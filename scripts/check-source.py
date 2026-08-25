@@ -21,6 +21,13 @@ FOCUS_ANNOTATION_RE = re.compile(
 ASSERT_ANNOTATION_RE = re.compile(
     r"//\s*agenc-review:\s*internal-assert\s+owner=\S+\s+reviewed=\d{4}-\d{2}-\d{2}\s+reason=\S.*"
 )
+ALLOW_ANNOTATION_RE = re.compile(
+    r"//\s*agenc-review:\s*allow\s+owner=\S+\s+reviewed=\d{4}-\d{2}-\d{2}\s+reason=\S.*"
+)
+ALLOW_RE = re.compile(r"#\s*!?\s*\[\s*allow\s*\(")
+CFG_TEST_MODULE_RE = re.compile(
+    r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{"
+)
 POLICY = {
     "schema_version": 1,
     "function_logical_line_review": 60,
@@ -28,14 +35,19 @@ POLICY = {
     "cyclomatic_complexity_review": 10,
     "review_annotation": "// agenc-review: focus owner=<name> reviewed=<YYYY-MM-DD> reason=<specific reason>",
     "assert_annotation": "// agenc-review: internal-assert owner=<name> reviewed=<YYYY-MM-DD> reason=<unforgeable precondition>",
+    "allow_annotation": "// agenc-review: allow owner=<name> reviewed=<YYYY-MM-DD> reason=<specific reason>",
     "forbid_unsafe": True,
     "forbid_panic_macros": True,
     "forbid_unbounded_channels": True,
+    "forbid_unreviewed_allows": True,
 }
 BANNED_PATTERNS = (
     (re.compile(r"\bunsafe\b"), "unsafe Rust token"),
     (re.compile(r"\.(?:unwrap|expect)\s*\("), "unwrap/expect panic path"),
-    (re.compile(r"\b(?:panic|todo|unimplemented)\s*!\s*\("), "panic/placeholder macro"),
+    (
+        re.compile(r"\b(?:panic|todo|unimplemented|unreachable|debug_assert|debug_assert_eq|debug_assert_ne)\s*!\s*\("),
+        "panic/placeholder macro",
+    ),
     (
         re.compile(
             r"(?:\bstd::sync::mpsc::channel\s*(?:::\s*<[^>]*>)?\s*\(|"
@@ -45,6 +57,13 @@ BANNED_PATTERNS = (
             r"\bUnbounded(?:Sender|Receiver)\b)"
         ),
         "unbounded channel",
+    ),
+    (
+        re.compile(
+            r"\buse\s+[^;]*(?:unbounded_channel|::unbounded|std::sync::mpsc::channel)\s+as\s+"
+            r"[A-Za-z_][A-Za-z0-9_]*"
+        ),
+        "aliased unbounded channel",
     ),
 )
 
@@ -73,6 +92,13 @@ def load_policy(root: Path) -> None:
         raise SourcePolicyError(f"cannot read source policy: {error}") from error
     if policy != POLICY:
         raise SourcePolicyError("source policy differs from the checker's reviewed closed form")
+    try:
+        workspace = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise SourcePolicyError(f"cannot read workspace lint policy: {error}") from error
+    clippy = workspace.get("workspace", {}).get("lints", {}).get("clippy", {})
+    if not isinstance(clippy, dict) or clippy.get("indexing_slicing") != "deny":
+        raise SourcePolicyError("workspace must deny clippy::indexing_slicing")
 
 
 def sanitize_rust(source: str) -> str:
@@ -141,6 +167,33 @@ def sanitize_rust(source: str) -> str:
 def line_number(source: str, offset: int) -> int:
     """Return a one-based line number for one source offset."""
     return source.count("\n", 0, offset) + 1
+
+
+def cfg_test_ranges(sanitized: str) -> list[tuple[int, int]]:
+    """Return byte ranges occupied by complete `#[cfg(test)]` modules."""
+    ranges: list[tuple[int, int]] = []
+    for match in CFG_TEST_MODULE_RE.finditer(sanitized):
+        brace = sanitized.find("{", match.start(), match.end())
+        if brace == -1:
+            continue
+        depth = 0
+        for position in range(brace, len(sanitized)):
+            character = sanitized[position]
+            if character == "{":
+                depth += 1
+                continue
+            if character != "}":
+                continue
+            depth -= 1
+            if depth == 0:
+                ranges.append((match.start(), position + 1))
+                break
+    return ranges
+
+
+def offset_in_ranges(offset: int, ranges: list[tuple[int, int]]) -> bool:
+    """Return whether one source offset is inside a known half-open range."""
+    return any(start <= offset < end for start, end in ranges)
 
 
 def has_annotation(
@@ -212,21 +265,32 @@ def scan_source(relative: Path, source: str) -> list[str]:
     errors: list[str] = []
     sanitized = sanitize_rust(source)
     lines = source.splitlines()
+    test_ranges = cfg_test_ranges(sanitized)
 
-    if is_compilation_root(relative) and FORBID_ATTRIBUTE_RE.search(source) is None:
+    if is_compilation_root(relative) and FORBID_ATTRIBUTE_RE.search(sanitized) is None:
         errors.append(f"{relative}: compilation root lacks #![forbid(unsafe_code)]")
     for pattern, description in BANNED_PATTERNS:
         for match in pattern.finditer(sanitized):
             errors.append(f"{relative}:{line_number(sanitized, match.start())}: {description}")
 
+    for match in ALLOW_RE.finditer(sanitized):
+        source_line = line_number(sanitized, match.start())
+        if not has_annotation(lines, source_line, ALLOW_ANNOTATION_RE):
+            errors.append(f"{relative}:{source_line}: lint allow lacks review annotation")
+
     if not is_test_source(relative):
         for match in ASSERT_RE.finditer(sanitized):
+            if offset_in_ranges(match.start(), test_ranges):
+                continue
             source_line = line_number(sanitized, match.start())
             if not has_annotation(lines, source_line, ASSERT_ANNOTATION_RE):
                 errors.append(
                     f"{relative}:{source_line}: production assertion lacks internal-proof review annotation"
                 )
         for shape in function_shapes(sanitized):
+            offset = sum(len(line) + 1 for line in sanitized.splitlines()[: shape.line - 1])
+            if offset_in_ranges(offset, test_ranges):
+                continue
             triggers: list[str] = []
             if shape.logical_lines > POLICY["function_logical_line_review"]:
                 triggers.append(f"{shape.logical_lines} logical lines")
@@ -286,8 +350,15 @@ def self_test(root: Path) -> int:
 
     fixtures = (
         ("missing forbid", "pub fn value() {}\n", "lacks #![forbid"),
+        (
+            "comment-only forbid",
+            "// #![forbid(unsafe_code)]\npub fn value() {}\n",
+            "lacks #![forbid",
+        ),
         ("unsafe", valid + "unsafe fn bad() {}\n", "unsafe Rust token"),
         ("panic", valid + "fn bad() { panic!(\"bad\"); }\n", "panic/placeholder"),
+        ("unreachable", valid + "fn bad() { unreachable!(); }\n", "panic/placeholder"),
+        ("debug assert", valid + "fn bad() { debug_assert!(true); }\n", "panic/placeholder"),
         ("todo", valid + "fn bad() { todo!(); }\n", "panic/placeholder"),
         ("unwrap", valid + "fn bad(v: Option<u8>) { v.unwrap(); }\n", "unwrap/expect"),
         (
@@ -295,7 +366,17 @@ def self_test(root: Path) -> int:
             valid + "fn bad() { let _ = tokio::sync::mpsc::unbounded_channel::<u8>(); }\n",
             "unbounded channel",
         ),
+        (
+            "aliased unbounded",
+            valid + "use tokio::sync::mpsc::unbounded_channel as queue;\n",
+            "aliased unbounded channel",
+        ),
         ("assert", valid + "fn bad() { assert!(true); }\n", "assertion lacks"),
+        (
+            "unreviewed allow",
+            valid + "#[allow(dead_code)]\nfn hidden() {}\n",
+            "lint allow lacks",
+        ),
         (
             "long function",
             valid + "fn long() {\n" + "    let _value = 1;\n" * 61 + "}\n",
@@ -324,6 +405,11 @@ def self_test(root: Path) -> int:
     harmless_errors = scan_source(Path("crates/fixture/src/lib.rs"), harmless)
     if harmless_errors:
         raise SourcePolicyError(f"comment/string false-positive guard failed: {harmless_errors}")
+    cases += 1
+    cfg_test_assertion = valid + "#[cfg(test)]\nmod tests { #[test] fn works() { assert!(true); } }\n"
+    cfg_test_errors = scan_source(Path("crates/fixture/src/lib.rs"), cfg_test_assertion)
+    if cfg_test_errors:
+        raise SourcePolicyError(f"cfg(test) assertion guard failed: {cfg_test_errors}")
     cases += 1
     return cases
 

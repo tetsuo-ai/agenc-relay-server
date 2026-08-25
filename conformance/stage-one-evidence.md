@@ -1,0 +1,104 @@
+# Stage 01 Evidence
+
+Status: passed on 2026-08-24.
+
+## Verification summary
+
+`bash scripts/check-stage-one.sh` passes under Rust 1.98.0 for both declared
+Linux targets. The inherited Stage 00 gate and Stage 01 checks cover frozen
+sources, generated artifacts, formatting, compilation, Clippy, all tests,
+documentation tests, dependency policy, advisories, and branch coverage.
+Measured workspace coverage is 91.56% branches and 95.37% lines.
+
+The independent artifact checker accounts for 53 closed registry constants,
+all 128 Appendix B schemas, and one reviewed golden vector per schema. This
+stage implements bounded representations and codecs only; client connection
+state, domain behavior, persistence, cryptographic operations, and networking
+remain assigned to later stages.
+
+## S01-001
+
+`EVID-S01-001-REGISTRIES`: generated typed registries match the frozen
+Appendix A and Appendix B sources exhaustively. Independent checks reject
+missing, duplicate, reordered, renumbered, and stale entries.
+
+## S01-002
+
+`EVID-S01-002-QUANTITIES`: ten private-field quantity families retain units and
+inclusive bounds. Tests exercise minimum, one, maximum, maximum-plus-one,
+overflow, and underflow behavior.
+
+## S01-003
+
+`EVID-S01-003-IDENTITIES`: domain-separated identifier types provide explicit
+binary construction, canonical unpadded Base64url parsing, redacted debug
+output, injected entropy, and account-specific grammar. Cross-domain and
+alternate-encoding tests pass.
+
+## S01-004
+
+`EVID-S01-004-BOUNDED-VALUES`: bounded byte and UTF-8 types validate length,
+encoding, NUL, and control policy before allocation. Boundary and hostile-input
+tests cover owned and borrowed construction.
+
+## S01-005
+
+`EVID-S01-005-NAMES-MASKS`: nickname, login, account-label, display-name,
+channel, server, cloak, and typed-mask values implement their exact canonical
+profiles. Tests cover presentation/comparison separation, collisions, invalid
+PRECIS input, prefixes, globs, and fixed cloak grammar.
+
+## S01-006
+
+`EVID-S01-006-PROTOCOL-ERRORS`: closed validation and public protocol errors
+map exhaustively to fixed codes and safe descriptions. Error values retain no
+raw input, internal chain, or implicit user-controlled rendering.
+
+## S01-007
+
+`EVID-S01-007-BINARY-CODEC`: the safe-Rust federation codec implements every
+integer width, minimal length prefix, enum, structure, vector, and fixed union
+without Serde. It requires full consumption, checked allocation and arithmetic,
+an explicit value budget, and a bounded iterative parser stack.
+
+## S01-008
+
+`EVID-S01-008-APPENDIX-B`: all 128 common, projection, event, request, result,
+origin, and snapshot schemas decode through exact registered arms. Semantic
+negatives cover canonical IDs/names, revision and presence tuples, ordering,
+envelope and union substitution, projected values, identity cross-references,
+padding, and malformed embedded objects.
+
+## S01-009
+
+`EVID-S01-009-TEXT-CARRIERS`: client and federation carrier primitives enforce
+uppercase tokens, exact arity, canonical decimal, canonical padded or unpadded
+Base64 as selected, fragment arithmetic, and re-encode equality. Alternate
+alphabets, padding, signs, zero forms, case variants, and overflow are rejected.
+
+## S01-010
+
+`EVID-S01-010-PROFILE-HASHES`: generated constants bind the raw architecture,
+E2EE companion, registry, source ledger, and both derived profile hashes.
+Independent single-byte mutations change the expected digest and fail checks.
+
+## S01-011
+
+`EVID-S01-011-REFERENCE-VECTORS`: the Python generator/checker and the testkit
+reference encoder do not import production codec types. Production decode and
+canonical re-encode agree byte-for-byte with all 128 checked-in vectors and
+their SHA-256 provenance records.
+
+## S01-012
+
+`EVID-S01-012-TOTALITY`: every vector rejects every truncation and trailing
+byte, every schema is exercised against a finite hostile corpus, and every
+parser error discriminant has a negative path. Source checks require explicit
+nonrecursive stacks and reject recursive parser mutations.
+
+## S01-900
+
+`EVID-S01-900-STAGE-GATE`: the complete Stage 01 gate passes with the pinned
+lockfile and tools on both targets. Generated-source freshness, six artifact
+checker mutations, all workspace tests, Clippy with warnings denied,
+`cargo-deny`, `cargo-audit`, and the greater-than-90% branch threshold pass.

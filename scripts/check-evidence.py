@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import re
 import sys
@@ -17,6 +18,7 @@ CATALOG_PATH = "conformance/evidence-catalog.toml"
 LEDGER_PATH = "conformance/requirements.toml"
 SCHEMA_PATH = "conformance/evidence-manifest.schema.json"
 EXAMPLE_PATH = "conformance/evidence-manifest.example.json"
+SCHEMA_SHA256 = "ee74d350fcdadca864bca6a1d335c058014ab8d127940044a913aff5ce0c5c8e"
 
 STAGE_BINDINGS = {
     "EVID-S00-001-BASELINE": (["S00-001"], "specification-baseline"),
@@ -30,6 +32,19 @@ STAGE_BINDINGS = {
     "EVID-S00-009-CI-BASELINE": (["S00-009"], "continuous-integration"),
     "EVID-S00-010-MANIFEST-SCHEMA": (["S00-010"], "evidence-schema"),
     "EVID-S00-900-STAGE-GATE": (["S00-900"], "stage-gate"),
+    "EVID-S01-001-REGISTRIES": (["S01-001"], "registry-consistency"),
+    "EVID-S01-002-QUANTITIES": (["S01-002"], "bounded-quantities"),
+    "EVID-S01-003-IDENTITIES": (["S01-003"], "typed-identities"),
+    "EVID-S01-004-BOUNDED-VALUES": (["S01-004"], "bounded-values"),
+    "EVID-S01-005-NAMES-MASKS": (["S01-005"], "canonical-names-masks"),
+    "EVID-S01-006-PROTOCOL-ERRORS": (["S01-006"], "protocol-errors"),
+    "EVID-S01-007-BINARY-CODEC": (["S01-007"], "canonical-binary-codec"),
+    "EVID-S01-008-APPENDIX-B": (["S01-008"], "appendix-b-codecs"),
+    "EVID-S01-009-TEXT-CARRIERS": (["S01-009"], "text-carriers"),
+    "EVID-S01-010-PROFILE-HASHES": (["S01-010"], "source-profile-hashes"),
+    "EVID-S01-011-REFERENCE-VECTORS": (["S01-011"], "reference-vectors"),
+    "EVID-S01-012-TOTALITY": (["S01-012"], "totality-boundedness"),
+    "EVID-S01-900-STAGE-GATE": (["S01-900"], "stage-gate"),
 }
 TOP_FIELDS = {
     "schema_version",
@@ -99,7 +114,7 @@ def load_toml(path: Path) -> dict[str, object]:
 
 
 def validate_catalog(root: Path) -> dict[str, list[str]]:
-    """Validate Stage-00 and normative requirement evidence bindings."""
+    """Validate stage and normative requirement evidence bindings."""
     catalog = load_toml(root / CATALOG_PATH)
     if set(catalog) != {"schema_version", "evidence"} or catalog.get("schema_version") != 1:
         raise EvidenceError("evidence catalog has an invalid top-level schema")
@@ -128,7 +143,7 @@ def validate_catalog(root: Path) -> dict[str, list[str]]:
             raise EvidenceError(f"catalog record {evidence_id} has an invalid kind")
         stage_records[evidence_id] = (claim_ids, kind)
     if stage_records != STAGE_BINDINGS:
-        raise EvidenceError("Stage-00 evidence catalog is missing, stale, or differently bound")
+        raise EvidenceError("stage evidence catalog is missing, stale, or differently bound")
 
     ledger = load_toml(root / LEDGER_PATH)
     raw_requirements = ledger.get("requirement")
@@ -153,7 +168,10 @@ def validate_catalog(root: Path) -> dict[str, list[str]]:
 
 def validate_schema(root: Path) -> None:
     """Ensure the published JSON Schema describes the enforced closed shape."""
-    schema = load_json(root / SCHEMA_PATH)
+    schema_path = root / SCHEMA_PATH
+    if hashlib.sha256(schema_path.read_bytes()).hexdigest() != SCHEMA_SHA256:
+        raise EvidenceError("evidence schema bytes differ from the reviewed closed schema")
+    schema = load_json(schema_path)
     if schema.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
         raise EvidenceError("evidence schema must use JSON Schema draft 2020-12")
     if schema.get("type") != "object" or schema.get("additionalProperties") is not False:
@@ -170,6 +188,31 @@ def validate_schema(root: Path) -> None:
         raise EvidenceError("evidence entries must be closed objects")
     if set(evidence.get("required", [])) != ENTRY_FIELDS:
         raise EvidenceError("evidence schema entry required fields are stale")
+
+
+def canonical_source_sha256(root: Path) -> str:
+    """Hash the complete tracked-tree equivalent with explicit path/mode framing."""
+    digest = hashlib.sha256()
+    excluded_roots = {".git", "target", "__pycache__"}
+    paths = sorted(
+        path
+        for path in root.rglob("*")
+        if path.is_file()
+        and path.suffix != ".pyc"
+        and not any(part in excluded_roots for part in path.relative_to(root).parts)
+        and not (
+            path.relative_to(root).parts[:2] == ("conformance", "evidence")
+            and path.suffix == ".json"
+        )
+    )
+    for path in paths:
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        mode = b"100755" if path.stat().st_mode & 0o111 else b"100644"
+        content = path.read_bytes()
+        for field in (mode, relative, content):
+            digest.update(len(field).to_bytes(8, "big"))
+            digest.update(field)
+    return digest.hexdigest()
 
 
 def require_string(
@@ -205,7 +248,12 @@ def validate_hash(value: object, label: str) -> str:
     return require_string(value, label, minimum=64, maximum=64, pattern=SHA256_RE)
 
 
-def validate_manifest(manifest: dict[str, object], bindings: dict[str, list[str]]) -> None:
+def validate_manifest(
+    manifest: dict[str, object],
+    bindings: dict[str, list[str]],
+    *,
+    expected_source_hash: str | None = None,
+) -> None:
     """Validate one complete evidence manifest and all catalog bindings."""
     if set(manifest) != TOP_FIELDS:
         raise EvidenceError("manifest is missing required fields or has unknown fields")
@@ -220,6 +268,8 @@ def validate_manifest(manifest: dict[str, object], bindings: dict[str, list[str]
         pattern=COMMIT_RE,
     )
     source_hash = validate_hash(manifest.get("source_sha256"), "source_sha256")
+    if expected_source_hash is not None and source_hash != expected_source_hash:
+        raise EvidenceError("manifest source hash does not match the canonical repository tree")
     lock_hash = validate_hash(manifest.get("lock_sha256"), "lock_sha256")
     entries = manifest.get("entries")
     if not isinstance(entries, list) or not entries:
@@ -297,12 +347,19 @@ def validate_manifest(manifest: dict[str, object], bindings: dict[str, list[str]
 
 
 def validate(root: Path) -> tuple[int, int]:
-    """Validate schema, catalogs, and the positive example."""
+    """Validate schema, catalogs, the example, and every checked-in manifest."""
     validate_schema(root)
     bindings = validate_catalog(root)
     example = load_json(root / EXAMPLE_PATH)
     validate_manifest(example, bindings)
-    return len(bindings), len(example["entries"])  # type: ignore[arg-type]
+    source_hash = canonical_source_sha256(root)
+    manifest_paths = sorted((root / "conformance/evidence").glob("*.json"))
+    entry_count = len(example["entries"])  # type: ignore[arg-type]
+    for path in manifest_paths:
+        manifest = load_json(path)
+        validate_manifest(manifest, bindings, expected_source_hash=source_hash)
+        entry_count += len(manifest["entries"])  # type: ignore[arg-type]
+    return len(bindings), entry_count
 
 
 def expect_rejection(

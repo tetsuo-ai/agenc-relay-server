@@ -4,6 +4,8 @@ control_nesting_review = 3
 cyclomatic_complexity_review = 10
 review_annotation = "// agenc-review: focus owner=<name> reviewed=<YYYY-MM-DD> reason=<specific reason>"
 assert_annotation = "// agenc-review: internal-assert owner=<name> reviewed=<YYYY-MM-DD> reason=<unforgeable precondition>"
+allow_annotation = "// agenc-review: allow owner=<name> reviewed=<YYYY-MM-DD> reason=<specific reason>"
 forbid_unsafe = true
 forbid_panic_macros = true
 forbid_unbounded_channels = true
+forbid_unreviewed_allows = true

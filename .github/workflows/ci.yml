@@ -1,4 +1,4 @@
-name: Phase 00 conformance
+name: Phase 01 conformance
 
 on:
   push:
@@ -12,12 +12,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: phase-zero-${{ github.workflow }}-${{ github.ref }}
+  group: phase-one-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  stage-zero:
-    name: Complete Stage 00 gate
+  stage-one:
+    name: Complete Stage 01 gate
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -42,5 +42,5 @@ jobs:
           cargo +1.98.0 install --locked cargo-audit --version 0.22.2
           cargo +1.98.0 install --locked cargo-llvm-cov --version 0.9.0
 
-      - name: Run the complete Stage 00 gate
-        run: bash scripts/check-stage-zero.sh
+      - name: Run the complete Stage 01 gate
+        run: bash scripts/check-stage-one.sh

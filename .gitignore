@@ -1,4 +1,6 @@
 /target/
 /.gitnexus/
 /coverage/
+__pycache__/
+*.pyc
 *.profraw

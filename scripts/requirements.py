@@ -17,6 +17,7 @@ from typing import NoReturn
 ARCHITECTURE_PATH = "docs/ircd-architecture-and-implementation-spec.md"
 E2EE_PATH = "docs/irc-mls-e2ee-extension.md"
 LEDGER_PATH = "conformance/requirements.toml"
+BINDINGS_PATH = "conformance/requirement-bindings.toml"
 
 CRATES = frozenset(
     {
@@ -47,7 +48,10 @@ TERMS = (
     "RECOMMENDED",
     "MAY",
 )
-TERM_RE = re.compile(r"(?<![A-Z])(" + "|".join(map(re.escape, TERMS)) + r")(?![A-Z])")
+TERM_RE = re.compile(
+    r"(?<![A-Z0-9_])(" + "|".join(map(re.escape, TERMS)) + r")(?![A-Z0-9_])"
+)
+BOLD_TERM_RE = re.compile(r"\*\*(" + "|".join(map(re.escape, TERMS)) + r")\*\*")
 HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*$")
 LIST_RE = re.compile(r"^\s*(?:[-*+] |\d+[.)] )(.*)$")
 TABLE_DIVIDER_RE = re.compile(r"^\|?(?:\s*:?-{3,}:?\s*\|)+\s*$")
@@ -56,6 +60,7 @@ INVARIANT_RE = re.compile(
 )
 ID_RE = re.compile(r"(?:ARCH|E2EE)-(?:REQ-[0-9A-F]{20}|(?:TRN|ID|AUTH|PRV|STA|E2E|FED|DUR|CON|OPS)-\d{2})")
 EVIDENCE_ID_RE = re.compile(r"EVID-(?:ARCH|E2EE)-(?:REQ-[0-9A-F]{20}|(?:TRN|ID|AUTH|PRV|STA|E2E|FED|DUR|CON|OPS)-\d{2})")
+TASK_ID_RE = re.compile(r"S\d{2}-(?:\d{3}|900)")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 
@@ -98,15 +103,15 @@ def normalize_text(text: str) -> str:
     return " ".join(text.replace("**", "").split())
 
 
+def normative_matches(text: str, *, bold_only: bool = False) -> list[re.Match[str]]:
+    """Return each BCP 14 occurrence under the selected document rule."""
+    pattern = BOLD_TERM_RE if bold_only else TERM_RE
+    return list(pattern.finditer(text))
+
+
 def normative_terms(text: str) -> tuple[str, ...]:
-    """Return BCP 14 terms in first-occurrence order."""
-    probe = text.replace("MUST/MUST NOT", "").replace("MUST NOT/MUST", "")
-    found: list[str] = []
-    for match in TERM_RE.finditer(probe):
-        term = match.group(1)
-        if term not in found:
-            found.append(term)
-    return tuple(found)
+    """Return BCP 14 terms for Markdown block expansion."""
+    return tuple(match.group(1) for match in normative_matches(text))
 
 
 def markdown_blocks(text: str) -> list[Block]:
@@ -122,7 +127,7 @@ def markdown_blocks(text: str) -> list[Block]:
         nonlocal pending, pending_line, pending_kind
         if pending:
             blocks.append(
-                Block(normalize_text(" ".join(pending)), pending_line, section, pending_kind)
+                Block("\n".join(pending), pending_line, section, pending_kind)
             )
         pending = []
         pending_line = 0
@@ -136,7 +141,7 @@ def markdown_blocks(text: str) -> list[Block]:
             continue
         if in_fence:
             if normative_terms(stripped):
-                blocks.append(Block(normalize_text(stripped), line_number, section, "code"))
+                blocks.append(Block(stripped, line_number, section, "code"))
             continue
 
         heading = HEADING_RE.match(raw_line)
@@ -150,7 +155,7 @@ def markdown_blocks(text: str) -> list[Block]:
         if stripped.startswith("|"):
             flush()
             if TABLE_DIVIDER_RE.fullmatch(stripped) is None:
-                blocks.append(Block(normalize_text(stripped), line_number, section, "table"))
+                blocks.append(Block(stripped, line_number, section, "table"))
             continue
 
         list_item = LIST_RE.match(raw_line)
@@ -207,8 +212,17 @@ def split_sentences(block: Block) -> list[Block]:
     """Split prose into independently traceable normative sentences."""
     if block.kind in {"table", "code"}:
         return [block]
-    parts = re.split(r"(?<=[.!?])\s+(?=[`*\[(A-Z0-9])", block.text)
-    return [Block(part, block.line, block.section, block.kind) for part in parts if part]
+    boundaries = list(re.finditer(r"(?<=[.!?])\s+(?=[`*\[(A-Z0-9])", block.text))
+    starts = [0] + [match.end() for match in boundaries]
+    ends = [match.start() for match in boundaries] + [len(block.text)]
+    sentences: list[Block] = []
+    for start, end in zip(starts, ends, strict=True):
+        part = block.text[start:end]
+        if not part:
+            continue
+        line = block.line + block.text[:start].count("\n")
+        sentences.append(Block(part, line, block.section, block.kind))
+    return sentences
 
 
 def section_number(section: str) -> int | None:
@@ -301,30 +315,76 @@ def target_for(document: SourceDocument, section: str, invariant: str | None = N
     return e2ee_target(section)
 
 
+def task_for(document: SourceDocument, section: str, invariant: str | None = None) -> str:
+    """Assign the implementation stage that first closes one requirement."""
+    if invariant is not None:
+        family = invariant.split("-", 1)[0]
+        return {
+            "TRN": "S06-900",
+            "ID": "S03-900",
+            "AUTH": "S04-900",
+            "PRV": "S06-900",
+            "STA": "S03-900",
+            "E2E": "S08-900",
+            "FED": "S07-900",
+            "DUR": "S05-900",
+            "CON": "S06-900",
+            "OPS": "S10-900",
+        }[family]
+    if document.key == "e2ee-companion":
+        if section.startswith("2.3"):
+            return "S01-010"
+        if section.startswith(("11.2", "11.10")):
+            return "S01-009"
+        return "S08-900"
+    if section.startswith("7."):
+        return "S01-005"
+    if section.startswith("9.5"):
+        return "S01-006"
+    if section.startswith("Appendix A"):
+        return "S01-001"
+    if section.startswith("Appendix B"):
+        return "S01-008"
+    if section.startswith("30.3"):
+        return "S01-010"
+    if section.startswith("24.1"):
+        return "S00-004"
+    if section.startswith("24.3"):
+        return "S00-005"
+    if section.startswith("24.5"):
+        return "S00-006"
+    if section.startswith("28.1"):
+        return "S00-007"
+    if section.startswith("28.8"):
+        return "S00-009"
+    return "S10-900"
+
+
 def record_for_statement(
     document: SourceDocument,
     source_hash: str,
     block: Block,
+    term: str,
+    term_ordinal: int,
+    term_offset: int,
 ) -> dict[str, object]:
-    """Create one deterministic ledger record for a normative statement."""
-    terms = normative_terms(block.text)
+    """Create one deterministic ledger record for one normative occurrence."""
     normalized = normalize_text(block.text)
     text_hash = sha256_bytes(normalized.encode("utf-8"))
-    stable_material = f"{document.key}\0{normalized}".encode("utf-8")
+    stable_material = (
+        f"{document.key}\0{block.section}\0{normalized}\0{term}\0{term_ordinal}"
+    ).encode("utf-8")
     identifier = f"{document.prefix}-REQ-{sha256_bytes(stable_material)[:20].upper()}"
     return {
         "id": identifier,
         "kind": "bcp14",
-        "normative_terms": list(terms),
+        "normative_terms": [term],
         "document": document.key,
         "source_section": block.section,
-        "source_line": block.line,
+        "source_line": block.line + block.text[:term_offset].count("\n"),
         "source_sha256": source_hash,
         "text_sha256": text_hash,
         "text": normalized,
-        "target_crate": target_for(document, block.section),
-        "evidence_ids": [f"EVID-{identifier}"],
-        "status": "unimplemented",
         "applicable": True,
     }
 
@@ -349,9 +409,6 @@ def record_for_invariant(
         "source_sha256": source_hash,
         "text_sha256": sha256_bytes(normalized.encode("utf-8")),
         "text": normalized,
-        "target_crate": target_for(document, block.section, invariant),
-        "evidence_ids": [f"EVID-{identifier}"],
-        "status": "unimplemented",
         "applicable": True,
     }
 
@@ -380,12 +437,29 @@ def extract(root: Path) -> tuple[list[dict[str, object]], dict[str, str]]:
                 )
                 continue
             for sentence in split_sentences(block):
-                terms = normative_terms(sentence.text)
-                if not terms:
+                matches = normative_matches(
+                    sentence.text,
+                    bold_only=document.key == "e2ee-companion",
+                )
+                if not matches:
                     continue
-                if sentence.text.startswith("The key words MUST, MUST NOT"):
+                if normalize_text(sentence.text).startswith("The key words MUST, MUST NOT"):
                     continue
-                records.append(record_for_statement(document, source_hash, sentence))
+                term_counts: dict[str, int] = {}
+                for match in matches:
+                    term = match.group(1)
+                    ordinal = term_counts.get(term, 0)
+                    term_counts[term] = ordinal + 1
+                    records.append(
+                        record_for_statement(
+                            document,
+                            source_hash,
+                            sentence,
+                            term,
+                            ordinal,
+                            match.start(),
+                        )
+                    )
 
     records.sort(key=lambda item: (str(item["document"]), int(item["source_line"]), str(item["id"])))
     identifiers = [str(record["id"]) for record in records]
@@ -398,6 +472,129 @@ def extract(root: Path) -> tuple[list[dict[str, object]], dict[str, str]]:
 def quote(value: str) -> str:
     """Render one TOML basic string with JSON-compatible escaping."""
     return json.dumps(value, ensure_ascii=False)
+
+
+def default_binding(record: dict[str, object]) -> dict[str, object]:
+    """Create the initial reviewed-binding shape for one extracted record."""
+    document_key = str(record["document"])
+    document = next(item for item in DOCUMENTS if item.key == document_key)
+    identifier = str(record["id"])
+    invariant = identifier.removeprefix("ARCH-") if record["kind"] == "invariant" else None
+    section = str(record["source_section"])
+    task_id = task_for(document, section, invariant)
+    return {
+        "id": identifier,
+        "target_crates": [target_for(document, section, invariant)],
+        "task_ids": [task_id],
+        "evidence_ids": [f"EVID-{identifier}"],
+        "status": "implemented" if task_id.startswith("S00-") else "unimplemented",
+    }
+
+
+def render_bindings(bindings: list[dict[str, object]]) -> str:
+    """Render reviewed implementation bindings in canonical TOML order."""
+    lines = [
+        "# Reviewed implementation ownership; normative text remains generated separately.",
+        "schema_version = 1",
+        f"binding_count = {len(bindings)}",
+        "",
+    ]
+    for binding in sorted(bindings, key=lambda item: str(item["id"])):
+        lines.append("[[binding]]")
+        for field in ("id", "target_crates", "task_ids", "evidence_ids", "status"):
+            value = binding[field]
+            if isinstance(value, str):
+                rendered = quote(value)
+            elif isinstance(value, list):
+                rendered = "[" + ", ".join(quote(str(item)) for item in value) + "]"
+            else:
+                raise LedgerError(f"cannot render binding field {field!r}")
+            lines.append(f"{field} = {rendered}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def load_bindings(path: Path) -> dict[str, object]:
+    """Load the reviewed requirement-binding overlay."""
+    try:
+        return tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise LedgerError(f"cannot read requirement bindings: {error}") from error
+
+
+def validate_bindings(
+    data: dict[str, object], records: list[dict[str, object]]
+) -> list[dict[str, object]]:
+    """Validate complete binding coverage without permitting waivers."""
+    if set(data) != {"schema_version", "binding_count", "binding"}:
+        raise LedgerError("requirement bindings have an invalid top-level schema")
+    if data.get("schema_version") != 1:
+        raise LedgerError("requirement binding schema_version must be 1")
+    raw_bindings = data.get("binding")
+    if not isinstance(raw_bindings, list) or data.get("binding_count") != len(raw_bindings):
+        raise LedgerError("requirement binding_count does not match its array")
+    expected_ids = {str(record["id"]) for record in records}
+    by_id: dict[str, dict[str, object]] = {}
+    required_fields = {"id", "target_crates", "task_ids", "evidence_ids", "status"}
+    for index, raw_binding in enumerate(raw_bindings):
+        if not isinstance(raw_binding, dict) or set(raw_binding) != required_fields:
+            raise LedgerError(f"requirement binding {index} has invalid fields")
+        identifier = raw_binding.get("id")
+        if not isinstance(identifier, str) or ID_RE.fullmatch(identifier) is None:
+            raise LedgerError(f"requirement binding {index} has an invalid ID")
+        if identifier in by_id:
+            raise LedgerError(f"duplicate requirement binding: {identifier}")
+        targets = raw_binding.get("target_crates")
+        if (
+            not isinstance(targets, list)
+            or not targets
+            or targets != sorted(set(map(str, targets)))
+            or any(target not in CRATES for target in targets)
+        ):
+            raise LedgerError(f"{identifier} has invalid target crates")
+        tasks = raw_binding.get("task_ids")
+        if (
+            not isinstance(tasks, list)
+            or not tasks
+            or tasks != sorted(set(map(str, tasks)))
+            or any(not isinstance(task, str) or TASK_ID_RE.fullmatch(task) is None for task in tasks)
+        ):
+            raise LedgerError(f"{identifier} has invalid task IDs")
+        evidence = raw_binding.get("evidence_ids")
+        if (
+            not isinstance(evidence, list)
+            or not evidence
+            or f"EVID-{identifier}" not in evidence
+            or evidence != sorted(set(map(str, evidence)))
+            or any(
+                not isinstance(item, str) or EVIDENCE_ID_RE.fullmatch(item) is None
+                for item in evidence
+            )
+        ):
+            raise LedgerError(f"{identifier} has invalid evidence IDs")
+        if raw_binding.get("status") not in {"implemented", "unimplemented"}:
+            raise LedgerError(f"{identifier} has an invalid or waived status")
+        by_id[identifier] = raw_binding
+    missing = sorted(expected_ids - set(by_id))
+    stale = sorted(set(by_id) - expected_ids)
+    if missing or stale:
+        raise LedgerError(f"requirement binding coverage differs; missing={missing}, stale={stale}")
+    return [by_id[identifier] for identifier in sorted(by_id)]
+
+
+def merge_bindings(
+    records: list[dict[str, object]], bindings: list[dict[str, object]]
+) -> list[dict[str, object]]:
+    """Merge reviewed implementation metadata into extracted source records."""
+    by_id = {str(binding["id"]): binding for binding in bindings}
+    merged: list[dict[str, object]] = []
+    for record in records:
+        binding = by_id[str(record["id"])]
+        candidate = dict(record)
+        for field in ("target_crates", "task_ids", "evidence_ids", "status"):
+            candidate[field] = copy.deepcopy(binding[field])
+        merged.append(candidate)
+    return merged
 
 
 def render(records: list[dict[str, object]], source_hashes: dict[str, str]) -> str:
@@ -421,7 +618,8 @@ def render(records: list[dict[str, object]], source_hashes: dict[str, str]) -> s
         "source_sha256",
         "text_sha256",
         "text",
-        "target_crate",
+        "target_crates",
+        "task_ids",
         "evidence_ids",
         "status",
         "applicable",
@@ -504,12 +702,25 @@ def validate_data(
             errors.append(f"{identifier} has empty requirement text")
         elif text_hash != sha256_bytes(text.encode("utf-8")):
             errors.append(f"{identifier} text hash does not match its text")
-        if record.get("target_crate") not in CRATES:
-            errors.append(f"{identifier} has an invalid target crate")
+        targets = record.get("target_crates")
+        if not isinstance(targets, list) or not targets or any(target not in CRATES for target in targets):
+            errors.append(f"{identifier} has invalid target crates")
+        tasks = record.get("task_ids")
+        if (
+            not isinstance(tasks, list)
+            or not tasks
+            or any(not isinstance(task, str) or TASK_ID_RE.fullmatch(task) is None for task in tasks)
+        ):
+            errors.append(f"{identifier} has invalid task IDs")
         if record.get("applicable") is not True:
             errors.append(f"{identifier} is not applicable")
-        if record.get("status") != "unimplemented":
-            errors.append(f"{identifier} is waived or prematurely implemented")
+        if record.get("status") not in {"implemented", "unimplemented"}:
+            errors.append(f"{identifier} has an invalid or waived status")
+        terms = record.get("normative_terms")
+        if record.get("kind") == "bcp14" and (
+            not isinstance(terms, list) or len(terms) != 1 or terms[0] not in TERMS
+        ):
+            errors.append(f"{identifier} does not represent exactly one normative occurrence")
         evidence_ids = record.get("evidence_ids")
         if not isinstance(evidence_ids, list) or not evidence_ids:
             errors.append(f"{identifier} has no evidence ID")
@@ -542,7 +753,10 @@ def validate_data(
 
 def validate(root: Path) -> int:
     """Validate the checked-in ledger and return its requirement count."""
-    expected, source_hashes = extract(root)
+    extracted, source_hashes = extract(root)
+    binding_data = load_bindings(root / BINDINGS_PATH)
+    bindings = validate_bindings(binding_data, extracted)
+    expected = merge_bindings(extracted, bindings)
     ledger = load_ledger(root / LEDGER_PATH)
     validate_data(ledger, expected, source_hashes)
     expected_rendering = render(expected, source_hashes)
@@ -550,6 +764,28 @@ def validate(root: Path) -> int:
     if actual_rendering != expected_rendering:
         raise LedgerError("ledger is structurally valid but not in canonical generated form")
     return len(expected)
+
+
+def validate_stage(root: Path, stage: int) -> int:
+    """Require every binding owned by one completed stage to be implemented."""
+    extracted, _source_hashes = extract(root)
+    bindings = validate_bindings(load_bindings(root / BINDINGS_PATH), extracted)
+    prefix = f"S{stage:02d}-"
+    owned = [
+        binding
+        for binding in bindings
+        if any(str(task).startswith(prefix) for task in binding["task_ids"])
+    ]
+    incomplete = sorted(
+        str(binding["id"])
+        for binding in owned
+        if binding["status"] != "implemented"
+    )
+    if incomplete:
+        raise LedgerError(
+            f"Stage {stage:02d} has unimplemented owned requirements: {', '.join(incomplete)}"
+        )
+    return len(owned)
 
 
 def expect_rejection(
@@ -571,7 +807,9 @@ def expect_rejection(
 
 def self_test(root: Path) -> int:
     """Exercise every required negative validation category."""
-    expected, source_hashes = extract(root)
+    extracted, source_hashes = extract(root)
+    bindings = validate_bindings(load_bindings(root / BINDINGS_PATH), extracted)
+    expected = merge_bindings(extracted, bindings)
     valid = load_ledger(root / LEDGER_PATH)
     validate_data(valid, expected, source_hashes)
     cases = 0
@@ -594,8 +832,8 @@ def self_test(root: Path) -> int:
     cases += 1
 
     bad_target = copy.deepcopy(valid)
-    bad_target["requirement"][0]["target_crate"] = "agenc-ircd-invalid"  # type: ignore[index]
-    expect_rejection("target", bad_target, expected, source_hashes, "invalid target crate")
+    bad_target["requirement"][0]["target_crates"] = ["agenc-ircd-invalid"]  # type: ignore[index]
+    expect_rejection("target", bad_target, expected, source_hashes, "invalid target crates")
     cases += 1
 
     missing_evidence = copy.deepcopy(valid)
@@ -605,7 +843,7 @@ def self_test(root: Path) -> int:
 
     waived = copy.deepcopy(valid)
     waived["requirement"][0]["status"] = "waived"  # type: ignore[index]
-    expect_rejection("waiver", waived, expected, source_hashes, "waived or prematurely")
+    expect_rejection("waiver", waived, expected, source_hashes, "invalid or waived")
     cases += 1
 
     changed_text = copy.deepcopy(valid)
@@ -641,17 +879,31 @@ def fail(message: str) -> NoReturn:
 def main() -> None:
     """Dispatch generate, check, and negative self-test commands."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("generate", "check", "self-test"))
+    parser.add_argument(
+        "command",
+        choices=("generate", "generate-bindings", "check", "check-stage-zero", "check-stage-one", "self-test"),
+    )
     arguments = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     try:
         if arguments.command == "generate":
-            records, source_hashes = extract(root)
+            extracted, source_hashes = extract(root)
+            bindings = validate_bindings(load_bindings(root / BINDINGS_PATH), extracted)
+            records = merge_bindings(extracted, bindings)
             (root / LEDGER_PATH).write_text(render(records, source_hashes), encoding="utf-8")
             print(f"requirement ledger: generated {len(records)} records")
+        elif arguments.command == "generate-bindings":
+            records, _source_hashes = extract(root)
+            defaults = [default_binding(record) for record in records]
+            (root / BINDINGS_PATH).write_text(render_bindings(defaults), encoding="utf-8")
+            print(f"requirement bindings: generated {len(defaults)} records")
         elif arguments.command == "check":
             count = validate(root)
             print(f"requirement ledger: ok ({count} records)")
+        elif arguments.command in {"check-stage-zero", "check-stage-one"}:
+            stage = 0 if arguments.command.endswith("zero") else 1
+            count = validate_stage(root, stage)
+            print(f"requirement Stage {stage:02d}: ok ({count} owned records)")
         else:
             cases = self_test(root)
             print(f"requirement ledger self-test: ok ({cases} rejection cases)")

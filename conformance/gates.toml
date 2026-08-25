@@ -1,0 +1,91 @@
+schema_version = 1
+
+[gate.stage-zero]
+
+[[gate.stage-zero.command]]
+argv = ["bash", "scripts/check-spec.sh"]
+
+[[gate.stage-zero.command]]
+argv = ["python3", "scripts/check-baseline.py"]
+
+[[gate.stage-zero.command]]
+argv = ["python3", "scripts/requirements.py", "check"]
+
+[[gate.stage-zero.command]]
+argv = ["python3", "scripts/requirements.py", "check-stage-zero"]
+
+[[gate.stage-zero.command]]
+argv = ["python3", "scripts/requirements.py", "self-test"]
+
+[[gate.stage-zero.command]]
+argv = ["python3", "scripts/check-workspace.py", "check"]
+
+[[gate.stage-zero.command]]
+argv = ["python3", "scripts/check-workspace.py", "self-test"]
+
+[[gate.stage-zero.command]]
+argv = ["python3", "scripts/check-source.py", "check"]
+
+[[gate.stage-zero.command]]
+argv = ["python3", "scripts/check-source.py", "self-test"]
+
+[[gate.stage-zero.command]]
+argv = ["python3", "scripts/check-evidence.py", "check"]
+
+[[gate.stage-zero.command]]
+argv = ["python3", "scripts/check-evidence.py", "self-test"]
+
+[[gate.stage-zero.command]]
+argv = ["python3", "scripts/check-ci.py", "check"]
+
+[[gate.stage-zero.command]]
+argv = ["python3", "scripts/check-ci.py", "self-test"]
+
+[[gate.stage-zero.command]]
+argv = ["cargo", "fmt", "--all", "--check"]
+
+[[gate.stage-zero.command]]
+argv = ["cargo", "check", "--workspace", "--all-targets", "--all-features", "--locked"]
+
+[[gate.stage-zero.command]]
+argv = ["cargo", "check", "--workspace", "--all-targets", "--all-features", "--locked", "--target", "x86_64-unknown-linux-gnu"]
+
+[[gate.stage-zero.command]]
+argv = ["cargo", "check", "--workspace", "--all-targets", "--all-features", "--locked", "--target", "aarch64-unknown-linux-gnu"]
+
+[[gate.stage-zero.command]]
+argv = ["cargo", "clippy", "--workspace", "--all-targets", "--all-features", "--locked", "--", "-D", "warnings"]
+
+[[gate.stage-zero.command]]
+argv = ["cargo", "test", "--workspace", "--all-features", "--locked"]
+
+[[gate.stage-zero.command]]
+argv = ["cargo", "test", "--workspace", "--doc", "--all-features", "--locked"]
+
+[[gate.stage-zero.command]]
+argv = ["cargo", "tree", "--workspace", "--all-features", "--locked"]
+
+[[gate.stage-zero.command]]
+argv = ["cargo", "deny", "check"]
+
+[[gate.stage-zero.command]]
+argv = ["cargo", "audit", "--deny", "warnings"]
+
+[[gate.stage-zero.command]]
+argv = ["cargo", "llvm-cov", "--workspace", "--all-features", "--branch", "--json", "--summary-only", "--output-path", "target/stage-zero-coverage.json"]
+environment = { RUSTC_BOOTSTRAP = "1" }
+
+[[gate.stage-zero.command]]
+argv = ["python3", "scripts/check-coverage.py", "target/stage-zero-coverage.json"]
+
+[gate.stage-one]
+includes = ["stage-zero"]
+
+[[gate.stage-one.command]]
+argv = ["python3", "scripts/requirements.py", "check-stage-one"]
+
+[[gate.stage-one.command]]
+argv = ["python3", "scripts/check-stage-one.py", "check"]
+
+[[gate.stage-one.command]]
+argv = ["python3", "scripts/check-stage-one.py", "self-test"]

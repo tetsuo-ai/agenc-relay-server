@@ -54,3 +54,68 @@ kind = "evidence-schema"
 id = "EVID-S00-900-STAGE-GATE"
 claim_ids = ["S00-900"]
 kind = "stage-gate"
+
+[[evidence]]
+id = "EVID-S01-001-REGISTRIES"
+claim_ids = ["S01-001"]
+kind = "registry-consistency"
+
+[[evidence]]
+id = "EVID-S01-002-QUANTITIES"
+claim_ids = ["S01-002"]
+kind = "bounded-quantities"
+
+[[evidence]]
+id = "EVID-S01-003-IDENTITIES"
+claim_ids = ["S01-003"]
+kind = "typed-identities"
+
+[[evidence]]
+id = "EVID-S01-004-BOUNDED-VALUES"
+claim_ids = ["S01-004"]
+kind = "bounded-values"
+
+[[evidence]]
+id = "EVID-S01-005-NAMES-MASKS"
+claim_ids = ["S01-005"]
+kind = "canonical-names-masks"
+
+[[evidence]]
+id = "EVID-S01-006-PROTOCOL-ERRORS"
+claim_ids = ["S01-006"]
+kind = "protocol-errors"
+
+[[evidence]]
+id = "EVID-S01-007-BINARY-CODEC"
+claim_ids = ["S01-007"]
+kind = "canonical-binary-codec"
+
+[[evidence]]
+id = "EVID-S01-008-APPENDIX-B"
+claim_ids = ["S01-008"]
+kind = "appendix-b-codecs"
+
+[[evidence]]
+id = "EVID-S01-009-TEXT-CARRIERS"
+claim_ids = ["S01-009"]
+kind = "text-carriers"
+
+[[evidence]]
+id = "EVID-S01-010-PROFILE-HASHES"
+claim_ids = ["S01-010"]
+kind = "source-profile-hashes"
+
+[[evidence]]
+id = "EVID-S01-011-REFERENCE-VECTORS"
+claim_ids = ["S01-011"]
+kind = "reference-vectors"
+
+[[evidence]]
+id = "EVID-S01-012-TOTALITY"
+claim_ids = ["S01-012"]
+kind = "totality-boundedness"
+
+[[evidence]]
+id = "EVID-S01-900-STAGE-GATE"
+claim_ids = ["S01-900"]
+kind = "stage-gate"

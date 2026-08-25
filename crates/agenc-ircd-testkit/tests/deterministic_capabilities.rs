@@ -3,15 +3,25 @@
 //! Boundary tests for deterministic test-only capabilities.
 
 use agenc_ircd_testkit::{
-    CapabilityError, DeterministicClock, FaultStore, FaultStoreError, MAX_FAULT_STORE_RECORDS,
-    MAX_SCRIPTED_ENTROPY_BYTES, MAX_TRANSCRIPT_STEP_BYTES, MAX_TRANSCRIPT_STEPS, ReferenceModel,
-    ReferenceTransitionError, ScriptedEntropy, StoreOperation, TranscriptActor, TranscriptDriver,
-    TranscriptError, TranscriptStep,
+    CapabilityError, DeterministicMonotonicClock, DeterministicWallClock, FaultStore,
+    FaultStoreError, MAX_FAULT_STORE_BYTES, MAX_FAULT_STORE_RECORDS, MAX_SCRIPTED_ENTROPY_BYTES,
+    MAX_TRANSCRIPT_STEP_BYTES, MAX_TRANSCRIPT_STEPS, ReferenceModel, ReferenceTransitionError,
+    ScriptedEntropy, StoreOperation, TranscriptActor, TranscriptDriver, TranscriptError,
+    TranscriptStep,
 };
 
 #[test]
 fn clock_overflow_is_atomic() -> Result<(), CapabilityError> {
-    let mut clock = DeterministicClock::at(u64::MAX - 1);
+    let mut clock = DeterministicMonotonicClock::at(u64::MAX - 1);
+    assert_eq!(clock.advance(1)?, u64::MAX);
+    assert_eq!(clock.advance(1), Err(CapabilityError::ClockOverflow));
+    assert_eq!(clock.now(), u64::MAX);
+    Ok(())
+}
+
+#[test]
+fn wall_clock_is_distinct_and_overflow_is_atomic() -> Result<(), CapabilityError> {
+    let mut clock = DeterministicWallClock::at(u64::MAX - 1);
     assert_eq!(clock.advance(1)?, u64::MAX);
     assert_eq!(clock.advance(1), Err(CapabilityError::ClockOverflow));
     assert_eq!(clock.now(), u64::MAX);
@@ -87,17 +97,17 @@ fn exhausted_reference_revision_rejects_before_transition() {
 
 #[test]
 fn fault_store_failures_are_counted_and_side_effect_free() -> Result<(), FaultStoreError> {
-    let mut store = FaultStore::new(1)?;
+    let mut store = FaultStore::new(1, 16)?;
     store.fail_next(StoreOperation::Write, 1);
     assert_eq!(
-        store.insert("key", "value"),
+        store.insert("key", "value", 5),
         Err(FaultStoreError::Injected(StoreOperation::Write))
     );
     assert!(store.is_empty());
 
-    assert_eq!(store.insert("key", "value")?, None);
+    assert_eq!(store.insert("key", "value", 5)?, None);
     assert_eq!(
-        store.insert("other", "value"),
+        store.insert("other", "value", 5),
         Err(FaultStoreError::CapacityExhausted)
     );
     assert_eq!(store.get(&"key")?, Some(&"value"));
@@ -107,11 +117,15 @@ fn fault_store_failures_are_counted_and_side_effect_free() -> Result<(), FaultSt
 #[test]
 fn fault_store_validates_capacity_and_each_operation() -> Result<(), FaultStoreError> {
     assert!(matches!(
-        FaultStore::<u8, u8>::new(0),
+        FaultStore::<u8, u8>::new(0, 1),
         Err(FaultStoreError::InvalidCapacity)
     ));
     assert!(matches!(
-        FaultStore::<u8, u8>::new(MAX_FAULT_STORE_RECORDS + 1),
+        FaultStore::<u8, u8>::new(MAX_FAULT_STORE_RECORDS + 1, 1),
+        Err(FaultStoreError::InvalidCapacity)
+    ));
+    assert!(matches!(
+        FaultStore::<u8, u8>::new(1, MAX_FAULT_STORE_BYTES + 1),
         Err(FaultStoreError::InvalidCapacity)
     ));
     assert_eq!(
@@ -126,11 +140,20 @@ fn fault_store_validates_capacity_and_each_operation() -> Result<(), FaultStoreE
         FaultStoreError::CapacityExhausted.to_string(),
         "fault-store capacity exhausted"
     );
+    assert_eq!(
+        FaultStoreError::ByteCapacityExhausted.to_string(),
+        "fault-store byte capacity exhausted"
+    );
 
-    let mut store = FaultStore::new(2)?;
-    assert_eq!(store.insert(1, 10)?, None);
-    assert_eq!(store.insert(1, 11)?, Some(10));
+    let mut store = FaultStore::new(2, 3)?;
+    assert_eq!(store.insert(1, 10, 2)?, None);
+    assert_eq!(store.insert(1, 11, 3)?, Some(10));
     assert_eq!(store.len(), 1);
+    assert_eq!(store.stored_bytes(), 3);
+    assert_eq!(
+        store.insert(2, 20, 1),
+        Err(FaultStoreError::ByteCapacityExhausted)
+    );
 
     store.fail_next(StoreOperation::Read, 2);
     assert_eq!(
@@ -147,6 +170,7 @@ fn fault_store_validates_capacity_and_each_operation() -> Result<(), FaultStoreE
     store.fail_next(StoreOperation::Delete, 0);
     assert_eq!(store.remove(&1)?, Some(11));
     assert!(store.is_empty());
+    assert_eq!(store.stored_bytes(), 0);
     Ok(())
 }
 
@@ -206,6 +230,20 @@ fn transcript_limits_and_terminal_states_are_explicit() -> Result<(), Transcript
     }
     assert_eq!(
         full.push_expected(TranscriptStep::new(TranscriptActor::Server, Vec::new())?),
+        Err(TranscriptError::TooManySteps)
+    );
+
+    let mut drained = TranscriptDriver::new();
+    for _ in 0..MAX_TRANSCRIPT_STEPS {
+        drained.push_expected(TranscriptStep::new(TranscriptActor::Server, Vec::new())?)?;
+        drained.observe(TranscriptActor::Server, &[])?;
+    }
+    assert_eq!(
+        drained.push_expected(TranscriptStep::new(TranscriptActor::Server, Vec::new())?),
+        Err(TranscriptError::TooManySteps)
+    );
+    assert_eq!(
+        drained.observe(TranscriptActor::Server, &[]),
         Err(TranscriptError::TooManySteps)
     );
     Ok(())

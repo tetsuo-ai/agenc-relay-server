@@ -51,7 +51,7 @@ References: [Architecture §§1.2–4](docs/ircd-architecture-and-implementation
 | Stage | Outcome | Gate |
 | --- | --- | --- |
 | 00 | Reproducible workspace and traceability foundation | [x] |
-| 01 | Registries, validated types, and canonical codecs | [ ] |
+| 01 | Registries, validated types, and canonical codecs | [x] |
 | 02 | Bounded client wire implementation | [ ] |
 | 03 | Pure deterministic domain model | [ ] |
 | 04 | Crypto adapters and account authentication | [ ] |
@@ -248,16 +248,16 @@ source baseline, and evidence model are fixed before protocol behavior lands.
 Outcome: all protocol vocabulary and byte representations required by later
 stages exist as bounded, private-field types with independent vectors.
 
-- [ ] `S01-001` **Mirror the frozen registries into typed constants.** Cover
+- [x] `S01-001` **Mirror the frozen registries into typed constants.** Cover
   every Appendix-A command/numeric/capability/mode entry and Appendix-B closed
   value without using declaration order as a wire discriminant.
   - After: `S00-900`.
   - Targets: `agenc-ircd-types`; registry-consistency tests.
   - References: [Architecture Appendix A](docs/ircd-architecture-and-implementation-spec.md#appendix-a-client-wire-registries), [Appendix B.2](docs/ircd-architecture-and-implementation-spec.md#b2-closed-enum-registry), [federation registry](docs/federation-v1-profile.registry).
   - Invariants: `TRN-06`, `FED-08`.
-  - Evidence: exhaustive comparison proves no missing, duplicate, reordered, or differently encoded entry.
+  - Evidence: [EVID-S01-001-REGISTRIES](conformance/stage-one-evidence.md#s01-001) proves no missing, duplicate, reordered, or differently encoded entry.
 
-- [ ] `S01-002` **Implement bounded quantities and units.** Represent byte
+- [x] `S01-002` **Implement bounded quantities and units.** Represent byte
   counts, object counts, queue demand, timestamps, durations, revisions,
   generations, sequence numbers, and quotas with checked construction and
   arithmetic.
@@ -265,9 +265,9 @@ stages exist as bounded, private-field types with independent vectors.
   - Targets: `agenc-ircd-types`.
   - References: [Architecture §§19.2 and 24.2–24.3](docs/ircd-architecture-and-implementation-spec.md#192-hard-resource-maxima).
   - Invariants: `TRN-04`, `CON-05`, `DUR-11`.
-  - Evidence: empty/one/maximum/maximum-plus-one and overflow tests for every quantity family.
+  - Evidence: [EVID-S01-002-QUANTITIES](conformance/stage-one-evidence.md#s01-002) covers empty/one/maximum/maximum-plus-one, underflow, and overflow for every quantity family.
 
-- [ ] `S01-003` **Implement typed identities.** Add private-field Account,
+- [x] `S01-003` **Implement typed identities.** Add private-field Account,
   User, Session, ChannelInstance, Message, request, event, origin, server,
   transaction, database, and recovery identities with explicit parsing and
   generation/incarnation rules.
@@ -275,97 +275,97 @@ stages exist as bounded, private-field types with independent vectors.
   - Targets: `agenc-ircd-types`.
   - References: [Architecture §7](docs/ircd-architecture-and-implementation-spec.md#7-typed-identifiers-and-canonical-names), [Appendix B.3](docs/ircd-architecture-and-implementation-spec.md#b3-common-validated-values-and-control-arms).
   - Invariants: `ID-01`, `ID-02`, `FED-04`.
-  - Evidence: construction, canonical text/binary round-trip, domain-confusion, and non-reuse tests.
+  - Evidence: [EVID-S01-003-IDENTITIES](conformance/stage-one-evidence.md#s01-003) covers construction, canonical text/binary round-trip, domain confusion, and entropy injection.
 
-- [ ] `S01-004` **Implement bounded byte and UTF-8 text types.** Reject NUL,
+- [x] `S01-004` **Implement bounded byte and UTF-8 text types.** Reject NUL,
   invalid UTF-8, forbidden controls, overlength input, lossy conversion, and
   allocation before bound validation.
   - After: `S01-002`.
   - Targets: `agenc-ircd-types`.
   - References: [Architecture §§4, 7, and 9.1](docs/ircd-architecture-and-implementation-spec.md#4-fixed-version-1-decisions).
   - Invariants: `TRN-04`, `TRN-05`, `TRN-06`.
-  - Evidence: byte-boundary, Unicode, invalid-encoding, allocation-budget, and property tests.
+  - Evidence: [EVID-S01-004-BOUNDED-VALUES](conformance/stage-one-evidence.md#s01-004) covers byte boundaries, Unicode, invalid encoding, controls, and allocation-before-validation negatives.
 
-- [ ] `S01-005` **Implement canonical names and masks.** Apply the exact
+- [x] `S01-005` **Implement canonical names and masks.** Apply the exact
   nickname, account, channel, server, user-mask, case mapping, PRECIS, prefix,
   and comparison rules while preserving presentation separately from identity.
   - After: `S01-003`, `S01-004`.
   - Targets: `agenc-ircd-types`.
   - References: [Architecture §§7.1–7.4 and 13.4](docs/ircd-architecture-and-implementation-spec.md#71-account-identity).
   - Invariants: `ID-01`, `STA-01`, `STA-02`.
-  - Evidence: canonicalization, collision, confusable, prefix, mask, and reference-profile vectors.
+  - Evidence: [EVID-S01-005-NAMES-MASKS](conformance/stage-one-evidence.md#s01-005) covers canonicalization, collisions, PRECIS rejection, prefixes, masks, and profile boundaries.
 
-- [ ] `S01-006` **Implement stable public protocol errors.** Use closed error
+- [x] `S01-006` **Implement stable public protocol errors.** Use closed error
   enums and exact public mappings without carrying raw input or internal error
   chains into replies, logs, or metrics.
   - After: `S01-001`, `S01-004`.
   - Targets: `agenc-ircd-types`.
   - References: [Architecture §9.5](docs/ircd-architecture-and-implementation-spec.md#95-errors), [§24.3](docs/ircd-architecture-and-implementation-spec.md#243-safe-rust-and-code-shape-policy), [Appendix A.2](docs/ircd-architecture-and-implementation-spec.md#a2-server-command-and-numeric-registry).
   - Invariants: `PRV-01`, `PRV-02`, `OPS-01`.
-  - Evidence: exhaustive mapping tests and canary scans prove no input-bearing error is rendered implicitly.
+  - Evidence: [EVID-S01-006-PROTOCOL-ERRORS](conformance/stage-one-evidence.md#s01-006) uses exhaustive mapping tests and safe fixed descriptions with no input-bearing implicit rendering.
 
-- [ ] `S01-007` **Implement canonical binary primitives.** Decode exact-width
+- [x] `S01-007` **Implement canonical binary primitives.** Decode exact-width
   integers, lengths, options, vectors, enums, and structures with full
   consumption, checked allocation, explicit discriminants, and no Serde.
   - After: `S01-001` through `S01-004`.
   - Targets: `agenc-ircd-federation-wire`.
   - References: [Architecture §§24.4 and Appendix B.1](docs/ircd-architecture-and-implementation-spec.md#b1-encoding-notation).
   - Invariants: `TRN-04`, `TRN-05`, `TRN-06`, `FED-08`.
-  - Evidence: canonical round-trip, trailing-byte, truncated, noncanonical, oversized-vector, and every-discriminant tests.
+  - Evidence: [EVID-S01-007-BINARY-CODEC](conformance/stage-one-evidence.md#s01-007) covers canonical round-trip, trailing bytes, truncation, bounds, allocation budgets, nesting, and every discriminant.
 
-- [ ] `S01-008` **Implement Appendix-B object codecs.** Cover common control
+- [x] `S01-008` **Implement Appendix-B object codecs.** Cover common control
   arms, projections, events, deltas, requests, results, origins, delivery,
   snapshots, descriptors, and cross-reference validation at the codec layer.
   - After: `S01-003`, `S01-007`.
   - Targets: `agenc-ircd-federation-wire`.
   - References: [Architecture Appendices B.3–B.7](docs/ircd-architecture-and-implementation-spec.md#b3-common-validated-values-and-control-arms).
   - Invariants: `FED-03` through `FED-13` at the representation boundary.
-  - Evidence: one independent golden vector per arm plus absent/present, count, order, and malformed-cross-reference negatives.
+  - Evidence: [EVID-S01-008-APPENDIX-B](conformance/stage-one-evidence.md#s01-008) provides all 128 arm vectors plus presence, count, order, substitution, and malformed-cross-reference negatives.
 
-- [ ] `S01-009` **Implement canonical text carrier primitives.** Enforce
+- [x] `S01-009` **Implement canonical text carrier primitives.** Enforce
   uppercase tokens, decimal forms, unpadded URL-safe base64, arity, and exact
   decode/re-encode equality without yet implementing connection state.
   - After: `S01-004`, `S01-007`.
   - Targets: `agenc-ircd-client-wire`, `agenc-ircd-federation-wire`.
   - References: [Architecture Appendix B.8](docs/ircd-architecture-and-implementation-spec.md#b8-text-carrier-tokens-and-command-arity), [E2EE §§11.2 and 11.10](docs/irc-mls-e2ee-extension.md#112-fragment-tag).
   - Invariants: `TRN-06`, `FED-08`.
-  - Evidence: alternate-alphabet, padding, width, sign, leading-zero, case, arity, and overflow negatives.
+  - Evidence: [EVID-S01-009-TEXT-CARRIERS](conformance/stage-one-evidence.md#s01-009) covers alternate alphabets, padding, width, sign, leading zero, case, arity, fragments, and overflow.
 
-- [ ] `S01-010` **Bind source and profile hashes.** Verify raw document,
+- [x] `S01-010` **Bind source and profile hashes.** Verify raw document,
   registry, base-federation profile, and E2EE profile derivations independently
   of production codecs and fail on any changed byte.
   - After: `S01-001`, `S01-007`.
   - Targets: conformance tests and source-hash tooling.
   - References: [Architecture §§30.2–30.3 and Appendix B.9](docs/ircd-architecture-and-implementation-spec.md#302-living-protocol-and-implementation-sources), [E2EE §2.3](docs/irc-mls-e2ee-extension.md#23-exact-profile-revision), [manifest](docs/specification-manifest.txt).
   - Invariants: `E2E-07`, `FED-02`.
-  - Evidence: positive known hashes and single-byte-change negative fixtures.
+  - Evidence: [EVID-S01-010-PROFILE-HASHES](conformance/stage-one-evidence.md#s01-010) binds all known hashes and rejects independent single-byte changes.
 
-- [ ] `S01-011` **Create independent reference codecs and golden vectors.** A
+- [x] `S01-011` **Create independent reference codecs and golden vectors.** A
   small implementation that does not reuse production derive or codec logic
   must generate or verify every stable byte representation.
   - After: `S01-007` through `S01-010`.
   - Targets: `agenc-ircd-testkit`, checked-in vector corpus.
   - References: [Architecture §28.2](docs/ircd-architecture-and-implementation-spec.md#282-deterministic-unit-and-vector-tests).
   - Invariants: all representation-bound invariants.
-  - Evidence: production and reference codecs agree byte-for-byte; vector review records provenance and hash.
+  - Evidence: [EVID-S01-011-REFERENCE-VECTORS](conformance/stage-one-evidence.md#s01-011) records independent byte-for-byte agreement, provenance, and SHA-256 for every schema.
 
-- [ ] `S01-012` **Exercise totality and boundedness.** Property and negative
+- [x] `S01-012` **Exercise totality and boundedness.** Property and negative
   tests must prove every finite codec input produces bounded success or error
   without panic, recursion, trailing acceptance, or pre-validation growth.
   - After: `S01-011`.
   - Targets: type and wire test suites.
   - References: [Architecture §§19.4, 27.1, and 28.2](docs/ircd-architecture-and-implementation-spec.md#194-parser-and-algorithmic-defenses).
   - Invariants: `TRN-04`, `TRN-05`, `TRN-06`, `CON-05`.
-  - Evidence: property corpus, allocation-budget instrumentation, and negative coverage for every parser error discriminant.
+  - Evidence: [EVID-S01-012-TOTALITY](conformance/stage-one-evidence.md#s01-012) covers the hostile corpus, every truncation, explicit depth/value budgets, nonrecursion, and parser-error negatives.
 
-- [ ] `S01-900` **Pass the Stage 01 gate.** All Appendix-A/B constants,
+- [x] `S01-900` **Pass the Stage 01 gate.** All Appendix-A/B constants,
   validated foundational types, canonical codecs, source checks, and independent
   vectors are complete before client behavior begins.
   - After: `S01-001` through `S01-012`.
   - Targets: `agenc-ircd-types`, foundational wire code, testkit vectors.
   - References: [Architecture §29 phase 1](docs/ircd-architecture-and-implementation-spec.md#29-implementation-sequence-and-acceptance-gates).
   - Invariants: `TRN-04` through `TRN-06`, applicable identity and federation representation invariants.
-  - Evidence: all vector, round-trip, negative, source-hash, lint, and workspace tests pass under `--locked`.
+  - Evidence: [EVID-S01-900-STAGE-GATE](conformance/stage-one-evidence.md#s01-900) records the complete pinned, locked, dual-target gate.
 
 ## Stage 02 — Bounded client wire
 

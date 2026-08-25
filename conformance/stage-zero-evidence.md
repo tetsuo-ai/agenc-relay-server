@@ -18,10 +18,10 @@ instrumentation uses `RUSTC_BOOTSTRAP=1` only for the coverage command because
 the pinned compiler still gates LLVM branch instrumentation behind `-Z`; the
 variable is forbidden from ordinary build, test, and release compilation.
 
-The 243 normative records and all later roadmap requirements remain explicitly
-`unimplemented`. The binary's only behavior is an unsuccessful refusal stating
-that daemon behavior is unavailable. These results establish the implementation
-foundation, not a claim that the daemon or protocol is implemented or secure.
+The corrected ledger contains 237 normative records. At this gate the binary's
+only behavior was an unsuccessful refusal stating that daemon behavior was
+unavailable. These results establish the implementation foundation; later-stage
+status and evidence are recorded separately.
 
 ## S00-001
 
@@ -31,7 +31,7 @@ the independent baseline checker pass without normative byte changes.
 
 ## S00-002
 
-`EVID-S00-002-REQUIREMENTS`: the generated ledger maps 163 BCP 14 statements
+`EVID-S00-002-REQUIREMENTS`: the generated ledger maps 157 BCP 14 statements
 and all 80 Section-27 invariants to stable source, crate, evidence, and status
 records. Nine negative fixtures reject missing, duplicate, stale, waived, or
 unbound mappings.
@@ -65,7 +65,7 @@ unknown-source, license, yanked, duplicate, and advisory policies are closed;
 
 `EVID-S00-007-EVIDENCE-LAYOUT`: unit/integration, vector, transcript, property,
 fuzz, Loom, fault, interoperability, capacity, and release locations are named.
-The catalogs expose 254 unique stable evidence bindings.
+The catalogs now expose 261 unique stable evidence bindings.
 
 ## S00-008
 
@@ -92,5 +92,5 @@ missing, duplicate, stale, invalid, and unbound categories.
 
 `EVID-S00-900-STAGE-GATE`: the complete gate passes from the clean staged-tree
 export on both targets, coverage exceeds 90%, the release graph excludes
-testkit, the binary refuses to impersonate a server, and every later normative
-record remains `unimplemented`.
+testkit, and the binary refuses to impersonate a server. This gate makes no
+claim for work completed under a later stage.

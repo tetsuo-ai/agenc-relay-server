@@ -9,11 +9,21 @@ use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::fmt;
 
+mod reference_codec;
+
+pub use reference_codec::{
+    MAX_REFERENCE_VECTOR_BYTES, MAX_REFERENCE_VECTORS, ReferenceCodecError, ReferenceEncoder,
+    ReferenceVector, parse_reference_vectors,
+};
+
 /// Maximum bytes accepted by one scripted entropy source.
 pub const MAX_SCRIPTED_ENTROPY_BYTES: usize = 1_048_576;
 
 /// Maximum records held by a deterministic fault store.
 pub const MAX_FAULT_STORE_RECORDS: usize = 1_000_000;
+
+/// Maximum canonical record bytes held by a deterministic fault store.
+pub const MAX_FAULT_STORE_BYTES: u64 = 1_073_741_824;
 
 /// Maximum expected steps in one transcript.
 pub const MAX_TRANSCRIPT_STEPS: usize = 16_384;
@@ -47,11 +57,11 @@ impl Error for CapabilityError {}
 
 /// A monotonic test clock advanced explicitly by its owner.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct DeterministicClock {
+pub struct DeterministicMonotonicClock {
     ticks: u64,
 }
 
-impl DeterministicClock {
+impl DeterministicMonotonicClock {
     /// Creates a clock at an explicit tick.
     #[must_use]
     pub const fn at(ticks: u64) -> Self {
@@ -71,6 +81,36 @@ impl DeterministicClock {
             .checked_add(ticks)
             .ok_or(CapabilityError::ClockOverflow)?;
         self.ticks = next;
+        Ok(next)
+    }
+}
+
+/// A wall clock whose UTC millisecond value is advanced explicitly.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DeterministicWallClock {
+    unix_milliseconds: u64,
+}
+
+impl DeterministicWallClock {
+    /// Creates a wall clock at an explicit Unix millisecond timestamp.
+    #[must_use]
+    pub const fn at(unix_milliseconds: u64) -> Self {
+        Self { unix_milliseconds }
+    }
+
+    /// Returns the current Unix millisecond timestamp.
+    #[must_use]
+    pub const fn now(&self) -> u64 {
+        self.unix_milliseconds
+    }
+
+    /// Advances wall time atomically, leaving it unchanged on overflow.
+    pub fn advance(&mut self, milliseconds: u64) -> Result<u64, CapabilityError> {
+        let next = self
+            .unix_milliseconds
+            .checked_add(milliseconds)
+            .ok_or(CapabilityError::ClockOverflow)?;
+        self.unix_milliseconds = next;
         Ok(next)
     }
 }
@@ -190,12 +230,14 @@ pub enum StoreOperation {
 /// Errors returned by a deterministic fault store.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FaultStoreError {
-    /// The configured record capacity is zero or above the test ceiling.
+    /// A configured record or byte capacity is zero or above its test ceiling.
     InvalidCapacity,
     /// A configured fault fired at this operation.
     Injected(StoreOperation),
     /// Inserting a new key would exceed the configured record capacity.
     CapacityExhausted,
+    /// A record charge or total byte count exceeds its configured bound.
+    ByteCapacityExhausted,
 }
 
 impl fmt::Display for FaultStoreError {
@@ -204,6 +246,9 @@ impl fmt::Display for FaultStoreError {
             Self::InvalidCapacity => formatter.write_str("invalid fault-store capacity"),
             Self::Injected(operation) => write!(formatter, "injected {operation:?} fault"),
             Self::CapacityExhausted => formatter.write_str("fault-store capacity exhausted"),
+            Self::ByteCapacityExhausted => {
+                formatter.write_str("fault-store byte capacity exhausted")
+            }
         }
     }
 }
@@ -213,21 +258,35 @@ impl Error for FaultStoreError {}
 /// A bounded in-memory store with per-operation fault schedules.
 #[derive(Debug)]
 pub struct FaultStore<Key, Value> {
-    records: BTreeMap<Key, Value>,
+    records: BTreeMap<Key, FaultRecord<Value>>,
     failures: BTreeMap<StoreOperation, u32>,
     record_capacity: usize,
+    byte_capacity: u64,
+    stored_bytes: u64,
+}
+
+#[derive(Debug)]
+struct FaultRecord<Value> {
+    value: Value,
+    encoded_bytes: u64,
 }
 
 impl<Key: Ord, Value> FaultStore<Key, Value> {
     /// Creates an empty store with a finite record capacity.
-    pub fn new(record_capacity: usize) -> Result<Self, FaultStoreError> {
-        if record_capacity == 0 || record_capacity > MAX_FAULT_STORE_RECORDS {
+    pub fn new(record_capacity: usize, byte_capacity: u64) -> Result<Self, FaultStoreError> {
+        if record_capacity == 0
+            || record_capacity > MAX_FAULT_STORE_RECORDS
+            || byte_capacity == 0
+            || byte_capacity > MAX_FAULT_STORE_BYTES
+        {
             return Err(FaultStoreError::InvalidCapacity);
         }
         Ok(Self {
             records: BTreeMap::new(),
             failures: BTreeMap::new(),
             record_capacity,
+            byte_capacity,
+            stored_bytes: 0,
         })
     }
 
@@ -252,25 +311,66 @@ impl<Key: Ord, Value> FaultStore<Key, Value> {
         self.records.is_empty()
     }
 
+    /// Returns the exact caller-declared canonical bytes currently stored.
+    #[must_use]
+    pub const fn stored_bytes(&self) -> u64 {
+        self.stored_bytes
+    }
+
     /// Reads a record, subject to the configured read fault schedule.
     pub fn get(&mut self, key: &Key) -> Result<Option<&Value>, FaultStoreError> {
         self.maybe_fail(StoreOperation::Read)?;
-        Ok(self.records.get(key))
+        Ok(self.records.get(key).map(|record| &record.value))
     }
 
     /// Inserts or replaces a record, subject to bounds and write faults.
-    pub fn insert(&mut self, key: Key, value: Value) -> Result<Option<Value>, FaultStoreError> {
+    pub fn insert(
+        &mut self,
+        key: Key,
+        value: Value,
+        encoded_bytes: u64,
+    ) -> Result<Option<Value>, FaultStoreError> {
         self.maybe_fail(StoreOperation::Write)?;
         if !self.records.contains_key(&key) && self.records.len() == self.record_capacity {
             return Err(FaultStoreError::CapacityExhausted);
         }
-        Ok(self.records.insert(key, value))
+        let prior_bytes = self
+            .records
+            .get(&key)
+            .map_or(0, |record| record.encoded_bytes);
+        let without_prior = self
+            .stored_bytes
+            .checked_sub(prior_bytes)
+            .ok_or(FaultStoreError::ByteCapacityExhausted)?;
+        let next_bytes = without_prior
+            .checked_add(encoded_bytes)
+            .ok_or(FaultStoreError::ByteCapacityExhausted)?;
+        if next_bytes > self.byte_capacity {
+            return Err(FaultStoreError::ByteCapacityExhausted);
+        }
+        let previous = self.records.insert(
+            key,
+            FaultRecord {
+                value,
+                encoded_bytes,
+            },
+        );
+        self.stored_bytes = next_bytes;
+        Ok(previous.map(|record| record.value))
     }
 
     /// Removes a record, subject to the configured delete fault schedule.
     pub fn remove(&mut self, key: &Key) -> Result<Option<Value>, FaultStoreError> {
         self.maybe_fail(StoreOperation::Delete)?;
-        Ok(self.records.remove(key))
+        let removed = self.records.remove(key);
+        if let Some(record) = removed {
+            self.stored_bytes = self
+                .stored_bytes
+                .checked_sub(record.encoded_bytes)
+                .ok_or(FaultStoreError::ByteCapacityExhausted)?;
+            return Ok(Some(record.value));
+        }
+        Ok(None)
     }
 
     fn maybe_fail(&mut self, operation: StoreOperation) -> Result<(), FaultStoreError> {
@@ -359,6 +459,8 @@ impl Error for TranscriptError {}
 pub struct TranscriptDriver {
     expected: VecDeque<TranscriptStep>,
     observed: usize,
+    scheduled: usize,
+    observation_attempts: usize,
 }
 
 impl TranscriptDriver {
@@ -368,15 +470,18 @@ impl TranscriptDriver {
         Self {
             expected: VecDeque::new(),
             observed: 0,
+            scheduled: 0,
+            observation_attempts: 0,
         }
     }
 
     /// Appends one already-bounded expected step.
     pub fn push_expected(&mut self, step: TranscriptStep) -> Result<(), TranscriptError> {
-        if self.expected.len() == MAX_TRANSCRIPT_STEPS {
+        if self.scheduled == MAX_TRANSCRIPT_STEPS {
             return Err(TranscriptError::TooManySteps);
         }
         self.expected.push_back(step);
+        self.scheduled += 1;
         Ok(())
     }
 
@@ -385,6 +490,10 @@ impl TranscriptDriver {
         if bytes.len() > MAX_TRANSCRIPT_STEP_BYTES {
             return Err(TranscriptError::StepTooLarge);
         }
+        if self.observation_attempts == MAX_TRANSCRIPT_STEPS {
+            return Err(TranscriptError::TooManySteps);
+        }
+        self.observation_attempts += 1;
         let Some(expected) = self.expected.front() else {
             return Err(TranscriptError::UnexpectedStep);
         };

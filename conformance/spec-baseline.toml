@@ -1,5 +1,5 @@
 schema_version = 1
-frozen_at_commit = "39d449394d0d0c32cc3f53d672976c78c4a13b22"
+frozen_at_commit = "4b4b9fc7f5e944e1be83d9fbfc90979243977c6c"
 
 [profiles.base_federation_v1]
 sha256 = "63813b0c384d51f674ba56ec5e8b166ed04c06ae0d22e18c0fc1d5f516331ff3"
@@ -27,12 +27,12 @@ sha256 = "6e905288c64a5c4a9fd5f6fd64737d62f42ed70c9777480f481de7d016bc6c03"
 [[artifacts]]
 path = "docs/protocol-sources-and-decisions.md"
 role = "source-ledger"
-sha256 = "c3e9c6a43f7a8b639f3e867aa19ecc35190305f434885a8be9183184de51354c"
+sha256 = "a7426ab79f32ee2f19fcfb6136c4f6542751b33f0c0d6a6276ada52b24563ffb"
 
 [[artifacts]]
 path = "docs/specification-manifest.txt"
 role = "specification-manifest"
-sha256 = "c58984d10edb2cb095ff7e9d7afcb3c90798a9e9e8af3ceb04776a3cf0966186"
+sha256 = "ce2201f248d68237b2e9fd1bde0a6f2391381e4cc9d2dc997dd9eb820092b684"
 
 [[artifacts]]
 path = "scripts/check-spec.sh"

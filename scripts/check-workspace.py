@@ -69,7 +69,7 @@ EXPECTED_EDGES = {
         "agenc-ircd-config",
         "agenc-ircd-admin",
     },
-    "agenc-ircd-testkit": set(),
+    "agenc-ircd-testkit": {"agenc-ircd-federation-wire", "agenc-ircd-types"},
     "agenc-ircd": {"agenc-ircd-runtime", "agenc-ircd-config", "agenc-ircd-storage"},
 }
 EXTERNAL_DEPENDENCIES = {
@@ -82,6 +82,7 @@ EXTERNAL_DEPENDENCIES = {
     "hmac": ("=0.13.0", {"zeroize"}),
     "hpke": ("=0.14.0", {"alloc", "chacha", "hkdfsha2", "x25519"}),
     "opaque-ke": ("=4.0.1", {"argon2", "ristretto255", "std"}),
+    "precis-profiles": ("=0.1.13", set()),
     "redb": ("=4.2.0", {"std"}),
     "rustls": ("=0.23.43", {"aws_lc_rs", "prefer-post-quantum", "std"}),
     "sha2": ("=0.11.0", {"zeroize"}),
@@ -103,6 +104,7 @@ DIRECT_CHECKSUMS = {
     "hmac": "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f",
     "hpke": "dd5130e119706b4d8c2180da6126f7e60b6c38c2d340d539219f57051f0a7af7",
     "opaque-ke": "ded22991b43cd15561b62b2e1cf9ace1344a8534eebec96202d5c96a77a6616a",
+    "precis-profiles": "31e2768890a47af73a032af9f0cedbddce3c9d06cf8de201d5b8f2436ded7674",
     "redb": "de6c3b63e007e90ce536ec2ae4690826136a20ec8dbbbb400daef1bb999d2e36",
     "rustls": "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06",
     "sha2": "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4",
@@ -112,6 +114,12 @@ DIRECT_CHECKSUMS = {
     "zeroize": "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e",
 }
 DEPENDENCY_TABLE_NAMES = {"dependencies", "dev-dependencies", "build-dependencies"}
+EXPECTED_EXTERNAL_EDGES = {
+    "agenc-ircd-types": {"base64", "precis-profiles", "zeroize"},
+    "agenc-ircd-client-wire": {"base64"},
+    "agenc-ircd-federation-wire": {"base64", "sha2", "tls_codec"},
+    "agenc-ircd-testkit": {"sha2"},
+}
 CRATES_IO_SOURCES = {
     "registry+https://github.com/rust-lang/crates.io-index",
     "sparse+https://index.crates.io/",
@@ -243,7 +251,7 @@ def dependency_tables(document: dict[str, object]) -> list[tuple[str, dict[str, 
 
 
 def validate_package_manifests(root: Path) -> None:
-    """Reject local versions, external declarations, and source overrides."""
+    """Validate inherited package dependencies and their ownership roles."""
     for manifest_path in sorted((root / "crates").glob("*/Cargo.toml")):
         manifest = load_toml(manifest_path)
         if "patch" in manifest or "replace" in manifest:
@@ -256,16 +264,45 @@ def validate_package_manifests(root: Path) -> None:
                 raise WorkspaceError(f"{manifest_path} does not inherit package.{field}")
         if manifest.get("lints") != {"workspace": True}:
             raise WorkspaceError(f"{manifest_path} does not inherit workspace lints")
+        package_name = str(package["name"])
+        actual_external: set[str] = set()
         for table_name, table in dependency_tables(manifest):
             for dependency_name, declaration in table.items():
-                if dependency_name not in CRATE_NAMES:
-                    raise WorkspaceError(
-                        f"{manifest_path} declares external dependency {dependency_name} outside the root"
-                    )
                 if declaration != {"workspace": True}:
                     raise WorkspaceError(
                         f"{manifest_path} {table_name}.{dependency_name} must inherit the root pin"
                     )
+                if dependency_name in EXTERNAL_DEPENDENCIES:
+                    if not table_name.endswith("dependencies"):
+                        raise WorkspaceError(
+                            f"{manifest_path} places {dependency_name} in an invalid dependency table"
+                        )
+                    actual_external.add(dependency_name)
+                    continue
+                if dependency_name not in CRATE_NAMES:
+                    raise WorkspaceError(
+                        f"{manifest_path} names unknown dependency {dependency_name}"
+                    )
+                if dependency_name == "agenc-ircd-testkit" and table_name == "dependencies":
+                    raise WorkspaceError(
+                        f"{manifest_path} has a production dependency on testkit"
+                    )
+                if package_name != "agenc-ircd-testkit" and table_name == "dependencies":
+                    continue
+                if package_name == "agenc-ircd-testkit" and table_name == "dependencies":
+                    continue
+                if table_name == "dev-dependencies" and dependency_name == "agenc-ircd-testkit":
+                    continue
+                if table_name != "dependencies":
+                    raise WorkspaceError(
+                        f"{manifest_path} has forbidden {table_name}.{dependency_name} edge"
+                    )
+        expected_external = EXPECTED_EXTERNAL_EDGES.get(package_name, set())
+        if actual_external != expected_external:
+            raise WorkspaceError(
+                f"{manifest_path} external dependency set differs: "
+                f"expected={sorted(expected_external)}, actual={sorted(actual_external)}"
+            )
 
 
 def validate_direct_dependency_evidence(root: Path) -> None:
@@ -348,8 +385,17 @@ def graph_from_packages(packages: dict[str, dict[str, object]]) -> dict[str, set
             dependency_name = dependency.get("name")
             if dependency_name not in CRATE_NAMES:
                 continue
-            if dependency.get("kind") not in {None, "normal"} or dependency.get("target") is not None:
-                raise WorkspaceError(f"workspace edge {name} -> {dependency_name} is not unconditional normal")
+            kind = dependency.get("kind")
+            if kind == "dev":
+                if dependency_name != "agenc-ircd-testkit":
+                    raise WorkspaceError(
+                        f"workspace dev edge {name} -> {dependency_name} is not testkit"
+                    )
+                continue
+            if kind not in {None, "normal"} or dependency.get("target") is not None:
+                raise WorkspaceError(
+                    f"workspace edge {name} -> {dependency_name} is not unconditional normal"
+                )
             edges.add(str(dependency_name))
         graph[name] = edges
     return graph
