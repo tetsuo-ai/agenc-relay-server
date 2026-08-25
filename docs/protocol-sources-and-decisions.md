@@ -125,6 +125,7 @@ the complete graph actually shipped.
 | `getrandom` | 0.4.3 | `300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099` | no defaults; `std` |
 | `redb` | 4.2.0 | `de6c3b63e007e90ce536ec2ae4690826136a20ec8dbbbb400daef1bb999d2e36` | no defaults; `std`; no production compaction call |
 | `opaque-ke` | 4.0.1 | `ded22991b43cd15561b62b2e1cf9ace1344a8534eebec96202d5c96a77a6616a` | no defaults; `ristretto255,argon2,std`; no Serde |
+| `precis-profiles` | 0.1.13 | `31e2768890a47af73a032af9f0cedbddce3c9d06cf8de201d5b8f2436ded7674` | no defaults; private bounded adapter; networking feature disabled |
 | `hpke` | 0.14.0 | `dd5130e119706b4d8c2180da6126f7e60b6c38c2d340d539219f57051f0a7af7` | no defaults; `alloc,chacha,x25519,hkdfsha2` |
 | `tls_codec` | 0.5.0 | `18cc98286004cea38f717e2b03d990fc774fbfd38a82720de40e5c94365067c8` | no defaults; `std,mls`; no production derive/Serde |
 | `base64` | 0.23.1 | `ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5` | no defaults; `alloc`; canonical unpadded URL-safe adapter only |

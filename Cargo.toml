@@ -47,6 +47,7 @@ hkdf = { version = "=0.13.0", default-features = false }
 hmac = { version = "=0.13.0", default-features = false, features = ["zeroize"] }
 hpke = { version = "=0.14.0", default-features = false, features = ["alloc", "chacha", "x25519", "hkdfsha2"] }
 opaque-ke = { version = "=4.0.1", default-features = false, features = ["ristretto255", "argon2", "std"] }
+precis-profiles = { version = "=0.1.13", default-features = false }
 redb = { version = "=4.2.0", default-features = false, features = ["std"] }
 rustls = { version = "=0.23.43", default-features = false, features = ["std", "aws_lc_rs", "prefer-post-quantum"] }
 sha2 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }

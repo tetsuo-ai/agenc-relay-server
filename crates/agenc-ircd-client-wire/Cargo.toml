@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 agenc-ircd-types.workspace = true
+base64.workspace = true
 
 [lints]
 workspace = true
