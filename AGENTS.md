@@ -2,20 +2,22 @@
 
 ## Project Structure & Module Organization
 
-This repository currently contains the protocol and implementation design, not a runnable daemon. `docs/` holds the normative architecture, E2EE extension, federation registry, decision ledger, and integrity manifest. `rfcs/` contains pinned upstream RFC text; preserve these files byte-for-byte. `scripts/check-spec.sh` validates source hashes, registry structure, and negotiated profile hashes.
+`docs/` holds the normative architecture, E2EE extension, federation registry, decision ledger, and integrity manifest. `rfcs/` contains pinned upstream RFC text; preserve these files byte-for-byte. `crates/` contains the 13-crate Section-24 workspace; most production crates intentionally export no behavior until their roadmap stage. `conformance/` owns requirement and evidence catalogs, while `test-data/` owns public deterministic fixtures.
 
 Rust implementation must follow Section 24 of `docs/ircd-architecture-and-implementation-spec.md`. Keep the declared `agenc-ircd-*` crate boundaries intact: types and wire codecs remain independent of runtime, storage, and policy; the `agenc-ircd` binary performs composition only. Put crate integration tests in `crates/<crate>/tests/` and shared deterministic fixtures in `agenc-ircd-testkit`.
 
 ## Build, Test, and Development Commands
 
-- `bash scripts/check-spec.sh`: validate the current specification baseline; run after any documentation or registry change.
+- `bash scripts/check-stage-zero.sh`: run the complete workspace, policy, conformance, target, audit, and coverage gate.
+- `python3 scripts/requirements.py check`: prove the generated ledger covers the frozen normative sources.
+- `python3 scripts/check-source.py check`: reject unsafe, panic-prone, unbounded-channel, and unreviewed code shapes.
 - `cargo fmt --all --check`: verify Rust formatting once the workspace exists.
 - `cargo check --workspace --all-targets --all-features --locked`: compile every supported target surface.
 - `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`: enforce the lint policy.
 - `cargo test --workspace --all-features --locked`: run unit and integration tests.
 - `cargo deny check` and `cargo audit --deny warnings`: check dependencies and advisories.
 
-There is no server binary to run yet. Implement phases in the order specified by Section 29.
+The `agenc-ircd` binary deliberately exits unsuccessfully during Stage 00 so it cannot be mistaken for a server. Implement phases in `TODO.md` order.
 
 ## Coding Style & Naming Conventions
 

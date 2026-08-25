@@ -1,0 +1,77 @@
+[workspace]
+members = [
+    "crates/agenc-ircd",
+    "crates/agenc-ircd-admin",
+    "crates/agenc-ircd-auth",
+    "crates/agenc-ircd-client-wire",
+    "crates/agenc-ircd-config",
+    "crates/agenc-ircd-crypto",
+    "crates/agenc-ircd-domain",
+    "crates/agenc-ircd-e2ee",
+    "crates/agenc-ircd-federation-wire",
+    "crates/agenc-ircd-runtime",
+    "crates/agenc-ircd-storage",
+    "crates/agenc-ircd-testkit",
+    "crates/agenc-ircd-types",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+
+[workspace.dependencies]
+agenc-ircd-admin = { version = "=0.0.0", path = "crates/agenc-ircd-admin" }
+agenc-ircd-auth = { version = "=0.0.0", path = "crates/agenc-ircd-auth" }
+agenc-ircd-client-wire = { version = "=0.0.0", path = "crates/agenc-ircd-client-wire" }
+agenc-ircd-config = { version = "=0.0.0", path = "crates/agenc-ircd-config" }
+agenc-ircd-crypto = { version = "=0.0.0", path = "crates/agenc-ircd-crypto" }
+agenc-ircd-domain = { version = "=0.0.0", path = "crates/agenc-ircd-domain" }
+agenc-ircd-e2ee = { version = "=0.0.0", path = "crates/agenc-ircd-e2ee" }
+agenc-ircd-federation-wire = { version = "=0.0.0", path = "crates/agenc-ircd-federation-wire" }
+agenc-ircd-runtime = { version = "=0.0.0", path = "crates/agenc-ircd-runtime" }
+agenc-ircd-storage = { version = "=0.0.0", path = "crates/agenc-ircd-storage" }
+agenc-ircd-types = { version = "=0.0.0", path = "crates/agenc-ircd-types" }
+
+# These exact profiles are frozen by Architecture section 24.4. They remain
+# unused until their owning implementation stage, so Phase 00 has no third-
+# party code in its release graph.
+argon2 = { version = "=0.5.3", default-features = false, features = ["alloc"] }
+base64 = { version = "=0.23.1", default-features = false, features = ["alloc"] }
+chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["alloc", "zeroize"] }
+ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["fast", "zeroize"] }
+getrandom = { version = "=0.4.3", default-features = false, features = ["std"] }
+hkdf = { version = "=0.13.0", default-features = false }
+hmac = { version = "=0.13.0", default-features = false, features = ["zeroize"] }
+hpke = { version = "=0.14.0", default-features = false, features = ["alloc", "chacha", "x25519", "hkdfsha2"] }
+opaque-ke = { version = "=4.0.1", default-features = false, features = ["ristretto255", "argon2", "std"] }
+redb = { version = "=4.2.0", default-features = false, features = ["std"] }
+rustls = { version = "=0.23.43", default-features = false, features = ["std", "aws_lc_rs", "prefer-post-quantum"] }
+sha2 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
+subtle = { version = "=2.6.1", default-features = false }
+tls_codec = { version = "=0.5.0", default-features = false, features = ["std", "mls"] }
+tokio = { version = "=1.53.1", default-features = false, features = ["rt-multi-thread", "net", "io-util", "time", "signal", "sync", "macros"] }
+zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
+
+[workspace.lints.rust]
+missing_docs = "warn"
+rust_2018_idioms = { level = "deny", priority = -1 }
+unsafe_code = "forbid"
+unreachable_pub = "warn"
+warnings = "deny"
+
+[workspace.lints.clippy]
+complexity = { level = "deny", priority = -1 }
+correctness = { level = "deny", priority = -1 }
+perf = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+dbg_macro = "deny"
+expect_used = "deny"
+large_futures = "deny"
+manual_let_else = "warn"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"

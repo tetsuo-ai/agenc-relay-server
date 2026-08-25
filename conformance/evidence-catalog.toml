@@ -1,0 +1,56 @@
+schema_version = 1
+
+[[evidence]]
+id = "EVID-S00-001-BASELINE"
+claim_ids = ["S00-001"]
+kind = "specification-baseline"
+
+[[evidence]]
+id = "EVID-S00-002-REQUIREMENTS"
+claim_ids = ["S00-002"]
+kind = "requirement-ledger"
+
+[[evidence]]
+id = "EVID-S00-003-BUILD-CONTRACT"
+claim_ids = ["S00-003"]
+kind = "build-contract"
+
+[[evidence]]
+id = "EVID-S00-004-CRATE-GRAPH"
+claim_ids = ["S00-004"]
+kind = "workspace-graph"
+
+[[evidence]]
+id = "EVID-S00-005-SOURCE-POLICY"
+claim_ids = ["S00-005"]
+kind = "source-policy"
+
+[[evidence]]
+id = "EVID-S00-006-DEPENDENCIES"
+claim_ids = ["S00-006"]
+kind = "dependency-policy"
+
+[[evidence]]
+id = "EVID-S00-007-EVIDENCE-LAYOUT"
+claim_ids = ["S00-007"]
+kind = "test-evidence-layout"
+
+[[evidence]]
+id = "EVID-S00-008-TESTKIT-ISOLATION"
+claim_ids = ["S00-008"]
+kind = "testkit-isolation"
+
+[[evidence]]
+id = "EVID-S00-009-CI-BASELINE"
+claim_ids = ["S00-009"]
+kind = "continuous-integration"
+
+[[evidence]]
+id = "EVID-S00-010-MANIFEST-SCHEMA"
+claim_ids = ["S00-010"]
+kind = "evidence-schema"
+
+[[evidence]]
+id = "EVID-S00-900-STAGE-GATE"
+claim_ids = ["S00-900"]
+kind = "stage-gate"

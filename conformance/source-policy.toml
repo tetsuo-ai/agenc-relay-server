@@ -1,0 +1,9 @@
+schema_version = 1
+function_logical_line_review = 60
+control_nesting_review = 3
+cyclomatic_complexity_review = 10
+review_annotation = "// agenc-review: focus owner=<name> reviewed=<YYYY-MM-DD> reason=<specific reason>"
+assert_annotation = "// agenc-review: internal-assert owner=<name> reviewed=<YYYY-MM-DD> reason=<unforgeable precondition>"
+forbid_unsafe = true
+forbid_panic_macros = true
+forbid_unbounded_channels = true

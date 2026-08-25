@@ -1,0 +1,641 @@
+#!/usr/bin/env python3
+"""Validate the pinned workspace, crate graph, and dependency-source policy."""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import json
+import re
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+from typing import NoReturn
+
+TOOLCHAIN = "1.98.0"
+EDITION = "2024"
+RUST_VERSION = "1.98"
+TARGETS = ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]
+CRATE_NAMES = {
+    "agenc-ircd",
+    "agenc-ircd-admin",
+    "agenc-ircd-auth",
+    "agenc-ircd-client-wire",
+    "agenc-ircd-config",
+    "agenc-ircd-crypto",
+    "agenc-ircd-domain",
+    "agenc-ircd-e2ee",
+    "agenc-ircd-federation-wire",
+    "agenc-ircd-runtime",
+    "agenc-ircd-storage",
+    "agenc-ircd-testkit",
+    "agenc-ircd-types",
+}
+EXPECTED_EDGES = {
+    "agenc-ircd-types": set(),
+    "agenc-ircd-client-wire": {"agenc-ircd-types"},
+    "agenc-ircd-federation-wire": {"agenc-ircd-types"},
+    "agenc-ircd-crypto": {"agenc-ircd-types"},
+    "agenc-ircd-auth": {"agenc-ircd-types", "agenc-ircd-crypto"},
+    "agenc-ircd-domain": {"agenc-ircd-types"},
+    "agenc-ircd-e2ee": {
+        "agenc-ircd-types",
+        "agenc-ircd-crypto",
+        "agenc-ircd-domain",
+        "agenc-ircd-federation-wire",
+    },
+    "agenc-ircd-storage": {
+        "agenc-ircd-types",
+        "agenc-ircd-crypto",
+        "agenc-ircd-domain",
+        "agenc-ircd-e2ee",
+    },
+    "agenc-ircd-config": {"agenc-ircd-types"},
+    "agenc-ircd-admin": {
+        "agenc-ircd-types",
+        "agenc-ircd-crypto",
+        "agenc-ircd-domain",
+    },
+    "agenc-ircd-runtime": {
+        "agenc-ircd-types",
+        "agenc-ircd-client-wire",
+        "agenc-ircd-federation-wire",
+        "agenc-ircd-crypto",
+        "agenc-ircd-auth",
+        "agenc-ircd-domain",
+        "agenc-ircd-e2ee",
+        "agenc-ircd-storage",
+        "agenc-ircd-config",
+        "agenc-ircd-admin",
+    },
+    "agenc-ircd-testkit": set(),
+    "agenc-ircd": {"agenc-ircd-runtime", "agenc-ircd-config", "agenc-ircd-storage"},
+}
+EXTERNAL_DEPENDENCIES = {
+    "argon2": ("=0.5.3", {"alloc"}),
+    "base64": ("=0.23.1", {"alloc"}),
+    "chacha20poly1305": ("=0.11.0", {"alloc", "zeroize"}),
+    "ed25519-dalek": ("=3.0.0", {"fast", "zeroize"}),
+    "getrandom": ("=0.4.3", {"std"}),
+    "hkdf": ("=0.13.0", set()),
+    "hmac": ("=0.13.0", {"zeroize"}),
+    "hpke": ("=0.14.0", {"alloc", "chacha", "hkdfsha2", "x25519"}),
+    "opaque-ke": ("=4.0.1", {"argon2", "ristretto255", "std"}),
+    "redb": ("=4.2.0", {"std"}),
+    "rustls": ("=0.23.43", {"aws_lc_rs", "prefer-post-quantum", "std"}),
+    "sha2": ("=0.11.0", {"zeroize"}),
+    "subtle": ("=2.6.1", set()),
+    "tls_codec": ("=0.5.0", {"mls", "std"}),
+    "tokio": (
+        "=1.53.1",
+        {"io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"},
+    ),
+    "zeroize": ("=1.9.0", {"alloc"}),
+}
+DIRECT_CHECKSUMS = {
+    "argon2": "3c3610892ee6e0cbce8ae2700349fcf8f98adb0dbfbee85aec3c9179d29cc072",
+    "base64": "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5",
+    "chacha20poly1305": "9b89e1c441e926b9c82a8d023f6e1b7ae0adcfaa7d621814e4d60789bac751cb",
+    "ed25519-dalek": "6ebaa1a2bf1290ab3bfe5a7b771d050ebffab2711c19a81691c683a5144a25de",
+    "getrandom": "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099",
+    "hkdf": "4aaa26c720c68b866f2c96ef5c1264b3e6f473fe5d4ce61cd44bbe913e553018",
+    "hmac": "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f",
+    "hpke": "dd5130e119706b4d8c2180da6126f7e60b6c38c2d340d539219f57051f0a7af7",
+    "opaque-ke": "ded22991b43cd15561b62b2e1cf9ace1344a8534eebec96202d5c96a77a6616a",
+    "redb": "de6c3b63e007e90ce536ec2ae4690826136a20ec8dbbbb400daef1bb999d2e36",
+    "rustls": "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06",
+    "sha2": "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4",
+    "subtle": "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292",
+    "tls_codec": "18cc98286004cea38f717e2b03d990fc774fbfd38a82720de40e5c94365067c8",
+    "tokio": "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed",
+    "zeroize": "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e",
+}
+DEPENDENCY_TABLE_NAMES = {"dependencies", "dev-dependencies", "build-dependencies"}
+CRATES_IO_SOURCES = {
+    "registry+https://github.com/rust-lang/crates.io-index",
+    "sparse+https://index.crates.io/",
+}
+SHA256_RE = re.compile(r"[0-9a-f]{64}")
+
+
+class WorkspaceError(ValueError):
+    """A workspace or dependency policy violation."""
+
+
+def load_toml(path: Path) -> dict[str, object]:
+    """Load one TOML document."""
+    try:
+        return tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise WorkspaceError(f"cannot read {path}: {error}") from error
+
+
+def validate_toolchain(root: Path) -> None:
+    """Validate the exact compiler, components, and target contract."""
+    toolchain = load_toml(root / "rust-toolchain.toml").get("toolchain")
+    if not isinstance(toolchain, dict):
+        raise WorkspaceError("rust-toolchain.toml has no toolchain table")
+    if toolchain.get("channel") != TOOLCHAIN or toolchain.get("profile") != "minimal":
+        raise WorkspaceError("Rust toolchain channel/profile does not match the frozen contract")
+    if toolchain.get("components") != ["clippy", "llvm-tools-preview", "rustfmt"]:
+        raise WorkspaceError("Rust toolchain components do not match the frozen contract")
+    if toolchain.get("targets") != TARGETS:
+        raise WorkspaceError("Rust targets do not match the frozen sorted target list")
+
+    policy = load_toml(root / "conformance/toolchain-policy.toml")
+    expected_policy = {
+        "schema_version": 1,
+        "rust": TOOLCHAIN,
+        "cargo_deny": "0.20.2",
+        "cargo_audit": "0.22.2",
+        "cargo_llvm_cov": "0.9.0",
+        "checkout_action_commit": "df4cb1c069e1874edd31b4311f1884172cec0e10",
+        "targets": TARGETS,
+        "branch_coverage_instrumentation": "coverage-only RUSTC_BOOTSTRAP=1 on pinned rustc; forbidden for build, test, and release compilation",
+    }
+    if policy != expected_policy:
+        raise WorkspaceError("toolchain policy differs from the reviewed CI pin set")
+
+
+def validate_workspace_manifest(root: Path) -> dict[str, object]:
+    """Validate root workspace metadata and frozen dependency profiles."""
+    manifest = load_toml(root / "Cargo.toml")
+    if "package" in manifest or "patch" in manifest or "replace" in manifest:
+        raise WorkspaceError("root must be virtual and may not patch or replace sources")
+    workspace = manifest.get("workspace")
+    if not isinstance(workspace, dict):
+        raise WorkspaceError("root Cargo.toml has no workspace table")
+    if workspace.get("resolver") != "3":
+        raise WorkspaceError("workspace resolver must be 3")
+    package = workspace.get("package")
+    if not isinstance(package, dict):
+        raise WorkspaceError("workspace.package is missing")
+    expected_package = {
+        "version": "0.0.0",
+        "edition": EDITION,
+        "rust-version": RUST_VERSION,
+        "publish": False,
+    }
+    if package != expected_package:
+        raise WorkspaceError("workspace package metadata differs from the frozen contract")
+
+    members = workspace.get("members")
+    expected_members = {f"crates/{name}" for name in CRATE_NAMES}
+    if not isinstance(members, list) or set(members) != expected_members or len(members) != 13:
+        raise WorkspaceError("workspace members do not name the exact 13-crate graph")
+
+    dependencies = workspace.get("dependencies")
+    if not isinstance(dependencies, dict):
+        raise WorkspaceError("workspace.dependencies is missing")
+    validate_dependency_profiles(dependencies)
+    return manifest
+
+
+def validate_dependency_profiles(dependencies: dict[str, object]) -> None:
+    """Validate every root dependency declaration exactly."""
+    expected_names = CRATE_NAMES - {"agenc-ircd", "agenc-ircd-testkit"}
+    if set(dependencies) != expected_names | set(EXTERNAL_DEPENDENCIES):
+        raise WorkspaceError("workspace dependency names differ from the frozen closed set")
+
+    for name in expected_names:
+        declaration = dependencies.get(name)
+        if not isinstance(declaration, dict):
+            raise WorkspaceError(f"workspace dependency {name} must be a table")
+        expected = {"version": "=0.0.0", "path": f"crates/{name}"}
+        if declaration != expected:
+            raise WorkspaceError(f"workspace dependency {name} has a forbidden declaration")
+
+    for name, (version, features) in EXTERNAL_DEPENDENCIES.items():
+        declaration = dependencies.get(name)
+        if not isinstance(declaration, dict):
+            raise WorkspaceError(f"external dependency {name} must be a table")
+        if declaration.get("version") != version:
+            raise WorkspaceError(f"external dependency {name} is not pinned to {version}")
+        if declaration.get("default-features") is not False:
+            raise WorkspaceError(f"external dependency {name} enables default features")
+        declared_features = declaration.get("features", [])
+        if not isinstance(declared_features, list) or set(declared_features) != features:
+            raise WorkspaceError(f"external dependency {name} has a stale feature profile")
+        if set(declaration) != {"version", "default-features"} | (
+            {"features"} if features else set()
+        ):
+            raise WorkspaceError(f"external dependency {name} has forbidden source/profile keys")
+
+
+def dependency_tables(document: dict[str, object]) -> list[tuple[str, dict[str, object]]]:
+    """Return dependency tables, including target-conditional tables."""
+    tables: list[tuple[str, dict[str, object]]] = []
+    for name in DEPENDENCY_TABLE_NAMES:
+        table = document.get(name)
+        if isinstance(table, dict):
+            tables.append((name, table))
+    targets = document.get("target")
+    if isinstance(targets, dict):
+        for target_name, target in targets.items():
+            if not isinstance(target, dict):
+                continue
+            for name in DEPENDENCY_TABLE_NAMES:
+                table = target.get(name)
+                if isinstance(table, dict):
+                    tables.append((f"target.{target_name}.{name}", table))
+    return tables
+
+
+def validate_package_manifests(root: Path) -> None:
+    """Reject local versions, external declarations, and source overrides."""
+    for manifest_path in sorted((root / "crates").glob("*/Cargo.toml")):
+        manifest = load_toml(manifest_path)
+        if "patch" in manifest or "replace" in manifest:
+            raise WorkspaceError(f"source override is forbidden in {manifest_path}")
+        package = manifest.get("package")
+        if not isinstance(package, dict) or package.get("name") not in CRATE_NAMES:
+            raise WorkspaceError(f"invalid package metadata in {manifest_path}")
+        for field in ("version", "edition", "rust-version", "publish"):
+            if package.get(field) != {"workspace": True}:
+                raise WorkspaceError(f"{manifest_path} does not inherit package.{field}")
+        if manifest.get("lints") != {"workspace": True}:
+            raise WorkspaceError(f"{manifest_path} does not inherit workspace lints")
+        for table_name, table in dependency_tables(manifest):
+            for dependency_name, declaration in table.items():
+                if dependency_name not in CRATE_NAMES:
+                    raise WorkspaceError(
+                        f"{manifest_path} declares external dependency {dependency_name} outside the root"
+                    )
+                if declaration != {"workspace": True}:
+                    raise WorkspaceError(
+                        f"{manifest_path} {table_name}.{dependency_name} must inherit the root pin"
+                    )
+
+
+def validate_direct_dependency_evidence(root: Path) -> None:
+    """Compare root pins with the frozen crates.io checksum evidence table."""
+    source_path = root / "docs/protocol-sources-and-decisions.md"
+    try:
+        source = source_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise WorkspaceError(f"cannot read dependency source ledger: {error}") from error
+    start = source.find("## 5. Initial Rust dependency evidence")
+    end = source.find("## 6. Update and review procedure", start)
+    if start == -1 or end == -1:
+        raise WorkspaceError("dependency source ledger section boundaries are missing")
+    records = {
+        name: (version, checksum)
+        for name, version, checksum in re.findall(
+            r"^\| `([^`]+)` \| ([0-9.]+) \| `([0-9a-f]{64})` \|",
+            source[start:end],
+            flags=re.MULTILINE,
+        )
+    }
+    expected_records = {
+        name: (version.removeprefix("="), DIRECT_CHECKSUMS[name])
+        for name, (version, _features) in EXTERNAL_DEPENDENCIES.items()
+    }
+    if records != expected_records:
+        raise WorkspaceError("root dependency pins and frozen crates.io checksum evidence disagree")
+
+
+def cargo_metadata(root: Path) -> dict[str, object]:
+    """Load Cargo's authoritative package graph without third-party dependencies."""
+    completed = subprocess.run(
+        ["cargo", "metadata", "--no-deps", "--format-version", "1", "--locked"],
+        cwd=root,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if completed.returncode != 0:
+        details = (completed.stderr or completed.stdout).strip()
+        raise WorkspaceError(f"cargo metadata failed: {details}")
+    try:
+        metadata = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise WorkspaceError(f"cargo metadata returned invalid JSON: {error}") from error
+    if not isinstance(metadata, dict):
+        raise WorkspaceError("cargo metadata did not return an object")
+    return metadata
+
+
+def packages_from_metadata(metadata: dict[str, object]) -> dict[str, dict[str, object]]:
+    """Index Cargo package objects by unique workspace name."""
+    packages = metadata.get("packages")
+    workspace_members = metadata.get("workspace_members")
+    if not isinstance(packages, list) or not isinstance(workspace_members, list):
+        raise WorkspaceError("cargo metadata is missing packages or workspace_members")
+    member_ids = set(workspace_members)
+    indexed: dict[str, dict[str, object]] = {}
+    for package in packages:
+        if not isinstance(package, dict) or package.get("id") not in member_ids:
+            continue
+        name = package.get("name")
+        if not isinstance(name, str) or name in indexed:
+            raise WorkspaceError(f"invalid or duplicate workspace package name: {name!r}")
+        indexed[name] = package
+    return indexed
+
+
+def graph_from_packages(packages: dict[str, dict[str, object]]) -> dict[str, set[str]]:
+    """Build the workspace-only normal dependency graph."""
+    graph: dict[str, set[str]] = {}
+    for name, package in packages.items():
+        dependencies = package.get("dependencies")
+        if not isinstance(dependencies, list):
+            raise WorkspaceError(f"package {name} has invalid dependency metadata")
+        edges: set[str] = set()
+        for dependency in dependencies:
+            if not isinstance(dependency, dict):
+                raise WorkspaceError(f"package {name} has a malformed dependency")
+            dependency_name = dependency.get("name")
+            if dependency_name not in CRATE_NAMES:
+                continue
+            if dependency.get("kind") not in {None, "normal"} or dependency.get("target") is not None:
+                raise WorkspaceError(f"workspace edge {name} -> {dependency_name} is not unconditional normal")
+            edges.add(str(dependency_name))
+        graph[name] = edges
+    return graph
+
+
+def validate_graph(packages: dict[str, dict[str, object]]) -> dict[str, set[str]]:
+    """Validate package metadata and the exact Section-24 edge set."""
+    if set(packages) != CRATE_NAMES:
+        missing = sorted(CRATE_NAMES - set(packages))
+        extra = sorted(set(packages) - CRATE_NAMES)
+        raise WorkspaceError(f"workspace package set differs; missing={missing}, extra={extra}")
+    for name, package in packages.items():
+        if package.get("edition") != EDITION or package.get("rust_version") != RUST_VERSION:
+            raise WorkspaceError(f"package {name} has stale edition or rust-version metadata")
+        if package.get("version") != "0.0.0":
+            raise WorkspaceError(f"package {name} has a non-Phase-00 version")
+        features = package.get("features")
+        if features != {}:
+            raise WorkspaceError(f"package {name} exposes an unexpected production feature")
+
+        targets = package.get("targets")
+        if not isinstance(targets, list):
+            raise WorkspaceError(f"package {name} has invalid target metadata")
+        product_kinds: list[str] = []
+        for target in targets:
+            if not isinstance(target, dict):
+                continue
+            kinds = target.get("kind")
+            if not isinstance(kinds, list):
+                continue
+            for kind in kinds:
+                if kind in {"lib", "bin"}:
+                    product_kinds.append(kind)
+        expected_kind = ["bin"] if name == "agenc-ircd" else ["lib"]
+        if product_kinds != expected_kind:
+            raise WorkspaceError(f"package {name} product target must be exactly {expected_kind}")
+
+    graph = graph_from_packages(packages)
+    if graph != EXPECTED_EDGES:
+        differences = {
+            name: {
+                "expected": sorted(EXPECTED_EDGES.get(name, set())),
+                "actual": sorted(graph.get(name, set())),
+            }
+            for name in sorted(CRATE_NAMES)
+            if graph.get(name) != EXPECTED_EDGES.get(name)
+        }
+        raise WorkspaceError(f"workspace dependency graph differs: {differences}")
+    validate_acyclic(graph)
+    validate_release_closure(graph)
+    return graph
+
+
+def validate_acyclic(graph: dict[str, set[str]]) -> None:
+    """Reject every workspace dependency cycle."""
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(name: str) -> None:
+        if name in visiting:
+            raise WorkspaceError(f"workspace dependency cycle reaches {name}")
+        if name in visited:
+            return
+        visiting.add(name)
+        for dependency in graph.get(name, set()):
+            visit(dependency)
+        visiting.remove(name)
+        visited.add(name)
+
+    for name in graph:
+        visit(name)
+
+
+def validate_release_closure(graph: dict[str, set[str]]) -> None:
+    """Prove testkit is absent and every production library is composed."""
+    closure: set[str] = set()
+    pending = ["agenc-ircd"]
+    while pending:
+        name = pending.pop()
+        if name in closure:
+            continue
+        closure.add(name)
+        pending.extend(graph.get(name, set()))
+    if "agenc-ircd-testkit" in closure:
+        raise WorkspaceError("agenc-ircd-testkit entered the release dependency closure")
+    expected_closure = CRATE_NAMES - {"agenc-ircd-testkit"}
+    if closure != expected_closure:
+        raise WorkspaceError("release binary does not compose every production library")
+    for owner, dependencies in graph.items():
+        if owner != "agenc-ircd-testkit" and "agenc-ircd-testkit" in dependencies:
+            raise WorkspaceError(f"production package {owner} depends on testkit")
+        if "agenc-ircd" in dependencies:
+            raise WorkspaceError(f"library package {owner} depends on the binary")
+
+
+def validate_lockfile(root: Path) -> int:
+    """Validate lockfile source/checksum integrity and return package count."""
+    lock_path = root / "Cargo.lock"
+    if not lock_path.is_file():
+        raise WorkspaceError("Cargo.lock is required")
+    lock = load_toml(lock_path)
+    if lock.get("version") != 4:
+        raise WorkspaceError("Cargo.lock must use lockfile format version 4")
+    packages = lock.get("package")
+    if not isinstance(packages, list):
+        raise WorkspaceError("Cargo.lock has no package array")
+    for package in packages:
+        if not isinstance(package, dict):
+            raise WorkspaceError("Cargo.lock contains a malformed package")
+        source = package.get("source")
+        checksum = package.get("checksum")
+        if source is None:
+            if checksum is not None:
+                raise WorkspaceError("workspace/path lock package unexpectedly has a checksum")
+            continue
+        if source not in CRATES_IO_SOURCES:
+            raise WorkspaceError(f"Cargo.lock contains forbidden source {source!r}")
+        if not isinstance(checksum, str) or SHA256_RE.fullmatch(checksum) is None:
+            raise WorkspaceError("registry lock package has no valid checksum")
+        name = package.get("name")
+        version = package.get("version")
+        direct = EXTERNAL_DEPENDENCIES.get(str(name))
+        if direct is not None and version == direct[0].removeprefix("="):
+            if checksum != DIRECT_CHECKSUMS[str(name)]:
+                raise WorkspaceError(f"direct dependency {name} checksum differs from frozen evidence")
+    return len(packages)
+
+
+def validate_dependency_exception(root: Path) -> None:
+    """Validate the one closed duplicate-crypto generation exception."""
+    policy = load_toml(root / "conformance/dependency-policy.toml")
+    if set(policy) != {
+        "schema_version",
+        "default_registry",
+        "lockfile_required",
+        "offline_after_fetch",
+        "reviewed_duplicate_crypto_generation",
+    }:
+        raise WorkspaceError("dependency policy has unknown or missing top-level fields")
+    if (
+        policy.get("schema_version") != 1
+        or policy.get("default_registry") != "https://github.com/rust-lang/crates.io-index"
+        or policy.get("lockfile_required") is not True
+        or policy.get("offline_after_fetch") is not True
+    ):
+        raise WorkspaceError("dependency policy baseline fields are invalid")
+    exceptions = policy.get("reviewed_duplicate_crypto_generation")
+    if not isinstance(exceptions, list) or len(exceptions) != 1:
+        raise WorkspaceError("exactly one duplicate-crypto exception must be documented")
+    expected = {
+        "id": "DEP-EXCEPTION-OPAQUE-0001",
+        "root_package": "opaque-ke",
+        "root_version": "=4.0.1",
+        "status": "approved-when-reachable",
+        "allowed_duplicate_packages": ["curve25519-dalek", "digest", "hmac", "sha2"],
+        "reason": "RFC 9807 OPAQUE retains its audited digest, HMAC, and curve dependency generation while direct adapters use the frozen current RustCrypto generation.",
+        "constraints": "The exception is reachable only below opaque-ke 4.0.1; its types never cross into direct primitive adapters; byte-identical vectors cover both graphs; no second exception is implicit.",
+    }
+    if exceptions[0] != expected:
+        raise WorkspaceError("duplicate-crypto exception differs from its reviewed closed form")
+
+
+def validate(root: Path) -> tuple[int, int]:
+    """Run the complete workspace and dependency-source check."""
+    validate_toolchain(root)
+    validate_workspace_manifest(root)
+    validate_package_manifests(root)
+    validate_direct_dependency_evidence(root)
+    metadata = cargo_metadata(root)
+    packages = packages_from_metadata(metadata)
+    validate_graph(packages)
+    lock_packages = validate_lockfile(root)
+    validate_dependency_exception(root)
+    return len(packages), lock_packages
+
+
+def expect_rejection(label: str, action: object, fragment: str) -> None:
+    """Require one seeded policy violation to reach its intended branch."""
+    if not callable(action):
+        raise WorkspaceError(f"self-test {label!r} is not callable")
+    try:
+        action()
+    except WorkspaceError as error:
+        if fragment not in str(error):
+            raise WorkspaceError(f"self-test {label!r} reached the wrong branch: {error}") from error
+        return
+    raise WorkspaceError(f"self-test {label!r} was accepted")
+
+
+def self_test(root: Path) -> int:
+    """Exercise graph, metadata, source, feature, and pin rejection paths."""
+    validate_toolchain(root)
+    manifest = validate_workspace_manifest(root)
+    validate_package_manifests(root)
+    validate_direct_dependency_evidence(root)
+    packages = packages_from_metadata(cargo_metadata(root))
+    validate_graph(packages)
+    validate_lockfile(root)
+    validate_dependency_exception(root)
+    cases = 0
+
+    forbidden = copy.deepcopy(packages)
+    forbidden["agenc-ircd-types"]["dependencies"].append(
+        copy.deepcopy(forbidden["agenc-ircd-client-wire"]["dependencies"][0])
+    )
+    expect_rejection("forbidden edge", lambda: validate_graph(forbidden), "graph differs")
+    cases += 1
+
+    cycle_graph = copy.deepcopy(EXPECTED_EDGES)
+    cycle_graph["agenc-ircd-types"] = {"agenc-ircd-runtime"}
+    expect_rejection("cycle", lambda: validate_acyclic(cycle_graph), "cycle")
+    cases += 1
+
+    testkit_graph = copy.deepcopy(EXPECTED_EDGES)
+    testkit_graph["agenc-ircd-runtime"] = set(testkit_graph["agenc-ircd-runtime"])
+    testkit_graph["agenc-ircd-runtime"].add("agenc-ircd-testkit")
+    expect_rejection(
+        "testkit release edge", lambda: validate_release_closure(testkit_graph), "testkit"
+    )
+    cases += 1
+
+    missing = copy.deepcopy(packages)
+    missing.pop("agenc-ircd-types")
+    expect_rejection("missing crate", lambda: validate_graph(missing), "package set differs")
+    cases += 1
+
+    stale_metadata = copy.deepcopy(packages)
+    stale_metadata["agenc-ircd-types"]["rust_version"] = "1.97"
+    expect_rejection("MSRV", lambda: validate_graph(stale_metadata), "stale edition")
+    cases += 1
+
+    feature = copy.deepcopy(packages)
+    feature["agenc-ircd-runtime"]["features"] = {"deterministic-entropy": []}
+    expect_rejection("production feature", lambda: validate_graph(feature), "unexpected production feature")
+    cases += 1
+
+    workspace = manifest["workspace"]
+    dependencies = copy.deepcopy(workspace["dependencies"])
+    dependencies["tokio"]["version"] = "*"
+    expect_rejection("wildcard", lambda: validate_dependency_profiles(dependencies), "not pinned")
+    cases += 1
+
+    git_dependency = copy.deepcopy(workspace["dependencies"])
+    git_dependency["tokio"]["git"] = "https://example.invalid/tokio"
+    expect_rejection(
+        "Git dependency", lambda: validate_dependency_profiles(git_dependency), "forbidden source"
+    )
+    cases += 1
+
+    default_features = copy.deepcopy(workspace["dependencies"])
+    default_features["rustls"]["default-features"] = True
+    expect_rejection(
+        "default features",
+        lambda: validate_dependency_profiles(default_features),
+        "enables default features",
+    )
+    cases += 1
+
+    return cases
+
+
+def fail(message: str) -> NoReturn:
+    """Print a stable command-line error and exit unsuccessfully."""
+    print(f"workspace validation failed: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def main() -> None:
+    """Dispatch the workspace check and seeded negative tests."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=("check", "self-test"))
+    arguments = parser.parse_args()
+    root = Path(__file__).resolve().parent.parent
+    try:
+        if arguments.command == "check":
+            workspace_packages, lock_packages = validate(root)
+            print(
+                f"workspace policy: ok ({workspace_packages} workspace packages, "
+                f"{lock_packages} locked packages)"
+            )
+        else:
+            cases = self_test(root)
+            print(f"workspace policy self-test: ok ({cases} rejection cases)")
+    except (WorkspaceError, OSError, UnicodeError) as error:
+        fail(str(error))
+
+
+if __name__ == "__main__":
+    main()

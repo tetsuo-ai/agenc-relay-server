@@ -1,0 +1,46 @@
+name: Phase 00 conformance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 9 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase-zero-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  stage-zero:
+    name: Complete Stage 00 gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Check out the exact source revision
+        # actions/checkout v6.0.3
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned Rust build contract
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup component add --toolchain 1.98.0 clippy llvm-tools-preview rustfmt
+          rustup target add --toolchain 1.98.0 aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu
+
+      - name: Install pinned policy and evidence tools
+        run: |
+          cargo +1.98.0 install --locked cargo-deny --version 0.20.2
+          cargo +1.98.0 install --locked cargo-audit --version 0.22.2
+          cargo +1.98.0 install --locked cargo-llvm-cov --version 0.9.0
+
+      - name: Run the complete Stage 00 gate
+        run: bash scripts/check-stage-zero.sh

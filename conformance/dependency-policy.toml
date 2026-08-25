@@ -1,0 +1,13 @@
+schema_version = 1
+default_registry = "https://github.com/rust-lang/crates.io-index"
+lockfile_required = true
+offline_after_fetch = true
+
+[[reviewed_duplicate_crypto_generation]]
+id = "DEP-EXCEPTION-OPAQUE-0001"
+root_package = "opaque-ke"
+root_version = "=4.0.1"
+status = "approved-when-reachable"
+allowed_duplicate_packages = ["curve25519-dalek", "digest", "hmac", "sha2"]
+reason = "RFC 9807 OPAQUE retains its audited digest, HMAC, and curve dependency generation while direct adapters use the frozen current RustCrypto generation."
+constraints = "The exception is reachable only below opaque-ke 4.0.1; its types never cross into direct primitive adapters; byte-identical vectors cover both graphs; no second exception is implicit."

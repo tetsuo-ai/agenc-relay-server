@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "manifest_id": "EVID-MANIFEST-SCHEMA-EXAMPLE",
+  "source_commit": "0000000000000000000000000000000000000000",
+  "source_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "lock_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "entries": [
+    {
+      "evidence_id": "EVID-S00-010-MANIFEST-SCHEMA",
+      "claim_ids": ["S00-010"],
+      "command": "python3 scripts/check-evidence.py check",
+      "tool": {
+        "name": "python",
+        "version": "example-only"
+      },
+      "source_commit": "0000000000000000000000000000000000000000",
+      "source_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "lock_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": ["all-features"],
+      "started_at": "2026-08-24T00:00:00Z",
+      "ended_at": "2026-08-24T00:00:01Z",
+      "result": "not-run",
+      "artifact": {
+        "label": "illustrative-schema-fixture",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "limitations": [
+        "This is schema test data and does not claim that a validation command ran."
+      ]
+    }
+  ]
+}

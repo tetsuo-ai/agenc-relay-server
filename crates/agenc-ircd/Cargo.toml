@@ -1,0 +1,14 @@
+[package]
+name = "agenc-ircd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+agenc-ircd-config.workspace = true
+agenc-ircd-runtime.workspace = true
+agenc-ircd-storage.workspace = true
+
+[lints]
+workspace = true

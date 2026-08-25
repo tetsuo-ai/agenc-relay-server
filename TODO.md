@@ -50,7 +50,7 @@ References: [Architecture §§1.2–4](docs/ircd-architecture-and-implementation
 
 | Stage | Outcome | Gate |
 | --- | --- | --- |
-| 00 | Reproducible workspace and traceability foundation | [ ] |
+| 00 | Reproducible workspace and traceability foundation | [x] |
 | 01 | Registries, validated types, and canonical codecs | [ ] |
 | 02 | Bounded client wire implementation | [ ] |
 | 03 | Pure deterministic domain model | [ ] |
@@ -143,100 +143,100 @@ Reference: [Architecture Appendix D](docs/ircd-architecture-and-implementation-s
 Outcome: a compiling, reproducible Rust workspace whose crate graph, toolchain,
 source baseline, and evidence model are fixed before protocol behavior lands.
 
-- [ ] `S00-001` **Freeze and verify the specification baseline.** Record the
+- [x] `S00-001` **Freeze and verify the specification baseline.** Record the
   architecture, companion, registry, source-ledger, validator, and derived
-  profile hashes without changing normative bytes.
+  profile hashes without changing normative bytes. ([evidence](conformance/stage-zero-evidence.md#s00-001))
   - After: none.
   - Targets: `docs/`, `scripts/check-spec.sh`, repository evidence.
   - References: [Architecture §§2 and 30](docs/ircd-architecture-and-implementation-spec.md#2-normative-document-order), [source ledger §1](docs/protocol-sources-and-decisions.md#1-purpose), [manifest](docs/specification-manifest.txt).
   - Invariants: `E2E-07`, `FED-02`.
   - Evidence: `bash scripts/check-spec.sh` passes and recorded hashes equal the manifest.
 
-- [ ] `S00-002` **Create the machine requirement ledger.** Enumerate every
+- [x] `S00-002` **Create the machine requirement ledger.** Enumerate every
   applicable MUST/MUST NOT from both normative documents with a stable ID,
-  source section/hash, target crate, evidence IDs, and initial status.
+  source section/hash, target crate, evidence IDs, and initial status. ([evidence](conformance/stage-zero-evidence.md#s00-002))
   - After: `S00-001`.
   - Targets: `conformance/requirements.toml` and its validator.
   - References: [Architecture §28.1](docs/ircd-architecture-and-implementation-spec.md#281-requirement-ledger-and-evidence), [Appendix D](docs/ircd-architecture-and-implementation-spec.md#appendix-d-requirement-traceability).
   - Invariants: every Section-27 invariant and every E2EE requirement.
   - Evidence: validator proves unique IDs, valid source hashes, valid crate names, and no unmapped normative requirement.
 
-- [ ] `S00-003` **Pin the Rust build contract.** Select compiler 1.98.0,
+- [x] `S00-003` **Pin the Rust build contract.** Select compiler 1.98.0,
   edition 2024, `rust-version = "1.98"`, resolver version, and the two initial
-  Linux targets exactly as specified.
+  Linux targets exactly as specified. ([evidence](conformance/stage-zero-evidence.md#s00-003))
   - After: `S00-001`.
   - Targets: `rust-toolchain.toml`, root and package manifests.
   - References: [Architecture §4](docs/ircd-architecture-and-implementation-spec.md#4-fixed-version-1-decisions), [§24.5](docs/ircd-architecture-and-implementation-spec.md#245-dependency-and-build-integrity).
   - Invariants: `OPS-02`.
   - Evidence: host and cross-target `cargo check --locked` use the pinned compiler and declared package metadata.
 
-- [ ] `S00-004` **Create the complete workspace skeleton.** Add every crate in
+- [x] `S00-004` **Create the complete workspace skeleton.** Add every crate in
   the Section-24 graph with only its declared dependency direction; empty crate
-  roots must not expose placeholder protocol or cryptographic behavior.
+  roots must not expose placeholder protocol or cryptographic behavior. ([evidence](conformance/stage-zero-evidence.md#s00-004))
   - After: `S00-003`.
   - Targets: all `agenc-ircd-*` libraries, `agenc-ircd-testkit`, and the `agenc-ircd` binary crate.
   - References: [Architecture §24.1](docs/ircd-architecture-and-implementation-spec.md#241-crate-graph).
   - Invariants: `CON-01`, `CON-04`.
   - Evidence: a `cargo metadata` graph check rejects forbidden edges, cycles, production use of `testkit`, and library dependency on the binary.
 
-- [ ] `S00-005` **Enforce workspace-safe Rust and legibility policy.** Apply
+- [x] `S00-005` **Enforce workspace-safe Rust and legibility policy.** Apply
   workspace lints, warning denial, `#![forbid(unsafe_code)]`, rustfmt defaults,
-  focused-function review triggers, and narrowly documented lint exceptions.
+  focused-function review triggers, and narrowly documented lint exceptions. ([evidence](conformance/stage-zero-evidence.md#s00-005))
   - After: `S00-004`.
   - Targets: workspace lint tables, crate roots, lint/source-scan tooling.
   - References: [Architecture §21.4](docs/ircd-architecture-and-implementation-spec.md#214-input-pipeline), [§24.3](docs/ircd-architecture-and-implementation-spec.md#243-safe-rust-and-code-shape-policy), [AGENTS.md](AGENTS.md).
   - Invariants: `TRN-05`, `CON-04`, `OPS-01`.
   - Evidence: formatting, Clippy, unsafe-source, panic-path, and unbounded-channel checks fail on seeded violations.
 
-- [ ] `S00-006` **Configure dependency and source policy.** Permit crates.io
+- [x] `S00-006` **Configure dependency and source policy.** Permit crates.io
   only, forbid wildcard and Git requirements, define license/advisory/source
-  rules, and document the one reviewed duplicate-crypto dependency generation.
+  rules, and document the one reviewed duplicate-crypto dependency generation. ([evidence](conformance/stage-zero-evidence.md#s00-006))
   - After: `S00-003`.
   - Targets: workspace dependency table, `Cargo.lock`, `deny.toml`, audit policy.
   - References: [Architecture §§24.4–24.5](docs/ircd-architecture-and-implementation-spec.md#244-serialization-and-crypto-libraries), [source ledger §§5–6](docs/protocol-sources-and-decisions.md#5-initial-rust-dependency-evidence).
   - Invariants: `OPS-02`.
   - Evidence: `cargo deny check`, `cargo audit --deny warnings`, feature-tree inspection, and checksum comparison pass.
 
-- [ ] `S00-007` **Define deterministic test and evidence layout.** Separate
+- [x] `S00-007` **Define deterministic test and evidence layout.** Separate
   unit, integration, golden-vector, transcript, property, fuzz, Loom, fault,
   interoperability, capacity, and release evidence so each requirement can
-  name a stable evidence ID.
+  name a stable evidence ID. ([evidence](conformance/stage-zero-evidence.md#s00-007))
   - After: `S00-002`, `S00-004`.
   - Targets: test directories, corpus/vector directories, evidence schema.
   - References: [Architecture §§28.1–28.8](docs/ircd-architecture-and-implementation-spec.md#28-verification-conformance-and-security-testing).
   - Invariants: all invariant families.
   - Evidence: a schema check rejects missing, duplicate, stale, or unbound evidence IDs.
 
-- [ ] `S00-008` **Isolate deterministic test capabilities.** Provide test-only
+- [x] `S00-008` **Isolate deterministic test capabilities.** Provide test-only
   clocks, entropy, reference models, fault stores, and transcript drivers that
-  cannot enter a release dependency graph or production configuration.
+  cannot enter a release dependency graph or production configuration. ([evidence](conformance/stage-zero-evidence.md#s00-008))
   - After: `S00-004`, `S00-007`.
   - Targets: `agenc-ircd-testkit` and dependency-graph checks.
   - References: [Architecture §§24.1–24.2](docs/ircd-architecture-and-implementation-spec.md#241-crate-graph), [§29](docs/ircd-architecture-and-implementation-spec.md#29-implementation-sequence-and-acceptance-gates).
   - Invariants: `CON-01`, `CON-02`.
   - Evidence: release metadata contains no testkit edge or deterministic entropy/clock feature.
 
-- [ ] `S00-009` **Create the continuous-integration baseline.** Run source
+- [x] `S00-009` **Create the continuous-integration baseline.** Run source
   checks, graph checks, formatting, compilation, Clippy, tests, docs,
-  dependency policy, audit, and coverage under the pinned toolchain.
+  dependency policy, audit, and coverage under the pinned toolchain. ([evidence](conformance/stage-zero-evidence.md#s00-009))
   - After: `S00-005` through `S00-008`.
   - Targets: CI workflows and reusable validation commands.
   - References: [Architecture §28.8](docs/ircd-architecture-and-implementation-spec.md#288-mandatory-build-and-analysis-gates), [§24.5](docs/ircd-architecture-and-implementation-spec.md#245-dependency-and-build-integrity).
   - Invariants: `OPS-02`.
   - Evidence: every mandatory command runs from a clean checkout and failures block the build.
 
-- [ ] `S00-010` **Define release evidence manifests.** Record command, tool
+- [x] `S00-010` **Define release evidence manifests.** Record command, tool
   version, source/lock hashes, target, features, timing, result, artifact hash,
-  and limitations without confusing test execution with a security claim.
+  and limitations without confusing test execution with a security claim. ([evidence](conformance/stage-zero-evidence.md#s00-010))
   - After: `S00-002`, `S00-007`.
   - Targets: conformance evidence schema and validation tooling.
   - References: [Architecture §§26.4 and 28.1](docs/ircd-architecture-and-implementation-spec.md#264-conformance-claims).
   - Invariants: all invariant families.
   - Evidence: positive and malformed sample manifests exercise every validation branch.
 
-- [ ] `S00-900` **Pass the Stage 00 gate.** The complete empty workspace and
+- [x] `S00-900` **Pass the Stage 00 gate.** The complete empty workspace and
   traceability baseline must build reproducibly without any protocol stub being
-  mistaken for implemented behavior.
+  mistaken for implemented behavior. ([evidence](conformance/stage-zero-evidence.md#s00-900))
   - After: `S00-001` through `S00-010`.
   - Targets: entire repository.
   - References: [Architecture §§24, 28.1, 28.8, and 29](docs/ircd-architecture-and-implementation-spec.md#24-rust-workspace-and-module-boundaries).
