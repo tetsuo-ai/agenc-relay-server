@@ -45,10 +45,44 @@ fn unsigned(value: u64) -> WireValue {
 }
 
 fn raw_object(schema_name: &str, values: Vec<WireValue>) -> SchemaObject {
-    SchemaObject {
-        schema: schema(schema_name),
-        fields: values,
-    }
+    SchemaObject::raw_for_test(schema(schema_name), values)
+}
+
+fn federation_reply(trailing_length: usize) -> SchemaObject {
+    let descriptor = schema("FederationReply");
+    raw_object(
+        descriptor.name,
+        fields(descriptor, |name| match name {
+            "command" => Some(opaque("FAIL")),
+            "parameters" => Some(WireValue::Vector(Vec::new())),
+            "trailing_presence" => Some(unsigned(1)),
+            "trailing" => Some(opaque(vec![b'a'; trailing_length])),
+            _ => None,
+        }),
+    )
+}
+
+fn federation_result_fields(
+    kind: u64,
+    completion: &[u8],
+    replies: Vec<SchemaObject>,
+) -> Vec<WireValue> {
+    let descriptor = schema("FederationResult");
+    let mut replies = Some(replies);
+    fields(descriptor, |name| match name {
+        "profile_version" => Some(unsigned(1)),
+        "network_id" | "request_object_id" => Some(opaque([0; 32])),
+        "home_server_id" | "server_incarnation" | "origin_id" | "request_id" => {
+            Some(opaque([0; 16]))
+        }
+        "origin_generation" | "operation_sequence" => Some(unsigned(0)),
+        "completion_event_id" => Some(opaque(completion)),
+        "result_kind" => Some(unsigned(kind)),
+        "result" if kind == 7 => Some(opaque([1; 37])),
+        "result" => Some(opaque([])),
+        "replies" => replies.take().map(WireValue::Vector),
+        _ => None,
+    })
 }
 
 fn history_reference(kind: u64, value: u8) -> SchemaObject {
@@ -113,9 +147,22 @@ fn source_view(user: u8, nickname_value: &[u8], label: &[u8]) -> SchemaObject {
         descriptor.name,
         fields(descriptor, |name| match name {
             "user_id" => Some(opaque([user; 16])),
-            "nickname" => Some(WireValue::Structure(Box::new(nickname(nickname_value)))),
-            "public_cloak" => Some(WireValue::Structure(Box::new(public_cloak()))),
+            "nickname" => Some(WireValue::Structure(nickname(nickname_value))),
+            "public_cloak" => Some(WireValue::Structure(public_cloak())),
             "account_label" => Some(opaque(label)),
+            _ => None,
+        }),
+    )
+}
+
+fn actor_view(user_present: bool) -> SchemaObject {
+    let descriptor = schema("FederationActorView");
+    raw_object(
+        descriptor.name,
+        fields(descriptor, |name| match name {
+            "user_present" => Some(unsigned(if user_present { 1 } else { 0 })),
+            "source" if user_present => Some(opaque("encoded-source")),
+            "source" => Some(opaque([])),
             _ => None,
         }),
     )
@@ -133,9 +180,9 @@ fn session_projection(user: u8, nickname_value: &[u8], label: &[u8]) -> SchemaOb
             "account_id" => Some(opaque(ACCOUNT)),
             "account_session_generation" if label.is_empty() => Some(unsigned(0)),
             "account_session_generation" => Some(unsigned(1)),
-            "nickname" => Some(WireValue::Structure(Box::new(nickname(nickname_value)))),
+            "nickname" => Some(WireValue::Structure(nickname(nickname_value))),
             "display_name" => Some(opaque([])),
-            "public_cloak" => Some(WireValue::Structure(Box::new(public_cloak()))),
+            "public_cloak" => Some(WireValue::Structure(public_cloak())),
             "account_label" => Some(opaque(label)),
             "user_mode_bits" => Some(unsigned(1)),
             "away_kind" => Some(unsigned(0)),
@@ -161,8 +208,8 @@ fn membership_view(channel: u8, user: u8, revision: u64) -> SchemaObject {
     raw_object(
         "FederationMembershipView",
         vec![
-            WireValue::Structure(Box::new(membership)),
-            WireValue::Structure(Box::new(source_view(user, b"alice", b""))),
+            WireValue::Structure(membership),
+            WireValue::Structure(source_view(user, b"alice", b"")),
         ],
     )
 }
@@ -174,10 +221,8 @@ fn mode_list_entry(code: u64) -> SchemaObject {
         fields(descriptor, |name| match name {
             "channel_instance_id" | "entry_id" => Some(opaque([1; 16])),
             "mode_code" => Some(unsigned(code)),
-            "mask" => Some(WireValue::Structure(Box::new(typed_mask(0)))),
-            "setter" => Some(WireValue::Structure(Box::new(source_view(
-                1, b"alice", b"",
-            )))),
+            "mask" => Some(WireValue::Structure(typed_mask(0))),
+            "setter" => Some(WireValue::Structure(source_view(1, b"alice", b""))),
             "created_at" => Some(unsigned(1)),
             "expires_at" => Some(unsigned(0)),
             _ => None,
@@ -319,22 +364,14 @@ fn account_service_envelope_kinds_match_their_selected_arms() {
             envelope_schema.name,
             fields(envelope_schema, |name| {
                 (name == "header")
-                    .then(|| {
-                        header
-                            .take()
-                            .map(|value| WireValue::Structure(Box::new(value)))
-                    })
+                    .then(|| header.take().map(WireValue::Structure))
                     .flatten()
             }),
         );
         let mut envelope = Some(envelope);
         validate(schema_name, |name| {
             (name == "account_service_envelope")
-                .then(|| {
-                    envelope
-                        .take()
-                        .map(|value| WireValue::Structure(Box::new(value)))
-                })
+                .then(|| envelope.take().map(WireValue::Structure))
                 .flatten()
         })
     };
@@ -360,22 +397,14 @@ fn account_service_envelope_kinds_match_their_selected_arms() {
             response_schema.name,
             fields(response_schema, |name| {
                 (name == "header")
-                    .then(|| {
-                        header
-                            .take()
-                            .map(|value| WireValue::Structure(Box::new(value)))
-                    })
+                    .then(|| header.take().map(WireValue::Structure))
                     .flatten()
             }),
         );
         let mut response = Some(response);
         validate("result.auth_challenge", |name| {
             (name == "account_service_response")
-                .then(|| {
-                    response
-                        .take()
-                        .map(|value| WireValue::Structure(Box::new(value)))
-                })
+                .then(|| response.take().map(WireValue::Structure))
                 .flatten()
         })
     };
@@ -449,8 +478,8 @@ fn directory_presence_channel_and_tag_rules_cover_alternatives() {
 
     let channel = |bits, policy, binding: &[u8]| {
         validate("FederationChannelDetail", |name| match name {
-            "canonical_name" => Some(WireValue::Structure(Box::new(channel_name(b"#room")))),
-            "display_name" => Some(WireValue::Structure(Box::new(channel_name(b"#Room")))),
+            "canonical_name" => Some(WireValue::Structure(channel_name(b"#room"))),
+            "display_name" => Some(WireValue::Structure(channel_name(b"#Room"))),
             "channel_revision" => Some(unsigned(1)),
             "simple_mode_bits" => Some(unsigned(bits)),
             "content_policy" => Some(unsigned(policy)),
@@ -467,8 +496,8 @@ fn directory_presence_channel_and_tag_rules_cover_alternatives() {
 
     let channel_identity = |canonical: &[u8], display: &[u8], revision| {
         validate("FederationChannelDetail", |name| match name {
-            "canonical_name" => Some(WireValue::Structure(Box::new(channel_name(canonical)))),
-            "display_name" => Some(WireValue::Structure(Box::new(channel_name(display)))),
+            "canonical_name" => Some(WireValue::Structure(channel_name(canonical))),
+            "display_name" => Some(WireValue::Structure(channel_name(display))),
             "channel_revision" => Some(unsigned(revision)),
             "simple_mode_bits" => Some(unsigned(0x04)),
             "content_policy" => Some(unsigned(1)),
@@ -511,8 +540,69 @@ fn directory_presence_channel_and_tag_rules_cover_alternatives() {
         tag(b"vendor/key", b"value"),
         Err(CodecError::CrossReference)
     );
-    assert_eq!(tag(b"+bad:key", b"value"), Err(CodecError::CrossReference));
+    assert_eq!(tag(b"+future:key?", b"value"), Ok(()));
+    assert_eq!(tag(b"+bad key", b"value"), Err(CodecError::CrossReference));
+    assert_eq!(tag(b"+bad;key", b"value"), Err(CodecError::CrossReference));
+    assert_eq!(tag(b"+bad=key", b"value"), Err(CodecError::CrossReference));
     assert_eq!(tag(b"+key", &[0]), Err(CodecError::CrossReference));
+}
+
+#[test]
+fn client_tags_accept_utf8_and_once_unescaped_line_breaks() {
+    let tag = |key: &[u8], value: &[u8]| {
+        validate("FederationClientTag", |name| match name {
+            "key" => Some(opaque(key)),
+            "value" => Some(opaque(value)),
+            _ => None,
+        })
+    };
+
+    assert_eq!(
+        tag(
+            "+métadonnée".as_bytes(),
+            "première ligne\r\ndeuxième ligne".as_bytes(),
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        tag(&[b'+', 0xff], b"value"),
+        Err(CodecError::CrossReference)
+    );
+    assert_eq!(tag(b"+key", &[0xff]), Err(CodecError::CrossReference));
+    assert_eq!(
+        tag(b"+key", b"before\0after"),
+        Err(CodecError::CrossReference)
+    );
+}
+
+#[test]
+fn federation_parameters_accept_valid_non_ascii_utf8() {
+    let parameter = |value: &[u8]| {
+        validate("FederationParameter", |name| {
+            (name == "value").then(|| opaque(value))
+        })
+    };
+
+    assert_eq!(parameter("café:東京".as_bytes()), Ok(()));
+    assert_eq!(parameter(&[0xc3, 0x28]), Err(CodecError::CrossReference));
+}
+
+#[test]
+fn topic_changes_require_a_present_actor() {
+    let topic = |user_present| {
+        validate("event.topic_changed", |name| match name {
+            "resulting_revision" => Some(unsigned(1)),
+            "actor" => Some(WireValue::Structure(actor_view(user_present))),
+            "topic_presence" => Some(unsigned(1)),
+            "topic" => Some(opaque("topic")),
+            "set_at" => Some(unsigned(1)),
+            "message_id" => Some(opaque([1; 16])),
+            _ => None,
+        })
+    };
+
+    assert_eq!(topic(true), Ok(()));
+    assert_eq!(topic(false), Err(CodecError::CrossReference));
 }
 
 #[test]
@@ -556,14 +646,9 @@ fn event_correlation_tuples_cover_empty_present_and_multipart_cases() {
         Err(CodecError::CrossReference)
     );
     assert_eq!(event(b"", 0, 0, 22, &[1; 16], 1, 1), Ok(()));
-    assert_eq!(
-        event(b"", 0, 0, 22, &[1; 16], 1, 0),
-        Err(CodecError::CrossReference)
-    );
-    assert_eq!(
-        event(b"", 0, 0, 22, &[1; 16], 0, 1),
-        Err(CodecError::CrossReference)
-    );
+    assert_eq!(event(b"", 0, 0, 22, &[1; 16], 1, 0), Ok(()));
+    assert_eq!(event(b"", 0, 0, 22, &[1; 16], 0, 1), Ok(()));
+    assert_eq!(event(b"", 0, 0, 22, &[1; 16], 0, 0), Ok(()));
     assert_eq!(
         event(b"", 0, 0, 22, b"", 0, 0),
         Err(CodecError::CrossReference)
@@ -580,6 +665,38 @@ fn event_correlation_tuples_cover_empty_present_and_multipart_cases() {
         event(b"", 0, 0, 1, &[1; 16], 1, 1),
         Err(CodecError::CrossReference)
     );
+}
+
+#[test]
+fn zero_origin_request_correlation_round_trips_through_the_canonical_codec()
+-> Result<(), CodecError> {
+    let completed = SchemaObject::new("event.request_completed", vec![WireValue::Unsigned(1)])?;
+    let event_bytes = completed.encode_canonical()?;
+    let descriptor = schema("FederationEvent");
+    let event = SchemaObject::new(
+        descriptor.name,
+        fields(descriptor, |name| match name {
+            "profile_version" => Some(unsigned(1)),
+            "network_id" => Some(opaque([1; 32])),
+            "target_server_id" | "event_id" => Some(opaque([2; 16])),
+            "coordinator_state_generation" => Some(unsigned(1)),
+            "event_kind" => Some(unsigned(22)),
+            "event" => Some(opaque(&event_bytes)),
+            "cross_profile_mutation_id" => Some(opaque([])),
+            "request_home_server_id"
+            | "request_server_incarnation"
+            | "request_origin_id"
+            | "request_id" => Some(opaque([3; 16])),
+            "request_origin_generation" | "request_operation_sequence" => Some(unsigned(0)),
+            _ => None,
+        }),
+    )?;
+    let encoded = event.encode_canonical()?;
+    let mut budget = DecodeBudget::new(encoded.len(), 64);
+    let decoded = SchemaObject::decode_exact("FederationEvent", encoded.as_slice(), &mut budget)?;
+    let reencoded = decoded.encode_canonical()?;
+    assert_eq!(reencoded.as_slice(), encoded.as_slice());
+    Ok(())
 }
 
 #[test]
@@ -660,7 +777,7 @@ fn mode_lists_names_origins_parameters_and_cloaks_cover_alternatives() {
             "mode_code" => Some(unsigned(code)),
             "created_at" => Some(unsigned(created)),
             "expires_at" => Some(unsigned(expires)),
-            "mask" => Some(WireValue::Structure(Box::new(typed_mask(quiet)))),
+            "mask" => Some(WireValue::Structure(typed_mask(quiet))),
             _ => None,
         })
     };
@@ -785,25 +902,22 @@ fn query_reply_result_and_session_rules_cover_alternatives() {
     assert_eq!(reply(b"FAIL", 0, b"text"), Err(CodecError::CrossReference));
     assert_eq!(reply(b"FAIL", 1, &[0]), Err(CodecError::CrossReference));
 
-    let result = |kind, completion: &[u8], reply_count| {
-        let mut replies = Some(
-            (0..reply_count)
-                .map(|_| raw_object("FederationReply", Vec::new()))
-                .collect(),
-        );
-        validate("FederationResult", |name| match name {
-            "result_kind" => Some(unsigned(kind)),
-            "completion_event_id" => Some(opaque(completion)),
-            "replies" => Some(WireValue::Vector(replies.take().unwrap_or_default())),
-            _ => None,
-        })
+    let result = |kind, completion: &[u8], reply_count, trailing_length| {
+        let replies = (0..reply_count)
+            .map(|_| federation_reply(trailing_length))
+            .collect();
+        let descriptor = schema("FederationResult");
+        let values = federation_result_fields(kind, completion, replies);
+        validate_result_envelope(descriptor, &values)
     };
-    assert_eq!(result(2, &[0; 16], 0), Ok(()));
-    assert_eq!(result(1, b"", 0), Ok(()));
-    assert_eq!(result(7, b"", 1), Ok(()));
-    assert_eq!(result(7, b"", 0), Err(CodecError::CrossReference));
-    assert_eq!(result(2, b"", 0), Err(CodecError::CrossReference));
-    assert_eq!(result(1, b"", 65), Err(CodecError::CrossReference));
+    assert_eq!(result(2, &[0; 16], 0, 0), Ok(()));
+    assert_eq!(result(1, b"", 0, 0), Ok(()));
+    assert_eq!(result(7, b"", 1, 0), Ok(()));
+    assert_eq!(result(7, b"", 0, 0), Err(CodecError::CrossReference));
+    assert_eq!(result(2, b"", 0, 0), Err(CodecError::CrossReference));
+    assert_eq!(result(1, b"", 65, 0), Err(CodecError::CrossReference));
+    assert_eq!(result(7, b"", 15, 4_096), Ok(()));
+    assert_eq!(result(7, b"", 16, 4_096), Err(CodecError::CrossReference));
 
     let session = |account: &[u8], generation, label: &[u8], bits, away, away_text: &[u8]| {
         validate("FederationSessionProjection", |name| match name {
@@ -870,8 +984,8 @@ fn masks_history_selectors_topics_parts_and_results_cover_alternatives() {
             descriptor,
             &[
                 unsigned(kind),
-                WireValue::Structure(Box::new(first)),
-                WireValue::Structure(Box::new(second)),
+                WireValue::Structure(first),
+                WireValue::Structure(second),
             ],
         )
     };
@@ -932,6 +1046,7 @@ fn masks_history_selectors_topics_parts_and_results_cover_alternatives() {
     let topic = |presence, topic: &[u8], set_at, message: &[u8]| {
         validate("event.topic_changed", |name| match name {
             "resulting_revision" => Some(unsigned(1)),
+            "actor" => Some(WireValue::Structure(actor_view(true))),
             "topic_presence" => Some(unsigned(presence)),
             "topic" => Some(opaque(topic)),
             "set_at" => Some(unsigned(set_at)),
@@ -1179,10 +1294,10 @@ fn embedded_dispatch_is_iterative_bounded_and_fail_closed() -> Result<(), CodecE
     );
 
     for (quiet, expected) in [(0, Ok(())), (1, Err(CodecError::CrossReference))] {
-        let argument = typed_mask(quiet).encode_canonical().unwrap_or_default();
+        let argument = typed_mask(quiet).encode_canonical()?;
         let mode_fields = fields(mode_schema, |name| match name {
             "mode_code" => Some(unsigned(2)),
-            "argument" => Some(opaque(&argument)),
+            "argument" => Some(opaque(argument.as_slice())),
             _ => None,
         });
         assert_eq!(
@@ -1261,14 +1376,12 @@ fn embedded_dispatch_is_iterative_bounded_and_fail_closed() -> Result<(), CodecE
 fn home_session_projection_matches_its_event_source_identity() {
     let validate_view =
         |source_user, source_nick: &[u8], source_label: &[u8], projection: SchemaObject| {
-            let encoded = projection.encode_canonical().unwrap_or_default();
+            let encoded = projection.encode_canonical()?;
             let descriptor = schema("FederationSessionEventView");
             let mut source = Some(source_view(source_user, source_nick, source_label));
             let values = fields(descriptor, |name| match name {
-                "source" => source
-                    .take()
-                    .map(|value| WireValue::Structure(Box::new(value))),
-                "home_session_projection" => Some(opaque(&encoded)),
+                "source" => source.take().map(WireValue::Structure),
+                "home_session_projection" => Some(opaque(encoded.as_slice())),
                 _ => None,
             });
             let mut budget = DecodeBudget::new(4_096, 256);
@@ -1295,6 +1408,120 @@ fn home_session_projection_matches_its_event_source_identity() {
             session_projection(1, b"alice", b"Label")
         ),
         Err(CodecError::CrossReference)
+    );
+}
+
+#[test]
+fn event_target_matches_the_embedded_home_session_projection() -> Result<(), CodecError> {
+    let projection = session_projection(1, b"alice", b"").encode_canonical()?;
+    let view_schema = schema("FederationSessionEventView");
+    let mut source = Some(source_view(1, b"alice", b""));
+    let session_view = raw_object(
+        view_schema.name,
+        fields(view_schema, |name| match name {
+            "source" => source.take().map(WireValue::Structure),
+            "home_session_projection" => Some(opaque(projection.as_slice())),
+            _ => None,
+        }),
+    );
+    let event = raw_object(
+        "event.session_visible",
+        vec![WireValue::Structure(session_view)],
+    );
+    let event_bytes = event.encode_canonical()?;
+
+    let decode_for_target = |target: u8| {
+        let descriptor = schema("FederationEvent");
+        let envelope = raw_object(
+            descriptor.name,
+            fields(descriptor, |name| match name {
+                "profile_version" => Some(unsigned(1)),
+                "network_id" => Some(opaque([1; 32])),
+                "target_server_id" => Some(opaque([target; 16])),
+                "coordinator_state_generation" => Some(unsigned(1)),
+                "event_id" => Some(opaque([2; 16])),
+                "event_kind" => Some(unsigned(1)),
+                "event" => Some(opaque(event_bytes.as_slice())),
+                "cross_profile_mutation_id"
+                | "request_home_server_id"
+                | "request_server_incarnation"
+                | "request_origin_id"
+                | "request_id" => Some(opaque([])),
+                _ => None,
+            }),
+        );
+        let encoded = envelope.encode_canonical()?;
+        let mut budget = DecodeBudget::new(16_384, 256);
+        SchemaObject::decode_exact("FederationEvent", encoded.as_slice(), &mut budget).map(|_| ())
+    };
+
+    assert_eq!(decode_for_target(1), Ok(()));
+    assert_eq!(decode_for_target(2), Err(CodecError::CrossReference));
+    Ok(())
+}
+
+#[test]
+fn authenticated_origin_requires_a_registered_session_identity() {
+    let origin = |session: &[u8], user: &[u8]| {
+        validate("FederationOrigin", |name| match name {
+            "generation" => Some(unsigned(1)),
+            "previous_origin_object_id" => Some(opaque([1; 32])),
+            "session_id" => Some(opaque(session)),
+            "user_id" => Some(opaque(user)),
+            "account_id" => Some(opaque(ACCOUNT)),
+            "account_session_generation" => Some(unsigned(1)),
+            _ => None,
+        })
+    };
+
+    assert_eq!(origin(&[1; 16], &[2; 16]), Ok(()));
+    assert_eq!(origin(b"", b""), Err(CodecError::CrossReference));
+}
+
+#[test]
+fn singleton_channel_modes_reject_repeated_directions_with_distinct_values() {
+    let mode_change = |code, argument: &[u8]| {
+        let descriptor = schema("FederationModeChange");
+        raw_object(
+            descriptor.name,
+            fields(descriptor, |name| match name {
+                "direction" => Some(unsigned(1)),
+                "mode_code" => Some(unsigned(code)),
+                "argument" => Some(opaque(argument)),
+                _ => None,
+            }),
+        )
+    };
+    let operation = |changes: Vec<SchemaObject>| {
+        let mut changes = Some(changes);
+        validate("operation.channel_mode", |name| match name {
+            "expected_channel_revision" => Some(unsigned(1)),
+            "changes" => changes.take().map(WireValue::Vector),
+            _ => None,
+        })
+    };
+
+    let mut first_key = vec![0, 8];
+    first_key.extend_from_slice(b"firstkey");
+    let mut second_key = vec![0, 9];
+    second_key.extend_from_slice(b"secondkey");
+    assert_eq!(
+        operation(vec![
+            mode_change(4, &first_key),
+            mode_change(4, &second_key),
+        ]),
+        Err(CodecError::DuplicateValue)
+    );
+    assert_eq!(
+        operation(vec![
+            mode_change(5, &[0, 0, 0, 10]),
+            mode_change(5, &[0, 0, 0, 20]),
+        ]),
+        Err(CodecError::DuplicateValue)
+    );
+    assert_eq!(
+        operation(vec![mode_change(14, &[1; 16]), mode_change(14, &[2; 16]),]),
+        Ok(())
     );
 }
 
@@ -1366,8 +1593,8 @@ fn appendix_b_cross_field_regressions_fail_closed() {
         validate_schema_semantics(
             schema("FederationMembershipView"),
             &[
-                WireValue::Structure(Box::new(membership)),
-                WireValue::Structure(Box::new(source)),
+                WireValue::Structure(membership),
+                WireValue::Structure(source),
             ],
         )
     };
@@ -1454,4 +1681,114 @@ fn recomputed_memberships_bind_the_outer_channel_and_revision() {
     assert_eq!(recompute(1, 0, 1, 0), Err(CodecError::CrossReference));
     assert_eq!(recompute(1, 2, 2, 2), Err(CodecError::CrossReference));
     assert_eq!(recompute(1, 2, 1, 3), Err(CodecError::CrossReference));
+}
+
+#[test]
+fn event_target_binding_skips_unrelated_fields_and_rejects_short_projections() {
+    let envelope_schema = schema("FederationEvent");
+    let envelope_fields = fields(envelope_schema, |name| {
+        (name == "target_server_id").then(|| opaque([1; 16]))
+    });
+    let view_schema = schema("FederationSessionEventView");
+
+    let empty_view = raw_object(
+        view_schema.name,
+        fields(view_schema, |name| {
+            (name == "home_session_projection").then(|| opaque([]))
+        }),
+    );
+    let unrelated_event = raw_object(
+        "event.session_visible",
+        vec![
+            unsigned(1),
+            WireValue::Structure(nickname(b"alice")),
+            WireValue::Structure(empty_view),
+        ],
+    );
+    assert_eq!(
+        validate_event_target_binding(envelope_schema, &envelope_fields, &unrelated_event),
+        Ok(())
+    );
+
+    let short_view = raw_object(
+        view_schema.name,
+        fields(view_schema, |name| {
+            (name == "home_session_projection").then(|| opaque([0; 8]))
+        }),
+    );
+    let short_event = raw_object(
+        "event.session_visible",
+        vec![WireValue::Structure(short_view)],
+    );
+    assert_eq!(
+        validate_event_target_binding(envelope_schema, &envelope_fields, &short_event),
+        Err(CodecError::CrossReference)
+    );
+}
+
+#[test]
+fn request_correlation_rejects_partially_present_identifier_tuples() {
+    let event = |event_kind, home: &[u8], incarnation: &[u8], origin: &[u8], request: &[u8]| {
+        validate("FederationEvent", |name| match name {
+            "coordinator_state_generation" => Some(unsigned(1)),
+            "cross_profile_mutation_id" => Some(opaque([])),
+            "event_kind" => Some(unsigned(event_kind)),
+            "request_home_server_id" => Some(opaque(home)),
+            "request_server_incarnation" => Some(opaque(incarnation)),
+            "request_origin_id" => Some(opaque(origin)),
+            "request_id" => Some(opaque(request)),
+            _ => None,
+        })
+    };
+
+    assert_eq!(
+        event(22, &[1; 16], &[2; 16], &[3; 16], b""),
+        Err(CodecError::CrossReference)
+    );
+    assert_eq!(
+        event(1, b"", b"", &[3; 16], b""),
+        Err(CodecError::CrossReference)
+    );
+}
+
+#[test]
+fn kick_targets_are_fixed_width_strictly_ordered_and_unique() {
+    let kick = |revision, targets: &[u8], reason: &[u8]| {
+        validate("operation.kick", |name| match name {
+            "expected_channel_revision" => Some(unsigned(revision)),
+            "target_user_ids" => Some(opaque(targets)),
+            "reason" => Some(opaque(reason)),
+            _ => None,
+        })
+    };
+
+    let mut ordered = vec![1; USER_ID_BYTES];
+    ordered.extend(vec![2; USER_ID_BYTES]);
+    assert_eq!(kick(1, &ordered, b"reason"), Ok(()));
+
+    let mut duplicate = vec![1; USER_ID_BYTES];
+    duplicate.extend(vec![1; USER_ID_BYTES]);
+    assert_eq!(
+        kick(1, &duplicate, b"reason"),
+        Err(CodecError::CrossReference)
+    );
+
+    let mut descending = vec![2; USER_ID_BYTES];
+    descending.extend(vec![1; USER_ID_BYTES]);
+    assert_eq!(
+        kick(1, &descending, b"reason"),
+        Err(CodecError::CrossReference)
+    );
+    assert_eq!(
+        kick(1, &[1; USER_ID_BYTES + 1], b"reason"),
+        Err(CodecError::CrossReference)
+    );
+    assert_eq!(
+        kick(0, &[1; USER_ID_BYTES], b"reason"),
+        Err(CodecError::CrossReference)
+    );
+    assert_eq!(
+        kick(1, &[1; USER_ID_BYTES], &[0xff]),
+        Err(CodecError::CrossReference)
+    );
 }

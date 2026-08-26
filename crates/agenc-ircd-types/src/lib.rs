@@ -15,7 +15,7 @@ mod quantities;
 mod registries;
 
 pub use bounded::{BoundedBytes, BoundedUtf8, ControlPolicy};
-pub use errors::{SafeContext, ValidationError};
+pub use errors::{ClockError, EntropyError, SafeContext, ValidationError};
 pub use identifiers::{
     AccountId, AccountRandomId, AuthGrantId, ChannelInstanceId, ConnectionId, DatabaseId, EntryId,
     EventId, InviteId, MessageId, NetworkId, OpaqueCredentialId, OriginId, RecoveryEpoch,
@@ -28,6 +28,7 @@ pub use names::{
 };
 pub use quantities::{
     ByteCount, DurationMilliseconds, EntropySource, Generation, MonotonicClock, MonotonicTick,
-    ObjectCount, QueueDemand, Quota, Revision, SequenceNumber, UnixMilliseconds, WallClock,
+    ObjectCount, QueueDemand, Quota, Revision, SequenceNumber, UnixMilliseconds, UtcSecond,
+    WallClock,
 };
 pub use registries::*;

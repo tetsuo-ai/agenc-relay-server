@@ -26,7 +26,7 @@ fn every_schema_decodes_and_reencodes_its_independent_vector() -> Result<(), Box
         let decoded = SchemaObject::decode_exact(vector.schema(), vector.bytes(), &mut budget)
             .map_err(|error| format!("{} failed semantic decode: {error}", vector.schema()))?;
         assert_eq!(decoded.schema().name, vector.schema());
-        assert_eq!(decoded.encode_canonical()?, vector.bytes());
+        assert_eq!(decoded.encode_canonical()?.as_slice(), vector.bytes());
     }
     let registered: BTreeSet<String> = SCHEMA_REGISTRY
         .iter()
@@ -112,6 +112,18 @@ fn independent_encoder_rejects_every_width_and_bound_failure() -> Result<(), Ref
     encoder.write_length(1, 0x00ff_ffff)?;
     encoder.write_length(1, 0x0100_0000)?;
     assert_eq!(encoder.finish(), [0, 1, 0, 0, 1, 0, 0, 0, 1]);
+    Ok(())
+}
+
+#[test]
+fn opaque_write_output_limit_is_transactional() -> Result<(), ReferenceCodecError> {
+    let mut encoder = ReferenceEncoder::new(2);
+    encoder.write_u8(0xaa)?;
+    assert_eq!(
+        encoder.write_opaque(b"x", 1, 255),
+        Err(ReferenceCodecError::OutputLimit)
+    );
+    assert_eq!(encoder.finish(), [0xaa]);
     Ok(())
 }
 

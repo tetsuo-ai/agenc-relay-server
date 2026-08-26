@@ -1,0 +1,34 @@
+schema_version = 1
+evidence_id = "EVID-S02-008-RENDER"
+
+[stream]
+traditional_with_crlf = 512
+command_without_crlf = 510
+client_tag_data = 4094
+server_tag_data = 4094
+combined_tag_section = 8191
+physical_with_crlf = 8703
+
+[websocket]
+command_without_crlf = 510
+message_without_crlf = 8701
+
+[tags]
+client_only_count = 16
+ordinary_value_decoded = 256
+ordinary_total_decoded = 1024
+
+[registration]
+pending_messages = 16
+pending_bytes = 32768
+registration_millis = 30000
+keepalive_idle_millis = 120000
+keepalive_pong_millis = 30000
+
+[account_carriers]
+request_bytes = 4726
+response_bytes = 4342
+sasl_request_characters = 6304
+sasl_response_characters = 5792
+account_request_characters = 6302
+account_response_characters = 5790

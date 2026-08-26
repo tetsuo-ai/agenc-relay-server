@@ -1,12 +1,12 @@
 #![forbid(unsafe_code)]
 
-//! Verifies that the Phase-00 binary cannot be mistaken for a daemon.
+//! Verifies that the pre-runtime binary cannot be mistaken for a daemon.
 
 use std::error::Error;
 use std::process::Command;
 
 const EXPECTED_MESSAGE: &str =
-    "agenc-ircd: daemon behavior is unavailable until its implementation stages are complete\n";
+    "agenc-ircd: daemon behavior is unavailable until the Stage 06 runtime is implemented\n";
 
 #[test]
 fn binary_refuses_to_impersonate_an_implemented_daemon() -> Result<(), Box<dyn Error>> {

@@ -2,5 +2,4 @@
 
 //! Durable record codecs, transactions, backup, and recovery.
 //!
-//! Functional persistence behavior begins in Stage 05. Stage 00 defines only
-//! this ownership boundary.
+//! This crate remains an ownership boundary until Stage 05.

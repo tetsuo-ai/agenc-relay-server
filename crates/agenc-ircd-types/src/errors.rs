@@ -3,6 +3,42 @@
 use std::error::Error;
 use std::fmt;
 
+/// Closed failures from an operating-system entropy authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EntropyError {
+    /// The authority could not fill the complete destination.
+    Unavailable,
+}
+
+impl fmt::Display for EntropyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("entropy source is unavailable")
+    }
+}
+
+impl Error for EntropyError {}
+
+/// Closed failures from a UTC wall-clock authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClockError {
+    /// The wall clock could not be read.
+    Unavailable,
+    /// The returned time was outside the supported UTC domain.
+    OutOfRange,
+}
+
+impl fmt::Display for ClockError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::Unavailable => "wall clock is unavailable",
+            Self::OutOfRange => "wall clock value is outside its UTC domain",
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl Error for ClockError {}
+
 /// Closed failures raised while constructing foundational values.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValidationError {

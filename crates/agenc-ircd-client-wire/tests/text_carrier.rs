@@ -14,7 +14,7 @@ use agenc_ircd_client_wire::{
 #[test]
 fn canonical_base64url_rejects_padding_alphabets_and_unused_bits() -> Result<(), Box<dyn Error>> {
     let token = CanonicalBase64Url::from_bytes(&[0_u8], 1, 1)?;
-    assert_eq!(token.to_text(), "AA");
+    assert_eq!(token.to_text()?, "AA");
     assert_eq!(CanonicalBase64Url::parse("AA", 1, 1)?.as_bytes(), &[0]);
     assert!(matches!(
         CanonicalBase64Url::parse("AA==", 1, 1),
@@ -32,6 +32,14 @@ fn canonical_base64url_rejects_padding_alphabets_and_unused_bits() -> Result<(),
         CanonicalBase64Url::parse("", 1, 1),
         Err(TextCarrierError::Empty)
     ));
+    assert_eq!(
+        CanonicalBase64Url::parse("A", 0, 3).err(),
+        Some(TextCarrierError::NonCanonical)
+    );
+    assert_eq!(
+        CanonicalBase64Url::parse("AA", 2, 3).err(),
+        Some(TextCarrierError::WrongLength)
+    );
     Ok(())
 }
 
@@ -82,7 +90,7 @@ fn uppercase_tokens_and_exact_arity_reject_variants() -> Result<(), TextCarrierE
 fn e2ee_fragment_round_trips_boundaries_and_rejects_inconsistency() -> Result<(), Box<dyn Error>> {
     let first_segment = vec![7_u8; MAX_E2EE_FRAGMENT_BYTES];
     let first = E2eeFragment::new([3_u8; 32], 0, 2, 2_941, &first_segment)?;
-    let first_text = first.to_text();
+    let first_text = first.to_text()?;
     let parsed_first = E2eeFragment::parse(&first_text)?;
     assert_eq!(parsed_first.object_id(), &[3_u8; 32]);
     assert_eq!(parsed_first.part(), 0);
@@ -92,7 +100,7 @@ fn e2ee_fragment_round_trips_boundaries_and_rejects_inconsistency() -> Result<()
 
     let final_fragment = E2eeFragment::new([3_u8; 32], 1, 2, 2_941, &[9])?;
     assert_eq!(
-        E2eeFragment::parse(&final_fragment.to_text())?.segment(),
+        E2eeFragment::parse(&final_fragment.to_text()?)?.segment(),
         &[9]
     );
     assert!(matches!(
@@ -220,6 +228,19 @@ fn fragment_arithmetic_rejects_each_inconsistent_scalar() -> Result<(), TextCarr
         Some(TextCarrierError::InvalidFragment)
     );
     Ok(())
+}
+
+#[test]
+fn fragment_scalar_validation_precedes_segment_decoding() {
+    let object = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    assert_eq!(
+        E2eeFragment::parse(&format!("v1.{object}.0.2.1.!")).err(),
+        Some(TextCarrierError::FragmentRange)
+    );
+    assert_eq!(
+        E2eeFragment::parse(&format!("v1.{object}.0.1.1.!")).err(),
+        Some(TextCarrierError::InvalidCharacter)
+    );
 }
 
 #[test]

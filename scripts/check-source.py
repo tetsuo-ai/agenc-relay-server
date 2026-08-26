@@ -24,7 +24,9 @@ ASSERT_ANNOTATION_RE = re.compile(
 ALLOW_ANNOTATION_RE = re.compile(
     r"//\s*agenc-review:\s*allow\s+owner=\S+\s+reviewed=\d{4}-\d{2}-\d{2}\s+reason=\S.*"
 )
-ALLOW_RE = re.compile(r"#\s*!?\s*\[\s*allow\s*\(")
+ALLOW_RE = re.compile(
+    r"#\s*!?\s*\[\s*(?:allow\s*\(|cfg_attr\s*\([^]]*\ballow\s*\()"
+)
 CFG_TEST_MODULE_RE = re.compile(
     r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{"
 )
@@ -50,20 +52,23 @@ BANNED_PATTERNS = (
     ),
     (
         re.compile(
-            r"(?:\bstd::sync::mpsc::channel\s*(?:::\s*<[^>]*>)?\s*\(|"
-            r"\bunbounded_channel\s*(?:::\s*<[^>]*>)?\s*\(|"
-            r"\b(?:async_channel|crossbeam_channel|flume)::unbounded\s*"
-            r"(?:::\s*<[^>]*>)?\s*\(|"
+            r"(?:\bstd\s*::\s*sync\s*::\s*mpsc\s*::\s*(?:channel\b|"
+            r"\{[^}]*\bchannel\b)|"
+            r"\buse\s+std\s*::\s*sync\s*::\s*mpsc\s*(?:;|\s+as\b)|"
+            r"\bunbounded_channel\b|"
+            r"\b(?:async_channel|crossbeam_channel|flume)\s*::\s*(?:unbounded\b|"
+            r"\{[^}]*\bunbounded\b)|"
+            r"\buse\s+(?:async_channel|crossbeam_channel|flume)\s*(?:;|\s+as\b)|"
             r"\bUnbounded(?:Sender|Receiver)\b)"
         ),
         "unbounded channel",
     ),
     (
         re.compile(
-            r"\buse\s+[^;]*(?:unbounded_channel|::unbounded|std::sync::mpsc::channel)\s+as\s+"
-            r"[A-Za-z_][A-Za-z0-9_]*"
+            r"(?:\b(?:panic_any|resume_unwind)\b|"
+            r"\bstd\s*::\s*process\s*::\s*(?:abort\b|\{[^}]*\babort\b))"
         ),
-        "aliased unbounded channel",
+        "panic/abort function",
     ),
 )
 
@@ -369,7 +374,57 @@ def self_test(root: Path) -> int:
         (
             "aliased unbounded",
             valid + "use tokio::sync::mpsc::unbounded_channel as queue;\n",
-            "aliased unbounded channel",
+            "unbounded channel",
+        ),
+        (
+            "imported standard channel",
+            valid
+            + "use std::sync::mpsc::channel;\n"
+            + "fn bad() { let _queue = channel::<u8>(); }\n",
+            "unbounded channel",
+        ),
+        (
+            "group-imported standard channel",
+            valid
+            + "use std::sync::mpsc::{channel};\n"
+            + "fn bad() { let _queue = channel::<u8>(); }\n",
+            "unbounded channel",
+        ),
+        (
+            "aliased channel namespace",
+            valid
+            + "use std::sync::mpsc as queue;\n"
+            + "fn bad() { let _queue = queue::channel::<u8>(); }\n",
+            "unbounded channel",
+        ),
+        (
+            "escaped channel constructor",
+            valid
+            + "fn bad() { let constructor = std::sync::mpsc::channel::<u8>; "
+            + "let _queue = constructor(); }\n",
+            "unbounded channel",
+        ),
+        (
+            "panic any",
+            valid + "fn bad() { std::panic::panic_any(\"bad\"); }\n",
+            "panic/abort function",
+        ),
+        (
+            "resume unwind",
+            valid
+            + "fn bad(payload: Box<dyn std::any::Any + Send>) { "
+            + "std::panic::resume_unwind(payload); }\n",
+            "panic/abort function",
+        ),
+        (
+            "process abort",
+            valid + "fn bad() { std::process::abort(); }\n",
+            "panic/abort function",
+        ),
+        (
+            "conditional allow",
+            valid + "#[cfg_attr(not(test), allow(dead_code))]\nfn hidden() {}\n",
+            "lint allow lacks",
         ),
         ("assert", valid + "fn bad() { assert!(true); }\n", "assertion lacks"),
         (
@@ -401,6 +456,7 @@ def self_test(root: Path) -> int:
         "// unsafe { panic!(\"comment\"); tokio::sync::mpsc::unbounded_channel(); }\n"
         "const TEXT: &str = \"unsafe panic! unwrap unbounded_channel\";\n"
         "const RAW: &str = r#\"todo! unsafe\"#;\n"
+        "fn bounded() { let _queue = std::sync::mpsc::sync_channel::<u8>(1); }\n"
     )
     harmless_errors = scan_source(Path("crates/fixture/src/lib.rs"), harmless)
     if harmless_errors:

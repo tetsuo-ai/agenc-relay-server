@@ -1,8 +1,10 @@
 # Stage 00 Evidence
 
-Status: passed on 2026-08-24. This report applies to the exact staged tree that
-was exported with `git checkout-index` and then committed without changing its
-contents or executable modes.
+Status: historical pass on 2026-08-24 for commit
+`6b48ecb73afd471ed576146483098c19c12893f9`. This report applies only to the
+staged tree that was exported with `git checkout-index` and committed without
+changing its contents or executable modes. It does not provide evidence for
+the current uncommitted tree.
 
 ## Verification summary
 
@@ -69,8 +71,9 @@ The catalogs now expose 261 unique stable evidence bindings.
 
 ## S00-008
 
-`EVID-S00-008-TESTKIT-ISOLATION`: bounded deterministic clock, scripted entropy,
-pure reference model, fault store, and transcript driver tests pass. Cargo
+`EVID-S00-008-TESTKIT-ISOLATION`: bounded deterministic clocks and scripted
+entropy implement the production clock and entropy traits. Pure reference
+model, fault store, and transcript driver tests pass. Cargo
 metadata proves testkit is absent from every production edge and release
 closure, with no deterministic production feature.
 

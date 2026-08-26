@@ -69,7 +69,11 @@ EXPECTED_EDGES = {
         "agenc-ircd-config",
         "agenc-ircd-admin",
     },
-    "agenc-ircd-testkit": {"agenc-ircd-federation-wire", "agenc-ircd-types"},
+    "agenc-ircd-testkit": {
+        "agenc-ircd-client-wire",
+        "agenc-ircd-federation-wire",
+        "agenc-ircd-types",
+    },
     "agenc-ircd": {"agenc-ircd-runtime", "agenc-ircd-config", "agenc-ircd-storage"},
 }
 EXTERNAL_DEPENDENCIES = {
@@ -116,9 +120,9 @@ DIRECT_CHECKSUMS = {
 DEPENDENCY_TABLE_NAMES = {"dependencies", "dev-dependencies", "build-dependencies"}
 EXPECTED_EXTERNAL_EDGES = {
     "agenc-ircd-types": {"base64", "precis-profiles", "zeroize"},
-    "agenc-ircd-client-wire": {"base64"},
-    "agenc-ircd-federation-wire": {"base64", "sha2", "tls_codec"},
-    "agenc-ircd-testkit": {"sha2"},
+    "agenc-ircd-client-wire": {"base64", "zeroize"},
+    "agenc-ircd-federation-wire": {"base64", "sha2", "tls_codec", "zeroize"},
+    "agenc-ircd-testkit": {"sha2", "subtle"},
 }
 CRATES_IO_SOURCES = {
     "registry+https://github.com/rust-lang/crates.io-index",
@@ -411,7 +415,7 @@ def validate_graph(packages: dict[str, dict[str, object]]) -> dict[str, set[str]
         if package.get("edition") != EDITION or package.get("rust_version") != RUST_VERSION:
             raise WorkspaceError(f"package {name} has stale edition or rust-version metadata")
         if package.get("version") != "0.0.0":
-            raise WorkspaceError(f"package {name} has a non-Phase-00 version")
+            raise WorkspaceError(f"package {name} version differs from required 0.0.0")
         features = package.get("features")
         if features != {}:
             raise WorkspaceError(f"package {name} exposes an unexpected production feature")

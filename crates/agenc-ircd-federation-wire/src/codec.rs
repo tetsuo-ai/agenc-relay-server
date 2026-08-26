@@ -2,8 +2,10 @@
 
 use std::error::Error;
 use std::fmt;
+use std::mem::size_of;
 
-use agenc_ircd_types::{BASE_OBJECT_BYTES, ENUM_REGISTRY};
+use agenc_ircd_types::{BASE_OBJECT_BYTES, ChannelName, ENUM_REGISTRY};
+use zeroize::Zeroize as _;
 
 use crate::schema::{FieldKind, LengthWidth, SchemaDescriptor, schema_by_name};
 use crate::semantics::{validate_embedded_semantics, validate_schema_semantics};
@@ -126,29 +128,119 @@ impl DecodeBudget {
     }
 }
 
+/// Move-only canonical bytes that erase their complete backing capacity on drop.
+///
+/// The encoded bytes may contain credentials or other protocol secrets. The
+/// private field prevents accidentally extracting a non-zeroizing `Vec<u8>`.
+/// Borrow the result explicitly with [`CanonicalBytes::as_slice`].
+///
+/// This type intentionally does not implement `Clone` or `Debug`:
+///
+/// ```compile_fail
+/// use agenc_ircd_federation_wire::CanonicalBytes;
+///
+/// fn requires_clone<T: Clone>() {}
+/// requires_clone::<CanonicalBytes>();
+/// ```
+///
+/// ```compile_fail
+/// use agenc_ircd_federation_wire::CanonicalBytes;
+///
+/// fn requires_debug<T: core::fmt::Debug>() {}
+/// requires_debug::<CanonicalBytes>();
+/// ```
+#[must_use = "canonical encoded bytes must be consumed or explicitly dropped"]
+pub struct CanonicalBytes {
+    bytes: Vec<u8>,
+}
+
+impl CanonicalBytes {
+    fn try_with_capacity(capacity: usize) -> Result<Self, CodecError> {
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(capacity)
+            .map_err(|_| CodecError::AllocationFailed)?;
+        Ok(Self { bytes })
+    }
+
+    /// Borrows the canonical byte representation.
+    #[must_use]
+    pub fn as_slice(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Returns the exact encoded byte length.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    /// Reports whether the canonical representation is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    fn zeroize_storage(&mut self) {
+        zeroize_vec_capacity(&mut self.bytes);
+    }
+}
+
+impl AsRef<[u8]> for CanonicalBytes {
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl Drop for CanonicalBytes {
+    fn drop(&mut self) {
+        self.zeroize_storage();
+    }
+}
+
+fn zeroize_vec_capacity(bytes: &mut Vec<u8>) {
+    bytes.resize(bytes.capacity(), 0);
+    bytes.as_mut_slice().zeroize();
+}
+
 /// One field value whose validity is established by [`SchemaObject::new`].
 pub enum WireValue {
     /// Unsigned integer or closed enum value.
     Unsigned(u64),
     /// Fixed or length-prefixed opaque bytes.
     Opaque(Vec<u8>),
-    /// One nested structure.
-    Structure(Box<SchemaObject>),
+    /// One nested structure, owned without a separate peer-triggered allocation.
+    Structure(SchemaObject),
     /// One bounded vector of nested structures.
     Vector(Vec<SchemaObject>),
     /// One projection union arm and its explicit discriminant.
     ProjectionUnion {
         /// Encoded `FederationProjectionKind` discriminant.
         discriminant: u16,
-        /// Validated selected arm.
-        value: Box<SchemaObject>,
+        /// Validated selected arm, owned without a separate peer-triggered allocation.
+        value: SchemaObject,
     },
+}
+
+impl WireValue {
+    fn zeroize_opaque_storage(&mut self) {
+        if let Self::Opaque(bytes) = self {
+            zeroize_vec_capacity(bytes);
+        }
+    }
+}
+
+impl Drop for WireValue {
+    fn drop(&mut self) {
+        self.zeroize_opaque_storage();
+    }
 }
 
 /// A complete value validated against one frozen Appendix-B schema.
 pub struct SchemaObject {
     pub(crate) schema: &'static SchemaDescriptor,
     pub(crate) fields: Vec<WireValue>,
+    backing_capacity_bytes: usize,
 }
 
 impl SchemaObject {
@@ -156,7 +248,7 @@ impl SchemaObject {
     pub fn new(schema_name: &str, fields: Vec<WireValue>) -> Result<Self, CodecError> {
         let schema = schema_by_name(schema_name).ok_or(CodecError::UnknownSchema)?;
         validate_fields(schema, &fields)?;
-        let object = Self { schema, fields };
+        let object = Self::from_validated_fields(schema, fields)?;
         if object.encoded_len()? > base_object_limit()? {
             return Err(CodecError::LengthAboveMaximum);
         }
@@ -166,6 +258,34 @@ impl SchemaObject {
         let mut semantic_budget = DecodeBudget::new(semantic_byte_limit, 1_000_000);
         validate_embedded_tree(&object, &mut semantic_budget)?;
         Ok(object)
+    }
+
+    fn from_validated_fields(
+        schema: &'static SchemaDescriptor,
+        fields: Vec<WireValue>,
+    ) -> Result<Self, CodecError> {
+        validate_storage_capacities(schema, &fields, fields.capacity())?;
+        let backing_capacity_bytes = calculate_backing_capacity_bytes(&fields, fields.capacity())?;
+        Ok(Self {
+            schema,
+            fields,
+            backing_capacity_bytes,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn raw_for_test(schema: &'static SchemaDescriptor, fields: Vec<WireValue>) -> Self {
+        let backing_capacity_bytes = calculate_backing_capacity_bytes(&fields, fields.capacity());
+        // agenc-review: internal-assert owner=stage01-codec reviewed=2026-08-26 reason=cfg(test)-only constructor must preserve the exact cache invariant
+        assert!(
+            backing_capacity_bytes.is_ok(),
+            "test-owned schema storage capacity must fit usize"
+        );
+        Self {
+            schema,
+            fields,
+            backing_capacity_bytes: backing_capacity_bytes.unwrap_or_default(),
+        }
     }
 
     /// Decodes exactly one complete object under an explicit allocation budget.
@@ -191,6 +311,16 @@ impl SchemaObject {
         &self.fields
     }
 
+    /// Returns the exact bytes reserved by every object-owned backing vector.
+    ///
+    /// This includes field tables, opaque byte buffers, vector element tables,
+    /// and all nested objects. It excludes inline object size and allocator
+    /// bookkeeping, which admission control charges separately.
+    #[must_use]
+    pub const fn backing_capacity_bytes(&self) -> usize {
+        self.backing_capacity_bytes
+    }
+
     /// Returns the exact canonical encoded length without writing output.
     pub fn encoded_len(&self) -> Result<usize, CodecError> {
         encoded_fields_len(self.schema, &self.fields)
@@ -204,20 +334,17 @@ mod private {
 /// Sealed canonical encoding contract for validated federation values.
 pub trait CanonicalEncode: private::Sealed {
     /// Encodes one unique Appendix-B representation.
-    fn encode_canonical(&self) -> Result<Vec<u8>, CodecError>;
+    fn encode_canonical(&self) -> Result<CanonicalBytes, CodecError>;
 }
 
 impl private::Sealed for SchemaObject {}
 
 impl CanonicalEncode for SchemaObject {
-    fn encode_canonical(&self) -> Result<Vec<u8>, CodecError> {
+    fn encode_canonical(&self) -> Result<CanonicalBytes, CodecError> {
         let length = self.encoded_len()?;
-        let mut output = Vec::new();
-        output
-            .try_reserve_exact(length)
-            .map_err(|_| CodecError::AllocationFailed)?;
-        encode_fields(self.schema, &self.fields, &mut output)?;
-        if output.len() != length {
+        let mut output = CanonicalBytes::try_with_capacity(length)?;
+        encode_fields(self.schema, &self.fields, &mut output.bytes)?;
+        if output.bytes.len() != length {
             return Err(CodecError::Overflow);
         }
         Ok(output)
@@ -226,6 +353,115 @@ impl CanonicalEncode for SchemaObject {
 
 fn base_object_limit() -> Result<usize, CodecError> {
     usize::try_from(BASE_OBJECT_BYTES).map_err(|_| CodecError::Overflow)
+}
+
+fn validate_storage_capacities(
+    schema: &SchemaDescriptor,
+    fields: &[WireValue],
+    fields_capacity: usize,
+) -> Result<(), CodecError> {
+    if fields_capacity > schema.fields.len() {
+        return Err(CodecError::LengthAboveMaximum);
+    }
+    for (descriptor, value) in schema.fields.iter().zip(fields) {
+        validate_value_storage_capacity(descriptor.kind, value)?;
+    }
+    Ok(())
+}
+
+fn validate_value_storage_capacity(kind: FieldKind, value: &WireValue) -> Result<(), CodecError> {
+    match (kind, value) {
+        (
+            FieldKind::Uint8
+            | FieldKind::Uint16
+            | FieldKind::Uint24
+            | FieldKind::Uint32
+            | FieldKind::Uint64
+            | FieldKind::Enumeration { .. },
+            WireValue::Unsigned(_),
+        ) => Ok(()),
+        (FieldKind::FixedOpaque { length }, WireValue::Opaque(bytes)) => {
+            validate_capacity(bytes.capacity(), length)
+        }
+        (FieldKind::VariableOpaque { maximum, .. }, WireValue::Opaque(bytes)) => {
+            validate_capacity(bytes.capacity(), maximum)
+        }
+        (FieldKind::Structure { schema }, WireValue::Structure(value)) => {
+            validate_nested_schema_name(schema, value)?;
+            validate_storage_capacities(value.schema, &value.fields, value.fields.capacity())
+        }
+        (
+            FieldKind::Vector {
+                schema, maximum, ..
+            },
+            WireValue::Vector(values),
+        ) => {
+            validate_capacity(values.capacity(), maximum)?;
+            for value in values {
+                validate_nested_schema_name(schema, value)?;
+                validate_storage_capacities(value.schema, &value.fields, value.fields.capacity())?;
+            }
+            Ok(())
+        }
+        (
+            FieldKind::ProjectionUnion {
+                discriminant,
+                schema,
+            },
+            WireValue::ProjectionUnion {
+                discriminant: actual,
+                value,
+            },
+        ) if discriminant == *actual => {
+            validate_nested_schema_name(schema, value)?;
+            validate_storage_capacities(value.schema, &value.fields, value.fields.capacity())
+        }
+        _ => Err(CodecError::TypeMismatch),
+    }
+}
+
+fn validate_capacity(capacity: usize, maximum: usize) -> Result<(), CodecError> {
+    if capacity > maximum {
+        return Err(CodecError::LengthAboveMaximum);
+    }
+    Ok(())
+}
+
+fn calculate_backing_capacity_bytes(
+    fields: &[WireValue],
+    fields_capacity: usize,
+) -> Result<usize, CodecError> {
+    let mut total = fields_capacity
+        .checked_mul(size_of::<WireValue>())
+        .ok_or(CodecError::Overflow)?;
+    for value in fields {
+        total = total
+            .checked_add(value_backing_capacity_bytes(value)?)
+            .ok_or(CodecError::Overflow)?;
+    }
+    Ok(total)
+}
+
+fn value_backing_capacity_bytes(value: &WireValue) -> Result<usize, CodecError> {
+    match value {
+        WireValue::Unsigned(_) => Ok(0),
+        WireValue::Opaque(bytes) => Ok(bytes.capacity()),
+        WireValue::Structure(value) | WireValue::ProjectionUnion { value, .. } => {
+            Ok(value.backing_capacity_bytes)
+        }
+        WireValue::Vector(values) => {
+            let mut total = values
+                .capacity()
+                .checked_mul(size_of::<SchemaObject>())
+                .ok_or(CodecError::Overflow)?;
+            for value in values {
+                total = total
+                    .checked_add(value.backing_capacity_bytes)
+                    .ok_or(CodecError::Overflow)?;
+            }
+            Ok(total)
+        }
+    }
 }
 
 fn validate_fields(schema: &SchemaDescriptor, fields: &[WireValue]) -> Result<(), CodecError> {
@@ -497,14 +733,12 @@ fn collection_key(
     value: &SchemaObject,
 ) -> Result<Vec<u8>, CodecError> {
     match (owner_schema, field_name) {
-        ("operation.join", "targets") => {
-            let channel = structure_value(value, "channel_name")?;
-            opaque_value(channel, "value").and_then(copy_key)
-        }
+        ("operation.join", "targets") => join_target_key(value),
         ("operation.message", "targets") => message_target_key(value),
         ("operation.message" | "FederationDeliveredMessage", "tags") => {
             opaque_value(value, "key").and_then(copy_key)
         }
+        ("operation.part", "channels") => opaque_value(value, "value").and_then(copy_key),
         ("event.session_hidden", "channels") => {
             opaque_value(value, "channel_instance_id").and_then(copy_key)
         }
@@ -514,6 +748,14 @@ fn collection_key(
         }
         _ => Err(CodecError::SchemaMismatch),
     }
+}
+
+fn join_target_key(value: &SchemaObject) -> Result<Vec<u8>, CodecError> {
+    let channel = structure_value(value, "channel_name")?;
+    let bytes = opaque_value(channel, "value")?;
+    let text = std::str::from_utf8(bytes).map_err(|_| CodecError::CrossReference)?;
+    let name = ChannelName::parse(text).map_err(|_| CodecError::CrossReference)?;
+    copy_key(name.canonical().as_bytes())
 }
 
 fn object_value<'a>(
@@ -579,6 +821,16 @@ fn encoded_fields_len(
     fields: &[WireValue],
 ) -> Result<usize, CodecError> {
     validate_fields(schema, fields)?;
+    measured_fields_len(schema, fields)
+}
+
+pub(crate) fn measured_fields_len(
+    schema: &SchemaDescriptor,
+    fields: &[WireValue],
+) -> Result<usize, CodecError> {
+    if fields.len() != schema.fields.len() {
+        return Err(CodecError::FieldCount);
+    }
     let mut total = 0_usize;
     for (descriptor, value) in schema.fields.iter().zip(fields) {
         total = total
@@ -590,6 +842,10 @@ fn encoded_fields_len(
 
 fn encoded_value_len(kind: FieldKind, value: &WireValue) -> Result<usize, CodecError> {
     validate_value(kind, value)?;
+    measured_value_len(kind, value)
+}
+
+fn measured_value_len(kind: FieldKind, value: &WireValue) -> Result<usize, CodecError> {
     match (kind, value) {
         (FieldKind::Uint8, _) => Ok(1),
         (FieldKind::Uint16 | FieldKind::Enumeration { .. }, _) => Ok(2),
@@ -601,20 +857,23 @@ fn encoded_value_len(kind: FieldKind, value: &WireValue) -> Result<usize, CodecE
             .bytes()
             .checked_add(bytes.len())
             .ok_or(CodecError::Overflow),
-        (FieldKind::Structure { .. }, WireValue::Structure(value)) => value.encoded_len(),
+        (FieldKind::Structure { .. }, WireValue::Structure(value)) => {
+            measured_fields_len(value.schema, &value.fields)
+        }
         (FieldKind::Vector { width, .. }, WireValue::Vector(values)) => {
             let mut total = width.bytes();
             for value in values {
                 total = total
-                    .checked_add(value.encoded_len()?)
+                    .checked_add(measured_fields_len(value.schema, &value.fields)?)
                     .ok_or(CodecError::Overflow)?;
             }
             Ok(total)
         }
-        (FieldKind::ProjectionUnion { .. }, WireValue::ProjectionUnion { value, .. }) => value
-            .encoded_len()?
-            .checked_add(2)
-            .ok_or(CodecError::Overflow),
+        (FieldKind::ProjectionUnion { .. }, WireValue::ProjectionUnion { value, .. }) => {
+            measured_fields_len(value.schema, &value.fields)?
+                .checked_add(2)
+                .ok_or(CodecError::Overflow)
+        }
         _ => Err(CodecError::TypeMismatch),
     }
 }
@@ -789,9 +1048,34 @@ enum DecodeStep {
     Vector(VectorFrame),
 }
 
+enum CompletedValue {
+    Wire(WireValue),
+    Structure(SchemaObject),
+    Projection {
+        discriminant: u16,
+        value: SchemaObject,
+    },
+}
+
+impl CompletedValue {
+    fn into_wire(self) -> WireValue {
+        match self {
+            Self::Wire(value) => value,
+            Self::Structure(value) => WireValue::Structure(value),
+            Self::Projection {
+                discriminant,
+                value,
+            } => WireValue::ProjectionUnion {
+                discriminant,
+                value,
+            },
+        }
+    }
+}
+
 enum DecodeProgress {
     Waiting,
-    Value(WireValue),
+    Value(CompletedValue),
     Root(SchemaObject),
 }
 
@@ -861,20 +1145,15 @@ fn complete_schema_frame(
     frames: &[DecodeFrame],
 ) -> Result<DecodeProgress, CodecError> {
     validate_decoded_fields(frame.schema, &frame.fields)?;
-    let object = SchemaObject {
-        schema: frame.schema,
-        fields: frame.fields,
-    };
+    let object = SchemaObject::from_validated_fields(frame.schema, frame.fields)?;
     match frame.completion {
         SchemaCompletion::Root if frames.is_empty() => Ok(DecodeProgress::Root(object)),
         SchemaCompletion::Root => Err(CodecError::Overflow),
-        SchemaCompletion::Structure => Ok(DecodeProgress::Value(WireValue::Structure(Box::new(
-            object,
-        )))),
+        SchemaCompletion::Structure => Ok(DecodeProgress::Value(CompletedValue::Structure(object))),
         SchemaCompletion::Projection(discriminant) => {
-            Ok(DecodeProgress::Value(WireValue::ProjectionUnion {
+            Ok(DecodeProgress::Value(CompletedValue::Projection {
                 discriminant,
-                value: Box::new(object),
+                value: object,
             }))
         }
     }
@@ -894,7 +1173,7 @@ fn advance_schema_frame(
     let child_depth = frame.depth.checked_add(1).ok_or(CodecError::Overflow)?;
     push_decode_frame(frames, DecodeFrame::Schema(frame))?;
     match begin_decode_value(kind, decoder, budget, child_depth)? {
-        DecodeStep::Value(value) => Ok(DecodeProgress::Value(value)),
+        DecodeStep::Value(value) => Ok(DecodeProgress::Value(CompletedValue::Wire(value))),
         DecodeStep::Schema(nested) => {
             push_decode_frame(frames, DecodeFrame::Schema(nested))?;
             Ok(DecodeProgress::Waiting)
@@ -912,7 +1191,9 @@ fn process_vector_frame(
     frames: &mut Vec<DecodeFrame>,
 ) -> Result<DecodeProgress, CodecError> {
     if frame.remaining == 0 {
-        return Ok(DecodeProgress::Value(WireValue::Vector(frame.values)));
+        return Ok(DecodeProgress::Value(CompletedValue::Wire(
+            WireValue::Vector(frame.values),
+        )));
     }
     frame.remaining = frame.remaining.checked_sub(1).ok_or(CodecError::Overflow)?;
     let nested = new_schema_frame(
@@ -959,19 +1240,19 @@ fn push_decode_frame(frames: &mut Vec<DecodeFrame>, frame: DecodeFrame) -> Resul
 
 fn deliver_completed_value(
     frames: &mut Vec<DecodeFrame>,
-    value: WireValue,
+    value: CompletedValue,
 ) -> Result<(), CodecError> {
     let parent = frames.pop().ok_or(CodecError::Overflow)?;
     match parent {
         DecodeFrame::Schema(mut frame) => {
-            frame.fields.push(value);
+            frame.fields.push(value.into_wire());
             push_decode_frame(frames, DecodeFrame::Schema(frame))
         }
         DecodeFrame::Vector(mut frame) => {
-            let WireValue::Structure(value) = value else {
+            let CompletedValue::Structure(value) = value else {
                 return Err(CodecError::TypeMismatch);
             };
-            frame.values.push(*value);
+            frame.values.push(value);
             push_decode_frame(frames, DecodeFrame::Vector(frame))
         }
     }

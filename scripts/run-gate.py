@@ -9,10 +9,32 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
-from typing import NoReturn
+from typing import Mapping, NoReturn
 
 MANIFEST_PATH = "conformance/gates.toml"
 ALLOWED_ENVIRONMENT = {"RUSTC_BOOTSTRAP"}
+BUILD_OVERRIDE_ENVIRONMENT = frozenset(
+    {
+        "CARGO_BUILD_RUSTC",
+        "CARGO_BUILD_RUSTC_WRAPPER",
+        "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+        "CARGO_BUILD_RUSTFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "RUSTC",
+        "RUSTC_BOOTSTRAP",
+        "RUSTC_WRAPPER",
+        "RUSTC_WORKSPACE_WRAPPER",
+        "RUSTDOC",
+        "RUSTDOCFLAGS",
+        "RUSTFLAGS",
+        "RUSTUP_TOOLCHAIN",
+    }
+)
+BUILD_OVERRIDE_PREFIXES = (
+    "CARGO_BUILD_",
+    "CARGO_PROFILE_",
+    "CARGO_TARGET_",
+)
 
 
 class GateError(ValueError):
@@ -66,13 +88,26 @@ def resolve_commands(
     return resolved
 
 
+def command_environment(
+    inherited: Mapping[str, str], reviewed: Mapping[str, str]
+) -> dict[str, str]:
+    """Return inherited process state without unreviewed Rust build overrides."""
+    environment = {
+        name: value
+        for name, value in inherited.items()
+        if name not in BUILD_OVERRIDE_ENVIRONMENT
+        and not name.startswith(BUILD_OVERRIDE_PREFIXES)
+    }
+    environment.update(reviewed)
+    return environment
+
+
 def execute(root: Path, name: str) -> None:
     """Execute every command in one resolved gate, stopping on first failure."""
     commands = resolve_commands(load_gates(root), name)
     for command in commands:
         argv = command["argv"]
-        environment = os.environ.copy()
-        environment.update(command.get("environment", {}))
+        environment = command_environment(os.environ, command.get("environment", {}))
         print("+ " + " ".join(argv), flush=True)
         completed = subprocess.run(argv, cwd=root, env=environment, check=False)
         if completed.returncode != 0:

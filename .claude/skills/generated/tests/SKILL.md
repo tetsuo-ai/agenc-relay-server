@@ -1,96 +1,99 @@
 ---
 name: tests
-description: "Skill for the Tests area of agenc-ircd. 103 symbols across 17 files."
+description: "Skill for the Tests area of agenc-ircd. 420 symbols across 44 files."
 ---
 
 # Tests
 
-103 symbols | 17 files | Cohesion: 93%
+420 symbols | 44 files | Cohesion: 82%
 
 ## When to Use
 
 - Working with code in `crates/`
-- Understanding how new, parse, parse work
+- Understanding how decode_exact, parameter_count, validate_post_registration_command work
 - Modifying tests-related functionality
 
 ## Key Files
 
 | File | Symbols |
 |------|---------|
-| `crates/agenc-ircd-federation-wire/src/tests/semantics.rs` | schema, fields, validate, opaque, unsigned (+25) |
-| `crates/agenc-ircd-testkit/src/reference_codec.rs` | admit, write_u8, write_u16, write_u24, write_u32 (+10) |
-| `crates/agenc-ircd-client-wire/src/text.rs` | from_bytes, validate_decoded_length, new, from_parts, validate_fragment_relationships (+4) |
-| `crates/agenc-ircd-testkit/tests/codec_boundaries.rs` | every_vector_rejects_every_truncation_and_trailing_byte, decode, finite_hostile_corpus_is_total_for_every_schema, constructors_reject_shape_type_bounds_enum_schema_and_order, join_target (+3) |
-| `crates/agenc-ircd-testkit/src/lib.rs` | new, push_expected, observe, finish, at_revision (+2) |
-| `crates/agenc-ircd-testkit/tests/deterministic_capabilities.rs` | transcript_mismatch_does_not_consume_expectation, transcript_limits_and_terminal_states_are_explicit, rejected_reference_transition_preserves_state, exhausted_reference_revision_rejects_before_transition, clock_overflow_is_atomic (+1) |
-| `crates/agenc-ircd-federation-wire/src/text.rs` | validate_federation_command, validate_command_token, select_command_form, validate_tag_policy, to_text |
-| `crates/agenc-ircd-federation-wire/src/tests/codec.rs` | schema, enum_nested_projection_and_optional_fixed_guards_fail_closed, iterative_machines_reject_impossible_or_overdeep_states |
-| `crates/agenc-ircd-types/src/masks.rs` | compile, parse, parse_subject |
-| `crates/agenc-ircd-testkit/tests/federation_vectors.rs` | independent_primitive_encoder_covers_every_length_width, independent_encoder_rejects_every_width_and_bound_failure, every_schema_decodes_and_reencodes_its_independent_vector |
+| `crates/agenc-ircd-client-wire/src/registration_command.rs` | validate_post_registration_command, validate_join, validate_part, validate_mode, validate_topic (+48) |
+| `crates/agenc-ircd-federation-wire/src/tests/semantics.rs` | schema, fields, validate, opaque, unsigned (+38) |
+| `crates/agenc-ircd-client-wire/tests/stage_two_regressions.rs` | in_flight_commit_defers_owned_input_and_resumes_it_after_registration, repeated_commit_defer_resume_cycles_retain_fifo_message_ownership, blind_cap_req_delays_commit_until_end, invalid_pass_does_not_consume_attempt_and_late_events_cannot_reopen_close, pending_ownership_and_auth_failures_are_transactional_and_terminal (+18) |
+| `crates/agenc-ircd-client-wire/src/auth_transport.rs` | zeroize_storage, drop, new, client, server_response (+17) |
+| `crates/agenc-ircd-client-wire/tests/stage_two_branches.rs` | sasl_covers_abort_retry_finish_completion_and_failure_branches, account_carriers_cover_sequence_shape_finish_and_deadlines, feed_sasl_request, feed_account_request, registration_profile_changes_notify_only_opted_in_clients_and_always_reconnect (+16) |
+| `crates/agenc-ircd-client-wire/tests/stage_two_wire.rs` | new, stream_framer_handles_every_split_and_coalesced_boundary, stream_framer_enforces_terminators_utf8_nul_eof_and_exact_limits, syntax_parser_canonicalizes_commands_and_preserves_trailing_presence, registration_bounds_pending_input_keepalive_and_close_idempotence (+16) |
+| `crates/agenc-ircd-federation-wire/src/codec.rs` | decode_exact, encode_canonical, into_wire, decode_schema_iterative, process_decode_frame (+15) |
+| `crates/agenc-ircd-testkit/src/reference_codec.rs` | encode_length_prefix, write_u64, write_fixed, write_opaque, write_length (+15) |
+| `crates/agenc-ircd-testkit/tests/codec_boundaries.rs` | finite_hostile_corpus_is_total_for_every_schema, encode_part_operation, encode_join_operation, every_vector_rejects_every_truncation_and_trailing_byte, constructors_reject_shape_type_bounds_enum_schema_and_order (+10) |
+| `crates/agenc-ircd-client-wire/tests/nickname_reservation_ownership.rs` | new_nick_cancels_pending_before_replacing_and_releases_stale_acceptance, replacement_result_selects_the_exact_lease_transferred_by_commit, latest_nickname_blocks_pass_user_cap_and_token_completion_callers, every_close_entry_cleans_nickname_ownership_once_before_close, transport_close_and_deadline_stale_result_cleanup_are_generation_bound (+10) |
 
 ## Entry Points
 
 Start here when exploring this area:
 
-- **`new`** (Function) — `crates/agenc-ircd-testkit/src/lib.rs:128`
-- **`parse`** (Function) — `crates/agenc-ircd-types/src/masks.rs:127`
-- **`parse`** (Function) — `crates/agenc-ircd-types/src/names.rs:38`
-- **`write_u8`** (Function) — `crates/agenc-ircd-testkit/src/reference_codec.rs:82`
-- **`write_u16`** (Function) — `crates/agenc-ircd-testkit/src/reference_codec.rs:90`
+- **`decode_exact`** (Function) — `crates/agenc-ircd-federation-wire/src/codec.rs:291`
+- **`parameter_count`** (Function) — `crates/agenc-ircd-client-wire/src/message.rs:63`
+- **`validate_post_registration_command`** (Function) — `crates/agenc-ircd-client-wire/src/registration_command.rs:406`
+- **`iter`** (Function) — `crates/agenc-ircd-client-wire/src/tags.rs:201`
+- **`new`** (Function) — `crates/agenc-ircd-client-wire/src/auth_transport.rs:215`
 
 ## Key Symbols
 
 | Symbol | Type | File | Line |
 |--------|------|------|------|
-| `new` | Function | `crates/agenc-ircd-testkit/src/lib.rs` | 128 |
-| `parse` | Function | `crates/agenc-ircd-types/src/masks.rs` | 127 |
-| `parse` | Function | `crates/agenc-ircd-types/src/names.rs` | 38 |
-| `write_u8` | Function | `crates/agenc-ircd-testkit/src/reference_codec.rs` | 82 |
-| `write_u16` | Function | `crates/agenc-ircd-testkit/src/reference_codec.rs` | 90 |
-| `write_u24` | Function | `crates/agenc-ircd-testkit/src/reference_codec.rs` | 98 |
-| `write_u32` | Function | `crates/agenc-ircd-testkit/src/reference_codec.rs` | 114 |
-| `write_u64` | Function | `crates/agenc-ircd-testkit/src/reference_codec.rs` | 122 |
-| `write_fixed` | Function | `crates/agenc-ircd-testkit/src/reference_codec.rs` | 129 |
-| `write_opaque` | Function | `crates/agenc-ircd-testkit/src/reference_codec.rs` | 136 |
-| `write_length` | Function | `crates/agenc-ircd-testkit/src/reference_codec.rs` | 150 |
-| `from_bytes` | Function | `crates/agenc-ircd-client-wire/src/text.rs` | 94 |
-| `new` | Function | `crates/agenc-ircd-client-wire/src/text.rs` | 246 |
-| `new` | Function | `crates/agenc-ircd-testkit/src/reference_codec.rs` | 60 |
-| `parse_reference_vectors` | Function | `crates/agenc-ircd-testkit/src/reference_codec.rs` | 220 |
-| `decode_exact` | Function | `crates/agenc-ircd-federation-wire/src/codec.rs` | 171 |
-| `validate_federation_command` | Function | `crates/agenc-ircd-federation-wire/src/text.rs` | 443 |
-| `push_expected` | Function | `crates/agenc-ircd-testkit/src/lib.rs` | 478 |
-| `observe` | Function | `crates/agenc-ircd-testkit/src/lib.rs` | 488 |
-| `finish` | Function | `crates/agenc-ircd-testkit/src/lib.rs` | 510 |
+| `decode_exact` | Function | `crates/agenc-ircd-federation-wire/src/codec.rs` | 291 |
+| `parameter_count` | Function | `crates/agenc-ircd-client-wire/src/message.rs` | 63 |
+| `validate_post_registration_command` | Function | `crates/agenc-ircd-client-wire/src/registration_command.rs` | 406 |
+| `iter` | Function | `crates/agenc-ircd-client-wire/src/tags.rs` | 201 |
+| `new` | Function | `crates/agenc-ircd-client-wire/src/auth_transport.rs` | 215 |
+| `client` | Function | `crates/agenc-ircd-client-wire/src/auth_transport.rs` | 229 |
+| `server_response` | Function | `crates/agenc-ircd-client-wire/src/auth_transport.rs` | 251 |
+| `complete` | Function | `crates/agenc-ircd-client-wire/src/auth_transport.rs` | 283 |
+| `tick` | Function | `crates/agenc-ircd-client-wire/src/auth_transport.rs` | 305 |
+| `parse_registration_command` | Function | `crates/agenc-ircd-client-wire/src/registration_command.rs` | 362 |
+| `parse_client_transcript` | Function | `crates/agenc-ircd-testkit/src/client_transcript.rs` | 144 |
+| `write_u64` | Function | `crates/agenc-ircd-testkit/src/reference_codec.rs` | 156 |
+| `write_fixed` | Function | `crates/agenc-ircd-testkit/src/reference_codec.rs` | 163 |
+| `write_opaque` | Function | `crates/agenc-ircd-testkit/src/reference_codec.rs` | 170 |
+| `write_length` | Function | `crates/agenc-ircd-testkit/src/reference_codec.rs` | 194 |
+| `finish` | Function | `crates/agenc-ircd-testkit/src/reference_codec.rs` | 208 |
+| `render_tags` | Function | `crates/agenc-ircd-client-wire/src/tags.rs` | 509 |
+| `try_clone` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 77 |
+| `encode` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 374 |
+| `parse_client_tags` | Function | `crates/agenc-ircd-client-wire/src/tags.rs` | 386 |
 
 ## Execution Flows
 
 | Flow | Type | Steps |
 |------|------|-------|
-| `Validate_mode_change → New` | cross_community | 6 |
-| `From_bytes → Expected_fragment_count` | intra_community | 5 |
-| `From_bytes → Expected_segment_length` | intra_community | 5 |
-| `Validate_session_hidden → New` | cross_community | 5 |
-| `Validate_topic_change → New` | cross_community | 5 |
-| `Validate_away_fields → New` | cross_community | 5 |
-| `Write_opaque → Admit` | intra_community | 4 |
-| `Parse_reference_vectors → New` | cross_community | 4 |
-| `Validate_reply → New` | cross_community | 4 |
-| `New → Validate_decoded_length` | intra_community | 3 |
+| `Labeled_response → Escaped_len` | cross_community | 7 |
+| `Tick → At` | cross_community | 6 |
+| `Add_client_only_tag → Validate_parameter_count` | cross_community | 6 |
+| `Add_client_only_tag → Command_bytes` | cross_community | 6 |
+| `Add_client_only_tag → Validate_prefix` | cross_community | 6 |
+| `Add_client_only_tag → Validate_command` | cross_community | 6 |
+| `Drive → At` | cross_community | 6 |
+| `Drive → Admit_len` | cross_community | 6 |
+| `Run → At` | cross_community | 6 |
+| `Labeled_response → Validate_parameter_count` | cross_community | 6 |
 
 ## Connected Areas
 
 | Area | Connections |
 |------|-------------|
-| Cluster_3 | 4 calls |
-| Cluster_7 | 3 calls |
-| Cluster_11 | 3 calls |
-| Cluster_10 | 1 calls |
-| Cluster_14 | 1 calls |
+| Fuzz_targets | 19 calls |
+| Cluster_2 | 14 calls |
+| Cluster_72 | 7 calls |
+| Cluster_68 | 4 calls |
+| Cluster_24 | 4 calls |
+| Cluster_85 | 3 calls |
+| Cluster_70 | 3 calls |
+| Cluster_61 | 3 calls |
 
 ## How to Explore
 
-1. `context({name: "new"})` — see callers and callees
+1. `context({name: "decode_exact"})` — see callers and callees
 2. `query({search_query: "tests"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

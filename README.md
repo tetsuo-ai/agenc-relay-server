@@ -8,23 +8,24 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/tetsuo-ai/agenc-ircd/actions/workflows/ci.yml"><img alt="Phase 01 conformance" src="https://img.shields.io/github/actions/workflow/status/tetsuo-ai/agenc-ircd/ci.yml?branch=main&style=flat-square&label=conformance"></a>
+  <a href="https://github.com/tetsuo-ai/agenc-ircd/actions/workflows/ci.yml"><img alt="Stage checks" src="https://img.shields.io/github/actions/workflow/status/tetsuo-ai/agenc-ircd/ci.yml?branch=main&style=flat-square&label=checks"></a>
   <img alt="Status: pre-alpha" src="https://img.shields.io/badge/status-pre--alpha-ff2bd6?style=flat-square">
   <img alt="Rust 1.98" src="https://img.shields.io/badge/Rust-1.98.0-00d9e9?style=flat-square&logo=rust&logoColor=white">
   <img alt="Unsafe Rust forbidden" src="https://img.shields.io/badge/unsafe-forbidden-5234ff?style=flat-square">
 </p>
 
 > [!IMPORTANT]
-> **This is pre-alpha infrastructure, not a deployable server.** Phases 00 and
-> 01 are complete: the workspace, conformance system, validated protocol types,
-> and canonical codecs exist. Networking and runnable daemon behavior arrive in
-> later phases.
+> **This is pre-alpha infrastructure, not a deployable server.** Stages 00 and
+> 01 have historical gate passes. The local Stage 02 gate also passes, but
+> formal closure is blocked by frozen wire-size conflicts, reply ownership
+> gaps, and missing revision-bound evidence. The binary stays unavailable
+> until the runtime stage is implemented.
 
 ## What is being built
 
-The version-1 design keeps the parts of classic chat that still work—nicknames,
-direct messages, `/join #channel`, topics, modes, invites, bans, kicks, and
-public or secret channels—while replacing inherited security assumptions.
+The version-1 design keeps nicknames, direct messages, `/join #channel`, topics,
+modes, invites, bans, kicks, and public or secret channels while replacing
+inherited security assumptions.
 
 | Boundary | Version-1 design |
 | --- | --- |
@@ -45,14 +46,18 @@ Ed25519, and authenticated storage.
 | --- | --- | --- |
 | 00 | complete | Reproducible workspace, source baseline, policy, and traceability |
 | 01 | complete | 53 registry constants, validated types, 128 canonical object codecs, and independent vectors |
-| 02 | next | Incremental, total, resource-bounded client wire layer |
-| 03–10 | planned | Domain state through production qualification |
+| 02 | local gate passes; closure blocked | Incremental framing, client parsing, capability and registration state, bounded rendering, transcripts, and fuzz targets are implemented locally |
+| 03 | blocked | Pure deterministic domain model waits for the Stage 02 gate |
+| 04-10 | planned | Cryptographic adapters through production qualification |
 
-The complete dependency-ordered roadmap lives in [TODO.md](TODO.md). Phase 01
-passed both declared Linux targets, dependency policy and advisory checks,
-Clippy with warnings denied, all tests, and coverage at **91.56% branches** and
-**95.37% lines**. See the [recorded evidence](conformance/stage-one-evidence.md)
-and the [latest CI runs](https://github.com/tetsuo-ai/agenc-ircd/actions).
+The complete dependency-ordered roadmap lives in [TODO.md](TODO.md). The Stage
+02 command runs both declared Linux target checks, dependency and advisory
+checks, Clippy with warnings denied, all workspace tests, coverage, and four
+deterministic fuzz smoke targets. On 2026-08-26 it passed with 90.03% branch
+coverage and 93.96% line coverage. A local pass does not replace evidence tied
+to a committed revision. See the [development record](conformance/stage-two-evidence.md),
+the [closure audit](conformance/stage-two-audit.md), and the
+[latest CI runs](https://github.com/tetsuo-ai/agenc-ircd/actions).
 
 ## Trust shape
 
@@ -78,7 +83,7 @@ The pinned toolchain is Rust 1.98.0. From a clean checkout:
 ```sh
 git clone https://github.com/tetsuo-ai/agenc-ircd.git
 cd agenc-ircd
-bash scripts/check-stage-one.sh
+bash scripts/check-stage-two.sh
 ```
 
 There is no server start command yet. The binary fails closed until its runtime
@@ -93,7 +98,7 @@ stage is implemented.
 | [Protocol decision ledger](docs/protocol-sources-and-decisions.md) | Adopted, narrowed, superseded, and pinned standards |
 | [`crates/`](crates) | Thirteen-crate Rust workspace with enforced dependency boundaries |
 | [`conformance/`](conformance) | Requirement ledger, evidence catalog, gates, and source policy |
-| [`test-data/`](test-data) | Deterministic vectors and future fault, fuzz, transcript, and interoperability corpora |
+| [`test-data/`](test-data) | Deterministic vectors, transcripts, fuzz seeds, and planned fault, model, capacity, and interoperability fixtures |
 
 ## Participate
 

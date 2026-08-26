@@ -1,13 +1,15 @@
 //! Canonical base-federation text tokens and command-form validation.
 
 use std::error::Error;
-use std::fmt;
+use std::fmt::{self, Write as _};
 
 use agenc_ircd_types::{BASE_FRAGMENT_BYTES, BASE_FRAGMENT_COUNT, BASE_OBJECT_BYTES};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use zeroize::{Zeroize as _, Zeroizing};
 
 const FEDERATION_FRAGMENT_VERSION: &str = "v1";
+const MAX_FIXED_BASE64_TEXT_BYTES: usize = 43;
 
 /// Closed failures from base-federation text validation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -123,22 +125,61 @@ impl FederationHash32 {
 
 fn decode_fixed<const LENGTH: usize>(token: &str) -> Result<[u8; LENGTH], FederationTextError> {
     let expected_encoded = encoded_base64_length(LENGTH)?;
-    if token.len() != expected_encoded {
+    if token.len() != expected_encoded || expected_encoded > MAX_FIXED_BASE64_TEXT_BYTES {
         return Err(FederationTextError::WrongLength);
     }
     validate_base64_alphabet(token)?;
-    let decoded = URL_SAFE_NO_PAD
-        .decode(token.as_bytes())
+    let mut decoded = [0_u8; LENGTH];
+    let written = URL_SAFE_NO_PAD
+        .decode_slice(token.as_bytes(), &mut decoded)
         .map_err(|_| FederationTextError::NonCanonical)?;
-    if decoded.len() != LENGTH || URL_SAFE_NO_PAD.encode(&decoded) != token {
+    if written != LENGTH {
+        return Err(FederationTextError::WrongLength);
+    }
+    let mut canonical = [0_u8; MAX_FIXED_BASE64_TEXT_BYTES];
+    let canonical_length = URL_SAFE_NO_PAD
+        .encode_slice(decoded, &mut canonical)
+        .map_err(|_| FederationTextError::Overflow)?;
+    let canonical = canonical
+        .get(..canonical_length)
+        .ok_or(FederationTextError::Overflow)?;
+    if canonical != token.as_bytes() {
         return Err(FederationTextError::NonCanonical);
     }
-    decoded
-        .try_into()
-        .map_err(|_| FederationTextError::WrongLength)
+    Ok(decoded)
 }
 
-fn decode_variable(token: &str, maximum: usize) -> Result<Vec<u8>, FederationTextError> {
+fn decode_variable(
+    token: &str,
+    maximum: usize,
+) -> Result<SecretFragmentBytes, FederationTextError> {
+    let decoded_length = validate_variable_base64_shape(token, maximum)?;
+    let mut decoded = zeroed_secret_buffer(decoded_length)?;
+    let written = URL_SAFE_NO_PAD
+        .decode_slice(token.as_bytes(), &mut decoded)
+        .map_err(|_| FederationTextError::NonCanonical)?;
+    if written != decoded_length {
+        return Err(FederationTextError::NonCanonical);
+    }
+    if !base64_reencode_matches(&decoded, token)? {
+        return Err(FederationTextError::NonCanonical);
+    }
+    Ok(SecretFragmentBytes(std::mem::take(&mut *decoded)))
+}
+
+fn zeroed_secret_buffer(length: usize) -> Result<Zeroizing<Vec<u8>>, FederationTextError> {
+    let mut buffer = Zeroizing::new(Vec::new());
+    buffer
+        .try_reserve_exact(length)
+        .map_err(|_| FederationTextError::AllocationFailed)?;
+    buffer.resize(length, 0);
+    Ok(buffer)
+}
+
+fn validate_variable_base64_shape(
+    token: &str,
+    maximum: usize,
+) -> Result<usize, FederationTextError> {
     if token.is_empty() {
         return Err(FederationTextError::Empty);
     }
@@ -146,16 +187,36 @@ fn decode_variable(token: &str, maximum: usize) -> Result<Vec<u8>, FederationTex
         return Err(FederationTextError::TooLong);
     }
     validate_base64_alphabet(token)?;
-    let decoded = URL_SAFE_NO_PAD
-        .decode(token.as_bytes())
-        .map_err(|_| FederationTextError::NonCanonical)?;
-    if decoded.is_empty() || decoded.len() > maximum {
+    let decoded_length = decoded_base64_length(token.len())?;
+    if decoded_length > maximum {
         return Err(FederationTextError::TooLong);
     }
-    if URL_SAFE_NO_PAD.encode(&decoded) != token {
-        return Err(FederationTextError::NonCanonical);
-    }
-    Ok(decoded)
+    Ok(decoded_length)
+}
+
+fn decoded_base64_length(encoded: usize) -> Result<usize, FederationTextError> {
+    let complete = encoded
+        .checked_div(4)
+        .and_then(|value| value.checked_mul(3))
+        .ok_or(FederationTextError::Overflow)?;
+    let remainder = match encoded % 4 {
+        0 => 0,
+        1 => return Err(FederationTextError::NonCanonical),
+        2 => 1,
+        3 => 2,
+        _ => return Err(FederationTextError::Overflow),
+    };
+    complete
+        .checked_add(remainder)
+        .ok_or(FederationTextError::Overflow)
+}
+
+fn base64_reencode_matches(decoded: &[u8], expected: &str) -> Result<bool, FederationTextError> {
+    let mut canonical = zeroed_secret_buffer(expected.len())?;
+    let written = URL_SAFE_NO_PAD
+        .encode_slice(decoded, &mut canonical)
+        .map_err(|_| FederationTextError::Overflow)?;
+    Ok(written == expected.len() && canonical.as_slice() == expected.as_bytes())
 }
 
 fn encoded_base64_length(decoded: usize) -> Result<usize, FederationTextError> {
@@ -265,7 +326,99 @@ pub struct FederationFragment {
     part: u32,
     count: u32,
     total: u32,
-    segment: Vec<u8>,
+    segment: SecretFragmentBytes,
+}
+
+struct SecretFragmentBytes(Vec<u8>);
+
+impl SecretFragmentBytes {
+    fn try_copy_from_slice(bytes: &[u8]) -> Result<Self, FederationTextError> {
+        let mut owned = Vec::new();
+        owned
+            .try_reserve_exact(bytes.len())
+            .map_err(|_| FederationTextError::AllocationFailed)?;
+        owned.extend_from_slice(bytes);
+        Ok(Self(owned))
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn zeroize_storage(&mut self) {
+        zeroize_vec_capacity(&mut self.0);
+    }
+}
+
+impl Drop for SecretFragmentBytes {
+    fn drop(&mut self) {
+        self.zeroize_storage();
+    }
+}
+
+/// Move-only rendered federation fragment text that erases its backing
+/// allocation on drop.
+///
+/// Fragment text can carry complete federation request or result bytes. It is
+/// deliberately not printable through `Debug` or `Display`; borrow it only at
+/// the transport boundary with [`Self::as_str`].
+///
+/// ```compile_fail
+/// use agenc_ircd_federation_wire::FederationFragmentText;
+///
+/// fn requires_clone<T: Clone>() {}
+/// requires_clone::<FederationFragmentText>();
+/// ```
+///
+/// ```compile_fail
+/// use agenc_ircd_federation_wire::FederationFragmentText;
+///
+/// fn requires_debug<T: core::fmt::Debug>() {}
+/// requires_debug::<FederationFragmentText>();
+/// ```
+#[must_use = "rendered federation text must be sent or explicitly dropped"]
+pub struct FederationFragmentText {
+    text: String,
+}
+
+impl FederationFragmentText {
+    /// Borrows the canonical wire text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+
+    /// Returns the encoded byte length.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.text.len()
+    }
+
+    /// Reports whether the encoded text is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    fn zeroize_storage(&mut self) {
+        zeroize_string_capacity(&mut self.text);
+    }
+}
+
+impl AsRef<str> for FederationFragmentText {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Drop for FederationFragmentText {
+    fn drop(&mut self) {
+        self.zeroize_storage();
+    }
 }
 
 impl FederationFragment {
@@ -287,6 +440,11 @@ impl FederationFragment {
         let count = parse_federation_u32(count)?;
         let total = parse_federation_u32(total)?;
         let maximum = usize_constant(BASE_FRAGMENT_BYTES)?;
+        let decoded_segment_length = validate_variable_base64_shape(segment, maximum)?;
+        let expected_segment_length = validate_fragment_header(part, count, total)?;
+        if decoded_segment_length != expected_segment_length {
+            return Err(FederationTextError::FragmentRange);
+        }
         let segment = decode_variable(segment, maximum)?;
         Self::from_parts(object_id, part, count, total, segment)
     }
@@ -300,11 +458,7 @@ impl FederationFragment {
         segment: &[u8],
     ) -> Result<Self, FederationTextError> {
         validate_fragment_relationships(part, count, total, segment.len())?;
-        let mut owned = Vec::new();
-        owned
-            .try_reserve_exact(segment.len())
-            .map_err(|_| FederationTextError::AllocationFailed)?;
-        owned.extend_from_slice(segment);
+        let owned = SecretFragmentBytes::try_copy_from_slice(segment)?;
         Self::from_parts(object_id, part, count, total, owned)
     }
 
@@ -313,7 +467,7 @@ impl FederationFragment {
         part: u32,
         count: u32,
         total: u32,
-        segment: Vec<u8>,
+        segment: SecretFragmentBytes,
     ) -> Result<Self, FederationTextError> {
         validate_fragment_relationships(part, count, total, segment.len())?;
         Ok(Self {
@@ -352,21 +506,71 @@ impl FederationFragment {
     /// Borrows this fragment's raw bytes.
     #[must_use]
     pub fn segment(&self) -> &[u8] {
-        &self.segment
+        self.segment.as_slice()
     }
 
     /// Produces the unique six-field fragment value.
-    #[must_use]
-    pub fn to_text(&self) -> String {
-        format!(
-            "{FEDERATION_FRAGMENT_VERSION}.{}.{}.{}.{}.{}",
-            self.object_id.to_text(),
-            self.part,
-            self.count,
-            self.total,
-            URL_SAFE_NO_PAD.encode(&self.segment)
-        )
+    pub fn to_text(&self) -> Result<FederationFragmentText, FederationTextError> {
+        let object_length = encoded_base64_length(self.object_id.as_bytes().len())?;
+        let segment_length = encoded_base64_length(self.segment.len())?;
+        let rendered_length = 7_usize
+            .checked_add(object_length)
+            .and_then(|length| length.checked_add(decimal_digits_u32(self.part)))
+            .and_then(|length| length.checked_add(decimal_digits_u32(self.count)))
+            .and_then(|length| length.checked_add(decimal_digits_u32(self.total)))
+            .and_then(|length| length.checked_add(segment_length))
+            .ok_or(FederationTextError::Overflow)?;
+
+        let mut rendered = Zeroizing::new(String::new());
+        rendered
+            .try_reserve_exact(rendered_length)
+            .map_err(|_| FederationTextError::AllocationFailed)?;
+        rendered.push_str(FEDERATION_FRAGMENT_VERSION);
+        rendered.push('.');
+        append_base64url(&mut rendered, self.object_id.as_bytes())?;
+        write!(rendered, ".{}.{}.{}.", self.part, self.count, self.total)
+            .map_err(|_| FederationTextError::Overflow)?;
+        append_base64url(&mut rendered, self.segment.as_slice())?;
+        if rendered.len() != rendered_length {
+            return Err(FederationTextError::Overflow);
+        }
+        Ok(FederationFragmentText {
+            text: std::mem::take(&mut *rendered),
+        })
     }
+}
+
+fn zeroize_vec_capacity(bytes: &mut Vec<u8>) {
+    bytes.resize(bytes.capacity(), 0);
+    bytes.as_mut_slice().zeroize();
+}
+
+fn zeroize_string_capacity(text: &mut String) {
+    let remaining = text.capacity().saturating_sub(text.len());
+    text.extend(std::iter::repeat_n('\0', remaining));
+    text.as_mut_str().zeroize();
+}
+
+fn append_base64url(output: &mut String, bytes: &[u8]) -> Result<(), FederationTextError> {
+    let encoded_length = encoded_base64_length(bytes.len())?;
+    output
+        .try_reserve_exact(encoded_length)
+        .map_err(|_| FederationTextError::AllocationFailed)?;
+    let original_length = output.len();
+    URL_SAFE_NO_PAD.encode_string(bytes, output);
+    if output.len() != original_length + encoded_length {
+        return Err(FederationTextError::Overflow);
+    }
+    Ok(())
+}
+
+const fn decimal_digits_u32(mut value: u32) -> usize {
+    let mut digits = 1;
+    while value >= 10 {
+        value /= 10;
+        digits += 1;
+    }
+    digits
 }
 
 fn validate_fragment_relationships(
@@ -375,6 +579,18 @@ fn validate_fragment_relationships(
     total: u32,
     segment_length: usize,
 ) -> Result<(), FederationTextError> {
+    let expected_length = validate_fragment_header(part, count, total)?;
+    if segment_length != expected_length {
+        return Err(FederationTextError::FragmentRange);
+    }
+    Ok(())
+}
+
+fn validate_fragment_header(
+    part: u32,
+    count: u32,
+    total: u32,
+) -> Result<usize, FederationTextError> {
     let maximum_count = u32_constant(BASE_FRAGMENT_COUNT)?;
     let maximum_total = u32_constant(BASE_OBJECT_BYTES)?;
     if total == 0 || total > maximum_total || count == 0 || count > maximum_count || part >= count {
@@ -386,10 +602,10 @@ fn validate_fragment_relationships(
         .ok_or(FederationTextError::Overflow)?
         / fragment_bytes;
     let expected_length = expected_fragment_length(part, total, fragment_bytes)?;
-    if count != expected_count || segment_length != expected_length {
+    if count != expected_count {
         return Err(FederationTextError::FragmentRange);
     }
-    Ok(())
+    Ok(expected_length)
 }
 
 fn expected_fragment_length(
@@ -500,4 +716,28 @@ fn validate_tag_policy(
         return Ok(());
     }
     Err(FederationTextError::WrongTagPolicy)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FederationFragmentText, SecretFragmentBytes};
+
+    #[test]
+    fn secret_storage_wipers_cover_complete_backing_capacity() {
+        let mut raw_bytes = Vec::with_capacity(32);
+        raw_bytes.extend_from_slice(b"secret fragment");
+        let byte_capacity = raw_bytes.capacity();
+        let mut bytes = SecretFragmentBytes(raw_bytes);
+        bytes.zeroize_storage();
+        assert_eq!(bytes.as_slice().len(), byte_capacity);
+        assert!(bytes.as_slice().iter().all(|byte| *byte == 0));
+
+        let mut raw_text = String::with_capacity(32);
+        raw_text.push_str("v1.secret-fragment");
+        let text_capacity = raw_text.capacity();
+        let mut text = FederationFragmentText { text: raw_text };
+        text.zeroize_storage();
+        assert_eq!(text.len(), text_capacity);
+        assert!(text.as_str().as_bytes().iter().all(|byte| *byte == 0));
+    }
 }

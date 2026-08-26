@@ -1,0 +1,11 @@
+# evidence-id|surface|encoding|payload
+EVID-S02-001-FRAMING|empty-line|hex|0d0a
+EVID-S02-002-WEBSOCKET|masked-text|ascii|PING :vector
+EVID-S02-003-TAGS|ircv3-escape|ascii|vendor/key=a\:b\sc\\d\r\n
+EVID-S02-004-PARSER|trailing-empty|ascii|PRIVMSG target :
+EVID-S02-005-CAP|cap-ls-302|ascii|CAP LS 302
+EVID-S02-007-AUTH|sasl-request-shape|ascii|15x400+304=6304
+EVID-S02-007-AUTH|account-request-shape|ascii|15x400+302=6302
+EVID-S02-007-AUTH|decimal-u64-max|ascii|18446744073709551615
+EVID-S02-007-AUTH|base64url-one-byte|ascii|AQ
+EVID-S02-008-RENDER|tag-order|ascii|a=one;z=two;+a=first;+z=last

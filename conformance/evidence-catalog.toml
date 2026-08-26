@@ -119,3 +119,63 @@ kind = "totality-boundedness"
 id = "EVID-S01-900-STAGE-GATE"
 claim_ids = ["S01-900"]
 kind = "stage-gate"
+
+[[evidence]]
+id = "EVID-S02-001-FRAMING"
+claim_ids = ["S02-001"]
+kind = "client-stream-framing"
+
+[[evidence]]
+id = "EVID-S02-002-WEBSOCKET"
+claim_ids = ["S02-002"]
+kind = "websocket-semantics"
+
+[[evidence]]
+id = "EVID-S02-003-TAGS"
+claim_ids = ["S02-003"]
+kind = "message-tags"
+
+[[evidence]]
+id = "EVID-S02-004-PARSER"
+claim_ids = ["S02-004"]
+kind = "client-syntax-parser"
+
+[[evidence]]
+id = "EVID-S02-005-CAP"
+claim_ids = ["S02-005"]
+kind = "capability-negotiation"
+
+[[evidence]]
+id = "EVID-S02-006-REGISTRATION"
+claim_ids = ["S02-006"]
+kind = "registration-wire-state"
+
+[[evidence]]
+id = "EVID-S02-007-AUTH"
+claim_ids = ["S02-007"]
+kind = "authentication-carriers"
+
+[[evidence]]
+id = "EVID-S02-008-RENDER"
+claim_ids = ["S02-008"]
+kind = "bounded-rendering"
+
+[[evidence]]
+id = "EVID-S02-009-REPLIES"
+claim_ids = ["S02-009"]
+kind = "labeled-batched-replies"
+
+[[evidence]]
+id = "EVID-S02-010-TRANSCRIPT"
+claim_ids = ["S02-010"]
+kind = "client-transcripts"
+
+[[evidence]]
+id = "EVID-S02-011-FUZZ"
+claim_ids = ["S02-011"]
+kind = "client-wire-fuzzing"
+
+[[evidence]]
+id = "EVID-S02-900-STAGE-GATE"
+claim_ids = ["S02-900"]
+kind = "stage-gate"

@@ -1,0 +1,9 @@
+schema_version = 1
+nightly = "nightly-2026-08-24"
+rustc = "rustc 1.100.0-nightly (fb6531d55 2026-08-23)"
+cargo_fuzz_version = "0.13.2"
+cargo_fuzz_checksum = "5acfd01930e49823e58c30dd8012d3338a620377d7c7d4cc140ca4b2169400e2"
+libfuzzer_sys_version = "0.4.13"
+libfuzzer_sys_checksum = "a9fd2f41a1cba099f79a0b6b6c35656cf7c03351a7bae8ff0f28f25270f929d2"
+native_build_license = "NCSA"
+full_campaign_task = "S10-004"

@@ -1,0 +1,13 @@
+schema_version = 1
+evidence_id = "EVID-S02-011-FUZZ"
+toolchain = "nightly-2026-08-24"
+cargo_fuzz = "0.13.2"
+seed = 20260824
+runs_per_target = 10000
+max_len = 32768
+timeout_seconds = 2
+rss_limit_mb = 512
+executed_on = "2026-08-26"
+result = "pass"
+targets = ["tcp_framing", "websocket", "parse_render", "client_state"]
+limitations = "The 24 CPU-hour parser campaign remains S10-004 release evidence."

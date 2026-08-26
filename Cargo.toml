@@ -35,9 +35,9 @@ agenc-ircd-runtime = { version = "=0.0.0", path = "crates/agenc-ircd-runtime" }
 agenc-ircd-storage = { version = "=0.0.0", path = "crates/agenc-ircd-storage" }
 agenc-ircd-types = { version = "=0.0.0", path = "crates/agenc-ircd-types" }
 
-# These exact profiles are frozen by Architecture section 24.4. They remain
-# unused until their owning implementation stage, so Phase 00 has no third-
-# party code in its release graph.
+# These exact profiles are frozen by Architecture section 24.4. Crate manifests
+# for completed stages reference only the profiles they use. Profiles for later
+# stages remain declarations and do not enter the package graph.
 argon2 = { version = "=0.5.3", default-features = false, features = ["alloc"] }
 base64 = { version = "=0.23.1", default-features = false, features = ["alloc"] }
 chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["alloc", "zeroize"] }

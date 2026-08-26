@@ -7,7 +7,7 @@ use std::error::Error;
 use agenc_ircd_federation_wire::{
     CanonicalEncode, CodecError, DecodeBudget, SCHEMA_REGISTRY, SchemaObject, WireValue,
 };
-use agenc_ircd_testkit::parse_reference_vectors;
+use agenc_ircd_testkit::{ReferenceCodecError, ReferenceEncoder, parse_reference_vectors};
 
 const VECTORS: &str = include_str!("../../../test-data/vectors/base-federation-v1.vectors");
 const LARGE_BUDGET: usize = 64 * 1024 * 1024;
@@ -85,7 +85,7 @@ fn constructors_reject_shape_type_bounds_enum_schema_and_order() -> Result<(), B
                 WireValue::Opaque(vec![0; 16]),
                 WireValue::Opaque(vec![0; 16]),
                 WireValue::Unsigned(0),
-                WireValue::Structure(Box::new(wrong_nested)),
+                WireValue::Structure(wrong_nested),
             ]
         )
         .err(),
@@ -120,6 +120,151 @@ fn constructors_reject_shape_type_bounds_enum_schema_and_order() -> Result<(), B
     Ok(())
 }
 
+#[test]
+fn part_channel_ids_are_accepted_in_canonical_order() -> Result<(), Box<dyn Error>> {
+    let first = [1_u8; 16];
+    let second = [2_u8; 16];
+    let valid = part_operation(&[first, second])?;
+    let encoded = valid.encode_canonical()?;
+    let reencoded = decode("operation.part", encoded.as_slice())?.encode_canonical()?;
+    assert_eq!(reencoded.as_slice(), encoded.as_slice());
+
+    assert_eq!(
+        part_operation(&[first, first]).err(),
+        Some(CodecError::DuplicateValue)
+    );
+    assert_eq!(
+        part_operation(&[second, first]).err(),
+        Some(CodecError::NonCanonicalOrder)
+    );
+
+    let duplicate = encode_part_operation(&[first, first])?;
+    assert_eq!(
+        decode("operation.part", &duplicate).err(),
+        Some(CodecError::DuplicateValue)
+    );
+    let reversed = encode_part_operation(&[second, first])?;
+    assert_eq!(
+        decode("operation.part", &reversed).err(),
+        Some(CodecError::NonCanonicalOrder)
+    );
+    Ok(())
+}
+
+#[test]
+fn join_targets_use_canonical_channel_name_keys() -> Result<(), Box<dyn Error>> {
+    let valid = join_operation_at_revision(vec![join_target(b"#a")?, join_target(b"#B")?])?;
+    let encoded = valid.encode_canonical()?;
+    let reencoded = decode("operation.join", encoded.as_slice())?.encode_canonical()?;
+    assert_eq!(reencoded.as_slice(), encoded.as_slice());
+
+    assert_eq!(
+        join_operation_at_revision(vec![join_target(b"#Room")?, join_target(b"#room")?]).err(),
+        Some(CodecError::DuplicateValue)
+    );
+    assert_eq!(
+        join_operation_at_revision(vec![join_target(b"#B")?, join_target(b"#a")?]).err(),
+        Some(CodecError::NonCanonicalOrder)
+    );
+
+    let duplicate_names: [&[u8]; 2] = [b"#Room", b"#room"];
+    let duplicate = encode_join_operation(&duplicate_names)?;
+    assert_eq!(
+        decode("operation.join", &duplicate).err(),
+        Some(CodecError::DuplicateValue)
+    );
+    let reversed_names: [&[u8]; 2] = [b"#B", b"#a"];
+    let reversed = encode_join_operation(&reversed_names)?;
+    assert_eq!(
+        decode("operation.join", &reversed).err(),
+        Some(CodecError::NonCanonicalOrder)
+    );
+    Ok(())
+}
+
+#[test]
+fn federation_client_tag_keys_are_opaque_but_renderer_safe() -> Result<(), Box<dyn Error>> {
+    let valid_keys: [&[u8]; 4] = [b"+", b"++tag", b"+future?name", b"+vendor.example/name"];
+    for key in valid_keys {
+        client_tag(key, b"")?;
+    }
+
+    let invalid_keys: [&[u8]; 7] = [
+        b"tag",
+        b"+bad tag",
+        b"+bad;tag",
+        b"+bad=tag",
+        b"+bad\0tag",
+        b"+bad\rtag",
+        b"+bad\ntag",
+    ];
+    for key in invalid_keys {
+        assert_eq!(client_tag(key, b"").err(), Some(CodecError::CrossReference));
+    }
+    Ok(())
+}
+
+fn channel_id(value: [u8; 16]) -> Result<SchemaObject, CodecError> {
+    SchemaObject::new(
+        "FederationChannelId",
+        vec![WireValue::Opaque(value.to_vec())],
+    )
+}
+
+fn part_operation(channels: &[[u8; 16]]) -> Result<SchemaObject, CodecError> {
+    let channels = channels
+        .iter()
+        .copied()
+        .map(channel_id)
+        .collect::<Result<Vec<_>, _>>()?;
+    SchemaObject::new(
+        "operation.part",
+        vec![
+            WireValue::Opaque(vec![0; 16]),
+            WireValue::Unsigned(1),
+            WireValue::Unsigned(0),
+            WireValue::Vector(channels),
+            WireValue::Opaque(Vec::new()),
+        ],
+    )
+}
+
+fn encode_part_operation(channels: &[[u8; 16]]) -> Result<Vec<u8>, ReferenceCodecError> {
+    let mut encoder = ReferenceEncoder::new(LARGE_BUDGET);
+    encoder.write_fixed(&[0; 16])?;
+    encoder.write_u64(1)?;
+    encoder.write_u16(0)?;
+    encoder.write_length(channels.len(), 256)?;
+    for channel in channels {
+        encoder.write_fixed(channel)?;
+    }
+    encoder.write_opaque(b"", 0, 256)?;
+    Ok(encoder.finish())
+}
+
+fn join_operation_at_revision(targets: Vec<SchemaObject>) -> Result<SchemaObject, CodecError> {
+    SchemaObject::new(
+        "operation.join",
+        vec![
+            WireValue::Opaque(vec![0; 16]),
+            WireValue::Unsigned(1),
+            WireValue::Vector(targets),
+        ],
+    )
+}
+
+fn encode_join_operation(names: &[&[u8]]) -> Result<Vec<u8>, ReferenceCodecError> {
+    let mut encoder = ReferenceEncoder::new(LARGE_BUDGET);
+    encoder.write_fixed(&[0; 16])?;
+    encoder.write_u64(1)?;
+    encoder.write_length(names.len(), 20)?;
+    for name in names {
+        encoder.write_opaque(name, 2, 64)?;
+        encoder.write_opaque(b"", 0, 256)?;
+    }
+    Ok(encoder.finish())
+}
+
 fn join_target(channel: &[u8]) -> Result<SchemaObject, CodecError> {
     join_target_with_key(channel, b"")
 }
@@ -131,10 +276,7 @@ fn join_target_with_key(channel: &[u8], key: &[u8]) -> Result<SchemaObject, Code
     )?;
     SchemaObject::new(
         "FederationJoinTarget",
-        vec![
-            WireValue::Structure(Box::new(name)),
-            WireValue::Opaque(key.to_vec()),
-        ],
+        vec![WireValue::Structure(name), WireValue::Opaque(key.to_vec())],
     )
 }
 
@@ -246,7 +388,7 @@ fn mode_arguments_and_kick_targets_enforce_exact_inner_grammars() -> Result<(), 
             vec![
                 WireValue::Unsigned(1),
                 WireValue::Unsigned(2),
-                WireValue::Opaque(quiet_mask),
+                WireValue::Opaque(quiet_mask.as_slice().to_vec()),
             ],
         )
         .err(),

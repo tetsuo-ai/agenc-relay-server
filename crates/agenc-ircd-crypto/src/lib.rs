@@ -2,5 +2,5 @@
 
 //! Adapters for reviewed cryptographic libraries.
 //!
-//! No cryptographic behavior exists in Stage 00. Integration begins in Stage
-//! 04 and never implements cryptographic primitives locally.
+//! This crate remains an ownership boundary until Stage 04. It never
+//! implements cryptographic primitives locally.

@@ -1,10 +1,12 @@
 //! Canonical names with presentation kept separate from comparison identity.
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 
 use precis_profiles::precis_core::profile::PrecisFastInvocation as _;
 use precis_profiles::{Nickname as PrecisNickname, UsernameCaseMapped};
+use zeroize::Zeroize;
 
 use crate::ValidationError;
 
@@ -12,6 +14,7 @@ use crate::ValidationError;
 pub const MAX_PRECIS_INPUT_BYTES: usize = 256;
 /// Maximum UTF-8 bytes in a prepared display name.
 pub const MAX_DISPLAY_NAME_BYTES: usize = 64;
+const MAX_DNS_LABEL_BYTES: usize = 63;
 
 fn is_ascii_name_character(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
@@ -26,6 +29,22 @@ fn ascii_lowercase_copy(input: &str) -> Result<String, ValidationError> {
         canonical.push(char::from(byte.to_ascii_lowercase()));
     }
     Ok(canonical)
+}
+
+fn fallible_string_copy(input: &str) -> Result<String, ValidationError> {
+    let mut output = String::new();
+    output
+        .try_reserve_exact(input.len())
+        .map_err(|_| ValidationError::AllocationFailed)?;
+    output.push_str(input);
+    Ok(output)
+}
+
+fn into_owned_fallible(input: Cow<'_, str>) -> Result<String, ValidationError> {
+    match input {
+        Cow::Borrowed(value) => fallible_string_copy(value),
+        Cow::Owned(value) => Ok(value),
+    }
 }
 
 /// A mutable ASCII routing nickname with a separate comparison key.
@@ -224,22 +243,30 @@ impl NormalizedLogin {
         if input.len() > MAX_PRECIS_INPUT_BYTES {
             return Err(ValidationError::TooLong);
         }
-        let normalized =
-            UsernameCaseMapped::enforce(input).map_err(|_| ValidationError::PrecisRejected)?;
-        if !(3..=64).contains(&normalized.len()) {
-            return Err(if normalized.len() < 3 {
+        let normalized = UsernameCaseMapped::enforce(input)
+            .map_err(|_| ValidationError::PrecisRejected)
+            .and_then(into_owned_fallible)
+            .map(Self)?;
+        if !(3..=64).contains(&normalized.0.len()) {
+            return Err(if normalized.0.len() < 3 {
                 ValidationError::TooShort
             } else {
                 ValidationError::TooLong
             });
         }
-        Ok(Self(normalized.into_owned()))
+        Ok(normalized)
     }
 
     /// Borrows the exact normalized login bytes.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl Drop for NormalizedLogin {
+    fn drop(&mut self) {
+        self.0.zeroize();
     }
 }
 
@@ -263,7 +290,7 @@ impl AccountLabel {
         {
             return Err(ValidationError::InvalidCharacter);
         }
-        Ok(Self(input.to_owned()))
+        fallible_string_copy(input).map(Self)
     }
 
     /// Borrows the exact public label spelling.
@@ -285,7 +312,7 @@ impl DisplayName {
         if prepared.len() > MAX_DISPLAY_NAME_BYTES {
             return Err(ValidationError::TooLong);
         }
-        Ok(Self(prepared.into_owned()))
+        into_owned_fallible(prepared).map(Self)
     }
 
     /// Borrows the prepared display text.
@@ -299,7 +326,11 @@ impl DisplayName {
 pub struct ServerName(String);
 
 fn is_valid_server_label(label: &str) -> bool {
-    if label.is_empty() || label.starts_with('-') || label.ends_with('-') {
+    if label.is_empty()
+        || label.len() > MAX_DNS_LABEL_BYTES
+        || label.starts_with('-')
+        || label.ends_with('-')
+    {
         return false;
     }
     label
@@ -319,7 +350,7 @@ impl ServerName {
         if !input.contains('.') || !input.split('.').all(is_valid_server_label) {
             return Err(ValidationError::InvalidCharacter);
         }
-        Ok(Self(input.to_owned()))
+        fallible_string_copy(input).map(Self)
     }
 
     /// Borrows the configured exact-match name.

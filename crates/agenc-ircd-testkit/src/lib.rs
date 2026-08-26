@@ -9,7 +9,18 @@ use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::fmt;
 
+use agenc_ircd_types::{
+    ClockError, EntropyError, EntropySource, MonotonicClock, MonotonicTick, UtcSecond, WallClock,
+};
+
+mod client_transcript;
 mod reference_codec;
+
+pub use client_transcript::{
+    ClientTranscript, ClientTranscriptError, ClientTranscriptHandoff, ClientTranscriptHarness,
+    ClientTranscriptMessage, ClientTranscriptOperation, ClientTranscriptStep, TranscriptEncoding,
+    parse_client_transcript,
+};
 
 pub use reference_codec::{
     MAX_REFERENCE_VECTOR_BYTES, MAX_REFERENCE_VECTORS, ReferenceCodecError, ReferenceEncoder,
@@ -85,33 +96,67 @@ impl DeterministicMonotonicClock {
     }
 }
 
-/// A wall clock whose UTC millisecond value is advanced explicitly.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+impl MonotonicClock for DeterministicMonotonicClock {
+    fn now(&self) -> MonotonicTick {
+        MonotonicTick::from_ticks(self.ticks)
+    }
+}
+
+/// A wall clock whose whole-second UTC value is advanced explicitly.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DeterministicWallClock {
-    unix_milliseconds: u64,
+    unix_seconds: u64,
+    available: bool,
 }
 
 impl DeterministicWallClock {
-    /// Creates a wall clock at an explicit Unix millisecond timestamp.
+    /// Creates an available wall clock at an explicit Unix timestamp.
     #[must_use]
-    pub const fn at(unix_milliseconds: u64) -> Self {
-        Self { unix_milliseconds }
+    pub const fn at(unix_seconds: u64) -> Self {
+        Self {
+            unix_seconds,
+            available: true,
+        }
     }
 
-    /// Returns the current Unix millisecond timestamp.
+    /// Creates a clock that deterministically fails UTC reads.
+    #[must_use]
+    pub const fn unavailable_at(unix_seconds: u64) -> Self {
+        Self {
+            unix_seconds,
+            available: false,
+        }
+    }
+
+    /// Returns the scripted whole-second Unix timestamp.
     #[must_use]
     pub const fn now(&self) -> u64 {
-        self.unix_milliseconds
+        self.unix_seconds
     }
 
     /// Advances wall time atomically, leaving it unchanged on overflow.
-    pub fn advance(&mut self, milliseconds: u64) -> Result<u64, CapabilityError> {
+    pub fn advance(&mut self, seconds: u64) -> Result<u64, CapabilityError> {
         let next = self
-            .unix_milliseconds
-            .checked_add(milliseconds)
+            .unix_seconds
+            .checked_add(seconds)
             .ok_or(CapabilityError::ClockOverflow)?;
-        self.unix_milliseconds = next;
+        self.unix_seconds = next;
         Ok(next)
+    }
+}
+
+impl Default for DeterministicWallClock {
+    fn default() -> Self {
+        Self::at(0)
+    }
+}
+
+impl WallClock for DeterministicWallClock {
+    fn utc_now(&self) -> Result<UtcSecond, ClockError> {
+        if !self.available {
+            return Err(ClockError::Unavailable);
+        }
+        Ok(UtcSecond::from_unix_seconds(self.unix_seconds))
     }
 }
 
@@ -127,7 +172,8 @@ pub struct ScriptedEntropy {
 impl ScriptedEntropy {
     /// Creates a bounded byte script.
     pub fn new(bytes: Vec<u8>) -> Result<Self, CapabilityError> {
-        if bytes.len() > MAX_SCRIPTED_ENTROPY_BYTES {
+        if bytes.len() > MAX_SCRIPTED_ENTROPY_BYTES || bytes.capacity() > MAX_SCRIPTED_ENTROPY_BYTES
+        {
             return Err(CapabilityError::EntropyScriptTooLarge);
         }
         Ok(Self {
@@ -154,6 +200,12 @@ impl ScriptedEntropy {
             *slot = byte;
         }
         Ok(())
+    }
+}
+
+impl EntropySource for ScriptedEntropy {
+    fn fill_exact(&mut self, destination: &mut [u8]) -> Result<(), EntropyError> {
+        ScriptedEntropy::fill_exact(self, destination).map_err(|_| EntropyError::Unavailable)
     }
 }
 
@@ -401,7 +453,7 @@ pub enum TranscriptActor {
 }
 
 /// One bounded expected transcript step.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct TranscriptStep {
     actor: TranscriptActor,
     bytes: Vec<u8>,
@@ -412,6 +464,9 @@ impl TranscriptStep {
     pub fn new(actor: TranscriptActor, bytes: Vec<u8>) -> Result<Self, TranscriptError> {
         if bytes.len() > MAX_TRANSCRIPT_STEP_BYTES {
             return Err(TranscriptError::StepTooLarge);
+        }
+        if bytes.capacity() > MAX_TRANSCRIPT_STEP_BYTES {
+            return Err(TranscriptError::StepCapacityTooLarge);
         }
         Ok(Self { actor, bytes })
     }
@@ -424,6 +479,10 @@ pub enum TranscriptError {
     TooManySteps,
     /// One step exceeds its fixed byte ceiling.
     StepTooLarge,
+    /// One owned step hides spare allocation beyond its fixed byte ceiling.
+    StepCapacityTooLarge,
+    /// A bounded transcript queue allocation failed.
+    AllocationFailed,
     /// An observation arrived after all expected steps were consumed.
     UnexpectedStep,
     /// An observation differs from the next expected actor or bytes.
@@ -443,6 +502,10 @@ impl fmt::Display for TranscriptError {
         match self {
             Self::TooManySteps => formatter.write_str("transcript step ceiling reached"),
             Self::StepTooLarge => formatter.write_str("transcript step exceeds its byte ceiling"),
+            Self::StepCapacityTooLarge => {
+                formatter.write_str("transcript step backing capacity exceeds its byte ceiling")
+            }
+            Self::AllocationFailed => formatter.write_str("transcript queue allocation failed"),
             Self::UnexpectedStep => formatter.write_str("unexpected transcript step"),
             Self::Mismatch { index } => write!(formatter, "transcript mismatch at step {index}"),
             Self::Incomplete { remaining } => {
@@ -480,6 +543,9 @@ impl TranscriptDriver {
         if self.scheduled == MAX_TRANSCRIPT_STEPS {
             return Err(TranscriptError::TooManySteps);
         }
+        self.expected
+            .try_reserve(1)
+            .map_err(|_| TranscriptError::AllocationFailed)?;
         self.expected.push_back(step);
         self.scheduled += 1;
         Ok(())

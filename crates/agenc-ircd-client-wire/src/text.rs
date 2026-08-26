@@ -1,10 +1,11 @@
 //! Canonical text-carrier primitives shared by bounded client commands.
 
 use std::error::Error;
-use std::fmt;
+use std::fmt::{self, Write as _};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use zeroize::{Zeroize as _, Zeroizing};
 
 /// Maximum raw bytes in one E2EE fragment.
 pub const MAX_E2EE_FRAGMENT_BYTES: usize = 2_940;
@@ -80,15 +81,27 @@ impl CanonicalBase64Url {
         minimum_decoded: usize,
         maximum_decoded: usize,
     ) -> Result<Self, TextCarrierError> {
-        validate_base64_shape(token, minimum_decoded, maximum_decoded)?;
-        let bytes = URL_SAFE_NO_PAD
-            .decode(token.as_bytes())
+        let expected_decoded_length =
+            validate_base64_shape(token, minimum_decoded, maximum_decoded)?;
+        let mut bytes = zeroed_buffer(expected_decoded_length)?;
+        let decoded_length = URL_SAFE_NO_PAD
+            .decode_slice(token.as_bytes(), &mut bytes)
             .map_err(|_| TextCarrierError::NonCanonical)?;
-        validate_decoded_length(bytes.len(), minimum_decoded, maximum_decoded)?;
-        if URL_SAFE_NO_PAD.encode(&bytes) != token {
+        if decoded_length != expected_decoded_length {
             return Err(TextCarrierError::NonCanonical);
         }
-        Ok(Self { bytes })
+
+        let encoded_length = encoded_base64_length(bytes.len())?;
+        let mut canonical = zeroed_buffer(encoded_length)?;
+        let canonical_length = URL_SAFE_NO_PAD
+            .encode_slice(&bytes, &mut canonical)
+            .map_err(|_| TextCarrierError::Overflow)?;
+        if canonical_length != token.len() || canonical.as_slice() != token.as_bytes() {
+            return Err(TextCarrierError::NonCanonical);
+        }
+        Ok(Self {
+            bytes: std::mem::take(&mut *bytes),
+        })
     }
 
     /// Constructs from already bounded bytes, copying only after validation.
@@ -113,13 +126,33 @@ impl CanonicalBase64Url {
     }
 
     /// Produces the unique unpadded URL-safe representation.
-    #[must_use]
-    pub fn to_text(&self) -> String {
-        URL_SAFE_NO_PAD.encode(&self.bytes)
+    pub fn to_text(&self) -> Result<String, TextCarrierError> {
+        let encoded_length = encoded_base64_length(self.bytes.len())?;
+        let mut encoded = String::new();
+        encoded
+            .try_reserve_exact(encoded_length)
+            .map_err(|_| TextCarrierError::AllocationFailed)?;
+        append_base64url(&mut encoded, &self.bytes)?;
+        Ok(encoded)
     }
 
-    fn into_bytes(self) -> Vec<u8> {
-        self.bytes
+    fn into_bytes(mut self) -> Vec<u8> {
+        std::mem::take(&mut self.bytes)
+    }
+}
+
+fn zeroed_buffer(length: usize) -> Result<Zeroizing<Vec<u8>>, TextCarrierError> {
+    let mut buffer = Zeroizing::new(Vec::new());
+    buffer
+        .try_reserve_exact(length)
+        .map_err(|_| TextCarrierError::AllocationFailed)?;
+    buffer.resize(length, 0);
+    Ok(buffer)
+}
+
+impl Drop for CanonicalBase64Url {
+    fn drop(&mut self) {
+        self.bytes.zeroize();
     }
 }
 
@@ -127,7 +160,7 @@ fn validate_base64_shape(
     token: &str,
     minimum_decoded: usize,
     maximum_decoded: usize,
-) -> Result<(), TextCarrierError> {
+) -> Result<usize, TextCarrierError> {
     if minimum_decoded > maximum_decoded {
         return Err(TextCarrierError::OutOfRange);
     }
@@ -141,7 +174,23 @@ fn validate_base64_shape(
     if !token.bytes().all(is_base64url_character) {
         return Err(TextCarrierError::InvalidCharacter);
     }
-    Ok(())
+    let complete = token
+        .len()
+        .checked_div(4)
+        .and_then(|length| length.checked_mul(3))
+        .ok_or(TextCarrierError::Overflow)?;
+    let remainder = match token.len() % 4 {
+        0 => 0,
+        2 => 1,
+        3 => 2,
+        1 => return Err(TextCarrierError::NonCanonical),
+        _ => return Err(TextCarrierError::Overflow),
+    };
+    let decoded_length = complete
+        .checked_add(remainder)
+        .ok_or(TextCarrierError::Overflow)?;
+    validate_decoded_length(decoded_length, minimum_decoded, maximum_decoded)?;
+    Ok(decoded_length)
 }
 
 fn encoded_base64_length(decoded: usize) -> Result<usize, TextCarrierError> {
@@ -286,11 +335,13 @@ impl E2eeFragment {
         if version != "v1" || fields.next().is_some() {
             return Err(TextCarrierError::InvalidFragment);
         }
-        let object_id = parse_object_id(object_id)?;
         let part = parse_fragment_decimal(part)?;
         let count = parse_fragment_decimal(count)?;
         let total = parse_total_decimal(total)?;
-        let segment = CanonicalBase64Url::parse(segment, 1, MAX_E2EE_FRAGMENT_BYTES)?;
+        let expected_segment_length = validate_fragment_scalars(part, count, total)?;
+        let object_id = parse_object_id(object_id)?;
+        let segment =
+            CanonicalBase64Url::parse(segment, expected_segment_length, expected_segment_length)?;
         Self::from_parts(object_id, part, count, total, segment.into_bytes())
     }
 
@@ -356,17 +407,53 @@ impl E2eeFragment {
     }
 
     /// Produces the unique `v1.<id>.<part>.<count>.<total>.<segment>` value.
-    #[must_use]
-    pub fn to_text(&self) -> String {
-        format!(
-            "v1.{}.{}.{}.{}.{}",
-            URL_SAFE_NO_PAD.encode(self.object_id),
-            self.part,
-            self.count,
-            self.total,
-            URL_SAFE_NO_PAD.encode(&self.segment)
-        )
+    pub fn to_text(&self) -> Result<String, TextCarrierError> {
+        let object_length = encoded_base64_length(self.object_id.len())?;
+        let segment_length = encoded_base64_length(self.segment.len())?;
+        let rendered_length = 7_usize
+            .checked_add(object_length)
+            .and_then(|length| length.checked_add(decimal_digits_u32(u32::from(self.part))))
+            .and_then(|length| length.checked_add(decimal_digits_u32(u32::from(self.count))))
+            .and_then(|length| length.checked_add(decimal_digits_u32(self.total)))
+            .and_then(|length| length.checked_add(segment_length))
+            .ok_or(TextCarrierError::Overflow)?;
+
+        let mut rendered = String::new();
+        rendered
+            .try_reserve_exact(rendered_length)
+            .map_err(|_| TextCarrierError::AllocationFailed)?;
+        rendered.push_str("v1.");
+        append_base64url(&mut rendered, &self.object_id)?;
+        write!(rendered, ".{}.{}.{}.", self.part, self.count, self.total)
+            .map_err(|_| TextCarrierError::Overflow)?;
+        append_base64url(&mut rendered, &self.segment)?;
+        if rendered.len() != rendered_length {
+            return Err(TextCarrierError::Overflow);
+        }
+        Ok(rendered)
     }
+}
+
+fn append_base64url(output: &mut String, bytes: &[u8]) -> Result<(), TextCarrierError> {
+    let encoded_length = encoded_base64_length(bytes.len())?;
+    output
+        .try_reserve_exact(encoded_length)
+        .map_err(|_| TextCarrierError::AllocationFailed)?;
+    let original_length = output.len();
+    URL_SAFE_NO_PAD.encode_string(bytes, output);
+    if output.len() != original_length + encoded_length {
+        return Err(TextCarrierError::Overflow);
+    }
+    Ok(())
+}
+
+const fn decimal_digits_u32(mut value: u32) -> usize {
+    let mut digits = 1;
+    while value >= 10 {
+        value /= 10;
+        digits += 1;
+    }
+    digits
 }
 
 fn parse_object_id(token: &str) -> Result<[u8; 32], TextCarrierError> {
@@ -394,15 +481,19 @@ fn validate_fragment_relationships(
     total: u32,
     segment_length: usize,
 ) -> Result<(), TextCarrierError> {
-    let expected_count = expected_fragment_count(total)?;
-    if count == 0 || count > MAX_E2EE_FRAGMENT_COUNT || count != expected_count || part >= count {
-        return Err(TextCarrierError::FragmentRange);
-    }
-    let expected_length = expected_segment_length(part, total)?;
+    let expected_length = validate_fragment_scalars(part, count, total)?;
     if segment_length != expected_length {
         return Err(TextCarrierError::FragmentRange);
     }
     Ok(())
+}
+
+fn validate_fragment_scalars(part: u16, count: u16, total: u32) -> Result<usize, TextCarrierError> {
+    let expected_count = expected_fragment_count(total)?;
+    if count == 0 || count > MAX_E2EE_FRAGMENT_COUNT || count != expected_count || part >= count {
+        return Err(TextCarrierError::FragmentRange);
+    }
+    expected_segment_length(part, total)
 }
 
 fn expected_fragment_count(total: u32) -> Result<u16, TextCarrierError> {
@@ -444,7 +535,12 @@ impl SafeLabel {
         if !token.bytes().all(is_base64url_character) {
             return Err(TextCarrierError::InvalidCharacter);
         }
-        Ok(Self(token.to_owned()))
+        let mut owned = String::new();
+        owned
+            .try_reserve_exact(token.len())
+            .map_err(|_| TextCarrierError::AllocationFailed)?;
+        owned.push_str(token);
+        Ok(Self(owned))
     }
 
     /// Borrows the exact validated label bytes as text.

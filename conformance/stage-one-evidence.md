@@ -1,6 +1,8 @@
 # Stage 01 Evidence
 
-Status: passed on 2026-08-24.
+Status: historical pass on 2026-08-24 for commit
+`7ae6439b472521d3c23fb99261deaf8964a70c5a`. This report does not provide
+evidence for the current uncommitted tree.
 
 ## Verification summary
 
@@ -24,7 +26,7 @@ missing, duplicate, reordered, renumbered, and stale entries.
 
 ## S01-002
 
-`EVID-S01-002-QUANTITIES`: ten private-field quantity families retain units and
+`EVID-S01-002-QUANTITIES`: eleven private-field quantity families retain units and
 inclusive bounds. Tests exercise minimum, one, maximum, maximum-plus-one,
 overflow, and underflow behavior.
 
@@ -69,6 +71,11 @@ negatives cover canonical IDs/names, revision and presence tuples, ordering,
 envelope and union substitution, projected values, identity cross-references,
 padding, and malformed embedded objects.
 
+Request correlation uses the four ID fields as its presence discriminator.
+An empty tuple requires both integer fields to be zero. A present tuple accepts
+generation and operation-sequence zero because Section 20.5 assigns those
+values to the pre-registration principal and the first request in a generation.
+
 ## S01-009
 
 `EVID-S01-009-TEXT-CARRIERS`: client and federation carrier primitives enforce
@@ -92,9 +99,12 @@ their SHA-256 provenance records.
 ## S01-012
 
 `EVID-S01-012-TOTALITY`: every vector rejects every truncation and trailing
-byte, every schema is exercised against a finite hostile corpus, and every
-parser error discriminant has a negative path. Source checks require explicit
-nonrecursive stacks and reject recursive parser mutations.
+byte. Every schema is tested with a deterministic generated corpus at short,
+length-prefix, and object-size boundaries. Successful decodes are re-encoded,
+decoded, and re-encoded again under explicit budgets, with byte-for-byte
+canonical agreement. Every parser error discriminant has a negative path.
+Source checks require explicit nonrecursive stacks and reject recursive parser
+mutations.
 
 ## S01-900
 

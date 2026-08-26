@@ -8,6 +8,7 @@ import copy
 import hashlib
 import json
 import re
+import subprocess
 import sys
 import tomllib
 from datetime import datetime, timezone
@@ -45,6 +46,18 @@ STAGE_BINDINGS = {
     "EVID-S01-011-REFERENCE-VECTORS": (["S01-011"], "reference-vectors"),
     "EVID-S01-012-TOTALITY": (["S01-012"], "totality-boundedness"),
     "EVID-S01-900-STAGE-GATE": (["S01-900"], "stage-gate"),
+    "EVID-S02-001-FRAMING": (["S02-001"], "client-stream-framing"),
+    "EVID-S02-002-WEBSOCKET": (["S02-002"], "websocket-semantics"),
+    "EVID-S02-003-TAGS": (["S02-003"], "message-tags"),
+    "EVID-S02-004-PARSER": (["S02-004"], "client-syntax-parser"),
+    "EVID-S02-005-CAP": (["S02-005"], "capability-negotiation"),
+    "EVID-S02-006-REGISTRATION": (["S02-006"], "registration-wire-state"),
+    "EVID-S02-007-AUTH": (["S02-007"], "authentication-carriers"),
+    "EVID-S02-008-RENDER": (["S02-008"], "bounded-rendering"),
+    "EVID-S02-009-REPLIES": (["S02-009"], "labeled-batched-replies"),
+    "EVID-S02-010-TRANSCRIPT": (["S02-010"], "client-transcripts"),
+    "EVID-S02-011-FUZZ": (["S02-011"], "client-wire-fuzzing"),
+    "EVID-S02-900-STAGE-GATE": (["S02-900"], "stage-gate"),
 }
 TOP_FIELDS = {
     "schema_version",
@@ -190,26 +203,70 @@ def validate_schema(root: Path) -> None:
         raise EvidenceError("evidence schema entry required fields are stale")
 
 
-def canonical_source_sha256(root: Path) -> str:
-    """Hash the complete tracked-tree equivalent with explicit path/mode framing."""
-    digest = hashlib.sha256()
-    excluded_roots = {".git", "target", "__pycache__"}
-    paths = sorted(
-        path
-        for path in root.rglob("*")
-        if path.is_file()
-        and path.suffix != ".pyc"
-        and not any(part in excluded_roots for part in path.relative_to(root).parts)
-        and not (
-            path.relative_to(root).parts[:2] == ("conformance", "evidence")
-            and path.suffix == ".json"
+def git_bytes(root: Path, arguments: list[str], label: str) -> bytes:
+    """Run one Git object lookup and return its raw standard output."""
+    try:
+        completed = subprocess.run(
+            ["git", *arguments],
+            cwd=root,
+            capture_output=True,
+            check=False,
         )
+    except OSError as error:
+        raise EvidenceError(f"cannot execute Git for {label}: {error}") from error
+    if completed.returncode != 0:
+        details = (completed.stderr or completed.stdout).decode("utf-8", errors="replace").strip()
+        raise EvidenceError(f"Git lookup failed for {label}: {details}")
+    return completed.stdout
+
+
+def commit_blob(root: Path, source_commit: str, path: str) -> bytes:
+    """Read one blob from an exact source commit."""
+    return git_bytes(root, ["cat-file", "blob", f"{source_commit}:{path}"], path)
+
+
+def commit_blob_sha256(root: Path, source_commit: str, path: str) -> str:
+    """Hash one blob from an exact source commit."""
+    return hashlib.sha256(commit_blob(root, source_commit, path)).hexdigest()
+
+
+def canonical_source_sha256(root: Path, source_commit: str) -> str:
+    """Hash tracked blobs and modes from one commit with explicit framing."""
+    git_bytes(root, ["cat-file", "-e", f"{source_commit}^{{commit}}"], "source commit")
+    git_bytes(
+        root,
+        ["merge-base", "--is-ancestor", source_commit, "HEAD"],
+        "source commit ancestry",
     )
-    for path in paths:
-        relative = path.relative_to(root).as_posix().encode("utf-8")
-        mode = b"100755" if path.stat().st_mode & 0o111 else b"100644"
-        content = path.read_bytes()
-        for field in (mode, relative, content):
+    tree = git_bytes(
+        root,
+        ["ls-tree", "-rz", "--full-tree", source_commit],
+        "source tree",
+    )
+    records: list[tuple[bytes, bytes, bytes]] = []
+    for raw_record in tree.split(b"\0"):
+        if not raw_record:
+            continue
+        try:
+            metadata, path = raw_record.split(b"\t", 1)
+            mode, kind, object_id = metadata.split(b" ", 2)
+        except ValueError as error:
+            raise EvidenceError("Git source tree contains a malformed entry") from error
+        if path.startswith(b"conformance/evidence/") and path.endswith(b".json"):
+            continue
+        if kind != b"blob":
+            display_path = path.decode("utf-8", errors="replace")
+            raise EvidenceError(f"Git source tree contains unsupported entry {display_path!r}")
+        records.append((path, mode, object_id))
+
+    digest = hashlib.sha256()
+    for path, mode, object_id in sorted(records):
+        content = git_bytes(
+            root,
+            ["cat-file", "blob", object_id.decode("ascii")],
+            path.decode("utf-8", errors="replace"),
+        )
+        for field in (mode, path, content):
             digest.update(len(field).to_bytes(8, "big"))
             digest.update(field)
     return digest.hexdigest()
@@ -253,6 +310,7 @@ def validate_manifest(
     bindings: dict[str, list[str]],
     *,
     expected_source_hash: str | None = None,
+    expected_lock_hash: str | None = None,
 ) -> None:
     """Validate one complete evidence manifest and all catalog bindings."""
     if set(manifest) != TOP_FIELDS:
@@ -269,8 +327,10 @@ def validate_manifest(
     )
     source_hash = validate_hash(manifest.get("source_sha256"), "source_sha256")
     if expected_source_hash is not None and source_hash != expected_source_hash:
-        raise EvidenceError("manifest source hash does not match the canonical repository tree")
+        raise EvidenceError("manifest source hash does not match the canonical Git tree")
     lock_hash = validate_hash(manifest.get("lock_sha256"), "lock_sha256")
+    if expected_lock_hash is not None and lock_hash != expected_lock_hash:
+        raise EvidenceError("manifest lock hash does not match Cargo.lock at its source commit")
     entries = manifest.get("entries")
     if not isinstance(entries, list) or not entries:
         raise EvidenceError("manifest entries must be a nonempty array")
@@ -352,12 +412,20 @@ def validate(root: Path) -> tuple[int, int]:
     bindings = validate_catalog(root)
     example = load_json(root / EXAMPLE_PATH)
     validate_manifest(example, bindings)
-    source_hash = canonical_source_sha256(root)
     manifest_paths = sorted((root / "conformance/evidence").glob("*.json"))
     entry_count = len(example["entries"])  # type: ignore[arg-type]
     for path in manifest_paths:
         manifest = load_json(path)
-        validate_manifest(manifest, bindings, expected_source_hash=source_hash)
+        validate_manifest(manifest, bindings)
+        source_commit = str(manifest["source_commit"])
+        source_hash = canonical_source_sha256(root, source_commit)
+        lock_hash = commit_blob_sha256(root, source_commit, "Cargo.lock")
+        validate_manifest(
+            manifest,
+            bindings,
+            expected_source_hash=source_hash,
+            expected_lock_hash=lock_hash,
+        )
         entry_count += len(manifest["entries"])  # type: ignore[arg-type]
     return len(bindings), entry_count
 
@@ -464,6 +532,46 @@ def self_test(root: Path) -> int:
         lambda value: value["entries"][0].__setitem__("limitations", [""]),  # type: ignore[index,union-attr]
         "limitations must be",
     )
+
+    head = git_bytes(root, ["rev-parse", "HEAD"], "current commit").decode("ascii").strip()
+    source_hash = canonical_source_sha256(root, head)
+    lock_hash = commit_blob_sha256(root, head, "Cargo.lock")
+    bound = copy.deepcopy(valid)
+    bound["source_commit"] = head
+    bound["source_sha256"] = source_hash
+    bound["lock_sha256"] = lock_hash
+    bound_entry = bound["entries"][0]  # type: ignore[index]
+    bound_entry["source_commit"] = head  # type: ignore[index]
+    bound_entry["source_sha256"] = source_hash  # type: ignore[index]
+    bound_entry["lock_sha256"] = lock_hash  # type: ignore[index]
+    validate_manifest(
+        bound,
+        bindings,
+        expected_source_hash=source_hash,
+        expected_lock_hash=lock_hash,
+    )
+
+    stale_lock = copy.deepcopy(bound)
+    replacement_lock = ("0" if lock_hash[:1] != "0" else "1") + lock_hash[1:]
+    stale_lock["lock_sha256"] = replacement_lock
+    stale_lock["entries"][0]["lock_sha256"] = replacement_lock  # type: ignore[index]
+    try:
+        validate_manifest(stale_lock, bindings, expected_lock_hash=lock_hash)
+    except EvidenceError as error:
+        if "does not match Cargo.lock" not in str(error):
+            raise EvidenceError(f"self-test 'commit lock' reached the wrong branch: {error}") from error
+    else:
+        raise EvidenceError("self-test 'commit lock' was accepted")
+    cases += 1
+
+    try:
+        canonical_source_sha256(root, "0" * 40)
+    except EvidenceError as error:
+        if "source commit" not in str(error):
+            raise EvidenceError(f"self-test 'missing commit' reached the wrong branch: {error}") from error
+    else:
+        raise EvidenceError("self-test 'missing commit' was accepted")
+    cases += 1
     return cases
 
 
