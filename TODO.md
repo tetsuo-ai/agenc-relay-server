@@ -52,7 +52,7 @@ References: [Architecture §§1.2–4](docs/ircd-architecture-and-implementation
 | --- | --- | --- | --- | --- |
 | 00 | Reproducible workspace and traceability foundation | Complete | Pass, 2026-08-26 | Historical commit `6b48ecb73afd471ed576146483098c19c12893f9` |
 | 01 | Registries, validated types, and canonical codecs | Complete | Pass, 2026-08-26 | Historical commit `7ae6439b472521d3c23fb99261deaf8964a70c5a` |
-| 02 | Bounded client wire implementation | Implemented locally; closure blocked | Pass, 2026-08-26 | Absent; see the [closure audit](conformance/stage-two-audit.md) |
+| 02 | Bounded client wire implementation | Complete | Pass, 2026-08-26 | [Evidence record](conformance/stage-two-evidence.md) |
 | 03 | Pure deterministic domain model | Not started | Not run | Absent |
 | 04 | Crypto adapters and account authentication | Not started | Not run | Absent |
 | 05 | Durable and recoverable persistence | Not started | Not run | Absent |
@@ -379,7 +379,7 @@ evidence manifest is tied to a committed source revision. Rendering is also
 blocked by the frozen topic and message-body limits recorded in the
 [Stage 02 closure audit](conformance/stage-two-audit.md).
 
-- [ ] `S02-001` **Implement incremental stream framing.** Handle fragmented and
+- [x] `S02-001` **Implement incremental stream framing.** Handle fragmented and
   coalesced reads, CRLF, EOF, timeouts, and exact physical-line limits without
   scanning or allocating beyond admitted bounds. ([evidence](conformance/stage-two-evidence.md#s02-001))
   - After: `S01-900`.
@@ -388,7 +388,7 @@ blocked by the frozen topic and message-body limits recorded in the
   - Invariants: `TRN-04`, `TRN-05`, `TRN-06`.
   - Evidence: every split/coalesce boundary, empty/equal/plus-one length, CRLF, timeout, and EOF transcript passes.
 
-- [ ] `S02-002` **Implement WebSocket message framing semantics.** Validate the
+- [x] `S02-002` **Implement WebSocket message framing semantics.** Validate the
   IRC-over-WebSocket message boundary, UTF-8, compression prohibition, size,
   and close behavior independently of the optional network listener. ([evidence](conformance/stage-two-evidence.md#s02-002))
   - After: `S02-001`.
@@ -397,7 +397,7 @@ blocked by the frozen topic and message-body limits recorded in the
   - Invariants: `TRN-02`, `TRN-04`, `TRN-05`.
   - Evidence: fragmented-message, binary-frame, invalid-UTF-8, extension, multi-line, and oversize negatives.
 
-- [ ] `S02-003` **Implement IRCv3 tags.** Parse and render tag names, values,
+- [x] `S02-003` **Implement IRCv3 tags.** Parse and render tag names, values,
   escapes, duplicates, client-only tags, and budgets canonically. ([evidence](conformance/stage-two-evidence.md#s02-003))
   - After: `S02-001`.
   - Targets: `agenc-ircd-client-wire`.
@@ -405,7 +405,7 @@ blocked by the frozen topic and message-body limits recorded in the
   - Invariants: `TRN-04`, `TRN-06`.
   - Evidence: ratified IRCv3 vectors plus all escape, duplicate, boundary, and malformed cases.
 
-- [ ] `S02-004` **Implement syntax parsing.** Produce `ParsedMessage` from a
+- [x] `S02-004` **Implement syntax parsing.** Produce `ParsedMessage` from a
   framed line with exact prefix, command, parameter, trailing, and UTF-8 rules;
   do not perform authorization or mutation. ([evidence](conformance/stage-two-evidence.md#s02-004))
   - After: `S02-001`, `S02-003`.
@@ -414,7 +414,7 @@ blocked by the frozen topic and message-body limits recorded in the
   - Invariants: `TRN-05`, `TRN-06`.
   - Evidence: every grammar arm and arity, prefix rejection, malformed command, parameter boundary, and differential transcript passes.
 
-- [ ] `S02-005` **Implement capability state.** Support CAP LS 302, REQ, ACK,
+- [x] `S02-005` **Implement capability state.** Support CAP LS 302, REQ, ACK,
   NAK, END, NEW, DEL, dependencies, line splitting, and reconnect-only profile
   transitions without silently enabling unsupported drafts. ([evidence](conformance/stage-two-evidence.md#s02-005))
   - After: `S02-004`.
@@ -423,7 +423,7 @@ blocked by the frozen topic and message-body limits recorded in the
   - Invariants: `E2E-07`, `TRN-04`, `TRN-06`.
   - Evidence: capability dependency, simultaneous change, unknown capability, line-budget, and downgrade transcripts.
 
-- [ ] `S02-006` **Implement the connection-registration wire state.** Enforce
+- [x] `S02-006` **Implement the connection-registration wire state.** Enforce
   permitted pre-registration commands, NICK/USER/CAP/SASL ordering, welcome
   burst ordering, keepalive, and bounded close output without implementing auth
   internals. ([evidence](conformance/stage-two-evidence.md#s02-006))
@@ -433,7 +433,7 @@ blocked by the frozen topic and message-body limits recorded in the
   - Invariants: `TRN-05`, `AUTH-02`, `OPS-04` at the wire boundary.
   - Evidence: every registration transition, invalid ordering, timeout, ping/pong, and close transcript.
 
-- [ ] `S02-007` **Implement SASL transport framing.** Handle AUTHENTICATE
+- [x] `S02-007` **Implement SASL transport framing.** Handle AUTHENTICATE
   chunking, mechanism selection surface, abort, timeout, and fixed public
   replies while leaving OPAQUE processing to `agenc-ircd-auth`. ([evidence](conformance/stage-two-evidence.md#s02-007))
   - After: `S02-005`, `S02-006`.
@@ -442,7 +442,7 @@ blocked by the frozen topic and message-body limits recorded in the
   - Invariants: `AUTH-01`, `AUTH-02`, `AUTH-10` at the carrier boundary.
   - Evidence: chunk width, plus marker, abort, unsupported mechanism, timeout, and response-shape transcripts.
 
-- [ ] `S02-008` **Implement capability-aware rendering.** Separate measuring
+- [x] `S02-008` **Implement capability-aware rendering.** Separate measuring
   from encoding, enforce exact client/server/combined line budgets, preserve
   canonical ordering, and never allocate before a matching permit is supplied. ([evidence](conformance/stage-two-evidence.md#s02-008))
   - After: `S02-003` through `S02-006`.
@@ -451,7 +451,7 @@ blocked by the frozen topic and message-body limits recorded in the
   - Invariants: `TRN-04`, `STA-08`, `CON-05`.
   - Evidence: mechanical wire-budget table, measure/encode equality, exact-capacity allocation tests, and every capability combination.
 
-- [ ] `S02-009` **Implement labeled replies, batches, and reply ordering.**
+- [x] `S02-009` **Implement labeled replies, batches, and reply ordering.**
   Render standard errors, numerics, labeled-response groups, and batch nesting
   exactly once and in the required order. ([evidence](conformance/stage-two-evidence.md#s02-009))
   - After: `S02-005`, `S02-008`.
@@ -460,7 +460,7 @@ blocked by the frozen topic and message-body limits recorded in the
   - Invariants: `STA-06`, `STA-08`, `PRV-02`.
   - Evidence: traditional/standard reply, partial-success, nested-batch, label, and ordering golden transcripts.
 
-- [ ] `S02-010` **Build the client transcript harness.** Drive framing,
+- [x] `S02-010` **Build the client transcript harness.** Drive framing,
   parsing, capability state, registration, and rendering with deterministic
   time and byte-exact expectations. ([evidence](conformance/stage-two-evidence.md#s02-010))
   - After: `S02-001` through `S02-009`.
@@ -469,7 +469,7 @@ blocked by the frozen topic and message-body limits recorded in the
   - Invariants: `TRN-*`, applicable `AUTH-*` and `STA-*` wire invariants.
   - Evidence: pinned base-client transcript corpus runs byte-identically.
 
-- [ ] `S02-011` **Fuzz every client-wire boundary.** Cover raw framing, tags,
+- [x] `S02-011` **Fuzz every client-wire boundary.** Cover raw framing, tags,
   commands, decimal values, base64, capability transitions, render plans, and
   fragmented/coalesced input with explicit memory and time envelopes. ([evidence](conformance/stage-two-evidence.md#s02-011))
   - After: `S02-010`.
@@ -478,7 +478,7 @@ blocked by the frozen topic and message-body limits recorded in the
   - Invariants: `TRN-04`, `TRN-05`, `TRN-06`, `CON-05`.
   - Evidence: reproducible fuzz records plus minimized failures promoted to ordinary tests.
 
-- [ ] `S02-900` **Pass the Stage 02 gate.** The complete client-wire surface
+- [x] `S02-900` **Pass the Stage 02 gate.** The complete client-wire surface
   must be total, bounded, capability-correct, and transcript-compatible before
   domain state consumes a parsed command. ([evidence](conformance/stage-two-evidence.md#s02-900))
   - After: `S02-001` through `S02-011`.

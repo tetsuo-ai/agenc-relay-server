@@ -119,7 +119,7 @@ DIRECT_CHECKSUMS = {
 }
 DEPENDENCY_TABLE_NAMES = {"dependencies", "dev-dependencies", "build-dependencies"}
 EXPECTED_EXTERNAL_EDGES = {
-    "agenc-ircd-types": {"base64", "precis-profiles", "zeroize"},
+    "agenc-ircd-types": {"base64", "precis-profiles", "subtle", "zeroize"},
     "agenc-ircd-client-wire": {"base64", "zeroize"},
     "agenc-ircd-federation-wire": {"base64", "sha2", "tls_codec", "zeroize"},
     "agenc-ircd-testkit": {"sha2", "subtle"},

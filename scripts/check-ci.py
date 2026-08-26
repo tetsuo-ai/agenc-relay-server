@@ -29,6 +29,7 @@ REQUIRED_WORKFLOW_SNIPPETS = (
     "fetch-depth: 0",
     "rustup toolchain install 1.98.0 --profile minimal",
     "rustup toolchain install nightly-2026-08-24 --profile minimal",
+    "rustup component add --toolchain nightly-2026-08-24 rustfmt",
     "cargo +1.98.0 install --locked cargo-deny --version 0.20.2",
     "cargo +1.98.0 install --locked cargo-audit --version 0.22.2",
     "cargo +1.98.0 install --locked cargo-llvm-cov --version 0.9.0",
@@ -90,6 +91,7 @@ REQUIRED_STAGE_ONE = (
     ("python3", "scripts/check-stage-one.py", "self-test"),
 )
 REQUIRED_STAGE_TWO = (
+    ("python3", "scripts/requirements.py", "check-stage-two"),
     ("python3", "scripts/generate-stage-two.py", "--check"),
     ("python3", "scripts/check-stage-two.py", "check"),
     ("python3", "scripts/check-stage-two.py", "self-test"),

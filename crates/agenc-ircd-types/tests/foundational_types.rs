@@ -5,15 +5,16 @@
 use std::error::Error;
 
 use agenc_ircd_types::{
-    AccountId, AccountLabel, AccountRandomId, AuthGrantId, BoundedBytes, BoundedUtf8, ByteCount,
-    CAPABILITIES, CLIENT_COMMANDS, CONSTANT_REGISTRY, ChannelInstanceId, ChannelName, ClockError,
-    ConnectionId, ControlPolicy, DatabaseId, DisplayName, DurationMilliseconds, ENUM_REGISTRY,
-    EntropyError, EntropySource, EntryId, EventId, FEDERATION_WIRE_FORMS, Generation, InviteId,
-    MAX_GLOB_BYTES, MAX_TYPED_MASK_BYTES, MessageId, MonotonicTick, NetworkId, Nickname,
-    NormalizedLogin, ObjectCount, OriginId, PublicCloak, PublicErrorCode, QueueDemand, Quota,
-    RecoveryEpoch, RequestId, Revision, SERVER_COMMANDS, SERVER_NUMERICS, STANDARD_REPLY_CODES,
-    SafeContext, SequenceNumber, ServerId, ServerIncarnation, ServerName, SessionId, TransactionId,
-    TypedMask, UnixMilliseconds, UserId, UtcSecond, ValidationError,
+    AccountDeletionToken, AccountId, AccountLabel, AccountRandomId, AuthGrantId, BoundedBytes,
+    BoundedUtf8, ByteCount, CAPABILITIES, CLIENT_COMMANDS, CONSTANT_REGISTRY, ChannelInstanceId,
+    ChannelName, ClockError, ConnectionId, ControlPolicy, DatabaseId, DisplayName,
+    DurationMilliseconds, ENUM_REGISTRY, EntropyError, EntropySource, EntryId, EventId,
+    FEDERATION_WIRE_FORMS, Generation, InviteId, MAX_GLOB_BYTES, MAX_TYPED_MASK_BYTES, MessageId,
+    MonotonicTick, NetworkId, Nickname, NormalizedLogin, ObjectCount, OriginId, PublicCloak,
+    PublicErrorCode, QueueDemand, Quota, RecoveryEpoch, RequestId, Revision, SERVER_COMMANDS,
+    SERVER_NUMERICS, STANDARD_REPLY_CODES, SafeContext, SequenceNumber, ServerId,
+    ServerIncarnation, ServerName, SessionId, TransactionId, TypedMask, UnixMilliseconds, UserId,
+    UtcSecond, ValidationError,
 };
 
 #[test]
@@ -30,6 +31,13 @@ fn capability_port_errors_have_closed_descriptions() {
         ClockError::OutOfRange.to_string(),
         "wall clock value is outside its UTC domain"
     );
+}
+
+#[test]
+fn account_deletion_tokens_match_only_the_exact_candidate() {
+    let token = AccountDeletionToken::from_bytes([7; 16]);
+    assert!(token.matches(&[7; 16]));
+    assert!(!token.matches(&[8; 16]));
 }
 
 struct IncrementingEntropy(u8);

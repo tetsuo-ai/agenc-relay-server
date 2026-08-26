@@ -151,7 +151,8 @@ fn exercise_boundary_render_plan(data: &[u8], capabilities: &CapabilityState) {
 }
 
 fn exercise_exact_render_boundaries(capabilities: &CapabilityState) {
-    let exact_trailing_bytes = MAX_COMMAND_BYTES.saturating_sub(EXACT_TAGMSG_FIXED_BYTES);
+    let traditional_command_bytes = MAX_TRADITIONAL_LINE_BYTES.saturating_sub(2);
+    let exact_trailing_bytes = traditional_command_bytes.saturating_sub(EXACT_TAGMSG_FIXED_BYTES);
     let trailing = "x".repeat(exact_trailing_bytes);
     let Ok(mut message) = WireMessage::new("s", "TAGMSG", &["t"], Some(&trailing)) else {
         panic!("exact command budget was rejected");
@@ -183,7 +184,8 @@ fn exercise_exact_render_boundaries(capabilities: &CapabilityState) {
     );
     assert_eq!(rendered_snapshot(&message), Ok(before));
 
-    let oversized_trailing = "x".repeat(exact_trailing_bytes.saturating_add(1));
+    let oversized_trailing =
+        "x".repeat(MAX_COMMAND_BYTES.saturating_sub(EXACT_TAGMSG_FIXED_BYTES) + 1);
     assert!(WireMessage::new("s", "TAGMSG", &["t"], Some(&oversized_trailing)).is_err());
 }
 
