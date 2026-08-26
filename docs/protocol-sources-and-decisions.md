@@ -111,6 +111,14 @@ The Tor community setup guide is operational guidance only. The pinned Tor
 specification commit and the architecture's exact listener/isolation/DNS rules
 control conformance.
 
+The local version-1 client profile deliberately extends the complete IRC
+message envelope to 8,703 stream bytes so its fixed 1,024-byte topics and
+512-byte message bodies remain representable with required prefixes and
+targets. Ratified message-tag side and combined-section limits remain intact,
+CAP replies retain a 512-byte compatibility budget, and all bytes share the
+one physical ceiling. This is a locally versioned narrowing/extension decision,
+not a claim that legacy IRC clients accept every maximum-sized message.
+
 ## 5. Initial Rust dependency evidence
 
 These checksums came from the crates.io version API on 2026-08-24. They pin

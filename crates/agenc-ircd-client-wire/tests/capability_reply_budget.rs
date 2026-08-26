@@ -6,7 +6,7 @@ use std::error::Error;
 
 use agenc_ircd_client_wire::{
     CapError, CapRequestReply, CapabilityProfile, CapabilitySpec, CapabilityState,
-    MAX_COMMAND_BYTES, RenderError, WireMessage,
+    MAX_TRADITIONAL_LINE_BYTES, WireMessage,
 };
 
 const MAX_SERVER_NAME_WIRE_BYTES: usize = 253;
@@ -20,7 +20,8 @@ const CAP_LIST_FIXED_BYTES: usize = 1
     + 1
     + "LIST".len()
     + 2;
-const CAP_TOKEN_LIST_BUDGET: usize = MAX_COMMAND_BYTES - CAP_LIST_FIXED_BYTES;
+const CAP_COMMAND_BYTES: usize = MAX_TRADITIONAL_LINE_BYTES - 2;
+const CAP_TOKEN_LIST_BUDGET: usize = CAP_COMMAND_BYTES - CAP_LIST_FIXED_BYTES;
 const MAX_SERVER_NAME: &str = concat!(
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.",
     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.",
@@ -61,7 +62,8 @@ extended-join invite-notify labeled-response message-ids message-tags monitor mu
 server-time setname standard-replies userhost-in-names sts";
 
 #[test]
-fn worst_case_list_renders_at_the_boundary_and_rejects_plus_one() -> Result<(), Box<dyn Error>> {
+fn capability_budget_remains_traditional_inside_the_extended_envelope() -> Result<(), Box<dyn Error>>
+{
     assert_eq!(MAX_SERVER_NAME.len(), MAX_SERVER_NAME_WIRE_BYTES);
     assert_eq!(MAX_CAP_TARGET.len(), MAX_CAP_TARGET_WIRE_BYTES);
 
@@ -71,17 +73,14 @@ fn worst_case_list_renders_at_the_boundary_and_rejects_plus_one() -> Result<(), 
         &[MAX_CAP_TARGET, "LIST"],
         Some(EXACT_REQUEST),
     )?;
-    assert_eq!(exact.measure()?.bytes(), MAX_COMMAND_BYTES + 2);
-    assert_eq!(
-        WireMessage::new(
-            MAX_SERVER_NAME,
-            "CAP",
-            &[MAX_CAP_TARGET, "LIST"],
-            Some(PLUS_ONE_REQUEST),
-        )
-        .err(),
-        Some(RenderError::LineBudget)
-    );
+    assert_eq!(exact.measure()?.bytes(), MAX_TRADITIONAL_LINE_BYTES);
+    let extended = WireMessage::new(
+        MAX_SERVER_NAME,
+        "CAP",
+        &[MAX_CAP_TARGET, "LIST"],
+        Some(PLUS_ONE_REQUEST),
+    )?;
+    assert_eq!(extended.measure()?.bytes(), MAX_TRADITIONAL_LINE_BYTES + 1);
     Ok(())
 }
 

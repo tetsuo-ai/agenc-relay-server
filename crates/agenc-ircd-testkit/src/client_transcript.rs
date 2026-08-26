@@ -5,11 +5,11 @@ use std::error::Error;
 use std::fmt;
 
 use agenc_ircd_client_wire::{
-    AccessTokenPolicy, CapRequestReply, CapabilityProfile, CapabilitySpec, MAX_COMMAND_BYTES,
-    OutputBudget, RegisteredCommandKind, RegistrationAction, RegistrationAuthCarrier,
-    RegistrationError, RegistrationEvent, RegistrationPhase, RegistrationState, RenderedMessage,
-    SecretBytes, StreamFramer, WelcomeStep, WireMessage, isupport_messages, numeric_reply,
-    parse_message, split_capability_lines,
+    AccessTokenPolicy, CapRequestReply, CapabilityProfile, CapabilitySpec,
+    MAX_TRADITIONAL_LINE_BYTES, OutputBudget, RegisteredCommandKind, RegistrationAction,
+    RegistrationAuthCarrier, RegistrationError, RegistrationEvent, RegistrationPhase,
+    RegistrationState, RenderedMessage, SecretBytes, StreamFramer, WelcomeStep, WireMessage,
+    isupport_messages, numeric_reply, parse_message, split_capability_lines,
 };
 use agenc_ircd_types::NetworkId;
 use subtle::ConstantTimeEq as _;
@@ -1024,7 +1024,7 @@ fn capability_trailing_budget(
         .and_then(|bytes| bytes.checked_add(2))
         .and_then(|bytes| bytes.checked_add(2))
         .ok_or(ClientTranscriptError::Overflow)?;
-    MAX_COMMAND_BYTES
+    MAX_TRADITIONAL_LINE_BYTES
         .checked_sub(fixed)
         .ok_or(ClientTranscriptError::Rendering)
 }

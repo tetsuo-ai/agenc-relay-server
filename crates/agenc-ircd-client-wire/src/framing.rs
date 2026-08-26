@@ -230,8 +230,7 @@ impl StreamFramer {
     }
 }
 
-const MAX_CLIENT_STREAM_CONTENT_CAPACITY: usize =
-    1 + MAX_CLIENT_TAG_DATA_BYTES + 1 + MAX_COMMAND_BYTES;
+const MAX_CLIENT_STREAM_CONTENT_CAPACITY: usize = MAX_COMMAND_BYTES;
 
 fn validate_line_budgets(line: &[u8]) -> Result<(), FramingError> {
     if line.first().copied() != Some(b'@') {
@@ -258,6 +257,9 @@ fn validate_line_budgets(line: &[u8]) -> Result<(), FramingError> {
     }
     let command_bytes = line.len().saturating_sub(space.saturating_add(1));
     if command_bytes > MAX_COMMAND_BYTES {
+        return Err(FramingError::LineTooLong);
+    }
+    if line.len() > MAX_CLIENT_STREAM_CONTENT_CAPACITY {
         return Err(FramingError::LineTooLong);
     }
     Ok(())

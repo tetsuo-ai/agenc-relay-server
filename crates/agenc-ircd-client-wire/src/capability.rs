@@ -5,7 +5,9 @@ use std::fmt;
 
 use agenc_ircd_types::CAPABILITIES;
 
-use crate::{CanonicalBase64Url, MAX_COMMAND_BYTES};
+use crate::{CanonicalBase64Url, MAX_TRADITIONAL_LINE_BYTES};
+
+const MAX_CAP_COMMAND_BYTES: usize = MAX_TRADITIONAL_LINE_BYTES - 2;
 
 const MAX_SERVER_NAME_WIRE_BYTES: usize = 253;
 const MAX_CAP_TARGET_WIRE_BYTES: usize = 32;
@@ -21,7 +23,7 @@ const CAP_LIST_FIXED_BYTES: usize = 1
 // LIST cannot continue, so reserve the longest non-continuation CAP form at
 // the frozen server-name and nickname maxima. ACK, NAK, and LS continuation
 // have no more fixed overhead than LIST.
-const MAX_CAP_TOKEN_LIST_BYTES: usize = MAX_COMMAND_BYTES - CAP_LIST_FIXED_BYTES;
+const MAX_CAP_TOKEN_LIST_BYTES: usize = MAX_CAP_COMMAND_BYTES - CAP_LIST_FIXED_BYTES;
 
 /// One currently advertisable capability and optional LS/NEW value.
 #[derive(Debug, Eq, PartialEq)]
@@ -271,7 +273,8 @@ impl CapabilityState {
         request: &str,
         profile: &CapabilityProfile,
     ) -> Result<CapRequestReply, CapError> {
-        if request.len() > MAX_COMMAND_BYTES || request.bytes().any(|byte| byte.is_ascii_control())
+        if request.len() > MAX_CAP_COMMAND_BYTES
+            || request.bytes().any(|byte| byte.is_ascii_control())
         {
             return Err(CapError::InvalidValue);
         }
@@ -834,7 +837,7 @@ mod tests {
         );
         assert_eq!(
             no_notify_302.request(
-                &"x".repeat(super::MAX_COMMAND_BYTES + 1),
+                &"x".repeat(super::MAX_CAP_COMMAND_BYTES + 1),
                 &profile_without_notify
             ),
             Err(CapError::InvalidValue)

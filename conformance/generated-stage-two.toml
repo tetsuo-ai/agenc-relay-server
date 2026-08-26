@@ -104,7 +104,7 @@ value = 8191
 
 [[budget]]
 name = "stream.command_without_crlf"
-value = 510
+value = 8701
 
 [[budget]]
 name = "stream.physical_with_crlf"
@@ -132,7 +132,7 @@ value = 256
 
 [[budget]]
 name = "websocket.command_without_crlf"
-value = 510
+value = 8701
 
 [[budget]]
 name = "websocket.message_without_crlf"

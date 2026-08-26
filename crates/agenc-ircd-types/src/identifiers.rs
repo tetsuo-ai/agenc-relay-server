@@ -4,6 +4,7 @@ use std::fmt;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use subtle::ConstantTimeEq as _;
 use zeroize::Zeroize;
 
 use crate::{EntropyError, EntropySource, ValidationError};
@@ -124,6 +125,39 @@ identifier!(DatabaseId, 16, "A 16-byte durable database identity.");
 identifier!(ConnectionId, 16, "A 16-byte accepted transport identity.");
 identifier!(InviteId, 16, "A 16-byte invitation identity.");
 identifier!(EntryId, 16, "A 16-byte list-mode entry identity.");
+
+/// A one-use account-deletion confirmation token.
+///
+/// The token is move-only, redacted from formatting, and zeroized on drop.
+/// Its only public byte exposure is the exact deletion reply/confirmation
+/// boundary.
+pub struct AccountDeletionToken([u8; 16]);
+
+impl AccountDeletionToken {
+    /// Constructs a token from explicitly supplied entropy bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrows the bytes for the deletion reply or confirmation boundary.
+    #[must_use]
+    pub const fn expose_for_deletion(&self) -> &[u8; 16] {
+        &self.0
+    }
+
+    /// Compares a supplied token without data-dependent early exit.
+    #[must_use]
+    pub fn matches(&self, candidate: &[u8; 16]) -> bool {
+        bool::from(self.0.ct_eq(candidate))
+    }
+}
+
+impl Drop for AccountDeletionToken {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
 
 /// A one-use 32-byte authentication bearer grant.
 ///

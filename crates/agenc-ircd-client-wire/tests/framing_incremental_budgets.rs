@@ -27,7 +27,7 @@ fn fragmented_tag_input_fails_at_the_client_side_limit() -> Result<(), Box<dyn E
 fn fragmented_tagged_command_fails_at_the_command_limit() -> Result<(), Box<dyn Error>> {
     let mut framer = StreamFramer::new()?;
     framer.feed(b"@a=b ", |_| {})?;
-    framer.feed(&vec![b'A'; 510], |_| {})?;
+    framer.feed(&vec![b'A'; 8_696], |_| {})?;
 
     assert_eq!(
         framer.feed(b"A", |_| {}).err(),
@@ -43,7 +43,7 @@ fn fragmented_maximal_tagged_line_is_admitted() -> Result<(), Box<dyn Error>> {
     framer.feed(b"@", |_| emitted += 1)?;
     framer.feed(&vec![b'a'; 4_094], |_| emitted += 1)?;
     framer.feed(b" ", |_| emitted += 1)?;
-    framer.feed(&vec![b'A'; 510], |_| emitted += 1)?;
+    framer.feed(&vec![b'A'; 4_605], |_| emitted += 1)?;
     framer.feed(b"\r\n", |_| emitted += 1)?;
 
     assert_eq!(emitted, 1);

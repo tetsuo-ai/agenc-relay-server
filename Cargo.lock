@@ -122,6 +122,7 @@ version = "0.0.0"
 dependencies = [
  "base64",
  "precis-profiles",
+ "subtle",
  "zeroize",
 ]
 

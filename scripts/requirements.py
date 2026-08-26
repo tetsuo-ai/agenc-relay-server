@@ -318,6 +318,8 @@ def target_for(document: SourceDocument, section: str, invariant: str | None = N
 def task_for(document: SourceDocument, section: str, invariant: str | None = None) -> str:
     """Assign the implementation stage that first closes one requirement."""
     if invariant is not None:
+        if invariant in {"TRN-04", "TRN-05", "TRN-06"}:
+            return "S02-900"
         family = invariant.split("-", 1)[0]
         return {
             "TRN": "S06-900",
@@ -881,7 +883,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "command",
-        choices=("generate", "generate-bindings", "check", "check-stage-zero", "check-stage-one", "self-test"),
+        choices=(
+            "generate",
+            "generate-bindings",
+            "check",
+            "check-stage-zero",
+            "check-stage-one",
+            "check-stage-two",
+            "check-stage-three",
+            "self-test",
+        ),
     )
     arguments = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
@@ -900,8 +911,13 @@ def main() -> None:
         elif arguments.command == "check":
             count = validate(root)
             print(f"requirement ledger: ok ({count} records)")
-        elif arguments.command in {"check-stage-zero", "check-stage-one"}:
-            stage = 0 if arguments.command.endswith("zero") else 1
+        elif arguments.command.startswith("check-stage-"):
+            stage = {
+                "check-stage-zero": 0,
+                "check-stage-one": 1,
+                "check-stage-two": 2,
+                "check-stage-three": 3,
+            }[arguments.command]
             count = validate_stage(root, stage)
             print(f"requirement Stage {stage:02d}: ok ({count} owned records)")
         else:

@@ -1013,23 +1013,23 @@ status = "unimplemented"
 [[binding]]
 id = "ARCH-TRN-04"
 target_crates = ["agenc-ircd-client-wire"]
-task_ids = ["S06-900"]
+task_ids = ["S02-900"]
 evidence_ids = ["EVID-ARCH-TRN-04"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-TRN-05"
 target_crates = ["agenc-ircd-client-wire"]
-task_ids = ["S06-900"]
+task_ids = ["S02-900"]
 evidence_ids = ["EVID-ARCH-TRN-05"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-TRN-06"
 target_crates = ["agenc-ircd-client-wire"]
-task_ids = ["S06-900"]
+task_ids = ["S02-900"]
 evidence_ids = ["EVID-ARCH-TRN-06"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-03E795692C36DFAE083B"

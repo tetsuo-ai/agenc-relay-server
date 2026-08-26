@@ -94,6 +94,9 @@ argv = ["python3", "scripts/check-stage-one.py", "self-test"]
 includes = ["stage-one"]
 
 [[gate.stage-two.command]]
+argv = ["python3", "scripts/requirements.py", "check-stage-two"]
+
+[[gate.stage-two.command]]
 argv = ["python3", "scripts/generate-stage-two.py", "--check"]
 
 [[gate.stage-two.command]]
