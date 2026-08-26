@@ -5,14 +5,22 @@ use agenc_ircd_types::{
     MAPPING_DESCRIPTORS, Nickname, NormalizedLogin, PublicCloak, SERVER_COMMANDS, SERVER_NUMERICS,
     TypedMask,
 };
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 use crate::codec::{
     CodecError, DecodeBudget, SchemaObject, WireValue, decode_one_without_embedded,
+    measured_fields_len,
 };
 use crate::schema::SchemaDescriptor;
 
 const ACCOUNT_ID_BYTES: usize = 24;
+const SERVER_ID_BYTES: usize = 16;
+const SESSION_ID_BYTES: usize = 16;
 const USER_ID_BYTES: usize = 16;
+const SESSION_PROJECTION_HOME_SERVER_OFFSET: usize = SESSION_ID_BYTES + USER_ID_BYTES;
+const SESSION_PROJECTION_HOME_SERVER_END: usize =
+    SESSION_PROJECTION_HOME_SERVER_OFFSET + SERVER_ID_BYTES;
 
 pub(crate) fn validate_schema_semantics(
     schema: &SchemaDescriptor,
@@ -289,15 +297,50 @@ fn validate_discriminated_embedded(
     };
     let kind = unsigned_field(schema, fields, kind_field)?;
     let nested_schema = discriminated_arm(schema.name, kind)?;
-    validate_embedded(
-        schema,
-        fields,
-        value_field,
-        nested_schema,
-        budget,
-        depth,
-        pending,
-    )
+    if schema.name != "FederationEvent" {
+        return validate_embedded(
+            schema,
+            fields,
+            value_field,
+            nested_schema,
+            budget,
+            depth,
+            pending,
+        );
+    }
+    let (object, child_depth) =
+        decode_embedded(schema, fields, value_field, nested_schema, budget, depth)?;
+    validate_event_target_binding(schema, fields, &object)?;
+    retain_embedded(pending, object, child_depth)
+}
+
+fn validate_event_target_binding(
+    envelope_schema: &SchemaDescriptor,
+    envelope_fields: &[WireValue],
+    event: &SchemaObject,
+) -> Result<(), CodecError> {
+    let target_server_id = opaque_field(envelope_schema, envelope_fields, "target_server_id")?;
+    for value in &event.fields {
+        let WireValue::Structure(session_view) = value else {
+            continue;
+        };
+        if session_view.schema.name != "FederationSessionEventView" {
+            continue;
+        }
+        let projection = opaque_field(
+            session_view.schema,
+            &session_view.fields,
+            "home_session_projection",
+        )?;
+        if projection.is_empty() {
+            continue;
+        }
+        let home_server_id = projection
+            .get(SESSION_PROJECTION_HOME_SERVER_OFFSET..SESSION_PROJECTION_HOME_SERVER_END)
+            .ok_or(CodecError::CrossReference)?;
+        semantic(home_server_id == target_server_id)?;
+    }
+    Ok(())
 }
 
 fn discriminated_arm(owner_schema: &str, kind: u64) -> Result<&'static str, CodecError> {
@@ -589,14 +632,14 @@ fn validate_channel_name(
 fn validate_client_tag(schema: &SchemaDescriptor, fields: &[WireValue]) -> Result<(), CodecError> {
     let key = opaque_field(schema, fields, "key")?;
     let value = opaque_field(schema, fields, "value")?;
+    std::str::from_utf8(key).map_err(|_| CodecError::CrossReference)?;
+    std::str::from_utf8(value).map_err(|_| CodecError::CrossReference)?;
     let key_valid = key.first() == Some(&b'+')
         && key
             .iter()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.' | b'/'));
+            .all(|byte| !matches!(byte, 0 | b'\r' | b'\n' | b' ' | b';' | b'='));
     semantic(key_valid)?;
-    BoundedUtf8::<0, 256>::try_from_bytes(value, ControlPolicy::RejectAll)
-        .map_err(|_| CodecError::CrossReference)?;
-    Ok(())
+    semantic(!value.contains(&0))
 }
 
 fn validate_delivered_message(
@@ -654,7 +697,7 @@ fn validate_request_tuple(
     let empty = request_ids.iter().all(|value| value.is_empty());
     let present = request_ids.iter().all(|value| value.len() == 16);
     let tuple_valid = (empty && generation == 0 && sequence == 0 && event_kind != 22)
-        || (present && generation != 0 && sequence != 0 && event_kind == 22);
+        || (present && event_kind == 22);
     semantic(tuple_valid)
 }
 
@@ -801,6 +844,7 @@ fn validate_origin(schema: &SchemaDescriptor, fields: &[WireValue]) -> Result<()
     let account_generation = unsigned_field(schema, fields, "account_session_generation")?;
     semantic((session.is_empty() && user.is_empty()) || (session.len() == 16 && user.len() == 16))?;
     validate_optional_account(account, account_generation)?;
+    semantic(account.is_empty() || !session.is_empty())?;
     if generation == 0 {
         return semantic(
             predecessor.iter().all(|byte| *byte == 0)
@@ -814,9 +858,9 @@ fn validate_origin(schema: &SchemaDescriptor, fields: &[WireValue]) -> Result<()
 
 fn validate_parameter(schema: &SchemaDescriptor, fields: &[WireValue]) -> Result<(), CodecError> {
     let value = opaque_field(schema, fields, "value")?;
+    std::str::from_utf8(value).map_err(|_| CodecError::CrossReference)?;
     semantic(
-        value.is_ascii()
-            && value.first() != Some(&b':')
+        value.first() != Some(&b':')
             && !value
                 .iter()
                 .any(|byte| matches!(byte, b'\0' | b'\r' | b'\n' | b' ')),
@@ -885,7 +929,8 @@ fn validate_result_envelope(
     } else {
         replies.len() <= 64
     };
-    semantic(completion_valid && replies_valid)
+    let page_size_valid = kind != 7 || measured_fields_len(schema, fields)? <= 65_536;
+    semantic(completion_valid && replies_valid && page_size_valid)
 }
 
 fn validate_session_projection(
@@ -931,19 +976,48 @@ fn validate_typed_mask(schema: &SchemaDescriptor, fields: &[WireValue]) -> Resul
         4 => "$c:",
         _ => return Err(CodecError::UnknownDiscriminant),
     };
-    let value_text = if kind == 2 {
-        use base64::Engine as _;
-        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-        URL_SAFE_NO_PAD.encode(value)
+    let encoded_value_length = if kind == 2 {
+        base64url_encoded_length(value.len())?
     } else {
-        std::str::from_utf8(value)
-            .map_err(|_| CodecError::CrossReference)?
-            .to_owned()
+        std::str::from_utf8(value).map_err(|_| CodecError::CrossReference)?;
+        value.len()
     };
     let wrapper = if quiet == 1 { "$q:" } else { "" };
-    let rendered = format!("{wrapper}{prefix}{value_text}");
+    let rendered_length = wrapper
+        .len()
+        .checked_add(prefix.len())
+        .and_then(|length| length.checked_add(encoded_value_length))
+        .ok_or(CodecError::Overflow)?;
+    let mut rendered = String::new();
+    rendered
+        .try_reserve_exact(rendered_length)
+        .map_err(|_| CodecError::AllocationFailed)?;
+    rendered.push_str(wrapper);
+    rendered.push_str(prefix);
+    if kind == 2 {
+        URL_SAFE_NO_PAD.encode_string(value, &mut rendered);
+    } else {
+        rendered.push_str(std::str::from_utf8(value).map_err(|_| CodecError::CrossReference)?);
+    }
+    if rendered.len() != rendered_length {
+        return Err(CodecError::Overflow);
+    }
     TypedMask::parse(&rendered).map_err(|_| CodecError::CrossReference)?;
     Ok(())
+}
+
+fn base64url_encoded_length(decoded: usize) -> Result<usize, CodecError> {
+    let complete = decoded
+        .checked_div(3)
+        .and_then(|value| value.checked_mul(4))
+        .ok_or(CodecError::Overflow)?;
+    let remainder = match decoded % 3 {
+        0 => 0,
+        1 => 2,
+        2 => 3,
+        _ => return Err(CodecError::Overflow),
+    };
+    complete.checked_add(remainder).ok_or(CodecError::Overflow)
 }
 
 fn validate_history_selector(
@@ -1088,6 +1162,8 @@ fn validate_topic_change(
     fields: &[WireValue],
 ) -> Result<(), CodecError> {
     validate_nonzero_field(schema, fields, "resulting_revision")?;
+    let actor = structure_field(schema, fields, "actor")?;
+    semantic(unsigned_field(actor.schema, &actor.fields, "user_present")? == 1)?;
     let presence = unsigned_field(schema, fields, "topic_presence")?;
     let topic = opaque_field(schema, fields, "topic")?;
     let set_at = unsigned_field(schema, fields, "set_at")?;
@@ -1215,12 +1291,14 @@ fn validate_mode_vector(
         }
         let direction = unsigned_field(change.schema, &change.fields, "direction")?;
         let argument = opaque_field(change.schema, &change.fields, "argument")?;
+        let argument_identifies_target = matches!(code, 1..=3 | 12..=16);
         for prior in changes.iter().take(position) {
             let same_direction =
                 unsigned_field(prior.schema, &prior.fields, "direction")? == direction;
             let same_code = unsigned_field(prior.schema, &prior.fields, "mode_code")? == code;
-            let same_argument = opaque_field(prior.schema, &prior.fields, "argument")? == argument;
-            if same_direction && same_code && same_argument {
+            let same_target_or_mask = !argument_identifies_target
+                || opaque_field(prior.schema, &prior.fields, "argument")? == argument;
+            if same_direction && same_code && same_target_or_mask {
                 return Err(CodecError::DuplicateValue);
             }
         }

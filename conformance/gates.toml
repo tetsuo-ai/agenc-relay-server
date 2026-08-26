@@ -89,3 +89,27 @@ argv = ["python3", "scripts/check-stage-one.py", "check"]
 
 [[gate.stage-one.command]]
 argv = ["python3", "scripts/check-stage-one.py", "self-test"]
+
+[gate.stage-two]
+includes = ["stage-one"]
+
+[[gate.stage-two.command]]
+argv = ["python3", "scripts/generate-stage-two.py", "--check"]
+
+[[gate.stage-two.command]]
+argv = ["python3", "scripts/check-stage-two.py", "check"]
+
+[[gate.stage-two.command]]
+argv = ["python3", "scripts/check-stage-two.py", "self-test"]
+
+[[gate.stage-two.command]]
+argv = ["cargo", "+nightly-2026-08-24", "fmt", "--manifest-path", "fuzz/Cargo.toml", "--", "--check"]
+
+[[gate.stage-two.command]]
+argv = ["cargo", "+nightly-2026-08-24", "check", "--manifest-path", "fuzz/Cargo.toml", "--bins", "--locked"]
+
+[[gate.stage-two.command]]
+argv = ["cargo", "deny", "--manifest-path", "fuzz/Cargo.toml", "check"]
+
+[[gate.stage-two.command]]
+argv = ["bash", "scripts/run-stage-two-fuzz.sh"]

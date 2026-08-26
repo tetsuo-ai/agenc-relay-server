@@ -1,68 +1,73 @@
 ---
 name: cluster-30
-description: "Skill for the Cluster_30 area of agenc-ircd. 5 symbols across 1 files."
+description: "Skill for the Cluster_30 area of agenc-ircd. 10 symbols across 2 files."
 ---
 
 # Cluster_30
 
-5 symbols | 1 files | Cohesion: 67%
+10 symbols | 2 files | Cohesion: 65%
 
 ## When to Use
 
 - Working with code in `crates/`
-- Understanding how try_from_slice, try_from_vec, len work
+- Understanding how numeric_reply, isupport_messages work
 - Modifying cluster_30-related functionality
 
 ## Key Files
 
 | File | Symbols |
 |------|---------|
-| `crates/agenc-ircd-types/src/bounded.rs` | try_from_slice, try_from_vec, len, try_from_bytes, try_from_str |
+| `crates/agenc-ircd-client-wire/src/render.rs` | encode_public_identifier, numeric_reply, stage_two_numeric_shape_is_applicable, stage_two_numeric_middle_is_applicable, isupport_messages (+1) |
+| `crates/agenc-ircd-testkit/src/client_transcript.rs` | queue_welcome, queue_welcome_step, record_welcome_step, welcome_numerics |
 
 ## Entry Points
 
 Start here when exploring this area:
 
-- **`try_from_slice`** (Function) — `crates/agenc-ircd-types/src/bounded.rs:31`
-- **`try_from_vec`** (Function) — `crates/agenc-ircd-types/src/bounded.rs:42`
-- **`len`** (Function) — `crates/agenc-ircd-types/src/bounded.rs:55`
-- **`try_from_bytes`** (Function) — `crates/agenc-ircd-types/src/bounded.rs:89`
-- **`try_from_str`** (Function) — `crates/agenc-ircd-types/src/bounded.rs:96`
+- **`numeric_reply`** (Function) — `crates/agenc-ircd-client-wire/src/render.rs:714`
+- **`isupport_messages`** (Function) — `crates/agenc-ircd-client-wire/src/render.rs:805`
 
 ## Key Symbols
 
 | Symbol | Type | File | Line |
 |--------|------|------|------|
-| `try_from_slice` | Function | `crates/agenc-ircd-types/src/bounded.rs` | 31 |
-| `try_from_vec` | Function | `crates/agenc-ircd-types/src/bounded.rs` | 42 |
-| `len` | Function | `crates/agenc-ircd-types/src/bounded.rs` | 55 |
-| `try_from_bytes` | Function | `crates/agenc-ircd-types/src/bounded.rs` | 89 |
-| `try_from_str` | Function | `crates/agenc-ircd-types/src/bounded.rs` | 96 |
+| `numeric_reply` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 714 |
+| `isupport_messages` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 805 |
+| `encode_public_identifier` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 691 |
+| `stage_two_numeric_shape_is_applicable` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 746 |
+| `stage_two_numeric_middle_is_applicable` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 758 |
+| `prefixed_value` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 1341 |
+| `queue_welcome` | Function | `crates/agenc-ircd-testkit/src/client_transcript.rs` | 718 |
+| `queue_welcome_step` | Function | `crates/agenc-ircd-testkit/src/client_transcript.rs` | 730 |
+| `record_welcome_step` | Function | `crates/agenc-ircd-testkit/src/client_transcript.rs` | 780 |
+| `welcome_numerics` | Function | `crates/agenc-ircd-testkit/src/client_transcript.rs` | 822 |
 
 ## Execution Flows
 
 | Flow | Type | Steps |
 |------|------|-------|
-| `Validate_mode_change → New` | cross_community | 6 |
-| `Validate_mode_change → Len` | cross_community | 6 |
-| `Validate_operation_schema → Len` | cross_community | 5 |
-| `Validate_event_schema → Len` | cross_community | 5 |
-| `Validate_session_hidden → New` | cross_community | 5 |
-| `Validate_session_hidden → Len` | cross_community | 5 |
-| `Validate_topic_change → New` | cross_community | 5 |
-| `Validate_topic_change → Len` | cross_community | 5 |
-| `Validate_away_fields → New` | cross_community | 5 |
-| `Validate_away_fields → Len` | cross_community | 5 |
+| `Labeled_response → Validate_parameter_count` | cross_community | 6 |
+| `Labeled_response → Command_bytes` | cross_community | 6 |
+| `Labeled_response → Validate_prefix` | cross_community | 6 |
+| `Labeled_response → Validate_command` | cross_community | 6 |
+| `Queue_welcome_step → Command_bytes` | cross_community | 4 |
+| `Queue_welcome_step → Combined_tag_section` | cross_community | 4 |
+| `Queue_welcome_step → MeasuredMessage` | cross_community | 4 |
+| `Isupport_messages → Validate_command` | cross_community | 4 |
+| `Isupport_messages → Validate_parameter_count` | cross_community | 4 |
+| `Isupport_messages → Command_bytes` | cross_community | 4 |
 
 ## Connected Areas
 
 | Area | Connections |
 |------|-------------|
-| Tests | 2 calls |
+| Cluster_85 | 7 calls |
+| Tests | 3 calls |
+| Cluster_24 | 1 calls |
 
 ## How to Explore
 
-1. `context({name: "try_from_slice"})` — see callers and callees
+1. `context({name: "numeric_reply"})` — see callers and callees
 2. `query({search_query: "cluster_30"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

@@ -9,6 +9,14 @@ use sha2::{Digest, Sha256};
 pub const MAX_REFERENCE_VECTORS: usize = 4_096;
 /// Maximum decoded bytes accepted across one vector manifest.
 pub const MAX_REFERENCE_VECTOR_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum retained metadata bytes in one manifest record.
+const MAX_REFERENCE_RECORD_METADATA_BYTES: usize = 256;
+/// Maximum retained identifier, schema, hash, and provenance bytes.
+const MAX_REFERENCE_METADATA_BYTES: usize =
+    MAX_REFERENCE_VECTORS * MAX_REFERENCE_RECORD_METADATA_BYTES;
+/// Maximum borrowed manifest bytes, including hex expansion and line syntax.
+const MAX_REFERENCE_MANIFEST_BYTES: usize =
+    MAX_REFERENCE_VECTOR_BYTES * 2 + MAX_REFERENCE_METADATA_BYTES + 64 * 1024;
 
 /// Failures from the independent reference codec and vector loader.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,6 +61,32 @@ impl Error for ReferenceCodecError {}
 pub struct ReferenceEncoder {
     output: Vec<u8>,
     output_limit: usize,
+}
+
+fn encode_length_prefix(
+    length: usize,
+    maximum: usize,
+) -> Result<([u8; 4], usize), ReferenceCodecError> {
+    if length > maximum {
+        return Err(ReferenceCodecError::VectorLength);
+    }
+    let value = u64::try_from(length).map_err(|_| ReferenceCodecError::Overflow)?;
+    if maximum <= u8::MAX.into() {
+        let value = u8::try_from(value).map_err(|_| ReferenceCodecError::IntegerOutOfRange)?;
+        return Ok(([value, 0, 0, 0], 1));
+    }
+    if maximum <= u16::MAX.into() {
+        let value = u16::try_from(value).map_err(|_| ReferenceCodecError::IntegerOutOfRange)?;
+        let [high, low] = value.to_be_bytes();
+        return Ok(([high, low, 0, 0], 2));
+    }
+    if maximum <= 0x00ff_ffff {
+        let value = u32::try_from(value).map_err(|_| ReferenceCodecError::IntegerOutOfRange)?;
+        let [_, high, middle, low] = value.to_be_bytes();
+        return Ok(([high, middle, low, 0], 3));
+    }
+    let value = u32::try_from(value).map_err(|_| ReferenceCodecError::IntegerOutOfRange)?;
+    Ok((value.to_be_bytes(), 4))
 }
 
 impl ReferenceEncoder {
@@ -143,8 +177,18 @@ impl ReferenceEncoder {
         if bytes.len() < minimum || bytes.len() > maximum {
             return Err(ReferenceCodecError::VectorLength);
         }
-        self.write_length(bytes.len(), maximum)?;
-        self.write_fixed(bytes)
+        let (prefix, prefix_len) = encode_length_prefix(bytes.len(), maximum)?;
+        let prefix = prefix
+            .get(..prefix_len)
+            .ok_or(ReferenceCodecError::Overflow)?;
+        let additional = prefix
+            .len()
+            .checked_add(bytes.len())
+            .ok_or(ReferenceCodecError::Overflow)?;
+        self.admit(additional)?;
+        self.output.extend_from_slice(prefix);
+        self.output.extend_from_slice(bytes);
+        Ok(())
     }
 
     /// Writes an element-count prefix with the minimal derived width.
@@ -153,20 +197,11 @@ impl ReferenceEncoder {
         length: usize,
         maximum: usize,
     ) -> Result<(), ReferenceCodecError> {
-        if length > maximum {
-            return Err(ReferenceCodecError::VectorLength);
-        }
-        let value = u64::try_from(length).map_err(|_| ReferenceCodecError::Overflow)?;
-        if maximum <= u8::MAX.into() {
-            return self.write_u8(value);
-        }
-        if maximum <= u16::MAX.into() {
-            return self.write_u16(value);
-        }
-        if maximum <= 0x00ff_ffff {
-            return self.write_u24(value);
-        }
-        self.write_u32(value)
+        let (prefix, prefix_len) = encode_length_prefix(length, maximum)?;
+        let prefix = prefix
+            .get(..prefix_len)
+            .ok_or(ReferenceCodecError::Overflow)?;
+        self.write_fixed(prefix)
     }
 
     /// Transfers the complete encoded bytes.
@@ -219,40 +254,148 @@ impl ReferenceVector {
 
 /// Parses and verifies a complete checked-in vector manifest.
 pub fn parse_reference_vectors(input: &str) -> Result<Vec<ReferenceVector>, ReferenceCodecError> {
+    parse_reference_vectors_with_limit(input, MAX_REFERENCE_VECTOR_BYTES)
+}
+
+fn parse_reference_vectors_with_limit(
+    input: &str,
+    decoded_byte_limit: usize,
+) -> Result<Vec<ReferenceVector>, ReferenceCodecError> {
+    parse_reference_vectors_with_limits(
+        input,
+        decoded_byte_limit,
+        MAX_REFERENCE_MANIFEST_BYTES,
+        MAX_REFERENCE_METADATA_BYTES,
+    )
+}
+
+fn parse_reference_vectors_with_limits(
+    input: &str,
+    decoded_byte_limit: usize,
+    manifest_byte_limit: usize,
+    metadata_byte_limit: usize,
+) -> Result<Vec<ReferenceVector>, ReferenceCodecError> {
+    if input.len() > manifest_byte_limit {
+        return Err(ReferenceCodecError::OutputLimit);
+    }
     let mut vectors = Vec::new();
     let mut decoded_bytes = 0_usize;
-    for line in input.lines() {
-        if line.starts_with('#') || line.is_empty() {
-            continue;
-        }
+    let mut metadata_bytes = 0_usize;
+    for line in input
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.is_empty())
+    {
         if vectors.len() == MAX_REFERENCE_VECTORS {
             return Err(ReferenceCodecError::OutputLimit);
         }
-        let fields: Vec<&str> = line.split('|').collect();
-        let [identifier, schema, encoded, expected_hash, provenance] = fields.as_slice() else {
-            return Err(ReferenceCodecError::ManifestShape);
-        };
-        validate_manifest_strings(identifier, schema, expected_hash, provenance)?;
-        let bytes = decode_hex(encoded)?;
-        decoded_bytes = decoded_bytes
-            .checked_add(bytes.len())
-            .ok_or(ReferenceCodecError::Overflow)?;
-        if decoded_bytes > MAX_REFERENCE_VECTOR_BYTES {
+        let fields = parse_manifest_fields(line)?;
+        let record_metadata = manifest_metadata_len(
+            fields.identifier,
+            fields.schema,
+            fields.expected_hash,
+            fields.provenance,
+        )?;
+        if record_metadata > MAX_REFERENCE_RECORD_METADATA_BYTES {
             return Err(ReferenceCodecError::OutputLimit);
         }
-        let actual_hash = hex_digest(&bytes);
-        if actual_hash != *expected_hash {
-            return Err(ReferenceCodecError::HashMismatch);
-        }
-        vectors.push(ReferenceVector {
-            identifier: (*identifier).to_owned(),
-            schema: (*schema).to_owned(),
-            bytes,
-            sha256: (*expected_hash).to_owned(),
-            provenance: (*provenance).to_owned(),
-        });
+        claim_total(&mut metadata_bytes, record_metadata, metadata_byte_limit)?;
+        validate_manifest_strings(
+            fields.identifier,
+            fields.schema,
+            fields.expected_hash,
+            fields.provenance,
+        )?;
+        let decoded_length = checked_decoded_hex_len(fields.encoded)?;
+        claim_total(&mut decoded_bytes, decoded_length, decoded_byte_limit)?;
+        validate_hex_alphabet(fields.encoded)?;
+        vectors
+            .try_reserve(1)
+            .map_err(|_| ReferenceCodecError::AllocationFailed)?;
+        vectors.push(reference_vector_from_fields(fields)?);
     }
     Ok(vectors)
+}
+
+#[derive(Clone, Copy)]
+struct ManifestFields<'a> {
+    identifier: &'a str,
+    schema: &'a str,
+    encoded: &'a str,
+    expected_hash: &'a str,
+    provenance: &'a str,
+}
+
+fn parse_manifest_fields(line: &str) -> Result<ManifestFields<'_>, ReferenceCodecError> {
+    let mut fields = line.split('|');
+    let parsed = ManifestFields {
+        identifier: fields.next().ok_or(ReferenceCodecError::ManifestShape)?,
+        schema: fields.next().ok_or(ReferenceCodecError::ManifestShape)?,
+        encoded: fields.next().ok_or(ReferenceCodecError::ManifestShape)?,
+        expected_hash: fields.next().ok_or(ReferenceCodecError::ManifestShape)?,
+        provenance: fields.next().ok_or(ReferenceCodecError::ManifestShape)?,
+    };
+    if fields.next().is_some() {
+        return Err(ReferenceCodecError::ManifestShape);
+    }
+    Ok(parsed)
+}
+
+fn claim_total(total: &mut usize, amount: usize, limit: usize) -> Result<(), ReferenceCodecError> {
+    let next = total
+        .checked_add(amount)
+        .ok_or(ReferenceCodecError::Overflow)?;
+    if next > limit {
+        return Err(ReferenceCodecError::OutputLimit);
+    }
+    *total = next;
+    Ok(())
+}
+
+fn reference_vector_from_fields(
+    fields: ManifestFields<'_>,
+) -> Result<ReferenceVector, ReferenceCodecError> {
+    let bytes = decode_hex(fields.encoded)?;
+    if hex_digest(&bytes) != fields.expected_hash {
+        return Err(ReferenceCodecError::HashMismatch);
+    }
+    Ok(ReferenceVector {
+        identifier: copy_manifest_string(fields.identifier)?,
+        schema: copy_manifest_string(fields.schema)?,
+        bytes,
+        sha256: copy_manifest_string(fields.expected_hash)?,
+        provenance: copy_manifest_string(fields.provenance)?,
+    })
+}
+
+fn manifest_metadata_len(
+    identifier: &str,
+    schema: &str,
+    hash: &str,
+    provenance: &str,
+) -> Result<usize, ReferenceCodecError> {
+    [identifier, schema, hash, provenance]
+        .into_iter()
+        .try_fold(0_usize, |total, value| {
+            total
+                .checked_add(value.len())
+                .ok_or(ReferenceCodecError::Overflow)
+        })
+}
+
+fn copy_manifest_string(input: &str) -> Result<String, ReferenceCodecError> {
+    let mut output = String::new();
+    output
+        .try_reserve_exact(input.len())
+        .map_err(|_| ReferenceCodecError::AllocationFailed)?;
+    output.push_str(input);
+    Ok(output)
+}
+
+fn checked_decoded_hex_len(input: &str) -> Result<usize, ReferenceCodecError> {
+    if !input.len().is_multiple_of(2) {
+        return Err(ReferenceCodecError::ManifestValue);
+    }
+    Ok(input.len() / 2)
 }
 
 fn validate_manifest_strings(
@@ -261,8 +404,8 @@ fn validate_manifest_strings(
     hash: &str,
     provenance: &str,
 ) -> Result<(), ReferenceCodecError> {
-    if !identifier.starts_with("VEC-B-")
-        || schema.is_empty()
+    if !is_reference_identifier(identifier)
+        || !is_reference_schema(schema)
         || provenance != "frozen-registry-minimum"
         || hash.len() != 64
         || !hash
@@ -274,10 +417,36 @@ fn validate_manifest_strings(
     Ok(())
 }
 
+fn is_reference_identifier(identifier: &str) -> bool {
+    let Some(sequence) = identifier.strip_prefix("VEC-B-") else {
+        return false;
+    };
+    if !(3..=4).contains(&sequence.len())
+        || !sequence.bytes().all(|byte| byte.is_ascii_digit())
+        || (sequence.len() == 4 && sequence.starts_with('0'))
+    {
+        return false;
+    }
+    sequence
+        .parse::<usize>()
+        .is_ok_and(|value| (1..=MAX_REFERENCE_VECTORS).contains(&value))
+}
+
+fn is_reference_schema(schema: &str) -> bool {
+    let Some((&first, remaining)) = schema.as_bytes().split_first() else {
+        return false;
+    };
+    first.is_ascii_alphabetic()
+        && remaining
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.'))
+}
+
 fn decode_hex(input: &str) -> Result<Vec<u8>, ReferenceCodecError> {
     if !input.len().is_multiple_of(2) {
         return Err(ReferenceCodecError::ManifestValue);
     }
+    validate_hex_alphabet(input)?;
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(input.len() / 2)
@@ -296,6 +465,13 @@ fn decode_hex(input: &str) -> Result<Vec<u8>, ReferenceCodecError> {
         bytes.push((high << 4) | low);
     }
     Ok(bytes)
+}
+
+fn validate_hex_alphabet(input: &str) -> Result<(), ReferenceCodecError> {
+    if input.bytes().all(|byte| hex_nibble(byte).is_some()) {
+        return Ok(());
+    }
+    Err(ReferenceCodecError::ManifestValue)
 }
 
 fn hex_nibble(byte: u8) -> Option<u8> {
@@ -319,4 +495,83 @@ fn hex_digest(bytes: &[u8]) -> String {
         }
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        MAX_REFERENCE_METADATA_BYTES, MAX_REFERENCE_RECORD_METADATA_BYTES, ReferenceCodecError,
+        parse_reference_vectors_with_limit, parse_reference_vectors_with_limits,
+    };
+
+    #[test]
+    fn decoded_byte_limit_is_checked_before_hex_decode() {
+        let manifest = concat!(
+            "VEC-B-001|x|gg|",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "|frozen-registry-minimum"
+        );
+        assert_eq!(
+            parse_reference_vectors_with_limit(manifest, 0).err(),
+            Some(ReferenceCodecError::OutputLimit)
+        );
+    }
+
+    #[test]
+    fn manifest_and_metadata_limits_precede_record_allocation() {
+        let manifest = concat!(
+            "VEC-B-001|x|gg|",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "|frozen-registry-minimum"
+        );
+        assert_eq!(
+            parse_reference_vectors_with_limits(
+                manifest,
+                usize::MAX,
+                manifest.len() - 1,
+                MAX_REFERENCE_METADATA_BYTES,
+            )
+            .err(),
+            Some(ReferenceCodecError::OutputLimit)
+        );
+        assert_eq!(
+            parse_reference_vectors_with_limits(manifest, usize::MAX, manifest.len(), 0).err(),
+            Some(ReferenceCodecError::OutputLimit)
+        );
+        let oversized_schema = "a".repeat(MAX_REFERENCE_RECORD_METADATA_BYTES);
+        let oversized_record = format!(
+            "VEC-B-001|{oversized_schema}||\
+             e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855|\
+             frozen-registry-minimum"
+        );
+        assert_eq!(
+            parse_reference_vectors_with_limits(
+                &oversized_record,
+                usize::MAX,
+                usize::MAX,
+                MAX_REFERENCE_METADATA_BYTES,
+            )
+            .err(),
+            Some(ReferenceCodecError::OutputLimit)
+        );
+    }
+
+    #[test]
+    fn manifest_names_follow_the_generator_grammar() {
+        const EMPTY_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        for identifier in ["VEC-B-", "VEC-B-000", "VEC-B-0001", "VEC-B-4097"] {
+            let manifest = format!("{identifier}|x||{EMPTY_HASH}|frozen-registry-minimum");
+            assert_eq!(
+                parse_reference_vectors_with_limit(&manifest, 0).err(),
+                Some(ReferenceCodecError::ManifestValue)
+            );
+        }
+        for schema in ["", ".leading", "bad/schema", "bad-name"] {
+            let manifest = format!("VEC-B-001|{schema}||{EMPTY_HASH}|frozen-registry-minimum");
+            assert_eq!(
+                parse_reference_vectors_with_limit(&manifest, 0).err(),
+                Some(ReferenceCodecError::ManifestValue)
+            );
+        }
+    }
 }

@@ -22,7 +22,7 @@ fn validate_length<const MIN: usize, const MAX: usize>(
 }
 
 /// A byte vector whose inclusive length bounds are retained by construction.
-#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct BoundedBytes<const MIN: usize, const MAX: usize> {
     bytes: Vec<u8>,
 }
@@ -39,9 +39,15 @@ impl<const MIN: usize, const MAX: usize> BoundedBytes<MIN, MAX> {
         Ok(Self { bytes })
     }
 
-    /// Validates an already-owned vector without another allocation.
+    /// Validates an already-owned, exactly sized vector without another allocation.
+    ///
+    /// Vectors with spare capacity are rejected because that hidden allocation
+    /// would not be represented by this type's length bound.
     pub fn try_from_vec(bytes: Vec<u8>) -> Result<Self, ValidationError> {
         validate_length::<MIN, MAX>(bytes.len())?;
+        if bytes.capacity() != bytes.len() {
+            return Err(ValidationError::TooLong);
+        }
         Ok(Self { bytes })
     }
 
@@ -80,7 +86,7 @@ pub enum ControlPolicy {
 }
 
 /// UTF-8 whose byte bounds, NUL rule, and control policy are retained.
-#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct BoundedUtf8<const MIN: usize, const MAX: usize> {
     text: String,
 }

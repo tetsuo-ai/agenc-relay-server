@@ -48,19 +48,19 @@ References: [Architecture §§1.2–4](docs/ircd-architecture-and-implementation
 
 ## Stage status
 
-| Stage | Outcome | Gate |
-| --- | --- | --- |
-| 00 | Reproducible workspace and traceability foundation | [x] |
-| 01 | Registries, validated types, and canonical codecs | [x] |
-| 02 | Bounded client wire implementation | [ ] |
-| 03 | Pure deterministic domain model | [ ] |
-| 04 | Crypto adapters and account authentication | [ ] |
-| 05 | Durable and recoverable persistence | [ ] |
-| 06 | Conforming single-node daemon | [ ] |
-| 07 | Conforming base federation | [ ] |
-| 08 | Conforming E2EE server adapter | [ ] |
-| 09 | Optional WSS and history profiles | [ ] |
-| 10 | Production qualification and release evidence | [ ] |
+| Stage | Outcome | Implementation | Latest local gate | Revision-bound evidence |
+| --- | --- | --- | --- | --- |
+| 00 | Reproducible workspace and traceability foundation | Complete | Pass, 2026-08-26 | Historical commit `6b48ecb73afd471ed576146483098c19c12893f9` |
+| 01 | Registries, validated types, and canonical codecs | Complete | Pass, 2026-08-26 | Historical commit `7ae6439b472521d3c23fb99261deaf8964a70c5a` |
+| 02 | Bounded client wire implementation | Implemented locally; closure blocked | Pass, 2026-08-26 | Absent; see the [closure audit](conformance/stage-two-audit.md) |
+| 03 | Pure deterministic domain model | Not started | Not run | Absent |
+| 04 | Crypto adapters and account authentication | Not started | Not run | Absent |
+| 05 | Durable and recoverable persistence | Not started | Not run | Absent |
+| 06 | Conforming single-node daemon | Not started | Not run | Absent |
+| 07 | Conforming base federation | Not started | Not run | Absent |
+| 08 | Conforming E2EE server adapter | Not started | Not run | Absent |
+| 09 | Optional WSS and history profiles | Not started | Not run | Absent |
+| 10 | Production qualification and release evidence | Not started | Not run | Absent |
 
 ## Coverage and ownership maps
 
@@ -373,9 +373,15 @@ Outcome: arbitrary client bytes can be framed, parsed, negotiated, and rendered
 through a total, resource-bounded wire layer with no sockets, policy, or state
 mutation inside the crate.
 
+Implementation and local tests exist for every Stage 02 task, and the complete
+local gate passed on 2026-08-26. The checkboxes remain open because no Stage 02
+evidence manifest is tied to a committed source revision. Rendering is also
+blocked by the frozen topic and message-body limits recorded in the
+[Stage 02 closure audit](conformance/stage-two-audit.md).
+
 - [ ] `S02-001` **Implement incremental stream framing.** Handle fragmented and
   coalesced reads, CRLF, EOF, timeouts, and exact physical-line limits without
-  scanning or allocating beyond admitted bounds.
+  scanning or allocating beyond admitted bounds. ([evidence](conformance/stage-two-evidence.md#s02-001))
   - After: `S01-900`.
   - Targets: `agenc-ircd-client-wire`.
   - References: [Architecture §§8.3 and 9.1](docs/ircd-architecture-and-implementation-spec.md#83-time-and-resource-bounds).
@@ -384,7 +390,7 @@ mutation inside the crate.
 
 - [ ] `S02-002` **Implement WebSocket message framing semantics.** Validate the
   IRC-over-WebSocket message boundary, UTF-8, compression prohibition, size,
-  and close behavior independently of the optional network listener.
+  and close behavior independently of the optional network listener. ([evidence](conformance/stage-two-evidence.md#s02-002))
   - After: `S02-001`.
   - Targets: `agenc-ircd-client-wire`.
   - References: [Architecture §8.4](docs/ircd-architecture-and-implementation-spec.md#84-websocket-listener), [RFC 6455 decision](docs/protocol-sources-and-decisions.md#2-published-standards).
@@ -392,7 +398,7 @@ mutation inside the crate.
   - Evidence: fragmented-message, binary-frame, invalid-UTF-8, extension, multi-line, and oversize negatives.
 
 - [ ] `S02-003` **Implement IRCv3 tags.** Parse and render tag names, values,
-  escapes, duplicates, client-only tags, and budgets canonically.
+  escapes, duplicates, client-only tags, and budgets canonically. ([evidence](conformance/stage-two-evidence.md#s02-003))
   - After: `S02-001`.
   - Targets: `agenc-ircd-client-wire`.
   - References: [Architecture §9.2](docs/ircd-architecture-and-implementation-spec.md#92-tag-handling), [Appendix A](docs/ircd-architecture-and-implementation-spec.md#appendix-a-client-wire-registries).
@@ -401,7 +407,7 @@ mutation inside the crate.
 
 - [ ] `S02-004` **Implement syntax parsing.** Produce `ParsedMessage` from a
   framed line with exact prefix, command, parameter, trailing, and UTF-8 rules;
-  do not perform authorization or mutation.
+  do not perform authorization or mutation. ([evidence](conformance/stage-two-evidence.md#s02-004))
   - After: `S02-001`, `S02-003`.
   - Targets: `agenc-ircd-client-wire`.
   - References: [Architecture §§9 and Appendix A.1](docs/ircd-architecture-and-implementation-spec.md#9-client-wire-format), [RFC 2812](rfcs/rfc2812-irc-client-protocol.txt).
@@ -410,7 +416,7 @@ mutation inside the crate.
 
 - [ ] `S02-005` **Implement capability state.** Support CAP LS 302, REQ, ACK,
   NAK, END, NEW, DEL, dependencies, line splitting, and reconnect-only profile
-  transitions without silently enabling unsupported drafts.
+  transitions without silently enabling unsupported drafts. ([evidence](conformance/stage-two-evidence.md#s02-005))
   - After: `S02-004`.
   - Targets: `agenc-ircd-client-wire`.
   - References: [Architecture §§2.1, 9.3, and Appendix A.3](docs/ircd-architecture-and-implementation-spec.md#21-adopted-client-specifications).
@@ -420,7 +426,7 @@ mutation inside the crate.
 - [ ] `S02-006` **Implement the connection-registration wire state.** Enforce
   permitted pre-registration commands, NICK/USER/CAP/SASL ordering, welcome
   burst ordering, keepalive, and bounded close output without implementing auth
-  internals.
+  internals. ([evidence](conformance/stage-two-evidence.md#s02-006))
   - After: `S02-004`, `S02-005`.
   - Targets: `agenc-ircd-client-wire` and transcript model.
   - References: [Architecture §10](docs/ircd-architecture-and-implementation-spec.md#10-connection-and-registration-state-machine).
@@ -429,7 +435,7 @@ mutation inside the crate.
 
 - [ ] `S02-007` **Implement SASL transport framing.** Handle AUTHENTICATE
   chunking, mechanism selection surface, abort, timeout, and fixed public
-  replies while leaving OPAQUE processing to `agenc-ircd-auth`.
+  replies while leaving OPAQUE processing to `agenc-ircd-auth`. ([evidence](conformance/stage-two-evidence.md#s02-007))
   - After: `S02-005`, `S02-006`.
   - Targets: `agenc-ircd-client-wire`.
   - References: [Architecture §§11.2–11.6](docs/ircd-architecture-and-implementation-spec.md#112-opaque-profile).
@@ -438,7 +444,7 @@ mutation inside the crate.
 
 - [ ] `S02-008` **Implement capability-aware rendering.** Separate measuring
   from encoding, enforce exact client/server/combined line budgets, preserve
-  canonical ordering, and never allocate before a matching permit is supplied.
+  canonical ordering, and never allocate before a matching permit is supplied. ([evidence](conformance/stage-two-evidence.md#s02-008))
   - After: `S02-003` through `S02-006`.
   - Targets: `agenc-ircd-client-wire`.
   - References: [Architecture §§9.4–9.5, 21.3, and 24.2](docs/ircd-architecture-and-implementation-spec.md#94-rpl_isupport).
@@ -447,7 +453,7 @@ mutation inside the crate.
 
 - [ ] `S02-009` **Implement labeled replies, batches, and reply ordering.**
   Render standard errors, numerics, labeled-response groups, and batch nesting
-  exactly once and in the required order.
+  exactly once and in the required order. ([evidence](conformance/stage-two-evidence.md#s02-009))
   - After: `S02-005`, `S02-008`.
   - Targets: `agenc-ircd-client-wire`.
   - References: [Architecture §§9.3–9.5 and 14.1](docs/ircd-architecture-and-implementation-spec.md#93-advertised-capabilities).
@@ -456,7 +462,7 @@ mutation inside the crate.
 
 - [ ] `S02-010` **Build the client transcript harness.** Drive framing,
   parsing, capability state, registration, and rendering with deterministic
-  time and byte-exact expectations.
+  time and byte-exact expectations. ([evidence](conformance/stage-two-evidence.md#s02-010))
   - After: `S02-001` through `S02-009`.
   - Targets: `agenc-ircd-testkit`, client-wire integration tests.
   - References: [Architecture §§28.2 and 28.6](docs/ircd-architecture-and-implementation-spec.md#282-deterministic-unit-and-vector-tests), [Appendix E](docs/ircd-architecture-and-implementation-spec.md#appendix-e-worked-protocol-flows).
@@ -465,7 +471,7 @@ mutation inside the crate.
 
 - [ ] `S02-011` **Fuzz every client-wire boundary.** Cover raw framing, tags,
   commands, decimal values, base64, capability transitions, render plans, and
-  fragmented/coalesced input with explicit memory and time envelopes.
+  fragmented/coalesced input with explicit memory and time envelopes. ([evidence](conformance/stage-two-evidence.md#s02-011))
   - After: `S02-010`.
   - Targets: client-wire fuzz targets and regression corpus.
   - References: [Architecture §28.4](docs/ircd-architecture-and-implementation-spec.md#284-parser-and-fuzz-testing).
@@ -474,7 +480,7 @@ mutation inside the crate.
 
 - [ ] `S02-900` **Pass the Stage 02 gate.** The complete client-wire surface
   must be total, bounded, capability-correct, and transcript-compatible before
-  domain state consumes a parsed command.
+  domain state consumes a parsed command. ([evidence](conformance/stage-two-evidence.md#s02-900))
   - After: `S02-001` through `S02-011`.
   - Targets: `agenc-ircd-client-wire`, testkit transcripts and fuzz corpus.
   - References: [Architecture §29 phase 2](docs/ircd-architecture-and-implementation-spec.md#29-implementation-sequence-and-acceptance-gates).

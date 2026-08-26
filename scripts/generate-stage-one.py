@@ -57,16 +57,25 @@ def parse_client_commands(architecture: str) -> list[str]:
 
 
 def parse_capabilities(architecture: str) -> list[str]:
-    """Extract every capability in Appendix A.3."""
-    section = architecture[architecture.index("### A.3 Capability dependencies") :]
-    section = section[: section.index("### A.4")]
-    capabilities: list[str] = []
-    for line in section.splitlines():
+    """Extract the ordered union of advertised and dependency capabilities."""
+    advertised = code_block_after(
+        architecture, "Every full node implements and advertises:"
+    ).split()
+    wire_section = architecture[
+        architecture.index("### 9.3 Advertised capabilities") :
+        architecture.index("### 9.4 `RPL_ISUPPORT`")
+    ]
+    optional = re.findall(r"advertises `([^`]+)`", wire_section)
+    appendix = architecture[architecture.index("### A.3 Capability dependencies") :]
+    appendix = appendix[: appendix.index("### A.4")]
+    dependencies: list[str] = []
+    for line in appendix.splitlines():
         if not line.startswith("| `"):
             continue
         first_cell = line.split("|", 2)[1]
-        capabilities.extend(re.findall(r"`([^`]+)`", first_cell))
-    return capabilities
+        dependencies.extend(re.findall(r"`([^`]+)`", first_cell))
+    ordered = advertised + optional + dependencies
+    return list(dict.fromkeys(value.split("=", 1)[0] for value in ordered))
 
 
 def parse_registry(registry: str) -> dict[str, list[list[str]]]:
@@ -499,6 +508,12 @@ def minimal_schema_vectors(registry: str) -> list[tuple[str, bytes]]:
         registry_name: str,
         active: tuple[str, ...],
     ) -> int:
+        if (
+            schema_name == "FederationActorView"
+            and field_name == "user_present"
+            and "event.topic_changed" in active
+        ):
+            return 1
         if (schema_name, field_name) == ("AccountServiceRequestHeader", "message_kind"):
             for owner, value in account_service_operation_kinds.items():
                 if owner in active:
@@ -547,6 +562,12 @@ def minimal_schema_vectors(registry: str) -> list[tuple[str, bytes]]:
         selected = direct.get((schema_name, field_name))
         if selected is not None:
             return selected
+        if (
+            schema_name == "FederationActorView"
+            and field_name == "source"
+            and "event.topic_changed" in active
+        ):
+            return encode_schema("FederationSourceView", active)
         if field_name == "account_id" and minimum == maximum == 24:
             return account_id
         embedded = {
@@ -577,6 +598,12 @@ def minimal_schema_vectors(registry: str) -> list[tuple[str, bytes]]:
         if integer is not None:
             width = int(integer.group(1)) // 8
             value = semantic_integers.get((schema_name, field_name), 0)
+            if (
+                schema_name == "FederationActorView"
+                and field_name == "user_present"
+                and "event.topic_changed" in active
+            ):
+                value = 1
             if field_name in {"profile_version", "padding_version"}:
                 value = 1
             return value.to_bytes(width, "big")

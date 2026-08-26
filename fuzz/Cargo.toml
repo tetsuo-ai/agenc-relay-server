@@ -1,0 +1,44 @@
+[package]
+name = "agenc-ircd-fuzz"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+agenc-ircd-client-wire = { version = "=0.0.0", path = "../crates/agenc-ircd-client-wire" }
+libfuzzer-sys = "=0.4.13"
+
+[[bin]]
+name = "tcp_framing"
+path = "fuzz_targets/tcp_framing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "websocket"
+path = "fuzz_targets/websocket.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_render"
+path = "fuzz_targets/parse_render.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "client_state"
+path = "fuzz_targets/client_state.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

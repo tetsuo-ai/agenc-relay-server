@@ -28,15 +28,17 @@ impl CompiledGlob {
                 ValidationError::TooLong
             });
         }
+        if !input.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'*' | b'?')
+        }) {
+            return Err(ValidationError::InvalidCharacter);
+        }
         let mut pattern = String::new();
         pattern
             .try_reserve_exact(input.len())
             .map_err(|_| ValidationError::AllocationFailed)?;
         let mut previous_star = false;
         for byte in input.bytes() {
-            if !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'*' | b'?')) {
-                return Err(ValidationError::InvalidCharacter);
-            }
             if byte == b'*' && previous_star {
                 continue;
             }

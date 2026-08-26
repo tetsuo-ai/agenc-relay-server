@@ -2,5 +2,4 @@
 
 //! Administrative command parsing, verification, and permissions.
 //!
-//! Functional administrative behavior begins in Stage 06. Stage 00 defines
-//! only this ownership boundary.
+//! This crate remains an ownership boundary until Stage 06.

@@ -37,6 +37,47 @@ def sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def git_bytes(root: Path, arguments: list[str], label: str) -> bytes:
+    """Run one bounded Git lookup and return its raw standard output."""
+    try:
+        completed = subprocess.run(
+            ["git", *arguments],
+            cwd=root,
+            capture_output=True,
+            check=False,
+        )
+    except OSError as error:
+        raise BaselineError(f"cannot execute Git for {label}: {error}") from error
+    if completed.returncode != 0:
+        details = (completed.stderr or completed.stdout).decode("utf-8", errors="replace").strip()
+        raise BaselineError(f"Git lookup failed for {label}: {details}")
+    return completed.stdout
+
+
+def validate_frozen_commit(root: Path, commit: str) -> None:
+    """Require the recorded source commit to exist in the current history."""
+    git_bytes(root, ["cat-file", "-e", f"{commit}^{{commit}}"], "frozen commit")
+    git_bytes(root, ["merge-base", "--is-ancestor", commit, "HEAD"], "frozen ancestry")
+
+
+def frozen_blob(root: Path, commit: str, path: str) -> bytes:
+    """Read one tracked artifact from the recorded frozen commit."""
+    return git_bytes(root, ["cat-file", "blob", f"{commit}:{path}"], path)
+
+
+def frozen_mode(root: Path, commit: str, path: str) -> str:
+    """Read one artifact mode from the recorded frozen tree."""
+    entry = git_bytes(root, ["ls-tree", commit, "--", path], path)
+    try:
+        metadata, recorded_path = entry.rstrip(b"\n").split(b"\t", 1)
+        mode, kind, _object_id = metadata.split(b" ", 2)
+    except ValueError as error:
+        raise BaselineError(f"frozen tree entry is malformed: {path}") from error
+    if kind != b"blob" or recorded_path.decode("utf-8", errors="replace") != path:
+        raise BaselineError(f"frozen tree entry is not an exact blob: {path}")
+    return mode.decode("ascii")
+
+
 def parse_manifest(path: Path) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
     """Parse the deliberately simple frozen specification manifest."""
     file_hashes: dict[str, str] = {}
@@ -70,6 +111,7 @@ def validate(root: Path) -> None:
     frozen_commit = baseline.get("frozen_at_commit")
     if not isinstance(frozen_commit, str) or COMMIT_RE.fullmatch(frozen_commit) is None:
         raise BaselineError("frozen_at_commit must be a full lowercase Git object ID")
+    validate_frozen_commit(root, frozen_commit)
 
     records = baseline.get("artifacts")
     if not isinstance(records, list):
@@ -95,10 +137,33 @@ def validate(root: Path) -> None:
         artifact_path = root / expected_path
         if not artifact_path.is_file():
             raise BaselineError(f"frozen artifact is missing: {expected_path}")
+        if artifact_path.is_symlink():
+            raise BaselineError(f"frozen artifact may not be a symbolic link: {expected_path}")
+        expected_mode = "100755" if role == "specification-validator" else "100644"
+        actual_mode = "100755" if artifact_path.stat().st_mode & 0o111 else "100644"
+        if actual_mode != expected_mode:
+            raise BaselineError(
+                f"frozen artifact mode changed: {expected_path}: "
+                f"{actual_mode} != {expected_mode}"
+            )
+        committed_mode = frozen_mode(root, frozen_commit, expected_path)
+        if committed_mode != expected_mode:
+            raise BaselineError(
+                f"frozen commit mode disagrees for {expected_path}: "
+                f"{committed_mode} != {expected_mode}"
+            )
         actual_hash = sha256_file(artifact_path)
         if actual_hash != expected_hash:
             raise BaselineError(
                 f"frozen artifact changed: {expected_path}: {actual_hash} != {expected_hash}"
+            )
+        committed_hash = hashlib.sha256(
+            frozen_blob(root, frozen_commit, expected_path)
+        ).hexdigest()
+        if committed_hash != expected_hash:
+            raise BaselineError(
+                f"frozen commit disagrees for {expected_path}: "
+                f"{committed_hash} != {expected_hash}"
             )
 
     manifest_hashes, manifest_profiles = parse_manifest(

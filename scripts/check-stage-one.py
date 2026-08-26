@@ -264,6 +264,12 @@ def minimum_vectors(records: dict[str, list[tuple[str, str]]]) -> dict[str, byte
         registry_name: str,
         active: tuple[str, ...],
     ) -> int:
+        if (
+            schema_name == "FederationActorView"
+            and field_name == "user_present"
+            and "event.topic_changed" in active
+        ):
+            return 1
         if (schema_name, field_name) == ("AccountServiceRequestHeader", "message_kind"):
             for owner, value in account_service_operation_kinds.items():
                 if owner in active:
@@ -318,6 +324,12 @@ def minimum_vectors(records: dict[str, list[tuple[str, str]]]) -> dict[str, byte
         selected = direct.get((schema_name, field_name))
         if selected is not None:
             return selected
+        if (
+            schema_name == "FederationActorView"
+            and field_name == "source"
+            and "event.topic_changed" in active
+        ):
+            return encode_schema("FederationSourceView", active)
         if field_name == "account_id" and minimum == maximum == 24:
             return account_id
         embedded = {
@@ -348,6 +360,12 @@ def minimum_vectors(records: dict[str, list[tuple[str, str]]]) -> dict[str, byte
         if integer is not None:
             width = int(integer.group(1)) // 8
             value = semantic_integers.get((schema_name, field_name), 0)
+            if (
+                schema_name == "FederationActorView"
+                and field_name == "user_present"
+                and "event.topic_changed" in active
+            ):
+                value = 1
             if field_name in {"profile_version", "padding_version"}:
                 value = 1
             return value.to_bytes(width, "big")

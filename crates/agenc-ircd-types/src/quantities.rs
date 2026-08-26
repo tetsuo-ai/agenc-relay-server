@@ -1,6 +1,6 @@
 //! Checked quantities whose units remain visible at call sites.
 
-use crate::ValidationError;
+use crate::{ClockError, EntropyError, ValidationError};
 
 macro_rules! quantity {
     ($name:ident, $minimum:expr, $maximum:expr, $documentation:literal) => {
@@ -72,6 +72,12 @@ quantity!(
     "An unsigned UTC timestamp measured in Unix milliseconds."
 );
 quantity!(
+    UtcSecond,
+    0,
+    u64::MAX,
+    "An unsigned UTC wall-clock timestamp measured in whole Unix seconds."
+);
+quantity!(
     MonotonicTick,
     0,
     u64::MAX,
@@ -98,10 +104,26 @@ quantity!(
     "A nonzero configured quota; zero never means unlimited."
 );
 
+impl MonotonicTick {
+    /// Constructs any representable process-local tick.
+    #[must_use]
+    pub const fn from_ticks(ticks: u64) -> Self {
+        Self(ticks)
+    }
+}
+
+impl UtcSecond {
+    /// Constructs any representable whole-second Unix timestamp.
+    #[must_use]
+    pub const fn from_unix_seconds(seconds: u64) -> Self {
+        Self(seconds)
+    }
+}
+
 /// Supplies unpredictable bytes to identifier constructors.
 pub trait EntropySource {
     /// Fills the complete destination or leaves its documented state unchanged.
-    fn fill_exact(&mut self, destination: &mut [u8]) -> Result<(), ValidationError>;
+    fn fill_exact(&mut self, destination: &mut [u8]) -> Result<(), EntropyError>;
 }
 
 /// Supplies process-local monotonic time.
@@ -112,6 +134,6 @@ pub trait MonotonicClock {
 
 /// Supplies UTC wall time separately from monotonic policy time.
 pub trait WallClock {
-    /// Returns the current unsigned Unix millisecond timestamp.
-    fn now(&self) -> UnixMilliseconds;
+    /// Returns the current whole-second UTC timestamp or a closed read failure.
+    fn utc_now(&self) -> Result<UtcSecond, ClockError>;
 }

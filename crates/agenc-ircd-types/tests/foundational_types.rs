@@ -6,20 +6,36 @@ use std::error::Error;
 
 use agenc_ircd_types::{
     AccountId, AccountLabel, AccountRandomId, AuthGrantId, BoundedBytes, BoundedUtf8, ByteCount,
-    CAPABILITIES, CLIENT_COMMANDS, CONSTANT_REGISTRY, ChannelInstanceId, ChannelName, ConnectionId,
-    ControlPolicy, DatabaseId, DisplayName, DurationMilliseconds, ENUM_REGISTRY, EntropySource,
-    EntryId, EventId, FEDERATION_WIRE_FORMS, Generation, InviteId, MAX_GLOB_BYTES,
-    MAX_TYPED_MASK_BYTES, MessageId, MonotonicTick, NetworkId, Nickname, NormalizedLogin,
-    ObjectCount, OriginId, PublicCloak, PublicErrorCode, QueueDemand, Quota, RecoveryEpoch,
-    RequestId, Revision, SERVER_COMMANDS, SERVER_NUMERICS, STANDARD_REPLY_CODES, SafeContext,
-    SequenceNumber, ServerId, ServerIncarnation, ServerName, SessionId, TransactionId, TypedMask,
-    UnixMilliseconds, UserId, ValidationError,
+    CAPABILITIES, CLIENT_COMMANDS, CONSTANT_REGISTRY, ChannelInstanceId, ChannelName, ClockError,
+    ConnectionId, ControlPolicy, DatabaseId, DisplayName, DurationMilliseconds, ENUM_REGISTRY,
+    EntropyError, EntropySource, EntryId, EventId, FEDERATION_WIRE_FORMS, Generation, InviteId,
+    MAX_GLOB_BYTES, MAX_TYPED_MASK_BYTES, MessageId, MonotonicTick, NetworkId, Nickname,
+    NormalizedLogin, ObjectCount, OriginId, PublicCloak, PublicErrorCode, QueueDemand, Quota,
+    RecoveryEpoch, RequestId, Revision, SERVER_COMMANDS, SERVER_NUMERICS, STANDARD_REPLY_CODES,
+    SafeContext, SequenceNumber, ServerId, ServerIncarnation, ServerName, SessionId, TransactionId,
+    TypedMask, UnixMilliseconds, UserId, UtcSecond, ValidationError,
 };
+
+#[test]
+fn capability_port_errors_have_closed_descriptions() {
+    assert_eq!(
+        EntropyError::Unavailable.to_string(),
+        "entropy source is unavailable"
+    );
+    assert_eq!(
+        ClockError::Unavailable.to_string(),
+        "wall clock is unavailable"
+    );
+    assert_eq!(
+        ClockError::OutOfRange.to_string(),
+        "wall clock value is outside its UTC domain"
+    );
+}
 
 struct IncrementingEntropy(u8);
 
 impl EntropySource for IncrementingEntropy {
-    fn fill_exact(&mut self, destination: &mut [u8]) -> Result<(), ValidationError> {
+    fn fill_exact(&mut self, destination: &mut [u8]) -> Result<(), EntropyError> {
         for byte in destination {
             *byte = self.0;
             self.0 = self.0.wrapping_add(1);
@@ -105,6 +121,7 @@ fn quantity_families_reject_bounds_and_overflow() -> Result<(), ValidationError>
     zero_based_quantity!(ObjectCount);
     zero_based_quantity!(QueueDemand);
     zero_based_quantity!(UnixMilliseconds);
+    zero_based_quantity!(UtcSecond);
     zero_based_quantity!(MonotonicTick);
     zero_based_quantity!(DurationMilliseconds);
     zero_based_quantity!(Revision);
@@ -147,7 +164,6 @@ fn every_identifier_domain_round_trips_only_its_canonical_text() -> Result<(), B
     round_trip_identifier!(ConnectionId, 14_u8);
     round_trip_identifier!(InviteId, 15_u8);
     round_trip_identifier!(EntryId, 16_u8);
-    round_trip_identifier!(AuthGrantId, 17_u8);
     let account = AccountRandomId::from_bytes([19_u8; 16]);
     assert_eq!(AccountRandomId::parse(&account.to_text())?, account);
     assert_eq!(
@@ -165,6 +181,10 @@ fn every_identifier_domain_round_trips_only_its_canonical_text() -> Result<(), B
     let mut entropy = IncrementingEntropy(1);
     let generated = NetworkId::generate(&mut entropy)?;
     assert_ne!(generated.as_bytes(), &[0_u8; 32]);
+    let grant = AuthGrantId::generate(&mut entropy)?;
+    assert_ne!(grant.expose_for_session_open(), &[0_u8; 32]);
+    let fixed_grant = AuthGrantId::from_bytes([17_u8; 32]);
+    assert_eq!(fixed_grant.expose_for_session_open(), &[17_u8; 32]);
     Ok(())
 }
 
@@ -190,6 +210,14 @@ fn bounded_values_validate_before_copying() -> Result<(), ValidationError> {
         BoundedBytes::<1, 3>::try_from_slice(b"ok")?.as_slice(),
         b"ok"
     );
+    let mut bytes_with_spare_capacity = Vec::with_capacity(3);
+    bytes_with_spare_capacity.extend_from_slice(b"ok");
+    assert_eq!(
+        BoundedBytes::<1, 3>::try_from_vec(bytes_with_spare_capacity).err(),
+        Some(ValidationError::TooLong)
+    );
+    let exactly_sized = BoundedBytes::<1, 3>::try_from_vec(b"ok".to_vec())?.into_vec();
+    assert_eq!(exactly_sized.capacity(), exactly_sized.len());
 
     assert!(matches!(
         BoundedUtf8::<0, 8>::try_from_bytes(&[0xff], ControlPolicy::RejectAll),
@@ -301,6 +329,10 @@ fn name_profiles_reject_every_length_and_grammar_boundary() -> Result<(), Valida
         DisplayName::prepare(&"a".repeat(65)).err(),
         Some(ValidationError::TooLong)
     );
+    assert_eq!(
+        DisplayName::prepare(&"a".repeat(257)).err(),
+        Some(ValidationError::TooLong)
+    );
 
     assert_eq!(ServerName::parse("").err(), Some(ValidationError::Empty));
     assert_eq!(
@@ -387,6 +419,30 @@ fn validation_errors_render_only_closed_public_messages() {
         SafeContext::RetryAfterSeconds(3)
     );
     assert_eq!(SafeContext::Maximum(4), SafeContext::Maximum(4));
+}
+
+#[test]
+fn server_names_enforce_dns_label_and_total_boundaries() -> Result<(), ValidationError> {
+    let maximum_label = "a".repeat(63);
+    let valid = format!("{maximum_label}.invalid");
+    assert_eq!(ServerName::parse(&valid)?.as_str(), valid);
+
+    let oversized_label = format!("{}.invalid", "a".repeat(64));
+    assert_eq!(
+        ServerName::parse(&oversized_label).err(),
+        Some(ValidationError::InvalidCharacter)
+    );
+
+    let maximum_name = format!(
+        "{}.{}.{}.{}",
+        "a".repeat(63),
+        "b".repeat(63),
+        "c".repeat(63),
+        "d".repeat(61)
+    );
+    assert_eq!(maximum_name.len(), 253);
+    assert_eq!(ServerName::parse(&maximum_name)?.as_str(), maximum_name);
+    Ok(())
 }
 
 #[test]

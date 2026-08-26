@@ -12,7 +12,7 @@
 ## Verification
 
 <!-- List exact commands and results. The current full gate is:
-bash scripts/check-stage-one.sh
+bash scripts/check-stage-two.sh
 -->
 
 ## Deferred work

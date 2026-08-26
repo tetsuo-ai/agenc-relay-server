@@ -2,12 +2,17 @@
 
 //! Boundary tests for deterministic test-only capabilities.
 
+use std::error::Error;
+
 use agenc_ircd_testkit::{
     CapabilityError, DeterministicMonotonicClock, DeterministicWallClock, FaultStore,
     FaultStoreError, MAX_FAULT_STORE_BYTES, MAX_FAULT_STORE_RECORDS, MAX_SCRIPTED_ENTROPY_BYTES,
     MAX_TRANSCRIPT_STEP_BYTES, MAX_TRANSCRIPT_STEPS, ReferenceModel, ReferenceTransitionError,
     ScriptedEntropy, StoreOperation, TranscriptActor, TranscriptDriver, TranscriptError,
     TranscriptStep,
+};
+use agenc_ircd_types::{
+    ClockError, EntropyError, EntropySource, MonotonicClock, NetworkId, WallClock,
 };
 
 #[test]
@@ -25,6 +30,27 @@ fn wall_clock_is_distinct_and_overflow_is_atomic() -> Result<(), CapabilityError
     assert_eq!(clock.advance(1)?, u64::MAX);
     assert_eq!(clock.advance(1), Err(CapabilityError::ClockOverflow));
     assert_eq!(clock.now(), u64::MAX);
+    Ok(())
+}
+
+#[test]
+fn deterministic_capabilities_implement_production_ports() -> Result<(), Box<dyn Error>> {
+    let monotonic = DeterministicMonotonicClock::at(17);
+    assert_eq!(MonotonicClock::now(&monotonic).get(), 17);
+
+    let wall = DeterministicWallClock::at(23);
+    assert_eq!(WallClock::utc_now(&wall)?.get(), 23);
+    assert_eq!(
+        WallClock::utc_now(&DeterministicWallClock::unavailable_at(23)),
+        Err(ClockError::Unavailable)
+    );
+
+    let mut entropy = ScriptedEntropy::new(vec![7; 32])?;
+    assert_eq!(NetworkId::generate(&mut entropy)?.as_bytes(), &[7; 32]);
+    assert_eq!(
+        EntropySource::fill_exact(&mut entropy, &mut [0; 1]),
+        Err(EntropyError::Unavailable)
+    );
     Ok(())
 }
 
@@ -61,6 +87,11 @@ fn capability_errors_are_bounded_and_descriptive() {
     );
     assert_eq!(
         ScriptedEntropy::new(vec![0_u8; MAX_SCRIPTED_ENTROPY_BYTES + 1]),
+        Err(CapabilityError::EntropyScriptTooLarge)
+    );
+    let oversized_capacity = Vec::with_capacity(MAX_SCRIPTED_ENTROPY_BYTES + 1);
+    assert_eq!(
+        ScriptedEntropy::new(oversized_capacity),
         Err(CapabilityError::EntropyScriptTooLarge)
     );
 }
@@ -203,6 +234,11 @@ fn transcript_limits_and_terminal_states_are_explicit() -> Result<(), Transcript
         ),
         Err(TranscriptError::StepTooLarge)
     );
+    let oversized_capacity = Vec::with_capacity(MAX_TRANSCRIPT_STEP_BYTES + 1);
+    assert_eq!(
+        TranscriptStep::new(TranscriptActor::Administrator, oversized_capacity),
+        Err(TranscriptError::StepCapacityTooLarge)
+    );
 
     let mut empty = TranscriptDriver::new();
     assert_eq!(
@@ -258,6 +294,14 @@ fn transcript_errors_are_bounded_and_descriptive() {
     assert_eq!(
         TranscriptError::StepTooLarge.to_string(),
         "transcript step exceeds its byte ceiling"
+    );
+    assert_eq!(
+        TranscriptError::StepCapacityTooLarge.to_string(),
+        "transcript step backing capacity exceeds its byte ceiling"
+    );
+    assert_eq!(
+        TranscriptError::AllocationFailed.to_string(),
+        "transcript queue allocation failed"
     );
     assert_eq!(
         TranscriptError::UnexpectedStep.to_string(),

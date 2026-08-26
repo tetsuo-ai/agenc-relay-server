@@ -6,7 +6,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use zeroize::Zeroize;
 
-use crate::{EntropySource, ValidationError};
+use crate::{EntropyError, EntropySource, ValidationError};
 
 const MAX_IDENTIFIER_TEXT_BYTES: usize = 43;
 
@@ -56,7 +56,7 @@ macro_rules! identifier {
             }
 
             /// Generates a fresh identifier through an injected entropy authority.
-            pub fn generate(entropy: &mut impl EntropySource) -> Result<Self, ValidationError> {
+            pub fn generate(entropy: &mut impl EntropySource) -> Result<Self, EntropyError> {
                 let mut bytes = [0_u8; $bytes];
                 entropy.fill_exact(&mut bytes)?;
                 Ok(Self(bytes))
@@ -124,7 +124,55 @@ identifier!(DatabaseId, 16, "A 16-byte durable database identity.");
 identifier!(ConnectionId, 16, "A 16-byte accepted transport identity.");
 identifier!(InviteId, 16, "A 16-byte invitation identity.");
 identifier!(EntryId, 16, "A 16-byte list-mode entry identity.");
-identifier!(AuthGrantId, 32, "A 32-byte authentication grant identity.");
+
+/// A one-use 32-byte authentication bearer grant.
+///
+/// The grant deliberately has no text form and does not implement `Clone`,
+/// `Copy`, `Debug`, or `Display`.
+///
+/// ```compile_fail
+/// use agenc_ircd_types::AuthGrantId;
+///
+/// fn require_clone<T: Clone>() {}
+/// require_clone::<AuthGrantId>();
+/// ```
+///
+/// ```compile_fail
+/// use std::fmt::Debug;
+///
+/// use agenc_ircd_types::AuthGrantId;
+///
+/// fn require_debug<T: Debug>() {}
+/// require_debug::<AuthGrantId>();
+/// ```
+pub struct AuthGrantId([u8; 32]);
+
+impl AuthGrantId {
+    /// Constructs a grant from its complete private binary representation.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Generates a fresh grant through an injected entropy authority.
+    pub fn generate(entropy: &mut impl EntropySource) -> Result<Self, EntropyError> {
+        let mut grant = Self([0_u8; 32]);
+        entropy.fill_exact(&mut grant.0)?;
+        Ok(grant)
+    }
+
+    /// Borrows the private bytes for the one matching session-open operation.
+    #[must_use]
+    pub const fn expose_for_session_open(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl Drop for AuthGrantId {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
 
 /// The immutable 16-byte random component of a public account identity.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -138,7 +186,7 @@ impl AccountRandomId {
     }
 
     /// Generates a fresh account identity through an injected entropy authority.
-    pub fn generate(entropy: &mut impl EntropySource) -> Result<Self, ValidationError> {
+    pub fn generate(entropy: &mut impl EntropySource) -> Result<Self, EntropyError> {
         let mut bytes = [0_u8; 16];
         entropy.fill_exact(&mut bytes)?;
         Ok(Self(bytes))
@@ -241,5 +289,30 @@ impl OpaqueCredentialId {
 impl Drop for OpaqueCredentialId {
     fn drop(&mut self) {
         self.0.zeroize();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AccountRandomId, NetworkId};
+    use crate::ValidationError;
+
+    #[test]
+    fn identifier_text_rejects_each_length_and_prefix_boundary() {
+        assert_eq!(
+            NetworkId::parse("short"),
+            Err(ValidationError::IdentifierLength)
+        );
+        assert_eq!(
+            NetworkId::parse(&"!".repeat(43)),
+            Err(ValidationError::NonCanonical)
+        );
+        assert_eq!(
+            AccountRandomId::parse("AAAAAAAAAAAAAAAAAAAAAA"),
+            Err(ValidationError::InvalidPrefix)
+        );
+
+        let network = NetworkId::from_bytes([0_u8; 32]);
+        assert_eq!(NetworkId::parse(&network.to_base64url()), Ok(network));
     }
 }
