@@ -1,11 +1,11 @@
 ---
 name: scripts
-description: "Skill for the Scripts area of agenc-ircd. 181 symbols across 12 files."
+description: "Skill for the Scripts area of agenc-ircd. 197 symbols across 14 files."
 ---
 
 # Scripts
 
-181 symbols | 12 files | Cohesion: 90%
+197 symbols | 14 files | Cohesion: 91%
 
 ## When to Use
 
@@ -24,44 +24,44 @@ description: "Skill for the Scripts area of agenc-ircd. 181 symbols across 12 fi
 | `scripts/check-evidence.py` | load_json, load_toml, validate_catalog, validate_schema, git_bytes (+13) |
 | `scripts/check-source.py` | load_policy, sanitize_rust, blank, line_number, cfg_test_ranges (+12) |
 | `scripts/check-stage-two.py` | validate_capabilities, validate_modules, check_generator, validate, fail (+9) |
+| `scripts/check-stage-three.py` | load_toml, validate_domain_boundary, extract_post_registration_names, extract_command_match_names, validate_command_coverage (+8) |
 | `scripts/check-baseline.py` | sha256_file, git_bytes, validate_frozen_commit, frozen_blob, frozen_mode (+4) |
 | `scripts/check-ci.py` | live_workflow_text, validate_workflow, validate_manifest, load_manifest_text, validate (+4) |
-| `scripts/run-gate.py` | load_gates, resolve_commands, command_environment, execute, fail (+1) |
 
 ## Entry Points
 
 Start here when exploring this area:
 
-- **`load_toml`** (Function) — `scripts/check-workspace.py:137`
-- **`validate_toolchain`** (Function) — `scripts/check-workspace.py:145`
-- **`validate_workspace_manifest`** (Function) — `scripts/check-workspace.py:172`
-- **`validate_dependency_profiles`** (Function) — `scripts/check-workspace.py:206`
-- **`dependency_tables`** (Function) — `scripts/check-workspace.py:237`
+- **`load_toml`** (Function) — `scripts/check-workspace.py:138`
+- **`validate_toolchain`** (Function) — `scripts/check-workspace.py:146`
+- **`validate_workspace_manifest`** (Function) — `scripts/check-workspace.py:173`
+- **`validate_dependency_profiles`** (Function) — `scripts/check-workspace.py:207`
+- **`dependency_tables`** (Function) — `scripts/check-workspace.py:238`
 
 ## Key Symbols
 
 | Symbol | Type | File | Line |
 |--------|------|------|------|
-| `load_toml` | Function | `scripts/check-workspace.py` | 137 |
-| `validate_toolchain` | Function | `scripts/check-workspace.py` | 145 |
-| `validate_workspace_manifest` | Function | `scripts/check-workspace.py` | 172 |
-| `validate_dependency_profiles` | Function | `scripts/check-workspace.py` | 206 |
-| `dependency_tables` | Function | `scripts/check-workspace.py` | 237 |
-| `validate_package_manifests` | Function | `scripts/check-workspace.py` | 256 |
-| `validate_direct_dependency_evidence` | Function | `scripts/check-workspace.py` | 311 |
-| `cargo_metadata` | Function | `scripts/check-workspace.py` | 338 |
-| `packages_from_metadata` | Function | `scripts/check-workspace.py` | 359 |
-| `graph_from_packages` | Function | `scripts/check-workspace.py` | 377 |
-| `validate_graph` | Function | `scripts/check-workspace.py` | 407 |
-| `validate_acyclic` | Function | `scripts/check-workspace.py` | 455 |
-| `visit` | Function | `scripts/check-workspace.py` | 460 |
-| `validate_release_closure` | Function | `scripts/check-workspace.py` | 475 |
-| `validate_lockfile` | Function | `scripts/check-workspace.py` | 497 |
-| `validate_dependency_exception` | Function | `scripts/check-workspace.py` | 530 |
-| `validate` | Function | `scripts/check-workspace.py` | 564 |
-| `expect_rejection` | Function | `scripts/check-workspace.py` | 578 |
-| `self_test` | Function | `scripts/check-workspace.py` | 591 |
-| `fail` | Function | `scripts/check-workspace.py` | 663 |
+| `load_toml` | Function | `scripts/check-workspace.py` | 138 |
+| `validate_toolchain` | Function | `scripts/check-workspace.py` | 146 |
+| `validate_workspace_manifest` | Function | `scripts/check-workspace.py` | 173 |
+| `validate_dependency_profiles` | Function | `scripts/check-workspace.py` | 207 |
+| `dependency_tables` | Function | `scripts/check-workspace.py` | 238 |
+| `validate_package_manifests` | Function | `scripts/check-workspace.py` | 257 |
+| `validate_direct_dependency_evidence` | Function | `scripts/check-workspace.py` | 312 |
+| `cargo_metadata` | Function | `scripts/check-workspace.py` | 339 |
+| `packages_from_metadata` | Function | `scripts/check-workspace.py` | 360 |
+| `graph_from_packages` | Function | `scripts/check-workspace.py` | 378 |
+| `validate_graph` | Function | `scripts/check-workspace.py` | 408 |
+| `validate_acyclic` | Function | `scripts/check-workspace.py` | 456 |
+| `visit` | Function | `scripts/check-workspace.py` | 461 |
+| `validate_release_closure` | Function | `scripts/check-workspace.py` | 476 |
+| `validate_lockfile` | Function | `scripts/check-workspace.py` | 498 |
+| `validate_dependency_exception` | Function | `scripts/check-workspace.py` | 531 |
+| `validate` | Function | `scripts/check-workspace.py` | 565 |
+| `expect_rejection` | Function | `scripts/check-workspace.py` | 579 |
+| `self_test` | Function | `scripts/check-workspace.py` | 592 |
+| `fail` | Function | `scripts/check-workspace.py` | 664 |
 
 ## Execution Flows
 
@@ -75,8 +75,8 @@ Start here when exploring this area:
 | `Main → Require_string` | cross_community | 5 |
 | `Main → Blank` | intra_community | 5 |
 | `Main → Cfg_test_ranges` | intra_community | 5 |
-| `Self_test → Blank` | intra_community | 5 |
-| `Main → Length_width` | cross_community | 5 |
+| `Main → Flush` | cross_community | 4 |
+| `Main → Normalize_text` | cross_community | 4 |
 
 ## How to Explore
 

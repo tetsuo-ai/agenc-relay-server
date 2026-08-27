@@ -1,11 +1,11 @@
 ---
 name: fuzz-targets
-description: "Skill for the Fuzz_targets area of agenc-ircd. 68 symbols across 12 files."
+description: "Skill for the Fuzz_targets area of agenc-ircd. 77 symbols across 12 files."
 ---
 
 # Fuzz_targets
 
-68 symbols | 12 files | Cohesion: 73%
+77 symbols | 12 files | Cohesion: 71%
 
 ## When to Use
 
@@ -17,13 +17,13 @@ description: "Skill for the Fuzz_targets area of agenc-ircd. 68 symbols across 1
 
 | File | Symbols |
 |------|---------|
-| `fuzz/fuzz_targets/client_state.rs` | exercise_post_registration_grammar, exercise_post_registration_line, exercise_capability_state, exercise_capability_request, exercise_capability_end (+18) |
+| `fuzz/fuzz_targets/client_state.rs` | exercise_post_registration_grammar, exercise_post_registration_line, exercise_capability_state, exercise_capability_request, exercise_capability_end (+21) |
 | `fuzz/fuzz_targets/parse_render.rs` | new, exercise_boundary_render_plan, exercise_exact_render_boundaries, render_prefix, render_command (+8) |
+| `crates/agenc-ircd-client-wire/src/capability.rs` | list, ensure_token_list_renderable, contains, apply_profile, diff_advertisements (+3) |
 | `fuzz/fuzz_targets/websocket.rs` | exercise_fragmented_sequence, assert_control_event, exercise_arbitrary_frame, exercise_oversized_message, safe_message (+3) |
 | `crates/agenc-ircd-client-wire/src/message.rs` | parse_message, parse_parameters, validate_parameters, copy_string, calculate_requested_backing_bytes (+1) |
 | `crates/agenc-ircd-client-wire/src/text.rs` | parse_u16_decimal, parse_u32_decimal, parse_u64_decimal, parse_decimal, parse_fragment_decimal (+1) |
-| `crates/agenc-ircd-client-wire/src/capability.rs` | list, split_capability_lines, advertisement_and_split_boundaries_are_closed |
-| `crates/agenc-ircd-client-wire/src/registration_command.rs` | parsed, classify |
+| `crates/agenc-ircd-client-wire/src/registration_command.rs` | parsed, classify, validate_account_length |
 | `fuzz/fuzz_targets/tcp_framing.rs` | run, checksum |
 | `crates/agenc-ircd-client-wire/src/render.rs` | measure, combined_tag_section |
 | `crates/agenc-ircd-client-wire/src/framing.rs` | as_str |
@@ -50,6 +50,7 @@ Start here when exploring this area:
 | `parse_u16_decimal` | Function | `crates/agenc-ircd-client-wire/src/text.rs` | 230 |
 | `parse_u32_decimal` | Function | `crates/agenc-ircd-client-wire/src/text.rs` | 236 |
 | `parse_u64_decimal` | Function | `crates/agenc-ircd-client-wire/src/text.rs` | 242 |
+| `apply_profile` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 364 |
 | `split_capability_lines` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 468 |
 | `parse_parameters` | Function | `crates/agenc-ircd-client-wire/src/message.rs` | 210 |
 | `validate_parameters` | Function | `crates/agenc-ircd-client-wire/src/message.rs` | 232 |
@@ -61,35 +62,34 @@ Start here when exploring this area:
 | `classify` | Function | `crates/agenc-ircd-client-wire/src/registration_command.rs` | 1953 |
 | `exercise_post_registration_grammar` | Function | `fuzz/fuzz_targets/client_state.rs` | 97 |
 | `exercise_post_registration_line` | Function | `fuzz/fuzz_targets/client_state.rs` | 113 |
-| `run` | Function | `fuzz/fuzz_targets/tcp_framing.rs` | 41 |
 
 ## Execution Flows
 
 | Flow | Type | Steps |
 |------|------|-------|
-| `Exercise_decimal_and_base64 → Expected_fragment_count` | cross_community | 8 |
-| `Exercise_decimal_and_base64 → Expected_segment_length` | cross_community | 8 |
 | `Drive → Admit_len` | cross_community | 6 |
-| `Run → At` | cross_community | 6 |
-| `Render_action → Command_bytes` | cross_community | 6 |
-| `Render_action → Combined_tag_section` | cross_community | 6 |
-| `Render_action → MeasuredMessage` | cross_community | 6 |
-| `Exercise_decimal_and_base64 → Validate_decoded_length` | cross_community | 6 |
-| `Exercise_capability_state → Capabilities` | cross_community | 5 |
-| `Exercise_capability_state → Ensure_token_list_renderable` | cross_community | 5 |
+| `Drive → Split_field` | cross_community | 5 |
+| `Run → Admit_len` | cross_community | 5 |
+| `Run → Split_field` | cross_community | 5 |
+| `Run → Validate_key` | cross_community | 5 |
+| `Run → Validate_correlation_value_len` | cross_community | 5 |
+| `Run → Validate_decoded_value` | cross_community | 5 |
+| `Maximal_message_stays_below_the_hard_parsed_arena → Admit_len` | cross_community | 5 |
+| `Maximal_message_stays_below_the_hard_parsed_arena → Split_field` | cross_community | 5 |
+| `Maximal_message_stays_below_the_hard_parsed_arena → Validate_key` | cross_community | 5 |
 
 ## Connected Areas
 
 | Area | Connections |
 |------|-------------|
 | Tests | 8 calls |
-| Cluster_2 | 6 calls |
-| Cluster_6 | 3 calls |
-| Cluster_44 | 1 calls |
-| Cluster_24 | 1 calls |
-| Cluster_9 | 1 calls |
-| Cluster_13 | 1 calls |
-| Cluster_31 | 1 calls |
+| Cluster_6 | 7 calls |
+| Cluster_2 | 5 calls |
+| Cluster_8 | 3 calls |
+| Cluster_46 | 1 calls |
+| Cluster_27 | 1 calls |
+| Cluster_11 | 1 calls |
+| Cluster_15 | 1 calls |
 
 ## How to Explore
 

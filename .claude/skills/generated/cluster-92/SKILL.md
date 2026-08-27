@@ -1,9 +1,9 @@
 ---
-name: cluster-61
-description: "Skill for the Cluster_61 area of agenc-ircd. 11 symbols across 2 files."
+name: cluster-92
+description: "Skill for the Cluster_92 area of agenc-ircd. 11 symbols across 2 files."
 ---
 
-# Cluster_61
+# Cluster_92
 
 11 symbols | 2 files | Cohesion: 76%
 
@@ -11,7 +11,7 @@ description: "Skill for the Cluster_61 area of agenc-ircd. 11 symbols across 2 f
 
 - Working with code in `crates/`
 - Understanding how bytes work
-- Modifying cluster_61-related functionality
+- Modifying cluster_92-related functionality
 
 ## Key Files
 
@@ -54,12 +54,12 @@ Start here when exploring this area:
 | Area | Connections |
 |------|-------------|
 | Tests | 3 calls |
-| Cluster_68 | 1 calls |
-| Cluster_70 | 1 calls |
+| Cluster_99 | 1 calls |
+| Cluster_101 | 1 calls |
 
 ## How to Explore
 
 1. `context({name: "bytes"})` — see callers and callees
-2. `query({search_query: "cluster_61"})` — find related execution flows
+2. `query({search_query: "cluster_92"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`
