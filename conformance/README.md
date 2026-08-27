@@ -50,10 +50,15 @@ The command inherits every Stage 03 check and adds the exact cryptographic
 profile, auth and crypto boundary tests, account-generation fences, and
 account-envelope fuzzing. The reviewed `opaque-ke` source patch is pinned by
 `conformance/vendored-dependencies.toml` and checked by workspace policy. The
-command alone does not close `S04-900`. The five schema version 1 manifests for
-source commit `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` remain historical records.
-The current source changes require fresh schema version 2 Stage 00 through 04
-runs before those gates are closed for the new revision.
+command alone does not close `S04-900`. The five schema version 2 manifests and
+artifacts for exact source commit
+`1e5b738468f88b238061cc6e84b732176f5cae65` close Stages 00 through 04. They
+contain 17 Stage 00 records, 14 Stage 01 records, 12 Stage 02 records, 13 Stage
+03 records, and 20 Stage 04 records. Every record passed. Coverage reached
+90.01% of branches and 95.59% of lines, with all five critical regions at 100%.
+The evidence validator passed 78 rejection cases. The five schema version 1
+manifests for source commit `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb`
+remain archive-only.
 
 For an evidence-only check:
 

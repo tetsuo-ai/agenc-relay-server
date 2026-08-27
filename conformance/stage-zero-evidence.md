@@ -1,11 +1,13 @@
 # Stage 00 Evidence
 
-Status: implementation complete; schema version 2 checkpoint refresh pending.
-The [historical
+Status: implementation complete; checkpoint closed for exact source commit
+`1e5b738468f88b238061cc6e84b732176f5cae65`. The current schema version 2
+[manifest](evidence/stage-00-1e5b738468f88b238061cc6e84b732176f5cae65.json)
+binds 17 passed records to one clean Stage 00 gate run and its checked-in
+[artifact](evidence/artifacts/stage-zero-implementation-1e5b738468f88b238061cc6e84b732176f5cae65.json).
+The [schema version 1
 manifest](evidence/stage-00-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json)
-binds a clean Stage 00 gate run for source commit
-`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` to its checked-in
-[artifact](evidence/artifacts/stage-zero-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json).
+for commit `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` remains archive-only.
 The 2026-08-24 pass for commit
 `6b48ecb73afd471ed576146483098c19c12893f9` remains historical evidence.
 
@@ -19,7 +21,8 @@ specification check, every policy validator and negative self-test, formatting,
 compilation, Clippy, unit/integration/doc tests, dependency-tree inspection,
 `cargo-deny` 0.20.2, `cargo-audit` 0.22.2, and `cargo-llvm-cov` 0.9.0.
 
-Measured Stage-00 coverage is 91.18% branches and 98.87% lines. Branch
+Measured workspace coverage is 90.01% branches and 95.59% lines. All five
+critical regions reached 100%. Branch
 instrumentation uses `RUSTC_BOOTSTRAP=1` only for the coverage command because
 the pinned compiler still gates LLVM branch instrumentation behind `-Z`; the
 variable is forbidden from ordinary build, test, and release compilation.
@@ -94,7 +97,7 @@ audit policy, and globally widened coverage instrumentation.
 `EVID-S00-010-MANIFEST-SCHEMA`: the closed JSON Schema and validator bind every
 record to a catalog ID and require command, exact ordered toolchain and policy
 hash, source and lock hashes, target, feature, time, result, artifact, and
-nonempty limitation fields. Schema version 1 remains archive-only. Seventy-four
+nonempty limitation fields. Schema version 1 remains archive-only. Seventy-eight
 seeded rejection cases cover missing, duplicate, stale, invalid, unbound,
 legacy, toolchain, and artifact-provenance categories.
 
@@ -103,7 +106,7 @@ legacy, toolchain, and artifact-provenance categories.
 `EVID-S00-900-STAGE-GATE`: the recorded run passed from a clean detached
 worktree at the exact source commit on both targets, coverage exceeded 90%, the
 release graph excluded testkit, and the binary refused to impersonate a server.
-The historical manifest records the earlier required gate on exact source commit
-`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` with a verified artifact path and
-is retained as archive evidence. A fresh schema version 2 run is required to
-close `S00-900` for the current source.
+The current schema version 2 manifest records the required gate on exact source
+commit `1e5b738468f88b238061cc6e84b732176f5cae65` with a verified artifact path
+and closes `S00-900`. The schema version 1 record for commit
+`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` is retained as archive evidence.

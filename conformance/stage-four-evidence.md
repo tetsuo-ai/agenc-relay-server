@@ -1,11 +1,13 @@
 # Stage 04 Evidence
 
-Status: implementation complete; schema version 2 checkpoint refresh pending.
-The [historical
+Status: implementation complete; checkpoint closed for exact source commit
+`1e5b738468f88b238061cc6e84b732176f5cae65`. The current schema version 2
+[manifest](evidence/stage-04-1e5b738468f88b238061cc6e84b732176f5cae65.json)
+binds 20 passed records to one clean Stage 04 gate run and its checked-in
+[artifact](evidence/artifacts/stage-four-implementation-1e5b738468f88b238061cc6e84b732176f5cae65.json).
+The [schema version 1
 manifest](evidence/stage-04-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json)
-binds every required record for source commit
-`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` to one clean gate run and its checked-in
-[artifact](evidence/artifacts/stage-four-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json).
+for commit `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` remains archive-only.
 
 Stage 04 implements the cryptographic adapters and account-authentication
 state machines. The adapters compose maintained libraries; they do not
@@ -120,16 +122,16 @@ medians, and a pooled median absolute deviation. Measurement is supplemental;
 the source-hash-bound path review in
 `conformance/stage-four-constant-time-review.toml` is the primary evidence.
 That review also records the remaining Stage 05 fixed-lookup dependency.
-`conformance/stage-four-fuzz-smoke.toml` records the deterministic smoke runs.
+`conformance/stage-four-fuzz-smoke.toml` records two deterministic fuzz targets
+at 10,000 runs each.
 The 24 CPU-hour release campaign for each target remains Stage 10 evidence.
 
 ## Gate state
 
 `bash scripts/check-stage-four.sh` inherits every Stage 00 through Stage 03
-check and adds the Stage 04 profile, tests, and fuzz target. The [historical
-manifest](evidence/stage-04-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json)
-binds the full passed gate and its checked-in artifact to exact source commit
-`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb`. The baseline at that commit
-contains the corrected normative OPAQUE length. The record is retained as
-archive evidence, and a fresh schema version 2 run is required to close
-`S04-900` for the current source.
+check and adds the Stage 04 profile, tests, and fuzz targets. The current schema
+version 2 manifest binds the full passed gate and its checked-in artifact to
+exact source commit `1e5b738468f88b238061cc6e84b732176f5cae65`. Coverage
+reached 90.01% of branches and 95.59% of lines, with all five critical regions
+at 100%. The manifest closes `S04-900`. The schema version 1 record for commit
+`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` remains archive-only.

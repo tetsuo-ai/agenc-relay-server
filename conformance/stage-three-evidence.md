@@ -1,11 +1,13 @@
 # Stage 03 Evidence
 
-Status: implementation complete; schema version 2 checkpoint refresh pending.
-The [historical
+Status: implementation complete; checkpoint closed for exact source commit
+`1e5b738468f88b238061cc6e84b732176f5cae65`. The current schema version 2
+[manifest](evidence/stage-03-1e5b738468f88b238061cc6e84b732176f5cae65.json)
+binds 13 passed records to one clean Stage 03 gate run and its checked-in
+[artifact](evidence/artifacts/stage-three-implementation-1e5b738468f88b238061cc6e84b732176f5cae65.json).
+The [schema version 1
 manifest](evidence/stage-03-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json)
-binds every required record for source commit
-`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` to one clean gate run and its checked-in
-[artifact](evidence/artifacts/stage-three-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json).
+for commit `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` remains archive-only.
 
 Stage 03 implements pure domain behavior. The domain crate has no sockets,
 filesystem access, executor, database handle, concrete clock, random generator,
@@ -103,8 +105,8 @@ so a later generator change cannot silently replace either operation sequence.
 `EVID-S03-900-STAGE-GATE` names `bash scripts/check-stage-three.sh`. The command
 inherits the Stage 02 implementation checks and adds requirement ownership,
 generated-artifact checks, independent domain checks, targeted model
-comparisons, and the full Stage 03 behavior matrix. The historical manifest binds
-that passed run to exact source commit
-`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` and is retained as archive
-evidence. A fresh schema version 2 run is required to close `S03-900` for the
-current source.
+comparisons, and the full Stage 03 behavior matrix. The current schema version 2
+manifest binds the passed run to exact source commit
+`1e5b738468f88b238061cc6e84b732176f5cae65` with a verified artifact path and
+closes `S03-900`. The schema version 1 record for commit
+`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` is retained as archive evidence.

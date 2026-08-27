@@ -35,13 +35,15 @@ CI also checks the fuzz workspace with the pinned nightly formatter.
 
 ## Verification
 
-`bash scripts/check-stage-two.sh` passed on 2026-08-26. The run checked both Linux
+`bash scripts/check-stage-two.sh` passed on 2026-08-27 for exact source commit
+`1e5b738468f88b238061cc6e84b732176f5cae65`. The run checked both Linux
 targets, formatting, Clippy with warnings denied, tests, documentation tests,
-dependency policy, advisories, generated artifacts, and all four deterministic
-10,000-run fuzz smokes. Coverage was 90.03% of branches and 93.97% of lines.
-The source revision and artifact digest are recorded in the Stage 02 evidence
-manifest. That 2026-08-26 manifest remains archive evidence. The [historical
-manifest](evidence/stage-02-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json)
-binds a repeated Stage 02 gate run to a checked-in artifact for exact source
-commit `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb`. A schema version 2 checkpoint
-refresh is pending for the current source.
+dependency policy, advisories, generated artifacts, and four fuzz targets at
+10,000 runs each. Coverage reached 90.01% of branches and 95.59% of lines, with
+all five critical regions at 100%. The current schema version 2
+[manifest](evidence/stage-02-1e5b738468f88b238061cc6e84b732176f5cae65.json)
+and checked-in
+[artifact](evidence/artifacts/stage-two-implementation-1e5b738468f88b238061cc6e84b732176f5cae65.json)
+close Stage 02. The schema version 1 manifest for commit
+`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` and the 2026-08-26 manifest remain
+archive-only.

@@ -17,7 +17,7 @@ Rust implementation must follow Section 24 of `docs/ircd-architecture-and-implem
 - `cargo test --workspace --all-features --locked`: run unit and integration tests.
 - `cargo deny check` and `cargo audit --deny warnings`: check dependencies and advisories.
 
-The `agenc-ircd` binary still exits unsuccessfully because daemon composition begins in Stage 06. This fail-closed behavior prevents the binary from being mistaken for a server. Implementation checks do not close a stage by themselves. The schema version 1 evidence for commit `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` is historical; a schema version 2 checkpoint refresh is pending for the current source. Stage 05 is next; implement stages in `TODO.md` order.
+The `agenc-ircd` binary still exits unsuccessfully because daemon composition begins in Stage 06. This fail-closed behavior prevents the binary from being mistaken for a server. Implementation checks do not close a stage by themselves. Schema version 2 manifests and artifacts close Stages 00 through 04 for exact source commit `1e5b738468f88b238061cc6e84b732176f5cae65`. The schema version 1 evidence for commit `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` remains archive-only. Stage 05 is next; implement stages in `TODO.md` order.
 
 ## Coding Style & Naming Conventions
 

@@ -1,11 +1,13 @@
 # Stage 01 Evidence
 
-Status: implementation complete; schema version 2 checkpoint refresh pending.
-The [historical
+Status: implementation complete; checkpoint closed for exact source commit
+`1e5b738468f88b238061cc6e84b732176f5cae65`. The current schema version 2
+[manifest](evidence/stage-01-1e5b738468f88b238061cc6e84b732176f5cae65.json)
+binds 14 passed records to one clean Stage 01 gate run and its checked-in
+[artifact](evidence/artifacts/stage-one-implementation-1e5b738468f88b238061cc6e84b732176f5cae65.json).
+The [schema version 1
 manifest](evidence/stage-01-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json)
-binds a clean Stage 01 gate run for source commit
-`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` to its checked-in
-[artifact](evidence/artifacts/stage-one-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json).
+for commit `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` remains archive-only.
 The 2026-08-24 pass for commit
 `7ae6439b472521d3c23fb99261deaf8964a70c5a` remains historical evidence.
 
@@ -15,7 +17,8 @@ The 2026-08-24 pass for commit
 Linux targets. The recorded Stage 00 and Stage 01 checks covered frozen
 sources, generated artifacts, formatting, compilation, Clippy, all tests,
 documentation tests, dependency policy, advisories, and branch coverage.
-Measured workspace coverage is 91.56% branches and 95.37% lines.
+Measured workspace coverage is 90.01% branches and 95.59% lines. All five
+critical regions reached 100%.
 
 The independent artifact checker accounts for 53 closed registry constants,
 all 128 Appendix B schemas, and one reviewed golden vector per schema. This
@@ -117,7 +120,7 @@ mutations.
 lockfile and tools on both targets. Generated-source freshness, six artifact
 checker mutations, all workspace tests, Clippy with warnings denied,
 `cargo-deny`, `cargo-audit`, and the greater-than-90% branch threshold passed.
-The historical manifest records the earlier required gate on exact source commit
-`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` with a verified artifact path and
-is retained as archive evidence. A fresh schema version 2 run is required to
-close `S01-900` for the current source.
+The current schema version 2 manifest records the required gate on exact source
+commit `1e5b738468f88b238061cc6e84b732176f5cae65` with a verified artifact path
+and closes `S01-900`. The schema version 1 record for commit
+`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` is retained as archive evidence.
