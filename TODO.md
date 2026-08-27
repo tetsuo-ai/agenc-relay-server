@@ -53,7 +53,7 @@ References: [Architecture §§1.2–4](docs/ircd-architecture-and-implementation
 | 00 | Reproducible workspace and traceability foundation | Complete | Pass, 2026-08-26 | Historical commit `6b48ecb73afd471ed576146483098c19c12893f9` |
 | 01 | Registries, validated types, and canonical codecs | Complete | Pass, 2026-08-26 | Historical commit `7ae6439b472521d3c23fb99261deaf8964a70c5a` |
 | 02 | Bounded client wire implementation | Complete | Pass, 2026-08-26 | [Evidence record](conformance/stage-two-evidence.md) |
-| 03 | Pure deterministic domain model | Not started | Not run | Absent |
+| 03 | Pure deterministic domain model | Complete | Pass, 2026-08-26 | [Evidence record](conformance/stage-three-evidence.md) |
 | 04 | Crypto adapters and account authentication | Not started | Not run | Absent |
 | 05 | Durable and recoverable persistence | Not started | Not run | Absent |
 | 06 | Conforming single-node daemon | Not started | Not run | Absent |
