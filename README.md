@@ -16,8 +16,9 @@
 
 > [!IMPORTANT]
 > **This is pre-alpha infrastructure, not a deployable server.** Stages 00
-> through 03 are implemented and pass their local gates. The binary stays
-> unavailable until the runtime stage is implemented.
+> through 03 are implemented and pass the current complete gate. Stage 03 adds
+> no sockets, storage, cryptography, or executor. The binary intentionally
+> exits unsuccessfully until Stage 06 composes the runtime.
 
 ## What is being built
 
@@ -46,14 +47,19 @@ Ed25519, and authenticated storage.
 | 01 | complete | 53 registry constants, validated types, 128 canonical object codecs, and independent vectors |
 | 02 | complete | Incremental framing, client parsing, capability and registration state, bounded rendering, transcripts, and fuzz targets |
 | 03 | complete | Pure accounts, sessions, channels, authorization, privacy projections, plans, explicit external inputs, and an independent reference model |
-| 04-10 | planned | Cryptographic adapters through production qualification |
+| 04 | not started | Secret-safe cryptographic adapters and account authentication |
+| 05-10 | planned | Persistence, runtime composition, federation, E2EE routing, optional profiles, and production qualification |
 
-The complete dependency-ordered roadmap lives in [TODO.md](TODO.md). The Stage
-03 command inherits both declared Linux target checks, dependency and advisory
-checks, Clippy with warnings denied, all workspace tests, coverage, and the
-Stage 02 deterministic fuzz targets. It adds the pure-domain checks, generated
-state-machine cases, privacy tests, and production/reference comparisons. See
-the [Stage 03 development record](conformance/stage-three-evidence.md) and the
+The current highest implemented layer is pure domain logic.
+`agenc-ircd-domain` validates and authorizes commands, produces
+privacy-filtered projections and mutation plans, and requests time or entropy
+as explicit inputs. It does not perform I/O. `agenc-ircd-testkit` contains a
+separate value-state model that checks the same command families without
+importing the production domain crate.
+
+Stage 04 is next. The complete dependency-ordered roadmap lives in
+[TODO.md](TODO.md). See the
+[Stage 03 evidence record](conformance/stage-three-evidence.md) and the
 [latest CI runs](https://github.com/tetsuo-ai/agenc-ircd/actions).
 
 ## Trust shape
@@ -73,9 +79,12 @@ state; it does not conceal every delivery relationship. The normative
 [threat model](docs/ircd-architecture-and-implementation-spec.md#5-threat-and-trust-model)
 states the exact guarantees and limits.
 
-## Build and verify
+## Verify the current stage
 
-The pinned toolchain is Rust 1.98.0. From a clean checkout:
+The repository pins Rust 1.98.0 and a separate nightly toolchain for fuzz
+targets. Install the exact policy and evidence tool versions listed in the
+[CI workflow](.github/workflows/ci.yml), then run the complete gate from a
+clean checkout:
 
 ```sh
 git clone https://github.com/tetsuo-ai/agenc-ircd.git
@@ -83,8 +92,14 @@ cd agenc-ircd
 bash scripts/check-stage-three.sh
 ```
 
+The Stage 03 gate inherits both declared Linux target checks, dependency and
+advisory checks, Clippy with warnings denied, workspace tests, documentation
+tests, branch coverage, and the Stage 02 fuzz smoke targets. It adds generated
+domain sequences, privacy checks, and production/reference comparisons. The
+reviewed command list is in [conformance/gates.toml](conformance/gates.toml).
+
 There is no server start command yet. The binary fails closed until its runtime
-stage is implemented.
+is composed in Stage 06.
 
 ## Find your way around
 
@@ -94,8 +109,10 @@ stage is implemented.
 | [E2EE companion](docs/irc-mls-e2ee-extension.md) | MLS identity, objects, ordering, downgrade resistance, and encrypted routes |
 | [Protocol decision ledger](docs/protocol-sources-and-decisions.md) | Adopted, narrowed, superseded, and pinned standards |
 | [`crates/`](crates) | Thirteen-crate Rust workspace with enforced dependency boundaries |
+| [`agenc-ircd-domain`](crates/agenc-ircd-domain) | Pure Stage 03 state, command, decision, event, and projection model |
+| [`agenc-ircd-testkit`](crates/agenc-ircd-testkit) | Independent models, deterministic inputs, fixtures, and transcript support |
 | [`conformance/`](conformance) | Requirement ledger, evidence catalog, gates, and source policy |
-| [`test-data/`](test-data) | Deterministic vectors, transcripts, fuzz seeds, and planned fault, model, capacity, and interoperability fixtures |
+| [`test-data/`](test-data) | Deterministic vectors, transcripts, generated property cases, fuzz seeds, and reserved later-stage fixtures |
 
 ## Participate
 
