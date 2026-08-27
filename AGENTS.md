@@ -2,13 +2,13 @@
 
 ## Project Structure & Module Organization
 
-`docs/` holds the normative architecture, E2EE extension, federation registry, decision ledger, and integrity manifest. `rfcs/` contains pinned upstream RFC text; preserve these files byte-for-byte. `crates/` contains the 13-crate Section-24 workspace. Stages 00 through 03 implement validated types, canonical federation codecs, bounded client wire behavior, the pure domain model, and deterministic test support. Crates assigned to later stages expose no behavior yet. `conformance/` owns requirement and evidence catalogs, while `test-data/` owns public deterministic fixtures.
+`docs/` holds the normative architecture, E2EE extension, federation registry, decision ledger, and integrity manifest. `rfcs/` contains pinned upstream RFC text; preserve these files byte-for-byte. `crates/` contains the 13-crate Section-24 workspace. Stages 00 through 04 implement validated types, canonical federation codecs, bounded client wire behavior, the pure domain model, cryptographic adapters, private account authentication, and deterministic test support. Crates assigned to later stages expose no behavior yet. `conformance/` owns requirement and evidence catalogs, while `test-data/` owns public deterministic fixtures.
 
 Rust implementation must follow Section 24 of `docs/ircd-architecture-and-implementation-spec.md`. Keep the declared `agenc-ircd-*` crate boundaries intact: types and wire codecs remain independent of runtime, storage, and policy; the `agenc-ircd` binary performs composition only. Put crate integration tests in `crates/<crate>/tests/` and shared deterministic fixtures in `agenc-ircd-testkit`.
 
 ## Build, Test, and Development Commands
 
-- `bash scripts/check-stage-three.sh`: run the current complete gate, including the inherited Stage 00 through Stage 02 checks plus Stage 03 domain and reference-model checks.
+- `bash scripts/check-stage-four.sh`: run the current Stage 04 implementation checks, including inherited Stage 00 through Stage 03 checks plus Stage 04 crypto, auth, dependency, and fuzz checks.
 - `python3 scripts/requirements.py check`: prove the generated ledger covers the frozen normative sources.
 - `python3 scripts/check-source.py check`: reject unsafe, panic-prone, unbounded-channel, and unreviewed code shapes.
 - `cargo fmt --all --check`: verify Rust formatting.
@@ -17,7 +17,7 @@ Rust implementation must follow Section 24 of `docs/ircd-architecture-and-implem
 - `cargo test --workspace --all-features --locked`: run unit and integration tests.
 - `cargo deny check` and `cargo audit --deny warnings`: check dependencies and advisories.
 
-The `agenc-ircd` binary still exits unsuccessfully because daemon composition begins in Stage 06. This fail-closed behavior prevents the binary from being mistaken for a server. Implement stages in `TODO.md` order.
+The `agenc-ircd` binary still exits unsuccessfully because daemon composition begins in Stage 06. This fail-closed behavior prevents the binary from being mistaken for a server. Implementation checks do not close a stage by themselves. Schema version 2 manifests and artifacts close Stages 00 through 04 for exact source commit `1e5b738468f88b238061cc6e84b732176f5cae65`. The schema version 1 evidence for commit `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` remains archive-only. Stage 05 is next; implement stages in `TODO.md` order.
 
 ## Coding Style & Naming Conventions
 
@@ -34,7 +34,7 @@ Use concise imperative subjects such as `Add bounded client framing`. Keep commi
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **agenc-ircd** (23439 symbols, 55634 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **agenc-ircd** (33202 symbols, 80970 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
@@ -74,25 +74,25 @@ This project is indexed by GitNexus as **agenc-ircd** (23439 symbols, 55634 rela
 | Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
 | Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
 | Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
-| Work in the Tests area (561 symbols) | `.claude/skills/generated/tests/SKILL.md` |
-| Work in the Scripts area (197 symbols) | `.claude/skills/generated/scripts/SKILL.md` |
-| Work in the Cluster_103 area (116 symbols) | `.claude/skills/generated/cluster-103/SKILL.md` |
-| Work in the Fuzz_targets area (77 symbols) | `.claude/skills/generated/fuzz-targets/SKILL.md` |
-| Work in the Cluster_64 area (61 symbols) | `.claude/skills/generated/cluster-64/SKILL.md` |
-| Work in the Cluster_8 area (52 symbols) | `.claude/skills/generated/cluster-8/SKILL.md` |
-| Work in the Cluster_124 area (29 symbols) | `.claude/skills/generated/cluster-124/SKILL.md` |
-| Work in the Cluster_74 area (23 symbols) | `.claude/skills/generated/cluster-74/SKILL.md` |
-| Work in the Cluster_33 area (17 symbols) | `.claude/skills/generated/cluster-33/SKILL.md` |
-| Work in the Cluster_47 area (14 symbols) | `.claude/skills/generated/cluster-47/SKILL.md` |
-| Work in the Cluster_63 area (11 symbols) | `.claude/skills/generated/cluster-63/SKILL.md` |
-| Work in the Cluster_85 area (11 symbols) | `.claude/skills/generated/cluster-85/SKILL.md` |
-| Work in the Cluster_92 area (11 symbols) | `.claude/skills/generated/cluster-92/SKILL.md` |
-| Work in the Cluster_99 area (11 symbols) | `.claude/skills/generated/cluster-99/SKILL.md` |
-| Work in the Cluster_14 area (10 symbols) | `.claude/skills/generated/cluster-14/SKILL.md` |
-| Work in the Cluster_25 area (9 symbols) | `.claude/skills/generated/cluster-25/SKILL.md` |
-| Work in the Cluster_15 area (8 symbols) | `.claude/skills/generated/cluster-15/SKILL.md` |
-| Work in the Cluster_38 area (8 symbols) | `.claude/skills/generated/cluster-38/SKILL.md` |
-| Work in the Cluster_80 area (8 symbols) | `.claude/skills/generated/cluster-80/SKILL.md` |
-| Work in the Cluster_90 area (8 symbols) | `.claude/skills/generated/cluster-90/SKILL.md` |
+| Work in the Tests area (865 symbols) | `.claude/skills/generated/tests/SKILL.md` |
+| Work in the Scripts area (308 symbols) | `.claude/skills/generated/scripts/SKILL.md` |
+| Work in the Cluster_112 area (135 symbols) | `.claude/skills/generated/cluster-112/SKILL.md` |
+| Work in the Cluster_156 area (106 symbols) | `.claude/skills/generated/cluster-156/SKILL.md` |
+| Work in the Fuzz_targets area (78 symbols) | `.claude/skills/generated/fuzz-targets/SKILL.md` |
+| Work in the Cluster_41 area (53 symbols) | `.claude/skills/generated/cluster-41/SKILL.md` |
+| Work in the Cluster_9 area (30 symbols) | `.claude/skills/generated/cluster-9/SKILL.md` |
+| Work in the Cluster_176 area (29 symbols) | `.claude/skills/generated/cluster-176/SKILL.md` |
+| Work in the Cluster_123 area (21 symbols) | `.claude/skills/generated/cluster-123/SKILL.md` |
+| Work in the Cluster_66 area (18 symbols) | `.claude/skills/generated/cluster-66/SKILL.md` |
+| Work in the Cluster_152 area (17 symbols) | `.claude/skills/generated/cluster-152/SKILL.md` |
+| Work in the Cluster_5 area (15 symbols) | `.claude/skills/generated/cluster-5/SKILL.md` |
+| Work in the Cluster_22 area (15 symbols) | `.claude/skills/generated/cluster-22/SKILL.md` |
+| Work in the Cluster_134 area (15 symbols) | `.claude/skills/generated/cluster-134/SKILL.md` |
+| Work in the Cluster_154 area (13 symbols) | `.claude/skills/generated/cluster-154/SKILL.md` |
+| Work in the Cluster_111 area (12 symbols) | `.claude/skills/generated/cluster-111/SKILL.md` |
+| Work in the Cluster_79 area (11 symbols) | `.claude/skills/generated/cluster-79/SKILL.md` |
+| Work in the Cluster_106 area (11 symbols) | `.claude/skills/generated/cluster-106/SKILL.md` |
+| Work in the Cluster_128 area (11 symbols) | `.claude/skills/generated/cluster-128/SKILL.md` |
+| Work in the Cluster_173 area (11 symbols) | `.claude/skills/generated/cluster-173/SKILL.md` |
 
 <!-- gitnexus:end -->

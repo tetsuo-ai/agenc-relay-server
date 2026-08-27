@@ -1,0 +1,62 @@
+schema_version = 1
+minimum_overall_branch_percent = 90.0
+minimum_overall_line_percent = 90.0
+critical_region_percent = 100.0
+required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
+reviewed_source_files = 65
+reviewed_source_sha256 = "593711c39de1b30161a234545c2c4ecc81aeafd91c6b618f2ab84722af7b18de"
+
+[[region]]
+id = "client-message-error-enum-arms"
+category = "parser-error-discriminants"
+file = "crates/agenc-ircd-client-wire/src/message.rs"
+source_sha256 = "f00ac1acc8b179ec4bc1168af8ddd02d3d5fe74163d4cbfbd4d28dc1dd21385a"
+start_line = 120
+end_line = 142
+metric = "regions"
+reason = "Every closed parser error arm must be observed by the error reporting tests."
+
+[[region]]
+id = "client-message-parser-errors"
+category = "parser-error-discriminants"
+file = "crates/agenc-ircd-client-wire/src/message.rs"
+source_sha256 = "f00ac1acc8b179ec4bc1168af8ddd02d3d5fe74163d4cbfbd4d28dc1dd21385a"
+start_line = 151
+end_line = 231
+metric = "branches"
+reason = "Every accepted and rejected syntax path must be exercised at the client parser boundary."
+
+[[region]]
+id = "domain-command-authorization"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-domain/src/decision.rs"
+source_sha256 = "8af0e678db8a9548d6da1b442e80eebe87ad7b16e0f2199248d330dfa3615de3"
+start_line = 1540
+end_line = 1823
+metric = "branches"
+reason = "Session fences, admission, and command authority are security decisions."
+
+[[region]]
+id = "federation-field-kind-decode"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-federation-wire/src/codec.rs"
+source_sha256 = "ad2f1c630c28026a8f39f6308be562ba4eee654c81fe5f4f6976ada8c4664291"
+start_line = 1280
+end_line = 1347
+metric = "regions"
+reason = "Every closed FieldKind decode arm must run in the canonical federation codec suite."
+
+[[region]]
+id = "domain-state-invariant-checks"
+category = "section-27-invariant-checkers"
+file = "crates/agenc-ircd-domain/src/model.rs"
+source_sha256 = "e830bd3312055feb1fa9ea3302ca65b796bf5621c9ec4a002d119889d6c77a77"
+start_line = 1245
+end_line = 1429
+metric = "branches"
+reason = "Every current domain cross-index and authority-fence check must take both outcomes."
+
+[[deferred]]
+category = "persistence-recovery"
+until_task = "S05-010"
+reason = "Persistence recovery code does not exist before Stage 05. The deferment expires when fail-closed startup recovery is implemented."

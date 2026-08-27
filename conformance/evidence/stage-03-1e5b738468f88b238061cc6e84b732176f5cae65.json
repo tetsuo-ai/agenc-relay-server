@@ -1,0 +1,2518 @@
+{
+  "schema_version": 2,
+  "manifest_id": "EVID-MANIFEST-STAGE-03-1E5B738468F88B23",
+  "source_commit": "1e5b738468f88b238061cc6e84b732176f5cae65",
+  "source_sha256": "7fa14eadaa040b1405f0ebbe08f542191e5b4d4fadeee50e56138aa3f498c346",
+  "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+  "entries": [
+    {
+      "evidence_id": "EVID-S03-001-IDENTITIES",
+      "claim_ids": [
+        "S03-001"
+      ],
+      "command": "python3 scripts/run-gate.py stage-three-implementation",
+      "tool": {
+        "name": "agenc-ircd-gate-runner",
+        "version": "a45c8425639e6e7a9a99b9fe703005250c64e1918927f8ee698b6919c2998f2c"
+      },
+      "toolchain_policy_sha256": "3f125bad8eeb2ef52f3cb49d2296e9453a76b14d6d288d75b3e3fdd2fbe13095",
+      "toolchain": [
+        {
+          "name": "rustc",
+          "argv": [
+            "rustc",
+            "--version"
+          ],
+          "version": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
+        },
+        {
+          "name": "cargo",
+          "argv": [
+            "cargo",
+            "--version"
+          ],
+          "version": "cargo 1.98.0 (797e8a9bc 2026-08-05)"
+        },
+        {
+          "name": "cargo-fmt",
+          "argv": [
+            "cargo",
+            "fmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "rustfmt",
+          "argv": [
+            "rustfmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "cargo-clippy",
+          "argv": [
+            "cargo",
+            "clippy",
+            "--version"
+          ],
+          "version": "clippy 0.1.98 (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "clippy",
+          "argv": [
+            "clippy-driver",
+            "--version"
+          ],
+          "version": "clippy 0.1.98 (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "rustdoc",
+          "argv": [
+            "rustdoc",
+            "--version"
+          ],
+          "version": "rustdoc 1.98.0 (88d9e12ae 2026-08-18)"
+        },
+        {
+          "name": "cargo-deny",
+          "argv": [
+            "cargo",
+            "deny",
+            "--version"
+          ],
+          "version": "cargo-deny 0.20.2"
+        },
+        {
+          "name": "cargo-audit",
+          "argv": [
+            "cargo",
+            "audit",
+            "--version"
+          ],
+          "version": "cargo-audit-audit 0.22.2"
+        },
+        {
+          "name": "cargo-llvm-cov",
+          "argv": [
+            "cargo",
+            "llvm-cov",
+            "--version"
+          ],
+          "version": "cargo-llvm-cov 0.9.0"
+        },
+        {
+          "name": "rust-llvm-cov",
+          "argv": [
+            "python3",
+            "scripts/check-rust-components.py",
+            "probe",
+            "llvm-cov"
+          ],
+          "version": "LLVM (http://llvm.org/):\n  LLVM version 22.1.8-rust-1.98.0-stable\n  Optimized build."
+        },
+        {
+          "name": "rust-llvm-profdata",
+          "argv": [
+            "python3",
+            "scripts/check-rust-components.py",
+            "probe",
+            "llvm-profdata"
+          ],
+          "version": "LLVM (http://llvm.org/):\n  LLVM version 22.1.8-rust-1.98.0-stable\n  Optimized build."
+        },
+        {
+          "name": "nightly-rustc",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "rustc",
+            "--version"
+          ],
+          "version": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)"
+        },
+        {
+          "name": "nightly-cargo",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "cargo",
+            "--version"
+          ],
+          "version": "cargo 1.100.0-nightly (e8cb624d5 2026-08-22)"
+        },
+        {
+          "name": "nightly-cargo-fmt",
+          "argv": [
+            "cargo",
+            "+nightly-2026-08-24",
+            "fmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.10.0-nightly (fb6531d550 2026-08-23)"
+        },
+        {
+          "name": "nightly-rustfmt",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "rustfmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.10.0-nightly (fb6531d550 2026-08-23)"
+        },
+        {
+          "name": "cargo-fuzz",
+          "argv": [
+            "cargo",
+            "fuzz",
+            "--version"
+          ],
+          "version": "cargo-fuzz 0.13.2"
+        }
+      ],
+      "source_commit": "1e5b738468f88b238061cc6e84b732176f5cae65",
+      "source_sha256": "7fa14eadaa040b1405f0ebbe08f542191e5b4d4fadeee50e56138aa3f498c346",
+      "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": [
+        "all-features"
+      ],
+      "started_at": "2026-08-27T15:39:34.465736Z",
+      "ended_at": "2026-08-27T15:40:17.838763Z",
+      "result": "passed",
+      "artifact": {
+        "label": "Stage 03 exact-source gate run",
+        "sha256": "184a08ed44f1ebbd40c431a640f58a0197044ec6f90076258a94a992dcee1563",
+        "path": "conformance/evidence/artifacts/stage-three-implementation-1e5b738468f88b238061cc6e84b732176f5cae65.json"
+      },
+      "limitations": [
+        "Command output is not captured.",
+        "Bash, external shell utilities such as awk and coreutils, Python, Git, the Rustup selector and version, PATH and executable locations, Cargo and Rustup homes, ignored build caches, installed target presence, and the default native compiler, archiver, linker, and runtime-library identities remain external inputs.",
+        "Reviewed outcome-affecting environment overrides are stripped.",
+        "Cargo audit and deny advisory database revisions, freshness, and network state are not captured.",
+        "Exact-source test attestation is not a hermetic-build or broad security proof."
+      ]
+    },
+    {
+      "evidence_id": "EVID-S03-002-CHANNELS",
+      "claim_ids": [
+        "S03-002"
+      ],
+      "command": "python3 scripts/run-gate.py stage-three-implementation",
+      "tool": {
+        "name": "agenc-ircd-gate-runner",
+        "version": "a45c8425639e6e7a9a99b9fe703005250c64e1918927f8ee698b6919c2998f2c"
+      },
+      "toolchain_policy_sha256": "3f125bad8eeb2ef52f3cb49d2296e9453a76b14d6d288d75b3e3fdd2fbe13095",
+      "toolchain": [
+        {
+          "name": "rustc",
+          "argv": [
+            "rustc",
+            "--version"
+          ],
+          "version": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
+        },
+        {
+          "name": "cargo",
+          "argv": [
+            "cargo",
+            "--version"
+          ],
+          "version": "cargo 1.98.0 (797e8a9bc 2026-08-05)"
+        },
+        {
+          "name": "cargo-fmt",
+          "argv": [
+            "cargo",
+            "fmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "rustfmt",
+          "argv": [
+            "rustfmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "cargo-clippy",
+          "argv": [
+            "cargo",
+            "clippy",
+            "--version"
+          ],
+          "version": "clippy 0.1.98 (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "clippy",
+          "argv": [
+            "clippy-driver",
+            "--version"
+          ],
+          "version": "clippy 0.1.98 (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "rustdoc",
+          "argv": [
+            "rustdoc",
+            "--version"
+          ],
+          "version": "rustdoc 1.98.0 (88d9e12ae 2026-08-18)"
+        },
+        {
+          "name": "cargo-deny",
+          "argv": [
+            "cargo",
+            "deny",
+            "--version"
+          ],
+          "version": "cargo-deny 0.20.2"
+        },
+        {
+          "name": "cargo-audit",
+          "argv": [
+            "cargo",
+            "audit",
+            "--version"
+          ],
+          "version": "cargo-audit-audit 0.22.2"
+        },
+        {
+          "name": "cargo-llvm-cov",
+          "argv": [
+            "cargo",
+            "llvm-cov",
+            "--version"
+          ],
+          "version": "cargo-llvm-cov 0.9.0"
+        },
+        {
+          "name": "rust-llvm-cov",
+          "argv": [
+            "python3",
+            "scripts/check-rust-components.py",
+            "probe",
+            "llvm-cov"
+          ],
+          "version": "LLVM (http://llvm.org/):\n  LLVM version 22.1.8-rust-1.98.0-stable\n  Optimized build."
+        },
+        {
+          "name": "rust-llvm-profdata",
+          "argv": [
+            "python3",
+            "scripts/check-rust-components.py",
+            "probe",
+            "llvm-profdata"
+          ],
+          "version": "LLVM (http://llvm.org/):\n  LLVM version 22.1.8-rust-1.98.0-stable\n  Optimized build."
+        },
+        {
+          "name": "nightly-rustc",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "rustc",
+            "--version"
+          ],
+          "version": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)"
+        },
+        {
+          "name": "nightly-cargo",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "cargo",
+            "--version"
+          ],
+          "version": "cargo 1.100.0-nightly (e8cb624d5 2026-08-22)"
+        },
+        {
+          "name": "nightly-cargo-fmt",
+          "argv": [
+            "cargo",
+            "+nightly-2026-08-24",
+            "fmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.10.0-nightly (fb6531d550 2026-08-23)"
+        },
+        {
+          "name": "nightly-rustfmt",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "rustfmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.10.0-nightly (fb6531d550 2026-08-23)"
+        },
+        {
+          "name": "cargo-fuzz",
+          "argv": [
+            "cargo",
+            "fuzz",
+            "--version"
+          ],
+          "version": "cargo-fuzz 0.13.2"
+        }
+      ],
+      "source_commit": "1e5b738468f88b238061cc6e84b732176f5cae65",
+      "source_sha256": "7fa14eadaa040b1405f0ebbe08f542191e5b4d4fadeee50e56138aa3f498c346",
+      "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": [
+        "all-features"
+      ],
+      "started_at": "2026-08-27T15:39:34.465736Z",
+      "ended_at": "2026-08-27T15:40:17.838763Z",
+      "result": "passed",
+      "artifact": {
+        "label": "Stage 03 exact-source gate run",
+        "sha256": "184a08ed44f1ebbd40c431a640f58a0197044ec6f90076258a94a992dcee1563",
+        "path": "conformance/evidence/artifacts/stage-three-implementation-1e5b738468f88b238061cc6e84b732176f5cae65.json"
+      },
+      "limitations": [
+        "Command output is not captured.",
+        "Bash, external shell utilities such as awk and coreutils, Python, Git, the Rustup selector and version, PATH and executable locations, Cargo and Rustup homes, ignored build caches, installed target presence, and the default native compiler, archiver, linker, and runtime-library identities remain external inputs.",
+        "Reviewed outcome-affecting environment overrides are stripped.",
+        "Cargo audit and deny advisory database revisions, freshness, and network state are not captured.",
+        "Exact-source test attestation is not a hermetic-build or broad security proof."
+      ]
+    },
+    {
+      "evidence_id": "EVID-S03-003-PROJECTIONS",
+      "claim_ids": [
+        "S03-003"
+      ],
+      "command": "python3 scripts/run-gate.py stage-three-implementation",
+      "tool": {
+        "name": "agenc-ircd-gate-runner",
+        "version": "a45c8425639e6e7a9a99b9fe703005250c64e1918927f8ee698b6919c2998f2c"
+      },
+      "toolchain_policy_sha256": "3f125bad8eeb2ef52f3cb49d2296e9453a76b14d6d288d75b3e3fdd2fbe13095",
+      "toolchain": [
+        {
+          "name": "rustc",
+          "argv": [
+            "rustc",
+            "--version"
+          ],
+          "version": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
+        },
+        {
+          "name": "cargo",
+          "argv": [
+            "cargo",
+            "--version"
+          ],
+          "version": "cargo 1.98.0 (797e8a9bc 2026-08-05)"
+        },
+        {
+          "name": "cargo-fmt",
+          "argv": [
+            "cargo",
+            "fmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "rustfmt",
+          "argv": [
+            "rustfmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "cargo-clippy",
+          "argv": [
+            "cargo",
+            "clippy",
+            "--version"
+          ],
+          "version": "clippy 0.1.98 (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "clippy",
+          "argv": [
+            "clippy-driver",
+            "--version"
+          ],
+          "version": "clippy 0.1.98 (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "rustdoc",
+          "argv": [
+            "rustdoc",
+            "--version"
+          ],
+          "version": "rustdoc 1.98.0 (88d9e12ae 2026-08-18)"
+        },
+        {
+          "name": "cargo-deny",
+          "argv": [
+            "cargo",
+            "deny",
+            "--version"
+          ],
+          "version": "cargo-deny 0.20.2"
+        },
+        {
+          "name": "cargo-audit",
+          "argv": [
+            "cargo",
+            "audit",
+            "--version"
+          ],
+          "version": "cargo-audit-audit 0.22.2"
+        },
+        {
+          "name": "cargo-llvm-cov",
+          "argv": [
+            "cargo",
+            "llvm-cov",
+            "--version"
+          ],
+          "version": "cargo-llvm-cov 0.9.0"
+        },
+        {
+          "name": "rust-llvm-cov",
+          "argv": [
+            "python3",
+            "scripts/check-rust-components.py",
+            "probe",
+            "llvm-cov"
+          ],
+          "version": "LLVM (http://llvm.org/):\n  LLVM version 22.1.8-rust-1.98.0-stable\n  Optimized build."
+        },
+        {
+          "name": "rust-llvm-profdata",
+          "argv": [
+            "python3",
+            "scripts/check-rust-components.py",
+            "probe",
+            "llvm-profdata"
+          ],
+          "version": "LLVM (http://llvm.org/):\n  LLVM version 22.1.8-rust-1.98.0-stable\n  Optimized build."
+        },
+        {
+          "name": "nightly-rustc",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "rustc",
+            "--version"
+          ],
+          "version": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)"
+        },
+        {
+          "name": "nightly-cargo",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "cargo",
+            "--version"
+          ],
+          "version": "cargo 1.100.0-nightly (e8cb624d5 2026-08-22)"
+        },
+        {
+          "name": "nightly-cargo-fmt",
+          "argv": [
+            "cargo",
+            "+nightly-2026-08-24",
+            "fmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.10.0-nightly (fb6531d550 2026-08-23)"
+        },
+        {
+          "name": "nightly-rustfmt",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "rustfmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.10.0-nightly (fb6531d550 2026-08-23)"
+        },
+        {
+          "name": "cargo-fuzz",
+          "argv": [
+            "cargo",
+            "fuzz",
+            "--version"
+          ],
+          "version": "cargo-fuzz 0.13.2"
+        }
+      ],
+      "source_commit": "1e5b738468f88b238061cc6e84b732176f5cae65",
+      "source_sha256": "7fa14eadaa040b1405f0ebbe08f542191e5b4d4fadeee50e56138aa3f498c346",
+      "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": [
+        "all-features"
+      ],
+      "started_at": "2026-08-27T15:39:34.465736Z",
+      "ended_at": "2026-08-27T15:40:17.838763Z",
+      "result": "passed",
+      "artifact": {
+        "label": "Stage 03 exact-source gate run",
+        "sha256": "184a08ed44f1ebbd40c431a640f58a0197044ec6f90076258a94a992dcee1563",
+        "path": "conformance/evidence/artifacts/stage-three-implementation-1e5b738468f88b238061cc6e84b732176f5cae65.json"
+      },
+      "limitations": [
+        "Command output is not captured.",
+        "Bash, external shell utilities such as awk and coreutils, Python, Git, the Rustup selector and version, PATH and executable locations, Cargo and Rustup homes, ignored build caches, installed target presence, and the default native compiler, archiver, linker, and runtime-library identities remain external inputs.",
+        "Reviewed outcome-affecting environment overrides are stripped.",
+        "Cargo audit and deny advisory database revisions, freshness, and network state are not captured.",
+        "Exact-source test attestation is not a hermetic-build or broad security proof."
+      ]
+    },
+    {
+      "evidence_id": "EVID-S03-004-COMMANDS",
+      "claim_ids": [
+        "S03-004"
+      ],
+      "command": "python3 scripts/run-gate.py stage-three-implementation",
+      "tool": {
+        "name": "agenc-ircd-gate-runner",
+        "version": "a45c8425639e6e7a9a99b9fe703005250c64e1918927f8ee698b6919c2998f2c"
+      },
+      "toolchain_policy_sha256": "3f125bad8eeb2ef52f3cb49d2296e9453a76b14d6d288d75b3e3fdd2fbe13095",
+      "toolchain": [
+        {
+          "name": "rustc",
+          "argv": [
+            "rustc",
+            "--version"
+          ],
+          "version": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
+        },
+        {
+          "name": "cargo",
+          "argv": [
+            "cargo",
+            "--version"
+          ],
+          "version": "cargo 1.98.0 (797e8a9bc 2026-08-05)"
+        },
+        {
+          "name": "cargo-fmt",
+          "argv": [
+            "cargo",
+            "fmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "rustfmt",
+          "argv": [
+            "rustfmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "cargo-clippy",
+          "argv": [
+            "cargo",
+            "clippy",
+            "--version"
+          ],
+          "version": "clippy 0.1.98 (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "clippy",
+          "argv": [
+            "clippy-driver",
+            "--version"
+          ],
+          "version": "clippy 0.1.98 (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "rustdoc",
+          "argv": [
+            "rustdoc",
+            "--version"
+          ],
+          "version": "rustdoc 1.98.0 (88d9e12ae 2026-08-18)"
+        },
+        {
+          "name": "cargo-deny",
+          "argv": [
+            "cargo",
+            "deny",
+            "--version"
+          ],
+          "version": "cargo-deny 0.20.2"
+        },
+        {
+          "name": "cargo-audit",
+          "argv": [
+            "cargo",
+            "audit",
+            "--version"
+          ],
+          "version": "cargo-audit-audit 0.22.2"
+        },
+        {
+          "name": "cargo-llvm-cov",
+          "argv": [
+            "cargo",
+            "llvm-cov",
+            "--version"
+          ],
+          "version": "cargo-llvm-cov 0.9.0"
+        },
+        {
+          "name": "rust-llvm-cov",
+          "argv": [
+            "python3",
+            "scripts/check-rust-components.py",
+            "probe",
+            "llvm-cov"
+          ],
+          "version": "LLVM (http://llvm.org/):\n  LLVM version 22.1.8-rust-1.98.0-stable\n  Optimized build."
+        },
+        {
+          "name": "rust-llvm-profdata",
+          "argv": [
+            "python3",
+            "scripts/check-rust-components.py",
+            "probe",
+            "llvm-profdata"
+          ],
+          "version": "LLVM (http://llvm.org/):\n  LLVM version 22.1.8-rust-1.98.0-stable\n  Optimized build."
+        },
+        {
+          "name": "nightly-rustc",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "rustc",
+            "--version"
+          ],
+          "version": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)"
+        },
+        {
+          "name": "nightly-cargo",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "cargo",
+            "--version"
+          ],
+          "version": "cargo 1.100.0-nightly (e8cb624d5 2026-08-22)"
+        },
+        {
+          "name": "nightly-cargo-fmt",
+          "argv": [
+            "cargo",
+            "+nightly-2026-08-24",
+            "fmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.10.0-nightly (fb6531d550 2026-08-23)"
+        },
+        {
+          "name": "nightly-rustfmt",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "rustfmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.10.0-nightly (fb6531d550 2026-08-23)"
+        },
+        {
+          "name": "cargo-fuzz",
+          "argv": [
+            "cargo",
+            "fuzz",
+            "--version"
+          ],
+          "version": "cargo-fuzz 0.13.2"
+        }
+      ],
+      "source_commit": "1e5b738468f88b238061cc6e84b732176f5cae65",
+      "source_sha256": "7fa14eadaa040b1405f0ebbe08f542191e5b4d4fadeee50e56138aa3f498c346",
+      "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": [
+        "all-features"
+      ],
+      "started_at": "2026-08-27T15:39:34.465736Z",
+      "ended_at": "2026-08-27T15:40:17.838763Z",
+      "result": "passed",
+      "artifact": {
+        "label": "Stage 03 exact-source gate run",
+        "sha256": "184a08ed44f1ebbd40c431a640f58a0197044ec6f90076258a94a992dcee1563",
+        "path": "conformance/evidence/artifacts/stage-three-implementation-1e5b738468f88b238061cc6e84b732176f5cae65.json"
+      },
+      "limitations": [
+        "Command output is not captured.",
+        "Bash, external shell utilities such as awk and coreutils, Python, Git, the Rustup selector and version, PATH and executable locations, Cargo and Rustup homes, ignored build caches, installed target presence, and the default native compiler, archiver, linker, and runtime-library identities remain external inputs.",
+        "Reviewed outcome-affecting environment overrides are stripped.",
+        "Cargo audit and deny advisory database revisions, freshness, and network state are not captured.",
+        "Exact-source test attestation is not a hermetic-build or broad security proof."
+      ]
+    },
+    {
+      "evidence_id": "EVID-S03-005-AUTHORIZATION",
+      "claim_ids": [
+        "S03-005"
+      ],
+      "command": "python3 scripts/run-gate.py stage-three-implementation",
+      "tool": {
+        "name": "agenc-ircd-gate-runner",
+        "version": "a45c8425639e6e7a9a99b9fe703005250c64e1918927f8ee698b6919c2998f2c"
+      },
+      "toolchain_policy_sha256": "3f125bad8eeb2ef52f3cb49d2296e9453a76b14d6d288d75b3e3fdd2fbe13095",
+      "toolchain": [
+        {
+          "name": "rustc",
+          "argv": [
+            "rustc",
+            "--version"
+          ],
+          "version": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
+        },
+        {
+          "name": "cargo",
+          "argv": [
+            "cargo",
+            "--version"
+          ],
+          "version": "cargo 1.98.0 (797e8a9bc 2026-08-05)"
+        },
+        {
+          "name": "cargo-fmt",
+          "argv": [
+            "cargo",
+            "fmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "rustfmt",
+          "argv": [
+            "rustfmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "cargo-clippy",
+          "argv": [
+            "cargo",
+            "clippy",
+            "--version"
+          ],
+          "version": "clippy 0.1.98 (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "clippy",
+          "argv": [
+            "clippy-driver",
+            "--version"
+          ],
+          "version": "clippy 0.1.98 (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "rustdoc",
+          "argv": [
+            "rustdoc",
+            "--version"
+          ],
+          "version": "rustdoc 1.98.0 (88d9e12ae 2026-08-18)"
+        },
+        {
+          "name": "cargo-deny",
+          "argv": [
+            "cargo",
+            "deny",
+            "--version"
+          ],
+          "version": "cargo-deny 0.20.2"
+        },
+        {
+          "name": "cargo-audit",
+          "argv": [
+            "cargo",
+            "audit",
+            "--version"
+          ],
+          "version": "cargo-audit-audit 0.22.2"
+        },
+        {
+          "name": "cargo-llvm-cov",
+          "argv": [
+            "cargo",
+            "llvm-cov",
+            "--version"
+          ],
+          "version": "cargo-llvm-cov 0.9.0"
+        },
+        {
+          "name": "rust-llvm-cov",
+          "argv": [
+            "python3",
+            "scripts/check-rust-components.py",
+            "probe",
+            "llvm-cov"
+          ],
+          "version": "LLVM (http://llvm.org/):\n  LLVM version 22.1.8-rust-1.98.0-stable\n  Optimized build."
+        },
+        {
+          "name": "rust-llvm-profdata",
+          "argv": [
+            "python3",
+            "scripts/check-rust-components.py",
+            "probe",
+            "llvm-profdata"
+          ],
+          "version": "LLVM (http://llvm.org/):\n  LLVM version 22.1.8-rust-1.98.0-stable\n  Optimized build."
+        },
+        {
+          "name": "nightly-rustc",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "rustc",
+            "--version"
+          ],
+          "version": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)"
+        },
+        {
+          "name": "nightly-cargo",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "cargo",
+            "--version"
+          ],
+          "version": "cargo 1.100.0-nightly (e8cb624d5 2026-08-22)"
+        },
+        {
+          "name": "nightly-cargo-fmt",
+          "argv": [
+            "cargo",
+            "+nightly-2026-08-24",
+            "fmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.10.0-nightly (fb6531d550 2026-08-23)"
+        },
+        {
+          "name": "nightly-rustfmt",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "rustfmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.10.0-nightly (fb6531d550 2026-08-23)"
+        },
+        {
+          "name": "cargo-fuzz",
+          "argv": [
+            "cargo",
+            "fuzz",
+            "--version"
+          ],
+          "version": "cargo-fuzz 0.13.2"
+        }
+      ],
+      "source_commit": "1e5b738468f88b238061cc6e84b732176f5cae65",
+      "source_sha256": "7fa14eadaa040b1405f0ebbe08f542191e5b4d4fadeee50e56138aa3f498c346",
+      "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": [
+        "all-features"
+      ],
+      "started_at": "2026-08-27T15:39:34.465736Z",
+      "ended_at": "2026-08-27T15:40:17.838763Z",
+      "result": "passed",
+      "artifact": {
+        "label": "Stage 03 exact-source gate run",
+        "sha256": "184a08ed44f1ebbd40c431a640f58a0197044ec6f90076258a94a992dcee1563",
+        "path": "conformance/evidence/artifacts/stage-three-implementation-1e5b738468f88b238061cc6e84b732176f5cae65.json"
+      },
+      "limitations": [
+        "Command output is not captured.",
+        "Bash, external shell utilities such as awk and coreutils, Python, Git, the Rustup selector and version, PATH and executable locations, Cargo and Rustup homes, ignored build caches, installed target presence, and the default native compiler, archiver, linker, and runtime-library identities remain external inputs.",
+        "Reviewed outcome-affecting environment overrides are stripped.",
+        "Cargo audit and deny advisory database revisions, freshness, and network state are not captured.",
+        "Exact-source test attestation is not a hermetic-build or broad security proof."
+      ]
+    },
+    {
+      "evidence_id": "EVID-S03-006-DELIVERY-PLANS",
+      "claim_ids": [
+        "S03-006"
+      ],
+      "command": "python3 scripts/run-gate.py stage-three-implementation",
+      "tool": {
+        "name": "agenc-ircd-gate-runner",
+        "version": "a45c8425639e6e7a9a99b9fe703005250c64e1918927f8ee698b6919c2998f2c"
+      },
+      "toolchain_policy_sha256": "3f125bad8eeb2ef52f3cb49d2296e9453a76b14d6d288d75b3e3fdd2fbe13095",
+      "toolchain": [
+        {
+          "name": "rustc",
+          "argv": [
+            "rustc",
+            "--version"
+          ],
+          "version": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
+        },
+        {
+          "name": "cargo",
+          "argv": [
+            "cargo",
+            "--version"
+          ],
+          "version": "cargo 1.98.0 (797e8a9bc 2026-08-05)"
+        },
+        {
+          "name": "cargo-fmt",
+          "argv": [
+            "cargo",
+            "fmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "rustfmt",
+          "argv": [
+            "rustfmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "cargo-clippy",
+          "argv": [
+            "cargo",
+            "clippy",
+            "--version"
+          ],
+          "version": "clippy 0.1.98 (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "clippy",
+          "argv": [
+            "clippy-driver",
+            "--version"
+          ],
+          "version": "clippy 0.1.98 (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "rustdoc",
+          "argv": [
+            "rustdoc",
+            "--version"
+          ],
+          "version": "rustdoc 1.98.0 (88d9e12ae 2026-08-18)"
+        },
+        {
+          "name": "cargo-deny",
+          "argv": [
+            "cargo",
+            "deny",
+            "--version"
+          ],
+          "version": "cargo-deny 0.20.2"
+        },
+        {
+          "name": "cargo-audit",
+          "argv": [
+            "cargo",
+            "audit",
+            "--version"
+          ],
+          "version": "cargo-audit-audit 0.22.2"
+        },
+        {
+          "name": "cargo-llvm-cov",
+          "argv": [
+            "cargo",
+            "llvm-cov",
+            "--version"
+          ],
+          "version": "cargo-llvm-cov 0.9.0"
+        },
+        {
+          "name": "rust-llvm-cov",
+          "argv": [
+            "python3",
+            "scripts/check-rust-components.py",
+            "probe",
+            "llvm-cov"
+          ],
+          "version": "LLVM (http://llvm.org/):\n  LLVM version 22.1.8-rust-1.98.0-stable\n  Optimized build."
+        },
+        {
+          "name": "rust-llvm-profdata",
+          "argv": [
+            "python3",
+            "scripts/check-rust-components.py",
+            "probe",
+            "llvm-profdata"
+          ],
+          "version": "LLVM (http://llvm.org/):\n  LLVM version 22.1.8-rust-1.98.0-stable\n  Optimized build."
+        },
+        {
+          "name": "nightly-rustc",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "rustc",
+            "--version"
+          ],
+          "version": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)"
+        },
+        {
+          "name": "nightly-cargo",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "cargo",
+            "--version"
+          ],
+          "version": "cargo 1.100.0-nightly (e8cb624d5 2026-08-22)"
+        },
+        {
+          "name": "nightly-cargo-fmt",
+          "argv": [
+            "cargo",
+            "+nightly-2026-08-24",
+            "fmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.10.0-nightly (fb6531d550 2026-08-23)"
+        },
+        {
+          "name": "nightly-rustfmt",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "rustfmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.10.0-nightly (fb6531d550 2026-08-23)"
+        },
+        {
+          "name": "cargo-fuzz",
+          "argv": [
+            "cargo",
+            "fuzz",
+            "--version"
+          ],
+          "version": "cargo-fuzz 0.13.2"
+        }
+      ],
+      "source_commit": "1e5b738468f88b238061cc6e84b732176f5cae65",
+      "source_sha256": "7fa14eadaa040b1405f0ebbe08f542191e5b4d4fadeee50e56138aa3f498c346",
+      "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": [
+        "all-features"
+      ],
+      "started_at": "2026-08-27T15:39:34.465736Z",
+      "ended_at": "2026-08-27T15:40:17.838763Z",
+      "result": "passed",
+      "artifact": {
+        "label": "Stage 03 exact-source gate run",
+        "sha256": "184a08ed44f1ebbd40c431a640f58a0197044ec6f90076258a94a992dcee1563",
+        "path": "conformance/evidence/artifacts/stage-three-implementation-1e5b738468f88b238061cc6e84b732176f5cae65.json"
+      },
+      "limitations": [
+        "Command output is not captured.",
+        "Bash, external shell utilities such as awk and coreutils, Python, Git, the Rustup selector and version, PATH and executable locations, Cargo and Rustup homes, ignored build caches, installed target presence, and the default native compiler, archiver, linker, and runtime-library identities remain external inputs.",
+        "Reviewed outcome-affecting environment overrides are stripped.",
+        "Cargo audit and deny advisory database revisions, freshness, and network state are not captured.",
+        "Exact-source test attestation is not a hermetic-build or broad security proof."
+      ]
+    },
+    {
+      "evidence_id": "EVID-S03-007-MODERATION",
+      "claim_ids": [
+        "S03-007"
+      ],
+      "command": "python3 scripts/run-gate.py stage-three-implementation",
+      "tool": {
+        "name": "agenc-ircd-gate-runner",
+        "version": "a45c8425639e6e7a9a99b9fe703005250c64e1918927f8ee698b6919c2998f2c"
+      },
+      "toolchain_policy_sha256": "3f125bad8eeb2ef52f3cb49d2296e9453a76b14d6d288d75b3e3fdd2fbe13095",
+      "toolchain": [
+        {
+          "name": "rustc",
+          "argv": [
+            "rustc",
+            "--version"
+          ],
+          "version": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
+        },
+        {
+          "name": "cargo",
+          "argv": [
+            "cargo",
+            "--version"
+          ],
+          "version": "cargo 1.98.0 (797e8a9bc 2026-08-05)"
+        },
+        {
+          "name": "cargo-fmt",
+          "argv": [
+            "cargo",
+            "fmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "rustfmt",
+          "argv": [
+            "rustfmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "cargo-clippy",
+          "argv": [
+            "cargo",
+            "clippy",
+            "--version"
+          ],
+          "version": "clippy 0.1.98 (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "clippy",
+          "argv": [
+            "clippy-driver",
+            "--version"
+          ],
+          "version": "clippy 0.1.98 (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "rustdoc",
+          "argv": [
+            "rustdoc",
+            "--version"
+          ],
+          "version": "rustdoc 1.98.0 (88d9e12ae 2026-08-18)"
+        },
+        {
+          "name": "cargo-deny",
+          "argv": [
+            "cargo",
+            "deny",
+            "--version"
+          ],
+          "version": "cargo-deny 0.20.2"
+        },
+        {
+          "name": "cargo-audit",
+          "argv": [
+            "cargo",
+            "audit",
+            "--version"
+          ],
+          "version": "cargo-audit-audit 0.22.2"
+        },
+        {
+          "name": "cargo-llvm-cov",
+          "argv": [
+            "cargo",
+            "llvm-cov",
+            "--version"
+          ],
+          "version": "cargo-llvm-cov 0.9.0"
+        },
+        {
+          "name": "rust-llvm-cov",
+          "argv": [
+            "python3",
+            "scripts/check-rust-components.py",
+            "probe",
+            "llvm-cov"
+          ],
+          "version": "LLVM (http://llvm.org/):\n  LLVM version 22.1.8-rust-1.98.0-stable\n  Optimized build."
+        },
+        {
+          "name": "rust-llvm-profdata",
+          "argv": [
+            "python3",
+            "scripts/check-rust-components.py",
+            "probe",
+            "llvm-profdata"
+          ],
+          "version": "LLVM (http://llvm.org/):\n  LLVM version 22.1.8-rust-1.98.0-stable\n  Optimized build."
+        },
+        {
+          "name": "nightly-rustc",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "rustc",
+            "--version"
+          ],
+          "version": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)"
+        },
+        {
+          "name": "nightly-cargo",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "cargo",
+            "--version"
+          ],
+          "version": "cargo 1.100.0-nightly (e8cb624d5 2026-08-22)"
+        },
+        {
+          "name": "nightly-cargo-fmt",
+          "argv": [
+            "cargo",
+            "+nightly-2026-08-24",
+            "fmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.10.0-nightly (fb6531d550 2026-08-23)"
+        },
+        {
+          "name": "nightly-rustfmt",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "rustfmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.10.0-nightly (fb6531d550 2026-08-23)"
+        },
+        {
+          "name": "cargo-fuzz",
+          "argv": [
+            "cargo",
+            "fuzz",
+            "--version"
+          ],
+          "version": "cargo-fuzz 0.13.2"
+        }
+      ],
+      "source_commit": "1e5b738468f88b238061cc6e84b732176f5cae65",
+      "source_sha256": "7fa14eadaa040b1405f0ebbe08f542191e5b4d4fadeee50e56138aa3f498c346",
+      "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": [
+        "all-features"
+      ],
+      "started_at": "2026-08-27T15:39:34.465736Z",
+      "ended_at": "2026-08-27T15:40:17.838763Z",
+      "result": "passed",
+      "artifact": {
+        "label": "Stage 03 exact-source gate run",
+        "sha256": "184a08ed44f1ebbd40c431a640f58a0197044ec6f90076258a94a992dcee1563",
+        "path": "conformance/evidence/artifacts/stage-three-implementation-1e5b738468f88b238061cc6e84b732176f5cae65.json"
+      },
+      "limitations": [
+        "Command output is not captured.",
+        "Bash, external shell utilities such as awk and coreutils, Python, Git, the Rustup selector and version, PATH and executable locations, Cargo and Rustup homes, ignored build caches, installed target presence, and the default native compiler, archiver, linker, and runtime-library identities remain external inputs.",
+        "Reviewed outcome-affecting environment overrides are stripped.",
+        "Cargo audit and deny advisory database revisions, freshness, and network state are not captured.",
+        "Exact-source test attestation is not a hermetic-build or broad security proof."
+      ]
+    },
+    {
+      "evidence_id": "EVID-S03-008-HISTORY-E2EE",
+      "claim_ids": [
+        "S03-008"
+      ],
+      "command": "python3 scripts/run-gate.py stage-three-implementation",
+      "tool": {
+        "name": "agenc-ircd-gate-runner",
+        "version": "a45c8425639e6e7a9a99b9fe703005250c64e1918927f8ee698b6919c2998f2c"
+      },
+      "toolchain_policy_sha256": "3f125bad8eeb2ef52f3cb49d2296e9453a76b14d6d288d75b3e3fdd2fbe13095",
+      "toolchain": [
+        {
+          "name": "rustc",
+          "argv": [
+            "rustc",
+            "--version"
+          ],
+          "version": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
+        },
+        {
+          "name": "cargo",
+          "argv": [
+            "cargo",
+            "--version"
+          ],
+          "version": "cargo 1.98.0 (797e8a9bc 2026-08-05)"
+        },
+        {
+          "name": "cargo-fmt",
+          "argv": [
+            "cargo",
+            "fmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "rustfmt",
+          "argv": [
+            "rustfmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "cargo-clippy",
+          "argv": [
+            "cargo",
+            "clippy",
+            "--version"
+          ],
+          "version": "clippy 0.1.98 (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "clippy",
+          "argv": [
+            "clippy-driver",
+            "--version"
+          ],
+          "version": "clippy 0.1.98 (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "rustdoc",
+          "argv": [
+            "rustdoc",
+            "--version"
+          ],
+          "version": "rustdoc 1.98.0 (88d9e12ae 2026-08-18)"
+        },
+        {
+          "name": "cargo-deny",
+          "argv": [
+            "cargo",
+            "deny",
+            "--version"
+          ],
+          "version": "cargo-deny 0.20.2"
+        },
+        {
+          "name": "cargo-audit",
+          "argv": [
+            "cargo",
+            "audit",
+            "--version"
+          ],
+          "version": "cargo-audit-audit 0.22.2"
+        },
+        {
+          "name": "cargo-llvm-cov",
+          "argv": [
+            "cargo",
+            "llvm-cov",
+            "--version"
+          ],
+          "version": "cargo-llvm-cov 0.9.0"
+        },
+        {
+          "name": "rust-llvm-cov",
+          "argv": [
+            "python3",
+            "scripts/check-rust-components.py",
+            "probe",
+            "llvm-cov"
+          ],
+          "version": "LLVM (http://llvm.org/):\n  LLVM version 22.1.8-rust-1.98.0-stable\n  Optimized build."
+        },
+        {
+          "name": "rust-llvm-profdata",
+          "argv": [
+            "python3",
+            "scripts/check-rust-components.py",
+            "probe",
+            "llvm-profdata"
+          ],
+          "version": "LLVM (http://llvm.org/):\n  LLVM version 22.1.8-rust-1.98.0-stable\n  Optimized build."
+        },
+        {
+          "name": "nightly-rustc",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "rustc",
+            "--version"
+          ],
+          "version": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)"
+        },
+        {
+          "name": "nightly-cargo",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "cargo",
+            "--version"
+          ],
+          "version": "cargo 1.100.0-nightly (e8cb624d5 2026-08-22)"
+        },
+        {
+          "name": "nightly-cargo-fmt",
+          "argv": [
+            "cargo",
+            "+nightly-2026-08-24",
+            "fmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.10.0-nightly (fb6531d550 2026-08-23)"
+        },
+        {
+          "name": "nightly-rustfmt",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "rustfmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.10.0-nightly (fb6531d550 2026-08-23)"
+        },
+        {
+          "name": "cargo-fuzz",
+          "argv": [
+            "cargo",
+            "fuzz",
+            "--version"
+          ],
+          "version": "cargo-fuzz 0.13.2"
+        }
+      ],
+      "source_commit": "1e5b738468f88b238061cc6e84b732176f5cae65",
+      "source_sha256": "7fa14eadaa040b1405f0ebbe08f542191e5b4d4fadeee50e56138aa3f498c346",
+      "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": [
+        "all-features"
+      ],
+      "started_at": "2026-08-27T15:39:34.465736Z",
+      "ended_at": "2026-08-27T15:40:17.838763Z",
+      "result": "passed",
+      "artifact": {
+        "label": "Stage 03 exact-source gate run",
+        "sha256": "184a08ed44f1ebbd40c431a640f58a0197044ec6f90076258a94a992dcee1563",
+        "path": "conformance/evidence/artifacts/stage-three-implementation-1e5b738468f88b238061cc6e84b732176f5cae65.json"
+      },
+      "limitations": [
+        "Command output is not captured.",
+        "Bash, external shell utilities such as awk and coreutils, Python, Git, the Rustup selector and version, PATH and executable locations, Cargo and Rustup homes, ignored build caches, installed target presence, and the default native compiler, archiver, linker, and runtime-library identities remain external inputs.",
+        "Reviewed outcome-affecting environment overrides are stripped.",
+        "Cargo audit and deny advisory database revisions, freshness, and network state are not captured.",
+        "Exact-source test attestation is not a hermetic-build or broad security proof."
+      ]
+    },
+    {
+      "evidence_id": "EVID-S03-009-MUTATION-PLANS",
+      "claim_ids": [
+        "S03-009"
+      ],
+      "command": "python3 scripts/run-gate.py stage-three-implementation",
+      "tool": {
+        "name": "agenc-ircd-gate-runner",
+        "version": "a45c8425639e6e7a9a99b9fe703005250c64e1918927f8ee698b6919c2998f2c"
+      },
+      "toolchain_policy_sha256": "3f125bad8eeb2ef52f3cb49d2296e9453a76b14d6d288d75b3e3fdd2fbe13095",
+      "toolchain": [
+        {
+          "name": "rustc",
+          "argv": [
+            "rustc",
+            "--version"
+          ],
+          "version": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
+        },
+        {
+          "name": "cargo",
+          "argv": [
+            "cargo",
+            "--version"
+          ],
+          "version": "cargo 1.98.0 (797e8a9bc 2026-08-05)"
+        },
+        {
+          "name": "cargo-fmt",
+          "argv": [
+            "cargo",
+            "fmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "rustfmt",
+          "argv": [
+            "rustfmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "cargo-clippy",
+          "argv": [
+            "cargo",
+            "clippy",
+            "--version"
+          ],
+          "version": "clippy 0.1.98 (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "clippy",
+          "argv": [
+            "clippy-driver",
+            "--version"
+          ],
+          "version": "clippy 0.1.98 (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "rustdoc",
+          "argv": [
+            "rustdoc",
+            "--version"
+          ],
+          "version": "rustdoc 1.98.0 (88d9e12ae 2026-08-18)"
+        },
+        {
+          "name": "cargo-deny",
+          "argv": [
+            "cargo",
+            "deny",
+            "--version"
+          ],
+          "version": "cargo-deny 0.20.2"
+        },
+        {
+          "name": "cargo-audit",
+          "argv": [
+            "cargo",
+            "audit",
+            "--version"
+          ],
+          "version": "cargo-audit-audit 0.22.2"
+        },
+        {
+          "name": "cargo-llvm-cov",
+          "argv": [
+            "cargo",
+            "llvm-cov",
+            "--version"
+          ],
+          "version": "cargo-llvm-cov 0.9.0"
+        },
+        {
+          "name": "rust-llvm-cov",
+          "argv": [
+            "python3",
+            "scripts/check-rust-components.py",
+            "probe",
+            "llvm-cov"
+          ],
+          "version": "LLVM (http://llvm.org/):\n  LLVM version 22.1.8-rust-1.98.0-stable\n  Optimized build."
+        },
+        {
+          "name": "rust-llvm-profdata",
+          "argv": [
+            "python3",
+            "scripts/check-rust-components.py",
+            "probe",
+            "llvm-profdata"
+          ],
+          "version": "LLVM (http://llvm.org/):\n  LLVM version 22.1.8-rust-1.98.0-stable\n  Optimized build."
+        },
+        {
+          "name": "nightly-rustc",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "rustc",
+            "--version"
+          ],
+          "version": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)"
+        },
+        {
+          "name": "nightly-cargo",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "cargo",
+            "--version"
+          ],
+          "version": "cargo 1.100.0-nightly (e8cb624d5 2026-08-22)"
+        },
+        {
+          "name": "nightly-cargo-fmt",
+          "argv": [
+            "cargo",
+            "+nightly-2026-08-24",
+            "fmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.10.0-nightly (fb6531d550 2026-08-23)"
+        },
+        {
+          "name": "nightly-rustfmt",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "rustfmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.10.0-nightly (fb6531d550 2026-08-23)"
+        },
+        {
+          "name": "cargo-fuzz",
+          "argv": [
+            "cargo",
+            "fuzz",
+            "--version"
+          ],
+          "version": "cargo-fuzz 0.13.2"
+        }
+      ],
+      "source_commit": "1e5b738468f88b238061cc6e84b732176f5cae65",
+      "source_sha256": "7fa14eadaa040b1405f0ebbe08f542191e5b4d4fadeee50e56138aa3f498c346",
+      "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": [
+        "all-features"
+      ],
+      "started_at": "2026-08-27T15:39:34.465736Z",
+      "ended_at": "2026-08-27T15:40:17.838763Z",
+      "result": "passed",
+      "artifact": {
+        "label": "Stage 03 exact-source gate run",
+        "sha256": "184a08ed44f1ebbd40c431a640f58a0197044ec6f90076258a94a992dcee1563",
+        "path": "conformance/evidence/artifacts/stage-three-implementation-1e5b738468f88b238061cc6e84b732176f5cae65.json"
+      },
+      "limitations": [
+        "Command output is not captured.",
+        "Bash, external shell utilities such as awk and coreutils, Python, Git, the Rustup selector and version, PATH and executable locations, Cargo and Rustup homes, ignored build caches, installed target presence, and the default native compiler, archiver, linker, and runtime-library identities remain external inputs.",
+        "Reviewed outcome-affecting environment overrides are stripped.",
+        "Cargo audit and deny advisory database revisions, freshness, and network state are not captured.",
+        "Exact-source test attestation is not a hermetic-build or broad security proof."
+      ]
+    },
+    {
+      "evidence_id": "EVID-S03-010-EXPLICIT-INPUTS",
+      "claim_ids": [
+        "S03-010"
+      ],
+      "command": "python3 scripts/run-gate.py stage-three-implementation",
+      "tool": {
+        "name": "agenc-ircd-gate-runner",
+        "version": "a45c8425639e6e7a9a99b9fe703005250c64e1918927f8ee698b6919c2998f2c"
+      },
+      "toolchain_policy_sha256": "3f125bad8eeb2ef52f3cb49d2296e9453a76b14d6d288d75b3e3fdd2fbe13095",
+      "toolchain": [
+        {
+          "name": "rustc",
+          "argv": [
+            "rustc",
+            "--version"
+          ],
+          "version": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
+        },
+        {
+          "name": "cargo",
+          "argv": [
+            "cargo",
+            "--version"
+          ],
+          "version": "cargo 1.98.0 (797e8a9bc 2026-08-05)"
+        },
+        {
+          "name": "cargo-fmt",
+          "argv": [
+            "cargo",
+            "fmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "rustfmt",
+          "argv": [
+            "rustfmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "cargo-clippy",
+          "argv": [
+            "cargo",
+            "clippy",
+            "--version"
+          ],
+          "version": "clippy 0.1.98 (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "clippy",
+          "argv": [
+            "clippy-driver",
+            "--version"
+          ],
+          "version": "clippy 0.1.98 (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "rustdoc",
+          "argv": [
+            "rustdoc",
+            "--version"
+          ],
+          "version": "rustdoc 1.98.0 (88d9e12ae 2026-08-18)"
+        },
+        {
+          "name": "cargo-deny",
+          "argv": [
+            "cargo",
+            "deny",
+            "--version"
+          ],
+          "version": "cargo-deny 0.20.2"
+        },
+        {
+          "name": "cargo-audit",
+          "argv": [
+            "cargo",
+            "audit",
+            "--version"
+          ],
+          "version": "cargo-audit-audit 0.22.2"
+        },
+        {
+          "name": "cargo-llvm-cov",
+          "argv": [
+            "cargo",
+            "llvm-cov",
+            "--version"
+          ],
+          "version": "cargo-llvm-cov 0.9.0"
+        },
+        {
+          "name": "rust-llvm-cov",
+          "argv": [
+            "python3",
+            "scripts/check-rust-components.py",
+            "probe",
+            "llvm-cov"
+          ],
+          "version": "LLVM (http://llvm.org/):\n  LLVM version 22.1.8-rust-1.98.0-stable\n  Optimized build."
+        },
+        {
+          "name": "rust-llvm-profdata",
+          "argv": [
+            "python3",
+            "scripts/check-rust-components.py",
+            "probe",
+            "llvm-profdata"
+          ],
+          "version": "LLVM (http://llvm.org/):\n  LLVM version 22.1.8-rust-1.98.0-stable\n  Optimized build."
+        },
+        {
+          "name": "nightly-rustc",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "rustc",
+            "--version"
+          ],
+          "version": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)"
+        },
+        {
+          "name": "nightly-cargo",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "cargo",
+            "--version"
+          ],
+          "version": "cargo 1.100.0-nightly (e8cb624d5 2026-08-22)"
+        },
+        {
+          "name": "nightly-cargo-fmt",
+          "argv": [
+            "cargo",
+            "+nightly-2026-08-24",
+            "fmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.10.0-nightly (fb6531d550 2026-08-23)"
+        },
+        {
+          "name": "nightly-rustfmt",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "rustfmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.10.0-nightly (fb6531d550 2026-08-23)"
+        },
+        {
+          "name": "cargo-fuzz",
+          "argv": [
+            "cargo",
+            "fuzz",
+            "--version"
+          ],
+          "version": "cargo-fuzz 0.13.2"
+        }
+      ],
+      "source_commit": "1e5b738468f88b238061cc6e84b732176f5cae65",
+      "source_sha256": "7fa14eadaa040b1405f0ebbe08f542191e5b4d4fadeee50e56138aa3f498c346",
+      "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": [
+        "all-features"
+      ],
+      "started_at": "2026-08-27T15:39:34.465736Z",
+      "ended_at": "2026-08-27T15:40:17.838763Z",
+      "result": "passed",
+      "artifact": {
+        "label": "Stage 03 exact-source gate run",
+        "sha256": "184a08ed44f1ebbd40c431a640f58a0197044ec6f90076258a94a992dcee1563",
+        "path": "conformance/evidence/artifacts/stage-three-implementation-1e5b738468f88b238061cc6e84b732176f5cae65.json"
+      },
+      "limitations": [
+        "Command output is not captured.",
+        "Bash, external shell utilities such as awk and coreutils, Python, Git, the Rustup selector and version, PATH and executable locations, Cargo and Rustup homes, ignored build caches, installed target presence, and the default native compiler, archiver, linker, and runtime-library identities remain external inputs.",
+        "Reviewed outcome-affecting environment overrides are stripped.",
+        "Cargo audit and deny advisory database revisions, freshness, and network state are not captured.",
+        "Exact-source test attestation is not a hermetic-build or broad security proof."
+      ]
+    },
+    {
+      "evidence_id": "EVID-S03-011-REFERENCE-MODEL",
+      "claim_ids": [
+        "S03-011"
+      ],
+      "command": "python3 scripts/run-gate.py stage-three-implementation",
+      "tool": {
+        "name": "agenc-ircd-gate-runner",
+        "version": "a45c8425639e6e7a9a99b9fe703005250c64e1918927f8ee698b6919c2998f2c"
+      },
+      "toolchain_policy_sha256": "3f125bad8eeb2ef52f3cb49d2296e9453a76b14d6d288d75b3e3fdd2fbe13095",
+      "toolchain": [
+        {
+          "name": "rustc",
+          "argv": [
+            "rustc",
+            "--version"
+          ],
+          "version": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
+        },
+        {
+          "name": "cargo",
+          "argv": [
+            "cargo",
+            "--version"
+          ],
+          "version": "cargo 1.98.0 (797e8a9bc 2026-08-05)"
+        },
+        {
+          "name": "cargo-fmt",
+          "argv": [
+            "cargo",
+            "fmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "rustfmt",
+          "argv": [
+            "rustfmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "cargo-clippy",
+          "argv": [
+            "cargo",
+            "clippy",
+            "--version"
+          ],
+          "version": "clippy 0.1.98 (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "clippy",
+          "argv": [
+            "clippy-driver",
+            "--version"
+          ],
+          "version": "clippy 0.1.98 (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "rustdoc",
+          "argv": [
+            "rustdoc",
+            "--version"
+          ],
+          "version": "rustdoc 1.98.0 (88d9e12ae 2026-08-18)"
+        },
+        {
+          "name": "cargo-deny",
+          "argv": [
+            "cargo",
+            "deny",
+            "--version"
+          ],
+          "version": "cargo-deny 0.20.2"
+        },
+        {
+          "name": "cargo-audit",
+          "argv": [
+            "cargo",
+            "audit",
+            "--version"
+          ],
+          "version": "cargo-audit-audit 0.22.2"
+        },
+        {
+          "name": "cargo-llvm-cov",
+          "argv": [
+            "cargo",
+            "llvm-cov",
+            "--version"
+          ],
+          "version": "cargo-llvm-cov 0.9.0"
+        },
+        {
+          "name": "rust-llvm-cov",
+          "argv": [
+            "python3",
+            "scripts/check-rust-components.py",
+            "probe",
+            "llvm-cov"
+          ],
+          "version": "LLVM (http://llvm.org/):\n  LLVM version 22.1.8-rust-1.98.0-stable\n  Optimized build."
+        },
+        {
+          "name": "rust-llvm-profdata",
+          "argv": [
+            "python3",
+            "scripts/check-rust-components.py",
+            "probe",
+            "llvm-profdata"
+          ],
+          "version": "LLVM (http://llvm.org/):\n  LLVM version 22.1.8-rust-1.98.0-stable\n  Optimized build."
+        },
+        {
+          "name": "nightly-rustc",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "rustc",
+            "--version"
+          ],
+          "version": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)"
+        },
+        {
+          "name": "nightly-cargo",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "cargo",
+            "--version"
+          ],
+          "version": "cargo 1.100.0-nightly (e8cb624d5 2026-08-22)"
+        },
+        {
+          "name": "nightly-cargo-fmt",
+          "argv": [
+            "cargo",
+            "+nightly-2026-08-24",
+            "fmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.10.0-nightly (fb6531d550 2026-08-23)"
+        },
+        {
+          "name": "nightly-rustfmt",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "rustfmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.10.0-nightly (fb6531d550 2026-08-23)"
+        },
+        {
+          "name": "cargo-fuzz",
+          "argv": [
+            "cargo",
+            "fuzz",
+            "--version"
+          ],
+          "version": "cargo-fuzz 0.13.2"
+        }
+      ],
+      "source_commit": "1e5b738468f88b238061cc6e84b732176f5cae65",
+      "source_sha256": "7fa14eadaa040b1405f0ebbe08f542191e5b4d4fadeee50e56138aa3f498c346",
+      "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": [
+        "all-features"
+      ],
+      "started_at": "2026-08-27T15:39:34.465736Z",
+      "ended_at": "2026-08-27T15:40:17.838763Z",
+      "result": "passed",
+      "artifact": {
+        "label": "Stage 03 exact-source gate run",
+        "sha256": "184a08ed44f1ebbd40c431a640f58a0197044ec6f90076258a94a992dcee1563",
+        "path": "conformance/evidence/artifacts/stage-three-implementation-1e5b738468f88b238061cc6e84b732176f5cae65.json"
+      },
+      "limitations": [
+        "Command output is not captured.",
+        "Bash, external shell utilities such as awk and coreutils, Python, Git, the Rustup selector and version, PATH and executable locations, Cargo and Rustup homes, ignored build caches, installed target presence, and the default native compiler, archiver, linker, and runtime-library identities remain external inputs.",
+        "Reviewed outcome-affecting environment overrides are stripped.",
+        "Cargo audit and deny advisory database revisions, freshness, and network state are not captured.",
+        "Exact-source test attestation is not a hermetic-build or broad security proof."
+      ]
+    },
+    {
+      "evidence_id": "EVID-S03-012-SEQUENCES",
+      "claim_ids": [
+        "S03-012"
+      ],
+      "command": "python3 scripts/run-gate.py stage-three-implementation",
+      "tool": {
+        "name": "agenc-ircd-gate-runner",
+        "version": "a45c8425639e6e7a9a99b9fe703005250c64e1918927f8ee698b6919c2998f2c"
+      },
+      "toolchain_policy_sha256": "3f125bad8eeb2ef52f3cb49d2296e9453a76b14d6d288d75b3e3fdd2fbe13095",
+      "toolchain": [
+        {
+          "name": "rustc",
+          "argv": [
+            "rustc",
+            "--version"
+          ],
+          "version": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
+        },
+        {
+          "name": "cargo",
+          "argv": [
+            "cargo",
+            "--version"
+          ],
+          "version": "cargo 1.98.0 (797e8a9bc 2026-08-05)"
+        },
+        {
+          "name": "cargo-fmt",
+          "argv": [
+            "cargo",
+            "fmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "rustfmt",
+          "argv": [
+            "rustfmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "cargo-clippy",
+          "argv": [
+            "cargo",
+            "clippy",
+            "--version"
+          ],
+          "version": "clippy 0.1.98 (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "clippy",
+          "argv": [
+            "clippy-driver",
+            "--version"
+          ],
+          "version": "clippy 0.1.98 (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "rustdoc",
+          "argv": [
+            "rustdoc",
+            "--version"
+          ],
+          "version": "rustdoc 1.98.0 (88d9e12ae 2026-08-18)"
+        },
+        {
+          "name": "cargo-deny",
+          "argv": [
+            "cargo",
+            "deny",
+            "--version"
+          ],
+          "version": "cargo-deny 0.20.2"
+        },
+        {
+          "name": "cargo-audit",
+          "argv": [
+            "cargo",
+            "audit",
+            "--version"
+          ],
+          "version": "cargo-audit-audit 0.22.2"
+        },
+        {
+          "name": "cargo-llvm-cov",
+          "argv": [
+            "cargo",
+            "llvm-cov",
+            "--version"
+          ],
+          "version": "cargo-llvm-cov 0.9.0"
+        },
+        {
+          "name": "rust-llvm-cov",
+          "argv": [
+            "python3",
+            "scripts/check-rust-components.py",
+            "probe",
+            "llvm-cov"
+          ],
+          "version": "LLVM (http://llvm.org/):\n  LLVM version 22.1.8-rust-1.98.0-stable\n  Optimized build."
+        },
+        {
+          "name": "rust-llvm-profdata",
+          "argv": [
+            "python3",
+            "scripts/check-rust-components.py",
+            "probe",
+            "llvm-profdata"
+          ],
+          "version": "LLVM (http://llvm.org/):\n  LLVM version 22.1.8-rust-1.98.0-stable\n  Optimized build."
+        },
+        {
+          "name": "nightly-rustc",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "rustc",
+            "--version"
+          ],
+          "version": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)"
+        },
+        {
+          "name": "nightly-cargo",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "cargo",
+            "--version"
+          ],
+          "version": "cargo 1.100.0-nightly (e8cb624d5 2026-08-22)"
+        },
+        {
+          "name": "nightly-cargo-fmt",
+          "argv": [
+            "cargo",
+            "+nightly-2026-08-24",
+            "fmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.10.0-nightly (fb6531d550 2026-08-23)"
+        },
+        {
+          "name": "nightly-rustfmt",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "rustfmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.10.0-nightly (fb6531d550 2026-08-23)"
+        },
+        {
+          "name": "cargo-fuzz",
+          "argv": [
+            "cargo",
+            "fuzz",
+            "--version"
+          ],
+          "version": "cargo-fuzz 0.13.2"
+        }
+      ],
+      "source_commit": "1e5b738468f88b238061cc6e84b732176f5cae65",
+      "source_sha256": "7fa14eadaa040b1405f0ebbe08f542191e5b4d4fadeee50e56138aa3f498c346",
+      "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": [
+        "all-features"
+      ],
+      "started_at": "2026-08-27T15:39:34.465736Z",
+      "ended_at": "2026-08-27T15:40:17.838763Z",
+      "result": "passed",
+      "artifact": {
+        "label": "Stage 03 exact-source gate run",
+        "sha256": "184a08ed44f1ebbd40c431a640f58a0197044ec6f90076258a94a992dcee1563",
+        "path": "conformance/evidence/artifacts/stage-three-implementation-1e5b738468f88b238061cc6e84b732176f5cae65.json"
+      },
+      "limitations": [
+        "Command output is not captured.",
+        "Bash, external shell utilities such as awk and coreutils, Python, Git, the Rustup selector and version, PATH and executable locations, Cargo and Rustup homes, ignored build caches, installed target presence, and the default native compiler, archiver, linker, and runtime-library identities remain external inputs.",
+        "Reviewed outcome-affecting environment overrides are stripped.",
+        "Cargo audit and deny advisory database revisions, freshness, and network state are not captured.",
+        "Exact-source test attestation is not a hermetic-build or broad security proof."
+      ]
+    },
+    {
+      "evidence_id": "EVID-S03-900-STAGE-GATE",
+      "claim_ids": [
+        "S03-900"
+      ],
+      "command": "python3 scripts/run-gate.py stage-three-implementation",
+      "tool": {
+        "name": "agenc-ircd-gate-runner",
+        "version": "a45c8425639e6e7a9a99b9fe703005250c64e1918927f8ee698b6919c2998f2c"
+      },
+      "toolchain_policy_sha256": "3f125bad8eeb2ef52f3cb49d2296e9453a76b14d6d288d75b3e3fdd2fbe13095",
+      "toolchain": [
+        {
+          "name": "rustc",
+          "argv": [
+            "rustc",
+            "--version"
+          ],
+          "version": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
+        },
+        {
+          "name": "cargo",
+          "argv": [
+            "cargo",
+            "--version"
+          ],
+          "version": "cargo 1.98.0 (797e8a9bc 2026-08-05)"
+        },
+        {
+          "name": "cargo-fmt",
+          "argv": [
+            "cargo",
+            "fmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "rustfmt",
+          "argv": [
+            "rustfmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "cargo-clippy",
+          "argv": [
+            "cargo",
+            "clippy",
+            "--version"
+          ],
+          "version": "clippy 0.1.98 (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "clippy",
+          "argv": [
+            "clippy-driver",
+            "--version"
+          ],
+          "version": "clippy 0.1.98 (88d9e12ae1 2026-08-18)"
+        },
+        {
+          "name": "rustdoc",
+          "argv": [
+            "rustdoc",
+            "--version"
+          ],
+          "version": "rustdoc 1.98.0 (88d9e12ae 2026-08-18)"
+        },
+        {
+          "name": "cargo-deny",
+          "argv": [
+            "cargo",
+            "deny",
+            "--version"
+          ],
+          "version": "cargo-deny 0.20.2"
+        },
+        {
+          "name": "cargo-audit",
+          "argv": [
+            "cargo",
+            "audit",
+            "--version"
+          ],
+          "version": "cargo-audit-audit 0.22.2"
+        },
+        {
+          "name": "cargo-llvm-cov",
+          "argv": [
+            "cargo",
+            "llvm-cov",
+            "--version"
+          ],
+          "version": "cargo-llvm-cov 0.9.0"
+        },
+        {
+          "name": "rust-llvm-cov",
+          "argv": [
+            "python3",
+            "scripts/check-rust-components.py",
+            "probe",
+            "llvm-cov"
+          ],
+          "version": "LLVM (http://llvm.org/):\n  LLVM version 22.1.8-rust-1.98.0-stable\n  Optimized build."
+        },
+        {
+          "name": "rust-llvm-profdata",
+          "argv": [
+            "python3",
+            "scripts/check-rust-components.py",
+            "probe",
+            "llvm-profdata"
+          ],
+          "version": "LLVM (http://llvm.org/):\n  LLVM version 22.1.8-rust-1.98.0-stable\n  Optimized build."
+        },
+        {
+          "name": "nightly-rustc",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "rustc",
+            "--version"
+          ],
+          "version": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)"
+        },
+        {
+          "name": "nightly-cargo",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "cargo",
+            "--version"
+          ],
+          "version": "cargo 1.100.0-nightly (e8cb624d5 2026-08-22)"
+        },
+        {
+          "name": "nightly-cargo-fmt",
+          "argv": [
+            "cargo",
+            "+nightly-2026-08-24",
+            "fmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.10.0-nightly (fb6531d550 2026-08-23)"
+        },
+        {
+          "name": "nightly-rustfmt",
+          "argv": [
+            "rustup",
+            "run",
+            "nightly-2026-08-24",
+            "rustfmt",
+            "--version"
+          ],
+          "version": "rustfmt 1.10.0-nightly (fb6531d550 2026-08-23)"
+        },
+        {
+          "name": "cargo-fuzz",
+          "argv": [
+            "cargo",
+            "fuzz",
+            "--version"
+          ],
+          "version": "cargo-fuzz 0.13.2"
+        }
+      ],
+      "source_commit": "1e5b738468f88b238061cc6e84b732176f5cae65",
+      "source_sha256": "7fa14eadaa040b1405f0ebbe08f542191e5b4d4fadeee50e56138aa3f498c346",
+      "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": [
+        "all-features"
+      ],
+      "started_at": "2026-08-27T15:39:34.465736Z",
+      "ended_at": "2026-08-27T15:40:17.838763Z",
+      "result": "passed",
+      "artifact": {
+        "label": "Stage 03 exact-source gate run",
+        "sha256": "184a08ed44f1ebbd40c431a640f58a0197044ec6f90076258a94a992dcee1563",
+        "path": "conformance/evidence/artifacts/stage-three-implementation-1e5b738468f88b238061cc6e84b732176f5cae65.json"
+      },
+      "limitations": [
+        "Command output is not captured.",
+        "Bash, external shell utilities such as awk and coreutils, Python, Git, the Rustup selector and version, PATH and executable locations, Cargo and Rustup homes, ignored build caches, installed target presence, and the default native compiler, archiver, linker, and runtime-library identities remain external inputs.",
+        "Reviewed outcome-affecting environment overrides are stripped.",
+        "Cargo audit and deny advisory database revisions, freshness, and network state are not captured.",
+        "Exact-source test attestation is not a hermetic-build or broad security proof."
+      ]
+    }
+  ]
+}

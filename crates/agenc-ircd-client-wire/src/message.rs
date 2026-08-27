@@ -111,8 +111,6 @@ pub enum MessageParseError {
     InvalidCommand,
     /// More than 15 parameters were supplied.
     TooManyParameters,
-    /// A middle parameter violated IRC syntax.
-    InvalidMiddleParameter,
     /// A parsed backing-capacity calculation overflowed.
     Overflow,
     /// A bounded parser allocation failed.
@@ -127,7 +125,6 @@ impl fmt::Display for MessageParseError {
             Self::Tags(_) => "message tags are invalid",
             Self::InvalidCommand => "client command must contain only ASCII letters",
             Self::TooManyParameters => "client message has more than 15 parameters",
-            Self::InvalidMiddleParameter => "client middle parameter is invalid",
             Self::Overflow => "client message backing-capacity calculation overflowed",
             Self::AllocationFailed => "client message allocation failed",
         };
@@ -157,17 +154,11 @@ pub fn parse_message(line: FramedLine<'_>) -> Result<Option<ParsedMessage>, Mess
     if rest.is_empty() {
         return Ok(None);
     }
-    let tags = if rest.starts_with('@') {
-        let Some(space) = rest.find(' ') else {
+    let tags = if let Some(tagged) = rest.strip_prefix('@') {
+        let Some((raw_tags, remaining)) = tagged.split_once(' ') else {
             return Err(MessageParseError::UnterminatedTags);
         };
-        let Some(raw_tags) = rest.get(1..space) else {
-            return Err(MessageParseError::UnterminatedTags);
-        };
-        rest = rest
-            .get(space.saturating_add(1)..)
-            .unwrap_or_default()
-            .trim_start_matches(' ');
+        rest = remaining.trim_start_matches(' ');
         parse_client_tags(raw_tags)?
     } else {
         ParsedTags::empty()
@@ -175,10 +166,7 @@ pub fn parse_message(line: FramedLine<'_>) -> Result<Option<ParsedMessage>, Mess
     if rest.starts_with(':') {
         return Err(MessageParseError::ClientPrefix);
     }
-    let command_end = rest.find(' ').unwrap_or(rest.len());
-    let Some(raw_command) = rest.get(..command_end) else {
-        return Err(MessageParseError::InvalidCommand);
-    };
+    let (raw_command, remaining) = rest.split_once(' ').unwrap_or((rest, ""));
     if raw_command.is_empty() || !raw_command.bytes().all(|byte| byte.is_ascii_alphabetic()) {
         return Err(MessageParseError::InvalidCommand);
     }
@@ -191,10 +179,7 @@ pub fn parse_message(line: FramedLine<'_>) -> Result<Option<ParsedMessage>, Mess
             .bytes()
             .map(|byte| char::from(byte.to_ascii_uppercase())),
     );
-    rest = rest
-        .get(command_end..)
-        .unwrap_or_default()
-        .trim_start_matches(' ');
+    rest = remaining.trim_start_matches(' ');
     let (middle, trailing) = parse_parameters(rest)?;
     let requested_backing_bytes =
         calculate_requested_backing_bytes(&tags, &command, &middle, trailing.as_deref())?;
@@ -220,12 +205,9 @@ fn parse_parameters(mut rest: &str) -> Result<(Vec<String>, Option<String>), Mes
             trailing = Some(copy_string(value)?);
             break;
         }
-        let end = rest.find(' ').unwrap_or(rest.len());
-        let Some(parameter) = rest.get(..end) else {
-            return Err(MessageParseError::InvalidMiddleParameter);
-        };
+        let (parameter, remaining) = rest.split_once(' ').unwrap_or((rest, ""));
         middle.push(copy_string(parameter)?);
-        rest = rest.get(end..).unwrap_or_default().trim_start_matches(' ');
+        rest = remaining.trim_start_matches(' ');
     }
     Ok((middle, trailing))
 }
@@ -239,22 +221,11 @@ fn validate_parameters(mut rest: &str) -> Result<usize, MessageParseError> {
         if rest.starts_with(':') {
             return Ok(middle_count);
         }
-        let end = rest.find(' ').unwrap_or(rest.len());
-        let Some(parameter) = rest.get(..end) else {
-            return Err(MessageParseError::InvalidMiddleParameter);
-        };
-        if parameter.is_empty()
-            || parameter.starts_with(':')
-            || parameter
-                .bytes()
-                .any(|byte| matches!(byte, 0 | b'\r' | b'\n' | b' '))
-        {
-            return Err(MessageParseError::InvalidMiddleParameter);
-        }
+        let (_, remaining) = rest.split_once(' ').unwrap_or((rest, ""));
         middle_count = middle_count
             .checked_add(1)
             .ok_or(MessageParseError::TooManyParameters)?;
-        rest = rest.get(end..).unwrap_or_default().trim_start_matches(' ');
+        rest = remaining.trim_start_matches(' ');
     }
     Ok(middle_count)
 }
@@ -386,16 +357,72 @@ mod tests {
     }
 
     #[test]
-    fn parameter_validation_rejects_each_forbidden_middle_byte() {
-        for parameters in ["\0", "\r", "\n"] {
-            assert_eq!(
-                super::validate_parameters(parameters),
-                Err(MessageParseError::InvalidMiddleParameter),
-                "{parameters:?}"
-            );
+    fn parser_error_reporting_covers_every_closed_variant() {
+        let cases = [
+            (
+                MessageParseError::ClientPrefix,
+                "client messages may not contain a prefix",
+            ),
+            (
+                MessageParseError::UnterminatedTags,
+                "message tag section lacks a separating space",
+            ),
+            (
+                MessageParseError::Tags(crate::TagError::InvalidKey),
+                "message tags are invalid",
+            ),
+            (
+                MessageParseError::InvalidCommand,
+                "client command must contain only ASCII letters",
+            ),
+            (
+                MessageParseError::TooManyParameters,
+                "client message has more than 15 parameters",
+            ),
+            (
+                MessageParseError::Overflow,
+                "client message backing-capacity calculation overflowed",
+            ),
+            (
+                MessageParseError::AllocationFailed,
+                "client message allocation failed",
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(error.to_string(), expected);
         }
+        assert!(Error::source(&MessageParseError::Tags(crate::TagError::InvalidKey)).is_some());
+        assert!(Error::source(&MessageParseError::ClientPrefix).is_none());
+    }
+
+    #[test]
+    fn parser_exercises_every_input_shape_decision() -> Result<(), Box<dyn Error>> {
+        for line in [
+            "PING",
+            "PING token",
+            "PING one two",
+            "PING :trailing value",
+            "@tag=value PING",
+            "@tag=value   PING token",
+        ] {
+            assert!(parse_message(FramedLine::new(line)?)?.is_some(), "{line:?}");
+        }
+        for (line, expected) in [
+            ("@tag", MessageParseError::UnterminatedTags),
+            (
+                "@ PING",
+                MessageParseError::Tags(crate::TagError::InvalidKey),
+            ),
+            (":prefix PING", MessageParseError::ClientPrefix),
+            ("@tag=value   ", MessageParseError::InvalidCommand),
+            ("P1NG", MessageParseError::InvalidCommand),
+        ] {
+            assert_eq!(parse_message(FramedLine::new(line)?).err(), Some(expected));
+        }
+        assert_eq!(parse_message(FramedLine::new("   ")?)?, None);
         assert_eq!(super::validate_parameters(":"), Ok(0));
         assert_eq!(allocation_charge(0), 0);
+        Ok(())
     }
 
     fn requested_allocation_charge(message: &ParsedMessage) -> usize {

@@ -1346,7 +1346,7 @@ fn validate_authenticate(
 ) -> Result<RegistrationCommand, RegistrationGrammarError> {
     let token = require_one_middle(message)?;
     if token.len() > AUTH_CHUNK_CHARACTERS {
-        return Err(RegistrationGrammarError::InputTooLong);
+        return Ok(RegistrationCommand::Authenticate);
     }
     if matches!(token, "*" | "+")
         || is_sasl_mechanism(token)

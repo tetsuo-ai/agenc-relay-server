@@ -5,9 +5,10 @@
 use std::error::Error;
 
 use agenc_ircd_federation_wire::{
-    FEDERATION_COMMAND_FORMS, FederationFragment, FederationHash32, FederationId16,
-    FederationTextError, FragmentTagPolicy, StarCursor, StarId, parse_federation_u32,
-    parse_federation_u64, validate_federation_command,
+    FEDERATION_COMMAND_FORMS, FEDERATION_FRAGMENT_TAG_NAME, FederationCommandTag,
+    FederationCommandTags, FederationFragment, FederationFragmentText, FederationHash32,
+    FederationId16, FederationTextError, FragmentTagPolicy, StarCursor, StarId,
+    parse_federation_u32, parse_federation_u64, validate_federation_command,
 };
 use agenc_ircd_types::{BASE_FRAGMENT_BYTES, BASE_FRAGMENT_COUNT, BASE_OBJECT_BYTES};
 
@@ -49,29 +50,99 @@ fn fixed_tokens_and_decimals_reject_noncanonical_forms() -> Result<(), Box<dyn E
 #[test]
 fn every_frozen_command_form_enforces_case_arity_and_tag_policy() -> Result<(), Box<dyn Error>> {
     assert_eq!(FEDERATION_COMMAND_FORMS.len(), 22);
+    let fragment_text = valid_fragment_tag_text()?;
+    let raw_fragment_tag = [FederationCommandTag::new(
+        FEDERATION_FRAGMENT_TAG_NAME,
+        Some(fragment_text.as_str()),
+    )];
+    let fragment_tags = FederationCommandTags::parse(&raw_fragment_tag)?;
+    let empty_tags = FederationCommandTags::empty();
     for descriptor in FEDERATION_COMMAND_FORMS {
         let mut parameters = Vec::new();
         if let Some(subcommand) = descriptor.subcommand {
             parameters.push(subcommand);
         }
         parameters.extend(std::iter::repeat_n("x", descriptor.parameter_count));
-        let tagged = descriptor.fragment_tag == FragmentTagPolicy::Required;
-        let selected = validate_federation_command(descriptor.command, &parameters, tagged)?;
+        let (accepted_tags, rejected_tags) =
+            if descriptor.fragment_tag == FragmentTagPolicy::Required {
+                (&fragment_tags, &empty_tags)
+            } else {
+                (&empty_tags, &fragment_tags)
+            };
+        let selected = validate_federation_command(descriptor.command, &parameters, accepted_tags)?;
         assert_eq!(selected.form, descriptor.form);
         assert_eq!(
-            validate_federation_command(descriptor.command, &parameters, !tagged),
+            validate_federation_command(descriptor.command, &parameters, rejected_tags),
             Err(FederationTextError::WrongTagPolicy)
         );
         parameters.push("trailing");
         assert_eq!(
-            validate_federation_command(descriptor.command, &parameters, tagged),
+            validate_federation_command(descriptor.command, &parameters, accepted_tags),
             Err(FederationTextError::WrongArity)
         );
     }
-    assert!(validate_federation_command("fhello", &["x", "x"], false).is_err());
-    assert!(validate_federation_command("FUTURE", &[], false).is_err());
-    assert!(validate_federation_command("FORIGIN", &["UNKNOWN"], false).is_err());
+    assert!(validate_federation_command("fhello", &["x", "x"], &empty_tags).is_err());
+    assert!(validate_federation_command("FUTURE", &[], &empty_tags).is_err());
+    assert!(validate_federation_command("FORIGIN", &["UNKNOWN"], &empty_tags).is_err());
     Ok(())
+}
+
+#[test]
+fn federation_command_tags_reject_every_noncanonical_set() -> Result<(), Box<dyn Error>> {
+    let fragment_text = valid_fragment_tag_text()?;
+    let fragment_tag =
+        FederationCommandTag::new(FEDERATION_FRAGMENT_TAG_NAME, Some(fragment_text.as_str()));
+    assert_eq!(fragment_tag.name(), FEDERATION_FRAGMENT_TAG_NAME);
+    assert_eq!(fragment_tag.value(), Some(fragment_text.as_str()));
+
+    let valid_tags = FederationCommandTags::parse(&[fragment_tag])?;
+    assert_eq!(
+        valid_tags.fragment().map(FederationFragment::segment),
+        Some(&[1_u8][..])
+    );
+    assert!(
+        FederationCommandTags::parse(&[] as &[FederationCommandTag<'_>])?
+            .fragment()
+            .is_none()
+    );
+
+    let duplicate_tags = [fragment_tag, fragment_tag];
+    assert_eq!(
+        FederationCommandTags::parse(&duplicate_tags).err(),
+        Some(FederationTextError::WrongTagPolicy)
+    );
+    for invalid_tag in [
+        FederationCommandTag::new("example.org/extra", Some("value")),
+        FederationCommandTag::new("+agenc.ag/fed", Some(fragment_text.as_str())),
+        FederationCommandTag::new(FEDERATION_FRAGMENT_TAG_NAME, None),
+        FederationCommandTag::new(FEDERATION_FRAGMENT_TAG_NAME, Some("")),
+    ] {
+        assert_eq!(
+            FederationCommandTags::parse(&[invalid_tag]).err(),
+            Some(FederationTextError::WrongTagPolicy)
+        );
+    }
+    assert!(
+        FederationCommandTags::parse(&[FederationCommandTag::new(
+            FEDERATION_FRAGMENT_TAG_NAME,
+            Some("not-a-fragment"),
+        )])
+        .is_err()
+    );
+    let oversized_value = "x".repeat(4_001);
+    assert_eq!(
+        FederationCommandTags::parse(&[FederationCommandTag::new(
+            FEDERATION_FRAGMENT_TAG_NAME,
+            Some(&oversized_value),
+        )])
+        .err(),
+        Some(FederationTextError::TooLong)
+    );
+    Ok(())
+}
+
+fn valid_fragment_tag_text() -> Result<FederationFragmentText, FederationTextError> {
+    FederationFragment::new(FederationHash32::from_bytes([9_u8; 32]), 0, 1, 1, &[1])?.to_text()
 }
 
 #[test]
@@ -183,7 +254,7 @@ fn decimals_commands_and_errors_cover_closed_alternatives() {
         Err(FederationTextError::TooLong)
     );
     assert_eq!(
-        validate_federation_command("", &[], false).err(),
+        validate_federation_command("", &[], &FederationCommandTags::empty()).err(),
         Some(FederationTextError::Empty)
     );
 

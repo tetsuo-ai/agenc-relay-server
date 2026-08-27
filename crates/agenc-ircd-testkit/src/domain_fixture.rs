@@ -185,12 +185,48 @@ pub fn apply_command(
     apply_plan(state, plan)
 }
 
-fn deterministic_cloak(seed: u8) -> Result<PublicCloak, DomainError> {
-    let cloak = match seed % 4 {
-        0 => PublicCloak::parse("aaaaaaaaaa", "aaaaaaaaaaaaaaaa")?,
-        1 => PublicCloak::parse("bbbbbbbbbb", "bbbbbbbbbbbbbbbb")?,
-        2 => PublicCloak::parse("cccccccccc", "cccccccccccccccc")?,
-        _ => PublicCloak::parse("dddddddddd", "dddddddddddddddd")?,
-    };
-    Ok(cloak)
+/// Returns the collision-free public cloak assigned to one deterministic fixture seed.
+pub fn deterministic_cloak(seed: u8) -> Result<PublicCloak, DomainError> {
+    const BASE32: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+
+    let high = usize::from(seed) / BASE32.len();
+    let low = usize::from(seed) % BASE32.len();
+    let high = char::from(*BASE32.get(high).ok_or(DomainError::InvariantViolation)?);
+    let low = char::from(*BASE32.get(low).ok_or(DomainError::InvariantViolation)?);
+    let user_component = format!("aaaaaaaa{high}{low}");
+
+    let host_seed = seed.rotate_left(3) ^ 0xa5;
+    let host_high = usize::from(host_seed) / BASE32.len();
+    let host_low = usize::from(host_seed) % BASE32.len();
+    let host_high = char::from(
+        *BASE32
+            .get(host_high)
+            .ok_or(DomainError::InvariantViolation)?,
+    );
+    let host_low = char::from(
+        *BASE32
+            .get(host_low)
+            .ok_or(DomainError::InvariantViolation)?,
+    );
+    let host_component = format!("bbbbbbbbbbbbbb{host_high}{host_low}");
+
+    PublicCloak::parse(&user_component, &host_component).map_err(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::*;
+
+    #[test]
+    fn deterministic_cloaks_are_unique_across_the_complete_seed_domain() -> Result<(), DomainError>
+    {
+        let mut cloaks = BTreeSet::new();
+        for seed in u8::MIN..=u8::MAX {
+            assert!(cloaks.insert(deterministic_cloak(seed)?));
+        }
+        assert_eq!(cloaks.len(), usize::from(u8::MAX) + 1);
+        Ok(())
+    }
 }

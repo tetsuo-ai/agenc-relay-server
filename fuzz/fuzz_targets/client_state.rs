@@ -81,7 +81,7 @@ const POST_REGISTRATION_INVALID: &[&str] = &[
 ];
 
 fuzz_target!(|data: &[u8]| {
-    if data.len() > 16_384 {
+    if data.len() > 32_768 {
         return;
     }
     exercise_decimal_and_base64(data);

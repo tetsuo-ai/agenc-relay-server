@@ -42,8 +42,10 @@ EXPECTED_BUDGETS = {
         "account_request_characters": 6302,
         "account_response_characters": 5790,
     },
+    "replies": {"batch_nesting": 16},
 }
 EXPECTED_FUZZ_TARGETS = ("tcp_framing", "websocket", "parse_render", "client_state")
+EXPECTED_LATER_FUZZ_TARGETS = ("account_service_envelope", "crypto_wrappers")
 EXPECTED_FUZZ_POLICY = {
     "schema_version": 1,
     "nightly": "nightly-2026-08-24",
@@ -142,6 +144,65 @@ def validate_modules(root: Path) -> None:
         raise StageTwoError("client-wire is missing a required Stage-02 surface")
 
 
+def validate_corrected_semantics(root: Path) -> None:
+    """Pin security-relevant Stage-02 behavior that broad surface checks miss."""
+    wire_root = root / "crates/agenc-ircd-client-wire"
+    capability = (wire_root / "src/capability.rs").read_text(encoding="utf-8")
+    registration = (wire_root / "src/registration.rs").read_text(encoding="utf-8")
+    grammar = (wire_root / "src/registration_command.rs").read_text(encoding="utf-8")
+    auth = (wire_root / "src/auth_transport.rs").read_text(encoding="utf-8")
+    render = (wire_root / "src/render.rs").read_text(encoding="utf-8")
+    transcript = (
+        root / "crates/agenc-ircd-testkit/src/client_transcript.rs"
+    ).read_text(encoding="utf-8")
+
+    obsolete_dependency = (
+        '"account-tag" | "server-time" | "message-ids" | "batch"'
+        ' => &["message-tags"]'
+    )
+    required_dependencies = (
+        '"labeled-response" => &["batch"]',
+        '"extended-join" => &["account-notify"]',
+        '"draft/chathistory" => &["batch", "server-time", "message-ids"]',
+    )
+    if obsolete_dependency in capability or any(
+        dependency not in capability for dependency in required_dependencies
+    ):
+        raise StageTwoError("capability dependency graph differs from Appendix A.3")
+
+    multiline_markers = (
+        "ensure_enabled_list_renderable(&projected, self.version_302)",
+        "multiline: self.cap.supports_multiline()",
+        'queue_capability_tokens(&target, "LIST", multiline, &tokens)',
+        "if !multiline",
+    )
+    if any(
+        marker not in capability + registration + transcript
+        for marker in multiline_markers
+    ):
+        raise StageTwoError("CAP 302 LIST continuation behavior is not enforced")
+    if "pub const MAX_BATCH_NESTING: usize = 16;" not in render:
+        raise StageTwoError("batch nesting hard maximum is not 16")
+    if not re.search(
+        r"fn cap_end_message\([^)]*\).*?"
+        r"self\.phase == RegistrationPhase::Registered.*?return Ok\(Vec::new\(\)\)",
+        registration,
+        re.DOTALL,
+    ):
+        raise StageTwoError("registered CAP END is not ignored")
+    if (
+        "SaslAction::Numeric(SaslNumeric::TooLong)" not in auth
+        or not re.search(
+            r"token\.len\(\) > AUTH_CHUNK_CHARACTERS\s*\{\s*"
+            r"return Ok\(RegistrationCommand::Authenticate\)",
+            grammar,
+        )
+    ):
+        raise StageTwoError("oversized AUTHENTICATE cannot reach numeric 905")
+    if "impl fmt::Debug for SecretBytes" in registration or "impl fmt::Debug for SecretText" in auth:
+        raise StageTwoError("secret-bearing client-wire types implement Debug")
+
+
 def validate_fixture(path: Path, known_evidence: set[str]) -> int:
     """Validate one four-field ASCII/hex transcript or vector fixture."""
     count = 0
@@ -173,7 +234,9 @@ def validate_fuzz(root: Path) -> None:
     if not isinstance(binaries, list):
         raise StageTwoError("fuzz manifest has no binary targets")
     names = tuple(record.get("name") for record in binaries if isinstance(record, dict))
-    if names != EXPECTED_FUZZ_TARGETS or manifest.get("workspace") != {"members": ["."]}:
+    if names != EXPECTED_FUZZ_TARGETS + EXPECTED_LATER_FUZZ_TARGETS or manifest.get(
+        "workspace"
+    ) != {"members": ["."]}:
         raise StageTwoError("fuzz workspace target set or isolation is invalid")
     policy = load_toml(root / "fuzz/toolchain-policy.toml")
     validate_fuzz_policy(policy)
@@ -189,6 +252,8 @@ def validate_fuzz(root: Path) -> None:
         corpus = root / f"test-data/fuzz-corpus/client-wire/{target}"
         if not source.is_file() or "#![forbid(unsafe_code)]" not in source.read_text(encoding="utf-8"):
             raise StageTwoError(f"fuzz target is missing safe-Rust policy: {target}")
+        if "data.len() > 32_768" not in source.read_text(encoding="utf-8"):
+            raise StageTwoError(f"fuzz target does not admit the recorded input ceiling: {target}")
         if not corpus.is_dir() or not any(path.is_file() for path in corpus.iterdir()):
             raise StageTwoError(f"fuzz target has no seed corpus: {target}")
     state_source = (root / "fuzz/fuzz_targets/client_state.rs").read_text(encoding="utf-8")
@@ -232,6 +297,7 @@ def validate(root: Path) -> tuple[int, int]:
     validate_budgets(budgets)
     validate_capabilities(root)
     validate_modules(root)
+    validate_corrected_semantics(root)
     catalog = load_toml(root / "conformance/evidence-catalog.toml")
     records = catalog.get("evidence")
     if not isinstance(records, list):

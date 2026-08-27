@@ -95,6 +95,10 @@ name = "registration.registration_millis"
 value = 30000
 
 [[budget]]
+name = "replies.batch_nesting"
+value = 16
+
+[[budget]]
 name = "stream.client_tag_data"
 value = 4094
 

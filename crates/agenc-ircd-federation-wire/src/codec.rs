@@ -8,7 +8,6 @@ use agenc_ircd_types::{BASE_OBJECT_BYTES, ChannelName, ENUM_REGISTRY};
 use zeroize::Zeroize as _;
 
 use crate::schema::{FieldKind, LengthWidth, SchemaDescriptor, schema_by_name};
-use crate::semantics::{validate_embedded_semantics, validate_schema_semantics};
 
 pub(crate) const MAX_STATIC_SCHEMA_DEPTH: usize = 16;
 const UINT24_MAX: u64 = 0x00ff_ffff;
@@ -243,6 +242,26 @@ pub struct SchemaObject {
     backing_capacity_bytes: usize,
 }
 
+/// Closed semantic-policy seam for the canonical codec.
+///
+/// The representation and allocation machinery remains independent of the
+/// protocol-specific rules in `semantics`. The one implementation is kept
+/// crate-private so callers cannot select a weaker validation profile.
+pub(crate) trait SemanticValidator {
+    fn validate_schema(schema: &SchemaDescriptor, fields: &[WireValue]) -> Result<(), CodecError>;
+
+    fn validate_embedded(
+        schema: &SchemaDescriptor,
+        fields: &[WireValue],
+        budget: &mut DecodeBudget,
+        depth: usize,
+        pending: &mut Vec<(SchemaObject, usize)>,
+    ) -> Result<(), CodecError>;
+}
+
+/// The only semantic policy accepted by the frozen federation codec.
+pub(crate) struct FederationSemanticValidator;
+
 impl SchemaObject {
     /// Validates a complete field vector against one exact schema.
     pub fn new(schema_name: &str, fields: Vec<WireValue>) -> Result<Self, CodecError> {
@@ -473,7 +492,7 @@ fn validate_fields(schema: &SchemaDescriptor, fields: &[WireValue]) -> Result<()
         validate_field_semantics(schema.name, descriptor.name, value)?;
     }
     validate_collection_semantics(schema, fields)?;
-    validate_schema_semantics(schema, fields)
+    <FederationSemanticValidator as SemanticValidator>::validate_schema(schema, fields)
 }
 
 fn validate_decoded_fields(
@@ -488,7 +507,7 @@ fn validate_decoded_fields(
         validate_field_semantics(schema.name, descriptor.name, value)?;
     }
     validate_collection_semantics(schema, fields)?;
-    validate_schema_semantics(schema, fields)
+    <FederationSemanticValidator as SemanticValidator>::validate_schema(schema, fields)
 }
 
 fn validate_decoded_value(kind: FieldKind, value: &WireValue) -> Result<(), CodecError> {
@@ -1296,20 +1315,15 @@ fn begin_decode_value(
             maximum,
             width,
         } => {
-            let count = decode_length(width, decoder)?;
-            validate_bounds(count, minimum, maximum)?;
-            budget.claim_values(count)?;
-            let nested = schema_by_name(schema).ok_or(CodecError::UnknownSchema)?;
-            let mut values = Vec::new();
-            values
-                .try_reserve_exact(count)
-                .map_err(|_| CodecError::AllocationFailed)?;
-            return Ok(DecodeStep::Vector(VectorFrame {
-                schema: nested,
-                values,
-                remaining: count,
-                element_depth: child_depth,
-            }));
+            return begin_decode_vector(
+                schema,
+                minimum,
+                maximum,
+                width,
+                decoder,
+                budget,
+                child_depth,
+            );
         }
         FieldKind::ProjectionUnion {
             discriminant,
@@ -1330,6 +1344,36 @@ fn begin_decode_value(
         }
     };
     Ok(DecodeStep::Value(value))
+}
+
+fn begin_decode_vector(
+    schema: &'static str,
+    minimum: usize,
+    maximum: usize,
+    width: LengthWidth,
+    decoder: &mut Decoder<'_>,
+    budget: &mut DecodeBudget,
+    element_depth: usize,
+) -> Result<DecodeStep, CodecError> {
+    let count = decode_length(width, decoder)?;
+    validate_bounds(count, minimum, maximum)?;
+    budget.claim_values(count)?;
+    let nested = schema_by_name(schema).ok_or(CodecError::UnknownSchema)?;
+    let values = allocate_vector_values(count)?;
+    Ok(DecodeStep::Vector(VectorFrame {
+        schema: nested,
+        values,
+        remaining: count,
+        element_depth,
+    }))
+}
+
+fn allocate_vector_values(count: usize) -> Result<Vec<SchemaObject>, CodecError> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(count)
+        .map_err(|_| CodecError::AllocationFailed)?;
+    Ok(values)
 }
 
 fn read_u64(decoder: &mut Decoder<'_>) -> Result<u64, CodecError> {
@@ -1437,7 +1481,13 @@ fn process_object_walk<'a>(
     pending: &mut Vec<(SchemaObject, usize)>,
 ) -> Result<(), CodecError> {
     if next_field == 0 {
-        validate_embedded_semantics(object.schema, &object.fields, budget, depth, pending)?;
+        <FederationSemanticValidator as SemanticValidator>::validate_embedded(
+            object.schema,
+            &object.fields,
+            budget,
+            depth,
+            pending,
+        )?;
     }
     let Some(value) = object.fields.get(next_field) else {
         return Ok(());

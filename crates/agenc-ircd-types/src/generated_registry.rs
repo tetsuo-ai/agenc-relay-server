@@ -11,7 +11,7 @@ pub const ACCOUNT_SERVICE_HPKE_KEM_ID: u64 = 32;
 /// Frozen federation constant `account_service_opaque_ke1_bytes`.
 pub const ACCOUNT_SERVICE_OPAQUE_KE1_BYTES: u64 = 96;
 /// Frozen federation constant `account_service_opaque_ke2_bytes`.
-pub const ACCOUNT_SERVICE_OPAQUE_KE2_BYTES: u64 = 288;
+pub const ACCOUNT_SERVICE_OPAQUE_KE2_BYTES: u64 = 320;
 /// Frozen federation constant `account_service_opaque_ke3_bytes`.
 pub const ACCOUNT_SERVICE_OPAQUE_KE3_BYTES: u64 = 64;
 /// Frozen federation constant `account_service_opaque_registration_record_bytes`.
@@ -131,7 +131,7 @@ pub const CONSTANT_REGISTRY: &[ConstantDescriptor] = &[
     },
     ConstantDescriptor {
         name: "account_service_opaque_ke2_bytes",
-        value: 288,
+        value: 320,
     },
     ConstantDescriptor {
         name: "account_service_opaque_ke3_bytes",

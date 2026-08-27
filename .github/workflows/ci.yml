@@ -1,4 +1,4 @@
-name: Stage 03 conformance
+name: Stage 04 implementation checks
 
 on:
   push:
@@ -12,12 +12,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: stage-three-${{ github.workflow }}-${{ github.ref }}
+  group: stage-four-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  stage-three:
-    name: Complete Stage 03 gate
+  stage-four:
+    name: Stage 04 implementation checks
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -46,5 +46,5 @@ jobs:
           cargo +1.98.0 install --locked cargo-llvm-cov --version 0.9.0
           cargo +1.98.0 install --locked cargo-fuzz --version 0.13.2
 
-      - name: Run the complete Stage 03 gate
-        run: bash scripts/check-stage-three.sh
+      - name: Run Stage 04 implementation checks
+        run: bash scripts/check-stage-four.sh

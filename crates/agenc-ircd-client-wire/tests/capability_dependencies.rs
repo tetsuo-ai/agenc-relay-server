@@ -12,36 +12,18 @@ const E2EE_VALUE: &str = concat!(
     "v1,profile=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,",
     "seg=2940,obj=262144,parts=90,welcome=4194304"
 );
-const MESSAGE_TAG_DEPENDENTS: &[&str] = &["account-tag", "server-time", "message-ids", "batch"];
+const PARSER_BACKED_CAPABILITIES: &[&str] = &["account-tag", "server-time", "message-ids", "batch"];
 
 #[test]
-fn message_tag_dependents_reject_incomplete_profiles_and_requests() -> Result<(), Box<dyn Error>> {
-    for dependent in MESSAGE_TAG_DEPENDENTS {
-        assert_eq!(
-            profile(&[dependent]).err(),
-            Some(CapError::InvalidAdvertisement),
-            "{dependent} was advertised without message-tags"
-        );
-
-        let advertised = profile(&["message-tags", dependent])?;
+fn parser_backed_capabilities_negotiate_independently() -> Result<(), Box<dyn Error>> {
+    for capability in PARSER_BACKED_CAPABILITIES {
+        let advertised = profile(&[capability])?;
         let mut state = CapabilityState::default();
         assert!(matches!(
-            state.request(dependent, &advertised)?,
-            CapRequestReply::Nak(_)
-        ));
-        assert!(state.list()?.is_empty());
-
-        let complete_request = format!("message-tags {dependent}");
-        assert!(matches!(
-            state.request(&complete_request, &advertised)?,
+            state.request(capability, &advertised)?,
             CapRequestReply::Ack(_)
         ));
-        let enabled = state.list()?;
-        assert!(matches!(
-            state.request("-message-tags", &advertised)?,
-            CapRequestReply::Nak(_)
-        ));
-        assert_eq!(state.list()?, enabled);
+        assert_eq!(state.list()?, [capability.to_string()]);
     }
     Ok(())
 }

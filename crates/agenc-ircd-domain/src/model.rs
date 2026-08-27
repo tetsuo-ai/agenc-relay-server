@@ -5,9 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 
 use agenc_ircd_types::{
-    AccountId, AccountLabel, BoundedUtf8, ChannelInstanceId, ChannelName, DisplayName, EntryId,
-    Generation, InviteId, MessageId, MonotonicTick, Nickname, PublicCloak, Revision, ServerId,
-    SessionId, TypedMask, UserId, UtcSecond,
+    AccountDeletionToken, AccountId, AccountLabel, BoundedUtf8, ChannelInstanceId, ChannelName,
+    DisplayName, EntryId, Generation, InviteId, MessageId, MonotonicTick, Nickname, PublicCloak,
+    Revision, ServerId, SessionId, TypedMask, UserId, UtcSecond,
 };
 
 use crate::DomainError;
@@ -792,6 +792,18 @@ pub(crate) struct Invite {
     pub(crate) expires_at: MonotonicTick,
 }
 
+/// Process-local, single-use account-deletion challenge bound to one session fence.
+pub(crate) struct AccountDeletionChallengeState {
+    pub(crate) token: AccountDeletionToken,
+    pub(crate) account_id: AccountId,
+    pub(crate) account_revision: Revision,
+    pub(crate) account_session_generation: Generation,
+    pub(crate) session_id: SessionId,
+    pub(crate) user_id: UserId,
+    pub(crate) session_generation: Generation,
+    pub(crate) expires_at: MonotonicTick,
+}
+
 /// Authoritative channel state.
 pub struct ChannelState {
     pub(crate) channel_id: ChannelInstanceId,
@@ -970,7 +982,10 @@ impl ChannelState {
         if !self.identities_and_limits_are_valid() {
             return Err(DomainError::InvariantViolation);
         }
-        if self.scope == ChannelScope::Local && self.content_policy == ContentPolicy::E2eeBound {
+        if !self.content_policy_is_valid() {
+            return Err(DomainError::InvariantViolation);
+        }
+        if !self.pending_removals_are_valid() {
             return Err(DomainError::InvariantViolation);
         }
         if !self.history.is_allowed_for(self) {
@@ -983,6 +998,26 @@ impl ChannelState {
             return Err(DomainError::InvariantViolation);
         }
         Ok(())
+    }
+
+    fn content_policy_is_valid(&self) -> bool {
+        self.content_policy == ContentPolicy::Plaintext
+            || (self.scope == ChannelScope::Global
+                && self.persistence == PersistencePolicy::Registered
+                && self.history == HistoryPolicy::Off
+                && self.topic.is_none()
+                && self
+                    .memberships
+                    .values()
+                    .all(|membership| membership.account_id.is_some()))
+    }
+
+    fn pending_removals_are_valid(&self) -> bool {
+        (self.content_policy == ContentPolicy::E2eeBound || self.e2ee_removal_pending.is_empty())
+            && self
+                .e2ee_removal_pending
+                .iter()
+                .all(|user_id| self.memberships.contains_key(user_id))
     }
 
     fn identities_and_limits_are_valid(&self) -> bool {
@@ -1001,10 +1036,12 @@ impl ChannelState {
     }
 
     fn membership_roles_are_current(&self) -> bool {
-        self.memberships
-            .values()
-            .copied()
-            .all(|membership| membership.effective_role == self.effective_role(membership))
+        self.memberships.values().copied().all(|membership| {
+            membership.effective_role == self.effective_role(membership)
+                && (self.persistence != PersistencePolicy::Registered
+                    || membership.account_id.is_none()
+                    || membership.session_role == Role::Member)
+        })
     }
 }
 
@@ -1110,8 +1147,10 @@ pub struct DomainState {
     pub(crate) sessions: BTreeMap<UserId, SessionState>,
     pub(crate) session_ids: BTreeMap<SessionId, UserId>,
     pub(crate) nicknames: BTreeMap<NicknameValue, UserId>,
+    pub(crate) public_cloaks: BTreeMap<PublicCloak, UserId>,
     pub(crate) channels: BTreeMap<ChannelInstanceId, ChannelState>,
     pub(crate) channel_names: BTreeMap<ChannelNameValue, ChannelInstanceId>,
+    pub(crate) account_deletion_challenges: BTreeMap<SessionId, AccountDeletionChallengeState>,
     pub(crate) sanctions: Vec<Sanction>,
 }
 
@@ -1130,8 +1169,10 @@ impl DomainState {
             sessions: BTreeMap::new(),
             session_ids: BTreeMap::new(),
             nicknames: BTreeMap::new(),
+            public_cloaks: BTreeMap::new(),
             channels: BTreeMap::new(),
             channel_names: BTreeMap::new(),
+            account_deletion_challenges: BTreeMap::new(),
             sanctions: Vec::new(),
         }
     }
@@ -1205,12 +1246,14 @@ impl DomainState {
     pub fn validate(&self) -> Result<(), DomainError> {
         self.validate_sessions()?;
         self.validate_channels()?;
-        self.validate_accounts()
+        self.validate_accounts()?;
+        self.validate_account_deletion_challenges()
     }
 
     fn validate_sessions(&self) -> Result<(), DomainError> {
         if self.sessions.len() != self.session_ids.len()
             || self.sessions.len() != self.nicknames.len()
+            || self.sessions.len() != self.public_cloaks.len()
         {
             return Err(DomainError::InvariantViolation);
         }
@@ -1228,6 +1271,7 @@ impl DomainState {
         if user_id != &session.user_id
             || self.session_ids.get(&session.session_id) != Some(user_id)
             || self.nicknames.get(&session.nickname) != Some(user_id)
+            || self.public_cloaks.get(&session.public_cloak) != Some(user_id)
             || session.joined_channels.len() > MAX_CHANNELS_PER_SESSION
             || session.monitored_nicknames.len() > MAX_MONITORED_NICKNAMES
         {
@@ -1253,7 +1297,9 @@ impl DomainState {
             {
                 Err(DomainError::InvariantViolation)
             }
-            None if session.account_session_generation.get() != 0 => {
+            None if session.account_session_generation.get() != 0
+                || session.fresh_auth_deadline.is_some() =>
+            {
                 Err(DomainError::InvariantViolation)
             }
             Some(_) | None => Ok(()),
@@ -1264,12 +1310,7 @@ impl DomainState {
         if self.channels.len() != self.channel_names.len() {
             return Err(DomainError::InvariantViolation);
         }
-        let invite_count = self.channels.values().try_fold(0_usize, |total, channel| {
-            total.checked_add(channel.invites.len())
-        });
-        if invite_count.is_none_or(|count| count > MAX_INVITES_NETWORK_WIDE) {
-            return Err(DomainError::InvariantViolation);
-        }
+        validate_network_invite_count(self.channels.values().map(|channel| channel.invites.len()))?;
         for (channel_id, channel) in &self.channels {
             channel.validate()?;
             if channel_id != &channel.channel_id
@@ -1343,10 +1384,63 @@ impl DomainState {
         }
         Ok(())
     }
+
+    fn validate_account_deletion_challenges(&self) -> Result<(), DomainError> {
+        if self.account_deletion_challenges.len() > self.sessions.len() {
+            return Err(DomainError::InvariantViolation);
+        }
+        for (session_id, challenge) in &self.account_deletion_challenges {
+            let user_id = self
+                .session_ids
+                .get(session_id)
+                .ok_or(DomainError::InvariantViolation)?;
+            let session = self
+                .sessions
+                .get(user_id)
+                .ok_or(DomainError::InvariantViolation)?;
+            if challenge.session_id != *session_id
+                || challenge.user_id != *user_id
+                || challenge.account_id
+                    != session.account_id.ok_or(DomainError::InvariantViolation)?
+                || challenge.account_session_generation != session.account_session_generation
+                || challenge.session_generation != session.generation
+                || session.fresh_auth_deadline.is_some()
+            {
+                return Err(DomainError::InvariantViolation);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_network_invite_count(
+    invite_counts: impl IntoIterator<Item = usize>,
+) -> Result<(), DomainError> {
+    let mut total = 0_usize;
+    for count in invite_counts {
+        total = total
+            .checked_add(count)
+            .ok_or(DomainError::InvariantViolation)?;
+        if total > MAX_INVITES_NETWORK_WIDE {
+            return Err(DomainError::InvariantViolation);
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn next_revision(revision: Revision) -> Result<Revision, DomainError> {
     revision.checked_add(1).map_err(Into::into)
+}
+
+#[cfg(test)]
+pub(crate) fn test_public_cloak(seed: u8) -> Result<PublicCloak, DomainError> {
+    const BASE32: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+
+    let high = usize::from(seed) / BASE32.len();
+    let low = usize::from(seed) % BASE32.len();
+    let high = char::from(*BASE32.get(high).ok_or(DomainError::InvariantViolation)?);
+    let low = char::from(*BASE32.get(low).ok_or(DomainError::InvariantViolation)?);
+    PublicCloak::parse(&format!("aaaaaaaa{high}{low}"), "bbbbbbbbbbbbbbbb").map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -1372,7 +1466,7 @@ mod tests {
             generation: Generation::new(1)?,
             nickname: NicknameValue::parse(&format!("user{seed}"))?,
             display_name: DisplayNameValue::prepare(&format!("User {seed}"))?,
-            public_cloak: PublicCloak::parse("aaaaaaaaaa", "bbbbbbbbbbbbbbbb")?,
+            public_cloak: test_public_cloak(seed)?,
             connection_nonce: [seed; 32],
             negotiated_capability_hash: [seed.wrapping_add(1); 32],
             created_at_utc: UtcSecond::from_unix_seconds(10),
@@ -1416,7 +1510,59 @@ mod tests {
         state
             .nicknames
             .insert(value.nickname.clone(), value.user_id);
+        state
+            .public_cloaks
+            .insert(value.public_cloak, value.user_id);
         state.sessions.insert(value.user_id, value);
+    }
+
+    fn guest_channel_state(
+        seed: u8,
+        name: &str,
+    ) -> Result<(DomainState, ChannelInstanceId, UserId), DomainError> {
+        let mut state = DomainState::new()?;
+        let mut live = session(seed, None)?;
+        let value = channel(seed, name)?;
+        let channel_id = value.channel_id;
+        let user_id = live.user_id;
+        live.joined_channels.insert(channel_id);
+        insert_session(&mut state, live);
+        state.channel_names.insert(value.name.clone(), channel_id);
+        state.channels.insert(channel_id, value);
+        state.validate()?;
+        Ok((state, channel_id, user_id))
+    }
+
+    fn deletion_challenge_state(
+        seed: u8,
+    ) -> Result<(DomainState, SessionId, UserId, AccountId), DomainError> {
+        let mut state = DomainState::new()?;
+        let account_id = account(seed);
+        state.accounts.insert(
+            account_id,
+            AccountState::new(account_id, Generation::new(1)?, state.revision),
+        );
+        let live = session(seed, Some(account_id))?;
+        let session_id = live.session_id;
+        let user_id = live.user_id;
+        let session_generation = live.generation;
+        let account_session_generation = live.account_session_generation;
+        insert_session(&mut state, live);
+        state.account_deletion_challenges.insert(
+            session_id,
+            AccountDeletionChallengeState {
+                token: AccountDeletionToken::from_bytes(id(seed.wrapping_add(1))),
+                account_id,
+                account_revision: state.revision,
+                account_session_generation,
+                session_id,
+                user_id,
+                session_generation,
+                expires_at: MonotonicTick::from_ticks(100),
+            },
+        );
+        state.validate()?;
+        Ok((state, session_id, user_id, account_id))
     }
 
     #[test]
@@ -1451,6 +1597,29 @@ mod tests {
             .ok_or(DomainError::InvariantViolation)?;
         membership.effective_role = Role::Member;
         assert_eq!(value.validate(), Err(DomainError::InvariantViolation));
+
+        let mut value = channel(1, "#registered-session-role")?;
+        let account_id = account(1);
+        value.persistence = PersistencePolicy::Registered;
+        value.role_grants.insert(account_id, Role::Owner);
+        {
+            let membership = value
+                .memberships
+                .values_mut()
+                .next()
+                .ok_or(DomainError::InvariantViolation)?;
+            membership.account_id = Some(account_id);
+            membership.session_role = Role::Owner;
+            membership.effective_role = Role::Owner;
+        }
+        assert_eq!(value.validate(), Err(DomainError::InvariantViolation));
+        value
+            .memberships
+            .values_mut()
+            .next()
+            .ok_or(DomainError::InvariantViolation)?
+            .session_role = Role::Member;
+        assert_eq!(value.validate(), Ok(()));
 
         let mut value = channel(1, "#scope")?;
         value.scope = ChannelScope::Local;
@@ -1531,6 +1700,7 @@ mod tests {
         let user_id = valid_session.user_id;
         let session_id = valid_session.session_id;
         let nickname = valid_session.nickname.clone();
+        let public_cloak = valid_session.public_cloak;
 
         let mut state = DomainState::new()?;
         state.sessions.insert(user_id, valid_session);
@@ -1538,13 +1708,22 @@ mod tests {
         state.session_ids.insert(session_id, user_id);
         assert_eq!(state.validate(), Err(DomainError::InvariantViolation));
         state.nicknames.insert(nickname.clone(), user_id);
+        assert_eq!(state.validate(), Err(DomainError::InvariantViolation));
+        state.public_cloaks.insert(public_cloak, user_id);
         assert_eq!(state.validate(), Ok(()));
         state
             .session_ids
             .insert(session_id, UserId::from_bytes(id(99)));
         assert_eq!(state.validate(), Err(DomainError::InvariantViolation));
         state.session_ids.insert(session_id, user_id);
-        state.nicknames.insert(nickname, UserId::from_bytes(id(98)));
+        state
+            .nicknames
+            .insert(nickname.clone(), UserId::from_bytes(id(98)));
+        assert_eq!(state.validate(), Err(DomainError::InvariantViolation));
+        state.nicknames.insert(nickname, user_id);
+        state
+            .public_cloaks
+            .insert(public_cloak, UserId::from_bytes(id(97)));
         assert_eq!(state.validate(), Err(DomainError::InvariantViolation));
 
         let mut state = DomainState::new()?;
@@ -1565,6 +1744,20 @@ mod tests {
         let wrong_id = ChannelInstanceId::from_bytes(id(98));
         state.channel_names.insert(value.name.clone(), wrong_id);
         state.channels.insert(wrong_id, value);
+        assert_eq!(state.validate(), Err(DomainError::InvariantViolation));
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_live_public_cloaks_are_rejected_as_corrupt_state() -> Result<(), DomainError> {
+        let first = session(5, None)?;
+        let mut second = session(6, None)?;
+        second.public_cloak = first.public_cloak;
+
+        let mut state = DomainState::new()?;
+        insert_session(&mut state, first);
+        insert_session(&mut state, second);
+
         assert_eq!(state.validate(), Err(DomainError::InvariantViolation));
         Ok(())
     }
@@ -1648,6 +1841,9 @@ mod tests {
         state
             .nicknames
             .insert(valid.nickname.clone(), valid.user_id);
+        state
+            .public_cloaks
+            .insert(valid.public_cloak, valid.user_id);
         state.sessions.insert(UserId::from_bytes(id(250)), valid);
         assert_eq!(state.validate(), Err(DomainError::InvariantViolation));
 
@@ -1837,6 +2033,165 @@ mod tests {
         state.nicknames.remove(&live.nickname);
         live.nickname = reserved;
         insert_session(&mut state, live);
+        assert_eq!(state.validate(), Err(DomainError::InvariantViolation));
+        Ok(())
+    }
+
+    #[test]
+    fn session_limits_and_guest_auth_fences_reject_corrupt_state() -> Result<(), DomainError> {
+        let mut monitored = session(26, None)?;
+        for index in 0..=MAX_MONITORED_NICKNAMES {
+            monitored
+                .monitored_nicknames
+                .insert(NicknameValue::parse(&format!("watch{index}"))?);
+        }
+        let mut state = DomainState::new()?;
+        insert_session(&mut state, monitored);
+        assert_eq!(state.validate(), Err(DomainError::InvariantViolation));
+
+        let mut guest = session(27, None)?;
+        guest.fresh_auth_deadline = Some(MonotonicTick::from_ticks(1));
+        let mut state = DomainState::new()?;
+        insert_session(&mut state, guest);
+        assert_eq!(state.validate(), Err(DomainError::InvariantViolation));
+        Ok(())
+    }
+
+    #[test]
+    fn network_invite_count_rejects_limit_excess_and_arithmetic_overflow() {
+        assert_eq!(validate_network_invite_count([]), Ok(()));
+        assert_eq!(
+            validate_network_invite_count([MAX_INVITES_NETWORK_WIDE]),
+            Ok(())
+        );
+        assert_eq!(
+            validate_network_invite_count([MAX_INVITES_NETWORK_WIDE, 1]),
+            Err(DomainError::InvariantViolation)
+        );
+        assert_eq!(
+            validate_network_invite_count([1, usize::MAX]),
+            Err(DomainError::InvariantViolation)
+        );
+    }
+
+    #[test]
+    fn channel_invites_reject_missing_guest_and_account_targets() -> Result<(), DomainError> {
+        let (mut state, channel_id, _) = guest_channel_state(28, "#guest-invite")?;
+        let invite_id = InviteId::from_bytes(id(28));
+        state
+            .channels
+            .get_mut(&channel_id)
+            .ok_or(DomainError::InvariantViolation)?
+            .invites
+            .insert(
+                invite_id,
+                Invite {
+                    invite_id,
+                    target: Principal::Guest(UserId::from_bytes(id(250))),
+                    inviter: UserId::from_bytes(id(28)),
+                    creation_revision: state.revision,
+                    expires_at: MonotonicTick::from_ticks(100),
+                },
+            );
+        assert_eq!(state.validate(), Err(DomainError::InvariantViolation));
+
+        let (mut state, channel_id, user_id) = guest_channel_state(29, "#account-invite")?;
+        let invite_id = InviteId::from_bytes(id(29));
+        state
+            .channels
+            .get_mut(&channel_id)
+            .ok_or(DomainError::InvariantViolation)?
+            .invites
+            .insert(
+                invite_id,
+                Invite {
+                    invite_id,
+                    target: Principal::Account(account(250)),
+                    inviter: user_id,
+                    creation_revision: state.revision,
+                    expires_at: MonotonicTick::from_ticks(100),
+                },
+            );
+        assert_eq!(state.validate(), Err(DomainError::InvariantViolation));
+        Ok(())
+    }
+
+    #[test]
+    fn deletion_challenges_reject_each_corrupt_session_binding() -> Result<(), DomainError> {
+        let (mut state, session_id, user_id, _) = deletion_challenge_state(30)?;
+        let (nickname, public_cloak) = {
+            let session = state
+                .sessions
+                .get(&user_id)
+                .ok_or(DomainError::InvariantViolation)?;
+            (session.nickname.clone(), session.public_cloak)
+        };
+        state.sessions.remove(&user_id);
+        state.session_ids.remove(&session_id);
+        state.nicknames.remove(&nickname);
+        state.public_cloaks.remove(&public_cloak);
+        assert_eq!(state.validate(), Err(DomainError::InvariantViolation));
+
+        let (mut state, session_id, _, _) = deletion_challenge_state(31)?;
+        state
+            .account_deletion_challenges
+            .get_mut(&session_id)
+            .ok_or(DomainError::InvariantViolation)?
+            .session_id = SessionId::from_bytes(id(250));
+        assert_eq!(state.validate(), Err(DomainError::InvariantViolation));
+
+        let (mut state, session_id, _, _) = deletion_challenge_state(32)?;
+        state
+            .account_deletion_challenges
+            .get_mut(&session_id)
+            .ok_or(DomainError::InvariantViolation)?
+            .user_id = UserId::from_bytes(id(250));
+        assert_eq!(state.validate(), Err(DomainError::InvariantViolation));
+
+        let (mut state, session_id, _, _) = deletion_challenge_state(33)?;
+        let other_account = account(250);
+        state.accounts.insert(
+            other_account,
+            AccountState::new(other_account, Generation::new(1)?, state.revision),
+        );
+        state
+            .account_deletion_challenges
+            .get_mut(&session_id)
+            .ok_or(DomainError::InvariantViolation)?
+            .account_id = other_account;
+        assert_eq!(state.validate(), Err(DomainError::InvariantViolation));
+
+        let (mut state, session_id, _, _) = deletion_challenge_state(34)?;
+        state
+            .account_deletion_challenges
+            .get_mut(&session_id)
+            .ok_or(DomainError::InvariantViolation)?
+            .account_session_generation = Generation::new(2)?;
+        assert_eq!(state.validate(), Err(DomainError::InvariantViolation));
+
+        let (mut state, session_id, _, _) = deletion_challenge_state(35)?;
+        state
+            .account_deletion_challenges
+            .get_mut(&session_id)
+            .ok_or(DomainError::InvariantViolation)?
+            .session_generation = Generation::new(2)?;
+        assert_eq!(state.validate(), Err(DomainError::InvariantViolation));
+
+        let (mut state, _, user_id, _) = deletion_challenge_state(36)?;
+        state
+            .sessions
+            .get_mut(&user_id)
+            .ok_or(DomainError::InvariantViolation)?
+            .fresh_auth_deadline = Some(MonotonicTick::from_ticks(1));
+        assert_eq!(state.validate(), Err(DomainError::InvariantViolation));
+
+        let (mut state, _, user_id, _) = deletion_challenge_state(37)?;
+        let live = state
+            .sessions
+            .get_mut(&user_id)
+            .ok_or(DomainError::InvariantViolation)?;
+        live.account_id = None;
+        live.account_session_generation = Generation::new(0)?;
         assert_eq!(state.validate(), Err(DomainError::InvariantViolation));
         Ok(())
     }

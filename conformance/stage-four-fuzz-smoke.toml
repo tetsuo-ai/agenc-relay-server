@@ -1,0 +1,13 @@
+schema_version = 1
+evidence_id = "EVID-S04-014-VERIFICATION"
+toolchain = "nightly-2026-08-24"
+cargo_fuzz = "0.13.2"
+seed = 20260827
+runs = 10000
+max_len = 4726
+timeout_seconds = 2
+rss_limit_mb = 512
+executed_on = "2026-08-27"
+result = "pass"
+targets = ["account_service_envelope", "crypto_wrappers"]
+limitations = "The 24 CPU-hour release campaign for each parser target remains S10-004 evidence."

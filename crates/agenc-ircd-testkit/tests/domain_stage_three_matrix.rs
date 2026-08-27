@@ -12,7 +12,7 @@ use agenc_ircd_domain::{
     MessageText, ModeChange, ModeOperation, ModerationAction, ModerationReason,
     ModerationReasonCode, NicknameValue, PlanDecision, PresenceCommand, PresencePolicy,
     PresenceProjection, Principal, ProjectionDecision, RateBucket, ResolvedMessageTarget, Role,
-    SanctionRequest, TopicProjection, TopicText, UserQuery, Visibility,
+    SanctionRequest, TopicProjection, TopicText, UserQuery, Visibility, VisibilityMode,
 };
 use agenc_ircd_testkit::{
     DomainTestIdentity, account_id, apply_command, apply_plan, bytes, channel_id, create_account,
@@ -24,7 +24,7 @@ use agenc_ircd_types::{
 };
 
 fn text(value: &str) -> Result<MessageText, DomainError> {
-    BoundedUtf8::try_from_str(value, ControlPolicy::RejectAll).map_err(Into::into)
+    MessageText::parse(value)
 }
 
 fn join_new(
@@ -207,13 +207,12 @@ fn canonical_command_matrix_covers_bounds_scopes_and_kinds() -> Result<(), Box<d
         .err(),
         Some(DomainError::InvalidArgument)
     );
-    assert_eq!(
+    assert!(
         CanonicalCommand::mode(
             global.clone(),
-            vec![ModeChange::Moderated(true), ModeChange::Moderated(false),],
+            vec![ModeChange::Moderated(true), ModeChange::Moderated(false)],
         )
-        .err(),
-        Some(DomainError::InvalidArgument)
+        .is_ok()
     );
 
     let commands = vec![
@@ -461,7 +460,7 @@ fn account_direct_message_and_projection_matrix_is_recipient_scoped() -> Result<
     else {
         return Err("same-account contact was hidden".into());
     };
-    assert_eq!(projected.away_text(), Some("away"));
+    assert_eq!(projected.away_text(), None);
     assert_eq!(projected.display_name().as_str(), "Alice Display");
 
     let bob_credit = message_admission(bob, &[])?;
@@ -897,7 +896,7 @@ fn topic_history_queries_sanctions_and_part_all_cover_closed_policies() -> Resul
             )?,
             &message_admission(member, &[channel])?,
         )?,
-        Some(DomainError::PlaintextRoute)
+        None
     );
 
     apply_modes(
@@ -1204,7 +1203,10 @@ fn successful_target_subsets_commit_with_complete_canonical_failures() -> Result
         &mut state,
         owner,
         "#subset-secret",
-        vec![ModeChange::Visibility(Visibility::Secret)],
+        vec![ModeChange::Visibility {
+            operation: ModeOperation::Add,
+            mode: VisibilityMode::Secret,
+        }],
         Vec::new(),
     )?;
 
@@ -1781,7 +1783,10 @@ fn secret_channel_lookups_match_missing_channel_errors() -> Result<(), Box<dyn E
         &mut state,
         owner,
         "#hidden-parity",
-        vec![ModeChange::Visibility(Visibility::Secret)],
+        vec![ModeChange::Visibility {
+            operation: ModeOperation::Add,
+            mode: VisibilityMode::Secret,
+        }],
         Vec::new(),
     )?;
     let admission = AdmissionSnapshot::new(vec![

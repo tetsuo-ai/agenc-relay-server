@@ -51,6 +51,24 @@ fn sasl_and_account_carriers_reject_overrun_and_wrong_state_boundaries()
 }
 
 #[test]
+fn empty_sasl_chunks_and_early_account_end_fail_closed() -> Result<(), Box<dyn Error>> {
+    let mut sasl = SaslTransport::new()?;
+    sasl.client("AGENC-OPAQUE", 0)?;
+    assert_eq!(
+        sasl.client("", 1).err(),
+        Some(AuthTransportError::WrongLength)
+    );
+
+    let mut account = AccountTransfer::new(AccountCarrierKind::Create)?;
+    account.client("START", Some("4726"), false, 0)?;
+    assert_eq!(
+        account.client("END", None, false, 1).err(),
+        Some(AuthTransportError::WrongLength)
+    );
+    Ok(())
+}
+
+#[test]
 fn account_carrier_checked_deadlines_cover_total_data_and_end_boundaries()
 -> Result<(), Box<dyn Error>> {
     let mut start_overflow = AccountTransfer::new(AccountCarrierKind::Create)?;

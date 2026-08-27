@@ -1,21 +1,28 @@
 # Stage 00 Evidence
 
-Status: historical pass on 2026-08-24 for commit
-`6b48ecb73afd471ed576146483098c19c12893f9`. This report applies only to the
-staged tree that was exported with `git checkout-index` and committed without
-changing its contents or executable modes. It does not provide evidence for
-the current uncommitted tree.
+Status: implementation complete; checkpoint closed for exact source commit
+`1e5b738468f88b238061cc6e84b732176f5cae65`. The current schema version 2
+[manifest](evidence/stage-00-1e5b738468f88b238061cc6e84b732176f5cae65.json)
+binds 17 passed records to one clean Stage 00 gate run and its checked-in
+[artifact](evidence/artifacts/stage-zero-implementation-1e5b738468f88b238061cc6e84b732176f5cae65.json).
+The [schema version 1
+manifest](evidence/stage-00-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json)
+for commit `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` remains archive-only.
+The 2026-08-24 pass for commit
+`6b48ecb73afd471ed576146483098c19c12893f9` remains historical evidence.
 
 ## Verification summary
 
-`bash scripts/check-stage-zero.sh` passed from the clean staged-tree export.
-The gate used Rust 1.98.0 and checked both
+`bash scripts/check-stage-zero.sh` passed from a clean detached worktree at the
+exact source commit.
+The recorded run used Rust 1.98.0 and checked both
 `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`. It ran the frozen
 specification check, every policy validator and negative self-test, formatting,
 compilation, Clippy, unit/integration/doc tests, dependency-tree inspection,
 `cargo-deny` 0.20.2, `cargo-audit` 0.22.2, and `cargo-llvm-cov` 0.9.0.
 
-Measured Stage-00 coverage is 91.18% branches and 98.87% lines. Branch
+Measured workspace coverage is 90.01% branches and 95.59% lines. All five
+critical regions reached 100%. Branch
 instrumentation uses `RUSTC_BOOTSTRAP=1` only for the coverage command because
 the pinned compiler still gates LLVM branch instrumentation behind `-Z`; the
 variable is forbidden from ordinary build, test, and release compilation.
@@ -67,7 +74,7 @@ unknown-source, license, yanked, duplicate, and advisory policies are closed;
 
 `EVID-S00-007-EVIDENCE-LAYOUT`: unit/integration, vector, transcript, property,
 fuzz, Loom, fault, interoperability, capacity, and release locations are named.
-The catalogs now expose 261 unique stable evidence bindings.
+The catalog exposes 76 unique stable evidence bindings at this commit.
 
 ## S00-008
 
@@ -80,20 +87,26 @@ closure, with no deterministic production feature.
 ## S00-009
 
 `EVID-S00-009-CI-BASELINE`: the least-privilege workflow pins its sole action
-and every tool, then invokes the same complete gate. CI validator mutations
-reject floating actions, write permission, weakened failures, missing audit
-policy, and globally widened coverage instrumentation.
+and every reviewed Rust and Cargo policy tool, then invokes the same recorded
+command set. CI validator
+mutations reject floating actions, write permission, weakened failures, missing
+audit policy, and globally widened coverage instrumentation.
 
 ## S00-010
 
 `EVID-S00-010-MANIFEST-SCHEMA`: the closed JSON Schema and validator bind every
-record to a catalog ID and require command, tool, source/lock, target, feature,
-time, result, artifact, and limitation fields. Fifteen malformed fixtures cover
-missing, duplicate, stale, invalid, and unbound categories.
+record to a catalog ID and require command, exact ordered toolchain and policy
+hash, source and lock hashes, target, feature, time, result, artifact, and
+nonempty limitation fields. Schema version 1 remains archive-only. Seventy-eight
+seeded rejection cases cover missing, duplicate, stale, invalid, unbound,
+legacy, toolchain, and artifact-provenance categories.
 
 ## S00-900
 
-`EVID-S00-900-STAGE-GATE`: the complete gate passes from the clean staged-tree
-export on both targets, coverage exceeds 90%, the release graph excludes
-testkit, and the binary refuses to impersonate a server. This gate makes no
-claim for work completed under a later stage.
+`EVID-S00-900-STAGE-GATE`: the recorded run passed from a clean detached
+worktree at the exact source commit on both targets, coverage exceeded 90%, the
+release graph excluded testkit, and the binary refused to impersonate a server.
+The current schema version 2 manifest records the required gate on exact source
+commit `1e5b738468f88b238061cc6e84b732176f5cae65` with a verified artifact path
+and closes `S00-900`. The schema version 1 record for commit
+`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` is retained as archive evidence.

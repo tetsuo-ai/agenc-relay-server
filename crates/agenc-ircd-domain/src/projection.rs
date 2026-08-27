@@ -273,7 +273,7 @@ impl DomainState {
         if !self.session_is_visible(requester, target_session) {
             return ProjectionDecision::Hidden;
         }
-        ProjectionDecision::Visible(self.session_projection(target_session))
+        ProjectionDecision::Visible(self.session_projection(requester, target_session))
     }
 
     /// Returns presence without distinguishing an offline target from a hidden one.
@@ -296,7 +296,7 @@ impl DomainState {
         let Some(channel) = self.channels.get(&channel_id) else {
             return Ok(ProjectionDecision::Hidden);
         };
-        if channel.visibility == Visibility::Secret && !channel.memberships.contains_key(&requester)
+        if channel.visibility != Visibility::Listed && !channel.memberships.contains_key(&requester)
         {
             return Ok(ProjectionDecision::Hidden);
         }
@@ -352,7 +352,11 @@ impl DomainState {
         Ok(projections)
     }
 
-    fn session_projection<'a>(&'a self, session: &'a SessionState) -> SessionProjection<'a> {
+    fn session_projection<'a>(
+        &'a self,
+        requester: UserId,
+        session: &'a SessionState,
+    ) -> SessionProjection<'a> {
         let account_label = session
             .account_id
             .and_then(|account_id| self.accounts.get(&account_id))
@@ -363,7 +367,10 @@ impl DomainState {
             display_name: &session.display_name,
             public_cloak: session.public_cloak,
             account_label,
-            away_text: session.away.as_ref().map(|away| away.as_str()),
+            away_text: (requester == session.user_id
+                || self.shares_channel(requester, session.user_id))
+            .then(|| session.away.as_ref().map(|away| away.as_str()))
+            .flatten(),
         }
     }
 
@@ -441,8 +448,8 @@ mod tests {
         GuestDirectMessagePolicy, Membership, PlaintextTopic, Principal, SessionSeed, TopicText,
     };
     use agenc_ircd_types::{
-        AccountRandomId, ControlPolicy, Generation, MessageId, PublicCloak, Revision, ServerId,
-        SessionId, UtcSecond,
+        AccountRandomId, ControlPolicy, Generation, MessageId, Revision, ServerId, SessionId,
+        UtcSecond,
     };
 
     fn bytes(seed: u8) -> [u8; 16] {
@@ -463,7 +470,7 @@ mod tests {
             generation: Generation::new(1)?,
             nickname: NicknameValue::parse(&format!("project{seed}"))?,
             display_name: DisplayNameValue::prepare(&format!("Project {seed}"))?,
-            public_cloak: PublicCloak::parse("aaaaaaaaaa", "bbbbbbbbbbbbbbbb")?,
+            public_cloak: crate::model::test_public_cloak(seed)?,
             connection_nonce: [seed; 32],
             negotiated_capability_hash: [seed.wrapping_add(1); 32],
             created_at_utc: UtcSecond::from_unix_seconds(10),
@@ -478,6 +485,9 @@ mod tests {
         state
             .nicknames
             .insert(session.nickname.clone(), session.user_id);
+        state
+            .public_cloaks
+            .insert(session.public_cloak, session.user_id);
         state.sessions.insert(session.user_id, session);
     }
 
@@ -714,7 +724,7 @@ mod tests {
             projected.account_label().map(AccountLabelValue::as_str),
             Some("Target")
         );
-        assert_eq!(projected.away_text(), Some("away"));
+        assert_eq!(projected.away_text(), None);
 
         let shared_id = ChannelInstanceId::from_bytes(bytes(30));
         state
@@ -730,6 +740,11 @@ mod tests {
             .joined_channels
             .insert(shared_id);
         assert!(state.shares_channel(requester_id, target_id));
+        let ProjectionDecision::Visible(projected) = state.project_session(requester_id, target_id)
+        else {
+            return Err(DomainError::InvariantViolation);
+        };
+        assert_eq!(projected.away_text(), Some("away"));
 
         let mut channel = ChannelState::new_ephemeral(
             shared_id,

@@ -1,0 +1,52 @@
+schema_version = 1
+evidence_id = "EVID-S04-014-CONSTANT-TIME"
+reviewed_revision = "325c086ce197e6c9c39129ef79c2ff3f24039ffa"
+worktree_state = "dirty-source-hash-bound"
+conclusion = "Known and unknown account inputs converge on one OPAQUE server-start implementation with equal-size credential IDs and records. Secret digest and OPAQUE MAC comparisons use constant-time library operations."
+limit = "This review does not claim resistance to global timing analysis. Stage 05 must add the fixed storage lookup schedule before the full account lookup path can close AUTH-01."
+
+[measurement]
+test = "crates/agenc-ircd-auth/tests/stage_four_security.rs::shuffled_known_and_unknown_opaque_starts_share_one_timing_class"
+sample_order = "48 fixed shuffled samples, 24 known and 24 unknown, after four interleaved warmups"
+statistic = "separate medians with a pooled median absolute deviation; allowed difference is max(pooled median, 12 * pooled MAD)"
+role = "Supplemental regression signal only. The source-bound path review is the primary evidence."
+
+[[surface]]
+path = "crates/agenc-ircd-auth/src/service.rs"
+sha256 = "83610fd0f13fefaeb5998fe3d7901d8222fbc5ef1ea42907ef8fc18800c152a6"
+symbols = ["begin_authentication"]
+review = "Both lookup arms derive the same fixed-key fake credential HMAC, select a 32-byte credential ID and an exact 192-byte record choice, then call OpaqueProfile::authentication_start once. The real digest comparison is constant-time. Stage 05 owns the required fixed storage-lookup schedule."
+
+[[surface]]
+path = "crates/agenc-ircd-auth/src/opaque.rs"
+sha256 = "b2e25d1ba2a41e5708555e0a84d33877d8b35dda4e027d460a6b6627924fdb7c"
+symbols = ["OpaqueProfile::authentication_start", "finish_authentication"]
+review = "Real and fake selections deserialize one exact-size record and execute the same ServerLogin::start call. Finish consumes one exact-size state and one KE3 on every result."
+
+[[surface]]
+path = "crates/agenc-ircd-crypto/src/hash.rs"
+sha256 = "c3a692f5eb7a50a60e7f56b2bbc701ce6385e398896a119e17936c2f3f60ecca"
+symbols = ["LoginIndexDigest::matches", "derive_fake_credential_id"]
+review = "Login digest equality uses subtle::ConstantTimeEq. The fake credential ID is a full HMAC-SHA256 result under an independent key and fixed domain label."
+
+[[surface]]
+path = "crates/agenc-ircd-crypto/src/storage.rs"
+sha256 = "96e872b67f76cc1130bd575b4eba86dec0c2e488a66d1964cd339a74bc1ba858"
+symbols = ["StorageIndex::matches"]
+review = "Private storage-index equality uses subtle::ConstantTimeEq over all 32 bytes."
+
+[[surface]]
+path = "vendor/opaque-ke-4.0.1/src/opaque.rs"
+sha256 = "e64b3148c6de6b6f2bef26f5b309441963382fc50485da862137ea91e498b36e"
+symbols = ["ServerLogin::builder_with_key_material", "ServerLogin::finish"]
+review = "The library constructs a dummy record before constant-time real-or-dummy selection and returns only the closed invalid-login error on failed finish. The local patch changes secret lifetime, not transcript work."
+
+[[surface]]
+path = "vendor/opaque-ke-4.0.1/src/key_exchange/tripledh.rs"
+sha256 = "d767a3f7bc734562582a23dbca8be90cd607819fb1cdc2d69d7a599bbacdaa8f"
+symbols = ["TripleDh::finish_ke"]
+review = "TripleDH compares the expected and supplied KE3 MAC with ConstantTimeEq before selecting the session key. Context and identifiers are committed when KE2 state is created."
+
+[gate]
+status = "evidence-only"
+reason = "The repository has uncommitted Stage 04 changes, so this artifact does not claim gate closure."

@@ -128,9 +128,21 @@ identifier!(EntryId, 16, "A 16-byte list-mode entry identity.");
 
 /// A one-use account-deletion confirmation token.
 ///
-/// The token is move-only, redacted from formatting, and zeroized on drop.
+/// The token is move-only, has no formatting surface, and is zeroized on drop.
 /// Its only public byte exposure is the exact deletion reply/confirmation
 /// boundary.
+///
+/// ```compile_fail
+/// use agenc_ircd_types::AccountDeletionToken;
+/// fn require_clone<T: Clone>() {}
+/// require_clone::<AccountDeletionToken>();
+/// ```
+///
+/// ```compile_fail
+/// use agenc_ircd_types::AccountDeletionToken;
+/// fn require_debug<T: core::fmt::Debug>() {}
+/// require_debug::<AccountDeletionToken>();
+/// ```
 pub struct AccountDeletionToken([u8; 16]);
 
 impl AccountDeletionToken {
@@ -138,6 +150,13 @@ impl AccountDeletionToken {
     #[must_use]
     pub const fn from_bytes(bytes: [u8; 16]) -> Self {
         Self(bytes)
+    }
+
+    /// Generates a fresh token through an injected entropy authority.
+    pub fn generate(entropy: &mut impl EntropySource) -> Result<Self, EntropyError> {
+        let mut token = Self([0_u8; 16]);
+        entropy.fill_exact(&mut token.0)?;
+        Ok(token)
     }
 
     /// Borrows the bytes for the deletion reply or confirmation boundary.

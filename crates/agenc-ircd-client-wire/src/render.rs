@@ -28,7 +28,7 @@ const MAX_STANDARD_REPLY_DESCRIPTION_BYTES: usize = 256;
 /// Maximum semantic messages in one logical response, excluding wrappers.
 pub const MAX_SEMANTIC_REPLIES: usize = 512;
 /// Maximum local nesting of response batches.
-pub const MAX_BATCH_NESTING: usize = 32;
+pub const MAX_BATCH_NESTING: usize = 16;
 
 /// Authority that reserves the exact bytes requested by the renderer.
 ///
@@ -544,8 +544,11 @@ fn failed_standard_reply_is_applicable(
     code: PublicErrorCode,
     context: &[SafeReplyContext<'_>],
 ) -> bool {
-    if operation == "NOTICE" || !CLIENT_COMMANDS.contains(&operation) {
+    if !CLIENT_COMMANDS.contains(&operation) {
         return false;
+    }
+    if operation == "NOTICE" {
+        return matches!((code, context), (PublicErrorCode::INVALIDARGUMENT, []));
     }
     matches!(
         (operation, code, context),
@@ -985,7 +988,7 @@ impl BatchStack {
         if !capabilities.enabled("batch") || !capabilities.enabled("labeled-response") {
             return Err(RenderError::CapabilityRequired);
         }
-        validate_correlation(id)?;
+        validate_batch_reference(id)?;
         validate_correlation(label)?;
         if self.ids.len() >= MAX_BATCH_NESTING || self.ids.iter().any(|open| open == id) {
             return Err(RenderError::InvalidBatch);
@@ -998,6 +1001,9 @@ impl BatchStack {
             None,
         )?;
         message.add_correlation_tag(LABEL_TAG, label)?;
+        if let Some(parent) = self.ids.last() {
+            message.add_correlation_tag(BATCH_TAG, parent)?;
+        }
         let id = copy_string(id)?;
         self.ids
             .try_reserve(1)
@@ -1020,7 +1026,10 @@ impl BatchStack {
             return Err(RenderError::InvalidBatch);
         }
         let close_parameter = prefixed_value("-", id)?;
-        let message = WireMessage::new_registered(prefix, "BATCH", &[&close_parameter], None)?;
+        let mut message = WireMessage::new_registered(prefix, "BATCH", &[&close_parameter], None)?;
+        if let Some(parent) = self.ids.iter().rev().nth(1) {
+            message.add_correlation_tag(BATCH_TAG, parent)?;
+        }
         self.ids.pop();
         Ok(message)
     }
@@ -1272,6 +1281,18 @@ fn validate_correlation(value: &str) -> Result<(), RenderError> {
         || value
             .bytes()
             .any(|byte| matches!(byte, 0 | b'\r' | b'\n' | b' ' | b';'))
+    {
+        return Err(RenderError::InvalidCorrelation);
+    }
+    Ok(())
+}
+
+fn validate_batch_reference(value: &str) -> Result<(), RenderError> {
+    if value.is_empty()
+        || value.len() > MAX_CORRELATION_TAG_BYTES
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
     {
         return Err(RenderError::InvalidCorrelation);
     }

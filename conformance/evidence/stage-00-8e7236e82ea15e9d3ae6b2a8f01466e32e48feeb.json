@@ -1,0 +1,468 @@
+{
+  "schema_version": 1,
+  "manifest_id": "EVID-MANIFEST-STAGE-00-8E7236E82EA15E9D",
+  "source_commit": "8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb",
+  "source_sha256": "c1e6579f111f99e74545d84c496970889a3b76f15d42bbb3f601f665c1ca56fa",
+  "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+  "entries": [
+    {
+      "evidence_id": "EVID-ARCH-REQ-3BFE92E0E09C7C1C45E5",
+      "claim_ids": [
+        "ARCH-REQ-3BFE92E0E09C7C1C45E5"
+      ],
+      "command": "python3 scripts/run-gate.py stage-zero-implementation",
+      "tool": {
+        "name": "agenc-ircd-gate-runner",
+        "version": "e51e42ea08956282ee76dba1904e177e3b12dd9c7f923f98bec9890a3b31e71d"
+      },
+      "source_commit": "8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb",
+      "source_sha256": "c1e6579f111f99e74545d84c496970889a3b76f15d42bbb3f601f665c1ca56fa",
+      "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": [
+        "all-features"
+      ],
+      "started_at": "2026-08-27T13:50:55.291825Z",
+      "ended_at": "2026-08-27T13:51:46.193463Z",
+      "result": "passed",
+      "artifact": {
+        "label": "Stage 00 exact-source gate run",
+        "sha256": "ea23b7c74ea4978b2d34add7985b3911e21071e2db0be809e8cb655204123d6c",
+        "path": "conformance/evidence/artifacts/stage-zero-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json"
+      },
+      "limitations": []
+    },
+    {
+      "evidence_id": "EVID-ARCH-REQ-48ECE41B610BE7FF1950",
+      "claim_ids": [
+        "ARCH-REQ-48ECE41B610BE7FF1950"
+      ],
+      "command": "python3 scripts/run-gate.py stage-zero-implementation",
+      "tool": {
+        "name": "agenc-ircd-gate-runner",
+        "version": "e51e42ea08956282ee76dba1904e177e3b12dd9c7f923f98bec9890a3b31e71d"
+      },
+      "source_commit": "8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb",
+      "source_sha256": "c1e6579f111f99e74545d84c496970889a3b76f15d42bbb3f601f665c1ca56fa",
+      "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": [
+        "all-features"
+      ],
+      "started_at": "2026-08-27T13:50:55.291825Z",
+      "ended_at": "2026-08-27T13:51:46.193463Z",
+      "result": "passed",
+      "artifact": {
+        "label": "Stage 00 exact-source gate run",
+        "sha256": "ea23b7c74ea4978b2d34add7985b3911e21071e2db0be809e8cb655204123d6c",
+        "path": "conformance/evidence/artifacts/stage-zero-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json"
+      },
+      "limitations": []
+    },
+    {
+      "evidence_id": "EVID-ARCH-REQ-49AAC75AD4C65F0466B2",
+      "claim_ids": [
+        "ARCH-REQ-49AAC75AD4C65F0466B2"
+      ],
+      "command": "python3 scripts/run-gate.py stage-zero-implementation",
+      "tool": {
+        "name": "agenc-ircd-gate-runner",
+        "version": "e51e42ea08956282ee76dba1904e177e3b12dd9c7f923f98bec9890a3b31e71d"
+      },
+      "source_commit": "8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb",
+      "source_sha256": "c1e6579f111f99e74545d84c496970889a3b76f15d42bbb3f601f665c1ca56fa",
+      "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": [
+        "all-features"
+      ],
+      "started_at": "2026-08-27T13:50:55.291825Z",
+      "ended_at": "2026-08-27T13:51:46.193463Z",
+      "result": "passed",
+      "artifact": {
+        "label": "Stage 00 exact-source gate run",
+        "sha256": "ea23b7c74ea4978b2d34add7985b3911e21071e2db0be809e8cb655204123d6c",
+        "path": "conformance/evidence/artifacts/stage-zero-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json"
+      },
+      "limitations": []
+    },
+    {
+      "evidence_id": "EVID-ARCH-REQ-78FAB57061FA01E1805E",
+      "claim_ids": [
+        "ARCH-REQ-78FAB57061FA01E1805E"
+      ],
+      "command": "python3 scripts/run-gate.py stage-zero-implementation",
+      "tool": {
+        "name": "agenc-ircd-gate-runner",
+        "version": "e51e42ea08956282ee76dba1904e177e3b12dd9c7f923f98bec9890a3b31e71d"
+      },
+      "source_commit": "8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb",
+      "source_sha256": "c1e6579f111f99e74545d84c496970889a3b76f15d42bbb3f601f665c1ca56fa",
+      "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": [
+        "all-features"
+      ],
+      "started_at": "2026-08-27T13:50:55.291825Z",
+      "ended_at": "2026-08-27T13:51:46.193463Z",
+      "result": "passed",
+      "artifact": {
+        "label": "Stage 00 exact-source gate run",
+        "sha256": "ea23b7c74ea4978b2d34add7985b3911e21071e2db0be809e8cb655204123d6c",
+        "path": "conformance/evidence/artifacts/stage-zero-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json"
+      },
+      "limitations": []
+    },
+    {
+      "evidence_id": "EVID-ARCH-REQ-B45135D9F5992114B394",
+      "claim_ids": [
+        "ARCH-REQ-B45135D9F5992114B394"
+      ],
+      "command": "python3 scripts/run-gate.py stage-zero-implementation",
+      "tool": {
+        "name": "agenc-ircd-gate-runner",
+        "version": "e51e42ea08956282ee76dba1904e177e3b12dd9c7f923f98bec9890a3b31e71d"
+      },
+      "source_commit": "8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb",
+      "source_sha256": "c1e6579f111f99e74545d84c496970889a3b76f15d42bbb3f601f665c1ca56fa",
+      "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": [
+        "all-features"
+      ],
+      "started_at": "2026-08-27T13:50:55.291825Z",
+      "ended_at": "2026-08-27T13:51:46.193463Z",
+      "result": "passed",
+      "artifact": {
+        "label": "Stage 00 exact-source gate run",
+        "sha256": "ea23b7c74ea4978b2d34add7985b3911e21071e2db0be809e8cb655204123d6c",
+        "path": "conformance/evidence/artifacts/stage-zero-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json"
+      },
+      "limitations": []
+    },
+    {
+      "evidence_id": "EVID-ARCH-REQ-F3D92EF9C888E0675CB4",
+      "claim_ids": [
+        "ARCH-REQ-F3D92EF9C888E0675CB4"
+      ],
+      "command": "python3 scripts/run-gate.py stage-zero-implementation",
+      "tool": {
+        "name": "agenc-ircd-gate-runner",
+        "version": "e51e42ea08956282ee76dba1904e177e3b12dd9c7f923f98bec9890a3b31e71d"
+      },
+      "source_commit": "8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb",
+      "source_sha256": "c1e6579f111f99e74545d84c496970889a3b76f15d42bbb3f601f665c1ca56fa",
+      "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": [
+        "all-features"
+      ],
+      "started_at": "2026-08-27T13:50:55.291825Z",
+      "ended_at": "2026-08-27T13:51:46.193463Z",
+      "result": "passed",
+      "artifact": {
+        "label": "Stage 00 exact-source gate run",
+        "sha256": "ea23b7c74ea4978b2d34add7985b3911e21071e2db0be809e8cb655204123d6c",
+        "path": "conformance/evidence/artifacts/stage-zero-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json"
+      },
+      "limitations": []
+    },
+    {
+      "evidence_id": "EVID-S00-001-BASELINE",
+      "claim_ids": [
+        "S00-001"
+      ],
+      "command": "python3 scripts/run-gate.py stage-zero-implementation",
+      "tool": {
+        "name": "agenc-ircd-gate-runner",
+        "version": "e51e42ea08956282ee76dba1904e177e3b12dd9c7f923f98bec9890a3b31e71d"
+      },
+      "source_commit": "8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb",
+      "source_sha256": "c1e6579f111f99e74545d84c496970889a3b76f15d42bbb3f601f665c1ca56fa",
+      "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": [
+        "all-features"
+      ],
+      "started_at": "2026-08-27T13:50:55.291825Z",
+      "ended_at": "2026-08-27T13:51:46.193463Z",
+      "result": "passed",
+      "artifact": {
+        "label": "Stage 00 exact-source gate run",
+        "sha256": "ea23b7c74ea4978b2d34add7985b3911e21071e2db0be809e8cb655204123d6c",
+        "path": "conformance/evidence/artifacts/stage-zero-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json"
+      },
+      "limitations": []
+    },
+    {
+      "evidence_id": "EVID-S00-002-REQUIREMENTS",
+      "claim_ids": [
+        "S00-002"
+      ],
+      "command": "python3 scripts/run-gate.py stage-zero-implementation",
+      "tool": {
+        "name": "agenc-ircd-gate-runner",
+        "version": "e51e42ea08956282ee76dba1904e177e3b12dd9c7f923f98bec9890a3b31e71d"
+      },
+      "source_commit": "8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb",
+      "source_sha256": "c1e6579f111f99e74545d84c496970889a3b76f15d42bbb3f601f665c1ca56fa",
+      "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": [
+        "all-features"
+      ],
+      "started_at": "2026-08-27T13:50:55.291825Z",
+      "ended_at": "2026-08-27T13:51:46.193463Z",
+      "result": "passed",
+      "artifact": {
+        "label": "Stage 00 exact-source gate run",
+        "sha256": "ea23b7c74ea4978b2d34add7985b3911e21071e2db0be809e8cb655204123d6c",
+        "path": "conformance/evidence/artifacts/stage-zero-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json"
+      },
+      "limitations": []
+    },
+    {
+      "evidence_id": "EVID-S00-003-BUILD-CONTRACT",
+      "claim_ids": [
+        "S00-003"
+      ],
+      "command": "python3 scripts/run-gate.py stage-zero-implementation",
+      "tool": {
+        "name": "agenc-ircd-gate-runner",
+        "version": "e51e42ea08956282ee76dba1904e177e3b12dd9c7f923f98bec9890a3b31e71d"
+      },
+      "source_commit": "8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb",
+      "source_sha256": "c1e6579f111f99e74545d84c496970889a3b76f15d42bbb3f601f665c1ca56fa",
+      "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": [
+        "all-features"
+      ],
+      "started_at": "2026-08-27T13:50:55.291825Z",
+      "ended_at": "2026-08-27T13:51:46.193463Z",
+      "result": "passed",
+      "artifact": {
+        "label": "Stage 00 exact-source gate run",
+        "sha256": "ea23b7c74ea4978b2d34add7985b3911e21071e2db0be809e8cb655204123d6c",
+        "path": "conformance/evidence/artifacts/stage-zero-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json"
+      },
+      "limitations": []
+    },
+    {
+      "evidence_id": "EVID-S00-004-CRATE-GRAPH",
+      "claim_ids": [
+        "S00-004"
+      ],
+      "command": "python3 scripts/run-gate.py stage-zero-implementation",
+      "tool": {
+        "name": "agenc-ircd-gate-runner",
+        "version": "e51e42ea08956282ee76dba1904e177e3b12dd9c7f923f98bec9890a3b31e71d"
+      },
+      "source_commit": "8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb",
+      "source_sha256": "c1e6579f111f99e74545d84c496970889a3b76f15d42bbb3f601f665c1ca56fa",
+      "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": [
+        "all-features"
+      ],
+      "started_at": "2026-08-27T13:50:55.291825Z",
+      "ended_at": "2026-08-27T13:51:46.193463Z",
+      "result": "passed",
+      "artifact": {
+        "label": "Stage 00 exact-source gate run",
+        "sha256": "ea23b7c74ea4978b2d34add7985b3911e21071e2db0be809e8cb655204123d6c",
+        "path": "conformance/evidence/artifacts/stage-zero-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json"
+      },
+      "limitations": []
+    },
+    {
+      "evidence_id": "EVID-S00-005-SOURCE-POLICY",
+      "claim_ids": [
+        "S00-005"
+      ],
+      "command": "python3 scripts/run-gate.py stage-zero-implementation",
+      "tool": {
+        "name": "agenc-ircd-gate-runner",
+        "version": "e51e42ea08956282ee76dba1904e177e3b12dd9c7f923f98bec9890a3b31e71d"
+      },
+      "source_commit": "8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb",
+      "source_sha256": "c1e6579f111f99e74545d84c496970889a3b76f15d42bbb3f601f665c1ca56fa",
+      "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": [
+        "all-features"
+      ],
+      "started_at": "2026-08-27T13:50:55.291825Z",
+      "ended_at": "2026-08-27T13:51:46.193463Z",
+      "result": "passed",
+      "artifact": {
+        "label": "Stage 00 exact-source gate run",
+        "sha256": "ea23b7c74ea4978b2d34add7985b3911e21071e2db0be809e8cb655204123d6c",
+        "path": "conformance/evidence/artifacts/stage-zero-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json"
+      },
+      "limitations": []
+    },
+    {
+      "evidence_id": "EVID-S00-006-DEPENDENCIES",
+      "claim_ids": [
+        "S00-006"
+      ],
+      "command": "python3 scripts/run-gate.py stage-zero-implementation",
+      "tool": {
+        "name": "agenc-ircd-gate-runner",
+        "version": "e51e42ea08956282ee76dba1904e177e3b12dd9c7f923f98bec9890a3b31e71d"
+      },
+      "source_commit": "8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb",
+      "source_sha256": "c1e6579f111f99e74545d84c496970889a3b76f15d42bbb3f601f665c1ca56fa",
+      "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": [
+        "all-features"
+      ],
+      "started_at": "2026-08-27T13:50:55.291825Z",
+      "ended_at": "2026-08-27T13:51:46.193463Z",
+      "result": "passed",
+      "artifact": {
+        "label": "Stage 00 exact-source gate run",
+        "sha256": "ea23b7c74ea4978b2d34add7985b3911e21071e2db0be809e8cb655204123d6c",
+        "path": "conformance/evidence/artifacts/stage-zero-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json"
+      },
+      "limitations": []
+    },
+    {
+      "evidence_id": "EVID-S00-007-EVIDENCE-LAYOUT",
+      "claim_ids": [
+        "S00-007"
+      ],
+      "command": "python3 scripts/run-gate.py stage-zero-implementation",
+      "tool": {
+        "name": "agenc-ircd-gate-runner",
+        "version": "e51e42ea08956282ee76dba1904e177e3b12dd9c7f923f98bec9890a3b31e71d"
+      },
+      "source_commit": "8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb",
+      "source_sha256": "c1e6579f111f99e74545d84c496970889a3b76f15d42bbb3f601f665c1ca56fa",
+      "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": [
+        "all-features"
+      ],
+      "started_at": "2026-08-27T13:50:55.291825Z",
+      "ended_at": "2026-08-27T13:51:46.193463Z",
+      "result": "passed",
+      "artifact": {
+        "label": "Stage 00 exact-source gate run",
+        "sha256": "ea23b7c74ea4978b2d34add7985b3911e21071e2db0be809e8cb655204123d6c",
+        "path": "conformance/evidence/artifacts/stage-zero-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json"
+      },
+      "limitations": []
+    },
+    {
+      "evidence_id": "EVID-S00-008-TESTKIT-ISOLATION",
+      "claim_ids": [
+        "S00-008"
+      ],
+      "command": "python3 scripts/run-gate.py stage-zero-implementation",
+      "tool": {
+        "name": "agenc-ircd-gate-runner",
+        "version": "e51e42ea08956282ee76dba1904e177e3b12dd9c7f923f98bec9890a3b31e71d"
+      },
+      "source_commit": "8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb",
+      "source_sha256": "c1e6579f111f99e74545d84c496970889a3b76f15d42bbb3f601f665c1ca56fa",
+      "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": [
+        "all-features"
+      ],
+      "started_at": "2026-08-27T13:50:55.291825Z",
+      "ended_at": "2026-08-27T13:51:46.193463Z",
+      "result": "passed",
+      "artifact": {
+        "label": "Stage 00 exact-source gate run",
+        "sha256": "ea23b7c74ea4978b2d34add7985b3911e21071e2db0be809e8cb655204123d6c",
+        "path": "conformance/evidence/artifacts/stage-zero-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json"
+      },
+      "limitations": []
+    },
+    {
+      "evidence_id": "EVID-S00-009-CI-BASELINE",
+      "claim_ids": [
+        "S00-009"
+      ],
+      "command": "python3 scripts/run-gate.py stage-zero-implementation",
+      "tool": {
+        "name": "agenc-ircd-gate-runner",
+        "version": "e51e42ea08956282ee76dba1904e177e3b12dd9c7f923f98bec9890a3b31e71d"
+      },
+      "source_commit": "8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb",
+      "source_sha256": "c1e6579f111f99e74545d84c496970889a3b76f15d42bbb3f601f665c1ca56fa",
+      "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": [
+        "all-features"
+      ],
+      "started_at": "2026-08-27T13:50:55.291825Z",
+      "ended_at": "2026-08-27T13:51:46.193463Z",
+      "result": "passed",
+      "artifact": {
+        "label": "Stage 00 exact-source gate run",
+        "sha256": "ea23b7c74ea4978b2d34add7985b3911e21071e2db0be809e8cb655204123d6c",
+        "path": "conformance/evidence/artifacts/stage-zero-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json"
+      },
+      "limitations": []
+    },
+    {
+      "evidence_id": "EVID-S00-010-MANIFEST-SCHEMA",
+      "claim_ids": [
+        "S00-010"
+      ],
+      "command": "python3 scripts/run-gate.py stage-zero-implementation",
+      "tool": {
+        "name": "agenc-ircd-gate-runner",
+        "version": "e51e42ea08956282ee76dba1904e177e3b12dd9c7f923f98bec9890a3b31e71d"
+      },
+      "source_commit": "8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb",
+      "source_sha256": "c1e6579f111f99e74545d84c496970889a3b76f15d42bbb3f601f665c1ca56fa",
+      "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": [
+        "all-features"
+      ],
+      "started_at": "2026-08-27T13:50:55.291825Z",
+      "ended_at": "2026-08-27T13:51:46.193463Z",
+      "result": "passed",
+      "artifact": {
+        "label": "Stage 00 exact-source gate run",
+        "sha256": "ea23b7c74ea4978b2d34add7985b3911e21071e2db0be809e8cb655204123d6c",
+        "path": "conformance/evidence/artifacts/stage-zero-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json"
+      },
+      "limitations": []
+    },
+    {
+      "evidence_id": "EVID-S00-900-STAGE-GATE",
+      "claim_ids": [
+        "S00-900"
+      ],
+      "command": "python3 scripts/run-gate.py stage-zero-implementation",
+      "tool": {
+        "name": "agenc-ircd-gate-runner",
+        "version": "e51e42ea08956282ee76dba1904e177e3b12dd9c7f923f98bec9890a3b31e71d"
+      },
+      "source_commit": "8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb",
+      "source_sha256": "c1e6579f111f99e74545d84c496970889a3b76f15d42bbb3f601f665c1ca56fa",
+      "lock_sha256": "8d8ac6cf2fcfb92cabb00023ab2bca96b3080af4af1972f2f7089cb490265365",
+      "target": "x86_64-unknown-linux-gnu",
+      "features": [
+        "all-features"
+      ],
+      "started_at": "2026-08-27T13:50:55.291825Z",
+      "ended_at": "2026-08-27T13:51:46.193463Z",
+      "result": "passed",
+      "artifact": {
+        "label": "Stage 00 exact-source gate run",
+        "sha256": "ea23b7c74ea4978b2d34add7985b3911e21071e2db0be809e8cb655204123d6c",
+        "path": "conformance/evidence/artifacts/stage-zero-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json"
+      },
+      "limitations": []
+    }
+  ]
+}

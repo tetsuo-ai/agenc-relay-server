@@ -6,3 +6,116 @@ cargo_llvm_cov = "0.9.0"
 checkout_action_commit = "df4cb1c069e1874edd31b4311f1884172cec0e10"
 targets = ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]
 branch_coverage_instrumentation = "coverage-only RUSTC_BOOTSTRAP=1 on pinned rustc; forbidden for build, test, and release compilation"
+limitations = [
+    "Command output is not captured.",
+    "Bash, external shell utilities such as awk and coreutils, Python, Git, the Rustup selector and version, PATH and executable locations, Cargo and Rustup homes, ignored build caches, installed target presence, and the default native compiler, archiver, linker, and runtime-library identities remain external inputs.",
+    "Reviewed outcome-affecting environment overrides are stripped.",
+    "Cargo audit and deny advisory database revisions, freshness, and network state are not captured.",
+    "Exact-source test attestation is not a hermetic-build or broad security proof.",
+]
+
+[[tool]]
+name = "rustc"
+first_stage = 0
+argv = ["rustc", "--version"]
+version = "rustc 1.98.0 (88d9e12ae 2026-08-18)"
+
+[[tool]]
+name = "cargo"
+first_stage = 0
+argv = ["cargo", "--version"]
+version = "cargo 1.98.0 (797e8a9bc 2026-08-05)"
+
+[[tool]]
+name = "cargo-fmt"
+first_stage = 0
+argv = ["cargo", "fmt", "--version"]
+version = "rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)"
+
+[[tool]]
+name = "rustfmt"
+first_stage = 0
+argv = ["rustfmt", "--version"]
+version = "rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)"
+
+[[tool]]
+name = "cargo-clippy"
+first_stage = 0
+argv = ["cargo", "clippy", "--version"]
+version = "clippy 0.1.98 (88d9e12ae1 2026-08-18)"
+
+[[tool]]
+name = "clippy"
+first_stage = 0
+argv = ["clippy-driver", "--version"]
+version = "clippy 0.1.98 (88d9e12ae1 2026-08-18)"
+
+[[tool]]
+name = "rustdoc"
+first_stage = 0
+argv = ["rustdoc", "--version"]
+version = "rustdoc 1.98.0 (88d9e12ae 2026-08-18)"
+
+[[tool]]
+name = "cargo-deny"
+first_stage = 0
+argv = ["cargo", "deny", "--version"]
+version = "cargo-deny 0.20.2"
+
+[[tool]]
+name = "cargo-audit"
+first_stage = 0
+argv = ["cargo", "audit", "--version"]
+version = "cargo-audit-audit 0.22.2"
+
+[[tool]]
+name = "cargo-llvm-cov"
+first_stage = 0
+argv = ["cargo", "llvm-cov", "--version"]
+version = "cargo-llvm-cov 0.9.0"
+
+[[tool]]
+name = "rust-llvm-cov"
+first_stage = 0
+argv = ["python3", "scripts/check-rust-components.py", "probe", "llvm-cov"]
+version = """LLVM (http://llvm.org/):
+  LLVM version 22.1.8-rust-1.98.0-stable
+  Optimized build."""
+
+[[tool]]
+name = "rust-llvm-profdata"
+first_stage = 0
+argv = ["python3", "scripts/check-rust-components.py", "probe", "llvm-profdata"]
+version = """LLVM (http://llvm.org/):
+  LLVM version 22.1.8-rust-1.98.0-stable
+  Optimized build."""
+
+[[tool]]
+name = "nightly-rustc"
+first_stage = 2
+argv = ["rustup", "run", "nightly-2026-08-24", "rustc", "--version"]
+version = "rustc 1.100.0-nightly (fb6531d55 2026-08-23)"
+
+[[tool]]
+name = "nightly-cargo"
+first_stage = 2
+argv = ["rustup", "run", "nightly-2026-08-24", "cargo", "--version"]
+version = "cargo 1.100.0-nightly (e8cb624d5 2026-08-22)"
+
+[[tool]]
+name = "nightly-cargo-fmt"
+first_stage = 2
+argv = ["cargo", "+nightly-2026-08-24", "fmt", "--version"]
+version = "rustfmt 1.10.0-nightly (fb6531d550 2026-08-23)"
+
+[[tool]]
+name = "nightly-rustfmt"
+first_stage = 2
+argv = ["rustup", "run", "nightly-2026-08-24", "rustfmt", "--version"]
+version = "rustfmt 1.10.0-nightly (fb6531d550 2026-08-23)"
+
+[[tool]]
+name = "cargo-fuzz"
+first_stage = 2
+argv = ["cargo", "fuzz", "--version"]
+version = "cargo-fuzz 0.13.2"

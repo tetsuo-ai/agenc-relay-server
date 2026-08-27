@@ -8,6 +8,15 @@ publish.workspace = true
 [dependencies]
 agenc-ircd-crypto.workspace = true
 agenc-ircd-types.workspace = true
+argon2.workspace = true
+opaque-ke.workspace = true
+opaque-sha2.workspace = true
+subtle.workspace = true
+tls_codec.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
 
 [lints]
 workspace = true

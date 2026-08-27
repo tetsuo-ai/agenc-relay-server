@@ -42,7 +42,7 @@ impl OutputBudget for FuzzBudget {
 }
 
 fuzz_target!(|data: &[u8]| {
-    if data.len() > 16_384 {
+    if data.len() > 32_768 {
         return;
     }
 

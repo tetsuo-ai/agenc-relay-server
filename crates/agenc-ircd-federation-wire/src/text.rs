@@ -9,6 +9,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use zeroize::{Zeroize as _, Zeroizing};
 
 const FEDERATION_FRAGMENT_VERSION: &str = "v1";
+/// Exact sole tag name permitted on object-bearing federation commands.
+pub const FEDERATION_FRAGMENT_TAG_NAME: &str = "agenc.ag/fed";
 const MAX_FIXED_BASE64_TEXT_BYTES: usize = 43;
 
 /// Closed failures from base-federation text validation.
@@ -30,7 +32,7 @@ pub enum FederationTextError {
     UnknownCommandForm,
     /// A registered command did not have its exact parameter count.
     WrongArity,
-    /// A command used or omitted its fragment tag contrary to the registry.
+    /// A command's complete tag set violated its frozen form.
     WrongTagPolicy,
     /// A fragment had the wrong field count or version.
     InvalidFragment,
@@ -630,12 +632,113 @@ fn u32_constant(value: u64) -> Result<u32, FederationTextError> {
     u32::try_from(value).map_err(|_| FederationTextError::Overflow)
 }
 
+/// One borrowed message tag supplied to the federation command boundary.
+#[derive(Clone, Copy)]
+pub struct FederationCommandTag<'a> {
+    name: &'a str,
+    value: Option<&'a str>,
+}
+
+impl<'a> FederationCommandTag<'a> {
+    /// Borrows one decoded tag name and value without allocating.
+    #[must_use]
+    pub const fn new(name: &'a str, value: Option<&'a str>) -> Self {
+        Self { name, value }
+    }
+
+    /// Returns the exact case-sensitive tag name.
+    #[must_use]
+    pub const fn name(self) -> &'a str {
+        self.name
+    }
+
+    /// Returns the decoded tag value, when present.
+    #[must_use]
+    pub const fn value(self) -> Option<&'a str> {
+        self.value
+    }
+}
+
+impl fmt::Debug for FederationCommandTag<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FederationCommandTag")
+            .field("name_bytes", &self.name.len())
+            .field(
+                "is_fragment_tag",
+                &(self.name == FEDERATION_FRAGMENT_TAG_NAME),
+            )
+            .field("value_bytes", &self.value.map(str::len))
+            .finish()
+    }
+}
+
+/// Exact bounded tag set admitted on one base-federation command.
+///
+/// The set contains either no tags or one parsed `agenc.ag/fed` fragment. Any
+/// duplicate, unrelated, client-only, valueless, or malformed tag is rejected
+/// during construction.
+pub struct FederationCommandTags {
+    fragment: Option<FederationFragment>,
+}
+
+impl FederationCommandTags {
+    /// Validates a complete decoded tag set without accepting unbounded input.
+    pub fn parse(tags: &[FederationCommandTag<'_>]) -> Result<Self, FederationTextError> {
+        let [tag] = tags else {
+            return if tags.is_empty() {
+                Ok(Self { fragment: None })
+            } else {
+                Err(FederationTextError::WrongTagPolicy)
+            };
+        };
+        if tag.name != FEDERATION_FRAGMENT_TAG_NAME {
+            return Err(FederationTextError::WrongTagPolicy);
+        }
+        let value = tag
+            .value
+            .filter(|value| !value.is_empty())
+            .ok_or(FederationTextError::WrongTagPolicy)?;
+        if value.len() > maximum_fragment_tag_value_bytes()? {
+            return Err(FederationTextError::TooLong);
+        }
+        Ok(Self {
+            fragment: Some(FederationFragment::parse(value)?),
+        })
+    }
+
+    /// Constructs the sole valid tag set for an untagged command.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self { fragment: None }
+    }
+
+    /// Borrows the validated fragment when this is the sole tagged form.
+    #[must_use]
+    pub const fn fragment(&self) -> Option<&FederationFragment> {
+        self.fragment.as_ref()
+    }
+}
+
+fn maximum_fragment_tag_value_bytes() -> Result<usize, FederationTextError> {
+    let fragment_bytes = usize_constant(BASE_FRAGMENT_BYTES)?;
+    let encoded_fragment_bytes = encoded_base64_length(fragment_bytes)?;
+    let decimal_bytes = decimal_digits_u32(u32::MAX)
+        .checked_mul(3)
+        .ok_or(FederationTextError::Overflow)?;
+    7_usize
+        .checked_add(MAX_FIXED_BASE64_TEXT_BYTES)
+        .and_then(|length| length.checked_add(decimal_bytes))
+        .and_then(|length| length.checked_add(encoded_fragment_bytes))
+        .ok_or(FederationTextError::Overflow)
+}
+
 /// Whether one command form requires the sole federation fragment tag.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FragmentTagPolicy {
     /// The command must have exactly one `agenc.ag/fed` tag.
     Required,
-    /// The command must not have an `agenc.ag/fed` tag.
+    /// The command must have no tags.
     Forbidden,
 }
 
@@ -656,11 +759,11 @@ pub struct FederationCommandDescriptor {
 
 include!("generated_text_registry.rs");
 
-/// Validates exact case, subcommand, arity, and fragment-tag presence.
+/// Validates exact case, subcommand, arity, and the complete tag set.
 pub fn validate_federation_command(
     command: &str,
     parameters: &[&str],
-    has_fragment_tag: bool,
+    tags: &FederationCommandTags,
 ) -> Result<&'static FederationCommandDescriptor, FederationTextError> {
     validate_command_token(command)?;
     let descriptor = select_command_form(command, parameters)?;
@@ -672,7 +775,7 @@ pub fn validate_federation_command(
     if parameters.len() != expected {
         return Err(FederationTextError::WrongArity);
     }
-    validate_tag_policy(descriptor.fragment_tag, has_fragment_tag)?;
+    validate_tag_policy(descriptor.fragment_tag, tags)?;
     Ok(descriptor)
 }
 
@@ -707,11 +810,11 @@ fn select_command_form(
 
 fn validate_tag_policy(
     policy: FragmentTagPolicy,
-    has_fragment_tag: bool,
+    tags: &FederationCommandTags,
 ) -> Result<(), FederationTextError> {
     if matches!(
-        (policy, has_fragment_tag),
-        (FragmentTagPolicy::Required, true) | (FragmentTagPolicy::Forbidden, false)
+        (policy, tags.fragment.is_some()),
+        (FragmentTagPolicy::Required, true) | (FragmentTagPolicy::Forbidden, false),
     ) {
         return Ok(());
     }

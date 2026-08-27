@@ -1,6 +1,45 @@
 #![forbid(unsafe_code)]
 
-//! Adapters for reviewed cryptographic libraries.
+//! Bounded adapters for the cryptographic suites fixed by the protocol.
 //!
-//! This crate remains an ownership boundary until Stage 04. It never
-//! implements cryptographic primitives locally.
+//! This crate owns algorithm selection, domain separation, secret lifetimes,
+//! and the blocking-worker boundary. It does not implement cryptographic
+//! primitives.
+
+mod account_hpke;
+mod entropy;
+mod error;
+mod hash;
+mod secret;
+mod signature;
+mod storage;
+mod worker;
+
+pub use account_hpke::{
+    ACCOUNT_HPKE_ENCAPSULATED_KEY_BYTES, ACCOUNT_HPKE_REQUEST_CIPHERTEXT_BYTES,
+    ACCOUNT_HPKE_REQUEST_PLAINTEXT_BYTES, ACCOUNT_HPKE_RESPONSE_CIPHERTEXT_BYTES,
+    ACCOUNT_HPKE_RESPONSE_PLAINTEXT_BYTES, AccountHpkeKeyId, AccountHpkePrivateKey,
+    AccountHpkePublicKey, AccountRequestBinding, AccountResponseOpenToken,
+    AccountResponseSealToken, OpenedAccountRequest, OpenedAccountResponse, SealedAccountRequest,
+    SealedAccountResponse, open_account_request, seal_account_request,
+};
+pub use entropy::OsEntropy;
+pub use error::{CryptoError, CryptoWorkerError};
+pub use hash::{
+    Digest32, LoginIndexDigest, LoginIndexKey, OpaqueFakeCredentialKey, SemanticHashDomain,
+    derive_fake_credential_id, derive_login_index, semantic_digest,
+};
+pub use signature::{
+    Ed25519PublicKey, Ed25519SecretKey, Ed25519Signature, SignatureDomain, sign_canonical,
+    verify_canonical,
+};
+pub use storage::{
+    DATABASE_BINDING_BYTES, DatabaseBinding, MAX_STORAGE_CIPHERTEXT_BYTES, MAX_STORAGE_KEY_BYTES,
+    MAX_STORAGE_PLAINTEXT_BYTES, OpenedStoragePlaintext, SealedStorageRecord, StorageIndex,
+    StorageMasterKey, StorageNonce, StorageRecordKey, StorageTable, derive_storage_index,
+    derive_storage_record_key, open_storage_record, seal_storage_record,
+};
+pub use worker::{
+    BoundedCryptoPool, CRYPTO_QUEUE_SLOTS_PER_WORKER, CRYPTO_WORKER_RESERVED_BYTES, CryptoJob,
+    CryptoPort, CryptoSubmissionError, CryptoWorkerConfig, JobClass, JobHandle,
+};

@@ -1,16 +1,24 @@
 # Stage 01 Evidence
 
-Status: historical pass on 2026-08-24 for commit
-`7ae6439b472521d3c23fb99261deaf8964a70c5a`. This report does not provide
-evidence for the current uncommitted tree.
+Status: implementation complete; checkpoint closed for exact source commit
+`1e5b738468f88b238061cc6e84b732176f5cae65`. The current schema version 2
+[manifest](evidence/stage-01-1e5b738468f88b238061cc6e84b732176f5cae65.json)
+binds 14 passed records to one clean Stage 01 gate run and its checked-in
+[artifact](evidence/artifacts/stage-one-implementation-1e5b738468f88b238061cc6e84b732176f5cae65.json).
+The [schema version 1
+manifest](evidence/stage-01-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json)
+for commit `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` remains archive-only.
+The 2026-08-24 pass for commit
+`7ae6439b472521d3c23fb99261deaf8964a70c5a` remains historical evidence.
 
 ## Verification summary
 
-`bash scripts/check-stage-one.sh` passes under Rust 1.98.0 for both declared
-Linux targets. The inherited Stage 00 gate and Stage 01 checks cover frozen
+`bash scripts/check-stage-one.sh` passed under Rust 1.98.0 for both declared
+Linux targets. The recorded Stage 00 and Stage 01 checks covered frozen
 sources, generated artifacts, formatting, compilation, Clippy, all tests,
 documentation tests, dependency policy, advisories, and branch coverage.
-Measured workspace coverage is 91.56% branches and 95.37% lines.
+Measured workspace coverage is 90.01% branches and 95.59% lines. All five
+critical regions reached 100%.
 
 The independent artifact checker accounts for 53 closed registry constants,
 all 128 Appendix B schemas, and one reviewed golden vector per schema. This
@@ -26,7 +34,7 @@ missing, duplicate, reordered, renumbered, and stale entries.
 
 ## S01-002
 
-`EVID-S01-002-QUANTITIES`: eleven private-field quantity families retain units and
+`EVID-S01-002-QUANTITIES`: ten private-field quantity families retain units and
 inclusive bounds. Tests exercise minimum, one, maximum, maximum-plus-one,
 overflow, and underflow behavior.
 
@@ -108,7 +116,11 @@ mutations.
 
 ## S01-900
 
-`EVID-S01-900-STAGE-GATE`: the complete Stage 01 gate passes with the pinned
+`EVID-S01-900-STAGE-GATE`: the recorded Stage 01 run passed with the pinned
 lockfile and tools on both targets. Generated-source freshness, six artifact
 checker mutations, all workspace tests, Clippy with warnings denied,
-`cargo-deny`, `cargo-audit`, and the greater-than-90% branch threshold pass.
+`cargo-deny`, `cargo-audit`, and the greater-than-90% branch threshold passed.
+The current schema version 2 manifest records the required gate on exact source
+commit `1e5b738468f88b238061cc6e84b732176f5cae65` with a verified artifact path
+and closes `S01-900`. The schema version 1 record for commit
+`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` is retained as archive evidence.

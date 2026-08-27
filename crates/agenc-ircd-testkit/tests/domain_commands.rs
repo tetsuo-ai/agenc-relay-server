@@ -4,7 +4,7 @@
 
 use std::error::Error;
 
-use agenc_ircd_client_wire::POST_REGISTRATION_COMMANDS;
+use agenc_ircd_client_wire::{FramedLine, POST_REGISTRATION_COMMANDS, parse_message};
 use agenc_ircd_domain::{
     AccountCommand, AdmissionSnapshot, CanonicalCommand, ChannelNameValue, ChannelTarget,
     CommandEnvelope, DirectMessagePolicy, DomainCommandKind, DomainError, ExternalInputRequest,
@@ -15,10 +15,42 @@ use agenc_ircd_testkit::{
     ALL_REFERENCE_COMMAND_KINDS, ReferenceCommandKind, apply_command, bytes, create_account,
     message_admission, open_session, plan, registered_admission,
 };
-use agenc_ircd_types::{ControlPolicy, MessageId, UtcSecond};
+use agenc_ircd_types::{MessageId, UtcSecond};
 
 fn message_body(text: &str) -> Result<MessageText, Box<dyn Error>> {
-    Ok(MessageText::try_from_str(text, ControlPolicy::RejectAll)?)
+    Ok(MessageText::parse(text)?)
+}
+
+#[test]
+fn client_wire_and_domain_agree_on_ctcp_message_semantics() -> Result<(), Box<dyn Error>> {
+    let target = MessageTarget::User(agenc_ircd_domain::NicknameValue::parse("recipient")?);
+    let action = parse_message(FramedLine::new(
+        "PRIVMSG recipient :\u{1}ACTION waves\u{1}",
+    )?)?
+    .ok_or("ACTION message was ignored")?;
+    let action_body = action.trailing().ok_or("ACTION body is missing")?;
+    let accepted = MessageCommand::new(
+        MessageKind::Privmsg,
+        vec![target.clone()],
+        Some(MessageText::parse(action_body)?),
+    )?;
+    assert_eq!(accepted.body(), Some("\u{1}ACTION waves\u{1}"));
+
+    let dcc = parse_message(FramedLine::new(
+        "PRIVMSG recipient :\u{1}DCC SEND secret 127.0.0.1 1\u{1}",
+    )?)?
+    .ok_or("DCC message was ignored")?;
+    let dcc_body = dcc.trailing().ok_or("DCC body is missing")?;
+    assert_eq!(
+        MessageCommand::new(
+            MessageKind::Privmsg,
+            vec![target],
+            Some(MessageText::parse(dcc_body)?),
+        )
+        .err(),
+        Some(DomainError::UnsafeCtcp)
+    );
+    Ok(())
 }
 
 #[test]
@@ -205,10 +237,7 @@ fn external_requests_are_stable_failure_aware_and_bound_before_ids() -> Result<(
                 MessageTarget::User(agenc_ircd_domain::NicknameValue::parse("ExternalOne")?),
                 MessageTarget::User(agenc_ircd_domain::NicknameValue::parse("ExternalTwo")?),
             ],
-            Some(MessageText::try_from_str(
-                "two targets",
-                ControlPolicy::RejectAll,
-            )?),
+            Some(MessageText::parse("two targets")?),
         )?))
     };
 

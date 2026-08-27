@@ -21,25 +21,27 @@ EXPECTED_TESTS = {
     "domain_stage_three_matrix.rs",
 }
 EXPECTED_TASKS = tuple(f"S03-{number:03d}" for number in range(1, 13)) + ("S03-900",)
-REQUIRED_REJECTIONS = {
-    "duplicate-nickname": "Duplicate",
-    "stale-channel-instance": "Stale",
-    "role-escalation": "Forbidden",
-    "stale-session-generation": "Stale",
-    "federation-duplicate": "Stale",
-    "federation-gap": "Gap",
-    "stale-account-deletion": "Stale",
-}
-SCENARIO_FAMILIES = (
-    "membership-role-mode",
-    "nickname-reuse-recreation",
-    "invite-account-switch",
-    "account-deletion-federation",
+IMPLEMENTATION_TASKS = EXPECTED_TASKS[:-1]
+SCHEMA_VERSION = 2
+GENERATOR_VERSION = 2
+SEED_COUNT = 256
+MAX_STEPS = 64
+SEED_BASE = 0xA63C_0300_0000_0001
+SEED_STRIDE = 0x9E37_79B9_7F4A_7C15
+REGRESSIONS = (
+    ("invite-metadata-parity", 0, 16, 0x28E9_87FA_8CC9_23A5),
+    ("account-delete-multi-session", 0, 26, 0x1F32_FDCF_E748_A2EC),
 )
-VISIBILITIES = ("listed", "unlisted", "secret")
-EXPECTED_SCENARIOS = tuple(
-    (case, VISIBILITIES[case % len(VISIBILITIES)], SCENARIO_FAMILIES[case // 3])
-    for case in range(12)
+REQUIRED_MODEL_TEST_MARKERS = (
+    "seeded_valid_and_invalid_sequences_match_complete_snapshots",
+    "reference.validate_invariants()",
+    "ReferenceDomainStep::ApplyModeVector",
+    "ReferenceModeOperation::Remove",
+    "creation_revision: invite.creation_revision",
+    "expires_at: invite.expires_at",
+    "minimal_failing_prefix",
+    "promotion_record=REGRESSION|",
+    "if after.production != after.reference",
 )
 FORBIDDEN_DOMAIN_MARKERS = (
     "std::net",
@@ -135,74 +137,113 @@ def validate_command_coverage(root: Path) -> None:
         raise StageThreeError("reference model calls or embeds production domain transitions")
 
 
+def seed_at(index: int) -> int:
+    """Return one wrapped 64-bit seed from the reviewed arithmetic range."""
+    return (SEED_BASE + SEED_STRIDE * index) & ((1 << 64) - 1)
+
+
+def expected_regressions() -> tuple[tuple[str, int, int, int], ...]:
+    """Return the exact retained replay-prefix records."""
+    return tuple(
+        (name, seed_at(index), steps, fingerprint)
+        for name, index, steps, fingerprint in REGRESSIONS
+    )
+
+
 def validate_generated_summary(document: dict[str, object]) -> None:
-    """Validate task bindings and the finite generated-case dimensions."""
-    if document.get("schema_version") != 1:
+    """Validate task bindings and executable sequence-test bounds."""
+    if document.get("schema_version") != SCHEMA_VERSION:
         raise StageThreeError("Stage-03 generated schema version is invalid")
-    if document.get("generated_cases") != 12 or document.get("rejection_cases") != 7:
-        raise StageThreeError("Stage-03 generated case counts are stale")
+    expected_scalars = {
+        "generator_version": GENERATOR_VERSION,
+        "seed_count": SEED_COUNT,
+        "max_steps": MAX_STEPS,
+        "minimum_step_checks": SEED_COUNT * MAX_STEPS,
+        "snapshot_cadence": "after-every-step",
+        "rejection_atomicity": "both-models",
+        "failure_shrink": "minimal-failing-prefix",
+        "regression_count": len(REGRESSIONS),
+        "seed_base": SEED_BASE,
+        "seed_stride": SEED_STRIDE,
+    }
+    if any(document.get(name) != value for name, value in expected_scalars.items()):
+        raise StageThreeError("Stage-03 generated model-test bounds are stale")
     tasks = document.get("task")
     if not isinstance(tasks, list):
         raise StageThreeError("Stage-03 generated task list is absent")
     task_ids = tuple(record.get("id") for record in tasks if isinstance(record, dict))
     if task_ids != EXPECTED_TASKS:
         raise StageThreeError("Stage-03 generated task order or coverage is stale")
-    scenarios = document.get("scenario")
-    if not isinstance(scenarios, list):
-        raise StageThreeError("Stage-03 generated scenario list is absent")
-    actual_scenarios = tuple(
+    regressions = document.get("regression")
+    if not isinstance(regressions, list):
+        raise StageThreeError("Stage-03 retained regression list is absent")
+    actual = tuple(
         (
-            record.get("case"),
-            record.get("visibility"),
             record.get("name"),
+            record.get("seed"),
+            record.get("steps"),
+            record.get("fingerprint"),
         )
-        for record in scenarios
+        for record in regressions
         if isinstance(record, dict)
     )
-    expected_scenarios = tuple(
-        (case, visibility, f"{visibility}-{family}")
-        for case, visibility, family in EXPECTED_SCENARIOS
-    )
-    if actual_scenarios != expected_scenarios:
-        raise StageThreeError("Stage-03 generated scenarios are stale")
-    rejections = document.get("rejection")
-    if not isinstance(rejections, list):
-        raise StageThreeError("Stage-03 generated rejection list is absent")
-    actual = {
-        str(record.get("name")): str(record.get("error"))
-        for record in rejections
-        if isinstance(record, dict) and record.get("unchanged") is True
-    }
-    if actual != REQUIRED_REJECTIONS:
-        raise StageThreeError("Stage-03 rejection matrix is incomplete")
+    if actual != expected_regressions():
+        raise StageThreeError("Stage-03 retained regression prefixes are stale")
 
 
 def validate_sequence_fixture(path: Path) -> None:
-    """Validate canonical records and complete visibility/rejection coverage."""
-    cases: list[tuple[int, str, str]] = []
-    rejections: dict[str, str] = {}
+    """Validate the seed range, execution bounds, and replay prefixes."""
+    config: dict[str, str] = {}
+    seed_range: tuple[int, int, int] | None = None
+    regressions: list[tuple[str, int, int, int]] = []
     for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if not line or line.startswith("#"):
             continue
         fields = line.split("|")
-        if len(fields) != 4:
-            raise StageThreeError(f"generated sequence line {line_number} is malformed")
-        kind, identity, outcome, scenario = fields
-        if kind == "CASE":
+        if fields[:1] == ["CONFIG"] and len(fields) == 3:
+            _, name, value = fields
+            if name in config:
+                raise StageThreeError("generated sequence config key is duplicated")
+            config[name] = value
+        elif fields[:1] == ["SEED-RANGE"] and len(fields) == 4:
+            if seed_range is not None:
+                raise StageThreeError("generated sequence has multiple seed ranges")
             try:
-                cases.append((int(identity), outcome, scenario))
+                seed_range = (int(fields[1], 0), int(fields[2], 0), int(fields[3]))
             except ValueError as error:
-                raise StageThreeError("generated case identity is not decimal") from error
-        elif kind == "REJECT" and scenario == "state-unchanged":
-            rejections[identity] = outcome
+                raise StageThreeError("generated seed range is malformed") from error
+        elif fields[:1] == ["REGRESSION"] and len(fields) == 5:
+            try:
+                regressions.append(
+                    (fields[1], int(fields[2], 0), int(fields[3]), int(fields[4], 0))
+                )
+            except ValueError as error:
+                raise StageThreeError("generated regression prefix is malformed") from error
         else:
             raise StageThreeError(f"generated sequence line {line_number} has unknown shape")
-    expected_cases = [
-        (case, visibility, f"{visibility}-{family}")
-        for case, visibility, family in EXPECTED_SCENARIOS
-    ]
-    if cases != expected_cases or rejections != REQUIRED_REJECTIONS:
-        raise StageThreeError("generated sequence coverage is stale")
+    expected_config = {
+        "schema-version": str(SCHEMA_VERSION),
+        "generator-version": str(GENERATOR_VERSION),
+        "seed-count": str(SEED_COUNT),
+        "max-steps": str(MAX_STEPS),
+        "snapshot-cadence": "after-every-step",
+    }
+    if config != expected_config:
+        raise StageThreeError("generated sequence execution config is stale")
+    if seed_range != (SEED_BASE, SEED_STRIDE, SEED_COUNT):
+        raise StageThreeError("generated sequence seed range is stale")
+    if tuple(regressions) != expected_regressions():
+        raise StageThreeError("generated sequence regression prefixes are stale")
+
+
+def validate_model_test_source(root: Path) -> None:
+    """Require the Rust test to execute both models at every generated step."""
+    source = (
+        root / "crates/agenc-ircd-testkit/tests/domain_reference_model.rs"
+    ).read_text(encoding="utf-8")
+    missing = [marker for marker in REQUIRED_MODEL_TEST_MARKERS if marker not in source]
+    if missing:
+        raise StageThreeError("Stage-03 executable model-test proof is incomplete")
 
 
 def check_generator(root: Path) -> None:
@@ -219,9 +260,9 @@ def check_generator(root: Path) -> None:
 
 
 def validate_roadmap(root: Path) -> None:
-    """Require every Stage-03 task to be checked only with complete gate evidence."""
+    """Require each Stage-03 implementation task to be checked."""
     source = (root / "TODO.md").read_text(encoding="utf-8")
-    for task in EXPECTED_TASKS:
+    for task in IMPLEMENTATION_TASKS:
         if re.search(rf"^- \[x\] `{task}`", source, flags=re.MULTILINE) is None:
             raise StageThreeError(f"roadmap task is not complete: {task}")
 
@@ -232,6 +273,7 @@ def validate(root: Path) -> None:
     validate_command_coverage(root)
     validate_generated_summary(load_toml(root / "conformance/generated-stage-three.toml"))
     validate_sequence_fixture(root / "test-data/property/domain-stage-three-v1.steps")
+    validate_model_test_source(root)
     validate_roadmap(root)
     check_generator(root)
 
@@ -240,23 +282,37 @@ def self_test(root: Path) -> int:
     """Prove malformed generated metadata is rejected without filesystem mutation."""
     valid = load_toml(root / "conformance/generated-stage-three.toml")
     malformed = copy.deepcopy(valid)
-    malformed["generated_cases"] = 11
+    malformed["seed_count"] = SEED_COUNT - 1
     try:
         validate_generated_summary(malformed)
     except StageThreeError:
         pass
     else:
-        raise StageThreeError("self-test accepted a stale generated case count")
+        raise StageThreeError("self-test accepted a stale seed count")
     malformed = copy.deepcopy(valid)
-    tasks = malformed.get("task")
-    if not isinstance(tasks, list) or not tasks:
-        raise StageThreeError("self-test fixture has no tasks")
-    tasks.pop()
+    regressions = malformed.get("regression")
+    if not isinstance(regressions, list) or not regressions:
+        raise StageThreeError("self-test fixture has no regression prefixes")
+    regressions.pop()
     try:
         validate_generated_summary(malformed)
     except StageThreeError:
-        return 2
-    raise StageThreeError("self-test accepted an incomplete task vector")
+        pass
+    else:
+        raise StageThreeError("self-test accepted an incomplete regression vector")
+    malformed = copy.deepcopy(valid)
+    regressions = malformed.get("regression")
+    if not isinstance(regressions, list) or not regressions:
+        raise StageThreeError("self-test fixture has no regression fingerprints")
+    fingerprint = regressions[0].get("fingerprint")
+    if not isinstance(fingerprint, int):
+        raise StageThreeError("self-test fixture has no numeric regression fingerprint")
+    regressions[0]["fingerprint"] = fingerprint ^ 1
+    try:
+        validate_generated_summary(malformed)
+    except StageThreeError:
+        return 3
+    raise StageThreeError("self-test accepted a stale regression fingerprint")
 
 
 def fail(message: str) -> NoReturn:

@@ -248,7 +248,7 @@ fn capability_requests_are_case_sensitive_atomic_and_dependency_checked()
     assert!(state.enabled("cap-notify"));
     assert!(matches!(
         state.request("batch", &advertised)?,
-        CapRequestReply::Nak(_)
+        CapRequestReply::Ack(_)
     ));
     assert_eq!(
         state.request("message-tags batch labeled-response", &advertised)?,

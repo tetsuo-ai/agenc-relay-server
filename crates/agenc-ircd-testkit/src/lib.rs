@@ -26,14 +26,16 @@ pub use client_transcript::{
 
 pub use domain_fixture::{
     DomainTestIdentity, account_id, apply_command, apply_plan, authorize, bytes, channel_id,
-    create_account, generation, message_admission, open_session, plan, registered_admission,
-    revision,
+    create_account, deterministic_cloak, generation, message_admission, open_session, plan,
+    registered_admission, revision,
 };
 
 pub use domain_reference::{
     ALL_REFERENCE_COMMAND_KINDS, ReferenceChannelSnapshot, ReferenceCommand, ReferenceCommandKind,
     ReferenceDomainError, ReferenceDomainModel, ReferenceDomainSnapshot, ReferenceDomainStep,
-    ReferenceMessageTarget, ReferenceRole, ReferenceSessionSnapshot, ReferenceVisibility,
+    ReferenceInviteSnapshot, ReferenceMessageTarget, ReferenceModeChange, ReferenceModeOperation,
+    ReferencePrincipal, ReferenceRole, ReferenceSessionSnapshot, ReferenceVisibility,
+    ReferenceVisibilityMode,
 };
 
 pub use reference_codec::{

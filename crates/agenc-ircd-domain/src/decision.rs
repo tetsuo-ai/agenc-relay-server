@@ -4,13 +4,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use agenc_ircd_types::{
     AccountDeletionToken, AccountId, ChannelInstanceId, EntryId, InviteId, MaskSubject, MessageId,
-    MonotonicTick, Revision, TypedMask, UserId, UtcSecond,
+    MonotonicTick, Revision, SessionId, TypedMask, UserId, UtcSecond,
 };
 
 use crate::command::{CanonicalCommandData, MaskList, MessageTarget};
 use crate::model::{
-    Invite, MAX_CHANNELS_PER_SESSION, MAX_CONTACTS_PER_ACCOUNT, MAX_INVITES_PER_CHANNEL,
-    MAX_INVITES_PER_PRINCIPAL,
+    AccountDeletionChallengeState, Invite, MAX_CHANNELS_PER_SESSION, MAX_CONTACTS_PER_ACCOUNT,
+    MAX_INVITES_PER_CHANNEL, MAX_INVITES_PER_PRINCIPAL, MAX_MEMBERS_PER_CHANNEL,
 };
 use crate::{
     AccountCommand, AccountState, CanonicalCommand, ChannelCommand, ChannelNameValue,
@@ -18,8 +18,11 @@ use crate::{
     DomainError, DomainState, GuestDirectMessagePolicy, HistoryPolicy, Membership, MessageKind,
     ModeChange, ModeCommand, ModeOperation, ModerationAction, ModerationReasonCode, NicknameValue,
     PersistencePolicy, PlaintextTopic, PresenceCommand, PresencePolicy, Principal, Role, Sanction,
-    SessionSeed, SessionState, TopicText, Visibility,
+    SessionSeed, SessionState, TagmsgClassification, TopicText, Visibility, VisibilityMode,
 };
+
+/// Maximum number of expired invitations removed by one timer plan.
+pub const MAX_INVITE_EXPIRATIONS_PER_PLAN: usize = 256;
 
 /// One hierarchical admission bucket selected without peer-controlled text.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -84,12 +87,22 @@ impl AdmissionSnapshot {
         Ok(Self { available })
     }
 
-    fn admits(&self, charges: &[RateCharge]) -> bool {
-        charges.iter().all(|charge| {
-            self.available
+    fn admits(&self, charges: &[RateCharge]) -> Result<bool, DomainError> {
+        let mut required = BTreeMap::new();
+        for charge in charges {
+            let total = required
                 .get(&charge.bucket)
-                .is_some_and(|available| *available >= charge.tokens)
-        })
+                .copied()
+                .unwrap_or(0_u64)
+                .checked_add(charge.tokens)
+                .ok_or(DomainError::Overflow)?;
+            required.insert(charge.bucket, total);
+        }
+        Ok(required.into_iter().all(|(bucket, tokens)| {
+            self.available
+                .get(&bucket)
+                .is_some_and(|available| *available >= tokens)
+        }))
     }
 }
 
@@ -147,6 +160,80 @@ pub struct SanctionRequest {
     pub created_at: UtcSecond,
     /// Optional explicit expiry second.
     pub expires_at: Option<UtcSecond>,
+}
+
+/// Companion-approved roster proof for the one-way plaintext-to-E2EE transition.
+pub struct E2eeBindingProof {
+    channel_id: ChannelInstanceId,
+    channel_revision: Revision,
+    approved_roster: Vec<(UserId, AccountId)>,
+}
+
+impl E2eeBindingProof {
+    /// Creates a bounded, canonical proof from a companion-approved roster.
+    pub fn new(
+        channel_id: ChannelInstanceId,
+        channel_revision: Revision,
+        mut approved_roster: Vec<(UserId, AccountId)>,
+    ) -> Result<Self, DomainError> {
+        if approved_roster.is_empty() || approved_roster.len() > MAX_MEMBERS_PER_CHANNEL {
+            return Err(DomainError::LimitExceeded);
+        }
+        approved_roster.sort_unstable_by_key(|(user_id, _)| *user_id);
+        if approved_roster
+            .windows(2)
+            .any(|pair| matches!(pair, [left, right] if left.0 == right.0))
+        {
+            return Err(DomainError::InvalidArgument);
+        }
+        Ok(Self {
+            channel_id,
+            channel_revision,
+            approved_roster,
+        })
+    }
+
+    /// Returns the immutable channel instance approved by the companion.
+    #[must_use]
+    pub const fn channel_id(&self) -> ChannelInstanceId {
+        self.channel_id
+    }
+
+    /// Returns the exact channel revision approved by the companion.
+    #[must_use]
+    pub const fn channel_revision(&self) -> Revision {
+        self.channel_revision
+    }
+
+    /// Borrows the canonical user-to-account roster approved by every member.
+    #[must_use]
+    pub fn approved_roster(&self) -> &[(UserId, AccountId)] {
+        &self.approved_roster
+    }
+}
+
+/// Companion finality proof for one pending E2EE membership removal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct E2eeRemovalFinality {
+    channel_id: ChannelInstanceId,
+    user_id: UserId,
+    channel_revision: Revision,
+}
+
+impl E2eeRemovalFinality {
+    /// Records the pending removal and exact channel revision finalized by the companion.
+    #[must_use]
+    pub const fn new(
+        channel_id: ChannelInstanceId,
+        user_id: UserId,
+        channel_revision: Revision,
+    ) -> Self {
+        Self {
+            channel_id,
+            user_id,
+            channel_revision,
+        }
+    }
 }
 
 impl AuthorizedCommand {
@@ -335,6 +422,7 @@ pub struct MessageBatch {
     kind: MessageKind,
     sender: UserId,
     body: Option<crate::MessageText>,
+    tagmsg_classification: Option<TagmsgClassification>,
     accepted_at: UtcSecond,
     routes: Vec<MessageRoute>,
 }
@@ -356,6 +444,12 @@ impl MessageBatch {
     #[must_use]
     pub fn body(&self) -> Option<&str> {
         self.body.as_ref().map(crate::MessageText::as_str)
+    }
+
+    /// Returns the validated semantic classification of a tag-only message.
+    #[must_use]
+    pub const fn tagmsg_classification(&self) -> Option<TagmsgClassification> {
+        self.tagmsg_classification
     }
 
     /// Returns the explicitly supplied authoritative acceptance second.
@@ -482,10 +576,18 @@ pub enum DomainEvent {
     SessionAuthorityChanged(UserId),
     /// One immutable account and its live sessions left domain state.
     AccountDeleted(AccountId),
+    /// One process-local account-deletion confirmation challenge was installed.
+    AccountDeletionChallengeStarted(UserId),
+    /// One account-deletion confirmation was rejected and its challenge consumed.
+    AccountDeletionConfirmationRejected(UserId),
+    /// One account advanced its credential generation and fenced every old session.
+    AccountCredentialReplaced(AccountId),
     /// One session and all live memberships were removed.
     SessionHidden(UserId),
     /// One nickname mapping changed without changing User ID.
     NicknameChanged(UserId),
+    /// One prepared per-session display name changed without changing routing identity.
+    DisplayNameChanged(UserId),
     /// One per-session away value changed.
     AwayChanged(UserId),
     /// One channel instance was created.
@@ -506,6 +608,8 @@ pub enum DomainEvent {
     MessageAccepted(MessageId, UserId),
     /// One single-use invitation was created.
     InviteCreated(ChannelInstanceId, InviteId),
+    /// One expired invitation was removed by bounded timer maintenance.
+    InviteExpired(ChannelInstanceId, InviteId),
     /// One authenticated account setting changed.
     AccountUpdated(AccountId),
     /// One owner-controlled channel setting changed.
@@ -530,6 +634,11 @@ enum Mutation {
         account_id: AccountId,
         user_ids: Vec<UserId>,
     },
+    ReplaceAccountCredential {
+        account_id: AccountId,
+        account_session_generation: agenc_ircd_types::Generation,
+        user_ids: Vec<UserId>,
+    },
     Rename {
         user_id: UserId,
         nickname: NicknameValue,
@@ -550,6 +659,12 @@ enum Mutation {
         user_id: UserId,
         display_name: DisplayNameValue,
     },
+    SetFreshAuthDeadline {
+        user_id: UserId,
+        deadline: MonotonicTick,
+    },
+    StartAccountDeletion(AccountDeletionChallengeState),
+    ConsumeAccountDeletionChallenge(SessionId),
     JoinNew(crate::ChannelState),
     JoinExisting {
         channel_id: ChannelInstanceId,
@@ -576,6 +691,9 @@ enum Mutation {
         setting: AccountSetting,
     },
     ChannelSetting(ChannelCommand),
+    BindE2ee {
+        channel_id: ChannelInstanceId,
+    },
     CreateInvite {
         channel_id: ChannelInstanceId,
         invite: Invite,
@@ -585,6 +703,11 @@ enum Mutation {
         channel_id: ChannelInstanceId,
         user_id: UserId,
     },
+    FinalizeE2eeRemoval {
+        channel_id: ChannelInstanceId,
+        user_id: UserId,
+    },
+    ExpireInvites(Vec<(ChannelInstanceId, InviteId)>),
     AddSanction(Sanction),
     EventOnly,
 }
@@ -598,6 +721,12 @@ struct JoinPlanAccumulator {
     new_channel_ids: BTreeSet<ChannelInstanceId>,
     accepted_joins: usize,
     mutations: Vec<Mutation>,
+    events: Vec<DomainEvent>,
+    recipients: RecipientSet,
+}
+
+struct ExpiredInviteSweep {
+    expired: Vec<(ChannelInstanceId, InviteId)>,
     events: Vec<DomainEvent>,
     recipients: RecipientSet,
 }
@@ -673,6 +802,26 @@ impl MutationPlan {
     #[must_use]
     pub const fn storage_class(&self) -> StorageClass {
         self.storage
+    }
+
+    /// Borrows a new deletion token only for the private challenge reply boundary.
+    #[must_use]
+    pub fn account_deletion_token(&self) -> Option<&[u8; 16]> {
+        self.mutations.iter().find_map(|mutation| match mutation {
+            Mutation::StartAccountDeletion(challenge) => {
+                Some(challenge.token.expose_for_deletion())
+            }
+            _ => None,
+        })
+    }
+
+    /// Returns the original exclusive deadline for a new deletion challenge.
+    #[must_use]
+    pub fn account_deletion_expires_at(&self) -> Option<MonotonicTick> {
+        self.mutations.iter().find_map(|mutation| match mutation {
+            Mutation::StartAccountDeletion(challenge) => Some(challenge.expires_at),
+            _ => None,
+        })
     }
 }
 
@@ -859,7 +1008,7 @@ impl DomainState {
         )
     }
 
-    /// Plans an authentication-proved guest/account authority replacement.
+    /// Plans a generation-fenced guest login or authenticated logout.
     pub fn plan_session_account_switch(
         &self,
         user_id: UserId,
@@ -870,8 +1019,26 @@ impl DomainState {
         if session.generation != expected_session_generation {
             return Err(DomainError::StaleGeneration);
         }
+        let replaces_account = match account {
+            Some((requested_account, _)) => session.account_id != Some(requested_account),
+            None => session.account_id.is_some(),
+        };
+        if replaces_account
+            && session.joined_channels.iter().any(|channel_id| {
+                self.channels
+                    .get(channel_id)
+                    .is_some_and(|channel| channel.content_policy == ContentPolicy::E2eeBound)
+            })
+        {
+            return Err(DomainError::BadState);
+        }
         let (account_id, account_session_generation) =
             self.resolve_switch_account(session.account_id, account)?;
+        if session.account_id == account_id
+            || (session.account_id.is_some() && account_id.is_some())
+        {
+            return Err(DomainError::BadState);
+        }
         if self
             .reserved_nickname_owner(&session.nickname)
             .is_some_and(|owner| Some(owner) != account_id)
@@ -965,6 +1132,7 @@ impl DomainState {
             for recipient in self.session_recipients(*user_id)?.iter() {
                 recipients.insert(recipient);
             }
+            recipients.insert(*user_id);
         }
         self.single_mutation(
             Mutation::DeleteAccount {
@@ -976,6 +1144,274 @@ impl DomainState {
             Vec::new(),
             StorageClass::Durable,
         )
+    }
+
+    /// Plans deletion only at the account revision authenticated by a one-use confirmation.
+    pub fn plan_account_deleted_at_revision(
+        &self,
+        account_id: AccountId,
+        expected_generation: agenc_ircd_types::Generation,
+        expected_account_revision: Revision,
+    ) -> Result<MutationPlan, DomainError> {
+        let account = self
+            .accounts
+            .get(&account_id)
+            .ok_or(DomainError::NotFound)?;
+        if account.revision != expected_account_revision {
+            return Err(DomainError::StaleRevision);
+        }
+        self.plan_account_deleted(account_id, expected_generation)
+    }
+
+    /// Installs one coordinator-local fresh-auth deadline from a trusted auth completion.
+    pub fn plan_session_fresh_authentication(
+        &self,
+        user_id: UserId,
+        account_id: AccountId,
+        expected_session_generation: agenc_ircd_types::Generation,
+        authenticated_at: MonotonicTick,
+    ) -> Result<MutationPlan, DomainError> {
+        let session = self.sessions.get(&user_id).ok_or(DomainError::NotFound)?;
+        if session.account_id != Some(account_id) {
+            return Err(DomainError::Forbidden);
+        }
+        if session.generation != expected_session_generation {
+            return Err(DomainError::StaleGeneration);
+        }
+        if self
+            .account_deletion_challenges
+            .get(&session.session_id)
+            .is_some_and(|challenge| authenticated_at < challenge.expires_at)
+        {
+            return Err(DomainError::BadState);
+        }
+        let deadline = authenticated_at.checked_add(300_000)?;
+        let mut recipients = RecipientSet::new();
+        recipients.insert(user_id);
+        Ok(MutationPlan {
+            expected_revision: self.revision,
+            resulting_revision: crate::model::next_revision(self.revision)?,
+            mutations: vec![Mutation::SetFreshAuthDeadline { user_id, deadline }],
+            events: Vec::new(),
+            recipients,
+            failures: Vec::new(),
+            message_batch: None,
+            charges: Vec::new(),
+            storage: StorageClass::Ephemeral,
+        })
+    }
+
+    /// Plans one atomic credential-generation advance and removal of every old session.
+    pub fn plan_account_credential_replaced(
+        &self,
+        account_id: AccountId,
+        expected_generation: agenc_ircd_types::Generation,
+        expected_account_revision: Revision,
+    ) -> Result<(MutationPlan, agenc_ircd_types::Generation), DomainError> {
+        let account = self
+            .accounts
+            .get(&account_id)
+            .ok_or(DomainError::NotFound)?;
+        if account.session_generation != expected_generation {
+            return Err(DomainError::StaleGeneration);
+        }
+        if account.revision != expected_account_revision {
+            return Err(DomainError::StaleRevision);
+        }
+        let account_session_generation = account.session_generation.checked_add(1)?;
+        let user_ids: Vec<UserId> = self
+            .sessions
+            .iter()
+            .filter_map(|(user_id, session)| {
+                (session.account_id == Some(account_id)).then_some(*user_id)
+            })
+            .collect();
+        if user_ids.is_empty() {
+            return Err(DomainError::BadState);
+        }
+        let mut recipients = RecipientSet::new();
+        let mut events = vec![DomainEvent::AccountCredentialReplaced(account_id)];
+        for user_id in &user_ids {
+            for recipient in self.session_recipients(*user_id)?.iter() {
+                recipients.insert(recipient);
+            }
+            recipients.insert(*user_id);
+            events.push(DomainEvent::SessionHidden(*user_id));
+        }
+        let plan = MutationPlan {
+            expected_revision: self.revision,
+            resulting_revision: crate::model::next_revision(self.revision)?,
+            mutations: vec![Mutation::ReplaceAccountCredential {
+                account_id,
+                account_session_generation,
+                user_ids,
+            }],
+            events,
+            recipients,
+            failures: Vec::new(),
+            message_batch: None,
+            charges: Vec::new(),
+            storage: StorageClass::Durable,
+        };
+        Ok((plan, account_session_generation))
+    }
+
+    /// Plans the one-way joint transition from plaintext to companion-bound E2EE.
+    pub fn plan_e2ee_binding(
+        &self,
+        actor_user_id: UserId,
+        proof: E2eeBindingProof,
+    ) -> Result<MutationPlan, DomainError> {
+        let channel = self
+            .channels
+            .get(&proof.channel_id)
+            .ok_or(DomainError::NotFound)?;
+        if channel.revision != proof.channel_revision {
+            return Err(DomainError::StaleRevision);
+        }
+        self.validate_e2ee_binding_actor(actor_user_id, channel)?;
+        if !channel_accepts_e2ee_binding(channel) {
+            return Err(DomainError::BadState);
+        }
+        if canonical_account_roster(channel)? != proof.approved_roster {
+            return Err(DomainError::StaleRevision);
+        }
+        Ok(MutationPlan {
+            expected_revision: self.revision,
+            resulting_revision: crate::model::next_revision(self.revision)?,
+            mutations: vec![Mutation::BindE2ee {
+                channel_id: proof.channel_id,
+            }],
+            events: vec![DomainEvent::ChannelPolicyChanged(proof.channel_id)],
+            recipients: self.channel_recipients(proof.channel_id)?,
+            failures: Vec::new(),
+            message_batch: None,
+            charges: Vec::new(),
+            storage: StorageClass::Durable,
+        })
+    }
+
+    fn validate_e2ee_binding_actor(
+        &self,
+        actor_user_id: UserId,
+        channel: &crate::ChannelState,
+    ) -> Result<(), DomainError> {
+        let actor = self
+            .sessions
+            .get(&actor_user_id)
+            .ok_or(DomainError::NotFound)?;
+        if actor.account_id.is_none() || channel.role_of(actor_user_id) != Some(Role::Owner) {
+            return Err(DomainError::Forbidden);
+        }
+        Ok(())
+    }
+
+    /// Plans membership removal only after companion cryptographic finality.
+    pub fn plan_e2ee_removal_finalized(
+        &self,
+        finality: E2eeRemovalFinality,
+    ) -> Result<MutationPlan, DomainError> {
+        let channel = self
+            .channels
+            .get(&finality.channel_id)
+            .ok_or(DomainError::NotFound)?;
+        if channel.revision != finality.channel_revision {
+            return Err(DomainError::StaleRevision);
+        }
+        if channel.content_policy != ContentPolicy::E2eeBound
+            || !channel.e2ee_removal_pending.contains(&finality.user_id)
+            || !channel.memberships.contains_key(&finality.user_id)
+        {
+            return Err(DomainError::BadState);
+        }
+        Ok(MutationPlan {
+            expected_revision: self.revision,
+            resulting_revision: crate::model::next_revision(self.revision)?,
+            mutations: vec![Mutation::FinalizeE2eeRemoval {
+                channel_id: finality.channel_id,
+                user_id: finality.user_id,
+            }],
+            events: vec![DomainEvent::Parted(finality.channel_id, finality.user_id)],
+            recipients: self.channel_recipients(finality.channel_id)?,
+            failures: Vec::new(),
+            message_batch: None,
+            charges: Vec::new(),
+            storage: StorageClass::Durable,
+        })
+    }
+
+    /// Plans one deterministic, bounded network-wide expired-invitation sweep.
+    pub fn plan_expired_invites(
+        &self,
+        now: MonotonicTick,
+    ) -> Result<Option<MutationPlan>, DomainError> {
+        let sweep = self.collect_expired_invites(now)?;
+        if sweep.expired.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(MutationPlan {
+            expected_revision: self.revision,
+            resulting_revision: crate::model::next_revision(self.revision)?,
+            mutations: vec![Mutation::ExpireInvites(sweep.expired)],
+            events: sweep.events,
+            recipients: sweep.recipients,
+            failures: Vec::new(),
+            message_batch: None,
+            charges: Vec::new(),
+            storage: StorageClass::Durable,
+        }))
+    }
+
+    fn collect_expired_invites(
+        &self,
+        now: MonotonicTick,
+    ) -> Result<ExpiredInviteSweep, DomainError> {
+        let mut expired = Vec::new();
+        expired
+            .try_reserve_exact(MAX_INVITE_EXPIRATIONS_PER_PLAN)
+            .map_err(|_| DomainError::AllocationFailed)?;
+        let mut events = Vec::new();
+        events
+            .try_reserve_exact(MAX_INVITE_EXPIRATIONS_PER_PLAN)
+            .map_err(|_| DomainError::AllocationFailed)?;
+        let mut recipients = RecipientSet::new();
+        let candidates = self.channels.iter().flat_map(|(channel_id, channel)| {
+            channel
+                .invites
+                .iter()
+                .map(move |(invite_id, invite)| (*channel_id, *invite_id, invite))
+        });
+        for (channel_id, invite_id, invite) in candidates
+            .filter(|(_, _, invite)| now >= invite.expires_at)
+            .take(MAX_INVITE_EXPIRATIONS_PER_PLAN)
+        {
+            expired.push((channel_id, invite_id));
+            events.push(DomainEvent::InviteExpired(channel_id, invite_id));
+            self.add_invite_recipients(invite, &mut recipients);
+        }
+        Ok(ExpiredInviteSweep {
+            expired,
+            events,
+            recipients,
+        })
+    }
+
+    fn add_invite_recipients(&self, invite: &Invite, recipients: &mut RecipientSet) {
+        recipients.insert(invite.inviter);
+        match invite.target {
+            Principal::Guest(user_id) => recipients.insert(user_id),
+            Principal::Account(account_id) => {
+                self.add_account_session_recipients(account_id, recipients);
+            }
+        }
+    }
+
+    fn add_account_session_recipients(&self, account_id: AccountId, recipients: &mut RecipientSet) {
+        for user_id in self.sessions.iter().filter_map(|(user_id, session)| {
+            (session.account_id == Some(account_id)).then_some(*user_id)
+        }) {
+            recipients.insert(user_id);
+        }
     }
 
     /// Validates session fences, authorization, and all hierarchical charges.
@@ -1105,6 +1541,7 @@ impl DomainState {
         if self.sessions.contains_key(&seed.user_id)
             || self.session_ids.contains_key(&seed.session_id)
             || self.nicknames.contains_key(&seed.nickname)
+            || self.public_cloaks.contains_key(&seed.public_cloak)
         {
             return Err(DomainError::BadState);
         }
@@ -1172,7 +1609,7 @@ impl DomainState {
         {
             return Err(DomainError::StaleGeneration);
         }
-        if !admission.admits(charges) {
+        if !admission.admits(charges)? {
             return Err(DomainError::ServerBusy);
         }
         self.authorize_command(session, envelope.command())?;
@@ -1299,7 +1736,7 @@ impl DomainState {
         &self,
         sender: &SessionState,
         name: &ChannelNameValue,
-        kind: MessageKind,
+        _kind: MessageKind,
     ) -> Result<(), DomainError> {
         let channel = self.privacy_safe_channel(sender, name)?;
         let Some(role) = channel.role_of(sender.user_id) else {
@@ -1308,14 +1745,39 @@ impl DomainState {
         if effective_mask(channel, sender, true) {
             return Err(DomainError::Forbidden);
         }
-        match (channel.content_policy, kind) {
-            (ContentPolicy::E2eeBound, MessageKind::Privmsg | MessageKind::Notice) => {
-                return Err(DomainError::EncryptedRoute);
-            }
-            (ContentPolicy::Plaintext, MessageKind::Tagmsg) => {
-                return Err(DomainError::PlaintextRoute);
-            }
-            _ => {}
+        if channel.content_policy == ContentPolicy::E2eeBound {
+            return Err(DomainError::EncryptedRoute);
+        }
+        if channel.modes.moderated && role < Role::Voice {
+            return Err(DomainError::Forbidden);
+        }
+        Ok(())
+    }
+
+    fn authorize_e2ee_channel_message(
+        &self,
+        sender: &SessionState,
+        name: &ChannelNameValue,
+        proof: crate::E2eeApplicationProof,
+    ) -> Result<(), DomainError> {
+        let channel = self.privacy_safe_channel(sender, name)?;
+        if channel.content_policy != ContentPolicy::E2eeBound {
+            return Err(DomainError::PlaintextRoute);
+        }
+        if proof.channel_id() != channel.channel_id || proof.sender() != sender.user_id {
+            return Err(DomainError::Forbidden);
+        }
+        if proof.channel_revision() != channel.revision {
+            return Err(DomainError::StaleRevision);
+        }
+        if !channel.e2ee_removal_pending.is_empty() {
+            return Err(DomainError::BadState);
+        }
+        let Some(role) = channel.role_of(sender.user_id) else {
+            return Err(DomainError::Forbidden);
+        };
+        if effective_mask(channel, sender, true) {
+            return Err(DomainError::Forbidden);
         }
         if channel.modes.moderated && role < Role::Voice {
             return Err(DomainError::Forbidden);
@@ -1448,6 +1910,9 @@ impl DomainState {
                 )?;
                 push_request(&mut requests, RequestShape::Monotonic)?;
             }
+            CanonicalCommandData::Account(AccountCommand::DeleteConfirm(_)) => {
+                push_request(&mut requests, RequestShape::Monotonic)?;
+            }
             _ => {}
         }
         Ok(requests)
@@ -1461,7 +1926,7 @@ impl DomainState {
         let mut accepted = Vec::new();
         let mut failures = Vec::new();
         for (index, target) in message.targets().iter().enumerate() {
-            match self.authorize_message_target(sender, target, message.kind()) {
+            match self.authorize_message_target(sender, target, message) {
                 Ok(()) => accepted.push(self.resolve_message_target(target)?),
                 Err(error) if is_target_policy_failure(error) => {
                     failures.push(TargetFailure::message(index, target, error)?);
@@ -1477,11 +1942,19 @@ impl DomainState {
         &self,
         sender: &SessionState,
         target: &MessageTarget,
-        kind: MessageKind,
+        message: &crate::MessageCommand,
     ) -> Result<(), DomainError> {
-        match target {
-            MessageTarget::Channel(name) => self.authorize_channel_message(sender, name, kind),
-            MessageTarget::User(nickname) => self.authorize_direct_message(sender, nickname),
+        match (target, message.tagmsg_classification()) {
+            (MessageTarget::Channel(name), Some(TagmsgClassification::E2eeApplication(proof))) => {
+                self.authorize_e2ee_channel_message(sender, name, proof)
+            }
+            (MessageTarget::Channel(name), _) => {
+                self.authorize_channel_message(sender, name, message.kind())
+            }
+            (MessageTarget::User(_), Some(TagmsgClassification::E2eeApplication(_))) => {
+                Err(DomainError::EncryptedRoute)
+            }
+            (MessageTarget::User(nickname), _) => self.authorize_direct_message(sender, nickname),
         }
     }
 
@@ -1574,7 +2047,7 @@ impl DomainState {
                 self.plan_setname(user_id, display_name, charges)
             }
             CanonicalCommandData::Account(account) => {
-                self.plan_account(user_id, principal, account, charges)
+                self.plan_account(user_id, principal, account, charges, inputs)
             }
             CanonicalCommandData::Channel(channel) => {
                 self.plan_channel(user_id, principal, channel, charges)
@@ -1886,14 +2359,26 @@ impl DomainState {
             for member in channel.memberships.keys().copied() {
                 recipients.insert(member);
             }
-            mutations.push(Mutation::Part {
-                channel_id,
-                user_id,
-            });
-            events.push(DomainEvent::Parted(channel_id, user_id));
-            if channel.memberships.len() == 1 && channel.persistence == PersistencePolicy::Ephemeral
-            {
-                events.push(DomainEvent::ChannelDestroyed(channel_id));
+            if channel.content_policy == ContentPolicy::E2eeBound {
+                if channel.e2ee_removal_pending.contains(&user_id) {
+                    return Err(DomainError::BadState);
+                }
+                mutations.push(Mutation::MarkRemovalPending {
+                    channel_id,
+                    user_id,
+                });
+                events.push(DomainEvent::E2eeRemovalPending(channel_id, user_id));
+            } else {
+                mutations.push(Mutation::Part {
+                    channel_id,
+                    user_id,
+                });
+                events.push(DomainEvent::Parted(channel_id, user_id));
+                if channel.memberships.len() == 1
+                    && channel.persistence == PersistencePolicy::Ephemeral
+                {
+                    events.push(DomainEvent::ChannelDestroyed(channel_id));
+                }
             }
         }
         self.command_plan_with_failures(
@@ -2118,6 +2603,12 @@ impl DomainState {
                 failures.push(TargetFailure::user(index, target, DomainError::Forbidden)?);
                 continue;
             }
+            if channel.content_policy == ContentPolicy::E2eeBound
+                && channel.e2ee_removal_pending.contains(&target_user)
+            {
+                failures.push(TargetFailure::user(index, target, DomainError::BadState)?);
+                continue;
+            }
             accepted.push(target_user);
         }
         accepted.sort_unstable();
@@ -2164,7 +2655,9 @@ impl DomainState {
             .get(&user_id)
             .ok_or(DomainError::InvariantViolation)?;
         let (resolved_routes, failures) = self.resolve_message_targets(sender, &message)?;
-        if resolved_routes.len() != inputs.message_ids.len() {
+        if resolved_routes.len() != inputs.message_ids.len()
+            || contains_duplicate(&inputs.message_ids)
+        {
             return Err(DomainError::ExternalInputMismatch);
         }
         let kind = match message.kind() {
@@ -2196,7 +2689,7 @@ impl DomainState {
         }
         recipients.insert(user_id);
         let accepted_at = inputs.utc_now.ok_or(DomainError::ExternalInputMismatch)?;
-        let (message_kind, _targets, body) = message.into_parts();
+        let (message_kind, _targets, body, tagmsg_classification) = message.into_parts();
         self.message_plan(
             events,
             recipients,
@@ -2205,6 +2698,7 @@ impl DomainState {
                 kind: message_kind,
                 sender: user_id,
                 body,
+                tagmsg_classification,
                 accepted_at,
                 routes,
             },
@@ -2318,7 +2812,7 @@ impl DomainState {
                 user_id,
                 display_name,
             }],
-            vec![DomainEvent::NicknameChanged(user_id)],
+            vec![DomainEvent::DisplayNameChanged(user_id)],
             recipients,
             charges,
             StorageClass::Ephemeral,
@@ -2327,14 +2821,26 @@ impl DomainState {
 
     fn plan_account(
         &self,
-        _user_id: UserId,
+        user_id: UserId,
         principal: Principal,
         command: AccountCommand,
         charges: Vec<RateCharge>,
+        inputs: ExternalInputs,
     ) -> Result<PlanDecision, DomainError> {
         let account_id = principal
             .account_id()
             .ok_or(DomainError::RegistrationRequired)?;
+        match command {
+            AccountCommand::DeleteStart => {
+                return self.plan_account_deletion_start(user_id, account_id, charges, inputs);
+            }
+            AccountCommand::DeleteConfirm(candidate) => {
+                return self.plan_account_deletion_confirm(
+                    user_id, account_id, candidate, charges, inputs,
+                );
+            }
+            _ => {}
+        }
         let setting = account_setting(self, account_id, command)?;
         let mut recipients = RecipientSet::new();
         for session in self.sessions.values() {
@@ -2351,6 +2857,97 @@ impl DomainState {
             recipients,
             charges,
             StorageClass::Durable,
+        )
+    }
+
+    fn plan_account_deletion_start(
+        &self,
+        user_id: UserId,
+        account_id: AccountId,
+        charges: Vec<RateCharge>,
+        mut inputs: ExternalInputs,
+    ) -> Result<PlanDecision, DomainError> {
+        let session = self.sessions.get(&user_id).ok_or(DomainError::NotFound)?;
+        let account = self
+            .accounts
+            .get(&account_id)
+            .ok_or(DomainError::NotFound)?;
+        let now = inputs
+            .monotonic_now
+            .ok_or(DomainError::ExternalInputMismatch)?;
+        if session
+            .fresh_auth_deadline
+            .is_none_or(|deadline| now > deadline)
+        {
+            return Err(DomainError::BadState);
+        }
+        let token = take_one(&mut inputs.deletion_tokens)?;
+        let expires_at = now.checked_add(60_000)?;
+        let challenge = AccountDeletionChallengeState {
+            token,
+            account_id,
+            account_revision: account.revision,
+            account_session_generation: account.session_generation,
+            session_id: session.session_id,
+            user_id,
+            session_generation: session.generation,
+            expires_at,
+        };
+        let mut recipients = RecipientSet::new();
+        recipients.insert(user_id);
+        self.command_plan(
+            vec![Mutation::StartAccountDeletion(challenge)],
+            vec![DomainEvent::AccountDeletionChallengeStarted(user_id)],
+            recipients,
+            charges,
+            StorageClass::Ephemeral,
+        )
+    }
+
+    fn plan_account_deletion_confirm(
+        &self,
+        user_id: UserId,
+        account_id: AccountId,
+        candidate: AccountDeletionToken,
+        charges: Vec<RateCharge>,
+        inputs: ExternalInputs,
+    ) -> Result<PlanDecision, DomainError> {
+        let session = self.sessions.get(&user_id).ok_or(DomainError::NotFound)?;
+        let now = inputs
+            .monotonic_now
+            .ok_or(DomainError::ExternalInputMismatch)?;
+        let challenge = self
+            .account_deletion_challenges
+            .get(&session.session_id)
+            .ok_or(DomainError::BadState)?;
+        let token_matches = challenge.token.matches(candidate.expose_for_deletion());
+        let binding_matches = challenge.account_id == account_id
+            && challenge.account_session_generation == session.account_session_generation
+            && challenge.session_id == session.session_id
+            && challenge.user_id == user_id
+            && challenge.session_generation == session.generation
+            && now < challenge.expires_at;
+        if token_matches
+            && binding_matches
+            && let Ok(mut plan) = self.plan_account_deleted_at_revision(
+                account_id,
+                challenge.account_session_generation,
+                challenge.account_revision,
+            )
+        {
+            plan.charges = charges;
+            return Ok(PlanDecision::Mutation(plan));
+        }
+        let mut recipients = RecipientSet::new();
+        recipients.insert(user_id);
+        self.command_plan(
+            vec![Mutation::ConsumeAccountDeletionChallenge(
+                session.session_id,
+            )],
+            vec![DomainEvent::AccountDeletionConfirmationRejected(user_id)],
+            recipients,
+            charges,
+            StorageClass::Ephemeral,
         )
     }
 
@@ -2535,6 +3132,16 @@ impl DomainState {
                 account_id,
                 user_ids,
             } => self.apply_account_deletion(account_id, user_ids, revision),
+            Mutation::ReplaceAccountCredential {
+                account_id,
+                account_session_generation,
+                user_ids,
+            } => self.apply_account_credential_replacement(
+                account_id,
+                account_session_generation,
+                user_ids,
+                revision,
+            ),
             Mutation::Rename { user_id, nickname } => self.apply_nick(user_id, nickname, revision),
             Mutation::SetAway { user_id, away } => self.apply_away(user_id, away, revision),
             Mutation::SetOperatorNotices { user_id, enabled } => {
@@ -2548,6 +3155,24 @@ impl DomainState {
                 display_name,
             } => {
                 self.apply_display_name(user_id, display_name, revision);
+            }
+            Mutation::SetFreshAuthDeadline { user_id, deadline } => {
+                if let Some(session) = self.sessions.get_mut(&user_id) {
+                    self.account_deletion_challenges.remove(&session.session_id);
+                    session.fresh_auth_deadline = Some(deadline);
+                    session.revision = revision;
+                }
+            }
+            Mutation::StartAccountDeletion(challenge) => {
+                if let Some(session) = self.sessions.get_mut(&challenge.user_id) {
+                    session.fresh_auth_deadline = None;
+                    session.revision = revision;
+                }
+                self.account_deletion_challenges
+                    .insert(challenge.session_id, challenge);
+            }
+            Mutation::ConsumeAccountDeletionChallenge(session_id) => {
+                self.account_deletion_challenges.remove(&session_id);
             }
             Mutation::JoinNew(channel) => self.apply_join_new(channel, revision),
             Mutation::JoinExisting {
@@ -2580,6 +3205,12 @@ impl DomainState {
                 self.apply_account_setting(account_id, setting, revision);
             }
             Mutation::ChannelSetting(command) => self.apply_channel_setting(command, revision),
+            Mutation::BindE2ee { channel_id } => {
+                if let Some(channel) = self.channels.get_mut(&channel_id) {
+                    channel.content_policy = ContentPolicy::E2eeBound;
+                    channel.revision = revision;
+                }
+            }
             Mutation::CreateInvite {
                 channel_id,
                 invite,
@@ -2602,6 +3233,19 @@ impl DomainState {
                     channel.revision = revision;
                 }
             }
+            Mutation::FinalizeE2eeRemoval {
+                channel_id,
+                user_id,
+            } => self.apply_part(channel_id, user_id, revision),
+            Mutation::ExpireInvites(expired) => {
+                for (channel_id, invite_id) in expired {
+                    if let Some(channel) = self.channels.get_mut(&channel_id)
+                        && channel.invites.remove(&invite_id).is_some()
+                    {
+                        channel.revision = revision;
+                    }
+                }
+            }
             Mutation::AddSanction(sanction) => self.sanctions.push(sanction),
             Mutation::EventOnly => {}
         }
@@ -2617,6 +3261,8 @@ impl DomainState {
         self.session_ids.insert(session.session_id, session.user_id);
         self.nicknames
             .insert(session.nickname.clone(), session.user_id);
+        self.public_cloaks
+            .insert(session.public_cloak, session.user_id);
         self.sessions.insert(session.user_id, session);
     }
 
@@ -2633,11 +3279,19 @@ impl DomainState {
             .sessions
             .get(&user_id)
             .is_some_and(|session| session.account_id.is_none());
+        let session_id = self
+            .sessions
+            .get(&user_id)
+            .map(|session| session.session_id);
         if let Some(session) = self.sessions.get_mut(&user_id) {
             session.account_id = account_id;
             session.account_session_generation = account_session_generation;
             session.generation = session_generation;
+            session.fresh_auth_deadline = None;
             session.revision = revision;
+        }
+        if let Some(session_id) = session_id {
+            self.account_deletion_challenges.remove(&session_id);
         }
         for channel_id in channel_ids {
             let Some(channel) = self.channels.get_mut(channel_id) else {
@@ -2685,6 +3339,22 @@ impl DomainState {
             if grant_removed || channel.invites.len() != invite_count {
                 channel.revision = revision;
             }
+        }
+    }
+
+    fn apply_account_credential_replacement(
+        &mut self,
+        account_id: AccountId,
+        account_session_generation: agenc_ircd_types::Generation,
+        user_ids: Vec<UserId>,
+        revision: Revision,
+    ) {
+        for user_id in user_ids {
+            self.apply_close_session(user_id, revision);
+        }
+        if let Some(account) = self.accounts.get_mut(&account_id) {
+            account.session_generation = account_session_generation;
+            account.revision = revision;
         }
     }
 
@@ -2780,6 +3450,7 @@ impl DomainState {
             session.revision = revision;
         }
         let destroy = self.channels.get_mut(&channel_id).is_some_and(|channel| {
+            channel.e2ee_removal_pending.remove(&user_id);
             channel.memberships.remove(&user_id);
             channel.revision = revision;
             channel.memberships.is_empty() && channel.persistence == PersistencePolicy::Ephemeral
@@ -2799,8 +3470,10 @@ impl DomainState {
         let Some(session) = self.sessions.remove(&user_id) else {
             return;
         };
+        self.account_deletion_challenges.remove(&session.session_id);
         self.session_ids.remove(&session.session_id);
         self.nicknames.remove(&session.nickname);
+        self.public_cloaks.remove(&session.public_cloak);
         for channel in self.channels.values_mut() {
             let invite_count = channel.invites.len();
             channel
@@ -2853,7 +3526,9 @@ impl DomainState {
             return;
         };
         match change {
-            ModeChange::Visibility(visibility) => channel.visibility = visibility,
+            ModeChange::Visibility { operation, mode } => {
+                channel.visibility = resulting_visibility(channel.visibility, operation, mode);
+            }
             ModeChange::InviteOnly(value) => channel.modes.invite_only = value,
             ModeChange::Moderated(value) => channel.modes.moderated = value,
             ModeChange::TopicProtected(value) => channel.modes.topic_protected = value,
@@ -2936,7 +3611,6 @@ impl DomainState {
             ChannelCommand::Register(_) => register_channel_roles(channel),
             ChannelCommand::Unregister(_) => unregister_channel_roles(channel),
             ChannelCommand::History(_, history) => channel.history = history,
-            ChannelCommand::Content(_, content) => channel.content_policy = content,
         }
         channel.revision = revision;
     }
@@ -2958,7 +3632,10 @@ fn register_channel_roles(channel: &mut crate::ChannelState) {
             .account_id
             .and_then(|account_id| channel.role_grants.get(&account_id).copied())
             .unwrap_or(Role::Member);
-        membership.effective_role = std::cmp::max(membership.session_role, grant);
+        if membership.account_id.is_some() {
+            membership.session_role = Role::Member;
+            membership.effective_role = grant;
+        }
     }
     channel.persistence = PersistencePolicy::Registered;
 }
@@ -3191,6 +3868,14 @@ fn take_one<Value>(values: &mut Vec<Value>) -> Result<Value, DomainError> {
     values.pop().ok_or(DomainError::ExternalInputMismatch)
 }
 
+fn contains_duplicate<Value: Eq>(values: &[Value]) -> bool {
+    values.iter().enumerate().any(|(index, value)| {
+        values
+            .get(index + 1..)
+            .is_some_and(|remaining| remaining.contains(value))
+    })
+}
+
 fn invite_expiry(now: MonotonicTick) -> Result<MonotonicTick, DomainError> {
     let ticks = now
         .get()
@@ -3286,9 +3971,11 @@ fn validate_mode_vector(
     if expected_entries != entry_ids.len() {
         return Err(DomainError::ExternalInputMismatch);
     }
-    let mut unique_entry_ids = BTreeSet::new();
-    for entry_id in entry_ids {
-        if !unique_entry_ids.insert(*entry_id)
+    for (index, entry_id) in entry_ids.iter().enumerate() {
+        if entry_ids
+            .iter()
+            .take(index)
+            .any(|previous| previous == entry_id)
             || channel
                 .bans
                 .iter()
@@ -3299,65 +3986,330 @@ fn validate_mode_vector(
             return Err(DomainError::ExternalInputMismatch);
         }
     }
+    let mut validation = ModeValidationState::new(channel, changes.len())?;
+    let mut supplied_entry_ids = entry_ids.iter().copied();
     for change in changes {
-        validate_mode_change(state, channel, actor_role, actor_account, change)?;
+        let entry_id = if matches!(change, ModeChange::AddMask { .. }) {
+            Some(
+                supplied_entry_ids
+                    .next()
+                    .ok_or(DomainError::ExternalInputMismatch)?,
+            )
+        } else {
+            None
+        };
+        validation.validate_and_apply(
+            state,
+            channel,
+            actor_role,
+            actor_account,
+            change,
+            entry_id,
+        )?;
     }
-    validate_role_grant_capacity(state, channel, changes)?;
-    validate_owner_continuity(state, channel, changes)
+    if supplied_entry_ids.next().is_some() {
+        return Err(DomainError::ExternalInputMismatch);
+    }
+    validation.validate_final(channel)
 }
 
-fn validate_role_grant_capacity(
-    state: &DomainState,
-    channel: &crate::ChannelState,
-    changes: &[ModeChange],
-) -> Result<(), DomainError> {
-    if channel.persistence != PersistencePolicy::Registered {
-        return Ok(());
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ModeRoleSubject {
+    Account(AccountId),
+    Session(UserId),
+}
+
+struct ModeRoleState {
+    subject: ModeRoleSubject,
+    role: Role,
+    grant_present: bool,
+}
+
+#[derive(Clone, Copy)]
+enum ModeMaskDelta<'a> {
+    Added {
+        list: MaskList,
+        entry_id: EntryId,
+        mask: &'a TypedMask,
+    },
+    Removed {
+        list: MaskList,
+        entry_id: EntryId,
+    },
+}
+
+struct ModeValidationState<'a> {
+    visibility: Visibility,
+    roles: Vec<ModeRoleState>,
+    mask_deltas: Vec<ModeMaskDelta<'a>>,
+    mask_lengths: [usize; 3],
+}
+
+impl<'a> ModeValidationState<'a> {
+    fn new(channel: &crate::ChannelState, change_count: usize) -> Result<Self, DomainError> {
+        let mut roles = Vec::new();
+        roles
+            .try_reserve_exact(change_count)
+            .map_err(|_| DomainError::AllocationFailed)?;
+        let mut mask_deltas = Vec::new();
+        mask_deltas
+            .try_reserve_exact(change_count)
+            .map_err(|_| DomainError::AllocationFailed)?;
+        Ok(Self {
+            visibility: channel.visibility,
+            roles,
+            mask_deltas,
+            mask_lengths: [
+                channel.bans.len(),
+                channel.exceptions.len(),
+                channel.invite_exceptions.len(),
+            ],
+        })
     }
-    let mut grants: BTreeSet<AccountId> = channel.role_grants.keys().copied().collect();
-    for change in changes {
-        let ModeChange::Role {
-            operation,
-            target,
-            role,
-        } = change
-        else {
-            continue;
-        };
-        let user_id = state.nicknames.get(target).ok_or(DomainError::NotFound)?;
-        let account_id = state
-            .sessions
-            .get(user_id)
-            .and_then(|session| session.account_id)
-            .ok_or(DomainError::RegistrationRequired)?;
-        let next = match operation {
-            ModeOperation::Add => *role,
-            ModeOperation::Remove => role.next_lower().ok_or(DomainError::InvalidArgument)?,
-        };
-        if next == Role::Member {
-            grants.remove(&account_id);
-        } else {
-            grants.insert(account_id);
+
+    fn validate_and_apply(
+        &mut self,
+        state: &DomainState,
+        channel: &'a crate::ChannelState,
+        actor_role: Role,
+        actor_account: Option<AccountId>,
+        change: &'a ModeChange,
+        entry_id: Option<EntryId>,
+    ) -> Result<(), DomainError> {
+        validate_mode_authority(actor_role, actor_account, change)?;
+        match change {
+            ModeChange::Visibility { operation, mode } => {
+                self.visibility = resulting_visibility(self.visibility, *operation, *mode);
+            }
+            ModeChange::Role {
+                operation,
+                target,
+                role,
+            } => self.apply_role_change(state, channel, *operation, target, *role)?,
+            ModeChange::AddMask { list, mask } => {
+                let entry_id = entry_id.ok_or(DomainError::ExternalInputMismatch)?;
+                self.apply_mask_add(channel, *list, entry_id, mask)?;
+            }
+            ModeChange::RemoveMask { list, entry_id } => {
+                self.apply_mask_remove(channel, actor_role, *list, *entry_id)?;
+            }
+            ModeChange::InviteOnly(_)
+            | ModeChange::Moderated(_)
+            | ModeChange::TopicProtected(_)
+            | ModeChange::JoinKey(_)
+            | ModeChange::MemberLimit(_) => {}
         }
-        if grants.len() > crate::model::MAX_ROLE_GRANTS_PER_CHANNEL {
+        Ok(())
+    }
+
+    fn apply_role_change(
+        &mut self,
+        state: &DomainState,
+        channel: &crate::ChannelState,
+        operation: ModeOperation,
+        target: &NicknameValue,
+        role: Role,
+    ) -> Result<(), DomainError> {
+        let (subject, initial_role, grant_present) =
+            resolve_mode_role_subject(state, channel, target)?;
+        let role_state = if let Some(index) = self
+            .roles
+            .iter()
+            .position(|current| current.subject == subject)
+        {
+            self.roles
+                .get_mut(index)
+                .ok_or(DomainError::InvariantViolation)?
+        } else {
+            self.roles.push(ModeRoleState {
+                subject,
+                role: initial_role,
+                grant_present,
+            });
+            self.roles
+                .last_mut()
+                .ok_or(DomainError::InvariantViolation)?
+        };
+        role_state.role = resulting_role(role_state.role, operation, role)?;
+        if matches!(subject, ModeRoleSubject::Account(_)) {
+            role_state.grant_present = role_state.role != Role::Member;
+        }
+        Ok(())
+    }
+
+    fn apply_mask_add(
+        &mut self,
+        channel: &'a crate::ChannelState,
+        list: MaskList,
+        entry_id: EntryId,
+        mask: &'a TypedMask,
+    ) -> Result<(), DomainError> {
+        if self.mask_is_present(channel, list, mask) {
+            return Err(DomainError::InvalidArgument);
+        }
+        let index = mask_list_index(list);
+        let length = self
+            .mask_lengths
+            .get_mut(index)
+            .ok_or(DomainError::InvariantViolation)?;
+        *length = length.checked_add(1).ok_or(DomainError::Overflow)?;
+        self.mask_deltas.push(ModeMaskDelta::Added {
+            list,
+            entry_id,
+            mask,
+        });
+        Ok(())
+    }
+
+    fn apply_mask_remove(
+        &mut self,
+        channel: &'a crate::ChannelState,
+        actor_role: Role,
+        list: MaskList,
+        entry_id: EntryId,
+    ) -> Result<(), DomainError> {
+        let quiet = self
+            .mask_for_entry(channel, list, entry_id)
+            .ok_or(DomainError::InvalidArgument)?
+            .is_quiet();
+        if quiet {
+            require_role(actor_role, Role::Operator)?;
+        }
+        let index = mask_list_index(list);
+        let length = self
+            .mask_lengths
+            .get_mut(index)
+            .ok_or(DomainError::InvariantViolation)?;
+        *length = length
+            .checked_sub(1)
+            .ok_or(DomainError::InvariantViolation)?;
+        self.mask_deltas
+            .push(ModeMaskDelta::Removed { list, entry_id });
+        Ok(())
+    }
+
+    fn mask_for_entry(
+        &self,
+        channel: &'a crate::ChannelState,
+        list: MaskList,
+        entry_id: EntryId,
+    ) -> Option<&'a TypedMask> {
+        let mut found = mask_list(channel, list)
+            .iter()
+            .find(|entry| entry.entry_id == entry_id)
+            .map(|entry| &entry.mask);
+        for delta in &self.mask_deltas {
+            match delta {
+                ModeMaskDelta::Added {
+                    list: added_list,
+                    entry_id: added_id,
+                    mask,
+                } if *added_list == list && *added_id == entry_id => found = Some(mask),
+                ModeMaskDelta::Removed {
+                    list: removed_list,
+                    entry_id: removed_id,
+                } if *removed_list == list && *removed_id == entry_id => found = None,
+                ModeMaskDelta::Added { .. } | ModeMaskDelta::Removed { .. } => {}
+            }
+        }
+        found
+    }
+
+    fn mask_is_present(
+        &self,
+        channel: &'a crate::ChannelState,
+        list: MaskList,
+        mask: &TypedMask,
+    ) -> bool {
+        let original_match = mask_list(channel, list).iter().any(|entry| {
+            entry.mask == *mask && self.mask_for_entry(channel, list, entry.entry_id).is_some()
+        });
+        original_match
+            || self.mask_deltas.iter().any(|delta| {
+                let ModeMaskDelta::Added {
+                    list: added_list,
+                    entry_id,
+                    mask: added_mask,
+                } = delta
+                else {
+                    return false;
+                };
+                *added_list == list
+                    && **added_mask == *mask
+                    && self.mask_for_entry(channel, list, *entry_id).is_some()
+            })
+    }
+
+    fn validate_final(&self, channel: &crate::ChannelState) -> Result<(), DomainError> {
+        if self
+            .mask_lengths
+            .iter()
+            .any(|length| *length > crate::model::MAX_MASK_ENTRIES_PER_LIST)
+        {
             return Err(DomainError::LimitExceeded);
         }
+        if channel.history != HistoryPolicy::Off && self.visibility != Visibility::Listed {
+            return Err(DomainError::BadState);
+        }
+        self.validate_registered_roles(channel)
     }
-    Ok(())
+
+    fn validate_registered_roles(&self, channel: &crate::ChannelState) -> Result<(), DomainError> {
+        if channel.persistence != PersistencePolicy::Registered {
+            return Ok(());
+        }
+        let mut grants = channel.role_grants.len();
+        let mut owners = channel
+            .role_grants
+            .values()
+            .filter(|role| **role == Role::Owner)
+            .count();
+        for role_state in &self.roles {
+            let ModeRoleSubject::Account(account_id) = role_state.subject else {
+                continue;
+            };
+            let initial = channel.role_grants.get(&account_id).copied();
+            match (initial.is_some(), role_state.grant_present) {
+                (true, false) => {
+                    grants = grants
+                        .checked_sub(1)
+                        .ok_or(DomainError::InvariantViolation)?;
+                }
+                (false, true) => {
+                    grants = grants.checked_add(1).ok_or(DomainError::Overflow)?;
+                }
+                (true, true) | (false, false) => {}
+            }
+            if initial == Some(Role::Owner) {
+                owners = owners
+                    .checked_sub(1)
+                    .ok_or(DomainError::InvariantViolation)?;
+            }
+            if role_state.grant_present && role_state.role == Role::Owner {
+                owners = owners.checked_add(1).ok_or(DomainError::Overflow)?;
+            }
+        }
+        if grants > crate::model::MAX_ROLE_GRANTS_PER_CHANNEL {
+            return Err(DomainError::LimitExceeded);
+        }
+        if owners == 0 {
+            return Err(DomainError::BadState);
+        }
+        Ok(())
+    }
 }
 
-fn validate_mode_change(
-    state: &DomainState,
-    channel: &crate::ChannelState,
+fn validate_mode_authority(
     actor_role: Role,
     actor_account: Option<AccountId>,
     change: &ModeChange,
 ) -> Result<(), DomainError> {
     match change {
-        ModeChange::Visibility(Visibility::Secret) => {
-            validate_secret_visibility(actor_role, actor_account)
-        }
-        ModeChange::Visibility(_)
+        ModeChange::Visibility {
+            operation: ModeOperation::Add,
+            mode: VisibilityMode::Secret,
+        } => validate_secret_visibility(actor_role, actor_account),
+        ModeChange::Visibility { .. }
         | ModeChange::InviteOnly(_)
         | ModeChange::Moderated(_)
         | ModeChange::JoinKey(_) => require_role(actor_role, Role::Operator),
@@ -3365,15 +4317,105 @@ fn validate_mode_change(
         ModeChange::TopicProtected(_) | ModeChange::MemberLimit(_) => {
             require_role(actor_role, Role::HalfOperator)
         }
-        ModeChange::Role {
-            operation,
-            target,
-            role,
-        } => validate_role_change(state, channel, actor_role, *operation, target, *role),
-        ModeChange::AddMask { list, mask } => validate_mask_add(channel, actor_role, *list, mask),
-        ModeChange::RemoveMask { list, entry_id } => {
-            validate_mask_remove(channel, actor_role, *list, *entry_id)
+        ModeChange::Role { role, .. } => {
+            if *role == Role::Member {
+                return Err(DomainError::InvalidArgument);
+            }
+            if !actor_role.can_grant(*role) {
+                return Err(DomainError::Forbidden);
+            }
+            Ok(())
         }
+        ModeChange::AddMask { list, mask } => {
+            if mask.is_quiet() && *list != MaskList::Ban {
+                return Err(DomainError::InvalidArgument);
+            }
+            let required = if mask.is_quiet() {
+                Role::Operator
+            } else {
+                Role::HalfOperator
+            };
+            require_role(actor_role, required)
+        }
+        ModeChange::RemoveMask { .. } => require_role(actor_role, Role::HalfOperator),
+    }
+}
+
+fn resolve_mode_role_subject(
+    state: &DomainState,
+    channel: &crate::ChannelState,
+    target: &NicknameValue,
+) -> Result<(ModeRoleSubject, Role, bool), DomainError> {
+    let user_id = state
+        .nicknames
+        .get(target)
+        .copied()
+        .ok_or(DomainError::NotFound)?;
+    let membership = channel
+        .memberships
+        .get(&user_id)
+        .ok_or(DomainError::NotFound)?;
+    let session = state
+        .sessions
+        .get(&user_id)
+        .ok_or(DomainError::InvariantViolation)?;
+    if membership.account_id != session.account_id {
+        return Err(DomainError::InvariantViolation);
+    }
+    if channel.persistence == PersistencePolicy::Registered
+        && let Some(account_id) = session.account_id
+    {
+        let grant = channel.role_grants.get(&account_id).copied();
+        let role = grant.unwrap_or(Role::Member);
+        if membership.session_role != Role::Member || membership.effective_role != role {
+            return Err(DomainError::InvariantViolation);
+        }
+        return Ok((ModeRoleSubject::Account(account_id), role, grant.is_some()));
+    }
+    Ok((
+        ModeRoleSubject::Session(user_id),
+        membership.effective_role,
+        false,
+    ))
+}
+
+fn resulting_role(
+    current: Role,
+    operation: ModeOperation,
+    requested: Role,
+) -> Result<Role, DomainError> {
+    match operation {
+        ModeOperation::Add => Ok(std::cmp::max(current, requested)),
+        ModeOperation::Remove if requested == current => {
+            current.next_lower().ok_or(DomainError::InvalidArgument)
+        }
+        ModeOperation::Remove => Err(DomainError::InvalidArgument),
+    }
+}
+
+fn resulting_visibility(
+    current: Visibility,
+    operation: ModeOperation,
+    mode: VisibilityMode,
+) -> Visibility {
+    match (operation, mode) {
+        (ModeOperation::Add, VisibilityMode::Unlisted) => Visibility::Unlisted,
+        (ModeOperation::Add, VisibilityMode::Secret) => Visibility::Secret,
+        (ModeOperation::Remove, VisibilityMode::Unlisted) if current == Visibility::Unlisted => {
+            Visibility::Listed
+        }
+        (ModeOperation::Remove, VisibilityMode::Secret) if current == Visibility::Secret => {
+            Visibility::Listed
+        }
+        (ModeOperation::Remove, VisibilityMode::Unlisted | VisibilityMode::Secret) => current,
+    }
+}
+
+const fn mask_list_index(list: MaskList) -> usize {
+    match list {
+        MaskList::Ban => 0,
+        MaskList::Exception => 1,
+        MaskList::InviteException => 2,
     }
 }
 
@@ -3394,48 +4436,22 @@ fn validate_secret_visibility(
     require_role(actor_role, Role::Owner)
 }
 
-fn validate_mask_add(
+#[cfg(test)]
+fn validate_mode_change(
+    state: &DomainState,
     channel: &crate::ChannelState,
     actor_role: Role,
-    list: MaskList,
-    mask: &TypedMask,
+    actor_account: Option<AccountId>,
+    change: &ModeChange,
 ) -> Result<(), DomainError> {
-    if mask.is_quiet() && list != MaskList::Ban {
-        return Err(DomainError::InvalidArgument);
-    }
-    let required = if mask.is_quiet() {
-        Role::Operator
-    } else {
-        Role::HalfOperator
-    };
-    require_role(actor_role, required)?;
-    let entries = mask_list(channel, list);
-    if entries.len() >= crate::model::MAX_MASK_ENTRIES_PER_LIST {
-        return Err(DomainError::LimitExceeded);
-    }
-    if entries.iter().any(|entry| entry.mask == *mask) {
-        return Err(DomainError::InvalidArgument);
-    }
-    Ok(())
+    let mut validation = ModeValidationState::new(channel, 1)?;
+    let entry_id =
+        matches!(change, ModeChange::AddMask { .. }).then_some(EntryId::from_bytes([0_u8; 16]));
+    validation.validate_and_apply(state, channel, actor_role, actor_account, change, entry_id)?;
+    validation.validate_final(channel)
 }
 
-fn validate_mask_remove(
-    channel: &crate::ChannelState,
-    actor_role: Role,
-    list: MaskList,
-    entry_id: EntryId,
-) -> Result<(), DomainError> {
-    require_role(actor_role, Role::HalfOperator)?;
-    let entry = mask_list(channel, list)
-        .iter()
-        .find(|entry| entry.entry_id == entry_id)
-        .ok_or(DomainError::InvalidArgument)?;
-    if entry.is_quiet() {
-        require_role(actor_role, Role::Operator)?;
-    }
-    Ok(())
-}
-
+#[cfg(test)]
 fn validate_role_change(
     state: &DomainState,
     channel: &crate::ChannelState,
@@ -3444,33 +4460,26 @@ fn validate_role_change(
     target: &NicknameValue,
     role: Role,
 ) -> Result<(), DomainError> {
-    if !actor_role.can_grant(role) {
-        return Err(DomainError::Forbidden);
-    }
-    let target_user = state.nicknames.get(target).ok_or(DomainError::NotFound)?;
-    let current = channel.role_of(*target_user).ok_or(DomainError::NotFound)?;
-    match operation {
-        ModeOperation::Add if role <= current => Err(DomainError::InvalidArgument),
-        ModeOperation::Remove if role != current || role.next_lower().is_none() => {
-            Err(DomainError::InvalidArgument)
-        }
-        _ => Ok(()),
-    }
+    validate_mode_authority(
+        actor_role,
+        None,
+        &ModeChange::Role {
+            operation,
+            target: target.clone(),
+            role,
+        },
+    )?;
+    let (_, current, _) = resolve_mode_role_subject(state, channel, target)?;
+    resulting_role(current, operation, role).map(|_| ())
 }
 
-fn validate_owner_continuity(
+#[cfg(test)]
+fn validate_role_vector_final(
     state: &DomainState,
     channel: &crate::ChannelState,
     changes: &[ModeChange],
 ) -> Result<(), DomainError> {
-    if channel.persistence != PersistencePolicy::Registered {
-        return Ok(());
-    }
-    let mut owners = channel
-        .role_grants
-        .values()
-        .filter(|role| **role == Role::Owner)
-        .count();
+    let mut validation = ModeValidationState::new(channel, changes.len())?;
     for change in changes {
         let ModeChange::Role {
             operation,
@@ -3480,34 +4489,27 @@ fn validate_owner_continuity(
         else {
             continue;
         };
-        let Some(user_id) = state.nicknames.get(target) else {
-            return Err(DomainError::NotFound);
-        };
-        let account_id = state
-            .sessions
-            .get(user_id)
-            .and_then(|session| session.account_id)
-            .ok_or(DomainError::RegistrationRequired)?;
-        let prior = channel
-            .role_grants
-            .get(&account_id)
-            .copied()
-            .unwrap_or(Role::Member);
-        if prior == Role::Owner {
-            owners = owners.saturating_sub(1);
-        }
-        let next = match operation {
-            ModeOperation::Add => *role,
-            ModeOperation::Remove => role.next_lower().ok_or(DomainError::InvalidArgument)?,
-        };
-        if next == Role::Owner {
-            owners = owners.checked_add(1).ok_or(DomainError::Overflow)?;
-        }
+        validation.apply_role_change(state, channel, *operation, target, *role)?;
     }
-    if owners == 0 {
-        return Err(DomainError::BadState);
-    }
-    Ok(())
+    validation.validate_final(channel)
+}
+
+#[cfg(test)]
+fn validate_role_grant_capacity(
+    state: &DomainState,
+    channel: &crate::ChannelState,
+    changes: &[ModeChange],
+) -> Result<(), DomainError> {
+    validate_role_vector_final(state, channel, changes)
+}
+
+#[cfg(test)]
+fn validate_owner_continuity(
+    state: &DomainState,
+    channel: &crate::ChannelState,
+    changes: &[ModeChange],
+) -> Result<(), DomainError> {
+    validate_role_vector_final(state, channel, changes)
 }
 
 fn mode_events(
@@ -3554,21 +4556,31 @@ fn apply_role_change(
     let Some(user_id) = nicknames.get(target).copied() else {
         return;
     };
-    let Some(membership) = channel.memberships.get_mut(&user_id) else {
+    let Some(membership) = channel.memberships.get(&user_id) else {
         return;
     };
-    let next = match operation {
-        ModeOperation::Add => role,
-        ModeOperation::Remove => role.next_lower().unwrap_or(Role::Member),
-    };
-    membership.session_role = next;
     let account_id = membership.account_id;
-    if channel.persistence != PersistencePolicy::Registered {
+    if channel.persistence != PersistencePolicy::Registered || account_id.is_none() {
+        let current = membership.effective_role;
+        let Ok(next) = resulting_role(current, operation, role) else {
+            return;
+        };
+        let Some(membership) = channel.memberships.get_mut(&user_id) else {
+            return;
+        };
+        membership.session_role = next;
         membership.effective_role = next;
         return;
     }
     let Some(account_id) = account_id else {
-        membership.effective_role = next;
+        return;
+    };
+    let current = channel
+        .role_grants
+        .get(&account_id)
+        .copied()
+        .unwrap_or(Role::Member);
+    let Ok(next) = resulting_role(current, operation, role) else {
         return;
     };
     if next == Role::Member {
@@ -3578,7 +4590,8 @@ fn apply_role_change(
     }
     for current in channel.memberships.values_mut() {
         if current.account_id == Some(account_id) {
-            current.effective_role = std::cmp::max(current.session_role, next);
+            current.session_role = Role::Member;
+            current.effective_role = next;
         }
     }
 }
@@ -3695,8 +4708,7 @@ fn channel_command_id(command: ChannelCommand) -> ChannelInstanceId {
     match command {
         ChannelCommand::Register(channel_id)
         | ChannelCommand::Unregister(channel_id)
-        | ChannelCommand::History(channel_id, _)
-        | ChannelCommand::Content(channel_id, _) => channel_id,
+        | ChannelCommand::History(channel_id, _) => channel_id,
     }
 }
 
@@ -3723,7 +4735,9 @@ fn validate_channel_setting(
             }
         }
         ChannelCommand::Unregister(_) => {
-            if channel.persistence != PersistencePolicy::Registered {
+            if channel.persistence != PersistencePolicy::Registered
+                || channel.content_policy == ContentPolicy::E2eeBound
+            {
                 return Err(DomainError::BadState);
             }
         }
@@ -3732,15 +4746,6 @@ fn validate_channel_setting(
                 return Err(DomainError::BadState);
             }
         }
-        ChannelCommand::Content(_, ContentPolicy::E2eeBound) => {
-            if channel.scope != crate::ChannelScope::Global
-                || channel.history != HistoryPolicy::Off
-                || channel.topic.is_some()
-            {
-                return Err(DomainError::BadState);
-            }
-        }
-        ChannelCommand::Content(_, ContentPolicy::Plaintext) => {}
     }
     Ok(())
 }
@@ -3751,6 +4756,30 @@ fn history_setting_is_allowed(channel: &crate::ChannelState, history: HistoryPol
             && channel.persistence == PersistencePolicy::Registered
             && channel.content_policy == ContentPolicy::Plaintext
             && channel.scope == crate::ChannelScope::Global)
+}
+
+fn channel_accepts_e2ee_binding(channel: &crate::ChannelState) -> bool {
+    channel.scope == crate::ChannelScope::Global
+        && channel.persistence == PersistencePolicy::Registered
+        && channel.content_policy == ContentPolicy::Plaintext
+        && channel.history == HistoryPolicy::Off
+        && channel.topic.is_none()
+        && channel.e2ee_removal_pending.is_empty()
+}
+
+fn canonical_account_roster(
+    channel: &crate::ChannelState,
+) -> Result<Vec<(UserId, AccountId)>, DomainError> {
+    let mut roster = Vec::new();
+    roster
+        .try_reserve_exact(channel.memberships.len())
+        .map_err(|_| DomainError::AllocationFailed)?;
+    for membership in channel.memberships.values() {
+        let account_id = membership.account_id.ok_or(DomainError::BadState)?;
+        roster.push((membership.user_id, account_id));
+    }
+    roster.sort_unstable_by_key(|(user_id, _)| *user_id);
+    Ok(roster)
 }
 
 fn authorize_sanction(
@@ -3807,7 +4836,7 @@ fn authorize_sanction(
 mod tests {
     use super::*;
     use crate::{MessageCommand, MessageText};
-    use agenc_ircd_types::{AccountRandomId, ControlPolicy, PublicCloak, ServerId, SessionId};
+    use agenc_ircd_types::{AccountRandomId, ControlPolicy, ServerId, SessionId};
 
     struct Fixture {
         state: DomainState,
@@ -3850,7 +4879,7 @@ mod tests {
             generation: agenc_ircd_types::Generation::new(1)?,
             nickname: NicknameValue::parse(&format!("test{seed}"))?,
             display_name: DisplayNameValue::prepare(&format!("Test {seed}"))?,
-            public_cloak: PublicCloak::parse("aaaaaaaaaa", "bbbbbbbbbbbbbbbb")?,
+            public_cloak: crate::model::test_public_cloak(seed)?,
             connection_nonce: [seed; 32],
             negotiated_capability_hash: [seed.wrapping_add(1); 32],
             created_at_utc: UtcSecond::from_unix_seconds(10),
@@ -3962,6 +4991,21 @@ mod tests {
             .first()
             .map(TargetFailure::error)
             .ok_or(DomainError::InvariantViolation)
+    }
+
+    fn account_command_plan(
+        state: &DomainState,
+        session: &SessionState,
+        command: AccountCommand,
+        external: Option<ExternalInputs>,
+    ) -> Result<PlanDecision, DomainError> {
+        let authorized = state
+            .authorize(
+                envelope(session, state.revision, CanonicalCommand::account(command)),
+                &admission(session.user_id)?,
+            )
+            .map_err(|failure| failure.error())?;
+        state.plan_authorized(authorized, external)
     }
 
     #[test]
@@ -4122,7 +5166,7 @@ mod tests {
         let missing_message = MessageCommand::new(
             MessageKind::Privmsg,
             vec![MessageTarget::Channel(missing_name)],
-            Some(MessageText::try_from_str("x", ControlPolicy::RejectAll)?),
+            Some(MessageText::parse("x")?),
         )?;
         let message_credit = AdmissionSnapshot::new(vec![
             (RateBucket::RegisteredCommand(fixture.owner.user_id), 10),
@@ -4141,7 +5185,7 @@ mod tests {
         let outsider_message = MessageCommand::new(
             MessageKind::Privmsg,
             vec![MessageTarget::Channel(fixture.name.clone())],
-            Some(MessageText::try_from_str("x", ControlPolicy::RejectAll)?),
+            Some(MessageText::parse("x")?),
         )?;
         let outsider_credit = AdmissionSnapshot::new(vec![
             (RateBucket::RegisteredCommand(fixture.outsider.user_id), 10),
@@ -4166,7 +5210,7 @@ mod tests {
         let member_message = MessageCommand::new(
             MessageKind::Privmsg,
             vec![MessageTarget::Channel(fixture.name.clone())],
-            Some(MessageText::try_from_str("x", ControlPolicy::RejectAll)?),
+            Some(MessageText::parse("x")?),
         )?;
         let member_credit = AdmissionSnapshot::new(vec![
             (RateBucket::RegisteredCommand(fixture.member.user_id), 10),
@@ -4189,7 +5233,7 @@ mod tests {
             .content_policy = ContentPolicy::E2eeBound;
         for kind in [MessageKind::Privmsg, MessageKind::Notice] {
             let body = (kind == MessageKind::Privmsg)
-                .then(|| MessageText::try_from_str("x", ControlPolicy::RejectAll))
+                .then(|| MessageText::parse("x"))
                 .transpose()?;
             let command = CanonicalCommand::message(MessageCommand::new(
                 kind,
@@ -4445,7 +5489,10 @@ mod tests {
                 channel,
                 Role::HalfOperator,
                 Some(fixture.owner_account),
-                &ModeChange::Visibility(Visibility::Secret),
+                &ModeChange::Visibility {
+                    operation: ModeOperation::Add,
+                    mode: VisibilityMode::Secret,
+                },
             ),
             Err(DomainError::Forbidden)
         );
@@ -4527,7 +5574,7 @@ mod tests {
                 &fixture.owner.nickname,
                 Role::Owner,
             ),
-            Err(DomainError::InvalidArgument)
+            Ok(())
         );
         assert_eq!(
             validate_role_change(
@@ -4580,15 +5627,6 @@ mod tests {
                 ChannelCommand::Unregister(fixture.channel_id),
             ),
             Err(DomainError::BadState)
-        );
-        assert_eq!(
-            validate_channel_setting(
-                state,
-                fixture.owner.user_id,
-                fixture.owner_account,
-                ChannelCommand::Content(fixture.channel_id, ContentPolicy::E2eeBound),
-            ),
-            Ok(())
         );
         assert_eq!(
             authorize_sanction(
@@ -4712,8 +5750,21 @@ mod tests {
         );
         assert_eq!(charge.tokens(), 2);
         let admission = AdmissionSnapshot::new(vec![(charge.bucket(), 2)])?;
-        assert!(admission.admits(&[charge]));
-        assert!(!admission.admits(&[RateCharge::new(charge.bucket(), 3)?]));
+        assert_eq!(admission.admits(&[charge]), Ok(true));
+        assert_eq!(
+            admission.admits(&[
+                RateCharge::new(charge.bucket(), 1)?,
+                RateCharge::new(charge.bucket(), 2)?,
+            ]),
+            Ok(false)
+        );
+        assert_eq!(
+            admission.admits(&[
+                RateCharge::new(charge.bucket(), u64::MAX)?,
+                RateCharge::new(charge.bucket(), 1)?,
+            ]),
+            Err(DomainError::Overflow)
+        );
 
         for (index, request) in [
             ExternalInputRequest::UtcNow {
@@ -4789,7 +5840,10 @@ mod tests {
                 &channel,
                 Role::Owner,
                 None,
-                &ModeChange::Visibility(Visibility::Secret),
+                &ModeChange::Visibility {
+                    operation: ModeOperation::Add,
+                    mode: VisibilityMode::Secret,
+                },
             ),
             Err(DomainError::RegistrationRequired)
         );
@@ -4799,7 +5853,10 @@ mod tests {
                 &channel,
                 Role::Member,
                 Some(fixture.owner_account),
-                &ModeChange::Visibility(Visibility::Listed),
+                &ModeChange::Visibility {
+                    operation: ModeOperation::Remove,
+                    mode: VisibilityMode::Secret,
+                },
             ),
             Err(DomainError::Forbidden)
         );
@@ -4966,6 +6023,17 @@ mod tests {
         channel
             .role_grants
             .insert(fixture.member_account, Role::Member);
+        for membership in channel.memberships.values_mut() {
+            let Some(account_id) = membership.account_id else {
+                continue;
+            };
+            membership.session_role = Role::Member;
+            membership.effective_role = channel
+                .role_grants
+                .get(&account_id)
+                .copied()
+                .unwrap_or(Role::Member);
+        }
         let remove_owner = ModeChange::Role {
             operation: ModeOperation::Remove,
             target: fixture.owner.nickname.clone(),
@@ -5064,6 +6132,243 @@ mod tests {
             ),
             Err(DomainError::LimitExceeded)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn mode_vectors_simulate_client_order_and_check_only_the_final_state() -> Result<(), DomainError>
+    {
+        {
+            let fixture = fixture()?;
+            let channel = fixture
+                .state
+                .channels
+                .get(&fixture.channel_id)
+                .ok_or(DomainError::InvariantViolation)?;
+            let private_then_secret = [
+                ModeChange::Visibility {
+                    operation: ModeOperation::Add,
+                    mode: VisibilityMode::Unlisted,
+                },
+                ModeChange::Visibility {
+                    operation: ModeOperation::Add,
+                    mode: VisibilityMode::Secret,
+                },
+            ];
+            validate_mode_vector(
+                &fixture.state,
+                channel,
+                fixture.owner.user_id,
+                &private_then_secret,
+                &[],
+            )?;
+            let final_visibility = private_then_secret.iter().fold(
+                channel.visibility,
+                |current, change| match change {
+                    ModeChange::Visibility { operation, mode } => {
+                        resulting_visibility(current, *operation, *mode)
+                    }
+                    _ => current,
+                },
+            );
+            assert_eq!(final_visibility, Visibility::Secret);
+        }
+
+        {
+            let mut fixture = fixture()?;
+            let mut channel = fixture
+                .state
+                .channels
+                .remove(&fixture.channel_id)
+                .ok_or(DomainError::InvariantViolation)?;
+            let raise_without_demotion = [
+                ModeChange::Role {
+                    operation: ModeOperation::Add,
+                    target: fixture.member.nickname.clone(),
+                    role: Role::Operator,
+                },
+                ModeChange::Role {
+                    operation: ModeOperation::Add,
+                    target: fixture.member.nickname.clone(),
+                    role: Role::Voice,
+                },
+            ];
+            validate_mode_vector(
+                &fixture.state,
+                &channel,
+                fixture.owner.user_id,
+                &raise_without_demotion,
+                &[],
+            )?;
+            for change in raise_without_demotion {
+                let ModeChange::Role {
+                    operation,
+                    target,
+                    role,
+                } = change
+                else {
+                    return Err(DomainError::InvariantViolation);
+                };
+                apply_role_change(
+                    &fixture.state.nicknames,
+                    &mut channel,
+                    operation,
+                    &target,
+                    role,
+                );
+            }
+            assert_eq!(
+                channel.role_of(fixture.member.user_id),
+                Some(Role::Operator)
+            );
+        }
+
+        {
+            let mut fixture = fixture()?;
+            let mut channel = fixture
+                .state
+                .channels
+                .remove(&fixture.channel_id)
+                .ok_or(DomainError::InvariantViolation)?;
+            register_channel_roles(&mut channel);
+            let transfer = [
+                ModeChange::Role {
+                    operation: ModeOperation::Remove,
+                    target: fixture.owner.nickname.clone(),
+                    role: Role::Owner,
+                },
+                ModeChange::Role {
+                    operation: ModeOperation::Add,
+                    target: fixture.member.nickname.clone(),
+                    role: Role::Owner,
+                },
+            ];
+            validate_mode_vector(
+                &fixture.state,
+                &channel,
+                fixture.owner.user_id,
+                &transfer,
+                &[],
+            )?;
+            for change in transfer {
+                let ModeChange::Role {
+                    operation,
+                    target,
+                    role,
+                } = change
+                else {
+                    return Err(DomainError::InvariantViolation);
+                };
+                apply_role_change(
+                    &fixture.state.nicknames,
+                    &mut channel,
+                    operation,
+                    &target,
+                    role,
+                );
+            }
+            assert_eq!(
+                channel.role_grants.get(&fixture.owner_account),
+                Some(&Role::Administrator)
+            );
+            assert_eq!(
+                channel.role_grants.get(&fixture.member_account),
+                Some(&Role::Owner)
+            );
+            channel.validate()?;
+
+            channel.memberships.insert(
+                fixture.outsider.user_id,
+                Membership::new(fixture.outsider.user_id, None, Role::Member),
+            );
+            validate_mode_vector(
+                &fixture.state,
+                &channel,
+                fixture.member.user_id,
+                &[ModeChange::Role {
+                    operation: ModeOperation::Add,
+                    target: fixture.outsider.nickname.clone(),
+                    role: Role::Voice,
+                }],
+                &[],
+            )?;
+
+            channel.history = HistoryPolicy::OneHour;
+            assert_eq!(
+                validate_mode_vector(
+                    &fixture.state,
+                    &channel,
+                    fixture.member.user_id,
+                    &[ModeChange::Visibility {
+                        operation: ModeOperation::Add,
+                        mode: VisibilityMode::Unlisted,
+                    }],
+                    &[],
+                ),
+                Err(DomainError::BadState)
+            );
+        }
+
+        {
+            let mut fixture = fixture()?;
+            let channel = fixture
+                .state
+                .channels
+                .get_mut(&fixture.channel_id)
+                .ok_or(DomainError::InvariantViolation)?;
+            let mut first_entry_id = None;
+            for index in 0..crate::model::MAX_MASK_ENTRIES_PER_LIST {
+                let index = u64::try_from(index).map_err(|_| DomainError::Overflow)?;
+                let mut raw = [0_u8; 16];
+                raw[..8].copy_from_slice(&index.to_be_bytes());
+                let entry_id = EntryId::from_bytes(raw);
+                first_entry_id.get_or_insert(entry_id);
+                channel.bans.push(crate::ListEntry::new(
+                    entry_id,
+                    TypedMask::parse(&format!("$n:bounded{index}"))?,
+                    fixture.owner.principal(),
+                    UtcSecond::from_unix_seconds(10),
+                ));
+            }
+            let first_entry_id = first_entry_id.ok_or(DomainError::InvariantViolation)?;
+            let channel = fixture
+                .state
+                .channels
+                .get(&fixture.channel_id)
+                .ok_or(DomainError::InvariantViolation)?;
+            validate_mode_vector(
+                &fixture.state,
+                channel,
+                fixture.owner.user_id,
+                &[
+                    ModeChange::AddMask {
+                        list: MaskList::Ban,
+                        mask: TypedMask::parse("$n:temporary")?,
+                    },
+                    ModeChange::RemoveMask {
+                        list: MaskList::Ban,
+                        entry_id: first_entry_id,
+                    },
+                ],
+                &[EntryId::from_bytes([0xff_u8; 16])],
+            )?;
+            validate_mode_vector(
+                &fixture.state,
+                channel,
+                fixture.owner.user_id,
+                &[
+                    ModeChange::RemoveMask {
+                        list: MaskList::Ban,
+                        entry_id: first_entry_id,
+                    },
+                    ModeChange::AddMask {
+                        list: MaskList::Ban,
+                        mask: TypedMask::parse("$n:bounded0")?,
+                    },
+                ],
+                &[EntryId::from_bytes([0xfe_u8; 16])],
+            )?;
+        }
         Ok(())
     }
 
@@ -5622,30 +6927,6 @@ mod tests {
             ),
             Ok(())
         );
-        assert_eq!(
-            validate_channel_setting(
-                state,
-                fixture.owner.user_id,
-                fixture.owner_account,
-                ChannelCommand::Content(fixture.channel_id, ContentPolicy::E2eeBound),
-            ),
-            Ok(())
-        );
-        state
-            .channels
-            .get_mut(&fixture.channel_id)
-            .ok_or(DomainError::InvariantViolation)?
-            .scope = crate::ChannelScope::Local;
-        assert_eq!(
-            validate_channel_setting(
-                state,
-                fixture.owner.user_id,
-                fixture.owner_account,
-                ChannelCommand::Content(fixture.channel_id, ContentPolicy::E2eeBound),
-            ),
-            Err(DomainError::BadState)
-        );
-
         assert_eq!(
             authorize_sanction(
                 state,
@@ -6291,10 +7572,7 @@ mod tests {
         let message = MessageCommand::new(
             MessageKind::Privmsg,
             vec![MessageTarget::User(fixture.member.nickname.clone())],
-            Some(MessageText::try_from_str(
-                "extra",
-                ControlPolicy::RejectAll,
-            )?),
+            Some(MessageText::parse("extra")?),
         )?;
         assert_eq!(
             fixture
@@ -6316,6 +7594,43 @@ mod tests {
             Some(DomainError::ExternalInputMismatch)
         );
         Ok(())
+    }
+
+    #[test]
+    fn message_planning_rejects_duplicate_external_ids_without_state_change()
+    -> Result<(), DomainError> {
+        let fixture = fixture()?;
+        let message = MessageCommand::new(
+            MessageKind::Privmsg,
+            vec![
+                MessageTarget::User(fixture.member.nickname.clone()),
+                MessageTarget::User(fixture.outsider.nickname.clone()),
+            ],
+            Some(MessageText::parse("duplicate ID")?),
+        )?;
+        let duplicate = MessageId::from_bytes(bytes(239));
+        let before_revision = fixture.state.revision;
+        let before_sessions = fixture.state.session_count();
+
+        assert_eq!(
+            fixture
+                .state
+                .plan_message(
+                    fixture.owner.user_id,
+                    message,
+                    Vec::new(),
+                    ExternalInputs {
+                        utc_now: Some(UtcSecond::from_unix_seconds(20)),
+                        message_ids: vec![duplicate, duplicate],
+                        ..ExternalInputs::default()
+                    },
+                )
+                .err(),
+            Some(DomainError::ExternalInputMismatch)
+        );
+        assert_eq!(fixture.state.revision, before_revision);
+        assert_eq!(fixture.state.session_count(), before_sessions);
+        fixture.state.validate()
     }
 
     #[test]
@@ -6656,7 +7971,10 @@ mod tests {
                 &channel,
                 Role::Owner,
                 Some(fixture.owner_account),
-                &ModeChange::Visibility(Visibility::Secret),
+                &ModeChange::Visibility {
+                    operation: ModeOperation::Add,
+                    mode: VisibilityMode::Secret,
+                },
             ),
             Ok(())
         );
@@ -6859,7 +8177,7 @@ mod tests {
             .memberships
             .get_mut(&fixture.member.user_id)
             .ok_or(DomainError::InvariantViolation)?;
-        member.session_role = Role::Voice;
+        member.session_role = Role::Member;
         member.effective_role = Role::Voice;
         assert_eq!(
             fixture.state.authorize_channel_message(
@@ -6919,7 +8237,7 @@ mod tests {
     fn account_switch_contact_and_invite_short_circuits_are_observable() -> Result<(), DomainError>
     {
         let mut fixture = fixture()?;
-        assert!(
+        assert_eq!(
             fixture
                 .state
                 .plan_session_account_switch(
@@ -6930,7 +8248,8 @@ mod tests {
                         fixture.owner.account_session_generation,
                     )),
                 )
-                .is_ok()
+                .err(),
+            Some(DomainError::BadState)
         );
 
         fixture
@@ -7017,12 +8336,17 @@ mod tests {
         channel
             .role_grants
             .insert(fixture.member_account, Role::Voice);
-        let member = channel
-            .memberships
-            .get_mut(&fixture.member.user_id)
-            .ok_or(DomainError::InvariantViolation)?;
-        member.session_role = Role::Voice;
-        member.effective_role = Role::Voice;
+        for membership in channel.memberships.values_mut() {
+            let Some(account_id) = membership.account_id else {
+                continue;
+            };
+            membership.session_role = Role::Member;
+            membership.effective_role = channel
+                .role_grants
+                .get(&account_id)
+                .copied()
+                .unwrap_or(Role::Member);
+        }
 
         let removal = ModeChange::Role {
             operation: ModeOperation::Remove,
@@ -7062,6 +8386,749 @@ mod tests {
             Role::Voice,
         );
         assert!(!channel.role_grants.contains_key(&fixture.member_account));
+        Ok(())
+    }
+
+    #[test]
+    fn credential_replacement_advances_generation_and_fences_every_session()
+    -> Result<(), DomainError> {
+        let account_id = account_id(220);
+        let generation = agenc_ircd_types::Generation::new(1)?;
+        let account_revision = Revision::new(0)?;
+        let mut state = DomainState::new()?;
+        state.accounts.insert(
+            account_id,
+            AccountState::new(account_id, generation, account_revision),
+        );
+        let first = session(221, Some(account_id))?;
+        let first_user = first.user_id;
+        let second = session(222, Some(account_id))?;
+        let second_user = second.user_id;
+        state.apply_session(first, account_revision);
+        state.apply_session(second, account_revision);
+
+        assert_eq!(
+            state
+                .plan_account_credential_replaced(account_id, generation, Revision::new(9)?,)
+                .err(),
+            Some(DomainError::StaleRevision)
+        );
+        let (plan, next_generation) =
+            state.plan_account_credential_replaced(account_id, generation, account_revision)?;
+        assert_eq!(next_generation, agenc_ircd_types::Generation::new(2)?);
+        assert_eq!(plan.events().len(), 3);
+        let prepared = state.prepare_mutation(plan)?;
+        let receipt = state.apply_prepared(prepared)?;
+        assert_eq!(receipt.storage_class(), StorageClass::Durable);
+        assert!(!state.sessions.contains_key(&first_user));
+        assert!(!state.sessions.contains_key(&second_user));
+        let account = state
+            .accounts
+            .get(&account_id)
+            .ok_or(DomainError::InvariantViolation)?;
+        assert_eq!(account.session_generation, next_generation);
+        assert_eq!(account.revision, receipt.revision());
+        Ok(())
+    }
+
+    #[test]
+    fn deletion_confirmation_revision_is_rechecked_before_planning() -> Result<(), DomainError> {
+        let account_id = account_id(223);
+        let generation = agenc_ircd_types::Generation::new(1)?;
+        let account_revision = Revision::new(0)?;
+        let mut state = DomainState::new()?;
+        state.accounts.insert(
+            account_id,
+            AccountState::new(account_id, generation, account_revision),
+        );
+        state.apply_session(session(224, Some(account_id))?, account_revision);
+        assert_eq!(
+            state
+                .plan_account_deleted_at_revision(account_id, generation, Revision::new(1)?,)
+                .err(),
+            Some(DomainError::StaleRevision)
+        );
+        let plan =
+            state.plan_account_deleted_at_revision(account_id, generation, account_revision)?;
+        assert_eq!(plan.storage_class(), StorageClass::Durable);
+        Ok(())
+    }
+
+    #[test]
+    fn expired_invite_sweep_is_network_wide_bounded_and_preserves_live_invites()
+    -> Result<(), DomainError> {
+        let mut fixture = fixture()?;
+        let second_channel_id = ChannelInstanceId::from_bytes(bytes(225));
+        let second_channel = crate::ChannelState::new_ephemeral(
+            second_channel_id,
+            ChannelNameValue::parse("#second")?,
+            Principal::Account(fixture.owner_account),
+            Membership::new(
+                fixture.owner.user_id,
+                Some(fixture.owner_account),
+                Role::Owner,
+            ),
+            UtcSecond::from_unix_seconds(10),
+            fixture.state.revision,
+        );
+        fixture
+            .state
+            .apply_join_new(second_channel, fixture.state.revision);
+
+        let first_expired = InviteId::from_bytes(bytes(226));
+        let second_expired = InviteId::from_bytes(bytes(227));
+        let live = InviteId::from_bytes(bytes(228));
+        let creation_revision = fixture.state.revision;
+        fixture
+            .state
+            .channels
+            .get_mut(&fixture.channel_id)
+            .ok_or(DomainError::InvariantViolation)?
+            .invites
+            .extend([
+                (
+                    first_expired,
+                    Invite {
+                        invite_id: first_expired,
+                        target: Principal::Account(fixture.member_account),
+                        inviter: fixture.owner.user_id,
+                        creation_revision,
+                        expires_at: MonotonicTick::from_ticks(5),
+                    },
+                ),
+                (
+                    live,
+                    Invite {
+                        invite_id: live,
+                        target: Principal::Account(fixture.member_account),
+                        inviter: fixture.owner.user_id,
+                        creation_revision,
+                        expires_at: MonotonicTick::from_ticks(6),
+                    },
+                ),
+            ]);
+        fixture
+            .state
+            .channels
+            .get_mut(&second_channel_id)
+            .ok_or(DomainError::InvariantViolation)?
+            .invites
+            .insert(
+                second_expired,
+                Invite {
+                    invite_id: second_expired,
+                    target: Principal::Guest(fixture.outsider.user_id),
+                    inviter: fixture.owner.user_id,
+                    creation_revision,
+                    expires_at: MonotonicTick::from_ticks(4),
+                },
+            );
+
+        let plan = fixture
+            .state
+            .plan_expired_invites(MonotonicTick::from_ticks(5))?
+            .ok_or(DomainError::InvariantViolation)?;
+        assert_eq!(plan.events().len(), 2);
+        assert!(
+            plan.recipients()
+                .iter()
+                .any(|user_id| user_id == fixture.owner.user_id)
+        );
+        assert!(
+            plan.recipients()
+                .iter()
+                .any(|user_id| user_id == fixture.member.user_id)
+        );
+        assert!(
+            plan.recipients()
+                .iter()
+                .any(|user_id| user_id == fixture.outsider.user_id)
+        );
+        let prepared = fixture.state.prepare_mutation(plan)?;
+        fixture.state.apply_prepared(prepared)?;
+        assert_eq!(
+            fixture
+                .state
+                .channel(fixture.channel_id)
+                .ok_or(DomainError::InvariantViolation)?
+                .pending_invites()
+                .map(|(invite_id, ..)| invite_id)
+                .collect::<Vec<_>>(),
+            vec![live]
+        );
+        assert_eq!(
+            fixture
+                .state
+                .channel(second_channel_id)
+                .ok_or(DomainError::InvariantViolation)?
+                .pending_invites()
+                .count(),
+            0
+        );
+        assert!(
+            fixture
+                .state
+                .plan_expired_invites(MonotonicTick::from_ticks(5))?
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn nickname_and_display_name_changes_emit_distinct_events() -> Result<(), DomainError> {
+        let fixture = fixture()?;
+        let PlanDecision::Mutation(nickname) = fixture.state.plan_nick(
+            fixture.owner.user_id,
+            NicknameValue::parse("renamed")?,
+            Vec::new(),
+        )?
+        else {
+            return Err(DomainError::InvariantViolation);
+        };
+        assert_eq!(
+            nickname.events(),
+            &[DomainEvent::NicknameChanged(fixture.owner.user_id)]
+        );
+        let PlanDecision::Mutation(display_name) = fixture.state.plan_setname(
+            fixture.owner.user_id,
+            DisplayNameValue::prepare("Renamed Display")?,
+            Vec::new(),
+        )?
+        else {
+            return Err(DomainError::InvariantViolation);
+        };
+        assert_eq!(
+            display_name.events(),
+            &[DomainEvent::DisplayNameChanged(fixture.owner.user_id)]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn account_delete_commands_consume_fresh_auth_and_every_confirmation_challenge()
+    -> Result<(), DomainError> {
+        let account_id = account_id(229);
+        let account_generation = agenc_ircd_types::Generation::new(1)?;
+        let mut state = DomainState::new()?;
+        state.apply_account(
+            AccountState::new(account_id, account_generation, state.revision),
+            state.revision,
+        );
+        let live_session = session(230, Some(account_id))?;
+        let live_user_id = live_session.user_id;
+        state.apply_session(session(230, Some(account_id))?, state.revision);
+
+        let fresh = state.plan_session_fresh_authentication(
+            live_user_id,
+            account_id,
+            live_session.generation,
+            MonotonicTick::from_ticks(100),
+        )?;
+        let prepared = state.prepare_mutation(fresh)?;
+        state.apply_prepared(prepared)?;
+        let PlanDecision::NeedsExternal(requests) =
+            account_command_plan(&state, &live_session, AccountCommand::DeleteStart, None)?
+        else {
+            return Err(DomainError::InvariantViolation);
+        };
+        assert_eq!(requests.len(), 2);
+        let start = account_command_plan(
+            &state,
+            &live_session,
+            AccountCommand::DeleteStart,
+            Some(ExternalInputs {
+                monotonic_now: Some(MonotonicTick::from_ticks(101)),
+                deletion_tokens: vec![AccountDeletionToken::from_bytes(bytes(231))],
+                ..ExternalInputs::default()
+            }),
+        )?;
+        let PlanDecision::Mutation(start) = start else {
+            return Err(DomainError::InvariantViolation);
+        };
+        assert_eq!(start.account_deletion_token(), Some(&bytes(231)));
+        assert_eq!(
+            start.account_deletion_expires_at(),
+            Some(MonotonicTick::from_ticks(60_101))
+        );
+        let prepared = state.prepare_mutation(start)?;
+        state.apply_prepared(prepared)?;
+        assert_eq!(
+            state
+                .session(live_user_id)
+                .ok_or(DomainError::InvariantViolation)?
+                .fresh_auth_deadline(),
+            None
+        );
+        state.validate()?;
+        assert_eq!(
+            state
+                .plan_session_fresh_authentication(
+                    live_user_id,
+                    account_id,
+                    live_session.generation,
+                    MonotonicTick::from_ticks(102),
+                )
+                .err(),
+            Some(DomainError::BadState)
+        );
+
+        let rejected = account_command_plan(
+            &state,
+            &live_session,
+            AccountCommand::DeleteConfirm(AccountDeletionToken::from_bytes(bytes(232))),
+            Some(ExternalInputs {
+                monotonic_now: Some(MonotonicTick::from_ticks(102)),
+                ..ExternalInputs::default()
+            }),
+        )?;
+        let PlanDecision::Mutation(rejected) = rejected else {
+            return Err(DomainError::InvariantViolation);
+        };
+        assert_eq!(
+            rejected.events(),
+            &[DomainEvent::AccountDeletionConfirmationRejected(
+                live_user_id
+            )]
+        );
+        let prepared = state.prepare_mutation(rejected)?;
+        state.apply_prepared(prepared)?;
+        assert!(state.account_deletion_challenges.is_empty());
+        state.validate()?;
+
+        let fresh = state.plan_session_fresh_authentication(
+            live_user_id,
+            account_id,
+            live_session.generation,
+            MonotonicTick::from_ticks(200),
+        )?;
+        let prepared = state.prepare_mutation(fresh)?;
+        state.apply_prepared(prepared)?;
+        let PlanDecision::Mutation(start) = account_command_plan(
+            &state,
+            &live_session,
+            AccountCommand::DeleteStart,
+            Some(ExternalInputs {
+                monotonic_now: Some(MonotonicTick::from_ticks(201)),
+                deletion_tokens: vec![AccountDeletionToken::from_bytes(bytes(233))],
+                ..ExternalInputs::default()
+            }),
+        )?
+        else {
+            return Err(DomainError::InvariantViolation);
+        };
+        let prepared = state.prepare_mutation(start)?;
+        state.apply_prepared(prepared)?;
+        let fresh = state.plan_session_fresh_authentication(
+            live_user_id,
+            account_id,
+            live_session.generation,
+            MonotonicTick::from_ticks(60_201),
+        )?;
+        let prepared = state.prepare_mutation(fresh)?;
+        state.apply_prepared(prepared)?;
+        assert!(state.account_deletion_challenges.is_empty());
+        let PlanDecision::Mutation(start) = account_command_plan(
+            &state,
+            &live_session,
+            AccountCommand::DeleteStart,
+            Some(ExternalInputs {
+                monotonic_now: Some(MonotonicTick::from_ticks(60_202)),
+                deletion_tokens: vec![AccountDeletionToken::from_bytes(bytes(234))],
+                ..ExternalInputs::default()
+            }),
+        )?
+        else {
+            return Err(DomainError::InvariantViolation);
+        };
+        let prepared = state.prepare_mutation(start)?;
+        state.apply_prepared(prepared)?;
+        let PlanDecision::Mutation(confirmed) = account_command_plan(
+            &state,
+            &live_session,
+            AccountCommand::DeleteConfirm(AccountDeletionToken::from_bytes(bytes(234))),
+            Some(ExternalInputs {
+                monotonic_now: Some(MonotonicTick::from_ticks(60_203)),
+                ..ExternalInputs::default()
+            }),
+        )?
+        else {
+            return Err(DomainError::InvariantViolation);
+        };
+        assert_eq!(
+            confirmed.events(),
+            &[DomainEvent::AccountDeleted(account_id)]
+        );
+        let prepared = state.prepare_mutation(confirmed)?;
+        state.apply_prepared(prepared)?;
+        assert!(state.account(account_id).is_none());
+        assert!(state.session(live_user_id).is_none());
+        assert!(state.account_deletion_challenges.is_empty());
+        state.validate()?;
+        Ok(())
+    }
+
+    #[test]
+    fn account_delete_start_defers_state_preconditions_until_confirmation()
+    -> Result<(), DomainError> {
+        let account_id = account_id(235);
+        let account_generation = agenc_ircd_types::Generation::new(1)?;
+        let mut state = DomainState::new()?;
+        state.apply_account(
+            AccountState::new(account_id, account_generation, state.revision),
+            state.revision,
+        );
+        let confirming_session = session(236, Some(account_id))?;
+        let confirming_user_id = confirming_session.user_id;
+        state.apply_session(session(236, Some(account_id))?, state.revision);
+        state.apply_session(session(237, Some(account_id))?, state.revision);
+
+        let fresh = state.plan_session_fresh_authentication(
+            confirming_user_id,
+            account_id,
+            confirming_session.generation,
+            MonotonicTick::from_ticks(100),
+        )?;
+        let prepared = state.prepare_mutation(fresh)?;
+        state.apply_prepared(prepared)?;
+
+        let PlanDecision::Mutation(start) = account_command_plan(
+            &state,
+            &confirming_session,
+            AccountCommand::DeleteStart,
+            Some(ExternalInputs {
+                monotonic_now: Some(MonotonicTick::from_ticks(101)),
+                deletion_tokens: vec![AccountDeletionToken::from_bytes(bytes(238))],
+                ..ExternalInputs::default()
+            }),
+        )?
+        else {
+            return Err(DomainError::InvariantViolation);
+        };
+        let prepared = state.prepare_mutation(start)?;
+        state.apply_prepared(prepared)?;
+        assert_eq!(state.account_deletion_challenges.len(), 1);
+
+        let PlanDecision::Mutation(rejected) = account_command_plan(
+            &state,
+            &confirming_session,
+            AccountCommand::DeleteConfirm(AccountDeletionToken::from_bytes(bytes(238))),
+            Some(ExternalInputs {
+                monotonic_now: Some(MonotonicTick::from_ticks(102)),
+                ..ExternalInputs::default()
+            }),
+        )?
+        else {
+            return Err(DomainError::InvariantViolation);
+        };
+        assert_eq!(
+            rejected.events(),
+            &[DomainEvent::AccountDeletionConfirmationRejected(
+                confirming_user_id
+            )]
+        );
+        let prepared = state.prepare_mutation(rejected)?;
+        state.apply_prepared(prepared)?;
+
+        assert!(state.account_deletion_challenges.is_empty());
+        assert!(state.account(account_id).is_some());
+        state.validate()?;
+        Ok(())
+    }
+
+    #[test]
+    fn authorization_fences_user_modes_and_channel_privacy_cover_each_outcome()
+    -> Result<(), DomainError> {
+        let mut fixture = fixture()?;
+        let wrong_generation = CommandEnvelope::new(
+            fixture.owner.session_id,
+            fixture.owner.user_id,
+            agenc_ircd_types::Generation::new(2)?,
+            fixture.state.revision,
+            CanonicalCommand::list(Vec::new())?,
+        );
+        assert_eq!(
+            fixture
+                .state
+                .authorize(wrong_generation, &admission(fixture.owner.user_id)?,)
+                .err()
+                .map(|failure| failure.error()),
+            Some(DomainError::StaleGeneration)
+        );
+
+        for command in [
+            CanonicalCommand::user_mode_query(fixture.owner.nickname.clone()),
+            CanonicalCommand::user_operator_notices(fixture.owner.nickname.clone(), true),
+        ] {
+            assert!(
+                fixture
+                    .state
+                    .authorize(
+                        envelope(&fixture.owner, fixture.state.revision, command),
+                        &admission(fixture.owner.user_id)?,
+                    )
+                    .is_ok()
+            );
+        }
+        for command in [
+            CanonicalCommand::user_mode_query(fixture.member.nickname.clone()),
+            CanonicalCommand::user_operator_notices(fixture.member.nickname.clone(), true),
+        ] {
+            assert_eq!(
+                fixture
+                    .state
+                    .authorize(
+                        envelope(&fixture.owner, fixture.state.revision, command),
+                        &admission(fixture.owner.user_id)?,
+                    )
+                    .err()
+                    .map(|failure| failure.error()),
+                Some(DomainError::Forbidden)
+            );
+        }
+
+        fixture
+            .state
+            .channels
+            .get_mut(&fixture.channel_id)
+            .ok_or(DomainError::InvariantViolation)?
+            .visibility = Visibility::Unlisted;
+        assert_eq!(
+            fixture
+                .state
+                .privacy_safe_channel(&fixture.outsider, &fixture.name)
+                .err(),
+            Some(DomainError::SecretUnavailable)
+        );
+        assert!(
+            fixture
+                .state
+                .privacy_safe_channel(&fixture.owner, &fixture.name)
+                .is_ok()
+        );
+
+        let channel = fixture
+            .state
+            .channels
+            .get_mut(&fixture.channel_id)
+            .ok_or(DomainError::InvariantViolation)?;
+        channel.visibility = Visibility::Listed;
+        channel.modes.topic_protected = false;
+        assert_eq!(
+            fixture
+                .state
+                .require_channel_role(&fixture.outsider, &fixture.name, Role::Member),
+            Err(DomainError::Forbidden)
+        );
+        assert_eq!(
+            fixture
+                .state
+                .authorize_topic_change(&fixture.member, &fixture.name),
+            Ok(())
+        );
+
+        fixture
+            .state
+            .channels
+            .get_mut(&fixture.channel_id)
+            .ok_or(DomainError::InvariantViolation)?
+            .persistence = PersistencePolicy::Registered;
+        assert_eq!(
+            fixture
+                .state
+                .validate_account_deletion_roles(fixture.owner_account),
+            Ok(())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn e2ee_message_authorization_rejects_each_binding_and_policy_failure()
+    -> Result<(), DomainError> {
+        let plaintext_fixture = fixture()?;
+        let revision = plaintext_fixture
+            .state
+            .channel(plaintext_fixture.channel_id)
+            .ok_or(DomainError::InvariantViolation)?
+            .revision();
+        let proof = crate::E2eeApplicationProof::new(
+            plaintext_fixture.channel_id,
+            plaintext_fixture.owner.user_id,
+            revision,
+        );
+        assert_eq!(
+            plaintext_fixture.state.authorize_e2ee_channel_message(
+                &plaintext_fixture.owner,
+                &plaintext_fixture.name,
+                proof,
+            ),
+            Err(DomainError::PlaintextRoute)
+        );
+
+        let mut e2ee_fixture = fixture()?;
+        e2ee_fixture
+            .state
+            .channels
+            .get_mut(&e2ee_fixture.channel_id)
+            .ok_or(DomainError::InvariantViolation)?
+            .content_policy = ContentPolicy::E2eeBound;
+        let revision = e2ee_fixture
+            .state
+            .channel(e2ee_fixture.channel_id)
+            .ok_or(DomainError::InvariantViolation)?
+            .revision();
+        assert_eq!(
+            e2ee_fixture.state.authorize_e2ee_channel_message(
+                &e2ee_fixture.owner,
+                &e2ee_fixture.name,
+                crate::E2eeApplicationProof::new(
+                    ChannelInstanceId::from_bytes(bytes(250)),
+                    e2ee_fixture.owner.user_id,
+                    revision,
+                ),
+            ),
+            Err(DomainError::Forbidden)
+        );
+        assert_eq!(
+            e2ee_fixture.state.authorize_e2ee_channel_message(
+                &e2ee_fixture.owner,
+                &e2ee_fixture.name,
+                crate::E2eeApplicationProof::new(
+                    e2ee_fixture.channel_id,
+                    e2ee_fixture.member.user_id,
+                    revision,
+                ),
+            ),
+            Err(DomainError::Forbidden)
+        );
+        assert_eq!(
+            e2ee_fixture.state.authorize_e2ee_channel_message(
+                &e2ee_fixture.owner,
+                &e2ee_fixture.name,
+                crate::E2eeApplicationProof::new(
+                    e2ee_fixture.channel_id,
+                    e2ee_fixture.owner.user_id,
+                    revision.checked_add(1)?,
+                ),
+            ),
+            Err(DomainError::StaleRevision)
+        );
+
+        e2ee_fixture
+            .state
+            .channels
+            .get_mut(&e2ee_fixture.channel_id)
+            .ok_or(DomainError::InvariantViolation)?
+            .e2ee_removal_pending
+            .insert(e2ee_fixture.member.user_id);
+        assert_eq!(
+            e2ee_fixture.state.authorize_e2ee_channel_message(
+                &e2ee_fixture.owner,
+                &e2ee_fixture.name,
+                proof,
+            ),
+            Err(DomainError::BadState)
+        );
+
+        let channel = e2ee_fixture
+            .state
+            .channels
+            .get_mut(&e2ee_fixture.channel_id)
+            .ok_or(DomainError::InvariantViolation)?;
+        channel.e2ee_removal_pending.clear();
+        channel.bans.push(crate::ListEntry::new(
+            EntryId::from_bytes(bytes(251)),
+            TypedMask::parse("$q:$n:test1")?,
+            Principal::Account(e2ee_fixture.owner_account),
+            UtcSecond::from_unix_seconds(10),
+        ));
+        assert_eq!(
+            e2ee_fixture.state.authorize_e2ee_channel_message(
+                &e2ee_fixture.owner,
+                &e2ee_fixture.name,
+                proof,
+            ),
+            Err(DomainError::Forbidden)
+        );
+
+        let mut moderated_fixture = fixture()?;
+        let channel = moderated_fixture
+            .state
+            .channels
+            .get_mut(&moderated_fixture.channel_id)
+            .ok_or(DomainError::InvariantViolation)?;
+        channel.content_policy = ContentPolicy::E2eeBound;
+        channel.modes.moderated = true;
+        let revision = channel.revision;
+        assert_eq!(
+            moderated_fixture.state.authorize_e2ee_channel_message(
+                &moderated_fixture.member,
+                &moderated_fixture.name,
+                crate::E2eeApplicationProof::new(
+                    moderated_fixture.channel_id,
+                    moderated_fixture.member.user_id,
+                    revision,
+                ),
+            ),
+            Err(DomainError::Forbidden)
+        );
+        assert_eq!(
+            moderated_fixture.state.authorize_e2ee_channel_message(
+                &moderated_fixture.outsider,
+                &moderated_fixture.name,
+                crate::E2eeApplicationProof::new(
+                    moderated_fixture.channel_id,
+                    moderated_fixture.outsider.user_id,
+                    revision,
+                ),
+            ),
+            Err(DomainError::Forbidden)
+        );
+
+        moderated_fixture
+            .state
+            .channels
+            .get_mut(&moderated_fixture.channel_id)
+            .ok_or(DomainError::InvariantViolation)?
+            .modes
+            .moderated = false;
+        assert_eq!(
+            moderated_fixture.state.authorize_e2ee_channel_message(
+                &moderated_fixture.owner,
+                &moderated_fixture.name,
+                crate::E2eeApplicationProof::new(
+                    moderated_fixture.channel_id,
+                    moderated_fixture.owner.user_id,
+                    revision,
+                ),
+            ),
+            Ok(())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn e2ee_moderation_allows_voice_or_higher() -> Result<(), DomainError> {
+        let mut fixture = fixture()?;
+        let channel = fixture
+            .state
+            .channels
+            .get_mut(&fixture.channel_id)
+            .ok_or(DomainError::InvariantViolation)?;
+        channel.content_policy = ContentPolicy::E2eeBound;
+        channel.modes.moderated = true;
+        let revision = channel.revision;
+        assert_eq!(
+            fixture.state.authorize_e2ee_channel_message(
+                &fixture.owner,
+                &fixture.name,
+                crate::E2eeApplicationProof::new(
+                    fixture.channel_id,
+                    fixture.owner.user_id,
+                    revision,
+                ),
+            ),
+            Ok(())
+        );
         Ok(())
     }
 }

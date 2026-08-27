@@ -3,7 +3,7 @@ constant|account_service_hpke_aead_id|3
 constant|account_service_hpke_kdf_id|1
 constant|account_service_hpke_kem_id|32
 constant|account_service_opaque_ke1_bytes|96
-constant|account_service_opaque_ke2_bytes|288
+constant|account_service_opaque_ke2_bytes|320
 constant|account_service_opaque_ke3_bytes|64
 constant|account_service_opaque_registration_record_bytes|192
 constant|account_service_opaque_registration_request_bytes|32
@@ -158,13 +158,13 @@ schema|AccountCreateFinish|profile_version:uint16,network_id:opaque[32],transact
 schema|AccountCreateStart|profile_version:uint16,network_id:opaque[32],normalized_login:opaque<3..64>,registration_request:opaque<32..32>,creation_invite:opaque<0..132>
 schema|AccountCreationInviteTBS|profile_version:uint16,network_id:opaque[32],invite_id:opaque[16],not_before:uint64,expires_at:uint64,use_limit:uint16
 schema|AccountCreationInvite|tbs:struct(AccountCreationInviteTBS),signature:opaque[64]
-schema|AccountServiceChallenge|profile_version:uint16,transaction_id:opaque[16],opaque_credential_id:opaque[32],opaque_message:opaque<64..288>
+schema|AccountServiceChallenge|profile_version:uint16,transaction_id:opaque[16],opaque_credential_id:opaque[32],opaque_message:opaque<64..320>
 schema|AccountServiceCompletion|profile_version:uint16,transaction_id:opaque[16],status:enum(AccountServiceCompletionStatus),account_id:opaque[24],account_session_generation:uint64
 schema|AccountServiceEnvelope|header:struct(AccountServiceRequestHeader),enc:opaque[32],ciphertext:opaque<4608..4608>
 schema|AccountServiceRequestHeader|profile_version:uint16,network_id:opaque[32],recipient_key_id:opaque[32],client_request_id:opaque[16],message_kind:enum(AccountServiceMessageKind)
 schema|AccountServiceRequestPlaintext|padding_version:uint16,inner_payload:opaque<72..265>,zero_padding:opaque<4321..4514>
 schema|AccountServiceResponseHeader|profile_version:uint16,network_id:opaque[32],recipient_key_id:opaque[32],client_request_id:opaque[16],response_kind:enum(AccountServiceResponseKind),response_salt:opaque[32]
-schema|AccountServiceResponsePlaintext|padding_version:uint16,payload:opaque<52..340>,zero_padding:opaque<3862..4150>
+schema|AccountServiceResponsePlaintext|padding_version:uint16,payload:opaque<52..372>,zero_padding:opaque<3830..4150>
 schema|AccountServiceResponse|header:struct(AccountServiceResponseHeader),ciphertext:opaque<4224..4224>
 schema|AccountSettingsChange|setting_kind:enum(FederationAccountSettingKind),value:opaque<0..64>
 schema|AuthFinish|profile_version:uint16,network_id:opaque[32],transaction_id:opaque[16],ke3:opaque<64..64>

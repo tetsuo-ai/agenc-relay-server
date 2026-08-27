@@ -8,7 +8,6 @@ use agenc_ircd_types::{
 use crate::{
     AccountLabelValue, AwayText, ChannelNameValue, DirectMessagePolicy, DomainError,
     GuestDirectMessagePolicy, HistoryPolicy, NicknameValue, PresencePolicy, Role, TopicText,
-    Visibility,
 };
 
 const MAX_CHANNEL_TARGETS: usize = 20;
@@ -20,9 +19,47 @@ const MAX_WHOWAS_RESULTS: u8 = 10;
 const MAX_ISON_TARGETS: usize = 20;
 const MAX_USERHOST_TARGETS: usize = 5;
 const MAX_CHATHISTORY_RESULTS: u8 = 100;
+const MAX_MESSAGE_TEXT_BYTES: usize = 512;
 
-/// A validated message body. `PRIVMSG` applies the nonempty rule separately.
-pub type MessageText = BoundedUtf8<0, 512>;
+/// A validated IRC message body.
+///
+/// Client framing has already excluded NUL, carriage return, and line feed.
+/// Other control bytes remain ordinary text so CTCP `ACTION` and IRC text
+/// formatting survive without being interpreted by the server.
+#[must_use]
+pub struct MessageText(String);
+
+impl MessageText {
+    /// Validates and copies one bounded message body.
+    pub fn parse(input: &str) -> Result<Self, DomainError> {
+        if input.len() > MAX_MESSAGE_TEXT_BYTES
+            || input
+                .as_bytes()
+                .iter()
+                .any(|byte| matches!(byte, 0 | b'\r' | b'\n'))
+        {
+            return Err(DomainError::InvalidArgument);
+        }
+        let mut text = String::new();
+        text.try_reserve_exact(input.len())
+            .map_err(|_| DomainError::AllocationFailed)?;
+        text.push_str(input);
+        Ok(Self(text))
+    }
+
+    /// Borrows the exact validated message text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Reports whether this body is empty, as permitted only for `NOTICE`.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 /// A validated PART or KICK reason.
 pub type DepartureReason = BoundedUtf8<0, 256>;
 
@@ -183,11 +220,66 @@ pub enum MessageKind {
     Tagmsg,
 }
 
+/// Companion-issued proof that one `TAGMSG` carries an E2EE application object.
+///
+/// The domain binds the proof to the immutable channel instance, sending user,
+/// and exact channel revision before it authorizes the opaque route.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct E2eeApplicationProof {
+    channel_id: ChannelInstanceId,
+    sender: UserId,
+    channel_revision: Revision,
+}
+
+impl E2eeApplicationProof {
+    /// Records the identities and revision validated by the companion profile.
+    #[must_use]
+    pub const fn new(
+        channel_id: ChannelInstanceId,
+        sender: UserId,
+        channel_revision: Revision,
+    ) -> Self {
+        Self {
+            channel_id,
+            sender,
+            channel_revision,
+        }
+    }
+
+    /// Returns the immutable channel instance covered by the proof.
+    #[must_use]
+    pub const fn channel_id(self) -> ChannelInstanceId {
+        self.channel_id
+    }
+
+    /// Returns the live sending user covered by the proof.
+    #[must_use]
+    pub const fn sender(self) -> UserId {
+        self.sender
+    }
+
+    /// Returns the exact channel revision covered by the proof.
+    #[must_use]
+    pub const fn channel_revision(self) -> Revision {
+        self.channel_revision
+    }
+}
+
+/// Closed semantic classification for a validated tag-only message.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TagmsgClassification {
+    /// Ordinary client-only tags with no companion application object.
+    ClientOnly,
+    /// An opaque E2EE application object validated by the companion profile.
+    E2eeApplication(E2eeApplicationProof),
+}
+
 /// A completely shape-checked message command.
 pub struct MessageCommand {
     kind: MessageKind,
     targets: Vec<MessageTarget>,
     body: Option<MessageText>,
+    tagmsg_classification: Option<TagmsgClassification>,
 }
 
 impl MessageCommand {
@@ -203,7 +295,22 @@ impl MessageCommand {
             kind,
             targets,
             body,
+            tagmsg_classification: (kind == MessageKind::Tagmsg)
+                .then_some(TagmsgClassification::ClientOnly),
         })
+    }
+
+    /// Builds one companion-validated E2EE application `TAGMSG` route.
+    pub fn e2ee_tagmsg(
+        target: MessageTarget,
+        proof: E2eeApplicationProof,
+    ) -> Result<Self, DomainError> {
+        if !matches!(target, MessageTarget::Channel(_)) {
+            return Err(DomainError::InvalidArgument);
+        }
+        let mut command = Self::new(MessageKind::Tagmsg, vec![target], None)?;
+        command.tagmsg_classification = Some(TagmsgClassification::E2eeApplication(proof));
+        Ok(command)
     }
 
     /// Returns the exact routing behavior.
@@ -221,11 +328,29 @@ impl MessageCommand {
     /// Borrows validated plaintext when this command carries it.
     #[must_use]
     pub fn body(&self) -> Option<&str> {
-        self.body.as_ref().map(BoundedUtf8::as_str)
+        self.body.as_ref().map(MessageText::as_str)
     }
 
-    pub(crate) fn into_parts(self) -> (MessageKind, Vec<MessageTarget>, Option<MessageText>) {
-        (self.kind, self.targets, self.body)
+    /// Returns the semantic classification carried by a tag-only message.
+    #[must_use]
+    pub const fn tagmsg_classification(&self) -> Option<TagmsgClassification> {
+        self.tagmsg_classification
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        MessageKind,
+        Vec<MessageTarget>,
+        Option<MessageText>,
+        Option<TagmsgClassification>,
+    ) {
+        (
+            self.kind,
+            self.targets,
+            self.body,
+            self.tagmsg_classification,
+        )
     }
 }
 
@@ -244,13 +369,35 @@ fn validate_message_shape(
         return Err(DomainError::LimitExceeded);
     }
     match kind {
-        MessageKind::Privmsg if body.is_none_or(BoundedUtf8::is_empty) => {
+        MessageKind::Privmsg if body.is_none_or(MessageText::is_empty) => {
             return Err(DomainError::InvalidArgument);
         }
         MessageKind::Tagmsg if body.is_some() => return Err(DomainError::InvalidArgument),
         _ => {}
     }
+    if body.is_some_and(|body| contains_unsafe_ctcp_dcc(body.as_str())) {
+        return Err(DomainError::UnsafeCtcp);
+    }
     validate_message_targets(targets)
+}
+
+fn contains_unsafe_ctcp_dcc(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.iter().enumerate().any(|(index, byte)| {
+        if *byte != 0x01 {
+            return false;
+        }
+        let Some(candidate) = bytes.get(index + 1..) else {
+            return false;
+        };
+        let Some(command) = candidate.get(..3) else {
+            return false;
+        };
+        command.eq_ignore_ascii_case(b"DCC")
+            && candidate
+                .get(3)
+                .is_none_or(|separator| *separator == 0x01 || separator.is_ascii_whitespace())
+    })
 }
 
 fn validate_message_targets(targets: &[MessageTarget]) -> Result<(), DomainError> {
@@ -316,10 +463,24 @@ pub enum MaskList {
     InviteException,
 }
 
+/// One mutually exclusive channel-discovery letter mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VisibilityMode {
+    /// The `p` mode: omitted from discovery but not existence-hiding.
+    Unlisted,
+    /// The `s` mode: existence-hidden from unauthorized nonmembers.
+    Secret,
+}
+
 /// One typed channel mode change.
 pub enum ModeChange {
-    /// Set listed, unlisted, or secret discovery policy.
-    Visibility(Visibility),
+    /// Apply one `p` or `s` discovery-mode direction.
+    Visibility {
+        /// Add or remove direction.
+        operation: ModeOperation,
+        /// Exact discovery letter selected by the command.
+        mode: VisibilityMode,
+    },
     /// Toggle invite-only membership.
     InviteOnly(bool),
     /// Toggle moderated speaking.
@@ -402,8 +563,6 @@ pub enum ChannelCommand {
     Unregister(ChannelInstanceId),
     /// Set the closed optional plaintext-history policy.
     History(ChannelInstanceId, HistoryPolicy),
-    /// Select ordinary plaintext or companion-bound opaque content.
-    Content(ChannelInstanceId, crate::ContentPolicy),
 }
 
 /// Presence and monitor command families.
@@ -924,11 +1083,10 @@ fn validate_singleton_modes(changes: &[ModeChange]) -> Result<(), DomainError> {
         let Some(remaining) = changes.get(index + 1..) else {
             return Err(DomainError::InvariantViolation);
         };
-        if remaining.iter().any(|other| {
-            (mode_singleton_key(change) == mode_singleton_key(other)
-                && mode_singleton_key(change).is_some())
-                || same_vector_mode(change, other)
-        }) {
+        if remaining
+            .iter()
+            .any(|other| same_vector_mode(change, other))
+        {
             return Err(DomainError::InvalidArgument);
         }
     }
@@ -937,6 +1095,23 @@ fn validate_singleton_modes(changes: &[ModeChange]) -> Result<(), DomainError> {
 
 fn same_vector_mode(left: &ModeChange, right: &ModeChange) -> bool {
     match (left, right) {
+        (
+            ModeChange::Visibility {
+                operation: left_operation,
+                mode: left_mode,
+            },
+            ModeChange::Visibility {
+                operation: right_operation,
+                mode: right_mode,
+            },
+        ) => left_operation == right_operation && left_mode == right_mode,
+        (ModeChange::InviteOnly(left), ModeChange::InviteOnly(right))
+        | (ModeChange::Moderated(left), ModeChange::Moderated(right))
+        | (ModeChange::TopicProtected(left), ModeChange::TopicProtected(right))
+        | (ModeChange::JoinKey(left), ModeChange::JoinKey(right)) => left == right,
+        (ModeChange::MemberLimit(left), ModeChange::MemberLimit(right)) => {
+            left.is_some() == right.is_some()
+        }
         (
             ModeChange::Role {
                 operation: left_operation,
@@ -974,20 +1149,6 @@ fn same_vector_mode(left: &ModeChange, right: &ModeChange) -> bool {
             },
         ) => left_list == right_list && left_entry == right_entry,
         _ => false,
-    }
-}
-
-fn mode_singleton_key(change: &ModeChange) -> Option<u8> {
-    match change {
-        ModeChange::Visibility(_) => Some(1),
-        ModeChange::InviteOnly(_) => Some(2),
-        ModeChange::Moderated(_) => Some(3),
-        ModeChange::TopicProtected(_) => Some(4),
-        ModeChange::JoinKey(_) => Some(5),
-        ModeChange::MemberLimit(_) => Some(6),
-        ModeChange::Role { .. } | ModeChange::AddMask { .. } | ModeChange::RemoveMask { .. } => {
-            None
-        }
     }
 }
 
@@ -1055,7 +1216,6 @@ impl CommandEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agenc_ircd_types::ControlPolicy;
 
     fn channel(name: &str) -> Result<ChannelNameValue, DomainError> {
         ChannelNameValue::parse(name)
@@ -1066,7 +1226,7 @@ mod tests {
     }
 
     fn body(text: &str) -> Result<MessageText, DomainError> {
-        MessageText::try_from_str(text, ControlPolicy::RejectAll).map_err(Into::into)
+        MessageText::parse(text)
     }
 
     #[test]
@@ -1154,6 +1314,67 @@ mod tests {
     }
 
     #[test]
+    fn message_text_preserves_ctcp_action_and_irc_formatting_controls() -> Result<(), DomainError> {
+        let action = MessageCommand::new(
+            MessageKind::Privmsg,
+            vec![MessageTarget::User(nickname("target")?)],
+            Some(body("\u{1}ACTION waves\u{1}")?),
+        )?;
+        assert_eq!(action.body(), Some("\u{1}ACTION waves\u{1}"));
+
+        let formatted = body("\u{2}bold\u{2}\t\u{85}")?;
+        assert_eq!(formatted.as_str(), "\u{2}bold\u{2}\t\u{85}");
+        for rejected in ["nul\0byte", "carriage\rreturn", "line\nfeed"] {
+            assert_eq!(
+                MessageText::parse(rejected).err(),
+                Some(DomainError::InvalidArgument)
+            );
+        }
+        assert_eq!(
+            MessageText::parse(&"x".repeat(MAX_MESSAGE_TEXT_BYTES + 1)).err(),
+            Some(DomainError::InvalidArgument)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plaintext_ctcp_dcc_is_rejected_without_blocking_other_ctcp() -> Result<(), DomainError> {
+        let target = || nickname("target").map(MessageTarget::User);
+        for unsafe_body in [
+            "\u{1}DCC SEND secret 127.0.0.1 1\u{1}",
+            "prefix \u{1}dcc\tchat chat 1 2\u{1}",
+            "\u{1}DcC\u{1}",
+            "\u{1}DCC",
+        ] {
+            assert_eq!(
+                MessageCommand::new(
+                    MessageKind::Privmsg,
+                    vec![target()?],
+                    Some(body(unsafe_body)?),
+                )
+                .err(),
+                Some(DomainError::UnsafeCtcp)
+            );
+        }
+        let action = MessageCommand::new(
+            MessageKind::Notice,
+            vec![target()?],
+            Some(body("\u{1}ACTION discusses DCC safely\u{1}")?),
+        )?;
+        assert_eq!(action.body(), Some("\u{1}ACTION discusses DCC safely\u{1}"));
+        let unrelated = MessageCommand::new(
+            MessageKind::Privmsg,
+            vec![target()?],
+            Some(body("\u{1}DCCX is not the DCC command\u{1}")?),
+        )?;
+        assert_eq!(
+            unrelated.body(),
+            Some("\u{1}DCCX is not the DCC command\u{1}")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn channel_target_commands_reject_limits_duplicates_and_mixed_authority()
     -> Result<(), DomainError> {
         assert_eq!(
@@ -1219,13 +1440,33 @@ mod tests {
         assert_eq!(
             CanonicalCommand::mode(
                 channel.clone(),
-                vec![
-                    ModeChange::Visibility(Visibility::Listed),
-                    ModeChange::Visibility(Visibility::Secret),
-                ],
+                vec![ModeChange::InviteOnly(true), ModeChange::InviteOnly(true)],
             )
             .err(),
             Some(DomainError::InvalidArgument)
+        );
+        assert!(
+            CanonicalCommand::mode(
+                channel.clone(),
+                vec![ModeChange::InviteOnly(true), ModeChange::InviteOnly(false)],
+            )
+            .is_ok()
+        );
+        assert!(
+            CanonicalCommand::mode(
+                channel.clone(),
+                vec![
+                    ModeChange::Visibility {
+                        operation: ModeOperation::Add,
+                        mode: VisibilityMode::Unlisted,
+                    },
+                    ModeChange::Visibility {
+                        operation: ModeOperation::Add,
+                        mode: VisibilityMode::Secret,
+                    },
+                ],
+            )
+            .is_ok()
         );
         let role_target = nickname("target")?;
         let role = || ModeChange::Role {
@@ -1273,7 +1514,10 @@ mod tests {
             Some(DomainError::InvalidArgument)
         );
         let too_many = vec![
-            ModeChange::Visibility(Visibility::Listed),
+            ModeChange::Visibility {
+                operation: ModeOperation::Remove,
+                mode: VisibilityMode::Unlisted,
+            },
             ModeChange::InviteOnly(true),
             ModeChange::Moderated(true),
             ModeChange::TopicProtected(true),
