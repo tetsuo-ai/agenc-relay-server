@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "manifest_id": "EVID-MANIFEST-SCHEMA-EXAMPLE",
   "source_commit": "0000000000000000000000000000000000000000",
   "source_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
@@ -13,6 +13,14 @@
         "name": "python",
         "version": "example-only"
       },
+      "toolchain_policy_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "toolchain": [
+        {
+          "name": "example-tool",
+          "argv": ["example-tool", "--version"],
+          "version": "example-tool 1.0"
+        }
+      ],
       "source_commit": "0000000000000000000000000000000000000000",
       "source_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
       "lock_sha256": "0000000000000000000000000000000000000000000000000000000000000000",

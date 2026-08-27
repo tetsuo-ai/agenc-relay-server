@@ -1,16 +1,18 @@
 # Stage 00 Evidence
 
-Status: closed on 2026-08-27 for source commit
-`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb`. The [current
+Status: implementation complete; schema version 2 checkpoint refresh pending.
+The [historical
 manifest](evidence/stage-00-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json)
-binds a clean Stage 00 gate run to its checked-in
+binds a clean Stage 00 gate run for source commit
+`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` to its checked-in
 [artifact](evidence/artifacts/stage-zero-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json).
 The 2026-08-24 pass for commit
 `6b48ecb73afd471ed576146483098c19c12893f9` remains historical evidence.
 
 ## Verification summary
 
-`bash scripts/check-stage-zero.sh` passed from the clean staged-tree export.
+`bash scripts/check-stage-zero.sh` passed from a clean detached worktree at the
+exact source commit.
 The recorded run used Rust 1.98.0 and checked both
 `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`. It ran the frozen
 specification check, every policy validator and negative self-test, formatting,
@@ -82,22 +84,26 @@ closure, with no deterministic production feature.
 ## S00-009
 
 `EVID-S00-009-CI-BASELINE`: the least-privilege workflow pins its sole action
-and every tool, then invokes the same recorded command set. CI validator
+and every reviewed Rust and Cargo policy tool, then invokes the same recorded
+command set. CI validator
 mutations reject floating actions, write permission, weakened failures, missing
 audit policy, and globally widened coverage instrumentation.
 
 ## S00-010
 
 `EVID-S00-010-MANIFEST-SCHEMA`: the closed JSON Schema and validator bind every
-record to a catalog ID and require command, tool, source/lock, target, feature,
-time, result, artifact, and limitation fields. Fifteen malformed fixtures cover
-missing, duplicate, stale, invalid, and unbound categories.
+record to a catalog ID and require command, exact ordered toolchain and policy
+hash, source and lock hashes, target, feature, time, result, artifact, and
+nonempty limitation fields. Schema version 1 remains archive-only. Seventy-four
+seeded rejection cases cover missing, duplicate, stale, invalid, unbound,
+legacy, toolchain, and artifact-provenance categories.
 
 ## S00-900
 
-`EVID-S00-900-STAGE-GATE`: the recorded run passed from the clean staged-tree
-export on both targets, coverage exceeded 90%, the release graph excluded
-testkit, and the binary refused to impersonate a server. The current manifest
-records the same required gate on exact source commit
+`EVID-S00-900-STAGE-GATE`: the recorded run passed from a clean detached
+worktree at the exact source commit on both targets, coverage exceeded 90%, the
+release graph excluded testkit, and the binary refused to impersonate a server.
+The historical manifest records the earlier required gate on exact source commit
 `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` with a verified artifact path and
-closes `S00-900` for that revision.
+is retained as archive evidence. A fresh schema version 2 run is required to
+close `S00-900` for the current source.

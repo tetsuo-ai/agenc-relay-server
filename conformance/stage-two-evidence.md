@@ -1,9 +1,10 @@
 # Stage 02 Evidence
 
-Status: closed on 2026-08-27 for source commit
-`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb`. The [current
+Status: implementation complete; schema version 2 checkpoint refresh pending.
+The [historical
 manifest](evidence/stage-02-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json)
-binds a clean Stage 02 gate run to its checked-in
+binds a clean Stage 02 gate run for source commit
+`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` to its checked-in
 [artifact](evidence/artifacts/stage-two-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json).
 The 2026-08-26 manifest remains archive evidence for its earlier source
 revision.
@@ -86,5 +87,6 @@ Clippy, tests, documentation tests, dependency checks, generated-artifact
 validation, 90.03% branch coverage, 93.97% line coverage, and four 10,000-run
 fuzz smokes. The current run repeated the required gate, reached 90.01% branch
 coverage and 95.59% line coverage, and recorded four 10,000-run fuzz smokes.
-Its manifest has a verified artifact path and closes `S02-900` for exact source
-commit `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb`.
+Its manifest has a verified artifact path and is retained as archive evidence
+for exact source commit `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb`. A fresh
+schema version 2 run is required to close `S02-900` for the current source.

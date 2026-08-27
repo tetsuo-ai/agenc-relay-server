@@ -5,12 +5,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 import re
 import subprocess
 import sys
 import tomllib
 from pathlib import Path
-from typing import NoReturn
+from typing import Mapping, NoReturn
 
 ARTIFACTS = {
     "architecture": "docs/ircd-architecture-and-implementation-spec.md",
@@ -37,12 +38,29 @@ def sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def git_environment(inherited: Mapping[str, str]) -> dict[str, str]:
+    """Return process state that cannot redirect or rewrite Git object reads."""
+    environment = {
+        name: value for name, value in inherited.items() if not name.startswith("GIT_")
+    }
+    environment.update(
+        {
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_GRAFT_FILE": os.devnull,
+            "GIT_NO_REPLACE_OBJECTS": "1",
+        }
+    )
+    return environment
+
+
 def git_bytes(root: Path, arguments: list[str], label: str) -> bytes:
     """Run one bounded Git lookup and return its raw standard output."""
     try:
         completed = subprocess.run(
-            ["git", *arguments],
+            ["git", "--no-replace-objects", *arguments],
             cwd=root,
+            env=git_environment(os.environ),
             capture_output=True,
             check=False,
         )
@@ -54,8 +72,22 @@ def git_bytes(root: Path, arguments: list[str], label: str) -> bytes:
     return completed.stdout
 
 
+def require_complete_history(root: Path) -> None:
+    """Reject shallow history before making ancestry claims."""
+    shallow = git_bytes(
+        root,
+        ["rev-parse", "--is-shallow-repository"],
+        "repository history",
+    ).strip()
+    if shallow != b"false":
+        if shallow == b"true":
+            raise BaselineError("frozen baseline validation requires complete Git history")
+        raise BaselineError("Git returned an invalid shallow-repository state")
+
+
 def validate_frozen_commit(root: Path, commit: str) -> None:
     """Require the recorded source commit to exist in the current history."""
+    require_complete_history(root)
     git_bytes(root, ["cat-file", "-e", f"{commit}^{{commit}}"], "frozen commit")
     git_bytes(root, ["merge-base", "--is-ancestor", commit, "HEAD"], "frozen ancestry")
 

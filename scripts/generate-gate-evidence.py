@@ -101,6 +101,7 @@ def build_manifest(
         commit_blob_sha256 = policy["commit_blob_sha256"]
         required_stage_evidence_ids = policy["required_stage_evidence_ids"]
         source_gate_policy = policy["source_gate_policy"]
+        source_toolchain_policy = policy["source_toolchain_policy"]
         validate_manifest = policy["validate_manifest"]
         validate_run_artifact = policy["validate_run_artifact"]
 
@@ -124,6 +125,9 @@ def build_manifest(
         )
         gate_name, runner_hash, gate_hash, commands = source_gate_policy(  # type: ignore[operator]
             root, stage, source_commit
+        )
+        toolchain_policy_hash, expected_toolchain, expected_limitations = (  # type: ignore[operator]
+            source_toolchain_policy(root, stage, source_commit)
         )
     except (KeyError, OSError, TypeError, ValueError) as error:
         raise GenerationError(f"cannot resolve evidence policy: {error}") from error
@@ -151,6 +155,10 @@ def build_manifest(
                 "claim_ids": claims,
                 "command": " ".join(argv),
                 "tool": tool,
+                "toolchain_policy_sha256": artifact.get(
+                    "toolchain_policy_sha256"
+                ),
+                "toolchain": artifact.get("toolchain"),
                 "source_commit": source_commit,
                 "source_sha256": source_hash,
                 "lock_sha256": lock_hash,
@@ -164,12 +172,12 @@ def build_manifest(
                     "sha256": artifact_hash,
                     "path": artifact_relative,
                 },
-                "limitations": [],
+                "limitations": artifact.get("limitations"),
             }
         )
 
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "manifest_id": (
             f"EVID-MANIFEST-STAGE-{stage:02d}-{source_commit[:16].upper()}"
         ),
@@ -188,6 +196,9 @@ def build_manifest(
             runner_hash=runner_hash,
             gate_hash=gate_hash,
             expected_commands=commands,
+            toolchain_policy_hash=toolchain_policy_hash,
+            expected_toolchain=expected_toolchain,
+            expected_limitations=expected_limitations,
             source_commit=source_commit,
             source_hash=source_hash,
             lock_hash=lock_hash,
@@ -227,6 +238,7 @@ def write_manifest(destination: Path, relative: str, manifest: dict[str, object]
     """Atomically create one canonical JSON manifest without overwriting data."""
     encoded = (json.dumps(manifest, indent=2) + "\n").encode("utf-8")
     temporary_path: Path | None = None
+    destination_linked = False
     try:
         descriptor, temporary_name = tempfile.mkstemp(
             prefix=f".{destination.name}.",
@@ -240,6 +252,7 @@ def write_manifest(destination: Path, relative: str, manifest: dict[str, object]
             output.flush()
             os.fsync(output.fileno())
         os.link(temporary_path, destination)
+        destination_linked = True
         temporary_path.unlink()
         temporary_path = None
         directory_descriptor = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
@@ -248,13 +261,27 @@ def write_manifest(destination: Path, relative: str, manifest: dict[str, object]
         finally:
             os.close(directory_descriptor)
     except OSError as error:
+        rollback_errors: list[str] = []
         if temporary_path is not None:
             try:
                 temporary_path.unlink()
-            except OSError:
-                pass
-        raise GenerationError(f"cannot create evidence manifest {relative}: {error}") from error
-    print(f"evidence manifest: {relative}")
+            except OSError as cleanup_error:
+                rollback_errors.append(f"temporary file: {cleanup_error}")
+        if destination_linked:
+            try:
+                destination.unlink()
+            except OSError as cleanup_error:
+                rollback_errors.append(f"destination: {cleanup_error}")
+        rollback = ""
+        if rollback_errors:
+            rollback = "; rollback failed for " + ", ".join(rollback_errors)
+        raise GenerationError(
+            f"cannot create evidence manifest {relative}: {error}{rollback}"
+        ) from error
+    try:
+        print(f"evidence manifest: {relative}", flush=True)
+    except (OSError, ValueError):
+        sys.stdout = None
 
 
 def fail(message: str) -> NoReturn:

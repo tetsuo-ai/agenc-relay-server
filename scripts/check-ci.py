@@ -14,6 +14,7 @@ import tempfile
 import tomllib
 from pathlib import Path
 from typing import NoReturn
+from unittest import mock
 
 CHECKOUT_COMMIT = "df4cb1c069e1874edd31b4311f1884172cec0e10"
 WORKFLOW_PATH = ".github/workflows/ci.yml"
@@ -63,6 +64,7 @@ REQUIRED_STAGE_ZERO = (
     ("python3", "scripts/check-evidence.py", "self-test"),
     ("python3", "scripts/check-ci.py", "check"),
     ("python3", "scripts/check-ci.py", "self-test"),
+    ("python3", "scripts/check-rust-components.py", "self-test"),
     ("cargo", "fmt", "--all", "--check"),
     ("cargo", "check", "--workspace", "--all-targets", "--all-features", "--locked"),
     (
@@ -423,25 +425,569 @@ def self_test(root: Path) -> int:
         raise CiError("gate runner does not expose reviewed environment construction")
     inherited = {
         "AGENC_IRCD_RECORD_GATE": "1",
+        "AGENC_STAGE3_SEED": "1",
+        "AGENC_STAGE3_STEPS": "1",
         "BASH_ENV": "/tmp/unreviewed-shell-environment",
+        "BASHOPTS": "xpg_echo",
         "BASH_FUNC_cargo%%": "() { printf injected; }",
+        "CARGO_ENCODED_RUSTDOCFLAGS": "--test-args\u001f--skip\u001fall",
+        "GIT_COMMON_DIR": "/tmp/unreviewed-common-directory",
         "GIT_CONFIG_KEY_0": "core.hooksPath",
+        "GIT_CONFIG_PARAMETERS": "'core.useReplaceRefs'='true'",
+        "GIT_EXEC_PATH": "/tmp/unreviewed-git-exec-path",
+        "GIT_FUTURE_OVERRIDE": "unreviewed-future-state",
+        "GIT_GRAFT_FILE": "/tmp/unreviewed-grafts",
+        "GIT_NAMESPACE": "unreviewed-namespace",
+        "GIT_NO_REPLACE_OBJECTS": "0",
+        "GIT_REPLACE_REF_BASE": "refs/unreviewed/replace/",
         "LD_PRELOAD": "/tmp/unreviewed-library.so",
+        "LD_AUDIT": "/tmp/unreviewed-audit-library.so",
         "PATH": "/usr/bin",
         "PYTHONPATH": "/tmp/unreviewed-python-path",
         "CARGO_PROFILE_RELEASE_PANIC": "abort",
         "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS": "-C target-feature=+crt-static",
+        "CARGO_LLVM_COV_FLAGS": "--ignore-filename-regex=.*",
+        "CLIPPY_CONF_DIR": "/tmp/unreviewed-clippy-config",
+        "LLVM_COV": "/tmp/unreviewed-llvm-cov",
+        "LLVM_PROFDATA": "/tmp/unreviewed-llvm-profdata",
+        "CC": "/tmp/unreviewed-cc",
+        "CC_x86_64_unknown_linux_gnu": "/tmp/unreviewed-target-cc",
+        "CXX": "/tmp/unreviewed-cxx",
+        "AR": "/tmp/unreviewed-ar",
+        "ASAN_OPTIONS": "detect_leaks=0",
+        "CUSTOM_LIBFUZZER_PATH": "/tmp/unreviewed-libfuzzer.a",
+        "CUSTOM_LIBFUZZER_STD_CXX": "none",
         "RUSTC_BOOTSTRAP": "1",
+        "RUSTC_STAGE": "2",
+        "RUSTFMT": "/tmp/unreviewed-rustfmt",
+        "RUST_LIBFUZZER_DEBUG_PATH": "/tmp/unreviewed-libfuzzer-debug",
+        "RUST_LIBC_UNSTABLE_GNU_TIME_BITS": "64",
         "RUSTFLAGS": "-Zallow-features=all",
         "RUSTUP_TOOLCHAIN": "nightly",
+        "SHELLOPTS": "xtrace",
     }
     clean_environment = environment_builder(inherited, {})
-    if clean_environment != {"PATH": "/usr/bin"}:
+    if clean_environment != {
+        "CARGO_INCREMENTAL": "0",
+        "PATH": "/usr/bin",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }:
         raise CiError("gate runner retained an inherited Rust build override")
     coverage_environment = environment_builder(inherited, {"RUSTC_BOOTSTRAP": "1"})
-    if coverage_environment != {"PATH": "/usr/bin", "RUSTC_BOOTSTRAP": "1"}:
+    if coverage_environment != {
+        "CARGO_INCREMENTAL": "0",
+        "PATH": "/usr/bin",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "RUSTC_BOOTSTRAP": "1",
+    }:
         raise CiError("gate runner did not restore the reviewed coverage override exactly")
     cases += 1
+
+    git_environment_builder = runner.get("git_environment")
+    if not callable(git_environment_builder):
+        raise CiError("gate runner does not expose isolated Git environment construction")
+    git_environment = git_environment_builder(
+        {
+            "GIT_DIR": "/tmp/unreviewed-repository",
+            "GIT_PAGER": "unreviewed-pager",
+            "PATH": "/usr/bin",
+        }
+    )
+    if git_environment != {
+        "CARGO_INCREMENTAL": "0",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_GRAFT_FILE": os.devnull,
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "PATH": "/usr/bin",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }:
+        raise CiError("gate runner did not isolate Git object lookups")
+    cases += 1
+
+    git_lookup = runner.get("git_output")
+    clean_source = runner.get("require_clean_source")
+    gate_error = runner.get("GateError")
+    if (
+        not callable(git_lookup)
+        or not callable(clean_source)
+        or not isinstance(gate_error, type)
+    ):
+        raise CiError("gate runner does not expose exact-source validation")
+
+    def expect_source_rejection(label: str, root_path: Path, fragment: str) -> None:
+        nonlocal cases
+        try:
+            clean_source(root_path)
+        except gate_error as error:
+            if fragment not in str(error):
+                raise CiError(
+                    f"exact-source self-test {label!r} reached the wrong branch: {error}"
+                ) from error
+        else:
+            raise CiError(f"exact-source self-test {label!r} was accepted")
+        cases += 1
+
+    with tempfile.TemporaryDirectory(prefix="agenc-exact-source-test-") as temporary:
+        temporary_root = Path(temporary)
+        tracked_path = temporary_root / "tracked.txt"
+        tracked_path.write_text("committed\n", encoding="utf-8")
+        (temporary_root / ".gitignore").write_text("/target/\n", encoding="utf-8")
+        initialized = subprocess.run(
+            ["git", "init", "--quiet"],
+            cwd=temporary_root,
+            env=git_environment_builder(os.environ),
+            capture_output=True,
+            check=False,
+        )
+        if initialized.returncode != 0:
+            raise CiError("cannot create the exact-source self-test repository")
+        git_lookup(
+            temporary_root,
+            ["add", "--", ".gitignore", "tracked.txt"],
+            "exact-source files",
+        )
+        author = [
+            "-c",
+            "user.name=CI Self-Test",
+            "-c",
+            "user.email=ci@example.invalid",
+        ]
+        git_lookup(
+            temporary_root,
+            [*author, "commit", "--quiet", "-m", "Add exact source"],
+            "exact-source commit",
+        )
+        source_commit = clean_source(temporary_root)
+        original_blob = git_lookup(
+            temporary_root,
+            ["cat-file", "blob", f"{source_commit}:tracked.txt"],
+            "exact-source blob",
+        )
+
+        empty_tree = git_lookup(
+            temporary_root,
+            ["hash-object", "-t", "tree", os.devnull],
+            "exact-source empty tree",
+        ).decode("ascii").strip()
+        replacement_commit = git_lookup(
+            temporary_root,
+            [*author, "commit-tree", empty_tree, "-m", "Replacement source"],
+            "exact-source replacement commit",
+        ).decode("ascii").strip()
+        git_lookup(
+            temporary_root,
+            ["replace", source_commit, replacement_commit],
+            "exact-source replacement reference",
+        )
+        attack_environment = {
+            name: value
+            for name, value in os.environ.items()
+            if not name.startswith("GIT_")
+        }
+        replaced_read = subprocess.run(
+            ["git", "cat-file", "-e", f"{source_commit}:tracked.txt"],
+            cwd=temporary_root,
+            env=attack_environment,
+            capture_output=True,
+            check=False,
+        )
+        if replaced_read.returncode == 0:
+            raise CiError("exact-source replacement fixture did not alter ordinary Git")
+        isolated_blob = git_lookup(
+            temporary_root,
+            ["cat-file", "blob", f"{source_commit}:tracked.txt"],
+            "replacement-isolated source blob",
+        )
+        if isolated_blob != original_blob or clean_source(temporary_root) != source_commit:
+            raise CiError("gate recorder trusted a replacement source object")
+        git_lookup(
+            temporary_root,
+            ["replace", "-d", source_commit],
+            "exact-source replacement cleanup",
+        )
+        cases += 1
+
+        git_lookup(
+            temporary_root,
+            [*author, "commit", "--quiet", "--allow-empty", "-m", "Add descendant"],
+            "exact-source descendant",
+        )
+        descendant_commit = clean_source(temporary_root)
+        graft_path = temporary_root / ".git/info/grafts"
+        graft_path.parent.mkdir(parents=True, exist_ok=True)
+        graft_path.write_text(f"{descendant_commit}\n", encoding="ascii")
+        grafted_ancestry = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", source_commit, descendant_commit],
+            cwd=temporary_root,
+            env=attack_environment,
+            capture_output=True,
+            check=False,
+        )
+        if grafted_ancestry.returncode != 1:
+            raise CiError("exact-source graft fixture did not alter ordinary Git ancestry")
+        git_lookup(
+            temporary_root,
+            ["merge-base", "--is-ancestor", source_commit, descendant_commit],
+            "graft-isolated source ancestry",
+        )
+        if clean_source(temporary_root) != descendant_commit:
+            raise CiError("gate recorder trusted grafted source ancestry")
+        graft_path.unlink()
+        cases += 1
+
+        git_lookup(
+            temporary_root,
+            ["update-index", "--assume-unchanged", "tracked.txt"],
+            "assume-unchanged fixture",
+        )
+        tracked_path.write_text("hidden modification\n", encoding="utf-8")
+        expect_source_rejection(
+            "assume-unchanged file",
+            temporary_root,
+            "hidden Git index flags",
+        )
+        git_lookup(
+            temporary_root,
+            ["update-index", "--no-assume-unchanged", "tracked.txt"],
+            "assume-unchanged cleanup",
+        )
+        tracked_path.write_text("committed\n", encoding="utf-8")
+
+        git_lookup(
+            temporary_root,
+            ["update-index", "--skip-worktree", "tracked.txt"],
+            "skip-worktree fixture",
+        )
+        expect_source_rejection(
+            "skip-worktree file",
+            temporary_root,
+            "hidden Git index flags",
+        )
+        git_lookup(
+            temporary_root,
+            ["update-index", "--no-skip-worktree", "tracked.txt"],
+            "skip-worktree cleanup",
+        )
+
+        tracked_path.write_text("staged modification\n", encoding="utf-8")
+        git_lookup(
+            temporary_root,
+            ["add", "--", "tracked.txt"],
+            "index-divergence fixture",
+        )
+        expect_source_rejection(
+            "divergent index tree",
+            temporary_root,
+            "Git index tree to equal HEAD",
+        )
+        tracked_path.write_text("committed\n", encoding="utf-8")
+        git_lookup(
+            temporary_root,
+            ["add", "--", "tracked.txt"],
+            "index-divergence cleanup",
+        )
+
+        tracked_path.write_text("unstaged modification\n", encoding="utf-8")
+        expect_source_rejection(
+            "modified worktree bytes",
+            temporary_root,
+            "worktree bytes from HEAD",
+        )
+        tracked_path.write_text("committed\n", encoding="utf-8")
+
+        cargo_directory = temporary_root / ".cargo"
+        cargo_directory.mkdir()
+        (cargo_directory / "config.toml").write_text(
+            "[build]\nrustflags = ['--cfg', 'forged_gate']\n",
+            encoding="utf-8",
+        )
+        exclude_path = temporary_root / ".git/info/exclude"
+        exclude_path.write_text(
+            exclude_path.read_text(encoding="utf-8") + "\n.cargo/config.toml\n",
+            encoding="utf-8",
+        )
+        expect_source_rejection(
+            "ignored Cargo configuration",
+            temporary_root,
+            "ignored source inputs",
+        )
+        (cargo_directory / "config.toml").unlink()
+        cargo_directory.rmdir()
+
+        target_directory = temporary_root / "target"
+        target_directory.mkdir()
+        (target_directory / "cache").write_bytes(b"external build cache\n")
+        if clean_source(temporary_root) != descendant_commit:
+            raise CiError("gate recorder rejected its reviewed build-cache limitation")
+        cases += 1
+
+        shallow_path = temporary_root / ".git/shallow"
+        shallow_path.write_text(f"{descendant_commit}\n", encoding="ascii")
+        expect_source_rejection(
+            "shallow source history",
+            temporary_root,
+            "complete Git history",
+        )
+
+    toolchain_probe = runner.get("probe_toolchain")
+    if not callable(toolchain_probe) or not isinstance(gate_error, type):
+        raise CiError("gate runner does not expose reviewed toolchain probing")
+
+    def expect_probe_rejection(
+        label: str,
+        root_path: Path,
+        tool: dict[str, object],
+        fragment: str,
+    ) -> None:
+        nonlocal cases
+        try:
+            toolchain_probe(root_path, [tool])
+        except gate_error as error:
+            if fragment not in str(error):
+                raise CiError(
+                    f"toolchain probe self-test {label!r} reached the wrong branch: {error}"
+                ) from error
+        else:
+            raise CiError(f"toolchain probe self-test {label!r} was accepted")
+        cases += 1
+
+    with tempfile.TemporaryDirectory(prefix="agenc-toolchain-probe-test-") as temporary:
+        temporary_root = Path(temporary)
+        probe_path = temporary_root / "reviewed-tool"
+
+        def write_probe(program: str) -> None:
+            probe_path.write_text(
+                f"#!{sys.executable}\n{program}\n",
+                encoding="utf-8",
+            )
+            probe_path.chmod(0o755)
+
+        reviewed_tool = {
+            "name": "reviewed-tool",
+            "argv": ["reviewed-tool", "--version"],
+            "version": "reviewed-tool 1.0",
+        }
+        with mock.patch.dict(os.environ, {"PATH": str(temporary_root)}):
+            write_probe("print('reviewed-tool 1.0')")
+            if toolchain_probe(temporary_root, [reviewed_tool]) != [reviewed_tool]:
+                raise CiError("gate runner changed a successful toolchain identity")
+
+            write_probe("print('reviewed-tool 2.0')")
+            expect_probe_rejection(
+                "wrong stdout",
+                temporary_root,
+                reviewed_tool,
+                "unexpected version",
+            )
+            write_probe("print('reviewed-tool 1.0\\nextra output')")
+            expect_probe_rejection(
+                "extra stdout",
+                temporary_root,
+                reviewed_tool,
+                "unexpected version",
+            )
+            write_probe("import os; os.write(1, b'x' * 70000)")
+            expect_probe_rejection(
+                "oversized stdout",
+                temporary_root,
+                reviewed_tool,
+                "stdout exceeded 65536 bytes",
+            )
+            write_probe("import sys; print('diagnostic', file=sys.stderr)")
+            expect_probe_rejection(
+                "stderr output",
+                temporary_root,
+                reviewed_tool,
+                "wrote to stderr",
+            )
+            write_probe("raise SystemExit(9)")
+            expect_probe_rejection(
+                "nonzero exit",
+                temporary_root,
+                reviewed_tool,
+                "failed with status 9",
+            )
+            write_probe("import time; time.sleep(2)")
+            probe_globals = toolchain_probe.__globals__
+            with mock.patch.dict(
+                probe_globals,
+                {"TOOLCHAIN_PROBE_TIMEOUT_SECONDS": 0.05},
+            ):
+                expect_probe_rejection(
+                    "timeout",
+                    temporary_root,
+                    reviewed_tool,
+                    "timed out",
+                )
+            missing_tool = copy.deepcopy(reviewed_tool)
+            missing_tool["argv"] = ["missing-reviewed-tool", "--version"]
+            expect_probe_rejection(
+                "missing executable",
+                temporary_root,
+                missing_tool,
+                "cannot execute",
+            )
+
+    record_gate = runner.get("record_gate")
+    if not callable(record_gate):
+        raise CiError("gate runner does not expose failure-atomic recording")
+
+    with tempfile.TemporaryDirectory(prefix="agenc-gate-atomicity-test-") as temporary:
+        temporary_root = Path(temporary)
+        destination = temporary_root / "artifact.json"
+        source_commit = "1" * 40
+        expected_toolchain = [
+            {
+                "name": "reviewed-tool",
+                "argv": ["reviewed-tool", "--version"],
+                "version": "reviewed-tool 1.0",
+            }
+        ]
+
+        def expect_record_rejection(
+            label: str,
+            replacements: dict[str, object],
+            fragment: str,
+        ) -> None:
+            nonlocal cases
+            writer = mock.Mock()
+            defaults: dict[str, object] = {
+                "artifact_metadata": lambda _root, _gate: {
+                    "source_commit": source_commit,
+                    "toolchain": copy.deepcopy(expected_toolchain),
+                },
+                "evidence_artifact_path": lambda _root, _gate, _commit: (
+                    destination,
+                    "conformance/evidence/artifacts/test.json",
+                ),
+                "probe_toolchain": mock.Mock(
+                    side_effect=[
+                        copy.deepcopy(expected_toolchain),
+                        copy.deepcopy(expected_toolchain),
+                    ]
+                ),
+                "utc_timestamp": mock.Mock(
+                    side_effect=["2026-08-27T00:00:00Z", "2026-08-27T00:00:01Z"]
+                ),
+                "execute": lambda _root, _gate: [],
+                "require_clean_source": lambda _root: source_commit,
+                "write_artifact": writer,
+            }
+            defaults.update(replacements)
+            try:
+                with mock.patch.dict(record_gate.__globals__, defaults):
+                    record_gate(temporary_root, "stage-zero-implementation")
+            except gate_error as error:
+                if fragment not in str(error):
+                    raise CiError(
+                        f"gate atomicity self-test {label!r} reached the wrong branch: {error}"
+                    ) from error
+            else:
+                raise CiError(f"gate atomicity self-test {label!r} was accepted")
+            if writer.called or destination.exists():
+                raise CiError(
+                    f"gate atomicity self-test {label!r} published partial evidence"
+                )
+            cases += 1
+
+        expect_record_rejection(
+            "initial probe failure",
+            {
+                "probe_toolchain": mock.Mock(
+                    side_effect=gate_error("toolchain probe failed")
+                )
+            },
+            "toolchain probe failed",
+        )
+        expect_record_rejection(
+            "gate command failure",
+            {"execute": mock.Mock(side_effect=gate_error("command failed"))},
+            "command failed",
+        )
+        drifted_toolchain = copy.deepcopy(expected_toolchain)
+        drifted_toolchain[0]["version"] = "reviewed-tool 2.0"
+        expect_record_rejection(
+            "toolchain drift",
+            {
+                "probe_toolchain": mock.Mock(
+                    side_effect=[expected_toolchain, drifted_toolchain]
+                )
+            },
+            "toolchain identity changed",
+        )
+        expect_record_rejection(
+            "source drift",
+            {"require_clean_source": lambda _root: "2" * 40},
+            "source HEAD changed",
+        )
+
+        artifact_writer = runner.get("write_artifact")
+        if not callable(artifact_writer):
+            raise CiError("gate runner does not expose atomic artifact publication")
+        artifact_metadata = {
+            "toolchain_policy_sha256": "2" * 64,
+            "toolchain": expected_toolchain,
+            "limitations": ["Self-test limitation."],
+            "source_commit": source_commit,
+            "source_sha256": "3" * 64,
+            "lock_sha256": "4" * 64,
+            "target": "x86_64-unknown-linux-gnu",
+            "features": ["all-features"],
+            "evidence": [],
+        }
+        with mock.patch.object(
+            os,
+            "fsync",
+            side_effect=[None, OSError("seeded directory fsync failure")],
+        ):
+            try:
+                artifact_writer(
+                    root,
+                    destination,
+                    "conformance/evidence/artifacts/test.json",
+                    "stage-zero-implementation",
+                    artifact_metadata,
+                    "2026-08-27T00:00:00Z",
+                    "2026-08-27T00:00:01Z",
+                    [],
+                )
+            except gate_error as error:
+                if "seeded directory fsync failure" not in str(error):
+                    raise CiError(
+                        f"artifact rollback reached the wrong branch: {error}"
+                    ) from error
+            else:
+                raise CiError("artifact writer accepted a failed directory fsync")
+        if destination.exists() or list(temporary_root.glob(".*.tmp")):
+            raise CiError("artifact writer retained output after a post-link failure")
+        cases += 1
+
+        class BrokenOutput:
+            """A status stream whose consumer closed its read end."""
+
+            def write(self, _text: str) -> int:
+                raise BrokenPipeError("seeded closed output")
+
+            def flush(self) -> None:
+                raise BrokenPipeError("seeded closed output")
+
+        with mock.patch.object(sys, "stdout", BrokenOutput()):
+            artifact_writer(
+                root,
+                destination,
+                "conformance/evidence/artifacts/test.json",
+                "stage-zero-implementation",
+                artifact_metadata,
+                "2026-08-27T00:00:00Z",
+                "2026-08-27T00:00:01Z",
+                [],
+            )
+            if sys.stdout is not None:
+                raise CiError("artifact writer retained a broken status stream")
+        if not destination.is_file():
+            raise CiError("artifact writer lost published output after status failure")
+        cases += 1
 
     artifact_path_builder = runner.get("evidence_artifact_path")
     if not callable(artifact_path_builder):
@@ -466,11 +1012,15 @@ def self_test(root: Path) -> int:
     generator = runpy.run_path(str(root / "scripts/generate-gate-evidence.py"))
     identity_checker = generator.get("require_artifact_identity")
     path_checker = generator.get("repository_path")
+    manifest_writer = generator.get("write_manifest")
+    generation_error = generator.get("GenerationError")
     artifact_directory = generator.get("ARTIFACT_DIRECTORY")
     manifest_directory = generator.get("MANIFEST_DIRECTORY")
     if (
         not callable(identity_checker)
         or not callable(path_checker)
+        or not callable(manifest_writer)
+        or not isinstance(generation_error, type)
         or not isinstance(artifact_directory, Path)
         or not isinstance(manifest_directory, Path)
     ):
@@ -507,6 +1057,38 @@ def self_test(root: Path) -> int:
         else:
             raise CiError("gate evidence generator accepted an existing manifest path")
     cases += 1
+
+    with tempfile.TemporaryDirectory(prefix="agenc-manifest-atomicity-test-") as temporary:
+        temporary_root = Path(temporary)
+        evidence_directory = temporary_root / manifest_directory
+        evidence_directory.mkdir(parents=True)
+        destination = evidence_directory / "stage-04-atomic.json"
+        relative = destination.relative_to(temporary_root).as_posix()
+        with mock.patch.object(
+            os,
+            "fsync",
+            side_effect=[None, OSError("seeded directory fsync failure")],
+        ):
+            try:
+                manifest_writer(destination, relative, {"schema_version": 2})
+            except generation_error as error:
+                if "seeded directory fsync failure" not in str(error):
+                    raise CiError(
+                        f"manifest rollback reached the wrong branch: {error}"
+                    ) from error
+            else:
+                raise CiError("manifest writer accepted a failed directory fsync")
+        if destination.exists() or list(evidence_directory.glob(".*.tmp")):
+            raise CiError("manifest writer retained output after a post-link failure")
+        cases += 1
+
+        with mock.patch.object(sys, "stdout", BrokenOutput()):
+            manifest_writer(destination, relative, {"schema_version": 2})
+            if sys.stdout is not None:
+                raise CiError("manifest writer retained a broken status stream")
+        if not destination.is_file():
+            raise CiError("manifest writer lost published output after status failure")
+        cases += 1
     return cases
 
 

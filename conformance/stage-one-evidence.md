@@ -1,9 +1,10 @@
 # Stage 01 Evidence
 
-Status: closed on 2026-08-27 for source commit
-`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb`. The [current
+Status: implementation complete; schema version 2 checkpoint refresh pending.
+The [historical
 manifest](evidence/stage-01-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json)
-binds a clean Stage 01 gate run to its checked-in
+binds a clean Stage 01 gate run for source commit
+`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` to its checked-in
 [artifact](evidence/artifacts/stage-one-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json).
 The 2026-08-24 pass for commit
 `7ae6439b472521d3c23fb99261deaf8964a70c5a` remains historical evidence.
@@ -75,10 +76,10 @@ negatives cover canonical IDs/names, revision and presence tuples, ordering,
 envelope and union substitution, projected values, identity cross-references,
 padding, and malformed embedded objects.
 
-Request correlation at this commit uses the four ID fields as its presence
-discriminator. An empty tuple requires both integer fields to be zero. A
-present tuple requires both integer fields to be nonzero. Later revisions
-correct that rule to admit the zero values assigned by Section 20.5.
+Request correlation uses the four ID fields as its presence discriminator.
+An empty tuple requires both integer fields to be zero. A present tuple accepts
+generation and operation-sequence zero because Section 20.5 assigns those
+values to the pre-registration principal and the first request in a generation.
 
 ## S01-009
 
@@ -116,6 +117,7 @@ mutations.
 lockfile and tools on both targets. Generated-source freshness, six artifact
 checker mutations, all workspace tests, Clippy with warnings denied,
 `cargo-deny`, `cargo-audit`, and the greater-than-90% branch threshold passed.
-The current manifest records the same required gate on exact source commit
+The historical manifest records the earlier required gate on exact source commit
 `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` with a verified artifact path and
-closes `S01-900` for that revision.
+is retained as archive evidence. A fresh schema version 2 run is required to
+close `S01-900` for the current source.

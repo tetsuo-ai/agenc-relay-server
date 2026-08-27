@@ -7,14 +7,16 @@ import argparse
 import copy
 import hashlib
 import json
+import os
 import re
+import runpy
 import subprocess
 import sys
 import tempfile
 import tomllib
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import NoReturn
+from typing import Mapping, NoReturn
 
 import requirements as requirement_ledger
 
@@ -22,7 +24,9 @@ CATALOG_PATH = "conformance/evidence-catalog.toml"
 LEDGER_PATH = "conformance/requirements.toml"
 SCHEMA_PATH = "conformance/evidence-manifest.schema.json"
 EXAMPLE_PATH = "conformance/evidence-manifest.example.json"
-SCHEMA_SHA256 = "1369851a6a7b3943064de9f2e20fc75cbfc301d52a6069958571a78f6a79fb76"
+SCHEMA_SHA256 = "b0e137647d8ce7d999f13a1e5cae1008476d3fc850ad006d77bf6627c8540470"
+TOOLCHAIN_POLICY_PATH = "conformance/toolchain-policy.toml"
+TOOLCHAIN_POLICY_SHA256 = "3f125bad8eeb2ef52f3cb49d2296e9453a76b14d6d288d75b3e3fdd2fbe13095"
 
 STAGE_BINDINGS = {
     "EVID-S00-001-BASELINE": (["S00-001"], "specification-baseline"),
@@ -155,7 +159,25 @@ ENTRY_FIELDS = {
     "artifact",
     "limitations",
 }
+ENTRY_V2_FIELDS = ENTRY_FIELDS | {
+    "toolchain_policy_sha256",
+    "toolchain",
+}
 TOOL_FIELDS = {"name", "version"}
+TOOLCHAIN_FIELDS = {"name", "argv", "version"}
+TOOLCHAIN_POLICY_FIELDS = {"name", "first_stage", "argv", "version"}
+TOOLCHAIN_POLICY_TOP_FIELDS = {
+    "schema_version",
+    "rust",
+    "cargo_deny",
+    "cargo_audit",
+    "cargo_llvm_cov",
+    "checkout_action_commit",
+    "targets",
+    "branch_coverage_instrumentation",
+    "limitations",
+    "tool",
+}
 ARTIFACT_LEGACY_FIELDS = {"label", "sha256"}
 ARTIFACT_PROVENANCE_FIELDS = {"label", "sha256", "path"}
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -170,6 +192,11 @@ ARTIFACT_PATH_RE = re.compile(
     r"conformance/evidence/artifacts/[A-Za-z0-9][A-Za-z0-9_./-]{0,511}"
 )
 CLOSABLE_STAGES = frozenset(range(5))
+REVIEWED_EVIDENCE_TARGETS = (
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-gnu",
+)
+REVIEWED_EVIDENCE_FEATURES = ("all-features",)
 STAGE_NAMES = {
     0: "zero",
     1: "one",
@@ -195,6 +222,11 @@ RUN_ARTIFACT_FIELDS = {
     "command_results",
     "evidence",
 }
+RUN_ARTIFACT_V2_FIELDS = RUN_ARTIFACT_FIELDS | {
+    "toolchain_policy_sha256",
+    "toolchain",
+    "limitations",
+}
 RUN_COMMAND_FIELDS = {
     "argv",
     "environment",
@@ -205,6 +237,8 @@ RUN_COMMAND_FIELDS = {
 RUN_EVIDENCE_FIELDS = {"evidence_id", "kind"}
 RUN_ARTIFACT_MAX_BYTES = 4 * 1024 * 1024
 RUN_GATE_ENVIRONMENT = {"RUSTC_BOOTSTRAP"}
+TOOLCHAIN_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
+TOOLCHAIN_MAX_TOOLS = 32
 
 
 class EvidenceError(ValueError):
@@ -359,20 +393,30 @@ def validate_schema(root: Path) -> None:
         raise EvidenceError("evidence schema top level must be a closed object")
     if set(schema.get("required", [])) != TOP_FIELDS:
         raise EvidenceError("evidence schema top-level required fields are stale")
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        raise EvidenceError("evidence schema top level has no properties")
+    version = properties.get("schema_version")
+    if not isinstance(version, dict) or version.get("enum") != [1, 2]:
+        raise EvidenceError("evidence schema versions are stale")
     definitions = schema.get("$defs")
     if not isinstance(definitions, dict):
         raise EvidenceError("evidence schema has no definitions")
-    evidence = definitions.get("evidence")
-    if not isinstance(evidence, dict):
-        raise EvidenceError("evidence schema has no evidence definition")
-    if evidence.get("additionalProperties") is not False:
-        raise EvidenceError("evidence entries must be closed objects")
-    if set(evidence.get("required", [])) != ENTRY_FIELDS:
-        raise EvidenceError("evidence schema entry required fields are stale")
-    properties = evidence.get("properties")
-    if not isinstance(properties, dict):
-        raise EvidenceError("evidence schema entry has no properties")
-    artifact = properties.get("artifact")
+    for name in ("evidence-v1", "evidence-v2"):
+        evidence = definitions.get(name)
+        if not isinstance(evidence, dict):
+            raise EvidenceError(f"evidence schema has no {name} definition")
+        if evidence.get("unevaluatedProperties") is not False:
+            raise EvidenceError(f"{name} entries must be closed objects")
+    common = definitions.get("evidence-common")
+    if not isinstance(common, dict):
+        raise EvidenceError("evidence schema has no common entry definition")
+    if set(common.get("required", [])) != ENTRY_FIELDS:
+        raise EvidenceError("evidence schema version 1 required fields are stale")
+    common_properties = common.get("properties")
+    if not isinstance(common_properties, dict):
+        raise EvidenceError("evidence schema common entry has no properties")
+    artifact = common_properties.get("artifact")
     if not isinstance(artifact, dict) or artifact.get("additionalProperties") is not False:
         raise EvidenceError("evidence schema artifact must be a closed object")
     artifact_properties = artifact.get("properties")
@@ -382,14 +426,36 @@ def validate_schema(root: Path) -> None:
         "path",
     }:
         raise EvidenceError("evidence schema artifact provenance fields are stale")
+    v2_extension = definitions.get("evidence-v2-extension")
+    if not isinstance(v2_extension, dict):
+        raise EvidenceError("evidence schema has no version 2 extension")
+    if set(v2_extension.get("required", [])) != ENTRY_V2_FIELDS - ENTRY_FIELDS:
+        raise EvidenceError("evidence schema version 2 required fields are stale")
+
+
+def git_environment(inherited: Mapping[str, str]) -> dict[str, str]:
+    """Return process state that cannot redirect or rewrite Git object reads."""
+    environment = {
+        name: value for name, value in inherited.items() if not name.startswith("GIT_")
+    }
+    environment.update(
+        {
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_GRAFT_FILE": os.devnull,
+            "GIT_NO_REPLACE_OBJECTS": "1",
+        }
+    )
+    return environment
 
 
 def git_bytes(root: Path, arguments: list[str], label: str) -> bytes:
     """Run one Git object lookup and return its raw standard output."""
     try:
         completed = subprocess.run(
-            ["git", *arguments],
+            ["git", "--no-replace-objects", *arguments],
             cwd=root,
+            env=git_environment(os.environ),
             capture_output=True,
             check=False,
         )
@@ -399,6 +465,19 @@ def git_bytes(root: Path, arguments: list[str], label: str) -> bytes:
         details = (completed.stderr or completed.stdout).decode("utf-8", errors="replace").strip()
         raise EvidenceError(f"Git lookup failed for {label}: {details}")
     return completed.stdout
+
+
+def require_complete_history(root: Path) -> None:
+    """Reject shallow history before making ancestry claims."""
+    shallow = git_bytes(
+        root,
+        ["rev-parse", "--is-shallow-repository"],
+        "repository history",
+    ).strip()
+    if shallow != b"false":
+        if shallow == b"true":
+            raise EvidenceError("evidence closure requires complete Git history")
+        raise EvidenceError("Git returned an invalid shallow-repository state")
 
 
 def validate_index_bytes(
@@ -429,6 +508,7 @@ def commit_blob_sha256(root: Path, source_commit: str, path: str) -> str:
 
 def canonical_source_sha256(root: Path, source_commit: str) -> str:
     """Hash tracked blobs and modes from one commit with explicit framing."""
+    require_complete_history(root)
     git_bytes(root, ["cat-file", "-e", f"{source_commit}^{{commit}}"], "source commit")
     git_bytes(
         root,
@@ -502,6 +582,226 @@ def validate_hash(value: object, label: str) -> str:
     return require_string(value, label, minimum=64, maximum=64, pattern=SHA256_RE)
 
 
+def validate_toolchain(
+    value: object,
+    label: str,
+) -> list[dict[str, object]]:
+    """Validate one closed, ordered toolchain identity list."""
+    if not isinstance(value, list) or not value or len(value) > TOOLCHAIN_MAX_TOOLS:
+        raise EvidenceError(
+            f"{label} must be a nonempty array of at most {TOOLCHAIN_MAX_TOOLS} tools"
+        )
+    tools: list[dict[str, object]] = []
+    names: set[str] = set()
+    argument_vectors: set[tuple[str, ...]] = set()
+    for index, raw_tool in enumerate(value):
+        tool_label = f"{label}[{index}]"
+        if not isinstance(raw_tool, dict) or set(raw_tool) != TOOLCHAIN_FIELDS:
+            raise EvidenceError(f"{tool_label} has invalid fields")
+        name = require_string(
+            raw_tool.get("name"),
+            f"{tool_label}.name",
+            maximum=64,
+            pattern=TOOLCHAIN_NAME_RE,
+        )
+        argv = raw_tool.get("argv")
+        if (
+            not isinstance(argv, list)
+            or not argv
+            or len(argv) > 32
+            or any(
+                not isinstance(argument, str) or not argument or len(argument) > 512
+                for argument in argv
+            )
+        ):
+            raise EvidenceError(
+                f"{tool_label}.argv must contain 1..32 bounded nonempty strings"
+            )
+        version = require_string(
+            raw_tool.get("version"),
+            f"{tool_label}.version",
+            maximum=512,
+        )
+        argv_key = tuple(argv)
+        if name in names:
+            raise EvidenceError(f"{label} contains duplicate tool name {name!r}")
+        if argv_key in argument_vectors:
+            raise EvidenceError(f"{label} contains duplicate tool probe argv")
+        names.add(name)
+        argument_vectors.add(argv_key)
+        tools.append({"name": name, "argv": list(argv), "version": version})
+    return tools
+
+
+def validate_limitations(value: object, label: str, *, required: bool) -> list[str]:
+    """Validate bounded, unique limitations and optionally require disclosure."""
+    if not isinstance(value, list) or len(value) > 64 or (required and not value):
+        qualifier = "a nonempty" if required else "an"
+        raise EvidenceError(f"{label} must be {qualifier} array of at most 64 items")
+    limitations: list[str] = []
+    for limitation in value:
+        limitations.append(require_string(limitation, label, maximum=2048))
+    if len(limitations) != len(set(limitations)):
+        raise EvidenceError(f"{label} contains a duplicate")
+    return limitations
+
+
+def parse_toolchain_policy(
+    policy_bytes: bytes,
+    stage: int,
+    *,
+    label: str,
+) -> tuple[str, list[dict[str, object]], list[str]]:
+    """Parse one closed toolchain policy and select the requested stage profile."""
+    if stage not in CLOSABLE_STAGES:
+        raise EvidenceError("toolchain profiles currently cover only Stages 00 through 04")
+    policy_hash = hashlib.sha256(policy_bytes).hexdigest()
+    try:
+        policy = tomllib.loads(policy_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        raise EvidenceError(f"{label} cannot be read: {error}") from error
+    schema_version = policy.get("schema_version")
+    if (
+        set(policy) != TOOLCHAIN_POLICY_TOP_FIELDS
+        or type(schema_version) is not int
+        or schema_version != 1
+    ):
+        raise EvidenceError(f"{label} has an invalid top-level schema")
+    require_string(policy.get("rust"), f"{label} rust version", maximum=64)
+    require_string(policy.get("cargo_deny"), f"{label} cargo-deny version", maximum=64)
+    require_string(policy.get("cargo_audit"), f"{label} cargo-audit version", maximum=64)
+    require_string(
+        policy.get("cargo_llvm_cov"),
+        f"{label} cargo-llvm-cov version",
+        maximum=64,
+    )
+    require_string(
+        policy.get("checkout_action_commit"),
+        f"{label} checkout action commit",
+        minimum=40,
+        maximum=40,
+        pattern=COMMIT_RE,
+    )
+    targets = policy.get("targets")
+    if (
+        not isinstance(targets, list)
+        or not targets
+        or targets != sorted(set(map(str, targets)))
+        or any(
+            not isinstance(target, str) or TARGET_RE.fullmatch(target) is None
+            for target in targets
+        )
+    ):
+        raise EvidenceError(f"{label} targets must be a sorted unique target list")
+    if tuple(targets) != REVIEWED_EVIDENCE_TARGETS:
+        raise EvidenceError(f"{label} targets differ from the reviewed conforming hosts")
+    require_string(
+        policy.get("branch_coverage_instrumentation"),
+        f"{label} branch coverage policy",
+        maximum=512,
+    )
+    limitations = validate_limitations(
+        policy.get("limitations"),
+        f"{label} limitations",
+        required=True,
+    )
+    raw_tools = policy.get("tool")
+    if (
+        not isinstance(raw_tools, list)
+        or not raw_tools
+        or len(raw_tools) > TOOLCHAIN_MAX_TOOLS
+    ):
+        raise EvidenceError(
+            f"{label} tools must be a nonempty array of at most {TOOLCHAIN_MAX_TOOLS} items"
+        )
+
+    selected: list[dict[str, object]] = []
+    names: set[str] = set()
+    argument_vectors: set[tuple[str, ...]] = set()
+    previous_first_stage = -1
+    for index, raw_tool in enumerate(raw_tools):
+        tool_label = f"{label} tool {index}"
+        if not isinstance(raw_tool, dict) or set(raw_tool) != TOOLCHAIN_POLICY_FIELDS:
+            raise EvidenceError(f"{tool_label} has invalid fields")
+        first_stage = raw_tool.get("first_stage")
+        if (
+            type(first_stage) is not int
+            or first_stage not in CLOSABLE_STAGES
+            or first_stage < previous_first_stage
+        ):
+            raise EvidenceError(
+                f"{tool_label}.first_stage must be ordered within Stages 00 through 04"
+            )
+        previous_first_stage = first_stage
+        normalized = validate_toolchain(
+            [
+                {
+                    "name": raw_tool.get("name"),
+                    "argv": raw_tool.get("argv"),
+                    "version": raw_tool.get("version"),
+                }
+            ],
+            tool_label,
+        )[0]
+        name = str(normalized["name"])
+        argv_key = tuple(str(argument) for argument in normalized["argv"])
+        if name in names:
+            raise EvidenceError(f"{label} contains duplicate tool name {name!r}")
+        if argv_key in argument_vectors:
+            raise EvidenceError(f"{label} contains duplicate tool probe argv")
+        names.add(name)
+        argument_vectors.add(argv_key)
+        if first_stage <= stage:
+            selected.append(normalized)
+    if not selected:
+        raise EvidenceError(f"{label} selects no tools for Stage {stage:02d}")
+    if policy_hash != TOOLCHAIN_POLICY_SHA256:
+        raise EvidenceError(f"{label} differs from the reviewed closed toolchain policy")
+    return policy_hash, selected, limitations
+
+
+def load_toolchain_policy(
+    root: Path,
+    stage: int,
+) -> tuple[str, list[dict[str, object]], list[str]]:
+    """Load the indexed current toolchain profile for a stage gate run."""
+    path = root / TOOLCHAIN_POLICY_PATH
+    try:
+        policy_bytes = path.read_bytes()
+    except OSError as error:
+        raise EvidenceError(f"cannot read {TOOLCHAIN_POLICY_PATH}: {error}") from error
+    policy_hash, tools, limitations = parse_toolchain_policy(
+        policy_bytes,
+        stage,
+        label="toolchain policy",
+    )
+    validate_index_bytes(
+        root,
+        TOOLCHAIN_POLICY_PATH,
+        policy_hash,
+        "current toolchain policy differs from its Git index bytes",
+    )
+    return policy_hash, tools, limitations
+
+
+def source_toolchain_policy(
+    root: Path,
+    stage: int,
+    source_commit: str,
+) -> tuple[str, list[dict[str, object]], list[str]]:
+    """Return the exact committed tool profile and require current-policy parity."""
+    policy_bytes = commit_blob(root, source_commit, TOOLCHAIN_POLICY_PATH)
+    policy_hash, tools, limitations = parse_toolchain_policy(
+        policy_bytes,
+        stage,
+        label="source toolchain policy",
+    )
+    current_hash, _current_tools, _current_limitations = load_toolchain_policy(root, stage)
+    if current_hash != policy_hash:
+        raise EvidenceError("source toolchain policy differs from the current closure policy")
+    return policy_hash, tools, limitations
+
+
 def validate_artifact(
     root: Path,
     artifact: object,
@@ -571,8 +871,8 @@ def validate_manifest(
     if set(manifest) != TOP_FIELDS:
         raise EvidenceError("manifest is missing required fields or has unknown fields")
     schema_version = manifest.get("schema_version")
-    if type(schema_version) is not int or schema_version != 1:
-        raise EvidenceError("manifest schema_version must be 1")
+    if type(schema_version) is not int or schema_version not in {1, 2}:
+        raise EvidenceError("manifest schema_version must be 1 or 2")
     require_string(manifest.get("manifest_id"), "manifest_id", maximum=78, pattern=MANIFEST_ID_RE)
     source_commit = require_string(
         manifest.get("source_commit"),
@@ -592,9 +892,13 @@ def validate_manifest(
         raise EvidenceError("manifest entries must be a nonempty array")
 
     seen_evidence: set[str] = set()
+    manifest_toolchain: list[dict[str, object]] | None = None
+    manifest_policy_hash: str | None = None
+    manifest_limitations: list[str] | None = None
     for index, raw_entry in enumerate(entries):
         label = f"entries[{index}]"
-        if not isinstance(raw_entry, dict) or set(raw_entry) != ENTRY_FIELDS:
+        expected_entry_fields = ENTRY_FIELDS if schema_version == 1 else ENTRY_V2_FIELDS
+        if not isinstance(raw_entry, dict) or set(raw_entry) != expected_entry_fields:
             raise EvidenceError(f"{label} is missing required fields or has unknown fields")
         entry = raw_entry
         evidence_id = require_string(
@@ -675,11 +979,29 @@ def validate_manifest(
                 require_provenance=False,
             )
 
-        limitations = entry.get("limitations")
-        if not isinstance(limitations, list) or len(limitations) > 64:
-            raise EvidenceError(f"{label}.limitations must be an array of at most 64 items")
-        for limitation in limitations:
-            require_string(limitation, f"{label}.limitations", maximum=2048)
+        limitations = validate_limitations(
+            entry.get("limitations"),
+            f"{label}.limitations",
+            required=schema_version == 2,
+        )
+        if schema_version == 2:
+            policy_hash = validate_hash(
+                entry.get("toolchain_policy_sha256"),
+                f"{label}.toolchain_policy_sha256",
+            )
+            toolchain = validate_toolchain(entry.get("toolchain"), f"{label}.toolchain")
+            if manifest_toolchain is None:
+                manifest_toolchain = toolchain
+                manifest_policy_hash = policy_hash
+                manifest_limitations = limitations
+            elif (
+                toolchain != manifest_toolchain
+                or policy_hash != manifest_policy_hash
+                or limitations != manifest_limitations
+            ):
+                raise EvidenceError(
+                    "schema version 2 manifest entries must share one toolchain policy"
+                )
 
 
 def validate(root: Path) -> tuple[int, int]:
@@ -938,6 +1260,9 @@ def validate_run_artifact(
     runner_hash: str,
     gate_hash: str,
     expected_commands: list[dict[str, object]],
+    toolchain_policy_hash: str,
+    expected_toolchain: list[dict[str, object]],
+    expected_limitations: list[str],
     source_commit: str,
     source_hash: str,
     lock_hash: str,
@@ -952,11 +1277,15 @@ def validate_run_artifact(
     if size > RUN_ARTIFACT_MAX_BYTES:
         raise EvidenceError("closure artifact exceeds the 4 MiB record limit")
     artifact = load_json(path)
-    if set(artifact) != RUN_ARTIFACT_FIELDS:
-        raise EvidenceError("closure artifact has invalid gate-run fields")
     schema_version = artifact.get("schema_version")
-    if type(schema_version) is not int or schema_version != 1:
-        raise EvidenceError("closure artifact schema_version must be 1")
+    if type(schema_version) is int and schema_version == 1:
+        raise EvidenceError(
+            "closure artifact schema_version must be 2; version 1 is archive-only"
+        )
+    if type(schema_version) is not int or schema_version != 2:
+        raise EvidenceError("closure artifact schema_version must be 2")
+    if set(artifact) != RUN_ARTIFACT_V2_FIELDS:
+        raise EvidenceError("closure artifact has invalid gate-run fields")
     if artifact.get("gate") != gate_name:
         raise EvidenceError("closure artifact names the wrong reviewed gate")
     if artifact.get("gate_manifest_sha256") != gate_hash:
@@ -967,6 +1296,21 @@ def validate_run_artifact(
     expected_tool = {"name": "agenc-ircd-gate-runner", "version": runner_hash}
     if artifact.get("tool") != expected_tool:
         raise EvidenceError("closure artifact is not bound to the committed gate runner")
+    if artifact.get("toolchain_policy_sha256") != toolchain_policy_hash:
+        raise EvidenceError("closure artifact is not bound to the committed toolchain policy")
+    toolchain = validate_toolchain(
+        artifact.get("toolchain"),
+        "closure artifact toolchain",
+    )
+    if toolchain != expected_toolchain:
+        raise EvidenceError("closure artifact toolchain differs from the reviewed stage profile")
+    limitations = validate_limitations(
+        artifact.get("limitations"),
+        "closure artifact limitations",
+        required=True,
+    )
+    if limitations != expected_limitations:
+        raise EvidenceError("closure artifact limitations differ from the reviewed policy")
     if artifact.get("source_commit") != source_commit:
         raise EvidenceError("closure artifact has a stale source commit")
     if artifact.get("source_sha256") != source_hash:
@@ -980,6 +1324,8 @@ def validate_run_artifact(
         maximum=128,
         pattern=TARGET_RE,
     )
+    if target not in REVIEWED_EVIDENCE_TARGETS:
+        raise EvidenceError("closure artifact target is not a reviewed conforming host")
     features = artifact.get("features")
     if not isinstance(features, list):
         raise EvidenceError("closure artifact features must be an array")
@@ -992,6 +1338,8 @@ def validate_run_artifact(
         )
     if features != sorted(features) or len(features) != len(set(features)):
         raise EvidenceError("closure artifact features must be sorted and unique")
+    if tuple(features) != REVIEWED_EVIDENCE_FEATURES:
+        raise EvidenceError("closure artifact features differ from the reviewed profile")
     started = parse_timestamp(artifact.get("started_at"), "closure artifact started_at")
     ended = parse_timestamp(artifact.get("ended_at"), "closure artifact ended_at")
     if ended < started:
@@ -1067,6 +1415,12 @@ def validate_run_artifact(
             raise EvidenceError(f"{evidence_id} did not run the reviewed stage gate")
         if entry.get("tool") != expected_tool:
             raise EvidenceError(f"{evidence_id} names an unreviewed gate tool")
+        if entry.get("toolchain_policy_sha256") != toolchain_policy_hash:
+            raise EvidenceError(f"{evidence_id} names a stale toolchain policy")
+        if entry.get("toolchain") != toolchain:
+            raise EvidenceError(f"{evidence_id} has a stale toolchain profile")
+        if entry.get("limitations") != limitations:
+            raise EvidenceError(f"{evidence_id} has stale limitations")
         if entry.get("target") != target or entry.get("features") != features:
             raise EvidenceError(f"{evidence_id} does not match the gate-run target or features")
         if entry.get("started_at") != artifact.get("started_at"):
@@ -1102,6 +1456,10 @@ def validate_closure_entries(
     artifact_paths: set[Path] = set()
     for evidence_id in sorted(required_ids):
         entry = by_id[evidence_id][0]
+        if set(entry) != ENTRY_V2_FIELDS:
+            raise EvidenceError(
+                f"{evidence_id} must use schema version 2 closure fields"
+            )
         if entry.get("source_commit") != source_commit:
             raise EvidenceError(f"{evidence_id} is not bound to the requested source commit")
         if entry.get("result") != "passed":
@@ -1127,14 +1485,30 @@ def validate_closure_entries(
         stage,
         source_commit,
     )
+    artifact_path = next(iter(artifact_paths))
+    expected_artifact_path = (
+        root
+        / "conformance/evidence/artifacts"
+        / f"{gate_name}-{source_commit}.json"
+    ).resolve()
+    if artifact_path != expected_artifact_path:
+        raise EvidenceError("closure evidence artifact path is not canonical for the gate")
+    policy_hash, toolchain, limitations = source_toolchain_policy(
+        root,
+        stage,
+        source_commit,
+    )
     validate_run_artifact(
-        next(iter(artifact_paths)),
+        artifact_path,
         [by_id[evidence_id][0] for evidence_id in sorted(required_ids)],
         required_ids,
         gate_name=gate_name,
         runner_hash=runner_hash,
         gate_hash=gate_hash,
         expected_commands=commands,
+        toolchain_policy_hash=policy_hash,
+        expected_toolchain=toolchain,
+        expected_limitations=limitations,
         source_commit=source_commit,
         source_hash=source_hash,
         lock_hash=lock_hash,
@@ -1155,6 +1529,7 @@ def validate_closure(root: Path, stage: int, source_commit: str) -> tuple[int, i
     required_ids = required_stage_evidence_ids(root, stage, source_commit)
     current_entries: list[dict[str, object]] = []
     current_manifests = 0
+    legacy_manifests = 0
     for path in sorted((root / "conformance/evidence").glob("*.json")):
         manifest = load_json(path)
         if manifest.get("source_commit") != source_commit:
@@ -1166,12 +1541,19 @@ def validate_closure(root: Path, stage: int, source_commit: str) -> tuple[int, i
             expected_lock_hash=lock_hash,
             artifact_root=root,
         )
+        if manifest.get("schema_version") != 2:
+            legacy_manifests += 1
+            continue
         entries = manifest.get("entries")
         if not isinstance(entries, list):
             raise EvidenceError(f"{path} has no evidence entries")
         current_entries.extend(entry for entry in entries if isinstance(entry, dict))
         current_manifests += 1
     if current_manifests == 0:
+        if legacy_manifests:
+            raise EvidenceError(
+                "schema version 1 manifests are archive-only and cannot close a stage"
+            )
         raise EvidenceError("no evidence manifest is bound to the requested source commit")
     count = validate_closure_entries(
         root,
@@ -1332,6 +1714,121 @@ kind = "normative-requirement"
         raise EvidenceError("self-test 'generic normative kind fallback' was accepted")
     cases += 1
 
+    policy_text = (root / TOOLCHAIN_POLICY_PATH).read_text(encoding="utf-8")
+    stage_zero_policy = parse_toolchain_policy(
+        policy_text.encode("utf-8"),
+        0,
+        label="self-test toolchain policy",
+    )
+    stage_four_policy = parse_toolchain_policy(
+        policy_text.encode("utf-8"),
+        4,
+        label="self-test toolchain policy",
+    )
+    if (
+        stage_zero_policy[0] != TOOLCHAIN_POLICY_SHA256
+        or stage_four_policy[0] != TOOLCHAIN_POLICY_SHA256
+        or len(stage_zero_policy[1]) != 12
+        or len(stage_four_policy[1]) != 17
+        or stage_zero_policy[2] != stage_four_policy[2]
+    ):
+        raise EvidenceError("self-test toolchain profiles differ from reviewed policy")
+
+    def reject_toolchain_policy(label: str, malformed: str, fragment: str) -> None:
+        nonlocal cases
+        if malformed == policy_text:
+            raise EvidenceError(f"self-test {label!r} did not mutate the toolchain policy")
+        try:
+            parse_toolchain_policy(
+                malformed.encode("utf-8"),
+                4,
+                label="self-test toolchain policy",
+            )
+        except EvidenceError as error:
+            if fragment not in str(error):
+                raise EvidenceError(
+                    f"self-test {label!r} reached the wrong branch: {error}"
+                ) from error
+        else:
+            raise EvidenceError(f"self-test {label!r} was accepted")
+        cases += 1
+
+    reject_toolchain_policy(
+        "boolean toolchain schema",
+        policy_text.replace("schema_version = 1", "schema_version = true", 1),
+        "invalid top-level schema",
+    )
+    reject_toolchain_policy(
+        "unknown toolchain policy field",
+        policy_text.replace(
+            "schema_version = 1",
+            "schema_version = 1\nunreviewed = true",
+            1,
+        ),
+        "invalid top-level schema",
+    )
+    reject_toolchain_policy(
+        "empty toolchain limitations",
+        re.sub(
+            r"limitations = \[.*?\]\n\n\[\[tool\]\]",
+            "limitations = []\n\n[[tool]]",
+            policy_text,
+            count=1,
+            flags=re.DOTALL,
+        ),
+        "nonempty array",
+    )
+    reject_toolchain_policy(
+        "duplicate toolchain name",
+        policy_text.replace('name = "cargo"', 'name = "rustc"', 1),
+        "duplicate tool name",
+    )
+    reject_toolchain_policy(
+        "unordered toolchain stage",
+        policy_text.replace("first_stage = 0", "first_stage = 2", 1),
+        "first_stage must be ordered",
+    )
+    reject_toolchain_policy(
+        "empty toolchain argv",
+        policy_text.replace('argv = ["rustc", "--version"]', "argv = []", 1),
+        "argv must contain",
+    )
+    first_tool_block = re.search(
+        r"\[\[tool\]\]\nname = \"rustc\".*?(?=\n\[\[tool\]\])",
+        policy_text,
+        flags=re.DOTALL,
+    )
+    if first_tool_block is None:
+        raise EvidenceError("self-test cannot find the first reviewed tool")
+    reject_toolchain_policy(
+        "missing reviewed tool",
+        policy_text.replace(first_tool_block.group(0), "", 1),
+        "reviewed closed toolchain policy",
+    )
+    reject_toolchain_policy(
+        "substituted reviewed tool version",
+        policy_text.replace("cargo-deny 0.20.2", "cargo-deny 0.20.3", 1),
+        "reviewed closed toolchain policy",
+    )
+    reject_toolchain_policy(
+        "changed reviewed first stage",
+        policy_text.replace(
+            'name = "nightly-rustc"\nfirst_stage = 2',
+            'name = "nightly-rustc"\nfirst_stage = 1',
+            1,
+        ),
+        "reviewed closed toolchain policy",
+    )
+    reject_toolchain_policy(
+        "changed reviewed limitation",
+        policy_text.replace(
+            "Command output is not captured.",
+            "Command output capture is partial.",
+            1,
+        ),
+        "reviewed closed toolchain policy",
+    )
+
     def reject(label: str, mutation: callable, fragment: str) -> None:  # type: ignore[valid-type]
         nonlocal cases
         malformed = copy.deepcopy(valid)
@@ -1342,7 +1839,7 @@ kind = "normative-requirement"
     reject(
         "boolean manifest schema",
         lambda value: value.__setitem__("schema_version", True),
-        "manifest schema_version must be 1",
+        "manifest schema_version must be 1 or 2",
     )
     reject("missing field", lambda value: value.pop("lock_sha256"), "missing required")
     reject(
@@ -1428,6 +1925,22 @@ kind = "normative-requirement"
     historical_failure["entries"][0]["result"] = "failed"  # type: ignore[index]
     validate_manifest(historical_failure, bindings)
 
+    legacy = copy.deepcopy(valid)
+    legacy["schema_version"] = 1
+    legacy_entry = legacy["entries"][0]  # type: ignore[index]
+    legacy_entry.pop("toolchain_policy_sha256")  # type: ignore[union-attr]
+    legacy_entry.pop("toolchain")  # type: ignore[union-attr]
+    validate_manifest(legacy, bindings)
+    empty_version_two_limitations = copy.deepcopy(valid)
+    empty_version_two_limitations["entries"][0]["limitations"] = []  # type: ignore[index]
+    expect_rejection(
+        "empty version 2 limitations",
+        empty_version_two_limitations,
+        bindings,
+        "nonempty array",
+    )
+    cases += 1
+
     requirement_ledger.validate(root)
     source_ledger = requirement_ledger.load_ledger(root / requirement_ledger.LEDGER_PATH)
     source_records = source_ledger.get("requirement")
@@ -1510,14 +2023,150 @@ kind = "normative-requirement"
         raise EvidenceError("self-test 'incomplete source requirement' was accepted")
     cases += 1
 
+    with tempfile.TemporaryDirectory(prefix="agenc-git-provenance-test-") as temporary:
+        temporary_root = Path(temporary)
+        source_path = temporary_root / "source.txt"
+        source_path.write_text("original source\n", encoding="utf-8")
+        git_bytes(temporary_root, ["init", "--quiet"], "provenance test repository")
+        git_bytes(temporary_root, ["add", "--", "source.txt"], "provenance test source")
+        author = [
+            "-c",
+            "user.name=Evidence Self-Test",
+            "-c",
+            "user.email=evidence@example.invalid",
+        ]
+        git_bytes(
+            temporary_root,
+            [*author, "commit", "--quiet", "-m", "Add original source"],
+            "provenance test source commit",
+        )
+        source_commit = git_bytes(
+            temporary_root,
+            ["rev-parse", "HEAD"],
+            "provenance test source commit ID",
+        ).decode("ascii").strip()
+        original_hash = canonical_source_sha256(temporary_root, source_commit)
+        original_blob = commit_blob(temporary_root, source_commit, "source.txt")
+
+        baseline_policy = runpy.run_path(
+            str(root / "scripts/check-baseline.py"),
+            run_name="agenc_ircd_baseline_policy",
+        )
+        baseline_blob = baseline_policy.get("frozen_blob")
+        baseline_validate_commit = baseline_policy.get("validate_frozen_commit")
+        baseline_error = baseline_policy.get("BaselineError")
+        if (
+            not callable(baseline_blob)
+            or not callable(baseline_validate_commit)
+            or not isinstance(baseline_error, type)
+        ):
+            raise EvidenceError("self-test cannot load frozen baseline Git policy")
+
+        empty_tree = git_bytes(
+            temporary_root,
+            ["hash-object", "-t", "tree", os.devnull],
+            "empty replacement tree",
+        ).decode("ascii").strip()
+        replacement_commit = git_bytes(
+            temporary_root,
+            [*author, "commit-tree", empty_tree, "-m", "Replacement source"],
+            "replacement source commit",
+        ).decode("ascii").strip()
+        git_bytes(
+            temporary_root,
+            ["replace", source_commit, replacement_commit],
+            "replacement source reference",
+        )
+        attack_environment = {
+            name: value
+            for name, value in os.environ.items()
+            if not name.startswith("GIT_")
+        }
+        replaced_read = subprocess.run(
+            ["git", "cat-file", "-e", f"{source_commit}:source.txt"],
+            cwd=temporary_root,
+            env=attack_environment,
+            capture_output=True,
+            check=False,
+        )
+        if replaced_read.returncode == 0:
+            raise EvidenceError("self-test replacement reference did not alter ordinary Git")
+        if commit_blob(temporary_root, source_commit, "source.txt") != original_blob:
+            raise EvidenceError("replacement reference changed an evidence source blob")
+        if canonical_source_sha256(temporary_root, source_commit) != original_hash:
+            raise EvidenceError("replacement reference changed the canonical source hash")
+        if baseline_blob(temporary_root, source_commit, "source.txt") != original_blob:
+            raise EvidenceError("replacement reference changed a frozen baseline blob")
+        git_bytes(
+            temporary_root,
+            ["replace", "-d", source_commit],
+            "replacement source cleanup",
+        )
+        cases += 1
+
+        git_bytes(
+            temporary_root,
+            [*author, "commit", "--quiet", "--allow-empty", "-m", "Add descendant"],
+            "provenance test descendant",
+        )
+        descendant_commit = git_bytes(
+            temporary_root,
+            ["rev-parse", "HEAD"],
+            "provenance test descendant ID",
+        ).decode("ascii").strip()
+        graft_path = temporary_root / ".git/info/grafts"
+        graft_path.parent.mkdir(parents=True, exist_ok=True)
+        graft_path.write_text(f"{descendant_commit}\n", encoding="ascii")
+        grafted_ancestry = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", source_commit, descendant_commit],
+            cwd=temporary_root,
+            env=attack_environment,
+            capture_output=True,
+            check=False,
+        )
+        if grafted_ancestry.returncode != 1:
+            raise EvidenceError("self-test graft did not alter ordinary Git ancestry")
+        git_bytes(
+            temporary_root,
+            ["merge-base", "--is-ancestor", source_commit, descendant_commit],
+            "graft-isolated evidence ancestry",
+        )
+        baseline_validate_commit(temporary_root, source_commit)
+        graft_path.unlink()
+        cases += 1
+
+        shallow_path = temporary_root / ".git/shallow"
+        shallow_path.write_text(f"{descendant_commit}\n", encoding="ascii")
+        try:
+            canonical_source_sha256(temporary_root, source_commit)
+        except EvidenceError as error:
+            if "complete Git history" not in str(error):
+                raise EvidenceError(
+                    f"self-test 'shallow evidence history' reached the wrong branch: {error}"
+                ) from error
+        else:
+            raise EvidenceError("self-test 'shallow evidence history' was accepted")
+        cases += 1
+        try:
+            baseline_validate_commit(temporary_root, source_commit)
+        except baseline_error as error:
+            if "complete Git history" not in str(error):
+                raise EvidenceError(
+                    f"self-test 'shallow baseline history' reached the wrong branch: {error}"
+                ) from error
+        else:
+            raise EvidenceError("self-test 'shallow baseline history' was accepted")
+        cases += 1
+
     with tempfile.TemporaryDirectory(prefix="agenc-evidence-self-test-") as temporary:
         temporary_root = Path(temporary)
         runner_path = temporary_root / "scripts/run-gate.py"
         gate_path = temporary_root / "conformance/gates.toml"
-        artifact_path = temporary_root / "conformance/evidence/artifacts/closure.json"
+        policy_path = temporary_root / TOOLCHAIN_POLICY_PATH
+        artifact_directory = temporary_root / "conformance/evidence/artifacts"
         runner_path.parent.mkdir(parents=True)
         gate_path.parent.mkdir(parents=True)
-        artifact_path.parent.mkdir(parents=True)
+        artifact_directory.mkdir(parents=True)
         runner_path.write_text("# reviewed self-test gate runner\n", encoding="utf-8")
         gate_path.write_text(
             """schema_version = 1
@@ -1529,6 +2178,7 @@ argv = ["python3", "scripts/check-evidence.py", "check"]
 """,
             encoding="utf-8",
         )
+        policy_path.write_bytes((root / TOOLCHAIN_POLICY_PATH).read_bytes())
         git_bytes(temporary_root, ["init", "--quiet"], "self-test repository")
         git_bytes(
             temporary_root,
@@ -1541,6 +2191,7 @@ argv = ["python3", "scripts/check-evidence.py", "check"]
                 "--",
                 "scripts/run-gate.py",
                 "conformance/gates.toml",
+                TOOLCHAIN_POLICY_PATH,
             ],
             "self-test source files",
         )
@@ -1571,10 +2222,24 @@ argv = ["python3", "scripts/check-evidence.py", "check"]
             0,
             closure_commit,
         )
+        artifact_path = artifact_directory / f"{gate_name}-{closure_commit}.json"
+        policy_hash, toolchain, limitations = source_toolchain_policy(
+            temporary_root,
+            0,
+            closure_commit,
+        )
+        _stage_two_hash, stage_two_toolchain, _stage_two_limitations = (
+            source_toolchain_policy(temporary_root, 2, closure_commit)
+        )
+        if len(toolchain) != 12 or len(stage_two_toolchain) != 17:
+            raise EvidenceError("self-test toolchain stage profiles are not cumulative")
         run_artifact: dict[str, object] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "gate": gate_name,
             "gate_manifest_sha256": gate_hash,
+            "toolchain_policy_sha256": policy_hash,
+            "toolchain": toolchain,
+            "limitations": limitations,
             "argv": ["python3", "scripts/run-gate.py", gate_name],
             "tool": {
                 "name": "agenc-ircd-gate-runner",
@@ -1622,6 +2287,8 @@ argv = ["python3", "scripts/check-evidence.py", "check"]
             "name": "agenc-ircd-gate-runner",
             "version": runner_hash,
         }
+        closure_entry["toolchain_policy_sha256"] = policy_hash
+        closure_entry["toolchain"] = toolchain
         closure_entry["source_commit"] = closure_commit
         closure_entry["source_sha256"] = closure_source_hash
         closure_entry["lock_sha256"] = closure_lock_hash
@@ -1630,10 +2297,14 @@ argv = ["python3", "scripts/check-evidence.py", "check"]
         closure_entry["started_at"] = "2026-08-24T00:00:00Z"
         closure_entry["ended_at"] = "2026-08-24T00:00:02Z"
         closure_entry["result"] = "passed"
+        closure_entry["limitations"] = limitations
         closure_entry["artifact"] = {
             "label": "closure-test",
             "sha256": artifact_hash,
-            "path": "conformance/evidence/artifacts/closure.json",
+            "path": (
+                "conformance/evidence/artifacts/"
+                f"{gate_name}-{closure_commit}.json"
+            ),
         }
         validate_closure_entries(
             temporary_root,
@@ -1696,6 +2367,151 @@ argv = ["python3", "scripts/check-evidence.py", "check"]
         false_tool["tool"] = {"name": "sh", "version": "1"}
         reject_closure("unreviewed closure tool", [false_tool], "unreviewed gate tool")
 
+        legacy_run_artifact = copy.deepcopy(run_artifact)
+        legacy_run_artifact["schema_version"] = 1
+        legacy_run_artifact.pop("toolchain_policy_sha256")
+        legacy_run_artifact.pop("toolchain")
+        legacy_run_artifact.pop("limitations")
+        legacy_run = copy.deepcopy(closure_entry)
+        legacy_run["artifact"]["sha256"] = stage_artifact(  # type: ignore[index]
+            legacy_run_artifact
+        )
+        reject_closure(
+            "legacy gate-run schema",
+            [legacy_run],
+            "version 1 is archive-only",
+        )
+
+        stale_policy_artifact = copy.deepcopy(run_artifact)
+        stale_policy_artifact["toolchain_policy_sha256"] = "0" * 64
+        stale_policy = copy.deepcopy(closure_entry)
+        stale_policy["artifact"]["sha256"] = stage_artifact(  # type: ignore[index]
+            stale_policy_artifact
+        )
+        reject_closure(
+            "stale toolchain policy",
+            [stale_policy],
+            "committed toolchain policy",
+        )
+
+        missing_tool_artifact = copy.deepcopy(run_artifact)
+        missing_tool_artifact["toolchain"].pop()  # type: ignore[union-attr]
+        missing_tool = copy.deepcopy(closure_entry)
+        missing_tool["artifact"]["sha256"] = stage_artifact(  # type: ignore[index]
+            missing_tool_artifact
+        )
+        reject_closure(
+            "missing toolchain identity",
+            [missing_tool],
+            "reviewed stage profile",
+        )
+
+        extra_tool_artifact = copy.deepcopy(run_artifact)
+        extra_tool_artifact["toolchain"].append(  # type: ignore[union-attr]
+            {
+                "name": "unreviewed-tool",
+                "argv": ["unreviewed-tool", "--version"],
+                "version": "unreviewed-tool 1.0",
+            }
+        )
+        extra_tool = copy.deepcopy(closure_entry)
+        extra_tool["artifact"]["sha256"] = stage_artifact(  # type: ignore[index]
+            extra_tool_artifact
+        )
+        reject_closure(
+            "extra toolchain identity",
+            [extra_tool],
+            "reviewed stage profile",
+        )
+
+        wrong_tool_version_artifact = copy.deepcopy(run_artifact)
+        wrong_tool_version_artifact["toolchain"][0]["version"] = "test-tool 2.0"  # type: ignore[index]
+        wrong_tool_version = copy.deepcopy(closure_entry)
+        wrong_tool_version["artifact"]["sha256"] = stage_artifact(  # type: ignore[index]
+            wrong_tool_version_artifact
+        )
+        reject_closure(
+            "wrong toolchain version",
+            [wrong_tool_version],
+            "reviewed stage profile",
+        )
+
+        missing_limitations_artifact = copy.deepcopy(run_artifact)
+        missing_limitations_artifact["limitations"] = []
+        missing_limitations = copy.deepcopy(closure_entry)
+        missing_limitations["artifact"]["sha256"] = stage_artifact(  # type: ignore[index]
+            missing_limitations_artifact
+        )
+        reject_closure(
+            "missing artifact limitations",
+            [missing_limitations],
+            "nonempty array",
+        )
+
+        unsupported_target_artifact = copy.deepcopy(run_artifact)
+        unsupported_target_artifact["target"] = "aarch64-apple-darwin"
+        unsupported_target = copy.deepcopy(closure_entry)
+        unsupported_target["artifact"]["sha256"] = stage_artifact(  # type: ignore[index]
+            unsupported_target_artifact
+        )
+        reject_closure(
+            "unsupported evidence host",
+            [unsupported_target],
+            "not a reviewed conforming host",
+        )
+
+        empty_features_artifact = copy.deepcopy(run_artifact)
+        empty_features_artifact["features"] = []
+        empty_features = copy.deepcopy(closure_entry)
+        empty_features["artifact"]["sha256"] = stage_artifact(  # type: ignore[index]
+            empty_features_artifact
+        )
+        reject_closure(
+            "empty evidence features",
+            [empty_features],
+            "reviewed profile",
+        )
+
+        renamed_path = (
+            temporary_root / "conformance/evidence/artifacts/renamed-closure.json"
+        )
+        renamed_hash = stage_artifact(run_artifact, renamed_path)
+        renamed_artifact = copy.deepcopy(closure_entry)
+        renamed_artifact["artifact"] = {
+            "label": "renamed-gate-run",
+            "sha256": renamed_hash,
+            "path": "conformance/evidence/artifacts/renamed-closure.json",
+        }
+        reject_closure(
+            "noncanonical artifact path",
+            [renamed_artifact],
+            "not canonical for the gate",
+        )
+
+        artifact_hash = stage_artifact(run_artifact)
+        closure_entry["artifact"]["sha256"] = artifact_hash  # type: ignore[index]
+        stale_entry_policy = copy.deepcopy(closure_entry)
+        stale_entry_policy["toolchain_policy_sha256"] = "0" * 64
+        reject_closure(
+            "stale entry toolchain policy",
+            [stale_entry_policy],
+            "stale toolchain policy",
+        )
+        stale_entry_toolchain = copy.deepcopy(closure_entry)
+        stale_entry_toolchain["toolchain"].pop()  # type: ignore[union-attr]
+        reject_closure(
+            "stale entry toolchain profile",
+            [stale_entry_toolchain],
+            "stale toolchain profile",
+        )
+        stale_entry_limitations = copy.deepcopy(closure_entry)
+        stale_entry_limitations["limitations"] = ["Different limitation."]
+        reject_closure(
+            "stale entry limitations",
+            [stale_entry_limitations],
+            "stale limitations",
+        )
+
         wrong_kind_artifact = copy.deepcopy(run_artifact)
         wrong_kind_artifact["evidence"][0]["kind"] = "unrelated"  # type: ignore[index]
         wrong_kind = copy.deepcopy(closure_entry)
@@ -1712,15 +2528,17 @@ argv = ["python3", "scripts/check-evidence.py", "check"]
         )
         reject_closure("incomplete gate run", [incomplete_run], "command results are incomplete")
 
-        unrelated_path = temporary_root / "conformance/evidence/artifacts/unrelated.json"
-        unrelated_hash = stage_artifact({}, unrelated_path)
+        unrelated_hash = stage_artifact({})
         unrelated = copy.deepcopy(closure_entry)
         unrelated["artifact"] = {
             "label": "unrelated-test",
             "sha256": unrelated_hash,
-            "path": "conformance/evidence/artifacts/unrelated.json",
+            "path": (
+                "conformance/evidence/artifacts/"
+                f"{gate_name}-{closure_commit}.json"
+            ),
         }
-        reject_closure("unrelated staged artifact", [unrelated], "invalid gate-run fields")
+        reject_closure("unrelated staged artifact", [unrelated], "schema_version must be 2")
 
         artifact_hash = stage_artifact(run_artifact)
         closure_entry["artifact"]["sha256"] = artifact_hash  # type: ignore[index]

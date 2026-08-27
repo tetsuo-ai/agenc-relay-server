@@ -42,6 +42,9 @@ argv = ["python3", "scripts/check-ci.py", "check"]
 argv = ["python3", "scripts/check-ci.py", "self-test"]
 
 [[gate.stage-zero-implementation.command]]
+argv = ["python3", "scripts/check-rust-components.py", "self-test"]
+
+[[gate.stage-zero-implementation.command]]
 argv = ["cargo", "fmt", "--all", "--check"]
 
 [[gate.stage-zero-implementation.command]]

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import NoReturn
 
 TOOLCHAIN = "1.98.0"
+TOOLCHAIN_POLICY_SHA256 = "3f125bad8eeb2ef52f3cb49d2296e9453a76b14d6d288d75b3e3fdd2fbe13095"
 EDITION = "2024"
 RUST_VERSION = "1.98"
 TARGETS = ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]
@@ -223,6 +224,31 @@ def validate_vendored_patches(
         raise WorkspaceError("vendored opaque-ke tree digest differs from reviewed source")
 
 
+def validate_toolchain_policy(policy_bytes: bytes) -> None:
+    """Validate the complete reviewed gate-toolchain policy bytes."""
+    if hashlib.sha256(policy_bytes).hexdigest() != TOOLCHAIN_POLICY_SHA256:
+        raise WorkspaceError("toolchain policy differs from its reviewed closed bytes")
+    try:
+        policy = tomllib.loads(policy_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        raise WorkspaceError(f"cannot parse toolchain policy: {error}") from error
+    expected_policy = {
+        "schema_version": 1,
+        "rust": TOOLCHAIN,
+        "cargo_deny": "0.20.2",
+        "cargo_audit": "0.22.2",
+        "cargo_llvm_cov": "0.9.0",
+        "checkout_action_commit": "df4cb1c069e1874edd31b4311f1884172cec0e10",
+        "targets": TARGETS,
+        "branch_coverage_instrumentation": "coverage-only RUSTC_BOOTSTRAP=1 on pinned rustc; forbidden for build, test, and release compilation",
+    }
+    if (
+        set(policy) != set(expected_policy) | {"limitations", "tool"}
+        or any(policy.get(key) != value for key, value in expected_policy.items())
+    ):
+        raise WorkspaceError("toolchain policy differs from the reviewed CI pin set")
+
+
 def validate_toolchain(root: Path) -> None:
     """Validate the exact compiler, components, and target contract."""
     toolchain = load_toml(root / "rust-toolchain.toml").get("toolchain")
@@ -234,20 +260,11 @@ def validate_toolchain(root: Path) -> None:
         raise WorkspaceError("Rust toolchain components do not match the frozen contract")
     if toolchain.get("targets") != TARGETS:
         raise WorkspaceError("Rust targets do not match the frozen sorted target list")
-
-    policy = load_toml(root / "conformance/toolchain-policy.toml")
-    expected_policy = {
-        "schema_version": 1,
-        "rust": TOOLCHAIN,
-        "cargo_deny": "0.20.2",
-        "cargo_audit": "0.22.2",
-        "cargo_llvm_cov": "0.9.0",
-        "checkout_action_commit": "df4cb1c069e1874edd31b4311f1884172cec0e10",
-        "targets": TARGETS,
-        "branch_coverage_instrumentation": "coverage-only RUSTC_BOOTSTRAP=1 on pinned rustc; forbidden for build, test, and release compilation",
-    }
-    if policy != expected_policy:
-        raise WorkspaceError("toolchain policy differs from the reviewed CI pin set")
+    try:
+        policy_bytes = (root / "conformance/toolchain-policy.toml").read_bytes()
+    except OSError as error:
+        raise WorkspaceError(f"cannot read toolchain policy: {error}") from error
+    validate_toolchain_policy(policy_bytes)
 
 
 def validate_workspace_manifest(root: Path) -> dict[str, object]:
@@ -694,6 +711,17 @@ def self_test(root: Path) -> int:
     validate_lockfile(root)
     validate_dependency_exception(root)
     cases = 0
+
+    policy_bytes = (root / "conformance/toolchain-policy.toml").read_bytes()
+    changed_policy = policy_bytes.replace(b"cargo-deny 0.20.2", b"cargo-deny 0.20.3", 1)
+    if changed_policy == policy_bytes:
+        raise WorkspaceError("self-test cannot mutate the reviewed toolchain policy")
+    expect_rejection(
+        "toolchain policy bytes",
+        lambda: validate_toolchain_policy(changed_policy),
+        "reviewed closed bytes",
+    )
+    cases += 1
 
     forbidden = copy.deepcopy(packages)
     forbidden["agenc-ircd-types"]["dependencies"].append(

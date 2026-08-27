@@ -1,9 +1,10 @@
 # Stage 03 Evidence
 
-Status: closed on 2026-08-27 for source commit
-`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb`. The [current
+Status: implementation complete; schema version 2 checkpoint refresh pending.
+The [historical
 manifest](evidence/stage-03-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json)
-binds every required record to one clean gate run and its checked-in
+binds every required record for source commit
+`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` to one clean gate run and its checked-in
 [artifact](evidence/artifacts/stage-three-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json).
 
 Stage 03 implements pure domain behavior. The domain crate has no sockets,
@@ -102,7 +103,8 @@ so a later generator change cannot silently replace either operation sequence.
 `EVID-S03-900-STAGE-GATE` names `bash scripts/check-stage-three.sh`. The command
 inherits the Stage 02 implementation checks and adds requirement ownership,
 generated-artifact checks, independent domain checks, targeted model
-comparisons, and the full Stage 03 behavior matrix. The current manifest binds
+comparisons, and the full Stage 03 behavior matrix. The historical manifest binds
 that passed run to exact source commit
-`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` and closes `S03-900` for that
-revision.
+`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` and is retained as archive
+evidence. A fresh schema version 2 run is required to close `S03-900` for the
+current source.

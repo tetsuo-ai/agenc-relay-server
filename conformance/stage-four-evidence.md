@@ -1,9 +1,10 @@
 # Stage 04 Evidence
 
-Status: closed on 2026-08-27 for source commit
-`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb`. The [current
+Status: implementation complete; schema version 2 checkpoint refresh pending.
+The [historical
 manifest](evidence/stage-04-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json)
-binds every required record to one clean gate run and its checked-in
+binds every required record for source commit
+`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` to one clean gate run and its checked-in
 [artifact](evidence/artifacts/stage-four-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json).
 
 Stage 04 implements the cryptographic adapters and account-authentication
@@ -125,9 +126,10 @@ The 24 CPU-hour release campaign for each target remains Stage 10 evidence.
 ## Gate state
 
 `bash scripts/check-stage-four.sh` inherits every Stage 00 through Stage 03
-check and adds the Stage 04 profile, tests, and fuzz target. The [current
+check and adds the Stage 04 profile, tests, and fuzz target. The [historical
 manifest](evidence/stage-04-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json)
 binds the full passed gate and its checked-in artifact to exact source commit
 `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb`. The baseline at that commit
-contains the corrected normative OPAQUE length, so the record closes
-`EVID-S04-900-STAGE-GATE` for that revision.
+contains the corrected normative OPAQUE length. The record is retained as
+archive evidence, and a fresh schema version 2 run is required to close
+`S04-900` for the current source.

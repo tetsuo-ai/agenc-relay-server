@@ -18,9 +18,11 @@ records. Stage closure accepts only current passed records with a checked-in
 artifact path and a digest that matches the artifact bytes. The closing
 artifact is a closed JSON gate-run record. It names the exact committed gate
 runner and gate manifest, contains one successful result for every resolved
-command, and lists each required evidence ID with its catalog kind. All closing
-entries must refer to that same run. Historical logs remain valid archive
-records, but they cannot close a stage.
+command, binds the committed stage-specific toolchain policy, records every
+exact tool probe and disclosed limitation, and lists each required evidence ID
+with its catalog kind. All closing entries must refer to that same run. Schema
+version 1 records and other historical logs remain valid archive records, but
+they cannot close a stage.
 
 `evidence-manifest.example.json` is deliberately non-claiming test data. Real
 evidence belongs under `conformance/evidence/` and must identify the exact
@@ -48,10 +50,10 @@ The command inherits every Stage 03 check and adds the exact cryptographic
 profile, auth and crypto boundary tests, account-generation fences, and
 account-envelope fuzzing. The reviewed `opaque-ke` source patch is pinned by
 `conformance/vendored-dependencies.toml` and checked by workspace policy. The
-command alone does not close `S04-900`. The five checked-in manifests for
-source commit `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` record passed Stage 00
-through 04 gates with matching artifacts, so those stage gates are closed for
-that revision. Any later source change requires a new exact-source record.
+command alone does not close `S04-900`. The five schema version 1 manifests for
+source commit `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` remain historical records.
+The current source changes require fresh schema version 2 Stage 00 through 04
+runs before those gates are closed for the new revision.
 
 For an evidence-only check:
 

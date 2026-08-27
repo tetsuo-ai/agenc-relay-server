@@ -40,8 +40,8 @@ targets, formatting, Clippy with warnings denied, tests, documentation tests,
 dependency policy, advisories, generated artifacts, and all four deterministic
 10,000-run fuzz smokes. Coverage was 90.03% of branches and 93.97% of lines.
 The source revision and artifact digest are recorded in the Stage 02 evidence
-manifest. That 2026-08-26 manifest remains archive evidence. The [current
+manifest. That 2026-08-26 manifest remains archive evidence. The [historical
 manifest](evidence/stage-02-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json)
-binds a repeated Stage 02 gate run to a checked-in artifact and closes
-`S02-900` for exact source commit
-`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb`.
+binds a repeated Stage 02 gate run to a checked-in artifact for exact source
+commit `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb`. A schema version 2 checkpoint
+refresh is pending for the current source.
