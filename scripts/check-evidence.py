@@ -27,6 +27,8 @@ EXAMPLE_PATH = "conformance/evidence-manifest.example.json"
 SCHEMA_SHA256 = "b0e137647d8ce7d999f13a1e5cae1008476d3fc850ad006d77bf6627c8540470"
 TOOLCHAIN_POLICY_PATH = "conformance/toolchain-policy.toml"
 TOOLCHAIN_POLICY_SHA256 = "3f125bad8eeb2ef52f3cb49d2296e9453a76b14d6d288d75b3e3fdd2fbe13095"
+REGULAR_INDEX_MODE = "100644"
+EXECUTABLE_INDEX_MODE = "100755"
 
 STAGE_BINDINGS = {
     "EVID-S00-001-BASELINE": (["S00-001"], "specification-baseline"),
@@ -485,11 +487,37 @@ def validate_index_bytes(
     relative: str,
     expected_hash: str,
     mismatch: str,
+    *,
+    expected_mode: str = REGULAR_INDEX_MODE,
 ) -> None:
-    """Require one repository-relative file to match its Git index blob."""
+    """Require one regular stage-zero index entry with the expected blob and mode."""
+    raw_entries = git_bytes(
+        root,
+        ["ls-files", "--stage", "-z", "--", relative],
+        f"{relative} index entry",
+    )
+    entries = [entry for entry in raw_entries.split(b"\0") if entry]
+    if len(entries) != 1:
+        raise EvidenceError(f"{relative} has no unique Git index entry")
+    try:
+        metadata, indexed_path = entries[0].split(b"\t", 1)
+        raw_mode, raw_object_id, raw_stage = metadata.split(b" ", 2)
+        mode = raw_mode.decode("ascii")
+        object_id = raw_object_id.decode("ascii")
+        stage = int(raw_stage.decode("ascii"))
+    except (UnicodeDecodeError, ValueError) as error:
+        raise EvidenceError(f"{relative} has a malformed Git index entry") from error
+    if indexed_path != os.fsencode(relative):
+        raise EvidenceError(f"{relative} resolved to an unexpected Git index path")
+    if stage != 0:
+        raise EvidenceError(f"{relative} has a nonzero Git index stage")
+    if mode != expected_mode:
+        raise EvidenceError(
+            f"{relative} has Git index mode {mode}; expected {expected_mode}"
+        )
     tracked_bytes = git_bytes(
         root,
-        ["show", f":{relative}"],
+        ["cat-file", "blob", object_id],
         f"{relative} in the Git index",
     )
     if hashlib.sha256(tracked_bytes).hexdigest() != expected_hash:
@@ -1235,6 +1263,7 @@ def source_gate_policy(
         "scripts/run-gate.py",
         runner_hash,
         "current gate runner differs from its Git index bytes",
+        expected_mode=EXECUTABLE_INDEX_MODE,
     )
     return gate_name, runner_hash, gate_hash, commands
 
@@ -2168,6 +2197,7 @@ kind = "normative-requirement"
         gate_path.parent.mkdir(parents=True)
         artifact_directory.mkdir(parents=True)
         runner_path.write_text("# reviewed self-test gate runner\n", encoding="utf-8")
+        runner_path.chmod(0o755)
         gate_path.write_text(
             """schema_version = 1
 
@@ -2336,6 +2366,77 @@ argv = ["python3", "scripts/check-evidence.py", "check"]
             else:
                 raise EvidenceError(f"self-test {label!r} was accepted")
             cases += 1
+
+        artifact_relative = artifact_path.relative_to(temporary_root).as_posix()
+
+        def replace_index_mode(relative: str, mode: str) -> None:
+            object_id = git_bytes(
+                temporary_root,
+                ["rev-parse", f":{relative}"],
+                "self-test index object ID",
+            ).decode("ascii").strip()
+            git_bytes(
+                temporary_root,
+                [
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    f"{mode},{object_id},{relative}",
+                ],
+                "self-test index mode",
+            )
+
+        replace_index_mode(artifact_relative, "120000")
+        reject_closure(
+            "symbolic-link artifact index mode",
+            [closure_entry],
+            "expected 100644",
+        )
+        stage_artifact(run_artifact)
+        replace_index_mode(artifact_relative, "100755")
+        reject_closure(
+            "executable artifact index mode",
+            [closure_entry],
+            "expected 100644",
+        )
+        stage_artifact(run_artifact)
+
+        manifest_mode_path = temporary_root / "conformance/evidence/index-mode.json"
+        manifest_mode_path.write_bytes(b"{}\n")
+        manifest_mode_relative = manifest_mode_path.relative_to(temporary_root).as_posix()
+        git_bytes(
+            temporary_root,
+            ["add", "--", manifest_mode_relative],
+            "self-test manifest index fixture",
+        )
+        manifest_mode_hash = hashlib.sha256(manifest_mode_path.read_bytes()).hexdigest()
+
+        def reject_manifest_index_mode(label: str, mode: str) -> None:
+            nonlocal cases
+            replace_index_mode(manifest_mode_relative, mode)
+            try:
+                validate_index_bytes(
+                    temporary_root,
+                    manifest_mode_relative,
+                    manifest_mode_hash,
+                    "self-test manifest bytes differ",
+                )
+            except EvidenceError as error:
+                if "expected 100644" not in str(error):
+                    raise EvidenceError(
+                        f"self-test {label!r} reached the wrong branch: {error}"
+                    ) from error
+            else:
+                raise EvidenceError(f"self-test {label!r} was accepted")
+            git_bytes(
+                temporary_root,
+                ["add", "--", manifest_mode_relative],
+                "restore self-test manifest index fixture",
+            )
+            cases += 1
+
+        reject_manifest_index_mode("symbolic-link manifest index mode", "120000")
+        reject_manifest_index_mode("executable manifest index mode", "100755")
 
         reject_closure("missing closure evidence", [], "closure evidence is missing")
         failed = copy.deepcopy(closure_entry)
