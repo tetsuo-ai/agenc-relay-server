@@ -36,6 +36,8 @@ pub enum DomainError {
     EncryptedRoute,
     /// The selected route accepts plaintext content only.
     PlaintextRoute,
+    /// A plaintext message attempted to carry an unsafe CTCP DCC command.
+    UnsafeCtcp,
     /// A required UTC input was unavailable or untrusted.
     WallClockUnavailable,
     /// Explicit external inputs did not match the plan request.
@@ -75,6 +77,7 @@ impl fmt::Display for DomainError {
             Self::BadState => "operation is not valid in the current state",
             Self::EncryptedRoute => "encrypted route rejects plaintext",
             Self::PlaintextRoute => "plaintext route rejects encrypted content",
+            Self::UnsafeCtcp => "unsafe CTCP command refused",
             Self::WallClockUnavailable => "wall clock is unavailable",
             Self::ExternalInputMismatch => "external input does not match the request",
             Self::Overflow => "checked domain arithmetic overflowed",

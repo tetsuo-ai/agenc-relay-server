@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import re
 import subprocess
@@ -87,6 +88,7 @@ EXTERNAL_DEPENDENCIES = {
     "hmac": ("=0.13.0", {"zeroize"}),
     "hpke": ("=0.14.0", {"alloc", "chacha", "hkdfsha2", "x25519"}),
     "opaque-ke": ("=4.0.1", {"argon2", "ristretto255", "std"}),
+    "opaque-sha2": ("=0.10.9", set()),
     "precis-profiles": ("=0.1.13", set()),
     "redb": ("=4.2.0", {"std"}),
     "rustls": ("=0.23.43", {"aws_lc_rs", "prefer-post-quantum", "std"}),
@@ -109,6 +111,7 @@ DIRECT_CHECKSUMS = {
     "hmac": "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f",
     "hpke": "dd5130e119706b4d8c2180da6126f7e60b6c38c2d340d539219f57051f0a7af7",
     "opaque-ke": "ded22991b43cd15561b62b2e1cf9ace1344a8534eebec96202d5c96a77a6616a",
+    "opaque-sha2": "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283",
     "precis-profiles": "31e2768890a47af73a032af9f0cedbddce3c9d06cf8de201d5b8f2436ded7674",
     "redb": "de6c3b63e007e90ce536ec2ae4690826136a20ec8dbbbb400daef1bb999d2e36",
     "rustls": "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06",
@@ -118,11 +121,33 @@ DIRECT_CHECKSUMS = {
     "tokio": "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed",
     "zeroize": "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e",
 }
+EXTERNAL_PACKAGE_ALIASES = {"opaque-sha2": "sha2"}
 DEPENDENCY_TABLE_NAMES = {"dependencies", "dev-dependencies", "build-dependencies"}
 EXPECTED_EXTERNAL_EDGES = {
     "agenc-ircd-types": {"base64", "precis-profiles", "subtle", "zeroize"},
     "agenc-ircd-client-wire": {"base64", "zeroize"},
     "agenc-ircd-federation-wire": {"base64", "sha2", "tls_codec", "zeroize"},
+    "agenc-ircd-crypto": {
+        "chacha20poly1305",
+        "ed25519-dalek",
+        "getrandom",
+        "hkdf",
+        "hmac",
+        "hpke",
+        "sha2",
+        "subtle",
+        "tokio",
+        "zeroize",
+    },
+    "agenc-ircd-auth": {
+        "argon2",
+        "opaque-ke",
+        "opaque-sha2",
+        "subtle",
+        "tls_codec",
+        "tokio",
+        "zeroize",
+    },
     "agenc-ircd-testkit": {"sha2", "subtle"},
 }
 CRATES_IO_SOURCES = {
@@ -130,6 +155,8 @@ CRATES_IO_SOURCES = {
     "sparse+https://index.crates.io/",
 }
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
+VENDORED_PATCH_PATH = "vendor/opaque-ke-4.0.1"
+VENDORED_PATCH_TREE_SHA256 = "8f745b2d6dd9918602ef67313be5cfd7b0185fa1314ea38530560403cd57d96e"
 
 
 class WorkspaceError(ValueError):
@@ -142,6 +169,58 @@ def load_toml(path: Path) -> dict[str, object]:
         return tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as error:
         raise WorkspaceError(f"cannot read {path}: {error}") from error
+
+
+def vendored_tree_sha256(path: Path) -> str:
+    """Hash every path and byte in one reviewed vendored dependency tree."""
+    digest = hashlib.sha256()
+    files = sorted(path.rglob("*"), key=lambda value: value.relative_to(path).as_posix())
+    if not files:
+        raise WorkspaceError(f"vendored dependency tree is empty: {path}")
+    file_count = 0
+    for candidate in files:
+        if candidate.is_symlink():
+            raise WorkspaceError(f"vendored dependency contains a symlink: {candidate}")
+        if not candidate.is_file():
+            continue
+        relative = candidate.relative_to(path).as_posix().encode("utf-8")
+        contents = candidate.read_bytes()
+        digest.update(len(relative).to_bytes(4, "big"))
+        digest.update(relative)
+        digest.update(len(contents).to_bytes(8, "big"))
+        digest.update(contents)
+        file_count += 1
+    if file_count == 0:
+        raise WorkspaceError(f"vendored dependency tree has no files: {path}")
+    return digest.hexdigest()
+
+
+def validate_vendored_patches(
+    root: Path, evidence: dict[str, object] | None = None
+) -> None:
+    """Validate the sole reviewed source patch and its complete tree digest."""
+    if evidence is None:
+        evidence = load_toml(root / "conformance/vendored-dependencies.toml")
+    expected = {
+        "schema_version": 1,
+        "patch": [
+            {
+                "package": "opaque-ke",
+                "version": "4.0.1",
+                "path": VENDORED_PATCH_PATH,
+                "upstream_registry": "https://github.com/rust-lang/crates.io-index",
+                "upstream_checksum": DIRECT_CHECKSUMS["opaque-ke"],
+                "tree_sha256": VENDORED_PATCH_TREE_SHA256,
+                "modified_files": ["src/opaque.rs"],
+                "reason": "zeroize password-derived intermediates and the server-finish session key",
+            }
+        ],
+    }
+    if evidence != expected:
+        raise WorkspaceError("vendored dependency evidence differs from its reviewed closed form")
+    patch_root = root / VENDORED_PATCH_PATH
+    if vendored_tree_sha256(patch_root) != VENDORED_PATCH_TREE_SHA256:
+        raise WorkspaceError("vendored opaque-ke tree digest differs from reviewed source")
 
 
 def validate_toolchain(root: Path) -> None:
@@ -174,8 +253,11 @@ def validate_toolchain(root: Path) -> None:
 def validate_workspace_manifest(root: Path) -> dict[str, object]:
     """Validate root workspace metadata and frozen dependency profiles."""
     manifest = load_toml(root / "Cargo.toml")
-    if "package" in manifest or "patch" in manifest or "replace" in manifest:
-        raise WorkspaceError("root must be virtual and may not patch or replace sources")
+    if "package" in manifest or "replace" in manifest:
+        raise WorkspaceError("root must be virtual and may not replace sources")
+    expected_patch = {"crates-io": {"opaque-ke": {"path": VENDORED_PATCH_PATH}}}
+    if manifest.get("patch") != expected_patch:
+        raise WorkspaceError("root source patch differs from the reviewed opaque-ke patch")
     workspace = manifest.get("workspace")
     if not isinstance(workspace, dict):
         raise WorkspaceError("root Cargo.toml has no workspace table")
@@ -230,9 +312,13 @@ def validate_dependency_profiles(dependencies: dict[str, object]) -> None:
         declared_features = declaration.get("features", [])
         if not isinstance(declared_features, list) or set(declared_features) != features:
             raise WorkspaceError(f"external dependency {name} has a stale feature profile")
-        if set(declaration) != {"version", "default-features"} | (
+        package = EXTERNAL_PACKAGE_ALIASES.get(name)
+        if declaration.get("package") != package:
+            raise WorkspaceError(f"external dependency {name} has a stale package alias")
+        expected_keys = {"version", "default-features"} | (
             {"features"} if features else set()
-        ):
+        ) | ({"package"} if package is not None else set())
+        if set(declaration) != expected_keys:
             raise WorkspaceError(f"external dependency {name} has forbidden source/profile keys")
 
 
@@ -520,12 +606,16 @@ def validate_lockfile(root: Path) -> int:
             raise WorkspaceError(f"Cargo.lock contains forbidden source {source!r}")
         if not isinstance(checksum, str) or SHA256_RE.fullmatch(checksum) is None:
             raise WorkspaceError("registry lock package has no valid checksum")
-        name = package.get("name")
+        package_name = package.get("name")
         version = package.get("version")
-        direct = EXTERNAL_DEPENDENCIES.get(str(name))
-        if direct is not None and version == direct[0].removeprefix("="):
-            if checksum != DIRECT_CHECKSUMS[str(name)]:
-                raise WorkspaceError(f"direct dependency {name} checksum differs from frozen evidence")
+        for logical_name, direct in EXTERNAL_DEPENDENCIES.items():
+            expected_package = EXTERNAL_PACKAGE_ALIASES.get(logical_name, logical_name)
+            if package_name != expected_package or version != direct[0].removeprefix("="):
+                continue
+            if checksum != DIRECT_CHECKSUMS[logical_name]:
+                raise WorkspaceError(
+                    f"direct dependency {logical_name} checksum differs from frozen evidence"
+                )
     return len(packages)
 
 
@@ -567,6 +657,7 @@ def validate(root: Path) -> tuple[int, int]:
     """Run the complete workspace and dependency-source check."""
     validate_toolchain(root)
     validate_workspace_manifest(root)
+    validate_vendored_patches(root)
     validate_package_manifests(root)
     validate_direct_dependency_evidence(root)
     metadata = cargo_metadata(root)
@@ -594,6 +685,8 @@ def self_test(root: Path) -> int:
     """Exercise graph, metadata, source, feature, and pin rejection paths."""
     validate_toolchain(root)
     manifest = validate_workspace_manifest(root)
+    evidence = load_toml(root / "conformance/vendored-dependencies.toml")
+    validate_vendored_patches(root, evidence)
     validate_package_manifests(root)
     validate_direct_dependency_evidence(root)
     packages = packages_from_metadata(cargo_metadata(root))
@@ -656,6 +749,24 @@ def self_test(root: Path) -> int:
         "default features",
         lambda: validate_dependency_profiles(default_features),
         "enables default features",
+    )
+    cases += 1
+
+    package_alias = copy.deepcopy(workspace["dependencies"])
+    package_alias["opaque-sha2"]["package"] = "sha3"
+    expect_rejection(
+        "package alias",
+        lambda: validate_dependency_profiles(package_alias),
+        "stale package alias",
+    )
+    cases += 1
+
+    stale_patch = copy.deepcopy(evidence)
+    stale_patch["patch"][0]["tree_sha256"] = "0" * 64
+    expect_rejection(
+        "vendored patch digest",
+        lambda: validate_vendored_patches(root, stale_patch),
+        "reviewed closed form",
     )
     cases += 1
 

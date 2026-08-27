@@ -110,7 +110,11 @@
           "required": ["label", "sha256"],
           "properties": {
             "label": { "type": "string", "minLength": 1, "maxLength": 256 },
-            "sha256": { "$ref": "#/$defs/sha256" }
+            "sha256": { "$ref": "#/$defs/sha256" },
+            "path": {
+              "type": "string",
+              "pattern": "^conformance/evidence/artifacts/[A-Za-z0-9][A-Za-z0-9_./-]{0,511}$"
+            }
           }
         },
         "limitations": {

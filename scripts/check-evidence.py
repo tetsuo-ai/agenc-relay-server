@@ -10,16 +10,19 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 import tomllib
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import NoReturn
+
+import requirements as requirement_ledger
 
 CATALOG_PATH = "conformance/evidence-catalog.toml"
 LEDGER_PATH = "conformance/requirements.toml"
 SCHEMA_PATH = "conformance/evidence-manifest.schema.json"
 EXAMPLE_PATH = "conformance/evidence-manifest.example.json"
-SCHEMA_SHA256 = "ee74d350fcdadca864bca6a1d335c058014ab8d127940044a913aff5ce0c5c8e"
+SCHEMA_SHA256 = "1369851a6a7b3943064de9f2e20fc75cbfc301d52a6069958571a78f6a79fb76"
 
 STAGE_BINDINGS = {
     "EVID-S00-001-BASELINE": (["S00-001"], "specification-baseline"),
@@ -71,7 +74,63 @@ STAGE_BINDINGS = {
     "EVID-S03-011-REFERENCE-MODEL": (["S03-011"], "independent-reference-model"),
     "EVID-S03-012-SEQUENCES": (["S03-012"], "generated-domain-sequences"),
     "EVID-S03-900-STAGE-GATE": (["S03-900"], "stage-gate"),
+    "EVID-S04-001-SECRETS": (["S04-001"], "secret-bearing-wrappers"),
+    "EVID-S04-002-ENTROPY": (["S04-002"], "operating-system-entropy"),
+    "EVID-S04-003-DOMAIN-KDFS": (["S04-003"], "domain-hash-mac-kdf"),
+    "EVID-S04-004-STORAGE-AEAD": (["S04-004"], "storage-aead-adapter"),
+    "EVID-S04-005-SIGNATURES": (["S04-005"], "strict-signature-adapter"),
+    "EVID-S04-006-HPKE": (["S04-006"], "account-service-hpke"),
+    "EVID-S04-007-OPAQUE": (["S04-007"], "opaque-profile"),
+    "EVID-S04-008-CREATION": (["S04-008"], "account-creation-state"),
+    "EVID-S04-009-AUTHENTICATION": (["S04-009"], "account-authentication-state"),
+    "EVID-S04-010-COMPLETIONS": (["S04-010"], "authenticated-completion-receipts"),
+    "EVID-S04-011-DESTRUCTIVE-AUTH": (["S04-011"], "credential-deletion-authorization"),
+    "EVID-S04-012-WORKERS": (["S04-012"], "bounded-crypto-workers"),
+    "EVID-S04-013-DEPENDENCIES": (["S04-013"], "cryptographic-dependency-profile"),
+    "EVID-S04-014-VERIFICATION": (["S04-014"], "crypto-auth-verification"),
+    "EVID-S04-900-STAGE-GATE": (["S04-900"], "stage-gate"),
 }
+
+NORMATIVE_BINDINGS = {
+    "EVID-ARCH-AUTH-01": (["ARCH-AUTH-01"], "normative-requirement"),
+    "EVID-ARCH-AUTH-04": (["ARCH-AUTH-04"], "normative-requirement"),
+    "EVID-ARCH-AUTH-09": (["ARCH-AUTH-09"], "normative-requirement"),
+    "EVID-ARCH-AUTH-10": (["ARCH-AUTH-10"], "normative-requirement"),
+    "EVID-ARCH-REQ-3BFE92E0E09C7C1C45E5": (
+        ["ARCH-REQ-3BFE92E0E09C7C1C45E5"],
+        "normative-requirement",
+    ),
+    "EVID-ARCH-REQ-48ECE41B610BE7FF1950": (
+        ["ARCH-REQ-48ECE41B610BE7FF1950"],
+        "normative-requirement",
+    ),
+    "EVID-ARCH-REQ-49AAC75AD4C65F0466B2": (
+        ["ARCH-REQ-49AAC75AD4C65F0466B2"],
+        "normative-requirement",
+    ),
+    "EVID-ARCH-REQ-78FAB57061FA01E1805E": (
+        ["ARCH-REQ-78FAB57061FA01E1805E"],
+        "normative-requirement",
+    ),
+    "EVID-ARCH-REQ-B45135D9F5992114B394": (
+        ["ARCH-REQ-B45135D9F5992114B394"],
+        "normative-requirement",
+    ),
+    "EVID-ARCH-REQ-F3D92EF9C888E0675CB4": (
+        ["ARCH-REQ-F3D92EF9C888E0675CB4"],
+        "normative-requirement",
+    ),
+    "EVID-E2EE-REQ-1CF30FAFE8FA36F5CF2E": (
+        ["E2EE-REQ-1CF30FAFE8FA36F5CF2E"],
+        "normative-requirement",
+    ),
+    "EVID-E2EE-REQ-A0EFEAB7474EA0A450F5": (
+        ["E2EE-REQ-A0EFEAB7474EA0A450F5"],
+        "normative-requirement",
+    ),
+}
+
+REVIEWED_BINDINGS = STAGE_BINDINGS | NORMATIVE_BINDINGS
 TOP_FIELDS = {
     "schema_version",
     "manifest_id",
@@ -97,7 +156,8 @@ ENTRY_FIELDS = {
     "limitations",
 }
 TOOL_FIELDS = {"name", "version"}
-ARTIFACT_FIELDS = {"label", "sha256"}
+ARTIFACT_LEGACY_FIELDS = {"label", "sha256"}
+ARTIFACT_PROVENANCE_FIELDS = {"label", "sha256", "path"}
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 MANIFEST_ID_RE = re.compile(r"EVID-MANIFEST-[A-Z0-9][A-Z0-9_-]{0,63}")
@@ -106,6 +166,45 @@ CLAIM_ID_RE = re.compile(r"(?:S\d{2}-(?:\d{3}|900)|(?:ARCH|E2EE)-[A-Z0-9-]+)")
 TARGET_RE = re.compile(r"[a-z0-9_]+-[a-z0-9_]+-[a-z0-9_.-]+")
 FEATURE_RE = re.compile(r"[A-Za-z0-9_+.-]{1,128}")
 TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z")
+ARTIFACT_PATH_RE = re.compile(
+    r"conformance/evidence/artifacts/[A-Za-z0-9][A-Za-z0-9_./-]{0,511}"
+)
+CLOSABLE_STAGES = frozenset(range(5))
+STAGE_NAMES = {
+    0: "zero",
+    1: "one",
+    2: "two",
+    3: "three",
+    4: "four",
+}
+RUN_ARTIFACT_FIELDS = {
+    "schema_version",
+    "gate",
+    "gate_manifest_sha256",
+    "argv",
+    "tool",
+    "source_commit",
+    "source_sha256",
+    "lock_sha256",
+    "target",
+    "features",
+    "started_at",
+    "ended_at",
+    "result",
+    "exit_code",
+    "command_results",
+    "evidence",
+}
+RUN_COMMAND_FIELDS = {
+    "argv",
+    "environment",
+    "started_at",
+    "ended_at",
+    "exit_code",
+}
+RUN_EVIDENCE_FIELDS = {"evidence_id", "kind"}
+RUN_ARTIFACT_MAX_BYTES = 4 * 1024 * 1024
+RUN_GATE_ENVIRONMENT = {"RUSTC_BOOTSTRAP"}
 
 
 class EvidenceError(ValueError):
@@ -142,13 +241,18 @@ def load_toml(path: Path) -> dict[str, object]:
 def validate_catalog(root: Path) -> dict[str, list[str]]:
     """Validate stage and normative requirement evidence bindings."""
     catalog = load_toml(root / CATALOG_PATH)
-    if set(catalog) != {"schema_version", "evidence"} or catalog.get("schema_version") != 1:
+    schema_version = catalog.get("schema_version")
+    if (
+        set(catalog) != {"schema_version", "evidence"}
+        or type(schema_version) is not int
+        or schema_version != 1
+    ):
         raise EvidenceError("evidence catalog has an invalid top-level schema")
     raw_entries = catalog.get("evidence")
     if not isinstance(raw_entries, list):
         raise EvidenceError("evidence catalog entries must be an array")
 
-    stage_records: dict[str, tuple[list[str], str]] = {}
+    catalog_records: dict[str, tuple[list[str], str]] = {}
     for index, record in enumerate(raw_entries):
         if not isinstance(record, dict) or set(record) != {"id", "claim_ids", "kind"}:
             raise EvidenceError(f"catalog record {index} has invalid fields")
@@ -157,38 +261,89 @@ def validate_catalog(root: Path) -> dict[str, list[str]]:
         kind = record.get("kind")
         if not isinstance(evidence_id, str) or EVIDENCE_ID_RE.fullmatch(evidence_id) is None:
             raise EvidenceError(f"catalog record {index} has an invalid evidence ID")
-        if evidence_id in stage_records:
+        if evidence_id in catalog_records:
             raise EvidenceError(f"duplicate catalog evidence ID: {evidence_id}")
         if (
             not isinstance(claim_ids, list)
             or not claim_ids
-            or any(not isinstance(claim, str) for claim in claim_ids)
+            or claim_ids != sorted(set(map(str, claim_ids)))
+            or any(
+                not isinstance(claim, str) or CLAIM_ID_RE.fullmatch(claim) is None
+                for claim in claim_ids
+            )
         ):
             raise EvidenceError(f"catalog record {evidence_id} has invalid claims")
         if not isinstance(kind, str) or not kind:
             raise EvidenceError(f"catalog record {evidence_id} has an invalid kind")
-        stage_records[evidence_id] = (claim_ids, kind)
-    if stage_records != STAGE_BINDINGS:
+        catalog_records[evidence_id] = (claim_ids, kind)
+
+    actual_stage_records = {
+        evidence_id: record
+        for evidence_id, record in catalog_records.items()
+        if evidence_id in STAGE_BINDINGS
+    }
+    if actual_stage_records != STAGE_BINDINGS:
         raise EvidenceError("stage evidence catalog is missing, stale, or differently bound")
 
     ledger = load_toml(root / LEDGER_PATH)
     raw_requirements = ledger.get("requirement")
     if not isinstance(raw_requirements, list):
         raise EvidenceError("requirement ledger has no requirement records")
-    bindings = {evidence_id: claims for evidence_id, (claims, _kind) in stage_records.items()}
+    requirement_records: dict[str, tuple[str, str]] = {}
     for record in raw_requirements:
         if not isinstance(record, dict):
             raise EvidenceError("requirement ledger contains a non-table record")
         identifier = record.get("id")
         evidence_ids = record.get("evidence_ids")
-        if not isinstance(identifier, str) or not isinstance(evidence_ids, list) or not evidence_ids:
+        status = record.get("status")
+        if (
+            not isinstance(identifier, str)
+            or CLAIM_ID_RE.fullmatch(identifier) is None
+            or not isinstance(evidence_ids, list)
+            or not evidence_ids
+            or status not in {"implemented", "unimplemented"}
+        ):
             raise EvidenceError("requirement ledger contains an unbound record")
         for evidence_id in evidence_ids:
             if not isinstance(evidence_id, str) or EVIDENCE_ID_RE.fullmatch(evidence_id) is None:
                 raise EvidenceError(f"requirement {identifier} has an invalid evidence ID")
-            if evidence_id in bindings:
+            if evidence_id in requirement_records or evidence_id in STAGE_BINDINGS:
                 raise EvidenceError(f"duplicate evidence binding: {evidence_id}")
-            bindings[evidence_id] = [identifier]
+            requirement_records[evidence_id] = (identifier, status)
+
+    for evidence_id, (claims, kind) in catalog_records.items():
+        if evidence_id in STAGE_BINDINGS:
+            continue
+        requirement = requirement_records.get(evidence_id)
+        if requirement is None:
+            raise EvidenceError(f"catalog contains unrelated evidence ID: {evidence_id}")
+        identifier, status = requirement
+        if status != "implemented":
+            raise EvidenceError(
+                f"unimplemented requirement {identifier} must not have closing catalog evidence"
+            )
+        if claims != [identifier]:
+            raise EvidenceError(
+                f"normative evidence {evidence_id} must claim only {identifier}"
+            )
+        if kind != "normative-requirement":
+            raise EvidenceError(
+                f"normative evidence {evidence_id} must use kind normative-requirement"
+            )
+
+    for evidence_id, (identifier, status) in requirement_records.items():
+        if status == "implemented" and evidence_id not in catalog_records:
+            raise EvidenceError(
+                f"implemented requirement {identifier} lacks reviewed catalog evidence {evidence_id}"
+            )
+
+    if catalog_records != REVIEWED_BINDINGS:
+        raise EvidenceError("reviewed evidence catalog is missing, stale, or differently bound")
+
+    bindings = {
+        evidence_id: claims
+        for evidence_id, (claims, _kind) in catalog_records.items()
+    }
     return bindings
 
 
@@ -214,6 +369,19 @@ def validate_schema(root: Path) -> None:
         raise EvidenceError("evidence entries must be closed objects")
     if set(evidence.get("required", [])) != ENTRY_FIELDS:
         raise EvidenceError("evidence schema entry required fields are stale")
+    properties = evidence.get("properties")
+    if not isinstance(properties, dict):
+        raise EvidenceError("evidence schema entry has no properties")
+    artifact = properties.get("artifact")
+    if not isinstance(artifact, dict) or artifact.get("additionalProperties") is not False:
+        raise EvidenceError("evidence schema artifact must be a closed object")
+    artifact_properties = artifact.get("properties")
+    if not isinstance(artifact_properties, dict) or set(artifact_properties) != {
+        "label",
+        "sha256",
+        "path",
+    }:
+        raise EvidenceError("evidence schema artifact provenance fields are stale")
 
 
 def git_bytes(root: Path, arguments: list[str], label: str) -> bytes:
@@ -231,6 +399,22 @@ def git_bytes(root: Path, arguments: list[str], label: str) -> bytes:
         details = (completed.stderr or completed.stdout).decode("utf-8", errors="replace").strip()
         raise EvidenceError(f"Git lookup failed for {label}: {details}")
     return completed.stdout
+
+
+def validate_index_bytes(
+    root: Path,
+    relative: str,
+    expected_hash: str,
+    mismatch: str,
+) -> None:
+    """Require one repository-relative file to match its Git index blob."""
+    tracked_bytes = git_bytes(
+        root,
+        ["show", f":{relative}"],
+        f"{relative} in the Git index",
+    )
+    if hashlib.sha256(tracked_bytes).hexdigest() != expected_hash:
+        raise EvidenceError(mismatch)
 
 
 def commit_blob(root: Path, source_commit: str, path: str) -> bytes:
@@ -318,17 +502,76 @@ def validate_hash(value: object, label: str) -> str:
     return require_string(value, label, minimum=64, maximum=64, pattern=SHA256_RE)
 
 
+def validate_artifact(
+    root: Path,
+    artifact: object,
+    label: str,
+    *,
+    require_provenance: bool,
+) -> Path | None:
+    """Validate an artifact record and, when present, its checked-in bytes."""
+    if not isinstance(artifact, dict) or frozenset(artifact) not in {
+        frozenset(ARTIFACT_LEGACY_FIELDS),
+        frozenset(ARTIFACT_PROVENANCE_FIELDS),
+    }:
+        raise EvidenceError(
+            f"{label} must contain label and sha256, with an optional provenance path"
+        )
+    require_string(artifact.get("label"), f"{label}.label", maximum=256)
+    expected_hash = validate_hash(artifact.get("sha256"), f"{label}.sha256")
+    path_value = artifact.get("path")
+    if path_value is None:
+        if require_provenance:
+            raise EvidenceError(f"{label} has no verifiable provenance path")
+        return None
+
+    relative = require_string(
+        path_value,
+        f"{label}.path",
+        maximum=550,
+        pattern=ARTIFACT_PATH_RE,
+    )
+    pure_path = PurePosixPath(relative)
+    if pure_path.is_absolute() or ".." in pure_path.parts:
+        raise EvidenceError(f"{label}.path must stay inside the evidence artifact directory")
+    artifact_root = (root / "conformance/evidence/artifacts").resolve()
+    candidate = root.joinpath(*pure_path.parts)
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as error:
+        raise EvidenceError(f"{label}.path cannot be read: {error}") from error
+    if not resolved.is_relative_to(artifact_root) or not resolved.is_file():
+        raise EvidenceError(f"{label}.path is not a regular evidence artifact")
+    cursor = root
+    for part in pure_path.parts:
+        cursor /= part
+        if cursor.is_symlink():
+            raise EvidenceError(f"{label}.path may not traverse a symbolic link")
+    actual_hash = hashlib.sha256(resolved.read_bytes()).hexdigest()
+    if actual_hash != expected_hash:
+        raise EvidenceError(f"{label}.sha256 does not match the artifact bytes")
+    validate_index_bytes(
+        root,
+        relative,
+        expected_hash,
+        f"{label}.sha256 does not match the tracked artifact bytes",
+    )
+    return resolved
+
+
 def validate_manifest(
     manifest: dict[str, object],
     bindings: dict[str, list[str]],
     *,
     expected_source_hash: str | None = None,
     expected_lock_hash: str | None = None,
+    artifact_root: Path | None = None,
 ) -> None:
     """Validate one complete evidence manifest and all catalog bindings."""
     if set(manifest) != TOP_FIELDS:
         raise EvidenceError("manifest is missing required fields or has unknown fields")
-    if manifest.get("schema_version") != 1:
+    schema_version = manifest.get("schema_version")
+    if type(schema_version) is not int or schema_version != 1:
         raise EvidenceError("manifest schema_version must be 1")
     require_string(manifest.get("manifest_id"), "manifest_id", maximum=78, pattern=MANIFEST_ID_RE)
     source_commit = require_string(
@@ -394,10 +637,10 @@ def validate_manifest(
         features = entry.get("features")
         if not isinstance(features, list):
             raise EvidenceError(f"{label}.features must be an array")
-        if features != sorted(features) or len(features) != len(set(map(str, features))):
-            raise EvidenceError(f"{label}.features must be sorted and unique")
         for feature in features:
             require_string(feature, f"{label}.features", maximum=128, pattern=FEATURE_RE)
+        if features != sorted(features) or len(features) != len(set(features)):
+            raise EvidenceError(f"{label}.features must be sorted and unique")
 
         started = parse_timestamp(entry.get("started_at"), f"{label}.started_at")
         ended = parse_timestamp(entry.get("ended_at"), f"{label}.ended_at")
@@ -407,10 +650,30 @@ def validate_manifest(
             raise EvidenceError(f"{label}.result has an invalid value")
 
         artifact = entry.get("artifact")
-        if not isinstance(artifact, dict) or set(artifact) != ARTIFACT_FIELDS:
-            raise EvidenceError(f"{label}.artifact must contain only label and sha256")
-        require_string(artifact.get("label"), f"{label}.artifact.label", maximum=256)
-        validate_hash(artifact.get("sha256"), f"{label}.artifact.sha256")
+        if artifact_root is None:
+            if not isinstance(artifact, dict) or frozenset(artifact) not in {
+                frozenset(ARTIFACT_LEGACY_FIELDS),
+                frozenset(ARTIFACT_PROVENANCE_FIELDS),
+            }:
+                raise EvidenceError(
+                    f"{label}.artifact must contain label and sha256, with an optional path"
+                )
+            require_string(artifact.get("label"), f"{label}.artifact.label", maximum=256)
+            validate_hash(artifact.get("sha256"), f"{label}.artifact.sha256")
+            if "path" in artifact:
+                require_string(
+                    artifact.get("path"),
+                    f"{label}.artifact.path",
+                    maximum=550,
+                    pattern=ARTIFACT_PATH_RE,
+                )
+        else:
+            validate_artifact(
+                artifact_root,
+                artifact,
+                f"{label}.artifact",
+                require_provenance=False,
+            )
 
         limitations = entry.get("limitations")
         if not isinstance(limitations, list) or len(limitations) > 64:
@@ -428,6 +691,13 @@ def validate(root: Path) -> tuple[int, int]:
     manifest_paths = sorted((root / "conformance/evidence").glob("*.json"))
     entry_count = len(example["entries"])  # type: ignore[arg-type]
     for path in manifest_paths:
+        relative = path.relative_to(root).as_posix()
+        validate_index_bytes(
+            root,
+            relative,
+            hashlib.sha256(path.read_bytes()).hexdigest(),
+            f"{relative} bytes differ from the Git index",
+        )
         manifest = load_json(path)
         validate_manifest(manifest, bindings)
         source_commit = str(manifest["source_commit"])
@@ -438,9 +708,481 @@ def validate(root: Path) -> tuple[int, int]:
             bindings,
             expected_source_hash=source_hash,
             expected_lock_hash=lock_hash,
+            artifact_root=root,
         )
         entry_count += len(manifest["entries"])  # type: ignore[arg-type]
     return len(bindings), entry_count
+
+
+def required_stage_evidence_ids_from_data(
+    stage: int,
+    records: object,
+    states: dict[str, bool],
+) -> set[str]:
+    """Return the required IDs after validating one source requirement ledger."""
+    prefix = f"S{stage:02d}-"
+    stage_tasks = {
+        claim
+        for claims, _kind in STAGE_BINDINGS.values()
+        for claim in claims
+        if claim.startswith(prefix)
+    }
+    roadmap_stage_tasks = {task for task in states if task.startswith(prefix)}
+    unknown_tasks = sorted(stage_tasks - set(states))
+    if unknown_tasks:
+        raise EvidenceError(
+            "source roadmap is missing Stage "
+            f"{stage:02d} tasks: {', '.join(unknown_tasks)}"
+        )
+    unbound_tasks = sorted(roadmap_stage_tasks - stage_tasks)
+    if unbound_tasks:
+        raise EvidenceError(
+            f"Stage {stage:02d} source roadmap has tasks without evidence bindings: "
+            + ", ".join(unbound_tasks)
+        )
+    gate_task = f"{prefix}900"
+    if not states[gate_task]:
+        raise EvidenceError(f"Stage {stage:02d} source roadmap gate {gate_task} is open")
+    incomplete_tasks = sorted(
+        task
+        for task in stage_tasks
+        if not task.endswith("-900") and not states[task]
+    )
+    if incomplete_tasks:
+        raise EvidenceError(
+            f"Stage {stage:02d} source roadmap has incomplete implementation tasks: "
+            + ", ".join(incomplete_tasks)
+        )
+
+    required = {
+        evidence_id
+        for evidence_id, (claims, _kind) in STAGE_BINDINGS.items()
+        if any(claim.startswith(prefix) for claim in claims)
+    }
+    if not isinstance(records, list):
+        raise EvidenceError("source requirement ledger has no requirement records")
+    incomplete: list[str] = []
+    for record in records:
+        if not isinstance(record, dict):
+            raise EvidenceError("source requirement ledger contains a non-table record")
+        tasks = record.get("task_ids")
+        evidence_ids = record.get("evidence_ids")
+        if not isinstance(tasks, list) or not isinstance(evidence_ids, list):
+            raise EvidenceError("source requirement ledger contains an invalid binding")
+        if not any(isinstance(task, str) and task.startswith(prefix) for task in tasks):
+            continue
+        if record.get("status") != "implemented":
+            incomplete.append(str(record.get("id")))
+        for evidence_id in evidence_ids:
+            if not isinstance(evidence_id, str) or EVIDENCE_ID_RE.fullmatch(evidence_id) is None:
+                raise EvidenceError("source requirement ledger has an invalid evidence ID")
+            required.add(evidence_id)
+    if incomplete:
+        raise EvidenceError(
+            f"Stage {stage:02d} still owns unimplemented requirements: "
+            + ", ".join(sorted(incomplete))
+        )
+    if not required:
+        raise EvidenceError(f"Stage {stage:02d} has no required evidence bindings")
+    return required
+
+
+def required_stage_evidence_ids(
+    root: Path,
+    stage: int,
+    source_commit: str,
+) -> set[str]:
+    """Validate one source ledger and return every ID needed for stage closure."""
+    source_paths = (
+        requirement_ledger.ARCHITECTURE_PATH,
+        requirement_ledger.E2EE_PATH,
+        requirement_ledger.BINDINGS_PATH,
+        requirement_ledger.LEDGER_PATH,
+        "TODO.md",
+    )
+    with tempfile.TemporaryDirectory(prefix="agenc-source-ledger-") as temporary:
+        source_root = Path(temporary)
+        for relative in source_paths:
+            destination = source_root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(commit_blob(root, source_commit, relative))
+        try:
+            requirement_ledger.validate(source_root)
+            ledger = requirement_ledger.load_ledger(
+                source_root / requirement_ledger.LEDGER_PATH
+            )
+            states = requirement_ledger.task_states(source_root)
+        except requirement_ledger.LedgerError as error:
+            raise EvidenceError(
+                f"source requirement ledger does not pass the current closure policy: {error}"
+            ) from error
+        return required_stage_evidence_ids_from_data(
+            stage,
+            ledger.get("requirement"),
+            states,
+        )
+
+
+def source_gate_policy(
+    root: Path,
+    stage: int,
+    source_commit: str,
+) -> tuple[str, str, str, list[dict[str, object]]]:
+    """Return the exact committed runner, gate, and resolved command policy."""
+    stage_name = STAGE_NAMES[stage]
+    gate_name = f"stage-{stage_name}-implementation"
+    gate_bytes = commit_blob(root, source_commit, "conformance/gates.toml")
+    gate_hash = hashlib.sha256(gate_bytes).hexdigest()
+    current_gate_path = root / "conformance/gates.toml"
+    if hashlib.sha256(current_gate_path.read_bytes()).hexdigest() != gate_hash:
+        raise EvidenceError("source gate manifest differs from the current closure policy")
+    validate_index_bytes(
+        root,
+        "conformance/gates.toml",
+        gate_hash,
+        "current gate manifest differs from its Git index bytes",
+    )
+    try:
+        manifest = tomllib.loads(gate_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        raise EvidenceError(f"source gate manifest cannot be read: {error}") from error
+    schema_version = manifest.get("schema_version")
+    if (
+        set(manifest) != {"schema_version", "gate"}
+        or type(schema_version) is not int
+        or schema_version != 1
+    ):
+        raise EvidenceError("source gate manifest has an invalid top-level schema")
+    gates = manifest.get("gate")
+    if not isinstance(gates, dict):
+        raise EvidenceError("source gate manifest has no gate table")
+
+    def resolve(name: str, resolving: tuple[str, ...] = ()) -> list[dict[str, object]]:
+        if name in resolving:
+            raise EvidenceError(f"source gate include cycle reaches {name}")
+        gate = gates.get(name)
+        if not isinstance(gate, dict) or set(gate) - {"includes", "command"}:
+            raise EvidenceError(f"source gate {name!r} is missing or malformed")
+        includes = gate.get("includes", [])
+        commands = gate.get("command", [])
+        if (
+            not isinstance(includes, list)
+            or any(not isinstance(item, str) or not item for item in includes)
+            or len(includes) != len(set(includes))
+        ):
+            raise EvidenceError(f"source gate {name!r} has invalid includes")
+        if not isinstance(commands, list):
+            raise EvidenceError(f"source gate {name!r} has invalid commands")
+        resolved: list[dict[str, object]] = []
+        for included in includes:
+            resolved.extend(resolve(included, resolving + (name,)))
+        for command in commands:
+            if not isinstance(command, dict) or not set(command) <= {"argv", "environment"}:
+                raise EvidenceError(f"source gate {name!r} contains a malformed command")
+            argv = command.get("argv")
+            if (
+                not isinstance(argv, list)
+                or not argv
+                or any(not isinstance(item, str) or not item for item in argv)
+            ):
+                raise EvidenceError(f"source gate {name!r} contains invalid argv")
+            environment = command.get("environment", {})
+            if (
+                not isinstance(environment, dict)
+                or set(environment) - RUN_GATE_ENVIRONMENT
+                or any(
+                    not isinstance(key, str)
+                    or not key
+                    or not isinstance(value, str)
+                    for key, value in environment.items()
+                )
+            ):
+                raise EvidenceError(f"source gate {name!r} contains invalid environment state")
+            resolved.append({"argv": argv, "environment": environment})
+        return resolved
+
+    commands = resolve(gate_name)
+    if not commands:
+        raise EvidenceError(f"source gate {gate_name!r} resolves to no commands")
+    runner_hash = commit_blob_sha256(root, source_commit, "scripts/run-gate.py")
+    current_runner_hash = hashlib.sha256((root / "scripts/run-gate.py").read_bytes()).hexdigest()
+    if runner_hash != current_runner_hash:
+        raise EvidenceError("source gate runner differs from the current closure policy")
+    validate_index_bytes(
+        root,
+        "scripts/run-gate.py",
+        runner_hash,
+        "current gate runner differs from its Git index bytes",
+    )
+    return gate_name, runner_hash, gate_hash, commands
+
+
+def closure_evidence_inventory(required_ids: set[str]) -> list[dict[str, str]]:
+    """Return the exact evidence ID and catalog-kind inventory for closure."""
+    inventory: list[dict[str, str]] = []
+    for evidence_id in sorted(required_ids):
+        binding = REVIEWED_BINDINGS.get(evidence_id)
+        if binding is None:
+            raise EvidenceError(f"evidence ID lacks a reviewed catalog kind: {evidence_id}")
+        kind = binding[1]
+        inventory.append({"evidence_id": evidence_id, "kind": kind})
+    return inventory
+
+
+def validate_run_artifact(
+    path: Path,
+    entries: list[dict[str, object]],
+    required_ids: set[str],
+    *,
+    gate_name: str,
+    runner_hash: str,
+    gate_hash: str,
+    expected_commands: list[dict[str, object]],
+    source_commit: str,
+    source_hash: str,
+    lock_hash: str,
+) -> None:
+    """Validate one structured, exact-source gate-run artifact."""
+    if path.suffix != ".json":
+        raise EvidenceError("closure artifact must be a structured JSON gate-run record")
+    try:
+        size = path.stat().st_size
+    except OSError as error:
+        raise EvidenceError(f"closure artifact cannot be measured: {error}") from error
+    if size > RUN_ARTIFACT_MAX_BYTES:
+        raise EvidenceError("closure artifact exceeds the 4 MiB record limit")
+    artifact = load_json(path)
+    if set(artifact) != RUN_ARTIFACT_FIELDS:
+        raise EvidenceError("closure artifact has invalid gate-run fields")
+    schema_version = artifact.get("schema_version")
+    if type(schema_version) is not int or schema_version != 1:
+        raise EvidenceError("closure artifact schema_version must be 1")
+    if artifact.get("gate") != gate_name:
+        raise EvidenceError("closure artifact names the wrong reviewed gate")
+    if artifact.get("gate_manifest_sha256") != gate_hash:
+        raise EvidenceError("closure artifact is not bound to the committed gate manifest")
+    expected_argv = ["python3", "scripts/run-gate.py", gate_name]
+    if artifact.get("argv") != expected_argv:
+        raise EvidenceError("closure artifact did not invoke the reviewed gate runner")
+    expected_tool = {"name": "agenc-ircd-gate-runner", "version": runner_hash}
+    if artifact.get("tool") != expected_tool:
+        raise EvidenceError("closure artifact is not bound to the committed gate runner")
+    if artifact.get("source_commit") != source_commit:
+        raise EvidenceError("closure artifact has a stale source commit")
+    if artifact.get("source_sha256") != source_hash:
+        raise EvidenceError("closure artifact has a stale source hash")
+    if artifact.get("lock_sha256") != lock_hash:
+        raise EvidenceError("closure artifact has a stale lock hash")
+
+    target = require_string(
+        artifact.get("target"),
+        "closure artifact target",
+        maximum=128,
+        pattern=TARGET_RE,
+    )
+    features = artifact.get("features")
+    if not isinstance(features, list):
+        raise EvidenceError("closure artifact features must be an array")
+    for feature in features:
+        require_string(
+            feature,
+            "closure artifact feature",
+            maximum=128,
+            pattern=FEATURE_RE,
+        )
+    if features != sorted(features) or len(features) != len(set(features)):
+        raise EvidenceError("closure artifact features must be sorted and unique")
+    started = parse_timestamp(artifact.get("started_at"), "closure artifact started_at")
+    ended = parse_timestamp(artifact.get("ended_at"), "closure artifact ended_at")
+    if ended < started:
+        raise EvidenceError("closure artifact ended before it started")
+    if artifact.get("result") != "passed" or type(artifact.get("exit_code")) is not int:
+        raise EvidenceError("closure artifact does not record a passed gate run")
+    if artifact.get("exit_code") != 0:
+        raise EvidenceError("closure artifact does not record a zero gate exit status")
+
+    raw_evidence = artifact.get("evidence")
+    if not isinstance(raw_evidence, list):
+        raise EvidenceError("closure artifact evidence inventory must be an array")
+    evidence: list[dict[str, str]] = []
+    for index, item in enumerate(raw_evidence):
+        if not isinstance(item, dict) or set(item) != RUN_EVIDENCE_FIELDS:
+            raise EvidenceError(f"closure artifact evidence item {index} has invalid fields")
+        evidence_id = require_string(
+            item.get("evidence_id"),
+            f"closure artifact evidence item {index}",
+            maximum=132,
+            pattern=EVIDENCE_ID_RE,
+        )
+        kind = require_string(
+            item.get("kind"),
+            f"closure artifact evidence kind {index}",
+            maximum=128,
+        )
+        evidence.append({"evidence_id": evidence_id, "kind": kind})
+    if evidence != closure_evidence_inventory(required_ids):
+        raise EvidenceError("closure artifact evidence IDs or catalog kinds are stale")
+
+    raw_results = artifact.get("command_results")
+    if not isinstance(raw_results, list) or len(raw_results) != len(expected_commands):
+        raise EvidenceError("closure artifact command results are incomplete")
+    previous_end = started
+    for index, (raw_result, expected) in enumerate(zip(raw_results, expected_commands)):
+        if not isinstance(raw_result, dict) or set(raw_result) != RUN_COMMAND_FIELDS:
+            raise EvidenceError(f"closure artifact command result {index} has invalid fields")
+        if raw_result.get("argv") != expected["argv"]:
+            raise EvidenceError(f"closure artifact command result {index} has stale argv")
+        if raw_result.get("environment") != expected["environment"]:
+            raise EvidenceError(
+                f"closure artifact command result {index} has stale environment state"
+            )
+        command_started = parse_timestamp(
+            raw_result.get("started_at"),
+            f"closure artifact command result {index} started_at",
+        )
+        command_ended = parse_timestamp(
+            raw_result.get("ended_at"),
+            f"closure artifact command result {index} ended_at",
+        )
+        if (
+            command_started < previous_end
+            or command_ended < command_started
+            or command_ended > ended
+        ):
+            raise EvidenceError(
+                f"closure artifact command result {index} has invalid timing"
+            )
+        if type(raw_result.get("exit_code")) is not int or raw_result.get("exit_code") != 0:
+            raise EvidenceError(
+                f"closure artifact command result {index} did not pass"
+            )
+        previous_end = command_ended
+
+    expected_command = " ".join(expected_argv)
+    for evidence_id, entry in sorted(
+        ((str(entry["evidence_id"]), entry) for entry in entries),
+        key=lambda item: item[0],
+    ):
+        if entry.get("command") != expected_command:
+            raise EvidenceError(f"{evidence_id} did not run the reviewed stage gate")
+        if entry.get("tool") != expected_tool:
+            raise EvidenceError(f"{evidence_id} names an unreviewed gate tool")
+        if entry.get("target") != target or entry.get("features") != features:
+            raise EvidenceError(f"{evidence_id} does not match the gate-run target or features")
+        if entry.get("started_at") != artifact.get("started_at"):
+            raise EvidenceError(f"{evidence_id} has a stale gate-run start time")
+        if entry.get("ended_at") != artifact.get("ended_at"):
+            raise EvidenceError(f"{evidence_id} has a stale gate-run end time")
+
+
+def validate_closure_entries(
+    root: Path,
+    stage: int,
+    entries: list[dict[str, object]],
+    required_ids: set[str],
+    source_commit: str,
+    source_hash: str,
+    lock_hash: str,
+) -> int:
+    """Require one current passed record and one reviewed gate-run artifact."""
+    by_id: dict[str, list[dict[str, object]]] = {}
+    for entry in entries:
+        evidence_id = entry.get("evidence_id")
+        if isinstance(evidence_id, str) and evidence_id in required_ids:
+            by_id.setdefault(evidence_id, []).append(entry)
+
+    missing = sorted(required_ids - set(by_id))
+    if missing:
+        raise EvidenceError("closure evidence is missing: " + ", ".join(missing))
+    duplicates = sorted(evidence_id for evidence_id, values in by_id.items() if len(values) != 1)
+    if duplicates:
+        raise EvidenceError("closure evidence is duplicated: " + ", ".join(duplicates))
+
+    nonpassing: list[str] = []
+    artifact_paths: set[Path] = set()
+    for evidence_id in sorted(required_ids):
+        entry = by_id[evidence_id][0]
+        if entry.get("source_commit") != source_commit:
+            raise EvidenceError(f"{evidence_id} is not bound to the requested source commit")
+        if entry.get("result") != "passed":
+            nonpassing.append(evidence_id)
+            continue
+        artifact_path = validate_artifact(
+            root,
+            entry.get("artifact"),
+            f"{evidence_id}.artifact",
+            require_provenance=True,
+        )
+        if artifact_path is None:
+            raise EvidenceError(f"{evidence_id}.artifact has no verifiable provenance path")
+        artifact_paths.add(artifact_path)
+    if nonpassing:
+        raise EvidenceError(
+            "failed or not-run records do not close evidence: " + ", ".join(nonpassing)
+        )
+    if len(artifact_paths) != 1:
+        raise EvidenceError("closure evidence must share one exact stage gate-run artifact")
+    gate_name, runner_hash, gate_hash, commands = source_gate_policy(
+        root,
+        stage,
+        source_commit,
+    )
+    validate_run_artifact(
+        next(iter(artifact_paths)),
+        [by_id[evidence_id][0] for evidence_id in sorted(required_ids)],
+        required_ids,
+        gate_name=gate_name,
+        runner_hash=runner_hash,
+        gate_hash=gate_hash,
+        expected_commands=commands,
+        source_commit=source_commit,
+        source_hash=source_hash,
+        lock_hash=lock_hash,
+    )
+    return len(required_ids)
+
+
+def validate_closure(root: Path, stage: int, source_commit: str) -> tuple[int, int]:
+    """Validate exact-revision evidence needed to close one stage."""
+    if stage not in CLOSABLE_STAGES:
+        raise EvidenceError("closure evidence catalogs currently cover only Stages 00 through 04")
+    if COMMIT_RE.fullmatch(source_commit) is None:
+        raise EvidenceError("closure source commit must be an exact lowercase 40-character Git ID")
+    validate(root)
+    bindings = validate_catalog(root)
+    source_hash = canonical_source_sha256(root, source_commit)
+    lock_hash = commit_blob_sha256(root, source_commit, "Cargo.lock")
+    required_ids = required_stage_evidence_ids(root, stage, source_commit)
+    current_entries: list[dict[str, object]] = []
+    current_manifests = 0
+    for path in sorted((root / "conformance/evidence").glob("*.json")):
+        manifest = load_json(path)
+        if manifest.get("source_commit") != source_commit:
+            continue
+        validate_manifest(
+            manifest,
+            bindings,
+            expected_source_hash=source_hash,
+            expected_lock_hash=lock_hash,
+            artifact_root=root,
+        )
+        entries = manifest.get("entries")
+        if not isinstance(entries, list):
+            raise EvidenceError(f"{path} has no evidence entries")
+        current_entries.extend(entry for entry in entries if isinstance(entry, dict))
+        current_manifests += 1
+    if current_manifests == 0:
+        raise EvidenceError("no evidence manifest is bound to the requested source commit")
+    count = validate_closure_entries(
+        root,
+        stage,
+        current_entries,
+        required_ids,
+        source_commit,
+        source_hash,
+        lock_hash,
+    )
+    return count, current_manifests
 
 
 def expect_rejection(
@@ -467,6 +1209,129 @@ def self_test(root: Path) -> int:
     validate_manifest(valid, bindings)
     cases = 0
 
+    with tempfile.TemporaryDirectory(prefix="agenc-evidence-catalog-test-") as temporary:
+        temporary_root = Path(temporary)
+        conformance = temporary_root / "conformance"
+        conformance.mkdir()
+        catalog_text = (root / CATALOG_PATH).read_text(encoding="utf-8")
+        (temporary_root / CATALOG_PATH).write_text(
+            catalog_text.replace("schema_version = 1", "schema_version = true", 1),
+            encoding="utf-8",
+        )
+        (temporary_root / LEDGER_PATH).write_bytes((root / LEDGER_PATH).read_bytes())
+        try:
+            validate_catalog(temporary_root)
+        except EvidenceError as error:
+            if "invalid top-level schema" not in str(error):
+                raise EvidenceError(
+                    f"self-test 'boolean catalog schema' reached the wrong branch: {error}"
+                ) from error
+        else:
+            raise EvidenceError("self-test 'boolean catalog schema' was accepted")
+        cases += 1
+
+    catalog_text = (root / CATALOG_PATH).read_text(encoding="utf-8")
+    ledger_bytes = (root / LEDGER_PATH).read_bytes()
+    auth_record = """[[evidence]]
+id = "EVID-ARCH-AUTH-01"
+claim_ids = ["ARCH-AUTH-01"]
+kind = "normative-requirement"
+"""
+    if auth_record not in catalog_text:
+        raise EvidenceError("self-test catalog fixture cannot find ARCH-AUTH-01")
+
+    def reject_catalog(label: str, malformed: str, fragment: str) -> None:
+        nonlocal cases
+        if malformed == catalog_text:
+            raise EvidenceError(f"self-test {label!r} did not mutate the catalog")
+        with tempfile.TemporaryDirectory(
+            prefix="agenc-evidence-catalog-test-"
+        ) as temporary:
+            temporary_root = Path(temporary)
+            conformance = temporary_root / "conformance"
+            conformance.mkdir()
+            (temporary_root / CATALOG_PATH).write_text(malformed, encoding="utf-8")
+            (temporary_root / LEDGER_PATH).write_bytes(ledger_bytes)
+            try:
+                validate_catalog(temporary_root)
+            except EvidenceError as error:
+                if fragment not in str(error):
+                    raise EvidenceError(
+                        f"self-test {label!r} reached the wrong branch: {error}"
+                    ) from error
+            else:
+                raise EvidenceError(f"self-test {label!r} was accepted")
+        cases += 1
+
+    reject_catalog(
+        "missing normative catalog record",
+        catalog_text.replace(auth_record, "", 1),
+        "implemented requirement ARCH-AUTH-01 lacks reviewed catalog evidence",
+    )
+    reject_catalog(
+        "unrelated normative claim",
+        catalog_text.replace(
+            'claim_ids = ["ARCH-AUTH-01"]',
+            'claim_ids = ["ARCH-AUTH-04"]',
+            1,
+        ),
+        "must claim only ARCH-AUTH-01",
+    )
+    reject_catalog(
+        "stage claim on normative evidence",
+        catalog_text.replace(
+            'claim_ids = ["ARCH-AUTH-01"]',
+            'claim_ids = ["S04-014"]',
+            1,
+        ),
+        "must claim only ARCH-AUTH-01",
+    )
+    reject_catalog(
+        "wrong normative catalog kind",
+        catalog_text.replace(
+            auth_record,
+            auth_record.replace('kind = "normative-requirement"', 'kind = "stage-gate"'),
+            1,
+        ),
+        "must use kind normative-requirement",
+    )
+    reject_catalog(
+        "unimplemented normative catalog record",
+        catalog_text
+        + """
+
+[[evidence]]
+id = "EVID-ARCH-AUTH-08"
+claim_ids = ["ARCH-AUTH-08"]
+kind = "normative-requirement"
+""",
+        "unimplemented requirement ARCH-AUTH-08 must not have closing catalog evidence",
+    )
+    reject_catalog(
+        "unrelated catalog evidence",
+        catalog_text
+        + """
+
+[[evidence]]
+id = "EVID-ARCH-REQ-00000000000000000000"
+claim_ids = ["ARCH-REQ-00000000000000000000"]
+kind = "normative-requirement"
+""",
+        "catalog contains unrelated evidence ID",
+    )
+
+    try:
+        closure_evidence_inventory({"EVID-ARCH-AUTH-08"})
+    except EvidenceError as error:
+        if "lacks a reviewed catalog kind" not in str(error):
+            raise EvidenceError(
+                "self-test 'generic normative kind fallback' reached the wrong branch: "
+                f"{error}"
+            ) from error
+    else:
+        raise EvidenceError("self-test 'generic normative kind fallback' was accepted")
+    cases += 1
+
     def reject(label: str, mutation: callable, fragment: str) -> None:  # type: ignore[valid-type]
         nonlocal cases
         malformed = copy.deepcopy(valid)
@@ -474,6 +1339,11 @@ def self_test(root: Path) -> int:
         expect_rejection(label, malformed, bindings, fragment)
         cases += 1
 
+    reject(
+        "boolean manifest schema",
+        lambda value: value.__setitem__("schema_version", True),
+        "manifest schema_version must be 1",
+    )
     reject("missing field", lambda value: value.pop("lock_sha256"), "missing required")
     reject(
         "duplicate evidence",
@@ -521,6 +1391,14 @@ def self_test(root: Path) -> int:
         "sorted and unique",
     )
     reject(
+        "mixed-type features",
+        lambda value: value["entries"][0].__setitem__(  # type: ignore[index,union-attr]
+            "features",
+            ["all-features", 1],
+        ),
+        "features must be a string",
+    )
+    reject(
         "reverse time",
         lambda value: value["entries"][0].__setitem__("ended_at", "2026-08-23T23:59:59Z"),  # type: ignore[index,union-attr]
         "ended before",
@@ -545,6 +1423,324 @@ def self_test(root: Path) -> int:
         lambda value: value["entries"][0].__setitem__("limitations", [""]),  # type: ignore[index,union-attr]
         "limitations must be",
     )
+
+    historical_failure = copy.deepcopy(valid)
+    historical_failure["entries"][0]["result"] = "failed"  # type: ignore[index]
+    validate_manifest(historical_failure, bindings)
+
+    requirement_ledger.validate(root)
+    source_ledger = requirement_ledger.load_ledger(root / requirement_ledger.LEDGER_PATH)
+    source_records = source_ledger.get("requirement")
+    source_states = requirement_ledger.task_states(root)
+    closure_states = dict(source_states)
+    closure_states["S00-900"] = True
+    required_stage_evidence_ids_from_data(0, source_records, closure_states)
+
+    try:
+        required_stage_evidence_ids_from_data(0, source_records, source_states)
+    except EvidenceError as error:
+        if "source roadmap gate S00-900 is open" not in str(error):
+            raise EvidenceError(
+                f"self-test 'open source gate' reached the wrong branch: {error}"
+            ) from error
+    else:
+        raise EvidenceError("self-test 'open source gate' was accepted")
+    cases += 1
+
+    unbound_states = dict(closure_states)
+    unbound_states["S00-777"] = True
+    try:
+        required_stage_evidence_ids_from_data(0, source_records, unbound_states)
+    except EvidenceError as error:
+        if "tasks without evidence bindings" not in str(error):
+            raise EvidenceError(
+                f"self-test 'unbound source task' reached the wrong branch: {error}"
+            ) from error
+    else:
+        raise EvidenceError("self-test 'unbound source task' was accepted")
+    cases += 1
+
+    incomplete_states = dict(closure_states)
+    incomplete_states["S00-001"] = False
+    try:
+        required_stage_evidence_ids_from_data(0, source_records, incomplete_states)
+    except EvidenceError as error:
+        if "incomplete implementation tasks" not in str(error):
+            raise EvidenceError(
+                f"self-test 'incomplete source task' reached the wrong branch: {error}"
+            ) from error
+    else:
+        raise EvidenceError("self-test 'incomplete source task' was accepted")
+    cases += 1
+
+    try:
+        validate_closure(root, 5, "2" * 40)
+    except EvidenceError as error:
+        if "only Stages 00 through 04" not in str(error):
+            raise EvidenceError(
+                f"self-test 'unsupported closure stage' reached the wrong branch: {error}"
+            ) from error
+    else:
+        raise EvidenceError("self-test 'unsupported closure stage' was accepted")
+    cases += 1
+
+    incomplete_records = copy.deepcopy(source_records)
+    if not isinstance(incomplete_records, list):
+        raise EvidenceError("self-test source ledger has no requirement records")
+    stage_zero_record = next(
+        record
+        for record in incomplete_records
+        if isinstance(record, dict)
+        and any(
+            isinstance(task, str) and task.startswith("S00-")
+            for task in record.get("task_ids", [])
+        )
+    )
+    stage_zero_record["status"] = "unimplemented"
+    try:
+        required_stage_evidence_ids_from_data(0, incomplete_records, closure_states)
+    except EvidenceError as error:
+        if "owns unimplemented requirements" not in str(error):
+            raise EvidenceError(
+                f"self-test 'incomplete source requirement' reached the wrong branch: {error}"
+            ) from error
+    else:
+        raise EvidenceError("self-test 'incomplete source requirement' was accepted")
+    cases += 1
+
+    with tempfile.TemporaryDirectory(prefix="agenc-evidence-self-test-") as temporary:
+        temporary_root = Path(temporary)
+        runner_path = temporary_root / "scripts/run-gate.py"
+        gate_path = temporary_root / "conformance/gates.toml"
+        artifact_path = temporary_root / "conformance/evidence/artifacts/closure.json"
+        runner_path.parent.mkdir(parents=True)
+        gate_path.parent.mkdir(parents=True)
+        artifact_path.parent.mkdir(parents=True)
+        runner_path.write_text("# reviewed self-test gate runner\n", encoding="utf-8")
+        gate_path.write_text(
+            """schema_version = 1
+
+[gate.stage-zero-implementation]
+
+[[gate.stage-zero-implementation.command]]
+argv = ["python3", "scripts/check-evidence.py", "check"]
+""",
+            encoding="utf-8",
+        )
+        git_bytes(temporary_root, ["init", "--quiet"], "self-test repository")
+        git_bytes(
+            temporary_root,
+            [
+                "-c",
+                "user.name=Evidence Self-Test",
+                "-c",
+                "user.email=evidence@example.invalid",
+                "add",
+                "--",
+                "scripts/run-gate.py",
+                "conformance/gates.toml",
+            ],
+            "self-test source files",
+        )
+        git_bytes(
+            temporary_root,
+            [
+                "-c",
+                "user.name=Evidence Self-Test",
+                "-c",
+                "user.email=evidence@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "Add self-test gate",
+            ],
+            "self-test source commit",
+        )
+        closure_commit = git_bytes(
+            temporary_root,
+            ["rev-parse", "HEAD"],
+            "self-test source commit ID",
+        ).decode("ascii").strip()
+        closure_id = "EVID-S00-010-MANIFEST-SCHEMA"
+        closure_source_hash = "2" * 64
+        closure_lock_hash = "3" * 64
+        gate_name, runner_hash, gate_hash, commands = source_gate_policy(
+            temporary_root,
+            0,
+            closure_commit,
+        )
+        run_artifact: dict[str, object] = {
+            "schema_version": 1,
+            "gate": gate_name,
+            "gate_manifest_sha256": gate_hash,
+            "argv": ["python3", "scripts/run-gate.py", gate_name],
+            "tool": {
+                "name": "agenc-ircd-gate-runner",
+                "version": runner_hash,
+            },
+            "source_commit": closure_commit,
+            "source_sha256": closure_source_hash,
+            "lock_sha256": closure_lock_hash,
+            "target": "x86_64-unknown-linux-gnu",
+            "features": ["all-features"],
+            "started_at": "2026-08-24T00:00:00Z",
+            "ended_at": "2026-08-24T00:00:02Z",
+            "result": "passed",
+            "exit_code": 0,
+            "command_results": [
+                {
+                    "argv": command["argv"],
+                    "environment": command["environment"],
+                    "started_at": "2026-08-24T00:00:00Z",
+                    "ended_at": "2026-08-24T00:00:01Z",
+                    "exit_code": 0,
+                }
+                for command in commands
+            ],
+            "evidence": closure_evidence_inventory({closure_id}),
+        }
+
+        def stage_artifact(payload: dict[str, object], path: Path = artifact_path) -> str:
+            path.write_text(
+                json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            relative = path.relative_to(temporary_root).as_posix()
+            git_bytes(
+                temporary_root,
+                ["add", "--", relative],
+                "self-test artifact",
+            )
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+
+        artifact_hash = stage_artifact(run_artifact)
+        closure_entry = copy.deepcopy(valid["entries"][0])  # type: ignore[index]
+        closure_entry["command"] = f"python3 scripts/run-gate.py {gate_name}"
+        closure_entry["tool"] = {
+            "name": "agenc-ircd-gate-runner",
+            "version": runner_hash,
+        }
+        closure_entry["source_commit"] = closure_commit
+        closure_entry["source_sha256"] = closure_source_hash
+        closure_entry["lock_sha256"] = closure_lock_hash
+        closure_entry["target"] = "x86_64-unknown-linux-gnu"
+        closure_entry["features"] = ["all-features"]
+        closure_entry["started_at"] = "2026-08-24T00:00:00Z"
+        closure_entry["ended_at"] = "2026-08-24T00:00:02Z"
+        closure_entry["result"] = "passed"
+        closure_entry["artifact"] = {
+            "label": "closure-test",
+            "sha256": artifact_hash,
+            "path": "conformance/evidence/artifacts/closure.json",
+        }
+        validate_closure_entries(
+            temporary_root,
+            0,
+            [closure_entry],
+            {closure_id},
+            closure_commit,
+            closure_source_hash,
+            closure_lock_hash,
+        )
+
+        def reject_closure(label: str, entries: list[dict[str, object]], fragment: str) -> None:
+            nonlocal cases
+            try:
+                validate_closure_entries(
+                    temporary_root,
+                    0,
+                    entries,
+                    {closure_id},
+                    closure_commit,
+                    closure_source_hash,
+                    closure_lock_hash,
+                )
+            except EvidenceError as error:
+                if fragment not in str(error):
+                    raise EvidenceError(
+                        f"self-test {label!r} reached the wrong branch: {error}"
+                    ) from error
+            else:
+                raise EvidenceError(f"self-test {label!r} was accepted")
+            cases += 1
+
+        reject_closure("missing closure evidence", [], "closure evidence is missing")
+        failed = copy.deepcopy(closure_entry)
+        failed["result"] = "failed"
+        reject_closure("failed closure evidence", [failed], "do not close evidence")
+        not_run = copy.deepcopy(closure_entry)
+        not_run["result"] = "not-run"
+        reject_closure("not-run closure evidence", [not_run], "do not close evidence")
+        legacy = copy.deepcopy(closure_entry)
+        legacy["artifact"].pop("path")  # type: ignore[union-attr]
+        reject_closure("legacy closure artifact", [legacy], "no verifiable provenance path")
+        tampered = copy.deepcopy(closure_entry)
+        tampered["artifact"]["sha256"] = "0" * 64  # type: ignore[index]
+        reject_closure("tampered closure artifact", [tampered], "does not match")
+        duplicate = [copy.deepcopy(closure_entry), copy.deepcopy(closure_entry)]
+        reject_closure("duplicate closure evidence", duplicate, "closure evidence is duplicated")
+        stale_commit = copy.deepcopy(closure_entry)
+        stale_commit["source_commit"] = "3" * 40
+        reject_closure("stale closure source", [stale_commit], "requested source commit")
+        traversal = copy.deepcopy(closure_entry)
+        traversal["artifact"]["path"] = (  # type: ignore[index]
+            "conformance/evidence/artifacts/x/../../escape"
+        )
+        reject_closure("artifact traversal", [traversal], "stay inside")
+        false_command = copy.deepcopy(closure_entry)
+        false_command["command"] = "true"
+        reject_closure("unreviewed closure command", [false_command], "reviewed stage gate")
+        false_tool = copy.deepcopy(closure_entry)
+        false_tool["tool"] = {"name": "sh", "version": "1"}
+        reject_closure("unreviewed closure tool", [false_tool], "unreviewed gate tool")
+
+        wrong_kind_artifact = copy.deepcopy(run_artifact)
+        wrong_kind_artifact["evidence"][0]["kind"] = "unrelated"  # type: ignore[index]
+        wrong_kind = copy.deepcopy(closure_entry)
+        wrong_kind["artifact"]["sha256"] = stage_artifact(  # type: ignore[index]
+            wrong_kind_artifact
+        )
+        reject_closure("stale evidence kind", [wrong_kind], "catalog kinds are stale")
+
+        incomplete_run_artifact = copy.deepcopy(run_artifact)
+        incomplete_run_artifact["command_results"] = []
+        incomplete_run = copy.deepcopy(closure_entry)
+        incomplete_run["artifact"]["sha256"] = stage_artifact(  # type: ignore[index]
+            incomplete_run_artifact
+        )
+        reject_closure("incomplete gate run", [incomplete_run], "command results are incomplete")
+
+        unrelated_path = temporary_root / "conformance/evidence/artifacts/unrelated.json"
+        unrelated_hash = stage_artifact({}, unrelated_path)
+        unrelated = copy.deepcopy(closure_entry)
+        unrelated["artifact"] = {
+            "label": "unrelated-test",
+            "sha256": unrelated_hash,
+            "path": "conformance/evidence/artifacts/unrelated.json",
+        }
+        reject_closure("unrelated staged artifact", [unrelated], "invalid gate-run fields")
+
+        artifact_hash = stage_artifact(run_artifact)
+        closure_entry["artifact"]["sha256"] = artifact_hash  # type: ignore[index]
+        untracked_path = temporary_root / "conformance/evidence/artifacts/untracked.json"
+        untracked_path.write_bytes(artifact_path.read_bytes())
+        untracked = copy.deepcopy(closure_entry)
+        untracked["artifact"] = {
+            "label": "untracked-test",
+            "sha256": hashlib.sha256(untracked_path.read_bytes()).hexdigest(),
+            "path": "conformance/evidence/artifacts/untracked.json",
+        }
+        reject_closure("untracked artifact", [untracked], "Git index")
+        artifact_path.write_bytes(b"unstaged replacement\n")
+        unstaged = copy.deepcopy(closure_entry)
+        unstaged["artifact"]["sha256"] = hashlib.sha256(  # type: ignore[index]
+            artifact_path.read_bytes()
+        ).hexdigest()
+        reject_closure("unstaged artifact", [unstaged], "tracked artifact bytes")
+        artifact_path.write_text(
+            json.dumps(run_artifact, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
 
     head = git_bytes(root, ["rev-parse", "HEAD"], "current commit").decode("ascii").strip()
     source_hash = canonical_source_sha256(root, head)
@@ -595,16 +1791,34 @@ def fail(message: str) -> NoReturn:
 
 
 def main() -> None:
-    """Dispatch positive validation and negative self-tests."""
+    """Dispatch archive validation, closure validation, and self-tests."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("check", "self-test"))
+    parser.add_argument("command", choices=("check", "close-stage", "self-test"))
+    parser.add_argument("--stage", type=int)
+    parser.add_argument("--source-commit")
     arguments = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     try:
         if arguments.command == "check":
+            if arguments.stage is not None or arguments.source_commit is not None:
+                raise EvidenceError("check does not accept closure arguments")
             bindings, entries = validate(root)
-            print(f"evidence schema: ok ({bindings} bindings, {entries} example entry)")
+            print(f"evidence archive: ok ({bindings} bindings, {entries} entries)")
+        elif arguments.command == "close-stage":
+            if arguments.stage is None or arguments.source_commit is None:
+                raise EvidenceError("close-stage requires --stage and --source-commit")
+            entries, manifests = validate_closure(
+                root,
+                arguments.stage,
+                arguments.source_commit,
+            )
+            print(
+                f"Stage {arguments.stage:02d} evidence closure: ok "
+                f"({entries} passed records in {manifests} current manifests)"
+            )
         else:
+            if arguments.stage is not None or arguments.source_commit is not None:
+                raise EvidenceError("self-test does not accept closure arguments")
             cases = self_test(root)
             print(f"evidence schema self-test: ok ({cases} rejection cases)")
     except (EvidenceError, OSError, UnicodeError) as error:

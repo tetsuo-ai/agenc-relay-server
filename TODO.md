@@ -50,11 +50,11 @@ References: [Architecture §§1.2–4](docs/ircd-architecture-and-implementation
 
 | Stage | Outcome | Implementation | Latest local gate | Revision-bound evidence |
 | --- | --- | --- | --- | --- |
-| 00 | Reproducible workspace and traceability foundation | Complete | Pass, 2026-08-26 | Historical commit `6b48ecb73afd471ed576146483098c19c12893f9` |
-| 01 | Registries, validated types, and canonical codecs | Complete | Pass, 2026-08-26 | Historical commit `7ae6439b472521d3c23fb99261deaf8964a70c5a` |
-| 02 | Bounded client wire implementation | Complete | Pass, 2026-08-26 | [Evidence record](conformance/stage-two-evidence.md) |
-| 03 | Pure deterministic domain model | Complete | Pass, 2026-08-26 | [Evidence record](conformance/stage-three-evidence.md) |
-| 04 | Crypto adapters and account authentication | Not started | Not run | Absent |
+| 00 | Reproducible workspace and traceability foundation | Task work complete; closure reopened | Not run on the current tree | Incomplete under the artifact-backed closure policy |
+| 01 | Registries, validated types, and canonical codecs | Task work complete; closure reopened | Not run on the current tree | Incomplete under the artifact-backed closure policy |
+| 02 | Bounded client wire implementation | Task work complete; closure reopened | Not run on the current tree | Historical manifest has no verifiable artifact path |
+| 03 | Pure deterministic domain model | Task work complete; closure reopened | Not run on the current tree | Incomplete under the artifact-backed closure policy |
+| 04 | Crypto adapters and account authentication | Task work complete; closure open | Not run on an exact committed revision | Incomplete under the artifact-backed closure policy |
 | 05 | Durable and recoverable persistence | Not started | Not run | Absent |
 | 06 | Conforming single-node daemon | Not started | Not run | Absent |
 | 07 | Conforming base federation | Not started | Not run | Absent |
@@ -234,7 +234,7 @@ source baseline, and evidence model are fixed before protocol behavior lands.
   - Invariants: all invariant families.
   - Evidence: positive and malformed sample manifests exercise every validation branch.
 
-- [x] `S00-900` **Pass the Stage 00 gate.** The complete empty workspace and
+- [ ] `S00-900` **Pass the Stage 00 gate.** The complete empty workspace and
   traceability baseline must build reproducibly without any protocol stub being
   mistaken for implemented behavior. ([evidence](conformance/stage-zero-evidence.md#s00-900))
   - After: `S00-001` through `S00-010`.
@@ -358,14 +358,14 @@ stages exist as bounded, private-field types with independent vectors.
   - Invariants: `TRN-04`, `TRN-05`, `TRN-06`, `CON-05`.
   - Evidence: [EVID-S01-012-TOTALITY](conformance/stage-one-evidence.md#s01-012) covers the hostile corpus, every truncation, explicit depth/value budgets, nonrecursion, and parser-error negatives.
 
-- [x] `S01-900` **Pass the Stage 01 gate.** All Appendix-A/B constants,
+- [ ] `S01-900` **Pass the Stage 01 gate.** All Appendix-A/B constants,
   validated foundational types, canonical codecs, source checks, and independent
   vectors are complete before client behavior begins.
   - After: `S01-001` through `S01-012`.
   - Targets: `agenc-ircd-types`, foundational wire code, testkit vectors.
   - References: [Architecture §29 phase 1](docs/ircd-architecture-and-implementation-spec.md#29-implementation-sequence-and-acceptance-gates).
   - Invariants: `TRN-04` through `TRN-06`, applicable identity and federation representation invariants.
-  - Evidence: [EVID-S01-900-STAGE-GATE](conformance/stage-one-evidence.md#s01-900) records the complete pinned, locked, dual-target gate.
+  - Evidence: [EVID-S01-900-STAGE-GATE](conformance/stage-one-evidence.md#s01-900) records the historical pinned, locked, dual-target run; it does not close the current gate.
 
 ## Stage 02 — Bounded client wire
 
@@ -373,11 +373,12 @@ Outcome: arbitrary client bytes can be framed, parsed, negotiated, and rendered
 through a total, resource-bounded wire layer with no sockets, policy, or state
 mutation inside the crate.
 
-Implementation and local tests exist for every Stage 02 task, and the complete
-local gate passed on 2026-08-26. The checkboxes remain open because no Stage 02
-evidence manifest is tied to a committed source revision. Rendering is also
-blocked by the frozen topic and message-body limits recorded in the
-[Stage 02 closure audit](conformance/stage-two-audit.md).
+Stage 02 task work is complete. A manifest records a passed 2026-08-26 run for
+commit `cd1d7c937c2be9c469e6131fda21406764a39b78`, but its artifact records have
+digests without checked-in provenance paths. It remains archive evidence and
+does not close `S02-900` under the current policy. The
+[Stage 02 closure audit](conformance/stage-two-audit.md) records the resolved
+wire-size, reply-shape, and traceability issues.
 
 - [x] `S02-001` **Implement incremental stream framing.** Handle fragmented and
   coalesced reads, CRLF, EOF, timeouts, and exact physical-line limits without
@@ -478,7 +479,7 @@ blocked by the frozen topic and message-body limits recorded in the
   - Invariants: `TRN-04`, `TRN-05`, `TRN-06`, `CON-05`.
   - Evidence: reproducible fuzz records plus minimized failures promoted to ordinary tests.
 
-- [x] `S02-900` **Pass the Stage 02 gate.** The complete client-wire surface
+- [ ] `S02-900` **Pass the Stage 02 gate.** The complete client-wire surface
   must be total, bounded, capability-correct, and transcript-compatible before
   domain state consumes a parsed command. ([evidence](conformance/stage-two-evidence.md#s02-900))
   - After: `S02-001` through `S02-011`.
@@ -602,7 +603,7 @@ filesystem calls, concrete clocks, or random generators.
   - Invariants: every applicable Stage-03 invariant.
   - Evidence: generated sequences preserve invariants and rejected steps leave the reference state unchanged.
 
-- [x] `S03-900` **Pass the Stage 03 gate.** The pure domain implementation and
+- [ ] `S03-900` **Pass the Stage 03 gate.** The pure domain implementation and
   independent reference model must agree for all generated sequences before
   cryptographic, storage, or runtime side effects are introduced.
   - After: `S03-001` through `S03-012`.
@@ -617,7 +618,7 @@ Outcome: maintained libraries are configured and composed exactly as specified
 behind bounded, secret-safe adapters; account creation, authentication, and
 credential change have complete protocol state machines and vectors.
 
-- [ ] `S04-001` **Implement secret-bearing wrappers.** Prevent `Debug`,
+- [x] `S04-001` **Implement secret-bearing wrappers.** Prevent `Debug`,
   `Display`, `Clone`, Serde, implicit string conversion, and accidental log or
   error exposure; zeroize owned buffers where the selected library supports it.
   - After: `S03-900`.
@@ -626,7 +627,7 @@ credential change have complete protocol state machines and vectors.
   - Invariants: `ID-05`, `AUTH-03`, `OPS-01`.
   - Evidence: compile-fail trait checks, secret-canary scans, drop tests, and explicit exposure-path review.
 
-- [ ] `S04-002` **Implement the OS entropy adapter.** Use `getrandom` with the
+- [x] `S04-002` **Implement the OS entropy adapter.** Use `getrandom` with the
   exact features, require complete output, expose failure, and provide no
   production fallback or deterministic mode.
   - After: `S04-001`.
@@ -635,7 +636,7 @@ credential change have complete protocol state machines and vectors.
   - Invariants: `ID-02`, `ID-03`, `DUR-06` at the entropy boundary.
   - Evidence: full/partial/failure adapter tests and release-graph proof that deterministic entropy is unreachable.
 
-- [ ] `S04-003` **Implement domain-separated hash, HMAC, and HKDF adapters.**
+- [x] `S04-003` **Implement domain-separated hash, HMAC, and HKDF adapters.**
   Accept typed contexts and inputs, expose only registered algorithms, and
   prevent cross-domain or truncated-output substitution.
   - After: `S04-001`.
@@ -644,7 +645,7 @@ credential change have complete protocol state machines and vectors.
   - Invariants: `AUTH-08`, `DUR-03`, `E2E-05`.
   - Evidence: RFC/project vectors, domain-substitution negatives, length checks, and differential library tests where available.
 
-- [ ] `S04-004` **Implement XChaCha20-Poly1305 storage adapters.** Fix the
+- [x] `S04-004` **Implement XChaCha20-Poly1305 storage adapters.** Fix the
   algorithm, key/nonce sizes, AAD domains, full-tag verification, and failure
   behavior; nonce allocation remains a Stage-05 storage responsibility.
   - After: `S04-001`, `S04-003`.
@@ -653,7 +654,7 @@ credential change have complete protocol state machines and vectors.
   - Invariants: `DUR-03`, `DUR-06`.
   - Evidence: XChaCha/project vectors and wrong-key, nonce, AAD, tag, truncation, and tamper negatives.
 
-- [ ] `S04-005` **Implement strict Ed25519 adapters.** Use `verify_strict`,
+- [x] `S04-005` **Implement strict Ed25519 adapters.** Use `verify_strict`,
   typed signing domains, exact encodings, no batch/hazmat/legacy surface, and
   secret-key wrappers.
   - After: `S04-001`, `S04-003`.
@@ -662,7 +663,7 @@ credential change have complete protocol state machines and vectors.
   - Invariants: `TRN-03`, `E2E-05`, `OPS-05`.
   - Evidence: signature/domain vectors, malleability and wrong-domain negatives, and secret-exposure scans.
 
-- [ ] `S04-006` **Implement the fixed account-service HPKE envelope.** Enforce
+- [x] `S04-006` **Implement the fixed account-service HPKE envelope.** Enforce
   Base mode, the pinned suite, request/response contexts, recovery epoch,
   operation kind, exact 4,726-byte wrapper, all-zero padding, and one-use
   exporter material.
@@ -672,7 +673,7 @@ credential change have complete protocol state machines and vectors.
   - Invariants: `ID-05`, `ID-06`, `AUTH-08`, `AUTH-10`.
   - Evidence: fixed-wrapper vectors plus pin, epoch, kind, context, length, padding, salt, and replay negatives.
 
-- [ ] `S04-007` **Implement the exact OPAQUE profile.** Configure the pinned
+- [x] `S04-007` **Implement the exact OPAQUE profile.** Configure the pinned
   suite, identities, context, Argon2id KSF, private credential IDs, record
   lengths, real and fake records, and dummy KE3 work without Serde.
   - After: `S04-001` through `S04-003`.
@@ -681,7 +682,7 @@ credential change have complete protocol state machines and vectors.
   - Invariants: `AUTH-01`, `AUTH-03`, `AUTH-09`, `AUTH-10`.
   - Evidence: RFC 9807/project vectors, exact serialized lengths, fake-record equivalence, dummy-KE3 work, and unsupported-suite rejection.
 
-- [ ] `S04-008` **Implement account creation.** Bind invitation, login,
+- [x] `S04-008` **Implement account creation.** Bind invitation, login,
   credential identity, HPKE context, OPAQUE registration, expiry, connection,
   and one-use transaction state without creating an E2EE identity.
   - After: `S04-006`, `S04-007`.
@@ -690,7 +691,7 @@ credential change have complete protocol state machines and vectors.
   - Invariants: `AUTH-02`, `AUTH-04`, `AUTH-08`, `AUTH-09`.
   - Evidence: success, unknown/duplicate login, invitation substitution, expiry, replay, disconnect, and output-shape tests.
 
-- [ ] `S04-009` **Implement OPAQUE login over SASL.** Bind KE1/KE2/KE3,
+- [x] `S04-009` **Implement OPAQUE login over SASL.** Bind KE1/KE2/KE3,
   origin connection, edge/coordinator routing, account-service HPKE, fake-record
   behavior, session generation, and final public replies.
   - After: `S04-006` through `S04-008`.
@@ -699,7 +700,7 @@ credential change have complete protocol state machines and vectors.
   - Invariants: `AUTH-01`, `AUTH-02`, `AUTH-05`, `AUTH-06`, `AUTH-08` through `AUTH-10`.
   - Evidence: known/unknown parity, malicious-edge, stale completion, replay, session-fence, timeout, and wire-transcript tests.
 
-- [ ] `S04-010` **Implement exporter-authenticated completion receipts.** Use
+- [x] `S04-010` **Implement exporter-authenticated completion receipts.** Use
   independent salted one-use exporter material, operation/request binding,
   recovery epoch, response count, exact response kind, and idempotent replay.
   - After: `S04-006`, `S04-009`.
@@ -708,7 +709,7 @@ credential change have complete protocol state machines and vectors.
   - Invariants: `AUTH-06`, `AUTH-08`, `DUR-12`.
   - Evidence: forgery, substitution, bare-success, collision fixture, changed-outcome replay, and `u64::MAX` refusal tests.
 
-- [ ] `S04-011` **Implement credential replacement and account-deletion auth.**
+- [x] `S04-011` **Implement credential replacement and account-deletion auth.**
   Require fresh same-account proof, revision-bound one-use confirmation,
   credential-identity reuse, atomic record intent, and complete old-session
   fencing; provide no server-assisted recovery path.
@@ -718,7 +719,7 @@ credential change have complete protocol state machines and vectors.
   - Invariants: `AUTH-05`, `AUTH-07`, `AUTH-11`.
   - Evidence: fresh/stale proof, wrong account, revision replacement, replay, precondition, tombstone intent, and session-fence tests.
 
-- [ ] `S04-012` **Implement bounded crypto workers and `CryptoPort`.** Keep CPU
+- [x] `S04-012` **Implement bounded crypto workers and `CryptoPort`.** Keep CPU
   and blocking work off Tokio workers, bound queue/in-flight work, preserve
   job ownership, propagate cancellation outcomes, and never log job contents.
   - After: `S04-003` through `S04-011`.
@@ -727,7 +728,7 @@ credential change have complete protocol state machines and vectors.
   - Invariants: `CON-02`, `CON-04`, `CON-05`, `OPS-01`.
   - Evidence: queue-full, worker panic, cancellation, overload, timing-class, secret-canary, and joined-shutdown tests.
 
-- [ ] `S04-013` **Lock the cryptographic dependency graph and features.** Prove
+- [x] `S04-013` **Lock the cryptographic dependency graph and features.** Prove
   exact direct versions/features, no forbidden defaults, scoped duplicate
   generations, no Git source, and no unexpected algorithm reachability.
   - After: `S04-003` through `S04-012`.
@@ -736,7 +737,7 @@ credential change have complete protocol state machines and vectors.
   - Invariants: `OPS-02`.
   - Evidence: feature tree, duplicate/reachability report, checksum verification, `cargo deny`, and `cargo audit` pass.
 
-- [ ] `S04-014` **Complete crypto/auth verification.** Run all standardized and
+- [x] `S04-014` **Complete crypto/auth verification.** Run all standardized and
   project vectors, malicious-edge confirmation, fake-record/dummy-KE3,
   constant-time-path integration review, secret canaries, and worker-bound
   tests without claiming the primitives themselves were re-proved.
@@ -1717,14 +1718,17 @@ profile, and artifacts have complete conformance evidence for every claim made.
   - Evidence: tool/version/duration/corpus/schedule manifests and zero unresolved failures.
 
 - [ ] `S10-005` **Complete network interoperability and privacy qualification.**
-  Test pinned legacy/modern clients, two-node and multi-edge federation, exact
-  TLS, WSS when enabled, real Tor onion deployment, profile mismatches,
-  partitions, metadata canaries, packet captures, and timing classes.
+  Test pinned legacy, modern, and encrypted clients, two-node and multi-edge
+  federation, exact TLS, WSS when enabled, real Tor onion deployment, profile
+  mismatches, partitions, metadata canaries, packet captures, and timing
+  classes. Test trust-state presentation, TOFU and transparency distinctions,
+  and decrypted text containing control bytes, CTCP markers, terminal control,
+  HTML, and command prefixes without interpreting it as active content.
   - After: `S10-002`, `S10-004`.
-  - Targets: network/interoperability/privacy evidence.
+  - Targets: network/interoperability/privacy evidence and the test-only encrypted-client harness.
   - References: [Architecture §28.6](docs/ircd-architecture-and-implementation-spec.md#286-network-interoperability-and-privacy-tests).
   - Invariants: `TRN-*`, `PRV-*`, `FED-*`, `E2E-07`, `OPS-01`.
-  - Evidence: versioned client/server/topology matrix, scanner reports, captures, canary scans, and documented honest privacy limits.
+  - Evidence: versioned client/server/topology and client-policy matrices, safe-rendering outputs, scanner reports, captures, canary scans, and documented privacy limits.
 
 - [ ] `S10-006` **Complete storage platform qualification.** Run the release
   binary on every declared target/filesystem/block-size/mount tuple, measure

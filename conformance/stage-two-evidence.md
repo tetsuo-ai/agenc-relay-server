@@ -1,7 +1,9 @@
 # Stage 02 Evidence
 
-Status: complete on 2026-08-26. The machine-readable manifest in
-`conformance/evidence/` binds these claims to the tested source revision.
+Status: historical passed run on 2026-08-26. The machine-readable manifest in
+`conformance/evidence/` binds these claims to the tested source revision. Its
+artifact records contain digests but no checked-in provenance paths, so the
+manifest remains archive evidence and does not close `S02-900`.
 
 ## S02-001
 
@@ -56,8 +58,9 @@ traditional CAP output, and typed standard replies.
 ## S02-009
 
 `EVID-S02-009-REPLIES` covers empty, single, and multi-message labeled
-responses, bounded batch nesting, exact standard-reply contexts, and
-fail-closed mapping of every public reply shape.
+responses, bounded parent-tagged batch nesting, and the ratified ASCII letter,
+digit, and hyphen grammar for batch references. It also covers exact
+standard-reply contexts and fail-closed mapping of every public reply shape.
 
 ## S02-010
 
@@ -74,7 +77,9 @@ campaign remains release task S10-004.
 
 ## S02-900
 
-`EVID-S02-900-STAGE-GATE` is `bash scripts/check-stage-two.sh`. The 2026-08-26
-run passed the inherited gates, both declared Linux targets, Clippy, tests,
-documentation tests, dependency checks, generated-artifact validation, 90.03%
-branch coverage, 93.97% line coverage, and four 10,000-run fuzz smokes.
+`EVID-S02-900-STAGE-GATE` records `bash scripts/check-stage-two.sh`. The
+2026-08-26 run passed the inherited checks, both declared Linux targets,
+Clippy, tests, documentation tests, dependency checks, generated-artifact
+validation, 90.03% branch coverage, 93.97% line coverage, and four 10,000-run
+fuzz smokes. That record has no verifiable artifact path and does not close
+`S02-900`.

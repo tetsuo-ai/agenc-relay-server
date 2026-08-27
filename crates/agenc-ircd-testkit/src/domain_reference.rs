@@ -9,6 +9,7 @@ const MAX_REFERENCE_SESSIONS: usize = 256;
 const MAX_REFERENCE_CHANNELS: usize = 256;
 const MAX_REFERENCE_MEMBERS: usize = 256;
 const MAX_REFERENCE_INVITES: usize = 256;
+const MAX_REFERENCE_MODE_CHANGES: usize = 6;
 const MAX_REFERENCE_NAME_BYTES: usize = 64;
 const MAX_REFERENCE_MONITORS: usize = 100;
 
@@ -326,6 +327,54 @@ pub enum ReferenceVisibility {
     Secret,
 }
 
+/// Independent add or remove direction for one reference MODE change.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReferenceModeOperation {
+    /// Add or raise the selected mode.
+    Add,
+    /// Remove or lower the selected mode.
+    Remove,
+}
+
+/// One reference discovery-mode letter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReferenceVisibilityMode {
+    /// The unlisted `p` mode.
+    Unlisted,
+    /// The existence-hiding `s` mode.
+    Secret,
+}
+
+/// One independently modeled member or discovery MODE change.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReferenceModeChange {
+    /// Apply one discovery-mode direction in client order.
+    Visibility {
+        /// Add or remove direction.
+        operation: ReferenceModeOperation,
+        /// Exact discovery letter.
+        mode: ReferenceVisibilityMode,
+    },
+    /// Raise or lower one member's exact highest prefix role.
+    Role {
+        /// Add or remove direction.
+        operation: ReferenceModeOperation,
+        /// Live target user.
+        target: u16,
+        /// Exact prefix role named by the change.
+        role: ReferenceRole,
+    },
+}
+
+/// Principal identity retained by one reference invitation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReferencePrincipal {
+    /// Account-bound authority.
+    Account(u16),
+    /// Process-local guest authority.
+    Guest(u16),
+}
+
 /// One independently modeled state-machine input.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReferenceDomainStep {
@@ -353,7 +402,7 @@ pub enum ReferenceDomainStep {
         /// Independent public-cloak canary.
         cloak: u32,
     },
-    /// Replace one session's authority using an explicit generation fence.
+    /// Apply one guest login or authenticated logout using an explicit generation fence.
     SwitchAccount {
         /// Live user whose authority changes.
         user: u16,
@@ -412,6 +461,15 @@ pub enum ReferenceDomainStep {
         /// New exclusive discovery policy.
         visibility: ReferenceVisibility,
     },
+    /// Apply a bounded MODE vector in original client order.
+    ApplyModeVector {
+        /// Authorizing member.
+        actor: u16,
+        /// Current channel creation.
+        instance: u16,
+        /// Ordered typed mode changes.
+        changes: Vec<ReferenceModeChange>,
+    },
     /// Create a unique, revision-bound invitation.
     Invite {
         /// Authorizing member.
@@ -425,7 +483,7 @@ pub enum ReferenceDomainStep {
         /// Explicit process-local expiry tick.
         expires_at: u64,
     },
-    /// Delete an account and every session currently carrying its authority.
+    /// Delete an account after one isolated confirming session remains.
     DeleteAccount {
         /// Immutable account being deleted.
         account: u16,
@@ -511,7 +569,15 @@ struct ReferenceChannel {
     name: String,
     members: BTreeMap<u16, ReferenceRole>,
     visibility: ReferenceVisibility,
-    invites: BTreeMap<u16, (u16, u64, u64)>,
+    invites: BTreeMap<u16, ReferenceInvite>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ReferenceInvite {
+    target: ReferencePrincipal,
+    inviter: u16,
+    creation_revision: u64,
+    expires_at: u64,
 }
 
 /// Stable public session snapshot for implementation comparisons.
@@ -523,6 +589,8 @@ pub struct ReferenceSessionSnapshot {
     pub session: u16,
     /// Optional account authority.
     pub account: Option<u16>,
+    /// Account-generation fence captured by this session.
+    pub account_generation: u64,
     /// Current session generation.
     pub generation: u64,
     /// Current routing nickname.
@@ -544,8 +612,23 @@ pub struct ReferenceChannelSnapshot {
     pub visibility: ReferenceVisibility,
     /// Members and roles in User-ID order.
     pub members: Vec<(u16, ReferenceRole)>,
-    /// Invitation identities in order.
-    pub invites: Vec<u16>,
+    /// Complete invitation records in identity order.
+    pub invites: Vec<ReferenceInviteSnapshot>,
+}
+
+/// Stable public invitation snapshot for implementation comparisons.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReferenceInviteSnapshot {
+    /// Unique invitation identity.
+    pub invite: u16,
+    /// Guest or account authority being invited.
+    pub target: ReferencePrincipal,
+    /// Live user that issued the invitation.
+    pub inviter: u16,
+    /// State revision at invitation creation.
+    pub creation_revision: u64,
+    /// Process-local monotonic expiry tick.
+    pub expires_at: u64,
 }
 
 /// Deterministic full snapshot of independent reference state.
@@ -633,6 +716,11 @@ impl ReferenceDomainModel {
         next.validate()?;
         *self = next;
         Ok(())
+    }
+
+    /// Checks every reference-state invariant without changing the model.
+    pub fn validate_invariants(&self) -> Result<(), ReferenceDomainError> {
+        self.validate()
     }
 
     /// Returns a stable snapshot containing no private implementation maps.
@@ -731,6 +819,11 @@ impl ReferenceDomainModel {
                 instance,
                 visibility,
             } => self.set_visibility(actor, instance, visibility),
+            ReferenceDomainStep::ApplyModeVector {
+                actor,
+                instance,
+                changes,
+            } => self.apply_mode_vector(actor, instance, &changes),
             ReferenceDomainStep::Invite {
                 actor,
                 target,
@@ -781,12 +874,17 @@ impl ReferenceDomainModel {
         if self.sessions.contains_key(&user)
             || self.session_ids.contains(&session.session)
             || self.nicknames.contains_key(&session.nickname)
+            || self
+                .sessions
+                .values()
+                .any(|current| current.cloak == session.cloak)
         {
             return Err(ReferenceDomainError::Duplicate);
         }
         validate_account_fence(&self.accounts, session.account, session.account_generation)?;
         self.session_ids.insert(session.session);
         self.nicknames.insert(session.nickname.clone(), user);
+        self.display_names.insert(user, session.nickname.clone());
         self.sessions.insert(user, session);
         Ok(true)
     }
@@ -806,6 +904,9 @@ impl ReferenceDomainModel {
         if session.session_generation != expected_session_generation {
             return Err(ReferenceDomainError::Stale);
         }
+        if session.account == account || (session.account.is_some() && account.is_some()) {
+            return Err(ReferenceDomainError::Invalid);
+        }
         let was_guest = session.account.is_none();
         session.account = account;
         session.account_generation = account_generation;
@@ -815,7 +916,9 @@ impl ReferenceDomainModel {
             .ok_or(ReferenceDomainError::Overflow)?;
         if was_guest && account.is_some() {
             for channel in self.channels.values_mut() {
-                channel.invites.retain(|_, (target, _, _)| *target != user);
+                channel
+                    .invites
+                    .retain(|_, invite| invite.target != ReferencePrincipal::Guest(user));
             }
         }
         Ok(true)
@@ -847,7 +950,9 @@ impl ReferenceDomainModel {
         self.monitors.remove(&user);
         self.display_names.remove(&user);
         for channel in self.channels.values_mut() {
-            channel.invites.retain(|_, (target, _, _)| *target != user);
+            channel
+                .invites
+                .retain(|_, invite| invite.target != ReferencePrincipal::Guest(user));
         }
         for instance in session.channels {
             self.part_membership(user, instance);
@@ -982,12 +1087,58 @@ impl ReferenceDomainModel {
     ) -> Result<bool, ReferenceDomainError> {
         let channel = self
             .channels
-            .get_mut(&instance)
+            .get(&instance)
             .ok_or(ReferenceDomainError::NotFound)?;
-        if channel.members.get(&actor).copied() < Some(ReferenceRole::Operator) {
+        let actor_role = channel
+            .members
+            .get(&actor)
+            .copied()
+            .ok_or(ReferenceDomainError::Forbidden)?;
+        let actor_account = self
+            .sessions
+            .get(&actor)
+            .ok_or(ReferenceDomainError::InvariantViolation)?
+            .account;
+        let authorized = if visibility == ReferenceVisibility::Secret {
+            actor_account.is_some() && actor_role >= ReferenceRole::Owner
+        } else {
+            actor_role >= ReferenceRole::Operator
+        };
+        if !authorized {
             return Err(ReferenceDomainError::Forbidden);
         }
-        channel.visibility = visibility;
+        self.channels
+            .get_mut(&instance)
+            .ok_or(ReferenceDomainError::InvariantViolation)?
+            .visibility = visibility;
+        Ok(true)
+    }
+
+    fn apply_mode_vector(
+        &mut self,
+        actor: u16,
+        instance: u16,
+        changes: &[ReferenceModeChange],
+    ) -> Result<bool, ReferenceDomainError> {
+        validate_reference_mode_vector(changes)?;
+        let actor_account = self
+            .sessions
+            .get(&actor)
+            .ok_or(ReferenceDomainError::NotFound)?
+            .account;
+        let channel = self
+            .channels
+            .get_mut(&instance)
+            .ok_or(ReferenceDomainError::NotFound)?;
+        let actor_role = channel
+            .members
+            .get(&actor)
+            .copied()
+            .ok_or(ReferenceDomainError::Forbidden)?;
+        for change in changes {
+            validate_reference_mode_authority(actor_role, actor_account, *change)?;
+            apply_reference_mode_change(channel, *change)?;
+        }
         Ok(true)
     }
 
@@ -999,9 +1150,20 @@ impl ReferenceDomainModel {
         invite: u16,
         expires_at: u64,
     ) -> Result<bool, ReferenceDomainError> {
-        if !self.sessions.contains_key(&target) {
-            return Err(ReferenceDomainError::NotFound);
-        }
+        let target = self
+            .sessions
+            .get(&target)
+            .map(|session| {
+                session.account.map_or(
+                    ReferencePrincipal::Guest(target),
+                    ReferencePrincipal::Account,
+                )
+            })
+            .ok_or(ReferenceDomainError::NotFound)?;
+        let creation_revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(ReferenceDomainError::Overflow)?;
         let channel = self
             .channels
             .get_mut(&instance)
@@ -1014,7 +1176,15 @@ impl ReferenceDomainModel {
         }
         if channel
             .invites
-            .insert(invite, (target, self.revision, expires_at))
+            .insert(
+                invite,
+                ReferenceInvite {
+                    target,
+                    inviter: actor,
+                    creation_revision,
+                    expires_at,
+                },
+            )
             .is_some()
         {
             return Err(ReferenceDomainError::Duplicate);
@@ -1039,11 +1209,32 @@ impl ReferenceDomainModel {
             .iter()
             .filter_map(|(user, session)| (session.account == Some(account)).then_some(*user))
             .collect();
+        if users.len() != 1 {
+            return Err(ReferenceDomainError::Invalid);
+        }
+        let confirming_user = users
+            .first()
+            .copied()
+            .ok_or(ReferenceDomainError::InvariantViolation)?;
+        if !self
+            .sessions
+            .get(&confirming_user)
+            .ok_or(ReferenceDomainError::InvariantViolation)?
+            .channels
+            .is_empty()
+        {
+            return Err(ReferenceDomainError::Invalid);
+        }
         for user in users {
             self.close_session(user)?;
         }
         self.accounts.remove(&account);
         self.account_updates.remove(&account);
+        for channel in self.channels.values_mut() {
+            channel
+                .invites
+                .retain(|_, invite| invite.target != ReferencePrincipal::Account(account));
+        }
         Ok(true)
     }
 
@@ -1315,9 +1506,11 @@ impl ReferenceDomainModel {
     }
 
     fn validate_sessions(&self) -> Result<(), ReferenceDomainError> {
+        let mut public_cloaks = BTreeSet::new();
         for (user, session) in &self.sessions {
             if !self.session_ids.contains(&session.session)
                 || self.nicknames.get(&session.nickname) != Some(user)
+                || !public_cloaks.insert(session.cloak)
             {
                 return Err(ReferenceDomainError::InvariantViolation);
             }
@@ -1338,6 +1531,12 @@ impl ReferenceDomainModel {
     fn validate_channels(&self) -> Result<(), ReferenceDomainError> {
         for (instance, channel) in &self.channels {
             if self.channel_names.get(&channel.name) != Some(instance) {
+                return Err(ReferenceDomainError::InvariantViolation);
+            }
+            if channel.invites.values().any(|invite| match invite.target {
+                ReferencePrincipal::Account(account) => !self.accounts.contains_key(&account),
+                ReferencePrincipal::Guest(user) => !self.sessions.contains_key(&user),
+            }) {
                 return Err(ReferenceDomainError::InvariantViolation);
             }
             for user in channel.members.keys() {
@@ -1393,6 +1592,7 @@ impl ReferenceDomainModel {
                 user: *user,
                 session: session.session,
                 account: session.account,
+                account_generation: session.account_generation,
                 generation: session.session_generation,
                 nickname: session.nickname.clone(),
                 cloak: session.cloak,
@@ -1413,10 +1613,153 @@ impl ReferenceDomainModel {
                     .iter()
                     .map(|(user, role)| (*user, *role))
                     .collect(),
-                invites: channel.invites.keys().copied().collect(),
+                invites: channel
+                    .invites
+                    .iter()
+                    .map(|(invite, state)| ReferenceInviteSnapshot {
+                        invite: *invite,
+                        target: state.target,
+                        inviter: state.inviter,
+                        creation_revision: state.creation_revision,
+                        expires_at: state.expires_at,
+                    })
+                    .collect(),
             })
             .collect()
     }
+}
+
+fn validate_reference_mode_vector(
+    changes: &[ReferenceModeChange],
+) -> Result<(), ReferenceDomainError> {
+    if changes.is_empty() || changes.len() > MAX_REFERENCE_MODE_CHANGES {
+        return Err(ReferenceDomainError::Invalid);
+    }
+    if changes.iter().enumerate().any(|(index, change)| {
+        changes
+            .get(index + 1..)
+            .is_some_and(|remaining| remaining.contains(change))
+    }) {
+        return Err(ReferenceDomainError::Invalid);
+    }
+    Ok(())
+}
+
+fn validate_reference_mode_authority(
+    actor_role: ReferenceRole,
+    actor_account: Option<u16>,
+    change: ReferenceModeChange,
+) -> Result<(), ReferenceDomainError> {
+    match change {
+        ReferenceModeChange::Visibility {
+            operation: ReferenceModeOperation::Add,
+            mode: ReferenceVisibilityMode::Secret,
+        } => {
+            if actor_account.is_none() {
+                return Err(ReferenceDomainError::Forbidden);
+            }
+            require_reference_role(actor_role, ReferenceRole::Owner)
+        }
+        ReferenceModeChange::Visibility { .. } => {
+            require_reference_role(actor_role, ReferenceRole::Operator)
+        }
+        ReferenceModeChange::Role { role, .. } => {
+            if role == ReferenceRole::Member {
+                return Err(ReferenceDomainError::Invalid);
+            }
+            require_reference_role(actor_role, role)
+        }
+    }
+}
+
+fn apply_reference_mode_change(
+    channel: &mut ReferenceChannel,
+    change: ReferenceModeChange,
+) -> Result<(), ReferenceDomainError> {
+    match change {
+        ReferenceModeChange::Visibility { operation, mode } => {
+            channel.visibility =
+                resulting_reference_visibility(channel.visibility, operation, mode);
+        }
+        ReferenceModeChange::Role {
+            operation,
+            target,
+            role,
+        } => {
+            let current = channel
+                .members
+                .get(&target)
+                .copied()
+                .ok_or(ReferenceDomainError::NotFound)?;
+            let result = resulting_reference_role(current, operation, role)?;
+            channel.members.insert(target, result);
+        }
+    }
+    Ok(())
+}
+
+fn resulting_reference_visibility(
+    current: ReferenceVisibility,
+    operation: ReferenceModeOperation,
+    mode: ReferenceVisibilityMode,
+) -> ReferenceVisibility {
+    match (operation, mode) {
+        (ReferenceModeOperation::Add, ReferenceVisibilityMode::Unlisted) => {
+            ReferenceVisibility::Unlisted
+        }
+        (ReferenceModeOperation::Add, ReferenceVisibilityMode::Secret) => {
+            ReferenceVisibility::Secret
+        }
+        (ReferenceModeOperation::Remove, ReferenceVisibilityMode::Unlisted)
+            if current == ReferenceVisibility::Unlisted =>
+        {
+            ReferenceVisibility::Listed
+        }
+        (ReferenceModeOperation::Remove, ReferenceVisibilityMode::Secret)
+            if current == ReferenceVisibility::Secret =>
+        {
+            ReferenceVisibility::Listed
+        }
+        (
+            ReferenceModeOperation::Remove,
+            ReferenceVisibilityMode::Unlisted | ReferenceVisibilityMode::Secret,
+        ) => current,
+    }
+}
+
+fn resulting_reference_role(
+    current: ReferenceRole,
+    operation: ReferenceModeOperation,
+    requested: ReferenceRole,
+) -> Result<ReferenceRole, ReferenceDomainError> {
+    match operation {
+        ReferenceModeOperation::Add => Ok(std::cmp::max(current, requested)),
+        ReferenceModeOperation::Remove if requested == current => {
+            reference_next_lower(current).ok_or(ReferenceDomainError::Invalid)
+        }
+        ReferenceModeOperation::Remove => Err(ReferenceDomainError::Invalid),
+    }
+}
+
+const fn reference_next_lower(role: ReferenceRole) -> Option<ReferenceRole> {
+    match role {
+        ReferenceRole::Member => None,
+        ReferenceRole::Voice => Some(ReferenceRole::Member),
+        ReferenceRole::HalfOperator => Some(ReferenceRole::Voice),
+        ReferenceRole::Operator => Some(ReferenceRole::HalfOperator),
+        ReferenceRole::Administrator => Some(ReferenceRole::Operator),
+        ReferenceRole::Owner => Some(ReferenceRole::Administrator),
+    }
+}
+
+fn require_reference_role(
+    actual: ReferenceRole,
+    required: ReferenceRole,
+) -> Result<(), ReferenceDomainError> {
+    if actual < required {
+        return Err(ReferenceDomainError::Forbidden);
+    }
+    Ok(())
 }
 
 fn validate_name(name: &str) -> Result<(), ReferenceDomainError> {
@@ -1489,6 +1832,45 @@ mod tests {
             Err(expected)
         );
         assert_eq!(model.snapshot(), snapshot);
+    }
+
+    #[test]
+    fn duplicate_live_cloak_is_rejected_without_state_change() -> Result<(), ReferenceDomainError> {
+        let mut model = ReferenceDomainModel::new();
+        model.apply(open(1, 11, "first"))?;
+        let before = model.snapshot();
+
+        let mut colliding = open(2, 12, "second");
+        let ReferenceDomainStep::OpenSession { cloak, .. } = &mut colliding else {
+            return Err(ReferenceDomainError::InvariantViolation);
+        };
+        *cloak = 1;
+
+        assert_eq!(model.apply(colliding), Err(ReferenceDomainError::Duplicate));
+        assert_eq!(model.snapshot(), before);
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_live_cloak_is_rejected_as_corrupt_reference_state()
+    -> Result<(), ReferenceDomainError> {
+        let mut model = joined_model()?;
+        let first_cloak = model
+            .sessions
+            .get(&1)
+            .ok_or(ReferenceDomainError::InvariantViolation)?
+            .cloak;
+        model
+            .sessions
+            .get_mut(&2)
+            .ok_or(ReferenceDomainError::InvariantViolation)?
+            .cloak = first_cloak;
+
+        assert_eq!(
+            model.validate_sessions(),
+            Err(ReferenceDomainError::InvariantViolation)
+        );
+        Ok(())
     }
 
     #[test]
@@ -1915,6 +2297,16 @@ mod tests {
             }),
             Err(ReferenceDomainError::NotFound)
         );
+        let before_secret = model.snapshot();
+        assert_eq!(
+            model.apply(ReferenceDomainStep::SetVisibility {
+                actor: 1,
+                instance: 20,
+                visibility: ReferenceVisibility::Secret,
+            }),
+            Err(ReferenceDomainError::Forbidden)
+        );
+        assert_eq!(model.snapshot(), before_secret);
         model.apply(ReferenceDomainStep::SetVisibility {
             actor: 1,
             instance: 20,
@@ -1975,7 +2367,15 @@ mod tests {
         channel.invites.clear();
         for invite in 0..MAX_REFERENCE_INVITES {
             let invite = u16::try_from(invite).map_err(|_| ReferenceDomainError::Overflow)?;
-            channel.invites.insert(invite, (3, 1, 100));
+            channel.invites.insert(
+                invite,
+                ReferenceInvite {
+                    target: ReferencePrincipal::Guest(3),
+                    inviter: 1,
+                    creation_revision: 1,
+                    expires_at: 100,
+                },
+            );
         }
         assert_eq!(
             model.invite(1, 3, 20, 300, 100),
@@ -2085,6 +2485,9 @@ mod tests {
             overflow.federation_apply(1, u64::MAX),
             Err(ReferenceDomainError::Overflow)
         );
+        overflow
+            .accounts
+            .insert(1, ReferenceAccount { generation: 1 });
         overflow.sessions.insert(
             1,
             ReferenceSession {
@@ -2098,7 +2501,7 @@ mod tests {
             },
         );
         assert_eq!(
-            overflow.switch_account(1, None, u64::MAX, 0),
+            overflow.switch_account(1, Some(1), u64::MAX, 1),
             Err(ReferenceDomainError::Overflow)
         );
         Ok(())
@@ -2288,8 +2691,27 @@ mod tests {
 
         let mut switching = base.clone();
         assert_eq!(switching.create_account(7, 1), Ok(true));
-        assert_eq!(switching.switch_account(1, None, 1, 0), Ok(true));
-        assert_eq!(switching.switch_account(1, Some(7), 2, 1), Ok(true));
+        let unchanged = switching.snapshot();
+        assert_eq!(
+            switching.switch_account(1, None, 1, 0),
+            Err(ReferenceDomainError::Invalid)
+        );
+        assert_eq!(switching.snapshot(), unchanged);
+        assert_eq!(switching.switch_account(1, Some(7), 1, 1), Ok(true));
+        let unchanged = switching.snapshot();
+        assert_eq!(
+            switching.switch_account(1, Some(7), 2, 1),
+            Err(ReferenceDomainError::Invalid)
+        );
+        assert_eq!(switching.snapshot(), unchanged);
+        assert_eq!(switching.create_account(8, 1), Ok(true));
+        let unchanged = switching.snapshot();
+        assert_eq!(
+            switching.switch_account(1, Some(8), 2, 1),
+            Err(ReferenceDomainError::Invalid)
+        );
+        assert_eq!(switching.snapshot(), unchanged);
+        assert_eq!(switching.switch_account(1, None, 2, 0), Ok(true));
         assert_eq!(switching.switch_account(1, Some(7), 3, 1), Ok(true));
 
         assert_eq!(base.kick(1, 1, 20), Err(ReferenceDomainError::Forbidden));

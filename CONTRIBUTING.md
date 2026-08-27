@@ -19,16 +19,18 @@ review and evidence required by the specifications.
 
 ## Validation
 
-Run the current complete gate from the repository root:
+Run the current Stage 04 implementation checks from the repository root:
 
 ```sh
-bash scripts/check-stage-three.sh
+bash scripts/check-stage-four.sh
 ```
 
 For a narrower development loop, use `cargo fmt --all --check`,
 `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`,
-and `cargo test --workspace --all-features --locked`. The complete stage gate
-must still pass before merge.
+and `cargo test --workspace --all-features --locked`. The full implementation
+check must still pass before merge. That check does not close `S04-900`;
+closure also requires passed artifact-backed evidence for the exact source
+revision.
 
 ## Pull requests
 

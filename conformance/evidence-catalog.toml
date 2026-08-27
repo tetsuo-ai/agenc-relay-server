@@ -244,3 +244,142 @@ kind = "generated-domain-sequences"
 id = "EVID-S03-900-STAGE-GATE"
 claim_ids = ["S03-900"]
 kind = "stage-gate"
+
+[[evidence]]
+id = "EVID-S04-001-SECRETS"
+claim_ids = ["S04-001"]
+kind = "secret-bearing-wrappers"
+
+[[evidence]]
+id = "EVID-S04-002-ENTROPY"
+claim_ids = ["S04-002"]
+kind = "operating-system-entropy"
+
+[[evidence]]
+id = "EVID-S04-003-DOMAIN-KDFS"
+claim_ids = ["S04-003"]
+kind = "domain-hash-mac-kdf"
+
+[[evidence]]
+id = "EVID-S04-004-STORAGE-AEAD"
+claim_ids = ["S04-004"]
+kind = "storage-aead-adapter"
+
+[[evidence]]
+id = "EVID-S04-005-SIGNATURES"
+claim_ids = ["S04-005"]
+kind = "strict-signature-adapter"
+
+[[evidence]]
+id = "EVID-S04-006-HPKE"
+claim_ids = ["S04-006"]
+kind = "account-service-hpke"
+
+[[evidence]]
+id = "EVID-S04-007-OPAQUE"
+claim_ids = ["S04-007"]
+kind = "opaque-profile"
+
+[[evidence]]
+id = "EVID-S04-008-CREATION"
+claim_ids = ["S04-008"]
+kind = "account-creation-state"
+
+[[evidence]]
+id = "EVID-S04-009-AUTHENTICATION"
+claim_ids = ["S04-009"]
+kind = "account-authentication-state"
+
+[[evidence]]
+id = "EVID-S04-010-COMPLETIONS"
+claim_ids = ["S04-010"]
+kind = "authenticated-completion-receipts"
+
+[[evidence]]
+id = "EVID-S04-011-DESTRUCTIVE-AUTH"
+claim_ids = ["S04-011"]
+kind = "credential-deletion-authorization"
+
+[[evidence]]
+id = "EVID-S04-012-WORKERS"
+claim_ids = ["S04-012"]
+kind = "bounded-crypto-workers"
+
+[[evidence]]
+id = "EVID-S04-013-DEPENDENCIES"
+claim_ids = ["S04-013"]
+kind = "cryptographic-dependency-profile"
+
+[[evidence]]
+id = "EVID-S04-014-VERIFICATION"
+claim_ids = ["S04-014"]
+kind = "crypto-auth-verification"
+
+[[evidence]]
+id = "EVID-S04-900-STAGE-GATE"
+claim_ids = ["S04-900"]
+kind = "stage-gate"
+
+# Normative evidence enters this catalog only after its full closure task is
+# implemented. Unimplemented requirement IDs stay reserved in the requirement
+# ledger and cannot appear in a closing manifest.
+
+[[evidence]]
+id = "EVID-ARCH-AUTH-01"
+claim_ids = ["ARCH-AUTH-01"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-AUTH-04"
+claim_ids = ["ARCH-AUTH-04"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-AUTH-09"
+claim_ids = ["ARCH-AUTH-09"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-AUTH-10"
+claim_ids = ["ARCH-AUTH-10"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-3BFE92E0E09C7C1C45E5"
+claim_ids = ["ARCH-REQ-3BFE92E0E09C7C1C45E5"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-48ECE41B610BE7FF1950"
+claim_ids = ["ARCH-REQ-48ECE41B610BE7FF1950"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-49AAC75AD4C65F0466B2"
+claim_ids = ["ARCH-REQ-49AAC75AD4C65F0466B2"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-78FAB57061FA01E1805E"
+claim_ids = ["ARCH-REQ-78FAB57061FA01E1805E"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-B45135D9F5992114B394"
+claim_ids = ["ARCH-REQ-B45135D9F5992114B394"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-F3D92EF9C888E0675CB4"
+claim_ids = ["ARCH-REQ-F3D92EF9C888E0675CB4"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-1CF30FAFE8FA36F5CF2E"
+claim_ids = ["E2EE-REQ-1CF30FAFE8FA36F5CF2E"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-A0EFEAB7474EA0A450F5"
+claim_ids = ["E2EE-REQ-A0EFEAB7474EA0A450F5"]
+kind = "normative-requirement"

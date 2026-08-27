@@ -32,7 +32,14 @@ pub enum AccessTokenPolicy {
     RequireConfiguredToken,
 }
 
-/// Secret bytes that zeroize on drop and never reveal contents through Debug.
+/// Secret bytes that zeroize on drop and do not implement [`fmt::Debug`].
+///
+/// ```compile_fail
+/// use agenc_ircd_client_wire::SecretBytes;
+///
+/// fn require_debug<T: std::fmt::Debug>() {}
+/// require_debug::<SecretBytes>();
+/// ```
 pub struct SecretBytes(Vec<u8>);
 
 impl SecretBytes {
@@ -50,12 +57,6 @@ impl SecretBytes {
     #[must_use]
     pub fn expose(&self) -> &[u8] {
         &self.0
-    }
-}
-
-impl fmt::Debug for SecretBytes {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("SecretBytes([REDACTED])")
     }
 }
 
@@ -169,7 +170,12 @@ pub enum RegistrationAction {
     /// Send one atomic CAP ACK or NAK.
     CapabilityRequest(CapRequestReply),
     /// Send enabled bare names for CAP LIST.
-    CapabilityList(Vec<String>),
+    CapabilityList {
+        /// Enabled bare capability names in negotiation order.
+        tokens: Vec<String>,
+        /// Whether CAP 302 permits continuation lines.
+        multiline: bool,
+    },
     /// Send one complete capability token through CAP NEW.
     CapabilityNew(String),
     /// Send one bare capability name through CAP DEL.
@@ -258,7 +264,7 @@ impl fmt::Debug for RegistrationAction {
         let name = match self {
             Self::CapabilityLs(_) => "CapabilityLs",
             Self::CapabilityRequest(_) => "CapabilityRequest",
-            Self::CapabilityList(_) => "CapabilityList",
+            Self::CapabilityList { .. } => "CapabilityList",
             Self::CapabilityNew(_) => "CapabilityNew",
             Self::CapabilityDel(_) => "CapabilityDel",
             Self::CapabilityReconnectRequired(_) => "CapabilityReconnectRequired",
@@ -993,9 +999,10 @@ impl RegistrationState {
         match command {
             RegistrationCapCommand::ListSupported => self.cap_ls_message(message, advertised),
             RegistrationCapCommand::Request => self.cap_request_message(message, advertised),
-            RegistrationCapCommand::ListEnabled => {
-                one_action(RegistrationAction::CapabilityList(self.cap.list()?))
-            }
+            RegistrationCapCommand::ListEnabled => one_action(RegistrationAction::CapabilityList {
+                tokens: self.cap.list()?,
+                multiline: self.cap.supports_multiline(),
+            }),
             RegistrationCapCommand::End => self.cap_end_message(),
         }
     }
@@ -1033,6 +1040,9 @@ impl RegistrationState {
     }
 
     fn cap_end_message(&mut self) -> Result<Vec<RegistrationAction>, RegistrationError> {
+        if self.phase == RegistrationPhase::Registered {
+            return Ok(Vec::new());
+        }
         if self.active_auth.is_some() {
             return Err(RegistrationError::AuthenticationInProgress);
         }

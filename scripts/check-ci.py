@@ -10,6 +10,7 @@ import re
 import runpy
 import subprocess
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 from typing import NoReturn
@@ -21,6 +22,7 @@ GATE_PATHS = (
     "scripts/check-stage-one.sh",
     "scripts/check-stage-two.sh",
     "scripts/check-stage-three.sh",
+    "scripts/check-stage-four.sh",
 )
 MANIFEST_PATH = "conformance/gates.toml"
 REQUIRED_WORKFLOW_SNIPPETS = (
@@ -37,8 +39,8 @@ REQUIRED_WORKFLOW_SNIPPETS = (
     "cargo +1.98.0 install --locked cargo-fuzz --version 0.13.2",
 )
 REQUIRED_GATE_STEP = (
-    "      - name: Run the complete Stage 03 gate\n"
-    "        run: bash scripts/check-stage-three.sh"
+    "      - name: Run Stage 04 implementation checks\n"
+    "        run: bash scripts/check-stage-four.sh"
 )
 REQUIRED_CHECKOUT_STEP = (
     "      - name: Check out the exact source revision\n"
@@ -81,10 +83,17 @@ REQUIRED_STAGE_ZERO = (
     ("cargo", "deny", "check"),
     ("cargo", "audit", "--deny", "warnings"),
     (
-        "cargo", "llvm-cov", "--workspace", "--all-features", "--branch", "--json",
-        "--summary-only", "--output-path", "target/stage-zero-coverage.json",
+        "python3", "scripts/check-coverage.py", "self-test",
+        "conformance/critical-coverage.toml",
     ),
-    ("python3", "scripts/check-coverage.py", "target/stage-zero-coverage.json"),
+    (
+        "cargo", "llvm-cov", "--workspace", "--all-features", "--branch", "--locked",
+        "--json", "--output-path", "target/stage-zero-coverage.json",
+    ),
+    (
+        "python3", "scripts/check-coverage.py", "check",
+        "target/stage-zero-coverage.json", "conformance/critical-coverage.toml",
+    ),
 )
 REQUIRED_STAGE_ONE = (
     ("python3", "scripts/requirements.py", "check-stage-one"),
@@ -122,6 +131,18 @@ REQUIRED_STAGE_THREE = (
         "--locked",
     ),
 )
+REQUIRED_STAGE_FOUR = (
+    ("python3", "scripts/requirements.py", "check-stage-four"),
+    ("python3", "scripts/check-stage-four.py", "check"),
+    ("python3", "scripts/check-stage-four.py", "self-test"),
+    ("cargo", "test", "-p", "agenc-ircd-auth", "--test", "stage_four", "--locked"),
+    ("cargo", "test", "-p", "agenc-ircd-crypto", "--test", "stage_four", "--locked"),
+    (
+        "cargo", "test", "-p", "agenc-ircd-testkit",
+        "--test", "stage_four_domain_auth", "--locked",
+    ),
+    ("bash", "scripts/run-stage-four-fuzz.sh"),
+)
 
 
 class CiError(ValueError):
@@ -157,39 +178,52 @@ def validate_workflow(workflow: str) -> None:
     if live_workflow.count(REQUIRED_CHECKOUT_STEP) != 1:
         raise CiError("workflow must contain one exact live checkout step")
     if live_workflow.count(REQUIRED_GATE_STEP) != 1:
-        raise CiError("workflow must contain one live Stage 03 gate step")
+        raise CiError("workflow must contain one live Stage 04 implementation-check step")
 
 
 def validate_manifest(manifest: dict[str, object]) -> None:
     """Validate exact argv arrays instead of accepting textual command hints."""
-    if set(manifest) != {"schema_version", "gate"} or manifest.get("schema_version") != 1:
+    schema_version = manifest.get("schema_version")
+    if (
+        set(manifest) != {"schema_version", "gate"}
+        or type(schema_version) is not int
+        or schema_version != 1
+    ):
         raise CiError("gate manifest has an invalid top-level schema")
     gates = manifest.get("gate")
     if not isinstance(gates, dict) or set(gates) != {
-        "stage-zero",
-        "stage-one",
-        "stage-two",
-        "stage-three",
+        "stage-zero-implementation",
+        "stage-one-implementation",
+        "stage-two-implementation",
+        "stage-three-implementation",
+        "stage-four-implementation",
     }:
-        raise CiError("gate manifest must define exactly stages zero through three")
-    stage_zero = gates.get("stage-zero")
-    stage_one = gates.get("stage-one")
-    stage_two = gates.get("stage-two")
-    stage_three = gates.get("stage-three")
+        raise CiError(
+            "gate manifest must define Stages 00 through 03 and Stage 04 implementation checks"
+        )
+    stage_zero = gates.get("stage-zero-implementation")
+    stage_one = gates.get("stage-one-implementation")
+    stage_two = gates.get("stage-two-implementation")
+    stage_three = gates.get("stage-three-implementation")
+    stage_four = gates.get("stage-four-implementation")
     if not isinstance(stage_zero, dict) or set(stage_zero) != {"command"}:
-        raise CiError("stage-zero gate has invalid fields")
+        raise CiError("stage-zero implementation checks have invalid fields")
     if not isinstance(stage_one, dict) or set(stage_one) != {"includes", "command"}:
-        raise CiError("stage-one gate has invalid fields")
-    if stage_one.get("includes") != ["stage-zero"]:
-        raise CiError("stage-one must include the exact stage-zero gate")
+        raise CiError("stage-one implementation checks have invalid fields")
+    if stage_one.get("includes") != ["stage-zero-implementation"]:
+        raise CiError("stage-one implementation checks must include stage-zero checks")
     if not isinstance(stage_two, dict) or set(stage_two) != {"includes", "command"}:
-        raise CiError("stage-two gate has invalid fields")
-    if stage_two.get("includes") != ["stage-one"]:
-        raise CiError("stage-two must include the exact stage-one gate")
+        raise CiError("stage-two implementation checks have invalid fields")
+    if stage_two.get("includes") != ["stage-one-implementation"]:
+        raise CiError("stage-two implementation checks must include stage-one checks")
     if not isinstance(stage_three, dict) or set(stage_three) != {"includes", "command"}:
-        raise CiError("stage-three gate has invalid fields")
-    if stage_three.get("includes") != ["stage-two"]:
-        raise CiError("stage-three must include the exact stage-two gate")
+        raise CiError("stage-three implementation checks have invalid fields")
+    if stage_three.get("includes") != ["stage-two-implementation"]:
+        raise CiError("stage-three implementation checks must include stage-two checks")
+    if not isinstance(stage_four, dict) or set(stage_four) != {"includes", "command"}:
+        raise CiError("stage-four implementation checks have invalid fields")
+    if stage_four.get("includes") != ["stage-three-implementation"]:
+        raise CiError("stage-four implementation checks must include stage-three checks")
     commands = stage_zero.get("command")
     if not isinstance(commands, list):
         raise CiError("stage-zero commands must be an array")
@@ -208,7 +242,7 @@ def validate_manifest(manifest: dict[str, object]) -> None:
             if environment != {"RUSTC_BOOTSTRAP": "1"} or "llvm-cov" not in argv:
                 raise CiError("RUSTC_BOOTSTRAP is not scoped only to coverage")
     if tuple(actual) != REQUIRED_STAGE_ZERO:
-        raise CiError("stage-zero argv sequence differs from the reviewed closed gate")
+        raise CiError("stage-zero argv sequence differs from the reviewed implementation checks")
     if bootstrap_count != 1:
         raise CiError("coverage-only RUSTC_BOOTSTRAP scope is missing or duplicated")
     stage_one_commands = stage_one.get("command")
@@ -223,7 +257,7 @@ def validate_manifest(manifest: dict[str, object]) -> None:
             raise CiError(f"stage-one command {index} has invalid argv")
         stage_one_actual.append(tuple(argv))
     if tuple(stage_one_actual) != REQUIRED_STAGE_ONE:
-        raise CiError("stage-one command sequence differs from the reviewed gate")
+        raise CiError("stage-one command sequence differs from the reviewed implementation checks")
     stage_two_commands = stage_two.get("command")
     if not isinstance(stage_two_commands, list):
         raise CiError("stage-two commands must be an array")
@@ -236,7 +270,7 @@ def validate_manifest(manifest: dict[str, object]) -> None:
             raise CiError(f"stage-two command {index} has invalid argv")
         stage_two_actual.append(tuple(argv))
     if tuple(stage_two_actual) != REQUIRED_STAGE_TWO:
-        raise CiError("stage-two command sequence differs from the reviewed gate")
+        raise CiError("stage-two command sequence differs from the reviewed implementation checks")
     stage_three_commands = stage_three.get("command")
     if not isinstance(stage_three_commands, list):
         raise CiError("stage-three commands must be an array")
@@ -249,7 +283,20 @@ def validate_manifest(manifest: dict[str, object]) -> None:
             raise CiError(f"stage-three command {index} has invalid argv")
         stage_three_actual.append(tuple(argv))
     if tuple(stage_three_actual) != REQUIRED_STAGE_THREE:
-        raise CiError("stage-three command sequence differs from the reviewed gate")
+        raise CiError("stage-three command sequence differs from the reviewed implementation checks")
+    stage_four_commands = stage_four.get("command")
+    if not isinstance(stage_four_commands, list):
+        raise CiError("stage-four implementation commands must be an array")
+    stage_four_actual = []
+    for index, command in enumerate(stage_four_commands):
+        if not isinstance(command, dict) or set(command) != {"argv"}:
+            raise CiError(f"stage-four implementation command {index} has invalid fields")
+        argv = command.get("argv")
+        if not isinstance(argv, list) or any(not isinstance(item, str) for item in argv):
+            raise CiError(f"stage-four implementation command {index} has invalid argv")
+        stage_four_actual.append(tuple(argv))
+    if tuple(stage_four_actual) != REQUIRED_STAGE_FOUR:
+        raise CiError("stage-four implementation command sequence differs from the reviewed checks")
 
 
 def load_manifest_text(text: str) -> dict[str, object]:
@@ -268,7 +315,13 @@ def validate(root: Path) -> None:
     scripts = sorted((root / "scripts").glob("check-*.py"))
     gate_paths = [root / relative for relative in GATE_PATHS]
     scripts.extend(gate_paths)
-    scripts.extend([root / "scripts/requirements.py", root / "scripts/run-gate.py"])
+    scripts.extend(
+        [
+            root / "scripts/generate-gate-evidence.py",
+            root / "scripts/requirements.py",
+            root / "scripts/run-gate.py",
+        ]
+    )
     for script in scripts:
         if not os.access(script, os.X_OK):
             raise CiError(f"validation script is not executable: {script.relative_to(root)}")
@@ -302,22 +355,32 @@ def self_test(root: Path) -> int:
     validate_workflow(workflow)
     validate_manifest(manifest)
     cases = 0
+    boolean_schema = copy.deepcopy(manifest)
+    boolean_schema["schema_version"] = True
+    expect_rejection(
+        "boolean manifest schema",
+        lambda: validate_manifest(boolean_schema),
+        "invalid top-level schema",
+    )
+    cases += 1
     floating = workflow.replace(f"actions/checkout@{CHECKOUT_COMMIT}", "actions/checkout@v6", 1)
     expect_rejection("floating action", lambda: validate_workflow(floating), "missing required")
     cases += 1
     writable = workflow.replace("contents: read", "contents: write", 1)
     expect_rejection("write permission", lambda: validate_workflow(writable), "missing required")
     cases += 1
-    weakened = workflow.replace("run: bash scripts/check-stage-three.sh", "continue-on-error: true\n        run: bash scripts/check-stage-three.sh", 1)
+    weakened = workflow.replace("run: bash scripts/check-stage-four.sh", "continue-on-error: true\n        run: bash scripts/check-stage-four.sh", 1)
     expect_rejection("continue on error", lambda: validate_workflow(weakened), "continue-on-error")
     cases += 1
     commented = workflow.replace(
-        "        run: bash scripts/check-stage-three.sh",
-        "        # run: bash scripts/check-stage-three.sh",
+        "        run: bash scripts/check-stage-four.sh",
+        "        # run: bash scripts/check-stage-four.sh",
         1,
     )
     expect_rejection(
-        "commented gate", lambda: validate_workflow(commented), "one live Stage 03 gate step"
+        "commented gate",
+        lambda: validate_workflow(commented),
+        "one live Stage 04 implementation-check step",
     )
     cases += 1
     commented_checkout = workflow.replace(
@@ -332,8 +395,8 @@ def self_test(root: Path) -> int:
     )
     cases += 1
     conditional = workflow.replace(
-        "        run: bash scripts/check-stage-three.sh",
-        "        if: false\n        run: bash scripts/check-stage-three.sh",
+        "        run: bash scripts/check-stage-four.sh",
+        "        if: false\n        run: bash scripts/check-stage-four.sh",
         1,
     )
     expect_rejection(
@@ -341,11 +404,16 @@ def self_test(root: Path) -> int:
     )
     cases += 1
     dead_text = copy.deepcopy(manifest)
-    dead_text["gate"]["stage-zero"]["command"][22]["argv"] = ["true", "cargo audit --deny warnings"]
+    dead_text["gate"]["stage-zero-implementation"]["command"][22]["argv"] = [
+        "true",
+        "cargo audit --deny warnings",
+    ]
     expect_rejection("dead command text", lambda: validate_manifest(dead_text), "argv sequence")
     cases += 1
     widened = copy.deepcopy(manifest)
-    widened["gate"]["stage-zero"]["command"][0]["environment"] = {"RUSTC_BOOTSTRAP": "1"}
+    widened["gate"]["stage-zero-implementation"]["command"][0]["environment"] = {
+        "RUSTC_BOOTSTRAP": "1"
+    }
     expect_rejection("widened bootstrap", lambda: validate_manifest(widened), "not scoped")
     cases += 1
 
@@ -354,7 +422,13 @@ def self_test(root: Path) -> int:
     if not callable(environment_builder):
         raise CiError("gate runner does not expose reviewed environment construction")
     inherited = {
+        "AGENC_IRCD_RECORD_GATE": "1",
+        "BASH_ENV": "/tmp/unreviewed-shell-environment",
+        "BASH_FUNC_cargo%%": "() { printf injected; }",
+        "GIT_CONFIG_KEY_0": "core.hooksPath",
+        "LD_PRELOAD": "/tmp/unreviewed-library.so",
         "PATH": "/usr/bin",
+        "PYTHONPATH": "/tmp/unreviewed-python-path",
         "CARGO_PROFILE_RELEASE_PANIC": "abort",
         "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS": "-C target-feature=+crt-static",
         "RUSTC_BOOTSTRAP": "1",
@@ -367,6 +441,26 @@ def self_test(root: Path) -> int:
     coverage_environment = environment_builder(inherited, {"RUSTC_BOOTSTRAP": "1"})
     if coverage_environment != {"PATH": "/usr/bin", "RUSTC_BOOTSTRAP": "1"}:
         raise CiError("gate runner did not restore the reviewed coverage override exactly")
+    cases += 1
+
+    artifact_path_builder = runner.get("evidence_artifact_path")
+    if not callable(artifact_path_builder):
+        raise CiError("gate runner does not expose deterministic artifact paths")
+    with tempfile.TemporaryDirectory(prefix="agenc-gate-path-test-") as temporary:
+        temporary_root = Path(temporary)
+        (temporary_root / "conformance/evidence").mkdir(parents=True)
+        source_commit = "1" * 40
+        _path, relative = artifact_path_builder(
+            temporary_root,
+            "stage-four-implementation",
+            source_commit,
+        )
+        expected = (
+            "conformance/evidence/artifacts/"
+            f"stage-four-implementation-{source_commit}.json"
+        )
+        if relative != expected:
+            raise CiError("gate runner derived a noncanonical artifact path")
     cases += 1
     return cases
 

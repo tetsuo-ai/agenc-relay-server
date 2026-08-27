@@ -14,15 +14,16 @@ mod projection;
 
 pub use command::{
     AccountCommand, CanonicalCommand, CanonicalCommandView, ChannelCommand, ChannelTarget,
-    CommandEnvelope, DepartureReason, DomainCommandKind, InformationQuery, MaskList,
-    MessageCommand, MessageKind, MessageTarget, MessageText, ModeChange, ModeCommand,
-    ModeOperation, PresenceCommand, UserQuery, WhoTarget,
+    CommandEnvelope, DepartureReason, DomainCommandKind, E2eeApplicationProof, InformationQuery,
+    MaskList, MessageCommand, MessageKind, MessageTarget, MessageText, ModeChange, ModeCommand,
+    ModeOperation, PresenceCommand, TagmsgClassification, UserQuery, VisibilityMode, WhoTarget,
 };
 pub use decision::{
     AdmissionSnapshot, ApplyReceipt, AuthorizationFailure, AuthorizedCommand, DomainEvent,
-    EntropyPurpose, ExternalInputRequest, ExternalInputs, FailedTarget, MessageBatch, MessageRoute,
-    MutationPlan, PlanDecision, PreparedMutation, QueryPlan, RateBucket, RateCharge, RecipientSet,
-    RejectedPlan, ResolvedMessageTarget, SanctionRequest, StorageClass, TargetFailure,
+    E2eeBindingProof, E2eeRemovalFinality, EntropyPurpose, ExternalInputRequest, ExternalInputs,
+    FailedTarget, MAX_INVITE_EXPIRATIONS_PER_PLAN, MessageBatch, MessageRoute, MutationPlan,
+    PlanDecision, PreparedMutation, QueryPlan, RateBucket, RateCharge, RecipientSet, RejectedPlan,
+    ResolvedMessageTarget, SanctionRequest, StorageClass, TargetFailure,
 };
 pub use error::DomainError;
 pub use model::{

@@ -89,10 +89,7 @@ fn authenticate_validates_one_bounded_mechanism_marker_or_chunk() -> Result<(), 
         assert_eq!(classify(line).err(), Some(expected), "{line}");
     }
     let too_long = format!("AUTHENTICATE {}", "A".repeat(401));
-    assert_eq!(
-        classify(&too_long).err(),
-        Some(RegistrationGrammarError::InputTooLong)
-    );
+    assert_eq!(classify(&too_long)?, RegistrationCommand::Authenticate);
     Ok(())
 }
 
@@ -890,6 +887,62 @@ fn account_channel_and_history_controls_accept_only_closed_productions()
     ] {
         assert!(validate(line).is_err(), "{line}");
     }
+    Ok(())
+}
+
+#[test]
+fn reachable_short_circuit_boundaries_reject_noncanonical_commands() -> Result<(), Box<dyn Error>> {
+    for line in [
+        "CAP LIST extra",
+        "CAP LIST :extra",
+        "CAP END extra",
+        "ACCTCREATE END :extra",
+        "ACCTCREATE START :4726",
+    ] {
+        assert_eq!(
+            classify(line).err(),
+            Some(RegistrationGrammarError::InvalidArgument),
+            "{line}"
+        );
+    }
+
+    for line in [
+        "INVITE Nick :#one",
+        "CHANCTL :REGISTER",
+        "CHATHISTORY :LATEST",
+        "MODE #one i+",
+        "ACCT LABEL _label",
+        "ACCT LABEL label+",
+        "JOIN #bad!",
+        "CHATHISTORY BEFORE #one timestamp=2024-02-28T23:59:60.000Z 1",
+    ] {
+        assert!(validate(line).is_err(), "{line}");
+    }
+
+    assert_eq!(
+        classify("AUTHENTICATE YWJjZA==")?,
+        RegistrationCommand::Authenticate
+    );
+    for line in ["AUTHENTICATE abcd====", "AUTHENTICATE AB=="] {
+        assert_eq!(
+            classify(line).err(),
+            Some(RegistrationGrammarError::InvalidArgument),
+            "{line}"
+        );
+    }
+
+    let mut noncanonical_confirmation = URL_SAFE_NO_PAD.encode([0_u8; 16]);
+    let Some(last) = noncanonical_confirmation.pop() else {
+        return Err(io::Error::other("missing confirmation suffix").into());
+    };
+    if last != 'A' {
+        return Err(io::Error::other("unexpected canonical confirmation suffix").into());
+    }
+    noncanonical_confirmation.push('B');
+    assert_eq!(
+        validate(&format!("ACCT DELETE CONFIRM {noncanonical_confirmation}")).err(),
+        Some(RegistrationGrammarError::InvalidArgument)
+    );
     Ok(())
 }
 

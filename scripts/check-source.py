@@ -70,6 +70,7 @@ BANNED_PATTERNS = (
         ),
         "panic/abort function",
     ),
+    (re.compile(r"\.fetch_sub\s*\("), "wrapping atomic decrement"),
 )
 
 
@@ -420,6 +421,13 @@ def self_test(root: Path) -> int:
             "process abort",
             valid + "fn bad() { std::process::abort(); }\n",
             "panic/abort function",
+        ),
+        (
+            "wrapping atomic decrement",
+            valid
+            + "fn bad(value: &std::sync::atomic::AtomicUsize) { "
+            + "value.fetch_sub(1, std::sync::atomic::Ordering::AcqRel); }\n",
+            "wrapping atomic decrement",
         ),
         (
             "conditional allow",

@@ -20,9 +20,8 @@ const CAP_LIST_FIXED_BYTES: usize = 1
     + 1
     + "LIST".len()
     + 2;
-// LIST cannot continue, so reserve the longest non-continuation CAP form at
-// the frozen server-name and nickname maxima. ACK, NAK, and LS continuation
-// have no more fixed overhead than LIST.
+// ACK, NAK, and legacy LIST cannot continue, so reserve the longest
+// non-continuation CAP form at the frozen server-name and nickname maxima.
 const MAX_CAP_TOKEN_LIST_BYTES: usize = MAX_CAP_COMMAND_BYTES - CAP_LIST_FIXED_BYTES;
 
 /// One currently advertisable capability and optional LS/NEW value.
@@ -248,7 +247,7 @@ impl CapabilityState {
         {
             insert_unique(&mut enabled, "cap-notify")?;
         }
-        ensure_token_list_renderable(&enabled)?;
+        ensure_enabled_list_renderable(&enabled, version_302)?;
         let mut tokens = Vec::new();
         tokens
             .try_reserve_exact(advertised.len())
@@ -295,7 +294,7 @@ impl CapabilityState {
         } else {
             apply_requested_tokens(&mut projected, &tokens, advertised, self.version_302)
                 .and_then(|()| validate_dependencies(&projected))
-                .and_then(|()| ensure_token_list_renderable(&projected))
+                .and_then(|()| ensure_enabled_list_renderable(&projected, self.version_302))
         };
         let reply = match transition {
             Ok(()) => {
@@ -316,7 +315,7 @@ impl CapabilityState {
 
     /// Returns enabled bare names for CAP LIST.
     pub fn list(&self) -> Result<Vec<String>, CapError> {
-        ensure_token_list_renderable(&self.enabled)?;
+        ensure_enabled_list_renderable(&self.enabled, self.version_302)?;
         copy_strings(&self.enabled)
     }
 
@@ -346,6 +345,12 @@ impl CapabilityState {
     #[must_use]
     pub fn enabled_names(&self) -> &[String] {
         &self.enabled
+    }
+
+    /// Returns whether CAP 302 multiline LS and LIST rendering is active.
+    #[must_use]
+    pub const fn supports_multiline(&self) -> bool {
+        self.version_302
     }
 
     /// Fallibly duplicates the complete bounded negotiation state.
@@ -398,7 +403,7 @@ impl CapabilityState {
             insert_unique(&mut enabled, "cap-notify")?;
         }
         validate_dependencies(&enabled)?;
-        ensure_token_list_renderable(&enabled)?;
+        ensure_enabled_list_renderable(&enabled, self.version_302)?;
         let advertised = copy_specs(current.capabilities())?;
         let reconnect_required = self.reconnect_required
             || changes
@@ -463,9 +468,9 @@ fn diff_advertisements(
     Ok(changes)
 }
 
-/// Splits CAP LS tokens without splitting a token or exceeding `budget`.
+/// Splits CAP 302 LS or LIST tokens without splitting a token or exceeding `budget`.
 ///
-/// The frozen protocol permits the continuation marker only on CAP LS.
+/// Callers must use the continuation marker only after CAP 302 negotiation.
 pub fn split_capability_lines(tokens: &[String], budget: usize) -> Result<Vec<CapLine>, CapError> {
     let mut lines = Vec::new();
     lines
@@ -564,9 +569,16 @@ fn ensure_token_list_renderable(tokens: &[String]) -> Result<(), CapError> {
     }
 }
 
+fn ensure_enabled_list_renderable(tokens: &[String], multiline: bool) -> Result<(), CapError> {
+    if multiline {
+        Ok(())
+    } else {
+        ensure_token_list_renderable(tokens)
+    }
+}
+
 fn dependencies(capability: &str) -> &'static [&'static str] {
     match capability {
-        "account-tag" | "server-time" | "message-ids" | "batch" => &["message-tags"],
         "labeled-response" => &["batch"],
         "extended-join" => &["account-notify"],
         "draft/chathistory" => &["batch", "server-time", "message-ids"],
@@ -885,7 +897,7 @@ mod tests {
             Err(CapError::InvalidAdvertisement)
         );
         assert_eq!(
-            CapabilityProfile::new(vec![CapabilitySpec::new("batch", None)?]),
+            CapabilityProfile::new(vec![CapabilitySpec::new("labeled-response", None)?]),
             Err(CapError::InvalidAdvertisement)
         );
 

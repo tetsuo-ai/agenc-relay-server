@@ -61,7 +61,9 @@ the local profile adds one fixed-size RFC-9180-exporter-authenticated completion
 receipt after every account-service finish. That receipt does not alter OPAQUE
 or feed back into its transcript. The profile also fixes the RFC-9807
 ristretto255 serialization lengths and rejects the dependency's generic or
-Serde-shaped alternatives. Each response header carries a fresh authenticated
+Serde-shaped alternatives. With `Noe=32`, `Nn=32`, `Npk=32`, and `Nm=64`, the
+RFC structure makes `CredentialResponse` 192 bytes and `AuthResponse` 128
+bytes, so the complete `KE2` is 320 bytes. Each response header carries a fresh authenticated
 32-byte salt used in both HPKE exporter contexts. The client's pinned recovery
 epoch domain-separates both request opening and response exports, while an
 authenticated coordinator StateMeta counter limits newly committed responses
@@ -69,6 +71,14 @@ to fewer than `2^64` per epoch. This prevents a request replayed after result
 retention
 from reusing an AEAD key/nonce when its later semantic outcome differs and
 gives the random-salt collision claim an explicit bound.
+
+The fixed response registry has no separate START-rejection arm. A fully
+opened and parsed START that fails a semantic admission predicate therefore
+uses the ordinary challenge and retains a non-authorizing transaction whose
+only terminal result is an encrypted rejected completion. It creates no
+reservation or mutation authority. Pre-Open, parse, entropy, allocation,
+counter, deadline, and internal-corruption failures remain operational failures
+without a response.
 
 ## 3. Work in progress and deliberately excluded algorithms
 
@@ -133,6 +143,7 @@ the complete graph actually shipped.
 | `getrandom` | 0.4.3 | `300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099` | no defaults; `std` |
 | `redb` | 4.2.0 | `de6c3b63e007e90ce536ec2ae4690826136a20ec8dbbbb400daef1bb999d2e36` | no defaults; `std`; no production compaction call |
 | `opaque-ke` | 4.0.1 | `ded22991b43cd15561b62b2e1cf9ace1344a8534eebec96202d5c96a77a6616a` | no defaults; `ristretto255,argon2,std`; no Serde |
+| `opaque-sha2` | 0.10.9 | `a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283` | Cargo alias for package `sha2`; no defaults; scoped to the OPAQUE ciphersuite required by `opaque-ke` 4.0.1 |
 | `precis-profiles` | 0.1.13 | `31e2768890a47af73a032af9f0cedbddce3c9d06cf8de201d5b8f2436ded7674` | no defaults; private bounded adapter; networking feature disabled |
 | `hpke` | 0.14.0 | `dd5130e119706b4d8c2180da6126f7e60b6c38c2d340d539219f57051f0a7af7` | no defaults; `alloc,chacha,x25519,hkdfsha2` |
 | `tls_codec` | 0.5.0 | `18cc98286004cea38f717e2b03d990fc774fbfd38a82720de40e5c94365067c8` | no defaults; `std,mls`; no production derive/Serde |
@@ -151,6 +162,15 @@ and constructing a TLS-1.3-only version list are both required. The observed
 hpke defaults included algorithms outside the fixed account-service profile.
 The observed opaque-ke defaults included Serde. None of those defaults are
 protocol authority.
+
+The workspace uses a reviewed local source patch for `opaque-ke` 4.0.1. The
+patch does not change its protocol bytes, suite, features, or version. It keeps
+password-derived OPRF and KSF outputs in zeroizing storage while constructing
+the HKDF state, and returns the server-finish session key in a move-only,
+non-formatting zeroizing field. The published crates.io checksum above remains
+the upstream provenance value. `conformance/vendored-dependencies.toml` records
+the complete patched-tree digest, and the workspace checker rejects any other
+source override or tree content.
 
 redb 4.2.0 documents commit outcomes that can be indeterminate and exposes an
 in-place compaction operation implemented through its own write transactions.

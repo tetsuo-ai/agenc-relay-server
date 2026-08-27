@@ -1,0 +1,156 @@
+schema_version = 1
+evidence_id = "EVID-S04-013-DEPENDENCIES"
+
+[source_patch]
+package = "opaque-ke"
+version = "4.0.1"
+path = "vendor/opaque-ke-4.0.1"
+upstream_registry = "https://github.com/rust-lang/crates.io-index"
+upstream_checksum = "ded22991b43cd15561b62b2e1cf9ace1344a8534eebec96202d5c96a77a6616a"
+tree_sha256 = "8f745b2d6dd9918602ef67313be5cfd7b0185fa1314ea38530560403cd57d96e"
+modified_files = ["src/opaque.rs"]
+reason = "zeroize password-derived intermediates and the server-finish session key"
+
+[primitive.opaque]
+suite = "ristretto255-SHA512, TripleDH, HKDF-SHA512, HMAC-SHA512"
+argon2_memory_kib = 65536
+argon2_iterations = 3
+argon2_lanes = 4
+argon2_output_bytes = 64
+registration_request_bytes = 32
+registration_response_bytes = 64
+registration_record_bytes = 192
+ke1_bytes = 96
+ke2_bytes = 320
+ke3_bytes = 64
+
+[primitive.hpke]
+mode = "base"
+kem = "DHKEM-X25519-HKDF-SHA256"
+kdf = "HKDF-SHA256"
+aead = "ChaCha20Poly1305"
+request_envelope_bytes = 4726
+response_envelope_bytes = 4342
+
+[primitive.storage]
+aead = "XChaCha20Poly1305"
+key_bytes = 32
+nonce_bytes = 24
+tag_bytes = 16
+
+[primitive.signature]
+algorithm = "Ed25519"
+verification = "verify_strict"
+
+[worker]
+channel_job_limit_max = 64
+opaque_job_limit_max = 128
+worker_max = 128
+physical_queue_slots_per_worker = 2
+reserved_bytes_per_worker = 75497472
+
+[fuzz]
+targets = ["account_service_envelope", "crypto_wrappers"]
+seed = 20260827
+runs = 10000
+max_len = 4726
+timeout_seconds = 2
+rss_limit_mb = 512
+
+[[dependency]]
+logical_name = "argon2"
+package = "argon2"
+version = "0.5.3"
+checksum = "3c3610892ee6e0cbce8ae2700349fcf8f98adb0dbfbee85aec3c9179d29cc072"
+features = ["alloc"]
+
+[[dependency]]
+logical_name = "chacha20poly1305"
+package = "chacha20poly1305"
+version = "0.11.0"
+checksum = "9b89e1c441e926b9c82a8d023f6e1b7ae0adcfaa7d621814e4d60789bac751cb"
+features = ["alloc", "zeroize"]
+
+[[dependency]]
+logical_name = "ed25519-dalek"
+package = "ed25519-dalek"
+version = "3.0.0"
+checksum = "6ebaa1a2bf1290ab3bfe5a7b771d050ebffab2711c19a81691c683a5144a25de"
+features = ["fast", "zeroize"]
+
+[[dependency]]
+logical_name = "getrandom"
+package = "getrandom"
+version = "0.4.3"
+checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
+features = ["std"]
+
+[[dependency]]
+logical_name = "hkdf"
+package = "hkdf"
+version = "0.13.0"
+checksum = "4aaa26c720c68b866f2c96ef5c1264b3e6f473fe5d4ce61cd44bbe913e553018"
+features = []
+
+[[dependency]]
+logical_name = "hmac"
+package = "hmac"
+version = "0.13.0"
+checksum = "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f"
+features = ["zeroize"]
+
+[[dependency]]
+logical_name = "hpke"
+package = "hpke"
+version = "0.14.0"
+checksum = "dd5130e119706b4d8c2180da6126f7e60b6c38c2d340d539219f57051f0a7af7"
+features = ["alloc", "chacha", "x25519", "hkdfsha2"]
+
+[[dependency]]
+logical_name = "opaque-ke"
+package = "opaque-ke"
+version = "4.0.1"
+checksum = "ded22991b43cd15561b62b2e1cf9ace1344a8534eebec96202d5c96a77a6616a"
+features = ["ristretto255", "argon2", "std"]
+
+[[dependency]]
+logical_name = "opaque-sha2"
+package = "sha2"
+version = "0.10.9"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+features = []
+
+[[dependency]]
+logical_name = "sha2"
+package = "sha2"
+version = "0.11.0"
+checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
+features = ["zeroize"]
+
+[[dependency]]
+logical_name = "subtle"
+package = "subtle"
+version = "2.6.1"
+checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+features = []
+
+[[dependency]]
+logical_name = "tls_codec"
+package = "tls_codec"
+version = "0.5.0"
+checksum = "18cc98286004cea38f717e2b03d990fc774fbfd38a82720de40e5c94365067c8"
+features = ["std", "mls"]
+
+[[dependency]]
+logical_name = "tokio"
+package = "tokio"
+version = "1.53.1"
+checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
+features = ["rt-multi-thread", "net", "io-util", "time", "signal", "sync", "macros"]
+
+[[dependency]]
+logical_name = "zeroize"
+package = "zeroize"
+version = "1.9.0"
+checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
+features = ["alloc"]

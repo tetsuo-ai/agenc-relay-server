@@ -560,18 +560,18 @@ impl ClientTranscriptHarness {
         let target = copy_string(self.nickname.as_deref().unwrap_or("*"))?;
         match action {
             RegistrationAction::CapabilityLs(tokens) => {
-                self.queue_capability_tokens(&target, "LS", &tokens)?;
+                self.queue_capability_tokens(&target, "LS", true, &tokens)?;
             }
             RegistrationAction::CapabilityRequest(reply) => match reply {
                 CapRequestReply::Ack(tokens) => {
-                    self.queue_capability_tokens(&target, "ACK", &tokens)?;
+                    self.queue_capability_tokens(&target, "ACK", false, &tokens)?;
                 }
                 CapRequestReply::Nak(tokens) => {
-                    self.queue_capability_tokens(&target, "NAK", &tokens)?;
+                    self.queue_capability_tokens(&target, "NAK", false, &tokens)?;
                 }
             },
-            RegistrationAction::CapabilityList(tokens) => {
-                self.queue_capability_tokens(&target, "LIST", &tokens)?;
+            RegistrationAction::CapabilityList { tokens, multiline } => {
+                self.queue_capability_tokens(&target, "LIST", multiline, &tokens)?;
             }
             RegistrationAction::CapabilityNew(token) => {
                 self.queue_capability(&target, "NEW", false, &token)?;
@@ -638,7 +638,7 @@ impl ClientTranscriptHarness {
             }
             RegistrationAction::CapabilityLs(_)
             | RegistrationAction::CapabilityRequest(_)
-            | RegistrationAction::CapabilityList(_)
+            | RegistrationAction::CapabilityList { .. }
             | RegistrationAction::CapabilityNew(_)
             | RegistrationAction::CapabilityDel(_)
             | RegistrationAction::CapabilityReconnectRequired(_)
@@ -662,9 +662,10 @@ impl ClientTranscriptHarness {
         &mut self,
         target: &str,
         subcommand: &str,
+        multiline: bool,
         tokens: &[String],
     ) -> Result<(), ClientTranscriptError> {
-        if subcommand != "LS" {
+        if !multiline {
             let capabilities = join_tokens(tokens)?;
             return self.queue_capability(target, subcommand, false, &capabilities);
         }
@@ -1027,4 +1028,30 @@ fn capability_trailing_budget(
     MAX_TRADITIONAL_LINE_BYTES
         .checked_sub(fixed)
         .ok_or(ClientTranscriptError::Rendering)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ClientTranscriptError, ClientTranscriptHarness};
+
+    #[test]
+    fn cap_302_list_uses_bounded_continuation_lines() -> Result<(), ClientTranscriptError> {
+        let mut harness = ClientTranscriptHarness::new()?;
+        let tokens = vec!["a".repeat(200), "b".repeat(200), "c".repeat(200)];
+
+        harness.queue_capability_tokens("*", "LIST", true, &tokens)?;
+
+        assert_eq!(harness.pending_server_frame_count(), 2);
+        let first = harness
+            .pending_server_frame_bytes(0)
+            .ok_or(ClientTranscriptError::Rendering)?;
+        let second = harness
+            .pending_server_frame_bytes(1)
+            .ok_or(ClientTranscriptError::Rendering)?;
+        assert!(first.starts_with(b":server.example CAP * LIST * :"));
+        assert!(second.starts_with(b":server.example CAP * LIST :"));
+        assert!(first.len() <= agenc_ircd_client_wire::MAX_TRADITIONAL_LINE_BYTES);
+        assert!(second.len() <= agenc_ircd_client_wire::MAX_TRADITIONAL_LINE_BYTES);
+        Ok(())
+    }
 }

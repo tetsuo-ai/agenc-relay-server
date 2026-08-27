@@ -55,7 +55,7 @@ const EXACT_REQUEST: &str = "account-notify account-tag away-notify batch echo-m
 extended-join invite-notify labeled-response message-ids message-tags monitor multi-prefix sasl \
 server-time setname standard-replies userhost-in-names sts";
 const EXACT_NAK_REQUEST: &str = "account-notify account-tag away-notify batch echo-message \
-extended-join invite-notify labeled-response message-ids -message-ids monitor multi-prefix sasl \
+extended-join invite-notify labeled-response unknown-cap -message-ids monitor multi-prefix sasl \
 server-time setname standard-replies userhost-in-names sts";
 const PLUS_ONE_REQUEST: &str = "account-notify account-tag -away-notify batch echo-message \
 extended-join invite-notify labeled-response message-ids message-tags monitor multi-prefix sasl \
@@ -140,25 +140,23 @@ fn req_naks_a_projected_list_that_would_exceed_the_budget() -> Result<(), Box<dy
 }
 
 #[test]
-fn ls_does_not_implicitly_enable_an_unrenderable_list() -> Result<(), Box<dyn Error>> {
+fn cap_302_allows_a_multiline_enabled_list() -> Result<(), Box<dyn Error>> {
     let profile = profile(&["cap-notify"])?;
     let mut state = CapabilityState::default();
     assert!(matches!(
         state.request(EXACT_REQUEST, &profile)?,
         CapRequestReply::Ack(_)
     ));
-    let before = state.try_clone()?;
-
-    assert_eq!(
-        state.ls(Some("302"), &profile).err(),
-        Some(CapError::LineBudget)
-    );
-    assert_eq!(state, before);
+    state.ls(Some("302"), &profile)?;
+    let enabled = state.list()?;
+    assert!(enabled.contains(&"cap-notify".to_owned()));
+    assert!(joined_length(&enabled)? > CAP_TOKEN_LIST_BUDGET);
+    assert!(state.supports_multiline());
     Ok(())
 }
 
 #[test]
-fn profile_change_does_not_implicitly_enable_an_unrenderable_list() -> Result<(), Box<dyn Error>> {
+fn cap_302_profile_change_can_grow_a_multiline_list() -> Result<(), Box<dyn Error>> {
     let old_profile = profile(&[])?;
     let new_profile = profile(&["cap-notify"])?;
     let mut state = CapabilityState::default();
@@ -167,13 +165,10 @@ fn profile_change_does_not_implicitly_enable_an_unrenderable_list() -> Result<()
         state.request(EXACT_REQUEST, &old_profile)?,
         CapRequestReply::Ack(_)
     ));
-    let before = state.try_clone()?;
-
-    assert_eq!(
-        state.apply_profile(&new_profile).err(),
-        Some(CapError::LineBudget)
-    );
-    assert_eq!(state, before);
+    state.apply_profile(&new_profile)?;
+    let enabled = state.list()?;
+    assert!(enabled.contains(&"cap-notify".to_owned()));
+    assert!(joined_length(&enabled)? > CAP_TOKEN_LIST_BUDGET);
     Ok(())
 }
 

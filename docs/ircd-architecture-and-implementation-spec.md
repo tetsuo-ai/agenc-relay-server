@@ -710,6 +710,7 @@ bracketed context is optional; every other listed context is required:
 | --- | --- | --- |
 | `FAIL *` | `REGISTRATION_REQUIRED` | none |
 | `FAIL ACCTCREATE`, `FAIL ACCTCRED` | `UNAVAILABLE` | none |
+| `FAIL ACCT`, `FAIL ACCTCREATE`, `FAIL ACCTCRED`, `FAIL AUTHENTICATE` | `BAD_STATE` | none |
 | `FAIL JOIN` | `E2EE_REQUIRED`, `NETWORK_UNAVAILABLE` | optional channel |
 | `FAIL PRIVMSG` | `E2EE_REQUIRED` | channel |
 | `FAIL JOIN`, `FAIL MODE`, `FAIL NAMES`, `FAIL TOPIC` | `SECRET_UNAVAILABLE` | supplied channel |
@@ -874,7 +875,7 @@ accepted RFC-9807 serializations and their exact byte lengths are:
 | account-create challenge message | `RegistrationResponse` | 64 |
 | account-create finish message and stored password file | `RegistrationRecord` | 192 |
 | authentication start message | `KE1` | 96 |
-| authentication challenge message | `KE2` | 288 |
+| authentication challenge message | `KE2` | 320 |
 | authentication finish message | `KE3` | 64 |
 | credential-change start message | `RegistrationRequest` | 32 |
 | credential-change challenge message | `RegistrationResponse` | 64 |
@@ -1135,7 +1136,7 @@ struct {
     uint16 profile_version;
     opaque transaction_id[16];
     opaque opaque_credential_id[32];
-    opaque opaque_message<64..288>;         // exactly 64 or 288 bytes
+    opaque opaque_message<64..320>;         // exactly 64 or 320 bytes
 } AccountServiceChallenge;
 
 enum { rejected(1), committed(2) } AccountServiceCompletionStatus;
@@ -1150,8 +1151,8 @@ struct {
 
 struct {
     uint16 padding_version;                 // 1
-    opaque payload<52..340>;
-    opaque zero_padding<3862..4150>;
+    opaque payload<52..372>;
+    opaque zero_padding<3830..4150>;
 } AccountServiceResponsePlaintext;
 ```
 
@@ -1161,14 +1162,25 @@ The closed request/response mapping is:
 | --- | --- | --- |
 | `account_create_start` | `account_create_challenge` | `AccountServiceChallenge` with 64-byte `RegistrationResponse` |
 | `account_create_finish` | `account_create_complete` | `AccountServiceCompletion` |
-| `opaque_auth_start` | `opaque_auth_challenge` | `AccountServiceChallenge` with 288-byte `KE2` |
+| `opaque_auth_start` | `opaque_auth_challenge` | `AccountServiceChallenge` with 320-byte `KE2` |
 | `opaque_auth_finish` | `opaque_auth_complete` | `AccountServiceCompletion` |
 | `credential_change_start` | `credential_change_challenge` | `AccountServiceChallenge` with 64-byte `RegistrationResponse` |
 | `credential_change_finish` | `credential_change_complete` | `AccountServiceCompletion` |
 
+Version 1 has no separate START-rejection response arm. After a START has
+successfully opened and parsed, a failed policy or state-admission predicate
+therefore produces the ordinary fixed-size challenge and a one-use transaction
+marked for rejection. That transaction carries no reservation, mutation, or
+commit authority. A matching FINISH consumes it and produces the corresponding
+encrypted `rejected` completion. This protocol-shaped exchange is not semantic
+acceptance of the requested account operation. A failure before complete
+authenticated parsing, an entropy or bounded-allocation failure, counter or
+deadline overflow, or internal crypto/state corruption creates no such
+transaction and emits no response.
+
 `payload` is the complete exact object selected by the response kind. A
-challenge is 116 bytes with a 64-byte `RegistrationResponse` or 340 bytes with
-a 288-byte `KE2`; no other length is valid. A completion is exactly 52 bytes.
+challenge is 116 bytes with a 64-byte `RegistrationResponse` or 372 bytes with
+a 320-byte `KE2`; no other length is valid. A completion is exactly 52 bytes.
 For `account_create_complete`, `committed` requires a canonical Account ID and
 generation zero. For `opaque_auth_complete`, `committed` requires the exact
 authenticated Account ID and a nonzero account-session generation. For
@@ -1285,9 +1297,11 @@ S: NOTE ACCTCREATE CREATED <account-id> :Account created
 The canonical unsigned-decimal declared length is exactly 4,726 for every
 request envelope and exactly 4,342 for every response. `START`/`FINISH`
 reserve that fixed bounded buffer before READY. `CHALLENGE` is legal only after
-an accepted start; `COMPLETE` is legal only after a finish request that the
-coordinator successfully HPKE-opened and parsed. DATA is legal only in the
-immediately preceding transfer state. A request has fifteen 400-character
+the coordinator successfully HPKE-opens and parses START and creates either an
+admissible reservation-backed transaction or the closed latent-rejection
+transaction in Section 11.2.1. `COMPLETE` is legal only after a finish request
+that the coordinator successfully HPKE-opened and parsed. DATA is legal only in
+the immediately preceding transfer state. A request has fifteen 400-character
 chunks and one final 302-character chunk; either response has fourteen
 400-character chunks and one final 190-character chunk. Every chunk is
 canonical unpadded base64url and END marks the preceding chunk final.
@@ -1347,10 +1361,13 @@ the coordinator can decrypt and verify it. An edge sees only the bounded HPKE
 envelope and the mutually authenticated federation carrier. The token is never
 copied into an account, event, audit log, application log, metric, or reply.
 
-`START` computes the current-generation keyed login digest, checks both the
-current and any previous-generation index for a conflict, and durably reserves
-the current stored key with the exact Section-23.9 creation-reservation value
-and, when present, reserves the Invite ID for the transaction. It
+`START` computes the current-generation keyed login digest and checks both the
+current and any previous-generation index for a conflict. For a semantically
+admissible request, it durably reserves the current stored key with the exact
+Section-23.9 creation-reservation value and, when present, reserves the Invite
+ID for the transaction. A policy, invitation, or login-conflict rejection
+instead creates only the latent-rejection transaction from Section 11.2.1; it
+reserves neither identifier and can produce only a rejected completion. START
 then erases the normalized login; neither the identifier nor a reversible
 encoding of it enters durable state. A second transaction cannot reserve any
 matching active-generation value. `FINISH` validates the exact RFC 9807
@@ -1406,7 +1423,7 @@ The envelope and inner application wrappers use the unsigned network-order
 integers and TLS-style vectors in Section 11.2.1. `AuthStart` and `AuthFinish`
 are the request plaintexts: `ke1` is exactly the 96-byte OPAQUE KE1 and `ke3`
 is exactly the 64-byte KE3. For response kind `opaque_auth_challenge`, the
-`AccountServiceChallenge.opaque_message` is exactly the 288-byte OPAQUE KE2;
+`AccountServiceChallenge.opaque_message` is exactly the 320-byte OPAQUE KE2;
 for `account_create_challenge` it is exactly the 64-byte
 RegistrationResponse. The other arm is invalid in either exchange.
 
@@ -1538,7 +1555,7 @@ only to its local RFC-9807 registration computation, applies the exact
 Section-11.1 password byte rules, and erases its registration state after
 finish.
 
-START is accepted only when all of these are true:
+START is semantically admissible only when all of these are true:
 
 - the origin is registered and its Account ID equals the encrypted request;
 - a successful same-account OPAQUE authentication on this connection set
@@ -1547,6 +1564,12 @@ START is accepted only when all of these are true:
   account, or storage/recovery operation conflicts with it; and
 - the account, OPAQUE record, session generation, account revision, and
   private credential ID are internally consistent.
+
+A successfully opened and parsed START that fails one of those predicates
+still performs the fixed registration-challenge shape and creates the
+non-authorizing latent-rejection transaction from Section 11.2.1. It consumes
+the supplied fresh-auth proof, acquires no account-operation reservation, and
+can produce only an encrypted rejected completion after FINISH.
 
 The coordinator creates one 60-second transaction bound to Network ID,
 Account ID, account revision, account-session generation, session, edge,
@@ -7778,7 +7801,7 @@ struct {
     uint16 profile_version;
     opaque transaction_id[16];
     opaque opaque_credential_id[32];
-    opaque opaque_message<64..288>;
+    opaque opaque_message<64..320>;
 } AccountServiceChallenge;
 
 struct {
@@ -7791,8 +7814,8 @@ struct {
 
 struct {
     uint16 padding_version;
-    opaque payload<52..340>;
-    opaque zero_padding<3862..4150>;
+    opaque payload<52..372>;
+    opaque zero_padding<3830..4150>;
 } AccountServiceResponsePlaintext;
 
 struct {
@@ -8732,9 +8755,10 @@ request_operation_sequence: zero if empty, exact value if present
 request_id: empty or 16 bytes
 ```
 
-The four variable IDs are all empty or all present.
-The two integers are zero only for an empty tuple. A present tuple matches one
-durable request result, occurs only on that request's home-edge
+The four variable IDs are all empty or all present. Both integers are zero for
+an empty tuple. A present tuple carries the exact generation and operation
+sequence from the durable request result; either value may be zero under
+Section 20.5. The tuple occurs only on that request's home-edge
 `request_completed` event, and its event field plus arm generation equal the
 committed result.
 
@@ -8832,10 +8856,10 @@ profile_hash = SHA256(
 ```
 
 The exact registry file SHA-256 is
-`6e905288c64a5c4a9fd5f6fd64737d62f42ed70c9777480f481de7d016bc6c03`.
+`30d4a9e9947691e2ca26e137e2762413a9b6a4fd308308bd5bfbd8cad20ac2e9`.
 The resulting version-1 `profile_hash` is
-`63813b0c384d51f674ba56ec5e8b166ed04c06ae0d22e18c0fc1d5f516331ff3`
-(unpadded base64url `Y4E7DDhNUfZ0ulbsXosWbtBMBq4NIuGMD8HV9RYzH_M`). A placeholder
+`83702207e1e1153c8722d5cc668a7d1bab85ba518fcdde030a36811b41bdcc40`
+(unpadded base64url `g3AiB-HhFTyHItXMZop9G6uFulGPzd4DCjaBG0G9zEA`). A placeholder
 or hash of a locally regenerated alternative is invalid. The registry
 enumerates every enum, top-level/arm/helper structure, field, mode code, bound,
 carrier command, cryptographic suite/domain label, hash label, and ordering
@@ -9278,7 +9302,7 @@ dns-endpoint=<lowercase DNS name>:<port>
 onion-endpoint=<56-char-v3-name>.onion:<port>
 onion-tls-spki-sha256=<43-char-hash>
 recovery-epoch=<22-char-random-recovery-epoch>
-base-profile-sha256=Y4E7DDhNUfZ0ulbsXosWbtBMBq4NIuGMD8HV9RYzH_M
+base-profile-sha256=g3AiB-HhFTyHItXMZop9G6uFulGPzd4DCjaBG0G9zEA
 account-service-hpke-key-id=<43-char-hash>
 account-service-hpke-public-key=<43-char-X25519-public-key>
 e2ee-profile=IRC-MLS/1

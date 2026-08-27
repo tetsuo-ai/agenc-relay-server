@@ -11,9 +11,8 @@ use agenc_ircd_client_wire::{
     FramingError, MAX_CLIENT_TAG_DATA_BYTES, MAX_COMMAND_BYTES, MessageTag, OutputBudget,
     PendingInputQueue, RegistrationAction, RegistrationAuthCarrier, RegistrationError,
     RegistrationEvent, RegistrationGrammarError, RegistrationPhase, RegistrationState, RenderError,
-    ReplyKind, SafeReplyDescription, SecretBytes, WebSocketEvent, WebSocketOpcode,
-    WebSocketSubprotocol, WebSocketWire, WireMessage, labeled_response, parse_message,
-    standard_reply,
+    ReplyKind, SafeReplyDescription, WebSocketEvent, WebSocketOpcode, WebSocketSubprotocol,
+    WebSocketWire, WireMessage, labeled_response, parse_message, standard_reply,
 };
 use agenc_ircd_types::PublicErrorCode;
 use base64::Engine as _;
@@ -55,7 +54,7 @@ fn capability_state_preserves_302_support_and_blind_req_blocks_registration()
     let mut blind = CapabilityState::default();
     assert!(matches!(
         blind.request("batch", &advertised)?,
-        CapRequestReply::Nak(_)
+        CapRequestReply::Ack(_)
     ));
     assert!(matches!(
         blind.request("message-tags batch", &advertised)?,
@@ -137,7 +136,7 @@ fn in_flight_commit_defers_owned_input_and_resumes_it_after_registration()
         state
             .message(parsed("CAP LIST")?, 7, &advertised)?
             .as_slice(),
-        [RegistrationAction::CapabilityList(_)]
+        [RegistrationAction::CapabilityList { .. }]
     ));
     assert!(
         state
@@ -614,8 +613,6 @@ fn peer_material_is_redacted_from_debug_surfaces() -> Result<(), Box<dyn Error>>
 
     let tag = MessageTag::new("tag", Some(SECRET))?;
     assert!(!format!("{tag:?}").contains(SECRET));
-    let bytes = SecretBytes::new(SECRET.as_bytes())?;
-    assert!(!format!("{bytes:?}").contains(SECRET));
     let registration = RegistrationAction::ForwardAuthCarrier {
         generation: 1,
         carrier: RegistrationAuthCarrier::Sasl,

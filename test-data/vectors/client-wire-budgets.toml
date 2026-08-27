@@ -32,3 +32,6 @@ sasl_request_characters = 6304
 sasl_response_characters = 5792
 account_request_characters = 6302
 account_response_characters = 5790
+
+[replies]
+batch_nesting = 16

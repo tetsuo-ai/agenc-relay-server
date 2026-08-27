@@ -33,7 +33,7 @@ expected_files = {
     "rfcs/rfc9525-tls-service-identity.txt": "ed8116c2435376dffe37ec2ca688c3a8515e36820852b29e0b6cdfbe92abd2c5",
     "rfcs/rfc9750-mls-architecture.txt": "6aa156c5592f99802aae9c39510bf347cacee4abdb1c34baab4c933a6cd992dd",
     "docs/irc-mls-e2ee-extension.md": "c925723cd14d9b989ed553a65b8344d48496a339a92bd63e575487a5ef88dc53",
-    "docs/federation-v1-profile.registry": "6e905288c64a5c4a9fd5f6fd64737d62f42ed70c9777480f481de7d016bc6c03",
+    "docs/federation-v1-profile.registry": "30d4a9e9947691e2ca26e137e2762413a9b6a4fd308308bd5bfbd8cad20ac2e9",
 }
 
 errors: list[str] = []
@@ -134,7 +134,7 @@ expected_account_constants = {
     "account_service_hpke_kdf_id": "1",
     "account_service_hpke_kem_id": "32",
     "account_service_opaque_ke1_bytes": "96",
-    "account_service_opaque_ke2_bytes": "288",
+    "account_service_opaque_ke2_bytes": "320",
     "account_service_opaque_ke3_bytes": "64",
     "account_service_opaque_registration_record_bytes": "192",
     "account_service_opaque_registration_request_bytes": "32",
@@ -222,7 +222,7 @@ expected_account_schemas = {
     ),
     "AccountServiceChallenge": (
         "profile_version:uint16,transaction_id:opaque[16],"
-        "opaque_credential_id:opaque[32],opaque_message:opaque<64..288>"
+        "opaque_credential_id:opaque[32],opaque_message:opaque<64..320>"
     ),
     "AccountServiceCompletion": (
         "profile_version:uint16,transaction_id:opaque[16],"
@@ -250,8 +250,8 @@ expected_account_schemas = {
         "response_salt:opaque[32]"
     ),
     "AccountServiceResponsePlaintext": (
-        "padding_version:uint16,payload:opaque<52..340>,"
-        "zero_padding:opaque<3862..4150>"
+        "padding_version:uint16,payload:opaque<52..372>,"
+        "zero_padding:opaque<3830..4150>"
     ),
     "AuthFinish": (
         "profile_version:uint16,network_id:opaque[32],transaction_id:opaque[16],"
@@ -330,7 +330,7 @@ request_arm_lengths = account_create_start_lengths | {
 }
 challenge_lengths = {
     2 + 16 + 32 + 2 + 64,
-    2 + 16 + 32 + 2 + 288,
+    2 + 16 + 32 + 2 + 320,
 }
 completion_bytes = 2 + 16 + 2 + 24 + 8
 if request_envelope_bytes != 4726:
@@ -342,14 +342,14 @@ if (min(request_arm_lengths), max(request_arm_lengths)) != (72, 265):
         "account-service request-arm bounds are "
         f"{(min(request_arm_lengths), max(request_arm_lengths))!r}"
     )
-if (min(challenge_lengths | {completion_bytes}), max(challenge_lengths)) != (52, 340):
-    errors.append("account-service response-payload bounds are not 52..340")
+if (min(challenge_lengths | {completion_bytes}), max(challenge_lengths)) != (52, 372):
+    errors.append("account-service response-payload bounds are not 52..372")
 if 4586 - max(request_arm_lengths) != 4321:
     errors.append("account-service minimum request padding is not 4321")
 if 4586 - min(request_arm_lengths) != 4514:
     errors.append("account-service maximum request padding is not 4514")
-if 4202 - max(challenge_lengths) != 3862:
-    errors.append("account-service minimum response padding is not 3862")
+if 4202 - max(challenge_lengths) != 3830:
+    errors.append("account-service minimum response padding is not 3830")
 if 4202 - completion_bytes != 4150:
     errors.append("account-service maximum response padding is not 4150")
 if len(base64.urlsafe_b64encode(bytes(4726)).rstrip(b"=")) != 6302:
@@ -430,7 +430,7 @@ if wire_keys != expected_wire_keys:
 profile_hash = hashlib.sha256(
     b"agenc-chat base federation profile registry v1\0" + registry_bytes
 ).hexdigest()
-expected_profile_hash = "63813b0c384d51f674ba56ec5e8b166ed04c06ae0d22e18c0fc1d5f516331ff3"
+expected_profile_hash = "83702207e1e1153c8722d5cc668a7d1bab85ba518fcdde030a36811b41bdcc40"
 if profile_hash != expected_profile_hash:
     errors.append(f"profile hash mismatch: {profile_hash} != {expected_profile_hash}")
 

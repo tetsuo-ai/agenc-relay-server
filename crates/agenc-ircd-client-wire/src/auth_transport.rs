@@ -35,6 +35,13 @@ pub const ACCOUNT_TOTAL_TIMEOUT_MILLIS: u64 = 60_000;
 /// Values are bounded to one carrier chunk and expose bytes explicitly so
 /// response material cannot be cloned or converted into an ordinary string by
 /// accident.
+///
+/// ```compile_fail
+/// use agenc_ircd_client_wire::SecretText;
+///
+/// fn require_debug<T: std::fmt::Debug>() {}
+/// require_debug::<SecretText>();
+/// ```
 pub struct SecretText {
     storage: Zeroizing<Vec<u8>>,
     length: usize,
@@ -85,12 +92,6 @@ impl SecretText {
     fn zeroize_storage(&mut self) {
         self.storage.as_mut_slice().zeroize();
         self.length = 0;
-    }
-}
-
-impl fmt::Debug for SecretText {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("SecretText([REDACTED])")
     }
 }
 
@@ -233,6 +234,11 @@ impl SaslTransport {
         now: u64,
     ) -> Result<Vec<SaslAction>, AuthTransportError> {
         self.check_deadline(now)?;
+        if parameter.len() > AUTH_CHUNK_CHARACTERS && self.phase != SaslPhase::Authenticated {
+            let actions = one_action(SaslAction::Numeric(SaslNumeric::TooLong))?;
+            self.reset_attempt();
+            return Ok(actions);
+        }
         if parameter == "*" {
             return self.abort_or_logout();
         }
@@ -600,8 +606,14 @@ impl AccountTransfer {
         if bytes.len() != ACCOUNT_RESPONSE_BYTES {
             return self.fail(AuthTransportError::WrongLength);
         }
-        let Some(next_idle) = now.checked_add(ACCOUNT_IDLE_TIMEOUT_MILLIS) else {
-            return self.fail(AuthTransportError::Overflow);
+        let next_idle = match phase {
+            AccountCarrierPhase::Start => {
+                let Some(deadline) = now.checked_add(ACCOUNT_IDLE_TIMEOUT_MILLIS) else {
+                    return self.fail(AuthTransportError::Overflow);
+                };
+                Some(deadline)
+            }
+            AccountCarrierPhase::Finish => None,
         };
         let mut encoded = Zeroizing::new([0_u8; ACCOUNT_RESPONSE_CHARACTERS]);
         let written = URL_SAFE_NO_PAD
@@ -628,11 +640,7 @@ impl AccountTransfer {
             AccountCarrierPhase::Start => AccountState::AwaitingFinish,
             AccountCarrierPhase::Finish => AccountState::Complete,
         };
-        self.idle_deadline = if self.state == AccountState::Complete {
-            None
-        } else {
-            Some(next_idle)
-        };
+        self.idle_deadline = next_idle;
         Ok(actions)
     }
 
@@ -821,7 +829,11 @@ const fn is_base64url(byte: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{AUTH_CHUNK_CHARACTERS, AuthTransportError, SaslAction, SecretText, chunk_actions};
+    use super::{
+        ACCOUNT_RESPONSE_BYTES, AUTH_CHUNK_CHARACTERS, AccountCarrierPhase, AccountState,
+        AccountTransfer, AuthTransportError, SaslAction, SaslPhase, SaslTransport, SecretText,
+        chunk_actions,
+    };
 
     #[test]
     fn secret_text_zeroizes_its_full_allocation() -> Result<(), AuthTransportError> {
@@ -832,7 +844,6 @@ mod tests {
         assert!(allocation >= AUTH_CHUNK_CHARACTERS);
         assert_eq!(text.storage.len(), allocation);
         assert_eq!(text.expose(), CANARY.as_bytes());
-        assert!(!format!("{text:?}").contains(CANARY));
 
         text.zeroize_storage();
 
@@ -851,5 +862,124 @@ mod tests {
             chunk_actions(&encoded, SaslAction::SendChunk).err(),
             Some(AuthTransportError::InvalidChunk)
         );
+    }
+
+    #[test]
+    fn secret_text_rejects_empty_and_oversized_chunks() {
+        assert_eq!(
+            SecretText::copy_from("").err(),
+            Some(AuthTransportError::InvalidChunk)
+        );
+        assert_eq!(
+            SecretText::copy_from(&"A".repeat(AUTH_CHUNK_CHARACTERS + 1)).err(),
+            Some(AuthTransportError::InvalidChunk)
+        );
+    }
+
+    #[test]
+    fn sasl_server_response_rejects_the_wrong_exact_length() -> Result<(), AuthTransportError> {
+        let mut transport = SaslTransport::new()?;
+        transport.phase = SaslPhase::WaitingStartResponse;
+
+        assert_eq!(
+            transport.server_response(&[], 0).err(),
+            Some(AuthTransportError::WrongLength)
+        );
+        assert_eq!(transport.phase, SaslPhase::Idle);
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_authenticate_does_not_clear_an_authenticated_session()
+    -> Result<(), AuthTransportError> {
+        let mut transport = SaslTransport::new()?;
+        transport.phase = SaslPhase::Authenticated;
+
+        let actions = transport.client(&"A".repeat(AUTH_CHUNK_CHARACTERS + 1), 0)?;
+
+        assert!(matches!(
+            actions.as_slice(),
+            [SaslAction::Numeric(
+                super::SaslNumeric::AlreadyAuthenticated
+            )]
+        ));
+        assert_eq!(transport.phase, SaslPhase::Authenticated);
+        Ok(())
+    }
+
+    #[test]
+    fn account_server_response_rejects_length_and_deadline_overflow()
+    -> Result<(), AuthTransportError> {
+        let mut wrong_length = AccountTransfer::new(super::AccountCarrierKind::Create)?;
+        wrong_length.state = AccountState::WaitingResponse(AccountCarrierPhase::Start);
+        assert_eq!(
+            wrong_length
+                .server_response(AccountCarrierPhase::Start, &[], 0)
+                .err(),
+            Some(AuthTransportError::WrongLength)
+        );
+
+        let mut overflow = AccountTransfer::new(super::AccountCarrierKind::Create)?;
+        overflow.state = AccountState::WaitingResponse(AccountCarrierPhase::Start);
+        assert_eq!(
+            overflow
+                .server_response(
+                    AccountCarrierPhase::Start,
+                    &[0; ACCOUNT_RESPONSE_BYTES],
+                    u64::MAX,
+                )
+                .err(),
+            Some(AuthTransportError::Overflow)
+        );
+
+        let mut finish = AccountTransfer::new(super::AccountCarrierKind::Create)?;
+        finish.state = AccountState::WaitingResponse(AccountCarrierPhase::Finish);
+        let actions = finish.server_response(
+            AccountCarrierPhase::Finish,
+            &[0; ACCOUNT_RESPONSE_BYTES],
+            u64::MAX,
+        )?;
+        assert!(matches!(
+            actions.last(),
+            Some(super::AccountCarrierAction::End)
+        ));
+        assert_eq!(finish.state, AccountState::Complete);
+        assert_eq!(finish.idle_deadline, None);
+        Ok(())
+    }
+
+    #[test]
+    fn account_data_rejects_missing_and_misshapen_chunks() -> Result<(), AuthTransportError> {
+        let mut missing = AccountTransfer::new(super::AccountCarrierKind::Create)?;
+        missing.state = AccountState::Receiving(AccountCarrierPhase::Start);
+        assert_eq!(
+            missing.data(None, 0).err(),
+            Some(AuthTransportError::InvalidChunk)
+        );
+
+        let mut short = AccountTransfer::new(super::AccountCarrierKind::Create)?;
+        short.state = AccountState::Receiving(AccountCarrierPhase::Start);
+        assert_eq!(
+            short.data(Some("A"), 0).err(),
+            Some(AuthTransportError::InvalidChunk)
+        );
+
+        let mut too_many = AccountTransfer::new(super::AccountCarrierKind::Create)?;
+        too_many.state = AccountState::Receiving(AccountCarrierPhase::Start);
+        too_many.chunks = 16;
+        assert_eq!(
+            too_many.data(Some(&"A".repeat(302)), 0).err(),
+            Some(AuthTransportError::InvalidChunk)
+        );
+
+        let mut overflow = AccountTransfer::new(super::AccountCarrierKind::Create)?;
+        overflow.state = AccountState::Receiving(AccountCarrierPhase::Start);
+        assert_eq!(
+            overflow
+                .data(Some(&"A".repeat(AUTH_CHUNK_CHARACTERS)), u64::MAX)
+                .err(),
+            Some(AuthTransportError::Overflow)
+        );
+        Ok(())
     }
 }

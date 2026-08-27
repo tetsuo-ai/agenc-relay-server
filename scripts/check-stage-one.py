@@ -13,21 +13,21 @@ from typing import NoReturn
 
 RAW_HASHES = {
     "docs/ircd-architecture-and-implementation-spec.md": (
-        "1e866a88cfaf4b80e3599558157da488e310c667e225c1f5154547f8f5d5346b"
+        "5dddee2e4e7e5b795994844e0eb39c9d98f824b1e18f6d9f984724460e639e1a"
     ),
     "docs/irc-mls-e2ee-extension.md": (
         "c925723cd14d9b989ed553a65b8344d48496a339a92bd63e575487a5ef88dc53"
     ),
     "docs/federation-v1-profile.registry": (
-        "6e905288c64a5c4a9fd5f6fd64737d62f42ed70c9777480f481de7d016bc6c03"
+        "30d4a9e9947691e2ca26e137e2762413a9b6a4fd308308bd5bfbd8cad20ac2e9"
     ),
     "docs/protocol-sources-and-decisions.md": (
-        "49d45d9f1843198670fa34e1d6b4a2d4ab69288ce27d428b7cda5c39c8605cd2"
+        "82e0be36bd660968e61d8ab1143ff016116dcec394b455a2510a50ad31a29fda"
     ),
 }
 PROFILE_HASHES = {
     "base-federation-v1": (
-        "63813b0c384d51f674ba56ec5e8b166ed04c06ae0d22e18c0fc1d5f516331ff3"
+        "83702207e1e1153c8722d5cc668a7d1bab85ba518fcdde030a36811b41bdcc40"
     ),
     "e2ee-mls-v1": (
         "964d29f7aa06d50884dedd96d1f5011cf015525b39894a45357fba93d5e8bb73"

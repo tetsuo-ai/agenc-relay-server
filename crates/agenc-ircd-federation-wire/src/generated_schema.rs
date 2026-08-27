@@ -127,7 +127,7 @@ pub const SCHEMA_REGISTRY: &[SchemaDescriptor] = &[
                 name: "opaque_message",
                 kind: FieldKind::VariableOpaque {
                     minimum: 64,
-                    maximum: 288,
+                    maximum: 320,
                     width: LengthWidth::U16,
                 },
             },
@@ -277,14 +277,14 @@ pub const SCHEMA_REGISTRY: &[SchemaDescriptor] = &[
                 name: "payload",
                 kind: FieldKind::VariableOpaque {
                     minimum: 52,
-                    maximum: 340,
+                    maximum: 372,
                     width: LengthWidth::U16,
                 },
             },
             FieldDescriptor {
                 name: "zero_padding",
                 kind: FieldKind::VariableOpaque {
-                    minimum: 3862,
+                    minimum: 3830,
                     maximum: 4150,
                     width: LengthWidth::U16,
                 },

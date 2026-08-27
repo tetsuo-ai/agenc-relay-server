@@ -546,6 +546,224 @@ fn decode_entry_points_reject_oversize_trailing_and_unknown_projection() -> Resu
 }
 
 #[test]
+fn field_kind_decode_covers_missing_widths_and_nested_failures() -> Result<(), CodecError> {
+    let primitive_cases: &[(FieldKind, &[u8], u64)] = &[
+        (FieldKind::Uint8, &[0x7f], 0x7f),
+        (FieldKind::Uint24, &[0x01, 0x02, 0x03], 0x01_02_03),
+    ];
+    for (kind, input, expected) in primitive_cases {
+        let mut decoder = Decoder::new(input);
+        let mut budget = DecodeBudget::new(0, 0);
+        let DecodeStep::Value(WireValue::Unsigned(actual)) =
+            begin_decode_value(*kind, &mut decoder, &mut budget, 0)?
+        else {
+            return Err(CodecError::TypeMismatch);
+        };
+        assert_eq!(actual, *expected);
+    }
+    for (kind, input) in [
+        (FieldKind::Uint8, &[][..]),
+        (FieldKind::Uint24, &[0_u8, 0][..]),
+    ] {
+        let mut decoder = Decoder::new(input);
+        let mut budget = DecodeBudget::new(0, 0);
+        assert_eq!(
+            begin_decode_value(kind, &mut decoder, &mut budget, 0).err(),
+            Some(CodecError::UnexpectedEof)
+        );
+    }
+
+    let mut decoder = Decoder::new(&[]);
+    let mut budget = DecodeBudget::new(0, 0);
+    assert_eq!(
+        begin_decode_value(
+            FieldKind::Structure {
+                schema: MISSING_SCHEMA.name,
+            },
+            &mut decoder,
+            &mut budget,
+            0,
+        )
+        .err(),
+        Some(CodecError::UnknownSchema)
+    );
+
+    let mut decoder = Decoder::new(&[1]);
+    let mut budget = DecodeBudget::new(0, 0);
+    assert_eq!(
+        begin_decode_value(
+            FieldKind::Vector {
+                schema: "result.no_content",
+                minimum: 1,
+                maximum: 1,
+                width: LengthWidth::U8,
+            },
+            &mut decoder,
+            &mut budget,
+            0,
+        )
+        .err(),
+        Some(CodecError::AllocationBudgetExceeded)
+    );
+
+    let mut decoder = Decoder::new(&[0]);
+    let mut budget = DecodeBudget::new(0, 0);
+    assert_eq!(
+        begin_decode_value(
+            FieldKind::Vector {
+                schema: MISSING_SCHEMA.name,
+                minimum: 0,
+                maximum: 0,
+                width: LengthWidth::U8,
+            },
+            &mut decoder,
+            &mut budget,
+            0,
+        )
+        .err(),
+        Some(CodecError::UnknownSchema)
+    );
+
+    let encoded_discriminant = 1_u16.to_be_bytes();
+    let mut decoder = Decoder::new(&encoded_discriminant);
+    let mut budget = DecodeBudget::new(0, 0);
+    assert_eq!(
+        begin_decode_value(
+            FieldKind::ProjectionUnion {
+                discriminant: 1,
+                schema: MISSING_SCHEMA.name,
+            },
+            &mut decoder,
+            &mut budget,
+            0,
+        )
+        .err(),
+        Some(CodecError::UnknownSchema)
+    );
+
+    assert!(allocate_vector_values(1)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn remaining_integer_widths_decode_and_reject_truncation() -> Result<(), CodecError> {
+    let cases: &[(FieldKind, &[u8], u64, &[u8])] = &[
+        (FieldKind::Uint16, &[0x01, 0x02], 0x01_02, &[0]),
+        (
+            FieldKind::Uint32,
+            &[0x01, 0x02, 0x03, 0x04],
+            0x01_02_03_04,
+            &[0, 0, 0],
+        ),
+        (
+            FieldKind::Uint64,
+            &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08],
+            0x01_02_03_04_05_06_07_08,
+            &[0, 0, 0, 0, 0, 0, 0],
+        ),
+    ];
+    for (kind, input, expected, truncated) in cases {
+        let mut decoder = Decoder::new(input);
+        let mut budget = DecodeBudget::new(0, 0);
+        let DecodeStep::Value(WireValue::Unsigned(actual)) =
+            begin_decode_value(*kind, &mut decoder, &mut budget, 0)?
+        else {
+            return Err(CodecError::TypeMismatch);
+        };
+        assert_eq!(actual, *expected);
+        assert_decode_error(*kind, truncated, 0, 0, CodecError::UnexpectedEof);
+    }
+    Ok(())
+}
+
+#[test]
+fn opaque_enum_and_projection_decode_propagate_each_failure_phase() {
+    assert_decode_error(
+        FieldKind::FixedOpaque { length: 1 },
+        &[],
+        1,
+        0,
+        CodecError::UnexpectedEof,
+    );
+    assert_decode_error(
+        FieldKind::VariableOpaque {
+            minimum: 0,
+            maximum: 1,
+            width: LengthWidth::U8,
+        },
+        &[],
+        1,
+        0,
+        CodecError::UnexpectedEof,
+    );
+    assert_decode_error(
+        FieldKind::VariableOpaque {
+            minimum: 1,
+            maximum: 1,
+            width: LengthWidth::U8,
+        },
+        &[0],
+        1,
+        0,
+        CodecError::LengthBelowMinimum,
+    );
+    assert_decode_error(
+        FieldKind::VariableOpaque {
+            minimum: 1,
+            maximum: 1,
+            width: LengthWidth::U8,
+        },
+        &[1],
+        1,
+        0,
+        CodecError::UnexpectedEof,
+    );
+    assert_decode_error(
+        FieldKind::Enumeration {
+            registry: "ModeDirection",
+        },
+        &[0],
+        0,
+        0,
+        CodecError::UnexpectedEof,
+    );
+    assert_decode_error(
+        FieldKind::Enumeration {
+            registry: "ModeDirection",
+        },
+        &[0, 99],
+        0,
+        0,
+        CodecError::UnknownDiscriminant,
+    );
+    assert_decode_error(
+        FieldKind::ProjectionUnion {
+            discriminant: 1,
+            schema: "result.no_content",
+        },
+        &[0],
+        0,
+        0,
+        CodecError::UnexpectedEof,
+    );
+}
+
+fn assert_decode_error(
+    kind: FieldKind,
+    input: &[u8],
+    byte_limit: usize,
+    value_limit: usize,
+    expected: CodecError,
+) {
+    let mut decoder = Decoder::new(input);
+    let mut budget = DecodeBudget::new(byte_limit, value_limit);
+    assert_eq!(
+        begin_decode_value(kind, &mut decoder, &mut budget, 0).err(),
+        Some(expected)
+    );
+}
+
+#[test]
 fn empty_vectors_complete_without_descending() -> Result<(), CodecError> {
     let mut decode_budget = DecodeBudget::new(0, 0);
     let mut decode_frames = Vec::new();

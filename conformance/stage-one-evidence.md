@@ -2,12 +2,13 @@
 
 Status: historical pass on 2026-08-24 for commit
 `7ae6439b472521d3c23fb99261deaf8964a70c5a`. This report does not provide
-evidence for the current uncommitted tree.
+evidence for the current uncommitted tree. No current manifest with a
+verifiable artifact path closes `S01-900` under the current evidence policy.
 
 ## Verification summary
 
-`bash scripts/check-stage-one.sh` passes under Rust 1.98.0 for both declared
-Linux targets. The inherited Stage 00 gate and Stage 01 checks cover frozen
+`bash scripts/check-stage-one.sh` passed under Rust 1.98.0 for both declared
+Linux targets. The recorded Stage 00 and Stage 01 checks covered frozen
 sources, generated artifacts, formatting, compilation, Clippy, all tests,
 documentation tests, dependency policy, advisories, and branch coverage.
 Measured workspace coverage is 91.56% branches and 95.37% lines.
@@ -26,7 +27,7 @@ missing, duplicate, reordered, renumbered, and stale entries.
 
 ## S01-002
 
-`EVID-S01-002-QUANTITIES`: eleven private-field quantity families retain units and
+`EVID-S01-002-QUANTITIES`: ten private-field quantity families retain units and
 inclusive bounds. Tests exercise minimum, one, maximum, maximum-plus-one,
 overflow, and underflow behavior.
 
@@ -71,10 +72,10 @@ negatives cover canonical IDs/names, revision and presence tuples, ordering,
 envelope and union substitution, projected values, identity cross-references,
 padding, and malformed embedded objects.
 
-Request correlation uses the four ID fields as its presence discriminator.
-An empty tuple requires both integer fields to be zero. A present tuple accepts
-generation and operation-sequence zero because Section 20.5 assigns those
-values to the pre-registration principal and the first request in a generation.
+Request correlation at this commit uses the four ID fields as its presence
+discriminator. An empty tuple requires both integer fields to be zero. A
+present tuple requires both integer fields to be nonzero. Later revisions
+correct that rule to admit the zero values assigned by Section 20.5.
 
 ## S01-009
 
@@ -108,7 +109,9 @@ mutations.
 
 ## S01-900
 
-`EVID-S01-900-STAGE-GATE`: the complete Stage 01 gate passes with the pinned
+`EVID-S01-900-STAGE-GATE`: the recorded Stage 01 run passed with the pinned
 lockfile and tools on both targets. Generated-source freshness, six artifact
 checker mutations, all workspace tests, Clippy with warnings denied,
-`cargo-deny`, `cargo-audit`, and the greater-than-90% branch threshold pass.
+`cargo-deny`, `cargo-audit`, and the greater-than-90% branch threshold passed.
+This historical observation has no verifiable artifact path and does not close
+`S01-900`.

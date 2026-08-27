@@ -1,136 +1,163 @@
 schema_version = 1
 
-[gate.stage-zero]
+[gate.stage-zero-implementation]
 
-[[gate.stage-zero.command]]
+[[gate.stage-zero-implementation.command]]
 argv = ["bash", "scripts/check-spec.sh"]
 
-[[gate.stage-zero.command]]
+[[gate.stage-zero-implementation.command]]
 argv = ["python3", "scripts/check-baseline.py"]
 
-[[gate.stage-zero.command]]
+[[gate.stage-zero-implementation.command]]
 argv = ["python3", "scripts/requirements.py", "check"]
 
-[[gate.stage-zero.command]]
+[[gate.stage-zero-implementation.command]]
 argv = ["python3", "scripts/requirements.py", "check-stage-zero"]
 
-[[gate.stage-zero.command]]
+[[gate.stage-zero-implementation.command]]
 argv = ["python3", "scripts/requirements.py", "self-test"]
 
-[[gate.stage-zero.command]]
+[[gate.stage-zero-implementation.command]]
 argv = ["python3", "scripts/check-workspace.py", "check"]
 
-[[gate.stage-zero.command]]
+[[gate.stage-zero-implementation.command]]
 argv = ["python3", "scripts/check-workspace.py", "self-test"]
 
-[[gate.stage-zero.command]]
+[[gate.stage-zero-implementation.command]]
 argv = ["python3", "scripts/check-source.py", "check"]
 
-[[gate.stage-zero.command]]
+[[gate.stage-zero-implementation.command]]
 argv = ["python3", "scripts/check-source.py", "self-test"]
 
-[[gate.stage-zero.command]]
+[[gate.stage-zero-implementation.command]]
 argv = ["python3", "scripts/check-evidence.py", "check"]
 
-[[gate.stage-zero.command]]
+[[gate.stage-zero-implementation.command]]
 argv = ["python3", "scripts/check-evidence.py", "self-test"]
 
-[[gate.stage-zero.command]]
+[[gate.stage-zero-implementation.command]]
 argv = ["python3", "scripts/check-ci.py", "check"]
 
-[[gate.stage-zero.command]]
+[[gate.stage-zero-implementation.command]]
 argv = ["python3", "scripts/check-ci.py", "self-test"]
 
-[[gate.stage-zero.command]]
+[[gate.stage-zero-implementation.command]]
 argv = ["cargo", "fmt", "--all", "--check"]
 
-[[gate.stage-zero.command]]
+[[gate.stage-zero-implementation.command]]
 argv = ["cargo", "check", "--workspace", "--all-targets", "--all-features", "--locked"]
 
-[[gate.stage-zero.command]]
+[[gate.stage-zero-implementation.command]]
 argv = ["cargo", "check", "--workspace", "--all-targets", "--all-features", "--locked", "--target", "x86_64-unknown-linux-gnu"]
 
-[[gate.stage-zero.command]]
+[[gate.stage-zero-implementation.command]]
 argv = ["cargo", "check", "--workspace", "--all-targets", "--all-features", "--locked", "--target", "aarch64-unknown-linux-gnu"]
 
-[[gate.stage-zero.command]]
+[[gate.stage-zero-implementation.command]]
 argv = ["cargo", "clippy", "--workspace", "--all-targets", "--all-features", "--locked", "--", "-D", "warnings"]
 
-[[gate.stage-zero.command]]
+[[gate.stage-zero-implementation.command]]
 argv = ["cargo", "test", "--workspace", "--all-features", "--locked"]
 
-[[gate.stage-zero.command]]
+[[gate.stage-zero-implementation.command]]
 argv = ["cargo", "test", "--workspace", "--doc", "--all-features", "--locked"]
 
-[[gate.stage-zero.command]]
+[[gate.stage-zero-implementation.command]]
 argv = ["cargo", "tree", "--workspace", "--all-features", "--locked"]
 
-[[gate.stage-zero.command]]
+[[gate.stage-zero-implementation.command]]
 argv = ["cargo", "deny", "check"]
 
-[[gate.stage-zero.command]]
+[[gate.stage-zero-implementation.command]]
 argv = ["cargo", "audit", "--deny", "warnings"]
 
-[[gate.stage-zero.command]]
-argv = ["cargo", "llvm-cov", "--workspace", "--all-features", "--branch", "--json", "--summary-only", "--output-path", "target/stage-zero-coverage.json"]
+[[gate.stage-zero-implementation.command]]
+argv = ["python3", "scripts/check-coverage.py", "self-test", "conformance/critical-coverage.toml"]
+
+[[gate.stage-zero-implementation.command]]
+argv = ["cargo", "llvm-cov", "--workspace", "--all-features", "--branch", "--locked", "--json", "--output-path", "target/stage-zero-coverage.json"]
 environment = { RUSTC_BOOTSTRAP = "1" }
 
-[[gate.stage-zero.command]]
-argv = ["python3", "scripts/check-coverage.py", "target/stage-zero-coverage.json"]
+[[gate.stage-zero-implementation.command]]
+argv = ["python3", "scripts/check-coverage.py", "check", "target/stage-zero-coverage.json", "conformance/critical-coverage.toml"]
 
-[gate.stage-one]
-includes = ["stage-zero"]
+[gate.stage-one-implementation]
+includes = ["stage-zero-implementation"]
 
-[[gate.stage-one.command]]
+[[gate.stage-one-implementation.command]]
 argv = ["python3", "scripts/requirements.py", "check-stage-one"]
 
-[[gate.stage-one.command]]
+[[gate.stage-one-implementation.command]]
 argv = ["python3", "scripts/check-stage-one.py", "check"]
 
-[[gate.stage-one.command]]
+[[gate.stage-one-implementation.command]]
 argv = ["python3", "scripts/check-stage-one.py", "self-test"]
 
-[gate.stage-two]
-includes = ["stage-one"]
+[gate.stage-two-implementation]
+includes = ["stage-one-implementation"]
 
-[[gate.stage-two.command]]
+[[gate.stage-two-implementation.command]]
 argv = ["python3", "scripts/requirements.py", "check-stage-two"]
 
-[[gate.stage-two.command]]
+[[gate.stage-two-implementation.command]]
 argv = ["python3", "scripts/generate-stage-two.py", "--check"]
 
-[[gate.stage-two.command]]
+[[gate.stage-two-implementation.command]]
 argv = ["python3", "scripts/check-stage-two.py", "check"]
 
-[[gate.stage-two.command]]
+[[gate.stage-two-implementation.command]]
 argv = ["python3", "scripts/check-stage-two.py", "self-test"]
 
-[[gate.stage-two.command]]
+[[gate.stage-two-implementation.command]]
 argv = ["cargo", "+nightly-2026-08-24", "fmt", "--manifest-path", "fuzz/Cargo.toml", "--", "--check"]
 
-[[gate.stage-two.command]]
+[[gate.stage-two-implementation.command]]
 argv = ["cargo", "+nightly-2026-08-24", "check", "--manifest-path", "fuzz/Cargo.toml", "--bins", "--locked"]
 
-[[gate.stage-two.command]]
+[[gate.stage-two-implementation.command]]
 argv = ["cargo", "deny", "--manifest-path", "fuzz/Cargo.toml", "check"]
 
-[[gate.stage-two.command]]
+[[gate.stage-two-implementation.command]]
 argv = ["bash", "scripts/run-stage-two-fuzz.sh"]
 
-[gate.stage-three]
-includes = ["stage-two"]
+[gate.stage-three-implementation]
+includes = ["stage-two-implementation"]
 
-[[gate.stage-three.command]]
+[[gate.stage-three-implementation.command]]
 argv = ["python3", "scripts/requirements.py", "check-stage-three"]
 
-[[gate.stage-three.command]]
+[[gate.stage-three-implementation.command]]
 argv = ["python3", "scripts/generate-stage-three.py", "--check"]
 
-[[gate.stage-three.command]]
+[[gate.stage-three-implementation.command]]
 argv = ["python3", "scripts/check-stage-three.py", "check"]
 
-[[gate.stage-three.command]]
+[[gate.stage-three-implementation.command]]
 argv = ["python3", "scripts/check-stage-three.py", "self-test"]
 
-[[gate.stage-three.command]]
+[[gate.stage-three-implementation.command]]
 argv = ["cargo", "test", "-p", "agenc-ircd-testkit", "--test", "domain_channels", "--test", "domain_commands", "--test", "domain_lifecycle", "--test", "domain_reference_model", "--test", "domain_stage_three_matrix", "--locked"]
+
+[gate.stage-four-implementation]
+includes = ["stage-three-implementation"]
+
+[[gate.stage-four-implementation.command]]
+argv = ["python3", "scripts/requirements.py", "check-stage-four"]
+
+[[gate.stage-four-implementation.command]]
+argv = ["python3", "scripts/check-stage-four.py", "check"]
+
+[[gate.stage-four-implementation.command]]
+argv = ["python3", "scripts/check-stage-four.py", "self-test"]
+
+[[gate.stage-four-implementation.command]]
+argv = ["cargo", "test", "-p", "agenc-ircd-auth", "--test", "stage_four", "--locked"]
+
+[[gate.stage-four-implementation.command]]
+argv = ["cargo", "test", "-p", "agenc-ircd-crypto", "--test", "stage_four", "--locked"]
+
+[[gate.stage-four-implementation.command]]
+argv = ["cargo", "test", "-p", "agenc-ircd-testkit", "--test", "stage_four_domain_auth", "--locked"]
+
+[[gate.stage-four-implementation.command]]
+argv = ["bash", "scripts/run-stage-four-fuzz.sh"]

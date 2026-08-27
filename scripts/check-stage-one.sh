@@ -9,7 +9,7 @@ require_exact_version() {
     local actual="$2"
     local expected="$3"
     if [[ "$actual" != "$expected" ]]; then
-        echo "stage-one gate: $label version mismatch: $actual != $expected" >&2
+        echo "stage-one implementation checks: $label version mismatch: $actual != $expected" >&2
         exit 1
     fi
 }
@@ -17,7 +17,7 @@ require_exact_version() {
 require_command() {
     local command_name="$1"
     if ! command -v "$command_name" >/dev/null 2>&1; then
-        echo "stage-one gate: required command is missing: $command_name" >&2
+        echo "stage-one implementation checks: required command is missing: $command_name" >&2
         exit 1
     fi
 }
@@ -29,5 +29,5 @@ require_exact_version "cargo-deny" "$(cargo deny --version)" "cargo-deny 0.20.2"
 require_exact_version "cargo-audit" "$(cargo audit --version)" "cargo-audit-audit 0.22.2"
 require_exact_version "cargo-llvm-cov" "$(cargo llvm-cov --version)" "cargo-llvm-cov 0.9.0"
 
-python3 scripts/run-gate.py stage-one
-echo "stage-one gate: ok"
+python3 scripts/run-gate.py stage-one-implementation
+echo "stage-one implementation checks: ok; stage closure is validated separately"

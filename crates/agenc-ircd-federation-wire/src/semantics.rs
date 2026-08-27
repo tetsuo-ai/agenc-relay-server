@@ -9,18 +9,35 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 use crate::codec::{
-    CodecError, DecodeBudget, SchemaObject, WireValue, decode_one_without_embedded,
-    measured_fields_len,
+    CodecError, DecodeBudget, FederationSemanticValidator, SchemaObject, SemanticValidator,
+    WireValue, decode_one_without_embedded, measured_fields_len,
 };
 use crate::schema::SchemaDescriptor;
 
 const ACCOUNT_ID_BYTES: usize = 24;
+const CHANNEL_INSTANCE_ID_BYTES: usize = 16;
 const SERVER_ID_BYTES: usize = 16;
 const SESSION_ID_BYTES: usize = 16;
 const USER_ID_BYTES: usize = 16;
 const SESSION_PROJECTION_HOME_SERVER_OFFSET: usize = SESSION_ID_BYTES + USER_ID_BYTES;
 const SESSION_PROJECTION_HOME_SERVER_END: usize =
     SESSION_PROJECTION_HOME_SERVER_OFFSET + SERVER_ID_BYTES;
+
+impl SemanticValidator for FederationSemanticValidator {
+    fn validate_schema(schema: &SchemaDescriptor, fields: &[WireValue]) -> Result<(), CodecError> {
+        validate_schema_semantics(schema, fields)
+    }
+
+    fn validate_embedded(
+        schema: &SchemaDescriptor,
+        fields: &[WireValue],
+        budget: &mut DecodeBudget,
+        depth: usize,
+        pending: &mut Vec<(SchemaObject, usize)>,
+    ) -> Result<(), CodecError> {
+        validate_embedded_semantics(schema, fields, budget, depth, pending)
+    }
+}
 
 pub(crate) fn validate_schema_semantics(
     schema: &SchemaDescriptor,
@@ -311,6 +328,7 @@ fn validate_discriminated_embedded(
     let (object, child_depth) =
         decode_embedded(schema, fields, value_field, nested_schema, budget, depth)?;
     validate_event_target_binding(schema, fields, &object)?;
+    validate_event_projection_consistency(&object, budget, child_depth)?;
     retain_embedded(pending, object, child_depth)
 }
 
@@ -321,24 +339,107 @@ fn validate_event_target_binding(
 ) -> Result<(), CodecError> {
     let target_server_id = opaque_field(envelope_schema, envelope_fields, "target_server_id")?;
     for value in &event.fields {
-        let WireValue::Structure(session_view) = value else {
+        let Some(home_server_id) = event_projection_home_server(value)? else {
             continue;
         };
-        if session_view.schema.name != "FederationSessionEventView" {
-            continue;
-        }
-        let projection = opaque_field(
-            session_view.schema,
-            &session_view.fields,
-            "home_session_projection",
-        )?;
-        if projection.is_empty() {
-            continue;
-        }
-        let home_server_id = projection
-            .get(SESSION_PROJECTION_HOME_SERVER_OFFSET..SESSION_PROJECTION_HOME_SERVER_END)
-            .ok_or(CodecError::CrossReference)?;
         semantic(home_server_id == target_server_id)?;
+    }
+    Ok(())
+}
+
+fn event_projection_home_server(value: &WireValue) -> Result<Option<&[u8]>, CodecError> {
+    match value {
+        WireValue::Structure(session_view)
+            if session_view.schema.name == "FederationSessionEventView" =>
+        {
+            let projection = opaque_field(
+                session_view.schema,
+                &session_view.fields,
+                "home_session_projection",
+            )?;
+            if projection.is_empty() {
+                return Ok(None);
+            }
+            projection
+                .get(SESSION_PROJECTION_HOME_SERVER_OFFSET..SESSION_PROJECTION_HOME_SERVER_END)
+                .ok_or(CodecError::CrossReference)
+                .map(Some)
+        }
+        WireValue::ProjectionUnion { value, .. }
+            if value.schema.name == "FederationSessionProjection" =>
+        {
+            opaque_field(value.schema, &value.fields, "home_server_id").map(Some)
+        }
+        _ => Ok(None),
+    }
+}
+
+fn validate_event_projection_consistency(
+    event: &SchemaObject,
+    budget: &mut DecodeBudget,
+    depth: usize,
+) -> Result<(), CodecError> {
+    match event.schema.name {
+        "event.away_changed" => {
+            let Some(projection) = decode_event_home_projection(event, budget, depth)? else {
+                return Ok(());
+            };
+            semantic(
+                unsigned_field(event.schema, &event.fields, "away_kind")?
+                    == unsigned_field(projection.schema, &projection.fields, "away_kind")?,
+            )?;
+            semantic(
+                opaque_field(event.schema, &event.fields, "away_text")?
+                    == opaque_field(projection.schema, &projection.fields, "away_text")?,
+            )
+        }
+        "event.display_name_changed" => {
+            let Some(projection) = decode_event_home_projection(event, budget, depth)? else {
+                return Ok(());
+            };
+            semantic(
+                opaque_field(event.schema, &event.fields, "display_name")?
+                    == opaque_field(projection.schema, &projection.fields, "display_name")?,
+            )
+        }
+        "event.channel_modes_changed" => validate_projected_mode_channels(event),
+        _ => Ok(()),
+    }
+}
+
+fn decode_event_home_projection(
+    event: &SchemaObject,
+    budget: &mut DecodeBudget,
+    depth: usize,
+) -> Result<Option<SchemaObject>, CodecError> {
+    let session = structure_field(event.schema, &event.fields, "session")?;
+    let bytes = opaque_field(session.schema, &session.fields, "home_session_projection")?;
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    let projection_depth = depth.checked_add(2).ok_or(CodecError::Overflow)?;
+    decode_one_without_embedded(
+        "FederationSessionProjection",
+        bytes,
+        budget,
+        projection_depth,
+    )
+    .map(Some)
+}
+
+fn validate_projected_mode_channels(event: &SchemaObject) -> Result<(), CodecError> {
+    let event_channel = opaque_field(event.schema, &event.fields, "channel_instance_id")?;
+    let changes = vector_field(event.schema, &event.fields, "changes")?;
+    for change in changes {
+        let mode_code = unsigned_field(change.schema, &change.fields, "mode_code")?;
+        if !matches!(mode_code, 1..=3 | 12..=16) {
+            continue;
+        }
+        let argument = opaque_field(change.schema, &change.fields, "argument")?;
+        let projected_channel = argument
+            .get(..CHANNEL_INSTANCE_ID_BYTES)
+            .ok_or(CodecError::CrossReference)?;
+        semantic(projected_channel == event_channel)?;
     }
     Ok(())
 }
@@ -477,7 +578,7 @@ fn validate_account_challenge(
     fields: &[WireValue],
 ) -> Result<(), CodecError> {
     let message = opaque_field(schema, fields, "opaque_message")?;
-    semantic(matches!(message.len(), 64 | 288))
+    semantic(matches!(message.len(), 64 | 320))
 }
 
 fn validate_account_completion(

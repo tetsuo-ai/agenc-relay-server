@@ -43,6 +43,11 @@ impl OutputBudget for ExactBudget {
 }
 
 #[test]
+fn batch_nesting_hard_max_is_sixteen() {
+    assert_eq!(MAX_BATCH_NESTING, 16);
+}
+
+#[test]
 fn capability_profiles_cover_errors_dependencies_changes_and_splitting()
 -> Result<(), Box<dyn Error>> {
     assert_eq!(
@@ -80,7 +85,7 @@ fn capability_profiles_cover_errors_dependencies_changes_and_splitting()
     let new_recovery = CapabilitySpec::new("agenc.ag/recovery", Some("v1.AQEBAQEBAQEBAQEBAQEBAQ"))?;
     let sts = CapabilitySpec::new("sts", Some("duration=31536000"))?;
     assert_eq!(
-        CapabilityProfile::new(vec![batch.try_clone()?]).err(),
+        CapabilityProfile::new(vec![labeled.try_clone()?]).err(),
         Some(CapError::InvalidAdvertisement)
     );
     let batch_profile =
@@ -140,7 +145,7 @@ fn capability_profiles_cover_errors_dependencies_changes_and_splitting()
     ));
     assert!(matches!(
         dependency_state.request("batch labeled-response", &dependency_profile)?,
-        CapRequestReply::Nak(_)
+        CapRequestReply::Ack(_)
     ));
     assert!(matches!(
         dependency_state.request("message-tags batch labeled-response", &dependency_profile)?,
@@ -708,10 +713,15 @@ fn sasl_covers_abort_retry_finish_completion_and_failure_branches() -> Result<()
     }
     let mut long = SaslTransport::new()?;
     long.client("AGENC-OPAQUE", 0)?;
-    assert_eq!(
-        long.client(&"A".repeat(AUTH_CHUNK_CHARACTERS + 1), 1).err(),
-        Some(AuthTransportError::InvalidChunk)
-    );
+    assert!(matches!(
+        long.client(&"A".repeat(AUTH_CHUNK_CHARACTERS + 1), 1)?
+            .as_slice(),
+        [SaslAction::Numeric(SaslNumeric::TooLong)]
+    ));
+    assert!(matches!(
+        long.client("AGENC-OPAQUE", 2)?.as_slice(),
+        [SaslAction::SendPlus]
+    ));
     let mut invalid_base64 = SaslTransport::new()?;
     invalid_base64.client("AGENC-OPAQUE", 0)?;
     for _ in 0..15 {
@@ -1572,7 +1582,8 @@ fn registration_covers_cap_pass_generation_close_and_keepalive_paths() -> Result
     ));
     assert!(matches!(
         negotiation.message(parsed("CAP LIST")?, 7, &advertised)?.as_slice(),
-        [RegistrationAction::CapabilityList(values)] if values.contains(&"batch".to_owned())
+        [RegistrationAction::CapabilityList { tokens, multiline: true }]
+            if tokens.contains(&"batch".to_owned())
     ));
     assert!(
         negotiation

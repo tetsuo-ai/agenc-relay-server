@@ -4,12 +4,13 @@ Status: historical pass on 2026-08-24 for commit
 `6b48ecb73afd471ed576146483098c19c12893f9`. This report applies only to the
 staged tree that was exported with `git checkout-index` and committed without
 changing its contents or executable modes. It does not provide evidence for
-the current uncommitted tree.
+the current uncommitted tree. No current manifest with a verifiable artifact
+path closes `S00-900` under the current evidence policy.
 
 ## Verification summary
 
 `bash scripts/check-stage-zero.sh` passed from the clean staged-tree export.
-The gate used Rust 1.98.0 and checked both
+The recorded run used Rust 1.98.0 and checked both
 `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`. It ran the frozen
 specification check, every policy validator and negative self-test, formatting,
 compilation, Clippy, unit/integration/doc tests, dependency-tree inspection,
@@ -67,7 +68,7 @@ unknown-source, license, yanked, duplicate, and advisory policies are closed;
 
 `EVID-S00-007-EVIDENCE-LAYOUT`: unit/integration, vector, transcript, property,
 fuzz, Loom, fault, interoperability, capacity, and release locations are named.
-The catalogs now expose 261 unique stable evidence bindings.
+The catalog exposes 76 unique stable evidence bindings at this commit.
 
 ## S00-008
 
@@ -80,9 +81,9 @@ closure, with no deterministic production feature.
 ## S00-009
 
 `EVID-S00-009-CI-BASELINE`: the least-privilege workflow pins its sole action
-and every tool, then invokes the same complete gate. CI validator mutations
-reject floating actions, write permission, weakened failures, missing audit
-policy, and globally widened coverage instrumentation.
+and every tool, then invokes the same recorded command set. CI validator
+mutations reject floating actions, write permission, weakened failures, missing
+audit policy, and globally widened coverage instrumentation.
 
 ## S00-010
 
@@ -93,7 +94,7 @@ missing, duplicate, stale, invalid, and unbound categories.
 
 ## S00-900
 
-`EVID-S00-900-STAGE-GATE`: the complete gate passes from the clean staged-tree
-export on both targets, coverage exceeds 90%, the release graph excludes
-testkit, and the binary refuses to impersonate a server. This gate makes no
-claim for work completed under a later stage.
+`EVID-S00-900-STAGE-GATE`: the recorded run passed from the clean staged-tree
+export on both targets, coverage exceeded 90%, the release graph excluded
+testkit, and the binary refused to impersonate a server. This historical
+observation has no verifiable artifact path and does not close `S00-900`.

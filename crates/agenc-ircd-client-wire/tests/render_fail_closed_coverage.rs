@@ -6,8 +6,10 @@ use std::error::Error;
 
 use agenc_ircd_client_wire::{
     CapRequestReply, CapabilityProfile, CapabilitySpec, CapabilityState, MAX_COMMAND_BYTES,
-    OutputBudget, RenderError, WireMessage, labeled_response, numeric_reply,
+    OutputBudget, RenderError, ReplyKind, SafeReplyDescription, WireMessage, labeled_response,
+    numeric_reply, standard_reply,
 };
+use agenc_ircd_types::PublicErrorCode;
 
 struct ExactBudget(usize);
 
@@ -41,6 +43,56 @@ fn command_budget_accepts_the_exact_boundary_and_rejects_the_next_byte()
         WireMessage::new("s", "NOTICE", &[], Some(&oversized)).err(),
         Some(RenderError::LineBudget)
     );
+    Ok(())
+}
+
+#[test]
+fn notice_standard_reply_allows_syntax_errors_and_suppresses_delivery_errors()
+-> Result<(), Box<dyn Error>> {
+    let advertised = CapabilityProfile::new(vec![CapabilitySpec::new("standard-replies", None)?])?;
+    let mut capabilities = CapabilityState::default();
+    capabilities.ls(Some("302"), &advertised)?;
+    assert!(matches!(
+        capabilities.request("standard-replies", &advertised)?,
+        CapRequestReply::Ack(_)
+    ));
+
+    let syntax_failure = standard_reply(
+        &capabilities,
+        "server",
+        ReplyKind::Fail,
+        "NOTICE",
+        PublicErrorCode::INVALIDARGUMENT,
+        &[],
+        SafeReplyDescription::new("Invalid NOTICE syntax")?,
+    )?;
+    let measured = syntax_failure.measure()?;
+    let mut budget = ExactBudget(measured.bytes());
+    let rendered = measured.encode(&mut budget)?;
+    assert_eq!(
+        rendered.as_bytes(),
+        b":server FAIL NOTICE INVALID_ARGUMENT :Invalid NOTICE syntax\r\n"
+    );
+
+    for suppressed in [
+        PublicErrorCode::NETWORKUNAVAILABLE,
+        PublicErrorCode::SERVERBUSY,
+        PublicErrorCode::E2EEREQUIRED,
+    ] {
+        assert_eq!(
+            standard_reply(
+                &capabilities,
+                "server",
+                ReplyKind::Fail,
+                "NOTICE",
+                suppressed,
+                &[],
+                SafeReplyDescription::new("Suppressed delivery error")?,
+            )
+            .err(),
+            Some(RenderError::InapplicableReply)
+        );
+    }
     Ok(())
 }
 
@@ -108,6 +160,25 @@ fn stage_two_numerics_reject_noncanonical_middle_and_trailing_shapes() -> Result
         );
     }
     Ok(())
+}
+
+#[test]
+fn numeric_counts_and_isupport_names_use_their_exact_grammars() {
+    assert_eq!(
+        numeric_reply(
+            "server",
+            252,
+            "nick",
+            &["not-decimal"],
+            Some("operator count"),
+        )
+        .err(),
+        Some(RenderError::InapplicableReply)
+    );
+    assert_eq!(
+        numeric_reply("server", 5, "nick", &["=value"], Some("are supported")).err(),
+        Some(RenderError::InapplicableReply)
+    );
 }
 
 #[test]
