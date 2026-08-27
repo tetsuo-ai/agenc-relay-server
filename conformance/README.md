@@ -48,8 +48,10 @@ The command inherits every Stage 03 check and adds the exact cryptographic
 profile, auth and crypto boundary tests, account-generation fences, and
 account-envelope fuzzing. The reviewed `opaque-ke` source patch is pinned by
 `conformance/vendored-dependencies.toml` and checked by workspace policy. The
-command does not close `S04-900`; that task remains open until all inherited
-checks pass and exact-revision evidence is recorded.
+command alone does not close `S04-900`. The five checked-in manifests for
+source commit `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` record passed Stage 00
+through 04 gates with matching artifacts, so those stage gates are closed for
+that revision. Any later source change requires a new exact-source record.
 
 For an evidence-only check:
 

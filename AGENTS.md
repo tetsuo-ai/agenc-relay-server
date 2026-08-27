@@ -17,7 +17,7 @@ Rust implementation must follow Section 24 of `docs/ircd-architecture-and-implem
 - `cargo test --workspace --all-features --locked`: run unit and integration tests.
 - `cargo deny check` and `cargo audit --deny warnings`: check dependencies and advisories.
 
-The `agenc-ircd` binary still exits unsuccessfully because daemon composition begins in Stage 06. This fail-closed behavior prevents the binary from being mistaken for a server. Implementation checks do not close a stage: `S00-900` through `S04-900` remain open until passed evidence is checked in for an exact source revision. Implement stages in `TODO.md` order.
+The `agenc-ircd` binary still exits unsuccessfully because daemon composition begins in Stage 06. This fail-closed behavior prevents the binary from being mistaken for a server. Implementation checks do not close a stage by themselves. Checked-in exact-source evidence closes `S00-900` through `S04-900` for commit `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb`. Stage 05 is next; implement stages in `TODO.md` order.
 
 ## Coding Style & Naming Conventions
 
@@ -34,7 +34,7 @@ Use concise imperative subjects such as `Add bounded client framing`. Keep commi
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **agenc-ircd** (32253 symbols, 77865 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **agenc-ircd** (32284 symbols, 77956 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
@@ -74,25 +74,5 @@ This project is indexed by GitNexus as **agenc-ircd** (32253 symbols, 77865 rela
 | Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
 | Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
 | Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
-| Work in the Tests area (869 symbols) | `.claude/skills/generated/tests/SKILL.md` |
-| Work in the Scripts area (270 symbols) | `.claude/skills/generated/scripts/SKILL.md` |
-| Work in the Cluster_110 area (135 symbols) | `.claude/skills/generated/cluster-110/SKILL.md` |
-| Work in the Cluster_154 area (104 symbols) | `.claude/skills/generated/cluster-154/SKILL.md` |
-| Work in the Fuzz_targets area (82 symbols) | `.claude/skills/generated/fuzz-targets/SKILL.md` |
-| Work in the Cluster_41 area (53 symbols) | `.claude/skills/generated/cluster-41/SKILL.md` |
-| Work in the Cluster_9 area (30 symbols) | `.claude/skills/generated/cluster-9/SKILL.md` |
-| Work in the Cluster_174 area (29 symbols) | `.claude/skills/generated/cluster-174/SKILL.md` |
-| Work in the Cluster_121 area (21 symbols) | `.claude/skills/generated/cluster-121/SKILL.md` |
-| Work in the Cluster_65 area (18 symbols) | `.claude/skills/generated/cluster-65/SKILL.md` |
-| Work in the Cluster_150 area (17 symbols) | `.claude/skills/generated/cluster-150/SKILL.md` |
-| Work in the Cluster_5 area (15 symbols) | `.claude/skills/generated/cluster-5/SKILL.md` |
-| Work in the Cluster_22 area (15 symbols) | `.claude/skills/generated/cluster-22/SKILL.md` |
-| Work in the Cluster_132 area (15 symbols) | `.claude/skills/generated/cluster-132/SKILL.md` |
-| Work in the Cluster_152 area (15 symbols) | `.claude/skills/generated/cluster-152/SKILL.md` |
-| Work in the Cluster_58 area (13 symbols) | `.claude/skills/generated/cluster-58/SKILL.md` |
-| Work in the Cluster_109 area (12 symbols) | `.claude/skills/generated/cluster-109/SKILL.md` |
-| Work in the Cluster_78 area (11 symbols) | `.claude/skills/generated/cluster-78/SKILL.md` |
-| Work in the Cluster_104 area (11 symbols) | `.claude/skills/generated/cluster-104/SKILL.md` |
-| Work in the Cluster_126 area (11 symbols) | `.claude/skills/generated/cluster-126/SKILL.md` |
 
 <!-- gitnexus:end -->

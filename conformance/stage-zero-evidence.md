@@ -1,11 +1,12 @@
 # Stage 00 Evidence
 
-Status: historical pass on 2026-08-24 for commit
-`6b48ecb73afd471ed576146483098c19c12893f9`. This report applies only to the
-staged tree that was exported with `git checkout-index` and committed without
-changing its contents or executable modes. It does not provide evidence for
-the current uncommitted tree. No current manifest with a verifiable artifact
-path closes `S00-900` under the current evidence policy.
+Status: closed on 2026-08-27 for source commit
+`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb`. The [current
+manifest](evidence/stage-00-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json)
+binds a clean Stage 00 gate run to its checked-in
+[artifact](evidence/artifacts/stage-zero-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json).
+The 2026-08-24 pass for commit
+`6b48ecb73afd471ed576146483098c19c12893f9` remains historical evidence.
 
 ## Verification summary
 
@@ -96,5 +97,7 @@ missing, duplicate, stale, invalid, and unbound categories.
 
 `EVID-S00-900-STAGE-GATE`: the recorded run passed from the clean staged-tree
 export on both targets, coverage exceeded 90%, the release graph excluded
-testkit, and the binary refused to impersonate a server. This historical
-observation has no verifiable artifact path and does not close `S00-900`.
+testkit, and the binary refused to impersonate a server. The current manifest
+records the same required gate on exact source commit
+`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` with a verified artifact path and
+closes `S00-900` for that revision.

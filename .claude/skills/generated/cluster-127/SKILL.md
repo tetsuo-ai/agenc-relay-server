@@ -1,9 +1,9 @@
 ---
-name: cluster-126
-description: "Skill for the Cluster_126 area of agenc-ircd. 11 symbols across 2 files."
+name: cluster-127
+description: "Skill for the Cluster_127 area of agenc-ircd. 11 symbols across 2 files."
 ---
 
-# Cluster_126
+# Cluster_127
 
 11 symbols | 2 files | Cohesion: 91%
 
@@ -11,7 +11,7 @@ description: "Skill for the Cluster_126 area of agenc-ircd. 11 symbols across 2 
 
 - Working with code in `crates/`
 - Understanding how can_grant work
-- Modifying cluster_126-related functionality
+- Modifying cluster_127-related functionality
 
 ## Key Files
 
@@ -46,12 +46,12 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Cluster_127 | 1 calls |
-| Cluster_110 | 1 calls |
+| Cluster_128 | 1 calls |
+| Cluster_111 | 1 calls |
 
 ## How to Explore
 
 1. `context({name: "can_grant"})` — see callers and callees
-2. `query({search_query: "cluster_126"})` — find related execution flows
+2. `query({search_query: "cluster_127"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

@@ -1,9 +1,9 @@
 ---
-name: cluster-152
-description: "Skill for the Cluster_152 area of agenc-ircd. 15 symbols across 2 files."
+name: cluster-153
+description: "Skill for the Cluster_153 area of agenc-ircd. 15 symbols across 2 files."
 ---
 
-# Cluster_152
+# Cluster_153
 
 15 symbols | 2 files | Cohesion: 63%
 
@@ -11,7 +11,7 @@ description: "Skill for the Cluster_152 area of agenc-ircd. 15 symbols across 2 
 
 - Working with code in `crates/`
 - Understanding how decode_one_without_embedded, validate_embedded_semantics work
-- Modifying cluster_152-related functionality
+- Modifying cluster_153-related functionality
 
 ## Key Files
 
@@ -51,13 +51,13 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Cluster_154 | 17 calls |
+| Cluster_155 | 17 calls |
 | Tests | 4 calls |
-| Cluster_155 | 1 calls |
+| Cluster_156 | 1 calls |
 
 ## How to Explore
 
 1. `context({name: "decode_one_without_embedded"})` — see callers and callees
-2. `query({search_query: "cluster_152"})` — find related execution flows
+2. `query({search_query: "cluster_153"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

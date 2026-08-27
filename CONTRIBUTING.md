@@ -28,9 +28,10 @@ bash scripts/check-stage-four.sh
 For a narrower development loop, use `cargo fmt --all --check`,
 `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`,
 and `cargo test --workspace --all-features --locked`. The full implementation
-check must still pass before merge. That check does not close `S04-900`;
-closure also requires passed artifact-backed evidence for the exact source
-revision.
+check must still pass before merge. A check does not close a stage by itself.
+The checked [Stage 04 manifest](conformance/evidence/stage-04-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json)
+records the current exact-source closure; any later source change requires new
+artifact-backed evidence.
 
 ## Pull requests
 

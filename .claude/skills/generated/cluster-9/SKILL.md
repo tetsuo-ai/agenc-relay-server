@@ -71,7 +71,7 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Cluster_110 | 7 calls |
+| Cluster_111 | 7 calls |
 | Cluster_5 | 5 calls |
 | Tests | 5 calls |
 | Cluster_11 | 4 calls |

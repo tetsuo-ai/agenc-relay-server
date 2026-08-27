@@ -1,5 +1,11 @@
 # Stage 04 Evidence
 
+Status: closed on 2026-08-27 for source commit
+`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb`. The [current
+manifest](evidence/stage-04-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json)
+binds every required record to one clean gate run and its checked-in
+[artifact](evidence/artifacts/stage-four-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json).
+
 Stage 04 implements the cryptographic adapters and account-authentication
 state machines. The adapters compose maintained libraries; they do not
 implement cryptographic primitives.
@@ -119,8 +125,9 @@ The 24 CPU-hour release campaign for each target remains Stage 10 evidence.
 ## Gate state
 
 `bash scripts/check-stage-four.sh` inherits every Stage 00 through Stage 03
-check and adds the Stage 04 profile, tests, and fuzz target. This evidence was
-prepared in a dirty working tree and does not close
-`EVID-S04-900-STAGE-GATE`. The corrected normative OPAQUE length must first be
-frozen at an exact Git commit in `conformance/spec-baseline.toml`, and the full
-gate must pass again on that revision.
+check and adds the Stage 04 profile, tests, and fuzz target. The [current
+manifest](evidence/stage-04-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json)
+binds the full passed gate and its checked-in artifact to exact source commit
+`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb`. The baseline at that commit
+contains the corrected normative OPAQUE length, so the record closes
+`EVID-S04-900-STAGE-GATE` for that revision.

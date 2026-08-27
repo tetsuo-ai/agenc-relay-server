@@ -1,9 +1,12 @@
 # Stage 02 Evidence
 
-Status: historical passed run on 2026-08-26. The machine-readable manifest in
-`conformance/evidence/` binds these claims to the tested source revision. Its
-artifact records contain digests but no checked-in provenance paths, so the
-manifest remains archive evidence and does not close `S02-900`.
+Status: closed on 2026-08-27 for source commit
+`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb`. The [current
+manifest](evidence/stage-02-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json)
+binds a clean Stage 02 gate run to its checked-in
+[artifact](evidence/artifacts/stage-two-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json).
+The 2026-08-26 manifest remains archive evidence for its earlier source
+revision.
 
 ## S02-001
 
@@ -81,5 +84,7 @@ campaign remains release task S10-004.
 2026-08-26 run passed the inherited checks, both declared Linux targets,
 Clippy, tests, documentation tests, dependency checks, generated-artifact
 validation, 90.03% branch coverage, 93.97% line coverage, and four 10,000-run
-fuzz smokes. That record has no verifiable artifact path and does not close
-`S02-900`.
+fuzz smokes. The current run repeated the required gate, reached 90.01% branch
+coverage and 95.59% line coverage, and recorded four 10,000-run fuzz smokes.
+Its manifest has a verified artifact path and closes `S02-900` for exact source
+commit `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb`.

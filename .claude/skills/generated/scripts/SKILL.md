@@ -1,11 +1,11 @@
 ---
 name: scripts
-description: "Skill for the Scripts area of agenc-ircd. 270 symbols across 16 files."
+description: "Skill for the Scripts area of agenc-ircd. 271 symbols across 16 files."
 ---
 
 # Scripts
 
-270 symbols | 16 files | Cohesion: 86%
+271 symbols | 16 files | Cohesion: 86%
 
 ## When to Use
 

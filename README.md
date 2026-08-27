@@ -44,11 +44,11 @@ Ed25519, and authenticated storage.
 
 | Stage | State | Outcome |
 | --- | --- | --- |
-| 00 | implemented; closure reopened | Reproducible workspace, source baseline, policy, and traceability |
-| 01 | implemented; closure reopened | 53 registry constants, validated types, 128 canonical object codecs, and independent vectors |
-| 02 | implemented; closure reopened | Incremental framing, client parsing, capability and registration state, bounded rendering, transcripts, and fuzz targets |
-| 03 | implemented; closure reopened | Pure accounts, sessions, channels, authorization, privacy projections, plans, explicit external inputs, and an independent reference model |
-| 04 | implementation complete; closure open | Secret-safe crypto adapters, fixed HPKE and OPAQUE profiles, account authentication, destructive-account proofs, bounded workers, and fuzz coverage |
+| 00 | complete; checkpoint recorded | Reproducible workspace, source baseline, policy, and traceability |
+| 01 | complete; checkpoint recorded | 53 registry constants, validated types, 128 canonical object codecs, and independent vectors |
+| 02 | complete; checkpoint recorded | Incremental framing, client parsing, capability and registration state, bounded rendering, transcripts, and fuzz targets |
+| 03 | complete; checkpoint recorded | Pure accounts, sessions, channels, authorization, privacy projections, plans, explicit external inputs, and an independent reference model |
+| 04 | complete; checkpoint recorded | Secret-safe crypto adapters, fixed HPKE and OPAQUE profiles, account authentication, destructive-account proofs, bounded workers, and fuzz coverage |
 | 05-10 | planned | Persistence, runtime composition, federation, E2EE routing, optional profiles, and production qualification |
 
 The current highest implemented layer is account authentication.
@@ -61,6 +61,7 @@ revision and session-generation fences without doing I/O.
 Stage 05 is next. The complete dependency-ordered roadmap lives in
 [TODO.md](TODO.md). See the
 [Stage 04 evidence record](conformance/stage-four-evidence.md) and the
+[exact Stage 04 checkpoint](conformance/evidence/stage-04-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json), plus the
 [latest CI runs](https://github.com/tetsuo-ai/agenc-ircd/actions).
 
 ## Trust shape
@@ -101,9 +102,10 @@ and crypto tests, domain session-fence tests, and account-envelope fuzzing. The
 reviewed command list is in [conformance/gates.toml](conformance/gates.toml).
 
 The reviewed `opaque-ke` patch is vendored, hashed, and checked by workspace
-policy. The implementation commands do not close a stage. `S00-900` through
-`S04-900` remain open until the inherited checks pass on exact source commits
-and the required artifact-backed evidence records are present.
+policy. An implementation command alone does not close a stage. The checked-in
+Stage 00 through 04 manifests bind passed gates and matching artifacts to exact
+source commit `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb`, so `S00-900` through
+`S04-900` are closed for that revision.
 
 There is no server start command yet. The binary fails closed until its runtime
 is composed in Stage 06.

@@ -1,9 +1,9 @@
 ---
-name: cluster-121
-description: "Skill for the Cluster_121 area of agenc-ircd. 21 symbols across 1 files."
+name: cluster-122
+description: "Skill for the Cluster_122 area of agenc-ircd. 21 symbols across 1 files."
 ---
 
-# Cluster_121
+# Cluster_122
 
 21 symbols | 1 files | Cohesion: 96%
 
@@ -11,7 +11,7 @@ description: "Skill for the Cluster_121 area of agenc-ircd. 21 symbols across 1 
 
 - Working with code in `crates/`
 - Understanding how apply_prepared work
-- Modifying cluster_121-related functionality
+- Modifying cluster_122-related functionality
 
 ## Key Files
 
@@ -60,11 +60,11 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Cluster_110 | 2 calls |
+| Cluster_111 | 2 calls |
 
 ## How to Explore
 
 1. `context({name: "apply_prepared"})` — see callers and callees
-2. `query({search_query: "cluster_121"})` — find related execution flows
+2. `query({search_query: "cluster_122"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

@@ -1,8 +1,10 @@
 # Stage 03 Evidence
 
-Status: implementation task work is complete. No manifest binds the required
-records and verifiable artifact bytes to one exact source commit, so `S03-900`
-remains open.
+Status: closed on 2026-08-27 for source commit
+`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb`. The [current
+manifest](evidence/stage-03-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json)
+binds every required record to one clean gate run and its checked-in
+[artifact](evidence/artifacts/stage-three-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json).
 
 Stage 03 implements pure domain behavior. The domain crate has no sockets,
 filesystem access, executor, database handle, concrete clock, random generator,
@@ -100,5 +102,7 @@ so a later generator change cannot silently replace either operation sequence.
 `EVID-S03-900-STAGE-GATE` names `bash scripts/check-stage-three.sh`. The command
 inherits the Stage 02 implementation checks and adds requirement ownership,
 generated-artifact checks, independent domain checks, targeted model
-comparisons, and the full Stage 03 behavior matrix. A local pass does not close
-`S03-900` without the exact-revision evidence described above.
+comparisons, and the full Stage 03 behavior matrix. The current manifest binds
+that passed run to exact source commit
+`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` and closes `S03-900` for that
+revision.

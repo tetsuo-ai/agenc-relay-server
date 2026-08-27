@@ -1,9 +1,12 @@
 # Stage 01 Evidence
 
-Status: historical pass on 2026-08-24 for commit
-`7ae6439b472521d3c23fb99261deaf8964a70c5a`. This report does not provide
-evidence for the current uncommitted tree. No current manifest with a
-verifiable artifact path closes `S01-900` under the current evidence policy.
+Status: closed on 2026-08-27 for source commit
+`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb`. The [current
+manifest](evidence/stage-01-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json)
+binds a clean Stage 01 gate run to its checked-in
+[artifact](evidence/artifacts/stage-one-implementation-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json).
+The 2026-08-24 pass for commit
+`7ae6439b472521d3c23fb99261deaf8964a70c5a` remains historical evidence.
 
 ## Verification summary
 
@@ -113,5 +116,6 @@ mutations.
 lockfile and tools on both targets. Generated-source freshness, six artifact
 checker mutations, all workspace tests, Clippy with warnings denied,
 `cargo-deny`, `cargo-audit`, and the greater-than-90% branch threshold passed.
-This historical observation has no verifiable artifact path and does not close
-`S01-900`.
+The current manifest records the same required gate on exact source commit
+`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` with a verified artifact path and
+closes `S01-900` for that revision.

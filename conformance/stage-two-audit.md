@@ -1,7 +1,8 @@
 # Stage 02 Closure Audit
 
-Status: implementation findings resolved on 2026-08-26. Stage closure was
-reopened after the evidence and requirement-ownership policies were tightened.
+Status: implementation findings resolved on 2026-08-26. Exact-source closure
+was recorded on 2026-08-27 after the evidence and requirement-ownership
+policies were tightened.
 
 This audit records the issues found during the Stage 02 review and how each
 one was closed. The architecture specification remains authoritative.
@@ -39,5 +40,8 @@ targets, formatting, Clippy with warnings denied, tests, documentation tests,
 dependency policy, advisories, generated artifacts, and all four deterministic
 10,000-run fuzz smokes. Coverage was 90.03% of branches and 93.97% of lines.
 The source revision and artifact digest are recorded in the Stage 02 evidence
-manifest, but that manifest has no checked-in artifact path. It is archive
-evidence and does not close `S02-900` under the current policy.
+manifest. That 2026-08-26 manifest remains archive evidence. The [current
+manifest](evidence/stage-02-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json)
+binds a repeated Stage 02 gate run to a checked-in artifact and closes
+`S02-900` for exact source commit
+`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb`.

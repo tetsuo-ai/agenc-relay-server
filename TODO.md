@@ -50,11 +50,11 @@ References: [Architecture §§1.2–4](docs/ircd-architecture-and-implementation
 
 | Stage | Outcome | Implementation | Latest local gate | Revision-bound evidence |
 | --- | --- | --- | --- | --- |
-| 00 | Reproducible workspace and traceability foundation | Task work complete; closure reopened | Not run on the current tree | Incomplete under the artifact-backed closure policy |
-| 01 | Registries, validated types, and canonical codecs | Task work complete; closure reopened | Not run on the current tree | Incomplete under the artifact-backed closure policy |
-| 02 | Bounded client wire implementation | Task work complete; closure reopened | Not run on the current tree | Historical manifest has no verifiable artifact path |
-| 03 | Pure deterministic domain model | Task work complete; closure reopened | Not run on the current tree | Incomplete under the artifact-backed closure policy |
-| 04 | Crypto adapters and account authentication | Task work complete; closure open | Not run on an exact committed revision | Incomplete under the artifact-backed closure policy |
+| 00 | Reproducible workspace and traceability foundation | Complete | Pass, 2026-08-27 | [Exact checkpoint](conformance/evidence/stage-00-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json) |
+| 01 | Registries, validated types, and canonical codecs | Complete | Pass, 2026-08-27 | [Exact checkpoint](conformance/evidence/stage-01-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json) |
+| 02 | Bounded client wire implementation | Complete | Pass, 2026-08-27 | [Exact checkpoint](conformance/evidence/stage-02-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json) |
+| 03 | Pure deterministic domain model | Complete | Pass, 2026-08-27 | [Exact checkpoint](conformance/evidence/stage-03-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json) |
+| 04 | Crypto adapters and account authentication | Complete | Pass, 2026-08-27 | [Exact checkpoint](conformance/evidence/stage-04-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json) |
 | 05 | Durable and recoverable persistence | Not started | Not run | Absent |
 | 06 | Conforming single-node daemon | Not started | Not run | Absent |
 | 07 | Conforming base federation | Not started | Not run | Absent |
@@ -241,7 +241,7 @@ source baseline, and evidence model are fixed before protocol behavior lands.
   - Targets: entire repository.
   - References: [Architecture §§24, 28.1, 28.8, and 29](docs/ircd-architecture-and-implementation-spec.md#24-rust-workspace-and-module-boundaries).
   - Invariants: `CON-01`, `CON-02`, `OPS-02`.
-  - Evidence: all Stage-00 checks pass from a clean clone on both declared targets; later requirements remain explicitly `unimplemented`.
+  - Evidence: all Stage-00 checks passed from exact source commit `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb`; the [current manifest](conformance/evidence/stage-00-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json) binds the checked-in gate artifact.
 
 ## Stage 01 — Registries, validated types, and canonical codecs
 
@@ -365,7 +365,7 @@ stages exist as bounded, private-field types with independent vectors.
   - Targets: `agenc-ircd-types`, foundational wire code, testkit vectors.
   - References: [Architecture §29 phase 1](docs/ircd-architecture-and-implementation-spec.md#29-implementation-sequence-and-acceptance-gates).
   - Invariants: `TRN-04` through `TRN-06`, applicable identity and federation representation invariants.
-  - Evidence: [EVID-S01-900-STAGE-GATE](conformance/stage-one-evidence.md#s01-900) records the historical pinned, locked, dual-target run; it does not close the current gate.
+  - Evidence: [EVID-S01-900-STAGE-GATE](conformance/stage-one-evidence.md#s01-900) and the [current manifest](conformance/evidence/stage-01-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json) record the pinned, locked, dual-target run on the exact source commit.
 
 ## Stage 02 — Bounded client wire
 
@@ -373,10 +373,11 @@ Outcome: arbitrary client bytes can be framed, parsed, negotiated, and rendered
 through a total, resource-bounded wire layer with no sockets, policy, or state
 mutation inside the crate.
 
-Stage 02 task work is complete. A manifest records a passed 2026-08-26 run for
-commit `cd1d7c937c2be9c469e6131fda21406764a39b78`, but its artifact records have
-digests without checked-in provenance paths. It remains archive evidence and
-does not close `S02-900` under the current policy. The
+Stage 02 task work and its gate are complete. The [current
+manifest](conformance/evidence/stage-02-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json)
+binds the 2026-08-27 run and its checked-in artifact to exact source commit
+`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb`. The earlier manifest for commit
+`cd1d7c937c2be9c469e6131fda21406764a39b78` remains archive evidence. The
 [Stage 02 closure audit](conformance/stage-two-audit.md) records the resolved
 wire-size, reply-shape, and traceability issues.
 
@@ -486,7 +487,7 @@ wire-size, reply-shape, and traceability issues.
   - Targets: `agenc-ircd-client-wire`, testkit transcripts and fuzz corpus.
   - References: [Architecture §29 phase 2](docs/ircd-architecture-and-implementation-spec.md#29-implementation-sequence-and-acceptance-gates).
   - Invariants: `TRN-04` through `TRN-06`.
-  - Evidence: parser fuzzing and every wire boundary/registration transcript pass with mandatory workspace gates.
+  - Evidence: parser fuzzing and every wire boundary and registration transcript passed with the mandatory workspace gates; the [current manifest](conformance/evidence/stage-02-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json) binds the result to the exact source commit.
 
 ## Stage 03 — Pure domain model
 
@@ -610,7 +611,7 @@ filesystem calls, concrete clocks, or random generators.
   - Targets: `agenc-ircd-domain`, testkit reference model.
   - References: [Architecture §29 phase 3](docs/ircd-architecture-and-implementation-spec.md#29-implementation-sequence-and-acceptance-gates).
   - Invariants: applicable `ID-*`, `PRV-*`, `STA-*`, `CON-*`.
-  - Evidence: generated sequence tests, privacy matrices, model equality, and mandatory workspace gates pass.
+  - Evidence: generated sequence tests, privacy matrices, model equality, and mandatory workspace gates passed; the [current manifest](conformance/evidence/stage-03-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json) binds the result to the exact source commit.
 
 ## Stage 04 — Cryptographic adapters and account authentication
 
@@ -754,7 +755,7 @@ credential change have complete protocol state machines and vectors.
   - Targets: `agenc-ircd-crypto`, `agenc-ircd-auth`, affected testkit surfaces.
   - References: [Architecture §29 phase 4](docs/ircd-architecture-and-implementation-spec.md#29-implementation-sequence-and-acceptance-gates).
   - Invariants: `AUTH-*`, `ID-05` through `ID-07`, `CON-02`, `CON-04`, `CON-05`.
-  - Evidence: all named acceptance evidence and mandatory workspace gates pass under the pinned lockfile.
+  - Evidence: all named acceptance evidence and mandatory workspace gates passed under the pinned lockfile; the [current manifest](conformance/evidence/stage-04-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json) binds the result to the exact source commit.
 
 ## Stage 05 — Persistence, recovery, and durable construction
 
