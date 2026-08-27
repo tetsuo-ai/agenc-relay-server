@@ -462,6 +462,51 @@ def self_test(root: Path) -> int:
         if relative != expected:
             raise CiError("gate runner derived a noncanonical artifact path")
     cases += 1
+
+    generator = runpy.run_path(str(root / "scripts/generate-gate-evidence.py"))
+    identity_checker = generator.get("require_artifact_identity")
+    path_checker = generator.get("repository_path")
+    artifact_directory = generator.get("ARTIFACT_DIRECTORY")
+    manifest_directory = generator.get("MANIFEST_DIRECTORY")
+    if (
+        not callable(identity_checker)
+        or not callable(path_checker)
+        or not isinstance(artifact_directory, Path)
+        or not isinstance(manifest_directory, Path)
+    ):
+        raise CiError("gate evidence generator does not expose closed path checks")
+    try:
+        identity_checker(
+            "conformance/evidence/artifacts/renamed.json",
+            "stage-four-implementation",
+            "1" * 40,
+        )
+    except ValueError as error:
+        if "does not match its gate and source commit" not in str(error):
+            raise CiError(f"renamed artifact reached the wrong rejection: {error}") from error
+    else:
+        raise CiError("gate evidence generator accepted a renamed artifact")
+    cases += 1
+
+    with tempfile.TemporaryDirectory(prefix="agenc-manifest-path-test-") as temporary:
+        temporary_root = Path(temporary)
+        evidence_directory = temporary_root / manifest_directory
+        evidence_directory.mkdir(parents=True)
+        existing = evidence_directory / "stage-04-existing.json"
+        existing.write_text("reserved\n", encoding="utf-8")
+        try:
+            path_checker(
+                temporary_root,
+                existing.relative_to(temporary_root).as_posix(),
+                manifest_directory,
+                must_exist=False,
+            )
+        except ValueError as error:
+            if "output already exists" not in str(error):
+                raise CiError(f"manifest collision reached the wrong rejection: {error}") from error
+        else:
+            raise CiError("gate evidence generator accepted an existing manifest path")
+    cases += 1
     return cases
 
 

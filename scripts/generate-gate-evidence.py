@@ -76,6 +76,17 @@ def load_policy(root: Path) -> dict[str, object]:
     )
 
 
+def require_artifact_identity(
+    artifact_relative: str,
+    gate: str,
+    source_commit: str,
+) -> None:
+    """Require the deterministic filename bound to a gate and source commit."""
+    expected = (ARTIFACT_DIRECTORY / f"{gate}-{source_commit}.json").as_posix()
+    if artifact_relative != expected:
+        raise GenerationError("artifact path does not match its gate and source commit")
+
+
 def build_manifest(
     root: Path,
     artifact_path: Path,
@@ -101,11 +112,7 @@ def build_manifest(
         source_commit = artifact.get("source_commit")
         if not isinstance(source_commit, str):
             raise GenerationError("artifact does not name a source commit")
-        expected_artifact = (
-            ARTIFACT_DIRECTORY / f"{gate}-{source_commit}.json"
-        ).as_posix()
-        if artifact_relative != expected_artifact:
-            raise GenerationError("artifact path does not match its gate and source commit")
+        require_artifact_identity(artifact_relative, gate, source_commit)
 
         bindings = validate_catalog(root)  # type: ignore[operator]
         source_hash = canonical_source_sha256(root, source_commit)  # type: ignore[operator]

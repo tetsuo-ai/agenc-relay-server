@@ -41,6 +41,14 @@ the full gate passes. It does not capture command output. The manifest generator
 uses the checked-in catalog and validator, refuses to overwrite a file, and
 validates the run before writing the manifest.
 
-Each stage needs its own gate run. After generating the artifacts and manifests,
-add them to the Git index before running `check` or `close-stage`; both commands
+Each stage needs its own gate run. Record every required stage artifact before
+generating any manifest. An untracked manifest is intentionally rejected by the
+next gate's archive check. After generating all artifacts and manifests, add
+them to the Git index before running `check` or `close-stage`; both commands
 compare the files with their staged bytes.
+
+This record is not a hermetic-build claim. `PATH`, installed tool locations,
+Cargo and Rustup homes, and ignored build caches remain external inputs. The
+stage wrappers verify pinned tool versions before they invoke the recorder, and
+recorded runs reject known shell, Python, Git, and dynamic-loader injection
+variables.

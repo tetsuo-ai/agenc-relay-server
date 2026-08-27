@@ -1436,8 +1436,10 @@ kind = "normative-requirement"
     closure_states["S00-900"] = True
     required_stage_evidence_ids_from_data(0, source_records, closure_states)
 
+    open_states = dict(source_states)
+    open_states["S00-900"] = False
     try:
-        required_stage_evidence_ids_from_data(0, source_records, source_states)
+        required_stage_evidence_ids_from_data(0, source_records, open_states)
     except EvidenceError as error:
         if "source roadmap gate S00-900 is open" not in str(error):
             raise EvidenceError(
