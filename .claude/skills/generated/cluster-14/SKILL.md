@@ -1,17 +1,17 @@
 ---
-name: cluster-12
-description: "Skill for the Cluster_12 area of agenc-ircd. 10 symbols across 2 files."
+name: cluster-14
+description: "Skill for the Cluster_14 area of agenc-ircd. 10 symbols across 2 files."
 ---
 
-# Cluster_12
+# Cluster_14
 
-10 symbols | 2 files | Cohesion: 93%
+10 symbols | 2 files | Cohesion: 96%
 
 ## When to Use
 
 - Working with code in `crates/`
 - Understanding how feed, finish, timeout work
-- Modifying cluster_12-related functionality
+- Modifying cluster_14-related functionality
 
 ## Key Files
 
@@ -44,24 +44,15 @@ Start here when exploring this area:
 | `clear` | Function | `crates/agenc-ircd-client-wire/src/framing.rs` | 224 |
 | `drop` | Function | `crates/agenc-ircd-client-wire/src/framing.rs` | 268 |
 
-## Execution Flows
-
-| Flow | Type | Steps |
-|------|------|-------|
-| `Feed → Clear` | intra_community | 5 |
-| `Feed → Validate_line_budgets` | cross_community | 4 |
-| `Feed → At` | cross_community | 3 |
-
 ## Connected Areas
 
 | Area | Connections |
 |------|-------------|
-| Tests | 1 calls |
-| Cluster_10 | 1 calls |
+| Cluster_12 | 1 calls |
 
 ## How to Explore
 
 1. `context({name: "feed"})` — see callers and callees
-2. `query({search_query: "cluster_12"})` — find related execution flows
+2. `query({search_query: "cluster_14"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

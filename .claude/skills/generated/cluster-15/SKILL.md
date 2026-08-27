@@ -1,9 +1,9 @@
 ---
-name: cluster-13
-description: "Skill for the Cluster_13 area of agenc-ircd. 8 symbols across 2 files."
+name: cluster-15
+description: "Skill for the Cluster_15 area of agenc-ircd. 8 symbols across 2 files."
 ---
 
-# Cluster_13
+# Cluster_15
 
 8 symbols | 2 files | Cohesion: 84%
 
@@ -11,7 +11,7 @@ description: "Skill for the Cluster_13 area of agenc-ircd. 8 symbols across 2 fi
 
 - Working with code in `crates/`
 - Understanding how relays_client_only_tags, add_server_tag, add_client_only_tag work
-- Modifying cluster_13-related functionality
+- Modifying cluster_15-related functionality
 
 ## Key Files
 
@@ -52,18 +52,17 @@ Start here when exploring this area:
 | `Add_client_only_tag → Validate_command` | cross_community | 6 |
 | `Add_client_only_tag → Escaped_len` | intra_community | 5 |
 | `Labeled_response → RenderTag` | cross_community | 5 |
-| `Render_non_capability_action → Escaped_len` | cross_community | 5 |
 | `Add_client_only_tag → RenderTag` | intra_community | 3 |
 
 ## Connected Areas
 
 | Area | Connections |
 |------|-------------|
-| Cluster_24 | 1 calls |
+| Cluster_25 | 1 calls |
 
 ## How to Explore
 
 1. `context({name: "relays_client_only_tags"})` — see callers and callees
-2. `query({search_query: "cluster_13"})` — find related execution flows
+2. `query({search_query: "cluster_15"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

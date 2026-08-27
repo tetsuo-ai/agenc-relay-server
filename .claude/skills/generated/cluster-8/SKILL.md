@@ -1,17 +1,17 @@
 ---
-name: cluster-6
-description: "Skill for the Cluster_6 area of agenc-ircd. 52 symbols across 3 files."
+name: cluster-8
+description: "Skill for the Cluster_8 area of agenc-ircd. 52 symbols across 3 files."
 ---
 
-# Cluster_6
+# Cluster_8
 
-52 symbols | 3 files | Cohesion: 95%
+52 symbols | 3 files | Cohesion: 96%
 
 ## When to Use
 
 - Working with code in `crates/`
 - Understanding how blocks_registration, take_single_parameter, new work
-- Modifying cluster_6-related functionality
+- Modifying cluster_8-related functionality
 
 ## Key Files
 
@@ -60,29 +60,29 @@ Start here when exploring this area:
 
 | Flow | Type | Steps |
 |------|------|-------|
-| `Tick → At` | cross_community | 6 |
 | `Drive → Ignore_event_after_close` | cross_community | 6 |
 | `Drive → Owns_nickname_generation` | cross_community | 6 |
-| `Registration_committed → At` | cross_community | 6 |
-| `Pass_message → At` | cross_community | 6 |
-| `User_message → At` | cross_community | 6 |
-| `Event → At` | cross_community | 6 |
-| `Defer_input → At` | cross_community | 6 |
-| `Nickname_reserved → At` | cross_community | 6 |
-| `Apply_capability_profile → At` | cross_community | 5 |
+| `Tick → Owns_nickname_generation` | intra_community | 4 |
+| `Tick → Push_nickname_cleanup_actions` | intra_community | 4 |
+| `Tick → Clear` | intra_community | 4 |
+| `Tick → New` | intra_community | 4 |
+| `Exercise_capability_state → Blocks_registration` | cross_community | 4 |
+| `Registration_committed → Owns_nickname_generation` | intra_community | 4 |
+| `Registration_committed → Push_nickname_cleanup_actions` | intra_community | 4 |
+| `Registration_committed → Clear` | intra_community | 4 |
 
 ## Connected Areas
 
 | Area | Connections |
 |------|-------------|
-| Tests | 3 calls |
-| Cluster_2 | 2 calls |
-| Fuzz_targets | 2 calls |
-| Cluster_9 | 1 calls |
+| Fuzz_targets | 3 calls |
+| Tests | 2 calls |
+| Cluster_6 | 1 calls |
+| Cluster_11 | 1 calls |
 
 ## How to Explore
 
 1. `context({name: "blocks_registration"})` — see callers and callees
-2. `query({search_query: "cluster_6"})` — find related execution flows
+2. `query({search_query: "cluster_8"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`
