@@ -1,9 +1,9 @@
 ---
-name: cluster-105
-description: "Skill for the Cluster_105 area of agenc-ircd. 11 symbols across 2 files."
+name: cluster-106
+description: "Skill for the Cluster_106 area of agenc-ircd. 11 symbols across 2 files."
 ---
 
-# Cluster_105
+# Cluster_106
 
 11 symbols | 2 files | Cohesion: 78%
 
@@ -11,7 +11,7 @@ description: "Skill for the Cluster_105 area of agenc-ircd. 11 symbols across 2 
 
 - Working with code in `crates/`
 - Understanding how new, channel work
-- Modifying cluster_105-related functionality
+- Modifying cluster_106-related functionality
 
 ## Key Files
 
@@ -43,12 +43,6 @@ Start here when exploring this area:
 | `empty_and_disconnected_completion_handles_fail_closed` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 745 |
 | `unit_configuration_matrix_and_unobserved_handle_are_closed` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 768 |
 
-## Execution Flows
-
-| Flow | Type | Steps |
-|------|------|-------|
-| `Begin_account_creation_with_entropy → New` | cross_community | 4 |
-
 ## Connected Areas
 
 | Area | Connections |
@@ -58,6 +52,6 @@ Start here when exploring this area:
 ## How to Explore
 
 1. `context({name: "new"})` — see callers and callees
-2. `query({search_query: "cluster_105"})` — find related execution flows
+2. `query({search_query: "cluster_106"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

@@ -59,14 +59,13 @@ Start here when exploring this area:
 | `Authentication_grant_deadlines_fail_closed_on_overflow → New` | cross_community | 6 |
 | `Seal → New` | cross_community | 5 |
 | `Authentication_finish_entropy_failure_emits_no_completion → New` | cross_community | 5 |
-| `Begin_account_creation_with_entropy → New` | cross_community | 5 |
 
 ## Connected Areas
 
 | Area | Connections |
 |------|-------------|
 | Cluster_23 | 17 calls |
-| Cluster_155 | 1 calls |
+| Cluster_156 | 1 calls |
 
 ## How to Explore
 

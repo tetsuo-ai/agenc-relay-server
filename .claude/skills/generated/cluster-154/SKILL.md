@@ -1,23 +1,23 @@
 ---
-name: cluster-153
-description: "Skill for the Cluster_153 area of agenc-ircd. 15 symbols across 2 files."
+name: cluster-154
+description: "Skill for the Cluster_154 area of agenc-ircd. 13 symbols across 2 files."
 ---
 
-# Cluster_153
+# Cluster_154
 
-15 symbols | 2 files | Cohesion: 63%
+13 symbols | 2 files | Cohesion: 60%
 
 ## When to Use
 
 - Working with code in `crates/`
 - Understanding how decode_one_without_embedded, validate_embedded_semantics work
-- Modifying cluster_153-related functionality
+- Modifying cluster_154-related functionality
 
 ## Key Files
 
 | File | Symbols |
 |------|---------|
-| `crates/agenc-ircd-federation-wire/src/semantics.rs` | validate_embedded_semantics, validate_optional_schema_embedded, validate_session_event_embedded, validate_discriminated_embedded, validate_event_target_binding (+8) |
+| `crates/agenc-ircd-federation-wire/src/semantics.rs` | validate_embedded_semantics, validate_optional_schema_embedded, validate_session_event_embedded, validate_discriminated_embedded, validate_event_target_binding (+6) |
 | `crates/agenc-ircd-federation-wire/src/codec.rs` | remaining, decode_one_without_embedded |
 
 ## Entry Points
@@ -44,20 +44,18 @@ Start here when exploring this area:
 | `decode_embedded` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 1553 |
 | `retain_embedded` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 1567 |
 | `validate_optional_embedded` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 1579 |
-| `validate_projected_mode_embedded` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 1646 |
-| `validate_projected_limit` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 1684 |
 
 ## Connected Areas
 
 | Area | Connections |
 |------|-------------|
-| Cluster_155 | 17 calls |
+| Cluster_156 | 14 calls |
 | Tests | 4 calls |
-| Cluster_156 | 1 calls |
+| Cluster_157 | 1 calls |
 
 ## How to Explore
 
 1. `context({name: "decode_one_without_embedded"})` — see callers and callees
-2. `query({search_query: "cluster_153"})` — find related execution flows
+2. `query({search_query: "cluster_154"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

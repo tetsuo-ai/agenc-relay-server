@@ -1,9 +1,9 @@
 ---
-name: cluster-78
-description: "Skill for the Cluster_78 area of agenc-ircd. 11 symbols across 1 files."
+name: cluster-79
+description: "Skill for the Cluster_79 area of agenc-ircd. 11 symbols across 1 files."
 ---
 
-# Cluster_78
+# Cluster_79
 
 11 symbols | 1 files | Cohesion: 78%
 
@@ -11,7 +11,7 @@ description: "Skill for the Cluster_78 area of agenc-ircd. 11 symbols across 1 f
 
 - Working with code in `crates/`
 - Understanding how accept work
-- Modifying cluster_78-related functionality
+- Modifying cluster_79-related functionality
 
 ## Key Files
 
@@ -45,11 +45,11 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Cluster_79 | 8 calls |
+| Cluster_80 | 8 calls |
 
 ## How to Explore
 
 1. `context({name: "accept"})` — see callers and callees
-2. `query({search_query: "cluster_78"})` — find related execution flows
+2. `query({search_query: "cluster_79"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

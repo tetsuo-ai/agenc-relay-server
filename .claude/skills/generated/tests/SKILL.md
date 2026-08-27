@@ -82,14 +82,14 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Cluster_172 | 30 calls |
+| Cluster_173 | 30 calls |
 | Fuzz_targets | 24 calls |
 | Cluster_25 | 17 calls |
-| Cluster_111 | 15 calls |
-| Cluster_58 | 7 calls |
-| Cluster_103 | 6 calls |
-| Cluster_151 | 6 calls |
-| Cluster_105 | 6 calls |
+| Cluster_112 | 15 calls |
+| Cluster_104 | 6 calls |
+| Cluster_152 | 6 calls |
+| Cluster_106 | 6 calls |
+| Cluster_156 | 6 calls |
 
 ## How to Explore
 

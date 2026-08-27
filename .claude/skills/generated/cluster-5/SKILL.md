@@ -56,15 +56,11 @@ Start here when exploring this area:
 | Flow | Type | Steps |
 |------|------|-------|
 | `Deletion_confirmation_is_revision_bound_and_consumed_on_failure → Validate_match` | cross_community | 5 |
-| `Begin_account_creation_with_entropy → New` | cross_community | 5 |
 | `Credential_replacement_reuses_identity_and_fences_generation → Validate_match` | cross_community | 4 |
 | `Credential_replacement_reuses_identity_and_fences_generation → Expose_for_account_service` | cross_community | 4 |
 | `Credential_replacement_reuses_identity_and_fences_generation → Deserialize_setup` | cross_community | 4 |
 | `Deletion_confirmation_is_revision_bound_and_consumed_on_failure → Fresh_transaction_id` | cross_community | 4 |
 | `Deletion_confirmation_is_revision_bound_and_consumed_on_failure → AccountDeletionChallenge` | cross_community | 4 |
-| `Begin_account_creation_with_entropy → Reserved_memory_bytes` | cross_community | 4 |
-| `Begin_account_creation_with_entropy → Physical_queue_capacity` | cross_community | 4 |
-| `Begin_account_creation_with_entropy → New` | cross_community | 4 |
 
 ## Connected Areas
 
@@ -74,7 +70,7 @@ Start here when exploring this area:
 | Tests | 4 calls |
 | Cluster_2 | 1 calls |
 | Cluster_11 | 1 calls |
-| Cluster_96 | 1 calls |
+| Cluster_97 | 1 calls |
 
 ## How to Explore
 

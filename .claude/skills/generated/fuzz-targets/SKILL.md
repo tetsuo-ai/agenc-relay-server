@@ -1,11 +1,11 @@
 ---
 name: fuzz-targets
-description: "Skill for the Fuzz_targets area of agenc-ircd. 79 symbols across 13 files."
+description: "Skill for the Fuzz_targets area of agenc-ircd. 78 symbols across 13 files."
 ---
 
 # Fuzz_targets
 
-79 symbols | 13 files | Cohesion: 70%
+78 symbols | 13 files | Cohesion: 69%
 
 ## When to Use
 
@@ -23,7 +23,7 @@ description: "Skill for the Fuzz_targets area of agenc-ircd. 79 symbols across 1
 | `fuzz/fuzz_targets/websocket.rs` | exercise_fragmented_sequence, assert_control_event, exercise_arbitrary_frame, exercise_oversized_message, safe_message (+3) |
 | `crates/agenc-ircd-client-wire/src/message.rs` | parse_message, parse_parameters, validate_parameters, copy_string, calculate_requested_backing_bytes (+1) |
 | `crates/agenc-ircd-client-wire/src/text.rs` | parse_u16_decimal, parse_u32_decimal, parse_u64_decimal, parse_decimal, parse_fragment_decimal (+1) |
-| `crates/agenc-ircd-client-wire/src/render.rs` | measure, command_bytes, combined_tag_section |
+| `crates/agenc-ircd-client-wire/src/render.rs` | measure, combined_tag_section |
 | `fuzz/fuzz_targets/tcp_framing.rs` | run, checksum |
 | `crates/agenc-ircd-client-wire/src/framing.rs` | as_str |
 | `crates/agenc-ircd-client-wire/src/registration.rs` | grammar_rejection_refreshes_complete_message_activity |
@@ -52,7 +52,6 @@ Start here when exploring this area:
 | `apply_profile` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 369 |
 | `request` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 269 |
 | `split_capability_lines` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 473 |
-| `command_bytes` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 311 |
 | `combined_tag_section` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 1220 |
 | `new` | Function | `fuzz/fuzz_targets/parse_render.rs` | 23 |
 | `exercise_boundary_render_plan` | Function | `fuzz/fuzz_targets/parse_render.rs` | 109 |
@@ -62,13 +61,12 @@ Start here when exploring this area:
 | `render_middle` | Function | `fuzz/fuzz_targets/parse_render.rs` | 212 |
 | `render_parameter` | Function | `fuzz/fuzz_targets/parse_render.rs` | 227 |
 | `render_trailing` | Function | `fuzz/fuzz_targets/parse_render.rs` | 241 |
+| `render_tag_key` | Function | `fuzz/fuzz_targets/parse_render.rs` | 254 |
 
 ## Execution Flows
 
 | Flow | Type | Steps |
 |------|------|-------|
-| `Labeled_response → Command_bytes` | cross_community | 8 |
-| `Add_client_only_tag → Command_bytes` | cross_community | 6 |
 | `Run → Admit_len` | cross_community | 6 |
 | `Drive → Split_field` | cross_community | 5 |
 | `Run → Split_field` | cross_community | 5 |
@@ -77,6 +75,8 @@ Start here when exploring this area:
 | `Run → Validate_decoded_value` | cross_community | 5 |
 | `Maximal_message_stays_below_the_hard_parsed_arena → Admit_len` | cross_community | 5 |
 | `Maximal_message_stays_below_the_hard_parsed_arena → Split_field` | cross_community | 5 |
+| `Maximal_message_stays_below_the_hard_parsed_arena → Validate_key` | cross_community | 5 |
+| `Maximal_message_stays_below_the_hard_parsed_arena → Validate_correlation_value_len` | cross_community | 5 |
 
 ## Connected Areas
 
@@ -86,10 +86,10 @@ Start here when exploring this area:
 | Cluster_36 | 9 calls |
 | Cluster_35 | 7 calls |
 | Cluster_41 | 3 calls |
-| Cluster_78 | 1 calls |
+| Cluster_79 | 1 calls |
+| Cluster_60 | 1 calls |
 | Cluster_44 | 1 calls |
 | Cluster_48 | 1 calls |
-| Cluster_51 | 1 calls |
 
 ## How to Explore
 
