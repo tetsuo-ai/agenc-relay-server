@@ -234,7 +234,7 @@ source baseline, and evidence model are fixed before protocol behavior lands.
   - Invariants: all invariant families.
   - Evidence: positive and malformed sample manifests exercise every validation branch.
 
-- [ ] `S00-900` **Pass the Stage 00 gate.** The complete empty workspace and
+- [x] `S00-900` **Pass the Stage 00 gate.** The complete empty workspace and
   traceability baseline must build reproducibly without any protocol stub being
   mistaken for implemented behavior. ([evidence](conformance/stage-zero-evidence.md#s00-900))
   - After: `S00-001` through `S00-010`.
@@ -358,7 +358,7 @@ stages exist as bounded, private-field types with independent vectors.
   - Invariants: `TRN-04`, `TRN-05`, `TRN-06`, `CON-05`.
   - Evidence: [EVID-S01-012-TOTALITY](conformance/stage-one-evidence.md#s01-012) covers the hostile corpus, every truncation, explicit depth/value budgets, nonrecursion, and parser-error negatives.
 
-- [ ] `S01-900` **Pass the Stage 01 gate.** All Appendix-A/B constants,
+- [x] `S01-900` **Pass the Stage 01 gate.** All Appendix-A/B constants,
   validated foundational types, canonical codecs, source checks, and independent
   vectors are complete before client behavior begins.
   - After: `S01-001` through `S01-012`.
@@ -479,7 +479,7 @@ wire-size, reply-shape, and traceability issues.
   - Invariants: `TRN-04`, `TRN-05`, `TRN-06`, `CON-05`.
   - Evidence: reproducible fuzz records plus minimized failures promoted to ordinary tests.
 
-- [ ] `S02-900` **Pass the Stage 02 gate.** The complete client-wire surface
+- [x] `S02-900` **Pass the Stage 02 gate.** The complete client-wire surface
   must be total, bounded, capability-correct, and transcript-compatible before
   domain state consumes a parsed command. ([evidence](conformance/stage-two-evidence.md#s02-900))
   - After: `S02-001` through `S02-011`.
@@ -603,7 +603,7 @@ filesystem calls, concrete clocks, or random generators.
   - Invariants: every applicable Stage-03 invariant.
   - Evidence: generated sequences preserve invariants and rejected steps leave the reference state unchanged.
 
-- [ ] `S03-900` **Pass the Stage 03 gate.** The pure domain implementation and
+- [x] `S03-900` **Pass the Stage 03 gate.** The pure domain implementation and
   independent reference model must agree for all generated sequences before
   cryptographic, storage, or runtime side effects are introduced.
   - After: `S03-001` through `S03-012`.
@@ -747,7 +747,7 @@ credential change have complete protocol state machines and vectors.
   - Invariants: `ID-05` through `ID-07`, `AUTH-*`, applicable `DUR-*`, `OPS-01`.
   - Evidence: complete evidence manifest for every crypto/auth requirement and dependency configuration.
 
-- [ ] `S04-900` **Pass the Stage 04 gate.** No auth or cryptographic operation
+- [x] `S04-900` **Pass the Stage 04 gate.** No auth or cryptographic operation
   advances state without the exact standardized/library-backed validation,
   context binding, resource admission, and completion evidence.
   - After: `S04-001` through `S04-014`.
