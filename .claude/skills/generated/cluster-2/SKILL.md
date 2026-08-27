@@ -23,33 +23,33 @@ description: "Skill for the Cluster_2 area of agenc-ircd. 19 symbols across 1 fi
 
 Start here when exploring this area:
 
-- **`new`** (Function) — `crates/agenc-ircd-client-wire/src/capability.rs:34`
-- **`request`** (Function) — `crates/agenc-ircd-client-wire/src/capability.rs:268`
-- **`apply_profile`** (Function) — `crates/agenc-ircd-client-wire/src/capability.rs:361`
+- **`new`** (Function) — `crates/agenc-ircd-client-wire/src/capability.rs:36`
+- **`request`** (Function) — `crates/agenc-ircd-client-wire/src/capability.rs:270`
+- **`apply_profile`** (Function) — `crates/agenc-ircd-client-wire/src/capability.rs:364`
 
 ## Key Symbols
 
 | Symbol | Type | File | Line |
 |--------|------|------|------|
-| `new` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 34 |
-| `request` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 268 |
-| `apply_profile` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 361 |
-| `ls_token` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 84 |
-| `contains` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 136 |
-| `prepare_profile` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 415 |
-| `diff_advertisements` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 430 |
-| `apply_requested_tokens` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 512 |
-| `validate_dependencies` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 540 |
-| `ensure_token_list_renderable` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 551 |
-| `dependencies` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 563 |
-| `insert_unique` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 581 |
-| `reconnects_on_value_change` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 613 |
-| `validate_advertisement` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 627 |
-| `copy_string` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 650 |
-| `copy_strings` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 659 |
-| `copy_specs` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 670 |
-| `profile_does_not_retain_caller_vector_headroom` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 694 |
-| `capability_values_reject_each_malformed_shape` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 707 |
+| `new` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 36 |
+| `request` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 270 |
+| `apply_profile` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 364 |
+| `ls_token` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 86 |
+| `contains` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 138 |
+| `prepare_profile` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 418 |
+| `diff_advertisements` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 433 |
+| `apply_requested_tokens` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 515 |
+| `validate_dependencies` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 543 |
+| `ensure_token_list_renderable` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 554 |
+| `dependencies` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 566 |
+| `insert_unique` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 584 |
+| `reconnects_on_value_change` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 616 |
+| `validate_advertisement` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 630 |
+| `copy_string` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 653 |
+| `copy_strings` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 662 |
+| `copy_specs` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 673 |
+| `profile_does_not_retain_caller_vector_headroom` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 697 |
+| `capability_values_reject_each_malformed_shape` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 710 |
 
 ## Execution Flows
 

@@ -2,8 +2,10 @@
 
 /// Traditional IRC message bytes including the terminating CRLF.
 pub const MAX_TRADITIONAL_LINE_BYTES: usize = 512;
-/// Traditional IRC command bytes without the terminating CRLF.
-pub const MAX_COMMAND_BYTES: usize = 510;
+/// Version-1 command bytes without the terminating CRLF.
+///
+/// Tags and command bytes still share the complete physical-message budget.
+pub const MAX_COMMAND_BYTES: usize = 8_701;
 /// Client-provided tag data bytes, excluding `@` and the trailing space.
 pub const MAX_CLIENT_TAG_DATA_BYTES: usize = 4_094;
 /// Server-provided tag data bytes, excluding `@` and the trailing space.

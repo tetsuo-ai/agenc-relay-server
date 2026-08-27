@@ -5,8 +5,8 @@ use std::fmt;
 use std::fmt::Write as _;
 
 use agenc_ircd_types::{
-    AccountId, CLIENT_COMMANDS, ChannelName, NetworkId, Nickname, PublicErrorCode, RecoveryEpoch,
-    SERVER_COMMANDS, SERVER_NUMERICS, SafeContext,
+    AccountDeletionToken, AccountId, CLIENT_COMMANDS, ChannelName, NetworkId, Nickname,
+    PublicErrorCode, RecoveryEpoch, SERVER_COMMANDS, SERVER_NUMERICS, SafeContext,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -15,7 +15,7 @@ use crate::{
     CapabilityState, MAX_CLIENT_ONLY_TAGS, MAX_CLIENT_ONLY_TOTAL_BYTES,
     MAX_CLIENT_ONLY_VALUE_BYTES, MAX_CLIENT_TAG_DATA_BYTES, MAX_COMBINED_TAG_SECTION_BYTES,
     MAX_COMMAND_BYTES, MAX_CORRELATION_TAG_BYTES, MAX_PARAMETERS, MAX_PHYSICAL_LINE_BYTES,
-    MAX_SERVER_TAG_DATA_BYTES, MAX_TRADITIONAL_LINE_BYTES, relays_client_only_tags,
+    MAX_SERVER_TAG_DATA_BYTES, relays_client_only_tags,
 };
 
 const E2EE_TAG: &str = "+agenc.ag/e2ee";
@@ -300,12 +300,7 @@ impl WireMessage {
             .checked_add(command_bytes)
             .and_then(|value| value.checked_add(2))
             .ok_or(RenderError::Overflow)?;
-        let limit = if tag_section == 0 {
-            MAX_TRADITIONAL_LINE_BYTES
-        } else {
-            MAX_PHYSICAL_LINE_BYTES
-        };
-        if bytes > limit {
+        if bytes > MAX_PHYSICAL_LINE_BYTES {
             return Err(RenderError::LineBudget);
         }
         Ok(MeasuredMessage {
@@ -464,7 +459,7 @@ impl SafeReplyDescription {
 }
 
 /// One provenance-carrying public standard-reply context value.
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy)]
 pub enum SafeReplyContext<'a> {
     /// A validated public channel name.
     Channel(&'a ChannelName),
@@ -474,6 +469,8 @@ pub enum SafeReplyContext<'a> {
     AccountId(AccountId),
     /// The public recovery identity advertised by this listener.
     RecoveryEpoch(RecoveryEpoch),
+    /// The one-use token returned only by `ACCT DELETE START`.
+    DeletionChallenge(&'a AccountDeletionToken),
     /// A server-owned bounded numeric value. `None` is represented by omitting
     /// the context entry and is rejected if placed in this variant.
     Bounded(SafeContext),
@@ -486,6 +483,7 @@ impl fmt::Debug for SafeReplyContext<'_> {
             Self::Nickname(_) => "Nickname",
             Self::AccountId(_) => "AccountId",
             Self::RecoveryEpoch(_) => "RecoveryEpoch",
+            Self::DeletionChallenge(_) => "DeletionChallenge",
             Self::Bounded(_) => "Bounded",
         };
         formatter.debug_tuple(variant).field(&"[public]").finish()
@@ -605,6 +603,16 @@ fn note_standard_reply_is_applicable(
                 [SafeReplyContext::RecoveryEpoch(_)],
             )
             | ("ACCT", PublicErrorCode::UPDATED, [])
+            | (
+                "ACCT",
+                PublicErrorCode::DELETECHALLENGE,
+                [SafeReplyContext::DeletionChallenge(_)],
+            )
+            | (
+                "CHANCTL",
+                PublicErrorCode::UPDATED,
+                [SafeReplyContext::Channel(_)],
+            )
     )
 }
 
@@ -678,6 +686,9 @@ fn reply_context_text(context: SafeReplyContext<'_>) -> Result<String, RenderErr
             encode_public_identifier("a_", account_id.random().as_bytes())
         }
         SafeReplyContext::RecoveryEpoch(epoch) => encode_public_identifier("", epoch.as_bytes()),
+        SafeReplyContext::DeletionChallenge(token) => {
+            encode_public_identifier("", token.expose_for_deletion())
+        }
         SafeReplyContext::Bounded(SafeContext::TargetIndex(value)) => {
             decimal_text(u64::from(value))
         }

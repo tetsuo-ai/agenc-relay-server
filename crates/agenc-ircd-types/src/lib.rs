@@ -17,9 +17,9 @@ mod registries;
 pub use bounded::{BoundedBytes, BoundedUtf8, ControlPolicy};
 pub use errors::{ClockError, EntropyError, SafeContext, ValidationError};
 pub use identifiers::{
-    AccountId, AccountRandomId, AuthGrantId, ChannelInstanceId, ConnectionId, DatabaseId, EntryId,
-    EventId, InviteId, MessageId, NetworkId, OpaqueCredentialId, OriginId, RecoveryEpoch,
-    RequestId, ServerId, ServerIncarnation, SessionId, TransactionId, UserId,
+    AccountDeletionToken, AccountId, AccountRandomId, AuthGrantId, ChannelInstanceId, ConnectionId,
+    DatabaseId, EntryId, EventId, InviteId, MessageId, NetworkId, OpaqueCredentialId, OriginId,
+    RecoveryEpoch, RequestId, ServerId, ServerIncarnation, SessionId, TransactionId, UserId,
 };
 pub use masks::{CompiledGlob, MAX_GLOB_BYTES, MAX_TYPED_MASK_BYTES, MaskSubject, TypedMask};
 pub use names::{

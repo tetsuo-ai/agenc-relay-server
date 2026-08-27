@@ -310,30 +310,33 @@ mod tests {
     #[test]
     fn maximal_message_stays_below_the_hard_parsed_arena() -> Result<(), Box<dyn Error>> {
         let tags = maximal_two_byte_key_section()?;
-        let command = maximal_parameter_section();
+        let command_bytes = MAX_COMMAND_BYTES
+            .checked_sub(tags.len().saturating_add(2))
+            .ok_or(MessageParseError::Overflow)?;
+        let command = maximal_parameter_section(command_bytes);
         let line = format!("@{tags} {command}");
         let Some(message) = parse_message(FramedLine::new(&line)?)? else {
             return Err(MessageParseError::InvalidCommand.into());
         };
         assert_eq!(message.wire_bytes(), line.len());
-        assert_eq!(message.requested_backing_bytes(), 14_480);
+        assert_eq!(message.requested_backing_bytes(), 18_575);
 
         let actual_charge = requested_allocation_charge(&message);
-        assert_eq!(actual_charge, 86_016);
+        assert_eq!(actual_charge, 90_112);
         assert!(actual_charge < HARD_PARSED_ARENA_BYTES);
 
         let maximum_tag_count = MAX_CLIENT_TAG_DATA_BYTES.div_ceil(2);
         let conservative_charge = allocation_charge(MAX_CLIENT_TAG_DATA_BYTES)
             + allocation_charge(maximum_tag_count * PARSED_TAG_DESCRIPTOR_BYTES)
             + allocation_charge(MAX_PARAMETERS * size_of::<String>())
-            + (MAX_PARAMETERS + 1) * allocation_charge(MAX_COMMAND_BYTES);
-        assert_eq!(conservative_charge, 98_304);
+            + allocation_charge(MAX_COMMAND_BYTES);
+        assert_eq!(conservative_charge, 45_056);
         assert!(conservative_charge < HARD_PARSED_ARENA_BYTES);
         let conservative_requested_backing = MAX_CLIENT_TAG_DATA_BYTES
             + maximum_tag_count * PARSED_TAG_DESCRIPTOR_BYTES
             + MAX_PARAMETERS * size_of::<String>()
             + MAX_COMMAND_BYTES;
-        assert_eq!(conservative_requested_backing, 21_340);
+        assert_eq!(conservative_requested_backing, 29_531);
         assert!(conservative_requested_backing < 32 * 1_024);
         Ok(())
     }
@@ -422,13 +425,13 @@ mod tests {
         pages * ALLOCATION_PAGE_BYTES
     }
 
-    fn maximal_parameter_section() -> String {
+    fn maximal_parameter_section(maximum_bytes: usize) -> String {
         let mut command = String::from("A");
         for _ in 0..MAX_PARAMETERS - 1 {
             command.push_str(" x");
         }
         command.push_str(" :");
-        command.push_str(&"y".repeat(MAX_COMMAND_BYTES - command.len()));
+        command.push_str(&"y".repeat(maximum_bytes.saturating_sub(command.len())));
         command
     }
 

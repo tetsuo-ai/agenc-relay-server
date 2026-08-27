@@ -15,11 +15,9 @@
 </p>
 
 > [!IMPORTANT]
-> **This is pre-alpha infrastructure, not a deployable server.** Stages 00 and
-> 01 have historical gate passes. The local Stage 02 gate also passes, but
-> formal closure is blocked by frozen wire-size conflicts, reply ownership
-> gaps, and missing revision-bound evidence. The binary stays unavailable
-> until the runtime stage is implemented.
+> **This is pre-alpha infrastructure, not a deployable server.** Stages 00
+> through 03 are implemented and pass their local gates. The binary stays
+> unavailable until the runtime stage is implemented.
 
 ## What is being built
 
@@ -46,17 +44,16 @@ Ed25519, and authenticated storage.
 | --- | --- | --- |
 | 00 | complete | Reproducible workspace, source baseline, policy, and traceability |
 | 01 | complete | 53 registry constants, validated types, 128 canonical object codecs, and independent vectors |
-| 02 | local gate passes; closure blocked | Incremental framing, client parsing, capability and registration state, bounded rendering, transcripts, and fuzz targets are implemented locally |
-| 03 | blocked | Pure deterministic domain model waits for the Stage 02 gate |
+| 02 | complete | Incremental framing, client parsing, capability and registration state, bounded rendering, transcripts, and fuzz targets |
+| 03 | complete | Pure accounts, sessions, channels, authorization, privacy projections, plans, explicit external inputs, and an independent reference model |
 | 04-10 | planned | Cryptographic adapters through production qualification |
 
 The complete dependency-ordered roadmap lives in [TODO.md](TODO.md). The Stage
-02 command runs both declared Linux target checks, dependency and advisory
-checks, Clippy with warnings denied, all workspace tests, coverage, and four
-deterministic fuzz smoke targets. On 2026-08-26 it passed with 90.03% branch
-coverage and 93.96% line coverage. A local pass does not replace evidence tied
-to a committed revision. See the [development record](conformance/stage-two-evidence.md),
-the [closure audit](conformance/stage-two-audit.md), and the
+03 command inherits both declared Linux target checks, dependency and advisory
+checks, Clippy with warnings denied, all workspace tests, coverage, and the
+Stage 02 deterministic fuzz targets. It adds the pure-domain checks, generated
+state-machine cases, privacy tests, and production/reference comparisons. See
+the [Stage 03 development record](conformance/stage-three-evidence.md) and the
 [latest CI runs](https://github.com/tetsuo-ai/agenc-ircd/actions).
 
 ## Trust shape
@@ -83,7 +80,7 @@ The pinned toolchain is Rust 1.98.0. From a clean checkout:
 ```sh
 git clone https://github.com/tetsuo-ai/agenc-ircd.git
 cd agenc-ircd
-bash scripts/check-stage-two.sh
+bash scripts/check-stage-three.sh
 ```
 
 There is no server start command yet. The binary fails closed until its runtime

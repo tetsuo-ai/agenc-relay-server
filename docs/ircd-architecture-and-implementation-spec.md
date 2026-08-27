@@ -576,9 +576,16 @@ bare CR, embedded NUL, or invalid UTF-8 is a protocol error. The parser scans
 for CRLF without growing past the active limit and does not allocate from a
 declared length.
 
-Without message tags, a complete message including CRLF is at most 512 bytes.
-With message tags, the limits from the ratified IRCv3 Message Tags
-specification apply:
+The traditional IRC interoperability envelope is 512 bytes including CRLF,
+but version 1 uses one bounded extended envelope so the fixed 1,024-byte topic
+and 512-byte message limits remain representable with their required prefixes
+and targets. Every complete stream message, tagged or untagged, is at most
+8,703 bytes including CRLF. Implementations should keep ordinary messages
+within 512 bytes when their complete semantic value fits; they never truncate
+or split a value merely to meet that compatibility target.
+
+For message tags, the limits from the ratified IRCv3 Message Tags
+specification still apply independently:
 
 - client-provided tag data: at most 4,094 bytes;
 - server-added tag data: at most 4,094 bytes;
@@ -586,11 +593,12 @@ specification apply:
   bytes; and
 - complete physical message including CRLF: at most 8,703 bytes.
 
-The command portion still fits the traditional 512-byte limit. A client line
-above either its side budget or the physical limit is rejected and the
-connection is closed; the server never truncates it. WebSocket messages omit
-CRLF and therefore have corresponding command and total limits of 510 and
-8,701 bytes.
+The command portion is at most 8,701 bytes without CRLF. The tag section and
+command portion share the 8,701-byte stream-content budget, so a maximum tag
+section leaves only 510 command bytes. A client line above its tag-side,
+combined-tag, command, or physical budget is rejected and the connection is
+closed; the server never truncates it. WebSocket messages omit CRLF and have
+the same 8,701-byte complete-message and command ceilings.
 
 The parser accepts at most 15 parameters. Prefixes from clients are forbidden.
 Commands are non-empty ASCII letters, compared case-insensitively, and
@@ -694,6 +702,32 @@ unescaped input, certificate, source address, or database error. Traditional
 commands still emit the expected numerics for legacy clients. A request with
 a negotiated `label` receives that label on exactly one logical response,
 using a batch when the response has multiple messages.
+
+The public renderer recognizes only the following standard-reply shapes. A
+bracketed context is optional; every other listed context is required:
+
+| Kind and operation | Code | Public context |
+| --- | --- | --- |
+| `FAIL *` | `REGISTRATION_REQUIRED` | none |
+| `FAIL ACCTCREATE`, `FAIL ACCTCRED` | `UNAVAILABLE` | none |
+| `FAIL JOIN` | `E2EE_REQUIRED`, `NETWORK_UNAVAILABLE` | optional channel |
+| `FAIL PRIVMSG` | `E2EE_REQUIRED` | channel |
+| `FAIL JOIN`, `FAIL MODE`, `FAIL NAMES`, `FAIL TOPIC` | `SECRET_UNAVAILABLE` | supplied channel |
+| `FAIL CHATHISTORY`, `FAIL JOIN`, `FAIL LIST`, `FAIL MONITOR`, `FAIL NAMES`, `FAIL WHO`, `FAIL WHOIS`, `FAIL WHOWAS` | `QUERY_EXPIRED` | none |
+| `FAIL PRIVMSG` | `UNSAFE_CTCP` | none |
+| `FAIL <public-client-command>` | `INVALID_ARGUMENT`, `NETWORK_UNAVAILABLE`, `SERVER_BUSY` | none |
+| `NOTE ACCTCREATE` | `CREATED` | Account ID |
+| `NOTE ACCTCRED` | `CHANGED` | none |
+| `NOTE ACCT` | `DELETE_CHALLENGE` | 22-character token |
+| `NOTE ACCT` | `UPDATED` | none |
+| `NOTE CHANCTL` | `UPDATED` | channel |
+| `NOTE *` | `RECOVERY_EPOCH` | 22-character epoch |
+
+`CHALLENGE`, `CHECKPOINT`, `CONFIRM`, `EVENT`, and `VALUE` remain admin-only;
+`SLOW_CONSUMER` remains queue-owner-only. The remaining registered codes are
+typed base-federation result values or future-stage internal mappings and have
+no direct public-renderer shape in version 1. Registry membership never
+authorizes a renderer to guess a command or context.
 
 ## 10. Connection and registration state machine
 
@@ -2100,7 +2134,7 @@ apply. `HISTORY` is accepted only for a listed, registered, plaintext global
 channel and has the semantics in Section 17. Every accepted change increments
 the account or channel revision and commits durably before returning
 `NOTE ACCT UPDATED :Account setting updated` or
-`NOTE CHANCTL UPDATED :Channel setting updated`. Syntax, stale revision,
+`NOTE CHANCTL UPDATED <channel> :Channel setting updated`. Syntax, stale revision,
 authorization, and policy failures change nothing.
 
 ## 15. Message routing

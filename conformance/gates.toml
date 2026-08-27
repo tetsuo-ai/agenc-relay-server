@@ -94,6 +94,9 @@ argv = ["python3", "scripts/check-stage-one.py", "self-test"]
 includes = ["stage-one"]
 
 [[gate.stage-two.command]]
+argv = ["python3", "scripts/requirements.py", "check-stage-two"]
+
+[[gate.stage-two.command]]
 argv = ["python3", "scripts/generate-stage-two.py", "--check"]
 
 [[gate.stage-two.command]]
@@ -113,3 +116,21 @@ argv = ["cargo", "deny", "--manifest-path", "fuzz/Cargo.toml", "check"]
 
 [[gate.stage-two.command]]
 argv = ["bash", "scripts/run-stage-two-fuzz.sh"]
+
+[gate.stage-three]
+includes = ["stage-two"]
+
+[[gate.stage-three.command]]
+argv = ["python3", "scripts/requirements.py", "check-stage-three"]
+
+[[gate.stage-three.command]]
+argv = ["python3", "scripts/generate-stage-three.py", "--check"]
+
+[[gate.stage-three.command]]
+argv = ["python3", "scripts/check-stage-three.py", "check"]
+
+[[gate.stage-three.command]]
+argv = ["python3", "scripts/check-stage-three.py", "self-test"]
+
+[[gate.stage-three.command]]
+argv = ["cargo", "test", "-p", "agenc-ircd-testkit", "--test", "domain_channels", "--test", "domain_commands", "--test", "domain_lifecycle", "--test", "domain_reference_model", "--test", "domain_stage_three_matrix", "--locked"]

@@ -52,7 +52,7 @@ References: [Architecture §§1.2–4](docs/ircd-architecture-and-implementation
 | --- | --- | --- | --- | --- |
 | 00 | Reproducible workspace and traceability foundation | Complete | Pass, 2026-08-26 | Historical commit `6b48ecb73afd471ed576146483098c19c12893f9` |
 | 01 | Registries, validated types, and canonical codecs | Complete | Pass, 2026-08-26 | Historical commit `7ae6439b472521d3c23fb99261deaf8964a70c5a` |
-| 02 | Bounded client wire implementation | Implemented locally; closure blocked | Pass, 2026-08-26 | Absent; see the [closure audit](conformance/stage-two-audit.md) |
+| 02 | Bounded client wire implementation | Complete | Pass, 2026-08-26 | [Evidence record](conformance/stage-two-evidence.md) |
 | 03 | Pure deterministic domain model | Not started | Not run | Absent |
 | 04 | Crypto adapters and account authentication | Not started | Not run | Absent |
 | 05 | Durable and recoverable persistence | Not started | Not run | Absent |
@@ -379,7 +379,7 @@ evidence manifest is tied to a committed source revision. Rendering is also
 blocked by the frozen topic and message-body limits recorded in the
 [Stage 02 closure audit](conformance/stage-two-audit.md).
 
-- [ ] `S02-001` **Implement incremental stream framing.** Handle fragmented and
+- [x] `S02-001` **Implement incremental stream framing.** Handle fragmented and
   coalesced reads, CRLF, EOF, timeouts, and exact physical-line limits without
   scanning or allocating beyond admitted bounds. ([evidence](conformance/stage-two-evidence.md#s02-001))
   - After: `S01-900`.
@@ -388,7 +388,7 @@ blocked by the frozen topic and message-body limits recorded in the
   - Invariants: `TRN-04`, `TRN-05`, `TRN-06`.
   - Evidence: every split/coalesce boundary, empty/equal/plus-one length, CRLF, timeout, and EOF transcript passes.
 
-- [ ] `S02-002` **Implement WebSocket message framing semantics.** Validate the
+- [x] `S02-002` **Implement WebSocket message framing semantics.** Validate the
   IRC-over-WebSocket message boundary, UTF-8, compression prohibition, size,
   and close behavior independently of the optional network listener. ([evidence](conformance/stage-two-evidence.md#s02-002))
   - After: `S02-001`.
@@ -397,7 +397,7 @@ blocked by the frozen topic and message-body limits recorded in the
   - Invariants: `TRN-02`, `TRN-04`, `TRN-05`.
   - Evidence: fragmented-message, binary-frame, invalid-UTF-8, extension, multi-line, and oversize negatives.
 
-- [ ] `S02-003` **Implement IRCv3 tags.** Parse and render tag names, values,
+- [x] `S02-003` **Implement IRCv3 tags.** Parse and render tag names, values,
   escapes, duplicates, client-only tags, and budgets canonically. ([evidence](conformance/stage-two-evidence.md#s02-003))
   - After: `S02-001`.
   - Targets: `agenc-ircd-client-wire`.
@@ -405,7 +405,7 @@ blocked by the frozen topic and message-body limits recorded in the
   - Invariants: `TRN-04`, `TRN-06`.
   - Evidence: ratified IRCv3 vectors plus all escape, duplicate, boundary, and malformed cases.
 
-- [ ] `S02-004` **Implement syntax parsing.** Produce `ParsedMessage` from a
+- [x] `S02-004` **Implement syntax parsing.** Produce `ParsedMessage` from a
   framed line with exact prefix, command, parameter, trailing, and UTF-8 rules;
   do not perform authorization or mutation. ([evidence](conformance/stage-two-evidence.md#s02-004))
   - After: `S02-001`, `S02-003`.
@@ -414,7 +414,7 @@ blocked by the frozen topic and message-body limits recorded in the
   - Invariants: `TRN-05`, `TRN-06`.
   - Evidence: every grammar arm and arity, prefix rejection, malformed command, parameter boundary, and differential transcript passes.
 
-- [ ] `S02-005` **Implement capability state.** Support CAP LS 302, REQ, ACK,
+- [x] `S02-005` **Implement capability state.** Support CAP LS 302, REQ, ACK,
   NAK, END, NEW, DEL, dependencies, line splitting, and reconnect-only profile
   transitions without silently enabling unsupported drafts. ([evidence](conformance/stage-two-evidence.md#s02-005))
   - After: `S02-004`.
@@ -423,7 +423,7 @@ blocked by the frozen topic and message-body limits recorded in the
   - Invariants: `E2E-07`, `TRN-04`, `TRN-06`.
   - Evidence: capability dependency, simultaneous change, unknown capability, line-budget, and downgrade transcripts.
 
-- [ ] `S02-006` **Implement the connection-registration wire state.** Enforce
+- [x] `S02-006` **Implement the connection-registration wire state.** Enforce
   permitted pre-registration commands, NICK/USER/CAP/SASL ordering, welcome
   burst ordering, keepalive, and bounded close output without implementing auth
   internals. ([evidence](conformance/stage-two-evidence.md#s02-006))
@@ -433,7 +433,7 @@ blocked by the frozen topic and message-body limits recorded in the
   - Invariants: `TRN-05`, `AUTH-02`, `OPS-04` at the wire boundary.
   - Evidence: every registration transition, invalid ordering, timeout, ping/pong, and close transcript.
 
-- [ ] `S02-007` **Implement SASL transport framing.** Handle AUTHENTICATE
+- [x] `S02-007` **Implement SASL transport framing.** Handle AUTHENTICATE
   chunking, mechanism selection surface, abort, timeout, and fixed public
   replies while leaving OPAQUE processing to `agenc-ircd-auth`. ([evidence](conformance/stage-two-evidence.md#s02-007))
   - After: `S02-005`, `S02-006`.
@@ -442,7 +442,7 @@ blocked by the frozen topic and message-body limits recorded in the
   - Invariants: `AUTH-01`, `AUTH-02`, `AUTH-10` at the carrier boundary.
   - Evidence: chunk width, plus marker, abort, unsupported mechanism, timeout, and response-shape transcripts.
 
-- [ ] `S02-008` **Implement capability-aware rendering.** Separate measuring
+- [x] `S02-008` **Implement capability-aware rendering.** Separate measuring
   from encoding, enforce exact client/server/combined line budgets, preserve
   canonical ordering, and never allocate before a matching permit is supplied. ([evidence](conformance/stage-two-evidence.md#s02-008))
   - After: `S02-003` through `S02-006`.
@@ -451,7 +451,7 @@ blocked by the frozen topic and message-body limits recorded in the
   - Invariants: `TRN-04`, `STA-08`, `CON-05`.
   - Evidence: mechanical wire-budget table, measure/encode equality, exact-capacity allocation tests, and every capability combination.
 
-- [ ] `S02-009` **Implement labeled replies, batches, and reply ordering.**
+- [x] `S02-009` **Implement labeled replies, batches, and reply ordering.**
   Render standard errors, numerics, labeled-response groups, and batch nesting
   exactly once and in the required order. ([evidence](conformance/stage-two-evidence.md#s02-009))
   - After: `S02-005`, `S02-008`.
@@ -460,7 +460,7 @@ blocked by the frozen topic and message-body limits recorded in the
   - Invariants: `STA-06`, `STA-08`, `PRV-02`.
   - Evidence: traditional/standard reply, partial-success, nested-batch, label, and ordering golden transcripts.
 
-- [ ] `S02-010` **Build the client transcript harness.** Drive framing,
+- [x] `S02-010` **Build the client transcript harness.** Drive framing,
   parsing, capability state, registration, and rendering with deterministic
   time and byte-exact expectations. ([evidence](conformance/stage-two-evidence.md#s02-010))
   - After: `S02-001` through `S02-009`.
@@ -469,7 +469,7 @@ blocked by the frozen topic and message-body limits recorded in the
   - Invariants: `TRN-*`, applicable `AUTH-*` and `STA-*` wire invariants.
   - Evidence: pinned base-client transcript corpus runs byte-identically.
 
-- [ ] `S02-011` **Fuzz every client-wire boundary.** Cover raw framing, tags,
+- [x] `S02-011` **Fuzz every client-wire boundary.** Cover raw framing, tags,
   commands, decimal values, base64, capability transitions, render plans, and
   fragmented/coalesced input with explicit memory and time envelopes. ([evidence](conformance/stage-two-evidence.md#s02-011))
   - After: `S02-010`.
@@ -478,7 +478,7 @@ blocked by the frozen topic and message-body limits recorded in the
   - Invariants: `TRN-04`, `TRN-05`, `TRN-06`, `CON-05`.
   - Evidence: reproducible fuzz records plus minimized failures promoted to ordinary tests.
 
-- [ ] `S02-900` **Pass the Stage 02 gate.** The complete client-wire surface
+- [x] `S02-900` **Pass the Stage 02 gate.** The complete client-wire surface
   must be total, bounded, capability-correct, and transcript-compatible before
   domain state consumes a parsed command. ([evidence](conformance/stage-two-evidence.md#s02-900))
   - After: `S02-001` through `S02-011`.
@@ -493,7 +493,7 @@ Outcome: deterministic protocol state, authorization, privacy projections, and
 mutation plans are complete without sockets, TLS, executors, databases,
 filesystem calls, concrete clocks, or random generators.
 
-- [ ] `S03-001` **Model accounts, principals, users, sessions, and presence.**
+- [x] `S03-001` **Model accounts, principals, users, sessions, and presence.**
   Keep account, E2EE, nickname, presentation, cloak, and transport identities
   separate with explicit generation fencing.
   - After: `S02-900`.
@@ -502,7 +502,7 @@ filesystem calls, concrete clocks, or random generators.
   - Invariants: `ID-01` through `ID-07`, `AUTH-04`, `AUTH-05`.
   - Evidence: lifecycle, account-switch, nickname reuse, cloak independence, and stale-generation property tests.
 
-- [ ] `S03-002` **Model channel instances, membership, roles, and modes.**
+- [x] `S03-002` **Model channel instances, membership, roles, and modes.**
   Enforce recreation isolation, owner continuity, role ordering, mandatory and
   mutually exclusive modes, typed masks, and revision-bound decisions.
   - After: `S03-001`.
@@ -511,7 +511,7 @@ filesystem calls, concrete clocks, or random generators.
   - Invariants: `STA-02` through `STA-05`.
   - Evidence: generated membership/role/mode sequences and every boundary/collision transition.
 
-- [ ] `S03-003` **Implement privacy and discovery projections.** Produce only
+- [x] `S03-003` **Implement privacy and discovery projections.** Produce only
   recipient-authorized views for public, unlisted, secret, invisible, offline,
   account, channel, query, and presence state.
   - After: `S03-001`, `S03-002`.
@@ -520,7 +520,7 @@ filesystem calls, concrete clocks, or random generators.
   - Invariants: `PRV-01`, `PRV-02`, `STA-10`, `ID-04`, `ID-05`.
   - Evidence: authorization matrices, projection diffs, equal-error tests, and forbidden-field canaries.
 
-- [ ] `S03-004` **Canonicalize and validate commands.** Convert parsed syntax
+- [x] `S03-004` **Canonicalize and validate commands.** Convert parsed syntax
   into `CanonicalCommand` only after semantic bounds, target resolution rules,
   mode vectors, and all-or-none command-level validation succeed.
   - After: `S03-001` through `S03-003`.
@@ -529,7 +529,7 @@ filesystem calls, concrete clocks, or random generators.
   - Invariants: `STA-04`, `STA-05`, `STA-06`, `TRN-05`.
   - Evidence: every Appendix-A command arm has success, rejection, multi-target, and unchanged-state tests.
 
-- [ ] `S03-005` **Implement authorization and rate charging.** Produce an
+- [x] `S03-005` **Implement authorization and rate charging.** Produce an
   `AuthorizedCommand` only after current principal, generation, role, target
   revision, policy, and hierarchical budget checks pass.
   - After: `S03-004`.
@@ -538,7 +538,7 @@ filesystem calls, concrete clocks, or random generators.
   - Invariants: `ID-01`, `STA-03`, `STA-05`, `STA-07`, `CON-05`.
   - Evidence: privilege-transition, stale-identity, confused-deputy, exhaustion, and charge-before-ID tests.
 
-- [ ] `S03-006` **Implement channel and direct-message plans.** Cover JOIN,
+- [x] `S03-006` **Implement channel and direct-message plans.** Cover JOIN,
   PART, TOPIC, NAMES, LIST, INVITE, KICK, direct/channel messaging, echo,
   recipient derivation, and atomic authorized-success subsets.
   - After: `S03-005`.
@@ -547,7 +547,7 @@ filesystem calls, concrete clocks, or random generators.
   - Invariants: `STA-01` through `STA-10`.
   - Evidence: deterministic two-client/multi-target flows, ordering tests, secret-target privacy, and rollback-free pure plans.
 
-- [ ] `S03-007` **Implement moderation and user-safety plans.** Model mutes,
+- [x] `S03-007` **Implement moderation and user-safety plans.** Model mutes,
   bans, exceptions, sanctions, role-gated actions, removal consequences, and
   auditable operator decisions without inspecting encrypted content.
   - After: `S03-005`, `S03-006`.
@@ -556,7 +556,7 @@ filesystem calls, concrete clocks, or random generators.
   - Invariants: `STA-03`, `STA-04`, `STA-05`, `OPS-03`.
   - Evidence: role/sanction matrix, appeal-state transitions, E2EE-removal intent tests, and audit-field allowlist tests.
 
-- [ ] `S03-008` **Model history and offline state policy.** Keep default
+- [x] `S03-008` **Model history and offline state policy.** Keep default
   ephemerality, optional plaintext channel history, offline account state, and
   E2EE opacity as explicit mutually constrained policies.
   - After: `S03-002`, `S03-006`.
@@ -565,7 +565,7 @@ filesystem calls, concrete clocks, or random generators.
   - Invariants: `STA-09`, `E2E-01`, `E2E-02`.
   - Evidence: default-no-history, opt-in scope, encrypted-target refusal, deletion, and visibility tests.
 
-- [ ] `S03-009` **Implement pure mutation plans and events.** Separate
+- [x] `S03-009` **Implement pure mutation plans and events.** Separate
   validation, authorization, deterministic state transition, storage
   projection, recipient projection, and later runtime reservations.
   - After: `S03-004` through `S03-008`.
@@ -574,7 +574,7 @@ filesystem calls, concrete clocks, or random generators.
   - Invariants: `CON-01`, `CON-03`, `DUR-01`, `STA-08`.
   - Evidence: plans are deterministic from one revision, contain no runtime/storage handles, and apply once in the reference model.
 
-- [ ] `S03-010` **Make time and randomness explicit inputs.** Express policy
+- [x] `S03-010` **Make time and randomness explicit inputs.** Express policy
   through monotonic/wall-clock values and requested entropy operations without
   calling system clocks or RNGs in domain code.
   - After: `S03-009`.
@@ -583,7 +583,7 @@ filesystem calls, concrete clocks, or random generators.
   - Invariants: `CON-01`, `AUTH-02`, `FED-09`.
   - Evidence: deterministic boundary tests for expiry, clock failure/jump, timer replacement, and entropy-request identity.
 
-- [ ] `S03-011` **Build the deterministic reference model.** Execute every
+- [x] `S03-011` **Build the deterministic reference model.** Execute every
   command and planned federation-domain operation against simple value state,
   checking invariants after every generated step.
   - After: `S03-001` through `S03-010`.
@@ -592,7 +592,7 @@ filesystem calls, concrete clocks, or random generators.
   - Invariants: all applicable `ID-*`, `PRV-*`, `STA-*`, `CON-*`.
   - Evidence: model covers every command registry arm and exports deterministic snapshots for implementation comparison.
 
-- [ ] `S03-012` **Generate adversarial domain sequences.** Cover registration,
+- [x] `S03-012` **Generate adversarial domain sequences.** Cover registration,
   nickname reuse, recreation, roles, modes, invites, account switches,
   deletion, partitions-as-domain-input, duplicates, gaps, and invalid state
   transitions.
@@ -602,7 +602,7 @@ filesystem calls, concrete clocks, or random generators.
   - Invariants: every applicable Stage-03 invariant.
   - Evidence: generated sequences preserve invariants and rejected steps leave the reference state unchanged.
 
-- [ ] `S03-900` **Pass the Stage 03 gate.** The pure domain implementation and
+- [x] `S03-900` **Pass the Stage 03 gate.** The pure domain implementation and
   independent reference model must agree for all generated sequences before
   cryptographic, storage, or runtime side effects are introduced.
   - After: `S03-001` through `S03-012`.

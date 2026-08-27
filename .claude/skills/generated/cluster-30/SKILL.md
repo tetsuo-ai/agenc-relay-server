@@ -24,19 +24,19 @@ description: "Skill for the Cluster_30 area of agenc-ircd. 10 symbols across 2 f
 
 Start here when exploring this area:
 
-- **`numeric_reply`** (Function) — `crates/agenc-ircd-client-wire/src/render.rs:714`
-- **`isupport_messages`** (Function) — `crates/agenc-ircd-client-wire/src/render.rs:805`
+- **`numeric_reply`** (Function) — `crates/agenc-ircd-client-wire/src/render.rs:725`
+- **`isupport_messages`** (Function) — `crates/agenc-ircd-client-wire/src/render.rs:816`
 
 ## Key Symbols
 
 | Symbol | Type | File | Line |
 |--------|------|------|------|
-| `numeric_reply` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 714 |
-| `isupport_messages` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 805 |
-| `encode_public_identifier` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 691 |
-| `stage_two_numeric_shape_is_applicable` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 746 |
-| `stage_two_numeric_middle_is_applicable` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 758 |
-| `prefixed_value` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 1341 |
+| `numeric_reply` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 725 |
+| `isupport_messages` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 816 |
+| `encode_public_identifier` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 702 |
+| `stage_two_numeric_shape_is_applicable` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 757 |
+| `stage_two_numeric_middle_is_applicable` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 769 |
+| `prefixed_value` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 1352 |
 | `queue_welcome` | Function | `crates/agenc-ircd-testkit/src/client_transcript.rs` | 718 |
 | `queue_welcome_step` | Function | `crates/agenc-ircd-testkit/src/client_transcript.rs` | 730 |
 | `record_welcome_step` | Function | `crates/agenc-ircd-testkit/src/client_transcript.rs` | 780 |

@@ -538,6 +538,22 @@ fn renderer_measures_utf8_bytes_and_applies_capability_and_registry_rules()
 }
 
 #[test]
+fn renderer_encodes_a_client_only_tag_without_server_tags() -> Result<(), Box<dyn Error>> {
+    let capabilities = renderer_capabilities()?;
+    let mut message = WireMessage::new("server", "PRIVMSG", &["#room"], Some("hello"))?;
+    message.add_client_only_tag(&capabilities, "+draft/test", Some("value"))?;
+
+    let measured = message.measure()?;
+    let mut budget = ExactBudget(measured.bytes());
+    let encoded = measured.encode(&mut budget)?;
+    assert_eq!(
+        encoded.as_bytes(),
+        b"@+draft/test=value :server PRIVMSG #room :hello\r\n"
+    );
+    Ok(())
+}
+
+#[test]
 fn renderer_enforces_client_tag_budgets_before_mutation() -> Result<(), Box<dyn Error>> {
     let capabilities = renderer_capabilities()?;
     let mut count = WireMessage::new("server", "NOTICE", &["nick"], Some("body"))?;

@@ -42,7 +42,7 @@ Start here when exploring this area:
 | `emit_line` | Function | `crates/agenc-ircd-client-wire/src/framing.rs` | 198 |
 | `fail` | Function | `crates/agenc-ircd-client-wire/src/framing.rs` | 219 |
 | `clear` | Function | `crates/agenc-ircd-client-wire/src/framing.rs` | 224 |
-| `drop` | Function | `crates/agenc-ircd-client-wire/src/framing.rs` | 266 |
+| `drop` | Function | `crates/agenc-ircd-client-wire/src/framing.rs` | 268 |
 
 ## Execution Flows
 

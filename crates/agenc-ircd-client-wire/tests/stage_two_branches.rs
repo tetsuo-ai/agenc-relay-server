@@ -21,7 +21,9 @@ use agenc_ircd_client_wire::{
     isupport_messages, labeled_response, numeric_reply, parse_client_tags, parse_message,
     render_tags, slow_consumer_warning, split_capability_lines, standard_reply,
 };
-use agenc_ircd_types::{ChannelName, NetworkId, PublicErrorCode, SafeContext};
+use agenc_ircd_types::{
+    AccountDeletionToken, ChannelName, NetworkId, PublicErrorCode, SafeContext,
+};
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 
@@ -1020,7 +1022,13 @@ fn renderer_covers_registry_syntax_budgets_labels_and_batch_stack() -> Result<()
     assert!(std::str::from_utf8(rendered.as_bytes())?.starts_with("@tag;+empty "));
 
     assert_eq!(
-        WireMessage::new("server", "NOTICE", &[], Some(&"x".repeat(500))).err(),
+        WireMessage::new(
+            "server",
+            "NOTICE",
+            &[],
+            Some(&"x".repeat(MAX_COMMAND_BYTES)),
+        )
+        .err(),
         Some(RenderError::LineBudget)
     );
     let mut server_tags = WireMessage::new("server", "NOTICE", &[], None)?;
@@ -1060,6 +1068,37 @@ fn renderer_covers_registry_syntax_budgets_labels_and_batch_stack() -> Result<()
         )
         .err(),
         Some(RenderError::InapplicableReply)
+    );
+    let challenge = AccountDeletionToken::from_bytes([7_u8; 16]);
+    let deletion_reply = standard_reply(
+        &render_capabilities,
+        "server",
+        ReplyKind::Note,
+        "ACCT",
+        PublicErrorCode::DELETECHALLENGE,
+        &[SafeReplyContext::DeletionChallenge(&challenge)],
+        SafeReplyDescription::new("Confirm account deletion")?,
+    )?;
+    let deletion_bytes = deletion_reply.measure()?.bytes();
+    let mut deletion_budget = ExactBudget(deletion_bytes);
+    let deletion_reply = deletion_reply.measure()?.encode(&mut deletion_budget)?;
+    assert!(
+        std::str::from_utf8(deletion_reply.as_bytes())?
+            .contains(" DELETE_CHALLENGE BwcHBwcHBwcHBwcHBwcHBw :Confirm account deletion")
+    );
+
+    let updated_channel = ChannelName::parse("#known-secret")?;
+    assert!(
+        standard_reply(
+            &render_capabilities,
+            "server",
+            ReplyKind::Note,
+            "CHANCTL",
+            PublicErrorCode::UPDATED,
+            &[SafeReplyContext::Channel(&updated_channel)],
+            SafeReplyDescription::new("Channel setting updated")?,
+        )
+        .is_ok()
     );
     assert_eq!(
         standard_reply(

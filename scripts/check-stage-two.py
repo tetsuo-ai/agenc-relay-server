@@ -15,13 +15,13 @@ from typing import NoReturn
 EXPECTED_BUDGETS = {
     "stream": {
         "traditional_with_crlf": 512,
-        "command_without_crlf": 510,
+        "command_without_crlf": 8701,
         "client_tag_data": 4094,
         "server_tag_data": 4094,
         "combined_tag_section": 8191,
         "physical_with_crlf": 8703,
     },
-    "websocket": {"command_without_crlf": 510, "message_without_crlf": 8701},
+    "websocket": {"command_without_crlf": 8701, "message_without_crlf": 8701},
     "tags": {
         "client_only_count": 16,
         "ordinary_value_decoded": 256,
