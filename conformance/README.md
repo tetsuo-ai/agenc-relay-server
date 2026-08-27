@@ -25,14 +25,13 @@ Rust compiler; CI policy rejects the variable anywhere else.
 Run the current local gate:
 
 ```sh
-bash scripts/check-stage-two.sh
+bash scripts/check-stage-three.sh
 ```
 
-The command is the current local verification surface. Stage 02 remains open
-until the blockers in the [closure audit](stage-two-audit.md) are resolved and
-a real evidence manifest binds a passing run to one committed revision. The
-2026-08-26 working-tree run passed with 90.03% branch coverage and 93.96% line
-coverage, including all four deterministic fuzz smoke targets.
+The command is the current local verification surface. It inherits every Stage
+02 check and adds Stage 03 domain, generated-sequence, privacy, and independent
+reference-model checks. Release evidence still requires a manifest tied to the
+exact committed revision on which the command ran.
 
 For an evidence-only check:
 

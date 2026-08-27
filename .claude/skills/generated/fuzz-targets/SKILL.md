@@ -1,23 +1,23 @@
 ---
 name: fuzz-targets
-description: "Skill for the Fuzz_targets area of agenc-ircd. 71 symbols across 12 files."
+description: "Skill for the Fuzz_targets area of agenc-ircd. 68 symbols across 12 files."
 ---
 
 # Fuzz_targets
 
-71 symbols | 12 files | Cohesion: 73%
+68 symbols | 12 files | Cohesion: 73%
 
 ## When to Use
 
 - Working with code in `fuzz/`
-- Understanding how list, as_str, parse_message work
+- Understanding how as_str, parse_message, requested_backing_capacities work
 - Modifying fuzz_targets-related functionality
 
 ## Key Files
 
 | File | Symbols |
 |------|---------|
-| `fuzz/fuzz_targets/client_state.rs` | exercise_capability_state, exercise_capability_request, exercise_capability_end, exercise_capability_changes, exercise_duplicate_advertisement (+21) |
+| `fuzz/fuzz_targets/client_state.rs` | exercise_post_registration_grammar, exercise_post_registration_line, exercise_capability_state, exercise_capability_request, exercise_capability_end (+18) |
 | `fuzz/fuzz_targets/parse_render.rs` | new, exercise_boundary_render_plan, exercise_exact_render_boundaries, render_prefix, render_command (+8) |
 | `fuzz/fuzz_targets/websocket.rs` | exercise_fragmented_sequence, assert_control_event, exercise_arbitrary_frame, exercise_oversized_message, safe_message (+3) |
 | `crates/agenc-ircd-client-wire/src/message.rs` | parse_message, parse_parameters, validate_parameters, copy_string, calculate_requested_backing_bytes (+1) |
@@ -32,36 +32,36 @@ description: "Skill for the Fuzz_targets area of agenc-ircd. 71 symbols across 1
 
 Start here when exploring this area:
 
-- **`list`** (Function) — `crates/agenc-ircd-client-wire/src/capability.rs:314`
 - **`as_str`** (Function) — `crates/agenc-ircd-client-wire/src/framing.rs:86`
 - **`parse_message`** (Function) — `crates/agenc-ircd-client-wire/src/message.rs:153`
 - **`requested_backing_capacities`** (Function) — `crates/agenc-ircd-client-wire/src/tags.rs:208`
 - **`measure`** (Function) — `crates/agenc-ircd-client-wire/src/render.rs:284`
+- **`list`** (Function) — `crates/agenc-ircd-client-wire/src/capability.rs:317`
 
 ## Key Symbols
 
 | Symbol | Type | File | Line |
 |--------|------|------|------|
-| `list` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 314 |
 | `as_str` | Function | `crates/agenc-ircd-client-wire/src/framing.rs` | 86 |
 | `parse_message` | Function | `crates/agenc-ircd-client-wire/src/message.rs` | 153 |
 | `requested_backing_capacities` | Function | `crates/agenc-ircd-client-wire/src/tags.rs` | 208 |
 | `measure` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 284 |
+| `list` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 317 |
 | `parse_u16_decimal` | Function | `crates/agenc-ircd-client-wire/src/text.rs` | 230 |
 | `parse_u32_decimal` | Function | `crates/agenc-ircd-client-wire/src/text.rs` | 236 |
 | `parse_u64_decimal` | Function | `crates/agenc-ircd-client-wire/src/text.rs` | 242 |
-| `split_capability_lines` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 465 |
-| `exercise_capability_state` | Function | `fuzz/fuzz_targets/client_state.rs` | 150 |
-| `exercise_capability_request` | Function | `fuzz/fuzz_targets/client_state.rs` | 219 |
-| `exercise_capability_end` | Function | `fuzz/fuzz_targets/client_state.rs` | 240 |
-| `exercise_capability_changes` | Function | `fuzz/fuzz_targets/client_state.rs` | 253 |
-| `exercise_duplicate_advertisement` | Function | `fuzz/fuzz_targets/client_state.rs` | 297 |
-| `capability_request` | Function | `fuzz/fuzz_targets/client_state.rs` | 315 |
-| `generated_capability_request` | Function | `fuzz/fuzz_targets/client_state.rs` | 344 |
-| `capability_profiles` | Function | `fuzz/fuzz_targets/client_state.rs` | 380 |
-| `capability_snapshot` | Function | `fuzz/fuzz_targets/client_state.rs` | 436 |
-| `assert_capability_invariants` | Function | `fuzz/fuzz_targets/client_state.rs` | 444 |
-| `assert_dependency` | Function | `fuzz/fuzz_targets/client_state.rs` | 471 |
+| `split_capability_lines` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 468 |
+| `parse_parameters` | Function | `crates/agenc-ircd-client-wire/src/message.rs` | 210 |
+| `validate_parameters` | Function | `crates/agenc-ircd-client-wire/src/message.rs` | 232 |
+| `copy_string` | Function | `crates/agenc-ircd-client-wire/src/message.rs` | 261 |
+| `calculate_requested_backing_bytes` | Function | `crates/agenc-ircd-client-wire/src/message.rs` | 270 |
+| `parser_covers_empty_prefix_command_and_parameter_shapes` | Function | `crates/agenc-ircd-client-wire/src/message.rs` | 354 |
+| `grammar_rejection_refreshes_complete_message_activity` | Function | `crates/agenc-ircd-client-wire/src/registration.rs` | 1436 |
+| `parsed` | Function | `crates/agenc-ircd-client-wire/src/registration_command.rs` | 1945 |
+| `classify` | Function | `crates/agenc-ircd-client-wire/src/registration_command.rs` | 1953 |
+| `exercise_post_registration_grammar` | Function | `fuzz/fuzz_targets/client_state.rs` | 97 |
+| `exercise_post_registration_line` | Function | `fuzz/fuzz_targets/client_state.rs` | 113 |
+| `run` | Function | `fuzz/fuzz_targets/tcp_framing.rs` | 41 |
 
 ## Execution Flows
 
@@ -83,7 +83,7 @@ Start here when exploring this area:
 | Area | Connections |
 |------|-------------|
 | Tests | 8 calls |
-| Cluster_2 | 7 calls |
+| Cluster_2 | 6 calls |
 | Cluster_6 | 3 calls |
 | Cluster_44 | 1 calls |
 | Cluster_24 | 1 calls |
@@ -93,7 +93,7 @@ Start here when exploring this area:
 
 ## How to Explore
 
-1. `context({name: "list"})` — see callers and callees
+1. `context({name: "as_str"})` — see callers and callees
 2. `query({search_query: "fuzz_targets"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

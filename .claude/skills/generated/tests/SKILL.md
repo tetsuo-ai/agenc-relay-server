@@ -1,11 +1,11 @@
 ---
 name: tests
-description: "Skill for the Tests area of agenc-ircd. 420 symbols across 44 files."
+description: "Skill for the Tests area of agenc-ircd. 424 symbols across 44 files."
 ---
 
 # Tests
 
-420 symbols | 44 files | Cohesion: 82%
+424 symbols | 44 files | Cohesion: 82%
 
 ## When to Use
 
@@ -19,7 +19,7 @@ description: "Skill for the Tests area of agenc-ircd. 420 symbols across 44 file
 |------|---------|
 | `crates/agenc-ircd-client-wire/src/registration_command.rs` | validate_post_registration_command, validate_join, validate_part, validate_mode, validate_topic (+48) |
 | `crates/agenc-ircd-federation-wire/src/tests/semantics.rs` | schema, fields, validate, opaque, unsigned (+38) |
-| `crates/agenc-ircd-client-wire/tests/stage_two_regressions.rs` | in_flight_commit_defers_owned_input_and_resumes_it_after_registration, repeated_commit_defer_resume_cycles_retain_fifo_message_ownership, blind_cap_req_delays_commit_until_end, invalid_pass_does_not_consume_attempt_and_late_events_cannot_reopen_close, pending_ownership_and_auth_failures_are_transactional_and_terminal (+18) |
+| `crates/agenc-ircd-client-wire/tests/stage_two_regressions.rs` | in_flight_commit_defers_owned_input_and_resumes_it_after_registration, repeated_commit_defer_resume_cycles_retain_fifo_message_ownership, blind_cap_req_delays_commit_until_end, invalid_pass_does_not_consume_attempt_and_late_events_cannot_reopen_close, pending_ownership_and_auth_failures_are_transactional_and_terminal (+19) |
 | `crates/agenc-ircd-client-wire/src/auth_transport.rs` | zeroize_storage, drop, new, client, server_response (+17) |
 | `crates/agenc-ircd-client-wire/tests/stage_two_branches.rs` | sasl_covers_abort_retry_finish_completion_and_failure_branches, account_carriers_cover_sequence_shape_finish_and_deadlines, feed_sasl_request, feed_account_request, registration_profile_changes_notify_only_opted_in_clients_and_always_reconnect (+16) |
 | `crates/agenc-ircd-client-wire/tests/stage_two_wire.rs` | new, stream_framer_handles_every_split_and_coalesced_boundary, stream_framer_enforces_terminators_utf8_nul_eof_and_exact_limits, syntax_parser_canonicalizes_commands_and_preserves_trailing_presence, registration_bounds_pending_input_keepalive_and_close_idempotence (+16) |
@@ -53,15 +53,15 @@ Start here when exploring this area:
 | `tick` | Function | `crates/agenc-ircd-client-wire/src/auth_transport.rs` | 305 |
 | `parse_registration_command` | Function | `crates/agenc-ircd-client-wire/src/registration_command.rs` | 362 |
 | `parse_client_transcript` | Function | `crates/agenc-ircd-testkit/src/client_transcript.rs` | 144 |
+| `try_clone` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 79 |
 | `write_u64` | Function | `crates/agenc-ircd-testkit/src/reference_codec.rs` | 156 |
 | `write_fixed` | Function | `crates/agenc-ircd-testkit/src/reference_codec.rs` | 163 |
 | `write_opaque` | Function | `crates/agenc-ircd-testkit/src/reference_codec.rs` | 170 |
 | `write_length` | Function | `crates/agenc-ircd-testkit/src/reference_codec.rs` | 194 |
 | `finish` | Function | `crates/agenc-ircd-testkit/src/reference_codec.rs` | 208 |
+| `ls` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 230 |
+| `end` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 323 |
 | `render_tags` | Function | `crates/agenc-ircd-client-wire/src/tags.rs` | 509 |
-| `try_clone` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 77 |
-| `encode` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 374 |
-| `parse_client_tags` | Function | `crates/agenc-ircd-client-wire/src/tags.rs` | 386 |
 
 ## Execution Flows
 
@@ -83,7 +83,7 @@ Start here when exploring this area:
 | Area | Connections |
 |------|-------------|
 | Fuzz_targets | 19 calls |
-| Cluster_2 | 14 calls |
+| Cluster_2 | 15 calls |
 | Cluster_72 | 7 calls |
 | Cluster_68 | 4 calls |
 | Cluster_24 | 4 calls |

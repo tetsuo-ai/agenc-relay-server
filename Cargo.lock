@@ -110,6 +110,7 @@ name = "agenc-ircd-testkit"
 version = "0.0.0"
 dependencies = [
  "agenc-ircd-client-wire",
+ "agenc-ircd-domain",
  "agenc-ircd-federation-wire",
  "agenc-ircd-types",
  "sha2",

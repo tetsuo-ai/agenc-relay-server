@@ -14,6 +14,7 @@ enum GlobCase {
 }
 
 /// A validated glob evaluated with a fixed `u128` NFA-state bitset.
+#[derive(Eq, PartialEq)]
 pub struct CompiledGlob {
     pattern: String,
     case: GlobCase,
@@ -108,6 +109,7 @@ impl CompiledGlob {
 }
 
 /// The domain selected by one typed mask.
+#[derive(Eq, PartialEq)]
 pub enum MaskSubject {
     /// An immutable authenticated account.
     Account(AccountRandomId),
@@ -120,6 +122,7 @@ pub enum MaskSubject {
 }
 
 /// A canonical nonrecursive typed mask.
+#[derive(Eq, PartialEq)]
 pub struct TypedMask {
     quiet: bool,
     subject: MaskSubject,

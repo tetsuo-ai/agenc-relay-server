@@ -22,7 +22,7 @@ review and evidence required by the specifications.
 Run the current complete gate from the repository root:
 
 ```sh
-bash scripts/check-stage-two.sh
+bash scripts/check-stage-three.sh
 ```
 
 For a narrower development loop, use `cargo fmt --all --check`,

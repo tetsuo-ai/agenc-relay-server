@@ -493,7 +493,7 @@ Outcome: deterministic protocol state, authorization, privacy projections, and
 mutation plans are complete without sockets, TLS, executors, databases,
 filesystem calls, concrete clocks, or random generators.
 
-- [ ] `S03-001` **Model accounts, principals, users, sessions, and presence.**
+- [x] `S03-001` **Model accounts, principals, users, sessions, and presence.**
   Keep account, E2EE, nickname, presentation, cloak, and transport identities
   separate with explicit generation fencing.
   - After: `S02-900`.
@@ -502,7 +502,7 @@ filesystem calls, concrete clocks, or random generators.
   - Invariants: `ID-01` through `ID-07`, `AUTH-04`, `AUTH-05`.
   - Evidence: lifecycle, account-switch, nickname reuse, cloak independence, and stale-generation property tests.
 
-- [ ] `S03-002` **Model channel instances, membership, roles, and modes.**
+- [x] `S03-002` **Model channel instances, membership, roles, and modes.**
   Enforce recreation isolation, owner continuity, role ordering, mandatory and
   mutually exclusive modes, typed masks, and revision-bound decisions.
   - After: `S03-001`.
@@ -511,7 +511,7 @@ filesystem calls, concrete clocks, or random generators.
   - Invariants: `STA-02` through `STA-05`.
   - Evidence: generated membership/role/mode sequences and every boundary/collision transition.
 
-- [ ] `S03-003` **Implement privacy and discovery projections.** Produce only
+- [x] `S03-003` **Implement privacy and discovery projections.** Produce only
   recipient-authorized views for public, unlisted, secret, invisible, offline,
   account, channel, query, and presence state.
   - After: `S03-001`, `S03-002`.
@@ -520,7 +520,7 @@ filesystem calls, concrete clocks, or random generators.
   - Invariants: `PRV-01`, `PRV-02`, `STA-10`, `ID-04`, `ID-05`.
   - Evidence: authorization matrices, projection diffs, equal-error tests, and forbidden-field canaries.
 
-- [ ] `S03-004` **Canonicalize and validate commands.** Convert parsed syntax
+- [x] `S03-004` **Canonicalize and validate commands.** Convert parsed syntax
   into `CanonicalCommand` only after semantic bounds, target resolution rules,
   mode vectors, and all-or-none command-level validation succeed.
   - After: `S03-001` through `S03-003`.
@@ -529,7 +529,7 @@ filesystem calls, concrete clocks, or random generators.
   - Invariants: `STA-04`, `STA-05`, `STA-06`, `TRN-05`.
   - Evidence: every Appendix-A command arm has success, rejection, multi-target, and unchanged-state tests.
 
-- [ ] `S03-005` **Implement authorization and rate charging.** Produce an
+- [x] `S03-005` **Implement authorization and rate charging.** Produce an
   `AuthorizedCommand` only after current principal, generation, role, target
   revision, policy, and hierarchical budget checks pass.
   - After: `S03-004`.
@@ -538,7 +538,7 @@ filesystem calls, concrete clocks, or random generators.
   - Invariants: `ID-01`, `STA-03`, `STA-05`, `STA-07`, `CON-05`.
   - Evidence: privilege-transition, stale-identity, confused-deputy, exhaustion, and charge-before-ID tests.
 
-- [ ] `S03-006` **Implement channel and direct-message plans.** Cover JOIN,
+- [x] `S03-006` **Implement channel and direct-message plans.** Cover JOIN,
   PART, TOPIC, NAMES, LIST, INVITE, KICK, direct/channel messaging, echo,
   recipient derivation, and atomic authorized-success subsets.
   - After: `S03-005`.
@@ -547,7 +547,7 @@ filesystem calls, concrete clocks, or random generators.
   - Invariants: `STA-01` through `STA-10`.
   - Evidence: deterministic two-client/multi-target flows, ordering tests, secret-target privacy, and rollback-free pure plans.
 
-- [ ] `S03-007` **Implement moderation and user-safety plans.** Model mutes,
+- [x] `S03-007` **Implement moderation and user-safety plans.** Model mutes,
   bans, exceptions, sanctions, role-gated actions, removal consequences, and
   auditable operator decisions without inspecting encrypted content.
   - After: `S03-005`, `S03-006`.
@@ -556,7 +556,7 @@ filesystem calls, concrete clocks, or random generators.
   - Invariants: `STA-03`, `STA-04`, `STA-05`, `OPS-03`.
   - Evidence: role/sanction matrix, appeal-state transitions, E2EE-removal intent tests, and audit-field allowlist tests.
 
-- [ ] `S03-008` **Model history and offline state policy.** Keep default
+- [x] `S03-008` **Model history and offline state policy.** Keep default
   ephemerality, optional plaintext channel history, offline account state, and
   E2EE opacity as explicit mutually constrained policies.
   - After: `S03-002`, `S03-006`.
@@ -565,7 +565,7 @@ filesystem calls, concrete clocks, or random generators.
   - Invariants: `STA-09`, `E2E-01`, `E2E-02`.
   - Evidence: default-no-history, opt-in scope, encrypted-target refusal, deletion, and visibility tests.
 
-- [ ] `S03-009` **Implement pure mutation plans and events.** Separate
+- [x] `S03-009` **Implement pure mutation plans and events.** Separate
   validation, authorization, deterministic state transition, storage
   projection, recipient projection, and later runtime reservations.
   - After: `S03-004` through `S03-008`.
@@ -574,7 +574,7 @@ filesystem calls, concrete clocks, or random generators.
   - Invariants: `CON-01`, `CON-03`, `DUR-01`, `STA-08`.
   - Evidence: plans are deterministic from one revision, contain no runtime/storage handles, and apply once in the reference model.
 
-- [ ] `S03-010` **Make time and randomness explicit inputs.** Express policy
+- [x] `S03-010` **Make time and randomness explicit inputs.** Express policy
   through monotonic/wall-clock values and requested entropy operations without
   calling system clocks or RNGs in domain code.
   - After: `S03-009`.
@@ -583,7 +583,7 @@ filesystem calls, concrete clocks, or random generators.
   - Invariants: `CON-01`, `AUTH-02`, `FED-09`.
   - Evidence: deterministic boundary tests for expiry, clock failure/jump, timer replacement, and entropy-request identity.
 
-- [ ] `S03-011` **Build the deterministic reference model.** Execute every
+- [x] `S03-011` **Build the deterministic reference model.** Execute every
   command and planned federation-domain operation against simple value state,
   checking invariants after every generated step.
   - After: `S03-001` through `S03-010`.
@@ -592,7 +592,7 @@ filesystem calls, concrete clocks, or random generators.
   - Invariants: all applicable `ID-*`, `PRV-*`, `STA-*`, `CON-*`.
   - Evidence: model covers every command registry arm and exports deterministic snapshots for implementation comparison.
 
-- [ ] `S03-012` **Generate adversarial domain sequences.** Cover registration,
+- [x] `S03-012` **Generate adversarial domain sequences.** Cover registration,
   nickname reuse, recreation, roles, modes, invites, account switches,
   deletion, partitions-as-domain-input, duplicates, gaps, and invalid state
   transitions.
@@ -602,7 +602,7 @@ filesystem calls, concrete clocks, or random generators.
   - Invariants: every applicable Stage-03 invariant.
   - Evidence: generated sequences preserve invariants and rejected steps leave the reference state unchanged.
 
-- [ ] `S03-900` **Pass the Stage 03 gate.** The pure domain implementation and
+- [x] `S03-900` **Pass the Stage 03 gate.** The pure domain implementation and
   independent reference model must agree for all generated sequences before
   cryptographic, storage, or runtime side effects are introduced.
   - After: `S03-001` through `S03-012`.

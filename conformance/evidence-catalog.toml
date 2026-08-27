@@ -179,3 +179,68 @@ kind = "client-wire-fuzzing"
 id = "EVID-S02-900-STAGE-GATE"
 claim_ids = ["S02-900"]
 kind = "stage-gate"
+
+[[evidence]]
+id = "EVID-S03-001-IDENTITIES"
+claim_ids = ["S03-001"]
+kind = "domain-identity-lifecycle"
+
+[[evidence]]
+id = "EVID-S03-002-CHANNELS"
+claim_ids = ["S03-002"]
+kind = "channel-state-model"
+
+[[evidence]]
+id = "EVID-S03-003-PROJECTIONS"
+claim_ids = ["S03-003"]
+kind = "privacy-projections"
+
+[[evidence]]
+id = "EVID-S03-004-COMMANDS"
+claim_ids = ["S03-004"]
+kind = "canonical-domain-commands"
+
+[[evidence]]
+id = "EVID-S03-005-AUTHORIZATION"
+claim_ids = ["S03-005"]
+kind = "authorization-rate-policy"
+
+[[evidence]]
+id = "EVID-S03-006-DELIVERY-PLANS"
+claim_ids = ["S03-006"]
+kind = "channel-direct-message-plans"
+
+[[evidence]]
+id = "EVID-S03-007-MODERATION"
+claim_ids = ["S03-007"]
+kind = "moderation-safety-plans"
+
+[[evidence]]
+id = "EVID-S03-008-HISTORY-E2EE"
+claim_ids = ["S03-008"]
+kind = "history-e2ee-policy"
+
+[[evidence]]
+id = "EVID-S03-009-MUTATION-PLANS"
+claim_ids = ["S03-009"]
+kind = "pure-mutation-plans"
+
+[[evidence]]
+id = "EVID-S03-010-EXPLICIT-INPUTS"
+claim_ids = ["S03-010"]
+kind = "explicit-time-entropy-inputs"
+
+[[evidence]]
+id = "EVID-S03-011-REFERENCE-MODEL"
+claim_ids = ["S03-011"]
+kind = "independent-reference-model"
+
+[[evidence]]
+id = "EVID-S03-012-SEQUENCES"
+claim_ids = ["S03-012"]
+kind = "generated-domain-sequences"
+
+[[evidence]]
+id = "EVID-S03-900-STAGE-GATE"
+claim_ids = ["S03-900"]
+kind = "stage-gate"

@@ -24,7 +24,7 @@ description: "Skill for the Cluster_13 area of agenc-ircd. 8 symbols across 2 fi
 
 Start here when exploring this area:
 
-- **`relays_client_only_tags`** (Function) — `crates/agenc-ircd-client-wire/src/limits.rs:29`
+- **`relays_client_only_tags`** (Function) — `crates/agenc-ircd-client-wire/src/limits.rs:31`
 - **`add_server_tag`** (Function) — `crates/agenc-ircd-client-wire/src/render.rs:246`
 - **`add_client_only_tag`** (Function) — `crates/agenc-ircd-client-wire/src/render.rs:254`
 
@@ -32,14 +32,14 @@ Start here when exploring this area:
 
 | Symbol | Type | File | Line |
 |--------|------|------|------|
-| `relays_client_only_tags` | Function | `crates/agenc-ircd-client-wire/src/limits.rs` | 29 |
+| `relays_client_only_tags` | Function | `crates/agenc-ircd-client-wire/src/limits.rs` | 31 |
 | `add_server_tag` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 246 |
 | `add_client_only_tag` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 254 |
-| `insert_tag` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 1097 |
-| `validate_client_tag_budget` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 1138 |
-| `tag_data_bytes_with` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 1165 |
-| `tag_data_bytes` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 1183 |
-| `escaped_len` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 1212 |
+| `insert_tag` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 1108 |
+| `validate_client_tag_budget` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 1149 |
+| `tag_data_bytes_with` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 1176 |
+| `tag_data_bytes` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 1194 |
+| `escaped_len` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 1223 |
 
 ## Execution Flows
 

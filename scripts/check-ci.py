@@ -20,6 +20,7 @@ GATE_PATHS = (
     "scripts/check-stage-zero.sh",
     "scripts/check-stage-one.sh",
     "scripts/check-stage-two.sh",
+    "scripts/check-stage-three.sh",
 )
 MANIFEST_PATH = "conformance/gates.toml"
 REQUIRED_WORKFLOW_SNIPPETS = (
@@ -36,8 +37,8 @@ REQUIRED_WORKFLOW_SNIPPETS = (
     "cargo +1.98.0 install --locked cargo-fuzz --version 0.13.2",
 )
 REQUIRED_GATE_STEP = (
-    "      - name: Run the complete Stage 02 gate\n"
-    "        run: bash scripts/check-stage-two.sh"
+    "      - name: Run the complete Stage 03 gate\n"
+    "        run: bash scripts/check-stage-three.sh"
 )
 REQUIRED_CHECKOUT_STEP = (
     "      - name: Check out the exact source revision\n"
@@ -106,6 +107,21 @@ REQUIRED_STAGE_TWO = (
     ("cargo", "deny", "--manifest-path", "fuzz/Cargo.toml", "check"),
     ("bash", "scripts/run-stage-two-fuzz.sh"),
 )
+REQUIRED_STAGE_THREE = (
+    ("python3", "scripts/requirements.py", "check-stage-three"),
+    ("python3", "scripts/generate-stage-three.py", "--check"),
+    ("python3", "scripts/check-stage-three.py", "check"),
+    ("python3", "scripts/check-stage-three.py", "self-test"),
+    (
+        "cargo", "test", "-p", "agenc-ircd-testkit",
+        "--test", "domain_channels",
+        "--test", "domain_commands",
+        "--test", "domain_lifecycle",
+        "--test", "domain_reference_model",
+        "--test", "domain_stage_three_matrix",
+        "--locked",
+    ),
+)
 
 
 class CiError(ValueError):
@@ -141,7 +157,7 @@ def validate_workflow(workflow: str) -> None:
     if live_workflow.count(REQUIRED_CHECKOUT_STEP) != 1:
         raise CiError("workflow must contain one exact live checkout step")
     if live_workflow.count(REQUIRED_GATE_STEP) != 1:
-        raise CiError("workflow must contain one live Stage 02 gate step")
+        raise CiError("workflow must contain one live Stage 03 gate step")
 
 
 def validate_manifest(manifest: dict[str, object]) -> None:
@@ -149,11 +165,17 @@ def validate_manifest(manifest: dict[str, object]) -> None:
     if set(manifest) != {"schema_version", "gate"} or manifest.get("schema_version") != 1:
         raise CiError("gate manifest has an invalid top-level schema")
     gates = manifest.get("gate")
-    if not isinstance(gates, dict) or set(gates) != {"stage-zero", "stage-one", "stage-two"}:
-        raise CiError("gate manifest must define exactly stages zero through two")
+    if not isinstance(gates, dict) or set(gates) != {
+        "stage-zero",
+        "stage-one",
+        "stage-two",
+        "stage-three",
+    }:
+        raise CiError("gate manifest must define exactly stages zero through three")
     stage_zero = gates.get("stage-zero")
     stage_one = gates.get("stage-one")
     stage_two = gates.get("stage-two")
+    stage_three = gates.get("stage-three")
     if not isinstance(stage_zero, dict) or set(stage_zero) != {"command"}:
         raise CiError("stage-zero gate has invalid fields")
     if not isinstance(stage_one, dict) or set(stage_one) != {"includes", "command"}:
@@ -164,6 +186,10 @@ def validate_manifest(manifest: dict[str, object]) -> None:
         raise CiError("stage-two gate has invalid fields")
     if stage_two.get("includes") != ["stage-one"]:
         raise CiError("stage-two must include the exact stage-one gate")
+    if not isinstance(stage_three, dict) or set(stage_three) != {"includes", "command"}:
+        raise CiError("stage-three gate has invalid fields")
+    if stage_three.get("includes") != ["stage-two"]:
+        raise CiError("stage-three must include the exact stage-two gate")
     commands = stage_zero.get("command")
     if not isinstance(commands, list):
         raise CiError("stage-zero commands must be an array")
@@ -211,6 +237,19 @@ def validate_manifest(manifest: dict[str, object]) -> None:
         stage_two_actual.append(tuple(argv))
     if tuple(stage_two_actual) != REQUIRED_STAGE_TWO:
         raise CiError("stage-two command sequence differs from the reviewed gate")
+    stage_three_commands = stage_three.get("command")
+    if not isinstance(stage_three_commands, list):
+        raise CiError("stage-three commands must be an array")
+    stage_three_actual = []
+    for index, command in enumerate(stage_three_commands):
+        if not isinstance(command, dict) or set(command) != {"argv"}:
+            raise CiError(f"stage-three command {index} has invalid fields")
+        argv = command.get("argv")
+        if not isinstance(argv, list) or any(not isinstance(item, str) for item in argv):
+            raise CiError(f"stage-three command {index} has invalid argv")
+        stage_three_actual.append(tuple(argv))
+    if tuple(stage_three_actual) != REQUIRED_STAGE_THREE:
+        raise CiError("stage-three command sequence differs from the reviewed gate")
 
 
 def load_manifest_text(text: str) -> dict[str, object]:
@@ -269,16 +308,16 @@ def self_test(root: Path) -> int:
     writable = workflow.replace("contents: read", "contents: write", 1)
     expect_rejection("write permission", lambda: validate_workflow(writable), "missing required")
     cases += 1
-    weakened = workflow.replace("run: bash scripts/check-stage-two.sh", "continue-on-error: true\n        run: bash scripts/check-stage-two.sh", 1)
+    weakened = workflow.replace("run: bash scripts/check-stage-three.sh", "continue-on-error: true\n        run: bash scripts/check-stage-three.sh", 1)
     expect_rejection("continue on error", lambda: validate_workflow(weakened), "continue-on-error")
     cases += 1
     commented = workflow.replace(
-        "        run: bash scripts/check-stage-two.sh",
-        "        # run: bash scripts/check-stage-two.sh",
+        "        run: bash scripts/check-stage-three.sh",
+        "        # run: bash scripts/check-stage-three.sh",
         1,
     )
     expect_rejection(
-        "commented gate", lambda: validate_workflow(commented), "one live Stage 02 gate step"
+        "commented gate", lambda: validate_workflow(commented), "one live Stage 03 gate step"
     )
     cases += 1
     commented_checkout = workflow.replace(
@@ -293,8 +332,8 @@ def self_test(root: Path) -> int:
     )
     cases += 1
     conditional = workflow.replace(
-        "        run: bash scripts/check-stage-two.sh",
-        "        if: false\n        run: bash scripts/check-stage-two.sh",
+        "        run: bash scripts/check-stage-three.sh",
+        "        if: false\n        run: bash scripts/check-stage-three.sh",
         1,
     )
     expect_rejection(

@@ -14,12 +14,26 @@ use agenc_ircd_types::{
 };
 
 mod client_transcript;
+mod domain_fixture;
+mod domain_reference;
 mod reference_codec;
 
 pub use client_transcript::{
     ClientTranscript, ClientTranscriptError, ClientTranscriptHandoff, ClientTranscriptHarness,
     ClientTranscriptMessage, ClientTranscriptOperation, ClientTranscriptStep, TranscriptEncoding,
     parse_client_transcript,
+};
+
+pub use domain_fixture::{
+    DomainTestIdentity, account_id, apply_command, apply_plan, authorize, bytes, channel_id,
+    create_account, generation, message_admission, open_session, plan, registered_admission,
+    revision,
+};
+
+pub use domain_reference::{
+    ALL_REFERENCE_COMMAND_KINDS, ReferenceChannelSnapshot, ReferenceCommand, ReferenceCommandKind,
+    ReferenceDomainError, ReferenceDomainModel, ReferenceDomainSnapshot, ReferenceDomainStep,
+    ReferenceMessageTarget, ReferenceRole, ReferenceSessionSnapshot, ReferenceVisibility,
 };
 
 pub use reference_codec::{

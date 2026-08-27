@@ -29,8 +29,8 @@ Start here when exploring this area:
 - **`decode_one_without_embedded`** (Function) — `crates/agenc-ircd-federation-wire/src/codec.rs:1081`
 - **`validate_schema_semantics`** (Function) — `crates/agenc-ircd-federation-wire/src/semantics.rs:24`
 - **`validate_embedded_semantics`** (Function) — `crates/agenc-ircd-federation-wire/src/semantics.rs:168`
-- **`parse`** (Function) — `crates/agenc-ircd-types/src/identifiers.rs:195`
-- **`parse_wire_bytes`** (Function) — `crates/agenc-ircd-types/src/identifiers.rs:247`
+- **`parse`** (Function) — `crates/agenc-ircd-types/src/identifiers.rs:229`
+- **`parse_wire_bytes`** (Function) — `crates/agenc-ircd-types/src/identifiers.rs:281`
 
 ## Key Symbols
 
@@ -39,8 +39,8 @@ Start here when exploring this area:
 | `decode_one_without_embedded` | Function | `crates/agenc-ircd-federation-wire/src/codec.rs` | 1081 |
 | `validate_schema_semantics` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 24 |
 | `validate_embedded_semantics` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 168 |
-| `parse` | Function | `crates/agenc-ircd-types/src/identifiers.rs` | 195 |
-| `parse_wire_bytes` | Function | `crates/agenc-ircd-types/src/identifiers.rs` | 247 |
+| `parse` | Function | `crates/agenc-ircd-types/src/identifiers.rs` | 229 |
+| `parse_wire_bytes` | Function | `crates/agenc-ircd-types/src/identifiers.rs` | 281 |
 | `prepare` | Function | `crates/agenc-ircd-types/src/names.rs` | 241 |
 | `remaining` | Function | `crates/agenc-ircd-federation-wire/src/codec.rs` | 991 |
 | `validate_event_schema` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 88 |

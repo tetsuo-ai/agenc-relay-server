@@ -25,7 +25,7 @@ description: "Skill for the Cluster_6 area of agenc-ircd. 52 symbols across 3 fi
 
 Start here when exploring this area:
 
-- **`blocks_registration`** (Function) — `crates/agenc-ircd-client-wire/src/capability.rs:331`
+- **`blocks_registration`** (Function) — `crates/agenc-ircd-client-wire/src/capability.rs:334`
 - **`take_single_parameter`** (Function) — `crates/agenc-ircd-client-wire/src/message.rs:67`
 - **`new`** (Function) — `crates/agenc-ircd-client-wire/src/registration.rs:39`
 - **`admit`** (Function) — `crates/agenc-ircd-client-wire/src/registration.rs:438`
@@ -35,7 +35,7 @@ Start here when exploring this area:
 
 | Symbol | Type | File | Line |
 |--------|------|------|------|
-| `blocks_registration` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 331 |
+| `blocks_registration` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 334 |
 | `take_single_parameter` | Function | `crates/agenc-ircd-client-wire/src/message.rs` | 67 |
 | `new` | Function | `crates/agenc-ircd-client-wire/src/registration.rs` | 39 |
 | `admit` | Function | `crates/agenc-ircd-client-wire/src/registration.rs` | 438 |
