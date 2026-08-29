@@ -69,11 +69,14 @@ pub enum LogEventCode {
     ClockTrusted,
     /// A task panicked; the process terminates after this event.
     Crash,
+    /// Events were dropped because the log queue was full; the count bucket
+    /// carries how many.
+    LogDropped,
 }
 
 impl LogEventCode {
     /// Every registered code.
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::ProcessStarted,
         Self::ConfigurationRejected,
         Self::StorageRecovered,
@@ -97,6 +100,7 @@ impl LogEventCode {
         Self::ClockDistrusted,
         Self::ClockTrusted,
         Self::Crash,
+        Self::LogDropped,
     ];
 
     /// Returns the fixed wire label.
@@ -126,6 +130,7 @@ impl LogEventCode {
             Self::ClockDistrusted => "clock_distrusted",
             Self::ClockTrusted => "clock_trusted",
             Self::Crash => "crash",
+            Self::LogDropped => "log_dropped",
         }
     }
 }
@@ -434,6 +439,18 @@ impl LogEvent {
     pub const fn severity(&self) -> Severity {
         self.severity
     }
+
+    /// Returns the coarse UTC second the event was stamped with.
+    #[must_use]
+    pub const fn utc_second(&self) -> UtcSecond {
+        self.utc_second
+    }
+
+    /// Returns the listener purpose, if attached.
+    #[must_use]
+    pub const fn purpose(&self) -> Option<ListenerPurpose> {
+        self.listener_purpose
+    }
 }
 
 impl fmt::Display for LogEvent {
@@ -528,7 +545,7 @@ mod tests {
         .to_string();
         assert!(!minimal.contains("purpose="));
         assert!(!minimal.contains("error="));
-        assert!(minimal.ends_with(" correlation=23"));
+        assert!(minimal.ends_with(" correlation=24"));
     }
 
     #[test]
