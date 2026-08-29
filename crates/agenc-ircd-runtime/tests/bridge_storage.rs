@@ -12,12 +12,15 @@ use std::time::Duration;
 use agenc_ircd_crypto::{
     Ed25519SecretKey, LoginIndexKey, RollbackGuardRootKey, StorageDigest, StorageMasterKey,
 };
+use agenc_ircd_domain::{
+    DirectMessagePolicy, DurableAccount, GuestDirectMessagePolicy, PresencePolicy,
+};
 use agenc_ircd_runtime::bridge::storage::{
     BridgeFailure, CompletionLedger, STORAGE_HANDOFF_CAPACITY, StorageBridge, SubmitError,
     classify_completion, read_blocking,
 };
 use agenc_ircd_storage::{
-    CommitOutcome, DatabaseHeaderTbs, InitialStorageRecord, LoginIndexKeyState,
+    AccountRecordBody, CommitOutcome, DatabaseHeaderTbs, InitialStorageRecord, LoginIndexKeyState,
     PersistentRecordValue, QualificationTarget, ReadPlan, RecordMutation, SCHEMA_GENERATION,
     StateDirectory, StorageAccountingLimits, StorageEngineLimits, StorageError,
     StorageFaultBoundary, StorageFaultCase, StorageFaultInjector, StorageFaultSite,
@@ -27,8 +30,8 @@ use agenc_ircd_storage::{
     StoredKey, TableId, initialize_storage,
 };
 use agenc_ircd_types::{
-    AccountRandomId, DatabaseId, NetworkId, RecoveryEpoch, ServerId, ServerIncarnation,
-    TransactionId,
+    AccountRandomId, DatabaseId, Generation, NetworkId, RecoveryEpoch, Revision, ServerId,
+    ServerIncarnation, TransactionId,
 };
 
 static DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -204,6 +207,19 @@ fn batch(
     expected_commit_sequence: u64,
     expected_generation: u64,
 ) -> Result<StorageMutationBatch, Box<dyn Error>> {
+    // Live account rows carry a decodable body since the persistence boundary
+    // landed; an opaque body is rejected at commit time.
+    let account = DurableAccount {
+        account_id: AccountRandomId::from_bytes([transaction; 16]).to_account_id(),
+        label: None,
+        presence: PresencePolicy::Private,
+        guest_direct_messages: GuestDirectMessagePolicy::Allow,
+        direct_messages: DirectMessagePolicy::Allow,
+        contacts: Vec::new(),
+        reserved_nicknames: Vec::new(),
+        session_generation: Generation::new(1)?,
+        revision: Revision::new(1)?,
+    };
     let value = PersistentRecordValue::new(
         TableId::Account,
         1,
@@ -211,7 +227,7 @@ fn batch(
         1,
         None,
         Vec::new(),
-        format!("account-{transaction}").into_bytes(),
+        AccountRecordBody::encode(&account)?,
     )?
     .encode()?;
     let mutation =
