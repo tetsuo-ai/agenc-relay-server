@@ -95,6 +95,22 @@ STAGE_BINDINGS = {
     "EVID-S04-013-DEPENDENCIES": (["S04-013"], "cryptographic-dependency-profile"),
     "EVID-S04-014-VERIFICATION": (["S04-014"], "crypto-auth-verification"),
     "EVID-S04-900-STAGE-GATE": (["S04-900"], "stage-gate"),
+    "EVID-S05-001-SCHEMA": (["S05-001"], "storage-schema-codecs"),
+    "EVID-S05-002-SEALED-RECORDS": (["S05-002"], "sealed-storage-records"),
+    "EVID-S05-003-ACCOUNTING": (["S05-003"], "storage-accounting"),
+    "EVID-S05-004-MUTATIONS": (["S05-004"], "storage-mutation-batches"),
+    "EVID-S05-005-OWNER": (["S05-005"], "single-storage-owner"),
+    "EVID-S05-006-COMMIT": (["S05-006"], "storage-two-phase-commit"),
+    "EVID-S05-007-NONCES": (["S05-007"], "storage-nonce-reservations"),
+    "EVID-S05-008-INTEGRITY": (["S05-008"], "storage-integrity-ledger"),
+    "EVID-S05-009-GUARD": (["S05-009"], "external-rollback-guard"),
+    "EVID-S05-010-RECOVERY": (["S05-010"], "storage-startup-recovery"),
+    "EVID-S05-011-MIGRATIONS": (["S05-011"], "storage-migration-construction"),
+    "EVID-S05-012-BACKUP": (["S05-012"], "storage-backup-restore"),
+    "EVID-S05-013-REKEY": (["S05-013"], "storage-deletion-rekey"),
+    "EVID-S05-014-LOGIN-INDEX": (["S05-014"], "login-index-transition"),
+    "EVID-S05-015-QUALIFICATION": (["S05-015"], "storage-fault-qualification"),
+    "EVID-S05-900-STAGE-GATE": (["S05-900"], "stage-gate"),
 }
 
 NORMATIVE_BINDINGS = {
@@ -134,6 +150,46 @@ NORMATIVE_BINDINGS = {
         ["E2EE-REQ-A0EFEAB7474EA0A450F5"],
         "normative-requirement",
     ),
+    "EVID-ARCH-REQ-D621F68B6C389E5B7660": (
+        ["ARCH-REQ-D621F68B6C389E5B7660"], "normative-requirement",
+    ),
+    "EVID-ARCH-REQ-30183AFAFED8128B6541": (
+        ["ARCH-REQ-30183AFAFED8128B6541"], "normative-requirement",
+    ),
+    "EVID-ARCH-REQ-497991387ADD6957DDBE": (
+        ["ARCH-REQ-497991387ADD6957DDBE"], "normative-requirement",
+    ),
+    "EVID-ARCH-REQ-61DDBED6FB176354A9BF": (
+        ["ARCH-REQ-61DDBED6FB176354A9BF"], "normative-requirement",
+    ),
+    "EVID-ARCH-REQ-61C6AFF8B1137410D0FD": (
+        ["ARCH-REQ-61C6AFF8B1137410D0FD"], "normative-requirement",
+    ),
+    "EVID-ARCH-REQ-EE3343E6DDAA279E4E23": (
+        ["ARCH-REQ-EE3343E6DDAA279E4E23"], "normative-requirement",
+    ),
+    "EVID-ARCH-REQ-29DE85F5026ADD8EF114": (
+        ["ARCH-REQ-29DE85F5026ADD8EF114"], "normative-requirement",
+    ),
+    "EVID-ARCH-REQ-F235013D840DBE992D6C": (
+        ["ARCH-REQ-F235013D840DBE992D6C"], "normative-requirement",
+    ),
+    "EVID-ARCH-REQ-C70A2FA24AD661DB7BC3": (
+        ["ARCH-REQ-C70A2FA24AD661DB7BC3"], "normative-requirement",
+    ),
+    "EVID-ARCH-REQ-2DAB3DDD73C2AE873977": (
+        ["ARCH-REQ-2DAB3DDD73C2AE873977"], "normative-requirement",
+    ),
+    "EVID-ARCH-REQ-351F91DD2F9F7B09DD4C": (
+        ["ARCH-REQ-351F91DD2F9F7B09DD4C"], "normative-requirement",
+    ),
+    "EVID-ARCH-ID-07": (["ARCH-ID-07"], "normative-requirement"),
+    "EVID-ARCH-DUR-03": (["ARCH-DUR-03"], "normative-requirement"),
+    "EVID-ARCH-DUR-06": (["ARCH-DUR-06"], "normative-requirement"),
+    "EVID-ARCH-DUR-07": (["ARCH-DUR-07"], "normative-requirement"),
+    "EVID-ARCH-DUR-09": (["ARCH-DUR-09"], "normative-requirement"),
+    "EVID-ARCH-DUR-10": (["ARCH-DUR-10"], "normative-requirement"),
+    "EVID-ARCH-DUR-12": (["ARCH-DUR-12"], "normative-requirement"),
 }
 
 REVIEWED_BINDINGS = STAGE_BINDINGS | NORMATIVE_BINDINGS
@@ -193,7 +249,7 @@ TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z")
 ARTIFACT_PATH_RE = re.compile(
     r"conformance/evidence/artifacts/[A-Za-z0-9][A-Za-z0-9_./-]{0,511}"
 )
-CLOSABLE_STAGES = frozenset(range(5))
+CLOSABLE_STAGES = frozenset(range(6))
 REVIEWED_EVIDENCE_TARGETS = (
     "aarch64-unknown-linux-gnu",
     "x86_64-unknown-linux-gnu",
@@ -205,6 +261,7 @@ STAGE_NAMES = {
     2: "two",
     3: "three",
     4: "four",
+    5: "five",
 }
 RUN_ARTIFACT_FIELDS = {
     "schema_version",
@@ -682,7 +739,7 @@ def parse_toolchain_policy(
 ) -> tuple[str, list[dict[str, object]], list[str]]:
     """Parse one closed toolchain policy and select the requested stage profile."""
     if stage not in CLOSABLE_STAGES:
-        raise EvidenceError("toolchain profiles currently cover only Stages 00 through 04")
+        raise EvidenceError("toolchain profiles currently cover only Stages 00 through 05")
     policy_hash = hashlib.sha256(policy_bytes).hexdigest()
     try:
         policy = tomllib.loads(policy_bytes.decode("utf-8"))
@@ -1548,7 +1605,7 @@ def validate_closure_entries(
 def validate_closure(root: Path, stage: int, source_commit: str) -> tuple[int, int]:
     """Validate exact-revision evidence needed to close one stage."""
     if stage not in CLOSABLE_STAGES:
-        raise EvidenceError("closure evidence catalogs currently cover only Stages 00 through 04")
+        raise EvidenceError("closure evidence catalogs currently cover only Stages 00 through 05")
     if COMMIT_RE.fullmatch(source_commit) is None:
         raise EvidenceError("closure source commit must be an exact lowercase 40-character Git ID")
     validate(root)
@@ -2018,9 +2075,9 @@ kind = "normative-requirement"
     cases += 1
 
     try:
-        validate_closure(root, 5, "2" * 40)
+        validate_closure(root, 6, "2" * 40)
     except EvidenceError as error:
-        if "only Stages 00 through 04" not in str(error):
+        if "only Stages 00 through 05" not in str(error):
             raise EvidenceError(
                 f"self-test 'unsupported closure stage' reached the wrong branch: {error}"
             ) from error

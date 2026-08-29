@@ -722,7 +722,7 @@ text = "These sets MUST be one database transaction account-creation start: logi
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S05-004"]
 evidence_ids = ["EVID-ARCH-REQ-D621F68B6C389E5B7660"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -738,7 +738,7 @@ text = "These sets MUST be one database transaction account-creation finish: log
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S05-004"]
 evidence_ids = ["EVID-ARCH-REQ-30183AFAFED8128B6541"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -754,7 +754,7 @@ text = "These sets MUST be one database transaction authentication start: encryp
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S05-004"]
 evidence_ids = ["EVID-ARCH-REQ-497991387ADD6957DDBE"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -770,7 +770,7 @@ text = "These sets MUST be one database transaction authentication finish: consu
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S05-004"]
 evidence_ids = ["EVID-ARCH-REQ-61DDBED6FB176354A9BF"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -786,7 +786,7 @@ text = "These sets MUST be one database transaction credential-change start: cur
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S05-004"]
 evidence_ids = ["EVID-ARCH-REQ-61C6AFF8B1137410D0FD"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -802,7 +802,7 @@ text = "These sets MUST be one database transaction credential-change finish: re
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S05-004"]
 evidence_ids = ["EVID-ARCH-REQ-EE3343E6DDAA279E4E23"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -818,7 +818,7 @@ text = "These sets MUST be one database transaction account deletion: account/lo
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S05-013"]
 evidence_ids = ["EVID-ARCH-REQ-29DE85F5026ADD8EF114"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -930,7 +930,7 @@ text = "These sets MUST be one database transaction login-index transition start
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S05-014"]
 evidence_ids = ["EVID-ARCH-REQ-F235013D840DBE992D6C"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -962,7 +962,7 @@ text = "These sets MUST be one database transaction retention deletion: deleted 
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S05-013"]
 evidence_ids = ["EVID-ARCH-REQ-C70A2FA24AD661DB7BC3"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -978,7 +978,7 @@ text = "These sets MUST be one database transaction offline restore/rekey/schema
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S05-011"]
 evidence_ids = ["EVID-ARCH-REQ-2DAB3DDD73C2AE873977"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -994,7 +994,7 @@ text = "Version 1 has no in-place or standalone compaction operation and MUST NO
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S05-013"]
 evidence_ids = ["EVID-ARCH-REQ-351F91DD2F9F7B09DD4C"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1218,7 +1218,7 @@ text = "Persistent state contains neither login plaintext nor a reversible login
 target_crates = ["agenc-ircd-types"]
 task_ids = ["S05-014"]
 evidence_ids = ["EVID-ARCH-ID-07"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1986,7 +1986,7 @@ text = "An encrypted record is parsed only after header/AAD/schema/key generatio
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S05-002"]
 evidence_ids = ["EVID-ARCH-DUR-03"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2034,7 +2034,7 @@ text = "Every record seal samples a fresh uniform 192-bit XChaCha20 nonce from t
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S05-007"]
 evidence_ids = ["EVID-ARCH-DUR-06"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2050,7 +2050,7 @@ text = "Insertion, deletion, or substitution of any integrity-tracked sealed rec
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S05-008"]
 evidence_ids = ["EVID-ARCH-DUR-07"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2082,7 +2082,7 @@ text = "Restore/rekey/schema-migration output is produced only through the authe
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S05-011"]
 evidence_ids = ["EVID-ARCH-DUR-09"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2098,7 +2098,7 @@ text = "Login-index key state, configured key IDs, generations, index-key prefix
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S05-014"]
 evidence_ids = ["EVID-ARCH-DUR-10"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2130,7 +2130,7 @@ text = "A coordinator StateMeta's account-service response count starts at zero 
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S05-011"]
 evidence_ids = ["EVID-ARCH-DUR-12"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]

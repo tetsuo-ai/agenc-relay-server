@@ -24,6 +24,7 @@ GATE_PATHS = (
     "scripts/check-stage-two.sh",
     "scripts/check-stage-three.sh",
     "scripts/check-stage-four.sh",
+    "scripts/check-stage-five.sh",
 )
 MANIFEST_PATH = "conformance/gates.toml"
 REQUIRED_WORKFLOW_SNIPPETS = (
@@ -40,8 +41,8 @@ REQUIRED_WORKFLOW_SNIPPETS = (
     "cargo +1.98.0 install --locked cargo-fuzz --version 0.13.2",
 )
 REQUIRED_GATE_STEP = (
-    "      - name: Run Stage 04 implementation checks\n"
-    "        run: bash scripts/check-stage-four.sh"
+    "      - name: Run Stage 05 implementation checks\n"
+    "        run: bash scripts/check-stage-five.sh"
 )
 REQUIRED_CHECKOUT_STEP = (
     "      - name: Check out the exact source revision\n"
@@ -145,6 +146,24 @@ REQUIRED_STAGE_FOUR = (
     ),
     ("bash", "scripts/run-stage-four-fuzz.sh"),
 )
+REQUIRED_STAGE_FIVE = (
+    ("python3", "scripts/requirements.py", "check-stage-five"),
+    ("python3", "scripts/check-stage-five.py", "check"),
+    ("python3", "scripts/check-stage-five.py", "self-test"),
+    (
+        "cargo", "test", "-p", "agenc-ircd-storage", "--all-features", "--locked",
+    ),
+    (
+        "cargo", "+nightly-2026-08-24", "fmt", "--manifest-path",
+        "fuzz/Cargo.toml", "--", "--check",
+    ),
+    (
+        "cargo", "+nightly-2026-08-24", "check", "--manifest-path",
+        "fuzz/Cargo.toml", "--bins", "--locked",
+    ),
+    ("cargo", "deny", "--manifest-path", "fuzz/Cargo.toml", "check"),
+    ("bash", "scripts/run-stage-five-fuzz.sh"),
+)
 
 
 class CiError(ValueError):
@@ -180,7 +199,7 @@ def validate_workflow(workflow: str) -> None:
     if live_workflow.count(REQUIRED_CHECKOUT_STEP) != 1:
         raise CiError("workflow must contain one exact live checkout step")
     if live_workflow.count(REQUIRED_GATE_STEP) != 1:
-        raise CiError("workflow must contain one live Stage 04 implementation-check step")
+        raise CiError("workflow must contain one live Stage 05 implementation-check step")
 
 
 def validate_manifest(manifest: dict[str, object]) -> None:
@@ -199,15 +218,17 @@ def validate_manifest(manifest: dict[str, object]) -> None:
         "stage-two-implementation",
         "stage-three-implementation",
         "stage-four-implementation",
+        "stage-five-implementation",
     }:
         raise CiError(
-            "gate manifest must define Stages 00 through 03 and Stage 04 implementation checks"
+            "gate manifest must define Stage 00 through Stage 05 implementation checks"
         )
     stage_zero = gates.get("stage-zero-implementation")
     stage_one = gates.get("stage-one-implementation")
     stage_two = gates.get("stage-two-implementation")
     stage_three = gates.get("stage-three-implementation")
     stage_four = gates.get("stage-four-implementation")
+    stage_five = gates.get("stage-five-implementation")
     if not isinstance(stage_zero, dict) or set(stage_zero) != {"command"}:
         raise CiError("stage-zero implementation checks have invalid fields")
     if not isinstance(stage_one, dict) or set(stage_one) != {"includes", "command"}:
@@ -226,6 +247,10 @@ def validate_manifest(manifest: dict[str, object]) -> None:
         raise CiError("stage-four implementation checks have invalid fields")
     if stage_four.get("includes") != ["stage-three-implementation"]:
         raise CiError("stage-four implementation checks must include stage-three checks")
+    if not isinstance(stage_five, dict) or set(stage_five) != {"includes", "command"}:
+        raise CiError("stage-five implementation checks have invalid fields")
+    if stage_five.get("includes") != ["stage-four-implementation"]:
+        raise CiError("stage-five implementation checks must include stage-four checks")
     commands = stage_zero.get("command")
     if not isinstance(commands, list):
         raise CiError("stage-zero commands must be an array")
@@ -299,6 +324,19 @@ def validate_manifest(manifest: dict[str, object]) -> None:
         stage_four_actual.append(tuple(argv))
     if tuple(stage_four_actual) != REQUIRED_STAGE_FOUR:
         raise CiError("stage-four implementation command sequence differs from the reviewed checks")
+    stage_five_commands = stage_five.get("command")
+    if not isinstance(stage_five_commands, list):
+        raise CiError("stage-five implementation commands must be an array")
+    stage_five_actual = []
+    for index, command in enumerate(stage_five_commands):
+        if not isinstance(command, dict) or set(command) != {"argv"}:
+            raise CiError(f"stage-five implementation command {index} has invalid fields")
+        argv = command.get("argv")
+        if not isinstance(argv, list) or any(not isinstance(item, str) for item in argv):
+            raise CiError(f"stage-five implementation command {index} has invalid argv")
+        stage_five_actual.append(tuple(argv))
+    if tuple(stage_five_actual) != REQUIRED_STAGE_FIVE:
+        raise CiError("stage-five implementation command sequence differs from the reviewed checks")
 
 
 def load_manifest_text(text: str) -> dict[str, object]:
@@ -371,18 +409,18 @@ def self_test(root: Path) -> int:
     writable = workflow.replace("contents: read", "contents: write", 1)
     expect_rejection("write permission", lambda: validate_workflow(writable), "missing required")
     cases += 1
-    weakened = workflow.replace("run: bash scripts/check-stage-four.sh", "continue-on-error: true\n        run: bash scripts/check-stage-four.sh", 1)
+    weakened = workflow.replace("run: bash scripts/check-stage-five.sh", "continue-on-error: true\n        run: bash scripts/check-stage-five.sh", 1)
     expect_rejection("continue on error", lambda: validate_workflow(weakened), "continue-on-error")
     cases += 1
     commented = workflow.replace(
-        "        run: bash scripts/check-stage-four.sh",
-        "        # run: bash scripts/check-stage-four.sh",
+        "        run: bash scripts/check-stage-five.sh",
+        "        # run: bash scripts/check-stage-five.sh",
         1,
     )
     expect_rejection(
         "commented gate",
         lambda: validate_workflow(commented),
-        "one live Stage 04 implementation-check step",
+        "one live Stage 05 implementation-check step",
     )
     cases += 1
     commented_checkout = workflow.replace(
@@ -397,8 +435,8 @@ def self_test(root: Path) -> int:
     )
     cases += 1
     conditional = workflow.replace(
-        "        run: bash scripts/check-stage-four.sh",
-        "        if: false\n        run: bash scripts/check-stage-four.sh",
+        "        run: bash scripts/check-stage-five.sh",
+        "        if: false\n        run: bash scripts/check-stage-five.sh",
         1,
     )
     expect_rejection(

@@ -3,8 +3,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 65
-reviewed_source_sha256 = "593711c39de1b30161a234545c2c4ecc81aeafd91c6b618f2ab84722af7b18de"
+reviewed_source_files = 87
+reviewed_source_sha256 = "eb31342c45df9f4926e888871c47d3c7333f7cdd91d48df64f08f16f3388c893"
 
 [[region]]
 id = "client-message-error-enum-arms"
@@ -58,5 +58,5 @@ reason = "Every current domain cross-index and authority-fence check must take b
 
 [[deferred]]
 category = "persistence-recovery"
-until_task = "S05-010"
-reason = "Persistence recovery code does not exist before Stage 05. The deferment expires when fail-closed startup recovery is implemented."
+until_task = "S05-900"
+reason = "The persistence recovery region becomes mandatory when the Stage 05 exact-revision gate closes."

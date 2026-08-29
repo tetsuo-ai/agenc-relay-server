@@ -164,3 +164,30 @@ argv = ["cargo", "test", "-p", "agenc-ircd-testkit", "--test", "stage_four_domai
 
 [[gate.stage-four-implementation.command]]
 argv = ["bash", "scripts/run-stage-four-fuzz.sh"]
+
+[gate.stage-five-implementation]
+includes = ["stage-four-implementation"]
+
+[[gate.stage-five-implementation.command]]
+argv = ["python3", "scripts/requirements.py", "check-stage-five"]
+
+[[gate.stage-five-implementation.command]]
+argv = ["python3", "scripts/check-stage-five.py", "check"]
+
+[[gate.stage-five-implementation.command]]
+argv = ["python3", "scripts/check-stage-five.py", "self-test"]
+
+[[gate.stage-five-implementation.command]]
+argv = ["cargo", "test", "-p", "agenc-ircd-storage", "--all-features", "--locked"]
+
+[[gate.stage-five-implementation.command]]
+argv = ["cargo", "+nightly-2026-08-24", "fmt", "--manifest-path", "fuzz/Cargo.toml", "--", "--check"]
+
+[[gate.stage-five-implementation.command]]
+argv = ["cargo", "+nightly-2026-08-24", "check", "--manifest-path", "fuzz/Cargo.toml", "--bins", "--locked"]
+
+[[gate.stage-five-implementation.command]]
+argv = ["cargo", "deny", "--manifest-path", "fuzz/Cargo.toml", "check"]
+
+[[gate.stage-five-implementation.command]]
+argv = ["bash", "scripts/run-stage-five-fuzz.sh"]

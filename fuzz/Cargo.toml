@@ -12,6 +12,7 @@ cargo-fuzz = true
 agenc-ircd-client-wire = { version = "=0.0.0", path = "../crates/agenc-ircd-client-wire" }
 agenc-ircd-auth = { version = "=0.0.0", path = "../crates/agenc-ircd-auth" }
 agenc-ircd-crypto = { version = "=0.0.0", path = "../crates/agenc-ircd-crypto" }
+agenc-ircd-storage = { version = "=0.0.0", path = "../crates/agenc-ircd-storage" }
 agenc-ircd-types = { version = "=0.0.0", path = "../crates/agenc-ircd-types" }
 libfuzzer-sys = "=0.4.13"
 
@@ -53,6 +54,20 @@ bench = false
 [[bin]]
 name = "crypto_wrappers"
 path = "fuzz_targets/crypto_wrappers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "storage_codecs"
+path = "fuzz_targets/storage_codecs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "backup_stream"
+path = "fuzz_targets/backup_stream.rs"
 test = false
 doc = false
 bench = false

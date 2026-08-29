@@ -1,0 +1,3321 @@
+//! Completion coverage for the closed Stage 05 schema and qualification surfaces.
+
+#![forbid(unsafe_code)]
+
+use std::error::Error;
+use std::fs::{self, OpenOptions};
+use std::io::Write as _;
+use std::os::unix::fs::PermissionsExt as _;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use agenc_ircd_crypto::{
+    CryptoError, DatabaseBinding, Ed25519SecretKey, LoginIndexKey, RollbackGuardRootKey,
+    SignatureDomain, StorageDigest, StorageMasterKey, StorageTable, derive_login_index,
+    derive_storage_index, rekey_transform_profile_hash, sign_canonical,
+};
+use agenc_ircd_storage::{
+    CommitOutcome, ConstructionDirectory, ConstructionDirectoryPhase, ConstructionExecutor,
+    ConstructionLimits, ConstructionPlan, ConstructionPlanBuilder, ConstructionSourceDatabase,
+    ConstructionSourceReader, ConstructionSourceRecord, ConstructionTarget,
+    ConstructionTransformer, E2eeRecoveryGate, E2eeRecoveryKind, ExactCopyTransformer,
+    ExistingRecord, InitialStorageRecord, LoginIndexKeyState, LoginIndexLazyMigration,
+    LoginIndexLookupSchedule, LoginIndexStoredKey, LoginIndexTransitionBatch,
+    LoginIndexTransitionPreflight, LoginIndexValue, LoginIndexValueKind, PersistentRecordValue,
+    QualificationTarget, ReadPlan, RecordCodecKind, RecordMutation, RecordReference,
+    RecoveryTransformV1, SCHEMA_GENERATION, SealedRecord, StateDirectory, StorageAccountingLimits,
+    StorageConstruction, StorageConstructionAction, StorageConstructionCursor,
+    StorageConstructionKind, StorageConstructionPlanEntry, StorageConstructionSource,
+    StorageConstructionSourceKind, StorageEngineLimits, StorageError, StorageFaultBoundary,
+    StorageFaultCase, StorageFaultInjector, StorageFaultSchedule, StorageFaultSite,
+    StorageGrowthCase, StorageGrowthRecorder, StorageInitializationConfig,
+    StorageInitializationMode, StorageInitializationOutcome, StorageMutationBatch,
+    StorageMutationHead, StorageOpenConfig, StorageOperationIdentity, StorageOwner, StoragePort,
+    StorageQualificationReport, StorageQualificationReportTbs, StorageSealContext, StoredKey,
+    StoredKeyShape, TableId, construction_plan_hash, initialize_storage, recovery_transform_prefix,
+    table_schema, table_schemas, validate_record_plaintext,
+};
+use agenc_ircd_types::{
+    AccountRandomId, DatabaseId, NetworkId, NormalizedLogin, OpaqueCredentialId, RecoveryEpoch,
+    ServerId, ServerIncarnation, TransactionId,
+};
+
+static DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+const DOMAIN_TABLES: [TableId; 19] = [
+    TableId::Account,
+    TableId::OpaqueRecord,
+    TableId::AuthTransaction,
+    TableId::NicknameReservation,
+    TableId::RegistrationInvite,
+    TableId::Session,
+    TableId::Channel,
+    TableId::ChannelName,
+    TableId::Sanction,
+    TableId::FederationPeer,
+    TableId::FederationOrigin,
+    TableId::RequestResult,
+    TableId::EdgeOutbox,
+    TableId::EdgeProjection,
+    TableId::History,
+    TableId::Audit,
+    TableId::AuditCheckpoint,
+    TableId::E2eeObject,
+    TableId::E2eeState,
+];
+
+const QUALIFICATION_CASES: [&str; 15] = [
+    "btree-merge",
+    "btree-split",
+    "checkpoint",
+    "delete-max",
+    "delete-one",
+    "fragmented",
+    "guard-replace",
+    "insert-empty",
+    "insert-max",
+    "insert-one",
+    "replace-max",
+    "replace-min",
+    "reserve-equal",
+    "reserve-minus-one",
+    "reserve-plus-one",
+];
+
+#[test]
+fn every_table_has_one_closed_schema_and_domain_codec_consumes_fully() -> Result<(), Box<dyn Error>>
+{
+    let schemas = table_schemas()?;
+    for (number, schema) in (0_u16..=26).zip(schemas) {
+        assert_eq!(schema.table().as_u16(), number);
+        assert_eq!(
+            schema.is_integrity_tracked(),
+            schema.table().is_integrity_tracked()
+        );
+    }
+    for table in DOMAIN_TABLES {
+        assert_eq!(table_schema(table).codec(), RecordCodecKind::Domain);
+        let key = key_for(table)?;
+        let reference = RecordReference::new(TableId::Account, StoredKey::new(vec![b'a'; 24])?)?;
+        let body = if table == TableId::E2eeState {
+            E2eeRecoveryGate::new(
+                digest(40),
+                E2eeRecoveryKind::Normal,
+                RecoveryEpoch::from_bytes([41; 16]),
+                digest(42),
+                digest(43),
+                digest(44),
+                digest(45),
+            )
+            .encode()?
+        } else {
+            vec![7, 8, 9]
+        };
+        let value = PersistentRecordValue::new(table, 1, 1, 1, None, vec![reference], body)?;
+        let encoded = value.encode()?;
+        validate_record_plaintext(table, &key, 1, &encoded)?;
+        let mut trailing = encoded.clone();
+        trailing.push(0);
+        assert!(validate_record_plaintext(table, &key, 1, &trailing).is_err());
+        for length in 0..encoded.len() {
+            let prefix = encoded.get(..length).ok_or("missing record prefix")?;
+            assert!(validate_record_plaintext(table, &key, 1, prefix).is_err());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn persistent_record_schema_rejects_every_key_kind_and_counter_mismatch()
+-> Result<(), Box<dyn Error>> {
+    for schema in table_schemas()? {
+        match schema.key_shape() {
+            StoredKeyShape::Fixed(expected) => {
+                schema.validate_key(expected)?;
+                let mut changed = expected.to_vec();
+                changed.push(0);
+                assert!(schema.validate_key(&changed).is_err());
+            }
+            StoredKeyShape::Exact(length) => {
+                schema.validate_key(&vec![1; length])?;
+                assert!(
+                    schema
+                        .validate_key(&vec![1; length.saturating_sub(1)])
+                        .is_err()
+                );
+                assert!(schema.validate_key(&vec![1; length + 1]).is_err());
+            }
+            StoredKeyShape::Range { minimum, maximum } => {
+                schema.validate_key(&vec![1; minimum])?;
+                schema.validate_key(&vec![1; maximum])?;
+                assert!(schema.validate_key(&vec![1; minimum - 1]).is_err());
+                if maximum < agenc_ircd_storage::MAX_STORED_KEY_BYTES {
+                    assert!(schema.validate_key(&vec![1; maximum + 1]).is_err());
+                }
+            }
+            StoredKeyShape::AccountOrOpaqueFake => {
+                schema.validate_key(&[1; 24])?;
+                schema.validate_key(b"agenc-chat/opaque-fake-record/v1")?;
+                assert!(schema.validate_key(&[1; 23]).is_err());
+                assert!(schema.validate_key(&[1; 25]).is_err());
+            }
+        }
+    }
+
+    assert!(
+        RecordReference::new(
+            TableId::IntegrityManifest,
+            StoredKey::new(1_u64.to_be_bytes().to_vec())?,
+        )
+        .is_err()
+    );
+    let account_reference =
+        RecordReference::new(TableId::Account, StoredKey::new(vec![b'a'; 24])?)?;
+    assert!(
+        PersistentRecordValue::new(
+            TableId::Account,
+            1,
+            1,
+            1,
+            None,
+            vec![account_reference.clone(), account_reference],
+            vec![1],
+        )
+        .is_err()
+    );
+
+    for table in DOMAIN_TABLES {
+        let generation = if matches!(
+            table,
+            TableId::Account | TableId::Session | TableId::EdgeProjection
+        ) {
+            1
+        } else {
+            0
+        };
+        let body = if table == TableId::E2eeState {
+            E2eeRecoveryGate::new(
+                digest(130),
+                E2eeRecoveryKind::Normal,
+                RecoveryEpoch::from_bytes([131; 16]),
+                digest(132),
+                digest(133),
+                digest(134),
+                digest(135),
+            )
+            .encode()?
+        } else {
+            vec![1]
+        };
+        assert!(
+            PersistentRecordValue::new(table, 0, 1, generation, None, Vec::new(), body.clone())
+                .is_err()
+        );
+        assert!(
+            PersistentRecordValue::new(
+                table,
+                u16::MAX,
+                1,
+                generation,
+                None,
+                Vec::new(),
+                body.clone(),
+            )
+            .is_err()
+        );
+        assert!(
+            PersistentRecordValue::new(table, 1, 1, generation, Some(0), Vec::new(), body.clone(),)
+                .is_err()
+        );
+        assert!(
+            PersistentRecordValue::new(table, 1, 0, generation, None, Vec::new(), body.clone())
+                .is_err()
+        );
+        if matches!(
+            table,
+            TableId::Account | TableId::Session | TableId::EdgeProjection
+        ) {
+            assert!(
+                PersistentRecordValue::new(table, 1, 1, 0, None, Vec::new(), body.clone()).is_err()
+            );
+        }
+        assert!(
+            validate_record_plaintext(table, &key_for(table)?, 2, &body).is_err(),
+            "table {table:?} accepted schema two"
+        );
+    }
+
+    for table in [
+        TableId::Account,
+        TableId::RegistrationInvite,
+        TableId::Session,
+        TableId::Channel,
+    ] {
+        let tombstone = PersistentRecordValue::new(table, 2, 0, 0, None, Vec::new(), vec![1])?;
+        assert_eq!(
+            PersistentRecordValue::decode(table, &tombstone.encode()?)?.revision(),
+            0
+        );
+    }
+
+    for state in [
+        E2eeRecoveryKind::Normal,
+        E2eeRecoveryKind::Pending,
+        E2eeRecoveryKind::Conflict,
+        E2eeRecoveryKind::Closed,
+    ] {
+        let gate = E2eeRecoveryGate::new(
+            digest(140),
+            state,
+            RecoveryEpoch::from_bytes([141; 16]),
+            digest(142),
+            digest(143),
+            digest(144),
+            digest(145),
+        );
+        let encoded = gate.encode()?;
+        assert_eq!(E2eeRecoveryGate::decode(&encoded)?.state(), state);
+        let recovered = gate.recover(RecoveryEpoch::from_bytes([146; 16]), digest(147));
+        if matches!(state, E2eeRecoveryKind::Normal | E2eeRecoveryKind::Pending) {
+            assert_eq!(recovered.state(), E2eeRecoveryKind::Pending);
+            assert_eq!(
+                recovered.recovery_epoch(),
+                RecoveryEpoch::from_bytes([146; 16])
+            );
+        } else {
+            assert_eq!(recovered, gate);
+        }
+    }
+    let mut bad_version = E2eeRecoveryGate::new(
+        digest(150),
+        E2eeRecoveryKind::Normal,
+        RecoveryEpoch::from_bytes([151; 16]),
+        digest(152),
+        digest(153),
+        digest(154),
+        digest(155),
+    )
+    .encode()?;
+    *bad_version.get_mut(1).ok_or("missing gate version byte")? = 2;
+    assert!(E2eeRecoveryGate::decode(&bad_version).is_err());
+    *bad_version.get_mut(1).ok_or("missing gate version byte")? = 1;
+    bad_version
+        .get_mut(34..36)
+        .ok_or("missing gate state bytes")?
+        .fill(0);
+    assert!(E2eeRecoveryGate::decode(&bad_version).is_err());
+    Ok(())
+}
+
+#[test]
+fn signed_growth_report_is_exact_tuple_authority() -> Result<(), Box<dyn Error>> {
+    let mut recorder = StorageGrowthRecorder::new();
+    let measurement_directory = TestDirectory::create()?;
+    let file = OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(measurement_directory.path().join("growth.bin"))?;
+    let database = redb::Builder::new().create_file(file.try_clone()?)?;
+    recorder.measure_required_corpus(&file, |name| {
+        let mut transaction = database
+            .begin_write()
+            .map_err(|_| StorageError::DatabaseRejected)?;
+        transaction
+            .set_durability(redb::Durability::Immediate)
+            .map_err(|_| StorageError::DatabaseRejected)?;
+        transaction.set_two_phase_commit(true);
+        {
+            let definition: redb::TableDefinition<'static, &'static [u8], &'static [u8]> =
+                redb::TableDefinition::new("qualification");
+            let mut table = transaction
+                .open_table(definition)
+                .map_err(|_| StorageError::DatabaseRejected)?;
+            let value_bytes = if name.contains("max") || name == "fragmented" {
+                65_536
+            } else {
+                4_096
+            };
+            let value = vec![name.as_bytes().first().copied().unwrap_or(1); value_bytes];
+            table
+                .insert(name.as_bytes(), value.as_slice())
+                .map_err(|_| StorageError::DatabaseRejected)?;
+            if name.starts_with("delete") {
+                table
+                    .remove(name.as_bytes())
+                    .map_err(|_| StorageError::DatabaseRejected)?;
+            }
+        }
+        transaction
+            .commit()
+            .map_err(|_| StorageError::DatabaseRejected)
+    })?;
+    let (cases, maximum) = recorder.finish()?;
+    assert_eq!(cases.len(), QUALIFICATION_CASES.len());
+    let key = Ed25519SecretKey::from_bytes([61; 32]);
+    let report = StorageQualificationReport::sign(
+        StorageQualificationReportTbs {
+            target: QualificationTarget::X86_64UnknownLinuxGnu,
+            filesystem_type: 0xef53,
+            block_size: 4_096,
+            mount_flags: 1,
+            kernel_release: "6.16.0-agenc".to_owned(),
+            redb_features_hash: digest(1),
+            release_profile_hash: digest(2),
+            corpus_hash: digest(3),
+            cases,
+            maximum_observed_growth: maximum,
+            raw_log_hash: digest(4),
+        },
+        &key,
+    )?;
+    let encoded = report.encode()?;
+    let verified = StorageQualificationReport::decode_and_verify(&encoded, key.public_key())?;
+    let tuple = agenc_ircd_storage::FilesystemTuple {
+        target: "x86_64-unknown-linux-gnu",
+        filesystem_type: 0xef53,
+        block_size: 4_096,
+        mount_flags: 1,
+    };
+    let qualification = verified.qualification_for(tuple)?;
+    assert_eq!(qualification.tuple(), tuple);
+    assert_eq!(qualification.maximum_observed_growth(), maximum);
+
+    let mut tampered = encoded;
+    let last = tampered.len().checked_sub(1).ok_or("empty report")?;
+    *tampered.get_mut(last).ok_or("missing signature")? ^= 1;
+    assert!(StorageQualificationReport::decode_and_verify(&tampered, key.public_key()).is_err());
+    Ok(())
+}
+
+#[test]
+fn platform_adapter_rejects_each_path_lock_guard_and_capacity_boundary()
+-> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::create()?;
+    let tuple = StateDirectory::probe(directory.path())?;
+    let qualification = signed_qualification(tuple)?;
+
+    for name in ["", ".", "..", "/absolute", "nested/name"] {
+        assert!(
+            agenc_ircd_storage::BackupDestination::new(directory.path(), name).is_err(),
+            "unsafe backup name {name:?} was accepted"
+        );
+    }
+    let safe_destination =
+        agenc_ircd_storage::BackupDestination::new(directory.path(), "backup.agenc")?;
+    drop(safe_destination);
+
+    assert!(StateDirectory::open(directory.path(), &[]).is_err());
+    let state = StateDirectory::open(directory.path(), &[qualification])?;
+    assert_eq!(state.tuple(), tuple);
+    let capacity = state.capacity(0, 0)?;
+    assert!(capacity.available_bytes > 0);
+    assert_eq!(capacity.reserve_bytes, 0);
+    assert_eq!(state.capacity(0, 101), Err(StorageError::LimitExceeded));
+    assert_eq!(
+        state.admit_transaction(u64::MAX, 0),
+        Err(StorageError::Overflow)
+    );
+    assert_eq!(
+        StateDirectory::open(directory.path(), &[qualification]).err(),
+        Some(StorageError::WriterLocked)
+    );
+
+    assert!(state.open_database_file().is_err());
+    let database = state.create_database_file()?;
+    assert_eq!(database.metadata()?.permissions().mode() & 0o777, 0o600);
+    assert!(state.create_database_file().is_err());
+    drop(database);
+    drop(state.open_database_file()?);
+
+    assert!(state.read_guard(1).is_err());
+    state.replace_guard(b"authenticated-guard")?;
+    assert_eq!(state.read_guard(19)?, b"authenticated-guard");
+    assert_eq!(state.read_guard(18), Err(StorageError::InvalidEncoding));
+    drop(state);
+
+    let invalid_temporary = directory
+        .path()
+        .join(".agenc-recovery-scratch-v1-not-a-random-name");
+    fs::write(&invalid_temporary, [])?;
+    fs::set_permissions(&invalid_temporary, fs::Permissions::from_mode(0o600))?;
+    assert_eq!(
+        StateDirectory::open(directory.path(), &[qualification]).err(),
+        Some(StorageError::FilesystemRejected)
+    );
+    fs::remove_file(invalid_temporary)?;
+
+    let valid_temporary = directory
+        .path()
+        .join(".agenc-recovery-scratch-v1-0123456789abcdef0123456789abcdef");
+    fs::write(&valid_temporary, [])?;
+    fs::set_permissions(&valid_temporary, fs::Permissions::from_mode(0o600))?;
+    let reopened = StateDirectory::open(directory.path(), &[qualification])?;
+    assert!(!valid_temporary.exists());
+    drop(reopened);
+
+    let wrong_mode = TestDirectory::create()?;
+    fs::set_permissions(wrong_mode.path(), fs::Permissions::from_mode(0o755))?;
+    assert_eq!(
+        StateDirectory::probe(wrong_mode.path()),
+        Err(StorageError::FilesystemRejected)
+    );
+
+    let symlink_parent = TestDirectory::create()?;
+    let symlink_path = symlink_parent.path().join("state-link");
+    std::os::unix::fs::symlink(directory.path(), &symlink_path)?;
+    assert!(StateDirectory::probe(&symlink_path).is_err());
+    Ok(())
+}
+
+#[test]
+fn transaction_capacity_admission_observes_minus_equal_and_plus_one_boundaries()
+-> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::create()?;
+    let tuple = StateDirectory::probe(directory.path())?;
+    let qualification = signed_qualification(tuple)?;
+    let state = StateDirectory::open(directory.path(), &[qualification])?;
+    let available = state.capacity(0, 0)?.available_bytes;
+    let growth = agenc_ircd_storage::MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH;
+    let equal_reserve = available
+        .checked_sub(growth)
+        .ok_or("qualification filesystem is smaller than the fixed growth allowance")?;
+    assert_eq!(
+        state.admit_transaction(
+            equal_reserve
+                .checked_add(1)
+                .ok_or("minus-one reserve overflow")?,
+            0,
+        ),
+        Err(StorageError::FilesystemRejected)
+    );
+    let equal = state.admit_transaction(equal_reserve, 0)?;
+    assert_eq!(equal.available_bytes, available);
+    let plus_one = state.admit_transaction(
+        equal_reserve
+            .checked_sub(1)
+            .ok_or("plus-one reserve underflow")?,
+        0,
+    )?;
+    assert_eq!(plus_one.available_bytes, available);
+    Ok(())
+}
+
+#[test]
+fn qualification_rejects_every_report_and_measurement_boundary() -> Result<(), Box<dyn Error>> {
+    assert_eq!(
+        QualificationTarget::Aarch64UnknownLinuxGnu.as_str(),
+        "aarch64-unknown-linux-gnu"
+    );
+    for name in ["", "UPPER", "has space", "has_underscore"] {
+        assert!(StorageGrowthCase::new(name.to_owned(), 0, 0).is_err());
+    }
+    assert!(StorageGrowthCase::new("a".repeat(65), 0, 0).is_err());
+    let reclaimed = StorageGrowthCase::new("reclaimed".to_owned(), 2, 1)?;
+    assert_eq!(reclaimed.allocated_before(), 2);
+    assert_eq!(reclaimed.allocated_after(), 1);
+    assert_eq!(reclaimed.positive_delta(), 0);
+
+    let valid_cases = || {
+        QUALIFICATION_CASES
+            .iter()
+            .map(|name| StorageGrowthCase::new((*name).to_owned(), 10, 11))
+            .collect::<Result<Vec<_>, StorageError>>()
+    };
+    let valid_tbs = || -> Result<StorageQualificationReportTbs, StorageError> {
+        Ok(StorageQualificationReportTbs {
+            target: QualificationTarget::X86_64UnknownLinuxGnu,
+            filesystem_type: 0xef53,
+            block_size: 4_096,
+            mount_flags: 1,
+            kernel_release: "6.16.0-agenc".to_owned(),
+            redb_features_hash: digest(1),
+            release_profile_hash: digest(2),
+            corpus_hash: digest(3),
+            cases: valid_cases()?,
+            maximum_observed_growth: 1,
+            raw_log_hash: digest(4),
+        })
+    };
+    for invalid in [
+        StorageQualificationReportTbs {
+            filesystem_type: 0,
+            ..valid_tbs()?
+        },
+        StorageQualificationReportTbs {
+            block_size: 0,
+            ..valid_tbs()?
+        },
+        StorageQualificationReportTbs {
+            block_size: 3,
+            ..valid_tbs()?
+        },
+        StorageQualificationReportTbs {
+            kernel_release: String::new(),
+            ..valid_tbs()?
+        },
+        StorageQualificationReportTbs {
+            kernel_release: "not graphic".to_owned(),
+            ..valid_tbs()?
+        },
+        StorageQualificationReportTbs {
+            kernel_release: "k".repeat(257),
+            ..valid_tbs()?
+        },
+        StorageQualificationReportTbs {
+            cases: Vec::new(),
+            ..valid_tbs()?
+        },
+        StorageQualificationReportTbs {
+            maximum_observed_growth: agenc_ircd_storage::MAX_QUALIFIED_OBSERVED_GROWTH + 1,
+            ..valid_tbs()?
+        },
+        StorageQualificationReportTbs {
+            maximum_observed_growth: 0,
+            ..valid_tbs()?
+        },
+    ] {
+        assert!(invalid.validate().is_err());
+    }
+    let mut missing = valid_cases()?;
+    missing.pop();
+    assert!(
+        StorageQualificationReportTbs {
+            cases: missing,
+            ..valid_tbs()?
+        }
+        .validate()
+        .is_err()
+    );
+    let mut out_of_order = valid_cases()?;
+    out_of_order.swap(0, 1);
+    assert!(
+        StorageQualificationReportTbs {
+            cases: out_of_order,
+            ..valid_tbs()?
+        }
+        .validate()
+        .is_err()
+    );
+    let mut duplicate = valid_cases()?;
+    duplicate.push(StorageGrowthCase::new("btree-merge".to_owned(), 10, 11)?);
+    assert!(
+        StorageQualificationReportTbs {
+            cases: duplicate,
+            ..valid_tbs()?
+        }
+        .validate()
+        .is_err()
+    );
+
+    assert!(StorageGrowthRecorder::new().finish().is_err());
+    let mut recorder = StorageGrowthRecorder::new();
+    let duplicate_case = StorageGrowthCase::new("duplicate".to_owned(), 0, 1)?;
+    recorder.record(duplicate_case.clone())?;
+    assert!(recorder.record(duplicate_case).is_err());
+    assert!(
+        StorageGrowthRecorder::new()
+            .record(StorageGrowthCase::new(
+                "too-large".to_owned(),
+                0,
+                agenc_ircd_storage::MAX_QUALIFIED_OBSERVED_GROWTH + 1,
+            )?)
+            .is_err()
+    );
+    let measurement_directory = TestDirectory::create()?;
+    let first = OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(measurement_directory.path().join("first-allocation.bin"))?;
+    let second = OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(measurement_directory.path().join("second-allocation.bin"))?;
+    let mut set_recorder = StorageGrowthRecorder::new();
+    assert!(
+        set_recorder
+            .measure_file_set("empty-set", &[], || Ok(()))
+            .is_err()
+    );
+    set_recorder.measure_file_set("file-set", &[&first, &second], || {
+        first
+            .set_len(8_192)
+            .map_err(|_| StorageError::FilesystemRejected)?;
+        second
+            .set_len(4_096)
+            .map_err(|_| StorageError::FilesystemRejected)?;
+        first
+            .sync_all()
+            .map_err(|_| StorageError::FilesystemRejected)?;
+        second
+            .sync_all()
+            .map_err(|_| StorageError::FilesystemRejected)
+    })?;
+    let (measured_set, _) = set_recorder.finish()?;
+    assert_eq!(
+        measured_set
+            .first()
+            .ok_or("missing file-set measurement")?
+            .name(),
+        "file-set"
+    );
+
+    let release_key = Ed25519SecretKey::from_bytes([221; 32]);
+    let report = StorageQualificationReport::sign(valid_tbs()?, &release_key)?;
+    let encoded = report.encode()?;
+    assert!(
+        StorageQualificationReport::decode_and_verify(
+            &encoded,
+            Ed25519SecretKey::from_bytes([222; 32]).public_key(),
+        )
+        .is_err()
+    );
+    let verified =
+        StorageQualificationReport::decode_and_verify(&encoded, release_key.public_key())?;
+    for tuple in [
+        agenc_ircd_storage::FilesystemTuple {
+            target: "aarch64-unknown-linux-gnu",
+            filesystem_type: 0xef53,
+            block_size: 4_096,
+            mount_flags: 1,
+        },
+        agenc_ircd_storage::FilesystemTuple {
+            target: "x86_64-unknown-linux-gnu",
+            filesystem_type: 1,
+            block_size: 4_096,
+            mount_flags: 1,
+        },
+        agenc_ircd_storage::FilesystemTuple {
+            target: "x86_64-unknown-linux-gnu",
+            filesystem_type: 0xef53,
+            block_size: 8_192,
+            mount_flags: 1,
+        },
+        agenc_ircd_storage::FilesystemTuple {
+            target: "x86_64-unknown-linux-gnu",
+            filesystem_type: 0xef53,
+            block_size: 4_096,
+            mount_flags: 2,
+        },
+    ] {
+        assert!(verified.qualification_for(tuple).is_err());
+    }
+
+    for (offset, replacement) in [(4_usize, 0_u16), (6, 0), (6, 3)] {
+        let mut changed = encoded.clone();
+        changed
+            .get_mut(offset..offset + 2)
+            .ok_or("missing qualification discriminator")?
+            .copy_from_slice(&replacement.to_be_bytes());
+        resign_qualification_frame(&mut changed, &release_key)?;
+        assert!(
+            StorageQualificationReport::decode_and_verify(&changed, release_key.public_key())
+                .is_err()
+        );
+    }
+    let oversized = vec![0_u8; agenc_ircd_storage::MAX_QUALIFICATION_REPORT_BYTES + 1];
+    assert!(
+        StorageQualificationReport::decode_and_verify(&oversized, release_key.public_key())
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn qualification_required_file_set_measures_every_named_durable_case() -> Result<(), Box<dyn Error>>
+{
+    let directory = TestDirectory::create()?;
+    let database = OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(directory.path().join("qualification-database.bin"))?;
+    let guard = OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(directory.path().join("qualification-guard.bin"))?;
+    let directory_file = OpenOptions::new().read(true).open(directory.path())?;
+    let mut operation_database = database.try_clone()?;
+    let operation_guard = guard.try_clone()?;
+    let operation_directory = directory_file.try_clone()?;
+    let mut recorder = StorageGrowthRecorder::new();
+    recorder.measure_required_file_set(&[&database, &guard, &directory_file], |name| {
+        operation_database
+            .write_all(name.as_bytes())
+            .map_err(|_| StorageError::FilesystemRejected)?;
+        operation_database
+            .sync_all()
+            .map_err(|_| StorageError::FilesystemRejected)?;
+        operation_guard
+            .sync_all()
+            .map_err(|_| StorageError::FilesystemRejected)?;
+        operation_directory
+            .sync_all()
+            .map_err(|_| StorageError::FilesystemRejected)
+    })?;
+    let (cases, maximum) = recorder.finish()?;
+    assert_eq!(
+        cases
+            .iter()
+            .map(StorageGrowthCase::name)
+            .collect::<Vec<_>>(),
+        QUALIFICATION_CASES
+    );
+    assert!(maximum <= agenc_ircd_storage::MAX_QUALIFIED_OBSERVED_GROWTH);
+    Ok(())
+}
+
+fn resign_qualification_frame(
+    encoded: &mut [u8],
+    release_key: &Ed25519SecretKey,
+) -> Result<(), Box<dyn Error>> {
+    let length_bytes: [u8; 4] = encoded
+        .get(..4)
+        .ok_or("qualification frame is missing its length")?
+        .try_into()?;
+    let tbs_length = usize::try_from(u32::from_be_bytes(length_bytes))?;
+    let tbs_end = 4_usize
+        .checked_add(tbs_length)
+        .ok_or("qualification length overflow")?;
+    let tbs = encoded
+        .get(4..tbs_end)
+        .ok_or("qualification frame is truncated")?;
+    let signature = sign_canonical(
+        release_key,
+        SignatureDomain::StorageQualificationReport,
+        tbs,
+    )?;
+    encoded
+        .get_mut(tbs_end..)
+        .ok_or("qualification signature is missing")?
+        .copy_from_slice(signature.as_bytes());
+    Ok(())
+}
+
+#[test]
+fn fault_campaign_covers_before_and_after_of_every_site() -> Result<(), Box<dyn Error>> {
+    let cases = StorageFaultCase::all()?;
+    assert_eq!(cases.len(), StorageFaultSite::all().len() * 2);
+    for case in cases {
+        let mut schedule = StorageFaultSchedule::new(case, 2)?;
+        schedule.check(case.site, case.boundary)?;
+        assert!(schedule.check(case.site, case.boundary).is_err());
+        schedule.finish()?;
+    }
+    let mut schedule = StorageFaultSchedule::new(
+        StorageFaultCase {
+            site: StorageFaultSite::GuardRename,
+            boundary: StorageFaultBoundary::After,
+        },
+        1,
+    )?;
+    schedule.check(StorageFaultSite::RecordRead, StorageFaultBoundary::After)?;
+    assert!(schedule.finish().is_err());
+    let before_effect = std::cell::Cell::new(false);
+    let mut before = StorageFaultSchedule::new(
+        StorageFaultCase {
+            site: StorageFaultSite::RecordWrite,
+            boundary: StorageFaultBoundary::Before,
+        },
+        1,
+    )?;
+    assert!(
+        before
+            .run(StorageFaultSite::RecordWrite, || {
+                before_effect.set(true);
+                Ok(())
+            })
+            .is_err()
+    );
+    assert!(!before_effect.get());
+    before.finish()?;
+    let after_effect = std::cell::Cell::new(false);
+    let mut after = StorageFaultSchedule::new(
+        StorageFaultCase {
+            site: StorageFaultSite::RecordWrite,
+            boundary: StorageFaultBoundary::After,
+        },
+        1,
+    )?;
+    assert!(
+        after
+            .run(StorageFaultSite::RecordWrite, || {
+                after_effect.set(true);
+                Ok(())
+            })
+            .is_err()
+    );
+    assert!(after_effect.get());
+    after.finish()?;
+    Ok(())
+}
+
+#[test]
+fn storage_errors_and_fault_controllers_cover_the_closed_failure_surface()
+-> Result<(), Box<dyn Error>> {
+    let errors = [
+        (StorageError::InvalidEncoding, "storage encoding is invalid"),
+        (
+            StorageError::UnsupportedVersion,
+            "storage version is unsupported",
+        ),
+        (
+            StorageError::LimitExceeded,
+            "storage input exceeds its limit",
+        ),
+        (StorageError::Overflow, "storage arithmetic overflowed"),
+        (
+            StorageError::AllocationFailed,
+            "bounded storage allocation failed",
+        ),
+        (
+            StorageError::AuthenticationFailed,
+            "storage authentication failed",
+        ),
+        (
+            StorageError::StaleState,
+            "storage state is stale or inconsistent",
+        ),
+        (StorageError::QueueFull, "storage queue is full"),
+        (StorageError::Unavailable, "storage owner is unavailable"),
+        (
+            StorageError::FilesystemRejected,
+            "filesystem policy rejected storage",
+        ),
+        (
+            StorageError::WriterLocked,
+            "storage writer is already locked",
+        ),
+        (
+            StorageError::DatabaseRejected,
+            "database rejected the operation",
+        ),
+        (
+            StorageError::UnsupportedMigration,
+            "storage migration profile is unsupported",
+        ),
+        (
+            StorageError::ResumeMismatch,
+            "storage construction cannot be resumed",
+        ),
+    ];
+    for (error, expected) in errors {
+        assert_eq!(error.to_string(), expected);
+    }
+
+    let crypto_conversions = [
+        (
+            CryptoError::AuthenticationFailed,
+            StorageError::AuthenticationFailed,
+        ),
+        (CryptoError::LimitExceeded, StorageError::LimitExceeded),
+        (CryptoError::Overflow, StorageError::Overflow),
+        (
+            CryptoError::AllocationFailed,
+            StorageError::AllocationFailed,
+        ),
+        (
+            CryptoError::EntropyUnavailable,
+            StorageError::InvalidEncoding,
+        ),
+        (CryptoError::InvalidEncoding, StorageError::InvalidEncoding),
+        (CryptoError::ExporterConsumed, StorageError::InvalidEncoding),
+        (CryptoError::KindMismatch, StorageError::InvalidEncoding),
+    ];
+    for (source, expected) in crypto_conversions {
+        assert_eq!(StorageError::from(source), expected);
+    }
+
+    let case = StorageFaultCase {
+        site: StorageFaultSite::Manifest,
+        boundary: StorageFaultBoundary::After,
+    };
+    assert!(StorageFaultSchedule::new(case, 0).is_err());
+    let mut operation_error = StorageFaultSchedule::new(case, 1)?;
+    assert_eq!(
+        operation_error.run(StorageFaultSite::Manifest, || Err::<(), _>(
+            StorageError::Overflow
+        )),
+        Err(StorageError::Overflow)
+    );
+    assert_eq!(operation_error.finish(), Err(StorageError::StaleState));
+
+    let disabled = StorageFaultInjector::disabled();
+    assert!(!disabled.is_enabled());
+    disabled.check(StorageFaultSite::Manifest, StorageFaultBoundary::Before)?;
+    assert_eq!(
+        disabled.run(StorageFaultSite::Manifest, || Ok::<_, StorageError>(17))?,
+        17
+    );
+    disabled.verify_fired()?;
+    assert_eq!(
+        disabled.arm_after_current(1),
+        Err(StorageError::InvalidEncoding)
+    );
+
+    let armed = StorageFaultInjector::new(case, u64::MAX)?;
+    assert!(armed.is_enabled());
+    assert_eq!(
+        armed.arm_after_current(0),
+        Err(StorageError::InvalidEncoding)
+    );
+    armed.arm_after_current(1)?;
+    assert_eq!(
+        armed.check(StorageFaultSite::Manifest, StorageFaultBoundary::After),
+        Err(StorageError::DatabaseRejected)
+    );
+    armed.verify_fired()?;
+    assert_eq!(armed.arm_after_current(1), Err(StorageError::StaleState));
+    assert_eq!(
+        armed.check(StorageFaultSite::Manifest, StorageFaultBoundary::After),
+        Ok(())
+    );
+    Ok(())
+}
+
+#[test]
+fn fault_campaign_classifies_real_durable_file_effects() -> Result<(), Box<dyn Error>> {
+    for case in StorageFaultCase::all()? {
+        let directory = TestDirectory::create()?;
+        let path = directory.path().join("fault-boundary.bin");
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)?;
+        let mut schedule = StorageFaultSchedule::new(case, 1)?;
+        let result = schedule.run(case.site, || {
+            file.write_all(&(case.site as u16).to_be_bytes())
+                .map_err(|_| StorageError::FilesystemRejected)?;
+            file.sync_all()
+                .map_err(|_| StorageError::FilesystemRejected)?;
+            Ok(())
+        });
+        assert!(result.is_err());
+        schedule.finish()?;
+        drop(file);
+        let bytes = fs::read(path)?;
+        match case.boundary {
+            StorageFaultBoundary::Before => assert!(bytes.is_empty()),
+            StorageFaultBoundary::After => {
+                assert_eq!(bytes, (case.site as u16).to_be_bytes())
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn real_storage_initialization_injects_every_durable_boundary() -> Result<(), Box<dyn Error>> {
+    for boundary in [StorageFaultBoundary::Before, StorageFaultBoundary::After] {
+        let directory = TestDirectory::create()?;
+        let tuple = StateDirectory::probe(directory.path())?;
+        let qualification = signed_qualification(tuple)?;
+        let faults = StorageFaultInjector::new(
+            StorageFaultCase {
+                site: StorageFaultSite::WriterLock,
+                boundary,
+            },
+            1,
+        )?;
+        assert!(
+            StateDirectory::open_with_faults(directory.path(), &[qualification], faults.clone(),)
+                .is_err()
+        );
+        faults.verify_fired()?;
+    }
+
+    for site in [
+        StorageFaultSite::CapacityAdmission,
+        StorageFaultSite::Allocation,
+        StorageFaultSite::RecordWrite,
+        StorageFaultSite::TransactionBegin,
+        StorageFaultSite::TransactionPhaseOne,
+        StorageFaultSite::TransactionPhaseTwo,
+        StorageFaultSite::DatabaseSync,
+        StorageFaultSite::NonceDraw,
+        StorageFaultSite::GuardTemporaryCreate,
+        StorageFaultSite::GuardWrite,
+        StorageFaultSite::GuardFileSync,
+        StorageFaultSite::GuardRename,
+        StorageFaultSite::GuardDirectorySync,
+    ] {
+        for boundary in [StorageFaultBoundary::Before, StorageFaultBoundary::After] {
+            let faults = StorageFaultInjector::new(StorageFaultCase { site, boundary }, 1)?;
+            let outcome = initialize_with_faults(faults.clone())?;
+            assert!(
+                !matches!(outcome, Ok(StorageInitializationOutcome::Complete { .. })),
+                "fault {site:?} {boundary:?} reported certain completion"
+            );
+            faults.verify_fired()?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn every_commit_fault_reopens_to_exact_prior_or_successor_state() -> Result<(), Box<dyn Error>> {
+    for site in [
+        StorageFaultSite::CapacityAdmission,
+        StorageFaultSite::Allocation,
+        StorageFaultSite::RecordWrite,
+        StorageFaultSite::TransactionBegin,
+        StorageFaultSite::TransactionPhaseOne,
+        StorageFaultSite::TransactionPhaseTwo,
+        StorageFaultSite::DatabaseSync,
+        StorageFaultSite::NonceDraw,
+        StorageFaultSite::GuardTemporaryCreate,
+        StorageFaultSite::GuardWrite,
+        StorageFaultSite::GuardFileSync,
+        StorageFaultSite::GuardRename,
+        StorageFaultSite::GuardDirectorySync,
+        StorageFaultSite::Manifest,
+    ] {
+        for boundary in [StorageFaultBoundary::Before, StorageFaultBoundary::After] {
+            let fixture = initialized_live_fixture()?;
+            let faults = StorageFaultInjector::new(StorageFaultCase { site, boundary }, u64::MAX)?;
+            let state_directory = StateDirectory::open_with_faults(
+                fixture.directory.path(),
+                &[fixture.qualification],
+                faults.clone(),
+            )?;
+            let owner = StorageOwner::start(live_open_config(state_directory))?;
+            faults.arm_after_current(1)?;
+            let outcome = owner
+                .port()
+                .try_commit(first_account_batch(
+                    &fixture,
+                    site == StorageFaultSite::Allocation,
+                )?)?
+                .wait()?;
+            assert!(
+                !matches!(outcome, CommitOutcome::Committed(_)),
+                "fault {site:?} {boundary:?} reported certain success"
+            );
+            faults.verify_fired()?;
+            owner.shutdown()?;
+
+            let reopened = StorageOwner::start(live_open_config(StateDirectory::open(
+                fixture.directory.path(),
+                &[fixture.qualification],
+            )?))?;
+            let result = reopened
+                .port()
+                .try_read(ReadPlan::exact(
+                    TableId::Account,
+                    StoredKey::new(vec![b'f'; 24])?,
+                ))?
+                .wait()?;
+            match result.storage_commit_sequence {
+                0 => assert!(result.records.is_empty()),
+                1 => assert_eq!(result.records.len(), 1),
+                sequence => return Err(format!("unexpected recovered commit {sequence}").into()),
+            }
+            reopened.shutdown()?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn every_checkpoint_fault_reopens_to_a_verified_commit_or_checkpoint() -> Result<(), Box<dyn Error>>
+{
+    for site in [
+        StorageFaultSite::CheckpointScan,
+        StorageFaultSite::CheckpointInstall,
+        StorageFaultSite::CheckpointPrune,
+    ] {
+        for boundary in [StorageFaultBoundary::Before, StorageFaultBoundary::After] {
+            let fixture = initialized_live_fixture()?;
+            let faults = StorageFaultInjector::new(StorageFaultCase { site, boundary }, 1)?;
+            let state_directory = StateDirectory::open_with_faults(
+                fixture.directory.path(),
+                &[fixture.qualification],
+                faults.clone(),
+            )?;
+            let owner = StorageOwner::start(live_open_config(state_directory))?;
+            let outcome = owner
+                .port()
+                .try_commit(first_account_batch(&fixture, false)?)?
+                .wait()?;
+            assert!(matches!(outcome, CommitOutcome::Committed(_)));
+            assert!(owner.shutdown().is_err());
+            faults.verify_fired()?;
+
+            let reopened = StorageOwner::start(live_open_config(StateDirectory::open(
+                fixture.directory.path(),
+                &[fixture.qualification],
+            )?))?;
+            let result = reopened
+                .port()
+                .try_read(ReadPlan::exact(
+                    TableId::Account,
+                    StoredKey::new(vec![b'f'; 24])?,
+                ))?
+                .wait()?;
+            assert!(matches!(result.storage_commit_sequence, 1 | 2));
+            assert_eq!(result.records.len(), 1);
+            reopened.shutdown()?;
+        }
+    }
+    Ok(())
+}
+
+fn first_account_batch(
+    fixture: &InitializedLiveFixture,
+    force_allocation: bool,
+) -> Result<agenc_ircd_storage::StorageMutationBatch, StorageError> {
+    let body = if force_allocation {
+        vec![0; 8 * 1_024 * 1_024]
+    } else {
+        b"fault-recovery".to_vec()
+    };
+    StorageMutationBatch::new(
+        StorageMutationHead {
+            transaction_id: TransactionId::from_bytes([239; 16]),
+            expected_storage_commit_sequence: 0,
+            expected_state_generation: 0,
+            resulting_state_generation: 1,
+            state_advancing_plan_count: 1,
+            expected_account_service_response_count: 0,
+            resulting_account_service_response_count: 0,
+        },
+        1,
+        fixture.accounting(),
+        vec![RecordMutation::put(
+            TableId::Account,
+            StoredKey::new(vec![b'f'; 24])?,
+            1,
+            None,
+            PersistentRecordValue::new(TableId::Account, 1, 1, 1, None, Vec::new(), body)?
+                .encode()?,
+        )?],
+    )
+}
+
+#[test]
+fn real_startup_and_backup_inject_read_and_publication_boundaries() -> Result<(), Box<dyn Error>> {
+    let fixture = initialized_live_fixture()?;
+    for boundary in [StorageFaultBoundary::Before, StorageFaultBoundary::After] {
+        let faults = StorageFaultInjector::new(
+            StorageFaultCase {
+                site: StorageFaultSite::RecordRead,
+                boundary,
+            },
+            1,
+        )?;
+        let state_directory = StateDirectory::open_with_faults(
+            fixture.directory.path(),
+            &[fixture.qualification],
+            faults.clone(),
+        )?;
+        assert!(StorageOwner::start(live_open_config(state_directory)).is_err());
+        faults.verify_fired()?;
+    }
+
+    for site in [
+        StorageFaultSite::BackupRecord,
+        StorageFaultSite::BackupFileSync,
+        StorageFaultSite::BackupRename,
+        StorageFaultSite::BackupDirectorySync,
+    ] {
+        for boundary in [StorageFaultBoundary::Before, StorageFaultBoundary::After] {
+            let faults = StorageFaultInjector::new(StorageFaultCase { site, boundary }, 1)?;
+            let state_directory = StateDirectory::open_with_faults(
+                fixture.directory.path(),
+                &[fixture.qualification],
+                faults.clone(),
+            )?;
+            let owner = StorageOwner::start(live_open_config(state_directory))?;
+            let backup_directory = TestDirectory::create()?;
+            let backup_name = format!("backup-{}-{boundary:?}.agenc", site as u16);
+            let completion = owner.port().try_backup(
+                agenc_ircd_storage::BackupDestination::new(backup_directory.path(), &backup_name)?,
+                Ed25519SecretKey::from_bytes([209; 32]),
+                1,
+                [210; 16],
+            )?;
+            assert!(completion.wait().is_err());
+            faults.verify_fired()?;
+            owner.shutdown()?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn absent_migration_profile_still_exercises_both_validation_boundaries()
+-> Result<(), Box<dyn Error>> {
+    let identity = StorageOperationIdentity {
+        kind: StorageConstructionKind::Migrate,
+        command_version: 1,
+        source_database_header_hash: digest(211),
+        target_database_header_hash: digest(212),
+        source_rollback_guard_hash: digest(213),
+        source_stream_digest: None,
+        source_schema_generation: 1,
+        target_schema_generation: 2,
+        transform_profile_hash: digest(214),
+        target_database_instance_id: DatabaseId::from_bytes([215; 16]),
+        source_master_key_id: digest(216),
+        source_guard_root_key_id: digest(217),
+        target_master_key_id: digest(218),
+        target_guard_root_key_id: digest(219),
+        planned_entry_count: 1,
+        construction_plan_hash: digest(220),
+    };
+    for boundary in [StorageFaultBoundary::Before, StorageFaultBoundary::After] {
+        let faults = StorageFaultInjector::new(
+            StorageFaultCase {
+                site: StorageFaultSite::MigrationProfile,
+                boundary,
+            },
+            1,
+        )?;
+        assert!(identity.validate_migration_profile(&faults).is_err());
+        faults.verify_fired()?;
+    }
+    Ok(())
+}
+
+#[test]
+fn real_login_transition_commits_inject_start_and_finish_boundaries() -> Result<(), Box<dyn Error>>
+{
+    for boundary in [StorageFaultBoundary::Before, StorageFaultBoundary::After] {
+        let fixture = initialized_live_fixture()?;
+        let faults = StorageFaultInjector::new(
+            StorageFaultCase {
+                site: StorageFaultSite::LoginIndexRotationStart,
+                boundary,
+            },
+            1,
+        )?;
+        let state_directory = StateDirectory::open_with_faults(
+            fixture.directory.path(),
+            &[fixture.qualification],
+            faults.clone(),
+        )?;
+        let owner = StorageOwner::start(live_open_config(state_directory))?;
+        let port = owner.port();
+        let key_state_record = read_key_state_record(&port)?;
+        let stable = LoginIndexKeyState::stable(
+            1,
+            LoginIndexKey::from_bytes([203; 32]).key_id(NetworkId::from_bytes([201; 32])),
+        )?;
+        let batch = LoginIndexTransitionBatch::start(
+            transition_head(0)?,
+            fixture.accounting(),
+            stable,
+            LoginIndexKey::from_bytes([221; 32]).key_id(NetworkId::from_bytes([201; 32])),
+            0,
+            key_state_record,
+            transition_audit(1)?,
+        )?;
+        let outcome = port.try_commit(batch)?.wait().map_err(|error| {
+            std::io::Error::other(format!("start completion failed at {boundary:?}: {error}"))
+        })?;
+        assert!(!matches!(outcome, CommitOutcome::Committed(_)));
+        faults.verify_fired()?;
+        owner.shutdown().map_err(|error| {
+            std::io::Error::other(format!("start shutdown failed at {boundary:?}: {error}"))
+        })?;
+    }
+
+    for boundary in [StorageFaultBoundary::Before, StorageFaultBoundary::After] {
+        let fixture = initialized_live_fixture()?;
+        let faults = StorageFaultInjector::new(
+            StorageFaultCase {
+                site: StorageFaultSite::LoginIndexRotationFinish,
+                boundary,
+            },
+            1,
+        )?;
+        let state_directory = StateDirectory::open_with_faults(
+            fixture.directory.path(),
+            &[fixture.qualification],
+            faults.clone(),
+        )?;
+        let owner = StorageOwner::start(live_open_config(state_directory))?;
+        let port = owner.port();
+        let network = NetworkId::from_bytes([201; 32]);
+        let previous_key = LoginIndexKey::from_bytes([203; 32]);
+        let current_key = LoginIndexKey::from_bytes([221; 32]);
+        let stable = LoginIndexKeyState::stable(1, previous_key.key_id(network))?;
+        let start = LoginIndexTransitionBatch::start(
+            transition_head(0)?,
+            fixture.accounting(),
+            stable,
+            current_key.key_id(network),
+            0,
+            read_key_state_record(&port)?,
+            transition_audit(1)?,
+        )?;
+        let start_logical_database_bytes = start.resulting_logical_database_bytes();
+        let start_backup_stream_bytes = start.resulting_backup_stream_bytes();
+        let start_outcome = port.try_commit(start)?.wait().map_err(|error| {
+            std::io::Error::other(format!(
+                "finish setup completion failed at {boundary:?}: {error}"
+            ))
+        })?;
+        assert!(matches!(start_outcome, CommitOutcome::Committed(_)));
+        let transition = stable.start_rotation(current_key.key_id(network), 0)?;
+        let finish = LoginIndexTransitionBatch::finalize(
+            transition_head(1)?,
+            StorageAccountingLimits {
+                current_logical_database_bytes: start_logical_database_bytes,
+                current_backup_stream_bytes: start_backup_stream_bytes,
+                database_max_bytes: test_limits().database_max_bytes,
+                backup_max_bytes: test_limits().backup_max_bytes,
+            },
+            transition,
+            read_key_state_record(&port)?,
+            transition_audit(2)?,
+        )?;
+        let outcome = port.try_commit(finish)?.wait().map_err(|error| {
+            std::io::Error::other(format!("finish completion failed at {boundary:?}: {error}"))
+        })?;
+        assert!(!matches!(outcome, CommitOutcome::Committed(_)));
+        faults.verify_fired()?;
+        owner.shutdown().map_err(|error| {
+            std::io::Error::other(format!("finish shutdown failed at {boundary:?}: {error}"))
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn real_successful_login_batch_injects_lazy_migration_boundaries() -> Result<(), Box<dyn Error>> {
+    for boundary in [StorageFaultBoundary::Before, StorageFaultBoundary::After] {
+        let setup = initialized_lazy_login_fixture()?;
+        let faults = StorageFaultInjector::new(
+            StorageFaultCase {
+                site: StorageFaultSite::LoginIndexLazyMigration,
+                boundary,
+            },
+            1,
+        )?;
+        let state_directory = StateDirectory::open_with_faults(
+            setup.fixture.directory.path(),
+            &[setup.fixture.qualification],
+            faults.clone(),
+        )?;
+        let owner = StorageOwner::start(live_open_config(state_directory))?;
+        let port = owner.port();
+        let network = NetworkId::from_bytes([201; 32]);
+        let previous_key = LoginIndexKey::from_bytes([203; 32]);
+        let current_key = LoginIndexKey::from_bytes([221; 32]);
+        let stable = LoginIndexKeyState::stable(1, previous_key.key_id(network))?;
+        let start = LoginIndexTransitionBatch::start(
+            transition_head(0)?,
+            setup.fixture.accounting(),
+            stable,
+            current_key.key_id(network),
+            1,
+            read_key_state_record(&port)?,
+            transition_audit(1)?,
+        )?;
+        let start_logical_database_bytes = start.resulting_logical_database_bytes();
+        let start_backup_stream_bytes = start.resulting_backup_stream_bytes();
+        assert!(matches!(
+            port.try_commit(start)?.wait()?,
+            CommitOutcome::Committed(_)
+        ));
+        let transition = stable.start_rotation(current_key.key_id(network), 1)?;
+        let migration = LoginIndexLazyMigration::new(
+            network,
+            &setup.login,
+            transition,
+            &current_key,
+            &previous_key,
+            setup.account_id,
+            setup.credential_id,
+            &setup.previous_value,
+        )?;
+        let previous_record = read_existing_record(
+            &port,
+            TableId::LoginIndex,
+            StoredKey::new(setup.previous_key.as_bytes().to_vec())?,
+        )?;
+        let mutations = migration.into_mutations(previous_record, read_key_state_record(&port)?)?;
+        let batch = agenc_ircd_storage::StorageMutationBatch::new_login_index_lazy(
+            transition_head(1)?,
+            1,
+            StorageAccountingLimits {
+                current_logical_database_bytes: start_logical_database_bytes,
+                current_backup_stream_bytes: start_backup_stream_bytes,
+                database_max_bytes: test_limits().database_max_bytes,
+                backup_max_bytes: test_limits().backup_max_bytes,
+            },
+            Vec::from(mutations),
+        )?;
+        let outcome = port.try_commit(batch)?.wait()?;
+        assert!(!matches!(outcome, CommitOutcome::Committed(_)));
+        faults.verify_fired()?;
+        owner.shutdown()?;
+    }
+    Ok(())
+}
+
+#[test]
+fn login_lookup_and_lazy_migration_are_exactly_two_generation() -> Result<(), Box<dyn Error>> {
+    let network = NetworkId::from_bytes([1; 32]);
+    let login = NormalizedLogin::prepare("example-login")?;
+    let old_key = LoginIndexKey::from_bytes([2; 32]);
+    let new_key = LoginIndexKey::from_bytes([3; 32]);
+    let stable = LoginIndexKeyState::stable(7, old_key.key_id(network))?;
+    let stable_schedule = LoginIndexLookupSchedule::new(network, &login, stable, &old_key, None)?;
+    assert!(!stable_schedule.is_transition());
+    assert_ne!(
+        stable_schedule.current().encode()?.as_bytes(),
+        stable_schedule.previous_or_dummy().encode()?.as_bytes()
+    );
+    let stable_lookup =
+        LoginIndexStoredKey::decode(stable_schedule.current().encode()?.as_bytes())?;
+    let account = AccountRandomId::from_bytes([4; 16]).to_account_id();
+    let credential = OpaqueCredentialId::from_bytes([5; 32]);
+    let stable_value = LoginIndexValue::new(
+        &stable_lookup,
+        LoginIndexValueKind::Live {
+            account_id: account,
+            opaque_credential_id: OpaqueCredentialId::from_bytes([5; 32]),
+        },
+    )?;
+    let mut preflight = LoginIndexTransitionPreflight::new(stable, new_key.key_id(network))?;
+    preflight.observe(&stable_lookup, &stable_value)?;
+    assert_eq!(preflight.finish()?.previous(), Some((7, 1)));
+    let reservation = LoginIndexValue::new(
+        &stable_lookup,
+        LoginIndexValueKind::CreationReservation {
+            transaction_id: agenc_ircd_types::TransactionId::from_bytes([6; 16]),
+            expires_at: 1,
+        },
+    )?;
+    let mut reservation_scan = LoginIndexTransitionPreflight::new(stable, new_key.key_id(network))?;
+    assert!(
+        reservation_scan
+            .observe(&stable_lookup, &reservation)
+            .is_err()
+    );
+
+    let transition = stable.start_rotation(new_key.key_id(network), 1)?;
+    let transition_schedule =
+        LoginIndexLookupSchedule::new(network, &login, transition, &new_key, Some(&old_key))?;
+    assert!(transition_schedule.is_transition());
+    let previous_lookup =
+        LoginIndexStoredKey::decode(transition_schedule.previous_or_dummy().encode()?.as_bytes())?;
+    let previous_value = LoginIndexValue::new(
+        &previous_lookup,
+        LoginIndexValueKind::Live {
+            account_id: account,
+            opaque_credential_id: OpaqueCredentialId::from_bytes([5; 32]),
+        },
+    )?;
+    let migration = LoginIndexLazyMigration::new(
+        network,
+        &login,
+        transition,
+        &new_key,
+        &old_key,
+        account,
+        credential,
+        &previous_value,
+    )?;
+    assert_eq!(migration.resulting_key_state().previous(), Some((7, 0)));
+    assert_eq!(migration.resulting_key_state().finish()?.previous(), None);
+    Ok(())
+}
+
+#[test]
+fn login_transition_start_and_finish_are_atomic_audited_batches() -> Result<(), Box<dyn Error>> {
+    let network = NetworkId::from_bytes([101; 32]);
+    let previous_key = LoginIndexKey::from_bytes([102; 32]);
+    let current_key = LoginIndexKey::from_bytes([103; 32]);
+    let stable = LoginIndexKeyState::stable(1, previous_key.key_id(network))?;
+    let accounting = StorageAccountingLimits {
+        current_logical_database_bytes: 10_000,
+        current_backup_stream_bytes: 10_000,
+        database_max_bytes: 1_073_741_824,
+        backup_max_bytes: 1_073_741_824,
+    };
+    let start = LoginIndexTransitionBatch::start(
+        transition_head(1)?,
+        accounting,
+        stable,
+        current_key.key_id(network),
+        0,
+        ExistingRecord::new(1, digest(104), 100)?,
+        transition_audit(1)?,
+    )?;
+    assert_eq!(start.plan_count(), 1);
+    assert_eq!(start.state_advancing_plan_count(), 1);
+    assert_eq!(start.mutations().len(), 2);
+
+    let transition = stable.start_rotation(current_key.key_id(network), 0)?;
+    let finish = LoginIndexTransitionBatch::finalize(
+        transition_head(2)?,
+        StorageAccountingLimits {
+            current_logical_database_bytes: start.resulting_logical_database_bytes(),
+            current_backup_stream_bytes: start.resulting_backup_stream_bytes(),
+            ..accounting
+        },
+        transition,
+        ExistingRecord::new(1, digest(105), 144)?,
+        transition_audit(2)?,
+    )?;
+    assert_eq!(finish.plan_count(), 1);
+    assert_eq!(finish.state_advancing_plan_count(), 1);
+    assert_eq!(finish.mutations().len(), 2);
+    Ok(())
+}
+
+fn transition_head(generation: u64) -> Result<StorageMutationHead, StorageError> {
+    let transaction_byte = u8::try_from(generation).map_err(|_| StorageError::Overflow)?;
+    Ok(StorageMutationHead {
+        transaction_id: TransactionId::from_bytes([transaction_byte; 16]),
+        expected_storage_commit_sequence: generation,
+        expected_state_generation: generation,
+        resulting_state_generation: generation + 1,
+        state_advancing_plan_count: 1,
+        expected_account_service_response_count: 0,
+        resulting_account_service_response_count: 0,
+    })
+}
+
+fn transition_audit(sequence: u64) -> Result<RecordMutation, StorageError> {
+    RecordMutation::put(
+        TableId::Audit,
+        StoredKey::new(sequence.to_be_bytes().to_vec())?,
+        1,
+        None,
+        PersistentRecordValue::new(
+            TableId::Audit,
+            1,
+            sequence,
+            0,
+            None,
+            Vec::new(),
+            b"login-index-transition".to_vec(),
+        )?
+        .encode()?,
+    )
+}
+
+#[test]
+fn restore_transform_preserves_deleted_accounts_and_rejects_creation_reservations()
+-> Result<(), Box<dyn Error>> {
+    let tombstone =
+        PersistentRecordValue::new(TableId::Account, 2, 0, 0, None, Vec::new(), vec![1, 2, 3])?;
+    assert_eq!(
+        recovery_transform_prefix(TableId::Account, &tombstone.encode()?)?,
+        tombstone.encode()?
+    );
+    let channel = PersistentRecordValue::new(
+        TableId::Channel,
+        1,
+        4,
+        0,
+        None,
+        vec![
+            RecordReference::new(TableId::Account, StoredKey::new(vec![b'a'; 24])?)?,
+            RecordReference::new(TableId::Session, StoredKey::new(vec![b's'; 16])?)?,
+            RecordReference::new(TableId::RegistrationInvite, StoredKey::new(vec![b'i'; 16])?)?,
+        ],
+        vec![4, 5, 6],
+    )?;
+    let transformed_channel = PersistentRecordValue::decode(
+        TableId::Channel,
+        &recovery_transform_prefix(TableId::Channel, &channel.encode()?)?,
+    )?;
+    assert_eq!(transformed_channel.revision(), 5);
+    assert_eq!(transformed_channel.references().len(), 1);
+    assert_eq!(
+        transformed_channel
+            .references()
+            .first()
+            .ok_or("retained account role reference is missing")?
+            .table(),
+        TableId::Account
+    );
+
+    let network = NetworkId::from_bytes([70; 32]);
+    let login_key = LoginIndexKey::from_bytes([71; 32]);
+    let normalized = NormalizedLogin::prepare("restore-reservation")?;
+    let index_key =
+        LoginIndexStoredKey::new(1, derive_login_index(&login_key, network, &normalized)?)?;
+    let stored_key = index_key.encode()?;
+    let plaintext = LoginIndexValue::new(
+        &index_key,
+        LoginIndexValueKind::CreationReservation {
+            transaction_id: agenc_ircd_types::TransactionId::from_bytes([72; 16]),
+            expires_at: 73,
+        },
+    )?
+    .encode()?;
+    let master = StorageMasterKey::from_bytes([74; 32]);
+    let binding = DatabaseBinding::new(
+        network,
+        ServerId::from_bytes([75; 16]),
+        ServerIncarnation::from_bytes([76; 16]),
+        DatabaseId::from_bytes([77; 16]),
+    );
+    let sealed = StorageSealContext::new(&master, binding, 1)?
+        .seal(TableId::LoginIndex, 1, [78; 24], &stored_key, &plaintext)?
+        .encode()?;
+    let record_id = agenc_ircd_storage::SealedRecord::decode(&sealed)?.record_id()?;
+    let source_reference = StorageConstructionSource::new(
+        StorageConstructionSourceKind::BackupRecord,
+        TableId::LoginIndex,
+        StoredKey::new(stored_key.as_bytes().to_vec())?,
+        1,
+        record_id,
+        1,
+    )?;
+    let entry = StorageConstructionPlanEntry::new(
+        StorageConstructionKind::Restore,
+        vec![source_reference],
+        TableId::LoginIndex,
+        StoredKey::new(stored_key.as_bytes().to_vec())?,
+        1,
+        StorageConstructionAction::RestoreCopy,
+        0,
+    )?;
+    let source = ConstructionSourceRecord::open(
+        entry.sources().first().ok_or("missing source")?,
+        &sealed,
+        &master,
+        binding,
+        1,
+    )?;
+    assert_eq!(
+        ExactCopyTransformer.transform(StorageConstructionKind::Restore, &entry, &[source]),
+        Err(StorageError::StaleState)
+    );
+
+    let live_account =
+        PersistentRecordValue::new(TableId::Account, 1, 9, 4, None, Vec::new(), vec![4])?;
+    let transformed_account = PersistentRecordValue::decode(
+        TableId::Account,
+        &recovery_transform_prefix(TableId::Account, &live_account.encode()?)?,
+    )?;
+    assert_eq!(transformed_account.revision(), 10);
+    assert_eq!(transformed_account.generation(), 5);
+
+    let e2ee_key = StoredKey::new(vec![9, 8, 7])?;
+    let e2ee_body = E2eeRecoveryGate::new(
+        digest(80),
+        E2eeRecoveryKind::Normal,
+        RecoveryEpoch::from_bytes([80; 16]),
+        digest(81),
+        digest(82),
+        digest(83),
+        digest(84),
+    )
+    .encode()?;
+    let e2ee_plaintext =
+        PersistentRecordValue::new(TableId::E2eeState, 1, 3, 4, None, Vec::new(), e2ee_body)?
+            .encode()?;
+    let e2ee_sealed = StorageSealContext::new(&master, binding, 1)?
+        .seal(TableId::E2eeState, 1, [81; 24], &e2ee_key, &e2ee_plaintext)?
+        .encode()?;
+    let e2ee_reference = StorageConstructionSource::new(
+        StorageConstructionSourceKind::BackupRecord,
+        TableId::E2eeState,
+        StoredKey::new(e2ee_key.as_bytes().to_vec())?,
+        1,
+        agenc_ircd_storage::SealedRecord::decode(&e2ee_sealed)?.record_id()?,
+        2,
+    )?;
+    let e2ee_entry = StorageConstructionPlanEntry::new(
+        StorageConstructionKind::Restore,
+        vec![e2ee_reference],
+        TableId::E2eeState,
+        StoredKey::new(e2ee_key.as_bytes().to_vec())?,
+        1,
+        StorageConstructionAction::RestoreE2eeState,
+        0,
+    )?;
+    let e2ee_source = ConstructionSourceRecord::open(
+        e2ee_entry.sources().first().ok_or("missing E2EE source")?,
+        &e2ee_sealed,
+        &master,
+        binding,
+        1,
+    )?;
+    let target_epoch = RecoveryEpoch::from_bytes([82; 16]);
+    let source_guard_hash = digest(85);
+    let transformed_e2ee = RecoveryTransformV1::new(target_epoch, source_guard_hash).transform(
+        StorageConstructionKind::Restore,
+        &e2ee_entry,
+        &[e2ee_source],
+    )?;
+    let transformed_e2ee = PersistentRecordValue::decode(TableId::E2eeState, &transformed_e2ee)?;
+    assert_eq!(transformed_e2ee.record_kind(), 1);
+    let gate = E2eeRecoveryGate::decode(transformed_e2ee.body())?;
+    assert_eq!(gate.state(), E2eeRecoveryKind::Pending);
+    assert_eq!(gate.recovery_epoch(), target_epoch);
+    assert_eq!(gate.source_rollback_guard_hash(), source_guard_hash);
+    Ok(())
+}
+
+#[test]
+fn restore_transform_covers_every_closed_action_and_source_mismatch() -> Result<(), Box<dyn Error>>
+{
+    let account_key = StoredKey::new(vec![b'a'; 24])?;
+    let live_account =
+        PersistentRecordValue::new(TableId::Account, 1, 7, 9, None, Vec::new(), vec![1])?
+            .encode()?;
+    let (account_reference, account_source) =
+        opened_domain_source(TableId::Account, account_key, live_account, 230)?;
+    let account_entry = StorageConstructionPlanEntry::new(
+        StorageConstructionKind::Restore,
+        vec![account_reference],
+        TableId::Account,
+        StoredKey::new(vec![b'a'; 24])?,
+        1,
+        StorageConstructionAction::RestoreAccount,
+        0,
+    )?;
+    let mut recovery = RecoveryTransformV1::new(RecoveryEpoch::from_bytes([231; 16]), digest(232));
+    assert!(
+        recovery
+            .transform(
+                StorageConstructionKind::Restore,
+                &account_entry,
+                &[account_source],
+            )
+            .is_ok()
+    );
+    assert_eq!(
+        recovery.transform(StorageConstructionKind::Rekey, &account_entry, &[]),
+        Err(StorageError::InvalidEncoding)
+    );
+    assert_eq!(
+        recovery.transform(StorageConstructionKind::Restore, &account_entry, &[]),
+        Err(StorageError::StaleState)
+    );
+
+    let invitation_key = StoredKey::new(vec![1; 16])?;
+    let redeemed_invitation = PersistentRecordValue::new(
+        TableId::RegistrationInvite,
+        2,
+        0,
+        0,
+        None,
+        Vec::new(),
+        vec![2],
+    )?
+    .encode()?;
+    let (invitation_reference, invitation_source) = opened_domain_source(
+        TableId::RegistrationInvite,
+        invitation_key,
+        redeemed_invitation,
+        233,
+    )?;
+    let invitation_entry = StorageConstructionPlanEntry::new(
+        StorageConstructionKind::Restore,
+        vec![invitation_reference],
+        TableId::RegistrationInvite,
+        StoredKey::new(vec![1; 16])?,
+        1,
+        StorageConstructionAction::RestoreCopy,
+        0,
+    )?;
+    assert!(
+        ExactCopyTransformer
+            .transform(
+                StorageConstructionKind::Restore,
+                &invitation_entry,
+                &[invitation_source],
+            )
+            .is_ok()
+    );
+    assert_eq!(
+        ExactCopyTransformer.transform(StorageConstructionKind::Restore, &invitation_entry, &[]),
+        Err(StorageError::StaleState)
+    );
+
+    let active_invitation = PersistentRecordValue::new(
+        TableId::RegistrationInvite,
+        1,
+        1,
+        0,
+        None,
+        Vec::new(),
+        vec![3],
+    )?
+    .encode()?;
+    let (_, active_invitation_source) = opened_domain_source(
+        TableId::RegistrationInvite,
+        StoredKey::new(vec![2; 16])?,
+        active_invitation,
+        234,
+    )?;
+    assert_eq!(
+        ExactCopyTransformer.transform(
+            StorageConstructionKind::Restore,
+            &invitation_entry,
+            &[active_invitation_source],
+        ),
+        Err(StorageError::StaleState)
+    );
+
+    let channel_key = StoredKey::new(vec![4; 16])?;
+    let channel_plaintext =
+        PersistentRecordValue::new(TableId::Channel, 1, 10, 0, None, Vec::new(), vec![4])?
+            .encode()?;
+    let (channel_reference, channel_source) =
+        opened_domain_source(TableId::Channel, channel_key, channel_plaintext, 235)?;
+    let name_plaintext = PersistentRecordValue::new(
+        TableId::ChannelName,
+        1,
+        8,
+        0,
+        None,
+        vec![RecordReference::new(
+            TableId::Channel,
+            StoredKey::new(vec![4; 16])?,
+        )?],
+        b"#channel".to_vec(),
+    )?
+    .encode()?;
+    let (name_reference, name_source) = opened_domain_source(
+        TableId::ChannelName,
+        StoredKey::new(vec![5; 32])?,
+        name_plaintext,
+        236,
+    )?;
+    let name_entry = StorageConstructionPlanEntry::new(
+        StorageConstructionKind::Restore,
+        vec![name_reference, channel_reference],
+        TableId::ChannelName,
+        StoredKey::new(vec![5; 32])?,
+        1,
+        StorageConstructionAction::RestoreChannelName,
+        0,
+    )?;
+    let transformed_name = recovery.transform(
+        StorageConstructionKind::Restore,
+        &name_entry,
+        &[name_source, channel_source],
+    )?;
+    assert_eq!(
+        PersistentRecordValue::decode(TableId::ChannelName, &transformed_name)?.revision(),
+        11
+    );
+    assert_eq!(
+        recovery.transform(StorageConstructionKind::Restore, &name_entry, &[]),
+        Err(StorageError::StaleState)
+    );
+
+    let peer_plaintext =
+        PersistentRecordValue::new(TableId::FederationPeer, 2, 12, 0, None, Vec::new(), vec![6])?
+            .encode()?;
+    let (peer_reference, peer_source) = opened_domain_source(
+        TableId::FederationPeer,
+        StoredKey::new(vec![6; 16])?,
+        peer_plaintext,
+        237,
+    )?;
+    let peer_entry = StorageConstructionPlanEntry::new(
+        StorageConstructionKind::Restore,
+        vec![peer_reference],
+        TableId::FederationPeer,
+        StoredKey::new(vec![6; 16])?,
+        1,
+        StorageConstructionAction::RestorePeerTombstones,
+        0,
+    )?;
+    assert!(
+        recovery
+            .transform(
+                StorageConstructionKind::Restore,
+                &peer_entry,
+                &[peer_source]
+            )
+            .is_ok()
+    );
+
+    let other_e2ee_plaintext =
+        PersistentRecordValue::new(TableId::E2eeState, 2, 13, 0, None, Vec::new(), vec![7])?
+            .encode()?;
+    let (other_e2ee_reference, other_e2ee_source) = opened_domain_source(
+        TableId::E2eeState,
+        StoredKey::new(vec![7; 3])?,
+        other_e2ee_plaintext,
+        238,
+    )?;
+    let other_e2ee_entry = StorageConstructionPlanEntry::new(
+        StorageConstructionKind::Restore,
+        vec![other_e2ee_reference],
+        TableId::E2eeState,
+        StoredKey::new(vec![7; 3])?,
+        1,
+        StorageConstructionAction::RestoreE2eeState,
+        0,
+    )?;
+    assert!(
+        recovery
+            .transform(
+                StorageConstructionKind::Restore,
+                &other_e2ee_entry,
+                &[other_e2ee_source],
+            )
+            .is_ok()
+    );
+
+    let maximum_account_revision =
+        PersistentRecordValue::new(TableId::Account, 1, u64::MAX, 1, None, Vec::new(), vec![8])?
+            .encode()?;
+    assert!(recovery_transform_prefix(TableId::Account, &maximum_account_revision).is_err());
+    let maximum_account_generation =
+        PersistentRecordValue::new(TableId::Account, 1, 1, u64::MAX, None, Vec::new(), vec![9])?
+            .encode()?;
+    assert!(recovery_transform_prefix(TableId::Account, &maximum_account_generation).is_err());
+    let audit = PersistentRecordValue::new(TableId::Audit, 1, 1, 0, None, Vec::new(), vec![10])?
+        .encode()?;
+    assert!(recovery_transform_prefix(TableId::Audit, &audit).is_err());
+    Ok(())
+}
+
+fn opened_domain_source(
+    table: TableId,
+    key: StoredKey,
+    plaintext: Vec<u8>,
+    nonce_byte: u8,
+) -> Result<(StorageConstructionSource, ConstructionSourceRecord), StorageError> {
+    let master = StorageMasterKey::from_bytes([240; 32]);
+    let binding = DatabaseBinding::new(
+        NetworkId::from_bytes([241; 32]),
+        ServerId::from_bytes([242; 16]),
+        ServerIncarnation::from_bytes([243; 16]),
+        DatabaseId::from_bytes([244; 16]),
+    );
+    let sealed = StorageSealContext::new(&master, binding, 1)?
+        .seal(table, 1, [nonce_byte; 24], &key, &plaintext)?
+        .encode()?;
+    let reference = StorageConstructionSource::new(
+        StorageConstructionSourceKind::BackupRecord,
+        table,
+        key,
+        1,
+        SealedRecord::decode(&sealed)?.record_id()?,
+        u64::from(nonce_byte),
+    )?;
+    let record = ConstructionSourceRecord::open(&reference, &sealed, &master, binding, 1)?;
+    Ok((reference, record))
+}
+
+#[test]
+fn disk_plan_orders_variable_keys_by_raw_bytes() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::create()?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(directory.path().join("ordered-plan.redb"))?;
+    let raw_first = StoredKey::new(
+        std::iter::once(1_u8)
+            .chain(std::iter::repeat_n(9_u8, 18))
+            .collect(),
+    )?;
+    let length_first = StoredKey::new(
+        std::iter::once(2_u8)
+            .chain(std::iter::repeat_n(8_u8, 17))
+            .collect(),
+    )?;
+    let login_state_key = StoredKey::new(agenc_ircd_storage::LOGIN_INDEX_KEY_STATE_KEY.to_vec())?;
+    let expected = vec![
+        rekey_entry(TableId::Sanction, &raw_first, digest(1))?,
+        rekey_entry(TableId::Sanction, &length_first, digest(2))?,
+        rekey_login_state_entry(&login_state_key, digest(3))?,
+    ];
+    let expected_hash = construction_plan_hash(
+        StorageConstructionKind::Rekey,
+        &expected,
+        agenc_ircd_storage::MAX_CONSTRUCTION_PLAN_BYTES,
+    )?;
+    let mut builder = ConstructionPlanBuilder::start_streaming(
+        StorageConstructionKind::Rekey,
+        file,
+        construction_limits(),
+    )?;
+    builder.push(rekey_entry(TableId::Sanction, &length_first, digest(2))?)?;
+    builder.push(rekey_login_state_entry(&login_state_key, digest(3))?)?;
+    builder.push(rekey_entry(TableId::Sanction, &raw_first, digest(1))?)?;
+    let plan = builder.finish()?;
+    assert_eq!(plan.entry_count(), 3);
+    assert_eq!(plan.hash(), expected_hash);
+    Ok(())
+}
+
+#[test]
+fn construction_directory_rejects_every_phase_and_plan_rebuild_mismatch()
+-> Result<(), Box<dyn Error>> {
+    assert!(ConstructionDirectory::open(Path::new("relative-output"), false).is_err());
+
+    let missing_root = TestDirectory::create()?;
+    let missing_output = missing_root.path().join("missing-output");
+    assert!(ConstructionDirectory::open(&missing_output, true).is_err());
+
+    let installed_root = TestDirectory::create()?;
+    let installed_output = installed_root.path().join("installed-output");
+    fs::create_dir(&installed_output)?;
+    fs::set_permissions(&installed_output, fs::Permissions::from_mode(0o700))?;
+    assert!(ConstructionDirectory::open(&installed_output, false).is_err());
+    let installed = ConstructionDirectory::open(&installed_output, true)?;
+    assert_eq!(installed.phase(), ConstructionDirectoryPhase::Installed);
+    assert_eq!(installed.selected_path(), installed_output);
+    assert_eq!(installed.output_path(), installed_output);
+    assert!(installed.rebuild_plan_file().is_err());
+    assert!(installed.remove_plan_file().is_err());
+
+    let ambiguous_root = TestDirectory::create()?;
+    let ambiguous_output = ambiguous_root.path().join("ambiguous-output");
+    fs::create_dir(&ambiguous_output)?;
+    fs::set_permissions(&ambiguous_output, fs::Permissions::from_mode(0o700))?;
+    let ambiguous_staging = ambiguous_root
+        .path()
+        .join(".ambiguous-output.agenc-construction-v1");
+    fs::create_dir(&ambiguous_staging)?;
+    fs::set_permissions(&ambiguous_staging, fs::Permissions::from_mode(0o700))?;
+    assert!(ConstructionDirectory::open(&ambiguous_output, true).is_err());
+
+    let rebuild_root = TestDirectory::create()?;
+    let rebuild_output = rebuild_root.path().join("rebuild-output");
+    let rebuild = ConstructionDirectory::open(&rebuild_output, false)?;
+    drop(rebuild.rebuild_plan_file()?);
+    drop(rebuild.rebuild_plan_file()?);
+    rebuild.remove_plan_file()?;
+    assert!(rebuild.remove_plan_file().is_err());
+
+    for boundary in [StorageFaultBoundary::Before, StorageFaultBoundary::After] {
+        let root = TestDirectory::create()?;
+        let output = root.path().join(format!("fault-{boundary:?}"));
+        let faults = StorageFaultInjector::new(
+            StorageFaultCase {
+                site: StorageFaultSite::ConstructionPlanRebuild,
+                boundary,
+            },
+            1,
+        )?;
+        let directory = ConstructionDirectory::open_with_faults(&output, false, faults.clone())?;
+        assert!(directory.rebuild_plan_file().is_err());
+        faults.verify_fired()?;
+    }
+    Ok(())
+}
+
+#[test]
+fn reconstructed_source_rebuilds_rekey_plan_and_enforces_key_generation()
+-> Result<(), Box<dyn Error>> {
+    let root = TestDirectory::create()?;
+    let source_path = root.path().join("source-state");
+    fs::create_dir(&source_path)?;
+    fs::set_permissions(&source_path, fs::Permissions::from_mode(0o700))?;
+    let network = NetworkId::from_bytes([70; 32]);
+    let server = ServerId::from_bytes([71; 16]);
+    let incarnation = ServerIncarnation::from_bytes([72; 16]);
+    let source_database = DatabaseId::from_bytes([73; 16]);
+    let source_master_bytes = [74; 32];
+    let source_guard_bytes = [75; 32];
+    let login_key_bytes = [76; 32];
+    let source_binding = DatabaseBinding::new(network, server, incarnation, source_database);
+    let nickname_index = derive_storage_index(
+        &StorageMasterKey::from_bytes(source_master_bytes),
+        source_binding,
+        StorageTable::new(TableId::NicknameReservation.as_u16())?,
+        1,
+        b"nick-one",
+    )?;
+    let account_key = StoredKey::new(vec![b'a'; 24])?;
+    let nickname_key = StoredKey::new(nickname_index.expose_for_storage_key().to_vec())?;
+    let login_key = LoginIndexKey::from_bytes(login_key_bytes);
+    let login_state = LoginIndexKeyState::stable(1, login_key.key_id(network))?;
+    let initial_records = vec![
+        InitialStorageRecord::new(
+            TableId::Account,
+            StoredKey::new(account_key.as_bytes().to_vec())?,
+            1,
+            PersistentRecordValue::new(TableId::Account, 1, 1, 1, None, Vec::new(), vec![1])?
+                .encode()?,
+        )?,
+        InitialStorageRecord::new(
+            TableId::NicknameReservation,
+            nickname_key,
+            1,
+            PersistentRecordValue::new(
+                TableId::NicknameReservation,
+                1,
+                1,
+                0,
+                None,
+                vec![RecordReference::new(
+                    TableId::Account,
+                    StoredKey::new(account_key.as_bytes().to_vec())?,
+                )?],
+                b"Nick-One".to_vec(),
+            )?
+            .encode()?,
+        )?,
+        InitialStorageRecord::new(
+            TableId::LoginIndexKeyState,
+            StoredKey::new(agenc_ircd_storage::LOGIN_INDEX_KEY_STATE_KEY.to_vec())?,
+            1,
+            login_state.encode()?,
+        )?,
+    ];
+    let limits = test_limits();
+    let tuple = StateDirectory::probe(&source_path)?;
+    let qualification = signed_qualification(tuple)?;
+    let initialized = initialize_storage(StorageInitializationConfig {
+        state_directory: StateDirectory::open(&source_path, &[qualification])?,
+        header_tbs: agenc_ircd_storage::DatabaseHeaderTbs::new(
+            network,
+            server,
+            incarnation,
+            source_database,
+            1,
+            SCHEMA_GENERATION,
+            RecoveryEpoch::from_bytes([77; 16]),
+        )?,
+        storage_master_key: StorageMasterKey::from_bytes(source_master_bytes),
+        rollback_guard_root_key: RollbackGuardRootKey::from_bytes(source_guard_bytes),
+        mode: StorageInitializationMode::Live,
+        initial_records,
+        account_service_response_count: 0,
+        state_generation: 1,
+        predecessor_guard_hash: digest(0),
+        limits,
+    })?;
+    assert!(matches!(
+        initialized,
+        StorageInitializationOutcome::Complete { .. }
+    ));
+    let source = ConstructionSourceDatabase::open(StorageOpenConfig {
+        expected_network_id: network,
+        expected_server_id: server,
+        state_directory: StateDirectory::open(&source_path, &[qualification])?,
+        storage_master_key: StorageMasterKey::from_bytes(source_master_bytes),
+        rollback_guard_root_key: RollbackGuardRootKey::from_bytes(source_guard_bytes),
+        login_index_key: LoginIndexKey::from_bytes(login_key_bytes),
+        previous_login_index_key: None,
+        limits,
+    })?;
+    assert_eq!(source.rekey_entry_count()?, 3);
+    let transition = source
+        .login_index_transition_preflight(LoginIndexKey::from_bytes([99; 32]).key_id(network))?;
+    assert_eq!(transition.current_generation(), 2);
+    assert_eq!(transition.previous(), Some((1, 0)));
+
+    let target_binding = DatabaseBinding::new(
+        network,
+        server,
+        incarnation,
+        DatabaseId::from_bytes([78; 16]),
+    );
+    let invalid_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(root.path().join("invalid-plan.redb"))?;
+    assert!(matches!(
+        source.rebuild_rekey_plan(
+            invalid_file,
+            &StorageMasterKey::from_bytes([79; 32]),
+            target_binding,
+            2,
+            construction_limits(),
+        ),
+        Err(StorageError::InvalidEncoding)
+    ));
+    let new_key_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(root.path().join("new-key-plan.redb"))?;
+    let new_key_plan = source.rebuild_rekey_plan(
+        new_key_file,
+        &StorageMasterKey::from_bytes([79; 32]),
+        target_binding,
+        1,
+        construction_limits(),
+    )?;
+    assert_eq!(new_key_plan.entry_count(), 3);
+    let same_key_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(root.path().join("same-key-plan.redb"))?;
+    let same_key_plan = source.rebuild_rekey_plan(
+        same_key_file,
+        &StorageMasterKey::from_bytes(source_master_bytes),
+        target_binding,
+        2,
+        construction_limits(),
+    )?;
+    assert_eq!(same_key_plan.entry_count(), 3);
+    Ok(())
+}
+
+#[test]
+fn rekey_construction_commits_finalizes_installs_and_reopens() -> Result<(), Box<dyn Error>> {
+    let root = TestDirectory::create()?;
+    let output = root.path().join("rekeyed-state");
+    let directory = ConstructionDirectory::open(&output, false)?;
+    let network = NetworkId::from_bytes([21; 32]);
+    let server = ServerId::from_bytes([22; 16]);
+    let target_database = DatabaseId::from_bytes([23; 16]);
+    let login_key = LoginIndexKey::from_bytes([24; 32]);
+    let login_state = LoginIndexKeyState::stable(1, login_key.key_id(network))?;
+    let stored_key = StoredKey::new(agenc_ircd_storage::LOGIN_INDEX_KEY_STATE_KEY.to_vec())?;
+    let source_master_bytes = [25; 32];
+    let target_master_bytes = [26; 32];
+    let source_guard_bytes = [27; 32];
+    let target_guard_bytes = [28; 32];
+    assert!(
+        !StorageMasterKey::from_bytes(source_master_bytes)
+            .matches(&StorageMasterKey::from_bytes(target_master_bytes))
+    );
+    assert!(
+        !RollbackGuardRootKey::from_bytes(source_guard_bytes)
+            .matches(&RollbackGuardRootKey::from_bytes(target_guard_bytes))
+    );
+    let source_binding = DatabaseBinding::new(
+        network,
+        server,
+        ServerIncarnation::from_bytes([29; 16]),
+        DatabaseId::from_bytes([30; 16]),
+    );
+    let source_sealed = StorageSealContext::new(
+        &StorageMasterKey::from_bytes(source_master_bytes),
+        source_binding,
+        1,
+    )?
+    .seal(
+        TableId::LoginIndexKeyState,
+        1,
+        [31; 24],
+        &stored_key,
+        &login_state.encode()?,
+    )?
+    .encode()?;
+    let source_record_id = agenc_ircd_storage::SealedRecord::decode(&source_sealed)?.record_id()?;
+    let account_key = StoredKey::new(vec![b'a'; 24])?;
+    let account_plaintext =
+        PersistentRecordValue::new(TableId::Account, 1, 7, 9, None, Vec::new(), vec![41])?
+            .encode()?;
+    let source_account_sealed = StorageSealContext::new(
+        &StorageMasterKey::from_bytes(source_master_bytes),
+        source_binding,
+        1,
+    )?
+    .seal(
+        TableId::Account,
+        1,
+        [32; 24],
+        &account_key,
+        &account_plaintext,
+    )?
+    .encode()?;
+    let source_account_id =
+        agenc_ircd_storage::SealedRecord::decode(&source_account_sealed)?.record_id()?;
+    let account_entry_for_hash = rekey_entry(TableId::Account, &account_key, source_account_id)?;
+    let login_entry_for_hash = rekey_login_state_entry(&stored_key, source_record_id)?;
+    let plan_hash = construction_plan_hash(
+        StorageConstructionKind::Rekey,
+        &[account_entry_for_hash, login_entry_for_hash],
+        agenc_ircd_storage::MAX_CONSTRUCTION_PLAN_BYTES,
+    )?;
+    let identity_template = StorageOperationIdentity {
+        kind: StorageConstructionKind::Rekey,
+        command_version: 1,
+        source_database_header_hash: digest(32),
+        target_database_header_hash: digest(0),
+        source_rollback_guard_hash: digest(33),
+        source_stream_digest: None,
+        source_schema_generation: 1,
+        target_schema_generation: 1,
+        transform_profile_hash: rekey_transform_profile_hash()?,
+        target_database_instance_id: target_database,
+        source_master_key_id: StorageMasterKey::from_bytes(source_master_bytes)
+            .source_operation_key_id()?,
+        source_guard_root_key_id: RollbackGuardRootKey::from_bytes(source_guard_bytes)
+            .source_operation_key_id()?,
+        target_master_key_id: StorageMasterKey::from_bytes(target_master_bytes)
+            .target_operation_key_id()?,
+        target_guard_root_key_id: RollbackGuardRootKey::from_bytes(target_guard_bytes)
+            .target_operation_key_id()?,
+        planned_entry_count: 2,
+        construction_plan_hash: plan_hash,
+    };
+    let marker = StorageConstruction {
+        identity: identity_template,
+        output_path_hash: directory.output_path_hash(),
+        next_target: StorageConstructionCursor::BeforeFirst,
+        target_records_committed: 0,
+    };
+    let limits = test_limits();
+    let tuple = StateDirectory::probe(&directory.selected_path())?;
+    let qualification = signed_qualification(tuple)?;
+    let outcome = initialize_storage(StorageInitializationConfig {
+        state_directory: StateDirectory::open(&directory.selected_path(), &[qualification])?,
+        header_tbs: agenc_ircd_storage::DatabaseHeaderTbs::new(
+            network,
+            server,
+            ServerIncarnation::from_bytes([34; 16]),
+            target_database,
+            1,
+            SCHEMA_GENERATION,
+            RecoveryEpoch::from_bytes([35; 16]),
+        )?,
+        storage_master_key: StorageMasterKey::from_bytes(target_master_bytes),
+        rollback_guard_root_key: RollbackGuardRootKey::from_bytes(target_guard_bytes),
+        mode: StorageInitializationMode::Construction,
+        initial_records: vec![InitialStorageRecord::new(
+            TableId::StorageConstruction,
+            StoredKey::new(agenc_ircd_storage::STORAGE_CONSTRUCTION_KEY.to_vec())?,
+            1,
+            marker.encode()?,
+        )?],
+        account_service_response_count: 0,
+        state_generation: 7,
+        predecessor_guard_hash: identity_template.source_rollback_guard_hash,
+        limits,
+    })?;
+    if !matches!(outcome, StorageInitializationOutcome::Complete { .. }) {
+        return Err("construction initialization did not complete".into());
+    }
+    let mut target = ConstructionTarget::open(StorageOpenConfig {
+        expected_network_id: network,
+        expected_server_id: server,
+        state_directory: StateDirectory::open(&directory.selected_path(), &[qualification])?,
+        storage_master_key: StorageMasterKey::from_bytes(target_master_bytes),
+        rollback_guard_root_key: RollbackGuardRootKey::from_bytes(target_guard_bytes),
+        login_index_key: LoginIndexKey::from_bytes([24; 32]),
+        previous_login_index_key: None,
+        limits,
+    })?;
+    let final_marker = target.marker()?;
+    let expected_identity = final_marker.identity;
+    assert_ne!(final_marker.identity.target_database_header_hash, digest(0));
+    let plan_file = directory.rebuild_plan_file()?;
+    let plan = ConstructionPlan::rebuild_disk(
+        &final_marker.identity,
+        plan_file,
+        [
+            Ok(rekey_entry(
+                TableId::Account,
+                &account_key,
+                source_account_id,
+            )?),
+            Ok(rekey_login_state_entry(&stored_key, source_record_id)?),
+        ],
+        construction_limits(),
+    )?;
+    let mut source = TestConstructionSource {
+        records: vec![
+            (TableId::Account, account_key, source_account_sealed),
+            (TableId::LoginIndexKeyState, stored_key, source_sealed),
+        ],
+        master_key: StorageMasterKey::from_bytes(source_master_bytes),
+        binding: source_binding,
+    };
+    let preflight = plan.preflight(
+        &final_marker,
+        7,
+        0,
+        &mut source,
+        &mut ExactCopyTransformer,
+        construction_limits(),
+    )?;
+    assert_eq!(preflight.target_batch_count, 1);
+    assert_eq!(preflight.finalization_storage_commit_sequence, 2);
+    assert_eq!(preflight.finalization_manifest_sequence, 2);
+    assert_eq!(preflight.checkpoint_storage_commit_sequence, 3);
+    let mut executor = ConstructionExecutor::resume(final_marker, plan, construction_limits())?;
+    assert_eq!(
+        executor.service_batch(&mut source, &mut ExactCopyTransformer, &mut target)?,
+        2
+    );
+    let receipt = executor
+        .last_receipt()
+        .ok_or("construction batch did not retain its receipt")?;
+    assert_eq!(receipt.target_records_committed, 2);
+    assert_eq!(receipt.storage_commit_sequence, 1);
+    assert_eq!(receipt.manifest_sequence, 1);
+    assert_eq!(receipt.state_generation, 7);
+    assert_eq!(receipt.account_service_response_count, 0);
+    assert_eq!(receipt.nonce_draw_high_water, 9);
+    let operation_id = executor.finalize(&mut target)?;
+    assert_ne!(operation_id, digest(0));
+    drop(executor);
+    drop(target);
+    directory.remove_plan_file()?;
+    let verification = ConstructionTarget::verify_completed(
+        StorageOpenConfig {
+            expected_network_id: network,
+            expected_server_id: server,
+            state_directory: StateDirectory::open(&directory.selected_path(), &[qualification])?,
+            storage_master_key: StorageMasterKey::from_bytes(target_master_bytes),
+            rollback_guard_root_key: RollbackGuardRootKey::from_bytes(target_guard_bytes),
+            login_index_key: LoginIndexKey::from_bytes([24; 32]),
+            previous_login_index_key: None,
+            limits,
+        },
+        expected_identity,
+        directory.output_path_hash(),
+    )?;
+    assert_eq!(verification.completion().storage_operation_id, operation_id);
+    assert_eq!(
+        verification.logical_database_bytes(),
+        preflight.final_logical_database_bytes
+    );
+    assert_eq!(
+        verification.backup_stream_bytes(),
+        preflight.final_backup_stream_bytes
+    );
+    assert_eq!(
+        verification
+            .completion()
+            .finalization_storage_commit_sequence,
+        preflight.finalization_storage_commit_sequence
+    );
+    assert_eq!(
+        verification.completion().finalization_manifest_sequence,
+        preflight.finalization_manifest_sequence
+    );
+    assert_eq!(
+        verification.completion().finalization_nonce_draw_high_water,
+        preflight
+            .checkpoint_nonce_draw_high_water
+            .checked_sub(2)
+            .ok_or("checkpoint nonce high-water underflow")?
+    );
+    let installed = directory.install(verification)?;
+    assert_eq!(installed, output);
+    let installed_directory = ConstructionDirectory::open(&installed, true)?;
+    assert_eq!(
+        installed_directory.phase(),
+        ConstructionDirectoryPhase::Installed
+    );
+    let resumed_verification = ConstructionTarget::verify_completed(
+        StorageOpenConfig {
+            expected_network_id: network,
+            expected_server_id: server,
+            state_directory: StateDirectory::open(
+                &installed_directory.selected_path(),
+                &[qualification],
+            )?,
+            storage_master_key: StorageMasterKey::from_bytes(target_master_bytes),
+            rollback_guard_root_key: RollbackGuardRootKey::from_bytes(target_guard_bytes),
+            login_index_key: LoginIndexKey::from_bytes([24; 32]),
+            previous_login_index_key: None,
+            limits,
+        },
+        expected_identity,
+        installed_directory.output_path_hash(),
+    )?;
+    assert_eq!(
+        resumed_verification.completion().storage_operation_id,
+        operation_id
+    );
+    let owner = StorageOwner::start(StorageOpenConfig {
+        expected_network_id: network,
+        expected_server_id: server,
+        state_directory: StateDirectory::open(&installed, &[qualification])?,
+        storage_master_key: StorageMasterKey::from_bytes(target_master_bytes),
+        rollback_guard_root_key: RollbackGuardRootKey::from_bytes(target_guard_bytes),
+        login_index_key: LoginIndexKey::from_bytes([24; 32]),
+        previous_login_index_key: None,
+        limits,
+    })?;
+    owner.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn every_construction_commit_fault_resumes_from_the_authenticated_cursor()
+-> Result<(), Box<dyn Error>> {
+    for site in [
+        StorageFaultSite::ConstructionBatch,
+        StorageFaultSite::ConstructionCursor,
+        StorageFaultSite::ConstructionCompletion,
+    ] {
+        for boundary in [StorageFaultBoundary::Before, StorageFaultBoundary::After] {
+            let fixture = RekeyConstructionFixture::create()?;
+            let faults = StorageFaultInjector::new(StorageFaultCase { site, boundary }, 1)?;
+            let (mut target, mut executor, mut source) = fixture.execution(faults.clone())?;
+            if site == StorageFaultSite::ConstructionCompletion {
+                assert_eq!(
+                    executor.service_batch(&mut source, &mut ExactCopyTransformer, &mut target,)?,
+                    2,
+                );
+                assert!(executor.finalize(&mut target).is_err());
+            } else {
+                assert!(
+                    executor
+                        .service_batch(&mut source, &mut ExactCopyTransformer, &mut target,)
+                        .is_err()
+                );
+            }
+            faults.verify_fired()?;
+            let expected_identity = executor.marker().identity;
+            drop(executor);
+            drop(target);
+
+            let operation_id = fixture.finish(expected_identity)?;
+            let verification = fixture.verify_completed(expected_identity)?;
+            assert_eq!(verification.completion().storage_operation_id, operation_id,);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn every_construction_checkpoint_fault_resumes_the_committed_completion()
+-> Result<(), Box<dyn Error>> {
+    for site in [
+        StorageFaultSite::CheckpointScan,
+        StorageFaultSite::CheckpointInstall,
+        StorageFaultSite::CheckpointPrune,
+    ] {
+        for boundary in [StorageFaultBoundary::Before, StorageFaultBoundary::After] {
+            let fixture = RekeyConstructionFixture::create()?;
+            let faults = StorageFaultInjector::new(StorageFaultCase { site, boundary }, 1)?;
+            let (mut target, mut executor, mut source) = fixture.execution(faults.clone())?;
+            assert_eq!(
+                executor.service_batch(&mut source, &mut ExactCopyTransformer, &mut target,)?,
+                2,
+            );
+            let expected_identity = executor.marker().identity;
+            assert!(executor.finalize(&mut target).is_err());
+            faults.verify_fired()?;
+            drop(executor);
+            drop(target);
+
+            let operation_id = fixture.finish(expected_identity)?;
+            let verification = fixture.verify_completed(expected_identity)?;
+            assert_eq!(verification.completion().storage_operation_id, operation_id,);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn construction_directory_rename_fault_resumes_before_or_after_install()
+-> Result<(), Box<dyn Error>> {
+    for boundary in [StorageFaultBoundary::Before, StorageFaultBoundary::After] {
+        let fixture = RekeyConstructionFixture::create()?;
+        let (target, executor, source) = fixture.execution(StorageFaultInjector::disabled())?;
+        let expected_identity = executor.marker().identity;
+        drop(target);
+        drop(executor);
+        drop(source);
+        fixture.finish(expected_identity)?;
+        let verification = fixture.verify_completed(expected_identity)?;
+        let faults = StorageFaultInjector::new(
+            StorageFaultCase {
+                site: StorageFaultSite::ConstructionDirectoryRename,
+                boundary,
+            },
+            1,
+        )?;
+        let directory =
+            ConstructionDirectory::open_with_faults(&fixture.output, true, faults.clone())?;
+        assert!(directory.install(verification).is_err());
+        faults.verify_fired()?;
+
+        let resumed = ConstructionDirectory::open(&fixture.output, true)?;
+        let resumed_verification = fixture.verify_completed_at(
+            &resumed.selected_path(),
+            expected_identity,
+            resumed.output_path_hash(),
+        )?;
+        match resumed.phase() {
+            ConstructionDirectoryPhase::Staging => {
+                assert_eq!(resumed.install(resumed_verification)?, fixture.output);
+            }
+            ConstructionDirectoryPhase::Installed => {
+                assert_eq!(resumed.selected_path(), fixture.output);
+            }
+        }
+        let installed = ConstructionDirectory::open(&fixture.output, true)?;
+        assert_eq!(installed.phase(), ConstructionDirectoryPhase::Installed);
+        let final_verification = fixture.verify_completed_at(
+            &installed.selected_path(),
+            expected_identity,
+            installed.output_path_hash(),
+        )?;
+        assert_eq!(
+            final_verification.completion().storage_operation_id,
+            expected_identity.operation_id()?,
+        );
+    }
+    Ok(())
+}
+
+struct RekeyConstructionFixture {
+    _root: TestDirectory,
+    output: PathBuf,
+    staging: PathBuf,
+    output_path_hash: StorageDigest,
+    qualification: agenc_ircd_storage::StorageQualification,
+    network: NetworkId,
+    server: ServerId,
+    target_master_bytes: [u8; 32],
+    target_guard_bytes: [u8; 32],
+    login_key_bytes: [u8; 32],
+    source_master_bytes: [u8; 32],
+    source_binding: DatabaseBinding,
+    account_sealed: Vec<u8>,
+    account_record_id: StorageDigest,
+    login_state_sealed: Vec<u8>,
+    login_state_record_id: StorageDigest,
+}
+
+impl RekeyConstructionFixture {
+    fn create() -> Result<Self, Box<dyn Error>> {
+        let root = TestDirectory::create()?;
+        let output = root.path().join("fault-rekeyed-state");
+        let directory = ConstructionDirectory::open(&output, false)?;
+        let staging = directory.selected_path();
+        let output_path_hash = directory.output_path_hash();
+        let network = NetworkId::from_bytes([121; 32]);
+        let server = ServerId::from_bytes([122; 16]);
+        let target_database = DatabaseId::from_bytes([123; 16]);
+        let login_key_bytes = [124; 32];
+        let login_key = LoginIndexKey::from_bytes(login_key_bytes);
+        let login_state = LoginIndexKeyState::stable(1, login_key.key_id(network))?;
+        let login_state_key =
+            StoredKey::new(agenc_ircd_storage::LOGIN_INDEX_KEY_STATE_KEY.to_vec())?;
+        let source_master_bytes = [125; 32];
+        let target_master_bytes = [126; 32];
+        let source_guard_bytes = [127; 32];
+        let target_guard_bytes = [128; 32];
+        let source_binding = DatabaseBinding::new(
+            network,
+            server,
+            ServerIncarnation::from_bytes([129; 16]),
+            DatabaseId::from_bytes([130; 16]),
+        );
+        let login_state_sealed = StorageSealContext::new(
+            &StorageMasterKey::from_bytes(source_master_bytes),
+            source_binding,
+            1,
+        )?
+        .seal(
+            TableId::LoginIndexKeyState,
+            1,
+            [131; 24],
+            &login_state_key,
+            &login_state.encode()?,
+        )?
+        .encode()?;
+        let login_state_record_id = SealedRecord::decode(&login_state_sealed)?.record_id()?;
+        let account_key = StoredKey::new(vec![b'r'; 24])?;
+        let account_plaintext =
+            PersistentRecordValue::new(TableId::Account, 1, 7, 9, None, Vec::new(), vec![132])?
+                .encode()?;
+        let account_sealed = StorageSealContext::new(
+            &StorageMasterKey::from_bytes(source_master_bytes),
+            source_binding,
+            1,
+        )?
+        .seal(
+            TableId::Account,
+            1,
+            [133; 24],
+            &account_key,
+            &account_plaintext,
+        )?
+        .encode()?;
+        let account_record_id = SealedRecord::decode(&account_sealed)?.record_id()?;
+        let plan_hash = construction_plan_hash(
+            StorageConstructionKind::Rekey,
+            &[
+                rekey_entry(TableId::Account, &account_key, account_record_id)?,
+                rekey_login_state_entry(&login_state_key, login_state_record_id)?,
+            ],
+            agenc_ircd_storage::MAX_CONSTRUCTION_PLAN_BYTES,
+        )?;
+        let identity = StorageOperationIdentity {
+            kind: StorageConstructionKind::Rekey,
+            command_version: 1,
+            source_database_header_hash: digest(134),
+            target_database_header_hash: digest(0),
+            source_rollback_guard_hash: digest(135),
+            source_stream_digest: None,
+            source_schema_generation: 1,
+            target_schema_generation: 1,
+            transform_profile_hash: rekey_transform_profile_hash()?,
+            target_database_instance_id: target_database,
+            source_master_key_id: StorageMasterKey::from_bytes(source_master_bytes)
+                .source_operation_key_id()?,
+            source_guard_root_key_id: RollbackGuardRootKey::from_bytes(source_guard_bytes)
+                .source_operation_key_id()?,
+            target_master_key_id: StorageMasterKey::from_bytes(target_master_bytes)
+                .target_operation_key_id()?,
+            target_guard_root_key_id: RollbackGuardRootKey::from_bytes(target_guard_bytes)
+                .target_operation_key_id()?,
+            planned_entry_count: 2,
+            construction_plan_hash: plan_hash,
+        };
+        let marker = StorageConstruction {
+            identity,
+            output_path_hash,
+            next_target: StorageConstructionCursor::BeforeFirst,
+            target_records_committed: 0,
+        };
+        let tuple = StateDirectory::probe(&staging)?;
+        let qualification = signed_qualification(tuple)?;
+        let outcome = initialize_storage(StorageInitializationConfig {
+            state_directory: StateDirectory::open(&staging, &[qualification])?,
+            header_tbs: agenc_ircd_storage::DatabaseHeaderTbs::new(
+                network,
+                server,
+                ServerIncarnation::from_bytes([136; 16]),
+                target_database,
+                1,
+                SCHEMA_GENERATION,
+                RecoveryEpoch::from_bytes([137; 16]),
+            )?,
+            storage_master_key: StorageMasterKey::from_bytes(target_master_bytes),
+            rollback_guard_root_key: RollbackGuardRootKey::from_bytes(target_guard_bytes),
+            mode: StorageInitializationMode::Construction,
+            initial_records: vec![InitialStorageRecord::new(
+                TableId::StorageConstruction,
+                StoredKey::new(agenc_ircd_storage::STORAGE_CONSTRUCTION_KEY.to_vec())?,
+                1,
+                marker.encode()?,
+            )?],
+            account_service_response_count: 0,
+            state_generation: 7,
+            predecessor_guard_hash: identity.source_rollback_guard_hash,
+            limits: test_limits(),
+        })?;
+        if !matches!(outcome, StorageInitializationOutcome::Complete { .. }) {
+            return Err("fault construction initialization did not complete".into());
+        }
+        Ok(Self {
+            _root: root,
+            output,
+            staging,
+            output_path_hash,
+            qualification,
+            network,
+            server,
+            target_master_bytes,
+            target_guard_bytes,
+            login_key_bytes,
+            source_master_bytes,
+            source_binding,
+            account_sealed,
+            account_record_id,
+            login_state_sealed,
+            login_state_record_id,
+        })
+    }
+
+    fn open_config_at(
+        &self,
+        path: &Path,
+        faults: StorageFaultInjector,
+    ) -> Result<StorageOpenConfig, StorageError> {
+        Ok(StorageOpenConfig {
+            expected_network_id: self.network,
+            expected_server_id: self.server,
+            state_directory: StateDirectory::open_with_faults(path, &[self.qualification], faults)?,
+            storage_master_key: StorageMasterKey::from_bytes(self.target_master_bytes),
+            rollback_guard_root_key: RollbackGuardRootKey::from_bytes(self.target_guard_bytes),
+            login_index_key: LoginIndexKey::from_bytes(self.login_key_bytes),
+            previous_login_index_key: None,
+            limits: test_limits(),
+        })
+    }
+
+    fn source(&self) -> Result<TestConstructionSource, StorageError> {
+        Ok(TestConstructionSource {
+            records: vec![
+                (
+                    TableId::Account,
+                    StoredKey::new(vec![b'r'; 24])?,
+                    self.account_sealed.clone(),
+                ),
+                (
+                    TableId::LoginIndexKeyState,
+                    StoredKey::new(agenc_ircd_storage::LOGIN_INDEX_KEY_STATE_KEY.to_vec())?,
+                    self.login_state_sealed.clone(),
+                ),
+            ],
+            master_key: StorageMasterKey::from_bytes(self.source_master_bytes),
+            binding: self.source_binding,
+        })
+    }
+
+    fn plan(&self, identity: &StorageOperationIdentity) -> Result<ConstructionPlan, StorageError> {
+        let account_key = StoredKey::new(vec![b'r'; 24])?;
+        let login_state_key =
+            StoredKey::new(agenc_ircd_storage::LOGIN_INDEX_KEY_STATE_KEY.to_vec())?;
+        ConstructionPlan::new(
+            identity,
+            vec![
+                rekey_entry(TableId::Account, &account_key, self.account_record_id)?,
+                rekey_login_state_entry(&login_state_key, self.login_state_record_id)?,
+            ],
+            construction_limits(),
+        )
+    }
+
+    fn execution(
+        &self,
+        faults: StorageFaultInjector,
+    ) -> Result<
+        (
+            ConstructionTarget,
+            ConstructionExecutor,
+            TestConstructionSource,
+        ),
+        StorageError,
+    > {
+        let target = ConstructionTarget::open(self.open_config_at(&self.staging, faults)?)?;
+        let marker = target.marker()?;
+        let plan = self.plan(&marker.identity)?;
+        let source = self.source()?;
+        let executor = ConstructionExecutor::resume(marker, plan, construction_limits())?;
+        Ok((target, executor, source))
+    }
+
+    fn finish(
+        &self,
+        expected_identity: StorageOperationIdentity,
+    ) -> Result<StorageDigest, StorageError> {
+        match self.execution(StorageFaultInjector::disabled()) {
+            Ok((mut target, mut executor, mut source)) => {
+                while executor.service_batch(&mut source, &mut ExactCopyTransformer, &mut target)?
+                    != 0
+                {}
+                executor.finalize(&mut target)
+            }
+            Err(_) => Ok(self
+                .verify_completed(expected_identity)?
+                .completion()
+                .storage_operation_id),
+        }
+    }
+
+    fn verify_completed(
+        &self,
+        expected_identity: StorageOperationIdentity,
+    ) -> Result<agenc_ircd_storage::VerifiedConstructionOutput, StorageError> {
+        self.verify_completed_at(&self.staging, expected_identity, self.output_path_hash)
+    }
+
+    fn verify_completed_at(
+        &self,
+        path: &Path,
+        expected_identity: StorageOperationIdentity,
+        output_path_hash: StorageDigest,
+    ) -> Result<agenc_ircd_storage::VerifiedConstructionOutput, StorageError> {
+        ConstructionTarget::verify_completed(
+            self.open_config_at(path, StorageFaultInjector::disabled())?,
+            expected_identity,
+            output_path_hash,
+        )
+    }
+}
+
+struct TestConstructionSource {
+    records: Vec<(TableId, StoredKey, Vec<u8>)>,
+    master_key: StorageMasterKey,
+    binding: DatabaseBinding,
+}
+
+impl ConstructionSourceReader for TestConstructionSource {
+    fn read_source(
+        &mut self,
+        reference: &StorageConstructionSource,
+    ) -> Result<ConstructionSourceRecord, StorageError> {
+        let sealed = self
+            .records
+            .iter()
+            .find(|(table, key, _)| {
+                *table == reference.table() && key.as_bytes() == reference.key().as_bytes()
+            })
+            .map(|(_, _, sealed)| sealed)
+            .ok_or(StorageError::StaleState)?;
+        ConstructionSourceRecord::open(reference, sealed, &self.master_key, self.binding, 1)
+    }
+}
+
+struct TestDirectory(PathBuf);
+
+impl TestDirectory {
+    fn create() -> Result<Self, Box<dyn Error>> {
+        let sequence = DIRECTORY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "agenc-ircd-stage-five-completion-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir(&path)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+        Ok(Self(path))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TestDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn rekey_login_state_entry(
+    key: &StoredKey,
+    source_record_id: StorageDigest,
+) -> Result<StorageConstructionPlanEntry, StorageError> {
+    rekey_entry(TableId::LoginIndexKeyState, key, source_record_id)
+}
+
+fn rekey_entry(
+    table: TableId,
+    key: &StoredKey,
+    source_record_id: StorageDigest,
+) -> Result<StorageConstructionPlanEntry, StorageError> {
+    StorageConstructionPlanEntry::new(
+        StorageConstructionKind::Rekey,
+        vec![StorageConstructionSource::new(
+            StorageConstructionSourceKind::DatabaseRecord,
+            table,
+            StoredKey::new(key.as_bytes().to_vec())?,
+            1,
+            source_record_id,
+            0,
+        )?],
+        table,
+        StoredKey::new(key.as_bytes().to_vec())?,
+        1,
+        StorageConstructionAction::RekeyCopy,
+        0,
+    )
+}
+
+fn test_limits() -> StorageEngineLimits {
+    StorageEngineLimits {
+        redb_cache_bytes: 8 * 1_024 * 1_024,
+        fixed_reserve_bytes: 64 * 1_024 * 1_024,
+        reserve_percent: 1,
+        database_max_bytes: 1_073_741_824,
+        backup_max_bytes: 1_073_741_824,
+        integrity_checkpoint_manifests: 10_000,
+    }
+}
+
+fn construction_limits() -> ConstructionLimits {
+    ConstructionLimits {
+        source_database_bytes: 1_073_741_824,
+        source_backup_bytes: 1_073_741_824,
+        target_database_bytes: 1_073_741_824,
+        target_backup_bytes: 1_073_741_824,
+        plan_bytes: 1_048_576,
+        batch_records: 1_000,
+        batch_bytes: 16_777_216,
+    }
+}
+
+fn initialize_with_faults(
+    faults: StorageFaultInjector,
+) -> Result<Result<StorageInitializationOutcome, StorageError>, Box<dyn Error>> {
+    let directory = TestDirectory::create()?;
+    let tuple = StateDirectory::probe(directory.path())?;
+    let qualification = signed_qualification(tuple)?;
+    let network = NetworkId::from_bytes([201; 32]);
+    let server = ServerId::from_bytes([202; 16]);
+    let login_key = LoginIndexKey::from_bytes([203; 32]);
+    let key_state = LoginIndexKeyState::stable(1, login_key.key_id(network))?;
+    let initial = InitialStorageRecord::new(
+        TableId::LoginIndexKeyState,
+        StoredKey::new(agenc_ircd_storage::LOGIN_INDEX_KEY_STATE_KEY.to_vec())?,
+        1,
+        key_state.encode()?,
+    )?;
+    let state_directory =
+        StateDirectory::open_with_faults(directory.path(), &[qualification], faults)?;
+    Ok(initialize_storage(StorageInitializationConfig {
+        state_directory,
+        header_tbs: agenc_ircd_storage::DatabaseHeaderTbs::new(
+            network,
+            server,
+            ServerIncarnation::from_bytes([204; 16]),
+            DatabaseId::from_bytes([205; 16]),
+            1,
+            SCHEMA_GENERATION,
+            RecoveryEpoch::from_bytes([206; 16]),
+        )?,
+        storage_master_key: StorageMasterKey::from_bytes([207; 32]),
+        rollback_guard_root_key: RollbackGuardRootKey::from_bytes([208; 32]),
+        mode: StorageInitializationMode::Live,
+        initial_records: vec![initial],
+        account_service_response_count: 0,
+        state_generation: 0,
+        predecessor_guard_hash: StorageDigest::from_bytes([0; 32]),
+        limits: test_limits(),
+    }))
+}
+
+struct InitializedLiveFixture {
+    directory: TestDirectory,
+    qualification: agenc_ircd_storage::StorageQualification,
+    logical_database_bytes: u64,
+    backup_stream_bytes: u64,
+}
+
+impl InitializedLiveFixture {
+    fn accounting(&self) -> StorageAccountingLimits {
+        StorageAccountingLimits {
+            current_logical_database_bytes: self.logical_database_bytes,
+            current_backup_stream_bytes: self.backup_stream_bytes,
+            database_max_bytes: test_limits().database_max_bytes,
+            backup_max_bytes: test_limits().backup_max_bytes,
+        }
+    }
+}
+
+fn initialized_live_fixture() -> Result<InitializedLiveFixture, Box<dyn Error>> {
+    let network = NetworkId::from_bytes([201; 32]);
+    let login_key = LoginIndexKey::from_bytes([203; 32]);
+    let key_state = LoginIndexKeyState::stable(1, login_key.key_id(network))?;
+    initialized_live_fixture_from(vec![InitialStorageRecord::new(
+        TableId::LoginIndexKeyState,
+        StoredKey::new(agenc_ircd_storage::LOGIN_INDEX_KEY_STATE_KEY.to_vec())?,
+        1,
+        key_state.encode()?,
+    )?])
+}
+
+struct LazyLoginFixture {
+    fixture: InitializedLiveFixture,
+    login: NormalizedLogin,
+    previous_key: StoredKey,
+    previous_value: LoginIndexValue,
+    account_id: agenc_ircd_types::AccountId,
+    credential_id: OpaqueCredentialId,
+}
+
+fn initialized_lazy_login_fixture() -> Result<LazyLoginFixture, Box<dyn Error>> {
+    let network = NetworkId::from_bytes([201; 32]);
+    let previous_login_key = LoginIndexKey::from_bytes([203; 32]);
+    let key_state = LoginIndexKeyState::stable(1, previous_login_key.key_id(network))?;
+    let login = NormalizedLogin::prepare("lazy-fault-login")?;
+    let previous_lookup =
+        LoginIndexStoredKey::new(1, derive_login_index(&previous_login_key, network, &login)?)?;
+    let previous_key = previous_lookup.encode()?;
+    let account_id = AccountRandomId::from_bytes([222; 16]).to_account_id();
+    let credential_id = OpaqueCredentialId::from_bytes([223; 32]);
+    let previous_value = LoginIndexValue::new(
+        &previous_lookup,
+        LoginIndexValueKind::Live {
+            account_id,
+            opaque_credential_id: OpaqueCredentialId::from_bytes([223; 32]),
+        },
+    )?;
+    let account_key = StoredKey::new(account_id.to_text().as_bytes().to_vec())?;
+    let fixture = initialized_live_fixture_from(vec![
+        InitialStorageRecord::new(
+            TableId::LoginIndexKeyState,
+            StoredKey::new(agenc_ircd_storage::LOGIN_INDEX_KEY_STATE_KEY.to_vec())?,
+            1,
+            key_state.encode()?,
+        )?,
+        InitialStorageRecord::new(
+            TableId::Account,
+            StoredKey::new(account_key.as_bytes().to_vec())?,
+            1,
+            PersistentRecordValue::new(TableId::Account, 1, 1, 1, None, Vec::new(), vec![1])?
+                .encode()?,
+        )?,
+        InitialStorageRecord::new(
+            TableId::OpaqueRecord,
+            account_key,
+            1,
+            PersistentRecordValue::new(TableId::OpaqueRecord, 1, 1, 0, None, Vec::new(), vec![2])?
+                .encode()?,
+        )?,
+        InitialStorageRecord::new(
+            TableId::LoginIndex,
+            StoredKey::new(previous_key.as_bytes().to_vec())?,
+            1,
+            previous_value.encode()?,
+        )?,
+    ])?;
+    Ok(LazyLoginFixture {
+        fixture,
+        login,
+        previous_key,
+        previous_value,
+        account_id,
+        credential_id,
+    })
+}
+
+fn initialized_live_fixture_from(
+    initial_records: Vec<InitialStorageRecord>,
+) -> Result<InitializedLiveFixture, Box<dyn Error>> {
+    let directory = TestDirectory::create()?;
+    let tuple = StateDirectory::probe(directory.path())?;
+    let qualification = signed_qualification(tuple)?;
+    let network = NetworkId::from_bytes([201; 32]);
+    let outcome = initialize_storage(StorageInitializationConfig {
+        state_directory: StateDirectory::open(directory.path(), &[qualification])?,
+        header_tbs: agenc_ircd_storage::DatabaseHeaderTbs::new(
+            network,
+            ServerId::from_bytes([202; 16]),
+            ServerIncarnation::from_bytes([204; 16]),
+            DatabaseId::from_bytes([205; 16]),
+            1,
+            SCHEMA_GENERATION,
+            RecoveryEpoch::from_bytes([206; 16]),
+        )?,
+        storage_master_key: StorageMasterKey::from_bytes([207; 32]),
+        rollback_guard_root_key: RollbackGuardRootKey::from_bytes([208; 32]),
+        mode: StorageInitializationMode::Live,
+        initial_records,
+        account_service_response_count: 0,
+        state_generation: 0,
+        predecessor_guard_hash: StorageDigest::from_bytes([0; 32]),
+        limits: test_limits(),
+    })?;
+    let StorageInitializationOutcome::Complete {
+        logical_database_bytes,
+        backup_stream_bytes,
+        ..
+    } = outcome
+    else {
+        return Err("live fixture initialization was indeterminate".into());
+    };
+    Ok(InitializedLiveFixture {
+        directory,
+        qualification,
+        logical_database_bytes,
+        backup_stream_bytes,
+    })
+}
+
+fn live_open_config(state_directory: StateDirectory) -> StorageOpenConfig {
+    StorageOpenConfig {
+        expected_network_id: NetworkId::from_bytes([201; 32]),
+        expected_server_id: ServerId::from_bytes([202; 16]),
+        state_directory,
+        storage_master_key: StorageMasterKey::from_bytes([207; 32]),
+        rollback_guard_root_key: RollbackGuardRootKey::from_bytes([208; 32]),
+        login_index_key: LoginIndexKey::from_bytes([203; 32]),
+        previous_login_index_key: None,
+        limits: test_limits(),
+    }
+}
+
+fn read_key_state_record(port: &StoragePort) -> Result<ExistingRecord, Box<dyn Error>> {
+    let key = StoredKey::new(agenc_ircd_storage::LOGIN_INDEX_KEY_STATE_KEY.to_vec())?;
+    let mut result = port
+        .try_read(ReadPlan::exact(TableId::LoginIndexKeyState, key))?
+        .wait()?;
+    if result.records.len() != 1 {
+        return Err("login-index key-state singleton is missing".into());
+    }
+    let record = result
+        .records
+        .pop()
+        .ok_or("login-index key-state singleton is missing")?;
+    let sealed = SealedRecord::decode(&record.sealed_record)?;
+    Ok(ExistingRecord::new(
+        sealed.record_schema(),
+        sealed.record_id()?,
+        record.sealed_record.len(),
+    )?)
+}
+
+fn read_existing_record(
+    port: &StoragePort,
+    table: TableId,
+    key: StoredKey,
+) -> Result<ExistingRecord, Box<dyn Error>> {
+    let mut result = port.try_read(ReadPlan::exact(table, key))?.wait()?;
+    if result.records.len() != 1 {
+        return Err("expected storage record is missing".into());
+    }
+    let record = result
+        .records
+        .pop()
+        .ok_or("expected storage record is missing")?;
+    let sealed = SealedRecord::decode(&record.sealed_record)?;
+    Ok(ExistingRecord::new(
+        sealed.record_schema(),
+        sealed.record_id()?,
+        record.sealed_record.len(),
+    )?)
+}
+
+fn signed_qualification(
+    tuple: agenc_ircd_storage::FilesystemTuple,
+) -> Result<agenc_ircd_storage::StorageQualification, Box<dyn Error>> {
+    let target = match tuple.target {
+        "x86_64-unknown-linux-gnu" => QualificationTarget::X86_64UnknownLinuxGnu,
+        "aarch64-unknown-linux-gnu" => QualificationTarget::Aarch64UnknownLinuxGnu,
+        _ => return Err("unsupported test target".into()),
+    };
+    let cases = QUALIFICATION_CASES
+        .iter()
+        .map(|name| StorageGrowthCase::new((*name).to_owned(), 1_000, 1_001))
+        .collect::<Result<Vec<_>, _>>()?;
+    let key = Ed25519SecretKey::from_bytes([62; 32]);
+    let report = StorageQualificationReport::sign(
+        StorageQualificationReportTbs {
+            target,
+            filesystem_type: tuple.filesystem_type,
+            block_size: tuple.block_size,
+            mount_flags: tuple.mount_flags,
+            kernel_release: "test-kernel".to_owned(),
+            redb_features_hash: digest(1),
+            release_profile_hash: digest(2),
+            corpus_hash: digest(3),
+            cases,
+            maximum_observed_growth: 1,
+            raw_log_hash: digest(4),
+        },
+        &key,
+    )?;
+    let verified =
+        StorageQualificationReport::decode_and_verify(&report.encode()?, key.public_key())?;
+    Ok(verified.qualification_for(tuple)?)
+}
+
+fn key_for(table: TableId) -> Result<StoredKey, Box<dyn Error>> {
+    let bytes = match table {
+        TableId::Account => vec![b'a'; 24],
+        TableId::OpaqueRecord => vec![b'o'; 24],
+        TableId::AuthTransaction
+        | TableId::RegistrationInvite
+        | TableId::Session
+        | TableId::Channel => vec![1; 16],
+        TableId::NicknameReservation | TableId::ChannelName | TableId::E2eeObject => vec![2; 32],
+        TableId::Sanction => vec![3; 18],
+        TableId::FederationPeer => vec![4; 16],
+        TableId::FederationOrigin => vec![5; 56],
+        TableId::RequestResult => vec![6; 16],
+        TableId::EdgeOutbox | TableId::EdgeProjection => vec![7; 10],
+        TableId::History => vec![8; 24],
+        TableId::Audit | TableId::AuditCheckpoint => vec![9; 8],
+        TableId::E2eeState => vec![10; 3],
+        _ => return Err("not a domain table".into()),
+    };
+    Ok(StoredKey::new(bytes)?)
+}
+
+fn digest(byte: u8) -> StorageDigest {
+    StorageDigest::from_bytes([byte; 32])
+}

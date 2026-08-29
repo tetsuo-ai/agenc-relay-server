@@ -10,6 +10,7 @@ use crate::CryptoError;
 use crate::secret::SecretBytes;
 
 const LOGIN_INDEX_LABEL: &[u8] = b"agenc-chat login index v1";
+const LOGIN_INDEX_KEY_ID_LABEL: &[u8] = b"agenc-chat login index key id v1";
 const FAKE_CREDENTIAL_LABEL: &[u8] = b"agenc-chat fake opaque credential id v1";
 const MAX_SEMANTIC_HASH_INPUT_BYTES: usize = 16_777_215;
 
@@ -37,6 +38,34 @@ impl LoginIndexKey {
 
     pub(crate) fn secret_bytes(&self) -> &[u8; 32] {
         self.0.as_bytes()
+    }
+
+    /// Computes the network-bound public identifier of this secret key.
+    #[must_use]
+    pub fn key_id(&self, network_id: NetworkId) -> LoginIndexKeyId {
+        let mut hasher = Sha256::new();
+        hasher.update(LOGIN_INDEX_KEY_ID_LABEL);
+        hasher.update(network_id.as_bytes());
+        hasher.update(self.secret_bytes());
+        LoginIndexKeyId(hasher.finalize().into())
+    }
+}
+
+/// A network-bound identifier for one login-index key generation.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct LoginIndexKeyId([u8; 32]);
+
+impl LoginIndexKeyId {
+    /// Constructs an identifier decoded from authenticated storage.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Returns the complete identifier.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
     }
 }
 

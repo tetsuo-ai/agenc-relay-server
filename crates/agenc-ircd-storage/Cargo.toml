@@ -10,6 +10,10 @@ agenc-ircd-crypto.workspace = true
 agenc-ircd-domain.workspace = true
 agenc-ircd-e2ee.workspace = true
 agenc-ircd-types.workspace = true
+redb.workspace = true
+rustix.workspace = true
+subtle.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true

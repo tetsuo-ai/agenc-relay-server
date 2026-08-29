@@ -1,0 +1,54 @@
+schema_version = 1
+stage = 5
+tasks = [
+  "S05-001", "S05-002", "S05-003", "S05-004", "S05-005",
+  "S05-006", "S05-007", "S05-008", "S05-009", "S05-010",
+  "S05-011", "S05-012", "S05-013", "S05-014", "S05-015",
+]
+
+[database]
+engine = "redb"
+version = "4.2.0"
+database_format = 1
+schema_generation = 1
+table_count = 27
+durability = "Immediate"
+two_phase_commit = true
+writer_threads = 1
+request_queue_capacity = 2
+handoff_slot_bytes = 58720240
+
+[limits]
+stored_key_bytes = 4096
+sealed_ciphertext_bytes = 16777216
+manifest_plaintext_bytes = 16777200
+tracked_mutations = 65535
+transaction_plans = 256
+transaction_seals = 65537
+nonce_draws = 1099511627776
+physical_growth_bytes = 268435456
+checkpoint_manifests = 100000
+retained_manifests = 1000000
+retained_manifest_bytes = 4294967296
+
+[filesystem]
+dependency = "rustix 1.1.4"
+state_directory_mode = "0700"
+file_mode = "0600"
+guard_publish = "create-exclusive temporary, file sync, rename, directory sync, read-back"
+backup_publish = "create-exclusive temporary, file sync, full verify, file sync, no-replace rename, directory sync, read-back full verify"
+qualified_targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+qualification_margin = 2
+
+[fuzz]
+targets = ["storage_codecs", "backup_stream"]
+seed = 20260827
+runs = 10000
+max_len = 1048576
+timeout_seconds = 2
+rss_limit_mb = 1024
+
+[closure]
+implementation_gate = "stage-five-implementation"
+exact_sha_checkpoint_required = true
+release_growth_signature_required = true

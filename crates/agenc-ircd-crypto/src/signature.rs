@@ -28,6 +28,8 @@ pub enum SignatureDomain {
     AdminAuditCheckpoint,
     /// Offline database-backup signature over the stream digest.
     BackupSignature,
+    /// Release storage-growth qualification report.
+    StorageQualificationReport,
     /// E2EE root identity.
     RootIdentity,
     /// E2EE root continuity.
@@ -97,6 +99,7 @@ impl SignatureDomain {
             Self::AdminAuditEvent => b"agenc-chat admin audit signature v1",
             Self::AdminAuditCheckpoint => b"agenc-chat admin audit checkpoint signature v1",
             Self::BackupSignature => b"agenc-chat backup signature v1",
+            Self::StorageQualificationReport => b"agenc-chat storage qualification report v1",
             Self::RootIdentity => b"IRC-MLS/1 root identity",
             Self::RootContinuity => b"IRC-MLS/1 root continuity",
             Self::DeviceEnrollmentPossession => b"IRC-MLS/1 device enrollment possession",
@@ -165,7 +168,8 @@ impl SignatureDomain {
             | Self::AdminCommand
             | Self::AdminAuditEvent
             | Self::AdminAuditCheckpoint
-            | Self::BackupSignature => SignatureEncoding::DirectPrefix,
+            | Self::BackupSignature
+            | Self::StorageQualificationReport => SignatureEncoding::DirectPrefix,
         }
     }
 }

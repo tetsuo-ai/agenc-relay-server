@@ -92,6 +92,7 @@ EXTERNAL_DEPENDENCIES = {
     "opaque-sha2": ("=0.10.9", set()),
     "precis-profiles": ("=0.1.13", set()),
     "redb": ("=4.2.0", {"std"}),
+    "rustix": ("=1.1.4", {"fs", "std"}),
     "rustls": ("=0.23.43", {"aws_lc_rs", "prefer-post-quantum", "std"}),
     "sha2": ("=0.11.0", {"zeroize"}),
     "subtle": ("=2.6.1", set()),
@@ -115,6 +116,7 @@ DIRECT_CHECKSUMS = {
     "opaque-sha2": "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283",
     "precis-profiles": "31e2768890a47af73a032af9f0cedbddce3c9d06cf8de201d5b8f2436ded7674",
     "redb": "de6c3b63e007e90ce536ec2ae4690826136a20ec8dbbbb400daef1bb999d2e36",
+    "rustix": "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190",
     "rustls": "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06",
     "sha2": "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4",
     "subtle": "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292",
@@ -149,6 +151,7 @@ EXPECTED_EXTERNAL_EDGES = {
         "tokio",
         "zeroize",
     },
+    "agenc-ircd-storage": {"redb", "rustix", "subtle", "zeroize"},
     "agenc-ircd-testkit": {"sha2", "subtle"},
 }
 CRATES_IO_SOURCES = {
@@ -414,7 +417,7 @@ def validate_package_manifests(root: Path) -> None:
 
 
 def validate_direct_dependency_evidence(root: Path) -> None:
-    """Compare root pins with the frozen crates.io checksum evidence table."""
+    """Compare root pins with the initial ledger and reviewed stage additions."""
     source_path = root / "docs/protocol-sources-and-decisions.md"
     try:
         source = source_path.read_text(encoding="utf-8")
@@ -435,9 +438,27 @@ def validate_direct_dependency_evidence(root: Path) -> None:
     expected_records = {
         name: (version.removeprefix("="), DIRECT_CHECKSUMS[name])
         for name, (version, _features) in EXTERNAL_DEPENDENCIES.items()
+        if name != "rustix"
     }
     if records != expected_records:
         raise WorkspaceError("root dependency pins and frozen crates.io checksum evidence disagree")
+    stage_five = load_toml(root / "conformance/stage-five-dependencies.toml")
+    expected_stage_five = {
+        "schema_version": 1,
+        "dependency": [
+            {
+                "name": "rustix",
+                "version": "1.1.4",
+                "checksum": DIRECT_CHECKSUMS["rustix"],
+                "default_features": False,
+                "features": ["fs", "std"],
+                "purpose": "safe Linux directory-relative filesystem, metadata, capacity, rename, sync, and lock operations",
+                "reviewed_on": "2026-08-27",
+            }
+        ],
+    }
+    if stage_five != expected_stage_five:
+        raise WorkspaceError("Stage 05 dependency evidence differs from its reviewed closed form")
 
 
 def cargo_metadata(root: Path) -> dict[str, object]:

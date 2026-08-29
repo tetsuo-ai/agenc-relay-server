@@ -1,0 +1,2639 @@
+//! Authenticated storage transaction state machine owned by one blocking thread.
+
+use std::fs::File;
+use std::io::{Seek as _, SeekFrom};
+
+use agenc_ircd_crypto::{
+    DatabaseBinding, Ed25519SecretKey, LoginIndexKey, LoginIndexKeyId, OsEntropy,
+    RollbackGuardRootKey, StorageDigest, StorageIntegrityContext, StorageIntegrityKeys,
+    StorageMasterKey, TrackedStateHasher, derive_storage_integrity_keys, tracked_record_commitment,
+};
+use agenc_ircd_types::{NetworkId, ServerId};
+
+use crate::mutation::ReadPlanKind;
+use crate::redb_store::{
+    HEADER_META_KEY, RESERVATION_META_KEY, RecoveryScratch, RedbCommitFailure, RedbStore,
+    RedbWrite, ReferenceScratch, SnapshotScan, StorageSnapshot,
+};
+use crate::{
+    BACKUP_FIXED_STREAM_BYTES, BackupDestination, BackupHeader, BackupOutput, BackupReceipt,
+    BackupRecord, BackupStreamWriter, BackupTrustKey, CommitOutcome, CommitReceipt, DatabaseHeader,
+    ExistingRecord, FilesystemCapacity, IntegrityCheckpoint, IntegrityCheckpointTbs,
+    IntegrityManifest, IntegrityManifestTbs, IntegrityRecordMutation, IntegrityRecordVersion,
+    LoginIndexKeyState, LoginIndexStoredKey, LoginIndexValueKind, NonceReservationState,
+    NonceReservationTbs, ROLLBACK_GUARD_BYTES, ReadPlan, ReadRecord, ReadResult, RecordReference,
+    RecoveryDisposition, RollbackGuard, RollbackGuardPhase, RollbackGuardTbs, SealedRecord,
+    StateDirectory, StateMeta, StateMetaTbs, StorageAccountingLimits, StorageConstruction,
+    StorageConstructionSource, StorageError, StorageFaultBoundary, StorageFaultInjector,
+    StorageFaultSite, StorageMutationBatch, StorageMutationHead, StorageOperationCompletion,
+    StorageOperationIdentity, StorageSealContext, StoredKey, TableId, classify_recovery_state,
+    logical_meta_charge, logical_record_charge, verify_backup, verify_guard_pair,
+};
+
+const KEY_CHECK_KEY: &[u8] = b"agenc-chat/key-check/v1";
+const STATE_META_KEY: &[u8] = b"agenc-chat/state-meta/v1";
+const MAX_RETAINED_MANIFESTS: u64 = 1_000_000;
+const MAX_RETAINED_MANIFEST_BYTES: u64 = 4_294_967_296;
+const MIN_STORAGE_BYTES: u64 = 1_073_741_824;
+const MAX_STORAGE_BYTES: u64 = 1_099_511_627_776;
+const MIN_FIXED_RESERVE_BYTES: u64 = 67_108_864;
+const MIN_CHECKPOINT_MANIFESTS: u64 = 10_000;
+const CHECKPOINT_SLICE_RECORDS: usize = 4_096;
+const CHECKPOINT_SLICE_BYTES: usize = 16_777_216;
+
+/// Runtime limits enforced at the final durable storage boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StorageEngineLimits {
+    /// redb cache allocation in bytes.
+    pub redb_cache_bytes: usize,
+    /// Fixed free-space reserve.
+    pub fixed_reserve_bytes: u64,
+    /// Percentage free-space reserve.
+    pub reserve_percent: u8,
+    /// Logical database maximum.
+    pub database_max_bytes: u64,
+    /// Exact backup-stream maximum.
+    pub backup_max_bytes: u64,
+    /// Soft manifest count that starts a checkpoint scan.
+    pub integrity_checkpoint_manifests: u64,
+}
+
+impl StorageEngineLimits {
+    /// Validates the complete Appendix-C.5 storage limit profile.
+    pub const fn validate(self) -> Result<Self, StorageError> {
+        if !storage_limits_are_valid(self)
+            || !reserve_limits_are_valid(self)
+            || !checkpoint_limit_is_valid(self)
+        {
+            return Err(StorageError::LimitExceeded);
+        }
+        Ok(self)
+    }
+}
+
+const fn storage_limits_are_valid(limits: StorageEngineLimits) -> bool {
+    limits.redb_cache_bytes != 0
+        && limits.database_max_bytes >= MIN_STORAGE_BYTES
+        && limits.database_max_bytes <= MAX_STORAGE_BYTES
+        && limits.backup_max_bytes >= MIN_STORAGE_BYTES
+        && limits.backup_max_bytes <= MAX_STORAGE_BYTES
+        && limits.database_max_bytes <= limits.backup_max_bytes
+}
+
+const fn reserve_limits_are_valid(limits: StorageEngineLimits) -> bool {
+    limits.fixed_reserve_bytes >= MIN_FIXED_RESERVE_BYTES
+        && limits.fixed_reserve_bytes <= MAX_STORAGE_BYTES
+        && limits.reserve_percent != 0
+        && limits.reserve_percent <= 25
+}
+
+const fn checkpoint_limit_is_valid(limits: StorageEngineLimits) -> bool {
+    limits.integrity_checkpoint_manifests >= MIN_CHECKPOINT_MANIFESTS
+        && limits.integrity_checkpoint_manifests <= MAX_RETAINED_MANIFESTS
+}
+
+/// Secret-bearing startup inputs moved directly onto the storage thread.
+pub struct StorageOpenConfig {
+    /// Expected permanent network identity from validated configuration.
+    pub expected_network_id: NetworkId,
+    /// Expected permanent server identity from validated configuration.
+    pub expected_server_id: ServerId,
+    /// Validated state-directory authority and writer lock.
+    pub state_directory: StateDirectory,
+    /// Active external storage master key.
+    pub storage_master_key: StorageMasterKey,
+    /// Independently provisioned rollback-guard root.
+    pub rollback_guard_root_key: RollbackGuardRootKey,
+    /// Configured current login-index key.
+    pub login_index_key: LoginIndexKey,
+    /// Configured previous login-index key, present only during a transition.
+    pub previous_login_index_key: Option<LoginIndexKey>,
+    /// Final storage and filesystem limits.
+    pub limits: StorageEngineLimits,
+}
+
+pub(crate) struct StorageEngine {
+    store: RedbStore,
+    state_directory: StateDirectory,
+    master_key: StorageMasterKey,
+    guard_root_key: RollbackGuardRootKey,
+    login_index_key: LoginIndexKey,
+    previous_login_index_key: Option<LoginIndexKey>,
+    integrity_keys: StorageIntegrityKeys,
+    header: DatabaseHeader,
+    binding: DatabaseBinding,
+    state_meta: StateMeta,
+    state_meta_record_id: StorageDigest,
+    reservation: NonceReservationState,
+    guard: RollbackGuard,
+    limits: StorageEngineLimits,
+    retained_manifest_count: u64,
+    retained_manifest_bytes: u64,
+    checkpoint_job: Option<CheckpointJob>,
+    backup_job: Option<BackupJob>,
+}
+
+impl StorageEngine {
+    // agenc-review: focus owner=storage reviewed=2026-08-27 reason=startup orders identity key guard recovery and ceiling validation before ownership
+    pub(crate) fn open(config: StorageOpenConfig) -> Result<Self, StorageError> {
+        let limits = config.limits.validate()?;
+        let file = config.state_directory.open_database_file()?;
+        let store = RedbStore::open_with_faults(
+            file,
+            limits.redb_cache_bytes,
+            config.state_directory.faults(),
+        )?;
+        let header = DatabaseHeader::decode(&require_meta(&store, HEADER_META_KEY)?)?;
+        if header.tbs().network_id != config.expected_network_id
+            || header.tbs().server_id != config.expected_server_id
+        {
+            return Err(StorageError::AuthenticationFailed);
+        }
+        let context = StorageIntegrityContext::new(
+            header.tbs().network_id,
+            header.tbs().server_id,
+            header.tbs().database_instance_id,
+        );
+        let integrity_keys =
+            derive_storage_integrity_keys(&config.rollback_guard_root_key, context)?;
+        let reservation = NonceReservationState::decode_and_verify(
+            &require_meta(&store, RESERVATION_META_KEY)?,
+            &integrity_keys,
+        )?;
+        let mut guard = RollbackGuard::decode_and_verify(
+            &config.state_directory.read_guard(ROLLBACK_GUARD_BYTES)?,
+            &integrity_keys,
+        )?;
+        let binding = database_binding(&header);
+        verify_key_check(&store, &config.storage_master_key, binding, &header)?;
+        let (state_meta, state_meta_record_id) = read_state_meta(
+            &store,
+            &config.storage_master_key,
+            binding,
+            &header,
+            &integrity_keys,
+        )?;
+        match classify_recovery_state(
+            &header,
+            &state_meta,
+            state_meta_record_id,
+            &reservation,
+            &guard,
+        )? {
+            RecoveryDisposition::ExactCommitted | RecoveryDisposition::ExactReserved => {}
+            RecoveryDisposition::InstallReservedGuard
+            | RecoveryDisposition::InstallCommittedGuard => {
+                let replacement = guard_for_reservation(&header, &reservation, &integrity_keys)?;
+                config
+                    .state_directory
+                    .replace_guard(&replacement.encode()?)?;
+                guard = replacement;
+            }
+        }
+        if state_meta.tbs().logical_database_bytes > limits.database_max_bytes
+            || state_meta.tbs().backup_stream_bytes > limits.backup_max_bytes
+        {
+            return Err(StorageError::LimitExceeded);
+        }
+        let (retained_manifest_count, retained_manifest_bytes) =
+            store.table_usage(TableId::IntegrityManifest, MAX_RETAINED_MANIFEST_BYTES)?;
+        let expected_manifest_count = state_meta
+            .tbs()
+            .manifest_sequence
+            .checked_sub(state_meta.tbs().checkpoint_manifest_sequence)
+            .ok_or(StorageError::StaleState)?;
+        if retained_manifest_count != expected_manifest_count
+            || retained_manifest_count > MAX_RETAINED_MANIFESTS
+        {
+            return Err(StorageError::StaleState);
+        }
+        Ok(Self {
+            store,
+            state_directory: config.state_directory,
+            master_key: config.storage_master_key,
+            guard_root_key: config.rollback_guard_root_key,
+            login_index_key: config.login_index_key,
+            previous_login_index_key: config.previous_login_index_key,
+            integrity_keys,
+            header,
+            binding,
+            state_meta,
+            state_meta_record_id,
+            reservation,
+            guard,
+            limits,
+            retained_manifest_count,
+            retained_manifest_bytes,
+            checkpoint_job: None,
+            backup_job: None,
+        })
+    }
+
+    // agenc-review: focus owner=storage reviewed=2026-08-27 reason=closed exact-or-range dispatch preserves one immutable read result contract
+    pub(crate) fn read(&self, plan: &ReadPlan) -> Result<ReadResult, StorageError> {
+        let records = match plan.kind() {
+            ReadPlanKind::Exact { table, key } => {
+                match self.store.read_record(*table, key.as_bytes())? {
+                    Some(sealed_record) => vec![ReadRecord {
+                        table: *table,
+                        key: StoredKey::new(key.as_bytes().to_vec())?,
+                        sealed_record,
+                    }],
+                    None => Vec::new(),
+                }
+            }
+            ReadPlanKind::Range {
+                table,
+                start,
+                end,
+                limit,
+            } => self
+                .store
+                .read_range(
+                    *table,
+                    start.as_bytes(),
+                    end.as_bytes(),
+                    usize::from(*limit),
+                )?
+                .into_iter()
+                .map(|(key, sealed_record)| {
+                    Ok(ReadRecord {
+                        table: *table,
+                        key: StoredKey::new(key)?,
+                        sealed_record,
+                    })
+                })
+                .collect::<Result<Vec<_>, StorageError>>()?,
+        };
+        Ok(ReadResult {
+            storage_commit_sequence: self.state_meta.tbs().storage_commit_sequence,
+            records,
+        })
+    }
+
+    pub(crate) fn construction_marker(&self) -> Result<StorageConstruction, StorageError> {
+        let encoded = self
+            .store
+            .read_record(
+                TableId::StorageConstruction,
+                crate::STORAGE_CONSTRUCTION_KEY,
+            )?
+            .ok_or(StorageError::StaleState)?;
+        let key = StoredKey::new(crate::STORAGE_CONSTRUCTION_KEY.to_vec())?;
+        let sealed = SealedRecord::decode(&encoded)?;
+        let plaintext = sealed.open(
+            &self.master_key,
+            self.binding,
+            TableId::StorageConstruction,
+            1,
+            self.header.tbs().storage_key_generation,
+            &key,
+        )?;
+        StorageConstruction::decode(plaintext.expose_for_storage_codec())
+    }
+
+    pub(crate) fn construction_existing(
+        &self,
+        table: TableId,
+        key: &StoredKey,
+    ) -> Result<Option<ExistingRecord>, StorageError> {
+        self.store
+            .read_record(table, key.as_bytes())?
+            .map(|encoded| {
+                let sealed = SealedRecord::decode(&encoded)?;
+                ExistingRecord::new(sealed.record_schema(), sealed.record_id()?, encoded.len())
+            })
+            .transpose()
+    }
+
+    pub(crate) fn completed_construction(
+        &self,
+        expected_identity: StorageOperationIdentity,
+    ) -> Result<StorageOperationCompletion, StorageError> {
+        let completion = self.read_completed_construction(expected_identity)?;
+        self.verify_completed_construction_boundary(&completion)?;
+        Ok(completion)
+    }
+
+    pub(crate) fn resume_completed_construction(
+        &mut self,
+        expected_identity: StorageOperationIdentity,
+    ) -> Result<StorageOperationCompletion, StorageError> {
+        let completion = self.read_completed_construction(expected_identity)?;
+        if self
+            .verify_completed_construction_boundary(&completion)
+            .is_ok()
+        {
+            return Ok(completion);
+        }
+        self.verify_uncheckpointed_completion(&completion)?;
+        self.checkpoint_for_shutdown()
+            .map_err(|error| match error {
+                EngineCommitFailure::Rejected(error) => error,
+                EngineCommitFailure::Indeterminate => StorageError::Unavailable,
+            })?;
+        let _capacity = self.startup_scan()?;
+        self.completed_construction(expected_identity)
+    }
+
+    fn read_completed_construction(
+        &self,
+        expected_identity: StorageOperationIdentity,
+    ) -> Result<StorageOperationCompletion, StorageError> {
+        expected_identity.validate()?;
+        let operation_id = expected_identity.operation_id()?;
+        let key = StoredKey::new(operation_id.as_bytes().to_vec())?;
+        let encoded = self
+            .store
+            .read_record(TableId::StorageOperation, key.as_bytes())?
+            .ok_or(StorageError::StaleState)?;
+        let sealed = SealedRecord::decode(&encoded)?;
+        let plaintext = sealed.open(
+            &self.master_key,
+            self.binding,
+            TableId::StorageOperation,
+            1,
+            self.header.tbs().storage_key_generation,
+            &key,
+        )?;
+        let completion = StorageOperationCompletion::decode(plaintext.expose_for_storage_codec())?;
+        if completion.identity != expected_identity
+            || expected_identity.target_database_header_hash != self.header.complete_hash()?
+            || expected_identity.target_database_instance_id
+                != self.header.tbs().database_instance_id
+        {
+            return Err(StorageError::ResumeMismatch);
+        }
+        Ok(completion)
+    }
+
+    fn verify_uncheckpointed_completion(
+        &self,
+        completion: &StorageOperationCompletion,
+    ) -> Result<(), StorageError> {
+        let state = self.state_meta.tbs();
+        if state.storage_commit_sequence != completion.finalization_storage_commit_sequence
+            || state.manifest_sequence != completion.finalization_manifest_sequence
+            || state.state_generation != completion.finalization_state_generation
+            || state.account_service_response_count
+                != completion.finalization_account_service_response_count
+            || state.nonce_draw_high_water != completion.finalization_nonce_draw_high_water
+            || state.checkpoint_manifest_sequence >= completion.finalization_manifest_sequence
+        {
+            return Err(StorageError::ResumeMismatch);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn login_index_transition_preflight(
+        &self,
+        new_key_id: LoginIndexKeyId,
+    ) -> Result<LoginIndexKeyState, StorageError> {
+        let state = self.read_login_index_key_state()?;
+        let mut preflight = crate::LoginIndexTransitionPreflight::new(state, new_key_id)?;
+        self.store.visit_table(
+            TableId::LoginIndex,
+            self.limits.database_max_bytes,
+            |key, encoded| {
+                let stored_key = LoginIndexStoredKey::decode(key)?;
+                let record_key = StoredKey::new(key.to_vec())?;
+                let sealed = SealedRecord::decode(encoded)?;
+                let plaintext = sealed.open(
+                    &self.master_key,
+                    self.binding,
+                    TableId::LoginIndex,
+                    1,
+                    self.header.tbs().storage_key_generation,
+                    &record_key,
+                )?;
+                let value = crate::LoginIndexValue::decode(
+                    plaintext.expose_for_storage_codec(),
+                    &stored_key,
+                )?;
+                preflight.observe(&stored_key, &value)
+            },
+        )?;
+        preflight.finish()
+    }
+
+    fn verify_completed_construction_boundary(
+        &self,
+        completion: &StorageOperationCompletion,
+    ) -> Result<(), StorageError> {
+        let state = self.state_meta.tbs();
+        let key = StoredKey::new(state.checkpoint_manifest_sequence.to_be_bytes().to_vec())?;
+        let encoded = self
+            .store
+            .read_record(TableId::IntegrityCheckpoint, key.as_bytes())?
+            .ok_or(StorageError::StaleState)?;
+        let sealed = SealedRecord::decode(&encoded)?;
+        let plaintext = sealed.open(
+            &self.master_key,
+            self.binding,
+            TableId::IntegrityCheckpoint,
+            1,
+            self.header.tbs().storage_key_generation,
+            &key,
+        )?;
+        let checkpoint = IntegrityCheckpoint::decode(plaintext.expose_for_storage_codec())?;
+        verify_completion_cut(completion, checkpoint.tbs())?;
+        verify_completion_installation(completion, checkpoint.tbs(), state)
+    }
+
+    pub(crate) const fn construction_source_header(&self) -> DatabaseHeader {
+        self.header
+    }
+
+    pub(crate) const fn construction_source_state(&self) -> StateMetaTbs {
+        *self.state_meta.tbs()
+    }
+
+    pub(crate) fn construction_source_guard_hash(&self) -> Result<StorageDigest, StorageError> {
+        self.guard.complete_hash()
+    }
+
+    pub(crate) const fn construction_source_master_key(&self) -> &StorageMasterKey {
+        &self.master_key
+    }
+
+    pub(crate) const fn construction_source_binding(&self) -> DatabaseBinding {
+        self.binding
+    }
+
+    pub(crate) fn check_construction_fault(
+        &self,
+        site: StorageFaultSite,
+        boundary: StorageFaultBoundary,
+    ) -> Result<(), StorageError> {
+        self.state_directory.faults().check(site, boundary)
+    }
+
+    pub(crate) fn visit_construction_source_records<F>(
+        &self,
+        mut visitor: F,
+    ) -> Result<(), StorageError>
+    where
+        F: FnMut(
+            StorageConstructionSource,
+            crate::ConstructionSourceRecord,
+        ) -> Result<(), StorageError>,
+    {
+        for number in 1_u16..=26 {
+            if matches!(number, 14..=16 | 25) {
+                continue;
+            }
+            let table = TableId::from_u16(number)?;
+            self.store
+                .visit_table(table, self.limits.database_max_bytes, |key, encoded| {
+                    let stored_key = StoredKey::new(key.to_vec())?;
+                    let sealed = SealedRecord::decode(encoded)?;
+                    let source = StorageConstructionSource::new(
+                        crate::StorageConstructionSourceKind::DatabaseRecord,
+                        table,
+                        StoredKey::new(key.to_vec())?,
+                        sealed.record_schema(),
+                        sealed.record_id()?,
+                        0,
+                    )?;
+                    let record = crate::ConstructionSourceRecord::open(
+                        &source,
+                        encoded,
+                        &self.master_key,
+                        self.binding,
+                        self.header.tbs().storage_key_generation,
+                    )?;
+                    if record.key().as_bytes() != stored_key.as_bytes() {
+                        return Err(StorageError::StaleState);
+                    }
+                    visitor(source, record)
+                })?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn open_construction_source_record(
+        &self,
+        reference: &StorageConstructionSource,
+    ) -> Result<crate::ConstructionSourceRecord, StorageError> {
+        if reference.kind() != crate::StorageConstructionSourceKind::DatabaseRecord {
+            return Err(StorageError::InvalidEncoding);
+        }
+        let encoded = self
+            .store
+            .read_record(reference.table(), reference.key().as_bytes())?
+            .ok_or(StorageError::StaleState)?;
+        crate::ConstructionSourceRecord::open(
+            reference,
+            &encoded,
+            &self.master_key,
+            self.binding,
+            self.header.tbs().storage_key_generation,
+        )
+    }
+
+    pub(crate) fn construction_accounting(&self) -> StorageAccountingLimits {
+        StorageAccountingLimits {
+            current_logical_database_bytes: self.state_meta.tbs().logical_database_bytes,
+            current_backup_stream_bytes: self.state_meta.tbs().backup_stream_bytes,
+            database_max_bytes: self.limits.database_max_bytes,
+            backup_max_bytes: self.limits.backup_max_bytes,
+        }
+    }
+
+    pub(crate) fn construction_head(
+        &self,
+        transaction_id: agenc_ircd_types::TransactionId,
+    ) -> StorageMutationHead {
+        StorageMutationHead {
+            transaction_id,
+            expected_storage_commit_sequence: self.state_meta.tbs().storage_commit_sequence,
+            expected_state_generation: self.state_meta.tbs().state_generation,
+            resulting_state_generation: self.state_meta.tbs().state_generation,
+            state_advancing_plan_count: 0,
+            expected_account_service_response_count: self
+                .state_meta
+                .tbs()
+                .account_service_response_count,
+            resulting_account_service_response_count: self
+                .state_meta
+                .tbs()
+                .account_service_response_count,
+        }
+    }
+
+    pub(crate) fn construction_commit(
+        &mut self,
+        batch: StorageMutationBatch,
+    ) -> Result<CommitReceipt, StorageError> {
+        match self.commit(batch) {
+            CommitOutcome::Committed(receipt) => Ok(receipt),
+            CommitOutcome::Rejected(error) => Err(error),
+            CommitOutcome::Indeterminate => Err(StorageError::Unavailable),
+        }
+    }
+
+    pub(crate) fn construction_counters(
+        &self,
+    ) -> Result<crate::ConstructionFinalizationCounters, StorageError> {
+        Ok(crate::ConstructionFinalizationCounters {
+            storage_commit_sequence: self
+                .state_meta
+                .tbs()
+                .storage_commit_sequence
+                .checked_add(1)
+                .ok_or(StorageError::Overflow)?,
+            manifest_sequence: self
+                .state_meta
+                .tbs()
+                .manifest_sequence
+                .checked_add(1)
+                .ok_or(StorageError::Overflow)?,
+            state_generation: self.state_meta.tbs().state_generation,
+            account_service_response_count: self.state_meta.tbs().account_service_response_count,
+            nonce_draw_high_water: self
+                .reservation
+                .tbs()
+                .nonce_draw_high_water
+                .checked_add(3)
+                .ok_or(StorageError::Overflow)?,
+        })
+    }
+
+    pub(crate) const fn construction_committed_counters(
+        &self,
+    ) -> crate::ConstructionFinalizationCounters {
+        crate::ConstructionFinalizationCounters {
+            storage_commit_sequence: self.state_meta.tbs().storage_commit_sequence,
+            manifest_sequence: self.state_meta.tbs().manifest_sequence,
+            state_generation: self.state_meta.tbs().state_generation,
+            account_service_response_count: self.state_meta.tbs().account_service_response_count,
+            nonce_draw_high_water: self.state_meta.tbs().nonce_draw_high_water,
+        }
+    }
+
+    pub(crate) fn finish_construction(&mut self) -> Result<(), StorageError> {
+        self.checkpoint_for_shutdown()
+            .map_err(|error| match error {
+                EngineCommitFailure::Rejected(error) => error,
+                EngineCommitFailure::Indeterminate => StorageError::Unavailable,
+            })?;
+        self.startup_scan().map(|_| ())
+    }
+
+    pub(crate) fn commit(&mut self, batch: StorageMutationBatch) -> CommitOutcome {
+        match self.commit_inner(&batch) {
+            Ok(receipt) => CommitOutcome::Committed(receipt),
+            Err(EngineCommitFailure::Rejected(error)) => CommitOutcome::Rejected(error),
+            Err(EngineCommitFailure::Indeterminate) => CommitOutcome::Indeterminate,
+        }
+    }
+
+    pub(crate) fn start_backup(
+        &mut self,
+        destination: BackupDestination,
+        signing_key: Ed25519SecretKey,
+        created_at: u64,
+        backup_id: [u8; 16],
+    ) -> Result<(), StorageError> {
+        if self.backup_job.is_some() || self.checkpoint_job.is_some() {
+            return Err(StorageError::QueueFull);
+        }
+        let _capacity = self.startup_scan()?;
+        let snapshot = self.store.snapshot()?;
+        let (logical_database_bytes, backup_stream_bytes) =
+            self.verify_snapshot_accounting(&snapshot)?;
+        if logical_database_bytes != self.state_meta.tbs().logical_database_bytes
+            || backup_stream_bytes != self.state_meta.tbs().backup_stream_bytes
+        {
+            return Err(StorageError::StaleState);
+        }
+        let output = destination.create_output(self.state_directory.faults())?;
+        crate::platform::admit_backup_output(
+            output.file(),
+            backup_stream_bytes,
+            self.limits.fixed_reserve_bytes,
+            self.limits.reserve_percent,
+        )?;
+        let reservation = NonceReservationState::decode_and_verify(
+            &self.reservation.encode()?,
+            &self.integrity_keys,
+        )?;
+        let guard = RollbackGuard::decode_and_verify(&self.guard.encode()?, &self.integrity_keys)?;
+        let header = BackupHeader::new(
+            self.header,
+            reservation,
+            guard,
+            created_at,
+            backup_id,
+            signing_key.public_key(),
+        )?;
+        let writer_file = output
+            .file()
+            .try_clone()
+            .map_err(|_| StorageError::FilesystemRejected)?;
+        let writer = BackupStreamWriter::start(writer_file, &header, backup_stream_bytes)?;
+        self.backup_job = Some(BackupJob {
+            scan: self.store.snapshot_scan()?,
+            writer: Some(writer),
+            output: Some(output),
+            signing_key,
+            expected_state_meta: *self.state_meta.tbs(),
+            expected_stream_bytes: backup_stream_bytes,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn backup_is_active(&self) -> bool {
+        self.backup_job.is_some()
+    }
+
+    pub(crate) fn service_backup(&mut self) -> Result<Option<BackupReceipt>, StorageError> {
+        let service = (|| {
+            let job = self.backup_job.as_mut().ok_or(StorageError::StaleState)?;
+            let slice = job
+                .scan
+                .next_all_slice(CHECKPOINT_SLICE_RECORDS, CHECKPOINT_SLICE_BYTES)?;
+            let writer = job.writer.as_mut().ok_or(StorageError::StaleState)?;
+            for (table, key, sealed_record) in slice.rows {
+                let sealed = SealedRecord::decode(&sealed_record)?;
+                self.state_directory
+                    .faults()
+                    .check(StorageFaultSite::BackupRecord, StorageFaultBoundary::Before)?;
+                writer.write_record(&BackupRecord::new(
+                    table,
+                    StoredKey::new(key)?,
+                    sealed.record_schema(),
+                    sealed_record,
+                )?)?;
+                self.state_directory
+                    .faults()
+                    .check(StorageFaultSite::BackupRecord, StorageFaultBoundary::After)?;
+            }
+            Ok(slice.complete)
+        })();
+        let complete = match service {
+            Ok(complete) => complete,
+            Err(error) => {
+                self.backup_job = None;
+                return Err(error);
+            }
+        };
+        if !complete {
+            return Ok(None);
+        }
+        let job = self.backup_job.take().ok_or(StorageError::StaleState)?;
+        job.finish(
+            &self.master_key,
+            &self.guard_root_key,
+            self.limits.backup_max_bytes,
+        )
+        .map(Some)
+    }
+
+    fn verify_snapshot_accounting(
+        &self,
+        snapshot: &StorageSnapshot,
+    ) -> Result<(u64, u64), StorageError> {
+        let mut logical = logical_meta_charge(HEADER_META_KEY.len(), crate::DATABASE_HEADER_BYTES)?
+            .checked_add(logical_meta_charge(
+                RESERVATION_META_KEY.len(),
+                crate::NONCE_RESERVATION_BYTES,
+            )?)
+            .ok_or(StorageError::Overflow)?;
+        let mut backup = BACKUP_FIXED_STREAM_BYTES;
+        for number in 0_u16..=26 {
+            let table = TableId::from_u16(number)?;
+            snapshot.visit_table(table, self.limits.database_max_bytes, |key, encoded| {
+                let stored_key = StoredKey::new(key.to_vec())?;
+                let sealed = crate::validate_sealed_record(table, &stored_key, encoded)?;
+                if sealed.key_generation() != self.header.tbs().storage_key_generation {
+                    return Err(StorageError::AuthenticationFailed);
+                }
+                let plaintext = sealed.open(
+                    &self.master_key,
+                    self.binding,
+                    table,
+                    sealed.record_schema(),
+                    self.header.tbs().storage_key_generation,
+                    &stored_key,
+                )?;
+                crate::validate_record_plaintext(
+                    table,
+                    &stored_key,
+                    sealed.record_schema(),
+                    plaintext.expose_for_storage_codec(),
+                )?;
+                let charge = logical_record_charge(key.len(), encoded.len())?;
+                logical = logical.checked_add(charge).ok_or(StorageError::Overflow)?;
+                backup = backup
+                    .checked_add(charge.checked_add(8).ok_or(StorageError::Overflow)?)
+                    .ok_or(StorageError::Overflow)?;
+                Ok(())
+            })?;
+        }
+        Ok((logical, backup))
+    }
+
+    pub(crate) fn checkpoint_due(&self) -> Result<bool, StorageError> {
+        Ok(
+            self.retained_manifest_count >= self.limits.integrity_checkpoint_manifests
+                || self.retained_manifest_count >= MAX_RETAINED_MANIFESTS
+                || self.retained_manifest_bytes >= MAX_RETAINED_MANIFEST_BYTES,
+        )
+    }
+
+    pub(crate) fn checkpoint_is_active(&self) -> bool {
+        self.checkpoint_job.is_some()
+    }
+
+    pub(crate) fn start_checkpoint(&mut self) -> Result<(), StorageError> {
+        if self.checkpoint_job.is_some() || self.backup_job.is_some() {
+            return Err(StorageError::QueueFull);
+        }
+        let cut = *self.state_meta.tbs();
+        let scan = self.store.snapshot_scan()?;
+        self.checkpoint_job = Some(CheckpointJob::new(cut, scan));
+        Ok(())
+    }
+
+    pub(crate) fn service_checkpoint(&mut self) -> Result<bool, EngineCommitFailure> {
+        self.state_directory
+            .faults()
+            .check(
+                StorageFaultSite::CheckpointScan,
+                StorageFaultBoundary::Before,
+            )
+            .map_err(rejected)?;
+        let Some(job) = self.checkpoint_job.as_mut() else {
+            return Ok(false);
+        };
+        let completed = job
+            .service(
+                &self.master_key,
+                self.binding,
+                self.header.tbs().storage_key_generation,
+            )
+            .map_err(rejected)?;
+        self.state_directory
+            .faults()
+            .check(
+                StorageFaultSite::CheckpointScan,
+                StorageFaultBoundary::After,
+            )
+            .map_err(rejected)?;
+        let Some(completed) = completed else {
+            return Ok(false);
+        };
+        self.checkpoint_job = None;
+        self.install_scanned_checkpoint(completed)?;
+        Ok(true)
+    }
+
+    fn install_scanned_checkpoint(
+        &mut self,
+        completed: CompletedCheckpointScan,
+    ) -> Result<(), EngineCommitFailure> {
+        self.state_directory
+            .faults()
+            .check(
+                StorageFaultSite::CheckpointInstall,
+                StorageFaultBoundary::Before,
+            )
+            .map_err(rejected)?;
+        self.verify_checkpoint_cut(&completed.cut)
+            .map_err(rejected)?;
+        let _capacity = self
+            .state_directory
+            .admit_transaction(self.limits.fixed_reserve_bytes, self.limits.reserve_percent)
+            .map_err(rejected)?;
+        let installation = *self.state_meta.tbs();
+        let previous_checkpoint_key = installation.checkpoint_manifest_sequence.to_be_bytes();
+        let retired_charges = self
+            .checkpoint_retired_charges(previous_checkpoint_key, completed.cut.manifest_sequence)
+            .map_err(rejected)?;
+        let reserved = self.reserve_nonce_block(2)?;
+        let reserved_guard = self.install_reserved_guard(&reserved)?;
+        self.reservation = reserved;
+        self.guard = reserved_guard;
+        let nonces = checkpoint_nonces(
+            draw_nonces_with_faults(2, &self.state_directory.faults()).map_err(rejected)?,
+        )
+        .map_err(rejected)?;
+        let prepared = self
+            .prepare_checkpoint(
+                completed.cut,
+                installation,
+                completed.tracked_record_count,
+                completed.tracked_state_digest,
+                retired_charges,
+                nonces,
+            )
+            .map_err(rejected)?;
+        self.commit_prepared_checkpoint(prepared, previous_checkpoint_key)?;
+        self.state_directory
+            .faults()
+            .check(
+                StorageFaultSite::CheckpointInstall,
+                StorageFaultBoundary::After,
+            )
+            .map_err(indeterminate)
+    }
+
+    fn verify_checkpoint_cut(&self, cut: &StateMetaTbs) -> Result<(), StorageError> {
+        if cut.manifest_sequence > self.state_meta.tbs().manifest_sequence
+            || cut.checkpoint_manifest_sequence
+                != self.state_meta.tbs().checkpoint_manifest_sequence
+            || cut.checkpoint_hash != self.state_meta.tbs().checkpoint_hash
+        {
+            return Err(StorageError::StaleState);
+        }
+        if cut.manifest_sequence == 0 {
+            if cut.latest_manifest_hash == StorageDigest::from_bytes([0; 32]) {
+                return Ok(());
+            }
+            return Err(StorageError::StaleState);
+        }
+        let manifest = self.read_manifest(cut.manifest_sequence)?;
+        if manifest.manifest_hash() == cut.latest_manifest_hash {
+            Ok(())
+        } else {
+            Err(StorageError::StaleState)
+        }
+    }
+
+    pub(crate) fn checkpoint_for_shutdown(&mut self) -> Result<(), EngineCommitFailure> {
+        if self.state_meta.tbs().manifest_sequence
+            == self.state_meta.tbs().checkpoint_manifest_sequence
+        {
+            return Ok(());
+        }
+        self.start_checkpoint().map_err(rejected)?;
+        while self.checkpoint_is_active() {
+            self.service_checkpoint()?;
+        }
+        Ok(())
+    }
+
+    fn prepare_checkpoint(
+        &self,
+        cut: StateMetaTbs,
+        installation: StateMetaTbs,
+        tracked_record_count: u64,
+        tracked_state_digest: StorageDigest,
+        retired_charges: (u64, u64),
+        nonces: [[u8; 24]; 2],
+    ) -> Result<PreparedCheckpoint, StorageError> {
+        let [checkpoint_nonce, state_meta_nonce] = nonces;
+        let (checkpoint, checkpoint_key, checkpoint_record) = self.seal_checkpoint(
+            cut,
+            installation,
+            tracked_record_count,
+            tracked_state_digest,
+            checkpoint_nonce,
+        )?;
+        let (logical_database_bytes, backup_stream_bytes) =
+            self.checkpoint_accounting(installation, &checkpoint_record, retired_charges)?;
+        let (state_meta, state_meta_record, state_meta_record_id) = self
+            .seal_checkpoint_state_meta(
+                installation,
+                cut.manifest_sequence,
+                checkpoint.checkpoint_hash(),
+                logical_database_bytes,
+                backup_stream_bytes,
+                state_meta_nonce,
+            )?;
+        let committed_reservation = self.checkpoint_committed_reservation(
+            installation,
+            state_meta.tbs().storage_commit_sequence,
+            state_meta_record_id,
+        )?;
+        let committed_guard =
+            guard_for_reservation(&self.header, &committed_reservation, &self.integrity_keys)?;
+        Ok(PreparedCheckpoint {
+            checkpoint_key,
+            checkpoint_record,
+            state_meta,
+            state_meta_record,
+            state_meta_record_id,
+            committed_reservation,
+            committed_guard,
+        })
+    }
+
+    fn seal_checkpoint(
+        &self,
+        cut: StateMetaTbs,
+        installation: StateMetaTbs,
+        tracked_record_count: u64,
+        tracked_state_digest: StorageDigest,
+        nonce: [u8; 24],
+    ) -> Result<(IntegrityCheckpoint, [u8; 8], Vec<u8>), StorageError> {
+        let installation_storage_commit_sequence = installation
+            .storage_commit_sequence
+            .checked_add(1)
+            .ok_or(StorageError::Overflow)?;
+        let checkpoint = IntegrityCheckpoint::new(IntegrityCheckpointTbs {
+            database_instance_id: self.header.tbs().database_instance_id,
+            cut_storage_commit_sequence: cut.storage_commit_sequence,
+            cut_manifest_sequence: cut.manifest_sequence,
+            cut_state_generation: cut.state_generation,
+            cut_account_service_response_count: cut.account_service_response_count,
+            cut_nonce_draw_high_water: cut.nonce_draw_high_water,
+            cut_manifest_hash: cut.latest_manifest_hash,
+            tracked_record_count,
+            tracked_state_digest,
+            previous_checkpoint_hash: cut.checkpoint_hash,
+            installation_storage_commit_sequence,
+            installation_manifest_sequence: installation.manifest_sequence,
+            installation_nonce_reservation_start: self.guard.tbs().nonce_reservation_start,
+            installation_nonce_draw_high_water: self.guard.tbs().nonce_draw_high_water,
+        })?;
+        let checkpoint_key = cut.manifest_sequence.to_be_bytes();
+        let seal_context = StorageSealContext::new(
+            &self.master_key,
+            self.binding,
+            self.header.tbs().storage_key_generation,
+        )?;
+        let checkpoint_stored_key = StoredKey::new(checkpoint_key.to_vec())?;
+        let checkpoint_record = seal_context
+            .seal(
+                TableId::IntegrityCheckpoint,
+                1,
+                nonce,
+                &checkpoint_stored_key,
+                &checkpoint.encode()?,
+            )
+            .and_then(|record| record.encode())?;
+        Ok((checkpoint, checkpoint_key, checkpoint_record))
+    }
+
+    fn checkpoint_accounting(
+        &self,
+        cut: StateMetaTbs,
+        checkpoint_record: &[u8],
+        retired_charges: (u64, u64),
+    ) -> Result<(u64, u64), StorageError> {
+        let new_checkpoint_logical =
+            logical_record_charge(u64::BITS as usize / 8, checkpoint_record.len())?;
+        let new_checkpoint_backup = new_checkpoint_logical
+            .checked_add(8)
+            .ok_or(StorageError::Overflow)?;
+        let logical_database_bytes = cut
+            .logical_database_bytes
+            .checked_add(new_checkpoint_logical)
+            .and_then(|value| value.checked_sub(retired_charges.0))
+            .ok_or(StorageError::Overflow)?;
+        let backup_stream_bytes = cut
+            .backup_stream_bytes
+            .checked_add(new_checkpoint_backup)
+            .and_then(|value| value.checked_sub(retired_charges.1))
+            .ok_or(StorageError::Overflow)?;
+        if logical_database_bytes > self.limits.database_max_bytes
+            || backup_stream_bytes > self.limits.backup_max_bytes
+        {
+            return Err(StorageError::LimitExceeded);
+        }
+        Ok((logical_database_bytes, backup_stream_bytes))
+    }
+
+    fn seal_checkpoint_state_meta(
+        &self,
+        installation: StateMetaTbs,
+        checkpoint_manifest_sequence: u64,
+        checkpoint_hash: StorageDigest,
+        logical_database_bytes: u64,
+        backup_stream_bytes: u64,
+        nonce: [u8; 24],
+    ) -> Result<(StateMeta, Vec<u8>, StorageDigest), StorageError> {
+        let state_meta = StateMeta::authenticate(
+            StateMetaTbs {
+                storage_commit_sequence: installation
+                    .storage_commit_sequence
+                    .checked_add(1)
+                    .ok_or(StorageError::Overflow)?,
+                manifest_sequence: installation.manifest_sequence,
+                state_generation: installation.state_generation,
+                account_service_response_count: installation.account_service_response_count,
+                nonce_draw_high_water: self.guard.tbs().nonce_draw_high_water,
+                logical_database_bytes,
+                backup_stream_bytes,
+                checkpoint_manifest_sequence,
+                latest_manifest_hash: installation.latest_manifest_hash,
+                checkpoint_hash,
+                previous_rollback_guard_hash: self.guard.complete_hash()?,
+            },
+            self.header.complete_hash()?,
+            &self.integrity_keys,
+        )?;
+        let seal_context = StorageSealContext::new(
+            &self.master_key,
+            self.binding,
+            self.header.tbs().storage_key_generation,
+        )?;
+        let state_meta_key = StoredKey::new(STATE_META_KEY.to_vec())?;
+        let state_meta_record = seal_context
+            .seal(
+                TableId::StateMeta,
+                1,
+                nonce,
+                &state_meta_key,
+                &state_meta.encode()?,
+            )
+            .and_then(|record| record.encode())?;
+        let state_meta_record_id =
+            SealedRecord::decode(&state_meta_record).and_then(|record| record.record_id())?;
+        Ok((state_meta, state_meta_record, state_meta_record_id))
+    }
+
+    fn checkpoint_committed_reservation(
+        &self,
+        installation: StateMetaTbs,
+        storage_commit_sequence: u64,
+        state_meta_record_id: StorageDigest,
+    ) -> Result<NonceReservationState, StorageError> {
+        NonceReservationState::authenticate(
+            NonceReservationTbs {
+                database_instance_id: self.header.tbs().database_instance_id,
+                reservation_sequence: self.reservation.tbs().reservation_sequence,
+                phase: RollbackGuardPhase::Committed,
+                nonce_reservation_start: self.reservation.tbs().nonce_draw_high_water,
+                nonce_draw_high_water: self.reservation.tbs().nonce_draw_high_water,
+                storage_commit_sequence,
+                manifest_sequence: installation.manifest_sequence,
+                state_generation: installation.state_generation,
+                database_header_hash: self.header.complete_hash()?,
+                state_meta_record_id,
+                previous_guard_hash: self.guard.complete_hash()?,
+            },
+            &self.integrity_keys,
+        )
+    }
+
+    fn commit_prepared_checkpoint(
+        &mut self,
+        prepared: PreparedCheckpoint,
+        previous_checkpoint_key: [u8; 8],
+    ) -> Result<(), EngineCommitFailure> {
+        self.state_directory
+            .faults()
+            .check(
+                StorageFaultSite::CheckpointPrune,
+                StorageFaultBoundary::Before,
+            )
+            .map_err(rejected)?;
+        let committed_reservation_bytes =
+            prepared.committed_reservation.encode().map_err(rejected)?;
+        match self.store.commit_checkpoint(
+            &prepared.checkpoint_key,
+            &prepared.checkpoint_record,
+            &previous_checkpoint_key,
+            &prepared.state_meta_record,
+            &committed_reservation_bytes,
+        ) {
+            Ok(()) => {}
+            Err(RedbCommitFailure::Rejected(error)) => return Err(rejected(error)),
+            Err(RedbCommitFailure::Indeterminate) => {
+                return Err(EngineCommitFailure::Indeterminate);
+            }
+        }
+        self.state_directory
+            .faults()
+            .check(
+                StorageFaultSite::CheckpointPrune,
+                StorageFaultBoundary::After,
+            )
+            .map_err(indeterminate)?;
+        self.state_directory
+            .replace_guard(&prepared.committed_guard.encode().map_err(indeterminate)?)
+            .map_err(indeterminate)?;
+        self.state_meta = prepared.state_meta;
+        self.state_meta_record_id = prepared.state_meta_record_id;
+        self.reservation = prepared.committed_reservation;
+        self.guard = prepared.committed_guard;
+        let (retained_manifest_count, retained_manifest_bytes) = self
+            .store
+            .table_usage(TableId::IntegrityManifest, MAX_RETAINED_MANIFEST_BYTES)
+            .map_err(indeterminate)?;
+        self.retained_manifest_count = retained_manifest_count;
+        self.retained_manifest_bytes = retained_manifest_bytes;
+        self.verify_integrity_ledger().map_err(indeterminate)
+    }
+
+    fn checkpoint_retired_charges(
+        &self,
+        active_checkpoint_key: [u8; 8],
+        cut_manifest_sequence: u64,
+    ) -> Result<(u64, u64), StorageError> {
+        let mut logical = 0_u64;
+        let mut backup = 0_u64;
+        let cut_manifest_key = cut_manifest_sequence.to_be_bytes();
+        self.store.visit_table(
+            TableId::IntegrityManifest,
+            self.limits.database_max_bytes,
+            |key, value| {
+                if key <= cut_manifest_key.as_slice() {
+                    add_retired_charge(&mut logical, &mut backup, key, value)
+                } else {
+                    Ok(())
+                }
+            },
+        )?;
+        self.store.visit_table(
+            TableId::IntegrityCheckpoint,
+            self.limits.database_max_bytes,
+            |key, value| {
+                if key == active_checkpoint_key {
+                    Ok(())
+                } else {
+                    add_retired_charge(&mut logical, &mut backup, key, value)
+                }
+            },
+        )?;
+        Ok((logical, backup))
+    }
+
+    // agenc-review: focus owner=storage reviewed=2026-08-28 reason=linear immediate transaction transcript binds reservation sealing database commit and guard installation
+    fn commit_inner(
+        &mut self,
+        batch: &StorageMutationBatch,
+    ) -> Result<CommitReceipt, EngineCommitFailure> {
+        if self.retained_manifest_count >= MAX_RETAINED_MANIFESTS
+            || self.retained_manifest_bytes >= MAX_RETAINED_MANIFEST_BYTES
+        {
+            return Err(rejected(StorageError::LimitExceeded));
+        }
+        self.validate_batch_head(batch).map_err(rejected)?;
+        if let Some(site) = batch.fault_site() {
+            self.state_directory
+                .faults()
+                .check(site, StorageFaultBoundary::Before)
+                .map_err(rejected)?;
+        }
+        let _capacity = self
+            .state_directory
+            .admit_transaction(self.limits.fixed_reserve_bytes, self.limits.reserve_percent)
+            .map_err(rejected)?;
+        self.validate_existing_records(batch).map_err(rejected)?;
+        let reserved = self.reserve_nonce_block(batch.seal_count())?;
+        let reserved_guard = self.install_reserved_guard(&reserved)?;
+        self.reservation = reserved;
+        self.guard = reserved_guard;
+
+        let nonces = draw_nonces_with_faults(batch.seal_count(), &self.state_directory.faults())
+            .map_err(rejected)?;
+        self.state_directory
+            .faults()
+            .check(StorageFaultSite::Manifest, StorageFaultBoundary::Before)
+            .map_err(rejected)?;
+        let prepared = self.prepare_application(batch, &nonces).map_err(rejected)?;
+        let manifest_row_bytes = u64::try_from(
+            prepared
+                .manifest_key
+                .len()
+                .checked_add(prepared.manifest_record.len())
+                .ok_or(StorageError::Overflow)
+                .map_err(rejected)?,
+        )
+        .map_err(|_| rejected(StorageError::Overflow))?;
+        let resulting_manifest_count = self
+            .retained_manifest_count
+            .checked_add(1)
+            .ok_or(StorageError::Overflow)
+            .map_err(rejected)?;
+        let resulting_manifest_bytes = self
+            .retained_manifest_bytes
+            .checked_add(manifest_row_bytes)
+            .ok_or(StorageError::Overflow)
+            .map_err(rejected)?;
+        if resulting_manifest_count > MAX_RETAINED_MANIFESTS
+            || resulting_manifest_bytes > MAX_RETAINED_MANIFEST_BYTES
+        {
+            return Err(rejected(StorageError::LimitExceeded));
+        }
+        let committed_reservation = self.committed_reservation(&prepared).map_err(rejected)?;
+        let committed_guard =
+            guard_for_reservation(&self.header, &committed_reservation, &self.integrity_keys)
+                .map_err(rejected)?;
+        let mut writes = prepared
+            .records
+            .iter()
+            .map(|record| RedbWrite {
+                table: record.table,
+                key: record.key.as_bytes(),
+                value: record.value.as_deref(),
+            })
+            .collect::<Vec<_>>();
+        writes.push(RedbWrite {
+            table: TableId::IntegrityManifest,
+            key: &prepared.manifest_key,
+            value: Some(&prepared.manifest_record),
+        });
+        writes.push(RedbWrite {
+            table: TableId::StateMeta,
+            key: STATE_META_KEY,
+            value: Some(&prepared.state_meta_record),
+        });
+        let committed_reservation_bytes = committed_reservation.encode().map_err(rejected)?;
+        match self
+            .store
+            .commit_records(&writes, &committed_reservation_bytes)
+        {
+            Ok(()) => {}
+            Err(RedbCommitFailure::Rejected(error)) => {
+                return Err(EngineCommitFailure::Rejected(error));
+            }
+            Err(RedbCommitFailure::Indeterminate) => {
+                return Err(EngineCommitFailure::Indeterminate);
+            }
+        }
+        let committed_guard_bytes = committed_guard.encode().map_err(indeterminate)?;
+        self.state_directory
+            .replace_guard(&committed_guard_bytes)
+            .map_err(indeterminate)?;
+        let rollback_guard_hash = committed_guard.complete_hash().map_err(indeterminate)?;
+        self.state_meta = prepared.state_meta;
+        self.state_meta_record_id = prepared.state_meta_record_id;
+        self.reservation = committed_reservation;
+        self.guard = committed_guard;
+        self.retained_manifest_count = resulting_manifest_count;
+        self.retained_manifest_bytes = resulting_manifest_bytes;
+        self.state_directory
+            .faults()
+            .check(StorageFaultSite::Manifest, StorageFaultBoundary::After)
+            .map_err(indeterminate)?;
+        if let Some(site) = batch.fault_site() {
+            self.state_directory
+                .faults()
+                .check(site, StorageFaultBoundary::After)
+                .map_err(indeterminate)?;
+        }
+        Ok(CommitReceipt {
+            transaction_id: batch.transaction_id(),
+            storage_commit_sequence: self.state_meta.tbs().storage_commit_sequence,
+            state_generation: self.state_meta.tbs().state_generation,
+            rollback_guard_hash,
+        })
+    }
+
+    fn validate_batch_head(&self, batch: &StorageMutationBatch) -> Result<(), StorageError> {
+        let state = self.state_meta.tbs();
+        if batch.expected_storage_commit_sequence() != state.storage_commit_sequence
+            || batch.expected_state_generation() != state.state_generation
+            || batch.expected_account_service_response_count()
+                != state.account_service_response_count
+            || batch.expected_logical_database_bytes() != state.logical_database_bytes
+            || batch.expected_backup_stream_bytes() != state.backup_stream_bytes
+            || batch.resulting_logical_database_bytes() > self.limits.database_max_bytes
+            || batch.resulting_backup_stream_bytes() > self.limits.backup_max_bytes
+        {
+            return Err(StorageError::StaleState);
+        }
+        Ok(())
+    }
+
+    fn validate_existing_records(&self, batch: &StorageMutationBatch) -> Result<(), StorageError> {
+        for mutation in batch.mutations() {
+            let current = self
+                .store
+                .read_record(mutation.table(), mutation.key().as_bytes())?;
+            match (mutation.before(), current) {
+                (None, None) => {}
+                (Some(expected), Some(encoded)) => verify_existing(expected, &encoded)?,
+                _ => return Err(StorageError::StaleState),
+            }
+        }
+        let next_manifest = self
+            .state_meta
+            .tbs()
+            .manifest_sequence
+            .checked_add(1)
+            .ok_or(StorageError::Overflow)?;
+        if self
+            .store
+            .read_record(TableId::IntegrityManifest, &next_manifest.to_be_bytes())?
+            .is_some()
+        {
+            return Err(StorageError::StaleState);
+        }
+        Ok(())
+    }
+
+    fn reserve_nonce_block(
+        &self,
+        seal_count: u32,
+    ) -> Result<NonceReservationState, EngineCommitFailure> {
+        let previous_guard_hash = self.guard.complete_hash().map_err(rejected)?;
+        let start = self.reservation.tbs().nonce_draw_high_water;
+        let end = start
+            .checked_add(u64::from(seal_count))
+            .ok_or_else(|| rejected(StorageError::Overflow))?;
+        let tbs = NonceReservationTbs {
+            database_instance_id: self.header.tbs().database_instance_id,
+            reservation_sequence: self
+                .reservation
+                .tbs()
+                .reservation_sequence
+                .checked_add(1)
+                .ok_or_else(|| rejected(StorageError::Overflow))?,
+            phase: RollbackGuardPhase::NonceReserved,
+            nonce_reservation_start: start,
+            nonce_draw_high_water: end,
+            storage_commit_sequence: self.state_meta.tbs().storage_commit_sequence,
+            manifest_sequence: self.state_meta.tbs().manifest_sequence,
+            state_generation: self.state_meta.tbs().state_generation,
+            database_header_hash: self.header.complete_hash().map_err(rejected)?,
+            state_meta_record_id: self.state_meta_record_id,
+            previous_guard_hash,
+        };
+        let reservation =
+            NonceReservationState::authenticate(tbs, &self.integrity_keys).map_err(rejected)?;
+        let bytes = reservation.encode().map_err(rejected)?;
+        match self.store.write_meta(RESERVATION_META_KEY, &bytes) {
+            Ok(()) => Ok(reservation),
+            Err(RedbCommitFailure::Rejected(error)) => Err(EngineCommitFailure::Rejected(error)),
+            Err(RedbCommitFailure::Indeterminate) => Err(EngineCommitFailure::Indeterminate),
+        }
+    }
+
+    fn install_reserved_guard(
+        &self,
+        reservation: &NonceReservationState,
+    ) -> Result<RollbackGuard, EngineCommitFailure> {
+        let guard = guard_for_reservation(&self.header, reservation, &self.integrity_keys)
+            .map_err(rejected)?;
+        self.state_directory
+            .replace_guard(&guard.encode().map_err(rejected)?)
+            .map_err(indeterminate)?;
+        let verified = RollbackGuard::decode_and_verify(
+            &self
+                .state_directory
+                .read_guard(ROLLBACK_GUARD_BYTES)
+                .map_err(indeterminate)?,
+            &self.integrity_keys,
+        )
+        .map_err(indeterminate)?;
+        verify_guard_pair(&self.header, reservation, &verified).map_err(indeterminate)?;
+        Ok(verified)
+    }
+
+    fn prepare_application(
+        &self,
+        batch: &StorageMutationBatch,
+        nonces: &[[u8; 24]],
+    ) -> Result<PreparedApplication, StorageError> {
+        if nonces.len()
+            != usize::try_from(batch.seal_count()).map_err(|_| StorageError::Overflow)?
+        {
+            return Err(StorageError::InvalidEncoding);
+        }
+        let mut nonce_cursor = 0_usize;
+        let seal_context = StorageSealContext::new(
+            &self.master_key,
+            self.binding,
+            self.header.tbs().storage_key_generation,
+        )?;
+        let mut records = Vec::new();
+        records
+            .try_reserve_exact(batch.mutations().len())
+            .map_err(|_| StorageError::AllocationFailed)?;
+        let mut integrity_mutations = Vec::new();
+        integrity_mutations
+            .try_reserve_exact(batch.mutations().len())
+            .map_err(|_| StorageError::AllocationFailed)?;
+        for mutation in batch.mutations() {
+            let before = mutation
+                .before()
+                .map_or(IntegrityRecordVersion::Absent, |record| {
+                    IntegrityRecordVersion::Present {
+                        record_schema: record.record_schema(),
+                        sealed_record_id: record.sealed_record_id(),
+                    }
+                });
+            let value = if let Some(plaintext) = mutation.plaintext() {
+                crate::validate_record_plaintext(
+                    mutation.table(),
+                    mutation.key(),
+                    mutation.record_schema(),
+                    plaintext,
+                )?;
+                let nonce = *nonces
+                    .get(nonce_cursor)
+                    .ok_or(StorageError::InvalidEncoding)?;
+                nonce_cursor = nonce_cursor.checked_add(1).ok_or(StorageError::Overflow)?;
+                Some(
+                    seal_context
+                        .seal(
+                            mutation.table(),
+                            mutation.record_schema(),
+                            nonce,
+                            mutation.key(),
+                            plaintext,
+                        )?
+                        .encode()?,
+                )
+            } else {
+                None
+            };
+            if mutation.table().is_integrity_tracked() {
+                let after = match &value {
+                    Some(encoded) => IntegrityRecordVersion::Present {
+                        record_schema: mutation.record_schema(),
+                        sealed_record_id: SealedRecord::decode(encoded)?.record_id()?,
+                    },
+                    None => IntegrityRecordVersion::Absent,
+                };
+                integrity_mutations.push(IntegrityRecordMutation::new(
+                    mutation.table(),
+                    StoredKey::new(mutation.key().as_bytes().to_vec())?,
+                    before,
+                    after,
+                )?);
+            }
+            records.push(PreparedRecord {
+                table: mutation.table(),
+                key: StoredKey::new(mutation.key().as_bytes().to_vec())?,
+                value,
+            });
+        }
+        let manifest_sequence = self
+            .state_meta
+            .tbs()
+            .manifest_sequence
+            .checked_add(1)
+            .ok_or(StorageError::Overflow)?;
+        let storage_commit_sequence = self
+            .state_meta
+            .tbs()
+            .storage_commit_sequence
+            .checked_add(1)
+            .ok_or(StorageError::Overflow)?;
+        let manifest = IntegrityManifest::new(IntegrityManifestTbs::new(
+            self.header.tbs().database_instance_id,
+            manifest_sequence,
+            storage_commit_sequence,
+            self.state_meta.tbs().state_generation,
+            batch.resulting_state_generation(),
+            self.state_meta.tbs().account_service_response_count,
+            batch.resulting_account_service_response_count(),
+            self.state_meta.tbs().nonce_draw_high_water,
+            self.guard.tbs().nonce_reservation_start,
+            self.guard.tbs().nonce_draw_high_water,
+            batch.seal_count(),
+            self.state_meta.tbs().latest_manifest_hash,
+            integrity_mutations,
+        )?)?;
+        let manifest_key = manifest_sequence.to_be_bytes();
+        let manifest_nonce = *nonces
+            .get(nonce_cursor)
+            .ok_or(StorageError::InvalidEncoding)?;
+        nonce_cursor = nonce_cursor.checked_add(1).ok_or(StorageError::Overflow)?;
+        let manifest_record = seal_context
+            .seal(
+                TableId::IntegrityManifest,
+                1,
+                manifest_nonce,
+                &StoredKey::new(manifest_key.to_vec())?,
+                &manifest.encode()?,
+            )?
+            .encode()?;
+        let state_meta = StateMeta::authenticate(
+            StateMetaTbs {
+                storage_commit_sequence,
+                manifest_sequence,
+                state_generation: batch.resulting_state_generation(),
+                account_service_response_count: batch.resulting_account_service_response_count(),
+                nonce_draw_high_water: self.guard.tbs().nonce_draw_high_water,
+                logical_database_bytes: batch.resulting_logical_database_bytes(),
+                backup_stream_bytes: batch.resulting_backup_stream_bytes(),
+                checkpoint_manifest_sequence: self.state_meta.tbs().checkpoint_manifest_sequence,
+                latest_manifest_hash: manifest.manifest_hash(),
+                checkpoint_hash: self.state_meta.tbs().checkpoint_hash,
+                previous_rollback_guard_hash: self.guard.complete_hash()?,
+            },
+            self.header.complete_hash()?,
+            &self.integrity_keys,
+        )?;
+        let state_meta_nonce = *nonces
+            .get(nonce_cursor)
+            .ok_or(StorageError::InvalidEncoding)?;
+        nonce_cursor = nonce_cursor.checked_add(1).ok_or(StorageError::Overflow)?;
+        if nonce_cursor != nonces.len() {
+            return Err(StorageError::InvalidEncoding);
+        }
+        let state_meta_record = seal_context
+            .seal(
+                TableId::StateMeta,
+                1,
+                state_meta_nonce,
+                &StoredKey::new(STATE_META_KEY.to_vec())?,
+                &state_meta.encode()?,
+            )?
+            .encode()?;
+        let state_meta_record_id = SealedRecord::decode(&state_meta_record)?.record_id()?;
+        Ok(PreparedApplication {
+            records,
+            manifest_key,
+            manifest_record,
+            state_meta_record,
+            state_meta,
+            state_meta_record_id,
+        })
+    }
+
+    fn committed_reservation(
+        &self,
+        prepared: &PreparedApplication,
+    ) -> Result<NonceReservationState, StorageError> {
+        NonceReservationState::authenticate(
+            NonceReservationTbs {
+                database_instance_id: self.header.tbs().database_instance_id,
+                reservation_sequence: self.reservation.tbs().reservation_sequence,
+                phase: RollbackGuardPhase::Committed,
+                nonce_reservation_start: self.reservation.tbs().nonce_draw_high_water,
+                nonce_draw_high_water: self.reservation.tbs().nonce_draw_high_water,
+                storage_commit_sequence: prepared.state_meta.tbs().storage_commit_sequence,
+                manifest_sequence: prepared.state_meta.tbs().manifest_sequence,
+                state_generation: prepared.state_meta.tbs().state_generation,
+                database_header_hash: self.header.complete_hash()?,
+                state_meta_record_id: prepared.state_meta_record_id,
+                previous_guard_hash: self.guard.complete_hash()?,
+            },
+            &self.integrity_keys,
+        )
+    }
+
+    // agenc-review: focus owner=storage reviewed=2026-08-27 reason=one canonical table walk shares global charge and singleton accumulators
+    pub(crate) fn startup_scan(&self) -> Result<FilesystemCapacity, StorageError> {
+        self.store.validate_inventory()?;
+        self.store.validate_meta_membership()?;
+        self.verify_integrity_ledger()?;
+        let (reference_file, reference_directory, reference_name) =
+            self.state_directory.create_recovery_scratch()?;
+        let reference_scratch =
+            ReferenceScratch::create(reference_file, reference_directory, reference_name)?;
+        let mut reference_writer = reference_scratch.begin()?;
+        let mut logical_bytes =
+            logical_meta_charge(HEADER_META_KEY.len(), crate::DATABASE_HEADER_BYTES)?
+                .checked_add(logical_meta_charge(
+                    RESERVATION_META_KEY.len(),
+                    crate::NONCE_RESERVATION_BYTES,
+                )?)
+                .ok_or(StorageError::Overflow)?;
+        let mut backup_bytes = BACKUP_FIXED_STREAM_BYTES;
+        let mut key_check_count = 0_u64;
+        let mut state_meta_count = 0_u64;
+        let mut login_key_state_count = 0_u64;
+        let mut construction_count = 0_u64;
+        let login_key_state = self.read_login_index_key_state()?;
+        login_key_state.validate_configured_keys(
+            self.header.tbs().network_id,
+            &self.login_index_key,
+            self.previous_login_index_key.as_ref(),
+        )?;
+        let current_login_generation = login_key_state.current_generation();
+        let previous_login_generation = login_key_state.previous();
+        let mut previous_login_entries = 0_u64;
+        for number in 0_u16..=26 {
+            let table = TableId::from_u16(number)?;
+            self.store
+                .visit_table(table, self.limits.database_max_bytes, |key, encoded| {
+                    let stored_key = StoredKey::new(key.to_vec())?;
+                    let sealed = SealedRecord::decode(encoded)?;
+                    if sealed.table() != table
+                        || sealed.key_generation() != self.header.tbs().storage_key_generation
+                    {
+                        return Err(StorageError::AuthenticationFailed);
+                    }
+                    let plaintext = sealed.open(
+                        &self.master_key,
+                        self.binding,
+                        table,
+                        sealed.record_schema(),
+                        self.header.tbs().storage_key_generation,
+                        &stored_key,
+                    )?;
+                    crate::validate_record_plaintext(
+                        table,
+                        &stored_key,
+                        sealed.record_schema(),
+                        plaintext.expose_for_storage_codec(),
+                    )?;
+                    if table.is_integrity_tracked() {
+                        let references = record_references(
+                            table,
+                            &stored_key,
+                            plaintext.expose_for_storage_codec(),
+                        )?;
+                        reference_writer.insert(table, &stored_key, &references)?;
+                    }
+                    logical_bytes = logical_bytes
+                        .checked_add(logical_record_charge(key.len(), encoded.len())?)
+                        .ok_or(StorageError::Overflow)?;
+                    backup_bytes = backup_bytes
+                        .checked_add(
+                            logical_record_charge(key.len(), encoded.len())?
+                                .checked_add(8)
+                                .ok_or(StorageError::Overflow)?,
+                        )
+                        .ok_or(StorageError::Overflow)?;
+                    match table {
+                        TableId::KeyCheck => {
+                            key_check_count = key_check_count
+                                .checked_add(1)
+                                .ok_or(StorageError::Overflow)?;
+                            if key != KEY_CHECK_KEY {
+                                return Err(StorageError::InvalidEncoding);
+                            }
+                        }
+                        TableId::StateMeta => {
+                            state_meta_count = state_meta_count
+                                .checked_add(1)
+                                .ok_or(StorageError::Overflow)?;
+                            if key != STATE_META_KEY
+                                || sealed.record_id()? != self.state_meta_record_id
+                            {
+                                return Err(StorageError::StaleState);
+                            }
+                        }
+                        TableId::IntegrityManifest => {
+                            let manifest =
+                                IntegrityManifest::decode(plaintext.expose_for_storage_codec())?;
+                            if key != manifest.tbs().manifest_sequence.to_be_bytes()
+                                || manifest.tbs().database_instance_id
+                                    != self.header.tbs().database_instance_id
+                            {
+                                return Err(StorageError::StaleState);
+                            }
+                        }
+                        TableId::IntegrityCheckpoint => {
+                            let checkpoint =
+                                IntegrityCheckpoint::decode(plaintext.expose_for_storage_codec())?;
+                            if key != checkpoint.tbs().cut_manifest_sequence.to_be_bytes()
+                                || checkpoint.tbs().database_instance_id
+                                    != self.header.tbs().database_instance_id
+                            {
+                                return Err(StorageError::StaleState);
+                            }
+                        }
+                        TableId::LoginIndex => {
+                            let login_key = LoginIndexStoredKey::decode(key)?;
+                            if login_key.generation() != current_login_generation {
+                                if previous_login_generation.is_some_and(|(generation, _)| {
+                                    generation == login_key.generation()
+                                }) {
+                                    previous_login_entries = previous_login_entries
+                                        .checked_add(1)
+                                        .ok_or(StorageError::Overflow)?;
+                                } else {
+                                    return Err(StorageError::StaleState);
+                                }
+                            }
+                            let _value = crate::LoginIndexValue::decode(
+                                plaintext.expose_for_storage_codec(),
+                                &login_key,
+                            )?;
+                        }
+                        TableId::LoginIndexKeyState => {
+                            login_key_state_count = login_key_state_count
+                                .checked_add(1)
+                                .ok_or(StorageError::Overflow)?;
+                            if key != crate::LOGIN_INDEX_KEY_STATE_KEY {
+                                return Err(StorageError::InvalidEncoding);
+                            }
+                            let _key_state =
+                                LoginIndexKeyState::decode(plaintext.expose_for_storage_codec())?;
+                        }
+                        TableId::StorageConstruction => {
+                            construction_count = construction_count
+                                .checked_add(1)
+                                .ok_or(StorageError::Overflow)?;
+                            let _marker =
+                                StorageConstruction::decode(plaintext.expose_for_storage_codec())?;
+                        }
+                        TableId::StorageOperation => {
+                            let operation = StorageOperationCompletion::decode(
+                                plaintext.expose_for_storage_codec(),
+                            )?;
+                            if key != operation.storage_operation_id.as_bytes() {
+                                return Err(StorageError::StaleState);
+                            }
+                        }
+                        _ => {}
+                    }
+                    Ok(())
+                })?;
+        }
+        reference_writer.commit()?;
+        reference_scratch.validate()?;
+        if key_check_count != 1
+            || state_meta_count != 1
+            || login_key_state_count != 1
+            || construction_count != 0
+            || previous_login_generation.map_or(previous_login_entries != 0, |(_, expected)| {
+                previous_login_entries != expected
+            })
+            || logical_bytes != self.state_meta.tbs().logical_database_bytes
+            || backup_bytes != self.state_meta.tbs().backup_stream_bytes
+        {
+            return Err(StorageError::StaleState);
+        }
+        self.state_directory
+            .capacity(self.limits.fixed_reserve_bytes, self.limits.reserve_percent)
+    }
+
+    // agenc-review: focus owner=storage reviewed=2026-08-28 reason=canonical construction scan validates every target table with shared exact charge and singleton accumulators
+    pub(crate) fn construction_scan(&self) -> Result<StorageConstruction, StorageError> {
+        self.store.validate_inventory()?;
+        self.store.validate_meta_membership()?;
+        self.verify_integrity_ledger()?;
+        let mut logical_bytes =
+            logical_meta_charge(HEADER_META_KEY.len(), crate::DATABASE_HEADER_BYTES)?
+                .checked_add(logical_meta_charge(
+                    RESERVATION_META_KEY.len(),
+                    crate::NONCE_RESERVATION_BYTES,
+                )?)
+                .ok_or(StorageError::Overflow)?;
+        let mut backup_bytes = BACKUP_FIXED_STREAM_BYTES;
+        let mut key_check_count = 0_u8;
+        let mut state_meta_count = 0_u8;
+        let mut login_key_state_count = 0_u8;
+        let mut marker = None;
+        for number in 0_u16..=26 {
+            let table = TableId::from_u16(number)?;
+            self.store
+                .visit_table(table, self.limits.database_max_bytes, |key, encoded| {
+                    let stored_key = StoredKey::new(key.to_vec())?;
+                    let sealed = crate::validate_sealed_record(table, &stored_key, encoded)?;
+                    if sealed.key_generation() != self.header.tbs().storage_key_generation {
+                        return Err(StorageError::AuthenticationFailed);
+                    }
+                    let plaintext = sealed.open(
+                        &self.master_key,
+                        self.binding,
+                        table,
+                        sealed.record_schema(),
+                        self.header.tbs().storage_key_generation,
+                        &stored_key,
+                    )?;
+                    crate::validate_record_plaintext(
+                        table,
+                        &stored_key,
+                        sealed.record_schema(),
+                        plaintext.expose_for_storage_codec(),
+                    )?;
+                    let charge = logical_record_charge(key.len(), encoded.len())?;
+                    logical_bytes = logical_bytes
+                        .checked_add(charge)
+                        .ok_or(StorageError::Overflow)?;
+                    backup_bytes = backup_bytes
+                        .checked_add(charge.checked_add(8).ok_or(StorageError::Overflow)?)
+                        .ok_or(StorageError::Overflow)?;
+                    match table {
+                        TableId::KeyCheck => {
+                            key_check_count = key_check_count
+                                .checked_add(1)
+                                .ok_or(StorageError::Overflow)?;
+                            if key != KEY_CHECK_KEY {
+                                return Err(StorageError::InvalidEncoding);
+                            }
+                        }
+                        TableId::StateMeta => {
+                            state_meta_count = state_meta_count
+                                .checked_add(1)
+                                .ok_or(StorageError::Overflow)?;
+                            if key != STATE_META_KEY
+                                || sealed.record_id()? != self.state_meta_record_id
+                            {
+                                return Err(StorageError::StaleState);
+                            }
+                        }
+                        TableId::LoginIndexKeyState => {
+                            login_key_state_count = login_key_state_count
+                                .checked_add(1)
+                                .ok_or(StorageError::Overflow)?;
+                            if key != crate::LOGIN_INDEX_KEY_STATE_KEY {
+                                return Err(StorageError::InvalidEncoding);
+                            }
+                            LoginIndexKeyState::decode(plaintext.expose_for_storage_codec())?
+                                .validate_configured_keys(
+                                    self.header.tbs().network_id,
+                                    &self.login_index_key,
+                                    self.previous_login_index_key.as_ref(),
+                                )?;
+                        }
+                        TableId::StorageConstruction => {
+                            if key != crate::STORAGE_CONSTRUCTION_KEY || marker.is_some() {
+                                return Err(StorageError::StaleState);
+                            }
+                            marker = Some(StorageConstruction::decode(
+                                plaintext.expose_for_storage_codec(),
+                            )?);
+                        }
+                        TableId::StorageOperation => {
+                            let operation = StorageOperationCompletion::decode(
+                                plaintext.expose_for_storage_codec(),
+                            )?;
+                            if key != operation.storage_operation_id.as_bytes() {
+                                return Err(StorageError::StaleState);
+                            }
+                        }
+                        _ => {}
+                    }
+                    Ok(())
+                })?;
+        }
+        if key_check_count != 1
+            || state_meta_count != 1
+            || login_key_state_count > 1
+            || logical_bytes != self.state_meta.tbs().logical_database_bytes
+            || backup_bytes != self.state_meta.tbs().backup_stream_bytes
+        {
+            return Err(StorageError::StaleState);
+        }
+        let marker = marker.ok_or(StorageError::StaleState)?;
+        if marker.identity.target_database_header_hash != self.header.complete_hash()?
+            || marker.identity.target_database_instance_id != self.header.tbs().database_instance_id
+            || marker.identity.target_schema_generation != self.header.tbs().schema_generation
+        {
+            return Err(StorageError::ResumeMismatch);
+        }
+        Ok(marker)
+    }
+
+    fn read_login_index_key_state(&self) -> Result<LoginIndexKeyState, StorageError> {
+        let key = StoredKey::new(crate::LOGIN_INDEX_KEY_STATE_KEY.to_vec())?;
+        let encoded = self
+            .store
+            .read_record(TableId::LoginIndexKeyState, key.as_bytes())?
+            .ok_or(StorageError::InvalidEncoding)?;
+        let sealed = SealedRecord::decode(&encoded)?;
+        let plaintext = sealed.open(
+            &self.master_key,
+            self.binding,
+            TableId::LoginIndexKeyState,
+            1,
+            self.header.tbs().storage_key_generation,
+            &key,
+        )?;
+        LoginIndexKeyState::decode(plaintext.expose_for_storage_codec())
+    }
+
+    // agenc-review: focus owner=storage reviewed=2026-08-27 reason=checkpoint-to-head replay keeps chain accumulators in one auditable scope
+    fn verify_integrity_ledger(&self) -> Result<(), StorageError> {
+        let state = self.state_meta.tbs();
+        let checkpoint_key =
+            StoredKey::new(state.checkpoint_manifest_sequence.to_be_bytes().to_vec())?;
+        let checkpoint_encoded = self
+            .store
+            .read_record(TableId::IntegrityCheckpoint, checkpoint_key.as_bytes())?
+            .ok_or(StorageError::InvalidEncoding)?;
+        let checkpoint_sealed = SealedRecord::decode(&checkpoint_encoded)?;
+        let checkpoint_plaintext = checkpoint_sealed.open(
+            &self.master_key,
+            self.binding,
+            TableId::IntegrityCheckpoint,
+            1,
+            self.header.tbs().storage_key_generation,
+            &checkpoint_key,
+        )?;
+        let checkpoint =
+            IntegrityCheckpoint::decode(checkpoint_plaintext.expose_for_storage_codec())?;
+        if checkpoint.checkpoint_hash() != state.checkpoint_hash
+            || checkpoint.tbs().cut_manifest_sequence != state.checkpoint_manifest_sequence
+            || checkpoint.tbs().cut_manifest_sequence > state.manifest_sequence
+            || checkpoint.tbs().installation_manifest_sequence > state.manifest_sequence
+        {
+            return Err(StorageError::StaleState);
+        }
+        let zero = StorageDigest::from_bytes([0_u8; 32]);
+        let genesis = checkpoint.tbs().cut_manifest_sequence == 0
+            && checkpoint.tbs().installation_manifest_sequence == 0
+            && checkpoint.tbs().cut_storage_commit_sequence == 0
+            && checkpoint.tbs().installation_storage_commit_sequence == 0;
+        if genesis {
+            let expected_high_water = checkpoint
+                .tbs()
+                .tracked_record_count
+                .checked_add(3)
+                .ok_or(StorageError::Overflow)?;
+            if checkpoint.tbs().previous_checkpoint_hash != zero
+                || checkpoint.tbs().cut_manifest_hash != zero
+                || checkpoint.tbs().cut_nonce_draw_high_water != expected_high_water
+                || checkpoint.tbs().installation_nonce_draw_high_water != expected_high_water
+            {
+                return Err(StorageError::StaleState);
+            }
+        } else if checkpoint.tbs().cut_manifest_sequence == 0
+            || checkpoint.tbs().installation_storage_commit_sequence == 0
+            || checkpoint.tbs().previous_checkpoint_hash == zero
+        {
+            return Err(StorageError::StaleState);
+        }
+        let (scratch_file, scratch_directory, scratch_name) =
+            self.state_directory.create_recovery_scratch()?;
+        let scratch = RecoveryScratch::create(scratch_file, scratch_directory, scratch_name)?;
+        let mut scratch_writer = scratch.begin_current()?;
+        for number in 0_u16..=26 {
+            let table = TableId::from_u16(number)?;
+            if !table.is_integrity_tracked() {
+                continue;
+            }
+            self.store
+                .visit_table(table, self.limits.database_max_bytes, |key, encoded| {
+                    let stored_key = StoredKey::new(key.to_vec())?;
+                    let sealed = SealedRecord::decode(encoded)?;
+                    scratch_writer.insert_current(
+                        table,
+                        &stored_key,
+                        sealed.record_schema(),
+                        sealed.record_id()?,
+                    )
+                })?;
+        }
+        scratch_writer.commit()?;
+        let mut checkpoint_count = 0_u64;
+        self.store.visit_table(
+            TableId::IntegrityCheckpoint,
+            self.limits.database_max_bytes,
+            |_key, _value| {
+                checkpoint_count = checkpoint_count
+                    .checked_add(1)
+                    .ok_or(StorageError::Overflow)?;
+                if checkpoint_count > 2 {
+                    return Err(StorageError::LimitExceeded);
+                }
+                Ok(())
+            },
+        )?;
+        if checkpoint_count == 0 {
+            return Err(StorageError::InvalidEncoding);
+        }
+        let expected_manifest_count = state
+            .manifest_sequence
+            .checked_sub(state.checkpoint_manifest_sequence)
+            .ok_or(StorageError::StaleState)?;
+        if expected_manifest_count > MAX_RETAINED_MANIFESTS {
+            return Err(StorageError::LimitExceeded);
+        }
+        let mut actual_manifest_count = 0_u64;
+        let manifest_bytes = self.store.visit_table(
+            TableId::IntegrityManifest,
+            MAX_RETAINED_MANIFEST_BYTES,
+            |_key, _value| {
+                actual_manifest_count = actual_manifest_count
+                    .checked_add(1)
+                    .ok_or(StorageError::Overflow)?;
+                Ok(())
+            },
+        )?;
+        if actual_manifest_count != expected_manifest_count
+            || manifest_bytes > MAX_RETAINED_MANIFEST_BYTES
+        {
+            return Err(StorageError::StaleState);
+        }
+        let mut previous_hash = checkpoint.tbs().cut_manifest_hash;
+        let mut last_state_generation = checkpoint.tbs().cut_state_generation;
+        let mut last_response_count = checkpoint.tbs().cut_account_service_response_count;
+        let mut last_storage_commit = checkpoint.tbs().cut_storage_commit_sequence;
+        let mut last_nonce_high_water = checkpoint.tbs().cut_nonce_draw_high_water;
+        let mut checkpoint_installation_applied = genesis;
+        if !genesis
+            && checkpoint.tbs().installation_manifest_sequence
+                == checkpoint.tbs().cut_manifest_sequence
+        {
+            apply_checkpoint_installation(
+                checkpoint.tbs(),
+                &mut last_storage_commit,
+                &mut last_nonce_high_water,
+            )?;
+            checkpoint_installation_applied = true;
+        }
+        let first_manifest = if expected_manifest_count == 0 {
+            None
+        } else {
+            Some(
+                state
+                    .checkpoint_manifest_sequence
+                    .checked_add(1)
+                    .ok_or(StorageError::Overflow)?,
+            )
+        };
+        if let Some(first_manifest) = first_manifest {
+            for sequence in first_manifest..=state.manifest_sequence {
+                let manifest = self.read_manifest(sequence)?;
+                let fields = manifest.tbs();
+                if fields.database_instance_id != self.header.tbs().database_instance_id
+                    || fields.manifest_sequence != sequence
+                    || fields.previous_manifest_hash != previous_hash
+                    || fields.previous_state_generation != last_state_generation
+                    || fields.previous_account_service_response_count != last_response_count
+                    || fields.storage_commit_sequence
+                        != last_storage_commit
+                            .checked_add(1)
+                            .ok_or(StorageError::Overflow)?
+                    || fields.previous_nonce_draw_high_water != last_nonce_high_water
+                    || fields.resulting_state_generation < fields.previous_state_generation
+                    || fields
+                        .resulting_state_generation
+                        .checked_sub(fields.previous_state_generation)
+                        .ok_or(StorageError::Overflow)?
+                        > u64::try_from(crate::MAX_TRANSACTION_PLANS)
+                            .map_err(|_| StorageError::Overflow)?
+                    || fields.resulting_account_service_response_count
+                        < fields.previous_account_service_response_count
+                {
+                    return Err(StorageError::StaleState);
+                }
+                previous_hash = manifest.manifest_hash();
+                last_state_generation = fields.resulting_state_generation;
+                last_response_count = fields.resulting_account_service_response_count;
+                last_storage_commit = fields.storage_commit_sequence;
+                last_nonce_high_water = fields.resulting_nonce_draw_high_water;
+                if sequence == checkpoint.tbs().installation_manifest_sequence {
+                    if checkpoint_installation_applied {
+                        return Err(StorageError::StaleState);
+                    }
+                    apply_checkpoint_installation(
+                        checkpoint.tbs(),
+                        &mut last_storage_commit,
+                        &mut last_nonce_high_water,
+                    )?;
+                    checkpoint_installation_applied = true;
+                }
+            }
+            for sequence in (first_manifest..=state.manifest_sequence).rev() {
+                let manifest = self.read_manifest(sequence)?;
+                scratch.apply_reverse(manifest.tbs().mutations())?;
+            }
+        }
+        if previous_hash != state.latest_manifest_hash
+            || last_state_generation != state.state_generation
+            || last_response_count != state.account_service_response_count
+            || last_storage_commit != state.storage_commit_sequence
+            || last_nonce_high_water != state.nonce_draw_high_water
+            || !checkpoint_installation_applied
+        {
+            return Err(StorageError::StaleState);
+        }
+        let (tracked_record_count, tracked_state_digest) = scratch.digest()?;
+        if tracked_record_count != checkpoint.tbs().tracked_record_count
+            || tracked_state_digest != checkpoint.tbs().tracked_state_digest
+        {
+            return Err(StorageError::StaleState);
+        }
+        Ok(())
+    }
+
+    fn read_manifest(&self, sequence: u64) -> Result<IntegrityManifest, StorageError> {
+        let key = StoredKey::new(sequence.to_be_bytes().to_vec())?;
+        let encoded = self
+            .store
+            .read_record(TableId::IntegrityManifest, key.as_bytes())?
+            .ok_or(StorageError::InvalidEncoding)?;
+        let sealed = SealedRecord::decode(&encoded)?;
+        let plaintext = sealed.open(
+            &self.master_key,
+            self.binding,
+            TableId::IntegrityManifest,
+            1,
+            self.header.tbs().storage_key_generation,
+            &key,
+        )?;
+        IntegrityManifest::decode(plaintext.expose_for_storage_codec())
+    }
+}
+
+fn record_references(
+    table: TableId,
+    stored_key: &StoredKey,
+    plaintext: &[u8],
+) -> Result<Vec<RecordReference>, StorageError> {
+    if table == TableId::LoginIndex {
+        let login_key = LoginIndexStoredKey::decode(stored_key.as_bytes())?;
+        let value = crate::LoginIndexValue::decode(plaintext, &login_key)?;
+        return match value.kind() {
+            LoginIndexValueKind::Live { account_id, .. } => Ok(vec![
+                RecordReference::new(
+                    TableId::Account,
+                    StoredKey::new(account_id.to_text().as_bytes().to_vec())?,
+                )?,
+                RecordReference::new(
+                    TableId::OpaqueRecord,
+                    StoredKey::new(account_id.to_text().as_bytes().to_vec())?,
+                )?,
+            ]),
+            LoginIndexValueKind::CreationReservation { transaction_id, .. } => {
+                Ok(vec![RecordReference::new(
+                    TableId::AuthTransaction,
+                    StoredKey::new(transaction_id.as_bytes().to_vec())?,
+                )?])
+            }
+            LoginIndexValueKind::DeletionTombstone {
+                deleted_account_id, ..
+            } => Ok(vec![RecordReference::new(
+                TableId::Account,
+                StoredKey::new(deleted_account_id.to_text().as_bytes().to_vec())?,
+            )?]),
+        };
+    }
+    if crate::table_schema(table).codec() == crate::RecordCodecKind::Domain {
+        return Ok(crate::PersistentRecordValue::decode(table, plaintext)?
+            .references()
+            .to_vec());
+    }
+    Ok(Vec::new())
+}
+
+fn add_retired_charge(
+    logical: &mut u64,
+    backup: &mut u64,
+    key: &[u8],
+    value: &[u8],
+) -> Result<(), StorageError> {
+    let charge = logical_record_charge(key.len(), value.len())?;
+    *logical = logical.checked_add(charge).ok_or(StorageError::Overflow)?;
+    *backup = backup
+        .checked_add(charge.checked_add(8).ok_or(StorageError::Overflow)?)
+        .ok_or(StorageError::Overflow)?;
+    Ok(())
+}
+
+fn checkpoint_nonces(nonces: Vec<[u8; 24]>) -> Result<[[u8; 24]; 2], StorageError> {
+    nonces.try_into().map_err(|_| StorageError::InvalidEncoding)
+}
+
+fn tracked_commitment_tuple(
+    table: TableId,
+    stored_key: &StoredKey,
+    record_schema: u32,
+    sealed_record_id: StorageDigest,
+) -> Result<Vec<u8>, StorageError> {
+    let mut encoded = Vec::new();
+    let capacity = 42_usize
+        .checked_add(stored_key.as_bytes().len())
+        .ok_or(StorageError::Overflow)?;
+    encoded
+        .try_reserve_exact(capacity)
+        .map_err(|_| StorageError::AllocationFailed)?;
+    encoded.extend_from_slice(&table.as_u16().to_be_bytes());
+    encoded.extend_from_slice(
+        &u32::try_from(stored_key.as_bytes().len())
+            .map_err(|_| StorageError::Overflow)?
+            .to_be_bytes(),
+    );
+    encoded.extend_from_slice(stored_key.as_bytes());
+    encoded.extend_from_slice(&record_schema.to_be_bytes());
+    encoded.extend_from_slice(sealed_record_id.as_bytes());
+    Ok(encoded)
+}
+
+fn apply_checkpoint_installation(
+    checkpoint: &crate::IntegrityCheckpointTbs,
+    storage_commit_sequence: &mut u64,
+    nonce_high_water: &mut u64,
+) -> Result<(), StorageError> {
+    let expected_commit = storage_commit_sequence
+        .checked_add(1)
+        .ok_or(StorageError::Overflow)?;
+    if checkpoint.installation_storage_commit_sequence != expected_commit
+        || checkpoint.installation_nonce_reservation_start < *nonce_high_water
+        || checkpoint.installation_nonce_draw_high_water
+            != checkpoint
+                .installation_nonce_reservation_start
+                .checked_add(2)
+                .ok_or(StorageError::Overflow)?
+    {
+        return Err(StorageError::StaleState);
+    }
+    *storage_commit_sequence = checkpoint.installation_storage_commit_sequence;
+    *nonce_high_water = checkpoint.installation_nonce_draw_high_water;
+    Ok(())
+}
+
+fn verify_completion_cut(
+    completion: &StorageOperationCompletion,
+    checkpoint: &IntegrityCheckpointTbs,
+) -> Result<(), StorageError> {
+    if checkpoint.cut_storage_commit_sequence != completion.finalization_storage_commit_sequence
+        || checkpoint.cut_manifest_sequence != completion.finalization_manifest_sequence
+        || checkpoint.cut_state_generation != completion.finalization_state_generation
+        || checkpoint.cut_account_service_response_count
+            != completion.finalization_account_service_response_count
+        || checkpoint.cut_nonce_draw_high_water != completion.finalization_nonce_draw_high_water
+    {
+        return Err(StorageError::ResumeMismatch);
+    }
+    Ok(())
+}
+
+fn verify_completion_installation(
+    completion: &StorageOperationCompletion,
+    checkpoint: &IntegrityCheckpointTbs,
+    state: &StateMetaTbs,
+) -> Result<(), StorageError> {
+    let expected_storage_commit = completion
+        .finalization_storage_commit_sequence
+        .checked_add(1)
+        .ok_or(StorageError::Overflow)?;
+    if checkpoint.installation_storage_commit_sequence != expected_storage_commit
+        || checkpoint.installation_manifest_sequence != completion.finalization_manifest_sequence
+        || checkpoint.installation_nonce_reservation_start
+            < completion.finalization_nonce_draw_high_water
+        || checkpoint.installation_nonce_draw_high_water
+            != checkpoint
+                .installation_nonce_reservation_start
+                .checked_add(2)
+                .ok_or(StorageError::Overflow)?
+    {
+        return Err(StorageError::ResumeMismatch);
+    }
+    if state.storage_commit_sequence != checkpoint.installation_storage_commit_sequence
+        || state.manifest_sequence != completion.finalization_manifest_sequence
+        || state.state_generation != completion.finalization_state_generation
+        || state.account_service_response_count
+            != completion.finalization_account_service_response_count
+        || state.nonce_draw_high_water != checkpoint.installation_nonce_draw_high_water
+    {
+        return Err(StorageError::ResumeMismatch);
+    }
+    Ok(())
+}
+
+struct PreparedRecord {
+    table: TableId,
+    key: StoredKey,
+    value: Option<Vec<u8>>,
+}
+
+struct PreparedApplication {
+    records: Vec<PreparedRecord>,
+    manifest_key: [u8; 8],
+    manifest_record: Vec<u8>,
+    state_meta_record: Vec<u8>,
+    state_meta: StateMeta,
+    state_meta_record_id: StorageDigest,
+}
+
+struct PreparedCheckpoint {
+    checkpoint_key: [u8; 8],
+    checkpoint_record: Vec<u8>,
+    state_meta: StateMeta,
+    state_meta_record: Vec<u8>,
+    state_meta_record_id: StorageDigest,
+    committed_reservation: NonceReservationState,
+    committed_guard: RollbackGuard,
+}
+
+struct BackupJob {
+    scan: SnapshotScan,
+    writer: Option<BackupStreamWriter<File>>,
+    output: Option<BackupOutput>,
+    signing_key: Ed25519SecretKey,
+    expected_state_meta: StateMetaTbs,
+    expected_stream_bytes: u64,
+}
+
+impl BackupJob {
+    fn finish(
+        mut self,
+        master_key: &StorageMasterKey,
+        guard_root_key: &RollbackGuardRootKey,
+        maximum_bytes: u64,
+    ) -> Result<BackupReceipt, StorageError> {
+        let writer = self.writer.take().ok_or(StorageError::StaleState)?;
+        let (_file, trailer) = writer.finish(&self.signing_key)?;
+        let mut output = self.output.take().ok_or(StorageError::StaleState)?;
+        output
+            .file_mut()
+            .sync_all()
+            .map_err(|_| StorageError::FilesystemRejected)?;
+        let actual_bytes = output
+            .file()
+            .metadata()
+            .map_err(|_| StorageError::FilesystemRejected)?
+            .len();
+        if actual_bytes != self.expected_stream_bytes {
+            return Err(StorageError::StaleState);
+        }
+        output
+            .file_mut()
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| StorageError::FilesystemRejected)?;
+        let trusted_key = BackupTrustKey::new(self.signing_key.public_key())?;
+        let verified = verify_backup(
+            output.file_mut(),
+            master_key,
+            guard_root_key,
+            &[trusted_key],
+            maximum_bytes,
+        )?;
+        if verified.stream_bytes != actual_bytes
+            || verified.trailer != trailer
+            || verified.state_meta.tbs() != &self.expected_state_meta
+        {
+            return Err(StorageError::AuthenticationFailed);
+        }
+        let mut published = output.publish()?;
+        let published_verified = verify_backup(
+            published.file_mut(),
+            master_key,
+            guard_root_key,
+            &[trusted_key],
+            maximum_bytes,
+        )?;
+        if published_verified.stream_bytes != actual_bytes
+            || published_verified.trailer != trailer
+            || published_verified.state_meta.tbs() != &self.expected_state_meta
+        {
+            return Err(StorageError::AuthenticationFailed);
+        }
+        Ok(BackupReceipt {
+            stream_bytes: actual_bytes,
+            record_count: trailer.record_count,
+            stream_digest: trailer.stream_digest,
+        })
+    }
+}
+
+struct CheckpointJob {
+    cut: StateMetaTbs,
+    scan: SnapshotScan,
+    phase: CheckpointScanPhase,
+    tracked_record_count: u64,
+}
+
+enum CheckpointScanPhase {
+    Count,
+    Digest(TrackedStateHasher),
+}
+
+struct CompletedCheckpointScan {
+    cut: StateMetaTbs,
+    tracked_record_count: u64,
+    tracked_state_digest: StorageDigest,
+}
+
+impl CheckpointJob {
+    fn new(cut: StateMetaTbs, scan: SnapshotScan) -> Self {
+        Self {
+            cut,
+            scan,
+            phase: CheckpointScanPhase::Count,
+            tracked_record_count: 0,
+        }
+    }
+
+    fn service(
+        &mut self,
+        master_key: &StorageMasterKey,
+        binding: DatabaseBinding,
+        storage_key_generation: u32,
+    ) -> Result<Option<CompletedCheckpointScan>, StorageError> {
+        let slice = self
+            .scan
+            .next_tracked_slice(CHECKPOINT_SLICE_RECORDS, CHECKPOINT_SLICE_BYTES)?;
+        match &mut self.phase {
+            CheckpointScanPhase::Count => {
+                self.tracked_record_count = self
+                    .tracked_record_count
+                    .checked_add(
+                        u64::try_from(slice.rows.len()).map_err(|_| StorageError::Overflow)?,
+                    )
+                    .ok_or(StorageError::Overflow)?;
+                if slice.complete {
+                    self.scan.reset();
+                    self.phase = CheckpointScanPhase::Digest(TrackedStateHasher::new(
+                        self.tracked_record_count,
+                    ));
+                }
+                Ok(None)
+            }
+            CheckpointScanPhase::Digest(hasher) => {
+                for (table, key, encoded) in slice.rows {
+                    let stored_key = StoredKey::new(key)?;
+                    let sealed = SealedRecord::decode(&encoded)?;
+                    let plaintext = sealed.open(
+                        master_key,
+                        binding,
+                        table,
+                        sealed.record_schema(),
+                        storage_key_generation,
+                        &stored_key,
+                    )?;
+                    crate::validate_record_plaintext(
+                        table,
+                        &stored_key,
+                        sealed.record_schema(),
+                        plaintext.expose_for_storage_codec(),
+                    )?;
+                    let tuple = tracked_commitment_tuple(
+                        table,
+                        &stored_key,
+                        sealed.record_schema(),
+                        sealed.record_id()?,
+                    )?;
+                    hasher.update(tracked_record_commitment(&tuple)?)?;
+                }
+                if !slice.complete {
+                    return Ok(None);
+                }
+                let phase = std::mem::replace(&mut self.phase, CheckpointScanPhase::Count);
+                let CheckpointScanPhase::Digest(hasher) = phase else {
+                    return Err(StorageError::StaleState);
+                };
+                Ok(Some(CompletedCheckpointScan {
+                    cut: self.cut,
+                    tracked_record_count: self.tracked_record_count,
+                    tracked_state_digest: hasher.finalize()?,
+                }))
+            }
+        }
+    }
+}
+
+pub(crate) enum EngineCommitFailure {
+    Rejected(StorageError),
+    Indeterminate,
+}
+
+fn rejected(error: StorageError) -> EngineCommitFailure {
+    EngineCommitFailure::Rejected(error)
+}
+
+fn indeterminate(_error: StorageError) -> EngineCommitFailure {
+    EngineCommitFailure::Indeterminate
+}
+
+fn require_meta(store: &RedbStore, key: &[u8]) -> Result<Vec<u8>, StorageError> {
+    store.read_meta(key)?.ok_or(StorageError::InvalidEncoding)
+}
+
+fn database_binding(header: &DatabaseHeader) -> DatabaseBinding {
+    DatabaseBinding::new(
+        header.tbs().network_id,
+        header.tbs().server_id,
+        header.tbs().server_incarnation,
+        header.tbs().database_instance_id,
+    )
+}
+
+fn verify_key_check(
+    store: &RedbStore,
+    master_key: &StorageMasterKey,
+    binding: DatabaseBinding,
+    header: &DatabaseHeader,
+) -> Result<(), StorageError> {
+    let key = StoredKey::new(KEY_CHECK_KEY.to_vec())?;
+    let encoded = store
+        .read_record(TableId::KeyCheck, key.as_bytes())?
+        .ok_or(StorageError::InvalidEncoding)?;
+    let record = SealedRecord::decode(&encoded)?;
+    if record.record_id()? != header.key_check_object_id() {
+        return Err(StorageError::AuthenticationFailed);
+    }
+    let plaintext = record.open(
+        master_key,
+        binding,
+        TableId::KeyCheck,
+        1,
+        header.tbs().storage_key_generation,
+        &key,
+    )?;
+    if plaintext.expose_for_storage_codec() != header.tbs().key_check_plaintext()?.as_bytes() {
+        return Err(StorageError::AuthenticationFailed);
+    }
+    Ok(())
+}
+
+fn read_state_meta(
+    store: &RedbStore,
+    master_key: &StorageMasterKey,
+    binding: DatabaseBinding,
+    header: &DatabaseHeader,
+    keys: &StorageIntegrityKeys,
+) -> Result<(StateMeta, StorageDigest), StorageError> {
+    let key = StoredKey::new(STATE_META_KEY.to_vec())?;
+    let encoded = store
+        .read_record(TableId::StateMeta, key.as_bytes())?
+        .ok_or(StorageError::InvalidEncoding)?;
+    let sealed = SealedRecord::decode(&encoded)?;
+    let record_id = sealed.record_id()?;
+    let plaintext = sealed.open(
+        master_key,
+        binding,
+        TableId::StateMeta,
+        1,
+        header.tbs().storage_key_generation,
+        &key,
+    )?;
+    let state_meta = StateMeta::decode_and_verify(
+        plaintext.expose_for_storage_codec(),
+        header.complete_hash()?,
+        keys,
+    )?;
+    Ok((state_meta, record_id))
+}
+
+fn verify_existing(expected: ExistingRecord, encoded: &[u8]) -> Result<(), StorageError> {
+    if usize::try_from(expected.sealed_record_bytes()).map_err(|_| StorageError::Overflow)?
+        != encoded.len()
+    {
+        return Err(StorageError::StaleState);
+    }
+    let sealed = SealedRecord::decode(encoded)?;
+    if sealed.record_schema() != expected.record_schema()
+        || sealed.record_id()? != expected.sealed_record_id()
+    {
+        return Err(StorageError::StaleState);
+    }
+    Ok(())
+}
+
+fn guard_for_reservation(
+    header: &DatabaseHeader,
+    reservation: &NonceReservationState,
+    keys: &StorageIntegrityKeys,
+) -> Result<RollbackGuard, StorageError> {
+    let source = reservation.tbs();
+    RollbackGuard::authenticate(
+        RollbackGuardTbs {
+            network_id: header.tbs().network_id,
+            server_id: header.tbs().server_id,
+            database_instance_id: header.tbs().database_instance_id,
+            storage_key_generation: header.tbs().storage_key_generation,
+            schema_generation: header.tbs().schema_generation,
+            recovery_epoch: header.tbs().recovery_epoch,
+            storage_commit_sequence: source.storage_commit_sequence,
+            manifest_sequence: source.manifest_sequence,
+            state_generation: source.state_generation,
+            phase: source.phase,
+            reservation_sequence: source.reservation_sequence,
+            nonce_reservation_start: source.nonce_reservation_start,
+            nonce_draw_high_water: source.nonce_draw_high_water,
+            database_header_hash: source.database_header_hash,
+            state_meta_record_id: source.state_meta_record_id,
+            nonce_reservation_state_hash: reservation.complete_hash()?,
+            previous_guard_hash: source.previous_guard_hash,
+        },
+        keys,
+    )
+}
+
+pub(crate) fn draw_nonces_with_faults(
+    count: u32,
+    faults: &StorageFaultInjector,
+) -> Result<Vec<[u8; 24]>, StorageError> {
+    let count = usize::try_from(count).map_err(|_| StorageError::Overflow)?;
+    let mut nonces = Vec::new();
+    nonces
+        .try_reserve_exact(count)
+        .map_err(|_| StorageError::AllocationFailed)?;
+    for _ in 0..count {
+        let mut nonce = [0_u8; 24];
+        faults.check(StorageFaultSite::NonceDraw, StorageFaultBoundary::Before)?;
+        OsEntropy::fill(&mut nonce)?;
+        faults.check(StorageFaultSite::NonceDraw, StorageFaultBoundary::After)?;
+        nonces.push(nonce);
+    }
+    Ok(nonces)
+}

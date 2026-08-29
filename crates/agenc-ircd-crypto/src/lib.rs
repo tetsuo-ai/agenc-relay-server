@@ -13,6 +13,7 @@ mod hash;
 mod secret;
 mod signature;
 mod storage;
+mod storage_integrity;
 mod worker;
 
 pub use account_hpke::{
@@ -26,8 +27,8 @@ pub use account_hpke::{
 pub use entropy::OsEntropy;
 pub use error::{CryptoError, CryptoWorkerError};
 pub use hash::{
-    Digest32, LoginIndexDigest, LoginIndexKey, OpaqueFakeCredentialKey, SemanticHashDomain,
-    derive_fake_credential_id, derive_login_index, semantic_digest,
+    Digest32, LoginIndexDigest, LoginIndexKey, LoginIndexKeyId, OpaqueFakeCredentialKey,
+    SemanticHashDomain, derive_fake_credential_id, derive_login_index, semantic_digest,
 };
 pub use signature::{
     Ed25519PublicKey, Ed25519SecretKey, Ed25519Signature, SignatureDomain, sign_canonical,
@@ -38,6 +39,16 @@ pub use storage::{
     MAX_STORAGE_PLAINTEXT_BYTES, OpenedStoragePlaintext, SealedStorageRecord, StorageIndex,
     StorageMasterKey, StorageNonce, StorageRecordKey, StorageTable, derive_storage_index,
     derive_storage_record_key, open_storage_record, seal_storage_record,
+};
+pub use storage_integrity::{
+    BackupStreamHasher, ConstructionPlanHasher, RollbackGuardRootKey, StorageAuthenticator,
+    StorageDigest, StorageIntegrityContext, StorageIntegrityKeys, TrackedStateHasher,
+    authenticate_nonce_reservation, authenticate_rollback_guard, authenticate_state_meta,
+    backup_signing_key_id, database_header_hash, database_key_check, derive_storage_integrity_keys,
+    integrity_checkpoint_hash, integrity_manifest_hash, nonce_reservation_hash,
+    rekey_transform_profile_hash, restore_transform_profile_hash, rollback_guard_hash,
+    sealed_record_id, storage_operation_id, storage_operation_key_id, storage_output_path_hash,
+    tracked_record_commitment, tracked_state_digest,
 };
 pub use worker::{
     BoundedCryptoPool, CRYPTO_QUEUE_SLOTS_PER_WORKER, CRYPTO_WORKER_RESERVED_BYTES, CryptoJob,

@@ -320,6 +320,86 @@ id = "EVID-S04-900-STAGE-GATE"
 claim_ids = ["S04-900"]
 kind = "stage-gate"
 
+[[evidence]]
+id = "EVID-S05-001-SCHEMA"
+claim_ids = ["S05-001"]
+kind = "storage-schema-codecs"
+
+[[evidence]]
+id = "EVID-S05-002-SEALED-RECORDS"
+claim_ids = ["S05-002"]
+kind = "sealed-storage-records"
+
+[[evidence]]
+id = "EVID-S05-003-ACCOUNTING"
+claim_ids = ["S05-003"]
+kind = "storage-accounting"
+
+[[evidence]]
+id = "EVID-S05-004-MUTATIONS"
+claim_ids = ["S05-004"]
+kind = "storage-mutation-batches"
+
+[[evidence]]
+id = "EVID-S05-005-OWNER"
+claim_ids = ["S05-005"]
+kind = "single-storage-owner"
+
+[[evidence]]
+id = "EVID-S05-006-COMMIT"
+claim_ids = ["S05-006"]
+kind = "storage-two-phase-commit"
+
+[[evidence]]
+id = "EVID-S05-007-NONCES"
+claim_ids = ["S05-007"]
+kind = "storage-nonce-reservations"
+
+[[evidence]]
+id = "EVID-S05-008-INTEGRITY"
+claim_ids = ["S05-008"]
+kind = "storage-integrity-ledger"
+
+[[evidence]]
+id = "EVID-S05-009-GUARD"
+claim_ids = ["S05-009"]
+kind = "external-rollback-guard"
+
+[[evidence]]
+id = "EVID-S05-010-RECOVERY"
+claim_ids = ["S05-010"]
+kind = "storage-startup-recovery"
+
+[[evidence]]
+id = "EVID-S05-011-MIGRATIONS"
+claim_ids = ["S05-011"]
+kind = "storage-migration-construction"
+
+[[evidence]]
+id = "EVID-S05-012-BACKUP"
+claim_ids = ["S05-012"]
+kind = "storage-backup-restore"
+
+[[evidence]]
+id = "EVID-S05-013-REKEY"
+claim_ids = ["S05-013"]
+kind = "storage-deletion-rekey"
+
+[[evidence]]
+id = "EVID-S05-014-LOGIN-INDEX"
+claim_ids = ["S05-014"]
+kind = "login-index-transition"
+
+[[evidence]]
+id = "EVID-S05-015-QUALIFICATION"
+claim_ids = ["S05-015"]
+kind = "storage-fault-qualification"
+
+[[evidence]]
+id = "EVID-S05-900-STAGE-GATE"
+claim_ids = ["S05-900"]
+kind = "stage-gate"
+
 # Normative evidence enters this catalog only after its full closure task is
 # implemented. Unimplemented requirement IDs stay reserved in the requirement
 # ledger and cannot appear in a closing manifest.
@@ -382,4 +462,94 @@ kind = "normative-requirement"
 [[evidence]]
 id = "EVID-E2EE-REQ-A0EFEAB7474EA0A450F5"
 claim_ids = ["E2EE-REQ-A0EFEAB7474EA0A450F5"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-D621F68B6C389E5B7660"
+claim_ids = ["ARCH-REQ-D621F68B6C389E5B7660"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-30183AFAFED8128B6541"
+claim_ids = ["ARCH-REQ-30183AFAFED8128B6541"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-497991387ADD6957DDBE"
+claim_ids = ["ARCH-REQ-497991387ADD6957DDBE"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-61DDBED6FB176354A9BF"
+claim_ids = ["ARCH-REQ-61DDBED6FB176354A9BF"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-61C6AFF8B1137410D0FD"
+claim_ids = ["ARCH-REQ-61C6AFF8B1137410D0FD"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-EE3343E6DDAA279E4E23"
+claim_ids = ["ARCH-REQ-EE3343E6DDAA279E4E23"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-29DE85F5026ADD8EF114"
+claim_ids = ["ARCH-REQ-29DE85F5026ADD8EF114"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-F235013D840DBE992D6C"
+claim_ids = ["ARCH-REQ-F235013D840DBE992D6C"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-C70A2FA24AD661DB7BC3"
+claim_ids = ["ARCH-REQ-C70A2FA24AD661DB7BC3"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-2DAB3DDD73C2AE873977"
+claim_ids = ["ARCH-REQ-2DAB3DDD73C2AE873977"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-351F91DD2F9F7B09DD4C"
+claim_ids = ["ARCH-REQ-351F91DD2F9F7B09DD4C"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-ID-07"
+claim_ids = ["ARCH-ID-07"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-DUR-03"
+claim_ids = ["ARCH-DUR-03"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-DUR-06"
+claim_ids = ["ARCH-DUR-06"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-DUR-07"
+claim_ids = ["ARCH-DUR-07"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-DUR-09"
+claim_ids = ["ARCH-DUR-09"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-DUR-10"
+claim_ids = ["ARCH-DUR-10"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-DUR-12"
+claim_ids = ["ARCH-DUR-12"]
 kind = "normative-requirement"

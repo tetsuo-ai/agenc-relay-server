@@ -16,10 +16,12 @@
 
 > [!IMPORTANT]
 > **This is pre-alpha infrastructure, not a deployable server.** Stages 00
-> through 04 are implemented. Stage 04 adds cryptographic adapters and private
-> account-authentication state machines, but no sockets, storage owner, or
-> daemon executor. The binary intentionally exits unsuccessfully until Stage
-> 06 composes the runtime.
+> through 04 are complete. Stage 05 is in progress: authenticated persistence,
+> backup/restore and rekey construction, recovery controls, and the single
+> storage owner exist. Domain-specific reconstruction, maintenance-command
+> composition, coverage, and release storage qualification remain open. There
+> are no sockets or daemon executor yet. The binary intentionally exits
+> unsuccessfully until Stage 06 composes the runtime.
 
 ## What is being built
 
@@ -49,17 +51,19 @@ Ed25519, and authenticated storage.
 | 02 | complete; checkpoint closed | Incremental framing, client parsing, capability and registration state, bounded rendering, transcripts, and fuzz targets |
 | 03 | complete; checkpoint closed | Pure accounts, sessions, channels, authorization, privacy projections, plans, explicit external inputs, and an independent reference model |
 | 04 | complete; checkpoint closed | Secret-safe crypto adapters, fixed HPKE and OPAQUE profiles, account authentication, destructive-account proofs, bounded workers, and fuzz coverage |
-| 05-10 | planned | Persistence, runtime composition, federation, E2EE routing, optional profiles, and production qualification |
+| 05 | in progress; gate failing | Sealed redb records, exact accounting, rollback recovery, bounded checkpoints, signed backup/restore, rekey construction, and login-index transition; reconstruction, CLI composition, coverage, and qualification remain |
+| 06-10 | planned | Runtime composition, federation, E2EE routing, optional profiles, and production qualification |
 
-The current highest implemented layer is account authentication.
-`agenc-ircd-crypto` owns strict library-backed adapters and bounded blocking
-workers. `agenc-ircd-auth` owns the fixed private account-service envelope,
-OPAQUE registration and login, authenticated completion receipts, credential
-replacement, and account-deletion proof. The domain crate applies the resulting
-revision and session-generation fences without doing I/O.
+The current implementation is working through durable storage.
+`agenc-ircd-storage` keeps redb on one blocking owner thread, accepts only
+validated owned batches, seals every numbered-table value, and authenticates
+nonce reservations, manifests, checkpoints, and the external rollback guard.
+Startup opens every record and reconstructs the active checkpoint through a
+disposable on-disk index before the storage port becomes available.
 
-Stage 05 is next. The complete dependency-ordered roadmap lives in
+Stage 05 must pass before Stage 06 begins. The complete dependency-ordered roadmap lives in
 [TODO.md](TODO.md). See the
+[Stage 05 storage profile](conformance/stage-five-storage-profile.toml), the
 [Stage 04 evidence record](conformance/stage-four-evidence.md), the
 [current Stage 04 checkpoint](conformance/evidence/stage-04-1e5b738468f88b238061cc6e84b732176f5cae65.json), the
 [historical Stage 04 checkpoint](conformance/evidence/stage-04-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json), and the
@@ -92,15 +96,14 @@ from a clean checkout:
 ```sh
 git clone https://github.com/tetsuo-ai/agenc-ircd.git
 cd agenc-ircd
-bash scripts/check-stage-four.sh
+bash scripts/check-stage-five.sh
 ```
 
-The Stage 04 implementation checks inherit both declared Linux target checks,
-dependency and advisory checks, Clippy with warnings denied, workspace tests,
-documentation tests, branch coverage, the client-wire fuzz targets, and the
-Stage 03 checks. They add exact crypto-profile and lockfile checks, public auth
-and crypto tests, domain session-fence tests, and account-envelope fuzzing. The
-reviewed command list is in [conformance/gates.toml](conformance/gates.toml).
+The Stage 05 implementation checks inherit every Stage 00 through 04 command.
+They add the closed storage profile, storage integration tests, dependency
+evidence for the safe filesystem adapter, and fuzzing for persistent codecs and
+authenticated backup streams. The reviewed command list is in
+[conformance/gates.toml](conformance/gates.toml).
 
 The reviewed `opaque-ke` patch is vendored, hashed, and checked by workspace
 policy. An implementation command alone does not close a stage. The schema
@@ -110,6 +113,13 @@ records, Stage 01 has 14, Stage 02 has 12, Stage 03 has 13, and Stage 04 has 20.
 Coverage reached 90.01% of branches and 95.59% of lines, with all five critical
 regions at 100%. The schema version 1 records for commit
 `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` remain archive-only.
+Stage 05 remains open. A clean all-workspace measurement currently reports
+66.56% branch coverage and 79.73% line coverage, below the 90% release gate.
+The storage library has executable restore and rekey construction, but the
+exact domain-body/StateCore reconstruction layer, binary maintenance-command
+composition, and signed per-target filesystem qualification are still open.
+Exact-SHA checkpointing follows only after those requirements and the
+implementation gate pass.
 
 There is no server start command yet. The binary fails closed until its runtime
 is composed in Stage 06.
@@ -125,6 +135,7 @@ is composed in Stage 06.
 | [`agenc-ircd-domain`](crates/agenc-ircd-domain) | Pure Stage 03 state, command, decision, event, and projection model |
 | [`agenc-ircd-crypto`](crates/agenc-ircd-crypto) | Stage 04 secret, entropy, hash, AEAD, signature, HPKE, and bounded-worker adapters |
 | [`agenc-ircd-auth`](crates/agenc-ircd-auth) | Stage 04 account-service wire, OPAQUE, creation, login, credential, and deletion state machines |
+| [`agenc-ircd-storage`](crates/agenc-ircd-storage) | Stage 05 redb ownership, sealed records, durable transactions, recovery, backup, and construction codecs |
 | [`agenc-ircd-testkit`](crates/agenc-ircd-testkit) | Independent models, deterministic inputs, fixtures, and transcript support |
 | [`conformance/`](conformance) | Requirement ledger, evidence catalog, gates, and source policy |
 | [`test-data/`](test-data) | Deterministic vectors, transcripts, generated property cases, fuzz seeds, and reserved later-stage fixtures |

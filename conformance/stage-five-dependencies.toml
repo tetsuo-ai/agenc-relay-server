@@ -1,0 +1,10 @@
+schema_version = 1
+
+[[dependency]]
+name = "rustix"
+version = "1.1.4"
+checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
+default_features = false
+features = ["fs", "std"]
+purpose = "safe Linux directory-relative filesystem, metadata, capacity, rename, sync, and lock operations"
+reviewed_on = "2026-08-27"

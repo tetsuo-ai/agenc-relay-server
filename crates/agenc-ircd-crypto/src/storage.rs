@@ -133,6 +133,26 @@ impl StorageMasterKey {
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(SecretBytes::new(bytes))
     }
+
+    /// Compares two master keys without exposing either key or exiting early.
+    #[must_use]
+    pub fn matches(&self, other: &Self) -> bool {
+        bool::from(self.0.as_bytes().ct_eq(other.0.as_bytes()))
+    }
+
+    /// Derives the source-role resumability ID without exposing this key.
+    pub fn source_operation_key_id(
+        &self,
+    ) -> Result<crate::storage_integrity::StorageDigest, CryptoError> {
+        crate::storage_integrity::storage_operation_key_id(b"source-master", self.0.as_bytes())
+    }
+
+    /// Derives the target-role resumability ID without exposing this key.
+    pub fn target_operation_key_id(
+        &self,
+    ) -> Result<crate::storage_integrity::StorageDigest, CryptoError> {
+        crate::storage_integrity::storage_operation_key_id(b"target-master", self.0.as_bytes())
+    }
 }
 
 /// One table- and generation-specific storage-record key.
