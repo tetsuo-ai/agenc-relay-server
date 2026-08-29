@@ -1,8 +1,9 @@
 //! Signed physical-growth qualification reports and tuple lookup.
 
 use std::collections::BTreeSet;
-use std::fs::File;
+use std::fs::{self, File};
 use std::os::unix::fs::MetadataExt as _;
+use std::path::Path;
 
 use agenc_ircd_crypto::{
     Ed25519PublicKey, Ed25519SecretKey, Ed25519Signature, SignatureDomain, StorageDigest,
@@ -19,19 +20,26 @@ pub const MAX_QUALIFICATION_CASES: usize = 65_535;
 /// Greatest canonical signed report bytes.
 pub const MAX_QUALIFICATION_REPORT_BYTES: usize = 16_777_000;
 
-const REQUIRED_CASES: [&str; 15] = [
-    "btree-merge",
-    "btree-split",
-    "checkpoint",
-    "delete-max",
-    "delete-one",
-    "fragmented",
-    "guard-replace",
+/// Complete native workload required in every release qualification report.
+pub const REQUIRED_QUALIFICATION_CASES: [&str; 21] = [
     "insert-empty",
-    "insert-max",
     "insert-one",
-    "replace-max",
     "replace-min",
+    "delete-one",
+    "insert-max-value",
+    "replace-max-value",
+    "delete-max-value",
+    "insert-max-key",
+    "insert-max-records",
+    "delete-max-records",
+    "mixed-max-records",
+    "btree-split",
+    "btree-merge",
+    "fragmented",
+    "checkpoint",
+    "guard-temp-fsync",
+    "guard-rename",
+    "guard-directory-fsync",
     "reserve-equal",
     "reserve-minus-one",
     "reserve-plus-one",
@@ -54,6 +62,19 @@ impl QualificationTarget {
         match self {
             Self::X86_64UnknownLinuxGnu => "x86_64-unknown-linux-gnu",
             Self::Aarch64UnknownLinuxGnu => "aarch64-unknown-linux-gnu",
+        }
+    }
+
+    /// Returns the native target selected by this release build.
+    #[must_use]
+    pub const fn native() -> Self {
+        #[cfg(target_arch = "x86_64")]
+        {
+            Self::X86_64UnknownLinuxGnu
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            Self::Aarch64UnknownLinuxGnu
         }
     }
 
@@ -164,6 +185,7 @@ impl StorageQualificationReportTbs {
     /// Validates tuple fields, complete required corpus, ordering, and exact maximum.
     // agenc-review: focus owner=storage reviewed=2026-08-28 reason=closed signed qualification matrix validates tuple corpus ordering and maximum as one statement
     pub fn validate(&self) -> Result<(), StorageError> {
+        let zero = StorageDigest::from_bytes([0_u8; 32]);
         if self.filesystem_type == 0
             || self.block_size == 0
             || !self.block_size.is_power_of_two()
@@ -176,6 +198,10 @@ impl StorageQualificationReportTbs {
             || self.cases.is_empty()
             || self.cases.len() > MAX_QUALIFICATION_CASES
             || self.maximum_observed_growth > MAX_QUALIFIED_OBSERVED_GROWTH
+            || self.redb_features_hash == zero
+            || self.release_profile_hash == zero
+            || self.corpus_hash == zero
+            || self.raw_log_hash == zero
         {
             return Err(StorageError::InvalidEncoding);
         }
@@ -191,7 +217,9 @@ impl StorageQualificationReportTbs {
             previous = Some(case.name());
         }
         if maximum != self.maximum_observed_growth
-            || REQUIRED_CASES.iter().any(|name| !names.contains(name))
+            || REQUIRED_QUALIFICATION_CASES
+                .iter()
+                .any(|name| !names.contains(name))
         {
             return Err(StorageError::StaleState);
         }
@@ -218,6 +246,11 @@ impl StorageQualificationReportTbs {
         encoder.put_u64(self.maximum_observed_growth)?;
         encoder.put_fixed(self.raw_log_hash.as_bytes())?;
         Ok(encoder.finish())
+    }
+
+    /// Encodes the validated unsigned measurement for offline signing.
+    pub fn encode_unsigned(&self) -> Result<Vec<u8>, StorageError> {
+        self.encode()
     }
 
     fn decode(encoded: &[u8]) -> Result<Self, StorageError> {
@@ -262,6 +295,14 @@ impl StorageQualificationReportTbs {
         decoder.finish()?;
         value.validate()?;
         Ok(value)
+    }
+
+    /// Parses a full-consumption unsigned measurement produced by the native harness.
+    pub fn decode_unsigned(encoded: &[u8]) -> Result<Self, StorageError> {
+        if encoded.len() > MAX_QUALIFICATION_REPORT_BYTES {
+            return Err(StorageError::LimitExceeded);
+        }
+        Self::decode(encoded)
     }
 }
 
@@ -409,13 +450,38 @@ impl StorageGrowthRecorder {
         Ok(result)
     }
 
+    /// Measures a boundary by resolving every participating path before and after it.
+    ///
+    /// Missing paths contribute zero, which permits an atomic rename to remove a
+    /// temporary name while replacing the final guard inode. The caller must pass
+    /// the database, guard temporary/final, and parent-directory paths explicitly.
+    pub fn measure_path_set<T>(
+        &mut self,
+        name: &str,
+        paths: &[&Path],
+        operation: impl FnOnce() -> Result<T, StorageError>,
+    ) -> Result<T, StorageError> {
+        if paths.is_empty() {
+            return Err(StorageError::InvalidEncoding);
+        }
+        let allocated_before = allocated_path_set(paths)?;
+        let result = operation()?;
+        let allocated_after = allocated_path_set(paths)?;
+        self.record(StorageGrowthCase::new(
+            name.to_owned(),
+            allocated_before,
+            allocated_after,
+        )?)?;
+        Ok(result)
+    }
+
     /// Measures every required case against one real database file.
     pub fn measure_required_corpus(
         &mut self,
         file: &File,
         mut run_case: impl FnMut(&str) -> Result<(), StorageError>,
     ) -> Result<(), StorageError> {
-        for name in REQUIRED_CASES {
+        for name in REQUIRED_QUALIFICATION_CASES {
             self.measure_file(name, file, || run_case(name))?;
         }
         Ok(())
@@ -431,7 +497,7 @@ impl StorageGrowthRecorder {
         files: &[&File],
         mut run_case: impl FnMut(&str) -> Result<(), StorageError>,
     ) -> Result<(), StorageError> {
-        for name in REQUIRED_CASES {
+        for name in REQUIRED_QUALIFICATION_CASES {
             self.measure_file_set(name, files, || run_case(name))?;
         }
         Ok(())
@@ -466,8 +532,53 @@ fn allocated_file_set(files: &[&File]) -> Result<u64, StorageError> {
     })
 }
 
+fn allocated_path_set(paths: &[&Path]) -> Result<u64, StorageError> {
+    paths.iter().try_fold(0_u64, |total, path| {
+        let blocks = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata
+                .blocks()
+                .checked_mul(512)
+                .ok_or(StorageError::Overflow)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(_) => return Err(StorageError::FilesystemRejected),
+        };
+        total.checked_add(blocks).ok_or(StorageError::Overflow)
+    })
+}
+
 impl Default for StorageGrowthRecorder {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Verifies the signed release report compiled for the native target.
+pub fn embedded_storage_qualifications() -> Result<Vec<StorageQualification>, StorageError> {
+    let public_key_bytes: [u8; 32] = *include_bytes!(
+        "../../../conformance/evidence/storage-qualification/release-public-key.bin"
+    );
+    let public_key = Ed25519PublicKey::from_bytes(public_key_bytes)?;
+    #[cfg(target_arch = "x86_64")]
+    let reports: &[&[u8]] = &[include_bytes!(
+        "../../../conformance/evidence/storage-qualification/x86_64-unknown-linux-gnu-ext4.report"
+    )];
+    #[cfg(target_arch = "aarch64")]
+    let reports: &[&[u8]] = &[];
+    if reports.is_empty() {
+        return Err(StorageError::FilesystemRejected);
+    }
+    reports
+        .iter()
+        .map(|encoded| {
+            let report = StorageQualificationReport::decode_and_verify(encoded, public_key)?;
+            let tbs = report.tbs();
+            let tuple = FilesystemTuple {
+                target: tbs.target.as_str(),
+                filesystem_type: tbs.filesystem_type,
+                block_size: tbs.block_size,
+                mount_flags: tbs.mount_flags,
+            };
+            report.qualification_for(tuple)
+        })
+        .collect()
 }

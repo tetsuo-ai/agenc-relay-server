@@ -2484,6 +2484,13 @@ impl VerifiedConstructionOutput {
 }
 
 impl ConstructionTarget {
+    /// Reconstructs a completed output and returns its authenticated header.
+    pub fn completed_header(config: StorageOpenConfig) -> Result<DatabaseHeader, StorageError> {
+        let engine = StorageEngine::open(config)?;
+        let _capacity = engine.startup_scan()?;
+        Ok(engine.construction_source_header())
+    }
+
     /// Opens and completely verifies one resumable staging database.
     pub fn open(config: StorageOpenConfig) -> Result<Self, StorageError> {
         let engine = StorageEngine::open(config)?;
@@ -2494,6 +2501,12 @@ impl ConstructionTarget {
     /// Reads the sole authenticated construction marker.
     pub fn marker(&self) -> Result<StorageConstruction, StorageError> {
         self.engine.construction_marker()
+    }
+
+    /// Returns the staging database header bound by the authenticated marker.
+    #[must_use]
+    pub const fn header(&self) -> DatabaseHeader {
+        self.engine.construction_source_header()
     }
 
     /// Reopens a completed output and binds its exact completion to the requested path.

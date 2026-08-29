@@ -16,7 +16,7 @@ EXPECTED_MODULES = {
     "construction_runtime.rs", "control.rs", "engine.rs", "error.rs", "fault.rs",
     "initialize.rs", "integrity.rs", "lib.rs", "login_index.rs", "mutation.rs",
     "owner.rs", "platform.rs", "qualification.rs", "records.rs", "recovery.rs",
-    "redb_store.rs", "schema.rs", "sealed.rs",
+    "redb_store.rs", "restore_command.rs", "schema.rs", "sealed.rs",
 }
 EXPECTED_TASKS = [f"S05-{number:03d}" for number in range(1, 16)]
 REQUIRED_SURFACES = (
@@ -128,7 +128,7 @@ def main() -> None:
         if command == "check":
             validate_profile(load_profile(root / PROFILE_PATH))
             validate_sources(root)
-            print("Stage-05 storage profile: ok (22 modules, 2 fuzz targets)")
+            print("Stage-05 storage profile: ok (23 modules, 2 fuzz targets)")
         else:
             print(f"Stage-05 storage profile self-test: ok ({self_test(root)} rejection cases)")
     except (OSError, StageFiveError, tomllib.TOMLDecodeError) as error:

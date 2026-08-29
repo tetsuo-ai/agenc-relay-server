@@ -143,6 +143,12 @@ impl BackupHeader {
     pub const fn signing_key_id(&self) -> StorageDigest {
         self.signing_key_id
     }
+
+    /// Returns the authenticated backup creation second.
+    #[must_use]
+    pub const fn created_at(&self) -> u64 {
+        self.created_at
+    }
 }
 
 /// One numbered-table record in canonical backup order.
@@ -370,15 +376,41 @@ pub struct BackupTrustKey {
     pub key_id: StorageDigest,
     /// Strict Ed25519 verification key.
     pub public_key: Ed25519PublicKey,
+    not_before: u64,
+    not_after: u64,
 }
 
 impl BackupTrustKey {
-    /// Validates that the manifest key and public key agree.
+    /// Creates an unrestricted test or in-memory trust entry.
     pub fn new(public_key: Ed25519PublicKey) -> Result<Self, StorageError> {
         Ok(Self {
             key_id: backup_signing_key_id(public_key.as_bytes())?,
             public_key,
+            not_before: 0,
+            not_after: u64::MAX,
         })
+    }
+
+    /// Validates one exact offline trust-manifest row.
+    pub fn with_validity(
+        key_id: StorageDigest,
+        public_key: Ed25519PublicKey,
+        not_before: u64,
+        not_after: u64,
+    ) -> Result<Self, StorageError> {
+        if not_before >= not_after || backup_signing_key_id(public_key.as_bytes())? != key_id {
+            return Err(StorageError::AuthenticationFailed);
+        }
+        Ok(Self {
+            key_id,
+            public_key,
+            not_before,
+            not_after,
+        })
+    }
+
+    const fn accepts_creation_time(&self, created_at: u64) -> bool {
+        created_at >= self.not_before && created_at < self.not_after
     }
 }
 
@@ -739,6 +771,7 @@ fn trusted_backup_key(
     let mut trusted_public_key = None;
     for entry in trusted_keys {
         if entry.key_id == header.signing_key_id()
+            && entry.accepts_creation_time(header.created_at())
             && trusted_public_key.replace(entry.public_key).is_some()
         {
             return Err(StorageError::AuthenticationFailed);

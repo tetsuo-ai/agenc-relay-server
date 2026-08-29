@@ -3,7 +3,7 @@
 use std::cmp::Ordering;
 
 use agenc_ircd_crypto::StorageDigest;
-use agenc_ircd_types::RecoveryEpoch;
+use agenc_ircd_types::{AccountId, ChannelName, Nickname, RecoveryEpoch};
 
 use crate::codec::{Decoder, Encoder};
 use crate::{
@@ -23,6 +23,12 @@ pub const STATE_META_STORED_KEY: &[u8] = b"agenc-chat/state-meta/v1";
 
 const OPAQUE_FAKE_RECORD_KEY: &[u8] = b"agenc-chat/opaque-fake-record/v1";
 const DOMAIN_RECORD_VERSION: u16 = 1;
+const PROTOCOL_BODY_VERSION: u16 = 1;
+const PROTOCOL_BODY_PREFIX_BYTES: usize = 12;
+
+/// Greatest canonical later-profile object carried in one persistent body.
+pub const MAX_PROTOCOL_BODY_BYTES: usize =
+    MAX_DOMAIN_RECORD_BODY_BYTES - PROTOCOL_BODY_PREFIX_BYTES;
 
 /// Closed server-side recovery state embedded in an E2EE recovery-gate row.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -154,6 +160,104 @@ impl E2eeRecoveryGate {
     }
 }
 
+/// Exact persistence wrapper for one already validated federation or E2EE object.
+///
+/// The wrapper binds the canonical object bytes to their table, closed record
+/// arm, and protocol profile. It prevents a value accepted for one later-stage
+/// type from being replayed as another while leaving protocol semantic
+/// validation with the owning federation or E2EE crate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtocolRecordBody {
+    table: TableId,
+    record_kind: u16,
+    profile_version: u16,
+    canonical_object: Vec<u8>,
+}
+
+impl ProtocolRecordBody {
+    /// Creates one complete version-one protocol body.
+    pub fn new(
+        table: TableId,
+        record_kind: u16,
+        profile_version: u16,
+        canonical_object: Vec<u8>,
+    ) -> Result<Self, StorageError> {
+        if !uses_protocol_body(table, record_kind)
+            || profile_version != 1
+            || canonical_object.is_empty()
+            || canonical_object.len() > protocol_body_limit(table)
+        {
+            return Err(StorageError::InvalidEncoding);
+        }
+        Ok(Self {
+            table,
+            record_kind,
+            profile_version,
+            canonical_object,
+        })
+    }
+
+    /// Parses one full-consumption protocol body for an expected table and arm.
+    pub fn decode(
+        expected_table: TableId,
+        expected_kind: u16,
+        encoded: &[u8],
+    ) -> Result<Self, StorageError> {
+        let mut decoder = Decoder::new(encoded);
+        if decoder.u16()? != PROTOCOL_BODY_VERSION {
+            return Err(StorageError::UnsupportedVersion);
+        }
+        let table = TableId::from_u16(decoder.u16()?)?;
+        let record_kind = decoder.u16()?;
+        let profile_version = decoder.u16()?;
+        let maximum = protocol_body_limit(expected_table);
+        let canonical_object = decoder.vector_u32(maximum)?.to_vec();
+        decoder.finish()?;
+        if table != expected_table || record_kind != expected_kind {
+            return Err(StorageError::InvalidEncoding);
+        }
+        Self::new(table, record_kind, profile_version, canonical_object)
+    }
+
+    /// Encodes the exact table- and arm-bound wrapper.
+    pub fn encode(&self) -> Result<Vec<u8>, StorageError> {
+        let capacity = PROTOCOL_BODY_PREFIX_BYTES
+            .checked_add(self.canonical_object.len())
+            .ok_or(StorageError::Overflow)?;
+        let mut encoder = Encoder::with_capacity(capacity, MAX_DOMAIN_RECORD_BODY_BYTES)?;
+        encoder.put_u16(PROTOCOL_BODY_VERSION)?;
+        encoder.put_u16(self.table.as_u16())?;
+        encoder.put_u16(self.record_kind)?;
+        encoder.put_u16(self.profile_version)?;
+        encoder.put_vector_u32(&self.canonical_object)?;
+        Ok(encoder.finish())
+    }
+
+    /// Returns the owning persistent table.
+    #[must_use]
+    pub const fn table(&self) -> TableId {
+        self.table
+    }
+
+    /// Returns the closed record arm within the table.
+    #[must_use]
+    pub const fn record_kind(&self) -> u16 {
+        self.record_kind
+    }
+
+    /// Returns the protocol profile version of the canonical object.
+    #[must_use]
+    pub const fn profile_version(&self) -> u16 {
+        self.profile_version
+    }
+
+    /// Borrows the complete canonical protocol object.
+    #[must_use]
+    pub fn canonical_object(&self) -> &[u8] {
+        &self.canonical_object
+    }
+}
+
 /// Canonical redb-key grammar for one table.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoredKeyShape {
@@ -230,11 +334,19 @@ impl TableSchema {
 
     /// Validates one complete stored key for this table.
     pub fn validate_key(self, key: &[u8]) -> Result<(), StorageError> {
-        if self.key_shape.accepts(key) {
-            Ok(())
-        } else {
-            Err(StorageError::InvalidEncoding)
+        if !self.key_shape.accepts(key) {
+            return Err(StorageError::InvalidEncoding);
         }
+        if self.table == TableId::Account
+            || (self.table == TableId::OpaqueRecord && key != OPAQUE_FAKE_RECORD_KEY)
+        {
+            let account =
+                AccountId::parse_wire_bytes(key).map_err(|_| StorageError::InvalidEncoding)?;
+            if account.to_text().as_bytes() != key {
+                return Err(StorageError::InvalidEncoding);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -664,10 +776,40 @@ fn validate_record_counters(
 }
 
 fn validate_domain_body(table: TableId, record_kind: u16, body: &[u8]) -> Result<(), StorageError> {
-    if table == TableId::E2eeState && record_kind == 1 {
-        E2eeRecoveryGate::decode(body).map(|_| ())
+    match (table, record_kind) {
+        (TableId::NicknameReservation, 1) => std::str::from_utf8(body)
+            .map_err(|_| StorageError::InvalidEncoding)
+            .and_then(|name| Nickname::parse(name).map_err(|_| StorageError::InvalidEncoding))
+            .map(|_| ()),
+        (TableId::ChannelName, 1) => std::str::from_utf8(body)
+            .map_err(|_| StorageError::InvalidEncoding)
+            .and_then(|name| ChannelName::parse(name).map_err(|_| StorageError::InvalidEncoding))
+            .map(|_| ()),
+        (TableId::E2eeState, 1) => E2eeRecoveryGate::decode(body).map(|_| ()),
+        _ if uses_protocol_body(table, record_kind) => {
+            ProtocolRecordBody::decode(table, record_kind, body).map(|_| ())
+        }
+        _ => Ok(()),
+    }
+}
+
+const fn uses_protocol_body(table: TableId, record_kind: u16) -> bool {
+    matches!(
+        table,
+        TableId::FederationPeer
+            | TableId::FederationOrigin
+            | TableId::RequestResult
+            | TableId::EdgeOutbox
+            | TableId::EdgeProjection
+            | TableId::E2eeObject
+    ) || (matches!(table, TableId::E2eeState) && record_kind != 1)
+}
+
+const fn protocol_body_limit(table: TableId) -> usize {
+    if matches!(table, TableId::E2eeObject) {
+        4_194_304
     } else {
-        Ok(())
+        MAX_PROTOCOL_BODY_BYTES
     }
 }
 

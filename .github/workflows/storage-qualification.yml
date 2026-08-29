@@ -1,0 +1,57 @@
+name: Native storage qualification
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    name: ${{ matrix.target }} ext4 measurement
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Check out the exact source revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install 1.98.0 --profile minimal
+
+      - name: Confirm native target and filesystem
+        run: |
+          test "$(rustc +1.98.0 -vV | sed -n 's/^host: //p')" = "${{ matrix.target }}"
+          test "$(findmnt -T "$RUNNER_TEMP" -n -o FSTYPE)" = "ext4"
+          uname -a
+          findmnt -T "$RUNNER_TEMP" -o TARGET,FSTYPE,OPTIONS
+
+      - name: Measure the release storage corpus
+        run: |
+          mkdir -p artifacts
+          export TMPDIR="$RUNNER_TEMP"
+          cargo +1.98.0 run --locked --release -p agenc-ircd-storage \
+            --example storage-qualification -- \
+            "artifacts/${{ matrix.target }}-ext4.unsigned" \
+            "artifacts/${{ matrix.target }}-ext4.log"
+
+      - name: Upload unsigned measurements
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: storage-qualification-${{ matrix.target }}-ext4
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30

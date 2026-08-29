@@ -327,6 +327,24 @@ pub fn backup_signing_key_id(public_key: &[u8; 32]) -> Result<StorageDigest, Cry
     labeled_digest(BACKUP_SIGNING_KEY_LABEL, &[public_key])
 }
 
+/// Hashes one bounded release-qualification component under an explicit label.
+pub fn storage_qualification_component_hash(
+    label: &[u8],
+    bytes: &[u8],
+) -> Result<StorageDigest, CryptoError> {
+    if label.is_empty()
+        || label.len() > 128
+        || !label.iter().all(u8::is_ascii_graphic)
+        || bytes.len() > MAX_CONTROL_INPUT_BYTES
+    {
+        return Err(CryptoError::LimitExceeded);
+    }
+    labeled_digest(
+        b"agenc-chat storage qualification component v1",
+        &[label, bytes],
+    )
+}
+
 /// Incremental hash of a canonically ordered bounded construction plan.
 pub struct ConstructionPlanHasher {
     hasher: Sha256,

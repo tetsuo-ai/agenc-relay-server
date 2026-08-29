@@ -15,15 +15,15 @@ use agenc_ircd_storage::{
     IntegrityCheckpoint, IntegrityCheckpointTbs, IntegrityManifest, IntegrityManifestTbs,
     IntegrityRecordMutation, IntegrityRecordVersion, LoginIndexKeyState, LoginIndexStoredKey,
     LoginIndexValue, LoginIndexValueKind, MAX_NONCE_DRAWS, MAX_SEALED_RECORD_BYTES,
-    MIN_SEALED_RECORD_BYTES, NonceReservationState, NonceReservationTbs, ReadPlan, RecordMutation,
-    RecordReference, RollbackGuard, RollbackGuardPhase, RollbackGuardTbs, SCHEMA_GENERATION,
-    SealedRecord, StateMeta, StateMetaTbs, StorageAccountingLimits, StorageConstruction,
-    StorageConstructionAction, StorageConstructionCursor, StorageConstructionKind,
-    StorageConstructionPlanEntry, StorageConstructionSource, StorageConstructionSourceKind,
-    StorageError, StorageMutationBatch, StorageMutationHead, StorageOperationCompletion,
-    StorageOperationIdentity, StorageSealContext, StoredKey, TableId, backup_stream_bytes,
-    construction_plan_hash, logical_meta_charge, logical_record_charge, validate_record_plaintext,
-    verify_backup, verify_guard_pair,
+    MIN_SEALED_RECORD_BYTES, NonceReservationState, NonceReservationTbs, ProtocolRecordBody,
+    ReadPlan, RecordMutation, RecordReference, RollbackGuard, RollbackGuardPhase, RollbackGuardTbs,
+    SCHEMA_GENERATION, SealedRecord, StateMeta, StateMetaTbs, StorageAccountingLimits,
+    StorageConstruction, StorageConstructionAction, StorageConstructionCursor,
+    StorageConstructionKind, StorageConstructionPlanEntry, StorageConstructionSource,
+    StorageConstructionSourceKind, StorageError, StorageMutationBatch, StorageMutationHead,
+    StorageOperationCompletion, StorageOperationIdentity, StorageSealContext, StoredKey, TableId,
+    backup_stream_bytes, construction_plan_hash, logical_meta_charge, logical_record_charge,
+    validate_record_plaintext, verify_backup, verify_guard_pair,
 };
 use agenc_ircd_types::{
     AccountRandomId, DatabaseId, NetworkId, NormalizedLogin, OpaqueCredentialId, RecoveryEpoch,
@@ -36,6 +36,35 @@ fn digest(byte: u8) -> StorageDigest {
 
 fn stored_key(text: &[u8]) -> Result<StoredKey, StorageError> {
     StoredKey::new(text.to_vec())
+}
+
+fn account_key(seed: u8) -> Vec<u8> {
+    AccountRandomId::from_bytes([seed; 16])
+        .to_text()
+        .into_bytes()
+}
+
+fn domain_body(table: TableId, kind: u16, byte: u8) -> Result<Vec<u8>, StorageError> {
+    if table == TableId::NicknameReservation && kind == 1 {
+        return Ok(b"nickname".to_vec());
+    }
+    if table == TableId::ChannelName && kind == 1 {
+        return Ok(b"#channel".to_vec());
+    }
+    if matches!(
+        table,
+        TableId::FederationPeer
+            | TableId::FederationOrigin
+            | TableId::RequestResult
+            | TableId::EdgeOutbox
+            | TableId::EdgeProjection
+            | TableId::E2eeObject
+            | TableId::E2eeState
+    ) {
+        ProtocolRecordBody::new(table, kind, 1, vec![byte])?.encode()
+    } else {
+        Ok(vec![byte])
+    }
 }
 
 fn source(
@@ -191,7 +220,7 @@ fn backup_components_reject_each_envelope_order_trust_and_size_boundary()
         BackupTrustKey::new(signing_key.public_key())?.key_id
     );
 
-    let stored_key = stored_key(&[b'a'; 24])?;
+    let stored_key = StoredKey::new(account_key(1))?;
     let sealed = StorageSealContext::new(&master_key, binding, 1)?.seal(
         TableId::Account,
         1,
@@ -265,6 +294,7 @@ fn backup_components_reject_each_envelope_order_trust_and_size_boundary()
         BackupStreamWriter::start(Vec::new(), &header, 1_073_741_824)?.finish(&signing_key)?;
     assert_eq!(trailer.record_count, 0);
     let trust = BackupTrustKey::new(signing_key.public_key())?;
+    assert!(BackupTrustKey::with_validity(trust.key_id, signing_key.public_key(), 5, 5).is_err());
     assert!(verify_backup(stream.as_slice(), &master_key, &guard_root, &[], u64::MAX).is_err());
     assert!(
         verify_backup(
@@ -1010,6 +1040,154 @@ fn construction_codecs_cover_every_closed_action_and_cursor() -> Result<(), Box<
         );
     }
 
+    for (kind, action, target) in [
+        (
+            StorageConstructionKind::Rekey,
+            StorageConstructionAction::RekeyCopy,
+            TableId::Account,
+        ),
+        (
+            StorageConstructionKind::Restore,
+            StorageConstructionAction::RestoreCopy,
+            TableId::LoginIndex,
+        ),
+        (
+            StorageConstructionKind::Restore,
+            StorageConstructionAction::RestoreAccount,
+            TableId::Account,
+        ),
+        (
+            StorageConstructionKind::Restore,
+            StorageConstructionAction::RestoreChannel,
+            TableId::Channel,
+        ),
+        (
+            StorageConstructionKind::Restore,
+            StorageConstructionAction::RestorePeerTombstones,
+            TableId::FederationPeer,
+        ),
+        (
+            StorageConstructionKind::Restore,
+            StorageConstructionAction::RestoreE2eeState,
+            TableId::E2eeState,
+        ),
+    ] {
+        assert!(
+            StorageConstructionPlanEntry::new(
+                kind,
+                Vec::new(),
+                target,
+                stored_key(b"no-source")?,
+                1,
+                action,
+                0,
+            )
+            .is_err()
+        );
+        assert!(
+            StorageConstructionPlanEntry::new(
+                kind,
+                vec![source(
+                    StorageConstructionSourceKind::DatabaseRecord,
+                    target,
+                    b"wrong-rule",
+                    17,
+                )?],
+                target,
+                stored_key(b"wrong-rule")?,
+                1,
+                action,
+                1,
+            )
+            .is_err()
+        );
+    }
+    for (action, valid_target) in [
+        (StorageConstructionAction::RestoreCopy, TableId::LoginIndex),
+        (StorageConstructionAction::RestoreAccount, TableId::Account),
+        (StorageConstructionAction::RestoreChannel, TableId::Channel),
+        (
+            StorageConstructionAction::RestorePeerTombstones,
+            TableId::FederationPeer,
+        ),
+        (
+            StorageConstructionAction::RestoreE2eeState,
+            TableId::E2eeState,
+        ),
+    ] {
+        assert!(
+            StorageConstructionPlanEntry::new(
+                StorageConstructionKind::Restore,
+                vec![source(
+                    StorageConstructionSourceKind::BackupRecord,
+                    valid_target,
+                    b"wrong-target",
+                    18,
+                )?],
+                TableId::Audit,
+                stored_key(b"wrong-target")?,
+                1,
+                action,
+                0,
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        StorageConstructionPlanEntry::new(
+            StorageConstructionKind::Restore,
+            vec![source(
+                StorageConstructionSourceKind::BackupRecord,
+                TableId::ChannelName,
+                b"one-name-source",
+                19,
+            )?],
+            TableId::ChannelName,
+            stored_key(b"one-name-source")?,
+            1,
+            StorageConstructionAction::RestoreChannelName,
+            0,
+        )
+        .is_err()
+    );
+    assert!(
+        StorageConstructionPlanEntry::new(
+            StorageConstructionKind::Restore,
+            vec![
+                source(
+                    StorageConstructionSourceKind::BackupRecord,
+                    TableId::Channel,
+                    b"channel-source",
+                    20,
+                )?,
+                source(
+                    StorageConstructionSourceKind::BackupRecord,
+                    TableId::ChannelName,
+                    b"name-source",
+                    21,
+                )?,
+            ],
+            TableId::Audit,
+            stored_key(b"wrong-name-target")?,
+            1,
+            StorageConstructionAction::RestoreChannelName,
+            0,
+        )
+        .is_err()
+    );
+    assert!(
+        StorageConstructionPlanEntry::new(
+            StorageConstructionKind::Migrate,
+            Vec::new(),
+            TableId::Account,
+            stored_key(b"migration-wrong-action")?,
+            1,
+            StorageConstructionAction::RestoreAccount,
+            1,
+        )
+        .is_err()
+    );
+
     let restore_identity = StorageOperationIdentity {
         kind: StorageConstructionKind::Restore,
         command_version: 1,
@@ -1071,6 +1249,30 @@ fn construction_codecs_cover_every_closed_action_and_cursor() -> Result<(), Box<
         ..restore_identity
     };
     rekey_identity.validate()?;
+    assert!(
+        StorageOperationIdentity {
+            source_stream_digest: Some(digest(90)),
+            ..rekey_identity
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        StorageOperationIdentity {
+            target_schema_generation: SCHEMA_GENERATION + 1,
+            ..rekey_identity
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        StorageOperationIdentity {
+            transform_profile_hash: digest(91),
+            ..rekey_identity
+        }
+        .validate()
+        .is_err()
+    );
     assert!(
         StorageOperationIdentity {
             command_version: 2,
@@ -1992,7 +2194,7 @@ fn domain_record_envelope_covers_every_union_and_length_boundary() -> Result<(),
                 )
                 .encode()?
             } else {
-                vec![u8::try_from(kind)?]
+                domain_body(table, kind, u8::try_from(kind)?)?
             };
             let value = agenc_ircd_storage::PersistentRecordValue::new(
                 table,
@@ -2014,10 +2216,11 @@ fn domain_record_envelope_covers_every_union_and_length_boundary() -> Result<(),
         }
     }
 
-    let account = RecordReference::new(TableId::Account, stored_key(&[b'a'; 24])?)?;
+    let canonical_account_key = account_key(1);
+    let account = RecordReference::new(TableId::Account, stored_key(&canonical_account_key)?)?;
     let session = RecordReference::new(TableId::Session, stored_key(&[b's'; 16])?)?;
     assert_eq!(account.table(), TableId::Account);
-    assert_eq!(account.key().as_bytes(), &[b'a'; 24]);
+    assert_eq!(account.key().as_bytes(), canonical_account_key);
     let ordered = agenc_ircd_storage::PersistentRecordValue::new(
         TableId::Channel,
         1,
@@ -2080,7 +2283,10 @@ fn domain_record_envelope_covers_every_union_and_length_boundary() -> Result<(),
         .is_err()
     );
     let too_many_references = (0..=agenc_ircd_storage::MAX_RECORD_REFERENCES)
-        .map(|_| RecordReference::new(TableId::Account, stored_key(&[b'a'; 24])?))
+        .map(|_| {
+            let key = account_key(1);
+            RecordReference::new(TableId::Account, stored_key(&key)?)
+        })
         .collect::<Result<Vec<_>, StorageError>>()?;
     assert!(
         agenc_ircd_storage::PersistentRecordValue::new(
