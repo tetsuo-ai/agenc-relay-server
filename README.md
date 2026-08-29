@@ -16,11 +16,11 @@
 
 > [!IMPORTANT]
 > **This is pre-alpha infrastructure, not a deployable server.** Stages 00
-> through 04 are complete. The full Stage 05 persistence implementation and
-> acceptance gate pass; its exact-revision checkpoint is being recorded. There
-> are no sockets or daemon executor yet. The binary intentionally exits
-> unsuccessfully until Stage 06 composes the runtime, except for its stopped-
-> daemon storage-restore command.
+> through 05 are complete. The Stage 05 persistence checkpoint closes exact
+> source commit `bd7518fe7f5c7420debdbaa958aa444ecb5c80c9`. There are no
+> sockets or daemon executor yet. The binary intentionally exits unsuccessfully
+> until Stage 06 composes the runtime, except for its stopped-daemon storage-
+> restore command.
 
 ## What is being built
 
@@ -50,7 +50,7 @@ Ed25519, and authenticated storage.
 | 02 | complete; checkpoint closed | Incremental framing, client parsing, capability and registration state, bounded rendering, transcripts, and fuzz targets |
 | 03 | complete; checkpoint closed | Pure accounts, sessions, channels, authorization, privacy projections, plans, explicit external inputs, and an independent reference model |
 | 04 | complete; checkpoint closed | Secret-safe crypto adapters, fixed HPKE and OPAQUE profiles, account authentication, destructive-account proofs, bounded workers, and fuzz coverage |
-| 05 | implementation complete; checkpoint pending | Sealed redb records, exact accounting, rollback recovery, bounded checkpoints, full startup reconstruction, signed backup/restore, rekey construction, login-index transition, and native filesystem qualification |
+| 05 | complete; checkpoint closed | Sealed redb records, exact accounting, rollback recovery, bounded checkpoints, full startup reconstruction, signed backup/restore, rekey construction, login-index transition, and native filesystem qualification |
 | 06-10 | planned | Runtime composition, federation, E2EE routing, optional profiles, and production qualification |
 
 `agenc-ircd-storage` keeps redb on one blocking owner thread, accepts only
@@ -61,9 +61,11 @@ through a disposable on-disk index before the storage port becomes available.
 Backup, stopped-daemon restore, rekey, login-index transitions, and bounded
 checkpoint work all use resumable authenticated construction records.
 
-Stage 05 must pass before Stage 06 begins. The complete dependency-ordered roadmap lives in
+Stage 05 is closed, so Stage 06 runtime composition is the next implementation
+stage. The complete dependency-ordered roadmap lives in
 [TODO.md](TODO.md). See the
 [Stage 05 storage profile](conformance/stage-five-storage-profile.toml), the
+[Stage 05 checkpoint](conformance/evidence/stage-05-bd7518fe7f5c7420debdbaa958aa444ecb5c80c9.json), the
 [Stage 04 evidence record](conformance/stage-four-evidence.md), the
 [current Stage 04 checkpoint](conformance/evidence/stage-04-1e5b738468f88b238061cc6e84b732176f5cae65.json), the
 [historical Stage 04 checkpoint](conformance/evidence/stage-04-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json), and the
@@ -106,19 +108,20 @@ authenticated backup streams. The reviewed command list is in
 [conformance/gates.toml](conformance/gates.toml).
 
 The reviewed `opaque-ke` patch is vendored, hashed, and checked by workspace
-policy. An implementation command alone does not close a stage. The schema
-version 2 manifests and artifacts close Stages 00 through 04 for exact source
-commit `1e5b738468f88b238061cc6e84b732176f5cae65`. Stage 00 has 17 passed
-records, Stage 01 has 14, Stage 02 has 12, Stage 03 has 13, and Stage 04 has 20.
+policy. An implementation command alone does not close a stage. Schema version
+2 manifests and artifacts close Stages 00 through 04 for exact source commit
+`1e5b738468f88b238061cc6e84b732176f5cae65`. Stage 00 has 17 passed records,
+Stage 01 has 14, Stage 02 has 12, Stage 03 has 13, and Stage 04 has 20.
 The schema version 1 records for commit
 `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` remain archive-only.
 
-The complete Stage 05 implementation gate passes. Clean workspace coverage is
-90.00% of branches and 95.50% of lines, with all six critical regions at 100%.
-The gate includes 181 storage tests, cross-target checks for x86_64 and AArch64,
-signed native ext4 growth reports for both targets, and 10,000 deterministic
-runs of each storage fuzz target. The exact-source artifact and closing
-manifest are the remaining checkpoint step.
+The [Stage 05 manifest](conformance/evidence/stage-05-bd7518fe7f5c7420debdbaa958aa444ecb5c80c9.json)
+contains 39 passed records and closes exact source commit
+`bd7518fe7f5c7420debdbaa958aa444ecb5c80c9`. Its recorded gate ran 58 commands.
+Coverage is 90.00% of branches and 95.50% of lines, with all six critical
+regions at 100%. The gate includes 181 storage tests, cross-target checks for
+x86_64 and AArch64, signed native ext4 growth reports for both targets, and
+10,000 deterministic runs of each storage fuzz target.
 
 There is no server start command yet. The binary fails closed until its runtime
 is composed in Stage 06.

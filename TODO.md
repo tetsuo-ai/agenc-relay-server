@@ -55,7 +55,7 @@ References: [Architecture §§1.2–4](docs/ircd-architecture-and-implementation
 | 02 | Bounded client wire implementation | Complete | Pass, 2026-08-27 | [Current checkpoint](conformance/evidence/stage-02-1e5b738468f88b238061cc6e84b732176f5cae65.json) |
 | 03 | Pure deterministic domain model | Complete | Pass, 2026-08-27 | [Current checkpoint](conformance/evidence/stage-03-1e5b738468f88b238061cc6e84b732176f5cae65.json) |
 | 04 | Crypto adapters and account authentication | Complete | Pass, 2026-08-27 | [Current checkpoint](conformance/evidence/stage-04-1e5b738468f88b238061cc6e84b732176f5cae65.json) |
-| 05 | Durable and recoverable persistence | Implementation complete | Pass, 2026-08-29; exact-revision checkpoint pending | Absent |
+| 05 | Durable and recoverable persistence | Complete | Pass, 2026-08-29 | [Current checkpoint](conformance/evidence/stage-05-bd7518fe7f5c7420debdbaa958aa444ecb5c80c9.json) |
 | 06 | Conforming single-node daemon | Not started | Not run | Absent |
 | 07 | Conforming base federation | Not started | Not run | Absent |
 | 08 | Conforming E2EE server adapter | Not started | Not run | Absent |
@@ -928,13 +928,15 @@ durability or rollback outcome.
   satisfies the complete `DUR-*` invariant family.
   - Current status: clean all-workspace coverage is 90.00% of branches and
     95.50% of lines, with all six critical regions at 100%. The complete
-    implementation gate passes; exact-SHA recording remains before this task
-    can close.
+    implementation gate passes.
   - After: `S05-001` through `S05-015`.
   - Targets: `agenc-ircd-storage` and all storage evidence.
   - References: [Architecture §29 phase 5](docs/ircd-architecture-and-implementation-spec.md#29-implementation-sequence-and-acceptance-gates).
   - Invariants: `DUR-01` through `DUR-12`, applicable `CON-*` and `OPS-*`.
-  - Evidence: all storage acceptance evidence and mandatory workspace gates pass from clean state.
+  - Evidence: all storage acceptance evidence and mandatory workspace gates
+    pass from clean state; the [schema version 2 manifest](conformance/evidence/stage-05-bd7518fe7f5c7420debdbaa958aa444ecb5c80c9.json)
+    closes the gate for exact source commit
+    `bd7518fe7f5c7420debdbaa958aa444ecb5c80c9`.
 
 ## Stage 06 — Single-node runtime and operations
 

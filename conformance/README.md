@@ -69,10 +69,12 @@ bash scripts/check-stage-five.sh
 This command inherits the Stage 04 gate and adds the closed storage profile,
 storage dependency review, 181 storage tests, persistent-codec and backup-
 stream fuzzing, x86_64 and AArch64 checks, the complete fault campaign, signed
-native ext4 growth reports, and the Stage 05 requirement set. The current
-implementation run passes with 90.00% branch coverage, 95.50% line coverage,
-and all six critical regions at 100%. Its exact-source artifact and manifest
-must be recorded before `S05-900` closes.
+native ext4 growth reports, and the Stage 05 requirement set. The
+[schema version 2 manifest](evidence/stage-05-bd7518fe7f5c7420debdbaa958aa444ecb5c80c9.json)
+contains 39 passed records and closes exact source commit
+`bd7518fe7f5c7420debdbaa958aa444ecb5c80c9`. The recorded run reached 90.00%
+branch coverage, 95.50% line coverage, and 100% coverage in all six critical
+regions.
 
 For an evidence-only check:
 
