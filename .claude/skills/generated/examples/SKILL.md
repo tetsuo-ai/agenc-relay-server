@@ -29,23 +29,23 @@ description: "Skill for the Examples area of agenc-ircd. 38 symbols across 7 fil
 
 Start here when exploring this area:
 
-- **`measure_required_corpus`** (Function) — `crates/agenc-ircd-storage/src/qualification.rs:478`
-- **`measure_required_file_set`** (Function) — `crates/agenc-ircd-storage/src/qualification.rs:494`
-- **`finish`** (Function) — `crates/agenc-ircd-storage/src/qualification.rs:506`
-- **`native`** (Function) — `crates/agenc-ircd-storage/src/qualification.rs:69`
+- **`measure_required_corpus`** (Function) — `crates/agenc-ircd-storage/src/qualification.rs:481`
+- **`measure_required_file_set`** (Function) — `crates/agenc-ircd-storage/src/qualification.rs:497`
+- **`finish`** (Function) — `crates/agenc-ircd-storage/src/qualification.rs:509`
+- **`native`** (Function) — `crates/agenc-ircd-storage/src/qualification.rs:72`
 - **`fill`** (Function) — `crates/agenc-ircd-crypto/src/entropy.rs:15`
 
 ## Key Symbols
 
 | Symbol | Type | File | Line |
 |--------|------|------|------|
-| `measure_required_corpus` | Function | `crates/agenc-ircd-storage/src/qualification.rs` | 478 |
-| `measure_required_file_set` | Function | `crates/agenc-ircd-storage/src/qualification.rs` | 494 |
-| `finish` | Function | `crates/agenc-ircd-storage/src/qualification.rs` | 506 |
-| `native` | Function | `crates/agenc-ircd-storage/src/qualification.rs` | 69 |
+| `measure_required_corpus` | Function | `crates/agenc-ircd-storage/src/qualification.rs` | 481 |
+| `measure_required_file_set` | Function | `crates/agenc-ircd-storage/src/qualification.rs` | 497 |
+| `finish` | Function | `crates/agenc-ircd-storage/src/qualification.rs` | 509 |
+| `native` | Function | `crates/agenc-ircd-storage/src/qualification.rs` | 72 |
 | `fill` | Function | `crates/agenc-ircd-crypto/src/entropy.rs` | 15 |
 | `generate` | Function | `crates/agenc-ircd-crypto/src/signature.rs` | 202 |
-| `decode_unsigned` | Function | `crates/agenc-ircd-storage/src/qualification.rs` | 300 |
+| `decode_unsigned` | Function | `crates/agenc-ircd-storage/src/qualification.rs` | 303 |
 | `measure_growth` | Function | `crates/agenc-ircd-storage/examples/storage-qualification.rs` | 86 |
 | `prepare_case` | Function | `crates/agenc-ircd-storage/examples/storage-qualification.rs` | 151 |
 | `run_case` | Function | `crates/agenc-ircd-storage/examples/storage-qualification.rs` | 169 |
@@ -57,26 +57,24 @@ Start here when exploring this area:
 | `fragment_tree` | Function | `crates/agenc-ircd-storage/examples/storage-qualification.rs` | 340 |
 | `record_key` | Function | `crates/agenc-ircd-storage/examples/storage-qualification.rs` | 370 |
 | `signed_growth_report_is_exact_tuple_authority` | Function | `crates/agenc-ircd-storage/tests/stage_five_completion.rs` | 555 |
-| `qualification_required_file_set_measures_every_named_durable_case` | Function | `crates/agenc-ircd-storage/tests/stage_five_completion.rs` | 1186 |
+| `qualification_required_file_set_measures_every_named_durable_case` | Function | `crates/agenc-ircd-storage/tests/stage_five_completion.rs` | 1197 |
 | `main` | Function | `crates/agenc-ircd-storage/examples/storage-qualification.rs` | 29 |
 
 ## Execution Flows
 
 | Flow | Type | Steps |
 |------|------|-------|
-| `Construction_scan → Fill_from` | cross_community | 6 |
 | `Generate → Fill_from` | cross_community | 6 |
 | `Startup_scan → Fill_from` | cross_community | 5 |
-| `Main → From_bytes` | cross_community | 3 |
 
 ## Connected Areas
 
 | Area | Connections |
 |------|-------------|
 | Tests | 11 calls |
-| Cluster_233 | 3 calls |
-| Cluster_109 | 1 calls |
-| Cluster_273 | 1 calls |
+| Cluster_242 | 3 calls |
+| Cluster_110 | 1 calls |
+| Cluster_282 | 1 calls |
 
 ## How to Explore
 

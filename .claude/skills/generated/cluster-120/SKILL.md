@@ -1,11 +1,11 @@
 ---
 name: cluster-120
-description: "Skill for the Cluster_120 area of agenc-ircd. 21 symbols across 2 files."
+description: "Skill for the Cluster_120 area of agenc-ircd. 23 symbols across 2 files."
 ---
 
 # Cluster_120
 
-21 symbols | 2 files | Cohesion: 96%
+23 symbols | 2 files | Cohesion: 96%
 
 ## When to Use
 
@@ -17,7 +17,7 @@ description: "Skill for the Cluster_120 area of agenc-ircd. 21 symbols across 2 
 
 | File | Symbols |
 |------|---------|
-| `crates/agenc-ircd-crypto/src/worker.rs` | try_submit, new, reserved_memory_bytes, physical_queue_capacity, release (+15) |
+| `crates/agenc-ircd-crypto/src/worker.rs` | try_submit, new, reserved_memory_bytes, physical_queue_capacity, release (+17) |
 | `crates/agenc-ircd-domain/src/decision.rs` | channel |
 
 ## Entry Points
@@ -27,6 +27,7 @@ Start here when exploring this area:
 - **`new`** (Function) — `crates/agenc-ircd-crypto/src/worker.rs:74`
 - **`reserved_memory_bytes`** (Function) — `crates/agenc-ircd-crypto/src/worker.rs:102`
 - **`start`** (Function) — `crates/agenc-ircd-crypto/src/worker.rs:179`
+- **`shutdown`** (Function) — `crates/agenc-ircd-crypto/src/worker.rs:237`
 - **`channel`** (Function) — `crates/agenc-ircd-domain/src/decision.rs:483`
 
 ## Key Symbols
@@ -36,23 +37,23 @@ Start here when exploring this area:
 | `new` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 74 |
 | `reserved_memory_bytes` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 102 |
 | `start` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 179 |
+| `shutdown` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 237 |
 | `channel` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 483 |
 | `try_submit` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 41 |
 | `physical_queue_capacity` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 112 |
 | `release` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 148 |
-| `worker_loop` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 302 |
-| `execute_crypto_job` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 334 |
-| `drop` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 360 |
-| `admission_counters` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 480 |
-| `admission_release_rejects_underflow_without_wrapping` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 493 |
-| `work_item` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 502 |
-| `returns_completion_through_a_bounded_channel` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 521 |
-| `class_limit_counts_active_and_queued_work` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 532 |
-| `cancellation_before_start_preserves_the_running_job` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 560 |
-| `a_panicking_worker_poisons_later_admission` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 591 |
-| `submission_reports_shutdown_full_and_disconnected_queues` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 607 |
-| `worker_loop_reports_poison_shutdown_and_concurrent_failure` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 671 |
-| `empty_and_disconnected_completion_handles_fail_closed` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 745 |
+| `join_workers` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 241 |
+| `worker_loop` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 321 |
+| `execute_crypto_job` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 353 |
+| `drop` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 380 |
+| `admission_counters` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 501 |
+| `admission_release_rejects_underflow_without_wrapping` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 514 |
+| `work_item` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 523 |
+| `returns_completion_through_a_bounded_channel` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 542 |
+| `class_limit_counts_active_and_queued_work` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 553 |
+| `cancellation_before_start_preserves_the_running_job` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 581 |
+| `a_panicking_worker_poisons_later_admission` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 612 |
+| `submission_reports_shutdown_full_and_disconnected_queues` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 628 |
 
 ## How to Explore
 

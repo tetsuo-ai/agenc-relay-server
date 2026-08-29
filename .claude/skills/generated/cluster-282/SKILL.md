@@ -1,9 +1,9 @@
 ---
-name: cluster-273
-description: "Skill for the Cluster_273 area of agenc-ircd. 29 symbols across 1 files."
+name: cluster-282
+description: "Skill for the Cluster_282 area of agenc-ircd. 29 symbols across 1 files."
 ---
 
-# Cluster_273
+# Cluster_282
 
 29 symbols | 1 files | Cohesion: 91%
 
@@ -11,7 +11,7 @@ description: "Skill for the Cluster_273 area of agenc-ircd. 29 symbols across 1 
 
 - Working with code in `crates/`
 - Understanding how apply_inner, create_account, open_session work
-- Modifying cluster_273-related functionality
+- Modifying cluster_282-related functionality
 
 ## Key Files
 
@@ -58,12 +58,12 @@ description: "Skill for the Cluster_273 area of agenc-ircd. 29 symbols across 1 
 
 | Area | Connections |
 |------|-------------|
-| Cluster_270 | 3 calls |
-| Cluster_274 | 1 calls |
+| Cluster_279 | 3 calls |
+| Cluster_283 | 1 calls |
 
 ## How to Explore
 
 1. `context({name: "apply_inner"})` — see callers and callees
-2. `query({search_query: "cluster_273"})` — find related execution flows
+2. `query({search_query: "cluster_282"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

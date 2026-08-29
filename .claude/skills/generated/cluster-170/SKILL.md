@@ -1,9 +1,9 @@
 ---
-name: cluster-169
-description: "Skill for the Cluster_169 area of agenc-ircd. 17 symbols across 2 files."
+name: cluster-170
+description: "Skill for the Cluster_170 area of agenc-ircd. 17 symbols across 2 files."
 ---
 
-# Cluster_169
+# Cluster_170
 
 17 symbols | 2 files | Cohesion: 76%
 
@@ -11,7 +11,7 @@ description: "Skill for the Cluster_169 area of agenc-ircd. 17 symbols across 2 
 
 - Working with code in `crates/`
 - Understanding how validate_fields, validate_decoded_fields, validate_decoded_value work
-- Modifying cluster_169-related functionality
+- Modifying cluster_170-related functionality
 
 ## Key Files
 
@@ -47,13 +47,13 @@ description: "Skill for the Cluster_169 area of agenc-ircd. 17 symbols across 2 
 | Area | Connections |
 |------|-------------|
 | Tests | 3 calls |
-| Cluster_173 | 1 calls |
-| Cluster_170 | 1 calls |
-| Cluster_164 | 1 calls |
+| Cluster_174 | 1 calls |
+| Cluster_171 | 1 calls |
+| Cluster_165 | 1 calls |
 
 ## How to Explore
 
 1. `context({name: "validate_fields"})` — see callers and callees
-2. `query({search_query: "cluster_169"})` — find related execution flows
+2. `query({search_query: "cluster_170"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`
