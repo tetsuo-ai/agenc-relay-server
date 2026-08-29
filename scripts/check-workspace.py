@@ -92,7 +92,8 @@ EXTERNAL_DEPENDENCIES = {
     "opaque-sha2": ("=0.10.9", set()),
     "precis-profiles": ("=0.1.13", set()),
     "redb": ("=4.2.0", {"std"}),
-    "rustix": ("=1.1.4", {"fs", "std"}),
+    "loom": ("=0.7.2", set()),
+    "rustix": ("=1.1.4", {"fs", "mm", "process", "std"}),
     "rustls": ("=0.23.43", {"aws_lc_rs", "prefer-post-quantum", "std"}),
     "sha2": ("=0.11.0", {"zeroize"}),
     "subtle": ("=2.6.1", set()),
@@ -113,6 +114,7 @@ DIRECT_CHECKSUMS = {
     "hkdf": "4aaa26c720c68b866f2c96ef5c1264b3e6f473fe5d4ce61cd44bbe913e553018",
     "hmac": "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f",
     "hpke": "dd5130e119706b4d8c2180da6126f7e60b6c38c2d340d539219f57051f0a7af7",
+    "loom": "419e0dc8046cb947daa77eb95ae174acfbddb7673b4151f56d1eed8e93fbfaca",
     "opaque-ke": "ded22991b43cd15561b62b2e1cf9ace1344a8534eebec96202d5c96a77a6616a",
     "opaque-sha2": "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283",
     "precis-profiles": "31e2768890a47af73a032af9f0cedbddce3c9d06cf8de201d5b8f2436ded7674",
@@ -154,8 +156,10 @@ EXPECTED_EXTERNAL_EDGES = {
         "zeroize",
     },
     "agenc-ircd-storage": {"redb", "rustix", "subtle", "zeroize"},
-    "agenc-ircd-config": {"base64", "toml"},
-    "agenc-ircd-testkit": {"sha2", "subtle"},
+    "agenc-ircd-config": {"base64", "rustix", "toml", "zeroize"},
+    "agenc-ircd-admin": {"base64", "subtle", "zeroize"},
+    "agenc-ircd-runtime": {"loom", "rustls", "subtle", "tokio", "zeroize"},
+    "agenc-ircd-testkit": {"ed25519-dalek", "sha2", "subtle"},
 }
 CRATES_IO_SOURCES = {
     "registry+https://github.com/rust-lang/crates.io-index",
@@ -312,7 +316,7 @@ def validate_workspace_manifest(root: Path) -> dict[str, object]:
 
 def validate_dependency_profiles(dependencies: dict[str, object]) -> None:
     """Validate every root dependency declaration exactly."""
-    expected_names = CRATE_NAMES - {"agenc-ircd", "agenc-ircd-testkit"}
+    expected_names = CRATE_NAMES - {"agenc-ircd"}
     if set(dependencies) != expected_names | set(EXTERNAL_DEPENDENCIES):
         raise WorkspaceError("workspace dependency names differ from the frozen closed set")
 
@@ -441,7 +445,7 @@ def validate_direct_dependency_evidence(root: Path) -> None:
     expected_records = {
         name: (version.removeprefix("="), DIRECT_CHECKSUMS[name])
         for name, (version, _features) in EXTERNAL_DEPENDENCIES.items()
-        if name not in {"rustix", "toml"}
+        if name not in {"loom", "rustix", "toml"}
     }
     if records != expected_records:
         raise WorkspaceError("root dependency pins and frozen crates.io checksum evidence disagree")
@@ -471,6 +475,54 @@ def validate_direct_dependency_evidence(root: Path) -> None:
     }
     if stage_five != expected_stage_five:
         raise WorkspaceError("Stage 05 dependency evidence differs from its reviewed closed form")
+    stage_six = load_toml(root / "conformance/stage-six-dependencies.toml")
+    expected_stage_six = {
+        "schema_version": 1,
+        "dependency": [
+            {
+                "name": "loom",
+                "version": "0.7.2",
+                "checksum": DIRECT_CHECKSUMS["loom"],
+                "default_features": False,
+                "features": [],
+                "scope": "dev",
+                "purpose": "exhaustive schedule exploration of the Stage 06 runtime ownership, receipt, permit, and shutdown models under dev-only compilation",
+                "reviewed_on": "2026-08-29",
+            },
+            {
+                "name": "rustix",
+                "version": "1.1.4",
+                "checksum": DIRECT_CHECKSUMS["rustix"],
+                "default_features": False,
+                "features": ["fs", "mm", "process", "std"],
+                "scope": "production",
+                "purpose": "Stage 06 adds process identity, core-dump control, and secret memory locking to the reviewed filesystem profile",
+                "reviewed_on": "2026-08-29",
+            },
+            {
+                "name": "rustls",
+                "version": "0.23.43",
+                "checksum": DIRECT_CHECKSUMS["rustls"],
+                "default_features": False,
+                "features": ["aws_lc_rs", "prefer-post-quantum", "std"],
+                "scope": "production",
+                "purpose": "TLS 1.3 only client, onion, and administrative listeners on the explicit aws-lc provider with the hybrid key-exchange order",
+                "reviewed_on": "2026-08-29",
+            },
+            {
+                "name": "tokio",
+                "version": "1.53.1",
+                "checksum": DIRECT_CHECKSUMS["tokio"],
+                "default_features": False,
+                "features": ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"],
+                "scope": "production",
+                "purpose": "the owned Stage 06 task tree, bounded channels, listeners, timers, and signal handling",
+                "reviewed_on": "2026-08-29",
+            },
+        ],
+    }
+    if stage_six != expected_stage_six:
+        raise WorkspaceError("Stage 06 dependency evidence differs from its reviewed closed form")
 
 
 def cargo_metadata(root: Path) -> dict[str, object]:
