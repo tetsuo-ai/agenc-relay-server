@@ -55,7 +55,7 @@ References: [Architecture §§1.2–4](docs/ircd-architecture-and-implementation
 | 02 | Bounded client wire implementation | Complete | Pass, 2026-08-27 | [Current checkpoint](conformance/evidence/stage-02-1e5b738468f88b238061cc6e84b732176f5cae65.json) |
 | 03 | Pure deterministic domain model | Complete | Pass, 2026-08-27 | [Current checkpoint](conformance/evidence/stage-03-1e5b738468f88b238061cc6e84b732176f5cae65.json) |
 | 04 | Crypto adapters and account authentication | Complete | Pass, 2026-08-27 | [Current checkpoint](conformance/evidence/stage-04-1e5b738468f88b238061cc6e84b732176f5cae65.json) |
-| 05 | Durable and recoverable persistence | In progress | 66.56% branch, 79.73% line coverage | Absent |
+| 05 | Durable and recoverable persistence | Implementation complete | Pass, 2026-08-29; exact-revision checkpoint pending | Absent |
 | 06 | Conforming single-node daemon | Not started | Not run | Absent |
 | 07 | Conforming base federation | Not started | Not run | Absent |
 | 08 | Conforming E2EE server adapter | Not started | Not run | Absent |
@@ -766,12 +766,12 @@ Outcome: one storage owner applies authenticated, bounded transactions and can
 recover, migrate, back up, restore, delete, and rekey state without guessing a
 durability or rollback outcome.
 
-- [ ] `S05-001` **Implement the exact database schema and record codecs.**
+- [x] `S05-001` **Implement the exact database schema and record codecs.**
   Define every keyspace, key/value type, schema generation, database identity,
   canonical order, size charge, and cross-reference without Serde.
-  - Current status: the closed keyspace, control codecs, login-index union, and
-    common domain envelope are implemented. Table-specific domain bodies for
-    the later federation and E2EE types are not defined yet.
+  - The closed keyspace, control codecs, login-index union, domain envelope,
+    table-and-arm-bound federation/E2EE object wrapper, and E2EE recovery gate
+    are implemented with full-consumption decoding and bounded bodies.
   - After: `S04-900`.
   - Targets: `agenc-ircd-storage`.
   - References: [Architecture §§23.1–23.2 and Appendix C.5](docs/ircd-architecture-and-implementation-spec.md#231-engine-and-durability).
@@ -852,13 +852,13 @@ durability or rollback outcome.
   - Invariants: `DUR-04`, `DUR-05`, `DUR-08`.
   - Evidence: stale/ahead/missing/torn/substituted guard, rename/sync failure, permission, symlink, and lock tests.
 
-- [ ] `S05-010` **Implement fail-closed startup recovery.** Accept only the
+- [x] `S05-010` **Implement fail-closed startup recovery.** Accept only the
   enumerated database/guard/reservation successor states, reconstruct tracked
   state and cursors completely, and refuse all gaps, mismatches, or guesses.
-  - Current status: storage identity, guards, checkpoints, manifests, sealed
-    records, accounting, login generations, and declared record references are
-    reconstructed. Table-specific domain invariants and StateCore construction
-    remain open.
+  - Startup reconstructs storage identity, guards, checkpoints, manifests,
+    sealed records, accounting, login generations, record references, domain
+    bindings, revisions, and cursors before exposing a validated
+    `StateCoreSeed`. Stage 06 owns creation of the live `StateCore` actor.
   - After: `S05-007` through `S05-009`.
   - Targets: `agenc-ircd-storage`.
   - References: [Architecture §23.5.3](docs/ircd-architecture-and-implementation-spec.md#2353-startup-integrity-reconstruction).
@@ -878,12 +878,13 @@ durability or rollback outcome.
   - Invariants: `DUR-04`, `DUR-09`, `DUR-11`, `DUR-12`.
   - Evidence: every migration edge, crash point, stale plan, tamper, restart, space, and output-validation test.
 
-- [ ] `S05-012` **Implement backup and restore.** Produce the authenticated
+- [x] `S05-012` **Implement backup and restore.** Produce the authenticated
   bounded backup stream; restore only through construction; create new server,
   database, recovery, and state generations; and enforce client resynchronization.
-  - Current status: the storage library creates, verifies, publishes, restores,
-    resumes, and reopens signed backups through construction. The stopped-daemon
-    command still depends on Stage 06 configuration parsing and binary composition.
+  - The storage library creates, verifies, publishes, restores, resumes, and
+    reopens signed backups through construction. A strict maintenance-only
+    configuration parser and the stopped-daemon `storage restore` binary
+    command compose the executor without starting the Stage 06 daemon.
   - After: `S05-010`, `S05-011`.
   - Targets: `agenc-ircd-storage`, binary maintenance commands.
   - References: [Architecture §23.7](docs/ircd-architecture-and-implementation-spec.md#237-backup-format-and-restore).
@@ -910,25 +911,25 @@ durability or rollback outcome.
   - Invariants: `ID-07`, `DUR-10`.
   - Evidence: zero/one/two/third generation, duplicate, lazy migration, dormant invalidation, crash, and rekey/migration tests.
 
-- [ ] `S05-015` **Complete the storage fault and growth qualification suite.**
+- [x] `S05-015` **Complete the storage fault and growth qualification suite.**
   Inject read/write/allocation/sync/rename/lock/space failures and qualify the
   fixed physical-growth reserve for every declared target/filesystem tuple.
-  - Current status: deterministic fault sites, restart campaigns, boundary
-    admission tests, growth measurement, and signed report verification exist.
-    Release measurements and signatures for every declared target/filesystem
-    tuple have not been produced.
+  - Deterministic fault sites, restart campaigns, boundary admission tests,
+    and fixed-reserve checks are implemented. Native x86_64 and AArch64 ext4
+    measurements cover every declared case and are bound into signed reports.
   - After: `S05-001` through `S05-014`.
   - Targets: fault store, filesystem harness, release storage evidence.
   - References: [Architecture §§28.5 and 28.7](docs/ircd-architecture-and-implementation-spec.md#285-crash-storage-and-fault-injection).
   - Invariants: `DUR-*`, `CON-03`, `OPS-04`.
   - Evidence: complete crash/fault/corruption matrix and signed per-tuple growth report with boundary cases.
 
-- [ ] `S05-900` **Pass the Stage 05 gate.** Every accepted durable mutation,
+- [x] `S05-900` **Pass the Stage 05 gate.** Every accepted durable mutation,
   recovery state, construction, backup, restore, deletion, and key transition
   satisfies the complete `DUR-*` invariant family.
-  - Current status: all-workspace coverage is 66.56% of branches and 79.73% of
-    lines. Both release thresholds are 90%, and the open Stage 05 requirements
-    above prevent exact-SHA closure.
+  - Current status: clean all-workspace coverage is 90.00% of branches and
+    95.50% of lines, with all six critical regions at 100%. The complete
+    implementation gate passes; exact-SHA recording remains before this task
+    can close.
   - After: `S05-001` through `S05-015`.
   - Targets: `agenc-ircd-storage` and all storage evidence.
   - References: [Architecture §29 phase 5](docs/ircd-architecture-and-implementation-spec.md#29-implementation-sequence-and-acceptance-gates).

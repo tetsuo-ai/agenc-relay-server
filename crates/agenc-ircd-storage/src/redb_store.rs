@@ -204,8 +204,7 @@ impl SnapshotScan {
                     .checked_add(value.value().len())
                     .ok_or(StorageError::Overflow)?;
                 let next_bytes = bytes.checked_add(row_bytes).ok_or(StorageError::Overflow)?;
-                if !rows.is_empty() && (rows.len() == maximum_records || next_bytes > maximum_bytes)
-                {
+                if !rows.is_empty() && next_bytes > maximum_bytes {
                     exhausted = false;
                     break;
                 }
@@ -1054,5 +1053,492 @@ fn commit(transaction: WriteTransaction) -> Result<(), RedbCommitFailure> {
         }
         Err(CommitError::Storage(_)) => Err(RedbCommitFailure::Indeterminate),
         Err(_) => Err(RedbCommitFailure::Indeterminate),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::{self, OpenOptions};
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use redb::MultimapTableDefinition;
+
+    use super::*;
+
+    static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDirectory {
+        path: PathBuf,
+    }
+
+    impl TestDirectory {
+        fn create(label: &str) -> Result<Self, StorageError> {
+            let sequence = NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "agenc-redb-store-{label}-{}-{sequence}",
+                std::process::id()
+            ));
+            fs::create_dir(&path).map_err(|_| StorageError::DatabaseRejected)?;
+            Ok(Self { path })
+        }
+
+        fn create_file(&self, name: &str) -> Result<File, StorageError> {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(self.path.join(name))
+                .map_err(|_| StorageError::DatabaseRejected)
+        }
+
+        fn open_directory(&self) -> Result<File, StorageError> {
+            File::open(&self.path).map_err(|_| StorageError::DatabaseRejected)
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn open_store(label: &str) -> Result<(TestDirectory, RedbStore), StorageError> {
+        let directory = TestDirectory::create(label)?;
+        let file = directory.create_file("state.redb")?;
+        let store = RedbStore::open_with_faults(file, 1_048_576, StorageFaultInjector::disabled())?;
+        Ok((directory, store))
+    }
+
+    fn initialize(store: &RedbStore, writes: &[RedbWrite<'_>]) -> Result<(), StorageError> {
+        store
+            .initialize_database(b"header", b"reservation", writes)
+            .map_err(|failure| match failure {
+                RedbCommitFailure::Rejected(error) => error,
+                RedbCommitFailure::Indeterminate => StorageError::DatabaseRejected,
+            })
+    }
+
+    fn scratch(
+        directory: &TestDirectory,
+        name: &str,
+    ) -> Result<(File, File, String), StorageError> {
+        Ok((
+            directory.create_file(name)?,
+            directory.open_directory()?,
+            name.to_owned(),
+        ))
+    }
+
+    #[test]
+    fn version_and_scratch_key_codecs_reject_invalid_forms() -> Result<(), StorageError> {
+        let digest = StorageDigest::from_bytes([7_u8; 32]);
+        let present = IntegrityRecordVersion::Present {
+            record_schema: 3,
+            sealed_record_id: digest,
+        };
+        let encoded = encode_present_version(present)?.ok_or(StorageError::InvalidEncoding)?;
+        assert_eq!(decode_present_version(&encoded)?, present);
+        assert_eq!(
+            encode_present_version(IntegrityRecordVersion::Absent)?,
+            None
+        );
+        assert_eq!(
+            encode_present_version(IntegrityRecordVersion::Present {
+                record_schema: 0,
+                sealed_record_id: digest,
+            }),
+            Err(StorageError::InvalidEncoding)
+        );
+        assert_eq!(
+            decode_present_version(&encoded[..35]),
+            Err(StorageError::InvalidEncoding)
+        );
+        let mut zero_schema = encoded;
+        zero_schema[..4].fill(0);
+        assert_eq!(
+            decode_present_version(&zero_schema),
+            Err(StorageError::InvalidEncoding)
+        );
+
+        let stored_key = StoredKey::new(vec![9_u8; 32])?;
+        let key = scratch_key(TableId::E2eeObject, &stored_key)?;
+        let (decoded_table, decoded_key) = decode_scratch_key(&key)?;
+        assert_eq!(decoded_table, TableId::E2eeObject);
+        assert!(decoded_key == stored_key);
+        assert!(matches!(
+            decode_scratch_key(&[0]),
+            Err(StorageError::InvalidEncoding)
+        ));
+        let untracked = scratch_key(TableId::KeyCheck, &StoredKey::new(vec![1])?)?;
+        assert!(matches!(
+            decode_scratch_key(&untracked),
+            Err(StorageError::InvalidEncoding)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn reference_scratch_detects_duplicates_and_missing_targets() -> Result<(), StorageError> {
+        let directory = TestDirectory::create("references")?;
+        let (file, parent, name) = scratch(&directory, "references.redb")?;
+        let scratch = ReferenceScratch::create(file, parent, name)?;
+        let source_key = StoredKey::new(vec![1_u8; 32])?;
+        let target_key = StoredKey::new(vec![2_u8; 32])?;
+        let target = RecordReference::new(TableId::E2eeObject, target_key.clone())?;
+
+        let mut writer = scratch.begin()?;
+        writer.insert(
+            TableId::E2eeObject,
+            &source_key,
+            std::slice::from_ref(&target),
+        )?;
+        assert_eq!(
+            writer.insert(TableId::E2eeObject, &source_key, &[]),
+            Err(StorageError::StaleState)
+        );
+        writer.commit()?;
+        assert_eq!(scratch.validate(), Err(StorageError::StaleState));
+
+        let mut writer = scratch.begin()?;
+        writer.insert(TableId::E2eeObject, &target_key, &[])?;
+        writer.commit()?;
+        scratch.validate()?;
+        drop(scratch);
+        assert!(!directory.path().join("references.redb").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_scratch_validates_versions_and_reverse_transitions() -> Result<(), StorageError> {
+        let directory = TestDirectory::create("recovery")?;
+        let (file, parent, name) = scratch(&directory, "recovery.redb")?;
+        let scratch = RecoveryScratch::create(file, parent, name)?;
+        let stored_key = StoredKey::new(vec![3_u8; 32])?;
+        let digest = StorageDigest::from_bytes([4_u8; 32]);
+        let present = IntegrityRecordVersion::Present {
+            record_schema: 1,
+            sealed_record_id: digest,
+        };
+
+        let mut writer = scratch.begin_current()?;
+        writer.insert_current(TableId::E2eeObject, &stored_key, 1, digest)?;
+        assert_eq!(
+            writer.insert_current(TableId::E2eeObject, &stored_key, 1, digest),
+            Err(StorageError::StaleState)
+        );
+        writer.commit()?;
+        assert_eq!(scratch.digest()?.0, 1);
+
+        let mismatch = IntegrityRecordMutation::new(
+            TableId::E2eeObject,
+            stored_key.clone(),
+            IntegrityRecordVersion::Absent,
+            IntegrityRecordVersion::Present {
+                record_schema: 2,
+                sealed_record_id: digest,
+            },
+        )?;
+        assert_eq!(
+            scratch.apply_reverse(&[mismatch]),
+            Err(StorageError::StaleState)
+        );
+
+        let mutation = IntegrityRecordMutation::new(
+            TableId::E2eeObject,
+            stored_key,
+            IntegrityRecordVersion::Absent,
+            present,
+        )?;
+        scratch.apply_reverse(&[mutation])?;
+        assert_eq!(scratch.digest()?.0, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_digest_rejects_malformed_scratch_rows() -> Result<(), StorageError> {
+        let directory = TestDirectory::create("malformed-recovery")?;
+        let (file, parent, name) = scratch(&directory, "recovery.redb")?;
+        let scratch = RecoveryScratch::create(file, parent, name)?;
+        let transaction = scratch
+            .database
+            .begin_write()
+            .map_err(|_| StorageError::DatabaseRejected)?;
+        {
+            let mut table = transaction
+                .open_table(RECOVERY_SCRATCH_TABLE)
+                .map_err(|_| StorageError::DatabaseRejected)?;
+            table
+                .insert(&[0_u8, 0, 1][..], &[0_u8; 36][..])
+                .map_err(|_| StorageError::DatabaseRejected)?;
+        }
+        transaction
+            .commit()
+            .map_err(|_| StorageError::DatabaseRejected)?;
+        assert_eq!(scratch.digest(), Err(StorageError::InvalidEncoding));
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_scans_are_bounded_resettable_and_table_aware() -> Result<(), StorageError> {
+        let (_directory, store) = open_store("snapshot")?;
+        let first_key = [1_u8; 32];
+        let second_key = [2_u8; 32];
+        let writes = [
+            RedbWrite {
+                table: TableId::KeyCheck,
+                key: b"control",
+                value: Some(b"value"),
+            },
+            RedbWrite {
+                table: TableId::E2eeObject,
+                key: &first_key,
+                value: Some(b"a"),
+            },
+            RedbWrite {
+                table: TableId::E2eeObject,
+                key: &second_key,
+                value: Some(b"b"),
+            },
+        ];
+        initialize(&store, &writes)?;
+
+        let mut scan = store.snapshot_scan()?;
+        assert!(matches!(
+            scan.next_all_slice(0, 1),
+            Err(StorageError::LimitExceeded)
+        ));
+        assert!(matches!(
+            scan.next_all_slice(1, 0),
+            Err(StorageError::LimitExceeded)
+        ));
+        let first = scan.next_tracked_slice(10, 40)?;
+        assert_eq!(first.rows.len(), 1);
+        assert!(!first.complete);
+        let second = scan.next_tracked_slice(10, 40)?;
+        assert_eq!(second.rows.len(), 1);
+        while !scan.next_tracked_slice(10, 40)?.complete {}
+        assert!(scan.next_tracked_slice(10, 40)?.complete);
+
+        scan.reset();
+        let control = scan.next_all_slice(1, usize::MAX)?;
+        assert_eq!(
+            control.rows.first().map(|row| row.0),
+            Some(TableId::KeyCheck)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_scans_stop_at_exact_byte_and_next_row_boundaries() -> Result<(), StorageError> {
+        let (_directory, store) = open_store("snapshot-byte-boundaries")?;
+        let first_key = [1_u8; 32];
+        let second_key = [2_u8; 32];
+        initialize(
+            &store,
+            &[
+                RedbWrite {
+                    table: TableId::E2eeObject,
+                    key: &first_key,
+                    value: Some(b"a"),
+                },
+                RedbWrite {
+                    table: TableId::E2eeObject,
+                    key: &second_key,
+                    value: Some(b"b"),
+                },
+            ],
+        )?;
+
+        let mut exact = store.snapshot_scan()?;
+        let exact_slice = exact.next_tracked_slice(10, 33)?;
+        assert_eq!(exact_slice.rows.len(), 1);
+        assert!(!exact_slice.complete);
+
+        let mut next_row = store.snapshot_scan()?;
+        let next_row_slice = next_row.next_tracked_slice(10, 34)?;
+        assert_eq!(next_row_slice.rows.len(), 1);
+        assert!(!next_row_slice.complete);
+        Ok(())
+    }
+
+    #[test]
+    fn snapshots_and_store_visitors_enforce_byte_limits_and_errors() -> Result<(), StorageError> {
+        let (_directory, store) = open_store("visitors")?;
+        let key = [5_u8; 32];
+        initialize(
+            &store,
+            &[RedbWrite {
+                table: TableId::E2eeObject,
+                key: &key,
+                value: Some(b"payload"),
+            }],
+        )?;
+
+        let snapshot = store.snapshot()?;
+        assert_eq!(
+            snapshot.visit_table(TableId::E2eeObject, 1, |_key, _value| Ok(())),
+            Err(StorageError::LimitExceeded)
+        );
+        assert_eq!(
+            store.visit_table(TableId::E2eeObject, u64::MAX, |_key, _value| {
+                Err(StorageError::StaleState)
+            }),
+            Err(StorageError::StaleState)
+        );
+        assert_eq!(
+            store.visit_table(TableId::E2eeObject, 1, |_key, _value| Ok(())),
+            Err(StorageError::LimitExceeded)
+        );
+        assert_eq!(store.table_usage(TableId::E2eeObject, u64::MAX)?, (1, 39));
+        Ok(())
+    }
+
+    #[test]
+    fn initialization_and_inventory_reject_invalid_database_shapes() -> Result<(), StorageError> {
+        let (_directory, store) = open_store("inventory-extra-table")?;
+        let rejected = store.initialize_database(
+            b"header",
+            b"reservation",
+            &[RedbWrite {
+                table: TableId::E2eeObject,
+                key: b"key",
+                value: None,
+            }],
+        );
+        assert!(matches!(
+            rejected,
+            Err(RedbCommitFailure::Rejected(StorageError::InvalidEncoding))
+        ));
+        initialize(&store, &[])?;
+        store.validate_inventory()?;
+        store.validate_meta_membership()?;
+        store
+            .write_meta(b"unexpected", b"value")
+            .map_err(|failure| match failure {
+                RedbCommitFailure::Rejected(error) => error,
+                RedbCommitFailure::Indeterminate => StorageError::DatabaseRejected,
+            })?;
+        assert_eq!(
+            store.validate_meta_membership(),
+            Err(StorageError::InvalidEncoding)
+        );
+
+        let transaction = store
+            .database
+            .begin_write()
+            .map_err(|_| StorageError::DatabaseRejected)?;
+        {
+            let extra: TableDefinition<'static, &'static [u8], &'static [u8]> =
+                TableDefinition::new("unexpected");
+            let _table = transaction
+                .open_table(extra)
+                .map_err(|_| StorageError::DatabaseRejected)?;
+        }
+        transaction
+            .commit()
+            .map_err(|_| StorageError::DatabaseRejected)?;
+        assert_eq!(
+            store.validate_inventory(),
+            Err(StorageError::InvalidEncoding)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inventory_rejects_multimap_tables() -> Result<(), StorageError> {
+        let (_directory, store) = open_store("inventory-multimap")?;
+        initialize(&store, &[])?;
+        let transaction = store
+            .database
+            .begin_write()
+            .map_err(|_| StorageError::DatabaseRejected)?;
+        {
+            let definition: MultimapTableDefinition<'static, &'static [u8], &'static [u8]> =
+                MultimapTableDefinition::new("unexpected-multimap");
+            let _table = transaction
+                .open_multimap_table(definition)
+                .map_err(|_| StorageError::DatabaseRejected)?;
+        }
+        transaction
+            .commit()
+            .map_err(|_| StorageError::DatabaseRejected)?;
+        assert_eq!(
+            store.validate_inventory(),
+            Err(StorageError::InvalidEncoding)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn record_commits_cover_insert_replace_and_delete() -> Result<(), StorageError> {
+        let (_directory, store) = open_store("record-commits")?;
+        initialize(&store, &[])?;
+        let key = [8_u8; 32];
+        store
+            .commit_records(
+                &[RedbWrite {
+                    table: TableId::E2eeObject,
+                    key: &key,
+                    value: Some(b"first"),
+                }],
+                b"reservation-2",
+            )
+            .map_err(|failure| match failure {
+                RedbCommitFailure::Rejected(error) => error,
+                RedbCommitFailure::Indeterminate => StorageError::DatabaseRejected,
+            })?;
+        assert_eq!(
+            store.read_record(TableId::E2eeObject, &key)?,
+            Some(b"first".to_vec())
+        );
+        store
+            .commit_records(
+                &[RedbWrite {
+                    table: TableId::E2eeObject,
+                    key: &key,
+                    value: None,
+                }],
+                b"reservation-3",
+            )
+            .map_err(|failure| match failure {
+                RedbCommitFailure::Rejected(error) => error,
+                RedbCommitFailure::Indeterminate => StorageError::DatabaseRejected,
+            })?;
+        assert_eq!(store.read_record(TableId::E2eeObject, &key)?, None);
+        assert_eq!(
+            store.read_meta(RESERVATION_META_KEY)?,
+            Some(b"reservation-3".to_vec())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn open_and_transaction_fault_paths_fail_closed() -> Result<(), StorageError> {
+        let directory = TestDirectory::create("faults")?;
+        let empty = directory.create_file("empty.redb")?;
+        assert!(matches!(
+            RedbStore::open_with_faults(empty, 0, StorageFaultInjector::disabled()),
+            Err(StorageError::LimitExceeded)
+        ));
+
+        let file = directory.create_file("faulted.redb")?;
+        let injector = StorageFaultInjector::new(
+            crate::StorageFaultCase {
+                site: StorageFaultSite::TransactionBegin,
+                boundary: StorageFaultBoundary::Before,
+            },
+            1,
+        )?;
+        let store = RedbStore::open_with_faults(file, 1_048_576, injector)?;
+        assert!(matches!(
+            store.write_meta(b"key", b"value"),
+            Err(RedbCommitFailure::Rejected(StorageError::DatabaseRejected))
+        ));
+        Ok(())
     }
 }

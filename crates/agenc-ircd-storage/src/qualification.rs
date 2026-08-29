@@ -209,10 +209,10 @@ impl StorageQualificationReportTbs {
         let mut previous: Option<&str> = None;
         let mut maximum = 0_u64;
         for case in &self.cases {
-            if previous.is_some_and(|name| name >= case.name()) || !names.insert(case.name.as_str())
-            {
+            if previous.is_some_and(|name| name >= case.name()) {
                 return Err(StorageError::InvalidEncoding);
             }
+            names.insert(case.name.as_str());
             maximum = maximum.max(case.positive_delta());
             previous = Some(case.name());
         }
@@ -563,7 +563,9 @@ pub fn embedded_storage_qualifications() -> Result<Vec<StorageQualification>, St
         "../../../conformance/evidence/storage-qualification/x86_64-unknown-linux-gnu-ext4.report"
     )];
     #[cfg(target_arch = "aarch64")]
-    let reports: &[&[u8]] = &[];
+    let reports: &[&[u8]] = &[include_bytes!(
+        "../../../conformance/evidence/storage-qualification/aarch64-unknown-linux-gnu-ext4.report"
+    )];
     if reports.is_empty() {
         return Err(StorageError::FilesystemRejected);
     }
@@ -581,4 +583,281 @@ pub fn embedded_storage_qualifications() -> Result<Vec<StorageQualification>, St
             report.qualification_for(tuple)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::{self, OpenOptions};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+
+    static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
+    const NONZERO: StorageDigest = StorageDigest::from_bytes([1; 32]);
+
+    struct TestFile {
+        path: PathBuf,
+        file: File,
+    }
+
+    impl TestFile {
+        fn create() -> Result<Self, StorageError> {
+            let sequence = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "agenc-qualification-{}-{sequence}",
+                std::process::id()
+            ));
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .map_err(|_| StorageError::FilesystemRejected)?;
+            Ok(Self { path, file })
+        }
+    }
+
+    impl Drop for TestFile {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+
+    fn required_cases() -> Result<Vec<StorageGrowthCase>, StorageError> {
+        let mut cases = REQUIRED_QUALIFICATION_CASES
+            .iter()
+            .map(|name| StorageGrowthCase::new((*name).to_owned(), 1, 1))
+            .collect::<Result<Vec<_>, _>>()?;
+        cases.sort_by(|left, right| left.name().cmp(right.name()));
+        Ok(cases)
+    }
+
+    fn valid_tbs() -> Result<StorageQualificationReportTbs, StorageError> {
+        Ok(StorageQualificationReportTbs {
+            target: QualificationTarget::X86_64UnknownLinuxGnu,
+            filesystem_type: 0xef53,
+            block_size: 4_096,
+            mount_flags: 1,
+            kernel_release: "6.16.0".to_owned(),
+            redb_features_hash: NONZERO,
+            release_profile_hash: NONZERO,
+            corpus_hash: NONZERO,
+            cases: required_cases()?,
+            maximum_observed_growth: 0,
+            raw_log_hash: NONZERO,
+        })
+    }
+
+    #[test]
+    fn growth_cases_validate_names_and_positive_delta() -> Result<(), StorageError> {
+        let case = StorageGrowthCase::new("valid-case-2".to_owned(), 9, 4)?;
+        assert_eq!(case.name(), "valid-case-2");
+        assert_eq!(case.allocated_before(), 9);
+        assert_eq!(case.allocated_after(), 4);
+        assert_eq!(case.positive_delta(), 0);
+        assert_eq!(
+            StorageGrowthCase::new("growth".to_owned(), 4, 9)?.positive_delta(),
+            5
+        );
+        for name in ["", "UPPER", "bad_name", "bad space"] {
+            assert!(matches!(
+                StorageGrowthCase::new(name.to_owned(), 0, 0),
+                Err(StorageError::InvalidEncoding)
+            ));
+        }
+        assert!(matches!(
+            StorageGrowthCase::new("a".repeat(65), 0, 0),
+            Err(StorageError::InvalidEncoding)
+        ));
+        assert_eq!(
+            QualificationTarget::decode(1)?.as_str(),
+            "x86_64-unknown-linux-gnu"
+        );
+        assert_eq!(
+            QualificationTarget::decode(2)?.as_str(),
+            "aarch64-unknown-linux-gnu"
+        );
+        assert_eq!(
+            QualificationTarget::decode(3),
+            Err(StorageError::UnsupportedVersion)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn report_tbs_rejects_every_independent_tuple_and_hash_boundary() -> Result<(), StorageError> {
+        valid_tbs()?.validate()?;
+
+        let mut invalid = valid_tbs()?;
+        invalid.filesystem_type = 0;
+        assert_eq!(invalid.validate(), Err(StorageError::InvalidEncoding));
+        let mut invalid = valid_tbs()?;
+        invalid.block_size = 0;
+        assert_eq!(invalid.validate(), Err(StorageError::InvalidEncoding));
+        let mut invalid = valid_tbs()?;
+        invalid.block_size = 3;
+        assert_eq!(invalid.validate(), Err(StorageError::InvalidEncoding));
+        let mut invalid = valid_tbs()?;
+        invalid.kernel_release.clear();
+        assert_eq!(invalid.validate(), Err(StorageError::InvalidEncoding));
+        let mut invalid = valid_tbs()?;
+        invalid.kernel_release = "a".repeat(257);
+        assert_eq!(invalid.validate(), Err(StorageError::InvalidEncoding));
+        let mut invalid = valid_tbs()?;
+        invalid.kernel_release = "contains space".to_owned();
+        assert_eq!(invalid.validate(), Err(StorageError::InvalidEncoding));
+        let mut invalid = valid_tbs()?;
+        invalid.cases.clear();
+        assert_eq!(invalid.validate(), Err(StorageError::InvalidEncoding));
+        let mut invalid = valid_tbs()?;
+        invalid.maximum_observed_growth = MAX_QUALIFIED_OBSERVED_GROWTH + 1;
+        assert_eq!(invalid.validate(), Err(StorageError::InvalidEncoding));
+
+        for field in 0..4 {
+            let mut invalid = valid_tbs()?;
+            match field {
+                0 => invalid.redb_features_hash = StorageDigest::from_bytes([0; 32]),
+                1 => invalid.release_profile_hash = StorageDigest::from_bytes([0; 32]),
+                2 => invalid.corpus_hash = StorageDigest::from_bytes([0; 32]),
+                _ => invalid.raw_log_hash = StorageDigest::from_bytes([0; 32]),
+            }
+            assert_eq!(invalid.validate(), Err(StorageError::InvalidEncoding));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn report_tbs_rejects_order_duplicates_missing_cases_and_wrong_maximum()
+    -> Result<(), StorageError> {
+        let mut invalid = valid_tbs()?;
+        invalid.cases.swap(0, 1);
+        assert_eq!(invalid.validate(), Err(StorageError::InvalidEncoding));
+
+        let mut invalid = valid_tbs()?;
+        let duplicate_name = invalid
+            .cases
+            .first()
+            .ok_or(StorageError::StaleState)?
+            .name()
+            .to_owned();
+        *invalid.cases.get_mut(1).ok_or(StorageError::StaleState)? =
+            StorageGrowthCase::new(duplicate_name, 1, 1)?;
+        assert_eq!(invalid.validate(), Err(StorageError::InvalidEncoding));
+
+        let mut invalid = valid_tbs()?;
+        invalid.cases.pop();
+        assert_eq!(invalid.validate(), Err(StorageError::StaleState));
+
+        let mut invalid = valid_tbs()?;
+        invalid.maximum_observed_growth = 1;
+        assert_eq!(invalid.validate(), Err(StorageError::StaleState));
+        Ok(())
+    }
+
+    #[test]
+    fn signed_report_verification_binds_signature_and_exact_tuple() -> Result<(), StorageError> {
+        let release = Ed25519SecretKey::from_bytes([2; 32]);
+        let report = StorageQualificationReport::sign(valid_tbs()?, &release)?;
+        let encoded = report.encode()?;
+        let verified =
+            StorageQualificationReport::decode_and_verify(&encoded, release.public_key())?;
+        let tuple = FilesystemTuple {
+            target: verified.tbs().target.as_str(),
+            filesystem_type: verified.tbs().filesystem_type,
+            block_size: verified.tbs().block_size,
+            mount_flags: verified.tbs().mount_flags,
+        };
+        verified.qualification_for(tuple)?;
+        assert!(matches!(
+            StorageQualificationReport::decode_and_verify(
+                &encoded,
+                Ed25519SecretKey::from_bytes([3; 32]).public_key(),
+            ),
+            Err(StorageError::AuthenticationFailed)
+        ));
+
+        for mismatch in 0..4 {
+            let mut wrong = tuple;
+            match mismatch {
+                0 => wrong.target = "aarch64-unknown-linux-gnu",
+                1 => wrong.filesystem_type += 1,
+                2 => wrong.block_size += 1,
+                _ => wrong.mount_flags += 1,
+            }
+            assert_eq!(
+                verified.qualification_for(wrong),
+                Err(StorageError::FilesystemRejected)
+            );
+        }
+        assert_eq!(
+            StorageQualificationReportTbs::decode_unsigned(&vec![
+                0;
+                MAX_QUALIFICATION_REPORT_BYTES + 1
+            ])
+            .map(|_| ()),
+            Err(StorageError::LimitExceeded)
+        );
+        assert_eq!(
+            StorageQualificationReport::decode_and_verify(
+                &vec![0; MAX_QUALIFICATION_REPORT_BYTES + 1],
+                release.public_key(),
+            )
+            .map(|_| ()),
+            Err(StorageError::LimitExceeded)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recorder_rejects_duplicates_growth_and_empty_measurement_sets() -> Result<(), StorageError> {
+        let recorder = StorageGrowthRecorder::new();
+        assert_eq!(recorder.finish(), Err(StorageError::InvalidEncoding));
+
+        let mut recorder = StorageGrowthRecorder::new();
+        recorder.record(StorageGrowthCase::new("one".to_owned(), 0, 1)?)?;
+        assert_eq!(
+            recorder.record(StorageGrowthCase::new("one".to_owned(), 0, 1)?),
+            Err(StorageError::LimitExceeded)
+        );
+        assert_eq!(
+            recorder.record(StorageGrowthCase::new(
+                "too-large".to_owned(),
+                0,
+                MAX_QUALIFIED_OBSERVED_GROWTH + 1,
+            )?),
+            Err(StorageError::LimitExceeded)
+        );
+
+        let file = TestFile::create()?;
+        let mut recorder = StorageGrowthRecorder::new();
+        assert_eq!(
+            recorder.measure_file_set("empty", &[], || Ok(())),
+            Err(StorageError::InvalidEncoding)
+        );
+        assert_eq!(
+            recorder.measure_path_set("empty", &[], || Ok(())),
+            Err(StorageError::InvalidEncoding)
+        );
+        recorder.measure_file("file", &file.file, || Ok(()))?;
+        let missing = file.path.with_extension("missing");
+        recorder.measure_path_set("missing", &[missing.as_path()], || Ok(()))?;
+        let (cases, maximum) = recorder.finish()?;
+        assert_eq!(cases.len(), 2);
+        assert_eq!(maximum, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn recorder_rejects_the_first_case_beyond_capacity() -> Result<(), StorageError> {
+        let mut recorder = StorageGrowthRecorder::new();
+        for index in 0..MAX_QUALIFICATION_CASES {
+            recorder.record(StorageGrowthCase::new(format!("case-{index}"), 1, 1)?)?;
+        }
+        assert_eq!(
+            recorder.record(StorageGrowthCase::new("case-overflow".to_owned(), 1, 1)?),
+            Err(StorageError::LimitExceeded),
+        );
+        Ok(())
+    }
 }

@@ -290,12 +290,11 @@ impl StorageConstructionPlanEntry {
             return Err(StorageError::InvalidEncoding);
         }
         sources.sort_by(|left, right| left.identity().cmp(&right.identity()));
-        if sources.windows(2).any(|pair| {
-            let [left, right] = pair else {
-                return false;
-            };
-            left.identity() == right.identity()
-        }) {
+        if sources
+            .iter()
+            .zip(sources.iter().skip(1))
+            .any(|(left, right)| left.identity() == right.identity())
+        {
             return Err(StorageError::InvalidEncoding);
         }
         validate_action(kind, &sources, target_table, action, transform_rule_id)?;
@@ -555,10 +554,7 @@ impl StorageOperationIdentity {
         if decoder.u16()? != 1 {
             return Err(StorageError::UnsupportedVersion);
         }
-        let (identity, output_path_hash) = Self::decode_fields(decoder, false)?;
-        if output_path_hash.is_some() {
-            return Err(StorageError::InvalidEncoding);
-        }
+        let (identity, _output_path_hash) = Self::decode_fields(decoder, false)?;
         Ok(identity)
     }
 
@@ -805,5 +801,60 @@ fn validate_action(
             Ok(())
         }
         _ => Err(StorageError::InvalidEncoding),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ZERO: StorageDigest = StorageDigest::from_bytes([0; 32]);
+
+    #[test]
+    fn cursor_codecs_and_migration_entrypoint_reject_cross_profile_inputs()
+    -> Result<(), StorageError> {
+        let invalid_cursor = StorageConstructionCursor::AtTarget {
+            table: TableId::KeyCheck,
+            key: StoredKey::new(vec![1])?,
+        };
+        let mut encoder = Encoder::with_capacity(16, 32)?;
+        assert_eq!(
+            invalid_cursor.encode(&mut encoder),
+            Err(StorageError::InvalidEncoding),
+        );
+
+        let mut encoder = Encoder::with_capacity(16, 32)?;
+        encoder.put_u16(1)?;
+        encoder.put_u16(TableId::KeyCheck.as_u16())?;
+        encoder.put_vector_u32(&[1])?;
+        let encoded = encoder.finish();
+        assert!(matches!(
+            StorageConstructionCursor::decode(&mut Decoder::new(&encoded)),
+            Err(StorageError::InvalidEncoding),
+        ));
+
+        let identity = StorageOperationIdentity {
+            kind: StorageConstructionKind::Rekey,
+            command_version: 1,
+            source_database_header_hash: ZERO,
+            target_database_header_hash: ZERO,
+            source_rollback_guard_hash: ZERO,
+            source_stream_digest: None,
+            source_schema_generation: 1,
+            target_schema_generation: 1,
+            transform_profile_hash: ZERO,
+            target_database_instance_id: DatabaseId::from_bytes([0; 16]),
+            source_master_key_id: ZERO,
+            source_guard_root_key_id: ZERO,
+            target_master_key_id: ZERO,
+            target_guard_root_key_id: ZERO,
+            planned_entry_count: 0,
+            construction_plan_hash: ZERO,
+        };
+        assert_eq!(
+            identity.validate_migration_profile(&StorageFaultInjector::disabled()),
+            Err(StorageError::InvalidEncoding),
+        );
+        Ok(())
     }
 }

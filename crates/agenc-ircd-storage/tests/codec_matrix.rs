@@ -1454,6 +1454,15 @@ fn state_meta_rejects_counter_and_authenticator_corruption() -> Result<(), Box<d
     assert_all_truncations_fail(&encoded, |candidate| {
         StateMeta::decode_and_verify(candidate, header_hash, &keys).map(|_| ())
     });
+    let mut wrong_version = encoded.clone();
+    wrong_version
+        .get_mut(..2)
+        .ok_or(StorageError::InvalidEncoding)?
+        .copy_from_slice(&2_u16.to_be_bytes());
+    assert_eq!(
+        StateMeta::decode_and_verify(&wrong_version, header_hash, &keys).map(|_| ()),
+        Err(StorageError::UnsupportedVersion),
+    );
     let mut corrupted = encoded;
     let last = corrupted.len() - 1;
     let byte = corrupted
@@ -1684,6 +1693,9 @@ fn database_and_guard_controls_bind_every_identity_and_phase() -> Result<(), Box
     let mut value = guard_tbs;
     value.previous_guard_hash = digest(96);
     guard_mismatches.push(value);
+    let mut value = guard_tbs;
+    value.database_header_hash = digest(97);
+    guard_mismatches.push(value);
     for tbs in guard_mismatches {
         let candidate = RollbackGuard::authenticate(tbs, &keys)?;
         assert_eq!(
@@ -1691,6 +1703,30 @@ fn database_and_guard_controls_bind_every_identity_and_phase() -> Result<(), Box
             Err(StorageError::StaleState),
         );
     }
+
+    let reserved_tbs = NonceReservationTbs {
+        phase: RollbackGuardPhase::NonceReserved,
+        reservation_sequence: 1,
+        nonce_reservation_start: 10,
+        nonce_draw_high_water: 11,
+        ..reservation_tbs
+    };
+    let reserved = NonceReservationState::authenticate(reserved_tbs, &keys)?;
+    let reserved_guard = RollbackGuard::authenticate(
+        RollbackGuardTbs {
+            phase: RollbackGuardPhase::NonceReserved,
+            reservation_sequence: 1,
+            nonce_reservation_start: 10,
+            nonce_draw_high_water: 12,
+            nonce_reservation_state_hash: reserved.complete_hash()?,
+            ..guard_tbs
+        },
+        &keys,
+    )?;
+    assert_eq!(
+        verify_guard_pair(&header, &reserved, &reserved_guard),
+        Err(StorageError::StaleState),
+    );
     Ok(())
 }
 

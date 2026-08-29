@@ -22,6 +22,7 @@ EXPECTED_CRYPTO_MODULES = {
     "secret.rs",
     "signature.rs",
     "storage.rs",
+    "storage_integrity.rs",
     "worker.rs",
 }
 EXPECTED_AUTH_MODULES = {

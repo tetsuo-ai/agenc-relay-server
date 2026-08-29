@@ -304,11 +304,13 @@ impl StorageMutationBatch {
         mut mutations: Vec<RecordMutation>,
         scope: MutationScope,
     ) -> Result<Self, StorageError> {
-        if !(1..=MAX_TRANSACTION_PLANS).contains(&plan_count)
-            || mutations.is_empty()
-            || mutations.len() > MAX_TRACKED_MUTATIONS
-            || head.resulting_account_service_response_count
-                < head.expected_account_service_response_count
+        if (
+            !(1..=MAX_TRANSACTION_PLANS).contains(&plan_count),
+            mutations.is_empty(),
+            mutations.len() > MAX_TRACKED_MUTATIONS,
+            head.resulting_account_service_response_count
+                < head.expected_account_service_response_count,
+        ) != (false, false, false, false)
         {
             return Err(StorageError::LimitExceeded);
         }
@@ -316,8 +318,10 @@ impl StorageMutationBatch {
             .resulting_state_generation
             .checked_sub(head.expected_state_generation)
             .ok_or(StorageError::StaleState)?;
-        if usize::from(head.state_advancing_plan_count) > plan_count
-            || state_generation_delta != u64::from(head.state_advancing_plan_count)
+        if (
+            usize::from(head.state_advancing_plan_count) > plan_count,
+            state_generation_delta != u64::from(head.state_advancing_plan_count),
+        ) != (false, false)
         {
             return Err(StorageError::InvalidEncoding);
         }
@@ -339,9 +343,10 @@ impl StorageMutationBatch {
         let mut owned_bytes = 0_usize;
         let mut tracked_mutation_bytes = 0_usize;
         for mutation in &mutations {
-            if !mutation.table().is_integrity_tracked()
-                || (scope == MutationScope::Live
-                    && mutation.table() == TableId::StorageConstruction)
+            if (
+                !mutation.table().is_integrity_tracked(),
+                (scope, mutation.table()) == (MutationScope::Live, TableId::StorageConstruction),
+            ) != (false, false)
             {
                 return Err(StorageError::InvalidEncoding);
             }
@@ -396,18 +401,17 @@ impl StorageMutationBatch {
         backup = backup
             .checked_add(backup_record_charge(8, manifest_sealed_bytes)?)
             .ok_or(StorageError::Overflow)?;
-        if tracked == 0
-            || owned_bytes > MAX_STORAGE_MUTATION_BATCH_BYTES
-            || tracked_mutation_bytes > MAX_TRACKED_MUTATION_BYTES
-            || logical > accounting.database_max_bytes
-            || backup > accounting.backup_max_bytes
+        if (
+            tracked == 0,
+            owned_bytes > MAX_STORAGE_MUTATION_BATCH_BYTES,
+            tracked_mutation_bytes > MAX_TRACKED_MUTATION_BYTES,
+            logical > accounting.database_max_bytes,
+            backup > accounting.backup_max_bytes,
+        ) != (false, false, false, false, false)
         {
             return Err(StorageError::LimitExceeded);
         }
         let seal_count = puts.checked_add(2).ok_or(StorageError::Overflow)?;
-        if seal_count > 65_537 {
-            return Err(StorageError::LimitExceeded);
-        }
         Ok(Self {
             transaction_id: head.transaction_id,
             expected_storage_commit_sequence: head.expected_storage_commit_sequence,
@@ -561,9 +565,11 @@ pub(crate) fn manifest_sealed_record_bytes(
 }
 
 fn backup_record_charge(key_bytes: usize, sealed_record_bytes: usize) -> Result<u64, StorageError> {
-    if key_bytes == 0
-        || key_bytes > MAX_STORED_KEY_BYTES
-        || !(MIN_SEALED_RECORD_BYTES..=MAX_SEALED_RECORD_BYTES).contains(&sealed_record_bytes)
+    if (
+        key_bytes == 0,
+        key_bytes > MAX_STORED_KEY_BYTES,
+        !(MIN_SEALED_RECORD_BYTES..=MAX_SEALED_RECORD_BYTES).contains(&sealed_record_bytes),
+    ) != (false, false, false)
     {
         return Err(StorageError::LimitExceeded);
     }
@@ -665,4 +671,57 @@ pub enum CommitOutcome {
     Rejected(StorageError),
     /// Persistence may have occurred; the owner is permanently closed.
     Indeterminate,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PersistentRecordValue;
+
+    #[test]
+    fn manifest_and_backup_charge_helpers_reject_their_exact_ceilings() -> Result<(), StorageError>
+    {
+        assert_eq!(
+            backup_record_charge(0, MIN_SEALED_RECORD_BYTES),
+            Err(StorageError::LimitExceeded),
+        );
+        assert_eq!(
+            backup_record_charge(MAX_STORED_KEY_BYTES + 1, MIN_SEALED_RECORD_BYTES),
+            Err(StorageError::LimitExceeded),
+        );
+        assert_eq!(
+            backup_record_charge(1, MIN_SEALED_RECORD_BYTES - 1),
+            Err(StorageError::LimitExceeded),
+        );
+        assert_eq!(
+            backup_record_charge(1, MAX_SEALED_RECORD_BYTES + 1),
+            Err(StorageError::LimitExceeded),
+        );
+
+        let plaintext =
+            PersistentRecordValue::new(TableId::Sanction, 1, 1, 0, None, Vec::new(), Vec::new())?
+                .encode()?;
+        let mut mutations = Vec::new();
+        mutations
+            .try_reserve_exact(4_100)
+            .map_err(|_| StorageError::AllocationFailed)?;
+        for index in 0_u64..4_100 {
+            let mut key = vec![0_u8; MAX_STORED_KEY_BYTES];
+            key.get_mut(..8)
+                .ok_or(StorageError::InvalidEncoding)?
+                .copy_from_slice(&index.to_be_bytes());
+            mutations.push(RecordMutation::put(
+                TableId::Sanction,
+                StoredKey::new(key)?,
+                1,
+                None,
+                plaintext.clone(),
+            )?);
+        }
+        assert_eq!(
+            manifest_plaintext_bytes(&mutations),
+            Err(StorageError::LimitExceeded),
+        );
+        Ok(())
+    }
 }

@@ -346,9 +346,41 @@ fn parse_maintenance_config(text: &str) -> Result<MaintenanceStorageConfig, Conf
         return Err(ConfigError::InvalidValue);
     }
     validate_closed_shape(&root)?;
-    let network = require_table(&root, "network")?;
-    let server = require_table(&root, "server")?;
-    let storage = require_table(&root, "storage")?;
+    let identity = parse_maintenance_identity(&root)?;
+    let limits = parse_maintenance_limits(require_table(&root, "storage")?)?;
+    Ok(MaintenanceStorageConfig {
+        network_id: identity.network_id,
+        server_id: identity.server_id,
+        state_directory: identity.state_directory,
+        storage_master_key_file: identity.storage_master_key_file,
+        rollback_guard_key_file: identity.rollback_guard_key_file,
+        login_index_key_file: identity.login_index_key_file,
+        login_index_previous_key_file: identity.login_index_previous_key_file,
+        backup_trust_manifest_file: identity.backup_trust_manifest_file,
+        redb_cache_bytes: DEFAULT_REDB_CACHE_BYTES,
+        fixed_reserve_bytes: limits.fixed_reserve_bytes,
+        reserve_percent: limits.reserve_percent,
+        database_max_bytes: limits.database_max_bytes,
+        backup_max_bytes: limits.backup_max_bytes,
+        integrity_checkpoint_manifests: limits.integrity_checkpoint_manifests,
+    })
+}
+
+struct MaintenanceIdentity {
+    network_id: NetworkId,
+    server_id: ServerId,
+    state_directory: PathBuf,
+    storage_master_key_file: PathBuf,
+    rollback_guard_key_file: PathBuf,
+    login_index_key_file: PathBuf,
+    login_index_previous_key_file: Option<PathBuf>,
+    backup_trust_manifest_file: PathBuf,
+}
+
+fn parse_maintenance_identity(root: &Table) -> Result<MaintenanceIdentity, ConfigError> {
+    let network = require_table(root, "network")?;
+    let server = require_table(root, "server")?;
+    let storage = require_table(root, "storage")?;
     let network_id = NetworkId::parse(require_string(network, "network_id")?)
         .map_err(|_| ConfigError::InvalidValue)?;
     let server_id = ServerId::parse(require_string(server, "server_id")?)
@@ -364,6 +396,27 @@ fn parse_maintenance_config(text: &str) -> Result<MaintenanceStorageConfig, Conf
     let login_index_previous_key_file =
         optional_absolute_path(storage, "login_index_previous_key_file")?;
     let backup_trust_manifest_file = require_absolute_path(storage, "backup_trust_manifest_file")?;
+    Ok(MaintenanceIdentity {
+        network_id,
+        server_id,
+        state_directory: state_dir,
+        storage_master_key_file,
+        rollback_guard_key_file,
+        login_index_key_file,
+        login_index_previous_key_file,
+        backup_trust_manifest_file,
+    })
+}
+
+struct MaintenanceLimits {
+    fixed_reserve_bytes: u64,
+    reserve_percent: u8,
+    database_max_bytes: u64,
+    backup_max_bytes: u64,
+    integrity_checkpoint_manifests: u64,
+}
+
+fn parse_maintenance_limits(storage: &Table) -> Result<MaintenanceLimits, ConfigError> {
     let database_max_bytes = integer_or_default(
         storage,
         "database_max_bytes",
@@ -403,16 +456,7 @@ fn parse_maintenance_config(text: &str) -> Result<MaintenanceStorageConfig, Conf
         MIN_CHECKPOINT_MANIFESTS,
         MAX_CHECKPOINT_MANIFESTS,
     )?;
-    Ok(MaintenanceStorageConfig {
-        network_id,
-        server_id,
-        state_directory: state_dir,
-        storage_master_key_file,
-        rollback_guard_key_file,
-        login_index_key_file,
-        login_index_previous_key_file,
-        backup_trust_manifest_file,
-        redb_cache_bytes: DEFAULT_REDB_CACHE_BYTES,
+    Ok(MaintenanceLimits {
         fixed_reserve_bytes,
         reserve_percent,
         database_max_bytes,
@@ -760,6 +804,77 @@ backup_trust_manifest_file = "/etc/agenc/backup-trust.toml"
             assert!(load_backup_trust_manifest(&path).is_err());
             remove_test_file(&path)?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn maintenance_boundaries_reject_every_unsafe_file_and_collection_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let base = minimal_config();
+        assert_eq!(
+            parse_maintenance_config(&base.replace("/srv/agenc/state", "/srv/elsewhere/state"))
+                .map(|_| ()),
+            Err(ConfigError::InvalidValue)
+        );
+
+        assert_eq!(
+            read_protected_text(Path::new("relative.toml"), MAX_CONFIG_BYTES),
+            Err(ConfigError::FileRejected)
+        );
+        assert_eq!(
+            read_protected_text(Path::new("/tmp/../unsafe.toml"), MAX_CONFIG_BYTES),
+            Err(ConfigError::FileRejected)
+        );
+
+        let directory = protected_file("placeholder")?;
+        let parent = directory
+            .parent()
+            .ok_or("protected test file has no parent")?
+            .to_path_buf();
+        fs::remove_file(&directory)?;
+        assert_eq!(
+            read_protected_text(&parent, MAX_CONFIG_BYTES),
+            Err(ConfigError::FileRejected)
+        );
+        let oversized = parent.join("oversized.toml");
+        let file = fs::File::create(&oversized)?;
+        file.set_len(MAX_CONFIG_BYTES + 1)?;
+        fs::set_permissions(&oversized, fs::Permissions::from_mode(0o600))?;
+        assert_eq!(
+            read_protected_text(&oversized, MAX_CONFIG_BYTES),
+            Err(ConfigError::FileRejected)
+        );
+        fs::remove_file(&oversized)?;
+        fs::remove_dir(parent)?;
+
+        let empty = protected_file("backup_trust_version = 1\nkey = []\n")?;
+        assert_eq!(
+            load_backup_trust_manifest(&empty),
+            Err(ConfigError::InvalidValue)
+        );
+        remove_test_file(&empty)?;
+
+        let key = URL_SAFE_NO_PAD.encode([5_u8; 32]);
+        let row = format!(
+            "{{ key_id = \"{key}\", ed25519_public_key = \"{key}\", not_before = 1, not_after = 2 }}"
+        );
+        let oversized_rows = format!(
+            "backup_trust_version = 1\nkey = [{}]\n",
+            std::iter::repeat_n(row, 1_025)
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let oversized_manifest = protected_file(&oversized_rows)?;
+        assert_eq!(
+            load_backup_trust_manifest(&oversized_manifest),
+            Err(ConfigError::InvalidValue)
+        );
+        remove_test_file(&oversized_manifest)?;
+
+        assert_eq!(
+            parse_base64url_32(&"!".repeat(43)),
+            Err(ConfigError::InvalidValue)
+        );
         Ok(())
     }
 }

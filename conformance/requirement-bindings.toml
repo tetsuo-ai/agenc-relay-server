@@ -140,14 +140,14 @@ id = "ARCH-DUR-04"
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S05-010"]
 evidence_ids = ["EVID-ARCH-DUR-04"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-DUR-05"
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S05-012"]
 evidence_ids = ["EVID-ARCH-DUR-05"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-DUR-06"
@@ -168,7 +168,7 @@ id = "ARCH-DUR-08"
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S05-010"]
 evidence_ids = ["EVID-ARCH-DUR-08"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-DUR-09"
@@ -189,7 +189,7 @@ id = "ARCH-DUR-11"
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S05-015"]
 evidence_ids = ["EVID-ARCH-DUR-11"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-DUR-12"
@@ -833,7 +833,7 @@ id = "ARCH-REQ-CAFA64060EE32DC7419D"
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S05-001"]
 evidence_ids = ["EVID-ARCH-REQ-CAFA64060EE32DC7419D"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-REQ-D621F68B6C389E5B7660"

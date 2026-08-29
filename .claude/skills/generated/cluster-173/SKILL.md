@@ -1,63 +1,69 @@
 ---
 name: cluster-173
-description: "Skill for the Cluster_173 area of agenc-ircd. 15 symbols across 2 files."
+description: "Skill for the Cluster_173 area of agenc-ircd. 104 symbols across 2 files."
 ---
 
 # Cluster_173
 
-15 symbols | 2 files | Cohesion: 63%
+104 symbols | 2 files | Cohesion: 95%
 
 ## When to Use
 
 - Working with code in `crates/`
-- Understanding how decode_one_without_embedded, validate_embedded_semantics work
+- Understanding how validate_schema_semantics, parse, parse_wire_bytes work
 - Modifying cluster_173-related functionality
 
 ## Key Files
 
 | File | Symbols |
 |------|---------|
-| `crates/agenc-ircd-federation-wire/src/semantics.rs` | validate_embedded_semantics, validate_optional_schema_embedded, validate_session_event_embedded, validate_discriminated_embedded, validate_event_target_binding (+8) |
-| `crates/agenc-ircd-federation-wire/src/codec.rs` | remaining, decode_one_without_embedded |
+| `crates/agenc-ircd-federation-wire/src/semantics.rs` | validate_schema_semantics, validate_event_schema, validate_operation_schema, validate_result_schema, validate_session_event_identity (+95) |
+| `crates/agenc-ircd-types/src/identifiers.rs` | unpadded_base64_len, parse_fixed, parse, parse_wire_bytes |
 
 ## Entry Points
 
 Start here when exploring this area:
 
-- **`decode_one_without_embedded`** (Function) — `crates/agenc-ircd-federation-wire/src/codec.rs:1100`
-- **`validate_embedded_semantics`** (Function) — `crates/agenc-ircd-federation-wire/src/semantics.rs:185`
+- **`validate_schema_semantics`** (Function) — `crates/agenc-ircd-federation-wire/src/semantics.rs:41`
+- **`parse`** (Function) — `crates/agenc-ircd-types/src/identifiers.rs:248`
+- **`parse_wire_bytes`** (Function) — `crates/agenc-ircd-types/src/identifiers.rs:300`
 
 ## Key Symbols
 
 | Symbol | Type | File | Line |
 |--------|------|------|------|
-| `decode_one_without_embedded` | Function | `crates/agenc-ircd-federation-wire/src/codec.rs` | 1100 |
-| `validate_embedded_semantics` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 185 |
-| `remaining` | Function | `crates/agenc-ircd-federation-wire/src/codec.rs` | 1010 |
-| `validate_optional_schema_embedded` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 216 |
-| `validate_session_event_embedded` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 242 |
-| `validate_discriminated_embedded` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 299 |
-| `validate_event_target_binding` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 334 |
-| `event_projection_home_server` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 349 |
-| `validate_mode_change_embedded` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 457 |
-| `validate_embedded` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 1539 |
-| `decode_embedded` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 1553 |
-| `retain_embedded` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 1567 |
-| `validate_optional_embedded` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 1579 |
-| `validate_projected_mode_embedded` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 1646 |
-| `validate_projected_limit` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 1684 |
+| `validate_schema_semantics` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 41 |
+| `parse` | Function | `crates/agenc-ircd-types/src/identifiers.rs` | 248 |
+| `parse_wire_bytes` | Function | `crates/agenc-ircd-types/src/identifiers.rs` | 300 |
+| `validate_event_schema` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 105 |
+| `validate_operation_schema` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 133 |
+| `validate_result_schema` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 169 |
+| `validate_session_event_identity` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 261 |
+| `validate_matching_structure_fields` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 282 |
+| `validate_event_projection_consistency` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 376 |
+| `decode_event_home_projection` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 409 |
+| `validate_projected_mode_channels` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 429 |
+| `field` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 481 |
+| `unsigned_field` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 494 |
+| `opaque_field` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 505 |
+| `structure_field` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 516 |
+| `vector_field` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 527 |
+| `semantic` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 538 |
+| `validate_normalized_login` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 545 |
+| `validate_credential_change_start` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 555 |
+| `validate_creation_invite` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 562 |
 
 ## Connected Areas
 
 | Area | Connections |
 |------|-------------|
-| Cluster_175 | 17 calls |
-| Tests | 4 calls |
-| Cluster_176 | 1 calls |
+| Cluster_171 | 3 calls |
+| Tests | 3 calls |
+| Cluster_167 | 1 calls |
 
 ## How to Explore
 
-1. `context({name: "decode_one_without_embedded"})` — see callers and callees
+1. `context({name: "validate_schema_semantics"})` — see callers and callees
 2. `query({search_query: "cluster_173"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

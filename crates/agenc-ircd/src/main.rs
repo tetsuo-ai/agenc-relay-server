@@ -6,10 +6,13 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use agenc_ircd_config::{load_backup_trust_manifest, load_maintenance_config};
+use agenc_ircd_config::{
+    BackupTrustManifestEntry, MaintenanceStorageConfig, load_backup_trust_manifest,
+    load_maintenance_config,
+};
 use agenc_ircd_storage::{
-    RestoreCommandRequest, RestoreTrustKey, StorageEngineLimits, embedded_storage_qualifications,
-    execute_restore_command,
+    RestoreCommandReceipt, RestoreCommandRequest, RestoreTrustKey, StorageEngineLimits,
+    embedded_storage_qualifications, execute_restore_command,
 };
 
 const DAEMON_UNAVAILABLE_MESSAGE: &str =
@@ -46,8 +49,20 @@ fn run(arguments: Vec<OsString>) -> Result<(), &'static str> {
 
 fn restore(options: RestoreOptions) -> Result<(), Box<dyn std::error::Error>> {
     let config = load_maintenance_config(&options.config)?;
-    let trust_manifest = load_backup_trust_manifest(&config.backup_trust_manifest_file)?;
-    let trusted_backup_keys = trust_manifest
+    let trusted_backup_keys = restore_trust_keys(load_backup_trust_manifest(
+        &config.backup_trust_manifest_file,
+    )?);
+    let qualifications = embedded_storage_qualifications()?;
+    let receipt = execute_restore_command(
+        restore_request(options, config, trusted_backup_keys),
+        &qualifications,
+    )?;
+    print_restore_receipt(&receipt);
+    Ok(())
+}
+
+fn restore_trust_keys(entries: Vec<BackupTrustManifestEntry>) -> Vec<RestoreTrustKey> {
+    entries
         .into_iter()
         .map(|entry| {
             RestoreTrustKey::new(
@@ -57,38 +72,43 @@ fn restore(options: RestoreOptions) -> Result<(), Box<dyn std::error::Error>> {
                 entry.not_after,
             )
         })
-        .collect();
-    let limits = StorageEngineLimits {
-        redb_cache_bytes: config.redb_cache_bytes,
-        fixed_reserve_bytes: config.fixed_reserve_bytes,
-        reserve_percent: config.reserve_percent,
-        database_max_bytes: config.database_max_bytes,
-        backup_max_bytes: config.backup_max_bytes,
-        integrity_checkpoint_manifests: config.integrity_checkpoint_manifests,
-    };
-    let qualifications = embedded_storage_qualifications()?;
-    let receipt = execute_restore_command(
-        RestoreCommandRequest {
-            network_id: config.network_id,
-            server_id: config.server_id,
-            current_state_directory: config.state_directory,
-            current_master_key_file: config.storage_master_key_file,
-            current_rollback_guard_key_file: config.rollback_guard_key_file,
-            backup_path: options.backup,
-            source_master_key_file: options.source_master_key_file,
-            source_rollback_guard_key_file: options.source_rollback_guard_key_file,
-            login_index_key_file: config.login_index_key_file,
-            login_index_previous_key_file: config.login_index_previous_key_file,
-            output_state_directory: options.output_state_directory,
-            target_rollback_guard_key_file: options.target_rollback_guard_key_file,
-            target_master_key_file: options.target_master_key_file,
-            resume: options.resume,
-            declare_recovery_epoch: options.declare_recovery_epoch,
-            trusted_backup_keys,
-            limits,
+        .collect()
+}
+
+fn restore_request(
+    options: RestoreOptions,
+    config: MaintenanceStorageConfig,
+    trusted_backup_keys: Vec<RestoreTrustKey>,
+) -> RestoreCommandRequest {
+    RestoreCommandRequest {
+        network_id: config.network_id,
+        server_id: config.server_id,
+        current_state_directory: config.state_directory,
+        current_master_key_file: config.storage_master_key_file,
+        current_rollback_guard_key_file: config.rollback_guard_key_file,
+        backup_path: options.backup,
+        source_master_key_file: options.source_master_key_file,
+        source_rollback_guard_key_file: options.source_rollback_guard_key_file,
+        login_index_key_file: config.login_index_key_file,
+        login_index_previous_key_file: config.login_index_previous_key_file,
+        output_state_directory: options.output_state_directory,
+        target_rollback_guard_key_file: options.target_rollback_guard_key_file,
+        target_master_key_file: options.target_master_key_file,
+        resume: options.resume,
+        declare_recovery_epoch: options.declare_recovery_epoch,
+        trusted_backup_keys,
+        limits: StorageEngineLimits {
+            redb_cache_bytes: config.redb_cache_bytes,
+            fixed_reserve_bytes: config.fixed_reserve_bytes,
+            reserve_percent: config.reserve_percent,
+            database_max_bytes: config.database_max_bytes,
+            backup_max_bytes: config.backup_max_bytes,
+            integrity_checkpoint_manifests: config.integrity_checkpoint_manifests,
         },
-        &qualifications,
-    )?;
+    }
+}
+
+fn print_restore_receipt(receipt: &RestoreCommandReceipt) {
     println!(
         "recovery epoch changed: {} -> {}",
         receipt.source_recovery_epoch.to_base64url(),
@@ -109,7 +129,6 @@ fn restore(options: RestoreOptions) -> Result<(), Box<dyn std::error::Error>> {
             receipt.source_state_generation, receipt.target_state_generation
         ),
     }
-    Ok(())
 }
 
 struct RestoreOptions {

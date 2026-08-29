@@ -401,8 +401,10 @@ impl ConstructionPlanBuilder {
         state: StateMetaTbs,
         checkpoint: &IntegrityCheckpoint,
     ) -> Result<(), StorageError> {
-        if checkpoint.tbs().cut_manifest_sequence != state.checkpoint_manifest_sequence
-            || checkpoint.checkpoint_hash() != state.checkpoint_hash
+        if (
+            checkpoint.tbs().cut_manifest_sequence,
+            checkpoint.checkpoint_hash(),
+        ) != (state.checkpoint_manifest_sequence, state.checkpoint_hash)
         {
             return Err(StorageError::StaleState);
         }
@@ -500,18 +502,15 @@ impl ConstructionPlanBuilder {
         for row in current.iter().map_err(|_| StorageError::DatabaseRejected)? {
             let (identity, encoded) = row.map_err(|_| StorageError::DatabaseRejected)?;
             let (table, key) = decode_restore_scratch_key(identity.value())?;
-            let IntegrityRecordVersion::Present {
-                record_schema,
-                sealed_record_id,
-            } = decode_restore_version(encoded.value())?
-            else {
-                return Err(StorageError::InvalidEncoding);
-            };
+            let (record_schema, sealed_record_id) = decode_restore_present(encoded.value())?;
             let tuple = tracked_commitment_tuple(table, &key, record_schema, sealed_record_id)?;
             hasher.update(tracked_record_commitment(&tuple)?)?;
         }
-        if count != checkpoint.tbs().tracked_record_count
-            || hasher.finalize()? != checkpoint.tbs().tracked_state_digest
+        if (count, hasher.finalize()?)
+            != (
+                checkpoint.tbs().tracked_record_count,
+                checkpoint.tbs().tracked_state_digest,
+            )
         {
             return Err(StorageError::StaleState);
         }
@@ -648,6 +647,14 @@ fn encode_restore_version(
 }
 
 fn decode_restore_version(encoded: &[u8]) -> Result<IntegrityRecordVersion, StorageError> {
+    let (record_schema, sealed_record_id) = decode_restore_present(encoded)?;
+    Ok(IntegrityRecordVersion::Present {
+        record_schema,
+        sealed_record_id,
+    })
+}
+
+fn decode_restore_present(encoded: &[u8]) -> Result<(u32, StorageDigest), StorageError> {
     let (schema, record_id) = encoded
         .split_first_chunk::<4>()
         .ok_or(StorageError::InvalidEncoding)?;
@@ -658,10 +665,7 @@ fn decode_restore_version(encoded: &[u8]) -> Result<IntegrityRecordVersion, Stor
     if record_schema == 0 {
         return Err(StorageError::InvalidEncoding);
     }
-    Ok(IntegrityRecordVersion::Present {
-        record_schema,
-        sealed_record_id: StorageDigest::from_bytes(record_id),
-    })
+    Ok((record_schema, StorageDigest::from_bytes(record_id)))
 }
 
 fn tracked_commitment_tuple(
@@ -752,7 +756,7 @@ impl ConstructionPlan {
                     u64::try_from(entry.encode()?.len()).map_err(|_| StorageError::Overflow)?,
                 )
                 .ok_or(StorageError::Overflow)?;
-            if encoded_bytes > limits.plan_bytes || encoded_bytes > MAX_CONSTRUCTION_PLAN_BYTES {
+            if encoded_bytes > limits.plan_bytes {
                 return Err(StorageError::LimitExceeded);
             }
             if entry.target_table() == TableId::LoginIndexKeyState {
@@ -897,9 +901,6 @@ impl ConstructionPlan {
                 return Err(StorageError::InvalidEncoding);
             }
             let canonical = entry.encode()?;
-            if canonical != encoded.value() {
-                return Err(StorageError::InvalidEncoding);
-            }
             bytes = bytes
                 .checked_add(u64::try_from(canonical.len()).map_err(|_| StorageError::Overflow)?)
                 .ok_or(StorageError::Overflow)?;
@@ -968,9 +969,7 @@ impl ConstructionPlan {
     fn validate_initial_marker(&self, marker: &StorageConstruction) -> Result<(), StorageError> {
         marker.validate()?;
         self.validate_identity(&marker.identity)?;
-        if marker.next_target != StorageConstructionCursor::BeforeFirst
-            || marker.target_records_committed != 0
-        {
+        if marker.next_target != StorageConstructionCursor::BeforeFirst {
             return Err(StorageError::ResumeMismatch);
         }
         Ok(())
@@ -1410,11 +1409,7 @@ impl ConstructionSourceRecord {
         storage_key_generation: u32,
     ) -> Result<Self, StorageError> {
         let sealed = SealedRecord::decode(encoded_sealed_record)?;
-        if sealed.table() != reference.table()
-            || sealed.record_schema() != reference.record_schema()
-            || sealed.record_id()? != reference.sealed_record_id()
-            || sealed.key_generation() != storage_key_generation
-        {
+        if sealed.record_id()? != reference.sealed_record_id() {
             return Err(StorageError::AuthenticationFailed);
         }
         let plaintext = sealed.open(
@@ -1590,9 +1585,7 @@ fn validate_source_charges(
     limits: ConstructionLimits,
 ) -> Result<(), StorageError> {
     if state.logical_database_bytes > limits.source_database_bytes
-        || state.logical_database_bytes > MAX_CONSTRUCTION_SOURCE_BYTES
         || state.backup_stream_bytes > limits.source_backup_bytes
-        || state.backup_stream_bytes > MAX_CONSTRUCTION_SOURCE_BYTES
     {
         return Err(StorageError::LimitExceeded);
     }
@@ -2013,8 +2006,10 @@ impl<R: Read + Seek> RestoreBackupSource<R> {
         let limits = limits.validate()?;
         let facts = self.facts()?;
         validate_source_charges(facts.state, limits)?;
-        if self.verified.logical_database_bytes > limits.source_database_bytes
-            || self.verified.stream_bytes > limits.source_backup_bytes
+        if (
+            self.verified.logical_database_bytes > limits.source_database_bytes,
+            self.verified.stream_bytes > limits.source_backup_bytes,
+        ) != (false, false)
         {
             return Err(StorageError::LimitExceeded);
         }
@@ -2155,10 +2150,15 @@ impl<R: Read + Seek> ConstructionSourceReader for RestoreBackupSource<R> {
             trailer_start,
             self.verified.stream_bytes,
         )?;
-        if record.table() != reference.table()
-            || record.stored_key().as_bytes() != reference.key().as_bytes()
-            || record.record_schema() != reference.record_schema()
-        {
+        if (
+            record.table(),
+            record.stored_key().as_bytes(),
+            record.record_schema(),
+        ) != (
+            reference.table(),
+            reference.key().as_bytes(),
+            reference.record_schema(),
+        ) {
             return Err(StorageError::StaleState);
         }
         ConstructionSourceRecord::open(
@@ -2640,8 +2640,8 @@ impl ConstructionTargetWriter for ConstructionTarget {
         )?;
         require_current_marker(&self.engine, marker)?;
         completion.validate()?;
-        if completion.identity != marker.identity
-            || completion.target_records_committed != marker.target_records_committed
+        if (completion.identity, completion.target_records_committed)
+            != (marker.identity, marker.target_records_committed)
         {
             return Err(StorageError::ResumeMismatch);
         }
@@ -2680,13 +2680,14 @@ impl ConstructionTargetWriter for ConstructionTarget {
             StorageFaultBoundary::After,
         )?;
         let actual = self.engine.construction_committed_counters();
-        if receipt.storage_commit_sequence != completion.finalization_storage_commit_sequence
-            || actual.storage_commit_sequence != completion.finalization_storage_commit_sequence
-            || actual.manifest_sequence != completion.finalization_manifest_sequence
-            || actual.state_generation != completion.finalization_state_generation
-            || actual.account_service_response_count
-                != completion.finalization_account_service_response_count
-            || actual.nonce_draw_high_water != completion.finalization_nonce_draw_high_water
+        let expected = ConstructionFinalizationCounters {
+            storage_commit_sequence: completion.finalization_storage_commit_sequence,
+            manifest_sequence: completion.finalization_manifest_sequence,
+            state_generation: completion.finalization_state_generation,
+            account_service_response_count: completion.finalization_account_service_response_count,
+            nonce_draw_high_water: completion.finalization_nonce_draw_high_water,
+        };
+        if (receipt.storage_commit_sequence, actual) != (expected.storage_commit_sequence, expected)
         {
             return Err(StorageError::StaleState);
         }
@@ -2714,18 +2715,18 @@ fn validate_marker_successor(
     };
     let added = u64::try_from(records.len()).map_err(|_| StorageError::Overflow)?;
     if !current_targets_entry
-        || records.windows(2).any(|pair| {
-            let [left, right] = pair else {
-                return false;
-            };
-            (
-                left.entry.target_table(),
-                left.entry.target_key().as_bytes(),
-            ) >= (
-                right.entry.target_table(),
-                right.entry.target_key().as_bytes(),
-            )
-        })
+        || records
+            .iter()
+            .zip(records.iter().skip(1))
+            .any(|(left, right)| {
+                (
+                    left.entry.target_table(),
+                    left.entry.target_key().as_bytes(),
+                ) >= (
+                    right.entry.target_table(),
+                    right.entry.target_key().as_bytes(),
+                )
+            })
         || current.identity != successor.identity
         || current.output_path_hash != successor.output_path_hash
         || successor.target_records_committed
@@ -2852,7 +2853,7 @@ impl ConstructionExecutor {
             let next_bytes = transformed_bytes
                 .checked_add(plaintext.len())
                 .ok_or(StorageError::Overflow)?;
-            if next_bytes > self.limits.batch_bytes || next_bytes > MAX_CONSTRUCTION_BATCH_BYTES {
+            if next_bytes > self.limits.batch_bytes {
                 if prepared.is_empty() {
                     return Err(StorageError::LimitExceeded);
                 }
@@ -3069,14 +3070,14 @@ fn validate_cursor(
     let committed = marker.target_records_committed;
     let entry = plan.entry(committed)?;
     match (&marker.next_target, entry.as_ref()) {
-        (StorageConstructionCursor::BeforeFirst, Some(_)) if committed == 0 => Ok(()),
+        (StorageConstructionCursor::BeforeFirst, Some(_)) => Ok(()),
         (StorageConstructionCursor::AtTarget { table, key }, Some(entry))
             if *table == entry.target_table()
                 && key.as_bytes() == entry.target_key().as_bytes() =>
         {
             Ok(())
         }
-        (StorageConstructionCursor::Complete, None) if committed == plan.entry_count() => Ok(()),
+        (StorageConstructionCursor::Complete, None) => Ok(()),
         _ => Err(StorageError::ResumeMismatch),
     }
 }
@@ -3241,8 +3242,8 @@ fn rebuild_persistent(
 /// Applies the fixed prefix changes common to restore account/channel records.
 pub fn recovery_transform_prefix(table: TableId, encoded: &[u8]) -> Result<Vec<u8>, StorageError> {
     let value = PersistentRecordValue::decode(table, encoded)?;
-    let (revision, generation) = match table {
-        TableId::Account if value.record_kind() == 1 => (
+    let (revision, generation) = match (table, value.record_kind()) {
+        (TableId::Account, 1) => (
             value
                 .revision()
                 .checked_add(1)
@@ -3252,17 +3253,17 @@ pub fn recovery_transform_prefix(table: TableId, encoded: &[u8]) -> Result<Vec<u
                 .checked_add(1)
                 .ok_or(StorageError::Overflow)?,
         ),
-        TableId::Channel if value.record_kind() == 1 => (
+        (TableId::Channel, 1) => (
             value
                 .revision()
                 .checked_add(1)
                 .ok_or(StorageError::Overflow)?,
             value.generation(),
         ),
-        TableId::Account if value.record_kind() == 2 => (value.revision(), value.generation()),
+        (TableId::Account, 2) => (value.revision(), value.generation()),
         _ => return Err(StorageError::InvalidEncoding),
     };
-    let references = if table == TableId::Channel && value.record_kind() == 1 {
+    let references = if table == TableId::Channel {
         value
             .references()
             .iter()
@@ -3287,4 +3288,2868 @@ pub fn recovery_transform_prefix(table: TableId, encoded: &[u8]) -> Result<Vec<u
         value.body().to_vec(),
     )?
     .encode()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::{File, OpenOptions};
+    use std::io::Cursor;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use agenc_ircd_crypto::{LoginIndexKey, derive_login_index};
+    use agenc_ircd_types::{
+        AccountRandomId, DatabaseId, NetworkId, NormalizedLogin, OpaqueCredentialId, ServerId,
+        ServerIncarnation, TransactionId,
+    };
+
+    use super::*;
+    use crate::{IntegrityCheckpointTbs, IntegrityManifestTbs, IntegrityRecordMutation};
+
+    const ZERO: StorageDigest = StorageDigest::from_bytes([0; 32]);
+    static SCRATCH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    fn scratch_file(label: &str) -> Result<(File, PathBuf), StorageError> {
+        let sequence = SCRATCH_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::current_dir()
+            .map_err(|_| StorageError::FilesystemRejected)?
+            .join("target");
+        std::fs::create_dir_all(&directory).map_err(|_| StorageError::FilesystemRejected)?;
+        let path = directory.join(format!(
+            "construction-{label}-{}-{sequence}.redb",
+            std::process::id()
+        ));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|_| StorageError::FilesystemRejected)?;
+        Ok((file, path))
+    }
+
+    fn state(logical: u64, backup: u64) -> StateMetaTbs {
+        StateMetaTbs {
+            storage_commit_sequence: 0,
+            manifest_sequence: 0,
+            state_generation: 0,
+            account_service_response_count: 0,
+            nonce_draw_high_water: 0,
+            logical_database_bytes: logical,
+            backup_stream_bytes: backup,
+            checkpoint_manifest_sequence: 0,
+            latest_manifest_hash: ZERO,
+            checkpoint_hash: ZERO,
+            previous_rollback_guard_hash: ZERO,
+        }
+    }
+
+    fn test_limits() -> ConstructionLimits {
+        ConstructionLimits {
+            source_database_bytes: 100,
+            source_backup_bytes: 200,
+            target_database_bytes: 300,
+            target_backup_bytes: 400,
+            plan_bytes: 1_024,
+            batch_records: 2,
+            batch_bytes: 1_024,
+        }
+    }
+
+    fn maximum_limits() -> ConstructionLimits {
+        ConstructionLimits {
+            source_database_bytes: MAX_CONSTRUCTION_SOURCE_BYTES,
+            source_backup_bytes: MAX_CONSTRUCTION_SOURCE_BYTES,
+            target_database_bytes: MAX_CONSTRUCTION_TARGET_BYTES,
+            target_backup_bytes: MAX_CONSTRUCTION_TARGET_BYTES,
+            plan_bytes: MAX_CONSTRUCTION_PLAN_BYTES,
+            batch_records: MAX_CONSTRUCTION_BATCH_RECORDS,
+            batch_bytes: MAX_CONSTRUCTION_BATCH_BYTES,
+        }
+    }
+
+    fn account_key(byte: u8) -> Result<StoredKey, StorageError> {
+        StoredKey::new(
+            AccountRandomId::from_bytes([byte; 16])
+                .to_text()
+                .into_bytes(),
+        )
+    }
+
+    fn source(table: TableId, key: &StoredKey) -> Result<StorageConstructionSource, StorageError> {
+        StorageConstructionSource::new(
+            StorageConstructionSourceKind::DatabaseRecord,
+            table,
+            StoredKey::new(key.as_bytes().to_vec())?,
+            1,
+            ZERO,
+            0,
+        )
+    }
+
+    fn rekey_entry(
+        table: TableId,
+        key: StoredKey,
+    ) -> Result<StorageConstructionPlanEntry, StorageError> {
+        StorageConstructionPlanEntry::new(
+            StorageConstructionKind::Rekey,
+            vec![source(table, &key)?],
+            table,
+            key,
+            1,
+            StorageConstructionAction::RekeyCopy,
+            0,
+        )
+    }
+
+    fn rekey_entries() -> Result<Vec<StorageConstructionPlanEntry>, StorageError> {
+        Ok(vec![
+            rekey_entry(TableId::Account, account_key(1)?)?,
+            rekey_entry(
+                TableId::LoginIndexKeyState,
+                StoredKey::new(crate::LOGIN_INDEX_KEY_STATE_KEY.to_vec())?,
+            )?,
+        ])
+    }
+
+    fn rekey_identity(
+        entries: &[StorageConstructionPlanEntry],
+    ) -> Result<StorageOperationIdentity, StorageError> {
+        Ok(StorageOperationIdentity {
+            kind: StorageConstructionKind::Rekey,
+            command_version: 1,
+            source_database_header_hash: ZERO,
+            target_database_header_hash: ZERO,
+            source_rollback_guard_hash: ZERO,
+            source_stream_digest: None,
+            source_schema_generation: 1,
+            target_schema_generation: 1,
+            transform_profile_hash: agenc_ircd_crypto::rekey_transform_profile_hash()?,
+            target_database_instance_id: DatabaseId::from_bytes([1; 16]),
+            source_master_key_id: ZERO,
+            source_guard_root_key_id: ZERO,
+            target_master_key_id: ZERO,
+            target_guard_root_key_id: ZERO,
+            planned_entry_count: u64::try_from(entries.len())
+                .map_err(|_| StorageError::Overflow)?,
+            construction_plan_hash: construction_plan_hash(
+                StorageConstructionKind::Rekey,
+                entries,
+                MAX_CONSTRUCTION_PLAN_BYTES,
+            )?,
+        })
+    }
+
+    fn rekey_plan() -> Result<(StorageOperationIdentity, ConstructionPlan), StorageError> {
+        let entries = rekey_entries()?;
+        let identity = rekey_identity(&entries)?;
+        let plan = ConstructionPlan::new(&identity, entries, maximum_limits())?;
+        Ok((identity, plan))
+    }
+
+    fn marker(
+        identity: StorageOperationIdentity,
+        next_target: StorageConstructionCursor,
+        committed: u64,
+    ) -> StorageConstruction {
+        StorageConstruction {
+            identity,
+            output_path_hash: StorageDigest::from_bytes([2; 32]),
+            next_target,
+            target_records_committed: committed,
+        }
+    }
+
+    fn record(table: TableId, key: StoredKey, plaintext: Vec<u8>) -> ConstructionSourceRecord {
+        ConstructionSourceRecord {
+            table,
+            key,
+            record_schema: 1,
+            plaintext: Zeroizing::new(plaintext),
+        }
+    }
+
+    fn backup_source(
+        table: TableId,
+        key: &StoredKey,
+        offset: u64,
+    ) -> Result<StorageConstructionSource, StorageError> {
+        StorageConstructionSource::new(
+            StorageConstructionSourceKind::BackupRecord,
+            table,
+            StoredKey::new(key.as_bytes().to_vec())?,
+            1,
+            StorageDigest::from_bytes([71; 32]),
+            offset,
+        )
+    }
+
+    fn domain_plaintext(table: TableId, kind: u16) -> Result<Vec<u8>, StorageError> {
+        let body = if matches!(
+            table,
+            TableId::FederationPeer
+                | TableId::FederationOrigin
+                | TableId::RequestResult
+                | TableId::EdgeOutbox
+                | TableId::EdgeProjection
+                | TableId::E2eeObject
+        ) || (table == TableId::E2eeState && kind != 1)
+        {
+            crate::ProtocolRecordBody::new(table, kind, 1, vec![1])?.encode()?
+        } else {
+            Vec::new()
+        };
+        let generation = if matches!(
+            table,
+            TableId::Account | TableId::Session | TableId::EdgeProjection
+        ) && kind == 1
+        {
+            1
+        } else {
+            0
+        };
+        PersistentRecordValue::new(table, kind, 1, generation, None, Vec::new(), body)?.encode()
+    }
+
+    #[test]
+    fn source_charges_and_rekey_generation_cover_each_independent_boundary() {
+        let limits = test_limits();
+        assert_eq!(validate_source_charges(state(100, 200), limits), Ok(()));
+        assert_eq!(
+            validate_source_charges(state(101, 200), limits),
+            Err(StorageError::LimitExceeded)
+        );
+        assert_eq!(
+            validate_source_charges(state(100, 201), limits),
+            Err(StorageError::LimitExceeded)
+        );
+
+        let source = StorageMasterKey::from_bytes([1; 32]);
+        let same = StorageMasterKey::from_bytes([1; 32]);
+        let different = StorageMasterKey::from_bytes([2; 32]);
+        assert_eq!(validate_rekey_generation(&source, 1, &same, 2), Ok(()));
+        assert_eq!(
+            validate_rekey_generation(&source, 1, &same, 1),
+            Err(StorageError::InvalidEncoding)
+        );
+        assert_eq!(
+            validate_rekey_generation(&source, u32::MAX, &same, 1),
+            Err(StorageError::LimitExceeded)
+        );
+        assert_eq!(validate_rekey_generation(&source, 1, &different, 1), Ok(()));
+        assert_eq!(
+            validate_rekey_generation(&source, 1, &different, 2),
+            Err(StorageError::InvalidEncoding)
+        );
+    }
+
+    #[test]
+    fn restore_login_scan_rejects_missing_unknown_and_creation_generations()
+    -> Result<(), StorageError> {
+        let network = NetworkId::from_bytes([3; 32]);
+        let previous_key = LoginIndexKey::from_bytes([4; 32]);
+        let current_key = LoginIndexKey::from_bytes([5; 32]);
+        let stable = crate::LoginIndexKeyState::stable(1, current_key.key_id(network))?;
+        let transition = crate::LoginIndexKeyState::transition(
+            1,
+            previous_key.key_id(network),
+            current_key.key_id(network),
+            2,
+        )?;
+
+        assert_eq!(
+            RestoreLoginScan::new().finish(network, &current_key, None),
+            Err(StorageError::StaleState)
+        );
+
+        let mut stable_scan = RestoreLoginScan::new();
+        stable_scan.key_state = Some(stable);
+        stable_scan.observe_generation(1, false)?;
+        stable_scan.finish(network, &current_key, None)?;
+
+        let mut transition_scan = RestoreLoginScan::new();
+        transition_scan.key_state = Some(transition);
+        transition_scan.observe_generation(1, false)?;
+        transition_scan.observe_generation(1, false)?;
+        transition_scan.observe_generation(2, false)?;
+        transition_scan.finish(network, &current_key, Some(&previous_key))?;
+
+        let mut creation_scan = RestoreLoginScan::new();
+        creation_scan.key_state = Some(transition);
+        creation_scan.observe_generation(1, true)?;
+        creation_scan.observe_generation(2, false)?;
+        assert_eq!(
+            creation_scan.finish(network, &current_key, Some(&previous_key)),
+            Err(StorageError::StaleState)
+        );
+
+        let mut unknown_scan = RestoreLoginScan::new();
+        unknown_scan.key_state = Some(transition);
+        unknown_scan.observe_generation(3, false)?;
+        assert_eq!(
+            unknown_scan.finish(network, &current_key, Some(&previous_key)),
+            Err(StorageError::StaleState)
+        );
+
+        let mut count_scan = RestoreLoginScan::new();
+        count_scan.key_state = Some(transition);
+        count_scan.observe_generation(1, false)?;
+        count_scan.observe_generation(2, false)?;
+        assert_eq!(
+            count_scan.finish(network, &current_key, Some(&previous_key)),
+            Err(StorageError::StaleState)
+        );
+
+        let mut full_scan = RestoreLoginScan::new();
+        full_scan.observe_generation(1, false)?;
+        full_scan.observe_generation(2, false)?;
+        assert_eq!(
+            full_scan.observe_generation(3, false),
+            Err(StorageError::StaleState)
+        );
+        full_scan.generations[0] = Some(RestoreLoginGeneration {
+            generation: 1,
+            entry_count: u64::MAX,
+            creation_reservations: 0,
+        });
+        assert_eq!(
+            full_scan.observe_generation(1, false),
+            Err(StorageError::Overflow)
+        );
+        full_scan.generations[0] = Some(RestoreLoginGeneration {
+            generation: 1,
+            entry_count: 0,
+            creation_reservations: u64::MAX,
+        });
+        assert_eq!(
+            full_scan.observe_generation(1, true),
+            Err(StorageError::Overflow)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rekey_private_index_transform_authenticates_source_and_target_keys()
+    -> Result<(), StorageError> {
+        let network = NetworkId::from_bytes([6; 32]);
+        let server = ServerId::from_bytes([7; 16]);
+        let source_binding = DatabaseBinding::new(
+            network,
+            server,
+            ServerIncarnation::from_bytes([8; 16]),
+            DatabaseId::from_bytes([9; 16]),
+        );
+        let target_binding = DatabaseBinding::new(
+            network,
+            server,
+            ServerIncarnation::from_bytes([10; 16]),
+            DatabaseId::from_bytes([11; 16]),
+        );
+        let source_master = StorageMasterKey::from_bytes([12; 32]);
+        let target_master = StorageMasterKey::from_bytes([13; 32]);
+        let table = StorageTable::new(TableId::NicknameReservation.as_u16())?;
+        let source_index =
+            derive_storage_index(&source_master, source_binding, table, 1, b"nickname")?;
+        let source_key = StoredKey::new(source_index.expose_for_storage_key().to_vec())?;
+        let plaintext = PersistentRecordValue::new(
+            TableId::NicknameReservation,
+            1,
+            1,
+            0,
+            None,
+            Vec::new(),
+            b"Nickname".to_vec(),
+        )?
+        .encode()?;
+        let source = StorageConstructionSource::new(
+            StorageConstructionSourceKind::DatabaseRecord,
+            TableId::NicknameReservation,
+            StoredKey::new(source_key.as_bytes().to_vec())?,
+            1,
+            ZERO,
+            0,
+        )?;
+        let record = ConstructionSourceRecord {
+            table: TableId::NicknameReservation,
+            key: StoredKey::new(source_key.as_bytes().to_vec())?,
+            record_schema: 1,
+            plaintext: Zeroizing::new(plaintext),
+        };
+        let target_key = rekey_target_stored_key(
+            &source,
+            &record,
+            &source_master,
+            source_binding,
+            1,
+            &target_master,
+            target_binding,
+            1,
+        )?;
+        assert_ne!(target_key.as_bytes(), source.key().as_bytes());
+
+        let wrong_source = StorageConstructionSource::new(
+            StorageConstructionSourceKind::DatabaseRecord,
+            TableId::NicknameReservation,
+            StoredKey::new(vec![0; 32])?,
+            1,
+            ZERO,
+            0,
+        )?;
+        assert_eq!(
+            rekey_target_stored_key(
+                &wrong_source,
+                &record,
+                &source_master,
+                source_binding,
+                1,
+                &target_master,
+                target_binding,
+                1,
+            )
+            .map(|_| ()),
+            Err(StorageError::AuthenticationFailed)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn construction_limits_reject_each_zero_excess_and_cross_limit() {
+        assert!(maximum_limits().validate().is_ok());
+
+        let mut cases = Vec::new();
+        for value in [0, MAX_CONSTRUCTION_SOURCE_BYTES + 1] {
+            cases.push(ConstructionLimits {
+                source_database_bytes: value,
+                ..maximum_limits()
+            });
+            cases.push(ConstructionLimits {
+                source_backup_bytes: value,
+                ..maximum_limits()
+            });
+        }
+        for value in [0, MAX_CONSTRUCTION_TARGET_BYTES + 1] {
+            cases.push(ConstructionLimits {
+                target_database_bytes: value,
+                ..maximum_limits()
+            });
+            cases.push(ConstructionLimits {
+                target_backup_bytes: value,
+                ..maximum_limits()
+            });
+        }
+        cases.extend([
+            ConstructionLimits {
+                target_database_bytes: 2,
+                target_backup_bytes: 1,
+                ..maximum_limits()
+            },
+            ConstructionLimits {
+                plan_bytes: 0,
+                ..maximum_limits()
+            },
+            ConstructionLimits {
+                plan_bytes: MAX_CONSTRUCTION_PLAN_BYTES + 1,
+                ..maximum_limits()
+            },
+            ConstructionLimits {
+                batch_records: 0,
+                ..maximum_limits()
+            },
+            ConstructionLimits {
+                batch_records: MAX_CONSTRUCTION_BATCH_RECORDS + 1,
+                ..maximum_limits()
+            },
+            ConstructionLimits {
+                batch_bytes: 0,
+                ..maximum_limits()
+            },
+            ConstructionLimits {
+                batch_bytes: MAX_CONSTRUCTION_BATCH_BYTES + 1,
+                ..maximum_limits()
+            },
+        ]);
+        for limits in cases {
+            assert_eq!(limits.validate(), Err(StorageError::LimitExceeded));
+        }
+    }
+
+    #[test]
+    fn in_memory_plan_rejects_count_key_state_size_and_hash_mismatches() -> Result<(), StorageError>
+    {
+        let entries = rekey_entries()?;
+        let mut wrong_count = rekey_identity(&entries)?;
+        wrong_count.planned_entry_count += 1;
+        assert!(matches!(
+            ConstructionPlan::new(&wrong_count, rekey_entries()?, maximum_limits()),
+            Err(StorageError::ResumeMismatch)
+        ));
+
+        let account_only = vec![rekey_entry(TableId::Account, account_key(2)?)?];
+        let account_identity = rekey_identity(&account_only)?;
+        assert!(matches!(
+            ConstructionPlan::new(&account_identity, account_only, maximum_limits()),
+            Err(StorageError::StaleState)
+        ));
+
+        let key = StoredKey::new(crate::LOGIN_INDEX_KEY_STATE_KEY.to_vec())?;
+        let duplicate_key_states = vec![
+            rekey_entry(
+                TableId::LoginIndexKeyState,
+                StoredKey::new(key.as_bytes().to_vec())?,
+            )?,
+            rekey_entry(TableId::LoginIndexKeyState, key)?,
+        ];
+        let mut duplicate_identity = rekey_identity(&entries)?;
+        duplicate_identity.planned_entry_count = 2;
+        assert!(matches!(
+            ConstructionPlan::new(&duplicate_identity, duplicate_key_states, maximum_limits()),
+            Err(StorageError::StaleState)
+        ));
+
+        let mut bad_hash = rekey_identity(&entries)?;
+        bad_hash.construction_plan_hash = StorageDigest::from_bytes([9; 32]);
+        assert!(matches!(
+            ConstructionPlan::new(&bad_hash, rekey_entries()?, maximum_limits()),
+            Err(StorageError::ResumeMismatch)
+        ));
+
+        let identity = rekey_identity(&entries)?;
+        assert!(matches!(
+            ConstructionPlan::new(
+                &identity,
+                entries,
+                ConstructionLimits {
+                    plan_bytes: 1,
+                    ..maximum_limits()
+                }
+            ),
+            Err(StorageError::LimitExceeded)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn plan_identity_cursor_and_successor_bind_every_resume_field() -> Result<(), StorageError> {
+        let (identity, plan) = rekey_plan()?;
+        assert!(plan.validate_identity(&identity).is_ok());
+
+        let mut wrong_count = identity;
+        wrong_count.planned_entry_count += 1;
+        assert_eq!(
+            plan.validate_identity(&wrong_count),
+            Err(StorageError::ResumeMismatch)
+        );
+        let mut wrong_hash = identity;
+        wrong_hash.construction_plan_hash = StorageDigest::from_bytes([8; 32]);
+        assert_eq!(
+            plan.validate_identity(&wrong_hash),
+            Err(StorageError::ResumeMismatch)
+        );
+        let mut restore = identity;
+        restore.kind = StorageConstructionKind::Restore;
+        restore.source_stream_digest = Some(StorageDigest::from_bytes([7; 32]));
+        restore.transform_profile_hash = agenc_ircd_crypto::restore_transform_profile_hash()?;
+        assert_eq!(
+            plan.validate_identity(&restore),
+            Err(StorageError::ResumeMismatch)
+        );
+
+        let before = marker(identity, StorageConstructionCursor::BeforeFirst, 0);
+        assert!(validate_cursor(&before, &plan).is_ok());
+        assert_eq!(
+            successor_marker(&before, &plan, 0).map(|_| ()),
+            Err(StorageError::InvalidEncoding)
+        );
+        let second = successor_marker(&before, &plan, 1)?;
+        assert!(matches!(
+            second.next_target,
+            StorageConstructionCursor::AtTarget { .. }
+        ));
+        assert!(validate_cursor(&second, &plan).is_ok());
+        let complete = successor_marker(&before, &plan, 2)?;
+        assert!(matches!(
+            complete.next_target,
+            StorageConstructionCursor::Complete
+        ));
+        assert!(validate_cursor(&complete, &plan).is_ok());
+        assert_eq!(
+            successor_marker(&before, &plan, 3).map(|_| ()),
+            Err(StorageError::StaleState)
+        );
+
+        let wrong_complete = marker(identity, StorageConstructionCursor::Complete, 1);
+        assert_eq!(
+            validate_cursor(&wrong_complete, &plan),
+            Err(StorageError::ResumeMismatch)
+        );
+        let overflow = marker(identity, StorageConstructionCursor::Complete, u64::MAX);
+        assert_eq!(
+            successor_marker(&overflow, &plan, 1).map(|_| ()),
+            Err(StorageError::Overflow)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn restore_scratch_codecs_reject_noncanonical_keys_and_versions() -> Result<(), StorageError> {
+        assert_eq!(
+            decode_restore_scratch_key(&[0]).map(|_| ()),
+            Err(StorageError::InvalidEncoding)
+        );
+        let mut untracked = TableId::KeyCheck.as_u16().to_be_bytes().to_vec();
+        untracked.push(1);
+        assert_eq!(
+            decode_restore_scratch_key(&untracked).map(|_| ()),
+            Err(StorageError::InvalidEncoding)
+        );
+
+        assert_eq!(
+            encode_restore_version(IntegrityRecordVersion::Absent)?,
+            None
+        );
+        assert_eq!(
+            encode_restore_version(IntegrityRecordVersion::Present {
+                record_schema: 0,
+                sealed_record_id: ZERO,
+            }),
+            Err(StorageError::InvalidEncoding)
+        );
+        let present = encode_restore_version(IntegrityRecordVersion::Present {
+            record_schema: 1,
+            sealed_record_id: ZERO,
+        })?
+        .ok_or(StorageError::InvalidEncoding)?;
+        assert!(matches!(
+            decode_restore_version(&present),
+            Ok(IntegrityRecordVersion::Present {
+                record_schema: 1,
+                ..
+            })
+        ));
+        assert_eq!(
+            decode_restore_version(&present[..35]),
+            Err(StorageError::InvalidEncoding)
+        );
+        let mut zero_schema = present;
+        zero_schema[..4].copy_from_slice(&0_u32.to_be_bytes());
+        assert_eq!(
+            decode_restore_version(&zero_schema),
+            Err(StorageError::InvalidEncoding)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn source_readers_reject_invalid_generation_offsets_and_frame_lengths()
+    -> Result<(), StorageError> {
+        let binding = DatabaseBinding::new(
+            NetworkId::from_bytes([1; 32]),
+            ServerId::from_bytes([2; 16]),
+            ServerIncarnation::from_bytes([3; 16]),
+            DatabaseId::from_bytes([4; 16]),
+        );
+        let master = StorageMasterKey::from_bytes([5; 32]);
+        assert!(matches!(
+            BackupConstructionSourceReader::new(
+                Cursor::new(Vec::new()),
+                StorageMasterKey::from_bytes([5; 32]),
+                binding,
+                0,
+                BACKUP_FIXED_STREAM_BYTES,
+            ),
+            Err(StorageError::InvalidEncoding)
+        ));
+        assert!(matches!(
+            BackupConstructionSourceReader::new(
+                Cursor::new(Vec::new()),
+                StorageMasterKey::from_bytes([5; 32]),
+                binding,
+                1,
+                BACKUP_FIXED_STREAM_BYTES - 1,
+            ),
+            Err(StorageError::InvalidEncoding)
+        ));
+        let mut reader = BackupConstructionSourceReader::new(
+            Cursor::new(Vec::new()),
+            master,
+            binding,
+            1,
+            BACKUP_FIXED_STREAM_BYTES,
+        )?;
+        let key = account_key(1)?;
+        let database_reference = source(TableId::Account, &key)?;
+        assert_eq!(
+            reader.read_source(&database_reference).map(|_| ()),
+            Err(StorageError::InvalidEncoding)
+        );
+        let past_end = StorageConstructionSource::new(
+            StorageConstructionSourceKind::BackupRecord,
+            TableId::Account,
+            key,
+            1,
+            ZERO,
+            BACKUP_FIXED_STREAM_BYTES,
+        )?;
+        assert_eq!(
+            reader.read_source(&past_end).map(|_| ()),
+            Err(StorageError::InvalidEncoding)
+        );
+
+        let offset = crate::backup::BACKUP_RECORDS_OFFSET;
+        let trailer = offset + 8;
+        let trailer_length = usize::try_from(trailer).map_err(|_| StorageError::Overflow)?;
+        let mut bytes = vec![0; trailer_length];
+        assert_eq!(
+            read_backup_record(
+                &mut Cursor::new(bytes.clone()),
+                offset - 1,
+                trailer,
+                trailer
+            )
+            .map(|_| ()),
+            Err(StorageError::InvalidEncoding)
+        );
+        assert_eq!(
+            read_backup_record(&mut Cursor::new(bytes.clone()), trailer, trailer, trailer)
+                .map(|_| ()),
+            Err(StorageError::InvalidEncoding)
+        );
+        assert_eq!(
+            read_backup_record(&mut Cursor::new(bytes.clone()), offset, trailer, trailer)
+                .map(|_| ()),
+            Err(StorageError::LimitExceeded)
+        );
+        let offset_index = usize::try_from(offset).map_err(|_| StorageError::Overflow)?;
+        let length_end = offset_index.checked_add(4).ok_or(StorageError::Overflow)?;
+        bytes
+            .get_mut(offset_index..length_end)
+            .ok_or(StorageError::InvalidEncoding)?
+            .copy_from_slice(&(crate::backup::MAX_BACKUP_RECORD_BYTES as u32 + 1).to_be_bytes());
+        assert_eq!(
+            read_backup_record(&mut Cursor::new(bytes), offset, trailer, trailer).map(|_| ()),
+            Err(StorageError::LimitExceeded)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn exact_copy_and_recovery_prefix_enforce_table_schema_and_counter_rules()
+    -> Result<(), StorageError> {
+        let stored_account_key = account_key(1)?;
+        let account_plaintext =
+            PersistentRecordValue::new(TableId::Account, 1, 1, 1, None, Vec::new(), vec![1])?
+                .encode()?;
+        let entry = rekey_entry(
+            TableId::Account,
+            StoredKey::new(stored_account_key.as_bytes().to_vec())?,
+        )?;
+        let account = record(
+            TableId::Account,
+            stored_account_key,
+            account_plaintext.clone(),
+        );
+        assert_eq!(exact_source(&entry, &[]), Err(StorageError::StaleState));
+        assert_eq!(
+            exact_source(
+                &entry,
+                &[
+                    account,
+                    record(TableId::Account, account_key(2)?, Vec::new())
+                ]
+            ),
+            Err(StorageError::StaleState)
+        );
+        let wrong_table = record(TableId::Channel, account_key(3)?, account_plaintext.clone());
+        assert_eq!(
+            exact_source(&entry, &[wrong_table]),
+            Err(StorageError::StaleState)
+        );
+        let account = record(TableId::Account, account_key(1)?, account_plaintext.clone());
+        assert_eq!(exact_source(&entry, &[account])?, account_plaintext);
+
+        let transformed = recovery_transform_prefix(TableId::Account, &account_plaintext)?;
+        let transformed = PersistentRecordValue::decode(TableId::Account, &transformed)?;
+        assert_eq!(transformed.revision(), 2);
+        assert_eq!(transformed.generation(), 2);
+
+        let tombstone =
+            PersistentRecordValue::new(TableId::Account, 2, 0, 0, None, Vec::new(), Vec::new())?
+                .encode()?;
+        let unchanged = recovery_transform_prefix(TableId::Account, &tombstone)?;
+        let unchanged = PersistentRecordValue::decode(TableId::Account, &unchanged)?;
+        assert_eq!((unchanged.revision(), unchanged.generation()), (0, 0));
+
+        let channel =
+            PersistentRecordValue::new(TableId::Channel, 1, 1, 0, None, Vec::new(), vec![2])?
+                .encode()?;
+        let channel = recovery_transform_prefix(TableId::Channel, &channel)?;
+        assert_eq!(
+            PersistentRecordValue::decode(TableId::Channel, &channel)?.revision(),
+            2
+        );
+
+        let overflow_revision = PersistentRecordValue::new(
+            TableId::Account,
+            1,
+            u64::MAX,
+            1,
+            None,
+            Vec::new(),
+            Vec::new(),
+        )?
+        .encode()?;
+        assert_eq!(
+            recovery_transform_prefix(TableId::Account, &overflow_revision),
+            Err(StorageError::Overflow)
+        );
+        let overflow_generation = PersistentRecordValue::new(
+            TableId::Account,
+            1,
+            1,
+            u64::MAX,
+            None,
+            Vec::new(),
+            Vec::new(),
+        )?
+        .encode()?;
+        assert_eq!(
+            recovery_transform_prefix(TableId::Account, &overflow_generation),
+            Err(StorageError::Overflow)
+        );
+        assert_eq!(
+            recovery_transform_prefix(TableId::Session, &account_plaintext),
+            Err(StorageError::InvalidEncoding)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn disk_plan_builder_enforces_count_uniqueness_order_and_byte_limits()
+    -> Result<(), StorageError> {
+        let entries = rekey_entries()?;
+        let identity = rekey_identity(&entries)?;
+        let (file, path) = scratch_file("complete")?;
+        let plan = ConstructionPlan::rebuild_disk(
+            &identity,
+            file,
+            rekey_entries()?.into_iter().rev().map(Ok),
+            maximum_limits(),
+        )?;
+        assert_eq!(plan.entry_count(), 2);
+        assert!(plan.encoded_bytes() > 0);
+        assert_eq!(plan.hash(), identity.construction_plan_hash);
+        assert!(plan.entry(0)?.is_some());
+        assert!(plan.entry(1)?.is_some());
+        assert!(plan.entry(2)?.is_none());
+        plan.reverify_disk()?;
+        drop(plan);
+        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+
+        let (file, path) = scratch_file("streaming")?;
+        let mut builder = ConstructionPlanBuilder::start_streaming(
+            StorageConstructionKind::Rekey,
+            file,
+            maximum_limits(),
+        )?;
+        for entry in rekey_entries()?.into_iter().rev() {
+            builder.push(entry)?;
+        }
+        let plan = builder.finish()?;
+        assert_eq!(plan.entry_count(), 2);
+        drop(plan);
+        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+
+        let (file, path) = scratch_file("duplicate")?;
+        let mut builder = ConstructionPlanBuilder::start(
+            StorageConstructionKind::Rekey,
+            2,
+            file,
+            maximum_limits(),
+        )?;
+        builder.push(rekey_entry(TableId::Account, account_key(1)?)?)?;
+        assert_eq!(
+            builder.push(rekey_entry(TableId::Account, account_key(1)?)?),
+            Err(StorageError::InvalidEncoding)
+        );
+        drop(builder);
+        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+
+        let (file, path) = scratch_file("count")?;
+        let mut builder = ConstructionPlanBuilder::start(
+            StorageConstructionKind::Rekey,
+            1,
+            file,
+            maximum_limits(),
+        )?;
+        builder.push(rekey_entry(TableId::Account, account_key(1)?)?)?;
+        assert_eq!(
+            builder.push(rekey_entry(
+                TableId::LoginIndexKeyState,
+                StoredKey::new(crate::LOGIN_INDEX_KEY_STATE_KEY.to_vec())?,
+            )?),
+            Err(StorageError::LimitExceeded)
+        );
+        drop(builder);
+        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+
+        let (file, path) = scratch_file("bytes")?;
+        let mut builder = ConstructionPlanBuilder::start(
+            StorageConstructionKind::Rekey,
+            2,
+            file,
+            ConstructionLimits {
+                plan_bytes: 1,
+                ..maximum_limits()
+            },
+        )?;
+        assert_eq!(
+            builder.push(rekey_entry(TableId::Account, account_key(1)?)?),
+            Err(StorageError::LimitExceeded)
+        );
+        drop(builder);
+        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+        Ok(())
+    }
+
+    #[test]
+    fn restore_scratch_indexes_channels_references_and_current_versions() -> Result<(), StorageError>
+    {
+        let channel_key = StoredKey::new([7; 16].to_vec())?;
+        let backup_channel = StorageConstructionSource::new(
+            StorageConstructionSourceKind::BackupRecord,
+            TableId::Channel,
+            StoredKey::new(channel_key.as_bytes().to_vec())?,
+            1,
+            StorageDigest::from_bytes([8; 32]),
+            91,
+        )?;
+        let (file, path) = scratch_file("wrong-kind")?;
+        let mut rekey = ConstructionPlanBuilder::start_streaming(
+            StorageConstructionKind::Rekey,
+            file,
+            maximum_limits(),
+        )?;
+        assert_eq!(
+            rekey.index_restore_channel_source(&backup_channel),
+            Err(StorageError::InvalidEncoding)
+        );
+        drop(rekey);
+        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+        let (file, path) = scratch_file("restore-index")?;
+        let mut builder = ConstructionPlanBuilder::start_streaming(
+            StorageConstructionKind::Restore,
+            file,
+            maximum_limits(),
+        )?;
+        assert_eq!(
+            builder.index_restore_channel_source(&source(TableId::Channel, &channel_key)?),
+            Err(StorageError::InvalidEncoding)
+        );
+        let backup_account = StorageConstructionSource::new(
+            StorageConstructionSourceKind::BackupRecord,
+            TableId::Account,
+            account_key(9)?,
+            1,
+            ZERO,
+            92,
+        )?;
+        assert_eq!(
+            builder.index_restore_channel_source(&backup_account),
+            Err(StorageError::InvalidEncoding)
+        );
+        builder.index_restore_channel_source(&backup_channel)?;
+        assert_eq!(
+            builder.index_restore_channel_source(&backup_channel),
+            Err(StorageError::StaleState)
+        );
+        let restored_channel = builder.restore_channel_source(&channel_key)?;
+        assert_eq!(restored_channel.kind(), backup_channel.kind());
+        assert_eq!(restored_channel.table(), backup_channel.table());
+        assert_eq!(
+            restored_channel.key().as_bytes(),
+            backup_channel.key().as_bytes()
+        );
+        assert_eq!(
+            restored_channel.backup_byte_offset(),
+            backup_channel.backup_byte_offset()
+        );
+        assert!(matches!(
+            builder.restore_channel_source(&account_key(10)?),
+            Err(StorageError::StaleState)
+        ));
+        let stored_account_key = account_key(11)?;
+        let opaque_key = account_key(12)?;
+        let account_reference = RecordReference::new(
+            TableId::OpaqueRecord,
+            StoredKey::new(opaque_key.as_bytes().to_vec())?,
+        )?;
+        let account_plaintext = PersistentRecordValue::new(
+            TableId::Account,
+            1,
+            1,
+            1,
+            None,
+            vec![account_reference],
+            Vec::new(),
+        )?
+        .encode()?;
+        let account_source = StorageConstructionSource::new(
+            StorageConstructionSourceKind::BackupRecord,
+            TableId::Account,
+            StoredKey::new(stored_account_key.as_bytes().to_vec())?,
+            1,
+            StorageDigest::from_bytes([13; 32]),
+            93,
+        )?;
+        let account_record = record(
+            TableId::Account,
+            StoredKey::new(stored_account_key.as_bytes().to_vec())?,
+            account_plaintext,
+        );
+        builder.observe_restore_source_record(&account_source, &account_record)?;
+        assert_eq!(
+            builder.observe_restore_source_record(&account_source, &account_record),
+            Err(StorageError::StaleState)
+        );
+        assert_eq!(
+            builder.verify_restore_references(),
+            Err(StorageError::StaleState)
+        );
+        let opaque_source = StorageConstructionSource::new(
+            StorageConstructionSourceKind::BackupRecord,
+            TableId::OpaqueRecord,
+            StoredKey::new(opaque_key.as_bytes().to_vec())?,
+            1,
+            StorageDigest::from_bytes([14; 32]),
+            94,
+        )?;
+        let opaque_plaintext = PersistentRecordValue::new(
+            TableId::OpaqueRecord,
+            1,
+            1,
+            0,
+            None,
+            Vec::new(),
+            Vec::new(),
+        )?
+        .encode()?;
+        builder.observe_restore_source_record(
+            &opaque_source,
+            &record(TableId::OpaqueRecord, opaque_key, opaque_plaintext),
+        )?;
+        assert_eq!(builder.verify_restore_references(), Ok(()));
+
+        let mut state = state(1, 1);
+        state.checkpoint_hash = StorageDigest::from_bytes([15; 32]);
+        let checkpoint = IntegrityCheckpoint::new(IntegrityCheckpointTbs {
+            database_instance_id: DatabaseId::from_bytes([16; 16]),
+            cut_storage_commit_sequence: 0,
+            cut_manifest_sequence: 0,
+            cut_state_generation: 0,
+            cut_account_service_response_count: 0,
+            cut_nonce_draw_high_water: 0,
+            cut_manifest_hash: ZERO,
+            tracked_record_count: 0,
+            tracked_state_digest: ZERO,
+            previous_checkpoint_hash: ZERO,
+            installation_storage_commit_sequence: 0,
+            installation_manifest_sequence: 0,
+            installation_nonce_reservation_start: 0,
+            installation_nonce_draw_high_water: 2,
+        })?;
+        assert_eq!(
+            builder.verify_restore_source(state, &checkpoint),
+            Err(StorageError::StaleState)
+        );
+        drop(builder);
+        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+        Ok(())
+    }
+
+    #[test]
+    fn restore_selection_covers_every_preserve_transform_and_omission_arm()
+    -> Result<(), StorageError> {
+        let (file, path) = scratch_file("selection")?;
+        let mut builder = ConstructionPlanBuilder::start_streaming(
+            StorageConstructionKind::Restore,
+            file,
+            maximum_limits(),
+        )?;
+
+        for table in [
+            TableId::Account,
+            TableId::OpaqueRecord,
+            TableId::NicknameReservation,
+            TableId::Sanction,
+            TableId::History,
+            TableId::Audit,
+            TableId::AuditCheckpoint,
+            TableId::E2eeObject,
+            TableId::LoginIndexKeyState,
+            TableId::StorageOperation,
+            TableId::E2eeState,
+        ] {
+            let key = if table == TableId::LoginIndexKeyState {
+                StoredKey::new(crate::LOGIN_INDEX_KEY_STATE_KEY.to_vec())?
+            } else {
+                account_key(table.as_u16() as u8 + 80)?
+            };
+            let source = backup_source(table, &key, u64::from(table.as_u16()) + 1)?;
+            let record = record(table, StoredKey::new(key.as_bytes().to_vec())?, Vec::new());
+            assert!(matches!(
+                select_restore_record(&mut builder, &source, &record)?,
+                RestoreSelection::Direct(_)
+            ));
+        }
+
+        for table in [
+            TableId::KeyCheck,
+            TableId::AuthTransaction,
+            TableId::Session,
+            TableId::FederationOrigin,
+            TableId::RequestResult,
+            TableId::StateMeta,
+            TableId::IntegrityManifest,
+            TableId::IntegrityCheckpoint,
+            TableId::EdgeOutbox,
+            TableId::EdgeProjection,
+            TableId::StorageConstruction,
+        ] {
+            let key = account_key(table.as_u16() as u8 + 110)?;
+            let source = backup_source(table, &key, u64::from(table.as_u16()) + 40)?;
+            let record = record(table, key, Vec::new());
+            assert!(matches!(
+                select_restore_record(&mut builder, &source, &record)?,
+                RestoreSelection::Omit
+            ));
+        }
+
+        for (kind, expected_direct) in [(1_u16, false), (2, true)] {
+            let key = account_key(140 + kind as u8)?;
+            let source = backup_source(TableId::RegistrationInvite, &key, 70 + u64::from(kind))?;
+            let record = record(
+                TableId::RegistrationInvite,
+                key,
+                domain_plaintext(TableId::RegistrationInvite, kind)?,
+            );
+            assert_eq!(
+                matches!(
+                    select_restore_record(&mut builder, &source, &record)?,
+                    RestoreSelection::Direct(_)
+                ),
+                expected_direct
+            );
+        }
+
+        for (kind, expected_direct) in [(1_u16, true), (2, false)] {
+            let key = StoredKey::new(vec![150 + kind as u8; 16])?;
+            let source = backup_source(TableId::Channel, &key, 80 + u64::from(kind))?;
+            let record = record(
+                TableId::Channel,
+                key,
+                domain_plaintext(TableId::Channel, kind)?,
+            );
+            assert_eq!(
+                matches!(
+                    select_restore_record(&mut builder, &source, &record)?,
+                    RestoreSelection::Direct(StorageConstructionAction::RestoreChannel)
+                ),
+                expected_direct
+            );
+        }
+
+        for kind in [1_u16, 2] {
+            let key = StoredKey::new(vec![160 + kind as u8; 16])?;
+            let source = backup_source(TableId::ChannelName, &key, 90 + u64::from(kind))?;
+            let body = if kind == 1 {
+                b"#channel".to_vec()
+            } else {
+                Vec::new()
+            };
+            let plaintext = PersistentRecordValue::new(
+                TableId::ChannelName,
+                kind,
+                1,
+                0,
+                None,
+                Vec::new(),
+                body,
+            )?
+            .encode()?;
+            let selection = select_restore_record(
+                &mut builder,
+                &source,
+                &record(TableId::ChannelName, key, plaintext),
+            )?;
+            assert_eq!(
+                matches!(selection, RestoreSelection::ChannelName),
+                kind == 1
+            );
+        }
+
+        for (kind, expected_direct) in [(1_u16, false), (2, true)] {
+            let key = account_key(170 + kind as u8)?;
+            let source = backup_source(TableId::FederationPeer, &key, 100 + u64::from(kind))?;
+            let plaintext = domain_plaintext(TableId::FederationPeer, kind)?;
+            assert_eq!(
+                matches!(
+                    select_restore_record(
+                        &mut builder,
+                        &source,
+                        &record(TableId::FederationPeer, key, plaintext),
+                    )?,
+                    RestoreSelection::Direct(StorageConstructionAction::RestorePeerTombstones)
+                ),
+                expected_direct
+            );
+        }
+
+        let network = NetworkId::from_bytes([181; 32]);
+        let login_secret = LoginIndexKey::from_bytes([182; 32]);
+        let login = NormalizedLogin::prepare("restore-selection")
+            .map_err(|_| StorageError::InvalidEncoding)?;
+        let login_key = crate::LoginIndexStoredKey::new(
+            1,
+            derive_login_index(&login_secret, network, &login)?,
+        )?;
+        let stored_login_key = login_key.encode()?;
+        let account = AccountRandomId::from_bytes([183; 16]).to_account_id();
+        let login_values = [
+            crate::LoginIndexValue::new(
+                &login_key,
+                crate::LoginIndexValueKind::Live {
+                    account_id: account,
+                    opaque_credential_id: OpaqueCredentialId::from_bytes([184; 32]),
+                },
+            )?,
+            crate::LoginIndexValue::new(
+                &login_key,
+                crate::LoginIndexValueKind::CreationReservation {
+                    transaction_id: TransactionId::from_bytes([185; 16]),
+                    expires_at: 1,
+                },
+            )?,
+            crate::LoginIndexValue::new(
+                &login_key,
+                crate::LoginIndexValueKind::DeletionTombstone {
+                    deleted_account_id: account,
+                    expires_at: 2,
+                },
+            )?,
+        ];
+        for (index, value) in login_values.into_iter().enumerate() {
+            let source = backup_source(TableId::LoginIndex, &stored_login_key, 120 + index as u64)?;
+            let record = record(
+                TableId::LoginIndex,
+                StoredKey::new(stored_login_key.as_bytes().to_vec())?,
+                value.encode()?,
+            );
+            assert_eq!(
+                matches!(
+                    select_restore_record(&mut builder, &source, &record)?,
+                    RestoreSelection::Direct(StorageConstructionAction::RestoreCopy)
+                ),
+                index != 1
+            );
+        }
+
+        drop(builder);
+        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+        Ok(())
+    }
+
+    #[test]
+    fn restore_copy_validation_covers_every_admitted_and_rejected_table() -> Result<(), StorageError>
+    {
+        for table in [
+            TableId::OpaqueRecord,
+            TableId::NicknameReservation,
+            TableId::Sanction,
+            TableId::History,
+            TableId::Audit,
+            TableId::AuditCheckpoint,
+            TableId::E2eeObject,
+            TableId::LoginIndexKeyState,
+            TableId::StorageOperation,
+        ] {
+            assert_eq!(
+                validate_restore_copy_source(&record(table, account_key(200)?, Vec::new())),
+                Ok(())
+            );
+        }
+        assert_eq!(
+            validate_restore_copy_source(&record(
+                TableId::RegistrationInvite,
+                account_key(201)?,
+                domain_plaintext(TableId::RegistrationInvite, 2)?,
+            )),
+            Ok(())
+        );
+        assert_eq!(
+            validate_restore_copy_source(&record(
+                TableId::RegistrationInvite,
+                account_key(202)?,
+                domain_plaintext(TableId::RegistrationInvite, 1)?,
+            )),
+            Err(StorageError::StaleState)
+        );
+        assert_eq!(
+            validate_restore_copy_source(&record(TableId::Account, account_key(203)?, Vec::new(),)),
+            Err(StorageError::InvalidEncoding)
+        );
+        Ok(())
+    }
+
+    fn restore_entry(
+        table: TableId,
+        key: StoredKey,
+        action: StorageConstructionAction,
+    ) -> Result<StorageConstructionPlanEntry, StorageError> {
+        StorageConstructionPlanEntry::new(
+            StorageConstructionKind::Restore,
+            vec![backup_source(table, &key, 1)?],
+            table,
+            key,
+            1,
+            action,
+            0,
+        )
+    }
+
+    #[test]
+    fn exact_copy_transformer_rejects_mismatched_inputs_and_admits_both_copy_profiles()
+    -> Result<(), StorageError> {
+        let key = account_key(210)?;
+        let entry = rekey_entry(TableId::Account, StoredKey::new(key.as_bytes().to_vec())?)?;
+        let source_record = record(TableId::Account, key, vec![1, 2, 3]);
+        let mut transformer = ExactCopyTransformer;
+        assert_eq!(
+            transformer
+                .transform(StorageConstructionKind::Rekey, &entry, &[source_record])?
+                .as_slice(),
+            [1, 2, 3]
+        );
+        assert_eq!(
+            transformer.transform(StorageConstructionKind::Rekey, &entry, &[]),
+            Err(StorageError::StaleState)
+        );
+        assert_eq!(
+            transformer.transform(
+                StorageConstructionKind::Restore,
+                &entry,
+                &[record(TableId::Account, account_key(210)?, Vec::new())]
+            ),
+            Err(StorageError::InvalidEncoding)
+        );
+        assert_eq!(
+            transformer.transform(
+                StorageConstructionKind::Rekey,
+                &entry,
+                &[
+                    record(TableId::Account, account_key(210)?, Vec::new()),
+                    record(TableId::Account, account_key(211)?, Vec::new()),
+                ]
+            ),
+            Err(StorageError::InvalidEncoding)
+        );
+        assert_eq!(
+            transformer.transform(
+                StorageConstructionKind::Rekey,
+                &entry,
+                &[record(
+                    TableId::Channel,
+                    StoredKey::new(vec![1; 16])?,
+                    Vec::new()
+                )]
+            ),
+            Err(StorageError::InvalidEncoding)
+        );
+        let mismatched_schema = ConstructionSourceRecord {
+            table: TableId::Account,
+            key: account_key(210)?,
+            record_schema: 2,
+            plaintext: Zeroizing::new(Vec::new()),
+        };
+        assert_eq!(
+            transformer.transform(StorageConstructionKind::Rekey, &entry, &[mismatched_schema]),
+            Err(StorageError::InvalidEncoding)
+        );
+
+        let invite_key = StoredKey::new(vec![212; 16])?;
+        let invite_entry = restore_entry(
+            TableId::RegistrationInvite,
+            StoredKey::new(invite_key.as_bytes().to_vec())?,
+            StorageConstructionAction::RestoreCopy,
+        )?;
+        let tombstone = domain_plaintext(TableId::RegistrationInvite, 2)?;
+        assert_eq!(
+            transformer
+                .transform(
+                    StorageConstructionKind::Restore,
+                    &invite_entry,
+                    &[record(
+                        TableId::RegistrationInvite,
+                        invite_key,
+                        tombstone.clone()
+                    )]
+                )?
+                .as_slice(),
+            tombstone
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_transformer_applies_account_channel_and_peer_profiles() -> Result<(), StorageError>
+    {
+        let epoch = RecoveryEpoch::from_bytes([213; 16]);
+        let source_guard = StorageDigest::from_bytes([214; 32]);
+        let mut transformer = RecoveryTransformV1::new(epoch, source_guard);
+
+        let account_key = account_key(215)?;
+        let account_entry = restore_entry(
+            TableId::Account,
+            StoredKey::new(account_key.as_bytes().to_vec())?,
+            StorageConstructionAction::RestoreAccount,
+        )?;
+        let account_plaintext = domain_plaintext(TableId::Account, 1)?;
+        let transformed = transformer.transform(
+            StorageConstructionKind::Restore,
+            &account_entry,
+            &[record(TableId::Account, account_key, account_plaintext)],
+        )?;
+        let account = PersistentRecordValue::decode(TableId::Account, &transformed)?;
+        assert_eq!((account.revision(), account.generation()), (2, 2));
+
+        let channel_key = StoredKey::new(vec![216; 16])?;
+        let channel_entry = restore_entry(
+            TableId::Channel,
+            StoredKey::new(channel_key.as_bytes().to_vec())?,
+            StorageConstructionAction::RestoreChannel,
+        )?;
+        let channel_plaintext = domain_plaintext(TableId::Channel, 1)?;
+        let transformed = transformer.transform(
+            StorageConstructionKind::Restore,
+            &channel_entry,
+            &[record(TableId::Channel, channel_key, channel_plaintext)],
+        )?;
+        let channel = PersistentRecordValue::decode(TableId::Channel, &transformed)?;
+        assert_eq!((channel.revision(), channel.generation()), (2, 0));
+
+        let peer_key = StoredKey::new(vec![217; 16])?;
+        let peer_entry = restore_entry(
+            TableId::FederationPeer,
+            StoredKey::new(peer_key.as_bytes().to_vec())?,
+            StorageConstructionAction::RestorePeerTombstones,
+        )?;
+        let peer_plaintext = domain_plaintext(TableId::FederationPeer, 2)?;
+        let transformed = transformer.transform(
+            StorageConstructionKind::Restore,
+            &peer_entry,
+            &[record(TableId::FederationPeer, peer_key, peer_plaintext)],
+        )?;
+        let peer = PersistentRecordValue::decode(TableId::FederationPeer, &transformed)?;
+        assert_eq!(peer.record_kind(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_transformer_rebuilds_channel_name_from_both_sources() -> Result<(), StorageError> {
+        let channel_key = StoredKey::new(vec![218; 16])?;
+        let name_key = StoredKey::new(vec![219; 32])?;
+        let channel_source = backup_source(TableId::Channel, &channel_key, 1)?;
+        let name_source = backup_source(TableId::ChannelName, &name_key, 2)?;
+        let entry = StorageConstructionPlanEntry::new(
+            StorageConstructionKind::Restore,
+            vec![name_source, channel_source],
+            TableId::ChannelName,
+            StoredKey::new(name_key.as_bytes().to_vec())?,
+            1,
+            StorageConstructionAction::RestoreChannelName,
+            0,
+        )?;
+        let channel_plaintext =
+            PersistentRecordValue::new(TableId::Channel, 1, 7, 0, None, Vec::new(), Vec::new())?
+                .encode()?;
+        let reference = RecordReference::new(
+            TableId::Channel,
+            StoredKey::new(channel_key.as_bytes().to_vec())?,
+        )?;
+        let name_plaintext = PersistentRecordValue::new(
+            TableId::ChannelName,
+            1,
+            1,
+            0,
+            None,
+            vec![reference],
+            b"#restored".to_vec(),
+        )?
+        .encode()?;
+        let sources = [
+            record(TableId::ChannelName, name_key, name_plaintext),
+            record(TableId::Channel, channel_key, channel_plaintext),
+        ];
+        let mut transformer = RecoveryTransformV1::new(
+            RecoveryEpoch::from_bytes([220; 16]),
+            StorageDigest::from_bytes([221; 32]),
+        );
+        let transformed =
+            transformer.transform(StorageConstructionKind::Restore, &entry, &sources)?;
+        let name = PersistentRecordValue::decode(TableId::ChannelName, &transformed)?;
+        assert_eq!(name.revision(), 8);
+        assert_eq!(name.body(), b"#restored");
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_transformer_rebinds_only_live_e2ee_routes() -> Result<(), StorageError> {
+        let target_epoch = RecoveryEpoch::from_bytes([222; 16]);
+        let source_guard = StorageDigest::from_bytes([223; 32]);
+        let mut transformer = RecoveryTransformV1::new(target_epoch, source_guard);
+        for (index, state) in [
+            crate::E2eeRecoveryKind::Normal,
+            crate::E2eeRecoveryKind::Pending,
+            crate::E2eeRecoveryKind::Conflict,
+            crate::E2eeRecoveryKind::Closed,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let key = StoredKey::new(vec![224, index as u8, 1])?;
+            let entry = restore_entry(
+                TableId::E2eeState,
+                StoredKey::new(key.as_bytes().to_vec())?,
+                StorageConstructionAction::RestoreE2eeState,
+            )?;
+            let original_epoch = RecoveryEpoch::from_bytes([225; 16]);
+            let original_guard = StorageDigest::from_bytes([226; 32]);
+            let gate = crate::E2eeRecoveryGate::new(
+                StorageDigest::from_bytes([227; 32]),
+                state,
+                original_epoch,
+                StorageDigest::from_bytes([228; 32]),
+                StorageDigest::from_bytes([229; 32]),
+                StorageDigest::from_bytes([230; 32]),
+                original_guard,
+            );
+            let plaintext = PersistentRecordValue::new(
+                TableId::E2eeState,
+                1,
+                1,
+                0,
+                None,
+                Vec::new(),
+                gate.encode()?,
+            )?
+            .encode()?;
+            let transformed = transformer.transform(
+                StorageConstructionKind::Restore,
+                &entry,
+                &[record(TableId::E2eeState, key, plaintext)],
+            )?;
+            let value = PersistentRecordValue::decode(TableId::E2eeState, &transformed)?;
+            let recovered = crate::E2eeRecoveryGate::decode(value.body())?;
+            if matches!(
+                state,
+                crate::E2eeRecoveryKind::Normal | crate::E2eeRecoveryKind::Pending
+            ) {
+                assert_eq!(recovered.state(), crate::E2eeRecoveryKind::Pending);
+                assert_eq!(recovered.recovery_epoch(), target_epoch);
+                assert_eq!(recovered.source_rollback_guard_hash(), source_guard);
+            } else {
+                assert_eq!(recovered.state(), state);
+                assert_eq!(recovered.recovery_epoch(), original_epoch);
+                assert_eq!(recovered.source_rollback_guard_hash(), original_guard);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_transformer_rejects_wrong_kind_action_source_and_target_key()
+    -> Result<(), StorageError> {
+        let mut transformer = RecoveryTransformV1::new(
+            RecoveryEpoch::from_bytes([231; 16]),
+            StorageDigest::from_bytes([232; 32]),
+        );
+        let key = account_key(233)?;
+        let entry = restore_entry(
+            TableId::Account,
+            StoredKey::new(key.as_bytes().to_vec())?,
+            StorageConstructionAction::RestoreAccount,
+        )?;
+        let plaintext = domain_plaintext(TableId::Account, 1)?;
+        assert_eq!(
+            transformer.transform(
+                StorageConstructionKind::Rekey,
+                &entry,
+                &[record(TableId::Account, key, plaintext.clone())]
+            ),
+            Err(StorageError::InvalidEncoding)
+        );
+        assert_eq!(
+            transformer.transform(StorageConstructionKind::Restore, &entry, &[]),
+            Err(StorageError::StaleState)
+        );
+
+        let rekey = rekey_entry(TableId::Account, account_key(234)?)?;
+        assert_eq!(
+            transformer.transform(
+                StorageConstructionKind::Restore,
+                &rekey,
+                &[record(
+                    TableId::Account,
+                    account_key(234)?,
+                    plaintext.clone()
+                )]
+            ),
+            Err(StorageError::InvalidEncoding)
+        );
+
+        let invalid_target = restore_entry(
+            TableId::E2eeState,
+            StoredKey::new(vec![1])?,
+            StorageConstructionAction::RestoreE2eeState,
+        )?;
+        let opaque = domain_plaintext(TableId::E2eeState, 2)?;
+        assert_eq!(
+            transformer.transform(
+                StorageConstructionKind::Restore,
+                &invalid_target,
+                &[record(TableId::E2eeState, StoredKey::new(vec![1])?, opaque)]
+            ),
+            Err(StorageError::InvalidEncoding)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn construction_source_open_binds_each_authenticated_envelope_field() -> Result<(), StorageError>
+    {
+        let master_key = StorageMasterKey::from_bytes([235; 32]);
+        let binding = DatabaseBinding::new(
+            NetworkId::from_bytes([236; 32]),
+            ServerId::from_bytes([237; 16]),
+            ServerIncarnation::from_bytes([238; 16]),
+            DatabaseId::from_bytes([239; 16]),
+        );
+        let key = account_key(240)?;
+        let plaintext = domain_plaintext(TableId::Account, 1)?;
+        let encoded = crate::StorageSealContext::new(&master_key, binding, 1)?
+            .seal(TableId::Account, 1, [241; 24], &key, &plaintext)?
+            .encode()?;
+        let record_id = SealedRecord::decode(&encoded)?.record_id()?;
+        let reference = StorageConstructionSource::new(
+            StorageConstructionSourceKind::DatabaseRecord,
+            TableId::Account,
+            StoredKey::new(key.as_bytes().to_vec())?,
+            1,
+            record_id,
+            0,
+        )?;
+        assert!(
+            ConstructionSourceRecord::open(&reference, &encoded, &master_key, binding, 1).is_ok()
+        );
+
+        let wrong_table = StorageConstructionSource::new(
+            StorageConstructionSourceKind::DatabaseRecord,
+            TableId::OpaqueRecord,
+            StoredKey::new(key.as_bytes().to_vec())?,
+            1,
+            record_id,
+            0,
+        )?;
+        assert!(matches!(
+            ConstructionSourceRecord::open(&wrong_table, &encoded, &master_key, binding, 1),
+            Err(StorageError::AuthenticationFailed)
+        ));
+        let wrong_schema = StorageConstructionSource::new(
+            StorageConstructionSourceKind::DatabaseRecord,
+            TableId::Account,
+            StoredKey::new(key.as_bytes().to_vec())?,
+            2,
+            record_id,
+            0,
+        )?;
+        assert!(matches!(
+            ConstructionSourceRecord::open(&wrong_schema, &encoded, &master_key, binding, 1),
+            Err(StorageError::AuthenticationFailed)
+        ));
+        let wrong_identifier = StorageConstructionSource::new(
+            StorageConstructionSourceKind::DatabaseRecord,
+            TableId::Account,
+            StoredKey::new(key.as_bytes().to_vec())?,
+            1,
+            StorageDigest::from_bytes([242; 32]),
+            0,
+        )?;
+        assert!(matches!(
+            ConstructionSourceRecord::open(&wrong_identifier, &encoded, &master_key, binding, 1),
+            Err(StorageError::AuthenticationFailed)
+        ));
+        assert!(matches!(
+            ConstructionSourceRecord::open(&reference, &encoded, &master_key, binding, 2),
+            Err(StorageError::AuthenticationFailed)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn executor_resume_and_batch_successor_reject_each_independent_binding()
+    -> Result<(), StorageError> {
+        let (identity, mut wrong_kind_plan) = rekey_plan()?;
+        wrong_kind_plan.kind = StorageConstructionKind::Restore;
+        let before = marker(identity, StorageConstructionCursor::BeforeFirst, 0);
+        assert!(matches!(
+            ConstructionExecutor::resume(before, wrong_kind_plan, maximum_limits()),
+            Err(StorageError::ResumeMismatch)
+        ));
+
+        let (identity, mut wrong_hash_plan) = rekey_plan()?;
+        wrong_hash_plan.hash = StorageDigest::from_bytes([243; 32]);
+        let before = marker(identity, StorageConstructionCursor::BeforeFirst, 0);
+        assert!(matches!(
+            ConstructionExecutor::resume(before, wrong_hash_plan, maximum_limits()),
+            Err(StorageError::ResumeMismatch)
+        ));
+
+        let (identity, mut wrong_count_plan) = rekey_plan()?;
+        wrong_count_plan.entry_count = 1;
+        let before = marker(identity, StorageConstructionCursor::BeforeFirst, 0);
+        assert!(matches!(
+            ConstructionExecutor::resume(before, wrong_count_plan, maximum_limits()),
+            Err(StorageError::ResumeMismatch)
+        ));
+
+        let (identity, plan) = rekey_plan()?;
+        let first_entry = plan.entry(0)?.ok_or(StorageError::StaleState)?;
+        let second_entry = plan.entry(1)?.ok_or(StorageError::StaleState)?;
+        let first = || ConstructionTargetRecord {
+            entry: &first_entry,
+            plaintext: &[],
+        };
+        let second = || ConstructionTargetRecord {
+            entry: &second_entry,
+            plaintext: &[],
+        };
+        let current = marker(identity, StorageConstructionCursor::BeforeFirst, 0);
+        let successor = successor_marker(&current, &plan, 1)?;
+
+        let wrong_cursor = marker(
+            identity,
+            StorageConstructionCursor::AtTarget {
+                table: TableId::Account,
+                key: account_key(244)?,
+            },
+            0,
+        );
+        assert_eq!(
+            validate_marker_successor(&wrong_cursor, &[first()], &successor),
+            Err(StorageError::ResumeMismatch)
+        );
+        assert_eq!(
+            validate_marker_successor(&current, &[second(), first()], &successor),
+            Err(StorageError::ResumeMismatch)
+        );
+
+        let mut identity_successor = successor_marker(&current, &plan, 1)?;
+        identity_successor.identity.source_master_key_id = StorageDigest::from_bytes([245; 32]);
+        assert_eq!(
+            validate_marker_successor(&current, &[first()], &identity_successor),
+            Err(StorageError::ResumeMismatch)
+        );
+        let mut path_successor = successor_marker(&current, &plan, 1)?;
+        path_successor.output_path_hash = StorageDigest::from_bytes([246; 32]);
+        assert_eq!(
+            validate_marker_successor(&current, &[first()], &path_successor),
+            Err(StorageError::ResumeMismatch)
+        );
+        let count_successor = marker(identity, StorageConstructionCursor::Complete, 2);
+        assert_eq!(
+            validate_marker_successor(&current, &[first()], &count_successor),
+            Err(StorageError::ResumeMismatch)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn disk_plan_and_preflight_accounting_reject_each_independent_internal_mismatch()
+    -> Result<(), StorageError> {
+        for changed in 0..3 {
+            let entries = rekey_entries()?;
+            let identity = rekey_identity(&entries)?;
+            let (file, path) = scratch_file("reverify-fields")?;
+            let mut plan = ConstructionPlan::rebuild_disk(
+                &identity,
+                file,
+                entries.into_iter().map(Ok),
+                maximum_limits(),
+            )?;
+            match changed {
+                0 => plan.entry_count += 1,
+                1 => plan.encoded_bytes += 1,
+                _ => plan.hash = StorageDigest::from_bytes([251; 32]),
+            }
+            assert_eq!(plan.reverify_disk(), Err(StorageError::ResumeMismatch));
+            drop(plan);
+            std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+        }
+
+        let (identity, plan) = rekey_plan()?;
+        let marker = marker(identity, StorageConstructionCursor::BeforeFirst, 0);
+        assert_eq!(
+            initial_construction_accounting(
+                &marker,
+                ConstructionLimits {
+                    target_database_bytes: 1,
+                    ..maximum_limits()
+                },
+            )
+            .map(|_| ()),
+            Err(StorageError::LimitExceeded)
+        );
+        assert_eq!(
+            initial_construction_accounting(
+                &marker,
+                ConstructionLimits {
+                    target_backup_bytes: 1,
+                    ..maximum_limits()
+                },
+            )
+            .map(|_| ()),
+            Err(StorageError::LimitExceeded)
+        );
+        let initial = initial_construction_accounting(&marker, maximum_limits())?;
+
+        for changed in 0..3 {
+            let mut simulation =
+                ConstructionPreflightSimulation::new(&marker, initial, 0, 0, maximum_limits());
+            let mut completion = simulation.predicted_completion()?;
+            match changed {
+                0 => completion.finalization_storage_commit_sequence += 1,
+                1 => completion.finalization_manifest_sequence += 1,
+                _ => completion.finalization_nonce_draw_high_water += 1,
+            }
+            assert_eq!(
+                simulation.apply_completion(&completion),
+                Err(StorageError::StaleState)
+            );
+        }
+
+        let mut storage_overflow =
+            ConstructionPreflightSimulation::new(&marker, initial, 0, 0, maximum_limits());
+        storage_overflow.storage_commit_sequence = u64::MAX;
+        assert_eq!(
+            storage_overflow.predicted_completion().map(|_| ()),
+            Err(StorageError::Overflow)
+        );
+        let mut manifest_overflow =
+            ConstructionPreflightSimulation::new(&marker, initial, 0, 0, maximum_limits());
+        manifest_overflow.manifest_sequence = u64::MAX;
+        assert_eq!(
+            manifest_overflow.predicted_completion().map(|_| ()),
+            Err(StorageError::Overflow)
+        );
+        let mut nonce_overflow =
+            ConstructionPreflightSimulation::new(&marker, initial, 0, 0, maximum_limits());
+        nonce_overflow.nonce_high_water = u64::MAX;
+        assert_eq!(
+            nonce_overflow.predicted_completion().map(|_| ()),
+            Err(StorageError::Overflow)
+        );
+
+        let completion =
+            ConstructionPreflightSimulation::new(&marker, initial, 0, 0, maximum_limits())
+                .predicted_completion()?;
+        let mut checkpoint_storage_overflow =
+            ConstructionPreflightSimulation::new(&marker, initial, 0, 0, maximum_limits());
+        checkpoint_storage_overflow.storage_commit_sequence = u64::MAX;
+        assert_eq!(
+            checkpoint_storage_overflow
+                .finished_preflight(&completion)
+                .map(|_| ()),
+            Err(StorageError::Overflow)
+        );
+        let mut checkpoint_nonce_overflow =
+            ConstructionPreflightSimulation::new(&marker, initial, 0, 0, maximum_limits());
+        checkpoint_nonce_overflow.nonce_high_water = u64::MAX;
+        assert_eq!(
+            checkpoint_nonce_overflow
+                .finished_preflight(&completion)
+                .map(|_| ()),
+            Err(StorageError::Overflow)
+        );
+
+        let mut logical_limit = ConstructionPreflightSimulation::new(
+            &marker,
+            StorageAccountingLimits {
+                current_logical_database_bytes: 0,
+                current_backup_stream_bytes: 0,
+                database_max_bytes: 0,
+                backup_max_bytes: u64::MAX,
+            },
+            0,
+            0,
+            maximum_limits(),
+        );
+        assert_eq!(
+            logical_limit.add_final_checkpoint(),
+            Err(StorageError::LimitExceeded)
+        );
+        let mut backup_limit = ConstructionPreflightSimulation::new(
+            &marker,
+            StorageAccountingLimits {
+                current_logical_database_bytes: 0,
+                current_backup_stream_bytes: 0,
+                database_max_bytes: u64::MAX,
+                backup_max_bytes: 0,
+            },
+            0,
+            0,
+            maximum_limits(),
+        );
+        assert_eq!(
+            backup_limit.add_final_checkpoint(),
+            Err(StorageError::LimitExceeded)
+        );
+
+        let sealed_bytes = MIN_SEALED_RECORD_BYTES;
+        let logical_charge = logical_record_charge(8, sealed_bytes)?;
+        let mut logical_underflow =
+            ConstructionPreflightSimulation::new(&marker, initial, 0, 0, maximum_limits());
+        logical_underflow.accounting.current_logical_database_bytes = 0;
+        logical_underflow.manifest_sealed_bytes = vec![sealed_bytes];
+        assert_eq!(
+            logical_underflow.prune_manifests(),
+            Err(StorageError::StaleState)
+        );
+        let mut backup_underflow =
+            ConstructionPreflightSimulation::new(&marker, initial, 0, 0, maximum_limits());
+        backup_underflow.accounting.current_logical_database_bytes = logical_charge;
+        backup_underflow.accounting.current_backup_stream_bytes = 0;
+        backup_underflow.manifest_sealed_bytes = vec![sealed_bytes];
+        assert_eq!(
+            backup_underflow.prune_manifests(),
+            Err(StorageError::StaleState)
+        );
+
+        assert_eq!(plan.validate_initial_marker(&marker), Ok(()));
+        let non_initial = successor_marker(&marker, &plan, 1)?;
+        assert_eq!(
+            plan.validate_initial_marker(&non_initial),
+            Err(StorageError::ResumeMismatch)
+        );
+        Ok(())
+    }
+
+    struct UnusedConstructionTarget;
+
+    impl ConstructionTargetWriter for UnusedConstructionTarget {
+        fn commit_batch(
+            &mut self,
+            _batch: ConstructionTargetBatch<'_>,
+        ) -> Result<ConstructionCommitReceipt, StorageError> {
+            Err(StorageError::Unavailable)
+        }
+
+        fn finalization_counters(
+            &mut self,
+            _marker: &StorageConstruction,
+        ) -> Result<ConstructionFinalizationCounters, StorageError> {
+            Err(StorageError::Unavailable)
+        }
+
+        fn finalize(
+            &mut self,
+            _marker: &StorageConstruction,
+            _completion: &StorageOperationCompletion,
+        ) -> Result<(), StorageError> {
+            Err(StorageError::Unavailable)
+        }
+    }
+
+    #[test]
+    fn cursor_successor_and_completion_guards_reject_reachable_internal_mismatches()
+    -> Result<(), StorageError> {
+        let (identity, plan) = rekey_plan()?;
+        let first_entry = plan.entry(0)?.ok_or(StorageError::StaleState)?;
+        let second_entry = plan.entry(1)?.ok_or(StorageError::StaleState)?;
+        let first_record = ConstructionTargetRecord {
+            entry: &first_entry,
+            plaintext: &[],
+        };
+        let second_record = ConstructionTargetRecord {
+            entry: &second_entry,
+            plaintext: &[],
+        };
+        let before = marker(identity, StorageConstructionCursor::BeforeFirst, 0);
+        assert_eq!(
+            validate_marker_successor(&before, &[], &before),
+            Err(StorageError::InvalidEncoding)
+        );
+
+        let complete = successor_marker(&before, &plan, 2)?;
+        let at_second = marker(
+            identity,
+            StorageConstructionCursor::AtTarget {
+                table: second_entry.target_table(),
+                key: StoredKey::new(second_entry.target_key().as_bytes().to_vec())?,
+            },
+            1,
+        );
+        assert_eq!(
+            validate_marker_successor(&at_second, &[second_record], &complete),
+            Ok(())
+        );
+        let wrong_table = marker(
+            identity,
+            StorageConstructionCursor::AtTarget {
+                table: TableId::Account,
+                key: StoredKey::new(second_entry.target_key().as_bytes().to_vec())?,
+            },
+            1,
+        );
+        assert_eq!(
+            validate_marker_successor(
+                &wrong_table,
+                &[ConstructionTargetRecord {
+                    entry: &second_entry,
+                    plaintext: &[],
+                }],
+                &complete
+            ),
+            Err(StorageError::ResumeMismatch)
+        );
+        let wrong_key = marker(
+            identity,
+            StorageConstructionCursor::AtTarget {
+                table: second_entry.target_table(),
+                key: account_key(252)?,
+            },
+            1,
+        );
+        assert_eq!(
+            validate_marker_successor(
+                &wrong_key,
+                &[ConstructionTargetRecord {
+                    entry: &second_entry,
+                    plaintext: &[],
+                }],
+                &complete
+            ),
+            Err(StorageError::ResumeMismatch)
+        );
+        let larger_identity = StorageOperationIdentity {
+            planned_entry_count: 3,
+            ..identity
+        };
+        let larger_successor = marker(larger_identity, StorageConstructionCursor::Complete, 3);
+        assert_eq!(
+            validate_marker_successor(&complete, &[first_record], &larger_successor),
+            Err(StorageError::ResumeMismatch)
+        );
+
+        assert_eq!(validate_cursor(&before, &plan), Ok(()));
+        assert_eq!(validate_cursor(&at_second, &plan), Ok(()));
+        assert_eq!(
+            validate_cursor(&wrong_table, &plan),
+            Err(StorageError::ResumeMismatch)
+        );
+        assert_eq!(
+            validate_cursor(&wrong_key, &plan),
+            Err(StorageError::ResumeMismatch)
+        );
+        assert_eq!(validate_cursor(&complete, &plan), Ok(()));
+        assert_eq!(
+            successor_marker(&before, &plan, 0).map(|_| ()),
+            Err(StorageError::InvalidEncoding)
+        );
+        assert_eq!(
+            successor_marker(&before, &plan, 3).map(|_| ()),
+            Err(StorageError::StaleState)
+        );
+
+        let initial = initial_construction_accounting(&before, maximum_limits())?;
+        let mut prediction =
+            ConstructionPreflightSimulation::new(&complete, initial, 0, 0, maximum_limits());
+        prediction.marker = marker(identity, StorageConstructionCursor::Complete, 2);
+        let completion = prediction.predicted_completion()?;
+        assert_eq!(completion.identity.validate(), Ok(()));
+        assert_eq!(
+            completion.storage_operation_id,
+            completion.identity.operation_id()?
+        );
+        assert_eq!(
+            completion.target_records_committed,
+            completion.identity.planned_entry_count
+        );
+        assert_ne!(completion.finalization_storage_commit_sequence, 0);
+        completion.validate()?;
+        let mut valid_completion =
+            ConstructionPreflightSimulation::new(&complete, initial, 0, 0, maximum_limits());
+        valid_completion.marker = marker(identity, StorageConstructionCursor::Complete, 2);
+        assert_eq!(valid_completion.apply_completion(&completion), Ok(()));
+        let mut storage_mismatch =
+            ConstructionPreflightSimulation::new(&complete, initial, 0, 0, maximum_limits());
+        storage_mismatch.marker = marker(identity, StorageConstructionCursor::Complete, 2);
+        storage_mismatch.storage_commit_sequence = 1;
+        assert_eq!(
+            storage_mismatch.apply_completion(&completion),
+            Err(StorageError::StaleState)
+        );
+        let mut manifest_mismatch =
+            ConstructionPreflightSimulation::new(&complete, initial, 0, 0, maximum_limits());
+        manifest_mismatch.marker = marker(identity, StorageConstructionCursor::Complete, 2);
+        manifest_mismatch.manifest_sequence = 1;
+        assert_eq!(
+            manifest_mismatch.apply_completion(&completion),
+            Err(StorageError::StaleState)
+        );
+        let mut nonce_mismatch =
+            ConstructionPreflightSimulation::new(&complete, initial, 0, 0, maximum_limits());
+        nonce_mismatch.marker = marker(identity, StorageConstructionCursor::Complete, 2);
+        nonce_mismatch.nonce_high_water = 1;
+        assert_eq!(
+            nonce_mismatch.apply_completion(&completion),
+            Err(StorageError::StaleState)
+        );
+
+        let mut incomplete = ConstructionExecutor {
+            marker: StorageConstruction {
+                next_target: StorageConstructionCursor::Complete,
+                target_records_committed: 1,
+                ..before
+            },
+            plan,
+            limits: maximum_limits(),
+            last_receipt: None,
+        };
+        assert_eq!(
+            incomplete.finalize(&mut UnusedConstructionTarget),
+            Err(StorageError::StaleState)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_transforms_reject_each_semantic_source_mismatch() -> Result<(), StorageError> {
+        let channel_key = StoredKey::new(vec![253; 16])?;
+        let name_key = StoredKey::new(vec![254; 32])?;
+        let entry = StorageConstructionPlanEntry::new(
+            StorageConstructionKind::Restore,
+            vec![
+                backup_source(TableId::ChannelName, &name_key, 1)?,
+                backup_source(TableId::Channel, &channel_key, 2)?,
+            ],
+            TableId::ChannelName,
+            StoredKey::new(name_key.as_bytes().to_vec())?,
+            1,
+            StorageConstructionAction::RestoreChannelName,
+            0,
+        )?;
+        let channel_reference = RecordReference::new(
+            TableId::Channel,
+            StoredKey::new(channel_key.as_bytes().to_vec())?,
+        )?;
+        let valid_channel =
+            PersistentRecordValue::new(TableId::Channel, 1, 1, 0, None, Vec::new(), Vec::new())?
+                .encode()?;
+        let valid_name = PersistentRecordValue::new(
+            TableId::ChannelName,
+            1,
+            1,
+            0,
+            None,
+            vec![channel_reference],
+            b"#name".to_vec(),
+        )?
+        .encode()?;
+        let channel_tombstone = domain_plaintext(TableId::Channel, 2)?;
+        assert_eq!(
+            transform_channel_name(
+                &entry,
+                &[
+                    record(
+                        TableId::ChannelName,
+                        StoredKey::new(name_key.as_bytes().to_vec())?,
+                        valid_name.clone()
+                    ),
+                    record(
+                        TableId::Channel,
+                        StoredKey::new(channel_key.as_bytes().to_vec())?,
+                        channel_tombstone
+                    ),
+                ],
+            ),
+            Err(StorageError::StaleState)
+        );
+        let name_tombstone = domain_plaintext(TableId::ChannelName, 2)?;
+        assert_eq!(
+            transform_channel_name(
+                &entry,
+                &[
+                    record(
+                        TableId::ChannelName,
+                        StoredKey::new(name_key.as_bytes().to_vec())?,
+                        name_tombstone
+                    ),
+                    record(
+                        TableId::Channel,
+                        StoredKey::new(channel_key.as_bytes().to_vec())?,
+                        valid_channel.clone()
+                    ),
+                ],
+            ),
+            Err(StorageError::StaleState)
+        );
+        let missing_reference = PersistentRecordValue::new(
+            TableId::ChannelName,
+            1,
+            1,
+            0,
+            None,
+            Vec::new(),
+            b"#name".to_vec(),
+        )?
+        .encode()?;
+        assert_eq!(
+            transform_channel_name(
+                &entry,
+                &[
+                    record(
+                        TableId::ChannelName,
+                        StoredKey::new(name_key.as_bytes().to_vec())?,
+                        missing_reference
+                    ),
+                    record(
+                        TableId::Channel,
+                        StoredKey::new(channel_key.as_bytes().to_vec())?,
+                        valid_channel.clone()
+                    ),
+                ],
+            ),
+            Err(StorageError::StaleState)
+        );
+        let wrong_reference = RecordReference::new(TableId::Account, account_key(1)?)?;
+        let wrong_reference_name = PersistentRecordValue::new(
+            TableId::ChannelName,
+            1,
+            1,
+            0,
+            None,
+            vec![wrong_reference],
+            b"#name".to_vec(),
+        )?
+        .encode()?;
+        assert_eq!(
+            transform_channel_name(
+                &entry,
+                &[
+                    record(
+                        TableId::ChannelName,
+                        StoredKey::new(name_key.as_bytes().to_vec())?,
+                        wrong_reference_name
+                    ),
+                    record(
+                        TableId::Channel,
+                        StoredKey::new(channel_key.as_bytes().to_vec())?,
+                        valid_channel.clone()
+                    ),
+                ],
+            ),
+            Err(StorageError::StaleState)
+        );
+
+        let peer_key = StoredKey::new(vec![2; 16])?;
+        let peer_entry = restore_entry(
+            TableId::FederationPeer,
+            StoredKey::new(peer_key.as_bytes().to_vec())?,
+            StorageConstructionAction::RestorePeerTombstones,
+        )?;
+        assert_eq!(
+            transform_peer_tombstones(
+                &peer_entry,
+                &[record(
+                    TableId::FederationPeer,
+                    peer_key,
+                    domain_plaintext(TableId::FederationPeer, 1)?,
+                )],
+            ),
+            Err(StorageError::StaleState)
+        );
+        assert_eq!(
+            recovery_transform_prefix(TableId::Channel, &domain_plaintext(TableId::Channel, 2)?,),
+            Err(StorageError::InvalidEncoding)
+        );
+        let _account_tombstone = domain_plaintext(TableId::Account, 2)?;
+
+        let account = account_key(3)?;
+        let account_entry = restore_entry(
+            TableId::Account,
+            StoredKey::new(account.as_bytes().to_vec())?,
+            StorageConstructionAction::RestoreAccount,
+        )?;
+        let wrong_schema = ConstructionSourceRecord {
+            table: TableId::Account,
+            key: StoredKey::new(account.as_bytes().to_vec())?,
+            record_schema: 2,
+            plaintext: Zeroizing::new(domain_plaintext(TableId::Account, 1)?),
+        };
+        assert_eq!(
+            exact_source(&account_entry, &[wrong_schema]),
+            Err(StorageError::StaleState)
+        );
+        assert!(
+            construction_record_references(
+                TableId::Account,
+                &account,
+                &domain_plaintext(TableId::Account, 1)?,
+            )?
+            .is_empty()
+        );
+
+        let copy_key = StoredKey::new(vec![6; 16])?;
+        let copy_entry = restore_entry(
+            TableId::OpaqueRecord,
+            StoredKey::new(copy_key.as_bytes().to_vec())?,
+            StorageConstructionAction::RestoreCopy,
+        )?;
+        let mut transformer = RecoveryTransformV1::new(
+            RecoveryEpoch::from_bytes([4; 16]),
+            StorageDigest::from_bytes([5; 32]),
+        );
+        assert_eq!(
+            transformer.transform(StorageConstructionKind::Restore, &copy_entry, &[]),
+            Err(StorageError::StaleState)
+        );
+        let copy_plaintext = domain_plaintext(TableId::OpaqueRecord, 2)?;
+        assert_eq!(
+            transformer.transform(
+                StorageConstructionKind::Restore,
+                &copy_entry,
+                &[
+                    record(
+                        TableId::OpaqueRecord,
+                        StoredKey::new(copy_key.as_bytes().to_vec())?,
+                        copy_plaintext.clone()
+                    ),
+                    record(TableId::OpaqueRecord, copy_key, copy_plaintext),
+                ],
+            ),
+            Err(StorageError::StaleState)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn internal_restore_scans_reject_duplicate_and_cross_kind_inputs() -> Result<(), StorageError> {
+        let stored_account_key = account_key(104)?;
+        let account_source = backup_source(TableId::Account, &stored_account_key, 1)?;
+        let account_record = record(
+            TableId::Account,
+            StoredKey::new(stored_account_key.as_bytes().to_vec())?,
+            domain_plaintext(TableId::Account, 1)?,
+        );
+        let (file, path) = scratch_file("rekey-restore-source")?;
+        let mut rekey_builder = ConstructionPlanBuilder::start_streaming(
+            StorageConstructionKind::Rekey,
+            file,
+            maximum_limits(),
+        )?;
+        assert_eq!(
+            rekey_builder.observe_restore_source_record(&account_source, &account_record),
+            Err(StorageError::InvalidEncoding),
+        );
+        drop(rekey_builder);
+        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+
+        let mutation = IntegrityRecordMutation::new(
+            TableId::Account,
+            StoredKey::new(stored_account_key.as_bytes().to_vec())?,
+            IntegrityRecordVersion::Absent,
+            IntegrityRecordVersion::Present {
+                record_schema: 1,
+                sealed_record_id: StorageDigest::from_bytes([105; 32]),
+            },
+        )?;
+        let manifest = IntegrityManifest::new(IntegrityManifestTbs::new(
+            DatabaseId::from_bytes([106; 16]),
+            1,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            3,
+            3,
+            ZERO,
+            vec![mutation],
+        )?)?
+        .encode()?;
+        let (file, path) = scratch_file("duplicate-restore-manifest")?;
+        let mut restore_builder = ConstructionPlanBuilder::start_streaming(
+            StorageConstructionKind::Restore,
+            file,
+            maximum_limits(),
+        )?;
+        for (key_sequence, offset) in [(1_u64, 2_u64), (2, 3)] {
+            let key = StoredKey::new(key_sequence.to_be_bytes().to_vec())?;
+            let source = backup_source(TableId::IntegrityManifest, &key, offset)?;
+            let manifest_record = record(
+                TableId::IntegrityManifest,
+                StoredKey::new(key.as_bytes().to_vec())?,
+                manifest.clone(),
+            );
+            let result = restore_builder.observe_restore_source_record(&source, &manifest_record);
+            if key_sequence == 1 {
+                result?;
+            } else {
+                assert_eq!(result, Err(StorageError::StaleState));
+            }
+        }
+        drop(restore_builder);
+        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+
+        let (_, memory_plan) = rekey_plan()?;
+        memory_plan.reverify_disk()?;
+
+        let login_key = LoginIndexKey::from_bytes([107; 32]);
+        let login_state = crate::LoginIndexKeyState::stable(
+            1,
+            login_key.key_id(NetworkId::from_bytes([108; 32])),
+        )?;
+        let login_state_key = StoredKey::new(crate::LOGIN_INDEX_KEY_STATE_KEY.to_vec())?;
+        let login_state_source = backup_source(TableId::LoginIndexKeyState, &login_state_key, 4)?;
+        let login_state_record = record(
+            TableId::LoginIndexKeyState,
+            login_state_key,
+            login_state.encode()?,
+        );
+        let mut login_scan = RestoreLoginScan::new();
+        login_scan.observe(&login_state_source, &login_state_record)?;
+        assert_eq!(
+            login_scan.observe(&login_state_source, &login_state_record),
+            Err(StorageError::StaleState),
+        );
+
+        let active_sequence = 9_u64;
+        let checkpoint_key = StoredKey::new(active_sequence.to_be_bytes().to_vec())?;
+        let checkpoint_source = backup_source(TableId::IntegrityCheckpoint, &checkpoint_key, 5)?;
+        let checkpoint_record = record(TableId::IntegrityCheckpoint, checkpoint_key, Vec::new());
+        let mut active = Some(IntegrityCheckpoint::new(IntegrityCheckpointTbs {
+            database_instance_id: DatabaseId::from_bytes([109; 16]),
+            cut_storage_commit_sequence: 0,
+            cut_manifest_sequence: 0,
+            cut_state_generation: 0,
+            cut_account_service_response_count: 0,
+            cut_nonce_draw_high_water: 0,
+            cut_manifest_hash: ZERO,
+            tracked_record_count: 0,
+            tracked_state_digest: ZERO,
+            previous_checkpoint_hash: ZERO,
+            installation_storage_commit_sequence: 0,
+            installation_manifest_sequence: 0,
+            installation_nonce_reservation_start: 0,
+            installation_nonce_draw_high_water: 2,
+        })?);
+        assert_eq!(
+            observe_active_checkpoint(
+                &checkpoint_source,
+                &checkpoint_record,
+                active_sequence,
+                &mut active,
+            ),
+            Err(StorageError::StaleState),
+        );
+
+        let offset = crate::backup::BACKUP_RECORDS_OFFSET;
+        let trailer_start = offset.checked_add(8).ok_or(StorageError::Overflow)?;
+        let mut bytes =
+            vec![0_u8; usize::try_from(trailer_start).map_err(|_| StorageError::Overflow)?];
+        let length_end = usize::try_from(offset.checked_add(4).ok_or(StorageError::Overflow)?)
+            .map_err(|_| StorageError::Overflow)?;
+        bytes
+            .get_mut(usize::try_from(offset).map_err(|_| StorageError::Overflow)?..length_end)
+            .ok_or(StorageError::InvalidEncoding)?
+            .copy_from_slice(&1_u32.to_be_bytes());
+        assert_eq!(
+            read_backup_record(&mut Cursor::new(bytes), offset, trailer_start, offset + 4,)
+                .map(|_| ()),
+            Err(StorageError::InvalidEncoding),
+        );
+
+        let wrong_entry = rekey_entry(TableId::Account, account_key(110)?)?;
+        assert_eq!(
+            transform_channel_name(&wrong_entry, &[]),
+            Err(StorageError::StaleState),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn restore_scratch_and_disk_plan_rereads_reject_corruption() -> Result<(), StorageError> {
+        let stored_account_key = account_key(111)?;
+        let mutation = IntegrityRecordMutation::new(
+            TableId::Account,
+            StoredKey::new(stored_account_key.as_bytes().to_vec())?,
+            IntegrityRecordVersion::Absent,
+            IntegrityRecordVersion::Present {
+                record_schema: 1,
+                sealed_record_id: StorageDigest::from_bytes([112; 32]),
+            },
+        )?;
+        let manifest = IntegrityManifest::new(IntegrityManifestTbs::new(
+            DatabaseId::from_bytes([113; 16]),
+            1,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            3,
+            3,
+            ZERO,
+            vec![mutation],
+        )?)?;
+        let manifest_key = StoredKey::new(1_u64.to_be_bytes().to_vec())?;
+        let manifest_source = backup_source(TableId::IntegrityManifest, &manifest_key, 1)?;
+        let manifest_record = record(
+            TableId::IntegrityManifest,
+            StoredKey::new(manifest_key.as_bytes().to_vec())?,
+            manifest.encode()?,
+        );
+        let (file, path) = scratch_file("restore-corruption")?;
+        let mut builder = ConstructionPlanBuilder::start_streaming(
+            StorageConstructionKind::Restore,
+            file,
+            maximum_limits(),
+        )?;
+        builder.observe_restore_source_record(&manifest_source, &manifest_record)?;
+        let checkpoint = IntegrityCheckpoint::new(IntegrityCheckpointTbs {
+            database_instance_id: DatabaseId::from_bytes([113; 16]),
+            cut_storage_commit_sequence: 0,
+            cut_manifest_sequence: 0,
+            cut_state_generation: 0,
+            cut_account_service_response_count: 0,
+            cut_nonce_draw_high_water: 0,
+            cut_manifest_hash: ZERO,
+            tracked_record_count: 0,
+            tracked_state_digest: ZERO,
+            previous_checkpoint_hash: ZERO,
+            installation_storage_commit_sequence: 0,
+            installation_manifest_sequence: 0,
+            installation_nonce_reservation_start: 0,
+            installation_nonce_draw_high_water: 2,
+        })?;
+        assert_eq!(
+            builder.verify_restore_checkpoint(&checkpoint),
+            Err(StorageError::StaleState),
+        );
+        assert_eq!(
+            builder.reverse_restore_manifest(1),
+            Err(StorageError::StaleState),
+        );
+        drop(builder);
+        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+
+        let entries = rekey_entries()?;
+        let identity = rekey_identity(&entries)?;
+        let (file, path) = scratch_file("disk-sequence-corruption")?;
+        let plan = ConstructionPlan::rebuild_disk(
+            &identity,
+            file,
+            entries.into_iter().map(Ok),
+            maximum_limits(),
+        )?;
+        let ConstructionPlanStorage::Disk(database) = &plan.storage else {
+            return Err(StorageError::StaleState);
+        };
+        let transaction = database
+            .begin_write()
+            .map_err(|_| StorageError::DatabaseRejected)?;
+        {
+            let mut table = transaction
+                .open_table(CONSTRUCTION_PLAN_TABLE)
+                .map_err(|_| StorageError::DatabaseRejected)?;
+            let value = table
+                .remove(0_u64.to_be_bytes().as_slice())
+                .map_err(|_| StorageError::DatabaseRejected)?
+                .ok_or(StorageError::StaleState)?
+                .value()
+                .to_vec();
+            table
+                .insert(2_u64.to_be_bytes().as_slice(), value.as_slice())
+                .map_err(|_| StorageError::DatabaseRejected)?;
+        }
+        transaction
+            .commit()
+            .map_err(|_| StorageError::DatabaseRejected)?;
+        assert_eq!(plan.reverify_disk(), Err(StorageError::StaleState));
+        drop(plan);
+        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+
+        let entries = rekey_entries()?;
+        let identity = rekey_identity(&entries)?;
+        let (file, path) = scratch_file("disk-order-corruption")?;
+        let plan = ConstructionPlan::rebuild_disk(
+            &identity,
+            file,
+            entries.into_iter().map(Ok),
+            maximum_limits(),
+        )?;
+        let ConstructionPlanStorage::Disk(database) = &plan.storage else {
+            return Err(StorageError::StaleState);
+        };
+        let transaction = database
+            .begin_write()
+            .map_err(|_| StorageError::DatabaseRejected)?;
+        {
+            let mut table = transaction
+                .open_table(CONSTRUCTION_PLAN_TABLE)
+                .map_err(|_| StorageError::DatabaseRejected)?;
+            let first = table
+                .get(0_u64.to_be_bytes().as_slice())
+                .map_err(|_| StorageError::DatabaseRejected)?
+                .ok_or(StorageError::StaleState)?
+                .value()
+                .to_vec();
+            let second = table
+                .get(1_u64.to_be_bytes().as_slice())
+                .map_err(|_| StorageError::DatabaseRejected)?
+                .ok_or(StorageError::StaleState)?
+                .value()
+                .to_vec();
+            table
+                .insert(0_u64.to_be_bytes().as_slice(), second.as_slice())
+                .map_err(|_| StorageError::DatabaseRejected)?;
+            table
+                .insert(1_u64.to_be_bytes().as_slice(), first.as_slice())
+                .map_err(|_| StorageError::DatabaseRejected)?;
+        }
+        transaction
+            .commit()
+            .map_err(|_| StorageError::DatabaseRejected)?;
+        assert_eq!(plan.reverify_disk(), Err(StorageError::InvalidEncoding));
+        drop(plan);
+        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+
+        let (file, path) = scratch_file("builder-order-corruption")?;
+        let mut builder = ConstructionPlanBuilder::start_streaming(
+            StorageConstructionKind::Rekey,
+            file,
+            maximum_limits(),
+        )?;
+        let key_state = rekey_entry(
+            TableId::LoginIndexKeyState,
+            StoredKey::new(crate::LOGIN_INDEX_KEY_STATE_KEY.to_vec())?,
+        )?
+        .encode()?;
+        let account = rekey_entry(TableId::Account, account_key(114)?)?.encode()?;
+        {
+            let mut table = builder
+                .transaction
+                .open_table(CONSTRUCTION_PLAN_UNSORTED_TABLE)
+                .map_err(|_| StorageError::DatabaseRejected)?;
+            table
+                .insert(&[0_u8][..], key_state.as_slice())
+                .map_err(|_| StorageError::DatabaseRejected)?;
+            table
+                .insert(&[1_u8][..], account.as_slice())
+                .map_err(|_| StorageError::DatabaseRejected)?;
+        }
+        builder.entry_count = 2;
+        builder.encoded_bytes = u64::try_from(
+            key_state
+                .len()
+                .checked_add(account.len())
+                .ok_or(StorageError::Overflow)?,
+        )
+        .map_err(|_| StorageError::Overflow)?;
+        assert!(matches!(
+            builder.finish(),
+            Err(StorageError::InvalidEncoding)
+        ));
+        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+        Ok(())
+    }
+
+    #[test]
+    fn login_references_and_restore_boundaries_cover_each_exact_arm() -> Result<(), StorageError> {
+        let network = NetworkId::from_bytes([115; 32]);
+        let login_secret = LoginIndexKey::from_bytes([116; 32]);
+        let login = NormalizedLogin::prepare("reference-arms")
+            .map_err(|_| StorageError::InvalidEncoding)?;
+        let login_key = crate::LoginIndexStoredKey::new(
+            1,
+            derive_login_index(&login_secret, network, &login)?,
+        )?;
+        let stored_login_key = login_key.encode()?;
+        let account = AccountRandomId::from_bytes([117; 16]).to_account_id();
+        let values = [
+            crate::LoginIndexValue::new(
+                &login_key,
+                crate::LoginIndexValueKind::Live {
+                    account_id: account,
+                    opaque_credential_id: OpaqueCredentialId::from_bytes([118; 32]),
+                },
+            )?,
+            crate::LoginIndexValue::new(
+                &login_key,
+                crate::LoginIndexValueKind::CreationReservation {
+                    transaction_id: TransactionId::from_bytes([119; 16]),
+                    expires_at: 1,
+                },
+            )?,
+            crate::LoginIndexValue::new(
+                &login_key,
+                crate::LoginIndexValueKind::DeletionTombstone {
+                    deleted_account_id: account,
+                    expires_at: 2,
+                },
+            )?,
+        ];
+        let expected_counts = [2_usize, 1, 1];
+        for (value, expected_count) in values.into_iter().zip(expected_counts) {
+            assert_eq!(
+                construction_record_references(
+                    TableId::LoginIndex,
+                    &stored_login_key,
+                    &value.encode()?,
+                )?
+                .len(),
+                expected_count,
+            );
+        }
+
+        let account_key = account_key(120)?;
+        let account_source = backup_source(TableId::Account, &account_key, 1)?;
+        let account_record = record(
+            TableId::Account,
+            StoredKey::new(account_key.as_bytes().to_vec())?,
+            domain_plaintext(TableId::Account, 1)?,
+        );
+        let mut login_scan = RestoreLoginScan::new();
+        login_scan.observe(&account_source, &account_record)?;
+        let live_login = crate::LoginIndexValue::new(
+            &login_key,
+            crate::LoginIndexValueKind::Live {
+                account_id: account,
+                opaque_credential_id: OpaqueCredentialId::from_bytes([129; 32]),
+            },
+        )?;
+        let login_source = backup_source(TableId::LoginIndex, &stored_login_key, 2)?;
+        let login_record = record(
+            TableId::LoginIndex,
+            StoredKey::new(stored_login_key.as_bytes().to_vec())?,
+            live_login.encode()?,
+        );
+        login_scan.observe(&login_source, &login_record)?;
+
+        let offset = crate::backup::BACKUP_RECORDS_OFFSET;
+        let trailer_start = offset.checked_add(8).ok_or(StorageError::Overflow)?;
+        let mut bytes =
+            vec![0_u8; usize::try_from(trailer_start).map_err(|_| StorageError::Overflow)?];
+        let length_end = usize::try_from(offset.checked_add(4).ok_or(StorageError::Overflow)?)
+            .map_err(|_| StorageError::Overflow)?;
+        bytes
+            .get_mut(usize::try_from(offset).map_err(|_| StorageError::Overflow)?..length_end)
+            .ok_or(StorageError::InvalidEncoding)?
+            .copy_from_slice(&5_u32.to_be_bytes());
+        assert_eq!(
+            read_backup_record(
+                &mut Cursor::new(bytes),
+                offset,
+                trailer_start,
+                trailer_start,
+            )
+            .map(|_| ()),
+            Err(StorageError::LimitExceeded),
+        );
+
+        let first_channel = StoredKey::new(vec![121; 16])?;
+        let second_channel = StoredKey::new(vec![122; 16])?;
+        let channel_name_key = StoredKey::new(vec![123; 32])?;
+        let channel_name_source = backup_source(TableId::ChannelName, &channel_name_key, 2)?;
+        let channel_name_plaintext = PersistentRecordValue::new(
+            TableId::ChannelName,
+            1,
+            1,
+            0,
+            None,
+            vec![
+                RecordReference::new(TableId::Channel, first_channel.clone())?,
+                RecordReference::new(TableId::Channel, second_channel)?,
+            ],
+            b"#duplicate-channels".to_vec(),
+        )?
+        .encode()?;
+        let channel_name_record = record(
+            TableId::ChannelName,
+            StoredKey::new(channel_name_key.as_bytes().to_vec())?,
+            channel_name_plaintext,
+        );
+        let (file, path) = scratch_file("duplicate-channel-references")?;
+        let mut builder = ConstructionPlanBuilder::start_streaming(
+            StorageConstructionKind::Restore,
+            file,
+            maximum_limits(),
+        )?;
+        let source_master = StorageMasterKey::from_bytes([124; 32]);
+        let target_master = StorageMasterKey::from_bytes([125; 32]);
+        let binding = DatabaseBinding::new(
+            network,
+            ServerId::from_bytes([126; 16]),
+            ServerIncarnation::from_bytes([127; 16]),
+            DatabaseId::from_bytes([128; 16]),
+        );
+        let context = RekeyContext {
+            source_master_key: &source_master,
+            source_binding: binding,
+            source_generation: 1,
+            target_master_key: &target_master,
+            target_binding: binding,
+            target_generation: 1,
+        };
+        assert_eq!(
+            push_restore_channel_name(
+                &mut builder,
+                channel_name_source,
+                &channel_name_record,
+                &context,
+            ),
+            Err(StorageError::StaleState),
+        );
+        let single_channel_plaintext = PersistentRecordValue::new(
+            TableId::ChannelName,
+            1,
+            1,
+            0,
+            None,
+            vec![RecordReference::new(TableId::Channel, first_channel)?],
+            b"#single-channel".to_vec(),
+        )?
+        .encode()?;
+        let single_channel_source = backup_source(TableId::ChannelName, &channel_name_key, 3)?;
+        let single_channel_record = record(
+            TableId::ChannelName,
+            channel_name_key,
+            single_channel_plaintext,
+        );
+        assert_eq!(
+            push_restore_channel_name(
+                &mut builder,
+                single_channel_source,
+                &single_channel_record,
+                &context,
+            ),
+            Err(StorageError::StaleState),
+        );
+        drop(builder);
+        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+        Ok(())
+    }
 }

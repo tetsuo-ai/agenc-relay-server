@@ -45,7 +45,12 @@ EXPECTED_BUDGETS = {
     "replies": {"batch_nesting": 16},
 }
 EXPECTED_FUZZ_TARGETS = ("tcp_framing", "websocket", "parse_render", "client_state")
-EXPECTED_LATER_FUZZ_TARGETS = ("account_service_envelope", "crypto_wrappers")
+EXPECTED_LATER_FUZZ_TARGETS = (
+    "account_service_envelope",
+    "crypto_wrappers",
+    "storage_codecs",
+    "backup_stream",
+)
 EXPECTED_FUZZ_POLICY = {
     "schema_version": 1,
     "nightly": "nightly-2026-08-24",

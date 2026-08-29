@@ -19,6 +19,19 @@ EXPECTED_MODULES = {
     "redb_store.rs", "restore_command.rs", "schema.rs", "sealed.rs",
 }
 EXPECTED_TASKS = [f"S05-{number:03d}" for number in range(1, 16)]
+QUALIFICATION_TARGETS = (
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-gnu",
+)
+QUALIFICATION_CASES = {
+    "insert-empty", "insert-one", "replace-min", "delete-one",
+    "insert-max-value", "replace-max-value", "delete-max-value",
+    "insert-max-key", "insert-max-records", "delete-max-records",
+    "mixed-max-records", "btree-split", "btree-merge", "fragmented",
+    "checkpoint", "guard-temp-fsync", "guard-rename",
+    "guard-directory-fsync", "reserve-equal", "reserve-minus-one",
+    "reserve-plus-one",
+}
 REQUIRED_SURFACES = (
     "pub struct SealedRecord",
     "pub struct StateMeta",
@@ -97,6 +110,32 @@ def validate_sources(root: Path) -> None:
     bins = {entry.get("name") for entry in fuzz.get("bin", [])}
     if not {"storage_codecs", "backup_stream"}.issubset(bins):
         raise StageFiveError("Stage-05 fuzz targets are missing")
+    evidence_root = root / "conformance/evidence/storage-qualification"
+    expected_artifacts = {"release-public-key.bin"}
+    for target in QUALIFICATION_TARGETS:
+        expected_artifacts.update(
+            {
+                f"{target}-ext4.log",
+                f"{target}-ext4.report",
+                f"{target}-ext4.unsigned",
+            }
+        )
+    actual_artifacts = {path.name for path in evidence_root.iterdir() if path.is_file()}
+    if actual_artifacts != expected_artifacts:
+        raise StageFiveError("storage qualification artifact set is incomplete or unexpected")
+    if (evidence_root / "release-public-key.bin").stat().st_size != 32:
+        raise StageFiveError("storage qualification release key has the wrong size")
+    for target in QUALIFICATION_TARGETS:
+        log = (evidence_root / f"{target}-ext4.log").read_text(encoding="ascii")
+        case_names = [line.partition("|")[0] for line in log.splitlines()]
+        if len(case_names) != len(QUALIFICATION_CASES) or set(case_names) != QUALIFICATION_CASES:
+            raise StageFiveError(f"{target} qualification log has a stale case set")
+        report_paths = (
+            evidence_root / f"{target}-ext4.report",
+            evidence_root / f"{target}-ext4.unsigned",
+        )
+        if any(path.stat().st_size == 0 for path in report_paths):
+            raise StageFiveError(f"{target} qualification report is empty")
 
 
 def self_test(root: Path) -> int:

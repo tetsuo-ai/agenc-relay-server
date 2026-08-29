@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-`docs/` holds the normative architecture, E2EE extension, federation registry, decision ledger, and integrity manifest. `rfcs/` contains pinned upstream RFC text; preserve these files byte-for-byte. `crates/` contains the 13-crate Section-24 workspace. Stages 00 through 04 are complete. Stage 05 storage work is in progress and includes sealed records, the single storage owner, rollback controls, bounded checkpoints, signed backup/restore, rekey construction, and login-index transition. Domain-specific reconstruction, maintenance-command composition, coverage, and per-filesystem release qualification remain open. Crates assigned to later stages expose no behavior yet. `conformance/` owns requirement and evidence catalogs, while `test-data/` owns public deterministic fixtures.
+`docs/` holds the normative architecture, E2EE extension, federation registry, decision ledger, and integrity manifest. `rfcs/` contains pinned upstream RFC text; preserve these files byte-for-byte. `crates/` contains the 13-crate Section-24 workspace. Stages 00 through 04 are complete. The full Stage 05 persistence implementation and acceptance gate pass; exact-revision evidence is being recorded. Stage 05 includes sealed records, one storage owner, rollback controls, bounded checkpoints, complete startup reconstruction, signed backup and stopped-daemon restore, rekey construction, login-index transition, and native filesystem qualification. Crates assigned to later stages expose no behavior yet. `conformance/` owns requirement and evidence catalogs, while `test-data/` owns public deterministic fixtures.
 
 Rust implementation must follow Section 24 of `docs/ircd-architecture-and-implementation-spec.md`. Keep the declared `agenc-ircd-*` crate boundaries intact: types and wire codecs remain independent of runtime, storage, and policy; the `agenc-ircd` binary performs composition only. Put crate integration tests in `crates/<crate>/tests/` and shared deterministic fixtures in `agenc-ircd-testkit`.
 
@@ -17,7 +17,7 @@ Rust implementation must follow Section 24 of `docs/ircd-architecture-and-implem
 - `cargo test --workspace --all-features --locked`: run unit and integration tests.
 - `cargo deny check` and `cargo audit --deny warnings`: check dependencies and advisories.
 
-The `agenc-ircd` binary still exits unsuccessfully because daemon composition begins in Stage 06. This fail-closed behavior prevents the binary from being mistaken for a server. Implementation checks do not close a stage by themselves. Schema version 2 manifests and artifacts close Stages 00 through 04 for exact source commit `1e5b738468f88b238061cc6e84b732176f5cae65`. The schema version 1 evidence for commit `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` remains archive-only. Stage 05 remains in progress and must pass its implementation and exact-SHA gates before Stage 06 begins.
+The `agenc-ircd` binary still exits unsuccessfully because daemon composition begins in Stage 06; only the stopped-daemon `storage restore` maintenance command is available. This fail-closed behavior prevents the binary from being mistaken for a server. Implementation checks do not close a stage by themselves. Schema version 2 manifests and artifacts close Stages 00 through 04 for exact source commit `1e5b738468f88b238061cc6e84b732176f5cae65`. The schema version 1 evidence for commit `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` remains archive-only. Stage 05 implementation checks pass, but Stage 06 must not begin until the Stage 05 exact-SHA artifact and manifest close its checkpoint.
 
 ## Coding Style & Naming Conventions
 
@@ -34,7 +34,7 @@ Use concise imperative subjects such as `Add bounded client framing`. Keep commi
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **agenc-ircd** (41606 symbols, 102969 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **agenc-ircd** (44976 symbols, 111969 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
@@ -74,5 +74,25 @@ This project is indexed by GitNexus as **agenc-ircd** (41606 symbols, 102969 rel
 | Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
 | Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
 | Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
+| Work in the Tests area (1153 symbols) | `.claude/skills/generated/tests/SKILL.md` |
+| Work in the Scripts area (314 symbols) | `.claude/skills/generated/scripts/SKILL.md` |
+| Work in the Cluster_129 area (135 symbols) | `.claude/skills/generated/cluster-129/SKILL.md` |
+| Work in the Cluster_173 area (104 symbols) | `.claude/skills/generated/cluster-173/SKILL.md` |
+| Work in the Fuzz_targets area (80 symbols) | `.claude/skills/generated/fuzz-targets/SKILL.md` |
+| Work in the Cluster_192 area (58 symbols) | `.claude/skills/generated/cluster-192/SKILL.md` |
+| Work in the Cluster_36 area (53 symbols) | `.claude/skills/generated/cluster-36/SKILL.md` |
+| Work in the Examples area (38 symbols) | `.claude/skills/generated/examples/SKILL.md` |
+| Work in the Cluster_7 area (30 symbols) | `.claude/skills/generated/cluster-7/SKILL.md` |
+| Work in the Cluster_273 area (29 symbols) | `.claude/skills/generated/cluster-273/SKILL.md` |
+| Work in the Cluster_20 area (27 symbols) | `.claude/skills/generated/cluster-20/SKILL.md` |
+| Work in the Cluster_214 area (25 symbols) | `.claude/skills/generated/cluster-214/SKILL.md` |
+| Work in the Cluster_2 area (22 symbols) | `.claude/skills/generated/cluster-2/SKILL.md` |
+| Work in the Cluster_120 area (21 symbols) | `.claude/skills/generated/cluster-120/SKILL.md` |
+| Work in the Cluster_140 area (21 symbols) | `.claude/skills/generated/cluster-140/SKILL.md` |
+| Work in the Cluster_215 area (21 symbols) | `.claude/skills/generated/cluster-215/SKILL.md` |
+| Work in the Cluster_60 area (18 symbols) | `.claude/skills/generated/cluster-60/SKILL.md` |
+| Work in the Cluster_203 area (18 symbols) | `.claude/skills/generated/cluster-203/SKILL.md` |
+| Work in the Cluster_1 area (17 symbols) | `.claude/skills/generated/cluster-1/SKILL.md` |
+| Work in the Cluster_169 area (17 symbols) | `.claude/skills/generated/cluster-169/SKILL.md` |
 
 <!-- gitnexus:end -->

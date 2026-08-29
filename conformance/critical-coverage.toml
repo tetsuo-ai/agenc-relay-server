@@ -3,8 +3,9 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 87
-reviewed_source_sha256 = "eb31342c45df9f4926e888871c47d3c7333f7cdd91d48df64f08f16f3388c893"
+reviewed_source_files = 88
+reviewed_source_sha256 = "f4b734ad787a1cc1d83215ca6cfa64e53f015a5314ca42c24f7eeb256ee2dab7"
+deferred = []
 
 [[region]]
 id = "client-message-error-enum-arms"
@@ -56,7 +57,12 @@ end_line = 1429
 metric = "branches"
 reason = "Every current domain cross-index and authority-fence check must take both outcomes."
 
-[[deferred]]
+[[region]]
+id = "storage-recovery-state-classification"
 category = "persistence-recovery"
-until_task = "S05-900"
-reason = "The persistence recovery region becomes mandatory when the Stage 05 exact-revision gate closes."
+file = "crates/agenc-ircd-storage/src/recovery.rs"
+source_sha256 = "0ad662a9cfe3699b5b28ab7de8e1c9c8fae16696aabc02140c559f9cb75baa41"
+start_line = 1
+end_line = 857
+metric = "branches"
+reason = "Every enumerated rollback-guard, reservation, and database recovery state must be exercised."

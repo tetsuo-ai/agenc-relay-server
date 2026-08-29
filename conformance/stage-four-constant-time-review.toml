@@ -1,6 +1,6 @@
 schema_version = 1
 evidence_id = "EVID-S04-014-CONSTANT-TIME"
-reviewed_revision = "325c086ce197e6c9c39129ef79c2ff3f24039ffa"
+reviewed_revision = "6472e55b6fb9c4d0de7eb3e74fe94eb3ca5701aa"
 worktree_state = "dirty-source-hash-bound"
 conclusion = "Known and unknown account inputs converge on one OPAQUE server-start implementation with equal-size credential IDs and records. Secret digest and OPAQUE MAC comparisons use constant-time library operations."
 limit = "This review does not claim resistance to global timing analysis. Stage 05 must add the fixed storage lookup schedule before the full account lookup path can close AUTH-01."
@@ -25,15 +25,15 @@ review = "Real and fake selections deserialize one exact-size record and execute
 
 [[surface]]
 path = "crates/agenc-ircd-crypto/src/hash.rs"
-sha256 = "c3a692f5eb7a50a60e7f56b2bbc701ce6385e398896a119e17936c2f3f60ecca"
-symbols = ["LoginIndexDigest::matches", "derive_fake_credential_id"]
-review = "Login digest equality uses subtle::ConstantTimeEq. The fake credential ID is a full HMAC-SHA256 result under an independent key and fixed domain label."
+sha256 = "49027d6ef18c4fa38f1925084aaf7813c6e31128f79ebe9f298d8520c075fdac"
+symbols = ["LoginIndexDigest::matches", "LoginIndexKey::key_id", "derive_fake_credential_id"]
+review = "Login digest equality uses subtle::ConstantTimeEq. The public login-index key identifier is a network-bound SHA-256 derivation over the secret key. The fake credential ID is a full HMAC-SHA256 result under an independent key and fixed domain label."
 
 [[surface]]
 path = "crates/agenc-ircd-crypto/src/storage.rs"
-sha256 = "96e872b67f76cc1130bd575b4eba86dec0c2e488a66d1964cd339a74bc1ba858"
-symbols = ["StorageIndex::matches"]
-review = "Private storage-index equality uses subtle::ConstantTimeEq over all 32 bytes."
+sha256 = "96bc0b0726b1b1ea49ea85e193442867d865d464a12ca6de1d3061f3a95bb80d"
+symbols = ["StorageIndex::matches", "StorageMasterKey::matches", "StorageMasterKey::source_operation_key_id", "StorageMasterKey::target_operation_key_id"]
+review = "Private storage-index and storage-master-key equality use subtle::ConstantTimeEq over all 32 bytes. Source- and target-role resumability IDs use separate domain labels and expose only a digest."
 
 [[surface]]
 path = "vendor/opaque-ke-4.0.1/src/opaque.rs"

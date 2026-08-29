@@ -732,17 +732,23 @@ impl LoginIndexTransitionBatch {
         audit_mutation: RecordMutation,
         fault_site: StorageFaultSite,
     ) -> Result<StorageMutationBatch, StorageError> {
-        if audit_mutation.table() != TableId::Audit
-            || audit_mutation.is_deletion()
-            || head.state_advancing_plan_count != 1
-            || head.resulting_state_generation
-                != head
-                    .expected_state_generation
-                    .checked_add(1)
-                    .ok_or(StorageError::Overflow)?
-            || head.resulting_account_service_response_count
-                != head.expected_account_service_response_count
-        {
+        let expected_state_generation = head
+            .expected_state_generation
+            .checked_add(1)
+            .ok_or(StorageError::Overflow)?;
+        if (
+            audit_mutation.table(),
+            audit_mutation.is_deletion(),
+            head.state_advancing_plan_count,
+            head.resulting_state_generation,
+            head.resulting_account_service_response_count,
+        ) != (
+            TableId::Audit,
+            false,
+            1,
+            expected_state_generation,
+            head.expected_account_service_response_count,
+        ) {
             return Err(StorageError::InvalidEncoding);
         }
         let key_state_mutation = RecordMutation::put(
@@ -816,5 +822,283 @@ impl LoginIndexTransitionPreflight {
     pub fn finish(self) -> Result<LoginIndexKeyState, StorageError> {
         self.stable_state
             .start_rotation(self.new_key_id, self.previous_entry_count)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use agenc_ircd_types::AccountRandomId;
+
+    use super::*;
+
+    fn credential() -> OpaqueCredentialId {
+        OpaqueCredentialId::from_bytes([5; 32])
+    }
+
+    struct LoginIndexFixture {
+        network: NetworkId,
+        login: NormalizedLogin,
+        previous_key: LoginIndexKey,
+        current_key: LoginIndexKey,
+        transition: LoginIndexKeyState,
+        stored: LoginIndexStoredKey,
+        value: LoginIndexValue,
+        account: AccountId,
+    }
+
+    fn fixture() -> Result<LoginIndexFixture, StorageError> {
+        let network = NetworkId::from_bytes([1; 32]);
+        let login =
+            NormalizedLogin::prepare("branch-login").map_err(|_| StorageError::InvalidEncoding)?;
+        let previous_key = LoginIndexKey::from_bytes([2; 32]);
+        let current_key = LoginIndexKey::from_bytes([3; 32]);
+        let state = LoginIndexKeyState::transition(
+            1,
+            previous_key.key_id(network),
+            current_key.key_id(network),
+            1,
+        )?;
+        let stored =
+            LoginIndexStoredKey::new(1, derive_login_index(&previous_key, network, &login)?)?;
+        let account = AccountRandomId::from_bytes([4; 16]).to_account_id();
+        let value = LoginIndexValue::new(
+            &stored,
+            LoginIndexValueKind::Live {
+                account_id: account,
+                opaque_credential_id: credential(),
+            },
+        )?;
+        Ok(LoginIndexFixture {
+            network,
+            login,
+            previous_key,
+            current_key,
+            transition: state,
+            stored,
+            value,
+            account,
+        })
+    }
+
+    #[test]
+    fn private_key_and_value_helpers_reject_unreachable_internal_states() -> Result<(), StorageError>
+    {
+        assert!(matches!(
+            LoginIndexStoredKey::dummy(0),
+            Err(StorageError::InvalidEncoding)
+        ));
+        let dummy = LoginIndexStoredKey::dummy(1)?;
+        let same = LoginIndexStoredKey {
+            generation: 1,
+            digest: [0; 32],
+        };
+        assert!(dummy.same_identity(&same));
+        let different = LoginIndexStoredKey {
+            generation: 2,
+            digest: [0; 32],
+        };
+        assert!(!dummy.same_identity(&different));
+
+        let creation = LoginIndexValue {
+            generation: 1,
+            digest: [0; 32],
+            kind: LoginIndexValueKind::CreationReservation {
+                transaction_id: TransactionId::from_bytes([6; 16]),
+                expires_at: 0,
+            },
+        };
+        assert_eq!(creation.encode(), Err(StorageError::InvalidEncoding));
+        let deletion = LoginIndexValue {
+            generation: 1,
+            digest: [0; 32],
+            kind: LoginIndexValueKind::DeletionTombstone {
+                deleted_account_id: AccountRandomId::from_bytes([7; 16]).to_account_id(),
+                expires_at: 0,
+            },
+        };
+        assert_eq!(deletion.encode(), Err(StorageError::InvalidEncoding));
+        Ok(())
+    }
+
+    #[test]
+    fn lazy_migration_rejects_every_previous_owner_mismatch() -> Result<(), StorageError> {
+        let LoginIndexFixture {
+            network,
+            login,
+            previous_key,
+            current_key,
+            transition,
+            stored,
+            value,
+            account,
+        } = fixture()?;
+
+        let stable = LoginIndexKeyState::stable(1, current_key.key_id(network))?;
+        assert_eq!(
+            LoginIndexLazyMigration::new(
+                network,
+                &login,
+                stable,
+                &current_key,
+                &previous_key,
+                account,
+                credential(),
+                &value,
+            )
+            .map(|_| ()),
+            Err(StorageError::AuthenticationFailed)
+        );
+
+        let wrong_generation = LoginIndexValue {
+            generation: 2,
+            digest: stored.digest,
+            kind: LoginIndexValueKind::Live {
+                account_id: account,
+                opaque_credential_id: credential(),
+            },
+        };
+        assert_eq!(
+            LoginIndexLazyMigration::new(
+                network,
+                &login,
+                transition,
+                &current_key,
+                &previous_key,
+                account,
+                credential(),
+                &wrong_generation,
+            )
+            .map(|_| ()),
+            Err(StorageError::StaleState)
+        );
+
+        let reservation = LoginIndexValue::new(
+            &stored,
+            LoginIndexValueKind::CreationReservation {
+                transaction_id: TransactionId::from_bytes([8; 16]),
+                expires_at: 1,
+            },
+        )?;
+        assert_eq!(
+            LoginIndexLazyMigration::new(
+                network,
+                &login,
+                transition,
+                &current_key,
+                &previous_key,
+                account,
+                credential(),
+                &reservation,
+            )
+            .map(|_| ()),
+            Err(StorageError::StaleState)
+        );
+
+        for (candidate_account, candidate_credential) in [
+            (
+                AccountRandomId::from_bytes([9; 16]).to_account_id(),
+                credential(),
+            ),
+            (account, OpaqueCredentialId::from_bytes([10; 32])),
+        ] {
+            assert_eq!(
+                LoginIndexLazyMigration::new(
+                    network,
+                    &login,
+                    transition,
+                    &current_key,
+                    &previous_key,
+                    candidate_account,
+                    candidate_credential,
+                    &value,
+                )
+                .map(|_| ()),
+                Err(StorageError::AuthenticationFailed)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn transition_preflight_rejects_generation_reservation_and_overflow() -> Result<(), StorageError>
+    {
+        let LoginIndexFixture {
+            network,
+            login: _,
+            previous_key,
+            current_key,
+            transition,
+            stored,
+            value,
+            account: _,
+        } = fixture()?;
+        assert_eq!(
+            LoginIndexTransitionPreflight::new(transition, previous_key.key_id(network))
+                .map(|_| ()),
+            Err(StorageError::StaleState)
+        );
+
+        let stable = LoginIndexKeyState::stable(1, previous_key.key_id(network))?;
+        assert_eq!(
+            LoginIndexTransitionPreflight::new(stable, previous_key.key_id(network)).map(|_| ()),
+            Err(StorageError::InvalidEncoding)
+        );
+        let mut preflight =
+            LoginIndexTransitionPreflight::new(stable, current_key.key_id(network))?;
+        let wrong_key = LoginIndexStoredKey {
+            generation: 2,
+            digest: stored.digest,
+        };
+        assert_eq!(
+            preflight.observe(&wrong_key, &value),
+            Err(StorageError::StaleState)
+        );
+        let wrong_value = LoginIndexValue {
+            generation: 2,
+            digest: stored.digest,
+            kind: LoginIndexValueKind::Live {
+                account_id: AccountRandomId::from_bytes([11; 16]).to_account_id(),
+                opaque_credential_id: OpaqueCredentialId::from_bytes([12; 32]),
+            },
+        };
+        assert_eq!(
+            preflight.observe(&stored, &wrong_value),
+            Err(StorageError::StaleState)
+        );
+        let reservation = LoginIndexValue::new(
+            &stored,
+            LoginIndexValueKind::CreationReservation {
+                transaction_id: TransactionId::from_bytes([13; 16]),
+                expires_at: 1,
+            },
+        )?;
+        assert_eq!(
+            preflight.observe(&stored, &reservation),
+            Err(StorageError::StaleState)
+        );
+        preflight.previous_entry_count = u64::MAX;
+        assert_eq!(
+            preflight.observe(&stored, &value),
+            Err(StorageError::Overflow)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn transition_key_validation_rejects_a_wrong_previous_key_after_current_matches()
+    -> Result<(), StorageError> {
+        let LoginIndexFixture {
+            network,
+            previous_key: _,
+            current_key,
+            transition,
+            ..
+        } = fixture()?;
+        let wrong_previous = LoginIndexKey::from_bytes([14; 32]);
+        assert_eq!(
+            transition.validate_configured_keys(network, &current_key, Some(&wrong_previous),),
+            Err(StorageError::AuthenticationFailed),
+        );
+        Ok(())
     }
 }

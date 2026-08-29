@@ -2,6 +2,8 @@
 
 #![forbid(unsafe_code)]
 
+mod recovery_matrix;
+
 use std::error::Error;
 use std::fs;
 use std::io::Cursor;
@@ -934,3 +936,9 @@ fn initialized_owner_commits_and_reads_one_manifested_mutation() -> Result<(), B
     reopened.shutdown()?;
     Ok(())
 }
+
+#[path = "codec_matrix.rs"]
+mod codec_matrix;
+
+#[path = "stage_five_completion.rs"]
+mod stage_five_completion;

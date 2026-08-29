@@ -66,7 +66,7 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Cluster_4 | 2 calls |
+| Cluster_1 | 2 calls |
 | Cluster_3 | 1 calls |
 
 ## How to Explore

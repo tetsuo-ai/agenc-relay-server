@@ -706,7 +706,7 @@ text = "A recovery epoch MUST be different from the source and any readable curr
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S05-001"]
 evidence_ids = ["EVID-ARCH-REQ-CAFA64060EE32DC7419D"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2002,7 +2002,7 @@ text = "Recovery accepts materialized state only when the guard-bound StateMeta,
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S05-010"]
 evidence_ids = ["EVID-ARCH-DUR-04"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2018,7 +2018,7 @@ text = "Every backup restore creates a new server incarnation, database instance
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S05-012"]
 evidence_ids = ["EVID-ARCH-DUR-05"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2066,7 +2066,7 @@ text = "Startup accepts only an exact committed reservation-record/database/guar
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S05-010"]
 evidence_ids = ["EVID-ARCH-DUR-08"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2114,7 +2114,7 @@ text = "StateMeta's logical-database and exact-backup-stream byte counters equal
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S05-015"]
 evidence_ids = ["EVID-ARCH-DUR-11"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]

@@ -615,3 +615,381 @@ pub fn logical_meta_charge(key_bytes: usize, value_bytes: usize) -> Result<u64, 
         .ok_or(StorageError::Overflow)?;
     u64::try_from(total).map_err(|_| StorageError::Overflow)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn digest(byte: u8) -> StorageDigest {
+        StorageDigest::from_bytes([byte; 32])
+    }
+
+    fn stored_key(byte: u8) -> Result<StoredKey, StorageError> {
+        StoredKey::new(vec![byte])
+    }
+
+    fn mutation(byte: u8) -> Result<IntegrityRecordMutation, StorageError> {
+        IntegrityRecordMutation::new(
+            TableId::Account,
+            stored_key(byte)?,
+            IntegrityRecordVersion::Absent,
+            IntegrityRecordVersion::Present {
+                record_schema: 1,
+                sealed_record_id: digest(byte),
+            },
+        )
+    }
+
+    fn manifest_tbs(
+        mutations: Vec<IntegrityRecordMutation>,
+    ) -> Result<IntegrityManifestTbs, StorageError> {
+        let seals = u32::try_from(
+            mutations
+                .iter()
+                .filter(|mutation| {
+                    matches!(mutation.after(), IntegrityRecordVersion::Present { .. })
+                })
+                .count()
+                + 2,
+        )
+        .map_err(|_| StorageError::Overflow)?;
+        IntegrityManifestTbs::new(
+            DatabaseId::from_bytes([1; 16]),
+            1,
+            1,
+            0,
+            1,
+            0,
+            0,
+            10,
+            10,
+            10 + u64::from(seals),
+            seals,
+            digest(2),
+            mutations,
+        )
+    }
+
+    fn checkpoint_tbs() -> IntegrityCheckpointTbs {
+        IntegrityCheckpointTbs {
+            database_instance_id: DatabaseId::from_bytes([3; 16]),
+            cut_storage_commit_sequence: 2,
+            cut_manifest_sequence: 2,
+            cut_state_generation: 2,
+            cut_account_service_response_count: 1,
+            cut_nonce_draw_high_water: 20,
+            cut_manifest_hash: digest(4),
+            tracked_record_count: 1,
+            tracked_state_digest: digest(5),
+            previous_checkpoint_hash: digest(6),
+            installation_storage_commit_sequence: 3,
+            installation_manifest_sequence: 2,
+            installation_nonce_reservation_start: 20,
+            installation_nonce_draw_high_water: 22,
+        }
+    }
+
+    #[test]
+    fn record_versions_reject_zero_schema_and_noncanonical_encodings() -> Result<(), StorageError> {
+        let mut encoder = Encoder::with_capacity(38, 38)?;
+        assert_eq!(
+            IntegrityRecordVersion::Present {
+                record_schema: 0,
+                sealed_record_id: digest(1),
+            }
+            .encode(&mut encoder),
+            Err(StorageError::InvalidEncoding)
+        );
+
+        for (presence, schema, identifier) in [
+            (0_u16, 1_u32, Vec::new()),
+            (1, 0, vec![0; 32]),
+            (1, 1, vec![0; 31]),
+            (2, 1, vec![0; 32]),
+        ] {
+            let mut encoder = Encoder::with_capacity(42, 42)?;
+            encoder.put_u16(presence)?;
+            encoder.put_u32(schema)?;
+            encoder.put_vector_u32(&identifier)?;
+            assert_eq!(
+                IntegrityRecordVersion::decode(&mut Decoder::new(&encoder.finish())),
+                Err(StorageError::InvalidEncoding)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_validation_rejects_each_independent_limit() -> Result<(), StorageError> {
+        let valid = mutation(1)?;
+        assert!(matches!(
+            IntegrityManifestTbs::new(
+                DatabaseId::from_bytes([1; 16]),
+                0,
+                1,
+                0,
+                1,
+                0,
+                0,
+                10,
+                10,
+                13,
+                3,
+                digest(2),
+                vec![valid.clone()],
+            ),
+            Err(StorageError::LimitExceeded)
+        ));
+        assert!(matches!(
+            manifest_tbs(Vec::new()),
+            Err(StorageError::LimitExceeded)
+        ));
+        assert!(matches!(
+            manifest_tbs(vec![valid.clone(); MAX_TRACKED_MUTATIONS + 1]),
+            Err(StorageError::LimitExceeded)
+        ));
+        assert!(matches!(
+            IntegrityManifestTbs::new(
+                DatabaseId::from_bytes([1; 16]),
+                1,
+                1,
+                0,
+                1,
+                0,
+                0,
+                11,
+                10,
+                13,
+                3,
+                digest(2),
+                vec![valid.clone()],
+            ),
+            Err(StorageError::LimitExceeded)
+        ));
+        assert!(matches!(
+            IntegrityManifestTbs::new(
+                DatabaseId::from_bytes([1; 16]),
+                1,
+                1,
+                0,
+                1,
+                0,
+                0,
+                10,
+                10,
+                MAX_NONCE_DRAWS + 1,
+                3,
+                digest(2),
+                vec![valid],
+            ),
+            Err(StorageError::LimitExceeded)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_validation_rejects_duplicates_seal_mismatch_and_nonce_errors()
+    -> Result<(), StorageError> {
+        let duplicate = mutation(1)?;
+        assert!(matches!(
+            manifest_tbs(vec![duplicate.clone(), duplicate]),
+            Err(StorageError::InvalidEncoding)
+        ));
+        assert!(matches!(
+            IntegrityManifestTbs::new(
+                DatabaseId::from_bytes([1; 16]),
+                1,
+                1,
+                0,
+                1,
+                0,
+                0,
+                10,
+                10,
+                12,
+                2,
+                digest(2),
+                vec![mutation(2)?],
+            ),
+            Err(StorageError::InvalidEncoding)
+        ));
+        assert!(matches!(
+            IntegrityManifestTbs::new(
+                DatabaseId::from_bytes([1; 16]),
+                1,
+                1,
+                0,
+                1,
+                0,
+                0,
+                10,
+                10,
+                14,
+                3,
+                digest(2),
+                vec![mutation(3)?],
+            ),
+            Err(StorageError::InvalidEncoding)
+        ));
+        assert!(matches!(
+            IntegrityManifestTbs::new(
+                DatabaseId::from_bytes([1; 16]),
+                1,
+                1,
+                0,
+                1,
+                0,
+                0,
+                10,
+                u64::MAX,
+                10,
+                3,
+                digest(2),
+                vec![mutation(4)?],
+            ),
+            Err(StorageError::Overflow)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_decoding_rejects_invalid_counts_versions_and_hashes() -> Result<(), StorageError> {
+        let manifest = IntegrityManifest::new(manifest_tbs(vec![mutation(1)?])?)?;
+        let encoded = manifest.encode()?;
+        let count_offset = 126;
+
+        for count in [0_u32, (MAX_TRACKED_MUTATIONS as u32) + 1] {
+            let mut candidate = encoded.clone();
+            candidate
+                .get_mut(count_offset..count_offset + 4)
+                .ok_or(StorageError::InvalidEncoding)?
+                .copy_from_slice(&count.to_be_bytes());
+            assert!(matches!(
+                IntegrityManifest::decode(&candidate),
+                Err(StorageError::LimitExceeded)
+            ));
+        }
+        let mut wrong_version = encoded.clone();
+        wrong_version
+            .get_mut(..2)
+            .ok_or(StorageError::InvalidEncoding)?
+            .copy_from_slice(&2_u16.to_be_bytes());
+        assert!(matches!(
+            IntegrityManifest::decode(&wrong_version),
+            Err(StorageError::UnsupportedVersion)
+        ));
+        let mut wrong_hash = encoded;
+        let last = wrong_hash.last_mut().ok_or(StorageError::InvalidEncoding)?;
+        *last ^= 1;
+        assert!(matches!(
+            IntegrityManifest::decode(&wrong_hash),
+            Err(StorageError::AuthenticationFailed)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn checkpoint_validation_rejects_each_cut_and_installation_error() {
+        let mut candidate = checkpoint_tbs();
+        candidate.cut_nonce_draw_high_water = MAX_NONCE_DRAWS + 1;
+        assert_eq!(candidate.validate(), Err(StorageError::StaleState));
+
+        let mut candidate = checkpoint_tbs();
+        candidate.installation_nonce_draw_high_water = MAX_NONCE_DRAWS + 1;
+        assert_eq!(candidate.validate(), Err(StorageError::StaleState));
+
+        let mut candidate = checkpoint_tbs();
+        candidate.installation_manifest_sequence = candidate.cut_manifest_sequence - 1;
+        assert_eq!(candidate.validate(), Err(StorageError::StaleState));
+
+        let mut candidate = checkpoint_tbs();
+        candidate.installation_nonce_draw_high_water += 1;
+        assert_eq!(candidate.validate(), Err(StorageError::StaleState));
+
+        let mut candidate = checkpoint_tbs();
+        candidate.installation_nonce_reservation_start = u64::MAX;
+        assert_eq!(candidate.validate(), Err(StorageError::Overflow));
+    }
+
+    #[test]
+    fn checkpoint_decoding_rejects_version_length_and_hash_errors() -> Result<(), StorageError> {
+        let checkpoint = IntegrityCheckpoint::new(checkpoint_tbs())?;
+        let encoded = checkpoint.encode()?;
+
+        let truncated_length = encoded
+            .len()
+            .checked_sub(1)
+            .ok_or(StorageError::InvalidEncoding)?;
+        let truncated = encoded
+            .get(..truncated_length)
+            .ok_or(StorageError::InvalidEncoding)?;
+        assert!(matches!(
+            IntegrityCheckpoint::decode(truncated),
+            Err(StorageError::InvalidEncoding)
+        ));
+        let mut wrong_version = encoded.clone();
+        wrong_version
+            .get_mut(..2)
+            .ok_or(StorageError::InvalidEncoding)?
+            .copy_from_slice(&2_u16.to_be_bytes());
+        assert!(matches!(
+            IntegrityCheckpoint::decode(&wrong_version),
+            Err(StorageError::UnsupportedVersion)
+        ));
+        let mut wrong_hash = encoded;
+        let last = wrong_hash.last_mut().ok_or(StorageError::InvalidEncoding)?;
+        *last ^= 1;
+        assert!(matches!(
+            IntegrityCheckpoint::decode(&wrong_hash),
+            Err(StorageError::AuthenticationFailed)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn tracked_state_digest_rejects_untracked_zero_schema_and_duplicate_rows()
+    -> Result<(), StorageError> {
+        let key = stored_key(1)?;
+        let mut untracked = [TrackedRecord {
+            table: TableId::KeyCheck,
+            stored_key: &key,
+            record_schema: 1,
+            sealed_record_id: digest(1),
+        }];
+        assert_eq!(
+            compute_tracked_state_digest(&mut untracked),
+            Err(StorageError::InvalidEncoding)
+        );
+
+        let mut zero_schema = [TrackedRecord {
+            table: TableId::Account,
+            stored_key: &key,
+            record_schema: 0,
+            sealed_record_id: digest(1),
+        }];
+        assert_eq!(
+            compute_tracked_state_digest(&mut zero_schema),
+            Err(StorageError::InvalidEncoding)
+        );
+
+        let mut duplicate = [
+            TrackedRecord {
+                table: TableId::Account,
+                stored_key: &key,
+                record_schema: 1,
+                sealed_record_id: digest(1),
+            },
+            TrackedRecord {
+                table: TableId::Account,
+                stored_key: &key,
+                record_schema: 1,
+                sealed_record_id: digest(2),
+            },
+        ];
+        assert_eq!(
+            compute_tracked_state_digest(&mut duplicate),
+            Err(StorageError::InvalidEncoding)
+        );
+        Ok(())
+    }
+}

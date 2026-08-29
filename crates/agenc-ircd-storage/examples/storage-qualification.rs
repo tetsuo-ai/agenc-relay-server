@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use agenc_ircd_crypto::{OsEntropy, storage_qualification_component_hash};
 use agenc_ircd_storage::{
     QualificationTarget, REQUIRED_QUALIFICATION_CASES, StateDirectory, StorageError,
-    StorageGrowthRecorder, StorageQualificationReportTbs,
+    StorageGrowthCase, StorageGrowthRecorder, StorageQualificationReportTbs,
 };
 use redb::{Database, Durability, TableDefinition};
 
@@ -28,6 +28,11 @@ const MIXED_RECORDS_PER_SHAPE: u64 = MAX_TRACKED_MUTATIONS / 3;
 const REDB_FEATURES: &[u8] = b"redb=4.2.0;default-features=false;features=std\n";
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let (report_path, raw_log_path) = qualification_paths()?;
+    qualify(&report_path, &raw_log_path)
+}
+
+fn qualification_paths() -> Result<(PathBuf, PathBuf), Box<dyn Error>> {
     let mut arguments = std::env::args_os();
     let _program = arguments.next();
     let report_path = arguments.next().ok_or("missing unsigned report path")?;
@@ -35,51 +40,83 @@ fn main() -> Result<(), Box<dyn Error>> {
     if arguments.next().is_some() {
         return Err("usage: storage-qualification <unsigned-report> <raw-log>".into());
     }
+    Ok((report_path.into(), raw_log_path.into()))
+}
 
+fn qualify(report_path: &Path, raw_log_path: &Path) -> Result<(), Box<dyn Error>> {
     let scratch = ScratchDirectory::create()?;
     let database_path = scratch.path().join("database.redb");
     let guard_path = scratch.path().join("rollback.guard");
     let guard_temporary_path = scratch.path().join("rollback.guard.tmp");
-    let database_file = create_private_file(&database_path)?;
+    let database = create_measurement_database(&database_path)?;
     let _guard_file = create_private_file(&guard_path)?;
-    let mut builder = redb::Builder::new();
-    builder.set_cache_size(64 * 1_024 * 1_024);
-    let database = builder.create_file(database_file)?;
-    initialize_table(&database)?;
-
     let participant_paths = [
         database_path.as_path(),
         guard_path.as_path(),
         guard_temporary_path.as_path(),
         scratch.path(),
     ];
+    let (cases, maximum_observed_growth) = measure_growth(
+        &database,
+        scratch.path(),
+        &guard_path,
+        &guard_temporary_path,
+        &participant_paths,
+    )?;
+    let raw_log = encode_raw_log(&cases)?;
+    write_private_file(raw_log_path, raw_log.as_bytes())?;
+    let report = qualification_report(
+        scratch.path(),
+        cases,
+        maximum_observed_growth,
+        raw_log.as_bytes(),
+    )?;
+    write_private_file(report_path, &report.encode_unsigned()?)?;
+    Ok(())
+}
+
+fn create_measurement_database(path: &Path) -> Result<Database, Box<dyn Error>> {
+    let database_file = create_private_file(path)?;
+    let mut builder = redb::Builder::new();
+    builder.set_cache_size(64 * 1_024 * 1_024);
+    let database = builder.create_file(database_file)?;
+    initialize_table(&database)?;
+    Ok(database)
+}
+
+fn measure_growth(
+    database: &Database,
+    directory: &Path,
+    guard: &Path,
+    guard_temporary: &Path,
+    participant_paths: &[&Path],
+) -> Result<(Vec<StorageGrowthCase>, u64), StorageError> {
     let mut recorder = StorageGrowthRecorder::new();
     for name in REQUIRED_QUALIFICATION_CASES {
-        prepare_case(name, &database)?;
-        recorder.measure_path_set(name, &participant_paths, || {
-            run_case(
-                name,
-                &database,
-                scratch.path(),
-                &guard_path,
-                &guard_temporary_path,
-            )
+        prepare_case(name, database)?;
+        recorder.measure_path_set(name, participant_paths, || {
+            run_case(name, database, directory, guard, guard_temporary)
         })?;
     }
-    let (cases, maximum_observed_growth) = recorder.finish()?;
-    let raw_log = encode_raw_log(&cases)?;
-    write_private_file(Path::new(&raw_log_path), raw_log.as_bytes())?;
+    recorder.finish()
+}
 
+fn qualification_report(
+    directory: &Path,
+    cases: Vec<StorageGrowthCase>,
+    maximum_observed_growth: u64,
+    raw_log: &[u8],
+) -> Result<StorageQualificationReportTbs, Box<dyn Error>> {
     let profile = fs::read(
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../conformance/stage-five-storage-profile.toml"),
     )?;
     let corpus = qualification_corpus()?;
-    let tuple = StateDirectory::probe(scratch.path())?;
+    let tuple = StateDirectory::probe(directory)?;
     let kernel_release = fs::read_to_string("/proc/sys/kernel/osrelease")?
         .trim_end_matches(['\r', '\n'])
         .to_owned();
-    let report = StorageQualificationReportTbs {
+    Ok(StorageQualificationReportTbs {
         target: QualificationTarget::native(),
         filesystem_type: tuple.filesystem_type,
         block_size: tuple.block_size,
@@ -90,10 +127,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         corpus_hash: storage_qualification_component_hash(b"boundary-corpus", &corpus)?,
         cases,
         maximum_observed_growth,
-        raw_log_hash: storage_qualification_component_hash(b"raw-log", raw_log.as_bytes())?,
-    };
-    write_private_file(Path::new(&report_path), &report.encode_unsigned()?)?;
-    Ok(())
+        raw_log_hash: storage_qualification_component_hash(b"raw-log", raw_log)?,
+    })
 }
 
 fn initialize_table(database: &Database) -> Result<(), StorageError> {

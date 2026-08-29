@@ -60,6 +60,20 @@ The evidence validator passed 78 rejection cases. The five schema version 1
 manifests for source commit `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb`
 remain archive-only.
 
+Run the Stage 05 implementation checks:
+
+```sh
+bash scripts/check-stage-five.sh
+```
+
+This command inherits the Stage 04 gate and adds the closed storage profile,
+storage dependency review, 181 storage tests, persistent-codec and backup-
+stream fuzzing, x86_64 and AArch64 checks, the complete fault campaign, signed
+native ext4 growth reports, and the Stage 05 requirement set. The current
+implementation run passes with 90.00% branch coverage, 95.50% line coverage,
+and all six critical regions at 100%. Its exact-source artifact and manifest
+must be recorded before `S05-900` closes.
+
 For an evidence-only check:
 
 ```sh

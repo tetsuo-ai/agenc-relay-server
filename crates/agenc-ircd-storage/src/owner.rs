@@ -368,3 +368,59 @@ fn map_submission_error<T>(error: TrySendError<T>) -> StorageError {
         TrySendError::Disconnected(_) => StorageError::Unavailable,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completion_distinguishes_pending_success_failure_and_disconnect() {
+        let (sender, receiver) = sync_channel(1);
+        let completion = StorageCompletion { receiver };
+        assert_eq!(completion.try_take(), Ok(None));
+        assert!(sender.send(Ok(7_u8)).is_ok());
+        assert_eq!(completion.try_take(), Ok(Some(Ok(7))));
+        drop(sender);
+        assert_eq!(completion.try_take(), Err(StorageError::Unavailable));
+
+        let (sender, receiver) = sync_channel(1);
+        assert!(sender.send(Err(StorageError::StaleState)).is_ok());
+        assert_eq!(
+            StorageCompletion::<u8> { receiver }.wait(),
+            Err(StorageError::StaleState)
+        );
+
+        let (sender, receiver) = sync_channel::<Result<u8, StorageError>>(1);
+        drop(sender);
+        assert_eq!(
+            StorageCompletion { receiver }.wait(),
+            Err(StorageError::Unavailable)
+        );
+    }
+
+    #[test]
+    fn submission_and_checkpoint_errors_preserve_failure_classification() {
+        let (sender, receiver) = sync_channel(1);
+        assert!(sender.try_send(1_u8).is_ok());
+        assert_eq!(
+            sender.try_send(2).err().map(map_submission_error),
+            Some(StorageError::QueueFull)
+        );
+        drop(receiver);
+        assert_eq!(
+            sender.try_send(3).err().map(map_submission_error),
+            Some(StorageError::Unavailable)
+        );
+
+        assert_eq!(
+            checkpoint_error(crate::engine::EngineCommitFailure::Rejected(
+                StorageError::LimitExceeded,
+            )),
+            StorageError::LimitExceeded
+        );
+        assert_eq!(
+            checkpoint_error(crate::engine::EngineCommitFailure::Indeterminate),
+            StorageError::Unavailable
+        );
+    }
+}

@@ -1,11 +1,11 @@
 ---
 name: tests
-description: "Skill for the Tests area of agenc-ircd. 1056 symbols across 100 files."
+description: "Skill for the Tests area of agenc-ircd. 1153 symbols across 101 files."
 ---
 
 # Tests
 
-1056 symbols | 100 files | Cohesion: 78%
+1153 symbols | 101 files | Cohesion: 76%
 
 ## When to Use
 
@@ -17,12 +17,12 @@ description: "Skill for the Tests area of agenc-ircd. 1056 symbols across 100 fi
 
 | File | Symbols |
 |------|---------|
+| `crates/agenc-ircd-storage/tests/stage_five_completion.rs` | login_index_codecs_reject_each_short_circuit_boundary, real_successful_login_batch_injects_lazy_migration_boundaries, login_lookup_and_lazy_migration_are_exactly_two_generation, initialized_lazy_login_fixture, later_protocol_bodies_are_profile_table_and_arm_bound (+73) |
 | `crates/agenc-ircd-testkit/tests/domain_reference_model.rs` | apply_production, production_authority, apply_production_command, apply_production_join, reference_model_executes_every_command_with_real_behavior (+64) |
 | `crates/agenc-ircd-federation-wire/src/tests/semantics.rs` | schema, fields, validate, opaque, unsigned (+53) |
-| `crates/agenc-ircd-storage/tests/stage_five_completion.rs` | signed_growth_report_is_exact_tuple_authority, platform_adapter_rejects_each_path_lock_guard_and_capacity_boundary, transaction_capacity_admission_observes_minus_equal_and_plus_one_boundaries, qualification_rejects_every_report_and_measurement_boundary, qualification_required_file_set_measures_every_named_durable_case (+53) |
 | `crates/agenc-ircd-auth/tests/stage_four.rs` | hash, new, credential, operation_context, operation_route (+49) |
 | `crates/agenc-ircd-client-wire/src/registration_command.rs` | validate_post_registration_command, validate_join, validate_part, validate_mode, validate_topic (+48) |
-| `crates/agenc-ircd-storage/src/construction_runtime.rs` | add_final_checkpoint, initial_construction_accounting, add_preflight_record_charge, login_index_transition_preflight, index_restore_channel_source (+38) |
+| `crates/agenc-ircd-storage/src/engine.rs` | open, construction_existing, prepare_checkpoint, seal_checkpoint_state_meta, checkpoint_committed_reservation (+36) |
 | `crates/agenc-ircd-federation-wire/src/codec.rs` | encode_canonical, claim_bytes, validate_bounds, is_optional_fixed, validate_optional_fixed_field (+31) |
 | `crates/agenc-ircd-domain/src/model.rs` | resolve_channel, parse, new, from_seed, at_revision (+28) |
 | `crates/agenc-ircd-client-wire/src/auth_transport.rs` | zeroize_storage, drop, new, client, server_response (+21) |
@@ -75,21 +75,21 @@ Start here when exploring this area:
 | `Remaining_mode_and_request_helpers_cover_successful_fallthroughs → Presentation` | cross_community | 8 |
 | `Remaining_mode_and_request_helpers_cover_successful_fallthroughs → Canonical` | cross_community | 8 |
 | `Remaining_mode_and_request_helpers_cover_successful_fallthroughs → Is_global` | cross_community | 8 |
-| `Mutation_helpers_ignore_missing_targets_without_corrupting_indexes → Presentation` | cross_community | 8 |
-| `Mutation_helpers_ignore_missing_targets_without_corrupting_indexes → Canonical` | cross_community | 8 |
+| `Classify_recovery_state → As_bytes` | cross_community | 7 |
+| `Construction_scan → Fill_from` | cross_community | 6 |
 
 ## Connected Areas
 
 | Area | Connections |
 |------|-------------|
-| Cluster_245 | 30 calls |
-| Fuzz_targets | 29 calls |
-| Cluster_75 | 18 calls |
-| Cluster_24 | 17 calls |
-| Cluster_131 | 15 calls |
+| Cluster_192 | 34 calls |
+| Cluster_270 | 30 calls |
+| Cluster_203 | 24 calls |
+| Fuzz_targets | 24 calls |
+| Cluster_20 | 22 calls |
+| Cluster_129 | 15 calls |
 | Cluster_2 | 11 calls |
-| Cluster_113 | 9 calls |
-| Cluster_95 | 9 calls |
+| Cluster_214 | 9 calls |
 
 ## How to Explore
 
