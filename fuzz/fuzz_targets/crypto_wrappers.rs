@@ -38,7 +38,10 @@ fn fuzz_signature(input: &[u8]) {
         content,
         Ed25519Signature::from_bytes(signature),
     );
-    assert!(result.is_err(), "fuzz bytes verified as a strict Ed25519 signature");
+    assert!(
+        result.is_err(),
+        "fuzz bytes verified as a strict Ed25519 signature"
+    );
 }
 
 fn fuzz_sealed_record(input: &[u8]) {
@@ -61,7 +64,10 @@ fn fuzz_sealed_record(input: &[u8]) {
     };
     let nonce = StorageNonce::from_reserved_bytes([6_u8; 24]);
     let result = open_storage_record(&key, &nonce, 1, b"fuzz-record", &ciphertext);
-    assert!(result.is_err(), "fuzz bytes opened under the fixed storage key");
+    assert!(
+        result.is_err(),
+        "fuzz bytes opened under the fixed storage key"
+    );
 }
 
 fuzz_target!(|data: &[u8]| {
