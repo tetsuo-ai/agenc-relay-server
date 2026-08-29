@@ -5,16 +5,17 @@
 use std::io;
 
 use agenc_ircd_crypto::{
-    AccountHpkeKeyId, AccountHpkePrivateKey, AccountRequestBinding, DatabaseBinding,
-    Ed25519PublicKey, Ed25519SecretKey, Ed25519Signature, LoginIndexKey, OpaqueFakeCredentialKey,
-    SealedStorageRecord, SemanticHashDomain, SignatureDomain, StorageMasterKey, StorageNonce,
-    StorageTable, derive_fake_credential_id, derive_login_index, derive_storage_index,
-    derive_storage_record_key, open_account_request, open_storage_record, seal_storage_record,
-    semantic_digest, sign_canonical, verify_canonical,
+    ACCOUNT_HPKE_RESPONSE_PLAINTEXT_BYTES, AccountHpkeKeyId, AccountHpkePrivateKey,
+    AccountRequestBinding, CryptoError, DatabaseBinding, Ed25519PublicKey, Ed25519SecretKey,
+    Ed25519Signature, LoginIndexKey, OpaqueFakeCredentialKey, SealedStorageRecord,
+    SemanticHashDomain, SignatureDomain, StorageMasterKey, StorageNonce, StorageTable,
+    derive_fake_credential_id, derive_login_index, derive_storage_index, derive_storage_record_key,
+    open_account_request, open_storage_record, seal_storage_record, semantic_digest,
+    sign_canonical, verify_canonical,
 };
 use agenc_ircd_types::{
-    AccountServiceMessageKind, DatabaseId, NetworkId, NormalizedLogin, RecoveryEpoch, RequestId,
-    ServerId, ServerIncarnation,
+    AccountServiceMessageKind, AccountServiceResponseKind, DatabaseId, NetworkId, NormalizedLogin,
+    RecoveryEpoch, RequestId, ServerId, ServerIncarnation,
 };
 use chacha20poly1305::aead::{Aead as _, KeyInit as _, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
@@ -213,7 +214,7 @@ fn immutable_storage_vector_rejects_tamper_and_context_substitution()
         .ok_or_else(|| vector_error("storage ciphertext is empty"))?;
     *first ^= 1;
     let tampered = SealedStorageRecord::from_bytes(ciphertext)?;
-    assert!(
+    assert_eq!(
         open_storage_record(
             &key,
             &StorageNonce::from_reserved_bytes(nonce_bytes),
@@ -221,11 +222,12 @@ fn immutable_storage_vector_rejects_tamper_and_context_substitution()
             &stored_key,
             &tampered,
         )
-        .is_err()
+        .err(),
+        Some(CryptoError::AuthenticationFailed)
     );
 
     let sealed = SealedStorageRecord::from_bytes(decode_hex(field(vector, "ciphertext")?)?)?;
-    assert!(
+    assert_eq!(
         open_storage_record(
             &key,
             &StorageNonce::from_reserved_bytes([0x26; 24]),
@@ -233,9 +235,10 @@ fn immutable_storage_vector_rejects_tamper_and_context_substitution()
             &stored_key,
             &sealed,
         )
-        .is_err()
+        .err(),
+        Some(CryptoError::AuthenticationFailed)
     );
-    assert!(
+    assert_eq!(
         open_storage_record(
             &key,
             &StorageNonce::from_reserved_bytes(nonce_bytes),
@@ -243,9 +246,10 @@ fn immutable_storage_vector_rejects_tamper_and_context_substitution()
             &stored_key,
             &sealed,
         )
-        .is_err()
+        .err(),
+        Some(CryptoError::AuthenticationFailed)
     );
-    assert!(
+    assert_eq!(
         open_storage_record(
             &key,
             &StorageNonce::from_reserved_bytes(nonce_bytes),
@@ -253,10 +257,11 @@ fn immutable_storage_vector_rejects_tamper_and_context_substitution()
             b"substituted database key",
             &sealed,
         )
-        .is_err()
+        .err(),
+        Some(CryptoError::AuthenticationFailed)
     );
     let wrong_generation = derive_storage_record_key(&master, storage_binding(), table, 8)?;
-    assert!(
+    assert_eq!(
         open_storage_record(
             &wrong_generation,
             &StorageNonce::from_reserved_bytes(nonce_bytes),
@@ -264,7 +269,8 @@ fn immutable_storage_vector_rejects_tamper_and_context_substitution()
             &stored_key,
             &sealed,
         )
-        .is_err()
+        .err(),
+        Some(CryptoError::AuthenticationFailed)
     );
     Ok(())
 }
@@ -288,51 +294,56 @@ fn immutable_strict_ed25519_vector_matches_and_rejects_substitution()
         &content,
         expected,
     )?;
-    assert!(
-        verify_canonical(public, SignatureDomain::FederationHello, &content, expected).is_err()
+    assert_eq!(
+        verify_canonical(public, SignatureDomain::FederationHello, &content, expected).err(),
+        Some(CryptoError::AuthenticationFailed)
     );
-    assert!(
+    assert_eq!(
         verify_canonical(
             public,
             SignatureDomain::AccountCreationInvite,
             b"substituted content",
             expected,
         )
-        .is_err()
+        .err(),
+        Some(CryptoError::AuthenticationFailed)
     );
     let mut tampered = *expected.as_bytes();
     let first = tampered
         .first_mut()
         .ok_or_else(|| vector_error("signature is empty"))?;
     *first ^= 1;
-    assert!(
+    assert_eq!(
         verify_canonical(
             public,
             SignatureDomain::AccountCreationInvite,
             &content,
             Ed25519Signature::from_bytes(tampered),
         )
-        .is_err()
+        .err(),
+        Some(CryptoError::AuthenticationFailed)
     );
     let substituted_public = Ed25519SecretKey::from_bytes([0x31; 32]).public_key();
-    assert!(
+    assert_eq!(
         verify_canonical(
             substituted_public,
             SignatureDomain::AccountCreationInvite,
             &content,
             expected,
         )
-        .is_err()
+        .err(),
+        Some(CryptoError::AuthenticationFailed)
     );
     let noncanonical_signature = Ed25519Signature::from_bytes([0xff; 64]);
-    assert!(
+    assert_eq!(
         verify_canonical(
             public,
             SignatureDomain::AccountCreationInvite,
             &content,
             noncanonical_signature,
         )
-        .is_err()
+        .err(),
+        Some(CryptoError::AuthenticationFailed)
     );
     Ok(())
 }
@@ -459,7 +470,7 @@ fn immutable_hpke_request_response_and_exporter_vectors_match()
     assert_eq!(private.public_key()?.key_id().as_bytes(), &binding.key_id);
     let encapsulated = fixed(vector, "encapsulated")?;
     let ciphertext = fixed(vector, "request_ciphertext")?;
-    let (opened, _response_token) = open_account_request(
+    let (opened, response_token) = open_account_request(
         &private,
         production_binding(binding),
         &encapsulated,
@@ -471,6 +482,20 @@ fn immutable_hpke_request_response_and_exporter_vectors_match()
     );
     let response_ciphertext = decode_hex(field(vector, "response_ciphertext")?)?;
     let response_salt = fixed(vector, "response_salt")?;
+    let response_plaintext =
+        fixed::<ACCOUNT_HPKE_RESPONSE_PLAINTEXT_BYTES>(vector, "response_plaintext")?;
+    let sealed_response = response_token.seal_response_with_salt(
+        0,
+        AccountServiceResponseKind::OpaqueAuthChallenge,
+        response_salt,
+        &response_plaintext,
+    )?;
+    assert_eq!(
+        sealed_response.ciphertext().as_slice(),
+        response_ciphertext.as_slice()
+    );
+    assert_eq!(sealed_response.response_salt(), &response_salt);
+    assert_eq!(sealed_response.next_response_count(), 1);
     let private_reference =
         <X25519HkdfSha256 as hpke::Kem>::PrivateKey::from_bytes(&fixed::<32>(vector, "private")?)?;
     let encapsulated_reference = <X25519HkdfSha256 as hpke::Kem>::EncappedKey::from_bytes(
@@ -517,47 +542,51 @@ fn immutable_hpke_vector_rejects_binding_substitution_and_tamper()
 
     let mut substituted = original;
     substituted.network = [0x60; 32];
-    assert!(
+    assert_eq!(
         open_account_request(
             &private,
             production_binding(substituted),
             &encapsulated,
             &ciphertext,
         )
-        .is_err()
+        .err(),
+        Some(CryptoError::AuthenticationFailed)
     );
     substituted = original;
     substituted.epoch = [0x61; 16];
-    assert!(
+    assert_eq!(
         open_account_request(
             &private,
             production_binding(substituted),
             &encapsulated,
             &ciphertext,
         )
-        .is_err()
+        .err(),
+        Some(CryptoError::AuthenticationFailed)
     );
     substituted = original;
     substituted.key_id = [0x62; 32];
-    assert!(
+    assert_eq!(
         open_account_request(
             &private,
             production_binding(substituted),
             &encapsulated,
             &ciphertext,
         )
-        .is_err()
+        .err(),
+        Some(CryptoError::AuthenticationFailed)
     );
     substituted = original;
     substituted.request_id = [0x63; 16];
-    assert!(
+    assert_eq!(
         open_account_request(
             &private,
             production_binding(substituted),
             &encapsulated,
             &ciphertext,
         )
-        .is_err()
+        .err(),
+        Some(CryptoError::AuthenticationFailed)
     );
     let kind_substitution = AccountRequestBinding::new(
         NetworkId::from_bytes(original.network),
@@ -566,34 +595,39 @@ fn immutable_hpke_vector_rejects_binding_substitution_and_tamper()
         RequestId::from_bytes(original.request_id),
         AccountServiceMessageKind::OpaqueAuthFinish,
     );
-    assert!(open_account_request(&private, kind_substitution, &encapsulated, &ciphertext).is_err());
+    assert_eq!(
+        open_account_request(&private, kind_substitution, &encapsulated, &ciphertext).err(),
+        Some(CryptoError::AuthenticationFailed)
+    );
     let mut tampered_encapsulated = encapsulated;
     let first = tampered_encapsulated
         .first_mut()
         .ok_or_else(|| vector_error("HPKE encapsulated key is empty"))?;
     *first ^= 1;
-    assert!(
+    assert_eq!(
         open_account_request(
             &private,
             production_binding(original),
             &tampered_encapsulated,
             &ciphertext,
         )
-        .is_err()
+        .err(),
+        Some(CryptoError::AuthenticationFailed)
     );
     let mut tampered_ciphertext = ciphertext;
     let first = tampered_ciphertext
         .first_mut()
         .ok_or_else(|| vector_error("HPKE ciphertext is empty"))?;
     *first ^= 1;
-    assert!(
+    assert_eq!(
         open_account_request(
             &private,
             production_binding(original),
             &encapsulated,
             &tampered_ciphertext,
         )
-        .is_err()
+        .err(),
+        Some(CryptoError::AuthenticationFailed)
     );
 
     let response_ciphertext = decode_hex(field(vector, "response_ciphertext")?)?;

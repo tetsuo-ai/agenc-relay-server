@@ -434,14 +434,34 @@ impl AccountResponseSealToken {
         response_kind: AccountServiceResponseKind,
         plaintext: &[u8; ACCOUNT_HPKE_RESPONSE_PLAINTEXT_BYTES],
     ) -> Result<SealedAccountResponse, CryptoError> {
+        let mut response_salt = [0_u8; 32];
+        OsEntropy::fill(&mut response_salt)?;
+        self.seal_response_with_salt(
+            current_response_count,
+            response_kind,
+            response_salt,
+            plaintext,
+        )
+    }
+
+    /// Seals with a caller-supplied salt so reference vectors can bind this path.
+    ///
+    /// Production callers must use [`Self::seal_response`]: a repeated salt
+    /// repeats the response key and nonce for the same exporter context.
+    #[doc(hidden)]
+    pub fn seal_response_with_salt(
+        self,
+        current_response_count: u64,
+        response_kind: AccountServiceResponseKind,
+        response_salt: [u8; 32],
+        plaintext: &[u8; ACCOUNT_HPKE_RESPONSE_PLAINTEXT_BYTES],
+    ) -> Result<SealedAccountResponse, CryptoError> {
         if expected_response_kind(self.binding.message_kind) != response_kind {
             return Err(CryptoError::KindMismatch);
         }
         let next_response_count = current_response_count
             .checked_add(1)
             .ok_or(CryptoError::Overflow)?;
-        let mut response_salt = [0_u8; 32];
-        OsEntropy::fill(&mut response_salt)?;
         let response_material =
             export_response_material(&self.context, self.binding, &response_salt)?;
         let aad = response_aad(self.binding, response_kind, &response_salt)?;

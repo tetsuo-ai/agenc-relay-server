@@ -11,15 +11,19 @@ use agenc_ircd_crypto::{
     AccountHpkePrivateKey, AccountRequestBinding, BoundedCryptoPool, CryptoError, CryptoJob,
     CryptoPort, CryptoWorkerConfig, CryptoWorkerError, DatabaseBinding, Ed25519PublicKey,
     Ed25519SecretKey, Ed25519Signature, JobClass, LoginIndexKey, MAX_STORAGE_CIPHERTEXT_BYTES,
-    OpaqueFakeCredentialKey, SealedStorageRecord, SemanticHashDomain, SignatureDomain,
-    StorageMasterKey, StorageNonce, StorageTable, derive_fake_credential_id, derive_login_index,
-    derive_storage_index, derive_storage_record_key, open_account_request, open_storage_record,
-    seal_account_request, seal_storage_record, semantic_digest, sign_canonical, verify_canonical,
+    MAX_STORAGE_PLAINTEXT_BYTES, OpaqueFakeCredentialKey, SealedStorageRecord, SemanticHashDomain,
+    SignatureDomain, StorageMasterKey, StorageNonce, StorageTable, derive_fake_credential_id,
+    derive_login_index, derive_storage_index, derive_storage_record_key, open_account_request,
+    open_storage_record, seal_account_request, seal_storage_record, semantic_digest,
+    sign_canonical, verify_canonical,
 };
 use agenc_ircd_types::{
     AccountServiceMessageKind, AccountServiceResponseKind, DatabaseId, NetworkId, NormalizedLogin,
     RecoveryEpoch, RequestId, ServerId, ServerIncarnation,
 };
+
+/// Upper bound for an OS worker thread to dequeue a job on a saturated host.
+const WORKER_START_BUDGET: Duration = Duration::from_secs(30);
 
 fn database_binding(seed: u8) -> DatabaseBinding {
     DatabaseBinding::new(
@@ -107,14 +111,15 @@ fn hpke_rejects_every_public_binding_and_ciphertext_substitution()
         binding.client_request_id(),
         binding.message_kind(),
     );
-    assert!(
+    assert_eq!(
         open_account_request(
             &private_key,
             changed_epoch,
             sealed.encapsulated_key(),
             sealed.ciphertext(),
         )
-        .is_err()
+        .err(),
+        Some(CryptoError::AuthenticationFailed)
     );
     let changed_kind = AccountRequestBinding::new(
         binding.network_id(),
@@ -123,42 +128,45 @@ fn hpke_rejects_every_public_binding_and_ciphertext_substitution()
         binding.client_request_id(),
         AccountServiceMessageKind::AccountCreateStart,
     );
-    assert!(
+    assert_eq!(
         open_account_request(
             &private_key,
             changed_kind,
             sealed.encapsulated_key(),
             sealed.ciphertext(),
         )
-        .is_err()
+        .err(),
+        Some(CryptoError::AuthenticationFailed)
     );
     let mut changed_encapsulation = *sealed.encapsulated_key();
     let first = changed_encapsulation
         .first_mut()
         .ok_or("encapsulated key is empty")?;
     *first ^= 1;
-    assert!(
+    assert_eq!(
         open_account_request(
             &private_key,
             binding,
             &changed_encapsulation,
             sealed.ciphertext(),
         )
-        .is_err()
+        .err(),
+        Some(CryptoError::AuthenticationFailed)
     );
     let mut changed_ciphertext = *sealed.ciphertext();
     let last = changed_ciphertext
         .last_mut()
         .ok_or("request ciphertext is empty")?;
     *last ^= 1;
-    assert!(
+    assert_eq!(
         open_account_request(
             &private_key,
             binding,
             sealed.encapsulated_key(),
             &changed_ciphertext,
         )
-        .is_err()
+        .err(),
+        Some(CryptoError::AuthenticationFailed)
     );
 
     let response_plaintext = [11_u8; ACCOUNT_HPKE_RESPONSE_PLAINTEXT_BYTES];
@@ -252,7 +260,7 @@ fn storage_adapter_rejects_all_key_nonce_aad_tag_and_limit_changes()
     );
     assert_eq!(
         derive_storage_index(&master, binding, table, 0, b"key").err(),
-        Some(CryptoError::LimitExceeded)
+        Some(CryptoError::InvalidEncoding)
     );
     assert_eq!(
         derive_storage_index(&master, binding, table, 1, &vec![0_u8; 4_097]).err(),
@@ -353,6 +361,33 @@ fn storage_ciphertext_rejects_the_maximum_plus_one() {
         SealedStorageRecord::from_bytes(vec![0_u8; MAX_STORAGE_CIPHERTEXT_BYTES + 1]).err(),
         Some(CryptoError::InvalidEncoding)
     );
+}
+
+#[test]
+fn storage_adapter_accepts_the_exact_maximum_plaintext_and_ciphertext()
+-> Result<(), Box<dyn core::error::Error>> {
+    assert!(SealedStorageRecord::from_bytes(vec![0_u8; MAX_STORAGE_CIPHERTEXT_BYTES]).is_ok());
+    let table = StorageTable::new(3)?;
+    let master = StorageMasterKey::from_bytes([7_u8; 32]);
+    let key = derive_storage_record_key(&master, database_binding(1), table, 1)?;
+    let plaintext = vec![0x5a_u8; MAX_STORAGE_PLAINTEXT_BYTES];
+    let sealed = seal_storage_record(
+        &key,
+        StorageNonce::from_reserved_bytes([9_u8; 24]),
+        1,
+        b"record-key",
+        &plaintext,
+    )?;
+    assert_eq!(sealed.as_bytes().len(), MAX_STORAGE_CIPHERTEXT_BYTES);
+    let opened = open_storage_record(
+        &key,
+        &StorageNonce::from_reserved_bytes([9_u8; 24]),
+        1,
+        b"record-key",
+        &sealed,
+    )?;
+    assert_eq!(opened.expose_for_storage_codec(), plaintext.as_slice());
+    Ok(())
 }
 
 #[test]
@@ -565,7 +600,7 @@ async fn worker_configuration_and_both_admission_classes_are_closed()
             release: release_receiver,
         })
         .map_err(|error| error.reason())?;
-    started_receiver.recv_timeout(Duration::from_secs(1))?;
+    started_receiver.recv_timeout(WORKER_START_BUDGET)?;
     let (rejected_started, _unused_started) = sync_channel(1);
     let (_unused_release, rejected_release) = sync_channel(1);
     let rejected = pool
@@ -590,7 +625,7 @@ async fn worker_configuration_and_both_admission_classes_are_closed()
             release: release_receiver,
         })
         .map_err(|error| error.reason())?;
-    started_receiver.recv_timeout(Duration::from_secs(1))?;
+    started_receiver.recv_timeout(WORKER_START_BUDGET)?;
     release_sender.send(())?;
     assert_eq!(opaque.completion().await?, 7);
     Ok(())
@@ -630,7 +665,7 @@ async fn worker_panic_and_queued_cancellation_are_terminal_and_bounded()
             release: first_release_receiver,
         })
         .map_err(|error| error.reason())?;
-    first_started_receiver.recv_timeout(Duration::from_secs(1))?;
+    first_started_receiver.recv_timeout(WORKER_START_BUDGET)?;
     let (cancelled_started_sender, cancelled_started_receiver) = sync_channel(1);
     let (_cancelled_release_sender, cancelled_release_receiver) = sync_channel(1);
     let cancelled = cancellation_pool
@@ -664,7 +699,7 @@ async fn dropping_a_queued_handle_requests_prestart_cancellation()
             release: first_release_receiver,
         })
         .map_err(|error| error.reason())?;
-    first_started_receiver.recv_timeout(Duration::from_secs(1))?;
+    first_started_receiver.recv_timeout(WORKER_START_BUDGET)?;
 
     let (cancelled_started_sender, cancelled_started_receiver) = sync_channel(1);
     let (_cancelled_release_sender, cancelled_release_receiver) = sync_channel(1);
@@ -681,5 +716,66 @@ async fn dropping_a_queued_handle_requests_prestart_cancellation()
     assert_eq!(first.completion().await?, 7);
     drop(pool);
     assert!(cancelled_started_receiver.try_recv().is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn dropping_a_pending_completion_future_requests_prestart_cancellation()
+-> Result<(), Box<dyn core::error::Error>> {
+    let pool = BoundedCryptoPool::start(CryptoWorkerConfig::new(2, 1, 1)?)?;
+    let (first_started_sender, first_started_receiver) = sync_channel(1);
+    let (first_release_sender, first_release_receiver) = sync_channel(1);
+    let first = pool
+        .try_submit(BlockingJob {
+            class: JobClass::Channel,
+            started: first_started_sender,
+            release: first_release_receiver,
+        })
+        .map_err(|error| error.reason())?;
+    first_started_receiver.recv_timeout(WORKER_START_BUDGET)?;
+
+    let (queued_started_sender, queued_started_receiver) = sync_channel(1);
+    let (queued_release_sender, queued_release_receiver) = sync_channel(1);
+    let queued = pool
+        .try_submit(BlockingJob {
+            class: JobClass::Channel,
+            started: queued_started_sender,
+            release: queued_release_receiver,
+        })
+        .map_err(|error| error.reason())?;
+    let timed_out = tokio::time::timeout(Duration::from_millis(10), queued.completion()).await;
+    assert!(
+        timed_out.is_err(),
+        "queued job finished behind a blocked worker"
+    );
+    // A regression would start the queued job; releasing it here turns that
+    // into a failed assertion below instead of a hung worker join.
+    drop(queued_release_sender);
+
+    first_release_sender.send(())?;
+    assert_eq!(first.completion().await?, 7);
+    drop(pool);
+    assert!(queued_started_receiver.try_recv().is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn shutdown_joins_workers_after_in_flight_work_finishes()
+-> Result<(), Box<dyn core::error::Error>> {
+    let pool = BoundedCryptoPool::start(CryptoWorkerConfig::new(1, 1, 1)?)?;
+    let (started_sender, started_receiver) = sync_channel(1);
+    let (release_sender, release_receiver) = sync_channel(1);
+    let job = pool
+        .try_submit(BlockingJob {
+            class: JobClass::Channel,
+            started: started_sender,
+            release: release_receiver,
+        })
+        .map_err(|error| error.reason())?;
+    started_receiver.recv_timeout(WORKER_START_BUDGET)?;
+    let shutdown = tokio::task::spawn_blocking(move || pool.shutdown());
+    release_sender.send(())?;
+    assert_eq!(job.completion().await?, 7);
+    shutdown.await?;
     Ok(())
 }

@@ -282,7 +282,10 @@ pub fn derive_storage_index(
     key_generation: u32,
     canonical_semantic_key: &[u8],
 ) -> Result<StorageIndex, CryptoError> {
-    if key_generation == 0 || canonical_semantic_key.len() > MAX_STORAGE_KEY_BYTES {
+    if key_generation == 0 {
+        return Err(CryptoError::InvalidEncoding);
+    }
+    if canonical_semantic_key.len() > MAX_STORAGE_KEY_BYTES {
         return Err(CryptoError::LimitExceeded);
     }
     let index_key = derive_storage_subkey(
@@ -313,6 +316,9 @@ fn derive_storage_subkey(
     salt_hash.update(binding_bytes);
     let salt: [u8; 32] = salt_hash.finalize().into();
     let hkdf = Hkdf::<Sha256>::new(Some(&salt), master_key.0.as_bytes());
+    // The info is the label, the u16 table value, and the u32 key generation.
+    // The longest label is the 37-byte table index label, so every info needs
+    // at most 43 bytes of this fixed 47-byte buffer.
     let mut info = [0_u8; 47];
     let needed = label.len().checked_add(6).ok_or(CryptoError::Overflow)?;
     let Some(info) = info.get_mut(..needed) else {

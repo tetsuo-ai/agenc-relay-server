@@ -178,6 +178,8 @@ pub struct BoundedCryptoPool<J: CryptoJob> {
 impl<J: CryptoJob> BoundedCryptoPool<J> {
     /// Starts exactly the validated number of named OS worker threads.
     pub fn start(config: CryptoWorkerConfig) -> Result<Self, CryptoWorkerError> {
+        // Only the u64 product is validated here; the pool reserves no memory itself.
+        // Stage 06 admission accounting charges this reservation before start.
         let _reserved_bytes = config.reserved_memory_bytes()?;
         let queue_capacity = config.physical_queue_capacity()?;
         let (sender, receiver) = sync_channel(queue_capacity);
@@ -226,6 +228,23 @@ impl<J: CryptoJob> BoundedCryptoPool<J> {
             failed,
             shutting_down,
         })
+    }
+
+    /// Refuses new work and joins every worker once its in-flight job finishes.
+    ///
+    /// This blocks the calling thread for up to one full job per worker, so a
+    /// Tokio caller should run it through the runtime's blocking pool. Dropping
+    /// the pool performs the same join.
+    pub fn shutdown(mut self) {
+        self.join_workers();
+    }
+
+    fn join_workers(&mut self) {
+        self.shutting_down.store(true, Ordering::Release);
+        drop(self.sender.take());
+        for handle in self.workers.drain(..) {
+            let _join_result = handle.join();
+        }
     }
 }
 
@@ -357,13 +376,10 @@ fn execute_crypto_job<J: CryptoJob>(
     }
 }
 
+/// Dropping performs the same blocking join as [`BoundedCryptoPool::shutdown`].
 impl<J: CryptoJob> Drop for BoundedCryptoPool<J> {
     fn drop(&mut self) {
-        self.shutting_down.store(true, Ordering::Release);
-        drop(self.sender.take());
-        for handle in self.workers.drain(..) {
-            let _join_result = handle.join();
-        }
+        self.join_workers();
     }
 }
 
@@ -380,13 +396,18 @@ impl<O> JobHandle<O> {
     }
 
     /// Waits without blocking a Tokio worker.
+    ///
+    /// Dropping the returned future before it resolves drops this handle, which
+    /// still requests pre-start cancellation of the queued job.
     pub async fn completion(mut self) -> Result<O, CryptoWorkerError> {
-        let Some(receiver) = self.receiver.take() else {
+        let Some(receiver) = self.receiver.as_mut() else {
             return Err(CryptoWorkerError::ShuttingDown);
         };
-        receiver
+        let outcome = receiver
             .await
-            .unwrap_or(Err(CryptoWorkerError::WorkerPanicked))
+            .unwrap_or(Err(CryptoWorkerError::WorkerPanicked));
+        self.receiver = None;
+        outcome
     }
 }
 
