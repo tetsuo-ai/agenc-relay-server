@@ -1,11 +1,11 @@
 ---
 name: tests
-description: "Skill for the Tests area of agenc-ircd. 865 symbols across 81 files."
+description: "Skill for the Tests area of agenc-ircd. 1056 symbols across 100 files."
 ---
 
 # Tests
 
-865 symbols | 81 files | Cohesion: 83%
+1056 symbols | 100 files | Cohesion: 78%
 
 ## When to Use
 
@@ -19,14 +19,14 @@ description: "Skill for the Tests area of agenc-ircd. 865 symbols across 81 file
 |------|---------|
 | `crates/agenc-ircd-testkit/tests/domain_reference_model.rs` | apply_production, production_authority, apply_production_command, apply_production_join, reference_model_executes_every_command_with_real_behavior (+64) |
 | `crates/agenc-ircd-federation-wire/src/tests/semantics.rs` | schema, fields, validate, opaque, unsigned (+53) |
-| `crates/agenc-ircd-client-wire/src/registration_command.rs` | validate_post_registration_command, validate_join, validate_part, validate_mode, validate_topic (+50) |
+| `crates/agenc-ircd-storage/tests/stage_five_completion.rs` | signed_growth_report_is_exact_tuple_authority, platform_adapter_rejects_each_path_lock_guard_and_capacity_boundary, transaction_capacity_admission_observes_minus_equal_and_plus_one_boundaries, qualification_rejects_every_report_and_measurement_boundary, qualification_required_file_set_measures_every_named_durable_case (+53) |
 | `crates/agenc-ircd-auth/tests/stage_four.rs` | hash, new, credential, operation_context, operation_route (+49) |
+| `crates/agenc-ircd-client-wire/src/registration_command.rs` | validate_post_registration_command, validate_join, validate_part, validate_mode, validate_topic (+48) |
+| `crates/agenc-ircd-storage/src/construction_runtime.rs` | add_final_checkpoint, initial_construction_accounting, add_preflight_record_charge, login_index_transition_preflight, index_restore_channel_source (+38) |
 | `crates/agenc-ircd-federation-wire/src/codec.rs` | encode_canonical, claim_bytes, validate_bounds, is_optional_fixed, validate_optional_fixed_field (+31) |
 | `crates/agenc-ircd-domain/src/model.rs` | resolve_channel, parse, new, from_seed, at_revision (+28) |
 | `crates/agenc-ircd-client-wire/src/auth_transport.rs` | zeroize_storage, drop, new, client, server_response (+21) |
 | `crates/agenc-ircd-client-wire/tests/stage_two_regressions.rs` | in_flight_commit_defers_owned_input_and_resumes_it_after_registration, repeated_commit_defer_resume_cycles_retain_fifo_message_ownership, blind_cap_req_delays_commit_until_end, invalid_pass_does_not_consume_attempt_and_late_events_cannot_reopen_close, pending_ownership_and_auth_failures_are_transactional_and_terminal (+19) |
-| `crates/agenc-ircd-auth/tests/generate_stage_four_vectors.rs` | hash, new, succeeded, reference_error, fixed (+18) |
-| `crates/agenc-ircd-crypto/src/account_hpke.rs` | from_bytes, as_bytes, key_id, generate, new (+17) |
 
 ## Entry Points
 
@@ -82,14 +82,14 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Cluster_173 | 30 calls |
-| Fuzz_targets | 24 calls |
-| Cluster_25 | 17 calls |
-| Cluster_112 | 15 calls |
-| Cluster_104 | 6 calls |
-| Cluster_152 | 6 calls |
-| Cluster_106 | 6 calls |
-| Cluster_156 | 6 calls |
+| Cluster_245 | 30 calls |
+| Fuzz_targets | 29 calls |
+| Cluster_75 | 18 calls |
+| Cluster_24 | 17 calls |
+| Cluster_131 | 15 calls |
+| Cluster_2 | 11 calls |
+| Cluster_113 | 9 calls |
+| Cluster_95 | 9 calls |
 
 ## How to Explore
 

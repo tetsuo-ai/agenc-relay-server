@@ -1,11 +1,11 @@
 ---
 name: scripts
-description: "Skill for the Scripts area of agenc-ircd. 308 symbols across 17 files."
+description: "Skill for the Scripts area of agenc-ircd. 314 symbols across 18 files."
 ---
 
 # Scripts
 
-308 symbols | 17 files | Cohesion: 86%
+314 symbols | 18 files | Cohesion: 86%
 
 ## When to Use
 
@@ -32,36 +32,36 @@ description: "Skill for the Scripts area of agenc-ircd. 308 symbols across 17 fi
 
 Start here when exploring this area:
 
-- **`load_json`** (Function) — `scripts/check-evidence.py:249`
-- **`load_toml`** (Function) — `scripts/check-evidence.py:268`
-- **`validate_catalog`** (Function) — `scripts/check-evidence.py:276`
-- **`validate_schema`** (Function) — `scripts/check-evidence.py:385`
-- **`git_environment`** (Function) — `scripts/check-evidence.py:437`
+- **`load_json`** (Function) — `scripts/check-evidence.py:306`
+- **`load_toml`** (Function) — `scripts/check-evidence.py:325`
+- **`validate_catalog`** (Function) — `scripts/check-evidence.py:333`
+- **`validate_schema`** (Function) — `scripts/check-evidence.py:442`
+- **`git_environment`** (Function) — `scripts/check-evidence.py:494`
 
 ## Key Symbols
 
 | Symbol | Type | File | Line |
 |--------|------|------|------|
-| `load_json` | Function | `scripts/check-evidence.py` | 249 |
-| `load_toml` | Function | `scripts/check-evidence.py` | 268 |
-| `validate_catalog` | Function | `scripts/check-evidence.py` | 276 |
-| `validate_schema` | Function | `scripts/check-evidence.py` | 385 |
-| `git_environment` | Function | `scripts/check-evidence.py` | 437 |
-| `git_bytes` | Function | `scripts/check-evidence.py` | 453 |
-| `require_complete_history` | Function | `scripts/check-evidence.py` | 471 |
-| `validate_index_bytes` | Function | `scripts/check-evidence.py` | 484 |
-| `commit_blob` | Function | `scripts/check-evidence.py` | 526 |
-| `commit_blob_sha256` | Function | `scripts/check-evidence.py` | 531 |
-| `canonical_source_sha256` | Function | `scripts/check-evidence.py` | 536 |
-| `load_toolchain_policy` | Function | `scripts/check-evidence.py` | 790 |
-| `source_toolchain_policy` | Function | `scripts/check-evidence.py` | 814 |
-| `validate` | Function | `scripts/check-evidence.py` | 1034 |
-| `source_gate_policy` | Function | `scripts/check-evidence.py` | 1175 |
-| `resolve` | Function | `scripts/check-evidence.py` | 1209 |
-| `validate_closure_entries` | Function | `scripts/check-evidence.py` | 1460 |
-| `validate_closure` | Function | `scripts/check-evidence.py` | 1547 |
-| `expect_rejection` | Function | `scripts/check-evidence.py` | 1598 |
-| `self_test` | Function | `scripts/check-evidence.py` | 1614 |
+| `load_json` | Function | `scripts/check-evidence.py` | 306 |
+| `load_toml` | Function | `scripts/check-evidence.py` | 325 |
+| `validate_catalog` | Function | `scripts/check-evidence.py` | 333 |
+| `validate_schema` | Function | `scripts/check-evidence.py` | 442 |
+| `git_environment` | Function | `scripts/check-evidence.py` | 494 |
+| `git_bytes` | Function | `scripts/check-evidence.py` | 510 |
+| `require_complete_history` | Function | `scripts/check-evidence.py` | 528 |
+| `validate_index_bytes` | Function | `scripts/check-evidence.py` | 541 |
+| `commit_blob` | Function | `scripts/check-evidence.py` | 583 |
+| `commit_blob_sha256` | Function | `scripts/check-evidence.py` | 588 |
+| `canonical_source_sha256` | Function | `scripts/check-evidence.py` | 593 |
+| `load_toolchain_policy` | Function | `scripts/check-evidence.py` | 847 |
+| `source_toolchain_policy` | Function | `scripts/check-evidence.py` | 871 |
+| `validate` | Function | `scripts/check-evidence.py` | 1091 |
+| `source_gate_policy` | Function | `scripts/check-evidence.py` | 1232 |
+| `resolve` | Function | `scripts/check-evidence.py` | 1266 |
+| `validate_closure_entries` | Function | `scripts/check-evidence.py` | 1517 |
+| `validate_closure` | Function | `scripts/check-evidence.py` | 1604 |
+| `expect_rejection` | Function | `scripts/check-evidence.py` | 1655 |
+| `self_test` | Function | `scripts/check-evidence.py` | 1671 |
 
 ## Execution Flows
 
@@ -73,10 +73,10 @@ Start here when exploring this area:
 | `Self_test → Task_for` | cross_community | 6 |
 | `Main → Normative_matches` | cross_community | 6 |
 | `Self_test → Normative_matches` | cross_community | 6 |
-| `Record_gate → Command_environment` | cross_community | 6 |
-| `Main → Terminate_process_group` | cross_community | 6 |
 | `Self_test → Flush` | cross_community | 5 |
 | `Self_test → Normalize_text` | cross_community | 5 |
+| `Self_test → Sha256_bytes` | cross_community | 5 |
+| `Main → Task_for` | intra_community | 5 |
 
 ## How to Explore
 

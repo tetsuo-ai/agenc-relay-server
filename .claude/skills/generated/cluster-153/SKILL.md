@@ -1,9 +1,9 @@
 ---
-name: cluster-134
-description: "Skill for the Cluster_134 area of agenc-ircd. 15 symbols across 1 files."
+name: cluster-153
+description: "Skill for the Cluster_153 area of agenc-ircd. 15 symbols across 1 files."
 ---
 
-# Cluster_134
+# Cluster_153
 
 15 symbols | 1 files | Cohesion: 88%
 
@@ -11,7 +11,7 @@ description: "Skill for the Cluster_134 area of agenc-ircd. 15 symbols across 1 
 
 - Working with code in `crates/`
 - Understanding how is_allowed_for, validate work
-- Modifying cluster_134-related functionality
+- Modifying cluster_153-related functionality
 
 ## Key Files
 
@@ -55,6 +55,6 @@ Start here when exploring this area:
 ## How to Explore
 
 1. `context({name: "is_allowed_for"})` — see callers and callees
-2. `query({search_query: "cluster_134"})` — find related execution flows
+2. `query({search_query: "cluster_153"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

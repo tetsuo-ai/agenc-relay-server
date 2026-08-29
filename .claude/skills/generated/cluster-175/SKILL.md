@@ -1,23 +1,23 @@
 ---
-name: cluster-156
-description: "Skill for the Cluster_156 area of agenc-ircd. 106 symbols across 2 files."
+name: cluster-175
+description: "Skill for the Cluster_175 area of agenc-ircd. 104 symbols across 2 files."
 ---
 
-# Cluster_156
+# Cluster_175
 
-106 symbols | 2 files | Cohesion: 96%
+104 symbols | 2 files | Cohesion: 95%
 
 ## When to Use
 
 - Working with code in `crates/`
 - Understanding how validate_schema_semantics, parse, parse_wire_bytes work
-- Modifying cluster_156-related functionality
+- Modifying cluster_175-related functionality
 
 ## Key Files
 
 | File | Symbols |
 |------|---------|
-| `crates/agenc-ircd-federation-wire/src/semantics.rs` | validate_schema_semantics, validate_event_schema, validate_operation_schema, validate_result_schema, validate_session_event_identity (+97) |
+| `crates/agenc-ircd-federation-wire/src/semantics.rs` | validate_schema_semantics, validate_event_schema, validate_operation_schema, validate_result_schema, validate_session_event_identity (+95) |
 | `crates/agenc-ircd-types/src/identifiers.rs` | unpadded_base64_len, parse_fixed, parse, parse_wire_bytes |
 
 ## Entry Points
@@ -57,13 +57,13 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Cluster_154 | 5 calls |
+| Cluster_173 | 3 calls |
 | Tests | 3 calls |
-| Cluster_150 | 1 calls |
+| Cluster_169 | 1 calls |
 
 ## How to Explore
 
 1. `context({name: "validate_schema_semantics"})` — see callers and callees
-2. `query({search_query: "cluster_156"})` — find related execution flows
+2. `query({search_query: "cluster_175"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

@@ -1,9 +1,9 @@
 ---
-name: cluster-9
-description: "Skill for the Cluster_9 area of agenc-ircd. 30 symbols across 1 files."
+name: cluster-8
+description: "Skill for the Cluster_8 area of agenc-ircd. 30 symbols across 1 files."
 ---
 
-# Cluster_9
+# Cluster_8
 
 30 symbols | 1 files | Cohesion: 81%
 
@@ -11,7 +11,7 @@ description: "Skill for the Cluster_9 area of agenc-ircd. 30 symbols across 1 fi
 
 - Working with code in `crates/`
 - Understanding how new, finish_credential_change, begin_account_deletion work
-- Modifying cluster_9-related functionality
+- Modifying cluster_8-related functionality
 
 ## Key Files
 
@@ -61,26 +61,26 @@ Start here when exploring this area:
 | `Every_start_path_propagates_entropy_failure_without_a_response → Matches_request_kind` | cross_community | 6 |
 | `Credential_generation_overflow_consumes_without_response_authority → New` | cross_community | 6 |
 | `Destructive_proofs_and_deletion_confirmations_reject_every_substitution → New` | cross_community | 6 |
-| `Authentication_grant_deadlines_fail_closed_on_overflow → New` | cross_community | 6 |
 | `Every_start_path_propagates_entropy_failure_without_a_response → Message_kind` | intra_community | 5 |
 | `Every_start_path_propagates_entropy_failure_without_a_response → From_ticks` | cross_community | 5 |
 | `Every_start_path_propagates_entropy_failure_without_a_response → From_unix_seconds` | cross_community | 5 |
 | `Authentication_finish_entropy_failure_emits_no_completion → New` | cross_community | 5 |
+| `Credential_replacement_reuses_identity_and_fences_generation → Transaction_id` | intra_community | 5 |
 
 ## Connected Areas
 
 | Area | Connections |
 |------|-------------|
-| Cluster_112 | 7 calls |
-| Cluster_5 | 5 calls |
+| Cluster_131 | 7 calls |
+| Cluster_4 | 5 calls |
 | Tests | 5 calls |
-| Cluster_11 | 4 calls |
-| Cluster_8 | 2 calls |
-| Cluster_12 | 1 calls |
+| Cluster_10 | 4 calls |
+| Cluster_7 | 2 calls |
+| Cluster_11 | 1 calls |
 
 ## How to Explore
 
 1. `context({name: "new"})` — see callers and callees
-2. `query({search_query: "cluster_9"})` — find related execution flows
+2. `query({search_query: "cluster_8"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

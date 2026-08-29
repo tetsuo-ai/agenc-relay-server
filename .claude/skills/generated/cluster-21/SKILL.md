@@ -1,9 +1,9 @@
 ---
-name: cluster-22
-description: "Skill for the Cluster_22 area of agenc-ircd. 15 symbols across 3 files."
+name: cluster-21
+description: "Skill for the Cluster_21 area of agenc-ircd. 15 symbols across 3 files."
 ---
 
-# Cluster_22
+# Cluster_21
 
 15 symbols | 3 files | Cohesion: 69%
 
@@ -11,7 +11,7 @@ description: "Skill for the Cluster_22 area of agenc-ircd. 15 symbols across 3 f
 
 - Working with code in `crates/`
 - Understanding how parse, expose_for_account_parser, from_wire work
-- Modifying cluster_22-related functionality
+- Modifying cluster_21-related functionality
 
 ## Key Files
 
@@ -56,7 +56,6 @@ Start here when exploring this area:
 | `Every_start_path_propagates_entropy_failure_without_a_response → New` | cross_community | 6 |
 | `Credential_generation_overflow_consumes_without_response_authority → New` | cross_community | 6 |
 | `Destructive_proofs_and_deletion_confirmations_reject_every_substitution → New` | cross_community | 6 |
-| `Authentication_grant_deadlines_fail_closed_on_overflow → New` | cross_community | 6 |
 | `Seal → New` | cross_community | 5 |
 | `Authentication_finish_entropy_failure_emits_no_completion → New` | cross_community | 5 |
 
@@ -64,12 +63,12 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Cluster_23 | 17 calls |
-| Cluster_156 | 1 calls |
+| Cluster_22 | 17 calls |
+| Cluster_175 | 1 calls |
 
 ## How to Explore
 
 1. `context({name: "parse"})` — see callers and callees
-2. `query({search_query: "cluster_22"})` — find related execution flows
+2. `query({search_query: "cluster_21"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

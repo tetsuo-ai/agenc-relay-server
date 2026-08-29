@@ -1,9 +1,9 @@
 ---
-name: cluster-176
-description: "Skill for the Cluster_176 area of agenc-ircd. 29 symbols across 1 files."
+name: cluster-248
+description: "Skill for the Cluster_248 area of agenc-ircd. 29 symbols across 1 files."
 ---
 
-# Cluster_176
+# Cluster_248
 
 29 symbols | 1 files | Cohesion: 92%
 
@@ -11,7 +11,7 @@ description: "Skill for the Cluster_176 area of agenc-ircd. 29 symbols across 1 
 
 - Working with code in `crates/`
 - Understanding how apply_inner, create_account, open_session work
-- Modifying cluster_176-related functionality
+- Modifying cluster_248-related functionality
 
 ## Key Files
 
@@ -51,9 +51,6 @@ description: "Skill for the Cluster_176 area of agenc-ircd. 29 symbols across 1 
 | `Reference_guard_matrix_covers_limits_roles_and_reverse_indexes → ReferenceAccount` | cross_community | 5 |
 | `Reference_guard_matrix_covers_limits_roles_and_reverse_indexes → Validate_name` | cross_community | 5 |
 | `Reference_guard_matrix_covers_limits_roles_and_reverse_indexes → Validate_account_fence` | cross_community | 5 |
-| `Reference_rejections_cover_identity_membership_role_and_sequence_edges → ReferenceAccount` | cross_community | 5 |
-| `Reference_rejections_cover_identity_membership_role_and_sequence_edges → Validate_name` | cross_community | 5 |
-| `Reference_rejections_cover_identity_membership_role_and_sequence_edges → Validate_account_fence` | cross_community | 5 |
 | `Execute_command → ReferenceChannel` | cross_community | 4 |
 | `Execute_command → New` | cross_community | 4 |
 
@@ -61,12 +58,12 @@ description: "Skill for the Cluster_176 area of agenc-ircd. 29 symbols across 1 
 
 | Area | Connections |
 |------|-------------|
-| Cluster_173 | 3 calls |
-| Cluster_177 | 1 calls |
+| Cluster_245 | 3 calls |
+| Cluster_249 | 1 calls |
 
 ## How to Explore
 
 1. `context({name: "apply_inner"})` — see callers and callees
-2. `query({search_query: "cluster_176"})` — find related execution flows
+2. `query({search_query: "cluster_248"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

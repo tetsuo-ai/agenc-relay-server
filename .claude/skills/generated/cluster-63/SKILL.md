@@ -1,9 +1,9 @@
 ---
-name: cluster-66
-description: "Skill for the Cluster_66 area of agenc-ircd. 18 symbols across 2 files."
+name: cluster-63
+description: "Skill for the Cluster_63 area of agenc-ircd. 18 symbols across 2 files."
 ---
 
-# Cluster_66
+# Cluster_63
 
 18 symbols | 2 files | Cohesion: 78%
 
@@ -11,7 +11,7 @@ description: "Skill for the Cluster_66 area of agenc-ircd. 18 symbols across 2 f
 
 - Working with code in `crates/`
 - Understanding how numeric_reply, new work
-- Modifying cluster_66-related functionality
+- Modifying cluster_63-related functionality
 
 ## Key Files
 
@@ -60,14 +60,13 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
+| Cluster_57 | 3 calls |
 | Fuzz_targets | 2 calls |
-| Cluster_58 | 2 calls |
 | Tests | 1 calls |
-| Cluster_60 | 1 calls |
 
 ## How to Explore
 
 1. `context({name: "numeric_reply"})` — see callers and callees
-2. `query({search_query: "cluster_66"})` — find related execution flows
+2. `query({search_query: "cluster_63"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

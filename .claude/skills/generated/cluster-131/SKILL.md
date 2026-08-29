@@ -1,9 +1,9 @@
 ---
-name: cluster-112
-description: "Skill for the Cluster_112 area of agenc-ircd. 135 symbols across 6 files."
+name: cluster-131
+description: "Skill for the Cluster_131 area of agenc-ircd. 135 symbols across 6 files."
 ---
 
-# Cluster_112
+# Cluster_131
 
 135 symbols | 6 files | Cohesion: 96%
 
@@ -11,7 +11,7 @@ description: "Skill for the Cluster_112 area of agenc-ircd. 135 symbols across 6
 
 - Working with code in `crates/`
 - Understanding how into_name, into_parts, user_mode_query work
-- Modifying cluster_112-related functionality
+- Modifying cluster_131-related functionality
 
 ## Key Files
 
@@ -79,16 +79,16 @@ Start here when exploring this area:
 | Area | Connections |
 |------|-------------|
 | Tests | 27 calls |
-| Cluster_106 | 3 calls |
-| Cluster_125 | 2 calls |
-| Cluster_126 | 2 calls |
-| Cluster_134 | 1 calls |
-| Cluster_129 | 1 calls |
-| Cluster_127 | 1 calls |
+| Cluster_122 | 3 calls |
+| Cluster_144 | 2 calls |
+| Cluster_145 | 2 calls |
+| Cluster_153 | 1 calls |
+| Cluster_148 | 1 calls |
+| Cluster_146 | 1 calls |
 
 ## How to Explore
 
 1. `context({name: "into_name"})` — see callers and callees
-2. `query({search_query: "cluster_112"})` — find related execution flows
+2. `query({search_query: "cluster_131"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`
