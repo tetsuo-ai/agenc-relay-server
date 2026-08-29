@@ -55,10 +55,38 @@ pub struct RecoveredStorageState {
     manifest_sequence: u64,
     nonce_draw_high_water: u64,
     maximum_record_revision: u64,
+    logical_database_bytes: u64,
+    backup_stream_bytes: u64,
+    database_binding: DatabaseBinding,
+    storage_key_generation: u32,
     capacity: FilesystemCapacity,
 }
 
 impl RecoveredStorageState {
+    /// Returns the exact committed logical database charge.
+    #[must_use]
+    pub const fn logical_database_bytes(&self) -> u64 {
+        self.logical_database_bytes
+    }
+
+    /// Returns the exact committed backup stream length.
+    #[must_use]
+    pub const fn backup_stream_bytes(&self) -> u64 {
+        self.backup_stream_bytes
+    }
+
+    /// Returns the immutable record-encryption binding of the open database.
+    #[must_use]
+    pub const fn database_binding(&self) -> DatabaseBinding {
+        self.database_binding
+    }
+
+    /// Returns the current record-key generation of the open database.
+    #[must_use]
+    pub const fn storage_key_generation(&self) -> u32 {
+        self.storage_key_generation
+    }
+
     /// Returns the exact row count reconstructed for one numbered table.
     #[must_use]
     pub fn table_record_count(&self, table: TableId) -> u64 {
@@ -1865,6 +1893,10 @@ impl StorageEngine {
             manifest_sequence: self.state_meta.tbs().manifest_sequence,
             nonce_draw_high_water: self.state_meta.tbs().nonce_draw_high_water,
             maximum_record_revision,
+            logical_database_bytes: self.state_meta.tbs().logical_database_bytes,
+            backup_stream_bytes: self.state_meta.tbs().backup_stream_bytes,
+            database_binding: self.binding,
+            storage_key_generation: self.header.tbs().storage_key_generation,
             capacity,
         })
     }
@@ -3315,9 +3347,16 @@ pub(crate) mod tests {
         accounting: StorageAccountingLimits,
     ) -> Result<StorageMutationBatch, StorageError> {
         let key = StoredKey::new(AccountRandomId::from_bytes([40; 16]).to_text().into_bytes())?;
-        let plaintext =
-            PersistentRecordValue::new(TableId::Account, 1, 1, 1, None, Vec::new(), vec![1])?
-                .encode()?;
+        let plaintext = PersistentRecordValue::new(
+            TableId::Account,
+            1,
+            1,
+            1,
+            None,
+            Vec::new(),
+            crate::domain_records::fixtures::live_body(TableId::Account, 1)?,
+        )?
+        .encode()?;
         StorageMutationBatch::new(
             head,
             1,
@@ -3384,8 +3423,16 @@ pub(crate) mod tests {
     }
 
     fn account_plaintext(revision: u64) -> Result<Vec<u8>, StorageError> {
-        PersistentRecordValue::new(TableId::Account, 1, revision, 1, None, Vec::new(), vec![1])?
-            .encode()
+        PersistentRecordValue::new(
+            TableId::Account,
+            1,
+            revision,
+            1,
+            None,
+            Vec::new(),
+            crate::domain_records::fixtures::live_body(TableId::Account, 1)?,
+        )?
+        .encode()
     }
 
     fn existing_record(
@@ -3604,8 +3651,15 @@ pub(crate) mod tests {
             StoredKey::new(channel_key.as_bytes().to_vec())?,
         )?;
 
-        let account =
-            PersistentRecordValue::new(TableId::Account, 1, 1, 1, None, Vec::new(), vec![1])?;
+        let account = PersistentRecordValue::new(
+            TableId::Account,
+            1,
+            1,
+            1,
+            None,
+            Vec::new(),
+            crate::domain_records::fixtures::live_body(TableId::Account, 1)?,
+        )?;
         assert_eq!(
             validate_recovered_domain_record(TableId::Channel, &account),
             Err(StorageError::StaleState)
@@ -3618,7 +3672,7 @@ pub(crate) mod tests {
             1,
             None,
             vec![channel_reference],
-            vec![1],
+            crate::domain_records::fixtures::live_body(TableId::Account, 1)?,
         )?;
         assert_eq!(
             validate_recovered_domain_record(TableId::Account, &illegal),
@@ -4203,8 +4257,15 @@ pub(crate) mod tests {
                 Err(StorageError::AuthenticationFailed)
             );
         }
-        let account =
-            PersistentRecordValue::new(TableId::Account, 1, 1, 1, None, Vec::new(), Vec::new())?;
+        let account = PersistentRecordValue::new(
+            TableId::Account,
+            1,
+            1,
+            1,
+            None,
+            Vec::new(),
+            crate::domain_records::fixtures::live_body(TableId::Account, 1)?,
+        )?;
         let account_key =
             StoredKey::new(AccountRandomId::from_bytes([1; 16]).to_text().into_bytes())?;
         engine.validate_recovered_index_binding(TableId::Account, &account_key, &account)?;

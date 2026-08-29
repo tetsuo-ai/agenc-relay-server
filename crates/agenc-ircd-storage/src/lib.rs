@@ -8,6 +8,7 @@ mod construction;
 mod construction_directory;
 mod construction_runtime;
 mod control;
+mod domain_records;
 mod engine;
 mod error;
 mod fault;
@@ -53,6 +54,10 @@ pub use control::{
     NonceReservationState, NonceReservationTbs, ROLLBACK_GUARD_BYTES, RollbackGuard,
     RollbackGuardPhase, RollbackGuardTbs, STATE_META_BYTES, StateMeta, StateMetaTbs,
     verify_guard_pair,
+};
+pub use domain_records::{
+    AccountRecordBody, ChannelRecordBody, LIVE_RECORD_KIND, MAX_ACCOUNT_RECORD_BODY_BYTES,
+    MAX_CHANNEL_RECORD_BODY_BYTES, MAX_SANCTION_RECORD_BODY_BYTES, SanctionRecordBody,
 };
 pub use engine::{RecoveredStorageState, StorageEngineLimits, StorageOpenConfig};
 pub use error::StorageError;

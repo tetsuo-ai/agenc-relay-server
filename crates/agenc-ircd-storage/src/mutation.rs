@@ -697,9 +697,16 @@ mod tests {
             Err(StorageError::LimitExceeded),
         );
 
-        let plaintext =
-            PersistentRecordValue::new(TableId::Sanction, 1, 1, 0, None, Vec::new(), Vec::new())?
-                .encode()?;
+        let plaintext = PersistentRecordValue::new(
+            TableId::Sanction,
+            1,
+            1,
+            0,
+            None,
+            Vec::new(),
+            crate::domain_records::fixtures::live_body(TableId::Sanction, 1)?,
+        )?
+        .encode()?;
         let mut mutations = Vec::new();
         mutations
             .try_reserve_exact(4_100)

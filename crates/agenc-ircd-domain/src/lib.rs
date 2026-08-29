@@ -10,6 +10,7 @@ mod command;
 mod decision;
 mod error;
 mod model;
+mod persist;
 mod projection;
 
 pub use command::{
@@ -35,6 +36,9 @@ pub use model::{
     MAX_ROLE_GRANTS_PER_CHANNEL, MAX_SESSIONS_PER_ACCOUNT, Membership, ModerationAction,
     ModerationReason, ModerationReasonCode, NicknameValue, PersistencePolicy, PlaintextTopic,
     PresencePolicy, Principal, Role, Sanction, SessionSeed, SessionState, TopicText, Visibility,
+};
+pub use persist::{
+    DurableAccount, DurableChannel, DurableListEntry, DurableSanction, DurableTopic, DurableWrite,
 };
 pub use projection::{
     AccountProjection, ChannelListProjection, ChannelProjection, MemberProjection,

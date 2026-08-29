@@ -12,6 +12,9 @@ use crate::model::{
     AccountDeletionChallengeState, Invite, MAX_CHANNELS_PER_SESSION, MAX_CONTACTS_PER_ACCOUNT,
     MAX_INVITES_PER_CHANNEL, MAX_INVITES_PER_PRINCIPAL, MAX_MEMBERS_PER_CHANNEL,
 };
+use crate::persist::{
+    DurableAccount, DurableChannel, DurableSanction, DurableWrite, duplicate_typed_mask,
+};
 use crate::{
     AccountCommand, AccountState, CanonicalCommand, ChannelCommand, ChannelNameValue,
     CommandEnvelope, ContentPolicy, DirectMessagePolicy, DisplayNameValue, DomainCommandKind,
@@ -712,6 +715,227 @@ enum Mutation {
     EventOnly,
 }
 
+/// The persisted entities a mutation list can change.
+struct TouchedEntities {
+    accounts: BTreeSet<AccountId>,
+    channels: BTreeSet<ChannelInstanceId>,
+    role_targets: Vec<NicknameValue>,
+    sanctions: bool,
+}
+
+impl TouchedEntities {
+    fn collect(state: &DomainState, mutations: &[Mutation]) -> Self {
+        let mut touched = Self {
+            accounts: BTreeSet::new(),
+            channels: BTreeSet::new(),
+            role_targets: Vec::new(),
+            sanctions: false,
+        };
+        for mutation in mutations {
+            touched.note(state, mutation);
+        }
+        touched
+    }
+
+    fn note(&mut self, state: &DomainState, mutation: &Mutation) {
+        match mutation {
+            Mutation::InsertAccount(account) => {
+                self.accounts.insert(account.account_id);
+            }
+            Mutation::DeleteAccount { account_id, .. } => {
+                self.accounts.insert(*account_id);
+                self.channels
+                    .extend(state.channels.values().filter_map(|channel| {
+                        channel
+                            .role_grants
+                            .contains_key(account_id)
+                            .then_some(channel.channel_id)
+                    }));
+            }
+            Mutation::ReplaceAccountCredential { account_id, .. }
+            | Mutation::AccountSetting { account_id, .. } => {
+                self.accounts.insert(*account_id);
+            }
+            Mutation::SetTopic { channel_id, .. } | Mutation::BindE2ee { channel_id } => {
+                self.channels.insert(*channel_id);
+            }
+            Mutation::ApplyModes {
+                channel_id,
+                changes,
+                ..
+            } => self.note_mode_changes(*channel_id, changes),
+            Mutation::ChannelSetting(command) => {
+                self.channels.insert(channel_command_id(*command));
+            }
+            Mutation::AddSanction(_) => self.sanctions = true,
+            _ => {}
+        }
+    }
+
+    fn note_mode_changes(&mut self, channel_id: ChannelInstanceId, changes: &[ModeChange]) {
+        self.channels.insert(channel_id);
+        for change in changes {
+            if let ModeChange::Role { target, .. } = change {
+                self.role_targets.push(target.clone());
+            }
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.accounts.is_empty() && self.channels.is_empty() && !self.sanctions
+    }
+
+    /// Builds a state holding only duplicates of the touched entities and the
+    /// nickname index entries the mode arms resolve.
+    fn scratch(&self, state: &DomainState) -> Result<DomainState, DomainError> {
+        let mut scratch = DomainState::at_revision(state.revision);
+        for account_id in &self.accounts {
+            if let Some(account) = state.accounts.get(account_id) {
+                scratch.accounts.insert(*account_id, account.clone());
+            }
+        }
+        for channel_id in &self.channels {
+            if let Some(channel) = state.channels.get(channel_id) {
+                scratch.channels.insert(*channel_id, channel.duplicate()?);
+            }
+        }
+        for target in &self.role_targets {
+            if let Some(user_id) = state.nicknames.get(target) {
+                scratch.nicknames.insert(target.clone(), *user_id);
+            }
+        }
+        Ok(scratch)
+    }
+
+    fn writes(&self, before: &DomainState, after: &DomainState) -> Vec<DurableWrite> {
+        let mut writes = Vec::new();
+        for account_id in &self.accounts {
+            let previous = before.durable_account(*account_id);
+            let next = after.durable_account(*account_id);
+            match (previous, next) {
+                (previous, Some(next)) if account_differs(previous.as_ref(), &next) => {
+                    writes.push(DurableWrite::PutAccount(next));
+                }
+                (Some(_), None) => writes.push(DurableWrite::TombstoneAccount(*account_id)),
+                _ => {}
+            }
+        }
+        for channel_id in &self.channels {
+            let previous = before.durable_channel(*channel_id);
+            let next = after.durable_channel(*channel_id);
+            match (previous, next) {
+                (previous, Some(next)) if channel_differs(previous.as_ref(), &next) => {
+                    writes.push(DurableWrite::PutChannel(next));
+                }
+                (Some(previous), None) => writes.push(DurableWrite::TombstoneChannel {
+                    channel_id: *channel_id,
+                    name: previous.name,
+                }),
+                _ => {}
+            }
+        }
+        writes.extend(
+            after.sanctions.iter().map(|sanction| {
+                DurableWrite::AppendSanction(DurableSanction::from_state(sanction))
+            }),
+        );
+        writes
+    }
+}
+
+fn account_differs(previous: Option<&DurableAccount>, next: &DurableAccount) -> bool {
+    previous.is_none_or(|previous| !previous.same_content(next))
+}
+
+fn channel_differs(previous: Option<&DurableChannel>, next: &DurableChannel) -> bool {
+    previous.is_none_or(|previous| !previous.same_content(next))
+}
+
+impl Mutation {
+    /// Copies the arms that can change persisted state; every other arm becomes a
+    /// no-op because sessions, memberships, and invites are never persisted.
+    fn duplicate_for_projection(&self) -> Result<Self, DomainError> {
+        Ok(match self {
+            Self::InsertAccount(account) => Self::InsertAccount(account.clone()),
+            Self::DeleteAccount { account_id, .. } => Self::DeleteAccount {
+                account_id: *account_id,
+                user_ids: Vec::new(),
+            },
+            Self::ReplaceAccountCredential {
+                account_id,
+                account_session_generation,
+                ..
+            } => Self::ReplaceAccountCredential {
+                account_id: *account_id,
+                account_session_generation: *account_session_generation,
+                user_ids: Vec::new(),
+            },
+            Self::AccountSetting {
+                account_id,
+                setting,
+            } => Self::AccountSetting {
+                account_id: *account_id,
+                setting: setting.clone(),
+            },
+            Self::SetTopic { channel_id, topic } => Self::SetTopic {
+                channel_id: *channel_id,
+                topic: topic.duplicate()?,
+            },
+            Self::ApplyModes {
+                channel_id,
+                changes,
+                entry_ids,
+                created_at,
+            } => Self::ApplyModes {
+                channel_id: *channel_id,
+                changes: changes
+                    .iter()
+                    .map(duplicate_mode_change)
+                    .collect::<Result<Vec<_>, _>>()?,
+                entry_ids: entry_ids.clone(),
+                created_at: *created_at,
+            },
+            Self::ChannelSetting(command) => Self::ChannelSetting(*command),
+            Self::BindE2ee { channel_id } => Self::BindE2ee {
+                channel_id: *channel_id,
+            },
+            Self::AddSanction(sanction) => Self::AddSanction(sanction.duplicate()?),
+            _ => Self::EventOnly,
+        })
+    }
+}
+
+fn duplicate_mode_change(change: &ModeChange) -> Result<ModeChange, DomainError> {
+    Ok(match change {
+        ModeChange::Visibility { operation, mode } => ModeChange::Visibility {
+            operation: *operation,
+            mode: *mode,
+        },
+        ModeChange::InviteOnly(value) => ModeChange::InviteOnly(*value),
+        ModeChange::Moderated(value) => ModeChange::Moderated(*value),
+        ModeChange::TopicProtected(value) => ModeChange::TopicProtected(*value),
+        ModeChange::JoinKey(value) => ModeChange::JoinKey(*value),
+        ModeChange::MemberLimit(value) => ModeChange::MemberLimit(*value),
+        ModeChange::Role {
+            operation,
+            target,
+            role,
+        } => ModeChange::Role {
+            operation: *operation,
+            target: target.clone(),
+            role: *role,
+        },
+        ModeChange::AddMask { list, mask } => ModeChange::AddMask {
+            list: *list,
+            mask: duplicate_typed_mask(mask)?,
+        },
+        ModeChange::RemoveMask { list, entry_id } => ModeChange::RemoveMask {
+            list: *list,
+            entry_id: *entry_id,
+        },
+    })
+}
+
 struct JoinPlanAccumulator {
     user_id: UserId,
     principal: Principal,
@@ -731,6 +955,7 @@ struct ExpiredInviteSweep {
     recipients: RecipientSet,
 }
 
+#[derive(Clone)]
 enum AccountSetting {
     Label(Option<crate::AccountLabelValue>),
     Presence(PresencePolicy),
@@ -759,9 +984,30 @@ pub struct MutationPlan {
     message_batch: Option<MessageBatch>,
     charges: Vec<RateCharge>,
     storage: StorageClass,
+    durable_writes: Vec<DurableWrite>,
+}
+
+/// Every field of a plan except the revisions and the derived durable writes.
+struct PlanParts {
+    mutations: Vec<Mutation>,
+    events: Vec<DomainEvent>,
+    recipients: RecipientSet,
+    failures: Vec<TargetFailure>,
+    message_batch: Option<MessageBatch>,
+    charges: Vec<RateCharge>,
+    storage: StorageClass,
 }
 
 impl MutationPlan {
+    /// Borrows the logical persisted writes this plan produces, in canonical order.
+    ///
+    /// The set is derived from the same apply logic that later executes the plan,
+    /// so a durable plan whose entities keep their persisted content yields nothing.
+    #[must_use]
+    pub fn durable_writes(&self) -> &[DurableWrite] {
+        &self.durable_writes
+    }
+
     /// Returns the state revision this plan was validated against.
     #[must_use]
     pub const fn expected_revision(&self) -> Revision {
@@ -1188,9 +1434,7 @@ impl DomainState {
         let deadline = authenticated_at.checked_add(300_000)?;
         let mut recipients = RecipientSet::new();
         recipients.insert(user_id);
-        Ok(MutationPlan {
-            expected_revision: self.revision,
-            resulting_revision: crate::model::next_revision(self.revision)?,
+        self.assemble_plan(PlanParts {
             mutations: vec![Mutation::SetFreshAuthDeadline { user_id, deadline }],
             events: Vec::new(),
             recipients,
@@ -1238,9 +1482,7 @@ impl DomainState {
             recipients.insert(*user_id);
             events.push(DomainEvent::SessionHidden(*user_id));
         }
-        let plan = MutationPlan {
-            expected_revision: self.revision,
-            resulting_revision: crate::model::next_revision(self.revision)?,
+        let plan = self.assemble_plan(PlanParts {
             mutations: vec![Mutation::ReplaceAccountCredential {
                 account_id,
                 account_session_generation,
@@ -1252,7 +1494,7 @@ impl DomainState {
             message_batch: None,
             charges: Vec::new(),
             storage: StorageClass::Durable,
-        };
+        })?;
         Ok((plan, account_session_generation))
     }
 
@@ -1276,9 +1518,7 @@ impl DomainState {
         if canonical_account_roster(channel)? != proof.approved_roster {
             return Err(DomainError::StaleRevision);
         }
-        Ok(MutationPlan {
-            expected_revision: self.revision,
-            resulting_revision: crate::model::next_revision(self.revision)?,
+        self.assemble_plan(PlanParts {
             mutations: vec![Mutation::BindE2ee {
                 channel_id: proof.channel_id,
             }],
@@ -1324,9 +1564,7 @@ impl DomainState {
         {
             return Err(DomainError::BadState);
         }
-        Ok(MutationPlan {
-            expected_revision: self.revision,
-            resulting_revision: crate::model::next_revision(self.revision)?,
+        self.assemble_plan(PlanParts {
             mutations: vec![Mutation::FinalizeE2eeRemoval {
                 channel_id: finality.channel_id,
                 user_id: finality.user_id,
@@ -1349,9 +1587,7 @@ impl DomainState {
         if sweep.expired.is_empty() {
             return Ok(None);
         }
-        Ok(Some(MutationPlan {
-            expected_revision: self.revision,
-            resulting_revision: crate::model::next_revision(self.revision)?,
+        self.assemble_plan(PlanParts {
             mutations: vec![Mutation::ExpireInvites(sweep.expired)],
             events: sweep.events,
             recipients: sweep.recipients,
@@ -1359,7 +1595,8 @@ impl DomainState {
             message_batch: None,
             charges: Vec::new(),
             storage: StorageClass::Durable,
-        }))
+        })
+        .map(Some)
     }
 
     fn collect_expired_invites(
@@ -1524,9 +1761,7 @@ impl DomainState {
         };
         let mut recipients = RecipientSet::new();
         recipients.insert(request.actor_user_id);
-        Ok(MutationPlan {
-            expected_revision: self.revision,
-            resulting_revision: next,
+        self.assemble_plan(PlanParts {
             mutations: vec![Mutation::AddSanction(sanction)],
             events: vec![DomainEvent::SanctionRecorded(request.target)],
             recipients,
@@ -2981,9 +3216,7 @@ impl DomainState {
         charges: Vec<RateCharge>,
         storage: StorageClass,
     ) -> Result<MutationPlan, DomainError> {
-        Ok(MutationPlan {
-            expected_revision: self.revision,
-            resulting_revision: crate::model::next_revision(self.revision)?,
+        self.assemble_plan(PlanParts {
             mutations: vec![mutation],
             events: vec![event],
             recipients,
@@ -2992,6 +3225,48 @@ impl DomainState {
             charges,
             storage,
         })
+    }
+
+    /// Fixes the revisions of one plan and derives its persisted write set.
+    fn assemble_plan(&self, parts: PlanParts) -> Result<MutationPlan, DomainError> {
+        let resulting_revision = crate::model::next_revision(self.revision)?;
+        let durable_writes =
+            self.durable_writes_for(&parts.mutations, resulting_revision, parts.storage)?;
+        Ok(MutationPlan {
+            expected_revision: self.revision,
+            resulting_revision,
+            mutations: parts.mutations,
+            events: parts.events,
+            recipients: parts.recipients,
+            failures: parts.failures,
+            message_batch: parts.message_batch,
+            charges: parts.charges,
+            storage: parts.storage,
+            durable_writes,
+        })
+    }
+
+    /// Runs the persisted-entity arms of a plan against duplicated entities and
+    /// reports every projection that changed.
+    fn durable_writes_for(
+        &self,
+        mutations: &[Mutation],
+        revision: Revision,
+        storage: StorageClass,
+    ) -> Result<Vec<DurableWrite>, DomainError> {
+        let touched = TouchedEntities::collect(self, mutations);
+        if touched.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut scratch = touched.scratch(self)?;
+        for mutation in mutations {
+            scratch.apply_mutation(mutation.duplicate_for_projection()?, revision);
+        }
+        let writes = touched.writes(self, &scratch);
+        if storage == StorageClass::Ephemeral && !writes.is_empty() {
+            return Err(DomainError::InvariantViolation);
+        }
+        Ok(writes)
     }
 
     fn command_plan(
@@ -3014,9 +3289,7 @@ impl DomainState {
         charges: Vec<RateCharge>,
         storage: StorageClass,
     ) -> Result<PlanDecision, DomainError> {
-        Ok(PlanDecision::Mutation(MutationPlan {
-            expected_revision: self.revision,
-            resulting_revision: crate::model::next_revision(self.revision)?,
+        Ok(PlanDecision::Mutation(self.assemble_plan(PlanParts {
             mutations,
             events,
             recipients,
@@ -3024,7 +3297,7 @@ impl DomainState {
             message_batch: None,
             charges,
             storage,
-        }))
+        })?))
     }
 
     fn rejected_plan(
@@ -3054,9 +3327,7 @@ impl DomainState {
         message_batch: MessageBatch,
         charges: Vec<RateCharge>,
     ) -> Result<PlanDecision, DomainError> {
-        Ok(PlanDecision::Mutation(MutationPlan {
-            expected_revision: self.revision,
-            resulting_revision: crate::model::next_revision(self.revision)?,
+        Ok(PlanDecision::Mutation(self.assemble_plan(PlanParts {
             mutations: vec![Mutation::EventOnly],
             events,
             recipients,
@@ -3064,7 +3335,7 @@ impl DomainState {
             message_batch: Some(message_batch),
             charges,
             storage: StorageClass::Durable,
-        }))
+        })?))
     }
 
     fn channel_recipients(
@@ -3646,6 +3917,9 @@ fn unregister_channel_roles(channel: &mut crate::ChannelState) {
     }
     channel.role_grants.clear();
     channel.persistence = PersistencePolicy::Ephemeral;
+    // Plaintext history is retained only for registered channels, so an ephemeral
+    // channel must not keep a retention policy the invariants forbid.
+    channel.history = HistoryPolicy::Off;
 }
 
 fn require_account(session: &SessionState) -> Result<AccountId, DomainError> {
@@ -4830,6 +5104,82 @@ fn authorize_sanction(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use agenc_ircd_types::{MonotonicTick, Revision, UserId};
+
+    use super::{Mutation, StorageClass};
+    use crate::{AccountState, DomainError, DomainState, NicknameValue};
+
+    fn revision(value: u64) -> Result<Revision, DomainError> {
+        Ok(Revision::new(value)?)
+    }
+
+    #[test]
+    fn session_only_arms_project_to_no_write() -> Result<(), DomainError> {
+        let state = DomainState::new()?;
+        let user_id = UserId::from_bytes([1; 16]);
+        let mutations = [
+            Mutation::Rename {
+                user_id,
+                nickname: NicknameValue::parse("Nick")?,
+            },
+            Mutation::SetAway {
+                user_id,
+                away: None,
+            },
+            Mutation::SetOperatorNotices {
+                user_id,
+                enabled: true,
+            },
+            Mutation::SetFreshAuthDeadline {
+                user_id,
+                deadline: MonotonicTick::from_ticks(1),
+            },
+            Mutation::CloseSession(user_id),
+            Mutation::ConsumeAccountDeletionChallenge(agenc_ircd_types::SessionId::from_bytes(
+                [2; 16],
+            )),
+            Mutation::EventOnly,
+        ];
+        for mutation in &mutations {
+            assert!(matches!(
+                mutation.duplicate_for_projection()?,
+                Mutation::EventOnly
+            ));
+        }
+        assert!(
+            state
+                .durable_writes_for(&mutations, revision(1)?, StorageClass::Ephemeral)?
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_persisted_change_under_an_ephemeral_label_is_an_invariant_violation()
+    -> Result<(), DomainError> {
+        let state = DomainState::new()?;
+        let account = AccountState::new(
+            crate::model::tests_support_account_id(3),
+            agenc_ircd_types::Generation::new(1)?,
+            revision(0)?,
+        );
+        let mutations = [Mutation::InsertAccount(account)];
+        assert_eq!(
+            state.durable_writes_for(&mutations, revision(1)?, StorageClass::Ephemeral),
+            Err(DomainError::InvariantViolation)
+        );
+        assert_eq!(
+            state
+                .durable_writes_for(&mutations, revision(1)?, StorageClass::Durable)?
+                .len(),
+            1
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]

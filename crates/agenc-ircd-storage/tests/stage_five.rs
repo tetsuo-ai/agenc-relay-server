@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+mod domain_records;
 mod recovery_matrix;
 
 use std::error::Error;
@@ -432,7 +433,7 @@ fn initialized_owner_commits_and_reads_one_manifested_mutation() -> Result<(), B
         1,
         None,
         Vec::new(),
-        b"account-v1".to_vec(),
+        crate::domain_records::live_body(TableId::Account, 1)?,
     )?
     .encode()?;
     let mutation = RecordMutation::put(
@@ -518,7 +519,7 @@ fn initialized_owner_commits_and_reads_one_manifested_mutation() -> Result<(), B
                 1,
                 None,
                 Vec::new(),
-                b"stale".to_vec(),
+                crate::domain_records::live_body(TableId::Account, 3)?,
             )?
             .encode()?,
         )?],
@@ -557,7 +558,7 @@ fn initialized_owner_commits_and_reads_one_manifested_mutation() -> Result<(), B
                 1,
                 None,
                 Vec::new(),
-                b"account-v2".to_vec(),
+                crate::domain_records::live_body(TableId::Account, 2)?,
             )?
             .encode()?,
         )?],

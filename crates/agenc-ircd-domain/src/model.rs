@@ -6,11 +6,12 @@ use std::hash::{Hash, Hasher};
 
 use agenc_ircd_types::{
     AccountDeletionToken, AccountId, AccountLabel, BoundedUtf8, ChannelInstanceId, ChannelName,
-    DisplayName, EntryId, Generation, InviteId, MessageId, MonotonicTick, Nickname, PublicCloak,
-    Revision, ServerId, SessionId, TypedMask, UserId, UtcSecond,
+    ControlPolicy, DisplayName, EntryId, Generation, InviteId, MessageId, MonotonicTick, Nickname,
+    PublicCloak, Revision, ServerId, SessionId, TypedMask, UserId, UtcSecond,
 };
 
 use crate::DomainError;
+use crate::persist::{DurableAccount, DurableChannel, DurableSanction};
 
 /// Maximum live sessions belonging to one account.
 pub const MAX_SESSIONS_PER_ACCOUNT: usize = 32;
@@ -339,6 +340,7 @@ pub enum DirectMessagePolicy {
 }
 
 /// One account's public and authorization-relevant domain state.
+#[derive(Clone)]
 pub struct AccountState {
     pub(crate) account_id: AccountId,
     pub(crate) label: Option<AccountLabelValue>,
@@ -414,6 +416,18 @@ impl AccountState {
     #[must_use]
     pub fn contains_contact(&self, account_id: AccountId) -> bool {
         self.contacts.contains(&account_id)
+    }
+}
+
+impl AccountState {
+    /// Iterates reserved nicknames in canonical order.
+    pub fn reserved_nicknames(&self) -> impl Iterator<Item = &NicknameValue> {
+        self.reserved_nicknames.iter()
+    }
+
+    /// Iterates unilateral contacts in ascending Account ID order.
+    pub fn contacts(&self) -> impl Iterator<Item = AccountId> + '_ {
+        self.contacts.iter().copied()
     }
 }
 
@@ -740,6 +754,18 @@ impl PlaintextTopic {
     }
 }
 
+impl PlaintextTopic {
+    /// Copies the topic by re-validating its text under the most permissive policy.
+    pub(crate) fn duplicate(&self) -> Result<Self, DomainError> {
+        Ok(Self {
+            text: TopicText::try_from_str(self.text.as_str(), ControlPolicy::PermitHorizontalTab)?,
+            message_id: self.message_id,
+            setter: self.setter,
+            set_at: self.set_at,
+        })
+    }
+}
+
 /// One typed channel list entry.
 pub struct ListEntry {
     pub(crate) entry_id: EntryId,
@@ -784,6 +810,19 @@ impl ListEntry {
     }
 }
 
+impl ListEntry {
+    /// Copies the entry by rebuilding its mask from the canonical text.
+    pub(crate) fn duplicate(&self) -> Result<Self, DomainError> {
+        Ok(Self {
+            entry_id: self.entry_id,
+            mask: crate::persist::duplicate_typed_mask(&self.mask)?,
+            setter: self.setter,
+            created_at: self.created_at,
+        })
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct Invite {
     pub(crate) invite_id: InviteId,
     pub(crate) target: Principal,
@@ -1045,6 +1084,42 @@ impl ChannelState {
     }
 }
 
+impl ChannelState {
+    /// Copies the complete live channel for plan projection.
+    pub(crate) fn duplicate(&self) -> Result<Self, DomainError> {
+        Ok(Self {
+            channel_id: self.channel_id,
+            name: self.name.clone(),
+            scope: self.scope,
+            visibility: self.visibility,
+            content_policy: self.content_policy,
+            persistence: self.persistence,
+            creator: self.creator,
+            created_at: self.created_at,
+            revision: self.revision,
+            modes: self.modes,
+            member_limit: self.member_limit,
+            topic: self
+                .topic
+                .as_ref()
+                .map(PlaintextTopic::duplicate)
+                .transpose()?,
+            memberships: self.memberships.clone(),
+            role_grants: self.role_grants.clone(),
+            bans: duplicate_entries(&self.bans)?,
+            exceptions: duplicate_entries(&self.exceptions)?,
+            invite_exceptions: duplicate_entries(&self.invite_exceptions)?,
+            invites: self.invites.clone(),
+            history: self.history,
+            e2ee_removal_pending: self.e2ee_removal_pending.clone(),
+        })
+    }
+}
+
+fn duplicate_entries(entries: &[ListEntry]) -> Result<Vec<ListEntry>, DomainError> {
+    entries.iter().map(ListEntry::duplicate).collect()
+}
+
 /// Closed reason code for an auditable moderation decision.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ModerationReasonCode {
@@ -1137,6 +1212,30 @@ impl Sanction {
     #[must_use]
     pub const fn revision(&self) -> Revision {
         self.revision
+    }
+}
+
+impl Sanction {
+    /// Copies the sanction by re-validating its reason under the most permissive policy.
+    pub(crate) fn duplicate(&self) -> Result<Self, DomainError> {
+        let reason = match &self.reason {
+            Some(reason) => Some(ModerationReason::try_from_str(
+                reason.as_str(),
+                ControlPolicy::PermitHorizontalTab,
+            )?),
+            None => None,
+        };
+        Ok(Self {
+            actor: self.actor,
+            target: self.target,
+            channel_id: self.channel_id,
+            action: self.action,
+            reason_code: self.reason_code,
+            reason,
+            created_at: self.created_at,
+            expires_at: self.expires_at,
+            revision: self.revision,
+        })
     }
 }
 
@@ -1430,6 +1529,91 @@ fn validate_network_invite_count(
 
 pub(crate) fn next_revision(revision: Revision) -> Result<Revision, DomainError> {
     revision.checked_add(1).map_err(Into::into)
+}
+
+impl DomainState {
+    /// Rebuilds authoritative state from persisted projections and validates it.
+    ///
+    /// Sessions, memberships, invites, and pending removals start empty because they
+    /// are never persisted. Duplicate identities and any invariant failure reject the
+    /// whole input.
+    pub fn restore(
+        revision: Revision,
+        accounts: Vec<DurableAccount>,
+        channels: Vec<DurableChannel>,
+        sanctions: Vec<DurableSanction>,
+    ) -> Result<Self, DomainError> {
+        let mut state = Self::at_revision(revision);
+        for account in accounts {
+            let account = account.into_state()?;
+            if state.accounts.insert(account.account_id, account).is_some() {
+                return Err(DomainError::InvariantViolation);
+            }
+        }
+        for channel in channels {
+            let channel = channel.into_state()?;
+            let replaced_name = state
+                .channel_names
+                .insert(channel.name.clone(), channel.channel_id)
+                .is_some();
+            let replaced_id = state.channels.insert(channel.channel_id, channel).is_some();
+            if replaced_name || replaced_id {
+                return Err(DomainError::InvariantViolation);
+            }
+        }
+        for sanction in sanctions {
+            state.sanctions.push(sanction.into_state()?);
+        }
+        state.validate()?;
+        Ok(state)
+    }
+
+    /// Projects one account into its persisted value.
+    #[must_use]
+    pub fn durable_account(&self, account_id: AccountId) -> Option<DurableAccount> {
+        self.accounts
+            .get(&account_id)
+            .map(DurableAccount::from_state)
+    }
+
+    /// Projects one registered channel into its persisted value.
+    #[must_use]
+    pub fn durable_channel(&self, channel_id: ChannelInstanceId) -> Option<DurableChannel> {
+        self.channels
+            .get(&channel_id)
+            .and_then(DurableChannel::from_state)
+    }
+
+    /// Iterates every account projection in ascending Account ID order.
+    pub fn durable_accounts(&self) -> impl Iterator<Item = DurableAccount> + '_ {
+        self.accounts.values().map(DurableAccount::from_state)
+    }
+
+    /// Iterates every registered channel projection in ascending instance order.
+    pub fn durable_channels(&self) -> impl Iterator<Item = DurableChannel> + '_ {
+        self.channels
+            .values()
+            .filter_map(DurableChannel::from_state)
+    }
+
+    /// Iterates every sanction projection in application order.
+    pub fn durable_sanctions(&self) -> impl Iterator<Item = DurableSanction> + '_ {
+        self.sanctions.iter().map(DurableSanction::from_state)
+    }
+
+    /// Finds the account holding a durable reservation for one canonical nickname.
+    #[must_use]
+    pub fn nickname_reserved_by(&self, nickname: &NicknameValue) -> Option<AccountId> {
+        self.accounts
+            .values()
+            .find(|account| account.reserved_nicknames.contains(nickname))
+            .map(|account| account.account_id)
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn tests_support_account_id(seed: u8) -> AccountId {
+    AccountId::from_random(agenc_ircd_types::AccountRandomId::from_bytes([seed; 16]))
 }
 
 #[cfg(test)]

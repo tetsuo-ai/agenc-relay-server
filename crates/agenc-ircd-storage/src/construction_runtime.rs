@@ -3510,6 +3510,8 @@ mod tests {
         ) || (table == TableId::E2eeState && kind != 1)
         {
             crate::ProtocolRecordBody::new(table, kind, 1, vec![1])?.encode()?
+        } else if kind == 1 {
+            crate::domain_records::fixtures::live_body(table, 1)?
         } else {
             Vec::new()
         };
@@ -4042,9 +4044,16 @@ mod tests {
     fn exact_copy_and_recovery_prefix_enforce_table_schema_and_counter_rules()
     -> Result<(), StorageError> {
         let stored_account_key = account_key(1)?;
-        let account_plaintext =
-            PersistentRecordValue::new(TableId::Account, 1, 1, 1, None, Vec::new(), vec![1])?
-                .encode()?;
+        let account_plaintext = PersistentRecordValue::new(
+            TableId::Account,
+            1,
+            1,
+            1,
+            None,
+            Vec::new(),
+            crate::domain_records::fixtures::live_body(TableId::Account, 1)?,
+        )?
+        .encode()?;
         let entry = rekey_entry(
             TableId::Account,
             StoredKey::new(stored_account_key.as_bytes().to_vec())?,
@@ -4085,9 +4094,16 @@ mod tests {
         let unchanged = PersistentRecordValue::decode(TableId::Account, &unchanged)?;
         assert_eq!((unchanged.revision(), unchanged.generation()), (0, 0));
 
-        let channel =
-            PersistentRecordValue::new(TableId::Channel, 1, 1, 0, None, Vec::new(), vec![2])?
-                .encode()?;
+        let channel = PersistentRecordValue::new(
+            TableId::Channel,
+            1,
+            1,
+            0,
+            None,
+            Vec::new(),
+            crate::domain_records::fixtures::live_body(TableId::Channel, 2)?,
+        )?
+        .encode()?;
         let channel = recovery_transform_prefix(TableId::Channel, &channel)?;
         assert_eq!(
             PersistentRecordValue::decode(TableId::Channel, &channel)?.revision(),
@@ -4101,7 +4117,7 @@ mod tests {
             1,
             None,
             Vec::new(),
-            Vec::new(),
+            crate::domain_records::fixtures::live_body(TableId::Account, 1)?,
         )?
         .encode()?;
         assert_eq!(
@@ -4115,7 +4131,7 @@ mod tests {
             u64::MAX,
             None,
             Vec::new(),
-            Vec::new(),
+            crate::domain_records::fixtures::live_body(TableId::Account, 1)?,
         )?
         .encode()?;
         assert_eq!(
@@ -4296,7 +4312,7 @@ mod tests {
             1,
             None,
             vec![account_reference],
-            Vec::new(),
+            crate::domain_records::fixtures::live_body(TableId::Account, 1)?,
         )?
         .encode()?;
         let account_source = StorageConstructionSource::new(
@@ -4774,9 +4790,16 @@ mod tests {
             StorageConstructionAction::RestoreChannelName,
             0,
         )?;
-        let channel_plaintext =
-            PersistentRecordValue::new(TableId::Channel, 1, 7, 0, None, Vec::new(), Vec::new())?
-                .encode()?;
+        let channel_plaintext = PersistentRecordValue::new(
+            TableId::Channel,
+            1,
+            7,
+            0,
+            None,
+            Vec::new(),
+            crate::domain_records::fixtures::live_body(TableId::Channel, 1)?,
+        )?
+        .encode()?;
         let reference = RecordReference::new(
             TableId::Channel,
             StoredKey::new(channel_key.as_bytes().to_vec())?,
@@ -5457,9 +5480,16 @@ mod tests {
             TableId::Channel,
             StoredKey::new(channel_key.as_bytes().to_vec())?,
         )?;
-        let valid_channel =
-            PersistentRecordValue::new(TableId::Channel, 1, 1, 0, None, Vec::new(), Vec::new())?
-                .encode()?;
+        let valid_channel = PersistentRecordValue::new(
+            TableId::Channel,
+            1,
+            1,
+            0,
+            None,
+            Vec::new(),
+            crate::domain_records::fixtures::live_body(TableId::Channel, 1)?,
+        )?
+        .encode()?;
         let valid_name = PersistentRecordValue::new(
             TableId::ChannelName,
             1,

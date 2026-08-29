@@ -78,6 +78,14 @@ const DOMAIN_TABLES: [TableId; 19] = [
 ];
 
 fn domain_body(table: TableId, kind: u16, bytes: Vec<u8>) -> Result<Vec<u8>, StorageError> {
+    if kind == 1
+        && matches!(
+            table,
+            TableId::Account | TableId::Channel | TableId::Sanction
+        )
+    {
+        return crate::domain_records::live_body(table, bytes.first().copied().unwrap_or(1));
+    }
     if table == TableId::NicknameReservation && kind == 1 {
         return Ok(b"nickname".to_vec());
     }
@@ -424,7 +432,7 @@ fn persistent_record_schema_rejects_every_key_kind_and_counter_mismatch()
             1,
             None,
             vec![account_reference.clone(), account_reference],
-            vec![1],
+            crate::domain_records::live_body(TableId::Account, 1)?
         )
         .is_err()
     );
@@ -1637,10 +1645,15 @@ fn first_account_batch(
     fixture: &InitializedLiveFixture,
     force_allocation: bool,
 ) -> Result<agenc_ircd_storage::StorageMutationBatch, StorageError> {
-    let body = if force_allocation {
-        vec![0; 8 * 1_024 * 1_024]
+    // A live account body is bounded, so the allocation probe uses the opaque history
+    // table, whose stored key has the same 24-byte shape as an account key.
+    let (table, body) = if force_allocation {
+        (TableId::History, vec![0; 8 * 1_024 * 1_024])
     } else {
-        b"fault-recovery".to_vec()
+        (
+            TableId::Account,
+            crate::domain_records::live_body(TableId::Account, 1)?,
+        )
     };
     StorageMutationBatch::new(
         StorageMutationHead {
@@ -1655,12 +1668,11 @@ fn first_account_batch(
         1,
         fixture.accounting(),
         vec![RecordMutation::put(
-            TableId::Account,
+            table,
             StoredKey::new(account_key_bytes(2))?,
             1,
             None,
-            PersistentRecordValue::new(TableId::Account, 1, 1, 1, None, Vec::new(), body)?
-                .encode()?,
+            PersistentRecordValue::new(table, 1, 1, 1, None, Vec::new(), body)?.encode()?,
         )?],
     )
 }
@@ -2247,7 +2259,7 @@ fn restore_transform_preserves_deleted_accounts_and_rejects_creation_reservation
             RecordReference::new(TableId::Session, StoredKey::new(vec![b's'; 16])?)?,
             RecordReference::new(TableId::RegistrationInvite, StoredKey::new(vec![b'i'; 16])?)?,
         ],
-        vec![4, 5, 6],
+        crate::domain_records::live_body(TableId::Channel, 4)?,
     )?;
     let transformed_channel = PersistentRecordValue::decode(
         TableId::Channel,
@@ -2318,8 +2330,15 @@ fn restore_transform_preserves_deleted_accounts_and_rejects_creation_reservation
         Err(StorageError::StaleState)
     );
 
-    let live_account =
-        PersistentRecordValue::new(TableId::Account, 1, 9, 4, None, Vec::new(), vec![4])?;
+    let live_account = PersistentRecordValue::new(
+        TableId::Account,
+        1,
+        9,
+        4,
+        None,
+        Vec::new(),
+        crate::domain_records::live_body(TableId::Account, 4)?,
+    )?;
     let transformed_account = PersistentRecordValue::decode(
         TableId::Account,
         &recovery_transform_prefix(TableId::Account, &live_account.encode()?)?,
@@ -2388,9 +2407,16 @@ fn restore_transform_preserves_deleted_accounts_and_rejects_creation_reservation
 fn restore_transform_covers_every_closed_action_and_source_mismatch() -> Result<(), Box<dyn Error>>
 {
     let account_key = StoredKey::new(account_key_bytes(1))?;
-    let live_account =
-        PersistentRecordValue::new(TableId::Account, 1, 7, 9, None, Vec::new(), vec![1])?
-            .encode()?;
+    let live_account = PersistentRecordValue::new(
+        TableId::Account,
+        1,
+        7,
+        9,
+        None,
+        Vec::new(),
+        crate::domain_records::live_body(TableId::Account, 1)?,
+    )?
+    .encode()?;
     let (account_reference, account_source) =
         opened_domain_source(TableId::Account, account_key, live_account, 230)?;
     let account_entry = StorageConstructionPlanEntry::new(
@@ -2487,9 +2513,16 @@ fn restore_transform_covers_every_closed_action_and_source_mismatch() -> Result<
     );
 
     let channel_key = StoredKey::new(vec![4; 16])?;
-    let channel_plaintext =
-        PersistentRecordValue::new(TableId::Channel, 1, 10, 0, None, Vec::new(), vec![4])?
-            .encode()?;
+    let channel_plaintext = PersistentRecordValue::new(
+        TableId::Channel,
+        1,
+        10,
+        0,
+        None,
+        Vec::new(),
+        crate::domain_records::live_body(TableId::Channel, 4)?,
+    )?
+    .encode()?;
     let (channel_reference, channel_source) =
         opened_domain_source(TableId::Channel, channel_key, channel_plaintext, 235)?;
     let name_plaintext = PersistentRecordValue::new(
@@ -2604,13 +2637,27 @@ fn restore_transform_covers_every_closed_action_and_source_mismatch() -> Result<
             .is_ok()
     );
 
-    let maximum_account_revision =
-        PersistentRecordValue::new(TableId::Account, 1, u64::MAX, 1, None, Vec::new(), vec![8])?
-            .encode()?;
+    let maximum_account_revision = PersistentRecordValue::new(
+        TableId::Account,
+        1,
+        u64::MAX,
+        1,
+        None,
+        Vec::new(),
+        crate::domain_records::live_body(TableId::Account, 8)?,
+    )?
+    .encode()?;
     assert!(recovery_transform_prefix(TableId::Account, &maximum_account_revision).is_err());
-    let maximum_account_generation =
-        PersistentRecordValue::new(TableId::Account, 1, 1, u64::MAX, None, Vec::new(), vec![9])?
-            .encode()?;
+    let maximum_account_generation = PersistentRecordValue::new(
+        TableId::Account,
+        1,
+        1,
+        u64::MAX,
+        None,
+        Vec::new(),
+        crate::domain_records::live_body(TableId::Account, 9)?,
+    )?
+    .encode()?;
     assert!(recovery_transform_prefix(TableId::Account, &maximum_account_generation).is_err());
     let audit = PersistentRecordValue::new(TableId::Audit, 1, 1, 0, None, Vec::new(), vec![10])?
         .encode()?;
@@ -2777,8 +2824,16 @@ fn reconstructed_source_rebuilds_rekey_plan_and_enforces_key_generation()
             TableId::Account,
             StoredKey::new(account_key.as_bytes().to_vec())?,
             1,
-            PersistentRecordValue::new(TableId::Account, 1, 1, 1, None, Vec::new(), vec![1])?
-                .encode()?,
+            PersistentRecordValue::new(
+                TableId::Account,
+                1,
+                1,
+                1,
+                None,
+                Vec::new(),
+                crate::domain_records::live_body(TableId::Account, 1)?,
+            )?
+            .encode()?,
         )?,
         InitialStorageRecord::new(
             TableId::NicknameReservation,
@@ -2942,9 +2997,16 @@ fn rekey_construction_commits_finalizes_installs_and_reopens() -> Result<(), Box
     .encode()?;
     let source_record_id = agenc_ircd_storage::SealedRecord::decode(&source_sealed)?.record_id()?;
     let account_key = StoredKey::new(account_key_bytes(1))?;
-    let account_plaintext =
-        PersistentRecordValue::new(TableId::Account, 1, 7, 9, None, Vec::new(), vec![41])?
-            .encode()?;
+    let account_plaintext = PersistentRecordValue::new(
+        TableId::Account,
+        1,
+        7,
+        9,
+        None,
+        Vec::new(),
+        crate::domain_records::live_body(TableId::Account, 41)?,
+    )?
+    .encode()?;
     let source_account_sealed = StorageSealContext::new(
         &StorageMasterKey::from_bytes(source_master_bytes),
         source_binding,
@@ -3464,9 +3526,16 @@ impl RekeyConstructionFixture {
         .encode()?;
         let login_state_record_id = SealedRecord::decode(&login_state_sealed)?.record_id()?;
         let account_key = StoredKey::new(account_key_bytes(3))?;
-        let account_plaintext =
-            PersistentRecordValue::new(TableId::Account, 1, 7, 9, None, Vec::new(), vec![132])?
-                .encode()?;
+        let account_plaintext = PersistentRecordValue::new(
+            TableId::Account,
+            1,
+            7,
+            9,
+            None,
+            Vec::new(),
+            crate::domain_records::live_body(TableId::Account, 132)?,
+        )?
+        .encode()?;
         let account_sealed = StorageSealContext::new(
             &StorageMasterKey::from_bytes(source_master_bytes),
             source_binding,
@@ -4154,9 +4223,16 @@ fn construction_source_readers_reject_missing_rows_and_every_backup_frame_mismat
     );
 
     let account_key = StoredKey::new(account_key_bytes(1))?;
-    let plaintext =
-        PersistentRecordValue::new(TableId::Account, 1, 1, 1, None, Vec::new(), vec![1])?
-            .encode()?;
+    let plaintext = PersistentRecordValue::new(
+        TableId::Account,
+        1,
+        1,
+        1,
+        None,
+        Vec::new(),
+        crate::domain_records::live_body(TableId::Account, 1)?,
+    )?
+    .encode()?;
     let sealed =
         StorageSealContext::new(&StorageMasterKey::from_bytes([35; 32]), backup_binding, 1)?
             .seal(TableId::Account, 1, [36; 24], &account_key, &plaintext)?
@@ -4381,10 +4457,17 @@ fn construction_executor_rejects_source_receipt_and_finalization_failures()
 fn construction_executor_enforces_first_and_accumulated_plaintext_limits()
 -> Result<(), Box<dyn Error>> {
     let fixture = RekeyConstructionFixture::create()?;
-    let account_bytes =
-        PersistentRecordValue::new(TableId::Account, 1, 7, 9, None, Vec::new(), vec![132])?
-            .encode()?
-            .len();
+    let account_bytes = PersistentRecordValue::new(
+        TableId::Account,
+        1,
+        7,
+        9,
+        None,
+        Vec::new(),
+        crate::domain_records::live_body(TableId::Account, 132)?,
+    )?
+    .encode()?
+    .len();
 
     for (batch_bytes, expected) in [
         (account_bytes - 1, Err(StorageError::LimitExceeded)),
@@ -4424,10 +4507,17 @@ fn construction_preflight_rejects_an_oversized_first_record() -> Result<(), Box<
     let marker = target.marker()?;
     let plan = fixture.plan(&marker.identity)?;
     let mut source = fixture.source()?;
-    let account_bytes =
-        PersistentRecordValue::new(TableId::Account, 1, 7, 9, None, Vec::new(), vec![132])?
-            .encode()?
-            .len();
+    let account_bytes = PersistentRecordValue::new(
+        TableId::Account,
+        1,
+        7,
+        9,
+        None,
+        Vec::new(),
+        crate::domain_records::live_body(TableId::Account, 132)?,
+    )?
+    .encode()?
+    .len();
     let limits = ConstructionLimits {
         batch_bytes: account_bytes - 1,
         ..construction_limits()
@@ -4843,8 +4933,16 @@ fn initialized_lazy_login_fixture() -> Result<LazyLoginFixture, Box<dyn Error>> 
             TableId::Account,
             StoredKey::new(account_key.as_bytes().to_vec())?,
             1,
-            PersistentRecordValue::new(TableId::Account, 1, 1, 1, None, Vec::new(), vec![1])?
-                .encode()?,
+            PersistentRecordValue::new(
+                TableId::Account,
+                1,
+                1,
+                1,
+                None,
+                Vec::new(),
+                crate::domain_records::live_body(TableId::Account, 1)?,
+            )?
+            .encode()?,
         )?,
         InitialStorageRecord::new(
             TableId::OpaqueRecord,

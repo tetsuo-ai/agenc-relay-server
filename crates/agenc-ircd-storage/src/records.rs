@@ -6,6 +6,9 @@ use agenc_ircd_crypto::StorageDigest;
 use agenc_ircd_types::{AccountId, ChannelName, Nickname, RecoveryEpoch};
 
 use crate::codec::{Decoder, Encoder};
+use crate::domain_records::{
+    AccountRecordBody, ChannelRecordBody, LIVE_RECORD_KIND, SanctionRecordBody,
+};
 use crate::{
     IntegrityCheckpoint, IntegrityManifest, LoginIndexKeyState, LoginIndexStoredKey,
     LoginIndexValue, SealedRecord, StorageConstruction, StorageError, StorageOperationCompletion,
@@ -801,6 +804,9 @@ fn validate_domain_body(table: TableId, record_kind: u16, body: &[u8]) -> Result
             .and_then(|name| ChannelName::parse(name).map_err(|_| StorageError::InvalidEncoding))
             .map(|_| ()),
         (TableId::E2eeState, 1) => E2eeRecoveryGate::decode(body).map(|_| ()),
+        (TableId::Account, LIVE_RECORD_KIND) => AccountRecordBody::decode(body).map(|_| ()),
+        (TableId::Channel, LIVE_RECORD_KIND) => ChannelRecordBody::decode(body).map(|_| ()),
+        (TableId::Sanction, LIVE_RECORD_KIND) => SanctionRecordBody::decode(body).map(|_| ()),
         _ if uses_protocol_body(table, record_kind) => {
             ProtocolRecordBody::decode(table, record_kind, body).map(|_| ())
         }
@@ -895,7 +901,7 @@ mod tests {
         };
 
         let exact = PersistentRecordValue::new(
-            TableId::Sanction,
+            TableId::History,
             1,
             1,
             0,
@@ -911,7 +917,7 @@ mod tests {
         );
         assert_eq!(
             PersistentRecordValue::new(
-                TableId::Sanction,
+                TableId::History,
                 1,
                 1,
                 0,
@@ -934,9 +940,16 @@ mod tests {
             Err(StorageError::InvalidEncoding)
         );
 
-        let valid =
-            PersistentRecordValue::new(TableId::Account, 1, 1, 1, None, Vec::new(), Vec::new())?
-                .encode()?;
+        let valid = PersistentRecordValue::new(
+            TableId::Account,
+            1,
+            1,
+            1,
+            None,
+            Vec::new(),
+            crate::domain_records::fixtures::live_body(TableId::Account, 1)?,
+        )?
+        .encode()?;
         let mut wrong_version = valid.clone();
         wrong_version
             .get_mut(..2)

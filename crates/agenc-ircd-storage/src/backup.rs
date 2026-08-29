@@ -1921,7 +1921,7 @@ mod tests {
             1,
             None,
             Vec::new(),
-            Vec::new(),
+            crate::domain_records::fixtures::live_body(TableId::Account, 1)?,
         )?
         .encode()?;
         let sealed = StorageSealContext::new(

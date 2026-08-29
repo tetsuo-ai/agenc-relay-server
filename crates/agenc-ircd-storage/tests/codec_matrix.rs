@@ -45,6 +45,14 @@ fn account_key(seed: u8) -> Vec<u8> {
 }
 
 fn domain_body(table: TableId, kind: u16, byte: u8) -> Result<Vec<u8>, StorageError> {
+    if kind == 1
+        && matches!(
+            table,
+            TableId::Account | TableId::Channel | TableId::Sanction
+        )
+    {
+        return crate::domain_records::live_body(table, byte);
+    }
     if table == TableId::NicknameReservation && kind == 1 {
         return Ok(b"nickname".to_vec());
     }
@@ -2267,7 +2275,7 @@ fn domain_record_envelope_covers_every_union_and_length_boundary() -> Result<(),
         0,
         None,
         vec![session, account],
-        vec![1],
+        crate::domain_records::live_body(TableId::Channel, 1)?,
     )?;
     let ordered =
         agenc_ircd_storage::PersistentRecordValue::decode(TableId::Channel, &ordered.encode()?)?;
