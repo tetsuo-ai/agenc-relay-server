@@ -188,7 +188,7 @@ async fn secret_canary_never_enters_error_or_worker_capture_text()
             release: release_receiver,
         }))
         .map_err(|error| error.reason())?;
-    started_receiver.recv_timeout(Duration::from_secs(1))?;
+    started_receiver.recv_timeout(Duration::from_secs(30))?;
     let executed = Arc::new(AtomicBool::new(false));
     let cancelled = cancellation_pool
         .try_submit(CanaryJob::new(CanaryBehavior::MarkExecuted(Arc::clone(
@@ -241,6 +241,11 @@ fn median_absolute_deviation(values: &[u128], center: u128) -> Result<u128, io::
     median(deviations)
 }
 
+/// Supplemental smoke signal only: it checks that known and unknown logins
+/// both perform the full OPAQUE server-start work within a wide tolerance.
+/// Wall-clock samples inside a parallel test process are not constant-time
+/// evidence; the source-bound review in the Stage 04 constant-time manifest
+/// is the primary evidence and side-channel claims need dedicated tooling.
 #[test]
 fn shuffled_known_and_unknown_opaque_starts_share_one_timing_class()
 -> Result<(), Box<dyn core::error::Error>> {

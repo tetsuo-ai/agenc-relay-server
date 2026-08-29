@@ -3,7 +3,7 @@
 
 use agenc_ircd_auth::{
     ACCOUNT_SERVICE_ENVELOPE_BYTES, ACCOUNT_SERVICE_RESPONSE_BYTES, AccountServiceEnvelope,
-    AccountServiceResponse, open_and_parse_request, open_and_parse_response,
+    AccountServiceResponse, AuthError, open_and_parse_request, open_and_parse_response,
 };
 use agenc_ircd_crypto::{
     ACCOUNT_HPKE_REQUEST_PLAINTEXT_BYTES, ACCOUNT_HPKE_RESPONSE_PLAINTEXT_BYTES,
@@ -80,12 +80,18 @@ fn fuzz_request_plaintext(input: &[u8], request_kind: AccountServiceMessageKind)
     let Ok(envelope) = AccountServiceEnvelope::from_sealed(sealed) else {
         return;
     };
-    let _result = open_and_parse_request(
+    let result = open_and_parse_request(
         &private_key,
         RECOVERY_EPOCH,
         NETWORK_ID,
         request_kind,
         &envelope,
+    );
+    // Production sealed this envelope under the same binding, so only the
+    // inner plaintext syntax may reject it; a MAC failure is a codec defect.
+    assert!(
+        !matches!(result, Err(AuthError::AuthenticationFailed)),
+        "production-sealed request failed authentication"
     );
 }
 
@@ -125,7 +131,11 @@ fn fuzz_response_plaintext(input: &[u8], request_kind: AccountServiceMessageKind
     let Ok(response) = AccountServiceResponse::from_sealed(sealed_response) else {
         return;
     };
-    let _result = open_and_parse_response(open_token, &response);
+    let result = open_and_parse_response(open_token, &response);
+    assert!(
+        !matches!(result, Err(AuthError::AuthenticationFailed)),
+        "production-sealed response failed authentication"
+    );
 }
 
 fuzz_target!(|data: &[u8]| {

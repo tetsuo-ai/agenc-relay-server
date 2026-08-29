@@ -330,6 +330,9 @@ pub struct AccountCreationStartParameters {
     pub admission: CreationAdmission,
     /// Storage result proving no live, reserved, or tombstoned login conflict.
     pub login_is_available: bool,
+    /// Storage result proving the supplied Invite ID was never reserved, redeemed,
+    /// or tombstoned. Ignored when the request carries no invitation.
+    pub invitation_is_available: bool,
 }
 
 /// Result of a successful account-creation finish, ready for one storage transaction.
@@ -406,6 +409,7 @@ fn begin_account_creation_with_entropy(
         request,
         admission,
         login_is_available,
+        invitation_is_available,
     } = parameters;
     let (request, response_lineage) = request.into_parts();
     let start_request_binding = response_lineage.binding();
@@ -414,6 +418,11 @@ fn begin_account_creation_with_entropy(
     }
     let (invitation, disposition) =
         evaluate_creation_admission(admission, request.invitation.as_ref(), context.network_id);
+    let disposition = if request.invitation.is_some() && !invitation_is_available {
+        disposition.reject(AuthError::InvitationRejected)
+    } else {
+        disposition
+    };
     let disposition = if login_is_available {
         disposition
     } else {
@@ -728,7 +737,9 @@ impl AuthenticationGrant {
     }
 
     /// Returns the separate process-local fresh-auth deadline retained inside
-    /// this inseparable grant intent.
+    /// this inseparable grant intent. Unlike the exclusive transaction
+    /// deadlines, this instant is inclusive: the proof stays valid while
+    /// `now <= expires_at`.
     #[must_use]
     pub const fn fresh_authentication_expires_at(&self) -> MonotonicTick {
         self.fresh_authentication.expires_at
@@ -1118,6 +1129,11 @@ impl CredentialReplacementIntent {
 }
 
 /// Starts credential replacement after consuming a fresh same-account proof.
+///
+/// Stage 04 withholds the `FreshAuthenticationProof` accessor, so this entry
+/// point becomes reachable only when Stage 06 consumes an authentication
+/// grant through `session_open`. A grant reconstructed from storage must never
+/// yield a proof; the client reauthenticates before a destructive control.
 pub fn begin_credential_change(
     profile: &OpaqueProfile,
     parameters: CredentialChangeStartParameters,
@@ -1397,6 +1413,11 @@ impl AccountDeletionIntent {
 }
 
 /// Starts one deletion confirmation after consuming a fresh same-account proof.
+///
+/// Stage 04 withholds the `FreshAuthenticationProof` accessor, so this entry
+/// point becomes reachable only when Stage 06 consumes an authentication
+/// grant through `session_open`. A grant reconstructed from storage must never
+/// yield a proof; the client reauthenticates before a destructive control.
 pub fn begin_account_deletion(
     context: AccountOperationContext,
     proof: FreshAuthenticationProof,
@@ -2162,6 +2183,7 @@ mod tests {
             request: creation_start_request(20)?,
             admission: CreationAdmission::Open,
             login_is_available: true,
+            invitation_is_available: true,
         };
         assert_eq!(
             begin_account_creation_with_entropy(
