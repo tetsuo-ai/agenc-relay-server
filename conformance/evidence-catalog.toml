@@ -465,6 +465,11 @@ claim_ids = ["E2EE-REQ-A0EFEAB7474EA0A450F5"]
 kind = "normative-requirement"
 
 [[evidence]]
+id = "EVID-ARCH-REQ-CAFA64060EE32DC7419D"
+claim_ids = ["ARCH-REQ-CAFA64060EE32DC7419D"]
+kind = "normative-requirement"
+
+[[evidence]]
 id = "EVID-ARCH-REQ-D621F68B6C389E5B7660"
 claim_ids = ["ARCH-REQ-D621F68B6C389E5B7660"]
 kind = "normative-requirement"
@@ -530,6 +535,16 @@ claim_ids = ["ARCH-DUR-03"]
 kind = "normative-requirement"
 
 [[evidence]]
+id = "EVID-ARCH-DUR-04"
+claim_ids = ["ARCH-DUR-04"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-DUR-05"
+claim_ids = ["ARCH-DUR-05"]
+kind = "normative-requirement"
+
+[[evidence]]
 id = "EVID-ARCH-DUR-06"
 claim_ids = ["ARCH-DUR-06"]
 kind = "normative-requirement"
@@ -540,6 +555,11 @@ claim_ids = ["ARCH-DUR-07"]
 kind = "normative-requirement"
 
 [[evidence]]
+id = "EVID-ARCH-DUR-08"
+claim_ids = ["ARCH-DUR-08"]
+kind = "normative-requirement"
+
+[[evidence]]
 id = "EVID-ARCH-DUR-09"
 claim_ids = ["ARCH-DUR-09"]
 kind = "normative-requirement"
@@ -547,6 +567,11 @@ kind = "normative-requirement"
 [[evidence]]
 id = "EVID-ARCH-DUR-10"
 claim_ids = ["ARCH-DUR-10"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-DUR-11"
+claim_ids = ["ARCH-DUR-11"]
 kind = "normative-requirement"
 
 [[evidence]]

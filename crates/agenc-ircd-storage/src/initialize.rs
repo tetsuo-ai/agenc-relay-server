@@ -269,7 +269,11 @@ pub fn initialize_storage(
         STATE_META_KEY.len(),
         predicted_state_meta_record_bytes,
     )?;
-    if logical_bytes > limits.database_max_bytes || backup_bytes > limits.backup_max_bytes {
+    if (
+        logical_bytes > limits.database_max_bytes,
+        backup_bytes > limits.backup_max_bytes,
+    ) != (false, false)
+    {
         return Err(StorageError::LimitExceeded);
     }
     let state_meta = StateMeta::authenticate(
@@ -299,7 +303,7 @@ pub fn initialize_storage(
             &state_meta.encode()?,
         )?
         .encode()?;
-    if nonce_cursor != nonces.len() || state_meta_record.len() != predicted_state_meta_record_bytes
+    if (nonce_cursor, state_meta_record.len()) != (nonces.len(), predicted_state_meta_record_bytes)
     {
         return Err(StorageError::InvalidEncoding);
     }
@@ -420,17 +424,24 @@ fn bind_construction_target_header(
         .iter_mut()
         .find(|record| record.table == TableId::StorageConstruction)
         .ok_or(StorageError::InvalidEncoding)?;
-    if record.key.as_bytes() != crate::STORAGE_CONSTRUCTION_KEY || record.record_schema != 1 {
+    if (record.key.as_bytes(), record.record_schema) != (crate::STORAGE_CONSTRUCTION_KEY, 1) {
         return Err(StorageError::InvalidEncoding);
     }
     let mut marker = StorageConstruction::decode(&record.plaintext)?;
     let zero = StorageDigest::from_bytes([0_u8; 32]);
-    if marker.identity.target_database_header_hash != zero
-        || marker.identity.target_database_instance_id != header.tbs().database_instance_id
-        || marker.identity.target_schema_generation != header.tbs().schema_generation
-        || marker.next_target != StorageConstructionCursor::BeforeFirst
-        || marker.target_records_committed != 0
-    {
+    if (
+        marker.identity.target_database_header_hash,
+        marker.identity.target_database_instance_id,
+        marker.identity.target_schema_generation,
+        &marker.next_target,
+        marker.target_records_committed,
+    ) != (
+        zero,
+        header.tbs().database_instance_id,
+        header.tbs().schema_generation,
+        &StorageConstructionCursor::BeforeFirst,
+        0,
+    ) {
         return Err(StorageError::ResumeMismatch);
     }
     marker.identity.target_database_header_hash = header.complete_hash()?;
@@ -483,4 +494,310 @@ fn guard_tbs(
         nonce_reservation_state_hash: reservation.complete_hash()?,
         previous_guard_hash: state.previous_guard_hash,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use agenc_ircd_crypto::{LoginIndexKey, rekey_transform_profile_hash};
+    use agenc_ircd_types::{DatabaseId, NetworkId, RecoveryEpoch, ServerId, ServerIncarnation};
+
+    use super::*;
+    use crate::{
+        LoginIndexKeyState, StorageConstructionKind, StorageOperationIdentity,
+        construction_plan_hash,
+    };
+
+    const ZERO: StorageDigest = StorageDigest::from_bytes([0; 32]);
+
+    fn header(database: DatabaseId) -> Result<DatabaseHeader, StorageError> {
+        let tbs = DatabaseHeaderTbs::new(
+            NetworkId::from_bytes([1; 32]),
+            ServerId::from_bytes([2; 16]),
+            ServerIncarnation::from_bytes([3; 16]),
+            database,
+            1,
+            1,
+            RecoveryEpoch::from_bytes([4; 16]),
+        )?;
+        Ok(DatabaseHeader::new(tbs, StorageDigest::from_bytes([5; 32])))
+    }
+
+    fn identity(database: DatabaseId) -> Result<StorageOperationIdentity, StorageError> {
+        Ok(StorageOperationIdentity {
+            kind: StorageConstructionKind::Rekey,
+            command_version: 1,
+            source_database_header_hash: ZERO,
+            target_database_header_hash: ZERO,
+            source_rollback_guard_hash: ZERO,
+            source_stream_digest: None,
+            source_schema_generation: 1,
+            target_schema_generation: 1,
+            transform_profile_hash: rekey_transform_profile_hash()?,
+            target_database_instance_id: database,
+            source_master_key_id: ZERO,
+            source_guard_root_key_id: ZERO,
+            target_master_key_id: ZERO,
+            target_guard_root_key_id: ZERO,
+            planned_entry_count: 1,
+            construction_plan_hash: construction_plan_hash(
+                StorageConstructionKind::Rekey,
+                &[],
+                crate::MAX_CONSTRUCTION_PLAN_BYTES,
+            )?,
+        })
+    }
+
+    fn marker_record(
+        marker: StorageConstruction,
+        key: Vec<u8>,
+        schema: u32,
+    ) -> Result<InitialStorageRecord, StorageError> {
+        Ok(InitialStorageRecord {
+            table: TableId::StorageConstruction,
+            key: StoredKey::new(key)?,
+            record_schema: schema,
+            plaintext: Zeroizing::new(marker.encode()?),
+        })
+    }
+
+    fn login_key_state_record(byte: u8) -> Result<InitialStorageRecord, StorageError> {
+        let network = NetworkId::from_bytes([1; 32]);
+        let key = LoginIndexKey::from_bytes([byte; 32]);
+        let state = LoginIndexKeyState::stable(1, key.key_id(network))?;
+        InitialStorageRecord::new(
+            TableId::LoginIndexKeyState,
+            StoredKey::new(crate::LOGIN_INDEX_KEY_STATE_KEY.to_vec())?,
+            1,
+            state.encode()?,
+        )
+    }
+
+    #[test]
+    fn initial_record_rejects_untracked_zero_schema_and_oversized_plaintext()
+    -> Result<(), StorageError> {
+        assert!(matches!(
+            InitialStorageRecord::new(TableId::KeyCheck, StoredKey::new(vec![1])?, 1, vec![1],),
+            Err(StorageError::InvalidEncoding)
+        ));
+        assert!(matches!(
+            InitialStorageRecord::new(TableId::Account, StoredKey::new(vec![1])?, 0, vec![1],),
+            Err(StorageError::InvalidEncoding)
+        ));
+        assert!(matches!(
+            InitialStorageRecord::new(
+                TableId::Account,
+                StoredKey::new(vec![1])?,
+                1,
+                vec![0; agenc_ircd_crypto::MAX_STORAGE_PLAINTEXT_BYTES + 1],
+            ),
+            Err(StorageError::InvalidEncoding)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn initial_singleton_validation_enforces_mode_and_unique_identity() -> Result<(), StorageError>
+    {
+        let mut live = vec![login_key_state_record(1)?];
+        assert_eq!(
+            validate_initial_records(StorageInitializationMode::Live, &mut live),
+            Ok(())
+        );
+
+        let mut missing = Vec::new();
+        assert_eq!(
+            validate_initial_records(StorageInitializationMode::Live, &mut missing),
+            Err(StorageError::InvalidEncoding)
+        );
+        assert_eq!(
+            validate_initial_records(StorageInitializationMode::Construction, &mut missing),
+            Err(StorageError::InvalidEncoding)
+        );
+
+        let mut duplicate = vec![login_key_state_record(2)?, login_key_state_record(2)?];
+        assert_eq!(
+            validate_initial_records(StorageInitializationMode::Live, &mut duplicate),
+            Err(StorageError::InvalidEncoding)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn construction_header_binding_rejects_each_marker_mismatch() -> Result<(), StorageError> {
+        let database = DatabaseId::from_bytes([6; 16]);
+        let header = header(database)?;
+        let valid = StorageConstruction {
+            identity: identity(database)?,
+            output_path_hash: StorageDigest::from_bytes([7; 32]),
+            next_target: StorageConstructionCursor::BeforeFirst,
+            target_records_committed: 0,
+        };
+        let mut live = Vec::new();
+        assert_eq!(
+            bind_construction_target_header(StorageInitializationMode::Live, &mut live, &header),
+            Ok(())
+        );
+        assert_eq!(
+            bind_construction_target_header(
+                StorageInitializationMode::Construction,
+                &mut live,
+                &header,
+            ),
+            Err(StorageError::InvalidEncoding)
+        );
+
+        let mut wrong_key = vec![marker_record(valid, b"wrong-key".to_vec(), 1)?];
+        assert_eq!(
+            bind_construction_target_header(
+                StorageInitializationMode::Construction,
+                &mut wrong_key,
+                &header,
+            ),
+            Err(StorageError::InvalidEncoding)
+        );
+
+        let valid = StorageConstruction {
+            identity: identity(database)?,
+            output_path_hash: StorageDigest::from_bytes([7; 32]),
+            next_target: StorageConstructionCursor::BeforeFirst,
+            target_records_committed: 0,
+        };
+        let mut wrong_schema = vec![marker_record(
+            valid,
+            crate::STORAGE_CONSTRUCTION_KEY.to_vec(),
+            2,
+        )?];
+        assert_eq!(
+            bind_construction_target_header(
+                StorageInitializationMode::Construction,
+                &mut wrong_schema,
+                &header,
+            ),
+            Err(StorageError::InvalidEncoding)
+        );
+
+        let mut nonzero_hash_identity = identity(database)?;
+        nonzero_hash_identity.target_database_header_hash = StorageDigest::from_bytes([8; 32]);
+        let mut nonzero_hash = vec![marker_record(
+            StorageConstruction {
+                identity: nonzero_hash_identity,
+                output_path_hash: StorageDigest::from_bytes([7; 32]),
+                next_target: StorageConstructionCursor::BeforeFirst,
+                target_records_committed: 0,
+            },
+            crate::STORAGE_CONSTRUCTION_KEY.to_vec(),
+            1,
+        )?];
+        assert_eq!(
+            bind_construction_target_header(
+                StorageInitializationMode::Construction,
+                &mut nonzero_hash,
+                &header,
+            ),
+            Err(StorageError::ResumeMismatch)
+        );
+
+        let mut advanced_identity = identity(database)?;
+        advanced_identity.planned_entry_count = 2;
+        let advanced = StorageConstruction {
+            identity: advanced_identity,
+            output_path_hash: StorageDigest::from_bytes([7; 32]),
+            next_target: StorageConstructionCursor::AtTarget {
+                table: TableId::Account,
+                key: StoredKey::new(vec![10; 24])?,
+            },
+            target_records_committed: 1,
+        };
+        let mut advanced_record = vec![marker_record(
+            advanced,
+            crate::STORAGE_CONSTRUCTION_KEY.to_vec(),
+            1,
+        )?];
+        assert_eq!(
+            bind_construction_target_header(
+                StorageInitializationMode::Construction,
+                &mut advanced_record,
+                &header,
+            ),
+            Err(StorageError::ResumeMismatch)
+        );
+
+        let mut wrong_database = vec![marker_record(
+            StorageConstruction {
+                identity: identity(DatabaseId::from_bytes([9; 16]))?,
+                output_path_hash: StorageDigest::from_bytes([7; 32]),
+                next_target: StorageConstructionCursor::BeforeFirst,
+                target_records_committed: 0,
+            },
+            crate::STORAGE_CONSTRUCTION_KEY.to_vec(),
+            1,
+        )?];
+        assert_eq!(
+            bind_construction_target_header(
+                StorageInitializationMode::Construction,
+                &mut wrong_database,
+                &header,
+            ),
+            Err(StorageError::ResumeMismatch)
+        );
+
+        let valid = StorageConstruction {
+            identity: identity(database)?,
+            output_path_hash: StorageDigest::from_bytes([7; 32]),
+            next_target: StorageConstructionCursor::BeforeFirst,
+            target_records_committed: 0,
+        };
+        let mut records = vec![marker_record(
+            valid,
+            crate::STORAGE_CONSTRUCTION_KEY.to_vec(),
+            1,
+        )?];
+        assert_eq!(
+            bind_construction_target_header(
+                StorageInitializationMode::Construction,
+                &mut records,
+                &header,
+            ),
+            Ok(())
+        );
+        let rebound = StorageConstruction::decode(
+            &records.first().ok_or(StorageError::StaleState)?.plaintext,
+        )?;
+        assert_eq!(
+            rebound.identity.target_database_header_hash,
+            header.complete_hash()?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn nonce_and_charge_helpers_reject_exhaustion_and_overflow() -> Result<(), StorageError> {
+        let nonces = [[1_u8; 24], [2_u8; 24]];
+        let mut cursor = 0;
+        assert_eq!(take_nonce(&nonces, &mut cursor)?, [1; 24]);
+        assert_eq!(take_nonce(&nonces, &mut cursor)?, [2; 24]);
+        assert_eq!(
+            take_nonce(&nonces, &mut cursor),
+            Err(StorageError::InvalidEncoding)
+        );
+
+        let mut logical = 0;
+        let mut backup = 0;
+        add_record_charge(&mut logical, &mut backup, 1, crate::MIN_SEALED_RECORD_BYTES)?;
+        assert!(logical > 0 && backup > logical);
+
+        let mut logical = u64::MAX;
+        let mut backup = 0;
+        assert_eq!(
+            add_record_charge(&mut logical, &mut backup, 1, crate::MIN_SEALED_RECORD_BYTES,),
+            Err(StorageError::Overflow)
+        );
+        let mut logical = 0;
+        let mut backup = u64::MAX;
+        assert_eq!(
+            add_record_charge(&mut logical, &mut backup, 1, crate::MIN_SEALED_RECORD_BYTES,),
+            Err(StorageError::Overflow)
+        );
+        Ok(())
+    }
 }

@@ -636,7 +636,13 @@ def self_test(root: Path, policy_path: Path) -> int:
     )
     cases += 1
     expired = copy.deepcopy(policy)
-    expired["deferred"][0]["until_task"] = "S04-014"  # type: ignore[index]
+    expired["deferred"].append(  # type: ignore[union-attr]
+        {
+            "category": "persistence-recovery",
+            "until_task": "S04-014",
+            "reason": "Synthetic expired deferment for validator coverage.",
+        }
+    )
     expect_rejection(
         "expired category deferment",
         lambda: validate_policy_data(root, expired),

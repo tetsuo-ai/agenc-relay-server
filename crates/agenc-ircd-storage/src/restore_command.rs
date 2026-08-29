@@ -15,12 +15,13 @@ use zeroize::Zeroizing;
 
 use crate::{
     BackupTrustKey, ConstructionDirectory, ConstructionDirectoryPhase, ConstructionExecutor,
-    ConstructionLimits, ConstructionSourceDatabase, ConstructionSourceFacts, ConstructionTarget,
-    DatabaseHeader, DatabaseHeaderTbs, InitialStorageRecord, RecoveryTransformV1,
-    SCHEMA_GENERATION, StateDirectory, StorageConstruction, StorageConstructionCursor,
-    StorageConstructionKind, StorageEngineLimits, StorageError, StorageInitializationConfig,
-    StorageInitializationMode, StorageInitializationOutcome, StorageOpenConfig,
-    StorageOperationIdentity, StorageQualification, StoredKey, TableId, initialize_storage,
+    ConstructionLimits, ConstructionPlan, ConstructionSourceDatabase, ConstructionSourceFacts,
+    ConstructionTarget, DatabaseHeader, DatabaseHeaderTbs, InitialStorageRecord,
+    RecoveryTransformV1, SCHEMA_GENERATION, StateDirectory, StorageConstruction,
+    StorageConstructionCursor, StorageConstructionKind, StorageEngineLimits, StorageError,
+    StorageInitializationConfig, StorageInitializationMode, StorageInitializationOutcome,
+    StorageOpenConfig, StorageOperationIdentity, StorageQualification, StoredKey, TableId,
+    initialize_storage,
 };
 
 const RESTORE_BATCH_RECORDS: usize = 1_000;
@@ -128,66 +129,26 @@ pub fn execute_restore_command(
     request: RestoreCommandRequest,
     qualifications: &[StorageQualification],
 ) -> Result<RestoreCommandReceipt, StorageError> {
-    if !request.declare_recovery_epoch
-        || request.trusted_backup_keys.is_empty()
-        || request.trusted_backup_keys.len() > 1_024
-    {
-        return Err(StorageError::InvalidEncoding);
-    }
+    validate_restore_request(&request)?;
     let limits = request.limits.validate()?;
     let construction_limits = construction_limits(limits)?;
-    let source_master_bytes = read_secret_key(&request.source_master_key_file)?;
-    let source_guard_bytes = read_secret_key(&request.source_rollback_guard_key_file)?;
-    let login_key_bytes = read_secret_key(&request.login_index_key_file)?;
-    let previous_login_key_bytes = request
-        .login_index_previous_key_file
-        .as_deref()
-        .map(read_secret_key)
-        .transpose()?;
-    let target_master_bytes = request
-        .target_master_key_file
-        .as_deref()
-        .map(read_secret_key)
-        .transpose()?
-        .unwrap_or_else(|| Zeroizing::new(*source_master_bytes));
-    let target_guard_bytes = read_secret_key(&request.target_rollback_guard_key_file)?;
-    if bool::from(
-        source_guard_bytes
-            .as_ref()
-            .ct_eq(target_guard_bytes.as_ref()),
-    ) {
-        return Err(StorageError::AuthenticationFailed);
-    }
-    let trusted_keys = request
-        .trusted_backup_keys
-        .iter()
-        .copied()
-        .map(RestoreTrustKey::validate)
-        .collect::<Result<Vec<_>, _>>()?;
-    let backup = open_private_regular(&request.backup_path, Mode::RUSR | Mode::WUSR)?;
-    let mut source = crate::RestoreBackupSource::open(
-        backup,
-        StorageMasterKey::from_bytes(*source_master_bytes),
-        RollbackGuardRootKey::from_bytes(*source_guard_bytes),
-        LoginIndexKey::from_bytes(*login_key_bytes),
-        previous_login_key_bytes
-            .as_ref()
-            .map(|bytes| LoginIndexKey::from_bytes(**bytes)),
-        &trusted_keys,
-        limits.backup_max_bytes,
-    )?;
+    let secrets = RestoreSecrets::load(&request)?;
+    let trusted_keys = trusted_restore_keys(&request)?;
+    let mut source = secrets.open_source(&request, &trusted_keys, limits)?;
     let source_facts = source.facts()?;
     let source_header = source_facts.header;
-    if source_header.tbs().network_id != request.network_id
-        || source_header.tbs().server_id != request.server_id
+    if (
+        source_header.tbs().network_id,
+        source_header.tbs().server_id,
+    ) != (request.network_id, request.server_id)
     {
         return Err(StorageError::AuthenticationFailed);
     }
     let current_facts = read_current_boundary(
         &request,
         qualifications,
-        &login_key_bytes,
-        previous_login_key_bytes.as_deref(),
+        &secrets.login_index,
+        secrets.previous_login_index.as_deref(),
         limits,
     )?;
     if current_facts.is_some_and(|current| !same_restore_boundary(current, source_facts)) {
@@ -199,148 +160,283 @@ pub fn execute_restore_command(
         &directory,
         qualifications,
         source_header,
-        &source_master_bytes,
-        &target_master_bytes,
-        &target_guard_bytes,
-        &login_key_bytes,
-        previous_login_key_bytes.as_deref(),
+        &secrets.source_master,
+        &secrets.target_master,
+        &secrets.target_guard,
+        &secrets.login_index,
+        secrets.previous_login_index.as_deref(),
         limits,
     )?;
-    let target_binding = DatabaseBinding::new(
-        request.network_id,
-        request.server_id,
-        target.header.tbs().server_incarnation,
-        target.header.tbs().database_instance_id,
-    );
-    let plan_file = match directory.phase() {
-        ConstructionDirectoryPhase::Staging => directory.rebuild_plan_file()?,
-        ConstructionDirectoryPhase::Installed => anonymous_plan_file()?,
-    };
-    let plan = source.rebuild_restore_plan(
-        plan_file,
-        &StorageMasterKey::from_bytes(*target_master_bytes),
-        target_binding,
-        target.header.tbs().storage_key_generation,
-        construction_limits,
-    )?;
-    let mut identity = restore_identity(
-        &source,
-        &source_master_bytes,
-        &source_guard_bytes,
-        &target_master_bytes,
-        &target_guard_bytes,
-        &target.header,
-        plan.entry_count(),
-        plan.hash(),
-    )?;
-    if target.fresh {
-        identity.target_database_header_hash = StorageDigest::from_bytes([0_u8; 32]);
-    }
-    if directory.phase() == ConstructionDirectoryPhase::Installed {
-        let verification = ConstructionTarget::verify_completed(
-            target_open_config(
-                &request,
-                &directory,
-                qualifications,
-                &target_master_bytes,
-                &target_guard_bytes,
-                &login_key_bytes,
-                previous_login_key_bytes.as_deref(),
-                limits,
-            )?,
-            identity,
-            directory.output_path_hash(),
-        )?;
-        return Ok(restore_receipt(
-            directory.output_path(),
-            verification.completion().storage_operation_id,
-            source_facts,
-            current_facts,
-            target.header,
-        ));
-    }
-    let initial_marker = StorageConstruction {
-        identity,
-        output_path_hash: directory.output_path_hash(),
-        next_target: StorageConstructionCursor::BeforeFirst,
-        target_records_committed: 0,
-    };
-    if target.fresh {
-        initialize_restore_target(
-            &directory,
-            qualifications,
-            &target,
-            &initial_marker,
-            &target_master_bytes,
-            &target_guard_bytes,
-            source_facts.rollback_guard_hash,
-            limits,
-        )?;
-    }
-    let mut target_writer = ConstructionTarget::open(target_open_config(
-        &request,
-        &directory,
+    RestoreExecution {
+        request: &request,
         qualifications,
-        &target_master_bytes,
-        &target_guard_bytes,
-        &login_key_bytes,
-        previous_login_key_bytes.as_deref(),
+        secrets,
         limits,
-    )?)?;
-    let marker = target_writer.marker()?;
-    if !target.fresh && marker.identity != identity {
-        return Err(StorageError::ResumeMismatch);
-    }
-    let expected_identity = marker.identity;
-    let preflight_marker = StorageConstruction {
-        identity: expected_identity,
-        output_path_hash: directory.output_path_hash(),
-        next_target: StorageConstructionCursor::BeforeFirst,
-        target_records_committed: 0,
-    };
-    let mut transformer = RecoveryTransformV1::new(
-        target.header.tbs().recovery_epoch,
-        source_facts.rollback_guard_hash,
-    );
-    let _preflight = plan.preflight(
-        &preflight_marker,
-        0,
-        0,
-        &mut source,
-        &mut transformer,
         construction_limits,
-    )?;
-    let mut executor = ConstructionExecutor::resume(marker, plan, construction_limits)?;
-    while executor.service_batch(&mut source, &mut transformer, &mut target_writer)? != 0 {}
-    let operation_id = executor.finalize(&mut target_writer)?;
-    drop(executor);
-    drop(target_writer);
-    directory.remove_plan_file()?;
-    let verification = ConstructionTarget::verify_completed(
-        target_open_config(
-            &request,
-            &directory,
-            qualifications,
-            &target_master_bytes,
-            &target_guard_bytes,
-            &login_key_bytes,
-            previous_login_key_bytes.as_deref(),
-            limits,
-        )?,
-        expected_identity,
-        directory.output_path_hash(),
-    )?;
-    if verification.completion().storage_operation_id != operation_id {
-        return Err(StorageError::StaleState);
-    }
-    let output = directory.install(verification)?;
-    Ok(restore_receipt(
-        output,
-        operation_id,
+        directory,
+        target,
         source_facts,
         current_facts,
-        target.header,
-    ))
+    }
+    .run(&mut source)
+}
+
+fn validate_restore_request(request: &RestoreCommandRequest) -> Result<(), StorageError> {
+    if (
+        !request.declare_recovery_epoch,
+        request.trusted_backup_keys.is_empty(),
+        request.trusted_backup_keys.len() > 1_024,
+    ) != (false, false, false)
+    {
+        return Err(StorageError::InvalidEncoding);
+    }
+    Ok(())
+}
+
+fn trusted_restore_keys(
+    request: &RestoreCommandRequest,
+) -> Result<Vec<BackupTrustKey>, StorageError> {
+    request
+        .trusted_backup_keys
+        .iter()
+        .copied()
+        .map(RestoreTrustKey::validate)
+        .collect()
+}
+
+struct RestoreSecrets {
+    source_master: Zeroizing<[u8; 32]>,
+    source_guard: Zeroizing<[u8; 32]>,
+    login_index: Zeroizing<[u8; 32]>,
+    previous_login_index: Option<Zeroizing<[u8; 32]>>,
+    target_master: Zeroizing<[u8; 32]>,
+    target_guard: Zeroizing<[u8; 32]>,
+}
+
+impl RestoreSecrets {
+    fn load(request: &RestoreCommandRequest) -> Result<Self, StorageError> {
+        let source_master = read_secret_key(&request.source_master_key_file)?;
+        let source_guard = read_secret_key(&request.source_rollback_guard_key_file)?;
+        let login_index = read_secret_key(&request.login_index_key_file)?;
+        let previous_login_index = request
+            .login_index_previous_key_file
+            .as_deref()
+            .map(read_secret_key)
+            .transpose()?;
+        let target_master = request
+            .target_master_key_file
+            .as_deref()
+            .map(read_secret_key)
+            .transpose()?
+            .unwrap_or_else(|| Zeroizing::new(*source_master));
+        let target_guard = read_secret_key(&request.target_rollback_guard_key_file)?;
+        if bool::from(source_guard.as_ref().ct_eq(target_guard.as_ref())) {
+            return Err(StorageError::AuthenticationFailed);
+        }
+        Ok(Self {
+            source_master,
+            source_guard,
+            login_index,
+            previous_login_index,
+            target_master,
+            target_guard,
+        })
+    }
+
+    fn open_source(
+        &self,
+        request: &RestoreCommandRequest,
+        trusted_keys: &[BackupTrustKey],
+        limits: StorageEngineLimits,
+    ) -> Result<crate::RestoreBackupSource<File>, StorageError> {
+        let backup = open_private_regular(&request.backup_path, Mode::RUSR | Mode::WUSR)?;
+        crate::RestoreBackupSource::open(
+            backup,
+            StorageMasterKey::from_bytes(*self.source_master),
+            RollbackGuardRootKey::from_bytes(*self.source_guard),
+            LoginIndexKey::from_bytes(*self.login_index),
+            self.previous_login_index
+                .as_ref()
+                .map(|bytes| LoginIndexKey::from_bytes(**bytes)),
+            trusted_keys,
+            limits.backup_max_bytes,
+        )
+    }
+}
+
+struct RestoreExecution<'a> {
+    request: &'a RestoreCommandRequest,
+    qualifications: &'a [StorageQualification],
+    secrets: RestoreSecrets,
+    limits: StorageEngineLimits,
+    construction_limits: ConstructionLimits,
+    directory: ConstructionDirectory,
+    target: TargetIdentity,
+    source_facts: ConstructionSourceFacts,
+    current_facts: Option<ConstructionSourceFacts>,
+}
+
+impl RestoreExecution<'_> {
+    fn run(
+        self,
+        source: &mut crate::RestoreBackupSource<File>,
+    ) -> Result<RestoreCommandReceipt, StorageError> {
+        let (plan, identity) = self.rebuild_plan(source)?;
+        if self.directory.phase() == ConstructionDirectoryPhase::Installed {
+            self.verify_installed(identity)
+        } else {
+            self.install_staging(source, plan, identity)
+        }
+    }
+
+    fn rebuild_plan(
+        &self,
+        source: &mut crate::RestoreBackupSource<File>,
+    ) -> Result<(ConstructionPlan, StorageOperationIdentity), StorageError> {
+        let target_binding = DatabaseBinding::new(
+            self.request.network_id,
+            self.request.server_id,
+            self.target.header.tbs().server_incarnation,
+            self.target.header.tbs().database_instance_id,
+        );
+        let plan_file = match self.directory.phase() {
+            ConstructionDirectoryPhase::Staging => self.directory.rebuild_plan_file()?,
+            ConstructionDirectoryPhase::Installed => anonymous_plan_file()?,
+        };
+        let plan = source.rebuild_restore_plan(
+            plan_file,
+            &StorageMasterKey::from_bytes(*self.secrets.target_master),
+            target_binding,
+            self.target.header.tbs().storage_key_generation,
+            self.construction_limits,
+        )?;
+        let mut identity = restore_identity(
+            source,
+            &self.secrets.source_master,
+            &self.secrets.source_guard,
+            &self.secrets.target_master,
+            &self.secrets.target_guard,
+            &self.target.header,
+            plan.entry_count(),
+            plan.hash(),
+        )?;
+        if self.target.fresh {
+            identity.target_database_header_hash = StorageDigest::from_bytes([0_u8; 32]);
+        }
+        Ok((plan, identity))
+    }
+
+    fn verify_installed(
+        &self,
+        identity: StorageOperationIdentity,
+    ) -> Result<RestoreCommandReceipt, StorageError> {
+        let verification = ConstructionTarget::verify_completed(
+            self.target_config()?,
+            identity,
+            self.directory.output_path_hash(),
+        )?;
+        Ok(restore_receipt(
+            self.directory.output_path(),
+            verification.completion().storage_operation_id,
+            self.source_facts,
+            self.current_facts,
+            self.target.header,
+        ))
+    }
+
+    fn install_staging(
+        self,
+        source: &mut crate::RestoreBackupSource<File>,
+        plan: ConstructionPlan,
+        identity: StorageOperationIdentity,
+    ) -> Result<RestoreCommandReceipt, StorageError> {
+        let initial_marker = StorageConstruction {
+            identity,
+            output_path_hash: self.directory.output_path_hash(),
+            next_target: StorageConstructionCursor::BeforeFirst,
+            target_records_committed: 0,
+        };
+        if self.target.fresh {
+            initialize_restore_target(
+                &self.directory,
+                self.qualifications,
+                &self.target,
+                &initial_marker,
+                &self.secrets.target_master,
+                &self.secrets.target_guard,
+                self.source_facts.rollback_guard_hash,
+                self.limits,
+            )?;
+        }
+        let mut target_writer = ConstructionTarget::open(self.target_config()?)?;
+        let marker = target_writer.marker()?;
+        if (self.target.fresh, marker.identity != identity) == (false, true) {
+            return Err(StorageError::ResumeMismatch);
+        }
+        let expected_identity = marker.identity;
+        let operation_id = self.execute_plan(source, plan, marker, &mut target_writer)?;
+        drop(target_writer);
+        self.directory.remove_plan_file()?;
+        let verification = ConstructionTarget::verify_completed(
+            self.target_config()?,
+            expected_identity,
+            self.directory.output_path_hash(),
+        )?;
+        if verification.completion().storage_operation_id != operation_id {
+            return Err(StorageError::StaleState);
+        }
+        let output = self.directory.install(verification)?;
+        Ok(restore_receipt(
+            output,
+            operation_id,
+            self.source_facts,
+            self.current_facts,
+            self.target.header,
+        ))
+    }
+
+    fn execute_plan(
+        &self,
+        source: &mut crate::RestoreBackupSource<File>,
+        plan: ConstructionPlan,
+        marker: StorageConstruction,
+        target_writer: &mut ConstructionTarget,
+    ) -> Result<StorageDigest, StorageError> {
+        let preflight_marker = StorageConstruction {
+            identity: marker.identity,
+            output_path_hash: self.directory.output_path_hash(),
+            next_target: StorageConstructionCursor::BeforeFirst,
+            target_records_committed: 0,
+        };
+        let mut transformer = RecoveryTransformV1::new(
+            self.target.header.tbs().recovery_epoch,
+            self.source_facts.rollback_guard_hash,
+        );
+        let _preflight = plan.preflight(
+            &preflight_marker,
+            0,
+            0,
+            source,
+            &mut transformer,
+            self.construction_limits,
+        )?;
+        let mut executor = ConstructionExecutor::resume(marker, plan, self.construction_limits)?;
+        while executor.service_batch(source, &mut transformer, target_writer)? != 0 {}
+        executor.finalize(target_writer)
+    }
+
+    fn target_config(&self) -> Result<StorageOpenConfig, StorageError> {
+        target_open_config(
+            self.request,
+            &self.directory,
+            self.qualifications,
+            &self.secrets.target_master,
+            &self.secrets.target_guard,
+            &self.secrets.login_index,
+            self.secrets.previous_login_index.as_deref(),
+            self.limits,
+        )
+    }
 }
 
 fn read_current_boundary(
@@ -382,10 +478,17 @@ fn same_restore_boundary(
     current: ConstructionSourceFacts,
     source: ConstructionSourceFacts,
 ) -> bool {
-    current.header.tbs().recovery_epoch == source.header.tbs().recovery_epoch
-        && current.header.tbs().server_incarnation == source.header.tbs().server_incarnation
-        && current.rollback_guard_hash == source.rollback_guard_hash
-        && current.state.state_generation == source.state.state_generation
+    (
+        current.header.tbs().recovery_epoch,
+        current.header.tbs().server_incarnation,
+        current.rollback_guard_hash,
+        current.state.state_generation,
+    ) == (
+        source.header.tbs().recovery_epoch,
+        source.header.tbs().server_incarnation,
+        source.rollback_guard_hash,
+        source.state.state_generation,
+    )
 }
 
 fn restore_receipt(
@@ -516,14 +619,23 @@ fn validate_target_header(
     } else {
         1
     };
-    if target.tbs().network_id != source.tbs().network_id
-        || target.tbs().server_id != source.tbs().server_id
-        || target.tbs().server_incarnation == source.tbs().server_incarnation
-        || target.tbs().database_instance_id == source.tbs().database_instance_id
-        || target.tbs().recovery_epoch == source.tbs().recovery_epoch
-        || target.tbs().schema_generation != source.tbs().schema_generation
-        || target.tbs().storage_key_generation != expected_generation
-    {
+    if (
+        target.tbs().network_id,
+        target.tbs().server_id,
+        target.tbs().server_incarnation == source.tbs().server_incarnation,
+        target.tbs().database_instance_id == source.tbs().database_instance_id,
+        target.tbs().recovery_epoch == source.tbs().recovery_epoch,
+        target.tbs().schema_generation,
+        target.tbs().storage_key_generation,
+    ) != (
+        source.tbs().network_id,
+        source.tbs().server_id,
+        false,
+        false,
+        false,
+        source.tbs().schema_generation,
+        expected_generation,
+    ) {
         return Err(StorageError::ResumeMismatch);
     }
     Ok(())
@@ -689,8 +801,10 @@ fn open_private_regular(path: &Path, mode: Mode) -> Result<File, StorageError> {
     )
     .map_err(|_| StorageError::FilesystemRejected)?;
     let metadata = fstat(&fd).map_err(|_| StorageError::FilesystemRejected)?;
-    if FileType::from_raw_mode(metadata.st_mode) != FileType::RegularFile
-        || Mode::from_raw_mode(metadata.st_mode) != mode
+    if (
+        FileType::from_raw_mode(metadata.st_mode),
+        Mode::from_raw_mode(metadata.st_mode),
+    ) != (FileType::RegularFile, mode)
     {
         return Err(StorageError::FilesystemRejected);
     }
@@ -715,4 +829,323 @@ fn anonymous_plan_file() -> Result<File, StorageError> {
         .map_err(|_| StorageError::FilesystemRejected)?;
     std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
     Ok(file)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write as _;
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+    use crate::StateMetaTbs;
+
+    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    const ZERO: StorageDigest = StorageDigest::from_bytes([0; 32]);
+
+    #[derive(Clone, Copy)]
+    struct HeaderFixture {
+        network: NetworkId,
+        server: ServerId,
+        incarnation: ServerIncarnation,
+        database: DatabaseId,
+        generation: u32,
+        schema: u64,
+        recovery: RecoveryEpoch,
+    }
+
+    fn database_header(fixture: HeaderFixture) -> DatabaseHeader {
+        DatabaseHeader::new(
+            DatabaseHeaderTbs {
+                network_id: fixture.network,
+                server_id: fixture.server,
+                server_incarnation: fixture.incarnation,
+                database_instance_id: fixture.database,
+                storage_key_generation: fixture.generation,
+                schema_generation: fixture.schema,
+                recovery_epoch: fixture.recovery,
+            },
+            ZERO,
+        )
+    }
+
+    fn source_facts(fixture: HeaderFixture, state_generation: u64) -> ConstructionSourceFacts {
+        ConstructionSourceFacts {
+            header: database_header(fixture),
+            state: StateMetaTbs {
+                storage_commit_sequence: 0,
+                manifest_sequence: 0,
+                state_generation,
+                account_service_response_count: 0,
+                nonce_draw_high_water: 0,
+                logical_database_bytes: 0,
+                backup_stream_bytes: 0,
+                checkpoint_manifest_sequence: 0,
+                latest_manifest_hash: ZERO,
+                checkpoint_hash: ZERO,
+                previous_rollback_guard_hash: ZERO,
+            },
+            rollback_guard_hash: StorageDigest::from_bytes([9; 32]),
+        }
+    }
+
+    fn engine_limits() -> StorageEngineLimits {
+        StorageEngineLimits {
+            redb_cache_bytes: 8 * 1_024 * 1_024,
+            fixed_reserve_bytes: 64 * 1_024 * 1_024,
+            reserve_percent: 1,
+            database_max_bytes: 1_073_741_824,
+            backup_max_bytes: 1_073_741_824,
+            integrity_checkpoint_manifests: 10_000,
+        }
+    }
+
+    fn request(declare: bool, trust_count: usize) -> RestoreCommandRequest {
+        let trust = RestoreTrustKey::new([1; 32], [2; 32], 1, 2);
+        RestoreCommandRequest {
+            network_id: NetworkId::from_bytes([1; 32]),
+            server_id: ServerId::from_bytes([2; 16]),
+            current_state_directory: PathBuf::from("/nonexistent/current"),
+            current_master_key_file: PathBuf::from("/nonexistent/current-master"),
+            current_rollback_guard_key_file: PathBuf::from("/nonexistent/current-guard"),
+            backup_path: PathBuf::from("/nonexistent/backup"),
+            source_master_key_file: PathBuf::from("/nonexistent/source-master"),
+            source_rollback_guard_key_file: PathBuf::from("/nonexistent/source-guard"),
+            login_index_key_file: PathBuf::from("/nonexistent/login"),
+            login_index_previous_key_file: None,
+            output_state_directory: PathBuf::from("/nonexistent/output"),
+            target_rollback_guard_key_file: PathBuf::from("/nonexistent/target-guard"),
+            target_master_key_file: None,
+            resume: false,
+            declare_recovery_epoch: declare,
+            trusted_backup_keys: vec![trust; trust_count],
+            limits: engine_limits(),
+        }
+    }
+
+    fn unique_temp_directory() -> PathBuf {
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "agenc-restore-command-test-{}-{sequence}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn command_preconditions_reject_missing_acknowledgement_and_trust_bounds() {
+        for request in [request(false, 1), request(true, 0), request(true, 1_025)] {
+            assert_eq!(
+                execute_restore_command(request, &[]),
+                Err(StorageError::InvalidEncoding)
+            );
+        }
+    }
+
+    #[test]
+    fn restore_boundary_compares_each_authenticated_lineage_field() {
+        let fixture = HeaderFixture {
+            network: NetworkId::from_bytes([1; 32]),
+            server: ServerId::from_bytes([2; 16]),
+            incarnation: ServerIncarnation::from_bytes([3; 16]),
+            database: DatabaseId::from_bytes([4; 16]),
+            generation: 1,
+            schema: 1,
+            recovery: RecoveryEpoch::from_bytes([5; 16]),
+        };
+        let source = source_facts(fixture, 7);
+        assert!(same_restore_boundary(source, source));
+
+        let mut changed = source;
+        changed.header = database_header(HeaderFixture {
+            recovery: RecoveryEpoch::from_bytes([6; 16]),
+            ..fixture
+        });
+        assert!(!same_restore_boundary(changed, source));
+        let mut changed = source;
+        changed.header = database_header(HeaderFixture {
+            incarnation: ServerIncarnation::from_bytes([7; 16]),
+            ..fixture
+        });
+        assert!(!same_restore_boundary(changed, source));
+        let mut changed = source;
+        changed.rollback_guard_hash = StorageDigest::from_bytes([8; 32]);
+        assert!(!same_restore_boundary(changed, source));
+        let changed = source_facts(fixture, 8);
+        assert!(!same_restore_boundary(changed, source));
+    }
+
+    #[test]
+    fn target_header_validation_rejects_each_identity_and_generation_mismatch() {
+        let source_fixture = HeaderFixture {
+            network: NetworkId::from_bytes([1; 32]),
+            server: ServerId::from_bytes([2; 16]),
+            incarnation: ServerIncarnation::from_bytes([3; 16]),
+            database: DatabaseId::from_bytes([4; 16]),
+            generation: 1,
+            schema: 1,
+            recovery: RecoveryEpoch::from_bytes([5; 16]),
+        };
+        let target_fixture = HeaderFixture {
+            incarnation: ServerIncarnation::from_bytes([6; 16]),
+            database: DatabaseId::from_bytes([7; 16]),
+            generation: 2,
+            recovery: RecoveryEpoch::from_bytes([8; 16]),
+            ..source_fixture
+        };
+        let source = database_header(source_fixture);
+        let secret = [9; 32];
+        assert_eq!(
+            validate_target_header(database_header(target_fixture), source, &secret, &secret,),
+            Ok(())
+        );
+        assert_eq!(
+            validate_target_header(
+                database_header(HeaderFixture {
+                    generation: 1,
+                    ..target_fixture
+                }),
+                source,
+                &secret,
+                &[10; 32],
+            ),
+            Ok(())
+        );
+
+        let mismatches = [
+            HeaderFixture {
+                network: NetworkId::from_bytes([11; 32]),
+                ..target_fixture
+            },
+            HeaderFixture {
+                server: ServerId::from_bytes([12; 16]),
+                ..target_fixture
+            },
+            HeaderFixture {
+                incarnation: source_fixture.incarnation,
+                ..target_fixture
+            },
+            HeaderFixture {
+                database: source_fixture.database,
+                ..target_fixture
+            },
+            HeaderFixture {
+                recovery: source_fixture.recovery,
+                ..target_fixture
+            },
+            HeaderFixture {
+                schema: 2,
+                ..target_fixture
+            },
+            HeaderFixture {
+                generation: 3,
+                ..target_fixture
+            },
+        ];
+        for mismatch in mismatches {
+            assert_eq!(
+                validate_target_header(database_header(mismatch), source, &secret, &secret),
+                Err(StorageError::ResumeMismatch)
+            );
+        }
+
+        let maximum_source = database_header(HeaderFixture {
+            generation: u32::MAX,
+            ..source_fixture
+        });
+        assert_eq!(
+            validate_target_header(
+                database_header(target_fixture),
+                maximum_source,
+                &secret,
+                &secret,
+            ),
+            Err(StorageError::LimitExceeded)
+        );
+    }
+
+    #[test]
+    fn construction_limits_and_secret_comparison_preserve_exact_bounds() -> Result<(), StorageError>
+    {
+        let limits = construction_limits(engine_limits())?;
+        assert_eq!(limits.batch_records, RESTORE_BATCH_RECORDS);
+        assert_eq!(limits.batch_bytes, RESTORE_BATCH_BYTES);
+        assert!(secret_bytes_match(&[1; 32], &[1; 32]));
+        assert!(!secret_bytes_match(&[1; 32], &[2; 32]));
+
+        let mut invalid = engine_limits();
+        invalid.backup_max_bytes = 0;
+        assert_eq!(
+            construction_limits(invalid),
+            Err(StorageError::LimitExceeded)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn secret_files_require_absolute_regular_mode_0600_and_exact_length() -> Result<(), StorageError>
+    {
+        let directory = unique_temp_directory();
+        std::fs::create_dir(&directory).map_err(|_| StorageError::FilesystemRejected)?;
+        let key_path = directory.join("key");
+        let mut key = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&key_path)
+            .map_err(|_| StorageError::FilesystemRejected)?;
+        key.write_all(&[1; 32])
+            .map_err(|_| StorageError::FilesystemRejected)?;
+        drop(key);
+        assert_eq!(*read_secret_key(&key_path)?, [1; 32]);
+
+        let short_path = directory.join("short");
+        let mut short = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&short_path)
+            .map_err(|_| StorageError::FilesystemRejected)?;
+        short
+            .write_all(&[2; 31])
+            .map_err(|_| StorageError::FilesystemRejected)?;
+        drop(short);
+        assert_eq!(
+            read_secret_key(&short_path).map(|_| ()),
+            Err(StorageError::InvalidEncoding)
+        );
+
+        let public_path = directory.join("public");
+        let mut public = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&public_path)
+            .map_err(|_| StorageError::FilesystemRejected)?;
+        public
+            .write_all(&[3; 32])
+            .map_err(|_| StorageError::FilesystemRejected)?;
+        drop(public);
+        std::fs::set_permissions(&public_path, std::fs::Permissions::from_mode(0o644))
+            .map_err(|_| StorageError::FilesystemRejected)?;
+        assert_eq!(
+            read_secret_key(&public_path).map(|_| ()),
+            Err(StorageError::FilesystemRejected)
+        );
+
+        let link_path = directory.join("link");
+        symlink(&key_path, &link_path).map_err(|_| StorageError::FilesystemRejected)?;
+        assert_eq!(
+            read_secret_key(&link_path).map(|_| ()),
+            Err(StorageError::FilesystemRejected)
+        );
+        assert_eq!(
+            read_secret_key(Path::new("relative-key")).map(|_| ()),
+            Err(StorageError::FilesystemRejected)
+        );
+        assert!(anonymous_plan_file().is_ok());
+
+        std::fs::remove_dir_all(directory).map_err(|_| StorageError::FilesystemRejected)?;
+        Ok(())
+    }
 }

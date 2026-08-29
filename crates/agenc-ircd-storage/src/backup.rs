@@ -588,7 +588,12 @@ impl BackupReconstruction {
 
     // agenc-review: focus owner=storage reviewed=2026-08-28 reason=closed backup completion matrix binds login manifest and checkpoint invariants together
     fn finish(self, state_meta: &StateMeta) -> Result<(), StorageError> {
-        if self.key_check_count != 1 || self.state_meta_count != 1 || self.construction_count != 0 {
+        if (
+            self.key_check_count,
+            self.state_meta_count,
+            self.construction_count,
+        ) != (1, 1, 0)
+        {
             return Err(StorageError::StaleState);
         }
         let login_state = self.login_key_state.ok_or(StorageError::StaleState)?;
@@ -606,12 +611,8 @@ impl BackupReconstruction {
                 return Err(StorageError::StaleState);
             }
         }
-        if login_state
-            .previous()
-            .map_or(previous_count != 0, |(_, expected)| {
-                expected != previous_count
-            })
-        {
+        let expected_previous_count = login_state.previous().map_or(0, |(_, count)| count);
+        if previous_count != expected_previous_count {
             return Err(StorageError::StaleState);
         }
         let state = state_meta.tbs();
@@ -626,18 +627,24 @@ impl BackupReconstruction {
             if self.last_manifest_sequence.is_some() {
                 return Err(StorageError::StaleState);
             }
-        } else if self.first_manifest_sequence
-            != Some(
+        } else if (
+            self.first_manifest_sequence,
+            self.last_manifest_sequence,
+            self.last_manifest_hash,
+            self.last_manifest_state_generation,
+            self.last_manifest_response_count,
+        ) != (
+            Some(
                 state
                     .checkpoint_manifest_sequence
                     .checked_add(1)
                     .ok_or(StorageError::Overflow)?,
-            )
-            || self.last_manifest_sequence != Some(state.manifest_sequence)
-            || self.last_manifest_hash != Some(state.latest_manifest_hash)
-            || self.last_manifest_state_generation != Some(state.state_generation)
-            || self.last_manifest_response_count != Some(state.account_service_response_count)
-        {
+            ),
+            Some(state.manifest_sequence),
+            Some(state.latest_manifest_hash),
+            Some(state.state_generation),
+            Some(state.account_service_response_count),
+        ) {
             return Err(StorageError::StaleState);
         }
         let active = self
@@ -650,14 +657,15 @@ impl BackupReconstruction {
             .ok_or(StorageError::StaleState)?;
         let zero = StorageDigest::from_bytes([0_u8; 32]);
         if state.checkpoint_manifest_sequence == 0 {
-            if self.checkpoints.len() != 1 || active.previous_checkpoint_hash != zero {
+            if (self.checkpoints.len(), active.previous_checkpoint_hash) != (1, zero) {
                 return Err(StorageError::StaleState);
             }
-        } else if self.checkpoints.len() != 2
-            || !self
-                .checkpoints
+        } else if (
+            self.checkpoints.len(),
+            self.checkpoints
                 .iter()
-                .any(|checkpoint| checkpoint.checkpoint_hash == active.previous_checkpoint_hash)
+                .any(|checkpoint| checkpoint.checkpoint_hash == active.previous_checkpoint_hash),
+        ) != (2, true)
         {
             return Err(StorageError::StaleState);
         }
@@ -886,15 +894,16 @@ impl<'a> BackupRecordVerification<'a> {
         if record.table() != TableId::KeyCheck || record.stored_key().as_bytes() != KEY_CHECK_KEY {
             return Ok(());
         }
-        if self.key_check_seen
-            || sealed.record_id()? != self.header.source_header().key_check_object_id()
-            || plaintext
-                != self
-                    .header
+        if (self.key_check_seen, sealed.record_id()?, plaintext)
+            != (
+                false,
+                self.header.source_header().key_check_object_id(),
+                self.header
                     .source_header()
                     .tbs()
                     .key_check_plaintext()?
-                    .as_bytes()
+                    .as_bytes(),
+            )
         {
             return Err(StorageError::AuthenticationFailed);
         }
@@ -912,13 +921,14 @@ impl<'a> BackupRecordVerification<'a> {
         {
             return Ok(());
         }
-        if self.state_meta.is_some()
-            || sealed.record_id()?
-                != self
-                    .header
+        if (self.state_meta.is_some(), sealed.record_id()?)
+            != (
+                false,
+                self.header
                     .source_nonce_reservation()
                     .tbs()
-                    .state_meta_record_id
+                    .state_meta_record_id,
+            )
         {
             return Err(StorageError::StaleState);
         }
@@ -1047,4 +1057,905 @@ fn database_binding(header: &DatabaseHeader) -> DatabaseBinding {
         header.tbs().server_incarnation,
         header.tbs().database_instance_id,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use agenc_ircd_crypto::{
+        LoginIndexKey, RollbackGuardRootKey, StorageIntegrityContext, derive_storage_integrity_keys,
+    };
+    use agenc_ircd_types::{DatabaseId, NetworkId, RecoveryEpoch, ServerId, ServerIncarnation};
+
+    use super::*;
+    use crate::{
+        DatabaseHeaderTbs, IntegrityCheckpointTbs, IntegrityManifestTbs, IntegrityRecordMutation,
+        IntegrityRecordVersion, NonceReservationTbs, RollbackGuardPhase, RollbackGuardTbs,
+        StateMetaTbs, StorageSealContext,
+    };
+
+    const ZERO: StorageDigest = StorageDigest::from_bytes([0; 32]);
+
+    fn state_meta(
+        manifest_sequence: u64,
+        checkpoint_manifest_sequence: u64,
+        latest_manifest_hash: StorageDigest,
+        checkpoint_hash: StorageDigest,
+    ) -> Result<StateMeta, StorageError> {
+        let network = NetworkId::from_bytes([1; 32]);
+        let server = ServerId::from_bytes([2; 16]);
+        let database = DatabaseId::from_bytes([3; 16]);
+        let keys = derive_storage_integrity_keys(
+            &RollbackGuardRootKey::from_bytes([4; 32]),
+            StorageIntegrityContext::new(network, server, database),
+        )?;
+        StateMeta::authenticate(
+            StateMetaTbs {
+                storage_commit_sequence: manifest_sequence,
+                manifest_sequence,
+                state_generation: manifest_sequence,
+                account_service_response_count: manifest_sequence,
+                nonce_draw_high_water: manifest_sequence,
+                logical_database_bytes: 1,
+                backup_stream_bytes: 1,
+                checkpoint_manifest_sequence,
+                latest_manifest_hash,
+                checkpoint_hash,
+                previous_rollback_guard_hash: ZERO,
+            },
+            StorageDigest::from_bytes([5; 32]),
+            &keys,
+        )
+    }
+
+    fn baseline_reconstruction(
+        checkpoint_hash: StorageDigest,
+    ) -> Result<BackupReconstruction, StorageError> {
+        let network = NetworkId::from_bytes([1; 32]);
+        let login_key = LoginIndexKey::from_bytes([6; 32]);
+        Ok(BackupReconstruction {
+            key_check_count: 1,
+            state_meta_count: 1,
+            login_key_state: Some(LoginIndexKeyState::stable(1, login_key.key_id(network))?),
+            login_generations: [None, None],
+            construction_count: 0,
+            manifest_count: 0,
+            first_manifest_sequence: None,
+            first_manifest_previous_hash: None,
+            last_manifest_sequence: None,
+            last_manifest_hash: None,
+            last_manifest_state_generation: None,
+            last_manifest_response_count: None,
+            checkpoints: vec![CheckpointFacts {
+                cut_manifest_sequence: 0,
+                checkpoint_hash,
+                previous_checkpoint_hash: ZERO,
+                cut_manifest_hash: ZERO,
+            }],
+        })
+    }
+
+    fn reconstruction_record(table: TableId, key: Vec<u8>) -> Result<BackupRecord, StorageError> {
+        Ok(BackupRecord {
+            table,
+            stored_key: StoredKey::new(key)?,
+            record_schema: 1,
+            sealed_record: Vec::new(),
+        })
+    }
+
+    fn manifest(
+        database: DatabaseId,
+        sequence: u64,
+        previous_hash: StorageDigest,
+    ) -> Result<IntegrityManifest, StorageError> {
+        let mutation = IntegrityRecordMutation::new(
+            TableId::Account,
+            StoredKey::new(vec![u8::try_from(sequence).unwrap_or(0)])?,
+            IntegrityRecordVersion::Absent,
+            IntegrityRecordVersion::Present {
+                record_schema: 1,
+                sealed_record_id: StorageDigest::from_bytes([31; 32]),
+            },
+        )?;
+        IntegrityManifest::new(IntegrityManifestTbs::new(
+            database,
+            sequence,
+            sequence,
+            sequence.saturating_sub(1),
+            sequence,
+            sequence.saturating_sub(1),
+            sequence,
+            0,
+            0,
+            3,
+            3,
+            previous_hash,
+            vec![mutation],
+        )?)
+    }
+
+    fn checkpoint(
+        database: DatabaseId,
+        cut_sequence: u64,
+        previous_hash: StorageDigest,
+    ) -> Result<IntegrityCheckpoint, StorageError> {
+        IntegrityCheckpoint::new(IntegrityCheckpointTbs {
+            database_instance_id: database,
+            cut_storage_commit_sequence: cut_sequence,
+            cut_manifest_sequence: cut_sequence,
+            cut_state_generation: cut_sequence,
+            cut_account_service_response_count: cut_sequence,
+            cut_nonce_draw_high_water: 0,
+            cut_manifest_hash: ZERO,
+            tracked_record_count: 0,
+            tracked_state_digest: ZERO,
+            previous_checkpoint_hash: previous_hash,
+            installation_storage_commit_sequence: cut_sequence.saturating_add(1),
+            installation_manifest_sequence: cut_sequence,
+            installation_nonce_reservation_start: 0,
+            installation_nonce_draw_high_water: 2,
+        })
+    }
+
+    fn backup_boundary() -> Result<
+        (
+            BackupHeader,
+            StorageMasterKey,
+            RollbackGuardRootKey,
+            Ed25519SecretKey,
+        ),
+        StorageError,
+    > {
+        let network = NetworkId::from_bytes([61; 32]);
+        let server = ServerId::from_bytes([62; 16]);
+        let incarnation = ServerIncarnation::from_bytes([63; 16]);
+        let database = DatabaseId::from_bytes([64; 16]);
+        let header = DatabaseHeader::new(
+            DatabaseHeaderTbs::new(
+                network,
+                server,
+                incarnation,
+                database,
+                1,
+                crate::SCHEMA_GENERATION,
+                RecoveryEpoch::from_bytes([65; 16]),
+            )?,
+            StorageDigest::from_bytes([66; 32]),
+        );
+        let guard_root = RollbackGuardRootKey::from_bytes([67; 32]);
+        let integrity_keys = derive_storage_integrity_keys(
+            &guard_root,
+            StorageIntegrityContext::new(network, server, database),
+        )?;
+        let state_meta_record_id = StorageDigest::from_bytes([68; 32]);
+        let reservation = NonceReservationState::authenticate(
+            NonceReservationTbs {
+                database_instance_id: database,
+                reservation_sequence: 0,
+                phase: RollbackGuardPhase::Committed,
+                nonce_reservation_start: 0,
+                nonce_draw_high_water: 0,
+                storage_commit_sequence: 0,
+                manifest_sequence: 0,
+                state_generation: 0,
+                database_header_hash: header.complete_hash()?,
+                state_meta_record_id,
+                previous_guard_hash: ZERO,
+            },
+            &integrity_keys,
+        )?;
+        let guard = RollbackGuard::authenticate(
+            RollbackGuardTbs {
+                network_id: network,
+                server_id: server,
+                database_instance_id: database,
+                storage_key_generation: 1,
+                schema_generation: crate::SCHEMA_GENERATION,
+                recovery_epoch: header.tbs().recovery_epoch,
+                storage_commit_sequence: 0,
+                manifest_sequence: 0,
+                state_generation: 0,
+                phase: RollbackGuardPhase::Committed,
+                reservation_sequence: 0,
+                nonce_reservation_start: 0,
+                nonce_draw_high_water: 0,
+                database_header_hash: header.complete_hash()?,
+                state_meta_record_id,
+                nonce_reservation_state_hash: reservation.complete_hash()?,
+                previous_guard_hash: ZERO,
+            },
+            &integrity_keys,
+        )?;
+        let signing_key = Ed25519SecretKey::from_bytes([69; 32]);
+        let backup_header = BackupHeader::new(
+            header,
+            reservation,
+            guard,
+            123,
+            [70; 16],
+            signing_key.public_key(),
+        )?;
+        Ok((
+            backup_header,
+            StorageMasterKey::from_bytes([71; 32]),
+            guard_root,
+            signing_key,
+        ))
+    }
+
+    fn complete_verification<'a>(
+        header: &'a BackupHeader,
+        master_key: &'a StorageMasterKey,
+        guard_root: &RollbackGuardRootKey,
+        stream_bytes: u64,
+    ) -> Result<BackupRecordVerification<'a>, StorageError> {
+        let mut verification = BackupRecordVerification::new(header, master_key, guard_root)?;
+        let source = header.source_header();
+        let keys = derive_storage_integrity_keys(
+            guard_root,
+            StorageIntegrityContext::new(
+                source.tbs().network_id,
+                source.tbs().server_id,
+                source.tbs().database_instance_id,
+            ),
+        )?;
+        verification.key_check_seen = true;
+        verification.state_meta = Some(StateMeta::authenticate(
+            StateMetaTbs {
+                storage_commit_sequence: 0,
+                manifest_sequence: 0,
+                state_generation: 0,
+                account_service_response_count: 0,
+                nonce_draw_high_water: 0,
+                logical_database_bytes: verification.logical_database_bytes,
+                backup_stream_bytes: stream_bytes,
+                checkpoint_manifest_sequence: 0,
+                latest_manifest_hash: ZERO,
+                checkpoint_hash: ZERO,
+                previous_rollback_guard_hash: ZERO,
+            },
+            source.complete_hash()?,
+            &keys,
+        )?);
+        Ok(verification)
+    }
+
+    #[test]
+    fn reconstruction_rejects_each_singleton_login_and_genesis_mismatch() -> Result<(), StorageError>
+    {
+        let checkpoint_hash = StorageDigest::from_bytes([7; 32]);
+        let state = state_meta(0, 0, ZERO, checkpoint_hash)?;
+        baseline_reconstruction(checkpoint_hash)?.finish(&state)?;
+
+        let mut missing_key_check = baseline_reconstruction(checkpoint_hash)?;
+        missing_key_check.key_check_count = 0;
+        assert_eq!(
+            missing_key_check.finish(&state),
+            Err(StorageError::StaleState)
+        );
+
+        let mut missing_state = baseline_reconstruction(checkpoint_hash)?;
+        missing_state.state_meta_count = 0;
+        assert_eq!(missing_state.finish(&state), Err(StorageError::StaleState));
+
+        let mut construction = baseline_reconstruction(checkpoint_hash)?;
+        construction.construction_count = 1;
+        assert_eq!(construction.finish(&state), Err(StorageError::StaleState));
+
+        let mut missing_login_state = baseline_reconstruction(checkpoint_hash)?;
+        missing_login_state.login_key_state = None;
+        assert_eq!(
+            missing_login_state.finish(&state),
+            Err(StorageError::StaleState)
+        );
+
+        let mut unknown_login_generation = baseline_reconstruction(checkpoint_hash)?;
+        unknown_login_generation.login_generations[0] = Some((2, 1));
+        assert_eq!(
+            unknown_login_generation.finish(&state),
+            Err(StorageError::StaleState)
+        );
+
+        let mut unexpected_checkpoint = baseline_reconstruction(checkpoint_hash)?;
+        unexpected_checkpoint.checkpoints.push(CheckpointFacts {
+            cut_manifest_sequence: 1,
+            checkpoint_hash: StorageDigest::from_bytes([8; 32]),
+            previous_checkpoint_hash: checkpoint_hash,
+            cut_manifest_hash: ZERO,
+        });
+        assert_eq!(
+            unexpected_checkpoint.finish(&state),
+            Err(StorageError::StaleState)
+        );
+
+        let mut wrong_genesis_predecessor = baseline_reconstruction(checkpoint_hash)?;
+        wrong_genesis_predecessor
+            .checkpoints
+            .first_mut()
+            .ok_or(StorageError::StaleState)?
+            .previous_checkpoint_hash = StorageDigest::from_bytes([9; 32]);
+        assert_eq!(
+            wrong_genesis_predecessor.finish(&state),
+            Err(StorageError::StaleState)
+        );
+
+        let mut wrong_cut_hash = baseline_reconstruction(checkpoint_hash)?;
+        wrong_cut_hash
+            .checkpoints
+            .first_mut()
+            .ok_or(StorageError::StaleState)?
+            .cut_manifest_hash = StorageDigest::from_bytes([10; 32]);
+        assert_eq!(wrong_cut_hash.finish(&state), Err(StorageError::StaleState));
+        Ok(())
+    }
+
+    #[test]
+    fn reconstruction_rejects_each_manifest_and_checkpoint_chain_mismatch()
+    -> Result<(), StorageError> {
+        let checkpoint_hash = StorageDigest::from_bytes([11; 32]);
+        let manifest_hash = StorageDigest::from_bytes([12; 32]);
+        let state = state_meta(1, 0, manifest_hash, checkpoint_hash)?;
+
+        let wrong_count = baseline_reconstruction(checkpoint_hash)?;
+        assert_eq!(wrong_count.finish(&state), Err(StorageError::StaleState));
+
+        let complete = || -> Result<BackupReconstruction, StorageError> {
+            let mut reconstruction = baseline_reconstruction(checkpoint_hash)?;
+            reconstruction.manifest_count = 1;
+            reconstruction.first_manifest_sequence = Some(1);
+            reconstruction.first_manifest_previous_hash = Some(ZERO);
+            reconstruction.last_manifest_sequence = Some(1);
+            reconstruction.last_manifest_hash = Some(manifest_hash);
+            reconstruction.last_manifest_state_generation = Some(1);
+            reconstruction.last_manifest_response_count = Some(1);
+            Ok(reconstruction)
+        };
+        complete()?.finish(&state)?;
+
+        for changed in 0..5 {
+            let mut reconstruction = complete()?;
+            match changed {
+                0 => reconstruction.first_manifest_sequence = Some(2),
+                1 => reconstruction.last_manifest_sequence = Some(2),
+                2 => reconstruction.last_manifest_hash = Some(ZERO),
+                3 => reconstruction.last_manifest_state_generation = Some(2),
+                _ => reconstruction.last_manifest_response_count = Some(2),
+            }
+            assert_eq!(reconstruction.finish(&state), Err(StorageError::StaleState));
+        }
+
+        let cut_hash = StorageDigest::from_bytes([13; 32]);
+        let active_hash = StorageDigest::from_bytes([14; 32]);
+        let predecessor_hash = StorageDigest::from_bytes([15; 32]);
+        let checkpoint_state = state_meta(1, 1, cut_hash, active_hash)?;
+        let mut checkpointed = baseline_reconstruction(active_hash)?;
+        checkpointed.checkpoints = vec![
+            CheckpointFacts {
+                cut_manifest_sequence: 0,
+                checkpoint_hash: predecessor_hash,
+                previous_checkpoint_hash: ZERO,
+                cut_manifest_hash: ZERO,
+            },
+            CheckpointFacts {
+                cut_manifest_sequence: 1,
+                checkpoint_hash: active_hash,
+                previous_checkpoint_hash: predecessor_hash,
+                cut_manifest_hash: cut_hash,
+            },
+        ];
+        let mut unknown_active = baseline_reconstruction(active_hash)?;
+        unknown_active.checkpoints = checkpointed.checkpoints.clone();
+        unknown_active
+            .checkpoints
+            .get_mut(1)
+            .ok_or(StorageError::StaleState)?
+            .checkpoint_hash = ZERO;
+        checkpointed.finish(&checkpoint_state)?;
+
+        let mut missing_predecessor = baseline_reconstruction(active_hash)?;
+        missing_predecessor.checkpoints = vec![CheckpointFacts {
+            cut_manifest_sequence: 1,
+            checkpoint_hash: active_hash,
+            previous_checkpoint_hash: predecessor_hash,
+            cut_manifest_hash: cut_hash,
+        }];
+        assert_eq!(
+            missing_predecessor.finish(&checkpoint_state),
+            Err(StorageError::StaleState)
+        );
+
+        assert_eq!(
+            unknown_active.finish(&checkpoint_state),
+            Err(StorageError::StaleState)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn login_generation_accumulator_accepts_two_generations_only() {
+        let mut reconstruction = BackupReconstruction::new();
+        assert_eq!(reconstruction.observe_login_generation(1), Ok(()));
+        assert_eq!(reconstruction.observe_login_generation(1), Ok(()));
+        assert_eq!(reconstruction.observe_login_generation(2), Ok(()));
+        assert_eq!(
+            reconstruction.observe_login_generation(3),
+            Err(StorageError::StaleState)
+        );
+        assert_eq!(
+            reconstruction.login_generations,
+            [Some((1, 2)), Some((2, 1))]
+        );
+    }
+
+    #[test]
+    fn reconstruction_observe_authenticates_singletons_manifests_and_checkpoints()
+    -> Result<(), StorageError> {
+        let database = DatabaseId::from_bytes([41; 16]);
+        let other_database = DatabaseId::from_bytes([42; 16]);
+
+        let mut reconstruction = BackupReconstruction::new();
+        reconstruction.observe(
+            &reconstruction_record(TableId::KeyCheck, KEY_CHECK_KEY.to_vec())?,
+            &[],
+            database,
+        )?;
+        reconstruction.observe(
+            &reconstruction_record(TableId::StateMeta, STATE_META_KEY.to_vec())?,
+            &[],
+            database,
+        )?;
+        assert_eq!(
+            (
+                reconstruction.key_check_count,
+                reconstruction.state_meta_count
+            ),
+            (1, 1)
+        );
+        reconstruction.key_check_count = u8::MAX;
+        assert_eq!(
+            reconstruction.observe(
+                &reconstruction_record(TableId::KeyCheck, KEY_CHECK_KEY.to_vec())?,
+                &[],
+                database,
+            ),
+            Err(StorageError::Overflow)
+        );
+        reconstruction.state_meta_count = u8::MAX;
+        assert_eq!(
+            reconstruction.observe(
+                &reconstruction_record(TableId::StateMeta, STATE_META_KEY.to_vec())?,
+                &[],
+                database,
+            ),
+            Err(StorageError::Overflow)
+        );
+
+        let login_key = LoginIndexKey::from_bytes([43; 32]);
+        let key_state =
+            LoginIndexKeyState::stable(1, login_key.key_id(NetworkId::from_bytes([44; 32])))?
+                .encode()?;
+        let key_state_record = reconstruction_record(
+            TableId::LoginIndexKeyState,
+            crate::LOGIN_INDEX_KEY_STATE_KEY.to_vec(),
+        )?;
+        let mut reconstruction = BackupReconstruction::new();
+        reconstruction.observe(&key_state_record, &key_state, database)?;
+        assert_eq!(
+            reconstruction.observe(&key_state_record, &key_state, database),
+            Err(StorageError::StaleState)
+        );
+
+        let first = manifest(database, 1, ZERO)?;
+        let second = manifest(database, 2, first.manifest_hash())?;
+        let first_record =
+            reconstruction_record(TableId::IntegrityManifest, 1_u64.to_be_bytes().to_vec())?;
+        let second_record =
+            reconstruction_record(TableId::IntegrityManifest, 2_u64.to_be_bytes().to_vec())?;
+        let mut reconstruction = BackupReconstruction::new();
+        reconstruction.observe(&first_record, &first.encode()?, database)?;
+        reconstruction.observe(&second_record, &second.encode()?, database)?;
+        assert_eq!(reconstruction.manifest_count, 2);
+
+        let wrong_database = manifest(other_database, 1, ZERO)?;
+        assert_eq!(
+            BackupReconstruction::new()
+                .observe(&first_record, &wrong_database.encode()?, database,),
+            Err(StorageError::StaleState)
+        );
+        assert_eq!(
+            BackupReconstruction::new().observe(&second_record, &first.encode()?, database,),
+            Err(StorageError::StaleState)
+        );
+
+        let mut gap = BackupReconstruction::new();
+        gap.observe(&first_record, &first.encode()?, database)?;
+        let third = manifest(database, 3, first.manifest_hash())?;
+        let third_record =
+            reconstruction_record(TableId::IntegrityManifest, 3_u64.to_be_bytes().to_vec())?;
+        assert_eq!(
+            gap.observe(&third_record, &third.encode()?, database),
+            Err(StorageError::StaleState)
+        );
+        let mut wrong_hash = BackupReconstruction::new();
+        wrong_hash.observe(&first_record, &first.encode()?, database)?;
+        let second_wrong_hash = manifest(database, 2, ZERO)?;
+        assert_eq!(
+            wrong_hash.observe(&second_record, &second_wrong_hash.encode()?, database),
+            Err(StorageError::StaleState)
+        );
+        let mut sequence_overflow = BackupReconstruction::new();
+        sequence_overflow.last_manifest_sequence = Some(u64::MAX);
+        assert_eq!(
+            sequence_overflow.observe(&first_record, &first.encode()?, database),
+            Err(StorageError::Overflow)
+        );
+        let mut count_overflow = BackupReconstruction::new();
+        count_overflow.manifest_count = u64::MAX;
+        assert_eq!(
+            count_overflow.observe(&first_record, &first.encode()?, database),
+            Err(StorageError::Overflow)
+        );
+
+        let first_checkpoint = checkpoint(database, 0, ZERO)?;
+        let checkpoint_record =
+            reconstruction_record(TableId::IntegrityCheckpoint, 0_u64.to_be_bytes().to_vec())?;
+        let mut reconstruction = BackupReconstruction::new();
+        reconstruction.observe(&checkpoint_record, &first_checkpoint.encode()?, database)?;
+        reconstruction.observe(
+            &reconstruction_record(TableId::IntegrityCheckpoint, 1_u64.to_be_bytes().to_vec())?,
+            &checkpoint(database, 1, first_checkpoint.checkpoint_hash())?.encode()?,
+            database,
+        )?;
+        assert_eq!(
+            reconstruction.observe(
+                &reconstruction_record(
+                    TableId::IntegrityCheckpoint,
+                    2_u64.to_be_bytes().to_vec(),
+                )?,
+                &checkpoint(database, 2, first_checkpoint.checkpoint_hash())?.encode()?,
+                database,
+            ),
+            Err(StorageError::LimitExceeded)
+        );
+        assert_eq!(
+            BackupReconstruction::new().observe(
+                &checkpoint_record,
+                &checkpoint(other_database, 0, ZERO)?.encode()?,
+                database,
+            ),
+            Err(StorageError::StaleState)
+        );
+        assert_eq!(
+            BackupReconstruction::new().observe(
+                &reconstruction_record(
+                    TableId::IntegrityCheckpoint,
+                    1_u64.to_be_bytes().to_vec(),
+                )?,
+                &first_checkpoint.encode()?,
+                database,
+            ),
+            Err(StorageError::StaleState)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fixed_backup_codecs_and_trust_validity_reject_each_boundary() -> Result<(), StorageError> {
+        let guard_root = RollbackGuardRootKey::from_bytes([51; 32]);
+        assert_eq!(
+            BackupHeader::decode(&[], &guard_root).map(|_| ()),
+            Err(StorageError::InvalidEncoding)
+        );
+        let mut wrong_version = vec![0; BACKUP_HEADER_BYTES];
+        wrong_version
+            .get_mut(..2)
+            .ok_or(StorageError::InvalidEncoding)?
+            .copy_from_slice(&2_u16.to_be_bytes());
+        assert_eq!(
+            BackupHeader::decode(&wrong_version, &guard_root).map(|_| ()),
+            Err(StorageError::UnsupportedVersion)
+        );
+        assert_eq!(
+            BackupTrailer::decode(&[]),
+            Err(StorageError::InvalidEncoding)
+        );
+        assert_eq!(
+            BackupRecord::decode(&vec![0; MAX_BACKUP_RECORD_BYTES + 1]).map(|_| ()),
+            Err(StorageError::LimitExceeded)
+        );
+
+        let signing_key = Ed25519SecretKey::from_bytes([52; 32]);
+        let key_id = backup_signing_key_id(signing_key.public_key().as_bytes())?;
+        let trust = BackupTrustKey::with_validity(key_id, signing_key.public_key(), 10, 20)?;
+        assert!(!trust.accepts_creation_time(9));
+        assert!(trust.accepts_creation_time(10));
+        assert!(trust.accepts_creation_time(19));
+        assert!(!trust.accepts_creation_time(20));
+        assert_eq!(
+            BackupTrustKey::with_validity(key_id, signing_key.public_key(), 20, 20),
+            Err(StorageError::AuthenticationFailed)
+        );
+        assert_eq!(
+            BackupTrustKey::with_validity(
+                StorageDigest::from_bytes([53; 32]),
+                signing_key.public_key(),
+                10,
+                20,
+            ),
+            Err(StorageError::AuthenticationFailed)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn streaming_and_verification_limits_reject_each_late_boundary() -> Result<(), StorageError> {
+        let (header, master_key, guard_root, signing_key) = backup_boundary()?;
+        let trust = BackupTrustKey::new(signing_key.public_key())?;
+        assert_eq!(
+            trusted_backup_key(&header, &[]),
+            Err(StorageError::AuthenticationFailed)
+        );
+        assert_eq!(
+            trusted_backup_key(
+                &header,
+                &[
+                    BackupTrustKey::new(signing_key.public_key())?,
+                    BackupTrustKey::new(signing_key.public_key())?,
+                ],
+            ),
+            Err(StorageError::AuthenticationFailed)
+        );
+        let wrong_key = Ed25519SecretKey::from_bytes([72; 32]);
+        assert_eq!(
+            trusted_backup_key(&header, &[BackupTrustKey::new(wrong_key.public_key())?]),
+            Err(StorageError::AuthenticationFailed)
+        );
+
+        let oversized_trust = (0..1_025)
+            .map(|_| BackupTrustKey::new(signing_key.public_key()))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            verify_backup(
+                std::io::Cursor::new(Vec::<u8>::new()),
+                &master_key,
+                &guard_root,
+                &oversized_trust,
+                BACKUP_FIXED_STREAM_BYTES,
+            )
+            .map(|_| ()),
+            Err(StorageError::LimitExceeded)
+        );
+
+        let mut writer = BackupStreamWriter::start(Vec::new(), &header, BACKUP_FIXED_STREAM_BYTES)?;
+        writer.write_record(&BackupRecord {
+            table: TableId::KeyCheck,
+            stored_key: StoredKey::new(KEY_CHECK_KEY.to_vec())?,
+            record_schema: 1,
+            sealed_record: Vec::new(),
+        })?;
+        assert_eq!(
+            writer.finish(&signing_key).map(|_| ()),
+            Err(StorageError::LimitExceeded)
+        );
+
+        let (bytes, _) = BackupStreamWriter::start(Vec::new(), &header, BACKUP_FIXED_STREAM_BYTES)?
+            .finish(&signing_key)?;
+        assert_eq!(
+            verify_backup(
+                std::io::Cursor::new(bytes),
+                &master_key,
+                &guard_root,
+                &[trust],
+                BACKUP_FIXED_STREAM_BYTES - 1,
+            )
+            .map(|_| ()),
+            Err(StorageError::LimitExceeded)
+        );
+
+        let mut verification = BackupRecordVerification::new(&header, &master_key, &guard_root)?;
+        let mut hasher = BackupStreamHasher::new(BACKUP_FIXED_STREAM_BYTES)?;
+        assert_eq!(
+            read_backup_records(
+                &mut std::io::Cursor::new(0_u32.to_be_bytes()),
+                &mut hasher,
+                &mut verification,
+            ),
+            Err(StorageError::LimitExceeded)
+        );
+        let too_large = u32::try_from(MAX_BACKUP_RECORD_BYTES)
+            .map_err(|_| StorageError::Overflow)?
+            .checked_add(1)
+            .ok_or(StorageError::Overflow)?;
+        assert_eq!(
+            read_backup_records(
+                &mut std::io::Cursor::new(too_large.to_be_bytes()),
+                &mut hasher,
+                &mut verification,
+            ),
+            Err(StorageError::LimitExceeded)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn record_verification_finish_binds_each_state_and_reservation_counter()
+    -> Result<(), StorageError> {
+        let (header, master_key, guard_root, _) = backup_boundary()?;
+        let stream_bytes = BACKUP_FIXED_STREAM_BYTES;
+        for changed in 0..6 {
+            let mut verification =
+                complete_verification(&header, &master_key, &guard_root, stream_bytes)?;
+            match changed {
+                0 => verification.key_check_seen = false,
+                1 => verification.logical_database_bytes += 1,
+                2 => {}
+                3 => {
+                    let mut state = *verification
+                        .state_meta
+                        .as_ref()
+                        .ok_or(StorageError::StaleState)?
+                        .tbs();
+                    state.storage_commit_sequence += 1;
+                    verification.state_meta = Some(StateMeta::authenticate(
+                        state,
+                        header.source_header().complete_hash()?,
+                        &verification.integrity_keys,
+                    )?);
+                }
+                4 => {
+                    let mut state = *verification
+                        .state_meta
+                        .as_ref()
+                        .ok_or(StorageError::StaleState)?
+                        .tbs();
+                    state.manifest_sequence += 1;
+                    verification.state_meta = Some(StateMeta::authenticate(
+                        state,
+                        header.source_header().complete_hash()?,
+                        &verification.integrity_keys,
+                    )?);
+                }
+                _ => {
+                    let mut state = *verification
+                        .state_meta
+                        .as_ref()
+                        .ok_or(StorageError::StaleState)?
+                        .tbs();
+                    state.state_generation += 1;
+                    verification.state_meta = Some(StateMeta::authenticate(
+                        state,
+                        header.source_header().complete_hash()?,
+                        &verification.integrity_keys,
+                    )?);
+                }
+            }
+            let supplied_stream_bytes = if changed == 2 {
+                stream_bytes + 1
+            } else {
+                stream_bytes
+            };
+            assert_eq!(
+                verification.finish(supplied_stream_bytes).map(|_| ()),
+                Err(StorageError::StaleState)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn reconstruction_accepts_an_exact_previous_generation_and_rejects_empty_head_metadata()
+    -> Result<(), StorageError> {
+        let checkpoint_hash = StorageDigest::from_bytes([73; 32]);
+        let state = state_meta(0, 0, ZERO, checkpoint_hash)?;
+        let network = NetworkId::from_bytes([1; 32]);
+        let previous = LoginIndexKey::from_bytes([74; 32]);
+        let current = LoginIndexKey::from_bytes([75; 32]);
+        let mut transition = baseline_reconstruction(checkpoint_hash)?;
+        transition.login_key_state = Some(LoginIndexKeyState::transition(
+            1,
+            previous.key_id(network),
+            current.key_id(network),
+            1,
+        )?);
+        transition.login_generations = [Some((2, 1)), Some((1, 1))];
+        transition.finish(&state)?;
+
+        let mut unexpected_head = baseline_reconstruction(checkpoint_hash)?;
+        unexpected_head.last_manifest_sequence = Some(0);
+        assert_eq!(
+            unexpected_head.finish(&state),
+            Err(StorageError::StaleState)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn trust_and_singleton_observers_reject_internally_inconsistent_rows()
+    -> Result<(), StorageError> {
+        let (header, master_key, guard_root, signing_key) = backup_boundary()?;
+        let mut inconsistent_trust =
+            BackupTrustKey::new(Ed25519SecretKey::from_bytes([73; 32]).public_key())?;
+        inconsistent_trust.key_id = header.signing_key_id();
+        assert_eq!(
+            trusted_backup_key(&header, &[inconsistent_trust]),
+            Err(StorageError::AuthenticationFailed),
+        );
+
+        let key = StoredKey::new(
+            agenc_ircd_types::AccountRandomId::from_bytes([74; 16])
+                .to_text()
+                .into_bytes(),
+        )?;
+        let plaintext = crate::PersistentRecordValue::new(
+            TableId::Account,
+            1,
+            1,
+            1,
+            None,
+            Vec::new(),
+            Vec::new(),
+        )?
+        .encode()?;
+        let sealed = StorageSealContext::new(
+            &master_key,
+            database_binding(header.source_header()),
+            header.source_header().tbs().storage_key_generation,
+        )?
+        .seal(TableId::Account, 1, [75; 24], &key, &plaintext)?;
+        let wrong_key_check = BackupRecord {
+            table: TableId::KeyCheck,
+            stored_key: StoredKey::new(b"wrong-key-check".to_vec())?,
+            record_schema: 1,
+            sealed_record: Vec::new(),
+        };
+        let mut verification = BackupRecordVerification::new(&header, &master_key, &guard_root)?;
+        verification.observe_key_check(&wrong_key_check, &sealed, &plaintext)?;
+        verification.key_check_seen = true;
+        let key_check = BackupRecord {
+            table: TableId::KeyCheck,
+            stored_key: StoredKey::new(KEY_CHECK_KEY.to_vec())?,
+            record_schema: 1,
+            sealed_record: Vec::new(),
+        };
+        assert_eq!(
+            verification.observe_key_check(&key_check, &sealed, &plaintext),
+            Err(StorageError::AuthenticationFailed),
+        );
+
+        let wrong_state_meta = BackupRecord {
+            table: TableId::StateMeta,
+            stored_key: StoredKey::new(b"wrong-state-meta".to_vec())?,
+            record_schema: 1,
+            sealed_record: Vec::new(),
+        };
+        verification.observe_state_meta(&wrong_state_meta, &sealed, &plaintext)?;
+        verification.state_meta = Some(state_meta(0, 0, ZERO, ZERO)?);
+        let state_meta_record = BackupRecord {
+            table: TableId::StateMeta,
+            stored_key: StoredKey::new(STATE_META_KEY.to_vec())?,
+            record_schema: 1,
+            sealed_record: Vec::new(),
+        };
+        assert_eq!(
+            verification.observe_state_meta(&state_meta_record, &sealed, &plaintext),
+            Err(StorageError::StaleState),
+        );
+
+        let network = header.source_header().tbs().network_id;
+        let current = LoginIndexKey::from_bytes([76; 32]);
+        let previous = LoginIndexKey::from_bytes([77; 32]);
+        let mut reconstruction = baseline_reconstruction(ZERO)?;
+        reconstruction.login_key_state = Some(LoginIndexKeyState::transition(
+            1,
+            previous.key_id(network),
+            current.key_id(network),
+            1,
+        )?);
+        assert_eq!(
+            reconstruction.finish(&state_meta(0, 0, ZERO, ZERO)?),
+            Err(StorageError::StaleState),
+        );
+        assert_ne!(signing_key.public_key(), inconsistent_trust.public_key);
+        Ok(())
+    }
 }

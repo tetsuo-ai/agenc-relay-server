@@ -150,6 +150,9 @@ NORMATIVE_BINDINGS = {
         ["E2EE-REQ-A0EFEAB7474EA0A450F5"],
         "normative-requirement",
     ),
+    "EVID-ARCH-REQ-CAFA64060EE32DC7419D": (
+        ["ARCH-REQ-CAFA64060EE32DC7419D"], "normative-requirement",
+    ),
     "EVID-ARCH-REQ-D621F68B6C389E5B7660": (
         ["ARCH-REQ-D621F68B6C389E5B7660"], "normative-requirement",
     ),
@@ -185,10 +188,14 @@ NORMATIVE_BINDINGS = {
     ),
     "EVID-ARCH-ID-07": (["ARCH-ID-07"], "normative-requirement"),
     "EVID-ARCH-DUR-03": (["ARCH-DUR-03"], "normative-requirement"),
+    "EVID-ARCH-DUR-04": (["ARCH-DUR-04"], "normative-requirement"),
+    "EVID-ARCH-DUR-05": (["ARCH-DUR-05"], "normative-requirement"),
     "EVID-ARCH-DUR-06": (["ARCH-DUR-06"], "normative-requirement"),
     "EVID-ARCH-DUR-07": (["ARCH-DUR-07"], "normative-requirement"),
+    "EVID-ARCH-DUR-08": (["ARCH-DUR-08"], "normative-requirement"),
     "EVID-ARCH-DUR-09": (["ARCH-DUR-09"], "normative-requirement"),
     "EVID-ARCH-DUR-10": (["ARCH-DUR-10"], "normative-requirement"),
+    "EVID-ARCH-DUR-11": (["ARCH-DUR-11"], "normative-requirement"),
     "EVID-ARCH-DUR-12": (["ARCH-DUR-12"], "normative-requirement"),
 }
 

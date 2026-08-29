@@ -662,3 +662,170 @@ fn filesystem_tuple(fd: &OwnedFd) -> Result<FilesystemTuple, StorageError> {
         mount_flags: vfs.f_flag.bits(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs::{self, OpenOptions};
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+
+    static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn create(label: &str) -> Result<Self, StorageError> {
+            let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "agenc-platform-{label}-{}-{sequence}",
+                std::process::id()
+            ));
+            fs::create_dir(&path).map_err(io_rejected)?;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).map_err(io_rejected)?;
+            Ok(Self(path))
+        }
+
+        fn create_file(&self, name: &str, mode: u32) -> Result<File, StorageError> {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .mode(mode)
+                .open(self.0.join(name))
+                .map_err(io_rejected)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn qualification_and_component_validation_cover_both_outcomes() {
+        let tuple = FilesystemTuple {
+            target: TARGET_TRIPLE,
+            filesystem_type: 1,
+            block_size: 4_096,
+            mount_flags: 0,
+        };
+        let valid = StorageQualification::from_verified_report(tuple, 134_217_728);
+        assert_eq!(valid.validate(), Ok(valid));
+        assert_eq!(valid.tuple(), tuple);
+        assert_eq!(valid.maximum_observed_growth(), 134_217_728);
+        assert_eq!(
+            StorageQualification::from_verified_report(tuple, 134_217_729).validate(),
+            Err(StorageError::FilesystemRejected)
+        );
+
+        assert!(BackupDestination::new(Path::new("/tmp"), "backup.bin").is_ok());
+        for name in ["", ".", "..", "nested/backup", "/absolute"] {
+            assert!(matches!(
+                BackupDestination::new(Path::new("/tmp"), name),
+                Err(StorageError::FilesystemRejected)
+            ));
+        }
+    }
+
+    #[test]
+    fn temporary_cleanup_removes_only_well_formed_owned_files() -> Result<(), StorageError> {
+        let directory = TestDirectory::create("cleanup")?;
+        let directory_fd = openat(
+            CWD,
+            directory.path(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(rustix_rejected)?;
+        let prefix = ".agenc-test-";
+        let valid_name = format!("{prefix}{}", "a".repeat(32));
+        directory.create_file(&valid_name, 0o600)?;
+        directory.create_file("unrelated", 0o600)?;
+        cleanup_random_temporaries(&directory_fd, directory.path(), prefix)?;
+        assert!(!directory.path().join(valid_name).exists());
+        assert!(directory.path().join("unrelated").exists());
+
+        directory.create_file(&format!("{prefix}short"), 0o600)?;
+        assert_eq!(
+            cleanup_random_temporaries(&directory_fd, directory.path(), prefix),
+            Err(StorageError::FilesystemRejected)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn file_validation_and_backup_admission_fail_closed() -> Result<(), StorageError> {
+        let directory = TestDirectory::create("admission")?;
+        let file = directory.create_file("empty", 0o600)?;
+        validate_file(&file, FileType::RegularFile, Mode::RUSR | Mode::WUSR)?;
+        assert_eq!(
+            validate_file(&file, FileType::Directory, Mode::RUSR | Mode::WUSR),
+            Err(StorageError::FilesystemRejected)
+        );
+        assert_eq!(
+            validate_file(&file, FileType::RegularFile, Mode::RUSR),
+            Err(StorageError::FilesystemRejected)
+        );
+        assert_eq!(
+            admit_backup_output(&file, 0, 0, 101),
+            Err(StorageError::FilesystemRejected)
+        );
+        admit_backup_output(&file, 0, 0, 0)?;
+        assert_eq!(
+            admit_backup_output(&file, u64::MAX, u64::MAX, 0),
+            Err(StorageError::Overflow)
+        );
+
+        file.set_len(1).map_err(io_rejected)?;
+        assert_eq!(
+            admit_backup_output(&file, 0, 0, 0),
+            Err(StorageError::FilesystemRejected)
+        );
+        require_same_filesystem(directory.create_file("second", 0o600)?, file)?;
+        Ok(())
+    }
+
+    #[test]
+    fn state_directory_exercises_capacity_guard_and_exclusive_database_paths()
+    -> Result<(), StorageError> {
+        let directory = TestDirectory::create("state")?;
+        let tuple = StateDirectory::probe(directory.path())?;
+        let qualification = StorageQualification::from_verified_report(tuple, 1).validate()?;
+        let state = StateDirectory::open(directory.path(), &[qualification])?;
+        assert_eq!(state.tuple(), tuple);
+        assert_eq!(state.capacity(0, 101), Err(StorageError::LimitExceeded));
+        let capacity = state.capacity(0, 0)?;
+        assert!(capacity.available_bytes > 0);
+
+        assert_eq!(state.read_guard(1), Err(StorageError::FilesystemRejected));
+        state.replace_guard(b"guard")?;
+        assert_eq!(state.read_guard(5)?, b"guard");
+        assert_eq!(state.read_guard(4), Err(StorageError::InvalidEncoding));
+
+        let database = state.create_database_file()?;
+        assert_eq!(database.metadata().map_err(io_rejected)?.len(), 0);
+        assert!(matches!(
+            state.create_database_file(),
+            Err(StorageError::FilesystemRejected)
+        ));
+        assert_eq!(
+            state
+                .open_database_file()?
+                .metadata()
+                .map_err(io_rejected)?
+                .len(),
+            0
+        );
+        let (scratch, _parent, name) = state.create_recovery_scratch()?;
+        assert_eq!(scratch.metadata().map_err(io_rejected)?.len(), 0);
+        assert!(directory.path().join(name).exists());
+        Ok(())
+    }
+}

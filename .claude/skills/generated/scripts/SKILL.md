@@ -32,36 +32,36 @@ description: "Skill for the Scripts area of agenc-ircd. 314 symbols across 18 fi
 
 Start here when exploring this area:
 
-- **`load_json`** (Function) — `scripts/check-evidence.py:306`
-- **`load_toml`** (Function) — `scripts/check-evidence.py:325`
-- **`validate_catalog`** (Function) — `scripts/check-evidence.py:333`
-- **`validate_schema`** (Function) — `scripts/check-evidence.py:442`
-- **`git_environment`** (Function) — `scripts/check-evidence.py:494`
+- **`load_json`** (Function) — `scripts/check-evidence.py:313`
+- **`load_toml`** (Function) — `scripts/check-evidence.py:332`
+- **`validate_catalog`** (Function) — `scripts/check-evidence.py:340`
+- **`validate_schema`** (Function) — `scripts/check-evidence.py:449`
+- **`git_environment`** (Function) — `scripts/check-evidence.py:501`
 
 ## Key Symbols
 
 | Symbol | Type | File | Line |
 |--------|------|------|------|
-| `load_json` | Function | `scripts/check-evidence.py` | 306 |
-| `load_toml` | Function | `scripts/check-evidence.py` | 325 |
-| `validate_catalog` | Function | `scripts/check-evidence.py` | 333 |
-| `validate_schema` | Function | `scripts/check-evidence.py` | 442 |
-| `git_environment` | Function | `scripts/check-evidence.py` | 494 |
-| `git_bytes` | Function | `scripts/check-evidence.py` | 510 |
-| `require_complete_history` | Function | `scripts/check-evidence.py` | 528 |
-| `validate_index_bytes` | Function | `scripts/check-evidence.py` | 541 |
-| `commit_blob` | Function | `scripts/check-evidence.py` | 583 |
-| `commit_blob_sha256` | Function | `scripts/check-evidence.py` | 588 |
-| `canonical_source_sha256` | Function | `scripts/check-evidence.py` | 593 |
-| `load_toolchain_policy` | Function | `scripts/check-evidence.py` | 847 |
-| `source_toolchain_policy` | Function | `scripts/check-evidence.py` | 871 |
-| `validate` | Function | `scripts/check-evidence.py` | 1091 |
-| `source_gate_policy` | Function | `scripts/check-evidence.py` | 1232 |
-| `resolve` | Function | `scripts/check-evidence.py` | 1266 |
-| `validate_closure_entries` | Function | `scripts/check-evidence.py` | 1517 |
-| `validate_closure` | Function | `scripts/check-evidence.py` | 1604 |
-| `expect_rejection` | Function | `scripts/check-evidence.py` | 1655 |
-| `self_test` | Function | `scripts/check-evidence.py` | 1671 |
+| `load_json` | Function | `scripts/check-evidence.py` | 313 |
+| `load_toml` | Function | `scripts/check-evidence.py` | 332 |
+| `validate_catalog` | Function | `scripts/check-evidence.py` | 340 |
+| `validate_schema` | Function | `scripts/check-evidence.py` | 449 |
+| `git_environment` | Function | `scripts/check-evidence.py` | 501 |
+| `git_bytes` | Function | `scripts/check-evidence.py` | 517 |
+| `require_complete_history` | Function | `scripts/check-evidence.py` | 535 |
+| `validate_index_bytes` | Function | `scripts/check-evidence.py` | 548 |
+| `commit_blob` | Function | `scripts/check-evidence.py` | 590 |
+| `commit_blob_sha256` | Function | `scripts/check-evidence.py` | 595 |
+| `canonical_source_sha256` | Function | `scripts/check-evidence.py` | 600 |
+| `load_toolchain_policy` | Function | `scripts/check-evidence.py` | 854 |
+| `source_toolchain_policy` | Function | `scripts/check-evidence.py` | 878 |
+| `validate` | Function | `scripts/check-evidence.py` | 1098 |
+| `source_gate_policy` | Function | `scripts/check-evidence.py` | 1239 |
+| `resolve` | Function | `scripts/check-evidence.py` | 1273 |
+| `validate_closure_entries` | Function | `scripts/check-evidence.py` | 1524 |
+| `validate_closure` | Function | `scripts/check-evidence.py` | 1611 |
+| `expect_rejection` | Function | `scripts/check-evidence.py` | 1662 |
+| `self_test` | Function | `scripts/check-evidence.py` | 1678 |
 
 ## Execution Flows
 

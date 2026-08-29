@@ -53,7 +53,6 @@ pub fn classify_recovery_state(
                 .checked_add(1)
                 .ok_or(StorageError::Overflow)?
         && database.nonce_reservation_start == external.nonce_draw_high_water
-        && database.nonce_draw_high_water > database.nonce_reservation_start
         && database.storage_commit_sequence == external.storage_commit_sequence
         && database.manifest_sequence == external.manifest_sequence
         && database.state_generation == external.state_generation
@@ -85,9 +84,7 @@ pub fn classify_recovery_state(
         common_application_successor && (tracked_successor || checkpoint_successor);
     if application_successor {
         verify_state_against_reservation(state_meta, state_meta_record_id, reservation)?;
-        if state_meta.tbs().previous_rollback_guard_hash != guard_hash
-            || state_meta.tbs().nonce_draw_high_water != external.nonce_draw_high_water
-        {
+        if state_meta.tbs().previous_rollback_guard_hash != guard_hash {
             return Err(StorageError::StaleState);
         }
         return Ok(RecoveryDisposition::InstallCommittedGuard);
@@ -734,6 +731,127 @@ mod tests {
             ),
             Err(StorageError::StaleState),
         );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_each_remaining_authenticated_state_mismatch() -> Result<(), StorageError> {
+        let fixture = Fixture::new()?;
+        let committed = fixture.reservation(fixture.reservation_tbs(ReservationFields {
+            sequence: 0,
+            phase: RollbackGuardPhase::Committed,
+            start: 10,
+            end: 10,
+            commit: 0,
+            manifest: 0,
+            generation: 0,
+            previous_guard_hash: ZERO,
+        })?)?;
+        let committed_guard = fixture.guard(&committed)?;
+        let committed_guard_hash = committed_guard.complete_hash()?;
+        let state = fixture.state(0, 0, 0, 10, ZERO)?;
+
+        let mut mismatched_record = fixture.reservation_tbs(ReservationFields {
+            sequence: 1,
+            phase: RollbackGuardPhase::NonceReserved,
+            start: 10,
+            end: 12,
+            commit: 0,
+            manifest: 0,
+            generation: 0,
+            previous_guard_hash: committed_guard_hash,
+        })?;
+        mismatched_record.state_meta_record_id = StorageDigest::from_bytes([44; 32]);
+        assert_eq!(
+            classify_recovery_state(
+                &fixture.header,
+                &state,
+                STATE_RECORD_ID,
+                &fixture.reservation(mismatched_record)?,
+                &committed_guard,
+            ),
+            Err(StorageError::StaleState),
+        );
+
+        let reserved = fixture.reservation(fixture.reservation_tbs(ReservationFields {
+            sequence: 1,
+            phase: RollbackGuardPhase::NonceReserved,
+            start: 10,
+            end: 13,
+            commit: 0,
+            manifest: 0,
+            generation: 0,
+            previous_guard_hash: committed_guard_hash,
+        })?)?;
+        let reserved_guard = fixture.guard(&reserved)?;
+        let reserved_guard_hash = reserved_guard.complete_hash()?;
+        let application = fixture.reservation(fixture.reservation_tbs(ReservationFields {
+            sequence: 1,
+            phase: RollbackGuardPhase::Committed,
+            start: 13,
+            end: 13,
+            commit: 1,
+            manifest: 1,
+            generation: 1,
+            previous_guard_hash: reserved_guard_hash,
+        })?)?;
+        assert_eq!(
+            classify_recovery_state(
+                &fixture.header,
+                &fixture.state(1, 1, 1, 12, reserved_guard_hash)?,
+                STATE_RECORD_ID,
+                &application,
+                &reserved_guard,
+            ),
+            Err(StorageError::StaleState),
+        );
+
+        let wrong_manifest =
+            fixture.reservation(fixture.reservation_tbs(ReservationFields {
+                sequence: 0,
+                phase: RollbackGuardPhase::Committed,
+                start: 10,
+                end: 10,
+                commit: 0,
+                manifest: 1,
+                generation: 0,
+                previous_guard_hash: ZERO,
+            })?)?;
+        assert_eq!(
+            verify_state_against_reservation(&state, STATE_RECORD_ID, &wrong_manifest),
+            Err(StorageError::StaleState),
+        );
+        let wrong_generation =
+            fixture.reservation(fixture.reservation_tbs(ReservationFields {
+                sequence: 0,
+                phase: RollbackGuardPhase::Committed,
+                start: 10,
+                end: 10,
+                commit: 0,
+                manifest: 0,
+                generation: 1,
+                previous_guard_hash: ZERO,
+            })?)?;
+        assert_eq!(
+            verify_state_against_reservation(&state, STATE_RECORD_ID, &wrong_generation),
+            Err(StorageError::StaleState),
+        );
+        let reserved_before_state =
+            fixture.reservation(fixture.reservation_tbs(ReservationFields {
+                sequence: 1,
+                phase: RollbackGuardPhase::NonceReserved,
+                start: 9,
+                end: 11,
+                commit: 0,
+                manifest: 0,
+                generation: 0,
+                previous_guard_hash: committed_guard_hash,
+            })?)?;
+        assert_eq!(
+            verify_state_against_reservation(&state, STATE_RECORD_ID, &reserved_before_state),
+            Err(StorageError::StaleState),
+        );
+        verify_state_against_guard(&state, STATE_RECORD_ID, &reserved_guard)?;
         Ok(())
     }
 }

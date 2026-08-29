@@ -838,3 +838,129 @@ const fn record_kind_is_valid(table: TableId, kind: u16) -> bool {
     };
     kind != 0 && kind <= maximum
 }
+
+#[cfg(test)]
+mod tests {
+    use agenc_ircd_crypto::{DatabaseBinding, StorageMasterKey};
+    use agenc_ircd_types::{AccountRandomId, DatabaseId, NetworkId, ServerId, ServerIncarnation};
+
+    use super::*;
+    use crate::{
+        IntegrityCheckpoint, IntegrityCheckpointTbs, IntegrityManifest, IntegrityManifestTbs,
+        IntegrityRecordMutation, IntegrityRecordVersion, StorageSealContext,
+    };
+
+    #[test]
+    fn domain_envelope_and_sealed_inventory_reject_each_outer_binding() -> Result<(), StorageError>
+    {
+        assert_eq!(
+            PersistentRecordValue::new(TableId::KeyCheck, 1, 1, 0, None, Vec::new(), Vec::new())
+                .map(|_| ()),
+            Err(StorageError::InvalidEncoding)
+        );
+
+        let valid =
+            PersistentRecordValue::new(TableId::Account, 1, 1, 1, None, Vec::new(), Vec::new())?
+                .encode()?;
+        let mut wrong_version = valid.clone();
+        wrong_version
+            .get_mut(..2)
+            .ok_or(StorageError::InvalidEncoding)?
+            .copy_from_slice(&2_u16.to_be_bytes());
+        assert_eq!(
+            PersistentRecordValue::decode(TableId::Account, &wrong_version).map(|_| ()),
+            Err(StorageError::UnsupportedVersion)
+        );
+
+        let key = StoredKey::new(AccountRandomId::from_bytes([1; 16]).to_text().into_bytes())?;
+        let binding = DatabaseBinding::new(
+            NetworkId::from_bytes([2; 32]),
+            ServerId::from_bytes([3; 16]),
+            ServerIncarnation::from_bytes([4; 16]),
+            DatabaseId::from_bytes([5; 16]),
+        );
+        let master_key = StorageMasterKey::from_bytes([6; 32]);
+        let context = StorageSealContext::new(&master_key, binding, 1)?;
+        let sealed = context
+            .seal(TableId::Account, 1, [7; 24], &key, &valid)?
+            .encode()?;
+        assert!(validate_sealed_record(TableId::Account, &key, &sealed).is_ok());
+        assert_eq!(
+            validate_sealed_record(TableId::OpaqueRecord, &key, &sealed).map(|_| ()),
+            Err(StorageError::AuthenticationFailed)
+        );
+        let wrong_schema = context
+            .seal(TableId::Account, 2, [8; 24], &key, &valid)?
+            .encode()?;
+        assert_eq!(
+            validate_sealed_record(TableId::Account, &key, &wrong_schema).map(|_| ()),
+            Err(StorageError::AuthenticationFailed)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn control_plaintext_validation_rejects_mismatched_integrity_keys() -> Result<(), StorageError>
+    {
+        let mutation = IntegrityRecordMutation::new(
+            TableId::Account,
+            StoredKey::new(AccountRandomId::from_bytes([11; 16]).to_text().into_bytes())?,
+            IntegrityRecordVersion::Absent,
+            IntegrityRecordVersion::Present {
+                record_schema: 1,
+                sealed_record_id: StorageDigest::from_bytes([12; 32]),
+            },
+        )?;
+        let manifest = IntegrityManifest::new(IntegrityManifestTbs::new(
+            DatabaseId::from_bytes([13; 16]),
+            1,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            3,
+            3,
+            StorageDigest::from_bytes([0; 32]),
+            vec![mutation],
+        )?)?;
+        assert_eq!(
+            validate_record_plaintext(
+                TableId::IntegrityManifest,
+                &StoredKey::new(2_u64.to_be_bytes().to_vec())?,
+                1,
+                &manifest.encode()?,
+            ),
+            Err(StorageError::StaleState),
+        );
+
+        let checkpoint = IntegrityCheckpoint::new(IntegrityCheckpointTbs {
+            database_instance_id: DatabaseId::from_bytes([13; 16]),
+            cut_storage_commit_sequence: 0,
+            cut_manifest_sequence: 0,
+            cut_state_generation: 0,
+            cut_account_service_response_count: 0,
+            cut_nonce_draw_high_water: 3,
+            cut_manifest_hash: StorageDigest::from_bytes([0; 32]),
+            tracked_record_count: 0,
+            tracked_state_digest: StorageDigest::from_bytes([0; 32]),
+            previous_checkpoint_hash: StorageDigest::from_bytes([0; 32]),
+            installation_storage_commit_sequence: 0,
+            installation_manifest_sequence: 0,
+            installation_nonce_reservation_start: 3,
+            installation_nonce_draw_high_water: 5,
+        })?;
+        assert_eq!(
+            validate_record_plaintext(
+                TableId::IntegrityCheckpoint,
+                &StoredKey::new(1_u64.to_be_bytes().to_vec())?,
+                1,
+                &checkpoint.encode()?,
+            ),
+            Err(StorageError::StaleState),
+        );
+        Ok(())
+    }
+}

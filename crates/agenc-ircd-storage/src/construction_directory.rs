@@ -293,10 +293,12 @@ fn require_kind_and_mode(
     expected_mode: Option<Mode>,
 ) -> Result<(), StorageError> {
     let status = fstat(file).map_err(|_| StorageError::FilesystemRejected)?;
-    if FileType::from_raw_mode(status.st_mode) != expected_kind
-        || expected_mode
-            .is_some_and(|mode| Mode::from_raw_mode(status.st_mode) & Mode::RWXU != mode)
-        || Mode::from_raw_mode(status.st_mode).intersects(Mode::RWXG | Mode::RWXO)
+    let actual_mode = Mode::from_raw_mode(status.st_mode);
+    if (
+        FileType::from_raw_mode(status.st_mode),
+        expected_mode.is_none_or(|mode| actual_mode & Mode::RWXU == mode),
+        actual_mode.intersects(Mode::RWXG | Mode::RWXO),
+    ) != (expected_kind, true, false)
     {
         return Err(StorageError::FilesystemRejected);
     }
@@ -321,4 +323,155 @@ fn validate_completed_membership(path: &Path) -> Result<(), StorageError> {
         return Err(StorageError::StaleState);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::{self, OpenOptions};
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+
+    static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn create(label: &str) -> Result<Self, StorageError> {
+            let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "agenc-construction-directory-{label}-{}-{sequence}",
+                std::process::id()
+            ));
+            fs::create_dir(&path).map_err(|_| StorageError::FilesystemRejected)?;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+                .map_err(|_| StorageError::FilesystemRejected)?;
+            Ok(Self(path))
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn private_file(path: &Path) -> Result<(), StorageError> {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|_| StorageError::FilesystemRejected)?;
+        Ok(())
+    }
+
+    #[test]
+    fn lexical_paths_and_directory_queries_reject_ambiguous_objects() -> Result<(), StorageError> {
+        assert_eq!(
+            validate_lexical_absolute_path(Path::new("relative")),
+            Err(StorageError::InvalidEncoding)
+        );
+        assert_eq!(
+            validate_lexical_absolute_path(Path::new("/tmp/../ambiguous")),
+            Err(StorageError::InvalidEncoding)
+        );
+        validate_lexical_absolute_path(Path::new("/tmp/unambiguous"))?;
+
+        let directory = TestDirectory::create("queries")?;
+        assert!(!directory_exists(&directory.path().join("missing"))?);
+        let file = directory.path().join("file");
+        private_file(&file)?;
+        assert_eq!(
+            directory_exists(&file),
+            Err(StorageError::FilesystemRejected)
+        );
+        assert!(directory_exists(directory.path())?);
+        Ok(())
+    }
+
+    #[test]
+    fn completed_membership_requires_exact_fixed_files() -> Result<(), StorageError> {
+        let directory = TestDirectory::create("membership")?;
+        assert_eq!(
+            validate_completed_membership(directory.path()),
+            Err(StorageError::StaleState)
+        );
+        for name in [DATABASE_FILE, GUARD_FILE, WRITER_LOCK_FILE] {
+            private_file(&directory.path().join(name))?;
+        }
+        validate_completed_membership(directory.path())?;
+        private_file(&directory.path().join("unexpected"))?;
+        assert_eq!(
+            validate_completed_membership(directory.path()),
+            Err(StorageError::StaleState)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn directory_phases_reject_conflicts_and_installed_plan_mutation() -> Result<(), StorageError> {
+        let parent = TestDirectory::create("phases")?;
+        let output = parent.path().join("output");
+        let staging = ConstructionDirectory::open(&output, false)?;
+        assert_eq!(staging.phase(), ConstructionDirectoryPhase::Staging);
+        assert_eq!(staging.output_path(), output);
+        assert!(staging.selected_path().is_dir());
+        drop(staging);
+
+        assert!(matches!(
+            ConstructionDirectory::open(&output, false),
+            Err(StorageError::StaleState)
+        ));
+        let resumed = ConstructionDirectory::open(&output, true)?;
+        let plan = resumed.rebuild_plan_file()?;
+        drop(plan);
+        resumed.remove_plan_file()?;
+        drop(resumed);
+
+        let staging_name = ".output.agenc-construction-v1";
+        fs::rename(parent.path().join(staging_name), &output)
+            .map_err(|_| StorageError::FilesystemRejected)?;
+        let installed = ConstructionDirectory::open(&output, true)?;
+        assert_eq!(installed.phase(), ConstructionDirectoryPhase::Installed);
+        assert!(matches!(
+            installed.rebuild_plan_file(),
+            Err(StorageError::StaleState)
+        ));
+        assert_eq!(installed.remove_plan_file(), Err(StorageError::StaleState));
+        assert!(matches!(
+            ConstructionDirectory::open(&output, false),
+            Err(StorageError::StaleState)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn directory_mode_validation_rejects_public_permissions() -> Result<(), StorageError> {
+        let directory = TestDirectory::create("mode")?;
+        let fd = openat(
+            CWD,
+            directory.path(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| StorageError::FilesystemRejected)?;
+        require_kind_and_mode(&fd, FileType::Directory, Some(Mode::RWXU))?;
+        assert_eq!(
+            require_kind_and_mode(&fd, FileType::RegularFile, Some(Mode::RWXU)),
+            Err(StorageError::FilesystemRejected)
+        );
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o750))
+            .map_err(|_| StorageError::FilesystemRejected)?;
+        assert_eq!(
+            require_kind_and_mode(&fd, FileType::Directory, Some(Mode::RWXU)),
+            Err(StorageError::FilesystemRejected)
+        );
+        Ok(())
+    }
 }
