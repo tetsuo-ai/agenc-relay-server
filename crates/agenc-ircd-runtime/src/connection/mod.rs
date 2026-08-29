@@ -1,7 +1,30 @@
-//! Per-connection owners: sockets, transport metadata, and the output queue.
-//!
-//! The connection supervisor owns queue storage and the socket generation
-//! (spec 21.1, lines 3995-3998); StateCore holds only the rollback-capable
-//! queue reservations defined in [`sink`].
+//! Connection owners: the client sink contract, the owner-side writer queue,
+//! the reader and writer tasks, and the per-connection supervisor (spec
+//! 21.2 and 21.3, lines 4048-4113).
 
+pub mod queue;
+pub mod reader;
 pub mod sink;
+pub mod supervisor;
+pub mod writer;
+
+pub use queue::{
+    CONTROL_ITEM_SLOTS, ClosePolicy, DEFAULT_CONTROL_OUTPUT_BYTES, DEFAULT_OUTPUT_BYTES,
+    DEFAULT_QUEUE_ITEMS, MAX_CONTROL_OUTPUT_BYTES, MAX_OUTPUT_BYTES, MAX_QUEUE_ITEMS,
+    QUEUE_WARNING_PERCENT, QueueLimits, QueuePop, WriterQueue,
+};
+pub use reader::{
+    DEFAULT_PARSED_ARENA_BYTES, DEFAULT_REQUESTS_PER_CONNECTION, READ_CHUNK_BYTES,
+    READ_STALL_BUDGET, ReaderLimits, run_reader,
+};
+pub use sink::{
+    BoundedSharedClientFrames, ClientQueueDemand, ClientQueueReservation, ClientSink,
+    ConnectionGeneration, MAX_DEMAND_BYTES, MAX_DEMAND_FRAMES, QueueAllocationError,
+    QueueReservationLedger, QueueTransfer, ReservationToken, SinkReserveError,
+    TentativeClientQueueReservation,
+};
+pub use supervisor::{
+    AdmittedConnection, ConnectionExit, ConnectionLimits, ConnectionResources, PeerIdentity,
+    run_connection,
+};
+pub use writer::run_writer;

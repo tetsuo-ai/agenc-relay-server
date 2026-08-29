@@ -7,6 +7,7 @@
 //! backing permit, and commits without allocation. Every type here has
 //! private fields so a mismatched or duplicated reservation cannot be built.
 
+use std::error::Error;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -143,6 +144,8 @@ impl fmt::Display for SinkReserveError {
     }
 }
 
+impl Error for SinkReserveError {}
+
 /// Preparing a reservation failed before any visible effect.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QueueAllocationError {
@@ -163,6 +166,8 @@ impl fmt::Display for QueueAllocationError {
         }
     }
 }
+
+impl Error for QueueAllocationError {}
 
 /// Whole-demand logical reservation on one sink, rolled back on drop.
 #[must_use = "dropping a tentative reservation rolls back its logical counts"]
