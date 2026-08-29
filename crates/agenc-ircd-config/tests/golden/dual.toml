@@ -1,0 +1,124 @@
+# Golden configuration for the `dual` profile: DNS and onion endpoints, federation
+# enabled on a coordinator with one edge peer, E2EE enabled with a sequencer.
+config_version = 1
+
+[network]
+network_id = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE"
+display_name = "example"
+role = "coordinator"
+coordinator_server_id = "AgICAgICAgICAgICAgICAg"
+dns_name = "chat.example"
+dns_port = 6697
+onion_address = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion"
+onion_port = 6697
+onion_tls_spki_sha256 = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc"
+
+[server]
+server_id = "AgICAgICAgICAgICAgICAg"
+name = "chat.example"
+data_dir = "/srv/agenc"
+runtime_dir = "/run/agenc"
+
+[listeners]
+
+[[listeners.endpoint]]
+name = "public"
+enabled = true
+purpose = "client_tls"
+bind = "203.0.113.1:6697"
+max_connections = 50000
+tls_certificate_file = "/etc/agenc/tls/server.crt"
+tls_private_key_file = "/etc/agenc/tls/server.key"
+
+[[listeners.endpoint]]
+name = "onion"
+enabled = true
+purpose = "client_onion"
+bind = "/run/agenc/onion.sock"
+max_connections = 50000
+tls_certificate_file = "/etc/agenc/tls/onion.crt"
+tls_private_key_file = "/etc/agenc/tls/onion.key"
+
+[[listeners.endpoint]]
+name = "federation"
+enabled = true
+purpose = "federation"
+bind = "203.0.113.1:7000"
+max_connections = 64
+tls_certificate_file = "/etc/agenc/tls/federation.crt"
+tls_private_key_file = "/etc/agenc/tls/federation.key"
+client_ca_file = "/etc/agenc/tls/federation-ca.pem"
+
+[[listeners.endpoint]]
+name = "admin"
+enabled = true
+purpose = "admin_local"
+bind = "/run/agenc/admin.sock"
+max_connections = 4
+allowed_uids = [1000]
+
+[[listeners.endpoint]]
+name = "admin-tls"
+enabled = true
+purpose = "admin_tls"
+bind = "203.0.113.1:7001"
+max_connections = 4
+tls_certificate_file = "/etc/agenc/tls/admin.crt"
+tls_private_key_file = "/etc/agenc/tls/admin.key"
+client_ca_file = "/etc/agenc/tls/admin-ca.pem"
+
+[tls]
+
+[federation]
+enabled = true
+private_ca_file = "/etc/agenc/tls/federation-ca.pem"
+signing_private_key_file = "/etc/agenc/keys/federation-signing.key"
+
+[[federation.peer]]
+server_id = "AwMDAwMDAwMDAwMDAwMDAw"
+server_name = "edge.example"
+role = "edge"
+recovery_epoch = "CQkJCQkJCQkJCQkJCQkJCQ"
+endpoints = []
+certificate_spki_sha256 = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc"
+signing_public_key = "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg"
+enabled = true
+
+[storage]
+state_dir = "/srv/agenc/state"
+master_key_file = "/etc/agenc/keys/storage-master.key"
+rollback_guard_key_file = "/etc/agenc/keys/rollback-guard.key"
+login_index_key_file = "/etc/agenc/keys/login-index-g1.key"
+backup_dir = "/srv/agenc-backups"
+backup_signing_private_key_file = "/etc/agenc/keys/backup-signing.key"
+backup_trust_manifest_file = "/etc/agenc/trust/backup-trust.toml"
+
+[accounts]
+registration = "open"
+account_service_hpke_public_key = "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU"
+account_service_hpke_private_key_file = "/etc/agenc/keys/account-service-hpke.key"
+opaque_server_setup_file = "/etc/agenc/keys/opaque-server-setup.key"
+opaque_fake_credential_key_file = "/etc/agenc/keys/opaque-fake-credential.key"
+
+[limits]
+
+[privacy]
+
+[moderation]
+audit_signing_private_key_file = "/etc/agenc/keys/audit-signing.key"
+audit_trust_manifest_file = "/etc/agenc/trust/audit-trust.toml"
+
+[[moderation.operator]]
+operator_id = "BAQEBAQEBAQEBAQEBAQEBA"
+display_label = "ops"
+signing_public_key = "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY"
+certificate_spki_sha256 = "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU"
+local_uids = [1000]
+permissions = ["observe", "configure", "process"]
+enabled = true
+
+[e2ee]
+enabled = true
+coordinator_server_id = "AgICAgICAgICAgICAgICAg"
+sequencer_private_key_file = "/etc/agenc/keys/sequencer.key"
+sequencer_credentials_file = "/etc/agenc/trust/sequencer-credentials.toml"
