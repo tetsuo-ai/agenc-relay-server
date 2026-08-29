@@ -1,6 +1,25 @@
 #![forbid(unsafe_code)]
 
 //! Supervision, listeners, state ownership, and bounded queue plumbing.
+//!
+//! The foundation modules in this crate define the ownership boundaries that
+//! Architecture section 21 fixes for the single-node runtime: one process-wide
+//! memory budget with RAII permits, cancellation tokens for the supervised
+//! task tree, the client sink contract, the StateCore inbox, the storage and
+//! crypto bridge messages, and the closed log event registry.
+
+pub mod bridge;
+pub mod budget;
+pub mod cancel;
+pub mod clock;
+pub mod connection;
+mod error;
+pub mod observe;
+pub mod purpose;
+pub mod state_core;
+mod sync;
+
+pub use error::RuntimeError;
 
 use agenc_ircd_storage::{RecoveredStorageState, StorageError, StorageOwner, TableId};
 

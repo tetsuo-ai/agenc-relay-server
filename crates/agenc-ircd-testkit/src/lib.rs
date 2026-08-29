@@ -17,6 +17,7 @@ mod client_transcript;
 mod domain_fixture;
 mod domain_reference;
 mod reference_codec;
+mod tls_fixture;
 
 pub use client_transcript::{
     ClientTranscript, ClientTranscriptError, ClientTranscriptHandoff, ClientTranscriptHarness,
@@ -42,6 +43,8 @@ pub use reference_codec::{
     MAX_REFERENCE_VECTOR_BYTES, MAX_REFERENCE_VECTORS, ReferenceCodecError, ReferenceEncoder,
     ReferenceVector, parse_reference_vectors,
 };
+
+pub use tls_fixture::{MAX_FIXTURE_DNS_NAME_BYTES, TlsFixture, TlsFixtureError};
 
 /// Maximum bytes accepted by one scripted entropy source.
 pub const MAX_SCRIPTED_ENTROPY_BYTES: usize = 1_048_576;
