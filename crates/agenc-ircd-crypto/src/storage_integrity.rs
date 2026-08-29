@@ -26,6 +26,16 @@ const CHECKPOINT_HASH_LABEL: &[u8] = b"agenc-chat integrity checkpoint v1";
 const RECORD_COMMITMENT_LABEL: &[u8] = b"agenc-chat tracked record commitment v1";
 const TRACKED_STATE_LABEL: &[u8] = b"agenc-chat tracked state digest v1";
 const BACKUP_SIGNING_KEY_LABEL: &[u8] = b"agenc-chat backup signing key v1";
+const AUDIT_SIGNING_KEY_LABEL: &[u8] = b"agenc-chat audit signing key v1";
+const ADMIN_CONFIRMATION_TOKEN_LABEL: &[u8] = b"agenc-chat admin confirmation token v1";
+const ADMIN_AUDIT_EVENT_LABEL: &[u8] = b"agenc-chat admin audit event v1";
+const ADMIN_AUDIT_CHECKPOINT_LABEL: &[u8] = b"agenc-chat admin audit checkpoint v1";
+/// Largest TLS-encoded `AdminAuditEventTBS`: every fixed field plus a full
+/// 4,096-byte canonical command and a 64-byte outcome code with their length
+/// prefixes.
+const MAX_ADMIN_AUDIT_TBS_BYTES: usize = 4_500;
+/// Exact TLS-encoded `AdminAuditCheckpointTBS` length: 2 + 32 + 16 + 32 + 6 * 8 + 32 + 32.
+const ADMIN_AUDIT_CHECKPOINT_TBS_BYTES: usize = 194;
 const CONSTRUCTION_PLAN_LABEL: &[u8] = b"agenc-chat storage construction plan v1";
 const STORAGE_OPERATION_ID_LABEL: &[u8] = b"agenc-chat completed storage operation id v1";
 const STORAGE_OPERATION_KEY_ID_LABEL: &[u8] = b"agenc-chat storage operation key id v1";
@@ -327,6 +337,58 @@ impl TrackedStateHasher {
 /// Computes the trusted identifier of a backup signing public key.
 pub fn backup_signing_key_id(public_key: &[u8; 32]) -> Result<StorageDigest, CryptoError> {
     labeled_digest(BACKUP_SIGNING_KEY_LABEL, &[public_key])
+}
+
+/// Computes the trusted identifier of an audit signing public key.
+///
+/// Section 16.4 fixes it as `SHA256("agenc-chat audit signing key v1" ||
+/// ed25519_public_key)`; the label differs from the backup key label so one
+/// public key never resolves in both trust manifests under one identifier.
+pub fn audit_signing_key_id(public_key: &[u8; 32]) -> Result<StorageDigest, CryptoError> {
+    labeled_digest(AUDIT_SIGNING_KEY_LABEL, &[public_key])
+}
+
+/// Hashes one 16-byte administrative confirmation token for `AdminCommandTBS`.
+///
+/// Section 22.4 fixes the field as `SHA256("agenc-chat admin confirmation
+/// token v1" || token_bytes)`. The token itself is never signed or stored.
+pub fn admin_confirmation_token_hash(token: &[u8; 16]) -> Result<StorageDigest, CryptoError> {
+    labeled_digest(ADMIN_CONFIRMATION_TOKEN_LABEL, &[token])
+}
+
+/// Hashes one TLS-encoded `AdminAuditEventTBS` from Section 16.4.
+///
+/// The input is the complete canonical encoding in field order: `uint16
+/// profile_version`, `network_id[32]`, `server_id[16]`,
+/// `audit_signing_key_id[32]`, `uint64 audit_sequence`, `uint64 created_at`,
+/// `operator_id[16]`, the embedded `AdminCommandTBS` (`uint16 profile_version`,
+/// `network_id[32]`, `server_id[16]`, `admin_session_id[16]`, `uint64
+/// command_counter`, `confirmation_token_hash<0..32>` behind a one-byte length,
+/// `canonical_command<1..4096>` behind a two-byte length),
+/// `operator_signature[64]`, `uint8 phase`, `safe_outcome_code<1..64>` behind a
+/// one-byte length, and `previous_event_hash[32]`. The admin crate owns that
+/// encoding; this function binds only the fixed label and the size ceiling.
+pub fn admin_audit_event_hash(encoded_tbs: &[u8]) -> Result<StorageDigest, CryptoError> {
+    if encoded_tbs.is_empty() || encoded_tbs.len() > MAX_ADMIN_AUDIT_TBS_BYTES {
+        return Err(CryptoError::LimitExceeded);
+    }
+    labeled_digest(ADMIN_AUDIT_EVENT_LABEL, &[encoded_tbs])
+}
+
+/// Hashes one TLS-encoded `AdminAuditCheckpointTBS` from Section 16.4.
+///
+/// The input is the complete canonical encoding in field order: `uint16
+/// profile_version`, `network_id[32]`, `server_id[16]`,
+/// `audit_signing_key_id[32]`, `uint64 checkpoint_sequence`, `uint64
+/// created_at`, `uint64 deleted_first_sequence`, `uint64 deleted_last_sequence`,
+/// `uint64 deleted_count`, `deleted_last_event_hash[32]`, `uint64
+/// next_retained_sequence`, and `previous_checkpoint_hash[32]`, which is
+/// exactly 194 bytes.
+pub fn admin_audit_checkpoint_hash(encoded_tbs: &[u8]) -> Result<StorageDigest, CryptoError> {
+    if encoded_tbs.len() != ADMIN_AUDIT_CHECKPOINT_TBS_BYTES {
+        return Err(CryptoError::InvalidEncoding);
+    }
+    labeled_digest(ADMIN_AUDIT_CHECKPOINT_LABEL, &[encoded_tbs])
 }
 
 /// Hashes one bounded release-qualification component under an explicit label.

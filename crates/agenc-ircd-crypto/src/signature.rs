@@ -20,6 +20,8 @@ pub enum SignatureDomain {
     AccountCreationInvite,
     /// Federation hello identity proof.
     FederationHello,
+    /// Administrator session proof over the challenge and transport binding.
+    AdminSession,
     /// Post-authentication administrator command.
     AdminCommand,
     /// Server audit-event signature over an event hash.
@@ -95,6 +97,7 @@ impl SignatureDomain {
         match self {
             Self::AccountCreationInvite => b"agenc-chat account creation invite v1",
             Self::FederationHello => b"agenc-chat federation hello v1",
+            Self::AdminSession => b"agenc-chat admin session v1",
             Self::AdminCommand => b"agenc-chat admin command v1",
             Self::AdminAuditEvent => b"agenc-chat admin audit signature v1",
             Self::AdminAuditCheckpoint => b"agenc-chat admin audit checkpoint signature v1",
@@ -165,6 +168,7 @@ impl SignatureDomain {
             | Self::ReinitAttemptAbort => SignatureEncoding::IrcSignatureInput,
             Self::AccountCreationInvite
             | Self::FederationHello
+            | Self::AdminSession
             | Self::AdminCommand
             | Self::AdminAuditEvent
             | Self::AdminAuditCheckpoint

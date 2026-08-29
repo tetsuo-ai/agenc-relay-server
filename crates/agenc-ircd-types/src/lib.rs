@@ -6,6 +6,7 @@
 //! identifiers, units, names, and masks do not provide implicit cross-domain
 //! conversions.
 
+mod admin;
 mod bounded;
 mod errors;
 mod identifiers;
@@ -14,12 +15,14 @@ mod names;
 mod quantities;
 mod registries;
 
+pub use admin::{AdminPermission, AdminPermissionSet};
 pub use bounded::{BoundedBytes, BoundedUtf8, ControlPolicy};
 pub use errors::{ClockError, EntropyError, SafeContext, ValidationError};
 pub use identifiers::{
     AccountDeletionToken, AccountId, AccountRandomId, AuthGrantId, ChannelInstanceId, ConnectionId,
-    DatabaseId, EntryId, EventId, InviteId, MessageId, NetworkId, OpaqueCredentialId, OriginId,
-    RecoveryEpoch, RequestId, ServerId, ServerIncarnation, SessionId, TransactionId, UserId,
+    DatabaseId, EntryId, EventId, InviteId, MessageId, NetworkId, OpaqueCredentialId, OperatorId,
+    OriginId, RecoveryEpoch, RequestId, ServerId, ServerIncarnation, SessionId, TransactionId,
+    UserId,
 };
 pub use masks::{CompiledGlob, MAX_GLOB_BYTES, MAX_TYPED_MASK_BYTES, MaskSubject, TypedMask};
 pub use names::{
