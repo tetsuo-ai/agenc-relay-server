@@ -8,16 +8,20 @@
 //! task tree, the client sink contract, the StateCore inbox, the storage and
 //! crypto bridge messages, and the closed log event registry.
 
+pub mod admission;
 pub mod bridge;
 pub mod budget;
 pub mod cancel;
 pub mod clock;
 pub mod connection;
 mod error;
+pub mod listener;
 pub mod observe;
 pub mod purpose;
 pub mod state_core;
+pub mod supervisor;
 mod sync;
+pub mod tls;
 
 pub use error::RuntimeError;
 
