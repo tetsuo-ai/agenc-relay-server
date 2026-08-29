@@ -214,7 +214,7 @@ impl<J: CryptoJob> BoundedCryptoPool<J> {
                 for handle in workers {
                     let _join_result = handle.join();
                 }
-                return Err(CryptoWorkerError::InvalidConfiguration);
+                return Err(CryptoWorkerError::WorkerSpawnFailed);
             };
             workers.push(handle);
         }

@@ -64,9 +64,8 @@ impl From<CryptoError> for AuthError {
         match error {
             CryptoError::EntropyUnavailable => Self::EntropyUnavailable,
             CryptoError::InvalidEncoding | CryptoError::LimitExceeded => Self::InvalidEncoding,
-            CryptoError::AuthenticationFailed
-            | CryptoError::ExporterConsumed
-            | CryptoError::KindMismatch => Self::AuthenticationFailed,
+            CryptoError::AuthenticationFailed => Self::AuthenticationFailed,
+            CryptoError::KindMismatch => Self::ContextMismatch,
             CryptoError::Overflow => Self::Overflow,
             CryptoError::AllocationFailed => Self::AllocationFailed,
         }

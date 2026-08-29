@@ -164,7 +164,6 @@ async fn secret_canary_never_enters_error_or_worker_capture_text()
         CryptoError::LimitExceeded,
         CryptoError::Overflow,
         CryptoError::AllocationFailed,
-        CryptoError::ExporterConsumed,
         CryptoError::KindMismatch,
     ];
     let worker_errors = [
@@ -173,6 +172,7 @@ async fn secret_canary_never_enters_error_or_worker_capture_text()
         CryptoWorkerError::WorkerPanicked,
         CryptoWorkerError::ShuttingDown,
         CryptoWorkerError::InvalidConfiguration,
+        CryptoWorkerError::WorkerSpawnFailed,
     ];
     let mut captured = Vec::new();
     append_error_formats(&mut captured, &auth_errors);

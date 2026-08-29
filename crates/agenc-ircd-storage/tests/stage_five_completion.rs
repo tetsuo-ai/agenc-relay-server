@@ -1379,12 +1379,8 @@ fn storage_errors_and_fault_controllers_cover_the_closed_failure_surface()
             CryptoError::AllocationFailed,
             StorageError::AllocationFailed,
         ),
-        (
-            CryptoError::EntropyUnavailable,
-            StorageError::InvalidEncoding,
-        ),
+        (CryptoError::EntropyUnavailable, StorageError::Unavailable),
         (CryptoError::InvalidEncoding, StorageError::InvalidEncoding),
-        (CryptoError::ExporterConsumed, StorageError::InvalidEncoding),
         (CryptoError::KindMismatch, StorageError::InvalidEncoding),
     ];
     for (source, expected) in crypto_conversions {
