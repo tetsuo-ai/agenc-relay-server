@@ -10,7 +10,9 @@ cargo-fuzz = true
 
 [dependencies]
 agenc-ircd-client-wire = { version = "=0.0.0", path = "../crates/agenc-ircd-client-wire" }
+agenc-ircd-admin = { version = "=0.0.0", path = "../crates/agenc-ircd-admin" }
 agenc-ircd-auth = { version = "=0.0.0", path = "../crates/agenc-ircd-auth" }
+agenc-ircd-config = { version = "=0.0.0", path = "../crates/agenc-ircd-config" }
 agenc-ircd-crypto = { version = "=0.0.0", path = "../crates/agenc-ircd-crypto" }
 agenc-ircd-storage = { version = "=0.0.0", path = "../crates/agenc-ircd-storage" }
 agenc-ircd-types = { version = "=0.0.0", path = "../crates/agenc-ircd-types" }
@@ -68,6 +70,20 @@ bench = false
 [[bin]]
 name = "backup_stream"
 path = "fuzz_targets/backup_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_document"
+path = "fuzz_targets/config_document.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "admin_command"
+path = "fuzz_targets/admin_command.rs"
 test = false
 doc = false
 bench = false
