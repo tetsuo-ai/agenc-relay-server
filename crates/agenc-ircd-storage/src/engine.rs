@@ -42,6 +42,8 @@ const MIN_FIXED_RESERVE_BYTES: u64 = 67_108_864;
 const MIN_CHECKPOINT_MANIFESTS: u64 = 10_000;
 const CHECKPOINT_SLICE_RECORDS: usize = 4_096;
 const CHECKPOINT_SLICE_BYTES: usize = 16_777_216;
+/// Length prefix the backup stream adds ahead of every logical record charge.
+const BACKUP_RECORD_LENGTH_PREFIX_BYTES: u64 = 8;
 
 /// Bounded state reconstructed before the storage owner accepts requests.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -838,7 +840,7 @@ impl StorageEngine {
                 let charge = logical_record_charge(key.len(), encoded.len())?;
                 logical = logical.checked_add(charge).ok_or(StorageError::Overflow)?;
                 backup = backup
-                    .checked_add(charge.checked_add(8).ok_or(StorageError::Overflow)?)
+                    .checked_add(backup_charge(charge)?)
                     .ok_or(StorageError::Overflow)?;
                 Ok(())
             })?;
@@ -846,16 +848,29 @@ impl StorageEngine {
         Ok((logical, backup))
     }
 
-    pub(crate) fn checkpoint_due(&self) -> Result<bool, StorageError> {
-        Ok(
-            self.retained_manifest_count >= self.limits.integrity_checkpoint_manifests
-                || self.retained_manifest_count >= MAX_RETAINED_MANIFESTS
-                || self.retained_manifest_bytes >= MAX_RETAINED_MANIFEST_BYTES,
-        )
+    /// Reports whether retained manifests reached the configured or protocol ceiling.
+    pub(crate) fn checkpoint_due(&self) -> bool {
+        self.retained_manifest_count >= self.limits.integrity_checkpoint_manifests
+            || self.retained_manifest_count >= MAX_RETAINED_MANIFESTS
+            || self.retained_manifest_bytes >= MAX_RETAINED_MANIFEST_BYTES
     }
 
     pub(crate) fn checkpoint_is_active(&self) -> bool {
         self.checkpoint_job.is_some()
+    }
+
+    /// Drops a checkpoint job whose scan or installation was rejected before its transaction.
+    ///
+    /// A nonce block reserved for the installation stays reserved; the next commit or
+    /// checkpoint burns it exactly as it would after a rejected commit.
+    pub(crate) fn abandon_checkpoint(&mut self) {
+        self.checkpoint_job = None;
+    }
+
+    /// Makes the next idle owner iteration start a checkpoint without ten thousand commits.
+    #[cfg(test)]
+    pub(crate) fn mark_checkpoint_due(&mut self) {
+        self.retained_manifest_count = self.limits.integrity_checkpoint_manifests;
     }
 
     pub(crate) fn start_checkpoint(&mut self) -> Result<(), StorageError> {
@@ -1087,9 +1102,7 @@ impl StorageEngine {
     ) -> Result<(u64, u64), StorageError> {
         let new_checkpoint_logical =
             logical_record_charge(u64::BITS as usize / 8, checkpoint_record.len())?;
-        let new_checkpoint_backup = new_checkpoint_logical
-            .checked_add(8)
-            .ok_or(StorageError::Overflow)?;
+        let new_checkpoint_backup = backup_charge(new_checkpoint_logical)?;
         let logical_database_bytes = cut
             .logical_database_bytes
             .checked_add(new_checkpoint_logical)
@@ -1298,6 +1311,7 @@ impl StorageEngine {
             .check(StorageFaultSite::Manifest, StorageFaultBoundary::Before)
             .map_err(rejected)?;
         let prepared = self.prepare_application(batch, &nonces).map_err(rejected)?;
+        verify_prepared_accounting(batch, &prepared).map_err(rejected)?;
         let manifest_row_bytes = u64::try_from(
             prepared
                 .manifest_key
@@ -2434,6 +2448,65 @@ const fn reference_is_legal(source: TableId, target: TableId) -> bool {
     }
 }
 
+/// Converts one logical record charge into its backup stream charge.
+fn backup_charge(logical_charge: u64) -> Result<u64, StorageError> {
+    logical_charge
+        .checked_add(BACKUP_RECORD_LENGTH_PREFIX_BYTES)
+        .ok_or(StorageError::Overflow)
+}
+
+/// Rejects a prepared application whose exact sealed bytes disagree with the batch estimate.
+///
+/// `StorageMutationBatch` predicts the successor accounting from the envelope and manifest
+/// layouts before anything is sealed. Startup and backup later require byte-exact equality
+/// between StateMeta and the stored rows, so a wrong prediction must fail here instead of
+/// producing an authenticated StateMeta that no later open can reconcile.
+fn verify_prepared_accounting(
+    batch: &StorageMutationBatch,
+    prepared: &PreparedApplication,
+) -> Result<(), StorageError> {
+    let mut logical = batch.expected_logical_database_bytes();
+    let mut backup = batch.expected_backup_stream_bytes();
+    for (mutation, record) in batch.mutations().iter().zip(&prepared.records) {
+        let key_bytes = record.key.as_bytes().len();
+        if let Some(before) = mutation.before() {
+            let before_bytes = usize::try_from(before.sealed_record_bytes())
+                .map_err(|_| StorageError::Overflow)?;
+            let charge = logical_record_charge(key_bytes, before_bytes)?;
+            logical = logical
+                .checked_sub(charge)
+                .ok_or(StorageError::StaleState)?;
+            backup = backup
+                .checked_sub(backup_charge(charge)?)
+                .ok_or(StorageError::StaleState)?;
+        }
+        if let Some(value) = &record.value {
+            let charge = logical_record_charge(key_bytes, value.len())?;
+            logical = logical.checked_add(charge).ok_or(StorageError::Overflow)?;
+            backup = backup
+                .checked_add(backup_charge(charge)?)
+                .ok_or(StorageError::Overflow)?;
+        }
+    }
+    let manifest_charge =
+        logical_record_charge(prepared.manifest_key.len(), prepared.manifest_record.len())?;
+    logical = logical
+        .checked_add(manifest_charge)
+        .ok_or(StorageError::Overflow)?;
+    backup = backup
+        .checked_add(backup_charge(manifest_charge)?)
+        .ok_or(StorageError::Overflow)?;
+    if (logical, backup)
+        != (
+            batch.resulting_logical_database_bytes(),
+            batch.resulting_backup_stream_bytes(),
+        )
+    {
+        return Err(StorageError::StaleState);
+    }
+    Ok(())
+}
+
 fn add_retired_charge(
     logical: &mut u64,
     backup: &mut u64,
@@ -2893,7 +2966,7 @@ pub(crate) fn draw_nonces_with_faults(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -2915,13 +2988,20 @@ mod tests {
     const ZERO: StorageDigest = StorageDigest::from_bytes([0; 32]);
     static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-    struct EngineFixture {
+    pub(crate) struct EngineFixture {
         engine: Option<StorageEngine>,
         path: PathBuf,
     }
 
     impl EngineFixture {
-        fn create() -> Result<Self, StorageError> {
+        pub(crate) fn create() -> Result<Self, StorageError> {
+            Self::create_with_faults(StorageFaultInjector::disabled())
+        }
+
+        /// Opens the engine through one qualification fault schedule after a clean initialization.
+        pub(crate) fn create_with_faults(
+            faults: StorageFaultInjector,
+        ) -> Result<Self, StorageError> {
             let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
             let path = std::env::current_dir()
                 .map_err(|_| StorageError::FilesystemRejected)?
@@ -2972,7 +3052,7 @@ mod tests {
             let engine = StorageEngine::open(StorageOpenConfig {
                 expected_network_id: network,
                 expected_server_id: server,
-                state_directory: StateDirectory::open(&path, &qualifications)?,
+                state_directory: StateDirectory::open_with_faults(&path, &qualifications, faults)?,
                 storage_master_key: StorageMasterKey::from_bytes([27; 32]),
                 rollback_guard_root_key: RollbackGuardRootKey::from_bytes([28; 32]),
                 login_index_key: login_key,
@@ -2989,8 +3069,50 @@ mod tests {
             self.engine.as_ref().ok_or(StorageError::Unavailable)
         }
 
-        fn engine_mut(&mut self) -> Result<&mut StorageEngine, StorageError> {
+        pub(crate) fn engine_mut(&mut self) -> Result<&mut StorageEngine, StorageError> {
             self.engine.as_mut().ok_or(StorageError::Unavailable)
+        }
+
+        /// Returns the private mode-0700 directory that holds this fixture's state.
+        pub(crate) fn path(&self) -> &std::path::Path {
+            &self.path
+        }
+
+        /// Returns the account key that [`Self::advancing_batch`] writes for `byte`.
+        pub(crate) fn account_key(byte: u8) -> Result<StoredKey, StorageError> {
+            account_key_for_test(byte)
+        }
+
+        /// Builds one state-advancing account insertion against the engine's current head.
+        pub(crate) fn advancing_batch(
+            engine: &StorageEngine,
+            byte: u8,
+        ) -> Result<StorageMutationBatch, StorageError> {
+            advancing_batch(engine, byte)
+        }
+
+        /// Builds a batch whose expected sequence is one ahead of the engine's head.
+        pub(crate) fn stale_batch(
+            engine: &StorageEngine,
+            byte: u8,
+        ) -> Result<StorageMutationBatch, StorageError> {
+            let mut head = current_head(engine);
+            head.expected_storage_commit_sequence = head
+                .expected_storage_commit_sequence
+                .checked_add(1)
+                .ok_or(StorageError::Overflow)?;
+            StorageMutationBatch::new(
+                head,
+                1,
+                current_accounting(engine),
+                vec![RecordMutation::put(
+                    TableId::Account,
+                    account_key_for_test(byte)?,
+                    1,
+                    None,
+                    account_plaintext(1)?,
+                )?],
+            )
         }
     }
 
@@ -3862,7 +3984,7 @@ mod tests {
     {
         let mut fixture = EngineFixture::create()?;
         let engine = fixture.engine_mut()?;
-        assert!(!engine.checkpoint_due()?);
+        assert!(!engine.checkpoint_due());
         assert!(matches!(engine.service_checkpoint(), Ok(false)));
 
         let batch = mutation_batch(current_head(engine), current_accounting(engine))?;
@@ -3871,10 +3993,10 @@ mod tests {
         let retained_manifest_bytes = engine.retained_manifest_bytes;
 
         engine.retained_manifest_count = engine.limits.integrity_checkpoint_manifests;
-        assert!(engine.checkpoint_due()?);
+        assert!(engine.checkpoint_due());
         engine.retained_manifest_count = retained_manifest_count;
         engine.retained_manifest_bytes = MAX_RETAINED_MANIFEST_BYTES;
-        assert!(engine.checkpoint_due()?);
+        assert!(engine.checkpoint_due());
         engine.retained_manifest_bytes = retained_manifest_bytes;
 
         engine.start_checkpoint()?;
@@ -4446,6 +4568,33 @@ mod tests {
     }
 
     #[test]
+    fn prepared_accounting_verification_rejects_a_drifted_sealed_length() -> Result<(), StorageError>
+    {
+        let mut fixture = EngineFixture::create()?;
+        let engine = fixture.engine_mut()?;
+        let batch = mutation_batch(current_head(engine), current_accounting(engine))?;
+        let nonces =
+            draw_nonces_with_faults(batch.seal_count(), &StorageFaultInjector::disabled())?;
+        // Preparation binds the manifest to the reserved nonce block, so reserve it first.
+        let reserved = engine
+            .reserve_nonce_block(batch.seal_count())
+            .map_err(|_| StorageError::Unavailable)?;
+        let reserved_guard = engine
+            .install_reserved_guard(&reserved)
+            .map_err(|_| StorageError::Unavailable)?;
+        engine.reservation = reserved;
+        engine.guard = reserved_guard;
+        let mut prepared = engine.prepare_application(&batch, &nonces)?;
+        verify_prepared_accounting(&batch, &prepared)?;
+        prepared.manifest_record.push(0);
+        assert_eq!(
+            verify_prepared_accounting(&batch, &prepared),
+            Err(StorageError::StaleState)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn existing_record_validation_rejects_both_presence_mismatches_and_manifest_collision()
     -> Result<(), StorageError> {
         let mut fixture = EngineFixture::create()?;
@@ -4533,7 +4682,7 @@ mod tests {
             } else {
                 engine.retained_manifest_count = MAX_RETAINED_MANIFESTS;
                 engine.limits.integrity_checkpoint_manifests = MAX_RETAINED_MANIFESTS + 1;
-                assert!(engine.checkpoint_due()?);
+                assert!(engine.checkpoint_due());
             }
             assert!(matches!(
                 engine.commit(batch),

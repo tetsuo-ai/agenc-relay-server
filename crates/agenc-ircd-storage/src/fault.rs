@@ -16,11 +16,11 @@ pub enum StorageFaultSite {
     Allocation = 3,
     /// redb write-transaction creation.
     TransactionBegin = 4,
-    /// redb two-phase preparation.
+    /// First durable flush inside one redb two-phase commit: the secondary header slot.
     TransactionPhaseOne = 5,
-    /// redb two-phase durable completion.
+    /// Second durable flush inside one redb two-phase commit: the primary slot swap.
     TransactionPhaseTwo = 6,
-    /// Database durable sync.
+    /// Every database file sync, inside a commit or not (creation, open, repair, shutdown).
     DatabaseSync = 7,
     /// Guard temporary-file creation.
     GuardTemporaryCreate = 8,
@@ -223,6 +223,10 @@ impl StorageFaultSchedule {
 /// Normal storage opens use [`Self::disabled`]. Qualification opens use one shared
 /// handle so a selected occurrence is counted across every adapter involved in the
 /// storage operation.
+///
+/// An enabled handle exists for the qualification campaign and the test suites only. The
+/// daemon must never construct one: an armed schedule turns one real boundary into an injected
+/// failure, and the fault-labeled file backend it selects is not the production backend.
 #[derive(Clone, Debug, Default)]
 pub struct StorageFaultInjector {
     schedule: Option<Arc<Mutex<StorageFaultSchedule>>>,

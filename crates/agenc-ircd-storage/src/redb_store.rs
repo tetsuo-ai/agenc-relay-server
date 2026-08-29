@@ -5,7 +5,8 @@ use std::fs::File;
 use std::io::Error as IoError;
 use std::ops::Bound::{Excluded, Unbounded};
 use std::os::unix::fs::FileExt as _;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use agenc_ircd_crypto::{StorageDigest, TrackedStateHasher, tracked_record_commitment};
 use redb::{
@@ -16,8 +17,9 @@ use redb::{
 use rustix::fs::{AtFlags, unlinkat};
 
 use crate::{
-    IntegrityRecordMutation, IntegrityRecordVersion, RecordReference, StorageError,
-    StorageFaultBoundary, StorageFaultInjector, StorageFaultSite, StoredKey, TableId,
+    IntegrityRecordMutation, IntegrityRecordVersion, MAX_SEALED_RECORD_BYTES, MAX_STORED_KEY_BYTES,
+    RecordReference, StorageError, StorageFaultBoundary, StorageFaultInjector, StorageFaultSite,
+    StoredKey, TableId,
 };
 
 const META_TABLE: TableDefinition<'static, &'static [u8], &'static [u8]> =
@@ -35,21 +37,65 @@ const STATE_META_RECORD_KEY: &[u8] = b"agenc-chat/state-meta/v1";
 pub(crate) struct RedbStore {
     database: Database,
     faults: StorageFaultInjector,
+    commit_flushes: Arc<CommitFlushCounter>,
+}
+
+/// Labels the durable flushes redb issues inside one two-phase transaction.
+///
+/// redb also syncs the file outside transactions: twice on creation, once when the first
+/// writable transaction after open marks the header, after a repair, and at shutdown. Those
+/// flushes are reported only as [`StorageFaultSite::DatabaseSync`]. The first and second flush
+/// issued between [`Self::begin`] and [`Self::end`] are the two transaction phases.
+#[derive(Debug, Default)]
+struct CommitFlushCounter {
+    in_transaction: AtomicBool,
+    flushes: AtomicU8,
+}
+
+impl CommitFlushCounter {
+    fn begin(&self) {
+        self.flushes.store(0, Ordering::Release);
+        self.in_transaction.store(true, Ordering::Release);
+    }
+
+    fn end(&self) {
+        self.in_transaction.store(false, Ordering::Release);
+    }
+
+    fn next_phase_site(&self) -> Option<StorageFaultSite> {
+        if !self.in_transaction.load(Ordering::Acquire) {
+            return None;
+        }
+        let counted = self
+            .flushes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |seen| {
+                Some(seen.saturating_add(1))
+            });
+        match counted {
+            Ok(0) => Some(StorageFaultSite::TransactionPhaseOne),
+            Ok(1) => Some(StorageFaultSite::TransactionPhaseTwo),
+            Ok(_) | Err(_) => None,
+        }
+    }
 }
 
 #[derive(Debug)]
 struct FaultingFileBackend {
     file: File,
     faults: StorageFaultInjector,
-    next_sync_is_phase_one: AtomicBool,
+    commit_flushes: Arc<CommitFlushCounter>,
 }
 
 impl FaultingFileBackend {
-    fn new(file: File, faults: StorageFaultInjector) -> Self {
+    fn new(
+        file: File,
+        faults: StorageFaultInjector,
+        commit_flushes: Arc<CommitFlushCounter>,
+    ) -> Self {
         Self {
             file,
             faults,
-            next_sync_is_phase_one: AtomicBool::new(true),
+            commit_flushes,
         }
     }
 
@@ -82,19 +128,17 @@ impl StorageBackend for FaultingFileBackend {
     }
 
     fn sync_data(&self) -> Result<(), IoError> {
-        let phase_one = self
-            .next_sync_is_phase_one
-            .fetch_xor(true, Ordering::AcqRel);
-        let phase_site = if phase_one {
-            StorageFaultSite::TransactionPhaseOne
-        } else {
-            StorageFaultSite::TransactionPhaseTwo
-        };
-        self.inject(phase_site, StorageFaultBoundary::Before)?;
+        let phase_site = self.commit_flushes.next_phase_site();
+        if let Some(site) = phase_site {
+            self.inject(site, StorageFaultBoundary::Before)?;
+        }
         self.inject(StorageFaultSite::DatabaseSync, StorageFaultBoundary::Before)?;
         self.file.sync_data()?;
         self.inject(StorageFaultSite::DatabaseSync, StorageFaultBoundary::After)?;
-        self.inject(phase_site, StorageFaultBoundary::After)
+        if let Some(site) = phase_site {
+            self.inject(site, StorageFaultBoundary::After)?;
+        }
+        Ok(())
     }
 
     fn write(&self, offset: u64, data: &[u8]) -> Result<(), IoError> {
@@ -208,6 +252,7 @@ impl SnapshotScan {
                     exhausted = false;
                     break;
                 }
+                validate_row_shape(key.value(), value.value())?;
                 let key = key.value().to_vec();
                 let value = value.value().to_vec();
                 bytes = next_bytes;
@@ -704,16 +749,25 @@ impl RedbStore {
         }
         let mut builder = redb::Builder::new();
         builder.set_cache_size(cache_bytes);
+        let commit_flushes = Arc::new(CommitFlushCounter::default());
         let database = if faults.is_enabled() {
             builder
-                .create_with_backend(FaultingFileBackend::new(file, faults.clone()))
+                .create_with_backend(FaultingFileBackend::new(
+                    file,
+                    faults.clone(),
+                    Arc::clone(&commit_flushes),
+                ))
                 .map_err(|_| StorageError::DatabaseRejected)?
         } else {
             builder
                 .create_file(file)
                 .map_err(|_| StorageError::DatabaseRejected)?
         };
-        Ok(Self { database, faults })
+        Ok(Self {
+            database,
+            faults,
+            commit_flushes,
+        })
     }
 
     pub(crate) fn snapshot_scan(&self) -> Result<SnapshotScan, StorageError> {
@@ -788,7 +842,12 @@ impl RedbStore {
             .open_table(table_definition(table))
             .map_err(|_| StorageError::DatabaseRejected)?;
         let value = table.get(key).map_err(|_| StorageError::DatabaseRejected)?;
-        Ok(value.map(|guard| guard.value().to_vec()))
+        value
+            .map(|guard| {
+                validate_row_shape(key, guard.value())?;
+                Ok(guard.value().to_vec())
+            })
+            .transpose()
     }
 
     pub(crate) fn read_range(
@@ -813,6 +872,7 @@ impl RedbStore {
             .map_err(|_| StorageError::DatabaseRejected)?;
         for entry in range.take(limit) {
             let (key, value) = entry.map_err(|_| StorageError::DatabaseRejected)?;
+            validate_row_shape(key.value(), value.value())?;
             rows.push((key.value().to_vec(), value.value().to_vec()));
         }
         Ok(rows)
@@ -822,36 +882,12 @@ impl RedbStore {
         &self,
         table: TableId,
         maximum_bytes: u64,
-        mut visitor: F,
+        visitor: F,
     ) -> Result<u64, StorageError>
     where
         F: FnMut(&[u8], &[u8]) -> Result<(), StorageError>,
     {
-        let transaction = self
-            .database
-            .begin_read()
-            .map_err(|_| StorageError::DatabaseRejected)?;
-        let table = transaction
-            .open_table(table_definition(table))
-            .map_err(|_| StorageError::DatabaseRejected)?;
-        let iterator = table.iter().map_err(|_| StorageError::DatabaseRejected)?;
-        let mut bytes_seen = 0_u64;
-        for entry in iterator {
-            let (key, value) = entry.map_err(|_| StorageError::DatabaseRejected)?;
-            let row_bytes = key
-                .value()
-                .len()
-                .checked_add(value.value().len())
-                .ok_or(StorageError::Overflow)?;
-            bytes_seen = bytes_seen
-                .checked_add(u64::try_from(row_bytes).map_err(|_| StorageError::Overflow)?)
-                .ok_or(StorageError::Overflow)?;
-            if bytes_seen > maximum_bytes {
-                return Err(StorageError::LimitExceeded);
-            }
-            visitor(key.value(), value.value())?;
-        }
-        Ok(bytes_seen)
+        self.snapshot()?.visit_table(table, maximum_bytes, visitor)
     }
 
     pub(crate) fn table_usage(
@@ -901,7 +937,7 @@ impl RedbStore {
             let mut table = transaction.open_table(META_TABLE).map_err(rejected_table)?;
             table.insert(key, value).map_err(rejected_storage)?;
         }
-        commit(transaction)
+        self.finish_transaction(transaction)
     }
 
     pub(crate) fn initialize_database(
@@ -935,7 +971,7 @@ impl RedbStore {
                 .map_err(rejected_table)?;
             table.insert(write.key, value).map_err(rejected_storage)?;
         }
-        commit(transaction)
+        self.finish_transaction(transaction)
     }
 
     pub(crate) fn commit_records(
@@ -959,7 +995,7 @@ impl RedbStore {
             meta.insert(RESERVATION_META_KEY, reservation)
                 .map_err(rejected_storage)?;
         }
-        commit(transaction)
+        self.finish_transaction(transaction)
     }
 
     pub(crate) fn commit_checkpoint(
@@ -1005,7 +1041,7 @@ impl RedbStore {
             meta.insert(RESERVATION_META_KEY, reservation)
                 .map_err(rejected_storage)?;
         }
-        commit(transaction)
+        self.finish_transaction(transaction)
     }
 
     fn begin_durable_write(&self) -> Result<WriteTransaction, RedbCommitFailure> {
@@ -1045,15 +1081,36 @@ fn rejected_storage(_error: redb::StorageError) -> RedbCommitFailure {
     RedbCommitFailure::Rejected(StorageError::DatabaseRejected)
 }
 
-fn commit(transaction: WriteTransaction) -> Result<(), RedbCommitFailure> {
-    match transaction.commit() {
-        Ok(()) => Ok(()),
-        Err(CommitError::TransactionPoisoned) => {
-            Err(RedbCommitFailure::Rejected(StorageError::DatabaseRejected))
+impl RedbStore {
+    /// Runs the durable two-phase completion with its flushes labeled as transaction phases.
+    fn finish_transaction(&self, transaction: WriteTransaction) -> Result<(), RedbCommitFailure> {
+        self.commit_flushes.begin();
+        let result = transaction.commit();
+        self.commit_flushes.end();
+        match result {
+            Ok(()) => Ok(()),
+            Err(CommitError::TransactionPoisoned) => {
+                Err(RedbCommitFailure::Rejected(StorageError::DatabaseRejected))
+            }
+            Err(CommitError::Storage(_)) => Err(RedbCommitFailure::Indeterminate),
+            Err(_) => Err(RedbCommitFailure::Indeterminate),
         }
-        Err(CommitError::Storage(_)) => Err(RedbCommitFailure::Indeterminate),
-        Err(_) => Err(RedbCommitFailure::Indeterminate),
     }
+}
+
+/// Rejects a stored row whose key or value exceeds the schema ceilings before it is copied.
+///
+/// Every legitimate row was bounded when it was written, so an oversized row can only come from
+/// a tampered file; copying it first would let that file drive the allocation.
+fn validate_row_shape(key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+    if (
+        key.len() > MAX_STORED_KEY_BYTES,
+        value.len() > MAX_SEALED_RECORD_BYTES,
+    ) != (false, false)
+    {
+        return Err(StorageError::InvalidEncoding);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1515,6 +1572,51 @@ mod tests {
             Some(b"reservation-3".to_vec())
         );
         Ok(())
+    }
+
+    #[test]
+    fn oversized_rows_are_rejected_before_any_read_path_copies_them() -> Result<(), StorageError> {
+        let (_directory, store) = open_store("oversized-rows")?;
+        initialize(&store, &[])?;
+        let key = [9_u8; 32];
+        let oversized = vec![0_u8; MAX_SEALED_RECORD_BYTES + 1];
+        let transaction = store
+            .database
+            .begin_write()
+            .map_err(|_| StorageError::DatabaseRejected)?;
+        {
+            let mut table = transaction
+                .open_table(table_definition(TableId::E2eeObject))
+                .map_err(|_| StorageError::DatabaseRejected)?;
+            table
+                .insert(key.as_slice(), oversized.as_slice())
+                .map_err(|_| StorageError::DatabaseRejected)?;
+        }
+        transaction
+            .commit()
+            .map_err(|_| StorageError::DatabaseRejected)?;
+
+        assert_eq!(
+            store.read_record(TableId::E2eeObject, &key),
+            Err(StorageError::InvalidEncoding)
+        );
+        assert_eq!(
+            store
+                .read_range(TableId::E2eeObject, &[0; 32], &[255; 32], 4)
+                .map(|rows| rows.len()),
+            Err(StorageError::InvalidEncoding)
+        );
+        let mut scan = store.snapshot_scan()?;
+        assert_eq!(
+            scan.next_all_slice(4, MAX_SEALED_RECORD_BYTES * 2)
+                .map(|slice| slice.rows.len()),
+            Err(StorageError::InvalidEncoding)
+        );
+        assert_eq!(
+            validate_row_shape(&[0; MAX_STORED_KEY_BYTES + 1], &[]),
+            Err(StorageError::InvalidEncoding)
+        );
+        validate_row_shape(&[0; MAX_STORED_KEY_BYTES], &[0; MAX_SEALED_RECORD_BYTES])
     }
 
     #[test]

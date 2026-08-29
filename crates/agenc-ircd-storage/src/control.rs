@@ -8,7 +8,9 @@ use agenc_ircd_crypto::{
 use agenc_ircd_types::{DatabaseId, NetworkId, RecoveryEpoch, ServerId, ServerIncarnation};
 
 use crate::codec::{Decoder, Encoder};
-use crate::{DATABASE_FORMAT, MAX_NONCE_DRAWS, SCHEMA_GENERATION, StorageError};
+use crate::{
+    DATABASE_FORMAT, MAX_NONCE_DRAWS, MAX_TRACKED_MUTATIONS, SCHEMA_GENERATION, StorageError,
+};
 
 const DATABASE_MAGIC: &[u8; 16] = b"AGENC-IRCD-DB\0\0\0";
 const GUARD_MAGIC: &[u8; 20] = b"AGENC-IRCD-GUARD-V1\0";
@@ -16,6 +18,9 @@ const HEADER_TBS_BYTES: usize = 126;
 /// Exact encoded size of a complete database header.
 pub const DATABASE_HEADER_BYTES: usize = 158;
 const NONCE_RESERVATION_TBS_BYTES: usize = 164;
+/// Greatest reservation length: one seal per tracked mutation plus the manifest and StateMeta
+/// seals every commit adds. Checkpoint (two) and construction (three) reservations stay below it.
+const MAX_RESERVATION_LENGTH: u64 = MAX_TRACKED_MUTATIONS as u64 + 2;
 /// Exact encoded size of the fixed nonce-reservation object.
 pub const NONCE_RESERVATION_BYTES: usize = 196;
 const ROLLBACK_GUARD_TBS_BYTES: usize = 292;
@@ -226,7 +231,7 @@ impl NonceReservationTbs {
                 .nonce_draw_high_water
                 .checked_sub(self.nonce_reservation_start)
                 .ok_or(StorageError::Overflow)?;
-            if !(1..=65_537).contains(&length) {
+            if !(1..=MAX_RESERVATION_LENGTH).contains(&length) {
                 return Err(StorageError::LimitExceeded);
             }
         }
