@@ -21,6 +21,7 @@ mod qualification;
 mod records;
 mod recovery;
 mod redb_store;
+mod restore_command;
 mod schema;
 mod sealed;
 
@@ -52,7 +53,7 @@ pub use control::{
     RollbackGuardPhase, RollbackGuardTbs, STATE_META_BYTES, StateMeta, StateMetaTbs,
     verify_guard_pair,
 };
-pub use engine::{StorageEngineLimits, StorageOpenConfig};
+pub use engine::{RecoveredStorageState, StorageEngineLimits, StorageOpenConfig};
 pub use error::StorageError;
 pub use fault::{
     StorageFaultBoundary, StorageFaultCase, StorageFaultInjector, StorageFaultSchedule,
@@ -88,16 +89,19 @@ pub use platform::{
 };
 pub use qualification::{
     MAX_QUALIFICATION_CASES, MAX_QUALIFICATION_REPORT_BYTES, MAX_QUALIFIED_OBSERVED_GROWTH,
-    QualificationTarget, StorageGrowthCase, StorageGrowthRecorder, StorageQualificationReport,
-    StorageQualificationReportTbs,
+    QualificationTarget, REQUIRED_QUALIFICATION_CASES, StorageGrowthCase, StorageGrowthRecorder,
+    StorageQualificationReport, StorageQualificationReportTbs, embedded_storage_qualifications,
 };
 pub use records::{
     E2eeRecoveryGate, E2eeRecoveryKind, KEY_CHECK_STORED_KEY, MAX_DOMAIN_RECORD_BODY_BYTES,
-    MAX_RECORD_REFERENCES, PersistentRecordValue, RecordCodecKind, RecordReference,
-    STATE_META_STORED_KEY, StoredKeyShape, TableSchema, table_schema, table_schemas,
-    validate_record_plaintext, validate_sealed_record,
+    MAX_PROTOCOL_BODY_BYTES, MAX_RECORD_REFERENCES, PersistentRecordValue, ProtocolRecordBody,
+    RecordCodecKind, RecordReference, STATE_META_STORED_KEY, StoredKeyShape, TableSchema,
+    table_schema, table_schemas, validate_record_plaintext, validate_sealed_record,
 };
 pub use recovery::{RecoveryDisposition, classify_recovery_state};
+pub use restore_command::{
+    RestoreCommandReceipt, RestoreCommandRequest, RestoreTrustKey, execute_restore_command,
+};
 pub use schema::{
     DATABASE_FORMAT, MAX_NONCE_DRAWS, MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH,
     MAX_STORED_KEY_BYTES, MAX_TRACKED_MUTATIONS, MAX_TRANSACTION_PLANS, SCHEMA_GENERATION,

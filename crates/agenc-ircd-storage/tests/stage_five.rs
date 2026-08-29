@@ -28,10 +28,17 @@ use agenc_ircd_storage::{
     initialize_storage, verify_backup,
 };
 use agenc_ircd_types::{
-    DatabaseId, NetworkId, RecoveryEpoch, ServerId, ServerIncarnation, TransactionId,
+    AccountRandomId, DatabaseId, NetworkId, RecoveryEpoch, ServerId, ServerIncarnation,
+    TransactionId,
 };
 
 static DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn account_key_bytes(seed: u8) -> Vec<u8> {
+    AccountRandomId::from_bytes([seed; 16])
+        .to_text()
+        .into_bytes()
+}
 
 struct TestDirectory(PathBuf);
 
@@ -61,32 +68,16 @@ impl Drop for TestDirectory {
 fn signed_test_qualification(
     tuple: agenc_ircd_storage::FilesystemTuple,
 ) -> Result<agenc_ircd_storage::StorageQualification, Box<dyn Error>> {
-    const CASES: [&str; 15] = [
-        "btree-merge",
-        "btree-split",
-        "checkpoint",
-        "delete-max",
-        "delete-one",
-        "fragmented",
-        "guard-replace",
-        "insert-empty",
-        "insert-max",
-        "insert-one",
-        "replace-max",
-        "replace-min",
-        "reserve-equal",
-        "reserve-minus-one",
-        "reserve-plus-one",
-    ];
     let target = match tuple.target {
         "x86_64-unknown-linux-gnu" => QualificationTarget::X86_64UnknownLinuxGnu,
         "aarch64-unknown-linux-gnu" => QualificationTarget::Aarch64UnknownLinuxGnu,
         _ => return Err("unsupported test target".into()),
     };
-    let cases = CASES
+    let mut cases = agenc_ircd_storage::REQUIRED_QUALIFICATION_CASES
         .iter()
         .map(|name| StorageGrowthCase::new((*name).to_owned(), 1_000, 1_001))
         .collect::<Result<Vec<_>, _>>()?;
+    cases.sort_by(|left, right| left.name().cmp(right.name()));
     let key = Ed25519SecretKey::from_bytes([99; 32]);
     let report = StorageQualificationReport::sign(
         StorageQualificationReportTbs {
@@ -353,8 +344,18 @@ fn initialized_owner_commits_and_reads_one_manifested_mutation() -> Result<(), B
         previous_login_index_key: None,
         limits,
     })?;
+    let recovered = owner.recovered_state();
+    assert_eq!(recovered.table_record_count(TableId::KeyCheck), 1);
+    assert_eq!(recovered.table_record_count(TableId::StateMeta), 1);
+    assert_eq!(recovered.state_generation(), 0);
+    assert_eq!(recovered.account_service_response_count(), 0);
+    assert_eq!(recovered.storage_commit_sequence(), 0);
+    assert_eq!(recovered.manifest_sequence(), 0);
+    assert_eq!(recovered.nonce_draw_high_water(), 4);
+    assert_eq!(recovered.maximum_record_revision(), 0);
+    assert!(recovered.capacity().available_bytes > 0);
     let port = owner.port();
-    let account_key = StoredKey::new(vec![b'a'; 24])?;
+    let account_key = StoredKey::new(account_key_bytes(1))?;
     let account_v1 = PersistentRecordValue::new(
         TableId::Account,
         1,
@@ -438,7 +439,7 @@ fn initialized_owner_commits_and_reads_one_manifested_mutation() -> Result<(), B
         },
         vec![RecordMutation::put(
             TableId::Account,
-            StoredKey::new(vec![b's'; 24])?,
+            StoredKey::new(account_key_bytes(2))?,
             1,
             None,
             PersistentRecordValue::new(
@@ -577,6 +578,43 @@ fn initialized_owner_commits_and_reads_one_manifested_mutation() -> Result<(), B
         limits.backup_max_bytes,
     )?;
     assert_eq!(verified.stream_bytes, backup.stream_bytes);
+    let bounded_trust = BackupTrustKey::with_validity(
+        trusted.key_id,
+        signing_key.public_key(),
+        1_800_000_000,
+        1_800_000_001,
+    )?;
+    assert!(
+        verify_backup(
+            backup_bytes.as_slice(),
+            &StorageMasterKey::from_bytes([19; 32]),
+            &RollbackGuardRootKey::from_bytes([20; 32]),
+            &[bounded_trust],
+            limits.backup_max_bytes,
+        )
+        .is_ok()
+    );
+    for (not_before, not_after) in [
+        (1_800_000_001, 1_800_000_002),
+        (1_799_999_999, 1_800_000_000),
+    ] {
+        let outside = BackupTrustKey::with_validity(
+            trusted.key_id,
+            signing_key.public_key(),
+            not_before,
+            not_after,
+        )?;
+        assert!(
+            verify_backup(
+                backup_bytes.as_slice(),
+                &StorageMasterKey::from_bytes([19; 32]),
+                &RollbackGuardRootKey::from_bytes([20; 32]),
+                &[outside],
+                limits.backup_max_bytes,
+            )
+            .is_err()
+        );
+    }
     let restore_directory = TestDirectory::create()?;
     let restore_output = restore_directory.path().join("restored-state");
     let construction_directory = ConstructionDirectory::open(&restore_output, false)?;

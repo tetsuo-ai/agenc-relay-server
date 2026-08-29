@@ -7,8 +7,8 @@ use std::thread::{self, JoinHandle};
 use agenc_ircd_crypto::Ed25519SecretKey;
 
 use crate::{
-    BackupDestination, BackupReceipt, CommitOutcome, ReadPlan, ReadResult, StorageError,
-    StorageMutationBatch,
+    BackupDestination, BackupReceipt, CommitOutcome, ReadPlan, ReadResult, RecoveredStorageState,
+    StorageError, StorageMutationBatch,
     engine::{StorageEngine, StorageOpenConfig},
 };
 
@@ -115,6 +115,7 @@ impl<T> StorageCompletion<T> {
 pub struct StorageOwner {
     requests: SyncSender<StorageRequest>,
     thread: Option<JoinHandle<()>>,
+    recovered: RecoveredStorageState,
 }
 
 impl StorageOwner {
@@ -127,12 +128,12 @@ impl StorageOwner {
             .name("agenc-ircd-storage-owner".to_owned())
             .spawn(move || {
                 let engine = StorageEngine::open(config).and_then(|engine| {
-                    let _capacity = engine.startup_scan()?;
-                    Ok(engine)
+                    let recovered = engine.startup_scan()?;
+                    Ok((engine, recovered))
                 });
                 match engine {
-                    Ok(mut engine) => {
-                        if startup_sender.send(Ok(())).is_err() {
+                    Ok((mut engine, recovered)) => {
+                        if startup_sender.send(Ok(recovered)).is_err() {
                             return;
                         }
                         run_owner(&mut engine, &receiver);
@@ -144,9 +145,10 @@ impl StorageOwner {
             })
             .map_err(|_| StorageError::Unavailable)?;
         match startup_receiver.recv() {
-            Ok(Ok(())) => Ok(Self {
+            Ok(Ok(recovered)) => Ok(Self {
                 requests,
                 thread: Some(thread),
+                recovered,
             }),
             Ok(Err(error)) => {
                 let _ = thread.join();
@@ -165,6 +167,12 @@ impl StorageOwner {
         StoragePort {
             requests: self.requests.clone(),
         }
+    }
+
+    /// Returns the state reconstructed before the owner accepted work.
+    #[must_use]
+    pub const fn recovered_state(&self) -> &RecoveredStorageState {
+        &self.recovered
     }
 
     /// Drains prior requests, closes the owner, and joins the blocking thread.

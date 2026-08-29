@@ -6,9 +6,11 @@ use std::io::{Seek as _, SeekFrom};
 use agenc_ircd_crypto::{
     DatabaseBinding, Ed25519SecretKey, LoginIndexKey, LoginIndexKeyId, OsEntropy,
     RollbackGuardRootKey, StorageDigest, StorageIntegrityContext, StorageIntegrityKeys,
-    StorageMasterKey, TrackedStateHasher, derive_storage_integrity_keys, tracked_record_commitment,
+    StorageMasterKey, StorageTable, TrackedStateHasher, derive_storage_index,
+    derive_storage_integrity_keys, tracked_record_commitment,
 };
-use agenc_ircd_types::{NetworkId, ServerId};
+use agenc_ircd_types::{ChannelName, NetworkId, Nickname, ServerId};
+use subtle::ConstantTimeEq as _;
 
 use crate::mutation::ReadPlanKind;
 use crate::redb_store::{
@@ -40,6 +42,72 @@ const MIN_FIXED_RESERVE_BYTES: u64 = 67_108_864;
 const MIN_CHECKPOINT_MANIFESTS: u64 = 10_000;
 const CHECKPOINT_SLICE_RECORDS: usize = 4_096;
 const CHECKPOINT_SLICE_BYTES: usize = 16_777_216;
+
+/// Bounded state reconstructed before the storage owner accepts requests.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RecoveredStorageState {
+    table_record_counts: [u64; 27],
+    state_generation: u64,
+    account_service_response_count: u64,
+    storage_commit_sequence: u64,
+    manifest_sequence: u64,
+    nonce_draw_high_water: u64,
+    maximum_record_revision: u64,
+    capacity: FilesystemCapacity,
+}
+
+impl RecoveredStorageState {
+    /// Returns the exact row count reconstructed for one numbered table.
+    #[must_use]
+    pub fn table_record_count(&self, table: TableId) -> u64 {
+        self.table_record_counts
+            .get(usize::from(table.as_u16()))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Returns the durable logical state generation.
+    #[must_use]
+    pub const fn state_generation(&self) -> u64 {
+        self.state_generation
+    }
+
+    /// Returns the durable account-service response count.
+    #[must_use]
+    pub const fn account_service_response_count(&self) -> u64 {
+        self.account_service_response_count
+    }
+
+    /// Returns the durable storage commit sequence.
+    #[must_use]
+    pub const fn storage_commit_sequence(&self) -> u64 {
+        self.storage_commit_sequence
+    }
+
+    /// Returns the durable integrity-manifest sequence.
+    #[must_use]
+    pub const fn manifest_sequence(&self) -> u64 {
+        self.manifest_sequence
+    }
+
+    /// Returns the committed storage nonce high-water mark.
+    #[must_use]
+    pub const fn nonce_draw_high_water(&self) -> u64 {
+        self.nonce_draw_high_water
+    }
+
+    /// Returns the greatest authenticated domain-record revision observed.
+    #[must_use]
+    pub const fn maximum_record_revision(&self) -> u64 {
+        self.maximum_record_revision
+    }
+
+    /// Returns the startup filesystem capacity sample.
+    #[must_use]
+    pub const fn capacity(&self) -> FilesystemCapacity {
+        self.capacity
+    }
+}
 
 /// Runtime limits enforced at the final durable storage boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1603,7 +1671,7 @@ impl StorageEngine {
     }
 
     // agenc-review: focus owner=storage reviewed=2026-08-27 reason=one canonical table walk shares global charge and singleton accumulators
-    pub(crate) fn startup_scan(&self) -> Result<FilesystemCapacity, StorageError> {
+    pub(crate) fn startup_scan(&self) -> Result<RecoveredStorageState, StorageError> {
         self.store.validate_inventory()?;
         self.store.validate_meta_membership()?;
         self.verify_integrity_ledger()?;
@@ -1633,6 +1701,8 @@ impl StorageEngine {
         let current_login_generation = login_key_state.current_generation();
         let previous_login_generation = login_key_state.previous();
         let mut previous_login_entries = 0_u64;
+        let mut table_record_counts = [0_u64; 27];
+        let mut maximum_record_revision = 0_u64;
         for number in 0_u16..=26 {
             let table = TableId::from_u16(number)?;
             self.store
@@ -1658,6 +1728,19 @@ impl StorageEngine {
                         sealed.record_schema(),
                         plaintext.expose_for_storage_codec(),
                     )?;
+                    let count = table_record_counts
+                        .get_mut(usize::from(table.as_u16()))
+                        .ok_or(StorageError::InvalidEncoding)?;
+                    *count = count.checked_add(1).ok_or(StorageError::Overflow)?;
+                    if crate::table_schema(table).codec() == crate::RecordCodecKind::Domain {
+                        let value = crate::PersistentRecordValue::decode(
+                            table,
+                            plaintext.expose_for_storage_codec(),
+                        )?;
+                        validate_recovered_domain_record(table, &value)?;
+                        self.validate_recovered_index_binding(table, &stored_key, &value)?;
+                        maximum_record_revision = maximum_record_revision.max(value.revision());
+                    }
                     if table.is_integrity_tracked() {
                         let references = record_references(
                             table,
@@ -1777,8 +1860,60 @@ impl StorageEngine {
         {
             return Err(StorageError::StaleState);
         }
-        self.state_directory
-            .capacity(self.limits.fixed_reserve_bytes, self.limits.reserve_percent)
+        let capacity = self
+            .state_directory
+            .capacity(self.limits.fixed_reserve_bytes, self.limits.reserve_percent)?;
+        Ok(RecoveredStorageState {
+            table_record_counts,
+            state_generation: self.state_meta.tbs().state_generation,
+            account_service_response_count: self.state_meta.tbs().account_service_response_count,
+            storage_commit_sequence: self.state_meta.tbs().storage_commit_sequence,
+            manifest_sequence: self.state_meta.tbs().manifest_sequence,
+            nonce_draw_high_water: self.state_meta.tbs().nonce_draw_high_water,
+            maximum_record_revision,
+            capacity,
+        })
+    }
+
+    fn validate_recovered_index_binding(
+        &self,
+        table: TableId,
+        stored_key: &StoredKey,
+        value: &crate::PersistentRecordValue,
+    ) -> Result<(), StorageError> {
+        let semantic_key = match (table, value.record_kind()) {
+            (TableId::NicknameReservation, 1) => Nickname::parse(
+                std::str::from_utf8(value.body()).map_err(|_| StorageError::InvalidEncoding)?,
+            )
+            .map_err(|_| StorageError::InvalidEncoding)?
+            .canonical()
+            .as_bytes()
+            .to_vec(),
+            (TableId::ChannelName, 1) => ChannelName::parse(
+                std::str::from_utf8(value.body()).map_err(|_| StorageError::InvalidEncoding)?,
+            )
+            .map_err(|_| StorageError::InvalidEncoding)?
+            .canonical()
+            .as_bytes()
+            .to_vec(),
+            _ => return Ok(()),
+        };
+        let expected = derive_storage_index(
+            &self.master_key,
+            self.binding,
+            StorageTable::new(table.as_u16())?,
+            self.header.tbs().storage_key_generation,
+            &semantic_key,
+        )?;
+        if bool::from(
+            expected
+                .expose_for_storage_key()
+                .ct_eq(stored_key.as_bytes()),
+        ) {
+            Ok(())
+        } else {
+            Err(StorageError::AuthenticationFailed)
+        }
     }
 
     // agenc-review: focus owner=storage reviewed=2026-08-28 reason=canonical construction scan validates every target table with shared exact charge and singleton accumulators
@@ -2182,6 +2317,125 @@ fn record_references(
             .to_vec());
     }
     Ok(Vec::new())
+}
+
+fn validate_recovered_domain_record(
+    table: TableId,
+    value: &crate::PersistentRecordValue,
+) -> Result<(), StorageError> {
+    if value.table() != table
+        || value
+            .references()
+            .iter()
+            .any(|reference| !reference_is_legal(table, reference.table()))
+    {
+        return Err(StorageError::StaleState);
+    }
+    let required_reference = match (table, value.record_kind()) {
+        (TableId::NicknameReservation, 1) => Some(TableId::Account),
+        (TableId::ChannelName, 1) => Some(TableId::Channel),
+        _ => None,
+    };
+    if let Some(required) = required_reference {
+        let mut matching = value
+            .references()
+            .iter()
+            .filter(|reference| reference.table() == required);
+        if matching.next().is_none() || matching.next().is_some() {
+            return Err(StorageError::StaleState);
+        }
+    }
+    if matches!(
+        (table, value.record_kind()),
+        (
+            TableId::Account | TableId::RegistrationInvite | TableId::Session,
+            2
+        )
+    ) && !value.references().is_empty()
+    {
+        return Err(StorageError::StaleState);
+    }
+    Ok(())
+}
+
+const fn reference_is_legal(source: TableId, target: TableId) -> bool {
+    match source {
+        TableId::Account => matches!(target, TableId::OpaqueRecord),
+        TableId::OpaqueRecord | TableId::NicknameReservation => {
+            matches!(target, TableId::Account)
+        }
+        TableId::AuthTransaction => matches!(
+            target,
+            TableId::Account | TableId::OpaqueRecord | TableId::RegistrationInvite
+        ),
+        TableId::RegistrationInvite => {
+            matches!(target, TableId::Account | TableId::AuthTransaction)
+        }
+        TableId::Session => matches!(target, TableId::Account | TableId::Channel),
+        TableId::Channel => matches!(
+            target,
+            TableId::Account | TableId::Session | TableId::RegistrationInvite
+        ),
+        TableId::ChannelName | TableId::History => matches!(target, TableId::Channel),
+        TableId::Sanction => matches!(
+            target,
+            TableId::Account | TableId::Session | TableId::Channel
+        ),
+        TableId::FederationPeer => matches!(target, TableId::E2eeState),
+        TableId::FederationOrigin => matches!(target, TableId::FederationPeer),
+        TableId::RequestResult => matches!(
+            target,
+            TableId::FederationPeer
+                | TableId::FederationOrigin
+                | TableId::EdgeOutbox
+                | TableId::E2eeState
+        ),
+        TableId::EdgeOutbox => matches!(
+            target,
+            TableId::FederationPeer
+                | TableId::RequestResult
+                | TableId::E2eeObject
+                | TableId::E2eeState
+        ),
+        TableId::EdgeProjection => matches!(
+            target,
+            TableId::FederationPeer
+                | TableId::Account
+                | TableId::Session
+                | TableId::Channel
+                | TableId::E2eeState
+        ),
+        TableId::Audit => matches!(
+            target,
+            TableId::Account
+                | TableId::Session
+                | TableId::Channel
+                | TableId::Sanction
+                | TableId::FederationPeer
+                | TableId::E2eeState
+        ),
+        TableId::AuditCheckpoint => matches!(target, TableId::Audit),
+        TableId::E2eeObject => matches!(
+            target,
+            TableId::Account | TableId::Channel | TableId::E2eeState
+        ),
+        TableId::E2eeState => matches!(
+            target,
+            TableId::Account
+                | TableId::Channel
+                | TableId::FederationPeer
+                | TableId::E2eeObject
+                | TableId::E2eeState
+        ),
+        TableId::KeyCheck
+        | TableId::LoginIndex
+        | TableId::StateMeta
+        | TableId::IntegrityManifest
+        | TableId::IntegrityCheckpoint
+        | TableId::LoginIndexKeyState
+        | TableId::StorageConstruction
+        | TableId::StorageOperation => false,
+    }
 }
 
 fn add_retired_charge(

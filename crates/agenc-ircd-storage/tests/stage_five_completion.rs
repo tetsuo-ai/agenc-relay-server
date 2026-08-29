@@ -5,14 +5,22 @@
 use std::error::Error;
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
-use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use agenc_ircd_crypto::{
-    CryptoError, DatabaseBinding, Ed25519SecretKey, LoginIndexKey, RollbackGuardRootKey,
-    SignatureDomain, StorageDigest, StorageMasterKey, StorageTable, derive_login_index,
-    derive_storage_index, rekey_transform_profile_hash, sign_canonical,
+    BackupStreamHasher, ConstructionPlanHasher, CryptoError, DatabaseBinding, Ed25519SecretKey,
+    LoginIndexKey, RollbackGuardRootKey, SignatureDomain, StorageAuthenticator, StorageDigest,
+    StorageIntegrityContext, StorageMasterKey, StorageNonce, StorageTable, TrackedStateHasher,
+    authenticate_nonce_reservation, authenticate_rollback_guard, authenticate_state_meta,
+    backup_signing_key_id, database_header_hash, database_key_check, derive_login_index,
+    derive_storage_index, derive_storage_integrity_keys, derive_storage_record_key,
+    integrity_checkpoint_hash, integrity_manifest_hash, nonce_reservation_hash,
+    open_storage_record, rekey_transform_profile_hash, restore_transform_profile_hash,
+    rollback_guard_hash, seal_storage_record, sealed_record_id, sign_canonical,
+    storage_operation_id, storage_operation_key_id, storage_output_path_hash,
+    storage_qualification_component_hash, tracked_record_commitment, tracked_state_digest,
 };
 use agenc_ircd_storage::{
     CommitOutcome, ConstructionDirectory, ConstructionDirectoryPhase, ConstructionExecutor,
@@ -22,17 +30,18 @@ use agenc_ircd_storage::{
     ExistingRecord, InitialStorageRecord, LoginIndexKeyState, LoginIndexLazyMigration,
     LoginIndexLookupSchedule, LoginIndexStoredKey, LoginIndexTransitionBatch,
     LoginIndexTransitionPreflight, LoginIndexValue, LoginIndexValueKind, PersistentRecordValue,
-    QualificationTarget, ReadPlan, RecordCodecKind, RecordMutation, RecordReference,
-    RecoveryTransformV1, SCHEMA_GENERATION, SealedRecord, StateDirectory, StorageAccountingLimits,
-    StorageConstruction, StorageConstructionAction, StorageConstructionCursor,
-    StorageConstructionKind, StorageConstructionPlanEntry, StorageConstructionSource,
-    StorageConstructionSourceKind, StorageEngineLimits, StorageError, StorageFaultBoundary,
-    StorageFaultCase, StorageFaultInjector, StorageFaultSchedule, StorageFaultSite,
-    StorageGrowthCase, StorageGrowthRecorder, StorageInitializationConfig,
-    StorageInitializationMode, StorageInitializationOutcome, StorageMutationBatch,
-    StorageMutationHead, StorageOpenConfig, StorageOperationIdentity, StorageOwner, StoragePort,
-    StorageQualificationReport, StorageQualificationReportTbs, StorageSealContext, StoredKey,
-    StoredKeyShape, TableId, construction_plan_hash, initialize_storage, recovery_transform_prefix,
+    ProtocolRecordBody, QualificationTarget, ReadPlan, RecordCodecKind, RecordMutation,
+    RecordReference, RecoveryTransformV1, RestoreCommandRequest, RestoreTrustKey,
+    SCHEMA_GENERATION, SealedRecord, StateDirectory, StorageAccountingLimits, StorageConstruction,
+    StorageConstructionAction, StorageConstructionCursor, StorageConstructionKind,
+    StorageConstructionPlanEntry, StorageConstructionSource, StorageConstructionSourceKind,
+    StorageEngineLimits, StorageError, StorageFaultBoundary, StorageFaultCase,
+    StorageFaultInjector, StorageFaultSchedule, StorageFaultSite, StorageGrowthCase,
+    StorageGrowthRecorder, StorageInitializationConfig, StorageInitializationMode,
+    StorageInitializationOutcome, StorageMutationBatch, StorageMutationHead, StorageOpenConfig,
+    StorageOperationIdentity, StorageOwner, StoragePort, StorageQualificationReport,
+    StorageQualificationReportTbs, StorageSealContext, StoredKey, StoredKeyShape, TableId,
+    construction_plan_hash, execute_restore_command, initialize_storage, recovery_transform_prefix,
     table_schema, table_schemas, validate_record_plaintext,
 };
 use agenc_ircd_types::{
@@ -64,23 +73,217 @@ const DOMAIN_TABLES: [TableId; 19] = [
     TableId::E2eeState,
 ];
 
-const QUALIFICATION_CASES: [&str; 15] = [
-    "btree-merge",
-    "btree-split",
-    "checkpoint",
-    "delete-max",
-    "delete-one",
-    "fragmented",
-    "guard-replace",
-    "insert-empty",
-    "insert-max",
-    "insert-one",
-    "replace-max",
-    "replace-min",
-    "reserve-equal",
-    "reserve-minus-one",
-    "reserve-plus-one",
-];
+fn domain_body(table: TableId, kind: u16, bytes: Vec<u8>) -> Result<Vec<u8>, StorageError> {
+    if table == TableId::NicknameReservation && kind == 1 {
+        return Ok(b"nickname".to_vec());
+    }
+    if table == TableId::ChannelName && kind == 1 {
+        return Ok(b"#channel".to_vec());
+    }
+    if matches!(
+        table,
+        TableId::FederationPeer
+            | TableId::FederationOrigin
+            | TableId::RequestResult
+            | TableId::EdgeOutbox
+            | TableId::EdgeProjection
+            | TableId::E2eeObject
+            | TableId::E2eeState
+    ) {
+        ProtocolRecordBody::new(table, kind, 1, bytes)?.encode()
+    } else {
+        Ok(bytes)
+    }
+}
+
+fn account_key_bytes(seed: u8) -> Vec<u8> {
+    AccountRandomId::from_bytes([seed; 16])
+        .to_text()
+        .into_bytes()
+}
+
+const QUALIFICATION_CASES: [&str; 21] = agenc_ircd_storage::REQUIRED_QUALIFICATION_CASES;
+
+#[test]
+fn storage_crypto_adapters_cover_every_public_boundary() -> Result<(), Box<dyn Error>> {
+    let binding = DatabaseBinding::new(
+        NetworkId::from_bytes([1; 32]),
+        ServerId::from_bytes([2; 16]),
+        ServerIncarnation::from_bytes([3; 16]),
+        DatabaseId::from_bytes([4; 16]),
+    );
+    assert_eq!(binding.encode()?.len(), 98);
+    assert_eq!(StorageTable::new(0)?.value(), 0);
+    assert_eq!(StorageTable::new(26)?.value(), 26);
+    assert!(StorageTable::new(27).is_err());
+
+    let master = StorageMasterKey::from_bytes([5; 32]);
+    assert!(master.matches(&StorageMasterKey::from_bytes([5; 32])));
+    assert!(!master.matches(&StorageMasterKey::from_bytes([6; 32])));
+    assert_ne!(
+        master.source_operation_key_id()?,
+        master.target_operation_key_id()?
+    );
+    let table = StorageTable::new(1)?;
+    assert!(derive_storage_record_key(&master, binding, table, 0).is_err());
+    let record_key = derive_storage_record_key(&master, binding, table, 1)?;
+    assert!(derive_storage_index(&master, binding, table, 0, b"key").is_err());
+    assert!(derive_storage_index(&master, binding, table, 1, &vec![0; 4_097]).is_err());
+    let first_index = derive_storage_index(&master, binding, table, 1, b"key")?;
+    let same_index = derive_storage_index(&master, binding, table, 1, b"key")?;
+    let other_index = derive_storage_index(&master, binding, table, 1, b"other")?;
+    assert!(first_index.matches(&same_index));
+    assert!(first_index == same_index);
+    assert!(!first_index.matches(&other_index));
+    assert_eq!(first_index.expose_for_storage_key().len(), 32);
+
+    let nonce_bytes = [7; 24];
+    let sealed = seal_storage_record(
+        &record_key,
+        StorageNonce::from_reserved_bytes(nonce_bytes),
+        1,
+        b"stored-key",
+        b"plaintext",
+    )?;
+    assert_eq!(sealed.as_bytes().len(), b"plaintext".len() + 16);
+    let opened = open_storage_record(
+        &record_key,
+        &StorageNonce::from_reserved_bytes(nonce_bytes),
+        1,
+        b"stored-key",
+        &sealed,
+    )?;
+    assert_eq!(opened.expose_for_storage_codec(), b"plaintext");
+    assert!(
+        open_storage_record(
+            &record_key,
+            &StorageNonce::from_reserved_bytes([8; 24]),
+            1,
+            b"stored-key",
+            &sealed,
+        )
+        .is_err()
+    );
+    assert!(
+        open_storage_record(
+            &record_key,
+            &StorageNonce::from_reserved_bytes(nonce_bytes),
+            2,
+            b"stored-key",
+            &sealed,
+        )
+        .is_err()
+    );
+    assert!(
+        seal_storage_record(
+            &record_key,
+            StorageNonce::from_reserved_bytes(nonce_bytes),
+            0,
+            b"stored-key",
+            b"plaintext",
+        )
+        .is_err()
+    );
+    assert!(
+        seal_storage_record(
+            &record_key,
+            StorageNonce::from_reserved_bytes(nonce_bytes),
+            1,
+            &vec![0; 4_097],
+            b"plaintext",
+        )
+        .is_err()
+    );
+
+    let root = RollbackGuardRootKey::from_bytes([9; 32]);
+    assert!(root.matches(&RollbackGuardRootKey::from_bytes([9; 32])));
+    assert!(!root.matches(&RollbackGuardRootKey::from_bytes([10; 32])));
+    assert_ne!(
+        root.source_operation_key_id()?,
+        root.target_operation_key_id()?
+    );
+    let keys = derive_storage_integrity_keys(
+        &root,
+        StorageIntegrityContext::new(
+            NetworkId::from_bytes([1; 32]),
+            ServerId::from_bytes([2; 16]),
+            DatabaseId::from_bytes([4; 16]),
+        ),
+    )?;
+    let auth = authenticate_state_meta(&keys, digest(11), b"state")?;
+    assert!(auth.matches(&StorageAuthenticator::from_bytes(
+        *auth.expose_for_storage()
+    )));
+    assert!(!auth.matches(&StorageAuthenticator::from_bytes([0; 32])));
+    assert_ne!(
+        authenticate_nonce_reservation(&keys, b"control")?.expose_for_storage(),
+        authenticate_rollback_guard(&keys, b"control")?.expose_for_storage()
+    );
+
+    let small = b"canonical";
+    let hashes = [
+        database_header_hash(small)?,
+        database_key_check(small)?,
+        nonce_reservation_hash(small)?,
+        rollback_guard_hash(small)?,
+        sealed_record_id(small)?,
+        integrity_manifest_hash(small)?,
+        integrity_checkpoint_hash(small)?,
+        tracked_record_commitment(small)?,
+        backup_signing_key_id(&[12; 32])?,
+        storage_operation_id(small)?,
+        restore_transform_profile_hash()?,
+        rekey_transform_profile_hash()?,
+    ];
+    assert!(hashes.windows(2).all(|pair| {
+        let [left, right] = pair else {
+            return false;
+        };
+        left != right
+    }));
+
+    assert!(tracked_state_digest(1, &[]).is_err());
+    let commitments = [digest(13), digest(14)];
+    assert_eq!(tracked_state_digest(2, &commitments)?, {
+        let mut hasher = TrackedStateHasher::new(2);
+        hasher.update(commitments[0])?;
+        hasher.update(commitments[1])?;
+        hasher.finalize()?
+    });
+    assert!(TrackedStateHasher::new(1).finalize().is_err());
+    let mut full_state = TrackedStateHasher::new(0);
+    assert!(full_state.update(digest(15)).is_err());
+
+    assert!(storage_qualification_component_hash(b"", b"bytes").is_err());
+    assert!(storage_qualification_component_hash(&[b'a'; 129], b"bytes").is_err());
+    assert!(storage_qualification_component_hash(b"not\nprintable", b"bytes").is_err());
+    assert!(storage_qualification_component_hash(b"valid", &vec![0; 16_777_257]).is_err());
+    storage_qualification_component_hash(b"valid", b"bytes")?;
+
+    assert!(ConstructionPlanHasher::new(1, 0).is_err());
+    let mut too_small = ConstructionPlanHasher::new(1, 1)?;
+    assert!(too_small.update_entry(b"two").is_err());
+    let mut complete = ConstructionPlanHasher::new(1, 3)?;
+    complete.update_entry(b"one")?;
+    assert!(complete.update_entry(b"extra").is_err());
+    complete.finalize()?;
+    assert!(ConstructionPlanHasher::new(1, 3)?.finalize().is_err());
+
+    assert!(storage_operation_key_id(b"", &[16; 32]).is_err());
+    assert!(storage_operation_key_id(&[b'x'; 33], &[16; 32]).is_err());
+    storage_operation_key_id(b"purpose", &[16; 32])?;
+    assert!(storage_output_path_hash("").is_err());
+    assert!(storage_output_path_hash(&"x".repeat(4_097)).is_err());
+    storage_output_path_hash("/absolute/output")?;
+
+    assert!(BackupStreamHasher::new(0).is_err());
+    let mut stream = BackupStreamHasher::new(3)?;
+    stream.update(b"abc")?;
+    assert_eq!(stream.bytes_seen(), 3);
+    assert!(stream.update(b"d").is_err());
+    let _ = stream.finalize();
+    Ok(())
+}
 
 #[test]
 fn every_table_has_one_closed_schema_and_domain_codec_consumes_fully() -> Result<(), Box<dyn Error>>
@@ -96,7 +299,8 @@ fn every_table_has_one_closed_schema_and_domain_codec_consumes_fully() -> Result
     for table in DOMAIN_TABLES {
         assert_eq!(table_schema(table).codec(), RecordCodecKind::Domain);
         let key = key_for(table)?;
-        let reference = RecordReference::new(TableId::Account, StoredKey::new(vec![b'a'; 24])?)?;
+        let reference =
+            RecordReference::new(TableId::Account, StoredKey::new(account_key_bytes(1))?)?;
         let body = if table == TableId::E2eeState {
             E2eeRecoveryGate::new(
                 digest(40),
@@ -109,7 +313,7 @@ fn every_table_has_one_closed_schema_and_domain_codec_consumes_fully() -> Result
             )
             .encode()?
         } else {
-            vec![7, 8, 9]
+            domain_body(table, 1, vec![7, 8, 9])?
         };
         let value = PersistentRecordValue::new(table, 1, 1, 1, None, vec![reference], body)?;
         let encoded = value.encode()?;
@@ -126,6 +330,38 @@ fn every_table_has_one_closed_schema_and_domain_codec_consumes_fully() -> Result
 }
 
 #[test]
+fn later_protocol_bodies_are_profile_table_and_arm_bound() -> Result<(), Box<dyn Error>> {
+    let body = ProtocolRecordBody::new(TableId::FederationPeer, 1, 1, vec![7, 8, 9])?;
+    let encoded = body.encode()?;
+    let decoded = ProtocolRecordBody::decode(TableId::FederationPeer, 1, &encoded)?;
+    assert_eq!(decoded.table(), TableId::FederationPeer);
+    assert_eq!(decoded.record_kind(), 1);
+    assert_eq!(decoded.profile_version(), 1);
+    assert_eq!(decoded.canonical_object(), [7, 8, 9]);
+
+    assert!(ProtocolRecordBody::new(TableId::Account, 1, 1, vec![1]).is_err());
+    assert!(ProtocolRecordBody::new(TableId::FederationPeer, 1, 2, vec![1]).is_err());
+    assert!(ProtocolRecordBody::new(TableId::FederationPeer, 1, 1, Vec::new()).is_err());
+    assert!(ProtocolRecordBody::decode(TableId::FederationOrigin, 1, &encoded).is_err());
+    assert!(ProtocolRecordBody::decode(TableId::FederationPeer, 2, &encoded).is_err());
+
+    let mut unsupported_version = encoded.clone();
+    unsupported_version
+        .get_mut(..2)
+        .ok_or("missing protocol body version")?
+        .copy_from_slice(&2_u16.to_be_bytes());
+    assert!(ProtocolRecordBody::decode(TableId::FederationPeer, 1, &unsupported_version).is_err());
+    let mut trailing = encoded;
+    trailing.push(0);
+    assert!(ProtocolRecordBody::decode(TableId::FederationPeer, 1, &trailing).is_err());
+
+    let maximum_e2ee = ProtocolRecordBody::new(TableId::E2eeObject, 1, 1, vec![1; 4_194_304])?;
+    assert_eq!(maximum_e2ee.canonical_object().len(), 4_194_304);
+    assert!(ProtocolRecordBody::new(TableId::E2eeObject, 1, 1, vec![1; 4_194_305]).is_err());
+    Ok(())
+}
+
+#[test]
 fn persistent_record_schema_rejects_every_key_kind_and_counter_mismatch()
 -> Result<(), Box<dyn Error>> {
     for schema in table_schemas()? {
@@ -137,7 +373,12 @@ fn persistent_record_schema_rejects_every_key_kind_and_counter_mismatch()
                 assert!(schema.validate_key(&changed).is_err());
             }
             StoredKeyShape::Exact(length) => {
-                schema.validate_key(&vec![1; length])?;
+                let valid = if schema.table() == TableId::Account {
+                    account_key_bytes(1)
+                } else {
+                    vec![1; length]
+                };
+                schema.validate_key(&valid)?;
                 assert!(
                     schema
                         .validate_key(&vec![1; length.saturating_sub(1)])
@@ -154,7 +395,7 @@ fn persistent_record_schema_rejects_every_key_kind_and_counter_mismatch()
                 }
             }
             StoredKeyShape::AccountOrOpaqueFake => {
-                schema.validate_key(&[1; 24])?;
+                schema.validate_key(&account_key_bytes(1))?;
                 schema.validate_key(b"agenc-chat/opaque-fake-record/v1")?;
                 assert!(schema.validate_key(&[1; 23]).is_err());
                 assert!(schema.validate_key(&[1; 25]).is_err());
@@ -170,7 +411,7 @@ fn persistent_record_schema_rejects_every_key_kind_and_counter_mismatch()
         .is_err()
     );
     let account_reference =
-        RecordReference::new(TableId::Account, StoredKey::new(vec![b'a'; 24])?)?;
+        RecordReference::new(TableId::Account, StoredKey::new(account_key_bytes(1))?)?;
     assert!(
         PersistentRecordValue::new(
             TableId::Account,
@@ -205,7 +446,7 @@ fn persistent_record_schema_rejects_every_key_kind_and_counter_mismatch()
             )
             .encode()?
         } else {
-            vec![1]
+            domain_body(table, 1, vec![1])?
         };
         assert!(
             PersistentRecordValue::new(table, 0, 1, generation, None, Vec::new(), body.clone())
@@ -517,10 +758,12 @@ fn qualification_rejects_every_report_and_measurement_boundary() -> Result<(), B
     assert_eq!(reclaimed.positive_delta(), 0);
 
     let valid_cases = || {
-        QUALIFICATION_CASES
+        let mut cases = QUALIFICATION_CASES
             .iter()
             .map(|name| StorageGrowthCase::new((*name).to_owned(), 10, 11))
-            .collect::<Result<Vec<_>, StorageError>>()
+            .collect::<Result<Vec<_>, StorageError>>()?;
+        cases.sort_by(|left, right| left.name().cmp(right.name()));
+        Ok::<_, StorageError>(cases)
     };
     let valid_tbs = || -> Result<StorageQualificationReportTbs, StorageError> {
         Ok(StorageQualificationReportTbs {
@@ -757,12 +1000,14 @@ fn qualification_required_file_set_measures_every_named_durable_case() -> Result
             .map_err(|_| StorageError::FilesystemRejected)
     })?;
     let (cases, maximum) = recorder.finish()?;
+    let mut expected = QUALIFICATION_CASES;
+    expected.sort_unstable();
     assert_eq!(
         cases
             .iter()
             .map(StorageGrowthCase::name)
             .collect::<Vec<_>>(),
-        QUALIFICATION_CASES
+        expected
     );
     assert!(maximum <= agenc_ircd_storage::MAX_QUALIFIED_OBSERVED_GROWTH);
     Ok(())
@@ -1106,7 +1351,7 @@ fn every_commit_fault_reopens_to_exact_prior_or_successor_state() -> Result<(), 
                 .port()
                 .try_read(ReadPlan::exact(
                     TableId::Account,
-                    StoredKey::new(vec![b'f'; 24])?,
+                    StoredKey::new(account_key_bytes(2))?,
                 ))?
                 .wait()?;
             match result.storage_commit_sequence {
@@ -1153,7 +1398,7 @@ fn every_checkpoint_fault_reopens_to_a_verified_commit_or_checkpoint() -> Result
                 .port()
                 .try_read(ReadPlan::exact(
                     TableId::Account,
-                    StoredKey::new(vec![b'f'; 24])?,
+                    StoredKey::new(account_key_bytes(2))?,
                 ))?
                 .wait()?;
             assert!(matches!(result.storage_commit_sequence, 1 | 2));
@@ -1187,7 +1432,7 @@ fn first_account_batch(
         fixture.accounting(),
         vec![RecordMutation::put(
             TableId::Account,
-            StoredKey::new(vec![b'f'; 24])?,
+            StoredKey::new(account_key_bytes(2))?,
             1,
             None,
             PersistentRecordValue::new(TableId::Account, 1, 1, 1, None, Vec::new(), body)?
@@ -1619,7 +1864,7 @@ fn restore_transform_preserves_deleted_accounts_and_rejects_creation_reservation
         0,
         None,
         vec![
-            RecordReference::new(TableId::Account, StoredKey::new(vec![b'a'; 24])?)?,
+            RecordReference::new(TableId::Account, StoredKey::new(account_key_bytes(1))?)?,
             RecordReference::new(TableId::Session, StoredKey::new(vec![b's'; 16])?)?,
             RecordReference::new(TableId::RegistrationInvite, StoredKey::new(vec![b'i'; 16])?)?,
         ],
@@ -1763,7 +2008,7 @@ fn restore_transform_preserves_deleted_accounts_and_rejects_creation_reservation
 #[test]
 fn restore_transform_covers_every_closed_action_and_source_mismatch() -> Result<(), Box<dyn Error>>
 {
-    let account_key = StoredKey::new(vec![b'a'; 24])?;
+    let account_key = StoredKey::new(account_key_bytes(1))?;
     let live_account =
         PersistentRecordValue::new(TableId::Account, 1, 7, 9, None, Vec::new(), vec![1])?
             .encode()?;
@@ -1773,7 +2018,7 @@ fn restore_transform_covers_every_closed_action_and_source_mismatch() -> Result<
         StorageConstructionKind::Restore,
         vec![account_reference],
         TableId::Account,
-        StoredKey::new(vec![b'a'; 24])?,
+        StoredKey::new(account_key_bytes(1))?,
         1,
         StorageConstructionAction::RestoreAccount,
         0,
@@ -1910,9 +2155,16 @@ fn restore_transform_covers_every_closed_action_and_source_mismatch() -> Result<
         Err(StorageError::StaleState)
     );
 
-    let peer_plaintext =
-        PersistentRecordValue::new(TableId::FederationPeer, 2, 12, 0, None, Vec::new(), vec![6])?
-            .encode()?;
+    let peer_plaintext = PersistentRecordValue::new(
+        TableId::FederationPeer,
+        2,
+        12,
+        0,
+        None,
+        Vec::new(),
+        domain_body(TableId::FederationPeer, 2, vec![6])?,
+    )?
+    .encode()?;
     let (peer_reference, peer_source) = opened_domain_source(
         TableId::FederationPeer,
         StoredKey::new(vec![6; 16])?,
@@ -1938,9 +2190,16 @@ fn restore_transform_covers_every_closed_action_and_source_mismatch() -> Result<
             .is_ok()
     );
 
-    let other_e2ee_plaintext =
-        PersistentRecordValue::new(TableId::E2eeState, 2, 13, 0, None, Vec::new(), vec![7])?
-            .encode()?;
+    let other_e2ee_plaintext = PersistentRecordValue::new(
+        TableId::E2eeState,
+        2,
+        13,
+        0,
+        None,
+        Vec::new(),
+        domain_body(TableId::E2eeState, 2, vec![7])?,
+    )?
+    .encode()?;
     let (other_e2ee_reference, other_e2ee_source) = opened_domain_source(
         TableId::E2eeState,
         StoredKey::new(vec![7; 3])?,
@@ -2130,7 +2389,7 @@ fn reconstructed_source_rebuilds_rekey_plan_and_enforces_key_generation()
         1,
         b"nick-one",
     )?;
-    let account_key = StoredKey::new(vec![b'a'; 24])?;
+    let account_key = StoredKey::new(account_key_bytes(1))?;
     let nickname_key = StoredKey::new(nickname_index.expose_for_storage_key().to_vec())?;
     let login_key = LoginIndexKey::from_bytes(login_key_bytes);
     let login_state = LoginIndexKeyState::stable(1, login_key.key_id(network))?;
@@ -2303,7 +2562,7 @@ fn rekey_construction_commits_finalizes_installs_and_reopens() -> Result<(), Box
     )?
     .encode()?;
     let source_record_id = agenc_ircd_storage::SealedRecord::decode(&source_sealed)?.record_id()?;
-    let account_key = StoredKey::new(vec![b'a'; 24])?;
+    let account_key = StoredKey::new(account_key_bytes(1))?;
     let account_plaintext =
         PersistentRecordValue::new(TableId::Account, 1, 7, 9, None, Vec::new(), vec![41])?
             .encode()?;
@@ -2537,6 +2796,116 @@ fn rekey_construction_commits_finalizes_installs_and_reopens() -> Result<(), Box
 }
 
 #[test]
+fn stopped_daemon_restore_installs_and_reverifies_a_signed_backup() -> Result<(), Box<dyn Error>> {
+    let source = initialized_live_fixture()?;
+    let owner = StorageOwner::start(live_open_config(StateDirectory::open(
+        source.directory.path(),
+        &[source.qualification],
+    )?))?;
+    let backup_directory = TestDirectory::create()?;
+    let signing_key = Ed25519SecretKey::from_bytes([151; 32]);
+    let public_key = signing_key.public_key();
+    let backup_name = "restore-source.agenc";
+    let backup_path = backup_directory.path().join(backup_name);
+    owner
+        .port()
+        .try_backup(
+            agenc_ircd_storage::BackupDestination::new(backup_directory.path(), backup_name)?,
+            signing_key,
+            1_000,
+            [152; 16],
+        )?
+        .wait()?;
+    owner.shutdown()?;
+
+    let command_directory = TestDirectory::create()?;
+    let source_master =
+        protected_key_file(command_directory.path(), "source-master.key", [207; 32])?;
+    let source_guard = protected_key_file(command_directory.path(), "source-guard.key", [208; 32])?;
+    let login_key = protected_key_file(command_directory.path(), "login.key", [203; 32])?;
+    let target_guard = protected_key_file(command_directory.path(), "target-guard.key", [153; 32])?;
+    let output = command_directory.path().join("restored-state");
+    let trusted = agenc_ircd_storage::BackupTrustKey::new(public_key)?.key_id;
+    let request = || RestoreCommandRequest {
+        network_id: NetworkId::from_bytes([201; 32]),
+        server_id: ServerId::from_bytes([202; 16]),
+        current_state_directory: source.directory.path().to_path_buf(),
+        current_master_key_file: source_master.clone(),
+        current_rollback_guard_key_file: source_guard.clone(),
+        backup_path: backup_path.clone(),
+        source_master_key_file: source_master.clone(),
+        source_rollback_guard_key_file: source_guard.clone(),
+        login_index_key_file: login_key.clone(),
+        login_index_previous_key_file: None,
+        output_state_directory: output.clone(),
+        target_rollback_guard_key_file: target_guard.clone(),
+        target_master_key_file: None,
+        resume: false,
+        declare_recovery_epoch: true,
+        trusted_backup_keys: vec![RestoreTrustKey::new(
+            *trusted.as_bytes(),
+            *public_key.as_bytes(),
+            900,
+            1_100,
+        )],
+        limits: test_limits(),
+    };
+    let locked_owner = StorageOwner::start(live_open_config(StateDirectory::open(
+        source.directory.path(),
+        &[source.qualification],
+    )?))?;
+    let mut locked_current = request();
+    locked_current.output_state_directory = command_directory.path().join("locked-current");
+    assert_eq!(
+        execute_restore_command(locked_current, &[source.qualification]),
+        Err(StorageError::WriterLocked)
+    );
+    locked_owner.shutdown()?;
+
+    let divergent = initialized_live_fixture()?;
+    let mut mismatched_current = request();
+    mismatched_current.current_state_directory = divergent.directory.path().to_path_buf();
+    mismatched_current.output_state_directory = command_directory.path().join("mismatched-current");
+    assert_eq!(
+        execute_restore_command(mismatched_current, &[source.qualification]),
+        Err(StorageError::StaleState)
+    );
+
+    let receipt = execute_restore_command(request(), &[source.qualification])?;
+    assert_eq!(receipt.output_state_directory, output);
+    assert_eq!(receipt.current_state_generation, Some(0));
+    assert_eq!(receipt.source_state_generation, 0);
+    assert_eq!(receipt.target_state_generation, 0);
+    assert_ne!(receipt.source_recovery_epoch, receipt.target_recovery_epoch);
+    assert_ne!(
+        receipt.source_server_incarnation,
+        receipt.target_server_incarnation
+    );
+    assert!(
+        receipt
+            .output_state_directory
+            .join("database.redb")
+            .is_file()
+    );
+
+    let mut resumed = request();
+    resumed.resume = true;
+    assert_eq!(
+        execute_restore_command(resumed, &[source.qualification])?,
+        receipt
+    );
+
+    let mut undeclared = request();
+    undeclared.output_state_directory = command_directory.path().join("undeclared");
+    undeclared.declare_recovery_epoch = false;
+    assert_eq!(
+        execute_restore_command(undeclared, &[source.qualification]),
+        Err(StorageError::InvalidEncoding)
+    );
+    Ok(())
+}
+
+#[test]
 fn every_construction_commit_fault_resumes_from_the_authenticated_cursor()
 -> Result<(), Box<dyn Error>> {
     for site in [
@@ -2715,7 +3084,7 @@ impl RekeyConstructionFixture {
         )?
         .encode()?;
         let login_state_record_id = SealedRecord::decode(&login_state_sealed)?.record_id()?;
-        let account_key = StoredKey::new(vec![b'r'; 24])?;
+        let account_key = StoredKey::new(account_key_bytes(3))?;
         let account_plaintext =
             PersistentRecordValue::new(TableId::Account, 1, 7, 9, None, Vec::new(), vec![132])?
                 .encode()?;
@@ -2841,7 +3210,7 @@ impl RekeyConstructionFixture {
             records: vec![
                 (
                     TableId::Account,
-                    StoredKey::new(vec![b'r'; 24])?,
+                    StoredKey::new(account_key_bytes(3))?,
                     self.account_sealed.clone(),
                 ),
                 (
@@ -2856,7 +3225,7 @@ impl RekeyConstructionFixture {
     }
 
     fn plan(&self, identity: &StorageOperationIdentity) -> Result<ConstructionPlan, StorageError> {
-        let account_key = StoredKey::new(vec![b'r'; 24])?;
+        let account_key = StoredKey::new(account_key_bytes(3))?;
         let login_state_key =
             StoredKey::new(agenc_ircd_storage::LOGIN_INDEX_KEY_STATE_KEY.to_vec())?;
         ConstructionPlan::new(
@@ -2973,6 +3342,22 @@ impl Drop for TestDirectory {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+fn protected_key_file(
+    directory: &Path,
+    name: &str,
+    bytes: [u8; 32],
+) -> Result<PathBuf, Box<dyn Error>> {
+    let path = directory.join(name);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    Ok(path)
 }
 
 fn rekey_login_state_entry(
@@ -3268,10 +3653,11 @@ fn signed_qualification(
         "aarch64-unknown-linux-gnu" => QualificationTarget::Aarch64UnknownLinuxGnu,
         _ => return Err("unsupported test target".into()),
     };
-    let cases = QUALIFICATION_CASES
+    let mut cases = QUALIFICATION_CASES
         .iter()
         .map(|name| StorageGrowthCase::new((*name).to_owned(), 1_000, 1_001))
         .collect::<Result<Vec<_>, _>>()?;
+    cases.sort_by(|left, right| left.name().cmp(right.name()));
     let key = Ed25519SecretKey::from_bytes([62; 32]);
     let report = StorageQualificationReport::sign(
         StorageQualificationReportTbs {
@@ -3296,8 +3682,8 @@ fn signed_qualification(
 
 fn key_for(table: TableId) -> Result<StoredKey, Box<dyn Error>> {
     let bytes = match table {
-        TableId::Account => vec![b'a'; 24],
-        TableId::OpaqueRecord => vec![b'o'; 24],
+        TableId::Account => account_key_bytes(1),
+        TableId::OpaqueRecord => account_key_bytes(2),
         TableId::AuthTransaction
         | TableId::RegistrationInvite
         | TableId::Session

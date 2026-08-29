@@ -101,6 +101,7 @@ EXTERNAL_DEPENDENCIES = {
         "=1.53.1",
         {"io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"},
     ),
+    "toml": ("=1.1.4", {"parse", "serde", "std"}),
     "zeroize": ("=1.9.0", {"alloc"}),
 }
 DIRECT_CHECKSUMS = {
@@ -122,6 +123,7 @@ DIRECT_CHECKSUMS = {
     "subtle": "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292",
     "tls_codec": "18cc98286004cea38f717e2b03d990fc774fbfd38a82720de40e5c94365067c8",
     "tokio": "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed",
+    "toml": "3aace63f4bbcdfc2c965b059de67119c89c4017a70d633be6c104910f67056f5",
     "zeroize": "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e",
 }
 EXTERNAL_PACKAGE_ALIASES = {"opaque-sha2": "sha2"}
@@ -152,6 +154,7 @@ EXPECTED_EXTERNAL_EDGES = {
         "zeroize",
     },
     "agenc-ircd-storage": {"redb", "rustix", "subtle", "zeroize"},
+    "agenc-ircd-config": {"base64", "toml"},
     "agenc-ircd-testkit": {"sha2", "subtle"},
 }
 CRATES_IO_SOURCES = {
@@ -438,7 +441,7 @@ def validate_direct_dependency_evidence(root: Path) -> None:
     expected_records = {
         name: (version.removeprefix("="), DIRECT_CHECKSUMS[name])
         for name, (version, _features) in EXTERNAL_DEPENDENCIES.items()
-        if name != "rustix"
+        if name not in {"rustix", "toml"}
     }
     if records != expected_records:
         raise WorkspaceError("root dependency pins and frozen crates.io checksum evidence disagree")
@@ -454,7 +457,16 @@ def validate_direct_dependency_evidence(root: Path) -> None:
                 "features": ["fs", "std"],
                 "purpose": "safe Linux directory-relative filesystem, metadata, capacity, rename, sync, and lock operations",
                 "reviewed_on": "2026-08-27",
-            }
+            },
+            {
+                "name": "toml",
+                "version": "1.1.4",
+                "checksum": DIRECT_CHECKSUMS["toml"],
+                "default_features": False,
+                "features": ["parse", "serde", "std"],
+                "purpose": "strict parsing of stopped-daemon maintenance configuration and backup trust manifests",
+                "reviewed_on": "2026-08-29",
+            },
         ],
     }
     if stage_five != expected_stage_five:

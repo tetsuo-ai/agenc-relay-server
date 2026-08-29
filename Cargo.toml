@@ -56,6 +56,7 @@ sha2 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
 subtle = { version = "=2.6.1", default-features = false }
 tls_codec = { version = "=0.5.0", default-features = false, features = ["std", "mls"] }
 tokio = { version = "=1.53.1", default-features = false, features = ["rt-multi-thread", "net", "io-util", "time", "signal", "sync", "macros"] }
+toml = { version = "=1.1.4", default-features = false, features = ["parse", "serde", "std"] }
 zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
 
 [workspace.lints.rust]

@@ -48,7 +48,7 @@ pub use storage_integrity::{
     integrity_checkpoint_hash, integrity_manifest_hash, nonce_reservation_hash,
     rekey_transform_profile_hash, restore_transform_profile_hash, rollback_guard_hash,
     sealed_record_id, storage_operation_id, storage_operation_key_id, storage_output_path_hash,
-    tracked_record_commitment, tracked_state_digest,
+    storage_qualification_component_hash, tracked_record_commitment, tracked_state_digest,
 };
 pub use worker::{
     BoundedCryptoPool, CRYPTO_QUEUE_SLOTS_PER_WORKER, CRYPTO_WORKER_RESERVED_BYTES, CryptoJob,
