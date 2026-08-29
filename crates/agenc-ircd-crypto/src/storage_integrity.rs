@@ -32,6 +32,8 @@ const STORAGE_OPERATION_KEY_ID_LABEL: &[u8] = b"agenc-chat storage operation key
 const STORAGE_OUTPUT_PATH_LABEL: &[u8] = b"agenc-chat storage output path v1";
 const RESTORE_PROFILE_LABEL: &[u8] = b"agenc-chat RecoveryTransformV1 profile v1";
 const REKEY_PROFILE_LABEL: &[u8] = b"agenc-chat storage rekey transform profile v1";
+// Total bytes, label included, that one control-plane digest or MAC may absorb:
+// the 16 MiB maximum sealed ciphertext plus 40 bytes of label and framing slack.
 const MAX_CONTROL_INPUT_BYTES: usize = 16_777_256;
 
 /// An independently provisioned rollback-guard root key.
@@ -328,6 +330,11 @@ pub fn backup_signing_key_id(public_key: &[u8; 32]) -> Result<StorageDigest, Cry
 }
 
 /// Hashes one bounded release-qualification component under an explicit label.
+///
+/// The label and the component bytes are concatenated without a length prefix,
+/// so callers must draw labels from one fixed, prefix-free set (the four labels
+/// in `examples/storage-qualification.rs`). Signed qualification reports depend
+/// on these exact bytes, so the encoding cannot change within version one.
 pub fn storage_qualification_component_hash(
     label: &[u8],
     bytes: &[u8],

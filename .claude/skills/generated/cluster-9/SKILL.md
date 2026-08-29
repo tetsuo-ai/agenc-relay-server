@@ -1,9 +1,9 @@
 ---
-name: cluster-7
-description: "Skill for the Cluster_7 area of agenc-ircd. 30 symbols across 1 files."
+name: cluster-9
+description: "Skill for the Cluster_9 area of agenc-ircd. 30 symbols across 1 files."
 ---
 
-# Cluster_7
+# Cluster_9
 
 30 symbols | 1 files | Cohesion: 81%
 
@@ -11,7 +11,7 @@ description: "Skill for the Cluster_7 area of agenc-ircd. 30 symbols across 1 fi
 
 - Working with code in `crates/`
 - Understanding how new, finish_credential_change, begin_account_deletion work
-- Modifying cluster_7-related functionality
+- Modifying cluster_9-related functionality
 
 ## Key Files
 
@@ -24,33 +24,33 @@ description: "Skill for the Cluster_7 area of agenc-ircd. 30 symbols across 1 fi
 Start here when exploring this area:
 
 - **`new`** (Function) — `crates/agenc-ircd-auth/src/service.rs:42`
-- **`finish_credential_change`** (Function) — `crates/agenc-ircd-auth/src/service.rs:1180`
-- **`begin_account_deletion`** (Function) — `crates/agenc-ircd-auth/src/service.rs:1399`
+- **`finish_credential_change`** (Function) — `crates/agenc-ircd-auth/src/service.rs:1196`
+- **`begin_account_deletion`** (Function) — `crates/agenc-ircd-auth/src/service.rs:1420`
 
 ## Key Symbols
 
 | Symbol | Type | File | Line |
 |--------|------|------|------|
 | `new` | Function | `crates/agenc-ircd-auth/src/service.rs` | 42 |
-| `finish_credential_change` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1180 |
-| `begin_account_deletion` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1399 |
-| `rejected_credential_change_response` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1551 |
-| `context` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1645 |
-| `context_for_network` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1649 |
-| `account` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1669 |
-| `fresh_proof` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1677 |
-| `inputs` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1722 |
-| `decode_nibble` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1848 |
-| `vector_bytes` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1856 |
-| `open_request` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1885 |
-| `open_request_for_network` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1892 |
-| `open_request_with_token` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1902 |
-| `credential_start_request` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1940 |
-| `creation_start_request` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1961 |
-| `authentication_start_request` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1978 |
-| `authentication_finish_request` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1995 |
-| `credential_finish_request` | Function | `crates/agenc-ircd-auth/src/service.rs` | 2016 |
-| `assert_rejected_credential_start` | Function | `crates/agenc-ircd-auth/src/service.rs` | 2037 |
+| `finish_credential_change` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1196 |
+| `begin_account_deletion` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1420 |
+| `rejected_credential_change_response` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1572 |
+| `context` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1666 |
+| `context_for_network` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1670 |
+| `account` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1690 |
+| `fresh_proof` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1698 |
+| `inputs` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1743 |
+| `decode_nibble` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1869 |
+| `vector_bytes` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1877 |
+| `open_request` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1906 |
+| `open_request_for_network` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1913 |
+| `open_request_with_token` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1923 |
+| `credential_start_request` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1961 |
+| `creation_start_request` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1982 |
+| `authentication_start_request` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1999 |
+| `authentication_finish_request` | Function | `crates/agenc-ircd-auth/src/service.rs` | 2016 |
+| `credential_finish_request` | Function | `crates/agenc-ircd-auth/src/service.rs` | 2037 |
+| `assert_rejected_credential_start` | Function | `crates/agenc-ircd-auth/src/service.rs` | 2058 |
 
 ## Execution Flows
 
@@ -71,16 +71,16 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Cluster_129 | 7 calls |
+| Cluster_130 | 7 calls |
 | Cluster_1 | 5 calls |
 | Tests | 5 calls |
-| Cluster_9 | 4 calls |
-| Cluster_6 | 2 calls |
-| Cluster_10 | 1 calls |
+| Cluster_8 | 3 calls |
+| Cluster_11 | 3 calls |
+| Cluster_12 | 1 calls |
 
 ## How to Explore
 
 1. `context({name: "new"})` — see callers and callees
-2. `query({search_query: "cluster_7"})` — find related execution flows
+2. `query({search_query: "cluster_9"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

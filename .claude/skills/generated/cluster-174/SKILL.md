@@ -1,9 +1,9 @@
 ---
-name: cluster-173
-description: "Skill for the Cluster_173 area of agenc-ircd. 104 symbols across 2 files."
+name: cluster-174
+description: "Skill for the Cluster_174 area of agenc-ircd. 104 symbols across 2 files."
 ---
 
-# Cluster_173
+# Cluster_174
 
 104 symbols | 2 files | Cohesion: 95%
 
@@ -11,7 +11,7 @@ description: "Skill for the Cluster_173 area of agenc-ircd. 104 symbols across 2
 
 - Working with code in `crates/`
 - Understanding how validate_schema_semantics, parse, parse_wire_bytes work
-- Modifying cluster_173-related functionality
+- Modifying cluster_174-related functionality
 
 ## Key Files
 
@@ -57,13 +57,13 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Cluster_171 | 3 calls |
+| Cluster_172 | 3 calls |
 | Tests | 3 calls |
-| Cluster_167 | 1 calls |
+| Cluster_168 | 1 calls |
 
 ## How to Explore
 
 1. `context({name: "validate_schema_semantics"})` — see callers and callees
-2. `query({search_query: "cluster_173"})` — find related execution flows
+2. `query({search_query: "cluster_174"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

@@ -100,14 +100,18 @@ fn assert_all_truncations_fail(
 
 fn exercise_single_byte_corruptions(
     bytes: &[u8],
-    mut decode: impl FnMut(&[u8]) -> Result<(), StorageError>,
+    mut reencode: impl FnMut(&[u8]) -> Result<Vec<u8>, StorageError>,
 ) {
     for index in 0..bytes.len() {
         let mut corrupted = bytes.to_vec();
         if let Some(byte) = corrupted.get_mut(index) {
             *byte ^= 0xff;
         }
-        let _ = decode(&corrupted);
+        // An unauthenticated codec may accept the corrupted frame as a different
+        // valid value, but only when the frame is that value's canonical encoding.
+        if let Ok(reencoded) = reencode(&corrupted) {
+            assert_eq!(reencoded, corrupted, "byte {index} decoded non-canonically");
+        }
     }
 }
 
@@ -832,8 +836,8 @@ fn construction_codecs_cover_every_closed_action_and_cursor() -> Result<(), Box<
                 .map(|_| ())
         });
         exercise_single_byte_corruptions(&encoded, |candidate| {
-            StorageConstructionPlanEntry::decode(StorageConstructionKind::Restore, candidate)
-                .map(|_| ())
+            StorageConstructionPlanEntry::decode(StorageConstructionKind::Restore, candidate)?
+                .encode()
         });
     }
     let _ = construction_plan_hash(StorageConstructionKind::Restore, &entries, 100_000)?;
@@ -870,11 +874,10 @@ fn construction_codecs_cover_every_closed_action_and_cursor() -> Result<(), Box<
             .is_ok()
     );
     exercise_single_byte_corruptions(&rekey.encode()?, |candidate| {
-        StorageConstructionPlanEntry::decode(StorageConstructionKind::Rekey, candidate).map(|_| ())
+        StorageConstructionPlanEntry::decode(StorageConstructionKind::Rekey, candidate)?.encode()
     });
     exercise_single_byte_corruptions(&migrate.encode()?, |candidate| {
-        StorageConstructionPlanEntry::decode(StorageConstructionKind::Migrate, candidate)
-            .map(|_| ())
+        StorageConstructionPlanEntry::decode(StorageConstructionKind::Migrate, candidate)?.encode()
     });
     assert!(
         StorageConstructionSource::new(
@@ -1219,7 +1222,7 @@ fn construction_codecs_cover_every_closed_action_and_cursor() -> Result<(), Box<
         StorageConstruction::decode(candidate).map(|_| ())
     });
     exercise_single_byte_corruptions(&marker_bytes, |candidate| {
-        StorageConstruction::decode(candidate).map(|_| ())
+        StorageConstruction::decode(candidate)?.encode()
     });
 
     let complete_identity = restore_identity;
@@ -1239,7 +1242,7 @@ fn construction_codecs_cover_every_closed_action_and_cursor() -> Result<(), Box<
         StorageOperationCompletion::decode(candidate).map(|_| ())
     });
     exercise_single_byte_corruptions(&completion_bytes, |candidate| {
-        StorageOperationCompletion::decode(candidate).map(|_| ())
+        StorageOperationCompletion::decode(candidate)?.encode()
     });
 
     let rekey_identity = StorageOperationIdentity {

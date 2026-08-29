@@ -19,6 +19,9 @@ pub const AUTHENTICATION_GRANT_TIMEOUT_SECONDS: u64 = 30;
 /// Credential-change registration transaction lifetime in monotonic milliseconds.
 pub const CREDENTIAL_CHANGE_TIMEOUT_TICKS: u64 = 60_000;
 /// Fresh same-account proof lifetime in monotonic milliseconds.
+///
+/// The proof is process-local state inside an authentication grant, not a
+/// transaction class, so no `TransactionClass` binds this deadline.
 pub const FRESH_AUTH_TIMEOUT_TICKS: u64 = 300_000;
 /// Account-deletion confirmation lifetime in monotonic milliseconds.
 pub const DELETION_CONFIRMATION_TIMEOUT_TICKS: u64 = 60_000;
@@ -32,8 +35,6 @@ pub enum TransactionClass {
     Authentication,
     /// Credential replacement registration.
     CredentialChange,
-    /// Fresh same-account authorization proof.
-    FreshAuthentication,
     /// Revision-bound account-deletion confirmation.
     AccountDeletion,
 }
@@ -129,7 +130,6 @@ impl TransactionClass {
             Self::AccountCreation => ACCOUNT_CREATION_TIMEOUT_TICKS,
             Self::Authentication => AUTHENTICATION_TIMEOUT_TICKS,
             Self::CredentialChange => CREDENTIAL_CHANGE_TIMEOUT_TICKS,
-            Self::FreshAuthentication => FRESH_AUTH_TIMEOUT_TICKS,
             Self::AccountDeletion => DELETION_CONFIRMATION_TIMEOUT_TICKS,
         }
     }

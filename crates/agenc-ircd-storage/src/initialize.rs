@@ -217,6 +217,9 @@ pub fn initialize_storage(
         previous_checkpoint_hash: zero,
         installation_storage_commit_sequence: 0,
         installation_manifest_sequence: 0,
+        // The genesis installation drew exactly the checkpoint and StateMeta seals, the last two
+        // nonces of `high_water`, so its reservation starts two draws below the high-water mark.
+        // `IntegrityCheckpointTbs::validate` requires that exact distance.
         installation_nonce_reservation_start: high_water
             .checked_sub(2)
             .ok_or(StorageError::Overflow)?,

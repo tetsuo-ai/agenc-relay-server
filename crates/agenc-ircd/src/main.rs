@@ -32,19 +32,21 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(arguments: Vec<OsString>) -> Result<(), &'static str> {
+fn run(arguments: Vec<OsString>) -> Result<(), String> {
     let Some(first) = arguments.first().and_then(|value| value.to_str()) else {
-        return Err(DAEMON_UNAVAILABLE_MESSAGE);
+        return Err(DAEMON_UNAVAILABLE_MESSAGE.to_owned());
     };
     if first != "storage" {
-        return Err(DAEMON_UNAVAILABLE_MESSAGE);
+        return Err(DAEMON_UNAVAILABLE_MESSAGE.to_owned());
     }
     if arguments.get(1).and_then(|value| value.to_str()) != Some("restore") {
-        return Err(RESTORE_USAGE);
+        return Err(RESTORE_USAGE.to_owned());
     }
-    let option_arguments = arguments.get(2..).ok_or(RESTORE_USAGE)?;
-    let options = RestoreOptions::parse(option_arguments).map_err(|_| RESTORE_USAGE)?;
-    restore(options).map_err(|_| "storage restore failed")
+    let option_arguments = arguments.get(2..).ok_or_else(|| RESTORE_USAGE.to_owned())?;
+    let options = RestoreOptions::parse(option_arguments).map_err(|()| RESTORE_USAGE.to_owned())?;
+    // Storage and configuration errors display fixed, secret-free messages, so the
+    // operator sees which stage of the restore refused the command.
+    restore(options).map_err(|error| format!("storage restore failed: {error}"))
 }
 
 fn restore(options: RestoreOptions) -> Result<(), Box<dyn std::error::Error>> {
@@ -147,6 +149,9 @@ impl RestoreOptions {
     fn parse(arguments: &[OsString]) -> Result<Self, ()> {
         let mut parser = OptionParser::new(arguments);
         while parser.advance()? {}
+        if !parser.declare_recovery_epoch {
+            return Err(());
+        }
         Ok(Self {
             config: parser.config.ok_or(())?,
             backup: parser.backup.ok_or(())?,
@@ -316,14 +321,49 @@ mod tests {
         ] {
             assert!(RestoreOptions::parse(&invalid).is_err());
         }
+        let mut without_acknowledgement = complete_options();
+        without_acknowledgement.pop();
+        assert!(RestoreOptions::parse(&without_acknowledgement).is_err());
     }
 
     #[test]
     fn command_dispatch_keeps_daemon_closed_and_restore_usage_exact() {
-        assert_eq!(run(Vec::new()), Err(DAEMON_UNAVAILABLE_MESSAGE));
-        assert_eq!(run(arguments(&["serve"])), Err(DAEMON_UNAVAILABLE_MESSAGE));
-        assert_eq!(run(arguments(&["storage"])), Err(RESTORE_USAGE));
-        assert_eq!(run(arguments(&["storage", "unknown"])), Err(RESTORE_USAGE));
-        assert_eq!(run(arguments(&["storage", "restore"])), Err(RESTORE_USAGE));
+        assert_eq!(
+            run(Vec::new()).err().as_deref(),
+            Some(DAEMON_UNAVAILABLE_MESSAGE)
+        );
+        assert_eq!(
+            run(arguments(&["serve"])).err().as_deref(),
+            Some(DAEMON_UNAVAILABLE_MESSAGE)
+        );
+        assert_eq!(
+            run(arguments(&["storage"])).err().as_deref(),
+            Some(RESTORE_USAGE)
+        );
+        assert_eq!(
+            run(arguments(&["storage", "unknown"])).err().as_deref(),
+            Some(RESTORE_USAGE)
+        );
+        assert_eq!(
+            run(arguments(&["storage", "restore"])).err().as_deref(),
+            Some(RESTORE_USAGE)
+        );
+        let mut without_acknowledgement = arguments(&["storage", "restore"]);
+        without_acknowledgement.extend(complete_options());
+        without_acknowledgement.pop();
+        assert_eq!(
+            run(without_acknowledgement).err().as_deref(),
+            Some(RESTORE_USAGE)
+        );
+    }
+
+    #[test]
+    fn restore_failures_report_the_refusing_stage() {
+        let mut command = arguments(&["storage", "restore"]);
+        command.extend(complete_options());
+        assert_eq!(
+            run(command).err().as_deref(),
+            Some("storage restore failed: configuration file rejected")
+        );
     }
 }

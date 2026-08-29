@@ -9,6 +9,8 @@ use crate::AuthError;
 const PROFILE_VERSION: u16 = 1;
 const INVITATION_TBS_BYTES: usize = 68;
 const MAX_INVITATION_LIFETIME_SECONDS: u64 = 2_592_000;
+/// Every version-one invitation is single-use; any other limit is malformed.
+const INVITATION_USE_LIMIT: u16 = 1;
 
 /// Exact decoded account-creation invitation length.
 pub const ACCOUNT_CREATION_INVITE_BYTES: usize = 132;
@@ -49,7 +51,7 @@ impl AccountCreationInvite {
         let invite_id = InviteId::from_bytes(cursor.read_array()?);
         let not_before = cursor.read_u64()?;
         let expires_at = cursor.read_u64()?;
-        if cursor.read_u16()? != 1 {
+        if cursor.read_u16()? != INVITATION_USE_LIMIT {
             return Err(AuthError::InvalidEncoding);
         }
         cursor.skip(64)?;

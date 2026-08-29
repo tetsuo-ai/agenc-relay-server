@@ -11,10 +11,13 @@ use agenc_ircd_crypto::{
 };
 
 use crate::codec::{Decoder, Encoder};
-use crate::{FilesystemTuple, StorageError, StorageQualification};
+use crate::{
+    FilesystemTuple, MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH, StorageError, StorageQualification,
+};
 
-/// Release qualification's greatest allowed observed positive growth.
-pub const MAX_QUALIFIED_OBSERVED_GROWTH: u64 = 134_217_728;
+/// Release qualification's greatest allowed observed positive growth: half the physical growth
+/// every admitted transaction reserves, so a qualified filesystem keeps a twofold margin.
+pub const MAX_QUALIFIED_OBSERVED_GROWTH: u64 = MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH / 2;
 /// Greatest number of independently measured cases in one report.
 pub const MAX_QUALIFICATION_CASES: usize = 65_535;
 /// Greatest canonical signed report bytes.
@@ -566,9 +569,6 @@ pub fn embedded_storage_qualifications() -> Result<Vec<StorageQualification>, St
     let reports: &[&[u8]] = &[include_bytes!(
         "../../../conformance/evidence/storage-qualification/aarch64-unknown-linux-gnu-ext4.report"
     )];
-    if reports.is_empty() {
-        return Err(StorageError::FilesystemRejected);
-    }
     reports
         .iter()
         .map(|encoded| {

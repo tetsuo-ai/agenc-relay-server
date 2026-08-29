@@ -13,7 +13,7 @@ use opaque_ke::{
     ServerLogin, ServerLoginParameters, ServerRegistration, ServerSetup, TripleDh,
 };
 use subtle::ConstantTimeEq as _;
-use zeroize::{Zeroize as _, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::AuthError;
 
@@ -417,18 +417,16 @@ pub fn finish_authentication(
         .map_err(|_| AuthError::InvalidEncoding)?;
     let context = opaque_context(network_id)?;
     let parameters = server_parameters(&network_id, credential_id, &context);
-    let mut result = state
+    let result = state
         .finish(message, parameters)
         .map_err(|_| AuthError::AuthenticationFailed)?;
-    if result.session_key.len() != 64 {
-        result.session_key.zeroize();
-        return Err(AuthError::InvalidEncoding);
-    }
+    // The pinned suite hash fixes the session key at exactly 64 bytes, so the
+    // copy below cannot mismatch; the library result zeroizes its own copy on
+    // drop, and the owned array zeroizes with the authentication token.
     let mut session_key = Zeroizing::new([0_u8; 64]);
     session_key
         .as_mut()
         .copy_from_slice(result.session_key.as_slice());
-    result.session_key.zeroize();
     Ok(OpaqueAuthentication(session_key))
 }
 

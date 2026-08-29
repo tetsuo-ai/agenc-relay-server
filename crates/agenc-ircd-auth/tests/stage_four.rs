@@ -4,14 +4,15 @@
 
 use agenc_ircd_auth::{
     ACCOUNT_CREATION_INVITE_BYTES, ACCOUNT_SERVICE_ENVELOPE_BYTES, ACCOUNT_SERVICE_RESPONSE_BYTES,
-    AccountCreationStartParameters, AccountCredentialRecord, AccountOperationContext,
-    AccountRequestPayload, AccountRouteBinding, AccountServiceEnvelope, AccountServiceResponse,
-    AccountServiceResponsePayload, AccountTransaction, AccountTransactionBinding, AuthError,
-    AuthenticatedAccountRequest, AuthenticationFinish, AuthenticationLookup, AuthenticationStart,
-    AuthenticationStartParameters, Completion, CreationAdmission, CreationFinish, CreationStart,
-    CredentialChangeFinish, CredentialChangeStart, OPAQUE_KE2_BYTES, OpaqueKe1, OpaqueKe2,
+    AccountAuthenticationState, AccountCreationStartParameters, AccountCreationState,
+    AccountCredentialRecord, AccountOperationContext, AccountRequestPayload, AccountRouteBinding,
+    AccountServiceEnvelope, AccountServiceResponse, AccountServiceResponsePayload,
+    AccountTransaction, AccountTransactionBinding, AuthError, AuthenticatedAccountRequest,
+    AuthenticationFinish, AuthenticationLookup, AuthenticationStart, AuthenticationStartParameters,
+    Completion, CreationAdmission, CreationFinish, CreationStart, CredentialChangeFinish,
+    CredentialChangeStart, CredentialChangeState, OPAQUE_KE2_BYTES, OpaqueKe1, OpaqueKe2,
     OpaqueKe3, OpaqueProfile, OpaqueRegistrationRecord, OpaqueRegistrationRequest,
-    OpaqueRegistrationResponse, OpenedAccountServiceRequest, TransactionClass,
+    OpaqueRegistrationResponse, OpenedAccountServiceRequest, SealedAccountStart, TransactionClass,
     authentication_completion, begin_account_creation, begin_authentication,
     encode_request_plaintext as encode_secret_request_plaintext,
     encode_response_plaintext as encode_secret_response_plaintext, finish_account_authentication,
@@ -81,6 +82,10 @@ struct TestRng {
 impl TestRng {
     const fn new() -> Self {
         Self { failed: false }
+    }
+
+    const fn succeeded(&self) -> bool {
+        !self.failed
     }
 
     fn fill_or_latch(&mut self, destination: &mut [u8]) {
@@ -229,6 +234,10 @@ fn protocol_fixture(
     let ke3 = OpaqueKe3::from_bytes(login_finish.message.serialize().as_slice().try_into()?)?;
     agenc_ircd_auth::finish_authentication(TEST_NETWORK, credential_id, state, &ke3)?
         .authorize_account_transition();
+    assert!(
+        rng.succeeded(),
+        "test entropy failed inside protocol_fixture"
+    );
     Ok(ProtocolFixture {
         registration_request,
         registration_response,
@@ -693,7 +702,7 @@ fn authenticate_account(
         ),
     )?;
     let ke3 = OpaqueKe3::from_bytes(finish.message.serialize().as_slice().try_into()?)?;
-    let mut start = start.seal(0)?;
+    let mut start: SealedAccountStart<AccountAuthenticationState> = start.seal(0)?;
     let outcome = finish_account_authentication(
         start.transaction_mut(),
         context,
@@ -706,6 +715,10 @@ fn authenticate_account(
             },
         )?,
     )?;
+    assert!(
+        rng.succeeded(),
+        "test entropy failed inside authenticate_account"
+    );
     Ok(outcome.seal(1)?)
 }
 
@@ -714,7 +727,14 @@ struct RejectedCreationCase {
     invitation: Option<agenc_ircd_auth::AccountCreationInvite>,
     admission: CreationAdmission,
     login_is_available: bool,
+    invitation_is_available: bool,
     expected_error: AuthError,
+}
+
+/// Downstream composition holds sealed starts in owned state, so the state
+/// type must be nameable outside this crate.
+struct HeldCreationStart {
+    start: SealedAccountStart<AccountCreationState>,
 }
 
 fn assert_rejected_creation_exchange(
@@ -728,6 +748,7 @@ fn assert_rejected_creation_exchange(
         invitation,
         admission,
         login_is_available,
+        invitation_is_available,
         expected_error,
     } = case;
     let (request, challenge_token) = authenticated_creation_start_with_token(
@@ -747,6 +768,7 @@ fn assert_rejected_creation_exchange(
             request,
             admission,
             login_is_available,
+            invitation_is_available,
         },
     )?;
     let transaction_id = start.transaction_id();
@@ -880,6 +902,7 @@ fn assert_creation_finish_context_rejected(
             )?,
             admission: CreationAdmission::Open,
             login_is_available: true,
+            invitation_is_available: true,
         },
     )?;
     let transaction_id = start.transaction_id();
@@ -1222,6 +1245,7 @@ fn account_creation_and_authentication_complete_with_bound_receipts()
             )?,
             admission: CreationAdmission::Open,
             login_is_available: true,
+            invitation_is_available: true,
         },
     )?;
     let transaction_id = creation_start.transaction_id();
@@ -1252,6 +1276,7 @@ fn account_creation_and_authentication_complete_with_bound_receipts()
             .as_slice()
             .try_into()?,
     )?;
+    assert!(rng.succeeded(), "test entropy failed during registration");
     let mut creation_start = creation_start.seal(0)?;
     let creation_outcome = finish_account_creation(
         creation_start.transaction_mut(),
@@ -1268,7 +1293,6 @@ fn account_creation_and_authentication_complete_with_bound_receipts()
     let creation_outcome = creation_outcome.seal(1)?;
     let creation_intent = creation_outcome.result()?;
     let account_id = creation_intent.account_id();
-    assert_eq!(creation_intent.account_id(), account_id);
     assert_eq!(creation_intent.invitation_id(), None);
     assert_eq!(creation_intent.invitation_expires_at(), None);
     let grant = authenticate_account(
@@ -1348,6 +1372,7 @@ fn same_kind_finish_swap_is_rejected_and_exact_finish_token_seals_response()
             )?,
             admission: CreationAdmission::Open,
             login_is_available: true,
+            invitation_is_available: true,
         })
     };
     let first = begin_account_creation(&profile, &login_key, creation_parameters(162)?)?;
@@ -1439,6 +1464,7 @@ fn opened_finish_context_failure_seals_for_the_exact_request()
             )?,
             admission: CreationAdmission::Open,
             login_is_available: true,
+            invitation_is_available: true,
         },
     )?;
     let transaction_id = start.transaction_id();
@@ -1563,6 +1589,7 @@ fn unknown_login_runs_fake_record_and_dummy_finish_work() -> Result<(), Box<dyn 
     let mut rng = TestRng::new();
     let client = ClientLogin::<TestOpaqueSuite>::start(&mut rng, b"unknown password")?;
     let ke1 = OpaqueKe1::from_bytes(client.message.serialize().as_slice().try_into()?)?;
+    assert!(rng.succeeded(), "test entropy failed for the unknown login");
     let (request, challenge_token) = authenticated_authentication_start_with_token(
         64,
         AuthenticationStart {
@@ -1657,6 +1684,7 @@ fn opened_start_rejections_return_challenges_then_rejected_completions()
             invitation: None,
             admission: CreationAdmission::Open,
             login_is_available: false,
+            invitation_is_available: true,
             expected_error: AuthError::WrongState,
         },
     )?;
@@ -1669,6 +1697,7 @@ fn opened_start_rejections_return_challenges_then_rejected_completions()
             invitation: None,
             admission: CreationAdmission::Closed,
             login_is_available: false,
+            invitation_is_available: true,
             expected_error: AuthError::InvitationRejected,
         },
     )?;
@@ -1682,6 +1711,7 @@ fn opened_start_rejections_return_challenges_then_rejected_completions()
             invitation: Some(unexpected_invitation),
             admission: CreationAdmission::Open,
             login_is_available: true,
+            invitation_is_available: true,
             expected_error: AuthError::InvitationRejected,
         },
     )?;
@@ -1698,6 +1728,7 @@ fn opened_start_rejections_return_challenges_then_rejected_completions()
                 now: UtcSecond::from_unix_seconds(10),
             },
             login_is_available: true,
+            invitation_is_available: true,
             expected_error: AuthError::InvitationRejected,
         },
     )?;
@@ -1722,6 +1753,7 @@ fn opened_start_rejections_return_challenges_then_rejected_completions()
                 now: UtcSecond::from_unix_seconds(10),
             },
             login_is_available: true,
+            invitation_is_available: true,
             expected_error: AuthError::InvitationRejected,
         },
     )?;
@@ -1738,6 +1770,7 @@ fn opened_start_rejections_return_challenges_then_rejected_completions()
                 now: UtcSecond::from_unix_seconds(20),
             },
             login_is_available: true,
+            invitation_is_available: true,
             expected_error: AuthError::InvitationRejected,
         },
     )?;
@@ -1755,7 +1788,39 @@ fn opened_start_rejections_return_challenges_then_rejected_completions()
                 now: UtcSecond::from_unix_seconds(10),
             },
             login_is_available: true,
+            invitation_is_available: true,
             expected_error: AuthError::InvitationRejected,
+        },
+    )?;
+
+    let (reserved_invitation, authority) = signed_invitation(TEST_NETWORK, 10, 20)?;
+    assert_rejected_creation_exchange(
+        &profile,
+        &login_key,
+        &fixture,
+        RejectedCreationCase {
+            request_id: 83,
+            invitation: Some(reserved_invitation),
+            admission: CreationAdmission::Invitation {
+                authority: authority.public_key(),
+                now: UtcSecond::from_unix_seconds(10),
+            },
+            login_is_available: true,
+            invitation_is_available: false,
+            expected_error: AuthError::InvitationRejected,
+        },
+    )?;
+    assert_rejected_creation_exchange(
+        &profile,
+        &login_key,
+        &fixture,
+        RejectedCreationCase {
+            request_id: 85,
+            invitation: None,
+            admission: CreationAdmission::Open,
+            login_is_available: false,
+            invitation_is_available: false,
+            expected_error: AuthError::WrongState,
         },
     )?;
 
@@ -2517,7 +2582,6 @@ fn invitation_and_transaction_rejections_cover_every_bound_context()
         (TransactionClass::AccountCreation, 60_000_u64),
         (TransactionClass::Authentication, 30_000),
         (TransactionClass::CredentialChange, 60_000),
-        (TransactionClass::FreshAuthentication, 300_000),
         (TransactionClass::AccountDeletion, 60_000),
     ] {
         let binding = AccountTransactionBinding::new(
@@ -2675,6 +2739,16 @@ fn invitation_and_transaction_rejections_cover_every_bound_context()
             Some(AuthError::Consumed)
         );
     }
+    let mut accepted = AccountTransaction::new(binding, 9_u8);
+    assert_eq!(
+        accepted.consume(
+            TransactionClass::Authentication,
+            TEST_NETWORK,
+            route,
+            MonotonicTick::from_ticks(29_999),
+        )?,
+        9
+    );
     let mut disconnected = AccountTransaction::new(binding, 8_u8);
     disconnected.consume_on_disconnect();
     assert_eq!(
@@ -2720,6 +2794,7 @@ fn account_service_guards_reject_every_context_and_state_substitution()
             )?,
             admission: CreationAdmission::Open,
             login_is_available,
+            invitation_is_available: true,
         })
     };
     assert_eq!(
@@ -2750,9 +2825,11 @@ fn account_service_guards_reject_every_context_and_state_substitution()
     };
     let invited_start = begin_account_creation(&profile, &login_key, invited)?;
     let invited_transaction_id = invited_start.transaction_id();
-    let mut invited_start = invited_start.seal(0)?;
+    let mut held = HeldCreationStart {
+        start: invited_start.seal(0)?,
+    };
     let invited_outcome = finish_account_creation(
-        invited_start.transaction_mut(),
+        held.start.transaction_mut(),
         operation_context(11)?,
         authenticated_creation_finish(
             135,
@@ -2883,4 +2960,28 @@ fn account_service_guards_reject_every_context_and_state_substitution()
     }
 
     Ok(())
+}
+
+#[test]
+fn transaction_state_types_are_nameable_by_downstream_composition() {
+    let cases = [
+        (
+            core::any::type_name::<SealedAccountStart<AccountCreationState>>(),
+            "AccountCreationState>",
+        ),
+        (
+            core::any::type_name::<SealedAccountStart<AccountAuthenticationState>>(),
+            "AccountAuthenticationState>",
+        ),
+        (
+            core::any::type_name::<AccountTransaction<CredentialChangeState>>(),
+            "CredentialChangeState>",
+        ),
+    ];
+    for (name, suffix) in cases {
+        assert!(
+            name.ends_with(suffix),
+            "{name} is not the expected state type"
+        );
+    }
 }

@@ -5,10 +5,19 @@ use agenc_ircd_crypto::RollbackGuardRootKey;
 use agenc_ircd_storage::{
     BackupRecord, DatabaseHeader, IntegrityCheckpoint, IntegrityManifest, LoginIndexKeyState,
     LoginIndexStoredKey, NonceReservationState, RollbackGuard, SealedRecord, StateMeta,
-    StorageConstruction, StorageConstructionKind, StorageConstructionPlanEntry,
+    StorageConstruction, StorageConstructionKind, StorageConstructionPlanEntry, StorageError,
     StorageOperationCompletion,
 };
 use libfuzzer_sys::fuzz_target;
+
+/// Every accepted unauthenticated frame must re-encode to exactly the accepted bytes.
+fn assert_canonical(reencoded: Result<Vec<u8>, StorageError>, encoded: &[u8]) {
+    assert_eq!(
+        reencoded.ok().as_deref(),
+        Some(encoded),
+        "accepted bytes did not re-encode canonically"
+    );
+}
 
 fuzz_target!(|data: &[u8]| {
     let Some((&selector, encoded)) = data.split_first() else {
@@ -25,40 +34,66 @@ fuzz_target!(|data: &[u8]| {
     ) else {
         return;
     };
+    // Arms 1 through 3 are MAC-authenticated under keys derived from the fixed
+    // guard root above; fuzz bytes cannot carry a valid tag, so they must fail.
     match selector % 13 {
         0 => {
-            let _result = DatabaseHeader::decode(encoded);
+            if let Ok(header) = DatabaseHeader::decode(encoded) {
+                assert_canonical(header.encode(), encoded);
+            }
         }
         1 => {
-            let _result = NonceReservationState::decode_and_verify(encoded, &integrity_keys);
+            assert!(
+                NonceReservationState::decode_and_verify(encoded, &integrity_keys).is_err(),
+                "nonce reservation verified without the integrity key"
+            );
         }
         2 => {
-            let _result = RollbackGuard::decode_and_verify(encoded, &integrity_keys);
+            assert!(
+                RollbackGuard::decode_and_verify(encoded, &integrity_keys).is_err(),
+                "rollback guard verified without the integrity key"
+            );
         }
         3 => {
-            let _result = StateMeta::decode_and_verify(
-                encoded,
-                agenc_ircd_crypto::StorageDigest::from_bytes([0x52; 32]),
-                &integrity_keys,
+            assert!(
+                StateMeta::decode_and_verify(
+                    encoded,
+                    agenc_ircd_crypto::StorageDigest::from_bytes([0x52; 32]),
+                    &integrity_keys,
+                )
+                .is_err(),
+                "state meta verified without the integrity key"
             );
         }
         4 => {
-            let _result = IntegrityManifest::decode(encoded);
+            if let Ok(manifest) = IntegrityManifest::decode(encoded) {
+                assert_canonical(manifest.encode(), encoded);
+            }
         }
         5 => {
-            let _result = IntegrityCheckpoint::decode(encoded);
+            if let Ok(checkpoint) = IntegrityCheckpoint::decode(encoded) {
+                assert_canonical(checkpoint.encode(), encoded);
+            }
         }
         6 => {
-            let _result = SealedRecord::decode(encoded);
+            if let Ok(record) = SealedRecord::decode(encoded) {
+                assert_canonical(record.encode(), encoded);
+            }
         }
         7 => {
-            let _result = BackupRecord::decode(encoded);
+            if let Ok(record) = BackupRecord::decode(encoded) {
+                assert_canonical(record.encode(), encoded);
+            }
         }
         8 => {
-            let _result = LoginIndexStoredKey::decode(encoded);
+            if let Ok(key) = LoginIndexStoredKey::decode(encoded) {
+                assert_canonical(key.encode().map(|key| key.as_bytes().to_vec()), encoded);
+            }
         }
         9 => {
-            let _result = LoginIndexKeyState::decode(encoded);
+            if let Ok(state) = LoginIndexKeyState::decode(encoded) {
+                assert_canonical(state.encode(), encoded);
+            }
         }
         10 => {
             let kind = if selector & 0x80 == 0 {
@@ -66,13 +101,19 @@ fuzz_target!(|data: &[u8]| {
             } else {
                 StorageConstructionKind::Rekey
             };
-            let _result = StorageConstructionPlanEntry::decode(kind, encoded);
+            if let Ok(entry) = StorageConstructionPlanEntry::decode(kind, encoded) {
+                assert_canonical(entry.encode(), encoded);
+            }
         }
         11 => {
-            let _result = StorageConstruction::decode(encoded);
+            if let Ok(construction) = StorageConstruction::decode(encoded) {
+                assert_canonical(construction.encode(), encoded);
+            }
         }
         _ => {
-            let _result = StorageOperationCompletion::decode(encoded);
+            if let Ok(completion) = StorageOperationCompletion::decode(encoded) {
+                assert_canonical(completion.encode(), encoded);
+            }
         }
     }
 });

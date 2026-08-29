@@ -16,8 +16,8 @@
 
 > [!IMPORTANT]
 > **This is pre-alpha infrastructure, not a deployable server.** Stages 00
-> through 05 are complete. The Stage 05 persistence checkpoint closes exact
-> source commit `bd7518fe7f5c7420debdbaa958aa444ecb5c80c9`. There are no
+> through 05 are complete. The Stage 04 and Stage 05 checkpoints close exact
+> source commit `4040796f2c21774d58ea7ce54e70a080678e83ac`. There are no
 > sockets or daemon executor yet. The binary intentionally exits unsuccessfully
 > until Stage 06 composes the runtime, except for its stopped-daemon storage-
 > restore command.
@@ -65,9 +65,11 @@ Stage 05 is closed, so Stage 06 runtime composition is the next implementation
 stage. The complete dependency-ordered roadmap lives in
 [TODO.md](TODO.md). See the
 [Stage 05 storage profile](conformance/stage-five-storage-profile.toml), the
-[Stage 05 checkpoint](conformance/evidence/stage-05-bd7518fe7f5c7420debdbaa958aa444ecb5c80c9.json), the
+[current Stage 05 checkpoint](conformance/evidence/stage-05-4040796f2c21774d58ea7ce54e70a080678e83ac.json), the
+[previous Stage 05 checkpoint](conformance/evidence/stage-05-bd7518fe7f5c7420debdbaa958aa444ecb5c80c9.json), the
 [Stage 04 evidence record](conformance/stage-four-evidence.md), the
-[current Stage 04 checkpoint](conformance/evidence/stage-04-1e5b738468f88b238061cc6e84b732176f5cae65.json), the
+[current Stage 04 checkpoint](conformance/evidence/stage-04-4040796f2c21774d58ea7ce54e70a080678e83ac.json), the
+[previous Stage 04 checkpoint](conformance/evidence/stage-04-1e5b738468f88b238061cc6e84b732176f5cae65.json), the
 [historical Stage 04 checkpoint](conformance/evidence/stage-04-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json), and the
 [latest CI runs](https://github.com/tetsuo-ai/agenc-ircd/actions).
 
@@ -109,17 +111,24 @@ authenticated backup streams. The reviewed command list is in
 
 The reviewed `opaque-ke` patch is vendored, hashed, and checked by workspace
 policy. An implementation command alone does not close a stage. Schema version
-2 manifests and artifacts close Stages 00 through 04 for exact source commit
+2 manifests and artifacts close Stages 00 through 03 for exact source commit
 `1e5b738468f88b238061cc6e84b732176f5cae65`. Stage 00 has 17 passed records,
-Stage 01 has 14, Stage 02 has 12, Stage 03 has 13, and Stage 04 has 20.
-The schema version 1 records for commit
+Stage 01 has 14, Stage 02 has 12, and Stage 03 has 13. The Stage 04 and
+Stage 05 legibility review changed Stage 04 sources, so the
+[Stage 04 manifest](conformance/evidence/stage-04-4040796f2c21774d58ea7ce54e70a080678e83ac.json)
+with 20 passed records now closes exact source commit
+`4040796f2c21774d58ea7ce54e70a080678e83ac`; its recorded gate ran 50 commands. The
+earlier Stage 04 manifest for `1e5b738468f88b238061cc6e84b732176f5cae65` and the
+schema version 1 records for commit
 `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` remain archive-only.
 
-The [Stage 05 manifest](conformance/evidence/stage-05-bd7518fe7f5c7420debdbaa958aa444ecb5c80c9.json)
+The [Stage 05 manifest](conformance/evidence/stage-05-4040796f2c21774d58ea7ce54e70a080678e83ac.json)
 contains 39 passed records and closes exact source commit
-`bd7518fe7f5c7420debdbaa958aa444ecb5c80c9`. Its recorded gate ran 58 commands.
-Coverage is 90.00% of branches and 95.50% of lines, with all six critical
-regions at 100%. The gate includes 181 storage tests, cross-target checks for
+`4040796f2c21774d58ea7ce54e70a080678e83ac`. Its recorded gate ran 58 commands.
+Coverage is 90.64% of branches and 95.65% of lines, with all six critical
+regions at 100%. The earlier Stage 05 manifest for
+`bd7518fe7f5c7420debdbaa958aa444ecb5c80c9` remains archive-only. The gate
+includes 191 storage tests, cross-target checks for
 x86_64 and AArch64, signed native ext4 growth reports for both targets, and
 10,000 deterministic runs of each storage fuzz target.
 

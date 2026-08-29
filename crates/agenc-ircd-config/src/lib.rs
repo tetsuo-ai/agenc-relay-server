@@ -306,6 +306,8 @@ pub fn load_backup_trust_manifest(
         .get("key")
         .and_then(Value::as_array)
         .ok_or(ConfigError::MissingValue)?;
+    // Mirrors agenc_ircd_storage::MAX_BACKUP_TRUST_KEYS; this crate does not depend on
+    // the storage crate, so the ceiling is repeated here by value.
     if rows.is_empty() || rows.len() > 1_024 {
         return Err(ConfigError::InvalidValue);
     }

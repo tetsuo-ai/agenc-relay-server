@@ -4,7 +4,7 @@ use std::fs::{File, read_dir, symlink_metadata};
 use std::os::fd::OwnedFd;
 use std::path::{Component, Path, PathBuf};
 
-use agenc_ircd_crypto::{StorageDigest, storage_output_path_hash};
+use agenc_ircd_crypto::{OsEntropy, StorageDigest, storage_output_path_hash};
 use rustix::fs::{
     AtFlags, CWD, FileType, Mode, OFlags, RenameFlags, fstat, fsync, mkdirat, openat,
     renameat_with, unlinkat,
@@ -21,6 +21,7 @@ const DATABASE_FILE: &str = "database.redb";
 const GUARD_FILE: &str = "rollback.guard";
 const WRITER_LOCK_FILE: &str = "writer.lock";
 const CONSTRUCTION_PLAN_FILE: &str = "construction-plan.redb";
+const ANONYMOUS_PLAN_PREFIX: &str = ".agenc-restore-plan-v1-";
 
 /// Authenticated phase selected by the exact new/resume path rules.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -197,6 +198,27 @@ impl ConstructionDirectory {
         fsync(&staging).map_err(|_| StorageError::FilesystemRejected)
     }
 
+    /// Creates an unlinked mode-0600 scratch file inside the validated parent directory.
+    ///
+    /// Installed-phase verification rebuilds the restore plan into this file, so the plan
+    /// follows the storage path policy instead of living under a shared temporary root.
+    /// The name is unlinked immediately after creation; a crash inside that window leaves
+    /// one private empty file behind.
+    pub fn anonymous_plan_file(&self) -> Result<File, StorageError> {
+        let name = random_scratch_name(ANONYMOUS_PLAN_PREFIX)?;
+        let file = openat(
+            &self.parent,
+            name.as_str(),
+            OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR,
+        )
+        .map_err(|_| StorageError::FilesystemRejected)?;
+        let unlinked = unlinkat(&self.parent, name.as_str(), AtFlags::empty());
+        require_kind_and_mode(&file, FileType::RegularFile, Some(Mode::RUSR | Mode::WUSR))?;
+        unlinked.map_err(|_| StorageError::FilesystemRejected)?;
+        Ok(File::from(file))
+    }
+
     /// Syncs and atomically installs a completed database/guard pair without replacement.
     pub fn install(
         self,
@@ -285,6 +307,19 @@ fn open_regular(directory: &OwnedFd, name: &str) -> Result<OwnedFd, StorageError
     .map_err(|_| StorageError::FilesystemRejected)?;
     require_kind_and_mode(&file, FileType::RegularFile, Some(Mode::RUSR | Mode::WUSR))?;
     Ok(file)
+}
+
+fn random_scratch_name(prefix: &str) -> Result<String, StorageError> {
+    let mut random = [0_u8; 16];
+    OsEntropy::fill(&mut random)?;
+    let capacity = prefix.len().checked_add(32).ok_or(StorageError::Overflow)?;
+    let mut name = String::with_capacity(capacity);
+    name.push_str(prefix);
+    for byte in random {
+        use std::fmt::Write as _;
+        write!(name, "{byte:02x}").map_err(|_| StorageError::AllocationFailed)?;
+    }
+    Ok(name)
 }
 
 fn require_kind_and_mode(
@@ -448,6 +483,31 @@ mod tests {
             ConstructionDirectory::open(&output, false),
             Err(StorageError::StaleState)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn anonymous_plan_file_is_private_unlinked_and_inside_the_parent() -> Result<(), StorageError> {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let parent = TestDirectory::create("anonymous-plan")?;
+        let output = parent.path().join("output");
+        let directory = ConstructionDirectory::open(&output, false)?;
+        let file = directory.anonymous_plan_file()?;
+        let metadata = file
+            .metadata()
+            .map_err(|_| StorageError::FilesystemRejected)?;
+        assert_eq!(metadata.mode() & 0o777, 0o600);
+        assert_eq!(metadata.nlink(), 0);
+        for entry in read_dir(parent.path()).map_err(|_| StorageError::FilesystemRejected)? {
+            let entry = entry.map_err(|_| StorageError::FilesystemRejected)?;
+            assert!(
+                !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(ANONYMOUS_PLAN_PREFIX)
+            );
+        }
         Ok(())
     }
 

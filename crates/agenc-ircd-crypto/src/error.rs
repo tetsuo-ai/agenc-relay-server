@@ -18,8 +18,6 @@ pub enum CryptoError {
     Overflow,
     /// A fallible bounded allocation was refused.
     AllocationFailed,
-    /// Exporter material was already consumed.
-    ExporterConsumed,
     /// A request kind and response kind were not a registered pair.
     KindMismatch,
 }
@@ -33,7 +31,6 @@ impl fmt::Display for CryptoError {
             Self::LimitExceeded => "cryptographic input exceeds its protocol limit",
             Self::Overflow => "cryptographic length calculation overflowed",
             Self::AllocationFailed => "bounded cryptographic allocation failed",
-            Self::ExporterConsumed => "account response exporter was already consumed",
             Self::KindMismatch => "account request and response kinds do not match",
         };
         formatter.write_str(message)
@@ -55,6 +52,8 @@ pub enum CryptoWorkerError {
     ShuttingDown,
     /// Worker configuration was outside its closed limits.
     InvalidConfiguration,
+    /// The operating system refused to create a worker thread.
+    WorkerSpawnFailed,
 }
 
 impl fmt::Display for CryptoWorkerError {
@@ -65,6 +64,7 @@ impl fmt::Display for CryptoWorkerError {
             Self::WorkerPanicked => "cryptographic worker failed",
             Self::ShuttingDown => "cryptographic worker pool is shutting down",
             Self::InvalidConfiguration => "cryptographic worker configuration is invalid",
+            Self::WorkerSpawnFailed => "cryptographic worker thread could not be created",
         };
         formatter.write_str(message)
     }

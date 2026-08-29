@@ -54,8 +54,8 @@ References: [Architecture §§1.2–4](docs/ircd-architecture-and-implementation
 | 01 | Registries, validated types, and canonical codecs | Complete | Pass, 2026-08-27 | [Current checkpoint](conformance/evidence/stage-01-1e5b738468f88b238061cc6e84b732176f5cae65.json) |
 | 02 | Bounded client wire implementation | Complete | Pass, 2026-08-27 | [Current checkpoint](conformance/evidence/stage-02-1e5b738468f88b238061cc6e84b732176f5cae65.json) |
 | 03 | Pure deterministic domain model | Complete | Pass, 2026-08-27 | [Current checkpoint](conformance/evidence/stage-03-1e5b738468f88b238061cc6e84b732176f5cae65.json) |
-| 04 | Crypto adapters and account authentication | Complete | Pass, 2026-08-27 | [Current checkpoint](conformance/evidence/stage-04-1e5b738468f88b238061cc6e84b732176f5cae65.json) |
-| 05 | Durable and recoverable persistence | Complete | Pass, 2026-08-29 | [Current checkpoint](conformance/evidence/stage-05-bd7518fe7f5c7420debdbaa958aa444ecb5c80c9.json) |
+| 04 | Crypto adapters and account authentication | Complete | Pass, 2026-08-29 | [Current checkpoint](conformance/evidence/stage-04-4040796f2c21774d58ea7ce54e70a080678e83ac.json) |
+| 05 | Durable and recoverable persistence | Complete | Pass, 2026-08-29 | [Current checkpoint](conformance/evidence/stage-05-4040796f2c21774d58ea7ce54e70a080678e83ac.json) |
 | 06 | Conforming single-node daemon | Not started | Not run | Absent |
 | 07 | Conforming base federation | Not started | Not run | Absent |
 | 08 | Conforming E2EE server adapter | Not started | Not run | Absent |
@@ -758,7 +758,7 @@ credential change have complete protocol state machines and vectors.
   - Targets: `agenc-ircd-crypto`, `agenc-ircd-auth`, affected testkit surfaces.
   - References: [Architecture §29 phase 4](docs/ircd-architecture-and-implementation-spec.md#29-implementation-sequence-and-acceptance-gates).
   - Invariants: `AUTH-*`, `ID-05` through `ID-07`, `CON-02`, `CON-04`, `CON-05`.
-  - Evidence: all named acceptance evidence and mandatory workspace gates passed under the pinned lockfile; the [current schema version 2 manifest](conformance/evidence/stage-04-1e5b738468f88b238061cc6e84b732176f5cae65.json) closes the gate for exact source commit `1e5b738468f88b238061cc6e84b732176f5cae65`, and the [schema version 1 manifest](conformance/evidence/stage-04-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json) remains archive-only.
+  - Evidence: all named acceptance evidence and mandatory workspace gates passed under the pinned lockfile; the [current schema version 2 manifest](conformance/evidence/stage-04-4040796f2c21774d58ea7ce54e70a080678e83ac.json) closes the gate for exact source commit `4040796f2c21774d58ea7ce54e70a080678e83ac` after the Stage 04 and 05 legibility review; the [previous schema version 2 manifest](conformance/evidence/stage-04-1e5b738468f88b238061cc6e84b732176f5cae65.json) and the [schema version 1 manifest](conformance/evidence/stage-04-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json) remain archive-only.
 
 ## Stage 05 — Persistence, recovery, and durable construction
 
@@ -926,17 +926,19 @@ durability or rollback outcome.
 - [x] `S05-900` **Pass the Stage 05 gate.** Every accepted durable mutation,
   recovery state, construction, backup, restore, deletion, and key transition
   satisfies the complete `DUR-*` invariant family.
-  - Current status: clean all-workspace coverage is 90.00% of branches and
-    95.50% of lines, with all six critical regions at 100%. The complete
+  - Current status: clean all-workspace coverage is 90.64% of branches and
+    95.65% of lines, with all six critical regions at 100%. The complete
     implementation gate passes.
   - After: `S05-001` through `S05-015`.
   - Targets: `agenc-ircd-storage` and all storage evidence.
   - References: [Architecture §29 phase 5](docs/ircd-architecture-and-implementation-spec.md#29-implementation-sequence-and-acceptance-gates).
   - Invariants: `DUR-01` through `DUR-12`, applicable `CON-*` and `OPS-*`.
   - Evidence: all storage acceptance evidence and mandatory workspace gates
-    pass from clean state; the [schema version 2 manifest](conformance/evidence/stage-05-bd7518fe7f5c7420debdbaa958aa444ecb5c80c9.json)
+    pass from clean state; the [current schema version 2 manifest](conformance/evidence/stage-05-4040796f2c21774d58ea7ce54e70a080678e83ac.json)
     closes the gate for exact source commit
-    `bd7518fe7f5c7420debdbaa958aa444ecb5c80c9`.
+    `4040796f2c21774d58ea7ce54e70a080678e83ac` after the Stage 04 and 05 legibility
+    review, and the [previous schema version 2 manifest](conformance/evidence/stage-05-bd7518fe7f5c7420debdbaa958aa444ecb5c80c9.json)
+    remains archive-only.
 
 ## Stage 06 — Single-node runtime and operations
 

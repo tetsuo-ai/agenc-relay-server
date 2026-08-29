@@ -7,18 +7,24 @@ use std::path::{Component, Path, PathBuf};
 
 use agenc_ircd_crypto::OsEntropy;
 use rustix::fs::{
-    AtFlags, CWD, FileType, Mode, OFlags, RenameFlags, fstat, fstatfs, fstatvfs, fsync, openat,
-    renameat, renameat_with, unlinkat,
+    AtFlags, CWD, FileType, Mode, OFlags, RenameFlags, StatVfs, fstat, fstatfs, fstatvfs, fsync,
+    openat, renameat, renameat_with, unlinkat,
 };
 
 use crate::{
-    MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH, StorageError, StorageFaultBoundary,
-    StorageFaultInjector, StorageFaultSite,
+    MAX_QUALIFIED_OBSERVED_GROWTH, MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH, StorageError,
+    StorageFaultBoundary, StorageFaultInjector, StorageFaultSite,
 };
 
 const DATABASE_FILE: &str = "database.redb";
 const GUARD_FILE: &str = "rollback.guard";
 const WRITER_LOCK_FILE: &str = "writer.lock";
+/// Prefix of the random create-exclusive file a backup is written to before its rename.
+const BACKUP_TEMPORARY_PREFIX: &str = ".agenc-backup-tmp-v1-";
+/// Prefix of the random scratch database used while startup replays manifests.
+const RECOVERY_SCRATCH_PREFIX: &str = ".agenc-recovery-scratch-v1-";
+/// Prefix of the random file a rollback guard is written to before its rename.
+const GUARD_TEMPORARY_PREFIX: &str = ".rollback.guard.agenc-tmp-v1-";
 
 #[cfg(target_arch = "x86_64")]
 const TARGET_TRIPLE: &str = "x86_64-unknown-linux-gnu";
@@ -68,7 +74,7 @@ impl StorageQualification {
 
     /// Validates the mandatory twofold margin inside the live reserve.
     pub const fn validate(self) -> Result<Self, StorageError> {
-        if self.maximum_observed_growth > 134_217_728 {
+        if self.maximum_observed_growth > MAX_QUALIFIED_OBSERVED_GROWTH {
             return Err(StorageError::FilesystemRejected);
         }
         Ok(self)
@@ -164,19 +170,26 @@ impl BackupOutput {
         )
         .map_err(rustix_rejected)?;
         validate_file(&directory_fd, FileType::Directory, Mode::RWXU)?;
-        cleanup_random_temporaries(&directory_fd, directory_path, ".agenc-backup-tmp-v1-")?;
-        let temporary_name = random_temporary_name(".agenc-backup-tmp-v1-")?;
+        let directory = File::from(directory_fd);
+        // One producer per backup directory. The directory descriptor itself carries the lock,
+        // so no extra file appears in the directory, a crashed producer releases it, and the
+        // sweep below can never remove another live producer's temporary.
+        directory
+            .try_lock()
+            .map_err(|_| StorageError::WriterLocked)?;
+        cleanup_random_temporaries(&directory, directory_path, BACKUP_TEMPORARY_PREFIX)?;
+        let temporary_name = random_temporary_name(BACKUP_TEMPORARY_PREFIX)?;
         let file_fd = openat(
-            &directory_fd,
+            &directory,
             temporary_name.as_str(),
             OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::RUSR | Mode::WUSR,
         )
         .map_err(rustix_rejected)?;
         validate_file(&file_fd, FileType::RegularFile, Mode::RUSR | Mode::WUSR)?;
-        require_same_filesystem(&directory_fd, &file_fd)?;
+        require_same_filesystem(&directory, &file_fd)?;
         Ok(Self {
-            directory: File::from(directory_fd),
+            directory,
             file: File::from(file_fd),
             temporary_name,
             final_name: final_name.to_owned(),
@@ -309,7 +322,8 @@ impl StateDirectory {
             .try_lock()
             .map_err(|_| StorageError::WriterLocked)?;
         faults.check(StorageFaultSite::WriterLock, StorageFaultBoundary::After)?;
-        cleanup_random_temporaries(&directory_fd, path, ".agenc-recovery-scratch-v1-")?;
+        cleanup_random_temporaries(&directory_fd, path, RECOVERY_SCRATCH_PREFIX)?;
+        cleanup_random_temporaries(&directory_fd, path, GUARD_TEMPORARY_PREFIX)?;
         Ok(Self {
             directory: File::from(directory_fd),
             writer_lock,
@@ -348,26 +362,7 @@ impl StateDirectory {
             return Err(StorageError::LimitExceeded);
         }
         let statistics = fstatvfs(&self.directory).map_err(rustix_rejected)?;
-        let block_size = statistics.f_frsize;
-        let available_bytes = statistics
-            .f_bavail
-            .checked_mul(block_size)
-            .ok_or(StorageError::Overflow)?;
-        let total_bytes = statistics
-            .f_blocks
-            .checked_mul(block_size)
-            .ok_or(StorageError::Overflow)?;
-        let percentage_numerator = total_bytes
-            .checked_mul(u64::from(reserve_percent))
-            .ok_or(StorageError::Overflow)?;
-        let percentage_reserve = percentage_numerator
-            .checked_add(99)
-            .ok_or(StorageError::Overflow)?
-            / 100;
-        Ok(FilesystemCapacity {
-            available_bytes,
-            reserve_bytes: fixed_reserve_bytes.max(percentage_reserve),
-        })
+        capacity_from_statistics(&statistics, fixed_reserve_bytes, reserve_percent)
     }
 
     /// Enforces `R(F) + G` immediately before a durable transaction.
@@ -512,7 +507,7 @@ impl StateDirectory {
     }
 
     pub(crate) fn create_recovery_scratch(&self) -> Result<(File, File, String), StorageError> {
-        let temporary_name = random_temporary_name(".agenc-recovery-scratch-v1-")?;
+        let temporary_name = random_temporary_name(RECOVERY_SCRATCH_PREFIX)?;
         let scratch = openat(
             &self.directory,
             temporary_name.as_str(),
@@ -531,7 +526,33 @@ impl StateDirectory {
 }
 
 fn random_guard_temporary_name() -> Result<String, StorageError> {
-    random_temporary_name(".rollback.guard.agenc-tmp-v1-")
+    random_temporary_name(GUARD_TEMPORARY_PREFIX)
+}
+
+/// Computes UID-available bytes and the effective reserve `max(fixed, ceil(total * percent / 100))`.
+fn capacity_from_statistics(
+    statistics: &StatVfs,
+    fixed_reserve_bytes: u64,
+    reserve_percent: u8,
+) -> Result<FilesystemCapacity, StorageError> {
+    let block_size = statistics.f_frsize;
+    let available_bytes = statistics
+        .f_bavail
+        .checked_mul(block_size)
+        .ok_or(StorageError::Overflow)?;
+    let total_bytes = statistics
+        .f_blocks
+        .checked_mul(block_size)
+        .ok_or(StorageError::Overflow)?;
+    let percentage_reserve = total_bytes
+        .checked_mul(u64::from(reserve_percent))
+        .and_then(|bytes| bytes.checked_add(99))
+        .ok_or(StorageError::Overflow)?
+        / 100;
+    Ok(FilesystemCapacity {
+        available_bytes,
+        reserve_bytes: fixed_reserve_bytes.max(percentage_reserve),
+    })
 }
 
 fn random_temporary_name(prefix: &str) -> Result<String, StorageError> {
@@ -617,24 +638,12 @@ pub(crate) fn admit_backup_output(
     }
     validate_file(file, FileType::RegularFile, Mode::RUSR | Mode::WUSR)?;
     let statistics = fstatvfs(file).map_err(rustix_rejected)?;
-    let available = statistics
-        .f_bavail
-        .checked_mul(statistics.f_frsize)
-        .ok_or(StorageError::Overflow)?;
-    let total = statistics
-        .f_blocks
-        .checked_mul(statistics.f_frsize)
-        .ok_or(StorageError::Overflow)?;
-    let percentage = total
-        .checked_mul(u64::from(reserve_percent))
-        .and_then(|bytes| bytes.checked_add(99))
-        .ok_or(StorageError::Overflow)?
-        / 100;
-    let required = fixed_reserve_bytes
-        .max(percentage)
+    let capacity = capacity_from_statistics(&statistics, fixed_reserve_bytes, reserve_percent)?;
+    let required = capacity
+        .reserve_bytes
         .checked_add(required_stream_bytes)
         .ok_or(StorageError::Overflow)?;
-    if available < required {
+    if capacity.available_bytes < required {
         return Err(StorageError::FilesystemRejected);
     }
     Ok(())
@@ -657,7 +666,7 @@ fn filesystem_tuple(fd: &OwnedFd) -> Result<FilesystemTuple, StorageError> {
     let vfs = fstatvfs(fd).map_err(rustix_rejected)?;
     Ok(FilesystemTuple {
         target: TARGET_TRIPLE,
-        filesystem_type: fs.f_type as u64,
+        filesystem_type: u64::try_from(fs.f_type).map_err(|_| StorageError::FilesystemRejected)?,
         block_size: vfs.f_frsize,
         mount_flags: vfs.f_flag.bits(),
     })
@@ -716,12 +725,14 @@ mod tests {
             block_size: 4_096,
             mount_flags: 0,
         };
-        let valid = StorageQualification::from_verified_report(tuple, 134_217_728);
+        let valid =
+            StorageQualification::from_verified_report(tuple, MAX_QUALIFIED_OBSERVED_GROWTH);
         assert_eq!(valid.validate(), Ok(valid));
         assert_eq!(valid.tuple(), tuple);
         assert_eq!(valid.maximum_observed_growth(), 134_217_728);
         assert_eq!(
-            StorageQualification::from_verified_report(tuple, 134_217_729).validate(),
+            StorageQualification::from_verified_report(tuple, MAX_QUALIFIED_OBSERVED_GROWTH + 1)
+                .validate(),
             Err(StorageError::FilesystemRejected)
         );
 
@@ -756,6 +767,30 @@ mod tests {
         assert_eq!(
             cleanup_random_temporaries(&directory_fd, directory.path(), prefix),
             Err(StorageError::FilesystemRejected)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn backup_outputs_hold_the_directory_lock_and_sweep_only_stale_temporaries()
+    -> Result<(), StorageError> {
+        let directory = TestDirectory::create("backup-lock")?;
+        let faults = StorageFaultInjector::disabled();
+        let first = BackupOutput::create(directory.path(), "first.backup", faults.clone())?;
+        assert_eq!(
+            BackupOutput::create(directory.path(), "second.backup", faults.clone()).err(),
+            Some(StorageError::WriterLocked)
+        );
+        drop(first);
+
+        let stale = format!("{BACKUP_TEMPORARY_PREFIX}{}", "b".repeat(32));
+        directory.create_file(&stale, 0o600)?;
+        let second = BackupOutput::create(directory.path(), "second.backup", faults)?;
+        assert!(!directory.path().join(stale).exists());
+        drop(second);
+        assert_eq!(
+            fs::read_dir(directory.path()).map_err(io_rejected)?.count(),
+            0
         );
         Ok(())
     }
@@ -798,7 +833,10 @@ mod tests {
         let directory = TestDirectory::create("state")?;
         let tuple = StateDirectory::probe(directory.path())?;
         let qualification = StorageQualification::from_verified_report(tuple, 1).validate()?;
+        let stale_guard = format!("{GUARD_TEMPORARY_PREFIX}{}", "c".repeat(32));
+        directory.create_file(&stale_guard, 0o600)?;
         let state = StateDirectory::open(directory.path(), &[qualification])?;
+        assert!(!directory.path().join(stale_guard).exists());
         assert_eq!(state.tuple(), tuple);
         assert_eq!(state.capacity(0, 101), Err(StorageError::LimitExceeded));
         let capacity = state.capacity(0, 0)?;

@@ -22,7 +22,8 @@ pub enum StorageError {
     StaleState,
     /// The fixed storage handoff queue had no free slot.
     QueueFull,
-    /// The storage owner is closing or has entered indeterminate state.
+    /// The storage owner is closing, entered indeterminate state, or lost a required
+    /// operating-system facility such as entropy.
     Unavailable,
     /// The filesystem identity, permissions, capacity, or qualification was invalid.
     FilesystemRejected,
@@ -67,10 +68,8 @@ impl From<agenc_ircd_crypto::CryptoError> for StorageError {
             CryptoError::LimitExceeded => Self::LimitExceeded,
             CryptoError::Overflow => Self::Overflow,
             CryptoError::AllocationFailed => Self::AllocationFailed,
-            CryptoError::EntropyUnavailable
-            | CryptoError::InvalidEncoding
-            | CryptoError::ExporterConsumed
-            | CryptoError::KindMismatch => Self::InvalidEncoding,
+            CryptoError::EntropyUnavailable => Self::Unavailable,
+            CryptoError::InvalidEncoding | CryptoError::KindMismatch => Self::InvalidEncoding,
         }
     }
 }

@@ -28,6 +28,9 @@ const PADDING_VERSION: u16 = 1;
 const REQUEST_HEADER_BYTES: usize = 84;
 const RESPONSE_HEADER_BYTES: usize = 116;
 const REQUEST_INNER_MIN_BYTES: usize = 72;
+/// Login byte bounds mirror `NormalizedLogin`, which accepts 3 through 64 bytes.
+const MIN_LOGIN_BYTES: usize = 3;
+const MAX_LOGIN_BYTES: usize = 64;
 const REQUEST_INNER_MAX_BYTES: usize = 265;
 const REQUEST_PADDING_BASE: usize = 4_586;
 const RESPONSE_PAYLOAD_MIN_BYTES: usize = 52;
@@ -409,7 +412,7 @@ fn parse_creation_start(
     network_id: NetworkId,
     cursor: &mut Cursor<'_>,
 ) -> Result<AccountRequestPayload, AuthError> {
-    let login = parse_login(cursor.read_vector_u8(3, 64)?)?;
+    let login = parse_login(cursor.read_vector_u8(MIN_LOGIN_BYTES, MAX_LOGIN_BYTES)?)?;
     let registration_request = read_registration_request(cursor)?;
     let invitation = match cursor.read_vector_u8(0, ACCOUNT_CREATION_INVITE_BYTES)? {
         [] => None,
@@ -445,7 +448,7 @@ fn parse_authentication_start(
     network_id: NetworkId,
     cursor: &mut Cursor<'_>,
 ) -> Result<AccountRequestPayload, AuthError> {
-    let login = parse_login(cursor.read_vector_u8(3, 64)?)?;
+    let login = parse_login(cursor.read_vector_u8(MIN_LOGIN_BYTES, MAX_LOGIN_BYTES)?)?;
     let bytes = cursor.read_vector_u8(OPAQUE_KE1_BYTES, OPAQUE_KE1_BYTES)?;
     let ke1 = OpaqueKe1::from_bytes(bytes.try_into().map_err(|_| AuthError::InvalidEncoding)?)?;
     Ok(AccountRequestPayload::AuthenticationStart(

@@ -23,15 +23,15 @@ pub use opaque::{
     OpaqueRegistrationResponse, OpaqueServerLoginState, finish_authentication, finish_registration,
 };
 pub use service::{
-    AccountCreationStartParameters, AccountCredentialRecord, AccountDeletionChallenge,
-    AccountDeletionIntent, AccountFinishOutcome, AccountOperationContext, AccountResponseIntent,
-    AccountResponsePlan, AccountStartOutcome, AuthenticationGrant, AuthenticationLookup,
-    AuthenticationStartParameters, CreateAccountIntent, CreationAdmission,
-    CredentialChangeStartParameters, CredentialReplacementIntent, DestructiveAccountSnapshot,
-    FreshAuthenticationProof, SealedAccountFinishOutcome, SealedAccountStart,
-    authentication_completion, begin_account_creation, begin_account_deletion,
-    begin_authentication, begin_credential_change, finish_account_authentication,
-    finish_account_creation, finish_credential_change,
+    AccountAuthenticationState, AccountCreationStartParameters, AccountCreationState,
+    AccountCredentialRecord, AccountDeletionChallenge, AccountDeletionIntent, AccountFinishOutcome,
+    AccountOperationContext, AccountResponseIntent, AccountResponsePlan, AccountStartOutcome,
+    AuthenticationGrant, AuthenticationLookup, AuthenticationStartParameters, CreateAccountIntent,
+    CreationAdmission, CredentialChangeStartParameters, CredentialChangeState,
+    CredentialReplacementIntent, DestructiveAccountSnapshot, FreshAuthenticationProof,
+    SealedAccountFinishOutcome, SealedAccountStart, authentication_completion,
+    begin_account_creation, begin_account_deletion, begin_authentication, begin_credential_change,
+    finish_account_authentication, finish_account_creation, finish_credential_change,
 };
 pub use transaction::{
     ACCOUNT_CREATION_TIMEOUT_TICKS, AUTHENTICATION_GRANT_TIMEOUT_SECONDS,

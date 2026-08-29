@@ -23,6 +23,11 @@ pub const STATE_META_STORED_KEY: &[u8] = b"agenc-chat/state-meta/v1";
 
 const OPAQUE_FAKE_RECORD_KEY: &[u8] = b"agenc-chat/opaque-fake-record/v1";
 const DOMAIN_RECORD_VERSION: u16 = 1;
+/// Encoded bytes of a schema-one domain record ahead of its references and body: version,
+/// kind, revision, generation, the expiry tag and value, the reference count, and the body length.
+const DOMAIN_RECORD_FIXED_BYTES: usize = 38;
+/// Encoded bytes of one reference ahead of its key: the table and the key length.
+const RECORD_REFERENCE_FIXED_BYTES: usize = 6;
 const PROTOCOL_BODY_VERSION: u16 = 1;
 const PROTOCOL_BODY_PREFIX_BYTES: usize = 12;
 
@@ -529,6 +534,13 @@ impl PersistentRecordValue {
             return Err(StorageError::InvalidEncoding);
         }
         validate_record_counters(table, record_kind, revision, generation)?;
+        // The reference and body ceilings are independent, so their sum can exceed the sealed
+        // plaintext ceiling; admit only what `encode` can seal.
+        if domain_record_encoded_bytes(&references, body.len())?
+            > agenc_ircd_crypto::MAX_STORAGE_PLAINTEXT_BYTES
+        {
+            return Err(StorageError::LimitExceeded);
+        }
         Ok(Self {
             table,
             record_kind,
@@ -586,23 +598,9 @@ impl PersistentRecordValue {
 
     /// Encodes one complete canonical domain record.
     pub fn encode(&self) -> Result<Vec<u8>, StorageError> {
-        let reference_bytes = self
-            .references
-            .iter()
-            .try_fold(0_usize, |total, reference| {
-                total
-                    .checked_add(6)
-                    .and_then(|value| value.checked_add(reference.key.as_bytes().len()))
-                    .ok_or(StorageError::Overflow)
-            })?;
-        let capacity = 36_usize
-            .checked_add(reference_bytes)
-            .and_then(|value| value.checked_add(self.body.len()))
-            .ok_or(StorageError::Overflow)?;
-        let mut encoder = Encoder::with_capacity(
-            capacity.min(MAX_DOMAIN_RECORD_BODY_BYTES),
-            agenc_ircd_crypto::MAX_STORAGE_PLAINTEXT_BYTES,
-        )?;
+        let capacity = domain_record_encoded_bytes(&self.references, self.body.len())?;
+        let mut encoder =
+            Encoder::with_capacity(capacity, agenc_ircd_crypto::MAX_STORAGE_PLAINTEXT_BYTES)?;
         encoder.put_u16(DOMAIN_RECORD_VERSION)?;
         encoder.put_u16(self.record_kind)?;
         encoder.put_u64(self.revision)?;
@@ -732,6 +730,23 @@ pub fn validate_sealed_record(
     Ok(sealed)
 }
 
+/// Computes the exact encoded length of a schema-one domain record.
+fn domain_record_encoded_bytes(
+    references: &[RecordReference],
+    body_bytes: usize,
+) -> Result<usize, StorageError> {
+    let reference_bytes = references.iter().try_fold(0_usize, |total, reference| {
+        total
+            .checked_add(RECORD_REFERENCE_FIXED_BYTES)
+            .and_then(|value| value.checked_add(reference.key.as_bytes().len()))
+            .ok_or(StorageError::Overflow)
+    })?;
+    DOMAIN_RECORD_FIXED_BYTES
+        .checked_add(reference_bytes)
+        .and_then(|value| value.checked_add(body_bytes))
+        .ok_or(StorageError::Overflow)
+}
+
 fn validate_key_check(plaintext: &[u8]) -> Result<(), StorageError> {
     validate_fixed_length(plaintext, 32)
 }
@@ -849,6 +864,66 @@ mod tests {
         IntegrityCheckpoint, IntegrityCheckpointTbs, IntegrityManifest, IntegrityManifestTbs,
         IntegrityRecordMutation, IntegrityRecordVersion, StorageSealContext,
     };
+
+    #[test]
+    fn domain_record_admission_stops_at_the_exact_sealed_plaintext_ceiling()
+    -> Result<(), StorageError> {
+        let plaintext_ceiling = agenc_ircd_crypto::MAX_STORAGE_PLAINTEXT_BYTES;
+        let body = vec![7_u8; MAX_DOMAIN_RECORD_BODY_BYTES];
+        let full_key_bytes = crate::MAX_STORED_KEY_BYTES;
+        let remaining = plaintext_ceiling
+            - DOMAIN_RECORD_FIXED_BYTES
+            - MAX_DOMAIN_RECORD_BODY_BYTES
+            - 4 * (RECORD_REFERENCE_FIXED_BYTES + full_key_bytes)
+            - RECORD_REFERENCE_FIXED_BYTES;
+        let references = |last_key_bytes: usize| -> Result<Vec<RecordReference>, StorageError> {
+            let mut references = Vec::new();
+            for index in 0_u8..4 {
+                let mut key = vec![index; full_key_bytes];
+                key.push(index);
+                key.truncate(full_key_bytes);
+                references.push(RecordReference::new(
+                    TableId::Sanction,
+                    StoredKey::new(key)?,
+                )?);
+            }
+            references.push(RecordReference::new(
+                TableId::Sanction,
+                StoredKey::new(vec![9; last_key_bytes])?,
+            )?);
+            Ok(references)
+        };
+
+        let exact = PersistentRecordValue::new(
+            TableId::Sanction,
+            1,
+            1,
+            0,
+            None,
+            references(remaining)?,
+            body.clone(),
+        )?;
+        let encoded = exact.encode()?;
+        assert_eq!(encoded.len(), plaintext_ceiling);
+        assert_eq!(
+            domain_record_encoded_bytes(&references(remaining)?, body.len())?,
+            plaintext_ceiling
+        );
+        assert_eq!(
+            PersistentRecordValue::new(
+                TableId::Sanction,
+                1,
+                1,
+                0,
+                None,
+                references(remaining + 1)?,
+                body,
+            )
+            .map(|_| ()),
+            Err(StorageError::LimitExceeded)
+        );
+        Ok(())
+    }
 
     #[test]
     fn domain_envelope_and_sealed_inventory_reject_each_outer_binding() -> Result<(), StorageError>

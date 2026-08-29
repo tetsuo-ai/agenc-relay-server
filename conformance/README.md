@@ -50,13 +50,18 @@ The command inherits every Stage 03 check and adds the exact cryptographic
 profile, auth and crypto boundary tests, account-generation fences, and
 account-envelope fuzzing. The reviewed `opaque-ke` source patch is pinned by
 `conformance/vendored-dependencies.toml` and checked by workspace policy. The
-command alone does not close `S04-900`. The five schema version 2 manifests and
+command alone does not close `S04-900`. The schema version 2 manifests and
 artifacts for exact source commit
-`1e5b738468f88b238061cc6e84b732176f5cae65` close Stages 00 through 04. They
-contain 17 Stage 00 records, 14 Stage 01 records, 12 Stage 02 records, 13 Stage
-03 records, and 20 Stage 04 records. Every record passed. Coverage reached
-90.01% of branches and 95.59% of lines, with all five critical regions at 100%.
-The evidence validator passed 78 rejection cases. The five schema version 1
+`1e5b738468f88b238061cc6e84b732176f5cae65` close Stages 00 through 03. They
+contain 17 Stage 00 records, 14 Stage 01 records, 12 Stage 02 records, and 13
+Stage 03 records. The
+[Stage 04 manifest](evidence/stage-04-4040796f2c21774d58ea7ce54e70a080678e83ac.json)
+with 20 passed records closes exact source commit
+`4040796f2c21774d58ea7ce54e70a080678e83ac` after the Stage 04 and 05 legibility
+review. Its recorded gate ran 50 commands and reached 90.64% of branches and
+95.65% of lines, with all six critical regions at 100%. The evidence validator
+passed 78 rejection cases. The earlier Stage 04 manifest for
+`1e5b738468f88b238061cc6e84b732176f5cae65` and the five schema version 1
 manifests for source commit `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb`
 remain archive-only.
 
@@ -67,14 +72,15 @@ bash scripts/check-stage-five.sh
 ```
 
 This command inherits the Stage 04 gate and adds the closed storage profile,
-storage dependency review, 181 storage tests, persistent-codec and backup-
+storage dependency review, 191 storage tests, persistent-codec and backup-
 stream fuzzing, x86_64 and AArch64 checks, the complete fault campaign, signed
 native ext4 growth reports, and the Stage 05 requirement set. The
-[schema version 2 manifest](evidence/stage-05-bd7518fe7f5c7420debdbaa958aa444ecb5c80c9.json)
+[schema version 2 manifest](evidence/stage-05-4040796f2c21774d58ea7ce54e70a080678e83ac.json)
 contains 39 passed records and closes exact source commit
-`bd7518fe7f5c7420debdbaa958aa444ecb5c80c9`. The recorded run reached 90.00%
-branch coverage, 95.50% line coverage, and 100% coverage in all six critical
-regions.
+`4040796f2c21774d58ea7ce54e70a080678e83ac`. The recorded run reached 90.64%
+branch coverage, 95.65% line coverage, and 100% coverage in all six critical
+regions. The earlier manifest for `bd7518fe7f5c7420debdbaa958aa444ecb5c80c9`
+remains archive-only.
 
 For an evidence-only check:
 

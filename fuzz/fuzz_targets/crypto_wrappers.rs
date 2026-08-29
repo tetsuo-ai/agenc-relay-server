@@ -32,11 +32,15 @@ fn fuzz_signature(input: &[u8]) {
     let Ok(public_key) = Ed25519PublicKey::from_bytes(public_key) else {
         return;
     };
-    let _result = verify_canonical(
+    let result = verify_canonical(
         public_key,
         SignatureDomain::AccountCreationInvite,
         content,
         Ed25519Signature::from_bytes(signature),
+    );
+    assert!(
+        result.is_err(),
+        "fuzz bytes verified as a strict Ed25519 signature"
     );
 }
 
@@ -59,7 +63,11 @@ fn fuzz_sealed_record(input: &[u8]) {
         return;
     };
     let nonce = StorageNonce::from_reserved_bytes([6_u8; 24]);
-    let _result = open_storage_record(&key, &nonce, 1, b"fuzz-record", &ciphertext);
+    let result = open_storage_record(&key, &nonce, 1, b"fuzz-record", &ciphertext);
+    assert!(
+        result.is_err(),
+        "fuzz bytes opened under the fixed storage key"
+    );
 }
 
 fuzz_target!(|data: &[u8]| {

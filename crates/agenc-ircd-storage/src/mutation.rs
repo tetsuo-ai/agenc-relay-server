@@ -17,6 +17,8 @@ pub const MAX_STORAGE_MUTATION_BATCH_BYTES: usize = 58_720_240;
 const MAX_TRACKED_MUTATION_BYTES: usize = 16_777_216;
 /// Greatest logical records removed by one retention transaction.
 pub const MAX_RETENTION_DELETIONS: usize = 1_000;
+/// Greatest rows one consistent range read returns.
+const MAX_RANGE_READ_RECORDS: u16 = 4_096;
 
 /// Existing record metadata required to validate replacement/deletion accounting.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -336,7 +338,6 @@ impl StorageMutationBatch {
             (left.table(), left.key().as_bytes()).cmp(&(right.table(), right.key().as_bytes()))
         });
         let mut identities = BTreeSet::new();
-        let mut tracked = 0_usize;
         let mut puts = 0_usize;
         let mut logical = accounting.current_logical_database_bytes;
         let mut backup = accounting.current_backup_stream_bytes;
@@ -353,9 +354,6 @@ impl StorageMutationBatch {
             let identity = (mutation.table(), mutation.key().as_bytes());
             if !identities.insert(identity) {
                 return Err(StorageError::InvalidEncoding);
-            }
-            if mutation.table().is_integrity_tracked() {
-                tracked = tracked.checked_add(1).ok_or(StorageError::Overflow)?;
             }
             let key_len = mutation.key().as_bytes().len();
             owned_bytes = owned_bytes
@@ -401,13 +399,14 @@ impl StorageMutationBatch {
         backup = backup
             .checked_add(backup_record_charge(8, manifest_sealed_bytes)?)
             .ok_or(StorageError::Overflow)?;
+        // Every mutation that reached this point is integrity tracked and the batch is non-empty,
+        // so the tracked count needs no separate check.
         if (
-            tracked == 0,
             owned_bytes > MAX_STORAGE_MUTATION_BATCH_BYTES,
             tracked_mutation_bytes > MAX_TRACKED_MUTATION_BYTES,
             logical > accounting.database_max_bytes,
             backup > accounting.backup_max_bytes,
-        ) != (false, false, false, false, false)
+        ) != (false, false, false, false)
         {
             return Err(StorageError::LimitExceeded);
         }
@@ -614,7 +613,7 @@ impl ReadPlan {
         end: StoredKey,
         limit: u16,
     ) -> Result<Self, StorageError> {
-        if start >= end || limit == 0 || limit > 4_096 {
+        if start >= end || limit == 0 || limit > MAX_RANGE_READ_RECORDS {
             return Err(StorageError::LimitExceeded);
         }
         Ok(Self {
