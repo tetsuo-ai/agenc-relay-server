@@ -1,7 +1,6 @@
 //! Stopped-daemon backup restore composition.
 
-use std::fs::{File, OpenOptions};
-use std::os::unix::fs::OpenOptionsExt as _;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use agenc_ircd_crypto::{
@@ -69,7 +68,9 @@ pub struct RestoreCommandRequest {
     pub network_id: NetworkId,
     /// Validated permanent server identity.
     pub server_id: ServerId,
-    /// Configured current state directory, compared with the signed backup when readable.
+    /// Configured current state directory. When it exists it must open, and its lineage
+    /// must match the signed backup; when absent the comparison is skipped and the receipt
+    /// reports the current generation as unknown.
     pub current_state_directory: PathBuf,
     /// Configured current storage master-key file.
     pub current_master_key_file: PathBuf,
@@ -182,13 +183,15 @@ pub fn execute_restore_command(
 }
 
 fn validate_restore_request(request: &RestoreCommandRequest) -> Result<(), StorageError> {
-    if (
-        !request.declare_recovery_epoch,
-        request.trusted_backup_keys.is_empty(),
-        request.trusted_backup_keys.len() > 1_024,
-    ) != (false, false, false)
-    {
+    if !request.declare_recovery_epoch {
         return Err(StorageError::InvalidEncoding);
+    }
+    if (
+        request.trusted_backup_keys.is_empty(),
+        request.trusted_backup_keys.len() > crate::MAX_BACKUP_TRUST_KEYS,
+    ) != (false, false)
+    {
+        return Err(StorageError::LimitExceeded);
     }
     Ok(())
 }
@@ -301,7 +304,7 @@ impl RestoreExecution<'_> {
         );
         let plan_file = match self.directory.phase() {
             ConstructionDirectoryPhase::Staging => self.directory.rebuild_plan_file()?,
-            ConstructionDirectoryPhase::Installed => anonymous_plan_file()?,
+            ConstructionDirectoryPhase::Installed => self.directory.anonymous_plan_file()?,
         };
         let plan = source.rebuild_restore_plan(
             plan_file,
@@ -446,19 +449,13 @@ fn read_current_boundary(
     previous_login_key_bytes: Option<&[u8; 32]>,
     limits: StorageEngineLimits,
 ) -> Result<Option<ConstructionSourceFacts>, StorageError> {
-    let Ok(master) = read_secret_key(&request.current_master_key_file) else {
+    if !current_state_directory_exists(&request.current_state_directory)? {
         return Ok(None);
-    };
-    let Ok(guard) = read_secret_key(&request.current_rollback_guard_key_file) else {
-        return Ok(None);
-    };
-    let state_directory =
-        match StateDirectory::open(&request.current_state_directory, qualifications) {
-            Ok(directory) => directory,
-            Err(StorageError::WriterLocked) => return Err(StorageError::WriterLocked),
-            Err(_) => return Ok(None),
-        };
-    let Ok(source) = ConstructionSourceDatabase::open(StorageOpenConfig {
+    }
+    let master = read_secret_key(&request.current_master_key_file)?;
+    let guard = read_secret_key(&request.current_rollback_guard_key_file)?;
+    let state_directory = StateDirectory::open(&request.current_state_directory, qualifications)?;
+    let source = ConstructionSourceDatabase::open(StorageOpenConfig {
         expected_network_id: request.network_id,
         expected_server_id: request.server_id,
         state_directory,
@@ -468,10 +465,17 @@ fn read_current_boundary(
         previous_login_index_key: previous_login_key_bytes
             .map(|bytes| LoginIndexKey::from_bytes(*bytes)),
         limits,
-    }) else {
-        return Ok(None);
-    };
-    Ok(source.facts().ok())
+    })?;
+    Ok(Some(source.facts()?))
+}
+
+/// Distinguishes an absent configured database from one that exists but cannot be read.
+fn current_state_directory_exists(path: &Path) -> Result<bool, StorageError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(StorageError::FilesystemRejected),
+    }
 }
 
 fn same_restore_boundary(
@@ -811,30 +815,11 @@ fn open_private_regular(path: &Path, mode: Mode) -> Result<File, StorageError> {
     Ok(File::from(fd))
 }
 
-fn anonymous_plan_file() -> Result<File, StorageError> {
-    let mut random = [0_u8; 16];
-    OsEntropy::fill(&mut random)?;
-    let mut suffix = String::with_capacity(32);
-    for byte in random {
-        use std::fmt::Write as _;
-        write!(suffix, "{byte:02x}").map_err(|_| StorageError::AllocationFailed)?;
-    }
-    let path = std::env::temp_dir().join(format!("agenc-restore-plan-{suffix}"));
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&path)
-        .map_err(|_| StorageError::FilesystemRejected)?;
-    std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
-    Ok(file)
-}
-
 #[cfg(test)]
 mod tests {
+    use std::fs::OpenOptions;
     use std::io::Write as _;
-    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _, symlink};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
@@ -934,12 +919,59 @@ mod tests {
 
     #[test]
     fn command_preconditions_reject_missing_acknowledgement_and_trust_bounds() {
-        for request in [request(false, 1), request(true, 0), request(true, 1_025)] {
+        assert_eq!(
+            execute_restore_command(request(false, 1), &[]),
+            Err(StorageError::InvalidEncoding)
+        );
+        for request in [
+            request(true, 0),
+            request(true, crate::MAX_BACKUP_TRUST_KEYS + 1),
+        ] {
             assert_eq!(
                 execute_restore_command(request, &[]),
-                Err(StorageError::InvalidEncoding)
+                Err(StorageError::LimitExceeded)
             );
         }
+    }
+
+    #[test]
+    fn current_boundary_is_skipped_only_when_the_configured_directory_is_absent()
+    -> Result<(), StorageError> {
+        let directory = unique_temp_directory();
+        std::fs::create_dir(&directory).map_err(|_| StorageError::FilesystemRejected)?;
+        let limits = engine_limits();
+        let absent = request(true, 1);
+        assert_eq!(
+            read_current_boundary(&absent, &[], &[0; 32], None, limits)
+                .map(|facts| facts.is_some()),
+            Ok(false)
+        );
+
+        let mut unreadable_keys = request(true, 1);
+        unreadable_keys.current_state_directory = directory.clone();
+        assert_eq!(
+            read_current_boundary(&unreadable_keys, &[], &[0; 32], None, limits)
+                .map(|facts| facts.is_some()),
+            Err(StorageError::FilesystemRejected)
+        );
+
+        let file_path = directory.join("file");
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&file_path)
+            .map_err(|_| StorageError::FilesystemRejected)?;
+        let mut below_file = request(true, 1);
+        below_file.current_state_directory = file_path.join("child");
+        assert_eq!(
+            read_current_boundary(&below_file, &[], &[0; 32], None, limits)
+                .map(|facts| facts.is_some()),
+            Err(StorageError::FilesystemRejected)
+        );
+
+        std::fs::remove_dir_all(directory).map_err(|_| StorageError::FilesystemRejected)?;
+        Ok(())
     }
 
     #[test]
@@ -1143,8 +1175,6 @@ mod tests {
             read_secret_key(Path::new("relative-key")).map(|_| ()),
             Err(StorageError::FilesystemRejected)
         );
-        assert!(anonymous_plan_file().is_ok());
-
         std::fs::remove_dir_all(directory).map_err(|_| StorageError::FilesystemRejected)?;
         Ok(())
     }

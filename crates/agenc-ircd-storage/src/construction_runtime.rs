@@ -31,7 +31,7 @@ use crate::{
     verify_backup,
 };
 
-/// Fixed version-one construction-plan ceiling.
+/// Fixed version-one source logical/backup ceiling.
 pub const MAX_CONSTRUCTION_SOURCE_BYTES: u64 = 1_099_511_627_776;
 /// Fixed version-one target logical/backup ceiling.
 pub const MAX_CONSTRUCTION_TARGET_BYTES: u64 = 1_099_511_627_776;
@@ -39,6 +39,23 @@ pub const MAX_CONSTRUCTION_TARGET_BYTES: u64 = 1_099_511_627_776;
 pub const MAX_CONSTRUCTION_BATCH_RECORDS: usize = 1_000;
 /// Greatest transformed plaintext bytes committed by one construction batch.
 pub const MAX_CONSTRUCTION_BATCH_BYTES: usize = 16_777_216;
+
+/// redb page cache used by the scratch plan database.
+const CONSTRUCTION_PLAN_CACHE_BYTES: usize = 8 * 1_024 * 1_024;
+/// Sequence-zero initialization seals the key check, construction marker, genesis
+/// checkpoint, and StateMeta, so a fresh target starts at this nonce high-water mark.
+/// Mirrors `initialize_storage`.
+const INITIALIZED_NONCE_DRAW_HIGH_WATER: u64 = 4;
+/// The dedicated finalization transaction seals the completion record, its manifest,
+/// and StateMeta. The simulated finalization batch must reproduce this count.
+const FINALIZATION_NONCE_DRAWS: u64 = 3;
+/// Checkpoint installation seals the checkpoint record and StateMeta; mirrors the
+/// two-draw reservation validated by `IntegrityCheckpointTbs`.
+const CHECKPOINT_INSTALLATION_NONCE_DRAWS: u64 = 2;
+/// Manifest and checkpoint rows are keyed by one big-endian `u64` sequence.
+const SEQUENCE_STORED_KEY_BYTES: usize = 8;
+/// The key-check row stores one 32-byte `StorageDigest` plaintext.
+const KEY_CHECK_PLAINTEXT_BYTES: usize = 32;
 
 const CONSTRUCTION_PLAN_TABLE: TableDefinition<'static, &'static [u8], &'static [u8]> =
     TableDefinition::new("construction_plan");
@@ -170,7 +187,7 @@ impl ConstructionPlanBuilder {
         let limits = limits.validate()?;
         let maximum_bytes = limits.plan_bytes.min(MAX_CONSTRUCTION_PLAN_BYTES);
         let mut builder = redb::Builder::new();
-        builder.set_cache_size(8 * 1_024 * 1_024);
+        builder.set_cache_size(CONSTRUCTION_PLAN_CACHE_BYTES);
         let database = builder
             .create_file(file)
             .map_err(|_| StorageError::DatabaseRejected)?;
@@ -1036,7 +1053,7 @@ impl ConstructionPreflightSimulation {
             response_count,
             storage_commit_sequence: 0,
             manifest_sequence: 0,
-            nonce_high_water: 4,
+            nonce_high_water: INITIALIZED_NONCE_DRAW_HIGH_WATER,
             target_batch_count: 0,
             manifest_sealed_bytes: Vec::new(),
             peak_logical_database_bytes: accounting.current_logical_database_bytes,
@@ -1088,40 +1105,13 @@ impl ConstructionPreflightSimulation {
         source: &mut dyn ConstructionSourceReader,
         transformer: &mut dyn ConstructionTransformer,
     ) -> Result<Vec<PreparedConstructionEntry>, StorageError> {
-        let mut prepared = Vec::new();
-        prepared
-            .try_reserve_exact(self.limits.batch_records)
-            .map_err(|_| StorageError::AllocationFailed)?;
-        let mut transformed_bytes = 0_usize;
-        while prepared.len() < self.limits.batch_records {
-            let index = self
-                .marker
-                .target_records_committed
-                .checked_add(u64::try_from(prepared.len()).map_err(|_| StorageError::Overflow)?)
-                .ok_or(StorageError::Overflow)?;
-            let Some(entry) = plan.entry(index)? else {
-                break;
-            };
-            let sources = read_construction_sources(source, &entry)?;
-            let plaintext = transformer.transform(plan.kind(), &entry, &sources)?;
-            validate_record_plaintext(
-                entry.target_table(),
-                entry.target_key(),
-                entry.target_record_schema(),
-                &plaintext,
-            )?;
-            let next_bytes = transformed_bytes
-                .checked_add(plaintext.len())
-                .ok_or(StorageError::Overflow)?;
-            if next_bytes > self.limits.batch_bytes {
-                if prepared.is_empty() {
-                    return Err(StorageError::LimitExceeded);
-                }
-                break;
-            }
-            prepared.push((entry, plaintext));
-            transformed_bytes = next_bytes;
-        }
+        let prepared = prepare_construction_batch(
+            plan,
+            self.marker.target_records_committed,
+            self.limits,
+            source,
+            transformer,
+        )?;
         if prepared.is_empty() {
             return Err(StorageError::StaleState);
         }
@@ -1186,7 +1176,7 @@ impl ConstructionPreflightSimulation {
             .ok_or(StorageError::Overflow)?;
         let finalization_nonce_draw_high_water = self
             .nonce_high_water
-            .checked_add(3)
+            .checked_add(FINALIZATION_NONCE_DRAWS)
             .ok_or(StorageError::Overflow)?;
         let operation_id = self.marker.identity.operation_id()?;
         Ok(StorageOperationCompletion {
@@ -1241,7 +1231,7 @@ impl ConstructionPreflightSimulation {
             .ok_or(StorageError::Overflow)?;
         let checkpoint_nonce_draw_high_water = self
             .nonce_high_water
-            .checked_add(2)
+            .checked_add(CHECKPOINT_INSTALLATION_NONCE_DRAWS)
             .ok_or(StorageError::Overflow)?;
         Ok(ConstructionPreflight {
             final_logical_database_bytes: self.accounting.current_logical_database_bytes,
@@ -1258,7 +1248,7 @@ impl ConstructionPreflightSimulation {
 
     fn prune_manifests(&mut self) -> Result<(), StorageError> {
         for sealed_bytes in &self.manifest_sealed_bytes {
-            let logical = logical_record_charge(8, *sealed_bytes)?;
+            let logical = logical_record_charge(SEQUENCE_STORED_KEY_BYTES, *sealed_bytes)?;
             self.accounting.current_logical_database_bytes = self
                 .accounting
                 .current_logical_database_bytes
@@ -1267,7 +1257,11 @@ impl ConstructionPreflightSimulation {
             self.accounting.current_backup_stream_bytes = self
                 .accounting
                 .current_backup_stream_bytes
-                .checked_sub(logical.checked_add(8).ok_or(StorageError::Overflow)?)
+                .checked_sub(
+                    logical
+                        .checked_add(crate::backup::BACKUP_RECORD_OVERHEAD_BYTES)
+                        .ok_or(StorageError::Overflow)?,
+                )
                 .ok_or(StorageError::StaleState)?;
         }
         Ok(())
@@ -1277,7 +1271,7 @@ impl ConstructionPreflightSimulation {
         add_preflight_record_charge(
             &mut self.accounting.current_logical_database_bytes,
             &mut self.accounting.current_backup_stream_bytes,
-            8,
+            SEQUENCE_STORED_KEY_BYTES,
             INTEGRITY_CHECKPOINT_BYTES,
         )?;
         if self.accounting.current_logical_database_bytes > self.accounting.database_max_bytes
@@ -1309,6 +1303,51 @@ fn read_construction_sources(
     Ok(sources)
 }
 
+/// Transforms consecutive plan entries from `committed` until the batch record or byte
+/// ceiling is reached. The result is empty only when no entry remains; the preflight
+/// simulation and the executor apply their own policy to that case.
+fn prepare_construction_batch(
+    plan: &ConstructionPlan,
+    committed: u64,
+    limits: ConstructionLimits,
+    source: &mut dyn ConstructionSourceReader,
+    transformer: &mut dyn ConstructionTransformer,
+) -> Result<Vec<PreparedConstructionEntry>, StorageError> {
+    let mut prepared = Vec::new();
+    prepared
+        .try_reserve_exact(limits.batch_records)
+        .map_err(|_| StorageError::AllocationFailed)?;
+    let mut transformed_bytes = 0_usize;
+    while prepared.len() < limits.batch_records {
+        let index = committed
+            .checked_add(u64::try_from(prepared.len()).map_err(|_| StorageError::Overflow)?)
+            .ok_or(StorageError::Overflow)?;
+        let Some(entry) = plan.entry(index)? else {
+            break;
+        };
+        let sources = read_construction_sources(source, &entry)?;
+        let plaintext = transformer.transform(plan.kind(), &entry, &sources)?;
+        validate_record_plaintext(
+            entry.target_table(),
+            entry.target_key(),
+            entry.target_record_schema(),
+            &plaintext,
+        )?;
+        let next_bytes = transformed_bytes
+            .checked_add(plaintext.len())
+            .ok_or(StorageError::Overflow)?;
+        if next_bytes > limits.batch_bytes {
+            if prepared.is_empty() {
+                return Err(StorageError::LimitExceeded);
+            }
+            break;
+        }
+        prepared.push((entry, plaintext));
+        transformed_bytes = next_bytes;
+    }
+    Ok(prepared)
+}
+
 fn marker_replacement(
     marker: &StorageConstruction,
     successor: &StorageConstruction,
@@ -1337,18 +1376,21 @@ fn initial_construction_accounting(
     marker: &StorageConstruction,
     limits: ConstructionLimits,
 ) -> Result<StorageAccountingLimits, StorageError> {
-    let mut logical = logical_meta_charge(b"header/v1".len(), crate::DATABASE_HEADER_BYTES)?
-        .checked_add(logical_meta_charge(
-            b"nonce-reservation/v1".len(),
-            crate::NONCE_RESERVATION_BYTES,
-        )?)
-        .ok_or(StorageError::Overflow)?;
+    let mut logical = logical_meta_charge(
+        crate::redb_store::HEADER_META_KEY.len(),
+        crate::DATABASE_HEADER_BYTES,
+    )?
+    .checked_add(logical_meta_charge(
+        crate::redb_store::RESERVATION_META_KEY.len(),
+        crate::NONCE_RESERVATION_BYTES,
+    )?)
+    .ok_or(StorageError::Overflow)?;
     let mut backup = BACKUP_FIXED_STREAM_BYTES;
     add_preflight_record_charge(
         &mut logical,
         &mut backup,
         crate::KEY_CHECK_STORED_KEY.len(),
-        32,
+        KEY_CHECK_PLAINTEXT_BYTES,
     )?;
     add_preflight_record_charge(
         &mut logical,
@@ -1356,7 +1398,12 @@ fn initial_construction_accounting(
         crate::STORAGE_CONSTRUCTION_KEY.len(),
         marker.encode()?.len(),
     )?;
-    add_preflight_record_charge(&mut logical, &mut backup, 8, INTEGRITY_CHECKPOINT_BYTES)?;
+    add_preflight_record_charge(
+        &mut logical,
+        &mut backup,
+        SEQUENCE_STORED_KEY_BYTES,
+        INTEGRITY_CHECKPOINT_BYTES,
+    )?;
     add_preflight_record_charge(
         &mut logical,
         &mut backup,
@@ -1386,7 +1433,11 @@ fn add_preflight_record_charge(
     let charge = logical_record_charge(key_bytes, sealed_bytes)?;
     *logical = logical.checked_add(charge).ok_or(StorageError::Overflow)?;
     *backup = backup
-        .checked_add(charge.checked_add(8).ok_or(StorageError::Overflow)?)
+        .checked_add(
+            charge
+                .checked_add(crate::backup::BACKUP_RECORD_OVERHEAD_BYTES)
+                .ok_or(StorageError::Overflow)?,
+        )
         .ok_or(StorageError::Overflow)?;
     Ok(())
 }
@@ -1769,37 +1820,17 @@ impl<R: Read + Seek> ConstructionSourceReader for BackupConstructionSourceReader
         &mut self,
         reference: &StorageConstructionSource,
     ) -> Result<ConstructionSourceRecord, StorageError> {
-        if reference.kind() != StorageConstructionSourceKind::BackupRecord
-            || reference.backup_byte_offset() >= self.stream_bytes
-        {
+        if reference.kind() != StorageConstructionSourceKind::BackupRecord {
             return Err(StorageError::InvalidEncoding);
         }
-        self.input
-            .seek(SeekFrom::Start(reference.backup_byte_offset()))
-            .map_err(|_| StorageError::FilesystemRejected)?;
-        let mut length_bytes = [0_u8; 4];
-        self.input
-            .read_exact(&mut length_bytes)
-            .map_err(|_| StorageError::FilesystemRejected)?;
-        let length = usize::try_from(u32::from_be_bytes(length_bytes))
-            .map_err(|_| StorageError::Overflow)?;
-        let end = reference
-            .backup_byte_offset()
-            .checked_add(4)
-            .and_then(|value| value.checked_add(u64::try_from(length).ok()?))
-            .ok_or(StorageError::Overflow)?;
-        if length == 0 || length > 16_781_364 || end > self.stream_bytes {
-            return Err(StorageError::LimitExceeded);
-        }
-        let mut encoded = Vec::new();
-        encoded
-            .try_reserve_exact(length)
-            .map_err(|_| StorageError::AllocationFailed)?;
-        encoded.resize(length, 0);
-        self.input
-            .read_exact(&mut encoded)
-            .map_err(|_| StorageError::FilesystemRejected)?;
-        let record = BackupRecord::decode(&encoded)?;
+        // This reader validates a frame against the whole stream length it was given;
+        // `RestoreBackupSource` narrows the window to the numbered-record region.
+        let record = read_backup_frame(
+            &mut self.input,
+            reference.backup_byte_offset(),
+            0,
+            self.stream_bytes,
+        )?;
         if record.table() != reference.table()
             || record.stored_key().as_bytes() != reference.key().as_bytes()
             || record.record_schema() != reference.record_schema()
@@ -2070,7 +2101,7 @@ impl<R: Read + Seek> RestoreBackupSource<R> {
             let offset = input
                 .stream_position()
                 .map_err(|_| StorageError::FilesystemRejected)?;
-            let record = read_backup_record(input, offset, trailer_start, stream_bytes)?;
+            let record = read_backup_record(input, offset, trailer_start)?;
             let sealed = SealedRecord::decode(record.sealed_record())?;
             let source = StorageConstructionSource::new(
                 StorageConstructionSourceKind::BackupRecord,
@@ -2148,7 +2179,6 @@ impl<R: Read + Seek> ConstructionSourceReader for RestoreBackupSource<R> {
             &mut self.input,
             reference.backup_byte_offset(),
             trailer_start,
-            self.verified.stream_bytes,
         )?;
         if (
             record.table(),
@@ -2175,13 +2205,28 @@ impl<R: Read + Seek> ConstructionSourceReader for RestoreBackupSource<R> {
     }
 }
 
+/// Reads one numbered record whose frame lies inside the verified record region.
 fn read_backup_record<R: Read + Seek>(
     input: &mut R,
     offset: u64,
     trailer_start: u64,
-    stream_bytes: u64,
 ) -> Result<BackupRecord, StorageError> {
-    if offset < crate::backup::BACKUP_RECORDS_OFFSET || offset >= trailer_start {
+    read_backup_frame(
+        input,
+        offset,
+        crate::backup::BACKUP_RECORDS_OFFSET,
+        trailer_start,
+    )
+}
+
+/// Reads one length-prefixed frame that starts and ends inside `[start, end)`.
+fn read_backup_frame<R: Read + Seek>(
+    input: &mut R,
+    offset: u64,
+    start: u64,
+    end: u64,
+) -> Result<BackupRecord, StorageError> {
+    if offset < start || offset >= end {
         return Err(StorageError::InvalidEncoding);
     }
     input
@@ -2193,15 +2238,12 @@ fn read_backup_record<R: Read + Seek>(
         .map_err(|_| StorageError::FilesystemRejected)?;
     let length =
         usize::try_from(u32::from_be_bytes(length_bytes)).map_err(|_| StorageError::Overflow)?;
-    let end = offset
+    let frame_end = offset
         .checked_add(4)
         .and_then(|value| value.checked_add(u64::try_from(length).ok()?))
         .ok_or(StorageError::Overflow)?;
-    if length == 0 || length > crate::backup::MAX_BACKUP_RECORD_BYTES || end > trailer_start {
+    if length == 0 || length > crate::backup::MAX_BACKUP_RECORD_BYTES || frame_end > end {
         return Err(StorageError::LimitExceeded);
-    }
-    if end > stream_bytes {
-        return Err(StorageError::InvalidEncoding);
     }
     let mut encoded = Vec::new();
     encoded
@@ -2295,6 +2337,10 @@ fn select_restore_record(
         TableId::Channel => {
             let value = PersistentRecordValue::decode(table, record.plaintext())?;
             if value.record_kind() == 1 {
+                // Backup streams are written in strictly increasing (table, key) order by
+                // `BackupStreamWriter::write_record`, and Channel (8) precedes ChannelName
+                // (9), so every channel is indexed here before `push_restore_channel_name`
+                // looks it up.
                 builder.index_restore_channel_source(source)?;
                 Some(StorageConstructionAction::RestoreChannel)
             } else {
@@ -2426,7 +2472,10 @@ pub struct ConstructionFinalizationCounters {
 
 /// Target adapter that owns sealing, nonce reservation, and immediate commit.
 pub trait ConstructionTargetWriter {
-    /// Commits one target record and the exact cursor successor atomically.
+    /// Commits one target batch and the exact cursor successor atomically.
+    ///
+    /// Callers guarantee that `batch.records` are the consecutive plan entries starting at
+    /// the marker cursor; the writer verifies the marker chain, not plan membership.
     fn commit_batch(
         &mut self,
         batch: ConstructionTargetBatch<'_>,
@@ -2757,7 +2806,9 @@ fn fresh_transaction_id() -> Result<TransactionId, StorageError> {
     Ok(TransactionId::from_bytes(bytes))
 }
 
-/// Resumable executor that retains only one entry, two sources, and one target.
+/// Resumable executor that buffers at most `limits.batch_records` transformed entries
+/// and `limits.batch_bytes` of plaintext per batch, then commits them in one target
+/// transaction.
 pub struct ConstructionExecutor {
     marker: StorageConstruction,
     plan: ConstructionPlan,
@@ -2822,46 +2873,13 @@ impl ConstructionExecutor {
         transformer: &mut dyn ConstructionTransformer,
         target: &mut dyn ConstructionTargetWriter,
     ) -> Result<usize, StorageError> {
-        let mut prepared: Vec<(StorageConstructionPlanEntry, Zeroizing<Vec<u8>>)> = Vec::new();
-        prepared
-            .try_reserve_exact(self.limits.batch_records)
-            .map_err(|_| StorageError::AllocationFailed)?;
-        let mut transformed_bytes = 0_usize;
-        while prepared.len() < self.limits.batch_records {
-            let index = self
-                .marker
-                .target_records_committed
-                .checked_add(u64::try_from(prepared.len()).map_err(|_| StorageError::Overflow)?)
-                .ok_or(StorageError::Overflow)?;
-            let Some(entry) = self.plan.entry(index)? else {
-                break;
-            };
-            let mut sources = Vec::new();
-            sources
-                .try_reserve_exact(entry.sources().len())
-                .map_err(|_| StorageError::AllocationFailed)?;
-            for reference in entry.sources() {
-                sources.push(source.read_source(reference)?);
-            }
-            let plaintext = transformer.transform(self.plan.kind(), &entry, &sources)?;
-            validate_record_plaintext(
-                entry.target_table(),
-                entry.target_key(),
-                entry.target_record_schema(),
-                &plaintext,
-            )?;
-            let next_bytes = transformed_bytes
-                .checked_add(plaintext.len())
-                .ok_or(StorageError::Overflow)?;
-            if next_bytes > self.limits.batch_bytes {
-                if prepared.is_empty() {
-                    return Err(StorageError::LimitExceeded);
-                }
-                break;
-            }
-            prepared.push((entry, plaintext));
-            transformed_bytes = next_bytes;
-        }
+        let prepared = prepare_construction_batch(
+            &self.plan,
+            self.marker.target_records_committed,
+            self.limits,
+            source,
+            transformer,
+        )?;
         if prepared.is_empty() {
             return Ok(0);
         }
@@ -3134,25 +3152,21 @@ fn transform_channel_name(
     if entry.target_table() != TableId::ChannelName || sources.len() != 2 {
         return Err(StorageError::StaleState);
     }
-    let channel = sources
+    let channel_source = sources
         .iter()
         .find(|source| source.table() == TableId::Channel)
         .ok_or(StorageError::StaleState)?;
-    let name = sources
+    let name_source = sources
         .iter()
         .find(|source| source.table() == TableId::ChannelName)
         .ok_or(StorageError::StaleState)?;
-    let channel = PersistentRecordValue::decode(TableId::Channel, channel.plaintext())?;
-    let name = PersistentRecordValue::decode(TableId::ChannelName, name.plaintext())?;
-    let source_channel = sources
-        .iter()
-        .find(|source| source.table() == TableId::Channel)
-        .ok_or(StorageError::StaleState)?;
+    let channel = PersistentRecordValue::decode(TableId::Channel, channel_source.plaintext())?;
+    let name = PersistentRecordValue::decode(TableId::ChannelName, name_source.plaintext())?;
     if channel.record_kind() != 1
         || name.record_kind() != 1
         || !name.references().iter().any(|reference| {
             reference.table() == TableId::Channel
-                && reference.key().as_bytes() == source_channel.key().as_bytes()
+                && reference.key().as_bytes() == channel_source.key().as_bytes()
         })
     {
         return Err(StorageError::StaleState);
@@ -4000,23 +4014,15 @@ mod tests {
         let trailer_length = usize::try_from(trailer).map_err(|_| StorageError::Overflow)?;
         let mut bytes = vec![0; trailer_length];
         assert_eq!(
-            read_backup_record(
-                &mut Cursor::new(bytes.clone()),
-                offset - 1,
-                trailer,
-                trailer
-            )
-            .map(|_| ()),
+            read_backup_record(&mut Cursor::new(bytes.clone()), offset - 1, trailer).map(|_| ()),
             Err(StorageError::InvalidEncoding)
         );
         assert_eq!(
-            read_backup_record(&mut Cursor::new(bytes.clone()), trailer, trailer, trailer)
-                .map(|_| ()),
+            read_backup_record(&mut Cursor::new(bytes.clone()), trailer, trailer).map(|_| ()),
             Err(StorageError::InvalidEncoding)
         );
         assert_eq!(
-            read_backup_record(&mut Cursor::new(bytes.clone()), offset, trailer, trailer)
-                .map(|_| ()),
+            read_backup_record(&mut Cursor::new(bytes.clone()), offset, trailer).map(|_| ()),
             Err(StorageError::LimitExceeded)
         );
         let offset_index = usize::try_from(offset).map_err(|_| StorageError::Overflow)?;
@@ -4026,7 +4032,7 @@ mod tests {
             .ok_or(StorageError::InvalidEncoding)?
             .copy_from_slice(&(crate::backup::MAX_BACKUP_RECORD_BYTES as u32 + 1).to_be_bytes());
         assert_eq!(
-            read_backup_record(&mut Cursor::new(bytes), offset, trailer, trailer).map(|_| ()),
+            read_backup_record(&mut Cursor::new(bytes), offset, trailer).map(|_| ()),
             Err(StorageError::LimitExceeded)
         );
         Ok(())
@@ -5775,8 +5781,7 @@ mod tests {
             .ok_or(StorageError::InvalidEncoding)?
             .copy_from_slice(&1_u32.to_be_bytes());
         assert_eq!(
-            read_backup_record(&mut Cursor::new(bytes), offset, trailer_start, offset + 4,)
-                .map(|_| ()),
+            read_backup_record(&mut Cursor::new(bytes), offset, trailer_start).map(|_| ()),
             Err(StorageError::InvalidEncoding),
         );
 
@@ -6060,13 +6065,7 @@ mod tests {
             .ok_or(StorageError::InvalidEncoding)?
             .copy_from_slice(&5_u32.to_be_bytes());
         assert_eq!(
-            read_backup_record(
-                &mut Cursor::new(bytes),
-                offset,
-                trailer_start,
-                trailer_start,
-            )
-            .map(|_| ()),
+            read_backup_record(&mut Cursor::new(bytes), offset, trailer_start,).map(|_| ()),
             Err(StorageError::LimitExceeded),
         );
 

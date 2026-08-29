@@ -27,6 +27,11 @@ pub(crate) const BACKUP_TRAILER_FRAME_BYTES: u64 = 4 + BACKUP_TRAILER_BYTES as u
 /// Exact version-one stream bytes excluding numbered records.
 pub const BACKUP_FIXED_STREAM_BYTES: u64 = 869;
 pub(crate) const MAX_BACKUP_RECORD_BYTES: usize = 16_781_364;
+/// Greatest number of offline-authorized backup signing keys one verification accepts.
+pub const MAX_BACKUP_TRUST_KEYS: usize = 1_024;
+/// Bytes a stream adds over the logical record charge: the 4-byte frame length prefix
+/// and the 4-byte record-schema field.
+pub(crate) const BACKUP_RECORD_OVERHEAD_BYTES: u64 = 8;
 const STATE_META_KEY: &[u8] = b"agenc-chat/state-meta/v1";
 const KEY_CHECK_KEY: &[u8] = b"agenc-chat/key-check/v1";
 
@@ -564,7 +569,25 @@ impl BackupReconstruction {
                     return Err(StorageError::StaleState);
                 }
             }
-            _ => {}
+            TableId::Account
+            | TableId::OpaqueRecord
+            | TableId::AuthTransaction
+            | TableId::NicknameReservation
+            | TableId::RegistrationInvite
+            | TableId::Session
+            | TableId::Channel
+            | TableId::ChannelName
+            | TableId::Sanction
+            | TableId::FederationPeer
+            | TableId::FederationOrigin
+            | TableId::RequestResult
+            | TableId::EdgeOutbox
+            | TableId::EdgeProjection
+            | TableId::History
+            | TableId::Audit
+            | TableId::AuditCheckpoint
+            | TableId::E2eeObject
+            | TableId::E2eeState => {}
         }
         Ok(())
     }
@@ -715,7 +738,7 @@ fn verify_backup_reader(
     trusted_keys: &[BackupTrustKey],
     maximum_bytes: u64,
 ) -> Result<VerifiedBackup, StorageError> {
-    if trusted_keys.is_empty() || trusted_keys.len() > 1_024 {
+    if trusted_keys.is_empty() || trusted_keys.len() > MAX_BACKUP_TRUST_KEYS {
         return Err(StorageError::LimitExceeded);
     }
     let mut input = BufReader::new(input);
@@ -1000,16 +1023,21 @@ pub fn backup_stream_bytes<'a>(
 
 fn backup_record_charge(key_bytes: usize, sealed_bytes: usize) -> Result<u64, StorageError> {
     let logical = logical_record_charge(key_bytes, sealed_bytes)?;
-    logical.checked_add(8).ok_or(StorageError::Overflow)
+    logical
+        .checked_add(BACKUP_RECORD_OVERHEAD_BYTES)
+        .ok_or(StorageError::Overflow)
 }
 
 fn meta_logical_bytes() -> Result<u64, StorageError> {
-    crate::logical_meta_charge(b"header/v1".len(), DATABASE_HEADER_BYTES)?
-        .checked_add(crate::logical_meta_charge(
-            b"nonce-reservation/v1".len(),
-            NONCE_RESERVATION_BYTES,
-        )?)
-        .ok_or(StorageError::Overflow)
+    crate::logical_meta_charge(
+        crate::redb_store::HEADER_META_KEY.len(),
+        DATABASE_HEADER_BYTES,
+    )?
+    .checked_add(crate::logical_meta_charge(
+        crate::redb_store::RESERVATION_META_KEY.len(),
+        NONCE_RESERVATION_BYTES,
+    )?)
+    .ok_or(StorageError::Overflow)
 }
 
 fn write_hashed<W: Write>(

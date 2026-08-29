@@ -27,7 +27,8 @@ mod sealed;
 
 pub use backup::{
     BACKUP_FIXED_STREAM_BYTES, BackupHeader, BackupReceipt, BackupRecord, BackupStreamWriter,
-    BackupTrailer, BackupTrustKey, VerifiedBackup, backup_stream_bytes, verify_backup,
+    BackupTrailer, BackupTrustKey, MAX_BACKUP_TRUST_KEYS, VerifiedBackup, backup_stream_bytes,
+    verify_backup,
 };
 pub use construction::{
     MAX_CONSTRUCTION_PLAN_BYTES, STORAGE_CONSTRUCTION_KEY, StorageConstruction,

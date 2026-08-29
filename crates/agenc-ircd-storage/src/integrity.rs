@@ -17,6 +17,9 @@ use crate::{
 /// Greatest canonical manifest or checkpoint plaintext accepted for sealing.
 pub const MAX_INTEGRITY_PLAINTEXT_BYTES: usize = 16_777_200;
 const CHECKPOINT_TBS_BYTES: usize = 194;
+/// Commitment input: table id (2), key length prefix (4), the longest key, record
+/// schema (4), and the 32-byte sealed-record identity.
+const TRACKED_RECORD_COMMITMENT_INPUT_BYTES: usize = 2 + 4 + MAX_STORED_KEY_BYTES + 4 + 32;
 /// Exact plaintext size of an integrity checkpoint.
 pub const INTEGRITY_CHECKPOINT_BYTES: usize = 226;
 
@@ -421,6 +424,10 @@ pub struct IntegrityCheckpointTbs {
 
 impl IntegrityCheckpointTbs {
     fn validate(&self) -> Result<(), StorageError> {
+        // Installation reserves exactly two draws, so the recorded start is always the
+        // installation high-water mark minus two. That also holds for the genesis
+        // checkpoint written by `initialize_storage`; the specification sentence saying
+        // the genesis start equals the high-water mark itself needs a later amendment.
         if self.cut_nonce_draw_high_water > MAX_NONCE_DRAWS
             || self.installation_nonce_draw_high_water > MAX_NONCE_DRAWS
             || self.installation_manifest_sequence < self.cut_manifest_sequence
@@ -571,7 +578,7 @@ pub fn compute_tracked_state_digest(
             return Err(StorageError::InvalidEncoding);
         }
         previous = Some(identity);
-        let mut encoder = Encoder::with_capacity(64, 4_138)?;
+        let mut encoder = Encoder::with_capacity(64, TRACKED_RECORD_COMMITMENT_INPUT_BYTES)?;
         encoder.put_u16(record.table.as_u16())?;
         encoder.put_vector_u32(record.stored_key.as_bytes())?;
         encoder.put_u32(record.record_schema)?;
@@ -594,6 +601,8 @@ pub fn logical_record_charge(
     {
         return Err(StorageError::LimitExceeded);
     }
+    // Row layout: table id (2), key length prefix (4), key, sealed-record length prefix
+    // (4), sealed record.
     let total = 2_usize
         .checked_add(4)
         .and_then(|value| value.checked_add(stored_key_bytes))
