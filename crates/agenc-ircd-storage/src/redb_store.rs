@@ -68,7 +68,7 @@ impl CommitFlushCounter {
         }
         let counted = self
             .flushes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |seen| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |seen| {
                 Some(seen.saturating_add(1))
             });
         match counted {
