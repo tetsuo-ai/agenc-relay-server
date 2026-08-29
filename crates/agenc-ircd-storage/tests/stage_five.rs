@@ -16,18 +16,18 @@ use agenc_ircd_crypto::{
     StorageMasterKey, restore_transform_profile_hash,
 };
 use agenc_ircd_storage::{
-    BackupDestination, BackupTrustKey, CommitOutcome, ConstructionDirectory, ConstructionExecutor,
-    ConstructionLimits, ConstructionTarget, DatabaseHeaderTbs, ExistingRecord,
-    InitialStorageRecord, LoginIndexKeyState, PersistentRecordValue, QualificationTarget, ReadPlan,
-    RecordMutation, RecoveryTransformV1, RestoreBackupSource, SCHEMA_GENERATION, SealedRecord,
-    StateDirectory, StorageAccountingLimits, StorageConstruction, StorageConstructionAction,
-    StorageConstructionCursor, StorageConstructionKind, StorageConstructionPlanEntry,
-    StorageConstructionSource, StorageConstructionSourceKind, StorageEngineLimits, StorageError,
-    StorageGrowthCase, StorageInitializationConfig, StorageInitializationMode,
-    StorageInitializationOutcome, StorageMutationBatch, StorageMutationHead, StorageOpenConfig,
-    StorageOperationIdentity, StorageOwner, StorageQualificationReport,
-    StorageQualificationReportTbs, StorageSealContext, StoredKey, TableId, construction_plan_hash,
-    initialize_storage, verify_backup,
+    BACKUP_FIXED_STREAM_BYTES, BackupDestination, BackupTrustKey, CommitOutcome,
+    ConstructionDirectory, ConstructionExecutor, ConstructionLimits, ConstructionTarget,
+    DatabaseHeaderTbs, ExistingRecord, InitialStorageRecord, LoginIndexKeyState,
+    PersistentRecordValue, QualificationTarget, ReadPlan, RecordMutation, RecoveryTransformV1,
+    RestoreBackupSource, SCHEMA_GENERATION, SealedRecord, StateDirectory, StorageAccountingLimits,
+    StorageConstruction, StorageConstructionAction, StorageConstructionCursor,
+    StorageConstructionKind, StorageConstructionPlanEntry, StorageConstructionSource,
+    StorageConstructionSourceKind, StorageEngineLimits, StorageError, StorageGrowthCase,
+    StorageInitializationConfig, StorageInitializationMode, StorageInitializationOutcome,
+    StorageMutationBatch, StorageMutationHead, StorageOpenConfig, StorageOperationIdentity,
+    StorageOwner, StorageQualificationReport, StorageQualificationReportTbs, StorageSealContext,
+    StoredKey, TableId, construction_plan_hash, initialize_storage, verify_backup,
 };
 use agenc_ircd_types::{
     AccountRandomId, DatabaseId, NetworkId, RecoveryEpoch, ServerId, ServerIncarnation,
@@ -35,6 +35,69 @@ use agenc_ircd_types::{
 };
 
 static DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Backup stream layout in bytes: magic, header length, header, record frames, trailer frame.
+const BACKUP_MAGIC_BYTES: usize = 21;
+const BACKUP_HEADER_LENGTH_BYTES: usize = 4;
+const BACKUP_FORMAT_BYTES: usize = 2;
+const BACKUP_HEADER_BYTES: usize = 736;
+const BACKUP_TRAILER_FRAME_BYTES: usize = 108;
+/// The header ends with created_at (8), backup_id (16), and signing_key_id (32).
+const BACKUP_HEADER_TAIL_BYTES: usize = 56;
+const _: () = assert!(
+    (BACKUP_MAGIC_BYTES
+        + BACKUP_HEADER_LENGTH_BYTES
+        + BACKUP_HEADER_BYTES
+        + BACKUP_TRAILER_FRAME_BYTES) as u64
+        == BACKUP_FIXED_STREAM_BYTES
+);
+
+/// Exact stream length and record count of the deterministic backup fixture in
+/// `initialized_owner_commits_and_reads_one_manifested_mutation`. Fixed keys, a fixed
+/// creation time, and a fixed backup id make the stream reproducible; a fixture or
+/// framing change must update both values deliberately.
+const EXPECTED_BACKUP_STREAM_BYTES: u64 = 2_773;
+const EXPECTED_BACKUP_RECORD_COUNT: u64 = 7;
+
+/// Rejections one flipped byte at `offset` of a verified backup may legitimately produce.
+fn expected_backup_flip_rejections(offset: usize) -> &'static [StorageError] {
+    let format_start = BACKUP_MAGIC_BYTES + BACKUP_HEADER_LENGTH_BYTES;
+    let embedded_start = format_start + BACKUP_FORMAT_BYTES;
+    let header_end = format_start + BACKUP_HEADER_BYTES;
+    let tail_start = header_end - BACKUP_HEADER_TAIL_BYTES;
+    if offset < format_start {
+        // Magic and the fixed header length are compared exactly before any decoding.
+        &[StorageError::InvalidEncoding]
+    } else if offset < embedded_start {
+        &[StorageError::UnsupportedVersion]
+    } else if offset < tail_start {
+        // The embedded database header, nonce reservation, and rollback guard validate
+        // their own fields before their integrity MAC is checked.
+        &[
+            StorageError::UnsupportedVersion,
+            StorageError::AuthenticationFailed,
+            StorageError::StaleState,
+            StorageError::LimitExceeded,
+            StorageError::InvalidEncoding,
+        ]
+    } else if offset < header_end {
+        // created_at, backup_id, and signing_key_id only feed the signed stream digest
+        // and the trust-key match.
+        &[StorageError::AuthenticationFailed]
+    } else {
+        // Record frames and the trailer: a flipped length prefix causes a short read,
+        // envelopes validate their fields, and every other flip fails authentication or
+        // the StateMeta cross-check.
+        &[
+            StorageError::FilesystemRejected,
+            StorageError::InvalidEncoding,
+            StorageError::UnsupportedVersion,
+            StorageError::LimitExceeded,
+            StorageError::AuthenticationFailed,
+            StorageError::StaleState,
+        ]
+    }
+}
 
 fn account_key_bytes(seed: u8) -> Vec<u8> {
     AccountRandomId::from_bytes([seed; 16])
@@ -117,10 +180,11 @@ fn sealed_record_rejects_wrong_stored_key() -> Result<(), Box<dyn Error>> {
     let encoded = sealed.encode()?;
     let decoded = agenc_ircd_storage::SealedRecord::decode(&encoded)?;
     let wrong_key = StoredKey::new(b"other-key".to_vec())?;
-    assert!(
+    assert_eq!(
         decoded
             .open(&master, binding, TableId::Account, 1, 1, &wrong_key)
-            .is_err()
+            .err(),
+        Some(StorageError::AuthenticationFailed)
     );
     let opened = decoded.open(&master, binding, TableId::Account, 1, 1, &key)?;
     assert_eq!(opened.expose_for_storage_codec(), b"record");
@@ -273,7 +337,10 @@ fn storage_engine_limits_enforce_the_appendix_c_profile() {
 #[test]
 fn backup_output_rejects_paths_and_cleans_unpublished_files() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::create()?;
-    assert!(BackupDestination::new(directory.path(), "../escape").is_err());
+    assert_eq!(
+        BackupDestination::new(directory.path(), "../escape").err(),
+        Some(StorageError::FilesystemRejected)
+    );
     let destination = BackupDestination::new(directory.path(), "unused.backup")?;
     assert_eq!(fs::read_dir(directory.path())?.count(), 0);
     drop(destination);
@@ -565,8 +632,8 @@ fn initialized_owner_commits_and_reads_one_manifested_mutation() -> Result<(), B
             [23; 16],
         )?
         .wait()?;
-    assert!(backup.stream_bytes > 869);
-    assert!(backup.record_count >= 5);
+    assert_eq!(backup.stream_bytes, EXPECTED_BACKUP_STREAM_BYTES);
+    assert_eq!(backup.record_count, EXPECTED_BACKUP_RECORD_COUNT);
     let backup_path = directory.path().join("verified.backup");
     assert!(backup_path.is_file());
     let backup_bytes = fs::read(&backup_path)?;
@@ -606,7 +673,7 @@ fn initialized_owner_commits_and_reads_one_manifested_mutation() -> Result<(), B
             not_before,
             not_after,
         )?;
-        assert!(
+        assert_eq!(
             verify_backup(
                 backup_bytes.as_slice(),
                 &StorageMasterKey::from_bytes([19; 32]),
@@ -614,7 +681,8 @@ fn initialized_owner_commits_and_reads_one_manifested_mutation() -> Result<(), B
                 &[outside],
                 limits.backup_max_bytes,
             )
-            .is_err()
+            .err(),
+            Some(StorageError::AuthenticationFailed)
         );
     }
     let restore_directory = TestDirectory::create()?;
@@ -782,7 +850,7 @@ fn initialized_owner_commits_and_reads_one_manifested_mutation() -> Result<(), B
         limits,
     })?;
     restored.shutdown()?;
-    assert!(
+    assert_eq!(
         verify_backup(
             backup_bytes.as_slice(),
             &StorageMasterKey::from_bytes([19; 32]),
@@ -790,9 +858,10 @@ fn initialized_owner_commits_and_reads_one_manifested_mutation() -> Result<(), B
             &[],
             limits.backup_max_bytes,
         )
-        .is_err()
+        .err(),
+        Some(StorageError::LimitExceeded)
     );
-    assert!(
+    assert_eq!(
         verify_backup(
             backup_bytes.as_slice(),
             &StorageMasterKey::from_bytes([99; 32]),
@@ -800,9 +869,10 @@ fn initialized_owner_commits_and_reads_one_manifested_mutation() -> Result<(), B
             &[trusted],
             limits.backup_max_bytes,
         )
-        .is_err()
+        .err(),
+        Some(StorageError::AuthenticationFailed)
     );
-    assert!(
+    assert_eq!(
         verify_backup(
             backup_bytes.as_slice(),
             &StorageMasterKey::from_bytes([19; 32]),
@@ -810,9 +880,10 @@ fn initialized_owner_commits_and_reads_one_manifested_mutation() -> Result<(), B
             &[trusted],
             limits.backup_max_bytes,
         )
-        .is_err()
+        .err(),
+        Some(StorageError::AuthenticationFailed)
     );
-    assert!(
+    assert_eq!(
         verify_backup(
             backup_bytes.as_slice(),
             &StorageMasterKey::from_bytes([19; 32]),
@@ -820,10 +891,11 @@ fn initialized_owner_commits_and_reads_one_manifested_mutation() -> Result<(), B
             &[trusted, trusted],
             limits.backup_max_bytes,
         )
-        .is_err()
+        .err(),
+        Some(StorageError::AuthenticationFailed)
     );
     let wrong_trust = BackupTrustKey::new(Ed25519SecretKey::from_bytes([98; 32]).public_key())?;
-    assert!(
+    assert_eq!(
         verify_backup(
             backup_bytes.as_slice(),
             &StorageMasterKey::from_bytes([19; 32]),
@@ -831,13 +903,14 @@ fn initialized_owner_commits_and_reads_one_manifested_mutation() -> Result<(), B
             &[wrong_trust],
             limits.backup_max_bytes,
         )
-        .is_err()
+        .err(),
+        Some(StorageError::AuthenticationFailed)
     );
     for length in [0, 1, 20, 21, 100, backup_bytes.len() - 1] {
         let candidate = backup_bytes
             .get(..length)
             .ok_or_else(|| std::io::Error::other("backup truncation is out of range"))?;
-        assert!(
+        assert_eq!(
             verify_backup(
                 candidate,
                 &StorageMasterKey::from_bytes([19; 32]),
@@ -845,7 +918,9 @@ fn initialized_owner_commits_and_reads_one_manifested_mutation() -> Result<(), B
                 &[trusted],
                 limits.backup_max_bytes,
             )
-            .is_err()
+            .err(),
+            Some(StorageError::FilesystemRejected),
+            "truncation at {length}"
         );
     }
     for offset in 0..backup_bytes.len() {
@@ -854,19 +929,22 @@ fn initialized_owner_commits_and_reads_one_manifested_mutation() -> Result<(), B
             .get_mut(offset)
             .ok_or_else(|| std::io::Error::other("backup corruption is out of range"))?;
         *byte ^= 1;
+        let rejection = verify_backup(
+            corrupted.as_slice(),
+            &StorageMasterKey::from_bytes([19; 32]),
+            &RollbackGuardRootKey::from_bytes([20; 32]),
+            &[trusted],
+            limits.backup_max_bytes,
+        )
+        .err();
+        let allowed = expected_backup_flip_rejections(offset);
         assert!(
-            verify_backup(
-                corrupted.as_slice(),
-                &StorageMasterKey::from_bytes([19; 32]),
-                &RollbackGuardRootKey::from_bytes([20; 32]),
-                &[trusted],
-                limits.backup_max_bytes,
-            )
-            .is_err()
+            rejection.is_some_and(|error| allowed.contains(&error)),
+            "flip at {offset} produced {rejection:?}, expected one of {allowed:?}"
         );
     }
     let replacement = BackupDestination::new(directory.path(), "verified.backup")?;
-    assert!(
+    assert_eq!(
         port.try_backup(
             replacement,
             Ed25519SecretKey::from_bytes([22; 32]),
@@ -874,7 +952,8 @@ fn initialized_owner_commits_and_reads_one_manifested_mutation() -> Result<(), B
             [24; 16],
         )?
         .wait()
-        .is_err()
+        .err(),
+        Some(StorageError::FilesystemRejected)
     );
     assert!(fs::read_dir(directory.path())?.all(|entry| {
         entry
@@ -885,7 +964,7 @@ fn initialized_owner_commits_and_reads_one_manifested_mutation() -> Result<(), B
     drop(port);
     owner.shutdown()?;
     let wrong_key_directory = StateDirectory::open(directory.path(), &[qualification])?;
-    assert!(
+    assert_eq!(
         StorageOwner::start(StorageOpenConfig {
             expected_network_id: network,
             expected_server_id: server,
@@ -896,7 +975,8 @@ fn initialized_owner_commits_and_reads_one_manifested_mutation() -> Result<(), B
             previous_login_index_key: None,
             limits,
         })
-        .is_err()
+        .err(),
+        Some(StorageError::AuthenticationFailed)
     );
     let state_directory = StateDirectory::open(directory.path(), &[qualification])?;
     let reopened = StorageOwner::start(StorageOpenConfig {

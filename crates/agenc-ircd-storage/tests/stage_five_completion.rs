@@ -779,9 +779,10 @@ fn platform_adapter_rejects_each_path_lock_guard_and_capacity_boundary()
     let qualification = signed_qualification(tuple)?;
 
     for name in ["", ".", "..", "/absolute", "nested/name"] {
-        assert!(
-            agenc_ircd_storage::BackupDestination::new(directory.path(), name).is_err(),
-            "unsafe backup name {name:?} was accepted"
+        assert_eq!(
+            agenc_ircd_storage::BackupDestination::new(directory.path(), name).err(),
+            Some(StorageError::FilesystemRejected),
+            "unsafe backup name {name:?} was not rejected as a filesystem policy violation"
         );
     }
     let safe_destination =
@@ -871,7 +872,10 @@ fn observe_capacity_boundary(
     reserve_delta: i8,
     expected_admitted: bool,
 ) -> Result<(), Box<dyn Error>> {
-    for _ in 0..128 {
+    // Other tests share this filesystem, so free space can move between the two
+    // probes below. Retry with a bounded backoff instead of spinning on yield_now.
+    let mut backoff = CAPACITY_RETRY_INITIAL_BACKOFF;
+    for _ in 0..CAPACITY_RETRY_ATTEMPTS {
         let before = state.capacity(0, 0)?.available_bytes;
         let exact_reserve = before
             .checked_sub(growth)
@@ -889,7 +893,8 @@ fn observe_capacity_boundary(
         let result = state.admit_transaction(reserve, 0);
         let after = state.capacity(0, 0)?.available_bytes;
         if before != after {
-            std::thread::yield_now();
+            std::thread::sleep(backoff);
+            backoff = (backoff * 2).min(CAPACITY_RETRY_MAX_BACKOFF);
             continue;
         }
         assert_eq!(result.is_ok(), expected_admitted);
@@ -897,6 +902,12 @@ fn observe_capacity_boundary(
     }
     Err("filesystem capacity did not stabilize for a boundary observation".into())
 }
+
+/// Capacity observations retry for roughly five seconds at most: 10 ms doubling to a
+/// 100 ms ceiling over 48 attempts.
+const CAPACITY_RETRY_ATTEMPTS: usize = 48;
+const CAPACITY_RETRY_INITIAL_BACKOFF: std::time::Duration = std::time::Duration::from_millis(10);
+const CAPACITY_RETRY_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
 
 #[test]
 fn qualification_rejects_every_report_and_measurement_boundary() -> Result<(), Box<dyn Error>> {

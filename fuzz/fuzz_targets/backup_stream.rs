@@ -23,11 +23,17 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     let stream = data.get(32..).unwrap_or_default();
-    let _result = verify_backup(
+    let result = verify_backup(
         Cursor::new(stream),
         &StorageMasterKey::from_bytes([0x61; 32]),
         &RollbackGuardRootKey::from_bytes([0x62; 32]),
         &[trust_key],
         MAX_FUZZ_BACKUP_BYTES,
+    );
+    // The harness never holds the signing secret for the fuzzed public key, so a
+    // stream that verifies would be an Ed25519 forgery over the trailer digest.
+    assert!(
+        result.is_err(),
+        "backup verified under a trust key with no known signing secret"
     );
 });
