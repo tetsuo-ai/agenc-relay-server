@@ -1,6 +1,9 @@
 //! Messages crossing from the storage thread and crypto workers into
 //! StateCore (spec 21.5, lines 4178-4194 and 4203-4210).
 
+pub mod crypto;
+pub mod storage;
+
 use agenc_ircd_crypto::CryptoWorkerError;
 use agenc_ircd_storage::CommitOutcome;
 use agenc_ircd_types::TransactionId;
