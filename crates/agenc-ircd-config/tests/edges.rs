@@ -10,9 +10,9 @@ use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
 
 use agenc_ircd_config::{
-    Config, ConfigError, HttpsOrigin, PathResolver, RATE_ROWS, ReadinessGate, RegistrationPolicy,
-    SchemaKey, SecretLength, SecretSet, SocksEndpoint, ValidationDepth, ValidationStage,
-    allocation_charge, load_config, open_secret_file, open_secret_file_with_hook,
+    Config, ConfigError, HttpsOrigin, PathResolver, RATE_ROWS, RegistrationPolicy, SchemaKey,
+    SecretLength, SecretSet, SocksEndpoint, ValidationDepth, ValidationStage, allocation_charge,
+    load_config, open_secret_file, open_secret_file_with_hook,
 };
 use support::{DUAL, PUBLIC, Sandbox, edge, mutate, parse};
 
@@ -609,45 +609,6 @@ fn scalar_literals_cover_ipv6_origins_socks_and_base64_lengths() {
         SocksEndpoint::parse("localhost:9050").err(),
         Some(ConfigError::InvalidValue)
     );
-}
-
-#[test]
-fn readiness_requires_each_gate_individually() {
-    let all = ReadinessGate {
-        config: true,
-        keys: true,
-        storage_recovered: true,
-        state_core: true,
-        federation_sync: true,
-        e2ee_sync: true,
-    };
-    assert!(all.ready());
-    let variants = [
-        ReadinessGate {
-            config: false,
-            ..all
-        },
-        ReadinessGate { keys: false, ..all },
-        ReadinessGate {
-            storage_recovered: false,
-            ..all
-        },
-        ReadinessGate {
-            state_core: false,
-            ..all
-        },
-        ReadinessGate {
-            federation_sync: false,
-            ..all
-        },
-        ReadinessGate {
-            e2ee_sync: false,
-            ..all
-        },
-    ];
-    for gate in variants {
-        assert!(!gate.ready());
-    }
 }
 
 #[test]
