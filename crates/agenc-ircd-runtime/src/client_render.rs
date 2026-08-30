@@ -418,6 +418,24 @@ mod tests {
     }
 
     #[test]
+    fn durable_storage_rejections_use_bounded_standard_busy() -> Result<(), Box<dyn Error>> {
+        let request = parsed("PRIVMSG #chat :hello")?;
+        let frame = failure_frame(
+            &standard_capabilities()?,
+            "server",
+            "requester",
+            &request,
+            DomainError::ServerBusy,
+            None,
+        )?;
+        assert_eq!(
+            encoded(frame)?,
+            b":server FAIL PRIVMSG SERVER_BUSY :Server is busy\r\n"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn legacy_failures_use_public_targets_without_internal_text() -> Result<(), Box<dyn Error>> {
         let request = parsed("JOIN #hidden")?;
         let frame = failure_frame(

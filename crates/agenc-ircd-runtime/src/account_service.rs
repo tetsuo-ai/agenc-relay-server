@@ -2040,7 +2040,7 @@ impl AccountServiceCoordinator {
         else {
             return CarrierRoute::Close;
         };
-        match context.stage_durable(plan, fanout, Some(StagedOrigin { generation }), 0) {
+        match context.stage_durable(plan, fanout, Some(StagedOrigin::silent(generation)), 0) {
             Ok(StageAccepted::Staged { .. }) => {
                 self.pending_authority = Some(PendingAuthority::Logout {
                     generation,
@@ -4044,9 +4044,7 @@ impl AccountServiceCoordinator {
         let accepted = context.stage_durable_with_account_service(
             plan,
             fanout,
-            Some(StagedOrigin {
-                generation: request.generation,
-            }),
+            Some(StagedOrigin::silent(request.generation)),
             1,
             writes,
         );
@@ -4178,9 +4176,7 @@ impl AccountServiceCoordinator {
         let accepted = context.stage_durable_with_account_service(
             plan,
             fanout,
-            Some(StagedOrigin {
-                generation: request.generation,
-            }),
+            Some(StagedOrigin::silent(request.generation)),
             1,
             writes,
         );
@@ -4346,9 +4342,7 @@ impl AccountServiceCoordinator {
         let accepted = context.stage_durable_with_account_service(
             plan,
             fanout,
-            Some(StagedOrigin {
-                generation: request.generation,
-            }),
+            Some(StagedOrigin::silent(request.generation)),
             1,
             writes,
         );
@@ -4503,9 +4497,7 @@ impl AccountServiceCoordinator {
         let accepted = context.stage_durable_with_account_service(
             plan,
             fanout,
-            Some(StagedOrigin {
-                generation: request.generation,
-            }),
+            Some(StagedOrigin::silent(request.generation)),
             1,
             writes,
         );
@@ -4584,9 +4576,7 @@ impl AccountServiceCoordinator {
         let accepted = context.stage_durable_with_account_service(
             plan,
             fanout,
-            Some(StagedOrigin {
-                generation: request.generation,
-            }),
+            Some(StagedOrigin::silent(request.generation)),
             1,
             vec![transaction_write, result_write],
         );
@@ -4764,9 +4754,7 @@ impl AccountServiceCoordinator {
         let accepted = context.stage_durable_with_account_service(
             plan,
             fanout,
-            Some(StagedOrigin {
-                generation: request.generation,
-            }),
+            Some(StagedOrigin::silent(request.generation)),
             1,
             writes,
         );
@@ -5712,7 +5700,7 @@ impl AccountServiceCoordinator {
     pub(crate) fn batch_rejected(
         &mut self,
         context: &mut StateCoreContext,
-        origin: Option<StagedOrigin>,
+        origin: Option<ConnectionGeneration>,
     ) -> Vec<CarrierCompletion> {
         if self.pending_login_tombstone_expiry.take().is_some() && origin.is_none() {
             let _scheduled = self.schedule_next_login_tombstone(context);
@@ -5743,13 +5731,6 @@ impl AccountServiceCoordinator {
             carrier_generation,
             close: true,
         }];
-        if origin.is_some_and(|origin| origin.generation != generation) {
-            completions.push(CarrierCompletion {
-                generation: origin.map_or(generation, |origin| origin.generation),
-                carrier_generation: 0,
-                close: true,
-            });
-        }
         completions.extend(self.progress(context));
         completions
     }

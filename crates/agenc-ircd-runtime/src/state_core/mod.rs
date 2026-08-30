@@ -793,9 +793,9 @@ impl StateCoreContext {
         let (plans, _retained) = batch.finish();
         plans
             .into_iter()
-            .map(|staged| Rejection {
-                origin: staged.origin(),
-                error,
+            .map(|staged| {
+                let (_plan, _fanout, origin) = staged.into_parts();
+                Rejection { origin, error }
             })
             .collect()
     }

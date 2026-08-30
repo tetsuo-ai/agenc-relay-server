@@ -783,20 +783,21 @@ fn execute_planned_command(
             .apply_ephemeral(plan, fanout)
             .map(|_| true)
             .map_err(|_| RuntimeError::InvalidValue),
-        StorageClass::Durable => stage_durable_command(context, accounts, plan, fanout, reply),
+        StorageClass::Durable => {
+            stage_durable_command(context, accounts, bound, plan, fanout, reply)
+        }
     }
 }
 
 fn stage_durable_command(
     context: &mut StateCoreContext,
     accounts: Option<&mut AccountServiceCoordinator>,
+    bound: BoundSession,
     plan: MutationPlan,
     fanout: crate::state_core::fanout::FanoutRequest,
     reply: Option<ClientReply<'_>>,
 ) -> Result<bool, RuntimeError> {
-    let origin = reply.map(|reply| StagedOrigin {
-        generation: reply.generation,
-    });
+    let origin = durable_command_origin(context, bound, reply)?;
     let Some(account_id) = deleted_account(&plan)? else {
         return context
             .stage_durable(plan, fanout, origin, 0)
@@ -820,6 +821,38 @@ fn stage_durable_command(
             Err(stage_error(error))
         }
     }
+}
+
+fn durable_command_origin(
+    context: &StateCoreContext,
+    bound: BoundSession,
+    reply: Option<ClientReply<'_>>,
+) -> Result<Option<StagedOrigin>, RuntimeError> {
+    let Some(reply) = reply else {
+        return Ok(None);
+    };
+    if reply.request.message.command() == "NOTICE" {
+        return Ok(Some(StagedOrigin::silent(reply.generation)));
+    }
+    let nickname = crate::client_render::requester_nickname(context, bound.user_id);
+    let frame = crate::client_render::failure_frame(
+        reply.capabilities,
+        context.server_prefix(),
+        &nickname,
+        reply.request.message,
+        DomainError::ServerBusy,
+        None,
+    )?;
+    let frames = crate::client_render::logical_frames(
+        context.server_prefix(),
+        reply.capabilities,
+        reply.request.message,
+        vec![frame],
+    )?;
+    Ok(Some(StagedOrigin::with_rejection_frames(
+        reply.generation,
+        frames,
+    )))
 }
 
 fn deleted_account(plan: &MutationPlan) -> Result<Option<AccountId>, RuntimeError> {

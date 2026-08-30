@@ -693,9 +693,7 @@ impl RegistrationRouter {
         let staged = context.stage_durable_with_account_service(
             plan,
             fanout,
-            Some(StagedOrigin {
-                generation: connection,
-            }),
+            Some(StagedOrigin::silent(connection)),
             0,
             vec![grant_write],
         );
@@ -1379,22 +1377,26 @@ impl CommandRouter for RegistrationRouter {
         origin: Option<crate::state_core::StagedOrigin>,
         _error: agenc_ircd_storage::StorageError,
     ) {
-        if origin.is_some_and(|origin| self.reject_pending_registration(context, origin.generation))
+        let generation = origin.as_ref().map(StagedOrigin::generation);
+        if generation
+            .is_some_and(|generation| self.reject_pending_registration(context, generation))
         {
             self.retry_session_closes(context);
             return;
         }
-        if origin.is_some_and(|origin| {
-            self.accounts
-                .account_deletion_rejected(context, origin.generation)
-        }) {
+        if generation
+            .is_some_and(|generation| self.accounts.account_deletion_rejected(context, generation))
+        {
             if let Some(origin) = origin {
-                close_transport(context, origin.generation);
+                reject_staged_origin(context, origin);
             }
             self.retry_session_closes(context);
             return;
         }
-        let completions = self.accounts.batch_rejected(context, origin);
+        let completions = self.accounts.batch_rejected(context, generation);
+        if let Some(origin) = origin {
+            reject_staged_origin(context, origin);
+        }
         self.apply_account_completions(context, completions);
         self.retry_session_closes(context);
     }
@@ -1572,6 +1574,13 @@ fn close_transport(context: &mut StateCoreContext, generation: ConnectionGenerat
         sink.begin_slow_consumer_close();
     }
     context.sessions_mut().mark_sink_gone(generation);
+}
+
+fn reject_staged_origin(context: &mut StateCoreContext, origin: StagedOrigin) {
+    let (generation, frames) = origin.into_rejection();
+    if !frames.is_empty() && context.send_to(generation, frames).is_err() {
+        close_transport(context, generation);
+    }
 }
 
 #[cfg(test)]

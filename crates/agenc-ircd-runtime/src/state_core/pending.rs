@@ -7,6 +7,7 @@
 
 use std::collections::BTreeSet;
 
+use agenc_ircd_client_wire::WireMessage;
 use agenc_ircd_domain::MutationPlan;
 use agenc_ircd_types::{MonotonicTick, TransactionId};
 
@@ -24,10 +25,44 @@ pub const GATHER_WINDOW_MILLIS: u64 = 1;
 
 /// The connection whose command produced a staged plan, kept so a rejected
 /// batch can render its bounded failure to the right sink.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StagedOrigin {
     /// The originating connection's queue generation.
-    pub generation: ConnectionGeneration,
+    generation: ConnectionGeneration,
+    rejection_frames: Vec<WireMessage>,
+}
+
+impl StagedOrigin {
+    /// Marks an internal durable operation whose coordinator owns rejection.
+    #[must_use]
+    pub(crate) const fn silent(generation: ConnectionGeneration) -> Self {
+        Self {
+            generation,
+            rejection_frames: Vec::new(),
+        }
+    }
+
+    /// Retains an already rendered public failure until the durable outcome.
+    #[must_use]
+    pub(crate) const fn with_rejection_frames(
+        generation: ConnectionGeneration,
+        rejection_frames: Vec<WireMessage>,
+    ) -> Self {
+        Self {
+            generation,
+            rejection_frames,
+        }
+    }
+
+    /// Returns the generation fenced to this origin.
+    #[must_use]
+    pub(crate) const fn generation(&self) -> ConnectionGeneration {
+        self.generation
+    }
+
+    /// Moves the retained failure frames to the rejection router.
+    pub(crate) fn into_rejection(self) -> (ConnectionGeneration, Vec<WireMessage>) {
+        (self.generation, self.rejection_frames)
+    }
 }
 
 /// One plan waiting on the durable outcome.
@@ -62,12 +97,6 @@ impl StagedPlan {
     #[must_use]
     pub(super) const fn plan(&self) -> &MutationPlan {
         &self.plan
-    }
-
-    /// Returns the originating connection.
-    #[must_use]
-    pub(super) const fn origin(&self) -> Option<StagedOrigin> {
-        self.origin
     }
 
     /// Returns the response-count permits this plan consumes.
@@ -240,6 +269,7 @@ impl PendingMutationBatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agenc_ircd_client_wire::numeric_reply;
     use agenc_ircd_domain::{AccountState, DomainState};
     use agenc_ircd_testkit::account_id;
     use agenc_ircd_types::{Generation, Revision};
@@ -260,6 +290,27 @@ mod tests {
             0,
             Vec::new(),
         ))
+    }
+
+    #[test]
+    fn staged_origin_moves_retained_rejection_frames() -> Result<(), RuntimeError> {
+        let generation = ConnectionGeneration::new(41);
+        let frame = numeric_reply("server", 481, "requester", &[], Some("Server is busy"))
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let origin = StagedOrigin::with_rejection_frames(generation, vec![frame]);
+        assert_eq!(origin.generation(), generation);
+        let (retained_generation, frames) = origin.into_rejection();
+        assert_eq!(retained_generation, generation);
+        assert_eq!(frames.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn silent_staged_origin_retains_no_public_failure() {
+        let generation = ConnectionGeneration::new(42);
+        let (retained_generation, frames) = StagedOrigin::silent(generation).into_rejection();
+        assert_eq!(retained_generation, generation);
+        assert!(frames.is_empty());
     }
 
     #[test]
