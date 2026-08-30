@@ -39,7 +39,7 @@ use agenc_ircd_storage::{
 use agenc_ircd_types::{
     AccountId, AccountServiceMessageKind, ConnectionId, Generation, MonotonicTick, NetworkId,
     NormalizedLogin, OriginId, RecoveryEpoch, RequestId, ServerId, ServerIncarnation,
-    TransactionId,
+    TransactionId, UtcSecond,
 };
 
 use crate::RuntimeError;
@@ -70,6 +70,7 @@ const AUTHENTICATION_GRANT_KIND: u16 = 4;
 const INVITATION_RESERVATION_KIND: u16 = 1;
 const INVITATION_TOMBSTONE_KIND: u16 = 2;
 const INVITATION_TOMBSTONE_SECONDS: u64 = 7 * 24 * 60 * 60;
+const LOGIN_DELETION_TOMBSTONE_SECONDS: u64 = 30 * 24 * 60 * 60;
 const REQUEST_RESULT_KIND: u16 = 1;
 const REQUEST_RESULT_VERSION: u16 = 2;
 const REQUEST_RESULT_ROUTE_BYTES: usize = 16 + 8 + 16 + 32;
@@ -362,6 +363,18 @@ struct CommittedLoginIndexMigration {
     previous_key: StoredKey,
     current_key: StoredKey,
 }
+
+struct AccountDeletionBarrier {
+    account_id: AccountId,
+    authentications: Vec<(ConnectionGeneration, TransactionId)>,
+    grants: Vec<(ConnectionGeneration, TransactionId)>,
+    completions: Vec<CarrierCompletion>,
+}
+
+type DeletionAuthorities = (
+    Vec<(ConnectionGeneration, TransactionId)>,
+    Vec<(ConnectionGeneration, TransactionId)>,
+);
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum LiveTransactionClass {
@@ -815,6 +828,7 @@ pub(crate) struct AccountServiceCoordinator {
     credential_reservations: BTreeMap<AccountId, ConnectionGeneration>,
     transaction_owners: BTreeMap<TransactionId, (ConnectionGeneration, LiveTransactionClass)>,
     grant_consumptions: BTreeMap<ConnectionGeneration, TransactionId>,
+    pending_account_deletions: BTreeMap<ConnectionGeneration, AccountDeletionBarrier>,
     cleanup_queue: VecDeque<TransactionCleanup>,
     startup_cleanup_remaining: usize,
     credential_cleanup_owners: BTreeSet<ConnectionGeneration>,
@@ -857,6 +871,7 @@ impl AccountServiceCoordinator {
             credential_reservations: BTreeMap::new(),
             transaction_owners: BTreeMap::new(),
             grant_consumptions: BTreeMap::new(),
+            pending_account_deletions: BTreeMap::new(),
             cleanup_queue,
             startup_cleanup_remaining,
             credential_cleanup_owners: BTreeSet::new(),
@@ -1512,6 +1527,115 @@ impl AccountServiceCoordinator {
         self.queue_unowned_transaction_cleanup(TransactionCleanup::authentication(transaction_id))?;
         let _staged = self.try_stage_transaction_cleanup(context);
         Ok(())
+    }
+
+    /// Retains one account-deletion invalidation set before its domain plan
+    /// enters the same durable batch.
+    pub(crate) fn begin_account_deletion(
+        &mut self,
+        generation: ConnectionGeneration,
+        account_id: AccountId,
+        now_utc: UtcSecond,
+    ) -> Result<Vec<AccountServiceDurableWrite>, RuntimeError> {
+        if !self.account_deletion_transition_available(account_id)
+            || !self.pending_account_deletions.is_empty()
+        {
+            return Err(RuntimeError::LimitExceeded);
+        }
+        let expires_at = now_utc
+            .checked_add(LOGIN_DELETION_TOMBSTONE_SECONDS)
+            .map_err(|_| RuntimeError::Overflow)?;
+        let login_key = self
+            .config
+            .live_login_keys
+            .get(&account_id)
+            .cloned()
+            .ok_or(RuntimeError::InvalidValue)?;
+        let (authentications, grants) = self.account_deletion_authorities(account_id)?;
+        let writes = account_deletion_writes(
+            account_id,
+            expires_at,
+            &login_key,
+            &authentications,
+            &grants,
+        )?;
+        let completions = account_deletion_completions(generation, &authentications, &grants)?;
+        let pending = AccountDeletionBarrier {
+            account_id,
+            authentications,
+            grants,
+            completions,
+        };
+        if self
+            .pending_account_deletions
+            .insert(generation, pending)
+            .is_some()
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
+        Ok(writes)
+    }
+
+    fn account_deletion_authorities(
+        &self,
+        account_id: AccountId,
+    ) -> Result<DeletionAuthorities, RuntimeError> {
+        let mut authentications = Vec::new();
+        let mut grants = Vec::new();
+        authentications
+            .try_reserve_exact(self.connections.len())
+            .map_err(|_| RuntimeError::MemoryExhausted)?;
+        grants
+            .try_reserve_exact(self.connections.len())
+            .map_err(|_| RuntimeError::MemoryExhausted)?;
+        for (connection_generation, connection) in &self.connections {
+            if let Some(authentication) = connection
+                .transaction
+                .as_ref()
+                .filter(|authentication| authentication.account_id == Some(account_id))
+            {
+                authentications.push((
+                    *connection_generation,
+                    authentication.transaction.binding().transaction_id(),
+                ));
+            }
+            if let Some(binding) = connection
+                .authenticated
+                .as_ref()
+                .filter(|binding| binding.account_id() == account_id)
+            {
+                grants.push((*connection_generation, binding.transaction_id));
+            }
+        }
+        Ok((authentications, grants))
+    }
+
+    fn account_deletion_transition_available(&self, account_id: AccountId) -> bool {
+        self.pending_authority.is_none()
+            && self.pending_cleanups.is_empty()
+            && self.cleanup_queue.is_empty()
+            && self.reads.is_empty()
+            && self.crypto.is_empty()
+            && self.ready_seals.is_empty()
+            && self.ready_stage.is_none()
+            && self.grant_consumptions.is_empty()
+            && !self.credential_reservations.contains_key(&account_id)
+    }
+
+    /// Rolls back a deletion barrier that could not enter a durable batch.
+    pub(crate) fn cancel_account_deletion(
+        &mut self,
+        generation: ConnectionGeneration,
+    ) -> Result<(), RuntimeError> {
+        self.pending_account_deletions
+            .remove(&generation)
+            .map(|_| ())
+            .ok_or(RuntimeError::InvalidValue)
+    }
+
+    /// Drops one determinate rejected deletion barrier.
+    pub(crate) fn account_deletion_rejected(&mut self, generation: ConnectionGeneration) -> bool {
+        self.pending_account_deletions.remove(&generation).is_some()
     }
 
     /// Routes one grammar-validated AUTHENTICATE command.
@@ -5164,6 +5288,92 @@ impl AccountServiceCoordinator {
         false
     }
 
+    fn commit_account_deletions(
+        &mut self,
+        context: &mut StateCoreContext,
+    ) -> Vec<CarrierCompletion> {
+        let Some((_, pending)) = std::mem::take(&mut self.pending_account_deletions)
+            .into_iter()
+            .next()
+        else {
+            return Vec::new();
+        };
+        let _removed_login_key = self.config.live_login_keys.remove(&pending.account_id);
+        for (generation, transaction_id) in pending.authentications {
+            self.invalidate_deleted_authentication(context, generation, transaction_id);
+        }
+        for (generation, transaction_id) in pending.grants {
+            self.invalidate_deleted_grant(context, generation, transaction_id);
+        }
+        pending.completions
+    }
+
+    fn invalidate_deleted_authentication(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+        transaction_id: TransactionId,
+    ) -> bool {
+        let matches = self
+            .connections
+            .get(&generation)
+            .and_then(|connection| connection.transaction.as_ref())
+            .is_some_and(|authentication| {
+                authentication.transaction.binding().transaction_id() == transaction_id
+            });
+        if !matches {
+            return false;
+        }
+        if let Some(connection) = self.connections.get_mut(&generation) {
+            connection.transaction = None;
+            connection.credential_id = None;
+            connection.fresh_authentication = None;
+        }
+        context
+            .timers_mut()
+            .cancel(TimerKind::Reservation, TimedId::Transaction(transaction_id));
+        let _released = self.release_finished_transaction(
+            generation,
+            LiveTransactionClass::Authentication,
+            transaction_id,
+        );
+        true
+    }
+
+    fn invalidate_deleted_grant(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+        transaction_id: TransactionId,
+    ) -> bool {
+        let matches = self
+            .connections
+            .get(&generation)
+            .and_then(|connection| connection.authenticated.as_ref())
+            .is_some_and(|binding| binding.transaction_id == transaction_id);
+        if !matches {
+            return false;
+        }
+        if let Some(connection) = self.connections.get_mut(&generation) {
+            connection.authenticated = None;
+            connection.credential_id = None;
+            connection.fresh_authentication = None;
+        }
+        context
+            .timers_mut()
+            .cancel(TimerKind::Reservation, TimedId::Transaction(transaction_id));
+        if self.grant_consumptions.get(&generation) == Some(&transaction_id) {
+            self.grant_consumptions.remove(&generation);
+        } else {
+            let _released = self.release_finished_transaction(
+                generation,
+                LiveTransactionClass::AuthenticationGrant,
+                transaction_id,
+            );
+        }
+        true
+    }
+
     /// Releases sealed transaction/result authority only after the matching
     /// durable head became visible.
     // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=closed postcommit dispatcher releases each sealed authority only against the matching visible response-count successor
@@ -5171,7 +5381,7 @@ impl AccountServiceCoordinator {
         &mut self,
         context: &mut StateCoreContext,
     ) -> Vec<CarrierCompletion> {
-        let mut completions = Vec::new();
+        let mut completions = self.commit_account_deletions(context);
         for cleanup in std::mem::take(&mut self.pending_cleanups) {
             let _completed = self.complete_transaction_cleanup(cleanup);
         }
@@ -5340,6 +5550,82 @@ impl AccountServiceCoordinator {
         completions.extend(self.progress(context));
         completions
     }
+}
+
+fn account_deletion_writes(
+    account_id: AccountId,
+    expires_at: UtcSecond,
+    login_key: &StoredKey,
+    authentications: &[(ConnectionGeneration, TransactionId)],
+    grants: &[(ConnectionGeneration, TransactionId)],
+) -> Result<Vec<AccountServiceDurableWrite>, RuntimeError> {
+    let stored_login_key = LoginIndexStoredKey::decode(login_key.as_bytes())?;
+    let tombstone = LoginIndexValue::new(
+        &stored_login_key,
+        LoginIndexValueKind::DeletionTombstone {
+            deleted_account_id: account_id,
+            expires_at: expires_at.get(),
+        },
+    )?;
+    let write_count = 2_usize
+        .checked_add(authentications.len())
+        .and_then(|count| count.checked_add(grants.len()))
+        .ok_or(RuntimeError::Overflow)?;
+    let mut writes = Vec::new();
+    writes
+        .try_reserve_exact(write_count)
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    writes.push(AccountServiceDurableWrite::put(
+        TableId::LoginIndex,
+        login_key.clone(),
+        tombstone.encode()?,
+    )?);
+    writes.push(AccountServiceDurableWrite::delete(
+        TableId::OpaqueRecord,
+        StoredKey::new(account_id.to_text().into_bytes())?,
+    )?);
+    for (_, transaction_id) in authentications.iter().chain(grants) {
+        writes.push(AccountServiceDurableWrite::delete(
+            TableId::AuthTransaction,
+            StoredKey::new(transaction_id.as_bytes().to_vec())?,
+        )?);
+    }
+    Ok(writes)
+}
+
+fn account_deletion_completions(
+    generation: ConnectionGeneration,
+    authentications: &[(ConnectionGeneration, TransactionId)],
+    grants: &[(ConnectionGeneration, TransactionId)],
+) -> Result<Vec<CarrierCompletion>, RuntimeError> {
+    // One deletion origin plus the two bounded progress continuations that
+    // may fail immediately after the receipt becomes visible.
+    let completion_capacity = 3_usize
+        .checked_add(authentications.len())
+        .and_then(|count| count.checked_add(grants.len()))
+        .ok_or(RuntimeError::Overflow)?;
+    let mut completions = Vec::new();
+    completions
+        .try_reserve_exact(completion_capacity)
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    completions.push(CarrierCompletion {
+        generation,
+        carrier_generation: 0,
+        close: true,
+    });
+    for (closing_generation, _) in authentications.iter().chain(grants) {
+        if !completions
+            .iter()
+            .any(|completion| completion.generation == *closing_generation)
+        {
+            completions.push(CarrierCompletion {
+                generation: *closing_generation,
+                carrier_generation: 0,
+                close: true,
+            });
+        }
+    }
+    Ok(completions)
 }
 
 fn transaction_cleanup_batch(
@@ -6045,17 +6331,19 @@ mod tests {
     use agenc_ircd_types::{
         AccountId, AccountRandomId, AccountServiceMessageKind, ConnectionId, Generation, InviteId,
         MonotonicTick, NetworkId, NormalizedLogin, OpaqueCredentialId, OriginId, TransactionId,
+        UtcSecond,
     };
 
     use crate::admission::{BucketTable, RateLimits};
 
     use super::{
-        AccountCarrierAction, AccountCarrierKind, AccountCarrierPhase, ConnectionRoute,
-        CreationReservation, MAX_OPAQUE_ATTEMPTS_PER_CONNECTION, REQUEST_RESULT_BYTES,
-        REQUEST_RESULT_VERSION, RequestResultRecord, RequestTerminal, RuntimeError,
-        TransactionCleanup, account_created_note, account_credential_changed_note, account_failure,
-        consume_opaque_connection_attempt, opaque_attempt_demand, render_account_action,
-        replay_terminal_account, select_live_login, transaction_cleanup_batch,
+        AccountCarrierAction, AccountCarrierKind, AccountCarrierPhase, ConnectionGeneration,
+        ConnectionRoute, CreationReservation, MAX_OPAQUE_ATTEMPTS_PER_CONNECTION,
+        REQUEST_RESULT_BYTES, REQUEST_RESULT_VERSION, RequestResultRecord, RequestTerminal,
+        RuntimeError, TransactionCleanup, account_created_note, account_credential_changed_note,
+        account_deletion_writes, account_failure, consume_opaque_connection_attempt,
+        opaque_attempt_demand, render_account_action, replay_terminal_account, select_live_login,
+        transaction_cleanup_batch,
     };
     use crate::state_core::durable::AccountServiceDurableWrite;
 
@@ -6355,6 +6643,58 @@ mod tests {
             writes.first().ok_or(RuntimeError::InvalidValue)?,
             TableId::AuthTransaction,
             &StoredKey::new(transaction_id.as_bytes().to_vec())?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn account_deletion_tombstones_login_and_deletes_private_authorities()
+    -> Result<(), RuntimeError> {
+        let account_id = account(9);
+        let login_key =
+            LoginIndexStoredKey::new(3, LoginIndexDigest::from_storage_key([10; 32]))?.encode()?;
+        let authentication = TransactionId::from_bytes([11; 16]);
+        let grant = TransactionId::from_bytes([12; 16]);
+        let writes = account_deletion_writes(
+            account_id,
+            UtcSecond::from_unix_seconds(2_592_100),
+            &login_key,
+            &[(ConnectionGeneration::new(7), authentication)],
+            &[(ConnectionGeneration::new(8), grant)],
+        )?;
+        assert_eq!(writes.len(), 4);
+        let AccountServiceDurableWrite::Put {
+            table,
+            key,
+            plaintext,
+        } = writes.first().ok_or(RuntimeError::InvalidValue)?
+        else {
+            return Err(RuntimeError::InvalidValue);
+        };
+        assert!(*table == TableId::LoginIndex && key == &login_key);
+        let stored_key = LoginIndexStoredKey::decode(key.as_bytes())?;
+        let tombstone = LoginIndexValue::decode(plaintext.as_slice(), &stored_key)?;
+        assert!(matches!(
+            tombstone.kind(),
+            LoginIndexValueKind::DeletionTombstone {
+                deleted_account_id,
+                expires_at: 2_592_100,
+            } if *deleted_account_id == account_id
+        ));
+        assert_delete(
+            writes.get(1).ok_or(RuntimeError::InvalidValue)?,
+            TableId::OpaqueRecord,
+            &StoredKey::new(account_id.to_text().into_bytes())?,
+        );
+        assert_delete(
+            writes.get(2).ok_or(RuntimeError::InvalidValue)?,
+            TableId::AuthTransaction,
+            &StoredKey::new(authentication.as_bytes().to_vec())?,
+        );
+        assert_delete(
+            writes.get(3).ok_or(RuntimeError::InvalidValue)?,
+            TableId::AuthTransaction,
+            &StoredKey::new(grant.as_bytes().to_vec())?,
         );
         Ok(())
     }

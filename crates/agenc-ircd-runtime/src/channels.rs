@@ -12,16 +12,17 @@ use agenc_ircd_client_wire::{
 };
 use agenc_ircd_domain::{
     AdmissionSnapshot, AuthorizationFailure, AuthorizedCommand, CanonicalCommand,
-    CanonicalCommandView, CommandEnvelope, DomainError, EntropyPurpose, ExternalInputRequest,
-    ExternalInputs, MessageKind, PlanDecision, StorageClass,
+    CanonicalCommandView, CommandEnvelope, DomainError, DomainEvent, EntropyPurpose,
+    ExternalInputRequest, ExternalInputs, MessageKind, MutationPlan, PlanDecision, StorageClass,
 };
 use agenc_ircd_types::{
-    AccountDeletionToken, BoundedUtf8, ChannelInstanceId, ControlPolicy, EntryId, InviteId,
-    MessageId,
+    AccountDeletionToken, AccountId, BoundedUtf8, ChannelInstanceId, ControlPolicy, EntryId,
+    InviteId, MessageId,
 };
 use zeroize::Zeroizing;
 
 use crate::RuntimeError;
+use crate::account_service::AccountServiceCoordinator;
 use crate::admission::{BucketDemand, BucketKey, BucketKind, domain_bucket};
 use crate::bridge::crypto::{
     ChannelKeyConstructJob, ChannelKeyTarget, ChannelKeyVerifier, ChannelKeyVerifierRecord,
@@ -357,9 +358,12 @@ impl From<RuntimeError> for SessionCommandError {
 
 impl RegisteredCommandExecutor {
     /// Executes one registered handoff or owns its deferred crypto continuation.
+    // agenc-review: allow owner=runtime reviewed=2026-08-30 reason=registered routing binds the account deletion coordinator connection session capabilities nickname and owned handoff at one entry boundary
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn route_registered(
         &mut self,
         context: &mut StateCoreContext,
+        accounts: &mut AccountServiceCoordinator,
         generation: ConnectionGeneration,
         bound: Option<BoundSession>,
         capabilities: &CapabilityState,
@@ -379,31 +383,23 @@ impl RegisteredCommandExecutor {
             capabilities,
             request,
         };
-        let command = match crate::command_convert::convert(context.domain(), kind, &message) {
-            Ok(command) => command,
-            Err(RuntimeError::InvalidValue | RuntimeError::LimitExceeded) => {
-                let (error, silent) =
-                    if charge_registered_command_only(context, bound.user_id).is_ok() {
-                        (DomainError::InvalidArgument, false)
-                    } else {
-                        (DomainError::ServerBusy, message.command() == "NOTICE")
-                    };
-                crate::client_render::render_domain_failure(
-                    context,
-                    reply.render_input(bound.user_id),
-                    error,
-                    silent,
-                    None,
-                )?;
-                return Ok(RouteOutcome::Continue);
-            }
-            Err(error) => return Err(error),
+        let Some(command) = convert_registered_command(context, bound, reply, kind, &message)?
+        else {
+            return Ok(RouteOutcome::Continue);
         };
         let next_nickname = match command.view() {
             CanonicalCommandView::Nick(nickname) => Some(nickname.presentation().to_owned()),
             _ => None,
         };
-        match execute_session_command(context, bound, Some(reply), command, None, true)? {
+        match execute_session_command(
+            context,
+            Some(accounts),
+            bound,
+            Some(reply),
+            command,
+            None,
+            true,
+        )? {
             CommandExecution::Complete(accepted) => {
                 if accepted && let Some(nickname) = next_nickname {
                     *current_nickname = Some(nickname);
@@ -424,6 +420,35 @@ impl RegisteredCommandExecutor {
             }
         }
         Ok(RouteOutcome::Continue)
+    }
+}
+
+fn convert_registered_command(
+    context: &mut StateCoreContext,
+    bound: BoundSession,
+    reply: ClientReply<'_>,
+    kind: RegisteredCommandKind,
+    message: &ParsedMessage,
+) -> Result<Option<CanonicalCommand>, RuntimeError> {
+    match crate::command_convert::convert(context.domain(), kind, message) {
+        Ok(command) => Ok(Some(command)),
+        Err(RuntimeError::InvalidValue | RuntimeError::LimitExceeded) => {
+            let (error, silent) = if charge_registered_command_only(context, bound.user_id).is_ok()
+            {
+                (DomainError::InvalidArgument, false)
+            } else {
+                (DomainError::ServerBusy, message.command() == "NOTICE")
+            };
+            crate::client_render::render_domain_failure(
+                context,
+                reply.render_input(bound.user_id),
+                error,
+                silent,
+                None,
+            )?;
+            Ok(None)
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -627,7 +652,8 @@ fn finish_pending(
             SessionCommandError::Internal(error) => return Err(error),
         },
     };
-    execute_planned_command(context, bound, Some(reply), &render_command, decision).map(|_| ())
+    execute_planned_command(context, None, bound, Some(reply), &render_command, decision)
+        .map(|_| ())
 }
 
 fn render_pending_busy(
@@ -679,6 +705,7 @@ pub(crate) fn close_registered(context: &mut StateCoreContext, bound: BoundSessi
         .to_owned();
     let _result = execute_session_command(
         context,
+        None,
         bound,
         None,
         CanonicalCommand::quit(reason),
@@ -689,6 +716,7 @@ pub(crate) fn close_registered(context: &mut StateCoreContext, bound: BoundSessi
 
 fn execute_session_command(
     context: &mut StateCoreContext,
+    accounts: Option<&mut AccountServiceCoordinator>,
     bound: BoundSession,
     reply: Option<ClientReply<'_>>,
     command: CanonicalCommand,
@@ -728,12 +756,13 @@ fn execute_session_command(
             CanonicalCommand::quit(reason)
         }
     };
-    execute_planned_command(context, bound, reply, &render_command, decision)
+    execute_planned_command(context, accounts, bound, reply, &render_command, decision)
         .map(CommandExecution::Complete)
 }
 
 fn execute_planned_command(
     context: &mut StateCoreContext,
+    accounts: Option<&mut AccountServiceCoordinator>,
     bound: BoundSession,
     reply: Option<ClientReply<'_>>,
     render_command: &CanonicalCommand,
@@ -754,18 +783,56 @@ fn execute_planned_command(
             .apply_ephemeral(plan, fanout)
             .map(|_| true)
             .map_err(|_| RuntimeError::InvalidValue),
-        StorageClass::Durable => context
-            .stage_durable(
-                plan,
-                fanout,
-                reply.map(|reply| StagedOrigin {
-                    generation: reply.generation,
-                }),
-                0,
-            )
-            .map(|_| true)
-            .map_err(stage_error),
+        StorageClass::Durable => stage_durable_command(context, accounts, plan, fanout, reply),
     }
+}
+
+fn stage_durable_command(
+    context: &mut StateCoreContext,
+    accounts: Option<&mut AccountServiceCoordinator>,
+    plan: MutationPlan,
+    fanout: crate::state_core::fanout::FanoutRequest,
+    reply: Option<ClientReply<'_>>,
+) -> Result<bool, RuntimeError> {
+    let origin = reply.map(|reply| StagedOrigin {
+        generation: reply.generation,
+    });
+    let Some(account_id) = deleted_account(&plan)? else {
+        return context
+            .stage_durable(plan, fanout, origin, 0)
+            .map(|_| true)
+            .map_err(stage_error);
+    };
+    let generation = reply
+        .map(|reply| reply.generation)
+        .ok_or(RuntimeError::InvalidValue)?;
+    let accounts = accounts.ok_or(RuntimeError::InvalidValue)?;
+    let now_utc = context.utc_now().map_err(|_| RuntimeError::InvalidValue)?;
+    let writes = accounts.begin_account_deletion(generation, account_id, now_utc)?;
+    let staged = context.stage_durable_with_account_service(plan, fanout, origin, 0, writes);
+    match staged {
+        Ok(crate::state_core::StageAccepted::Staged { .. }) => Ok(true),
+        Ok(crate::state_core::StageAccepted::AppliedInStep(_)) => {
+            accounts.cancel_account_deletion(generation)?;
+            Err(RuntimeError::InvalidValue)
+        }
+        Err(error) => {
+            accounts.cancel_account_deletion(generation)?;
+            Err(stage_error(error))
+        }
+    }
+}
+
+fn deleted_account(plan: &MutationPlan) -> Result<Option<AccountId>, RuntimeError> {
+    let mut deleted = plan.events().iter().filter_map(|event| match event {
+        DomainEvent::AccountDeleted(account_id) => Some(*account_id),
+        _ => None,
+    });
+    let account_id = deleted.next();
+    if deleted.next().is_some() {
+        return Err(RuntimeError::InvalidValue);
+    }
+    Ok(account_id)
 }
 
 fn complete_nonmutation(

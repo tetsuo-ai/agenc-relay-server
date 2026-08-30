@@ -472,6 +472,7 @@ impl RegistrationRouter {
                     .commands
                     .route_registered(
                         context,
+                        &mut self.accounts,
                         generation,
                         state.bound,
                         capabilities,
@@ -1380,6 +1381,13 @@ impl CommandRouter for RegistrationRouter {
     ) {
         if origin.is_some_and(|origin| self.reject_pending_registration(context, origin.generation))
         {
+            self.retry_session_closes(context);
+            return;
+        }
+        if origin.is_some_and(|origin| self.accounts.account_deletion_rejected(origin.generation)) {
+            if let Some(origin) = origin {
+                close_transport(context, origin.generation);
+            }
             self.retry_session_closes(context);
             return;
         }
