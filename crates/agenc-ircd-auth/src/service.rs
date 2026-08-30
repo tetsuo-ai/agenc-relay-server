@@ -10,6 +10,7 @@ use agenc_ircd_types::{
     MonotonicTick, NetworkId, OpaqueCredentialId, OriginId, RecoveryEpoch, RequestId, Revision,
     ServerId, ServerIncarnation, TransactionId, UtcSecond,
 };
+use subtle::ConstantTimeEq as _;
 use zeroize::Zeroizing;
 
 use crate::AuthError;
@@ -1797,9 +1798,9 @@ fn finish_account_authentication_with_entropy(
         expected_transaction,
         finish_request_binding,
     );
-    let (account, authentication) = match authentication? {
-        AuthenticationFinishEvaluation::Accepted(account, authentication) => {
-            (account, authentication)
+    let (account, credential_id, authentication) = match authentication? {
+        AuthenticationFinishEvaluation::Accepted(account, credential_id, authentication) => {
+            (account, credential_id, authentication)
         }
         AuthenticationFinishEvaluation::Rejected => {
             let response = rejected_authentication_response(response_lineage, claimed_transaction)?;
@@ -1810,7 +1811,7 @@ fn finish_account_authentication_with_entropy(
         }
     };
     authorize_opaque(authentication);
-    let grant = create_authentication_grant(account, context, entropy)?;
+    let grant = create_authentication_grant(account, credential_id, context, entropy)?;
     let response = AccountResponsePlan::new(
         response_lineage,
         expected_transaction,
@@ -1820,7 +1821,7 @@ fn finish_account_authentication_with_entropy(
 }
 
 enum AuthenticationFinishEvaluation {
-    Accepted(AccountSnapshot, OpaqueAuthentication),
+    Accepted(AccountSnapshot, OpaqueCredentialId, OpaqueAuthentication),
     Rejected,
 }
 
@@ -1860,12 +1861,14 @@ fn evaluate_authentication_finish(
     };
     Ok(AuthenticationFinishEvaluation::Accepted(
         account,
+        credential_id,
         authentication,
     ))
 }
 
 fn create_authentication_grant(
     account: AccountSnapshot,
+    credential_id: OpaqueCredentialId,
     context: AccountOperationContext,
     entropy: &mut impl EntropySource,
 ) -> Result<AuthenticationGrant, AuthError> {
@@ -1886,6 +1889,7 @@ fn create_authentication_grant(
     let grant_id = AuthGrantId::generate(entropy).map_err(|_| AuthError::EntropyUnavailable)?;
     let fresh_authentication = FreshAuthenticationProof {
         account,
+        credential_id,
         network_id: context.network_id,
         route: context.route,
         expires_at: MonotonicTick::from_ticks(fresh_authentication_expires_at),
@@ -1908,12 +1912,38 @@ fn authorize_opaque(authentication: OpaqueAuthentication) {
 /// Process-local, one-use proof for one destructive same-account start.
 pub struct FreshAuthenticationProof {
     account: AccountSnapshot,
+    credential_id: OpaqueCredentialId,
     network_id: NetworkId,
     route: AccountRouteBinding,
     expires_at: MonotonicTick,
 }
 
 impl FreshAuthenticationProof {
+    /// Borrows the authenticated private credential identity for the one
+    /// consistency read that precedes credential replacement.
+    #[must_use]
+    pub const fn credential_id_for_replacement(&self) -> &OpaqueCredentialId {
+        &self.credential_id
+    }
+
+    fn consume_for_credential_change(
+        self,
+        context: AccountOperationContext,
+        account: AccountSnapshot,
+        credential_id: &OpaqueCredentialId,
+    ) -> Result<(), AuthError> {
+        let credential_matches = self
+            .credential_id
+            .expose_for_account_service()
+            .ct_eq(credential_id.expose_for_account_service());
+        self.consume(context, account)?;
+        if bool::from(credential_matches) {
+            Ok(())
+        } else {
+            Err(AuthError::WrongState)
+        }
+    }
+
     fn consume(
         self,
         context: AccountOperationContext,
@@ -1969,8 +1999,8 @@ pub struct CredentialChangeState {
 pub struct CredentialChangeStartParameters {
     /// Complete route identity and clock binding.
     pub context: AccountOperationContext,
-    /// Consumed same-account OPAQUE proof.
-    pub proof: FreshAuthenticationProof,
+    /// Consumed same-account OPAQUE proof, or absence for a latent rejection.
+    pub proof: Option<FreshAuthenticationProof>,
     /// Current storage-validated account state.
     pub account: DestructiveAccountSnapshot,
     /// Existing private credential identity, which must not change.
@@ -2059,7 +2089,9 @@ fn begin_credential_change_with_entropy(
     if request.network_id != context.network_id {
         return Err(AuthError::ContextMismatch);
     }
-    let proof_result = proof.consume(context, account.0);
+    let proof_result = proof.map_or(Err(AuthError::WrongState), |proof| {
+        proof.consume_for_credential_change(context, account.0, &credential_id)
+    });
     let mut disposition = StartDisposition::SuccessCandidate;
     if request.account_id != account.0.account_id {
         disposition = disposition.reject(AuthError::ContextMismatch);
@@ -2604,6 +2636,7 @@ mod tests {
     ) -> Result<FreshAuthenticationProof, agenc_ircd_types::ValidationError> {
         Ok(FreshAuthenticationProof {
             account: account()?.0,
+            credential_id: OpaqueCredentialId::from_bytes([9_u8; 32]),
             network_id: context(0)?.network_id,
             route: context(0)?.route,
             expires_at: MonotonicTick::from_ticks(expires_at),
@@ -2624,11 +2657,12 @@ mod tests {
         ProofConnectionNonce,
         ProofRevision,
         ProofGeneration,
+        ProofCredential,
         ProofExpired,
     }
 
     impl CredentialStartRejectionCase {
-        const ALL: [Self; 13] = [
+        const ALL: [Self; 14] = [
             Self::RequestedAccount,
             Self::OperationUnavailable,
             Self::ProofNetwork,
@@ -2641,6 +2675,7 @@ mod tests {
             Self::ProofConnectionNonce,
             Self::ProofRevision,
             Self::ProofGeneration,
+            Self::ProofCredential,
             Self::ProofExpired,
         ];
 
@@ -2652,6 +2687,7 @@ mod tests {
         ) -> Result<CredentialRejectionInputs, agenc_ircd_types::ValidationError> {
             let mut proof = FreshAuthenticationProof {
                 account: snapshot,
+                credential_id: OpaqueCredentialId::from_bytes([40_u8; 32]),
                 network_id: operation.network_id,
                 route: operation.route,
                 expires_at: MonotonicTick::from_ticks(20),
@@ -2747,6 +2783,10 @@ mod tests {
                 }
                 Self::ProofGeneration => {
                     proof.account.account_session_generation = Generation::new(10)?;
+                    AuthError::WrongState
+                }
+                Self::ProofCredential => {
+                    proof.credential_id = OpaqueCredentialId::from_bytes([41_u8; 32]);
                     AuthError::WrongState
                 }
                 Self::ProofExpired => {
@@ -2962,7 +3002,7 @@ mod tests {
     fn assert_rejected_credential_start(
         profile: &OpaqueProfile,
         request_id: u8,
-        proof: FreshAuthenticationProof,
+        proof: Option<FreshAuthenticationProof>,
         account: DestructiveAccountSnapshot,
         requested_account: agenc_ircd_types::AccountId,
         operation_is_available: bool,
@@ -3119,7 +3159,7 @@ mod tests {
         let destructive_account = account()?;
         let credential_change = CredentialChangeStartParameters {
             context: context(10)?,
-            proof: fresh_proof(20)?,
+            proof: Some(fresh_proof(20)?),
             account: destructive_account,
             credential_id: OpaqueCredentialId::from_bytes([9_u8; 32]),
             request: credential_start_request(22, destructive_account.0.account_id)?,
@@ -3594,7 +3634,13 @@ mod tests {
             ..base
         };
         assert_eq!(
-            create_authentication_grant(account, monotonic_overflow, &mut entropy).err(),
+            create_authentication_grant(
+                account,
+                OpaqueCredentialId::from_bytes([9_u8; 32]),
+                monotonic_overflow,
+                &mut entropy,
+            )
+            .err(),
             Some(AuthError::Overflow)
         );
         let utc_overflow = AccountOperationContext {
@@ -3602,10 +3648,21 @@ mod tests {
             ..base
         };
         assert_eq!(
-            create_authentication_grant(account, utc_overflow, &mut entropy).err(),
+            create_authentication_grant(
+                account,
+                OpaqueCredentialId::from_bytes([9_u8; 32]),
+                utc_overflow,
+                &mut entropy,
+            )
+            .err(),
             Some(AuthError::Overflow)
         );
-        let grant = create_authentication_grant(account, context(100)?, &mut entropy)?;
+        let grant = create_authentication_grant(
+            account,
+            OpaqueCredentialId::from_bytes([9_u8; 32]),
+            context(100)?,
+            &mut entropy,
+        )?;
         assert_eq!(grant.grant_id.expose_for_session_open(), &[30_u8; 32]);
         assert_eq!(grant.route.connection_nonce(), &[8_u8; 32]);
         Ok(())
@@ -3622,7 +3679,13 @@ mod tests {
             &profile,
             CredentialChangeStartParameters {
                 context: context(10)?,
-                proof: fresh_proof(20)?,
+                proof: Some(FreshAuthenticationProof {
+                    account: destructive_account.0,
+                    credential_id: OpaqueCredentialId::from_bytes(credential_bytes),
+                    network_id: context(0)?.network_id,
+                    route: context(0)?.route,
+                    expires_at: MonotonicTick::from_ticks(20),
+                }),
                 account: destructive_account,
                 credential_id: OpaqueCredentialId::from_bytes(credential_bytes),
                 request: credential_start_request(23, destructive_account.0.account_id)?,
@@ -3671,6 +3734,7 @@ mod tests {
         );
         let proof = FreshAuthenticationProof {
             account: account.0,
+            credential_id: OpaqueCredentialId::from_bytes([10_u8; 32]),
             network_id: operation.network_id,
             route: operation.route,
             expires_at: MonotonicTick::from_ticks(20),
@@ -3680,7 +3744,7 @@ mod tests {
             &profile,
             CredentialChangeStartParameters {
                 context: operation,
-                proof,
+                proof: Some(proof),
                 account,
                 credential_id: OpaqueCredentialId::from_bytes([10_u8; 32]),
                 request: credential_start_request(25, account.0.account_id)?,
@@ -3725,13 +3789,22 @@ mod tests {
             assert_rejected_credential_start(
                 &profile,
                 request_id,
-                proof,
+                Some(proof),
                 current,
                 requested_account,
                 available,
                 expected,
             )?;
         }
+        assert_rejected_credential_start(
+            &profile,
+            118,
+            None,
+            current,
+            snapshot.account_id,
+            true,
+            AuthError::WrongState,
+        )?;
         Ok(())
     }
 
@@ -3787,6 +3860,7 @@ mod tests {
         let operation = context(10)?;
         let proof = |expires_at| FreshAuthenticationProof {
             account: expected,
+            credential_id: OpaqueCredentialId::from_bytes([9_u8; 32]),
             network_id: operation.network_id,
             route: operation.route,
             expires_at: MonotonicTick::from_ticks(expires_at),
