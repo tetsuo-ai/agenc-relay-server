@@ -8,6 +8,7 @@
 //! task tree, the client sink contract, the StateCore inbox, the storage and
 //! crypto bridge messages, and the closed log event registry.
 
+mod account_service;
 pub mod admission;
 pub mod bridge;
 pub mod budget;

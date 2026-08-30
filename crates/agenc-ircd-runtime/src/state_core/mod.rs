@@ -21,8 +21,9 @@ use std::fmt;
 use std::time::Duration;
 
 use agenc_ircd_client_wire::{ParsedMessage, WireMessage, numeric_reply};
+use agenc_ircd_crypto::OpenedStoragePlaintext;
 use agenc_ircd_domain::{ApplyReceipt, DomainError, DomainState, MutationPlan};
-use agenc_ircd_storage::{CommitOutcome, ReadPlan, StorageError, StoredKey, TableId};
+use agenc_ircd_storage::{CommitOutcome, ReadPlan, SealedRecord, StorageError, StoredKey, TableId};
 use agenc_ircd_types::{
     ClockError, EntropySource, MonotonicClock, MonotonicTick, TransactionId, UserId, UtcSecond,
     WallClock,
@@ -425,6 +426,18 @@ impl StateCoreContext {
         self.bridge.submit_read(plan)
     }
 
+    /// Authenticates one asynchronously read row under the active database
+    /// binding before an owning record codec sees its plaintext.
+    pub(crate) fn open_storage_plaintext(
+        &self,
+        table: TableId,
+        key: &StoredKey,
+        sealed_record: &[u8],
+    ) -> Result<OpenedStoragePlaintext, RuntimeError> {
+        let sealed = SealedRecord::decode(sealed_record)?;
+        self.keys.open(table, key, &sealed)
+    }
+
     /// Borrows the drift monitor.
     #[must_use]
     pub const fn drift(&self) -> &DriftMonitor {
@@ -514,6 +527,16 @@ impl StateCoreContext {
         generation: ConnectionGeneration,
         frames: Vec<WireMessage>,
     ) -> Result<FanoutCommitReport, FanoutRefused> {
+        let request = self.fanout_request_to(generation, frames)?;
+        self.fanout_now(request)
+    }
+
+    /// Builds one generation-fenced fanout without making its frames visible.
+    pub(crate) fn fanout_request_to(
+        &self,
+        generation: ConnectionGeneration,
+        frames: Vec<WireMessage>,
+    ) -> Result<FanoutRequest, FanoutRefused> {
         let sink = self
             .sessions
             .sink_for_generation(generation)
@@ -525,8 +548,10 @@ impl StateCoreContext {
         for frame in frames {
             fanout_frames.push(FanoutFrame::new(frame, vec![0])?);
         }
-        let request = FanoutRequest::new(vec![FanoutTarget { generation, sink }], fanout_frames)?;
-        self.fanout_now(request)
+        Ok(FanoutRequest::new(
+            vec![FanoutTarget { generation, sink }],
+            fanout_frames,
+        )?)
     }
 
     /// Reserves and commits a fanout with no plan behind it.

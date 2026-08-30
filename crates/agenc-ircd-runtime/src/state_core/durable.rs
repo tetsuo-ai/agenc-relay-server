@@ -534,6 +534,7 @@ const fn account_service_table(table: TableId) -> bool {
             | TableId::RegistrationInvite
             | TableId::Session
             | TableId::RequestResult
+            | TableId::LoginIndexKeyState
     )
 }
 
@@ -762,7 +763,7 @@ impl Projection<'_> {
                 key,
                 plaintext,
             } => {
-                if *table != TableId::LoginIndex
+                if !matches!(*table, TableId::LoginIndex | TableId::LoginIndexKeyState)
                     && PersistentRecordValue::decode(*table, plaintext)?.revision() != revision
                 {
                     return Err(RuntimeError::Storage(StorageError::StaleState));
@@ -1028,9 +1029,12 @@ impl Projection<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agenc_ircd_crypto::StorageDigest;
+    use agenc_ircd_crypto::{LoginIndexKey, StorageDigest};
     use agenc_ircd_domain::{AccountState, DomainState};
-    use agenc_ircd_storage::{MIN_SEALED_RECORD_BYTES, logical_record_charge};
+    use agenc_ircd_storage::{
+        LOGIN_INDEX_KEY_STATE_KEY, LoginIndexKeyState, MIN_SEALED_RECORD_BYTES,
+        logical_record_charge,
+    };
     use agenc_ircd_testkit::{ScriptedEntropy, account_id};
     use agenc_ircd_types::{
         DatabaseId, Generation, NetworkId, Revision, ServerId, ServerIncarnation,
@@ -1252,6 +1256,30 @@ mod tests {
             )
             .err(),
             Some(RuntimeError::Storage(StorageError::StaleState))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn account_service_write_set_accepts_only_the_login_index_control_row()
+    -> Result<(), RuntimeError> {
+        let network = NetworkId::from_bytes([12; 32]);
+        let login_key = LoginIndexKey::from_bytes([13; 32]);
+        let state = LoginIndexKeyState::stable(1, login_key.key_id(network))?;
+        let write = AccountServiceDurableWrite::put(
+            TableId::LoginIndexKeyState,
+            StoredKey::new(LOGIN_INDEX_KEY_STATE_KEY.to_vec())?,
+            state.encode()?,
+        );
+        assert!(write.is_ok());
+        assert_eq!(
+            AccountServiceDurableWrite::put(
+                TableId::StateMeta,
+                StoredKey::new(agenc_ircd_storage::STATE_META_STORED_KEY.to_vec())?,
+                vec![0; 8],
+            )
+            .err(),
+            Some(RuntimeError::InvalidValue)
         );
         Ok(())
     }

@@ -45,6 +45,30 @@ pub(crate) fn render_mutation(
     builder.finish()
 }
 
+pub(crate) fn render_account_logout(
+    context: &StateCoreContext,
+    bound: BoundSession,
+    plan: &MutationPlan,
+) -> Result<FanoutRequest, RuntimeError> {
+    if plan.expected_revision() != context.domain().revision() {
+        return Err(RuntimeError::InvalidValue);
+    }
+    require_event(plan, DomainEvent::SessionAuthorityChanged(bound.user_id))?;
+    let session = context
+        .domain()
+        .session(bound.user_id)
+        .ok_or(RuntimeError::InvalidValue)?;
+    if session.account_id().is_none() {
+        return Err(RuntimeError::InvalidValue);
+    }
+    let source = session_prefix(session)?;
+    let mut builder = FanoutBuilder::new(context, plan, None)?;
+    let recipients: Vec<_> = plan.recipients().iter().collect();
+    let notified = builder.users_with_capability(&recipients, "account-notify");
+    builder.add_simple(&source, "ACCOUNT", &["*".to_owned()], None, &notified)?;
+    builder.finish()
+}
+
 fn render_command(
     builder: &mut FanoutBuilder<'_, '_>,
     plan: &MutationPlan,

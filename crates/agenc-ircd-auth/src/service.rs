@@ -279,6 +279,12 @@ pub struct SealedAccountStart<S> {
 }
 
 impl<S> SealedAccountStart<S> {
+    /// Returns the retained transaction identity used as its durable row key.
+    #[must_use]
+    pub const fn transaction_id(&self) -> TransactionId {
+        self.transaction.binding().transaction_id()
+    }
+
     /// Borrows the encrypted START response retained for exact replay.
     pub const fn response_intent(&self) -> &AccountResponseIntent {
         &self.response
@@ -294,6 +300,18 @@ impl<S> SealedAccountStart<S> {
             return Err(AuthError::ContextMismatch);
         }
         Ok(self.transaction)
+    }
+}
+
+impl SealedAccountStart<AccountAuthenticationState> {
+    /// Captures the retained authentication transaction for encrypted durable
+    /// storage without releasing its post-commit continuation authority.
+    pub fn authentication_transaction_record(
+        &self,
+        now: MonotonicTick,
+        now_utc: UtcSecond,
+    ) -> Result<AuthenticationTransactionRecord, AuthError> {
+        AuthenticationTransactionRecord::capture(&self.transaction, now, now_utc)
     }
 }
 
@@ -739,6 +757,20 @@ impl AuthenticationTransactionRecord {
     #[must_use]
     pub fn expose_for_persistence(&self) -> &[u8; AUTHENTICATION_TRANSACTION_RECORD_BYTES] {
         &self.0
+    }
+
+    /// Returns the conservative exclusive UTC deadline encoded in this row.
+    pub fn durable_expires_at_utc(&self) -> Result<UtcSecond, AuthError> {
+        let mut reader = AuthenticationRecordReader::new(self.0.as_ref());
+        if reader.read_u16()? != AUTHENTICATION_TRANSACTION_RECORD_VERSION
+            || reader.read_u16()? != AUTHENTICATION_TRANSACTION_CLASS
+        {
+            return Err(AuthError::InvalidEncoding);
+        }
+        let _transaction_id = reader.read_array::<16>()?;
+        let _network_id = reader.read_array::<32>()?;
+        let _route = read_route(&mut reader)?;
+        Ok(UtcSecond::from_unix_seconds(reader.read_u64()?))
     }
 
     /// Restores a still-live transaction under new process-local monotonic time.
@@ -2698,6 +2730,10 @@ mod tests {
         assert_eq!(
             record.expose_for_persistence().len(),
             AUTHENTICATION_TRANSACTION_RECORD_BYTES
+        );
+        assert_eq!(
+            record.durable_expires_at_utc()?,
+            UtcSecond::from_unix_seconds(529)
         );
         assert!(
             !record

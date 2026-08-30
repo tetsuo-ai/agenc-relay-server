@@ -10,8 +10,9 @@ use std::collections::{BTreeMap, VecDeque};
 use agenc_ircd_client_wire::{
     AccessTokenPolicy, CapRequestReply, CapabilityProfile, CapabilitySpec, CapabilityState,
     KEEPALIVE_IDLE_MILLIS, KEEPALIVE_PONG_MILLIS, REGISTRATION_TIMEOUT_MILLIS, RegistrationAction,
-    RegistrationError, RegistrationEvent, RegistrationPhase, RegistrationState, WelcomeStep,
-    WireMessage, isupport_messages, numeric_reply, split_capability_lines,
+    RegistrationAuthCarrier, RegistrationError, RegistrationEvent, RegistrationPhase,
+    RegistrationState, WelcomeStep, WireMessage, isupport_messages, numeric_reply,
+    split_capability_lines,
 };
 use agenc_ircd_crypto::{SemanticHashDomain, semantic_digest};
 use agenc_ircd_domain::{DisplayNameValue, NicknameValue, SessionSeed};
@@ -20,6 +21,8 @@ use subtle::ConstantTimeEq as _;
 use zeroize::Zeroizing;
 
 use crate::RuntimeError;
+pub use crate::account_service::AccountServiceConfig;
+use crate::account_service::{AccountServiceCoordinator, CarrierCompletion, CarrierRoute};
 use crate::connection::sink::ConnectionGeneration;
 use crate::state_core::fanout::FanoutRequest;
 use crate::state_core::inbox::CloseReason;
@@ -43,6 +46,16 @@ pub struct RegistrationRouterConfig {
     pub display_name: String,
     /// Optional configured connection PASS token.
     pub access_token: Option<Zeroizing<[u8; 32]>>,
+    /// Coordinator-only account-service keys and route identity.
+    pub account_service: AccountServiceConfig,
+}
+
+struct RegistrationRuntimeConfig {
+    network_id: NetworkId,
+    server_id: ServerId,
+    server_prefix: String,
+    display_name: String,
+    access_token: Option<Zeroizing<[u8; 32]>>,
 }
 
 struct NicknameLease {
@@ -74,8 +87,9 @@ struct PendingClosure {
 
 /// Registration router for every public client connection.
 pub struct RegistrationRouter {
-    config: RegistrationRouterConfig,
+    config: RegistrationRuntimeConfig,
     advertised: CapabilityProfile,
+    accounts: AccountServiceCoordinator,
     commands: crate::channels::RegisteredCommandExecutor,
     connections: BTreeMap<ConnectionGeneration, ConnectionState>,
     leases: BTreeMap<NicknameValue, ConnectionGeneration>,
@@ -88,10 +102,28 @@ impl RegistrationRouter {
         config: RegistrationRouterConfig,
         commands: crate::channels::RegisteredCommandExecutor,
     ) -> Result<Self, RuntimeError> {
+        let RegistrationRouterConfig {
+            network_id,
+            server_id,
+            server_prefix,
+            display_name,
+            access_token,
+            account_service,
+        } = config;
+        if account_service.network_id != network_id || account_service.server_id != server_id {
+            return Err(RuntimeError::InvalidValue);
+        }
         let advertised = core_capabilities()?;
         Ok(Self {
-            config,
+            config: RegistrationRuntimeConfig {
+                network_id,
+                server_id,
+                server_prefix,
+                display_name,
+                access_token,
+            },
             advertised,
+            accounts: AccountServiceCoordinator::new(account_service)?,
             commands,
             connections: BTreeMap::new(),
             leases: BTreeMap::new(),
@@ -356,8 +388,37 @@ impl RegistrationRouter {
             }
             RegistrationAction::ForwardAuthCarrier {
                 generation: carrier_generation,
-                ..
+                carrier,
+                message,
             } => {
+                if carrier == RegistrationAuthCarrier::Sasl {
+                    let target = self.target(state).to_owned();
+                    return match self.accounts.route_sasl(
+                        context,
+                        generation,
+                        carrier_generation,
+                        &target,
+                        message,
+                    ) {
+                        CarrierRoute::Finished(frames) => {
+                            if !frames.is_empty() {
+                                context
+                                    .send_to(generation, frames)
+                                    .map_err(|_| RuntimeError::MemoryExhausted)?;
+                            }
+                            self.registration_event(
+                                context,
+                                generation,
+                                state,
+                                RegistrationEvent::AuthCarrierFinished {
+                                    generation: carrier_generation,
+                                },
+                            )
+                        }
+                        CarrierRoute::Pending => Ok(ActionStep::Continue),
+                        CarrierRoute::Close => Ok(ActionStep::Close(CloseReason::ProtocolError)),
+                    };
+                }
                 self.send_auth_unavailable(context, generation, state)?;
                 return self.registration_event(
                     context,
@@ -489,7 +550,8 @@ impl RegistrationRouter {
         nickname: &str,
         realname: &str,
     ) -> Result<ActionStep, RuntimeError> {
-        let seed = self.session_seed(context, state, nickname, realname)?;
+        let authenticated_account = self.accounts.authenticated_binding(connection);
+        let seed = self.session_seed(context, state, nickname, realname, authenticated_account)?;
         let bound = BoundSession {
             session_id: seed.session_id,
             user_id: seed.user_id,
@@ -505,6 +567,8 @@ impl RegistrationRouter {
             state.bound = Some(bound);
             state.nickname = Some(nickname.to_owned());
             self.release_lease(connection, state);
+            self.accounts
+                .registration_committed(context, connection, bound.user_id)?;
         }
         self.registration_event(
             context,
@@ -513,7 +577,7 @@ impl RegistrationRouter {
             RegistrationEvent::RegistrationCommitted {
                 generation: event_generation,
                 accepted,
-                authenticated: false,
+                authenticated: authenticated_account.is_some(),
             },
         )
     }
@@ -546,6 +610,7 @@ impl RegistrationRouter {
         state: &ConnectionState,
         nickname: &str,
         realname: &str,
+        authenticated_account: Option<(agenc_ircd_types::AccountId, Generation)>,
     ) -> Result<SessionSeed, RuntimeError> {
         let mut random = [0_u8; 90];
         context
@@ -561,8 +626,9 @@ impl RegistrationRouter {
             session_id,
             user_id,
             home_server_id: self.config.server_id,
-            account_id: None,
-            account_session_generation: Generation::new(0)
+            account_id: authenticated_account.map(|(account_id, _)| account_id),
+            account_session_generation: authenticated_account
+                .map_or_else(|| Generation::new(0), |(_, generation)| Ok(generation))
                 .map_err(|_| RuntimeError::InvalidValue)?,
             generation: Generation::new(0).map_err(|_| RuntimeError::InvalidValue)?,
             nickname: NicknameValue::parse(nickname).map_err(|_| RuntimeError::InvalidValue)?,
@@ -899,6 +965,40 @@ impl RegistrationRouter {
             context.domain().session(user_id).is_some()
         });
     }
+
+    fn apply_account_completions(
+        &mut self,
+        context: &mut StateCoreContext,
+        completions: Vec<CarrierCompletion>,
+    ) {
+        for completion in completions {
+            if completion.close {
+                close_transport(context, completion.generation);
+                continue;
+            }
+            let Some(mut state) = self.connections.remove(&completion.generation) else {
+                continue;
+            };
+            let actions = state.registration.event(
+                RegistrationEvent::AuthCarrierFinished {
+                    generation: completion.carrier_generation,
+                },
+                context.now().get(),
+            );
+            let outcome = match actions {
+                Ok(actions) => {
+                    self.drive_actions(context, completion.generation, &mut state, actions)
+                }
+                Err(_) => RouteOutcome::Close(CloseReason::ProtocolError),
+            };
+            if matches!(outcome, RouteOutcome::Close(_)) {
+                self.release_lease(completion.generation, &mut state);
+                close_transport(context, completion.generation);
+            } else {
+                self.connections.insert(completion.generation, state);
+            }
+        }
+    }
 }
 
 impl CommandRouter for RegistrationRouter {
@@ -931,6 +1031,15 @@ impl CommandRouter for RegistrationRouter {
                 close_transport(context, generation);
                 return;
             }
+            if self
+                .accounts
+                .connection_opened(context, generation)
+                .is_err()
+            {
+                cancel_connection_timers(context, generation);
+                close_transport(context, generation);
+                return;
+            }
             self.connections.insert(
                 generation,
                 ConnectionState {
@@ -953,6 +1062,7 @@ impl CommandRouter for RegistrationRouter {
         generation: ConnectionGeneration,
         _reason: CloseReason,
     ) {
+        self.accounts.connection_closed(context, generation);
         self.commands.connection_closed(context, generation);
         let Some(mut state) = self.connections.remove(&generation) else {
             return;
@@ -972,6 +1082,8 @@ impl CommandRouter for RegistrationRouter {
     }
 
     fn batch_applied(&mut self, context: &mut StateCoreContext, _plan_count: usize) {
+        let completions = self.accounts.batch_applied(context);
+        self.apply_account_completions(context, completions);
         self.retry_session_closes(context);
     }
 
@@ -980,17 +1092,33 @@ impl CommandRouter for RegistrationRouter {
         context: &mut StateCoreContext,
         message: crate::bridge::CryptoCompletionMessage<crate::bridge::crypto::CryptoJobOutput>,
     ) {
+        if self.accounts.owns_crypto_job(message.job_id) {
+            let completions = self.accounts.crypto_completed(context, message);
+            self.apply_account_completions(context, completions);
+            return;
+        }
         if let Err((generation, _error)) = self.commands.crypto_completed(context, message) {
             close_transport(context, generation);
         }
     }
 
+    fn storage_read_completed(
+        &mut self,
+        context: &mut StateCoreContext,
+        message: crate::bridge::StorageReadCompletionMessage,
+    ) {
+        let completions = self.accounts.storage_read_completed(context, message);
+        self.apply_account_completions(context, completions);
+    }
+
     fn batch_rejected(
         &mut self,
         context: &mut StateCoreContext,
-        _origin: Option<crate::state_core::StagedOrigin>,
+        origin: Option<crate::state_core::StagedOrigin>,
         _error: agenc_ircd_storage::StorageError,
     ) {
+        let completions = self.accounts.batch_rejected(context, origin);
+        self.apply_account_completions(context, completions);
         self.retry_session_closes(context);
     }
 
@@ -1033,6 +1161,7 @@ impl From<RouteOutcome> for ActionStep {
 fn core_capabilities() -> Result<CapabilityProfile, RuntimeError> {
     let mut capabilities = Vec::new();
     for name in [
+        "account-notify",
         "account-tag",
         "away-notify",
         "batch",
@@ -1041,12 +1170,15 @@ fn core_capabilities() -> Result<CapabilityProfile, RuntimeError> {
         "labeled-response",
         "message-ids",
         "message-tags",
+        "sasl",
         "server-time",
         "setname",
         "standard-replies",
         "utf8only",
     ] {
-        capabilities.push(CapabilitySpec::new(name, None).map_err(|_| RuntimeError::InvalidValue)?);
+        let value = (name == "sasl").then_some("AGENC-OPAQUE");
+        capabilities
+            .push(CapabilitySpec::new(name, value).map_err(|_| RuntimeError::InvalidValue)?);
     }
     CapabilityProfile::new(capabilities).map_err(|_| RuntimeError::InvalidValue)
 }
@@ -1175,6 +1307,7 @@ mod tests {
         assert_eq!(
             names,
             [
+                "account-notify",
                 "account-tag",
                 "away-notify",
                 "batch",
@@ -1183,6 +1316,7 @@ mod tests {
                 "labeled-response",
                 "message-ids",
                 "message-tags",
+                "sasl",
                 "server-time",
                 "setname",
                 "standard-replies",
