@@ -29,8 +29,8 @@ use agenc_ircd_runtime::connection::{
 };
 use agenc_ircd_runtime::listener::{
     AcceptAdmission, AdmissionVerdict, BoundAddress, ConnectionObserver, ListenerContext,
-    ListenerError, ListenerSet, ListenerSource, ListenerSpec, PermissiveAdmission, RefusalReason,
-    UNIX_SOCKET_MODE,
+    ListenerError, ListenerSet, ListenerSource, ListenerSpec, LocalAdminAdmission,
+    PermissiveAdmission, RefusalReason, UNIX_SOCKET_MODE,
 };
 use agenc_ircd_runtime::purpose::ListenerPurpose;
 use agenc_ircd_runtime::state_core::inbox::{CloseReason, SourceAddressKey, StateCoreMessage};
@@ -77,6 +77,12 @@ impl ConnectionObserver for Recorder {
     fn admitted(&self, connection: &AdmittedConnection) {
         if let Ok(mut events) = self.events.lock() {
             events.push(Observed::Admitted(connection.purpose, connection.peer));
+        }
+    }
+
+    fn admin_admitted(&self, purpose: ListenerPurpose, peer: PeerIdentity) {
+        if let Ok(mut events) = self.events.lock() {
+            events.push(Observed::Admitted(purpose, peer));
         }
     }
 
@@ -199,6 +205,7 @@ fn start(specs: Vec<ListenerSpec>, options: HarnessOptions) -> Result<Harness, L
         admission: options.admission,
         observer: recorder.clone(),
         inbox: sender,
+        admin: None,
         limits: ConnectionLimits::DEFAULT,
     };
     let set = ListenerSet::start(specs, context, &root)?;
@@ -224,6 +231,7 @@ fn tcp_spec(
         source: ListenerSource::InheritedTcp(listener),
         max_connections,
         tls,
+        local_admin: None,
     })
 }
 
@@ -600,11 +608,13 @@ fn scratch_directory(name: &str) -> Result<PathBuf, Box<dyn Error + Send + Sync>
 }
 
 #[tokio::test]
-async fn onion_and_local_admin_unix_listeners_carry_the_spec_modes_and_peer_facts() -> TestResult {
+async fn local_admin_lines_never_enter_the_public_client_inbox() -> TestResult {
     let fixture = fixture(54)?;
     let directory = scratch_directory("unix")?;
     let onion_path = directory.join("onion.sock");
     let admin_path = directory.join("admin.sock");
+    let local_uid = std::fs::metadata(&directory)?.uid();
+    let local_gid = std::fs::metadata(&directory)?.gid();
     let specs = vec![
         ListenerSpec {
             purpose: ListenerPurpose::ClientOnion,
@@ -615,12 +625,14 @@ async fn onion_and_local_admin_unix_listeners_carry_the_spec_modes_and_peer_fact
                 TlsEndpointProfile::Client,
                 ClientAuth::None,
             )?),
+            local_admin: None,
         },
         ListenerSpec {
             purpose: ListenerPurpose::AdminLocal,
             source: ListenerSource::Unix(admin_path.clone()),
             max_connections: 2,
             tls: None,
+            local_admin: Some(LocalAdminAdmission::new(vec![local_uid], vec![local_gid])?),
         },
     ];
     let mut harness = start(specs, HarnessOptions::default())?;
@@ -669,18 +681,13 @@ async fn onion_and_local_admin_unix_listeners_carry_the_spec_modes_and_peer_fact
         let _ = socket.read(&mut buffer);
         Ok(Vec::new())
     });
-    let (admin_generation, admin_sink) =
-        expect_opened(&mut harness.inbox, ListenerPurpose::AdminLocal).await?;
-    assert_eq!(
-        expect_line(&mut harness.inbox, admin_generation).await?,
-        "PING"
-    );
-    admin_sink.begin_slow_consumer_close();
-    assert_eq!(
-        expect_closed(&mut harness.inbox, admin_generation).await?,
-        CloseReason::SlowConsumer
-    );
     assert!(joined(admin_client).await?.is_ok());
+    assert!(
+        tokio::time::timeout(SETTLE, harness.inbox.recv())
+            .await
+            .is_err(),
+        "admin plaintext must not produce a public StateCore message"
+    );
 
     let probe = directory.join("probe");
     std::fs::write(&probe, b"x")?;
@@ -691,19 +698,20 @@ async fn onion_and_local_admin_unix_listeners_carry_the_spec_modes_and_peer_fact
         ListenerPurpose::ClientOnion,
         PeerIdentity::Anonymous
     )));
-    assert!(events.contains(&Observed::Admitted(
+    let _ = (uid, gid);
+    assert!(events.contains(&Observed::Refused(
         ListenerPurpose::AdminLocal,
-        PeerIdentity::LocalCredentials { uid, gid }
+        RefusalReason::AdminOwner
     )));
-    drop((onion_sink, admin_sink));
+    drop(onion_sink);
     let (admitted, refused) = finish(harness).await?;
-    assert_eq!((admitted, refused), (2, 0));
+    assert_eq!((admitted, refused), (1, 1));
     let _ = std::fs::remove_dir_all(directory);
     Ok(())
 }
 
 #[tokio::test]
-async fn an_admin_tls_listener_records_the_peer_spki() -> TestResult {
+async fn admin_tls_lines_never_enter_the_public_client_inbox() -> TestResult {
     let fixture = fixture(55)?;
     let store = TrustStore::parse(fixture.ca_certificate_der())?;
     let spec = tcp_spec(
@@ -722,23 +730,19 @@ async fn an_admin_tls_listener_records_the_peer_spki() -> TestResult {
         client(&fixture, ADMIN_ALPN, true)?,
         b"PING :a\r\n".to_vec(),
     );
-    let (generation, sink) = expect_opened(&mut harness.inbox, ListenerPurpose::AdminTls).await?;
-    assert_eq!(expect_line(&mut harness.inbox, generation).await?, "PING");
-    sink.begin_slow_consumer_close();
-    assert_eq!(
-        expect_closed(&mut harness.inbox, generation).await?,
-        CloseReason::SlowConsumer
+    let _closed_without_public_dispatch = joined(client).await?;
+    assert!(
+        tokio::time::timeout(SETTLE, harness.inbox.recv())
+            .await
+            .is_err(),
+        "admin plaintext must not produce a public StateCore message"
     );
-    assert!(joined(client).await?.is_ok());
-    assert!(harness.recorder.snapshot().contains(&Observed::Admitted(
+    assert!(harness.recorder.snapshot().contains(&Observed::Refused(
         ListenerPurpose::AdminTls,
-        PeerIdentity::ClientCertificate {
-            spki_sha256: *fixture.leaf_spki_sha256(),
-        }
+        RefusalReason::AdminOwner
     )));
-    drop(sink);
-    let (admitted, _) = finish(harness).await?;
-    assert_eq!(admitted, 1);
+    let (admitted, refused) = finish(harness).await?;
+    assert_eq!((admitted, refused), (0, 1));
     Ok(())
 }
 
@@ -923,6 +927,7 @@ async fn start_rejects_unsupported_and_mismatched_specs() -> TestResult {
             source,
             max_connections: 1,
             tls,
+            local_admin: None,
         };
         let error = start(vec![spec], HarnessOptions::default()).err();
         assert_eq!(error, Some(expected));
@@ -937,6 +942,7 @@ async fn start_rejects_unsupported_and_mismatched_specs() -> TestResult {
         admission: Arc::new(PermissiveAdmission),
         observer: Arc::new(Recorder::default()),
         inbox: sender,
+        admin: None,
         limits: ConnectionLimits::DEFAULT,
     };
     assert_eq!(

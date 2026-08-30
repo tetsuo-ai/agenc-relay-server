@@ -151,6 +151,19 @@ impl OperatorRegistry {
         Ok(record)
     }
 
+    /// Returns the immutable verification key for historical audit
+    /// verification, regardless of the record's current enable flag.
+    pub fn verification_key(
+        &self,
+        operator_id: OperatorId,
+    ) -> Result<Ed25519PublicKey, AdminError> {
+        self.records
+            .iter()
+            .find(|record| record.operator_id == operator_id)
+            .map(OperatorRecord::signing_key)
+            .ok_or(AdminError::Operator)
+    }
+
     /// Returns the number of configured records.
     #[must_use]
     pub fn len(&self) -> usize {

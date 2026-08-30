@@ -24,6 +24,12 @@ use tokio::net::{TcpStream, UnixStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::JoinSet;
 
+use agenc_ircd_admin::{
+    ADMIN_CHALLENGE_BYTES, ADMIN_SESSION_ID_BYTES, ADMIN_TRANSPORT_BINDING_BYTES, AdminChallenge,
+    AdminSessionId, Challenge, PeerIdentity as AdminPeerIdentity, TransportBinding, TransportKind,
+};
+use agenc_ircd_types::EntropySource as _;
+
 pub use prefix::{PREFIX_ERASURE_DELAY, source_key};
 pub use socket::{
     BoundAddress, ListenerError, ListenerSource, UNIX_SOCKET_DIRECTORY_MODE, UNIX_SOCKET_MODE,
@@ -32,6 +38,9 @@ pub use spki::spki_sha256;
 
 use self::socket::BoundListener;
 use crate::RuntimeError;
+use crate::admin::{
+    ADMIN_EXPORTER_LABEL, AdminConnectionStart, AdminTransportPort, run_admin_connection,
+};
 use crate::budget::{
     ADMIN_CONNECTION_BASE_BYTES, BoundedMemoryCharges, CLIENT_CONNECTION_BASE_BYTES, MemoryBudget,
     MemoryBudgetPort as _, MemoryCharge, MemoryPermitBatch, TLS_SETUP_INCREMENT_BYTES,
@@ -42,7 +51,7 @@ use crate::connection::{
     ConnectionResources, PeerIdentity, run_connection,
 };
 use crate::purpose::ListenerPurpose;
-use crate::state_core::inbox::{SourceAddressKey, StateCoreMessage};
+use crate::state_core::inbox::{CloseReason, SourceAddressKey, StateCoreMessage};
 use crate::sync::Arc;
 use crate::tls::{
     ACCEPT_TO_TLS_DEADLINE, HandshakeLimiter, TlsEndpointProfile, TlsHandshakeError, TlsStream,
@@ -55,6 +64,48 @@ pub const MAX_ADMIN_CONNECTIONS: usize = 64;
 /// Pause after a transient accept failure so a descriptor shortage cannot
 /// spin the listener.
 pub const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
+
+/// Listener-local operating-system credential admission for `admin_local`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalAdminAdmission {
+    allowed_uids: Vec<u32>,
+    allowed_gids: Vec<u32>,
+}
+
+impl LocalAdminAdmission {
+    /// Validates the Appendix C.3 bounds and uniqueness rules.
+    pub fn new(
+        mut allowed_uids: Vec<u32>,
+        mut allowed_gids: Vec<u32>,
+    ) -> Result<Self, ListenerError> {
+        if allowed_uids.is_empty()
+            || allowed_uids.len() > MAX_ADMIN_CONNECTIONS
+            || allowed_gids.len() > MAX_ADMIN_CONNECTIONS
+        {
+            return Err(ListenerError::AdminPolicy);
+        }
+        allowed_uids.sort_unstable();
+        allowed_gids.sort_unstable();
+        if allowed_uids
+            .windows(2)
+            .any(|pair| pair.first() == pair.get(1))
+            || allowed_gids
+                .windows(2)
+                .any(|pair| pair.first() == pair.get(1))
+        {
+            return Err(ListenerError::AdminPolicy);
+        }
+        Ok(Self {
+            allowed_uids,
+            allowed_gids,
+        })
+    }
+
+    fn admits(&self, uid: u32, gid: u32) -> bool {
+        self.allowed_uids.binary_search(&uid).is_ok()
+            || self.allowed_gids.binary_search(&gid).is_ok()
+    }
+}
 
 /// Whether the admission hook lets an accepted socket proceed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -103,6 +154,10 @@ pub enum RefusalReason {
     PeerCredentials,
     /// The mutual-TLS peer presented no usable certificate.
     ClientCertificate,
+    /// Administrative session entropy was unavailable.
+    Entropy,
+    /// No isolated administrative owner was available.
+    AdminOwner,
     /// The cancellation tree could not admit another child.
     TaskTree,
 }
@@ -116,6 +171,8 @@ impl fmt::Display for RefusalReason {
             Self::TlsHandshake(error) => write!(formatter, "TLS handshake refused: {error}"),
             Self::PeerCredentials => formatter.write_str("peer credentials unavailable"),
             Self::ClientCertificate => formatter.write_str("client certificate unusable"),
+            Self::Entropy => formatter.write_str("administrative session entropy unavailable"),
+            Self::AdminOwner => formatter.write_str("administrative owner unavailable"),
             Self::TaskTree => formatter.write_str("task tree is full"),
         }
     }
@@ -128,6 +185,12 @@ pub trait ConnectionObserver: Send + Sync {
     /// A connection was admitted and its supervisor started.
     fn admitted(&self, connection: &AdmittedConnection) {
         let _ = connection;
+    }
+
+    /// An administrative connection was admitted after its raw source key
+    /// had been discarded.
+    fn admin_admitted(&self, purpose: ListenerPurpose, peer: PeerIdentity) {
+        let _ = (purpose, peer);
     }
 
     /// An accepted socket was closed before a connection existed.
@@ -157,6 +220,8 @@ pub struct ListenerSpec {
     /// The TLS configuration; required for TLS purposes, forbidden for
     /// local administration.
     pub tls: Option<Arc<ServerConfig>>,
+    /// UID/GID admission for `admin_local`; absent for every other purpose.
+    pub local_admin: Option<LocalAdminAdmission>,
 }
 
 /// Everything listeners share with the rest of the runtime.
@@ -173,6 +238,8 @@ pub struct ListenerContext {
     pub observer: Arc<dyn ConnectionObserver>,
     /// The StateCore inbox.
     pub inbox: mpsc::Sender<StateCoreMessage>,
+    /// Isolated administrative owner, absent when no admin listener is enabled.
+    pub admin: Option<AdminTransportPort>,
     /// Per-connection reader and queue ceilings.
     pub limits: ConnectionLimits,
 }
@@ -197,6 +264,7 @@ struct ListenerShared {
     admission: Arc<dyn AcceptAdmission>,
     observer: Arc<dyn ConnectionObserver>,
     inbox: mpsc::Sender<StateCoreMessage>,
+    admin: Option<AdminTransportPort>,
     limits: ConnectionLimits,
     generations: AtomicU64,
 }
@@ -206,6 +274,7 @@ struct ValidatedSpec {
     max_connections: usize,
     tls: Option<Arc<ServerConfig>>,
     profile: Option<TlsEndpointProfile>,
+    local_admin: Option<LocalAdminAdmission>,
 }
 
 /// The set of open listeners and their connection supervisors.
@@ -300,6 +369,7 @@ impl ListenerSet {
             admission: context.admission,
             observer: context.observer,
             inbox: context.inbox,
+            admin: context.admin,
             limits: context.limits,
             generations: AtomicU64::new(1),
         });
@@ -398,11 +468,19 @@ fn validate_spec(spec: &ListenerSpec) -> Result<ValidatedSpec, ListenerError> {
         (None, Some(_)) => return Err(ListenerError::UnexpectedTls),
         _ => {}
     }
+    match (spec.purpose, &spec.local_admin) {
+        (ListenerPurpose::AdminLocal, Some(_)) => {}
+        (ListenerPurpose::AdminLocal, None) | (_, Some(_)) => {
+            return Err(ListenerError::AdminPolicy);
+        }
+        (_, None) => {}
+    }
     Ok(ValidatedSpec {
         purpose: spec.purpose,
         max_connections: spec.max_connections,
         tls: spec.tls.clone(),
         profile,
+        local_admin: spec.local_admin.clone(),
     })
 }
 
@@ -483,12 +561,16 @@ fn record_outcome(
         Some(ConnectionOutcome::Served(connection, source)) => {
             exit.admitted = exit.admitted.saturating_add(1);
             shared.observer.closed(&connection);
-            shared.admission.released(purpose, source);
+            if let Some(source) = source {
+                shared.admission.released(purpose, source);
+            }
         }
         Some(ConnectionOutcome::Refused(reason, source)) => {
             exit.refused = exit.refused.saturating_add(1);
             shared.observer.refused(purpose, reason);
-            shared.admission.released(purpose, source);
+            if let Some(source) = source {
+                shared.admission.released(purpose, source);
+            }
         }
         None => exit.refused = exit.refused.saturating_add(1),
     }
@@ -558,6 +640,7 @@ fn admit(
         tls: spec.tls.clone(),
         profile: spec.profile,
         shared: Arc::clone(shared),
+        local_admin: spec.local_admin.clone(),
     };
     connections.spawn(serve(accepted, admitted, admission, endpoint));
 }
@@ -577,15 +660,24 @@ fn prepare_admission(
     source: SourceAddressKey,
 ) -> Result<Admission, RefusalReason> {
     let global_slot = global_slot(shared, spec.purpose)?;
-    if shared.admission.admit(spec.purpose, source) == AdmissionVerdict::Refuse {
+    let address_accounted = !matches!(
+        spec.purpose,
+        ListenerPurpose::AdminLocal | ListenerPurpose::AdminTls
+    );
+    if address_accounted && shared.admission.admit(spec.purpose, source) == AdmissionVerdict::Refuse
+    {
         return Err(RefusalReason::Admission);
     }
     let Ok(permits) = acquire_charges(shared, spec) else {
-        shared.admission.released(spec.purpose, source);
+        if address_accounted {
+            shared.admission.released(spec.purpose, source);
+        }
         return Err(RefusalReason::MemoryExhausted);
     };
     let Ok(token) = connection_token.child() else {
-        shared.admission.released(spec.purpose, source);
+        if address_accounted {
+            shared.admission.released(spec.purpose, source);
+        }
         return Err(RefusalReason::TaskTree);
     };
     Ok(Admission {
@@ -632,8 +724,8 @@ fn acquire_charges(
 }
 
 enum ConnectionOutcome {
-    Served(ConnectionExit, SourceAddressKey),
-    Refused(RefusalReason, SourceAddressKey),
+    Served(ConnectionExit, Option<SourceAddressKey>),
+    Refused(RefusalReason, Option<SourceAddressKey>),
 }
 
 /// The listener facts one connection task carries.
@@ -641,6 +733,7 @@ struct Endpoint {
     tls: Option<Arc<ServerConfig>>,
     profile: Option<TlsEndpointProfile>,
     shared: Arc<ListenerShared>,
+    local_admin: Option<LocalAdminAdmission>,
 }
 
 async fn serve(
@@ -649,13 +742,18 @@ async fn serve(
     admission: Admission,
     endpoint: Endpoint,
 ) -> ConnectionOutcome {
-    let source = admitted.source;
+    let source = (!matches!(
+        admitted.purpose,
+        ListenerPurpose::AdminLocal | ListenerPurpose::AdminTls
+    ))
+    .then_some(admitted.source);
     match serve_inner(accepted, admitted, admission, endpoint).await {
         Ok(exit) => ConnectionOutcome::Served(exit, source),
         Err(reason) => ConnectionOutcome::Refused(reason, source),
     }
 }
 
+// agenc-review: focus owner=runtime reviewed=2026-08-30 reason=closed transport profile dispatch separates authenticated admin and public ownership while retaining bounded connection resources
 async fn serve_inner(
     accepted: Accepted,
     mut admitted: AdmittedConnection,
@@ -690,6 +788,24 @@ async fn serve_inner(
         (AcceptedTransport::Tcp(stream, _), Some(config), Some(profile)) => {
             let stream = negotiate(stream, config, profile, handshake_slot, &mut permits).await?;
             admitted.peer = tls_peer_identity(&stream, profile)?;
+            if admitted.purpose == ListenerPurpose::AdminTls {
+                let port = endpoint
+                    .shared
+                    .admin
+                    .clone()
+                    .ok_or(RefusalReason::AdminOwner)?;
+                let challenge = tls_admin_challenge(&stream, &port)?;
+                return Ok(finish_admin_serving(
+                    stream,
+                    admitted,
+                    resources(permits),
+                    endpoint.shared,
+                    token,
+                    challenge,
+                    port,
+                )
+                .await);
+            }
             Ok(finish_serving(stream, admitted, resources(permits), endpoint.shared, token).await)
         }
         (AcceptedTransport::Unix(stream), Some(config), Some(profile)) => {
@@ -698,6 +814,34 @@ async fn serve_inner(
         }
         (AcceptedTransport::Unix(stream), None, None) => {
             admitted.peer = local_peer_identity(&stream)?;
+            if admitted.purpose == ListenerPurpose::AdminLocal {
+                let PeerIdentity::LocalCredentials { uid, gid } = admitted.peer else {
+                    return Err(RefusalReason::PeerCredentials);
+                };
+                if !endpoint
+                    .local_admin
+                    .as_ref()
+                    .is_some_and(|policy| policy.admits(uid, gid))
+                {
+                    return Err(RefusalReason::PeerCredentials);
+                }
+                let port = endpoint
+                    .shared
+                    .admin
+                    .clone()
+                    .ok_or(RefusalReason::AdminOwner)?;
+                let challenge = local_admin_challenge()?;
+                return Ok(finish_admin_serving(
+                    stream,
+                    admitted,
+                    resources(permits),
+                    endpoint.shared,
+                    token,
+                    challenge,
+                    port,
+                )
+                .await);
+            }
             Ok(finish_serving(stream, admitted, resources(permits), endpoint.shared, token).await)
         }
         _ => Err(RefusalReason::TlsHandshake(TlsHandshakeError::Protocol)),
@@ -752,6 +896,94 @@ fn local_peer_identity(stream: &UnixStream) -> Result<PeerIdentity, RefusalReaso
     })
 }
 
+fn fresh_admin_material<const N: usize>() -> Result<[u8; N], RefusalReason> {
+    let mut bytes = [0_u8; N];
+    let mut entropy = agenc_ircd_crypto::OsEntropy;
+    entropy
+        .fill_exact(&mut bytes)
+        .map_err(|_| RefusalReason::Entropy)?;
+    Ok(bytes)
+}
+
+fn local_admin_challenge() -> Result<AdminChallenge, RefusalReason> {
+    Ok(AdminChallenge::new(
+        AdminSessionId::from_bytes(fresh_admin_material::<ADMIN_SESSION_ID_BYTES>()?),
+        Challenge::from_bytes(fresh_admin_material::<ADMIN_CHALLENGE_BYTES>()?),
+        TransportKind::Local,
+        TransportBinding::from_bytes(fresh_admin_material::<ADMIN_TRANSPORT_BINDING_BYTES>()?),
+    ))
+}
+
+fn tls_admin_challenge<S>(
+    stream: &TlsStream<S>,
+    port: &AdminTransportPort,
+) -> Result<AdminChallenge, RefusalReason>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let session_id = AdminSessionId::from_bytes(fresh_admin_material::<ADMIN_SESSION_ID_BYTES>()?);
+    let binding = port.binding();
+    let mut context = [0_u8; 32 + 16 + ADMIN_SESSION_ID_BYTES];
+    context[..32].copy_from_slice(binding.network_id.as_bytes());
+    context[32..48].copy_from_slice(binding.server_id.as_bytes());
+    context[48..].copy_from_slice(session_id.as_bytes());
+    let mut exporter = [0_u8; ADMIN_TRANSPORT_BINDING_BYTES];
+    stream
+        .export_keying_material(&mut exporter, ADMIN_EXPORTER_LABEL, &context)
+        .map_err(|_| RefusalReason::TlsHandshake(TlsHandshakeError::Protocol))?;
+    Ok(AdminChallenge::new(
+        session_id,
+        Challenge::from_bytes(fresh_admin_material::<ADMIN_CHALLENGE_BYTES>()?),
+        TransportKind::Tls,
+        TransportBinding::from_bytes(exporter),
+    ))
+}
+
+async fn finish_admin_serving<T>(
+    transport: T,
+    admitted: AdmittedConnection,
+    resources: ConnectionResources,
+    shared: Arc<ListenerShared>,
+    token: CancellationToken,
+    challenge: AdminChallenge,
+    port: AdminTransportPort,
+) -> ConnectionExit
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let AdmittedConnection {
+        generation,
+        purpose,
+        source: _,
+        peer,
+    } = admitted;
+    shared.observer.admin_admitted(purpose, peer);
+    let peer = match peer {
+        PeerIdentity::LocalCredentials { uid, gid } => AdminPeerIdentity::Local { uid, gid },
+        PeerIdentity::ClientCertificate { spki_sha256 } => AdminPeerIdentity::Pin(spki_sha256),
+        PeerIdentity::Anonymous => {
+            return ConnectionExit {
+                generation,
+                purpose,
+                reason: CloseReason::ProtocolError,
+            };
+        }
+    };
+    run_admin_connection(
+        transport,
+        AdminConnectionStart {
+            generation,
+            purpose,
+            resources,
+            challenge,
+            peer,
+            port,
+            token,
+        },
+    )
+    .await
+}
+
 async fn finish_serving<T>(
     transport: T,
     admitted: AdmittedConnection,
@@ -781,11 +1013,16 @@ mod tests {
     #[test]
     fn specs_pair_purposes_with_transports_and_ceilings() {
         let tcp = || ListenerSource::Tcp(std::net::SocketAddr::from(([127, 0, 0, 1], 0)));
+        let local_policy = || LocalAdminAdmission {
+            allowed_uids: vec![1],
+            allowed_gids: Vec::new(),
+        };
         let plain = ListenerSpec {
             purpose: ListenerPurpose::ClientTls,
             source: tcp(),
             max_connections: 1,
             tls: None,
+            local_admin: None,
         };
         assert_eq!(validate_spec(&plain).err(), Some(ListenerError::MissingTls));
         let wss = ListenerSpec {
@@ -793,6 +1030,7 @@ mod tests {
             source: tcp(),
             max_connections: 1,
             tls: None,
+            local_admin: None,
         };
         assert_eq!(
             validate_spec(&wss).err(),
@@ -803,6 +1041,7 @@ mod tests {
             source: tcp(),
             max_connections: 1,
             tls: None,
+            local_admin: None,
         };
         assert_eq!(
             validate_spec(&federation).err(),
@@ -813,6 +1052,7 @@ mod tests {
             source: ListenerSource::Unix("/tmp/x".into()),
             max_connections: 0,
             tls: None,
+            local_admin: Some(local_policy()),
         };
         assert_eq!(
             validate_spec(&zero).err(),
@@ -823,6 +1063,7 @@ mod tests {
             source: ListenerSource::Unix("/tmp/x".into()),
             max_connections: MAX_ADMIN_CONNECTIONS + 1,
             tls: None,
+            local_admin: Some(local_policy()),
         };
         assert_eq!(
             validate_spec(&too_many).err(),
@@ -833,6 +1074,7 @@ mod tests {
             source: ListenerSource::Unix("/tmp/x".into()),
             max_connections: MAX_ADMIN_CONNECTIONS,
             tls: None,
+            local_admin: Some(local_policy()),
         };
         let validated = validate_spec(&admin).ok();
         assert!(validated.is_some_and(|spec| spec.profile.is_none() && spec.tls.is_none()));

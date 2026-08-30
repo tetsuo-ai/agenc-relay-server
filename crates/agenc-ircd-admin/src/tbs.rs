@@ -58,6 +58,18 @@ impl AdminCommandTbs {
         self.command_counter
     }
 
+    /// Returns the network identity bound into the operator signature.
+    #[must_use]
+    pub const fn network_id(&self) -> NetworkId {
+        self.network_id
+    }
+
+    /// Returns the server identity bound into the operator signature.
+    #[must_use]
+    pub const fn server_id(&self) -> ServerId {
+        self.server_id
+    }
+
     /// Returns the exact canonical command bytes.
     #[must_use]
     pub fn canonical_command(&self) -> &[u8] {

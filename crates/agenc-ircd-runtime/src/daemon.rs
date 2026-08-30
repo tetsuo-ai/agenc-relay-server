@@ -5,6 +5,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use agenc_ircd_admin::{AdminSessionBinding, OperatorRecord, OperatorRegistry};
 use agenc_ircd_auth::{
     AuthError, CHANNEL_KEY_HASH_BYTES as AUTH_CHANNEL_HASH_BYTES,
     CHANNEL_KEY_ITERATIONS as AUTH_CHANNEL_ITERATIONS, CHANNEL_KEY_LANES as AUTH_CHANNEL_LANES,
@@ -15,11 +16,11 @@ use agenc_ircd_config::{
     Config, ConfigError, ConfigReport, DEFAULT_REDB_CACHE_BYTES, DirectMessageDefault, LimitKey,
     ListenerBind as ConfigListenerBind, ListenerPurpose as ConfigListenerPurpose, NodeRole,
     RATE_ROWS, RegistrationPolicy, SecretSet, ValidationDepth, apply_process_hardening,
-    load_config,
+    load_audit_trust_manifest, load_config,
 };
 use agenc_ircd_crypto::{
-    AccountHpkePrivateKey, CryptoError, CryptoWorkerConfig, Ed25519PublicKey, LoginIndexKey,
-    OpaqueFakeCredentialKey, OsEntropy, RollbackGuardRootKey, StorageMasterKey,
+    AccountHpkePrivateKey, CryptoError, CryptoWorkerConfig, Ed25519PublicKey, Ed25519SecretKey,
+    LoginIndexKey, OpaqueFakeCredentialKey, OsEntropy, RollbackGuardRootKey, StorageMasterKey,
 };
 use agenc_ircd_domain::{
     DirectMessagePolicy, GuestDirectMessagePolicy, OperationalLimitValues, OperationalLimits,
@@ -29,7 +30,7 @@ use agenc_ircd_storage::{
     StateDirectory, StorageEngineLimits, StorageError, StorageOpenConfig, StorageOwner,
     embedded_storage_qualifications,
 };
-use agenc_ircd_types::{EntropySource as _, Generation, OriginId};
+use agenc_ircd_types::{EntropySource as _, Generation, OriginId, WallClock as _};
 use tokio::runtime::Builder;
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use zeroize::Zeroizing;
@@ -37,6 +38,10 @@ use zeroize::Zeroizing;
 use crate::RuntimeError;
 use crate::StateCoreSeed;
 use crate::account_service::AccountCreationPolicy;
+use crate::admin::{
+    AdminAdmissionSnapshot, AdminOwner, AdminOwnerInbox, AdminTransportPort, AuditAuthority,
+    admin_transport_channel,
+};
 use crate::admission::{BucketKind, BucketRate, RateLimits, TransportAdmission};
 use crate::bridge::crypto::{
     CHANNEL_KEY_ARGON2_ITERATIONS, CHANNEL_KEY_ARGON2_MEMORY_KIB, CHANNEL_KEY_ARGON2_PARALLELISM,
@@ -52,7 +57,7 @@ use crate::connection::{
 };
 use crate::listener::{
     ListenerContext, ListenerControl, ListenerError, ListenerSet, ListenerSource, ListenerSpec,
-    NoObserver, spki_sha256,
+    LocalAdminAdmission, NoObserver, spki_sha256,
 };
 use crate::purpose::ListenerPurpose;
 use crate::registration::{AccountServiceConfig, RegistrationRouter, RegistrationRouterConfig};
@@ -72,7 +77,7 @@ use crate::supervisor::{
 use crate::sync::Arc;
 use crate::tls::{
     ClientAuth, HandshakeLimiter, PrivateKey, TlsConfigError, TlsEndpointProfile,
-    build_server_config, load_certificate_chain,
+    build_server_config, load_certificate_chain, load_trust_store,
 };
 
 const RUNTIME_THREAD_NAME: &str = "agenc-ircd-tokio";
@@ -201,7 +206,8 @@ pub fn serve(config_path: &Path) -> Result<DaemonExit, DaemonError> {
     validate_profile(&config)?;
     harden_process(&config)?;
     let secrets = SecretSet::load(&config)?;
-    let storage = LiveStorage::open(&config, &secrets)?;
+    let operators = operator_registry(&config)?;
+    let storage = LiveStorage::open(&config, &secrets, &operators)?;
     let workers = usize_value(config.server.tokio_worker_threads)?;
     let runtime = Builder::new_multi_thread()
         .worker_threads(workers)
@@ -209,7 +215,13 @@ pub fn serve(config_path: &Path) -> Result<DaemonExit, DaemonError> {
         .enable_all()
         .build()
         .map_err(|_| DaemonError::RuntimeStart)?;
-    runtime.block_on(run(config_path.to_path_buf(), config, secrets, storage))
+    runtime.block_on(run(
+        config_path.to_path_buf(),
+        config,
+        secrets,
+        operators,
+        storage,
+    ))
 }
 
 fn validate_profile(config: &Config) -> Result<(), DaemonError> {
@@ -223,7 +235,10 @@ fn validate_profile(config: &Config) -> Result<(), DaemonError> {
     for listener in config.listeners.iter().filter(|listener| listener.enabled) {
         if !matches!(
             listener.purpose,
-            ConfigListenerPurpose::ClientTls | ConfigListenerPurpose::ClientOnion
+            ConfigListenerPurpose::ClientTls
+                | ConfigListenerPurpose::ClientOnion
+                | ConfigListenerPurpose::AdminLocal
+                | ConfigListenerPurpose::AdminTls
         ) {
             return Err(DaemonError::UnsupportedProfile);
         }
@@ -244,10 +259,15 @@ struct LiveStorage {
     seed: StateCoreSeed,
     keys: KeyDeriver,
     reconstruction: Reconstruction,
+    audit: AuditAuthority,
 }
 
 impl LiveStorage {
-    fn open(config: &Config, secrets: &SecretSet) -> Result<Self, DaemonError> {
+    fn open(
+        config: &Config,
+        secrets: &SecretSet,
+        operators: &OperatorRegistry,
+    ) -> Result<Self, DaemonError> {
         let qualifications = embedded_storage_qualifications()?;
         let state_directory = StateDirectory::open(&config.storage.state_dir, &qualifications)?;
         let owner = StorageOwner::start(storage_open_config(config, secrets, state_directory))?;
@@ -259,11 +279,29 @@ impl LiveStorage {
             storage.storage_key_generation(),
         )?;
         let reconstruction = reconstruct(&seed, &owner.port(), &keys)?;
+        let trust = load_audit_trust_manifest(&config.moderation.audit_trust_manifest_file)?;
+        let now = SystemWallClock
+            .utc_now()
+            .map_err(|_| DaemonError::Runtime(RuntimeError::InvalidValue))?
+            .get();
+        let audit = AuditAuthority::reconstruct(
+            AdminSessionBinding {
+                network_id: config.network.network_id,
+                server_id: config.server.server_id,
+            },
+            Ed25519SecretKey::from_bytes(*secrets.audit_signing().expose()),
+            &trust,
+            &owner.port(),
+            &keys,
+            operators,
+            now,
+        )?;
         Ok(Self {
             owner,
             seed,
             keys,
             reconstruction,
+            audit,
         })
     }
 }
@@ -304,6 +342,7 @@ struct LiveState {
     crypto: mpsc::Receiver<
         crate::bridge::CryptoCompletionMessage<crate::bridge::crypto::CryptoJobOutput>,
     >,
+    audit: Option<AuditAuthority>,
 }
 
 fn build_live_state(
@@ -318,6 +357,7 @@ fn build_live_state(
         seed,
         keys,
         mut reconstruction,
+        audit,
     } = storage;
     let (bridge, storage, storage_reads) = StorageBridge::start(owner.port())?;
     let crypto_config = CryptoWorkerConfig::new(
@@ -362,6 +402,7 @@ fn build_live_state(
         storage,
         storage_reads,
         crypto,
+        audit: Some(audit),
     })
 }
 
@@ -555,10 +596,11 @@ fn runtime_purpose(purpose: ConfigListenerPurpose) -> Result<ListenerPurpose, Da
     match purpose {
         ConfigListenerPurpose::ClientTls => Ok(ListenerPurpose::ClientTls),
         ConfigListenerPurpose::ClientOnion => Ok(ListenerPurpose::ClientOnion),
-        ConfigListenerPurpose::ClientWss
-        | ConfigListenerPurpose::Federation
-        | ConfigListenerPurpose::AdminLocal
-        | ConfigListenerPurpose::AdminTls => Err(DaemonError::UnsupportedProfile),
+        ConfigListenerPurpose::AdminLocal => Ok(ListenerPurpose::AdminLocal),
+        ConfigListenerPurpose::AdminTls => Ok(ListenerPurpose::AdminTls),
+        ConfigListenerPurpose::ClientWss | ConfigListenerPurpose::Federation => {
+            Err(DaemonError::UnsupportedProfile)
+        }
     }
 }
 
@@ -630,19 +672,39 @@ async fn build_listener_specs(
     let mut specs = Vec::new();
     for listener in config.listeners.iter().filter(|listener| listener.enabled) {
         let purpose = runtime_purpose(listener.purpose)?;
-        let files = listener
-            .tls
+        let tls = if purpose == ListenerPurpose::AdminLocal {
+            None
+        } else {
+            let files = listener
+                .tls
+                .as_ref()
+                .ok_or(DaemonError::Tls(TlsConfigError::ClientAuthMismatch))?;
+            let chain = load_certificate_chain(files.certificate_file.clone()).await?;
+            validate_onion_pin(config, purpose, &chain)?;
+            let private = secrets
+                .tls_private_key(&listener.name)
+                .ok_or(DaemonError::Tls(TlsConfigError::InvalidPrivateKey))?;
+            let key = PrivateKey::parse(private.expose())?;
+            let profile =
+                TlsEndpointProfile::for_purpose(purpose).ok_or(DaemonError::UnsupportedProfile)?;
+            let client_auth = if purpose == ListenerPurpose::AdminTls {
+                let ca = listener
+                    .client_ca_file
+                    .clone()
+                    .ok_or(DaemonError::Tls(TlsConfigError::ClientAuthMismatch))?;
+                ClientAuth::MutualTls(load_trust_store(ca).await?)
+            } else {
+                ClientAuth::None
+            };
+            Some(build_server_config(profile, chain, key, client_auth).await?)
+        };
+        let local_admin = listener
+            .local_admin
             .as_ref()
-            .ok_or(DaemonError::Tls(TlsConfigError::ClientAuthMismatch))?;
-        let chain = load_certificate_chain(files.certificate_file.clone()).await?;
-        validate_onion_pin(config, purpose, &chain)?;
-        let private = secrets
-            .tls_private_key(&listener.name)
-            .ok_or(DaemonError::Tls(TlsConfigError::InvalidPrivateKey))?;
-        let key = PrivateKey::parse(private.expose())?;
-        let profile =
-            TlsEndpointProfile::for_purpose(purpose).ok_or(DaemonError::UnsupportedProfile)?;
-        let tls = build_server_config(profile, chain, key, ClientAuth::None).await?;
+            .map(|policy| {
+                LocalAdminAdmission::new(policy.allowed_uids.clone(), policy.allowed_gids.clone())
+            })
+            .transpose()?;
         let source = match &listener.bind {
             ConfigListenerBind::Socket(address) => ListenerSource::Tcp(*address),
             ConfigListenerBind::Unix(path) => ListenerSource::Unix(path.clone()),
@@ -651,7 +713,8 @@ async fn build_listener_specs(
             purpose,
             source,
             max_connections: usize_value(listener.max_connections)?,
-            tls: Some(tls),
+            tls,
+            local_admin,
         });
     }
     Ok(specs)
@@ -680,10 +743,12 @@ fn validate_onion_pin(
     Ok(())
 }
 
+// agenc-review: focus owner=runtime reviewed=2026-08-30 reason=top-level composition installs bounded owners before accepting and routes every exit through the phased shutdown budget
 async fn run(
     config_path: PathBuf,
     config: Config,
     secrets: SecretSet,
+    operators: OperatorRegistry,
     storage: LiveStorage,
 ) -> Result<DaemonExit, DaemonError> {
     let shutdown = shutdown_plan(&config)?;
@@ -699,9 +764,19 @@ async fn run(
         Arc::clone(&budget),
         Box::new(SystemMonotonicClock::start()),
     )?);
-    let live = build_live_state(&config, &secrets, storage, Arc::clone(&budget), rates)?;
+    let mut live = build_live_state(&config, &secrets, storage, Arc::clone(&budget), rates)?;
     let (inbox, inbox_receiver) = mpsc::channel(SIGNAL_EVENT_CAPACITY);
-    let context = listener_context(&config, &inbox, budget, Arc::clone(&admission))?;
+    let admin_binding = AdminSessionBinding {
+        network_id: config.network.network_id,
+        server_id: config.server.server_id,
+    };
+    let (admin_port, admin_inbox) = admin_transport_channel(admin_binding);
+    let audit = live
+        .audit
+        .take()
+        .ok_or(DaemonError::Runtime(RuntimeError::InvalidValue))?;
+    let admin_owner = AdminOwner::new(admin_binding, operators, operator_admission(&config), audit);
+    let context = listener_context(&config, &inbox, admin_port, budget, Arc::clone(&admission))?;
     let RunningOwners {
         owner,
         mut supervisor,
@@ -710,7 +785,18 @@ async fn run(
         mut signals,
         mut state_exited,
         mut listener_exited,
-    } = start_owners(specs, context, live, inbox_receiver, &inbox, admission)?;
+    } = start_owners(
+        specs,
+        context,
+        live,
+        inbox_receiver,
+        &inbox,
+        admission,
+        AdminOwnerStart {
+            owner: admin_owner,
+            inbox: admin_inbox,
+        },
+    )?;
     let trigger = wait_for_shutdown(
         &config_path,
         &config,
@@ -744,6 +830,11 @@ struct RunningOwners {
     listener_exited: oneshot::Receiver<()>,
 }
 
+struct AdminOwnerStart {
+    owner: AdminOwner,
+    inbox: AdminOwnerInbox,
+}
+
 fn start_owners(
     specs: Vec<ListenerSpec>,
     context: ListenerContext,
@@ -751,8 +842,10 @@ fn start_owners(
     inbox_receiver: mpsc::Receiver<StateCoreMessage>,
     inbox: &mpsc::Sender<StateCoreMessage>,
     admission: Arc<TransportAdmission>,
+    admin: AdminOwnerStart,
 ) -> Result<RunningOwners, DaemonError> {
     let mut supervisor = Supervisor::new();
+    spawn_admin_owner(&mut supervisor, admin.owner, admin.inbox)?;
     let listeners = ListenerSet::start(specs, context, &supervisor.root_token())?;
     let control = listeners.control();
     let listener_exited = spawn_listener_owner(&mut supervisor, listeners)?;
@@ -762,6 +855,7 @@ fn start_owners(
         storage,
         storage_reads,
         crypto,
+        audit: _,
     } = live;
     let (lifecycle, lifecycle_receiver) = lifecycle_channel();
     let state_exited = spawn_state_owner(
@@ -783,6 +877,22 @@ fn start_owners(
         state_exited,
         listener_exited,
     })
+}
+
+fn spawn_admin_owner(
+    supervisor: &mut Supervisor,
+    owner: AdminOwner,
+    inbox: AdminOwnerInbox,
+) -> Result<(), DaemonError> {
+    supervisor.spawn(
+        ChildName::AdminOwner,
+        ChildKind::Critical,
+        |token| async move {
+            owner.run(inbox, token).await;
+            Ok(())
+        },
+    )?;
+    Ok(())
 }
 
 fn spawn_listener_owner(
@@ -846,6 +956,7 @@ fn spawn_background_owners(
 fn listener_context(
     config: &Config,
     inbox: &mpsc::Sender<StateCoreMessage>,
+    admin: AdminTransportPort,
     budget: Arc<MemoryBudget>,
     admission: Arc<TransportAdmission>,
 ) -> Result<ListenerContext, DaemonError> {
@@ -858,8 +969,48 @@ fn listener_context(
         admission,
         observer: Arc::new(NoObserver),
         inbox: inbox.clone(),
+        admin: Some(admin),
         limits: connection_limits(config)?,
     })
+}
+
+fn operator_registry(config: &Config) -> Result<OperatorRegistry, DaemonError> {
+    let mut records = Vec::with_capacity(config.moderation.operators.len());
+    for operator in &config.moderation.operators {
+        records.push(
+            OperatorRecord::new(
+                operator.operator_id,
+                Ed25519PublicKey::from_bytes(operator.signing_public_key)?,
+                operator.certificate_spki_sha256,
+                operator.local_uids.clone(),
+                operator.local_gids.clone(),
+                operator.permissions,
+                operator.enabled,
+            )
+            .map_err(|_| RuntimeError::InvalidValue)?,
+        );
+    }
+    OperatorRegistry::from_records(records)
+        .map_err(|_| DaemonError::Runtime(RuntimeError::InvalidValue))
+}
+
+fn operator_admission(config: &Config) -> AdminAdmissionSnapshot {
+    let enabled = config
+        .moderation
+        .operators
+        .iter()
+        .filter(|operator| operator.enabled);
+    let mut uids = Vec::new();
+    let mut gids = Vec::new();
+    let mut pins = Vec::new();
+    for operator in enabled {
+        uids.extend_from_slice(&operator.local_uids);
+        gids.extend_from_slice(&operator.local_gids);
+        if let Some(pin) = operator.certificate_spki_sha256 {
+            pins.push(pin);
+        }
+    }
+    AdminAdmissionSnapshot::new(uids, gids, pins)
 }
 
 struct StateOwnerReceivers {
@@ -1108,7 +1259,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn runtime_purposes_keep_deferred_and_privileged_transports_closed() {
+    fn runtime_purposes_enable_admin_but_keep_deferred_transports_closed() {
         assert_eq!(
             runtime_purpose(ConfigListenerPurpose::ClientTls).ok(),
             Some(ListenerPurpose::ClientTls)
@@ -1117,11 +1268,17 @@ mod tests {
             runtime_purpose(ConfigListenerPurpose::ClientOnion).ok(),
             Some(ListenerPurpose::ClientOnion)
         );
+        assert_eq!(
+            runtime_purpose(ConfigListenerPurpose::AdminLocal).ok(),
+            Some(ListenerPurpose::AdminLocal)
+        );
+        assert_eq!(
+            runtime_purpose(ConfigListenerPurpose::AdminTls).ok(),
+            Some(ListenerPurpose::AdminTls)
+        );
         for purpose in [
             ConfigListenerPurpose::ClientWss,
             ConfigListenerPurpose::Federation,
-            ConfigListenerPurpose::AdminLocal,
-            ConfigListenerPurpose::AdminTls,
         ] {
             assert!(runtime_purpose(purpose).is_err());
         }

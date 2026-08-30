@@ -9,6 +9,7 @@
 //! crypto bridge messages, and the closed log event registry.
 
 mod account_service;
+mod admin;
 pub mod admission;
 pub mod bridge;
 pub mod budget;

@@ -62,6 +62,8 @@ pub enum ListenerError {
     SocketPermissions,
     /// The connection ceiling was zero or above the hard maximum.
     ConnectionCeiling,
+    /// A local-admin purpose and its UID/GID policy disagreed.
+    AdminPolicy,
     /// The parent token was cancelled before the listeners opened.
     Cancelled,
 }
@@ -77,6 +79,7 @@ impl fmt::Display for ListenerError {
             Self::SocketDirectory => "socket directory is absent or not mode 0750",
             Self::SocketPermissions => "socket mode could not be set to 0660",
             Self::ConnectionCeiling => "listener connection ceiling is out of range",
+            Self::AdminPolicy => "local administrative admission policy is invalid",
             Self::Cancelled => "listener set was cancelled before opening",
         };
         formatter.write_str(message)

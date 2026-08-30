@@ -304,6 +304,15 @@ pub async fn load_certificate_chain(path: std::path::PathBuf) -> Result<CertChai
     CertChain::parse(&document)
 }
 
+/// Reads a private client-CA bundle on the blocking pool and builds the
+/// endpoint-specific trust store. Public WebPKI roots are never added.
+pub async fn load_trust_store(path: std::path::PathBuf) -> Result<TrustStore, TlsConfigError> {
+    let document = tokio::task::spawn_blocking(move || read_bounded(&path))
+        .await
+        .map_err(|_| TlsConfigError::InvalidTrustStore)??;
+    TrustStore::parse(&document)
+}
+
 /// A client configuration on the same provider, for tests and native
 /// tooling; `alpn` may be absent to reproduce a client that offers none.
 pub fn build_client_config(
