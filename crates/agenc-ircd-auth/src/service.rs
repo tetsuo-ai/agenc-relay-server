@@ -1,20 +1,21 @@
 //! Complete coordinator-side account protocol state machines.
 
 use agenc_ircd_crypto::{
-    AccountRequestBinding, Ed25519PublicKey, LoginIndexDigest, LoginIndexKey,
+    AccountHpkeKeyId, AccountRequestBinding, Ed25519PublicKey, LoginIndexDigest, LoginIndexKey,
     OpaqueFakeCredentialKey, OsEntropy, derive_fake_credential_id, derive_login_index,
 };
 use agenc_ircd_types::{
-    AccountDeletionToken, AccountId, AccountRandomId, AccountServiceCompletionStatus, AuthGrantId,
-    ConnectionId, EntropySource, Generation, InviteId, MonotonicTick, NetworkId,
-    OpaqueCredentialId, OriginId, Revision, ServerId, ServerIncarnation, TransactionId, UtcSecond,
+    AccountDeletionToken, AccountId, AccountRandomId, AccountServiceCompletionStatus,
+    AccountServiceMessageKind, AuthGrantId, ConnectionId, EntropySource, Generation, InviteId,
+    MonotonicTick, NetworkId, OpaqueCredentialId, OriginId, RecoveryEpoch, RequestId, Revision,
+    ServerId, ServerIncarnation, TransactionId, UtcSecond,
 };
 use zeroize::Zeroizing;
 
 use crate::AuthError;
 use crate::opaque::{
-    OpaqueAuthentication, OpaqueProfile, OpaqueRegistrationRecord, OpaqueServerLoginState,
-    finish_authentication,
+    OPAQUE_SERVER_LOGIN_STATE_BYTES, OpaqueAuthentication, OpaqueProfile, OpaqueRegistrationRecord,
+    OpaqueServerLoginState, finish_authentication,
 };
 use crate::transaction::{
     AUTHENTICATION_GRANT_TIMEOUT_SECONDS, AUTHENTICATION_GRANT_TIMEOUT_TICKS, AccountRouteBinding,
@@ -627,6 +628,350 @@ pub struct AccountAuthenticationState {
     candidate: AuthenticationCandidate,
     credential_id: OpaqueCredentialId,
     server_state: OpaqueServerLoginState,
+}
+
+/// Exact version-one bytes of one live OPAQUE authentication transaction.
+pub const AUTHENTICATION_TRANSACTION_RECORD_BYTES: usize = 2
+    + 2
+    + 16
+    + 32
+    + (16 + 16 + 16 + 8 + 16 + 32)
+    + 8
+    + (32 + 16 + 32 + 16 + 2)
+    + (1 + 24 + 8 + 8)
+    + 32
+    + OPAQUE_SERVER_LOGIN_STATE_BYTES;
+
+const AUTHENTICATION_TRANSACTION_RECORD_VERSION: u16 = 1;
+const AUTHENTICATION_TRANSACTION_CLASS: u16 = 2;
+const AUTHENTICATION_CANDIDATE_KNOWN: u8 = 1;
+const AUTHENTICATION_CANDIDATE_REJECT: u8 = 2;
+
+/// Move-only encrypted-record plaintext for one live authentication attempt.
+///
+/// The fixed body contains no normalized login. It retains only keyed/private
+/// identities, the exact route and request bindings, and the reviewed OPAQUE
+/// server-state serialization required by a later FINISH.
+pub struct AuthenticationTransactionRecord(
+    Zeroizing<[u8; AUTHENTICATION_TRANSACTION_RECORD_BYTES]>,
+);
+
+impl AuthenticationTransactionRecord {
+    /// Captures an unconsumed transaction with a conservative UTC deadline.
+    ///
+    /// Whole-second persistence rounds the remaining monotonic lifetime down,
+    /// so restart can shorten an attempt but can never extend it.
+    pub fn capture(
+        transaction: &AccountTransaction<AccountAuthenticationState>,
+        now: MonotonicTick,
+        now_utc: UtcSecond,
+    ) -> Result<Self, AuthError> {
+        let binding = transaction.binding();
+        if binding.class() != TransactionClass::Authentication || now >= binding.expires_at() {
+            return Err(AuthError::Expired);
+        }
+        let state = transaction.state_ref().ok_or(AuthError::Consumed)?;
+        let remaining_millis = binding
+            .expires_at()
+            .get()
+            .checked_sub(now.get())
+            .ok_or(AuthError::Expired)?;
+        let remaining_seconds = remaining_millis / 1_000;
+        if remaining_seconds == 0 {
+            return Err(AuthError::Expired);
+        }
+        let durable_expires_at = now_utc
+            .checked_add(remaining_seconds)
+            .map_err(|_| AuthError::Overflow)?;
+        let mut encoded = Zeroizing::new([0_u8; AUTHENTICATION_TRANSACTION_RECORD_BYTES]);
+        let mut writer = AuthenticationRecordWriter::new(encoded.as_mut());
+        writer.put_u16(AUTHENTICATION_TRANSACTION_RECORD_VERSION)?;
+        writer.put_u16(AUTHENTICATION_TRANSACTION_CLASS)?;
+        writer.put(binding.transaction_id().as_bytes())?;
+        writer.put(binding.network_id().as_bytes())?;
+        put_route(&mut writer, binding.route())?;
+        writer.put_u64(durable_expires_at.get())?;
+        put_request_binding(&mut writer, state.start_request_binding)?;
+        put_authentication_candidate(&mut writer, state.candidate)?;
+        writer.put(state.credential_id.expose_for_account_service())?;
+        writer.put(state.server_state.expose_for_persistence())?;
+        writer.finish()?;
+        Ok(Self(encoded))
+    }
+
+    /// Copies one opened storage body into a fixed zeroizing allocation.
+    pub fn parse(encoded: &[u8]) -> Result<Self, AuthError> {
+        let bytes: [u8; AUTHENTICATION_TRANSACTION_RECORD_BYTES] =
+            encoded.try_into().map_err(|_| AuthError::InvalidEncoding)?;
+        Ok(Self(Zeroizing::new(bytes)))
+    }
+
+    /// Borrows the exact body only for encrypted persistence.
+    #[must_use]
+    pub fn expose_for_persistence(&self) -> &[u8; AUTHENTICATION_TRANSACTION_RECORD_BYTES] {
+        &self.0
+    }
+
+    /// Restores a still-live transaction under new process-local monotonic time.
+    pub fn restore(
+        self,
+        now: MonotonicTick,
+        now_utc: UtcSecond,
+    ) -> Result<AccountTransaction<AccountAuthenticationState>, AuthError> {
+        let mut reader = AuthenticationRecordReader::new(self.0.as_ref());
+        if reader.read_u16()? != AUTHENTICATION_TRANSACTION_RECORD_VERSION
+            || reader.read_u16()? != AUTHENTICATION_TRANSACTION_CLASS
+        {
+            return Err(AuthError::InvalidEncoding);
+        }
+        let transaction_id = TransactionId::from_bytes(reader.read_array()?);
+        let network_id = NetworkId::from_bytes(reader.read_array()?);
+        let route = read_route(&mut reader)?;
+        let durable_expires_at = UtcSecond::from_unix_seconds(reader.read_u64()?);
+        if now_utc >= durable_expires_at {
+            return Err(AuthError::Expired);
+        }
+        let start_request_binding = read_request_binding(&mut reader)?;
+        if start_request_binding.network_id() != network_id
+            || start_request_binding.message_kind() != AccountServiceMessageKind::OpaqueAuthStart
+        {
+            return Err(AuthError::ContextMismatch);
+        }
+        let candidate = read_authentication_candidate(&mut reader)?;
+        let credential_id = OpaqueCredentialId::from_bytes(reader.read_array()?);
+        let server_state = OpaqueServerLoginState::from_persisted_bytes(reader.read_array()?)?;
+        reader.finish()?;
+        let remaining_seconds = durable_expires_at
+            .get()
+            .checked_sub(now_utc.get())
+            .ok_or(AuthError::Expired)?;
+        let remaining_millis = remaining_seconds
+            .checked_mul(1_000)
+            .ok_or(AuthError::Overflow)?;
+        let expires_at = now
+            .checked_add(remaining_millis)
+            .map_err(|_| AuthError::Overflow)?;
+        let binding = AccountTransactionBinding::restore_authentication(
+            transaction_id,
+            network_id,
+            route,
+            expires_at,
+        );
+        Ok(AccountTransaction::new(
+            binding,
+            AccountAuthenticationState {
+                start_request_binding,
+                candidate,
+                credential_id,
+                server_state,
+            },
+        ))
+    }
+}
+
+fn put_route(
+    writer: &mut AuthenticationRecordWriter<'_>,
+    route: AccountRouteBinding,
+) -> Result<(), AuthError> {
+    writer.put(route.edge_server_id().as_bytes())?;
+    writer.put(route.edge_incarnation().as_bytes())?;
+    writer.put(route.origin_id().as_bytes())?;
+    writer.put_u64(route.origin_generation().get())?;
+    writer.put(route.connection_id().as_bytes())?;
+    writer.put(route.connection_nonce())
+}
+
+fn read_route(
+    reader: &mut AuthenticationRecordReader<'_>,
+) -> Result<AccountRouteBinding, AuthError> {
+    let edge_server_id = ServerId::from_bytes(reader.read_array()?);
+    let edge_incarnation = ServerIncarnation::from_bytes(reader.read_array()?);
+    let origin_id = OriginId::from_bytes(reader.read_array()?);
+    let origin_generation =
+        Generation::new(reader.read_u64()?).map_err(|_| AuthError::InvalidEncoding)?;
+    if origin_generation.get() == 0 {
+        return Err(AuthError::InvalidEncoding);
+    }
+    let connection_id = ConnectionId::from_bytes(reader.read_array()?);
+    let connection_nonce = reader.read_array()?;
+    Ok(AccountRouteBinding::new(
+        edge_server_id,
+        edge_incarnation,
+        origin_id,
+        origin_generation,
+        connection_id,
+        connection_nonce,
+    ))
+}
+
+fn put_request_binding(
+    writer: &mut AuthenticationRecordWriter<'_>,
+    binding: AccountRequestBinding,
+) -> Result<(), AuthError> {
+    writer.put(binding.network_id().as_bytes())?;
+    writer.put(binding.recovery_epoch().as_bytes())?;
+    writer.put(binding.recipient_key_id().as_bytes())?;
+    writer.put(binding.client_request_id().as_bytes())?;
+    writer.put_u16(binding.message_kind().wire_value())
+}
+
+fn read_request_binding(
+    reader: &mut AuthenticationRecordReader<'_>,
+) -> Result<AccountRequestBinding, AuthError> {
+    let network_id = NetworkId::from_bytes(reader.read_array()?);
+    let recovery_epoch = RecoveryEpoch::from_bytes(reader.read_array()?);
+    let recipient_key_id = AccountHpkeKeyId::from_bytes(reader.read_array()?);
+    let client_request_id = RequestId::from_bytes(reader.read_array()?);
+    let message_kind = AccountServiceMessageKind::from_wire(reader.read_u16()?)
+        .map_err(|_| AuthError::InvalidEncoding)?;
+    Ok(AccountRequestBinding::new(
+        network_id,
+        recovery_epoch,
+        recipient_key_id,
+        client_request_id,
+        message_kind,
+    ))
+}
+
+fn put_authentication_candidate(
+    writer: &mut AuthenticationRecordWriter<'_>,
+    candidate: AuthenticationCandidate,
+) -> Result<(), AuthError> {
+    match candidate {
+        AuthenticationCandidate::Known(account) => {
+            writer.put(&[AUTHENTICATION_CANDIDATE_KNOWN])?;
+            writer.put(account.account_id.to_text().as_bytes())?;
+            writer.put_u64(account.account_revision.get())?;
+            writer.put_u64(account.account_session_generation.get())
+        }
+        AuthenticationCandidate::RejectAtFinish => {
+            writer.put(&[AUTHENTICATION_CANDIDATE_REJECT])?;
+            writer.put(&[0_u8; 24])?;
+            writer.put_u64(0)?;
+            writer.put_u64(0)
+        }
+    }
+}
+
+fn read_authentication_candidate(
+    reader: &mut AuthenticationRecordReader<'_>,
+) -> Result<AuthenticationCandidate, AuthError> {
+    let tag = reader.read_array::<1>()?[0];
+    let account_bytes = reader.read_array::<24>()?;
+    let account_revision = reader.read_u64()?;
+    let account_session_generation = reader.read_u64()?;
+    match tag {
+        AUTHENTICATION_CANDIDATE_KNOWN => {
+            let account_id = AccountId::parse_wire_bytes(&account_bytes)
+                .map_err(|_| AuthError::InvalidEncoding)?;
+            let account_revision =
+                Revision::new(account_revision).map_err(|_| AuthError::InvalidEncoding)?;
+            let account_session_generation = Generation::new(account_session_generation)
+                .map_err(|_| AuthError::InvalidEncoding)?;
+            if account_session_generation.get() == 0 {
+                return Err(AuthError::InvalidEncoding);
+            }
+            Ok(AuthenticationCandidate::Known(AccountSnapshot {
+                account_id,
+                account_revision,
+                account_session_generation,
+            }))
+        }
+        AUTHENTICATION_CANDIDATE_REJECT
+            if account_bytes == [0_u8; 24]
+                && account_revision == 0
+                && account_session_generation == 0 =>
+        {
+            Ok(AuthenticationCandidate::RejectAtFinish)
+        }
+        _ => Err(AuthError::InvalidEncoding),
+    }
+}
+
+struct AuthenticationRecordWriter<'a> {
+    encoded: &'a mut [u8],
+    position: usize,
+}
+
+impl<'a> AuthenticationRecordWriter<'a> {
+    const fn new(encoded: &'a mut [u8]) -> Self {
+        Self {
+            encoded,
+            position: 0,
+        }
+    }
+
+    fn put(&mut self, bytes: &[u8]) -> Result<(), AuthError> {
+        let end = self
+            .position
+            .checked_add(bytes.len())
+            .ok_or(AuthError::Overflow)?;
+        let destination = self
+            .encoded
+            .get_mut(self.position..end)
+            .ok_or(AuthError::InvalidEncoding)?;
+        destination.copy_from_slice(bytes);
+        self.position = end;
+        Ok(())
+    }
+
+    fn put_u16(&mut self, value: u16) -> Result<(), AuthError> {
+        self.put(&value.to_be_bytes())
+    }
+
+    fn put_u64(&mut self, value: u64) -> Result<(), AuthError> {
+        self.put(&value.to_be_bytes())
+    }
+
+    fn finish(self) -> Result<(), AuthError> {
+        if self.position == self.encoded.len() {
+            Ok(())
+        } else {
+            Err(AuthError::InvalidEncoding)
+        }
+    }
+}
+
+struct AuthenticationRecordReader<'a> {
+    encoded: &'a [u8],
+    position: usize,
+}
+
+impl<'a> AuthenticationRecordReader<'a> {
+    const fn new(encoded: &'a [u8]) -> Self {
+        Self {
+            encoded,
+            position: 0,
+        }
+    }
+
+    fn read_array<const N: usize>(&mut self) -> Result<[u8; N], AuthError> {
+        let end = self.position.checked_add(N).ok_or(AuthError::Overflow)?;
+        let value = self
+            .encoded
+            .get(self.position..end)
+            .ok_or(AuthError::InvalidEncoding)?
+            .try_into()
+            .map_err(|_| AuthError::InvalidEncoding)?;
+        self.position = end;
+        Ok(value)
+    }
+
+    fn read_u16(&mut self) -> Result<u16, AuthError> {
+        self.read_array().map(u16::from_be_bytes)
+    }
+
+    fn read_u64(&mut self) -> Result<u64, AuthError> {
+        self.read_array().map(u64::from_be_bytes)
+    }
+
+    fn finish(self) -> Result<(), AuthError> {
+        if self.position == self.encoded.len() {
+            Ok(())
+        } else {
+            Err(AuthError::InvalidEncoding)
+        }
+    }
 }
 
 /// One-use bearer grant and exact route binding to commit when OPAQUE
@@ -1614,9 +1959,10 @@ mod tests {
     };
 
     use super::{
-        AccountAuthenticationState, AccountCreationStartParameters, AccountOperationContext,
-        AccountSnapshot, AuthError, AuthenticationCandidate, AuthenticationLookup,
-        AuthenticationStartParameters, CreationAdmission, CredentialChangeStartParameters,
+        AUTHENTICATION_TRANSACTION_RECORD_BYTES, AccountAuthenticationState,
+        AccountCreationStartParameters, AccountOperationContext, AccountSnapshot, AuthError,
+        AuthenticationCandidate, AuthenticationLookup, AuthenticationStartParameters,
+        AuthenticationTransactionRecord, CreationAdmission, CredentialChangeStartParameters,
         DestructiveAccountSnapshot, FreshAuthenticationProof, begin_account_creation_with_entropy,
         begin_account_deletion, begin_account_deletion_with_entropy,
         begin_authentication_with_entropy, begin_credential_change_with_entropy,
@@ -2280,6 +2626,162 @@ mod tests {
             )
             .err(),
             Some(AuthError::EntropyUnavailable)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn authentication_transaction_record_round_trips_without_login_plaintext()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let network_id = NetworkId::from_bytes(vector_bytes("network")?);
+        let operation = context_for_network(network_id, 100)?;
+        let transaction_id = TransactionId::from_bytes([41_u8; 16]);
+        let private_key = AccountHpkePrivateKey::from_bytes([6_u8; 32])?;
+        let start_request_binding = AccountRequestBinding::new(
+            network_id,
+            TEST_RECOVERY_EPOCH,
+            private_key.public_key()?.key_id(),
+            RequestId::from_bytes([42_u8; 16]),
+            AccountServiceMessageKind::OpaqueAuthStart,
+        );
+        let transaction_binding = AccountTransactionBinding::new(
+            transaction_id,
+            TransactionClass::Authentication,
+            network_id,
+            operation.route,
+            operation.now,
+        )?;
+        let expected_account = account()?.0;
+        let state = AccountAuthenticationState {
+            start_request_binding,
+            candidate: AuthenticationCandidate::Known(expected_account),
+            credential_id: OpaqueCredentialId::from_bytes(vector_bytes("credential_id")?),
+            server_state: OpaqueServerLoginState::from_persisted_bytes(vector_bytes(
+                "server_login_state",
+            )?)?,
+        };
+        let transaction = AccountTransaction::new(transaction_binding, state);
+        let record = AuthenticationTransactionRecord::capture(
+            &transaction,
+            MonotonicTick::from_ticks(1_100),
+            UtcSecond::from_unix_seconds(500),
+        )?;
+        assert_eq!(
+            record.expose_for_persistence().len(),
+            AUTHENTICATION_TRANSACTION_RECORD_BYTES
+        );
+        assert!(
+            !record
+                .expose_for_persistence()
+                .windows("entropy-user".len())
+                .any(|window| window == b"entropy-user")
+        );
+
+        let restored = AuthenticationTransactionRecord::parse(record.expose_for_persistence())?
+            .restore(
+                MonotonicTick::from_ticks(2_000),
+                UtcSecond::from_unix_seconds(501),
+            )?;
+        let restored_binding = restored.binding();
+        assert_eq!(restored_binding.transaction_id(), transaction_id);
+        assert_eq!(restored_binding.network_id(), network_id);
+        assert_eq!(
+            restored_binding.expires_at(),
+            MonotonicTick::from_ticks(30_000)
+        );
+        restored_binding.route().validate_match(operation.route)?;
+        let restored_state = restored.state_ref().ok_or(AuthError::Consumed)?;
+        assert_eq!(restored_state.start_request_binding, start_request_binding);
+        let AuthenticationCandidate::Known(restored_account) = restored_state.candidate else {
+            return Err("restored known account became a rejection candidate".into());
+        };
+        assert_eq!(restored_account, expected_account);
+        assert_eq!(
+            restored_state.credential_id.expose_for_account_service(),
+            vector_bytes::<32>("credential_id")?.as_slice()
+        );
+        assert_eq!(
+            restored_state.server_state.expose_for_persistence(),
+            vector_bytes::<128>("server_login_state")?.as_slice()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn authentication_transaction_record_rejects_expiry_and_corruption()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let network_id = NetworkId::from_bytes(vector_bytes("network")?);
+        let operation = context_for_network(network_id, 100)?;
+        let transaction_id = TransactionId::from_bytes([51_u8; 16]);
+        let private_key = AccountHpkePrivateKey::from_bytes([6_u8; 32])?;
+        let state = AccountAuthenticationState {
+            start_request_binding: AccountRequestBinding::new(
+                network_id,
+                TEST_RECOVERY_EPOCH,
+                private_key.public_key()?.key_id(),
+                RequestId::from_bytes([52_u8; 16]),
+                AccountServiceMessageKind::OpaqueAuthStart,
+            ),
+            candidate: AuthenticationCandidate::RejectAtFinish,
+            credential_id: OpaqueCredentialId::from_bytes(vector_bytes("credential_id")?),
+            server_state: OpaqueServerLoginState::from_persisted_bytes(vector_bytes(
+                "fake_server_login_state",
+            )?)?,
+        };
+        let binding = AccountTransactionBinding::new(
+            transaction_id,
+            TransactionClass::Authentication,
+            network_id,
+            operation.route,
+            operation.now,
+        )?;
+        let transaction = AccountTransaction::new(binding, state);
+        let record = AuthenticationTransactionRecord::capture(
+            &transaction,
+            MonotonicTick::from_ticks(1_100),
+            UtcSecond::from_unix_seconds(700),
+        )?;
+        assert_eq!(
+            AuthenticationTransactionRecord::parse(record.expose_for_persistence())?
+                .restore(
+                    MonotonicTick::from_ticks(0),
+                    UtcSecond::from_unix_seconds(729),
+                )
+                .err(),
+            Some(AuthError::Expired)
+        );
+        assert_eq!(
+            AuthenticationTransactionRecord::parse(
+                &record.expose_for_persistence()[..AUTHENTICATION_TRANSACTION_RECORD_BYTES - 1],
+            )
+            .err(),
+            Some(AuthError::InvalidEncoding)
+        );
+
+        let mut corrupted = *record.expose_for_persistence();
+        corrupted[0] ^= 1;
+        assert_eq!(
+            AuthenticationTransactionRecord::parse(&corrupted)?
+                .restore(
+                    MonotonicTick::from_ticks(0),
+                    UtcSecond::from_unix_seconds(701),
+                )
+                .err(),
+            Some(AuthError::InvalidEncoding)
+        );
+        let candidate_tag_offset = 262;
+        let mut corrupted = *record.expose_for_persistence();
+        *corrupted
+            .get_mut(candidate_tag_offset)
+            .ok_or("candidate-tag fixture offset is out of bounds")? = 9;
+        assert_eq!(
+            AuthenticationTransactionRecord::parse(&corrupted)?
+                .restore(
+                    MonotonicTick::from_ticks(0),
+                    UtcSecond::from_unix_seconds(701),
+                )
+                .err(),
+            Some(AuthError::InvalidEncoding)
         );
         Ok(())
     }

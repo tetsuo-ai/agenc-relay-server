@@ -23,11 +23,12 @@ pub use opaque::{
     OpaqueRegistrationResponse, OpaqueServerLoginState, finish_authentication, finish_registration,
 };
 pub use service::{
-    AccountAuthenticationState, AccountCreationStartParameters, AccountCreationState,
-    AccountCredentialRecord, AccountDeletionChallenge, AccountDeletionIntent, AccountFinishOutcome,
-    AccountOperationContext, AccountResponseIntent, AccountResponsePlan, AccountStartOutcome,
-    AuthenticationGrant, AuthenticationLookup, AuthenticationStartParameters, CreateAccountIntent,
-    CreationAdmission, CredentialChangeStartParameters, CredentialChangeState,
+    AUTHENTICATION_TRANSACTION_RECORD_BYTES, AccountAuthenticationState,
+    AccountCreationStartParameters, AccountCreationState, AccountCredentialRecord,
+    AccountDeletionChallenge, AccountDeletionIntent, AccountFinishOutcome, AccountOperationContext,
+    AccountResponseIntent, AccountResponsePlan, AccountStartOutcome, AuthenticationGrant,
+    AuthenticationLookup, AuthenticationStartParameters, AuthenticationTransactionRecord,
+    CreateAccountIntent, CreationAdmission, CredentialChangeStartParameters, CredentialChangeState,
     CredentialReplacementIntent, DestructiveAccountSnapshot, FreshAuthenticationProof,
     SealedAccountFinishOutcome, SealedAccountStart, authentication_completion,
     begin_account_creation, begin_account_deletion, begin_authentication, begin_credential_change,

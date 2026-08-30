@@ -178,6 +178,33 @@ impl AccountTransactionBinding {
     pub const fn expires_at(self) -> MonotonicTick {
         self.expires_at
     }
+
+    pub(crate) const fn class(self) -> TransactionClass {
+        self.class
+    }
+
+    pub(crate) const fn network_id(self) -> NetworkId {
+        self.network_id
+    }
+
+    pub(crate) const fn route(self) -> AccountRouteBinding {
+        self.route
+    }
+
+    pub(crate) const fn restore_authentication(
+        transaction_id: TransactionId,
+        network_id: NetworkId,
+        route: AccountRouteBinding,
+        expires_at: MonotonicTick,
+    ) -> Self {
+        Self {
+            transaction_id,
+            class: TransactionClass::Authentication,
+            network_id,
+            route,
+            expires_at,
+        }
+    }
 }
 
 /// Secret-capable state consumed exactly once on success or failure.
