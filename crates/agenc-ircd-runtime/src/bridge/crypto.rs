@@ -20,9 +20,11 @@ use agenc_ircd_auth::{
     AccountFinishOutcome, AccountOperationContext, AccountServiceEnvelope, AccountStartOutcome,
     AccountTransaction, AuthError, AuthenticatedAccountRequest, AuthenticationFinish,
     AuthenticationGrant, AuthenticationStartParameters, CreateAccountIntent, CreationFinish,
-    OpaqueProfile, OpenedAccountServiceRequest, SealedAccountFinishOutcome, SealedAccountStart,
-    begin_account_creation, begin_authentication, finish_account_authentication,
-    finish_account_creation, open_and_parse_request,
+    CredentialChangeFinish, CredentialChangeStartParameters, CredentialChangeState,
+    CredentialReplacementIntent, OpaqueProfile, OpenedAccountServiceRequest,
+    SealedAccountFinishOutcome, SealedAccountStart, begin_account_creation, begin_authentication,
+    begin_credential_change, finish_account_authentication, finish_account_creation,
+    finish_credential_change, open_and_parse_request,
 };
 use agenc_ircd_crypto::{
     ACCOUNT_HPKE_RESPONSE_PLAINTEXT_BYTES, AccountHpkePrivateKey, AccountResponseSealToken,
@@ -405,6 +407,31 @@ impl CreationStartJob {
     }
 }
 
+/// One account-creation START challenge seal after StateCore reserves the
+/// exact response-count successor.
+pub struct CreationStartSealJob {
+    outcome: AccountStartOutcome<AccountCreationState>,
+    current_response_count: u64,
+}
+
+impl CreationStartSealJob {
+    /// Moves the creation transaction lineage into its one-use seal job.
+    #[must_use]
+    pub fn new(
+        outcome: AccountStartOutcome<AccountCreationState>,
+        current_response_count: u64,
+    ) -> Self {
+        Self {
+            outcome,
+            current_response_count,
+        }
+    }
+
+    fn execute(self) -> Result<SealedAccountStart<AccountCreationState>, AuthError> {
+        self.outcome.seal(self.current_response_count)
+    }
+}
+
 /// One account-creation finish.
 pub struct CreationFinishJob {
     transaction: AccountTransaction<AccountCreationState>,
@@ -444,6 +471,141 @@ pub struct CreationFinishOutput {
     pub outcome: Result<AccountFinishOutcome<CreateAccountIntent>, AuthError>,
 }
 
+/// One account-creation FINISH completion seal after StateCore reserves the
+/// exact response-count successor.
+pub struct CreationFinishSealJob {
+    outcome: AccountFinishOutcome<CreateAccountIntent>,
+    current_response_count: u64,
+}
+
+impl CreationFinishSealJob {
+    /// Moves the checked creation result into its one-use completion seal.
+    #[must_use]
+    pub fn new(
+        outcome: AccountFinishOutcome<CreateAccountIntent>,
+        current_response_count: u64,
+    ) -> Self {
+        Self {
+            outcome,
+            current_response_count,
+        }
+    }
+
+    fn execute(self) -> Result<SealedAccountFinishOutcome<CreateAccountIntent>, AuthError> {
+        self.outcome.seal(self.current_response_count)
+    }
+}
+
+/// One credential-change start.
+pub struct CredentialStartJob {
+    profile: Arc<OpaqueProfile>,
+    parameters: CredentialChangeStartParameters,
+}
+
+impl CredentialStartJob {
+    /// Binds the coordinator OPAQUE profile to one credential-change start.
+    #[must_use]
+    pub fn new(profile: Arc<OpaqueProfile>, parameters: CredentialChangeStartParameters) -> Self {
+        Self {
+            profile,
+            parameters,
+        }
+    }
+
+    fn execute(self) -> Result<AccountStartOutcome<CredentialChangeState>, AuthError> {
+        begin_credential_change(&self.profile, self.parameters)
+    }
+}
+
+/// One credential-change START challenge seal after StateCore reserves the
+/// exact response-count successor.
+pub struct CredentialStartSealJob {
+    outcome: AccountStartOutcome<CredentialChangeState>,
+    current_response_count: u64,
+}
+
+impl CredentialStartSealJob {
+    /// Moves the replacement transaction lineage into its one-use seal job.
+    #[must_use]
+    pub fn new(
+        outcome: AccountStartOutcome<CredentialChangeState>,
+        current_response_count: u64,
+    ) -> Self {
+        Self {
+            outcome,
+            current_response_count,
+        }
+    }
+
+    fn execute(self) -> Result<SealedAccountStart<CredentialChangeState>, AuthError> {
+        self.outcome.seal(self.current_response_count)
+    }
+}
+
+/// One credential-change finish.
+pub struct CredentialFinishJob {
+    transaction: AccountTransaction<CredentialChangeState>,
+    context: AccountOperationContext,
+    finish: AuthenticatedAccountRequest<CredentialChangeFinish>,
+}
+
+impl CredentialFinishJob {
+    /// Moves the transaction and finish request into one blocking job.
+    #[must_use]
+    pub fn new(
+        transaction: AccountTransaction<CredentialChangeState>,
+        context: AccountOperationContext,
+        finish: AuthenticatedAccountRequest<CredentialChangeFinish>,
+    ) -> Self {
+        Self {
+            transaction,
+            context,
+            finish,
+        }
+    }
+
+    fn execute(mut self) -> CredentialFinishOutput {
+        let outcome = finish_credential_change(&mut self.transaction, self.context, self.finish);
+        CredentialFinishOutput {
+            transaction: self.transaction,
+            outcome,
+        }
+    }
+}
+
+/// The transaction and outcome of one credential-change finish.
+pub struct CredentialFinishOutput {
+    /// The transaction, consumed or not, returned to its owner.
+    pub transaction: AccountTransaction<CredentialChangeState>,
+    /// The finish outcome.
+    pub outcome: Result<AccountFinishOutcome<CredentialReplacementIntent>, AuthError>,
+}
+
+/// One credential-change FINISH completion seal after StateCore reserves the
+/// exact response-count successor.
+pub struct CredentialFinishSealJob {
+    outcome: AccountFinishOutcome<CredentialReplacementIntent>,
+    current_response_count: u64,
+}
+
+impl CredentialFinishSealJob {
+    /// Moves the checked replacement result into its one-use completion seal.
+    #[must_use]
+    pub fn new(
+        outcome: AccountFinishOutcome<CredentialReplacementIntent>,
+        current_response_count: u64,
+    ) -> Self {
+        Self {
+            outcome,
+            current_response_count,
+        }
+    }
+
+    fn execute(self) -> Result<SealedAccountFinishOutcome<CredentialReplacementIntent>, AuthError> {
+        self.outcome.seal(self.current_response_count)
+    }
+}
+
 /// The closed set of blocking crypto jobs the runtime submits.
 pub enum RuntimeCryptoJob {
     /// One Argon2id channel-key verification.
@@ -464,8 +626,20 @@ pub enum RuntimeCryptoJob {
     OpaqueFinishSeal(Box<OpaqueFinishSealJob>),
     /// One account-creation start.
     CreationStart(Box<CreationStartJob>),
+    /// One account-creation START response seal.
+    CreationStartSeal(Box<CreationStartSealJob>),
     /// One account-creation finish.
     CreationFinish(Box<CreationFinishJob>),
+    /// One account-creation FINISH response seal.
+    CreationFinishSeal(Box<CreationFinishSealJob>),
+    /// One credential-change start.
+    CredentialStart(Box<CredentialStartJob>),
+    /// One credential-change START response seal.
+    CredentialStartSeal(Box<CredentialStartSealJob>),
+    /// One credential-change finish.
+    CredentialFinish(Box<CredentialFinishJob>),
+    /// One credential-change FINISH response seal.
+    CredentialFinishSeal(Box<CredentialFinishSealJob>),
 }
 
 /// The closed set of job outputs; secret-bearing payloads have no `Debug`.
@@ -488,8 +662,22 @@ pub enum CryptoJobOutput {
     OpaqueFinishSealed(Box<Result<SealedAccountFinishOutcome<AuthenticationGrant>, AuthError>>),
     /// A creation start outcome.
     CreationStart(Box<Result<AccountStartOutcome<AccountCreationState>, AuthError>>),
+    /// A creation START with its one-use challenge sealed.
+    CreationStartSealed(Box<Result<SealedAccountStart<AccountCreationState>, AuthError>>),
     /// A creation finish outcome with its transaction.
     CreationFinish(Box<CreationFinishOutput>),
+    /// A creation FINISH with its checked completion sealed.
+    CreationFinishSealed(Box<Result<SealedAccountFinishOutcome<CreateAccountIntent>, AuthError>>),
+    /// A credential-change start outcome.
+    CredentialStart(Box<Result<AccountStartOutcome<CredentialChangeState>, AuthError>>),
+    /// A credential-change START with its one-use challenge sealed.
+    CredentialStartSealed(Box<Result<SealedAccountStart<CredentialChangeState>, AuthError>>),
+    /// A credential-change finish outcome with its transaction.
+    CredentialFinish(Box<CredentialFinishOutput>),
+    /// A credential-change FINISH with its checked completion sealed.
+    CredentialFinishSealed(
+        Box<Result<SealedAccountFinishOutcome<CredentialReplacementIntent>, AuthError>>,
+    ),
 }
 
 impl CryptoJob for RuntimeCryptoJob {
@@ -505,7 +693,13 @@ impl CryptoJob for RuntimeCryptoJob {
             | Self::OpaqueFinish(_)
             | Self::OpaqueFinishSeal(_)
             | Self::CreationStart(_)
-            | Self::CreationFinish(_) => JobClass::Opaque,
+            | Self::CreationStartSeal(_)
+            | Self::CreationFinish(_)
+            | Self::CreationFinishSeal(_)
+            | Self::CredentialStart(_)
+            | Self::CredentialStartSeal(_)
+            | Self::CredentialFinish(_)
+            | Self::CredentialFinishSeal(_) => JobClass::Opaque,
         }
     }
 
@@ -524,7 +718,23 @@ impl CryptoJob for RuntimeCryptoJob {
                 CryptoJobOutput::OpaqueFinishSealed(Box::new(job.execute()))
             }
             Self::CreationStart(job) => CryptoJobOutput::CreationStart(Box::new(job.execute())),
+            Self::CreationStartSeal(job) => {
+                CryptoJobOutput::CreationStartSealed(Box::new(job.execute()))
+            }
             Self::CreationFinish(job) => CryptoJobOutput::CreationFinish(Box::new(job.execute())),
+            Self::CreationFinishSeal(job) => {
+                CryptoJobOutput::CreationFinishSealed(Box::new(job.execute()))
+            }
+            Self::CredentialStart(job) => CryptoJobOutput::CredentialStart(Box::new(job.execute())),
+            Self::CredentialStartSeal(job) => {
+                CryptoJobOutput::CredentialStartSealed(Box::new(job.execute()))
+            }
+            Self::CredentialFinish(job) => {
+                CryptoJobOutput::CredentialFinish(Box::new(job.execute()))
+            }
+            Self::CredentialFinishSeal(job) => {
+                CryptoJobOutput::CredentialFinishSealed(Box::new(job.execute()))
+            }
         }
     }
 }
