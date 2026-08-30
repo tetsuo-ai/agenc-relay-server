@@ -364,10 +364,12 @@ impl RegistrationRouter {
                 );
             }
             RegistrationAction::ForwardRegisteredCommand(handoff) => {
+                let capabilities = state.registration.capability_state();
                 return crate::channels::route_registered(
                     context,
                     generation,
                     state.bound,
+                    capabilities,
                     &mut state.nickname,
                     handoff,
                 )

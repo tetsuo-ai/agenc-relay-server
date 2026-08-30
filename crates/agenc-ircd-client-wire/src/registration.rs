@@ -586,6 +586,14 @@ impl RegistrationState {
         self.cap.enabled_names()
     }
 
+    /// Borrows the negotiated capability state for registered-session
+    /// rendering. The wire owner remains the only authority that can mutate
+    /// this state.
+    #[must_use]
+    pub const fn capability_state(&self) -> &CapabilityState {
+        &self.cap
+    }
+
     /// Applies one live capability-profile transition to this connection.
     ///
     /// NEW and DEL actions are observable only when `cap-notify` was enabled

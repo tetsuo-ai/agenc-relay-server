@@ -766,8 +766,12 @@ fn stage_two_numeric_shape_is_applicable(
     if code == 4 {
         return middle.len() == 4 && trailing.is_none();
     }
-    trailing.is_some_and(|description| !description.is_empty())
-        && stage_two_numeric_middle_is_applicable(code, middle)
+    let trailing_is_applicable = match code {
+        221 | 324 | 329 | 333 | 341 | 346 | 348 | 367 => trailing.is_none(),
+        303 | 319 | 322 | 332 | 353 => trailing.is_some(),
+        _ => trailing.is_some_and(|description| !description.is_empty()),
+    };
+    trailing_is_applicable && stage_two_numeric_middle_is_applicable(code, middle)
 }
 
 fn stage_two_numeric_middle_is_applicable(code: u16, middle: &[&str]) -> bool {
@@ -785,7 +789,6 @@ fn stage_two_numeric_middle_is_applicable(code: u16, middle: &[&str]) -> bool {
         | 462
         | 464
         | 465
-        | 481
         | 903..=907 => middle.is_empty(),
         5 => (1..=13).contains(&middle.len()) && middle.iter().copied().all(is_isupport_token),
         252..=254 => matches!(middle, [value] if is_ascii_decimal(value)),
@@ -795,6 +798,43 @@ fn stage_two_numeric_middle_is_applicable(code: u16, middle: &[&str]) -> bool {
         421 | 432 | 433 | 461 => middle.len() == 1,
         900 => middle.len() == 2,
         908 => middle == ["AGENC-OPAQUE"],
+        _ => stage_six_numeric_middle_is_applicable(code, middle),
+    }
+}
+
+fn stage_six_numeric_middle_is_applicable(code: u16, middle: &[&str]) -> bool {
+    stage_six_reply_middle_is_applicable(code, middle)
+        || stage_six_error_middle_is_applicable(code, middle)
+}
+
+fn stage_six_reply_middle_is_applicable(code: u16, middle: &[&str]) -> bool {
+    match code {
+        303 | 305 | 306 | 323 | 371 | 374 => middle.is_empty(),
+        221 => matches!(middle, [modes] if modes.starts_with('+')),
+        301 | 315 | 318 | 319 | 331 | 332 | 347 | 349 | 366 | 368 | 369 | 391 => middle.len() == 1,
+        311 => middle.len() == 4,
+        312 | 321 | 341 | 346 | 348 | 353 => middle.len() == 2,
+        322 => matches!(middle, [_, users] if is_ascii_decimal(users)),
+        324 => (2..=8).contains(&middle.len()),
+        329 => matches!(middle, [_, timestamp] if is_ascii_decimal(timestamp)),
+        333 => matches!(middle, [_, _, timestamp] if is_ascii_decimal(timestamp)),
+        352 => middle.len() == 6,
+        367 => {
+            (2..=4).contains(&middle.len())
+                && middle
+                    .get(3)
+                    .is_none_or(|timestamp| is_ascii_decimal(timestamp))
+        }
+        _ => false,
+    }
+}
+
+fn stage_six_error_middle_is_applicable(code: u16, middle: &[&str]) -> bool {
+    match code {
+        409 | 411 | 412 | 481 | 483 | 501 | 502 => middle.is_empty(),
+        401..=407 | 442 | 471 | 473..=477 | 482 => middle.len() == 1,
+        441 | 443 => middle.len() == 2,
+        472 => matches!(middle, [mode] if mode.chars().count() == 1),
         _ => false,
     }
 }

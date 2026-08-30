@@ -6,11 +6,13 @@
 //! shutdown cannot leave a logical session behind.
 
 use agenc_ircd_client_wire::{
-    ParsedMessage, RegisteredCommandHandoff, RegisteredCommandKind, WireMessage, numeric_reply,
+    CapabilityState, ParsedMessage, RegisteredCommandHandoff, RegisteredCommandKind, WireMessage,
+    numeric_reply,
 };
 use agenc_ircd_domain::{
-    AdmissionSnapshot, AuthorizedCommand, CanonicalCommand, CanonicalCommandView, CommandEnvelope,
-    EntropyPurpose, ExternalInputRequest, ExternalInputs, PlanDecision, QueryPlan, StorageClass,
+    AdmissionSnapshot, AuthorizationFailure, AuthorizedCommand, CanonicalCommand,
+    CanonicalCommandView, CommandEnvelope, DomainError, EntropyPurpose, ExternalInputRequest,
+    ExternalInputs, PlanDecision, QueryPlan, StorageClass,
 };
 use agenc_ircd_types::{
     AccountDeletionToken, BoundedUtf8, ChannelInstanceId, ControlPolicy, EntryId, InviteId,
@@ -36,11 +38,49 @@ struct RetryCommand<'a> {
     message: &'a ParsedMessage,
 }
 
+#[derive(Clone, Copy)]
+struct ClientReply<'a> {
+    generation: ConnectionGeneration,
+    capabilities: &'a CapabilityState,
+    request: RetryCommand<'a>,
+}
+
+impl<'a> ClientReply<'a> {
+    const fn render_input(
+        self,
+        requester: agenc_ircd_types::UserId,
+    ) -> crate::client_render::ReplyInput<'a> {
+        crate::client_render::ReplyInput {
+            requester,
+            generation: self.generation,
+            capabilities: self.capabilities,
+            request: self.request.message,
+        }
+    }
+}
+
+enum AuthorizationError {
+    Rejected(AuthorizationFailure),
+    Internal(RuntimeError),
+}
+
+enum SessionCommandError {
+    Public { error: DomainError, silent: bool },
+    Internal(RuntimeError),
+}
+
+impl From<RuntimeError> for SessionCommandError {
+    fn from(error: RuntimeError) -> Self {
+        Self::Internal(error)
+    }
+}
+
 /// Executes one registered handoff or renders its closed public failure.
 pub(crate) fn route_registered(
     context: &mut StateCoreContext,
     generation: ConnectionGeneration,
     bound: Option<BoundSession>,
+    capabilities: &CapabilityState,
     current_nickname: &mut Option<String>,
     handoff: RegisteredCommandHandoff,
 ) -> Result<RouteOutcome, RuntimeError> {
@@ -48,7 +88,34 @@ pub(crate) fn route_registered(
         return Ok(RouteOutcome::Close(CloseReason::ProtocolError));
     };
     let (kind, message) = handoff.into_parts();
-    let command = crate::command_convert::convert(context.domain(), kind, &message)?;
+    let request = RetryCommand {
+        kind,
+        message: &message,
+    };
+    let reply = ClientReply {
+        generation,
+        capabilities,
+        request,
+    };
+    let command = match crate::command_convert::convert(context.domain(), kind, &message) {
+        Ok(command) => command,
+        Err(RuntimeError::InvalidValue | RuntimeError::LimitExceeded) => {
+            crate::client_render::render_domain_failure(
+                context,
+                crate::client_render::ReplyInput {
+                    requester: bound.user_id,
+                    generation: reply.generation,
+                    capabilities: reply.capabilities,
+                    request: reply.request.message,
+                },
+                DomainError::InvalidArgument,
+                false,
+                None,
+            )?;
+            return Ok(RouteOutcome::Continue);
+        }
+        Err(error) => return Err(error),
+    };
     let next_nickname = match command.view() {
         CanonicalCommandView::Nick(nickname) => Some(nickname.presentation().to_owned()),
         _ => None,
@@ -58,18 +125,8 @@ pub(crate) fn route_registered(
         .map_or(LifecycleRender::Silent, |nickname| {
             LifecycleRender::Nick(nickname.clone())
         });
-    execute_session_command(
-        context,
-        bound,
-        Some(generation),
-        command,
-        render,
-        Some(RetryCommand {
-            kind,
-            message: &message,
-        }),
-    )?;
-    if let Some(nickname) = next_nickname {
+    let accepted = execute_session_command(context, bound, Some(reply), command, render)?;
+    if accepted && let Some(nickname) = next_nickname {
         *current_nickname = Some(nickname);
     }
     Ok(RouteOutcome::Continue)
@@ -88,50 +145,78 @@ pub(crate) fn close_registered(context: &mut StateCoreContext, bound: BoundSessi
         None,
         CanonicalCommand::quit(reason),
         LifecycleRender::Quit(wire_reason),
-        None,
     );
 }
 
 fn execute_session_command(
     context: &mut StateCoreContext,
     bound: BoundSession,
-    origin: Option<ConnectionGeneration>,
+    reply: Option<ClientReply<'_>>,
     command: CanonicalCommand,
     render: LifecycleRender,
-    retry: Option<RetryCommand<'_>>,
-) -> Result<(), RuntimeError> {
-    let decision = plan_session_command(context, bound, command, retry)?;
-    let plan = match decision {
-        PlanDecision::Mutation(plan) => plan,
-        PlanDecision::Query(plan) => {
-            render_query(context, origin, &plan)?;
-            return Ok(());
+) -> Result<bool, RuntimeError> {
+    let decision = match plan_session_command(context, bound, command, reply.map(|r| r.request)) {
+        Ok(decision) => decision,
+        Err(SessionCommandError::Public { error, silent }) => {
+            let reply = reply.ok_or(RuntimeError::InvalidValue)?;
+            crate::client_render::render_domain_failure(
+                context,
+                reply.render_input(bound.user_id),
+                error,
+                silent,
+                None,
+            )?;
+            return Ok(false);
         }
-        PlanDecision::Rejected(plan) => {
-            if !plan.is_silent()
-                && let Some(generation) = origin
-            {
-                render_unknown(context, generation, None, "*")?;
-            }
-            return Ok(());
-        }
-        PlanDecision::NeedsExternal(_) => return Err(RuntimeError::InvalidValue),
+        Err(SessionCommandError::Internal(error)) => return Err(error),
+    };
+    let PlanDecision::Mutation(plan) = decision else {
+        return complete_nonmutation(context, bound, reply, decision);
     };
     let fanout = lifecycle_fanout(context, bound, &plan, render)?;
     match plan.storage_class() {
         StorageClass::Ephemeral => context
             .apply_ephemeral(plan, fanout)
-            .map(|_| ())
+            .map(|_| true)
             .map_err(|_| RuntimeError::InvalidValue),
         StorageClass::Durable => context
             .stage_durable(
                 plan,
                 fanout,
-                origin.map(|generation| StagedOrigin { generation }),
+                reply.map(|reply| StagedOrigin {
+                    generation: reply.generation,
+                }),
                 0,
             )
-            .map(|_| ())
+            .map(|_| true)
             .map_err(stage_error),
+    }
+}
+
+fn complete_nonmutation(
+    context: &mut StateCoreContext,
+    bound: BoundSession,
+    reply: Option<ClientReply<'_>>,
+    decision: PlanDecision,
+) -> Result<bool, RuntimeError> {
+    match decision {
+        PlanDecision::Query(plan) => {
+            render_query(context, reply.map(|reply| reply.generation), &plan)?;
+            Ok(true)
+        }
+        PlanDecision::Rejected(plan) => {
+            if let Some(reply) = reply {
+                crate::client_render::render_rejected(
+                    context,
+                    reply.render_input(bound.user_id),
+                    &plan,
+                )?;
+            }
+            Ok(false)
+        }
+        PlanDecision::Mutation(_) | PlanDecision::NeedsExternal(_) => {
+            Err(RuntimeError::InvalidValue)
+        }
     }
 }
 
@@ -140,12 +225,12 @@ fn plan_session_command(
     bound: BoundSession,
     command: CanonicalCommand,
     retry: Option<RetryCommand<'_>>,
-) -> Result<PlanDecision, RuntimeError> {
+) -> Result<PlanDecision, SessionCommandError> {
     let (authorized, admission) = admit_command(context, bound, command)?;
     let decision = context
         .domain()
         .plan_authorized(authorized, None)
-        .map_err(|_| RuntimeError::InvalidValue)?;
+        .map_err(domain_plan_error)?;
     let PlanDecision::NeedsExternal(requests) = decision else {
         return Ok(decision);
     };
@@ -156,7 +241,7 @@ fn admit_command(
     context: &mut StateCoreContext,
     bound: BoundSession,
     command: CanonicalCommand,
-) -> Result<(AuthorizedCommand, AdmissionSnapshot), RuntimeError> {
+) -> Result<(AuthorizedCommand, AdmissionSnapshot), SessionCommandError> {
     let buckets: Vec<_> = context
         .domain()
         .command_charges(bound.user_id, &command)
@@ -168,12 +253,24 @@ fn admit_command(
         .buckets_mut()
         .domain_snapshot(now, &buckets)
         .map_err(|_| RuntimeError::InvalidValue)?;
-    let authorized = authorize_command(context, bound, command, &admission)?;
+    let authorized = authorize_command(context, bound, command, &admission);
+    let charges = match &authorized {
+        Ok(authorized) => authorized.charges(),
+        Err(AuthorizationError::Rejected(failure)) => failure.charges(),
+        Err(AuthorizationError::Internal(error)) => return Err((*error).into()),
+    };
     context
         .buckets_mut()
-        .apply_domain_charges(now, authorized.charges())
+        .apply_domain_charges(now, charges)
         .map_err(|_| RuntimeError::LimitExceeded)?;
-    Ok((authorized, admission))
+    match authorized {
+        Ok(authorized) => Ok((authorized, admission)),
+        Err(AuthorizationError::Rejected(failure)) => Err(SessionCommandError::Public {
+            error: failure.error(),
+            silent: failure.is_silent(),
+        }),
+        Err(AuthorizationError::Internal(error)) => Err(error.into()),
+    }
 }
 
 fn authorize_command(
@@ -181,11 +278,11 @@ fn authorize_command(
     bound: BoundSession,
     command: CanonicalCommand,
     admission: &AdmissionSnapshot,
-) -> Result<AuthorizedCommand, RuntimeError> {
+) -> Result<AuthorizedCommand, AuthorizationError> {
     let session = context
         .domain()
         .session(bound.user_id)
-        .ok_or(RuntimeError::InvalidValue)?;
+        .ok_or(AuthorizationError::Internal(RuntimeError::InvalidValue))?;
     let envelope = CommandEnvelope::new(
         bound.session_id,
         bound.user_id,
@@ -196,7 +293,7 @@ fn authorize_command(
     context
         .domain()
         .authorize(envelope, admission)
-        .map_err(|_| RuntimeError::InvalidValue)
+        .map_err(AuthorizationError::Rejected)
 }
 
 fn complete_external_plan(
@@ -205,15 +302,36 @@ fn complete_external_plan(
     retry: Option<RetryCommand<'_>>,
     admission: &AdmissionSnapshot,
     requests: &[ExternalInputRequest],
-) -> Result<PlanDecision, RuntimeError> {
+) -> Result<PlanDecision, SessionCommandError> {
     let retry = retry.ok_or(RuntimeError::InvalidValue)?;
     let command = crate::command_convert::convert(context.domain(), retry.kind, retry.message)?;
-    let authorized = authorize_command(context, bound, command, admission)?;
+    let authorized = match authorize_command(context, bound, command, admission) {
+        Ok(authorized) => authorized,
+        Err(AuthorizationError::Rejected(failure)) => {
+            return Err(SessionCommandError::Public {
+                error: failure.error(),
+                silent: failure.is_silent(),
+            });
+        }
+        Err(AuthorizationError::Internal(error)) => return Err(error.into()),
+    };
     let external = satisfy_external(context, requests)?;
     context
         .domain()
         .plan_authorized(authorized, Some(external))
-        .map_err(|_| RuntimeError::InvalidValue)
+        .map_err(domain_plan_error)
+}
+
+fn domain_plan_error(error: DomainError) -> SessionCommandError {
+    match error {
+        DomainError::ExternalInputMismatch | DomainError::InvariantViolation => {
+            SessionCommandError::Internal(RuntimeError::InvalidValue)
+        }
+        error => SessionCommandError::Public {
+            error,
+            silent: false,
+        },
+    }
 }
 
 fn lifecycle_fanout(
@@ -407,26 +525,6 @@ fn session_prefix(session: &agenc_ircd_domain::SessionState) -> Result<String, R
         user,
         host
     ))
-}
-
-fn render_unknown(
-    context: &mut StateCoreContext,
-    generation: ConnectionGeneration,
-    nickname: Option<&str>,
-    command: &str,
-) -> Result<(), RuntimeError> {
-    let frame = numeric_reply(
-        context.server_prefix(),
-        421,
-        nickname.unwrap_or("*"),
-        &[command],
-        Some("Unknown command"),
-    )
-    .map_err(|_| RuntimeError::InvalidValue)?;
-    context
-        .send_to(generation, vec![frame])
-        .map_err(|_| RuntimeError::MemoryExhausted)?;
-    Ok(())
 }
 
 fn stage_error(error: StageRefused) -> RuntimeError {

@@ -163,6 +163,64 @@ fn stage_two_numerics_reject_noncanonical_middle_and_trailing_shapes() -> Result
 }
 
 #[test]
+fn stage_six_numerics_accept_only_their_registered_parameter_shapes() {
+    for (code, middle, trailing) in [
+        (221, vec!["+i"], None),
+        (303, vec![], Some("")),
+        (311, vec!["nick", "user", "host", "*"], Some("Real Name")),
+        (322, vec!["#chat", "5"], Some("topic")),
+        (324, vec!["#chat", "+im"], None),
+        (329, vec!["#chat", "1700000000"], None),
+        (333, vec!["#chat", "setter", "1700000000"], None),
+        (
+            352,
+            vec!["#chat", "user", "host", "server", "nick", "H"],
+            Some("0 Real Name"),
+        ),
+        (367, vec!["#chat", "*!*@host", "setter", "1700000000"], None),
+        (401, vec!["missing"], Some("No such nick")),
+        (
+            441,
+            vec!["nick", "#chat"],
+            Some("They are not on that channel"),
+        ),
+        (472, vec!["x"], Some("Unknown mode")),
+        (482, vec!["#chat"], Some("Permission denied for channel")),
+    ] {
+        assert!(
+            numeric_reply("server", code, "requester", &middle, trailing).is_ok(),
+            "registered numeric {code} rejected its canonical shape"
+        );
+    }
+
+    for (code, middle, trailing) in [
+        (221, vec!["i"], None),
+        (303, vec![], None),
+        (311, vec!["nick", "user", "host"], Some("Real Name")),
+        (322, vec!["#chat", "exact"], Some("topic")),
+        (324, vec!["#chat"], None),
+        (329, vec!["#chat", "not-a-time"], None),
+        (333, vec!["#chat", "setter", "not-a-time"], None),
+        (
+            352,
+            vec!["#chat", "user", "host", "server", "nick"],
+            Some("0 Real Name"),
+        ),
+        (367, vec!["#chat", "*!*@host", "setter", "not-a-time"], None),
+        (401, vec![], Some("No such nick")),
+        (441, vec!["nick"], Some("They are not on that channel")),
+        (472, vec!["xx"], Some("Unknown mode")),
+        (482, vec!["#chat"], None),
+    ] {
+        assert_eq!(
+            numeric_reply("server", code, "requester", &middle, trailing).err(),
+            Some(RenderError::InapplicableReply),
+            "registered numeric {code} accepted a noncanonical shape"
+        );
+    }
+}
+
+#[test]
 fn numeric_counts_and_isupport_names_use_their_exact_grammars() {
     assert_eq!(
         numeric_reply(

@@ -13,6 +13,7 @@ pub mod bridge;
 pub mod budget;
 pub mod cancel;
 pub mod channels;
+mod client_render;
 pub mod clock;
 mod command_convert;
 pub mod connection;
