@@ -799,10 +799,10 @@ fn stage_durable_command(
 ) -> Result<bool, RuntimeError> {
     let origin = durable_command_origin(context, bound, reply)?;
     let Some(account_id) = deleted_account(&plan)? else {
-        return context
-            .stage_durable(plan, fanout, origin, 0)
-            .map(|_| true)
-            .map_err(stage_error);
+        return match context.stage_durable(plan, fanout, origin, 0) {
+            Ok(_) => Ok(true),
+            Err(error) => render_durable_stage_refusal(context, bound, reply, error),
+        };
     };
     let generation = reply
         .map(|reply| reply.generation)
@@ -818,8 +818,40 @@ fn stage_durable_command(
         }
         Err(error) => {
             accounts.cancel_account_deletion(context, generation)?;
-            Err(stage_error(error))
+            render_durable_stage_refusal(context, bound, reply, error)
         }
+    }
+}
+
+fn render_durable_stage_refusal(
+    context: &mut StateCoreContext,
+    bound: BoundSession,
+    reply: Option<ClientReply<'_>>,
+    error: StageRefused,
+) -> Result<bool, RuntimeError> {
+    let Some(reply) = reply else {
+        return Err(stage_error(error));
+    };
+    let error = durable_stage_refusal_error(error)?;
+    crate::client_render::render_domain_failure(
+        context,
+        reply.render_input(bound.user_id),
+        error,
+        reply.request.message.command() == "NOTICE",
+        None,
+    )?;
+    Ok(false)
+}
+
+fn durable_stage_refusal_error(error: StageRefused) -> Result<DomainError, RuntimeError> {
+    match error {
+        StageRefused::Fanout(_) | StageRefused::Busy | StageRefused::Quiescing => {
+            Ok(DomainError::ServerBusy)
+        }
+        StageRefused::Domain(error) => match domain_plan_error(error) {
+            SessionCommandError::Public { error, .. } => Ok(error),
+            SessionCommandError::Internal(error) => Err(error),
+        },
     }
 }
 
@@ -1285,6 +1317,24 @@ mod tests {
     use crate::admission::{BucketTable, RateLimits};
     use crate::bridge::crypto::ChannelKeyVerdict;
     use crate::state_core::inbox::SourceAddressKey;
+
+    #[test]
+    fn durable_stage_refusals_are_public_only_when_safe() {
+        for refusal in [StageRefused::Busy, StageRefused::Quiescing] {
+            assert!(matches!(
+                durable_stage_refusal_error(refusal),
+                Ok(DomainError::ServerBusy)
+            ));
+        }
+        assert!(matches!(
+            durable_stage_refusal_error(StageRefused::Domain(DomainError::StaleRevision)),
+            Ok(DomainError::StaleRevision)
+        ));
+        assert!(matches!(
+            durable_stage_refusal_error(StageRefused::Domain(DomainError::InvariantViolation)),
+            Err(RuntimeError::InvalidValue)
+        ));
+    }
 
     #[test]
     fn crypto_completion_mapping_accepts_only_the_pending_output_kind() {
