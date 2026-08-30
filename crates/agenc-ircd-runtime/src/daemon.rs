@@ -417,6 +417,10 @@ fn account_service_config(
         fake_credential_key: Arc::new(OpaqueFakeCredentialKey::from_bytes(*fake_key.expose())),
         login_index_key_state: reconstruction.account_service.login_index_key_state(),
         live_login_keys: reconstruction.account_service.live_login_keys().clone(),
+        login_deletion_tombstones: reconstruction
+            .account_service
+            .login_deletion_tombstones()
+            .clone(),
         startup_transaction_cleanups: reconstruction
             .account_service
             .startup_transaction_cleanups()

@@ -807,17 +807,16 @@ fn stage_durable_command(
         .map(|reply| reply.generation)
         .ok_or(RuntimeError::InvalidValue)?;
     let accounts = accounts.ok_or(RuntimeError::InvalidValue)?;
-    let now_utc = context.utc_now().map_err(|_| RuntimeError::InvalidValue)?;
-    let writes = accounts.begin_account_deletion(generation, account_id, now_utc)?;
+    let writes = accounts.begin_account_deletion(context, generation, account_id)?;
     let staged = context.stage_durable_with_account_service(plan, fanout, origin, 0, writes);
     match staged {
         Ok(crate::state_core::StageAccepted::Staged { .. }) => Ok(true),
         Ok(crate::state_core::StageAccepted::AppliedInStep(_)) => {
-            accounts.cancel_account_deletion(generation)?;
+            accounts.cancel_account_deletion(context, generation)?;
             Err(RuntimeError::InvalidValue)
         }
         Err(error) => {
-            accounts.cancel_account_deletion(generation)?;
+            accounts.cancel_account_deletion(context, generation)?;
             Err(stage_error(error))
         }
     }

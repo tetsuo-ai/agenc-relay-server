@@ -62,6 +62,7 @@ pub struct AccountServiceReconstruction {
     login_index_key_state: LoginIndexKeyState,
     fake_opaque_record: [u8; OPAQUE_REGISTRATION_RECORD_BYTES],
     live_login_keys: BTreeMap<AccountId, StoredKey>,
+    login_deletion_tombstones: BTreeMap<(u64, AccountId), StoredKey>,
     startup_transaction_cleanups: Vec<RecoveredAccountTransactionCleanup>,
 }
 
@@ -82,6 +83,12 @@ impl AccountServiceReconstruction {
     #[must_use]
     pub const fn live_login_keys(&self) -> &BTreeMap<AccountId, StoredKey> {
         &self.live_login_keys
+    }
+
+    /// Borrows validated login tombstones ordered by expiry and Account ID.
+    #[must_use]
+    pub const fn login_deletion_tombstones(&self) -> &BTreeMap<(u64, AccountId), StoredKey> {
+        &self.login_deletion_tombstones
     }
 
     /// Returns the authenticated connection-bound rows that must be deleted
@@ -142,7 +149,10 @@ struct AccountServiceScan {
     login_index_key_state: Option<LoginIndexKeyState>,
     fake_opaque_record: Option<[u8; OPAQUE_REGISTRATION_RECORD_BYTES]>,
     live_accounts: BTreeSet<AccountId>,
+    deleted_accounts: BTreeSet<AccountId>,
     live_login_keys: BTreeMap<AccountId, StoredKey>,
+    login_deletion_accounts: BTreeSet<AccountId>,
+    login_deletion_tombstones: BTreeMap<(u64, AccountId), StoredKey>,
     opaque_accounts: BTreeSet<AccountId>,
     login_entry_counts: BTreeMap<u32, u64>,
     transactions: BTreeMap<TransactionId, RecoveredTransaction>,
@@ -156,7 +166,10 @@ impl AccountServiceScan {
             login_index_key_state,
             fake_opaque_record,
             live_accounts,
+            deleted_accounts,
             live_login_keys,
+            login_deletion_accounts,
+            login_deletion_tombstones,
             opaque_accounts,
             login_entry_counts,
             transactions,
@@ -177,6 +190,12 @@ impl AccountServiceScan {
         {
             return Err(RuntimeError::Storage(StorageError::StaleState));
         }
+        if login_deletion_accounts
+            .iter()
+            .any(|account_id| !deleted_accounts.contains(account_id))
+        {
+            return Err(RuntimeError::Storage(StorageError::StaleState));
+        }
         let startup_transaction_cleanups = recover_account_transaction_cleanups(
             transactions,
             login_index_key_state,
@@ -188,6 +207,7 @@ impl AccountServiceScan {
             fake_opaque_record: fake_opaque_record
                 .ok_or(RuntimeError::Storage(StorageError::StaleState))?,
             live_login_keys,
+            login_deletion_tombstones,
             startup_transaction_cleanups,
         })
     }
@@ -504,7 +524,8 @@ impl Scan {
         let value = PersistentRecordValue::decode(table, opened.expose_for_storage_codec())?;
         self.index.record_known(table, key.clone(), existing);
         match (table, value.record_kind()) {
-            (TableId::Account | TableId::Channel, TOMBSTONE_RECORD_KIND) => Ok(()),
+            (TableId::Account, TOMBSTONE_RECORD_KIND) => self.admit_account_tombstone(&key, &value),
+            (TableId::Channel, TOMBSTONE_RECORD_KIND) => Ok(()),
             (TableId::Account, LIVE_RECORD_KIND) => self.admit_account(key, &value),
             (TableId::Channel, LIVE_RECORD_KIND) => self.admit_channel(key, &value),
             (TableId::NicknameReservation, LIVE_RECORD_KIND) => {
@@ -569,7 +590,42 @@ impl Scan {
                     return Err(RuntimeError::Storage(StorageError::StaleState));
                 }
             }
-            LoginIndexValueKind::DeletionTombstone { .. } => {}
+            LoginIndexValueKind::DeletionTombstone {
+                deleted_account_id,
+                expires_at,
+            } => {
+                if !self
+                    .account_service
+                    .login_deletion_accounts
+                    .insert(*deleted_account_id)
+                    || self
+                        .account_service
+                        .login_deletion_tombstones
+                        .insert((*expires_at, *deleted_account_id), key.clone())
+                        .is_some()
+                {
+                    return Err(RuntimeError::Storage(StorageError::StaleState));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn admit_account_tombstone(
+        &mut self,
+        key: &StoredKey,
+        value: &PersistentRecordValue,
+    ) -> Result<(), RuntimeError> {
+        let account_id = AccountId::parse_wire_bytes(key.as_bytes())
+            .map_err(|_| RuntimeError::Storage(StorageError::InvalidEncoding))?;
+        if KeyDeriver::account_key(account_id)? != *key
+            || value.generation() != 0
+            || value.expires_at().is_some()
+            || !value.references().is_empty()
+            || !value.body().is_empty()
+            || !self.account_service.deleted_accounts.insert(account_id)
+        {
+            return Err(RuntimeError::Storage(StorageError::StaleState));
         }
         Ok(())
     }
@@ -1557,6 +1613,68 @@ mod tests {
                 .existing(TableId::RegistrationInvite, &invitation_key)?
                 .is_some()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn login_deletion_tombstone_restores_only_for_a_deleted_account() -> Result<(), RuntimeError> {
+        let keys = keys()?;
+        let deleted_account_id = account_id(22);
+        let account_key = KeyDeriver::account_key(deleted_account_id)?;
+        let account_tombstone = PersistentRecordValue::new(
+            TableId::Account,
+            TOMBSTONE_RECORD_KIND,
+            1,
+            0,
+            None,
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let login_key = LoginIndexStoredKey::new(3, LoginIndexDigest::from_storage_key([23; 32]))?;
+        let stored_login_key = login_key.encode()?;
+        let login_tombstone = LoginIndexValue::new(
+            &login_key,
+            LoginIndexValueKind::DeletionTombstone {
+                deleted_account_id,
+                expires_at: 2_592_100,
+            },
+        )?;
+        let mut scan = Scan::default();
+        scan.admit(
+            &keys,
+            TableId::Account,
+            account_key.clone(),
+            &seal(TableId::Account, &account_key, &account_tombstone, 14)?,
+        )?;
+        scan.admit(
+            &keys,
+            TableId::LoginIndex,
+            stored_login_key.clone(),
+            &seal_raw(
+                TableId::LoginIndex,
+                &stored_login_key,
+                &login_tombstone.encode()?,
+                15,
+            )?,
+        )?;
+        assert!(
+            scan.account_service
+                .login_deletion_tombstones
+                .get(&(2_592_100, deleted_account_id))
+                == Some(&stored_login_key)
+        );
+
+        let mut missing_owner = account_service_scan()?;
+        missing_owner
+            .login_deletion_accounts
+            .insert(deleted_account_id);
+        missing_owner
+            .login_deletion_tombstones
+            .insert((2_592_100, deleted_account_id), stored_login_key);
+        assert!(matches!(
+            missing_owner.finish(),
+            Err(RuntimeError::Storage(StorageError::StaleState))
+        ));
         Ok(())
     }
 

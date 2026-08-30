@@ -1384,7 +1384,10 @@ impl CommandRouter for RegistrationRouter {
             self.retry_session_closes(context);
             return;
         }
-        if origin.is_some_and(|origin| self.accounts.account_deletion_rejected(origin.generation)) {
+        if origin.is_some_and(|origin| {
+            self.accounts
+                .account_deletion_rejected(context, origin.generation)
+        }) {
             if let Some(origin) = origin {
                 close_transport(context, origin.generation);
             }

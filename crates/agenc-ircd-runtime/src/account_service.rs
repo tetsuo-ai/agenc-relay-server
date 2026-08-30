@@ -59,7 +59,7 @@ use crate::state_core::durable::AccountServiceDurableWrite;
 use crate::state_core::fanout::FanoutRequest;
 use crate::state_core::reconstruct::RecoveredAccountTransactionCleanup;
 use crate::state_core::session::{AdmissionClass, MAX_TRACKED_CONNECTIONS};
-use crate::state_core::timers::{TimedId, TimerEntry, TimerKind};
+use crate::state_core::timers::{DRIFT_CHECK_INTERVAL_MILLIS, TimedId, TimerEntry, TimerKind};
 use crate::state_core::{StageAccepted, StagedOrigin, StateCoreContext};
 use crate::sync::Arc;
 
@@ -71,6 +71,7 @@ const INVITATION_RESERVATION_KIND: u16 = 1;
 const INVITATION_TOMBSTONE_KIND: u16 = 2;
 const INVITATION_TOMBSTONE_SECONDS: u64 = 7 * 24 * 60 * 60;
 const LOGIN_DELETION_TOMBSTONE_SECONDS: u64 = 30 * 24 * 60 * 60;
+const MAX_LOGIN_TOMBSTONE_EXPIRIES_PER_BATCH: usize = 256;
 const REQUEST_RESULT_KIND: u16 = 1;
 const REQUEST_RESULT_VERSION: u16 = 2;
 const REQUEST_RESULT_ROUTE_BYTES: usize = 16 + 8 + 16 + 32;
@@ -127,6 +128,8 @@ pub struct AccountServiceConfig {
     pub login_index_key_state: LoginIndexKeyState,
     /// One validated live private login-index key for each account.
     pub live_login_keys: BTreeMap<AccountId, StoredKey>,
+    /// Validated deletion tombstones ordered by expiry and Account ID.
+    pub login_deletion_tombstones: BTreeMap<(u64, AccountId), StoredKey>,
     /// Fully validated connection-bound rows left by the prior process.
     pub startup_transaction_cleanups: Vec<RecoveredAccountTransactionCleanup>,
     /// Deployment account-creation policy and optional invitation authority.
@@ -366,9 +369,21 @@ struct CommittedLoginIndexMigration {
 
 struct AccountDeletionBarrier {
     account_id: AccountId,
+    tombstone_id: (u64, AccountId),
     authentications: Vec<(ConnectionGeneration, TransactionId)>,
     grants: Vec<(ConnectionGeneration, TransactionId)>,
     completions: Vec<CarrierCompletion>,
+}
+
+struct PendingLoginTombstoneExpiry {
+    tombstones: Vec<((u64, AccountId), StoredKey)>,
+    resulting_key_state: Option<LoginIndexKeyState>,
+}
+
+struct LoginTombstoneExpiryBatch {
+    pending: PendingLoginTombstoneExpiry,
+    writes: Vec<AccountServiceDurableWrite>,
+    successor: Option<(u64, AccountId)>,
 }
 
 type DeletionAuthorities = (
@@ -829,6 +844,8 @@ pub(crate) struct AccountServiceCoordinator {
     transaction_owners: BTreeMap<TransactionId, (ConnectionGeneration, LiveTransactionClass)>,
     grant_consumptions: BTreeMap<ConnectionGeneration, TransactionId>,
     pending_account_deletions: BTreeMap<ConnectionGeneration, AccountDeletionBarrier>,
+    scheduled_login_tombstone: Option<(u64, AccountId)>,
+    pending_login_tombstone_expiry: Option<PendingLoginTombstoneExpiry>,
     cleanup_queue: VecDeque<TransactionCleanup>,
     startup_cleanup_remaining: usize,
     credential_cleanup_owners: BTreeSet<ConnectionGeneration>,
@@ -872,6 +889,8 @@ impl AccountServiceCoordinator {
             transaction_owners: BTreeMap::new(),
             grant_consumptions: BTreeMap::new(),
             pending_account_deletions: BTreeMap::new(),
+            scheduled_login_tombstone: None,
+            pending_login_tombstone_expiry: None,
             cleanup_queue,
             startup_cleanup_remaining,
             credential_cleanup_owners: BTreeSet::new(),
@@ -1104,6 +1123,13 @@ impl AccountServiceCoordinator {
         context: &mut StateCoreContext,
         entry: TimerEntry,
     ) -> (bool, Vec<CarrierCompletion>) {
+        if entry.kind == TimerKind::Reservation
+            && entry.id == TimedId::Global
+            && self.scheduled_login_tombstone.take().is_some()
+        {
+            let _staged = self.try_stage_login_tombstone_expiry(context);
+            return (true, self.progress(context));
+        }
         let TimedId::Transaction(transaction_id) = entry.id else {
             return (false, Vec::new());
         };
@@ -1340,9 +1366,111 @@ impl AccountServiceCoordinator {
         Ok(())
     }
 
+    fn schedule_login_tombstone(
+        &mut self,
+        context: &mut StateCoreContext,
+        tombstone_id: (u64, AccountId),
+    ) -> Result<(), RuntimeError> {
+        if self.scheduled_login_tombstone == Some(tombstone_id) {
+            return Ok(());
+        }
+        let deadline = login_tombstone_deadline(context, tombstone_id.0)?;
+        context
+            .timers_mut()
+            .schedule(deadline, TimerKind::Reservation, TimedId::Global)?;
+        self.scheduled_login_tombstone = Some(tombstone_id);
+        Ok(())
+    }
+
+    fn schedule_login_tombstone_retry(
+        &mut self,
+        context: &mut StateCoreContext,
+    ) -> Result<(), RuntimeError> {
+        let Some(tombstone_id) = self
+            .config
+            .login_deletion_tombstones
+            .first_key_value()
+            .map(|(tombstone_id, _)| *tombstone_id)
+        else {
+            context
+                .timers_mut()
+                .cancel(TimerKind::Reservation, TimedId::Global);
+            self.scheduled_login_tombstone = None;
+            return Ok(());
+        };
+        let deadline = context
+            .now()
+            .checked_add(DRIFT_CHECK_INTERVAL_MILLIS)
+            .map_err(|_| RuntimeError::Overflow)?;
+        context
+            .timers_mut()
+            .schedule(deadline, TimerKind::Reservation, TimedId::Global)?;
+        self.scheduled_login_tombstone = Some(tombstone_id);
+        Ok(())
+    }
+
+    fn schedule_next_login_tombstone(
+        &mut self,
+        context: &mut StateCoreContext,
+    ) -> Result<(), RuntimeError> {
+        let Some(tombstone_id) = self
+            .config
+            .login_deletion_tombstones
+            .first_key_value()
+            .map(|(tombstone_id, _)| *tombstone_id)
+        else {
+            context
+                .timers_mut()
+                .cancel(TimerKind::Reservation, TimedId::Global);
+            self.scheduled_login_tombstone = None;
+            return Ok(());
+        };
+        self.schedule_login_tombstone(context, tombstone_id)
+    }
+
+    fn try_stage_login_tombstone_expiry(
+        &mut self,
+        context: &mut StateCoreContext,
+    ) -> Result<(), RuntimeError> {
+        if !self.exclusive_account_service_transition_available() || context.pending_len() != 0 {
+            return self.schedule_login_tombstone_retry(context);
+        }
+        if !context.drift().wall_trusted() {
+            return self.schedule_login_tombstone_retry(context);
+        }
+        let Ok(now_utc) = context.utc_now() else {
+            return self.schedule_login_tombstone_retry(context);
+        };
+        let Some(batch) = login_tombstone_expiry_batch(
+            &self.config.login_deletion_tombstones,
+            self.config.login_index_key_state,
+            now_utc,
+        )?
+        else {
+            return self.schedule_next_login_tombstone(context);
+        };
+        let plan = context
+            .domain()
+            .plan_account_service_checkpoint()
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let fanout = FanoutRequest::new(Vec::new(), Vec::new())?;
+        if let Some(successor) = batch.successor {
+            self.schedule_login_tombstone(context, successor)?;
+        }
+        if matches!(
+            context.stage_durable_with_account_service(plan, fanout, None, 0, batch.writes),
+            Ok(StageAccepted::Staged { .. })
+        ) {
+            self.pending_login_tombstone_expiry = Some(batch.pending);
+            return Ok(());
+        }
+        self.schedule_next_login_tombstone(context)
+    }
+
     /// Starts deleting fully validated connection-bound rows recovered from
     /// the prior process before any new account connection is accepted.
     pub(crate) fn startup(&mut self, context: &mut StateCoreContext) {
+        let _scheduled = self.schedule_next_login_tombstone(context);
         let _staged = self.try_stage_transaction_cleanup(context);
     }
 
@@ -1533,15 +1661,19 @@ impl AccountServiceCoordinator {
     /// enters the same durable batch.
     pub(crate) fn begin_account_deletion(
         &mut self,
+        context: &mut StateCoreContext,
         generation: ConnectionGeneration,
         account_id: AccountId,
-        now_utc: UtcSecond,
     ) -> Result<Vec<AccountServiceDurableWrite>, RuntimeError> {
         if !self.account_deletion_transition_available(account_id)
             || !self.pending_account_deletions.is_empty()
         {
             return Err(RuntimeError::LimitExceeded);
         }
+        if !context.drift().wall_trusted() {
+            return Err(RuntimeError::InvalidValue);
+        }
+        let now_utc = context.utc_now().map_err(|_| RuntimeError::InvalidValue)?;
         let expires_at = now_utc
             .checked_add(LOGIN_DELETION_TOMBSTONE_SECONDS)
             .map_err(|_| RuntimeError::Overflow)?;
@@ -1560,8 +1692,24 @@ impl AccountServiceCoordinator {
             &grants,
         )?;
         let completions = account_deletion_completions(generation, &authentications, &grants)?;
+        let tombstone_id = (expires_at.get(), account_id);
+        if self
+            .config
+            .login_deletion_tombstones
+            .contains_key(&tombstone_id)
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
+        self.config
+            .login_deletion_tombstones
+            .insert(tombstone_id, login_key);
+        if let Err(error) = self.schedule_next_login_tombstone(context) {
+            self.config.login_deletion_tombstones.remove(&tombstone_id);
+            return Err(error);
+        }
         let pending = AccountDeletionBarrier {
             account_id,
+            tombstone_id,
             authentications,
             grants,
             completions,
@@ -1571,6 +1719,9 @@ impl AccountServiceCoordinator {
             .insert(generation, pending)
             .is_some()
         {
+            self.config.login_deletion_tombstones.remove(&tombstone_id);
+            self.scheduled_login_tombstone = None;
+            let _rescheduled = self.schedule_next_login_tombstone(context);
             return Err(RuntimeError::InvalidValue);
         }
         Ok(writes)
@@ -1611,6 +1762,11 @@ impl AccountServiceCoordinator {
     }
 
     fn account_deletion_transition_available(&self, account_id: AccountId) -> bool {
+        self.exclusive_account_service_transition_available()
+            && !self.credential_reservations.contains_key(&account_id)
+    }
+
+    fn exclusive_account_service_transition_available(&self) -> bool {
         self.pending_authority.is_none()
             && self.pending_cleanups.is_empty()
             && self.cleanup_queue.is_empty()
@@ -1619,23 +1775,46 @@ impl AccountServiceCoordinator {
             && self.ready_seals.is_empty()
             && self.ready_stage.is_none()
             && self.grant_consumptions.is_empty()
-            && !self.credential_reservations.contains_key(&account_id)
+            && self.pending_account_deletions.is_empty()
+            && self.pending_login_tombstone_expiry.is_none()
     }
 
     /// Rolls back a deletion barrier that could not enter a durable batch.
     pub(crate) fn cancel_account_deletion(
         &mut self,
+        context: &mut StateCoreContext,
         generation: ConnectionGeneration,
     ) -> Result<(), RuntimeError> {
-        self.pending_account_deletions
+        let pending = self
+            .pending_account_deletions
             .remove(&generation)
-            .map(|_| ())
-            .ok_or(RuntimeError::InvalidValue)
+            .ok_or(RuntimeError::InvalidValue)?;
+        self.remove_uncommitted_account_tombstone(context, pending.tombstone_id)
     }
 
     /// Drops one determinate rejected deletion barrier.
-    pub(crate) fn account_deletion_rejected(&mut self, generation: ConnectionGeneration) -> bool {
-        self.pending_account_deletions.remove(&generation).is_some()
+    pub(crate) fn account_deletion_rejected(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+    ) -> bool {
+        let Some(pending) = self.pending_account_deletions.remove(&generation) else {
+            return false;
+        };
+        let _removed = self.remove_uncommitted_account_tombstone(context, pending.tombstone_id);
+        true
+    }
+
+    fn remove_uncommitted_account_tombstone(
+        &mut self,
+        context: &mut StateCoreContext,
+        tombstone_id: (u64, AccountId),
+    ) -> Result<(), RuntimeError> {
+        self.config
+            .login_deletion_tombstones
+            .remove(&tombstone_id)
+            .ok_or(RuntimeError::InvalidValue)?;
+        self.schedule_next_login_tombstone(context)
     }
 
     /// Routes one grammar-validated AUTHENTICATE command.
@@ -5288,6 +5467,24 @@ impl AccountServiceCoordinator {
         false
     }
 
+    fn commit_login_tombstone_expiry(&mut self) {
+        let Some(pending) = self.pending_login_tombstone_expiry.take() else {
+            return;
+        };
+        let exact = pending.tombstones.iter().all(|(tombstone_id, key)| {
+            self.config.login_deletion_tombstones.get(tombstone_id) == Some(key)
+        });
+        if !exact {
+            return;
+        }
+        for (tombstone_id, _) in pending.tombstones {
+            self.config.login_deletion_tombstones.remove(&tombstone_id);
+        }
+        if let Some(key_state) = pending.resulting_key_state {
+            self.config.login_index_key_state = key_state;
+        }
+    }
+
     fn commit_account_deletions(
         &mut self,
         context: &mut StateCoreContext,
@@ -5381,12 +5578,14 @@ impl AccountServiceCoordinator {
         &mut self,
         context: &mut StateCoreContext,
     ) -> Vec<CarrierCompletion> {
+        self.commit_login_tombstone_expiry();
         let mut completions = self.commit_account_deletions(context);
         for cleanup in std::mem::take(&mut self.pending_cleanups) {
             let _completed = self.complete_transaction_cleanup(cleanup);
         }
         let Some(authority) = self.pending_authority.take() else {
-            return self.progress(context);
+            completions.extend(self.progress(context));
+            return completions;
         };
         let committed_count = context.head().account_service_response_count;
         let completion = match authority {
@@ -5515,6 +5714,10 @@ impl AccountServiceCoordinator {
         context: &mut StateCoreContext,
         origin: Option<StagedOrigin>,
     ) -> Vec<CarrierCompletion> {
+        if self.pending_login_tombstone_expiry.take().is_some() && origin.is_none() {
+            let _scheduled = self.schedule_next_login_tombstone(context);
+            return self.progress(context);
+        }
         if !self.pending_cleanups.is_empty() && origin.is_none() {
             for cleanup in std::mem::take(&mut self.pending_cleanups).into_iter().rev() {
                 self.cleanup_queue.push_front(cleanup);
@@ -5550,6 +5753,88 @@ impl AccountServiceCoordinator {
         completions.extend(self.progress(context));
         completions
     }
+}
+
+fn login_tombstone_deadline(
+    context: &StateCoreContext,
+    expires_at: u64,
+) -> Result<MonotonicTick, RuntimeError> {
+    let delay_millis = if context.drift().wall_trusted() {
+        match context.utc_now() {
+            Ok(now_utc) => expires_at
+                .saturating_sub(now_utc.get())
+                .checked_mul(1_000)
+                .ok_or(RuntimeError::Overflow)?,
+            Err(_) => DRIFT_CHECK_INTERVAL_MILLIS,
+        }
+    } else {
+        DRIFT_CHECK_INTERVAL_MILLIS
+    };
+    context
+        .now()
+        .checked_add(delay_millis)
+        .map_err(|_| RuntimeError::Overflow)
+}
+
+fn login_tombstone_expiry_batch(
+    tombstones: &BTreeMap<(u64, AccountId), StoredKey>,
+    key_state: LoginIndexKeyState,
+    now_utc: UtcSecond,
+) -> Result<Option<LoginTombstoneExpiryBatch>, RuntimeError> {
+    let mut expired = Vec::new();
+    expired
+        .try_reserve_exact(MAX_LOGIN_TOMBSTONE_EXPIRIES_PER_BATCH)
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    let mut writes = Vec::new();
+    writes
+        .try_reserve_exact(MAX_LOGIN_TOMBSTONE_EXPIRIES_PER_BATCH.saturating_add(1))
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    let mut resulting_key_state = key_state;
+    let mut key_state_changed = false;
+    let mut successor = None;
+    for (tombstone_id, key) in tombstones {
+        if expired.len() == MAX_LOGIN_TOMBSTONE_EXPIRIES_PER_BATCH || tombstone_id.0 > now_utc.get()
+        {
+            successor = Some(*tombstone_id);
+            break;
+        }
+        let stored_key = LoginIndexStoredKey::decode(key.as_bytes())?;
+        if stored_key.generation() == key_state.current_generation() {
+        } else if key_state
+            .previous()
+            .is_some_and(|(generation, _)| stored_key.generation() == generation)
+        {
+            resulting_key_state = resulting_key_state.decrement_previous()?;
+            key_state_changed = true;
+        } else {
+            return Err(RuntimeError::Storage(
+                agenc_ircd_storage::StorageError::StaleState,
+            ));
+        }
+        writes.push(AccountServiceDurableWrite::delete(
+            TableId::LoginIndex,
+            key.clone(),
+        )?);
+        expired.push((*tombstone_id, key.clone()));
+    }
+    if expired.is_empty() {
+        return Ok(None);
+    }
+    if key_state_changed {
+        writes.push(AccountServiceDurableWrite::put(
+            TableId::LoginIndexKeyState,
+            StoredKey::new(LOGIN_INDEX_KEY_STATE_KEY.to_vec())?,
+            resulting_key_state.encode()?,
+        )?);
+    }
+    Ok(Some(LoginTombstoneExpiryBatch {
+        pending: PendingLoginTombstoneExpiry {
+            tombstones: expired,
+            resulting_key_state: key_state_changed.then_some(resulting_key_state),
+        },
+        writes,
+        successor,
+    }))
 }
 
 fn account_deletion_writes(
@@ -6321,12 +6606,13 @@ fn render_sasl_action(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
+    use std::collections::{BTreeMap, VecDeque};
 
     use agenc_ircd_client_wire::{OutputBudget, RenderError};
     use agenc_ircd_crypto::{LoginIndexDigest, LoginIndexKey, derive_login_index};
     use agenc_ircd_storage::{
-        LoginIndexStoredKey, LoginIndexValue, LoginIndexValueKind, StoredKey, TableId,
+        LoginIndexKeyState, LoginIndexStoredKey, LoginIndexValue, LoginIndexValueKind, StoredKey,
+        TableId,
     };
     use agenc_ircd_types::{
         AccountId, AccountRandomId, AccountServiceMessageKind, ConnectionId, Generation, InviteId,
@@ -6341,8 +6627,9 @@ mod tests {
         ConnectionRoute, CreationReservation, MAX_OPAQUE_ATTEMPTS_PER_CONNECTION,
         REQUEST_RESULT_BYTES, REQUEST_RESULT_VERSION, RequestResultRecord, RequestTerminal,
         RuntimeError, TransactionCleanup, account_created_note, account_credential_changed_note,
-        account_deletion_writes, account_failure, consume_opaque_connection_attempt,
-        opaque_attempt_demand, render_account_action, replay_terminal_account, select_live_login,
+        account_deletion_completions, account_deletion_writes, account_failure,
+        consume_opaque_connection_attempt, login_tombstone_expiry_batch, opaque_attempt_demand,
+        render_account_action, replay_terminal_account, select_live_login,
         transaction_cleanup_batch,
     };
     use crate::state_core::durable::AccountServiceDurableWrite;
@@ -6655,12 +6942,14 @@ mod tests {
             LoginIndexStoredKey::new(3, LoginIndexDigest::from_storage_key([10; 32]))?.encode()?;
         let authentication = TransactionId::from_bytes([11; 16]);
         let grant = TransactionId::from_bytes([12; 16]);
+        let authentications = [(ConnectionGeneration::new(7), authentication)];
+        let grants = [(ConnectionGeneration::new(8), grant)];
         let writes = account_deletion_writes(
             account_id,
             UtcSecond::from_unix_seconds(2_592_100),
             &login_key,
-            &[(ConnectionGeneration::new(7), authentication)],
-            &[(ConnectionGeneration::new(8), grant)],
+            &authentications,
+            &grants,
         )?;
         assert_eq!(writes.len(), 4);
         let AccountServiceDurableWrite::Put {
@@ -6696,6 +6985,127 @@ mod tests {
             TableId::AuthTransaction,
             &StoredKey::new(grant.as_bytes().to_vec())?,
         );
+        let completions =
+            account_deletion_completions(ConnectionGeneration::new(6), &authentications, &grants)?;
+        assert_eq!(completions.len(), 3);
+        assert!(completions.iter().all(|completion| completion.close));
+        assert!(
+            completions
+                .iter()
+                .any(|completion| completion.generation == ConnectionGeneration::new(6))
+        );
+        assert!(completions.capacity().saturating_sub(completions.len()) >= 2);
+        Ok(())
+    }
+
+    #[test]
+    fn login_tombstone_expiry_decrements_previous_generation_exactly_once()
+    -> Result<(), RuntimeError> {
+        let network = NetworkId::from_bytes([13; 32]);
+        let previous_key = LoginIndexKey::from_bytes([14; 32]);
+        let current_key = LoginIndexKey::from_bytes([15; 32]);
+        let key_state = LoginIndexKeyState::transition(
+            2,
+            previous_key.key_id(network),
+            current_key.key_id(network),
+            1,
+        )?;
+        let previous_login_key =
+            LoginIndexStoredKey::new(2, LoginIndexDigest::from_storage_key([16; 32]))?.encode()?;
+        let current_login_key =
+            LoginIndexStoredKey::new(3, LoginIndexDigest::from_storage_key([17; 32]))?.encode()?;
+        let future_login_key =
+            LoginIndexStoredKey::new(3, LoginIndexDigest::from_storage_key([18; 32]))?.encode()?;
+        let mut tombstones = BTreeMap::new();
+        tombstones.insert((99, account(16)), previous_login_key.clone());
+        tombstones.insert((100, account(17)), current_login_key.clone());
+        tombstones.insert((101, account(18)), future_login_key);
+
+        let Some(batch) = login_tombstone_expiry_batch(
+            &tombstones,
+            key_state,
+            UtcSecond::from_unix_seconds(100),
+        )?
+        else {
+            return Err(RuntimeError::InvalidValue);
+        };
+        assert_eq!(batch.pending.tombstones.len(), 2);
+        assert_eq!(batch.successor, Some((101, account(18))));
+        assert_eq!(batch.writes.len(), 3);
+        assert_delete(
+            batch.writes.first().ok_or(RuntimeError::InvalidValue)?,
+            TableId::LoginIndex,
+            &previous_login_key,
+        );
+        assert_delete(
+            batch.writes.get(1).ok_or(RuntimeError::InvalidValue)?,
+            TableId::LoginIndex,
+            &current_login_key,
+        );
+        let AccountServiceDurableWrite::Put {
+            table,
+            key,
+            plaintext,
+        } = batch.writes.get(2).ok_or(RuntimeError::InvalidValue)?
+        else {
+            return Err(RuntimeError::InvalidValue);
+        };
+        assert_eq!(*table, TableId::LoginIndexKeyState);
+        assert_eq!(
+            key.as_bytes(),
+            agenc_ircd_storage::LOGIN_INDEX_KEY_STATE_KEY
+        );
+        let resulting = LoginIndexKeyState::decode(plaintext.as_slice())?;
+        assert_eq!(resulting.previous(), Some((2, 0)));
+        assert_eq!(batch.pending.resulting_key_state, Some(resulting));
+        Ok(())
+    }
+
+    #[test]
+    fn login_tombstone_expiry_batch_stops_at_the_bounded_chunk() -> Result<(), RuntimeError> {
+        let network = NetworkId::from_bytes([19; 32]);
+        let current_key = LoginIndexKey::from_bytes([20; 32]);
+        let key_state = LoginIndexKeyState::stable(3, current_key.key_id(network))?;
+        let mut tombstones = BTreeMap::new();
+        for index in 0..=super::MAX_LOGIN_TOMBSTONE_EXPIRIES_PER_BATCH {
+            let suffix = u64::try_from(index).map_err(|_| RuntimeError::Overflow)?;
+            let mut account_bytes = [0_u8; 16];
+            account_bytes
+                .get_mut(8..)
+                .ok_or(RuntimeError::InvalidValue)?
+                .copy_from_slice(&suffix.to_be_bytes());
+            let mut digest = [0_u8; 32];
+            digest
+                .get_mut(24..)
+                .ok_or(RuntimeError::InvalidValue)?
+                .copy_from_slice(&suffix.to_be_bytes());
+            tombstones.insert(
+                (
+                    100,
+                    AccountId::from_random(AccountRandomId::from_bytes(account_bytes)),
+                ),
+                LoginIndexStoredKey::new(3, LoginIndexDigest::from_storage_key(digest))?
+                    .encode()?,
+            );
+        }
+        let Some(batch) = login_tombstone_expiry_batch(
+            &tombstones,
+            key_state,
+            UtcSecond::from_unix_seconds(100),
+        )?
+        else {
+            return Err(RuntimeError::InvalidValue);
+        };
+        assert_eq!(
+            batch.pending.tombstones.len(),
+            super::MAX_LOGIN_TOMBSTONE_EXPIRIES_PER_BATCH
+        );
+        assert_eq!(
+            batch.writes.len(),
+            super::MAX_LOGIN_TOMBSTONE_EXPIRIES_PER_BATCH
+        );
+        assert!(batch.successor.is_some());
+        assert!(batch.pending.resulting_key_state.is_none());
         Ok(())
     }
 
