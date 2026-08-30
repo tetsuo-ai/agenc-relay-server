@@ -16,7 +16,8 @@ use agenc_ircd_auth::{
     SealedAccountStart,
 };
 use agenc_ircd_client_wire::{
-    ParsedMessage, SaslAction, SaslNumeric, SaslTransport, SecretBytes, WireMessage, numeric_reply,
+    AccountCarrierAction, AccountCarrierKind, AccountCarrierPhase, AccountTransfer, ParsedMessage,
+    SaslAction, SaslNumeric, SaslTransport, SecretBytes, WireMessage, numeric_reply,
 };
 use agenc_ircd_crypto::{
     AccountHpkePrivateKey, LoginIndexKey, OpaqueFakeCredentialKey, derive_login_index,
@@ -266,6 +267,8 @@ struct LiveAuthentication {
 
 struct AccountConnection {
     sasl: SaslTransport,
+    creation: AccountTransfer,
+    credentials: AccountTransfer,
     route: ConnectionRoute,
     opaque_attempts: u8,
     transaction: Option<LiveAuthentication>,
@@ -278,7 +281,45 @@ struct RequestContext {
     target: String,
     route: ConnectionRoute,
     envelope: AccountServiceEnvelope,
-    finish: bool,
+    carrier: RequestCarrier,
+    phase: AccountCarrierPhase,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum RequestCarrier {
+    Sasl,
+    Account(AccountCarrierKind),
+}
+
+impl RequestContext {
+    fn is_finish(&self) -> bool {
+        self.phase == AccountCarrierPhase::Finish
+    }
+
+    const fn expected_message_kind(&self) -> AccountServiceMessageKind {
+        match (self.carrier, self.phase) {
+            (RequestCarrier::Sasl, AccountCarrierPhase::Start) => {
+                AccountServiceMessageKind::OpaqueAuthStart
+            }
+            (RequestCarrier::Sasl, AccountCarrierPhase::Finish) => {
+                AccountServiceMessageKind::OpaqueAuthFinish
+            }
+            (RequestCarrier::Account(AccountCarrierKind::Create), AccountCarrierPhase::Start) => {
+                AccountServiceMessageKind::AccountCreateStart
+            }
+            (RequestCarrier::Account(AccountCarrierKind::Create), AccountCarrierPhase::Finish) => {
+                AccountServiceMessageKind::AccountCreateFinish
+            }
+            (
+                RequestCarrier::Account(AccountCarrierKind::Credentials),
+                AccountCarrierPhase::Start,
+            ) => AccountServiceMessageKind::CredentialChangeStart,
+            (
+                RequestCarrier::Account(AccountCarrierKind::Credentials),
+                AccountCarrierPhase::Finish,
+            ) => AccountServiceMessageKind::CredentialChangeFinish,
+        }
+    }
 }
 
 enum PendingRead {
@@ -457,6 +498,10 @@ impl AccountServiceCoordinator {
             .map_err(|_| RuntimeError::InvalidValue)?;
         let state = AccountConnection {
             sasl: SaslTransport::new().map_err(|_| RuntimeError::MemoryExhausted)?,
+            creation: AccountTransfer::new(AccountCarrierKind::Create)
+                .map_err(|_| RuntimeError::MemoryExhausted)?,
+            credentials: AccountTransfer::new(AccountCarrierKind::Credentials)
+                .map_err(|_| RuntimeError::MemoryExhausted)?,
             route: ConnectionRoute {
                 origin_id: self.config.origin_id,
                 origin_generation: self.config.origin_generation,
@@ -609,6 +654,99 @@ impl AccountServiceCoordinator {
         CarrierRoute::Finished(frames)
     }
 
+    /// Routes one grammar-validated account-creation or credential carrier line.
+    pub(crate) fn route_account(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+        carrier_generation: u64,
+        target: &str,
+        kind: AccountCarrierKind,
+        mut message: ParsedMessage,
+    ) -> CarrierRoute {
+        let has_tags = !message.tags().is_empty();
+        let Some(subcommand) = message.take_parameter(0) else {
+            return CarrierRoute::Close;
+        };
+        let parameter = message.take_parameter(0);
+        let now = context.now().get();
+        let (route, result) = {
+            let Some(connection) = self.connections.get_mut(&generation) else {
+                return CarrierRoute::Close;
+            };
+            let transfer = match kind {
+                AccountCarrierKind::Create => &mut connection.creation,
+                AccountCarrierKind::Credentials => &mut connection.credentials,
+            };
+            (
+                connection.route,
+                transfer.client(&subcommand, parameter.as_deref(), has_tags, now),
+            )
+        };
+        let Ok(actions) = result else {
+            return self.fail_account_route(context, generation, kind);
+        };
+        let mut frames = Vec::new();
+        for action in actions {
+            match action {
+                AccountCarrierAction::RequestEnvelope { phase, bytes } => {
+                    return self.route_account_envelope(
+                        context,
+                        generation,
+                        carrier_generation,
+                        target,
+                        route,
+                        kind,
+                        phase,
+                        bytes,
+                    );
+                }
+                action => match render_account_action(context.server_prefix(), kind, action) {
+                    Ok(frame) => frames.push(frame),
+                    Err(_) => return CarrierRoute::Close,
+                },
+            }
+        }
+        CarrierRoute::Finished(frames)
+    }
+
+    // agenc-review: allow owner=runtime reviewed=2026-08-29 reason=the fixed account carrier tuple preserves the exact connection route and transfer phase
+    #[allow(clippy::too_many_arguments)]
+    fn route_account_envelope(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+        carrier_generation: u64,
+        target: &str,
+        route: ConnectionRoute,
+        kind: AccountCarrierKind,
+        phase: AccountCarrierPhase,
+        bytes: SecretBytes,
+    ) -> CarrierRoute {
+        let Ok(encoded) = bytes.expose().try_into() else {
+            return CarrierRoute::Close;
+        };
+        let Ok(envelope) = AccountServiceEnvelope::parse(encoded) else {
+            return self.fail_account_route(context, generation, kind);
+        };
+        let request = RequestContext {
+            generation,
+            carrier_generation,
+            target: target.to_owned(),
+            route,
+            envelope,
+            carrier: RequestCarrier::Account(kind),
+            phase,
+        };
+        if request.envelope.message_kind() != request.expected_message_kind() {
+            return self.fail_account_route(context, generation, kind);
+        }
+        if self.submit_replay_read(context, request).is_err() {
+            return CarrierRoute::Close;
+        }
+        CarrierRoute::Pending
+    }
+
     // agenc-review: allow owner=runtime reviewed=2026-08-29 reason=the fixed carrier route tuple is clearer than an intermediate request builder with the same fields
     #[allow(clippy::too_many_arguments)]
     fn route_envelope(
@@ -627,10 +765,14 @@ impl AccountServiceCoordinator {
         let Ok(envelope) = AccountServiceEnvelope::parse(encoded) else {
             return self.fail_route(context, generation, target);
         };
-        let expected = if finish {
-            AccountServiceMessageKind::OpaqueAuthFinish
+        let phase = if finish {
+            AccountCarrierPhase::Finish
         } else {
-            AccountServiceMessageKind::OpaqueAuthStart
+            AccountCarrierPhase::Start
+        };
+        let expected = match phase {
+            AccountCarrierPhase::Start => AccountServiceMessageKind::OpaqueAuthStart,
+            AccountCarrierPhase::Finish => AccountServiceMessageKind::OpaqueAuthFinish,
         };
         if envelope.message_kind() != expected {
             return self.fail_route(context, generation, target);
@@ -641,7 +783,8 @@ impl AccountServiceCoordinator {
             target: target.to_owned(),
             route,
             envelope,
-            finish,
+            carrier: RequestCarrier::Sasl,
+            phase,
         };
         if self.submit_replay_read(context, request).is_err() {
             return CarrierRoute::Close;
@@ -744,6 +887,25 @@ impl AccountServiceCoordinator {
         };
         match render_sasl_actions(context.server_prefix(), target, actions) {
             Ok(frames) => CarrierRoute::Finished(frames),
+            Err(_) => CarrierRoute::Close,
+        }
+    }
+
+    fn fail_account_route(
+        &mut self,
+        context: &StateCoreContext,
+        generation: ConnectionGeneration,
+        kind: AccountCarrierKind,
+    ) -> CarrierRoute {
+        let Some(connection) = self.connections.get_mut(&generation) else {
+            return CarrierRoute::Close;
+        };
+        match kind {
+            AccountCarrierKind::Create => connection.creation.reject(),
+            AccountCarrierKind::Credentials => connection.credentials.reject(),
+        }
+        match account_failure(context.server_prefix(), kind) {
+            Ok(frame) => CarrierRoute::Finished(vec![frame]),
             Err(_) => CarrierRoute::Close,
         }
     }
@@ -905,10 +1067,10 @@ impl AccountServiceCoordinator {
             return self.fail_pending(context, request);
         };
         match opened {
-            OpenedAccountServiceRequest::AuthenticationStart(opened) if !request.finish => {
+            OpenedAccountServiceRequest::AuthenticationStart(opened) if !request.is_finish() => {
                 self.open_authentication_start(context, request, opened)
             }
-            OpenedAccountServiceRequest::AuthenticationFinish(opened) if request.finish => {
+            OpenedAccountServiceRequest::AuthenticationFinish(opened) if request.is_finish() => {
                 self.open_authentication_finish(context, request, opened)
             }
             _ => self.fail_pending(context, request),
@@ -1335,7 +1497,7 @@ impl AccountServiceCoordinator {
         if stored.route != request.route || stored.request != *request.envelope.as_bytes() {
             return Err(RuntimeError::InvalidValue);
         }
-        let expected_terminal = if request.finish {
+        let expected_terminal = if request.is_finish() {
             matches!(
                 stored.terminal,
                 RequestTerminal::Accepted | RequestTerminal::Rejected
@@ -1353,10 +1515,8 @@ impl AccountServiceCoordinator {
         }
         let frames = self.response_frames(
             context,
-            request.generation,
-            &request.target,
+            &request,
             response.as_bytes(),
-            request.finish,
             stored.terminal == RequestTerminal::Accepted,
         )?;
         context
@@ -1530,14 +1690,7 @@ impl AccountServiceCoordinator {
             StoredKey::new(sealed.transaction_id().as_bytes().to_vec())?,
             transaction_value.encode()?,
         )?;
-        let frames = self.response_frames(
-            context,
-            request.generation,
-            &request.target,
-            response,
-            false,
-            false,
-        )?;
+        let frames = self.response_frames(context, &request, response, false)?;
         let fanout = context
             .fanout_request_to(request.generation, frames)
             .map_err(|_| RuntimeError::MemoryExhausted)?;
@@ -1685,14 +1838,7 @@ impl AccountServiceCoordinator {
         } else {
             None
         };
-        let frames = self.response_frames(
-            context,
-            request.generation,
-            &request.target,
-            response,
-            true,
-            sasl_accepted,
-        )?;
+        let frames = self.response_frames(context, &request, response, sasl_accepted)?;
         let fanout = context
             .fanout_request_to(request.generation, frames)
             .map_err(|_| RuntimeError::MemoryExhausted)?;
@@ -1730,21 +1876,34 @@ impl AccountServiceCoordinator {
     fn response_frames(
         &mut self,
         context: &StateCoreContext,
-        generation: ConnectionGeneration,
-        target: &str,
+        request: &RequestContext,
         response: &[u8],
-        finish: bool,
+        accepted: bool,
+    ) -> Result<Vec<WireMessage>, RuntimeError> {
+        match request.carrier {
+            RequestCarrier::Sasl => self.sasl_response_frames(context, request, response, accepted),
+            RequestCarrier::Account(kind) => {
+                self.account_response_frames(context, request, kind, response, accepted)
+            }
+        }
+    }
+
+    fn sasl_response_frames(
+        &mut self,
+        context: &StateCoreContext,
+        request: &RequestContext,
+        response: &[u8],
         accepted: bool,
     ) -> Result<Vec<WireMessage>, RuntimeError> {
         let connection = self
             .connections
-            .get_mut(&generation)
+            .get_mut(&request.generation)
             .ok_or(RuntimeError::InvalidValue)?;
         let mut actions = connection
             .sasl
             .server_response(response, context.now().get())
             .map_err(|_| RuntimeError::InvalidValue)?;
-        if finish {
+        if request.is_finish() {
             actions.extend(
                 connection
                     .sasl
@@ -1752,7 +1911,37 @@ impl AccountServiceCoordinator {
                     .map_err(|_| RuntimeError::InvalidValue)?,
             );
         }
-        render_sasl_actions(context.server_prefix(), target, actions)
+        render_sasl_actions(context.server_prefix(), &request.target, actions)
+    }
+
+    fn account_response_frames(
+        &mut self,
+        context: &StateCoreContext,
+        request: &RequestContext,
+        kind: AccountCarrierKind,
+        response: &[u8],
+        accepted: bool,
+    ) -> Result<Vec<WireMessage>, RuntimeError> {
+        let connection = self
+            .connections
+            .get_mut(&request.generation)
+            .ok_or(RuntimeError::InvalidValue)?;
+        let transfer = match kind {
+            AccountCarrierKind::Create => &mut connection.creation,
+            AccountCarrierKind::Credentials => &mut connection.credentials,
+        };
+        let actions = transfer
+            .server_response(request.phase, response, context.now().get())
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let mut frames = render_account_actions(context.server_prefix(), kind, actions)?;
+        if !request.is_finish() {
+            return Ok(frames);
+        }
+        if accepted {
+            return Err(RuntimeError::InvalidValue);
+        }
+        frames.push(account_failure(context.server_prefix(), kind)?);
+        Ok(frames)
     }
 
     fn fail_pending(
@@ -1760,7 +1949,12 @@ impl AccountServiceCoordinator {
         context: &mut StateCoreContext,
         request: RequestContext,
     ) -> Result<Vec<CarrierCompletion>, RuntimeError> {
-        let route = self.fail_route(context, request.generation, &request.target);
+        let route = match request.carrier {
+            RequestCarrier::Sasl => self.fail_route(context, request.generation, &request.target),
+            RequestCarrier::Account(kind) => {
+                self.fail_account_route(context, request.generation, kind)
+            }
+        };
         let CarrierRoute::Finished(frames) = route else {
             return Err(RuntimeError::InvalidValue);
         };
@@ -2262,6 +2456,73 @@ fn render_sasl_actions(
     Ok(frames)
 }
 
+fn render_account_actions(
+    prefix: &str,
+    kind: AccountCarrierKind,
+    actions: Vec<AccountCarrierAction>,
+) -> Result<Vec<WireMessage>, RuntimeError> {
+    let mut frames = Vec::new();
+    frames
+        .try_reserve_exact(actions.len())
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    for action in actions {
+        frames.push(render_account_action(prefix, kind, action)?);
+    }
+    Ok(frames)
+}
+
+fn render_account_action(
+    prefix: &str,
+    kind: AccountCarrierKind,
+    action: AccountCarrierAction,
+) -> Result<WireMessage, RuntimeError> {
+    let frame = match action {
+        AccountCarrierAction::Ready(phase) => WireMessage::new(
+            prefix,
+            kind.command(),
+            &["READY", account_phase_name(phase), "4726"],
+            None,
+        ),
+        AccountCarrierAction::ResponseStart(phase) => {
+            let response = match phase {
+                AccountCarrierPhase::Start => "CHALLENGE",
+                AccountCarrierPhase::Finish => "COMPLETE",
+            };
+            WireMessage::new(prefix, kind.command(), &[response, "4342"], None)
+        }
+        AccountCarrierAction::Data(chunk) => {
+            let text =
+                std::str::from_utf8(chunk.expose()).map_err(|_| RuntimeError::InvalidValue)?;
+            WireMessage::new(prefix, kind.command(), &["DATA", text], None)
+        }
+        AccountCarrierAction::End => WireMessage::new(prefix, kind.command(), &["END"], None),
+        AccountCarrierAction::RequestEnvelope { .. } => return Err(RuntimeError::InvalidValue),
+    }
+    .map_err(|_| RuntimeError::InvalidValue)?;
+    Ok(frame)
+}
+
+const fn account_phase_name(phase: AccountCarrierPhase) -> &'static str {
+    match phase {
+        AccountCarrierPhase::Start => "START",
+        AccountCarrierPhase::Finish => "FINISH",
+    }
+}
+
+fn account_failure(prefix: &str, kind: AccountCarrierKind) -> Result<WireMessage, RuntimeError> {
+    let description = match kind {
+        AccountCarrierKind::Create => "Account creation unavailable",
+        AccountCarrierKind::Credentials => "Credential change unavailable",
+    };
+    WireMessage::new(
+        prefix,
+        "FAIL",
+        &[kind.command(), "UNAVAILABLE"],
+        Some(description),
+    )
+    .map_err(|_| RuntimeError::InvalidValue)
+}
+
 fn render_sasl_action(
     prefix: &str,
     target: &str,
@@ -2293,6 +2554,7 @@ fn render_sasl_action(
 
 #[cfg(test)]
 mod tests {
+    use agenc_ircd_client_wire::{OutputBudget, RenderError};
     use agenc_ircd_crypto::{LoginIndexKey, derive_login_index};
     use agenc_ircd_storage::{LoginIndexStoredKey, LoginIndexValue, LoginIndexValueKind};
     use agenc_ircd_types::{
@@ -2303,13 +2565,72 @@ mod tests {
     use crate::admission::{BucketTable, RateLimits};
 
     use super::{
-        ConnectionRoute, MAX_OPAQUE_ATTEMPTS_PER_CONNECTION, REQUEST_RESULT_BYTES,
-        RequestResultRecord, RequestTerminal, RuntimeError, consume_opaque_connection_attempt,
-        opaque_attempt_demand, select_live_login,
+        AccountCarrierAction, AccountCarrierKind, AccountCarrierPhase, ConnectionRoute,
+        MAX_OPAQUE_ATTEMPTS_PER_CONNECTION, REQUEST_RESULT_BYTES, RequestResultRecord,
+        RequestTerminal, RuntimeError, account_failure, consume_opaque_connection_attempt,
+        opaque_attempt_demand, render_account_action, select_live_login,
     };
+
+    struct ExactBudget(usize);
+
+    impl OutputBudget for ExactBudget {
+        type Permit = ();
+
+        fn try_reserve_exact(&mut self, bytes: usize) -> Result<Self::Permit, RenderError> {
+            (bytes == self.0)
+                .then_some(())
+                .ok_or(RenderError::ReservationFailed)
+        }
+    }
+
+    fn encoded(message: agenc_ircd_client_wire::WireMessage) -> Result<Vec<u8>, RenderError> {
+        let measured = message.measure()?;
+        let mut budget = ExactBudget(measured.bytes());
+        Ok(measured.encode(&mut budget)?.as_bytes().to_vec())
+    }
 
     fn account(byte: u8) -> AccountId {
         AccountId::from_random(AccountRandomId::from_bytes([byte; 16]))
+    }
+
+    #[test]
+    fn account_carrier_control_frames_match_the_normative_text()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let prefix = "server.example";
+        let frames = [
+            (
+                render_account_action(
+                    prefix,
+                    AccountCarrierKind::Create,
+                    AccountCarrierAction::Ready(AccountCarrierPhase::Start),
+                )?,
+                ":server.example ACCTCREATE READY START 4726\r\n",
+            ),
+            (
+                render_account_action(
+                    prefix,
+                    AccountCarrierKind::Credentials,
+                    AccountCarrierAction::ResponseStart(AccountCarrierPhase::Finish),
+                )?,
+                ":server.example ACCTCRED COMPLETE 4342\r\n",
+            ),
+            (
+                render_account_action(
+                    prefix,
+                    AccountCarrierKind::Create,
+                    AccountCarrierAction::End,
+                )?,
+                ":server.example ACCTCREATE END\r\n",
+            ),
+            (
+                account_failure(prefix, AccountCarrierKind::Credentials)?,
+                ":server.example FAIL ACCTCRED UNAVAILABLE :Credential change unavailable\r\n",
+            ),
+        ];
+        for (frame, expected) in frames {
+            assert_eq!(encoded(frame)?, expected.as_bytes());
+        }
+        Ok(())
     }
 
     fn live_value(

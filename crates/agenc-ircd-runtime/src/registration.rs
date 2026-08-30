@@ -8,11 +8,11 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use agenc_ircd_client_wire::{
-    AccessTokenPolicy, CapRequestReply, CapabilityProfile, CapabilitySpec, CapabilityState,
-    KEEPALIVE_IDLE_MILLIS, KEEPALIVE_PONG_MILLIS, REGISTRATION_TIMEOUT_MILLIS, RegistrationAction,
-    RegistrationAuthCarrier, RegistrationCommand, RegistrationError, RegistrationEvent,
-    RegistrationPhase, RegistrationState, WelcomeStep, WireMessage, isupport_messages,
-    numeric_reply, parse_registration_command, split_capability_lines,
+    AccessTokenPolicy, AccountCarrierKind, CapRequestReply, CapabilityProfile, CapabilitySpec,
+    CapabilityState, KEEPALIVE_IDLE_MILLIS, KEEPALIVE_PONG_MILLIS, REGISTRATION_TIMEOUT_MILLIS,
+    RegistrationAction, RegistrationAuthCarrier, RegistrationCommand, RegistrationError,
+    RegistrationEvent, RegistrationPhase, RegistrationState, WelcomeStep, WireMessage,
+    isupport_messages, numeric_reply, parse_registration_command, split_capability_lines,
 };
 use agenc_ircd_crypto::{SemanticHashDomain, semantic_digest};
 use agenc_ircd_domain::{DisplayNameValue, NicknameValue, SessionSeed};
@@ -422,42 +422,38 @@ impl RegistrationRouter {
                 carrier,
                 message,
             } => {
-                if carrier == RegistrationAuthCarrier::Sasl {
-                    let target = self.target(state).to_owned();
-                    return match self.accounts.route_sasl(
+                let target = self.target(state).to_owned();
+                let route = match carrier {
+                    RegistrationAuthCarrier::Sasl => self.accounts.route_sasl(
                         context,
                         generation,
                         carrier_generation,
                         &target,
                         message,
-                    ) {
-                        CarrierRoute::Finished(frames) => {
-                            if !frames.is_empty() {
-                                context
-                                    .send_to(generation, frames)
-                                    .map_err(|_| RuntimeError::MemoryExhausted)?;
-                            }
-                            self.registration_event(
-                                context,
-                                generation,
-                                state,
-                                RegistrationEvent::AuthCarrierFinished {
-                                    generation: carrier_generation,
-                                },
-                            )
-                        }
-                        CarrierRoute::Pending => Ok(ActionStep::Continue),
-                        CarrierRoute::Close => Ok(ActionStep::Close(CloseReason::ProtocolError)),
-                    };
-                }
-                self.send_auth_unavailable(context, generation, state)?;
-                return self.registration_event(
+                    ),
+                    RegistrationAuthCarrier::AccountCreate => self.accounts.route_account(
+                        context,
+                        generation,
+                        carrier_generation,
+                        &target,
+                        AccountCarrierKind::Create,
+                        message,
+                    ),
+                    RegistrationAuthCarrier::AccountCredentials => self.accounts.route_account(
+                        context,
+                        generation,
+                        carrier_generation,
+                        &target,
+                        AccountCarrierKind::Credentials,
+                        message,
+                    ),
+                };
+                return self.complete_carrier_route(
                     context,
                     generation,
                     state,
-                    RegistrationEvent::AuthCarrierFinished {
-                        generation: carrier_generation,
-                    },
+                    carrier_generation,
+                    route,
                 );
             }
             RegistrationAction::ForwardRegisteredCommand(handoff) => {
@@ -822,20 +818,33 @@ impl RegistrationRouter {
         ])
     }
 
-    fn send_auth_unavailable(
-        &self,
+    fn complete_carrier_route(
+        &mut self,
         context: &mut StateCoreContext,
         generation: ConnectionGeneration,
-        state: &ConnectionState,
-    ) -> Result<(), RuntimeError> {
-        self.send_numeric(
-            context,
-            generation,
-            state,
-            904,
-            &[],
-            "Authentication service is unavailable",
-        )
+        state: &mut ConnectionState,
+        carrier_generation: u64,
+        route: CarrierRoute,
+    ) -> Result<ActionStep, RuntimeError> {
+        match route {
+            CarrierRoute::Finished(frames) => {
+                if !frames.is_empty() {
+                    context
+                        .send_to(generation, frames)
+                        .map_err(|_| RuntimeError::MemoryExhausted)?;
+                }
+                self.registration_event(
+                    context,
+                    generation,
+                    state,
+                    RegistrationEvent::AuthCarrierFinished {
+                        generation: carrier_generation,
+                    },
+                )
+            }
+            CarrierRoute::Pending => Ok(ActionStep::Continue),
+            CarrierRoute::Close => Ok(ActionStep::Close(CloseReason::ProtocolError)),
+        }
     }
 
     fn send_numeric(

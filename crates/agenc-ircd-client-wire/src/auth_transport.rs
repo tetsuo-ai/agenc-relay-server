@@ -699,6 +699,14 @@ impl AccountTransfer {
         self.check_deadlines(now)
     }
 
+    /// Irreversibly fails this one-use transfer after an external refusal.
+    pub fn reject(&mut self) {
+        self.clear_encoded();
+        self.state = AccountState::Failed;
+        self.total_deadline = None;
+        self.idle_deadline = None;
+    }
+
     fn begin(
         &mut self,
         phase: AccountCarrierPhase,
@@ -1066,6 +1074,28 @@ mod tests {
         ));
         assert_eq!(finish.state, AccountState::Complete);
         assert_eq!(finish.idle_deadline, None);
+        Ok(())
+    }
+
+    #[test]
+    fn rejected_account_transfer_erases_state_and_cannot_restart() -> Result<(), AuthTransportError>
+    {
+        let mut transfer = AccountTransfer::new(super::AccountCarrierKind::Create)?;
+        transfer.state = AccountState::WaitingResponse(AccountCarrierPhase::Start);
+        transfer.encoded.push_str("secret-carrier-text");
+        transfer.total_deadline = Some(60_000);
+        transfer.idle_deadline = Some(15_000);
+
+        transfer.reject();
+
+        assert_eq!(transfer.state, AccountState::Failed);
+        assert!(transfer.encoded.is_empty());
+        assert_eq!(transfer.total_deadline, None);
+        assert_eq!(transfer.idle_deadline, None);
+        assert_eq!(
+            transfer.client("START", Some("4726"), false, 1).err(),
+            Some(AuthTransportError::BadState)
+        );
         Ok(())
     }
 
