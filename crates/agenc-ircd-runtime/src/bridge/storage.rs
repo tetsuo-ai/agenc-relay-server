@@ -26,7 +26,10 @@ use agenc_ircd_types::TransactionId;
 use tokio::sync::mpsc;
 
 use crate::RuntimeError;
-use crate::bridge::{STORAGE_COMPLETION_CHANNEL_CAPACITY, StorageCompletionMessage};
+use crate::bridge::{
+    STORAGE_COMPLETION_CHANNEL_CAPACITY, STORAGE_READ_COMPLETION_CHANNEL_CAPACITY,
+    StorageCompletionMessage, StorageReadCompletionMessage, StorageReadId,
+};
 use crate::sync::{Arc, Mutex, lock};
 
 /// Completions the bridge thread may hold ahead of the storage owner: the
@@ -180,9 +183,15 @@ impl Default for CompletionLedger {
     }
 }
 
-struct PendingCompletion {
-    transaction_id: TransactionId,
-    completion: StorageCompletion<CommitOutcome>,
+enum PendingCompletion {
+    Commit {
+        transaction_id: TransactionId,
+        completion: StorageCompletion<CommitOutcome>,
+    },
+    Read {
+        read_id: StorageReadId,
+        completion: StorageCompletion<ReadResult>,
+    },
 }
 
 /// The submitting half of the bridge, owned by StateCore.
@@ -191,20 +200,31 @@ pub struct StorageBridge {
     handoff: Option<SyncSender<PendingCompletion>>,
     ledger: Arc<CompletionLedger>,
     thread: Option<JoinHandle<()>>,
+    next_read_id: u64,
 }
 
 impl StorageBridge {
-    /// Starts the bridge thread and returns the sole completion receiver.
+    /// Starts the bridge thread and returns the sole commit and read
+    /// completion receivers.
     pub fn start(
         port: StoragePort,
-    ) -> Result<(Self, mpsc::Receiver<StorageCompletionMessage>), RuntimeError> {
+    ) -> Result<
+        (
+            Self,
+            mpsc::Receiver<StorageCompletionMessage>,
+            mpsc::Receiver<StorageReadCompletionMessage>,
+        ),
+        RuntimeError,
+    > {
         let (handoff, pending) = sync_channel(STORAGE_HANDOFF_CAPACITY);
         let (outcomes, receiver) = mpsc::channel(STORAGE_COMPLETION_CHANNEL_CAPACITY);
+        let (read_outcomes, read_receiver) =
+            mpsc::channel(STORAGE_READ_COMPLETION_CHANNEL_CAPACITY);
         let ledger = Arc::new(CompletionLedger::new());
         let thread_ledger = Arc::clone(&ledger);
         let thread = thread::Builder::new()
             .name(STORAGE_BRIDGE_THREAD_NAME.to_owned())
-            .spawn(move || bridge_loop(&pending, &outcomes, &thread_ledger))
+            .spawn(move || bridge_loop(&pending, &outcomes, &read_outcomes, &thread_ledger))
             .map_err(|_| RuntimeError::Storage(StorageError::Unavailable))?;
         Ok((
             Self {
@@ -212,8 +232,10 @@ impl StorageBridge {
                 handoff: Some(handoff),
                 ledger,
                 thread: Some(thread),
+                next_read_id: 1,
             },
             receiver,
+            read_receiver,
         ))
     }
 
@@ -238,7 +260,7 @@ impl StorageBridge {
             self.ledger.fail(BridgeFailure::Stopped);
             return Err(SubmitError::Bridge(BridgeFailure::Stopped));
         };
-        match handoff.try_send(PendingCompletion {
+        match handoff.try_send(PendingCompletion::Commit {
             transaction_id,
             completion,
         }) {
@@ -253,6 +275,35 @@ impl StorageBridge {
                 self.ledger.fail(BridgeFailure::Stopped);
                 Err(SubmitError::Bridge(BridgeFailure::Stopped))
             }
+        }
+    }
+
+    /// Submits one bounded read without blocking and assigns its completion a
+    /// process-local identity. A refused handoff is determinate because reads
+    /// do not mutate storage.
+    pub fn submit_read(&mut self, plan: ReadPlan) -> Result<StorageReadId, StorageError> {
+        if self.ledger.failure().is_some() {
+            return Err(StorageError::Unavailable);
+        }
+        let next = self
+            .next_read_id
+            .checked_add(1)
+            .ok_or(StorageError::Overflow)?;
+        let read_id = StorageReadId::new(self.next_read_id);
+        let completion = self.port.try_read(plan)?;
+        let Some(handoff) = &self.handoff else {
+            return Err(StorageError::Unavailable);
+        };
+        match handoff.try_send(PendingCompletion::Read {
+            read_id,
+            completion,
+        }) {
+            Ok(()) => {
+                self.next_read_id = next;
+                Ok(read_id)
+            }
+            Err(TrySendError::Full(_)) => Err(StorageError::QueueFull),
+            Err(TrySendError::Disconnected(_)) => Err(StorageError::Unavailable),
         }
     }
 
@@ -320,29 +371,66 @@ pub fn classify_completion(
 fn bridge_loop(
     pending: &Receiver<PendingCompletion>,
     outcomes: &mpsc::Sender<StorageCompletionMessage>,
+    read_outcomes: &mpsc::Sender<StorageReadCompletionMessage>,
     ledger: &CompletionLedger,
 ) {
     while let Ok(next) = pending.recv() {
-        let (outcome, failure) = classify_completion(next.completion.wait());
-        if let Err(mismatch) = ledger.finish(next.transaction_id) {
-            ledger.fail(mismatch);
-            return;
-        }
-        if let Some(failure) = failure {
-            ledger.fail(failure);
-        }
-        let message = StorageCompletionMessage {
-            transaction_id: next.transaction_id,
-            outcome,
+        let keep_running = match next {
+            PendingCompletion::Commit {
+                transaction_id,
+                completion,
+            } => forward_commit(transaction_id, completion, outcomes, ledger),
+            PendingCompletion::Read {
+                read_id,
+                completion,
+            } => forward_read(read_id, completion, read_outcomes, ledger),
         };
-        if outcomes.blocking_send(message).is_err() {
-            ledger.fail(BridgeFailure::ReceiverLost);
-            return;
-        }
-        if failure.is_some() {
+        if !keep_running {
             return;
         }
     }
+}
+
+fn forward_commit(
+    transaction_id: TransactionId,
+    completion: StorageCompletion<CommitOutcome>,
+    outcomes: &mpsc::Sender<StorageCompletionMessage>,
+    ledger: &CompletionLedger,
+) -> bool {
+    let (outcome, failure) = classify_completion(completion.wait());
+    if let Err(mismatch) = ledger.finish(transaction_id) {
+        ledger.fail(mismatch);
+        return false;
+    }
+    if let Some(failure) = failure {
+        ledger.fail(failure);
+    }
+    let message = StorageCompletionMessage {
+        transaction_id,
+        outcome,
+    };
+    if outcomes.blocking_send(message).is_err() {
+        ledger.fail(BridgeFailure::ReceiverLost);
+        return false;
+    }
+    failure.is_none()
+}
+
+fn forward_read(
+    read_id: StorageReadId,
+    completion: StorageCompletion<ReadResult>,
+    read_outcomes: &mpsc::Sender<StorageReadCompletionMessage>,
+    ledger: &CompletionLedger,
+) -> bool {
+    let message = StorageReadCompletionMessage {
+        read_id,
+        result: completion.wait(),
+    };
+    if read_outcomes.blocking_send(message).is_err() {
+        ledger.fail(BridgeFailure::ReceiverLost);
+        return false;
+    }
+    true
 }
 
 /// Performs one bounded consistent read, blocking the calling thread.

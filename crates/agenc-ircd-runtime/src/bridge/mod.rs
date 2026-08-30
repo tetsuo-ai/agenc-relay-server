@@ -5,11 +5,13 @@ pub mod crypto;
 pub mod storage;
 
 use agenc_ircd_crypto::CryptoWorkerError;
-use agenc_ircd_storage::CommitOutcome;
+use agenc_ircd_storage::{CommitOutcome, ReadResult, StorageError};
 use agenc_ircd_types::TransactionId;
 
 /// Completions queued from the storage bridge to StateCore (spec line 4084).
 pub const STORAGE_COMPLETION_CHANNEL_CAPACITY: usize = 2;
+/// Read completions queued from the storage bridge to StateCore.
+pub const STORAGE_READ_COMPLETION_CHANNEL_CAPACITY: usize = 2;
 
 /// Process-local identity of one submitted crypto job.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -17,6 +19,24 @@ pub struct CryptoJobId(u64);
 
 impl CryptoJobId {
     /// Wraps a job identity issued by the crypto bridge.
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Returns the primitive identity.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Process-local identity of one submitted storage read.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct StorageReadId(u64);
+
+impl StorageReadId {
+    /// Wraps a read identity issued by the storage bridge.
     #[must_use]
     pub const fn new(value: u64) -> Self {
         Self(value)
@@ -41,6 +61,14 @@ pub struct StorageCompletionMessage {
     pub outcome: CommitOutcome,
 }
 
+/// One bounded read result forwarded to StateCore.
+pub struct StorageReadCompletionMessage {
+    /// The process-local read identity.
+    pub read_id: StorageReadId,
+    /// The complete read or its determinate storage failure.
+    pub result: Result<ReadResult, StorageError>,
+}
+
 /// One crypto job outcome forwarded to StateCore.
 pub struct CryptoCompletionMessage<O> {
     /// The job the bridge submitted.
@@ -58,6 +86,8 @@ mod tests {
         assert_eq!(CryptoJobId::new(42).get(), 42);
         assert!(CryptoJobId::new(1) < CryptoJobId::new(2));
         assert_eq!(STORAGE_COMPLETION_CHANNEL_CAPACITY, 2);
+        assert_eq!(STORAGE_READ_COMPLETION_CHANNEL_CAPACITY, 2);
+        assert_eq!(StorageReadId::new(8).get(), 8);
         let message = CryptoCompletionMessage::<u8> {
             job_id: CryptoJobId::new(9),
             output: Err(CryptoWorkerError::QueueFull),

@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use agenc_ircd_client_wire::{ParsedMessage, WireMessage, numeric_reply};
 use agenc_ircd_domain::{ApplyReceipt, DomainError, DomainState, MutationPlan};
-use agenc_ircd_storage::{CommitOutcome, StorageError, StoredKey, TableId};
+use agenc_ircd_storage::{CommitOutcome, ReadPlan, StorageError, StoredKey, TableId};
 use agenc_ircd_types::{
     ClockError, EntropySource, MonotonicClock, MonotonicTick, TransactionId, UserId, UtcSecond,
     WallClock,
@@ -38,7 +38,9 @@ use crate::admission::{
 };
 use crate::bridge::crypto::{CryptoBridge, CryptoJobOutput};
 use crate::bridge::storage::{BridgeFailure, StorageBridge, SubmitError};
-use crate::bridge::{CryptoCompletionMessage, StorageCompletionMessage};
+use crate::bridge::{
+    CryptoCompletionMessage, StorageCompletionMessage, StorageReadCompletionMessage, StorageReadId,
+};
 use crate::budget::MemoryBudget;
 use crate::cancel::CancellationToken;
 use crate::connection::sink::ConnectionGeneration;
@@ -150,6 +152,14 @@ pub trait CommandRouter: Send {
         &mut self,
         _context: &mut StateCoreContext,
         _message: CryptoCompletionMessage<CryptoJobOutput>,
+    ) {
+    }
+
+    /// A bounded storage read completed.
+    fn storage_read_completed(
+        &mut self,
+        _context: &mut StateCoreContext,
+        _message: StorageReadCompletionMessage,
     ) {
     }
 
@@ -407,6 +417,12 @@ impl StateCoreContext {
     /// Mutably borrows the bounded crypto submission bridge.
     pub const fn crypto_mut(&mut self) -> &mut CryptoBridge {
         &mut self.crypto
+    }
+
+    /// Submits one bounded live read through the storage owner without
+    /// blocking the state actor.
+    pub fn submit_storage_read(&mut self, plan: ReadPlan) -> Result<StorageReadId, StorageError> {
+        self.bridge.submit_read(plan)
     }
 
     /// Borrows the drift monitor.
@@ -1108,9 +1124,11 @@ impl StateCore {
         &mut self,
         mut inbox: mpsc::Receiver<StateCoreMessage>,
         mut storage: mpsc::Receiver<StorageCompletionMessage>,
+        mut storage_reads: mpsc::Receiver<StorageReadCompletionMessage>,
         mut crypto: mpsc::Receiver<CryptoCompletionMessage<CryptoJobOutput>>,
         token: CancellationToken,
     ) -> StateCoreExit {
+        let mut storage_reads_open = true;
         let mut crypto_open = true;
         let mut cancellation_open = true;
         loop {
@@ -1128,6 +1146,15 @@ impl StateCore {
                     None => Some(StateCoreExit::Indeterminate(
                         IndeterminateCause::CompletionChannelClosed,
                     )),
+                },
+                completion = storage_reads.recv(), if storage_reads_open => {
+                    match completion {
+                        Some(message) => {
+                            self.router.storage_read_completed(&mut self.context, message);
+                        }
+                        None => storage_reads_open = false,
+                    }
+                    None
                 },
                 completion = crypto.recv(), if crypto_open => {
                     match completion {

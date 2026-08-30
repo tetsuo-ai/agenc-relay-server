@@ -17,7 +17,7 @@ use agenc_ircd_domain::{
 };
 use agenc_ircd_runtime::bridge::storage::{
     BridgeFailure, CompletionLedger, STORAGE_HANDOFF_CAPACITY, StorageBridge, SubmitError,
-    classify_completion, read_blocking,
+    classify_completion,
 };
 use agenc_ircd_storage::{
     AccountRecordBody, CommitOutcome, DatabaseHeaderTbs, InitialStorageRecord, LoginIndexKeyState,
@@ -270,7 +270,7 @@ async fn committed_and_rejected_outcomes_arrive_with_their_transaction_ids()
 -> Result<(), Box<dyn Error>> {
     let initialized = initialize()?;
     let owner = open_owner(&initialized, StorageFaultInjector::disabled())?;
-    let (bridge, mut receiver) = StorageBridge::start(owner.port())?;
+    let (mut bridge, mut receiver, mut read_receiver) = StorageBridge::start(owner.port())?;
     assert_eq!(bridge.in_flight(), 0);
     let first = batch(&initialized, 1, 0, 0)?;
     let first_id = first.transaction_id();
@@ -301,11 +301,14 @@ async fn committed_and_rejected_outcomes_arrive_with_their_transaction_ids()
         CommitOutcome::Rejected(StorageError::StaleState)
     ));
 
-    // The port stays usable for reads while the bridge is alive.
-    let read = read_blocking(
-        bridge.port(),
-        ReadPlan::exact(TableId::Account, account_key(1)?),
-    )?;
+    // Live reads use their own bounded completion lane and retain their
+    // process-local identity.
+    let read_id = bridge.submit_read(ReadPlan::exact(TableId::Account, account_key(1)?))?;
+    let read_message = tokio::time::timeout(Duration::from_secs(60), read_receiver.recv())
+        .await?
+        .ok_or("read completion channel closed")?;
+    assert_eq!(read_message.read_id, read_id);
+    let read = read_message.result?;
     assert_eq!(read.records.len(), 1);
     assert!(first_logical > initialized.logical_database_bytes);
     bridge.shutdown()?;
@@ -317,7 +320,7 @@ async fn committed_and_rejected_outcomes_arrive_with_their_transaction_ids()
 async fn a_duplicate_transaction_identity_fails_the_bridge_closed() -> Result<(), Box<dyn Error>> {
     let initialized = initialize()?;
     let owner = open_owner(&initialized, StorageFaultInjector::disabled())?;
-    let (bridge, mut receiver) = StorageBridge::start(owner.port())?;
+    let (bridge, mut receiver, _read_receiver) = StorageBridge::start(owner.port())?;
     let first = batch(&initialized, 3, 0, 0)?;
     let duplicate = batch(&initialized, 3, 1, 1)?;
     let id = bridge.submit(first)?;
@@ -362,7 +365,7 @@ async fn a_lost_receiver_stops_the_bridge_and_later_submissions_report_stopped()
 -> Result<(), Box<dyn Error>> {
     let initialized = initialize()?;
     let owner = open_owner(&initialized, StorageFaultInjector::disabled())?;
-    let (bridge, receiver) = StorageBridge::start(owner.port())?;
+    let (bridge, receiver, _read_receiver) = StorageBridge::start(owner.port())?;
     drop(receiver);
     let id = bridge.submit(batch(&initialized, 5, 0, 0)?)?;
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
@@ -385,7 +388,7 @@ async fn a_lost_receiver_stops_the_bridge_and_later_submissions_report_stopped()
 async fn a_storage_refusal_abandons_the_ledger_entry() -> Result<(), Box<dyn Error>> {
     let initialized = initialize()?;
     let owner = open_owner(&initialized, StorageFaultInjector::disabled())?;
-    let (bridge, mut receiver) = StorageBridge::start(owner.port())?;
+    let (bridge, mut receiver, _read_receiver) = StorageBridge::start(owner.port())?;
     owner.shutdown()?;
     let refused = bridge.submit(batch(&initialized, 7, 0, 0)?).err();
     assert!(matches!(
@@ -416,7 +419,7 @@ async fn an_injected_commit_fault_after_the_primary_swap_is_indeterminate()
         boundary: StorageFaultBoundary::After,
     };
     let owner = open_owner(&initialized, StorageFaultInjector::new(case, 1)?)?;
-    let (bridge, mut receiver) = StorageBridge::start(owner.port())?;
+    let (bridge, mut receiver, _read_receiver) = StorageBridge::start(owner.port())?;
     let id = bridge.submit(batch(&initialized, 8, 0, 0)?)?;
     let message = next_outcome(&mut receiver).await?;
     assert_eq!(message.transaction_id, id);

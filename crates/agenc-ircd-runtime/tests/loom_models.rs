@@ -29,7 +29,8 @@ pub use agenc_ircd_runtime::RuntimeError;
 /// The message types the included bridge source names through `crate::bridge`.
 pub mod bridge {
     pub use agenc_ircd_runtime::bridge::{
-        STORAGE_COMPLETION_CHANNEL_CAPACITY, StorageCompletionMessage,
+        STORAGE_COMPLETION_CHANNEL_CAPACITY, STORAGE_READ_COMPLETION_CHANNEL_CAPACITY,
+        StorageCompletionMessage, StorageReadCompletionMessage, StorageReadId,
     };
 }
 
