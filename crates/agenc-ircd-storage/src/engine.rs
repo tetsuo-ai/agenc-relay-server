@@ -9,7 +9,7 @@ use agenc_ircd_crypto::{
     StorageMasterKey, StorageTable, TrackedStateHasher, derive_storage_index,
     derive_storage_integrity_keys, tracked_record_commitment,
 };
-use agenc_ircd_types::{ChannelName, NetworkId, Nickname, ServerId};
+use agenc_ircd_types::{ChannelName, NetworkId, Nickname, RecoveryEpoch, ServerId};
 use subtle::ConstantTimeEq as _;
 
 use crate::mutation::ReadPlanKind;
@@ -59,6 +59,7 @@ pub struct RecoveredStorageState {
     backup_stream_bytes: u64,
     database_binding: DatabaseBinding,
     storage_key_generation: u32,
+    recovery_epoch: RecoveryEpoch,
     capacity: FilesystemCapacity,
 }
 
@@ -85,6 +86,12 @@ impl RecoveredStorageState {
     #[must_use]
     pub const fn storage_key_generation(&self) -> u32 {
         self.storage_key_generation
+    }
+
+    /// Returns the authenticated recovery epoch advertised during onboarding.
+    #[must_use]
+    pub const fn recovery_epoch(&self) -> RecoveryEpoch {
+        self.recovery_epoch
     }
 
     /// Returns the exact row count reconstructed for one numbered table.
@@ -1897,6 +1904,7 @@ impl StorageEngine {
             backup_stream_bytes: self.state_meta.tbs().backup_stream_bytes,
             database_binding: self.binding,
             storage_key_generation: self.header.tbs().storage_key_generation,
+            recovery_epoch: self.header.tbs().recovery_epoch,
             capacity,
         })
     }

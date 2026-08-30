@@ -7,7 +7,7 @@ use agenc_ircd_types::{NetworkId, OperatorId, ServerId};
 
 use crate::config::{Config, ValidationDepth};
 use crate::error::{ConfigError, ConfigIssue, ConfigReport, SchemaKey, ValidationStage};
-use crate::network::DisplayLabel;
+use crate::network::{DisplayLabel, NodeRole};
 use crate::paths::PathResolver;
 use crate::scalar::{DnsName, encode_base64url_32};
 
@@ -60,6 +60,10 @@ pub struct InitValues {
     pub network_id: NetworkId,
     /// Fresh server identity.
     pub server_id: ServerId,
+    /// Local coordinator or edge role.
+    pub role: NodeRole,
+    /// Coordinator identity imported by an edge or equal to `server_id` locally.
+    pub coordinator_server_id: ServerId,
     /// Configured server name.
     pub server_name: DnsName,
     /// Display name.
@@ -133,11 +137,11 @@ fn render_network(out: &mut String, values: &InitValues) {
     let _ = writeln!(out, "# 1..32 ASCII [A-Za-z0-9._-]; reloadable.");
     let _ = writeln!(out, "display_name = \"{}\"", values.display_name.as_str());
     let _ = writeln!(out, "# coordinator or edge; restart-only.");
-    let _ = writeln!(out, "role = \"coordinator\"");
+    let _ = writeln!(out, "role = \"{}\"", values.role.as_str());
     let _ = writeln!(
         out,
         "coordinator_server_id = \"{}\"",
-        values.server_id.to_base64url()
+        values.coordinator_server_id.to_base64url()
     );
     if let Some(dns) = &values.dns_name {
         let _ = writeln!(out, "# Lowercase reference DNS name and port 1..65535.");
@@ -363,21 +367,23 @@ fn render_accounts(out: &mut String, values: &InitValues, keys: &Path) {
         "account_service_hpke_public_key = \"{}\"",
         encode_base64url_32(&values.account_service_hpke_public_key)
     );
-    let _ = writeln!(
-        out,
-        "account_service_hpke_private_key_file = \"{}\"",
-        path(keys, "account-service-hpke.key")
-    );
-    let _ = writeln!(
-        out,
-        "opaque_server_setup_file = \"{}\"",
-        path(keys, "opaque-server-setup.key")
-    );
-    let _ = writeln!(
-        out,
-        "opaque_fake_credential_key_file = \"{}\"",
-        path(keys, "opaque-fake-credential.key")
-    );
+    if values.role == NodeRole::Coordinator {
+        let _ = writeln!(
+            out,
+            "account_service_hpke_private_key_file = \"{}\"",
+            path(keys, "account-service-hpke.key")
+        );
+        let _ = writeln!(
+            out,
+            "opaque_server_setup_file = \"{}\"",
+            path(keys, "opaque-server-setup.key")
+        );
+        let _ = writeln!(
+            out,
+            "opaque_fake_credential_key_file = \"{}\"",
+            path(keys, "opaque-fake-credential.key")
+        );
+    }
     let _ = writeln!(
         out,
         "allow_guests = true\ndefault_public_presence = false\ndefault_allow_guest_dm = false"
@@ -471,7 +477,7 @@ fn render_e2ee(out: &mut String, values: &InitValues, keys: &Path) {
     let _ = writeln!(
         out,
         "coordinator_server_id = \"{}\"",
-        values.server_id.to_base64url()
+        values.coordinator_server_id.to_base64url()
     );
     let _ = writeln!(
         out,

@@ -17,6 +17,7 @@ pub mod connection;
 mod error;
 pub mod listener;
 pub mod observe;
+pub mod offline;
 pub mod purpose;
 pub mod state_core;
 pub mod supervisor;

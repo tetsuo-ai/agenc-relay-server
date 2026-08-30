@@ -7,8 +7,8 @@ mod support;
 
 use agenc_ircd_config::{
     BASE_PROFILE_SHA256_TOKEN, ConfigError, DisplayLabel, DnsName, E2EE_PROFILE_SHA256_TOKEN,
-    InitProfile, InitValues, OnboardingFacts, OperatorTemplate, ValidationStage, render_onboarding,
-    render_template,
+    InitProfile, InitValues, NodeRole, OnboardingFacts, OperatorTemplate, ValidationStage,
+    render_onboarding, render_template,
 };
 use agenc_ircd_types::{NetworkId, OperatorId, RecoveryEpoch, ServerId};
 use support::{DUAL, ONION, PUBLIC, parse};
@@ -20,6 +20,8 @@ fn values(profile: InitProfile) -> Result<InitValues, Box<dyn std::error::Error>
         profile,
         network_id: NetworkId::from_bytes([1; 32]),
         server_id: ServerId::from_bytes([2; 16]),
+        role: NodeRole::Coordinator,
+        coordinator_server_id: ServerId::from_bytes([2; 16]),
         server_name: DnsName::parse("chat.example")?,
         display_name: DisplayLabel::parse("example")?,
         data_dir: "/var/lib/agenc-ircd".into(),

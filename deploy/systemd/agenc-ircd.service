@@ -1,0 +1,40 @@
+[Unit]
+Description=AgenC IRC daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agenc-ircd
+Group=agenc-ircd
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @debug @mount @raw-io
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+LimitCORE=0
+LimitMEMLOCK=infinity
+RuntimeDirectory=agenc-ircd
+RuntimeDirectoryMode=0750
+StateDirectory=agenc-ircd
+ReadWritePaths=/var/lib/agenc-ircd/state /var/lib/agenc-ircd/backups /run/agenc-ircd
+ExecStartPre=/usr/bin/agenc-ircd check-config --config /etc/agenc-ircd/config.toml
+ExecStart=/usr/bin/agenc-ircd serve --config /etc/agenc-ircd/config.toml
+KillSignal=SIGTERM
+TimeoutStopSec=120
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

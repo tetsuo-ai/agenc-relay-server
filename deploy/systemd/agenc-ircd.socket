@@ -1,0 +1,10 @@
+[Unit]
+Description=AgenC IRC TLS socket
+
+[Socket]
+ListenStream=6697
+NoDelay=true
+Service=agenc-ircd.service
+
+[Install]
+WantedBy=sockets.target
