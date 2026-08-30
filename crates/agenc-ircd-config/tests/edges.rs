@@ -179,6 +179,16 @@ fn operator_records_reject_every_duplicate_identity() {
         stage,
         &SchemaKey::indexed("moderation.operator", 1, "local_gids")
     ));
+    let gid_outside_listener_policy = mutate(
+        &mutate(PUBLIC, "allowed_gids = []", "allowed_gids = [100]"),
+        "local_gids = []",
+        "local_gids = [101]",
+    );
+    assert!(has_issue(
+        &gid_outside_listener_policy,
+        stage,
+        &SchemaKey::indexed("moderation.operator", 0, "local_gids")
+    ));
     let same_pin = SECOND_OPERATOR.replacen(
         "permissions",
         "certificate_spki_sha256 = \"BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU\"\npermissions",

@@ -137,10 +137,47 @@ impl ShutdownPlan {
 pub enum PhaseOutcome {
     /// The hook finished within its budget.
     Completed,
+    /// The phase hook reported a closed owner failure.
+    Failed(ShutdownFailure),
     /// The budget expired; the driver moved on.
     TimedOut,
     /// A second termination signal skipped the phase.
     Skipped,
+}
+
+/// Closed failures a shutdown hook may return without exposing internal errors.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShutdownFailure {
+    /// Listener acceptance or its barrier failed.
+    Listener,
+    /// StateCore could not reach the requested safe point.
+    StateCore,
+    /// A connection writer did not honor its close contract.
+    Writer,
+    /// The due audit checkpoint could not be committed.
+    Audit,
+    /// A storage owner or bridge failed.
+    Storage,
+    /// A supervised child could not be joined.
+    Join,
+}
+
+/// The first failed or timed-out phase retained by the driver.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ShutdownProblem {
+    /// Phase that first failed or timed out.
+    pub phase: ShutdownPhase,
+    /// How that phase failed.
+    pub kind: ShutdownProblemKind,
+}
+
+/// Failure class retained in a [`ShutdownProblem`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShutdownProblemKind {
+    /// A hook returned a typed failure.
+    Failed(ShutdownFailure),
+    /// The phase budget expired.
+    TimedOut,
 }
 
 /// The record of one shutdown run.
@@ -148,6 +185,7 @@ pub enum PhaseOutcome {
 pub struct ShutdownReport {
     outcomes: [PhaseOutcome; 4],
     interrupted: bool,
+    first_problem: Option<ShutdownProblem>,
 }
 
 impl ShutdownReport {
@@ -167,15 +205,25 @@ impl ShutdownReport {
     pub const fn interrupted(&self) -> bool {
         self.interrupted
     }
+
+    /// Returns the first hook failure or timeout, if any.
+    #[must_use]
+    pub const fn first_problem(&self) -> Option<ShutdownProblem> {
+        self.first_problem
+    }
 }
 
 /// The work each phase performs; the runtime composes it from its owners.
 pub trait ShutdownHooks {
     /// Runs one phase to completion; the driver applies the budget.
-    fn run(&mut self, phase: ShutdownPhase) -> impl Future<Output = ()> + Send;
+    fn run(
+        &mut self,
+        phase: ShutdownPhase,
+    ) -> impl Future<Output = Result<(), ShutdownFailure>> + Send;
 }
 
 /// Drives the four phases, honoring budgets and the second-signal skip.
+// agenc-review: focus owner=runtime reviewed=2026-08-30 reason=single bounded four-phase loop preserves phase order second-signal supersession and first-problem retention
 pub async fn run_shutdown<H: ShutdownHooks>(
     plan: ShutdownPlan,
     hooks: &mut H,
@@ -183,6 +231,7 @@ pub async fn run_shutdown<H: ShutdownHooks>(
 ) -> ShutdownReport {
     let mut outcomes = [PhaseOutcome::Skipped; 4];
     let mut skip_to_stop = false;
+    let mut first_problem = None;
     for (slot, phase) in outcomes.iter_mut().zip(ShutdownPhase::ALL) {
         if skip_to_stop && phase != ShutdownPhase::Stop {
             *slot = PhaseOutcome::Skipped;
@@ -192,17 +241,31 @@ pub async fn run_shutdown<H: ShutdownHooks>(
         if outcome == PhaseOutcome::Skipped {
             skip_to_stop = true;
         }
+        if first_problem.is_none() {
+            first_problem = match outcome {
+                PhaseOutcome::Failed(failure) => Some(ShutdownProblem {
+                    phase,
+                    kind: ShutdownProblemKind::Failed(failure),
+                }),
+                PhaseOutcome::TimedOut => Some(ShutdownProblem {
+                    phase,
+                    kind: ShutdownProblemKind::TimedOut,
+                }),
+                PhaseOutcome::Completed | PhaseOutcome::Skipped => None,
+            };
+        }
         *slot = outcome;
     }
     ShutdownReport {
         outcomes,
         interrupted: skip_to_stop,
+        first_problem,
     }
 }
 
 /// Runs one phase under its budget; a termination signal skips it, a
 /// reload signal is ignored without dropping the phase future.
-async fn run_phase<F: Future<Output = ()>>(
+async fn run_phase<F: Future<Output = Result<(), ShutdownFailure>>>(
     budget: Duration,
     phase: F,
     signals: &mut mpsc::Receiver<SignalEvent>,
@@ -211,12 +274,13 @@ async fn run_phase<F: Future<Output = ()>>(
     tokio::pin!(bounded);
     loop {
         let event = tokio::select! {
-            result = &mut bounded => PhaseEvent::Finished(result.is_ok()),
+            result = &mut bounded => PhaseEvent::Finished(result),
             signal = signals.recv() => PhaseEvent::Signal(signal),
         };
         match event {
-            PhaseEvent::Finished(true) => return PhaseOutcome::Completed,
-            PhaseEvent::Finished(false) => return PhaseOutcome::TimedOut,
+            PhaseEvent::Finished(Ok(Ok(()))) => return PhaseOutcome::Completed,
+            PhaseEvent::Finished(Ok(Err(failure))) => return PhaseOutcome::Failed(failure),
+            PhaseEvent::Finished(Err(_)) => return PhaseOutcome::TimedOut,
             PhaseEvent::Signal(Some(SignalEvent::Terminate | SignalEvent::Interrupt)) => {
                 return PhaseOutcome::Skipped;
             }
@@ -226,7 +290,7 @@ async fn run_phase<F: Future<Output = ()>>(
 }
 
 enum PhaseEvent {
-    Finished(bool),
+    Finished(Result<Result<(), ShutdownFailure>, tokio::time::error::Elapsed>),
     Signal(Option<SignalEvent>),
 }
 

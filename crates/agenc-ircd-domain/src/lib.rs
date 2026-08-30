@@ -31,11 +31,12 @@ pub use model::{
     AccountLabelValue, AccountState, AwayText, ChannelKeyVerifier, ChannelModes, ChannelNameValue,
     ChannelScope, ChannelState, ContentPolicy, DirectMessagePolicy, DisplayNameValue, DomainState,
     GuestDirectMessagePolicy, HistoryPolicy, ListEntry, MAX_CHANNELS_PER_SESSION,
-    MAX_CONTACTS_PER_ACCOUNT, MAX_INVITES_PER_CHANNEL, MAX_MASK_ENTRIES_PER_LIST,
-    MAX_MEMBERS_PER_CHANNEL, MAX_MONITORED_NICKNAMES, MAX_RESERVED_NICKNAMES,
-    MAX_ROLE_GRANTS_PER_CHANNEL, MAX_SESSIONS_PER_ACCOUNT, Membership, ModerationAction,
-    ModerationReason, ModerationReasonCode, NicknameValue, PersistencePolicy, PlaintextTopic,
-    PresencePolicy, Principal, Role, Sanction, SessionSeed, SessionState, TopicText, Visibility,
+    MAX_CONTACTS_PER_ACCOUNT, MAX_GLOBAL_CHANNELS, MAX_INVITES_PER_CHANNEL, MAX_LOCAL_CHANNELS,
+    MAX_MASK_ENTRIES_PER_LIST, MAX_MEMBERS_PER_CHANNEL, MAX_MONITORED_NICKNAMES,
+    MAX_RESERVED_NICKNAMES, MAX_ROLE_GRANTS_PER_CHANNEL, MAX_SESSIONS_PER_ACCOUNT, Membership,
+    ModerationAction, ModerationReason, ModerationReasonCode, NicknameValue,
+    OperationalLimitValues, OperationalLimits, PersistencePolicy, PlaintextTopic, PresencePolicy,
+    Principal, Role, Sanction, SessionSeed, SessionState, TopicText, Visibility,
 };
 pub use persist::{
     DurableAccount, DurableChannel, DurableListEntry, DurableSanction, DurableTopic, DurableWrite,

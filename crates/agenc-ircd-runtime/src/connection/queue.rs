@@ -18,8 +18,8 @@ use tokio::sync::Notify;
 
 use super::sink::{
     BoundedSharedClientFrames, ClientQueueDemand, ClientQueueReservation, ClientSink,
-    ConnectionGeneration, QueueAllocationError, QueueReservationLedger, SinkReserveError,
-    TentativeClientQueueReservation,
+    ConnectionGeneration, FlushAcknowledgement, QueueAllocationError, QueueReservationLedger,
+    SinkReserveError, TentativeClientQueueReservation,
 };
 use crate::RuntimeError;
 use crate::budget::{MemoryCharge, MemoryPermit};
@@ -172,6 +172,7 @@ struct QueueState {
     closed: Option<CloseReason>,
     warning_armed: bool,
     warning_pending: bool,
+    flush_acknowledgement: Option<FlushAcknowledgement>,
 }
 
 impl QueueState {
@@ -238,6 +239,7 @@ impl WriterQueue {
                     closed: None,
                     warning_armed: true,
                     warning_pending: false,
+                    flush_acknowledgement: None,
                 }),
                 notify: Notify::new(),
             }),
@@ -321,6 +323,15 @@ impl WriterQueue {
         }
         drop(state);
         self.shared.notify.notify_one();
+    }
+
+    /// Completes the pending orderly-shutdown acknowledgement after the
+    /// writer has attempted its final transport flush.
+    pub fn acknowledge_flush(&self) {
+        let acknowledgement = lock(&self.shared.state).flush_acknowledgement.clone();
+        if let Some(acknowledgement) = acknowledgement {
+            acknowledgement.acknowledge();
+        }
     }
 
     /// Returns whether the queue is closed.
@@ -435,6 +446,20 @@ impl ClientSink for WriterQueue {
 
     fn begin_slow_consumer_close(&self) {
         self.close(CloseReason::SlowConsumer, ClosePolicy::Immediate);
+    }
+
+    fn shutdown_after_flush(&self) -> FlushAcknowledgement {
+        let mut state = lock(&self.shared.state);
+        let acknowledgement = state
+            .flush_acknowledgement
+            .get_or_insert_with(FlushAcknowledgement::pending)
+            .clone();
+        if state.closed.is_none() {
+            state.closed = Some(CloseReason::Shutdown);
+        }
+        drop(state);
+        self.shared.notify.notify_one();
+        acknowledgement
     }
 }
 

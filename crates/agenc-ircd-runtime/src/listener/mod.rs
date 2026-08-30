@@ -15,7 +15,7 @@ pub mod spki;
 
 use std::error::Error;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use rustls::ServerConfig;
@@ -214,6 +214,7 @@ pub struct ListenerSet {
     addresses: Vec<(ListenerPurpose, BoundAddress)>,
     accept_token: CancellationToken,
     connection_token: CancellationToken,
+    accept_barrier: Arc<AcceptBarrier>,
 }
 
 /// Cloneable shutdown authority for a listener set owned by another task.
@@ -221,6 +222,43 @@ pub struct ListenerSet {
 pub struct ListenerControl {
     accept_token: CancellationToken,
     connection_token: CancellationToken,
+    accept_barrier: Arc<AcceptBarrier>,
+}
+
+struct AcceptBarrier {
+    remaining: AtomicUsize,
+    notify: tokio::sync::Notify,
+}
+
+impl AcceptBarrier {
+    fn new(listeners: usize) -> Self {
+        Self {
+            remaining: AtomicUsize::new(listeners),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn arrived(&self) {
+        let previous =
+            self.remaining
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    current.checked_sub(1)
+                });
+        if previous == Ok(1) {
+            self.notify.notify_waiters();
+        }
+    }
+
+    async fn wait(&self) {
+        while self.remaining.load(Ordering::Acquire) != 0 {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.remaining.load(Ordering::Acquire) != 0 {
+                notified.await;
+            }
+        }
+    }
 }
 
 impl ListenerControl {
@@ -232,6 +270,11 @@ impl ListenerControl {
     /// Cancels every connection supervisor in the set.
     pub fn cancel_connections(&self) {
         self.connection_token.cancel();
+    }
+
+    /// Waits until every accept loop has dropped its listening socket.
+    pub async fn wait_accept_stopped(&self) {
+        self.accept_barrier.wait().await;
     }
 }
 
@@ -269,6 +312,7 @@ impl ListenerSet {
             }
             bound.push((validated, listener, address));
         }
+        let accept_barrier = Arc::new(AcceptBarrier::new(bound.len()));
         let mut tasks = JoinSet::new();
         let mut addresses = Vec::with_capacity(bound.len());
         for (spec, listener, address) in bound {
@@ -279,6 +323,7 @@ impl ListenerSet {
                 Arc::clone(&shared),
                 accept_token.clone(),
                 connection_token.clone(),
+                Arc::clone(&accept_barrier),
             ));
         }
         Ok(Self {
@@ -286,6 +331,7 @@ impl ListenerSet {
             addresses,
             accept_token,
             connection_token,
+            accept_barrier,
         })
     }
 
@@ -301,6 +347,7 @@ impl ListenerSet {
         ListenerControl {
             accept_token: self.accept_token.clone(),
             connection_token: self.connection_token.clone(),
+            accept_barrier: Arc::clone(&self.accept_barrier),
         }
     }
 
@@ -383,6 +430,7 @@ async fn run_listener(
     shared: Arc<ListenerShared>,
     accept_token: CancellationToken,
     connection_token: CancellationToken,
+    accept_barrier: Arc<AcceptBarrier>,
 ) -> ListenerExit {
     let slots = Arc::new(Semaphore::new(spec.max_connections));
     let mut connections: JoinSet<ConnectionOutcome> = JoinSet::new();
@@ -418,6 +466,7 @@ async fn run_listener(
         }
     }
     drop(listener);
+    accept_barrier.arrived();
     while let Some(outcome) = connections.join_next().await {
         record_outcome(&shared, spec.purpose, outcome.ok(), &mut exit);
     }

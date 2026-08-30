@@ -312,6 +312,17 @@ impl SessionTable {
     pub fn generations(&self) -> impl Iterator<Item = ConnectionGeneration> + '_ {
         self.connections.keys().copied()
     }
+
+    /// Clones every live sink in generation order for an owner-wide control
+    /// action such as orderly shutdown.
+    #[must_use]
+    pub fn live_sinks(&self) -> Vec<Arc<dyn ClientSink>> {
+        self.connections
+            .values()
+            .filter(|entry| !entry.sink_gone)
+            .map(|entry| Arc::clone(&entry.sink))
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -350,6 +361,10 @@ mod tests {
         }
 
         fn begin_slow_consumer_close(&self) {}
+
+        fn shutdown_after_flush(&self) -> crate::connection::FlushAcknowledgement {
+            crate::connection::FlushAcknowledgement::complete()
+        }
     }
 
     fn sink(value: u64) -> Arc<dyn ClientSink> {

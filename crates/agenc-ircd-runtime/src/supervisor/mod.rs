@@ -21,8 +21,8 @@ use tokio::task::JoinSet;
 pub use panic::{CRASH_EXIT_CODE, CrashReporter, exit_process};
 pub use shutdown::{
     DEFAULT_DRAIN, DEFAULT_FLUSH, DEFAULT_QUIESCE, DEFAULT_STOP, MAX_DRAIN, MAX_FLUSH, MAX_QUIESCE,
-    MAX_STOP, MAX_TOTAL, PhaseOutcome, ShutdownHooks, ShutdownPhase, ShutdownPlan, ShutdownReport,
-    run_shutdown,
+    MAX_STOP, MAX_TOTAL, PhaseOutcome, ShutdownFailure, ShutdownHooks, ShutdownPhase, ShutdownPlan,
+    ShutdownProblem, ShutdownProblemKind, ShutdownReport, run_shutdown,
 };
 pub use signal::{ReceivedSignal, SignalClassifier, run_signal_task};
 

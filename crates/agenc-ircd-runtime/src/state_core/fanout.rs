@@ -545,6 +545,10 @@ mod tests {
         fn begin_slow_consumer_close(&self) {
             self.closes.fetch_add(1, Ordering::SeqCst);
         }
+
+        fn shutdown_after_flush(&self) -> crate::connection::FlushAcknowledgement {
+            crate::connection::FlushAcknowledgement::complete()
+        }
     }
 
     fn message(text: &str) -> Result<WireMessage, RenderError> {

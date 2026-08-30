@@ -21,7 +21,10 @@ use agenc_ircd_crypto::{
     AccountHpkePrivateKey, CryptoError, CryptoWorkerConfig, Ed25519PublicKey, LoginIndexKey,
     OpaqueFakeCredentialKey, OsEntropy, RollbackGuardRootKey, StorageMasterKey,
 };
-use agenc_ircd_domain::{DirectMessagePolicy, GuestDirectMessagePolicy, PresencePolicy};
+use agenc_ircd_domain::{
+    DirectMessagePolicy, GuestDirectMessagePolicy, OperationalLimitValues, OperationalLimits,
+    PresencePolicy,
+};
 use agenc_ircd_storage::{
     StateDirectory, StorageEngineLimits, StorageError, StorageOpenConfig, StorageOwner,
     embedded_storage_qualifications,
@@ -55,14 +58,16 @@ use crate::purpose::ListenerPurpose;
 use crate::registration::{AccountServiceConfig, RegistrationRouter, RegistrationRouterConfig};
 use crate::state_core::durable::{AccountingCeilings, KeyDeriver};
 use crate::state_core::inbox::{
-    MaintenanceEvent, SIGNAL_EVENT_CAPACITY, SignalEvent, StateCoreMessage,
+    LifecycleControl, LifecycleFailure, LifecyclePhase, MaintenanceEvent, SIGNAL_EVENT_CAPACITY,
+    SignalEvent, StateCoreMessage, lifecycle_channel,
 };
 use crate::state_core::reconstruct::{Reconstruction, reconstruct};
 use crate::state_core::{
     StateCore, StateCoreClocks, StateCoreConfig, StateCoreExit, StateCoreInputs,
 };
 use crate::supervisor::{
-    ChildFailure, ChildKind, ChildName, JoinReport, ShutdownPlan, Supervisor, run_signal_task,
+    ChildFailure, ChildKind, ChildName, JoinReport, ShutdownFailure, ShutdownHooks, ShutdownPhase,
+    ShutdownPlan, ShutdownProblemKind, ShutdownReport, Supervisor, run_shutdown, run_signal_task,
 };
 use crate::sync::Arc;
 use crate::tls::{
@@ -74,6 +79,17 @@ const RUNTIME_THREAD_NAME: &str = "agenc-ircd-tokio";
 const MAINTENANCE_MINUTE: Duration = Duration::from_secs(60);
 const PREFIX_ERASURE_INTERVAL: Duration = Duration::from_secs(600);
 const RETENTION_INTERVAL: Duration = Duration::from_secs(3_600);
+/// Fixed process status used only for a committed service-manager restart.
+pub const RESTART_EXIT_CODE: u8 = 75;
+
+/// A completed daemon run classified for the service manager.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DaemonExit {
+    /// Graceful DIE, process signal, or ordinary service stop.
+    Stopped,
+    /// A committed administrative RESTART requested service-manager restart.
+    RestartRequested,
+}
 
 /// A public-safe live-daemon startup or ownership failure.
 pub enum DaemonError {
@@ -180,7 +196,7 @@ impl From<ListenerError> for DaemonError {
 }
 
 /// Loads, reconstructs, serves, and joins one standalone coordinator.
-pub fn serve(config_path: &Path) -> Result<(), DaemonError> {
+pub fn serve(config_path: &Path) -> Result<DaemonExit, DaemonError> {
     let config = load_config(config_path, ValidationDepth::Host)?;
     validate_profile(&config)?;
     harden_process(&config)?;
@@ -301,7 +317,7 @@ fn build_live_state(
         owner,
         seed,
         keys,
-        reconstruction,
+        mut reconstruction,
     } = storage;
     let (bridge, storage, storage_reads) = StorageBridge::start(owner.port())?;
     let crypto_config = CryptoWorkerConfig::new(
@@ -316,6 +332,9 @@ fn build_live_state(
         registration_config(config, secrets, &seed, &reconstruction)?,
         commands,
     )?;
+    reconstruction
+        .domain
+        .set_operational_limits(operational_limits(config)?);
     let state = StateCore::new(StateCoreInputs {
         config: StateCoreConfig {
             server_prefix: config.server.name.as_str().to_owned(),
@@ -581,6 +600,21 @@ fn connection_limits(config: &Config) -> Result<ConnectionLimits, DaemonError> {
     })
 }
 
+fn operational_limits(config: &Config) -> Result<OperationalLimits, DaemonError> {
+    OperationalLimits::new(OperationalLimitValues {
+        sessions_per_account: limit_usize(config, LimitKey::SessionsPerAccount)?,
+        channels_per_session: limit_usize(config, LimitKey::ChannelsPerSession)?,
+        members_per_channel: limit_usize(config, LimitKey::MembersPerChannel)?,
+        global_channels: limit_usize(config, LimitKey::GlobalChannels)?,
+        local_channels: limit_usize(config, LimitKey::LocalChannels)?,
+        invites_per_channel: limit_usize(config, LimitKey::InvitesPerChannel)?,
+        invites_per_principal: limit_usize(config, LimitKey::InvitesPerPrincipal)?,
+        invites_global: limit_usize(config, LimitKey::InvitesGlobal)?,
+        contacts_per_account: usize_value(config.accounts.max_contacts)?,
+    })
+    .map_err(|_| DaemonError::Runtime(RuntimeError::InvalidValue))
+}
+
 fn limit_usize(config: &Config, key: LimitKey) -> Result<usize, DaemonError> {
     usize_value(config.limits.values.get(key))
 }
@@ -651,7 +685,7 @@ async fn run(
     config: Config,
     secrets: SecretSet,
     storage: LiveStorage,
-) -> Result<(), DaemonError> {
+) -> Result<DaemonExit, DaemonError> {
     let shutdown = shutdown_plan(&config)?;
     let specs = build_listener_specs(&config, &secrets).await?;
     let budget = memory_budget(&config)?;
@@ -672,48 +706,42 @@ async fn run(
         owner,
         mut supervisor,
         control,
-        signals,
-        state_exited,
-        listener_exited,
+        lifecycle,
+        mut signals,
+        mut state_exited,
+        mut listener_exited,
     } = start_owners(specs, context, live, inbox_receiver, &inbox, admission)?;
-    let live_result = supervise(Supervision {
-        config_path: &config_path,
-        active: &config,
-        inbox: &inbox,
-        signals,
-        state_exited,
-        listener_exited,
-        control: &control,
-        supervisor: &supervisor,
-    })
+    let trigger = wait_for_shutdown(
+        &config_path,
+        &config,
+        &mut signals,
+        &mut state_exited,
+        &mut listener_exited,
+    )
     .await;
-    control.stop_accepting();
-    control.cancel_connections();
-    supervisor.cancel();
-    let report = supervisor.join_all(shutdown.total()).await;
-    let join_result = validate_join_report(&report);
-    let storage_result = shutdown_storage(owner).await;
-    live_result.and(join_result).and(storage_result)
+    let mut hooks = RuntimeShutdownHooks {
+        owner: Some(owner),
+        supervisor: &mut supervisor,
+        listeners: &control,
+        lifecycle: &lifecycle,
+        listener_exited: &mut listener_exited,
+        listener_joined: false,
+        stopped: false,
+    };
+    let report = run_shutdown(shutdown, &mut hooks, &mut signals).await;
+    let shutdown_result = validate_shutdown_report(report);
+    trigger.and(shutdown_result)?;
+    Ok(DaemonExit::Stopped)
 }
 
 struct RunningOwners {
     owner: StorageOwner,
     supervisor: Supervisor,
     control: ListenerControl,
+    lifecycle: LifecycleControl,
     signals: mpsc::Receiver<SignalEvent>,
     state_exited: oneshot::Receiver<StateCoreExit>,
     listener_exited: oneshot::Receiver<()>,
-}
-
-struct Supervision<'a> {
-    config_path: &'a Path,
-    active: &'a Config,
-    inbox: &'a mpsc::Sender<StateCoreMessage>,
-    signals: mpsc::Receiver<SignalEvent>,
-    state_exited: oneshot::Receiver<StateCoreExit>,
-    listener_exited: oneshot::Receiver<()>,
-    control: &'a ListenerControl,
-    supervisor: &'a Supervisor,
 }
 
 fn start_owners(
@@ -735,10 +763,12 @@ fn start_owners(
         storage_reads,
         crypto,
     } = live;
+    let (lifecycle, lifecycle_receiver) = lifecycle_channel();
     let state_exited = spawn_state_owner(
         &mut supervisor,
         state,
         inbox_receiver,
+        lifecycle_receiver,
         storage,
         storage_reads,
         crypto,
@@ -748,6 +778,7 @@ fn start_owners(
         owner,
         supervisor,
         control,
+        lifecycle,
         signals,
         state_exited,
         listener_exited,
@@ -775,6 +806,7 @@ fn spawn_state_owner(
     supervisor: &mut Supervisor,
     state: StateCore,
     inbox_receiver: mpsc::Receiver<StateCoreMessage>,
+    lifecycle: mpsc::Receiver<crate::state_core::inbox::LifecycleRequest>,
     storage: mpsc::Receiver<crate::bridge::StorageCompletionMessage>,
     storage_reads: mpsc::Receiver<crate::bridge::StorageReadCompletionMessage>,
     crypto: mpsc::Receiver<
@@ -782,16 +814,15 @@ fn spawn_state_owner(
     >,
 ) -> Result<oneshot::Receiver<StateCoreExit>, DaemonError> {
     let (state_exit, state_exited) = oneshot::channel();
+    let receivers = StateOwnerReceivers {
+        inbox: inbox_receiver,
+        lifecycle,
+        storage,
+        storage_reads,
+        crypto,
+    };
     supervisor.spawn(ChildName::StateCoreTask, ChildKind::Critical, |token| {
-        run_state_owner(
-            state,
-            inbox_receiver,
-            storage,
-            storage_reads,
-            crypto,
-            token,
-            state_exit,
-        )
+        run_state_owner(state, receivers, token, state_exit)
     })?;
     Ok(state_exited)
 }
@@ -831,19 +862,31 @@ fn listener_context(
     })
 }
 
-async fn run_state_owner(
-    mut state: StateCore,
+struct StateOwnerReceivers {
     inbox: mpsc::Receiver<StateCoreMessage>,
+    lifecycle: mpsc::Receiver<crate::state_core::inbox::LifecycleRequest>,
     storage: mpsc::Receiver<crate::bridge::StorageCompletionMessage>,
     storage_reads: mpsc::Receiver<crate::bridge::StorageReadCompletionMessage>,
     crypto: mpsc::Receiver<
         crate::bridge::CryptoCompletionMessage<crate::bridge::crypto::CryptoJobOutput>,
     >,
+}
+
+async fn run_state_owner(
+    mut state: StateCore,
+    receivers: StateOwnerReceivers,
     token: crate::cancel::CancellationToken,
     exited: oneshot::Sender<StateCoreExit>,
 ) -> Result<(), RuntimeError> {
+    let StateOwnerReceivers {
+        inbox,
+        lifecycle,
+        storage,
+        storage_reads,
+        crypto,
+    } = receivers;
     let exit = state
-        .run(inbox, storage, storage_reads, crypto, token)
+        .run(inbox, lifecycle, storage, storage_reads, crypto, token)
         .await;
     let (storage_bridge, crypto_bridge) = state.into_bridges();
     crypto_bridge.shutdown().await?;
@@ -852,7 +895,10 @@ async fn run_state_owner(
         .map_err(|_| RuntimeError::Cancelled)??;
     let healthy = matches!(
         exit,
-        StateCoreExit::Cancelled | StateCoreExit::Quiesced | StateCoreExit::Interrupted
+        StateCoreExit::Cancelled
+            | StateCoreExit::Quiesced
+            | StateCoreExit::Interrupted
+            | StateCoreExit::Stopped
     );
     let _sent = exited.send(exit);
     if healthy {
@@ -862,117 +908,115 @@ async fn run_state_owner(
     }
 }
 
-// agenc-review: focus owner=runtime reviewed=2026-08-29 reason=closed bounded owner loop dispatches signals state exit and listener exit without recursive control flow
-async fn supervise(mut ownership: Supervision<'_>) -> Result<(), DaemonError> {
-    let mut terminating = false;
-    let mut listener_done = false;
-    loop {
-        let event = next_supervisor_event(
-            &mut ownership.signals,
-            &mut ownership.state_exited,
-            &mut ownership.listener_exited,
-            listener_done,
-        )
-        .await;
-        match event {
-            SupervisorEvent::Signal(signal) => {
-                let Some(signal) = signal else {
-                    return Err(DaemonError::TaskFailed);
-                };
-                handle_signal(
-                    signal,
-                    &mut terminating,
-                    ownership.config_path,
-                    ownership.active,
-                    ownership.inbox,
-                    ownership.control,
-                    ownership.supervisor,
-                )
-                .await?;
-            }
-            SupervisorEvent::State(exit) => {
-                let exit = exit.map_err(|_| DaemonError::TaskFailed)?;
-                return classify_state_exit(exit, terminating);
-            }
-            SupervisorEvent::Listener(listener) => {
-                listener.map_err(|_| DaemonError::TaskFailed)?;
-                listener_done = true;
-                accept_listener_exit(terminating)?;
-            }
-        }
-    }
-}
-
-async fn next_supervisor_event(
+// agenc-review: focus owner=runtime reviewed=2026-08-30 reason=closed owner loop admits reload or one shutdown trigger and treats premature owner exit as fatal
+async fn wait_for_shutdown(
+    config_path: &Path,
+    active: &Config,
     signals: &mut mpsc::Receiver<SignalEvent>,
     state_exited: &mut oneshot::Receiver<StateCoreExit>,
     listener_exited: &mut oneshot::Receiver<()>,
-    listener_done: bool,
-) -> SupervisorEvent {
-    tokio::select! {
-        signal = signals.recv() => SupervisorEvent::Signal(signal),
-        exit = state_exited => SupervisorEvent::State(exit),
-        listener = listener_exited, if !listener_done => SupervisorEvent::Listener(listener),
-    }
-}
-
-fn accept_listener_exit(terminating: bool) -> Result<(), DaemonError> {
-    if terminating {
-        Ok(())
-    } else {
-        Err(DaemonError::TaskFailed)
+) -> Result<(), DaemonError> {
+    loop {
+        let event = tokio::select! {
+            biased;
+            signal = signals.recv() => SupervisorEvent::Signal(signal),
+            _exit = &mut *state_exited => SupervisorEvent::State,
+            _listener = &mut *listener_exited => SupervisorEvent::Listener,
+        };
+        match event {
+            SupervisorEvent::Signal(Some(SignalEvent::Reload)) => {
+                let _result = validate_reload(config_path, active).await;
+            }
+            SupervisorEvent::Signal(Some(SignalEvent::Terminate | SignalEvent::Interrupt)) => {
+                return Ok(());
+            }
+            SupervisorEvent::Signal(None) | SupervisorEvent::State | SupervisorEvent::Listener => {
+                return Err(DaemonError::TaskFailed);
+            }
+        }
     }
 }
 
 enum SupervisorEvent {
     Signal(Option<SignalEvent>),
-    State(Result<StateCoreExit, oneshot::error::RecvError>),
-    Listener(Result<(), oneshot::error::RecvError>),
+    State,
+    Listener,
 }
 
-async fn handle_signal(
-    signal: SignalEvent,
-    terminating: &mut bool,
-    config_path: &Path,
-    active: &Config,
-    inbox: &mpsc::Sender<StateCoreMessage>,
-    control: &ListenerControl,
-    supervisor: &Supervisor,
-) -> Result<(), DaemonError> {
-    match signal {
-        SignalEvent::Reload if !*terminating => {
-            let _reload_result = validate_reload(config_path, active).await;
-        }
-        SignalEvent::Reload => {}
-        SignalEvent::Terminate if !*terminating => {
-            *terminating = true;
-            control.stop_accepting();
-            inbox
-                .send(StateCoreMessage::Signal(signal))
-                .await
-                .map_err(|_| DaemonError::TaskFailed)?;
-        }
-        SignalEvent::Terminate | SignalEvent::Interrupt => {
-            *terminating = true;
-            control.stop_accepting();
-            control.cancel_connections();
-            supervisor.cancel();
-            let _sent = inbox.try_send(StateCoreMessage::Signal(SignalEvent::Interrupt));
+struct RuntimeShutdownHooks<'a> {
+    owner: Option<StorageOwner>,
+    supervisor: &'a mut Supervisor,
+    listeners: &'a ListenerControl,
+    lifecycle: &'a LifecycleControl,
+    listener_exited: &'a mut oneshot::Receiver<()>,
+    listener_joined: bool,
+    stopped: bool,
+}
+
+impl ShutdownHooks for RuntimeShutdownHooks<'_> {
+    async fn run(&mut self, phase: ShutdownPhase) -> Result<(), ShutdownFailure> {
+        match phase {
+            ShutdownPhase::Quiesce => {
+                self.listeners.stop_accepting();
+                self.listeners.wait_accept_stopped().await;
+                request_lifecycle(self.lifecycle, LifecyclePhase::Quiesce).await
+            }
+            ShutdownPhase::Drain => request_lifecycle(self.lifecycle, LifecyclePhase::Drain).await,
+            ShutdownPhase::Flush => {
+                if !self.listener_joined {
+                    (&mut *self.listener_exited)
+                        .await
+                        .map_err(|_| ShutdownFailure::Writer)?;
+                    self.listener_joined = true;
+                }
+                request_lifecycle(self.lifecycle, LifecyclePhase::Flush).await
+            }
+            ShutdownPhase::Stop => self.stop().await,
         }
     }
-    Ok(())
 }
 
-fn classify_state_exit(exit: StateCoreExit, terminating: bool) -> Result<(), DaemonError> {
-    match exit {
-        StateCoreExit::Quiesced | StateCoreExit::Interrupted if terminating => Ok(()),
-        StateCoreExit::Cancelled if terminating => Ok(()),
-        StateCoreExit::InboxClosed
-        | StateCoreExit::Indeterminate(_)
-        | StateCoreExit::Corrupt(_)
-        | StateCoreExit::Cancelled
-        | StateCoreExit::Quiesced
-        | StateCoreExit::Interrupted => Err(DaemonError::TaskFailed),
+impl RuntimeShutdownHooks<'_> {
+    async fn stop(&mut self) -> Result<(), ShutdownFailure> {
+        if self.stopped {
+            return Ok(());
+        }
+        self.stopped = true;
+        self.listeners.stop_accepting();
+        let mut first_failure = request_lifecycle(self.lifecycle, LifecyclePhase::Stop)
+            .await
+            .err();
+        self.listeners.cancel_connections();
+        self.supervisor.cancel();
+        let report = self.supervisor.join_all(crate::supervisor::MAX_TOTAL).await;
+        if validate_join_report(&report).is_err() && first_failure.is_none() {
+            first_failure = Some(ShutdownFailure::Join);
+        }
+        if let Some(owner) = self.owner.take()
+            && shutdown_storage(owner).await.is_err()
+            && first_failure.is_none()
+        {
+            first_failure = Some(ShutdownFailure::Storage);
+        }
+        first_failure.map_or(Ok(()), Err)
+    }
+}
+
+async fn request_lifecycle(
+    control: &LifecycleControl,
+    phase: LifecyclePhase,
+) -> Result<(), ShutdownFailure> {
+    control
+        .request(phase)
+        .await
+        .map_err(|_failure: LifecycleFailure| ShutdownFailure::StateCore)
+}
+
+fn validate_shutdown_report(report: ShutdownReport) -> Result<(), DaemonError> {
+    match report.first_problem().map(|problem| problem.kind) {
+        None => Ok(()),
+        Some(ShutdownProblemKind::TimedOut) => Err(DaemonError::ShutdownTimeout),
+        Some(ShutdownProblemKind::Failed(_)) => Err(DaemonError::TaskFailed),
     }
 }
 

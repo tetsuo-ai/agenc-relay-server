@@ -54,7 +54,8 @@ use crate::state_core::fanout::{
     reserve,
 };
 use crate::state_core::inbox::{
-    CloseReason, MaintenanceEvent, SignalEvent, SourceAddressKey, StateCoreMessage,
+    CloseReason, LifecycleFailure, LifecyclePhase, LifecycleRequest, LifecycleResult,
+    MaintenanceEvent, SignalEvent, SourceAddressKey, StateCoreMessage,
 };
 use crate::state_core::pending::{PendingMutationBatch, StagedPlan};
 use crate::state_core::reconstruct::Reconstruction;
@@ -241,6 +242,8 @@ pub enum StateCoreExit {
     Quiesced,
     /// A second termination signal skipped to the stop phase.
     Interrupted,
+    /// The lifecycle driver completed the ordered stop request.
+    Stopped,
     /// Durable state may or may not have changed; the supervisor restarts
     /// into offline recovery (spec lines 4188-4194 and 4207-4210).
     Indeterminate(IndeterminateCause),
@@ -282,6 +285,7 @@ impl fmt::Display for StateCoreExit {
             Self::InboxClosed => formatter.write_str("state core inbox closed"),
             Self::Quiesced => formatter.write_str("state core quiesced"),
             Self::Interrupted => formatter.write_str("state core interrupted"),
+            Self::Stopped => formatter.write_str("state core stopped"),
             Self::Indeterminate(_) => {
                 formatter.write_str("state core durable outcome indeterminate")
             }
@@ -932,6 +936,51 @@ pub struct StateCore {
     router: Box<dyn CommandRouter>,
 }
 
+#[derive(Default)]
+struct PendingLifecycleReplies {
+    drain: Option<tokio::sync::oneshot::Sender<LifecycleResult>>,
+    flush: Option<tokio::sync::oneshot::Sender<LifecycleResult>>,
+}
+
+impl PendingLifecycleReplies {
+    fn install(
+        &mut self,
+        phase: LifecyclePhase,
+        reply: tokio::sync::oneshot::Sender<LifecycleResult>,
+    ) {
+        let slot = match phase {
+            LifecyclePhase::Drain => &mut self.drain,
+            LifecyclePhase::Flush => &mut self.flush,
+            LifecyclePhase::Quiesce | LifecyclePhase::Stop => {
+                let _sent = reply.send(Ok(()));
+                return;
+            }
+        };
+        if slot.is_some() {
+            let _sent = reply.send(Err(LifecycleFailure::Busy));
+        } else {
+            *slot = Some(reply);
+        }
+    }
+
+    fn acknowledge(&mut self, phase: LifecyclePhase) {
+        let reply = match phase {
+            LifecyclePhase::Drain => self.drain.take(),
+            LifecyclePhase::Flush => self.flush.take(),
+            LifecyclePhase::Quiesce | LifecyclePhase::Stop => None,
+        };
+        if let Some(reply) = reply {
+            let _sent = reply.send(Ok(()));
+        }
+    }
+
+    fn supersede(&mut self) {
+        for reply in [self.drain.take(), self.flush.take()].into_iter().flatten() {
+            let _sent = reply.send(Err(LifecycleFailure::Superseded));
+        }
+    }
+}
+
 impl StateCore {
     /// Builds the state owner from reconstructed state.
     #[must_use]
@@ -987,6 +1036,27 @@ impl StateCore {
     #[must_use]
     pub fn into_bridges(self) -> (StorageBridge, CryptoBridge) {
         (self.context.bridge, self.context.crypto)
+    }
+
+    fn begin_connection_shutdown(&mut self) {
+        let sinks = self.context.sessions.live_sinks();
+        for sink in sinks {
+            let generation = sink.generation();
+            let frame = WireMessage::new(
+                self.context.server_prefix(),
+                "ERROR",
+                &[],
+                Some("Server shutting down"),
+            );
+            if frame
+                .ok()
+                .and_then(|frame| self.context.send_to(generation, vec![frame]).ok())
+                .is_none()
+            {
+                sink.begin_slow_consumer_close();
+            }
+            let _acknowledgement = sink.shutdown_after_flush();
+        }
     }
 
     /// Handles one inbox message; `Some` ends the loop.
@@ -1126,9 +1196,6 @@ impl StateCore {
         if let Some(exit) = self.refresh_index().await {
             return Some(exit);
         }
-        if self.context.quiescing {
-            return Some(StateCoreExit::Quiesced);
-        }
         self.step_batch()
     }
 
@@ -1154,6 +1221,7 @@ impl StateCore {
     pub async fn run(
         &mut self,
         mut inbox: mpsc::Receiver<StateCoreMessage>,
+        mut lifecycle: mpsc::Receiver<LifecycleRequest>,
         mut storage: mpsc::Receiver<StorageCompletionMessage>,
         mut storage_reads: mpsc::Receiver<StorageReadCompletionMessage>,
         mut crypto: mpsc::Receiver<CryptoCompletionMessage<CryptoJobOutput>>,
@@ -1162,15 +1230,74 @@ impl StateCore {
         let mut storage_reads_open = true;
         let mut crypto_open = true;
         let mut cancellation_open = true;
+        let mut lifecycle_open = true;
+        let mut cancellation_pending = false;
+        let mut lifecycle_target = None;
+        let mut lifecycle_completed = None;
+        let mut lifecycle_replies = PendingLifecycleReplies::default();
+        let mut shutdown_connections_started = false;
         loop {
             let in_flight = self.context.in_flight();
+            let safe_point = !in_flight && self.context.pending_len() == 0;
+            if safe_point {
+                if lifecycle_target.is_some_and(|phase| phase >= LifecyclePhase::Drain)
+                    && !lifecycle_completed.is_some_and(|phase| phase >= LifecyclePhase::Drain)
+                {
+                    if !shutdown_connections_started {
+                        self.begin_connection_shutdown();
+                        shutdown_connections_started = true;
+                    }
+                    lifecycle_replies.acknowledge(LifecyclePhase::Drain);
+                    lifecycle_completed = Some(LifecyclePhase::Drain);
+                }
+                if lifecycle_target.is_some_and(|phase| phase >= LifecyclePhase::Flush)
+                    && !lifecycle_completed.is_some_and(|phase| phase >= LifecyclePhase::Flush)
+                {
+                    lifecycle_replies.acknowledge(LifecyclePhase::Flush);
+                    lifecycle_completed = Some(LifecyclePhase::Flush);
+                }
+                if cancellation_pending {
+                    return StateCoreExit::Cancelled;
+                }
+            }
             let wake = self.wake_instant();
             let exit = tokio::select! {
                 biased;
                 () = token.cancelled(), if cancellation_open => {
                     cancellation_open = false;
+                    cancellation_pending = true;
                     self.context.quiescing = true;
                     (!in_flight).then_some(StateCoreExit::Cancelled)
+                },
+                request = lifecycle.recv(), if lifecycle_open => match request {
+                    Some(request) => {
+                        let (requested, reply) = request.into_parts();
+                        self.context.quiescing = true;
+                        if requested == LifecyclePhase::Stop {
+                            lifecycle_replies.supersede();
+                            let _sent = reply.send(Ok(()));
+                            Some(StateCoreExit::Stopped)
+                        } else if lifecycle_completed.is_some_and(|current| current >= requested) {
+                            let _sent = reply.send(Ok(()));
+                            None
+                        } else if lifecycle_target.is_some_and(|current| current >= requested) {
+                            let _sent = reply.send(Err(LifecycleFailure::Busy));
+                            None
+                        } else {
+                            lifecycle_target = Some(requested);
+                            if requested == LifecyclePhase::Quiesce {
+                                let _sent = reply.send(Ok(()));
+                                lifecycle_completed = Some(LifecyclePhase::Quiesce);
+                            } else {
+                                lifecycle_replies.install(requested, reply);
+                            }
+                            None
+                        }
+                    }
+                    None => {
+                        lifecycle_open = false;
+                        None
+                    }
                 },
                 completion = storage.recv() => match completion {
                     Some(message) => self.step_completion(message).await,
@@ -1195,6 +1322,8 @@ impl StateCore {
                     None
                 },
                 message = inbox.recv(), if !in_flight => match message {
+                    Some(StateCoreMessage::Line { .. } | StateCoreMessage::Opened { .. })
+                        if self.context.quiescing => None,
                     Some(message) => self.step_message(message),
                     None => Some(StateCoreExit::InboxClosed),
                 },
@@ -1213,5 +1342,27 @@ impl StateCore {
         let now = self.context.now();
         let delay = deadline.get().saturating_sub(now.get());
         Some(Instant::now() + Duration::from_millis(delay))
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn lifecycle_replies_are_bounded_idempotent_and_stop_supersedes_waiters() {
+        let mut pending = PendingLifecycleReplies::default();
+        let (drain_reply, drain) = tokio::sync::oneshot::channel();
+        pending.install(LifecyclePhase::Drain, drain_reply);
+        let (duplicate_reply, duplicate) = tokio::sync::oneshot::channel();
+        pending.install(LifecyclePhase::Drain, duplicate_reply);
+        assert_eq!(duplicate.await, Ok(Err(LifecycleFailure::Busy)));
+        pending.acknowledge(LifecyclePhase::Drain);
+        assert_eq!(drain.await, Ok(Ok(())));
+
+        let (flush_reply, flush) = tokio::sync::oneshot::channel();
+        pending.install(LifecyclePhase::Flush, flush_reply);
+        pending.supersede();
+        assert_eq!(flush.await, Ok(Err(LifecycleFailure::Superseded)));
     }
 }

@@ -1,6 +1,7 @@
 //! Messages that reach StateCore through its bounded inbox (spec 21.3).
 
 use agenc_ircd_client_wire::ParsedMessage;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::connection::sink::{ClientSink, ConnectionGeneration};
 use crate::purpose::ListenerPurpose;
@@ -8,6 +9,11 @@ use crate::sync::Arc;
 
 /// Signal and maintenance events queued ahead of StateCore (spec line 4086).
 pub const SIGNAL_EVENT_CAPACITY: usize = 64;
+/// Lifecycle commands queued independently of the public protocol inbox.
+///
+/// The dedicated channel remains selectable while a durable batch is in
+/// flight, so shutdown cannot be held behind client work (spec 21.8).
+pub const LIFECYCLE_EVENT_CAPACITY: usize = 8;
 /// Mutation batches queued from StateCore to storage (spec line 4083).
 pub const STORAGE_BATCH_CAPACITY: usize = 2;
 /// Completions queued from storage back to StateCore (spec line 4084).
@@ -138,6 +144,86 @@ pub enum SignalEvent {
     Reload,
 }
 
+/// An ordered phase requested by the daemon shutdown driver.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum LifecyclePhase {
+    /// Stop accepting work and reject new protocol messages.
+    Quiesce,
+    /// Finish every mutation accepted before quiescence.
+    Drain,
+    /// Reach a storage-safe point for owner flushes and checkpoints.
+    Flush,
+    /// End the StateCore task.
+    Stop,
+}
+
+/// A closed failure returned by the lifecycle owner boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LifecycleFailure {
+    /// The StateCore lifecycle receiver is no longer available.
+    Unavailable,
+    /// Another request is already waiting for the same safe point.
+    Busy,
+    /// Stop superseded an earlier request before its safe point.
+    Superseded,
+}
+
+/// Cloneable request handle held by the shutdown driver.
+#[derive(Clone)]
+pub struct LifecycleControl {
+    sender: mpsc::Sender<LifecycleRequest>,
+}
+
+impl LifecycleControl {
+    /// Requests one phase and waits for StateCore to acknowledge it.
+    pub async fn request(&self, phase: LifecyclePhase) -> Result<(), LifecycleFailure> {
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .send(LifecycleRequest { phase, reply })
+            .await
+            .map_err(|_| LifecycleFailure::Unavailable)?;
+        response.await.unwrap_or(Err(LifecycleFailure::Unavailable))
+    }
+
+    /// Attempts to request stop without waiting for channel capacity.
+    pub fn try_stop(&self) -> Result<oneshot::Receiver<LifecycleResult>, LifecycleFailure> {
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .try_send(LifecycleRequest {
+                phase: LifecyclePhase::Stop,
+                reply,
+            })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => LifecycleFailure::Busy,
+                mpsc::error::TrySendError::Closed(_) => LifecycleFailure::Unavailable,
+            })?;
+        Ok(response)
+    }
+}
+
+/// Result carried by a lifecycle acknowledgement.
+pub type LifecycleResult = Result<(), LifecycleFailure>;
+
+/// One lifecycle request consumed only by StateCore.
+pub struct LifecycleRequest {
+    phase: LifecyclePhase,
+    reply: oneshot::Sender<LifecycleResult>,
+}
+
+impl LifecycleRequest {
+    /// Splits a request into its closed phase and response owner.
+    pub(super) fn into_parts(self) -> (LifecyclePhase, oneshot::Sender<LifecycleResult>) {
+        (self.phase, self.reply)
+    }
+}
+
+/// Constructs the one bounded lifecycle channel for a StateCore owner.
+#[must_use]
+pub fn lifecycle_channel() -> (LifecycleControl, mpsc::Receiver<LifecycleRequest>) {
+    let (sender, receiver) = mpsc::channel(LIFECYCLE_EVENT_CAPACITY);
+    (LifecycleControl { sender }, receiver)
+}
+
 /// Maintenance ticks that StateCore coalesces when identical (spec line
 /// 4086).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -219,6 +305,7 @@ mod tests {
     #[test]
     fn inbox_capacities_match_the_channel_table() {
         assert_eq!(SIGNAL_EVENT_CAPACITY, 64);
+        assert_eq!(LIFECYCLE_EVENT_CAPACITY, 8);
         assert_eq!(STORAGE_BATCH_CAPACITY, 2);
         assert_eq!(STORAGE_COMPLETION_CAPACITY, 2);
         assert_eq!(CRYPTO_COMPLETION_SLOTS_PER_WORKER, 2);

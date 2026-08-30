@@ -103,8 +103,14 @@ fn one_config(arguments: &[OsString], usage: &str) -> Result<PathBuf, CliFailure
 
 fn serve(arguments: &[OsString]) -> Result<(), CliFailure> {
     let config = one_config(arguments, "usage: agenc-ircd serve --config <file>")?;
-    agenc_ircd_runtime::daemon::serve(&config)
-        .map_err(|error| CliFailure::command(EXIT_USAGE, error.to_string()))
+    match agenc_ircd_runtime::daemon::serve(&config) {
+        Ok(agenc_ircd_runtime::daemon::DaemonExit::Stopped) => Ok(()),
+        Ok(agenc_ircd_runtime::daemon::DaemonExit::RestartRequested) => Err(CliFailure::command(
+            agenc_ircd_runtime::daemon::RESTART_EXIT_CODE,
+            "service restart requested",
+        )),
+        Err(error) => Err(CliFailure::command(EXIT_USAGE, error.to_string())),
+    }
 }
 
 fn check_config(arguments: &[OsString]) -> Result<(), CliFailure> {

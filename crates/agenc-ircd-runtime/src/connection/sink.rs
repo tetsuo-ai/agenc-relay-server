@@ -9,9 +9,10 @@
 
 use std::error::Error;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use agenc_ircd_client_wire::{MAX_PHYSICAL_LINE_BYTES, MAX_SEMANTIC_REPLIES, RenderedMessage};
+use tokio::sync::Notify;
 
 use crate::RuntimeError;
 use crate::budget::MemoryPermit;
@@ -24,6 +25,61 @@ pub const MAX_DEMAND_FRAMES: usize = MAX_SEMANTIC_REPLIES * 2;
 /// Maximum bytes in one sink demand: the normal outbound queue hard maximum
 /// of 4 MiB (spec 19.2, line 2660).
 pub const MAX_DEMAND_BYTES: usize = 4_194_304;
+
+struct FlushState {
+    acknowledged: AtomicBool,
+    notify: Notify,
+}
+
+/// Awaitable acknowledgement that a connection writer attempted its final
+/// transport flush and shutdown.
+#[derive(Clone)]
+pub struct FlushAcknowledgement {
+    state: Arc<FlushState>,
+}
+
+impl FlushAcknowledgement {
+    pub(crate) fn pending() -> Self {
+        Self {
+            state: Arc::new(FlushState {
+                acknowledged: AtomicBool::new(false),
+                notify: Notify::new(),
+            }),
+        }
+    }
+
+    /// Creates an already-acknowledged value for closed test and embedding sinks.
+    #[must_use]
+    pub fn complete() -> Self {
+        let acknowledgement = Self::pending();
+        acknowledgement.acknowledge();
+        acknowledgement
+    }
+
+    pub(crate) fn acknowledge(&self) {
+        if !self.state.acknowledged.swap(true, Ordering::AcqRel) {
+            self.state.notify.notify_waiters();
+        }
+    }
+
+    /// Returns whether the writer has acknowledged the final flush attempt.
+    #[must_use]
+    pub fn is_acknowledged(&self) -> bool {
+        self.state.acknowledged.load(Ordering::Acquire)
+    }
+
+    /// Waits until the writer acknowledges the final flush attempt.
+    pub async fn wait(&self) {
+        while !self.is_acknowledged() {
+            let notified = self.state.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !self.is_acknowledged() {
+                notified.await;
+            }
+        }
+    }
+}
 
 /// Monotonic identity of one accepted connection's queue.
 ///
@@ -414,6 +470,10 @@ pub trait ClientSink: Send + Sync {
 
     /// Marks the connection closing after a full-queue exclusion.
     fn begin_slow_consumer_close(&self);
+
+    /// Queues an orderly shutdown after all already accepted frames and
+    /// returns an acknowledgement completed by the transport writer.
+    fn shutdown_after_flush(&self) -> FlushAcknowledgement;
 }
 
 #[cfg(test)]

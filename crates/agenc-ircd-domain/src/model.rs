@@ -35,6 +35,123 @@ pub const MAX_RESERVED_NICKNAMES: usize = 5;
 pub const MAX_MONITORED_NICKNAMES: usize = 100;
 /// Maximum pending invitations across the network.
 pub(crate) const MAX_INVITES_NETWORK_WIDE: usize = 1_000_000;
+/// Maximum coordinator-owned global channel instances.
+pub const MAX_GLOBAL_CHANNELS: usize = 1_000_000;
+/// Maximum server-local channel instances.
+pub const MAX_LOCAL_CHANNELS: usize = 100_000;
+
+/// Unvalidated values used to construct the live operational ceiling view.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OperationalLimitValues {
+    /// Live sessions belonging to one account.
+    pub sessions_per_account: usize,
+    /// Channels joined by one session.
+    pub channels_per_session: usize,
+    /// Live members in one channel.
+    pub members_per_channel: usize,
+    /// Coordinator-owned global channels.
+    pub global_channels: usize,
+    /// Server-local channels.
+    pub local_channels: usize,
+    /// Pending invitations in one channel.
+    pub invites_per_channel: usize,
+    /// Pending invitations naming one principal.
+    pub invites_per_principal: usize,
+    /// Pending invitations across the network.
+    pub invites_global: usize,
+    /// Contacts stored by one account.
+    pub contacts_per_account: usize,
+}
+
+/// Validated reloadable ceilings consulted by domain decisions.
+///
+/// Hard protocol maxima remain fixed. Lowering this view blocks new use but
+/// does not invalidate or remove already accepted state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OperationalLimits {
+    values: OperationalLimitValues,
+}
+
+impl OperationalLimits {
+    /// The hard protocol maxima used until a validated runtime profile is installed.
+    pub const HARD_MAX: Self = Self {
+        values: OperationalLimitValues {
+            sessions_per_account: MAX_SESSIONS_PER_ACCOUNT,
+            channels_per_session: MAX_CHANNELS_PER_SESSION,
+            members_per_channel: MAX_MEMBERS_PER_CHANNEL,
+            global_channels: MAX_GLOBAL_CHANNELS,
+            local_channels: MAX_LOCAL_CHANNELS,
+            invites_per_channel: MAX_INVITES_PER_CHANNEL,
+            invites_per_principal: MAX_INVITES_PER_PRINCIPAL,
+            invites_global: MAX_INVITES_NETWORK_WIDE,
+            contacts_per_account: MAX_CONTACTS_PER_ACCOUNT,
+        },
+    };
+
+    /// Validates nonzero ceilings at or below every hard protocol maximum.
+    pub fn new(values: OperationalLimitValues) -> Result<Self, DomainError> {
+        let pairs = [
+            (values.sessions_per_account, MAX_SESSIONS_PER_ACCOUNT),
+            (values.channels_per_session, MAX_CHANNELS_PER_SESSION),
+            (values.members_per_channel, MAX_MEMBERS_PER_CHANNEL),
+            (values.global_channels, MAX_GLOBAL_CHANNELS),
+            (values.local_channels, MAX_LOCAL_CHANNELS),
+            (values.invites_per_channel, MAX_INVITES_PER_CHANNEL),
+            (values.invites_per_principal, MAX_INVITES_PER_PRINCIPAL),
+            (values.invites_global, MAX_INVITES_NETWORK_WIDE),
+            (values.contacts_per_account, MAX_CONTACTS_PER_ACCOUNT),
+        ];
+        if pairs
+            .into_iter()
+            .any(|(value, hard_maximum)| value == 0 || value > hard_maximum)
+        {
+            return Err(DomainError::InvalidArgument);
+        }
+        Ok(Self { values })
+    }
+
+    /// Returns the validated values.
+    #[must_use]
+    pub const fn values(self) -> OperationalLimitValues {
+        self.values
+    }
+
+    pub(crate) const fn sessions_per_account(self) -> usize {
+        self.values.sessions_per_account
+    }
+
+    pub(crate) const fn channels_per_session(self) -> usize {
+        self.values.channels_per_session
+    }
+
+    pub(crate) const fn members_per_channel(self) -> usize {
+        self.values.members_per_channel
+    }
+
+    pub(crate) const fn global_channels(self) -> usize {
+        self.values.global_channels
+    }
+
+    pub(crate) const fn local_channels(self) -> usize {
+        self.values.local_channels
+    }
+
+    pub(crate) const fn invites_per_channel(self) -> usize {
+        self.values.invites_per_channel
+    }
+
+    pub(crate) const fn invites_per_principal(self) -> usize {
+        self.values.invites_per_principal
+    }
+
+    pub(crate) const fn invites_global(self) -> usize {
+        self.values.invites_global
+    }
+
+    pub(crate) const fn contacts_per_account(self) -> usize {
+        self.values.contacts_per_account
+    }
+}
 
 /// A validated away message.
 pub type AwayText = BoundedUtf8<0, 256>;
@@ -1363,6 +1480,7 @@ pub struct DomainState {
     pub(crate) channel_names: BTreeMap<ChannelNameValue, ChannelInstanceId>,
     pub(crate) account_deletion_challenges: BTreeMap<SessionId, AccountDeletionChallengeState>,
     pub(crate) sanctions: Vec<Sanction>,
+    pub(crate) operational_limits: OperationalLimits,
 }
 
 impl DomainState {
@@ -1385,7 +1503,19 @@ impl DomainState {
             channel_names: BTreeMap::new(),
             account_deletion_challenges: BTreeMap::new(),
             sanctions: Vec::new(),
+            operational_limits: OperationalLimits::HARD_MAX,
         }
+    }
+
+    /// Installs validated operational ceilings for subsequent decisions.
+    pub fn set_operational_limits(&mut self, limits: OperationalLimits) {
+        self.operational_limits = limits;
+    }
+
+    /// Returns the operational ceilings consulted by subsequent decisions.
+    #[must_use]
+    pub const fn operational_limits(&self) -> OperationalLimits {
+        self.operational_limits
     }
 
     /// Returns the current authoritative revision.
@@ -1743,6 +1873,39 @@ pub(crate) fn test_public_cloak(seed: u8) -> Result<PublicCloak, DomainError> {
 mod tests {
     use super::*;
     use agenc_ircd_types::{AccountRandomId, ControlPolicy};
+
+    #[test]
+    fn operational_limits_validate_hard_bounds_and_replace_atomically() -> Result<(), DomainError> {
+        let lowered = OperationalLimits::new(OperationalLimitValues {
+            sessions_per_account: 2,
+            channels_per_session: 3,
+            members_per_channel: 4,
+            global_channels: 5,
+            local_channels: 6,
+            invites_per_channel: 7,
+            invites_per_principal: 8,
+            invites_global: 9,
+            contacts_per_account: 10,
+        })?;
+        let mut state = DomainState::new()?;
+        assert_eq!(state.operational_limits(), OperationalLimits::HARD_MAX);
+        state.set_operational_limits(lowered);
+        assert_eq!(state.operational_limits(), lowered);
+
+        let mut invalid = lowered.values();
+        invalid.sessions_per_account = 0;
+        assert_eq!(
+            OperationalLimits::new(invalid),
+            Err(DomainError::InvalidArgument)
+        );
+        invalid = OperationalLimits::HARD_MAX.values();
+        invalid.local_channels = MAX_LOCAL_CHANNELS.saturating_add(1);
+        assert_eq!(
+            OperationalLimits::new(invalid),
+            Err(DomainError::InvalidArgument)
+        );
+        Ok(())
+    }
 
     fn id(seed: u8) -> [u8; 16] {
         [seed; 16]

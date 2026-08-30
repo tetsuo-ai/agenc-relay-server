@@ -13,8 +13,8 @@ use std::time::Duration;
 use agenc_ircd_runtime::RuntimeError;
 use agenc_ircd_runtime::state_core::inbox::SignalEvent;
 use agenc_ircd_runtime::supervisor::{
-    ChildFailure, ChildKind, ChildName, PhaseOutcome, ShutdownHooks, ShutdownPhase, ShutdownPlan,
-    Supervisor, run_shutdown,
+    ChildFailure, ChildKind, ChildName, PhaseOutcome, ShutdownFailure, ShutdownHooks,
+    ShutdownPhase, ShutdownPlan, ShutdownProblem, ShutdownProblemKind, Supervisor, run_shutdown,
 };
 use tokio::sync::mpsc;
 
@@ -24,10 +24,14 @@ struct RecordingHooks {
     phases: Arc<Mutex<Vec<ShutdownPhase>>>,
     delay: Option<(ShutdownPhase, Duration)>,
     release: Option<(ShutdownPhase, mpsc::Sender<()>)>,
+    failure: Option<(ShutdownPhase, ShutdownFailure)>,
 }
 
 impl ShutdownHooks for RecordingHooks {
-    fn run(&mut self, phase: ShutdownPhase) -> impl Future<Output = ()> + Send {
+    fn run(
+        &mut self,
+        phase: ShutdownPhase,
+    ) -> impl Future<Output = Result<(), ShutdownFailure>> + Send {
         let phases = Arc::clone(&self.phases);
         let delay = self
             .delay
@@ -38,6 +42,10 @@ impl ShutdownHooks for RecordingHooks {
             .as_ref()
             .filter(|(gated, _)| *gated == phase)
             .map(|(_, sender)| sender.clone());
+        let failure = self
+            .failure
+            .filter(|(failed, _)| *failed == phase)
+            .map(|(_, failure)| failure);
         async move {
             if let Ok(mut recorded) = phases.lock() {
                 recorded.push(phase);
@@ -48,6 +56,7 @@ impl ShutdownHooks for RecordingHooks {
             if let Some(delay) = delay {
                 tokio::time::sleep(delay).await;
             }
+            failure.map_or(Ok(()), Err)
         }
     }
 }
@@ -59,6 +68,7 @@ fn hooks() -> (RecordingHooks, Arc<Mutex<Vec<ShutdownPhase>>>) {
             phases: Arc::clone(&phases),
             delay: None,
             release: None,
+            failure: None,
         },
         phases,
     )
@@ -81,6 +91,7 @@ async fn every_phase_completes_in_order_within_its_budget() -> TestResult {
         assert_eq!(report.outcome(phase), PhaseOutcome::Completed);
     }
     assert!(!report.interrupted());
+    assert_eq!(report.first_problem(), None);
     Ok(())
 }
 
@@ -110,6 +121,34 @@ async fn a_phase_over_budget_times_out_and_the_rest_still_run() -> TestResult {
     assert_eq!(report.outcome(ShutdownPhase::Stop), PhaseOutcome::Completed);
     assert_eq!(recorded(&phases), ShutdownPhase::ALL.to_vec());
     assert!(!report.interrupted());
+    assert_eq!(
+        report.first_problem(),
+        Some(ShutdownProblem {
+            phase: ShutdownPhase::Drain,
+            kind: ShutdownProblemKind::TimedOut,
+        })
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_first_hook_failure_is_retained_while_later_phases_still_run() -> TestResult {
+    let (mut hooks, phases) = hooks();
+    hooks.failure = Some((ShutdownPhase::Drain, ShutdownFailure::Storage));
+    let (_signals, mut receiver) = mpsc::channel(4);
+    let report = run_shutdown(ShutdownPlan::DEFAULT, &mut hooks, &mut receiver).await;
+    assert_eq!(recorded(&phases), ShutdownPhase::ALL.to_vec());
+    assert_eq!(
+        report.outcome(ShutdownPhase::Drain),
+        PhaseOutcome::Failed(ShutdownFailure::Storage)
+    );
+    assert_eq!(
+        report.first_problem(),
+        Some(ShutdownProblem {
+            phase: ShutdownPhase::Drain,
+            kind: ShutdownProblemKind::Failed(ShutdownFailure::Storage),
+        })
+    );
     Ok(())
 }
 

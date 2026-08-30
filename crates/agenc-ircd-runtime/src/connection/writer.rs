@@ -57,6 +57,7 @@ async fn handle_pop<W: AsyncWrite + Unpin>(
         },
         QueuePop::Closed(reason) => {
             finish(transport).await;
+            queue.acknowledge_flush();
             Some(reason)
         }
         QueuePop::Empty => None,
@@ -81,4 +82,43 @@ async fn finish<W: AsyncWrite + Unpin>(transport: &mut W) {
         let _ = transport.shutdown().await;
     };
     let _ = tokio::time::timeout(CLOSE_NOTIFY_GRACE, close).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::RuntimeError;
+    use crate::budget::{BoundedMemoryCharges, MemoryBudget, MemoryBudgetPort as _};
+    use crate::connection::{ClientSink as _, ConnectionGeneration, QueueLimits};
+
+    #[tokio::test]
+    async fn orderly_shutdown_acknowledges_only_after_the_writer_finishes()
+    -> Result<(), RuntimeError> {
+        let budget = MemoryBudget::new(1_048_576);
+        let charge = QueueLimits::DEFAULT.backing_charge()?;
+        let mut permits = budget.try_acquire_batch(BoundedMemoryCharges::new(vec![charge])?)?;
+        let backing = permits
+            .split_exact(charge.bytes())
+            .ok_or(RuntimeError::InvalidValue)?;
+        let queue = WriterQueue::new(ConnectionGeneration::new(1), QueueLimits::DEFAULT, backing)?;
+        let (_peer, transport) = tokio::io::duplex(1_024);
+        let acknowledgement = queue.shutdown_after_flush();
+        assert!(!acknowledgement.is_acknowledged());
+        let writer = tokio::spawn(run_writer(
+            transport,
+            Arc::clone(&queue),
+            CancellationToken::root(),
+        ));
+        tokio::time::timeout(Duration::from_secs(1), acknowledgement.wait())
+            .await
+            .map_err(|_| RuntimeError::Cancelled)?;
+        assert!(acknowledgement.is_acknowledged());
+        assert_eq!(
+            writer.await.map_err(|_| RuntimeError::Cancelled)?,
+            CloseReason::Shutdown
+        );
+        Ok(())
+    }
 }

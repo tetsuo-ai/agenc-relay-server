@@ -404,6 +404,7 @@ fn peer_role(config: &Config, peer: &PeerConfig, index: u16, sink: &mut IssueSin
     }
 }
 
+// agenc-review: focus owner=config reviewed=2026-08-30 reason=single bounded operator pass cross-checks every unique identity and local-or-remote admission authority without accepting a partial record
 fn operator_records(config: &Config, sink: &mut IssueSink) {
     let stage = ValidationStage::Topology;
     let mut ids = BTreeSet::new();
@@ -411,16 +412,7 @@ fn operator_records(config: &Config, sink: &mut IssueSink) {
     let mut pins = BTreeSet::new();
     let mut uids = BTreeSet::new();
     let mut gids = BTreeSet::new();
-    let allowed_uids: BTreeSet<u32> = config
-        .listeners
-        .iter()
-        .filter_map(|listener| listener.local_admin.as_ref())
-        .flat_map(|policy| policy.allowed_uids.iter().copied())
-        .collect();
-    let has_local = config
-        .listeners
-        .iter()
-        .any(|listener| listener.purpose == ListenerPurpose::AdminLocal);
+    let (allowed_uids, allowed_gids, has_local) = local_admin_identity_policy(config);
     for (index, operator) in config.moderation.operators.iter().enumerate() {
         let key = |field| SchemaKey::indexed("moderation.operator", index_u16(index), field);
         if !ids.insert(*operator.operator_id.as_bytes()) {
@@ -449,8 +441,37 @@ fn operator_records(config: &Config, sink: &mut IssueSink) {
         {
             sink.push(stage, key("local_uids"), ConfigError::Topology);
         }
+        if has_local
+            && operator
+                .local_gids
+                .iter()
+                .any(|gid| !allowed_gids.contains(gid))
+        {
+            sink.push(stage, key("local_gids"), ConfigError::Topology);
+        }
     }
     remote_admin_operator(config, sink);
+}
+
+fn local_admin_identity_policy(config: &Config) -> (BTreeSet<u32>, BTreeSet<u32>, bool) {
+    let policies: Vec<_> = config
+        .listeners
+        .iter()
+        .filter_map(|listener| listener.local_admin.as_ref())
+        .collect();
+    let allowed_uids = policies
+        .iter()
+        .flat_map(|policy| policy.allowed_uids.iter().copied())
+        .collect();
+    let allowed_gids = policies
+        .iter()
+        .flat_map(|policy| policy.allowed_gids.iter().copied())
+        .collect();
+    let has_local = config
+        .listeners
+        .iter()
+        .any(|listener| listener.purpose == ListenerPurpose::AdminLocal);
+    (allowed_uids, allowed_gids, has_local)
 }
 
 /// An enabled remote admin listener needs at least one enabled operator with a pin

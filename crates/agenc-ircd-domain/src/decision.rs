@@ -8,10 +8,7 @@ use agenc_ircd_types::{
 };
 
 use crate::command::{CanonicalCommandData, MaskList, MessageTarget};
-use crate::model::{
-    AccountDeletionChallengeState, Invite, MAX_CHANNELS_PER_SESSION, MAX_CONTACTS_PER_ACCOUNT,
-    MAX_INVITES_PER_CHANNEL, MAX_INVITES_PER_PRINCIPAL, MAX_MEMBERS_PER_CHANNEL,
-};
+use crate::model::{AccountDeletionChallengeState, Invite, MAX_MEMBERS_PER_CHANNEL};
 use crate::persist::{
     DurableAccount, DurableChannel, DurableSanction, DurableWrite, duplicate_typed_mask,
 };
@@ -1364,7 +1361,7 @@ impl DomainState {
                 .values()
                 .filter(|session| session.account_id == Some(account_id))
                 .count();
-            if live >= crate::model::MAX_SESSIONS_PER_ACCOUNT {
+            if live >= self.operational_limits.sessions_per_account() {
                 return Err(DomainError::LimitExceeded);
             }
         }
@@ -1850,7 +1847,7 @@ impl DomainState {
             .values()
             .filter(|session| session.account_id == Some(account_id))
             .count();
-        if live >= crate::model::MAX_SESSIONS_PER_ACCOUNT {
+        if live >= self.operational_limits.sessions_per_account() {
             return Err(DomainError::LimitExceeded);
         }
         Ok(())
@@ -2476,7 +2473,7 @@ impl DomainState {
             .len()
             .checked_add(plan.accepted_joins)
             .ok_or(DomainError::Overflow)?;
-        if resulting_memberships >= MAX_CHANNELS_PER_SESSION {
+        if resulting_memberships >= self.operational_limits.channels_per_session() {
             return Err(DomainError::LimitExceeded);
         }
         if let Some(channel_id) = existing_channel_id {
@@ -2517,6 +2514,26 @@ impl DomainState {
         if self.channels.contains_key(&channel_id) || !plan.new_channel_ids.insert(channel_id) {
             return Err(DomainError::ExternalInputMismatch);
         }
+        let scope = target.name().scope();
+        let existing = self
+            .channels
+            .values()
+            .filter(|channel| channel.name.scope() == scope)
+            .count();
+        let planned = plan
+            .mutations
+            .iter()
+            .filter(|mutation| {
+                matches!(mutation, Mutation::JoinNew(channel) if channel.name.scope() == scope)
+            })
+            .count();
+        let ceiling = match scope {
+            crate::ChannelScope::Global => self.operational_limits.global_channels(),
+            crate::ChannelScope::Local => self.operational_limits.local_channels(),
+        };
+        if existing.checked_add(planned).ok_or(DomainError::Overflow)? >= ceiling {
+            return Err(DomainError::LimitExceeded);
+        }
         let created_at = plan.utc.ok_or(DomainError::ExternalInputMismatch)?;
         let revision = crate::model::next_revision(self.revision)?;
         let membership = Membership::new(plan.user_id, plan.principal.account_id(), Role::Owner);
@@ -2552,7 +2569,7 @@ impl DomainState {
         if channel.memberships.contains_key(&user_id) {
             return Err(DomainError::BadState);
         }
-        if channel.memberships.len() >= crate::model::MAX_MEMBERS_PER_CHANNEL {
+        if channel.memberships.len() >= self.operational_limits.members_per_channel() {
             return Err(DomainError::LimitExceeded);
         }
         let session = self.sessions.get(&user_id).ok_or(DomainError::NotFound)?;
@@ -2831,7 +2848,7 @@ impl DomainState {
             .len()
             .checked_sub(expired.len())
             .ok_or(DomainError::InvariantViolation)?;
-        if active >= MAX_INVITES_PER_CHANNEL {
+        if active >= self.operational_limits.invites_per_channel() {
             return Err(DomainError::LimitExceeded);
         }
         let network_total = self.channels.values().try_fold(0_usize, |total, current| {
@@ -2840,7 +2857,7 @@ impl DomainState {
         validate_network_invite_capacity(
             network_total.ok_or(DomainError::Overflow)?,
             expired.len(),
-            crate::model::MAX_INVITES_NETWORK_WIDE,
+            self.operational_limits.invites_global(),
         )?;
         let target_count = self
             .channels
@@ -2848,7 +2865,7 @@ impl DomainState {
             .flat_map(|current| current.invites.values())
             .filter(|invite| invite.target == target && now < invite.expires_at)
             .count();
-        if target_count >= MAX_INVITES_PER_PRINCIPAL {
+        if target_count >= self.operational_limits.invites_per_principal() {
             return Err(DomainError::LimitExceeded);
         }
         Ok(expired)
@@ -5025,7 +5042,9 @@ fn account_setting(
         }
         AccountCommand::DirectMessages(policy) => Ok(AccountSetting::DirectMessages(policy)),
         AccountCommand::ContactAdd(contact) => {
-            if account.contacts.len() >= MAX_CONTACTS_PER_ACCOUNT || contact == account_id {
+            if account.contacts.len() >= state.operational_limits.contacts_per_account()
+                || contact == account_id
+            {
                 return Err(DomainError::LimitExceeded);
             }
             Ok(AccountSetting::ContactAdd(contact))
@@ -5267,6 +5286,9 @@ mod projection_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{
+        MAX_CONTACTS_PER_ACCOUNT, MAX_INVITES_PER_CHANNEL, MAX_INVITES_PER_PRINCIPAL,
+    };
     use crate::{MessageCommand, MessageText};
     use agenc_ircd_types::{AccountRandomId, ControlPolicy, ServerId, SessionId};
 

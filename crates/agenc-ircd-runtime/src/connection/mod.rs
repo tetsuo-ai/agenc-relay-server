@@ -19,9 +19,9 @@ pub use reader::{
 };
 pub use sink::{
     BoundedSharedClientFrames, ClientQueueDemand, ClientQueueReservation, ClientSink,
-    ConnectionGeneration, MAX_DEMAND_BYTES, MAX_DEMAND_FRAMES, QueueAllocationError,
-    QueueReservationLedger, QueueTransfer, ReservationToken, SinkReserveError,
-    TentativeClientQueueReservation,
+    ConnectionGeneration, FlushAcknowledgement, MAX_DEMAND_BYTES, MAX_DEMAND_FRAMES,
+    QueueAllocationError, QueueReservationLedger, QueueTransfer, ReservationToken,
+    SinkReserveError, TentativeClientQueueReservation,
 };
 pub use supervisor::{
     AdmittedConnection, ConnectionExit, ConnectionLimits, ConnectionResources, PeerIdentity,

@@ -366,6 +366,49 @@ async fn finish(harness: Harness) -> Result<(u64, u64), Box<dyn Error + Send + S
 }
 
 #[tokio::test]
+async fn the_accept_barrier_closes_sockets_before_live_connections_are_cancelled() -> TestResult {
+    let fixture = fixture(71)?;
+    let spec = tcp_spec(
+        ListenerPurpose::ClientTls,
+        2,
+        Some(server(
+            &fixture,
+            TlsEndpointProfile::Client,
+            ClientAuth::None,
+        )?),
+    )?;
+    let mut harness = start(vec![spec], HarnessOptions::default())?;
+    let address = tcp_address(&harness, 0)?;
+    let client = tls_client(
+        address,
+        client(&fixture, CLIENT_ALPN, false)?,
+        b"PING :barrier\r\n".to_vec(),
+    );
+    let (generation, sink) = expect_opened(&mut harness.inbox, ListenerPurpose::ClientTls).await?;
+    assert_eq!(expect_line(&mut harness.inbox, generation).await?, "PING");
+
+    let control = harness.set.control();
+    control.stop_accepting();
+    tokio::time::timeout(Duration::from_secs(2), control.wait_accept_stopped()).await?;
+    assert!(
+        TcpStream::connect(address).is_err(),
+        "the listening socket is gone while the accepted connection remains"
+    );
+
+    let acknowledgement = sink.shutdown_after_flush();
+    tokio::time::timeout(Duration::from_secs(2), acknowledgement.wait()).await?;
+    assert_eq!(
+        expect_closed(&mut harness.inbox, generation).await?,
+        CloseReason::Shutdown
+    );
+    assert!(joined(client).await?.is_ok());
+    drop(sink);
+    let (admitted, refused) = finish(harness).await?;
+    assert_eq!((admitted, refused), (1, 0));
+    Ok(())
+}
+
+#[tokio::test]
 async fn an_inherited_tcp_listener_admits_a_client_and_routes_lines_and_frames() -> TestResult {
     let fixture = fixture(51)?;
     let spec = tcp_spec(
