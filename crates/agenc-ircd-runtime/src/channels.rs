@@ -5,7 +5,7 @@
 //! authorization, external inputs, bounded channel-key crypto continuations,
 //! commit-coupled rendering, and transport-safe session removal.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use agenc_ircd_client_wire::{
     CapabilityState, ParsedMessage, RegisteredCommandHandoff, RegisteredCommandKind,
@@ -13,7 +13,7 @@ use agenc_ircd_client_wire::{
 use agenc_ircd_domain::{
     AdmissionSnapshot, AuthorizationFailure, AuthorizedCommand, CanonicalCommand,
     CanonicalCommandView, CommandEnvelope, DomainError, EntropyPurpose, ExternalInputRequest,
-    ExternalInputs, PlanDecision, StorageClass,
+    ExternalInputs, MessageKind, PlanDecision, StorageClass,
 };
 use agenc_ircd_types::{
     AccountDeletionToken, BoundedUtf8, ChannelInstanceId, ControlPolicy, EntryId, InviteId,
@@ -22,12 +22,14 @@ use agenc_ircd_types::{
 use zeroize::Zeroizing;
 
 use crate::RuntimeError;
+use crate::admission::{BucketDemand, BucketKey, BucketKind, domain_bucket};
 use crate::bridge::crypto::{
     ChannelKeyConstructJob, ChannelKeyTarget, ChannelKeyVerifier, ChannelKeyVerifierRecord,
     CryptoJobOutput, RuntimeCryptoJob,
 };
 use crate::bridge::{CryptoCompletionMessage, CryptoJobId};
 use crate::connection::sink::ConnectionGeneration;
+use crate::purpose::ListenerPurpose;
 use crate::state_core::inbox::CloseReason;
 use crate::state_core::session::BoundSession;
 use crate::state_core::timers::{TimedId, TimerEntry, TimerKind};
@@ -380,11 +382,17 @@ impl RegisteredCommandExecutor {
         let command = match crate::command_convert::convert(context.domain(), kind, &message) {
             Ok(command) => command,
             Err(RuntimeError::InvalidValue | RuntimeError::LimitExceeded) => {
+                let (error, silent) =
+                    if charge_registered_command_only(context, bound.user_id).is_ok() {
+                        (DomainError::InvalidArgument, false)
+                    } else {
+                        (DomainError::ServerBusy, message.command() == "NOTICE")
+                    };
                 crate::client_render::render_domain_failure(
                     context,
                     reply.render_input(bound.user_id),
-                    DomainError::InvalidArgument,
-                    false,
+                    error,
+                    silent,
                     None,
                 )?;
                 return Ok(RouteOutcome::Continue);
@@ -395,7 +403,7 @@ impl RegisteredCommandExecutor {
             CanonicalCommandView::Nick(nickname) => Some(nickname.presentation().to_owned()),
             _ => None,
         };
-        match execute_session_command(context, bound, Some(reply), command, None)? {
+        match execute_session_command(context, bound, Some(reply), command, None, true)? {
             CommandExecution::Complete(accepted) => {
                 if accepted && let Some(nickname) = next_nickname {
                     *current_nickname = Some(nickname);
@@ -675,6 +683,7 @@ pub(crate) fn close_registered(context: &mut StateCoreContext, bound: BoundSessi
         None,
         CanonicalCommand::quit(reason),
         Some(&wire_reason),
+        false,
     );
 }
 
@@ -684,22 +693,24 @@ fn execute_session_command(
     reply: Option<ClientReply<'_>>,
     command: CanonicalCommand,
     close_reason: Option<&str>,
+    metered: bool,
 ) -> Result<CommandExecution, RuntimeError> {
-    let planned = match plan_session_command(context, bound, command, reply.map(|r| r.request)) {
-        Ok(planned) => planned,
-        Err(SessionCommandError::Public { error, silent }) => {
-            let reply = reply.ok_or(RuntimeError::InvalidValue)?;
-            crate::client_render::render_domain_failure(
-                context,
-                reply.render_input(bound.user_id),
-                error,
-                silent,
-                None,
-            )?;
-            return Ok(CommandExecution::Complete(false));
-        }
-        Err(SessionCommandError::Internal(error)) => return Err(error),
-    };
+    let planned =
+        match plan_session_command(context, bound, command, reply.map(|r| r.request), metered) {
+            Ok(planned) => planned,
+            Err(SessionCommandError::Public { error, silent }) => {
+                let reply = reply.ok_or(RuntimeError::InvalidValue)?;
+                crate::client_render::render_domain_failure(
+                    context,
+                    reply.render_input(bound.user_id),
+                    error,
+                    silent,
+                    None,
+                )?;
+                return Ok(CommandExecution::Complete(false));
+            }
+            Err(SessionCommandError::Internal(error)) => return Err(error),
+        };
     let decision = match planned {
         PlannedCommand::Ready(decision) => decision,
         PlannedCommand::Crypto(plan) => return Ok(CommandExecution::Crypto(plan)),
@@ -790,8 +801,13 @@ fn plan_session_command(
     bound: BoundSession,
     command: CanonicalCommand,
     retry: Option<RetryCommand<'_>>,
+    metered: bool,
 ) -> Result<PlannedCommand, SessionCommandError> {
-    let (authorized, admission) = admit_command(context, bound, command)?;
+    let (authorized, admission) = if metered {
+        admit_command(context, bound, command)?
+    } else {
+        authorize_unmetered_command(context, bound, command)?
+    };
     let decision = context
         .domain()
         .plan_authorized(authorized, None)
@@ -802,32 +818,58 @@ fn plan_session_command(
     complete_external_plan(context, bound, retry, &admission, &requests)
 }
 
-fn admit_command(
-    context: &mut StateCoreContext,
+fn authorize_unmetered_command(
+    context: &StateCoreContext,
     bound: BoundSession,
     command: CanonicalCommand,
 ) -> Result<(AuthorizedCommand, AdmissionSnapshot), SessionCommandError> {
-    let buckets: Vec<_> = context
+    let buckets: BTreeSet<_> = context
         .domain()
         .command_charges(bound.user_id, &command)
         .into_iter()
         .map(|charge| charge.bucket())
         .collect();
+    let admission = AdmissionSnapshot::new(
+        buckets
+            .into_iter()
+            .map(|bucket| (bucket, u64::MAX))
+            .collect(),
+    )
+    .map_err(|_| RuntimeError::InvalidValue)?;
+    match authorize_command(context, bound, command, &admission) {
+        Ok(authorized) => Ok((authorized, admission)),
+        Err(AuthorizationError::Rejected(failure)) => Err(SessionCommandError::Public {
+            error: failure.error(),
+            silent: failure.is_silent(),
+        }),
+        Err(AuthorizationError::Internal(error)) => Err(error.into()),
+    }
+}
+
+fn admit_command(
+    context: &mut StateCoreContext,
+    bound: BoundSession,
+    command: CanonicalCommand,
+) -> Result<(AuthorizedCommand, AdmissionSnapshot), SessionCommandError> {
+    let charges = context.domain().command_charges(bound.user_id, &command);
+    let buckets: Vec<_> = charges.iter().map(|charge| charge.bucket()).collect();
+    let prefix = guest_key_prefix_demand(context, bound, &command)?;
+    let silent = command_is_silent(&command);
     let now = context.now();
     let admission = context
         .buckets_mut()
         .domain_snapshot(now, &buckets)
         .map_err(|_| RuntimeError::InvalidValue)?;
+    charge_command(context, now, &charges, prefix, silent)?;
     let authorized = authorize_command(context, bound, command, &admission);
-    let charges = match &authorized {
+    let authorized_charges = match &authorized {
         Ok(authorized) => authorized.charges(),
         Err(AuthorizationError::Rejected(failure)) => failure.charges(),
         Err(AuthorizationError::Internal(error)) => return Err((*error).into()),
     };
-    context
-        .buckets_mut()
-        .apply_domain_charges(now, charges)
-        .map_err(|_| RuntimeError::LimitExceeded)?;
+    if authorized_charges != charges {
+        return Err(RuntimeError::InvalidValue.into());
+    }
     match authorized {
         Ok(authorized) => Ok((authorized, admission)),
         Err(AuthorizationError::Rejected(failure)) => Err(SessionCommandError::Public {
@@ -836,6 +878,116 @@ fn admit_command(
         }),
         Err(AuthorizationError::Internal(error)) => Err(error.into()),
     }
+}
+
+fn charge_command(
+    context: &mut StateCoreContext,
+    now: agenc_ircd_types::MonotonicTick,
+    charges: &[agenc_ircd_domain::RateCharge],
+    prefix: Option<BucketDemand>,
+    silent: bool,
+) -> Result<(), SessionCommandError> {
+    let demands = command_demands(charges, prefix)?;
+    context
+        .buckets_mut()
+        .charge_all_or_nothing(now, &demands)
+        .map_err(|_| SessionCommandError::Public {
+            error: DomainError::ServerBusy,
+            silent,
+        })
+}
+
+fn charge_registered_command_only(
+    context: &mut StateCoreContext,
+    user_id: agenc_ircd_types::UserId,
+) -> Result<(), RuntimeError> {
+    let demand = BucketDemand::new(
+        BucketKind::RegisteredCommand,
+        BucketKey::Session(user_id),
+        1,
+    )?;
+    let now = context.now();
+    context
+        .buckets_mut()
+        .charge_all_or_nothing(now, &[demand])
+        .map_err(|_| RuntimeError::LimitExceeded)
+}
+
+fn command_demands(
+    charges: &[agenc_ircd_domain::RateCharge],
+    prefix: Option<BucketDemand>,
+) -> Result<Vec<BucketDemand>, RuntimeError> {
+    let count = charges
+        .len()
+        .checked_add(usize::from(prefix.is_some()))
+        .ok_or(RuntimeError::Overflow)?;
+    let mut demands = Vec::new();
+    demands
+        .try_reserve_exact(count)
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    for charge in charges {
+        let (kind, key) = domain_bucket(charge.bucket());
+        demands.push(BucketDemand::new(kind, key, charge.tokens())?);
+    }
+    demands.extend(prefix);
+    Ok(demands)
+}
+
+fn guest_key_prefix_demand(
+    context: &StateCoreContext,
+    bound: BoundSession,
+    command: &CanonicalCommand,
+) -> Result<Option<BucketDemand>, RuntimeError> {
+    let CanonicalCommandView::Join(targets) = command.view() else {
+        return Ok(None);
+    };
+    let tokens = targets
+        .iter()
+        .filter(|target| target.key_supplied())
+        .count();
+    if tokens == 0 {
+        return Ok(None);
+    }
+    let session = context
+        .domain()
+        .session(bound.user_id)
+        .ok_or(RuntimeError::InvalidValue)?;
+    if session.account_id().is_some() {
+        return Ok(None);
+    }
+    let generation = context
+        .sessions()
+        .generation_for_user(bound.user_id)
+        .ok_or(RuntimeError::InvalidValue)?;
+    let connection = context
+        .sessions()
+        .connection(generation)
+        .ok_or(RuntimeError::InvalidValue)?;
+    let key = guest_prefix_bucket(connection.purpose(), connection.source())?;
+    let tokens = u64::try_from(tokens).map_err(|_| RuntimeError::Overflow)?;
+    BucketDemand::new(BucketKind::ChannelKeyAttempt, key, tokens).map(Some)
+}
+
+fn guest_prefix_bucket(
+    purpose: ListenerPurpose,
+    source: crate::state_core::inbox::SourceAddressKey,
+) -> Result<BucketKey, RuntimeError> {
+    match purpose {
+        ListenerPurpose::ClientTls | ListenerPurpose::ClientWss => {
+            Ok(BucketKey::Prefix(source.prefix_key()))
+        }
+        ListenerPurpose::ClientOnion => Ok(BucketKey::OnionListener),
+        ListenerPurpose::Federation | ListenerPurpose::AdminLocal | ListenerPurpose::AdminTls => {
+            Err(RuntimeError::InvalidValue)
+        }
+    }
+}
+
+fn command_is_silent(command: &CanonicalCommand) -> bool {
+    matches!(
+        command.view(),
+        CanonicalCommandView::Message(message) if message.kind() == MessageKind::Notice
+    )
 }
 
 fn authorize_command(
@@ -1027,9 +1179,13 @@ fn stage_error(error: StageRefused) -> RuntimeError {
 #[cfg(test)]
 mod tests {
     use agenc_ircd_crypto::{CryptoError, CryptoWorkerError};
+    use agenc_ircd_domain::{RateBucket, RateCharge};
+    use agenc_ircd_types::{MonotonicTick, UserId};
 
     use super::*;
+    use crate::admission::{BucketTable, RateLimits};
     use crate::bridge::crypto::ChannelKeyVerdict;
+    use crate::state_core::inbox::SourceAddressKey;
 
     #[test]
     fn crypto_completion_mapping_accepts_only_the_pending_output_kind() {
@@ -1097,5 +1253,41 @@ mod tests {
             ),
             Err(CryptoCompletionError::Busy)
         ));
+    }
+
+    #[test]
+    fn guest_prefix_and_session_key_charges_are_atomic() -> Result<(), RuntimeError> {
+        let user = UserId::from_bytes([7; 16]);
+        let charge = RateCharge::new(RateBucket::RegisteredCommand(user), 1)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let prefix = BucketKey::Prefix(SourceAddressKey::ipv4([192, 0, 2, 7]).prefix_key());
+        let extra = BucketDemand::new(BucketKind::ChannelKeyAttempt, prefix, 5)?;
+        let demands = command_demands(&[charge], Some(extra))?;
+        let mut table = BucketTable::new(RateLimits::defaults());
+        let now = MonotonicTick::from_ticks(0);
+        assert!(table.charge_all_or_nothing(now, &demands).is_err());
+        assert_eq!(
+            table.available(now, BucketKind::RegisteredCommand, BucketKey::Session(user),),
+            BucketKind::RegisteredCommand.default_rate().burst()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn guest_prefix_keys_follow_the_transport_profile() -> Result<(), RuntimeError> {
+        let direct = SourceAddressKey::ipv4([198, 51, 100, 8]);
+        assert!(matches!(
+            guest_prefix_bucket(ListenerPurpose::ClientTls, direct)?,
+            BucketKey::Prefix(prefix) if prefix == direct.prefix_key()
+        ));
+        assert!(matches!(
+            guest_prefix_bucket(
+                ListenerPurpose::ClientOnion,
+                SourceAddressKey::onion_listener(),
+            )?,
+            BucketKey::OnionListener
+        ));
+        assert!(guest_prefix_bucket(ListenerPurpose::AdminLocal, direct).is_err());
+        Ok(())
     }
 }

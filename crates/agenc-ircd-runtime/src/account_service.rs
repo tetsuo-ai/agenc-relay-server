@@ -34,6 +34,7 @@ use agenc_ircd_types::{
 };
 
 use crate::RuntimeError;
+use crate::admission::{BucketDemand, BucketKey, BucketKind, LoginHashKey};
 use crate::bridge::crypto::{
     AccountOpenJob, CryptoJobOutput, OpaqueFinishJob, OpaqueFinishSealJob, OpaqueStartJob,
     OpaqueStartSealJob, RuntimeCryptoJob,
@@ -904,6 +905,9 @@ impl AccountServiceCoordinator {
             OpenedAccountServiceRequest::AuthenticationStart(opened) if !request.finish => {
                 let login = NormalizedLogin::prepare(opened.payload().login.as_str())
                     .map_err(|_| RuntimeError::InvalidValue)?;
+                if self.charge_opaque_attempt(context, &login).is_err() {
+                    return self.fail_pending(context, request);
+                }
                 let schedule = LoginIndexLookupSchedule::new(
                     self.config.network_id,
                     &login,
@@ -958,6 +962,23 @@ impl AccountServiceCoordinator {
             }
             _ => self.fail_pending(context, request),
         }
+    }
+
+    fn charge_opaque_attempt(
+        &self,
+        context: &mut StateCoreContext,
+        login: &NormalizedLogin,
+    ) -> Result<(), RuntimeError> {
+        let demand = opaque_attempt_demand(
+            &self.config.current_login_index_key,
+            self.config.network_id,
+            login,
+        )?;
+        let now = context.now();
+        context
+            .buckets_mut()
+            .charge_all_or_nothing(now, &[demand])
+            .map_err(|_| RuntimeError::LimitExceeded)
     }
 
     fn operation_context(
@@ -2033,6 +2054,17 @@ impl PendingAuthority {
     }
 }
 
+fn opaque_attempt_demand(
+    key: &LoginIndexKey,
+    network_id: NetworkId,
+    login: &NormalizedLogin,
+) -> Result<BucketDemand, RuntimeError> {
+    let digest =
+        derive_login_index(key, network_id, login).map_err(|_| RuntimeError::InvalidValue)?;
+    let key = LoginHashKey::from_digest_bytes(*digest.expose_for_storage_key());
+    BucketDemand::new(BucketKind::OpaqueAttempt, BucketKey::LoginHash(key), 1)
+}
+
 fn request_result_key(request_id: RequestId) -> Result<StoredKey, RuntimeError> {
     Ok(StoredKey::new(request_id.as_bytes().to_vec())?)
 }
@@ -2226,13 +2258,15 @@ mod tests {
     use agenc_ircd_crypto::{LoginIndexKey, derive_login_index};
     use agenc_ircd_storage::{LoginIndexStoredKey, LoginIndexValue, LoginIndexValueKind};
     use agenc_ircd_types::{
-        AccountId, AccountRandomId, ConnectionId, Generation, NetworkId, NormalizedLogin,
-        OpaqueCredentialId, OriginId,
+        AccountId, AccountRandomId, ConnectionId, Generation, MonotonicTick, NetworkId,
+        NormalizedLogin, OpaqueCredentialId, OriginId,
     };
+
+    use crate::admission::{BucketTable, RateLimits};
 
     use super::{
         ConnectionRoute, REQUEST_RESULT_BYTES, RequestResultRecord, RequestTerminal, RuntimeError,
-        select_live_login,
+        opaque_attempt_demand, select_live_login,
     };
 
     fn account(byte: u8) -> AccountId {
@@ -2336,6 +2370,22 @@ mod tests {
         let selected = select_live_login(&current, &None)?.ok_or(RuntimeError::InvalidValue)?;
         assert_eq!(selected.0, account(8));
         assert_eq!(selected.1.expose_for_account_service(), &[8; 32]);
+        Ok(())
+    }
+
+    #[test]
+    fn opaque_attempts_stop_at_the_keyed_login_burst_before_lookup()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let key = LoginIndexKey::from_bytes([9; 32]);
+        let network = NetworkId::from_bytes([7; 32]);
+        let login = NormalizedLogin::prepare("bounded-user")?;
+        let demand = opaque_attempt_demand(&key, network, &login)?;
+        let mut buckets = BucketTable::new(RateLimits::defaults());
+        let now = MonotonicTick::from_ticks(0);
+        for _ in 0..5 {
+            assert!(buckets.charge_all_or_nothing(now, &[demand]).is_ok());
+        }
+        assert!(buckets.charge_all_or_nothing(now, &[demand]).is_err());
         Ok(())
     }
 }

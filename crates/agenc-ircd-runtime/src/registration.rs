@@ -10,9 +10,9 @@ use std::collections::{BTreeMap, VecDeque};
 use agenc_ircd_client_wire::{
     AccessTokenPolicy, CapRequestReply, CapabilityProfile, CapabilitySpec, CapabilityState,
     KEEPALIVE_IDLE_MILLIS, KEEPALIVE_PONG_MILLIS, REGISTRATION_TIMEOUT_MILLIS, RegistrationAction,
-    RegistrationAuthCarrier, RegistrationError, RegistrationEvent, RegistrationPhase,
-    RegistrationState, WelcomeStep, WireMessage, isupport_messages, numeric_reply,
-    split_capability_lines,
+    RegistrationAuthCarrier, RegistrationCommand, RegistrationError, RegistrationEvent,
+    RegistrationPhase, RegistrationState, WelcomeStep, WireMessage, isupport_messages,
+    numeric_reply, parse_registration_command, split_capability_lines,
 };
 use agenc_ircd_crypto::{SemanticHashDomain, semantic_digest};
 use agenc_ircd_domain::{DisplayNameValue, NicknameValue, SessionSeed};
@@ -23,6 +23,7 @@ use zeroize::Zeroizing;
 use crate::RuntimeError;
 pub use crate::account_service::AccountServiceConfig;
 use crate::account_service::{AccountServiceCoordinator, CarrierCompletion, CarrierRoute};
+use crate::admission::{BucketDemand, BucketKey, BucketKind};
 use crate::connection::sink::ConnectionGeneration;
 use crate::state_core::fanout::FanoutRequest;
 use crate::state_core::inbox::CloseReason;
@@ -149,6 +150,36 @@ impl RegistrationRouter {
         let Some(mut state) = self.connections.remove(&generation) else {
             return RouteOutcome::Close(CloseReason::ProtocolError);
         };
+        let admission = if state.bound.is_none() {
+            charge_preauth(context, generation)
+        } else if should_charge_registered_control(&message, self.access_policy()) {
+            state
+                .bound
+                .ok_or(RuntimeError::InvalidValue)
+                .and_then(|bound| charge_registered_control(context, bound.user_id))
+        } else {
+            Ok(())
+        };
+        if admission.is_err() {
+            let outcome = if self
+                .send_numeric(
+                    context,
+                    generation,
+                    &state,
+                    263,
+                    &[&command],
+                    "Please wait a while and try again.",
+                )
+                .is_ok()
+            {
+                RouteOutcome::Continue
+            } else {
+                RouteOutcome::Close(CloseReason::ProtocolError)
+            };
+            self.refresh_deadline(context, generation, &mut state, outcome);
+            self.connections.insert(generation, state);
+            return outcome;
+        }
         let actions = state
             .registration
             .message(message, context.now().get(), &self.advertised);
@@ -1001,6 +1032,58 @@ impl RegistrationRouter {
     }
 }
 
+fn charge_preauth(
+    context: &mut StateCoreContext,
+    generation: ConnectionGeneration,
+) -> Result<(), RuntimeError> {
+    let demand = preauth_demand(generation)?;
+    let now = context.now();
+    context
+        .buckets_mut()
+        .charge_all_or_nothing(now, &[demand])
+        .map_err(|_| RuntimeError::LimitExceeded)
+}
+
+fn preauth_demand(generation: ConnectionGeneration) -> Result<BucketDemand, RuntimeError> {
+    BucketDemand::new(
+        BucketKind::PreAuthCommand,
+        BucketKey::Connection(generation),
+        1,
+    )
+}
+
+fn should_charge_registered_control(
+    message: &agenc_ircd_client_wire::ParsedMessage,
+    access_policy: AccessTokenPolicy,
+) -> bool {
+    !matches!(
+        parse_registration_command(message, access_policy),
+        Ok(RegistrationCommand::Nick
+            | RegistrationCommand::PostRegistration(_)
+            | RegistrationCommand::Quit)
+    )
+}
+
+fn charge_registered_control(
+    context: &mut StateCoreContext,
+    user_id: UserId,
+) -> Result<(), RuntimeError> {
+    let demand = registered_command_demand(user_id)?;
+    let now = context.now();
+    context
+        .buckets_mut()
+        .charge_all_or_nothing(now, &[demand])
+        .map_err(|_| RuntimeError::LimitExceeded)
+}
+
+fn registered_command_demand(user_id: UserId) -> Result<BucketDemand, RuntimeError> {
+    BucketDemand::new(
+        BucketKind::RegisteredCommand,
+        BucketKey::Session(user_id),
+        1,
+    )
+}
+
 impl CommandRouter for RegistrationRouter {
     fn route(
         &mut self,
@@ -1294,7 +1377,10 @@ fn close_transport(context: &mut StateCoreContext, generation: ConnectionGenerat
 
 #[cfg(test)]
 mod tests {
+    use agenc_ircd_types::MonotonicTick;
+
     use super::*;
+    use crate::admission::{BucketTable, RateLimits};
 
     #[test]
     fn core_capabilities_and_cloaks_are_closed() -> Result<(), RuntimeError> {
@@ -1339,6 +1425,32 @@ mod tests {
             capability_hash(&["batch".to_owned(), "message-tags".to_owned()])?,
             capability_hash(&["message-tags".to_owned(), "batch".to_owned()])?
         );
+        Ok(())
+    }
+
+    #[test]
+    fn preauth_lines_stop_at_the_exact_connection_burst() -> Result<(), RuntimeError> {
+        let generation = ConnectionGeneration::new(7);
+        let mut buckets = BucketTable::new(RateLimits::defaults());
+        let demand = preauth_demand(generation)?;
+        let now = MonotonicTick::from_ticks(0);
+        for _ in 0..10 {
+            assert!(buckets.charge_all_or_nothing(now, &[demand]).is_ok());
+        }
+        assert!(buckets.charge_all_or_nothing(now, &[demand]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn registered_control_lines_stop_at_the_exact_session_burst() -> Result<(), RuntimeError> {
+        let user_id = UserId::from_bytes([7; 16]);
+        let mut buckets = BucketTable::new(RateLimits::defaults());
+        let demand = registered_command_demand(user_id)?;
+        let now = MonotonicTick::from_ticks(0);
+        for _ in 0..20 {
+            assert!(buckets.charge_all_or_nothing(now, &[demand]).is_ok());
+        }
+        assert!(buckets.charge_all_or_nothing(now, &[demand]).is_err());
         Ok(())
     }
 }
