@@ -919,6 +919,46 @@ const CREATION_TRANSACTION_CLASS: u16 = 1;
 /// only the keyed login digest and already-verified invitation metadata.
 pub struct CreationTransactionRecord(Zeroizing<[u8; CREATION_TRANSACTION_RECORD_BYTES]>);
 
+/// Authenticated creation-row facts needed to remove connection-bound state
+/// after a process restart.
+///
+/// This value carries no route, request, credential, or transaction
+/// continuation authority. A reservation is present only when START admitted
+/// it before the prior process stopped.
+pub struct CreationTransactionRestartMetadata {
+    transaction_id: TransactionId,
+    durable_expires_at_utc: UtcSecond,
+    reservation_login_digest: Option<LoginIndexDigest>,
+    reservation_invitation: Option<(InviteId, UtcSecond)>,
+}
+
+impl CreationTransactionRestartMetadata {
+    /// Returns the connection-bound transaction that owns the durable row.
+    #[must_use]
+    pub const fn transaction_id(&self) -> TransactionId {
+        self.transaction_id
+    }
+
+    /// Returns the exclusive durable transaction deadline.
+    #[must_use]
+    pub const fn durable_expires_at_utc(&self) -> UtcSecond {
+        self.durable_expires_at_utc
+    }
+
+    /// Borrows the private login digest only when START admitted a reservation.
+    #[must_use]
+    pub const fn reservation_login_digest(&self) -> Option<&LoginIndexDigest> {
+        self.reservation_login_digest.as_ref()
+    }
+
+    /// Returns verified invitation metadata only when START admitted its
+    /// corresponding reservation.
+    #[must_use]
+    pub const fn reservation_invitation(&self) -> Option<(InviteId, UtcSecond)> {
+        self.reservation_invitation
+    }
+}
+
 impl CreationTransactionRecord {
     fn capture(
         transaction: &AccountTransaction<AccountCreationState>,
@@ -969,6 +1009,34 @@ impl CreationTransactionRecord {
             CREATION_TRANSACTION_CLASS,
         )?;
         Ok(durable_expires_at)
+    }
+
+    /// Fully validates an opened row and returns only the facts needed to
+    /// delete its connection-bound transaction and admitted reservations.
+    pub fn into_restart_cleanup_metadata(
+        self,
+    ) -> Result<CreationTransactionRestartMetadata, AuthError> {
+        let durable_expires_at_utc = self.durable_expires_at_utc()?;
+        let transaction = self.restore(
+            MonotonicTick::from_ticks(0),
+            UtcSecond::from_unix_seconds(0),
+        )?;
+        let transaction_id = transaction.binding().transaction_id();
+        let state = transaction.state_ref().ok_or(AuthError::Consumed)?;
+        let admitted = state.disposition.rejection().is_none();
+        let reservation_login_digest = admitted.then(|| {
+            LoginIndexDigest::from_storage_key(*state.login_digest.expose_for_storage_key())
+        });
+        let reservation_invitation = admitted
+            .then_some(state.invitation.as_ref())
+            .flatten()
+            .map(|invitation| (invitation.invite_id, invitation.expires_at));
+        Ok(CreationTransactionRestartMetadata {
+            transaction_id,
+            durable_expires_at_utc,
+            reservation_login_digest,
+            reservation_invitation,
+        })
     }
 
     /// Restores a still-live transaction under new process-local monotonic time.
@@ -1041,6 +1109,38 @@ pub struct CredentialChangeTransactionRecord(
     Zeroizing<[u8; CREDENTIAL_CHANGE_TRANSACTION_RECORD_BYTES]>,
 );
 
+/// Authenticated credential-change row facts needed after process restart.
+///
+/// The optional account identity reports whether START admitted the
+/// process-local credential reservation. The reservation itself is not
+/// restored because process restart destroys all live connection authority.
+pub struct CredentialChangeTransactionRestartMetadata {
+    transaction_id: TransactionId,
+    durable_expires_at_utc: UtcSecond,
+    reservation_account_id: Option<AccountId>,
+}
+
+impl CredentialChangeTransactionRestartMetadata {
+    /// Returns the connection-bound transaction that owns the durable row.
+    #[must_use]
+    pub const fn transaction_id(&self) -> TransactionId {
+        self.transaction_id
+    }
+
+    /// Returns the exclusive durable transaction deadline.
+    #[must_use]
+    pub const fn durable_expires_at_utc(&self) -> UtcSecond {
+        self.durable_expires_at_utc
+    }
+
+    /// Returns the account whose process-local credential reservation was
+    /// admitted, if any.
+    #[must_use]
+    pub const fn reservation_account_id(&self) -> Option<AccountId> {
+        self.reservation_account_id
+    }
+}
+
 impl CredentialChangeTransactionRecord {
     fn capture(
         transaction: &AccountTransaction<CredentialChangeState>,
@@ -1092,6 +1192,29 @@ impl CredentialChangeTransactionRecord {
             CREDENTIAL_CHANGE_TRANSACTION_CLASS,
         )?;
         Ok(durable_expires_at)
+    }
+
+    /// Fully validates an opened row and returns only restart cleanup facts.
+    pub fn into_restart_cleanup_metadata(
+        self,
+    ) -> Result<CredentialChangeTransactionRestartMetadata, AuthError> {
+        let durable_expires_at_utc = self.durable_expires_at_utc()?;
+        let transaction = self.restore(
+            MonotonicTick::from_ticks(0),
+            UtcSecond::from_unix_seconds(0),
+        )?;
+        let transaction_id = transaction.binding().transaction_id();
+        let state = transaction.state_ref().ok_or(AuthError::Consumed)?;
+        let reservation_account_id = state
+            .disposition
+            .rejection()
+            .is_none()
+            .then_some(state.account.account_id);
+        Ok(CredentialChangeTransactionRestartMetadata {
+            transaction_id,
+            durable_expires_at_utc,
+            reservation_account_id,
+        })
     }
 
     /// Restores a still-live transaction under new process-local monotonic time.
@@ -3474,6 +3597,15 @@ mod tests {
                 .windows("entropy-user".len())
                 .any(|window| window == b"entropy-user")
         );
+        let restart = CreationTransactionRecord::parse(record.expose_for_persistence())?
+            .into_restart_cleanup_metadata()?;
+        assert_eq!(restart.transaction_id(), transaction_id);
+        assert_eq!(
+            restart.durable_expires_at_utc(),
+            UtcSecond::from_unix_seconds(559)
+        );
+        assert!(restart.reservation_login_digest().is_none());
+        assert!(restart.reservation_invitation().is_none());
 
         let restored = CreationTransactionRecord::parse(record.expose_for_persistence())?.restore(
             MonotonicTick::from_ticks(2_000),
@@ -3546,6 +3678,14 @@ mod tests {
             record.durable_expires_at_utc()?,
             UtcSecond::from_unix_seconds(759)
         );
+        let restart = CredentialChangeTransactionRecord::parse(record.expose_for_persistence())?
+            .into_restart_cleanup_metadata()?;
+        assert_eq!(restart.transaction_id(), transaction_id);
+        assert_eq!(
+            restart.durable_expires_at_utc(),
+            UtcSecond::from_unix_seconds(759)
+        );
+        assert!(restart.reservation_account_id().is_none());
 
         let restored = CredentialChangeTransactionRecord::parse(record.expose_for_persistence())?
             .restore(
@@ -3604,6 +3744,16 @@ mod tests {
             MonotonicTick::from_ticks(1_100),
             UtcSecond::from_unix_seconds(800),
         )?;
+        let restart = CreationTransactionRecord::parse(record.expose_for_persistence())?
+            .into_restart_cleanup_metadata()?;
+        assert_eq!(
+            restart
+                .reservation_login_digest()
+                .ok_or(AuthError::InvalidEncoding)?
+                .expose_for_storage_key(),
+            &[83_u8; 32]
+        );
+        assert!(restart.reservation_invitation().is_none());
         assert_eq!(
             CreationTransactionRecord::parse(record.expose_for_persistence())?
                 .restore(

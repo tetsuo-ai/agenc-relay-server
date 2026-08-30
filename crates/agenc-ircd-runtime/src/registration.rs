@@ -1094,6 +1094,10 @@ fn registered_command_demand(user_id: UserId) -> Result<BucketDemand, RuntimeErr
 }
 
 impl CommandRouter for RegistrationRouter {
+    fn startup(&mut self, context: &mut StateCoreContext) {
+        self.accounts.startup(context);
+    }
+
     fn route(
         &mut self,
         context: &mut StateCoreContext,

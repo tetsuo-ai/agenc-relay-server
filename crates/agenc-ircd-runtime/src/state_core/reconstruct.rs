@@ -9,15 +9,21 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use agenc_ircd_auth::{OPAQUE_REGISTRATION_RECORD_BYTES, OpaqueRegistrationRecord};
+use agenc_ircd_auth::{
+    AuthenticationTransactionRecord, CreationTransactionRecord, CredentialChangeTransactionRecord,
+    OPAQUE_REGISTRATION_RECORD_BYTES, OpaqueRegistrationRecord,
+};
 use agenc_ircd_domain::{DomainState, DurableAccount, DurableChannel, DurableSanction};
 use agenc_ircd_storage::{
     AccountRecordBody, ChannelRecordBody, ExistingRecord, LIVE_RECORD_KIND,
     LOGIN_INDEX_KEY_STATE_KEY, LoginIndexKeyState, LoginIndexStoredKey, LoginIndexValue,
-    MAX_STORED_KEY_BYTES, OPAQUE_FAKE_RECORD_KEY, PersistentRecordValue, ReadPlan,
-    SanctionRecordBody, SealedRecord, StorageError, StoragePort, StoredKey, TableId,
+    LoginIndexValueKind, MAX_STORED_KEY_BYTES, OPAQUE_FAKE_RECORD_KEY, PersistentRecordValue,
+    ReadPlan, SanctionRecordBody, SealedRecord, StorageError, StoragePort, StoredKey, TableId,
 };
-use agenc_ircd_types::{AccountId, ChannelInstanceId, ChannelName, Nickname, Revision};
+use agenc_ircd_types::{
+    AccountId, ChannelInstanceId, ChannelName, InviteId, MonotonicTick, Nickname, Revision,
+    TransactionId, UtcSecond,
+};
 
 use crate::RuntimeError;
 use crate::StateCoreSeed;
@@ -29,6 +35,11 @@ use crate::state_core::durable::{
 
 /// Rows fetched per consistent range read (the storage crate's range limit).
 pub const RECONSTRUCTION_PAGE_ROWS: u16 = 4_096;
+const CREATION_TRANSACTION_KIND: u16 = 1;
+const AUTHENTICATION_TRANSACTION_KIND: u16 = 2;
+const CREDENTIAL_CHANGE_TRANSACTION_KIND: u16 = 3;
+const INVITATION_RESERVATION_KIND: u16 = 1;
+const INVITATION_TOMBSTONE_KIND: u16 = 2;
 /// The tables Stage 06 reconstructs, in scan order.
 pub const RECONSTRUCTED_TABLES: [TableId; 12] = [
     TableId::Account,
@@ -49,6 +60,7 @@ pub const RECONSTRUCTED_TABLES: [TableId; 12] = [
 pub struct AccountServiceReconstruction {
     login_index_key_state: LoginIndexKeyState,
     fake_opaque_record: [u8; OPAQUE_REGISTRATION_RECORD_BYTES],
+    startup_transaction_cleanups: Vec<RecoveredAccountTransactionCleanup>,
 }
 
 impl AccountServiceReconstruction {
@@ -62,6 +74,46 @@ impl AccountServiceReconstruction {
     #[must_use]
     pub const fn fake_opaque_record(&self) -> &[u8; OPAQUE_REGISTRATION_RECORD_BYTES] {
         &self.fake_opaque_record
+    }
+
+    /// Returns the authenticated connection-bound rows that must be deleted
+    /// before this process accepts account work.
+    #[must_use]
+    pub fn startup_transaction_cleanups(&self) -> &[RecoveredAccountTransactionCleanup] {
+        &self.startup_transaction_cleanups
+    }
+}
+
+/// One fully cross-validated startup deletion for connection-bound account
+/// state left by the prior process.
+#[derive(Clone)]
+pub struct RecoveredAccountTransactionCleanup {
+    transaction_id: TransactionId,
+    login_key: Option<StoredKey>,
+    invitation_id: Option<InviteId>,
+}
+
+impl RecoveredAccountTransactionCleanup {
+    /// Returns the transaction row to delete.
+    #[must_use]
+    pub const fn transaction_id(&self) -> TransactionId {
+        self.transaction_id
+    }
+
+    /// Borrows the admitted login reservation to delete, if any.
+    #[must_use]
+    pub const fn login_key(&self) -> Option<&StoredKey> {
+        self.login_key.as_ref()
+    }
+
+    /// Returns the admitted invitation reservation to delete, if any.
+    #[must_use]
+    pub const fn invitation_id(&self) -> Option<InviteId> {
+        self.invitation_id
+    }
+
+    pub(crate) fn into_parts(self) -> (TransactionId, Option<StoredKey>, Option<InviteId>) {
+        (self.transaction_id, self.login_key, self.invitation_id)
     }
 }
 
@@ -81,19 +133,180 @@ pub struct Reconstruction {
 struct AccountServiceScan {
     login_index_key_state: Option<LoginIndexKeyState>,
     fake_opaque_record: Option<[u8; OPAQUE_REGISTRATION_RECORD_BYTES]>,
+    transactions: BTreeMap<TransactionId, RecoveredTransaction>,
+    login_reservations: BTreeMap<TransactionId, RecoveredLoginReservation>,
+    invitation_reservations: BTreeMap<TransactionId, RecoveredInvitationReservation>,
 }
 
 impl AccountServiceScan {
     fn finish(self) -> Result<AccountServiceReconstruction, RuntimeError> {
+        let Self {
+            login_index_key_state,
+            fake_opaque_record,
+            transactions,
+            login_reservations,
+            invitation_reservations,
+        } = self;
+        let login_index_key_state =
+            login_index_key_state.ok_or(RuntimeError::Storage(StorageError::StaleState))?;
+        let startup_transaction_cleanups = recover_account_transaction_cleanups(
+            transactions,
+            login_index_key_state,
+            login_reservations,
+            invitation_reservations,
+        )?;
         Ok(AccountServiceReconstruction {
-            login_index_key_state: self
-                .login_index_key_state
+            login_index_key_state,
+            fake_opaque_record: fake_opaque_record
                 .ok_or(RuntimeError::Storage(StorageError::StaleState))?,
-            fake_opaque_record: self
-                .fake_opaque_record
-                .ok_or(RuntimeError::Storage(StorageError::StaleState))?,
+            startup_transaction_cleanups,
         })
     }
+}
+
+enum RecoveredTransaction {
+    Authentication,
+    Creation {
+        expires_at: u64,
+        reservation_digest: Option<agenc_ircd_crypto::LoginIndexDigest>,
+        reservation_invitation: Option<InviteId>,
+    },
+    CredentialChange,
+}
+
+struct RecoveredLoginReservation {
+    key: StoredKey,
+    expires_at: u64,
+}
+
+struct RecoveredInvitationReservation {
+    invitation_id: InviteId,
+    expires_at: u64,
+}
+
+fn recover_account_transaction_cleanups(
+    transactions: BTreeMap<TransactionId, RecoveredTransaction>,
+    login_index_key_state: LoginIndexKeyState,
+    mut login_reservations: BTreeMap<TransactionId, RecoveredLoginReservation>,
+    mut invitation_reservations: BTreeMap<TransactionId, RecoveredInvitationReservation>,
+) -> Result<Vec<RecoveredAccountTransactionCleanup>, RuntimeError> {
+    let mut cleanups = Vec::new();
+    cleanups
+        .try_reserve_exact(transactions.len())
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    for (transaction_id, transaction) in transactions {
+        cleanups.push(recover_account_transaction_cleanup(
+            transaction_id,
+            transaction,
+            login_index_key_state,
+            &mut login_reservations,
+            &mut invitation_reservations,
+        )?);
+    }
+    if !login_reservations.is_empty() || !invitation_reservations.is_empty() {
+        return Err(RuntimeError::Storage(StorageError::StaleState));
+    }
+    Ok(cleanups)
+}
+
+fn recover_account_transaction_cleanup(
+    transaction_id: TransactionId,
+    transaction: RecoveredTransaction,
+    login_index_key_state: LoginIndexKeyState,
+    login_reservations: &mut BTreeMap<TransactionId, RecoveredLoginReservation>,
+    invitation_reservations: &mut BTreeMap<TransactionId, RecoveredInvitationReservation>,
+) -> Result<RecoveredAccountTransactionCleanup, RuntimeError> {
+    match transaction {
+        RecoveredTransaction::Authentication | RecoveredTransaction::CredentialChange => {
+            if login_reservations.contains_key(&transaction_id)
+                || invitation_reservations.contains_key(&transaction_id)
+            {
+                return Err(RuntimeError::Storage(StorageError::StaleState));
+            }
+            Ok(RecoveredAccountTransactionCleanup {
+                transaction_id,
+                login_key: None,
+                invitation_id: None,
+            })
+        }
+        RecoveredTransaction::Creation {
+            expires_at,
+            reservation_digest,
+            reservation_invitation,
+        } => recover_creation_transaction_cleanup(
+            transaction_id,
+            expires_at,
+            reservation_digest,
+            reservation_invitation,
+            login_index_key_state,
+            login_reservations,
+            invitation_reservations,
+        ),
+    }
+}
+
+fn recover_creation_transaction_cleanup(
+    transaction_id: TransactionId,
+    expires_at: u64,
+    reservation_digest: Option<agenc_ircd_crypto::LoginIndexDigest>,
+    reservation_invitation: Option<InviteId>,
+    login_index_key_state: LoginIndexKeyState,
+    login_reservations: &mut BTreeMap<TransactionId, RecoveredLoginReservation>,
+    invitation_reservations: &mut BTreeMap<TransactionId, RecoveredInvitationReservation>,
+) -> Result<RecoveredAccountTransactionCleanup, RuntimeError> {
+    let Some(digest) = reservation_digest else {
+        if login_reservations.contains_key(&transaction_id)
+            || invitation_reservations.contains_key(&transaction_id)
+            || reservation_invitation.is_some()
+        {
+            return Err(RuntimeError::Storage(StorageError::StaleState));
+        }
+        return Ok(RecoveredAccountTransactionCleanup {
+            transaction_id,
+            login_key: None,
+            invitation_id: None,
+        });
+    };
+    let expected_login_key =
+        LoginIndexStoredKey::new(login_index_key_state.current_generation(), digest)?.encode()?;
+    let login = login_reservations
+        .remove(&transaction_id)
+        .ok_or(RuntimeError::Storage(StorageError::StaleState))?;
+    if login.key != expected_login_key || login.expires_at != expires_at {
+        return Err(RuntimeError::Storage(StorageError::StaleState));
+    }
+    let invitation_id = recover_creation_invitation(
+        transaction_id,
+        expires_at,
+        reservation_invitation,
+        invitation_reservations,
+    )?;
+    Ok(RecoveredAccountTransactionCleanup {
+        transaction_id,
+        login_key: Some(login.key),
+        invitation_id,
+    })
+}
+
+fn recover_creation_invitation(
+    transaction_id: TransactionId,
+    expires_at: u64,
+    expected: Option<InviteId>,
+    reservations: &mut BTreeMap<TransactionId, RecoveredInvitationReservation>,
+) -> Result<Option<InviteId>, RuntimeError> {
+    let Some(expected) = expected else {
+        if reservations.contains_key(&transaction_id) {
+            return Err(RuntimeError::Storage(StorageError::StaleState));
+        }
+        return Ok(None);
+    };
+    let invitation = reservations
+        .remove(&transaction_id)
+        .ok_or(RuntimeError::Storage(StorageError::StaleState))?;
+    if invitation.invitation_id != expected || invitation.expires_at != expires_at {
+        return Err(RuntimeError::Storage(StorageError::StaleState));
+    }
+    Ok(Some(expected))
 }
 
 #[derive(Default)]
@@ -181,6 +394,26 @@ fn successor(key: &StoredKey) -> Result<StoredKey, RuntimeError> {
     Ok(StoredKey::new(bytes)?)
 }
 
+fn invalid_account_service_record() -> RuntimeError {
+    RuntimeError::Storage(StorageError::InvalidEncoding)
+}
+
+fn validate_creation_transaction_reference(
+    invitation_id: Option<InviteId>,
+    value: &PersistentRecordValue,
+) -> Result<(), RuntimeError> {
+    match (invitation_id, value.references()) {
+        (None, []) => Ok(()),
+        (Some(invite_id), [reference])
+            if reference.table() == TableId::RegistrationInvite
+                && reference.key().as_bytes() == invite_id.as_bytes() =>
+        {
+            Ok(())
+        }
+        _ => Err(RuntimeError::Storage(StorageError::StaleState)),
+    }
+}
+
 impl Scan {
     /// Records one row's identity and decodes its live body.
     fn admit(
@@ -202,7 +435,25 @@ impl Scan {
         let opened = keys.open(table, &key, &envelope)?;
         if table == TableId::LoginIndex {
             let stored_key = LoginIndexStoredKey::decode(key.as_bytes())?;
-            LoginIndexValue::decode(opened.expose_for_storage_codec(), &stored_key)?;
+            let value = LoginIndexValue::decode(opened.expose_for_storage_codec(), &stored_key)?;
+            if let LoginIndexValueKind::CreationReservation {
+                transaction_id,
+                expires_at,
+            } = value.kind()
+                && self
+                    .account_service
+                    .login_reservations
+                    .insert(
+                        *transaction_id,
+                        RecoveredLoginReservation {
+                            key: key.clone(),
+                            expires_at: *expires_at,
+                        },
+                    )
+                    .is_some()
+            {
+                return Err(RuntimeError::Storage(StorageError::StaleState));
+            }
             self.index.record_known(table, key, existing);
             return Ok(());
         }
@@ -235,14 +486,181 @@ impl Scan {
             (TableId::Sanction, LIVE_RECORD_KIND) => self.admit_sanction(&key, &value),
             (TableId::OpaqueRecord, LIVE_RECORD_KIND) => self.admit_opaque_record(&key, &value),
             (TableId::OpaqueRecord, TOMBSTONE_RECORD_KIND) if value.body().is_empty() => Ok(()),
-            (
-                TableId::AuthTransaction
-                | TableId::RegistrationInvite
-                | TableId::Session
-                | TableId::RequestResult,
-                _,
-            ) => Ok(()),
+            (TableId::AuthTransaction, record_kind) => {
+                self.admit_auth_transaction(&key, &value, record_kind)
+            }
+            (TableId::RegistrationInvite, record_kind) => {
+                self.admit_registration_invite(&key, &value, record_kind)
+            }
+            (TableId::Session | TableId::RequestResult, _) => Ok(()),
             _ => Err(RuntimeError::Storage(StorageError::InvalidEncoding)),
+        }
+    }
+
+    fn admit_auth_transaction(
+        &mut self,
+        key: &StoredKey,
+        value: &PersistentRecordValue,
+        record_kind: u16,
+    ) -> Result<(), RuntimeError> {
+        let keyed_transaction = TransactionId::from_bytes(
+            key.as_bytes()
+                .try_into()
+                .map_err(|_| RuntimeError::Storage(StorageError::InvalidEncoding))?,
+        );
+        if value.generation() != 0 {
+            return Err(RuntimeError::Storage(StorageError::StaleState));
+        }
+        let transaction = match record_kind {
+            AUTHENTICATION_TRANSACTION_KIND => {
+                Self::decode_authentication_transaction(value, keyed_transaction)?
+            }
+            CREATION_TRANSACTION_KIND => {
+                Self::decode_creation_transaction(value, keyed_transaction)?
+            }
+            CREDENTIAL_CHANGE_TRANSACTION_KIND => {
+                self.decode_credential_transaction(value, keyed_transaction)?
+            }
+            _ => return Err(RuntimeError::Storage(StorageError::InvalidEncoding)),
+        };
+        if self
+            .account_service
+            .transactions
+            .insert(keyed_transaction, transaction)
+            .is_some()
+        {
+            return Err(RuntimeError::Storage(StorageError::StaleState));
+        }
+        Ok(())
+    }
+
+    fn decode_authentication_transaction(
+        value: &PersistentRecordValue,
+        keyed_transaction: TransactionId,
+    ) -> Result<RecoveredTransaction, RuntimeError> {
+        let record = AuthenticationTransactionRecord::parse(value.body())
+            .map_err(|_| invalid_account_service_record())?;
+        let durable_expires_at = record
+            .durable_expires_at_utc()
+            .map_err(|_| invalid_account_service_record())?;
+        let restored = record
+            .restore(
+                MonotonicTick::from_ticks(0),
+                UtcSecond::from_unix_seconds(0),
+            )
+            .map_err(|_| invalid_account_service_record())?;
+        if restored.binding().transaction_id() != keyed_transaction
+            || value.expires_at() != Some(durable_expires_at.get())
+            || !value.references().is_empty()
+        {
+            return Err(RuntimeError::Storage(StorageError::StaleState));
+        }
+        Ok(RecoveredTransaction::Authentication)
+    }
+
+    fn decode_creation_transaction(
+        value: &PersistentRecordValue,
+        keyed_transaction: TransactionId,
+    ) -> Result<RecoveredTransaction, RuntimeError> {
+        let metadata = CreationTransactionRecord::parse(value.body())
+            .and_then(CreationTransactionRecord::into_restart_cleanup_metadata)
+            .map_err(|_| invalid_account_service_record())?;
+        if metadata.transaction_id() != keyed_transaction
+            || value.expires_at() != Some(metadata.durable_expires_at_utc().get())
+        {
+            return Err(RuntimeError::Storage(StorageError::StaleState));
+        }
+        let reservation_invitation = metadata
+            .reservation_invitation()
+            .map(|(invite_id, _)| invite_id);
+        validate_creation_transaction_reference(reservation_invitation, value)?;
+        let reservation_digest = metadata.reservation_login_digest().map(|digest| {
+            agenc_ircd_crypto::LoginIndexDigest::from_storage_key(*digest.expose_for_storage_key())
+        });
+        Ok(RecoveredTransaction::Creation {
+            expires_at: metadata.durable_expires_at_utc().get(),
+            reservation_digest,
+            reservation_invitation,
+        })
+    }
+
+    fn decode_credential_transaction(
+        &self,
+        value: &PersistentRecordValue,
+        keyed_transaction: TransactionId,
+    ) -> Result<RecoveredTransaction, RuntimeError> {
+        let metadata = CredentialChangeTransactionRecord::parse(value.body())
+            .and_then(CredentialChangeTransactionRecord::into_restart_cleanup_metadata)
+            .map_err(|_| invalid_account_service_record())?;
+        if metadata.transaction_id() != keyed_transaction
+            || value.expires_at() != Some(metadata.durable_expires_at_utc().get())
+        {
+            return Err(RuntimeError::Storage(StorageError::StaleState));
+        }
+        match (metadata.reservation_account_id(), value.references()) {
+            (None, []) => {}
+            (Some(account_id), [reference])
+                if reference.table() == TableId::Account
+                    && self.account_keys.get(reference.key()) == Some(&account_id) => {}
+            _ => return Err(RuntimeError::Storage(StorageError::StaleState)),
+        }
+        Ok(RecoveredTransaction::CredentialChange)
+    }
+
+    fn admit_registration_invite(
+        &mut self,
+        key: &StoredKey,
+        value: &PersistentRecordValue,
+        record_kind: u16,
+    ) -> Result<(), RuntimeError> {
+        let invitation_id = InviteId::from_bytes(
+            key.as_bytes()
+                .try_into()
+                .map_err(|_| RuntimeError::Storage(StorageError::InvalidEncoding))?,
+        );
+        let expires_at = value
+            .expires_at()
+            .ok_or(RuntimeError::Storage(StorageError::StaleState))?;
+        if value.generation() != 0 || !value.body().is_empty() {
+            return Err(RuntimeError::Storage(StorageError::StaleState));
+        }
+        match (record_kind, value.references()) {
+            (INVITATION_RESERVATION_KIND, [reference])
+                if reference.table() == TableId::AuthTransaction =>
+            {
+                let transaction_id = TransactionId::from_bytes(
+                    reference
+                        .key()
+                        .as_bytes()
+                        .try_into()
+                        .map_err(|_| RuntimeError::Storage(StorageError::InvalidEncoding))?,
+                );
+                if self
+                    .account_service
+                    .invitation_reservations
+                    .insert(
+                        transaction_id,
+                        RecoveredInvitationReservation {
+                            invitation_id,
+                            expires_at,
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(RuntimeError::Storage(StorageError::StaleState));
+                }
+                Ok(())
+            }
+            (INVITATION_TOMBSTONE_KIND, [reference])
+                if reference.table() == TableId::Account
+                    && self
+                        .index
+                        .existing(TableId::Account, reference.key())?
+                        .is_some() =>
+            {
+                Ok(())
+            }
+            _ => Err(RuntimeError::Storage(StorageError::StaleState)),
         }
     }
 
@@ -425,7 +843,9 @@ impl Scan {
 mod tests {
     use super::*;
     use agenc_ircd_auth::OpaqueProfile;
-    use agenc_ircd_crypto::{DatabaseBinding, LoginIndexKey, StorageMasterKey};
+    use agenc_ircd_crypto::{
+        DatabaseBinding, LoginIndexDigest, LoginIndexKey, LoginIndexKeyId, StorageMasterKey,
+    };
     use agenc_ircd_domain::{
         DirectMessagePolicy, DurableSanction, GuestDirectMessagePolicy, ModerationAction,
         ModerationReasonCode, NicknameValue, PresencePolicy, Principal,
@@ -682,6 +1102,173 @@ mod tests {
         )?;
         assert!(scan.accounts.is_empty());
         assert!(scan.index.existing(TableId::Account, &key)?.is_some());
+        Ok(())
+    }
+
+    fn account_service_scan() -> Result<AccountServiceScan, RuntimeError> {
+        Ok(AccountServiceScan {
+            login_index_key_state: Some(LoginIndexKeyState::stable(
+                3,
+                LoginIndexKeyId::from_bytes([12; 32]),
+            )?),
+            fake_opaque_record: Some([13; OPAQUE_REGISTRATION_RECORD_BYTES]),
+            ..AccountServiceScan::default()
+        })
+    }
+
+    #[test]
+    fn recovered_creation_cross_binds_both_reservations() -> Result<(), RuntimeError> {
+        let transaction_id = TransactionId::from_bytes([14; 16]);
+        let invitation_id = InviteId::from_bytes([15; 16]);
+        let digest_bytes = [16; 32];
+        let login_key =
+            LoginIndexStoredKey::new(3, LoginIndexDigest::from_storage_key(digest_bytes))?
+                .encode()?;
+        let expires_at = 900;
+        let mut scan = account_service_scan()?;
+        scan.transactions.insert(
+            transaction_id,
+            RecoveredTransaction::Creation {
+                expires_at,
+                reservation_digest: Some(LoginIndexDigest::from_storage_key(digest_bytes)),
+                reservation_invitation: Some(invitation_id),
+            },
+        );
+        scan.login_reservations.insert(
+            transaction_id,
+            RecoveredLoginReservation {
+                key: login_key.clone(),
+                expires_at,
+            },
+        );
+        scan.invitation_reservations.insert(
+            transaction_id,
+            RecoveredInvitationReservation {
+                invitation_id,
+                expires_at,
+            },
+        );
+
+        let reconstruction = scan.finish()?;
+        let [cleanup] = reconstruction.startup_transaction_cleanups() else {
+            return Err(RuntimeError::InvalidValue);
+        };
+        assert_eq!(cleanup.transaction_id(), transaction_id);
+        assert!(cleanup.login_key() == Some(&login_key));
+        assert_eq!(cleanup.invitation_id(), Some(invitation_id));
+        Ok(())
+    }
+
+    #[test]
+    fn recovered_creation_rejects_missing_or_mismatched_reservations() -> Result<(), RuntimeError> {
+        let transaction_id = TransactionId::from_bytes([17; 16]);
+        let digest_bytes = [18; 32];
+        let mut missing = account_service_scan()?;
+        missing.transactions.insert(
+            transaction_id,
+            RecoveredTransaction::Creation {
+                expires_at: 901,
+                reservation_digest: Some(LoginIndexDigest::from_storage_key(digest_bytes)),
+                reservation_invitation: None,
+            },
+        );
+        assert!(matches!(
+            missing.finish(),
+            Err(RuntimeError::Storage(StorageError::StaleState))
+        ));
+
+        let login_key =
+            LoginIndexStoredKey::new(3, LoginIndexDigest::from_storage_key(digest_bytes))?
+                .encode()?;
+        let mut mismatched = account_service_scan()?;
+        mismatched.transactions.insert(
+            transaction_id,
+            RecoveredTransaction::Creation {
+                expires_at: 901,
+                reservation_digest: Some(LoginIndexDigest::from_storage_key(digest_bytes)),
+                reservation_invitation: None,
+            },
+        );
+        mismatched.login_reservations.insert(
+            transaction_id,
+            RecoveredLoginReservation {
+                key: login_key,
+                expires_at: 902,
+            },
+        );
+        assert!(matches!(
+            mismatched.finish(),
+            Err(RuntimeError::Storage(StorageError::StaleState))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn latent_rejection_recovers_only_the_transaction_delete() -> Result<(), RuntimeError> {
+        let transaction_id = TransactionId::from_bytes([19; 16]);
+        let mut scan = account_service_scan()?;
+        scan.transactions.insert(
+            transaction_id,
+            RecoveredTransaction::Creation {
+                expires_at: 903,
+                reservation_digest: None,
+                reservation_invitation: None,
+            },
+        );
+
+        let reconstruction = scan.finish()?;
+        let [cleanup] = reconstruction.startup_transaction_cleanups() else {
+            return Err(RuntimeError::InvalidValue);
+        };
+        assert_eq!(cleanup.transaction_id(), transaction_id);
+        assert!(cleanup.login_key().is_none());
+        assert!(cleanup.invitation_id().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn invitation_tombstone_is_validated_without_becoming_startup_cleanup()
+    -> Result<(), RuntimeError> {
+        let keys = keys()?;
+        let account_key = KeyDeriver::account_key(account_id(20))?;
+        let account_tombstone = PersistentRecordValue::new(
+            TableId::Account,
+            TOMBSTONE_RECORD_KIND,
+            1,
+            0,
+            None,
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let mut scan = Scan::default();
+        scan.admit(
+            &keys,
+            TableId::Account,
+            account_key.clone(),
+            &seal(TableId::Account, &account_key, &account_tombstone, 12)?,
+        )?;
+        let invitation_key = StoredKey::new(InviteId::from_bytes([21; 16]).as_bytes().to_vec())?;
+        let tombstone = PersistentRecordValue::new(
+            TableId::RegistrationInvite,
+            INVITATION_TOMBSTONE_KIND,
+            1,
+            0,
+            Some(904),
+            vec![RecordReference::new(TableId::Account, account_key)?],
+            Vec::new(),
+        )?;
+        scan.admit(
+            &keys,
+            TableId::RegistrationInvite,
+            invitation_key.clone(),
+            &seal(TableId::RegistrationInvite, &invitation_key, &tombstone, 13)?,
+        )?;
+        assert!(scan.account_service.invitation_reservations.is_empty());
+        assert!(
+            scan.index
+                .existing(TableId::RegistrationInvite, &invitation_key)?
+                .is_some()
+        );
         Ok(())
     }
 

@@ -56,6 +56,7 @@ use crate::connection::sink::ConnectionGeneration;
 use crate::mutation_render::render_account_credential_replacement;
 use crate::state_core::durable::AccountServiceDurableWrite;
 use crate::state_core::fanout::FanoutRequest;
+use crate::state_core::reconstruct::RecoveredAccountTransactionCleanup;
 use crate::state_core::session::{AdmissionClass, MAX_TRACKED_CONNECTIONS};
 use crate::state_core::timers::{TimedId, TimerEntry, TimerKind};
 use crate::state_core::{StageAccepted, StagedOrigin, StateCoreContext};
@@ -82,6 +83,7 @@ const TERMINAL_REJECTED: u8 = 3;
 const MAX_READY_SEALS: usize = 128;
 const MAX_OPAQUE_ATTEMPTS_PER_CONNECTION: u8 = 2;
 const MAX_PENDING_TRANSACTION_CLEANUPS: usize = MAX_TRACKED_CONNECTIONS;
+const MAX_TRANSACTION_CLEANUPS_PER_BATCH: usize = 256;
 
 /// Deployment policy applied to authenticated account-creation requests.
 #[derive(Clone, Copy)]
@@ -120,6 +122,8 @@ pub struct AccountServiceConfig {
     pub fake_credential_key: Arc<OpaqueFakeCredentialKey>,
     /// Authenticated startup key-generation state.
     pub login_index_key_state: LoginIndexKeyState,
+    /// Fully validated connection-bound rows left by the prior process.
+    pub startup_transaction_cleanups: Vec<RecoveredAccountTransactionCleanup>,
     /// Deployment account-creation policy and optional invitation authority.
     pub creation_policy: AccountCreationPolicy,
     /// Initial public-presence policy copied into a committed account.
@@ -356,6 +360,7 @@ enum TransactionCleanupReservation {
 struct TransactionCleanup {
     transaction_id: TransactionId,
     reservation: TransactionCleanupReservation,
+    recovered: bool,
 }
 
 impl TransactionCleanup {
@@ -363,6 +368,7 @@ impl TransactionCleanup {
         Self {
             transaction_id,
             reservation: TransactionCleanupReservation::None,
+            recovered: false,
         }
     }
 
@@ -373,6 +379,7 @@ impl TransactionCleanup {
                 Some(reservation) => TransactionCleanupReservation::Creation(reservation),
                 None => TransactionCleanupReservation::None,
             },
+            recovered: false,
         }
     }
 
@@ -387,7 +394,27 @@ impl TransactionCleanup {
         Self {
             transaction_id,
             reservation,
+            recovered: false,
         }
+    }
+
+    fn recovered(cleanup: RecoveredAccountTransactionCleanup) -> Result<Self, RuntimeError> {
+        let (transaction_id, login_key, invitation_id) = cleanup.into_parts();
+        let reservation = match (login_key, invitation_id) {
+            (Some(login_key), invitation_id) => {
+                TransactionCleanupReservation::Creation(CreationReservation {
+                    login_key,
+                    invitation_id,
+                })
+            }
+            (None, None) => TransactionCleanupReservation::None,
+            (None, Some(_)) => return Err(RuntimeError::InvalidValue),
+        };
+        Ok(Self {
+            transaction_id,
+            reservation,
+            recovered: true,
+        })
     }
 
     fn durable_writes(&self) -> Result<Vec<AccountServiceDurableWrite>, RuntimeError> {
@@ -761,8 +788,9 @@ pub(crate) struct AccountServiceCoordinator {
     credential_reservations: BTreeMap<AccountId, ConnectionGeneration>,
     transaction_owners: BTreeMap<TransactionId, (ConnectionGeneration, LiveTransactionClass)>,
     cleanup_queue: VecDeque<TransactionCleanup>,
+    startup_cleanup_remaining: usize,
     credential_cleanup_owners: BTreeSet<ConnectionGeneration>,
-    pending_cleanup: Option<TransactionCleanup>,
+    pending_cleanups: Vec<TransactionCleanup>,
     reads: BTreeMap<StorageReadId, PendingRead>,
     crypto: BTreeMap<CryptoJobId, PendingCrypto>,
     ready_seals: VecDeque<ReadySeal>,
@@ -772,7 +800,7 @@ pub(crate) struct AccountServiceCoordinator {
 
 impl AccountServiceCoordinator {
     /// Validates immutable configuration and creates an empty live owner.
-    pub(crate) fn new(config: AccountServiceConfig) -> Result<Self, RuntimeError> {
+    pub(crate) fn new(mut config: AccountServiceConfig) -> Result<Self, RuntimeError> {
         if config.origin_generation.get() == 0 {
             return Err(RuntimeError::InvalidValue);
         }
@@ -784,14 +812,26 @@ impl AccountServiceCoordinator {
         {
             return Err(RuntimeError::InvalidValue);
         }
+        if config.startup_transaction_cleanups.len() > MAX_PENDING_TRANSACTION_CLEANUPS {
+            return Err(RuntimeError::LimitExceeded);
+        }
+        let startup_cleanup_remaining = config.startup_transaction_cleanups.len();
+        let mut cleanup_queue = VecDeque::new();
+        cleanup_queue
+            .try_reserve_exact(startup_cleanup_remaining)
+            .map_err(|_| RuntimeError::MemoryExhausted)?;
+        for cleanup in std::mem::take(&mut config.startup_transaction_cleanups) {
+            cleanup_queue.push_back(TransactionCleanup::recovered(cleanup)?);
+        }
         Ok(Self {
             config,
             connections: BTreeMap::new(),
             credential_reservations: BTreeMap::new(),
             transaction_owners: BTreeMap::new(),
-            cleanup_queue: VecDeque::new(),
+            cleanup_queue,
+            startup_cleanup_remaining,
             credential_cleanup_owners: BTreeSet::new(),
-            pending_cleanup: None,
+            pending_cleanups: Vec::new(),
             reads: BTreeMap::new(),
             crypto: BTreeMap::new(),
             ready_seals: VecDeque::new(),
@@ -806,6 +846,12 @@ impl AccountServiceCoordinator {
         context: &mut StateCoreContext,
         generation: ConnectionGeneration,
     ) -> Result<(), RuntimeError> {
+        if self.startup_cleanup_remaining != 0 {
+            self.try_stage_transaction_cleanup(context)?;
+            return Err(RuntimeError::Storage(
+                agenc_ircd_storage::StorageError::Unavailable,
+            ));
+        }
         let mut connection_id_bytes = [0_u8; 16];
         context
             .entropy_mut()
@@ -1071,7 +1117,7 @@ impl AccountServiceCoordinator {
         let retained = self
             .cleanup_queue
             .len()
-            .saturating_add(usize::from(self.pending_cleanup.is_some()))
+            .saturating_add(self.pending_cleanups.len())
             .saturating_add(self.transaction_owners.len());
         if retained >= MAX_PENDING_TRANSACTION_CLEANUPS
             || self.transaction_owners.contains_key(&transaction_id)
@@ -1097,7 +1143,7 @@ impl AccountServiceCoordinator {
     fn transaction_capacity_available(&self) -> bool {
         self.cleanup_queue
             .len()
-            .saturating_add(usize::from(self.pending_cleanup.is_some()))
+            .saturating_add(self.pending_cleanups.len())
             .saturating_add(self.transaction_owners.len())
             < MAX_PENDING_TRANSACTION_CLEANUPS
     }
@@ -1151,19 +1197,22 @@ impl AccountServiceCoordinator {
         context: &mut StateCoreContext,
     ) -> Result<(), RuntimeError> {
         if self.pending_authority.is_some()
-            || self.pending_cleanup.is_some()
+            || !self.pending_cleanups.is_empty()
             || context.pending_len() != 0
         {
             return Ok(());
         }
-        let Some(cleanup) = self.cleanup_queue.front() else {
+        if self.cleanup_queue.is_empty() {
             return Ok(());
-        };
+        }
         let plan = context
             .domain()
             .plan_account_service_checkpoint()
             .map_err(|_| RuntimeError::InvalidValue)?;
-        let writes = cleanup.durable_writes()?;
+        let (cleanup_count, writes) = transaction_cleanup_batch(&self.cleanup_queue)?;
+        self.pending_cleanups
+            .try_reserve_exact(cleanup_count)
+            .map_err(|_| RuntimeError::MemoryExhausted)?;
         let fanout = FanoutRequest::new(Vec::new(), Vec::new())?;
         if !matches!(
             context.stage_durable_with_account_service(plan, fanout, None, 0, writes),
@@ -1171,7 +1220,13 @@ impl AccountServiceCoordinator {
         ) {
             return Ok(());
         }
-        self.pending_cleanup = self.cleanup_queue.pop_front();
+        for _ in 0..cleanup_count {
+            let cleanup = self
+                .cleanup_queue
+                .pop_front()
+                .ok_or(RuntimeError::InvalidValue)?;
+            self.pending_cleanups.push(cleanup);
+        }
         Ok(())
     }
 
@@ -1179,12 +1234,24 @@ impl AccountServiceCoordinator {
         &mut self,
         cleanup: TransactionCleanup,
     ) -> Result<(), RuntimeError> {
+        if cleanup.recovered {
+            self.startup_cleanup_remaining = self
+                .startup_cleanup_remaining
+                .checked_sub(1)
+                .ok_or(RuntimeError::InvalidValue)?;
+        }
         if let TransactionCleanupReservation::Credential { account_id, owner } = cleanup.reservation
         {
             self.release_credential_reservation(account_id, owner)?;
             self.credential_cleanup_owners.remove(&owner);
         }
         Ok(())
+    }
+
+    /// Starts deleting fully validated connection-bound rows recovered from
+    /// the prior process before any new account connection is accepted.
+    pub(crate) fn startup(&mut self, context: &mut StateCoreContext) {
+        let _staged = self.try_stage_transaction_cleanup(context);
     }
 
     /// Returns a committed pre-registration account binding without exposing
@@ -3039,7 +3106,7 @@ impl AccountServiceCoordinator {
         if let Some(completion) = self.progress_ready_stage(context) {
             completions.push(completion);
         }
-        if self.pending_cleanup.is_none()
+        if self.pending_cleanups.is_empty()
             && self.pending_authority.is_none()
             && self.ready_stage.is_none()
         {
@@ -3055,7 +3122,7 @@ impl AccountServiceCoordinator {
         &mut self,
         context: &mut StateCoreContext,
     ) -> Option<CarrierCompletion> {
-        if self.pending_cleanup.is_some()
+        if !self.pending_cleanups.is_empty()
             || self.pending_authority.is_some()
             || self.ready_stage.is_none()
             || context.pending_len() != 0
@@ -3066,7 +3133,7 @@ impl AccountServiceCoordinator {
     }
 
     fn progress_ready_seal(&mut self, context: &mut StateCoreContext) -> Option<CarrierCompletion> {
-        if self.pending_cleanup.is_some()
+        if !self.pending_cleanups.is_empty()
             || self.pending_authority.is_some()
             || self.ready_stage.is_some()
             || self.has_seal_job()
@@ -4663,7 +4730,7 @@ impl AccountServiceCoordinator {
         context: &mut StateCoreContext,
     ) -> Vec<CarrierCompletion> {
         let mut completions = Vec::new();
-        if let Some(cleanup) = self.pending_cleanup.take() {
+        for cleanup in std::mem::take(&mut self.pending_cleanups) {
             let _completed = self.complete_transaction_cleanup(cleanup);
         }
         let Some(authority) = self.pending_authority.take() else {
@@ -4791,8 +4858,10 @@ impl AccountServiceCoordinator {
         context: &mut StateCoreContext,
         origin: Option<StagedOrigin>,
     ) -> Vec<CarrierCompletion> {
-        if let Some(cleanup) = self.pending_cleanup.take() {
-            self.cleanup_queue.push_front(cleanup);
+        if !self.pending_cleanups.is_empty() {
+            for cleanup in std::mem::take(&mut self.pending_cleanups).into_iter().rev() {
+                self.cleanup_queue.push_front(cleanup);
+            }
             return Vec::new();
         }
         let Some(authority) = self.pending_authority.take() else {
@@ -4824,6 +4893,20 @@ impl AccountServiceCoordinator {
         completions.extend(self.progress(context));
         completions
     }
+}
+
+fn transaction_cleanup_batch(
+    cleanup_queue: &VecDeque<TransactionCleanup>,
+) -> Result<(usize, Vec<AccountServiceDurableWrite>), RuntimeError> {
+    let cleanup_count = cleanup_queue.len().min(MAX_TRANSACTION_CLEANUPS_PER_BATCH);
+    let mut writes = Vec::new();
+    writes
+        .try_reserve_exact(cleanup_count.saturating_mul(3))
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    for cleanup in cleanup_queue.iter().take(cleanup_count) {
+        writes.extend(cleanup.durable_writes()?);
+    }
+    Ok((cleanup_count, writes))
 }
 
 impl PendingRead {
@@ -5505,6 +5588,8 @@ fn render_sasl_action(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     use agenc_ircd_client_wire::{OutputBudget, RenderError};
     use agenc_ircd_crypto::{LoginIndexDigest, LoginIndexKey, derive_login_index};
     use agenc_ircd_storage::{
@@ -5523,7 +5608,7 @@ mod tests {
         REQUEST_RESULT_VERSION, RequestResultRecord, RequestTerminal, RuntimeError,
         TransactionCleanup, account_created_note, account_credential_changed_note, account_failure,
         consume_opaque_connection_attempt, opaque_attempt_demand, render_account_action,
-        replay_terminal_account, select_live_login,
+        replay_terminal_account, select_live_login, transaction_cleanup_batch,
     };
     use crate::state_core::durable::AccountServiceDurableWrite;
 
@@ -5823,6 +5908,34 @@ mod tests {
             writes.first().ok_or(RuntimeError::InvalidValue)?,
             TableId::AuthTransaction,
             &StoredKey::new(transaction_id.as_bytes().to_vec())?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn restart_cleanup_batches_stop_at_the_bounded_storage_chunk() -> Result<(), RuntimeError> {
+        let mut cleanups = VecDeque::new();
+        cleanups
+            .try_reserve_exact(super::MAX_TRANSACTION_CLEANUPS_PER_BATCH + 1)
+            .map_err(|_| RuntimeError::MemoryExhausted)?;
+        for byte in 0..=super::MAX_TRANSACTION_CLEANUPS_PER_BATCH {
+            let suffix = u64::try_from(byte).map_err(|_| RuntimeError::Overflow)?;
+            let mut identifier = [0_u8; 16];
+            identifier
+                .get_mut(8..)
+                .ok_or(RuntimeError::InvalidValue)?
+                .copy_from_slice(&suffix.to_be_bytes());
+            cleanups.push_back(TransactionCleanup::authentication(
+                TransactionId::from_bytes(identifier),
+            ));
+        }
+
+        let (cleanup_count, writes) = transaction_cleanup_batch(&cleanups)?;
+        assert_eq!(cleanup_count, super::MAX_TRANSACTION_CLEANUPS_PER_BATCH);
+        assert_eq!(writes.len(), super::MAX_TRANSACTION_CLEANUPS_PER_BATCH);
+        assert_eq!(
+            cleanups.len(),
+            super::MAX_TRANSACTION_CLEANUPS_PER_BATCH + 1
         );
         Ok(())
     }

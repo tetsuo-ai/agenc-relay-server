@@ -416,6 +416,10 @@ fn account_service_config(
             .map(|key| Arc::new(LoginIndexKey::from_bytes(*key.expose()))),
         fake_credential_key: Arc::new(OpaqueFakeCredentialKey::from_bytes(*fake_key.expose())),
         login_index_key_state: reconstruction.account_service.login_index_key_state(),
+        startup_transaction_cleanups: reconstruction
+            .account_service
+            .startup_transaction_cleanups()
+            .to_vec(),
         creation_policy,
         default_presence,
         default_guest_direct_messages,

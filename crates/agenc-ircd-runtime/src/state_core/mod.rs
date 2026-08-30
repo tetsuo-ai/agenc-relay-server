@@ -123,6 +123,10 @@ pub enum RouteOutcome {
 /// interprets a command. Default hooks do nothing so a router only
 /// implements what it owns.
 pub trait CommandRouter: Send {
+    /// Starts fail-closed work reconstructed before the live loop accepts
+    /// command authority.
+    fn startup(&mut self, _context: &mut StateCoreContext) {}
+
     /// Handles one parsed line from an admitted connection.
     fn route(
         &mut self,
@@ -938,7 +942,7 @@ impl StateCore {
             .wall
             .utc_now()
             .unwrap_or(UtcSecond::from_unix_seconds(0));
-        Self {
+        let mut state = Self {
             context: StateCoreContext {
                 domain: inputs.reconstruction.domain,
                 sessions: SessionTable::new(),
@@ -963,7 +967,9 @@ impl StateCore {
                 quiescing: false,
             },
             router: inputs.router,
-        }
+        };
+        state.router.startup(&mut state.context);
+        state
     }
 
     /// Borrows the context.
