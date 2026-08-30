@@ -8,10 +8,10 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use agenc_ircd_client_wire::{
-    AccessTokenPolicy, CapRequestReply, CapabilityProfile, CapabilitySpec, KEEPALIVE_IDLE_MILLIS,
-    KEEPALIVE_PONG_MILLIS, REGISTRATION_TIMEOUT_MILLIS, RegistrationAction, RegistrationError,
-    RegistrationEvent, RegistrationPhase, RegistrationState, WelcomeStep, WireMessage,
-    isupport_messages, numeric_reply, split_capability_lines,
+    AccessTokenPolicy, CapRequestReply, CapabilityProfile, CapabilitySpec, CapabilityState,
+    KEEPALIVE_IDLE_MILLIS, KEEPALIVE_PONG_MILLIS, REGISTRATION_TIMEOUT_MILLIS, RegistrationAction,
+    RegistrationError, RegistrationEvent, RegistrationPhase, RegistrationState, WelcomeStep,
+    WireMessage, isupport_messages, numeric_reply, split_capability_lines,
 };
 use agenc_ircd_crypto::{SemanticHashDomain, semantic_digest};
 use agenc_ircd_domain::{DisplayNameValue, NicknameValue, SessionSeed};
@@ -488,7 +488,12 @@ impl RegistrationRouter {
             user_id: seed.user_id,
             capability_hash: seed.negotiated_capability_hash,
         };
-        let accepted = self.commit_session(context, connection, bound, seed)?;
+        let capabilities = state
+            .registration
+            .capability_state()
+            .try_clone()
+            .map_err(|_| RuntimeError::MemoryExhausted)?;
+        let accepted = self.commit_session(context, connection, bound, capabilities, seed)?;
         if accepted {
             state.bound = Some(bound);
             state.nickname = Some(nickname.to_owned());
@@ -511,12 +516,15 @@ impl RegistrationRouter {
         context: &mut StateCoreContext,
         connection: ConnectionGeneration,
         bound: BoundSession,
+        capabilities: CapabilityState,
         seed: SessionSeed,
     ) -> Result<bool, RuntimeError> {
         let Ok(plan) = context.domain().plan_session_opened(seed) else {
             return Ok(false);
         };
-        context.sessions_mut().bind_session(connection, bound)?;
+        context
+            .sessions_mut()
+            .bind_session(connection, bound, capabilities)?;
         let request = FanoutRequest::new(Vec::new(), Vec::new())?;
         if context.apply_ephemeral(plan, request).is_err() {
             context.sessions_mut().unbind_session(connection, bound)?;
@@ -999,11 +1007,18 @@ impl From<RouteOutcome> for ActionStep {
 fn core_capabilities() -> Result<CapabilityProfile, RuntimeError> {
     let mut capabilities = Vec::new();
     for name in [
+        "account-tag",
+        "away-notify",
         "batch",
         "cap-notify",
+        "echo-message",
         "labeled-response",
+        "message-ids",
         "message-tags",
+        "server-time",
+        "setname",
         "standard-replies",
+        "utf8only",
     ] {
         capabilities.push(CapabilitySpec::new(name, None).map_err(|_| RuntimeError::InvalidValue)?);
     }
@@ -1126,7 +1141,28 @@ mod tests {
     #[test]
     fn core_capabilities_and_cloaks_are_closed() -> Result<(), RuntimeError> {
         let profile = core_capabilities()?;
-        assert_eq!(profile.capabilities().len(), 5);
+        let names = profile
+            .capabilities()
+            .iter()
+            .map(CapabilitySpec::name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "account-tag",
+                "away-notify",
+                "batch",
+                "cap-notify",
+                "echo-message",
+                "labeled-response",
+                "message-ids",
+                "message-tags",
+                "server-time",
+                "setname",
+                "standard-replies",
+                "utf8only",
+            ]
+        );
         let cloak = cloak_from_random(&[0; 26])?;
         assert_eq!(cloak.user_component(), b"aaaaaaaaaa");
         assert_eq!(cloak.host_component(), b"aaaaaaaaaaaaaaaa");

@@ -12,6 +12,7 @@
 
 use std::collections::BTreeMap;
 
+use agenc_ircd_client_wire::CapabilityState;
 use agenc_ircd_types::{MonotonicTick, SessionId, UserId};
 
 use crate::RuntimeError;
@@ -69,6 +70,7 @@ pub struct ConnectionEntry {
     admission: AdmissionClass,
     opened_at: MonotonicTick,
     session: Option<BoundSession>,
+    capabilities: Option<CapabilityState>,
     sink_gone: bool,
 }
 
@@ -107,6 +109,12 @@ impl ConnectionEntry {
     #[must_use]
     pub const fn session(&self) -> Option<BoundSession> {
         self.session
+    }
+
+    /// Borrows the exact edge-local negotiated capability state.
+    #[must_use]
+    pub const fn capabilities(&self) -> Option<&CapabilityState> {
+        self.capabilities.as_ref()
     }
 
     /// Returns whether the transport already reported the connection gone.
@@ -166,6 +174,7 @@ impl SessionTable {
                 admission: AdmissionClass::for_purpose(purpose),
                 opened_at: now,
                 session: None,
+                capabilities: None,
                 sink_gone: false,
             },
         );
@@ -177,15 +186,20 @@ impl SessionTable {
         &mut self,
         generation: ConnectionGeneration,
         session: BoundSession,
+        capabilities: CapabilityState,
     ) -> Result<(), RuntimeError> {
         let entry = self
             .connections
             .get_mut(&generation)
             .ok_or(RuntimeError::InvalidValue)?;
-        if entry.session.is_some() || self.users.contains_key(&session.user_id) {
+        if entry.session.is_some()
+            || entry.capabilities.is_some()
+            || self.users.contains_key(&session.user_id)
+        {
             return Err(RuntimeError::InvalidValue);
         }
         entry.session = Some(session);
+        entry.capabilities = Some(capabilities);
         self.users.insert(session.user_id, generation);
         Ok(())
     }
@@ -205,6 +219,7 @@ impl SessionTable {
             return Err(RuntimeError::InvalidValue);
         }
         entry.session = None;
+        entry.capabilities = None;
         self.users.remove(&session.user_id);
         Ok(())
     }
@@ -268,6 +283,13 @@ impl SessionTable {
         self.users.get(&user_id).copied()
     }
 
+    /// Borrows one registered user's exact edge-local capability state.
+    #[must_use]
+    pub fn capabilities_for_user(&self, user_id: UserId) -> Option<&CapabilityState> {
+        let generation = self.users.get(&user_id)?;
+        self.connections.get(generation)?.capabilities()
+    }
+
     /// Returns the number of tracked connections.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -299,6 +321,7 @@ mod tests {
         BoundedSharedClientFrames, ClientQueueDemand, ClientQueueReservation, QueueAllocationError,
         SinkReserveError, TentativeClientQueueReservation,
     };
+    use agenc_ircd_client_wire::{CapabilityProfile, CapabilitySpec};
     use agenc_ircd_types::SessionId;
 
     struct ClosedSink(ConnectionGeneration);
@@ -341,6 +364,23 @@ mod tests {
         }
     }
 
+    fn enabled_capability(name: &str) -> Result<CapabilityState, RuntimeError> {
+        let capability = CapabilitySpec::new(name, None).map_err(|_| RuntimeError::InvalidValue)?;
+        let profile =
+            CapabilityProfile::new(vec![capability]).map_err(|_| RuntimeError::InvalidValue)?;
+        let mut state = CapabilityState::default();
+        state
+            .ls(Some("302"), &profile)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let reply = state
+            .request(name, &profile)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        if !matches!(reply, agenc_ircd_client_wire::CapRequestReply::Ack(_)) {
+            return Err(RuntimeError::InvalidValue);
+        }
+        Ok(state)
+    }
+
     #[test]
     fn open_bind_resolve_and_close_are_generation_fenced() -> Result<(), RuntimeError> {
         let mut table = SessionTable::new();
@@ -377,14 +417,25 @@ mod tests {
         assert_eq!(entry.sink().generation(), generation);
 
         let session = bound(1);
-        table.bind_session(generation, session)?;
+        table.bind_session(generation, session, enabled_capability("message-tags")?)?;
+        assert!(
+            table
+                .capabilities_for_user(session.user_id)
+                .is_some_and(|state| state.enabled("message-tags"))
+        );
         assert_eq!(
-            table.bind_session(generation, bound(2)).err(),
+            table
+                .bind_session(generation, bound(2), CapabilityState::default())
+                .err(),
             Some(RuntimeError::InvalidValue)
         );
         assert_eq!(
             table
-                .bind_session(ConnectionGeneration::new(99), bound(3))
+                .bind_session(
+                    ConnectionGeneration::new(99),
+                    bound(3),
+                    CapabilityState::default(),
+                )
                 .err(),
             Some(RuntimeError::InvalidValue)
         );
@@ -428,7 +479,8 @@ mod tests {
             MonotonicTick::from_ticks(5),
         )?;
         let session = bound(17);
-        table.bind_session(generation, session)?;
+        table.bind_session(generation, session, enabled_capability("server-time")?)?;
+        assert!(table.capabilities_for_user(session.user_id).is_some());
         assert_eq!(
             table.unbind_session(generation, bound(18)).err(),
             Some(RuntimeError::InvalidValue)
@@ -436,6 +488,7 @@ mod tests {
         assert_eq!(table.registered_len(), 1);
         table.unbind_session(generation, session)?;
         assert_eq!(table.registered_len(), 0);
+        assert!(table.capabilities_for_user(session.user_id).is_none());
         assert!(
             table
                 .connection(generation)
@@ -474,7 +527,7 @@ mod tests {
             Some(RuntimeError::LimitExceeded)
         );
         assert_eq!(table.len(), 1);
-        table.bind_session(first, bound(4))?;
+        table.bind_session(first, bound(4), CapabilityState::default())?;
         let mut larger = SessionTable::with_ceiling(2);
         larger.open(
             first,
@@ -490,9 +543,11 @@ mod tests {
             sink(2),
             now,
         )?;
-        larger.bind_session(first, bound(4))?;
+        larger.bind_session(first, bound(4), CapabilityState::default())?;
         assert_eq!(
-            larger.bind_session(second, bound(4)).err(),
+            larger
+                .bind_session(second, bound(4), CapabilityState::default())
+                .err(),
             Some(RuntimeError::InvalidValue),
             "one user binds to one live connection"
         );

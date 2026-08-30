@@ -6,7 +6,7 @@
 //! shutdown cannot leave a logical session behind.
 
 use agenc_ircd_client_wire::{
-    CapabilityState, ParsedMessage, RegisteredCommandHandoff, RegisteredCommandKind, WireMessage,
+    CapabilityState, ParsedMessage, RegisteredCommandHandoff, RegisteredCommandKind,
 };
 use agenc_ircd_domain::{
     AdmissionSnapshot, AuthorizationFailure, AuthorizedCommand, CanonicalCommand,
@@ -20,16 +20,9 @@ use agenc_ircd_types::{
 
 use crate::RuntimeError;
 use crate::connection::sink::ConnectionGeneration;
-use crate::state_core::fanout::{FanoutFrame, FanoutRequest};
 use crate::state_core::inbox::CloseReason;
 use crate::state_core::session::BoundSession;
 use crate::state_core::{RouteOutcome, StageRefused, StagedOrigin, StateCoreContext};
-
-enum LifecycleRender {
-    Nick(String),
-    Quit(String),
-    Silent,
-}
 
 #[derive(Clone, Copy)]
 struct RetryCommand<'a> {
@@ -119,12 +112,7 @@ pub(crate) fn route_registered(
         CanonicalCommandView::Nick(nickname) => Some(nickname.presentation().to_owned()),
         _ => None,
     };
-    let render = next_nickname
-        .as_ref()
-        .map_or(LifecycleRender::Silent, |nickname| {
-            LifecycleRender::Nick(nickname.clone())
-        });
-    let accepted = execute_session_command(context, bound, Some(reply), command, render)?;
+    let accepted = execute_session_command(context, bound, Some(reply), command, None)?;
     if accepted && let Some(nickname) = next_nickname {
         *current_nickname = Some(nickname);
     }
@@ -143,7 +131,7 @@ pub(crate) fn close_registered(context: &mut StateCoreContext, bound: BoundSessi
         bound,
         None,
         CanonicalCommand::quit(reason),
-        LifecycleRender::Quit(wire_reason),
+        Some(&wire_reason),
     );
 }
 
@@ -152,7 +140,7 @@ fn execute_session_command(
     bound: BoundSession,
     reply: Option<ClientReply<'_>>,
     command: CanonicalCommand,
-    render: LifecycleRender,
+    close_reason: Option<&str>,
 ) -> Result<bool, RuntimeError> {
     let decision = match plan_session_command(context, bound, command, reply.map(|r| r.request)) {
         Ok(decision) => decision,
@@ -172,7 +160,26 @@ fn execute_session_command(
     let PlanDecision::Mutation(plan) = decision else {
         return complete_nonmutation(context, bound, reply, decision);
     };
-    let fanout = lifecycle_fanout(context, bound, &plan, render)?;
+    let render_command = match reply {
+        Some(reply) => crate::command_convert::convert(
+            context.domain(),
+            reply.request.kind,
+            reply.request.message,
+        )?,
+        None => {
+            let reason = close_reason.and_then(|reason| {
+                BoundedUtf8::try_from_str(reason, ControlPolicy::RejectAll).ok()
+            });
+            CanonicalCommand::quit(reason)
+        }
+    };
+    let fanout = crate::mutation_render::render_mutation(
+        context,
+        bound,
+        reply.map(|reply| reply.render_input(bound.user_id)),
+        &render_command,
+        &plan,
+    )?;
     match plan.storage_class() {
         StorageClass::Ephemeral => context
             .apply_ephemeral(plan, fanout)
@@ -334,51 +341,6 @@ fn domain_plan_error(error: DomainError) -> SessionCommandError {
     }
 }
 
-fn lifecycle_fanout(
-    context: &StateCoreContext,
-    bound: BoundSession,
-    plan: &agenc_ircd_domain::MutationPlan,
-    render: LifecycleRender,
-) -> Result<FanoutRequest, RuntimeError> {
-    let session = context
-        .domain()
-        .session(bound.user_id)
-        .ok_or(RuntimeError::InvalidValue)?;
-    let prefix = session_prefix(session)?;
-    let message = match render {
-        LifecycleRender::Nick(nickname) => {
-            if !plan
-                .events()
-                .contains(&agenc_ircd_domain::DomainEvent::NicknameChanged(
-                    bound.user_id,
-                ))
-            {
-                return Err(RuntimeError::InvalidValue);
-            }
-            WireMessage::new(&prefix, "NICK", &[], Some(&nickname))
-        }
-        LifecycleRender::Quit(reason) => {
-            if !plan
-                .events()
-                .contains(&agenc_ircd_domain::DomainEvent::SessionHidden(
-                    bound.user_id,
-                ))
-            {
-                return Err(RuntimeError::InvalidValue);
-            }
-            WireMessage::new(&prefix, "QUIT", &[], Some(&reason))
-        }
-        LifecycleRender::Silent => return FanoutRequest::new(Vec::new(), Vec::new()),
-    }
-    .map_err(|_| RuntimeError::InvalidValue)?;
-    let targets = context.targets_for(plan.recipients().iter());
-    if targets.is_empty() {
-        return FanoutRequest::new(Vec::new(), Vec::new());
-    }
-    let recipients = (0..targets.len()).collect();
-    FanoutRequest::new(targets, vec![FanoutFrame::new(message, recipients)?])
-}
-
 fn satisfy_external(
     context: &mut StateCoreContext,
     requests: &[ExternalInputRequest],
@@ -457,20 +419,6 @@ fn reserve_one<T>(values: &mut Vec<T>) -> Result<(), RuntimeError> {
     values
         .try_reserve(1)
         .map_err(|_| RuntimeError::MemoryExhausted)
-}
-
-fn session_prefix(session: &agenc_ircd_domain::SessionState) -> Result<String, RuntimeError> {
-    let cloak = session.public_cloak();
-    let user =
-        std::str::from_utf8(cloak.user_component()).map_err(|_| RuntimeError::InvalidValue)?;
-    let host =
-        std::str::from_utf8(cloak.host_component()).map_err(|_| RuntimeError::InvalidValue)?;
-    Ok(format!(
-        "{}!{}@{}",
-        session.nickname().presentation(),
-        user,
-        host
-    ))
 }
 
 fn stage_error(error: StageRefused) -> RuntimeError {

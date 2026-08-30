@@ -85,7 +85,7 @@ pub(crate) fn render_rejected(
     )
 }
 
-fn failure_frame(
+pub(crate) fn failure_frame(
     capabilities: &CapabilityState,
     prefix: &str,
     nickname: &str,
@@ -331,17 +331,27 @@ pub(crate) fn send_logical(
     request: &ParsedMessage,
     frames: Vec<WireMessage>,
 ) -> Result<(), RuntimeError> {
+    let logical = logical_frames(context.server_prefix(), capabilities, request, frames)?;
+    context
+        .send_to(generation, logical)
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    Ok(())
+}
+
+pub(crate) fn logical_frames(
+    prefix: &str,
+    capabilities: &CapabilityState,
+    request: &ParsedMessage,
+    frames: Vec<WireMessage>,
+) -> Result<Vec<WireMessage>, RuntimeError> {
     let label = request
         .tags()
         .iter()
         .find(|tag| tag.key() == "label")
         .and_then(|tag| tag.value());
-    let logical = labeled_response(capabilities, context.server_prefix(), label, label, frames)
+    let logical = labeled_response(capabilities, prefix, label, label, frames)
         .map_err(|_| RuntimeError::InvalidValue)?;
-    context
-        .send_to(generation, logical.into_messages())
-        .map_err(|_| RuntimeError::MemoryExhausted)?;
-    Ok(())
+    Ok(logical.into_messages())
 }
 
 #[cfg(test)]

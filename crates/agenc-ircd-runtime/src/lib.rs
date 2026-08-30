@@ -19,6 +19,7 @@ mod command_convert;
 pub mod connection;
 mod error;
 pub mod listener;
+mod mutation_render;
 pub mod observe;
 pub mod offline;
 pub mod purpose;

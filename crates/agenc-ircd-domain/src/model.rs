@@ -1042,7 +1042,9 @@ impl ChannelState {
         })
     }
 
-    pub(crate) fn effective_role(&self, membership: Membership) -> Role {
+    /// Computes the effective role for a prospective or current membership.
+    #[must_use]
+    pub fn effective_role(&self, membership: Membership) -> Role {
         let grant = membership
             .account_id
             .and_then(|account_id| self.role_grants.get(&account_id).copied())
