@@ -5,7 +5,7 @@
 //! exact request replay, and the durable barrier that makes a response visible
 //! only with its transaction/result/session effects.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use agenc_ircd_auth::{
     ACCOUNT_SERVICE_ENVELOPE_BYTES, ACCOUNT_SERVICE_RESPONSE_BYTES, AccountAuthenticationState,
@@ -56,7 +56,8 @@ use crate::connection::sink::ConnectionGeneration;
 use crate::mutation_render::render_account_credential_replacement;
 use crate::state_core::durable::AccountServiceDurableWrite;
 use crate::state_core::fanout::FanoutRequest;
-use crate::state_core::session::AdmissionClass;
+use crate::state_core::session::{AdmissionClass, MAX_TRACKED_CONNECTIONS};
+use crate::state_core::timers::{TimedId, TimerEntry, TimerKind};
 use crate::state_core::{StageAccepted, StagedOrigin, StateCoreContext};
 use crate::sync::Arc;
 
@@ -80,6 +81,7 @@ const TERMINAL_ACCEPTED: u8 = 2;
 const TERMINAL_REJECTED: u8 = 3;
 const MAX_READY_SEALS: usize = 128;
 const MAX_OPAQUE_ATTEMPTS_PER_CONNECTION: u8 = 2;
+const MAX_PENDING_TRANSACTION_CLEANUPS: usize = MAX_TRACKED_CONNECTIONS;
 
 /// Deployment policy applied to authenticated account-creation requests.
 #[derive(Clone, Copy)]
@@ -317,6 +319,7 @@ struct LiveAuthentication {
     previous_value: Option<LoginIndexValue>,
 }
 
+#[derive(Clone)]
 struct CreationReservation {
     login_key: StoredKey,
     invitation_id: Option<agenc_ircd_types::InviteId>,
@@ -330,6 +333,86 @@ struct LiveCreation {
 struct LiveCredentialChange {
     transaction: AccountTransaction<CredentialChangeState>,
     reservation: Option<AccountId>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum LiveTransactionClass {
+    Authentication,
+    Creation,
+    CredentialChange,
+}
+
+#[derive(Clone)]
+enum TransactionCleanupReservation {
+    None,
+    Creation(CreationReservation),
+    Credential {
+        account_id: AccountId,
+        owner: ConnectionGeneration,
+    },
+}
+
+#[derive(Clone)]
+struct TransactionCleanup {
+    transaction_id: TransactionId,
+    reservation: TransactionCleanupReservation,
+}
+
+impl TransactionCleanup {
+    const fn authentication(transaction_id: TransactionId) -> Self {
+        Self {
+            transaction_id,
+            reservation: TransactionCleanupReservation::None,
+        }
+    }
+
+    fn creation(transaction_id: TransactionId, reservation: Option<CreationReservation>) -> Self {
+        Self {
+            transaction_id,
+            reservation: match reservation {
+                Some(reservation) => TransactionCleanupReservation::Creation(reservation),
+                None => TransactionCleanupReservation::None,
+            },
+        }
+    }
+
+    fn credential(
+        transaction_id: TransactionId,
+        reservation: Option<AccountId>,
+        owner: ConnectionGeneration,
+    ) -> Self {
+        let reservation = reservation
+            .map(|account_id| TransactionCleanupReservation::Credential { account_id, owner })
+            .unwrap_or(TransactionCleanupReservation::None);
+        Self {
+            transaction_id,
+            reservation,
+        }
+    }
+
+    fn durable_writes(&self) -> Result<Vec<AccountServiceDurableWrite>, RuntimeError> {
+        let mut writes = Vec::new();
+        writes
+            .try_reserve_exact(3)
+            .map_err(|_| RuntimeError::MemoryExhausted)?;
+        writes.push(AccountServiceDurableWrite::delete(
+            TableId::AuthTransaction,
+            StoredKey::new(self.transaction_id.as_bytes().to_vec())?,
+        )?);
+        if let TransactionCleanupReservation::Creation(reservation) = &self.reservation {
+            writes.push(AccountServiceDurableWrite::delete(
+                TableId::LoginIndex,
+                reservation.login_key.clone(),
+            )?);
+            if let Some(invite_id) = reservation.invitation_id {
+                writes.push(AccountServiceDurableWrite::delete(
+                    TableId::RegistrationInvite,
+                    StoredKey::new(invite_id.as_bytes().to_vec())?,
+                )?);
+            }
+        }
+        Ok(writes)
+    }
 }
 
 struct AccountConnection {
@@ -631,7 +714,9 @@ enum PendingAuthority {
     CreationFinish {
         generation: ConnectionGeneration,
         carrier_generation: u64,
+        transaction_id: TransactionId,
         sealed: SealedAccountFinishOutcome<CreateAccountIntent>,
+        reservation: Option<CreationReservation>,
     },
     CredentialStart {
         generation: ConnectionGeneration,
@@ -642,6 +727,7 @@ enum PendingAuthority {
     CredentialFinish {
         generation: ConnectionGeneration,
         carrier_generation: u64,
+        transaction_id: TransactionId,
         sealed: SealedAccountFinishOutcome<CredentialReplacementIntent>,
         reservation: Option<AccountId>,
         fenced: Vec<ConnectionGeneration>,
@@ -658,6 +744,7 @@ enum PendingAuthority {
     Finish {
         generation: ConnectionGeneration,
         carrier_generation: u64,
+        transaction_id: TransactionId,
         sealed: SealedAccountFinishOutcome<AuthenticationGrant>,
         account_id: Option<AccountId>,
         authenticated_at: MonotonicTick,
@@ -672,6 +759,10 @@ pub(crate) struct AccountServiceCoordinator {
     config: AccountServiceConfig,
     connections: BTreeMap<ConnectionGeneration, AccountConnection>,
     credential_reservations: BTreeMap<AccountId, ConnectionGeneration>,
+    transaction_owners: BTreeMap<TransactionId, (ConnectionGeneration, LiveTransactionClass)>,
+    cleanup_queue: VecDeque<TransactionCleanup>,
+    credential_cleanup_owners: BTreeSet<ConnectionGeneration>,
+    pending_cleanup: Option<TransactionCleanup>,
     reads: BTreeMap<StorageReadId, PendingRead>,
     crypto: BTreeMap<CryptoJobId, PendingCrypto>,
     ready_seals: VecDeque<ReadySeal>,
@@ -697,6 +788,10 @@ impl AccountServiceCoordinator {
             config,
             connections: BTreeMap::new(),
             credential_reservations: BTreeMap::new(),
+            transaction_owners: BTreeMap::new(),
+            cleanup_queue: VecDeque::new(),
+            credential_cleanup_owners: BTreeSet::new(),
+            pending_cleanup: None,
             reads: BTreeMap::new(),
             crypto: BTreeMap::new(),
             ready_seals: VecDeque::new(),
@@ -754,36 +849,342 @@ impl AccountServiceCoordinator {
         context: &mut StateCoreContext,
         generation: ConnectionGeneration,
     ) {
-        self.connections.remove(&generation);
-        self.credential_reservations
-            .retain(|_, owner| *owner != generation);
+        let mut retained = self.queue_closed_live_transactions(context, generation);
+        retained |= self.cancel_closed_crypto(context, generation);
+        self.reads
+            .retain(|_, pending| pending.generation() != generation);
+        retained |= self.discard_closed_ready_seals(context, generation);
+        retained |= self.discard_closed_ready_stage(context, generation);
+        if !self.retains_credential_reservation(generation, retained) {
+            self.credential_reservations
+                .retain(|_, owner| *owner != generation);
+        }
+        let _cleanup = self.try_stage_transaction_cleanup(context);
+    }
+
+    fn queue_closed_live_transactions(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+    ) -> bool {
+        let Some(mut connection) = self.connections.remove(&generation) else {
+            return false;
+        };
+        if let Some(live) = connection.transaction.take() {
+            let transaction_id = live.transaction.binding().transaction_id();
+            let cleanup = TransactionCleanup::authentication(transaction_id);
+            let _queued = self.queue_transaction_cleanup(
+                context,
+                generation,
+                LiveTransactionClass::Authentication,
+                cleanup,
+            );
+        }
+        if let Some(live) = connection.creation_transaction.take() {
+            let transaction_id = live.transaction.binding().transaction_id();
+            let cleanup = TransactionCleanup::creation(transaction_id, live.reservation);
+            let _queued = self.queue_transaction_cleanup(
+                context,
+                generation,
+                LiveTransactionClass::Creation,
+                cleanup,
+            );
+        }
+        let Some(live) = connection.credential_transaction.take() else {
+            return false;
+        };
+        let transaction_id = live.transaction.binding().transaction_id();
+        let retained = live.reservation.is_some();
+        let cleanup = TransactionCleanup::credential(transaction_id, live.reservation, generation);
+        let _queued = self.queue_transaction_cleanup(
+            context,
+            generation,
+            LiveTransactionClass::CredentialChange,
+            cleanup,
+        );
+        retained
+    }
+
+    fn cancel_closed_crypto(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+    ) -> bool {
+        let mut retained = false;
         let jobs = self
             .crypto
             .iter()
             .filter_map(|(job_id, pending)| (pending.generation() == generation).then_some(*job_id))
             .collect::<Vec<_>>();
         for job_id in jobs {
-            self.crypto.remove(&job_id);
+            if let Some(pending) = self.crypto.remove(&job_id)
+                && let Some((class, cleanup)) = pending.into_transaction_cleanup()
+            {
+                retained |= matches!(
+                    &cleanup.reservation,
+                    TransactionCleanupReservation::Credential { .. }
+                );
+                let _queued = self.queue_transaction_cleanup(context, generation, class, cleanup);
+            }
             let _cancelled = context.crypto_mut().cancel(job_id);
         }
-        self.reads
-            .retain(|_, pending| pending.generation() != generation);
-        self.ready_seals
-            .retain(|pending| pending.generation() != generation);
+        retained
+    }
+
+    fn discard_closed_ready_seals(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+    ) -> bool {
+        let mut retained = false;
+        let mut retained_seals = VecDeque::new();
+        while let Some(pending) = self.ready_seals.pop_front() {
+            if pending.generation() != generation {
+                retained_seals.push_back(pending);
+            } else if let Some((class, cleanup)) = pending.into_transaction_cleanup() {
+                retained |= matches!(
+                    &cleanup.reservation,
+                    TransactionCleanupReservation::Credential { .. }
+                );
+                let _queued = self.queue_transaction_cleanup(context, generation, class, cleanup);
+            }
+        }
+        self.ready_seals = retained_seals;
+        retained
+    }
+
+    fn discard_closed_ready_stage(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+    ) -> bool {
         if self
             .ready_stage
             .as_ref()
             .is_some_and(|pending| pending.generation() == generation)
+            && let Some(pending) = self.ready_stage.take()
+            && let Some((class, cleanup)) = pending.into_transaction_cleanup()
         {
-            self.ready_stage = None;
+            let retained = matches!(
+                &cleanup.reservation,
+                TransactionCleanupReservation::Credential { .. }
+            );
+            let _queued = self.queue_transaction_cleanup(context, generation, class, cleanup);
+            return retained;
         }
-        if self
+        false
+    }
+
+    fn retains_credential_reservation(
+        &self,
+        generation: ConnectionGeneration,
+        queued_credential_cleanup: bool,
+    ) -> bool {
+        let retained_authority_reservation = self
             .pending_authority
             .as_ref()
-            .is_some_and(|pending| pending.generation() == generation)
-        {
-            self.pending_authority = None;
+            .filter(|pending| pending.generation() == generation)
+            .and_then(PendingAuthority::credential_reservation)
+            .is_some();
+        let retained_transaction_reservation =
+            self.transaction_owners.values().any(|(owner, class)| {
+                *owner == generation && *class == LiveTransactionClass::CredentialChange
+            });
+        queued_credential_cleanup
+            || self.credential_cleanup_owners.contains(&generation)
+            || retained_authority_reservation
+            || retained_transaction_reservation
+    }
+
+    /// Consumes one account-transaction expiry from the shared timer heap.
+    pub(crate) fn timer_fired(
+        &mut self,
+        context: &mut StateCoreContext,
+        entry: TimerEntry,
+    ) -> (bool, Vec<CarrierCompletion>) {
+        let TimedId::Transaction(transaction_id) = entry.id else {
+            return (false, Vec::new());
+        };
+        if entry.kind != TimerKind::Reservation {
+            return (false, Vec::new());
         }
+        let Some((generation, class)) = self.transaction_owners.get(&transaction_id).copied()
+        else {
+            return (true, Vec::new());
+        };
+        let Some(cleanup) = self.take_live_transaction(generation, class, transaction_id) else {
+            return (true, Vec::new());
+        };
+        let _queued = self.queue_transaction_cleanup(context, generation, class, cleanup);
+        (true, self.progress(context))
+    }
+
+    fn take_live_transaction(
+        &mut self,
+        generation: ConnectionGeneration,
+        class: LiveTransactionClass,
+        transaction_id: TransactionId,
+    ) -> Option<TransactionCleanup> {
+        let connection = self.connections.get_mut(&generation)?;
+        let matches_transaction = match class {
+            LiveTransactionClass::Authentication => connection
+                .transaction
+                .as_ref()
+                .is_some_and(|live| live.transaction.binding().transaction_id() == transaction_id),
+            LiveTransactionClass::Creation => connection
+                .creation_transaction
+                .as_ref()
+                .is_some_and(|live| live.transaction.binding().transaction_id() == transaction_id),
+            LiveTransactionClass::CredentialChange => connection
+                .credential_transaction
+                .as_ref()
+                .is_some_and(|live| live.transaction.binding().transaction_id() == transaction_id),
+        };
+        if !matches_transaction {
+            return None;
+        }
+        match class {
+            LiveTransactionClass::Authentication => connection
+                .transaction
+                .take()
+                .map(|_| TransactionCleanup::authentication(transaction_id)),
+            LiveTransactionClass::Creation => connection
+                .creation_transaction
+                .take()
+                .map(|live| TransactionCleanup::creation(transaction_id, live.reservation)),
+            LiveTransactionClass::CredentialChange => {
+                connection.credential_transaction.take().map(|live| {
+                    TransactionCleanup::credential(transaction_id, live.reservation, generation)
+                })
+            }
+        }
+    }
+
+    fn install_transaction_timer(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+        class: LiveTransactionClass,
+        transaction_id: TransactionId,
+        deadline: MonotonicTick,
+    ) -> Result<(), RuntimeError> {
+        let retained = self
+            .cleanup_queue
+            .len()
+            .saturating_add(usize::from(self.pending_cleanup.is_some()))
+            .saturating_add(self.transaction_owners.len());
+        if retained >= MAX_PENDING_TRANSACTION_CLEANUPS
+            || self.transaction_owners.contains_key(&transaction_id)
+        {
+            return Err(RuntimeError::LimitExceeded);
+        }
+        self.transaction_owners
+            .insert(transaction_id, (generation, class));
+        if context
+            .timers_mut()
+            .schedule(
+                deadline,
+                TimerKind::Reservation,
+                TimedId::Transaction(transaction_id),
+            )
+            .is_err()
+        {
+            return Err(RuntimeError::LimitExceeded);
+        }
+        Ok(())
+    }
+
+    fn transaction_capacity_available(&self) -> bool {
+        self.cleanup_queue
+            .len()
+            .saturating_add(usize::from(self.pending_cleanup.is_some()))
+            .saturating_add(self.transaction_owners.len())
+            < MAX_PENDING_TRANSACTION_CLEANUPS
+    }
+
+    fn release_finished_transaction(
+        &mut self,
+        generation: ConnectionGeneration,
+        class: LiveTransactionClass,
+        transaction_id: TransactionId,
+    ) -> Result<(), RuntimeError> {
+        match self.transaction_owners.remove(&transaction_id) {
+            Some((owner, stored_class)) if owner == generation && stored_class == class => Ok(()),
+            Some(owner) => {
+                self.transaction_owners.insert(transaction_id, owner);
+                Err(RuntimeError::InvalidValue)
+            }
+            None => Err(RuntimeError::InvalidValue),
+        }
+    }
+
+    fn queue_transaction_cleanup(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+        class: LiveTransactionClass,
+        cleanup: TransactionCleanup,
+    ) -> Result<(), RuntimeError> {
+        if self.cleanup_queue.len().saturating_add(1) > MAX_PENDING_TRANSACTION_CLEANUPS {
+            return Err(RuntimeError::LimitExceeded);
+        }
+        self.cleanup_queue
+            .try_reserve(1)
+            .map_err(|_| RuntimeError::MemoryExhausted)?;
+        if self.transaction_owners.get(&cleanup.transaction_id) != Some(&(generation, class)) {
+            return Err(RuntimeError::InvalidValue);
+        }
+        self.transaction_owners.remove(&cleanup.transaction_id);
+        context.timers_mut().cancel(
+            TimerKind::Reservation,
+            TimedId::Transaction(cleanup.transaction_id),
+        );
+        if let TransactionCleanupReservation::Credential { owner, .. } = &cleanup.reservation {
+            self.credential_cleanup_owners.insert(*owner);
+        }
+        self.cleanup_queue.push_back(cleanup);
+        Ok(())
+    }
+
+    fn try_stage_transaction_cleanup(
+        &mut self,
+        context: &mut StateCoreContext,
+    ) -> Result<(), RuntimeError> {
+        if self.pending_authority.is_some()
+            || self.pending_cleanup.is_some()
+            || context.pending_len() != 0
+        {
+            return Ok(());
+        }
+        let Some(cleanup) = self.cleanup_queue.front() else {
+            return Ok(());
+        };
+        let plan = context
+            .domain()
+            .plan_account_service_checkpoint()
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let writes = cleanup.durable_writes()?;
+        let fanout = FanoutRequest::new(Vec::new(), Vec::new())?;
+        if !matches!(
+            context.stage_durable_with_account_service(plan, fanout, None, 0, writes),
+            Ok(StageAccepted::Staged { .. })
+        ) {
+            return Ok(());
+        }
+        self.pending_cleanup = self.cleanup_queue.pop_front();
+        Ok(())
+    }
+
+    fn complete_transaction_cleanup(
+        &mut self,
+        cleanup: TransactionCleanup,
+    ) -> Result<(), RuntimeError> {
+        if let TransactionCleanupReservation::Credential { account_id, owner } = cleanup.reservation
+        {
+            self.release_credential_reservation(account_id, owner)?;
+            self.credential_cleanup_owners.remove(&owner);
+        }
+        Ok(())
     }
 
     /// Returns a committed pre-registration account binding without exposing
@@ -1510,7 +1911,6 @@ impl AccountServiceCoordinator {
         request: RequestContext,
         opened: AuthenticatedAccountRequest<CreationFinish>,
     ) -> Result<Vec<CarrierCompletion>, RuntimeError> {
-        let transaction_id = opened.payload().transaction_id;
         let Some(live) = self
             .connections
             .get_mut(&request.generation)
@@ -1518,13 +1918,30 @@ impl AccountServiceCoordinator {
         else {
             return self.fail_pending(context, request);
         };
-        let operation = self.operation_context(context, request.route)?;
+        let transaction_id = live.transaction.binding().transaction_id();
+        context
+            .timers_mut()
+            .cancel(TimerKind::Reservation, TimedId::Transaction(transaction_id));
+        let generation = request.generation;
+        let cleanup = TransactionCleanup::creation(transaction_id, live.reservation.clone());
+        let operation = match self.operation_context(context, request.route) {
+            Ok(operation) => operation,
+            Err(error) => {
+                let _queued = self.queue_transaction_cleanup(
+                    context,
+                    generation,
+                    LiveTransactionClass::Creation,
+                    cleanup,
+                );
+                return Err(error);
+            }
+        };
         let job = RuntimeCryptoJob::CreationFinish(Box::new(CreationFinishJob::new(
             live.transaction,
             operation,
             opened,
         )));
-        self.submit_crypto(
+        let submitted = self.submit_crypto(
             context,
             PendingCrypto::CreationFinish {
                 request,
@@ -1532,7 +1949,16 @@ impl AccountServiceCoordinator {
                 reservation: live.reservation,
             },
             job,
-        )?;
+        );
+        if let Err(error) = submitted {
+            let _queued = self.queue_transaction_cleanup(
+                context,
+                generation,
+                LiveTransactionClass::Creation,
+                cleanup,
+            );
+            return Err(error);
+        }
         Ok(Vec::new())
     }
 
@@ -1711,7 +2137,6 @@ impl AccountServiceCoordinator {
         request: RequestContext,
         opened: AuthenticatedAccountRequest<CredentialChangeFinish>,
     ) -> Result<Vec<CarrierCompletion>, RuntimeError> {
-        let transaction_id = opened.payload().transaction_id;
         let Some(live) = self
             .connections
             .get_mut(&request.generation)
@@ -1719,21 +2144,48 @@ impl AccountServiceCoordinator {
         else {
             return self.fail_pending(context, request);
         };
-        let operation = self.operation_context(context, request.route)?;
+        let transaction_id = live.transaction.binding().transaction_id();
+        context
+            .timers_mut()
+            .cancel(TimerKind::Reservation, TimedId::Transaction(transaction_id));
+        let generation = request.generation;
+        let reservation = live.reservation;
+        let cleanup = TransactionCleanup::credential(transaction_id, reservation, generation);
+        let operation = match self.operation_context(context, request.route) {
+            Ok(operation) => operation,
+            Err(error) => {
+                let _queued = self.queue_transaction_cleanup(
+                    context,
+                    generation,
+                    LiveTransactionClass::CredentialChange,
+                    cleanup,
+                );
+                return Err(error);
+            }
+        };
         let job = RuntimeCryptoJob::CredentialFinish(Box::new(CredentialFinishJob::new(
             live.transaction,
             operation,
             opened,
         )));
-        self.submit_crypto(
+        let submitted = self.submit_crypto(
             context,
             PendingCrypto::CredentialFinish {
                 request,
                 transaction_id,
-                reservation: live.reservation,
+                reservation,
             },
             job,
-        )?;
+        );
+        if let Err(error) = submitted {
+            let _queued = self.queue_transaction_cleanup(
+                context,
+                generation,
+                LiveTransactionClass::CredentialChange,
+                cleanup,
+            );
+            return Err(error);
+        }
         Ok(Vec::new())
     }
 
@@ -1855,7 +2307,6 @@ impl AccountServiceCoordinator {
         request: RequestContext,
         opened: AuthenticatedAccountRequest<agenc_ircd_auth::AuthenticationFinish>,
     ) -> Result<Vec<CarrierCompletion>, RuntimeError> {
-        let transaction_id = opened.payload().transaction_id;
         let Some(live) = self
             .connections
             .get_mut(&request.generation)
@@ -1863,7 +2314,24 @@ impl AccountServiceCoordinator {
         else {
             return self.fail_pending(context, request);
         };
-        let operation = self.operation_context(context, request.route)?;
+        let transaction_id = live.transaction.binding().transaction_id();
+        context
+            .timers_mut()
+            .cancel(TimerKind::Reservation, TimedId::Transaction(transaction_id));
+        let generation = request.generation;
+        let cleanup = TransactionCleanup::authentication(transaction_id);
+        let operation = match self.operation_context(context, request.route) {
+            Ok(operation) => operation,
+            Err(error) => {
+                let _queued = self.queue_transaction_cleanup(
+                    context,
+                    generation,
+                    LiveTransactionClass::Authentication,
+                    cleanup,
+                );
+                return Err(error);
+            }
+        };
         let job = RuntimeCryptoJob::OpaqueFinish(Box::new(OpaqueFinishJob::new(
             live.transaction,
             operation,
@@ -1877,7 +2345,15 @@ impl AccountServiceCoordinator {
             previous_value: live.previous_value,
             authenticated_at: context.now(),
         };
-        self.submit_crypto(context, pending, job)?;
+        if let Err(error) = self.submit_crypto(context, pending, job) {
+            let _queued = self.queue_transaction_cleanup(
+                context,
+                generation,
+                LiveTransactionClass::Authentication,
+                cleanup,
+            );
+            return Err(error);
+        }
         Ok(Vec::new())
     }
 
@@ -2560,22 +3036,45 @@ impl AccountServiceCoordinator {
 
     fn progress(&mut self, context: &mut StateCoreContext) -> Vec<CarrierCompletion> {
         let mut completions = Vec::new();
-        if self.pending_authority.is_none()
-            && self.ready_stage.is_some()
-            && context.pending_len() == 0
-            && let Err(completion) = self.stage_ready(context)
-        {
+        if let Some(completion) = self.progress_ready_stage(context) {
             completions.push(completion);
         }
-        if self.pending_authority.is_none()
+        if self.pending_cleanup.is_none()
+            && self.pending_authority.is_none()
             && self.ready_stage.is_none()
-            && !self.has_seal_job()
-            && let Some(ready) = self.ready_seals.pop_front()
-            && let Err(completion) = self.begin_seal(context, ready)
         {
+            let _cleanup = self.try_stage_transaction_cleanup(context);
+        }
+        if let Some(completion) = self.progress_ready_seal(context) {
             completions.push(completion);
         }
         completions
+    }
+
+    fn progress_ready_stage(
+        &mut self,
+        context: &mut StateCoreContext,
+    ) -> Option<CarrierCompletion> {
+        if self.pending_cleanup.is_some()
+            || self.pending_authority.is_some()
+            || self.ready_stage.is_none()
+            || context.pending_len() != 0
+        {
+            return None;
+        }
+        self.stage_ready(context).err()
+    }
+
+    fn progress_ready_seal(&mut self, context: &mut StateCoreContext) -> Option<CarrierCompletion> {
+        if self.pending_cleanup.is_some()
+            || self.pending_authority.is_some()
+            || self.ready_stage.is_some()
+            || self.has_seal_job()
+        {
+            return None;
+        }
+        let ready = self.ready_seals.pop_front()?;
+        self.begin_seal(context, ready).err()
     }
 
     fn has_seal_job(&self) -> bool {
@@ -2598,6 +3097,7 @@ impl AccountServiceCoordinator {
         context: &mut StateCoreContext,
         ready: ReadySeal,
     ) -> Result<(), CarrierCompletion> {
+        let cleanup = ready.transaction_cleanup();
         let response_count = context.head().account_service_response_count;
         let (pending, job) = match ready {
             ReadySeal::CreationStart { request, outcome } => (
@@ -2699,8 +3199,13 @@ impl AccountServiceCoordinator {
             carrier_generation: pending.carrier_generation(),
             close: true,
         };
-        self.submit_crypto(context, pending, job)
-            .map_err(|_| completion)
+        if self.submit_crypto(context, pending, job).is_ok() {
+            return Ok(());
+        }
+        if let Some((generation, class, cleanup)) = cleanup {
+            let _queued = self.queue_transaction_cleanup(context, generation, class, cleanup);
+        }
+        Err(completion)
     }
 
     fn stage_ready(&mut self, context: &mut StateCoreContext) -> Result<(), CarrierCompletion> {
@@ -2714,7 +3219,22 @@ impl AccountServiceCoordinator {
             carrier_generation: ready.carrier_generation(),
             close: true,
         };
-        let staged = match ready {
+        let cleanup = ready.transaction_cleanup();
+        if self.stage_ready_work(context, ready).is_ok() {
+            return Ok(());
+        }
+        if let Some((generation, class, cleanup)) = cleanup {
+            let _queued = self.queue_transaction_cleanup(context, generation, class, cleanup);
+        }
+        Err(completion)
+    }
+
+    fn stage_ready_work(
+        &mut self,
+        context: &mut StateCoreContext,
+        ready: ReadyStage,
+    ) -> Result<(), RuntimeError> {
+        match ready {
             ReadyStage::CreationStart { request, sealed } => {
                 self.stage_creation_start(context, request, sealed)
             }
@@ -2762,8 +3282,7 @@ impl AccountServiceCoordinator {
                 previous_value,
                 authenticated_at,
             ),
-        };
-        staged.map_err(|_| completion)
+        }
     }
 
     // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=creation START commits the sealed challenge transaction replay row and only admissible identifier reservations as one set
@@ -2773,6 +3292,9 @@ impl AccountServiceCoordinator {
         request: RequestContext,
         sealed: SealedAccountStart<AccountCreationState>,
     ) -> Result<(), RuntimeError> {
+        if !self.transaction_capacity_available() {
+            return Err(RuntimeError::LimitExceeded);
+        }
         let now = context.now();
         let now_utc = context.utc_now().map_err(|_| RuntimeError::InvalidValue)?;
         let transaction_record = sealed
@@ -3016,7 +3538,9 @@ impl AccountServiceCoordinator {
         self.pending_authority = Some(PendingAuthority::CreationFinish {
             generation: request.generation,
             carrier_generation: request.carrier_generation,
+            transaction_id,
             sealed,
+            reservation,
         });
         Ok(())
     }
@@ -3104,6 +3628,9 @@ impl AccountServiceCoordinator {
         sealed: SealedAccountStart<CredentialChangeState>,
         mut reservation: Option<AccountId>,
     ) -> Result<(), RuntimeError> {
+        if !self.transaction_capacity_available() {
+            return Err(RuntimeError::LimitExceeded);
+        }
         match (sealed.credential_reservation_account_id(), reservation) {
             (Some(admitted), Some(reserved)) if admitted == reserved => {}
             (None, Some(reserved)) => {
@@ -3325,6 +3852,7 @@ impl AccountServiceCoordinator {
         self.pending_authority = Some(PendingAuthority::CredentialFinish {
             generation: request.generation,
             carrier_generation: request.carrier_generation,
+            transaction_id,
             sealed,
             reservation,
             fenced,
@@ -3343,6 +3871,9 @@ impl AccountServiceCoordinator {
         login: NormalizedLogin,
         previous_value: Option<LoginIndexValue>,
     ) -> Result<(), RuntimeError> {
+        if !self.transaction_capacity_available() {
+            return Err(RuntimeError::LimitExceeded);
+        }
         let now = context.now();
         let now_utc = context.utc_now().map_err(|_| RuntimeError::InvalidValue)?;
         let transaction_record = sealed
@@ -3551,6 +4082,7 @@ impl AccountServiceCoordinator {
         self.pending_authority = Some(PendingAuthority::Finish {
             generation: request.generation,
             carrier_generation: request.carrier_generation,
+            transaction_id,
             sealed,
             account_id,
             authenticated_at,
@@ -3684,6 +4216,7 @@ impl AccountServiceCoordinator {
     #[allow(clippy::too_many_arguments)]
     fn commit_start(
         &mut self,
+        context: &mut StateCoreContext,
         committed_count: u64,
         generation: ConnectionGeneration,
         carrier_generation: u64,
@@ -3699,7 +4232,41 @@ impl AccountServiceCoordinator {
                 close: true,
             });
         };
-        let connection = self.connections.get_mut(&generation)?;
+        let transaction_id = transaction.binding().transaction_id();
+        let deadline = transaction.binding().expires_at();
+        if self
+            .install_transaction_timer(
+                context,
+                generation,
+                LiveTransactionClass::Authentication,
+                transaction_id,
+                deadline,
+            )
+            .is_err()
+        {
+            let cleanup = TransactionCleanup::authentication(transaction_id);
+            let _queued = self.queue_transaction_cleanup(
+                context,
+                generation,
+                LiveTransactionClass::Authentication,
+                cleanup,
+            );
+            return Some(CarrierCompletion {
+                generation,
+                carrier_generation,
+                close: true,
+            });
+        }
+        let Some(connection) = self.connections.get_mut(&generation) else {
+            let cleanup = TransactionCleanup::authentication(transaction_id);
+            let _queued = self.queue_transaction_cleanup(
+                context,
+                generation,
+                LiveTransactionClass::Authentication,
+                cleanup,
+            );
+            return None;
+        };
         connection.transaction = Some(LiveAuthentication {
             transaction,
             account_id,
@@ -3715,6 +4282,7 @@ impl AccountServiceCoordinator {
 
     fn commit_creation_start(
         &mut self,
+        context: &mut StateCoreContext,
         committed_count: u64,
         generation: ConnectionGeneration,
         carrier_generation: u64,
@@ -3728,7 +4296,41 @@ impl AccountServiceCoordinator {
                 close: true,
             });
         };
-        let connection = self.connections.get_mut(&generation)?;
+        let transaction_id = transaction.binding().transaction_id();
+        let deadline = transaction.binding().expires_at();
+        if self
+            .install_transaction_timer(
+                context,
+                generation,
+                LiveTransactionClass::Creation,
+                transaction_id,
+                deadline,
+            )
+            .is_err()
+        {
+            let cleanup = TransactionCleanup::creation(transaction_id, reservation);
+            let _queued = self.queue_transaction_cleanup(
+                context,
+                generation,
+                LiveTransactionClass::Creation,
+                cleanup,
+            );
+            return Some(CarrierCompletion {
+                generation,
+                carrier_generation,
+                close: true,
+            });
+        }
+        let Some(connection) = self.connections.get_mut(&generation) else {
+            let cleanup = TransactionCleanup::creation(transaction_id, reservation);
+            let _queued = self.queue_transaction_cleanup(
+                context,
+                generation,
+                LiveTransactionClass::Creation,
+                cleanup,
+            );
+            return None;
+        };
         connection.creation_transaction = Some(LiveCreation {
             transaction,
             reservation,
@@ -3741,12 +4343,21 @@ impl AccountServiceCoordinator {
     }
 
     fn commit_creation_finish(
+        &mut self,
         committed_count: u64,
         generation: ConnectionGeneration,
         carrier_generation: u64,
+        transaction_id: TransactionId,
         sealed: SealedAccountFinishOutcome<CreateAccountIntent>,
     ) -> CarrierCompletion {
-        let close = sealed.into_result_after_commit(committed_count).is_err();
+        let close = self
+            .release_finished_transaction(
+                generation,
+                LiveTransactionClass::Creation,
+                transaction_id,
+            )
+            .is_err()
+            || sealed.into_result_after_commit(committed_count).is_err();
         CarrierCompletion {
             generation,
             carrier_generation,
@@ -3756,6 +4367,7 @@ impl AccountServiceCoordinator {
 
     fn commit_credential_start(
         &mut self,
+        context: &mut StateCoreContext,
         committed_count: u64,
         generation: ConnectionGeneration,
         carrier_generation: u64,
@@ -3769,7 +4381,41 @@ impl AccountServiceCoordinator {
                 close: true,
             });
         };
-        let connection = self.connections.get_mut(&generation)?;
+        let transaction_id = transaction.binding().transaction_id();
+        let deadline = transaction.binding().expires_at();
+        if self
+            .install_transaction_timer(
+                context,
+                generation,
+                LiveTransactionClass::CredentialChange,
+                transaction_id,
+                deadline,
+            )
+            .is_err()
+        {
+            let cleanup = TransactionCleanup::credential(transaction_id, reservation, generation);
+            let _queued = self.queue_transaction_cleanup(
+                context,
+                generation,
+                LiveTransactionClass::CredentialChange,
+                cleanup,
+            );
+            return Some(CarrierCompletion {
+                generation,
+                carrier_generation,
+                close: true,
+            });
+        }
+        let Some(connection) = self.connections.get_mut(&generation) else {
+            let cleanup = TransactionCleanup::credential(transaction_id, reservation, generation);
+            let _queued = self.queue_transaction_cleanup(
+                context,
+                generation,
+                LiveTransactionClass::CredentialChange,
+                cleanup,
+            );
+            return None;
+        };
         connection.credential_transaction = Some(LiveCredentialChange {
             transaction,
             reservation,
@@ -3786,14 +4432,30 @@ impl AccountServiceCoordinator {
     #[allow(clippy::too_many_arguments)]
     fn commit_credential_finish(
         &mut self,
+        context: &mut StateCoreContext,
         committed_count: u64,
         generation: ConnectionGeneration,
         carrier_generation: u64,
+        transaction_id: TransactionId,
         sealed: SealedAccountFinishOutcome<CredentialReplacementIntent>,
         reservation: Option<AccountId>,
         fenced: Vec<ConnectionGeneration>,
         invalidated_authentications: Vec<ConnectionGeneration>,
     ) -> Vec<CarrierCompletion> {
+        if self
+            .release_finished_transaction(
+                generation,
+                LiveTransactionClass::CredentialChange,
+                transaction_id,
+            )
+            .is_err()
+        {
+            return vec![CarrierCompletion {
+                generation,
+                carrier_generation,
+                close: true,
+            }];
+        }
         if let Some(account_id) = reservation
             && self
                 .release_credential_reservation(account_id, generation)
@@ -3821,8 +4483,18 @@ impl AccountServiceCoordinator {
         };
         let account_id = intent.account_id();
         for invalidated in invalidated_authentications {
-            if let Some(connection) = self.connections.get_mut(&invalidated) {
-                connection.transaction = None;
+            if let Some(connection) = self.connections.get_mut(&invalidated)
+                && let Some(authentication) = connection.transaction.take()
+            {
+                let transaction_id = authentication.transaction.binding().transaction_id();
+                context
+                    .timers_mut()
+                    .cancel(TimerKind::Reservation, TimedId::Transaction(transaction_id));
+                let _released = self.release_finished_transaction(
+                    invalidated,
+                    LiveTransactionClass::Authentication,
+                    transaction_id,
+                );
             }
         }
         for connection in self.connections.values_mut() {
@@ -3876,12 +4548,27 @@ impl AccountServiceCoordinator {
         committed_count: u64,
         generation: ConnectionGeneration,
         carrier_generation: u64,
+        transaction_id: TransactionId,
         sealed: SealedAccountFinishOutcome<AuthenticationGrant>,
         authenticated_at: MonotonicTick,
         sasl_accepted: bool,
         fresh_auth_session: Option<(agenc_ircd_types::UserId, Generation, AccountId)>,
         resulting_key_state: Option<LoginIndexKeyState>,
     ) -> CarrierCompletion {
+        if self
+            .release_finished_transaction(
+                generation,
+                LiveTransactionClass::Authentication,
+                transaction_id,
+            )
+            .is_err()
+        {
+            return CarrierCompletion {
+                generation,
+                carrier_generation,
+                close: true,
+            };
+        }
         let Ok(result) = sealed.into_result_after_commit(committed_count) else {
             return CarrierCompletion {
                 generation,
@@ -3976,6 +4663,9 @@ impl AccountServiceCoordinator {
         context: &mut StateCoreContext,
     ) -> Vec<CarrierCompletion> {
         let mut completions = Vec::new();
+        if let Some(cleanup) = self.pending_cleanup.take() {
+            let _completed = self.complete_transaction_cleanup(cleanup);
+        }
         let Some(authority) = self.pending_authority.take() else {
             return self.progress(context);
         };
@@ -3991,6 +4681,7 @@ impl AccountServiceCoordinator {
                 sealed,
                 reservation,
             } => self.commit_creation_start(
+                context,
                 committed_count,
                 generation,
                 carrier_generation,
@@ -4000,11 +4691,14 @@ impl AccountServiceCoordinator {
             PendingAuthority::CreationFinish {
                 generation,
                 carrier_generation,
+                transaction_id,
                 sealed,
-            } => Some(Self::commit_creation_finish(
+                reservation: _,
+            } => Some(self.commit_creation_finish(
                 committed_count,
                 generation,
                 carrier_generation,
+                transaction_id,
                 sealed,
             )),
             PendingAuthority::CredentialStart {
@@ -4013,6 +4707,7 @@ impl AccountServiceCoordinator {
                 sealed,
                 reservation,
             } => self.commit_credential_start(
+                context,
                 committed_count,
                 generation,
                 carrier_generation,
@@ -4022,15 +4717,18 @@ impl AccountServiceCoordinator {
             PendingAuthority::CredentialFinish {
                 generation,
                 carrier_generation,
+                transaction_id,
                 sealed,
                 reservation,
                 fenced,
                 invalidated_authentications,
             } => {
                 completions.extend(self.commit_credential_finish(
+                    context,
                     committed_count,
                     generation,
                     carrier_generation,
+                    transaction_id,
                     sealed,
                     reservation,
                     fenced,
@@ -4046,6 +4744,7 @@ impl AccountServiceCoordinator {
                 login,
                 previous_value,
             } => self.commit_start(
+                context,
                 committed_count,
                 generation,
                 carrier_generation,
@@ -4057,6 +4756,7 @@ impl AccountServiceCoordinator {
             PendingAuthority::Finish {
                 generation,
                 carrier_generation,
+                transaction_id,
                 sealed,
                 account_id: _,
                 authenticated_at,
@@ -4068,6 +4768,7 @@ impl AccountServiceCoordinator {
                 committed_count,
                 generation,
                 carrier_generation,
+                transaction_id,
                 sealed,
                 authenticated_at,
                 sasl_accepted,
@@ -4090,16 +4791,24 @@ impl AccountServiceCoordinator {
         context: &mut StateCoreContext,
         origin: Option<StagedOrigin>,
     ) -> Vec<CarrierCompletion> {
+        if let Some(cleanup) = self.pending_cleanup.take() {
+            self.cleanup_queue.push_front(cleanup);
+            return Vec::new();
+        }
         let Some(authority) = self.pending_authority.take() else {
             return self.progress(context);
         };
         let generation = authority.generation();
-        if let Some(account_id) = authority.credential_reservation()
+        let carrier_generation = authority.carrier_generation();
+        let credential_reservation = authority.credential_reservation();
+        let cleanup = authority.into_transaction_cleanup();
+        if let Some((class, cleanup)) = cleanup {
+            let _queued = self.queue_transaction_cleanup(context, generation, class, cleanup);
+        } else if let Some(account_id) = credential_reservation
             && self.credential_reservations.get(&account_id) == Some(&generation)
         {
             self.credential_reservations.remove(&account_id);
         }
-        let carrier_generation = authority.carrier_generation();
         let mut completions = vec![CarrierCompletion {
             generation,
             carrier_generation,
@@ -4146,6 +4855,44 @@ impl PendingRead {
 }
 
 impl PendingCrypto {
+    fn into_transaction_cleanup(self) -> Option<(LiveTransactionClass, TransactionCleanup)> {
+        match self {
+            Self::CreationFinish {
+                transaction_id,
+                reservation,
+                ..
+            }
+            | Self::CreationFinishSeal {
+                transaction_id,
+                reservation,
+                ..
+            } => Some((
+                LiveTransactionClass::Creation,
+                TransactionCleanup::creation(transaction_id, reservation),
+            )),
+            Self::CredentialFinish {
+                request,
+                transaction_id,
+                reservation,
+            }
+            | Self::CredentialFinishSeal {
+                request,
+                transaction_id,
+                reservation,
+            } => Some((
+                LiveTransactionClass::CredentialChange,
+                TransactionCleanup::credential(transaction_id, reservation, request.generation),
+            )),
+            Self::Finish { transaction_id, .. } | Self::FinishSeal { transaction_id, .. } => {
+                Some((
+                    LiveTransactionClass::Authentication,
+                    TransactionCleanup::authentication(transaction_id),
+                ))
+            }
+            _ => None,
+        }
+    }
+
     const fn generation(&self) -> ConnectionGeneration {
         match self {
             Self::Open(request)
@@ -4186,6 +4933,74 @@ impl PendingCrypto {
 }
 
 impl ReadySeal {
+    fn transaction_cleanup(
+        &self,
+    ) -> Option<(
+        ConnectionGeneration,
+        LiveTransactionClass,
+        TransactionCleanup,
+    )> {
+        match self {
+            Self::CreationFinish {
+                request,
+                transaction_id,
+                reservation,
+                ..
+            } => Some((
+                request.generation,
+                LiveTransactionClass::Creation,
+                TransactionCleanup::creation(*transaction_id, reservation.clone()),
+            )),
+            Self::CredentialFinish {
+                request,
+                transaction_id,
+                reservation,
+                ..
+            } => Some((
+                request.generation,
+                LiveTransactionClass::CredentialChange,
+                TransactionCleanup::credential(*transaction_id, *reservation, request.generation),
+            )),
+            Self::Finish {
+                request,
+                transaction_id,
+                ..
+            } => Some((
+                request.generation,
+                LiveTransactionClass::Authentication,
+                TransactionCleanup::authentication(*transaction_id),
+            )),
+            _ => None,
+        }
+    }
+
+    fn into_transaction_cleanup(self) -> Option<(LiveTransactionClass, TransactionCleanup)> {
+        match self {
+            Self::CreationFinish {
+                transaction_id,
+                reservation,
+                ..
+            } => Some((
+                LiveTransactionClass::Creation,
+                TransactionCleanup::creation(transaction_id, reservation),
+            )),
+            Self::CredentialFinish {
+                request,
+                transaction_id,
+                reservation,
+                ..
+            } => Some((
+                LiveTransactionClass::CredentialChange,
+                TransactionCleanup::credential(transaction_id, reservation, request.generation),
+            )),
+            Self::Finish { transaction_id, .. } => Some((
+                LiveTransactionClass::Authentication,
+                TransactionCleanup::authentication(transaction_id),
+            )),
+            _ => None,
+        }
+    }
+
     const fn generation(&self) -> ConnectionGeneration {
         match self {
             Self::CreationStart { request, .. }
@@ -4199,6 +5014,74 @@ impl ReadySeal {
 }
 
 impl ReadyStage {
+    fn transaction_cleanup(
+        &self,
+    ) -> Option<(
+        ConnectionGeneration,
+        LiveTransactionClass,
+        TransactionCleanup,
+    )> {
+        match self {
+            Self::CreationFinish {
+                request,
+                transaction_id,
+                reservation,
+                ..
+            } => Some((
+                request.generation,
+                LiveTransactionClass::Creation,
+                TransactionCleanup::creation(*transaction_id, reservation.clone()),
+            )),
+            Self::CredentialFinish {
+                request,
+                transaction_id,
+                reservation,
+                ..
+            } => Some((
+                request.generation,
+                LiveTransactionClass::CredentialChange,
+                TransactionCleanup::credential(*transaction_id, *reservation, request.generation),
+            )),
+            Self::Finish {
+                request,
+                transaction_id,
+                ..
+            } => Some((
+                request.generation,
+                LiveTransactionClass::Authentication,
+                TransactionCleanup::authentication(*transaction_id),
+            )),
+            _ => None,
+        }
+    }
+
+    fn into_transaction_cleanup(self) -> Option<(LiveTransactionClass, TransactionCleanup)> {
+        match self {
+            Self::CreationFinish {
+                transaction_id,
+                reservation,
+                ..
+            } => Some((
+                LiveTransactionClass::Creation,
+                TransactionCleanup::creation(transaction_id, reservation),
+            )),
+            Self::CredentialFinish {
+                request,
+                transaction_id,
+                reservation,
+                ..
+            } => Some((
+                LiveTransactionClass::CredentialChange,
+                TransactionCleanup::credential(transaction_id, reservation, request.generation),
+            )),
+            Self::Finish { transaction_id, .. } => Some((
+                LiveTransactionClass::Authentication,
+                TransactionCleanup::authentication(transaction_id),
+            )),
+            _ => None,
+        }
+    }
+
     const fn generation(&self) -> ConnectionGeneration {
         match self {
             Self::CreationStart { request, .. }
@@ -4223,6 +5106,33 @@ impl ReadyStage {
 }
 
 impl PendingAuthority {
+    fn into_transaction_cleanup(self) -> Option<(LiveTransactionClass, TransactionCleanup)> {
+        match self {
+            Self::CreationFinish {
+                transaction_id,
+                reservation,
+                ..
+            } => Some((
+                LiveTransactionClass::Creation,
+                TransactionCleanup::creation(transaction_id, reservation),
+            )),
+            Self::CredentialFinish {
+                generation,
+                transaction_id,
+                reservation,
+                ..
+            } => Some((
+                LiveTransactionClass::CredentialChange,
+                TransactionCleanup::credential(transaction_id, reservation, generation),
+            )),
+            Self::Finish { transaction_id, .. } => Some((
+                LiveTransactionClass::Authentication,
+                TransactionCleanup::authentication(transaction_id),
+            )),
+            _ => None,
+        }
+    }
+
     const fn credential_reservation(&self) -> Option<AccountId> {
         match self {
             Self::CredentialStart { reservation, .. }
@@ -4596,22 +5506,26 @@ fn render_sasl_action(
 #[cfg(test)]
 mod tests {
     use agenc_ircd_client_wire::{OutputBudget, RenderError};
-    use agenc_ircd_crypto::{LoginIndexKey, derive_login_index};
-    use agenc_ircd_storage::{LoginIndexStoredKey, LoginIndexValue, LoginIndexValueKind};
+    use agenc_ircd_crypto::{LoginIndexDigest, LoginIndexKey, derive_login_index};
+    use agenc_ircd_storage::{
+        LoginIndexStoredKey, LoginIndexValue, LoginIndexValueKind, StoredKey, TableId,
+    };
     use agenc_ircd_types::{
-        AccountId, AccountRandomId, AccountServiceMessageKind, ConnectionId, Generation,
-        MonotonicTick, NetworkId, NormalizedLogin, OpaqueCredentialId, OriginId,
+        AccountId, AccountRandomId, AccountServiceMessageKind, ConnectionId, Generation, InviteId,
+        MonotonicTick, NetworkId, NormalizedLogin, OpaqueCredentialId, OriginId, TransactionId,
     };
 
     use crate::admission::{BucketTable, RateLimits};
 
     use super::{
         AccountCarrierAction, AccountCarrierKind, AccountCarrierPhase, ConnectionRoute,
-        MAX_OPAQUE_ATTEMPTS_PER_CONNECTION, REQUEST_RESULT_BYTES, REQUEST_RESULT_VERSION,
-        RequestResultRecord, RequestTerminal, RuntimeError, account_created_note,
-        account_credential_changed_note, account_failure, consume_opaque_connection_attempt,
-        opaque_attempt_demand, render_account_action, replay_terminal_account, select_live_login,
+        CreationReservation, MAX_OPAQUE_ATTEMPTS_PER_CONNECTION, REQUEST_RESULT_BYTES,
+        REQUEST_RESULT_VERSION, RequestResultRecord, RequestTerminal, RuntimeError,
+        TransactionCleanup, account_created_note, account_credential_changed_note, account_failure,
+        consume_opaque_connection_attempt, opaque_attempt_demand, render_account_action,
+        replay_terminal_account, select_live_login,
     };
+    use crate::state_core::durable::AccountServiceDurableWrite;
 
     struct ExactBudget(usize);
 
@@ -4863,5 +5777,65 @@ mod tests {
             Some(RuntimeError::LimitExceeded)
         );
         Ok(())
+    }
+
+    #[test]
+    fn creation_expiry_deletes_the_transaction_and_both_reservations() -> Result<(), RuntimeError> {
+        let transaction_id = TransactionId::from_bytes([1; 16]);
+        let login_key =
+            LoginIndexStoredKey::new(1, LoginIndexDigest::from_storage_key([2; 32]))?.encode()?;
+        let invite_id = InviteId::from_bytes([3; 16]);
+        let cleanup = TransactionCleanup::creation(
+            transaction_id,
+            Some(CreationReservation {
+                login_key: login_key.clone(),
+                invitation_id: Some(invite_id),
+            }),
+        );
+
+        let writes = cleanup.durable_writes()?;
+        assert_eq!(writes.len(), 3);
+        assert_delete(
+            writes.first().ok_or(RuntimeError::InvalidValue)?,
+            TableId::AuthTransaction,
+            &StoredKey::new(transaction_id.as_bytes().to_vec())?,
+        );
+        assert_delete(
+            writes.get(1).ok_or(RuntimeError::InvalidValue)?,
+            TableId::LoginIndex,
+            &login_key,
+        );
+        assert_delete(
+            writes.get(2).ok_or(RuntimeError::InvalidValue)?,
+            TableId::RegistrationInvite,
+            &StoredKey::new(invite_id.as_bytes().to_vec())?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn authentication_expiry_deletes_only_its_server_owned_transaction() -> Result<(), RuntimeError>
+    {
+        let transaction_id = TransactionId::from_bytes([4; 16]);
+        let writes = TransactionCleanup::authentication(transaction_id).durable_writes()?;
+        assert_eq!(writes.len(), 1);
+        assert_delete(
+            writes.first().ok_or(RuntimeError::InvalidValue)?,
+            TableId::AuthTransaction,
+            &StoredKey::new(transaction_id.as_bytes().to_vec())?,
+        );
+        Ok(())
+    }
+
+    fn assert_delete(
+        write: &AccountServiceDurableWrite,
+        expected_table: TableId,
+        expected_key: &StoredKey,
+    ) {
+        assert!(matches!(
+            write,
+            AccountServiceDurableWrite::Delete { table, key }
+                if *table == expected_table && key == expected_key
+        ));
     }
 }

@@ -1215,6 +1215,11 @@ impl CommandRouter for RegistrationRouter {
     }
 
     fn timer_fired(&mut self, context: &mut StateCoreContext, entry: TimerEntry) {
+        let (handled, completions) = self.accounts.timer_fired(context, entry);
+        self.apply_account_completions(context, completions);
+        if handled {
+            return;
+        }
         match self.commands.timer_fired(context, entry) {
             Ok(true) => return,
             Err((generation, _error)) => {
