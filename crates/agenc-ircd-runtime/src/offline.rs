@@ -27,11 +27,11 @@ use agenc_ircd_crypto::{
     audit_signing_key_id, backup_signing_key_id, semantic_digest,
 };
 use agenc_ircd_storage::{
-    DatabaseHeaderTbs, InitialStorageRecord, LOGIN_INDEX_KEY_STATE_KEY, LoginIndexKeyState,
-    SCHEMA_GENERATION, StateDirectory, StorageEngineLimits, StorageError,
-    StorageInitializationConfig, StorageInitializationMode, StorageInitializationOutcome,
-    StorageOpenConfig, StorageOwner, StoredKey, TableId, embedded_storage_qualifications,
-    initialize_storage,
+    DatabaseHeaderTbs, InitialStorageRecord, LIVE_RECORD_KIND, LOGIN_INDEX_KEY_STATE_KEY,
+    LoginIndexKeyState, OPAQUE_FAKE_RECORD_KEY, PersistentRecordValue, SCHEMA_GENERATION,
+    StateDirectory, StorageEngineLimits, StorageError, StorageInitializationConfig,
+    StorageInitializationMode, StorageInitializationOutcome, StorageOpenConfig, StorageOwner,
+    StoredKey, TableId, embedded_storage_qualifications, initialize_storage,
 };
 use agenc_ircd_types::{
     DatabaseId, InviteId, NetworkId, OperatorId, RecoveryEpoch, ServerId, ServerIncarnation,
@@ -450,11 +450,26 @@ fn initialize_database(
 ) -> Result<(), OfflineError> {
     let login = LoginIndexKey::from_bytes(*keys.login_index);
     let key_state = LoginIndexKeyState::stable(1, login.key_id(identity.network_id))?;
-    let initial = InitialStorageRecord::new(
+    let key_state_record = InitialStorageRecord::new(
         TableId::LoginIndexKeyState,
         StoredKey::new(LOGIN_INDEX_KEY_STATE_KEY.to_vec())?,
         1,
         key_state.encode()?,
+    )?;
+    let fake_record = PersistentRecordValue::new(
+        TableId::OpaqueRecord,
+        LIVE_RECORD_KIND,
+        1,
+        0,
+        None,
+        Vec::new(),
+        keys.opaque.expose_fake_record_for_persistence().to_vec(),
+    )?;
+    let fake_record = InitialStorageRecord::new(
+        TableId::OpaqueRecord,
+        StoredKey::new(OPAQUE_FAKE_RECORD_KEY.to_vec())?,
+        1,
+        fake_record.encode()?,
     )?;
     let qualifications = embedded_storage_qualifications()?;
     let directory = StateDirectory::open(state, &qualifications)?;
@@ -472,7 +487,7 @@ fn initialize_database(
         storage_master_key: StorageMasterKey::from_bytes(*keys.storage_master),
         rollback_guard_root_key: RollbackGuardRootKey::from_bytes(*keys.rollback_guard),
         mode: StorageInitializationMode::Live,
-        initial_records: vec![initial],
+        initial_records: vec![key_state_record, fake_record],
         account_service_response_count: 0,
         state_generation: 1,
         predecessor_guard_hash: StorageDigest::from_bytes([0; 32]),
@@ -708,6 +723,7 @@ fn current_utc_second() -> Result<UtcSecond, OfflineError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agenc_ircd_storage::ReadPlan;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -856,6 +872,36 @@ mod tests {
             );
         }
         enable_test_listener(&root.0)?;
+        let config = load_config(&config_path, ValidationDepth::Document)?;
+        let secrets = SecretSet::load(&config)?;
+        let qualifications = embedded_storage_qualifications()?;
+        let state_directory = StateDirectory::open(&config.storage.state_dir, &qualifications)?;
+        let owner = StorageOwner::start(StorageOpenConfig {
+            expected_network_id: config.network.network_id,
+            expected_server_id: config.server.server_id,
+            state_directory,
+            storage_master_key: StorageMasterKey::from_bytes(*secrets.storage_master().expose()),
+            rollback_guard_root_key: RollbackGuardRootKey::from_bytes(
+                *secrets.rollback_guard_root().expose(),
+            ),
+            login_index_key: LoginIndexKey::from_bytes(*secrets.login_index().expose()),
+            previous_login_index_key: None,
+            limits: limits_from_config(&config),
+        })?;
+        assert_eq!(
+            owner
+                .recovered_state()
+                .table_record_count(TableId::OpaqueRecord),
+            1
+        );
+        let fake_key = StoredKey::new(OPAQUE_FAKE_RECORD_KEY.to_vec())?;
+        let fake_rows = owner
+            .port()
+            .try_read(ReadPlan::exact(TableId::OpaqueRecord, fake_key.clone()))?
+            .wait()?;
+        assert!(matches!(fake_rows.records.as_slice(), [record]
+                if record.table == TableId::OpaqueRecord && record.key == fake_key));
+        owner.shutdown()?;
         let descriptor = render_onboarding(&config_path)?;
         assert!(descriptor.starts_with("AGENC-CHAT-CONNECT/1\n"));
         assert!(descriptor.contains("recovery-epoch="));

@@ -100,9 +100,9 @@ pub use qualification::{
 };
 pub use records::{
     E2eeRecoveryGate, E2eeRecoveryKind, KEY_CHECK_STORED_KEY, MAX_DOMAIN_RECORD_BODY_BYTES,
-    MAX_PROTOCOL_BODY_BYTES, MAX_RECORD_REFERENCES, PersistentRecordValue, ProtocolRecordBody,
-    RecordCodecKind, RecordReference, STATE_META_STORED_KEY, StoredKeyShape, TableSchema,
-    table_schema, table_schemas, validate_record_plaintext, validate_sealed_record,
+    MAX_PROTOCOL_BODY_BYTES, MAX_RECORD_REFERENCES, OPAQUE_FAKE_RECORD_KEY, PersistentRecordValue,
+    ProtocolRecordBody, RecordCodecKind, RecordReference, STATE_META_STORED_KEY, StoredKeyShape,
+    TableSchema, table_schema, table_schemas, validate_record_plaintext, validate_sealed_record,
 };
 pub use recovery::{RecoveryDisposition, classify_recovery_state};
 pub use restore_command::{

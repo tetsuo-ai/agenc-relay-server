@@ -25,7 +25,8 @@ pub const KEY_CHECK_STORED_KEY: &[u8] = b"agenc-chat/key-check/v1";
 /// Fixed key of the StateMeta record.
 pub const STATE_META_STORED_KEY: &[u8] = b"agenc-chat/state-meta/v1";
 
-const OPAQUE_FAKE_RECORD_KEY: &[u8] = b"agenc-chat/opaque-fake-record/v1";
+/// Fixed key of the stable fake OPAQUE record used for unknown-login work.
+pub const OPAQUE_FAKE_RECORD_KEY: &[u8] = b"agenc-chat/opaque-fake-record/v1";
 const DOMAIN_RECORD_VERSION: u16 = 1;
 /// Encoded bytes of a schema-one domain record ahead of its references and body: version,
 /// kind, revision, generation, the expiry tag and value, the reference count, and the body length.
