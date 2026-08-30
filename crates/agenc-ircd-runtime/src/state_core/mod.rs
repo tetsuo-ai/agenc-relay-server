@@ -163,6 +163,11 @@ pub trait CommandRouter: Send {
     ) {
     }
 
+    /// One or more staged plans became visible after their complete durable
+    /// barrier. Routers use this only to retry work that was deferred behind
+    /// the single in-flight batch.
+    fn batch_applied(&mut self, _context: &mut StateCoreContext, _plan_count: usize) {}
+
     /// A reload signal arrived.
     fn reload_requested(&mut self, _context: &mut StateCoreContext) {}
 
@@ -987,6 +992,10 @@ impl StateCore {
                 self.report_rejections(rejections);
                 None
             }
+            Ok(BatchStep::AppliedInStep(count)) => {
+                self.router.batch_applied(&mut self.context, count);
+                None
+            }
             Ok(_) => None,
             Err(exit) => Some(exit),
         }
@@ -1018,6 +1027,9 @@ impl StateCore {
     ) -> Option<StateCoreExit> {
         match self.context.consume_completion(message) {
             Ok(BatchStep::Rejected(rejections)) => self.report_rejections(rejections),
+            Ok(BatchStep::AppliedInStep(count)) => {
+                self.router.batch_applied(&mut self.context, count);
+            }
             Ok(_) => {}
             Err(exit) => return Some(exit),
         }

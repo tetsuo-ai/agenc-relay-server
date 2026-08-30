@@ -573,6 +573,13 @@ impl RegistrationState {
         self.phase
     }
 
+    /// Reports whether the keepalive coordinator is waiting for the exact
+    /// PONG token issued by [`Self::tick`].
+    #[must_use]
+    pub const fn has_outstanding_ping(&self) -> bool {
+        self.outstanding_ping.is_some()
+    }
+
     /// Borrows negotiated bare capabilities for the registered-session handoff.
     #[must_use]
     pub fn enabled_capabilities(&self) -> &[String] {

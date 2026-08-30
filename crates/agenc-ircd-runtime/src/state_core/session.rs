@@ -190,6 +190,25 @@ impl SessionTable {
         Ok(())
     }
 
+    /// Rolls back a registration binding before its domain insertion became
+    /// visible. Both identities must match the entry being unbound.
+    pub fn unbind_session(
+        &mut self,
+        generation: ConnectionGeneration,
+        session: BoundSession,
+    ) -> Result<(), RuntimeError> {
+        let entry = self
+            .connections
+            .get_mut(&generation)
+            .ok_or(RuntimeError::InvalidValue)?;
+        if entry.session != Some(session) || self.users.get(&session.user_id) != Some(&generation) {
+            return Err(RuntimeError::InvalidValue);
+        }
+        entry.session = None;
+        self.users.remove(&session.user_id);
+        Ok(())
+    }
+
     /// Marks the transport gone without removing the entry, so an in-flight
     /// batch still finds the generation and discards its frames on commit
     /// (spec lines 4203-4206).
@@ -394,6 +413,38 @@ mod tests {
         assert!(table.is_empty());
         assert_eq!(table.registered_len(), 0);
         assert_eq!(table.generations().count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn registration_binding_rollback_requires_both_exact_identities() -> Result<(), RuntimeError> {
+        let mut table = SessionTable::new();
+        let generation = ConnectionGeneration::new(17);
+        table.open(
+            generation,
+            ListenerPurpose::ClientTls,
+            SourceAddressKey::ipv4([10, 0, 0, 17]),
+            sink(17),
+            MonotonicTick::from_ticks(5),
+        )?;
+        let session = bound(17);
+        table.bind_session(generation, session)?;
+        assert_eq!(
+            table.unbind_session(generation, bound(18)).err(),
+            Some(RuntimeError::InvalidValue)
+        );
+        assert_eq!(table.registered_len(), 1);
+        table.unbind_session(generation, session)?;
+        assert_eq!(table.registered_len(), 0);
+        assert!(
+            table
+                .connection(generation)
+                .is_some_and(|entry| entry.session().is_none())
+        );
+        assert_eq!(
+            table.unbind_session(generation, session).err(),
+            Some(RuntimeError::InvalidValue)
+        );
         Ok(())
     }
 
