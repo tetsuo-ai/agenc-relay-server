@@ -1866,6 +1866,20 @@ impl AccountServiceCoordinator {
                 CryptoJobOutput::OpaqueFinish(output),
             ) => {
                 let outcome = output.outcome.map_err(|_| RuntimeError::InvalidValue)?;
+                if let Ok(grant) = outcome.result()
+                    && account_id != Some(grant.account_id())
+                {
+                    return Err(RuntimeError::InvalidValue);
+                }
+                let operation_is_available = match outcome.result() {
+                    Ok(grant) => {
+                        self.authentication_finish_available(context, request.generation, grant)
+                    }
+                    Err(_) => true,
+                };
+                let outcome = outcome
+                    .reject_when_unavailable(operation_is_available)
+                    .map_err(|_| RuntimeError::InvalidValue)?;
                 self.push_ready_seal(ReadySeal::Finish {
                     request,
                     transaction_id,
@@ -2453,6 +2467,38 @@ impl AccountServiceCoordinator {
             context.now(),
             now_utc,
         ))
+    }
+
+    fn authentication_finish_available(
+        &self,
+        context: &StateCoreContext,
+        generation: ConnectionGeneration,
+        grant: &AuthenticationGrant,
+    ) -> bool {
+        let account_is_current =
+            context
+                .domain()
+                .account(grant.account_id())
+                .is_some_and(|account| {
+                    account.session_generation() == grant.account_session_generation()
+                });
+        if !account_is_current {
+            return false;
+        }
+        let Some(connection) = context.sessions().connection(generation) else {
+            return false;
+        };
+        let Some(bound) = connection.session() else {
+            return true;
+        };
+        context
+            .domain()
+            .session(bound.user_id)
+            .is_some_and(|session| {
+                session
+                    .account_id()
+                    .is_none_or(|account_id| account_id == grant.account_id())
+            })
     }
 
     fn submit_crypto(
@@ -4022,12 +4068,19 @@ impl AccountServiceCoordinator {
         authenticated_at: MonotonicTick,
     ) -> Result<(), RuntimeError> {
         let semantic_grant = sealed.result().ok();
+        if let Some(grant) = semantic_grant
+            && (account_id != Some(grant.account_id())
+                || !self.authentication_finish_available(context, request.generation, grant))
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
         let bound = context
             .sessions()
             .connection(request.generation)
-            .and_then(|entry| entry.session());
+            .ok_or(RuntimeError::InvalidValue)?
+            .session();
         let mut fresh_auth_session = None;
-        let mut sasl_accepted = semantic_grant.is_some();
+        let sasl_accepted = semantic_grant.is_some();
         let plan = match (semantic_grant, bound) {
             (Some(grant), Some(bound)) => {
                 let session = context
@@ -4060,11 +4113,7 @@ impl AccountServiceCoordinator {
                             .map_err(|_| RuntimeError::InvalidValue)?
                     }
                     Some(_) => {
-                        sasl_accepted = false;
-                        context
-                            .domain()
-                            .plan_account_service_checkpoint()
-                            .map_err(|_| RuntimeError::InvalidValue)?
+                        return Err(RuntimeError::InvalidValue);
                     }
                 }
             }

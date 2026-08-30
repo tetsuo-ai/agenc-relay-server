@@ -2357,6 +2357,25 @@ impl AccountFinishOutcome<CreateAccountIntent> {
 }
 
 impl AccountFinishOutcome<AuthenticationGrant> {
+    /// Converts an otherwise successful login into the same latent rejected
+    /// completion used for authentication failure when the runtime cannot
+    /// safely bind the account to the live session.
+    ///
+    /// This decision happens before sealing so the encrypted completion,
+    /// durable terminal row, and IRC carrier result cannot disagree.
+    pub fn reject_when_unavailable(self, operation_is_available: bool) -> Result<Self, AuthError> {
+        if operation_is_available || self.result.is_err() {
+            return Ok(self);
+        }
+        let AccountResponsePlan {
+            lineage,
+            transaction_id,
+            payload: _,
+        } = self.response;
+        let response = rejected_authentication_response(lineage, transaction_id)?;
+        Ok(Self::rejected(AuthError::AuthenticationFailed, response))
+    }
+
     /// Verifies the authentication receipt against the exact grant and seals
     /// both as one checked terminal outcome.
     pub fn seal(
@@ -2700,18 +2719,19 @@ mod tests {
 
     use super::{
         AUTHENTICATION_TRANSACTION_RECORD_BYTES, AccountAuthenticationState,
-        AccountCreationStartParameters, AccountCreationState, AccountOperationContext,
-        AccountSnapshot, AuthError, AuthenticationCandidate, AuthenticationLookup,
-        AuthenticationStartParameters, AuthenticationTransactionRecord,
-        CREATION_TRANSACTION_RECORD_BYTES, CREDENTIAL_CHANGE_TRANSACTION_RECORD_BYTES,
-        CreationAdmission, CreationTransactionRecord, CredentialChangeStartParameters,
-        CredentialChangeState, CredentialChangeTransactionRecord, DestructiveAccountSnapshot,
-        FreshAuthenticationProof, StartDisposition, ValidatedInvitation,
-        begin_account_creation_with_entropy, begin_account_deletion,
-        begin_account_deletion_with_entropy, begin_authentication_with_entropy,
-        begin_credential_change_with_entropy, create_authentication_grant,
-        finish_account_authentication_with_entropy, finish_credential_change, fresh_account_id,
-        fresh_opaque_credential_id, fresh_transaction_id,
+        AccountCreationStartParameters, AccountCreationState, AccountFinishOutcome,
+        AccountOperationContext, AccountResponsePlan, AccountSnapshot, AuthError,
+        AuthenticationCandidate, AuthenticationLookup, AuthenticationStartParameters,
+        AuthenticationTransactionRecord, CREATION_TRANSACTION_RECORD_BYTES,
+        CREDENTIAL_CHANGE_TRANSACTION_RECORD_BYTES, CreationAdmission, CreationTransactionRecord,
+        CredentialChangeStartParameters, CredentialChangeState, CredentialChangeTransactionRecord,
+        DestructiveAccountSnapshot, FreshAuthenticationProof, StartDisposition,
+        ValidatedInvitation, authentication_completion, begin_account_creation_with_entropy,
+        begin_account_deletion, begin_account_deletion_with_entropy,
+        begin_authentication_with_entropy, begin_credential_change_with_entropy,
+        create_authentication_grant, finish_account_authentication_with_entropy,
+        finish_credential_change, fresh_account_id, fresh_opaque_credential_id,
+        fresh_transaction_id,
     };
     use crate::opaque::{
         OpaqueKe1, OpaqueKe3, OpaqueProfile, OpaqueRegistrationRecord, OpaqueRegistrationRequest,
@@ -3846,6 +3866,42 @@ mod tests {
         )?;
         assert_eq!(grant.grant_id.expose_for_session_open(), &[30_u8; 32]);
         assert_eq!(grant.route.connection_nonce(), &[8_u8; 32]);
+        Ok(())
+    }
+
+    #[test]
+    fn unavailable_authentication_rewrites_the_completion_before_sealing()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let transaction_id = TransactionId::from_bytes([91_u8; 16]);
+        let request = authentication_finish_request(context(0)?.network_id, 92, transaction_id)?;
+        let (_finish, lineage) = request.into_parts();
+        let mut entropy = FilledEntropy(93);
+        let grant = create_authentication_grant(
+            account()?.0,
+            OpaqueCredentialId::from_bytes([94_u8; 32]),
+            context(10)?,
+            &mut entropy,
+        )?;
+        let response = AccountResponsePlan::new(
+            lineage,
+            transaction_id,
+            authentication_completion(transaction_id, &grant),
+        )?;
+        let outcome =
+            AccountFinishOutcome::committed(grant, response).reject_when_unavailable(false)?;
+
+        assert_eq!(
+            outcome.result().err(),
+            Some(AuthError::AuthenticationFailed)
+        );
+        assert!(matches!(
+            outcome.response_plan().payload(),
+            AccountServiceResponsePayload::AuthenticationCompletion(completion)
+                if completion.status() == AccountServiceCompletionStatus::Rejected
+                    && completion.transaction_id() == transaction_id
+        ));
+        let sealed = outcome.seal(0)?;
+        assert_eq!(sealed.result().err(), Some(AuthError::AuthenticationFailed));
         Ok(())
     }
 
