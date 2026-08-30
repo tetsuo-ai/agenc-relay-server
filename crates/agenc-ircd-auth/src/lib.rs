@@ -6,6 +6,7 @@
 //! HPKE envelope. OPAQUE state, credentials, transaction bindings, and
 //! completion receipts remain coordinator-owned and move-only.
 
+mod channel_key;
 mod error;
 mod invitation;
 mod opaque;
@@ -13,6 +14,10 @@ mod service;
 mod transaction;
 mod wire;
 
+pub use channel_key::{
+    CHANNEL_KEY_HASH_BYTES, CHANNEL_KEY_ITERATIONS, CHANNEL_KEY_LANES, CHANNEL_KEY_MEMORY_KIB,
+    CHANNEL_KEY_SALT_BYTES, derive_channel_key_verifier,
+};
 pub use error::AuthError;
 pub use invitation::{ACCOUNT_CREATION_INVITE_BYTES, AccountCreationInvite};
 pub use opaque::{

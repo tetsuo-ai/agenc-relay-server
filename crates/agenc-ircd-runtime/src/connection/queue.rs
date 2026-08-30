@@ -37,8 +37,9 @@ pub const MAX_CONTROL_OUTPUT_BYTES: usize = 262_144;
 /// Default queue item slots pre-allocated at admission: four maximal
 /// fanout demands of 1,024 frames each plus the control slots.
 pub const DEFAULT_QUEUE_ITEMS: usize = 4_104;
-/// Hard maximum queue item slots.
-pub const MAX_QUEUE_ITEMS: usize = 16_384;
+/// Hard maximum queue item slots: sixteen complete response demands plus
+/// the eight control-only slots.
+pub const MAX_QUEUE_ITEMS: usize = 16_392;
 /// Item slots held back for control frames so a fatal or overload frame
 /// always has a slot (spec lines 2748-2756).
 pub const CONTROL_ITEM_SLOTS: usize = 8;

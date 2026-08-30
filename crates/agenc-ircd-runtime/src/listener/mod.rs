@@ -216,6 +216,25 @@ pub struct ListenerSet {
     connection_token: CancellationToken,
 }
 
+/// Cloneable shutdown authority for a listener set owned by another task.
+#[derive(Clone)]
+pub struct ListenerControl {
+    accept_token: CancellationToken,
+    connection_token: CancellationToken,
+}
+
+impl ListenerControl {
+    /// Stops every accept loop while existing connections continue.
+    pub fn stop_accepting(&self) {
+        self.accept_token.cancel();
+    }
+
+    /// Cancels every connection supervisor in the set.
+    pub fn cancel_connections(&self) {
+        self.connection_token.cancel();
+    }
+}
+
 impl ListenerSet {
     /// Binds every source first, then starts one accept loop per listener.
     ///
@@ -274,6 +293,15 @@ impl ListenerSet {
     #[must_use]
     pub fn addresses(&self) -> &[(ListenerPurpose, BoundAddress)] {
         &self.addresses
+    }
+
+    /// Returns shutdown authority that may outlive this owner handle.
+    #[must_use]
+    pub fn control(&self) -> ListenerControl {
+        ListenerControl {
+            accept_token: self.accept_token.clone(),
+            connection_token: self.connection_token.clone(),
+        }
     }
 
     /// Stops every accept loop; connections keep running (quiesce, spec

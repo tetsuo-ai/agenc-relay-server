@@ -54,6 +54,12 @@ impl DatabaseBinding {
         }
     }
 
+    /// Returns the server incarnation authenticated by every stored record.
+    #[must_use]
+    pub const fn server_incarnation(self) -> ServerIncarnation {
+        self.server_incarnation
+    }
+
     /// Encodes the exact fixed-width TLS structure.
     pub fn encode(self) -> Result<[u8; DATABASE_BINDING_BYTES], CryptoError> {
         let mut encoded = [0_u8; DATABASE_BINDING_BYTES];

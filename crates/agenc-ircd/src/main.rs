@@ -27,8 +27,6 @@ const EXIT_USAGE: u8 = 1;
 const EXIT_HOST_CONTROL: u8 = 2;
 const EXIT_PARTIAL_INIT: u8 = 3;
 
-const DAEMON_UNAVAILABLE_MESSAGE: &str =
-    "daemon behavior is unavailable until Stage 06 composition is complete";
 const USAGE: &str = concat!(
     "usage: agenc-ircd <command> [options]\n",
     "commands:\n",
@@ -104,8 +102,9 @@ fn one_config(arguments: &[OsString], usage: &str) -> Result<PathBuf, CliFailure
 }
 
 fn serve(arguments: &[OsString]) -> Result<(), CliFailure> {
-    let _config = one_config(arguments, "usage: agenc-ircd serve --config <file>")?;
-    Err(CliFailure::command(EXIT_USAGE, DAEMON_UNAVAILABLE_MESSAGE))
+    let config = one_config(arguments, "usage: agenc-ircd serve --config <file>")?;
+    agenc_ircd_runtime::daemon::serve(&config)
+        .map_err(|error| CliFailure::command(EXIT_USAGE, error.to_string()))
 }
 
 fn check_config(arguments: &[OsString]) -> Result<(), CliFailure> {
@@ -449,12 +448,7 @@ mod tests {
             Some(USAGE.to_owned())
         );
         assert!(run(arguments(&["--help"])).is_ok());
-        assert_eq!(
-            run(arguments(&["serve", "--config", "/config.toml"]))
-                .err()
-                .map(|failure| failure.message),
-            Some(DAEMON_UNAVAILABLE_MESSAGE.to_owned())
-        );
+        assert!(run(arguments(&["serve", "--config", "/config.toml"])).is_err());
         assert!(run(arguments(&["serve", "--config", "--bad"])).is_err());
     }
 

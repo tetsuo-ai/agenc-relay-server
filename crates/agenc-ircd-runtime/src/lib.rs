@@ -18,6 +18,7 @@ mod client_render;
 pub mod clock;
 mod command_convert;
 pub mod connection;
+pub mod daemon;
 mod error;
 pub mod listener;
 mod mutation_render;
