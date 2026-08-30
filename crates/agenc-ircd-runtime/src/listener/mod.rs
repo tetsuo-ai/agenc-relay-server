@@ -436,9 +436,10 @@ fn record_outcome(
             shared.observer.closed(&connection);
             shared.admission.released(purpose, source);
         }
-        Some(ConnectionOutcome::Refused(reason)) => {
+        Some(ConnectionOutcome::Refused(reason, source)) => {
             exit.refused = exit.refused.saturating_add(1);
             shared.observer.refused(purpose, reason);
+            shared.admission.released(purpose, source);
         }
         None => exit.refused = exit.refused.saturating_add(1),
     }
@@ -530,10 +531,14 @@ fn prepare_admission(
     if shared.admission.admit(spec.purpose, source) == AdmissionVerdict::Refuse {
         return Err(RefusalReason::Admission);
     }
-    let permits = acquire_charges(shared, spec).map_err(|_| RefusalReason::MemoryExhausted)?;
-    let token = connection_token
-        .child()
-        .map_err(|_| RefusalReason::TaskTree)?;
+    let Ok(permits) = acquire_charges(shared, spec) else {
+        shared.admission.released(spec.purpose, source);
+        return Err(RefusalReason::MemoryExhausted);
+    };
+    let Ok(token) = connection_token.child() else {
+        shared.admission.released(spec.purpose, source);
+        return Err(RefusalReason::TaskTree);
+    };
     Ok(Admission {
         global_slot,
         permits,
@@ -579,7 +584,7 @@ fn acquire_charges(
 
 enum ConnectionOutcome {
     Served(ConnectionExit, SourceAddressKey),
-    Refused(RefusalReason),
+    Refused(RefusalReason, SourceAddressKey),
 }
 
 /// The listener facts one connection task carries.
@@ -598,7 +603,7 @@ async fn serve(
     let source = admitted.source;
     match serve_inner(accepted, admitted, admission, endpoint).await {
         Ok(exit) => ConnectionOutcome::Served(exit, source),
-        Err(reason) => ConnectionOutcome::Refused(reason),
+        Err(reason) => ConnectionOutcome::Refused(reason, source),
     }
 }
 

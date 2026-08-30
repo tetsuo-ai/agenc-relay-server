@@ -3,6 +3,7 @@
 pub mod buckets;
 pub mod overload;
 pub mod prefix;
+mod transport;
 
 pub use buckets::{
     AdmissionRefused, BucketDemand, BucketKey, BucketKind, BucketRate, BucketTable, LoginHashKey,
@@ -13,3 +14,4 @@ pub use overload::{
     select_evictions, usage_reaches,
 };
 pub use prefix::PrefixRegistry;
+pub use transport::TransportAdmission;

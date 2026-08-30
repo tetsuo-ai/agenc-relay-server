@@ -13,6 +13,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -97,6 +98,23 @@ struct RefuseAll;
 impl AcceptAdmission for RefuseAll {
     fn admit(&self, _: ListenerPurpose, _: SourceAddressKey) -> AdmissionVerdict {
         AdmissionVerdict::Refuse
+    }
+}
+
+#[derive(Default)]
+struct CountingAdmission {
+    admitted: AtomicU64,
+    released: AtomicU64,
+}
+
+impl AcceptAdmission for CountingAdmission {
+    fn admit(&self, _: ListenerPurpose, _: SourceAddressKey) -> AdmissionVerdict {
+        self.admitted.fetch_add(1, Ordering::Relaxed);
+        AdmissionVerdict::Admit
+    }
+
+    fn released(&self, _: ListenerPurpose, _: SourceAddressKey) {
+        self.released.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -431,6 +449,51 @@ async fn refusals_close_the_socket_before_tls() -> TestResult {
         let (admitted, refused) = finish(harness).await?;
         assert_eq!((admitted, refused), (0, 1));
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn post_admission_refusals_release_transport_quota() -> TestResult {
+    let fixture = fixture(62)?;
+    let tls = server(&fixture, TlsEndpointProfile::Client, ClientAuth::None)?;
+    let admission = Arc::new(CountingAdmission::default());
+    let options = HarnessOptions {
+        budget_bytes: 1_000,
+        admission: admission.clone(),
+        ..HarnessOptions::default()
+    };
+    let spec = tcp_spec(ListenerPurpose::ClientTls, 4, Some(tls))?;
+    let harness = start(vec![spec], options)?;
+    let address = tcp_address(&harness, 0)?;
+    let client = tls_client(address, client(&fixture, CLIENT_ALPN, false)?, Vec::new());
+    assert!(joined(client).await?.is_err());
+    tokio::time::sleep(SETTLE).await;
+    assert_eq!(admission.admitted.load(Ordering::Relaxed), 1);
+    assert_eq!(admission.released.load(Ordering::Relaxed), 1);
+    let (admitted, refused) = finish(harness).await?;
+    assert_eq!((admitted, refused), (0, 1));
+    Ok(())
+}
+
+#[tokio::test]
+async fn tls_refusals_release_transport_quota() -> TestResult {
+    let fixture = fixture(63)?;
+    let tls = server(&fixture, TlsEndpointProfile::Client, ClientAuth::None)?;
+    let admission = Arc::new(CountingAdmission::default());
+    let options = HarnessOptions {
+        admission: admission.clone(),
+        ..HarnessOptions::default()
+    };
+    let spec = tcp_spec(ListenerPurpose::ClientTls, 4, Some(tls))?;
+    let harness = start(vec![spec], options)?;
+    let address = tcp_address(&harness, 0)?;
+    let client = tls_client(address, client(&fixture, ADMIN_ALPN, false)?, Vec::new());
+    assert!(joined(client).await?.is_err());
+    tokio::time::sleep(SETTLE).await;
+    assert_eq!(admission.admitted.load(Ordering::Relaxed), 1);
+    assert_eq!(admission.released.load(Ordering::Relaxed), 1);
+    let (admitted, refused) = finish(harness).await?;
+    assert_eq!((admitted, refused), (0, 1));
     Ok(())
 }
 

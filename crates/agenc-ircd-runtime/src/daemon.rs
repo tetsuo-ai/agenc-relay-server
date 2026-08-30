@@ -31,7 +31,7 @@ use zeroize::Zeroizing;
 
 use crate::RuntimeError;
 use crate::StateCoreSeed;
-use crate::admission::{BucketKind, BucketRate, RateLimits};
+use crate::admission::{BucketKind, BucketRate, RateLimits, TransportAdmission};
 use crate::bridge::crypto::{
     CHANNEL_KEY_ARGON2_ITERATIONS, CHANNEL_KEY_ARGON2_MEMORY_KIB, CHANNEL_KEY_ARGON2_PARALLELISM,
     CHANNEL_KEY_HASH_BYTES, CHANNEL_KEY_SALT_BYTES, ChannelKeyVerifier, ChannelKeyVerifierRecord,
@@ -46,7 +46,7 @@ use crate::connection::{
 };
 use crate::listener::{
     ListenerContext, ListenerControl, ListenerError, ListenerSet, ListenerSource, ListenerSpec,
-    NoObserver, PermissiveAdmission, spki_sha256,
+    NoObserver, spki_sha256,
 };
 use crate::purpose::ListenerPurpose;
 use crate::registration::{AccountServiceConfig, RegistrationRouter, RegistrationRouterConfig};
@@ -292,6 +292,7 @@ fn build_live_state(
     secrets: &SecretSet,
     storage: LiveStorage,
     budget: Arc<MemoryBudget>,
+    rates: RateLimits,
 ) -> Result<LiveState, DaemonError> {
     let LiveStorage {
         owner,
@@ -315,7 +316,7 @@ fn build_live_state(
     let state = StateCore::new(StateCoreInputs {
         config: StateCoreConfig {
             server_prefix: config.server.name.as_str().to_owned(),
-            rate_limits: configured_rates(config)?,
+            rate_limits: rates,
             ceilings: AccountingCeilings {
                 database_max_bytes: config.storage.database_max_bytes,
                 backup_max_bytes: config.storage.backup_max_bytes,
@@ -592,9 +593,19 @@ async fn run(
     let shutdown = shutdown_plan(&config)?;
     let specs = build_listener_specs(&config, &secrets).await?;
     let budget = memory_budget(&config)?;
-    let live = build_live_state(&config, &secrets, storage, Arc::clone(&budget))?;
+    let rates = configured_rates(&config)?;
+    let admission = Arc::new(TransportAdmission::new(
+        rates,
+        config
+            .limits
+            .values
+            .get(LimitKey::DirectConnectionsPerAddress),
+        Arc::clone(&budget),
+        Box::new(SystemMonotonicClock::start()),
+    )?);
+    let live = build_live_state(&config, &secrets, storage, Arc::clone(&budget), rates)?;
     let (inbox, inbox_receiver) = mpsc::channel(SIGNAL_EVENT_CAPACITY);
-    let context = listener_context(&config, &inbox, budget)?;
+    let context = listener_context(&config, &inbox, budget, Arc::clone(&admission))?;
     let RunningOwners {
         owner,
         mut supervisor,
@@ -602,7 +613,7 @@ async fn run(
         signals,
         state_exited,
         listener_exited,
-    } = start_owners(specs, context, live, inbox_receiver, &inbox)?;
+    } = start_owners(specs, context, live, inbox_receiver, &inbox, admission)?;
     let live_result = supervise(Supervision {
         config_path: &config_path,
         active: &config,
@@ -649,6 +660,7 @@ fn start_owners(
     live: LiveState,
     inbox_receiver: mpsc::Receiver<StateCoreMessage>,
     inbox: &mpsc::Sender<StateCoreMessage>,
+    admission: Arc<TransportAdmission>,
 ) -> Result<RunningOwners, DaemonError> {
     let mut supervisor = Supervisor::new();
     let listeners = ListenerSet::start(specs, context, &supervisor.root_token())?;
@@ -669,7 +681,7 @@ fn start_owners(
         storage_reads,
         crypto,
     )?;
-    let signals = spawn_background_owners(&mut supervisor, inbox)?;
+    let signals = spawn_background_owners(&mut supervisor, inbox, admission)?;
     Ok(RunningOwners {
         owner,
         supervisor,
@@ -725,6 +737,7 @@ fn spawn_state_owner(
 fn spawn_background_owners(
     supervisor: &mut Supervisor,
     inbox: &mpsc::Sender<StateCoreMessage>,
+    admission: Arc<TransportAdmission>,
 ) -> Result<mpsc::Receiver<SignalEvent>, DaemonError> {
     let (signals, signal_receiver) = mpsc::channel(SIGNAL_EVENT_CAPACITY);
     supervisor.spawn(ChildName::SignalTask, ChildKind::Critical, |token| {
@@ -732,7 +745,7 @@ fn spawn_background_owners(
     })?;
     let maintenance_inbox = inbox.clone();
     supervisor.spawn(ChildName::MaintenanceTask, ChildKind::Critical, |token| {
-        run_maintenance(token, maintenance_inbox)
+        run_maintenance(token, maintenance_inbox, admission)
     })?;
     Ok(signal_receiver)
 }
@@ -741,6 +754,7 @@ fn listener_context(
     config: &Config,
     inbox: &mpsc::Sender<StateCoreMessage>,
     budget: Arc<MemoryBudget>,
+    admission: Arc<TransportAdmission>,
 ) -> Result<ListenerContext, DaemonError> {
     let clients = limit_usize(config, LimitKey::ClientConnections)?;
     let handshakes = limit_usize(config, LimitKey::TlsHandshakes)?;
@@ -748,7 +762,7 @@ fn listener_context(
         budget,
         handshakes: HandshakeLimiter::new(handshakes)?,
         client_slots: Arc::new(Semaphore::new(clients)),
-        admission: Arc::new(PermissiveAdmission),
+        admission,
         observer: Arc::new(NoObserver),
         inbox: inbox.clone(),
         limits: connection_limits(config)?,
@@ -921,6 +935,7 @@ async fn validate_reload(config_path: &Path, active: &Config) -> Result<(), Daem
 async fn run_maintenance(
     token: crate::cancel::CancellationToken,
     inbox: mpsc::Sender<StateCoreMessage>,
+    admission: Arc<TransportAdmission>,
 ) -> Result<(), RuntimeError> {
     let mut minute = tokio::time::interval(MAINTENANCE_MINUTE);
     let mut prefixes = tokio::time::interval(PREFIX_ERASURE_INTERVAL);
@@ -935,7 +950,10 @@ async fn run_maintenance(
         let event = tokio::select! {
             () = token.cancelled() => return Ok(()),
             _ = minute.tick() => MaintenanceEvent::ClockDriftCheck,
-            _ = prefixes.tick() => MaintenanceEvent::PrefixErasure,
+            _ = prefixes.tick() => {
+                admission.erase_idle();
+                MaintenanceEvent::PrefixErasure
+            },
             _ = retention.tick() => MaintenanceEvent::RetentionSweep,
         };
         match inbox.try_send(StateCoreMessage::Maintenance(event)) {
