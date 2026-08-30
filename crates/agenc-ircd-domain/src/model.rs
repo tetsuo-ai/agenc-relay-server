@@ -370,6 +370,29 @@ impl AccountState {
         }
     }
 
+    /// Creates an account with deployment-selected initial policy.
+    #[must_use]
+    pub fn with_policies(
+        account_id: AccountId,
+        session_generation: Generation,
+        revision: Revision,
+        presence: PresencePolicy,
+        guest_direct_messages: GuestDirectMessagePolicy,
+        direct_messages: DirectMessagePolicy,
+    ) -> Self {
+        Self {
+            account_id,
+            label: None,
+            presence,
+            guest_direct_messages,
+            direct_messages,
+            contacts: BTreeSet::new(),
+            reserved_nicknames: BTreeSet::new(),
+            session_generation,
+            revision,
+        }
+    }
+
     /// Returns the immutable account authority.
     #[must_use]
     pub const fn account_id(&self) -> AccountId {

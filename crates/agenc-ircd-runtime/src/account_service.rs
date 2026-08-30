@@ -20,8 +20,10 @@ use agenc_ircd_client_wire::{
     SaslAction, SaslNumeric, SaslTransport, SecretBytes, WireMessage, numeric_reply,
 };
 use agenc_ircd_crypto::{
-    AccountHpkePrivateKey, LoginIndexKey, OpaqueFakeCredentialKey, derive_login_index,
+    AccountHpkePrivateKey, Ed25519PublicKey, LoginIndexKey, OpaqueFakeCredentialKey,
+    derive_login_index,
 };
+use agenc_ircd_domain::{DirectMessagePolicy, GuestDirectMessagePolicy, PresencePolicy};
 use agenc_ircd_storage::{
     LIVE_RECORD_KIND, LOGIN_INDEX_KEY_STATE_KEY, LoginIndexKeyState, LoginIndexLazyMigration,
     LoginIndexLookupSchedule, LoginIndexStoredKey, LoginIndexValue, LoginIndexValueKind,
@@ -64,6 +66,17 @@ const TERMINAL_REJECTED: u8 = 3;
 const MAX_READY_SEALS: usize = 128;
 const MAX_OPAQUE_ATTEMPTS_PER_CONNECTION: u8 = 2;
 
+/// Deployment policy applied to authenticated account-creation requests.
+#[derive(Clone, Copy)]
+pub enum AccountCreationPolicy {
+    /// Creation is open and an invitation is forbidden.
+    Open,
+    /// Creation requires one valid invitation under this offline authority.
+    Invite(Ed25519PublicKey),
+    /// Every creation request follows the latent-rejection path.
+    Closed,
+}
+
 /// Coordinator-only keys and immutable route identity for live account work.
 pub struct AccountServiceConfig {
     /// Permanent network identity.
@@ -90,6 +103,14 @@ pub struct AccountServiceConfig {
     pub fake_credential_key: Arc<OpaqueFakeCredentialKey>,
     /// Authenticated startup key-generation state.
     pub login_index_key_state: LoginIndexKeyState,
+    /// Deployment account-creation policy and optional invitation authority.
+    pub creation_policy: AccountCreationPolicy,
+    /// Initial public-presence policy copied into a committed account.
+    pub default_presence: PresencePolicy,
+    /// Initial guest direct-message policy copied into a committed account.
+    pub default_guest_direct_messages: GuestDirectMessagePolicy,
+    /// Initial authenticated direct-message policy copied into a committed account.
+    pub default_direct_messages: DirectMessagePolicy,
 }
 
 /// One carrier line either finished synchronously or remains owned by an

@@ -12,14 +12,16 @@ use agenc_ircd_auth::{
     CHANNEL_KEY_SALT_BYTES as AUTH_CHANNEL_SALT_BYTES, OpaqueProfile, derive_channel_key_verifier,
 };
 use agenc_ircd_config::{
-    Config, ConfigError, ConfigReport, DEFAULT_REDB_CACHE_BYTES, LimitKey,
+    Config, ConfigError, ConfigReport, DEFAULT_REDB_CACHE_BYTES, DirectMessageDefault, LimitKey,
     ListenerBind as ConfigListenerBind, ListenerPurpose as ConfigListenerPurpose, NodeRole,
-    RATE_ROWS, SecretSet, ValidationDepth, apply_process_hardening, load_config,
+    RATE_ROWS, RegistrationPolicy, SecretSet, ValidationDepth, apply_process_hardening,
+    load_config,
 };
 use agenc_ircd_crypto::{
-    AccountHpkePrivateKey, CryptoError, CryptoWorkerConfig, LoginIndexKey, OpaqueFakeCredentialKey,
-    OsEntropy, RollbackGuardRootKey, StorageMasterKey,
+    AccountHpkePrivateKey, CryptoError, CryptoWorkerConfig, Ed25519PublicKey, LoginIndexKey,
+    OpaqueFakeCredentialKey, OsEntropy, RollbackGuardRootKey, StorageMasterKey,
 };
+use agenc_ircd_domain::{DirectMessagePolicy, GuestDirectMessagePolicy, PresencePolicy};
 use agenc_ircd_storage::{
     StateDirectory, StorageEngineLimits, StorageError, StorageOpenConfig, StorageOwner,
     embedded_storage_qualifications,
@@ -31,6 +33,7 @@ use zeroize::Zeroizing;
 
 use crate::RuntimeError;
 use crate::StateCoreSeed;
+use crate::account_service::AccountCreationPolicy;
 use crate::admission::{BucketKind, BucketRate, RateLimits, TransportAdmission};
 use crate::bridge::crypto::{
     CHANNEL_KEY_ARGON2_ITERATIONS, CHANNEL_KEY_ARGON2_MEMORY_KIB, CHANNEL_KEY_ARGON2_PARALLELISM,
@@ -393,6 +396,9 @@ fn account_service_config(
     let origin_id = OriginId::generate(&mut entropy)
         .map_err(|_| DaemonError::Cryptography(CryptoError::EntropyUnavailable))?;
     let storage = seed.storage();
+    let creation_policy = creation_policy(config, secrets)?;
+    let (default_presence, default_guest_direct_messages, default_direct_messages) =
+        account_defaults(config);
     Ok(AccountServiceConfig {
         network_id: config.network.network_id,
         server_id: config.server.server_id,
@@ -410,7 +416,54 @@ fn account_service_config(
             .map(|key| Arc::new(LoginIndexKey::from_bytes(*key.expose()))),
         fake_credential_key: Arc::new(OpaqueFakeCredentialKey::from_bytes(*fake_key.expose())),
         login_index_key_state: reconstruction.account_service.login_index_key_state(),
+        creation_policy,
+        default_presence,
+        default_guest_direct_messages,
+        default_direct_messages,
     })
+}
+
+fn creation_policy(
+    config: &Config,
+    secrets: &SecretSet,
+) -> Result<AccountCreationPolicy, DaemonError> {
+    match config.accounts.registration {
+        RegistrationPolicy::Open => Ok(AccountCreationPolicy::Open),
+        RegistrationPolicy::Invite => {
+            let key = secrets
+                .invitation_verification()
+                .ok_or(DaemonError::UnsupportedProfile)?;
+            Ok(AccountCreationPolicy::Invite(Ed25519PublicKey::from_bytes(
+                *key.expose(),
+            )?))
+        }
+        RegistrationPolicy::Closed => Ok(AccountCreationPolicy::Closed),
+    }
+}
+
+const fn account_defaults(
+    config: &Config,
+) -> (
+    PresencePolicy,
+    GuestDirectMessagePolicy,
+    DirectMessagePolicy,
+) {
+    let presence = if config.accounts.default_public_presence {
+        PresencePolicy::Public
+    } else {
+        PresencePolicy::Private
+    };
+    let guest_direct_messages = if config.accounts.default_allow_guest_dm {
+        GuestDirectMessagePolicy::Allow
+    } else {
+        GuestDirectMessagePolicy::Deny
+    };
+    let direct_messages = match config.accounts.default_direct_messages {
+        DirectMessageDefault::Allow => DirectMessagePolicy::Allow,
+        DirectMessageDefault::Contacts => DirectMessagePolicy::Contacts,
+        DirectMessageDefault::Deny => DirectMessagePolicy::Deny,
+    };
+    (presence, guest_direct_messages, direct_messages)
 }
 
 struct ReviewedChannelKeyVerifier;

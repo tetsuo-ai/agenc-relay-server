@@ -111,6 +111,10 @@ fn host_depth_accepts_the_populated_layout_and_loads_every_secret() -> TestResul
     assert!(secrets.federation_signing().is_none());
     assert!(secrets.access_token().is_none());
     assert_eq!(
+        secrets.invitation_verification().map(|key| key.expose()),
+        Some(&[0x11; 32])
+    );
+    assert_eq!(
         secrets
             .account_service_hpke_private()
             .map(|key| key.expose()),

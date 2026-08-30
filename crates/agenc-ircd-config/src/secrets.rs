@@ -156,6 +156,63 @@ fn secret_32(path: &Path) -> Result<(SecretBytes32, FileIdentity), ConfigError> 
     Ok((SecretBytes32(key), identity))
 }
 
+fn trusted_32(path: &Path) -> Result<(SecretBytes32, FileIdentity), ConfigError> {
+    let (before, before_mode) = trusted_metadata(path)?;
+    let (file, identity) = open_same_trusted_file(path, &before, before_mode)?;
+    let bytes = read_once(file, SecretLength::Exact(32))?;
+    let mut key = Zeroizing::new([0_u8; 32]);
+    key.copy_from_slice(&bytes);
+    Ok((SecretBytes32(key), identity))
+}
+
+fn trusted_metadata(path: &Path) -> Result<(fs::Metadata, u32), ConfigError> {
+    if !path.is_absolute() || path.components().any(is_unsafe_component) {
+        return Err(ConfigError::FileRejected);
+    }
+    let before = fs::symlink_metadata(path).map_err(|_| ConfigError::FileRejected)?;
+    let before_mode = before.permissions().mode() & 0o7777;
+    if !before.file_type().is_file()
+        || before.file_type().is_symlink()
+        || before.len() != 32
+        || before_mode & 0o022 != 0
+        || !owned_by_daemon_or_root(before.uid())
+    {
+        return Err(ConfigError::FileRejected);
+    }
+    Ok((before, before_mode))
+}
+
+fn open_same_trusted_file(
+    path: &Path,
+    before: &fs::Metadata,
+    before_mode: u32,
+) -> Result<(fs::File, FileIdentity), ConfigError> {
+    let fd = openat(
+        CWD,
+        path,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| ConfigError::FileRejected)?;
+    let after = fstat(&fd).map_err(|_| ConfigError::FileRejected)?;
+    let same = FileType::from_raw_mode(after.st_mode) == FileType::RegularFile
+        && after.st_dev == before.dev()
+        && after.st_ino == before.ino()
+        && after.st_uid == before.uid()
+        && after.st_size == 32
+        && after.st_mode & 0o7777 == before_mode;
+    if !same {
+        return Err(ConfigError::FileRejected);
+    }
+    Ok((
+        fs::File::from(fd),
+        FileIdentity {
+            device: before.dev(),
+            inode: before.ino(),
+        },
+    ))
+}
+
 fn secret_blob(path: &Path) -> Result<(SecretBlob, FileIdentity), ConfigError> {
     let (bytes, identity) = open_secret_file(path, SecretLength::AtMost(MAX_SECRET_BLOB_BYTES))?;
     Ok((SecretBlob(bytes), identity))
@@ -171,6 +228,7 @@ pub struct SecretSet {
     audit_signing: SecretBytes32,
     federation_signing: Option<SecretBytes32>,
     access_token: Option<SecretBytes32>,
+    invitation_verification: Option<SecretBytes32>,
     account_service_hpke_private: Option<SecretBytes32>,
     opaque_fake_credential: Option<SecretBytes32>,
     opaque_server_setup: Option<SecretBlob>,
@@ -208,6 +266,7 @@ impl SecretSet {
             audit_signing: required.audit_signing?,
             federation_signing: optional.federation_signing?,
             access_token: optional.access_token?,
+            invitation_verification: optional.invitation_verification?,
             account_service_hpke_private: optional.account_service_hpke_private?,
             opaque_fake_credential: optional.opaque_fake_credential?,
             opaque_server_setup: optional.opaque_server_setup?,
@@ -264,6 +323,12 @@ impl SecretSet {
         self.access_token.as_ref()
     }
 
+    /// Account-creation invitation verification key bytes when configured.
+    #[must_use]
+    pub fn invitation_verification(&self) -> Option<&SecretBytes32> {
+        self.invitation_verification.as_ref()
+    }
+
     /// Coordinator account-service HPKE private key bytes.
     #[must_use]
     pub fn account_service_hpke_private(&self) -> Option<&SecretBytes32> {
@@ -310,6 +375,7 @@ struct RequiredKeys {
 struct OptionalKeys {
     federation_signing: Option<Option<SecretBytes32>>,
     access_token: Option<Option<SecretBytes32>>,
+    invitation_verification: Option<Option<SecretBytes32>>,
     account_service_hpke_private: Option<Option<SecretBytes32>>,
     opaque_fake_credential: Option<Option<SecretBytes32>>,
     opaque_server_setup: Option<Option<SecretBlob>>,
@@ -378,6 +444,23 @@ impl Loader {
         stage4(sink, key, result).map(Some)
     }
 
+    fn optional_trusted32(
+        &mut self,
+        sink: &mut IssueSink,
+        table: &'static str,
+        field: &'static str,
+        path: Option<&Path>,
+    ) -> Option<Option<SecretBytes32>> {
+        let Some(path) = path else {
+            return Some(None);
+        };
+        let result = trusted_32(path).and_then(|(key, identity)| {
+            self.register(identity, key.expose())?;
+            Ok(key)
+        });
+        stage4(sink, SchemaKey::new(table, field), result).map(Some)
+    }
+
     fn required_keys(&mut self, sink: &mut IssueSink, config: &Config) -> RequiredKeys {
         let storage = &config.storage;
         RequiredKeys {
@@ -434,6 +517,12 @@ impl Loader {
                 "accounts",
                 "access_token_key_file",
                 accounts.access_token_key_file.as_deref(),
+            ),
+            invitation_verification: self.optional_trusted32(
+                sink,
+                "accounts",
+                "invite_verification_key_file",
+                accounts.invite_verification_key_file.as_deref(),
             ),
             account_service_hpke_private: self.optional32(
                 sink,
