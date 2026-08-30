@@ -61,6 +61,7 @@ pub const RECONSTRUCTED_TABLES: [TableId; 12] = [
 pub struct AccountServiceReconstruction {
     login_index_key_state: LoginIndexKeyState,
     fake_opaque_record: [u8; OPAQUE_REGISTRATION_RECORD_BYTES],
+    live_login_keys: BTreeMap<AccountId, StoredKey>,
     startup_transaction_cleanups: Vec<RecoveredAccountTransactionCleanup>,
 }
 
@@ -75,6 +76,12 @@ impl AccountServiceReconstruction {
     #[must_use]
     pub const fn fake_opaque_record(&self) -> &[u8; OPAQUE_REGISTRATION_RECORD_BYTES] {
         &self.fake_opaque_record
+    }
+
+    /// Borrows the one validated live private login-index key for each account.
+    #[must_use]
+    pub const fn live_login_keys(&self) -> &BTreeMap<AccountId, StoredKey> {
+        &self.live_login_keys
     }
 
     /// Returns the authenticated connection-bound rows that must be deleted
@@ -134,6 +141,10 @@ pub struct Reconstruction {
 struct AccountServiceScan {
     login_index_key_state: Option<LoginIndexKeyState>,
     fake_opaque_record: Option<[u8; OPAQUE_REGISTRATION_RECORD_BYTES]>,
+    live_accounts: BTreeSet<AccountId>,
+    live_login_keys: BTreeMap<AccountId, StoredKey>,
+    opaque_accounts: BTreeSet<AccountId>,
+    login_entry_counts: BTreeMap<u32, u64>,
     transactions: BTreeMap<TransactionId, RecoveredTransaction>,
     login_reservations: BTreeMap<TransactionId, RecoveredLoginReservation>,
     invitation_reservations: BTreeMap<TransactionId, RecoveredInvitationReservation>,
@@ -144,12 +155,28 @@ impl AccountServiceScan {
         let Self {
             login_index_key_state,
             fake_opaque_record,
+            live_accounts,
+            live_login_keys,
+            opaque_accounts,
+            login_entry_counts,
             transactions,
             login_reservations,
             invitation_reservations,
         } = self;
         let login_index_key_state =
             login_index_key_state.ok_or(RuntimeError::Storage(StorageError::StaleState))?;
+        validate_login_index_generations(login_index_key_state, &login_entry_counts)?;
+        if live_accounts.len() != live_login_keys.len()
+            || live_accounts.len() != opaque_accounts.len()
+            || live_accounts
+                .iter()
+                .any(|account_id| !live_login_keys.contains_key(account_id))
+            || live_login_keys
+                .keys()
+                .any(|account_id| !opaque_accounts.contains(account_id))
+        {
+            return Err(RuntimeError::Storage(StorageError::StaleState));
+        }
         let startup_transaction_cleanups = recover_account_transaction_cleanups(
             transactions,
             login_index_key_state,
@@ -160,9 +187,29 @@ impl AccountServiceScan {
             login_index_key_state,
             fake_opaque_record: fake_opaque_record
                 .ok_or(RuntimeError::Storage(StorageError::StaleState))?,
+            live_login_keys,
             startup_transaction_cleanups,
         })
     }
+}
+
+fn validate_login_index_generations(
+    key_state: LoginIndexKeyState,
+    entry_counts: &BTreeMap<u32, u64>,
+) -> Result<(), RuntimeError> {
+    let current = key_state.current_generation();
+    let previous = key_state.previous();
+    if entry_counts.keys().any(|generation| {
+        *generation != current && previous.is_none_or(|value| *generation != value.0)
+    }) {
+        return Err(RuntimeError::Storage(StorageError::StaleState));
+    }
+    if let Some((previous_generation, expected_count)) = previous
+        && entry_counts.get(&previous_generation).copied().unwrap_or(0) != expected_count
+    {
+        return Err(RuntimeError::Storage(StorageError::StaleState));
+    }
+    Ok(())
 }
 
 enum RecoveredTransaction {
@@ -438,26 +485,7 @@ impl Scan {
         }
         let opened = keys.open(table, &key, &envelope)?;
         if table == TableId::LoginIndex {
-            let stored_key = LoginIndexStoredKey::decode(key.as_bytes())?;
-            let value = LoginIndexValue::decode(opened.expose_for_storage_codec(), &stored_key)?;
-            if let LoginIndexValueKind::CreationReservation {
-                transaction_id,
-                expires_at,
-            } = value.kind()
-                && self
-                    .account_service
-                    .login_reservations
-                    .insert(
-                        *transaction_id,
-                        RecoveredLoginReservation {
-                            key: key.clone(),
-                            expires_at: *expires_at,
-                        },
-                    )
-                    .is_some()
-            {
-                return Err(RuntimeError::Storage(StorageError::StaleState));
-            }
+            self.admit_login_index(&key, opened.expose_for_storage_codec())?;
             self.index.record_known(table, key, existing);
             return Ok(());
         }
@@ -499,6 +527,51 @@ impl Scan {
             (TableId::Session | TableId::RequestResult, _) => Ok(()),
             _ => Err(RuntimeError::Storage(StorageError::InvalidEncoding)),
         }
+    }
+
+    fn admit_login_index(&mut self, key: &StoredKey, opened: &[u8]) -> Result<(), RuntimeError> {
+        let stored_key = LoginIndexStoredKey::decode(key.as_bytes())?;
+        let value = LoginIndexValue::decode(opened, &stored_key)?;
+        let count = self
+            .account_service
+            .login_entry_counts
+            .entry(value.generation())
+            .or_insert(0);
+        *count = count.checked_add(1).ok_or(RuntimeError::Overflow)?;
+        match value.kind() {
+            LoginIndexValueKind::Live { account_id, .. } => {
+                if !self.accounts.contains_key(account_id)
+                    || self
+                        .account_service
+                        .live_login_keys
+                        .insert(*account_id, key.clone())
+                        .is_some()
+                {
+                    return Err(RuntimeError::Storage(StorageError::StaleState));
+                }
+            }
+            LoginIndexValueKind::CreationReservation {
+                transaction_id,
+                expires_at,
+            } => {
+                if self
+                    .account_service
+                    .login_reservations
+                    .insert(
+                        *transaction_id,
+                        RecoveredLoginReservation {
+                            key: key.clone(),
+                            expires_at: *expires_at,
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(RuntimeError::Storage(StorageError::StaleState));
+                }
+            }
+            LoginIndexValueKind::DeletionTombstone { .. } => {}
+        }
+        Ok(())
     }
 
     fn admit_auth_transaction(
@@ -716,14 +789,48 @@ impl Scan {
         let record = OpaqueRegistrationRecord::from_bytes(encoded)
             .map_err(|_| RuntimeError::Storage(StorageError::InvalidEncoding))?;
         if key.as_bytes() == OPAQUE_FAKE_RECORD_KEY {
-            if value.generation() != 0
-                || value.expires_at().is_some()
-                || !value.references().is_empty()
-                || self.account_service.fake_opaque_record.is_some()
-            {
-                return Err(RuntimeError::Storage(StorageError::StaleState));
-            }
-            self.account_service.fake_opaque_record = Some(*record.expose_for_persistence());
+            return self.admit_fake_opaque_record(value, &record);
+        }
+        self.admit_live_opaque_record(key, value)
+    }
+
+    fn admit_fake_opaque_record(
+        &mut self,
+        value: &PersistentRecordValue,
+        record: &OpaqueRegistrationRecord,
+    ) -> Result<(), RuntimeError> {
+        if value.generation() != 0
+            || value.expires_at().is_some()
+            || !value.references().is_empty()
+            || self.account_service.fake_opaque_record.is_some()
+        {
+            return Err(RuntimeError::Storage(StorageError::StaleState));
+        }
+        self.account_service.fake_opaque_record = Some(*record.expose_for_persistence());
+        Ok(())
+    }
+
+    fn admit_live_opaque_record(
+        &mut self,
+        key: &StoredKey,
+        value: &PersistentRecordValue,
+    ) -> Result<(), RuntimeError> {
+        let account_id = AccountId::parse_wire_bytes(key.as_bytes())
+            .map_err(|_| RuntimeError::Storage(StorageError::InvalidEncoding))?;
+        let account = self
+            .accounts
+            .get(&account_id)
+            .ok_or(RuntimeError::Storage(StorageError::StaleState))?;
+        let [reference] = value.references() else {
+            return Err(RuntimeError::Storage(StorageError::StaleState));
+        };
+        if value.generation() != account.session_generation.get()
+            || value.expires_at().is_some()
+            || reference.table() != TableId::Account
+            || reference.key() != key
+            || !self.account_service.opaque_accounts.insert(account_id)
+        {
+            return Err(RuntimeError::Storage(StorageError::StaleState));
         }
         Ok(())
     }
@@ -741,7 +848,12 @@ impl Scan {
             return Err(RuntimeError::Storage(StorageError::StaleState));
         }
         self.account_keys.insert(key, account.account_id);
-        if self.accounts.insert(account.account_id, account).is_some() {
+        if !self
+            .account_service
+            .live_accounts
+            .insert(account.account_id)
+            || self.accounts.insert(account.account_id, account).is_some()
+        {
             return Err(RuntimeError::Storage(StorageError::StaleState));
         }
         Ok(())
@@ -927,6 +1039,19 @@ mod tests {
                 key,
                 &value.encode()?,
             )?
+            .encode()?)
+    }
+
+    fn seal_raw(
+        table: TableId,
+        key: &StoredKey,
+        value: &[u8],
+        nonce: u8,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        let master = StorageMasterKey::from_bytes(MASTER_BYTES);
+        let context = StorageSealContext::new(&master, binding(), 1)?;
+        Ok(context
+            .seal(table, DOMAIN_RECORD_SCHEMA, [nonce; 24], key, value)?
             .encode()?)
     }
 
@@ -1510,6 +1635,165 @@ mod tests {
                 &seal(TableId::OpaqueRecord, &fake_key, &invalid_value, 11)?,
             ),
             Err(RuntimeError::Storage(StorageError::InvalidEncoding))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn live_login_and_opaque_rows_restore_one_cross_bound_account_key() -> Result<(), RuntimeError>
+    {
+        let keys = keys()?;
+        let account = account(None)?;
+        let account_key = KeyDeriver::account_key(account.account_id)?;
+        let profile = OpaqueProfile::generate(NetworkId::from_bytes([1; 32]))
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let login_key = LoginIndexStoredKey::new(1, LoginIndexDigest::from_storage_key([31; 32]))?;
+        let stored_login_key = login_key.encode()?;
+        let login_value = LoginIndexValue::new(
+            &login_key,
+            LoginIndexValueKind::Live {
+                account_id: account.account_id,
+                opaque_credential_id: agenc_ircd_types::OpaqueCredentialId::from_bytes([32; 32]),
+            },
+        )?;
+        let opaque_value = PersistentRecordValue::new(
+            TableId::OpaqueRecord,
+            LIVE_RECORD_KIND,
+            account.revision.get(),
+            account.session_generation.get(),
+            None,
+            vec![RecordReference::new(TableId::Account, account_key.clone())?],
+            profile.expose_fake_record_for_persistence().to_vec(),
+        )?;
+
+        let mut valid = Scan::default();
+        valid.admit(
+            &keys,
+            TableId::Account,
+            account_key.clone(),
+            &seal(
+                TableId::Account,
+                &account_key,
+                &account_value(&account)?,
+                32,
+            )?,
+        )?;
+        valid.admit(
+            &keys,
+            TableId::LoginIndex,
+            stored_login_key.clone(),
+            &seal_raw(
+                TableId::LoginIndex,
+                &stored_login_key,
+                &login_value.encode()?,
+                33,
+            )?,
+        )?;
+        valid.admit(
+            &keys,
+            TableId::OpaqueRecord,
+            account_key.clone(),
+            &seal(TableId::OpaqueRecord, &account_key, &opaque_value, 34)?,
+        )?;
+        valid.account_service.login_index_key_state = Some(LoginIndexKeyState::stable(
+            1,
+            LoginIndexKeyId::from_bytes([35; 32]),
+        )?);
+        valid.account_service.fake_opaque_record =
+            Some(*profile.expose_fake_record_for_persistence());
+        let reconstructed = valid.account_service.finish()?;
+        assert!(
+            reconstructed.live_login_keys().get(&account.account_id) == Some(&stored_login_key)
+        );
+
+        let mut orphan_account = Scan::default();
+        orphan_account.admit(
+            &keys,
+            TableId::Account,
+            account_key.clone(),
+            &seal(
+                TableId::Account,
+                &account_key,
+                &account_value(&account)?,
+                35,
+            )?,
+        )?;
+        orphan_account.account_service.login_index_key_state = Some(LoginIndexKeyState::stable(
+            1,
+            LoginIndexKeyId::from_bytes([36; 32]),
+        )?);
+        orphan_account.account_service.fake_opaque_record =
+            Some(*profile.expose_fake_record_for_persistence());
+        assert!(matches!(
+            orphan_account.account_service.finish(),
+            Err(RuntimeError::Storage(StorageError::StaleState))
+        ));
+
+        let mut missing_account = Scan::default();
+        assert!(matches!(
+            missing_account.admit(
+                &keys,
+                TableId::LoginIndex,
+                stored_login_key.clone(),
+                &seal_raw(
+                    TableId::LoginIndex,
+                    &stored_login_key,
+                    &login_value.encode()?,
+                    37,
+                )?,
+            ),
+            Err(RuntimeError::Storage(StorageError::StaleState))
+        ));
+
+        let mut missing_reference = Scan::default();
+        missing_reference.admit(
+            &keys,
+            TableId::Account,
+            account_key.clone(),
+            &seal(
+                TableId::Account,
+                &account_key,
+                &account_value(&account)?,
+                38,
+            )?,
+        )?;
+        let opaque_without_reference = PersistentRecordValue::new(
+            TableId::OpaqueRecord,
+            LIVE_RECORD_KIND,
+            account.revision.get(),
+            account.session_generation.get(),
+            None,
+            Vec::new(),
+            profile.expose_fake_record_for_persistence().to_vec(),
+        )?;
+        assert!(matches!(
+            missing_reference.admit(
+                &keys,
+                TableId::OpaqueRecord,
+                account_key.clone(),
+                &seal(
+                    TableId::OpaqueRecord,
+                    &account_key,
+                    &opaque_without_reference,
+                    39,
+                )?,
+            ),
+            Err(RuntimeError::Storage(StorageError::StaleState))
+        ));
+        let stable = LoginIndexKeyState::stable(1, LoginIndexKeyId::from_bytes([40; 32]))?;
+        assert!(matches!(
+            validate_login_index_generations(stable, &BTreeMap::from([(2, 1)])),
+            Err(RuntimeError::Storage(StorageError::StaleState))
+        ));
+        let transition = LoginIndexKeyState::transition(
+            1,
+            LoginIndexKeyId::from_bytes([41; 32]),
+            LoginIndexKeyId::from_bytes([42; 32]),
+            2,
+        )?;
+        assert!(matches!(
+            validate_login_index_generations(transition, &BTreeMap::from([(1, 1)])),
+            Err(RuntimeError::Storage(StorageError::StaleState))
         ));
         Ok(())
     }

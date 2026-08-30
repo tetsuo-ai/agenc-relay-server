@@ -124,6 +124,8 @@ pub struct AccountServiceConfig {
     pub fake_credential_key: Arc<OpaqueFakeCredentialKey>,
     /// Authenticated startup key-generation state.
     pub login_index_key_state: LoginIndexKeyState,
+    /// One validated live private login-index key for each account.
+    pub live_login_keys: BTreeMap<AccountId, StoredKey>,
     /// Fully validated connection-bound rows left by the prior process.
     pub startup_transaction_cleanups: Vec<RecoveredAccountTransactionCleanup>,
     /// Deployment account-creation policy and optional invitation authority.
@@ -353,6 +355,12 @@ struct LiveCreation {
 struct LiveCredentialChange {
     transaction: AccountTransaction<CredentialChangeState>,
     reservation: Option<AccountId>,
+}
+
+struct CommittedLoginIndexMigration {
+    account_id: AccountId,
+    previous_key: StoredKey,
+    current_key: StoredKey,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -796,6 +804,7 @@ enum PendingAuthority {
         sasl_accepted: bool,
         fresh_auth_session: Option<(agenc_ircd_types::UserId, Generation, AccountId)>,
         resulting_key_state: Option<LoginIndexKeyState>,
+        login_index_migration: Option<CommittedLoginIndexMigration>,
     },
 }
 
@@ -4402,6 +4411,7 @@ impl AccountServiceCoordinator {
             transaction_write,
             request_result_write(revision, &request, terminal, None, response)?,
         ];
+        let mut login_index_migration = None;
         let resulting_key_state = if let (Some(grant), Some(previous_value)) =
             (semantic_grant, previous_value.as_ref())
         {
@@ -4434,6 +4444,11 @@ impl AccountServiceCoordinator {
                 StoredKey::new(LOGIN_INDEX_KEY_STATE_KEY.to_vec())?,
                 migration.resulting_key_state().encode()?,
             )?);
+            login_index_migration = Some(CommittedLoginIndexMigration {
+                account_id: grant.account_id(),
+                previous_key: migration.previous_key().clone(),
+                current_key: migration.current_key().clone(),
+            });
             Some(migration.resulting_key_state())
         } else {
             None
@@ -4471,6 +4486,7 @@ impl AccountServiceCoordinator {
             sasl_accepted,
             fresh_auth_session,
             resulting_key_state,
+            login_index_migration,
         });
         Ok(())
     }
@@ -4731,19 +4747,33 @@ impl AccountServiceCoordinator {
         carrier_generation: u64,
         transaction_id: TransactionId,
         sealed: SealedAccountFinishOutcome<CreateAccountIntent>,
+        reservation: Option<CreationReservation>,
     ) -> CarrierCompletion {
-        let close = self
+        let release_failed = self
             .release_finished_transaction(
                 generation,
                 LiveTransactionClass::Creation,
                 transaction_id,
             )
-            .is_err()
-            || sealed.into_result_after_commit(committed_count).is_err();
+            .is_err();
+        let result = sealed.into_result_after_commit(committed_count);
+        let install_failed = match (result.as_ref(), reservation) {
+            (Ok(Ok(intent)), Some(reservation)) => {
+                let account_id = intent.account_id();
+                self.config.live_login_keys.contains_key(&account_id)
+                    || self
+                        .config
+                        .live_login_keys
+                        .insert(account_id, reservation.login_key)
+                        .is_some()
+            }
+            (Ok(Err(_)), _) => false,
+            _ => true,
+        };
         CarrierCompletion {
             generation,
             carrier_generation,
-            close,
+            close: release_failed || install_failed,
         }
     }
 
@@ -4952,6 +4982,7 @@ impl AccountServiceCoordinator {
         sasl_accepted: bool,
         fresh_auth_session: Option<(agenc_ircd_types::UserId, Generation, AccountId)>,
         resulting_key_state: Option<LoginIndexKeyState>,
+        login_index_migration: Option<CommittedLoginIndexMigration>,
     ) -> CarrierCompletion {
         if self
             .release_finished_transaction(
@@ -4976,6 +5007,23 @@ impl AccountServiceCoordinator {
         };
         if let Some(key_state) = resulting_key_state {
             self.config.login_index_key_state = key_state;
+        }
+        if let Some(migration) = login_index_migration {
+            let valid = result.as_ref().is_ok_and(|grant| {
+                grant.account_id() == migration.account_id
+                    && self.config.live_login_keys.get(&migration.account_id)
+                        == Some(&migration.previous_key)
+            });
+            if !valid {
+                return CarrierCompletion {
+                    generation,
+                    carrier_generation,
+                    close: true,
+                };
+            }
+            self.config
+                .live_login_keys
+                .insert(migration.account_id, migration.current_key);
         }
         let close = match result {
             Ok(grant) if sasl_accepted => self.install_committed_grant(
@@ -5154,13 +5202,14 @@ impl AccountServiceCoordinator {
                 carrier_generation,
                 transaction_id,
                 sealed,
-                reservation: _,
+                reservation,
             } => Some(self.commit_creation_finish(
                 committed_count,
                 generation,
                 carrier_generation,
                 transaction_id,
                 sealed,
+                reservation,
             )),
             PendingAuthority::CredentialStart {
                 generation,
@@ -5226,6 +5275,7 @@ impl AccountServiceCoordinator {
                 sasl_accepted,
                 fresh_auth_session,
                 resulting_key_state,
+                login_index_migration,
             } => Some(self.commit_finish(
                 context,
                 committed_count,
@@ -5237,6 +5287,7 @@ impl AccountServiceCoordinator {
                 sasl_accepted,
                 fresh_auth_session,
                 resulting_key_state,
+                login_index_migration,
             )),
         };
         if let Some(completion) = completion {
