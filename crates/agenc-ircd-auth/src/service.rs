@@ -1613,6 +1613,17 @@ impl AuthenticationGrant {
     pub const fn grant_id_for_persistence_or_session_open(&self) -> &AuthGrantId {
         &self.grant_id
     }
+
+    /// Consumes a durably released authentication grant and returns its
+    /// process-local, one-use destructive-operation proof.
+    ///
+    /// External callers can obtain an owned grant only from
+    /// [`SealedAccountFinishOutcome::into_result_after_commit`], so the proof
+    /// cannot cross the durable completion barrier early.
+    #[must_use]
+    pub fn into_fresh_authentication_after_commit(self) -> FreshAuthenticationProof {
+        self.fresh_authentication
+    }
 }
 
 /// Starts a real-or-fake OPAQUE login without retaining the normalized login.
@@ -1991,10 +2002,10 @@ impl CredentialReplacementIntent {
 
 /// Starts credential replacement after consuming a fresh same-account proof.
 ///
-/// Stage 04 withholds the `FreshAuthenticationProof` accessor, so this entry
-/// point becomes reachable only when Stage 06 consumes an authentication
-/// grant through `session_open`. A grant reconstructed from storage must never
-/// yield a proof; the client reauthenticates before a destructive control.
+/// Stage 06 reaches this entry point only after a sealed authentication grant
+/// crosses its durable completion barrier. A grant reconstructed from storage
+/// must never yield a proof; the client reauthenticates before a destructive
+/// control.
 pub fn begin_credential_change(
     profile: &OpaqueProfile,
     parameters: CredentialChangeStartParameters,

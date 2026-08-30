@@ -11,9 +11,9 @@ use agenc_ircd_auth::{
     ACCOUNT_SERVICE_ENVELOPE_BYTES, ACCOUNT_SERVICE_RESPONSE_BYTES, AccountAuthenticationState,
     AccountCredentialRecord, AccountOperationContext, AccountRouteBinding, AccountServiceEnvelope,
     AccountStartOutcome, AccountTransaction, AuthenticatedAccountRequest, AuthenticationGrant,
-    AuthenticationLookup, AuthenticationStart, AuthenticationStartParameters, OpaqueProfile,
-    OpaqueRegistrationRecord, OpenedAccountServiceRequest, SealedAccountFinishOutcome,
-    SealedAccountStart,
+    AuthenticationLookup, AuthenticationStart, AuthenticationStartParameters,
+    FreshAuthenticationProof, OpaqueProfile, OpaqueRegistrationRecord, OpenedAccountServiceRequest,
+    SealedAccountFinishOutcome, SealedAccountStart,
 };
 use agenc_ircd_client_wire::{
     AccountCarrierAction, AccountCarrierKind, AccountCarrierPhase, AccountTransfer, ParsedMessage,
@@ -294,6 +294,7 @@ struct AccountConnection {
     opaque_attempts: u8,
     transaction: Option<LiveAuthentication>,
     authenticated: Option<AuthenticatedBinding>,
+    fresh_authentication: Option<FreshAuthenticationProof>,
 }
 
 struct RequestContext {
@@ -532,6 +533,7 @@ impl AccountServiceCoordinator {
             opaque_attempts: 0,
             transaction: None,
             authenticated: None,
+            fresh_authentication: None,
         };
         if self.connections.insert(generation, state).is_some() {
             return Err(RuntimeError::InvalidValue);
@@ -2070,7 +2072,7 @@ impl AccountServiceCoordinator {
             Ok(grant) if sasl_accepted => self.install_committed_grant(
                 context,
                 generation,
-                &grant,
+                grant,
                 authenticated_at,
                 fresh_auth_session,
             ),
@@ -2087,7 +2089,7 @@ impl AccountServiceCoordinator {
         &mut self,
         context: &mut StateCoreContext,
         generation: ConnectionGeneration,
-        grant: &AuthenticationGrant,
+        grant: AuthenticationGrant,
         authenticated_at: MonotonicTick,
         fresh_auth_session: Option<(agenc_ircd_types::UserId, Generation, AccountId)>,
     ) -> bool {
@@ -2106,19 +2108,31 @@ impl AccountServiceCoordinator {
                         .ok()
                         .and_then(|fanout| context.apply_ephemeral(plan, fanout).ok())
                 });
-            return applied.is_none();
+            if applied.is_none() {
+                return true;
+            }
+            let Some(connection) = self.connections.get_mut(&generation) else {
+                return true;
+            };
+            connection.fresh_authentication = Some(grant.into_fresh_authentication_after_commit());
+            return false;
         }
         let preregistered = context
             .sessions()
             .connection(generation)
             .is_some_and(|entry| entry.session().is_none());
-        if preregistered && let Some(connection) = self.connections.get_mut(&generation) {
-            connection.authenticated = Some(AuthenticatedBinding {
-                account_id: grant.account_id(),
-                account_session_generation: grant.account_session_generation(),
-                authenticated_at,
-            });
+        if !preregistered {
+            return true;
         }
+        let Some(connection) = self.connections.get_mut(&generation) else {
+            return true;
+        };
+        connection.authenticated = Some(AuthenticatedBinding {
+            account_id: grant.account_id(),
+            account_session_generation: grant.account_session_generation(),
+            authenticated_at,
+        });
+        connection.fresh_authentication = Some(grant.into_fresh_authentication_after_commit());
         false
     }
 
