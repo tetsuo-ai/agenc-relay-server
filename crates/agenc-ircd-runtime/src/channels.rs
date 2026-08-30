@@ -779,13 +779,48 @@ fn execute_planned_command(
         &plan,
     )?;
     match plan.storage_class() {
-        StorageClass::Ephemeral => context
-            .apply_ephemeral(plan, fanout)
-            .map(|_| true)
-            .map_err(|_| RuntimeError::InvalidValue),
+        StorageClass::Ephemeral => match context.apply_ephemeral(plan, fanout) {
+            Ok(_) => Ok(true),
+            Err(error) => render_ephemeral_refusal(context, bound, reply, error),
+        },
         StorageClass::Durable => {
             stage_durable_command(context, accounts, bound, plan, fanout, reply)
         }
+    }
+}
+
+fn render_ephemeral_refusal(
+    context: &mut StateCoreContext,
+    bound: BoundSession,
+    reply: Option<ClientReply<'_>>,
+    error: crate::state_core::EphemeralRefused,
+) -> Result<bool, RuntimeError> {
+    let Some(reply) = reply else {
+        return Err(match error {
+            crate::state_core::EphemeralRefused::Fanout(_) => RuntimeError::MemoryExhausted,
+            crate::state_core::EphemeralRefused::Domain(_) => RuntimeError::InvalidValue,
+        });
+    };
+    let error = ephemeral_refusal_error(error)?;
+    crate::client_render::render_domain_failure(
+        context,
+        reply.render_input(bound.user_id),
+        error,
+        reply.request.message.command() == "NOTICE",
+        None,
+    )?;
+    Ok(false)
+}
+
+fn ephemeral_refusal_error(
+    error: crate::state_core::EphemeralRefused,
+) -> Result<DomainError, RuntimeError> {
+    match error {
+        crate::state_core::EphemeralRefused::Fanout(_) => Ok(DomainError::ServerBusy),
+        crate::state_core::EphemeralRefused::Domain(error) => match domain_plan_error(error) {
+            SessionCommandError::Public { error, .. } => Ok(error),
+            SessionCommandError::Internal(error) => Err(error),
+        },
     }
 }
 
@@ -1316,7 +1351,25 @@ mod tests {
     use super::*;
     use crate::admission::{BucketTable, RateLimits};
     use crate::bridge::crypto::ChannelKeyVerdict;
+    use crate::state_core::EphemeralRefused;
+    use crate::state_core::fanout::FanoutRefused;
     use crate::state_core::inbox::SourceAddressKey;
+
+    #[test]
+    fn ephemeral_refusals_are_public_only_when_safe() {
+        assert!(matches!(
+            ephemeral_refusal_error(EphemeralRefused::Fanout(FanoutRefused::MemoryExhausted)),
+            Ok(DomainError::ServerBusy)
+        ));
+        assert!(matches!(
+            ephemeral_refusal_error(EphemeralRefused::Domain(DomainError::Forbidden)),
+            Ok(DomainError::Forbidden)
+        ));
+        assert!(matches!(
+            ephemeral_refusal_error(EphemeralRefused::Domain(DomainError::InvariantViolation)),
+            Err(RuntimeError::InvalidValue)
+        ));
+    }
 
     #[test]
     fn durable_stage_refusals_are_public_only_when_safe() {
