@@ -205,6 +205,22 @@ impl AccountTransactionBinding {
             expires_at,
         }
     }
+
+    pub(crate) const fn restore(
+        transaction_id: TransactionId,
+        class: TransactionClass,
+        network_id: NetworkId,
+        route: AccountRouteBinding,
+        expires_at: MonotonicTick,
+    ) -> Self {
+        Self {
+            transaction_id,
+            class,
+            network_id,
+            route,
+            expires_at,
+        }
+    }
 }
 
 /// Secret-capable state consumed exactly once on success or failure.
