@@ -325,6 +325,33 @@ impl SealedAccountStart<AccountCreationState> {
     ) -> Result<CreationTransactionRecord, AuthError> {
         CreationTransactionRecord::capture(&self.transaction, now, now_utc)
     }
+
+    /// Borrows the keyed login digest only when START admitted a reservation.
+    #[must_use]
+    pub fn creation_reservation_login_digest(&self) -> Option<&LoginIndexDigest> {
+        self.transaction.state_ref().and_then(|state| {
+            state
+                .disposition
+                .rejection()
+                .is_none()
+                .then_some(&state.login_digest)
+        })
+    }
+
+    /// Returns verified invitation metadata only when START admitted its
+    /// corresponding reservation.
+    #[must_use]
+    pub fn creation_reservation_invitation(&self) -> Option<(InviteId, UtcSecond)> {
+        self.transaction.state_ref().and_then(|state| {
+            state
+                .disposition
+                .rejection()
+                .is_none()
+                .then_some(state.invitation.as_ref())
+                .flatten()
+                .map(|invitation| (invitation.invite_id, invitation.expires_at))
+        })
+    }
 }
 
 impl SealedAccountStart<CredentialChangeState> {

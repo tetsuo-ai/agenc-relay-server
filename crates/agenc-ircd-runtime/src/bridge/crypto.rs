@@ -20,7 +20,7 @@ use agenc_ircd_auth::{
     AccountFinishOutcome, AccountOperationContext, AccountServiceEnvelope, AccountStartOutcome,
     AccountTransaction, AuthError, AuthenticatedAccountRequest, AuthenticationFinish,
     AuthenticationGrant, AuthenticationStartParameters, CreateAccountIntent, CreationFinish,
-    CredentialChangeFinish, CredentialChangeStartParameters, CredentialChangeState,
+    CreationStart, CredentialChangeFinish, CredentialChangeStartParameters, CredentialChangeState,
     CredentialReplacementIntent, OpaqueProfile, OpenedAccountServiceRequest,
     SealedAccountFinishOutcome, SealedAccountStart, begin_account_creation, begin_authentication,
     begin_credential_change, finish_account_authentication, finish_account_creation,
@@ -29,11 +29,12 @@ use agenc_ircd_auth::{
 use agenc_ircd_crypto::{
     ACCOUNT_HPKE_RESPONSE_PLAINTEXT_BYTES, AccountHpkePrivateKey, AccountResponseSealToken,
     BoundedCryptoPool, CRYPTO_WORKER_RESERVED_BYTES, CryptoError, CryptoJob, CryptoPort,
-    CryptoWorkerConfig, CryptoWorkerError, JobCancellationToken, JobClass, LoginIndexKey,
-    OpaqueFakeCredentialKey, SealedAccountResponse,
+    CryptoWorkerConfig, CryptoWorkerError, Ed25519PublicKey, JobCancellationToken, JobClass,
+    LoginIndexKey, OpaqueFakeCredentialKey, SealedAccountResponse,
 };
 use agenc_ircd_types::{
-    AccountServiceMessageKind, AccountServiceResponseKind, NetworkId, RecoveryEpoch,
+    AccountServiceMessageKind, AccountServiceResponseKind, InviteId, NetworkId, RecoveryEpoch,
+    UtcSecond,
 };
 use subtle::ConstantTimeEq as _;
 use tokio::sync::mpsc;
@@ -387,6 +388,59 @@ pub struct CreationStartJob {
     parameters: AccountCreationStartParameters,
 }
 
+/// One invitation verification preflight used only to derive the authenticated
+/// account-creation rate key.
+pub struct CreationPreflightJob {
+    request: AuthenticatedAccountRequest<CreationStart>,
+    authority: Ed25519PublicKey,
+    network_id: NetworkId,
+    now: UtcSecond,
+}
+
+impl CreationPreflightJob {
+    /// Binds one opened request to the configured offline invitation authority.
+    #[must_use]
+    pub fn new(
+        request: AuthenticatedAccountRequest<CreationStart>,
+        authority: Ed25519PublicKey,
+        network_id: NetworkId,
+        now: UtcSecond,
+    ) -> Self {
+        Self {
+            request,
+            authority,
+            network_id,
+            now,
+        }
+    }
+
+    fn execute(self) -> CreationPreflightOutput {
+        let verified_invite = self
+            .request
+            .payload()
+            .invitation
+            .as_ref()
+            .and_then(|invite| {
+                invite
+                    .verify(self.authority, self.network_id, self.now)
+                    .is_ok()
+                    .then_some(invite.invite_id())
+            });
+        CreationPreflightOutput {
+            request: self.request,
+            verified_invite,
+        }
+    }
+}
+
+/// The opened request and optional signature-verified invitation rate key.
+pub struct CreationPreflightOutput {
+    /// The request retaining its one-use response authority.
+    pub request: AuthenticatedAccountRequest<CreationStart>,
+    /// The verified invitation identity; invalid or absent invitations have no key.
+    pub verified_invite: Option<InviteId>,
+}
+
 impl CreationStartJob {
     /// Binds the shared coordinator keys to one creation start.
     #[must_use]
@@ -626,6 +680,8 @@ pub enum RuntimeCryptoJob {
     OpaqueFinishSeal(Box<OpaqueFinishSealJob>),
     /// One account-creation start.
     CreationStart(Box<CreationStartJob>),
+    /// One invitation verification preflight.
+    CreationPreflight(Box<CreationPreflightJob>),
     /// One account-creation START response seal.
     CreationStartSeal(Box<CreationStartSealJob>),
     /// One account-creation finish.
@@ -662,6 +718,8 @@ pub enum CryptoJobOutput {
     OpaqueFinishSealed(Box<Result<SealedAccountFinishOutcome<AuthenticationGrant>, AuthError>>),
     /// A creation start outcome.
     CreationStart(Box<Result<AccountStartOutcome<AccountCreationState>, AuthError>>),
+    /// An invitation verification preflight result.
+    CreationPreflight(Box<CreationPreflightOutput>),
     /// A creation START with its one-use challenge sealed.
     CreationStartSealed(Box<Result<SealedAccountStart<AccountCreationState>, AuthError>>),
     /// A creation finish outcome with its transaction.
@@ -693,6 +751,7 @@ impl CryptoJob for RuntimeCryptoJob {
             | Self::OpaqueFinish(_)
             | Self::OpaqueFinishSeal(_)
             | Self::CreationStart(_)
+            | Self::CreationPreflight(_)
             | Self::CreationStartSeal(_)
             | Self::CreationFinish(_)
             | Self::CreationFinishSeal(_)
@@ -718,6 +777,9 @@ impl CryptoJob for RuntimeCryptoJob {
                 CryptoJobOutput::OpaqueFinishSealed(Box::new(job.execute()))
             }
             Self::CreationStart(job) => CryptoJobOutput::CreationStart(Box::new(job.execute())),
+            Self::CreationPreflight(job) => {
+                CryptoJobOutput::CreationPreflight(Box::new(job.execute()))
+            }
             Self::CreationStartSeal(job) => {
                 CryptoJobOutput::CreationStartSealed(Box::new(job.execute()))
             }
