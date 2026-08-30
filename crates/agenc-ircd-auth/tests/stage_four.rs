@@ -702,9 +702,9 @@ fn authenticate_account(
         ),
     )?;
     let ke3 = OpaqueKe3::from_bytes(finish.message.serialize().as_slice().try_into()?)?;
-    let mut start: SealedAccountStart<AccountAuthenticationState> = start.seal(0)?;
+    let mut transaction = start.seal(0)?.into_transaction_after_commit(1)?;
     let outcome = finish_account_authentication(
-        start.transaction_mut(),
+        &mut transaction,
         context,
         authenticated_authentication_finish(
             202,
@@ -772,7 +772,7 @@ fn assert_rejected_creation_exchange(
         },
     )?;
     let transaction_id = start.transaction_id();
-    let mut start = start.seal(0)?;
+    let start = start.seal(0)?;
     assert_eq!(
         start.response_intent().response().as_bytes().len(),
         ACCOUNT_SERVICE_RESPONSE_BYTES
@@ -790,7 +790,8 @@ fn assert_rejected_creation_exchange(
             registration_record: copy_record(&fixture.record)?,
         },
     )?;
-    let outcome = finish_account_creation(start.transaction_mut(), operation_context(11)?, finish)?;
+    let mut transaction = start.into_transaction_after_commit(1)?;
+    let outcome = finish_account_creation(&mut transaction, operation_context(11)?, finish)?;
     assert_eq!(outcome.result().err(), Some(expected_error));
     let outcome = outcome.seal(1)?;
     assert_eq!(
@@ -833,7 +834,7 @@ fn assert_rejected_authentication_exchange(
         },
     )?;
     let transaction_id = start.transaction_id();
-    let mut start = start.seal(0)?;
+    let start = start.seal(0)?;
     assert_eq!(
         start.response_intent().response().as_bytes().len(),
         ACCOUNT_SERVICE_RESPONSE_BYTES
@@ -851,8 +852,8 @@ fn assert_rejected_authentication_exchange(
             ke3: OpaqueKe3::from_bytes([0_u8; 64])?,
         },
     )?;
-    let outcome =
-        finish_account_authentication(start.transaction_mut(), operation_context(101)?, finish)?;
+    let mut transaction = start.into_transaction_after_commit(1)?;
+    let outcome = finish_account_authentication(&mut transaction, operation_context(101)?, finish)?;
     assert_eq!(
         outcome.result().err(),
         Some(AuthError::AuthenticationFailed)
@@ -938,8 +939,8 @@ fn assert_creation_finish_context_rejected(
             registration_record: copy_record(&fixture.record)?,
         },
     )?;
-    let mut start = start.seal(0)?;
-    let outcome = finish_account_creation(start.transaction_mut(), operation_context(11)?, finish)?;
+    let mut transaction = start.seal(0)?.into_transaction_after_commit(1)?;
+    let outcome = finish_account_creation(&mut transaction, operation_context(11)?, finish)?;
     assert_eq!(outcome.result().err(), Some(AuthError::ContextMismatch));
     let sealed = outcome.seal(1)?;
     assert_eq!(sealed.result().err(), Some(AuthError::ContextMismatch));
@@ -1015,9 +1016,8 @@ fn assert_authentication_finish_rejected(
             ke3: OpaqueKe3::from_bytes([0_u8; 64])?,
         },
     )?;
-    let mut start = start.seal(0)?;
-    let outcome =
-        finish_account_authentication(start.transaction_mut(), operation_context(101)?, finish)?;
+    let mut transaction = start.seal(0)?.into_transaction_after_commit(1)?;
+    let outcome = finish_account_authentication(&mut transaction, operation_context(101)?, finish)?;
     assert_eq!(
         outcome.result().err(),
         Some(AuthError::AuthenticationFailed)
@@ -1277,9 +1277,9 @@ fn account_creation_and_authentication_complete_with_bound_receipts()
             .try_into()?,
     )?;
     assert!(rng.succeeded(), "test entropy failed during registration");
-    let mut creation_start = creation_start.seal(0)?;
+    let mut creation_transaction = creation_start.seal(0)?.into_transaction_after_commit(1)?;
     let creation_outcome = finish_account_creation(
-        creation_start.transaction_mut(),
+        &mut creation_transaction,
         operation_context(11)?,
         authenticated_creation_finish(
             54,
@@ -1314,7 +1314,24 @@ fn account_creation_and_authentication_complete_with_bound_receipts()
         completion.response_kind(),
         AccountServiceResponseKind::OpaqueAuthComplete
     );
-    let grant = grant.result()?;
+    let uncommitted_grant = authenticate_account(
+        &profile,
+        &login_key,
+        &fake_key,
+        b"first password",
+        StoredAccountFixture {
+            account_id,
+            account_revision: Revision::new(7)?,
+            generation: Generation::new(9)?,
+            credential_bytes,
+            record: copy_record(creation_intent.record())?,
+        },
+    )?;
+    assert!(matches!(
+        uncommitted_grant.into_result_after_commit(1),
+        Err(AuthError::ContextMismatch)
+    ));
+    let grant = grant.into_result_after_commit(2)??;
     assert_eq!(grant.account_id(), account_id);
     assert_eq!(grant.account_session_generation(), Generation::new(9)?);
     assert_eq!(grant.network_id(), TEST_NETWORK);
@@ -1353,6 +1370,40 @@ fn account_creation_and_authentication_complete_with_bound_receipts()
 }
 
 #[test]
+fn sealed_start_rejects_a_response_count_that_has_not_committed()
+-> Result<(), Box<dyn core::error::Error>> {
+    let profile = OpaqueProfile::generate(TEST_NETWORK)?;
+    let login_key = LoginIndexKey::from_bytes([57_u8; 32]);
+    let fixture = protocol_fixture(&profile, &credential(58), b"commit gate")?;
+    let start = begin_account_creation(
+        &profile,
+        &login_key,
+        AccountCreationStartParameters {
+            context: operation_context(10)?,
+            request: authenticated_creation_start(
+                59,
+                CreationStart {
+                    network_id: TEST_NETWORK,
+                    login: NormalizedLogin::prepare("commit-gate")?,
+                    registration_request: copy_request(&fixture.registration_request)?,
+                    invitation: None,
+                },
+            )?,
+            admission: CreationAdmission::Open,
+            login_is_available: true,
+            invitation_is_available: true,
+        },
+    )?;
+    let sealed = start.seal(7)?;
+    assert_eq!(sealed.response_intent().next_response_count(), 8);
+    assert!(matches!(
+        sealed.into_transaction_after_commit(7),
+        Err(AuthError::ContextMismatch)
+    ));
+    Ok(())
+}
+
+#[test]
 fn same_kind_finish_swap_is_rejected_and_exact_finish_token_seals_response()
 -> Result<(), Box<dyn core::error::Error>> {
     let profile = OpaqueProfile::generate(TEST_NETWORK)?;
@@ -1378,8 +1429,8 @@ fn same_kind_finish_swap_is_rejected_and_exact_finish_token_seals_response()
     let first = begin_account_creation(&profile, &login_key, creation_parameters(162)?)?;
     let second = begin_account_creation(&profile, &login_key, creation_parameters(163)?)?;
     let second_transaction_id = second.transaction_id();
-    let mut first = first.seal(0)?;
-    let mut second = second.seal(1)?;
+    let first = first.seal(0)?;
+    let second = second.seal(1)?;
     let (swapped_finish, swapped_token) = authenticated_creation_finish_with_token(
         164,
         CreationFinish {
@@ -1396,8 +1447,9 @@ fn same_kind_finish_swap_is_rejected_and_exact_finish_token_seals_response()
             registration_record: copy_record(&fixture.record)?,
         },
     )?;
+    let mut first_transaction = first.into_transaction_after_commit(2)?;
     let rejected = finish_account_creation(
-        first.transaction_mut(),
+        &mut first_transaction,
         operation_context(11)?,
         swapped_finish,
     )?;
@@ -1422,8 +1474,9 @@ fn same_kind_finish_swap_is_rejected_and_exact_finish_token_seals_response()
             registration_record: copy_record(&fixture.record)?,
         },
     )?;
+    let mut second_transaction = second.into_transaction_after_commit(2)?;
     let committed = finish_account_creation(
-        second.transaction_mut(),
+        &mut second_transaction,
         operation_context(11)?,
         valid_finish,
     )?;
@@ -1476,9 +1529,10 @@ fn opened_finish_context_failure_seals_for_the_exact_request()
             registration_record: copy_record(&fixture.record)?,
         },
     )?;
-    let mut start = start.seal(0)?;
+    let start = start.seal(0)?;
+    let mut transaction = start.into_transaction_after_commit(1)?;
     let rejected = finish_account_creation(
-        start.transaction_mut(),
+        &mut transaction,
         operation_context_for_network(NetworkId::from_bytes([171_u8; 32]), 11)?,
         finish,
     )?;
@@ -1615,7 +1669,7 @@ fn unknown_login_runs_fake_record_and_dummy_finish_work() -> Result<(), Box<dyn 
         return Err("unknown login did not receive a protocol-shaped challenge".into());
     };
     assert_eq!(ke2.expose_for_account_response().len(), OPAQUE_KE2_BYTES);
-    let mut start = start.seal(0)?;
+    let start = start.seal(0)?;
     assert_eq!(
         start.response_intent().response().as_bytes().len(),
         ACCOUNT_SERVICE_RESPONSE_BYTES
@@ -1633,8 +1687,8 @@ fn unknown_login_runs_fake_record_and_dummy_finish_work() -> Result<(), Box<dyn 
             ke3: OpaqueKe3::from_bytes([0_u8; 64])?,
         },
     )?;
-    let outcome =
-        finish_account_authentication(start.transaction_mut(), operation_context(6)?, finish)?;
+    let mut transaction = start.into_transaction_after_commit(1)?;
+    let outcome = finish_account_authentication(&mut transaction, operation_context(6)?, finish)?;
     assert_eq!(
         outcome.result().err(),
         Some(AuthError::AuthenticationFailed)
@@ -2825,11 +2879,12 @@ fn account_service_guards_reject_every_context_and_state_substitution()
     };
     let invited_start = begin_account_creation(&profile, &login_key, invited)?;
     let invited_transaction_id = invited_start.transaction_id();
-    let mut held = HeldCreationStart {
+    let held = HeldCreationStart {
         start: invited_start.seal(0)?,
     };
+    let mut invited_transaction = held.start.into_transaction_after_commit(1)?;
     let invited_outcome = finish_account_creation(
-        held.start.transaction_mut(),
+        &mut invited_transaction,
         operation_context(11)?,
         authenticated_creation_finish(
             135,
@@ -2869,9 +2924,9 @@ fn account_service_guards_reject_every_context_and_state_substitution()
         } else {
             operation_context(11)?
         };
-        let mut start = start.seal(0)?;
+        let mut transaction = start.seal(0)?.into_transaction_after_commit(1)?;
         let outcome = finish_account_creation(
-            start.transaction_mut(),
+            &mut transaction,
             finish_context,
             authenticated_creation_finish(
                 request_id.wrapping_add(1),
@@ -2941,9 +2996,9 @@ fn account_service_guards_reject_every_context_and_state_substitution()
         } else {
             operation_context(101)?
         };
-        let mut start = start.seal(0)?;
+        let mut transaction = start.seal(0)?.into_transaction_after_commit(1)?;
         let outcome = finish_account_authentication(
-            start.transaction_mut(),
+            &mut transaction,
             finish_context,
             authenticated_authentication_finish(
                 request_id.wrapping_add(1),

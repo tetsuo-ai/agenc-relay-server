@@ -201,6 +201,21 @@ impl<T> SealedAccountFinishOutcome<T> {
     pub const fn response_intent(&self) -> &AccountResponseIntent {
         &self.response
     }
+
+    /// Consumes the terminal result only after storage has committed the
+    /// response-count successor reserved for this response.
+    ///
+    /// The outer result reports a mismatched durable head. The inner result
+    /// is the authenticated operation's committed or rejected outcome.
+    pub fn into_result_after_commit(
+        self,
+        committed_response_count: u64,
+    ) -> Result<Result<T, AuthError>, AuthError> {
+        if committed_response_count < self.response.next_response_count() {
+            return Err(AuthError::ContextMismatch);
+        }
+        Ok(self.result)
+    }
 }
 
 /// A parsed START transaction inseparably paired with its authenticated challenge.
@@ -250,6 +265,13 @@ impl<S> AccountStartOutcome<S> {
 }
 
 /// A START transaction retained with the exact encrypted challenge sent for it.
+///
+/// ```compile_fail
+/// use agenc_ircd_auth::SealedAccountStart;
+/// fn bypass_commit<S>(mut start: SealedAccountStart<S>) {
+///     let _ = start.transaction_mut();
+/// }
+/// ```
 #[must_use = "the transaction and encrypted challenge must remain in one lineage"]
 pub struct SealedAccountStart<S> {
     transaction: AccountTransaction<S>,
@@ -257,14 +279,21 @@ pub struct SealedAccountStart<S> {
 }
 
 impl<S> SealedAccountStart<S> {
-    /// Mutably borrows the retained transaction for its one terminal FINISH.
-    pub fn transaction_mut(&mut self) -> &mut AccountTransaction<S> {
-        &mut self.transaction
-    }
-
     /// Borrows the encrypted START response retained for exact replay.
     pub const fn response_intent(&self) -> &AccountResponseIntent {
         &self.response
+    }
+
+    /// Consumes the retained START lineage only after storage has committed
+    /// the response-count successor reserved for its challenge.
+    pub fn into_transaction_after_commit(
+        self,
+        committed_response_count: u64,
+    ) -> Result<AccountTransaction<S>, AuthError> {
+        if committed_response_count < self.response.next_response_count() {
+            return Err(AuthError::ContextMismatch);
+        }
+        Ok(self.transaction)
     }
 }
 
@@ -2440,7 +2469,7 @@ mod tests {
             &mut entropy,
         )?;
         let transaction_id = start.transaction_id();
-        let mut start = start.seal(0)?;
+        let start = start.seal(0)?;
         assert_eq!(
             start.response_intent().response().as_bytes().len(),
             ACCOUNT_SERVICE_RESPONSE_BYTES
@@ -2468,8 +2497,8 @@ mod tests {
         else {
             return Err("opened request kind changed".into());
         };
-        let outcome =
-            finish_credential_change(start.transaction_mut(), context(11)?, finish_request)?;
+        let mut transaction = start.into_transaction_after_commit(1)?;
+        let outcome = finish_credential_change(&mut transaction, context(11)?, finish_request)?;
         assert_eq!(outcome.result().err(), Some(expected_error));
         let outcome = outcome.seal(1)?;
         assert_eq!(
@@ -2840,9 +2869,9 @@ mod tests {
                 if credential_id.expose_for_account_service() == &credential_bytes
         ));
         let transaction_id = start.transaction_id();
-        let mut start = start.seal(0)?;
+        let mut transaction = start.seal(0)?.into_transaction_after_commit(1)?;
         let outcome = finish_credential_change(
-            start.transaction_mut(),
+            &mut transaction,
             context(11)?,
             credential_finish_request(24, transaction_id)?,
         )?;
@@ -2892,18 +2921,18 @@ mod tests {
             &mut entropy,
         )?;
         let transaction_id = start.transaction_id();
-        let mut start = start.seal(0)?;
+        let mut transaction = start.seal(0)?.into_transaction_after_commit(1)?;
 
         assert_eq!(
             finish_credential_change(
-                start.transaction_mut(),
+                &mut transaction,
                 context(11)?,
                 credential_finish_request(26, transaction_id)?,
             )
             .err(),
             Some(AuthError::Overflow)
         );
-        assert!(start.transaction_mut().state_ref().is_none());
+        assert!(transaction.state_ref().is_none());
         Ok(())
     }
 

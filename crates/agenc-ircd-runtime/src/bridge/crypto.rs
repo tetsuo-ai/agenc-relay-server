@@ -317,10 +317,10 @@ impl OpaqueStartSealJob {
     }
 }
 
-/// One OPAQUE authentication finish; its complete START lineage returns with
-/// the outcome so StateCore keeps sole ownership of it.
+/// One OPAQUE authentication finish over a START lineage whose challenge is
+/// already durably committed.
 pub struct OpaqueFinishJob {
-    start: SealedAccountStart<AccountAuthenticationState>,
+    transaction: AccountTransaction<AccountAuthenticationState>,
     context: AccountOperationContext,
     finish: AuthenticatedAccountRequest<AuthenticationFinish>,
 }
@@ -329,12 +329,12 @@ impl OpaqueFinishJob {
     /// Moves the transaction and the finish request into the job.
     #[must_use]
     pub fn new(
-        start: SealedAccountStart<AccountAuthenticationState>,
+        transaction: AccountTransaction<AccountAuthenticationState>,
         context: AccountOperationContext,
         finish: AuthenticatedAccountRequest<AuthenticationFinish>,
     ) -> Self {
         Self {
-            start,
+            transaction,
             context,
             finish,
         }
@@ -342,19 +342,13 @@ impl OpaqueFinishJob {
 
     fn execute(mut self) -> OpaqueFinishOutput {
         let outcome =
-            finish_account_authentication(self.start.transaction_mut(), self.context, self.finish);
-        OpaqueFinishOutput {
-            start: self.start,
-            outcome,
-        }
+            finish_account_authentication(&mut self.transaction, self.context, self.finish);
+        OpaqueFinishOutput { outcome }
     }
 }
 
-/// The transaction and outcome of one OPAQUE finish.
+/// The terminal outcome of one OPAQUE finish.
 pub struct OpaqueFinishOutput {
-    /// The START lineage, with its transaction consumed or retained exactly
-    /// as the semantic finish decided.
-    pub start: SealedAccountStart<AccountAuthenticationState>,
     /// The finish outcome.
     pub outcome: Result<AccountFinishOutcome<AuthenticationGrant>, AuthError>,
 }
@@ -488,7 +482,7 @@ pub enum CryptoJobOutput {
     OpaqueStart(Box<Result<AccountStartOutcome<AccountAuthenticationState>, AuthError>>),
     /// An authentication START with its one-use challenge sealed.
     OpaqueStartSealed(Box<Result<SealedAccountStart<AccountAuthenticationState>, AuthError>>),
-    /// An authentication finish outcome with its transaction.
+    /// An authentication finish outcome.
     OpaqueFinish(Box<OpaqueFinishOutput>),
     /// An authentication FINISH with its checked completion sealed.
     OpaqueFinishSealed(Box<Result<SealedAccountFinishOutcome<AuthenticationGrant>, AuthError>>),
