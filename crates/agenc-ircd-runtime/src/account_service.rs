@@ -13,9 +13,10 @@ use agenc_ircd_auth::{
     AccountOperationContext, AccountRouteBinding, AccountServiceEnvelope, AccountStartOutcome,
     AccountTransaction, AuthenticatedAccountRequest, AuthenticationGrant, AuthenticationLookup,
     AuthenticationStart, AuthenticationStartParameters, CreateAccountIntent, CreationAdmission,
-    CreationFinish, CreationStart, FreshAuthenticationProof, OpaqueProfile,
-    OpaqueRegistrationRecord, OpenedAccountServiceRequest, SealedAccountFinishOutcome,
-    SealedAccountStart,
+    CreationFinish, CreationStart, CredentialChangeFinish, CredentialChangeStart,
+    CredentialChangeStartParameters, CredentialChangeState, CredentialReplacementIntent,
+    DestructiveAccountSnapshot, FreshAuthenticationProof, OpaqueProfile, OpaqueRegistrationRecord,
+    OpenedAccountServiceRequest, SealedAccountFinishOutcome, SealedAccountStart,
 };
 use agenc_ircd_client_wire::{
     AccountCarrierAction, AccountCarrierKind, AccountCarrierPhase, AccountTransfer, ParsedMessage,
@@ -26,7 +27,7 @@ use agenc_ircd_crypto::{
     derive_login_index,
 };
 use agenc_ircd_domain::{
-    AccountState, DirectMessagePolicy, GuestDirectMessagePolicy, PresencePolicy,
+    AccountState, DirectMessagePolicy, DomainEvent, GuestDirectMessagePolicy, PresencePolicy,
 };
 use agenc_ircd_storage::{
     LIVE_RECORD_KIND, LOGIN_INDEX_KEY_STATE_KEY, LoginIndexKeyState, LoginIndexLazyMigration,
@@ -44,13 +45,15 @@ use crate::RuntimeError;
 use crate::admission::{BucketDemand, BucketKey, BucketKind, LoginHashKey};
 use crate::bridge::crypto::{
     AccountOpenJob, CreationFinishJob, CreationFinishSealJob, CreationPreflightJob,
-    CreationStartJob, CreationStartSealJob, CryptoJobOutput, OpaqueFinishJob, OpaqueFinishSealJob,
-    OpaqueStartJob, OpaqueStartSealJob, RuntimeCryptoJob,
+    CreationStartJob, CreationStartSealJob, CredentialFinishJob, CredentialFinishSealJob,
+    CredentialStartJob, CredentialStartSealJob, CryptoJobOutput, OpaqueFinishJob,
+    OpaqueFinishSealJob, OpaqueStartJob, OpaqueStartSealJob, RuntimeCryptoJob,
 };
 use crate::bridge::{
     CryptoCompletionMessage, CryptoJobId, StorageReadCompletionMessage, StorageReadId,
 };
 use crate::connection::sink::ConnectionGeneration;
+use crate::mutation_render::render_account_credential_replacement;
 use crate::state_core::durable::AccountServiceDurableWrite;
 use crate::state_core::fanout::FanoutRequest;
 use crate::state_core::session::AdmissionClass;
@@ -59,6 +62,7 @@ use crate::sync::Arc;
 
 const AUTHENTICATION_TRANSACTION_KIND: u16 = 2;
 const CREATION_TRANSACTION_KIND: u16 = 1;
+const CREDENTIAL_CHANGE_TRANSACTION_KIND: u16 = 3;
 const INVITATION_RESERVATION_KIND: u16 = 1;
 const INVITATION_TOMBSTONE_KIND: u16 = 2;
 const INVITATION_TOMBSTONE_SECONDS: u64 = 7 * 24 * 60 * 60;
@@ -308,6 +312,7 @@ struct AuthenticatedBinding {
 
 struct LiveAuthentication {
     transaction: AccountTransaction<AccountAuthenticationState>,
+    account_id: Option<AccountId>,
     login: NormalizedLogin,
     previous_value: Option<LoginIndexValue>,
 }
@@ -322,6 +327,11 @@ struct LiveCreation {
     reservation: Option<CreationReservation>,
 }
 
+struct LiveCredentialChange {
+    transaction: AccountTransaction<CredentialChangeState>,
+    reservation: Option<AccountId>,
+}
+
 struct AccountConnection {
     sasl: SaslTransport,
     creation: AccountTransfer,
@@ -330,7 +340,9 @@ struct AccountConnection {
     opaque_attempts: u8,
     transaction: Option<LiveAuthentication>,
     creation_transaction: Option<LiveCreation>,
+    credential_transaction: Option<LiveCredentialChange>,
     authenticated: Option<AuthenticatedBinding>,
+    credential_id: Option<agenc_ircd_types::OpaqueCredentialId>,
     fresh_authentication: Option<FreshAuthenticationProof>,
 }
 
@@ -425,6 +437,15 @@ enum PendingRead {
         rate_available: bool,
         invitation_key: StoredKey,
     },
+    CredentialOpaque {
+        request: RequestContext,
+        opened: AuthenticatedAccountRequest<CredentialChangeStart>,
+        account: DestructiveAccountSnapshot,
+        credential_id: agenc_ircd_types::OpaqueCredentialId,
+        proof: Option<FreshAuthenticationProof>,
+        reservation: Option<AccountId>,
+        record_key: StoredKey,
+    },
 }
 
 struct OpaqueRecordContinuation {
@@ -434,6 +455,16 @@ struct OpaqueRecordContinuation {
     current: Option<LoginIndexValue>,
     previous: Option<LoginIndexValue>,
     selected: Option<(AccountId, agenc_ircd_types::OpaqueCredentialId)>,
+    record_key: StoredKey,
+}
+
+struct CredentialOpaqueContinuation {
+    request: RequestContext,
+    opened: AuthenticatedAccountRequest<CredentialChangeStart>,
+    account: DestructiveAccountSnapshot,
+    credential_id: agenc_ircd_types::OpaqueCredentialId,
+    proof: Option<FreshAuthenticationProof>,
+    reservation: Option<AccountId>,
     record_key: StoredKey,
 }
 
@@ -458,19 +489,40 @@ enum PendingCrypto {
         transaction_id: TransactionId,
         reservation: Option<CreationReservation>,
     },
+    CredentialStart {
+        request: RequestContext,
+        reservation: Option<AccountId>,
+    },
+    CredentialStartSeal {
+        request: RequestContext,
+        reservation: Option<AccountId>,
+    },
+    CredentialFinish {
+        request: RequestContext,
+        transaction_id: TransactionId,
+        reservation: Option<AccountId>,
+    },
+    CredentialFinishSeal {
+        request: RequestContext,
+        transaction_id: TransactionId,
+        reservation: Option<AccountId>,
+    },
     Start {
         request: RequestContext,
+        account_id: Option<AccountId>,
         login: NormalizedLogin,
         previous_value: Option<LoginIndexValue>,
     },
     StartSeal {
         request: RequestContext,
+        account_id: Option<AccountId>,
         login: NormalizedLogin,
         previous_value: Option<LoginIndexValue>,
     },
     Finish {
         request: RequestContext,
         transaction_id: TransactionId,
+        account_id: Option<AccountId>,
         login: NormalizedLogin,
         previous_value: Option<LoginIndexValue>,
         authenticated_at: MonotonicTick,
@@ -478,6 +530,7 @@ enum PendingCrypto {
     FinishSeal {
         request: RequestContext,
         transaction_id: TransactionId,
+        account_id: Option<AccountId>,
         login: NormalizedLogin,
         previous_value: Option<LoginIndexValue>,
         authenticated_at: MonotonicTick,
@@ -495,9 +548,21 @@ enum ReadySeal {
         outcome: agenc_ircd_auth::AccountFinishOutcome<CreateAccountIntent>,
         reservation: Option<CreationReservation>,
     },
+    CredentialStart {
+        request: RequestContext,
+        outcome: AccountStartOutcome<CredentialChangeState>,
+        reservation: Option<AccountId>,
+    },
+    CredentialFinish {
+        request: RequestContext,
+        transaction_id: TransactionId,
+        outcome: agenc_ircd_auth::AccountFinishOutcome<CredentialReplacementIntent>,
+        reservation: Option<AccountId>,
+    },
     Start {
         request: RequestContext,
         outcome: AccountStartOutcome<AccountAuthenticationState>,
+        account_id: Option<AccountId>,
         login: NormalizedLogin,
         previous_value: Option<LoginIndexValue>,
     },
@@ -505,6 +570,7 @@ enum ReadySeal {
         request: RequestContext,
         transaction_id: TransactionId,
         outcome: agenc_ircd_auth::AccountFinishOutcome<AuthenticationGrant>,
+        account_id: Option<AccountId>,
         login: NormalizedLogin,
         previous_value: Option<LoginIndexValue>,
         authenticated_at: MonotonicTick,
@@ -522,9 +588,21 @@ enum ReadyStage {
         sealed: SealedAccountFinishOutcome<CreateAccountIntent>,
         reservation: Option<CreationReservation>,
     },
+    CredentialStart {
+        request: RequestContext,
+        sealed: SealedAccountStart<CredentialChangeState>,
+        reservation: Option<AccountId>,
+    },
+    CredentialFinish {
+        request: RequestContext,
+        transaction_id: TransactionId,
+        sealed: SealedAccountFinishOutcome<CredentialReplacementIntent>,
+        reservation: Option<AccountId>,
+    },
     Start {
         request: RequestContext,
         sealed: SealedAccountStart<AccountAuthenticationState>,
+        account_id: Option<AccountId>,
         login: NormalizedLogin,
         previous_value: Option<LoginIndexValue>,
     },
@@ -532,6 +610,7 @@ enum ReadyStage {
         request: RequestContext,
         transaction_id: TransactionId,
         sealed: SealedAccountFinishOutcome<AuthenticationGrant>,
+        account_id: Option<AccountId>,
         login: NormalizedLogin,
         previous_value: Option<LoginIndexValue>,
         authenticated_at: MonotonicTick,
@@ -554,10 +633,25 @@ enum PendingAuthority {
         carrier_generation: u64,
         sealed: SealedAccountFinishOutcome<CreateAccountIntent>,
     },
+    CredentialStart {
+        generation: ConnectionGeneration,
+        carrier_generation: u64,
+        sealed: SealedAccountStart<CredentialChangeState>,
+        reservation: Option<AccountId>,
+    },
+    CredentialFinish {
+        generation: ConnectionGeneration,
+        carrier_generation: u64,
+        sealed: SealedAccountFinishOutcome<CredentialReplacementIntent>,
+        reservation: Option<AccountId>,
+        fenced: Vec<ConnectionGeneration>,
+        invalidated_authentications: Vec<ConnectionGeneration>,
+    },
     Start {
         generation: ConnectionGeneration,
         carrier_generation: u64,
         sealed: SealedAccountStart<AccountAuthenticationState>,
+        account_id: Option<AccountId>,
         login: NormalizedLogin,
         previous_value: Option<LoginIndexValue>,
     },
@@ -565,6 +659,7 @@ enum PendingAuthority {
         generation: ConnectionGeneration,
         carrier_generation: u64,
         sealed: SealedAccountFinishOutcome<AuthenticationGrant>,
+        account_id: Option<AccountId>,
         authenticated_at: MonotonicTick,
         sasl_accepted: bool,
         fresh_auth_session: Option<(agenc_ircd_types::UserId, Generation, AccountId)>,
@@ -576,6 +671,7 @@ enum PendingAuthority {
 pub(crate) struct AccountServiceCoordinator {
     config: AccountServiceConfig,
     connections: BTreeMap<ConnectionGeneration, AccountConnection>,
+    credential_reservations: BTreeMap<AccountId, ConnectionGeneration>,
     reads: BTreeMap<StorageReadId, PendingRead>,
     crypto: BTreeMap<CryptoJobId, PendingCrypto>,
     ready_seals: VecDeque<ReadySeal>,
@@ -600,6 +696,7 @@ impl AccountServiceCoordinator {
         Ok(Self {
             config,
             connections: BTreeMap::new(),
+            credential_reservations: BTreeMap::new(),
             reads: BTreeMap::new(),
             crypto: BTreeMap::new(),
             ready_seals: VecDeque::new(),
@@ -640,7 +737,9 @@ impl AccountServiceCoordinator {
             opaque_attempts: 0,
             transaction: None,
             creation_transaction: None,
+            credential_transaction: None,
             authenticated: None,
+            credential_id: None,
             fresh_authentication: None,
         };
         if self.connections.insert(generation, state).is_some() {
@@ -656,6 +755,8 @@ impl AccountServiceCoordinator {
         generation: ConnectionGeneration,
     ) {
         self.connections.remove(&generation);
+        self.credential_reservations
+            .retain(|_, owner| *owner != generation);
         let jobs = self
             .crypto
             .iter()
@@ -1172,8 +1273,82 @@ impl AccountServiceCoordinator {
                 Ok(Vec::new())
             }
             (
+                PendingCrypto::CredentialStart {
+                    request,
+                    reservation,
+                },
+                CryptoJobOutput::CredentialStart(output),
+            ) => {
+                let outcome = (*output).map_err(|_| RuntimeError::InvalidValue)?;
+                self.push_ready_seal(ReadySeal::CredentialStart {
+                    request,
+                    outcome,
+                    reservation,
+                })?;
+                Ok(Vec::new())
+            }
+            (
+                PendingCrypto::CredentialStartSeal {
+                    request,
+                    reservation,
+                },
+                CryptoJobOutput::CredentialStartSealed(output),
+            ) => {
+                let sealed = (*output).map_err(|_| RuntimeError::InvalidValue)?;
+                if self.ready_stage.is_some() {
+                    return Err(RuntimeError::InvalidValue);
+                }
+                self.ready_stage = Some(ReadyStage::CredentialStart {
+                    request,
+                    sealed,
+                    reservation,
+                });
+                Ok(Vec::new())
+            }
+            (
+                PendingCrypto::CredentialFinish {
+                    request,
+                    transaction_id,
+                    reservation,
+                },
+                CryptoJobOutput::CredentialFinish(output),
+            ) => {
+                if output.transaction.binding().transaction_id() != transaction_id {
+                    return Err(RuntimeError::InvalidValue);
+                }
+                let outcome = output.outcome.map_err(|_| RuntimeError::InvalidValue)?;
+                self.push_ready_seal(ReadySeal::CredentialFinish {
+                    request,
+                    transaction_id,
+                    outcome,
+                    reservation,
+                })?;
+                Ok(Vec::new())
+            }
+            (
+                PendingCrypto::CredentialFinishSeal {
+                    request,
+                    transaction_id,
+                    reservation,
+                },
+                CryptoJobOutput::CredentialFinishSealed(output),
+            ) => {
+                let sealed = (*output).map_err(|_| RuntimeError::InvalidValue)?;
+                if self.ready_stage.is_some() {
+                    return Err(RuntimeError::InvalidValue);
+                }
+                self.ready_stage = Some(ReadyStage::CredentialFinish {
+                    request,
+                    transaction_id,
+                    sealed,
+                    reservation,
+                });
+                Ok(Vec::new())
+            }
+            (
                 PendingCrypto::Start {
                     request,
+                    account_id,
                     login,
                     previous_value,
                 },
@@ -1183,6 +1358,7 @@ impl AccountServiceCoordinator {
                 self.push_ready_seal(ReadySeal::Start {
                     request,
                     outcome,
+                    account_id,
                     login,
                     previous_value,
                 })?;
@@ -1191,6 +1367,7 @@ impl AccountServiceCoordinator {
             (
                 PendingCrypto::StartSeal {
                     request,
+                    account_id,
                     login,
                     previous_value,
                 },
@@ -1203,6 +1380,7 @@ impl AccountServiceCoordinator {
                 self.ready_stage = Some(ReadyStage::Start {
                     request,
                     sealed,
+                    account_id,
                     login,
                     previous_value,
                 });
@@ -1212,6 +1390,7 @@ impl AccountServiceCoordinator {
                 PendingCrypto::Finish {
                     request,
                     transaction_id,
+                    account_id,
                     login,
                     previous_value,
                     authenticated_at,
@@ -1223,6 +1402,7 @@ impl AccountServiceCoordinator {
                     request,
                     transaction_id,
                     outcome,
+                    account_id,
                     login,
                     previous_value,
                     authenticated_at,
@@ -1233,6 +1413,7 @@ impl AccountServiceCoordinator {
                 PendingCrypto::FinishSeal {
                     request,
                     transaction_id,
+                    account_id,
                     login,
                     previous_value,
                     authenticated_at,
@@ -1247,6 +1428,7 @@ impl AccountServiceCoordinator {
                     request,
                     transaction_id,
                     sealed,
+                    account_id,
                     login,
                     previous_value,
                     authenticated_at,
@@ -1272,6 +1454,12 @@ impl AccountServiceCoordinator {
             }
             OpenedAccountServiceRequest::CreationFinish(opened) if request.is_finish() => {
                 self.open_creation_finish(context, request, opened)
+            }
+            OpenedAccountServiceRequest::CredentialChangeStart(opened) if !request.is_finish() => {
+                self.open_credential_start(context, request, opened)
+            }
+            OpenedAccountServiceRequest::CredentialChangeFinish(opened) if request.is_finish() => {
+                self.open_credential_finish(context, request, opened)
             }
             OpenedAccountServiceRequest::AuthenticationStart(opened) if !request.is_finish() => {
                 self.open_authentication_start(context, request, opened)
@@ -1339,6 +1527,207 @@ impl AccountServiceCoordinator {
         self.submit_crypto(
             context,
             PendingCrypto::CreationFinish {
+                request,
+                transaction_id,
+                reservation: live.reservation,
+            },
+            job,
+        )?;
+        Ok(Vec::new())
+    }
+
+    // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=credential START gathers one registered snapshot consumes one proof reserves one account and submits one fixed consistency read without exposing private predicates
+    fn open_credential_start(
+        &mut self,
+        context: &mut StateCoreContext,
+        request: RequestContext,
+        opened: AuthenticatedAccountRequest<CredentialChangeStart>,
+    ) -> Result<Vec<CarrierCompletion>, RuntimeError> {
+        let bound = context
+            .sessions()
+            .connection(request.generation)
+            .and_then(|entry| entry.session())
+            .ok_or(RuntimeError::InvalidValue)?;
+        let session = context
+            .domain()
+            .session(bound.user_id)
+            .ok_or(RuntimeError::InvalidValue)?;
+        let account_id = session.account_id().ok_or(RuntimeError::InvalidValue)?;
+        let fresh_auth_deadline = session.fresh_auth_deadline();
+        let account = context
+            .domain()
+            .account(account_id)
+            .ok_or(RuntimeError::InvalidValue)?;
+        let snapshot = DestructiveAccountSnapshot::new(
+            account_id,
+            account.revision(),
+            account.session_generation(),
+        );
+        let demand = BucketDemand::new(
+            BucketKind::CredentialChange,
+            BucketKey::Account(account_id),
+            1,
+        )?;
+        let now = context.now();
+        if context
+            .buckets_mut()
+            .charge_all_or_nothing(now, &[demand])
+            .is_err()
+        {
+            return self.fail_pending(context, request);
+        }
+        let authentication_in_flight = self.account_authentication_in_flight(account_id);
+        let connection = self
+            .connections
+            .get_mut(&request.generation)
+            .ok_or(RuntimeError::InvalidValue)?;
+        if connection.credential_transaction.is_some() {
+            return self.fail_pending(context, request);
+        }
+        let proof = connection.fresh_authentication.take();
+        let credential_id = connection
+            .credential_id
+            .as_ref()
+            .map(duplicate_credential_id)
+            .or_else(|| {
+                proof
+                    .as_ref()
+                    .map(FreshAuthenticationProof::credential_id_for_replacement)
+                    .map(duplicate_credential_id)
+            })
+            .unwrap_or_else(|| agenc_ircd_types::OpaqueCredentialId::from_bytes([0_u8; 32]));
+        let fresh_deadline_valid = fresh_auth_deadline.is_some_and(|deadline| now <= deadline);
+        let operation_available = opened.payload().account_id == account_id
+            && proof.is_some()
+            && connection.credential_id.is_some()
+            && fresh_deadline_valid
+            && !authentication_in_flight
+            && !self.credential_reservations.contains_key(&account_id);
+        let reservation = operation_available.then_some(account_id);
+        if reservation.is_some()
+            && self
+                .credential_reservations
+                .insert(account_id, request.generation)
+                .is_some()
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
+        let record_key = if connection.credential_id.is_some() {
+            StoredKey::new(account_id.to_text().into_bytes())?
+        } else {
+            StoredKey::new(OPAQUE_FAKE_RECORD_KEY.to_vec())?
+        };
+        let read_id = context
+            .submit_storage_read(ReadPlan::exact(TableId::OpaqueRecord, record_key.clone()))?;
+        if self
+            .reads
+            .insert(
+                read_id,
+                PendingRead::CredentialOpaque {
+                    request,
+                    opened,
+                    account: snapshot,
+                    credential_id,
+                    proof,
+                    reservation,
+                    record_key,
+                },
+            )
+            .is_some()
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
+        Ok(Vec::new())
+    }
+
+    fn account_authentication_in_flight(&self, account_id: AccountId) -> bool {
+        let live = self.connections.values().any(|connection| {
+            connection
+                .transaction
+                .as_ref()
+                .is_some_and(|transaction| transaction.account_id == Some(account_id))
+        });
+        let crypto = self.crypto.values().any(|pending| match pending {
+            PendingCrypto::Start {
+                account_id: candidate,
+                ..
+            }
+            | PendingCrypto::StartSeal {
+                account_id: candidate,
+                ..
+            }
+            | PendingCrypto::Finish {
+                account_id: candidate,
+                ..
+            }
+            | PendingCrypto::FinishSeal {
+                account_id: candidate,
+                ..
+            } => *candidate == Some(account_id),
+            _ => false,
+        });
+        let ready_seal = self.ready_seals.iter().any(|ready| match ready {
+            ReadySeal::Start {
+                account_id: candidate,
+                ..
+            }
+            | ReadySeal::Finish {
+                account_id: candidate,
+                ..
+            } => *candidate == Some(account_id),
+            _ => false,
+        });
+        let ready_stage = self.ready_stage.as_ref().is_some_and(|ready| match ready {
+            ReadyStage::Start {
+                account_id: candidate,
+                ..
+            }
+            | ReadyStage::Finish {
+                account_id: candidate,
+                ..
+            } => *candidate == Some(account_id),
+            _ => false,
+        });
+        let authority = self
+            .pending_authority
+            .as_ref()
+            .is_some_and(|authority| match authority {
+                PendingAuthority::Start {
+                    account_id: candidate,
+                    ..
+                }
+                | PendingAuthority::Finish {
+                    account_id: candidate,
+                    ..
+                } => *candidate == Some(account_id),
+                _ => false,
+            });
+        live || crypto || ready_seal || ready_stage || authority
+    }
+
+    fn open_credential_finish(
+        &mut self,
+        context: &mut StateCoreContext,
+        request: RequestContext,
+        opened: AuthenticatedAccountRequest<CredentialChangeFinish>,
+    ) -> Result<Vec<CarrierCompletion>, RuntimeError> {
+        let transaction_id = opened.payload().transaction_id;
+        let Some(live) = self
+            .connections
+            .get_mut(&request.generation)
+            .and_then(|connection| connection.credential_transaction.take())
+        else {
+            return self.fail_pending(context, request);
+        };
+        let operation = self.operation_context(context, request.route)?;
+        let job = RuntimeCryptoJob::CredentialFinish(Box::new(CredentialFinishJob::new(
+            live.transaction,
+            operation,
+            opened,
+        )));
+        self.submit_crypto(
+            context,
+            PendingCrypto::CredentialFinish {
                 request,
                 transaction_id,
                 reservation: live.reservation,
@@ -1483,6 +1872,7 @@ impl AccountServiceCoordinator {
         let pending = PendingCrypto::Finish {
             request,
             transaction_id,
+            account_id: live.account_id,
             login: live.login,
             previous_value: live.previous_value,
             authenticated_at: context.now(),
@@ -1660,6 +2050,27 @@ impl AccountServiceCoordinator {
                 login_available,
                 rate_available,
                 invitation_key,
+                result,
+            ),
+            PendingRead::CredentialOpaque {
+                request,
+                opened,
+                account,
+                credential_id,
+                proof,
+                reservation,
+                record_key,
+            } => self.credential_opaque_read(
+                context,
+                CredentialOpaqueContinuation {
+                    request,
+                    opened,
+                    account,
+                    credential_id,
+                    proof,
+                    reservation,
+                    record_key,
+                },
                 result,
             ),
         }
@@ -1904,9 +2315,17 @@ impl AccountServiceCoordinator {
             selected,
             record_key,
         } = continuation;
+        let mut account_id = selected.as_ref().map(|(account_id, _)| *account_id);
         let value = read_required_persistent(context, result, TableId::OpaqueRecord, &record_key)?;
-        let (lookup, previous_value) =
+        let (mut lookup, mut previous_value) =
             self.authentication_lookup(context, &login, current, previous, selected, &value)?;
+        if account_id
+            .is_some_and(|account_id| self.credential_reservations.contains_key(&account_id))
+        {
+            account_id = None;
+            lookup = AuthenticationLookup::Unknown;
+            previous_value = None;
+        }
         let parameters = AuthenticationStartParameters {
             context: self.operation_context(context, request.route)?,
             request: opened,
@@ -1920,6 +2339,7 @@ impl AccountServiceCoordinator {
         )));
         let pending = PendingCrypto::Start {
             request,
+            account_id,
             login,
             previous_value,
         };
@@ -1994,6 +2414,74 @@ impl AccountServiceCoordinator {
         ))
     }
 
+    fn credential_opaque_read(
+        &mut self,
+        context: &mut StateCoreContext,
+        continuation: CredentialOpaqueContinuation,
+        result: ReadResult,
+    ) -> Result<Vec<CarrierCompletion>, RuntimeError> {
+        let CredentialOpaqueContinuation {
+            request,
+            opened,
+            account,
+            credential_id,
+            proof,
+            mut reservation,
+            record_key,
+        } = continuation;
+        let value = read_optional_persistent(context, result, TableId::OpaqueRecord, &record_key)?;
+        let expected_key = StoredKey::new(account.account_id().to_text().into_bytes())?;
+        let record_matches = record_key == expected_key
+            && value.as_ref().is_some_and(|value| {
+                value.record_kind() == LIVE_RECORD_KIND
+                    && value.revision() == account.account_revision().get()
+                    && value.generation() == account.account_session_generation().get()
+                    && value
+                        .body()
+                        .try_into()
+                        .ok()
+                        .and_then(|bytes| OpaqueRegistrationRecord::from_bytes(bytes).ok())
+                        .is_some()
+            });
+        if reservation.is_some() && !record_matches {
+            self.release_credential_reservation(account.account_id(), request.generation)?;
+            reservation = None;
+        }
+        let parameters = CredentialChangeStartParameters {
+            context: self.operation_context(context, request.route)?,
+            proof,
+            account,
+            credential_id,
+            request: opened,
+            operation_is_available: reservation.is_some(),
+        };
+        let job = RuntimeCryptoJob::CredentialStart(Box::new(CredentialStartJob::new(
+            Arc::clone(&self.config.opaque_profile),
+            parameters,
+        )));
+        self.submit_crypto(
+            context,
+            PendingCrypto::CredentialStart {
+                request,
+                reservation,
+            },
+            job,
+        )?;
+        Ok(Vec::new())
+    }
+
+    fn release_credential_reservation(
+        &mut self,
+        account_id: AccountId,
+        generation: ConnectionGeneration,
+    ) -> Result<(), RuntimeError> {
+        match self.credential_reservations.remove(&account_id) {
+            Some(owner) if owner == generation => Ok(()),
+            _ => Err(RuntimeError::InvalidValue),
+        }
+    }
+
+    // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=one replay path validates route request terminal receipt and terminal companion frames before exact delivery
     fn replay_read(
         &mut self,
         context: &mut StateCoreContext,
@@ -2054,13 +2542,19 @@ impl AccountServiceCoordinator {
         if let Some(account_id) = terminal_account {
             frames.push(account_created_note(context.server_prefix(), account_id)?);
         }
+        let credential_changed = request.expected_message_kind()
+            == AccountServiceMessageKind::CredentialChangeFinish
+            && stored.terminal == RequestTerminal::Accepted;
+        if credential_changed {
+            frames.push(account_credential_changed_note(context.server_prefix())?);
+        }
         context
             .send_to(request.generation, frames)
             .map_err(|_| RuntimeError::MemoryExhausted)?;
         Ok(vec![CarrierCompletion {
             generation: request.generation,
             carrier_generation: request.carrier_generation,
-            close: false,
+            close: credential_changed,
         }])
     }
 
@@ -2090,6 +2584,8 @@ impl AccountServiceCoordinator {
                 pending,
                 PendingCrypto::CreationStartSeal { .. }
                     | PendingCrypto::CreationFinishSeal { .. }
+                    | PendingCrypto::CredentialStartSeal { .. }
+                    | PendingCrypto::CredentialFinishSeal { .. }
                     | PendingCrypto::StartSeal { .. }
                     | PendingCrypto::FinishSeal { .. }
             )
@@ -2127,14 +2623,46 @@ impl AccountServiceCoordinator {
                     response_count,
                 ))),
             ),
+            ReadySeal::CredentialStart {
+                request,
+                outcome,
+                reservation,
+            } => (
+                PendingCrypto::CredentialStartSeal {
+                    request,
+                    reservation,
+                },
+                RuntimeCryptoJob::CredentialStartSeal(Box::new(CredentialStartSealJob::new(
+                    outcome,
+                    response_count,
+                ))),
+            ),
+            ReadySeal::CredentialFinish {
+                request,
+                transaction_id,
+                outcome,
+                reservation,
+            } => (
+                PendingCrypto::CredentialFinishSeal {
+                    request,
+                    transaction_id,
+                    reservation,
+                },
+                RuntimeCryptoJob::CredentialFinishSeal(Box::new(CredentialFinishSealJob::new(
+                    outcome,
+                    response_count,
+                ))),
+            ),
             ReadySeal::Start {
                 request,
                 outcome,
+                account_id,
                 login,
                 previous_value,
             } => (
                 PendingCrypto::StartSeal {
                     request,
+                    account_id,
                     login,
                     previous_value,
                 },
@@ -2147,6 +2675,7 @@ impl AccountServiceCoordinator {
                 request,
                 transaction_id,
                 outcome,
+                account_id,
                 login,
                 previous_value,
                 authenticated_at,
@@ -2154,6 +2683,7 @@ impl AccountServiceCoordinator {
                 PendingCrypto::FinishSeal {
                     request,
                     transaction_id,
+                    account_id,
                     login,
                     previous_value,
                     authenticated_at,
@@ -2194,16 +2724,31 @@ impl AccountServiceCoordinator {
                 sealed,
                 reservation,
             } => self.stage_creation_finish(context, request, transaction_id, sealed, reservation),
+            ReadyStage::CredentialStart {
+                request,
+                sealed,
+                reservation,
+            } => self.stage_credential_start(context, request, sealed, reservation),
+            ReadyStage::CredentialFinish {
+                request,
+                transaction_id,
+                sealed,
+                reservation,
+            } => {
+                self.stage_credential_finish(context, request, transaction_id, sealed, reservation)
+            }
             ReadyStage::Start {
                 request,
                 sealed,
+                account_id,
                 login,
                 previous_value,
-            } => self.stage_start(context, request, sealed, login, previous_value),
+            } => self.stage_start(context, request, sealed, account_id, login, previous_value),
             ReadyStage::Finish {
                 request,
                 transaction_id,
                 sealed,
+                account_id,
                 login,
                 previous_value,
                 authenticated_at,
@@ -2212,6 +2757,7 @@ impl AccountServiceCoordinator {
                 request,
                 transaction_id,
                 sealed,
+                account_id,
                 login,
                 previous_value,
                 authenticated_at,
@@ -2550,12 +3096,250 @@ impl AccountServiceCoordinator {
         Ok(())
     }
 
+    // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=credential START consumes proof reservation transaction challenge replay and response authority in one durable set
+    fn stage_credential_start(
+        &mut self,
+        context: &mut StateCoreContext,
+        request: RequestContext,
+        sealed: SealedAccountStart<CredentialChangeState>,
+        mut reservation: Option<AccountId>,
+    ) -> Result<(), RuntimeError> {
+        match (sealed.credential_reservation_account_id(), reservation) {
+            (Some(admitted), Some(reserved)) if admitted == reserved => {}
+            (None, Some(reserved)) => {
+                self.release_credential_reservation(reserved, request.generation)?;
+                reservation = None;
+            }
+            (None, None) => {}
+            _ => return Err(RuntimeError::InvalidValue),
+        }
+        let now = context.now();
+        let now_utc = context.utc_now().map_err(|_| RuntimeError::InvalidValue)?;
+        let transaction_record = sealed
+            .credential_change_transaction_record(now, now_utc)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let plan = context
+            .domain()
+            .plan_account_service_checkpoint()
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let revision = plan.resulting_revision().get();
+        let mut references = Vec::new();
+        if let Some(account_id) = reservation {
+            references.push(RecordReference::new(
+                TableId::Account,
+                StoredKey::new(account_id.to_text().into_bytes())?,
+            )?);
+        }
+        let transaction_value = PersistentRecordValue::new(
+            TableId::AuthTransaction,
+            CREDENTIAL_CHANGE_TRANSACTION_KIND,
+            revision,
+            0,
+            Some(
+                transaction_record
+                    .durable_expires_at_utc()
+                    .map_err(|_| RuntimeError::InvalidValue)?
+                    .get(),
+            ),
+            references,
+            transaction_record.expose_for_persistence().to_vec(),
+        )?;
+        let response = sealed.response_intent().response().as_bytes();
+        let writes = vec![
+            AccountServiceDurableWrite::put(
+                TableId::AuthTransaction,
+                StoredKey::new(sealed.transaction_id().as_bytes().to_vec())?,
+                transaction_value.encode()?,
+            )?,
+            request_result_write(revision, &request, RequestTerminal::Start, None, response)?,
+        ];
+        let frames = self.response_frames(context, &request, response, false)?;
+        let fanout = context
+            .fanout_request_to(request.generation, frames)
+            .map_err(|_| RuntimeError::MemoryExhausted)?;
+        let next = sealed.response_intent().next_response_count();
+        let accepted = context.stage_durable_with_account_service(
+            plan,
+            fanout,
+            Some(StagedOrigin {
+                generation: request.generation,
+            }),
+            1,
+            writes,
+        );
+        if !matches!(accepted, Ok(StageAccepted::Staged { .. }))
+            || next
+                != context
+                    .head()
+                    .account_service_response_count
+                    .saturating_add(1)
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
+        self.pending_authority = Some(PendingAuthority::CredentialStart {
+            generation: request.generation,
+            carrier_generation: request.carrier_generation,
+            sealed,
+            reservation,
+        });
+        Ok(())
+    }
+
+    // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=credential FINISH replacement fencing encrypted receipt NOTE and close set share one durable and fanout barrier
+    fn stage_credential_finish(
+        &mut self,
+        context: &mut StateCoreContext,
+        request: RequestContext,
+        transaction_id: TransactionId,
+        sealed: SealedAccountFinishOutcome<CredentialReplacementIntent>,
+        reservation: Option<AccountId>,
+    ) -> Result<(), RuntimeError> {
+        let bound = context
+            .sessions()
+            .connection(request.generation)
+            .and_then(|entry| entry.session())
+            .ok_or(RuntimeError::InvalidValue)?;
+        let (plan, resulting_generation) = match (sealed.result(), reservation) {
+            (Ok(intent), Some(reserved)) if intent.account_id() == reserved => {
+                let (plan, generation) = context
+                    .domain()
+                    .plan_account_credential_replaced(
+                        reserved,
+                        intent.expected_account_session_generation(),
+                        intent.expected_account_revision(),
+                    )
+                    .map_err(|_| RuntimeError::InvalidValue)?;
+                if generation != intent.next_account_session_generation() {
+                    return Err(RuntimeError::InvalidValue);
+                }
+                (plan, Some(generation))
+            }
+            (Err(_), _) => (
+                context
+                    .domain()
+                    .plan_account_service_checkpoint()
+                    .map_err(|_| RuntimeError::InvalidValue)?,
+                None,
+            ),
+            _ => return Err(RuntimeError::InvalidValue),
+        };
+        let revision = plan.resulting_revision().get();
+        let terminal = if sealed.result().is_ok() {
+            RequestTerminal::Accepted
+        } else {
+            RequestTerminal::Rejected
+        };
+        let response = sealed.response_intent().response().as_bytes();
+        let mut writes = vec![
+            AccountServiceDurableWrite::delete(
+                TableId::AuthTransaction,
+                StoredKey::new(transaction_id.as_bytes().to_vec())?,
+            )?,
+            request_result_write(revision, &request, terminal, None, response)?,
+        ];
+        let mut invalidated_authentications = Vec::new();
+        if let (Ok(intent), Some(generation)) = (sealed.result(), resulting_generation) {
+            for (connection_generation, connection) in &self.connections {
+                let Some(authentication) =
+                    connection.transaction.as_ref().filter(|authentication| {
+                        authentication.account_id == Some(intent.account_id())
+                    })
+                else {
+                    continue;
+                };
+                invalidated_authentications.push(*connection_generation);
+                writes.push(AccountServiceDurableWrite::delete(
+                    TableId::AuthTransaction,
+                    StoredKey::new(
+                        authentication
+                            .transaction
+                            .binding()
+                            .transaction_id()
+                            .as_bytes()
+                            .to_vec(),
+                    )?,
+                )?);
+            }
+            let account_key = StoredKey::new(intent.account_id().to_text().into_bytes())?;
+            let opaque = PersistentRecordValue::new(
+                TableId::OpaqueRecord,
+                LIVE_RECORD_KIND,
+                revision,
+                generation.get(),
+                None,
+                vec![RecordReference::new(TableId::Account, account_key.clone())?],
+                intent.record().expose_for_persistence().to_vec(),
+            )?;
+            writes.push(AccountServiceDurableWrite::put(
+                TableId::OpaqueRecord,
+                account_key,
+                opaque.encode()?,
+            )?);
+        }
+        let mut frames =
+            self.response_frames(context, &request, response, sealed.result().is_ok())?;
+        if sealed.result().is_ok() {
+            frames.push(account_credential_changed_note(context.server_prefix())?);
+        }
+        let mut fenced = Vec::new();
+        let fanout = if let Ok(intent) = sealed.result() {
+            for user_id in plan.events().iter().filter_map(|event| match event {
+                DomainEvent::SessionHidden(user_id) => Some(*user_id),
+                _ => None,
+            }) {
+                if let Some(generation) = context.sessions().generation_for_user(user_id) {
+                    fenced.push(generation);
+                }
+            }
+            render_account_credential_replacement(
+                context,
+                intent.account_id(),
+                bound.user_id,
+                frames,
+                &plan,
+            )?
+        } else {
+            context
+                .fanout_request_to(request.generation, frames)
+                .map_err(|_| RuntimeError::MemoryExhausted)?
+        };
+        let next = sealed.response_intent().next_response_count();
+        let accepted = context.stage_durable_with_account_service(
+            plan,
+            fanout,
+            Some(StagedOrigin {
+                generation: request.generation,
+            }),
+            1,
+            writes,
+        );
+        if !matches!(accepted, Ok(StageAccepted::Staged { .. }))
+            || next
+                != context
+                    .head()
+                    .account_service_response_count
+                    .saturating_add(1)
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
+        self.pending_authority = Some(PendingAuthority::CredentialFinish {
+            generation: request.generation,
+            carrier_generation: request.carrier_generation,
+            sealed,
+            reservation,
+            fenced,
+            invalidated_authentications,
+        });
+        Ok(())
+    }
+
     // agenc-review: focus owner=runtime reviewed=2026-08-29 reason=one authentication-start atomic set constructs transaction result fanout and response-count authority before staging once
     fn stage_start(
         &mut self,
         context: &mut StateCoreContext,
         request: RequestContext,
         sealed: SealedAccountStart<AccountAuthenticationState>,
+        account_id: Option<AccountId>,
         login: NormalizedLogin,
         previous_value: Option<LoginIndexValue>,
     ) -> Result<(), RuntimeError> {
@@ -2618,6 +3402,7 @@ impl AccountServiceCoordinator {
             generation: request.generation,
             carrier_generation: request.carrier_generation,
             sealed,
+            account_id,
             login,
             previous_value,
         });
@@ -2633,6 +3418,7 @@ impl AccountServiceCoordinator {
         request: RequestContext,
         transaction_id: TransactionId,
         sealed: SealedAccountFinishOutcome<AuthenticationGrant>,
+        account_id: Option<AccountId>,
         login: NormalizedLogin,
         previous_value: Option<LoginIndexValue>,
         authenticated_at: MonotonicTick,
@@ -2766,6 +3552,7 @@ impl AccountServiceCoordinator {
             generation: request.generation,
             carrier_generation: request.carrier_generation,
             sealed,
+            account_id,
             authenticated_at,
             sasl_accepted,
             fresh_auth_session,
@@ -2893,12 +3680,15 @@ impl AccountServiceCoordinator {
         }
     }
 
+    // agenc-review: allow owner=runtime reviewed=2026-08-30 reason=authentication postcommit retains its account candidate login migration and exact carrier ownership explicitly
+    #[allow(clippy::too_many_arguments)]
     fn commit_start(
         &mut self,
         committed_count: u64,
         generation: ConnectionGeneration,
         carrier_generation: u64,
         sealed: SealedAccountStart<AccountAuthenticationState>,
+        account_id: Option<AccountId>,
         login: NormalizedLogin,
         previous_value: Option<LoginIndexValue>,
     ) -> Option<CarrierCompletion> {
@@ -2912,6 +3702,7 @@ impl AccountServiceCoordinator {
         let connection = self.connections.get_mut(&generation)?;
         connection.transaction = Some(LiveAuthentication {
             transaction,
+            account_id,
             login,
             previous_value,
         });
@@ -2961,6 +3752,120 @@ impl AccountServiceCoordinator {
             carrier_generation,
             close,
         }
+    }
+
+    fn commit_credential_start(
+        &mut self,
+        committed_count: u64,
+        generation: ConnectionGeneration,
+        carrier_generation: u64,
+        sealed: SealedAccountStart<CredentialChangeState>,
+        reservation: Option<AccountId>,
+    ) -> Option<CarrierCompletion> {
+        let Ok(transaction) = sealed.into_transaction_after_commit(committed_count) else {
+            return Some(CarrierCompletion {
+                generation,
+                carrier_generation,
+                close: true,
+            });
+        };
+        let connection = self.connections.get_mut(&generation)?;
+        connection.credential_transaction = Some(LiveCredentialChange {
+            transaction,
+            reservation,
+        });
+        Some(CarrierCompletion {
+            generation,
+            carrier_generation,
+            close: false,
+        })
+    }
+
+    // agenc-review: allow owner=runtime reviewed=2026-08-30 reason=credential postcommit keeps reservation sealed result and independently fenced authority sets explicit
+    // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=credential postcommit release invalidates account authorities clears reservations and returns the complete generation-fenced close set
+    #[allow(clippy::too_many_arguments)]
+    fn commit_credential_finish(
+        &mut self,
+        committed_count: u64,
+        generation: ConnectionGeneration,
+        carrier_generation: u64,
+        sealed: SealedAccountFinishOutcome<CredentialReplacementIntent>,
+        reservation: Option<AccountId>,
+        fenced: Vec<ConnectionGeneration>,
+        invalidated_authentications: Vec<ConnectionGeneration>,
+    ) -> Vec<CarrierCompletion> {
+        if let Some(account_id) = reservation
+            && self
+                .release_credential_reservation(account_id, generation)
+                .is_err()
+        {
+            return vec![CarrierCompletion {
+                generation,
+                carrier_generation,
+                close: true,
+            }];
+        }
+        let Ok(result) = sealed.into_result_after_commit(committed_count) else {
+            return vec![CarrierCompletion {
+                generation,
+                carrier_generation,
+                close: true,
+            }];
+        };
+        let Ok(intent) = result else {
+            return vec![CarrierCompletion {
+                generation,
+                carrier_generation,
+                close: false,
+            }];
+        };
+        let account_id = intent.account_id();
+        for invalidated in invalidated_authentications {
+            if let Some(connection) = self.connections.get_mut(&invalidated) {
+                connection.transaction = None;
+            }
+        }
+        for connection in self.connections.values_mut() {
+            if connection
+                .authenticated
+                .as_ref()
+                .is_some_and(|binding| binding.account_id == account_id)
+            {
+                connection.authenticated = None;
+                connection.credential_id = None;
+                connection.fresh_authentication = None;
+            }
+        }
+        let mut completions = Vec::new();
+        for fenced_generation in fenced {
+            if let Some(connection) = self.connections.get_mut(&fenced_generation) {
+                connection.authenticated = None;
+                connection.credential_id = None;
+                connection.fresh_authentication = None;
+                connection.transaction = None;
+                connection.credential_transaction = None;
+            }
+            completions.push(CarrierCompletion {
+                generation: fenced_generation,
+                carrier_generation: if fenced_generation == generation {
+                    carrier_generation
+                } else {
+                    0
+                },
+                close: true,
+            });
+        }
+        if !completions
+            .iter()
+            .any(|completion| completion.generation == generation)
+        {
+            completions.push(CarrierCompletion {
+                generation,
+                carrier_generation,
+                close: true,
+            });
+        }
+        completions
     }
 
     // agenc-review: allow owner=runtime reviewed=2026-08-29 reason=the postcommit finish authority carries every independently fenced session and key-transition result explicitly
@@ -3030,10 +3935,13 @@ impl AccountServiceCoordinator {
             if applied.is_none() {
                 return true;
             }
+            let proof = grant.into_fresh_authentication_after_commit();
+            let credential_id = duplicate_credential_id(proof.credential_id_for_replacement());
             let Some(connection) = self.connections.get_mut(&generation) else {
                 return true;
             };
-            connection.fresh_authentication = Some(grant.into_fresh_authentication_after_commit());
+            connection.credential_id = Some(credential_id);
+            connection.fresh_authentication = Some(proof);
             return false;
         }
         let preregistered = context
@@ -3043,15 +3951,20 @@ impl AccountServiceCoordinator {
         if !preregistered {
             return true;
         }
+        let account_id = grant.account_id();
+        let account_session_generation = grant.account_session_generation();
+        let proof = grant.into_fresh_authentication_after_commit();
+        let credential_id = duplicate_credential_id(proof.credential_id_for_replacement());
         let Some(connection) = self.connections.get_mut(&generation) else {
             return true;
         };
         connection.authenticated = Some(AuthenticatedBinding {
-            account_id: grant.account_id(),
-            account_session_generation: grant.account_session_generation(),
+            account_id,
+            account_session_generation,
             authenticated_at,
         });
-        connection.fresh_authentication = Some(grant.into_fresh_authentication_after_commit());
+        connection.credential_id = Some(credential_id);
+        connection.fresh_authentication = Some(proof);
         false
     }
 
@@ -3094,10 +4007,42 @@ impl AccountServiceCoordinator {
                 carrier_generation,
                 sealed,
             )),
+            PendingAuthority::CredentialStart {
+                generation,
+                carrier_generation,
+                sealed,
+                reservation,
+            } => self.commit_credential_start(
+                committed_count,
+                generation,
+                carrier_generation,
+                sealed,
+                reservation,
+            ),
+            PendingAuthority::CredentialFinish {
+                generation,
+                carrier_generation,
+                sealed,
+                reservation,
+                fenced,
+                invalidated_authentications,
+            } => {
+                completions.extend(self.commit_credential_finish(
+                    committed_count,
+                    generation,
+                    carrier_generation,
+                    sealed,
+                    reservation,
+                    fenced,
+                    invalidated_authentications,
+                ));
+                None
+            }
             PendingAuthority::Start {
                 generation,
                 carrier_generation,
                 sealed,
+                account_id,
                 login,
                 previous_value,
             } => self.commit_start(
@@ -3105,6 +4050,7 @@ impl AccountServiceCoordinator {
                 generation,
                 carrier_generation,
                 sealed,
+                account_id,
                 login,
                 previous_value,
             ),
@@ -3112,6 +4058,7 @@ impl AccountServiceCoordinator {
                 generation,
                 carrier_generation,
                 sealed,
+                account_id: _,
                 authenticated_at,
                 sasl_accepted,
                 fresh_auth_session,
@@ -3147,6 +4094,11 @@ impl AccountServiceCoordinator {
             return self.progress(context);
         };
         let generation = authority.generation();
+        if let Some(account_id) = authority.credential_reservation()
+            && self.credential_reservations.get(&account_id) == Some(&generation)
+        {
+            self.credential_reservations.remove(&account_id);
+        }
         let carrier_generation = authority.carrier_generation();
         let mut completions = vec![CarrierCompletion {
             generation,
@@ -3174,7 +4126,8 @@ impl PendingRead {
             | Self::OpaqueRecord { request, .. }
             | Self::CreationCurrentIndex { request, .. }
             | Self::CreationPreviousIndex { request, .. }
-            | Self::CreationInvitation { request, .. } => request.generation,
+            | Self::CreationInvitation { request, .. }
+            | Self::CredentialOpaque { request, .. } => request.generation,
         }
     }
 
@@ -3186,7 +4139,8 @@ impl PendingRead {
             | Self::OpaqueRecord { request, .. }
             | Self::CreationCurrentIndex { request, .. }
             | Self::CreationPreviousIndex { request, .. }
-            | Self::CreationInvitation { request, .. } => request.carrier_generation,
+            | Self::CreationInvitation { request, .. }
+            | Self::CredentialOpaque { request, .. } => request.carrier_generation,
         }
     }
 }
@@ -3200,6 +4154,10 @@ impl PendingCrypto {
             | Self::CreationStartSeal { request }
             | Self::CreationFinish { request, .. }
             | Self::CreationFinishSeal { request, .. }
+            | Self::CredentialStart { request, .. }
+            | Self::CredentialStartSeal { request, .. }
+            | Self::CredentialFinish { request, .. }
+            | Self::CredentialFinishSeal { request, .. }
             | Self::Start { request, .. }
             | Self::StartSeal { request, .. }
             | Self::Finish { request, .. }
@@ -3215,6 +4173,10 @@ impl PendingCrypto {
             | Self::CreationStartSeal { request }
             | Self::CreationFinish { request, .. }
             | Self::CreationFinishSeal { request, .. }
+            | Self::CredentialStart { request, .. }
+            | Self::CredentialStartSeal { request, .. }
+            | Self::CredentialFinish { request, .. }
+            | Self::CredentialFinishSeal { request, .. }
             | Self::Start { request, .. }
             | Self::StartSeal { request, .. }
             | Self::Finish { request, .. }
@@ -3228,6 +4190,8 @@ impl ReadySeal {
         match self {
             Self::CreationStart { request, .. }
             | Self::CreationFinish { request, .. }
+            | Self::CredentialStart { request, .. }
+            | Self::CredentialFinish { request, .. }
             | Self::Start { request, .. }
             | Self::Finish { request, .. } => request.generation,
         }
@@ -3239,6 +4203,8 @@ impl ReadyStage {
         match self {
             Self::CreationStart { request, .. }
             | Self::CreationFinish { request, .. }
+            | Self::CredentialStart { request, .. }
+            | Self::CredentialFinish { request, .. }
             | Self::Start { request, .. }
             | Self::Finish { request, .. } => request.generation,
         }
@@ -3248,6 +4214,8 @@ impl ReadyStage {
         match self {
             Self::CreationStart { request, .. }
             | Self::CreationFinish { request, .. }
+            | Self::CredentialStart { request, .. }
+            | Self::CredentialFinish { request, .. }
             | Self::Start { request, .. }
             | Self::Finish { request, .. } => request.carrier_generation,
         }
@@ -3255,11 +4223,21 @@ impl ReadyStage {
 }
 
 impl PendingAuthority {
+    const fn credential_reservation(&self) -> Option<AccountId> {
+        match self {
+            Self::CredentialStart { reservation, .. }
+            | Self::CredentialFinish { reservation, .. } => *reservation,
+            _ => None,
+        }
+    }
+
     const fn generation(&self) -> ConnectionGeneration {
         match self {
             Self::Logout { generation, .. }
             | Self::CreationStart { generation, .. }
             | Self::CreationFinish { generation, .. }
+            | Self::CredentialStart { generation, .. }
+            | Self::CredentialFinish { generation, .. }
             | Self::Start { generation, .. }
             | Self::Finish { generation, .. } => *generation,
         }
@@ -3274,6 +4252,12 @@ impl PendingAuthority {
                 carrier_generation, ..
             }
             | Self::CreationFinish {
+                carrier_generation, ..
+            }
+            | Self::CredentialStart {
+                carrier_generation, ..
+            }
+            | Self::CredentialFinish {
                 carrier_generation, ..
             }
             | Self::Start {
@@ -3372,6 +4356,16 @@ fn account_created_note(prefix: &str, account_id: AccountId) -> Result<WireMessa
         "NOTE",
         &["ACCTCREATE", "CREATED", &account],
         Some("Account created"),
+    )
+    .map_err(|_| RuntimeError::InvalidValue)
+}
+
+fn account_credential_changed_note(prefix: &str) -> Result<WireMessage, RuntimeError> {
+    WireMessage::new(
+        prefix,
+        "NOTE",
+        &["ACCTCRED", "CHANGED"],
+        Some("Account credential changed; reconnect required"),
     )
     .map_err(|_| RuntimeError::InvalidValue)
 }
@@ -3478,6 +4472,12 @@ fn credential_id(
         )),
         _ => Err(RuntimeError::InvalidValue),
     }
+}
+
+fn duplicate_credential_id(
+    credential_id: &agenc_ircd_types::OpaqueCredentialId,
+) -> agenc_ircd_types::OpaqueCredentialId {
+    agenc_ircd_types::OpaqueCredentialId::from_bytes(*credential_id.expose_for_account_service())
 }
 
 fn render_sasl_actions(
@@ -3608,9 +4608,9 @@ mod tests {
     use super::{
         AccountCarrierAction, AccountCarrierKind, AccountCarrierPhase, ConnectionRoute,
         MAX_OPAQUE_ATTEMPTS_PER_CONNECTION, REQUEST_RESULT_BYTES, REQUEST_RESULT_VERSION,
-        RequestResultRecord, RequestTerminal, RuntimeError, account_created_note, account_failure,
-        consume_opaque_connection_attempt, opaque_attempt_demand, render_account_action,
-        replay_terminal_account, select_live_login,
+        RequestResultRecord, RequestTerminal, RuntimeError, account_created_note,
+        account_credential_changed_note, account_failure, consume_opaque_connection_attempt,
+        opaque_attempt_demand, render_account_action, replay_terminal_account, select_live_login,
     };
 
     struct ExactBudget(usize);
@@ -3672,6 +4672,16 @@ mod tests {
         for (frame, expected) in frames {
             assert_eq!(encoded(frame)?, expected.as_bytes());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn credential_change_terminal_note_matches_the_normative_text()
+    -> Result<(), Box<dyn core::error::Error>> {
+        assert_eq!(
+            encoded(account_credential_changed_note("server.example")?)?,
+            b":server.example NOTE ACCTCRED CHANGED :Account credential changed; reconnect required\r\n"
+        );
         Ok(())
     }
 

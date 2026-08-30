@@ -13,7 +13,8 @@ use agenc_ircd_domain::{
     VisibilityMode,
 };
 use agenc_ircd_types::{
-    AccountDeletionToken, ChannelName, MaskSubject, PublicErrorCode, TypedMask, UserId, UtcSecond,
+    AccountDeletionToken, AccountId, ChannelName, MaskSubject, PublicErrorCode, TypedMask, UserId,
+    UtcSecond,
 };
 
 use crate::RuntimeError;
@@ -66,6 +67,60 @@ pub(crate) fn render_account_logout(
     let recipients: Vec<_> = plan.recipients().iter().collect();
     let notified = builder.users_with_capability(&recipients, "account-notify");
     builder.add_simple(&source, "ACCOUNT", &["*".to_owned()], None, &notified)?;
+    builder.finish()
+}
+
+/// Renders the terminal credential receipt to its requester and the exact
+/// public session departures to their pre-mutation audiences.
+pub(crate) fn render_account_credential_replacement(
+    context: &StateCoreContext,
+    account_id: AccountId,
+    initiating_user: UserId,
+    terminal_frames: Vec<WireMessage>,
+    plan: &MutationPlan,
+) -> Result<FanoutRequest, RuntimeError> {
+    if plan.expected_revision() != context.domain().revision() {
+        return Err(RuntimeError::InvalidValue);
+    }
+    require_event(plan, DomainEvent::AccountCredentialReplaced(account_id))?;
+    let hidden: Vec<UserId> = plan
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            DomainEvent::SessionHidden(user_id) => Some(*user_id),
+            _ => None,
+        })
+        .collect();
+    if !hidden.contains(&initiating_user) {
+        return Err(RuntimeError::InvalidValue);
+    }
+    let mut builder = FanoutBuilder::new(context, plan, None)?;
+    for frame in terminal_frames {
+        builder.push_to_user(frame, initiating_user)?;
+    }
+    for user_id in hidden {
+        let session = context
+            .domain()
+            .session(user_id)
+            .filter(|session| session.account_id() == Some(account_id))
+            .ok_or(RuntimeError::InvalidValue)?;
+        let source = session_prefix(session)?;
+        let recipients: Vec<UserId> = context
+            .domain()
+            .session_fanout_recipients(user_id)
+            .map_err(|_| RuntimeError::InvalidValue)?
+            .iter()
+            .filter(|recipient| *recipient != user_id && *recipient != initiating_user)
+            .collect();
+        render_credential_quit(
+            &mut builder,
+            plan,
+            user_id,
+            &source,
+            "connection closed",
+            &recipients,
+        )?;
+    }
     builder.finish()
 }
 
@@ -264,6 +319,17 @@ impl<'context, 'reply> FanoutBuilder<'context, 'reply> {
         Ok(())
     }
 
+    fn push_to_user(&mut self, message: WireMessage, user_id: UserId) -> Result<(), RuntimeError> {
+        let Some(index) = self.indices.get(&user_id).copied() else {
+            return Ok(());
+        };
+        self.frames
+            .try_reserve(1)
+            .map_err(|_| RuntimeError::MemoryExhausted)?;
+        self.frames.push(FanoutFrame::new(message, vec![index])?);
+        Ok(())
+    }
+
     fn capabilities(&self, user_id: UserId) -> Option<&CapabilityState> {
         self.context.sessions().capabilities_for_user(user_id)
     }
@@ -347,6 +413,18 @@ fn render_quit(
     require_event(plan, DomainEvent::SessionHidden(user_id))?;
     let users: Vec<_> = plan.recipients().iter().collect();
     builder.add_simple(source, "QUIT", &[], Some(reason), &users)
+}
+
+fn render_credential_quit(
+    builder: &mut FanoutBuilder<'_, '_>,
+    plan: &MutationPlan,
+    user_id: UserId,
+    source: &str,
+    reason: &str,
+    users: &[UserId],
+) -> Result<(), RuntimeError> {
+    require_event(plan, DomainEvent::SessionHidden(user_id))?;
+    builder.add_simple(source, "QUIT", &[], Some(reason), users)
 }
 
 fn render_join(

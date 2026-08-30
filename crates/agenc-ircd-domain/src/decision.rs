@@ -1531,6 +1531,13 @@ impl DomainState {
         Ok((plan, account_session_generation))
     }
 
+    /// Returns the exact pre-mutation audience for one session departure.
+    /// Runtime uses this only while rendering a plan that already contains
+    /// the matching `SessionHidden` event.
+    pub fn session_fanout_recipients(&self, user_id: UserId) -> Result<RecipientSet, DomainError> {
+        self.session_recipients(user_id)
+    }
+
     /// Plans the one-way joint transition from plaintext to companion-bound E2EE.
     pub fn plan_e2ee_binding(
         &self,

@@ -365,6 +365,19 @@ impl SealedAccountStart<CredentialChangeState> {
     ) -> Result<CredentialChangeTransactionRecord, AuthError> {
         CredentialChangeTransactionRecord::capture(&self.transaction, now, now_utc)
     }
+
+    /// Returns the account reservation only when START retained destructive
+    /// authorization after every latent-rejection check.
+    #[must_use]
+    pub fn credential_reservation_account_id(&self) -> Option<AccountId> {
+        self.transaction.state_ref().and_then(|state| {
+            state
+                .disposition
+                .rejection()
+                .is_none()
+                .then_some(state.account.account_id)
+        })
+    }
 }
 
 /// The invitation policy already selected for one account-creation request.
@@ -1982,6 +1995,24 @@ impl DestructiveAccountSnapshot {
             account_revision,
             account_session_generation,
         })
+    }
+
+    /// Returns the immutable account identity.
+    #[must_use]
+    pub const fn account_id(self) -> AccountId {
+        self.0.account_id
+    }
+
+    /// Returns the exact account revision observed before the operation.
+    #[must_use]
+    pub const fn account_revision(self) -> Revision {
+        self.0.account_revision
+    }
+
+    /// Returns the credential generation observed before the operation.
+    #[must_use]
+    pub const fn account_session_generation(self) -> Generation {
+        self.0.account_session_generation
     }
 }
 
