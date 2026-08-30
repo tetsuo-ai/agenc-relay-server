@@ -811,9 +811,11 @@ fn stage_six_reply_middle_is_applicable(code: u16, middle: &[&str]) -> bool {
     match code {
         303 | 305 | 306 | 323 | 371 | 374 => middle.is_empty(),
         221 => matches!(middle, [modes] if modes.starts_with('+')),
-        301 | 315 | 318 | 319 | 331 | 332 | 347 | 349 | 366 | 368 | 369 | 391 => middle.len() == 1,
+        301 | 315 | 318 | 319 | 321 | 331 | 332 | 347 | 349 | 366 | 368 | 369 | 391 => {
+            middle.len() == 1
+        }
         311 => middle.len() == 4,
-        312 | 321 | 341 | 346 | 348 | 353 => middle.len() == 2,
+        312 | 341 | 346 | 348 | 353 => middle.len() == 2,
         322 => matches!(middle, [_, users] if is_ascii_decimal(users)),
         324 => (2..=8).contains(&middle.len()),
         329 => matches!(middle, [_, timestamp] if is_ascii_decimal(timestamp)),

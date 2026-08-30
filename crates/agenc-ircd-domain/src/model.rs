@@ -578,6 +578,11 @@ impl SessionState {
         self.monitored_nicknames.iter()
     }
 
+    /// Iterates joined immutable channel identities in canonical order.
+    pub fn joined_channels(&self) -> impl Iterator<Item = ChannelInstanceId> + '_ {
+        self.joined_channels.iter().copied()
+    }
+
     /// Reports whether this session is joined to one immutable channel instance.
     #[must_use]
     pub fn is_joined(&self, channel_id: ChannelInstanceId) -> bool {
@@ -933,6 +938,12 @@ impl ChannelState {
         self.revision
     }
 
+    /// Returns the accepted UTC creation second.
+    #[must_use]
+    pub const fn created_at(&self) -> UtcSecond {
+        self.created_at
+    }
+
     /// Iterates live membership identities in canonical user order.
     pub fn members(&self) -> impl Iterator<Item = UserId> + '_ {
         self.memberships.keys().copied()
@@ -982,6 +993,12 @@ impl ChannelState {
     #[must_use]
     pub const fn modes(&self) -> ChannelModes {
         self.modes
+    }
+
+    /// Returns the optional simultaneous-membership limit.
+    #[must_use]
+    pub const fn member_limit(&self) -> Option<u16> {
+        self.member_limit
     }
 
     /// Borrows the optional plaintext topic.

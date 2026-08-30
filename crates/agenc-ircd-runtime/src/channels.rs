@@ -7,12 +7,11 @@
 
 use agenc_ircd_client_wire::{
     CapabilityState, ParsedMessage, RegisteredCommandHandoff, RegisteredCommandKind, WireMessage,
-    numeric_reply,
 };
 use agenc_ircd_domain::{
     AdmissionSnapshot, AuthorizationFailure, AuthorizedCommand, CanonicalCommand,
     CanonicalCommandView, CommandEnvelope, DomainError, EntropyPurpose, ExternalInputRequest,
-    ExternalInputs, PlanDecision, QueryPlan, StorageClass,
+    ExternalInputs, PlanDecision, StorageClass,
 };
 use agenc_ircd_types::{
     AccountDeletionToken, BoundedUtf8, ChannelInstanceId, ControlPolicy, EntryId, InviteId,
@@ -201,7 +200,8 @@ fn complete_nonmutation(
 ) -> Result<bool, RuntimeError> {
     match decision {
         PlanDecision::Query(plan) => {
-            render_query(context, reply.map(|reply| reply.generation), &plan)?;
+            let reply = reply.ok_or(RuntimeError::InvalidValue)?;
+            crate::query_render::render_query(context, reply.render_input(bound.user_id), &plan)?;
             Ok(true)
         }
         PlanDecision::Rejected(plan) => {
@@ -457,60 +457,6 @@ fn reserve_one<T>(values: &mut Vec<T>) -> Result<(), RuntimeError> {
     values
         .try_reserve(1)
         .map_err(|_| RuntimeError::MemoryExhausted)
-}
-
-fn render_query(
-    context: &mut StateCoreContext,
-    origin: Option<ConnectionGeneration>,
-    plan: &QueryPlan,
-) -> Result<(), RuntimeError> {
-    let generation = origin.ok_or(RuntimeError::InvalidValue)?;
-    let target = context
-        .domain()
-        .session(plan.requester())
-        .map(|session| session.nickname().presentation())
-        .unwrap_or("*");
-    let frame = match plan.command().view() {
-        CanonicalCommandView::Information(agenc_ircd_domain::InformationQuery::Motd) => {
-            numeric_reply(
-                context.server_prefix(),
-                422,
-                target,
-                &[],
-                Some("MOTD File is missing"),
-            )
-        }
-        CanonicalCommandView::Information(agenc_ircd_domain::InformationQuery::Lusers) => {
-            numeric_reply(
-                context.server_prefix(),
-                251,
-                target,
-                &[],
-                Some("There are users on this server"),
-            )
-        }
-        CanonicalCommandView::Information(agenc_ircd_domain::InformationQuery::Version) => {
-            numeric_reply(
-                context.server_prefix(),
-                351,
-                target,
-                &["agenc-ircd"],
-                Some("AgenC"),
-            )
-        }
-        _ => numeric_reply(
-            context.server_prefix(),
-            421,
-            target,
-            &["QUERY"],
-            Some("Unknown command"),
-        ),
-    }
-    .map_err(|_| RuntimeError::InvalidValue)?;
-    context
-        .send_to(generation, vec![frame])
-        .map_err(|_| RuntimeError::MemoryExhausted)?;
-    Ok(())
 }
 
 fn session_prefix(session: &agenc_ircd_domain::SessionState) -> Result<String, RuntimeError> {

@@ -22,6 +22,7 @@ pub mod listener;
 pub mod observe;
 pub mod offline;
 pub mod purpose;
+mod query_render;
 pub mod registration;
 pub mod state_core;
 pub mod supervisor;

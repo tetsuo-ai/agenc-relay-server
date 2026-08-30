@@ -312,7 +312,7 @@ fn failure_target<'a>(request: &'a ParsedMessage, target: Option<&'a FailedTarge
         .unwrap_or("*")
 }
 
-fn requester_nickname(context: &StateCoreContext, requester: UserId) -> String {
+pub(crate) fn requester_nickname(context: &StateCoreContext, requester: UserId) -> String {
     context
         .domain()
         .session(requester)
@@ -324,7 +324,7 @@ fn description(text: &'static str) -> Result<SafeReplyDescription, RuntimeError>
     SafeReplyDescription::new(text).map_err(|_| RuntimeError::InvalidValue)
 }
 
-fn send_logical(
+pub(crate) fn send_logical(
     context: &mut StateCoreContext,
     generation: ConnectionGeneration,
     capabilities: &CapabilityState,
