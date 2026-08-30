@@ -10,8 +10,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use agenc_ircd_auth::{
-    AuthenticationTransactionRecord, CreationTransactionRecord, CredentialChangeTransactionRecord,
-    OPAQUE_REGISTRATION_RECORD_BYTES, OpaqueRegistrationRecord,
+    AuthenticationGrantRecord, AuthenticationTransactionRecord, CreationTransactionRecord,
+    CredentialChangeTransactionRecord, OPAQUE_REGISTRATION_RECORD_BYTES, OpaqueRegistrationRecord,
 };
 use agenc_ircd_domain::{DomainState, DurableAccount, DurableChannel, DurableSanction};
 use agenc_ircd_storage::{
@@ -38,6 +38,7 @@ pub const RECONSTRUCTION_PAGE_ROWS: u16 = 4_096;
 const CREATION_TRANSACTION_KIND: u16 = 1;
 const AUTHENTICATION_TRANSACTION_KIND: u16 = 2;
 const CREDENTIAL_CHANGE_TRANSACTION_KIND: u16 = 3;
+const AUTHENTICATION_GRANT_KIND: u16 = 4;
 const INVITATION_RESERVATION_KIND: u16 = 1;
 const INVITATION_TOMBSTONE_KIND: u16 = 2;
 /// The tables Stage 06 reconstructs, in scan order.
@@ -166,6 +167,7 @@ impl AccountServiceScan {
 
 enum RecoveredTransaction {
     Authentication,
+    AuthenticationGrant,
     Creation {
         expires_at: u64,
         reservation_digest: Option<agenc_ircd_crypto::LoginIndexDigest>,
@@ -217,7 +219,9 @@ fn recover_account_transaction_cleanup(
     invitation_reservations: &mut BTreeMap<TransactionId, RecoveredInvitationReservation>,
 ) -> Result<RecoveredAccountTransactionCleanup, RuntimeError> {
     match transaction {
-        RecoveredTransaction::Authentication | RecoveredTransaction::CredentialChange => {
+        RecoveredTransaction::Authentication
+        | RecoveredTransaction::AuthenticationGrant
+        | RecoveredTransaction::CredentialChange => {
             if login_reservations.contains_key(&transaction_id)
                 || invitation_reservations.contains_key(&transaction_id)
             {
@@ -521,6 +525,9 @@ impl Scan {
             CREDENTIAL_CHANGE_TRANSACTION_KIND => {
                 self.decode_credential_transaction(value, keyed_transaction)?
             }
+            AUTHENTICATION_GRANT_KIND => {
+                self.decode_authentication_grant(value, keyed_transaction)?
+            }
             _ => return Err(RuntimeError::Storage(StorageError::InvalidEncoding)),
         };
         if self
@@ -605,6 +612,39 @@ impl Scan {
             _ => return Err(RuntimeError::Storage(StorageError::StaleState)),
         }
         Ok(RecoveredTransaction::CredentialChange)
+    }
+
+    fn decode_authentication_grant(
+        &self,
+        value: &PersistentRecordValue,
+        keyed_transaction: TransactionId,
+    ) -> Result<RecoveredTransaction, RuntimeError> {
+        let metadata = AuthenticationGrantRecord::parse(value.body())
+            .and_then(AuthenticationGrantRecord::into_restart_metadata)
+            .map_err(|_| invalid_account_service_record())?;
+        if metadata.transaction_id() != keyed_transaction
+            || value.expires_at() != Some(metadata.durable_expires_at_utc().get())
+        {
+            return Err(RuntimeError::Storage(StorageError::StaleState));
+        }
+        let [reference] = value.references() else {
+            return Err(RuntimeError::Storage(StorageError::StaleState));
+        };
+        let referenced_account = self
+            .account_keys
+            .get(reference.key())
+            .filter(|_| reference.table() == TableId::Account)
+            .ok_or(RuntimeError::Storage(StorageError::StaleState))?;
+        let account = self
+            .accounts
+            .get(referenced_account)
+            .ok_or(RuntimeError::Storage(StorageError::StaleState))?;
+        if *referenced_account != metadata.account_id()
+            || account.session_generation != metadata.account_session_generation()
+        {
+            return Err(RuntimeError::Storage(StorageError::StaleState));
+        }
+        Ok(RecoveredTransaction::AuthenticationGrant)
     }
 
     fn admit_registration_invite(
@@ -842,7 +882,7 @@ impl Scan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agenc_ircd_auth::OpaqueProfile;
+    use agenc_ircd_auth::{AUTHENTICATION_GRANT_RECORD_BYTES, OpaqueProfile};
     use agenc_ircd_crypto::{
         DatabaseBinding, LoginIndexDigest, LoginIndexKey, LoginIndexKeyId, StorageMasterKey,
     };
@@ -928,6 +968,42 @@ mod tests {
             None,
             vec![RecordReference::new(TableId::Account, account_key.clone())?],
             nickname.presentation().as_bytes().to_vec(),
+        )?)
+    }
+
+    fn authentication_grant_value(
+        transaction_id: TransactionId,
+        account: &DurableAccount,
+        account_key: &StoredKey,
+        account_session_generation: u64,
+    ) -> Result<PersistentRecordValue, RuntimeError> {
+        let expires_at = 930_u64;
+        let mut body = Vec::with_capacity(AUTHENTICATION_GRANT_RECORD_BYTES);
+        body.extend_from_slice(&1_u16.to_be_bytes());
+        body.extend_from_slice(&AUTHENTICATION_GRANT_KIND.to_be_bytes());
+        body.extend_from_slice(transaction_id.as_bytes());
+        body.extend_from_slice(&[21; 32]);
+        body.extend_from_slice(&[22; 32]);
+        body.extend_from_slice(&[23; 16]);
+        body.extend_from_slice(&[24; 16]);
+        body.extend_from_slice(&[25; 16]);
+        body.extend_from_slice(&1_u64.to_be_bytes());
+        body.extend_from_slice(&[26; 16]);
+        body.extend_from_slice(&[27; 32]);
+        body.extend_from_slice(account.account_id.to_text().as_bytes());
+        body.extend_from_slice(&account_session_generation.to_be_bytes());
+        body.extend_from_slice(&expires_at.to_be_bytes());
+        if body.len() != AUTHENTICATION_GRANT_RECORD_BYTES {
+            return Err(RuntimeError::InvalidValue);
+        }
+        Ok(PersistentRecordValue::new(
+            TableId::AuthTransaction,
+            AUTHENTICATION_GRANT_KIND,
+            1,
+            0,
+            Some(expires_at),
+            vec![RecordReference::new(TableId::Account, account_key.clone())?],
+            body,
         )?)
     }
 
@@ -1102,6 +1178,93 @@ mod tests {
         )?;
         assert!(scan.accounts.is_empty());
         assert!(scan.index.existing(TableId::Account, &key)?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn authentication_grant_requires_its_live_account_and_generation() -> Result<(), RuntimeError> {
+        let keys = keys()?;
+        let account = account(None)?;
+        let account_key = KeyDeriver::account_key(account.account_id)?;
+        let transaction_id = TransactionId::from_bytes([28; 16]);
+        let transaction_key = StoredKey::new(transaction_id.as_bytes().to_vec())?;
+
+        let mut valid = Scan::default();
+        valid.admit(
+            &keys,
+            TableId::Account,
+            account_key.clone(),
+            &seal(
+                TableId::Account,
+                &account_key,
+                &account_value(&account)?,
+                13,
+            )?,
+        )?;
+        let grant = authentication_grant_value(
+            transaction_id,
+            &account,
+            &account_key,
+            account.session_generation.get(),
+        )?;
+        valid.admit(
+            &keys,
+            TableId::AuthTransaction,
+            transaction_key.clone(),
+            &seal(TableId::AuthTransaction, &transaction_key, &grant, 14)?,
+        )?;
+        assert!(matches!(
+            valid.account_service.transactions.get(&transaction_id),
+            Some(RecoveredTransaction::AuthenticationGrant)
+        ));
+
+        let mut stale_generation = Scan::default();
+        stale_generation.admit(
+            &keys,
+            TableId::Account,
+            account_key.clone(),
+            &seal(
+                TableId::Account,
+                &account_key,
+                &account_value(&account)?,
+                15,
+            )?,
+        )?;
+        let stale = authentication_grant_value(transaction_id, &account, &account_key, 2)?;
+        assert!(matches!(
+            stale_generation.admit(
+                &keys,
+                TableId::AuthTransaction,
+                transaction_key.clone(),
+                &seal(TableId::AuthTransaction, &transaction_key, &stale, 16)?,
+            ),
+            Err(RuntimeError::Storage(StorageError::StaleState))
+        ));
+
+        let missing_reference = PersistentRecordValue::new(
+            TableId::AuthTransaction,
+            AUTHENTICATION_GRANT_KIND,
+            grant.revision(),
+            0,
+            grant.expires_at(),
+            Vec::new(),
+            grant.body().to_vec(),
+        )?;
+        let mut missing = Scan::default();
+        assert!(matches!(
+            missing.admit(
+                &keys,
+                TableId::AuthTransaction,
+                transaction_key.clone(),
+                &seal(
+                    TableId::AuthTransaction,
+                    &transaction_key,
+                    &missing_reference,
+                    17,
+                )?,
+            ),
+            Err(RuntimeError::Storage(StorageError::StaleState))
+        ));
         Ok(())
     }
 

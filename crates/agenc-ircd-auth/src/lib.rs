@@ -28,10 +28,11 @@ pub use opaque::{
     OpaqueRegistrationResponse, OpaqueServerLoginState, finish_authentication, finish_registration,
 };
 pub use service::{
-    AUTHENTICATION_TRANSACTION_RECORD_BYTES, AccountAuthenticationState,
-    AccountCreationStartParameters, AccountCreationState, AccountCredentialRecord,
-    AccountDeletionChallenge, AccountDeletionIntent, AccountFinishOutcome, AccountOperationContext,
-    AccountResponseIntent, AccountResponsePlan, AccountStartOutcome, AuthenticationGrant,
+    AUTHENTICATION_GRANT_RECORD_BYTES, AUTHENTICATION_TRANSACTION_RECORD_BYTES,
+    AccountAuthenticationState, AccountCreationStartParameters, AccountCreationState,
+    AccountCredentialRecord, AccountDeletionChallenge, AccountDeletionIntent, AccountFinishOutcome,
+    AccountOperationContext, AccountResponseIntent, AccountResponsePlan, AccountStartOutcome,
+    AuthenticationGrant, AuthenticationGrantRecord, AuthenticationGrantRestartMetadata,
     AuthenticationLookup, AuthenticationStartParameters, AuthenticationTransactionRecord,
     CREATION_TRANSACTION_RECORD_BYTES, CREDENTIAL_CHANGE_TRANSACTION_RECORD_BYTES,
     CreateAccountIntent, CreationAdmission, CreationTransactionRecord,

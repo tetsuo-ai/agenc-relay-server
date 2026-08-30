@@ -1790,6 +1790,127 @@ impl AuthenticationGrant {
     }
 }
 
+/// Exact version-one bytes of one durable, unconsumed authentication grant.
+pub const AUTHENTICATION_GRANT_RECORD_BYTES: usize =
+    2 + 2 + 16 + 32 + 32 + (16 + 16 + 16 + 8 + 16 + 32) + 24 + 8 + 8;
+
+const AUTHENTICATION_GRANT_RECORD_VERSION: u16 = 1;
+const AUTHENTICATION_GRANT_RECORD_CLASS: u16 = 4;
+
+/// Move-only encrypted-record plaintext for one one-use authentication grant.
+///
+/// The process-local fresh-authentication proof is deliberately absent. A
+/// restarted coordinator may validate and consume the durable bearer, but it
+/// cannot recreate the separate monotonic proof.
+pub struct AuthenticationGrantRecord(Zeroizing<[u8; AUTHENTICATION_GRANT_RECORD_BYTES]>);
+
+/// Authenticated grant-row facts needed during startup reconstruction.
+pub struct AuthenticationGrantRestartMetadata {
+    transaction_id: TransactionId,
+    account_id: AccountId,
+    account_session_generation: Generation,
+    durable_expires_at_utc: UtcSecond,
+}
+
+impl AuthenticationGrantRestartMetadata {
+    /// Returns the transaction key that owns the durable grant row.
+    #[must_use]
+    pub const fn transaction_id(&self) -> TransactionId {
+        self.transaction_id
+    }
+
+    /// Returns the account bound to the one-use grant.
+    #[must_use]
+    pub const fn account_id(&self) -> AccountId {
+        self.account_id
+    }
+
+    /// Returns the credential generation that fences the grant.
+    #[must_use]
+    pub const fn account_session_generation(&self) -> Generation {
+        self.account_session_generation
+    }
+
+    /// Returns the exclusive durable UTC deadline.
+    #[must_use]
+    pub const fn durable_expires_at_utc(&self) -> UtcSecond {
+        self.durable_expires_at_utc
+    }
+}
+
+impl AuthenticationGrantRecord {
+    /// Captures a successful authentication grant under its transaction key.
+    pub fn capture(
+        transaction_id: TransactionId,
+        grant: &AuthenticationGrant,
+    ) -> Result<Self, AuthError> {
+        if grant.account_session_generation().get() == 0
+            || grant.durable_expires_at_utc().get() == 0
+        {
+            return Err(AuthError::InvalidEncoding);
+        }
+        let mut encoded = Zeroizing::new([0_u8; AUTHENTICATION_GRANT_RECORD_BYTES]);
+        let mut writer = AuthenticationRecordWriter::new(encoded.as_mut());
+        writer.put_u16(AUTHENTICATION_GRANT_RECORD_VERSION)?;
+        writer.put_u16(AUTHENTICATION_GRANT_RECORD_CLASS)?;
+        writer.put(transaction_id.as_bytes())?;
+        writer.put(
+            grant
+                .grant_id_for_persistence_or_session_open()
+                .expose_for_session_open(),
+        )?;
+        writer.put(grant.network_id().as_bytes())?;
+        put_route(&mut writer, grant.route)?;
+        writer.put(grant.account_id().to_text().as_bytes())?;
+        writer.put_u64(grant.account_session_generation().get())?;
+        writer.put_u64(grant.durable_expires_at_utc().get())?;
+        writer.finish()?;
+        Ok(Self(encoded))
+    }
+
+    /// Copies one opened storage body into a fixed zeroizing allocation.
+    pub fn parse(encoded: &[u8]) -> Result<Self, AuthError> {
+        let bytes: [u8; AUTHENTICATION_GRANT_RECORD_BYTES] =
+            encoded.try_into().map_err(|_| AuthError::InvalidEncoding)?;
+        Ok(Self(Zeroizing::new(bytes)))
+    }
+
+    /// Borrows the exact body only for encrypted persistence.
+    #[must_use]
+    pub fn expose_for_persistence(&self) -> &[u8; AUTHENTICATION_GRANT_RECORD_BYTES] {
+        &self.0
+    }
+
+    /// Fully validates an opened grant row and returns its restart facts.
+    pub fn into_restart_metadata(self) -> Result<AuthenticationGrantRestartMetadata, AuthError> {
+        let mut reader = AuthenticationRecordReader::new(self.0.as_ref());
+        if reader.read_u16()? != AUTHENTICATION_GRANT_RECORD_VERSION
+            || reader.read_u16()? != AUTHENTICATION_GRANT_RECORD_CLASS
+        {
+            return Err(AuthError::InvalidEncoding);
+        }
+        let transaction_id = TransactionId::from_bytes(reader.read_array()?);
+        let _grant_id = AuthGrantId::from_bytes(reader.read_array()?);
+        let _network_id = NetworkId::from_bytes(reader.read_array()?);
+        let _route = read_route(&mut reader)?;
+        let account_id = AccountId::parse_wire_bytes(&reader.read_array::<24>()?)
+            .map_err(|_| AuthError::InvalidEncoding)?;
+        let account_session_generation =
+            Generation::new(reader.read_u64()?).map_err(|_| AuthError::InvalidEncoding)?;
+        let durable_expires_at_utc = UtcSecond::from_unix_seconds(reader.read_u64()?);
+        if account_session_generation.get() == 0 || durable_expires_at_utc.get() == 0 {
+            return Err(AuthError::InvalidEncoding);
+        }
+        reader.finish()?;
+        Ok(AuthenticationGrantRestartMetadata {
+            transaction_id,
+            account_id,
+            account_session_generation,
+            durable_expires_at_utc,
+        })
+    }
+}
+
 /// Starts a real-or-fake OPAQUE login without retaining the normalized login.
 pub fn begin_authentication(
     profile: &OpaqueProfile,
@@ -2718,20 +2839,20 @@ mod tests {
     };
 
     use super::{
-        AUTHENTICATION_TRANSACTION_RECORD_BYTES, AccountAuthenticationState,
-        AccountCreationStartParameters, AccountCreationState, AccountFinishOutcome,
-        AccountOperationContext, AccountResponsePlan, AccountSnapshot, AuthError,
-        AuthenticationCandidate, AuthenticationLookup, AuthenticationStartParameters,
-        AuthenticationTransactionRecord, CREATION_TRANSACTION_RECORD_BYTES,
-        CREDENTIAL_CHANGE_TRANSACTION_RECORD_BYTES, CreationAdmission, CreationTransactionRecord,
-        CredentialChangeStartParameters, CredentialChangeState, CredentialChangeTransactionRecord,
-        DestructiveAccountSnapshot, FreshAuthenticationProof, StartDisposition,
-        ValidatedInvitation, authentication_completion, begin_account_creation_with_entropy,
-        begin_account_deletion, begin_account_deletion_with_entropy,
-        begin_authentication_with_entropy, begin_credential_change_with_entropy,
-        create_authentication_grant, finish_account_authentication_with_entropy,
-        finish_credential_change, fresh_account_id, fresh_opaque_credential_id,
-        fresh_transaction_id,
+        AUTHENTICATION_GRANT_RECORD_BYTES, AUTHENTICATION_TRANSACTION_RECORD_BYTES,
+        AccountAuthenticationState, AccountCreationStartParameters, AccountCreationState,
+        AccountFinishOutcome, AccountOperationContext, AccountResponsePlan, AccountSnapshot,
+        AuthError, AuthenticationCandidate, AuthenticationGrantRecord, AuthenticationLookup,
+        AuthenticationStartParameters, AuthenticationTransactionRecord,
+        CREATION_TRANSACTION_RECORD_BYTES, CREDENTIAL_CHANGE_TRANSACTION_RECORD_BYTES,
+        CreationAdmission, CreationTransactionRecord, CredentialChangeStartParameters,
+        CredentialChangeState, CredentialChangeTransactionRecord, DestructiveAccountSnapshot,
+        FreshAuthenticationProof, StartDisposition, ValidatedInvitation, authentication_completion,
+        begin_account_creation_with_entropy, begin_account_deletion,
+        begin_account_deletion_with_entropy, begin_authentication_with_entropy,
+        begin_credential_change_with_entropy, create_authentication_grant,
+        finish_account_authentication_with_entropy, finish_credential_change, fresh_account_id,
+        fresh_opaque_credential_id, fresh_transaction_id,
     };
     use crate::opaque::{
         OpaqueKe1, OpaqueKe3, OpaqueProfile, OpaqueRegistrationRecord, OpaqueRegistrationRequest,
@@ -3902,6 +4023,56 @@ mod tests {
         ));
         let sealed = outcome.seal(0)?;
         assert_eq!(sealed.result().err(), Some(AuthError::AuthenticationFailed));
+        Ok(())
+    }
+
+    #[test]
+    fn authentication_grant_record_validates_restart_identity_and_fences()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let transaction_id = TransactionId::from_bytes([95_u8; 16]);
+        let mut entropy = FilledEntropy(96);
+        let grant = create_authentication_grant(
+            account()?.0,
+            OpaqueCredentialId::from_bytes([97_u8; 32]),
+            context(10)?,
+            &mut entropy,
+        )?;
+        let record = AuthenticationGrantRecord::capture(transaction_id, &grant)?;
+        assert_eq!(
+            record.expose_for_persistence().len(),
+            AUTHENTICATION_GRANT_RECORD_BYTES
+        );
+
+        let metadata = AuthenticationGrantRecord::parse(record.expose_for_persistence())?
+            .into_restart_metadata()?;
+        assert_eq!(metadata.transaction_id(), transaction_id);
+        assert_eq!(metadata.account_id(), grant.account_id());
+        assert_eq!(
+            metadata.account_session_generation(),
+            grant.account_session_generation()
+        );
+        assert_eq!(
+            metadata.durable_expires_at_utc(),
+            grant.durable_expires_at_utc()
+        );
+
+        let mut wrong_class = *record.expose_for_persistence();
+        wrong_class[3] = 5;
+        assert_eq!(
+            AuthenticationGrantRecord::parse(&wrong_class)?
+                .into_restart_metadata()
+                .err(),
+            Some(AuthError::InvalidEncoding)
+        );
+        let mut zero_generation = *record.expose_for_persistence();
+        let generation_start = AUTHENTICATION_GRANT_RECORD_BYTES - 16;
+        zero_generation[generation_start..generation_start + 8].fill(0);
+        assert_eq!(
+            AuthenticationGrantRecord::parse(&zero_generation)?
+                .into_restart_metadata()
+                .err(),
+            Some(AuthError::InvalidEncoding)
+        );
         Ok(())
     }
 
