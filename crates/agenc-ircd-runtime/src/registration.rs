@@ -29,7 +29,9 @@ use crate::state_core::fanout::FanoutRequest;
 use crate::state_core::inbox::CloseReason;
 use crate::state_core::session::BoundSession;
 use crate::state_core::timers::{TimedId, TimerEntry, TimerKind};
-use crate::state_core::{CommandRouter, RouteOutcome, StateCoreContext};
+use crate::state_core::{
+    CommandRouter, RouteOutcome, StageAccepted, StagedOrigin, StateCoreContext,
+};
 
 const MAX_PENDING_ACTIONS: usize = 64;
 const CAPABILITY_LINE_BYTES: usize = 512;
@@ -86,6 +88,12 @@ struct PendingClosure {
     reason: String,
 }
 
+struct PendingRegistration {
+    event_generation: u64,
+    bound: BoundSession,
+    nickname: String,
+}
+
 /// Registration router for every public client connection.
 pub struct RegistrationRouter {
     config: RegistrationRuntimeConfig,
@@ -94,6 +102,7 @@ pub struct RegistrationRouter {
     commands: crate::channels::RegisteredCommandExecutor,
     connections: BTreeMap<ConnectionGeneration, ConnectionState>,
     leases: BTreeMap<NicknameValue, ConnectionGeneration>,
+    pending_registrations: BTreeMap<ConnectionGeneration, PendingRegistration>,
     pending_closures: Vec<PendingClosure>,
 }
 
@@ -128,6 +137,7 @@ impl RegistrationRouter {
             commands,
             connections: BTreeMap::new(),
             leases: BTreeMap::new(),
+            pending_registrations: BTreeMap::new(),
             pending_closures: Vec::new(),
         })
     }
@@ -577,7 +587,9 @@ impl RegistrationRouter {
         nickname: &str,
         realname: &str,
     ) -> Result<ActionStep, RuntimeError> {
-        let authenticated_account = self.accounts.authenticated_binding(connection);
+        let authenticated_account = self
+            .accounts
+            .authenticated_binding(connection, context.now())?;
         let seed = self.session_seed(context, state, nickname, realname, authenticated_account)?;
         let bound = BoundSession {
             session_id: seed.session_id,
@@ -589,13 +601,34 @@ impl RegistrationRouter {
             .capability_state()
             .try_clone()
             .map_err(|_| RuntimeError::MemoryExhausted)?;
+        if authenticated_account.is_some() {
+            if self.stage_authenticated_session(
+                context,
+                connection,
+                event_generation,
+                bound,
+                capabilities,
+                seed,
+                nickname,
+            )? {
+                return Ok(ActionStep::Continue);
+            }
+            return self.registration_event(
+                context,
+                connection,
+                state,
+                RegistrationEvent::RegistrationCommitted {
+                    generation: event_generation,
+                    accepted: false,
+                    authenticated: true,
+                },
+            );
+        }
         let accepted = self.commit_session(context, connection, bound, capabilities, seed)?;
         if accepted {
             state.bound = Some(bound);
             state.nickname = Some(nickname.to_owned());
             self.release_lease(connection, state);
-            self.accounts
-                .registration_committed(context, connection, bound.user_id)?;
         }
         self.registration_event(
             context,
@@ -604,9 +637,77 @@ impl RegistrationRouter {
             RegistrationEvent::RegistrationCommitted {
                 generation: event_generation,
                 accepted,
-                authenticated: authenticated_account.is_some(),
+                authenticated: false,
             },
         )
+    }
+
+    // agenc-review: allow owner=runtime reviewed=2026-08-30 reason=authenticated registration requires the complete session seed capability binding and durable grant handoff at one atomic staging boundary
+    #[allow(clippy::too_many_arguments)]
+    fn stage_authenticated_session(
+        &mut self,
+        context: &mut StateCoreContext,
+        connection: ConnectionGeneration,
+        event_generation: u64,
+        bound: BoundSession,
+        capabilities: CapabilityState,
+        seed: SessionSeed,
+        nickname: &str,
+    ) -> Result<bool, RuntimeError> {
+        if self.pending_registrations.contains_key(&connection) {
+            return Err(RuntimeError::InvalidValue);
+        }
+        let Ok(plan) = context.domain().plan_session_opened(seed) else {
+            return Ok(false);
+        };
+        let grant_write = self
+            .accounts
+            .registration_grant_write(connection, context.now())?;
+        let mut owned_nickname = String::new();
+        owned_nickname
+            .try_reserve_exact(nickname.len())
+            .map_err(|_| RuntimeError::MemoryExhausted)?;
+        owned_nickname.push_str(nickname);
+        let fanout = FanoutRequest::new(Vec::new(), Vec::new())?;
+        context
+            .sessions_mut()
+            .bind_session(connection, bound, capabilities)?;
+        self.pending_registrations.insert(
+            connection,
+            PendingRegistration {
+                event_generation,
+                bound,
+                nickname: owned_nickname,
+            },
+        );
+        if self
+            .accounts
+            .begin_registration_grant_consumption(context, connection)
+            .is_err()
+        {
+            self.pending_registrations.remove(&connection);
+            context.sessions_mut().unbind_session(connection, bound)?;
+            return Err(RuntimeError::InvalidValue);
+        }
+        let staged = context.stage_durable_with_account_service(
+            plan,
+            fanout,
+            Some(StagedOrigin {
+                generation: connection,
+            }),
+            0,
+            vec![grant_write],
+        );
+        if matches!(staged, Ok(StageAccepted::Staged { .. })) {
+            return Ok(true);
+        }
+        let cancelled = self
+            .accounts
+            .cancel_registration_grant_consumption(context, connection);
+        self.pending_registrations.remove(&connection);
+        context.sessions_mut().unbind_session(connection, bound)?;
+        cancelled?;
+        Ok(false)
     }
 
     fn commit_session(
@@ -1006,6 +1107,69 @@ impl RegistrationRouter {
         });
     }
 
+    fn finalize_pending_registrations(&mut self, context: &mut StateCoreContext) {
+        for (generation, pending) in std::mem::take(&mut self.pending_registrations) {
+            let PendingRegistration {
+                event_generation,
+                bound,
+                nickname,
+            } = pending;
+            let account_committed = self
+                .accounts
+                .registration_committed(context, generation, bound.user_id)
+                .is_ok();
+            let Some(mut state) = self.connections.remove(&generation) else {
+                self.queue_session_close(context, bound, "connection closed");
+                continue;
+            };
+            state.bound = Some(bound);
+            state.nickname = Some(nickname);
+            self.release_lease(generation, &mut state);
+            let outcome = if account_committed {
+                match state.registration.event(
+                    RegistrationEvent::RegistrationCommitted {
+                        generation: event_generation,
+                        accepted: true,
+                        authenticated: true,
+                    },
+                    context.now().get(),
+                ) {
+                    Ok(actions) => self.drive_actions(context, generation, &mut state, actions),
+                    Err(_) => RouteOutcome::Close(CloseReason::ProtocolError),
+                }
+            } else {
+                RouteOutcome::Close(CloseReason::ProtocolError)
+            };
+            self.refresh_deadline(context, generation, &mut state, outcome);
+            if matches!(outcome, RouteOutcome::Close(_)) {
+                close_transport(context, generation);
+            }
+            self.connections.insert(generation, state);
+        }
+    }
+
+    fn reject_pending_registration(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+    ) -> bool {
+        let Some(pending) = self.pending_registrations.remove(&generation) else {
+            return false;
+        };
+        if context
+            .sessions()
+            .connection(generation)
+            .is_some_and(|entry| entry.session() == Some(pending.bound))
+        {
+            let _unbound = context
+                .sessions_mut()
+                .unbind_session(generation, pending.bound);
+        }
+        let _rejected = self.accounts.registration_rejected(context, generation);
+        close_transport(context, generation);
+        true
+    }
+
     fn apply_account_completions(
         &mut self,
         context: &mut StateCoreContext,
@@ -1178,6 +1342,7 @@ impl CommandRouter for RegistrationRouter {
     }
 
     fn batch_applied(&mut self, context: &mut StateCoreContext, _plan_count: usize) {
+        self.finalize_pending_registrations(context);
         let completions = self.accounts.batch_applied(context);
         self.apply_account_completions(context, completions);
         self.retry_session_closes(context);
@@ -1213,6 +1378,11 @@ impl CommandRouter for RegistrationRouter {
         origin: Option<crate::state_core::StagedOrigin>,
         _error: agenc_ircd_storage::StorageError,
     ) {
+        if origin.is_some_and(|origin| self.reject_pending_registration(context, origin.generation))
+        {
+            self.retry_session_closes(context);
+            return;
+        }
         let completions = self.accounts.batch_rejected(context, origin);
         self.apply_account_completions(context, completions);
         self.retry_session_closes(context);

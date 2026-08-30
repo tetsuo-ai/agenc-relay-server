@@ -4066,7 +4066,10 @@ mod tests {
         );
         let mut zero_generation = *record.expose_for_persistence();
         let generation_start = AUTHENTICATION_GRANT_RECORD_BYTES - 16;
-        zero_generation[generation_start..generation_start + 8].fill(0);
+        zero_generation
+            .get_mut(generation_start..generation_start + 8)
+            .ok_or(AuthError::InvalidEncoding)?
+            .fill(0);
         assert_eq!(
             AuthenticationGrantRecord::parse(&zero_generation)?
                 .into_restart_metadata()

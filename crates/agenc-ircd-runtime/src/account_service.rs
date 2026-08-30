@@ -11,12 +11,13 @@ use agenc_ircd_auth::{
     ACCOUNT_SERVICE_ENVELOPE_BYTES, ACCOUNT_SERVICE_RESPONSE_BYTES, AccountAuthenticationState,
     AccountCreationStartParameters, AccountCreationState, AccountCredentialRecord,
     AccountOperationContext, AccountRouteBinding, AccountServiceEnvelope, AccountStartOutcome,
-    AccountTransaction, AuthenticatedAccountRequest, AuthenticationGrant, AuthenticationLookup,
-    AuthenticationStart, AuthenticationStartParameters, CreateAccountIntent, CreationAdmission,
-    CreationFinish, CreationStart, CredentialChangeFinish, CredentialChangeStart,
-    CredentialChangeStartParameters, CredentialChangeState, CredentialReplacementIntent,
-    DestructiveAccountSnapshot, FreshAuthenticationProof, OpaqueProfile, OpaqueRegistrationRecord,
-    OpenedAccountServiceRequest, SealedAccountFinishOutcome, SealedAccountStart,
+    AccountTransaction, AuthenticatedAccountRequest, AuthenticationGrant,
+    AuthenticationGrantRecord, AuthenticationLookup, AuthenticationStart,
+    AuthenticationStartParameters, CreateAccountIntent, CreationAdmission, CreationFinish,
+    CreationStart, CredentialChangeFinish, CredentialChangeStart, CredentialChangeStartParameters,
+    CredentialChangeState, CredentialReplacementIntent, DestructiveAccountSnapshot,
+    FreshAuthenticationProof, OpaqueProfile, OpaqueRegistrationRecord, OpenedAccountServiceRequest,
+    SealedAccountFinishOutcome, SealedAccountStart,
 };
 use agenc_ircd_client_wire::{
     AccountCarrierAction, AccountCarrierKind, AccountCarrierPhase, AccountTransfer, ParsedMessage,
@@ -65,6 +66,7 @@ use crate::sync::Arc;
 const AUTHENTICATION_TRANSACTION_KIND: u16 = 2;
 const CREATION_TRANSACTION_KIND: u16 = 1;
 const CREDENTIAL_CHANGE_TRANSACTION_KIND: u16 = 3;
+const AUTHENTICATION_GRANT_KIND: u16 = 4;
 const INVITATION_RESERVATION_KIND: u16 = 1;
 const INVITATION_TOMBSTONE_KIND: u16 = 2;
 const INVITATION_TOMBSTONE_SECONDS: u64 = 7 * 24 * 60 * 60;
@@ -311,9 +313,23 @@ impl<'a> RequestResultCursor<'a> {
 }
 
 struct AuthenticatedBinding {
-    account_id: AccountId,
-    account_session_generation: Generation,
+    transaction_id: TransactionId,
+    grant: AuthenticationGrant,
     authenticated_at: MonotonicTick,
+}
+
+impl AuthenticatedBinding {
+    const fn account_id(&self) -> AccountId {
+        self.grant.account_id()
+    }
+
+    const fn account_session_generation(&self) -> Generation {
+        self.grant.account_session_generation()
+    }
+
+    const fn process_expires_at(&self) -> MonotonicTick {
+        self.grant.process_expires_at()
+    }
 }
 
 struct LiveAuthentication {
@@ -342,6 +358,7 @@ struct LiveCredentialChange {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum LiveTransactionClass {
     Authentication,
+    AuthenticationGrant,
     Creation,
     CredentialChange,
 }
@@ -759,6 +776,7 @@ enum PendingAuthority {
         reservation: Option<AccountId>,
         fenced: Vec<ConnectionGeneration>,
         invalidated_authentications: Vec<ConnectionGeneration>,
+        invalidated_grants: Vec<ConnectionGeneration>,
     },
     Start {
         generation: ConnectionGeneration,
@@ -787,6 +805,7 @@ pub(crate) struct AccountServiceCoordinator {
     connections: BTreeMap<ConnectionGeneration, AccountConnection>,
     credential_reservations: BTreeMap<AccountId, ConnectionGeneration>,
     transaction_owners: BTreeMap<TransactionId, (ConnectionGeneration, LiveTransactionClass)>,
+    grant_consumptions: BTreeMap<ConnectionGeneration, TransactionId>,
     cleanup_queue: VecDeque<TransactionCleanup>,
     startup_cleanup_remaining: usize,
     credential_cleanup_owners: BTreeSet<ConnectionGeneration>,
@@ -828,6 +847,7 @@ impl AccountServiceCoordinator {
             connections: BTreeMap::new(),
             credential_reservations: BTreeMap::new(),
             transaction_owners: BTreeMap::new(),
+            grant_consumptions: BTreeMap::new(),
             cleanup_queue,
             startup_cleanup_remaining,
             credential_cleanup_owners: BTreeSet::new(),
@@ -935,6 +955,18 @@ impl AccountServiceCoordinator {
                 LiveTransactionClass::Creation,
                 cleanup,
             );
+        }
+        if let Some(binding) = connection.authenticated.take() {
+            let transaction_id = binding.transaction_id;
+            if self.grant_consumptions.get(&generation) != Some(&transaction_id) {
+                let cleanup = TransactionCleanup::authentication(transaction_id);
+                let _queued = self.queue_transaction_cleanup(
+                    context,
+                    generation,
+                    LiveTransactionClass::AuthenticationGrant,
+                    cleanup,
+                );
+            }
         }
         let Some(live) = connection.credential_transaction.take() else {
             return false;
@@ -1058,11 +1090,20 @@ impl AccountServiceCoordinator {
         else {
             return (true, Vec::new());
         };
+        let expired_grant = class == LiveTransactionClass::AuthenticationGrant;
         let Some(cleanup) = self.take_live_transaction(generation, class, transaction_id) else {
             return (true, Vec::new());
         };
         let _queued = self.queue_transaction_cleanup(context, generation, class, cleanup);
-        (true, self.progress(context))
+        let mut completions = self.progress(context);
+        if expired_grant {
+            completions.push(CarrierCompletion {
+                generation,
+                carrier_generation: 0,
+                close: true,
+            });
+        }
+        (true, completions)
     }
 
     fn take_live_transaction(
@@ -1077,6 +1118,10 @@ impl AccountServiceCoordinator {
                 .transaction
                 .as_ref()
                 .is_some_and(|live| live.transaction.binding().transaction_id() == transaction_id),
+            LiveTransactionClass::AuthenticationGrant => connection
+                .authenticated
+                .as_ref()
+                .is_some_and(|binding| binding.transaction_id == transaction_id),
             LiveTransactionClass::Creation => connection
                 .creation_transaction
                 .as_ref()
@@ -1092,6 +1137,10 @@ impl AccountServiceCoordinator {
         match class {
             LiveTransactionClass::Authentication => connection
                 .transaction
+                .take()
+                .map(|_| TransactionCleanup::authentication(transaction_id)),
+            LiveTransactionClass::AuthenticationGrant => connection
+                .authenticated
                 .take()
                 .map(|_| TransactionCleanup::authentication(transaction_id)),
             LiveTransactionClass::Creation => connection
@@ -1192,6 +1241,25 @@ impl AccountServiceCoordinator {
         Ok(())
     }
 
+    fn queue_unowned_transaction_cleanup(
+        &mut self,
+        cleanup: TransactionCleanup,
+    ) -> Result<(), RuntimeError> {
+        let retained = self
+            .cleanup_queue
+            .len()
+            .saturating_add(self.pending_cleanups.len())
+            .saturating_add(self.transaction_owners.len());
+        if retained >= MAX_PENDING_TRANSACTION_CLEANUPS {
+            return Err(RuntimeError::LimitExceeded);
+        }
+        self.cleanup_queue
+            .try_reserve(1)
+            .map_err(|_| RuntimeError::MemoryExhausted)?;
+        self.cleanup_queue.push_back(cleanup);
+        Ok(())
+    }
+
     fn try_stage_transaction_cleanup(
         &mut self,
         context: &mut StateCoreContext,
@@ -1259,13 +1327,99 @@ impl AccountServiceCoordinator {
     pub(crate) fn authenticated_binding(
         &self,
         generation: ConnectionGeneration,
-    ) -> Option<(AccountId, Generation)> {
-        self.connections.get(&generation).and_then(|connection| {
-            connection
-                .authenticated
-                .as_ref()
-                .map(|binding| (binding.account_id, binding.account_session_generation))
-        })
+        now: MonotonicTick,
+    ) -> Result<Option<(AccountId, Generation)>, RuntimeError> {
+        let binding = self
+            .connections
+            .get(&generation)
+            .and_then(|connection| connection.authenticated.as_ref());
+        match binding {
+            Some(binding) if now < binding.process_expires_at() => Ok(Some((
+                binding.account_id(),
+                binding.account_session_generation(),
+            ))),
+            Some(_) => Err(RuntimeError::InvalidValue),
+            None => Ok(None),
+        }
+    }
+
+    /// Constructs the one durable delete that consumes a pre-registration
+    /// grant with its matching session-open plan.
+    pub(crate) fn registration_grant_write(
+        &self,
+        generation: ConnectionGeneration,
+        now: MonotonicTick,
+    ) -> Result<AccountServiceDurableWrite, RuntimeError> {
+        let binding = self
+            .connections
+            .get(&generation)
+            .and_then(|connection| connection.authenticated.as_ref())
+            .ok_or(RuntimeError::InvalidValue)?;
+        if now >= binding.process_expires_at()
+            || self.transaction_owners.get(&binding.transaction_id)
+                != Some(&(generation, LiveTransactionClass::AuthenticationGrant))
+            || self.grant_consumptions.contains_key(&generation)
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
+        AccountServiceDurableWrite::delete(
+            TableId::AuthTransaction,
+            StoredKey::new(binding.transaction_id.as_bytes().to_vec())?,
+        )
+    }
+
+    /// Moves one live grant timer into an in-flight registration barrier.
+    pub(crate) fn begin_registration_grant_consumption(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+    ) -> Result<(), RuntimeError> {
+        if self.grant_consumptions.contains_key(&generation) {
+            return Err(RuntimeError::InvalidValue);
+        }
+        let transaction_id = self
+            .connections
+            .get(&generation)
+            .and_then(|connection| connection.authenticated.as_ref())
+            .map(|binding| binding.transaction_id)
+            .ok_or(RuntimeError::InvalidValue)?;
+        self.release_finished_transaction(
+            generation,
+            LiveTransactionClass::AuthenticationGrant,
+            transaction_id,
+        )?;
+        context
+            .timers_mut()
+            .cancel(TimerKind::Reservation, TimedId::Transaction(transaction_id));
+        self.grant_consumptions.insert(generation, transaction_id);
+        Ok(())
+    }
+
+    /// Restores a grant timer when session-open could not enter a durable
+    /// batch and no grant row was consumed.
+    pub(crate) fn cancel_registration_grant_consumption(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+    ) -> Result<(), RuntimeError> {
+        let transaction_id = self
+            .grant_consumptions
+            .remove(&generation)
+            .ok_or(RuntimeError::InvalidValue)?;
+        let deadline = self
+            .connections
+            .get(&generation)
+            .and_then(|connection| connection.authenticated.as_ref())
+            .filter(|binding| binding.transaction_id == transaction_id)
+            .map(AuthenticatedBinding::process_expires_at)
+            .ok_or(RuntimeError::InvalidValue)?;
+        self.install_transaction_timer(
+            context,
+            generation,
+            LiveTransactionClass::AuthenticationGrant,
+            transaction_id,
+            deadline,
+        )
     }
 
     /// Applies a fresh-auth proof after registration has inserted a session
@@ -1276,22 +1430,34 @@ impl AccountServiceCoordinator {
         generation: ConnectionGeneration,
         user_id: agenc_ircd_types::UserId,
     ) -> Result<(), RuntimeError> {
-        let Some(binding) = self
+        let transaction_id = self
+            .grant_consumptions
+            .remove(&generation)
+            .ok_or(RuntimeError::InvalidValue)?;
+        let binding = self
             .connections
             .get_mut(&generation)
-            .and_then(|connection| connection.authenticated.take())
-        else {
+            .and_then(|connection| connection.authenticated.take());
+        let Some(binding) = binding else {
             return Ok(());
         };
+        if binding.transaction_id != transaction_id {
+            return Err(RuntimeError::InvalidValue);
+        }
         let session = context
             .domain()
             .session(user_id)
             .ok_or(RuntimeError::InvalidValue)?;
+        if session.account_id() != Some(binding.account_id())
+            || session.account_session_generation() != binding.account_session_generation()
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
         let plan = context
             .domain()
             .plan_session_fresh_authentication(
                 user_id,
-                binding.account_id,
+                binding.account_id(),
                 session.generation(),
                 binding.authenticated_at,
             )
@@ -1300,6 +1466,42 @@ impl AccountServiceCoordinator {
         context
             .apply_ephemeral(plan, fanout)
             .map_err(|_| RuntimeError::InvalidValue)?;
+        let proof = binding.grant.into_fresh_authentication_after_commit();
+        let credential_id = duplicate_credential_id(proof.credential_id_for_replacement());
+        let connection = self
+            .connections
+            .get_mut(&generation)
+            .ok_or(RuntimeError::InvalidValue)?;
+        connection.credential_id = Some(credential_id);
+        connection.fresh_authentication = Some(proof);
+        Ok(())
+    }
+
+    /// Drops an uncommitted registration grant and schedules its durable row
+    /// for deletion after a determinate batch rejection.
+    pub(crate) fn registration_rejected(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+    ) -> Result<(), RuntimeError> {
+        let transaction_id = *self
+            .grant_consumptions
+            .get(&generation)
+            .ok_or(RuntimeError::InvalidValue)?;
+        if self
+            .connections
+            .get(&generation)
+            .and_then(|connection| connection.authenticated.as_ref())
+            .is_some_and(|binding| binding.transaction_id != transaction_id)
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
+        self.grant_consumptions.remove(&generation);
+        if let Some(connection) = self.connections.get_mut(&generation) {
+            connection.authenticated = None;
+        }
+        self.queue_unowned_transaction_cleanup(TransactionCleanup::authentication(transaction_id))?;
+        let _staged = self.try_stage_transaction_cleanup(context);
         Ok(())
     }
 
@@ -1504,15 +1706,7 @@ impl AccountServiceCoordinator {
             .connection(generation)
             .and_then(|entry| entry.session());
         let Some(bound) = bound else {
-            let Some(connection) = self.connections.get_mut(&generation) else {
-                return CarrierRoute::Close;
-            };
-            if connection.authenticated.take().is_none()
-                || connection.sasl.complete_logout().is_err()
-            {
-                return CarrierRoute::Close;
-            }
-            return CarrierRoute::Finished(Vec::new());
+            return self.route_preregistered_logout(context, generation);
         };
         if self.pending_authority.is_some() {
             return self.reject_logout(context, generation, target);
@@ -1553,6 +1747,42 @@ impl AccountServiceCoordinator {
             }
             Err(_) => self.reject_logout(context, generation, target),
         }
+    }
+
+    fn route_preregistered_logout(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+    ) -> CarrierRoute {
+        let Some((transaction_id, logout_completed)) = self
+            .connections
+            .get_mut(&generation)
+            .and_then(|connection| {
+                connection.authenticated.take().map(|binding| {
+                    (
+                        binding.transaction_id,
+                        connection.sasl.complete_logout().is_ok(),
+                    )
+                })
+            })
+        else {
+            return CarrierRoute::Close;
+        };
+        let queued = self
+            .queue_transaction_cleanup(
+                context,
+                generation,
+                LiveTransactionClass::AuthenticationGrant,
+                TransactionCleanup::authentication(transaction_id),
+            )
+            .is_ok();
+        if queued {
+            let _staged = self.try_stage_transaction_cleanup(context);
+        }
+        if !logout_completed || !queued {
+            return CarrierRoute::Close;
+        }
+        CarrierRoute::Finished(Vec::new())
     }
 
     fn reject_logout(
@@ -2489,7 +2719,10 @@ impl AccountServiceCoordinator {
             return false;
         };
         let Some(bound) = connection.session() else {
-            return true;
+            return self
+                .connections
+                .get(&generation)
+                .is_some_and(|connection| connection.authenticated.is_none());
         };
         context
             .domain()
@@ -3878,27 +4111,38 @@ impl AccountServiceCoordinator {
             request_result_write(revision, &request, terminal, None, response)?,
         ];
         let mut invalidated_authentications = Vec::new();
+        let mut invalidated_grants = Vec::new();
         if let (Ok(intent), Some(generation)) = (sealed.result(), resulting_generation) {
             for (connection_generation, connection) in &self.connections {
-                let Some(authentication) =
-                    connection.transaction.as_ref().filter(|authentication| {
-                        authentication.account_id == Some(intent.account_id())
-                    })
-                else {
-                    continue;
-                };
-                invalidated_authentications.push(*connection_generation);
-                writes.push(AccountServiceDurableWrite::delete(
-                    TableId::AuthTransaction,
-                    StoredKey::new(
-                        authentication
-                            .transaction
-                            .binding()
-                            .transaction_id()
-                            .as_bytes()
-                            .to_vec(),
-                    )?,
-                )?);
+                if let Some(authentication) = connection
+                    .transaction
+                    .as_ref()
+                    .filter(|authentication| authentication.account_id == Some(intent.account_id()))
+                {
+                    invalidated_authentications.push(*connection_generation);
+                    writes.push(AccountServiceDurableWrite::delete(
+                        TableId::AuthTransaction,
+                        StoredKey::new(
+                            authentication
+                                .transaction
+                                .binding()
+                                .transaction_id()
+                                .as_bytes()
+                                .to_vec(),
+                        )?,
+                    )?);
+                }
+                if let Some(binding) = connection
+                    .authenticated
+                    .as_ref()
+                    .filter(|binding| binding.account_id() == intent.account_id())
+                {
+                    invalidated_grants.push(*connection_generation);
+                    writes.push(AccountServiceDurableWrite::delete(
+                        TableId::AuthTransaction,
+                        StoredKey::new(binding.transaction_id.as_bytes().to_vec())?,
+                    )?);
+                }
             }
             let account_key = StoredKey::new(intent.account_id().to_text().into_bytes())?;
             let opaque = PersistentRecordValue::new(
@@ -3970,6 +4214,7 @@ impl AccountServiceCoordinator {
             reservation,
             fenced,
             invalidated_authentications,
+            invalidated_grants,
         });
         Ok(())
     }
@@ -4129,11 +4374,32 @@ impl AccountServiceCoordinator {
             RequestTerminal::Rejected
         };
         let response = sealed.response_intent().response().as_bytes();
-        let mut writes = vec![
+        let transaction_write = if let (Some(grant), None) = (semantic_grant, bound) {
+            let record = AuthenticationGrantRecord::capture(transaction_id, grant)
+                .map_err(|_| RuntimeError::InvalidValue)?;
+            let account_key = StoredKey::new(grant.account_id().to_text().into_bytes())?;
+            let value = PersistentRecordValue::new(
+                TableId::AuthTransaction,
+                AUTHENTICATION_GRANT_KIND,
+                revision,
+                0,
+                Some(grant.durable_expires_at_utc().get()),
+                vec![RecordReference::new(TableId::Account, account_key)?],
+                record.expose_for_persistence().to_vec(),
+            )?;
+            AccountServiceDurableWrite::put(
+                TableId::AuthTransaction,
+                StoredKey::new(transaction_id.as_bytes().to_vec())?,
+                value.encode()?,
+            )?
+        } else {
             AccountServiceDurableWrite::delete(
                 TableId::AuthTransaction,
                 StoredKey::new(transaction_id.as_bytes().to_vec())?,
-            )?,
+            )?
+        };
+        let mut writes = vec![
+            transaction_write,
             request_result_write(revision, &request, terminal, None, response)?,
         ];
         let resulting_key_state = if let (Some(grant), Some(previous_value)) =
@@ -4557,6 +4823,7 @@ impl AccountServiceCoordinator {
         reservation: Option<AccountId>,
         fenced: Vec<ConnectionGeneration>,
         invalidated_authentications: Vec<ConnectionGeneration>,
+        invalidated_grants: Vec<ConnectionGeneration>,
     ) -> Vec<CarrierCompletion> {
         if self
             .release_finished_transaction(
@@ -4590,14 +4857,13 @@ impl AccountServiceCoordinator {
                 close: true,
             }];
         };
-        let Ok(intent) = result else {
+        let Ok(_intent) = result else {
             return vec![CarrierCompletion {
                 generation,
                 carrier_generation,
                 close: false,
             }];
         };
-        let account_id = intent.account_id();
         for invalidated in invalidated_authentications {
             if let Some(connection) = self.connections.get_mut(&invalidated)
                 && let Some(authentication) = connection.transaction.take()
@@ -4613,18 +4879,34 @@ impl AccountServiceCoordinator {
                 );
             }
         }
-        for connection in self.connections.values_mut() {
-            if connection
-                .authenticated
-                .as_ref()
-                .is_some_and(|binding| binding.account_id == account_id)
-            {
-                connection.authenticated = None;
+        let mut completions = Vec::new();
+        for invalidated in invalidated_grants {
+            let Some(binding) = self
+                .connections
+                .get_mut(&invalidated)
+                .and_then(|connection| connection.authenticated.take())
+            else {
+                continue;
+            };
+            context.timers_mut().cancel(
+                TimerKind::Reservation,
+                TimedId::Transaction(binding.transaction_id),
+            );
+            let _released = self.release_finished_transaction(
+                invalidated,
+                LiveTransactionClass::AuthenticationGrant,
+                binding.transaction_id,
+            );
+            if let Some(connection) = self.connections.get_mut(&invalidated) {
                 connection.credential_id = None;
                 connection.fresh_authentication = None;
             }
+            completions.push(CarrierCompletion {
+                generation: invalidated,
+                carrier_generation: 0,
+                close: true,
+            });
         }
-        let mut completions = Vec::new();
         for fenced_generation in fenced {
             if let Some(connection) = self.connections.get_mut(&fenced_generation) {
                 connection.authenticated = None;
@@ -4699,6 +4981,7 @@ impl AccountServiceCoordinator {
             Ok(grant) if sasl_accepted => self.install_committed_grant(
                 context,
                 generation,
+                transaction_id,
                 grant,
                 authenticated_at,
                 fresh_auth_session,
@@ -4716,37 +4999,73 @@ impl AccountServiceCoordinator {
         &mut self,
         context: &mut StateCoreContext,
         generation: ConnectionGeneration,
+        transaction_id: TransactionId,
         grant: AuthenticationGrant,
         authenticated_at: MonotonicTick,
         fresh_auth_session: Option<(agenc_ircd_types::UserId, Generation, AccountId)>,
     ) -> bool {
-        if let Some((user_id, session_generation, account_id)) = fresh_auth_session {
-            let applied = context
-                .domain()
-                .plan_session_fresh_authentication(
-                    user_id,
-                    account_id,
-                    session_generation,
-                    authenticated_at,
-                )
-                .ok()
-                .and_then(|plan| {
-                    FanoutRequest::new(Vec::new(), Vec::new())
-                        .ok()
-                        .and_then(|fanout| context.apply_ephemeral(plan, fanout).ok())
-                });
-            if applied.is_none() {
-                return true;
-            }
-            let proof = grant.into_fresh_authentication_after_commit();
-            let credential_id = duplicate_credential_id(proof.credential_id_for_replacement());
-            let Some(connection) = self.connections.get_mut(&generation) else {
-                return true;
-            };
-            connection.credential_id = Some(credential_id);
-            connection.fresh_authentication = Some(proof);
-            return false;
+        match fresh_auth_session {
+            Some(session) => self.install_registered_fresh_authentication(
+                context,
+                generation,
+                grant,
+                authenticated_at,
+                session,
+            ),
+            None => self.install_preregistration_grant(
+                context,
+                generation,
+                transaction_id,
+                grant,
+                authenticated_at,
+            ),
         }
+    }
+
+    fn install_registered_fresh_authentication(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+        grant: AuthenticationGrant,
+        authenticated_at: MonotonicTick,
+        session: (agenc_ircd_types::UserId, Generation, AccountId),
+    ) -> bool {
+        let (user_id, session_generation, account_id) = session;
+        let applied = context
+            .domain()
+            .plan_session_fresh_authentication(
+                user_id,
+                account_id,
+                session_generation,
+                authenticated_at,
+            )
+            .ok()
+            .and_then(|plan| {
+                FanoutRequest::new(Vec::new(), Vec::new())
+                    .ok()
+                    .and_then(|fanout| context.apply_ephemeral(plan, fanout).ok())
+            });
+        if applied.is_none() {
+            return true;
+        }
+        let proof = grant.into_fresh_authentication_after_commit();
+        let credential_id = duplicate_credential_id(proof.credential_id_for_replacement());
+        let Some(connection) = self.connections.get_mut(&generation) else {
+            return true;
+        };
+        connection.credential_id = Some(credential_id);
+        connection.fresh_authentication = Some(proof);
+        false
+    }
+
+    fn install_preregistration_grant(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+        transaction_id: TransactionId,
+        grant: AuthenticationGrant,
+        authenticated_at: MonotonicTick,
+    ) -> bool {
         let preregistered = context
             .sessions()
             .connection(generation)
@@ -4754,20 +5073,46 @@ impl AccountServiceCoordinator {
         if !preregistered {
             return true;
         }
-        let account_id = grant.account_id();
-        let account_session_generation = grant.account_session_generation();
-        let proof = grant.into_fresh_authentication_after_commit();
-        let credential_id = duplicate_credential_id(proof.credential_id_for_replacement());
+        let deadline = grant.process_expires_at();
         let Some(connection) = self.connections.get_mut(&generation) else {
             return true;
         };
+        if connection.authenticated.is_some() {
+            return true;
+        }
         connection.authenticated = Some(AuthenticatedBinding {
-            account_id,
-            account_session_generation,
+            transaction_id,
+            grant,
             authenticated_at,
         });
-        connection.credential_id = Some(credential_id);
-        connection.fresh_authentication = Some(proof);
+        if self
+            .install_transaction_timer(
+                context,
+                generation,
+                LiveTransactionClass::AuthenticationGrant,
+                transaction_id,
+                deadline,
+            )
+            .is_err()
+        {
+            if let Some(connection) = self.connections.get_mut(&generation) {
+                connection.authenticated = None;
+            }
+            let cleanup = TransactionCleanup::authentication(transaction_id);
+            if self.transaction_owners.get(&transaction_id)
+                == Some(&(generation, LiveTransactionClass::AuthenticationGrant))
+            {
+                let _queued = self.queue_transaction_cleanup(
+                    context,
+                    generation,
+                    LiveTransactionClass::AuthenticationGrant,
+                    cleanup,
+                );
+            } else {
+                let _queued = self.queue_unowned_transaction_cleanup(cleanup);
+            }
+            return true;
+        }
         false
     }
 
@@ -4838,6 +5183,7 @@ impl AccountServiceCoordinator {
                 reservation,
                 fenced,
                 invalidated_authentications,
+                invalidated_grants,
             } => {
                 completions.extend(self.commit_credential_finish(
                     context,
@@ -4849,6 +5195,7 @@ impl AccountServiceCoordinator {
                     reservation,
                     fenced,
                     invalidated_authentications,
+                    invalidated_grants,
                 ));
                 None
             }
@@ -4907,7 +5254,7 @@ impl AccountServiceCoordinator {
         context: &mut StateCoreContext,
         origin: Option<StagedOrigin>,
     ) -> Vec<CarrierCompletion> {
-        if !self.pending_cleanups.is_empty() {
+        if !self.pending_cleanups.is_empty() && origin.is_none() {
             for cleanup in std::mem::take(&mut self.pending_cleanups).into_iter().rev() {
                 self.cleanup_queue.push_front(cleanup);
             }
