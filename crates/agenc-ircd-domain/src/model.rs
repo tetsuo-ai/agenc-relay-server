@@ -797,6 +797,18 @@ impl ListEntry {
         self.mask.is_quiet()
     }
 
+    /// Returns the immutable list-entry identity used for removals.
+    #[must_use]
+    pub const fn entry_id(&self) -> EntryId {
+        self.entry_id
+    }
+
+    /// Borrows the canonical typed mask.
+    #[must_use]
+    pub const fn mask(&self) -> &TypedMask {
+        &self.mask
+    }
+
     /// Returns the principal that created this entry.
     #[must_use]
     pub const fn setter(&self) -> Principal {
@@ -919,6 +931,21 @@ impl ChannelState {
     #[must_use]
     pub const fn revision(&self) -> Revision {
         self.revision
+    }
+
+    /// Iterates live membership identities in canonical user order.
+    pub fn members(&self) -> impl Iterator<Item = UserId> + '_ {
+        self.memberships.keys().copied()
+    }
+
+    /// Borrows one typed mask list.
+    #[must_use]
+    pub fn mask_list(&self, list: crate::MaskList) -> &[ListEntry] {
+        match list {
+            crate::MaskList::Ban => &self.bans,
+            crate::MaskList::Exception => &self.exceptions,
+            crate::MaskList::InviteException => &self.invite_exceptions,
+        }
     }
 
     /// Returns the channel authority scope.

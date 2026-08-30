@@ -14,6 +14,7 @@ pub mod budget;
 pub mod cancel;
 pub mod channels;
 pub mod clock;
+mod command_convert;
 pub mod connection;
 mod error;
 pub mod listener;

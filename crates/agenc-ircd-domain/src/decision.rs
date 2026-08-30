@@ -1676,6 +1676,13 @@ impl DomainState {
         }
     }
 
+    /// Returns the exact hierarchical charges runtime admission must
+    /// snapshot before authorizing this command.
+    #[must_use]
+    pub fn command_charges(&self, user_id: UserId, command: &CanonicalCommand) -> Vec<RateCharge> {
+        self.assess_charges(user_id, command)
+    }
+
     /// Computes or completes a pure command plan from explicit external inputs.
     pub fn plan_authorized(
         &self,
