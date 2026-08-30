@@ -1,9 +1,11 @@
 //! Registered command execution through the pure domain authorization and
 //! mutation pipeline.
 //!
-//! The complete Appendix-A converter is built here incrementally. The first
-//! live slice owns nickname changes and durable session removal so transport
-//! shutdown cannot leave a logical session behind.
+//! This executor owns the complete registered-command path: admission,
+//! authorization, external inputs, bounded channel-key crypto continuations,
+//! commit-coupled rendering, and transport-safe session removal.
+
+use std::collections::{BTreeMap, VecDeque};
 
 use agenc_ircd_client_wire::{
     CapabilityState, ParsedMessage, RegisteredCommandHandoff, RegisteredCommandKind,
@@ -17,12 +19,22 @@ use agenc_ircd_types::{
     AccountDeletionToken, BoundedUtf8, ChannelInstanceId, ControlPolicy, EntryId, InviteId,
     MessageId,
 };
+use zeroize::Zeroizing;
 
 use crate::RuntimeError;
+use crate::bridge::crypto::{
+    ChannelKeyConstructJob, ChannelKeyTarget, ChannelKeyVerifier, ChannelKeyVerifierRecord,
+    CryptoJobOutput, RuntimeCryptoJob,
+};
+use crate::bridge::{CryptoCompletionMessage, CryptoJobId};
 use crate::connection::sink::ConnectionGeneration;
 use crate::state_core::inbox::CloseReason;
 use crate::state_core::session::BoundSession;
+use crate::state_core::timers::{TimedId, TimerEntry, TimerKind};
 use crate::state_core::{RouteOutcome, StageRefused, StagedOrigin, StateCoreContext};
+use crate::sync::Arc;
+
+const COMMAND_DEADLINE_MILLIS: u64 = 30_000;
 
 #[derive(Clone, Copy)]
 struct RetryCommand<'a> {
@@ -35,6 +47,14 @@ struct ClientReply<'a> {
     generation: ConnectionGeneration,
     capabilities: &'a CapabilityState,
     request: RetryCommand<'a>,
+}
+
+#[derive(Clone, Copy)]
+struct DeferredOrigin<'a> {
+    generation: ConnectionGeneration,
+    bound: BoundSession,
+    kind: RegisteredCommandKind,
+    capabilities: &'a CapabilityState,
 }
 
 impl<'a> ClientReply<'a> {
@@ -61,62 +81,585 @@ enum SessionCommandError {
     Internal(RuntimeError),
 }
 
+// agenc-review: allow owner=runtime reviewed=2026-08-29 reason=the hot ready path keeps its bounded plan inline while only the cold deferred crypto path allocates
+#[allow(clippy::large_enum_variant)]
+enum PlannedCommand {
+    Ready(PlanDecision),
+    Crypto(Box<DeferredPlan>),
+}
+
+struct DeferredPlan {
+    authorized: AuthorizedCommand,
+    external: ExternalInputs,
+    requests: Vec<ExternalInputRequest>,
+    render_command: CanonicalCommand,
+}
+
+enum CommandExecution {
+    Complete(bool),
+    Crypto(Box<DeferredPlan>),
+}
+
+enum PreparedCryptoJob {
+    Verify(crate::bridge::crypto::ChannelKeyVerifyJob),
+    Construct(ChannelKeyConstructJob),
+}
+
+impl PreparedCryptoJob {
+    const fn kind(&self) -> PendingCryptoKind {
+        match self {
+            Self::Verify(_) => PendingCryptoKind::Verify,
+            Self::Construct(_) => PendingCryptoKind::Construct,
+        }
+    }
+
+    fn into_runtime(self) -> RuntimeCryptoJob {
+        match self {
+            Self::Verify(job) => RuntimeCryptoJob::ChannelKeyVerify(job),
+            Self::Construct(job) => RuntimeCryptoJob::ChannelKeyConstruct(job),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PendingCryptoKind {
+    Verify,
+    Construct,
+}
+
+enum CryptoCompletionError {
+    Busy,
+    Internal(RuntimeError),
+}
+
+struct PendingCryptoCommand {
+    sequence: u64,
+    generation: ConnectionGeneration,
+    bound: BoundSession,
+    kind: RegisteredCommandKind,
+    capabilities: CapabilityState,
+    message: ParsedMessage,
+    authorized: AuthorizedCommand,
+    external: ExternalInputs,
+    render_command: CanonicalCommand,
+    current: PendingCryptoKind,
+    remaining: VecDeque<PreparedCryptoJob>,
+}
+
+/// Bounded registered-command crypto continuations owned by StateCore's
+/// router. The actual worker bridge remains in [`StateCoreContext`].
+pub struct RegisteredCommandExecutor {
+    verifier: Arc<dyn ChannelKeyVerifier>,
+    dummy: ChannelKeyVerifierRecord,
+    pending: BTreeMap<CryptoJobId, PendingCryptoCommand>,
+    by_connection: BTreeMap<ConnectionGeneration, CryptoJobId>,
+    by_sequence: BTreeMap<u64, CryptoJobId>,
+    next_sequence: u64,
+}
+
+impl RegisteredCommandExecutor {
+    /// Creates an empty continuation owner around the reviewed Argon2 adapter
+    /// and process-local dummy verifier.
+    #[must_use]
+    pub fn new(verifier: Arc<dyn ChannelKeyVerifier>, dummy: ChannelKeyVerifierRecord) -> Self {
+        Self {
+            verifier,
+            dummy,
+            pending: BTreeMap::new(),
+            by_connection: BTreeMap::new(),
+            by_sequence: BTreeMap::new(),
+            next_sequence: 1,
+        }
+    }
+}
+
+impl RegisteredCommandExecutor {
+    fn defer(
+        &mut self,
+        context: &mut StateCoreContext,
+        origin: DeferredOrigin<'_>,
+        mut message: ParsedMessage,
+        plan: Box<DeferredPlan>,
+    ) -> Result<(), RuntimeError> {
+        if self.by_connection.contains_key(&origin.generation) {
+            return render_busy(
+                context,
+                origin.bound,
+                origin.generation,
+                origin.capabilities,
+                &message,
+            );
+        }
+        let mut jobs = prepare_crypto_jobs(
+            context,
+            origin.bound,
+            &mut message,
+            &plan.render_command,
+            &plan.requests,
+            &self.verifier,
+            self.dummy,
+        )?;
+        let first = jobs.pop_front().ok_or(RuntimeError::InvalidValue)?;
+        let sequence = self.next_sequence;
+        self.next_sequence = sequence.checked_add(1).ok_or(RuntimeError::Overflow)?;
+        let capabilities = origin
+            .capabilities
+            .try_clone()
+            .map_err(|_| RuntimeError::MemoryExhausted)?;
+        let deadline = context
+            .now()
+            .checked_add(COMMAND_DEADLINE_MILLIS)
+            .map_err(|_| RuntimeError::Overflow)?;
+        context.timers_mut().schedule(
+            deadline,
+            TimerKind::CommandDeadline,
+            TimedId::Sequence(sequence),
+        )?;
+        let DeferredPlan {
+            authorized,
+            external,
+            render_command,
+            ..
+        } = *plan;
+        let pending = PendingCryptoCommand {
+            sequence,
+            generation: origin.generation,
+            bound: origin.bound,
+            kind: origin.kind,
+            capabilities,
+            message,
+            authorized,
+            external,
+            render_command,
+            current: first.kind(),
+            remaining: jobs,
+        };
+        self.submit(context, pending, first)
+    }
+
+    fn submit(
+        &mut self,
+        context: &mut StateCoreContext,
+        pending: PendingCryptoCommand,
+        job: PreparedCryptoJob,
+    ) -> Result<(), RuntimeError> {
+        let generation = pending.generation;
+        let sequence = pending.sequence;
+        let submitted = context.crypto_mut().try_submit(job.into_runtime());
+        let job_id = match submitted {
+            Ok(job_id) => job_id,
+            Err(_refused) => {
+                cancel_command_timer(context, sequence);
+                return render_pending_busy(context, &pending);
+            }
+        };
+        if self.pending.contains_key(&job_id)
+            || self.by_connection.contains_key(&generation)
+            || self.by_sequence.contains_key(&sequence)
+        {
+            let _cancelled = context.crypto_mut().cancel(job_id);
+            cancel_command_timer(context, sequence);
+            return Err(RuntimeError::InvalidValue);
+        }
+        self.by_connection.insert(generation, job_id);
+        self.by_sequence.insert(sequence, job_id);
+        self.pending.insert(job_id, pending);
+        Ok(())
+    }
+
+    /// Resumes one matching deferred command; unrelated job IDs are ignored
+    /// for the account-service dispatcher.
+    pub(crate) fn crypto_completed(
+        &mut self,
+        context: &mut StateCoreContext,
+        message: CryptoCompletionMessage<CryptoJobOutput>,
+    ) -> Result<(), (ConnectionGeneration, RuntimeError)> {
+        let Some(mut pending) = self.take_pending(message.job_id) else {
+            return Ok(());
+        };
+        let generation = pending.generation;
+        match apply_crypto_output(pending.current, &mut pending.external, message.output) {
+            Ok(()) => {}
+            Err(CryptoCompletionError::Busy) => {
+                cancel_command_timer(context, pending.sequence);
+                return render_pending_busy(context, &pending).map_err(|error| (generation, error));
+            }
+            Err(CryptoCompletionError::Internal(error)) => {
+                cancel_command_timer(context, pending.sequence);
+                return Err((generation, error));
+            }
+        }
+        if let Some(next) = pending.remaining.pop_front() {
+            pending.current = next.kind();
+            return self
+                .submit(context, pending, next)
+                .map_err(|error| (generation, error));
+        }
+        cancel_command_timer(context, pending.sequence);
+        finish_pending(context, pending).map_err(|error| (generation, error))
+    }
+
+    /// Drops one disconnected connection's side-effect-free continuation.
+    pub(crate) fn connection_closed(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+    ) {
+        let Some(job_id) = self.by_connection.get(&generation).copied() else {
+            return;
+        };
+        if let Some(pending) = self.take_pending(job_id) {
+            let _cancelled = context.crypto_mut().cancel(job_id);
+            cancel_command_timer(context, pending.sequence);
+        }
+    }
+
+    /// Applies the fixed pre-commit deadline to one deferred command.
+    pub(crate) fn timer_fired(
+        &mut self,
+        context: &mut StateCoreContext,
+        entry: TimerEntry,
+    ) -> Result<bool, (ConnectionGeneration, RuntimeError)> {
+        let TimedId::Sequence(sequence) = entry.id else {
+            return Ok(false);
+        };
+        if entry.kind != TimerKind::CommandDeadline {
+            return Ok(false);
+        }
+        let Some(job_id) = self.by_sequence.get(&sequence).copied() else {
+            return Ok(true);
+        };
+        let Some(pending) = self.take_pending(job_id) else {
+            return Ok(true);
+        };
+        let _cancelled = context.crypto_mut().cancel(job_id);
+        let generation = pending.generation;
+        render_pending_busy(context, &pending)
+            .map(|()| true)
+            .map_err(|error| (generation, error))
+    }
+
+    fn take_pending(&mut self, job_id: CryptoJobId) -> Option<PendingCryptoCommand> {
+        let pending = self.pending.remove(&job_id)?;
+        self.by_connection.remove(&pending.generation);
+        self.by_sequence.remove(&pending.sequence);
+        Some(pending)
+    }
+}
+
 impl From<RuntimeError> for SessionCommandError {
     fn from(error: RuntimeError) -> Self {
         Self::Internal(error)
     }
 }
 
-/// Executes one registered handoff or renders its closed public failure.
-pub(crate) fn route_registered(
+impl RegisteredCommandExecutor {
+    /// Executes one registered handoff or owns its deferred crypto continuation.
+    pub(crate) fn route_registered(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+        bound: Option<BoundSession>,
+        capabilities: &CapabilityState,
+        current_nickname: &mut Option<String>,
+        handoff: RegisteredCommandHandoff,
+    ) -> Result<RouteOutcome, RuntimeError> {
+        let Some(bound) = bound else {
+            return Ok(RouteOutcome::Close(CloseReason::ProtocolError));
+        };
+        let (kind, message) = handoff.into_parts();
+        let request = RetryCommand {
+            kind,
+            message: &message,
+        };
+        let reply = ClientReply {
+            generation,
+            capabilities,
+            request,
+        };
+        let command = match crate::command_convert::convert(context.domain(), kind, &message) {
+            Ok(command) => command,
+            Err(RuntimeError::InvalidValue | RuntimeError::LimitExceeded) => {
+                crate::client_render::render_domain_failure(
+                    context,
+                    reply.render_input(bound.user_id),
+                    DomainError::InvalidArgument,
+                    false,
+                    None,
+                )?;
+                return Ok(RouteOutcome::Continue);
+            }
+            Err(error) => return Err(error),
+        };
+        let next_nickname = match command.view() {
+            CanonicalCommandView::Nick(nickname) => Some(nickname.presentation().to_owned()),
+            _ => None,
+        };
+        match execute_session_command(context, bound, Some(reply), command, None)? {
+            CommandExecution::Complete(accepted) => {
+                if accepted && let Some(nickname) = next_nickname {
+                    *current_nickname = Some(nickname);
+                }
+            }
+            CommandExecution::Crypto(plan) => {
+                self.defer(
+                    context,
+                    DeferredOrigin {
+                        generation,
+                        bound,
+                        kind,
+                        capabilities,
+                    },
+                    message,
+                    plan,
+                )?;
+            }
+        }
+        Ok(RouteOutcome::Continue)
+    }
+}
+
+fn prepare_crypto_jobs(
     context: &mut StateCoreContext,
-    generation: ConnectionGeneration,
-    bound: Option<BoundSession>,
-    capabilities: &CapabilityState,
-    current_nickname: &mut Option<String>,
-    handoff: RegisteredCommandHandoff,
-) -> Result<RouteOutcome, RuntimeError> {
-    let Some(bound) = bound else {
-        return Ok(RouteOutcome::Close(CloseReason::ProtocolError));
-    };
-    let (kind, message) = handoff.into_parts();
-    let request = RetryCommand {
+    bound: BoundSession,
+    message: &mut ParsedMessage,
+    command: &CanonicalCommand,
+    requests: &[ExternalInputRequest],
+    verifier: &Arc<dyn ChannelKeyVerifier>,
+    dummy: ChannelKeyVerifierRecord,
+) -> Result<VecDeque<PreparedCryptoJob>, RuntimeError> {
+    match command.view() {
+        CanonicalCommandView::Join(targets) => {
+            prepare_join_key_jobs(context, bound, message, targets, requests, verifier, dummy)
+        }
+        CanonicalCommandView::Mode(agenc_ircd_domain::ModeCommand::ChannelChange(_, _)) => {
+            prepare_mode_key_jobs(context, message, requests, verifier)
+        }
+        _ => Err(RuntimeError::InvalidValue),
+    }
+}
+
+fn prepare_join_key_jobs(
+    context: &StateCoreContext,
+    bound: BoundSession,
+    message: &mut ParsedMessage,
+    targets: &[agenc_ircd_domain::ChannelTarget],
+    requests: &[ExternalInputRequest],
+    verifier: &Arc<dyn ChannelKeyVerifier>,
+    dummy: ChannelKeyVerifierRecord,
+) -> Result<VecDeque<PreparedCryptoJob>, RuntimeError> {
+    let raw_keys = message
+        .take_parameter(1)
+        .ok_or(RuntimeError::InvalidValue)?;
+    let raw_keys = Zeroizing::new(raw_keys);
+    let mut jobs = VecDeque::new();
+    jobs.try_reserve_exact(requests.len())
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    for request in requests {
+        let ExternalInputRequest::ChannelKeyVerification { target_index, .. } = request else {
+            return Err(RuntimeError::InvalidValue);
+        };
+        let target = targets
+            .get(usize::from(*target_index))
+            .ok_or(RuntimeError::InvalidValue)?;
+        let candidate = raw_keys
+            .split(',')
+            .nth(usize::from(*target_index))
+            .filter(|candidate| !candidate.is_empty())
+            .ok_or(RuntimeError::InvalidValue)?;
+        let candidate = copy_secret(candidate.as_bytes())?;
+        let key_target = channel_key_target(context, bound, target, dummy);
+        let job = crate::bridge::crypto::ChannelKeyVerifyJob::new(
+            Arc::clone(verifier),
+            key_target,
+            candidate,
+        )?;
+        jobs.push_back(PreparedCryptoJob::Verify(job));
+    }
+    Ok(jobs)
+}
+
+fn prepare_mode_key_jobs(
+    context: &mut StateCoreContext,
+    message: &mut ParsedMessage,
+    requests: &[ExternalInputRequest],
+    verifier: &Arc<dyn ChannelKeyVerifier>,
+) -> Result<VecDeque<PreparedCryptoJob>, RuntimeError> {
+    let positions = crate::command_convert::channel_key_parameter_positions(message)?;
+    let mut jobs = VecDeque::new();
+    jobs.try_reserve_exact(requests.len())
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    for request in requests {
+        let ExternalInputRequest::ChannelKeyConstruction { change_index, .. } = request else {
+            return Err(RuntimeError::InvalidValue);
+        };
+        let parameter_index = positions
+            .iter()
+            .find_map(|(index, parameter)| (index == change_index).then_some(*parameter))
+            .ok_or(RuntimeError::InvalidValue)?;
+        let candidate = message
+            .take_parameter(parameter_index)
+            .ok_or(RuntimeError::InvalidValue)?;
+        let candidate = Zeroizing::new(candidate);
+        let mut salt = [0_u8; crate::bridge::crypto::CHANNEL_KEY_SALT_BYTES];
+        context
+            .entropy_mut()
+            .fill_exact(&mut salt)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let job = ChannelKeyConstructJob::new(
+            Arc::clone(verifier),
+            salt,
+            copy_secret(candidate.as_bytes())?,
+        )?;
+        jobs.push_back(PreparedCryptoJob::Construct(job));
+    }
+    Ok(jobs)
+}
+
+fn channel_key_target(
+    context: &StateCoreContext,
+    bound: BoundSession,
+    target: &agenc_ircd_domain::ChannelTarget,
+    dummy: ChannelKeyVerifierRecord,
+) -> ChannelKeyTarget {
+    let stored = context
+        .domain()
+        .resolve_channel(target.name())
+        .and_then(|channel_id| context.domain().channel(channel_id))
+        .filter(|channel| channel_key_route_available(context, bound, channel))
+        .and_then(agenc_ircd_domain::ChannelState::key_verifier)
+        .copied();
+    stored.map_or(ChannelKeyTarget::Dummy(dummy), ChannelKeyTarget::Stored)
+}
+
+fn channel_key_route_available(
+    context: &StateCoreContext,
+    bound: BoundSession,
+    channel: &agenc_ircd_domain::ChannelState,
+) -> bool {
+    context
+        .domain()
+        .session(bound.user_id)
+        .is_some_and(|session| {
+            session.account_id().is_some()
+                || (channel.visibility() == agenc_ircd_domain::Visibility::Listed
+                    && channel.content_policy() == agenc_ircd_domain::ContentPolicy::Plaintext)
+        })
+}
+
+fn copy_secret(value: &[u8]) -> Result<Vec<u8>, RuntimeError> {
+    let mut copied = Vec::new();
+    copied
+        .try_reserve_exact(value.len())
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    copied.extend_from_slice(value);
+    Ok(copied)
+}
+
+fn apply_crypto_output(
+    current: PendingCryptoKind,
+    external: &mut ExternalInputs,
+    output: Result<CryptoJobOutput, agenc_ircd_crypto::CryptoWorkerError>,
+) -> Result<(), CryptoCompletionError> {
+    let output = output.map_err(|_| CryptoCompletionError::Busy)?;
+    match (current, output) {
+        (PendingCryptoKind::Verify, CryptoJobOutput::ChannelKey(verdict)) => {
+            reserve_one(&mut external.key_verdicts).map_err(CryptoCompletionError::Internal)?;
+            external.key_verdicts.push(verdict.matches());
+            Ok(())
+        }
+        (PendingCryptoKind::Construct, CryptoJobOutput::ChannelKeyConstruct(Ok(verifier))) => {
+            reserve_one(&mut external.key_verifiers).map_err(CryptoCompletionError::Internal)?;
+            external.key_verifiers.push(verifier);
+            Ok(())
+        }
+        (PendingCryptoKind::Construct, CryptoJobOutput::ChannelKeyConstruct(Err(_))) => {
+            Err(CryptoCompletionError::Busy)
+        }
+        _ => Err(CryptoCompletionError::Internal(RuntimeError::InvalidValue)),
+    }
+}
+
+fn finish_pending(
+    context: &mut StateCoreContext,
+    pending: PendingCryptoCommand,
+) -> Result<(), RuntimeError> {
+    let PendingCryptoCommand {
+        generation,
+        bound,
         kind,
-        message: &message,
-    };
+        capabilities,
+        message,
+        authorized,
+        external,
+        render_command,
+        ..
+    } = pending;
     let reply = ClientReply {
         generation,
-        capabilities,
-        request,
+        capabilities: &capabilities,
+        request: RetryCommand {
+            kind,
+            message: &message,
+        },
     };
-    let command = match crate::command_convert::convert(context.domain(), kind, &message) {
-        Ok(command) => command,
-        Err(RuntimeError::InvalidValue | RuntimeError::LimitExceeded) => {
-            crate::client_render::render_domain_failure(
-                context,
-                crate::client_render::ReplyInput {
-                    requester: bound.user_id,
-                    generation: reply.generation,
-                    capabilities: reply.capabilities,
-                    request: reply.request.message,
-                },
-                DomainError::InvalidArgument,
-                false,
-                None,
-            )?;
-            return Ok(RouteOutcome::Continue);
-        }
-        Err(error) => return Err(error),
+    let decision = match context.domain().plan_authorized(authorized, Some(external)) {
+        Ok(decision) => decision,
+        Err(error) => match domain_plan_error(error) {
+            SessionCommandError::Public { error, silent } => {
+                crate::client_render::render_domain_failure(
+                    context,
+                    reply.render_input(bound.user_id),
+                    error,
+                    silent,
+                    None,
+                )?;
+                return Ok(());
+            }
+            SessionCommandError::Internal(error) => return Err(error),
+        },
     };
-    let next_nickname = match command.view() {
-        CanonicalCommandView::Nick(nickname) => Some(nickname.presentation().to_owned()),
-        _ => None,
-    };
-    let accepted = execute_session_command(context, bound, Some(reply), command, None)?;
-    if accepted && let Some(nickname) = next_nickname {
-        *current_nickname = Some(nickname);
-    }
-    Ok(RouteOutcome::Continue)
+    execute_planned_command(context, bound, Some(reply), &render_command, decision).map(|_| ())
+}
+
+fn render_pending_busy(
+    context: &mut StateCoreContext,
+    pending: &PendingCryptoCommand,
+) -> Result<(), RuntimeError> {
+    render_busy(
+        context,
+        pending.bound,
+        pending.generation,
+        &pending.capabilities,
+        &pending.message,
+    )
+}
+
+fn render_busy(
+    context: &mut StateCoreContext,
+    bound: BoundSession,
+    generation: ConnectionGeneration,
+    capabilities: &CapabilityState,
+    message: &ParsedMessage,
+) -> Result<(), RuntimeError> {
+    crate::client_render::render_domain_failure(
+        context,
+        crate::client_render::ReplyInput {
+            requester: bound.user_id,
+            generation,
+            capabilities,
+            request: message,
+        },
+        DomainError::ServerBusy,
+        false,
+        None,
+    )
+}
+
+fn cancel_command_timer(context: &mut StateCoreContext, sequence: u64) {
+    context
+        .timers_mut()
+        .cancel(TimerKind::CommandDeadline, TimedId::Sequence(sequence));
 }
 
 /// Stages removal of one registered domain session after its transport ends.
@@ -141,9 +684,9 @@ fn execute_session_command(
     reply: Option<ClientReply<'_>>,
     command: CanonicalCommand,
     close_reason: Option<&str>,
-) -> Result<bool, RuntimeError> {
-    let decision = match plan_session_command(context, bound, command, reply.map(|r| r.request)) {
-        Ok(decision) => decision,
+) -> Result<CommandExecution, RuntimeError> {
+    let planned = match plan_session_command(context, bound, command, reply.map(|r| r.request)) {
+        Ok(planned) => planned,
         Err(SessionCommandError::Public { error, silent }) => {
             let reply = reply.ok_or(RuntimeError::InvalidValue)?;
             crate::client_render::render_domain_failure(
@@ -153,12 +696,13 @@ fn execute_session_command(
                 silent,
                 None,
             )?;
-            return Ok(false);
+            return Ok(CommandExecution::Complete(false));
         }
         Err(SessionCommandError::Internal(error)) => return Err(error),
     };
-    let PlanDecision::Mutation(plan) = decision else {
-        return complete_nonmutation(context, bound, reply, decision);
+    let decision = match planned {
+        PlannedCommand::Ready(decision) => decision,
+        PlannedCommand::Crypto(plan) => return Ok(CommandExecution::Crypto(plan)),
     };
     let render_command = match reply {
         Some(reply) => crate::command_convert::convert(
@@ -173,11 +717,25 @@ fn execute_session_command(
             CanonicalCommand::quit(reason)
         }
     };
+    execute_planned_command(context, bound, reply, &render_command, decision)
+        .map(CommandExecution::Complete)
+}
+
+fn execute_planned_command(
+    context: &mut StateCoreContext,
+    bound: BoundSession,
+    reply: Option<ClientReply<'_>>,
+    render_command: &CanonicalCommand,
+    decision: PlanDecision,
+) -> Result<bool, RuntimeError> {
+    let PlanDecision::Mutation(plan) = decision else {
+        return complete_nonmutation(context, bound, reply, decision);
+    };
     let fanout = crate::mutation_render::render_mutation(
         context,
         bound,
         reply.map(|reply| reply.render_input(bound.user_id)),
-        &render_command,
+        render_command,
         &plan,
     )?;
     match plan.storage_class() {
@@ -232,14 +790,14 @@ fn plan_session_command(
     bound: BoundSession,
     command: CanonicalCommand,
     retry: Option<RetryCommand<'_>>,
-) -> Result<PlanDecision, SessionCommandError> {
+) -> Result<PlannedCommand, SessionCommandError> {
     let (authorized, admission) = admit_command(context, bound, command)?;
     let decision = context
         .domain()
         .plan_authorized(authorized, None)
         .map_err(domain_plan_error)?;
     let PlanDecision::NeedsExternal(requests) = decision else {
-        return Ok(decision);
+        return Ok(PlannedCommand::Ready(decision));
     };
     complete_external_plan(context, bound, retry, &admission, &requests)
 }
@@ -309,7 +867,7 @@ fn complete_external_plan(
     retry: Option<RetryCommand<'_>>,
     admission: &AdmissionSnapshot,
     requests: &[ExternalInputRequest],
-) -> Result<PlanDecision, SessionCommandError> {
+) -> Result<PlannedCommand, SessionCommandError> {
     let retry = retry.ok_or(RuntimeError::InvalidValue)?;
     let command = crate::command_convert::convert(context.domain(), retry.kind, retry.message)?;
     let authorized = match authorize_command(context, bound, command, admission) {
@@ -323,10 +881,49 @@ fn complete_external_plan(
         Err(AuthorizationError::Internal(error)) => return Err(error.into()),
     };
     let external = satisfy_external(context, requests)?;
-    context
-        .domain()
-        .plan_authorized(authorized, Some(external))
-        .map_err(domain_plan_error)
+    let crypto_requests = crypto_requests(requests)?;
+    if crypto_requests.is_empty() {
+        return context
+            .domain()
+            .plan_authorized(authorized, Some(external))
+            .map(PlannedCommand::Ready)
+            .map_err(domain_plan_error);
+    }
+    let render_command =
+        crate::command_convert::convert(context.domain(), retry.kind, retry.message)?;
+    Ok(PlannedCommand::Crypto(Box::new(DeferredPlan {
+        authorized,
+        external,
+        requests: crypto_requests,
+        render_command,
+    })))
+}
+
+fn crypto_requests(
+    requests: &[ExternalInputRequest],
+) -> Result<Vec<ExternalInputRequest>, RuntimeError> {
+    let count = requests
+        .iter()
+        .filter(|request| {
+            matches!(
+                request,
+                ExternalInputRequest::ChannelKeyVerification { .. }
+                    | ExternalInputRequest::ChannelKeyConstruction { .. }
+            )
+        })
+        .count();
+    let mut selected = Vec::new();
+    selected
+        .try_reserve_exact(count)
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    selected.extend(requests.iter().copied().filter(|request| {
+        matches!(
+            request,
+            ExternalInputRequest::ChannelKeyVerification { .. }
+                | ExternalInputRequest::ChannelKeyConstruction { .. }
+        )
+    }));
+    Ok(selected)
 }
 
 fn domain_plan_error(error: DomainError) -> SessionCommandError {
@@ -362,10 +959,8 @@ fn satisfy_one(
             inputs.utc_now = Some(context.utc_now().map_err(|_| RuntimeError::InvalidValue)?);
         }
         ExternalInputRequest::MonotonicNow { .. } => inputs.monotonic_now = Some(context.now()),
-        ExternalInputRequest::ChannelKeyVerification { .. } => {
-            reserve_one(&mut inputs.key_verdicts)?;
-            inputs.key_verdicts.push(false);
-        }
+        ExternalInputRequest::ChannelKeyVerification { .. }
+        | ExternalInputRequest::ChannelKeyConstruction { .. } => {}
         ExternalInputRequest::Entropy { purpose, bytes, .. } => {
             if bytes != 16 {
                 return Err(RuntimeError::InvalidValue);
@@ -426,5 +1021,81 @@ fn stage_error(error: StageRefused) -> RuntimeError {
         StageRefused::Fanout(_) => RuntimeError::MemoryExhausted,
         StageRefused::Busy | StageRefused::Quiescing => RuntimeError::LimitExceeded,
         StageRefused::Domain(_) => RuntimeError::InvalidValue,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use agenc_ircd_crypto::{CryptoError, CryptoWorkerError};
+
+    use super::*;
+    use crate::bridge::crypto::ChannelKeyVerdict;
+
+    #[test]
+    fn crypto_completion_mapping_accepts_only_the_pending_output_kind() {
+        let mut external = ExternalInputs::default();
+        assert!(
+            apply_crypto_output(
+                PendingCryptoKind::Verify,
+                &mut external,
+                Ok(CryptoJobOutput::ChannelKey(ChannelKeyVerdict::for_test(
+                    true
+                ))),
+            )
+            .is_ok()
+        );
+        assert_eq!(external.key_verdicts, vec![true]);
+
+        let verifier = ChannelKeyVerifierRecord::new([1; 16], [2; 32]);
+        assert!(
+            apply_crypto_output(
+                PendingCryptoKind::Construct,
+                &mut external,
+                Ok(CryptoJobOutput::ChannelKeyConstruct(Ok(verifier))),
+            )
+            .is_ok()
+        );
+        assert_eq!(external.key_verifiers.len(), 1);
+        assert_eq!(
+            external
+                .key_verifiers
+                .first()
+                .map(ChannelKeyVerifierRecord::salt),
+            Some(&[1; 16])
+        );
+        assert_eq!(
+            external
+                .key_verifiers
+                .first()
+                .map(ChannelKeyVerifierRecord::hash),
+            Some(&[2; 32])
+        );
+
+        assert!(matches!(
+            apply_crypto_output(
+                PendingCryptoKind::Construct,
+                &mut external,
+                Ok(CryptoJobOutput::ChannelKeyConstruct(Err(
+                    CryptoError::LimitExceeded
+                ))),
+            ),
+            Err(CryptoCompletionError::Busy)
+        ));
+        assert!(matches!(
+            apply_crypto_output(
+                PendingCryptoKind::Verify,
+                &mut external,
+                Ok(CryptoJobOutput::ChannelKeyConstruct(Ok(verifier))),
+            ),
+            Err(CryptoCompletionError::Internal(RuntimeError::InvalidValue))
+        ));
+        assert!(matches!(
+            apply_crypto_output(
+                PendingCryptoKind::Verify,
+                &mut external,
+                Err(CryptoWorkerError::WorkerPanicked),
+            ),
+            Err(CryptoCompletionError::Busy)
+        ));
     }
 }

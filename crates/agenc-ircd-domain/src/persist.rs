@@ -16,10 +16,11 @@ use agenc_ircd_types::{
 
 use crate::error::DomainError;
 use crate::model::{
-    AccountLabelValue, AccountState, ChannelModes, ChannelNameValue, ChannelScope, ChannelState,
-    ContentPolicy, DirectMessagePolicy, GuestDirectMessagePolicy, HistoryPolicy, ListEntry,
-    ModerationAction, ModerationReason, ModerationReasonCode, NicknameValue, PersistencePolicy,
-    PlaintextTopic, PresencePolicy, Principal, Role, Sanction, TopicText, Visibility,
+    AccountLabelValue, AccountState, ChannelKeyVerifier, ChannelModes, ChannelNameValue,
+    ChannelScope, ChannelState, ContentPolicy, DirectMessagePolicy, GuestDirectMessagePolicy,
+    HistoryPolicy, ListEntry, ModerationAction, ModerationReason, ModerationReasonCode,
+    NicknameValue, PersistencePolicy, PlaintextTopic, PresencePolicy, Principal, Role, Sanction,
+    TopicText, Visibility,
 };
 
 /// The persisted value of one account.
@@ -183,6 +184,8 @@ pub struct DurableChannel {
     pub revision: Revision,
     /// Simple channel modes.
     pub modes: ChannelModes,
+    /// Optional Argon2id channel-key verifier; raw keys are never persisted.
+    pub key_verifier: Option<ChannelKeyVerifier>,
     /// Optional membership limit.
     pub member_limit: Option<u16>,
     /// Optional plaintext topic.
@@ -216,6 +219,7 @@ impl DurableChannel {
             created_at: channel.created_at,
             revision: channel.revision,
             modes: channel.modes,
+            key_verifier: channel.key_verifier,
             member_limit: channel.member_limit,
             topic: channel.topic.as_ref().map(DurableTopic::from_state),
             role_grants: channel
@@ -265,6 +269,7 @@ impl DurableChannel {
             created_at: self.created_at,
             revision: self.revision,
             modes: self.modes,
+            key_verifier: self.key_verifier,
             member_limit: self.member_limit,
             topic: self.topic.map(DurableTopic::into_state).transpose()?,
             memberships: Default::default(),
@@ -298,6 +303,7 @@ impl DurableChannel {
             ),
             (
                 &self.modes,
+                &self.key_verifier,
                 &self.member_limit,
                 &self.topic,
                 &self.role_grants,
@@ -324,6 +330,7 @@ type ChannelContentKey<'a> = (
     ),
     (
         &'a ChannelModes,
+        &'a Option<ChannelKeyVerifier>,
         &'a Option<u16>,
         &'a Option<DurableTopic>,
         &'a [(AccountId, Role)],
@@ -399,6 +406,8 @@ impl DurableSanction {
 
 /// One logical persisted write produced by a plan.
 #[derive(Clone, Eq, PartialEq)]
+// agenc-review: allow owner=domain reviewed=2026-08-29 reason=bounded write batches keep complete channel after-images inline to avoid a separate commit-boundary allocation
+#[allow(clippy::large_enum_variant)]
 pub enum DurableWrite {
     /// Store the complete after-image of one account.
     PutAccount(DurableAccount),

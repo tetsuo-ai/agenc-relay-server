@@ -189,6 +189,60 @@ fn parse_mode_changes(
     Ok(changes)
 }
 
+pub(crate) fn channel_key_parameter_positions(
+    message: &agenc_ircd_client_wire::ParsedMessage,
+) -> Result<Vec<(u8, usize)>, RuntimeError> {
+    let mode_string = message.middle().get(1).ok_or(RuntimeError::InvalidValue)?;
+    let mut operation = None;
+    let mut parameter_index = 2_usize;
+    let mut change_index = 0_u8;
+    let mut positions = Vec::new();
+    positions
+        .try_reserve_exact(mode_string.len())
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    for letter in mode_string.chars() {
+        if let Some(next_operation) = mode_operation_marker(letter) {
+            operation = Some(next_operation);
+            continue;
+        }
+        let operation = operation.ok_or(RuntimeError::InvalidValue)?;
+        let consumes = mode_letter_consumes_parameter(letter, operation)?;
+        if letter == 'k' && operation == ModeOperation::Add {
+            positions.push((change_index, parameter_index));
+        }
+        if consumes {
+            parameter_index = parameter_index
+                .checked_add(1)
+                .ok_or(RuntimeError::Overflow)?;
+        }
+        change_index = change_index.checked_add(1).ok_or(RuntimeError::Overflow)?;
+    }
+    if parameter_index != message.parameter_count() {
+        return Err(RuntimeError::InvalidValue);
+    }
+    Ok(positions)
+}
+
+const fn mode_operation_marker(letter: char) -> Option<ModeOperation> {
+    match letter {
+        '+' => Some(ModeOperation::Add),
+        '-' => Some(ModeOperation::Remove),
+        _ => None,
+    }
+}
+
+fn mode_letter_consumes_parameter(
+    letter: char,
+    operation: ModeOperation,
+) -> Result<bool, RuntimeError> {
+    match letter {
+        'p' | 's' | 'i' | 'm' | 't' => Ok(false),
+        'k' | 'l' => Ok(operation == ModeOperation::Add),
+        'q' | 'a' | 'o' | 'h' | 'v' | 'b' | 'e' | 'I' => Ok(true),
+        _ => Err(RuntimeError::InvalidValue),
+    }
+}
+
 fn mode_change_for(
     domain: &DomainState,
     channel: &ChannelNameValue,
@@ -211,6 +265,16 @@ fn mode_change_for(
         'm' => Ok(ModeChange::Moderated(enabled)),
         't' => Ok(ModeChange::TopicProtected(enabled)),
         'k' if !enabled => Ok(ModeChange::JoinKey(false)),
+        'k' => {
+            let key = take_argument(arguments, argument_index)?;
+            if !(crate::bridge::crypto::MIN_CHANNEL_KEY_BYTES
+                ..=crate::bridge::crypto::MAX_CHANNEL_KEY_BYTES)
+                .contains(&key.len())
+            {
+                return Err(RuntimeError::InvalidValue);
+            }
+            Ok(ModeChange::JoinKey(true))
+        }
         'l' if !enabled => Ok(ModeChange::MemberLimit(None)),
         'l' => Ok(ModeChange::MemberLimit(Some(
             take_argument(arguments, argument_index)?
@@ -641,7 +705,8 @@ mod tests {
     };
     use agenc_ircd_domain::{CanonicalCommandView, DomainCommandKind, DomainState, ModeCommand};
 
-    use super::convert;
+    use super::{channel_key_parameter_positions, convert};
+    use crate::RuntimeError;
 
     #[test]
     fn every_state_independent_public_family_converts_to_its_domain_kind()
@@ -723,6 +788,50 @@ mod tests {
             return Err(test_error("missing channel-mode change").into());
         };
         assert_eq!(changes.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn channel_key_modes_enforce_secret_bounds_and_track_each_parameter()
+    -> Result<(), Box<dyn Error>> {
+        let domain = DomainState::new()?;
+        for length in [8, 256] {
+            let line = format!("MODE #room +k {}", "k".repeat(length));
+            let command = converted(&domain, &line)?;
+            let CanonicalCommandView::Mode(ModeCommand::ChannelChange(_, changes)) = command.view()
+            else {
+                return Err(test_error("missing channel-key mode change").into());
+            };
+            assert!(matches!(
+                changes.as_slice(),
+                [agenc_ircd_domain::ModeChange::JoinKey(true)]
+            ));
+        }
+        for length in [7, 257] {
+            let line = format!("MODE #room +k {}", "k".repeat(length));
+            let message = parsed(&line)?;
+            let proof = validate_post_registration_command(&message)?;
+            assert_eq!(
+                convert(
+                    &domain,
+                    RegisteredCommandKind::Public(proof.kind()),
+                    &message,
+                )
+                .err(),
+                Some(RuntimeError::InvalidValue)
+            );
+        }
+
+        let message = parsed("MODE #room +ok-l+k Operator first :second")?;
+        assert_eq!(
+            channel_key_parameter_positions(&message)?,
+            vec![(1, 3), (3, 4)]
+        );
+        let message = parsed("MODE #room +kk first :second")?;
+        assert_eq!(
+            channel_key_parameter_positions(&message)?,
+            vec![(0, 2), (1, 3)]
+        );
         Ok(())
     }
 

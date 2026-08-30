@@ -65,6 +65,20 @@ impl ParsedMessage {
         self.middle.len() + usize::from(self.trailing.is_some())
     }
 
+    /// Moves one zero-based middle-or-trailing parameter out for a
+    /// secret-owning runtime adapter, leaving an empty value in its place.
+    ///
+    /// This preserves the parsed command and tag context needed for a later
+    /// logical response without retaining a second copy of the secret.
+    pub fn take_parameter(&mut self, index: usize) -> Option<String> {
+        if let Some(parameter) = self.middle.get_mut(index) {
+            return Some(std::mem::take(parameter));
+        }
+        (index == self.middle.len())
+            .then(|| self.trailing.as_mut().map(std::mem::take))
+            .flatten()
+    }
+
     pub(crate) fn take_single_parameter(&mut self) -> Option<String> {
         match (self.middle.as_slice(), self.trailing.as_ref()) {
             ([_], None) => self.middle.pop(),
@@ -353,6 +367,25 @@ mod tests {
         let mut multiple = parse_message(FramedLine::new("CMD one two")?)?
             .ok_or(MessageParseError::InvalidCommand)?;
         assert_eq!(multiple.take_single_parameter(), None);
+        Ok(())
+    }
+
+    #[test]
+    fn taking_parameters_moves_middle_and_trailing_secrets_without_losing_context()
+    -> Result<(), Box<dyn Error>> {
+        let mut message = parse_message(FramedLine::new(
+            "@label=crypto MODE #room +kk first :second",
+        )?)?
+        .ok_or(MessageParseError::InvalidCommand)?;
+
+        assert_eq!(message.take_parameter(2).as_deref(), Some("first"));
+        assert_eq!(message.middle().get(2).map(String::as_str), Some(""));
+        assert_eq!(message.take_parameter(3).as_deref(), Some("second"));
+        assert_eq!(message.trailing(), Some(""));
+        assert_eq!(message.take_parameter(4), None);
+        assert_eq!(message.command(), "MODE");
+        assert_eq!(message.tags().len(), 1);
+        assert_eq!(message.parameter_count(), 4);
         Ok(())
     }
 

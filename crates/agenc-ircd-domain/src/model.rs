@@ -691,6 +691,37 @@ impl Default for ChannelModes {
     }
 }
 
+/// Fixed-size Argon2id verifier material for one channel join secret.
+///
+/// The domain stores and persists only the random salt and derived hash. Raw
+/// channel keys remain runtime-owned external inputs and never enter domain
+/// state, plans, events, or formatted diagnostics.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct ChannelKeyVerifier {
+    salt: [u8; 16],
+    hash: [u8; 32],
+}
+
+impl ChannelKeyVerifier {
+    /// Wraps one already-derived verifier.
+    #[must_use]
+    pub const fn new(salt: [u8; 16], hash: [u8; 32]) -> Self {
+        Self { salt, hash }
+    }
+
+    /// Returns the random Argon2id salt.
+    #[must_use]
+    pub const fn salt(&self) -> &[u8; 16] {
+        &self.salt
+    }
+
+    /// Returns the derived Argon2id hash.
+    #[must_use]
+    pub const fn hash(&self) -> &[u8; 32] {
+        &self.hash
+    }
+}
+
 /// One live channel membership with session and effective roles separated.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Membership {
@@ -872,6 +903,7 @@ pub struct ChannelState {
     pub(crate) created_at: UtcSecond,
     pub(crate) revision: Revision,
     pub(crate) modes: ChannelModes,
+    pub(crate) key_verifier: Option<ChannelKeyVerifier>,
     pub(crate) member_limit: Option<u16>,
     pub(crate) topic: Option<PlaintextTopic>,
     pub(crate) memberships: BTreeMap<UserId, Membership>,
@@ -907,6 +939,7 @@ impl ChannelState {
             created_at,
             revision,
             modes: ChannelModes::default(),
+            key_verifier: None,
             member_limit: None,
             topic: None,
             memberships,
@@ -995,6 +1028,12 @@ impl ChannelState {
         self.modes
     }
 
+    /// Borrows the optional channel-key verifier without exposing a raw key.
+    #[must_use]
+    pub const fn key_verifier(&self) -> Option<&ChannelKeyVerifier> {
+        self.key_verifier.as_ref()
+    }
+
     /// Returns the optional simultaneous-membership limit.
     #[must_use]
     pub const fn member_limit(&self) -> Option<u16> {
@@ -1065,6 +1104,9 @@ impl ChannelState {
 
     pub(crate) fn validate(&self) -> Result<(), DomainError> {
         if !self.identities_and_limits_are_valid() {
+            return Err(DomainError::InvariantViolation);
+        }
+        if self.modes.join_key != self.key_verifier.is_some() {
             return Err(DomainError::InvariantViolation);
         }
         if !self.content_policy_is_valid() {
@@ -1144,6 +1186,7 @@ impl ChannelState {
             created_at: self.created_at,
             revision: self.revision,
             modes: self.modes,
+            key_verifier: self.key_verifier,
             member_limit: self.member_limit,
             topic: self
                 .topic

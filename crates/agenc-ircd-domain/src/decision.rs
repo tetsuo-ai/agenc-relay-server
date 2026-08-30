@@ -303,6 +303,13 @@ pub enum ExternalInputRequest {
         /// Canonical JOIN target position.
         target_index: u8,
     },
+    /// Derive and return one verifier for a `MODE +k` change.
+    ChannelKeyConstruction {
+        /// Stable position in this plan's external request vector.
+        request_sequence: u16,
+        /// Canonical MODE change position.
+        change_index: u8,
+    },
 }
 
 impl ExternalInputRequest {
@@ -316,6 +323,9 @@ impl ExternalInputRequest {
                 request_sequence, ..
             }
             | Self::ChannelKeyVerification {
+                request_sequence, ..
+            }
+            | Self::ChannelKeyConstruction {
                 request_sequence, ..
             } => request_sequence,
         }
@@ -343,6 +353,8 @@ pub struct ExternalInputs {
     pub deletion_tokens: Vec<AccountDeletionToken>,
     /// Real-or-dummy key-verification outcomes in target order.
     pub key_verdicts: Vec<bool>,
+    /// Derived channel-key verifiers in mode-change order.
+    pub key_verifiers: Vec<crate::ChannelKeyVerifier>,
 }
 
 /// Persistence class selected without introducing a storage handle.
@@ -687,6 +699,7 @@ enum Mutation {
         channel_id: ChannelInstanceId,
         changes: Vec<ModeChange>,
         entry_ids: Vec<EntryId>,
+        key_verifiers: Vec<crate::ChannelKeyVerifier>,
         created_at: Option<UtcSecond>,
     },
     AccountSetting {
@@ -885,6 +898,7 @@ impl Mutation {
                 channel_id,
                 changes,
                 entry_ids,
+                key_verifiers,
                 created_at,
             } => Self::ApplyModes {
                 channel_id: *channel_id,
@@ -893,6 +907,7 @@ impl Mutation {
                     .map(duplicate_mode_change)
                     .collect::<Result<Vec<_>, _>>()?,
                 entry_ids: entry_ids.clone(),
+                key_verifiers: key_verifiers.clone(),
                 created_at: *created_at,
             },
             Self::ChannelSetting(command) => Self::ChannelSetting(*command),
@@ -2689,6 +2704,7 @@ impl DomainState {
                 channel_id,
                 changes,
                 entry_ids: inputs.entry_ids,
+                key_verifiers: inputs.key_verifiers,
                 created_at: inputs.utc_now,
             }],
             events,
@@ -3472,9 +3488,17 @@ impl DomainState {
                 channel_id,
                 changes,
                 entry_ids,
+                key_verifiers,
                 created_at,
             } => {
-                self.apply_modes(channel_id, changes, entry_ids, created_at, revision);
+                self.apply_modes(
+                    channel_id,
+                    changes,
+                    entry_ids,
+                    key_verifiers,
+                    created_at,
+                    revision,
+                );
             }
             Mutation::AccountSetting {
                 account_id,
@@ -3783,12 +3807,20 @@ impl DomainState {
         channel_id: ChannelInstanceId,
         changes: Vec<ModeChange>,
         entry_ids: Vec<EntryId>,
+        key_verifiers: Vec<crate::ChannelKeyVerifier>,
         created_at: Option<UtcSecond>,
         revision: Revision,
     ) {
         let mut entry_ids = entry_ids.into_iter();
+        let mut key_verifiers = key_verifiers.into_iter();
         for change in changes {
-            self.apply_mode_change(channel_id, change, &mut entry_ids, created_at);
+            self.apply_mode_change(
+                channel_id,
+                change,
+                &mut entry_ids,
+                &mut key_verifiers,
+                created_at,
+            );
         }
         self.recompute_channel_roles(channel_id, revision);
     }
@@ -3798,6 +3830,7 @@ impl DomainState {
         channel_id: ChannelInstanceId,
         change: ModeChange,
         entry_ids: &mut impl Iterator<Item = EntryId>,
+        key_verifiers: &mut impl Iterator<Item = crate::ChannelKeyVerifier>,
         created_at: Option<UtcSecond>,
     ) {
         let Some(channel) = self.channels.get_mut(&channel_id) else {
@@ -3810,7 +3843,10 @@ impl DomainState {
             ModeChange::InviteOnly(value) => channel.modes.invite_only = value,
             ModeChange::Moderated(value) => channel.modes.moderated = value,
             ModeChange::TopicProtected(value) => channel.modes.topic_protected = value,
-            ModeChange::JoinKey(value) => channel.modes.join_key = value,
+            ModeChange::JoinKey(value) => {
+                channel.key_verifier = if value { key_verifiers.next() } else { None };
+                channel.modes.join_key = channel.key_verifier.is_some();
+            }
             ModeChange::MemberLimit(value) => channel.member_limit = value,
             ModeChange::Role {
                 operation,
@@ -3979,6 +4015,7 @@ enum RequestShape {
     Monotonic,
     Entropy(EntropyPurpose, u8),
     Key(u8),
+    KeyConstruction(u8),
 }
 
 fn push_request(
@@ -3998,6 +4035,12 @@ fn push_request(
             request_sequence,
             target_index,
         },
+        RequestShape::KeyConstruction(change_index) => {
+            ExternalInputRequest::ChannelKeyConstruction {
+                request_sequence,
+                change_index,
+            }
+        }
     };
     requests
         .try_reserve(1)
@@ -4025,6 +4068,10 @@ fn mode_requests(
 ) -> Result<(), DomainError> {
     let mut needs_utc = false;
     for (index, change) in changes.iter().enumerate() {
+        if matches!(change, ModeChange::JoinKey(true)) {
+            let index = u8::try_from(index).map_err(|_| DomainError::Overflow)?;
+            push_request(requests, RequestShape::KeyConstruction(index))?;
+        }
         if matches!(change, ModeChange::AddMask { .. }) {
             let index = u8::try_from(index).map_err(|_| DomainError::Overflow)?;
             push_request(
@@ -4089,6 +4136,7 @@ fn validate_external_inputs(
         || inputs.entry_ids.len() != counts.entry_ids
         || inputs.deletion_tokens.len() != counts.deletion_tokens
         || inputs.key_verdicts.len() != counts.key_verdicts
+        || inputs.key_verifiers.len() != counts.key_verifiers
     {
         return Err(DomainError::ExternalInputMismatch);
     }
@@ -4122,6 +4170,7 @@ struct RequestCounts {
     entry_ids: usize,
     deletion_tokens: usize,
     key_verdicts: usize,
+    key_verifiers: usize,
 }
 
 fn request_counts(requests: &[ExternalInputRequest]) -> RequestCounts {
@@ -4136,6 +4185,7 @@ fn request_counts(requests: &[ExternalInputRequest]) -> RequestCounts {
                 EntropyPurpose::AccountDeletionChallenge => counts.deletion_tokens += 1,
             },
             ExternalInputRequest::ChannelKeyVerification { .. } => counts.key_verdicts += 1,
+            ExternalInputRequest::ChannelKeyConstruction { .. } => counts.key_verifiers += 1,
             ExternalInputRequest::UtcNow { .. } | ExternalInputRequest::MonotonicNow { .. } => {}
         }
     }
@@ -5313,6 +5363,7 @@ mod tests {
             entry_ids: vec![EntryId::from_bytes(bytes(4))],
             deletion_tokens: vec![AccountDeletionToken::from_bytes(bytes(5))],
             key_verdicts: vec![true],
+            key_verifiers: vec![crate::ChannelKeyVerifier::new(bytes(6), [7; 32])],
             wall_clock_unavailable: false,
         }
     }
@@ -5724,11 +5775,21 @@ mod tests {
                 request_sequence: 7,
                 target_index: 0,
             },
+            ExternalInputRequest::ChannelKeyConstruction {
+                request_sequence: 8,
+                change_index: 0,
+            },
         ];
         let valid = complete_external_inputs();
         assert_eq!(validate_external_inputs(&requests, &valid), Ok(()));
         let mut invalid = complete_external_inputs();
         invalid.channel_ids.clear();
+        assert_eq!(
+            validate_external_inputs(&requests, &invalid),
+            Err(DomainError::ExternalInputMismatch)
+        );
+        let mut invalid = complete_external_inputs();
+        invalid.key_verifiers.clear();
         assert_eq!(
             validate_external_inputs(&requests, &invalid),
             Err(DomainError::ExternalInputMismatch)
@@ -7471,6 +7532,7 @@ mod tests {
             missing_channel,
             ModeChange::Moderated(true),
             &mut Vec::<EntryId>::new().into_iter(),
+            &mut Vec::<crate::ChannelKeyVerifier>::new().into_iter(),
             None,
         );
         fixture.state.apply_mode_change(
@@ -7480,6 +7542,7 @@ mod tests {
                 mask: TypedMask::parse("$n:no-id")?,
             },
             &mut Vec::<EntryId>::new().into_iter(),
+            &mut Vec::<crate::ChannelKeyVerifier>::new().into_iter(),
             None,
         );
         fixture.state.apply_mode_change(
@@ -7489,6 +7552,7 @@ mod tests {
                 mask: TypedMask::parse("$n:with-id")?,
             },
             &mut vec![EntryId::from_bytes(bytes(216))].into_iter(),
+            &mut Vec::<crate::ChannelKeyVerifier>::new().into_iter(),
             Some(UtcSecond::from_unix_seconds(20)),
         );
         fixture.state.apply_mode_change(
@@ -7498,6 +7562,7 @@ mod tests {
                 entry_id: EntryId::from_bytes(bytes(216)),
             },
             &mut Vec::<EntryId>::new().into_iter(),
+            &mut Vec::<crate::ChannelKeyVerifier>::new().into_iter(),
             None,
         );
 

@@ -12,6 +12,7 @@
 //! This module keeps its tests in `tests/bridge_crypto.rs` so the file can be
 //! compiled unchanged for the schedule models.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use agenc_ircd_auth::{
@@ -26,13 +27,14 @@ use agenc_ircd_crypto::{
     ACCOUNT_HPKE_ENCAPSULATED_KEY_BYTES, ACCOUNT_HPKE_REQUEST_CIPHERTEXT_BYTES,
     ACCOUNT_HPKE_RESPONSE_PLAINTEXT_BYTES, AccountHpkePrivateKey, AccountRequestBinding,
     AccountResponseSealToken, BoundedCryptoPool, CRYPTO_WORKER_RESERVED_BYTES, CryptoError,
-    CryptoJob, CryptoPort, CryptoWorkerConfig, CryptoWorkerError, JobClass, LoginIndexKey,
-    OpaqueFakeCredentialKey, OpenedAccountRequest, SealedAccountResponse, open_account_request,
+    CryptoJob, CryptoPort, CryptoWorkerConfig, CryptoWorkerError, JobCancellationToken, JobClass,
+    LoginIndexKey, OpaqueFakeCredentialKey, OpenedAccountRequest, SealedAccountResponse,
+    open_account_request,
 };
 use agenc_ircd_types::AccountServiceResponseKind;
 use subtle::ConstantTimeEq as _;
 use tokio::sync::mpsc;
-use tokio::task::JoinSet;
+use tokio::task::{AbortHandle, JoinSet};
 use zeroize::Zeroizing;
 
 use crate::RuntimeError;
@@ -71,35 +73,8 @@ pub trait ChannelKeyVerifier: Send + Sync {
     ) -> Result<[u8; CHANNEL_KEY_HASH_BYTES], CryptoError>;
 }
 
-/// The stored salt and hash of one channel secret.
-#[derive(Clone, Copy)]
-pub struct ChannelKeyVerifierRecord {
-    salt: [u8; CHANNEL_KEY_SALT_BYTES],
-    hash: [u8; CHANNEL_KEY_HASH_BYTES],
-}
-
-impl ChannelKeyVerifierRecord {
-    /// Wraps a stored salt and hash.
-    #[must_use]
-    pub const fn new(
-        salt: [u8; CHANNEL_KEY_SALT_BYTES],
-        hash: [u8; CHANNEL_KEY_HASH_BYTES],
-    ) -> Self {
-        Self { salt, hash }
-    }
-
-    /// Returns the salt.
-    #[must_use]
-    pub const fn salt(&self) -> &[u8; CHANNEL_KEY_SALT_BYTES] {
-        &self.salt
-    }
-
-    /// Returns the hash.
-    #[must_use]
-    pub const fn hash(&self) -> &[u8; CHANNEL_KEY_HASH_BYTES] {
-        &self.hash
-    }
-}
+/// The domain-owned stored salt and hash of one channel secret.
+pub use agenc_ircd_domain::ChannelKeyVerifier as ChannelKeyVerifierRecord;
 
 /// What a channel-key job compares against.
 ///
@@ -145,8 +120,8 @@ impl ChannelKeyVerifyJob {
             ChannelKeyTarget::Stored(record) => (record, true),
             ChannelKeyTarget::Dummy(record) => (record, false),
         };
-        let matches = match self.verifier.derive(&self.candidate, &record.salt) {
-            Ok(derived) => bool::from(derived.ct_eq(&record.hash)),
+        let matches = match self.verifier.derive(&self.candidate, record.salt()) {
+            Ok(derived) => bool::from(derived.ct_eq(record.hash())),
             Err(_) => false,
         };
         // A dummy target performs the full derivation but never matches; the
@@ -157,6 +132,37 @@ impl ChannelKeyVerifyJob {
     }
 }
 
+/// One channel-key verifier construction.
+pub struct ChannelKeyConstructJob {
+    verifier: Arc<dyn ChannelKeyVerifier>,
+    salt: [u8; CHANNEL_KEY_SALT_BYTES],
+    candidate: Zeroizing<Vec<u8>>,
+}
+
+impl ChannelKeyConstructJob {
+    /// Binds a candidate secret and fresh random salt to one derivation.
+    pub fn new(
+        verifier: Arc<dyn ChannelKeyVerifier>,
+        salt: [u8; CHANNEL_KEY_SALT_BYTES],
+        candidate: Vec<u8>,
+    ) -> Result<Self, RuntimeError> {
+        let candidate = Zeroizing::new(candidate);
+        if !(MIN_CHANNEL_KEY_BYTES..=MAX_CHANNEL_KEY_BYTES).contains(&candidate.len()) {
+            return Err(RuntimeError::InvalidValue);
+        }
+        Ok(Self {
+            verifier,
+            salt,
+            candidate,
+        })
+    }
+
+    fn execute(self) -> Result<ChannelKeyVerifierRecord, CryptoError> {
+        let hash = self.verifier.derive(&self.candidate, &self.salt)?;
+        Ok(ChannelKeyVerifierRecord::new(self.salt, hash))
+    }
+}
+
 /// The outcome of one channel-key verification.
 #[derive(Clone, Copy)]
 pub struct ChannelKeyVerdict {
@@ -164,6 +170,11 @@ pub struct ChannelKeyVerdict {
 }
 
 impl ChannelKeyVerdict {
+    #[cfg(test)]
+    pub(crate) const fn for_test(matches: bool) -> Self {
+        Self { matches }
+    }
+
     /// Returns whether the candidate matched a stored verifier.
     #[must_use]
     pub const fn matches(self) -> bool {
@@ -387,6 +398,8 @@ pub struct CreationFinishOutput {
 pub enum RuntimeCryptoJob {
     /// One Argon2id channel-key verification.
     ChannelKeyVerify(ChannelKeyVerifyJob),
+    /// One Argon2id channel-key verifier construction.
+    ChannelKeyConstruct(ChannelKeyConstructJob),
     /// One account-service request opening.
     AccountOpen(Box<AccountOpenJob>),
     /// One account-service response sealing.
@@ -405,6 +418,8 @@ pub enum RuntimeCryptoJob {
 pub enum CryptoJobOutput {
     /// A channel-key verdict.
     ChannelKey(ChannelKeyVerdict),
+    /// A newly derived channel-key verifier, or the closed crypto failure.
+    ChannelKeyConstruct(Result<ChannelKeyVerifierRecord, CryptoError>),
     /// An opened request with its one-use seal token, or the closed failure.
     AccountOpen(Box<Result<(OpenedAccountRequest, AccountResponseSealToken), CryptoError>>),
     /// A sealed response, or the closed failure.
@@ -424,7 +439,7 @@ impl CryptoJob for RuntimeCryptoJob {
 
     fn class(&self) -> JobClass {
         match self {
-            Self::ChannelKeyVerify(_) => JobClass::Channel,
+            Self::ChannelKeyVerify(_) | Self::ChannelKeyConstruct(_) => JobClass::Channel,
             Self::AccountOpen(_)
             | Self::AccountSeal(_)
             | Self::OpaqueStart(_)
@@ -437,6 +452,7 @@ impl CryptoJob for RuntimeCryptoJob {
     fn execute(self) -> Self::Output {
         match self {
             Self::ChannelKeyVerify(job) => CryptoJobOutput::ChannelKey(job.execute()),
+            Self::ChannelKeyConstruct(job) => CryptoJobOutput::ChannelKeyConstruct(job.execute()),
             Self::AccountOpen(job) => CryptoJobOutput::AccountOpen(Box::new(job.execute())),
             Self::AccountSeal(job) => CryptoJobOutput::AccountSeal(Box::new(job.execute())),
             Self::OpaqueStart(job) => CryptoJobOutput::OpaqueStart(Box::new(job.execute())),
@@ -483,10 +499,16 @@ impl fmt::Display for CryptoSubmitRefused {
 /// The bounded path from StateCore into the crypto pool and back.
 pub struct CryptoBridge {
     pool: Option<BoundedCryptoPool<RuntimeCryptoJob>>,
-    waiters: JoinSet<()>,
+    waiters: JoinSet<CryptoJobId>,
+    active: BTreeMap<CryptoJobId, ActiveCryptoJob>,
     waiter_ceiling: usize,
     completions: mpsc::Sender<CryptoCompletionMessage<CryptoJobOutput>>,
     next_job: u64,
+}
+
+struct ActiveCryptoJob {
+    abort: AbortHandle,
+    cancellation: JobCancellationToken,
 }
 
 impl CryptoBridge {
@@ -518,6 +540,7 @@ impl CryptoBridge {
             Self {
                 pool: Some(pool),
                 waiters: JoinSet::new(),
+                active: BTreeMap::new(),
                 waiter_ceiling: capacity,
                 completions,
                 next_job: 1,
@@ -535,7 +558,7 @@ impl CryptoBridge {
         job: RuntimeCryptoJob,
     ) -> Result<CryptoJobId, CryptoSubmitRefused> {
         self.reap_finished();
-        if self.waiters.len() >= self.waiter_ceiling {
+        if self.active.len() >= self.waiter_ceiling {
             return Err(CryptoSubmitRefused {
                 reason: CryptoWorkerError::QueueFull,
                 job,
@@ -559,25 +582,48 @@ impl CryptoBridge {
         })?;
         let job_id = CryptoJobId::new(self.next_job);
         self.next_job = next;
+        let cancellation = handle.cancellation_token();
         let completions = self.completions.clone();
-        self.waiters.spawn(async move {
+        let abort = self.waiters.spawn(async move {
             let output = handle.completion().await;
             let _send_result = completions
                 .send(CryptoCompletionMessage { job_id, output })
                 .await;
+            job_id
         });
+        let _previous = self.active.insert(
+            job_id,
+            ActiveCryptoJob {
+                abort,
+                cancellation,
+            },
+        );
         Ok(job_id)
+    }
+
+    /// Cancels one matching waiter and requests pre-start worker cancellation.
+    /// A job already executing remains side-effect-free and finishes without a
+    /// completion routed back to StateCore.
+    pub fn cancel(&mut self, job_id: CryptoJobId) -> bool {
+        self.reap_finished();
+        let Some(active) = self.active.remove(&job_id) else {
+            return false;
+        };
+        active.cancellation.cancel_before_start();
+        active.abort.abort();
+        true
     }
 
     /// Returns the number of jobs whose completion is still awaited.
     pub fn in_flight(&mut self) -> usize {
         self.reap_finished();
-        self.waiters.len()
+        self.active.len()
     }
 
     /// Aborts every waiter (cancelling unstarted jobs) and joins the pool
     /// on the blocking thread pool.
     pub async fn shutdown(mut self) -> Result<(), RuntimeError> {
+        self.cancel_all();
         self.waiters.shutdown().await;
         if let Some(pool) = self.pool.take() {
             tokio::task::spawn_blocking(move || pool.shutdown())
@@ -588,7 +634,19 @@ impl CryptoBridge {
     }
 
     fn reap_finished(&mut self) {
-        while self.waiters.try_join_next().is_some() {}
+        while let Some(result) = self.waiters.try_join_next() {
+            if let Ok(job_id) = result {
+                self.active.remove(&job_id);
+            }
+        }
+    }
+
+    fn cancel_all(&mut self) {
+        for active in self.active.values() {
+            active.cancellation.cancel_before_start();
+            active.abort.abort();
+        }
+        self.active.clear();
     }
 }
 
@@ -596,6 +654,7 @@ impl CryptoBridge {
 /// use [`CryptoBridge::shutdown`] from async code.
 impl Drop for CryptoBridge {
     fn drop(&mut self) {
+        self.cancel_all();
         self.waiters.abort_all();
         if let Some(pool) = self.pool.take() {
             pool.shutdown();

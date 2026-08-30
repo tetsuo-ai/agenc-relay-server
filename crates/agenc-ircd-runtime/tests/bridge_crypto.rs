@@ -11,9 +11,9 @@ use agenc_ircd_crypto::{CryptoError, CryptoWorkerConfig, CryptoWorkerError};
 use agenc_ircd_runtime::RuntimeError;
 use agenc_ircd_runtime::bridge::crypto::{
     CHANNEL_KEY_ARGON2_ITERATIONS, CHANNEL_KEY_ARGON2_MEMORY_KIB, CHANNEL_KEY_ARGON2_PARALLELISM,
-    CHANNEL_KEY_HASH_BYTES, CHANNEL_KEY_SALT_BYTES, ChannelKeyTarget, ChannelKeyVerifier,
-    ChannelKeyVerifierRecord, ChannelKeyVerifyJob, CryptoBridge, CryptoJobOutput,
-    MAX_CHANNEL_KEY_BYTES, MIN_CHANNEL_KEY_BYTES, RuntimeCryptoJob,
+    CHANNEL_KEY_HASH_BYTES, CHANNEL_KEY_SALT_BYTES, ChannelKeyConstructJob, ChannelKeyTarget,
+    ChannelKeyVerifier, ChannelKeyVerifierRecord, ChannelKeyVerifyJob, CryptoBridge,
+    CryptoJobOutput, MAX_CHANNEL_KEY_BYTES, MIN_CHANNEL_KEY_BYTES, RuntimeCryptoJob,
 };
 
 /// A stand-in derivation: the hash is the salt XOR the first secret byte
@@ -120,7 +120,11 @@ fn the_argon2_parameters_and_key_bounds_are_the_spec_values() {
     );
     assert!(ChannelKeyVerifyJob::new(verifier.clone(), stored, vec![2; 257]).is_err());
     assert!(ChannelKeyVerifyJob::new(verifier.clone(), stored, vec![2; 8]).is_ok());
-    assert!(ChannelKeyVerifyJob::new(verifier, stored, vec![2; 256]).is_ok());
+    assert!(ChannelKeyVerifyJob::new(verifier.clone(), stored, vec![2; 256]).is_ok());
+    assert!(ChannelKeyConstructJob::new(verifier.clone(), [3; 16], vec![2; 7]).is_err());
+    assert!(ChannelKeyConstructJob::new(verifier.clone(), [3; 16], vec![2; 257]).is_err());
+    assert!(ChannelKeyConstructJob::new(verifier.clone(), [3; 16], vec![2; 8]).is_ok());
+    assert!(ChannelKeyConstructJob::new(verifier, [3; 16], vec![2; 256]).is_ok());
     let stored_record = record(9, 4);
     assert_eq!(stored_record.salt(), &[9; CHANNEL_KEY_SALT_BYTES]);
     assert_eq!(stored_record.hash(), &[9 ^ 4; CHANNEL_KEY_HASH_BYTES]);
@@ -169,6 +173,36 @@ async fn channel_key_jobs_derive_once_and_dummy_targets_never_match()
 }
 
 #[tokio::test]
+async fn channel_key_construction_derives_once_and_returns_the_supplied_salt()
+-> Result<(), Box<dyn std::error::Error>> {
+    let verifier = Arc::new(FakeVerifier {
+        derivations: AtomicUsize::new(0),
+        fail: false,
+    });
+    let shared: Arc<dyn ChannelKeyVerifier> = verifier.clone();
+    let (mut bridge, mut receiver) = CryptoBridge::start(CryptoWorkerConfig::new(1, 1, 1)?)?;
+    let job = RuntimeCryptoJob::ChannelKeyConstruct(ChannelKeyConstructJob::new(
+        shared,
+        [9; CHANNEL_KEY_SALT_BYTES],
+        vec![4; MIN_CHANNEL_KEY_BYTES],
+    )?);
+    let job_id = bridge.try_submit(job).map_err(|refused| refused.reason())?;
+    let message = tokio::time::timeout(Duration::from_secs(30), receiver.recv())
+        .await?
+        .ok_or("completion channel closed")?;
+    assert_eq!(message.job_id, job_id);
+    let CryptoJobOutput::ChannelKeyConstruct(constructed) = message.output? else {
+        return Err("unexpected output kind".into());
+    };
+    let constructed = constructed?;
+    assert_eq!(constructed.salt(), &[9; CHANNEL_KEY_SALT_BYTES]);
+    assert_eq!(constructed.hash(), &[9 ^ 4; CHANNEL_KEY_HASH_BYTES]);
+    assert_eq!(verifier.derivations.load(Ordering::SeqCst), 1);
+    bridge.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_full_pool_refuses_with_server_busy_and_returns_the_job()
 -> Result<(), Box<dyn std::error::Error>> {
     let (started_sender, started_receiver) = sync_channel(4);
@@ -200,6 +234,46 @@ async fn a_full_pool_refuses_with_server_busy_and_returns_the_job()
         .ok_or("completion channel closed")?;
     assert_eq!(message.job_id, first);
     assert!(message.output.is_ok());
+    bridge.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelling_one_waiter_fences_its_completion_and_preserves_other_jobs()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (started_sender, started_receiver) = sync_channel(4);
+    let (release_sender, release_receiver) = sync_channel(4);
+    let blocking: Arc<dyn ChannelKeyVerifier> = Arc::new(BlockingVerifier {
+        started: started_sender,
+        release: std::sync::Mutex::new(release_receiver),
+    });
+    let (mut bridge, mut receiver) = CryptoBridge::start(CryptoWorkerConfig::new(2, 1, 1)?)?;
+    let target = ChannelKeyTarget::Stored(record(1, 1));
+    let first = bridge
+        .try_submit(job(blocking.clone(), target, &[1; 8])?)
+        .map_err(|refused| refused.reason())?;
+    started_receiver.recv_timeout(Duration::from_secs(30))?;
+    let second = bridge
+        .try_submit(job(blocking, target, &[1; 8])?)
+        .map_err(|refused| refused.reason())?;
+    assert_eq!(bridge.in_flight(), 2);
+    assert!(bridge.cancel(second));
+    assert!(!bridge.cancel(second));
+    assert_eq!(bridge.in_flight(), 1);
+
+    release_sender.send(())?;
+    let message = tokio::time::timeout(Duration::from_secs(30), receiver.recv())
+        .await?
+        .ok_or("completion channel closed")?;
+    assert_eq!(message.job_id, first);
+    assert!(message.output.is_ok());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), receiver.recv())
+            .await
+            .is_err(),
+        "the cancelled waiter forwarded a completion"
+    );
+    assert!(started_receiver.try_recv().is_err());
     bridge.shutdown().await?;
     Ok(())
 }

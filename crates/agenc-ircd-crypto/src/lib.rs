@@ -54,5 +54,6 @@ pub use storage_integrity::{
 };
 pub use worker::{
     BoundedCryptoPool, CRYPTO_QUEUE_SLOTS_PER_WORKER, CRYPTO_WORKER_RESERVED_BYTES, CryptoJob,
-    CryptoPort, CryptoSubmissionError, CryptoWorkerConfig, JobClass, JobHandle,
+    CryptoPort, CryptoSubmissionError, CryptoWorkerConfig, JobCancellationToken, JobClass,
+    JobHandle,
 };

@@ -5,11 +5,11 @@
 use std::error::Error;
 
 use agenc_ircd_domain::{
-    ChannelModes, ChannelNameValue, ChannelScope, ContentPolicy, DirectMessagePolicy,
-    DurableAccount, DurableChannel, DurableListEntry, DurableSanction, DurableTopic,
-    GuestDirectMessagePolicy, HistoryPolicy, MAX_CONTACTS_PER_ACCOUNT, MAX_MASK_ENTRIES_PER_LIST,
-    MAX_RESERVED_NICKNAMES, ModerationAction, ModerationReasonCode, NicknameValue,
-    PersistencePolicy, PresencePolicy, Principal, Role, Visibility,
+    ChannelKeyVerifier, ChannelModes, ChannelNameValue, ChannelScope, ContentPolicy,
+    DirectMessagePolicy, DurableAccount, DurableChannel, DurableListEntry, DurableSanction,
+    DurableTopic, GuestDirectMessagePolicy, HistoryPolicy, MAX_CONTACTS_PER_ACCOUNT,
+    MAX_MASK_ENTRIES_PER_LIST, MAX_RESERVED_NICKNAMES, ModerationAction, ModerationReasonCode,
+    NicknameValue, PersistencePolicy, PresencePolicy, Principal, Role, Visibility,
 };
 use agenc_ircd_storage::{
     AccountRecordBody, ChannelRecordBody, LIVE_RECORD_KIND, MAX_ACCOUNT_RECORD_BODY_BYTES,
@@ -35,6 +35,10 @@ pub(crate) fn live_body(table: TableId, seed: u8) -> Result<Vec<u8>, StorageErro
 fn set(bytes: &mut [u8], index: usize, value: u8) -> Result<(), StorageError> {
     *bytes.get_mut(index).ok_or(StorageError::InvalidEncoding)? = value;
     Ok(())
+}
+
+fn channel_key_verifier_offset(channel: &DurableChannel) -> usize {
+    2 + 16 + 4 + channel.name.presentation().len() + 4 + 17 + 8 + 8 + 1
 }
 
 fn account_id(seed: u8) -> AccountId {
@@ -71,6 +75,7 @@ fn minimal_channel(seed: u8) -> Result<DurableChannel, StorageError> {
         created_at: UtcSecond::from_unix_seconds(1),
         revision: quantity(Revision::new(1))?,
         modes: ChannelModes::default(),
+        key_verifier: None,
         member_limit: None,
         topic: None,
         role_grants: vec![(account_id(seed), Role::Owner)],
@@ -136,6 +141,7 @@ fn full_channel() -> Result<DurableChannel, Box<dyn Error>> {
             topic_protected: false,
             join_key: true,
         },
+        key_verifier: Some(ChannelKeyVerifier::new([14; 16], [15; 32])),
         member_limit: Some(512),
         topic: Some(DurableTopic {
             text: "topic text".to_owned(),
@@ -179,7 +185,7 @@ fn minimal_bodies_match_their_golden_vectors() -> Result<(), Box<dyn Error>> {
     assert_eq!(account.len(), 46);
 
     let channel = ChannelRecordBody::encode(&minimal_channel(7)?)?;
-    let mut expected = vec![0, 1];
+    let mut expected = vec![0, 2];
     expected.extend_from_slice(&[7; 16]);
     expected.extend_from_slice(&8_u32.to_be_bytes());
     expected.extend_from_slice(b"#fixture");
@@ -188,14 +194,14 @@ fn minimal_bodies_match_their_golden_vectors() -> Result<(), Box<dyn Error>> {
     expected.extend_from_slice(&[7; 16]);
     expected.extend_from_slice(&1_u64.to_be_bytes());
     expected.extend_from_slice(&1_u64.to_be_bytes());
-    expected.extend_from_slice(&[0b0100, 0, 0]);
+    expected.extend_from_slice(&[0b0100, 0, 0, 0]);
     expected.extend_from_slice(&1_u32.to_be_bytes());
     expected.extend_from_slice(&[7; 16]);
     expected.push(5);
     expected.extend_from_slice(&[0; 12]);
     expected.push(0);
     assert_eq!(channel, expected);
-    assert_eq!(channel.len(), 104);
+    assert_eq!(channel.len(), 105);
 
     let sanction = SanctionRecordBody::encode(&minimal_sanction(7)?)?;
     let mut expected = vec![0, 1, 1];
@@ -255,6 +261,44 @@ fn full_bodies_round_trip_and_admit_through_the_envelope() -> Result<(), Box<dyn
 }
 
 #[test]
+fn channel_body_v1_compatibility_is_limited_to_unkeyed_rows() -> Result<(), Box<dyn Error>> {
+    let unkeyed = minimal_channel(7)?;
+    let mut legacy_unkeyed = ChannelRecordBody::encode(&unkeyed)?;
+    set(&mut legacy_unkeyed, 1, 1)?;
+    let verifier_offset = channel_key_verifier_offset(&unkeyed);
+    legacy_unkeyed
+        .drain(verifier_offset..verifier_offset + 1)
+        .for_each(drop);
+    assert!(ChannelRecordBody::decode(&legacy_unkeyed)? == unkeyed);
+
+    let keyed = full_channel()?;
+    let mut legacy_keyed = ChannelRecordBody::encode(&keyed)?;
+    set(&mut legacy_keyed, 1, 1)?;
+    let verifier_offset = channel_key_verifier_offset(&keyed);
+    legacy_keyed
+        .drain(verifier_offset..verifier_offset + 49)
+        .for_each(drop);
+    assert_eq!(
+        ChannelRecordBody::decode(&legacy_keyed),
+        Err(StorageError::InvalidEncoding)
+    );
+
+    let mut missing = full_channel()?;
+    missing.key_verifier = None;
+    assert_eq!(
+        ChannelRecordBody::encode(&missing),
+        Err(StorageError::LimitExceeded)
+    );
+    let mut stray = minimal_channel(7)?;
+    stray.key_verifier = Some(ChannelKeyVerifier::new([1; 16], [2; 32]));
+    assert_eq!(
+        ChannelRecordBody::encode(&stray),
+        Err(StorageError::LimitExceeded)
+    );
+    Ok(())
+}
+
+#[test]
 fn every_strict_table_rejects_truncation_trailing_bytes_version_and_opaque_bodies()
 -> Result<(), Box<dyn Error>> {
     let bodies = [
@@ -288,7 +332,7 @@ fn every_strict_table_rejects_truncation_trailing_bytes_version_and_opaque_bodie
         trailing.push(0);
         assert_eq!(admit(trailing), Err(StorageError::InvalidEncoding));
         let mut wrong_version = encoded.clone();
-        set(&mut wrong_version, 1, 2)?;
+        set(&mut wrong_version, 1, 3)?;
         assert_eq!(admit(wrong_version), Err(StorageError::UnsupportedVersion));
         assert_eq!(admit(vec![1]), Err(StorageError::InvalidEncoding));
         assert_eq!(admit(Vec::new()), Err(StorageError::InvalidEncoding));
@@ -401,6 +445,6 @@ fn decoders_reject_each_closed_enum_ordering_and_ceiling_violation() -> Result<(
 #[test]
 fn body_ceilings_are_derived_from_the_domain_limits() {
     assert_eq!(MAX_ACCOUNT_RECORD_BODY_BYTES, 16_262);
-    assert_eq!(MAX_CHANNEL_RECORD_BODY_BYTES, 1_167_208);
+    assert_eq!(MAX_CHANNEL_RECORD_BODY_BYTES, 1_167_257);
     assert_eq!(MAX_SANCTION_RECORD_BODY_BYTES, 597);
 }

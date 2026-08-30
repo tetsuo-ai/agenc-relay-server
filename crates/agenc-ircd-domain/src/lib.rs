@@ -28,8 +28,8 @@ pub use decision::{
 };
 pub use error::DomainError;
 pub use model::{
-    AccountLabelValue, AccountState, AwayText, ChannelModes, ChannelNameValue, ChannelScope,
-    ChannelState, ContentPolicy, DirectMessagePolicy, DisplayNameValue, DomainState,
+    AccountLabelValue, AccountState, AwayText, ChannelKeyVerifier, ChannelModes, ChannelNameValue,
+    ChannelScope, ChannelState, ContentPolicy, DirectMessagePolicy, DisplayNameValue, DomainState,
     GuestDirectMessagePolicy, HistoryPolicy, ListEntry, MAX_CHANNELS_PER_SESSION,
     MAX_CONTACTS_PER_ACCOUNT, MAX_INVITES_PER_CHANNEL, MAX_MASK_ENTRIES_PER_LIST,
     MAX_MEMBERS_PER_CHANNEL, MAX_MONITORED_NICKNAMES, MAX_RESERVED_NICKNAMES,

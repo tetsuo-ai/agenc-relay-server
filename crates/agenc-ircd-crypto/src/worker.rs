@@ -389,10 +389,31 @@ pub struct JobHandle<O> {
     cancelled: Arc<AtomicBool>,
 }
 
+/// Cloneable authority to request cancellation before a worker starts a job.
+#[derive(Clone)]
+pub struct JobCancellationToken {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl JobCancellationToken {
+    /// Requests cancellation if the worker has not started the job.
+    pub fn cancel_before_start(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+}
+
 impl<O> JobHandle<O> {
     /// Requests cancellation if the worker has not started this job.
     pub fn cancel_before_start(&self) {
-        self.cancelled.store(true, Ordering::Release);
+        self.cancellation_token().cancel_before_start();
+    }
+
+    /// Returns cloneable cancellation authority for a separate waiter owner.
+    #[must_use]
+    pub fn cancellation_token(&self) -> JobCancellationToken {
+        JobCancellationToken {
+            cancelled: Arc::clone(&self.cancelled),
+        }
     }
 
     /// Waits without blocking a Tokio worker.

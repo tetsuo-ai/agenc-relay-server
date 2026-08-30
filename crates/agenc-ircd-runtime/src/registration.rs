@@ -76,6 +76,7 @@ struct PendingClosure {
 pub struct RegistrationRouter {
     config: RegistrationRouterConfig,
     advertised: CapabilityProfile,
+    commands: crate::channels::RegisteredCommandExecutor,
     connections: BTreeMap<ConnectionGeneration, ConnectionState>,
     leases: BTreeMap<NicknameValue, ConnectionGeneration>,
     pending_closures: Vec<PendingClosure>,
@@ -83,11 +84,15 @@ pub struct RegistrationRouter {
 
 impl RegistrationRouter {
     /// Builds the closed core-v1 capability advertisement.
-    pub fn new(config: RegistrationRouterConfig) -> Result<Self, RuntimeError> {
+    pub fn new(
+        config: RegistrationRouterConfig,
+        commands: crate::channels::RegisteredCommandExecutor,
+    ) -> Result<Self, RuntimeError> {
         let advertised = core_capabilities()?;
         Ok(Self {
             config,
             advertised,
+            commands,
             connections: BTreeMap::new(),
             leases: BTreeMap::new(),
             pending_closures: Vec::new(),
@@ -365,15 +370,17 @@ impl RegistrationRouter {
             }
             RegistrationAction::ForwardRegisteredCommand(handoff) => {
                 let capabilities = state.registration.capability_state();
-                return crate::channels::route_registered(
-                    context,
-                    generation,
-                    state.bound,
-                    capabilities,
-                    &mut state.nickname,
-                    handoff,
-                )
-                .map(ActionStep::from);
+                return self
+                    .commands
+                    .route_registered(
+                        context,
+                        generation,
+                        state.bound,
+                        capabilities,
+                        &mut state.nickname,
+                        handoff,
+                    )
+                    .map(ActionStep::from);
             }
             RegistrationAction::ResumeDeferredInput(queue) => {
                 let mut follow_up = Vec::new();
@@ -946,6 +953,7 @@ impl CommandRouter for RegistrationRouter {
         generation: ConnectionGeneration,
         _reason: CloseReason,
     ) {
+        self.commands.connection_closed(context, generation);
         let Some(mut state) = self.connections.remove(&generation) else {
             return;
         };
@@ -967,6 +975,16 @@ impl CommandRouter for RegistrationRouter {
         self.retry_session_closes(context);
     }
 
+    fn crypto_completed(
+        &mut self,
+        context: &mut StateCoreContext,
+        message: crate::bridge::CryptoCompletionMessage<crate::bridge::crypto::CryptoJobOutput>,
+    ) {
+        if let Err((generation, _error)) = self.commands.crypto_completed(context, message) {
+            close_transport(context, generation);
+        }
+    }
+
     fn batch_rejected(
         &mut self,
         context: &mut StateCoreContext,
@@ -977,6 +995,14 @@ impl CommandRouter for RegistrationRouter {
     }
 
     fn timer_fired(&mut self, context: &mut StateCoreContext, entry: TimerEntry) {
+        match self.commands.timer_fired(context, entry) {
+            Ok(true) => return,
+            Err((generation, _error)) => {
+                close_transport(context, generation);
+                return;
+            }
+            Ok(false) => {}
+        }
         let TimedId::Connection(generation) = entry.id else {
             return;
         };

@@ -36,7 +36,7 @@ use crate::RuntimeError;
 use crate::admission::{
     BucketKey, BucketTable, OverloadClass, OverloadState, PrefixRegistry, RateLimits,
 };
-use crate::bridge::crypto::CryptoJobOutput;
+use crate::bridge::crypto::{CryptoBridge, CryptoJobOutput};
 use crate::bridge::storage::{BridgeFailure, StorageBridge, SubmitError};
 use crate::bridge::{CryptoCompletionMessage, StorageCompletionMessage};
 use crate::budget::MemoryBudget;
@@ -93,6 +93,8 @@ pub struct StateCoreInputs {
     pub keys: KeyDeriver,
     /// The storage bridge; its completion receiver is passed to `run`.
     pub bridge: StorageBridge,
+    /// The crypto bridge; its completion receiver is passed to `run`.
+    pub crypto: CryptoBridge,
     /// The process-wide memory budget.
     pub budget: Arc<MemoryBudget>,
     /// The explicit clocks.
@@ -365,6 +367,7 @@ pub struct StateCoreContext {
     overload: OverloadState,
     budget: Arc<MemoryBudget>,
     bridge: StorageBridge,
+    crypto: CryptoBridge,
     entropy: Box<dyn EntropySource + Send>,
     monotonic: Box<dyn MonotonicClock + Send>,
     wall: Box<dyn WallClock + Send>,
@@ -399,6 +402,11 @@ impl StateCoreContext {
     /// Mutably borrows the timer heap.
     pub const fn timers_mut(&mut self) -> &mut TimerHeap {
         &mut self.timers
+    }
+
+    /// Mutably borrows the bounded crypto submission bridge.
+    pub const fn crypto_mut(&mut self) -> &mut CryptoBridge {
+        &mut self.crypto
     }
 
     /// Borrows the drift monitor.
@@ -871,6 +879,7 @@ impl StateCore {
                 overload: OverloadState::new(),
                 budget: inputs.budget,
                 bridge: inputs.bridge,
+                crypto: inputs.crypto,
                 entropy: inputs.entropy,
                 monotonic: inputs.clocks.monotonic,
                 wall: inputs.clocks.wall,
@@ -893,10 +902,10 @@ impl StateCore {
         &mut self.context
     }
 
-    /// Returns the storage bridge for the supervisor to join.
+    /// Returns both blocking bridges for the supervisor to join.
     #[must_use]
-    pub fn into_bridge(self) -> StorageBridge {
-        self.context.bridge
+    pub fn into_bridges(self) -> (StorageBridge, CryptoBridge) {
+        (self.context.bridge, self.context.crypto)
     }
 
     /// Handles one inbox message; `Some` ends the loop.

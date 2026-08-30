@@ -8,12 +8,13 @@ use std::error::Error;
 
 use agenc_ircd_domain::{
     AccountCommand, AccountLabelValue, AccountState, AdmissionSnapshot, CanonicalCommand,
-    ChannelCommand, ChannelNameValue, ChannelTarget, DomainState, DurableAccount, DurableChannel,
-    DurableSanction, DurableWrite, E2eeBindingProof, EntropyPurpose, ExternalInputRequest,
-    ExternalInputs, HistoryPolicy, InformationQuery, MaskList, MessageCommand, MessageKind,
-    MessageTarget, MessageText, ModeChange, ModeOperation, ModerationAction, ModerationReason,
-    ModerationReasonCode, MutationPlan, NicknameValue, PlanDecision, PresenceCommand,
-    PresencePolicy, Principal, RateBucket, Role, SanctionRequest, TopicText,
+    ChannelCommand, ChannelKeyVerifier, ChannelNameValue, ChannelTarget, DomainState,
+    DurableAccount, DurableChannel, DurableSanction, DurableWrite, E2eeBindingProof,
+    EntropyPurpose, ExternalInputRequest, ExternalInputs, HistoryPolicy, InformationQuery,
+    MaskList, MessageCommand, MessageKind, MessageTarget, MessageText, ModeChange, ModeOperation,
+    ModerationAction, ModerationReason, ModerationReasonCode, MutationPlan, NicknameValue,
+    PlanDecision, PresenceCommand, PresencePolicy, Principal, RateBucket, Role, SanctionRequest,
+    TopicText,
 };
 use agenc_ircd_testkit::{
     DomainTestIdentity, account_id, apply_plan, bytes, channel_id, generation, message_admission,
@@ -170,6 +171,9 @@ fn fulfil(requests: &[ExternalInputRequest], seed: &mut u8) -> ExternalInputs {
                     .push(AccountDeletionToken::from_bytes(bytes(*seed))),
             },
             ExternalInputRequest::ChannelKeyVerification { .. } => inputs.key_verdicts.push(true),
+            ExternalInputRequest::ChannelKeyConstruction { .. } => inputs
+                .key_verifiers
+                .push(ChannelKeyVerifier::new(bytes(*seed), [*seed; 32])),
         }
     }
     inputs

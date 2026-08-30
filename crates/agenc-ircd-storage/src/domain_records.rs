@@ -7,12 +7,12 @@
 //! could not have produced.
 
 use agenc_ircd_domain::{
-    AccountLabelValue, ChannelModes, ChannelNameValue, ChannelScope, ContentPolicy,
-    DirectMessagePolicy, DurableAccount, DurableChannel, DurableListEntry, DurableSanction,
-    DurableTopic, GuestDirectMessagePolicy, HistoryPolicy, MAX_CONTACTS_PER_ACCOUNT,
-    MAX_MASK_ENTRIES_PER_LIST, MAX_RESERVED_NICKNAMES, MAX_ROLE_GRANTS_PER_CHANNEL,
-    ModerationAction, ModerationReasonCode, NicknameValue, PersistencePolicy, PresencePolicy,
-    Principal, Role, Visibility,
+    AccountLabelValue, ChannelKeyVerifier, ChannelModes, ChannelNameValue, ChannelScope,
+    ContentPolicy, DirectMessagePolicy, DurableAccount, DurableChannel, DurableListEntry,
+    DurableSanction, DurableTopic, GuestDirectMessagePolicy, HistoryPolicy,
+    MAX_CONTACTS_PER_ACCOUNT, MAX_MASK_ENTRIES_PER_LIST, MAX_RESERVED_NICKNAMES,
+    MAX_ROLE_GRANTS_PER_CHANNEL, ModerationAction, ModerationReasonCode, NicknameValue,
+    PersistencePolicy, PresencePolicy, Principal, Role, Visibility,
 };
 use agenc_ircd_types::{
     AccountId, AccountRandomId, ChannelInstanceId, EntryId, Generation, MAX_TYPED_MASK_BYTES,
@@ -24,6 +24,8 @@ use crate::codec::{Decoder, Encoder};
 
 /// Version prefix shared by every domain body codec.
 const DOMAIN_BODY_VERSION: u16 = 1;
+/// Channel bodies gained persisted join-key verifier material in version two.
+const CHANNEL_BODY_VERSION: u16 = 2;
 /// Record kind of a live (non-tombstone) domain row.
 pub const LIVE_RECORD_KIND: u16 = 1;
 
@@ -61,6 +63,9 @@ pub const MAX_CHANNEL_RECORD_BODY_BYTES: usize = 2
     + 8
     + 8
     + 1
+    + 1
+    + 16
+    + 32
     + 3
     + 1
     + VECTOR_PREFIX_BYTES
@@ -185,6 +190,7 @@ impl ChannelRecordBody {
     /// Encodes one registered channel projection.
     pub fn encode(channel: &DurableChannel) -> Result<Vec<u8>, StorageError> {
         if channel.persistence != PersistencePolicy::Registered
+            || channel.modes.join_key != channel.key_verifier.is_some()
             || channel.role_grants.len() > MAX_ROLE_GRANTS_PER_CHANNEL
             || !ascending(
                 &channel
@@ -204,7 +210,7 @@ impl ChannelRecordBody {
             return Err(StorageError::LimitExceeded);
         }
         let mut encoder = Encoder::with_capacity(0, MAX_CHANNEL_RECORD_BODY_BYTES)?;
-        encoder.put_u16(DOMAIN_BODY_VERSION)?;
+        encoder.put_u16(CHANNEL_BODY_VERSION)?;
         encoder.put_fixed(channel.channel_id.as_bytes())?;
         encoder.put_vector_u32(channel.name.presentation().as_bytes())?;
         encoder.put_fixed(&[
@@ -217,6 +223,7 @@ impl ChannelRecordBody {
         encoder.put_u64(channel.created_at.get())?;
         encoder.put_u64(channel.revision.get())?;
         encoder.put_fixed(&[modes_byte(channel.modes)])?;
+        put_key_verifier(&mut encoder, channel.key_verifier.as_ref())?;
         put_member_limit(&mut encoder, channel.member_limit)?;
         put_topic(&mut encoder, channel.topic.as_ref())?;
         put_count(&mut encoder, channel.role_grants.len())?;
@@ -237,7 +244,10 @@ impl ChannelRecordBody {
             return Err(StorageError::LimitExceeded);
         }
         let mut decoder = Decoder::new(encoded);
-        expect_version(&mut decoder)?;
+        let version = decoder.u16()?;
+        if !matches!(version, DOMAIN_BODY_VERSION | CHANNEL_BODY_VERSION) {
+            return Err(StorageError::UnsupportedVersion);
+        }
         let channel_id = ChannelInstanceId::from_bytes(decoder.array()?);
         let name = ChannelNameValue::parse(text(&mut decoder, MAX_CHANNEL_NAME_BYTES)?)
             .map_err(|_| StorageError::InvalidEncoding)?;
@@ -249,6 +259,11 @@ impl ChannelRecordBody {
         let created_at = UtcSecond::from_unix_seconds(decoder.u64()?);
         let revision = revision(&mut decoder)?;
         let modes = modes_from(byte(&mut decoder)?)?;
+        let key_verifier = if version == CHANNEL_BODY_VERSION {
+            key_verifier(&mut decoder)?
+        } else {
+            None
+        };
         let member_limit = member_limit(&mut decoder)?;
         let topic = topic(&mut decoder)?;
         let role_grants = role_grants(&mut decoder)?;
@@ -257,7 +272,8 @@ impl ChannelRecordBody {
         let invite_exceptions = entries(&mut decoder)?;
         let history = history_from(byte(&mut decoder)?)?;
         decoder.finish()?;
-        if persistence != PersistencePolicy::Registered {
+        if persistence != PersistencePolicy::Registered || modes.join_key != key_verifier.is_some()
+        {
             return Err(StorageError::InvalidEncoding);
         }
         Ok(DurableChannel {
@@ -271,6 +287,7 @@ impl ChannelRecordBody {
             created_at,
             revision,
             modes,
+            key_verifier,
             member_limit,
             topic,
             role_grants,
@@ -433,6 +450,31 @@ fn principal(decoder: &mut Decoder<'_>) -> Result<Principal, StorageError> {
     match byte(decoder)? {
         0 => Ok(Principal::Guest(UserId::from_bytes(decoder.array()?))),
         1 => read_account_id(decoder).map(Principal::Account),
+        _ => Err(StorageError::InvalidEncoding),
+    }
+}
+
+fn put_key_verifier(
+    encoder: &mut Encoder,
+    verifier: Option<&ChannelKeyVerifier>,
+) -> Result<(), StorageError> {
+    match verifier {
+        Some(verifier) => {
+            encoder.put_fixed(&[1])?;
+            encoder.put_fixed(verifier.salt())?;
+            encoder.put_fixed(verifier.hash())
+        }
+        None => encoder.put_fixed(&[0]),
+    }
+}
+
+fn key_verifier(decoder: &mut Decoder<'_>) -> Result<Option<ChannelKeyVerifier>, StorageError> {
+    match byte(decoder)? {
+        0 => Ok(None),
+        1 => Ok(Some(ChannelKeyVerifier::new(
+            decoder.array()?,
+            decoder.array()?,
+        ))),
         _ => Err(StorageError::InvalidEncoding),
     }
 }
@@ -809,6 +851,7 @@ pub(crate) mod fixtures {
             created_at: UtcSecond::from_unix_seconds(1),
             revision,
             modes: ChannelModes::default(),
+            key_verifier: None,
             member_limit: None,
             topic: None,
             role_grants: vec![(account_id(seed), Role::Owner)],

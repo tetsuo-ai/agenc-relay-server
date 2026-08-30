@@ -6,13 +6,14 @@ use std::error::Error;
 
 use agenc_ircd_domain::{
     AccountCommand, AccountLabelValue, AdmissionSnapshot, CanonicalCommand, CanonicalCommandView,
-    ChannelCommand, ChannelNameValue, ChannelTarget, DirectMessagePolicy, DisplayNameValue,
-    DomainCommandKind, DomainError, ExternalInputRequest, ExternalInputs, GuestDirectMessagePolicy,
-    HistoryPolicy, InformationQuery, MaskList, MessageCommand, MessageKind, MessageTarget,
-    MessageText, ModeChange, ModeOperation, ModerationAction, ModerationReason,
-    ModerationReasonCode, NicknameValue, PlanDecision, PresenceCommand, PresencePolicy,
-    PresenceProjection, Principal, ProjectionDecision, RateBucket, ResolvedMessageTarget, Role,
-    SanctionRequest, TopicProjection, TopicText, UserQuery, Visibility, VisibilityMode,
+    ChannelCommand, ChannelKeyVerifier, ChannelNameValue, ChannelTarget, DirectMessagePolicy,
+    DisplayNameValue, DomainCommandKind, DomainError, ExternalInputRequest, ExternalInputs,
+    GuestDirectMessagePolicy, HistoryPolicy, InformationQuery, MaskList, MessageCommand,
+    MessageKind, MessageTarget, MessageText, ModeChange, ModeOperation, ModerationAction,
+    ModerationReason, ModerationReasonCode, NicknameValue, PlanDecision, PresenceCommand,
+    PresencePolicy, PresenceProjection, Principal, ProjectionDecision, RateBucket,
+    ResolvedMessageTarget, Role, SanctionRequest, TopicProjection, TopicText, UserQuery,
+    Visibility, VisibilityMode,
 };
 use agenc_ircd_testkit::{
     DomainTestIdentity, account_id, apply_command, apply_plan, bytes, channel_id, create_account,
@@ -83,10 +84,15 @@ fn apply_modes(
     entry_ids: Vec<EntryId>,
 ) -> Result<(), DomainError> {
     let has_entries = !entry_ids.is_empty();
+    let key_verifier_count = changes
+        .iter()
+        .filter(|change| matches!(change, ModeChange::JoinKey(true)))
+        .count();
     let admission = registered_admission(actor.user_id)?;
-    let external = has_entries.then_some(ExternalInputs {
-        utc_now: Some(UtcSecond::from_unix_seconds(1_710_000_010)),
+    let external = (has_entries || key_verifier_count != 0).then_some(ExternalInputs {
+        utc_now: has_entries.then_some(UtcSecond::from_unix_seconds(1_710_000_010)),
         entry_ids,
+        key_verifiers: vec![ChannelKeyVerifier::new([0xa5; 16], [0x5a; 32]); key_verifier_count],
         ..ExternalInputs::default()
     });
     apply_command(
@@ -1341,6 +1347,27 @@ fn channel_key_mode_distinguishes_real_and_dummy_verification_without_raw_secret
     let dummy_joiner = open_session(&mut state, 112, "DummyJoiner", None)?;
     join_new(&mut state, owner, "#keyed", 110)?;
     join_new(&mut state, owner, "#unkeyed", 111)?;
+    let construct_key = CanonicalCommand::mode(
+        ChannelNameValue::parse("#keyed")?,
+        vec![ModeChange::JoinKey(true)],
+    )?;
+    let PlanDecision::NeedsExternal(requests) = plan(
+        &state,
+        owner,
+        construct_key,
+        &registered_admission(owner.user_id)?,
+        None,
+    )?
+    else {
+        return Err("setting a channel key did not request verifier construction".into());
+    };
+    assert!(matches!(
+        requests.as_slice(),
+        [ExternalInputRequest::ChannelKeyConstruction {
+            change_index: 0,
+            ..
+        }]
+    ));
     apply_modes(
         &mut state,
         owner,
@@ -1348,13 +1375,15 @@ fn channel_key_mode_distinguishes_real_and_dummy_verification_without_raw_secret
         vec![ModeChange::JoinKey(true)],
         Vec::new(),
     )?;
-    assert!(
-        state
-            .channel(channel_id(110))
-            .ok_or("keyed channel missing")?
-            .modes()
-            .join_key
-    );
+    let keyed_channel = state
+        .channel(channel_id(110))
+        .ok_or("keyed channel missing")?;
+    assert!(keyed_channel.modes().join_key);
+    let verifier = keyed_channel
+        .key_verifier()
+        .ok_or("keyed channel did not retain its verifier")?;
+    assert_eq!(verifier.salt(), &[0xa5; 16]);
+    assert_eq!(verifier.hash(), &[0x5a; 32]);
 
     let no_key = plan(
         &state,
@@ -1475,6 +1504,18 @@ fn channel_key_mode_distinguishes_real_and_dummy_verification_without_raw_secret
             .ok_or("dummy joiner disappeared")?
             .is_joined(channel_id(111))
     );
+    apply_modes(
+        &mut state,
+        owner,
+        "#keyed",
+        vec![ModeChange::JoinKey(false)],
+        Vec::new(),
+    )?;
+    let keyed_channel = state
+        .channel(channel_id(110))
+        .ok_or("keyed channel missing after key removal")?;
+    assert!(!keyed_channel.modes().join_key);
+    assert!(keyed_channel.key_verifier().is_none());
     state.validate()?;
     Ok(())
 }
