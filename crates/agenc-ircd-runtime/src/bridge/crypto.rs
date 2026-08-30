@@ -17,21 +17,22 @@ use std::fmt;
 
 use agenc_ircd_auth::{
     AccountAuthenticationState, AccountCreationStartParameters, AccountCreationState,
-    AccountFinishOutcome, AccountOperationContext, AccountStartOutcome, AccountTransaction,
-    AuthError, AuthenticatedAccountRequest, AuthenticationFinish, AuthenticationGrant,
-    AuthenticationStartParameters, CreateAccountIntent, CreationFinish, OpaqueProfile,
+    AccountFinishOutcome, AccountOperationContext, AccountServiceEnvelope, AccountStartOutcome,
+    AccountTransaction, AuthError, AuthenticatedAccountRequest, AuthenticationFinish,
+    AuthenticationGrant, AuthenticationStartParameters, CreateAccountIntent, CreationFinish,
+    OpaqueProfile, OpenedAccountServiceRequest, SealedAccountFinishOutcome, SealedAccountStart,
     begin_account_creation, begin_authentication, finish_account_authentication,
-    finish_account_creation,
+    finish_account_creation, open_and_parse_request,
 };
 use agenc_ircd_crypto::{
-    ACCOUNT_HPKE_ENCAPSULATED_KEY_BYTES, ACCOUNT_HPKE_REQUEST_CIPHERTEXT_BYTES,
-    ACCOUNT_HPKE_RESPONSE_PLAINTEXT_BYTES, AccountHpkePrivateKey, AccountRequestBinding,
-    AccountResponseSealToken, BoundedCryptoPool, CRYPTO_WORKER_RESERVED_BYTES, CryptoError,
-    CryptoJob, CryptoPort, CryptoWorkerConfig, CryptoWorkerError, JobCancellationToken, JobClass,
-    LoginIndexKey, OpaqueFakeCredentialKey, OpenedAccountRequest, SealedAccountResponse,
-    open_account_request,
+    ACCOUNT_HPKE_RESPONSE_PLAINTEXT_BYTES, AccountHpkePrivateKey, AccountResponseSealToken,
+    BoundedCryptoPool, CRYPTO_WORKER_RESERVED_BYTES, CryptoError, CryptoJob, CryptoPort,
+    CryptoWorkerConfig, CryptoWorkerError, JobCancellationToken, JobClass, LoginIndexKey,
+    OpaqueFakeCredentialKey, SealedAccountResponse,
 };
-use agenc_ircd_types::AccountServiceResponseKind;
+use agenc_ircd_types::{
+    AccountServiceMessageKind, AccountServiceResponseKind, NetworkId, RecoveryEpoch,
+};
 use subtle::ConstantTimeEq as _;
 use tokio::sync::mpsc;
 use tokio::task::{AbortHandle, JoinSet};
@@ -185,9 +186,10 @@ impl ChannelKeyVerdict {
 /// One account-service HPKE request opening.
 pub struct AccountOpenJob {
     private_key: Arc<AccountHpkePrivateKey>,
-    binding: AccountRequestBinding,
-    encapsulated_key: Box<[u8; ACCOUNT_HPKE_ENCAPSULATED_KEY_BYTES]>,
-    ciphertext: Box<[u8; ACCOUNT_HPKE_REQUEST_CIPHERTEXT_BYTES]>,
+    recovery_epoch: RecoveryEpoch,
+    expected_network: NetworkId,
+    expected_message_kind: AccountServiceMessageKind,
+    envelope: AccountServiceEnvelope,
 }
 
 impl AccountOpenJob {
@@ -195,24 +197,27 @@ impl AccountOpenJob {
     #[must_use]
     pub fn new(
         private_key: Arc<AccountHpkePrivateKey>,
-        binding: AccountRequestBinding,
-        encapsulated_key: Box<[u8; ACCOUNT_HPKE_ENCAPSULATED_KEY_BYTES]>,
-        ciphertext: Box<[u8; ACCOUNT_HPKE_REQUEST_CIPHERTEXT_BYTES]>,
+        recovery_epoch: RecoveryEpoch,
+        expected_network: NetworkId,
+        expected_message_kind: AccountServiceMessageKind,
+        envelope: AccountServiceEnvelope,
     ) -> Self {
         Self {
             private_key,
-            binding,
-            encapsulated_key,
-            ciphertext,
+            recovery_epoch,
+            expected_network,
+            expected_message_kind,
+            envelope,
         }
     }
 
-    fn execute(self) -> Result<(OpenedAccountRequest, AccountResponseSealToken), CryptoError> {
-        open_account_request(
+    fn execute(self) -> Result<OpenedAccountServiceRequest, AuthError> {
+        open_and_parse_request(
             &self.private_key,
-            self.binding,
-            &self.encapsulated_key,
-            &self.ciphertext,
+            self.recovery_epoch,
+            self.expected_network,
+            self.expected_message_kind,
+            &self.envelope,
         )
     }
 }
@@ -287,10 +292,35 @@ impl OpaqueStartJob {
     }
 }
 
-/// One OPAQUE authentication finish; the transaction returns with the
-/// outcome so StateCore keeps sole ownership of it.
+/// One OPAQUE authentication START challenge seal after StateCore reserves
+/// the exact response-count successor.
+pub struct OpaqueStartSealJob {
+    outcome: AccountStartOutcome<AccountAuthenticationState>,
+    current_response_count: u64,
+}
+
+impl OpaqueStartSealJob {
+    /// Moves the authenticated transaction lineage into its one-use seal job.
+    #[must_use]
+    pub fn new(
+        outcome: AccountStartOutcome<AccountAuthenticationState>,
+        current_response_count: u64,
+    ) -> Self {
+        Self {
+            outcome,
+            current_response_count,
+        }
+    }
+
+    fn execute(self) -> Result<SealedAccountStart<AccountAuthenticationState>, AuthError> {
+        self.outcome.seal(self.current_response_count)
+    }
+}
+
+/// One OPAQUE authentication finish; its complete START lineage returns with
+/// the outcome so StateCore keeps sole ownership of it.
 pub struct OpaqueFinishJob {
-    transaction: AccountTransaction<AccountAuthenticationState>,
+    start: SealedAccountStart<AccountAuthenticationState>,
     context: AccountOperationContext,
     finish: AuthenticatedAccountRequest<AuthenticationFinish>,
 }
@@ -299,12 +329,12 @@ impl OpaqueFinishJob {
     /// Moves the transaction and the finish request into the job.
     #[must_use]
     pub fn new(
-        transaction: AccountTransaction<AccountAuthenticationState>,
+        start: SealedAccountStart<AccountAuthenticationState>,
         context: AccountOperationContext,
         finish: AuthenticatedAccountRequest<AuthenticationFinish>,
     ) -> Self {
         Self {
-            transaction,
+            start,
             context,
             finish,
         }
@@ -312,9 +342,9 @@ impl OpaqueFinishJob {
 
     fn execute(mut self) -> OpaqueFinishOutput {
         let outcome =
-            finish_account_authentication(&mut self.transaction, self.context, self.finish);
+            finish_account_authentication(self.start.transaction_mut(), self.context, self.finish);
         OpaqueFinishOutput {
-            transaction: self.transaction,
+            start: self.start,
             outcome,
         }
     }
@@ -322,10 +352,36 @@ impl OpaqueFinishJob {
 
 /// The transaction and outcome of one OPAQUE finish.
 pub struct OpaqueFinishOutput {
-    /// The transaction, consumed or not, returned to its owner.
-    pub transaction: AccountTransaction<AccountAuthenticationState>,
+    /// The START lineage, with its transaction consumed or retained exactly
+    /// as the semantic finish decided.
+    pub start: SealedAccountStart<AccountAuthenticationState>,
     /// The finish outcome.
     pub outcome: Result<AccountFinishOutcome<AuthenticationGrant>, AuthError>,
+}
+
+/// One OPAQUE authentication FINISH completion seal after StateCore reserves
+/// the exact response-count successor.
+pub struct OpaqueFinishSealJob {
+    outcome: AccountFinishOutcome<AuthenticationGrant>,
+    current_response_count: u64,
+}
+
+impl OpaqueFinishSealJob {
+    /// Moves the checked semantic result into its one-use completion seal.
+    #[must_use]
+    pub fn new(
+        outcome: AccountFinishOutcome<AuthenticationGrant>,
+        current_response_count: u64,
+    ) -> Self {
+        Self {
+            outcome,
+            current_response_count,
+        }
+    }
+
+    fn execute(self) -> Result<SealedAccountFinishOutcome<AuthenticationGrant>, AuthError> {
+        self.outcome.seal(self.current_response_count)
+    }
 }
 
 /// One account-creation start.
@@ -406,8 +462,12 @@ pub enum RuntimeCryptoJob {
     AccountSeal(Box<AccountSealJob>),
     /// One OPAQUE authentication start.
     OpaqueStart(Box<OpaqueStartJob>),
+    /// One OPAQUE authentication START response seal.
+    OpaqueStartSeal(Box<OpaqueStartSealJob>),
     /// One OPAQUE authentication finish.
     OpaqueFinish(Box<OpaqueFinishJob>),
+    /// One OPAQUE authentication FINISH response seal.
+    OpaqueFinishSeal(Box<OpaqueFinishSealJob>),
     /// One account-creation start.
     CreationStart(Box<CreationStartJob>),
     /// One account-creation finish.
@@ -420,14 +480,18 @@ pub enum CryptoJobOutput {
     ChannelKey(ChannelKeyVerdict),
     /// A newly derived channel-key verifier, or the closed crypto failure.
     ChannelKeyConstruct(Result<ChannelKeyVerifierRecord, CryptoError>),
-    /// An opened request with its one-use seal token, or the closed failure.
-    AccountOpen(Box<Result<(OpenedAccountRequest, AccountResponseSealToken), CryptoError>>),
+    /// A fully opened and parsed request retaining its one-use response authority.
+    AccountOpen(Box<Result<OpenedAccountServiceRequest, AuthError>>),
     /// A sealed response, or the closed failure.
     AccountSeal(Box<Result<SealedAccountResponse, CryptoError>>),
     /// An authentication start outcome.
     OpaqueStart(Box<Result<AccountStartOutcome<AccountAuthenticationState>, AuthError>>),
+    /// An authentication START with its one-use challenge sealed.
+    OpaqueStartSealed(Box<Result<SealedAccountStart<AccountAuthenticationState>, AuthError>>),
     /// An authentication finish outcome with its transaction.
     OpaqueFinish(Box<OpaqueFinishOutput>),
+    /// An authentication FINISH with its checked completion sealed.
+    OpaqueFinishSealed(Box<Result<SealedAccountFinishOutcome<AuthenticationGrant>, AuthError>>),
     /// A creation start outcome.
     CreationStart(Box<Result<AccountStartOutcome<AccountCreationState>, AuthError>>),
     /// A creation finish outcome with its transaction.
@@ -443,7 +507,9 @@ impl CryptoJob for RuntimeCryptoJob {
             Self::AccountOpen(_)
             | Self::AccountSeal(_)
             | Self::OpaqueStart(_)
+            | Self::OpaqueStartSeal(_)
             | Self::OpaqueFinish(_)
+            | Self::OpaqueFinishSeal(_)
             | Self::CreationStart(_)
             | Self::CreationFinish(_) => JobClass::Opaque,
         }
@@ -456,7 +522,13 @@ impl CryptoJob for RuntimeCryptoJob {
             Self::AccountOpen(job) => CryptoJobOutput::AccountOpen(Box::new(job.execute())),
             Self::AccountSeal(job) => CryptoJobOutput::AccountSeal(Box::new(job.execute())),
             Self::OpaqueStart(job) => CryptoJobOutput::OpaqueStart(Box::new(job.execute())),
+            Self::OpaqueStartSeal(job) => {
+                CryptoJobOutput::OpaqueStartSealed(Box::new(job.execute()))
+            }
             Self::OpaqueFinish(job) => CryptoJobOutput::OpaqueFinish(Box::new(job.execute())),
+            Self::OpaqueFinishSeal(job) => {
+                CryptoJobOutput::OpaqueFinishSealed(Box::new(job.execute()))
+            }
             Self::CreationStart(job) => CryptoJobOutput::CreationStart(Box::new(job.execute())),
             Self::CreationFinish(job) => CryptoJobOutput::CreationFinish(Box::new(job.execute())),
         }

@@ -7,13 +7,24 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::time::Duration;
 
-use agenc_ircd_crypto::{CryptoError, CryptoWorkerConfig, CryptoWorkerError};
+use agenc_ircd_auth::{
+    AccountRequestPayload, AccountServiceEnvelope, AuthenticationFinish, OpaqueKe3,
+    OpenedAccountServiceRequest, encode_request_plaintext,
+};
+use agenc_ircd_crypto::{
+    AccountHpkePrivateKey, AccountRequestBinding, CryptoError, CryptoWorkerConfig,
+    CryptoWorkerError, seal_account_request,
+};
 use agenc_ircd_runtime::RuntimeError;
 use agenc_ircd_runtime::bridge::crypto::{
-    CHANNEL_KEY_ARGON2_ITERATIONS, CHANNEL_KEY_ARGON2_MEMORY_KIB, CHANNEL_KEY_ARGON2_PARALLELISM,
-    CHANNEL_KEY_HASH_BYTES, CHANNEL_KEY_SALT_BYTES, ChannelKeyConstructJob, ChannelKeyTarget,
-    ChannelKeyVerifier, ChannelKeyVerifierRecord, ChannelKeyVerifyJob, CryptoBridge,
-    CryptoJobOutput, MAX_CHANNEL_KEY_BYTES, MIN_CHANNEL_KEY_BYTES, RuntimeCryptoJob,
+    AccountOpenJob, CHANNEL_KEY_ARGON2_ITERATIONS, CHANNEL_KEY_ARGON2_MEMORY_KIB,
+    CHANNEL_KEY_ARGON2_PARALLELISM, CHANNEL_KEY_HASH_BYTES, CHANNEL_KEY_SALT_BYTES,
+    ChannelKeyConstructJob, ChannelKeyTarget, ChannelKeyVerifier, ChannelKeyVerifierRecord,
+    ChannelKeyVerifyJob, CryptoBridge, CryptoJobOutput, MAX_CHANNEL_KEY_BYTES,
+    MIN_CHANNEL_KEY_BYTES, RuntimeCryptoJob,
+};
+use agenc_ircd_types::{
+    AccountServiceMessageKind, NetworkId, RecoveryEpoch, RequestId, TransactionId,
 };
 
 /// A stand-in derivation: the hash is the salt XOR the first secret byte
@@ -198,6 +209,60 @@ async fn channel_key_construction_derives_once_and_returns_the_supplied_salt()
     assert_eq!(constructed.salt(), &[9; CHANNEL_KEY_SALT_BYTES]);
     assert_eq!(constructed.hash(), &[9 ^ 4; CHANNEL_KEY_HASH_BYTES]);
     assert_eq!(verifier.derivations.load(Ordering::SeqCst), 1);
+    bridge.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn account_open_job_returns_only_a_fully_parsed_authenticated_arm()
+-> Result<(), Box<dyn std::error::Error>> {
+    let private_key = AccountHpkePrivateKey::from_bytes([19; 32])?;
+    let public_key = private_key.public_key()?;
+    let network = NetworkId::from_bytes([20; 32]);
+    let epoch = RecoveryEpoch::from_bytes([21; 16]);
+    let kind = AccountServiceMessageKind::OpaqueAuthFinish;
+    let binding = AccountRequestBinding::new(
+        network,
+        epoch,
+        public_key.key_id(),
+        RequestId::from_bytes([22; 16]),
+        kind,
+    );
+    let payload = AccountRequestPayload::AuthenticationFinish(AuthenticationFinish {
+        network_id: network,
+        transaction_id: TransactionId::from_bytes([23; 16]),
+        ke3: OpaqueKe3::from_bytes([24; 64])?,
+    });
+    let plaintext = encode_request_plaintext(&payload)?;
+    let (sealed, _response_token) =
+        seal_account_request(public_key, binding, plaintext.expose_for_hpke())?;
+    let envelope = AccountServiceEnvelope::from_sealed(sealed)?;
+    let job = RuntimeCryptoJob::AccountOpen(Box::new(AccountOpenJob::new(
+        Arc::new(private_key),
+        epoch,
+        network,
+        kind,
+        envelope,
+    )));
+
+    let (mut bridge, mut receiver) = CryptoBridge::start(CryptoWorkerConfig::new(1, 1, 1)?)?;
+    let job_id = bridge.try_submit(job).map_err(|refused| refused.reason())?;
+    let message = tokio::time::timeout(Duration::from_secs(30), receiver.recv())
+        .await?
+        .ok_or("completion channel closed")?;
+    assert_eq!(message.job_id, job_id);
+    let CryptoJobOutput::AccountOpen(opened) = message.output? else {
+        return Err("unexpected output kind".into());
+    };
+    let opened = (*opened)?;
+    let OpenedAccountServiceRequest::AuthenticationFinish(request) = opened else {
+        return Err("opened request kind changed".into());
+    };
+    assert_eq!(request.request_binding(), binding);
+    assert_eq!(
+        request.payload().transaction_id,
+        TransactionId::from_bytes([23; 16])
+    );
     bridge.shutdown().await?;
     Ok(())
 }
