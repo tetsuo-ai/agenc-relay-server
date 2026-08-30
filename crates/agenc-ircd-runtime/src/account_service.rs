@@ -61,6 +61,7 @@ const TERMINAL_START: u8 = 1;
 const TERMINAL_ACCEPTED: u8 = 2;
 const TERMINAL_REJECTED: u8 = 3;
 const MAX_READY_SEALS: usize = 128;
+const MAX_OPAQUE_ATTEMPTS_PER_CONNECTION: u8 = 2;
 
 /// Coordinator-only keys and immutable route identity for live account work.
 pub struct AccountServiceConfig {
@@ -266,6 +267,7 @@ struct LiveAuthentication {
 struct AccountConnection {
     sasl: SaslTransport,
     route: ConnectionRoute,
+    opaque_attempts: u8,
     transaction: Option<LiveAuthentication>,
     authenticated: Option<AuthenticatedBinding>,
 }
@@ -461,6 +463,7 @@ impl AccountServiceCoordinator {
                 connection_id,
                 connection_nonce,
             },
+            opaque_attempts: 0,
             transaction: None,
             authenticated: None,
         };
@@ -903,65 +906,92 @@ impl AccountServiceCoordinator {
         };
         match opened {
             OpenedAccountServiceRequest::AuthenticationStart(opened) if !request.finish => {
-                let login = NormalizedLogin::prepare(opened.payload().login.as_str())
-                    .map_err(|_| RuntimeError::InvalidValue)?;
-                if self.charge_opaque_attempt(context, &login).is_err() {
-                    return self.fail_pending(context, request);
-                }
-                let schedule = LoginIndexLookupSchedule::new(
-                    self.config.network_id,
-                    &login,
-                    self.config.login_index_key_state,
-                    &self.config.current_login_index_key,
-                    self.config.previous_login_index_key.as_deref(),
-                )?;
-                let key = schedule.current().encode()?;
-                let read_id =
-                    context.submit_storage_read(ReadPlan::exact(TableId::LoginIndex, key))?;
-                if self
-                    .reads
-                    .insert(
-                        read_id,
-                        PendingRead::CurrentIndex {
-                            request,
-                            opened,
-                            login,
-                            schedule,
-                        },
-                    )
-                    .is_some()
-                {
-                    return Err(RuntimeError::InvalidValue);
-                }
-                Ok(Vec::new())
+                self.open_authentication_start(context, request, opened)
             }
             OpenedAccountServiceRequest::AuthenticationFinish(opened) if request.finish => {
-                let transaction_id = opened.payload().transaction_id;
-                let Some(live) = self
-                    .connections
-                    .get_mut(&request.generation)
-                    .and_then(|connection| connection.transaction.take())
-                else {
-                    return self.fail_pending(context, request);
-                };
-                let operation = self.operation_context(context, request.route)?;
-                let job = RuntimeCryptoJob::OpaqueFinish(Box::new(OpaqueFinishJob::new(
-                    live.transaction,
-                    operation,
-                    opened,
-                )));
-                let pending = PendingCrypto::Finish {
-                    request,
-                    transaction_id,
-                    login: live.login,
-                    previous_value: live.previous_value,
-                    authenticated_at: context.now(),
-                };
-                self.submit_crypto(context, pending, job)?;
-                Ok(Vec::new())
+                self.open_authentication_finish(context, request, opened)
             }
             _ => self.fail_pending(context, request),
         }
+    }
+
+    fn open_authentication_start(
+        &mut self,
+        context: &mut StateCoreContext,
+        request: RequestContext,
+        opened: AuthenticatedAccountRequest<AuthenticationStart>,
+    ) -> Result<Vec<CarrierCompletion>, RuntimeError> {
+        let attempt = self
+            .connections
+            .get_mut(&request.generation)
+            .ok_or(RuntimeError::InvalidValue)
+            .and_then(|connection| {
+                consume_opaque_connection_attempt(&mut connection.opaque_attempts)
+            });
+        if attempt.is_err() {
+            return self.fail_pending(context, request);
+        }
+        let login = NormalizedLogin::prepare(opened.payload().login.as_str())
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        if self.charge_opaque_attempt(context, &login).is_err() {
+            return self.fail_pending(context, request);
+        }
+        let schedule = LoginIndexLookupSchedule::new(
+            self.config.network_id,
+            &login,
+            self.config.login_index_key_state,
+            &self.config.current_login_index_key,
+            self.config.previous_login_index_key.as_deref(),
+        )?;
+        let key = schedule.current().encode()?;
+        let read_id = context.submit_storage_read(ReadPlan::exact(TableId::LoginIndex, key))?;
+        if self
+            .reads
+            .insert(
+                read_id,
+                PendingRead::CurrentIndex {
+                    request,
+                    opened,
+                    login,
+                    schedule,
+                },
+            )
+            .is_some()
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
+        Ok(Vec::new())
+    }
+
+    fn open_authentication_finish(
+        &mut self,
+        context: &mut StateCoreContext,
+        request: RequestContext,
+        opened: AuthenticatedAccountRequest<agenc_ircd_auth::AuthenticationFinish>,
+    ) -> Result<Vec<CarrierCompletion>, RuntimeError> {
+        let transaction_id = opened.payload().transaction_id;
+        let Some(live) = self
+            .connections
+            .get_mut(&request.generation)
+            .and_then(|connection| connection.transaction.take())
+        else {
+            return self.fail_pending(context, request);
+        };
+        let operation = self.operation_context(context, request.route)?;
+        let job = RuntimeCryptoJob::OpaqueFinish(Box::new(OpaqueFinishJob::new(
+            live.transaction,
+            operation,
+            opened,
+        )));
+        let pending = PendingCrypto::Finish {
+            request,
+            transaction_id,
+            login: live.login,
+            previous_value: live.previous_value,
+            authenticated_at: context.now(),
+        };
+        self.submit_crypto(context, pending, job)?;
+        Ok(Vec::new())
     }
 
     fn charge_opaque_attempt(
@@ -2065,6 +2095,14 @@ fn opaque_attempt_demand(
     BucketDemand::new(BucketKind::OpaqueAttempt, BucketKey::LoginHash(key), 1)
 }
 
+fn consume_opaque_connection_attempt(attempts: &mut u8) -> Result<(), RuntimeError> {
+    if *attempts >= MAX_OPAQUE_ATTEMPTS_PER_CONNECTION {
+        return Err(RuntimeError::LimitExceeded);
+    }
+    *attempts = attempts.checked_add(1).ok_or(RuntimeError::Overflow)?;
+    Ok(())
+}
+
 fn request_result_key(request_id: RequestId) -> Result<StoredKey, RuntimeError> {
     Ok(StoredKey::new(request_id.as_bytes().to_vec())?)
 }
@@ -2265,7 +2303,8 @@ mod tests {
     use crate::admission::{BucketTable, RateLimits};
 
     use super::{
-        ConnectionRoute, REQUEST_RESULT_BYTES, RequestResultRecord, RequestTerminal, RuntimeError,
+        ConnectionRoute, MAX_OPAQUE_ATTEMPTS_PER_CONNECTION, REQUEST_RESULT_BYTES,
+        RequestResultRecord, RequestTerminal, RuntimeError, consume_opaque_connection_attempt,
         opaque_attempt_demand, select_live_login,
     };
 
@@ -2386,6 +2425,19 @@ mod tests {
             assert!(buckets.charge_all_or_nothing(now, &[demand]).is_ok());
         }
         assert!(buckets.charge_all_or_nothing(now, &[demand]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn opaque_attempts_stop_at_two_per_connection() -> Result<(), RuntimeError> {
+        let mut attempts = 0;
+        consume_opaque_connection_attempt(&mut attempts)?;
+        consume_opaque_connection_attempt(&mut attempts)?;
+        assert_eq!(attempts, MAX_OPAQUE_ATTEMPTS_PER_CONNECTION);
+        assert_eq!(
+            consume_opaque_connection_attempt(&mut attempts).err(),
+            Some(RuntimeError::LimitExceeded)
+        );
         Ok(())
     }
 }
