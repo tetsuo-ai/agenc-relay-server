@@ -1239,6 +1239,24 @@ impl ApplyReceipt {
 }
 
 impl DomainState {
+    /// Plans one revision-fenced account-service persistence checkpoint.
+    ///
+    /// The runtime must attach at least one validated account-service row to
+    /// this plan before staging it. The marker keeps the domain revision and
+    /// storage generation advancing together without inventing a domain
+    /// entity for an authentication transaction or sealed response.
+    pub fn plan_account_service_checkpoint(&self) -> Result<MutationPlan, DomainError> {
+        self.assemble_plan(PlanParts {
+            mutations: vec![Mutation::EventOnly],
+            events: Vec::new(),
+            recipients: RecipientSet::new(),
+            failures: Vec::new(),
+            message_batch: None,
+            charges: Vec::new(),
+            storage: StorageClass::Durable,
+        })
+    }
+
     /// Plans insertion of one account created by the later authentication stage.
     pub fn plan_account_created(&self, account: AccountState) -> Result<MutationPlan, DomainError> {
         if self.accounts.contains_key(&account.account_id) {

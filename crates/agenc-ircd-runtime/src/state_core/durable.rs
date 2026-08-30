@@ -21,8 +21,10 @@ use agenc_ircd_storage::{
     MAX_TRANSACTION_PLANS, PersistentRecordValue, ReadPlan, RecordMutation, RecordReference,
     RecoveredStorageState, SanctionRecordBody, SealedRecord, StorageAccountingLimits, StorageError,
     StorageMutationBatch, StorageMutationHead, StoragePort, StoredKey, TableId,
+    validate_record_plaintext,
 };
 use agenc_ircd_types::{AccountId, ChannelInstanceId, EntropySource, TransactionId};
+use zeroize::Zeroizing;
 
 use crate::RuntimeError;
 use crate::bridge::storage::read_blocking;
@@ -468,12 +470,81 @@ pub fn touched_entities(plan: &MutationPlan) -> BTreeSet<EntityId> {
         .collect()
 }
 
+/// One already encoded account-service row that must commit with a domain plan.
+///
+/// The storage plaintext remains zeroizing while StateCore gathers a batch.
+/// Its constructor accepts only the closed account-service record set and
+/// validates the complete table codec before the write can be staged.
+pub(crate) enum AccountServiceDurableWrite {
+    Put {
+        table: TableId,
+        key: StoredKey,
+        plaintext: Zeroizing<Vec<u8>>,
+    },
+    Delete {
+        table: TableId,
+        key: StoredKey,
+    },
+}
+
+impl AccountServiceDurableWrite {
+    pub(crate) fn put(
+        table: TableId,
+        key: StoredKey,
+        plaintext: Vec<u8>,
+    ) -> Result<Self, RuntimeError> {
+        if !account_service_table(table) {
+            return Err(RuntimeError::InvalidValue);
+        }
+        validate_record_plaintext(table, &key, DOMAIN_RECORD_SCHEMA, &plaintext)?;
+        Ok(Self::Put {
+            table,
+            key,
+            plaintext: Zeroizing::new(plaintext),
+        })
+    }
+
+    pub(crate) fn delete(table: TableId, key: StoredKey) -> Result<Self, RuntimeError> {
+        if !account_service_table(table) {
+            return Err(RuntimeError::InvalidValue);
+        }
+        agenc_ircd_storage::table_schema(table).validate_key(key.as_bytes())?;
+        Ok(Self::Delete { table, key })
+    }
+
+    pub(crate) fn revalidate(self) -> Result<Self, RuntimeError> {
+        match self {
+            Self::Put {
+                table,
+                key,
+                plaintext,
+            } => Self::put(table, key, plaintext.as_slice().to_vec()),
+            Self::Delete { table, key } => Self::delete(table, key),
+        }
+    }
+}
+
+const fn account_service_table(table: TableId) -> bool {
+    matches!(
+        table,
+        TableId::Account
+            | TableId::LoginIndex
+            | TableId::OpaqueRecord
+            | TableId::AuthTransaction
+            | TableId::RegistrationInvite
+            | TableId::Session
+            | TableId::RequestResult
+    )
+}
+
 /// One plan submitted for projection.
 pub struct PlanProjection<'a> {
     /// The domain plan.
     pub plan: &'a MutationPlan,
     /// Account-service response count permits this plan consumes.
     pub response_count_increment: u64,
+    /// Exact account-service rows inseparable from this plan.
+    pub(crate) account_service_writes: &'a [AccountServiceDurableWrite],
 }
 
 /// A batch ready for the storage owner plus the index changes to apply once
@@ -634,6 +705,9 @@ pub fn project_batch(
         for write in plan.plan.durable_writes() {
             projection.project_write(write, revision, entropy)?;
         }
+        for write in plan.account_service_writes {
+            projection.project_account_service_write(write, revision)?;
+        }
         if projection.mutations.len() > before {
             advancing = advancing.checked_add(1).ok_or(RuntimeError::Overflow)?;
         }
@@ -677,6 +751,28 @@ pub fn project_batch(
 }
 
 impl Projection<'_> {
+    fn project_account_service_write(
+        &mut self,
+        write: &AccountServiceDurableWrite,
+        revision: u64,
+    ) -> Result<(), RuntimeError> {
+        match write {
+            AccountServiceDurableWrite::Put {
+                table,
+                key,
+                plaintext,
+            } => {
+                if *table != TableId::LoginIndex
+                    && PersistentRecordValue::decode(*table, plaintext)?.revision() != revision
+                {
+                    return Err(RuntimeError::Storage(StorageError::StaleState));
+                }
+                self.put_plaintext(*table, key.clone(), plaintext.as_slice().to_vec())
+            }
+            AccountServiceDurableWrite::Delete { table, key } => self.delete(*table, key.clone()),
+        }
+    }
+
     fn project_write(
         &mut self,
         write: &DurableWrite,
@@ -879,9 +975,17 @@ impl Projection<'_> {
         key: StoredKey,
         value: PersistentRecordValue,
     ) -> Result<(), RuntimeError> {
+        self.put_plaintext(table, key, value.encode()?)
+    }
+
+    fn put_plaintext(
+        &mut self,
+        table: TableId,
+        key: StoredKey,
+        plaintext: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
         self.touch(table, &key)?;
         let before = self.index.existing(table, &key)?;
-        let plaintext = value.encode()?;
         let plaintext_bytes = plaintext.len();
         self.mutations.push(RecordMutation::put(
             table,
@@ -971,6 +1075,20 @@ mod tests {
             .map_err(|_| RuntimeError::InvalidValue)
     }
 
+    fn auth_transaction_write(revision: u64) -> Result<AccountServiceDurableWrite, RuntimeError> {
+        let key = StoredKey::new(vec![6; 16])?;
+        let value = PersistentRecordValue::new(
+            TableId::AuthTransaction,
+            1,
+            revision,
+            0,
+            Some(30),
+            Vec::new(),
+            vec![7; 32],
+        )?;
+        AccountServiceDurableWrite::put(TableId::AuthTransaction, key, value.encode()?)
+    }
+
     fn project_account(
         index: &DurableIndex,
         head: HeadCounters,
@@ -979,6 +1097,7 @@ mod tests {
         let projections = [PlanProjection {
             plan: &plan,
             response_count_increment: 0,
+            account_service_writes: &[],
         }];
         let mut entropy =
             ScriptedEntropy::new(Vec::new()).map_err(|_| RuntimeError::InvalidValue)?;
@@ -1043,6 +1162,96 @@ mod tests {
                 .and_then(|value| value.checked_add(8))
                 .and_then(|value| value.checked_sub(manifest_growth))
                 .ok_or(RuntimeError::Overflow)?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn account_service_checkpoint_advances_with_its_validated_row() -> Result<(), RuntimeError> {
+        let state = DomainState::new().map_err(|_| RuntimeError::InvalidValue)?;
+        let plan = state
+            .plan_account_service_checkpoint()
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        assert!(plan.durable_writes().is_empty());
+        let write = auth_transaction_write(plan.resulting_revision().get())?;
+        let projections = [PlanProjection {
+            plan: &plan,
+            response_count_increment: 1,
+            account_service_writes: std::slice::from_ref(&write),
+        }];
+        let mut entropy =
+            ScriptedEntropy::new(Vec::new()).map_err(|_| RuntimeError::InvalidValue)?;
+        let projected = project_batch(
+            TransactionId::from_bytes([10; 16]),
+            &projections,
+            &DurableIndex::new(),
+            &keys()?,
+            head(0, 0),
+            ceilings(),
+            &mut entropy,
+        )?
+        .ok_or(RuntimeError::InvalidValue)?;
+
+        assert_eq!(projected.advancing_plans(), 1);
+        assert_eq!(projected.mutation_count(), 1);
+        assert_eq!(projected.batch.resulting_state_generation(), 1);
+        assert_eq!(
+            projected.batch.resulting_account_service_response_count(),
+            1
+        );
+        assert_eq!(projected.updates().len(), 1);
+        assert_eq!(
+            projected
+                .batch
+                .mutations()
+                .first()
+                .map(RecordMutation::table),
+            Some(TableId::AuthTransaction)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn account_service_projection_rejects_wrong_table_and_revision() -> Result<(), RuntimeError> {
+        assert_eq!(
+            AccountServiceDurableWrite::put(
+                TableId::Channel,
+                StoredKey::new(vec![8; 16])?,
+                vec![1],
+            )
+            .err(),
+            Some(RuntimeError::InvalidValue)
+        );
+
+        let state = DomainState::new().map_err(|_| RuntimeError::InvalidValue)?;
+        let plan = state
+            .plan_account_service_checkpoint()
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let stale = auth_transaction_write(
+            plan.resulting_revision()
+                .get()
+                .checked_add(1)
+                .ok_or(RuntimeError::Overflow)?,
+        )?;
+        let projections = [PlanProjection {
+            plan: &plan,
+            response_count_increment: 0,
+            account_service_writes: std::slice::from_ref(&stale),
+        }];
+        let mut entropy =
+            ScriptedEntropy::new(Vec::new()).map_err(|_| RuntimeError::InvalidValue)?;
+        assert_eq!(
+            project_batch(
+                TransactionId::from_bytes([11; 16]),
+                &projections,
+                &DurableIndex::new(),
+                &keys()?,
+                head(0, 0),
+                ceilings(),
+                &mut entropy,
+            )
+            .err(),
+            Some(RuntimeError::Storage(StorageError::StaleState))
         );
         Ok(())
     }
@@ -1143,6 +1352,7 @@ mod tests {
         let projections = [PlanProjection {
             plan: &plan,
             response_count_increment: 1,
+            account_service_writes: &[],
         }];
         let overflowing = HeadCounters {
             account_service_response_count: u64::MAX,

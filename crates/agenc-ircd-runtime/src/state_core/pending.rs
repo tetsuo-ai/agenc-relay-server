@@ -12,7 +12,9 @@ use agenc_ircd_types::{MonotonicTick, TransactionId};
 
 use crate::RuntimeError;
 use crate::connection::sink::ConnectionGeneration;
-use crate::state_core::durable::{EntityId, RetainedProjection, touched_entities};
+use crate::state_core::durable::{
+    AccountServiceDurableWrite, EntityId, RetainedProjection, touched_entities,
+};
 use crate::state_core::fanout::FanoutReservation;
 
 /// Plans one batch may gather (spec line 4152).
@@ -34,22 +36,25 @@ pub(super) struct StagedPlan {
     fanout: FanoutReservation,
     origin: Option<StagedOrigin>,
     response_count_increment: u64,
+    account_service_writes: Vec<AccountServiceDurableWrite>,
 }
 
 impl StagedPlan {
-    /// Binds a plan to the fanout it reserved and the connection it came from.
+    /// Binds one account-service record set to the plan that authorizes it.
     #[must_use]
-    pub(super) fn new(
+    pub(super) fn with_account_service_writes(
         plan: MutationPlan,
         fanout: FanoutReservation,
         origin: Option<StagedOrigin>,
         response_count_increment: u64,
+        account_service_writes: Vec<AccountServiceDurableWrite>,
     ) -> Self {
         Self {
             plan,
             fanout,
             origin,
             response_count_increment,
+            account_service_writes,
         }
     }
 
@@ -69,6 +74,12 @@ impl StagedPlan {
     #[must_use]
     pub(super) const fn response_count_increment(&self) -> u64 {
         self.response_count_increment
+    }
+
+    /// Borrows the inseparable account-service rows.
+    #[must_use]
+    pub(super) fn account_service_writes(&self) -> &[AccountServiceDurableWrite] {
+        &self.account_service_writes
     }
 
     /// Splits the staged plan into its domain plan and fanout reservation.
@@ -242,7 +253,13 @@ mod tests {
         let plan = state
             .plan_account_created(account)
             .map_err(|_| RuntimeError::InvalidValue)?;
-        Ok(StagedPlan::new(plan, FanoutReservation::empty(), None, 0))
+        Ok(StagedPlan::with_account_service_writes(
+            plan,
+            FanoutReservation::empty(),
+            None,
+            0,
+            Vec::new(),
+        ))
     }
 
     #[test]

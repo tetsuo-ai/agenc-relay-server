@@ -43,8 +43,8 @@ use crate::budget::MemoryBudget;
 use crate::cancel::CancellationToken;
 use crate::connection::sink::ConnectionGeneration;
 use crate::state_core::durable::{
-    AccountingCeilings, DurableIndex, HeadCounters, KeyDeriver, PlanProjection, project_batch,
-    read_back,
+    AccountServiceDurableWrite, AccountingCeilings, DurableIndex, HeadCounters, KeyDeriver,
+    PlanProjection, project_batch, read_back,
 };
 use crate::state_core::fanout::{
     FanoutCommitReport, FanoutFrame, FanoutRefused, FanoutRequest, FanoutReservation, FanoutTarget,
@@ -547,6 +547,30 @@ impl StateCoreContext {
         origin: Option<StagedOrigin>,
         response_count_increment: u64,
     ) -> Result<StageAccepted, StageRefused> {
+        self.stage_durable_with_account_service(
+            plan,
+            request,
+            origin,
+            response_count_increment,
+            Vec::new(),
+        )
+    }
+
+    /// Stages one account-service record set behind the same durable barrier
+    /// as its domain transition and sealed response count.
+    pub(crate) fn stage_durable_with_account_service(
+        &mut self,
+        plan: MutationPlan,
+        request: FanoutRequest,
+        origin: Option<StagedOrigin>,
+        response_count_increment: u64,
+        account_service_writes: Vec<AccountServiceDurableWrite>,
+    ) -> Result<StageAccepted, StageRefused> {
+        let account_service_writes = account_service_writes
+            .into_iter()
+            .map(AccountServiceDurableWrite::revalidate)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| StageRefused::Domain(DomainError::InvariantViolation))?;
         if self.quiescing {
             return Err(StageRefused::Quiescing);
         }
@@ -556,12 +580,21 @@ impl StateCoreContext {
         let reservation = self
             .reserve_fanout(&request)
             .map_err(StageRefused::Fanout)?;
-        if plan.durable_writes().is_empty() && self.pending.is_none() {
+        if plan.durable_writes().is_empty()
+            && account_service_writes.is_empty()
+            && self.pending.is_none()
+        {
             let receipt = self.apply_plan(plan).map_err(StageRefused::Domain)?;
             reservation.commit();
             return Ok(StageAccepted::AppliedInStep(Box::new(receipt)));
         }
-        let staged = StagedPlan::new(plan, reservation, origin, response_count_increment);
+        let staged = StagedPlan::with_account_service_writes(
+            plan,
+            reservation,
+            origin,
+            response_count_increment,
+            account_service_writes,
+        );
         let now = self.now();
         match self.pending.take() {
             None => {
@@ -651,6 +684,7 @@ impl StateCoreContext {
             .map(|staged| PlanProjection {
                 plan: staged.plan(),
                 response_count_increment: staged.response_count_increment(),
+                account_service_writes: staged.account_service_writes(),
             })
             .collect();
         let projected = project_batch(

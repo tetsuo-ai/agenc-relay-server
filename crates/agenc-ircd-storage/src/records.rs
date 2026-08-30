@@ -4,6 +4,7 @@ use std::cmp::Ordering;
 
 use agenc_ircd_crypto::StorageDigest;
 use agenc_ircd_types::{AccountId, ChannelName, Nickname, RecoveryEpoch};
+use zeroize::Zeroizing;
 
 use crate::codec::{Decoder, Encoder};
 use crate::domain_records::{
@@ -506,7 +507,7 @@ pub struct PersistentRecordValue {
     generation: u64,
     expires_at: Option<u64>,
     references: Vec<RecordReference>,
-    body: Vec<u8>,
+    body: Zeroizing<Vec<u8>>,
 }
 
 impl PersistentRecordValue {
@@ -551,7 +552,7 @@ impl PersistentRecordValue {
             generation,
             expires_at,
             references,
-            body,
+            body: Zeroizing::new(body),
         })
     }
 
