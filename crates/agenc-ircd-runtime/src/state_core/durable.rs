@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use agenc_ircd_admin::AdminAuditEvent;
 use agenc_ircd_crypto::{
     DatabaseBinding, OpenedStoragePlaintext, StorageMasterKey, StorageTable, derive_storage_index,
 };
@@ -751,6 +752,65 @@ pub fn project_batch(
     }))
 }
 
+/// Projects one signed administrative audit append without advancing the
+/// logical protocol-state generation.
+pub(crate) fn project_admin_audit_event(
+    transaction_id: TransactionId,
+    event: &AdminAuditEvent,
+    index: &DurableIndex,
+    keys: &KeyDeriver,
+    head: HeadCounters,
+    ceilings: AccountingCeilings,
+) -> Result<ProjectedBatch, RuntimeError> {
+    let sequence = event.tbs().audit_sequence;
+    let revision = sequence.checked_add(1).ok_or(RuntimeError::Overflow)?;
+    let key = StoredKey::new(sequence.to_be_bytes().to_vec())?;
+    let value = PersistentRecordValue::new(
+        TableId::Audit,
+        LIVE_RECORD_KIND,
+        revision,
+        0,
+        None,
+        Vec::new(),
+        event.encode().map_err(|_| RuntimeError::InvalidValue)?,
+    )?;
+    let mut projection = Projection {
+        index,
+        keys,
+        mutations: Vec::new(),
+        updates: Vec::new(),
+        touched: BTreeSet::new(),
+    };
+    projection.put(TableId::Audit, key, value)?;
+    let batch = StorageMutationBatch::new(
+        StorageMutationHead {
+            transaction_id,
+            expected_storage_commit_sequence: head.storage_commit_sequence,
+            expected_state_generation: head.state_generation,
+            resulting_state_generation: head.state_generation,
+            state_advancing_plan_count: 0,
+            expected_account_service_response_count: head.account_service_response_count,
+            resulting_account_service_response_count: head.account_service_response_count,
+        },
+        1,
+        StorageAccountingLimits {
+            current_logical_database_bytes: head.logical_database_bytes,
+            current_backup_stream_bytes: head.backup_stream_bytes,
+            database_max_bytes: ceilings.database_max_bytes,
+            backup_max_bytes: ceilings.backup_max_bytes,
+        },
+        projection.mutations,
+    )?;
+    Ok(ProjectedBatch {
+        resulting_logical_database_bytes: batch.resulting_logical_database_bytes(),
+        resulting_backup_stream_bytes: batch.resulting_backup_stream_bytes(),
+        resulting_account_service_response_count: head.account_service_response_count,
+        batch,
+        updates: projection.updates,
+        advancing_plans: 0,
+    })
+}
+
 impl Projection<'_> {
     fn project_account_service_write(
         &mut self,
@@ -1029,7 +1089,8 @@ impl Projection<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agenc_ircd_crypto::{LoginIndexKey, StorageDigest};
+    use agenc_ircd_admin::{AdminAuditEventTbs, AdminAuditPhase, AdminCommandTbs, AdminSessionId};
+    use agenc_ircd_crypto::{Ed25519SecretKey, LoginIndexKey, StorageDigest, audit_signing_key_id};
     use agenc_ircd_domain::{AccountState, DomainState};
     use agenc_ircd_storage::{
         LOGIN_INDEX_KEY_STATE_KEY, LoginIndexKeyState, MIN_SEALED_RECORD_BYTES,
@@ -1037,7 +1098,7 @@ mod tests {
     };
     use agenc_ircd_testkit::{ScriptedEntropy, account_id};
     use agenc_ircd_types::{
-        DatabaseId, Generation, NetworkId, Revision, ServerId, ServerIncarnation,
+        DatabaseId, Generation, NetworkId, OperatorId, Revision, ServerId, ServerIncarnation,
     };
 
     fn binding() -> DatabaseBinding {
@@ -1077,6 +1138,75 @@ mod tests {
         state
             .plan_account_created(account)
             .map_err(|_| RuntimeError::InvalidValue)
+    }
+
+    fn audit_event() -> Result<AdminAuditEvent, RuntimeError> {
+        let operator_key = Ed25519SecretKey::from_bytes([21; 32]);
+        let audit_key = Ed25519SecretKey::from_bytes([22; 32]);
+        let command = AdminCommandTbs::new(
+            NetworkId::from_bytes([1; 32]),
+            ServerId::from_bytes([2; 16]),
+            AdminSessionId::from_bytes([23; 16]),
+            0,
+            None,
+            b"MOTD",
+        )
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        let operator_signature = command
+            .sign(&operator_key)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let key_id = *audit_signing_key_id(audit_key.public_key().as_bytes())
+            .map_err(|_| RuntimeError::InvalidValue)?
+            .as_bytes();
+        AdminAuditEvent::sign(
+            AdminAuditEventTbs {
+                network_id: NetworkId::from_bytes([1; 32]),
+                server_id: ServerId::from_bytes([2; 16]),
+                audit_signing_key_id: key_id,
+                audit_sequence: 0,
+                created_at: 50,
+                operator_id: OperatorId::from_bytes([24; 16]),
+                command_tbs: command,
+                operator_signature,
+                phase: AdminAuditPhase::Observed,
+                previous_event_hash: [0; 32],
+            },
+            &audit_key,
+        )
+        .map_err(|_| RuntimeError::InvalidValue)
+    }
+
+    #[test]
+    fn audit_projection_does_not_advance_protocol_state() -> Result<(), RuntimeError> {
+        let current = HeadCounters {
+            state_generation: 9,
+            storage_commit_sequence: 4,
+            account_service_response_count: 3,
+            logical_database_bytes: 0,
+            backup_stream_bytes: 0,
+        };
+        let projected = project_admin_audit_event(
+            TransactionId::from_bytes([25; 16]),
+            &audit_event()?,
+            &DurableIndex::new(),
+            &keys()?,
+            current,
+            ceilings(),
+        )?;
+        assert_eq!(projected.advancing_plans(), 0);
+        assert_eq!(projected.batch.expected_state_generation(), 9);
+        assert_eq!(projected.batch.resulting_state_generation(), 9);
+        assert_eq!(projected.batch.state_advancing_plan_count(), 0);
+        assert_eq!(projected.batch.plan_count(), 1);
+        let mutation = projected
+            .batch
+            .mutations()
+            .first()
+            .ok_or(RuntimeError::InvalidValue)?;
+        assert_eq!(mutation.table(), TableId::Audit);
+        assert_eq!(mutation.key().as_bytes(), 0_u64.to_be_bytes());
+        assert_eq!(projected.updates().len(), 1);
+        Ok(())
     }
 
     fn auth_transaction_write(revision: u64) -> Result<AccountServiceDurableWrite, RuntimeError> {

@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use agenc_ircd_admin::{
-    AdminAuditCheckpoint, AdminAuditEvent, AdminAuditPhase, AdminSessionBinding, AuditChainCursor,
-    OperatorRegistry,
+    AdminAuditCheckpoint, AdminAuditEvent, AdminAuditEventTbs, AdminAuditPhase, AdminCommandEvent,
+    AdminSessionBinding, AuditChainCursor, OperatorRegistry,
 };
 use agenc_ircd_config::AuditTrustManifestEntry;
 use agenc_ircd_crypto::{Ed25519PublicKey, Ed25519SecretKey, audit_signing_key_id};
@@ -12,6 +12,7 @@ use agenc_ircd_storage::{
     PersistentRecordValue, ReadPlan, SealedRecord, StoragePort, StoredKey, TableId,
     validate_record_plaintext,
 };
+use agenc_ircd_types::OperatorId;
 
 use crate::RuntimeError;
 use crate::state_core::durable::{DOMAIN_RECORD_SCHEMA, KeyDeriver};
@@ -22,6 +23,8 @@ const RANGE_READ_LIMIT: u16 = 4_096;
 pub(crate) struct AuditAuthority {
     signing_key: Ed25519SecretKey,
     signing_key_id: [u8; 32],
+    signing_not_before: u64,
+    signing_not_after: u64,
     cursor: AuditChainCursor,
     next_checkpoint_sequence: u64,
     previous_checkpoint_hash: [u8; 32],
@@ -45,8 +48,8 @@ impl AuditAuthority {
         let signing_key_id = *audit_signing_key_id(signing_key.public_key().as_bytes())
             .map_err(|_| RuntimeError::InvalidValue)?
             .as_bytes();
-        let current = trust.resolve(signing_key_id, now_unix_seconds)?;
-        if current != signing_key.public_key() {
+        let current = trust.trusted(signing_key_id, now_unix_seconds)?;
+        if current.public_key != signing_key.public_key() {
             return Err(RuntimeError::InvalidValue);
         }
 
@@ -59,6 +62,8 @@ impl AuditAuthority {
         Ok(Self {
             signing_key,
             signing_key_id,
+            signing_not_before: current.not_before,
+            signing_not_after: current.not_after,
             cursor,
             next_checkpoint_sequence,
             previous_checkpoint_hash,
@@ -76,6 +81,48 @@ impl AuditAuthority {
         self.reconciled && key_matches && checkpoint_position_valid && event_position_valid
     }
 
+    pub(crate) fn prepare_event(
+        &self,
+        binding: AdminSessionBinding,
+        operator_id: OperatorId,
+        command: &AdminCommandEvent,
+        phase: AdminAuditPhase,
+        created_at: u64,
+    ) -> Result<AdminAuditEvent, RuntimeError> {
+        if !self.reconciled
+            || created_at < self.signing_not_before
+            || created_at >= self.signing_not_after
+            || command.tbs.network_id() != binding.network_id
+            || command.tbs.server_id() != binding.server_id
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
+        AdminAuditEvent::sign(
+            AdminAuditEventTbs {
+                network_id: binding.network_id,
+                server_id: binding.server_id,
+                audit_signing_key_id: self.signing_key_id,
+                audit_sequence: self.cursor.next_sequence,
+                created_at,
+                operator_id,
+                command_tbs: command.tbs.clone(),
+                operator_signature: command.operator_signature,
+                phase,
+                previous_event_hash: self.cursor.previous_event_hash,
+            },
+            &self.signing_key,
+        )
+        .map_err(|_| RuntimeError::InvalidValue)
+    }
+
+    pub(crate) fn commit_event(&mut self, event: &AdminAuditEvent) -> Result<(), RuntimeError> {
+        self.cursor = self
+            .cursor
+            .advance(event)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(super) fn empty_for_test() -> Result<Self, RuntimeError> {
         let signing_key = Ed25519SecretKey::from_bytes([99; 32]);
@@ -86,6 +133,8 @@ impl AuditAuthority {
         Ok(Self {
             signing_key,
             signing_key_id,
+            signing_not_before: 0,
+            signing_not_after: u64::MAX,
             cursor: AuditChainCursor::genesis(),
             next_checkpoint_sequence: 0,
             previous_checkpoint_hash: [0; 32],
@@ -137,11 +186,15 @@ impl AuditTrust {
     }
 
     fn resolve(&self, key_id: [u8; 32], created_at: u64) -> Result<Ed25519PublicKey, RuntimeError> {
+        Ok(self.trusted(key_id, created_at)?.public_key)
+    }
+
+    fn trusted(&self, key_id: [u8; 32], created_at: u64) -> Result<TrustedAuditKey, RuntimeError> {
         let key = self.keys.get(&key_id).ok_or(RuntimeError::InvalidValue)?;
         if created_at < key.not_before || created_at >= key.not_after {
             return Err(RuntimeError::InvalidValue);
         }
-        Ok(key.public_key)
+        Ok(*key)
     }
 }
 

@@ -9,6 +9,7 @@
 //! delegated to a [`CommandRouter`] so registration, channel, and admin
 //! composition plug in without touching the loop or the durable path.
 
+mod admin;
 pub mod durable;
 pub mod fanout;
 pub mod inbox;
@@ -31,6 +32,7 @@ use agenc_ircd_types::{
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
+pub(crate) use admin::{AdminCoreFailure, AdminCoreInbox, AdminCorePort, admin_core_channel};
 pub use pending::{GATHER_WINDOW_MILLIS, MAX_BATCH_PLANS, StagedOrigin};
 
 use crate::RuntimeError;
@@ -45,9 +47,10 @@ use crate::bridge::{
 use crate::budget::MemoryBudget;
 use crate::cancel::CancellationToken;
 use crate::connection::sink::ConnectionGeneration;
+use crate::state_core::admin::{AdminCoreRequest, AdminCoreResult};
 use crate::state_core::durable::{
     AccountServiceDurableWrite, AccountingCeilings, DurableIndex, HeadCounters, KeyDeriver,
-    PlanProjection, project_batch, read_back,
+    PlanProjection, RetainedProjection, project_admin_audit_event, project_batch, read_back,
 };
 use crate::state_core::fanout::{
     FanoutCommitReport, FanoutFrame, FanoutRefused, FanoutRequest, FanoutReservation, FanoutTarget,
@@ -934,6 +937,15 @@ fn next_transaction_id(entropy: &mut dyn EntropySource) -> Result<TransactionId,
 pub struct StateCore {
     context: StateCoreContext,
     router: Box<dyn CommandRouter>,
+    admin_receiver: mpsc::Receiver<AdminCoreRequest>,
+    admin_open: bool,
+    admin_pending: Option<PendingAdminCommit>,
+}
+
+struct PendingAdminCommit {
+    transaction_id: TransactionId,
+    retained: RetainedProjection,
+    reply: tokio::sync::oneshot::Sender<AdminCoreResult>,
 }
 
 #[derive(Default)]
@@ -991,6 +1003,8 @@ impl StateCore {
             .wall
             .utc_now()
             .unwrap_or(UtcSecond::from_unix_seconds(0));
+        let (unused_admin, admin_receiver) = mpsc::channel(1);
+        drop(unused_admin);
         let mut state = Self {
             context: StateCoreContext {
                 domain: inputs.reconstruction.domain,
@@ -1016,9 +1030,26 @@ impl StateCore {
                 quiescing: false,
             },
             router: inputs.router,
+            admin_receiver,
+            admin_open: false,
+            admin_pending: None,
         };
         state.router.startup(&mut state.context);
         state
+    }
+
+    /// Installs the sole private administrative receiver before the actor
+    /// starts. A second installation is rejected.
+    pub(crate) fn install_admin_inbox(
+        &mut self,
+        inbox: AdminCoreInbox,
+    ) -> Result<(), RuntimeError> {
+        if self.admin_open || self.admin_pending.is_some() {
+            return Err(RuntimeError::InvalidValue);
+        }
+        self.admin_receiver = inbox.into_receiver();
+        self.admin_open = true;
+        Ok(())
     }
 
     /// Borrows the context.
@@ -1056,6 +1087,107 @@ impl StateCore {
                 sink.begin_slow_consumer_close();
             }
             let _acknowledgement = sink.shutdown_after_flush();
+        }
+    }
+
+    fn storage_in_flight(&self) -> bool {
+        self.context.in_flight() || self.admin_pending.is_some()
+    }
+
+    fn step_admin_request(&mut self, request: AdminCoreRequest) -> Option<StateCoreExit> {
+        let (event, reply) = request.into_parts();
+        if self.context.quiescing {
+            let _sent = reply.send(Err(AdminCoreFailure::Quiescing));
+            return None;
+        }
+        if self.storage_in_flight() || self.context.pending_len() != 0 {
+            let _sent = reply.send(Err(AdminCoreFailure::Busy));
+            return None;
+        }
+        let Ok(transaction_id) = next_transaction_id(self.context.entropy.as_mut()) else {
+            return Some(StateCoreExit::Corrupt(CorruptionCause::ProjectionFailed));
+        };
+        let projected = project_admin_audit_event(
+            transaction_id,
+            &event,
+            &self.context.index,
+            &self.context.keys,
+            self.context.head,
+            self.context.ceilings,
+        );
+        let projected = match projected {
+            Ok(projected) => projected,
+            Err(RuntimeError::Storage(StorageError::LimitExceeded)) => {
+                let _sent = reply.send(Err(AdminCoreFailure::StorageUnavailable));
+                return None;
+            }
+            Err(_) => return Some(StateCoreExit::Corrupt(CorruptionCause::ProjectionFailed)),
+        };
+        let (batch, retained) = projected.into_parts();
+        match self.context.bridge.submit(batch) {
+            Ok(submitted) if submitted == transaction_id => {
+                self.admin_pending = Some(PendingAdminCommit {
+                    transaction_id,
+                    retained,
+                    reply,
+                });
+                None
+            }
+            Ok(_) => Some(StateCoreExit::Indeterminate(
+                IndeterminateCause::TransactionMismatch,
+            )),
+            Err(SubmitError::Storage(_)) => {
+                let _sent = reply.send(Err(AdminCoreFailure::StorageUnavailable));
+                None
+            }
+            Err(SubmitError::Bridge(failure)) => Some(StateCoreExit::Indeterminate(
+                IndeterminateCause::Bridge(failure),
+            )),
+        }
+    }
+
+    async fn step_admin_completion(
+        &mut self,
+        message: StorageCompletionMessage,
+    ) -> Option<StateCoreExit> {
+        let Some(pending) = self.admin_pending.take() else {
+            return Some(StateCoreExit::Indeterminate(
+                IndeterminateCause::UnexpectedCompletion,
+            ));
+        };
+        if pending.transaction_id != message.transaction_id {
+            return Some(StateCoreExit::Indeterminate(
+                IndeterminateCause::TransactionMismatch,
+            ));
+        }
+        match message.outcome {
+            CommitOutcome::Committed(receipt) => {
+                if receipt.transaction_id != pending.transaction_id {
+                    return Some(StateCoreExit::Indeterminate(
+                        IndeterminateCause::TransactionMismatch,
+                    ));
+                }
+                self.context.head = pending.retained.advance(&receipt);
+                self.context.index.apply(pending.retained.updates());
+                self.context.counters.batches_committed =
+                    self.context.counters.batches_committed.saturating_add(1);
+                if let Some(exit) = self.refresh_index().await {
+                    return Some(exit);
+                }
+                let _sent = pending.reply.send(Ok(()));
+                self.step_batch()
+            }
+            CommitOutcome::Rejected(_error) => {
+                self.context.counters.batches_rejected =
+                    self.context.counters.batches_rejected.saturating_add(1);
+                let _sent = pending
+                    .reply
+                    .send(Err(AdminCoreFailure::StorageUnavailable));
+                self.step_batch()
+            }
+            CommitOutcome::Indeterminate => Some(StateCoreExit::Indeterminate(
+                IndeterminateCause::StorageIndeterminate,
+            )),
         }
     }
 
@@ -1147,6 +1279,9 @@ impl StateCore {
 
     /// Drives the pending batch and routes any rejections.
     fn step_batch(&mut self) -> Option<StateCoreExit> {
+        if self.admin_pending.is_some() {
+            return None;
+        }
         match self.context.drive_batch() {
             Ok(BatchStep::Rejected(rejections)) => {
                 self.report_rejections(rejections);
@@ -1185,6 +1320,9 @@ impl StateCore {
         &mut self,
         message: StorageCompletionMessage,
     ) -> Option<StateCoreExit> {
+        if self.admin_pending.is_some() {
+            return self.step_admin_completion(message).await;
+        }
         match self.context.consume_completion(message) {
             Ok(BatchStep::Rejected(rejections)) => self.report_rejections(rejections),
             Ok(BatchStep::AppliedInStep(count)) => {
@@ -1237,7 +1375,7 @@ impl StateCore {
         let mut lifecycle_replies = PendingLifecycleReplies::default();
         let mut shutdown_connections_started = false;
         loop {
-            let in_flight = self.context.in_flight();
+            let in_flight = self.storage_in_flight();
             let safe_point = !in_flight && self.context.pending_len() == 0;
             if safe_point {
                 if lifecycle_target.is_some_and(|phase| phase >= LifecyclePhase::Drain)
@@ -1267,7 +1405,7 @@ impl StateCore {
                     cancellation_open = false;
                     cancellation_pending = true;
                     self.context.quiescing = true;
-                    (!in_flight).then_some(StateCoreExit::Cancelled)
+                    safe_point.then_some(StateCoreExit::Cancelled)
                 },
                 request = lifecycle.recv(), if lifecycle_open => match request {
                     Some(request) => {
@@ -1296,6 +1434,13 @@ impl StateCore {
                     }
                     None => {
                         lifecycle_open = false;
+                        None
+                    }
+                },
+                request = self.admin_receiver.recv(), if self.admin_open => match request {
+                    Some(request) => self.step_admin_request(request),
+                    None => {
+                        self.admin_open = false;
                         None
                     }
                 },
