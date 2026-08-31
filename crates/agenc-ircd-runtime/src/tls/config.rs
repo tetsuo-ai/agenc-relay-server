@@ -18,6 +18,8 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 
+use agenc_ircd_crypto::{SemanticHashDomain, semantic_digest};
+
 use crate::RuntimeError;
 use crate::purpose::ListenerPurpose;
 use crate::sync::Arc;
@@ -304,6 +306,19 @@ pub async fn load_certificate_chain(path: std::path::PathBuf) -> Result<CertChai
     CertChain::parse(&document)
 }
 
+/// Reads a certificate document once and returns both its parsed chain and
+/// its reload content fingerprint.
+pub(crate) async fn load_certificate_chain_material(
+    path: std::path::PathBuf,
+) -> Result<(CertChain, [u8; 32]), TlsConfigError> {
+    let document = tokio::task::spawn_blocking(move || read_bounded(&path))
+        .await
+        .map_err(|_| TlsConfigError::InvalidCertificate)??;
+    let fingerprint = semantic_digest(SemanticHashDomain::PolicyId, &document)
+        .map_err(|_| TlsConfigError::InvalidCertificate)?;
+    Ok((CertChain::parse(&document)?, *fingerprint.as_bytes()))
+}
+
 /// Reads a private client-CA bundle on the blocking pool and builds the
 /// endpoint-specific trust store. Public WebPKI roots are never added.
 pub async fn load_trust_store(path: std::path::PathBuf) -> Result<TrustStore, TlsConfigError> {
@@ -311,6 +326,19 @@ pub async fn load_trust_store(path: std::path::PathBuf) -> Result<TrustStore, Tl
         .await
         .map_err(|_| TlsConfigError::InvalidTrustStore)??;
     TrustStore::parse(&document)
+}
+
+/// Reads a private CA document once and returns its parsed store and reload
+/// content fingerprint.
+pub(crate) async fn load_trust_store_material(
+    path: std::path::PathBuf,
+) -> Result<(TrustStore, [u8; 32]), TlsConfigError> {
+    let document = tokio::task::spawn_blocking(move || read_bounded(&path))
+        .await
+        .map_err(|_| TlsConfigError::InvalidTrustStore)??;
+    let fingerprint = semantic_digest(SemanticHashDomain::PolicyId, &document)
+        .map_err(|_| TlsConfigError::InvalidTrustStore)?;
+    Ok((TrustStore::parse(&document)?, *fingerprint.as_bytes()))
 }
 
 /// A client configuration on the same provider, for tests and native

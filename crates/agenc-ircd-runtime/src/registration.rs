@@ -32,6 +32,7 @@ use crate::state_core::timers::{TimedId, TimerEntry, TimerKind};
 use crate::state_core::{
     CommandRouter, RouteOutcome, StageAccepted, StagedOrigin, StateCoreContext,
 };
+use crate::sync::Arc;
 
 const MAX_PENDING_ACTIONS: usize = 64;
 const CAPABILITY_LINE_BYTES: usize = 512;
@@ -47,6 +48,8 @@ pub struct RegistrationRouterConfig {
     pub server_prefix: String,
     /// Public network label.
     pub display_name: String,
+    /// Whether newly admitted unauthenticated registrations may complete.
+    pub allow_guests: bool,
     /// Optional configured connection PASS token.
     pub access_token: Option<Zeroizing<[u8; 32]>>,
     /// Coordinator-only account-service keys and route identity.
@@ -57,7 +60,8 @@ struct RegistrationRuntimeConfig {
     network_id: NetworkId,
     server_id: ServerId,
     server_prefix: String,
-    display_name: String,
+    display_name: Arc<str>,
+    allow_guests: bool,
     access_token: Option<Zeroizing<[u8; 32]>>,
 }
 
@@ -73,6 +77,7 @@ struct ConnectionState {
     nickname: Option<String>,
     departure_reason: Option<String>,
     deadline: DeadlineState,
+    allow_guests: bool,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -117,6 +122,7 @@ impl RegistrationRouter {
             server_id,
             server_prefix,
             display_name,
+            allow_guests,
             access_token,
             account_service,
         } = config;
@@ -129,7 +135,8 @@ impl RegistrationRouter {
                 network_id,
                 server_id,
                 server_prefix,
-                display_name,
+                display_name: Arc::from(display_name),
+                allow_guests,
                 access_token,
             },
             advertised,
@@ -579,6 +586,7 @@ impl RegistrationRouter {
         )
     }
 
+    // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=registration commit binds one captured guest policy session seed capability set and welcome handoff at the existing atomic boundary
     fn commit_registration(
         &mut self,
         context: &mut StateCoreContext,
@@ -591,6 +599,18 @@ impl RegistrationRouter {
         let authenticated_account = self
             .accounts
             .authenticated_binding(connection, context.now())?;
+        if authenticated_account.is_none() && !state.allow_guests {
+            return self.registration_event(
+                context,
+                connection,
+                state,
+                RegistrationEvent::RegistrationCommitted {
+                    generation: event_generation,
+                    accepted: false,
+                    authenticated: false,
+                },
+            );
+        }
         let seed = self.session_seed(context, state, nickname, realname, authenticated_account)?;
         let bound = BoundSession {
             session_id: seed.session_id,
@@ -863,22 +883,61 @@ impl RegistrationRouter {
                     )
                     .map_err(|_| RuntimeError::InvalidValue)?,
                 ),
-                WelcomeStep::Motd => frames.push(
-                    numeric_reply(
-                        &self.config.server_prefix,
-                        422,
-                        target,
-                        &[],
-                        Some("MOTD File is missing"),
-                    )
-                    .map_err(|_| RuntimeError::InvalidValue)?,
-                ),
+                WelcomeStep::Motd => self.append_motd(context, target, &mut frames)?,
                 WelcomeStep::RecoveryEpoch
                 | WelcomeStep::AccountState
                 | WelcomeStep::RegistrationBatches => {}
             }
         }
         Ok(frames)
+    }
+
+    fn append_motd(
+        &self,
+        context: &StateCoreContext,
+        target: &str,
+        frames: &mut Vec<WireMessage>,
+    ) -> Result<(), RuntimeError> {
+        let Some(motd) = context.motd() else {
+            frames.push(
+                numeric_reply(
+                    &self.config.server_prefix,
+                    422,
+                    target,
+                    &[],
+                    Some("MOTD File is missing"),
+                )
+                .map_err(|_| RuntimeError::InvalidValue)?,
+            );
+            return Ok(());
+        };
+        frames.push(
+            numeric_reply(
+                &self.config.server_prefix,
+                375,
+                target,
+                &[],
+                Some("Message of the day"),
+            )
+            .map_err(|_| RuntimeError::InvalidValue)?,
+        );
+        for line in motd.lines() {
+            frames.push(
+                numeric_reply(&self.config.server_prefix, 372, target, &[], Some(line))
+                    .map_err(|_| RuntimeError::InvalidValue)?,
+            );
+        }
+        frames.push(
+            numeric_reply(
+                &self.config.server_prefix,
+                376,
+                target,
+                &[],
+                Some("End of MOTD"),
+            )
+            .map_err(|_| RuntimeError::InvalidValue)?,
+        );
+        Ok(())
     }
 
     fn welcome_numerics(&self, target: &str) -> Result<[WireMessage; 4], RuntimeError> {
@@ -1308,6 +1367,7 @@ impl CommandRouter for RegistrationRouter {
                     nickname: None,
                     departure_reason: None,
                     deadline: DeadlineState::Registration,
+                    allow_guests: self.config.allow_guests,
                 },
             );
         } else {
@@ -1338,6 +1398,23 @@ impl CommandRouter for RegistrationRouter {
                 .unwrap_or("connection closed");
             self.queue_session_close(context, bound, reason);
         }
+    }
+
+    fn config_reloaded(
+        &mut self,
+        _context: &mut StateCoreContext,
+        snapshot: &crate::runtime_config::RuntimeConfigSnapshot,
+    ) {
+        self.config.display_name = snapshot.display_name();
+        self.config.allow_guests = snapshot.account_policy().allow_guests;
+        self.accounts.reload_policy(snapshot.account_policy());
+    }
+
+    fn reload_ready(&self) -> bool {
+        self.pending_registrations.is_empty()
+            && self.pending_closures.is_empty()
+            && self.accounts.reload_ready()
+            && self.commands.reload_ready()
     }
 
     fn batch_applied(&mut self, context: &mut StateCoreContext, _plan_count: usize) {

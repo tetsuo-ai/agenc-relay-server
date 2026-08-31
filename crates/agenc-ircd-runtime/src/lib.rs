@@ -28,6 +28,7 @@ pub mod offline;
 pub mod purpose;
 mod query_render;
 pub mod registration;
+pub mod runtime_config;
 pub mod state_core;
 pub mod supervisor;
 mod sync;

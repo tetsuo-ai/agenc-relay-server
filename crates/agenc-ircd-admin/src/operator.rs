@@ -102,7 +102,7 @@ pub enum PeerIdentity {
 }
 
 /// The closed set of configured operators with uniqueness proven at build.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OperatorRegistry {
     records: Vec<OperatorRecord>,
 }

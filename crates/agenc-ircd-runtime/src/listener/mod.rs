@@ -28,6 +28,7 @@ use agenc_ircd_admin::{
     ADMIN_CHALLENGE_BYTES, ADMIN_SESSION_ID_BYTES, ADMIN_TRANSPORT_BINDING_BYTES, AdminChallenge,
     AdminSessionId, Challenge, PeerIdentity as AdminPeerIdentity, TransportBinding, TransportKind,
 };
+use agenc_ircd_config::ListenerName;
 use agenc_ircd_types::EntropySource as _;
 
 pub use prefix::{PREFIX_ERASURE_DELAY, source_key};
@@ -51,6 +52,7 @@ use crate::connection::{
     ConnectionResources, PeerIdentity, run_connection,
 };
 use crate::purpose::ListenerPurpose;
+use crate::runtime_config::RuntimeConfigHandle;
 use crate::state_core::inbox::{CloseReason, SourceAddressKey, StateCoreMessage};
 use crate::sync::Arc;
 use crate::tls::{
@@ -211,6 +213,8 @@ impl ConnectionObserver for NoObserver {}
 
 /// One configured endpoint.
 pub struct ListenerSpec {
+    /// Stable configured name used to select live listener policy.
+    pub name: ListenerName,
     /// The listener purpose.
     pub purpose: ListenerPurpose,
     /// Where its socket comes from.
@@ -242,6 +246,8 @@ pub struct ListenerContext {
     pub admin: Option<AdminTransportPort>,
     /// Per-connection reader and queue ceilings.
     pub limits: ConnectionLimits,
+    /// Published live policy; absent only at an embedding or test seam.
+    pub runtime_config: Option<RuntimeConfigHandle>,
 }
 
 /// How one listener task ended.
@@ -261,15 +267,18 @@ struct ListenerShared {
     budget: Arc<MemoryBudget>,
     handshakes: HandshakeLimiter,
     client_slots: Arc<Semaphore>,
+    client_slot_capacity: usize,
     admission: Arc<dyn AcceptAdmission>,
     observer: Arc<dyn ConnectionObserver>,
     inbox: mpsc::Sender<StateCoreMessage>,
     admin: Option<AdminTransportPort>,
     limits: ConnectionLimits,
+    runtime_config: Option<RuntimeConfigHandle>,
     generations: AtomicU64,
 }
 
 struct ValidatedSpec {
+    name: ListenerName,
     purpose: ListenerPurpose,
     max_connections: usize,
     tls: Option<Arc<ServerConfig>>,
@@ -365,12 +374,14 @@ impl ListenerSet {
         let shared = Arc::new(ListenerShared {
             budget: context.budget,
             handshakes: context.handshakes,
+            client_slot_capacity: context.client_slots.available_permits(),
             client_slots: context.client_slots,
             admission: context.admission,
             observer: context.observer,
             inbox: context.inbox,
             admin: context.admin,
             limits: context.limits,
+            runtime_config: context.runtime_config,
             generations: AtomicU64::new(1),
         });
         let mut bound = Vec::with_capacity(specs.len());
@@ -452,13 +463,7 @@ fn uses_unix_socket(purpose: ListenerPurpose) -> bool {
 }
 
 fn validate_spec(spec: &ListenerSpec) -> Result<ValidatedSpec, ListenerError> {
-    let ceiling = match spec.purpose {
-        ListenerPurpose::ClientTls | ListenerPurpose::ClientOnion => MAX_CLIENT_CONNECTIONS,
-        ListenerPurpose::AdminLocal | ListenerPurpose::AdminTls => MAX_ADMIN_CONNECTIONS,
-        ListenerPurpose::ClientWss | ListenerPurpose::Federation => {
-            return Err(ListenerError::UnsupportedPurpose);
-        }
-    };
+    let ceiling = purpose_ceiling(spec.purpose)?;
     if spec.max_connections == 0 || spec.max_connections > ceiling {
         return Err(ListenerError::ConnectionCeiling);
     }
@@ -476,12 +481,23 @@ fn validate_spec(spec: &ListenerSpec) -> Result<ValidatedSpec, ListenerError> {
         (_, None) => {}
     }
     Ok(ValidatedSpec {
+        name: spec.name.clone(),
         purpose: spec.purpose,
         max_connections: spec.max_connections,
         tls: spec.tls.clone(),
         profile,
         local_admin: spec.local_admin.clone(),
     })
+}
+
+fn purpose_ceiling(purpose: ListenerPurpose) -> Result<usize, ListenerError> {
+    match purpose {
+        ListenerPurpose::ClientTls | ListenerPurpose::ClientOnion => Ok(MAX_CLIENT_CONNECTIONS),
+        ListenerPurpose::AdminLocal | ListenerPurpose::AdminTls => Ok(MAX_ADMIN_CONNECTIONS),
+        ListenerPurpose::ClientWss | ListenerPurpose::Federation => {
+            Err(ListenerError::UnsupportedPurpose)
+        }
+    }
 }
 
 /// A socket accepted with the listener and handshake slots already held.
@@ -510,7 +526,12 @@ async fn run_listener(
     connection_token: CancellationToken,
     accept_barrier: Arc<AcceptBarrier>,
 ) -> ListenerExit {
-    let slots = Arc::new(Semaphore::new(spec.max_connections));
+    let slot_capacity = if shared.runtime_config.is_some() {
+        purpose_ceiling(spec.purpose).unwrap_or(spec.max_connections)
+    } else {
+        spec.max_connections
+    };
+    let slots = Arc::new(Semaphore::new(slot_capacity));
     let mut connections: JoinSet<ConnectionOutcome> = JoinSet::new();
     let mut exit = ListenerExit {
         purpose: spec.purpose,
@@ -521,7 +542,7 @@ async fn run_listener(
         let step = tokio::select! {
             () = accept_token.cancelled() => ListenerStep::Stop,
             Some(outcome) = connections.join_next() => ListenerStep::Joined(outcome.ok()),
-            accepted = next_accept(&listener, &slots, &shared.handshakes, spec.tls.is_some()) => {
+            accepted = next_accept(&listener, &slots, slot_capacity, &shared, &spec) => {
                 ListenerStep::Accepted(accepted)
             }
         };
@@ -581,12 +602,31 @@ fn record_outcome(
 async fn next_accept(
     listener: &BoundListener,
     slots: &Arc<Semaphore>,
-    handshakes: &HandshakeLimiter,
-    tls: bool,
+    slot_capacity: usize,
+    shared: &ListenerShared,
+    spec: &ValidatedSpec,
 ) -> Option<Accepted> {
     let listener_slot = Arc::clone(slots).acquire_owned().await.ok()?;
-    let handshake_slot = if tls {
-        Some(handshakes.acquire().await.ok()?)
+    if let Some(runtime) = &shared.runtime_config {
+        let active = slot_capacity.saturating_sub(slots.available_permits());
+        let ceiling = runtime.load().listener_ceiling(&spec.name)?;
+        if active > ceiling {
+            return None;
+        }
+    }
+    let handshake_slot = if spec.tls.is_some() {
+        let permit = shared.handshakes.acquire().await.ok()?;
+        if let Some(runtime) = &shared.runtime_config {
+            let active = shared
+                .handshakes
+                .capacity()
+                .saturating_sub(shared.handshakes.available());
+            let ceiling = runtime.load().tls_handshake_ceiling()?;
+            if active > ceiling {
+                return None;
+            }
+        }
+        Some(permit)
     } else {
         None
     };
@@ -621,7 +661,22 @@ fn admit(
         AcceptedTransport::Tcp(_, source) => *source,
         AcceptedTransport::Unix(_) => SourceAddressKey::onion_listener(),
     };
-    let admission = match prepare_admission(shared, spec, connection_token, source) {
+    let (tls, limits) = match connection_policy(shared, spec) {
+        Ok(policy) => policy,
+        Err(reason) => {
+            exit.refused = exit.refused.saturating_add(1);
+            shared.observer.refused(spec.purpose, reason);
+            return;
+        }
+    };
+    let admission = match prepare_admission(
+        shared,
+        spec,
+        connection_token,
+        source,
+        limits,
+        tls.is_some(),
+    ) {
         Ok(admission) => admission,
         Err(reason) => {
             exit.refused = exit.refused.saturating_add(1);
@@ -637,12 +692,32 @@ fn admit(
         peer: PeerIdentity::Anonymous,
     };
     let endpoint = Endpoint {
-        tls: spec.tls.clone(),
+        tls,
         profile: spec.profile,
         shared: Arc::clone(shared),
         local_admin: spec.local_admin.clone(),
+        limits,
     };
     connections.spawn(serve(accepted, admitted, admission, endpoint));
+}
+
+fn connection_policy(
+    shared: &ListenerShared,
+    spec: &ValidatedSpec,
+) -> Result<(Option<Arc<ServerConfig>>, ConnectionLimits), RefusalReason> {
+    let Some(runtime) = &shared.runtime_config else {
+        return Ok((spec.tls.clone(), shared.limits));
+    };
+    let snapshot = runtime.load();
+    let tls = match spec.profile {
+        Some(_) => Some(
+            snapshot
+                .tls_endpoint(&spec.name)
+                .ok_or(RefusalReason::TlsHandshake(TlsHandshakeError::Protocol))?,
+        ),
+        None => None,
+    };
+    Ok((tls, snapshot.connection_limits()))
 }
 
 /// The global slot, admission verdict, memory charges, and child token an
@@ -658,6 +733,8 @@ fn prepare_admission(
     spec: &ValidatedSpec,
     connection_token: &CancellationToken,
     source: SourceAddressKey,
+    limits: ConnectionLimits,
+    tls: bool,
 ) -> Result<Admission, RefusalReason> {
     let global_slot = global_slot(shared, spec.purpose)?;
     let address_accounted = !matches!(
@@ -668,7 +745,7 @@ fn prepare_admission(
     {
         return Err(RefusalReason::Admission);
     }
-    let Ok(permits) = acquire_charges(shared, spec) else {
+    let Ok(permits) = acquire_charges(shared, spec.purpose, limits, tls) else {
         if address_accounted {
             shared.admission.released(spec.purpose, source);
         }
@@ -697,25 +774,36 @@ fn global_slot(
     ) {
         return Ok(None);
     }
-    Arc::clone(&shared.client_slots)
+    let permit = Arc::clone(&shared.client_slots)
         .try_acquire_owned()
-        .map(Some)
-        .map_err(|_| RefusalReason::GlobalCeiling)
+        .map_err(|_| RefusalReason::GlobalCeiling)?;
+    if let Some(runtime) = &shared.runtime_config {
+        let active = shared
+            .client_slot_capacity
+            .saturating_sub(shared.client_slots.available_permits());
+        let ceiling = runtime
+            .load()
+            .client_connection_ceiling()
+            .ok_or(RefusalReason::GlobalCeiling)?;
+        if active > ceiling {
+            return Err(RefusalReason::GlobalCeiling);
+        }
+    }
+    Ok(Some(permit))
 }
 
 fn acquire_charges(
     shared: &ListenerShared,
-    spec: &ValidatedSpec,
+    purpose: ListenerPurpose,
+    limits: ConnectionLimits,
+    tls: bool,
 ) -> Result<MemoryPermitBatch, RuntimeError> {
-    let base = match spec.purpose {
+    let base = match purpose {
         ListenerPurpose::AdminLocal | ListenerPurpose::AdminTls => ADMIN_CONNECTION_BASE_BYTES,
         _ => CLIENT_CONNECTION_BASE_BYTES,
     };
-    let mut charges = vec![
-        MemoryCharge::fixed(base),
-        shared.limits.queue.backing_charge()?,
-    ];
-    if spec.tls.is_some() {
+    let mut charges = vec![MemoryCharge::fixed(base), limits.queue.backing_charge()?];
+    if tls {
         charges.push(MemoryCharge::fixed(TLS_SETUP_INCREMENT_BYTES));
     }
     Ok(shared
@@ -734,6 +822,7 @@ struct Endpoint {
     profile: Option<TlsEndpointProfile>,
     shared: Arc<ListenerShared>,
     local_admin: Option<LocalAdminAdmission>,
+    limits: ConnectionLimits,
 }
 
 async fn serve(
@@ -771,7 +860,6 @@ async fn serve_inner(
         token,
     } = admission;
     let queue_backing = endpoint
-        .shared
         .limits
         .queue
         .backing_charge()
@@ -806,11 +894,27 @@ async fn serve_inner(
                 )
                 .await);
             }
-            Ok(finish_serving(stream, admitted, resources(permits), endpoint.shared, token).await)
+            Ok(finish_serving(
+                stream,
+                admitted,
+                resources(permits),
+                endpoint.shared,
+                endpoint.limits,
+                token,
+            )
+            .await)
         }
         (AcceptedTransport::Unix(stream), Some(config), Some(profile)) => {
             let stream = negotiate(stream, config, profile, handshake_slot, &mut permits).await?;
-            Ok(finish_serving(stream, admitted, resources(permits), endpoint.shared, token).await)
+            Ok(finish_serving(
+                stream,
+                admitted,
+                resources(permits),
+                endpoint.shared,
+                endpoint.limits,
+                token,
+            )
+            .await)
         }
         (AcceptedTransport::Unix(stream), None, None) => {
             admitted.peer = local_peer_identity(&stream)?;
@@ -842,7 +946,15 @@ async fn serve_inner(
                 )
                 .await);
             }
-            Ok(finish_serving(stream, admitted, resources(permits), endpoint.shared, token).await)
+            Ok(finish_serving(
+                stream,
+                admitted,
+                resources(permits),
+                endpoint.shared,
+                endpoint.limits,
+                token,
+            )
+            .await)
         }
         _ => Err(RefusalReason::TlsHandshake(TlsHandshakeError::Protocol)),
     }
@@ -989,6 +1101,7 @@ async fn finish_serving<T>(
     admitted: AdmittedConnection,
     resources: ConnectionResources,
     shared: Arc<ListenerShared>,
+    limits: ConnectionLimits,
     token: CancellationToken,
 ) -> ConnectionExit
 where
@@ -999,7 +1112,7 @@ where
         transport,
         admitted,
         resources,
-        shared.limits,
+        limits,
         shared.inbox.clone(),
         token,
     )
@@ -1011,13 +1124,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn specs_pair_purposes_with_transports_and_ceilings() {
+    fn specs_pair_purposes_with_transports_and_ceilings() -> Result<(), Box<dyn std::error::Error>>
+    {
         let tcp = || ListenerSource::Tcp(std::net::SocketAddr::from(([127, 0, 0, 1], 0)));
         let local_policy = || LocalAdminAdmission {
             allowed_uids: vec![1],
             allowed_gids: Vec::new(),
         };
         let plain = ListenerSpec {
+            name: ListenerName::parse("test")?,
             purpose: ListenerPurpose::ClientTls,
             source: tcp(),
             max_connections: 1,
@@ -1026,6 +1141,7 @@ mod tests {
         };
         assert_eq!(validate_spec(&plain).err(), Some(ListenerError::MissingTls));
         let wss = ListenerSpec {
+            name: ListenerName::parse("test")?,
             purpose: ListenerPurpose::ClientWss,
             source: tcp(),
             max_connections: 1,
@@ -1037,6 +1153,7 @@ mod tests {
             Some(ListenerError::UnsupportedPurpose)
         );
         let federation = ListenerSpec {
+            name: ListenerName::parse("test")?,
             purpose: ListenerPurpose::Federation,
             source: tcp(),
             max_connections: 1,
@@ -1048,6 +1165,7 @@ mod tests {
             Some(ListenerError::UnsupportedPurpose)
         );
         let zero = ListenerSpec {
+            name: ListenerName::parse("test")?,
             purpose: ListenerPurpose::AdminLocal,
             source: ListenerSource::Unix("/tmp/x".into()),
             max_connections: 0,
@@ -1059,6 +1177,7 @@ mod tests {
             Some(ListenerError::ConnectionCeiling)
         );
         let too_many = ListenerSpec {
+            name: ListenerName::parse("test")?,
             purpose: ListenerPurpose::AdminLocal,
             source: ListenerSource::Unix("/tmp/x".into()),
             max_connections: MAX_ADMIN_CONNECTIONS + 1,
@@ -1070,6 +1189,7 @@ mod tests {
             Some(ListenerError::ConnectionCeiling)
         );
         let admin = ListenerSpec {
+            name: ListenerName::parse("test")?,
             purpose: ListenerPurpose::AdminLocal,
             source: ListenerSource::Unix("/tmp/x".into()),
             max_connections: MAX_ADMIN_CONNECTIONS,
@@ -1102,5 +1222,6 @@ mod tests {
         ] {
             assert!(reason.to_string().is_ascii());
         }
+        Ok(())
     }
 }

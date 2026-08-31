@@ -19,6 +19,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use agenc_ircd_client_wire::WireMessage;
+use agenc_ircd_config::ListenerName;
 use agenc_ircd_runtime::budget::{
     BoundedMemoryCharges, MemoryBudget, MemoryBudgetPort as _, MemoryCharge, PermitCursor,
 };
@@ -207,6 +208,7 @@ fn start(specs: Vec<ListenerSpec>, options: HarnessOptions) -> Result<Harness, L
         inbox: sender,
         admin: None,
         limits: ConnectionLimits::DEFAULT,
+        runtime_config: None,
     };
     let set = ListenerSet::start(specs, context, &root)?;
     Ok(Harness {
@@ -227,6 +229,7 @@ fn tcp_spec(
 ) -> Result<ListenerSpec, Box<dyn Error + Send + Sync>> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     Ok(ListenerSpec {
+        name: ListenerName::parse("test")?,
         purpose,
         source: ListenerSource::InheritedTcp(listener),
         max_connections,
@@ -617,6 +620,7 @@ async fn local_admin_lines_never_enter_the_public_client_inbox() -> TestResult {
     let local_gid = std::fs::metadata(&directory)?.gid();
     let specs = vec![
         ListenerSpec {
+            name: ListenerName::parse("onion")?,
             purpose: ListenerPurpose::ClientOnion,
             source: ListenerSource::Unix(onion_path.clone()),
             max_connections: 2,
@@ -628,6 +632,7 @@ async fn local_admin_lines_never_enter_the_public_client_inbox() -> TestResult {
             local_admin: None,
         },
         ListenerSpec {
+            name: ListenerName::parse("admin")?,
             purpose: ListenerPurpose::AdminLocal,
             source: ListenerSource::Unix(admin_path.clone()),
             max_connections: 2,
@@ -923,6 +928,7 @@ async fn start_rejects_unsupported_and_mismatched_specs() -> TestResult {
     ];
     for (purpose, source, tls, expected) in cases {
         let spec = ListenerSpec {
+            name: ListenerName::parse("invalid")?,
             purpose,
             source,
             max_connections: 1,
@@ -944,6 +950,7 @@ async fn start_rejects_unsupported_and_mismatched_specs() -> TestResult {
         inbox: sender,
         admin: None,
         limits: ConnectionLimits::DEFAULT,
+        runtime_config: None,
     };
     assert_eq!(
         ListenerSet::start(Vec::new(), context, &root).err(),

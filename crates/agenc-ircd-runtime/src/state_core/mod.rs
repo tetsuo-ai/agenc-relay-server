@@ -50,6 +50,10 @@ use crate::budget::MemoryBudget;
 use crate::cancel::CancellationToken;
 use crate::connection::sink::ConnectionGeneration;
 use crate::observe::health::Liveness;
+use crate::runtime_config::{
+    PreparedReload, ReloadActivation, ReloadCoreInbox, ReloadCoreRequest, ReloadMode,
+    ReloadOutcome, ReloadRejection, RuntimeConfigHandle, RuntimeConfigSnapshot,
+};
 use crate::state_core::admin::{AdminCoreRequest, AdminCoreResult};
 use crate::state_core::durable::{
     AccountServiceDurableWrite, AccountingCeilings, DurableIndex, HeadCounters, KeyDeriver,
@@ -85,6 +89,10 @@ pub struct StateCoreConfig {
     pub rate_limits: RateLimits,
     /// The configured storage ceilings.
     pub ceilings: AccountingCeilings,
+    /// Content-loaded public message of the day.
+    pub motd: Option<Arc<str>>,
+    /// Content-loaded public ADMIN/INFO text.
+    pub public_info: Option<Arc<str>>,
 }
 
 /// The explicit clocks StateCore consults (spec 24.2, line 6549).
@@ -198,6 +206,20 @@ pub trait CommandRouter: Send {
 
     /// A reload signal arrived.
     fn reload_requested(&mut self, _context: &mut StateCoreContext) {}
+
+    /// Applies already prepared router policy at the same safe point as the
+    /// StateCore-owned ceilings. Implementations must not allocate or await.
+    fn config_reloaded(
+        &mut self,
+        _context: &mut StateCoreContext,
+        _snapshot: &RuntimeConfigSnapshot,
+    ) {
+    }
+
+    /// Whether no router-owned asynchronous operation straddles a reload.
+    fn reload_ready(&self) -> bool {
+        true
+    }
 
     /// A maintenance tick the loop does not consume itself.
     fn maintenance(&mut self, _context: &mut StateCoreContext, _event: MaintenanceEvent) {}
@@ -401,6 +423,8 @@ pub struct StateCoreContext {
     monotonic: Box<dyn MonotonicClock + Send>,
     wall: Box<dyn WallClock + Send>,
     server_prefix: String,
+    motd: Option<Arc<str>>,
+    public_info: Option<Arc<str>>,
     counters: StateCoreCounters,
     quiescing: bool,
 }
@@ -482,6 +506,18 @@ impl StateCoreContext {
     #[must_use]
     pub fn server_prefix(&self) -> &str {
         &self.server_prefix
+    }
+
+    /// Borrows the published public MOTD content.
+    #[must_use]
+    pub fn motd(&self) -> Option<&str> {
+        self.motd.as_deref()
+    }
+
+    /// Borrows the published public ADMIN/INFO content.
+    #[must_use]
+    pub fn public_info(&self) -> Option<&str> {
+        self.public_info.as_deref()
     }
 
     /// Returns the head counters the next batch is fenced against.
@@ -947,6 +983,12 @@ pub struct StateCore {
     admin_receiver: mpsc::Receiver<AdminCoreRequest>,
     admin_open: bool,
     admin_pending: Option<PendingAdminCommit>,
+    reload_receiver: mpsc::Receiver<ReloadCoreRequest>,
+    reload_open: bool,
+    reload_handle: Option<RuntimeConfigHandle>,
+    reload_admission: Option<Arc<crate::admission::TransportAdmission>>,
+    reload_pending: Option<PendingReload>,
+    reload_provisional: Option<ProvisionalReload>,
     liveness: Arc<Liveness>,
 }
 
@@ -954,6 +996,19 @@ struct PendingAdminCommit {
     transaction_id: TransactionId,
     retained: RetainedProjection,
     reply: tokio::sync::oneshot::Sender<AdminCoreResult>,
+}
+
+struct PendingReload {
+    prepared: PreparedReload,
+    mode: ReloadMode,
+    reply: tokio::sync::oneshot::Sender<ReloadOutcome>,
+}
+
+struct ProvisionalReload {
+    activation: ReloadActivation,
+    previous: Arc<RuntimeConfigSnapshot>,
+    candidate: Arc<RuntimeConfigSnapshot>,
+    _lease: Option<crate::runtime_config::ReloadLease>,
 }
 
 #[derive(Default)]
@@ -1013,6 +1068,8 @@ impl StateCore {
             .unwrap_or(UtcSecond::from_unix_seconds(0));
         let (unused_admin, admin_receiver) = mpsc::channel(1);
         drop(unused_admin);
+        let (unused_reload, reload_receiver) = mpsc::channel(1);
+        drop(unused_reload);
         let mut state = Self {
             context: StateCoreContext {
                 domain: inputs.reconstruction.domain,
@@ -1034,6 +1091,8 @@ impl StateCore {
                 monotonic: inputs.clocks.monotonic,
                 wall: inputs.clocks.wall,
                 server_prefix: inputs.config.server_prefix,
+                motd: inputs.config.motd,
+                public_info: inputs.config.public_info,
                 counters: StateCoreCounters::default(),
                 quiescing: false,
             },
@@ -1041,6 +1100,12 @@ impl StateCore {
             admin_receiver,
             admin_open: false,
             admin_pending: None,
+            reload_receiver,
+            reload_open: false,
+            reload_handle: None,
+            reload_admission: None,
+            reload_pending: None,
+            reload_provisional: None,
             liveness: inputs.liveness,
         };
         state.router.startup(&mut state.context);
@@ -1058,6 +1123,26 @@ impl StateCore {
         }
         self.admin_receiver = inbox.into_receiver();
         self.admin_open = true;
+        Ok(())
+    }
+
+    /// Installs the sole private reload receiver before the actor starts.
+    pub(crate) fn install_reload_inbox(
+        &mut self,
+        inbox: ReloadCoreInbox,
+    ) -> Result<(), RuntimeError> {
+        if self.reload_open
+            || self.reload_pending.is_some()
+            || self.reload_provisional.is_some()
+            || self.reload_handle.is_some()
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
+        let (receiver, handle, admission) = inbox.into_parts();
+        self.reload_receiver = receiver;
+        self.reload_handle = Some(handle);
+        self.reload_admission = Some(admission);
+        self.reload_open = true;
         Ok(())
     }
 
@@ -1101,6 +1186,177 @@ impl StateCore {
 
     fn storage_in_flight(&self) -> bool {
         self.context.in_flight() || self.admin_pending.is_some()
+    }
+
+    // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=closed reload request union preserves quiescence single-flight activation finalize and rollback ordering
+    fn step_reload_request(&mut self, request: ReloadCoreRequest) -> Option<StateCoreExit> {
+        match request {
+            ReloadCoreRequest::Activate {
+                prepared,
+                mode,
+                reply,
+            } => {
+                if self.context.quiescing {
+                    let _sent = reply.send(ReloadOutcome::Rejected(ReloadRejection::Quiescing));
+                } else if self.reload_pending.is_some() || self.reload_provisional.is_some() {
+                    let _sent = reply.send(ReloadOutcome::Rejected(ReloadRejection::Busy));
+                } else {
+                    self.reload_pending = Some(PendingReload {
+                        prepared: *prepared,
+                        mode,
+                        reply,
+                    });
+                }
+                None
+            }
+            ReloadCoreRequest::Finalize { activation, reply } => {
+                let result = self.finalize_reload(activation);
+                let _sent = reply.send(result);
+                None
+            }
+            ReloadCoreRequest::Rollback { activation, reply } => {
+                let result = self.rollback_reload(activation);
+                let _sent = reply.send(result);
+                None
+            }
+        }
+    }
+
+    // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=one safe-point transition validates revision current-use floors applies prepared cells and publishes or retains an audited rollback barrier
+    fn activate_pending_reload(&mut self) {
+        let Some(mut pending) = self.reload_pending.take() else {
+            return;
+        };
+        let current = match &self.reload_handle {
+            Some(handle) => handle.load(),
+            None => {
+                let _sent = pending
+                    .reply
+                    .send(ReloadOutcome::Rejected(ReloadRejection::StorageUnavailable));
+                return;
+            }
+        };
+        if current.revision() != pending.prepared.expected_revision() {
+            let _sent = pending
+                .reply
+                .send(ReloadOutcome::Rejected(ReloadRejection::StaleRevision));
+            return;
+        }
+        if pending.prepared.is_noop() {
+            let _sent = pending
+                .reply
+                .send(ReloadOutcome::NoChange(current.revision()));
+            return;
+        }
+        let candidate = pending.prepared.candidate();
+        if !self.reload_floors_accept(&candidate) {
+            let _sent = pending
+                .reply
+                .send(ReloadOutcome::Rejected(ReloadRejection::CurrentUse));
+            return;
+        }
+        self.apply_runtime_snapshot(&candidate);
+        match pending.mode {
+            ReloadMode::Signal => {
+                let published = self
+                    .reload_handle
+                    .as_ref()
+                    .ok_or(ReloadRejection::StorageUnavailable)
+                    .and_then(|handle| handle.publish(current.revision(), Arc::clone(&candidate)));
+                match published {
+                    Ok(_) => {
+                        let _sent = pending
+                            .reply
+                            .send(ReloadOutcome::Applied(candidate.revision()));
+                    }
+                    Err(rejection) => {
+                        self.apply_runtime_snapshot(&current);
+                        let _sent = pending.reply.send(ReloadOutcome::Rejected(rejection));
+                    }
+                }
+            }
+            ReloadMode::AuditedAdmin => {
+                let activation = ReloadActivation {
+                    revision: candidate.revision(),
+                };
+                self.reload_provisional = Some(ProvisionalReload {
+                    activation,
+                    previous: current,
+                    candidate,
+                    _lease: pending.prepared.take_lease(),
+                });
+                let _sent = pending.reply.send(ReloadOutcome::Provisional(activation));
+            }
+        }
+    }
+
+    fn reload_floors_accept(&self, candidate: &RuntimeConfigSnapshot) -> bool {
+        let Ok(usage) = self.context.domain.operational_usage() else {
+            return false;
+        };
+        let ceilings = candidate.storage_ceilings();
+        candidate.operational_limits().admits(usage)
+            && self.context.head.logical_database_bytes <= ceilings.database_max_bytes
+            && self.context.head.backup_stream_bytes <= ceilings.backup_max_bytes
+    }
+
+    fn apply_runtime_snapshot(&mut self, snapshot: &RuntimeConfigSnapshot) {
+        self.context
+            .domain
+            .set_operational_limits(snapshot.operational_limits());
+        self.context.buckets.reload(snapshot.rates());
+        self.context.ceilings = snapshot.storage_ceilings();
+        self.context.motd = snapshot.motd_arc();
+        self.context.public_info = snapshot.public_info_arc();
+        if let Some(admission) = &self.reload_admission {
+            admission.reload(snapshot.rates());
+        }
+        self.router.config_reloaded(&mut self.context, snapshot);
+    }
+
+    fn finalize_reload(
+        &mut self,
+        activation: ReloadActivation,
+    ) -> Result<crate::runtime_config::ConfigRevision, ReloadRejection> {
+        let provisional = self
+            .reload_provisional
+            .take()
+            .ok_or(ReloadRejection::StaleRevision)?;
+        if provisional.activation != activation {
+            self.reload_provisional = Some(provisional);
+            return Err(ReloadRejection::StaleRevision);
+        }
+        let result = self
+            .reload_handle
+            .as_ref()
+            .ok_or(ReloadRejection::StorageUnavailable)?
+            .publish(
+                provisional.previous.revision(),
+                Arc::clone(&provisional.candidate),
+            );
+        match result {
+            Ok(_) => Ok(provisional.candidate.revision()),
+            Err(rejection) => {
+                self.apply_runtime_snapshot(&provisional.previous);
+                Err(rejection)
+            }
+        }
+    }
+
+    fn rollback_reload(
+        &mut self,
+        activation: ReloadActivation,
+    ) -> Result<crate::runtime_config::ConfigRevision, ReloadRejection> {
+        let provisional = self
+            .reload_provisional
+            .take()
+            .ok_or(ReloadRejection::StaleRevision)?;
+        if provisional.activation != activation {
+            self.reload_provisional = Some(provisional);
+            return Err(ReloadRejection::StaleRevision);
+        }
+        self.apply_runtime_snapshot(&provisional.previous);
+        Ok(provisional.previous.revision())
     }
 
     fn step_admin_request(&mut self, request: AdminCoreRequest) -> Option<StateCoreExit> {
@@ -1441,8 +1697,12 @@ impl StateCore {
         progress.tick().await;
         loop {
             let in_flight = self.storage_in_flight();
-            let safe_point = !in_flight && self.context.pending_len() == 0;
+            let safe_point =
+                !in_flight && self.context.pending_len() == 0 && self.router.reload_ready();
             if safe_point {
+                if self.reload_pending.is_some() {
+                    self.activate_pending_reload();
+                }
                 if lifecycle_target.is_some_and(|phase| phase >= LifecyclePhase::Drain)
                     && !lifecycle_completed.is_some_and(|phase| phase >= LifecyclePhase::Drain)
                 {
@@ -1509,6 +1769,13 @@ impl StateCore {
                         None
                     }
                 },
+                request = self.reload_receiver.recv(), if self.reload_open => match request {
+                    Some(request) => self.step_reload_request(request),
+                    None => {
+                        self.reload_open = false;
+                        None
+                    }
+                },
                 completion = storage.recv() => match completion {
                     Some(message) => self.step_completion(message).await,
                     None => Some(StateCoreExit::Indeterminate(
@@ -1531,7 +1798,7 @@ impl StateCore {
                     }
                     None
                 },
-                message = inbox.recv(), if !in_flight => match message {
+                message = inbox.recv(), if !in_flight && self.reload_provisional.is_none() => match message {
                     Some(StateCoreMessage::Line { .. } | StateCoreMessage::Opened { .. })
                         if self.context.quiescing => None,
                     Some(message) => self.step_message(message),

@@ -903,6 +903,25 @@ impl AccountServiceCoordinator {
         })
     }
 
+    /// Installs copy-only account defaults at a StateCore reload safe point.
+    pub(crate) fn reload_policy(&mut self, policy: crate::runtime_config::AccountRuntimePolicy) {
+        self.config.creation_policy = policy.creation;
+        self.config.default_presence = policy.default_presence;
+        self.config.default_guest_direct_messages = policy.default_guest_direct_messages;
+        self.config.default_direct_messages = policy.default_direct_messages;
+    }
+
+    /// Returns whether no account-service continuation can observe both
+    /// sides of a runtime policy activation.
+    pub(crate) fn reload_ready(&self) -> bool {
+        self.exclusive_account_service_transition_available()
+            && self.connections.values().all(|connection| {
+                connection.transaction.is_none()
+                    && connection.creation_transaction.is_none()
+                    && connection.credential_transaction.is_none()
+            })
+    }
+
     /// Creates fresh connection and nonce bindings for one admitted transport.
     pub(crate) fn connection_opened(
         &mut self,

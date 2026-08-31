@@ -18,13 +18,17 @@ use agenc_ircd_admin::{
 };
 use agenc_ircd_types::{EntropySource, MonotonicClock, WallClock};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::budget::MemoryPermitBatch;
 use crate::cancel::CancellationToken;
 use crate::connection::{ConnectionExit, ConnectionGeneration, ConnectionResources};
 use crate::observe::health::{HealthSnapshot, Liveness, ReadinessGate};
 use crate::purpose::ListenerPurpose;
+use crate::runtime_config::{
+    ReloadOutcome, ReloadPreparationPort, ReloadPrepareFailure, ReloadRejection,
+    RuntimeConfigHandle,
+};
 use crate::state_core::inbox::CloseReason;
 use crate::state_core::{AdminCoreFailure, AdminCorePort};
 use crate::sync::Arc;
@@ -42,7 +46,7 @@ const ADMIN_NOTICE_BUDGET: Duration = Duration::from_secs(30);
 /// Largest ordinary response batch. Audit export has a separately charged
 /// path and will raise this through a typed constructor in its composition
 /// slice.
-const MAX_ORDINARY_BATCH_LINES: usize = 32;
+const MAX_ORDINARY_BATCH_LINES: usize = 266;
 
 /// Opaque listener-side handle for the private admin-owner inbox.
 ///
@@ -210,6 +214,10 @@ pub(crate) struct AdminOwner {
     audit: AuditAuthority,
     core: AdminCorePort,
     health: AdminOwnerHealth,
+    config: Option<RuntimeConfigHandle>,
+    config_changes: Option<watch::Receiver<crate::runtime_config::ConfigRevision>>,
+    reload: Option<ReloadPreparationPort>,
+    fatal: Option<mpsc::Sender<()>>,
     entropy: Box<dyn EntropySource + Send>,
     monotonic: Box<dyn MonotonicClock + Send>,
     wall: Box<dyn WallClock + Send>,
@@ -223,6 +231,9 @@ pub(crate) struct AdminOwnerClocks {
 
 pub(crate) struct AdminOwnerRuntime {
     pub(crate) health: AdminOwnerHealth,
+    pub(crate) config: Option<RuntimeConfigHandle>,
+    pub(crate) reload: Option<ReloadPreparationPort>,
+    pub(crate) fatal: Option<mpsc::Sender<()>>,
     pub(crate) entropy: Box<dyn EntropySource + Send>,
     pub(crate) clocks: AdminOwnerClocks,
 }
@@ -240,6 +251,7 @@ impl AdminOwnerHealth {
 }
 
 /// Exact enabled-operator transport identities accepted before a challenge.
+#[derive(Clone)]
 pub(crate) struct AdminAdmissionSnapshot {
     uids: Vec<u32>,
     gids: Vec<u32>,
@@ -281,6 +293,7 @@ impl AdminOwner {
         core: AdminCorePort,
         runtime: AdminOwnerRuntime,
     ) -> Self {
+        let config_changes = runtime.config.as_ref().map(RuntimeConfigHandle::subscribe);
         Self {
             binding,
             registry,
@@ -288,6 +301,10 @@ impl AdminOwner {
             audit,
             core,
             health: runtime.health,
+            config: runtime.config,
+            config_changes,
+            reload: runtime.reload,
+            fatal: runtime.fatal,
             entropy: runtime.entropy,
             monotonic: runtime.clocks.monotonic,
             wall: runtime.clocks.wall,
@@ -295,10 +312,18 @@ impl AdminOwner {
         }
     }
 
+    // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=single bounded admin select owns session authority reload notifications transport input and cancellation ordering
     pub(crate) async fn run(mut self, mut inbox: AdminOwnerInbox, token: CancellationToken) {
         loop {
             let message = tokio::select! {
                 () = token.cancelled() => break,
+                changed = wait_for_config_change(&mut self.config_changes) => {
+                    if changed {
+                        self.reconcile_authority();
+                        continue;
+                    }
+                    break;
+                }
                 message = inbox.receiver.recv() => match message {
                     Some(message) => message,
                     None => break,
@@ -402,6 +427,10 @@ impl AdminOwner {
                 return;
             }
             AdminCommand::Pong(_) => return,
+            AdminCommand::Rehash(_) => {
+                self.rehash(generation, &event, token).await;
+                return;
+            }
             _ => {}
         }
         let Some(lines) = self
@@ -415,6 +444,245 @@ impl AdminOwner {
         };
         self.commit_observed(generation, &event.command, lines, audit, token)
             .await;
+    }
+
+    // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=audited reload keeps intent provisional activation outcome and rollback in one explicit fail-closed barrier
+    async fn rehash(
+        &mut self,
+        generation: ConnectionGeneration,
+        event: &AdminCommandEvent,
+        token: &CancellationToken,
+    ) {
+        let Some(reload) = self.reload.clone() else {
+            self.output_storage_unavailable(generation, "REHASH");
+            return;
+        };
+        let prepared = match reload.prepare(token).await {
+            Ok(prepared) => prepared,
+            Err(failure) => {
+                self.output_reload_prepare_failure(generation, failure);
+                return;
+            }
+        };
+        let Some(intent) = self.prepare_action_event(generation, event, AdminAuditPhase::Intent)
+        else {
+            return;
+        };
+        if let Err(failure) = self.commit_action_audit(generation, intent, token).await {
+            self.output_audit_failure(generation, "REHASH", failure);
+            return;
+        }
+
+        match reload.activate(prepared).await {
+            ReloadOutcome::NoChange(_) => {
+                if self
+                    .commit_rehash_outcome(
+                        generation,
+                        event,
+                        AdminAuditPhase::OutcomeSuccess,
+                        token,
+                    )
+                    .await
+                {
+                    self.output_line(
+                        generation,
+                        "NOTE REHASH OK :Configuration unchanged".to_owned(),
+                    );
+                }
+            }
+            ReloadOutcome::Provisional(activation) => {
+                if !self
+                    .commit_rehash_outcome(
+                        generation,
+                        event,
+                        AdminAuditPhase::OutcomeSuccess,
+                        token,
+                    )
+                    .await
+                {
+                    let _rollback = reload.rollback(activation).await;
+                    self.fail_closed(generation);
+                    return;
+                }
+                if reload.finalize(activation).await.is_err() {
+                    self.fail_closed(generation);
+                    return;
+                }
+                self.reconcile_authority();
+                self.output_line(
+                    generation,
+                    "NOTE REHASH OK :Configuration reloaded".to_owned(),
+                );
+            }
+            ReloadOutcome::Rejected(rejection) => {
+                if self
+                    .commit_rehash_outcome(
+                        generation,
+                        event,
+                        AdminAuditPhase::OutcomeFailure,
+                        token,
+                    )
+                    .await
+                {
+                    self.output_reload_rejection(generation, rejection);
+                }
+            }
+            ReloadOutcome::Applied(_) => self.fail_closed(generation),
+        }
+    }
+
+    fn prepare_action_event(
+        &mut self,
+        generation: ConnectionGeneration,
+        event: &AdminCommandEvent,
+        phase: AdminAuditPhase,
+    ) -> Option<AdminAuditEvent> {
+        let Some((operator_id, _permissions)) = self
+            .sessions
+            .get(&generation)
+            .and_then(|owned| owned.session.operator())
+        else {
+            self.close(generation, CloseReason::ProtocolError);
+            return None;
+        };
+        let created_at = match self.wall.utc_now() {
+            Ok(now) => now.get(),
+            Err(_) => {
+                self.output_storage_unavailable(generation, event.command.verb());
+                return None;
+            }
+        };
+        match self
+            .audit
+            .prepare_event(self.binding, operator_id, event, phase, created_at)
+        {
+            Ok(audit) => Some(audit),
+            Err(_) => {
+                self.output_storage_unavailable(generation, event.command.verb());
+                None
+            }
+        }
+    }
+
+    async fn commit_action_audit(
+        &mut self,
+        generation: ConnectionGeneration,
+        audit: AdminAuditEvent,
+        token: &CancellationToken,
+    ) -> Result<(), AdminCoreFailure> {
+        self.core.commit_audit(audit.clone(), token).await?;
+        if self.audit.commit_event(&audit).is_err() {
+            self.fail_closed(generation);
+            return Err(AdminCoreFailure::StorageUnavailable);
+        }
+        Ok(())
+    }
+
+    async fn commit_rehash_outcome(
+        &mut self,
+        generation: ConnectionGeneration,
+        event: &AdminCommandEvent,
+        phase: AdminAuditPhase,
+        token: &CancellationToken,
+    ) -> bool {
+        let Some(audit) = self.prepare_action_event(generation, event, phase) else {
+            self.fail_closed(generation);
+            return false;
+        };
+        if self
+            .commit_action_audit(generation, audit, token)
+            .await
+            .is_err()
+        {
+            self.fail_closed(generation);
+            return false;
+        }
+        true
+    }
+
+    fn output_reload_prepare_failure(
+        &self,
+        generation: ConnectionGeneration,
+        failure: ReloadPrepareFailure,
+    ) {
+        let line = match failure {
+            ReloadPrepareFailure::RestartRequired(_)
+            | ReloadPrepareFailure::RestartMaterialChanged => {
+                "FAIL REHASH RESTART_REQUIRED :Configuration requires restart"
+            }
+            ReloadPrepareFailure::Busy => "FAIL REHASH BUSY :Administrative action busy",
+            ReloadPrepareFailure::Unavailable => {
+                "FAIL REHASH STORAGE_UNAVAILABLE :Administrative reload unavailable"
+            }
+            ReloadPrepareFailure::InvalidConfig
+            | ReloadPrepareFailure::InvalidMaterial
+            | ReloadPrepareFailure::RevisionExhausted
+            | ReloadPrepareFailure::ResourceFloor
+            | ReloadPrepareFailure::StorageFloor => {
+                "FAIL REHASH INVALID_CONFIG :Configuration rejected"
+            }
+        };
+        self.output_line(generation, line.to_owned());
+    }
+
+    fn output_reload_rejection(
+        &self,
+        generation: ConnectionGeneration,
+        rejection: ReloadRejection,
+    ) {
+        let line = match rejection {
+            ReloadRejection::Busy | ReloadRejection::Quiescing | ReloadRejection::StaleRevision => {
+                "FAIL REHASH BUSY :Administrative action busy"
+            }
+            ReloadRejection::CurrentUse => "FAIL REHASH INVALID_CONFIG :Configuration rejected",
+            ReloadRejection::StorageUnavailable => {
+                "FAIL REHASH STORAGE_UNAVAILABLE :Administrative reload unavailable"
+            }
+        };
+        self.output_line(generation, line.to_owned());
+    }
+
+    fn output_audit_failure(
+        &self,
+        generation: ConnectionGeneration,
+        verb: &str,
+        failure: AdminCoreFailure,
+    ) {
+        match failure {
+            AdminCoreFailure::Busy | AdminCoreFailure::Quiescing => self.output_line(
+                generation,
+                format!("FAIL {verb} BUSY :Administrative action busy"),
+            ),
+            AdminCoreFailure::StorageUnavailable => {
+                self.output_storage_unavailable(generation, verb);
+            }
+        }
+    }
+
+    fn fail_closed(&self, generation: ConnectionGeneration) {
+        self.close(generation, CloseReason::ProtocolError);
+        if let Some(fatal) = &self.fatal {
+            let _sent = fatal.try_send(());
+        }
+    }
+
+    fn reconcile_authority(&mut self) {
+        let Some(snapshot) = self.config.as_ref().map(RuntimeConfigHandle::load) else {
+            return;
+        };
+        let changed = self.registry != *snapshot.operators();
+        self.admission = snapshot.operator_admission().clone();
+        if !changed {
+            return;
+        }
+        self.registry = snapshot.operators().clone();
+        self.sessions.retain(|_, owned| {
+            let retained = owned.session.reconcile_authority(&self.registry);
+            if !retained {
+                let _closed = owned.output.try_close(CloseReason::ProtocolError);
+            }
+            retained
+        });
     }
 
     async fn prepare_command_lines(
@@ -530,7 +798,7 @@ impl AdminOwner {
 
     fn prepare_read_only(&self, command: &AdminCommand) -> Option<Vec<String>> {
         match command {
-            AdminCommand::Motd => Some(vec!["422 * :MOTD File is missing".to_owned()]),
+            AdminCommand::Motd => Some(self.admin_motd()),
             AdminCommand::Version => Some(vec![
                 format!(
                     ":agenc-ircd 371 * :agenc-ircd-{}",
@@ -577,6 +845,26 @@ impl AdminOwner {
         }
     }
 
+    fn admin_motd(&self) -> Vec<String> {
+        let Some(motd) = self
+            .config
+            .as_ref()
+            .map(RuntimeConfigHandle::load)
+            .and_then(|snapshot| snapshot.motd_arc())
+        else {
+            return vec!["422 * :MOTD File is missing".to_owned()];
+        };
+        let chunks = crate::runtime_config::public_text_chunks(&motd);
+        let mut lines = Vec::with_capacity(chunks.count().saturating_add(2));
+        lines.push(":agenc-ircd 375 * :- agenc-ircd Message of the day -".to_owned());
+        lines.extend(
+            crate::runtime_config::public_text_chunks(&motd)
+                .map(|line| format!(":agenc-ircd 372 * :- {line}")),
+        );
+        lines.push(":agenc-ircd 376 * :End of MOTD".to_owned());
+        lines
+    }
+
     fn output_storage_unavailable(&self, generation: ConnectionGeneration, verb: &str) {
         self.output_line(
             generation,
@@ -618,6 +906,15 @@ impl AdminOwner {
         if let Some(owned) = self.sessions.get(&generation) {
             let _ = owned.output.try_close(reason);
         }
+    }
+}
+
+async fn wait_for_config_change(
+    receiver: &mut Option<watch::Receiver<crate::runtime_config::ConfigRevision>>,
+) -> bool {
+    match receiver {
+        Some(receiver) => receiver.changed().await.is_ok(),
+        None => std::future::pending().await,
     }
 }
 
@@ -921,6 +1218,9 @@ mod tests {
                 core,
                 AdminOwnerRuntime {
                     health: live_health(),
+                    config: None,
+                    reload: None,
+                    fatal: None,
                     entropy: Box::new(
                         ScriptedEntropy::new(vec![0; 64])
                             .map_err(|_| RuntimeError::InvalidValue)?,
@@ -1005,6 +1305,9 @@ mod tests {
                 core,
                 AdminOwnerRuntime {
                     health: live_health(),
+                    config: None,
+                    reload: None,
+                    fatal: None,
                     entropy: Box::new(
                         ScriptedEntropy::new(vec![0; 64])
                             .map_err(|_| RuntimeError::InvalidValue)?,

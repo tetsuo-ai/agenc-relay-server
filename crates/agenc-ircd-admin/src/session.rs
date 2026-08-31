@@ -155,6 +155,33 @@ impl AdminSession {
         }
     }
 
+    /// Applies a validated authority reload to an existing session.
+    ///
+    /// Disabled or credential-mismatched operators are terminated. Retained
+    /// operators receive the new permission set and lose any confirmation
+    /// issued under the previous authority revision.
+    pub fn reconcile_authority(&mut self, registry: &OperatorRegistry) -> bool {
+        let retained =
+            match &mut self.state {
+                State::Authenticated(auth) => registry
+                    .select(auth.operator_id, &self.peer)
+                    .is_ok_and(|record| {
+                        if record.signing_key() != auth.key {
+                            return false;
+                        }
+                        auth.permissions = record.permissions();
+                        auth.pending = None;
+                        true
+                    }),
+                State::AwaitingOper { .. } => true,
+                State::Closed(_) => false,
+            };
+        if !retained {
+            self.state = State::Closed(AdminCloseReason::Terminated);
+        }
+        retained
+    }
+
     /// Records the token the runtime drew for a `Required` command.
     pub fn issue_confirmation(
         &mut self,
@@ -933,6 +960,50 @@ mod tests {
             AdminSessionState::Closed(AdminCloseReason::Terminated)
         );
         unauthenticated.consume_confirmation();
+        Ok(())
+    }
+
+    #[test]
+    fn authority_reload_updates_permissions_consumes_confirmation_and_disconnects_mismatch()
+    -> Result<(), AdminError> {
+        let (mut session, original_registry) = authenticated(&[AdminPermission::Process])?;
+        session
+            .accept_line(
+                &signed_line(0, "DIE :x y", None)?,
+                tick(0)?,
+                &original_registry,
+            )
+            .map_err(|_| AdminError::Confirmation)?;
+        session.issue_confirmation(
+            ConfirmationToken::from_bytes([7; 16]),
+            tick(0)?,
+            b"DIE :x y",
+            Revision::new(5).map_err(|_| AdminError::Overflow)?,
+        )?;
+
+        let expanded = registry(&[AdminPermission::Observe, AdminPermission::Process])?;
+        assert!(session.reconcile_authority(&expanded));
+        assert!(session.operator().is_some_and(|(_, permissions)| {
+            permissions.contains(AdminPermission::Observe)
+                && permissions.contains(AdminPermission::Process)
+        }));
+        assert_eq!(
+            session
+                .accept_line(
+                    &signed_line(1, "DIE :x y", Some(&ConfirmationToken::from_bytes([7; 16])))?,
+                    tick(1)?,
+                    &expanded
+                )
+                .err(),
+            Some(AdminCloseReason::ConfirmationBinding)
+        );
+
+        let mismatched_key = registry_with_key([22; 32])?;
+        assert!(!session.reconcile_authority(&mismatched_key));
+        assert_eq!(
+            session.state(),
+            AdminSessionState::Closed(AdminCloseReason::Terminated)
+        );
         Ok(())
     }
 }

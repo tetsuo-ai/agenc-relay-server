@@ -16,3 +16,5 @@ pub use stream::{
     MAX_HANDSHAKES_IN_PROGRESS, TLS_TO_REGISTRATION_DEADLINE, TlsHandshakeError, TlsStream,
     WRITE_STALL_BUDGET,
 };
+
+pub(crate) use config::{load_certificate_chain_material, load_trust_store_material};

@@ -72,6 +72,29 @@ pub struct OperationalLimits {
     values: OperationalLimitValues,
 }
 
+/// Exact live-use floors captured before a configuration activation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct OperationalUsage {
+    /// Greatest live session count belonging to one account.
+    pub sessions_per_account: usize,
+    /// Greatest joined-channel count on one live session.
+    pub channels_per_session: usize,
+    /// Greatest live membership count in one channel.
+    pub members_per_channel: usize,
+    /// Current coordinator-owned global channel count.
+    pub global_channels: usize,
+    /// Current server-local channel count.
+    pub local_channels: usize,
+    /// Greatest pending-invite count in one channel.
+    pub invites_per_channel: usize,
+    /// Greatest pending-invite count naming one principal.
+    pub invites_per_principal: usize,
+    /// Current pending-invite count across all channels.
+    pub invites_global: usize,
+    /// Greatest contact count on one account.
+    pub contacts_per_account: usize,
+}
+
 impl OperationalLimits {
     /// The hard protocol maxima used until a validated runtime profile is installed.
     pub const HARD_MAX: Self = Self {
@@ -114,6 +137,20 @@ impl OperationalLimits {
     #[must_use]
     pub const fn values(self) -> OperationalLimitValues {
         self.values
+    }
+
+    /// Returns whether every current-use floor fits within this view.
+    #[must_use]
+    pub const fn admits(self, usage: OperationalUsage) -> bool {
+        usage.sessions_per_account <= self.values.sessions_per_account
+            && usage.channels_per_session <= self.values.channels_per_session
+            && usage.members_per_channel <= self.values.members_per_channel
+            && usage.global_channels <= self.values.global_channels
+            && usage.local_channels <= self.values.local_channels
+            && usage.invites_per_channel <= self.values.invites_per_channel
+            && usage.invites_per_principal <= self.values.invites_per_principal
+            && usage.invites_global <= self.values.invites_global
+            && usage.contacts_per_account <= self.values.contacts_per_account
     }
 
     pub(crate) const fn sessions_per_account(self) -> usize {
@@ -1518,6 +1555,58 @@ impl DomainState {
         self.operational_limits
     }
 
+    /// Captures exact live-use floors for an atomic limit replacement.
+    ///
+    /// The caller runs this during reload preparation, before the activation
+    /// safe point is released. Pending invitations are counted conservatively
+    /// until their ordinary expiry mutation removes them.
+    pub fn operational_usage(&self) -> Result<OperationalUsage, DomainError> {
+        let mut account_sessions = BTreeMap::<AccountId, usize>::new();
+        let mut invite_principals = BTreeMap::<Principal, usize>::new();
+        let mut usage = OperationalUsage::default();
+        for session in self.sessions.values() {
+            usage.channels_per_session = usage
+                .channels_per_session
+                .max(session.joined_channels.len());
+            if let Some(account_id) = session.account_id {
+                let count = account_sessions.entry(account_id).or_default();
+                *count = count.checked_add(1).ok_or(DomainError::Overflow)?;
+                usage.sessions_per_account = usage.sessions_per_account.max(*count);
+            }
+        }
+        for channel in self.channels.values() {
+            match channel.scope {
+                ChannelScope::Global => {
+                    usage.global_channels = usage
+                        .global_channels
+                        .checked_add(1)
+                        .ok_or(DomainError::Overflow)?;
+                }
+                ChannelScope::Local => {
+                    usage.local_channels = usage
+                        .local_channels
+                        .checked_add(1)
+                        .ok_or(DomainError::Overflow)?;
+                }
+            }
+            usage.members_per_channel = usage.members_per_channel.max(channel.memberships.len());
+            usage.invites_per_channel = usage.invites_per_channel.max(channel.invites.len());
+            usage.invites_global = usage
+                .invites_global
+                .checked_add(channel.invites.len())
+                .ok_or(DomainError::Overflow)?;
+            for invite in channel.invites.values() {
+                let count = invite_principals.entry(invite.target).or_default();
+                *count = count.checked_add(1).ok_or(DomainError::Overflow)?;
+                usage.invites_per_principal = usage.invites_per_principal.max(*count);
+            }
+        }
+        for account in self.accounts.values() {
+            usage.contacts_per_account = usage.contacts_per_account.max(account.contacts.len());
+        }
+        Ok(usage)
+    }
+
     /// Returns the current authoritative revision.
     #[must_use]
     pub const fn revision(&self) -> Revision {
@@ -1927,6 +2016,27 @@ mod tests {
             OperationalLimits::new(invalid),
             Err(DomainError::InvalidArgument)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn operational_usage_blocks_a_ceiling_below_live_state() -> Result<(), DomainError> {
+        let mut state = DomainState::new()?;
+        let account_id = account(1);
+        state.accounts.insert(
+            account_id,
+            AccountState::new(account_id, Generation::new(1)?, Revision::new(0)?),
+        );
+        insert_session(&mut state, session(1, Some(account_id))?);
+        insert_session(&mut state, session(2, Some(account_id))?);
+        let usage = state.operational_usage()?;
+        assert_eq!(usage.sessions_per_account, 2);
+        assert!(OperationalLimits::HARD_MAX.admits(usage));
+
+        let mut values = OperationalLimits::HARD_MAX.values();
+        values.sessions_per_account = 1;
+        let lowered = OperationalLimits::new(values)?;
+        assert!(!lowered.admits(usage));
         Ok(())
     }
 

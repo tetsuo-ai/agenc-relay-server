@@ -1,8 +1,11 @@
 //! Live Stage 06 daemon composition for a standalone coordinator.
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::time::Duration;
 
 use agenc_ircd_admin::{AdminSessionBinding, OperatorRecord, OperatorRegistry};
@@ -16,11 +19,12 @@ use agenc_ircd_config::{
     Config, ConfigError, ConfigReport, DEFAULT_REDB_CACHE_BYTES, DirectMessageDefault, LimitKey,
     ListenerBind as ConfigListenerBind, ListenerPurpose as ConfigListenerPurpose, NodeRole,
     RATE_ROWS, RegistrationPolicy, SecretSet, ValidationDepth, apply_process_hardening,
-    load_audit_trust_manifest, load_config,
+    load_audit_trust_manifest, load_backup_trust_manifest, load_config, load_public_text,
 };
 use agenc_ircd_crypto::{
     AccountHpkePrivateKey, CryptoError, CryptoWorkerConfig, Ed25519PublicKey, Ed25519SecretKey,
-    LoginIndexKey, OpaqueFakeCredentialKey, OsEntropy, RollbackGuardRootKey, StorageMasterKey,
+    LoginIndexKey, OpaqueFakeCredentialKey, OsEntropy, RollbackGuardRootKey, SemanticHashDomain,
+    StorageMasterKey, semantic_digest,
 };
 use agenc_ircd_domain::{
     DirectMessagePolicy, GuestDirectMessagePolicy, OperationalLimitValues, OperationalLimits,
@@ -59,11 +63,17 @@ use crate::connection::{
 };
 use crate::listener::{
     ListenerContext, ListenerControl, ListenerError, ListenerSet, ListenerSource, ListenerSpec,
-    LocalAdminAdmission, NoObserver, spki_sha256,
+    LocalAdminAdmission, MAX_CLIENT_CONNECTIONS, NoObserver, spki_sha256,
 };
 use crate::observe::health::{Liveness, ReadinessGate, ReadinessStage};
 use crate::purpose::ListenerPurpose;
 use crate::registration::{AccountServiceConfig, RegistrationRouter, RegistrationRouterConfig};
+use crate::runtime_config::{
+    AccountRuntimePolicy, ConfigRevision, PreparedReload, ReloadMode, ReloadOutcome, ReloadPort,
+    ReloadPreparationInbox, ReloadPreparationReply, ReloadPrepareFailure, RestartMaterial,
+    RestartMaterialKey, RuntimeConfigHandle, RuntimeConfigParts, RuntimeConfigSnapshot,
+    reload_channel, reload_preparation_channel,
+};
 use crate::state_core::durable::{AccountingCeilings, KeyDeriver};
 use crate::state_core::inbox::{
     LifecycleControl, LifecycleFailure, LifecyclePhase, MaintenanceEvent, SIGNAL_EVENT_CAPACITY,
@@ -79,8 +89,9 @@ use crate::supervisor::{
 };
 use crate::sync::Arc;
 use crate::tls::{
-    ClientAuth, HandshakeLimiter, PrivateKey, TlsConfigError, TlsEndpointProfile,
-    build_server_config, load_certificate_chain, load_trust_store,
+    ClientAuth, HandshakeLimiter, MAX_HANDSHAKES_IN_PROGRESS, PrivateKey, TlsConfigError,
+    TlsEndpointProfile, build_server_config, load_certificate_chain_material,
+    load_trust_store_material,
 };
 
 const RUNTIME_THREAD_NAME: &str = "agenc-ircd-tokio";
@@ -348,15 +359,29 @@ struct LiveState {
     audit: Option<AuditAuthority>,
 }
 
-fn build_live_state(
-    config: &Config,
-    secrets: &SecretSet,
+struct BuildLiveStateInputs<'a> {
+    config: &'a Config,
+    secrets: &'a SecretSet,
+    runtime_config: &'a RuntimeConfigSnapshot,
     storage: LiveStorage,
     budget: Arc<MemoryBudget>,
     rates: RateLimits,
     monotonic: SystemMonotonicClock,
     liveness: Arc<Liveness>,
-) -> Result<LiveState, DaemonError> {
+}
+
+// agenc-review: focus owner=runtime reviewed=2026-08-30 reason=single startup composition consumes one validated input bundle and constructs the exact storage crypto router and StateCore ownership graph
+fn build_live_state(inputs: BuildLiveStateInputs<'_>) -> Result<LiveState, DaemonError> {
+    let BuildLiveStateInputs {
+        config,
+        secrets,
+        runtime_config,
+        storage,
+        budget,
+        rates,
+        monotonic,
+        liveness,
+    } = inputs;
     let LiveStorage {
         owner,
         seed,
@@ -374,7 +399,7 @@ fn build_live_state(
     let (crypto_bridge, crypto) = CryptoBridge::start(crypto_config)?;
     let commands = registered_commands()?;
     let router = RegistrationRouter::new(
-        registration_config(config, secrets, &seed, &reconstruction)?,
+        registration_config(config, secrets, runtime_config, &seed, &reconstruction)?,
         commands,
     )?;
     reconstruction
@@ -388,6 +413,8 @@ fn build_live_state(
                 database_max_bytes: config.storage.database_max_bytes,
                 backup_max_bytes: config.storage.backup_max_bytes,
             },
+            motd: runtime_config.motd_arc(),
+            public_info: runtime_config.public_info_arc(),
         },
         reconstruction,
         keys,
@@ -415,6 +442,7 @@ fn build_live_state(
 fn registration_config(
     config: &Config,
     secrets: &SecretSet,
+    runtime_config: &RuntimeConfigSnapshot,
     seed: &StateCoreSeed,
     reconstruction: &Reconstruction,
 ) -> Result<RegistrationRouterConfig, DaemonError> {
@@ -426,7 +454,8 @@ fn registration_config(
         network_id: config.network.network_id,
         server_id: config.server.server_id,
         server_prefix: config.server.name.as_str().to_owned(),
-        display_name: config.network.display_name.as_str().to_owned(),
+        display_name: runtime_config.display_name().to_string(),
+        allow_guests: runtime_config.account_policy().allow_guests,
         access_token,
         account_service,
     })
@@ -671,11 +700,22 @@ fn usize_value(value: u64) -> Result<usize, DaemonError> {
     usize::try_from(value).map_err(|_| DaemonError::Runtime(RuntimeError::Overflow))
 }
 
+struct PreparedListenerSpecs {
+    specs: Vec<ListenerSpec>,
+    tls_endpoints: BTreeMap<agenc_ircd_config::ListenerName, Arc<rustls::ServerConfig>>,
+    certificate_fingerprints: BTreeMap<agenc_ircd_config::ListenerName, [u8; 32]>,
+    client_ca_fingerprints: BTreeMap<agenc_ircd_config::ListenerName, [u8; 32]>,
+}
+
+// agenc-review: focus owner=runtime reviewed=2026-08-30 reason=one closed listener preparation pass validates every enabled and disabled TLS identity CA and admission profile before activation
 async fn build_listener_specs(
     config: &Config,
     secrets: &SecretSet,
-) -> Result<Vec<ListenerSpec>, DaemonError> {
+) -> Result<PreparedListenerSpecs, DaemonError> {
     let mut specs = Vec::new();
+    let mut tls_endpoints = BTreeMap::new();
+    let mut certificate_fingerprints = BTreeMap::new();
+    let mut client_ca_fingerprints = BTreeMap::new();
     for listener in config.listeners.iter().filter(|listener| listener.enabled) {
         let purpose = runtime_purpose(listener.purpose)?;
         let tls = if purpose == ListenerPurpose::AdminLocal {
@@ -685,7 +725,8 @@ async fn build_listener_specs(
                 .tls
                 .as_ref()
                 .ok_or(DaemonError::Tls(TlsConfigError::ClientAuthMismatch))?;
-            let chain = load_certificate_chain(files.certificate_file.clone()).await?;
+            let (chain, certificate_fingerprint) =
+                load_certificate_chain_material(files.certificate_file.clone()).await?;
             validate_onion_pin(config, purpose, &chain)?;
             let private = secrets
                 .tls_private_key(&listener.name)
@@ -698,11 +739,28 @@ async fn build_listener_specs(
                     .client_ca_file
                     .clone()
                     .ok_or(DaemonError::Tls(TlsConfigError::ClientAuthMismatch))?;
-                ClientAuth::MutualTls(load_trust_store(ca).await?)
+                let (store, fingerprint) = load_trust_store_material(ca).await?;
+                if client_ca_fingerprints
+                    .insert(listener.name.clone(), fingerprint)
+                    .is_some()
+                {
+                    return Err(DaemonError::Runtime(RuntimeError::InvalidValue));
+                }
+                ClientAuth::MutualTls(store)
             } else {
                 ClientAuth::None
             };
-            Some(build_server_config(profile, chain, key, client_auth).await?)
+            let endpoint = build_server_config(profile, chain, key, client_auth).await?;
+            if tls_endpoints
+                .insert(listener.name.clone(), Arc::clone(&endpoint))
+                .is_some()
+                || certificate_fingerprints
+                    .insert(listener.name.clone(), certificate_fingerprint)
+                    .is_some()
+            {
+                return Err(DaemonError::Runtime(RuntimeError::InvalidValue));
+            }
+            Some(endpoint)
         };
         let local_admin = listener
             .local_admin
@@ -716,6 +774,7 @@ async fn build_listener_specs(
             ConfigListenerBind::Unix(path) => ListenerSource::Unix(path.clone()),
         };
         specs.push(ListenerSpec {
+            name: listener.name.clone(),
             purpose,
             source,
             max_connections: usize_value(listener.max_connections)?,
@@ -723,7 +782,316 @@ async fn build_listener_specs(
             local_admin,
         });
     }
-    Ok(specs)
+    for listener in config.listeners.iter().filter(|listener| !listener.enabled) {
+        if let Some(tls) = &listener.tls {
+            let (_chain, fingerprint) =
+                load_certificate_chain_material(tls.certificate_file.clone()).await?;
+            if certificate_fingerprints
+                .insert(listener.name.clone(), fingerprint)
+                .is_some()
+            {
+                return Err(DaemonError::Runtime(RuntimeError::InvalidValue));
+            }
+        }
+    }
+    for listener in &config.listeners {
+        if let Some(path) = listener.client_ca_file.clone()
+            && !client_ca_fingerprints.contains_key(&listener.name)
+        {
+            let (_store, fingerprint) = load_trust_store_material(path).await?;
+            if client_ca_fingerprints
+                .insert(listener.name.clone(), fingerprint)
+                .is_some()
+            {
+                return Err(DaemonError::Runtime(RuntimeError::InvalidValue));
+            }
+        }
+    }
+    Ok(PreparedListenerSpecs {
+        specs,
+        tls_endpoints,
+        certificate_fingerprints,
+        client_ca_fingerprints,
+    })
+}
+
+struct PreparedRuntimeFiles {
+    motd: Option<Arc<str>>,
+    public_info: Option<Arc<str>>,
+    backup_trust: [u8; 32],
+    audit_trust: [u8; 32],
+}
+
+async fn prepare_runtime_parts(
+    config: &Config,
+    secrets: &SecretSet,
+    operators: OperatorRegistry,
+) -> Result<(RuntimeConfigParts, Vec<ListenerSpec>), DaemonError> {
+    let operator_admission = operator_admission(config);
+    let (default_presence, default_guest_direct_messages, default_direct_messages) =
+        account_defaults(config);
+    let prepared = build_listener_specs(config, secrets).await?;
+    let files = load_runtime_files(config).await?;
+    let federation_ca = match config.federation.private_ca_file.clone() {
+        Some(path) => Some(load_trust_store_material(path).await?.1),
+        None => None,
+    };
+    let restart_material = restart_material(
+        config,
+        secrets,
+        files.backup_trust,
+        files.audit_trust,
+        federation_ca,
+        &prepared.client_ca_fingerprints,
+    )?;
+    let parts = RuntimeConfigParts {
+        tls_endpoints: prepared.tls_endpoints,
+        certificate_fingerprints: prepared.certificate_fingerprints,
+        restart_material,
+        motd: files.motd,
+        public_info: files.public_info,
+        display_name: Arc::from(config.network.display_name.as_str()),
+        operators,
+        operator_admission,
+        account_policy: AccountRuntimePolicy {
+            allow_guests: config.accounts.allow_guests,
+            creation: creation_policy(config, secrets)?,
+            default_presence,
+            default_guest_direct_messages,
+            default_direct_messages,
+        },
+        rates: configured_rates(config)?,
+        operational_limits: operational_limits(config)?,
+        connection_limits: connection_limits(config)?,
+        storage_ceilings: AccountingCeilings {
+            database_max_bytes: config.storage.database_max_bytes,
+            backup_max_bytes: config.storage.backup_max_bytes,
+        },
+        shutdown: shutdown_plan(config)?,
+    };
+    Ok((parts, prepared.specs))
+}
+
+async fn load_runtime_files(config: &Config) -> Result<PreparedRuntimeFiles, DaemonError> {
+    let motd_path = config.privacy.motd_file.clone();
+    let public_info_path = config.privacy.public_info_file.clone();
+    let backup_path = config.storage.backup_trust_manifest_file.clone();
+    let audit_path = config.moderation.audit_trust_manifest_file.clone();
+    tokio::task::spawn_blocking(move || {
+        let motd = motd_path
+            .as_deref()
+            .map(load_public_text)
+            .transpose()?
+            .map(Arc::<str>::from);
+        let public_info = public_info_path
+            .as_deref()
+            .map(load_public_text)
+            .transpose()?
+            .map(Arc::<str>::from);
+        let backup = load_backup_trust_manifest(&backup_path)?;
+        let audit = load_audit_trust_manifest(&audit_path)?;
+        Ok::<_, DaemonError>(PreparedRuntimeFiles {
+            motd,
+            public_info,
+            backup_trust: backup_trust_fingerprint(&backup)?,
+            audit_trust: audit_trust_fingerprint(&audit)?,
+        })
+    })
+    .await
+    .map_err(|_| DaemonError::TaskFailed)?
+}
+
+fn backup_trust_fingerprint(
+    entries: &[agenc_ircd_config::BackupTrustManifestEntry],
+) -> Result<[u8; 32], DaemonError> {
+    trust_fingerprint(entries.iter().map(|entry| {
+        (
+            entry.key_id,
+            entry.ed25519_public_key,
+            entry.not_before,
+            entry.not_after,
+        )
+    }))
+}
+
+fn audit_trust_fingerprint(
+    entries: &[agenc_ircd_config::AuditTrustManifestEntry],
+) -> Result<[u8; 32], DaemonError> {
+    trust_fingerprint(entries.iter().map(|entry| {
+        (
+            entry.key_id,
+            entry.ed25519_public_key,
+            entry.not_before,
+            entry.not_after,
+        )
+    }))
+}
+
+fn trust_fingerprint(
+    entries: impl ExactSizeIterator<Item = ([u8; 32], [u8; 32], u64, u64)>,
+) -> Result<[u8; 32], DaemonError> {
+    const ROW_BYTES: usize = 80;
+    let capacity = entries
+        .len()
+        .checked_mul(ROW_BYTES)
+        .ok_or(RuntimeError::Overflow)?;
+    let mut encoded = Vec::new();
+    encoded
+        .try_reserve_exact(capacity)
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    for (key_id, public_key, not_before, not_after) in entries {
+        encoded.extend_from_slice(&key_id);
+        encoded.extend_from_slice(&public_key);
+        encoded.extend_from_slice(&not_before.to_be_bytes());
+        encoded.extend_from_slice(&not_after.to_be_bytes());
+    }
+    material_fingerprint(&encoded)
+}
+
+fn material_fingerprint(bytes: &[u8]) -> Result<[u8; 32], DaemonError> {
+    Ok(*semantic_digest(SemanticHashDomain::PolicyId, bytes)?.as_bytes())
+}
+
+fn insert_material(
+    material: &mut RestartMaterial,
+    key: RestartMaterialKey,
+    bytes: &[u8],
+) -> Result<(), DaemonError> {
+    material
+        .insert(key, material_fingerprint(bytes)?)
+        .map_err(|_| DaemonError::Runtime(RuntimeError::InvalidValue))
+}
+
+fn insert_optional_material(
+    material: &mut RestartMaterial,
+    key: RestartMaterialKey,
+    bytes: Option<&[u8]>,
+) -> Result<(), DaemonError> {
+    if let Some(bytes) = bytes {
+        insert_material(material, key, bytes)?;
+    }
+    Ok(())
+}
+
+fn restart_material(
+    config: &Config,
+    secrets: &SecretSet,
+    backup_trust: [u8; 32],
+    audit_trust: [u8; 32],
+    federation_ca: Option<[u8; 32]>,
+    client_ca: &BTreeMap<agenc_ircd_config::ListenerName, [u8; 32]>,
+) -> Result<RestartMaterial, DaemonError> {
+    let mut material = RestartMaterial::default();
+    insert_material(
+        &mut material,
+        RestartMaterialKey::StorageMaster,
+        secrets.storage_master().expose(),
+    )?;
+    insert_material(
+        &mut material,
+        RestartMaterialKey::RollbackGuard,
+        secrets.rollback_guard_root().expose(),
+    )?;
+    insert_material(
+        &mut material,
+        RestartMaterialKey::LoginIndex,
+        secrets.login_index().expose(),
+    )?;
+    if let Some(secret) = secrets.login_index_previous() {
+        insert_material(
+            &mut material,
+            RestartMaterialKey::LoginIndexPrevious,
+            secret.expose(),
+        )?;
+    }
+    insert_material(
+        &mut material,
+        RestartMaterialKey::BackupSigning,
+        secrets.backup_signing().expose(),
+    )?;
+    material
+        .insert(RestartMaterialKey::BackupTrust, backup_trust)
+        .map_err(|_| DaemonError::Runtime(RuntimeError::InvalidValue))?;
+    insert_material(
+        &mut material,
+        RestartMaterialKey::AuditSigning,
+        secrets.audit_signing().expose(),
+    )?;
+    material
+        .insert(RestartMaterialKey::AuditTrust, audit_trust)
+        .map_err(|_| DaemonError::Runtime(RuntimeError::InvalidValue))?;
+    if let Some(secret) = secrets.federation_signing() {
+        insert_material(
+            &mut material,
+            RestartMaterialKey::FederationSigning,
+            secret.expose(),
+        )?;
+    }
+    if let Some(fingerprint) = federation_ca {
+        material
+            .insert(RestartMaterialKey::FederationCa, fingerprint)
+            .map_err(|_| DaemonError::Runtime(RuntimeError::InvalidValue))?;
+    }
+    if let Some(secret) = secrets.access_token() {
+        insert_material(
+            &mut material,
+            RestartMaterialKey::AccessToken,
+            secret.expose(),
+        )?;
+    }
+    if let Some(secret) = secrets.invitation_verification() {
+        insert_material(
+            &mut material,
+            RestartMaterialKey::InvitationVerification,
+            secret.expose(),
+        )?;
+    }
+    if let Some(secret) = secrets.account_service_hpke_private() {
+        insert_material(
+            &mut material,
+            RestartMaterialKey::AccountHpkePrivate,
+            secret.expose(),
+        )?;
+    }
+    insert_optional_material(
+        &mut material,
+        RestartMaterialKey::OpaqueServerSetup,
+        secrets
+            .opaque_server_setup()
+            .map(agenc_ircd_config::SecretBlob::expose),
+    )?;
+    if let Some(secret) = secrets.opaque_fake_credential() {
+        insert_material(
+            &mut material,
+            RestartMaterialKey::OpaqueFakeCredential,
+            secret.expose(),
+        )?;
+    }
+    if let Some(secret) = secrets.sequencer_private() {
+        insert_material(
+            &mut material,
+            RestartMaterialKey::SequencerPrivate,
+            secret.expose(),
+        )?;
+    }
+    for listener in &config.listeners {
+        if listener.tls.is_some() {
+            let private = secrets
+                .tls_private_key(&listener.name)
+                .ok_or(DaemonError::Tls(TlsConfigError::InvalidPrivateKey))?;
+            insert_material(
+                &mut material,
+                RestartMaterialKey::TlsPrivate(listener.name.clone()),
+                private.expose(),
+            )?;
+        }
+    }
+    for (listener, fingerprint) in client_ca {
+        material
+            .insert(RestartMaterialKey::ClientCa(listener.clone()), *fingerprint)
+            .map_err(|_| DaemonError::Runtime(RuntimeError::InvalidValue))?;
+    }
+    Ok(material)
 }
 
 fn validate_onion_pin(
@@ -763,10 +1131,15 @@ async fn run(
     readiness.mark(ReadinessStage::Keys);
     readiness.mark(ReadinessStage::StorageRecovered);
     let liveness = Arc::new(Liveness::new());
-    let shutdown = shutdown_plan(&config)?;
-    let specs = build_listener_specs(&config, &secrets).await?;
+    let (parts, specs) = prepare_runtime_parts(&config, &secrets, operators.clone()).await?;
+    let snapshot = Arc::new(RuntimeConfigSnapshot::from_parts(
+        ConfigRevision::INITIAL,
+        config.clone(),
+        parts,
+    ));
+    let runtime_config = RuntimeConfigHandle::new(Arc::clone(&snapshot));
     let budget = memory_budget(&config)?;
-    let rates = configured_rates(&config)?;
+    let rates = snapshot.rates();
     let admission = Arc::new(TransportAdmission::new(
         rates,
         config
@@ -776,15 +1149,16 @@ async fn run(
         Arc::clone(&budget),
         Box::new(SystemMonotonicClock::start()),
     )?);
-    let mut live = build_live_state(
-        &config,
-        &secrets,
+    let mut live = build_live_state(BuildLiveStateInputs {
+        config: &config,
+        secrets: &secrets,
+        runtime_config: snapshot.as_ref(),
         storage,
-        Arc::clone(&budget),
+        budget: Arc::clone(&budget),
         rates,
-        process_clock,
-        Arc::clone(&liveness),
-    )?;
+        monotonic: process_clock,
+        liveness: Arc::clone(&liveness),
+    })?;
     let (inbox, inbox_receiver) = mpsc::channel(SIGNAL_EVENT_CAPACITY);
     let admin_binding = AdminSessionBinding {
         network_id: config.network.network_id,
@@ -793,6 +1167,10 @@ async fn run(
     let (admin_port, admin_inbox) = admin_transport_channel(admin_binding);
     let (admin_core, admin_core_inbox) = admin_core_channel();
     live.state.install_admin_inbox(admin_core_inbox)?;
+    let (reload, reload_inbox) = reload_channel(runtime_config.clone(), Arc::clone(&admission));
+    live.state.install_reload_inbox(reload_inbox)?;
+    let (admin_reload, mut reload_preparation) = reload_preparation_channel(reload.clone());
+    let (admin_fatal, mut admin_failed) = mpsc::channel(1);
     let audit = live
         .audit
         .take()
@@ -808,6 +1186,9 @@ async fn run(
                 readiness: Arc::clone(&readiness),
                 liveness: Arc::clone(&liveness),
             },
+            config: Some(runtime_config.clone()),
+            reload: Some(admin_reload),
+            fatal: Some(admin_fatal),
             entropy: Box::new(OsEntropy),
             clocks: AdminOwnerClocks {
                 monotonic: Box::new(process_clock),
@@ -815,7 +1196,14 @@ async fn run(
             },
         },
     );
-    let context = listener_context(&config, &inbox, admin_port, budget, Arc::clone(&admission))?;
+    let context = listener_context(
+        &config,
+        runtime_config.clone(),
+        &inbox,
+        admin_port,
+        Arc::clone(&budget),
+        Arc::clone(&admission),
+    )?;
     let RunningOwners {
         owner,
         mut supervisor,
@@ -839,16 +1227,21 @@ async fn run(
         liveness: Arc::clone(&liveness),
     })
     .await?;
-    let trigger = wait_for_shutdown(
-        &config_path,
-        &config,
-        &mut signals,
-        &mut state_exited,
-        &mut listener_exited,
-        Arc::clone(&liveness),
-        process_clock,
-    )
+    let trigger = wait_for_shutdown(ShutdownWaitInputs {
+        config_path: &config_path,
+        runtime_config: &runtime_config,
+        reload: &reload,
+        reload_preparation: &mut reload_preparation,
+        admin_failed: &mut admin_failed,
+        budget: Arc::clone(&budget),
+        signals: &mut signals,
+        state_exited: &mut state_exited,
+        listener_exited: &mut listener_exited,
+        liveness: Arc::clone(&liveness),
+        monotonic: process_clock,
+    })
     .await;
+    let shutdown = runtime_config.load().shutdown_plan();
     let mut hooks = RuntimeShutdownHooks {
         owner: Some(owner),
         supervisor: &mut supervisor,
@@ -1036,22 +1429,24 @@ fn spawn_background_owners(
 
 fn listener_context(
     config: &Config,
+    runtime_config: RuntimeConfigHandle,
     inbox: &mpsc::Sender<StateCoreMessage>,
     admin: AdminTransportPort,
     budget: Arc<MemoryBudget>,
     admission: Arc<TransportAdmission>,
 ) -> Result<ListenerContext, DaemonError> {
-    let clients = limit_usize(config, LimitKey::ClientConnections)?;
-    let handshakes = limit_usize(config, LimitKey::TlsHandshakes)?;
+    let _clients = limit_usize(config, LimitKey::ClientConnections)?;
+    let _handshakes = limit_usize(config, LimitKey::TlsHandshakes)?;
     Ok(ListenerContext {
         budget,
-        handshakes: HandshakeLimiter::new(handshakes)?,
-        client_slots: Arc::new(Semaphore::new(clients)),
+        handshakes: HandshakeLimiter::new(MAX_HANDSHAKES_IN_PROGRESS)?,
+        client_slots: Arc::new(Semaphore::new(MAX_CLIENT_CONNECTIONS)),
         admission,
         observer: Arc::new(NoObserver),
         inbox: inbox.clone(),
         admin: Some(admin),
         limits: connection_limits(config)?,
+        runtime_config: Some(runtime_config),
     })
 }
 
@@ -1147,24 +1542,71 @@ async fn run_state_owner(
     }
 }
 
-// agenc-review: focus owner=runtime reviewed=2026-08-30 reason=closed owner loop admits reload or one shutdown trigger and treats premature owner exit as fatal
-async fn wait_for_shutdown(
-    config_path: &Path,
-    active: &Config,
-    signals: &mut mpsc::Receiver<SignalEvent>,
-    state_exited: &mut oneshot::Receiver<StateCoreExit>,
-    listener_exited: &mut oneshot::Receiver<()>,
+struct ShutdownWaitInputs<'a> {
+    config_path: &'a Path,
+    runtime_config: &'a RuntimeConfigHandle,
+    reload: &'a ReloadPort,
+    reload_preparation: &'a mut ReloadPreparationInbox,
+    admin_failed: &'a mut mpsc::Receiver<()>,
+    budget: Arc<MemoryBudget>,
+    signals: &'a mut mpsc::Receiver<SignalEvent>,
+    state_exited: &'a mut oneshot::Receiver<StateCoreExit>,
+    listener_exited: &'a mut oneshot::Receiver<()>,
     liveness: Arc<Liveness>,
     monotonic: SystemMonotonicClock,
-) -> Result<(), DaemonError> {
+}
+
+// agenc-review: focus owner=runtime reviewed=2026-08-30 reason=closed owner loop keeps termination selectable while serializing admin preparation signal coalescing activation progress and critical owner exits
+async fn wait_for_shutdown(inputs: ShutdownWaitInputs<'_>) -> Result<(), DaemonError> {
+    let ShutdownWaitInputs {
+        config_path,
+        runtime_config,
+        reload,
+        reload_preparation,
+        admin_failed,
+        budget,
+        signals,
+        state_exited,
+        listener_exited,
+        liveness,
+        monotonic,
+    } = inputs;
+    type PreparationFuture<'a> =
+        Pin<Box<dyn Future<Output = Result<PreparedReload, ReloadPrepareFailure>> + Send + 'a>>;
+    type ActivationFuture<'a> = Pin<Box<dyn Future<Output = ReloadOutcome> + Send + 'a>>;
+
     let mut progress = tokio::time::interval(Duration::from_secs(5));
     progress.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     progress.tick().await;
     liveness.record_supervisor(monotonic.now());
+    let mut preparation: Option<PreparationFuture<'_>> = None;
+    let mut preparation_origin = None;
+    let mut activation: Option<ActivationFuture<'_>> = None;
+    let mut pending_sighup = false;
     loop {
         let event = tokio::select! {
             biased;
             signal = signals.recv() => Some(SupervisorEvent::Signal(signal)),
+            request = reload_preparation.recv() => {
+                Some(SupervisorEvent::ReloadPreparation(request))
+            },
+            result = async {
+                match preparation.as_mut() {
+                    Some(future) => future.await,
+                    None => std::future::pending().await,
+                }
+            }, if preparation.is_some() => Some(SupervisorEvent::Prepared(result)),
+            outcome = async {
+                match activation.as_mut() {
+                    Some(future) => future.await,
+                    None => std::future::pending().await,
+                }
+            }, if activation.is_some() => Some(SupervisorEvent::Activated(outcome)),
+            () = runtime_config.wait_for_reload_idle(),
+                if pending_sighup && preparation.is_none() && activation.is_none() => {
+                    Some(SupervisorEvent::ReloadIdle)
+                },
+            _failure = admin_failed.recv() => Some(SupervisorEvent::AdminFailure),
             _exit = &mut *state_exited => Some(SupervisorEvent::State),
             _listener = &mut *listener_exited => Some(SupervisorEvent::Listener),
             _ = progress.tick() => None,
@@ -1175,12 +1617,64 @@ async fn wait_for_shutdown(
         };
         match event {
             SupervisorEvent::Signal(Some(SignalEvent::Reload)) => {
-                let _result = validate_reload(config_path, active).await;
+                if preparation.is_some() || activation.is_some() || pending_sighup {
+                    pending_sighup = true;
+                } else {
+                    preparation = Some(Box::pin(prepare_reload(
+                        config_path,
+                        runtime_config,
+                        &budget,
+                    )));
+                    preparation_origin = Some(ReloadPreparationOrigin::Signal);
+                }
+            }
+            SupervisorEvent::ReloadPreparation(Some(reply)) => {
+                if preparation.is_some() || activation.is_some() || pending_sighup {
+                    reply.send(Err(ReloadPrepareFailure::Busy));
+                } else {
+                    preparation = Some(Box::pin(prepare_reload(
+                        config_path,
+                        runtime_config,
+                        &budget,
+                    )));
+                    preparation_origin = Some(ReloadPreparationOrigin::Admin(reply));
+                }
+            }
+            SupervisorEvent::Prepared(result) => {
+                preparation = None;
+                match preparation_origin.take() {
+                    Some(ReloadPreparationOrigin::Signal) => match result {
+                        Ok(prepared) => {
+                            activation =
+                                Some(Box::pin(reload.activate(prepared, ReloadMode::Signal)));
+                        }
+                        Err(ReloadPrepareFailure::Busy) => pending_sighup = true,
+                        Err(_) => {}
+                    },
+                    Some(ReloadPreparationOrigin::Admin(reply)) => reply.send(result),
+                    None => return Err(DaemonError::TaskFailed),
+                }
+            }
+            SupervisorEvent::Activated(_outcome) => {
+                activation = None;
+            }
+            SupervisorEvent::ReloadIdle => {
+                pending_sighup = false;
+                preparation = Some(Box::pin(prepare_reload(
+                    config_path,
+                    runtime_config,
+                    &budget,
+                )));
+                preparation_origin = Some(ReloadPreparationOrigin::Signal);
             }
             SupervisorEvent::Signal(Some(SignalEvent::Terminate | SignalEvent::Interrupt)) => {
                 return Ok(());
             }
-            SupervisorEvent::Signal(None) | SupervisorEvent::State | SupervisorEvent::Listener => {
+            SupervisorEvent::Signal(None)
+            | SupervisorEvent::ReloadPreparation(None)
+            | SupervisorEvent::AdminFailure
+            | SupervisorEvent::State
+            | SupervisorEvent::Listener => {
                 return Err(DaemonError::TaskFailed);
             }
         }
@@ -1189,8 +1683,18 @@ async fn wait_for_shutdown(
 
 enum SupervisorEvent {
     Signal(Option<SignalEvent>),
+    ReloadPreparation(Option<ReloadPreparationReply>),
+    Prepared(Result<PreparedReload, ReloadPrepareFailure>),
+    Activated(ReloadOutcome),
+    ReloadIdle,
+    AdminFailure,
     State,
     Listener,
+}
+
+enum ReloadPreparationOrigin {
+    Signal,
+    Admin(ReloadPreparationReply),
 }
 
 struct RuntimeShutdownHooks<'a> {
@@ -1272,22 +1776,54 @@ fn validate_shutdown_report(report: ShutdownReport) -> Result<(), DaemonError> {
     }
 }
 
-async fn validate_reload(config_path: &Path, active: &Config) -> Result<(), DaemonError> {
+async fn prepare_reload(
+    config_path: &Path,
+    runtime_config: &RuntimeConfigHandle,
+    budget: &MemoryBudget,
+) -> Result<PreparedReload, ReloadPrepareFailure> {
+    let lease = runtime_config.begin_reload()?;
     let path = config_path.to_path_buf();
-    let active = active.clone();
-    tokio::task::spawn_blocking(move || {
+    let active = runtime_config.load();
+    let (candidate, secrets, operators) = tokio::task::spawn_blocking(move || {
         let candidate = load_config(&path, ValidationDepth::Host)?;
         validate_profile(&candidate)?;
-        let _secrets = SecretSet::load(&candidate)?;
-        let diff = agenc_ircd_config::ConfigDiff::compute(&active, &candidate);
-        if diff.is_empty() {
-            Ok(())
-        } else {
-            Err(DaemonError::UnsupportedProfile)
-        }
+        let secrets = SecretSet::load(&candidate)?;
+        let operators = operator_registry(&candidate)?;
+        Ok::<_, DaemonError>((candidate, secrets, operators))
     })
     .await
-    .map_err(|_| DaemonError::TaskFailed)?
+    .map_err(|_| ReloadPrepareFailure::InvalidConfig)?
+    .map_err(reload_prepare_failure)?;
+    let purposes = enabled_runtime_purposes(&candidate).map_err(reload_prepare_failure)?;
+    let pool = startup_arithmetic(
+        candidate.server.memory_budget_bytes,
+        candidate.server.crypto_worker_threads,
+        &purposes,
+        candidate.limits.values.get(LimitKey::ParsedArenaBytes),
+    )
+    .map_err(|_| ReloadPrepareFailure::ResourceFloor)?;
+    if pool.protocol_pool_bytes() != budget.capacity()
+        || pool.working_set_floor_bytes() > budget.capacity()
+    {
+        return Err(ReloadPrepareFailure::ResourceFloor);
+    }
+    let (parts, _unused_specs) = prepare_runtime_parts(&candidate, &secrets, operators)
+        .await
+        .map_err(reload_prepare_failure)?;
+    let mut prepared = PreparedReload::new(&active, candidate, parts)?;
+    prepared.attach_lease(lease);
+    Ok(prepared)
+}
+
+fn reload_prepare_failure(error: DaemonError) -> ReloadPrepareFailure {
+    match error {
+        DaemonError::Runtime(
+            RuntimeError::BudgetArithmetic
+            | RuntimeError::BudgetBelowWorkingSet
+            | RuntimeError::MemoryExhausted,
+        ) => ReloadPrepareFailure::ResourceFloor,
+        _ => ReloadPrepareFailure::InvalidConfig,
+    }
 }
 
 async fn run_maintenance(

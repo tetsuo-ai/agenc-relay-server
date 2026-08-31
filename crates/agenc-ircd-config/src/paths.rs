@@ -200,3 +200,8 @@ pub(crate) fn public_text(path: &Path) -> Result<String, ConfigError> {
     }
     Ok(text)
 }
+
+/// Loads one host-validated MOTD or public-info file.
+pub fn load_public_text(path: &Path) -> Result<String, ConfigError> {
+    public_text(path)
+}

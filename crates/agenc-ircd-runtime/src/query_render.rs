@@ -90,7 +90,7 @@ fn render_information(
 ) -> Result<Vec<WireMessage>, RuntimeError> {
     let prefix = context.server_prefix();
     match query {
-        InformationQuery::Motd => one_numeric(prefix, 422, nickname, &[], "MOTD File is missing"),
+        InformationQuery::Motd => render_motd(context, nickname),
         InformationQuery::Lusers => render_lusers(context.domain(), prefix, nickname),
         InformationQuery::Version => info_lines(
             prefix,
@@ -105,13 +105,13 @@ fn render_information(
                 .to_string();
             one_numeric(prefix, 391, nickname, &[prefix], &seconds)
         }
-        InformationQuery::Admin => info_lines(
-            prefix,
+        InformationQuery::Admin => public_info_lines(
+            context,
             nickname,
             &["AgenC network administration is available out of band"],
         ),
-        InformationQuery::Info => info_lines(
-            prefix,
+        InformationQuery::Info => public_info_lines(
+            context,
             nickname,
             &["AgenC IRC daemon", "Privacy-preserving federated chat"],
         ),
@@ -121,6 +121,61 @@ fn render_information(
             &["Server topology is not publicly exposed"],
         ),
     }
+}
+
+fn render_motd(
+    context: &StateCoreContext,
+    nickname: &str,
+) -> Result<Vec<WireMessage>, RuntimeError> {
+    let prefix = context.server_prefix();
+    let Some(motd) = context.motd() else {
+        return one_numeric(prefix, 422, nickname, &[], "MOTD File is missing");
+    };
+    let mut frames = Vec::new();
+    frames
+        .try_reserve_exact(
+            crate::runtime_config::public_text_chunks(motd)
+                .count()
+                .saturating_add(2),
+        )
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    push_numeric(
+        &mut frames,
+        prefix,
+        375,
+        nickname,
+        &[],
+        "Message of the day",
+    )?;
+    for line in crate::runtime_config::public_text_chunks(motd) {
+        push_numeric(&mut frames, prefix, 372, nickname, &[], line)?;
+    }
+    push_numeric(&mut frames, prefix, 376, nickname, &[], "End of MOTD")?;
+    Ok(frames)
+}
+
+fn public_info_lines(
+    context: &StateCoreContext,
+    nickname: &str,
+    fallback: &[&str],
+) -> Result<Vec<WireMessage>, RuntimeError> {
+    let Some(public_info) = context.public_info() else {
+        return info_lines(context.server_prefix(), nickname, fallback);
+    };
+    let prefix = context.server_prefix();
+    let mut frames = Vec::new();
+    frames
+        .try_reserve_exact(
+            crate::runtime_config::public_text_chunks(public_info)
+                .count()
+                .saturating_add(1),
+        )
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    for line in crate::runtime_config::public_text_chunks(public_info) {
+        push_numeric(&mut frames, prefix, 371, nickname, &[], line)?;
+    }
+    push_numeric(&mut frames, prefix, 374, nickname, &[], "End of INFO")?;
+    Ok(frames)
 }
 
 fn render_lusers(

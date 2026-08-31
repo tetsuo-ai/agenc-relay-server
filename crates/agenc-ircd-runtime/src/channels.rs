@@ -174,6 +174,11 @@ impl RegisteredCommandExecutor {
             next_sequence: 1,
         }
     }
+
+    /// Returns whether no deferred registered command spans a reload.
+    pub(crate) fn reload_ready(&self) -> bool {
+        self.pending.is_empty() && self.by_connection.is_empty() && self.by_sequence.is_empty()
+    }
 }
 
 impl RegisteredCommandExecutor {
