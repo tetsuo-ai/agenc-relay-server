@@ -428,7 +428,7 @@ fn trust_manifest(kind: &str, id: StorageDigest, public_key: [u8; 32]) -> String
         "{kind}_trust_version = 1\n\n[[key]]\nkey_id = \"{}\"\ned25519_public_key = \"{}\"\nnot_before = 0\nnot_after = {}\n",
         encode_base64url_32(id.as_bytes()),
         encode_base64url_32(&public_key),
-        u64::MAX,
+        i64::MAX,
     )
 }
 
@@ -873,6 +873,20 @@ mod tests {
         }
         enable_test_listener(&root.0)?;
         let config = load_config(&config_path, ValidationDepth::Document)?;
+        assert_eq!(
+            agenc_ircd_config::load_backup_trust_manifest(
+                &config.storage.backup_trust_manifest_file,
+            )?
+            .len(),
+            1,
+        );
+        assert_eq!(
+            agenc_ircd_config::load_audit_trust_manifest(
+                &config.moderation.audit_trust_manifest_file,
+            )?
+            .len(),
+            1,
+        );
         let secrets = SecretSet::load(&config)?;
         let qualifications = embedded_storage_qualifications()?;
         let state_directory = StateDirectory::open(&config.storage.state_dir, &qualifications)?;

@@ -591,6 +591,7 @@ impl AdminOwner {
         let first_retention = tokio::time::Instant::now() + AUDIT_RETENTION_SWEEP;
         let mut retention = tokio::time::interval_at(first_retention, AUDIT_RETENTION_SWEEP);
         retention.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut transport_open = true;
         loop {
             let event = tokio::select! {
                 biased;
@@ -615,9 +616,12 @@ impl AdminOwner {
                     }
                     break;
                 }
-                message = inbox.receiver.recv() => match message {
+                message = inbox.receiver.recv(), if transport_open => match message {
                     Some(message) => AdminOwnerEvent::Transport(message),
-                    None => break,
+                    None => {
+                        transport_open = false;
+                        continue;
+                    }
                 },
             };
             match event {
@@ -2402,6 +2406,7 @@ mod tests {
             .quiesce()
             .await
             .map_err(|_| RuntimeError::InvalidValue)?;
+        drop(port);
         let acknowledgements = lifecycle
             .drain()
             .await

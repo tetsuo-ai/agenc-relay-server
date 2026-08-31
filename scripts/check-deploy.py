@@ -48,7 +48,7 @@ SERVICE_VALUES = {
     ("Service", "LimitCORE"): "0",
     ("Service", "LimitMEMLOCK"): "infinity",
     ("Service", "RuntimeDirectory"): "agenc-ircd",
-    ("Service", "RuntimeDirectoryMode"): "0700",
+    ("Service", "RuntimeDirectoryMode"): "0750",
     ("Service", "StateDirectory"): "agenc-ircd/state agenc-ircd/backups agenc-ircd/logs",
     ("Service", "StateDirectoryMode"): "0700",
     ("Service", "LogsDirectory"): "agenc-ircd",
