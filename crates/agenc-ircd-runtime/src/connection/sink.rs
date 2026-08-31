@@ -16,6 +16,7 @@ use tokio::sync::Notify;
 
 use crate::RuntimeError;
 use crate::budget::MemoryPermit;
+use crate::state_core::inbox::CloseReason;
 use crate::sync::Arc;
 
 /// Maximum frames in one sink demand: the 512 semantic replies of one
@@ -501,9 +502,14 @@ pub trait ClientSink: Send + Sync {
     /// Marks the connection closing after a full-queue exclusion.
     fn begin_slow_consumer_close(&self);
 
-    /// Queues an orderly shutdown after all already accepted frames and
-    /// returns an acknowledgement completed by the transport writer.
-    fn shutdown_after_flush(&self) -> FlushAcknowledgement;
+    /// Queues an orderly close after all already accepted frames and returns
+    /// an acknowledgement completed by the transport writer.
+    fn close_after_flush(&self, reason: CloseReason) -> FlushAcknowledgement;
+
+    /// Queues an orderly daemon shutdown after all accepted frames.
+    fn shutdown_after_flush(&self) -> FlushAcknowledgement {
+        self.close_after_flush(CloseReason::Shutdown)
+    }
 
     /// Copies input-free writer queue occupancy without exposing queued
     /// frames or connection identity.

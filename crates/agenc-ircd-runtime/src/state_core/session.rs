@@ -379,7 +379,10 @@ mod tests {
 
         fn begin_slow_consumer_close(&self) {}
 
-        fn shutdown_after_flush(&self) -> crate::connection::FlushAcknowledgement {
+        fn close_after_flush(
+            &self,
+            _reason: crate::state_core::inbox::CloseReason,
+        ) -> crate::connection::FlushAcknowledgement {
             crate::connection::FlushAcknowledgement::complete()
         }
 

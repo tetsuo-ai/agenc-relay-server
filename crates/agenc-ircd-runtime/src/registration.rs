@@ -16,13 +16,17 @@ use agenc_ircd_client_wire::{
 };
 use agenc_ircd_crypto::{SemanticHashDomain, semantic_digest};
 use agenc_ircd_domain::{DisplayNameValue, NicknameValue, SessionSeed};
-use agenc_ircd_types::{Generation, NetworkId, PublicCloak, Revision, ServerId, SessionId, UserId};
+use agenc_ircd_types::{
+    Generation, NetworkId, PublicCloak, RecoveryEpoch, Revision, ServerId, SessionId, UserId,
+};
 use subtle::ConstantTimeEq as _;
 use zeroize::Zeroizing;
 
 use crate::RuntimeError;
 pub use crate::account_service::AccountServiceConfig;
-use crate::account_service::{AccountServiceCoordinator, CarrierCompletion, CarrierRoute};
+use crate::account_service::{
+    AccountCreationPolicy, AccountServiceCoordinator, CarrierCompletion, CarrierRoute,
+};
 use crate::admission::{BucketDemand, BucketKey, BucketKind};
 use crate::connection::sink::ConnectionGeneration;
 use crate::state_core::fanout::FanoutRequest;
@@ -129,7 +133,10 @@ impl RegistrationRouter {
         if account_service.network_id != network_id || account_service.server_id != server_id {
             return Err(RuntimeError::InvalidValue);
         }
-        let advertised = core_capabilities()?;
+        let advertised = core_capabilities(
+            account_service.creation_policy,
+            account_service.recovery_epoch,
+        )?;
         Ok(Self {
             config: RegistrationRuntimeConfig {
                 network_id,
@@ -1519,27 +1526,46 @@ impl From<RouteOutcome> for ActionStep {
     }
 }
 
-fn core_capabilities() -> Result<CapabilityProfile, RuntimeError> {
+fn core_capabilities(
+    creation_policy: AccountCreationPolicy,
+    recovery_epoch: RecoveryEpoch,
+) -> Result<CapabilityProfile, RuntimeError> {
+    let recovery_value = format!("v1.{}", recovery_epoch.to_base64url());
     let mut capabilities = Vec::new();
-    for name in [
-        "account-notify",
-        "account-tag",
-        "away-notify",
-        "batch",
-        "cap-notify",
-        "echo-message",
-        "labeled-response",
-        "message-ids",
-        "message-tags",
-        "sasl",
-        "server-time",
-        "setname",
-        "standard-replies",
-        "utf8only",
+    for (name, value) in [
+        ("account-notify", None),
+        ("account-tag", None),
+        ("away-notify", None),
+        ("batch", None),
+        ("cap-notify", None),
+        ("echo-message", None),
+        ("extended-join", None),
+        ("invite-notify", None),
+        ("labeled-response", None),
+        ("message-ids", None),
+        ("message-tags", None),
+        ("monitor", None),
+        ("multi-prefix", None),
+        ("sasl", Some("AGENC-OPAQUE")),
+        ("server-time", None),
+        ("setname", None),
+        ("standard-replies", None),
+        ("userhost-in-names", None),
+        ("utf8only", None),
+        ("agenc.ag/privacy", Some("v1")),
+        ("agenc.ag/account-controls", Some("v1")),
+        ("agenc.ag/account-credentials", Some("v1")),
+        ("agenc.ag/channel-controls", Some("v1")),
+        ("agenc.ag/recovery", Some(recovery_value.as_str())),
     ] {
-        let value = (name == "sasl").then_some("AGENC-OPAQUE");
         capabilities
             .push(CapabilitySpec::new(name, value).map_err(|_| RuntimeError::InvalidValue)?);
+    }
+    if !matches!(creation_policy, AccountCreationPolicy::Closed) {
+        capabilities.push(
+            CapabilitySpec::new("agenc.ag/account-create", Some("v1"))
+                .map_err(|_| RuntimeError::InvalidValue)?,
+        );
     }
     CapabilityProfile::new(capabilities).map_err(|_| RuntimeError::InvalidValue)
 }
@@ -1669,7 +1695,8 @@ mod tests {
 
     #[test]
     fn core_capabilities_and_cloaks_are_closed() -> Result<(), RuntimeError> {
-        let profile = core_capabilities()?;
+        let recovery_epoch = RecoveryEpoch::from_bytes([0; 16]);
+        let profile = core_capabilities(AccountCreationPolicy::Closed, recovery_epoch)?;
         let names = profile
             .capabilities()
             .iter()
@@ -1684,15 +1711,38 @@ mod tests {
                 "batch",
                 "cap-notify",
                 "echo-message",
+                "extended-join",
+                "invite-notify",
                 "labeled-response",
                 "message-ids",
                 "message-tags",
+                "monitor",
+                "multi-prefix",
                 "sasl",
                 "server-time",
                 "setname",
                 "standard-replies",
+                "userhost-in-names",
                 "utf8only",
+                "agenc.ag/privacy",
+                "agenc.ag/account-controls",
+                "agenc.ag/account-credentials",
+                "agenc.ag/channel-controls",
+                "agenc.ag/recovery",
             ]
+        );
+        assert_eq!(
+            profile
+                .capabilities()
+                .iter()
+                .find(|capability| capability.name() == "agenc.ag/recovery")
+                .and_then(CapabilitySpec::value),
+            Some("v1.AAAAAAAAAAAAAAAAAAAAAA")
+        );
+        let open = core_capabilities(AccountCreationPolicy::Open, recovery_epoch)?;
+        assert_eq!(
+            open.capabilities().last().map(CapabilitySpec::name),
+            Some("agenc.ag/account-create")
         );
         let cloak = cloak_from_random(&[0; 26])?;
         assert_eq!(cloak.user_component(), b"aaaaaaaaaa");

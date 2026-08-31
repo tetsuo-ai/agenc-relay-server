@@ -449,14 +449,14 @@ impl ClientSink for WriterQueue {
         self.close(CloseReason::SlowConsumer, ClosePolicy::Immediate);
     }
 
-    fn shutdown_after_flush(&self) -> FlushAcknowledgement {
+    fn close_after_flush(&self, reason: CloseReason) -> FlushAcknowledgement {
         let mut state = lock(&self.shared.state);
         let acknowledgement = state
             .flush_acknowledgement
             .get_or_insert_with(FlushAcknowledgement::pending)
             .clone();
         if state.closed.is_none() {
-            state.closed = Some(CloseReason::Shutdown);
+            state.closed = Some(reason);
         }
         drop(state);
         self.shared.notify.notify_one();
@@ -721,6 +721,30 @@ mod tests {
             later.prepare(tentative, None).err(),
             Some(QueueAllocationError::Closed)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn reasoned_after_flush_keeps_accepted_frames_and_first_reason() -> Result<(), RuntimeError> {
+        let budget = budget();
+        let queue = queue(&budget, 1, QueueLimits::new(400, 100, 12)?)?;
+        let accepted = frame(&budget, "credential changed")?;
+        reserve_and_commit(&queue, vec![accepted.clone()])?;
+
+        let acknowledgement = queue.close_after_flush(CloseReason::ClientQuit);
+        assert!(!acknowledgement.is_acknowledged());
+        let repeated = queue.close_after_flush(CloseReason::Shutdown);
+        repeated.acknowledge();
+        assert!(acknowledgement.is_acknowledged());
+        assert_eq!(queue.closed_reason(), Some(CloseReason::ClientQuit));
+        let QueuePop::Frame(frame) = queue.pop() else {
+            return Err(RuntimeError::InvalidValue);
+        };
+        assert!(Arc::ptr_eq(&frame, &accepted));
+        assert!(matches!(
+            queue.pop(),
+            QueuePop::Closed(CloseReason::ClientQuit)
+        ));
         Ok(())
     }
 

@@ -57,6 +57,7 @@ use crate::connection::sink::ConnectionGeneration;
 use crate::mutation_render::render_account_credential_replacement;
 use crate::state_core::durable::AccountServiceDurableWrite;
 use crate::state_core::fanout::FanoutRequest;
+use crate::state_core::inbox::CloseReason;
 use crate::state_core::reconstruct::RecoveredAccountTransactionCleanup;
 use crate::state_core::session::{AdmissionClass, MAX_TRACKED_CONNECTIONS};
 use crate::state_core::timers::{DRIFT_CHECK_INTERVAL_MILLIS, TimedId, TimerEntry, TimerKind};
@@ -1901,7 +1902,7 @@ impl AccountServiceCoordinator {
         let Some(subcommand) = message.take_parameter(0) else {
             return CarrierRoute::Close;
         };
-        let parameter = message.take_parameter(0);
+        let parameter = message.take_parameter(1);
         let now = context.now().get();
         let (route, result) = {
             let Some(connection) = self.connections.get_mut(&generation) else {
@@ -3709,10 +3710,13 @@ impl AccountServiceCoordinator {
         context
             .send_to(request.generation, frames)
             .map_err(|_| RuntimeError::MemoryExhausted)?;
+        if credential_changed {
+            close_account_authority_after_flush(context, request.generation);
+        }
         Ok(vec![CarrierCompletion {
             generation: request.generation,
             carrier_generation: request.carrier_generation,
-            close: credential_changed,
+            close: false,
         }])
     }
 
@@ -5224,7 +5228,6 @@ impl AccountServiceCoordinator {
                 );
             }
         }
-        let mut completions = Vec::new();
         for invalidated in invalidated_grants {
             let Some(binding) = self
                 .connections
@@ -5246,11 +5249,7 @@ impl AccountServiceCoordinator {
                 connection.credential_id = None;
                 connection.fresh_authentication = None;
             }
-            completions.push(CarrierCompletion {
-                generation: invalidated,
-                carrier_generation: 0,
-                close: true,
-            });
+            close_account_authority_after_flush(context, invalidated);
         }
         for fenced_generation in fenced {
             if let Some(connection) = self.connections.get_mut(&fenced_generation) {
@@ -5260,27 +5259,14 @@ impl AccountServiceCoordinator {
                 connection.transaction = None;
                 connection.credential_transaction = None;
             }
-            completions.push(CarrierCompletion {
-                generation: fenced_generation,
-                carrier_generation: if fenced_generation == generation {
-                    carrier_generation
-                } else {
-                    0
-                },
-                close: true,
-            });
+            close_account_authority_after_flush(context, fenced_generation);
         }
-        if !completions
-            .iter()
-            .any(|completion| completion.generation == generation)
-        {
-            completions.push(CarrierCompletion {
-                generation,
-                carrier_generation,
-                close: true,
-            });
-        }
-        completions
+        close_account_authority_after_flush(context, generation);
+        vec![CarrierCompletion {
+            generation,
+            carrier_generation,
+            close: false,
+        }]
     }
 
     // agenc-review: allow owner=runtime reviewed=2026-08-29 reason=the postcommit finish authority carries every independently fenced session and key-transition result explicitly
@@ -5881,6 +5867,15 @@ fn account_deletion_writes(
         )?);
     }
     Ok(writes)
+}
+
+fn close_account_authority_after_flush(
+    context: &StateCoreContext,
+    generation: ConnectionGeneration,
+) {
+    if let Some(sink) = context.sessions().sink_for_generation(generation) {
+        let _acknowledgement = sink.close_after_flush(CloseReason::ClientQuit);
+    }
 }
 
 fn account_deletion_completions(

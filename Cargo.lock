@@ -24,7 +24,11 @@ dependencies = [
  "agenc-ircd-storage",
  "agenc-ircd-testkit",
  "agenc-ircd-types",
+ "argon2",
+ "base64",
+ "opaque-ke",
  "rustls",
+ "sha2 0.10.9",
 ]
 
 [[package]]

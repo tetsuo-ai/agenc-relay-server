@@ -546,7 +546,10 @@ mod tests {
             self.closes.fetch_add(1, Ordering::SeqCst);
         }
 
-        fn shutdown_after_flush(&self) -> crate::connection::FlushAcknowledgement {
+        fn close_after_flush(
+            &self,
+            _reason: crate::state_core::inbox::CloseReason,
+        ) -> crate::connection::FlushAcknowledgement {
             crate::connection::FlushAcknowledgement::complete()
         }
 

@@ -19,14 +19,22 @@ use agenc_ircd_admin::{
     AdminChallenge, AdminCommandTbs, AdminSessionId, Challenge, ConfirmationToken,
     TransportBinding, TransportKind, decode_fixed_base64url, encode_base64url, render_admin_tag,
 };
-use agenc_ircd_auth::OpaqueProfile;
+use agenc_ircd_auth::{
+    ACCOUNT_SERVICE_ENVELOPE_BYTES, ACCOUNT_SERVICE_RESPONSE_BYTES, AccountRequestPayload,
+    AccountServiceEnvelope, AccountServiceResponse, AccountServiceResponsePayload,
+    AuthenticationFinish, AuthenticationStart, Completion, CreationFinish, CreationStart,
+    CredentialChangeFinish, CredentialChangeStart, OpaqueKe1, OpaqueKe3, OpaqueProfile,
+    OpaqueRegistrationRequest, encode_request_plaintext, finish_registration,
+    open_and_parse_response,
+};
 use agenc_ircd_config::{
     DEFAULT_REDB_CACHE_BYTES, DisplayLabel, DnsName, InitProfile, InitValues, NodeRole,
     OperatorTemplate, encode_base64url_32, render_template,
 };
 use agenc_ircd_crypto::{
-    AccountHpkePrivateKey, Ed25519SecretKey, LoginIndexKey, RollbackGuardRootKey, StorageDigest,
-    StorageMasterKey, audit_signing_key_id, backup_signing_key_id,
+    AccountHpkePrivateKey, AccountRequestBinding, AccountResponseOpenToken, Ed25519SecretKey,
+    LoginIndexKey, OsEntropy, RollbackGuardRootKey, StorageDigest, StorageMasterKey,
+    audit_signing_key_id, backup_signing_key_id, seal_account_request,
 };
 use agenc_ircd_runtime::tls::{CLIENT_ALPN, TrustStore, build_client_config};
 use agenc_ircd_storage::{
@@ -38,8 +46,21 @@ use agenc_ircd_storage::{
 };
 use agenc_ircd_testkit::TlsFixture;
 use agenc_ircd_types::{
-    AccountRandomId, ChannelInstanceId, DatabaseId, NetworkId, OperatorId, RecoveryEpoch, ServerId,
+    AccountId, AccountRandomId, AccountServiceCompletionStatus, ChannelInstanceId, DatabaseId,
+    NetworkId, NormalizedLogin, OpaqueCredentialId, OperatorId, RecoveryEpoch, RequestId, ServerId,
     ServerIncarnation, UserId,
+};
+use argon2::{Algorithm, Argon2, Params, Version};
+use base64::Engine as _;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use opaque_ke::errors::InternalError;
+use opaque_ke::generic_array::{ArrayLength, GenericArray};
+use opaque_ke::ksf::Ksf;
+use opaque_ke::rand::{CryptoRng, Error as RandError, RngCore};
+use opaque_ke::{
+    CipherSuite, ClientLogin, ClientLoginFinishParameters, ClientRegistration,
+    ClientRegistrationFinishParameters, CredentialResponse, Identifiers, RegistrationResponse,
+    Ristretto255, TripleDh,
 };
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
@@ -55,11 +76,150 @@ const DISK_RESERVE_BYTES: u64 = 67_108_864;
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
 const START_TIMEOUT: Duration = Duration::from_secs(20);
 const STOP_TIMEOUT: Duration = Duration::from_secs(20);
+const ACCOUNT_HPKE_PRIVATE: [u8; 32] = [14; 32];
+const ACCOUNT_PASSWORD: &[u8] = b"stage six live account password";
+const REPLACEMENT_PASSWORD: &[u8] = b"stage six replacement password";
+const TEST_ARGON2_SALT: [u8; 16] = [0; 16];
+const AUTH_CHUNK_CHARACTERS: usize = 400;
+const ACCOUNT_REQUEST_CHARACTERS: usize = 6_302;
+const ACCOUNT_RESPONSE_CHARACTERS: usize = 5_790;
+const SASL_REQUEST_CHARACTERS: usize = 6_304;
+const SASL_RESPONSE_CHARACTERS: usize = 5_792;
 
 static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+struct TestOpaqueSuite;
+
+impl CipherSuite for TestOpaqueSuite {
+    type OprfCs = Ristretto255;
+    type KeyExchange = TripleDh<Ristretto255, opaque_sha2::Sha512>;
+    type Ksf = TestArgon2id;
+}
+
+#[derive(Default)]
+struct TestArgon2id;
+
+impl Ksf for TestArgon2id {
+    fn hash<L: ArrayLength<u8>>(
+        &self,
+        input: GenericArray<u8, L>,
+    ) -> Result<GenericArray<u8, L>, InternalError> {
+        if input.len() != 64 {
+            return Err(InternalError::KsfError);
+        }
+        let parameters =
+            Params::new(65_536, 3, 4, Some(64)).map_err(|_| InternalError::KsfError)?;
+        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, parameters);
+        let mut output = GenericArray::default();
+        argon2
+            .hash_password_into(&input, &TEST_ARGON2_SALT, &mut output)
+            .map_err(|_| InternalError::KsfError)?;
+        Ok(output)
+    }
+}
+
+struct TestOpaqueRng {
+    failed: bool,
+}
+
+impl TestOpaqueRng {
+    const fn new() -> Self {
+        Self { failed: false }
+    }
+
+    fn fill_or_latch(&mut self, destination: &mut [u8]) {
+        if self.failed || OsEntropy::fill(destination).is_err() {
+            destination.fill(0);
+            self.failed = true;
+        }
+    }
+
+    fn require_success(&self) -> TestResult {
+        if self.failed {
+            Err(failure("test OPAQUE entropy was unavailable"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl RngCore for TestOpaqueRng {
+    fn next_u32(&mut self) -> u32 {
+        let mut bytes = [0; 4];
+        self.fill_or_latch(&mut bytes);
+        u32::from_be_bytes(bytes)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut bytes = [0; 8];
+        self.fill_or_latch(&mut bytes);
+        u64::from_be_bytes(bytes)
+    }
+
+    fn fill_bytes(&mut self, destination: &mut [u8]) {
+        self.fill_or_latch(destination);
+    }
+
+    fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), RandError> {
+        self.fill_or_latch(destination);
+        Ok(())
+    }
+}
+
+impl CryptoRng for TestOpaqueRng {}
+
 fn failure(message: impl Into<String>) -> TestError {
     io::Error::other(message.into()).into()
+}
+
+fn opaque_context(network_id: NetworkId) -> Vec<u8> {
+    let mut context = b"agenc-chat account authentication v1".to_vec();
+    context.extend_from_slice(network_id.as_bytes());
+    context
+}
+
+fn opaque_identifiers<'a>(
+    network_id: &'a NetworkId,
+    credential_id: &'a OpaqueCredentialId,
+) -> Identifiers<'a> {
+    Identifiers {
+        client: Some(credential_id.expose_for_account_service()),
+        server: Some(network_id.as_bytes()),
+    }
+}
+
+fn seal_account_payload(
+    network_id: NetworkId,
+    request_seed: u8,
+    payload: AccountRequestPayload,
+) -> TestResult<(
+    [u8; ACCOUNT_SERVICE_ENVELOPE_BYTES],
+    AccountResponseOpenToken,
+)> {
+    let private_key = AccountHpkePrivateKey::from_bytes(ACCOUNT_HPKE_PRIVATE)?;
+    let public_key = private_key.public_key()?;
+    let binding = AccountRequestBinding::new(
+        network_id,
+        RecoveryEpoch::from_bytes([6; 16]),
+        public_key.key_id(),
+        RequestId::from_bytes([request_seed; 16]),
+        payload.message_kind(),
+    );
+    let plaintext = encode_request_plaintext(&payload)?;
+    let (sealed, token) = seal_account_request(public_key, binding, plaintext.expose_for_hpke())?;
+    let envelope = AccountServiceEnvelope::from_sealed(sealed)?;
+    Ok((*envelope.as_bytes(), token))
+}
+
+fn open_account_payload(
+    token: AccountResponseOpenToken,
+    bytes: Vec<u8>,
+) -> TestResult<AccountServiceResponsePayload> {
+    let encoded: [u8; ACCOUNT_SERVICE_RESPONSE_BYTES] = bytes
+        .try_into()
+        .map_err(|_| failure("account response had the wrong exact length"))?;
+    let response = AccountServiceResponse::parse(encoded)?;
+    Ok(open_and_parse_response(token, &response)?)
 }
 
 struct TestRoot(PathBuf);
@@ -232,6 +392,11 @@ impl LiveFixture {
         )?;
         replace_once(
             &mut config,
+            "registration = \"closed\"",
+            "registration = \"open\"",
+        )?;
+        replace_once(
+            &mut config,
             "quiesce_seconds = 5\ndrain_seconds = 20\nflush_seconds = 10\nstop_seconds = 5",
             "quiesce_seconds = 2\ndrain_seconds = 4\nflush_seconds = 4\nstop_seconds = 8",
         )?;
@@ -282,7 +447,7 @@ impl LiveFixture {
         replace_once(
             &mut config,
             "\n[privacy]",
-            "\n[limits.rate.registered_command]\nrefill_tokens = 40\nrefill_seconds = 1\nburst = 200\n\n[limits.rate.expensive_query]\nrefill_tokens = 2\nrefill_seconds = 1\nburst = 10\n\n[privacy]",
+            "\n[limits.rate.preauth_command]\nrefill_tokens = 10\nrefill_seconds = 1\nburst = 50\n\n[limits.rate.registered_command]\nrefill_tokens = 40\nrefill_seconds = 1\nburst = 200\n\n[limits.rate.expensive_query]\nrefill_tokens = 2\nrefill_seconds = 1\nburst = 10\n\n[privacy]",
         )?;
         let config_path = etc.join("config.toml");
         write_private(&config_path, config.as_bytes())?;
@@ -366,6 +531,7 @@ fn write_trust_manifest(
     write_private(path, document.as_bytes())
 }
 
+// agenc-review: allow owner=tests reviewed=2026-08-31 reason=the exact startup database fixture carries each independent persisted identity and secret explicitly
 #[allow(clippy::too_many_arguments)]
 fn initialize_database(
     state_dir: &Path,
@@ -654,6 +820,43 @@ struct IrcClient {
     reader: BufReader<TlsClient>,
 }
 
+#[derive(Clone, Copy)]
+enum AccountCarrier {
+    Create,
+    Credentials,
+}
+
+impl AccountCarrier {
+    const fn command(self) -> &'static str {
+        match self {
+            Self::Create => "ACCTCREATE",
+            Self::Credentials => "ACCTCRED",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum AccountPhase {
+    Start,
+    Finish,
+}
+
+impl AccountPhase {
+    const fn command(self) -> &'static str {
+        match self {
+            Self::Start => "START",
+            Self::Finish => "FINISH",
+        }
+    }
+
+    const fn response(self) -> &'static str {
+        match self {
+            Self::Start => "CHALLENGE",
+            Self::Finish => "COMPLETE",
+        }
+    }
+}
+
 impl IrcClient {
     fn connect(fixture: &LiveFixture) -> TestResult<Self> {
         let deadline = Instant::now() + START_TIMEOUT;
@@ -692,6 +895,202 @@ impl IrcClient {
     fn send_until(&mut self, command: &str, ending: &str) -> TestResult<Vec<String>> {
         self.send(command)?;
         read_until(&mut self.reader, |line| line.contains(ending))
+    }
+
+    fn negotiate_sasl(&mut self) -> TestResult {
+        self.send("CAP LS 302")?;
+        let advertised = read_until(&mut self.reader, |line| {
+            line.contains(" CAP * LS ") && !line.contains(" CAP * LS * :")
+        })?;
+        assert_contains(&advertised, "sasl=AGENC-OPAQUE")?;
+        assert_contains(&advertised, "agenc.ag/account-create=v1")?;
+        assert_contains(&advertised, "agenc.ag/account-credentials=v1")?;
+        let acknowledged = self.send_until(
+            "CAP REQ :agenc.ag/account-create agenc.ag/account-credentials sasl",
+            " CAP * ACK ",
+        )?;
+        assert_contains(&acknowledged, "agenc.ag/account-create")?;
+        assert_contains(&acknowledged, "agenc.ag/account-credentials")?;
+        assert_contains(&acknowledged, "sasl")
+    }
+
+    fn complete_registration(&mut self, nickname: &str) -> TestResult<Vec<String>> {
+        self.send(&format!("NICK {nickname}"))?;
+        self.send(&format!("USER {nickname} 0 * :Stage Six Account"))?;
+        self.send("CAP END")?;
+        read_until(&mut self.reader, |line| {
+            line.contains(" 376 ") || line.contains(" 422 ")
+        })
+    }
+
+    fn account_exchange(
+        &mut self,
+        carrier: AccountCarrier,
+        phase: AccountPhase,
+        envelope: &[u8; ACCOUNT_SERVICE_ENVELOPE_BYTES],
+        token: AccountResponseOpenToken,
+    ) -> TestResult<AccountServiceResponsePayload> {
+        let command = carrier.command();
+        self.send(&format!(
+            "{command} {} {ACCOUNT_SERVICE_ENVELOPE_BYTES}",
+            phase.command()
+        ))?;
+        let ready = read_line_for(&mut self.reader, "account carrier READY")?;
+        let ready_marker = format!(
+            " {command} READY {} {ACCOUNT_SERVICE_ENVELOPE_BYTES}",
+            phase.command()
+        );
+        if !ready.contains(&ready_marker) {
+            return Err(failure(format!(
+                "account carrier did not enter the requested phase: {ready}"
+            )));
+        }
+
+        let encoded_request = URL_SAFE_NO_PAD.encode(envelope);
+        if encoded_request.len() != ACCOUNT_REQUEST_CHARACTERS {
+            return Err(failure("account request had the wrong encoded length"));
+        }
+        for chunk in encoded_request.as_bytes().chunks(AUTH_CHUNK_CHARACTERS) {
+            self.send(&format!("{command} DATA {}", std::str::from_utf8(chunk)?))?;
+        }
+        self.send(&format!("{command} END"))?;
+
+        let response_start = read_line_for(&mut self.reader, "account carrier response header")
+            .map_err(|error| {
+                failure(format!(
+                    "{command} {} response header: {error}",
+                    phase.command()
+                ))
+            })?;
+        let response_marker = format!(
+            " {command} {} {ACCOUNT_SERVICE_RESPONSE_BYTES}",
+            phase.response()
+        );
+        if !response_start.contains(&response_marker) {
+            return Err(failure(format!(
+                "account carrier response header was invalid: {response_start}"
+            )));
+        }
+
+        let mut encoded_response = String::with_capacity(ACCOUNT_RESPONSE_CHARACTERS);
+        let mut ended = false;
+        for _ in 0..16 {
+            let line = read_line_for(&mut self.reader, "account carrier response body")?;
+            let mut fields = line.split_ascii_whitespace();
+            let valid_prefix = fields.next().is_some_and(|prefix| prefix.starts_with(':'));
+            let valid_command = fields.next() == Some(command);
+            match fields.next() {
+                Some("DATA") if valid_prefix && valid_command => {
+                    let Some(chunk) = fields.next() else {
+                        return Err(failure("account response omitted a DATA chunk"));
+                    };
+                    if fields.next().is_some()
+                        || encoded_response.len().saturating_add(chunk.len())
+                            > ACCOUNT_RESPONSE_CHARACTERS
+                    {
+                        return Err(failure("account response DATA framing was invalid"));
+                    }
+                    encoded_response.push_str(chunk);
+                }
+                Some("END") if valid_prefix && valid_command && fields.next().is_none() => {
+                    ended = true;
+                    break;
+                }
+                _ => return Err(failure("account response framing was invalid")),
+            }
+        }
+        if !ended || encoded_response.len() != ACCOUNT_RESPONSE_CHARACTERS {
+            return Err(failure(
+                "account response did not have its exact bounded shape",
+            ));
+        }
+        let decoded = URL_SAFE_NO_PAD
+            .decode(encoded_response.as_bytes())
+            .map_err(|_| failure("account response Base64url was invalid"))?;
+        if URL_SAFE_NO_PAD.encode(&decoded) != encoded_response {
+            return Err(failure("account response was not canonical Base64url"));
+        }
+        open_account_payload(token, decoded)
+    }
+
+    fn begin_sasl(&mut self) -> TestResult {
+        self.send("AUTHENTICATE AGENC-OPAQUE")?;
+        let line = read_line_for(&mut self.reader, "SASL mechanism acknowledgement")?;
+        if line.ends_with(" AUTHENTICATE +") {
+            Ok(())
+        } else {
+            Err(failure("SASL carrier did not accept AGENC-OPAQUE"))
+        }
+    }
+
+    fn sasl_exchange(
+        &mut self,
+        envelope: &[u8; ACCOUNT_SERVICE_ENVELOPE_BYTES],
+        token: AccountResponseOpenToken,
+    ) -> TestResult<AccountServiceResponsePayload> {
+        let encoded_request = STANDARD.encode(envelope);
+        if encoded_request.len() != SASL_REQUEST_CHARACTERS {
+            return Err(failure("SASL request had the wrong encoded length"));
+        }
+        for chunk in encoded_request.as_bytes().chunks(AUTH_CHUNK_CHARACTERS) {
+            self.send(&format!("AUTHENTICATE {}", std::str::from_utf8(chunk)?))?;
+        }
+
+        let mut encoded_response = String::with_capacity(SASL_RESPONSE_CHARACTERS);
+        for chunk_index in 0..15 {
+            let line = read_line(&mut self.reader).map_err(|error| {
+                failure(format!(
+                    "SASL response ended after {chunk_index} chunks and {} characters: {error}",
+                    encoded_response.len()
+                ))
+            })?;
+            let mut fields = line.split_ascii_whitespace();
+            let valid_prefix = fields.next().is_some_and(|prefix| prefix.starts_with(':'));
+            let valid_command = fields.next() == Some("AUTHENTICATE");
+            let Some(chunk) = fields.next() else {
+                return Err(failure("SASL response omitted a payload chunk"));
+            };
+            if !valid_prefix
+                || !valid_command
+                || fields.next().is_some()
+                || encoded_response.len().saturating_add(chunk.len()) > SASL_RESPONSE_CHARACTERS
+            {
+                return Err(failure("SASL response framing was invalid"));
+            }
+            encoded_response.push_str(chunk);
+            if encoded_response.len() == SASL_RESPONSE_CHARACTERS {
+                break;
+            }
+        }
+        if encoded_response.len() != SASL_RESPONSE_CHARACTERS {
+            return Err(failure("SASL response had the wrong encoded length"));
+        }
+        let decoded = STANDARD
+            .decode(encoded_response.as_bytes())
+            .map_err(|_| failure("SASL response Base64 was invalid"))?;
+        if STANDARD.encode(&decoded) != encoded_response {
+            return Err(failure("SASL response was not canonical Base64"));
+        }
+        open_account_payload(token, decoded)
+    }
+
+    fn expect_closed_without_output(&mut self) -> TestResult {
+        let mut byte = [0_u8; 1];
+        match self.reader.read(&mut byte) {
+            Ok(0) => Ok(()),
+            Ok(_) => Err(failure("closed account session returned unexpected output")),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::BrokenPipe
+                        | io::ErrorKind::UnexpectedEof
+                ) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn register(&mut self) -> TestResult<Vec<String>> {
@@ -742,6 +1141,10 @@ fn read_line<R: BufRead>(reader: &mut R) -> TestResult<String> {
     Ok(line.trim_end_matches(['\r', '\n']).to_owned())
 }
 
+fn read_line_for<R: BufRead>(reader: &mut R, stage: &str) -> TestResult<String> {
+    read_line(reader).map_err(|error| failure(format!("{stage}: {error}")))
+}
+
 fn read_until<R: BufRead>(
     reader: &mut R,
     mut complete: impl FnMut(&str) -> bool,
@@ -773,6 +1176,283 @@ fn assert_contains(lines: &[String], expected: &str) -> TestResult {
             "reply did not contain {expected:?}: {lines:?}"
         )))
     }
+}
+
+fn committed_account(completion: Completion, expected: Option<AccountId>) -> TestResult<AccountId> {
+    if completion.status() != AccountServiceCompletionStatus::Committed {
+        return Err(failure("account-service operation was rejected"));
+    }
+    let account_id = completion
+        .account_id()
+        .ok_or_else(|| failure("committed account-service operation omitted its account"))?;
+    if expected.is_some_and(|expected| expected != account_id) {
+        return Err(failure(
+            "account-service completion named an unexpected account",
+        ));
+    }
+    Ok(account_id)
+}
+
+fn create_live_account(client: &mut IrcClient, fixture: &LiveFixture) -> TestResult<AccountId> {
+    let mut rng = TestOpaqueRng::new();
+    let registration = ClientRegistration::<TestOpaqueSuite>::start(&mut rng, ACCOUNT_PASSWORD)?;
+    let registration_request = OpaqueRegistrationRequest::from_bytes(
+        registration.message.serialize().as_slice().try_into()?,
+    )?;
+    let (start_envelope, start_token) = seal_account_payload(
+        fixture.network_id,
+        41,
+        AccountRequestPayload::CreationStart(CreationStart {
+            network_id: fixture.network_id,
+            login: NormalizedLogin::prepare("stage-six-account")?,
+            registration_request,
+            invitation: None,
+        }),
+    )?;
+    let challenge = client.account_exchange(
+        AccountCarrier::Create,
+        AccountPhase::Start,
+        &start_envelope,
+        start_token,
+    )?;
+    let AccountServiceResponsePayload::CreationChallenge {
+        transaction_id,
+        credential_id,
+        response,
+    } = challenge
+    else {
+        return Err(failure("account creation returned the wrong challenge"));
+    };
+    let registration_finish = registration.state.finish(
+        &mut rng,
+        ACCOUNT_PASSWORD,
+        RegistrationResponse::<TestOpaqueSuite>::deserialize(
+            response.expose_for_account_response(),
+        )?,
+        ClientRegistrationFinishParameters::new(
+            opaque_identifiers(&fixture.network_id, &credential_id),
+            Some(&TestArgon2id),
+        ),
+    )?;
+    let registration_record = finish_registration(
+        registration_finish
+            .message
+            .serialize()
+            .as_slice()
+            .try_into()?,
+    )?;
+    rng.require_success()?;
+
+    let (finish_envelope, finish_token) = seal_account_payload(
+        fixture.network_id,
+        42,
+        AccountRequestPayload::CreationFinish(CreationFinish {
+            network_id: fixture.network_id,
+            transaction_id,
+            registration_record,
+        }),
+    )?;
+    let completion = client.account_exchange(
+        AccountCarrier::Create,
+        AccountPhase::Finish,
+        &finish_envelope,
+        finish_token,
+    )?;
+    let AccountServiceResponsePayload::CreationCompletion(completion) = completion else {
+        return Err(failure("account creation returned the wrong completion"));
+    };
+    let account_id = committed_account(completion, None)?;
+    let note = read_line_for(&mut client.reader, "account creation receipt")?;
+    if !note.contains(&format!(
+        " NOTE ACCTCREATE CREATED {} :Account created",
+        account_id.to_text()
+    )) {
+        return Err(failure("account creation omitted its committed receipt"));
+    }
+    Ok(account_id)
+}
+
+fn authenticate_live_account(
+    client: &mut IrcClient,
+    fixture: &LiveFixture,
+    password: &[u8],
+    request_seed: u8,
+    expected_account: AccountId,
+) -> TestResult {
+    let mut rng = TestOpaqueRng::new();
+    let login = ClientLogin::<TestOpaqueSuite>::start(&mut rng, password)?;
+    let ke1 = OpaqueKe1::from_bytes(login.message.serialize().as_slice().try_into()?)?;
+    let (start_envelope, start_token) = seal_account_payload(
+        fixture.network_id,
+        request_seed,
+        AccountRequestPayload::AuthenticationStart(AuthenticationStart {
+            network_id: fixture.network_id,
+            login: NormalizedLogin::prepare("stage-six-account")?,
+            ke1,
+        }),
+    )?;
+    client.begin_sasl()?;
+    let challenge = client.sasl_exchange(&start_envelope, start_token)?;
+    let AccountServiceResponsePayload::AuthenticationChallenge {
+        transaction_id,
+        credential_id,
+        ke2,
+    } = challenge
+    else {
+        return Err(failure("authentication returned the wrong challenge"));
+    };
+    let context = opaque_context(fixture.network_id);
+    let login_finish = login.state.finish(
+        &mut rng,
+        password,
+        CredentialResponse::<TestOpaqueSuite>::deserialize(ke2.expose_for_account_response())?,
+        ClientLoginFinishParameters::new(
+            Some(&context),
+            opaque_identifiers(&fixture.network_id, &credential_id),
+            Some(&TestArgon2id),
+        ),
+    )?;
+    let ke3 = OpaqueKe3::from_bytes(login_finish.message.serialize().as_slice().try_into()?)?;
+    rng.require_success()?;
+    let finish_seed = request_seed
+        .checked_add(1)
+        .ok_or_else(|| failure("authentication request seed overflow"))?;
+    let (finish_envelope, finish_token) = seal_account_payload(
+        fixture.network_id,
+        finish_seed,
+        AccountRequestPayload::AuthenticationFinish(AuthenticationFinish {
+            network_id: fixture.network_id,
+            transaction_id,
+            ke3,
+        }),
+    )?;
+    let completion = client.sasl_exchange(&finish_envelope, finish_token)?;
+    let AccountServiceResponsePayload::AuthenticationCompletion(completion) = completion else {
+        return Err(failure("authentication returned the wrong completion"));
+    };
+    let _account = committed_account(completion, Some(expected_account))?;
+    let numeric = read_line_for(&mut client.reader, "SASL completion numeric")?;
+    if !numeric.contains(" 903 ") {
+        return Err(failure("successful authentication omitted numeric 903"));
+    }
+    Ok(())
+}
+
+fn replace_live_credential(
+    client: &mut IrcClient,
+    fixture: &LiveFixture,
+    account_id: AccountId,
+) -> TestResult {
+    let mut rng = TestOpaqueRng::new();
+    let registration =
+        ClientRegistration::<TestOpaqueSuite>::start(&mut rng, REPLACEMENT_PASSWORD)?;
+    let registration_request = OpaqueRegistrationRequest::from_bytes(
+        registration.message.serialize().as_slice().try_into()?,
+    )?;
+    let (start_envelope, start_token) = seal_account_payload(
+        fixture.network_id,
+        45,
+        AccountRequestPayload::CredentialChangeStart(CredentialChangeStart {
+            network_id: fixture.network_id,
+            account_id,
+            registration_request,
+        }),
+    )?;
+    let challenge = client.account_exchange(
+        AccountCarrier::Credentials,
+        AccountPhase::Start,
+        &start_envelope,
+        start_token,
+    )?;
+    let AccountServiceResponsePayload::CredentialChangeChallenge {
+        transaction_id,
+        credential_id,
+        response,
+    } = challenge
+    else {
+        return Err(failure("credential change returned the wrong challenge"));
+    };
+    let registration_finish = registration.state.finish(
+        &mut rng,
+        REPLACEMENT_PASSWORD,
+        RegistrationResponse::<TestOpaqueSuite>::deserialize(
+            response.expose_for_account_response(),
+        )?,
+        ClientRegistrationFinishParameters::new(
+            opaque_identifiers(&fixture.network_id, &credential_id),
+            Some(&TestArgon2id),
+        ),
+    )?;
+    let registration_record = finish_registration(
+        registration_finish
+            .message
+            .serialize()
+            .as_slice()
+            .try_into()?,
+    )?;
+    rng.require_success()?;
+    let (finish_envelope, finish_token) = seal_account_payload(
+        fixture.network_id,
+        46,
+        AccountRequestPayload::CredentialChangeFinish(CredentialChangeFinish {
+            network_id: fixture.network_id,
+            transaction_id,
+            registration_record,
+        }),
+    )?;
+    let completion = client.account_exchange(
+        AccountCarrier::Credentials,
+        AccountPhase::Finish,
+        &finish_envelope,
+        finish_token,
+    )?;
+    let AccountServiceResponsePayload::CredentialChangeCompletion(completion) = completion else {
+        return Err(failure("credential change returned the wrong completion"));
+    };
+    let _account = committed_account(completion, Some(account_id))?;
+    let note = read_line_for(&mut client.reader, "credential replacement receipt")?;
+    if !note.contains(" NOTE ACCTCRED CHANGED :Account credential changed; reconnect required") {
+        return Err(failure("credential change omitted its committed receipt"));
+    }
+    client.expect_closed_without_output()
+}
+
+fn connect_registered_account(
+    fixture: &LiveFixture,
+    nickname: &str,
+    request_seed: u8,
+    account_id: AccountId,
+) -> TestResult<IrcClient> {
+    let mut client = IrcClient::connect(fixture)?;
+    client.negotiate_sasl()?;
+    authenticate_live_account(
+        &mut client,
+        fixture,
+        REPLACEMENT_PASSWORD,
+        request_seed,
+        account_id,
+    )?;
+    let registered = client.complete_registration(nickname)?;
+    assert_contains(&registered, &format!(" 001 {nickname} "))?;
+    Ok(client)
+}
+
+fn exercise_account_client(fixture: &LiveFixture) -> TestResult<(IrcClient, AccountId)> {
+    let account_id = {
+        let mut creation_client = IrcClient::connect(fixture)?;
+        creation_client.negotiate_sasl()?;
+        create_live_account(&mut creation_client, fixture)?
+    };
+
+    let mut client = IrcClient::connect(fixture)?;
+    client.negotiate_sasl()?;
+    authenticate_live_account(&mut client, fixture, ACCOUNT_PASSWORD, 43, account_id)?;
+    let registered = client.complete_registration("AccountSeed")?;
+    assert_contains(&registered, " 001 AccountSeed ")?;
+    replace_live_credential(&mut client, fixture, account_id)?;
+
+    let client = connect_registered_account(fixture, "AccountLive", 47, account_id)?;
+    Ok((client, account_id))
 }
 
 fn exercise_client(fixture: &LiveFixture) -> TestResult<IrcClient> {
@@ -848,7 +1528,7 @@ fn exercise_client(fixture: &LiveFixture) -> TestResult<IrcClient> {
     Ok(client)
 }
 
-fn exercise_admin(fixture: &LiveFixture) -> TestResult<AdminClient<'_>> {
+fn exercise_admin(fixture: &LiveFixture, live_account: AccountId) -> TestResult<AdminClient<'_>> {
     let mut admin = AdminClient::connect(fixture)?;
     assert_eq!(admin.command_line("PING live")?, "PONG :live");
     admin.send("PONG live", None)?;
@@ -905,6 +1585,20 @@ fn exercise_admin(fixture: &LiveFixture) -> TestResult<AdminClient<'_>> {
         &[admin.command_line(&format!("ACCOUNT RESTORE {account} :test target"))?],
         "FAIL ACCOUNT INVALID_TARGET",
     )?;
+    assert_eq!(
+        admin.command_line(&format!(
+            "ACCOUNT SUSPEND {} 60 :live policy test",
+            live_account.to_text()
+        ))?,
+        "NOTE ACCOUNT OK :Account suspended"
+    );
+    assert_eq!(
+        admin.command_line(&format!(
+            "ACCOUNT RESTORE {} :live policy test",
+            live_account.to_text()
+        ))?,
+        "NOTE ACCOUNT OK :Account restored"
+    );
     let channel = ChannelInstanceId::from_bytes([33; 16]).to_base64url();
     assert_contains(
         &[admin.command_line(&format!("CHANNEL QUARANTINE {channel} :test target"))?],
@@ -940,13 +1634,27 @@ fn production_daemon_serves_restarts_reconciles_and_stops() -> TestResult {
     let fixture = LiveFixture::create()?;
     let mut first = DaemonProcess::start(&fixture.config_path)?;
     let mut client = exercise_client(&fixture)?;
-    let mut admin = exercise_admin(&fixture)?;
+    let (mut account_client, account_id) = match exercise_account_client(&fixture) {
+        Ok(result) => result,
+        Err(error) => {
+            return Err(failure(format!(
+                "account transcript failed: {error}; logs: {}",
+                fixture.log_excerpt()
+            )));
+        }
+    };
+    let mut admin = exercise_admin(&fixture, account_id)?;
+    account_client.expect_closed_without_output()?;
+    let mut restored_account =
+        connect_registered_account(&fixture, "AccountRestored", 49, account_id)?;
 
     let disposable = AdminClient::connect(&fixture)?;
     disposable.quit()?;
     admin.confirm_process("RESTART :test restart")?;
     let shutdown = client.shutdown_lines()?;
     assert_contains(&shutdown, "ERROR :Server shutting down")?;
+    let account_shutdown = restored_account.shutdown_lines()?;
+    assert_contains(&account_shutdown, "ERROR :Server shutting down")?;
     let restart_status = first.wait()?;
     if restart_status.code() != Some(75) {
         return Err(failure(format!(
@@ -956,6 +1664,8 @@ fn production_daemon_serves_restarts_reconciles_and_stops() -> TestResult {
     }
 
     let mut second = DaemonProcess::start(&fixture.config_path)?;
+    let mut persisted_account =
+        connect_registered_account(&fixture, "AccountPersisted", 51, account_id)?;
     let mut admin = AdminClient::connect(&fixture)?;
     let info = admin.command_until("INFO", " 374 ")?;
     assert_eq!(
@@ -963,6 +1673,8 @@ fn production_daemon_serves_restarts_reconciles_and_stops() -> TestResult {
         Some(":agenc-ircd 371 * :health readiness=1 liveness=1")
     );
     admin.confirm_process("DIE :test shutdown")?;
+    let account_shutdown = persisted_account.shutdown_lines()?;
+    assert_contains(&account_shutdown, "ERROR :Server shutting down")?;
     assert!(second.wait()?.success());
 
     let onboarding = Command::new(env!("CARGO_BIN_EXE_agenc-ircd"))
