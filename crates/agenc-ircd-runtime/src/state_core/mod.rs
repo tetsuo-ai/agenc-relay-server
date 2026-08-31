@@ -381,6 +381,12 @@ pub enum StageAccepted {
     AppliedInStep(Box<ApplyReceipt>),
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum DurableAdmission {
+    Ordinary,
+    ShutdownSessionClose,
+}
+
 /// Why an ephemeral plan could not be applied; nothing changed.
 #[derive(Debug)]
 pub enum EphemeralRefused {
@@ -668,12 +674,57 @@ impl StateCoreContext {
         response_count_increment: u64,
         account_service_writes: Vec<AccountServiceDurableWrite>,
     ) -> Result<StageAccepted, StageRefused> {
+        self.stage_durable_inner(
+            plan,
+            request,
+            origin,
+            response_count_increment,
+            account_service_writes,
+            DurableAdmission::Ordinary,
+        )
+    }
+
+    /// Stages the one internal session-close transition emitted after an
+    /// admitted transport ends during shutdown. Client and admin mutations
+    /// continue to use the ordinary quiescence gate.
+    pub(crate) fn stage_shutdown_session_close(
+        &mut self,
+        plan: MutationPlan,
+        request: FanoutRequest,
+    ) -> Result<StageAccepted, StageRefused> {
+        let hidden_sessions = plan
+            .events()
+            .iter()
+            .filter(|event| matches!(event, agenc_ircd_domain::DomainEvent::SessionHidden(_)))
+            .count();
+        if hidden_sessions != 1 {
+            return Err(StageRefused::Domain(DomainError::InvariantViolation));
+        }
+        self.stage_durable_inner(
+            plan,
+            request,
+            None,
+            0,
+            Vec::new(),
+            DurableAdmission::ShutdownSessionClose,
+        )
+    }
+
+    fn stage_durable_inner(
+        &mut self,
+        plan: MutationPlan,
+        request: FanoutRequest,
+        origin: Option<StagedOrigin>,
+        response_count_increment: u64,
+        account_service_writes: Vec<AccountServiceDurableWrite>,
+        admission: DurableAdmission,
+    ) -> Result<StageAccepted, StageRefused> {
         let account_service_writes = account_service_writes
             .into_iter()
             .map(AccountServiceDurableWrite::revalidate)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| StageRefused::Domain(DomainError::InvariantViolation))?;
-        if self.quiescing {
+        if self.quiescing && admission == DurableAdmission::Ordinary {
             return Err(StageRefused::Quiescing);
         }
         if self.in_flight() || self.conflicts(&plan) {

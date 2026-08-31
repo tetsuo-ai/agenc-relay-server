@@ -16,9 +16,15 @@ dependencies = [
 name = "agenc-ircd"
 version = "0.0.0"
 dependencies = [
+ "agenc-ircd-admin",
+ "agenc-ircd-auth",
  "agenc-ircd-config",
+ "agenc-ircd-crypto",
  "agenc-ircd-runtime",
  "agenc-ircd-storage",
+ "agenc-ircd-testkit",
+ "agenc-ircd-types",
+ "rustls",
 ]
 
 [[package]]

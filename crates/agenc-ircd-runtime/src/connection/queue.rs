@@ -328,10 +328,11 @@ impl WriterQueue {
     /// Completes the pending orderly-shutdown acknowledgement after the
     /// writer has attempted its final transport flush.
     pub fn acknowledge_flush(&self) {
-        let acknowledgement = lock(&self.shared.state).flush_acknowledgement.clone();
-        if let Some(acknowledgement) = acknowledgement {
-            acknowledgement.acknowledge();
-        }
+        let acknowledgement = lock(&self.shared.state)
+            .flush_acknowledgement
+            .get_or_insert_with(FlushAcknowledgement::pending)
+            .clone();
+        acknowledgement.acknowledge();
     }
 
     /// Returns whether the queue is closed.

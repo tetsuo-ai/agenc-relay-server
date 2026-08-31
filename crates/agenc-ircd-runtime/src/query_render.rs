@@ -1083,6 +1083,15 @@ mod tests {
     use std::error::Error;
 
     use agenc_ircd_client_wire::{OutputBudget, RenderError};
+    use agenc_ircd_domain::{
+        CanonicalCommand, ChannelKeyVerifier, ChannelNameValue, ChannelTarget, ExternalInputs,
+        ModeChange, ModeOperation, PresenceCommand, TopicText, VisibilityMode,
+    };
+    use agenc_ircd_testkit::{
+        DomainTestIdentity, account_id, apply_command, bytes, channel_id, create_account,
+        open_session, registered_admission,
+    };
+    use agenc_ircd_types::{ControlPolicy, EntryId, MessageId, TypedMask, UtcSecond};
 
     use super::*;
 
@@ -1105,6 +1114,230 @@ mod tests {
         Ok(String::from_utf8(
             measured.encode(&mut budget)?.as_bytes().to_vec(),
         )?)
+    }
+
+    struct QueryFixture {
+        state: DomainState,
+        owner: DomainTestIdentity,
+        member: DomainTestIdentity,
+        outsider: DomainTestIdentity,
+        listed: ChannelNameValue,
+        unlisted: ChannelNameValue,
+        secret: ChannelNameValue,
+    }
+
+    fn join_new(
+        state: &mut DomainState,
+        identity: DomainTestIdentity,
+        name: &ChannelNameValue,
+        seed: u8,
+    ) -> Result<(), Box<dyn Error>> {
+        apply_command(
+            state,
+            identity,
+            CanonicalCommand::join(vec![ChannelTarget::new(name.clone(), false)])?,
+            &registered_admission(identity.user_id)?,
+            Some(ExternalInputs {
+                utc_now: Some(UtcSecond::from_unix_seconds(1_720_000_000)),
+                channel_ids: vec![channel_id(seed)],
+                ..ExternalInputs::default()
+            }),
+        )?;
+        Ok(())
+    }
+
+    fn join_existing(
+        state: &mut DomainState,
+        identity: DomainTestIdentity,
+        name: &ChannelNameValue,
+    ) -> Result<(), Box<dyn Error>> {
+        apply_command(
+            state,
+            identity,
+            CanonicalCommand::join(vec![ChannelTarget::new(name.clone(), false)])?,
+            &registered_admission(identity.user_id)?,
+            None,
+        )?;
+        Ok(())
+    }
+
+    fn fixture() -> Result<QueryFixture, Box<dyn Error>> {
+        let mut state = DomainState::new()?;
+        let (owner_account, owner_generation) = create_account(&mut state, 1, 1)?;
+        let owner = open_session(
+            &mut state,
+            1,
+            "RenderOwner",
+            Some((owner_account, owner_generation)),
+        )?;
+        let member = open_session(&mut state, 2, "RenderMember", None)?;
+        let outsider = open_session(&mut state, 3, "RenderOutsider", None)?;
+        let listed = ChannelNameValue::parse("#render-listed")?;
+        let unlisted = ChannelNameValue::parse("#render-unlisted")?;
+        let secret = ChannelNameValue::parse("#render-secret")?;
+
+        join_new(&mut state, owner, &listed, 20)?;
+        join_existing(&mut state, member, &listed)?;
+        join_new(&mut state, owner, &unlisted, 21)?;
+        join_new(&mut state, owner, &secret, 22)?;
+
+        let owner_credit = registered_admission(owner.user_id)?;
+        apply_command(
+            &mut state,
+            owner,
+            CanonicalCommand::mode(
+                listed.clone(),
+                vec![
+                    ModeChange::InviteOnly(true),
+                    ModeChange::Moderated(true),
+                    ModeChange::TopicProtected(false),
+                    ModeChange::MemberLimit(Some(25)),
+                    ModeChange::Role {
+                        operation: ModeOperation::Add,
+                        target: agenc_ircd_domain::NicknameValue::parse("RenderMember")?,
+                        role: Role::Administrator,
+                    },
+                ],
+            )?,
+            &owner_credit,
+            None,
+        )?;
+        apply_command(
+            &mut state,
+            owner,
+            CanonicalCommand::mode(listed.clone(), vec![ModeChange::JoinKey(true)])?,
+            &owner_credit,
+            Some(ExternalInputs {
+                key_verifiers: vec![ChannelKeyVerifier::new([40; 16], [41; 32])],
+                ..ExternalInputs::default()
+            }),
+        )?;
+        apply_command(
+            &mut state,
+            owner,
+            CanonicalCommand::mode(
+                unlisted.clone(),
+                vec![ModeChange::Visibility {
+                    operation: ModeOperation::Add,
+                    mode: VisibilityMode::Unlisted,
+                }],
+            )?,
+            &owner_credit,
+            None,
+        )?;
+        apply_command(
+            &mut state,
+            owner,
+            CanonicalCommand::mode(
+                secret.clone(),
+                vec![ModeChange::Visibility {
+                    operation: ModeOperation::Add,
+                    mode: VisibilityMode::Secret,
+                }],
+            )?,
+            &owner_credit,
+            None,
+        )?;
+        apply_command(
+            &mut state,
+            owner,
+            CanonicalCommand::topic_set(
+                listed.clone(),
+                TopicText::try_from_str("visible topic", ControlPolicy::RejectAll)?,
+            ),
+            &owner_credit,
+            Some(ExternalInputs {
+                utc_now: Some(UtcSecond::from_unix_seconds(1_720_000_010)),
+                message_ids: vec![MessageId::from_bytes(bytes(30))],
+                ..ExternalInputs::default()
+            }),
+        )?;
+        apply_command(
+            &mut state,
+            member,
+            CanonicalCommand::presence(PresenceCommand::Away(Some(
+                agenc_ircd_domain::AwayText::try_from_str(
+                    "testing away",
+                    ControlPolicy::RejectAll,
+                )?,
+            )))?,
+            &registered_admission(member.user_id)?,
+            None,
+        )?;
+        apply_command(
+            &mut state,
+            owner,
+            CanonicalCommand::user_operator_notices(
+                agenc_ircd_domain::NicknameValue::parse("RenderOwner")?,
+                true,
+            ),
+            &owner_credit,
+            None,
+        )?;
+
+        let masks = [
+            TypedMask::parse(&format!("$a:{}", account_id(30).random().to_text()))?,
+            TypedMask::parse(&format!("$u:{}", member.user_id.to_base64url()))?,
+            TypedMask::parse("$n:render*")?,
+            TypedMask::parse("$q:$c:h-*.invalid")?,
+        ];
+        apply_command(
+            &mut state,
+            owner,
+            CanonicalCommand::mode(
+                listed.clone(),
+                vec![
+                    ModeChange::AddMask {
+                        list: MaskList::Ban,
+                        mask: masks.into_iter().next().ok_or("missing mask")?,
+                    },
+                    ModeChange::AddMask {
+                        list: MaskList::Exception,
+                        mask: TypedMask::parse(&format!("$u:{}", member.user_id.to_base64url()))?,
+                    },
+                    ModeChange::AddMask {
+                        list: MaskList::InviteException,
+                        mask: TypedMask::parse("$n:render*")?,
+                    },
+                    ModeChange::AddMask {
+                        list: MaskList::Ban,
+                        mask: TypedMask::parse("$q:$c:h-*.invalid")?,
+                    },
+                ],
+            )?,
+            &owner_credit,
+            Some(ExternalInputs {
+                utc_now: Some(UtcSecond::from_unix_seconds(1_720_000_020)),
+                entry_ids: vec![
+                    EntryId::from_bytes(bytes(31)),
+                    EntryId::from_bytes(bytes(32)),
+                    EntryId::from_bytes(bytes(33)),
+                    EntryId::from_bytes(bytes(34)),
+                ],
+                ..ExternalInputs::default()
+            }),
+        )?;
+        apply_command(
+            &mut state,
+            owner,
+            CanonicalCommand::presence(PresenceCommand::MonitorAdd(vec![
+                agenc_ircd_domain::NicknameValue::parse("RenderOwner")?,
+                agenc_ircd_domain::NicknameValue::parse("RenderMember")?,
+                agenc_ircd_domain::NicknameValue::parse("MissingRenderUser")?,
+            ]))?,
+            &owner_credit,
+            None,
+        )?;
+
+        Ok(QueryFixture {
+            state,
+            owner,
+            member,
+            outsider,
+            listed,
+            unlisted,
+            secret,
+        })
     }
 
     #[test]
@@ -1136,5 +1369,313 @@ mod tests {
             visible_projection::<()>(ProjectionDecision::Hidden).err(),
             Some(RuntimeError::InvalidValue)
         );
+    }
+
+    #[test]
+    fn modes_topics_masks_and_visibility_render_every_closed_shape() -> Result<(), Box<dyn Error>> {
+        let fixture = fixture()?;
+        let listed = visible_channel(&fixture.state, fixture.owner.user_id, &fixture.listed)?;
+        let modes = channel_mode_text(listed);
+        assert!(modes.contains('i'));
+        assert!(modes.contains('m'));
+        assert!(modes.contains('l'));
+        assert!(!modes.contains('t'));
+        assert!(modes.contains('k'));
+        assert_eq!(
+            render_channel_modes("server.test", "owner", listed)?.len(),
+            2
+        );
+
+        let unlisted = visible_channel(&fixture.state, fixture.owner.user_id, &fixture.unlisted)?;
+        assert!(channel_mode_text(unlisted).contains('p'));
+        let secret = visible_channel(&fixture.state, fixture.owner.user_id, &fixture.secret)?;
+        assert!(channel_mode_text(secret).contains('s'));
+        assert_eq!(
+            visible_channel(&fixture.state, fixture.outsider.user_id, &fixture.secret).err(),
+            Some(RuntimeError::InvalidValue)
+        );
+        assert_eq!(
+            visible_channel(
+                &fixture.state,
+                fixture.owner.user_id,
+                &ChannelNameValue::parse("#missing-render")?,
+            )
+            .err(),
+            Some(RuntimeError::InvalidValue)
+        );
+
+        assert_eq!(
+            render_mode(
+                &fixture.state,
+                "server.test",
+                "owner",
+                fixture.owner.user_id,
+                &ModeCommand::UserQuery(agenc_ircd_domain::NicknameValue::parse("RenderOwner",)?),
+            )?
+            .len(),
+            1
+        );
+        assert_eq!(
+            render_mode(
+                &fixture.state,
+                "server.test",
+                "owner",
+                fixture.owner.user_id,
+                &ModeCommand::ChannelQuery(fixture.listed.clone()),
+            )?
+            .len(),
+            2
+        );
+        for list in [
+            MaskList::Ban,
+            MaskList::Exception,
+            MaskList::InviteException,
+        ] {
+            assert!(
+                render_mode(
+                    &fixture.state,
+                    "server.test",
+                    "owner",
+                    fixture.owner.user_id,
+                    &ModeCommand::ChannelList(fixture.listed.clone(), list),
+                )?
+                .len()
+                    >= 2
+            );
+        }
+        assert_eq!(
+            render_mode(
+                &fixture.state,
+                "server.test",
+                "owner",
+                fixture.owner.user_id,
+                &ModeCommand::UserOperatorNotices(
+                    agenc_ircd_domain::NicknameValue::parse("RenderOwner")?,
+                    false,
+                ),
+            )
+            .err(),
+            Some(RuntimeError::InvalidValue)
+        );
+
+        assert_eq!(
+            render_topic(
+                &fixture.state,
+                "server.test",
+                "owner",
+                fixture.owner.user_id,
+                &fixture.listed,
+            )?
+            .len(),
+            2
+        );
+        assert_eq!(
+            render_topic(
+                &fixture.state,
+                "server.test",
+                "owner",
+                fixture.owner.user_id,
+                &fixture.unlisted,
+            )?
+            .len(),
+            1
+        );
+
+        for input in [
+            format!("$a:{}", account_id(40).random().to_text()),
+            format!("$u:{}", fixture.member.user_id.to_base64url()),
+            "$n:render*".to_owned(),
+            "$c:h-*".to_owned(),
+            "$q:$n:quiet*".to_owned(),
+        ] {
+            let mask = TypedMask::parse(&input)?;
+            assert_eq!(typed_mask_text(&mask), input);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn names_lists_who_and_presence_apply_privacy_before_rendering() -> Result<(), Box<dyn Error>> {
+        let fixture = fixture()?;
+        let all_names = render_names(
+            &fixture.state,
+            "server.test",
+            "owner",
+            fixture.owner.user_id,
+            true,
+            &[],
+        )?;
+        assert!(all_names.len() >= 6);
+        let selected_names = render_names(
+            &fixture.state,
+            "server.test",
+            "owner",
+            fixture.owner.user_id,
+            false,
+            std::slice::from_ref(&fixture.listed),
+        )?;
+        assert!(selected_names.len() >= 2);
+        assert_eq!(
+            selected_channel_ids(
+                &fixture.state,
+                fixture.owner.user_id,
+                &[ChannelNameValue::parse("#missing-render")?],
+            )
+            .err(),
+            Some(RuntimeError::InvalidValue)
+        );
+
+        assert_eq!(
+            render_list(&fixture.state, "server.test", "owner", &[])?.len(),
+            3
+        );
+        assert_eq!(
+            render_list(
+                &fixture.state,
+                "server.test",
+                "owner",
+                &[fixture.listed.clone(), fixture.unlisted.clone()],
+            )?
+            .len(),
+            3
+        );
+        assert_eq!(
+            render_list(
+                &fixture.state,
+                "server.test",
+                "owner",
+                std::slice::from_ref(&fixture.unlisted),
+            )?
+            .len(),
+            2
+        );
+
+        let member_name = agenc_ircd_domain::NicknameValue::parse("RenderMember")?;
+        let missing_name = agenc_ircd_domain::NicknameValue::parse("MissingRenderUser")?;
+        let queries = [
+            UserQuery::Who(None),
+            UserQuery::Who(Some(WhoTarget::Nickname(member_name.clone()))),
+            UserQuery::Who(Some(WhoTarget::Channel(fixture.listed.clone()))),
+            UserQuery::Whois(member_name.clone()),
+            UserQuery::Whois(missing_name.clone()),
+            UserQuery::Whowas(member_name.clone(), 1),
+            UserQuery::Ison(vec![
+                agenc_ircd_domain::NicknameValue::parse("RenderOwner")?,
+                member_name.clone(),
+                missing_name.clone(),
+            ]),
+            UserQuery::Userhost(vec![member_name.clone(), missing_name.clone()]),
+        ];
+        for query in &queries {
+            assert!(
+                !render_user_query(
+                    &fixture.state,
+                    "server.test",
+                    "owner",
+                    fixture.owner.user_id,
+                    query,
+                )?
+                .is_empty()
+            );
+        }
+        for query in [PresenceCommand::MonitorList, PresenceCommand::MonitorStatus] {
+            assert_eq!(
+                render_presence_query(
+                    &fixture.state,
+                    "server.test",
+                    "owner",
+                    fixture.owner.user_id,
+                    &query,
+                )?
+                .len(),
+                1
+            );
+        }
+        assert_eq!(
+            render_presence_query(
+                &fixture.state,
+                "server.test",
+                "owner",
+                fixture.owner.user_id,
+                &PresenceCommand::MonitorClear,
+            )
+            .err(),
+            Some(RuntimeError::InvalidValue)
+        );
+        assert_eq!(
+            render_who_self(
+                &fixture.state,
+                "server.test",
+                "missing",
+                agenc_ircd_types::UserId::from_bytes(bytes(200)),
+                &mut Vec::new(),
+            )?,
+            "missing"
+        );
+        assert_eq!(
+            render_whois(
+                &fixture.state,
+                "server.test",
+                "outsider",
+                fixture.outsider.user_id,
+                &agenc_ircd_domain::NicknameValue::parse("RenderOwner")?,
+            )?
+            .len(),
+            2
+        );
+        assert!(
+            render_whois(
+                &fixture.state,
+                "server.test",
+                "outsider",
+                fixture.outsider.user_id,
+                &agenc_ircd_domain::NicknameValue::parse("RenderOutsider")?,
+            )?
+            .len()
+                >= 4
+        );
+
+        let listed = visible_projection(
+            fixture
+                .state
+                .project_channel(fixture.owner.user_id, channel_id(20))?,
+        )?;
+        let unlisted = visible_projection(
+            fixture
+                .state
+                .project_channel(fixture.owner.user_id, channel_id(21))?,
+        )?;
+        let secret = visible_projection(
+            fixture
+                .state
+                .project_channel(fixture.owner.user_id, channel_id(22))?,
+        )?;
+        let mut frames = Vec::new();
+        render_names_channel(
+            &fixture.state,
+            "server.test",
+            "owner",
+            true,
+            &listed,
+            &mut frames,
+        )?;
+        render_names_channel(
+            &fixture.state,
+            "server.test",
+            "owner",
+            false,
+            &unlisted,
+            &mut frames,
+        )?;
+        render_names_channel(
+            &fixture.state,
+            "server.test",
+            "owner",
+            false,
+            &secret,
+            &mut frames,
+        )?;
+        assert!(frames.len() >= 6);
+        Ok(())
     }
 }

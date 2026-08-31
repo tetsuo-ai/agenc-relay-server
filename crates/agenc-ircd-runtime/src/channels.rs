@@ -839,7 +839,12 @@ fn stage_durable_command(
 ) -> Result<bool, RuntimeError> {
     let origin = durable_command_origin(context, bound, reply)?;
     let Some(account_id) = deleted_account(&plan)? else {
-        return match context.stage_durable(plan, fanout, origin, 0) {
+        let staged = if reply.is_none() {
+            context.stage_shutdown_session_close(plan, fanout)
+        } else {
+            context.stage_durable(plan, fanout, origin, 0)
+        };
+        return match staged {
             Ok(_) => Ok(true),
             Err(error) => render_durable_stage_refusal(context, bound, reply, error),
         };

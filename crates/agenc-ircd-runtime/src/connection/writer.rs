@@ -121,4 +121,32 @@ mod tests {
         );
         Ok(())
     }
+
+    #[tokio::test]
+    async fn orderly_shutdown_remembers_a_writer_that_already_finished() -> Result<(), RuntimeError>
+    {
+        let budget = MemoryBudget::new(1_048_576);
+        let charge = QueueLimits::DEFAULT.backing_charge()?;
+        let mut permits = budget.try_acquire_batch(BoundedMemoryCharges::new(vec![charge])?)?;
+        let backing = permits
+            .split_exact(charge.bytes())
+            .ok_or(RuntimeError::InvalidValue)?;
+        let queue = WriterQueue::new(ConnectionGeneration::new(1), QueueLimits::DEFAULT, backing)?;
+        let (_peer, transport) = tokio::io::duplex(1_024);
+        let writer = tokio::spawn(run_writer(
+            transport,
+            Arc::clone(&queue),
+            CancellationToken::root(),
+        ));
+        queue.close(CloseReason::Shutdown, ClosePolicy::AfterFlush);
+        assert_eq!(
+            writer.await.map_err(|_| RuntimeError::Cancelled)?,
+            CloseReason::Shutdown
+        );
+
+        let acknowledgement = queue.shutdown_after_flush();
+        assert!(acknowledgement.is_acknowledged());
+        acknowledgement.wait().await;
+        Ok(())
+    }
 }
