@@ -2223,6 +2223,14 @@ impl DomainState {
         target: &MessageTarget,
         message: &crate::MessageCommand,
     ) -> Result<(), DomainError> {
+        if let MessageTarget::Channel(name) = target
+            && self
+                .channel_names
+                .get(name)
+                .is_some_and(|channel_id| self.channel_is_quarantined(*channel_id))
+        {
+            return Err(DomainError::Forbidden);
+        }
         match (target, message.tagmsg_classification()) {
             (MessageTarget::Channel(name), Some(TagmsgClassification::E2eeApplication(proof))) => {
                 self.authorize_e2ee_channel_message(sender, name, proof)
@@ -5779,6 +5787,58 @@ mod tests {
                 None,
             ),
             Err(DomainError::LimitExceeded)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn committed_admin_policy_suspends_accounts_and_quarantines_delivery() -> Result<(), DomainError>
+    {
+        let mut fixture = fixture()?;
+        let expires_at = UtcSecond::from_unix_seconds(100);
+        fixture
+            .state
+            .admin_suspend_account(fixture.owner_account, expires_at)?;
+        assert!(
+            fixture
+                .state
+                .account_is_suspended(fixture.owner_account, UtcSecond::from_unix_seconds(99))
+        );
+        assert!(
+            !fixture
+                .state
+                .account_is_suspended(fixture.owner_account, expires_at)
+        );
+        assert_eq!(
+            fixture.state.users_for_account(fixture.owner_account),
+            vec![fixture.owner.user_id]
+        );
+        fixture.state.admin_restore_account(fixture.owner_account)?;
+        assert!(
+            !fixture
+                .state
+                .account_has_admin_suspension(fixture.owner_account)
+        );
+
+        fixture.state.admin_quarantine_channel(fixture.channel_id)?;
+        let message = MessageCommand::new(
+            MessageKind::Privmsg,
+            vec![MessageTarget::Channel(fixture.name.clone())],
+            Some(MessageText::parse("x")?),
+        )?;
+        let credit = AdmissionSnapshot::new(vec![
+            (RateBucket::RegisteredCommand(fixture.owner.user_id), 10),
+            (RateBucket::AccountMessage(fixture.owner_account), 10),
+            (RateBucket::ChannelMessage(fixture.channel_id), 10),
+        ])?;
+        assert_eq!(
+            rejected_message_error(
+                &fixture.state,
+                &fixture.owner,
+                CanonicalCommand::message(message),
+                &credit,
+            )?,
+            DomainError::Forbidden
         );
         Ok(())
     }

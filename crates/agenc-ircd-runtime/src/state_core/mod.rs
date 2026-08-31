@@ -26,14 +26,15 @@ use agenc_ircd_crypto::OpenedStoragePlaintext;
 use agenc_ircd_domain::{ApplyReceipt, DomainError, DomainState, MutationPlan};
 use agenc_ircd_storage::{CommitOutcome, ReadPlan, SealedRecord, StorageError, StoredKey, TableId};
 use agenc_ircd_types::{
-    ClockError, EntropySource, MonotonicClock, MonotonicTick, TransactionId, UserId, UtcSecond,
-    WallClock,
+    ClockError, EntropySource, MonotonicClock, MonotonicTick, Revision, TransactionId, UserId,
+    UtcSecond, WallClock,
 };
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 pub(crate) use admin::{
-    AdminCoreFailure, AdminCoreInbox, AdminCorePort, AdminCoreSnapshot, admin_core_channel,
+    AdminCoreFailure, AdminCoreInbox, AdminCorePort, AdminCoreSnapshot, AdminMutation, AdminTarget,
+    admin_core_channel,
 };
 pub use pending::{GATHER_WINDOW_MILLIS, MAX_BATCH_PLANS, StagedOrigin};
 
@@ -57,7 +58,8 @@ use crate::runtime_config::{
 use crate::state_core::admin::{AdminCoreRequest, AdminCoreResult};
 use crate::state_core::durable::{
     AccountServiceDurableWrite, AccountingCeilings, DurableIndex, HeadCounters, KeyDeriver,
-    PlanProjection, RetainedProjection, project_admin_audit_event, project_batch, read_back,
+    PlanProjection, RetainedProjection, project_admin_audit_event, project_admin_audit_retention,
+    project_batch, read_back,
 };
 use crate::state_core::fanout::{
     FanoutCommitReport, FanoutFrame, FanoutRefused, FanoutRequest, FanoutReservation, FanoutTarget,
@@ -995,6 +997,7 @@ pub struct StateCore {
 struct PendingAdminCommit {
     transaction_id: TransactionId,
     retained: RetainedProjection,
+    mutation: Option<AdminMutation>,
     reply: tokio::sync::oneshot::Sender<AdminCoreResult>,
 }
 
@@ -1359,12 +1362,41 @@ impl StateCore {
         Ok(provisional.previous.revision())
     }
 
+    // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=single admin safe-point dispatch owns validation projection submission and closed failure routing
     fn step_admin_request(&mut self, request: AdminCoreRequest) -> Option<StateCoreExit> {
-        let (event, reply) = match request {
-            AdminCoreRequest::CommitAudit { event, reply } => (event, reply),
+        let (event, mutation, reply) = match request {
+            AdminCoreRequest::CommitAudit { event, reply } => (event, None, reply),
+            AdminCoreRequest::CommitMutation {
+                event,
+                mutation,
+                expected_revision,
+                reply,
+            } => {
+                if !mutation.matches_event(&event) {
+                    return Some(StateCoreExit::Corrupt(CorruptionCause::ProjectionFailed));
+                }
+                match self.validate_admin_mutation(mutation, expected_revision) {
+                    Ok(()) => (event, Some(mutation), reply),
+                    Err(failure) => {
+                        let _sent = reply.send(Err(failure));
+                        return None;
+                    }
+                }
+            }
             AdminCoreRequest::Snapshot { reply } => {
                 let _sent = reply.send(Ok(self.admin_snapshot()));
                 return None;
+            }
+            AdminCoreRequest::TargetRevision { target, reply } => {
+                let _sent = reply.send(self.admin_target_revision(target));
+                return None;
+            }
+            AdminCoreRequest::Kill { user_id, reply } => {
+                let _sent = reply.send(self.admin_kill(user_id));
+                return None;
+            }
+            AdminCoreRequest::CommitRetention { checkpoint, reply } => {
+                return self.step_admin_retention(*checkpoint, reply);
             }
         };
         if self.context.quiescing {
@@ -1400,6 +1432,7 @@ impl StateCore {
                 self.admin_pending = Some(PendingAdminCommit {
                     transaction_id,
                     retained,
+                    mutation,
                     reply,
                 });
                 None
@@ -1415,6 +1448,165 @@ impl StateCore {
                 IndeterminateCause::Bridge(failure),
             )),
         }
+    }
+
+    fn step_admin_retention(
+        &mut self,
+        checkpoint: agenc_ircd_admin::AdminAuditCheckpoint,
+        reply: tokio::sync::oneshot::Sender<AdminCoreResult>,
+    ) -> Option<StateCoreExit> {
+        if self.context.quiescing {
+            let _sent = reply.send(Err(AdminCoreFailure::Quiescing));
+            return None;
+        }
+        if self.storage_in_flight() || self.context.pending_len() != 0 {
+            let _sent = reply.send(Err(AdminCoreFailure::Busy));
+            return None;
+        }
+        let Ok(transaction_id) = next_transaction_id(self.context.entropy.as_mut()) else {
+            return Some(StateCoreExit::Corrupt(CorruptionCause::ProjectionFailed));
+        };
+        let projected = project_admin_audit_retention(
+            transaction_id,
+            &checkpoint,
+            &self.context.index,
+            &self.context.keys,
+            self.context.head,
+            self.context.ceilings,
+        );
+        let projected = match projected {
+            Ok(projected) => projected,
+            Err(
+                RuntimeError::Storage(StorageError::LimitExceeded) | RuntimeError::LimitExceeded,
+            ) => {
+                let _sent = reply.send(Err(AdminCoreFailure::StorageUnavailable));
+                return None;
+            }
+            Err(_) => return Some(StateCoreExit::Corrupt(CorruptionCause::ProjectionFailed)),
+        };
+        let (batch, retained) = projected.into_parts();
+        match self.context.bridge.submit(batch) {
+            Ok(submitted) if submitted == transaction_id => {
+                self.admin_pending = Some(PendingAdminCommit {
+                    transaction_id,
+                    retained,
+                    mutation: None,
+                    reply,
+                });
+                None
+            }
+            Ok(_) => Some(StateCoreExit::Indeterminate(
+                IndeterminateCause::TransactionMismatch,
+            )),
+            Err(SubmitError::Storage(_)) => {
+                let _sent = reply.send(Err(AdminCoreFailure::StorageUnavailable));
+                None
+            }
+            Err(SubmitError::Bridge(failure)) => Some(StateCoreExit::Indeterminate(
+                IndeterminateCause::Bridge(failure),
+            )),
+        }
+    }
+
+    fn admin_target_revision(&self, target: AdminTarget) -> Result<Revision, AdminCoreFailure> {
+        if self.context.quiescing {
+            return Err(AdminCoreFailure::Quiescing);
+        }
+        let exists = match target {
+            AdminTarget::Account(account_id) => self.context.domain.account(account_id).is_some(),
+            AdminTarget::Channel(channel_id) => self.context.domain.channel(channel_id).is_some(),
+            AdminTarget::Process => true,
+        };
+        if !exists {
+            return Err(AdminCoreFailure::InvalidTarget);
+        }
+        Revision::new(self.context.head.storage_commit_sequence)
+            .map_err(|_| AdminCoreFailure::StorageUnavailable)
+    }
+
+    fn validate_admin_mutation(
+        &self,
+        mutation: AdminMutation,
+        expected_revision: Revision,
+    ) -> AdminCoreResult {
+        let target = match mutation {
+            AdminMutation::SuspendAccount { account_id, .. }
+            | AdminMutation::RestoreAccount(account_id) => AdminTarget::Account(account_id),
+            AdminMutation::QuarantineChannel(channel_id) => AdminTarget::Channel(channel_id),
+        };
+        if self.admin_target_revision(target)? != expected_revision {
+            return Err(AdminCoreFailure::StaleRevision);
+        }
+        match mutation {
+            AdminMutation::SuspendAccount { expires_at, .. } => {
+                let now = self
+                    .context
+                    .utc_now()
+                    .map_err(|_| AdminCoreFailure::StorageUnavailable)?;
+                if expires_at <= now {
+                    return Err(AdminCoreFailure::InvalidTarget);
+                }
+            }
+            AdminMutation::RestoreAccount(account_id) => {
+                if !self.context.domain.account_has_admin_suspension(account_id) {
+                    return Err(AdminCoreFailure::InvalidTarget);
+                }
+            }
+            AdminMutation::QuarantineChannel(channel_id) => {
+                if self.context.domain.channel_is_quarantined(channel_id) {
+                    return Err(AdminCoreFailure::InvalidTarget);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn admin_kill(&mut self, user_id: UserId) -> AdminCoreResult {
+        if self.context.quiescing {
+            return Err(AdminCoreFailure::Quiescing);
+        }
+        if self.context.domain.session(user_id).is_none() {
+            return Err(AdminCoreFailure::InvalidTarget);
+        }
+        let Some(generation) = self.context.sessions.generation_for_user(user_id) else {
+            return Err(AdminCoreFailure::InvalidTarget);
+        };
+        let Some(sink) = self.context.sessions.sink_for_generation(generation) else {
+            return Err(AdminCoreFailure::InvalidTarget);
+        };
+        sink.begin_slow_consumer_close();
+        self.context.sessions.mark_sink_gone(generation);
+        Ok(())
+    }
+
+    // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=post-commit policy application keeps account disconnect and channel quarantine effects adjacent
+    fn apply_admin_mutation(&mut self, mutation: AdminMutation) -> Result<(), DomainError> {
+        match mutation {
+            AdminMutation::SuspendAccount {
+                account_id,
+                expires_at,
+            } => {
+                let users = self.context.domain.users_for_account(account_id);
+                self.context
+                    .domain
+                    .admin_suspend_account(account_id, expires_at)?;
+                for user_id in users {
+                    if let Some(generation) = self.context.sessions.generation_for_user(user_id) {
+                        if let Some(sink) = self.context.sessions.sink_for_generation(generation) {
+                            sink.begin_slow_consumer_close();
+                        }
+                        self.context.sessions.mark_sink_gone(generation);
+                    }
+                }
+            }
+            AdminMutation::RestoreAccount(account_id) => {
+                self.context.domain.admin_restore_account(account_id)?;
+            }
+            AdminMutation::QuarantineChannel(channel_id) => {
+                self.context.domain.admin_quarantine_channel(channel_id)?;
+            }
+        }
+        Ok(())
     }
 
     fn admin_snapshot(&self) -> AdminCoreSnapshot {
@@ -1489,6 +1681,11 @@ impl StateCore {
                 self.context.index.apply(pending.retained.updates());
                 self.context.counters.batches_committed =
                     self.context.counters.batches_committed.saturating_add(1);
+                if let Some(mutation) = pending.mutation
+                    && self.apply_admin_mutation(mutation).is_err()
+                {
+                    return Some(StateCoreExit::Corrupt(CorruptionCause::ApplyFailed));
+                }
                 if let Some(exit) = self.refresh_index().await {
                     return Some(exit);
                 }

@@ -509,6 +509,7 @@ pub fn render_export_batch(
     }
     check_checkpoint_order(range, checkpoints)?;
     check_event_order(range, events)?;
+    check_export_coverage(range, checkpoints, events)?;
     let id = encode_base64url(batch_id);
     let mut lines = Vec::with_capacity(records.saturating_add(2));
     lines.push(format!(
@@ -561,6 +562,46 @@ fn check_event_order(range: AuditRange, events: &[AdminAuditEvent]) -> Result<()
             return Err(AdminError::Audit);
         }
         previous = Some(sequence);
+    }
+    Ok(())
+}
+
+fn check_export_coverage(
+    range: AuditRange,
+    checkpoints: &[AdminAuditCheckpoint],
+    events: &[AdminAuditEvent],
+) -> Result<(), AdminError> {
+    let records = checkpoints
+        .len()
+        .checked_add(events.len())
+        .ok_or(AdminError::Overflow)?;
+    let mut spans = Vec::with_capacity(records);
+    for checkpoint in checkpoints {
+        let tbs = checkpoint.tbs();
+        spans.push((
+            tbs.deleted_first_sequence.max(range.from()),
+            tbs.deleted_last_sequence.min(range.to()),
+        ));
+    }
+    spans.extend(events.iter().map(|event| {
+        let sequence = event.tbs().audit_sequence;
+        (sequence, sequence)
+    }));
+    spans.sort_unstable();
+
+    let Some((first_start, first_end)) = spans.first().copied() else {
+        return Ok(());
+    };
+    if first_start != range.from() {
+        return Err(AdminError::Audit);
+    }
+    let mut covered_through = first_end;
+    for (start, end) in spans.into_iter().skip(1) {
+        let expected = covered_through.checked_add(1).ok_or(AdminError::Overflow)?;
+        if start != expected {
+            return Err(AdminError::Audit);
+        }
+        covered_through = end;
     }
     Ok(())
 }
@@ -879,6 +920,30 @@ mod tests {
         );
         assert_eq!(
             render_export_batch(&[0; 16], range, &[checkpoint, checkpoint], &[]),
+            Err(AdminError::Audit)
+        );
+        let e2 = AdminAuditEvent::sign(
+            event_tbs(2, e1.event_hash(), AdminAuditPhase::Observed)?,
+            &audit_key(),
+        )?;
+        assert_eq!(
+            render_export_batch(
+                &[0; 16],
+                range,
+                std::slice::from_ref(&checkpoint),
+                std::slice::from_ref(&e2)
+            ),
+            Err(AdminError::Audit)
+        );
+        let overlapping_checkpoint =
+            AdminAuditCheckpoint::sign(checkpoint_tbs(0, 1, e1.event_hash())?, &audit_key())?;
+        assert_eq!(
+            render_export_batch(
+                &[0; 16],
+                range,
+                std::slice::from_ref(&overlapping_checkpoint),
+                std::slice::from_ref(&e1)
+            ),
             Err(AdminError::Audit)
         );
         let many = vec![e1; 10_001];

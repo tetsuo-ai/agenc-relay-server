@@ -1517,6 +1517,8 @@ pub struct DomainState {
     pub(crate) channel_names: BTreeMap<ChannelNameValue, ChannelInstanceId>,
     pub(crate) account_deletion_challenges: BTreeMap<SessionId, AccountDeletionChallengeState>,
     pub(crate) sanctions: Vec<Sanction>,
+    pub(crate) admin_suspensions: BTreeMap<AccountId, UtcSecond>,
+    pub(crate) quarantined_channels: BTreeSet<ChannelInstanceId>,
     pub(crate) operational_limits: OperationalLimits,
 }
 
@@ -1540,6 +1542,8 @@ impl DomainState {
             channel_names: BTreeMap::new(),
             account_deletion_challenges: BTreeMap::new(),
             sanctions: Vec::new(),
+            admin_suspensions: BTreeMap::new(),
+            quarantined_channels: BTreeSet::new(),
             operational_limits: OperationalLimits::HARD_MAX,
         }
     }
@@ -1629,6 +1633,98 @@ impl DomainState {
     #[must_use]
     pub fn channel(&self, channel_id: ChannelInstanceId) -> Option<&ChannelState> {
         self.channels.get(&channel_id)
+    }
+
+    /// Installs the policy derived from the verified administrative audit
+    /// chain. Entries whose durable target no longer exists have no live
+    /// effect and are discarded at the reconstruction boundary.
+    pub fn install_admin_policy(
+        &mut self,
+        suspensions: Vec<(AccountId, UtcSecond)>,
+        quarantined_channels: Vec<ChannelInstanceId>,
+    ) -> Result<(), DomainError> {
+        let mut installed_suspensions = BTreeMap::new();
+        for (account_id, expires_at) in suspensions {
+            if self.accounts.contains_key(&account_id) {
+                installed_suspensions.insert(account_id, expires_at);
+            }
+        }
+        let mut installed_quarantines = BTreeSet::new();
+        for channel_id in quarantined_channels {
+            if self.channels.contains_key(&channel_id) {
+                installed_quarantines.insert(channel_id);
+            }
+        }
+        self.admin_suspensions = installed_suspensions;
+        self.quarantined_channels = installed_quarantines;
+        Ok(())
+    }
+
+    /// Applies one committed bounded account suspension.
+    pub fn admin_suspend_account(
+        &mut self,
+        account_id: AccountId,
+        expires_at: UtcSecond,
+    ) -> Result<(), DomainError> {
+        if !self.accounts.contains_key(&account_id) {
+            return Err(DomainError::NotFound);
+        }
+        self.admin_suspensions.insert(account_id, expires_at);
+        Ok(())
+    }
+
+    /// Removes one committed account suspension.
+    pub fn admin_restore_account(&mut self, account_id: AccountId) -> Result<(), DomainError> {
+        if !self.accounts.contains_key(&account_id)
+            || self.admin_suspensions.remove(&account_id).is_none()
+        {
+            return Err(DomainError::NotFound);
+        }
+        Ok(())
+    }
+
+    /// Applies one committed channel-delivery quarantine.
+    pub fn admin_quarantine_channel(
+        &mut self,
+        channel_id: ChannelInstanceId,
+    ) -> Result<(), DomainError> {
+        if !self.channels.contains_key(&channel_id) || !self.quarantined_channels.insert(channel_id)
+        {
+            return Err(DomainError::NotFound);
+        }
+        Ok(())
+    }
+
+    /// Returns whether account authority is suspended at `now`.
+    #[must_use]
+    pub fn account_is_suspended(&self, account_id: AccountId, now: UtcSecond) -> bool {
+        self.admin_suspensions
+            .get(&account_id)
+            .is_some_and(|expires_at| now < *expires_at)
+    }
+
+    /// Returns whether the verified audit chain retains a suspension entry,
+    /// including one whose bounded effect has already expired.
+    #[must_use]
+    pub fn account_has_admin_suspension(&self, account_id: AccountId) -> bool {
+        self.admin_suspensions.contains_key(&account_id)
+    }
+
+    /// Returns every live user currently bound to one account.
+    #[must_use]
+    pub fn users_for_account(&self, account_id: AccountId) -> Vec<UserId> {
+        self.sessions
+            .iter()
+            .filter_map(|(user_id, session)| {
+                (session.account_id() == Some(account_id)).then_some(*user_id)
+            })
+            .collect()
+    }
+
+    /// Returns whether new delivery to a channel is quarantined.
+    #[must_use]
+    pub fn channel_is_quarantined(&self, channel_id: ChannelInstanceId) -> bool {
+        self.quarantined_channels.contains(&channel_id)
     }
 
     /// Returns the number of live account authorities.

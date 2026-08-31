@@ -45,8 +45,9 @@ use crate::RuntimeError;
 use crate::StateCoreSeed;
 use crate::account_service::AccountCreationPolicy;
 use crate::admin::{
-    AdminAdmissionSnapshot, AdminOwner, AdminOwnerClocks, AdminOwnerHealth, AdminOwnerInbox,
-    AdminOwnerRuntime, AdminTransportPort, AuditAuthority, admin_transport_channel,
+    AdminAdmissionSnapshot, AdminBackupRuntime, AdminOwner, AdminOwnerClocks, AdminOwnerHealth,
+    AdminOwnerInbox, AdminOwnerRuntime, AdminProcessAction, AdminProcessInbox, AdminTransportPort,
+    AuditAuthority, admin_process_channel, admin_transport_channel,
 };
 use crate::admission::{BucketKind, BucketRate, RateLimits, TransportAdmission};
 use crate::bridge::crypto::{
@@ -294,6 +295,11 @@ impl LiveStorage {
         )?;
         let reconstruction = reconstruct(&seed, &owner.port(), &keys)?;
         let trust = load_audit_trust_manifest(&config.moderation.audit_trust_manifest_file)?;
+        let audit_keys = KeyDeriver::new(
+            StorageMasterKey::from_bytes(*secrets.storage_master().expose()),
+            storage.database_binding(),
+            storage.storage_key_generation(),
+        )?;
         let now = SystemWallClock
             .utc_now()
             .map_err(|_| DaemonError::Runtime(RuntimeError::InvalidValue))?
@@ -305,8 +311,8 @@ impl LiveStorage {
             },
             Ed25519SecretKey::from_bytes(*secrets.audit_signing().expose()),
             &trust,
-            &owner.port(),
-            &keys,
+            owner.port(),
+            audit_keys,
             operators,
             now,
         )?;
@@ -357,6 +363,7 @@ struct LiveState {
         crate::bridge::CryptoCompletionMessage<crate::bridge::crypto::CryptoJobOutput>,
     >,
     audit: Option<AuditAuthority>,
+    backup: Option<AdminBackupRuntime>,
 }
 
 struct BuildLiveStateInputs<'a> {
@@ -389,6 +396,11 @@ fn build_live_state(inputs: BuildLiveStateInputs<'_>) -> Result<LiveState, Daemo
         mut reconstruction,
         audit,
     } = storage;
+    let (suspensions, quarantined_channels) = audit.policy_seed().into_parts();
+    reconstruction
+        .domain
+        .install_admin_policy(suspensions, quarantined_channels)
+        .map_err(|_| DaemonError::Runtime(RuntimeError::InvalidValue))?;
     let (bridge, storage, storage_reads) = StorageBridge::start(owner.port())?;
     let crypto_config = CryptoWorkerConfig::new(
         limit_usize(config, LimitKey::ChannelKeyJobs)?,
@@ -405,6 +417,11 @@ fn build_live_state(inputs: BuildLiveStateInputs<'_>) -> Result<LiveState, Daemo
     reconstruction
         .domain
         .set_operational_limits(operational_limits(config)?);
+    let backup = AdminBackupRuntime::new(
+        owner.port(),
+        config.storage.backup_dir.clone(),
+        *secrets.backup_signing().expose(),
+    );
     let state = StateCore::new(StateCoreInputs {
         config: StateCoreConfig {
             server_prefix: config.server.name.as_str().to_owned(),
@@ -436,6 +453,7 @@ fn build_live_state(inputs: BuildLiveStateInputs<'_>) -> Result<LiveState, Daemo
         storage_reads,
         crypto,
         audit: Some(audit),
+        backup: Some(backup),
     })
 }
 
@@ -1171,8 +1189,13 @@ async fn run(
     live.state.install_reload_inbox(reload_inbox)?;
     let (admin_reload, mut reload_preparation) = reload_preparation_channel(reload.clone());
     let (admin_fatal, mut admin_failed) = mpsc::channel(1);
+    let (admin_process, mut admin_process_inbox) = admin_process_channel();
     let audit = live
         .audit
+        .take()
+        .ok_or(DaemonError::Runtime(RuntimeError::InvalidValue))?;
+    let backup = live
+        .backup
         .take()
         .ok_or(DaemonError::Runtime(RuntimeError::InvalidValue))?;
     let admin_owner = AdminOwner::new(
@@ -1188,7 +1211,10 @@ async fn run(
             },
             config: Some(runtime_config.clone()),
             reload: Some(admin_reload),
+            backup: Some(backup),
+            process: Some(admin_process),
             fatal: Some(admin_fatal),
+            budget: Arc::clone(&budget),
             entropy: Box::new(OsEntropy),
             clocks: AdminOwnerClocks {
                 monotonic: Box::new(process_clock),
@@ -1233,6 +1259,7 @@ async fn run(
         reload: &reload,
         reload_preparation: &mut reload_preparation,
         admin_failed: &mut admin_failed,
+        admin_process: &mut admin_process_inbox,
         budget: Arc::clone(&budget),
         signals: &mut signals,
         state_exited: &mut state_exited,
@@ -1254,8 +1281,9 @@ async fn run(
     };
     let report = run_shutdown(shutdown, &mut hooks, &mut signals).await;
     let shutdown_result = validate_shutdown_report(report);
-    trigger.and(shutdown_result)?;
-    Ok(DaemonExit::Stopped)
+    let exit = trigger?;
+    shutdown_result?;
+    Ok(exit)
 }
 
 struct RunningOwners {
@@ -1306,6 +1334,7 @@ async fn start_owners(inputs: StartOwnersInputs) -> Result<RunningOwners, Daemon
         storage_reads,
         crypto,
         audit: _,
+        backup: _,
     } = live;
     let (lifecycle, lifecycle_receiver) = lifecycle_channel();
     let receivers = StateOwnerReceivers {
@@ -1548,6 +1577,7 @@ struct ShutdownWaitInputs<'a> {
     reload: &'a ReloadPort,
     reload_preparation: &'a mut ReloadPreparationInbox,
     admin_failed: &'a mut mpsc::Receiver<()>,
+    admin_process: &'a mut AdminProcessInbox,
     budget: Arc<MemoryBudget>,
     signals: &'a mut mpsc::Receiver<SignalEvent>,
     state_exited: &'a mut oneshot::Receiver<StateCoreExit>,
@@ -1557,13 +1587,14 @@ struct ShutdownWaitInputs<'a> {
 }
 
 // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=closed owner loop keeps termination selectable while serializing admin preparation signal coalescing activation progress and critical owner exits
-async fn wait_for_shutdown(inputs: ShutdownWaitInputs<'_>) -> Result<(), DaemonError> {
+async fn wait_for_shutdown(inputs: ShutdownWaitInputs<'_>) -> Result<DaemonExit, DaemonError> {
     let ShutdownWaitInputs {
         config_path,
         runtime_config,
         reload,
         reload_preparation,
         admin_failed,
+        admin_process,
         budget,
         signals,
         state_exited,
@@ -1607,6 +1638,7 @@ async fn wait_for_shutdown(inputs: ShutdownWaitInputs<'_>) -> Result<(), DaemonE
                     Some(SupervisorEvent::ReloadIdle)
                 },
             _failure = admin_failed.recv() => Some(SupervisorEvent::AdminFailure),
+            process = admin_process.recv() => Some(SupervisorEvent::AdminProcess(process)),
             _exit = &mut *state_exited => Some(SupervisorEvent::State),
             _listener = &mut *listener_exited => Some(SupervisorEvent::Listener),
             _ = progress.tick() => None,
@@ -1668,10 +1700,17 @@ async fn wait_for_shutdown(inputs: ShutdownWaitInputs<'_>) -> Result<(), DaemonE
                 preparation_origin = Some(ReloadPreparationOrigin::Signal);
             }
             SupervisorEvent::Signal(Some(SignalEvent::Terminate | SignalEvent::Interrupt)) => {
-                return Ok(());
+                return Ok(DaemonExit::Stopped);
+            }
+            SupervisorEvent::AdminProcess(Some(AdminProcessAction::Die)) => {
+                return Ok(DaemonExit::Stopped);
+            }
+            SupervisorEvent::AdminProcess(Some(AdminProcessAction::Restart)) => {
+                return Ok(DaemonExit::RestartRequested);
             }
             SupervisorEvent::Signal(None)
             | SupervisorEvent::ReloadPreparation(None)
+            | SupervisorEvent::AdminProcess(None)
             | SupervisorEvent::AdminFailure
             | SupervisorEvent::State
             | SupervisorEvent::Listener => {
@@ -1687,6 +1726,7 @@ enum SupervisorEvent {
     Prepared(Result<PreparedReload, ReloadPrepareFailure>),
     Activated(ReloadOutcome),
     ReloadIdle,
+    AdminProcess(Option<AdminProcessAction>),
     AdminFailure,
     State,
     Listener,

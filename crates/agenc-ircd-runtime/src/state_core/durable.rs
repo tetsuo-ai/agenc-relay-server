@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use agenc_ircd_admin::AdminAuditEvent;
+use agenc_ircd_admin::{AdminAuditCheckpoint, AdminAuditEvent};
 use agenc_ircd_crypto::{
     DatabaseBinding, OpenedStoragePlaintext, StorageMasterKey, StorageTable, derive_storage_index,
 };
@@ -42,6 +42,8 @@ pub const SANCTION_SCOPE_NETWORK: u16 = 0;
 pub const SANCTION_SCOPE_CHANNEL: u16 = 1;
 /// Random bytes in a sanction stored key.
 pub const SANCTION_KEY_RANDOM_BYTES: usize = 16;
+/// Largest expired audit prefix replaced by one checkpoint per sweep.
+pub(crate) const MAX_AUDIT_RETENTION_EVENTS: usize = 4_096;
 
 /// Derives every stored key the runtime writes and opens sealed rows.
 ///
@@ -811,6 +813,90 @@ pub(crate) fn project_admin_audit_event(
     })
 }
 
+/// Replaces one verified, nonempty retained audit prefix with one signed
+/// checkpoint without advancing logical protocol state.
+// agenc-review: focus owner=runtime reviewed=2026-08-30 reason=one projection must visibly couple every prefix deletion with the replacement checkpoint and accounting fence
+pub(crate) fn project_admin_audit_retention(
+    transaction_id: TransactionId,
+    checkpoint: &AdminAuditCheckpoint,
+    index: &DurableIndex,
+    keys: &KeyDeriver,
+    head: HeadCounters,
+    ceilings: AccountingCeilings,
+) -> Result<ProjectedBatch, RuntimeError> {
+    checkpoint
+        .tbs()
+        .validate()
+        .map_err(|_| RuntimeError::InvalidValue)?;
+    let tbs = checkpoint.tbs();
+    let deleted_count = usize::try_from(tbs.deleted_count).map_err(|_| RuntimeError::Overflow)?;
+    if deleted_count == 0 || deleted_count > MAX_AUDIT_RETENTION_EVENTS {
+        return Err(RuntimeError::LimitExceeded);
+    }
+    let mut projection = Projection {
+        index,
+        keys,
+        mutations: Vec::new(),
+        updates: Vec::new(),
+        touched: BTreeSet::new(),
+    };
+    let mut sequence = tbs.deleted_first_sequence;
+    loop {
+        projection.delete(
+            TableId::Audit,
+            StoredKey::new(sequence.to_be_bytes().to_vec())?,
+        )?;
+        if sequence == tbs.deleted_last_sequence {
+            break;
+        }
+        sequence = sequence.checked_add(1).ok_or(RuntimeError::Overflow)?;
+    }
+    let checkpoint_revision = tbs
+        .checkpoint_sequence
+        .checked_add(1)
+        .ok_or(RuntimeError::Overflow)?;
+    let checkpoint_key = StoredKey::new(tbs.checkpoint_sequence.to_be_bytes().to_vec())?;
+    let checkpoint_value = PersistentRecordValue::new(
+        TableId::AuditCheckpoint,
+        LIVE_RECORD_KIND,
+        checkpoint_revision,
+        0,
+        None,
+        Vec::new(),
+        checkpoint
+            .encode()
+            .map_err(|_| RuntimeError::InvalidValue)?,
+    )?;
+    projection.put(TableId::AuditCheckpoint, checkpoint_key, checkpoint_value)?;
+    let batch = StorageMutationBatch::new(
+        StorageMutationHead {
+            transaction_id,
+            expected_storage_commit_sequence: head.storage_commit_sequence,
+            expected_state_generation: head.state_generation,
+            resulting_state_generation: head.state_generation,
+            state_advancing_plan_count: 0,
+            expected_account_service_response_count: head.account_service_response_count,
+            resulting_account_service_response_count: head.account_service_response_count,
+        },
+        1,
+        StorageAccountingLimits {
+            current_logical_database_bytes: head.logical_database_bytes,
+            current_backup_stream_bytes: head.backup_stream_bytes,
+            database_max_bytes: ceilings.database_max_bytes,
+            backup_max_bytes: ceilings.backup_max_bytes,
+        },
+        projection.mutations,
+    )?;
+    Ok(ProjectedBatch {
+        resulting_logical_database_bytes: batch.resulting_logical_database_bytes(),
+        resulting_backup_stream_bytes: batch.resulting_backup_stream_bytes(),
+        resulting_account_service_response_count: head.account_service_response_count,
+        batch,
+        updates: projection.updates,
+        advancing_plans: 0,
+    })
+}
+
 impl Projection<'_> {
     fn project_account_service_write(
         &mut self,
@@ -1089,7 +1175,10 @@ impl Projection<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agenc_ircd_admin::{AdminAuditEventTbs, AdminAuditPhase, AdminCommandTbs, AdminSessionId};
+    use agenc_ircd_admin::{
+        AdminAuditCheckpoint, AdminAuditCheckpointTbs, AdminAuditEventTbs, AdminAuditPhase,
+        AdminCommandTbs, AdminSessionId,
+    };
     use agenc_ircd_crypto::{Ed25519SecretKey, LoginIndexKey, StorageDigest, audit_signing_key_id};
     use agenc_ircd_domain::{AccountState, DomainState};
     use agenc_ircd_storage::{
@@ -1206,6 +1295,72 @@ mod tests {
         assert_eq!(mutation.table(), TableId::Audit);
         assert_eq!(mutation.key().as_bytes(), 0_u64.to_be_bytes());
         assert_eq!(projected.updates().len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn audit_retention_deletes_prefix_and_puts_checkpoint_in_one_batch() -> Result<(), RuntimeError>
+    {
+        let event = audit_event()?;
+        let audit_key = Ed25519SecretKey::from_bytes([22; 32]);
+        let key_id = *audit_signing_key_id(audit_key.public_key().as_bytes())
+            .map_err(|_| RuntimeError::InvalidValue)?
+            .as_bytes();
+        let checkpoint = AdminAuditCheckpoint::sign(
+            AdminAuditCheckpointTbs {
+                network_id: NetworkId::from_bytes([1; 32]),
+                server_id: ServerId::from_bytes([2; 16]),
+                audit_signing_key_id: key_id,
+                checkpoint_sequence: 0,
+                created_at: 100,
+                deleted_first_sequence: 0,
+                deleted_last_sequence: 0,
+                deleted_count: 1,
+                deleted_last_event_hash: event.event_hash(),
+                next_retained_sequence: 1,
+                previous_checkpoint_hash: [0; 32],
+            },
+            &audit_key,
+        )
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        let mut index = DurableIndex::new();
+        index.record_known(
+            TableId::Audit,
+            StoredKey::new(0_u64.to_be_bytes().to_vec())?,
+            ExistingRecord::new(
+                DOMAIN_RECORD_SCHEMA,
+                StorageDigest::from_bytes([31; 32]),
+                MIN_SEALED_RECORD_BYTES,
+            )?,
+        );
+        let projected = project_admin_audit_retention(
+            TransactionId::from_bytes([32; 16]),
+            &checkpoint,
+            &index,
+            &keys()?,
+            head(100_000, 100_000),
+            ceilings(),
+        )?;
+        assert_eq!(projected.batch.plan_count(), 1);
+        assert_eq!(projected.batch.state_advancing_plan_count(), 0);
+        assert_eq!(projected.batch.mutations().len(), 2);
+        assert_eq!(
+            projected
+                .batch
+                .mutations()
+                .first()
+                .map(RecordMutation::table),
+            Some(TableId::Audit)
+        );
+        assert_eq!(
+            projected
+                .batch
+                .mutations()
+                .get(1)
+                .map(RecordMutation::table),
+            Some(TableId::AuditCheckpoint)
+        );
+        assert_eq!(projected.updates().len(), 2);
         Ok(())
     }
 

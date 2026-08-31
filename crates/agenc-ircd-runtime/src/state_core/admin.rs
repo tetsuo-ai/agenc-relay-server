@@ -1,6 +1,10 @@
 //! Private administrative persistence channel into the single state owner.
 
-use agenc_ircd_admin::{AdminAuditEvent, StatsSelector};
+use agenc_ircd_admin::{
+    AdminAuditCheckpoint, AdminAuditEvent, AdminAuditPhase, AdminCommand, CanonicalCommand,
+    StatsSelector,
+};
+use agenc_ircd_types::{AccountId, ChannelInstanceId, Revision, UserId, UtcSecond};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::cancel::CancellationToken;
@@ -12,11 +16,70 @@ const ADMIN_CORE_CAPACITY: usize = 16;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AdminCoreFailure {
     Busy,
+    InvalidTarget,
     Quiescing,
+    StaleRevision,
     StorageUnavailable,
 }
 
 pub(crate) type AdminCoreResult = Result<(), AdminCoreFailure>;
+
+/// A durable target whose current revision binds a confirmation token.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AdminTarget {
+    Account(AccountId),
+    Channel(ChannelInstanceId),
+    Process,
+}
+
+/// State represented durably by a committed-mutation audit event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AdminMutation {
+    SuspendAccount {
+        account_id: AccountId,
+        expires_at: UtcSecond,
+    },
+    RestoreAccount(AccountId),
+    QuarantineChannel(ChannelInstanceId),
+}
+
+impl AdminMutation {
+    pub(super) fn matches_event(self, event: &AdminAuditEvent) -> bool {
+        if event.tbs().phase != AdminAuditPhase::CommittedMutation {
+            return false;
+        }
+        let Ok(canonical) = CanonicalCommand::check(event.tbs().command_tbs.canonical_command())
+        else {
+            return false;
+        };
+        let Ok(command) = AdminCommand::parse(canonical) else {
+            return false;
+        };
+        match (self, command) {
+            (
+                Self::SuspendAccount {
+                    account_id,
+                    expires_at,
+                },
+                AdminCommand::AccountSuspend {
+                    account, seconds, ..
+                },
+            ) => event
+                .tbs()
+                .created_at
+                .checked_add(seconds.get())
+                .is_some_and(|expected| account_id == account && expires_at.get() == expected),
+            (Self::RestoreAccount(account_id), AdminCommand::AccountRestore { account, .. }) => {
+                account_id == account
+            }
+            (
+                Self::QuarantineChannel(channel_id),
+                AdminCommand::ChannelQuarantine { channel, .. },
+            ) => channel_id == channel,
+            _ => false,
+        }
+    }
+}
 
 /// One committed-state statistics view copied without exposing any mutable
 /// StateCore authority to the administrative owner.
@@ -108,6 +171,85 @@ impl AdminCorePort {
             outcome = response => outcome.unwrap_or(Err(AdminCoreFailure::StorageUnavailable)),
         }
     }
+
+    /// Captures the current durable revision after validating the typed
+    /// confirmation target.
+    pub(crate) async fn target_revision(
+        &self,
+        target: AdminTarget,
+        token: &CancellationToken,
+    ) -> Result<Revision, AdminCoreFailure> {
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .try_send(AdminCoreRequest::TargetRevision { target, reply })
+            .map_err(map_send_failure)?;
+        tokio::select! {
+            () = token.cancelled() => Err(AdminCoreFailure::StorageUnavailable),
+            outcome = response => outcome.unwrap_or(Err(AdminCoreFailure::StorageUnavailable)),
+        }
+    }
+
+    /// Commits the audit record and its derived administrative policy change
+    /// in one storage transaction, then applies the in-memory view.
+    pub(crate) async fn commit_mutation(
+        &self,
+        event: AdminAuditEvent,
+        mutation: AdminMutation,
+        expected_revision: Revision,
+        token: &CancellationToken,
+    ) -> AdminCoreResult {
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .try_send(AdminCoreRequest::CommitMutation {
+                event: Box::new(event),
+                mutation,
+                expected_revision,
+                reply,
+            })
+            .map_err(map_send_failure)?;
+        tokio::select! {
+            () = token.cancelled() => Err(AdminCoreFailure::StorageUnavailable),
+            outcome = response => outcome.unwrap_or(Err(AdminCoreFailure::StorageUnavailable)),
+        }
+    }
+
+    /// Terminates one exact live user session through StateCore ownership.
+    pub(crate) async fn kill(&self, user_id: UserId, token: &CancellationToken) -> AdminCoreResult {
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .try_send(AdminCoreRequest::Kill { user_id, reply })
+            .map_err(map_send_failure)?;
+        tokio::select! {
+            () = token.cancelled() => Err(AdminCoreFailure::StorageUnavailable),
+            outcome = response => outcome.unwrap_or(Err(AdminCoreFailure::StorageUnavailable)),
+        }
+    }
+
+    /// Replaces one verified expired audit prefix with its signed checkpoint.
+    pub(crate) async fn commit_retention(
+        &self,
+        checkpoint: AdminAuditCheckpoint,
+        token: &CancellationToken,
+    ) -> AdminCoreResult {
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .try_send(AdminCoreRequest::CommitRetention {
+                checkpoint: Box::new(checkpoint),
+                reply,
+            })
+            .map_err(map_send_failure)?;
+        tokio::select! {
+            () = token.cancelled() => Err(AdminCoreFailure::StorageUnavailable),
+            outcome = response => outcome.unwrap_or(Err(AdminCoreFailure::StorageUnavailable)),
+        }
+    }
+}
+
+fn map_send_failure(error: mpsc::error::TrySendError<AdminCoreRequest>) -> AdminCoreFailure {
+    match error {
+        mpsc::error::TrySendError::Full(_) => AdminCoreFailure::Busy,
+        mpsc::error::TrySendError::Closed(_) => AdminCoreFailure::StorageUnavailable,
+    }
 }
 
 /// Receiving half installed exactly once into StateCore.
@@ -135,6 +277,16 @@ impl AdminCoreInbox {
                 let _sent = reply.send(Err(AdminCoreFailure::StorageUnavailable));
                 None
             }
+            AdminCoreRequest::CommitMutation { reply, .. }
+            | AdminCoreRequest::Kill { reply, .. }
+            | AdminCoreRequest::CommitRetention { reply, .. } => {
+                let _sent = reply.send(outcome);
+                None
+            }
+            AdminCoreRequest::TargetRevision { reply, .. } => {
+                let _sent = reply.send(Err(AdminCoreFailure::StorageUnavailable));
+                None
+            }
         }
     }
 
@@ -149,6 +301,76 @@ impl AdminCoreInbox {
                 let _sent = reply.send(Err(AdminCoreFailure::StorageUnavailable));
                 false
             }
+            AdminCoreRequest::CommitMutation { reply, .. }
+            | AdminCoreRequest::Kill { reply, .. }
+            | AdminCoreRequest::CommitRetention { reply, .. } => {
+                let _sent = reply.send(Err(AdminCoreFailure::StorageUnavailable));
+                false
+            }
+            AdminCoreRequest::TargetRevision { reply, .. } => {
+                let _sent = reply.send(Err(AdminCoreFailure::StorageUnavailable));
+                false
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn complete_target_revision_for_test(
+        &mut self,
+        revision: Revision,
+    ) -> Option<AdminTarget> {
+        let request = self.receiver.recv().await?;
+        match request {
+            AdminCoreRequest::TargetRevision { target, reply } => {
+                let _sent = reply.send(Ok(revision));
+                Some(target)
+            }
+            AdminCoreRequest::CommitAudit { reply, .. }
+            | AdminCoreRequest::CommitMutation { reply, .. }
+            | AdminCoreRequest::Kill { reply, .. }
+            | AdminCoreRequest::CommitRetention { reply, .. } => {
+                let _sent = reply.send(Err(AdminCoreFailure::StorageUnavailable));
+                None
+            }
+            AdminCoreRequest::Snapshot { reply } => {
+                let _sent = reply.send(Err(AdminCoreFailure::StorageUnavailable));
+                None
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn complete_mutation_for_test(
+        &mut self,
+        outcome: AdminCoreResult,
+    ) -> Option<(AdminAuditEvent, AdminMutation, Revision)> {
+        let request = self.receiver.recv().await?;
+        match request {
+            AdminCoreRequest::CommitMutation {
+                event,
+                mutation,
+                expected_revision,
+                reply,
+            } => {
+                let _sent = reply.send(outcome);
+                Some((*event, mutation, expected_revision))
+            }
+            AdminCoreRequest::CommitAudit { reply, .. } | AdminCoreRequest::Kill { reply, .. } => {
+                let _sent = reply.send(Err(AdminCoreFailure::StorageUnavailable));
+                None
+            }
+            AdminCoreRequest::CommitRetention { reply, .. } => {
+                let _sent = reply.send(Err(AdminCoreFailure::StorageUnavailable));
+                None
+            }
+            AdminCoreRequest::Snapshot { reply } => {
+                let _sent = reply.send(Err(AdminCoreFailure::StorageUnavailable));
+                None
+            }
+            AdminCoreRequest::TargetRevision { reply, .. } => {
+                let _sent = reply.send(Err(AdminCoreFailure::StorageUnavailable));
+                None
+            }
         }
     }
 }
@@ -160,6 +382,24 @@ pub(super) enum AdminCoreRequest {
     },
     Snapshot {
         reply: oneshot::Sender<Result<AdminCoreSnapshot, AdminCoreFailure>>,
+    },
+    TargetRevision {
+        target: AdminTarget,
+        reply: oneshot::Sender<Result<Revision, AdminCoreFailure>>,
+    },
+    CommitMutation {
+        event: Box<AdminAuditEvent>,
+        mutation: AdminMutation,
+        expected_revision: Revision,
+        reply: oneshot::Sender<AdminCoreResult>,
+    },
+    Kill {
+        user_id: UserId,
+        reply: oneshot::Sender<AdminCoreResult>,
+    },
+    CommitRetention {
+        checkpoint: Box<AdminAuditCheckpoint>,
+        reply: oneshot::Sender<AdminCoreResult>,
     },
 }
 

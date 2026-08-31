@@ -8,19 +8,28 @@
 mod audit;
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use agenc_ircd_admin::{
     AdminAuditEvent, AdminAuditPhase, AdminChallenge, AdminCommand, AdminCommandEvent,
-    AdminSession, AdminSessionBinding, MAX_ADMIN_LINE_BYTES, MAX_ADMIN_OUTPUT_LINE_BYTES,
-    OperatorRegistry, PeerIdentity, StatsSelector, StatsValues, render_stats_batch,
+    AdminSession, AdminSessionBinding, ConfirmationState, ConfirmationToken, MAX_ADMIN_LINE_BYTES,
+    MAX_ADMIN_OUTPUT_LINE_BYTES, MAX_AUDIT_EXPORT_BYTES, OperatorRegistry, PeerIdentity,
+    StatsSelector, StatsValues, encode_base64url, render_stats_batch,
     render_stats_storage_unavailable, render_stats_unavailable,
+};
+use agenc_ircd_crypto::Ed25519SecretKey;
+use agenc_ircd_storage::{
+    BackupDestination, BackupReceipt, StorageCompletion, StorageError, StoragePort,
 };
 use agenc_ircd_types::{EntropySource, MonotonicClock, WallClock};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::sync::{mpsc, watch};
+use zeroize::Zeroizing;
 
-use crate::budget::MemoryPermitBatch;
+use crate::budget::{
+    BoundedMemoryCharges, MemoryBudget, MemoryBudgetPort as _, MemoryCharge, MemoryPermitBatch,
+};
 use crate::cancel::CancellationToken;
 use crate::connection::{ConnectionExit, ConnectionGeneration, ConnectionResources};
 use crate::observe::health::{HealthSnapshot, Liveness, ReadinessGate};
@@ -30,7 +39,7 @@ use crate::runtime_config::{
     RuntimeConfigHandle,
 };
 use crate::state_core::inbox::CloseReason;
-use crate::state_core::{AdminCoreFailure, AdminCorePort};
+use crate::state_core::{AdminCoreFailure, AdminCorePort, AdminMutation, AdminTarget};
 use crate::sync::Arc;
 
 pub(crate) use audit::AuditAuthority;
@@ -47,6 +56,85 @@ const ADMIN_NOTICE_BUDGET: Duration = Duration::from_secs(30);
 /// path and will raise this through a typed constructor in its composition
 /// slice.
 const MAX_ORDINARY_BATCH_LINES: usize = 266;
+/// Process actions waiting for the root shutdown driver.
+const ADMIN_PROCESS_CAPACITY: usize = 1;
+/// Periodic opportunity to replace one expired audit prefix.
+const AUDIT_RETENTION_SWEEP: Duration = Duration::from_secs(60 * 60);
+/// Checked conversion unit for configured retention days.
+const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
+
+/// A committed administrative process request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AdminProcessAction {
+    Die,
+    Restart,
+}
+
+#[derive(Clone)]
+pub(crate) struct AdminProcessPort {
+    sender: mpsc::Sender<AdminProcessAction>,
+}
+
+impl AdminProcessPort {
+    fn request(&self, action: AdminProcessAction) -> Result<(), AdminCoreFailure> {
+        self.sender.try_send(action).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => AdminCoreFailure::Busy,
+            mpsc::error::TrySendError::Closed(_) => AdminCoreFailure::StorageUnavailable,
+        })
+    }
+}
+
+pub(crate) struct AdminProcessInbox {
+    receiver: mpsc::Receiver<AdminProcessAction>,
+}
+
+impl AdminProcessInbox {
+    pub(crate) async fn recv(&mut self) -> Option<AdminProcessAction> {
+        self.receiver.recv().await
+    }
+}
+
+pub(crate) fn admin_process_channel() -> (AdminProcessPort, AdminProcessInbox) {
+    let (sender, receiver) = mpsc::channel(ADMIN_PROCESS_CAPACITY);
+    (AdminProcessPort { sender }, AdminProcessInbox { receiver })
+}
+
+/// Private capability for one signed backup action. The owner retains only
+/// the configured directory, a bounded storage port, and zeroized key bytes.
+pub(crate) struct AdminBackupRuntime {
+    storage: StoragePort,
+    directory: PathBuf,
+    signing_key: Zeroizing<[u8; 32]>,
+}
+
+impl AdminBackupRuntime {
+    pub(crate) fn new(storage: StoragePort, directory: PathBuf, signing_key: [u8; 32]) -> Self {
+        Self {
+            storage,
+            directory,
+            signing_key: Zeroizing::new(signing_key),
+        }
+    }
+
+    fn start(
+        &self,
+        audit_sequence: u64,
+        created_at: u64,
+        backup_id: [u8; 16],
+    ) -> Result<StorageCompletion<BackupReceipt>, agenc_ircd_storage::StorageError> {
+        let name = format!(
+            "admin-{audit_sequence:020}-{}.agenc-backup",
+            encode_base64url(&backup_id)
+        );
+        let destination = BackupDestination::new(&self.directory, &name)?;
+        self.storage.try_backup(
+            destination,
+            Ed25519SecretKey::from_bytes(*self.signing_key),
+            created_at,
+            backup_id,
+        )
+    }
+}
 
 /// Opaque listener-side handle for the private admin-owner inbox.
 ///
@@ -154,6 +242,14 @@ impl AdminOutput {
             mpsc::error::TrySendError::Closed(_) => CloseReason::TransportLoss,
         })
     }
+
+    fn try_export(&self, lines: Vec<String>, memory: MemoryPermitBatch) -> Result<(), CloseReason> {
+        let batch = AdminWrite::export(lines, memory)?;
+        self.sender.try_send(batch).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => CloseReason::SlowConsumer,
+            mpsc::error::TrySendError::Closed(_) => CloseReason::TransportLoss,
+        })
+    }
 }
 
 struct AdminWrite {
@@ -182,6 +278,28 @@ impl AdminWrite {
             lines: encoded,
             close,
             _memory: None,
+        })
+    }
+
+    fn export(lines: Vec<String>, memory: MemoryPermitBatch) -> Result<Self, CloseReason> {
+        let mut encoded = Vec::new();
+        encoded
+            .try_reserve_exact(lines.len())
+            .map_err(|_| CloseReason::Overload)?;
+        for line in lines {
+            let bytes = line.into_bytes();
+            if bytes.is_empty()
+                || bytes.len() > MAX_ADMIN_OUTPUT_LINE_BYTES
+                || bytes.iter().any(|byte| matches!(byte, b'\r' | b'\n'))
+            {
+                return Err(CloseReason::ProtocolError);
+            }
+            encoded.push(bytes);
+        }
+        Ok(Self {
+            lines: encoded,
+            close: None,
+            _memory: Some(memory),
         })
     }
 }
@@ -217,7 +335,10 @@ pub(crate) struct AdminOwner {
     config: Option<RuntimeConfigHandle>,
     config_changes: Option<watch::Receiver<crate::runtime_config::ConfigRevision>>,
     reload: Option<ReloadPreparationPort>,
+    backup: Option<AdminBackupRuntime>,
+    process: Option<AdminProcessPort>,
     fatal: Option<mpsc::Sender<()>>,
+    budget: Arc<MemoryBudget>,
     entropy: Box<dyn EntropySource + Send>,
     monotonic: Box<dyn MonotonicClock + Send>,
     wall: Box<dyn WallClock + Send>,
@@ -233,7 +354,10 @@ pub(crate) struct AdminOwnerRuntime {
     pub(crate) health: AdminOwnerHealth,
     pub(crate) config: Option<RuntimeConfigHandle>,
     pub(crate) reload: Option<ReloadPreparationPort>,
+    pub(crate) backup: Option<AdminBackupRuntime>,
+    pub(crate) process: Option<AdminProcessPort>,
     pub(crate) fatal: Option<mpsc::Sender<()>>,
+    pub(crate) budget: Arc<MemoryBudget>,
     pub(crate) entropy: Box<dyn EntropySource + Send>,
     pub(crate) clocks: AdminOwnerClocks,
 }
@@ -304,7 +428,10 @@ impl AdminOwner {
             config: runtime.config,
             config_changes,
             reload: runtime.reload,
+            backup: runtime.backup,
+            process: runtime.process,
             fatal: runtime.fatal,
+            budget: runtime.budget,
             entropy: runtime.entropy,
             monotonic: runtime.clocks.monotonic,
             wall: runtime.clocks.wall,
@@ -314,9 +441,16 @@ impl AdminOwner {
 
     // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=single bounded admin select owns session authority reload notifications transport input and cancellation ordering
     pub(crate) async fn run(mut self, mut inbox: AdminOwnerInbox, token: CancellationToken) {
+        let first_retention = tokio::time::Instant::now() + AUDIT_RETENTION_SWEEP;
+        let mut retention = tokio::time::interval_at(first_retention, AUDIT_RETENTION_SWEEP);
+        retention.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             let message = tokio::select! {
                 () = token.cancelled() => break,
+                _ = retention.tick() => {
+                    self.retention_sweep(&token).await;
+                    continue;
+                }
                 changed = wait_for_config_change(&mut self.config_changes) => {
                     if changed {
                         self.reconcile_authority();
@@ -333,6 +467,57 @@ impl AdminOwner {
         }
         for (_, owned) in self.sessions {
             let _ = owned.output.try_close(CloseReason::Shutdown);
+        }
+    }
+
+    async fn retention_sweep(&mut self, token: &CancellationToken) {
+        let Some(snapshot) = self.config.as_ref().map(RuntimeConfigHandle::load) else {
+            return;
+        };
+        let Some(retention_seconds) = snapshot
+            .config()
+            .moderation
+            .audit_retention_days
+            .checked_mul(SECONDS_PER_DAY)
+        else {
+            self.signal_fatal();
+            return;
+        };
+        let Ok(now) = self.wall.utc_now() else {
+            return;
+        };
+        let Ok(job) = self.audit.prepare_retention(now.get(), retention_seconds) else {
+            self.signal_fatal();
+            return;
+        };
+        let scan = tokio::task::spawn_blocking(move || job.run());
+        let tbs = tokio::select! {
+            () = token.cancelled() => return,
+            result = scan => match result {
+                Ok(Ok(Some(tbs))) => tbs,
+                Ok(Ok(None)) => return,
+                Ok(Err(_)) | Err(_) => {
+                    self.signal_fatal();
+                    return;
+                }
+            }
+        };
+        let Ok(checkpoint) = self.audit.sign_retention(tbs) else {
+            self.signal_fatal();
+            return;
+        };
+        match self.core.commit_retention(checkpoint, token).await {
+            Ok(()) => {
+                if self.audit.commit_retention(&checkpoint).is_err() {
+                    self.signal_fatal();
+                }
+            }
+            Err(AdminCoreFailure::Busy | AdminCoreFailure::Quiescing) => {}
+            Err(
+                AdminCoreFailure::InvalidTarget
+                | AdminCoreFailure::StaleRevision
+                | AdminCoreFailure::StorageUnavailable,
+            ) => self.signal_fatal(),
         }
     }
 
@@ -427,23 +612,458 @@ impl AdminOwner {
                 return;
             }
             AdminCommand::Pong(_) => return,
-            AdminCommand::Rehash(_) => {
-                self.rehash(generation, &event, token).await;
+            AdminCommand::Connect { .. }
+            | AdminCommand::Squit { .. }
+            | AdminCommand::PeerQuarantine { .. } => {
+                self.output_line(
+                    generation,
+                    format!(
+                        "FAIL {} UNAVAILABLE :Command unavailable",
+                        event.command.verb()
+                    ),
+                );
                 return;
             }
             _ => {}
         }
-        let Some(lines) = self
-            .prepare_command_lines(generation, &event.command, token)
+        if event.confirmation == ConfirmationState::Required {
+            self.issue_confirmation(generation, &event, token).await;
+            return;
+        }
+        match &event.command {
+            AdminCommand::Rehash(_) => self.rehash(generation, &event, token).await,
+            AdminCommand::Kill { user, .. } => {
+                self.kill(generation, &event, *user, token).await;
+            }
+            AdminCommand::AccountSuspend { account, .. }
+            | AdminCommand::AccountRestore { account, .. } => {
+                self.mutate_account(generation, &event, *account, token)
+                    .await;
+            }
+            AdminCommand::ChannelQuarantine { channel, .. } => {
+                self.mutate_channel(generation, &event, *channel, token)
+                    .await;
+            }
+            AdminCommand::Restart(_) => {
+                self.process_action(generation, &event, AdminProcessAction::Restart, token)
+                    .await;
+            }
+            AdminCommand::Die(_) => {
+                self.process_action(generation, &event, AdminProcessAction::Die, token)
+                    .await;
+            }
+            AdminCommand::AuditExport(range) => {
+                self.audit_export(generation, &event, *range, token).await;
+            }
+            AdminCommand::BackupCreate(_) => {
+                self.backup(generation, &event, token).await;
+            }
+            _ => {
+                let Some(lines) = self
+                    .prepare_command_lines(generation, &event.command, token)
+                    .await
+                else {
+                    return;
+                };
+                let Some(audit) = self.prepare_observed_event(generation, &event) else {
+                    return;
+                };
+                self.commit_observed(generation, &event.command, lines, audit, token)
+                    .await;
+            }
+        }
+    }
+
+    // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=external backup action keeps intent action outcome and indeterminate branches in one auditable sequence
+    async fn backup(
+        &mut self,
+        generation: ConnectionGeneration,
+        event: &AdminCommandEvent,
+        token: &CancellationToken,
+    ) {
+        if self.backup.is_none() {
+            self.output_line(
+                generation,
+                "FAIL BACKUP UNAVAILABLE :Command unavailable".to_owned(),
+            );
+            return;
+        }
+        let Some(intent) = self.prepare_action_event(generation, event, AdminAuditPhase::Intent)
+        else {
+            return;
+        };
+        if let Err(failure) = self
+            .commit_action_audit(generation, intent.clone(), token)
+            .await
+        {
+            self.output_audit_failure(generation, "BACKUP", failure);
+            return;
+        }
+
+        let mut backup_id = [0_u8; 16];
+        let completion = self
+            .entropy
+            .fill_exact(&mut backup_id)
+            .map_err(|_| AdminCoreFailure::StorageUnavailable)
+            .and_then(|()| {
+                self.backup
+                    .as_ref()
+                    .ok_or(AdminCoreFailure::StorageUnavailable)?
+                    .start(
+                        intent.tbs().audit_sequence,
+                        intent.tbs().created_at,
+                        backup_id,
+                    )
+                    .map_err(map_backup_failure)
+            });
+        let result = match completion {
+            Ok(completion) => {
+                let joined = tokio::task::spawn_blocking(move || completion.wait());
+                tokio::select! {
+                    () = token.cancelled() => return,
+                    result = joined => match result {
+                        Ok(Ok(_receipt)) => Ok(()),
+                        Ok(Err(error)) => Err(map_backup_failure(error)),
+                        Err(_) => {
+                            self.fail_closed(generation);
+                            return;
+                        }
+                    }
+                }
+            }
+            Err(failure) => Err(failure),
+        };
+        let phase = if result.is_ok() {
+            AdminAuditPhase::OutcomeSuccess
+        } else {
+            AdminAuditPhase::OutcomeFailure
+        };
+        if !self
+            .commit_rehash_outcome(generation, event, phase, token)
+            .await
+        {
+            self.fail_closed(generation);
+            return;
+        }
+        match result {
+            Ok(()) => self.output_line(generation, "NOTE BACKUP OK :Backup created".to_owned()),
+            Err(failure) => self.output_admin_failure(generation, "BACKUP", failure),
+        }
+    }
+
+    async fn audit_export(
+        &mut self,
+        generation: ConnectionGeneration,
+        event: &AdminCommandEvent,
+        range: agenc_ircd_admin::AuditRange,
+        token: &CancellationToken,
+    ) {
+        let Ok(memory) = MemoryCharge::allocation(MAX_AUDIT_EXPORT_BYTES)
+            .and_then(|charge| BoundedMemoryCharges::new(vec![charge]))
+            .and_then(|charges| self.budget.try_acquire_batch(charges).map_err(Into::into))
+        else {
+            self.output_line(
+                generation,
+                "FAIL AUDIT BUSY :Administrative action busy".to_owned(),
+            );
+            return;
+        };
+        let mut batch_id = [0_u8; 16];
+        if self.entropy.fill_exact(&mut batch_id).is_err() {
+            self.output_storage_unavailable(generation, "AUDIT");
+            return;
+        }
+        let preflight = match self.audit.prepare_export(range, batch_id) {
+            Ok(job) => job,
+            Err(error) => {
+                self.output_export_failure(generation, error);
+                return;
+            }
+        };
+        let preflight = tokio::task::spawn_blocking(move || preflight.run()).await;
+        match preflight {
+            Ok(Ok(_prepared)) => {}
+            Ok(Err(error)) => {
+                self.output_export_failure(generation, error);
+                return;
+            }
+            Err(_) => {
+                self.fail_closed(generation);
+                return;
+            }
+        }
+        let Some(observed) = self.prepare_observed_event(generation, event) else {
+            return;
+        };
+        if let Err(failure) = self.commit_action_audit(generation, observed, token).await {
+            self.output_audit_failure(generation, "AUDIT", failure);
+            return;
+        }
+        let export = match self.audit.prepare_export(range, batch_id) {
+            Ok(job) => job,
+            Err(error) => {
+                self.output_export_failure(generation, error);
+                return;
+            }
+        };
+        match tokio::task::spawn_blocking(move || export.run()).await {
+            Ok(Ok(lines)) => self.output_export(generation, lines, memory),
+            Ok(Err(error)) => self.output_export_failure(generation, error),
+            Err(_) => self.fail_closed(generation),
+        }
+    }
+
+    async fn issue_confirmation(
+        &mut self,
+        generation: ConnectionGeneration,
+        event: &AdminCommandEvent,
+        token: &CancellationToken,
+    ) {
+        let Some(target) = confirmation_target(&event.command) else {
+            self.close(generation, CloseReason::ProtocolError);
+            return;
+        };
+        let revision = match self.core.target_revision(target, token).await {
+            Ok(revision) => revision,
+            Err(failure) => {
+                self.output_admin_failure(generation, event.command.verb(), failure);
+                return;
+            }
+        };
+        let mut bytes = [0_u8; 16];
+        if self.entropy.fill_exact(&mut bytes).is_err() {
+            self.output_storage_unavailable(generation, event.command.verb());
+            return;
+        }
+        let token_text = {
+            let Some(owned) = self.sessions.get_mut(&generation) else {
+                return;
+            };
+            match owned.session.issue_confirmation(
+                ConfirmationToken::from_bytes(bytes),
+                self.monotonic.now(),
+                event.tbs.canonical_command(),
+                revision,
+            ) {
+                Ok(token) => token.to_base64url(),
+                Err(_) => return,
+            }
+        };
+        self.output_line(
+            generation,
+            format!(
+                "NOTE {} CONFIRM {token_text} :Repeat this exact command to confirm",
+                event.command.verb()
+            ),
+        );
+    }
+
+    async fn kill(
+        &mut self,
+        generation: ConnectionGeneration,
+        event: &AdminCommandEvent,
+        user_id: agenc_ircd_types::UserId,
+        token: &CancellationToken,
+    ) {
+        let Some(intent) = self.prepare_action_event(generation, event, AdminAuditPhase::Intent)
+        else {
+            return;
+        };
+        if let Err(failure) = self.commit_action_audit(generation, intent, token).await {
+            self.output_audit_failure(generation, "KILL", failure);
+            return;
+        }
+        let result = self.core.kill(user_id, token).await;
+        let phase = if result.is_ok() {
+            AdminAuditPhase::OutcomeSuccess
+        } else {
+            AdminAuditPhase::OutcomeFailure
+        };
+        if !self
+            .commit_rehash_outcome(generation, event, phase, token)
+            .await
+        {
+            self.fail_closed(generation);
+            return;
+        }
+        match result {
+            Ok(()) => self.output_line(generation, "NOTE KILL OK :Session terminated".to_owned()),
+            Err(failure) => self.output_admin_failure(generation, "KILL", failure),
+        }
+    }
+
+    async fn mutate_account(
+        &mut self,
+        generation: ConnectionGeneration,
+        event: &AdminCommandEvent,
+        account_id: agenc_ircd_types::AccountId,
+        token: &CancellationToken,
+    ) {
+        let Some(revision) = self
+            .mutation_revision(generation, event, AdminTarget::Account(account_id), token)
             .await
         else {
             return;
         };
-        let Some(audit) = self.prepare_observed_event(generation, &event) else {
+        let Some(audit) =
+            self.prepare_action_event(generation, event, AdminAuditPhase::CommittedMutation)
+        else {
             return;
         };
-        self.commit_observed(generation, &event.command, lines, audit, token)
-            .await;
+        let mutation = match &event.command {
+            AdminCommand::AccountSuspend { seconds, .. } => {
+                let Some(expires_at) = audit.tbs().created_at.checked_add(seconds.get()) else {
+                    self.output_storage_unavailable(generation, "ACCOUNT");
+                    return;
+                };
+                AdminMutation::SuspendAccount {
+                    account_id,
+                    expires_at: agenc_ircd_types::UtcSecond::from_unix_seconds(expires_at),
+                }
+            }
+            AdminCommand::AccountRestore { .. } => AdminMutation::RestoreAccount(account_id),
+            _ => return,
+        };
+        match self
+            .core
+            .commit_mutation(audit.clone(), mutation, revision, token)
+            .await
+        {
+            Ok(()) => {
+                if self.audit.commit_event(&audit).is_err() {
+                    self.fail_closed(generation);
+                    return;
+                }
+                let text = if matches!(event.command, AdminCommand::AccountSuspend { .. }) {
+                    "NOTE ACCOUNT OK :Account suspended"
+                } else {
+                    "NOTE ACCOUNT OK :Account restored"
+                };
+                self.output_line(generation, text.to_owned());
+            }
+            Err(failure) => self.output_admin_failure(generation, "ACCOUNT", failure),
+        }
+    }
+
+    async fn mutate_channel(
+        &mut self,
+        generation: ConnectionGeneration,
+        event: &AdminCommandEvent,
+        channel_id: agenc_ircd_types::ChannelInstanceId,
+        token: &CancellationToken,
+    ) {
+        let Some(revision) = self
+            .mutation_revision(generation, event, AdminTarget::Channel(channel_id), token)
+            .await
+        else {
+            return;
+        };
+        let Some(audit) =
+            self.prepare_action_event(generation, event, AdminAuditPhase::CommittedMutation)
+        else {
+            return;
+        };
+        match self
+            .core
+            .commit_mutation(
+                audit.clone(),
+                AdminMutation::QuarantineChannel(channel_id),
+                revision,
+                token,
+            )
+            .await
+        {
+            Ok(()) => {
+                if self.audit.commit_event(&audit).is_err() {
+                    self.fail_closed(generation);
+                    return;
+                }
+                self.output_line(
+                    generation,
+                    "NOTE CHANNEL OK :Channel quarantined".to_owned(),
+                );
+            }
+            Err(failure) => self.output_admin_failure(generation, "CHANNEL", failure),
+        }
+    }
+
+    // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=confirmation and fresh target revision branches remain adjacent to their closed reply mapping
+    async fn mutation_revision(
+        &mut self,
+        generation: ConnectionGeneration,
+        event: &AdminCommandEvent,
+        target: AdminTarget,
+        token: &CancellationToken,
+    ) -> Option<agenc_ircd_types::Revision> {
+        match event.confirmation {
+            ConfirmationState::Satisfied { target_revision } => Some(target_revision),
+            ConfirmationState::NotRequired => {
+                match self.core.target_revision(target, token).await {
+                    Ok(revision) => Some(revision),
+                    Err(failure) => {
+                        self.output_admin_failure(generation, event.command.verb(), failure);
+                        None
+                    }
+                }
+            }
+            ConfirmationState::Required => None,
+        }
+    }
+
+    async fn process_action(
+        &mut self,
+        generation: ConnectionGeneration,
+        event: &AdminCommandEvent,
+        action: AdminProcessAction,
+        token: &CancellationToken,
+    ) {
+        let Some(process) = self.process.clone() else {
+            self.output_line(
+                generation,
+                format!(
+                    "FAIL {} UNAVAILABLE :Command unavailable",
+                    event.command.verb()
+                ),
+            );
+            return;
+        };
+        let ConfirmationState::Satisfied { target_revision } = event.confirmation else {
+            self.close(generation, CloseReason::ProtocolError);
+            return;
+        };
+        match self.core.target_revision(AdminTarget::Process, token).await {
+            Ok(current) if current == target_revision => {}
+            Ok(_) => {
+                self.output_admin_failure(
+                    generation,
+                    event.command.verb(),
+                    AdminCoreFailure::StaleRevision,
+                );
+                return;
+            }
+            Err(failure) => {
+                self.output_admin_failure(generation, event.command.verb(), failure);
+                return;
+            }
+        }
+        let Some(intent) = self.prepare_action_event(generation, event, AdminAuditPhase::Intent)
+        else {
+            return;
+        };
+        if let Err(failure) = self.commit_action_audit(generation, intent, token).await {
+            self.output_audit_failure(generation, event.command.verb(), failure);
+            return;
+        }
+        if let Err(failure) = process.request(action) {
+            if !self
+                .commit_rehash_outcome(generation, event, AdminAuditPhase::OutcomeFailure, token)
+                .await
+            {
+                self.fail_closed(generation);
+                return;
+            }
+            self.output_admin_failure(generation, event.command.verb(), failure);
+        }
     }
 
     // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=audited reload keeps intent provisional activation outcome and rollback in one explicit fail-closed barrier
@@ -648,10 +1268,23 @@ impl AdminOwner {
         verb: &str,
         failure: AdminCoreFailure,
     ) {
+        self.output_admin_failure(generation, verb, failure);
+    }
+
+    fn output_admin_failure(
+        &self,
+        generation: ConnectionGeneration,
+        verb: &str,
+        failure: AdminCoreFailure,
+    ) {
         match failure {
             AdminCoreFailure::Busy | AdminCoreFailure::Quiescing => self.output_line(
                 generation,
                 format!("FAIL {verb} BUSY :Administrative action busy"),
+            ),
+            AdminCoreFailure::InvalidTarget | AdminCoreFailure::StaleRevision => self.output_line(
+                generation,
+                format!("FAIL {verb} INVALID_TARGET :Administrative target unavailable"),
             ),
             AdminCoreFailure::StorageUnavailable => {
                 self.output_storage_unavailable(generation, verb);
@@ -661,6 +1294,10 @@ impl AdminOwner {
 
     fn fail_closed(&self, generation: ConnectionGeneration) {
         self.close(generation, CloseReason::ProtocolError);
+        self.signal_fatal();
+    }
+
+    fn signal_fatal(&self) {
         if let Some(fatal) = &self.fatal {
             let _sent = fatal.try_send(());
         }
@@ -763,10 +1400,12 @@ impl AdminOwner {
                 }
                 self.output_batch(generation, lines);
             }
-            Err(AdminCoreFailure::Busy | AdminCoreFailure::Quiescing) => self.output_line(
-                generation,
-                format!("FAIL {verb} BUSY :Administrative action busy"),
-            ),
+            Err(
+                failure @ (AdminCoreFailure::Busy
+                | AdminCoreFailure::InvalidTarget
+                | AdminCoreFailure::Quiescing
+                | AdminCoreFailure::StaleRevision),
+            ) => self.output_admin_failure(generation, verb, failure),
             Err(AdminCoreFailure::StorageUnavailable) => {
                 if let AdminCommand::Stats(selector) = command {
                     self.output_line(generation, render_stats_storage_unavailable(*selector));
@@ -885,9 +1524,36 @@ impl AdminOwner {
                     selector.as_str()
                 )
             }
-            AdminCoreFailure::StorageUnavailable => render_stats_unavailable(selector),
+            AdminCoreFailure::InvalidTarget
+            | AdminCoreFailure::StaleRevision
+            | AdminCoreFailure::StorageUnavailable => render_stats_unavailable(selector),
         };
         self.output_line(generation, line);
+    }
+
+    fn output_export_failure(&self, generation: ConnectionGeneration, error: crate::RuntimeError) {
+        match error {
+            crate::RuntimeError::Storage(_) => self.output_storage_unavailable(generation, "AUDIT"),
+            crate::RuntimeError::LimitExceeded | crate::RuntimeError::MemoryExhausted => self
+                .output_line(
+                    generation,
+                    "FAIL AUDIT UNAVAILABLE :Audit export unavailable".to_owned(),
+                ),
+            _ => self.fail_closed(generation),
+        }
+    }
+
+    fn output_export(
+        &self,
+        generation: ConnectionGeneration,
+        lines: Vec<String>,
+        memory: MemoryPermitBatch,
+    ) {
+        if let Some(owned) = self.sessions.get(&generation)
+            && owned.output.try_export(lines, memory).is_err()
+        {
+            let _ = owned.output.try_close(CloseReason::SlowConsumer);
+        }
     }
 
     fn output_line(&self, generation: ConnectionGeneration, line: String) {
@@ -906,6 +1572,33 @@ impl AdminOwner {
         if let Some(owned) = self.sessions.get(&generation) {
             let _ = owned.output.try_close(reason);
         }
+    }
+}
+
+fn confirmation_target(command: &AdminCommand) -> Option<AdminTarget> {
+    match command {
+        AdminCommand::AccountSuspend { account, .. } => Some(AdminTarget::Account(*account)),
+        AdminCommand::Restart(_) | AdminCommand::Die(_) => Some(AdminTarget::Process),
+        AdminCommand::PeerQuarantine { .. } => None,
+        _ => None,
+    }
+}
+
+fn map_backup_failure(error: StorageError) -> AdminCoreFailure {
+    match error {
+        StorageError::QueueFull | StorageError::AllocationFailed => AdminCoreFailure::Busy,
+        StorageError::InvalidEncoding
+        | StorageError::UnsupportedVersion
+        | StorageError::LimitExceeded
+        | StorageError::Overflow
+        | StorageError::AuthenticationFailed
+        | StorageError::StaleState
+        | StorageError::Unavailable
+        | StorageError::FilesystemRejected
+        | StorageError::WriterLocked
+        | StorageError::DatabaseRejected
+        | StorageError::UnsupportedMigration
+        | StorageError::ResumeMismatch => AdminCoreFailure::StorageUnavailable,
     }
 }
 
@@ -1130,6 +1823,24 @@ mod tests {
         OperatorRegistry::from_records(vec![record]).map_err(|_| RuntimeError::InvalidValue)
     }
 
+    fn all_permissions_registry() -> Result<OperatorRegistry, RuntimeError> {
+        let mut permissions = AdminPermissionSet::EMPTY;
+        for permission in AdminPermission::ALL {
+            permissions.insert(permission);
+        }
+        let record = OperatorRecord::new(
+            OperatorId::from_bytes([7; 16]),
+            Ed25519SecretKey::from_bytes([8; 32]).public_key(),
+            None,
+            vec![1000],
+            Vec::new(),
+            permissions,
+            true,
+        )
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        OperatorRegistry::from_records(vec![record]).map_err(|_| RuntimeError::InvalidValue)
+    }
+
     fn binding() -> AdminSessionBinding {
         AdminSessionBinding {
             network_id: NetworkId::from_bytes([1; 32]),
@@ -1203,6 +1914,30 @@ mod tests {
         .into_bytes())
     }
 
+    fn confirmed_line(
+        counter: u64,
+        command: &str,
+        token: &ConfirmationToken,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        let tbs = AdminCommandTbs::new(
+            binding().network_id,
+            binding().server_id,
+            challenge().session_id(),
+            counter,
+            Some(token.hash().map_err(|_| RuntimeError::InvalidValue)?),
+            command.as_bytes(),
+        )
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        let signature = tbs
+            .sign(&Ed25519SecretKey::from_bytes([8; 32]))
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        Ok(format!(
+            "{} {command}\r\n",
+            render_admin_tag(counter, &signature, Some(token))
+        )
+        .into_bytes())
+    }
+
     #[tokio::test]
     async fn owner_answers_only_bounded_pre_auth_liveness() -> Result<(), RuntimeError> {
         let (port, inbox) = admin_transport_channel(binding());
@@ -1220,7 +1955,10 @@ mod tests {
                     health: live_health(),
                     config: None,
                     reload: None,
+                    backup: None,
+                    process: None,
                     fatal: None,
+                    budget: Arc::new(MemoryBudget::new(MAX_AUDIT_EXPORT_BYTES * 2)),
                     entropy: Box::new(
                         ScriptedEntropy::new(vec![0; 64])
                             .map_err(|_| RuntimeError::InvalidValue)?,
@@ -1307,7 +2045,10 @@ mod tests {
                     health: live_health(),
                     config: None,
                     reload: None,
+                    backup: None,
+                    process: None,
                     fatal: None,
+                    budget: Arc::new(MemoryBudget::new(MAX_AUDIT_EXPORT_BYTES * 2)),
                     entropy: Box::new(
                         ScriptedEntropy::new(vec![0; 64])
                             .map_err(|_| RuntimeError::InvalidValue)?,
@@ -1406,6 +2147,222 @@ mod tests {
             reply.lines.last(),
             Some(&b"BATCH -AAAAAAAAAAAAAAAAAAAAAA".to_vec())
         );
+        root.cancel();
+        owner.await.map_err(|_| RuntimeError::Cancelled)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn account_mutation_waits_for_one_atomic_state_core_commit() -> Result<(), RuntimeError> {
+        let (port, inbox) = admin_transport_channel(binding());
+        let (core, mut core_inbox) = admin_core_channel();
+        let root = CancellationToken::root();
+        let owner = tokio::spawn(
+            AdminOwner::new(
+                binding(),
+                all_permissions_registry()?,
+                AdminAdmissionSnapshot::new(vec![1000], Vec::new(), Vec::new()),
+                AuditAuthority::empty_for_test()?,
+                core,
+                AdminOwnerRuntime {
+                    health: live_health(),
+                    config: None,
+                    reload: None,
+                    backup: None,
+                    process: None,
+                    fatal: None,
+                    budget: Arc::new(MemoryBudget::new(MAX_AUDIT_EXPORT_BYTES * 2)),
+                    entropy: Box::new(
+                        ScriptedEntropy::new(vec![0; 64])
+                            .map_err(|_| RuntimeError::InvalidValue)?,
+                    ),
+                    clocks: AdminOwnerClocks {
+                        monotonic: Box::new(SystemMonotonicClock::start()),
+                        wall: Box::new(SystemWallClock),
+                    },
+                },
+            )
+            .run(inbox, root.clone()),
+        );
+        let (sender, mut output) = mpsc::channel(ADMIN_OUTPUT_CAPACITY);
+        port.opened(
+            ConnectionGeneration::new(12),
+            challenge(),
+            PeerIdentity::Local {
+                uid: 1000,
+                gid: 1000,
+            },
+            AdminOutput { sender },
+            &root,
+        )
+        .await
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        let _challenge = output.recv().await.ok_or(RuntimeError::InvalidValue)?;
+        port.line(ConnectionGeneration::new(12), oper_line()?, &root)
+            .await
+            .map_err(|_| RuntimeError::InvalidValue)?;
+
+        let account = agenc_ircd_types::AccountId::from_random(
+            agenc_ircd_types::AccountRandomId::from_bytes([9; 16]),
+        );
+        let command = format!("ACCOUNT SUSPEND {} 60 :policy action", account.to_text());
+        let canonical = agenc_ircd_admin::CanonicalCommand::check(command.as_bytes())
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        assert!(matches!(
+            AdminCommand::parse(canonical),
+            Ok(AdminCommand::AccountSuspend { account: parsed, .. }) if parsed == account
+        ));
+        port.line(
+            ConnectionGeneration::new(12),
+            signed_line(0, &command)?,
+            &root,
+        )
+        .await
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        let revision =
+            agenc_ircd_types::Revision::new(7).map_err(|_| RuntimeError::InvalidValue)?;
+        let target = tokio::time::timeout(
+            Duration::from_secs(1),
+            core_inbox.complete_target_revision_for_test(revision),
+        )
+        .await
+        .map_err(|_| RuntimeError::Cancelled)?;
+        assert_eq!(target, Some(AdminTarget::Account(account)));
+        let mutation = tokio::time::timeout(
+            Duration::from_secs(1),
+            core_inbox.complete_mutation_for_test(Ok(())),
+        )
+        .await
+        .map_err(|_| RuntimeError::Cancelled)?;
+        let (event, mutation, expected_revision) = mutation.ok_or(RuntimeError::InvalidValue)?;
+        assert_eq!(event.tbs().phase, AdminAuditPhase::CommittedMutation);
+        assert_eq!(
+            event.tbs().command_tbs.canonical_command(),
+            command.as_bytes()
+        );
+        assert_eq!(expected_revision, revision);
+        assert!(matches!(
+            mutation,
+            AdminMutation::SuspendAccount {
+                account_id,
+                expires_at,
+            } if account_id == account
+                && expires_at.get() == event.tbs().created_at.saturating_add(60)
+        ));
+        let reply = tokio::time::timeout(Duration::from_secs(1), output.recv())
+            .await
+            .map_err(|_| RuntimeError::Cancelled)?
+            .ok_or(RuntimeError::InvalidValue)?;
+        assert_eq!(
+            reply.lines,
+            vec![b"NOTE ACCOUNT OK :Account suspended".to_vec()]
+        );
+
+        root.cancel();
+        owner.await.map_err(|_| RuntimeError::Cancelled)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn confirmed_die_commits_intent_before_requesting_stop() -> Result<(), RuntimeError> {
+        let (port, inbox) = admin_transport_channel(binding());
+        let (core, mut core_inbox) = admin_core_channel();
+        let (process, mut process_inbox) = admin_process_channel();
+        let root = CancellationToken::root();
+        let owner = tokio::spawn(
+            AdminOwner::new(
+                binding(),
+                all_permissions_registry()?,
+                AdminAdmissionSnapshot::new(vec![1000], Vec::new(), Vec::new()),
+                AuditAuthority::empty_for_test()?,
+                core,
+                AdminOwnerRuntime {
+                    health: live_health(),
+                    config: None,
+                    reload: None,
+                    backup: None,
+                    process: Some(process),
+                    fatal: None,
+                    budget: Arc::new(MemoryBudget::new(MAX_AUDIT_EXPORT_BYTES * 2)),
+                    entropy: Box::new(
+                        ScriptedEntropy::new(vec![0; 64])
+                            .map_err(|_| RuntimeError::InvalidValue)?,
+                    ),
+                    clocks: AdminOwnerClocks {
+                        monotonic: Box::new(SystemMonotonicClock::start()),
+                        wall: Box::new(SystemWallClock),
+                    },
+                },
+            )
+            .run(inbox, root.clone()),
+        );
+        let (sender, mut output) = mpsc::channel(ADMIN_OUTPUT_CAPACITY);
+        port.opened(
+            ConnectionGeneration::new(13),
+            challenge(),
+            PeerIdentity::Local {
+                uid: 1000,
+                gid: 1000,
+            },
+            AdminOutput { sender },
+            &root,
+        )
+        .await
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        let _challenge = output.recv().await.ok_or(RuntimeError::InvalidValue)?;
+        port.line(ConnectionGeneration::new(13), oper_line()?, &root)
+            .await
+            .map_err(|_| RuntimeError::InvalidValue)?;
+
+        let command = "DIE :planned maintenance";
+        port.line(
+            ConnectionGeneration::new(13),
+            signed_line(0, command)?,
+            &root,
+        )
+        .await
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        let revision =
+            agenc_ircd_types::Revision::new(9).map_err(|_| RuntimeError::InvalidValue)?;
+        assert_eq!(
+            core_inbox.complete_target_revision_for_test(revision).await,
+            Some(AdminTarget::Process)
+        );
+        let confirmation = output.recv().await.ok_or(RuntimeError::InvalidValue)?;
+        assert_eq!(
+            confirmation.lines,
+            vec![
+                b"NOTE DIE CONFIRM AAAAAAAAAAAAAAAAAAAAAA :Repeat this exact command to confirm"
+                    .to_vec()
+            ]
+        );
+
+        let confirmation_token = ConfirmationToken::from_bytes([0; 16]);
+        port.line(
+            ConnectionGeneration::new(13),
+            confirmed_line(1, command, &confirmation_token)?,
+            &root,
+        )
+        .await
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        assert_eq!(
+            core_inbox.complete_target_revision_for_test(revision).await,
+            Some(AdminTarget::Process)
+        );
+        let event = core_inbox
+            .complete_next_for_test(Ok(()))
+            .await
+            .ok_or(RuntimeError::InvalidValue)?;
+        assert_eq!(event.tbs().phase, AdminAuditPhase::Intent);
+        assert_eq!(
+            event.tbs().command_tbs.canonical_command(),
+            command.as_bytes()
+        );
+        let action = tokio::time::timeout(Duration::from_secs(1), process_inbox.recv())
+            .await
+            .map_err(|_| RuntimeError::Cancelled)?;
+        assert_eq!(action, Some(AdminProcessAction::Die));
+
         root.cancel();
         owner.await.map_err(|_| RuntimeError::Cancelled)?;
         Ok(())

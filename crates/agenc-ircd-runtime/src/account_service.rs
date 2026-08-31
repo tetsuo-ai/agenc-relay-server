@@ -3036,6 +3036,11 @@ impl AccountServiceCoordinator {
         generation: ConnectionGeneration,
         grant: &AuthenticationGrant,
     ) -> bool {
+        let account_not_suspended = context.utc_now().is_ok_and(|now| {
+            !context
+                .domain()
+                .account_is_suspended(grant.account_id(), now)
+        });
         let account_is_current =
             context
                 .domain()
@@ -3043,7 +3048,7 @@ impl AccountServiceCoordinator {
                 .is_some_and(|account| {
                     account.session_generation() == grant.account_session_generation()
                 });
-        if !account_is_current {
+        if !account_is_current || !account_not_suspended {
             return false;
         }
         let Some(connection) = context.sessions().connection(generation) else {
