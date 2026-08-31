@@ -1,5 +1,5 @@
-//! Schedule models for the Stage 06 ownership boundaries (spec 28.3, lines
-//! 7058-7070).
+//! Schedule models for the Stage 06 ownership and shutdown boundaries (spec
+//! 28.3, lines 7058-7070).
 //!
 //! The storage bridge ledger is compiled from its production source under
 //! the loom scheduler through the crate-local `sync` alias, so every
@@ -232,5 +232,70 @@ fn completion_sender_loss() {
             }
         }
         assert_eq!(ledger.begin(id), Err(BridgeFailure::SenderLost));
+    });
+}
+
+#[derive(Default)]
+struct ShutdownSchedule {
+    phase: usize,
+    applications: [usize; 4],
+}
+
+impl ShutdownSchedule {
+    fn request(&mut self, requested: usize) {
+        const STOP: usize = 4;
+        if self.phase == STOP || !(1..=STOP).contains(&requested) {
+            return;
+        }
+        if requested == STOP || requested == self.phase.saturating_add(1) {
+            let Some(application) = self.applications.get_mut(requested.saturating_sub(1)) else {
+                return;
+            };
+            self.phase = requested;
+            *application += 1;
+        }
+    }
+}
+
+#[test]
+fn shutdown_stop_supersedes_reordered_phase_requests() {
+    builder().check(|| {
+        let schedule = sync::Arc::new(sync::Mutex::new(ShutdownSchedule::default()));
+        let driver = {
+            let schedule = sync::Arc::clone(&schedule);
+            loom::thread::spawn(move || {
+                for phase in 1..=4 {
+                    sync::lock(&schedule).request(phase);
+                }
+            })
+        };
+        let second_signal = {
+            let schedule = sync::Arc::clone(&schedule);
+            loom::thread::spawn(move || {
+                sync::lock(&schedule).request(4);
+                sync::lock(&schedule).request(4);
+            })
+        };
+        let duplicate_commands = {
+            let schedule = sync::Arc::clone(&schedule);
+            loom::thread::spawn(move || {
+                sync::lock(&schedule).request(1);
+                sync::lock(&schedule).request(2);
+            })
+        };
+        driver.join().unwrap_or(());
+        second_signal.join().unwrap_or(());
+        duplicate_commands.join().unwrap_or(());
+
+        let schedule = sync::lock(&schedule);
+        assert_eq!(schedule.phase, 4);
+        assert_eq!(schedule.applications.get(3), Some(&1));
+        assert!(
+            schedule
+                .applications
+                .iter()
+                .take(3)
+                .all(|count| *count <= 1)
+        );
     });
 }

@@ -544,7 +544,7 @@ fn init_receipt(request: &InitRequest, identity: InitIdentity) -> InitReceipt {
         operator_id: identity.operator_id,
         operator_signing_key_file: request.data_dir.join("keys/operator-signing.key"),
         tor_snippet: "HiddenServiceDir /var/lib/tor/agenc-ircd\nHiddenServiceVersion 3\nHiddenServicePort 6697 unix:/run/agenc-ircd/onion.sock\n".to_owned(),
-        systemd_snippet: "Use the packaged agenc-ircd.service and agenc-ircd.socket units after reviewing their paths.\n".to_owned(),
+        systemd_snippet: "Use the packaged agenc-ircd.service and one reviewed address-family profile; socket activation is not supported.\n".to_owned(),
         certificate_instructions: "Enroll TLS certificates for every configured public or onion listener, place them under the configured tls directory, then enable the reviewed listeners.\n".to_owned(),
     }
 }

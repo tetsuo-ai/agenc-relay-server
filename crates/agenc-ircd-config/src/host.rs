@@ -355,14 +355,17 @@ pub fn apply_process_hardening(
     require_locked_secrets: bool,
 ) -> Result<HardeningOutcome, ConfigError> {
     let dumpable_disabled = set_dumpable_behavior(DumpableBehavior::NotDumpable).is_ok();
-    let core_limit_zero = setrlimit(
-        Resource::Core,
-        Rlimit {
-            current: Some(0),
-            maximum: Some(0),
-        },
-    )
-    .is_ok();
+    let core_limit = getrlimit(Resource::Core);
+    let core_limit_zero = core_limit.current == Some(0)
+        || (setrlimit(
+            Resource::Core,
+            Rlimit {
+                current: Some(0),
+                maximum: Some(0),
+            },
+        )
+        .is_ok()
+            && getrlimit(Resource::Core).current == Some(0));
     let secrets_locked = mlockall(MlockAllFlags::CURRENT | MlockAllFlags::FUTURE).is_ok();
     if require_locked_secrets && !secrets_locked {
         return Err(ConfigError::HostControl);

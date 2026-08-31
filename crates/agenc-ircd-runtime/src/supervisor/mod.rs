@@ -195,6 +195,11 @@ impl Supervisor {
         self.root.cancel();
     }
 
+    /// Aborts every child that did not honor cooperative cancellation.
+    pub fn abort_all(&mut self) {
+        self.children.abort_all();
+    }
+
     /// Joins the next child, applying the failure policy; `None` when no
     /// child remains.
     pub async fn next_exit(&mut self) -> Option<ChildExit> {

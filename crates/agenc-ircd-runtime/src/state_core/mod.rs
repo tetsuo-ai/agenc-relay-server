@@ -49,7 +49,7 @@ use crate::bridge::{
 };
 use crate::budget::MemoryBudget;
 use crate::cancel::CancellationToken;
-use crate::connection::sink::ConnectionGeneration;
+use crate::connection::{ConnectionGeneration, FlushAcknowledgement};
 use crate::observe::adapter::RuntimeObserver;
 use crate::observe::health::Liveness;
 use crate::observe::metrics::{CommandClass, QueueName, ResultClass};
@@ -84,6 +84,8 @@ const ERR_UNKNOWNCOMMAND: u16 = 421;
 const ERR_NOTREGISTERED: u16 = 451;
 /// Owner progress cadence used by authenticated liveness.
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
+/// Bounded cadence used only while orderly connection flushes are pending.
+const SHUTDOWN_FLUSH_POLL: Duration = Duration::from_millis(10);
 
 /// Fixed configuration the state owner runs with.
 pub struct StateCoreConfig {
@@ -1188,8 +1190,9 @@ impl StateCore {
         (self.context.bridge, self.context.crypto)
     }
 
-    fn begin_connection_shutdown(&mut self) {
+    fn begin_connection_shutdown(&mut self) -> Vec<FlushAcknowledgement> {
         let sinks = self.context.sessions.live_sinks();
+        let mut acknowledgements = Vec::with_capacity(sinks.len());
         for sink in sinks {
             let generation = sink.generation();
             let frame = WireMessage::new(
@@ -1205,8 +1208,9 @@ impl StateCore {
             {
                 sink.begin_slow_consumer_close();
             }
-            let _acknowledgement = sink.shutdown_after_flush();
+            acknowledgements.push(sink.shutdown_after_flush());
         }
+        acknowledgements
     }
 
     fn storage_in_flight(&self) -> bool {
@@ -1481,10 +1485,6 @@ impl StateCore {
         checkpoint: agenc_ircd_admin::AdminAuditCheckpoint,
         reply: tokio::sync::oneshot::Sender<AdminCoreResult>,
     ) -> Option<StateCoreExit> {
-        if self.context.quiescing {
-            let _sent = reply.send(Err(AdminCoreFailure::Quiescing));
-            return None;
-        }
         if self.storage_in_flight() || self.context.pending_len() != 0 {
             let _sent = reply.send(Err(AdminCoreFailure::Busy));
             return None;
@@ -1944,6 +1944,10 @@ impl StateCore {
         let mut lifecycle_completed = None;
         let mut lifecycle_replies = PendingLifecycleReplies::default();
         let mut shutdown_connections_started = false;
+        let mut shutdown_acknowledgements = Vec::new();
+        let mut flush_poll = tokio::time::interval(SHUTDOWN_FLUSH_POLL);
+        flush_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        flush_poll.tick().await;
         let mut progress = tokio::time::interval(PROGRESS_INTERVAL);
         progress.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         progress.tick().await;
@@ -1959,7 +1963,7 @@ impl StateCore {
                     && !lifecycle_completed.is_some_and(|phase| phase >= LifecyclePhase::Drain)
                 {
                     if !shutdown_connections_started {
-                        self.begin_connection_shutdown();
+                        shutdown_acknowledgements = self.begin_connection_shutdown();
                         shutdown_connections_started = true;
                     }
                     lifecycle_replies.acknowledge(LifecyclePhase::Drain);
@@ -1967,6 +1971,9 @@ impl StateCore {
                 }
                 if lifecycle_target.is_some_and(|phase| phase >= LifecyclePhase::Flush)
                     && !lifecycle_completed.is_some_and(|phase| phase >= LifecyclePhase::Flush)
+                    && shutdown_acknowledgements
+                        .iter()
+                        .all(FlushAcknowledgement::is_acknowledged)
                 {
                     lifecycle_replies.acknowledge(LifecyclePhase::Flush);
                     lifecycle_completed = Some(LifecyclePhase::Flush);
@@ -1975,6 +1982,12 @@ impl StateCore {
                     return StateCoreExit::Cancelled;
                 }
             }
+            let waiting_for_connection_flush = safe_point
+                && lifecycle_target.is_some_and(|phase| phase >= LifecyclePhase::Flush)
+                && !lifecycle_completed.is_some_and(|phase| phase >= LifecyclePhase::Flush)
+                && shutdown_acknowledgements
+                    .iter()
+                    .any(|acknowledgement| !acknowledgement.is_acknowledged());
             let wake = self.wake_instant();
             let exit = tokio::select! {
                 biased;
@@ -2072,6 +2085,7 @@ impl StateCore {
                     }
                     None
                 },
+                _ = flush_poll.tick(), if waiting_for_connection_flush => None,
                 () = tokio::time::sleep_until(wake.unwrap_or_else(Instant::now)), if wake.is_some() => {
                     self.step_wake()
                 },

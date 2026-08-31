@@ -44,3 +44,11 @@ operations = "classify_completion, CompletionLedger::fail, CompletionLedger::beg
 property = "a lost sender is Indeterminate and every later submission reports the retained failure"
 invariants = ["CON-03", "DUR-01"]
 scope = "production source under the loom scheduler"
+
+[[model]]
+name = "shutdown_stop_supersedes_reordered_phase_requests"
+threads = 3
+operations = "idempotent phase request, second-signal Stop supersession"
+property = "each phase applies at most once, Stop applies exactly once, and no later request regresses the lifecycle"
+invariants = ["CON-01", "CON-04", "OPS-04"]
+scope = "bounded lifecycle state model under the loom scheduler"

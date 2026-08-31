@@ -4,7 +4,7 @@
 
 Install the records from `deploy/sysusers.d` and `deploy/tmpfiles.d` with the host's normal systemd tools. The daemon runs as `agenc-ircd`. Keep `/var/lib/agenc-ircd`, its key directory, its state directory, its trust directory, and its backup directory at mode 0700. Secret files use mode 0600.
 
-Install `deploy/systemd/agenc-ircd.service` and `deploy/systemd/agenc-ircd.socket` under `/etc/systemd/system`. Review the executable and configuration paths before enabling either unit. Run the deployment checker from the source tree:
+Install `deploy/systemd/agenc-ircd.service` under `/etc/systemd/system`. Choose the matching address-family file from `deploy/systemd/profiles` and install it as the service drop-in described in `deploy/README.md`. The daemon opens configured listeners directly; systemd socket activation is not supported. Review the executable and configuration paths before enabling the service. Run the deployment checker from the source tree:
 
 ```sh
 python3 scripts/check-deploy.py check

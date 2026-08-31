@@ -219,6 +219,7 @@ pub trait ShutdownHooks {
     fn run(
         &mut self,
         phase: ShutdownPhase,
+        budget: Duration,
     ) -> impl Future<Output = Result<(), ShutdownFailure>> + Send;
 }
 
@@ -237,7 +238,8 @@ pub async fn run_shutdown<H: ShutdownHooks>(
             *slot = PhaseOutcome::Skipped;
             continue;
         }
-        let outcome = run_phase(plan.budget(phase), hooks.run(phase), signals).await;
+        let budget = plan.budget(phase);
+        let outcome = run_phase(phase, budget, hooks.run(phase, budget), signals).await;
         if outcome == PhaseOutcome::Skipped {
             skip_to_stop = true;
         }
@@ -265,7 +267,9 @@ pub async fn run_shutdown<H: ShutdownHooks>(
 
 /// Runs one phase under its budget; a termination signal skips it, a
 /// reload signal is ignored without dropping the phase future.
+// agenc-review: focus owner=runtime reviewed=2026-08-31 reason=bounded phase select keeps timeout completion and signal supersession explicit without dropping Stop cleanup
 async fn run_phase<F: Future<Output = Result<(), ShutdownFailure>>>(
+    phase_name: ShutdownPhase,
     budget: Duration,
     phase: F,
     signals: &mut mpsc::Receiver<SignalEvent>,
@@ -282,7 +286,9 @@ async fn run_phase<F: Future<Output = Result<(), ShutdownFailure>>>(
             PhaseEvent::Finished(Ok(Err(failure))) => return PhaseOutcome::Failed(failure),
             PhaseEvent::Finished(Err(_)) => return PhaseOutcome::TimedOut,
             PhaseEvent::Signal(Some(SignalEvent::Terminate | SignalEvent::Interrupt)) => {
-                return PhaseOutcome::Skipped;
+                if phase_name != ShutdownPhase::Stop {
+                    return PhaseOutcome::Skipped;
+                }
             }
             PhaseEvent::Signal(_) => {}
         }

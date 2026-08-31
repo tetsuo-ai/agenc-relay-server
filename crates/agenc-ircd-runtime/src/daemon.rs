@@ -16,10 +16,11 @@ use agenc_ircd_auth::{
     CHANNEL_KEY_SALT_BYTES as AUTH_CHANNEL_SALT_BYTES, OpaqueProfile, derive_channel_key_verifier,
 };
 use agenc_ircd_config::{
-    Config, ConfigError, ConfigReport, DEFAULT_REDB_CACHE_BYTES, DirectMessageDefault, LimitKey,
-    ListenerBind as ConfigListenerBind, ListenerPurpose as ConfigListenerPurpose, NodeRole,
-    RATE_ROWS, RegistrationPolicy, SecretSet, ValidationDepth, apply_process_hardening,
-    load_audit_trust_manifest, load_backup_trust_manifest, load_config, load_public_text,
+    Config, ConfigError, ConfigReport, DEFAULT_REDB_CACHE_BYTES, DirectMessageDefault,
+    HardeningOutcome, LimitKey, ListenerBind as ConfigListenerBind,
+    ListenerPurpose as ConfigListenerPurpose, NodeRole, RATE_ROWS, RegistrationPolicy, SecretSet,
+    ValidationDepth, apply_process_hardening, load_audit_trust_manifest,
+    load_backup_trust_manifest, load_config, load_public_text,
 };
 use agenc_ircd_crypto::{
     AccountHpkePrivateKey, CryptoError, CryptoWorkerConfig, Ed25519PublicKey, Ed25519SecretKey,
@@ -45,9 +46,10 @@ use crate::RuntimeError;
 use crate::StateCoreSeed;
 use crate::account_service::AccountCreationPolicy;
 use crate::admin::{
-    AdminAdmissionSnapshot, AdminBackupRuntime, AdminOwner, AdminOwnerClocks, AdminOwnerHealth,
-    AdminOwnerInbox, AdminOwnerRuntime, AdminProcessAction, AdminProcessInbox, AdminTransportPort,
-    AuditAuthority, admin_process_channel, admin_transport_channel,
+    AdminAdmissionSnapshot, AdminBackupRuntime, AdminLifecycleControl, AdminLifecycleFailure,
+    AdminLifecycleInbox, AdminOwner, AdminOwnerClocks, AdminOwnerHealth, AdminOwnerInbox,
+    AdminOwnerRuntime, AdminProcessAction, AdminProcessInbox, AdminTransportPort, AuditAuthority,
+    admin_lifecycle_channel, admin_process_channel, admin_transport_channel,
 };
 use crate::admission::{BucketKind, BucketRate, RateLimits, TransportAdmission};
 use crate::bridge::crypto::{
@@ -60,7 +62,8 @@ use crate::budget::{MemoryBudget, startup_arithmetic};
 use crate::channels::RegisteredCommandExecutor;
 use crate::clock::{SystemMonotonicClock, SystemWallClock};
 use crate::connection::{
-    CONTROL_ITEM_SLOTS, ConnectionLimits, MAX_DEMAND_FRAMES, QueueLimits, ReaderLimits,
+    CONTROL_ITEM_SLOTS, ConnectionLimits, FlushAcknowledgement, MAX_DEMAND_FRAMES, QueueLimits,
+    ReaderLimits,
 };
 use crate::listener::{
     ListenerContext, ListenerControl, ListenerError, ListenerSet, ListenerSource, ListenerSpec,
@@ -224,7 +227,7 @@ impl From<ListenerError> for DaemonError {
 pub fn serve(config_path: &Path) -> Result<DaemonExit, DaemonError> {
     let config = load_config(config_path, ValidationDepth::Host)?;
     validate_profile(&config)?;
-    harden_process(&config)?;
+    let hardening = harden_process(&config)?;
     let secrets = SecretSet::load(&config)?;
     let operators = operator_registry(&config)?;
     let workers = usize_value(config.server.tokio_worker_threads)?;
@@ -261,6 +264,9 @@ pub fn serve(config_path: &Path) -> Result<DaemonExit, DaemonError> {
         Arc::new(MetricsRegistry::new()),
     ));
     observer.process_started();
+    if !hardening.secrets_locked {
+        observer.hardening_warning();
+    }
     let storage = LiveStorage::open(&config, &secrets, &operators)?;
     runtime.block_on(run(DaemonRunInputs {
         config_path: config_path.to_path_buf(),
@@ -296,12 +302,12 @@ fn validate_profile(config: &Config) -> Result<(), DaemonError> {
     Ok(())
 }
 
-fn harden_process(config: &Config) -> Result<(), DaemonError> {
+fn harden_process(config: &Config) -> Result<HardeningOutcome, DaemonError> {
     let outcome = apply_process_hardening(config.server.require_locked_secrets)?;
     if !outcome.dumpable_disabled || !outcome.core_limit_zero {
         return Err(DaemonError::HostControl(ConfigError::HostControl));
     }
-    Ok(())
+    Ok(outcome)
 }
 
 struct LiveStorage {
@@ -1289,6 +1295,7 @@ async fn run(inputs: DaemonRunInputs) -> Result<DaemonExit, DaemonError> {
         mut supervisor,
         control,
         lifecycle,
+        admin_lifecycle,
         mut signals,
         mut state_exited,
         mut listener_exited,
@@ -1329,6 +1336,8 @@ async fn run(inputs: DaemonRunInputs) -> Result<DaemonExit, DaemonError> {
         supervisor: &mut supervisor,
         listeners: &control,
         lifecycle: &lifecycle,
+        admin: &admin_lifecycle,
+        admin_acknowledgements: Vec::new(),
         listener_exited: &mut listener_exited,
         listener_joined: false,
         stopped: false,
@@ -1349,6 +1358,7 @@ struct RunningOwners {
     supervisor: Supervisor,
     control: ListenerControl,
     lifecycle: LifecycleControl,
+    admin_lifecycle: AdminLifecycleControl,
     signals: mpsc::Receiver<SignalEvent>,
     state_exited: oneshot::Receiver<StateCoreExit>,
     listener_exited: oneshot::Receiver<()>,
@@ -1371,6 +1381,7 @@ struct StartOwnersInputs {
     liveness: Arc<Liveness>,
 }
 
+// agenc-review: focus owner=runtime reviewed=2026-08-31 reason=single startup barrier constructs every bounded owner before listener admission and unwinds storage on acknowledgement failure
 async fn start_owners(inputs: StartOwnersInputs) -> Result<RunningOwners, DaemonError> {
     let StartOwnersInputs {
         specs,
@@ -1384,7 +1395,13 @@ async fn start_owners(inputs: StartOwnersInputs) -> Result<RunningOwners, Daemon
         liveness,
     } = inputs;
     let mut supervisor = Supervisor::new();
-    spawn_admin_owner(&mut supervisor, admin.owner, admin.inbox)?;
+    let (admin_lifecycle, admin_lifecycle_inbox) = admin_lifecycle_channel();
+    spawn_admin_owner(
+        &mut supervisor,
+        admin.owner,
+        admin.inbox,
+        admin_lifecycle_inbox,
+    )?;
     let LiveState {
         owner,
         state,
@@ -1426,6 +1443,7 @@ async fn start_owners(inputs: StartOwnersInputs) -> Result<RunningOwners, Daemon
         supervisor,
         control,
         lifecycle,
+        admin_lifecycle,
         signals,
         state_exited,
         listener_exited,
@@ -1436,12 +1454,13 @@ fn spawn_admin_owner(
     supervisor: &mut Supervisor,
     owner: AdminOwner,
     inbox: AdminOwnerInbox,
+    lifecycle: AdminLifecycleInbox,
 ) -> Result<(), DaemonError> {
     supervisor.spawn(
         ChildName::AdminOwner,
         ChildKind::Critical,
         |token| async move {
-            owner.run(inbox, token).await;
+            owner.run(inbox, lifecycle, token).await;
             Ok(())
         },
     )?;
@@ -1807,6 +1826,8 @@ struct RuntimeShutdownHooks<'a> {
     supervisor: &'a mut Supervisor,
     listeners: &'a ListenerControl,
     lifecycle: &'a LifecycleControl,
+    admin: &'a AdminLifecycleControl,
+    admin_acknowledgements: Vec<FlushAcknowledgement>,
     listener_exited: &'a mut oneshot::Receiver<()>,
     listener_joined: bool,
     stopped: bool,
@@ -1817,66 +1838,133 @@ struct RuntimeShutdownHooks<'a> {
 }
 
 impl ShutdownHooks for RuntimeShutdownHooks<'_> {
-    async fn run(&mut self, phase: ShutdownPhase) -> Result<(), ShutdownFailure> {
+    async fn run(&mut self, phase: ShutdownPhase, budget: Duration) -> Result<(), ShutdownFailure> {
         self.observer.shutdown_phase(phase);
         match phase {
             ShutdownPhase::Quiesce => {
                 self.readiness.clear(ReadinessStage::StateCore);
                 self.listeners.stop_accepting();
                 self.listeners.wait_accept_stopped().await;
+                self.admin.quiesce().await.map_err(map_admin_lifecycle)?;
                 request_lifecycle(self.lifecycle, LifecyclePhase::Quiesce).await
             }
-            ShutdownPhase::Drain => request_lifecycle(self.lifecycle, LifecyclePhase::Drain).await,
+            ShutdownPhase::Drain => {
+                self.admin_acknowledgements =
+                    self.admin.drain().await.map_err(map_admin_lifecycle)?;
+                request_lifecycle(self.lifecycle, LifecyclePhase::Drain).await
+            }
             ShutdownPhase::Flush => {
+                self.admin.flush().await.map_err(map_admin_lifecycle)?;
+                request_lifecycle(self.lifecycle, LifecyclePhase::Flush).await?;
+                for acknowledgement in &self.admin_acknowledgements {
+                    acknowledgement.wait().await;
+                }
                 if !self.listener_joined {
                     (&mut *self.listener_exited)
                         .await
                         .map_err(|_| ShutdownFailure::Writer)?;
                     self.listener_joined = true;
                 }
-                request_lifecycle(self.lifecycle, LifecyclePhase::Flush).await?;
                 self.log_control
                     .flush()
                     .await
                     .map_err(|_| ShutdownFailure::Writer)
             }
-            ShutdownPhase::Stop => self.stop().await,
+            ShutdownPhase::Stop => self.stop(budget).await,
         }
     }
 }
 
 impl RuntimeShutdownHooks<'_> {
-    async fn stop(&mut self) -> Result<(), ShutdownFailure> {
+    // agenc-review: focus owner=runtime reviewed=2026-08-31 reason=one stop budget retains first failure while ordering control cancellation forced join storage and log closure
+    async fn stop(&mut self, budget: Duration) -> Result<(), ShutdownFailure> {
         if self.stopped {
             return Ok(());
         }
         self.stopped = true;
         self.listeners.stop_accepting();
-        let mut first_failure = request_lifecycle(self.lifecycle, LifecyclePhase::Stop)
-            .await
-            .err();
+        let control_budget = budget / 5;
+        let controls = tokio::time::timeout(control_budget, async {
+            tokio::join!(
+                self.admin.stop(),
+                request_lifecycle(self.lifecycle, LifecyclePhase::Stop)
+            )
+        })
+        .await;
+        let mut first_failure = None;
+        match controls {
+            Ok((admin, state)) => {
+                if let Err(failure) = admin.map_err(map_admin_lifecycle) {
+                    first_failure = Some(failure);
+                }
+                if let Err(failure) = state
+                    && first_failure.is_none()
+                {
+                    first_failure = Some(failure);
+                }
+            }
+            Err(_) => first_failure = Some(ShutdownFailure::StateCore),
+        }
         self.listeners.cancel_connections();
         self.supervisor.cancel();
-        let report = self.supervisor.join_all(crate::supervisor::MAX_TOTAL).await;
+        let report = self.supervisor.join_all(budget / 3).await;
         if validate_join_report(&report).is_err() && first_failure.is_none() {
             first_failure = Some(ShutdownFailure::Join);
         }
-        if let Some(owner) = self.owner.take()
-            && shutdown_storage(owner).await.is_err()
-            && first_failure.is_none()
-        {
-            first_failure = Some(ShutdownFailure::Storage);
-        }
-        if let Some(log_owner) = self.log_owner.take() {
-            match log_owner.shutdown().await {
-                Ok(0) => {}
-                Ok(_) | Err(_) if first_failure.is_none() => {
-                    first_failure = Some(ShutdownFailure::Writer);
-                }
-                Ok(_) | Err(_) => {}
+        if report.unfinished != 0 {
+            self.supervisor.abort_all();
+            let forced = self.supervisor.join_all(budget / 10).await;
+            if validate_join_report(&forced).is_err() && first_failure.is_none() {
+                first_failure = Some(ShutdownFailure::Join);
             }
         }
+        let owner = self.owner.take();
+        let log_owner = self.log_owner.take();
+        let closed = tokio::time::timeout(budget / 4, async move {
+            let storage = async move {
+                match owner {
+                    Some(owner) => shutdown_storage(owner)
+                        .await
+                        .map_err(|_| ShutdownFailure::Storage),
+                    None => Ok(()),
+                }
+            };
+            let logs = async move {
+                match log_owner {
+                    Some(owner) => match owner.shutdown().await {
+                        Ok(0) => Ok(()),
+                        Ok(_) | Err(_) => Err(ShutdownFailure::Writer),
+                    },
+                    None => Ok(()),
+                }
+            };
+            tokio::join!(storage, logs)
+        })
+        .await;
+        match closed {
+            Ok((storage, logs)) => {
+                for result in [storage, logs] {
+                    if let Err(failure) = result
+                        && first_failure.is_none()
+                    {
+                        first_failure = Some(failure);
+                    }
+                }
+            }
+            Err(_) if first_failure.is_none() => first_failure = Some(ShutdownFailure::Storage),
+            Err(_) => {}
+        }
         first_failure.map_or(Ok(()), Err)
+    }
+}
+
+fn map_admin_lifecycle(failure: AdminLifecycleFailure) -> ShutdownFailure {
+    match failure {
+        AdminLifecycleFailure::Writer => ShutdownFailure::Writer,
+        AdminLifecycleFailure::Audit => ShutdownFailure::Audit,
+        AdminLifecycleFailure::Unavailable | AdminLifecycleFailure::Busy => {
+            ShutdownFailure::StateCore
+        }
     }
 }
 

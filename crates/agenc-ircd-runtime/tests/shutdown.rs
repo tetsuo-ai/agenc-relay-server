@@ -31,6 +31,7 @@ impl ShutdownHooks for RecordingHooks {
     fn run(
         &mut self,
         phase: ShutdownPhase,
+        _budget: Duration,
     ) -> impl Future<Output = Result<(), ShutdownFailure>> + Send {
         let phases = Arc::clone(&self.phases);
         let delay = self
@@ -153,6 +154,29 @@ async fn the_first_hook_failure_is_retained_while_later_phases_still_run() -> Te
 }
 
 #[tokio::test]
+async fn every_phase_retains_its_typed_failure_and_still_reaches_stop() -> TestResult {
+    for failed_phase in ShutdownPhase::ALL {
+        let (mut hooks, phases) = hooks();
+        hooks.failure = Some((failed_phase, ShutdownFailure::Writer));
+        let (_signals, mut receiver) = mpsc::channel(4);
+        let report = run_shutdown(ShutdownPlan::DEFAULT, &mut hooks, &mut receiver).await;
+        assert_eq!(recorded(&phases), ShutdownPhase::ALL.to_vec());
+        assert_eq!(
+            report.first_problem(),
+            Some(ShutdownProblem {
+                phase: failed_phase,
+                kind: ShutdownProblemKind::Failed(ShutdownFailure::Writer),
+            })
+        );
+        assert_eq!(
+            report.outcome(failed_phase),
+            PhaseOutcome::Failed(ShutdownFailure::Writer)
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_second_termination_signal_skips_to_stop() -> TestResult {
     let (mut hooks, phases) = hooks();
     let (entered, mut entered_receiver) = mpsc::channel(1);
@@ -187,6 +211,26 @@ async fn a_second_termination_signal_skips_to_stop() -> TestResult {
             ShutdownPhase::Stop
         ]
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn termination_signals_during_stop_do_not_cancel_owner_cleanup() -> TestResult {
+    let (mut hooks, phases) = hooks();
+    let (entered, mut entered_receiver) = mpsc::channel(1);
+    hooks.release = Some((ShutdownPhase::Stop, entered));
+    hooks.delay = Some((ShutdownPhase::Stop, Duration::from_millis(100)));
+    let (signals, mut receiver) = mpsc::channel(4);
+    let driver = tokio::spawn(async move {
+        run_shutdown(ShutdownPlan::DEFAULT, &mut hooks, &mut receiver).await
+    });
+    entered_receiver.recv().await.ok_or("stop never started")?;
+    signals.send(SignalEvent::Terminate).await?;
+    signals.send(SignalEvent::Interrupt).await?;
+    let report = driver.await?;
+    assert_eq!(report.outcome(ShutdownPhase::Stop), PhaseOutcome::Completed);
+    assert!(!report.interrupted());
+    assert_eq!(recorded(&phases), ShutdownPhase::ALL.to_vec());
     Ok(())
 }
 
@@ -272,5 +316,28 @@ async fn connection_children_churn_without_leaking_registrations() -> TestResult
     assert_eq!(supervisor.live_children(), 0);
     assert!(!root.is_cancelled());
     assert_eq!(root.live_children(), 0, "every child token was dropped");
+    Ok(())
+}
+
+#[tokio::test]
+async fn forced_abort_joins_every_non_cooperative_owner() -> TestResult {
+    let mut supervisor = Supervisor::new();
+    for _ in 0..8 {
+        supervisor.spawn(ChildName::Connection, ChildKind::Connection, |_| async {
+            std::future::pending::<()>().await;
+            Ok(())
+        })?;
+    }
+    supervisor.abort_all();
+    let report = supervisor.join_all(Duration::from_secs(1)).await;
+    assert_eq!(report.unfinished, 0);
+    assert_eq!(supervisor.live_children(), 0);
+    assert_eq!(report.exits.len(), 8);
+    assert!(
+        report
+            .exits
+            .iter()
+            .all(|exit| exit.outcome == Err(ChildFailure::Cancelled))
+    );
     Ok(())
 }

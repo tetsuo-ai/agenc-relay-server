@@ -166,6 +166,17 @@ impl RuntimeObserver {
         );
     }
 
+    /// Records the fixed warning emitted when ordinary memory locking is unavailable.
+    pub fn hardening_warning(&self) {
+        self.emit(
+            LogEventCode::HardeningWarning,
+            Severity::Warning,
+            None,
+            None,
+            None,
+        );
+    }
+
     /// Returns the closed metrics registry for authenticated snapshots.
     #[must_use]
     pub fn metrics(&self) -> Arc<MetricsRegistry> {

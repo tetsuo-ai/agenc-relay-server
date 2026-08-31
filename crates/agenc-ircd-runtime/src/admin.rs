@@ -24,14 +24,16 @@ use agenc_ircd_storage::{
 };
 use agenc_ircd_types::{EntropySource, MonotonicClock, WallClock};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use zeroize::Zeroizing;
 
 use crate::budget::{
     BoundedMemoryCharges, MemoryBudget, MemoryBudgetPort as _, MemoryCharge, MemoryPermitBatch,
 };
 use crate::cancel::CancellationToken;
-use crate::connection::{ConnectionExit, ConnectionGeneration, ConnectionResources};
+use crate::connection::{
+    ConnectionExit, ConnectionGeneration, ConnectionResources, FlushAcknowledgement,
+};
 use crate::observe::adapter::RuntimeObserver;
 use crate::observe::health::{HealthSnapshot, Liveness, ReadinessGate};
 use crate::observe::metrics::ResultClass;
@@ -43,6 +45,7 @@ use crate::runtime_config::{
 use crate::state_core::inbox::CloseReason;
 use crate::state_core::{AdminCoreFailure, AdminCorePort, AdminMutation, AdminTarget};
 use crate::sync::Arc;
+use crate::tls::{CLOSE_NOTIFY_GRACE, WRITE_STALL_BUDGET};
 
 pub(crate) use audit::AuditAuthority;
 
@@ -50,6 +53,8 @@ pub(crate) use audit::AuditAuthority;
 pub(crate) const ADMIN_EXPORTER_LABEL: &[u8] = b"EXPORTER-agenc-chat-admin-v1";
 /// Admin messages waiting for the single owner.
 const ADMIN_OWNER_CAPACITY: usize = 64;
+/// Lifecycle requests waiting for the administrative owner.
+const ADMIN_LIFECYCLE_CAPACITY: usize = 4;
 /// Complete ordered response batches waiting for one writer.
 const ADMIN_OUTPUT_CAPACITY: usize = 4;
 /// Owner notification stall budget, matching the public connection boundary.
@@ -64,6 +69,8 @@ const ADMIN_PROCESS_CAPACITY: usize = 1;
 const AUDIT_RETENTION_SWEEP: Duration = Duration::from_secs(60 * 60);
 /// Checked conversion unit for configured retention days.
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
+/// One input-free final frame queued for each administrative connection.
+const ADMIN_SHUTDOWN_LINE: &str = "ERROR :Server shutting down";
 
 /// A committed administrative process request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -207,6 +214,97 @@ impl AdminTransportPort {
     }
 }
 
+/// Cloneable shutdown authority for the isolated administrative owner.
+#[derive(Clone)]
+pub(crate) struct AdminLifecycleControl {
+    sender: mpsc::Sender<AdminLifecycleRequest>,
+}
+
+impl AdminLifecycleControl {
+    pub(crate) async fn quiesce(&self) -> Result<(), AdminLifecycleFailure> {
+        match self.request(AdminLifecyclePhase::Quiesce).await? {
+            AdminLifecycleOutcome::Complete => Ok(()),
+            AdminLifecycleOutcome::Draining(_) => Err(AdminLifecycleFailure::Unavailable),
+        }
+    }
+
+    pub(crate) async fn drain(&self) -> Result<Vec<FlushAcknowledgement>, AdminLifecycleFailure> {
+        match self.request(AdminLifecyclePhase::Drain).await? {
+            AdminLifecycleOutcome::Draining(acknowledgements) => Ok(acknowledgements),
+            AdminLifecycleOutcome::Complete => Err(AdminLifecycleFailure::Unavailable),
+        }
+    }
+
+    pub(crate) async fn flush(&self) -> Result<(), AdminLifecycleFailure> {
+        match self.request(AdminLifecyclePhase::Flush).await? {
+            AdminLifecycleOutcome::Complete => Ok(()),
+            AdminLifecycleOutcome::Draining(_) => Err(AdminLifecycleFailure::Unavailable),
+        }
+    }
+
+    pub(crate) async fn stop(&self) -> Result<(), AdminLifecycleFailure> {
+        match self.request(AdminLifecyclePhase::Stop).await? {
+            AdminLifecycleOutcome::Complete => Ok(()),
+            AdminLifecycleOutcome::Draining(_) => Err(AdminLifecycleFailure::Unavailable),
+        }
+    }
+
+    async fn request(
+        &self,
+        phase: AdminLifecyclePhase,
+    ) -> Result<AdminLifecycleOutcome, AdminLifecycleFailure> {
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .send(AdminLifecycleRequest { phase, reply })
+            .await
+            .map_err(|_| AdminLifecycleFailure::Unavailable)?;
+        response
+            .await
+            .unwrap_or(Err(AdminLifecycleFailure::Unavailable))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AdminLifecycleFailure {
+    Unavailable,
+    Writer,
+    Audit,
+    Busy,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AdminLifecyclePhase {
+    Quiesce,
+    Drain,
+    Flush,
+    Stop,
+}
+
+enum AdminLifecycleOutcome {
+    Complete,
+    Draining(Vec<FlushAcknowledgement>),
+}
+
+type AdminLifecycleResult = Result<AdminLifecycleOutcome, AdminLifecycleFailure>;
+
+struct AdminLifecycleRequest {
+    phase: AdminLifecyclePhase,
+    reply: oneshot::Sender<AdminLifecycleResult>,
+}
+
+pub(crate) struct AdminLifecycleInbox {
+    receiver: mpsc::Receiver<AdminLifecycleRequest>,
+}
+
+#[must_use]
+pub(crate) fn admin_lifecycle_channel() -> (AdminLifecycleControl, AdminLifecycleInbox) {
+    let (sender, receiver) = mpsc::channel(ADMIN_LIFECYCLE_CAPACITY);
+    (
+        AdminLifecycleControl { sender },
+        AdminLifecycleInbox { receiver },
+    )
+}
+
 enum AdminOwnerMessage {
     Opened {
         generation: ConnectionGeneration,
@@ -224,17 +322,38 @@ enum AdminOwnerMessage {
     },
 }
 
+enum AdminOwnerEvent {
+    Lifecycle(AdminLifecycleRequest),
+    Transport(AdminOwnerMessage),
+}
+
 struct AdminOutput {
     sender: mpsc::Sender<AdminWrite>,
+    flush_acknowledgement: FlushAcknowledgement,
 }
 
 impl AdminOutput {
+    fn new(sender: mpsc::Sender<AdminWrite>) -> Self {
+        Self {
+            sender,
+            flush_acknowledgement: FlushAcknowledgement::pending(),
+        }
+    }
+
     fn try_line(&self, line: String) -> Result<(), CloseReason> {
         self.try_batch(vec![line], None)
     }
 
     fn try_close(&self, reason: CloseReason) -> Result<(), CloseReason> {
         self.try_batch(Vec::new(), Some(reason))
+    }
+
+    fn try_shutdown(&self) -> Result<FlushAcknowledgement, CloseReason> {
+        self.try_batch(
+            vec![ADMIN_SHUTDOWN_LINE.to_owned()],
+            Some(CloseReason::Shutdown),
+        )?;
+        Ok(self.flush_acknowledgement.clone())
     }
 
     fn try_batch(&self, lines: Vec<String>, close: Option<CloseReason>) -> Result<(), CloseReason> {
@@ -347,6 +466,8 @@ pub(crate) struct AdminOwner {
     monotonic: Box<dyn MonotonicClock + Send>,
     wall: Box<dyn WallClock + Send>,
     sessions: BTreeMap<ConnectionGeneration, OwnedAdminSession>,
+    shutdown_acknowledgements: BTreeMap<ConnectionGeneration, FlushAcknowledgement>,
+    quiescing: bool,
 }
 
 pub(crate) struct AdminOwnerClocks {
@@ -444,6 +565,8 @@ impl AdminOwner {
             monotonic: runtime.clocks.monotonic,
             wall: runtime.clocks.wall,
             sessions: BTreeMap::new(),
+            shutdown_acknowledgements: BTreeMap::new(),
+            quiescing: false,
         }
     }
 
@@ -459,15 +582,30 @@ impl AdminOwner {
     }
 
     // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=single bounded admin select owns session authority reload notifications transport input and cancellation ordering
-    pub(crate) async fn run(mut self, mut inbox: AdminOwnerInbox, token: CancellationToken) {
+    pub(crate) async fn run(
+        mut self,
+        mut inbox: AdminOwnerInbox,
+        mut lifecycle: AdminLifecycleInbox,
+        token: CancellationToken,
+    ) {
         let first_retention = tokio::time::Instant::now() + AUDIT_RETENTION_SWEEP;
         let mut retention = tokio::time::interval_at(first_retention, AUDIT_RETENTION_SWEEP);
         retention.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            let message = tokio::select! {
+            let event = tokio::select! {
+                biased;
                 () = token.cancelled() => break,
+                request = lifecycle.receiver.recv() => match request {
+                    Some(request) => AdminOwnerEvent::Lifecycle(request),
+                    None => {
+                        self.signal_fatal();
+                        break;
+                    }
+                },
                 _ = retention.tick() => {
-                    self.retention_sweep(&token).await;
+                    if self.retention_sweep(&token).await == Err(AdminLifecycleFailure::Audit) {
+                        self.signal_fatal();
+                    }
                     continue;
                 }
                 changed = wait_for_config_change(&mut self.config_changes) => {
@@ -478,20 +616,30 @@ impl AdminOwner {
                     break;
                 }
                 message = inbox.receiver.recv() => match message {
-                    Some(message) => message,
+                    Some(message) => AdminOwnerEvent::Transport(message),
                     None => break,
                 },
             };
-            self.handle(message, &token).await;
+            match event {
+                AdminOwnerEvent::Lifecycle(request) => {
+                    if self.handle_lifecycle(request, &token).await {
+                        break;
+                    }
+                }
+                AdminOwnerEvent::Transport(message) => self.handle(message, &token).await,
+            }
         }
         for (_, owned) in self.sessions {
             let _ = owned.output.try_close(CloseReason::Shutdown);
         }
     }
 
-    async fn retention_sweep(&mut self, token: &CancellationToken) {
+    async fn retention_sweep(
+        &mut self,
+        token: &CancellationToken,
+    ) -> Result<(), AdminLifecycleFailure> {
         let Some(snapshot) = self.config.as_ref().map(RuntimeConfigHandle::load) else {
-            return;
+            return Ok(());
         };
         let Some(retention_seconds) = snapshot
             .config()
@@ -499,48 +647,114 @@ impl AdminOwner {
             .audit_retention_days
             .checked_mul(SECONDS_PER_DAY)
         else {
-            self.signal_fatal();
-            return;
+            return Err(AdminLifecycleFailure::Audit);
         };
         let Ok(now) = self.wall.utc_now() else {
-            return;
+            return Err(AdminLifecycleFailure::Audit);
         };
         let Ok(job) = self.audit.prepare_retention(now.get(), retention_seconds) else {
-            self.signal_fatal();
-            return;
+            return Err(AdminLifecycleFailure::Audit);
         };
         let scan = tokio::task::spawn_blocking(move || job.run());
         let tbs = tokio::select! {
-            () = token.cancelled() => return,
+            () = token.cancelled() => return Err(AdminLifecycleFailure::Unavailable),
             result = scan => match result {
                 Ok(Ok(Some(tbs))) => tbs,
-                Ok(Ok(None)) => return,
-                Ok(Err(_)) | Err(_) => {
-                    self.signal_fatal();
-                    return;
-                }
+                Ok(Ok(None)) => return Ok(()),
+                Ok(Err(_)) | Err(_) => return Err(AdminLifecycleFailure::Audit),
             }
         };
-        let Ok(checkpoint) = self.audit.sign_retention(tbs) else {
-            self.signal_fatal();
-            return;
-        };
+        let checkpoint = self
+            .audit
+            .sign_retention(tbs)
+            .map_err(|_| AdminLifecycleFailure::Audit)?;
         match self.core.commit_retention(checkpoint, token).await {
-            Ok(()) => {
-                if self.audit.commit_retention(&checkpoint).is_err() {
-                    self.signal_fatal();
-                }
+            Ok(()) => self
+                .audit
+                .commit_retention(&checkpoint)
+                .map_err(|_| AdminLifecycleFailure::Audit),
+            Err(AdminCoreFailure::Busy | AdminCoreFailure::Quiescing) => {
+                Err(AdminLifecycleFailure::Busy)
             }
-            Err(AdminCoreFailure::Busy | AdminCoreFailure::Quiescing) => {}
             Err(
                 AdminCoreFailure::InvalidTarget
                 | AdminCoreFailure::StaleRevision
                 | AdminCoreFailure::StorageUnavailable,
-            ) => self.signal_fatal(),
+            ) => Err(AdminLifecycleFailure::Audit),
         }
     }
 
+    async fn handle_lifecycle(
+        &mut self,
+        request: AdminLifecycleRequest,
+        token: &CancellationToken,
+    ) -> bool {
+        let stop = request.phase == AdminLifecyclePhase::Stop;
+        let outcome = match request.phase {
+            AdminLifecyclePhase::Quiesce => {
+                self.quiescing = true;
+                Ok(AdminLifecycleOutcome::Complete)
+            }
+            AdminLifecyclePhase::Drain => {
+                self.quiescing = true;
+                self.begin_shutdown().map(AdminLifecycleOutcome::Draining)
+            }
+            AdminLifecyclePhase::Flush => self
+                .retention_sweep(token)
+                .await
+                .map(|()| AdminLifecycleOutcome::Complete),
+            AdminLifecyclePhase::Stop => {
+                self.quiescing = true;
+                Ok(AdminLifecycleOutcome::Complete)
+            }
+        };
+        let _sent = request.reply.send(outcome);
+        stop
+    }
+
+    fn begin_shutdown(&mut self) -> Result<Vec<FlushAcknowledgement>, AdminLifecycleFailure> {
+        let mut failed = false;
+        for (generation, owned) in &self.sessions {
+            if self.shutdown_acknowledgements.contains_key(generation) {
+                continue;
+            }
+            match owned.output.try_shutdown() {
+                Ok(acknowledgement) => {
+                    self.shutdown_acknowledgements
+                        .insert(*generation, acknowledgement);
+                }
+                Err(_) => failed = true,
+            }
+        }
+        if failed {
+            return Err(AdminLifecycleFailure::Writer);
+        }
+        let mut acknowledgements = Vec::new();
+        acknowledgements
+            .try_reserve_exact(self.shutdown_acknowledgements.len())
+            .map_err(|_| AdminLifecycleFailure::Writer)?;
+        acknowledgements.extend(self.shutdown_acknowledgements.values().cloned());
+        Ok(acknowledgements)
+    }
+
+    // agenc-review: focus owner=runtime reviewed=2026-08-31 reason=bounded quiescing dispatch keeps each transport message closed before ordinary authority handling
     async fn handle(&mut self, message: AdminOwnerMessage, token: &CancellationToken) {
+        if self.quiescing {
+            match message {
+                AdminOwnerMessage::Opened { output, .. } => {
+                    let _ = output.try_close(CloseReason::Shutdown);
+                }
+                AdminOwnerMessage::Line { generation, .. } => {
+                    if !self.shutdown_acknowledgements.contains_key(&generation) {
+                        self.close(generation, CloseReason::Shutdown);
+                    }
+                }
+                AdminOwnerMessage::Closed { generation, .. } => {
+                    self.sessions.remove(&generation);
+                }
+            }
+            return;
+        }
         match message {
             AdminOwnerMessage::Opened {
                 generation,
@@ -1749,9 +1963,8 @@ where
         queue_backing,
     } = resources;
     let (output_sender, output_receiver) = mpsc::channel(ADMIN_OUTPUT_CAPACITY);
-    let output = AdminOutput {
-        sender: output_sender,
-    };
+    let output = AdminOutput::new(output_sender);
+    let flush_acknowledgement = output.flush_acknowledgement.clone();
     if let Err(reason) = port
         .opened(generation, challenge, peer, output, &token)
         .await
@@ -1779,6 +1992,7 @@ where
                 write_half,
                 output_receiver,
                 writer_token.clone(),
+                flush_acknowledgement,
             ));
             tokio::select! {
                 read = &mut reader => {
@@ -1863,31 +2077,55 @@ async fn run_admin_writer<W>(
     mut writer: W,
     mut output: mpsc::Receiver<AdminWrite>,
     token: CancellationToken,
+    flush_acknowledgement: FlushAcknowledgement,
 ) -> CloseReason
 where
     W: AsyncWrite + Unpin,
 {
-    loop {
+    let reason = 'writer: loop {
         let batch = tokio::select! {
-            () = token.cancelled() => return CloseReason::Shutdown,
+            () = token.cancelled() => break 'writer CloseReason::Shutdown,
             batch = output.recv() => match batch {
                 Some(batch) => batch,
-                None => return CloseReason::TransportLoss,
+                None => break 'writer CloseReason::TransportLoss,
             },
         };
-        for line in batch.lines {
-            if writer.write_all(&line).await.is_err() || writer.write_all(b"\r\n").await.is_err() {
-                return CloseReason::TransportLoss;
-            }
-        }
-        if writer.flush().await.is_err() {
-            return CloseReason::TransportLoss;
+        if let Err(reason) = write_admin_batch(&mut writer, &batch).await {
+            break reason;
         }
         if let Some(reason) = batch.close {
-            let _ = writer.shutdown().await;
-            return reason;
+            break reason;
         }
+    };
+    finish_admin_writer(&mut writer).await;
+    flush_acknowledgement.acknowledge();
+    reason
+}
+
+async fn write_admin_batch<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    batch: &AdminWrite,
+) -> Result<(), CloseReason> {
+    let write = async {
+        for line in &batch.lines {
+            writer.write_all(line).await?;
+            writer.write_all(b"\r\n").await?;
+        }
+        writer.flush().await
+    };
+    match tokio::time::timeout(WRITE_STALL_BUDGET, write).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) => Err(CloseReason::TransportLoss),
+        Err(_) => Err(CloseReason::WriteStall),
     }
+}
+
+async fn finish_admin_writer<W: AsyncWrite + Unpin>(writer: &mut W) {
+    let finish = async {
+        let _ = writer.flush().await;
+        let _ = writer.shutdown().await;
+    };
+    let _ = tokio::time::timeout(CLOSE_NOTIFY_GRACE, finish).await;
 }
 
 #[cfg(test)]
@@ -2043,6 +2281,7 @@ mod tests {
     #[tokio::test]
     async fn owner_answers_only_bounded_pre_auth_liveness() -> Result<(), RuntimeError> {
         let (port, inbox) = admin_transport_channel(binding());
+        let (_lifecycle, lifecycle_inbox) = admin_lifecycle_channel();
         let root = CancellationToken::root();
         let admission = AdminAdmissionSnapshot::new(vec![1000], Vec::new(), Vec::new());
         let (core, _core_inbox) = admin_core_channel();
@@ -2072,7 +2311,7 @@ mod tests {
                     },
                 },
             )
-            .run(inbox, root.clone()),
+            .run(inbox, lifecycle_inbox, root.clone()),
         );
         let (sender, mut output) = mpsc::channel(ADMIN_OUTPUT_CAPACITY);
         port.opened(
@@ -2082,7 +2321,7 @@ mod tests {
                 uid: 1000,
                 gid: 1000,
             },
-            AdminOutput { sender },
+            AdminOutput::new(sender),
             &root,
         )
         .await
@@ -2106,6 +2345,136 @@ mod tests {
         assert_eq!(pong.lines, vec![b"PONG :token".to_vec()]);
         root.cancel();
         owner.await.map_err(|_| RuntimeError::Cancelled)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lifecycle_queues_one_shutdown_frame_and_reuses_its_acknowledgement()
+    -> Result<(), RuntimeError> {
+        let (port, inbox) = admin_transport_channel(binding());
+        let (lifecycle, lifecycle_inbox) = admin_lifecycle_channel();
+        let root = CancellationToken::root();
+        let (core, _core_inbox) = admin_core_channel();
+        let owner = tokio::spawn(
+            AdminOwner::new(
+                binding(),
+                registry()?,
+                AdminAdmissionSnapshot::new(vec![1000], Vec::new(), Vec::new()),
+                AuditAuthority::empty_for_test()?,
+                core,
+                AdminOwnerRuntime {
+                    health: live_health(),
+                    config: None,
+                    reload: None,
+                    backup: None,
+                    process: None,
+                    fatal: None,
+                    observer: None,
+                    budget: Arc::new(MemoryBudget::new(MAX_AUDIT_EXPORT_BYTES * 2)),
+                    entropy: Box::new(
+                        ScriptedEntropy::new(vec![0; 64])
+                            .map_err(|_| RuntimeError::InvalidValue)?,
+                    ),
+                    clocks: AdminOwnerClocks {
+                        monotonic: Box::new(SystemMonotonicClock::start()),
+                        wall: Box::new(SystemWallClock),
+                    },
+                },
+            )
+            .run(inbox, lifecycle_inbox, root.clone()),
+        );
+        let (sender, mut output) = mpsc::channel(ADMIN_OUTPUT_CAPACITY);
+        port.opened(
+            ConnectionGeneration::new(2),
+            challenge(),
+            PeerIdentity::Local {
+                uid: 1000,
+                gid: 1000,
+            },
+            AdminOutput::new(sender),
+            &root,
+        )
+        .await
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        let _challenge = output.recv().await.ok_or(RuntimeError::InvalidValue)?;
+
+        lifecycle
+            .quiesce()
+            .await
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let acknowledgements = lifecycle
+            .drain()
+            .await
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        assert_eq!(acknowledgements.len(), 1);
+        let acknowledgement = acknowledgements.first().ok_or(RuntimeError::InvalidValue)?;
+        assert!(!acknowledgement.is_acknowledged());
+        let shutdown = output.recv().await.ok_or(RuntimeError::InvalidValue)?;
+        assert_eq!(
+            shutdown.lines,
+            vec![ADMIN_SHUTDOWN_LINE.as_bytes().to_vec()]
+        );
+        assert_eq!(shutdown.close, Some(CloseReason::Shutdown));
+
+        let repeated = lifecycle
+            .drain()
+            .await
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        assert_eq!(repeated.len(), 1);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), output.recv())
+                .await
+                .is_err()
+        );
+        let repeated_acknowledgement = repeated.first().ok_or(RuntimeError::InvalidValue)?;
+        acknowledgement.acknowledge();
+        repeated_acknowledgement.wait().await;
+        lifecycle
+            .flush()
+            .await
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        lifecycle
+            .stop()
+            .await
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        owner.await.map_err(|_| RuntimeError::Cancelled)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn writer_acknowledges_after_the_final_admin_frame_and_transport_close()
+    -> Result<(), RuntimeError> {
+        let (transport, mut peer) = tokio::io::duplex(1_024);
+        let (sender, receiver) = mpsc::channel(ADMIN_OUTPUT_CAPACITY);
+        let acknowledgement = FlushAcknowledgement::pending();
+        let root = CancellationToken::root();
+        let writer_acknowledgement = acknowledgement.clone();
+        let writer = tokio::spawn(run_admin_writer(
+            transport,
+            receiver,
+            root,
+            writer_acknowledgement,
+        ));
+        let batch = AdminWrite::ordinary(
+            vec![ADMIN_SHUTDOWN_LINE.to_owned()],
+            Some(CloseReason::Shutdown),
+        )
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        sender
+            .send(batch)
+            .await
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let mut bytes = Vec::new();
+        peer.read_to_end(&mut bytes)
+            .await
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        assert_eq!(bytes, b"ERROR :Server shutting down\r\n");
+        assert_eq!(
+            writer.await.map_err(|_| RuntimeError::Cancelled)?,
+            CloseReason::Shutdown
+        );
+        acknowledgement.wait().await;
+        assert!(acknowledgement.is_acknowledged());
         Ok(())
     }
 
@@ -2135,6 +2504,7 @@ mod tests {
     #[tokio::test]
     async fn observed_output_waits_for_the_durable_audit_reply() -> Result<(), RuntimeError> {
         let (port, inbox) = admin_transport_channel(binding());
+        let (_lifecycle, lifecycle_inbox) = admin_lifecycle_channel();
         let (core, mut core_inbox) = admin_core_channel();
         let root = CancellationToken::root();
         let owner = tokio::spawn(
@@ -2163,7 +2533,7 @@ mod tests {
                     },
                 },
             )
-            .run(inbox, root.clone()),
+            .run(inbox, lifecycle_inbox, root.clone()),
         );
         let (sender, mut output) = mpsc::channel(ADMIN_OUTPUT_CAPACITY);
         port.opened(
@@ -2173,7 +2543,7 @@ mod tests {
                 uid: 1000,
                 gid: 1000,
             },
-            AdminOutput { sender },
+            AdminOutput::new(sender),
             &root,
         )
         .await
@@ -2259,6 +2629,7 @@ mod tests {
     #[tokio::test]
     async fn account_mutation_waits_for_one_atomic_state_core_commit() -> Result<(), RuntimeError> {
         let (port, inbox) = admin_transport_channel(binding());
+        let (_lifecycle, lifecycle_inbox) = admin_lifecycle_channel();
         let (core, mut core_inbox) = admin_core_channel();
         let root = CancellationToken::root();
         let owner = tokio::spawn(
@@ -2287,7 +2658,7 @@ mod tests {
                     },
                 },
             )
-            .run(inbox, root.clone()),
+            .run(inbox, lifecycle_inbox, root.clone()),
         );
         let (sender, mut output) = mpsc::channel(ADMIN_OUTPUT_CAPACITY);
         port.opened(
@@ -2297,7 +2668,7 @@ mod tests {
                 uid: 1000,
                 gid: 1000,
             },
-            AdminOutput { sender },
+            AdminOutput::new(sender),
             &root,
         )
         .await
@@ -2371,6 +2742,7 @@ mod tests {
     #[tokio::test]
     async fn confirmed_die_commits_intent_before_requesting_stop() -> Result<(), RuntimeError> {
         let (port, inbox) = admin_transport_channel(binding());
+        let (_lifecycle, lifecycle_inbox) = admin_lifecycle_channel();
         let (core, mut core_inbox) = admin_core_channel();
         let (process, mut process_inbox) = admin_process_channel();
         let root = CancellationToken::root();
@@ -2400,7 +2772,7 @@ mod tests {
                     },
                 },
             )
-            .run(inbox, root.clone()),
+            .run(inbox, lifecycle_inbox, root.clone()),
         );
         let (sender, mut output) = mpsc::channel(ADMIN_OUTPUT_CAPACITY);
         port.opened(
@@ -2410,7 +2782,7 @@ mod tests {
                 uid: 1000,
                 gid: 1000,
             },
-            AdminOutput { sender },
+            AdminOutput::new(sender),
             &root,
         )
         .await
