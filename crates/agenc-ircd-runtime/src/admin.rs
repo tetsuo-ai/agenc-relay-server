@@ -11,20 +11,23 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use agenc_ircd_admin::{
-    AdminAuditPhase, AdminChallenge, AdminCommand, AdminCommandEvent, AdminSession,
-    AdminSessionBinding, MAX_ADMIN_LINE_BYTES, MAX_ADMIN_OUTPUT_LINE_BYTES, OperatorRegistry,
-    PeerIdentity,
+    AdminAuditEvent, AdminAuditPhase, AdminChallenge, AdminCommand, AdminCommandEvent,
+    AdminSession, AdminSessionBinding, MAX_ADMIN_LINE_BYTES, MAX_ADMIN_OUTPUT_LINE_BYTES,
+    OperatorRegistry, PeerIdentity, StatsSelector, StatsValues, render_stats_batch,
+    render_stats_storage_unavailable, render_stats_unavailable,
 };
-use agenc_ircd_types::{MonotonicClock, WallClock};
+use agenc_ircd_types::{EntropySource, MonotonicClock, WallClock};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::sync::mpsc;
 
 use crate::budget::MemoryPermitBatch;
 use crate::cancel::CancellationToken;
 use crate::connection::{ConnectionExit, ConnectionGeneration, ConnectionResources};
+use crate::observe::health::{HealthSnapshot, Liveness, ReadinessGate};
 use crate::purpose::ListenerPurpose;
 use crate::state_core::inbox::CloseReason;
 use crate::state_core::{AdminCoreFailure, AdminCorePort};
+use crate::sync::Arc;
 
 pub(crate) use audit::AuditAuthority;
 
@@ -206,6 +209,8 @@ pub(crate) struct AdminOwner {
     admission: AdminAdmissionSnapshot,
     audit: AuditAuthority,
     core: AdminCorePort,
+    health: AdminOwnerHealth,
+    entropy: Box<dyn EntropySource + Send>,
     monotonic: Box<dyn MonotonicClock + Send>,
     wall: Box<dyn WallClock + Send>,
     sessions: BTreeMap<ConnectionGeneration, OwnedAdminSession>,
@@ -214,6 +219,24 @@ pub(crate) struct AdminOwner {
 pub(crate) struct AdminOwnerClocks {
     pub(crate) monotonic: Box<dyn MonotonicClock + Send>,
     pub(crate) wall: Box<dyn WallClock + Send>,
+}
+
+pub(crate) struct AdminOwnerRuntime {
+    pub(crate) health: AdminOwnerHealth,
+    pub(crate) entropy: Box<dyn EntropySource + Send>,
+    pub(crate) clocks: AdminOwnerClocks,
+}
+
+#[derive(Clone)]
+pub(crate) struct AdminOwnerHealth {
+    pub(crate) readiness: Arc<ReadinessGate>,
+    pub(crate) liveness: Arc<Liveness>,
+}
+
+impl AdminOwnerHealth {
+    fn capture(&self, now: agenc_ircd_types::MonotonicTick) -> HealthSnapshot {
+        HealthSnapshot::capture(&self.readiness, &self.liveness, now)
+    }
 }
 
 /// Exact enabled-operator transport identities accepted before a challenge.
@@ -256,7 +279,7 @@ impl AdminOwner {
         admission: AdminAdmissionSnapshot,
         audit: AuditAuthority,
         core: AdminCorePort,
-        clocks: AdminOwnerClocks,
+        runtime: AdminOwnerRuntime,
     ) -> Self {
         Self {
             binding,
@@ -264,8 +287,10 @@ impl AdminOwner {
             admission,
             audit,
             core,
-            monotonic: clocks.monotonic,
-            wall: clocks.wall,
+            health: runtime.health,
+            entropy: runtime.entropy,
+            monotonic: runtime.clocks.monotonic,
+            wall: runtime.clocks.wall,
             sessions: BTreeMap::new(),
         }
     }
@@ -379,39 +404,89 @@ impl AdminOwner {
             AdminCommand::Pong(_) => return,
             _ => {}
         }
-        let verb = event.command.verb();
-        let Some(lines) = self.prepare_read_only(&event.command) else {
-            self.output_line(
-                generation,
-                format!("FAIL {verb} UNAVAILABLE :Command unavailable"),
-            );
+        let Some(lines) = self
+            .prepare_command_lines(generation, &event.command, token)
+            .await
+        else {
             return;
         };
+        let Some(audit) = self.prepare_observed_event(generation, &event) else {
+            return;
+        };
+        self.commit_observed(generation, &event.command, lines, audit, token)
+            .await;
+    }
+
+    async fn prepare_command_lines(
+        &mut self,
+        generation: ConnectionGeneration,
+        command: &AdminCommand,
+        token: &CancellationToken,
+    ) -> Option<Vec<String>> {
+        if let AdminCommand::Stats(selector) = command {
+            return match self.prepare_stats(*selector, token).await {
+                Ok(lines) => Some(lines),
+                Err(failure) => {
+                    self.output_stats_failure(generation, *selector, failure);
+                    None
+                }
+            };
+        }
+        let lines = self.prepare_read_only(command);
+        if lines.is_none() {
+            self.output_line(
+                generation,
+                format!("FAIL {} UNAVAILABLE :Command unavailable", command.verb()),
+            );
+        }
+        lines
+    }
+
+    fn prepare_observed_event(
+        &mut self,
+        generation: ConnectionGeneration,
+        event: &AdminCommandEvent,
+    ) -> Option<AdminAuditEvent> {
+        let verb = event.command.verb();
         let Some((operator_id, _permissions)) = self
             .sessions
             .get(&generation)
             .and_then(|owned| owned.session.operator())
         else {
             self.close(generation, CloseReason::ProtocolError);
-            return;
+            return None;
         };
         let created_at = match self.wall.utc_now() {
             Ok(now) => now.get(),
             Err(_) => {
                 self.output_storage_unavailable(generation, verb);
-                return;
+                return None;
             }
         };
-        let Ok(audit) = self.audit.prepare_event(
+        match self.audit.prepare_event(
             self.binding,
             operator_id,
-            &event,
+            event,
             AdminAuditPhase::Observed,
             created_at,
-        ) else {
-            self.output_storage_unavailable(generation, verb);
-            return;
-        };
+        ) {
+            Ok(audit) => Some(audit),
+            Err(_) => {
+                self.output_storage_unavailable(generation, verb);
+                None
+            }
+        }
+    }
+
+    async fn commit_observed(
+        &mut self,
+        generation: ConnectionGeneration,
+        command: &AdminCommand,
+        lines: Vec<String>,
+        audit: AdminAuditEvent,
+        token: &CancellationToken,
+    ) {
+        let verb = command.verb();
         match self.core.commit_audit(audit.clone(), token).await {
             Ok(()) => {
                 if self.audit.commit_event(&audit).is_err() {
@@ -425,9 +500,32 @@ impl AdminOwner {
                 format!("FAIL {verb} BUSY :Administrative action busy"),
             ),
             Err(AdminCoreFailure::StorageUnavailable) => {
-                self.output_storage_unavailable(generation, verb);
+                if let AdminCommand::Stats(selector) = command {
+                    self.output_line(generation, render_stats_storage_unavailable(*selector));
+                } else {
+                    self.output_storage_unavailable(generation, verb);
+                }
             }
         }
+    }
+
+    async fn prepare_stats(
+        &mut self,
+        selector: StatsSelector,
+        token: &CancellationToken,
+    ) -> Result<Vec<String>, AdminCoreFailure> {
+        let snapshot = self.core.snapshot(token).await?;
+        let values = StatsValues::new(selector, snapshot.values(selector))
+            .map_err(|_| AdminCoreFailure::StorageUnavailable)?;
+        let sampled_at = self
+            .wall
+            .utc_now()
+            .map_err(|_| AdminCoreFailure::StorageUnavailable)?;
+        let mut batch_id = [0_u8; 16];
+        self.entropy
+            .fill_exact(&mut batch_id)
+            .map_err(|_| AdminCoreFailure::StorageUnavailable)?;
+        Ok(render_stats_batch(&batch_id, sampled_at.get(), &values))
     }
 
     fn prepare_read_only(&self, command: &AdminCommand) -> Option<Vec<String>> {
@@ -449,8 +547,18 @@ impl AdminOwner {
                 ":agenc-ircd 371 * :Server topology is not exposed".to_owned(),
                 ":agenc-ircd 374 * :End of INFO".to_owned(),
             ]),
-            AdminCommand::Info
-            | AdminCommand::Stats(_)
+            AdminCommand::Info => {
+                let snapshot = self.health.capture(self.monotonic.now());
+                Some(vec![
+                    format!(
+                        ":agenc-ircd 371 * :health readiness={} liveness={}",
+                        u8::from(snapshot.readiness.ready()),
+                        u8::from(snapshot.liveness.live())
+                    ),
+                    ":agenc-ircd 374 * :End of INFO".to_owned(),
+                ])
+            }
+            AdminCommand::Stats(_)
             | AdminCommand::AuditExport(_)
             | AdminCommand::Ping(_)
             | AdminCommand::Pong(_)
@@ -474,6 +582,24 @@ impl AdminOwner {
             generation,
             format!("FAIL {verb} STORAGE_UNAVAILABLE :Administrative audit unavailable"),
         );
+    }
+
+    fn output_stats_failure(
+        &self,
+        generation: ConnectionGeneration,
+        selector: StatsSelector,
+        failure: AdminCoreFailure,
+    ) {
+        let line = match failure {
+            AdminCoreFailure::Busy | AdminCoreFailure::Quiescing => {
+                format!(
+                    "FAIL STATS BUSY {} :Administrative action busy",
+                    selector.as_str()
+                )
+            }
+            AdminCoreFailure::StorageUnavailable => render_stats_unavailable(selector),
+        };
+        self.output_line(generation, line);
     }
 
     fn output_line(&self, generation: ConnectionGeneration, line: String) {
@@ -680,12 +806,16 @@ mod tests {
         encode_base64url, render_admin_tag,
     };
     use agenc_ircd_crypto::Ed25519SecretKey;
-    use agenc_ircd_types::{AdminPermission, AdminPermissionSet, NetworkId, OperatorId, ServerId};
+    use agenc_ircd_testkit::ScriptedEntropy;
+    use agenc_ircd_types::{
+        AdminPermission, AdminPermissionSet, MonotonicTick, NetworkId, OperatorId, ServerId,
+    };
 
     use super::*;
     use crate::RuntimeError;
     use crate::clock::{SystemMonotonicClock, SystemWallClock};
-    use crate::state_core::admin_core_channel;
+    use crate::observe::health::ReadinessStage;
+    use crate::state_core::{AdminCoreSnapshot, admin_core_channel};
 
     fn registry() -> Result<OperatorRegistry, RuntimeError> {
         let mut permissions = AdminPermissionSet::EMPTY;
@@ -717,6 +847,26 @@ mod tests {
             TransportKind::Local,
             TransportBinding::from_bytes([5; 32]),
         )
+    }
+
+    fn live_health() -> AdminOwnerHealth {
+        let readiness = Arc::new(ReadinessGate::new());
+        for stage in [
+            ReadinessStage::Configuration,
+            ReadinessStage::Keys,
+            ReadinessStage::StorageRecovered,
+            ReadinessStage::StateCore,
+        ] {
+            readiness.mark(stage);
+        }
+        let liveness = Arc::new(Liveness::new());
+        let now = MonotonicTick::from_ticks(0);
+        liveness.record_supervisor(now);
+        liveness.record_state_core(now);
+        AdminOwnerHealth {
+            readiness,
+            liveness,
+        }
     }
 
     fn oper_line() -> Result<Vec<u8>, RuntimeError> {
@@ -769,9 +919,16 @@ mod tests {
                 admission,
                 AuditAuthority::empty_for_test()?,
                 core,
-                AdminOwnerClocks {
-                    monotonic: Box::new(SystemMonotonicClock::start()),
-                    wall: Box::new(SystemWallClock),
+                AdminOwnerRuntime {
+                    health: live_health(),
+                    entropy: Box::new(
+                        ScriptedEntropy::new(vec![0; 64])
+                            .map_err(|_| RuntimeError::InvalidValue)?,
+                    ),
+                    clocks: AdminOwnerClocks {
+                        monotonic: Box::new(SystemMonotonicClock::start()),
+                        wall: Box::new(SystemWallClock),
+                    },
                 },
             )
             .run(inbox, root.clone()),
@@ -846,9 +1003,16 @@ mod tests {
                 AdminAdmissionSnapshot::new(vec![1000], Vec::new(), Vec::new()),
                 AuditAuthority::empty_for_test()?,
                 core,
-                AdminOwnerClocks {
-                    monotonic: Box::new(SystemMonotonicClock::start()),
-                    wall: Box::new(SystemWallClock),
+                AdminOwnerRuntime {
+                    health: live_health(),
+                    entropy: Box::new(
+                        ScriptedEntropy::new(vec![0; 64])
+                            .map_err(|_| RuntimeError::InvalidValue)?,
+                    ),
+                    clocks: AdminOwnerClocks {
+                        monotonic: Box::new(SystemMonotonicClock::start()),
+                        wall: Box::new(SystemWallClock),
+                    },
                 },
             )
             .run(inbox, root.clone()),
@@ -884,6 +1048,61 @@ mod tests {
         assert_eq!(event.tbs().command_tbs.canonical_command(), b"MOTD");
         let reply = output.recv().await.ok_or(RuntimeError::InvalidValue)?;
         assert_eq!(reply.lines, vec![b"422 * :MOTD File is missing".to_vec()]);
+
+        port.line(ConnectionGeneration::new(9), signed_line(1, "INFO")?, &root)
+            .await
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        tokio::task::yield_now().await;
+        assert!(output.try_recv().is_err());
+        let event = core_inbox
+            .complete_next_for_test(Ok(()))
+            .await
+            .ok_or(RuntimeError::InvalidValue)?;
+        assert_eq!(event.tbs().command_tbs.canonical_command(), b"INFO");
+        let reply = output.recv().await.ok_or(RuntimeError::InvalidValue)?;
+        assert_eq!(
+            reply.lines,
+            vec![
+                b":agenc-ircd 371 * :health readiness=1 liveness=1".to_vec(),
+                b":agenc-ircd 374 * :End of INFO".to_vec(),
+            ]
+        );
+
+        port.line(
+            ConnectionGeneration::new(9),
+            signed_line(2, "STATS E2EE")?,
+            &root,
+        )
+        .await
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        tokio::task::yield_now().await;
+        assert!(output.try_recv().is_err());
+        let snapshot = AdminCoreSnapshot::new([0; 9], [0; 14], [0; 10], [0; 8]);
+        assert!(core_inbox.complete_snapshot_for_test(snapshot).await);
+        tokio::task::yield_now().await;
+        assert!(output.try_recv().is_err());
+        let event = core_inbox
+            .complete_next_for_test(Ok(()))
+            .await
+            .ok_or(RuntimeError::InvalidValue)?;
+        assert_eq!(event.tbs().command_tbs.canonical_command(), b"STATS E2EE");
+        let reply = output.recv().await.ok_or(RuntimeError::InvalidValue)?;
+        assert_eq!(reply.lines.len(), 11);
+        assert!(reply.lines.first().is_some_and(|line| {
+            line.starts_with(b"BATCH +AAAAAAAAAAAAAAAAAAAAAA agenc.ag/stats E2EE 9 ")
+        }));
+        assert!(
+            reply
+                .lines
+                .iter()
+                .skip(1)
+                .take(9)
+                .all(|line| { line.ends_with(b" 0 :Statistic value") })
+        );
+        assert_eq!(
+            reply.lines.last(),
+            Some(&b"BATCH -AAAAAAAAAAAAAAAAAAAAAA".to_vec())
+        );
         root.cancel();
         owner.await.map_err(|_| RuntimeError::Cancelled)?;
         Ok(())

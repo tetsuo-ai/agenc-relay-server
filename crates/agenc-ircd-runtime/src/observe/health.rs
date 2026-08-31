@@ -156,13 +156,17 @@ impl Liveness {
     /// Copies the counters and evaluates staleness at `now`.
     #[must_use]
     pub fn snapshot(&self, now: MonotonicTick) -> LivenessSnapshot {
+        let supervisor_progress = self.supervisor_progress.load(Ordering::Acquire);
+        let state_core_progress = self.state_core_progress.load(Ordering::Acquire);
         let supervisor_tick = self.supervisor_tick.load(Ordering::Acquire);
         let state_core_tick = self.state_core_tick.load(Ordering::Acquire);
         LivenessSnapshot {
-            supervisor_progress: self.supervisor_progress.load(Ordering::Acquire),
-            state_core_progress: self.state_core_progress.load(Ordering::Acquire),
-            supervisor_live: within(now, supervisor_tick, SUPERVISOR_STALE_MILLIS),
-            state_core_live: within(now, state_core_tick, STATE_CORE_STALE_MILLIS),
+            supervisor_progress,
+            state_core_progress,
+            supervisor_live: supervisor_progress != 0
+                && within(now, supervisor_tick, SUPERVISOR_STALE_MILLIS),
+            state_core_live: state_core_progress != 0
+                && within(now, state_core_tick, STATE_CORE_STALE_MILLIS),
         }
     }
 }
@@ -246,7 +250,7 @@ mod tests {
     #[test]
     fn liveness_tracks_progress_and_goes_stale_at_the_exact_bounds() {
         let liveness = Liveness::new();
-        assert!(!liveness.is_live(tick(0)) || SUPERVISOR_STALE_MILLIS > 0);
+        assert!(!liveness.is_live(tick(0)));
         liveness.record_supervisor(tick(1_000));
         liveness.record_state_core(tick(1_000));
         assert!(liveness.is_live(tick(1_000)));
@@ -266,9 +270,7 @@ mod tests {
         let health =
             HealthSnapshot::capture(&ReadinessGate::default(), &Liveness::default(), tick(0));
         assert!(!health.readiness.ready());
-        assert!(
-            health.liveness.supervisor_live,
-            "fresh counters at tick zero are within bound"
-        );
+        assert!(!health.liveness.supervisor_live);
+        assert!(!health.liveness.state_core_live);
     }
 }

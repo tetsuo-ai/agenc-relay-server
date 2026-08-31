@@ -32,7 +32,9 @@ use agenc_ircd_types::{
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-pub(crate) use admin::{AdminCoreFailure, AdminCoreInbox, AdminCorePort, admin_core_channel};
+pub(crate) use admin::{
+    AdminCoreFailure, AdminCoreInbox, AdminCorePort, AdminCoreSnapshot, admin_core_channel,
+};
 pub use pending::{GATHER_WINDOW_MILLIS, MAX_BATCH_PLANS, StagedOrigin};
 
 use crate::RuntimeError;
@@ -47,6 +49,7 @@ use crate::bridge::{
 use crate::budget::MemoryBudget;
 use crate::cancel::CancellationToken;
 use crate::connection::sink::ConnectionGeneration;
+use crate::observe::health::Liveness;
 use crate::state_core::admin::{AdminCoreRequest, AdminCoreResult};
 use crate::state_core::durable::{
     AccountServiceDurableWrite, AccountingCeilings, DurableIndex, HeadCounters, KeyDeriver,
@@ -71,6 +74,8 @@ const ERR_UNKNOWNCOMMAND: u16 = 421;
 /// The numeric an unregistered connection receives for a post-registration
 /// command.
 const ERR_NOTREGISTERED: u16 = 451;
+/// Owner progress cadence used by authenticated liveness.
+const PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Fixed configuration the state owner runs with.
 pub struct StateCoreConfig {
@@ -104,6 +109,8 @@ pub struct StateCoreInputs {
     pub crypto: CryptoBridge,
     /// The process-wide memory budget.
     pub budget: Arc<MemoryBudget>,
+    /// Process-wide progress counters shared with authenticated health.
+    pub liveness: Arc<Liveness>,
     /// The explicit clocks.
     pub clocks: StateCoreClocks,
     /// The entropy source for identities and keys.
@@ -940,6 +947,7 @@ pub struct StateCore {
     admin_receiver: mpsc::Receiver<AdminCoreRequest>,
     admin_open: bool,
     admin_pending: Option<PendingAdminCommit>,
+    liveness: Arc<Liveness>,
 }
 
 struct PendingAdminCommit {
@@ -1033,6 +1041,7 @@ impl StateCore {
             admin_receiver,
             admin_open: false,
             admin_pending: None,
+            liveness: inputs.liveness,
         };
         state.router.startup(&mut state.context);
         state
@@ -1095,7 +1104,13 @@ impl StateCore {
     }
 
     fn step_admin_request(&mut self, request: AdminCoreRequest) -> Option<StateCoreExit> {
-        let (event, reply) = request.into_parts();
+        let (event, reply) = match request {
+            AdminCoreRequest::CommitAudit { event, reply } => (event, reply),
+            AdminCoreRequest::Snapshot { reply } => {
+                let _sent = reply.send(Ok(self.admin_snapshot()));
+                return None;
+            }
+        };
         if self.context.quiescing {
             let _sent = reply.send(Err(AdminCoreFailure::Quiescing));
             return None;
@@ -1144,6 +1159,53 @@ impl StateCore {
                 IndeterminateCause::Bridge(failure),
             )),
         }
+    }
+
+    fn admin_snapshot(&self) -> AdminCoreSnapshot {
+        let (local_channels, global_channels) = self.context.domain.channel_scope_counts();
+        let counters = self.context.counters;
+        let head = self.context.head;
+        let storage_in_flight = u64::from(self.context.in_flight());
+        AdminCoreSnapshot::new(
+            [
+                self.context.now().get() / 1_000,
+                usize_u64(self.context.sessions.len()),
+                0,
+                usize_u64(self.context.sessions.registered_len()),
+                usize_u64(self.context.domain.authenticated_session_count()),
+                usize_u64(local_channels),
+                usize_u64(global_channels),
+                self.context.budget.charged(),
+                self.context.budget.capacity(),
+            ],
+            [
+                head.logical_database_bytes,
+                0,
+                self.context.ceilings.database_max_bytes,
+                head.backup_stream_bytes,
+                self.context.ceilings.backup_max_bytes,
+                head.state_generation,
+                head.storage_commit_sequence,
+                head.storage_commit_sequence,
+                head.account_service_response_count,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ],
+            [0, 0, 0, 0, 0, 0, storage_in_flight, 1, 0, 0],
+            [
+                counters.lines_routed,
+                counters.batches_rejected,
+                counters.connections_opened,
+                counters.connections_closed,
+                0,
+                0,
+                0,
+                0,
+            ],
+        )
     }
 
     async fn step_admin_completion(
@@ -1374,6 +1436,9 @@ impl StateCore {
         let mut lifecycle_completed = None;
         let mut lifecycle_replies = PendingLifecycleReplies::default();
         let mut shutdown_connections_started = false;
+        let mut progress = tokio::time::interval(PROGRESS_INTERVAL);
+        progress.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        progress.tick().await;
         loop {
             let in_flight = self.storage_in_flight();
             let safe_point = !in_flight && self.context.pending_len() == 0;
@@ -1472,6 +1537,10 @@ impl StateCore {
                     Some(message) => self.step_message(message),
                     None => Some(StateCoreExit::InboxClosed),
                 },
+                _ = progress.tick() => {
+                    self.liveness.record_state_core(self.context.now());
+                    None
+                },
                 () = tokio::time::sleep_until(wake.unwrap_or_else(Instant::now)), if wake.is_some() => {
                     self.step_wake()
                 },
@@ -1488,6 +1557,10 @@ impl StateCore {
         let delay = deadline.get().saturating_sub(now.get());
         Some(Instant::now() + Duration::from_millis(delay))
     }
+}
+
+fn usize_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]

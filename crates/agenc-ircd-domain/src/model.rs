@@ -1554,10 +1554,33 @@ impl DomainState {
         self.sessions.len()
     }
 
+    /// Returns the number of live sessions bound to account authority.
+    #[must_use]
+    pub fn authenticated_session_count(&self) -> usize {
+        self.sessions
+            .values()
+            .filter(|session| session.account_id().is_some())
+            .count()
+    }
+
     /// Returns the number of current channel instances.
     #[must_use]
     pub fn channel_count(&self) -> usize {
         self.channels.len()
+    }
+
+    /// Returns `(local, global)` channel counts without exposing the maps.
+    #[must_use]
+    pub fn channel_scope_counts(&self) -> (usize, usize) {
+        let mut local = 0_usize;
+        let mut global = 0_usize;
+        for channel in self.channels.values() {
+            match channel.scope() {
+                ChannelScope::Local => local = local.saturating_add(1),
+                ChannelScope::Global => global = global.saturating_add(1),
+            }
+        }
+        (local, global)
     }
 
     /// Returns the number of content-free audit sanctions.

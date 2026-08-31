@@ -30,7 +30,9 @@ use agenc_ircd_storage::{
     StateDirectory, StorageEngineLimits, StorageError, StorageOpenConfig, StorageOwner,
     embedded_storage_qualifications,
 };
-use agenc_ircd_types::{EntropySource as _, Generation, OriginId, WallClock as _};
+use agenc_ircd_types::{
+    EntropySource as _, Generation, MonotonicClock as _, OriginId, WallClock as _,
+};
 use tokio::runtime::Builder;
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use zeroize::Zeroizing;
@@ -39,8 +41,8 @@ use crate::RuntimeError;
 use crate::StateCoreSeed;
 use crate::account_service::AccountCreationPolicy;
 use crate::admin::{
-    AdminAdmissionSnapshot, AdminOwner, AdminOwnerClocks, AdminOwnerInbox, AdminTransportPort,
-    AuditAuthority, admin_transport_channel,
+    AdminAdmissionSnapshot, AdminOwner, AdminOwnerClocks, AdminOwnerHealth, AdminOwnerInbox,
+    AdminOwnerRuntime, AdminTransportPort, AuditAuthority, admin_transport_channel,
 };
 use crate::admission::{BucketKind, BucketRate, RateLimits, TransportAdmission};
 use crate::bridge::crypto::{
@@ -59,6 +61,7 @@ use crate::listener::{
     ListenerContext, ListenerControl, ListenerError, ListenerSet, ListenerSource, ListenerSpec,
     LocalAdminAdmission, NoObserver, spki_sha256,
 };
+use crate::observe::health::{Liveness, ReadinessGate, ReadinessStage};
 use crate::purpose::ListenerPurpose;
 use crate::registration::{AccountServiceConfig, RegistrationRouter, RegistrationRouterConfig};
 use crate::state_core::durable::{AccountingCeilings, KeyDeriver};
@@ -351,6 +354,8 @@ fn build_live_state(
     storage: LiveStorage,
     budget: Arc<MemoryBudget>,
     rates: RateLimits,
+    monotonic: SystemMonotonicClock,
+    liveness: Arc<Liveness>,
 ) -> Result<LiveState, DaemonError> {
     let LiveStorage {
         owner,
@@ -389,8 +394,9 @@ fn build_live_state(
         bridge,
         crypto: crypto_bridge,
         budget,
+        liveness,
         clocks: StateCoreClocks {
-            monotonic: Box::new(SystemMonotonicClock::start()),
+            monotonic: Box::new(monotonic),
             wall: Box::new(SystemWallClock),
         },
         entropy: Box::new(OsEntropy),
@@ -751,6 +757,12 @@ async fn run(
     operators: OperatorRegistry,
     storage: LiveStorage,
 ) -> Result<DaemonExit, DaemonError> {
+    let process_clock = SystemMonotonicClock::start();
+    let readiness = Arc::new(ReadinessGate::new());
+    readiness.mark(ReadinessStage::Configuration);
+    readiness.mark(ReadinessStage::Keys);
+    readiness.mark(ReadinessStage::StorageRecovered);
+    let liveness = Arc::new(Liveness::new());
     let shutdown = shutdown_plan(&config)?;
     let specs = build_listener_specs(&config, &secrets).await?;
     let budget = memory_budget(&config)?;
@@ -764,7 +776,15 @@ async fn run(
         Arc::clone(&budget),
         Box::new(SystemMonotonicClock::start()),
     )?);
-    let mut live = build_live_state(&config, &secrets, storage, Arc::clone(&budget), rates)?;
+    let mut live = build_live_state(
+        &config,
+        &secrets,
+        storage,
+        Arc::clone(&budget),
+        rates,
+        process_clock,
+        Arc::clone(&liveness),
+    )?;
     let (inbox, inbox_receiver) = mpsc::channel(SIGNAL_EVENT_CAPACITY);
     let admin_binding = AdminSessionBinding {
         network_id: config.network.network_id,
@@ -783,9 +803,16 @@ async fn run(
         operator_admission(&config),
         audit,
         admin_core,
-        AdminOwnerClocks {
-            monotonic: Box::new(SystemMonotonicClock::start()),
-            wall: Box::new(SystemWallClock),
+        AdminOwnerRuntime {
+            health: AdminOwnerHealth {
+                readiness: Arc::clone(&readiness),
+                liveness: Arc::clone(&liveness),
+            },
+            entropy: Box::new(OsEntropy),
+            clocks: AdminOwnerClocks {
+                monotonic: Box::new(process_clock),
+                wall: Box::new(SystemWallClock),
+            },
         },
     );
     let context = listener_context(&config, &inbox, admin_port, budget, Arc::clone(&admission))?;
@@ -797,24 +824,29 @@ async fn run(
         mut signals,
         mut state_exited,
         mut listener_exited,
-    } = start_owners(
+    } = start_owners(StartOwnersInputs {
         specs,
         context,
         live,
         inbox_receiver,
-        &inbox,
+        inbox: inbox.clone(),
         admission,
-        AdminOwnerStart {
+        admin: AdminOwnerStart {
             owner: admin_owner,
             inbox: admin_inbox,
         },
-    )?;
+        readiness: Arc::clone(&readiness),
+        liveness: Arc::clone(&liveness),
+    })
+    .await?;
     let trigger = wait_for_shutdown(
         &config_path,
         &config,
         &mut signals,
         &mut state_exited,
         &mut listener_exited,
+        Arc::clone(&liveness),
+        process_clock,
     )
     .await;
     let mut hooks = RuntimeShutdownHooks {
@@ -825,6 +857,7 @@ async fn run(
         listener_exited: &mut listener_exited,
         listener_joined: false,
         stopped: false,
+        readiness,
     };
     let report = run_shutdown(shutdown, &mut hooks, &mut signals).await;
     let shutdown_result = validate_shutdown_report(report);
@@ -847,20 +880,32 @@ struct AdminOwnerStart {
     inbox: AdminOwnerInbox,
 }
 
-fn start_owners(
+struct StartOwnersInputs {
     specs: Vec<ListenerSpec>,
     context: ListenerContext,
     live: LiveState,
     inbox_receiver: mpsc::Receiver<StateCoreMessage>,
-    inbox: &mpsc::Sender<StateCoreMessage>,
+    inbox: mpsc::Sender<StateCoreMessage>,
     admission: Arc<TransportAdmission>,
     admin: AdminOwnerStart,
-) -> Result<RunningOwners, DaemonError> {
+    readiness: Arc<ReadinessGate>,
+    liveness: Arc<Liveness>,
+}
+
+async fn start_owners(inputs: StartOwnersInputs) -> Result<RunningOwners, DaemonError> {
+    let StartOwnersInputs {
+        specs,
+        context,
+        live,
+        inbox_receiver,
+        inbox,
+        admission,
+        admin,
+        readiness,
+        liveness,
+    } = inputs;
     let mut supervisor = Supervisor::new();
     spawn_admin_owner(&mut supervisor, admin.owner, admin.inbox)?;
-    let listeners = ListenerSet::start(specs, context, &supervisor.root_token())?;
-    let control = listeners.control();
-    let listener_exited = spawn_listener_owner(&mut supervisor, listeners)?;
     let LiveState {
         owner,
         state,
@@ -870,16 +915,32 @@ fn start_owners(
         audit: _,
     } = live;
     let (lifecycle, lifecycle_receiver) = lifecycle_channel();
-    let state_exited = spawn_state_owner(
-        &mut supervisor,
-        state,
-        inbox_receiver,
-        lifecycle_receiver,
+    let receivers = StateOwnerReceivers {
+        inbox: inbox_receiver,
+        lifecycle: lifecycle_receiver,
         storage,
         storage_reads,
         crypto,
+    };
+    let (state_exited, state_started) = spawn_state_owner(
+        &mut supervisor,
+        StateOwnerStart {
+            state,
+            receivers,
+            readiness: Arc::clone(&readiness),
+            liveness,
+        },
     )?;
-    let signals = spawn_background_owners(&mut supervisor, inbox, admission)?;
+    if state_started.await.is_err() {
+        supervisor.cancel();
+        let _report = supervisor.join_all(crate::supervisor::MAX_TOTAL).await;
+        shutdown_storage(owner).await?;
+        return Err(DaemonError::TaskFailed);
+    }
+    let listeners = ListenerSet::start(specs, context, &supervisor.root_token())?;
+    let control = listeners.control();
+    let listener_exited = spawn_listener_owner(&mut supervisor, listeners)?;
+    let signals = spawn_background_owners(&mut supervisor, &inbox, admission)?;
     Ok(RunningOwners {
         owner,
         supervisor,
@@ -924,29 +985,37 @@ fn spawn_listener_owner(
     Ok(listener_exited)
 }
 
+struct StateOwnerStart {
+    state: StateCore,
+    receivers: StateOwnerReceivers,
+    readiness: Arc<ReadinessGate>,
+    liveness: Arc<Liveness>,
+}
+
 fn spawn_state_owner(
     supervisor: &mut Supervisor,
-    state: StateCore,
-    inbox_receiver: mpsc::Receiver<StateCoreMessage>,
-    lifecycle: mpsc::Receiver<crate::state_core::inbox::LifecycleRequest>,
-    storage: mpsc::Receiver<crate::bridge::StorageCompletionMessage>,
-    storage_reads: mpsc::Receiver<crate::bridge::StorageReadCompletionMessage>,
-    crypto: mpsc::Receiver<
-        crate::bridge::CryptoCompletionMessage<crate::bridge::crypto::CryptoJobOutput>,
-    >,
-) -> Result<oneshot::Receiver<StateCoreExit>, DaemonError> {
+    start: StateOwnerStart,
+) -> Result<(oneshot::Receiver<StateCoreExit>, oneshot::Receiver<()>), DaemonError> {
     let (state_exit, state_exited) = oneshot::channel();
-    let receivers = StateOwnerReceivers {
-        inbox: inbox_receiver,
-        lifecycle,
-        storage,
-        storage_reads,
-        crypto,
-    };
+    let (state_started, state_ready) = oneshot::channel();
+    let StateOwnerStart {
+        state,
+        receivers,
+        readiness,
+        liveness,
+    } = start;
     supervisor.spawn(ChildName::StateCoreTask, ChildKind::Critical, |token| {
-        run_state_owner(state, receivers, token, state_exit)
+        run_state_owner(
+            state,
+            receivers,
+            token,
+            state_exit,
+            state_started,
+            readiness,
+            liveness,
+        )
     })?;
-    Ok(state_exited)
+    Ok((state_exited, state_ready))
 }
 
 fn spawn_background_owners(
@@ -1040,6 +1109,9 @@ async fn run_state_owner(
     receivers: StateOwnerReceivers,
     token: crate::cancel::CancellationToken,
     exited: oneshot::Sender<StateCoreExit>,
+    started: oneshot::Sender<()>,
+    readiness: Arc<ReadinessGate>,
+    liveness: Arc<Liveness>,
 ) -> Result<(), RuntimeError> {
     let StateOwnerReceivers {
         inbox,
@@ -1048,9 +1120,13 @@ async fn run_state_owner(
         storage_reads,
         crypto,
     } = receivers;
+    readiness.mark(ReadinessStage::StateCore);
+    liveness.record_state_core(state.context().now());
+    let _sent = started.send(());
     let exit = state
         .run(inbox, lifecycle, storage, storage_reads, crypto, token)
         .await;
+    readiness.clear(ReadinessStage::StateCore);
     let (storage_bridge, crypto_bridge) = state.into_bridges();
     crypto_bridge.shutdown().await?;
     tokio::task::spawn_blocking(move || storage_bridge.shutdown())
@@ -1078,13 +1154,24 @@ async fn wait_for_shutdown(
     signals: &mut mpsc::Receiver<SignalEvent>,
     state_exited: &mut oneshot::Receiver<StateCoreExit>,
     listener_exited: &mut oneshot::Receiver<()>,
+    liveness: Arc<Liveness>,
+    monotonic: SystemMonotonicClock,
 ) -> Result<(), DaemonError> {
+    let mut progress = tokio::time::interval(Duration::from_secs(5));
+    progress.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    progress.tick().await;
+    liveness.record_supervisor(monotonic.now());
     loop {
         let event = tokio::select! {
             biased;
-            signal = signals.recv() => SupervisorEvent::Signal(signal),
-            _exit = &mut *state_exited => SupervisorEvent::State,
-            _listener = &mut *listener_exited => SupervisorEvent::Listener,
+            signal = signals.recv() => Some(SupervisorEvent::Signal(signal)),
+            _exit = &mut *state_exited => Some(SupervisorEvent::State),
+            _listener = &mut *listener_exited => Some(SupervisorEvent::Listener),
+            _ = progress.tick() => None,
+        };
+        let Some(event) = event else {
+            liveness.record_supervisor(monotonic.now());
+            continue;
         };
         match event {
             SupervisorEvent::Signal(Some(SignalEvent::Reload)) => {
@@ -1114,12 +1201,14 @@ struct RuntimeShutdownHooks<'a> {
     listener_exited: &'a mut oneshot::Receiver<()>,
     listener_joined: bool,
     stopped: bool,
+    readiness: Arc<ReadinessGate>,
 }
 
 impl ShutdownHooks for RuntimeShutdownHooks<'_> {
     async fn run(&mut self, phase: ShutdownPhase) -> Result<(), ShutdownFailure> {
         match phase {
             ShutdownPhase::Quiesce => {
+                self.readiness.clear(ReadinessStage::StateCore);
                 self.listeners.stop_accepting();
                 self.listeners.wait_accept_stopped().await;
                 request_lifecycle(self.lifecycle, LifecyclePhase::Quiesce).await
