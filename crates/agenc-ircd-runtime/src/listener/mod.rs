@@ -16,7 +16,7 @@ pub mod spki;
 use std::error::Error;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rustls::ServerConfig;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -184,6 +184,16 @@ impl Error for RefusalReason {}
 
 /// Observes admissions, refusals, and closes for logging and metrics.
 pub trait ConnectionObserver: Send + Sync {
+    /// A TLS handshake began after the global permit was acquired.
+    fn tls_started(&self, purpose: ListenerPurpose) {
+        let _ = purpose;
+    }
+
+    /// A TLS handshake released its permit, successfully or otherwise.
+    fn tls_finished(&self, purpose: ListenerPurpose, elapsed_millis: u64) {
+        let _ = (purpose, elapsed_millis);
+    }
+
     /// A connection was admitted and its supervisor started.
     fn admitted(&self, connection: &AdmittedConnection) {
         let _ = connection;
@@ -874,7 +884,14 @@ async fn serve_inner(
     };
     match (transport, endpoint.tls, endpoint.profile) {
         (AcceptedTransport::Tcp(stream, _), Some(config), Some(profile)) => {
-            let stream = negotiate(stream, config, profile, handshake_slot, &mut permits).await?;
+            endpoint.shared.observer.tls_started(admitted.purpose);
+            let handshake_started = Instant::now();
+            let negotiated = negotiate(stream, config, profile, handshake_slot, &mut permits).await;
+            endpoint.shared.observer.tls_finished(
+                admitted.purpose,
+                u64::try_from(handshake_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            );
+            let stream = negotiated?;
             admitted.peer = tls_peer_identity(&stream, profile)?;
             if admitted.purpose == ListenerPurpose::AdminTls {
                 let port = endpoint
@@ -905,7 +922,14 @@ async fn serve_inner(
             .await)
         }
         (AcceptedTransport::Unix(stream), Some(config), Some(profile)) => {
-            let stream = negotiate(stream, config, profile, handshake_slot, &mut permits).await?;
+            endpoint.shared.observer.tls_started(admitted.purpose);
+            let handshake_started = Instant::now();
+            let negotiated = negotiate(stream, config, profile, handshake_slot, &mut permits).await;
+            endpoint.shared.observer.tls_finished(
+                admitted.purpose,
+                u64::try_from(handshake_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            );
+            let stream = negotiated?;
             Ok(finish_serving(
                 stream,
                 admitted,

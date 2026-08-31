@@ -106,6 +106,7 @@ pub struct FilesystemCapacity {
 pub struct StateDirectory {
     directory: File,
     writer_lock: File,
+    construction_sibling: PathBuf,
     tuple: FilesystemTuple,
     faults: StorageFaultInjector,
 }
@@ -293,6 +294,7 @@ impl StateDirectory {
         qualifications: &[StorageQualification],
         faults: StorageFaultInjector,
     ) -> Result<Self, StorageError> {
+        let construction_sibling = construction_sibling(path)?;
         let directory_fd = openat(
             CWD,
             path,
@@ -327,6 +329,7 @@ impl StateDirectory {
         Ok(Self {
             directory: File::from(directory_fd),
             writer_lock,
+            construction_sibling,
             tuple,
             faults,
         })
@@ -351,6 +354,24 @@ impl StateDirectory {
         self.faults.run(StorageFaultSite::CapacityAdmission, || {
             self.capacity_inner(fixed_reserve_bytes, reserve_percent)
         })
+    }
+
+    /// Reports the one fixed sibling used by an interrupted offline
+    /// construction without scanning arbitrary directory entries.
+    pub(crate) fn pending_construction(&self) -> Result<u64, StorageError> {
+        match openat(
+            CWD,
+            &self.construction_sibling,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(directory) => {
+                validate_file(&directory, FileType::Directory, Mode::RWXU)?;
+                Ok(1)
+            }
+            Err(rustix::io::Errno::NOENT) => Ok(0),
+            Err(error) => Err(rustix_rejected(error)),
+        }
     }
 
     fn capacity_inner(
@@ -527,6 +548,21 @@ impl StateDirectory {
 
 fn random_guard_temporary_name() -> Result<String, StorageError> {
     random_temporary_name(GUARD_TEMPORARY_PREFIX)
+}
+
+fn construction_sibling(path: &Path) -> Result<PathBuf, StorageError> {
+    let output_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(StorageError::FilesystemRejected)?;
+    validate_single_component(output_name)?;
+    let parent = path.parent().ok_or(StorageError::FilesystemRejected)?;
+    let sibling = format!(
+        ".{output_name}{}",
+        crate::construction_directory::STAGING_SUFFIX
+    );
+    validate_single_component(&sibling)?;
+    Ok(parent.join(sibling))
 }
 
 /// Computes UID-available bytes and the effective reserve `max(fixed, ceil(total * percent / 100))`.

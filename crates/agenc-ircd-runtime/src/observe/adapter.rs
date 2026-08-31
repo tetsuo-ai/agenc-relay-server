@@ -1,0 +1,703 @@
+//! Closed production adapters for runtime logs, metrics, and STATS windows.
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use agenc_ircd_admin::STATS_SIXTY_SECOND_BUCKETS;
+use agenc_ircd_types::{MonotonicClock as _, ServerId, WallClock as _};
+
+use crate::RuntimeError;
+use crate::admission::OverloadClass;
+use crate::clock::{SystemMonotonicClock, SystemWallClock};
+use crate::connection::{AdmittedConnection, ConnectionExit, PeerIdentity};
+use crate::listener::{ConnectionObserver, RefusalReason};
+use crate::observe::events::{
+    CorrelationSource, CountBucket, LogEvent, LogEventCode, PublicErrorCode, Severity,
+};
+use crate::observe::log::{LogHandle, LogRetention};
+use crate::observe::metrics::{
+    CommandClass, LabelSet, MetricKey, MetricLabel, MetricName, MetricsRegistry, QueueName,
+    ResultClass, TransportFamily,
+};
+use crate::purpose::ListenerPurpose;
+use crate::state_core::inbox::CloseReason;
+use crate::supervisor::ShutdownPhase;
+use crate::sync::{Arc, Mutex, lock};
+use crate::tls::TlsHandshakeError;
+
+const RATE_FIELDS: usize = 8;
+
+#[derive(Clone, Copy)]
+enum RateField {
+    ClientCommandsAccepted = 0,
+    ClientCommandsRateLimited = 1,
+    ConnectionsAdmitted = 2,
+    ConnectionsRejected = 3,
+    AuthenticationStarted = 4,
+    AuthenticationRejected = 5,
+    FederationIngressBytes = 6,
+    FederationRejectedBytes = 7,
+}
+
+#[derive(Clone, Copy)]
+struct RateBucket {
+    second: Option<u64>,
+    values: [u64; RATE_FIELDS],
+}
+
+impl RateBucket {
+    const EMPTY: Self = Self {
+        second: None,
+        values: [0; RATE_FIELDS],
+    };
+}
+
+struct RateWindowState {
+    buckets: [RateBucket; STATS_SIXTY_SECOND_BUCKETS],
+}
+
+impl Default for RateWindowState {
+    fn default() -> Self {
+        Self {
+            buckets: [RateBucket::EMPTY; STATS_SIXTY_SECOND_BUCKETS],
+        }
+    }
+}
+
+/// Fixed 60 one-second buckets behind one short-held synchronization cell.
+pub struct SixtySecondRates {
+    state: Mutex<RateWindowState>,
+}
+
+impl SixtySecondRates {
+    /// Creates an empty window. Buckets before process start remain zero.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            state: Mutex::new(RateWindowState::default()),
+        }
+    }
+
+    fn increment(&self, second: u64, field: RateField, by: u64) {
+        let mut state = lock(&self.state);
+        let index = usize::try_from(second % STATS_SIXTY_SECOND_BUCKETS as u64).unwrap_or(0);
+        let Some(bucket) = state.buckets.get_mut(index) else {
+            return;
+        };
+        if bucket.second != Some(second) {
+            *bucket = RateBucket {
+                second: Some(second),
+                values: [0; RATE_FIELDS],
+            };
+        }
+        if let Some(value) = bucket.values.get_mut(field as usize) {
+            *value = value.saturating_add(by);
+        }
+    }
+
+    /// Returns checked sums of the current second and the preceding 59.
+    pub fn snapshot(&self, second: u64) -> Result<[u64; RATE_FIELDS], RuntimeError> {
+        let state = lock(&self.state);
+        let mut values = [0_u64; RATE_FIELDS];
+        for bucket in &state.buckets {
+            let Some(bucket_second) = bucket.second else {
+                continue;
+            };
+            if bucket_second > second || second.saturating_sub(bucket_second) >= 60 {
+                continue;
+            }
+            for (total, value) in values.iter_mut().zip(bucket.values) {
+                *total = total.checked_add(value).ok_or(RuntimeError::Overflow)?;
+            }
+        }
+        Ok(values)
+    }
+}
+
+impl Default for SixtySecondRates {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// One process-wide, input-free observer shared by runtime owners.
+pub struct RuntimeObserver {
+    server_id: ServerId,
+    wall: SystemWallClock,
+    monotonic: SystemMonotonicClock,
+    correlation: Arc<CorrelationSource>,
+    log: LogHandle,
+    metrics: Arc<MetricsRegistry>,
+    rates: SixtySecondRates,
+    live_clients: AtomicU64,
+    tls_handshakes: AtomicU64,
+}
+
+impl RuntimeObserver {
+    /// Binds the single process correlation source to logs and metrics.
+    #[must_use]
+    pub fn new(
+        server_id: ServerId,
+        monotonic: SystemMonotonicClock,
+        correlation: Arc<CorrelationSource>,
+        log: LogHandle,
+        metrics: Arc<MetricsRegistry>,
+    ) -> Self {
+        Self {
+            server_id,
+            wall: SystemWallClock,
+            monotonic,
+            correlation,
+            log,
+            metrics,
+            rates: SixtySecondRates::new(),
+            live_clients: AtomicU64::new(0),
+            tls_handshakes: AtomicU64::new(0),
+        }
+    }
+
+    /// Records process startup without including a configuration path.
+    pub fn process_started(&self) {
+        self.emit(
+            LogEventCode::ProcessStarted,
+            Severity::Info,
+            None,
+            None,
+            None,
+        );
+    }
+
+    /// Returns the closed metrics registry for authenticated snapshots.
+    #[must_use]
+    pub fn metrics(&self) -> Arc<MetricsRegistry> {
+        Arc::clone(&self.metrics)
+    }
+
+    /// Returns process runtime values owned outside StateCore.
+    #[must_use]
+    pub fn runtime_values(&self) -> [u64; 3] {
+        [
+            self.monotonic.now().get() / 1_000,
+            self.live_clients.load(Ordering::Acquire),
+            self.tls_handshakes.load(Ordering::Acquire),
+        ]
+    }
+
+    /// Returns the exact eight 60-second rate fields.
+    pub fn rate_values(&self) -> Result<[u64; RATE_FIELDS], RuntimeError> {
+        self.rates.snapshot(self.monotonic_second())
+    }
+
+    /// Marks one TLS handshake as in progress.
+    pub fn tls_started(&self) {
+        self.tls_handshakes.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Marks one TLS handshake as complete or refused.
+    pub fn tls_finished(&self, purpose: ListenerPurpose, elapsed_millis: u64) {
+        let _previous =
+            self.tls_handshakes
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                    value.checked_sub(1)
+                });
+        self.observe_duration(
+            MetricName::HandshakeDuration,
+            &[MetricLabel::ListenerPurpose(purpose)],
+            elapsed_millis,
+        );
+    }
+
+    /// Records one closed command/result classification.
+    pub fn command_handled(&self, command: &str, result: ResultClass) {
+        self.command_classified(Self::classify_command(command), result);
+    }
+
+    /// Reduces a parsed command token to the closed metric vocabulary.
+    #[must_use]
+    pub fn classify_command(command: &str) -> CommandClass {
+        command_class(command)
+    }
+
+    /// Records a command already reduced to its closed class.
+    pub fn command_classified(&self, class: CommandClass, result: ResultClass) {
+        self.increment(
+            MetricName::CommandsHandled,
+            &[
+                MetricLabel::CommandClass(class),
+                MetricLabel::ResultClass(result),
+            ],
+            1,
+        );
+        let field = if result == ResultClass::Busy {
+            RateField::ClientCommandsRateLimited
+        } else {
+            RateField::ClientCommandsAccepted
+        };
+        self.rates.increment(self.monotonic_second(), field, 1);
+    }
+
+    /// Records an authentication attempt without its account or mechanism.
+    pub fn authentication(&self, rejected: bool) {
+        let field = if rejected {
+            RateField::AuthenticationRejected
+        } else {
+            RateField::AuthenticationStarted
+        };
+        self.rates.increment(self.monotonic_second(), field, 1);
+    }
+
+    /// Records a federation ingress byte count. Core-v1 never calls this,
+    /// so both federation rate fields remain zero while federation is off.
+    pub fn federation_ingress(&self, bytes: u64, rejected: bool) {
+        let field = if rejected {
+            RateField::FederationRejectedBytes
+        } else {
+            RateField::FederationIngressBytes
+        };
+        self.rates.increment(self.monotonic_second(), field, bytes);
+    }
+
+    /// Records a bounded queue depth under a closed queue name.
+    pub fn queue_depth(&self, queue: QueueName, depth: u64) {
+        self.observe_count(
+            MetricName::QueueDepth,
+            &[MetricLabel::QueueName(queue)],
+            depth,
+        );
+    }
+
+    /// Records one durable batch byte count in fixed buckets.
+    pub fn storage_batch(&self, bytes: u64) {
+        self.observe_count(MetricName::BatchBytes, &[], bytes);
+        self.emit(
+            LogEventCode::StorageBatch,
+            Severity::Info,
+            None,
+            None,
+            Some(CountBucket::from_count(bytes)),
+        );
+    }
+
+    /// Records one reload outcome without a path or rejection detail.
+    pub fn reload(&self, applied: bool) {
+        let (code, severity, result) = if applied {
+            (LogEventCode::ReloadApplied, Severity::Info, ResultClass::Ok)
+        } else {
+            (
+                LogEventCode::ReloadRejected,
+                Severity::Warning,
+                ResultClass::Rejected,
+            )
+        };
+        self.emit(code, severity, None, None, None);
+        self.increment(
+            MetricName::CommandsHandled,
+            &[
+                MetricLabel::CommandClass(CommandClass::Administration),
+                MetricLabel::ResultClass(result),
+            ],
+            1,
+        );
+    }
+
+    /// Publishes the validated live log-retention policy.
+    pub fn set_log_retention(&self, hours: u64) -> Result<(), RuntimeError> {
+        let retention = LogRetention::hours(hours)?;
+        self.log.set_retention(retention);
+        Ok(())
+    }
+
+    /// Records one authenticated administrative command outcome.
+    pub fn admin_action(&self, result: ResultClass) {
+        let severity = if result == ResultClass::Ok {
+            Severity::Info
+        } else {
+            Severity::Warning
+        };
+        self.emit(LogEventCode::AdminAction, severity, None, None, None);
+        self.increment(
+            MetricName::CommandsHandled,
+            &[
+                MetricLabel::CommandClass(CommandClass::Administration),
+                MetricLabel::ResultClass(result),
+            ],
+            1,
+        );
+    }
+
+    /// Records an administrative authentication result.
+    pub fn admin_authentication(&self, purpose: ListenerPurpose, admitted: bool) {
+        let code = if admitted {
+            LogEventCode::AdminAuthenticated
+        } else {
+            LogEventCode::AdminRejected
+        };
+        let severity = if admitted {
+            Severity::Info
+        } else {
+            Severity::Warning
+        };
+        let error = (!admitted).then_some(PublicErrorCode::AuthenticationFailed);
+        self.emit(code, severity, Some(purpose), error, None);
+    }
+
+    /// Records a memory overload class transition.
+    pub fn overload_transition(&self, class: OverloadClass) {
+        let count = match class {
+            OverloadClass::Normal => 0,
+            OverloadClass::NoGuests => 1,
+            OverloadClass::NoNewConnections => 2,
+            OverloadClass::Evict => 3,
+        };
+        self.emit(
+            LogEventCode::OverloadClassChanged,
+            Severity::Warning,
+            None,
+            None,
+            Some(CountBucket::from_count(count)),
+        );
+        self.increment(MetricName::OverloadTransitions, &[], 1);
+    }
+
+    /// Records the beginning of one shutdown phase.
+    pub fn shutdown_phase(&self, phase: ShutdownPhase) {
+        let code = match phase {
+            ShutdownPhase::Quiesce => LogEventCode::ShutdownQuiesce,
+            ShutdownPhase::Drain => LogEventCode::ShutdownDrain,
+            ShutdownPhase::Flush => LogEventCode::ShutdownFlush,
+            ShutdownPhase::Stop => LogEventCode::ShutdownStop,
+        };
+        self.emit(code, Severity::Info, None, None, None);
+    }
+
+    fn monotonic_second(&self) -> u64 {
+        self.monotonic.now().get() / 1_000
+    }
+
+    fn emit(
+        &self,
+        code: LogEventCode,
+        severity: Severity,
+        purpose: Option<ListenerPurpose>,
+        error: Option<PublicErrorCode>,
+        count: Option<CountBucket>,
+    ) {
+        let Ok(now) = self.wall.utc_now() else {
+            return;
+        };
+        let mut event = LogEvent::new(code, severity, now, self.server_id, self.correlation.next());
+        if let Some(purpose) = purpose {
+            event = event.with_purpose(purpose);
+        }
+        if let Some(error) = error {
+            event = event.with_error(error);
+        }
+        if let Some(count) = count {
+            event = event.with_count(count);
+        }
+        if !self.log.try_emit(event) {
+            self.increment(MetricName::LogEventsDropped, &[], 1);
+        }
+        self.observe_count(
+            MetricName::QueueDepth,
+            &[MetricLabel::QueueName(QueueName::Log)],
+            u64::try_from(self.log.depth()).unwrap_or(u64::MAX),
+        );
+    }
+
+    fn increment(&self, name: MetricName, labels: &[MetricLabel], by: u64) {
+        let Ok(labels) = LabelSet::new(labels) else {
+            return;
+        };
+        let _recorded = self.metrics.increment(MetricKey { name, labels }, by);
+    }
+
+    fn observe_count(&self, name: MetricName, labels: &[MetricLabel], value: u64) {
+        let Ok(labels) = LabelSet::new(labels) else {
+            return;
+        };
+        let _recorded = self
+            .metrics
+            .observe_count(MetricKey { name, labels }, value);
+    }
+
+    fn observe_duration(&self, name: MetricName, labels: &[MetricLabel], millis: u64) {
+        let Ok(labels) = LabelSet::new(labels) else {
+            return;
+        };
+        let _recorded = self
+            .metrics
+            .observe_duration(MetricKey { name, labels }, millis);
+    }
+}
+
+impl ConnectionObserver for RuntimeObserver {
+    fn tls_started(&self, _purpose: ListenerPurpose) {
+        self.tls_started();
+    }
+
+    fn tls_finished(&self, purpose: ListenerPurpose, elapsed_millis: u64) {
+        self.tls_finished(purpose, elapsed_millis);
+    }
+
+    fn admitted(&self, connection: &AdmittedConnection) {
+        if is_client(connection.purpose) {
+            self.live_clients.fetch_add(1, Ordering::AcqRel);
+            self.rates
+                .increment(self.monotonic_second(), RateField::ConnectionsAdmitted, 1);
+        }
+        self.increment(
+            MetricName::ConnectionsAdmitted,
+            &[
+                MetricLabel::ListenerPurpose(connection.purpose),
+                MetricLabel::TransportFamily(transport_family(connection.purpose)),
+            ],
+            1,
+        );
+        self.emit(
+            LogEventCode::ConnectionAdmitted,
+            Severity::Info,
+            Some(connection.purpose),
+            None,
+            None,
+        );
+    }
+
+    fn admin_admitted(&self, purpose: ListenerPurpose, _peer: PeerIdentity) {
+        self.increment(
+            MetricName::ConnectionsAdmitted,
+            &[
+                MetricLabel::ListenerPurpose(purpose),
+                MetricLabel::TransportFamily(transport_family(purpose)),
+            ],
+            1,
+        );
+        self.emit(
+            LogEventCode::ConnectionAdmitted,
+            Severity::Info,
+            Some(purpose),
+            None,
+            None,
+        );
+    }
+
+    fn refused(&self, purpose: ListenerPurpose, reason: RefusalReason) {
+        if is_client(purpose) {
+            self.rates
+                .increment(self.monotonic_second(), RateField::ConnectionsRejected, 1);
+        }
+        self.increment(
+            MetricName::ConnectionsRefused,
+            &[
+                MetricLabel::ListenerPurpose(purpose),
+                MetricLabel::ResultClass(ResultClass::Rejected),
+            ],
+            1,
+        );
+        let (code, error) = refusal_event(reason);
+        self.emit(code, Severity::Warning, Some(purpose), Some(error), None);
+    }
+
+    fn closed(&self, exit: &ConnectionExit) {
+        if is_client(exit.purpose) {
+            let _previous =
+                self.live_clients
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                        value.checked_sub(1)
+                    });
+        }
+        self.increment(
+            MetricName::ConnectionsClosed,
+            &[
+                MetricLabel::ListenerPurpose(exit.purpose),
+                MetricLabel::ResultClass(close_result(exit.reason)),
+            ],
+            1,
+        );
+        self.emit(
+            LogEventCode::ConnectionClosed,
+            Severity::Info,
+            Some(exit.purpose),
+            None,
+            None,
+        );
+    }
+}
+
+fn is_client(purpose: ListenerPurpose) -> bool {
+    matches!(
+        purpose,
+        ListenerPurpose::ClientTls | ListenerPurpose::ClientWss | ListenerPurpose::ClientOnion
+    )
+}
+
+const fn transport_family(purpose: ListenerPurpose) -> TransportFamily {
+    match purpose {
+        ListenerPurpose::ClientOnion | ListenerPurpose::AdminLocal => TransportFamily::Unix,
+        ListenerPurpose::ClientTls
+        | ListenerPurpose::ClientWss
+        | ListenerPurpose::Federation
+        | ListenerPurpose::AdminTls => TransportFamily::Tcp,
+    }
+}
+
+const fn close_result(reason: CloseReason) -> ResultClass {
+    match reason {
+        CloseReason::ClientQuit | CloseReason::Shutdown => ResultClass::Ok,
+        CloseReason::TransportLoss => ResultClass::Closed,
+        CloseReason::SlowConsumer | CloseReason::ReadStall | CloseReason::WriteStall => {
+            ResultClass::Busy
+        }
+        CloseReason::ProtocolError | CloseReason::Deadline | CloseReason::Overload => {
+            ResultClass::Rejected
+        }
+    }
+}
+
+const fn refusal_event(reason: RefusalReason) -> (LogEventCode, PublicErrorCode) {
+    match reason {
+        RefusalReason::TlsHandshake(
+            TlsHandshakeError::AlpnMissing | TlsHandshakeError::AlpnMismatch,
+        ) => (LogEventCode::AlpnRejected, PublicErrorCode::AlpnMismatch),
+        RefusalReason::TlsHandshake(_) => (
+            LogEventCode::TlsHandshakeFailed,
+            PublicErrorCode::TlsFailure,
+        ),
+        RefusalReason::MemoryExhausted => (
+            LogEventCode::MemoryExhausted,
+            PublicErrorCode::MemoryExhausted,
+        ),
+        RefusalReason::Admission => (
+            LogEventCode::ConnectionRefused,
+            PublicErrorCode::AdmissionRefused,
+        ),
+        RefusalReason::GlobalCeiling | RefusalReason::TaskTree => (
+            LogEventCode::ConnectionRefused,
+            PublicErrorCode::LimitExceeded,
+        ),
+        RefusalReason::PeerCredentials
+        | RefusalReason::ClientCertificate
+        | RefusalReason::Entropy
+        | RefusalReason::AdminOwner => (
+            LogEventCode::ConnectionRefused,
+            PublicErrorCode::AuthenticationFailed,
+        ),
+    }
+}
+
+fn command_class(command: &str) -> CommandClass {
+    match command {
+        "CAP" => CommandClass::Capability,
+        "NICK" | "USER" | "PASS" => CommandClass::Registration,
+        "AUTHENTICATE" | "ACCTCREATE" | "ACCTCRED" => CommandClass::Authentication,
+        "AWAY" | "MONITOR" => CommandClass::Session,
+        "JOIN" | "PART" | "MODE" | "TOPIC" | "INVITE" | "KICK" | "NAMES" | "LIST" => {
+            CommandClass::Channel
+        }
+        "PRIVMSG" | "NOTICE" | "TAGMSG" => CommandClass::Message,
+        "WHO" | "WHOIS" | "WHOWAS" | "ISON" | "USERHOST" | "MOTD" | "VERSION" | "TIME" | "INFO"
+        | "LINKS" | "STATS" => CommandClass::Query,
+        "KILL" | "ACCOUNT" | "CHANNEL" => CommandClass::Moderation,
+        "OPER" | "REHASH" | "CONNECT" | "SQUIT" | "PEER" | "BACKUP" | "AUDIT" | "RESTART"
+        | "DIE" => CommandClass::Administration,
+        "PING" | "PONG" | "QUIT" => CommandClass::Keepalive,
+        _ => CommandClass::Other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::observe::events::CorrelationSource;
+    use crate::observe::log::{LogFilter, LogRetention, LogTarget, LogWriter};
+    use crate::observe::metrics::{MetricsView, ResultClass};
+    use agenc_ircd_types::UtcSecond;
+    use std::io;
+
+    struct MemoryTarget(Vec<String>);
+
+    impl LogTarget for MemoryTarget {
+        fn open_segment(&mut self, _hour: u64) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn write_line(&mut self, line: &str) -> io::Result<()> {
+            self.0.push(line.to_owned());
+            Ok(())
+        }
+
+        fn retire_before(&mut self, _hour: u64, _limit: usize) -> io::Result<usize> {
+            Ok(0)
+        }
+    }
+
+    fn observer() -> (Arc<RuntimeObserver>, LogWriter<MemoryTarget>) {
+        let correlation = Arc::new(CorrelationSource::new(10));
+        let (writer, log) = LogWriter::start(
+            MemoryTarget(Vec::new()),
+            LogRetention::DEFAULT,
+            LogFilter::new(Severity::Debug),
+            ServerId::from_bytes([3; 16]),
+            Arc::clone(&correlation),
+        );
+        let observer = Arc::new(RuntimeObserver::new(
+            ServerId::from_bytes([3; 16]),
+            SystemMonotonicClock::start(),
+            correlation,
+            log,
+            Arc::new(MetricsRegistry::new()),
+        ));
+        (observer, writer)
+    }
+
+    #[test]
+    fn rate_windows_clear_reused_buckets_and_exclude_future_values() -> Result<(), RuntimeError> {
+        let window = SixtySecondRates::new();
+        window.increment(0, RateField::ConnectionsAdmitted, 2);
+        window.increment(59, RateField::ConnectionsAdmitted, 3);
+        assert_eq!(window.snapshot(59)?[2], 5);
+        assert_eq!(window.snapshot(60)?[2], 3);
+        window.increment(60, RateField::ConnectionsAdmitted, 7);
+        assert_eq!(window.snapshot(60)?[2], 10);
+        assert_eq!(window.snapshot(59)?[2], 3, "a future bucket is excluded");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn listener_observation_never_formats_source_or_peer_identity() {
+        let (observer, writer) = observer();
+        let connection = AdmittedConnection {
+            generation: crate::connection::ConnectionGeneration::new(1),
+            purpose: ListenerPurpose::ClientTls,
+            source: crate::state_core::inbox::SourceAddressKey::ipv4([127, 0, 0, 1]),
+            peer: PeerIdentity::Anonymous,
+        };
+        observer.admitted(&connection);
+        observer.admin_admitted(
+            ListenerPurpose::AdminLocal,
+            PeerIdentity::LocalCredentials {
+                uid: 4_294_967_000,
+                gid: 4_294_966_999,
+            },
+        );
+        observer.command_handled("PRIVMSG", ResultClass::Ok);
+        let snapshot = observer.metrics().snapshot(MetricsView::Operator);
+        assert!(!snapshot.counters.is_empty());
+        drop(observer);
+        let (target, failures) = writer.run().await;
+        assert_eq!(failures, 0);
+        let rendered = target.0.join("\n");
+        for forbidden in ["127.0.0.1", "4294967000", "4294966999", "PRIVMSG"] {
+            assert!(!rendered.contains(forbidden), "{rendered}");
+        }
+        assert!(rendered.contains("event=connection_admitted"));
+    }
+
+    #[test]
+    fn every_command_maps_to_a_closed_class_without_retaining_input() {
+        assert_eq!(command_class("CAP"), CommandClass::Capability);
+        assert_eq!(command_class("AUTHENTICATE"), CommandClass::Authentication);
+        assert_eq!(command_class("PRIVMSG"), CommandClass::Message);
+        assert_eq!(command_class("attacker supplied text"), CommandClass::Other);
+        assert_eq!(UtcSecond::from_unix_seconds(0).get(), 0);
+    }
+}

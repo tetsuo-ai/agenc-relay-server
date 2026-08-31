@@ -51,6 +51,8 @@ pub enum LogEventCode {
     OverloadClassChanged,
     /// The memory budget refused a permit batch.
     MemoryExhausted,
+    /// A durable storage batch entered the bounded bridge.
+    StorageBatch,
     /// An administrative session authenticated.
     AdminAuthenticated,
     /// An administrative proof failed and the connection closed.
@@ -59,8 +61,18 @@ pub enum LogEventCode {
     ReloadApplied,
     /// A reload candidate was rejected; the prior configuration stays.
     ReloadRejected,
+    /// One authenticated administrative command completed or was rejected.
+    AdminAction,
     /// A shutdown phase began.
     ShutdownPhase,
+    /// The shutdown quiesce phase began.
+    ShutdownQuiesce,
+    /// The shutdown drain phase began.
+    ShutdownDrain,
+    /// The shutdown flush phase began.
+    ShutdownFlush,
+    /// The shutdown stop phase began.
+    ShutdownStop,
     /// A host hardening control was absent or a lock failed.
     HardeningWarning,
     /// Wall time diverged from monotonic time for five minutes (spec 21.6).
@@ -76,7 +88,7 @@ pub enum LogEventCode {
 
 impl LogEventCode {
     /// Every registered code.
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 30] = [
         Self::ProcessStarted,
         Self::ConfigurationRejected,
         Self::StorageRecovered,
@@ -91,11 +103,17 @@ impl LogEventCode {
         Self::AlpnRejected,
         Self::OverloadClassChanged,
         Self::MemoryExhausted,
+        Self::StorageBatch,
         Self::AdminAuthenticated,
         Self::AdminRejected,
         Self::ReloadApplied,
         Self::ReloadRejected,
+        Self::AdminAction,
         Self::ShutdownPhase,
+        Self::ShutdownQuiesce,
+        Self::ShutdownDrain,
+        Self::ShutdownFlush,
+        Self::ShutdownStop,
         Self::HardeningWarning,
         Self::ClockDistrusted,
         Self::ClockTrusted,
@@ -121,11 +139,17 @@ impl LogEventCode {
             Self::AlpnRejected => "alpn_rejected",
             Self::OverloadClassChanged => "overload_class_changed",
             Self::MemoryExhausted => "memory_exhausted",
+            Self::StorageBatch => "storage_batch",
             Self::AdminAuthenticated => "admin_authenticated",
             Self::AdminRejected => "admin_rejected",
             Self::ReloadApplied => "reload_applied",
             Self::ReloadRejected => "reload_rejected",
+            Self::AdminAction => "admin_action",
             Self::ShutdownPhase => "shutdown_phase",
+            Self::ShutdownQuiesce => "shutdown_quiesce",
+            Self::ShutdownDrain => "shutdown_drain",
+            Self::ShutdownFlush => "shutdown_flush",
+            Self::ShutdownStop => "shutdown_stop",
             Self::HardeningWarning => "hardening_warning",
             Self::ClockDistrusted => "clock_distrusted",
             Self::ClockTrusted => "clock_trusted",
@@ -486,15 +510,31 @@ mod tests {
 
     use super::*;
 
-    const FORBIDDEN: [&str; 8] = [
-        "127.0.0.1",
-        "::1",
-        "@",
-        "#",
-        "nick",
-        "password",
-        "login",
-        "PRIVMSG",
+    const FORBIDDEN: [&str; 24] = [
+        "198.51.100.77",
+        "user-port-49152",
+        "clientexampleonion.onion",
+        "login-canary-value",
+        "keyed-login-digest-canary",
+        "password-canary-value",
+        "access-token-canary-value",
+        "channel-key-canary-value",
+        "CN=certificate-subject-canary",
+        "account-id-canary-value",
+        "opaque-credential-canary",
+        "user-id-canary-value",
+        "nickname-canary-value",
+        "#channel-canary-value",
+        "message-body-canary-value",
+        "tag-body-canary-value",
+        "e2ee-object-canary-value",
+        "keypackage-canary-value",
+        "welcome-object-canary-value",
+        "database-key-canary-value",
+        "database-value-canary-value",
+        "secret-canary-value",
+        "moderation-reason-canary",
+        "raw-parser-input-canary",
     ];
 
     fn server_id() -> ServerId {
@@ -545,7 +585,7 @@ mod tests {
         .to_string();
         assert!(!minimal.contains("purpose="));
         assert!(!minimal.contains("error="));
-        assert!(minimal.ends_with(" correlation=24"));
+        assert!(minimal.ends_with(&format!(" correlation={}", LogEventCode::ALL.len())));
     }
 
     #[test]

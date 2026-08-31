@@ -958,6 +958,19 @@ impl CryptoBridge {
         self.active.len()
     }
 
+    /// Returns the owner-visible jobs whose completion has not yet been
+    /// reaped, without changing the job set while a statistics view is built.
+    #[must_use]
+    pub fn snapshot_in_flight(&self) -> usize {
+        self.active.len()
+    }
+
+    /// Returns the fixed completion/waiter ceiling selected at startup.
+    #[must_use]
+    pub const fn capacity(&self) -> usize {
+        self.waiter_ceiling
+    }
+
     /// Aborts every waiter (cancelling unstarted jobs) and joins the pool
     /// on the blocking thread pool.
     pub async fn shutdown(mut self) -> Result<(), RuntimeError> {

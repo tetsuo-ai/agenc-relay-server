@@ -18,8 +18,8 @@ pub use reader::{
     READ_STALL_BUDGET, ReaderLimits, run_reader,
 };
 pub use sink::{
-    BoundedSharedClientFrames, ClientQueueDemand, ClientQueueReservation, ClientSink,
-    ConnectionGeneration, FlushAcknowledgement, MAX_DEMAND_BYTES, MAX_DEMAND_FRAMES,
+    BoundedSharedClientFrames, ClientQueueDemand, ClientQueueReservation, ClientQueueSnapshot,
+    ClientSink, ConnectionGeneration, FlushAcknowledgement, MAX_DEMAND_BYTES, MAX_DEMAND_FRAMES,
     QueueAllocationError, QueueReservationLedger, QueueTransfer, ReservationToken,
     SinkReserveError, TentativeClientQueueReservation,
 };

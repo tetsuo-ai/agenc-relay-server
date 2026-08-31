@@ -16,7 +16,7 @@ use agenc_ircd_client_wire::CapabilityState;
 use agenc_ircd_types::{MonotonicTick, SessionId, UserId};
 
 use crate::RuntimeError;
-use crate::connection::sink::{ClientSink, ConnectionGeneration};
+use crate::connection::sink::{ClientQueueSnapshot, ClientSink, ConnectionGeneration};
 use crate::purpose::ListenerPurpose;
 use crate::state_core::inbox::SourceAddressKey;
 use crate::sync::Arc;
@@ -323,6 +323,23 @@ impl SessionTable {
             .map(|entry| Arc::clone(&entry.sink))
             .collect()
     }
+
+    /// Sums input-free queue snapshots for every live client sink.
+    #[must_use]
+    pub fn queue_snapshot(&self) -> ClientQueueSnapshot {
+        let mut queued_bytes = 0_u64;
+        let mut capacity_bytes = 0_u64;
+        for snapshot in self
+            .connections
+            .values()
+            .filter(|entry| !entry.sink_gone)
+            .map(|entry| entry.sink.queue_snapshot())
+        {
+            queued_bytes = queued_bytes.saturating_add(snapshot.queued_bytes());
+            capacity_bytes = capacity_bytes.saturating_add(snapshot.capacity_bytes());
+        }
+        ClientQueueSnapshot::new(queued_bytes, capacity_bytes)
+    }
 }
 
 #[cfg(test)]
@@ -364,6 +381,10 @@ mod tests {
 
         fn shutdown_after_flush(&self) -> crate::connection::FlushAcknowledgement {
             crate::connection::FlushAcknowledgement::complete()
+        }
+
+        fn queue_snapshot(&self) -> crate::connection::ClientQueueSnapshot {
+            crate::connection::ClientQueueSnapshot::default()
         }
     }
 

@@ -38,6 +38,36 @@ pub struct FlushAcknowledgement {
     state: Arc<FlushState>,
 }
 
+/// One input-free point-in-time view of a client writer queue.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ClientQueueSnapshot {
+    queued_bytes: u64,
+    capacity_bytes: u64,
+}
+
+impl ClientQueueSnapshot {
+    /// Builds one snapshot from already bounded queue values.
+    #[must_use]
+    pub const fn new(queued_bytes: u64, capacity_bytes: u64) -> Self {
+        Self {
+            queued_bytes,
+            capacity_bytes,
+        }
+    }
+
+    /// Returns normal and control bytes currently reserved or queued.
+    #[must_use]
+    pub const fn queued_bytes(self) -> u64 {
+        self.queued_bytes
+    }
+
+    /// Returns the queue's fixed total byte ceiling.
+    #[must_use]
+    pub const fn capacity_bytes(self) -> u64 {
+        self.capacity_bytes
+    }
+}
+
 impl FlushAcknowledgement {
     pub(crate) fn pending() -> Self {
         Self {
@@ -474,6 +504,10 @@ pub trait ClientSink: Send + Sync {
     /// Queues an orderly shutdown after all already accepted frames and
     /// returns an acknowledgement completed by the transport writer.
     fn shutdown_after_flush(&self) -> FlushAcknowledgement;
+
+    /// Copies input-free writer queue occupancy without exposing queued
+    /// frames or connection identity.
+    fn queue_snapshot(&self) -> ClientQueueSnapshot;
 }
 
 #[cfg(test)]

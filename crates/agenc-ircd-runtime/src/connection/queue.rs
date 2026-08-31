@@ -17,9 +17,9 @@ use agenc_ircd_client_wire::RenderedMessage;
 use tokio::sync::Notify;
 
 use super::sink::{
-    BoundedSharedClientFrames, ClientQueueDemand, ClientQueueReservation, ClientSink,
-    ConnectionGeneration, FlushAcknowledgement, QueueAllocationError, QueueReservationLedger,
-    SinkReserveError, TentativeClientQueueReservation,
+    BoundedSharedClientFrames, ClientQueueDemand, ClientQueueReservation, ClientQueueSnapshot,
+    ClientSink, ConnectionGeneration, FlushAcknowledgement, QueueAllocationError,
+    QueueReservationLedger, SinkReserveError, TentativeClientQueueReservation,
 };
 use crate::RuntimeError;
 use crate::budget::{MemoryCharge, MemoryPermit};
@@ -461,6 +461,14 @@ impl ClientSink for WriterQueue {
         self.shared.notify.notify_one();
         acknowledgement
     }
+
+    fn queue_snapshot(&self) -> ClientQueueSnapshot {
+        let state = lock(&self.shared.state);
+        ClientQueueSnapshot::new(
+            u64::try_from(state.normal_bytes + state.control_bytes).unwrap_or(u64::MAX),
+            u64::try_from(self.limits.total_bytes()).unwrap_or(u64::MAX),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -600,6 +608,25 @@ mod tests {
         assert_eq!(popped.as_bytes(), second.as_bytes());
         assert_eq!(queue.normal_bytes(), 0);
         assert!(matches!(queue.pop(), QueuePop::Empty));
+        Ok(())
+    }
+
+    #[test]
+    fn queue_snapshot_contains_only_bounded_occupancy_and_capacity() -> Result<(), RuntimeError> {
+        let budget = budget();
+        let limits = QueueLimits::new(400, 100, 12)?;
+        let queue = queue(&budget, 1, limits)?;
+        let output = frame(&budget, "snapshot")?;
+        let output_bytes =
+            u64::try_from(output.as_bytes().len()).map_err(|_| RuntimeError::Overflow)?;
+        reserve_and_commit(&queue, vec![output])?;
+
+        assert_eq!(
+            queue.queue_snapshot(),
+            ClientQueueSnapshot::new(output_bytes, 400)
+        );
+        let _popped = queue.pop();
+        assert_eq!(queue.queue_snapshot(), ClientQueueSnapshot::new(0, 400));
         Ok(())
     }
 

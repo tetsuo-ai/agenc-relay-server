@@ -16,7 +16,7 @@ use crate::{
     VerifiedConstructionOutput,
 };
 
-const STAGING_SUFFIX: &str = ".agenc-construction-v1";
+pub(crate) const STAGING_SUFFIX: &str = ".agenc-construction-v1";
 const DATABASE_FILE: &str = "database.redb";
 const GUARD_FILE: &str = "rollback.guard";
 const WRITER_LOCK_FILE: &str = "writer.lock";

@@ -63,6 +63,49 @@ pub struct RecoveredStorageState {
     capacity: FilesystemCapacity,
 }
 
+/// One coherent, input-free storage-owner sample for authenticated
+/// administrative statistics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StorageStatistics {
+    logical_database_bytes: u64,
+    database_file_bytes: u64,
+    database_max_bytes: u64,
+    backup_stream_bytes: u64,
+    backup_max_bytes: u64,
+    state_generation: u64,
+    manifest_sequence: u64,
+    storage_commit_sequence: u64,
+    account_service_response_count: u64,
+    nonce_draw_high_water: u64,
+    checkpoint_manifest_sequence: u64,
+    filesystem_available_bytes: u64,
+    filesystem_reserve_bytes: u64,
+    pending_storage_constructions: u64,
+}
+
+impl StorageStatistics {
+    /// Returns values in the normative `STATS STORAGE` field order.
+    #[must_use]
+    pub const fn values(self) -> [u64; 14] {
+        [
+            self.logical_database_bytes,
+            self.database_file_bytes,
+            self.database_max_bytes,
+            self.backup_stream_bytes,
+            self.backup_max_bytes,
+            self.state_generation,
+            self.manifest_sequence,
+            self.storage_commit_sequence,
+            self.account_service_response_count,
+            self.nonce_draw_high_water,
+            self.checkpoint_manifest_sequence,
+            self.filesystem_available_bytes,
+            self.filesystem_reserve_bytes,
+            self.pending_storage_constructions,
+        ]
+    }
+}
+
 impl RecoveredStorageState {
     /// Returns the exact committed logical database charge.
     #[must_use]
@@ -335,6 +378,34 @@ impl StorageEngine {
             retained_manifest_bytes,
             checkpoint_job: None,
             backup_job: None,
+        })
+    }
+
+    pub(crate) fn statistics(&self) -> Result<StorageStatistics, StorageError> {
+        let database_file_bytes = self
+            .state_directory
+            .open_database_file()?
+            .metadata()
+            .map_err(|_| StorageError::FilesystemRejected)?
+            .len();
+        let capacity = self
+            .state_directory
+            .capacity(self.limits.fixed_reserve_bytes, self.limits.reserve_percent)?;
+        Ok(StorageStatistics {
+            logical_database_bytes: self.state_meta.tbs().logical_database_bytes,
+            database_file_bytes,
+            database_max_bytes: self.limits.database_max_bytes,
+            backup_stream_bytes: self.state_meta.tbs().backup_stream_bytes,
+            backup_max_bytes: self.limits.backup_max_bytes,
+            state_generation: self.state_meta.tbs().state_generation,
+            manifest_sequence: self.state_meta.tbs().manifest_sequence,
+            storage_commit_sequence: self.state_meta.tbs().storage_commit_sequence,
+            account_service_response_count: self.state_meta.tbs().account_service_response_count,
+            nonce_draw_high_water: self.state_meta.tbs().nonce_draw_high_water,
+            checkpoint_manifest_sequence: self.state_meta.tbs().checkpoint_manifest_sequence,
+            filesystem_available_bytes: capacity.available_bytes,
+            filesystem_reserve_bytes: capacity.reserve_bytes,
+            pending_storage_constructions: self.state_directory.pending_construction()?,
         })
     }
 

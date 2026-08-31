@@ -8,7 +8,7 @@ use agenc_ircd_crypto::Ed25519SecretKey;
 
 use crate::{
     BackupDestination, BackupReceipt, CommitOutcome, ReadPlan, ReadResult, RecoveredStorageState,
-    StorageError, StorageMutationBatch,
+    StorageError, StorageMutationBatch, StorageStatistics,
     engine::{EngineCommitFailure, StorageEngine, StorageOpenConfig},
 };
 
@@ -25,6 +25,9 @@ enum StorageRequest {
     Read {
         plan: ReadPlan,
         completion: SyncSender<Result<ReadResult, StorageError>>,
+    },
+    Statistics {
+        completion: SyncSender<Result<StorageStatistics, StorageError>>,
     },
     Backup {
         destination: BackupDestination,
@@ -62,6 +65,16 @@ impl StoragePort {
         let (completion, receiver) = sync_channel(STORAGE_COMPLETION_QUEUE_CAPACITY);
         self.requests
             .try_send(StorageRequest::Read { plan, completion })
+            .map_err(map_submission_error)?;
+        Ok(StorageCompletion { receiver })
+    }
+
+    /// Submits one coherent read-only statistics sample without waiting for
+    /// queue space.
+    pub fn try_statistics(&self) -> Result<StorageCompletion<StorageStatistics>, StorageError> {
+        let (completion, receiver) = sync_channel(STORAGE_COMPLETION_QUEUE_CAPACITY);
+        self.requests
+            .try_send(StorageRequest::Statistics { completion })
             .map_err(map_submission_error)?;
         Ok(StorageCompletion { receiver })
     }
@@ -409,6 +422,10 @@ fn dispatch_request(
             let _ = completion.send(engine.read(&plan));
             OwnerStep::Continue
         }
+        StorageRequest::Statistics { completion } => {
+            let _ = completion.send(engine.statistics());
+            OwnerStep::Continue
+        }
         StorageRequest::Backup { completion, .. } => {
             let _ = completion.send(Err(StorageError::QueueFull));
             OwnerStep::Continue
@@ -483,6 +500,54 @@ mod tests {
             CommitOutcome::Rejected(error) => Err(error),
             CommitOutcome::Indeterminate => Err(StorageError::Unavailable),
         }
+    }
+
+    #[test]
+    fn statistics_request_samples_current_state_and_the_exact_construction_sibling()
+    -> Result<(), StorageError> {
+        let mut fixture = EngineFixture::create()?;
+        let state_path = fixture.path().to_path_buf();
+        let output_name = state_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(StorageError::FilesystemRejected)?;
+        let staging = state_path
+            .parent()
+            .ok_or(StorageError::FilesystemRejected)?
+            .join(format!(
+                ".{output_name}{}",
+                crate::construction_directory::STAGING_SUFFIX
+            ));
+        std::fs::create_dir(&staging).map_err(|_| StorageError::FilesystemRejected)?;
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o700))
+            .map_err(|_| StorageError::FilesystemRejected)?;
+
+        let engine = fixture.engine_mut()?;
+        commit_first_account(engine, 9)?;
+        let (completion, receiver) = sync_channel(STORAGE_COMPLETION_QUEUE_CAPACITY);
+        let mut state = OwnerState::new();
+        assert_eq!(
+            dispatch_request(
+                engine,
+                StorageRequest::Statistics { completion },
+                &mut state,
+            ),
+            OwnerStep::Continue
+        );
+        let values = take(&receiver)?.values();
+        std::fs::remove_dir(&staging).map_err(|_| StorageError::FilesystemRejected)?;
+
+        assert!(values[0] > 0);
+        assert!(values[1] > 0);
+        assert!(values[2] >= values[0]);
+        assert!(values[3] > values[0]);
+        assert!(values[4] >= values[3]);
+        assert_eq!(values[5], 1);
+        assert_eq!(values[6], 1);
+        assert_eq!(values[7], 1);
+        assert!(values[9] > 0);
+        assert_eq!(values[13], 1);
+        Ok(())
     }
 
     fn drive_checkpoint(

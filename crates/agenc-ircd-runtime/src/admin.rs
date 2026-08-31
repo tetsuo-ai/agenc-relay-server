@@ -15,7 +15,7 @@ use agenc_ircd_admin::{
     AdminAuditEvent, AdminAuditPhase, AdminChallenge, AdminCommand, AdminCommandEvent,
     AdminSession, AdminSessionBinding, ConfirmationState, ConfirmationToken, MAX_ADMIN_LINE_BYTES,
     MAX_ADMIN_OUTPUT_LINE_BYTES, MAX_AUDIT_EXPORT_BYTES, OperatorRegistry, PeerIdentity,
-    StatsSelector, StatsValues, encode_base64url, render_stats_batch,
+    StatsSelector, StatsValues, TransportKind, encode_base64url, render_stats_batch,
     render_stats_storage_unavailable, render_stats_unavailable,
 };
 use agenc_ircd_crypto::Ed25519SecretKey;
@@ -32,7 +32,9 @@ use crate::budget::{
 };
 use crate::cancel::CancellationToken;
 use crate::connection::{ConnectionExit, ConnectionGeneration, ConnectionResources};
+use crate::observe::adapter::RuntimeObserver;
 use crate::observe::health::{HealthSnapshot, Liveness, ReadinessGate};
+use crate::observe::metrics::ResultClass;
 use crate::purpose::ListenerPurpose;
 use crate::runtime_config::{
     ReloadOutcome, ReloadPreparationPort, ReloadPrepareFailure, ReloadRejection,
@@ -331,6 +333,7 @@ pub(crate) struct AdminOwner {
     admission: AdminAdmissionSnapshot,
     audit: AuditAuthority,
     core: AdminCorePort,
+    statistics_storage: Option<StoragePort>,
     health: AdminOwnerHealth,
     config: Option<RuntimeConfigHandle>,
     config_changes: Option<watch::Receiver<crate::runtime_config::ConfigRevision>>,
@@ -338,6 +341,7 @@ pub(crate) struct AdminOwner {
     backup: Option<AdminBackupRuntime>,
     process: Option<AdminProcessPort>,
     fatal: Option<mpsc::Sender<()>>,
+    observer: Option<Arc<RuntimeObserver>>,
     budget: Arc<MemoryBudget>,
     entropy: Box<dyn EntropySource + Send>,
     monotonic: Box<dyn MonotonicClock + Send>,
@@ -357,6 +361,7 @@ pub(crate) struct AdminOwnerRuntime {
     pub(crate) backup: Option<AdminBackupRuntime>,
     pub(crate) process: Option<AdminProcessPort>,
     pub(crate) fatal: Option<mpsc::Sender<()>>,
+    pub(crate) observer: Option<Arc<RuntimeObserver>>,
     pub(crate) budget: Arc<MemoryBudget>,
     pub(crate) entropy: Box<dyn EntropySource + Send>,
     pub(crate) clocks: AdminOwnerClocks,
@@ -406,6 +411,7 @@ impl AdminAdmissionSnapshot {
 struct OwnedAdminSession {
     session: AdminSession,
     output: AdminOutput,
+    purpose: ListenerPurpose,
 }
 
 impl AdminOwner {
@@ -424,6 +430,7 @@ impl AdminOwner {
             admission,
             audit,
             core,
+            statistics_storage: None,
             health: runtime.health,
             config: runtime.config,
             config_changes,
@@ -431,12 +438,24 @@ impl AdminOwner {
             backup: runtime.backup,
             process: runtime.process,
             fatal: runtime.fatal,
+            observer: runtime.observer,
             budget: runtime.budget,
             entropy: runtime.entropy,
             monotonic: runtime.clocks.monotonic,
             wall: runtime.clocks.wall,
             sessions: BTreeMap::new(),
         }
+    }
+
+    pub(crate) fn install_statistics_storage(
+        &mut self,
+        storage: StoragePort,
+    ) -> Result<(), crate::RuntimeError> {
+        if self.statistics_storage.is_some() {
+            return Err(crate::RuntimeError::InvalidValue);
+        }
+        self.statistics_storage = Some(storage);
+        Ok(())
     }
 
     // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=single bounded admin select owns session authority reload notifications transport input and cancellation ordering
@@ -554,15 +573,26 @@ impl AdminOwner {
             return;
         }
         let note = challenge.render_note();
+        let purpose = match challenge.kind() {
+            TransportKind::Local => ListenerPurpose::AdminLocal,
+            TransportKind::Tls => ListenerPurpose::AdminTls,
+        };
         let session = AdminSession::new(self.binding, challenge, peer);
         if output.try_line(note).is_err() {
             let _ = output.try_close(CloseReason::SlowConsumer);
             return;
         }
-        self.sessions
-            .insert(generation, OwnedAdminSession { session, output });
+        self.sessions.insert(
+            generation,
+            OwnedAdminSession {
+                session,
+                output,
+                purpose,
+            },
+        );
     }
 
+    // agenc-review: focus owner=runtime reviewed=2026-08-31 reason=closed admin line dispatch records only transport and result classes while preserving proof command and close ordering
     async fn line(
         &mut self,
         generation: ConnectionGeneration,
@@ -570,11 +600,15 @@ impl AdminOwner {
         token: &CancellationToken,
     ) {
         let now = self.monotonic.now();
-        let outcome = {
+        let (outcome, purpose, was_authenticated) = {
             let Some(owned) = self.sessions.get_mut(&generation) else {
                 return;
             };
-            owned.session.accept_line(line, now, &self.registry)
+            (
+                owned.session.accept_line(line, now, &self.registry),
+                owned.purpose,
+                owned.session.operator().is_some(),
+            )
         };
         match outcome {
             Ok(agenc_ircd_admin::AdminEvent::PreAuthPing(ping)) => {
@@ -584,17 +618,34 @@ impl AdminOwner {
             Ok(agenc_ircd_admin::AdminEvent::Quit) => {
                 self.close(generation, CloseReason::ClientQuit);
             }
-            Ok(agenc_ircd_admin::AdminEvent::Authenticated { .. }) => {}
+            Ok(agenc_ircd_admin::AdminEvent::Authenticated { .. }) => {
+                if let Some(observer) = &self.observer {
+                    observer.admin_authentication(purpose, true);
+                }
+            }
             Ok(agenc_ircd_admin::AdminEvent::Command(event)) => {
+                if let Some(observer) = &self.observer {
+                    observer.admin_action(ResultClass::Ok);
+                }
                 self.command(generation, *event, token).await;
             }
             Ok(agenc_ircd_admin::AdminEvent::PermissionDenied { verb, .. }) => {
+                if let Some(observer) = &self.observer {
+                    observer.admin_action(ResultClass::Rejected);
+                }
                 self.output_line(
                     generation,
                     format!("FAIL {verb} PRIVILEGES :Insufficient privileges"),
                 );
             }
             Err(_reason) => {
+                if let Some(observer) = &self.observer {
+                    if was_authenticated {
+                        observer.admin_action(ResultClass::Rejected);
+                    } else {
+                        observer.admin_authentication(purpose, false);
+                    }
+                }
                 self.close(generation, CloseReason::ProtocolError);
             }
         }
@@ -1080,6 +1131,9 @@ impl AdminOwner {
         let prepared = match reload.prepare(token).await {
             Ok(prepared) => prepared,
             Err(failure) => {
+                if let Some(observer) = &self.observer {
+                    observer.reload(false);
+                }
                 self.output_reload_prepare_failure(generation, failure);
                 return;
             }
@@ -1104,6 +1158,9 @@ impl AdminOwner {
                     )
                     .await
                 {
+                    if let Some(observer) = &self.observer {
+                        observer.reload(true);
+                    }
                     self.output_line(
                         generation,
                         "NOTE REHASH OK :Configuration unchanged".to_owned(),
@@ -1125,8 +1182,14 @@ impl AdminOwner {
                     return;
                 }
                 if reload.finalize(activation).await.is_err() {
+                    if let Some(observer) = &self.observer {
+                        observer.reload(false);
+                    }
                     self.fail_closed(generation);
                     return;
+                }
+                if let Some(observer) = &self.observer {
+                    observer.reload(true);
                 }
                 self.reconcile_authority();
                 self.output_line(
@@ -1144,6 +1207,9 @@ impl AdminOwner {
                     )
                     .await
                 {
+                    if let Some(observer) = &self.observer {
+                        observer.reload(false);
+                    }
                     self.output_reload_rejection(generation, rejection);
                 }
             }
@@ -1421,7 +1487,43 @@ impl AdminOwner {
         selector: StatsSelector,
         token: &CancellationToken,
     ) -> Result<Vec<String>, AdminCoreFailure> {
-        let snapshot = self.core.snapshot(token).await?;
+        let mut storage_task = if selector == StatsSelector::Storage {
+            self.statistics_storage
+                .as_ref()
+                .map(|storage| {
+                    storage
+                        .try_statistics()
+                        .map(|completion| tokio::task::spawn_blocking(move || completion.wait()))
+                })
+                .transpose()
+                .map_err(|_| AdminCoreFailure::StorageUnavailable)?
+        } else {
+            None
+        };
+        let (mut snapshot, storage) = tokio::time::timeout(Duration::from_secs(1), async {
+            let snapshot = self.core.snapshot(token).await?;
+            let storage = if let Some(task) = storage_task.take() {
+                Some(
+                    task.await
+                        .map_err(|_| AdminCoreFailure::StorageUnavailable)?
+                        .map_err(|_| AdminCoreFailure::StorageUnavailable)?,
+                )
+            } else {
+                None
+            };
+            Ok::<_, AdminCoreFailure>((snapshot, storage))
+        })
+        .await
+        .map_err(|_| AdminCoreFailure::StorageUnavailable)??;
+        if let Some(storage) = storage {
+            snapshot = snapshot.with_storage(storage.values());
+        }
+        if let Some(observer) = &self.observer {
+            let rates = observer
+                .rate_values()
+                .map_err(|_| AdminCoreFailure::StorageUnavailable)?;
+            snapshot = snapshot.with_observed_runtime(observer.runtime_values(), rates);
+        }
         let values = StatsValues::new(selector, snapshot.values(selector))
             .map_err(|_| AdminCoreFailure::StorageUnavailable)?;
         let sampled_at = self
@@ -1958,6 +2060,7 @@ mod tests {
                     backup: None,
                     process: None,
                     fatal: None,
+                    observer: None,
                     budget: Arc::new(MemoryBudget::new(MAX_AUDIT_EXPORT_BYTES * 2)),
                     entropy: Box::new(
                         ScriptedEntropy::new(vec![0; 64])
@@ -2048,6 +2151,7 @@ mod tests {
                     backup: None,
                     process: None,
                     fatal: None,
+                    observer: None,
                     budget: Arc::new(MemoryBudget::new(MAX_AUDIT_EXPORT_BYTES * 2)),
                     entropy: Box::new(
                         ScriptedEntropy::new(vec![0; 64])
@@ -2171,6 +2275,7 @@ mod tests {
                     backup: None,
                     process: None,
                     fatal: None,
+                    observer: None,
                     budget: Arc::new(MemoryBudget::new(MAX_AUDIT_EXPORT_BYTES * 2)),
                     entropy: Box::new(
                         ScriptedEntropy::new(vec![0; 64])
@@ -2283,6 +2388,7 @@ mod tests {
                     backup: None,
                     process: Some(process),
                     fatal: None,
+                    observer: None,
                     budget: Arc::new(MemoryBudget::new(MAX_AUDIT_EXPORT_BYTES * 2)),
                     entropy: Box::new(
                         ScriptedEntropy::new(vec![0; 64])

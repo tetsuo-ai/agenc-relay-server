@@ -11,6 +11,7 @@ use super::{
 use crate::RuntimeError;
 use crate::budget::MemoryBudget;
 use crate::listener::{AcceptAdmission, AdmissionVerdict};
+use crate::observe::adapter::RuntimeObserver;
 use crate::purpose::ListenerPurpose;
 use crate::state_core::inbox::SourceAddressKey;
 use crate::sync::{Arc, Mutex, lock};
@@ -21,6 +22,7 @@ pub struct TransportAdmission {
     state: Mutex<TransportAdmissionState>,
     budget: Arc<MemoryBudget>,
     direct_per_address: u64,
+    observer: Mutex<Option<Arc<RuntimeObserver>>>,
 }
 
 struct TransportAdmissionState {
@@ -52,7 +54,13 @@ impl TransportAdmission {
             }),
             budget,
             direct_per_address,
+            observer: Mutex::new(None),
         })
+    }
+
+    /// Installs the process observer before listeners begin accepting.
+    pub(crate) fn install_observer(&self, observer: Arc<RuntimeObserver>) {
+        *lock(&self.observer) = Some(observer);
     }
 
     /// Erases transport prefix rows that have been idle for ten minutes.
@@ -71,27 +79,37 @@ impl TransportAdmission {
 impl AcceptAdmission for TransportAdmission {
     fn admit(&self, purpose: ListenerPurpose, source: SourceAddressKey) -> AdmissionVerdict {
         let mut state = lock(&self.state);
-        if state
+        let previous = state.overload.class();
+        let current = state
             .overload
-            .classify(self.budget.charged(), self.budget.capacity())
-            >= OverloadClass::NoNewConnections
-        {
-            return AdmissionVerdict::Refuse;
-        }
-        let now = state.clock.now();
-        let admitted = match purpose {
-            ListenerPurpose::ClientTls => state.admit_direct(source, now, self.direct_per_address),
-            ListenerPurpose::ClientOnion => state.admit_onion(now),
-            ListenerPurpose::ClientWss
-            | ListenerPurpose::Federation
-            | ListenerPurpose::AdminLocal
-            | ListenerPurpose::AdminTls => false,
-        };
-        if admitted {
-            AdmissionVerdict::Admit
-        } else {
+            .classify(self.budget.charged(), self.budget.capacity());
+        let verdict = if current >= OverloadClass::NoNewConnections {
             AdmissionVerdict::Refuse
+        } else {
+            let now = state.clock.now();
+            let admitted = match purpose {
+                ListenerPurpose::ClientTls => {
+                    state.admit_direct(source, now, self.direct_per_address)
+                }
+                ListenerPurpose::ClientOnion => state.admit_onion(now),
+                ListenerPurpose::ClientWss
+                | ListenerPurpose::Federation
+                | ListenerPurpose::AdminLocal
+                | ListenerPurpose::AdminTls => false,
+            };
+            if admitted {
+                AdmissionVerdict::Admit
+            } else {
+                AdmissionVerdict::Refuse
+            }
+        };
+        drop(state);
+        if current != previous
+            && let Some(observer) = lock(&self.observer).clone()
+        {
+            observer.overload_transition(current);
         }
+        verdict
     }
 
     fn released(&self, purpose: ListenerPurpose, source: SourceAddressKey) {

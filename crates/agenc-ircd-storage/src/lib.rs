@@ -59,7 +59,9 @@ pub use domain_records::{
     AccountRecordBody, ChannelRecordBody, LIVE_RECORD_KIND, MAX_ACCOUNT_RECORD_BODY_BYTES,
     MAX_CHANNEL_RECORD_BODY_BYTES, MAX_SANCTION_RECORD_BODY_BYTES, SanctionRecordBody,
 };
-pub use engine::{RecoveredStorageState, StorageEngineLimits, StorageOpenConfig};
+pub use engine::{
+    RecoveredStorageState, StorageEngineLimits, StorageOpenConfig, StorageStatistics,
+};
 pub use error::StorageError;
 pub use fault::{
     StorageFaultBoundary, StorageFaultCase, StorageFaultInjector, StorageFaultSchedule,

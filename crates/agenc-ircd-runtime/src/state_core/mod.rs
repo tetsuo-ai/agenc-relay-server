@@ -43,14 +43,16 @@ use crate::admission::{
     BucketKey, BucketTable, OverloadClass, OverloadState, PrefixRegistry, RateLimits,
 };
 use crate::bridge::crypto::{CryptoBridge, CryptoJobOutput};
-use crate::bridge::storage::{BridgeFailure, StorageBridge, SubmitError};
+use crate::bridge::storage::{BridgeFailure, STORAGE_HANDOFF_CAPACITY, StorageBridge, SubmitError};
 use crate::bridge::{
     CryptoCompletionMessage, StorageCompletionMessage, StorageReadCompletionMessage, StorageReadId,
 };
 use crate::budget::MemoryBudget;
 use crate::cancel::CancellationToken;
 use crate::connection::sink::ConnectionGeneration;
+use crate::observe::adapter::RuntimeObserver;
 use crate::observe::health::Liveness;
+use crate::observe::metrics::{CommandClass, QueueName, ResultClass};
 use crate::runtime_config::{
     PreparedReload, ReloadActivation, ReloadCoreInbox, ReloadCoreRequest, ReloadMode,
     ReloadOutcome, ReloadRejection, RuntimeConfigHandle, RuntimeConfigSnapshot,
@@ -429,6 +431,7 @@ pub struct StateCoreContext {
     public_info: Option<Arc<str>>,
     counters: StateCoreCounters,
     quiescing: bool,
+    observer: Option<Arc<RuntimeObserver>>,
 }
 
 impl StateCoreContext {
@@ -809,8 +812,14 @@ impl StateCoreContext {
         projected: durable::ProjectedBatch,
     ) -> Result<BatchStep, StateCoreExit> {
         let (storage_batch, retained) = projected.into_parts();
+        let batch_bytes = storage_batch
+            .resulting_logical_database_bytes()
+            .saturating_sub(storage_batch.expected_logical_database_bytes());
         match self.bridge.submit(storage_batch) {
             Ok(transaction_id) => {
+                if let Some(observer) = &self.observer {
+                    observer.storage_batch(batch_bytes);
+                }
                 batch.mark_in_flight(transaction_id, retained);
                 self.pending = Some(batch);
                 Ok(BatchStep::Submitted)
@@ -934,8 +943,15 @@ impl StateCoreContext {
         self.sessions.open(generation, purpose, source, sink, now)?;
         self.counters.connections_opened = self.counters.connections_opened.saturating_add(1);
         let _prefix_result = self.prefixes.connection_opened(source.prefix_key(), now);
-        self.overload
+        let previous = self.overload.class();
+        let current = self
+            .overload
             .classify(self.budget.charged(), self.budget.capacity());
+        if current != previous
+            && let Some(observer) = &self.observer
+        {
+            observer.overload_transition(current);
+        }
         Ok(())
     }
 
@@ -1098,6 +1114,7 @@ impl StateCore {
                 public_info: inputs.config.public_info,
                 counters: StateCoreCounters::default(),
                 quiescing: false,
+                observer: None,
             },
             router: inputs.router,
             admin_receiver,
@@ -1113,6 +1130,11 @@ impl StateCore {
         };
         state.router.startup(&mut state.context);
         state
+    }
+
+    /// Installs the process observer before the actor starts.
+    pub(crate) fn install_observer(&mut self, observer: Arc<RuntimeObserver>) {
+        self.context.observer = Some(observer);
     }
 
     /// Installs the sole private administrative receiver before the actor
@@ -1315,6 +1337,10 @@ impl StateCore {
             admission.reload(snapshot.rates());
         }
         self.router.config_reloaded(&mut self.context, snapshot);
+        if let Some(observer) = &self.context.observer {
+            let _updated =
+                observer.set_log_retention(snapshot.config().privacy.log_retention_hours);
+        }
     }
 
     fn finalize_reload(
@@ -1614,6 +1640,7 @@ impl StateCore {
         let counters = self.context.counters;
         let head = self.context.head;
         let storage_in_flight = u64::from(self.context.in_flight());
+        let client_queues = self.context.sessions.queue_snapshot();
         AdminCoreSnapshot::new(
             [
                 self.context.now().get() / 1_000,
@@ -1633,7 +1660,7 @@ impl StateCore {
                 head.backup_stream_bytes,
                 self.context.ceilings.backup_max_bytes,
                 head.state_generation,
-                head.storage_commit_sequence,
+                0,
                 head.storage_commit_sequence,
                 head.account_service_response_count,
                 0,
@@ -1642,7 +1669,18 @@ impl StateCore {
                 0,
                 0,
             ],
-            [0, 0, 0, 0, 0, 0, storage_in_flight, 1, 0, 0],
+            [
+                client_queues.queued_bytes(),
+                client_queues.capacity_bytes(),
+                0,
+                0,
+                usize_u64(self.context.crypto.snapshot_in_flight()),
+                usize_u64(self.context.crypto.capacity()),
+                storage_in_flight,
+                usize_u64(STORAGE_HANDOFF_CAPACITY),
+                0,
+                0,
+            ],
             [
                 counters.lines_routed,
                 counters.batches_rejected,
@@ -1754,9 +1792,26 @@ impl StateCore {
             return;
         }
         self.context.counters.lines_routed = self.context.counters.lines_routed.saturating_add(1);
-        if let RouteOutcome::Close(_reason) =
-            self.router.route(&mut self.context, generation, message)
-        {
+        let observer = self.context.observer.clone();
+        let class = observer
+            .as_ref()
+            .map(|_| RuntimeObserver::classify_command(message.command()));
+        let outcome = self.router.route(&mut self.context, generation, message);
+        if let (Some(observer), Some(class)) = (&observer, class) {
+            let result = if matches!(outcome, RouteOutcome::Close(_)) {
+                ResultClass::Rejected
+            } else {
+                ResultClass::Ok
+            };
+            observer.command_classified(class, result);
+            if class == CommandClass::Authentication {
+                observer.authentication(false);
+                if result == ResultClass::Rejected {
+                    observer.authentication(true);
+                }
+            }
+        }
+        if let RouteOutcome::Close(_reason) = outcome {
             // The sink contract exposes one close path; the transport owner
             // ends the connection and reports it back through `Closed`.
             if let Some(sink) = self.context.sessions.sink_for_generation(generation) {
@@ -2003,6 +2058,18 @@ impl StateCore {
                 },
                 _ = progress.tick() => {
                     self.liveness.record_state_core(self.context.now());
+                    if let Some(observer) = &self.context.observer {
+                        observer.queue_depth(QueueName::StateCoreInbox, usize_u64(inbox.len()));
+                        observer.queue_depth(
+                            QueueName::StorageCompletions,
+                            usize_u64(storage.len()),
+                        );
+                        observer.queue_depth(QueueName::CryptoJobs, usize_u64(crypto.len()));
+                        observer.queue_depth(
+                            QueueName::SignalMaintenance,
+                            usize_u64(lifecycle.len()),
+                        );
+                    }
                     None
                 },
                 () = tokio::time::sleep_until(wake.unwrap_or_else(Instant::now)), if wake.is_some() => {

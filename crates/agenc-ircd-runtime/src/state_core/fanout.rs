@@ -549,6 +549,10 @@ mod tests {
         fn shutdown_after_flush(&self) -> crate::connection::FlushAcknowledgement {
             crate::connection::FlushAcknowledgement::complete()
         }
+
+        fn queue_snapshot(&self) -> crate::connection::ClientQueueSnapshot {
+            crate::connection::ClientQueueSnapshot::default()
+        }
     }
 
     fn message(text: &str) -> Result<WireMessage, RenderError> {

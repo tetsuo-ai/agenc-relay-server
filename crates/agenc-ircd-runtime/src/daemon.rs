@@ -64,9 +64,13 @@ use crate::connection::{
 };
 use crate::listener::{
     ListenerContext, ListenerControl, ListenerError, ListenerSet, ListenerSource, ListenerSpec,
-    LocalAdminAdmission, MAX_CLIENT_CONNECTIONS, NoObserver, spki_sha256,
+    LocalAdminAdmission, MAX_CLIENT_CONNECTIONS, spki_sha256,
 };
+use crate::observe::adapter::RuntimeObserver;
+use crate::observe::events::{CorrelationSource, Severity};
 use crate::observe::health::{Liveness, ReadinessGate, ReadinessStage};
+use crate::observe::log::{FileLogControl, FileLogOwner, LogFilter, LogRetention};
+use crate::observe::metrics::MetricsRegistry;
 use crate::purpose::ListenerPurpose;
 use crate::registration::{AccountServiceConfig, RegistrationRouter, RegistrationRouterConfig};
 use crate::runtime_config::{
@@ -85,8 +89,9 @@ use crate::state_core::{
     StateCore, StateCoreClocks, StateCoreConfig, StateCoreExit, StateCoreInputs, admin_core_channel,
 };
 use crate::supervisor::{
-    ChildFailure, ChildKind, ChildName, JoinReport, ShutdownFailure, ShutdownHooks, ShutdownPhase,
-    ShutdownPlan, ShutdownProblemKind, ShutdownReport, Supervisor, run_shutdown, run_signal_task,
+    ChildFailure, ChildKind, ChildName, CrashReporter, JoinReport, ShutdownFailure, ShutdownHooks,
+    ShutdownPhase, ShutdownPlan, ShutdownProblemKind, ShutdownReport, Supervisor, exit_process,
+    run_shutdown, run_signal_task,
 };
 use crate::sync::Arc;
 use crate::tls::{
@@ -222,7 +227,6 @@ pub fn serve(config_path: &Path) -> Result<DaemonExit, DaemonError> {
     harden_process(&config)?;
     let secrets = SecretSet::load(&config)?;
     let operators = operator_registry(&config)?;
-    let storage = LiveStorage::open(&config, &secrets, &operators)?;
     let workers = usize_value(config.server.tokio_worker_threads)?;
     let runtime = Builder::new_multi_thread()
         .worker_threads(workers)
@@ -230,13 +234,44 @@ pub fn serve(config_path: &Path) -> Result<DaemonExit, DaemonError> {
         .enable_all()
         .build()
         .map_err(|_| DaemonError::RuntimeStart)?;
-    runtime.block_on(run(
-        config_path.to_path_buf(),
+    let process_clock = SystemMonotonicClock::start();
+    let correlation = Arc::new(CorrelationSource::from_os_entropy()?);
+    CrashReporter::new(
+        config.server.server_id,
+        Arc::clone(&correlation),
+        Arc::new(SystemWallClock),
+        exit_process,
+    )
+    .ok_or(DaemonError::Runtime(RuntimeError::InvalidValue))?
+    .install();
+    let retention = LogRetention::hours(config.privacy.log_retention_hours)?;
+    let (log_owner, log) = FileLogOwner::start(
+        &config.server.data_dir,
+        retention,
+        LogFilter::new(Severity::Info),
+        config.server.server_id,
+        Arc::clone(&correlation),
+    )
+    .map_err(|_| DaemonError::Runtime(RuntimeError::InvalidValue))?;
+    let observer = Arc::new(RuntimeObserver::new(
+        config.server.server_id,
+        process_clock,
+        correlation,
+        log,
+        Arc::new(MetricsRegistry::new()),
+    ));
+    observer.process_started();
+    let storage = LiveStorage::open(&config, &secrets, &operators)?;
+    runtime.block_on(run(DaemonRunInputs {
+        config_path: config_path.to_path_buf(),
         config,
         secrets,
         operators,
         storage,
-    ))
+        process_clock,
+        observer,
+        log_owner,
+    }))
 }
 
 fn validate_profile(config: &Config) -> Result<(), DaemonError> {
@@ -1135,15 +1170,29 @@ fn validate_onion_pin(
     Ok(())
 }
 
-// agenc-review: focus owner=runtime reviewed=2026-08-30 reason=top-level composition installs bounded owners before accepting and routes every exit through the phased shutdown budget
-async fn run(
+struct DaemonRunInputs {
     config_path: PathBuf,
     config: Config,
     secrets: SecretSet,
     operators: OperatorRegistry,
     storage: LiveStorage,
-) -> Result<DaemonExit, DaemonError> {
-    let process_clock = SystemMonotonicClock::start();
+    process_clock: SystemMonotonicClock,
+    observer: Arc<RuntimeObserver>,
+    log_owner: FileLogOwner,
+}
+
+// agenc-review: focus owner=runtime reviewed=2026-08-30 reason=top-level composition installs bounded owners before accepting and routes every exit through the phased shutdown budget
+async fn run(inputs: DaemonRunInputs) -> Result<DaemonExit, DaemonError> {
+    let DaemonRunInputs {
+        config_path,
+        config,
+        secrets,
+        operators,
+        storage,
+        process_clock,
+        observer,
+        log_owner,
+    } = inputs;
     let readiness = Arc::new(ReadinessGate::new());
     readiness.mark(ReadinessStage::Configuration);
     readiness.mark(ReadinessStage::Keys);
@@ -1167,6 +1216,7 @@ async fn run(
         Arc::clone(&budget),
         Box::new(SystemMonotonicClock::start()),
     )?);
+    admission.install_observer(Arc::clone(&observer));
     let mut live = build_live_state(BuildLiveStateInputs {
         config: &config,
         secrets: &secrets,
@@ -1185,6 +1235,7 @@ async fn run(
     let (admin_port, admin_inbox) = admin_transport_channel(admin_binding);
     let (admin_core, admin_core_inbox) = admin_core_channel();
     live.state.install_admin_inbox(admin_core_inbox)?;
+    live.state.install_observer(Arc::clone(&observer));
     let (reload, reload_inbox) = reload_channel(runtime_config.clone(), Arc::clone(&admission));
     live.state.install_reload_inbox(reload_inbox)?;
     let (admin_reload, mut reload_preparation) = reload_preparation_channel(reload.clone());
@@ -1198,7 +1249,7 @@ async fn run(
         .backup
         .take()
         .ok_or(DaemonError::Runtime(RuntimeError::InvalidValue))?;
-    let admin_owner = AdminOwner::new(
+    let mut admin_owner = AdminOwner::new(
         admin_binding,
         operators,
         operator_admission(&config),
@@ -1214,6 +1265,7 @@ async fn run(
             backup: Some(backup),
             process: Some(admin_process),
             fatal: Some(admin_fatal),
+            observer: Some(Arc::clone(&observer)),
             budget: Arc::clone(&budget),
             entropy: Box::new(OsEntropy),
             clocks: AdminOwnerClocks {
@@ -1222,6 +1274,7 @@ async fn run(
             },
         },
     );
+    admin_owner.install_statistics_storage(live.owner.port())?;
     let context = listener_context(
         &config,
         runtime_config.clone(),
@@ -1229,6 +1282,7 @@ async fn run(
         admin_port,
         Arc::clone(&budget),
         Arc::clone(&admission),
+        Arc::clone(&observer),
     )?;
     let RunningOwners {
         owner,
@@ -1266,6 +1320,7 @@ async fn run(
         listener_exited: &mut listener_exited,
         liveness: Arc::clone(&liveness),
         monotonic: process_clock,
+        observer: Arc::clone(&observer),
     })
     .await;
     let shutdown = runtime_config.load().shutdown_plan();
@@ -1278,6 +1333,9 @@ async fn run(
         listener_joined: false,
         stopped: false,
         readiness,
+        observer,
+        log_control: log_owner.control(),
+        log_owner: Some(log_owner),
     };
     let report = run_shutdown(shutdown, &mut hooks, &mut signals).await;
     let shutdown_result = validate_shutdown_report(report);
@@ -1463,6 +1521,7 @@ fn listener_context(
     admin: AdminTransportPort,
     budget: Arc<MemoryBudget>,
     admission: Arc<TransportAdmission>,
+    observer: Arc<RuntimeObserver>,
 ) -> Result<ListenerContext, DaemonError> {
     let _clients = limit_usize(config, LimitKey::ClientConnections)?;
     let _handshakes = limit_usize(config, LimitKey::TlsHandshakes)?;
@@ -1471,7 +1530,7 @@ fn listener_context(
         handshakes: HandshakeLimiter::new(MAX_HANDSHAKES_IN_PROGRESS)?,
         client_slots: Arc::new(Semaphore::new(MAX_CLIENT_CONNECTIONS)),
         admission,
-        observer: Arc::new(NoObserver),
+        observer,
         inbox: inbox.clone(),
         admin: Some(admin),
         limits: connection_limits(config)?,
@@ -1584,6 +1643,7 @@ struct ShutdownWaitInputs<'a> {
     listener_exited: &'a mut oneshot::Receiver<()>,
     liveness: Arc<Liveness>,
     monotonic: SystemMonotonicClock,
+    observer: Arc<RuntimeObserver>,
 }
 
 // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=closed owner loop keeps termination selectable while serializing admin preparation signal coalescing activation progress and critical owner exits
@@ -1601,6 +1661,7 @@ async fn wait_for_shutdown(inputs: ShutdownWaitInputs<'_>) -> Result<DaemonExit,
         listener_exited,
         liveness,
         monotonic,
+        observer,
     } = inputs;
     type PreparationFuture<'a> =
         Pin<Box<dyn Future<Output = Result<PreparedReload, ReloadPrepareFailure>> + Send + 'a>>;
@@ -1681,13 +1742,17 @@ async fn wait_for_shutdown(inputs: ShutdownWaitInputs<'_>) -> Result<DaemonExit,
                                 Some(Box::pin(reload.activate(prepared, ReloadMode::Signal)));
                         }
                         Err(ReloadPrepareFailure::Busy) => pending_sighup = true,
-                        Err(_) => {}
+                        Err(_) => observer.reload(false),
                     },
                     Some(ReloadPreparationOrigin::Admin(reply)) => reply.send(result),
                     None => return Err(DaemonError::TaskFailed),
                 }
             }
-            SupervisorEvent::Activated(_outcome) => {
+            SupervisorEvent::Activated(outcome) => {
+                observer.reload(matches!(
+                    outcome,
+                    ReloadOutcome::Applied(_) | ReloadOutcome::NoChange(_)
+                ));
                 activation = None;
             }
             SupervisorEvent::ReloadIdle => {
@@ -1746,10 +1811,14 @@ struct RuntimeShutdownHooks<'a> {
     listener_joined: bool,
     stopped: bool,
     readiness: Arc<ReadinessGate>,
+    observer: Arc<RuntimeObserver>,
+    log_control: FileLogControl,
+    log_owner: Option<FileLogOwner>,
 }
 
 impl ShutdownHooks for RuntimeShutdownHooks<'_> {
     async fn run(&mut self, phase: ShutdownPhase) -> Result<(), ShutdownFailure> {
+        self.observer.shutdown_phase(phase);
         match phase {
             ShutdownPhase::Quiesce => {
                 self.readiness.clear(ReadinessStage::StateCore);
@@ -1765,7 +1834,11 @@ impl ShutdownHooks for RuntimeShutdownHooks<'_> {
                         .map_err(|_| ShutdownFailure::Writer)?;
                     self.listener_joined = true;
                 }
-                request_lifecycle(self.lifecycle, LifecyclePhase::Flush).await
+                request_lifecycle(self.lifecycle, LifecyclePhase::Flush).await?;
+                self.log_control
+                    .flush()
+                    .await
+                    .map_err(|_| ShutdownFailure::Writer)
             }
             ShutdownPhase::Stop => self.stop().await,
         }
@@ -1793,6 +1866,15 @@ impl RuntimeShutdownHooks<'_> {
             && first_failure.is_none()
         {
             first_failure = Some(ShutdownFailure::Storage);
+        }
+        if let Some(log_owner) = self.log_owner.take() {
+            match log_owner.shutdown().await {
+                Ok(0) => {}
+                Ok(_) | Err(_) if first_failure.is_none() => {
+                    first_failure = Some(ShutdownFailure::Writer);
+                }
+                Ok(_) | Err(_) => {}
+            }
         }
         first_failure.map_or(Ok(()), Err)
     }

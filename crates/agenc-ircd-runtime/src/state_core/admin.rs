@@ -120,6 +120,25 @@ impl AdminCoreSnapshot {
             StatsSelector::E2ee => &self.e2ee,
         }
     }
+
+    pub(crate) fn with_observed_runtime(
+        mut self,
+        runtime_prefix: [u64; 3],
+        rates: [u64; 8],
+    ) -> Self {
+        let [new_uptime, new_clients, new_tls] = runtime_prefix;
+        let [uptime, clients, tls, ..] = &mut self.runtime;
+        *uptime = new_uptime;
+        *clients = new_clients;
+        *tls = new_tls;
+        self.rates = rates;
+        self
+    }
+
+    pub(crate) fn with_storage(mut self, storage: [u64; 14]) -> Self {
+        self.storage = storage;
+        self
+    }
 }
 
 /// Cloneable sending half held only by `AdminOwner`.

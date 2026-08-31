@@ -6,10 +6,12 @@
 //! older than the retention window in bounded sweeps, and never enables
 //! debug output for a public listener.
 
-use std::fs::{File, OpenOptions};
+use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::{self, Write as _};
+use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread::{self, JoinHandle};
 
 use agenc_ircd_types::{ServerId, UtcSecond};
 use tokio::sync::mpsc;
@@ -30,10 +32,19 @@ pub const SECONDS_PER_HOUR: u64 = 3_600;
 /// Segments deleted by one retention sweep (spec line 6696: deletion is
 /// bounded).
 pub const MAX_SEGMENT_DELETIONS_PER_SWEEP: usize = 64;
+/// Directory entries examined by one retention sweep. Unrelated entries
+/// cannot turn rotation into an unbounded blocking operation.
+pub const MAX_DIRECTORY_ENTRIES_PER_SWEEP: usize = 4_096;
 /// Segment file prefix under the log directory.
 pub const SEGMENT_PREFIX: &str = "agenc-ircd-";
 /// Segment file suffix.
 pub const SEGMENT_SUFFIX: &str = ".log";
+/// Exact private mode of the derived log directory.
+pub const LOG_DIRECTORY_MODE: u32 = 0o700;
+/// Exact private mode of each log segment.
+pub const LOG_SEGMENT_MODE: u32 = 0o600;
+/// The operating-system name of the joined blocking log owner.
+pub const LOG_OWNER_THREAD_NAME: &str = "agenc-ircd-log";
 
 /// Retention in whole hours, 1..=720.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -97,8 +108,9 @@ const fn is_public(purpose: ListenerPurpose) -> bool {
 /// The cloneable emitter handed to every owner.
 #[derive(Clone)]
 pub struct LogHandle {
-    sender: mpsc::Sender<LogEvent>,
+    sender: mpsc::Sender<LogQueueItem>,
     dropped: Arc<AtomicU64>,
+    retention: Arc<AtomicU64>,
     filter: LogFilter,
 }
 
@@ -110,7 +122,7 @@ impl LogHandle {
         if !self.filter.admits(&event) {
             return false;
         }
-        match self.sender.try_send(event) {
+        match self.sender.try_send(LogQueueItem::Event(event)) {
             Ok(()) => true,
             Err(_) => {
                 self.dropped.fetch_add(1, Ordering::AcqRel);
@@ -124,6 +136,25 @@ impl LogHandle {
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Acquire)
     }
+
+    /// Returns the current bounded queue depth.
+    #[must_use]
+    pub fn depth(&self) -> usize {
+        self.sender
+            .max_capacity()
+            .saturating_sub(self.sender.capacity())
+    }
+
+    /// Publishes a validated retention window for the blocking owner.
+    pub fn set_retention(&self, retention: LogRetention) {
+        self.retention.store(retention.get(), Ordering::Release);
+    }
+}
+
+enum LogQueueItem {
+    Event(LogEvent),
+    Flush(std::sync::mpsc::SyncSender<()>),
+    Stop(std::sync::mpsc::SyncSender<()>),
 }
 
 /// Where segments are written.
@@ -141,14 +172,15 @@ pub trait LogTarget: Send {
 
 /// The writer task state.
 pub struct LogWriter<T: LogTarget> {
-    receiver: mpsc::Receiver<LogEvent>,
+    receiver: mpsc::Receiver<LogQueueItem>,
     target: T,
-    retention: LogRetention,
+    retention: Arc<AtomicU64>,
+    applied_retention: u64,
     current_hour: Option<u64>,
     dropped: Arc<AtomicU64>,
     reported_dropped: u64,
     server_id: ServerId,
-    correlation: CorrelationSource,
+    correlation: Arc<CorrelationSource>,
     write_failures: u64,
 }
 
@@ -160,19 +192,22 @@ impl<T: LogTarget> LogWriter<T> {
         retention: LogRetention,
         filter: LogFilter,
         server_id: ServerId,
-        correlation: CorrelationSource,
+        correlation: Arc<CorrelationSource>,
     ) -> (Self, LogHandle) {
         let (sender, receiver) = mpsc::channel(LOG_QUEUE_CAPACITY);
         let dropped = Arc::new(AtomicU64::new(0));
+        let retention_hours = Arc::new(AtomicU64::new(retention.get()));
         let handle = LogHandle {
             sender,
             dropped: Arc::clone(&dropped),
+            retention: Arc::clone(&retention_hours),
             filter,
         };
         let writer = Self {
             receiver,
             target,
-            retention,
+            retention: retention_hours,
+            applied_retention: retention.get(),
             current_hour: None,
             dropped,
             reported_dropped: 0,
@@ -183,22 +218,75 @@ impl<T: LogTarget> LogWriter<T> {
         (writer, handle)
     }
 
-    /// Drains events until every handle is dropped, then returns the
-    /// target and the count of lines the target refused.
-    pub async fn run(mut self) -> (T, u64) {
-        while let Some(event) = self.receiver.recv().await {
-            self.write(&event);
-            self.report_dropped(event.utc_second());
+    /// Test-only async driver for in-memory targets. Production uses only
+    /// the named blocking owner below.
+    #[cfg(test)]
+    pub(in crate::observe) async fn run(mut self) -> (T, u64) {
+        while let Some(item) = self.receiver.recv().await {
+            if self.handle_item(item) {
+                break;
+            }
         }
         (self.target, self.write_failures)
+    }
+
+    fn run_blocking(mut self) -> u64 {
+        while let Some(item) = self.receiver.blocking_recv() {
+            if self.handle_item(item) {
+                break;
+            }
+        }
+        self.write_failures
+    }
+
+    // agenc-review: focus owner=runtime reviewed=2026-08-31 reason=single blocking-owner dispatch preserves event flush stop drain and acknowledgement ordering on the bounded queue
+    fn handle_item(&mut self, item: LogQueueItem) -> bool {
+        match item {
+            LogQueueItem::Event(event) => {
+                self.write(&event);
+                self.report_dropped(event.utc_second());
+                false
+            }
+            LogQueueItem::Flush(reply) => {
+                let _sent = reply.send(());
+                false
+            }
+            LogQueueItem::Stop(reply) => {
+                self.receiver.close();
+                while let Ok(item) = self.receiver.try_recv() {
+                    match item {
+                        LogQueueItem::Event(event) => {
+                            self.write(&event);
+                            self.report_dropped(event.utc_second());
+                        }
+                        LogQueueItem::Flush(waiter) | LogQueueItem::Stop(waiter) => {
+                            let _sent = waiter.send(());
+                        }
+                    }
+                }
+                let _sent = reply.send(());
+                true
+            }
+        }
     }
 
     /// Writes one event synchronously; segments roll at hour boundaries.
     pub fn write(&mut self, event: &LogEvent) {
         let hour = event.utc_second().get() / SECONDS_PER_HOUR;
-        if self.current_hour != Some(hour) && self.roll(hour).is_err() {
-            self.write_failures = self.write_failures.saturating_add(1);
-            return;
+        if self.current_hour != Some(hour) {
+            if self.roll(hour).is_err() {
+                self.write_failures = self.write_failures.saturating_add(1);
+                return;
+            }
+        } else {
+            let retention = self.retention.load(Ordering::Acquire);
+            if retention != self.applied_retention {
+                if self.sweep(hour, retention).is_err() {
+                    self.write_failures = self.write_failures.saturating_add(1);
+                } else {
+                    self.applied_retention = retention;
+                }
+            }
         }
         if self.target.write_line(&event.to_string()).is_err() {
             self.write_failures = self.write_failures.saturating_add(1);
@@ -208,7 +296,14 @@ impl<T: LogTarget> LogWriter<T> {
     fn roll(&mut self, hour: u64) -> io::Result<()> {
         self.target.open_segment(hour)?;
         self.current_hour = Some(hour);
-        let oldest_kept = hour.saturating_sub(self.retention.get().saturating_sub(1));
+        let retention = self.retention.load(Ordering::Acquire);
+        self.sweep(hour, retention)?;
+        self.applied_retention = retention;
+        Ok(())
+    }
+
+    fn sweep(&mut self, hour: u64, retention: u64) -> io::Result<()> {
+        let oldest_kept = hour.saturating_sub(retention.saturating_sub(1));
         self.target
             .retire_before(oldest_kept, MAX_SEGMENT_DELETIONS_PER_SWEEP)?;
         Ok(())
@@ -256,6 +351,149 @@ impl FileLogTarget {
     }
 }
 
+/// Cloneable control path for the joined blocking log owner.
+#[derive(Clone)]
+pub struct FileLogControl {
+    sender: mpsc::Sender<LogQueueItem>,
+}
+
+impl FileLogControl {
+    fn send_blocking(&self, mut item: LogQueueItem) -> Result<(), RuntimeError> {
+        loop {
+            match self.sender.try_send(item) {
+                Ok(()) => return Ok(()),
+                Err(mpsc::error::TrySendError::Full(returned)) => {
+                    item = returned;
+                    thread::yield_now();
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    return Err(RuntimeError::Cancelled);
+                }
+            }
+        }
+    }
+
+    fn flush_blocking(&self) -> Result<(), RuntimeError> {
+        let (reply, response) = std::sync::mpsc::sync_channel(0);
+        self.send_blocking(LogQueueItem::Flush(reply))?;
+        response.recv().map_err(|_| RuntimeError::Cancelled)
+    }
+
+    fn stop_blocking(&self) -> Result<(), RuntimeError> {
+        let (reply, response) = std::sync::mpsc::sync_channel(0);
+        self.send_blocking(LogQueueItem::Stop(reply))?;
+        response.recv().map_err(|_| RuntimeError::Cancelled)
+    }
+
+    /// Waits until every event queued before this call has reached the file
+    /// owner. The wait itself runs on Tokio's blocking pool.
+    pub async fn flush(&self) -> Result<(), RuntimeError> {
+        let control = self.clone();
+        tokio::task::spawn_blocking(move || control.flush_blocking())
+            .await
+            .map_err(|_| RuntimeError::Cancelled)??;
+        Ok(())
+    }
+}
+
+/// The named filesystem owner. The thread is joined explicitly during the
+/// runtime stop phase; no filesystem operation runs on an async worker.
+pub struct FileLogOwner {
+    control: FileLogControl,
+    thread: Option<JoinHandle<u64>>,
+}
+
+impl FileLogOwner {
+    /// Creates and validates `data_dir/logs`, then starts the bounded writer.
+    pub fn start(
+        data_dir: &Path,
+        retention: LogRetention,
+        filter: LogFilter,
+        server_id: ServerId,
+        correlation: Arc<CorrelationSource>,
+    ) -> io::Result<(Self, LogHandle)> {
+        let directory = prepare_log_directory(data_dir)?;
+        let (writer, handle) = LogWriter::start(
+            FileLogTarget::new(directory),
+            retention,
+            filter,
+            server_id,
+            correlation,
+        );
+        let control = FileLogControl {
+            sender: handle.sender.clone(),
+        };
+        let thread = thread::Builder::new()
+            .name(LOG_OWNER_THREAD_NAME.to_owned())
+            .spawn(move || writer.run_blocking())?;
+        Ok((
+            Self {
+                control,
+                thread: Some(thread),
+            },
+            handle,
+        ))
+    }
+
+    /// Returns the flush authority retained by shutdown composition.
+    #[must_use]
+    pub fn control(&self) -> FileLogControl {
+        self.control.clone()
+    }
+
+    /// Returns the fixed operating-system thread name while it is live.
+    #[must_use]
+    pub fn thread_name(&self) -> Option<&str> {
+        self.thread
+            .as_ref()
+            .and_then(|thread| thread.thread().name())
+    }
+
+    /// Stops and joins the named thread on Tokio's blocking pool.
+    pub async fn shutdown(mut self) -> Result<u64, RuntimeError> {
+        let thread = self.thread.take().ok_or(RuntimeError::InvalidValue)?;
+        let control = self.control.clone();
+        tokio::task::spawn_blocking(move || {
+            control.stop_blocking()?;
+            thread.join().map_err(|_| RuntimeError::Cancelled)
+        })
+        .await
+        .map_err(|_| RuntimeError::Cancelled)?
+    }
+}
+
+impl Drop for FileLogOwner {
+    fn drop(&mut self) {
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+        let _stopped = self.control.stop_blocking();
+        let _joined = thread.join();
+    }
+}
+
+/// Creates the fixed private log directory or validates an existing one.
+pub fn prepare_log_directory(data_dir: &Path) -> io::Result<PathBuf> {
+    let directory = data_dir.join("logs");
+    match std::fs::symlink_metadata(&directory) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let mut builder = DirBuilder::new();
+            builder.mode(LOG_DIRECTORY_MODE).create(&directory)?;
+        }
+        Err(error) => return Err(error),
+    }
+    let metadata = std::fs::symlink_metadata(&directory)?;
+    if !metadata.file_type().is_dir() || metadata.permissions().mode() & 0o777 != LOG_DIRECTORY_MODE
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "log directory is not a private directory",
+        ));
+    }
+    Ok(directory)
+}
+
 /// Parses the hour of one segment file name.
 #[must_use]
 pub fn segment_hour(name: &str) -> Option<u64> {
@@ -273,7 +511,20 @@ impl LogTarget for FileLogTarget {
         // A restart inside the same hour appends; a fresh hour creates
         // atomically so a rotation is never observable half-done.
         let path = self.segment_path(hour);
-        let file = OpenOptions::new().append(true).create(true).open(&path)?;
+        let file = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .mode(LOG_SEGMENT_MODE)
+            .open(&path)?;
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if !metadata.file_type().is_file()
+            || metadata.permissions().mode() & 0o777 != LOG_SEGMENT_MODE
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "log segment is not a private regular file",
+            ));
+        }
         self.open = Some(file);
         Ok(())
     }
@@ -289,7 +540,7 @@ impl LogTarget for FileLogTarget {
 
     fn retire_before(&mut self, hour: u64, limit: usize) -> io::Result<usize> {
         let mut deleted = 0;
-        for entry in std::fs::read_dir(&self.directory)? {
+        for entry in std::fs::read_dir(&self.directory)?.take(MAX_DIRECTORY_ENTRIES_PER_SWEEP) {
             if deleted >= limit {
                 break;
             }
@@ -393,7 +644,7 @@ mod tests {
             LogRetention::hours(retention).unwrap_or(LogRetention::DEFAULT),
             LogFilter::new(Severity::Debug),
             server_id(),
-            CorrelationSource::new(100),
+            Arc::new(CorrelationSource::new(100)),
         )
     }
 
@@ -471,7 +722,7 @@ mod tests {
         assert!(!handle.try_emit(filtered));
         assert_eq!(handle.dropped(), 2, "a filtered event is not a drop");
         let first = writer.receiver.recv().await;
-        assert!(first.is_some());
+        assert!(matches!(first, Some(LogQueueItem::Event(_))));
         writer.write(&event(LogEventCode::ConnectionAdmitted, Severity::Info, 0));
         writer.report_dropped(UtcSecond::from_unix_seconds(5));
         writer.report_dropped(UtcSecond::from_unix_seconds(6));
@@ -545,6 +796,110 @@ mod tests {
         assert!(directory.join("unrelated.txt").exists());
         assert!(remove_segment(&directory.join("agenc-ircd-9.log")).is_ok_and(|removed| !removed));
         std::fs::remove_dir_all(&directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_lowered_live_retention_is_applied_without_waiting_for_rotation() {
+        let (mut writer, handle) = writer(MemoryTarget::new(), 4);
+        for hour in 0..4 {
+            writer.write(&event(
+                LogEventCode::ProcessStarted,
+                Severity::Info,
+                hour * SECONDS_PER_HOUR,
+            ));
+        }
+        assert_eq!(
+            writer.target.segments.keys().copied().collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+        handle.set_retention(LogRetention::hours(2).unwrap_or(LogRetention::DEFAULT));
+        writer.write(&event(
+            LogEventCode::ReloadApplied,
+            Severity::Info,
+            3 * SECONDS_PER_HOUR,
+        ));
+        assert_eq!(
+            writer.target.segments.keys().copied().collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_named_file_owner_creates_private_paths_flushes_and_joins() -> io::Result<()> {
+        let data_directory = std::env::temp_dir().join(format!(
+            "agenc-ircd-log-owner-{}-{}",
+            std::process::id(),
+            CorrelationSource::new(19).next().get()
+        ));
+        let mut builder = DirBuilder::new();
+        builder.mode(LOG_DIRECTORY_MODE).create(&data_directory)?;
+        let correlation = Arc::new(CorrelationSource::new(20));
+        let (owner, handle) = FileLogOwner::start(
+            &data_directory,
+            LogRetention::DEFAULT,
+            LogFilter::new(Severity::Info),
+            server_id(),
+            correlation,
+        )?;
+        assert_eq!(owner.thread_name(), Some(LOG_OWNER_THREAD_NAME));
+        let log_directory = data_directory.join("logs");
+        let directory_mode = std::fs::metadata(&log_directory)?.permissions().mode() & 0o777;
+        assert_eq!(directory_mode, LOG_DIRECTORY_MODE);
+        assert!(handle.try_emit(event(
+            LogEventCode::ProcessStarted,
+            Severity::Info,
+            2 * SECONDS_PER_HOUR,
+        )));
+        owner
+            .control()
+            .flush()
+            .await
+            .map_err(|_| io::Error::other("flush failed"))?;
+        let segment = log_directory.join("agenc-ircd-2.log");
+        assert!(std::fs::read_to_string(&segment)?.contains("event=process_started"));
+        assert_eq!(
+            std::fs::metadata(&segment)?.permissions().mode() & 0o777,
+            LOG_SEGMENT_MODE
+        );
+        drop(handle);
+        assert_eq!(
+            owner
+                .shutdown()
+                .await
+                .map_err(|_| io::Error::other("shutdown failed"))?,
+            0
+        );
+        std::fs::remove_dir_all(data_directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn existing_broad_or_non_directory_log_paths_are_rejected() -> io::Result<()> {
+        let data_directory = std::env::temp_dir().join(format!(
+            "agenc-ircd-log-mode-{}-{}",
+            std::process::id(),
+            CorrelationSource::new(21).next().get()
+        ));
+        let mut builder = DirBuilder::new();
+        builder.mode(LOG_DIRECTORY_MODE).create(&data_directory)?;
+        let logs = prepare_log_directory(&data_directory)?;
+        std::fs::set_permissions(&logs, std::fs::Permissions::from_mode(0o750))?;
+        assert_eq!(
+            prepare_log_directory(&data_directory)
+                .err()
+                .map(|error| error.kind()),
+            Some(io::ErrorKind::PermissionDenied)
+        );
+        std::fs::remove_dir_all(&logs)?;
+        std::fs::write(&logs, b"not a directory")?;
+        assert_eq!(
+            prepare_log_directory(&data_directory)
+                .err()
+                .map(|error| error.kind()),
+            Some(io::ErrorKind::PermissionDenied)
+        );
+        std::fs::remove_dir_all(data_directory)?;
         Ok(())
     }
 }
