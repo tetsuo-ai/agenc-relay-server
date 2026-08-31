@@ -1,0 +1,28 @@
+schema_version = 1
+stage = 6
+report_kind = "controlled qualification contract"
+
+[[check]]
+id = "deployment-policy"
+command = ["python3", "scripts/check-deploy.py", "check"]
+proves = ["directives", "path allowlist", "Tor key separation", "socket activation absent"]
+
+[[check]]
+id = "systemd-profiles"
+command = ["systemd-analyze", "--root=<temporary-root>", "verify", "agenc-ircd.service"]
+proves = ["direct", "dual", "onion-local-admin", "onion-remote-admin"]
+
+[[check]]
+id = "tor-configuration"
+command = ["tor", "--verify-config", "-f", "<temporary-torrc>"]
+proves = ["SafeSocks=1", "TestSocks=1", "DNSPort=0", "proxy listener absent", "onion Unix target"]
+
+[[check]]
+id = "host-and-secret-modes"
+command = ["cargo", "test", "-p", "agenc-ircd-config", "--test", "host", "--test", "secrets", "--locked"]
+proves = ["directory modes", "locked secret modes", "symlink refusal"]
+
+[[check]]
+id = "crash-signals-and-reopen"
+command = ["cargo", "test", "-p", "agenc-ircd-runtime", "--test", "shutdown", "--test", "bridge_storage", "--locked"]
+proves = ["crash containment", "first and second signals", "database reopen"]

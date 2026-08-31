@@ -1,4 +1,4 @@
-name: Stage 05 implementation checks
+name: Stage 06 implementation checks
 
 on:
   push:
@@ -12,14 +12,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: stage-five-${{ github.workflow }}-${{ github.ref }}
+  group: stage-six-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  stage-five:
-    name: Stage 05 implementation checks
+  stage-six:
+    name: Stage 06 implementation checks
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 120
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
@@ -46,5 +46,10 @@ jobs:
           cargo +1.98.0 install --locked cargo-llvm-cov --version 0.9.0
           cargo +1.98.0 install --locked cargo-fuzz --version 0.13.2
 
-      - name: Run Stage 05 implementation checks
-        run: bash scripts/check-stage-five.sh
+      - name: Install Stage 06 host qualification tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends gcc-aarch64-linux-gnu tor
+
+      - name: Run Stage 06 implementation checks
+        run: bash scripts/check-stage-six.sh
