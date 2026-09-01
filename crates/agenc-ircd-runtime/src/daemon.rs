@@ -2666,6 +2666,26 @@ const OWNER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 type LogFlushFuture = Pin<Box<dyn Future<Output = Result<(), ShutdownFailure>> + Send + 'static>>;
 
+async fn flush_admin_and_state<D, A, S>(
+    acknowledgements: &mut Vec<FlushAcknowledgement>,
+    drain: D,
+    admin_flush: A,
+    state_flush: S,
+) -> Result<(), ShutdownFailure>
+where
+    D: Future<Output = Result<Vec<FlushAcknowledgement>, AdminLifecycleFailure>>,
+    A: Future<Output = Result<(), AdminLifecycleFailure>>,
+    S: Future<Output = Result<(), ShutdownFailure>>,
+{
+    *acknowledgements = drain.await.map_err(map_admin_lifecycle)?;
+    admin_flush.await.map_err(map_admin_lifecycle)?;
+    state_flush.await?;
+    for acknowledgement in acknowledgements {
+        acknowledgement.wait().await;
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 struct TrackedLogFlush {
     future: Option<LogFlushFuture>,
@@ -2792,11 +2812,13 @@ impl ShutdownHooks for RuntimeShutdownHooks<'_> {
                 request_lifecycle(self.lifecycle, LifecyclePhase::Drain).await
             }
             ShutdownPhase::Flush => {
-                self.admin.flush().await.map_err(map_admin_lifecycle)?;
-                request_lifecycle(self.lifecycle, LifecyclePhase::Flush).await?;
-                for acknowledgement in &self.admin_acknowledgements {
-                    acknowledgement.wait().await;
-                }
+                flush_admin_and_state(
+                    &mut self.admin_acknowledgements,
+                    self.admin.drain(),
+                    self.admin.flush(),
+                    request_lifecycle(self.lifecycle, LifecyclePhase::Flush),
+                )
+                .await?;
                 if !self.listener_joined {
                     (&mut *self.listener_exited)
                         .await
@@ -3564,6 +3586,52 @@ mod tests {
             ),
             Err(DaemonError::ShutdownTimeout)
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn flush_reacquires_admin_acknowledgements_after_a_dropped_drain()
+    -> Result<(), RuntimeError> {
+        let acknowledgement = FlushAcknowledgement::pending();
+        let retained = acknowledgement.clone();
+        let (_release, wait) = oneshot::channel::<()>();
+        let first_drain = async move {
+            let _released = wait.await;
+            Ok::<_, AdminLifecycleFailure>(vec![retained])
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_millis(5), first_drain)
+                .await
+                .is_err()
+        );
+
+        let retention_runs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_runs = std::sync::Arc::clone(&retention_runs);
+        let repeated = acknowledgement.clone();
+        let mut acknowledgements = Vec::new();
+        {
+            let flush = flush_admin_and_state(
+                &mut acknowledgements,
+                async move { Ok(vec![repeated]) },
+                async move {
+                    observed_runs.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    Ok(())
+                },
+                async { Ok(()) },
+            );
+            tokio::pin!(flush);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(5), &mut flush)
+                    .await
+                    .is_err(),
+                "flush must retain the reacquired writer acknowledgement"
+            );
+            assert_eq!(retention_runs.load(std::sync::atomic::Ordering::Acquire), 1);
+            acknowledgement.acknowledge();
+            flush.await.map_err(|_| RuntimeError::Cancelled)?;
+        }
+        assert_eq!(acknowledgements.len(), 1);
+        assert_eq!(retention_runs.load(std::sync::atomic::Ordering::Acquire), 1);
         Ok(())
     }
 
