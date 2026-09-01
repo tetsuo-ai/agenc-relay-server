@@ -136,6 +136,7 @@ fn protected_file_status(
         return Err(ConfigError::FileRejected);
     }
     // `nlink_t` is `u64` on x86_64 Linux and `u32` on AArch64 Linux.
+    // agenc-review: allow owner=config reviewed=2026-09-01 reason=nlink_t is u64 on x86_64 Linux and u32 on AArch64 Linux so the widening conversion is required on one supported target and a no-op on the other
     #[allow(clippy::useless_conversion)]
     let links = u64::from(status.st_nlink);
     Ok(ProtectedFileStatus {
