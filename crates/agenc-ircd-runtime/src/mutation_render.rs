@@ -1693,7 +1693,10 @@ mod tests {
             member,
             CanonicalCommand::join(vec![ChannelTarget::new(name.clone(), false)])?,
             &registered_admission(member.user_id)?,
-            None,
+            Some(ExternalInputs {
+                utc_now: Some(UtcSecond::from_unix_seconds(1_700_000_001)),
+                ..ExternalInputs::default()
+            }),
         )?;
         let existing_entry = EntryId::from_bytes([1; 16]);
         apply_command(

@@ -8,7 +8,7 @@ use agenc_ircd_crypto::{
     RollbackGuardRootKey, StorageDigest, StorageMasterKey, StorageTable, TrackedStateHasher,
     derive_storage_index, tracked_record_commitment,
 };
-use agenc_ircd_types::{ChannelName, Generation, Nickname, RecoveryEpoch, Revision, TransactionId};
+use agenc_ircd_types::{Generation, Nickname, RecoveryEpoch, Revision, TransactionId};
 use redb::{
     Database, Durability, ReadableDatabase as _, ReadableTable as _, ReadableTableMetadata as _,
     TableDefinition,
@@ -18,17 +18,18 @@ use zeroize::Zeroizing;
 
 use crate::engine::{StorageEngine, StorageOpenConfig};
 use crate::{
-    AccountRecordBody, BACKUP_FIXED_STREAM_BYTES, BackupRecord, BackupTrustKey, ChannelRecordBody,
-    DatabaseHeader, ExistingRecord, INTEGRITY_CHECKPOINT_BYTES, IntegrityCheckpoint,
-    IntegrityManifest, IntegrityRecordVersion, MAX_CONSTRUCTION_PLAN_BYTES,
-    MIN_SEALED_RECORD_BYTES, PersistentRecordValue, ReadPlan, RecordMutation, RecordReference,
-    STATE_META_BYTES, SealedRecord, StateMetaTbs, StorageAccountingLimits, StorageConstruction,
-    StorageConstructionAction, StorageConstructionCursor, StorageConstructionKind,
-    StorageConstructionPlanEntry, StorageConstructionSource, StorageConstructionSourceKind,
-    StorageError, StorageFaultBoundary, StorageFaultSite, StorageMutationBatch,
-    StorageMutationHead, StorageOperationCompletion, StorageOperationIdentity, StoragePort,
-    StoredKey, TableId, VerifiedBackup, construction_plan_hash, logical_meta_charge,
-    logical_record_charge, validate_record_plaintext, verify_backup,
+    AccountRecordBody, BACKUP_FIXED_STREAM_BYTES, BackupRecord, BackupTrustKey,
+    ChannelNameRecordBody, ChannelRecordBody, DatabaseHeader, ExistingRecord,
+    INTEGRITY_CHECKPOINT_BYTES, IntegrityCheckpoint, IntegrityManifest, IntegrityRecordVersion,
+    MAX_CONSTRUCTION_PLAN_BYTES, MIN_SEALED_RECORD_BYTES, PersistentRecordValue, ReadPlan,
+    RecordMutation, RecordReference, STATE_META_BYTES, SealedRecord, StateMetaTbs,
+    StorageAccountingLimits, StorageConstruction, StorageConstructionAction,
+    StorageConstructionCursor, StorageConstructionKind, StorageConstructionPlanEntry,
+    StorageConstructionSource, StorageConstructionSourceKind, StorageError, StorageFaultBoundary,
+    StorageFaultSite, StorageMutationBatch, StorageMutationHead, StorageOperationCompletion,
+    StorageOperationIdentity, StoragePort, StoredKey, TableId, VerifiedBackup,
+    construction_plan_hash, logical_meta_charge, logical_record_charge, validate_record_plaintext,
+    verify_backup,
 };
 
 /// Fixed version-one source logical/backup ceiling.
@@ -1689,10 +1690,8 @@ fn rekey_target_stored_key(
         }
         TableId::ChannelName => {
             let value = PersistentRecordValue::decode(source.table(), record.plaintext())?;
-            let spelling =
-                std::str::from_utf8(value.body()).map_err(|_| StorageError::InvalidEncoding)?;
-            ChannelName::parse(spelling)
-                .map_err(|_| StorageError::InvalidEncoding)?
+            ChannelNameRecordBody::decode(value.body())?
+                .name
                 .canonical()
                 .as_bytes()
                 .to_vec()
@@ -3171,6 +3170,15 @@ fn transform_channel_name(
     {
         return Err(StorageError::StaleState);
     }
+    let channel_body = ChannelRecordBody::decode(channel.body())?;
+    let name_body = ChannelNameRecordBody::decode(name.body())?;
+    if name_body.name != channel_body.name
+        || name_body
+            .channel_id
+            .is_some_and(|channel_id| channel_id != channel_body.channel_id)
+    {
+        return Err(StorageError::StaleState);
+    }
     let revision = channel
         .revision()
         .checked_add(1)
@@ -4165,7 +4173,7 @@ mod tests {
         );
         assert_eq!(
             recovery_transform_prefix(TableId::Session, &account_plaintext),
-            Err(StorageError::InvalidEncoding)
+            Err(StorageError::UnsupportedVersion)
         );
         Ok(())
     }
@@ -4836,7 +4844,7 @@ mod tests {
             0,
             None,
             vec![reference],
-            b"#restored".to_vec(),
+            b"#fixture".to_vec(),
         )?
         .encode()?;
         let sources = [
@@ -4851,7 +4859,7 @@ mod tests {
             transformer.transform(StorageConstructionKind::Restore, &entry, &sources)?;
         let name = PersistentRecordValue::decode(TableId::ChannelName, &transformed)?;
         assert_eq!(name.revision(), 8);
-        assert_eq!(name.body(), b"#restored");
+        assert_eq!(name.body(), b"#fixture");
         Ok(())
     }
 

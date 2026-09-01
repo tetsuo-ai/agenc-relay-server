@@ -81,7 +81,7 @@ fn domain_body(table: TableId, kind: u16, bytes: Vec<u8>) -> Result<Vec<u8>, Sto
     if kind == 1
         && matches!(
             table,
-            TableId::Account | TableId::Channel | TableId::Sanction
+            TableId::Account | TableId::Session | TableId::Channel | TableId::Sanction
         )
     {
         return crate::domain_records::live_body(table, bytes.first().copied().unwrap_or(1));
@@ -2535,7 +2535,7 @@ fn restore_transform_covers_every_closed_action_and_source_mismatch() -> Result<
             TableId::Channel,
             StoredKey::new(vec![4; 16])?,
         )?],
-        b"#channel".to_vec(),
+        b"#fixture".to_vec(),
     )?
     .encode()?;
     let (name_reference, name_source) = opened_domain_source(

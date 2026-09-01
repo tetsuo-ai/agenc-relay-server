@@ -2250,10 +2250,7 @@ impl DomainState {
         targets: &[crate::ChannelTarget],
         requests: &mut Vec<ExternalInputRequest>,
     ) -> Result<(), DomainError> {
-        if targets
-            .iter()
-            .any(|target| !self.channel_names.contains_key(target.name()))
-        {
+        if !targets.is_empty() {
             push_request(requests, RequestShape::Utc)?;
         }
         if targets.iter().any(|target| {
@@ -2497,8 +2494,14 @@ impl DomainState {
                 key_ok,
                 plan.monotonic,
             )?;
-            let membership =
-                Membership::new(plan.user_id, plan.principal.account_id(), Role::Member);
+            let joined_at = plan.utc.ok_or(DomainError::ExternalInputMismatch)?;
+            let membership = Membership::joined(
+                plan.user_id,
+                plan.principal.account_id(),
+                Role::Member,
+                crate::model::next_revision(self.revision)?,
+                joined_at,
+            );
             let mut membership = membership;
             membership.effective_role = channel.effective_role(membership);
             plan.mutations.push(Mutation::JoinExisting {
@@ -2544,7 +2547,13 @@ impl DomainState {
         }
         let created_at = plan.utc.ok_or(DomainError::ExternalInputMismatch)?;
         let revision = crate::model::next_revision(self.revision)?;
-        let membership = Membership::new(plan.user_id, plan.principal.account_id(), Role::Owner);
+        let membership = Membership::joined(
+            plan.user_id,
+            plan.principal.account_id(),
+            Role::Owner,
+            revision,
+            created_at,
+        );
         let channel = crate::ChannelState::new_ephemeral(
             channel_id,
             target.into_name(),
@@ -2792,6 +2801,8 @@ impl DomainState {
             .monotonic_now
             .ok_or(DomainError::ExternalInputMismatch)?;
         let expires_at = invite_expiry(now)?;
+        let created_at_utc = inputs.utc_now.ok_or(DomainError::ExternalInputMismatch)?;
+        let expires_at_utc = created_at_utc.checked_add(600)?;
         let channel = self
             .channels
             .get(&channel_id)
@@ -2811,6 +2822,7 @@ impl DomainState {
             inviter: user_id,
             creation_revision: crate::model::next_revision(self.revision)?,
             expires_at,
+            expires_at_utc,
         };
         let mut recipients = RecipientSet::new();
         recipients.insert(user_id);
@@ -4109,6 +4121,7 @@ fn topic_requests(requests: &mut Vec<ExternalInputRequest>) -> Result<(), Domain
 
 fn invite_requests(requests: &mut Vec<ExternalInputRequest>) -> Result<(), DomainError> {
     push_request(requests, RequestShape::Monotonic)?;
+    push_request(requests, RequestShape::Utc)?;
     push_request(requests, RequestShape::Entropy(EntropyPurpose::Invite, 16))
 }
 
@@ -7599,6 +7612,7 @@ mod tests {
             inviter: fixture.owner.user_id,
             creation_revision: revision,
             expires_at: MonotonicTick::from_ticks(100),
+            expires_at_utc: UtcSecond::from_unix_seconds(610),
         };
         fixture
             .state
@@ -7639,6 +7653,7 @@ mod tests {
                     inviter: fixture.owner.user_id,
                     creation_revision: revision,
                     expires_at: MonotonicTick::from_ticks(100),
+                    expires_at_utc: UtcSecond::from_unix_seconds(610),
                 },
                 expired_invites: Vec::new(),
             },
@@ -7892,6 +7907,7 @@ mod tests {
                 inviter: fixture.owner.user_id,
                 creation_revision: Revision::new(1)?,
                 expires_at: MonotonicTick::from_ticks(100),
+                expires_at_utc: UtcSecond::from_unix_seconds(610),
             },
         );
         assert_eq!(
@@ -8236,6 +8252,7 @@ mod tests {
     -> Result<(), DomainError> {
         let make_inputs = |invite_id, now| ExternalInputs {
             monotonic_now: Some(MonotonicTick::from_ticks(now)),
+            utc_now: Some(UtcSecond::from_unix_seconds(10)),
             invite_ids: vec![invite_id],
             ..ExternalInputs::default()
         };
@@ -8256,6 +8273,7 @@ mod tests {
                     inviter: collision.owner.user_id,
                     creation_revision: Revision::new(1)?,
                     expires_at: MonotonicTick::from_ticks(100),
+                    expires_at_utc: UtcSecond::from_unix_seconds(610),
                 },
             );
         assert_eq!(
@@ -8288,6 +8306,7 @@ mod tests {
                     inviter: expired.owner.user_id,
                     creation_revision: Revision::new(1)?,
                     expires_at: MonotonicTick::from_ticks(10),
+                    expires_at_utc: UtcSecond::from_unix_seconds(610),
                 },
             );
         assert!(matches!(
@@ -8324,6 +8343,7 @@ mod tests {
                     inviter: channel_limited.owner.user_id,
                     creation_revision: Revision::new(1)?,
                     expires_at: MonotonicTick::from_ticks(1_000),
+                    expires_at_utc: UtcSecond::from_unix_seconds(610),
                 },
             );
         }
@@ -8365,6 +8385,7 @@ mod tests {
                     inviter: principal_limited.owner.user_id,
                     creation_revision: Revision::new(1)?,
                     expires_at: MonotonicTick::from_ticks(1_000),
+                    expires_at_utc: UtcSecond::from_unix_seconds(610),
                 },
             );
         }
@@ -8898,6 +8919,7 @@ mod tests {
                     inviter: fixture.owner.user_id,
                     creation_revision: Revision::new(1)?,
                     expires_at: MonotonicTick::from_ticks(10),
+                    expires_at_utc: UtcSecond::from_unix_seconds(610),
                 },
             );
         assert_eq!(
@@ -9092,6 +9114,7 @@ mod tests {
                         inviter: fixture.owner.user_id,
                         creation_revision,
                         expires_at: MonotonicTick::from_ticks(5),
+                        expires_at_utc: UtcSecond::from_unix_seconds(610),
                     },
                 ),
                 (
@@ -9102,6 +9125,7 @@ mod tests {
                         inviter: fixture.owner.user_id,
                         creation_revision,
                         expires_at: MonotonicTick::from_ticks(6),
+                        expires_at_utc: UtcSecond::from_unix_seconds(610),
                     },
                 ),
             ]);
@@ -9119,6 +9143,7 @@ mod tests {
                     inviter: fixture.owner.user_id,
                     creation_revision,
                     expires_at: MonotonicTick::from_ticks(4),
+                    expires_at_utc: UtcSecond::from_unix_seconds(610),
                 },
             );
 

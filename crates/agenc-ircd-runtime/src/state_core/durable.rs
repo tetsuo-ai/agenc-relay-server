@@ -222,6 +222,10 @@ pub struct AccountingCeilings {
 
 /// Full durable entity after-image coupled to one committed administrative
 /// mutation audit event.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "administrative after-images stay allocation-free after bounded projection"
+)]
 pub(crate) enum AdminMutationAfterImage {
     Account(DurableAccount),
     Channel(DurableChannel),
@@ -1143,7 +1147,7 @@ impl Projection<'_> {
             0,
             None,
             Vec::new(),
-            ChannelRecordBody::encode(channel)?,
+            ChannelRecordBody::encode_legacy(channel)?,
         )?;
         self.put(TableId::Channel, key.clone(), value)?;
         if self.index.channel_name_row(channel.channel_id).is_some() {

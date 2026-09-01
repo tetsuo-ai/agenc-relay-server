@@ -15,14 +15,14 @@ use agenc_ircd_auth::{
 };
 use agenc_ircd_domain::{DomainState, DurableAccount, DurableChannel, DurableSanction};
 use agenc_ircd_storage::{
-    AccountRecordBody, ChannelRecordBody, ExistingRecord, LIVE_RECORD_KIND,
+    AccountRecordBody, ChannelNameRecordBody, ChannelRecordBody, ExistingRecord, LIVE_RECORD_KIND,
     LOGIN_INDEX_KEY_STATE_KEY, LoginIndexKeyState, LoginIndexStoredKey, LoginIndexValue,
     LoginIndexValueKind, MAX_STORED_KEY_BYTES, OPAQUE_FAKE_RECORD_KEY, PersistentRecordValue,
     ReadPlan, SanctionRecordBody, SealedRecord, StorageError, StoragePort, StoredKey, TableId,
 };
 use agenc_ircd_types::{
-    AccountId, ChannelInstanceId, ChannelName, InviteId, MonotonicTick, Nickname, Revision,
-    TransactionId, UtcSecond,
+    AccountId, ChannelInstanceId, InviteId, MonotonicTick, Nickname, Revision, TransactionId,
+    UtcSecond,
 };
 
 use crate::RuntimeError;
@@ -1014,13 +1014,8 @@ impl Scan {
     fn bind_channel_names(&mut self, keys: &KeyDeriver) -> Result<(), RuntimeError> {
         let mut named = BTreeSet::new();
         for (row_key, value) in &self.channel_name_rows {
-            let spelling = std::str::from_utf8(value.body())
-                .map_err(|_| RuntimeError::Storage(StorageError::InvalidEncoding))?;
-            let name = ChannelName::parse(spelling)
-                .map_err(|_| RuntimeError::Storage(StorageError::InvalidEncoding))?;
-            let name_value = agenc_ircd_domain::ChannelNameValue::parse(name.presentation())
-                .map_err(|_| RuntimeError::Storage(StorageError::InvalidEncoding))?;
-            if keys.channel_name_key(&name_value)? != *row_key {
+            let binding = ChannelNameRecordBody::decode(value.body())?;
+            if keys.channel_name_key(&binding.name)? != *row_key {
                 return Err(RuntimeError::Storage(StorageError::StaleState));
             }
             let [reference] = value.references() else {
@@ -1035,7 +1030,12 @@ impl Scan {
                 .channels
                 .get(&channel_id)
                 .ok_or(RuntimeError::Storage(StorageError::StaleState))?;
-            if channel.name.canonical() != name.canonical() || !named.insert(channel_id) {
+            if binding
+                .channel_id
+                .is_some_and(|bound_id| bound_id != channel_id)
+                || channel.name != binding.name
+                || !named.insert(channel_id)
+            {
                 return Err(RuntimeError::Storage(StorageError::StaleState));
             }
             self.index.record_channel_name(channel_id, row_key.clone());

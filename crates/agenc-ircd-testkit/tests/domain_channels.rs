@@ -73,7 +73,10 @@ fn join_existing(
             false,
         )])?,
         &admission,
-        None,
+        Some(ExternalInputs {
+            utc_now: Some(UtcSecond::from_unix_seconds(1_700_100_001)),
+            ..ExternalInputs::default()
+        }),
     )?;
     Ok(())
 }

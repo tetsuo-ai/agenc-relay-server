@@ -48,7 +48,7 @@ fn domain_body(table: TableId, kind: u16, byte: u8) -> Result<Vec<u8>, StorageEr
     if kind == 1
         && matches!(
             table,
-            TableId::Account | TableId::Channel | TableId::Sanction
+            TableId::Account | TableId::Session | TableId::Channel | TableId::Sanction
         )
     {
         return crate::domain_records::live_body(table, byte);

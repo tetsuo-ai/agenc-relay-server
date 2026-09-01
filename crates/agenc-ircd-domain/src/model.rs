@@ -913,6 +913,8 @@ pub struct Membership {
     pub(crate) account_id: Option<AccountId>,
     pub(crate) session_role: Role,
     pub(crate) effective_role: Role,
+    pub(crate) membership_revision: Revision,
+    pub(crate) joined_at: UtcSecond,
 }
 
 impl Membership {
@@ -924,6 +926,27 @@ impl Membership {
             account_id,
             session_role: role,
             effective_role: role,
+            membership_revision: Revision::INITIAL,
+            joined_at: UtcSecond::UNIX_EPOCH,
+        }
+    }
+
+    /// Creates a membership with its accepted channel revision and UTC second.
+    #[must_use]
+    pub const fn joined(
+        user_id: UserId,
+        account_id: Option<AccountId>,
+        role: Role,
+        membership_revision: Revision,
+        joined_at: UtcSecond,
+    ) -> Self {
+        Self {
+            user_id,
+            account_id,
+            session_role: role,
+            effective_role: role,
+            membership_revision,
+            joined_at,
         }
     }
 
@@ -1061,6 +1084,11 @@ pub(crate) struct Invite {
     pub(crate) inviter: UserId,
     pub(crate) creation_revision: Revision,
     pub(crate) expires_at: MonotonicTick,
+    #[expect(
+        dead_code,
+        reason = "read by the complete channel projector at the Stage 06 writer cutover"
+    )]
+    pub(crate) expires_at_utc: UtcSecond,
 }
 
 /// Process-local, single-use account-deletion challenge bound to one session fence.
@@ -1335,12 +1363,40 @@ impl ChannelState {
 
     fn identities_and_limits_are_valid(&self) -> bool {
         self.scope == self.name.scope()
-            && self.memberships.len() <= MAX_MEMBERS_PER_CHANNEL
+            && self.lifetime_shape_is_valid()
+            && self.collection_limits_are_valid()
+            && self.membership_identities_are_valid()
+            && self.invite_identities_are_valid()
+    }
+
+    fn lifetime_shape_is_valid(&self) -> bool {
+        self.persistence == PersistencePolicy::Registered
+            || (!self.memberships.is_empty() && self.role_grants.is_empty())
+    }
+
+    fn collection_limits_are_valid(&self) -> bool {
+        self.memberships.len() <= MAX_MEMBERS_PER_CHANNEL
             && self.role_grants.len() <= MAX_ROLE_GRANTS_PER_CHANNEL
             && self.bans.len() <= MAX_MASK_ENTRIES_PER_LIST
             && self.exceptions.len() <= MAX_MASK_ENTRIES_PER_LIST
             && self.invite_exceptions.len() <= MAX_MASK_ENTRIES_PER_LIST
             && self.invites.len() <= MAX_INVITES_PER_CHANNEL
+    }
+
+    fn membership_identities_are_valid(&self) -> bool {
+        self.memberships.iter().all(|(user_id, membership)| {
+            *user_id == membership.user_id
+                && membership.membership_revision.get() != 0
+                && membership.membership_revision <= self.revision
+        })
+    }
+
+    fn invite_identities_are_valid(&self) -> bool {
+        self.invites.iter().all(|(invite_id, invite)| {
+            *invite_id == invite.invite_id
+                && invite.creation_revision.get() != 0
+                && invite.creation_revision <= self.revision
+        })
     }
 
     fn registered_owner_is_preserved(&self) -> bool {
@@ -2384,6 +2440,7 @@ mod tests {
                     inviter: UserId::from_bytes(id(1)),
                     creation_revision: Revision::new(1)?,
                     expires_at: MonotonicTick::from_ticks(100),
+                    expires_at_utc: UtcSecond::from_unix_seconds(610),
                 },
             );
         }
@@ -2804,6 +2861,7 @@ mod tests {
                     inviter: UserId::from_bytes(id(28)),
                     creation_revision: state.revision,
                     expires_at: MonotonicTick::from_ticks(100),
+                    expires_at_utc: UtcSecond::from_unix_seconds(610),
                 },
             );
         assert_eq!(state.validate(), Err(DomainError::InvariantViolation));
@@ -2823,6 +2881,7 @@ mod tests {
                     inviter: user_id,
                     creation_revision: state.revision,
                     expires_at: MonotonicTick::from_ticks(100),
+                    expires_at_utc: UtcSecond::from_unix_seconds(610),
                 },
             );
         assert_eq!(state.validate(), Err(DomainError::InvariantViolation));

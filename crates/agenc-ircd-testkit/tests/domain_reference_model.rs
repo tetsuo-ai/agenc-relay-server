@@ -1703,6 +1703,9 @@ fn apply_production(
             ),
             Some(ExternalInputs {
                 monotonic_now: Some(MonotonicTick::from_ticks(*monotonic_now)),
+                utc_now: Some(UtcSecond::from_unix_seconds(
+                    1_700_500_000_u64.saturating_add(*monotonic_now),
+                )),
                 invite_ids: vec![InviteId::from_bytes(bytes(*invite))],
                 ..ExternalInputs::default()
             }),
@@ -1751,16 +1754,19 @@ fn apply_production_join(
     instance: u8,
 ) -> Result<(), DomainError> {
     let channel_name = ChannelNameValue::parse(channel)?;
-    let external = state
+    let channel_ids = state
         .resolve_channel(&channel_name)
         .is_none()
-        .then_some(ExternalInputs {
-            utc_now: Some(UtcSecond::from_unix_seconds(
-                1_700_500_000_u64.saturating_add(u64::from(instance)),
-            )),
-            channel_ids: vec![channel_id(instance)],
-            ..ExternalInputs::default()
-        });
+        .then(|| channel_id(instance))
+        .into_iter()
+        .collect();
+    let external = Some(ExternalInputs {
+        utc_now: Some(UtcSecond::from_unix_seconds(
+            1_700_500_000_u64.saturating_add(u64::from(instance)),
+        )),
+        channel_ids,
+        ..ExternalInputs::default()
+    });
     apply_production_command(
         state,
         seed,

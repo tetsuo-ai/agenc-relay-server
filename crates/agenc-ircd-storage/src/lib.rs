@@ -56,8 +56,10 @@ pub use control::{
     verify_guard_pair,
 };
 pub use domain_records::{
-    AccountRecordBody, ChannelRecordBody, LIVE_RECORD_KIND, MAX_ACCOUNT_RECORD_BODY_BYTES,
-    MAX_CHANNEL_RECORD_BODY_BYTES, MAX_SANCTION_RECORD_BODY_BYTES, SanctionRecordBody,
+    AccountRecordBody, ChannelNameRecordBody, ChannelRecordBody, DecodedChannelNameRecord,
+    LIVE_RECORD_KIND, MAX_ACCOUNT_RECORD_BODY_BYTES, MAX_CHANNEL_NAME_RECORD_BODY_BYTES,
+    MAX_CHANNEL_RECORD_BODY_BYTES, MAX_SANCTION_RECORD_BODY_BYTES, MAX_SESSION_RECORD_BODY_BYTES,
+    SanctionRecordBody, SessionRecordBody,
 };
 pub use engine::{
     CheckpointOutcome, CheckpointReceipt, RecoveredStorageState, StorageEngineLimits,

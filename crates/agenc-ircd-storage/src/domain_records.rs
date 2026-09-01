@@ -7,16 +7,18 @@
 //! could not have produced.
 
 use agenc_ircd_domain::{
-    AccountLabelValue, ChannelKeyVerifier, ChannelModes, ChannelNameValue, ChannelScope,
-    ContentPolicy, DirectMessagePolicy, DurableAccount, DurableChannel, DurableListEntry,
-    DurableSanction, DurableTopic, GuestDirectMessagePolicy, HistoryPolicy,
-    MAX_CONTACTS_PER_ACCOUNT, MAX_MASK_ENTRIES_PER_LIST, MAX_RESERVED_NICKNAMES,
-    MAX_ROLE_GRANTS_PER_CHANNEL, ModerationAction, ModerationReasonCode, NicknameValue,
-    PersistencePolicy, PresencePolicy, Principal, Role, Visibility,
+    AccountLabelValue, AwayText, ChannelKeyVerifier, ChannelModes, ChannelNameValue, ChannelScope,
+    ContentPolicy, DirectMessagePolicy, DisplayNameValue, DurableAccount, DurableChannel,
+    DurableInvite, DurableListEntry, DurableMembership, DurableSanction, DurableSession,
+    DurableTopic, GuestDirectMessagePolicy, HistoryPolicy, MAX_CHANNELS_PER_SESSION,
+    MAX_CONTACTS_PER_ACCOUNT, MAX_INVITES_PER_CHANNEL, MAX_MASK_ENTRIES_PER_LIST,
+    MAX_MEMBERS_PER_CHANNEL, MAX_RESERVED_NICKNAMES, MAX_ROLE_GRANTS_PER_CHANNEL, ModerationAction,
+    ModerationReasonCode, NicknameValue, PersistencePolicy, PresencePolicy, Principal, Role,
+    Visibility,
 };
 use agenc_ircd_types::{
-    AccountId, AccountRandomId, ChannelInstanceId, EntryId, Generation, MAX_TYPED_MASK_BYTES,
-    MessageId, Revision, UserId, UtcSecond,
+    AccountId, AccountRandomId, ChannelInstanceId, ControlPolicy, EntryId, Generation, InviteId,
+    MAX_TYPED_MASK_BYTES, MessageId, PublicCloak, Revision, ServerId, SessionId, UserId, UtcSecond,
 };
 
 use crate::StorageError;
@@ -30,6 +32,8 @@ const ACCOUNT_BODY_VERSION: u16 = 2;
 const CHANNEL_KEY_BODY_VERSION: u16 = 2;
 /// Channel bodies gained durable administrative quarantine state in version three.
 const CHANNEL_BODY_VERSION: u16 = 3;
+/// Channel bodies gained complete membership and invite state in version four.
+const COMPLETE_CHANNEL_BODY_VERSION: u16 = 4;
 /// Record kind of a live (non-tombstone) domain row.
 pub const LIVE_RECORD_KIND: u16 = 1;
 
@@ -40,9 +44,12 @@ const MAX_NICKNAME_BYTES: usize = 32;
 const MAX_CHANNEL_NAME_BYTES: usize = 64;
 const MAX_TOPIC_BYTES: usize = 1_024;
 const MAX_REASON_BYTES: usize = 512;
+const MAX_AWAY_BYTES: usize = 256;
 const VECTOR_PREFIX_BYTES: usize = 4;
 const LIST_ENTRY_BYTES: usize =
     IDENTIFIER_BYTES + VECTOR_PREFIX_BYTES + MAX_TYPED_MASK_BYTES + PRINCIPAL_BYTES + 8;
+const MEMBERSHIP_BYTES: usize = IDENTIFIER_BYTES + 1 + IDENTIFIER_BYTES + 2 + 8 + 8;
+const INVITE_BYTES: usize = IDENTIFIER_BYTES + PRINCIPAL_BYTES + IDENTIFIER_BYTES + 8 + 8;
 
 /// Exact ceiling of one encoded account body at every domain limit.
 pub const MAX_ACCOUNT_RECORD_BODY_BYTES: usize = 2
@@ -59,6 +66,30 @@ pub const MAX_ACCOUNT_RECORD_BODY_BYTES: usize = 2
     + 8
     + 1
     + 8;
+/// Exact ceiling of one encoded logical-session body at every domain limit.
+pub const MAX_SESSION_RECORD_BODY_BYTES: usize = 2
+    + 3 * IDENTIFIER_BYTES
+    + 1
+    + IDENTIFIER_BYTES
+    + 2 * 8
+    + VECTOR_PREFIX_BYTES
+    + MAX_NICKNAME_BYTES
+    + VECTOR_PREFIX_BYTES
+    + 64
+    + 10
+    + 16
+    + 1
+    + VECTOR_PREFIX_BYTES
+    + MAX_AWAY_BYTES
+    + 1
+    + 32
+    + 32
+    + VECTOR_PREFIX_BYTES
+    + MAX_CHANNELS_PER_SESSION * IDENTIFIER_BYTES
+    + 2 * 8;
+/// Exact ceiling of one typed channel-name index body.
+pub const MAX_CHANNEL_NAME_RECORD_BODY_BYTES: usize =
+    2 + IDENTIFIER_BYTES + VECTOR_PREFIX_BYTES + MAX_CHANNEL_NAME_BYTES;
 /// Exact ceiling of one encoded channel body at every domain limit.
 pub const MAX_CHANNEL_RECORD_BODY_BYTES: usize = 2
     + IDENTIFIER_BYTES
@@ -80,8 +111,14 @@ pub const MAX_CHANNEL_RECORD_BODY_BYTES: usize = 2
     + IDENTIFIER_BYTES
     + 8
     + VECTOR_PREFIX_BYTES
+    + MAX_MEMBERS_PER_CHANNEL * MEMBERSHIP_BYTES
+    + VECTOR_PREFIX_BYTES
     + MAX_ROLE_GRANTS_PER_CHANNEL * (IDENTIFIER_BYTES + 1)
     + 3 * (VECTOR_PREFIX_BYTES + MAX_MASK_ENTRIES_PER_LIST * LIST_ENTRY_BYTES)
+    + VECTOR_PREFIX_BYTES
+    + MAX_INVITES_PER_CHANNEL * INVITE_BYTES
+    + VECTOR_PREFIX_BYTES
+    + MAX_MEMBERS_PER_CHANNEL * IDENTIFIER_BYTES
     + 2;
 /// Exact ceiling of one encoded sanction body at every domain limit.
 pub const MAX_SANCTION_RECORD_BODY_BYTES: usize = 2
@@ -199,34 +236,221 @@ impl AccountRecordBody {
     }
 }
 
+/// Codec for live `session` rows.
+pub struct SessionRecordBody;
+
+impl SessionRecordBody {
+    /// Encodes one authoritative logical-session projection.
+    pub fn encode(session: &DurableSession) -> Result<Vec<u8>, StorageError> {
+        validate_session(session)?;
+        let mut encoder = Encoder::with_capacity(0, MAX_SESSION_RECORD_BODY_BYTES)?;
+        encoder.put_u16(DOMAIN_BODY_VERSION)?;
+        encoder.put_fixed(session.session_id.as_bytes())?;
+        encoder.put_fixed(session.user_id.as_bytes())?;
+        encoder.put_fixed(session.home_server_id.as_bytes())?;
+        put_optional_account_id(&mut encoder, session.account_id)?;
+        encoder.put_u64(session.account_session_generation.get())?;
+        encoder.put_u64(session.generation.get())?;
+        encoder.put_vector_u32(session.nickname.presentation().as_bytes())?;
+        encoder.put_vector_u32(session.display_name.as_str().as_bytes())?;
+        encoder.put_fixed(session.public_cloak.user_component())?;
+        encoder.put_fixed(session.public_cloak.host_component())?;
+        put_optional_text(&mut encoder, session.away.as_deref())?;
+        encoder.put_fixed(&[bool_byte(session.operator_notices)])?;
+        encoder.put_fixed(&session.connection_nonce)?;
+        encoder.put_fixed(&session.negotiated_capability_hash)?;
+        put_count(&mut encoder, session.joined_channels.len())?;
+        for channel_id in &session.joined_channels {
+            encoder.put_fixed(channel_id.as_bytes())?;
+        }
+        encoder.put_u64(session.created_at_utc.get())?;
+        encoder.put_u64(session.revision.get())?;
+        Ok(encoder.finish())
+    }
+
+    /// Parses one full-consumption authoritative logical-session body.
+    pub fn decode(encoded: &[u8]) -> Result<DurableSession, StorageError> {
+        if encoded.len() > MAX_SESSION_RECORD_BODY_BYTES {
+            return Err(StorageError::LimitExceeded);
+        }
+        let mut decoder = Decoder::new(encoded);
+        expect_version(&mut decoder)?;
+        let session_id = SessionId::from_bytes(decoder.array()?);
+        let user_id = UserId::from_bytes(decoder.array()?);
+        let home_server_id = ServerId::from_bytes(decoder.array()?);
+        let account_id = optional_account_id(&mut decoder)?;
+        let account_session_generation = generation(&mut decoder)?;
+        let session_generation = generation(&mut decoder)?;
+        let nickname = NicknameValue::parse(text(&mut decoder, MAX_NICKNAME_BYTES)?)
+            .map_err(|_| StorageError::InvalidEncoding)?;
+        let display_text = text(&mut decoder, 64)?;
+        let display_name =
+            DisplayNameValue::prepare(display_text).map_err(|_| StorageError::InvalidEncoding)?;
+        if display_name.as_str() != display_text {
+            return Err(StorageError::InvalidEncoding);
+        }
+        let cloak_user = decoder.array::<10>()?;
+        let cloak_host = decoder.array::<16>()?;
+        let public_cloak = PublicCloak::parse(
+            std::str::from_utf8(&cloak_user).map_err(|_| StorageError::InvalidEncoding)?,
+            std::str::from_utf8(&cloak_host).map_err(|_| StorageError::InvalidEncoding)?,
+        )
+        .map_err(|_| StorageError::InvalidEncoding)?;
+        let away = optional_text(&mut decoder, MAX_AWAY_BYTES)?.map(str::to_owned);
+        let operator_notices = bool_from(byte(&mut decoder)?)?;
+        let connection_nonce = decoder.array()?;
+        let negotiated_capability_hash = decoder.array()?;
+        let joined_count = count(&mut decoder, MAX_CHANNELS_PER_SESSION)?;
+        let mut joined_channels = Vec::new();
+        joined_channels
+            .try_reserve_exact(joined_count)
+            .map_err(|_| StorageError::AllocationFailed)?;
+        for _ in 0..joined_count {
+            joined_channels.push(ChannelInstanceId::from_bytes(decoder.array()?));
+        }
+        let created_at_utc = UtcSecond::from_unix_seconds(decoder.u64()?);
+        let revision = revision(&mut decoder)?;
+        decoder.finish()?;
+        let session = DurableSession {
+            session_id,
+            user_id,
+            home_server_id,
+            account_id,
+            account_session_generation,
+            generation: session_generation,
+            nickname,
+            display_name,
+            public_cloak,
+            away,
+            operator_notices,
+            connection_nonce,
+            negotiated_capability_hash,
+            joined_channels,
+            created_at_utc,
+            revision,
+        };
+        validate_session(&session)?;
+        Ok(session)
+    }
+}
+
+fn validate_session(session: &DurableSession) -> Result<(), StorageError> {
+    let account_generation_valid = match session.account_id {
+        Some(_) => session.account_session_generation.get() != 0,
+        None => session.account_session_generation.get() == 0,
+    };
+    let away_valid = session.away.as_ref().is_none_or(|away| {
+        !away.is_empty() && AwayText::try_from_str(away, ControlPolicy::PermitHorizontalTab).is_ok()
+    });
+    if !account_generation_valid
+        || session.generation.get() == 0
+        || session.revision.get() == 0
+        || session.joined_channels.len() > MAX_CHANNELS_PER_SESSION
+        || !ascending(&session.joined_channels)
+        || !away_valid
+    {
+        return Err(StorageError::InvalidEncoding);
+    }
+    Ok(())
+}
+
+fn put_optional_account_id(
+    encoder: &mut Encoder,
+    account_id: Option<AccountId>,
+) -> Result<(), StorageError> {
+    match account_id {
+        Some(account_id) => {
+            encoder.put_fixed(&[1])?;
+            encoder.put_fixed(account_id.random().as_bytes())
+        }
+        None => encoder.put_fixed(&[0]),
+    }
+}
+
+fn optional_account_id(decoder: &mut Decoder<'_>) -> Result<Option<AccountId>, StorageError> {
+    match byte(decoder)? {
+        0 => Ok(None),
+        1 => read_account_id(decoder).map(Some),
+        _ => Err(StorageError::InvalidEncoding),
+    }
+}
+
+/// Decoded channel-name index binding.
+#[derive(Clone, Eq, PartialEq)]
+pub struct DecodedChannelNameRecord {
+    /// Channel identity carried by typed rows; absent only for legacy raw-name rows.
+    pub channel_id: Option<ChannelInstanceId>,
+    /// Validated stable spelling used to rederive the private index key.
+    pub name: ChannelNameValue,
+}
+
+/// Codec for live `channel_name` index rows.
+pub struct ChannelNameRecordBody;
+
+impl ChannelNameRecordBody {
+    /// Encodes a typed channel identity and stable name binding.
+    pub fn encode(
+        channel_id: ChannelInstanceId,
+        name: &ChannelNameValue,
+    ) -> Result<Vec<u8>, StorageError> {
+        let mut encoder = Encoder::with_capacity(0, MAX_CHANNEL_NAME_RECORD_BODY_BYTES)?;
+        encoder.put_u16(DOMAIN_BODY_VERSION)?;
+        encoder.put_fixed(channel_id.as_bytes())?;
+        encoder.put_vector_u32(name.presentation().as_bytes())?;
+        Ok(encoder.finish())
+    }
+
+    /// Decodes either a typed row or one legacy raw-name body.
+    pub fn decode(encoded: &[u8]) -> Result<DecodedChannelNameRecord, StorageError> {
+        if encoded.len() > MAX_CHANNEL_NAME_RECORD_BODY_BYTES {
+            return Err(StorageError::LimitExceeded);
+        }
+        if encoded.first() != Some(&0) {
+            let spelling =
+                std::str::from_utf8(encoded).map_err(|_| StorageError::InvalidEncoding)?;
+            let name =
+                ChannelNameValue::parse(spelling).map_err(|_| StorageError::InvalidEncoding)?;
+            return Ok(DecodedChannelNameRecord {
+                channel_id: None,
+                name,
+            });
+        }
+        let mut decoder = Decoder::new(encoded);
+        expect_version(&mut decoder)?;
+        let channel_id = ChannelInstanceId::from_bytes(decoder.array()?);
+        let name = ChannelNameValue::parse(text(&mut decoder, MAX_CHANNEL_NAME_BYTES)?)
+            .map_err(|_| StorageError::InvalidEncoding)?;
+        decoder.finish()?;
+        Ok(DecodedChannelNameRecord {
+            channel_id: Some(channel_id),
+            name,
+        })
+    }
+}
+
 /// Codec for live `channel` rows.
 pub struct ChannelRecordBody;
 
 impl ChannelRecordBody {
-    /// Encodes one registered channel projection.
+    /// Encodes one complete durable-authority channel projection.
     pub fn encode(channel: &DurableChannel) -> Result<Vec<u8>, StorageError> {
-        if channel.persistence != PersistencePolicy::Registered
-            || channel.modes.join_key != channel.key_verifier.is_some()
-            || channel.role_grants.len() > MAX_ROLE_GRANTS_PER_CHANNEL
-            || !ascending(
-                &channel
-                    .role_grants
-                    .iter()
-                    .map(|(id, _)| *id)
-                    .collect::<Vec<_>>(),
-            )
-            || [
-                &channel.bans,
-                &channel.exceptions,
-                &channel.invite_exceptions,
-            ]
-            .iter()
-            .any(|entries| entries.len() > MAX_MASK_ENTRIES_PER_LIST)
-        {
-            return Err(StorageError::LimitExceeded);
-        }
+        Self::encode_version(channel, true)
+    }
+
+    /// Encodes the version-three registered-channel projection during the
+    /// decoder-first compatibility phase.
+    pub fn encode_legacy(channel: &DurableChannel) -> Result<Vec<u8>, StorageError> {
+        Self::encode_version(channel, false)
+    }
+
+    fn encode_version(channel: &DurableChannel, complete: bool) -> Result<Vec<u8>, StorageError> {
+        validate_channel(channel, complete).map_err(|_| StorageError::LimitExceeded)?;
         let mut encoder = Encoder::with_capacity(0, MAX_CHANNEL_RECORD_BODY_BYTES)?;
-        encoder.put_u16(CHANNEL_BODY_VERSION)?;
+        encoder.put_u16(if complete {
+            COMPLETE_CHANNEL_BODY_VERSION
+        } else {
+            CHANNEL_BODY_VERSION
+        })?;
         encoder.put_fixed(channel.channel_id.as_bytes())?;
         encoder.put_vector_u32(channel.name.presentation().as_bytes())?;
         encoder.put_fixed(&[
@@ -242,6 +466,9 @@ impl ChannelRecordBody {
         put_key_verifier(&mut encoder, channel.key_verifier.as_ref())?;
         put_member_limit(&mut encoder, channel.member_limit)?;
         put_topic(&mut encoder, channel.topic.as_ref())?;
+        if complete {
+            put_memberships(&mut encoder, &channel.memberships)?;
+        }
         put_count(&mut encoder, channel.role_grants.len())?;
         for (account_id, role) in &channel.role_grants {
             encoder.put_fixed(account_id.random().as_bytes())?;
@@ -250,7 +477,13 @@ impl ChannelRecordBody {
         put_entries(&mut encoder, &channel.bans)?;
         put_entries(&mut encoder, &channel.exceptions)?;
         put_entries(&mut encoder, &channel.invite_exceptions)?;
+        if complete {
+            put_invites(&mut encoder, &channel.invites)?;
+        }
         encoder.put_fixed(&[history_byte(channel.history)])?;
+        if complete {
+            put_user_ids(&mut encoder, &channel.e2ee_removal_pending)?;
+        }
         encoder.put_fixed(&[bool_byte(channel.admin_quarantined)])?;
         Ok(encoder.finish())
     }
@@ -264,21 +497,21 @@ impl ChannelRecordBody {
         let version = decoder.u16()?;
         if !matches!(
             version,
-            DOMAIN_BODY_VERSION | CHANNEL_KEY_BODY_VERSION | CHANNEL_BODY_VERSION
+            DOMAIN_BODY_VERSION
+                | CHANNEL_KEY_BODY_VERSION
+                | CHANNEL_BODY_VERSION
+                | COMPLETE_CHANNEL_BODY_VERSION
         ) {
             return Err(StorageError::UnsupportedVersion);
         }
         let channel = decode_channel(&mut decoder, version)?;
         decoder.finish()?;
-        if channel.persistence != PersistencePolicy::Registered
-            || channel.modes.join_key != channel.key_verifier.is_some()
-        {
-            return Err(StorageError::InvalidEncoding);
-        }
+        validate_channel(&channel, version == COMPLETE_CHANNEL_BODY_VERSION)?;
         Ok(channel)
     }
 }
 
+// agenc-review: focus owner=storage reviewed=2026-09-01 reason=version-gated-canonical-channel-layout-is-kept-in-wire-order
 fn decode_channel(decoder: &mut Decoder<'_>, version: u16) -> Result<DurableChannel, StorageError> {
     let channel_id = ChannelInstanceId::from_bytes(decoder.array()?);
     let name = ChannelNameValue::parse(text(decoder, MAX_CHANNEL_NAME_BYTES)?)
@@ -291,19 +524,40 @@ fn decode_channel(decoder: &mut Decoder<'_>, version: u16) -> Result<DurableChan
     let created_at = UtcSecond::from_unix_seconds(decoder.u64()?);
     let revision = revision(decoder)?;
     let modes = modes_from(byte(decoder)?)?;
-    let key_verifier = if matches!(version, CHANNEL_KEY_BODY_VERSION | CHANNEL_BODY_VERSION) {
+    let key_verifier = if matches!(
+        version,
+        CHANNEL_KEY_BODY_VERSION | CHANNEL_BODY_VERSION | COMPLETE_CHANNEL_BODY_VERSION
+    ) {
         key_verifier(decoder)?
     } else {
         None
     };
     let member_limit = member_limit(decoder)?;
     let topic = topic(decoder)?;
+    let memberships = if version == COMPLETE_CHANNEL_BODY_VERSION {
+        memberships(decoder)?
+    } else {
+        Vec::new()
+    };
     let role_grants = role_grants(decoder)?;
     let bans = entries(decoder)?;
     let exceptions = entries(decoder)?;
     let invite_exceptions = entries(decoder)?;
+    let invites = if version == COMPLETE_CHANNEL_BODY_VERSION {
+        invites(decoder)?
+    } else {
+        Vec::new()
+    };
     let history = history_from(byte(decoder)?)?;
-    let admin_quarantined = if version == CHANNEL_BODY_VERSION {
+    let e2ee_removal_pending = if version == COMPLETE_CHANNEL_BODY_VERSION {
+        user_ids(decoder, MAX_MEMBERS_PER_CHANNEL)?
+    } else {
+        Vec::new()
+    };
+    let admin_quarantined = if matches!(
+        version,
+        CHANNEL_BODY_VERSION | COMPLETE_CHANNEL_BODY_VERSION
+    ) {
         bool_from(byte(decoder)?)?
     } else {
         false
@@ -322,13 +576,109 @@ fn decode_channel(decoder: &mut Decoder<'_>, version: u16) -> Result<DurableChan
         key_verifier,
         member_limit,
         topic,
+        memberships,
         role_grants,
         bans,
         exceptions,
         invite_exceptions,
+        invites,
         history,
+        e2ee_removal_pending,
         admin_quarantined,
     })
+}
+
+// agenc-review: focus owner=storage reviewed=2026-09-01 reason=complete-channel-cross-field-invariants-are-validated-in-one-closed-gate
+fn validate_channel(channel: &DurableChannel, complete: bool) -> Result<(), StorageError> {
+    let durable_authority = channel.scope == ChannelScope::Global
+        || channel.persistence == PersistencePolicy::Registered;
+    let legacy_lifetime = complete || channel.persistence == PersistencePolicy::Registered;
+    let ordered_memberships = ascending(
+        &channel
+            .memberships
+            .iter()
+            .map(|membership| membership.user_id)
+            .collect::<Vec<_>>(),
+    );
+    let ordered_grants = ascending(
+        &channel
+            .role_grants
+            .iter()
+            .map(|(account_id, _)| *account_id)
+            .collect::<Vec<_>>(),
+    );
+    let ordered_invites = ascending(
+        &channel
+            .invites
+            .iter()
+            .map(|invite| invite.invite_id)
+            .collect::<Vec<_>>(),
+    );
+    if !durable_authority
+        || !legacy_lifetime
+        || (channel.persistence == PersistencePolicy::Ephemeral
+            && (channel.memberships.is_empty() || !channel.role_grants.is_empty()))
+        || channel.modes.join_key != channel.key_verifier.is_some()
+        || channel.memberships.len() > MAX_MEMBERS_PER_CHANNEL
+        || channel.role_grants.len() > MAX_ROLE_GRANTS_PER_CHANNEL
+        || channel.invites.len() > MAX_INVITES_PER_CHANNEL
+        || channel.e2ee_removal_pending.len() > MAX_MEMBERS_PER_CHANNEL
+        || !ordered_memberships
+        || !ordered_grants
+        || !ordered_invites
+        || !ascending(&channel.e2ee_removal_pending)
+        || [
+            &channel.bans,
+            &channel.exceptions,
+            &channel.invite_exceptions,
+        ]
+        .iter()
+        .any(|entries| entries.len() > MAX_MASK_ENTRIES_PER_LIST)
+    {
+        return Err(StorageError::InvalidEncoding);
+    }
+    if channel.memberships.iter().any(|membership| {
+        membership.membership_revision.get() == 0
+            || membership.membership_revision > channel.revision
+            || membership.effective_role < membership.session_role
+            || (channel.persistence == PersistencePolicy::Registered
+                && membership.account_id.is_some()
+                && membership.session_role != Role::Member)
+    }) {
+        return Err(StorageError::InvalidEncoding);
+    }
+    if channel.invites.iter().any(|invite| {
+        invite.creation_revision.get() == 0
+            || invite.creation_revision > channel.revision
+            || invite.expires_at_utc <= channel.created_at
+    }) {
+        return Err(StorageError::InvalidEncoding);
+    }
+    if channel.e2ee_removal_pending.iter().any(|user_id| {
+        channel.content_policy != ContentPolicy::E2eeBound
+            || channel
+                .memberships
+                .binary_search_by_key(user_id, |membership| membership.user_id)
+                .is_err()
+    }) {
+        return Err(StorageError::InvalidEncoding);
+    }
+    for membership in &channel.memberships {
+        let grant = membership
+            .account_id
+            .and_then(|account_id| {
+                channel
+                    .role_grants
+                    .binary_search_by_key(&account_id, |(current, _)| *current)
+                    .ok()
+                    .and_then(|index| channel.role_grants.get(index).map(|(_, role)| *role))
+            })
+            .unwrap_or(Role::Member);
+        if membership.effective_role != std::cmp::max(membership.session_role, grant) {
+            return Err(StorageError::InvalidEncoding);
+        }
+    }
+    Ok(())
 }
 
 /// Codec for live `sanction` rows.
@@ -586,6 +936,43 @@ fn topic(decoder: &mut Decoder<'_>) -> Result<Option<DurableTopic>, StorageError
     }
 }
 
+fn put_memberships(
+    encoder: &mut Encoder,
+    memberships: &[DurableMembership],
+) -> Result<(), StorageError> {
+    put_count(encoder, memberships.len())?;
+    for membership in memberships {
+        encoder.put_fixed(membership.user_id.as_bytes())?;
+        put_optional_account_id(encoder, membership.account_id)?;
+        encoder.put_fixed(&[
+            role_byte(membership.session_role),
+            role_byte(membership.effective_role),
+        ])?;
+        encoder.put_u64(membership.membership_revision.get())?;
+        encoder.put_u64(membership.joined_at.get())?;
+    }
+    Ok(())
+}
+
+fn memberships(decoder: &mut Decoder<'_>) -> Result<Vec<DurableMembership>, StorageError> {
+    let membership_count = count(decoder, MAX_MEMBERS_PER_CHANNEL)?;
+    let mut memberships = Vec::new();
+    memberships
+        .try_reserve_exact(membership_count)
+        .map_err(|_| StorageError::AllocationFailed)?;
+    for _ in 0..membership_count {
+        memberships.push(DurableMembership {
+            user_id: UserId::from_bytes(decoder.array()?),
+            account_id: optional_account_id(decoder)?,
+            session_role: role_from(byte(decoder)?)?,
+            effective_role: role_from(byte(decoder)?)?,
+            membership_revision: revision(decoder)?,
+            joined_at: UtcSecond::from_unix_seconds(decoder.u64()?),
+        });
+    }
+    Ok(memberships)
+}
+
 fn role_grants(decoder: &mut Decoder<'_>) -> Result<Vec<(AccountId, Role)>, StorageError> {
     let grant_count = count(decoder, MAX_ROLE_GRANTS_PER_CHANNEL)?;
     let mut grants = Vec::new();
@@ -632,6 +1019,56 @@ fn entries(decoder: &mut Decoder<'_>) -> Result<Vec<DurableListEntry>, StorageEr
         });
     }
     Ok(entries)
+}
+
+fn put_invites(encoder: &mut Encoder, invites: &[DurableInvite]) -> Result<(), StorageError> {
+    put_count(encoder, invites.len())?;
+    for invite in invites {
+        encoder.put_fixed(invite.invite_id.as_bytes())?;
+        put_principal(encoder, invite.target)?;
+        encoder.put_fixed(invite.inviter.as_bytes())?;
+        encoder.put_u64(invite.creation_revision.get())?;
+        encoder.put_u64(invite.expires_at_utc.get())?;
+    }
+    Ok(())
+}
+
+fn invites(decoder: &mut Decoder<'_>) -> Result<Vec<DurableInvite>, StorageError> {
+    let invite_count = count(decoder, MAX_INVITES_PER_CHANNEL)?;
+    let mut invites = Vec::new();
+    invites
+        .try_reserve_exact(invite_count)
+        .map_err(|_| StorageError::AllocationFailed)?;
+    for _ in 0..invite_count {
+        invites.push(DurableInvite {
+            invite_id: InviteId::from_bytes(decoder.array()?),
+            target: principal(decoder)?,
+            inviter: UserId::from_bytes(decoder.array()?),
+            creation_revision: revision(decoder)?,
+            expires_at_utc: UtcSecond::from_unix_seconds(decoder.u64()?),
+        });
+    }
+    Ok(invites)
+}
+
+fn put_user_ids(encoder: &mut Encoder, user_ids: &[UserId]) -> Result<(), StorageError> {
+    put_count(encoder, user_ids.len())?;
+    for user_id in user_ids {
+        encoder.put_fixed(user_id.as_bytes())?;
+    }
+    Ok(())
+}
+
+fn user_ids(decoder: &mut Decoder<'_>, maximum: usize) -> Result<Vec<UserId>, StorageError> {
+    let user_count = count(decoder, maximum)?;
+    let mut user_ids = Vec::new();
+    user_ids
+        .try_reserve_exact(user_count)
+        .map_err(|_| StorageError::AllocationFailed)?;
+    for _ in 0..user_count {
+        user_ids.push(UserId::from_bytes(decoder.array()?));
+    }
+    Ok(user_ids)
 }
 
 fn ascending<T: Ord>(values: &[T]) -> bool {
@@ -855,15 +1292,16 @@ pub(crate) mod fixtures {
 
     use agenc_ircd_domain::{
         ChannelModes, ChannelNameValue, ChannelScope, ContentPolicy, DirectMessagePolicy,
-        DurableAccount, DurableChannel, DurableSanction, GuestDirectMessagePolicy, HistoryPolicy,
-        ModerationAction, ModerationReasonCode, PersistencePolicy, PresencePolicy, Principal, Role,
-        Visibility,
+        DisplayNameValue, DurableAccount, DurableChannel, DurableSanction, DurableSession,
+        GuestDirectMessagePolicy, HistoryPolicy, ModerationAction, ModerationReasonCode,
+        NicknameValue, PersistencePolicy, PresencePolicy, Principal, Role, Visibility,
     };
     use agenc_ircd_types::{
-        AccountId, AccountRandomId, ChannelInstanceId, Generation, Revision, UserId, UtcSecond,
+        AccountId, AccountRandomId, ChannelInstanceId, Generation, PublicCloak, Revision, ServerId,
+        SessionId, UserId, UtcSecond,
     };
 
-    use super::{AccountRecordBody, ChannelRecordBody, SanctionRecordBody};
+    use super::{AccountRecordBody, ChannelRecordBody, SanctionRecordBody, SessionRecordBody};
     use crate::{StorageError, TableId};
 
     /// Returns the smallest valid live body for a domain table, or an empty body for
@@ -871,6 +1309,7 @@ pub(crate) mod fixtures {
     pub(crate) fn live_body(table: TableId, seed: u8) -> Result<Vec<u8>, StorageError> {
         match table {
             TableId::Account => AccountRecordBody::encode(&account(seed)?),
+            TableId::Session => SessionRecordBody::encode(&session(seed)?),
             TableId::Channel => ChannelRecordBody::encode(&channel(seed)?),
             TableId::Sanction => SanctionRecordBody::encode(&sanction(seed)?),
             _ => Ok(Vec::new()),
@@ -920,12 +1359,39 @@ pub(crate) mod fixtures {
             key_verifier: None,
             member_limit: None,
             topic: None,
+            memberships: Vec::new(),
             role_grants: vec![(account_id(seed), Role::Owner)],
             bans: Vec::new(),
             exceptions: Vec::new(),
             invite_exceptions: Vec::new(),
+            invites: Vec::new(),
             history: HistoryPolicy::Off,
+            e2ee_removal_pending: Vec::new(),
             admin_quarantined: false,
+        })
+    }
+
+    pub(crate) fn session(seed: u8) -> Result<DurableSession, StorageError> {
+        let (account_session_generation, revision) = one()?;
+        Ok(DurableSession {
+            session_id: SessionId::from_bytes([seed; 16]),
+            user_id: UserId::from_bytes([seed.wrapping_add(1); 16]),
+            home_server_id: ServerId::from_bytes([seed.wrapping_add(2); 16]),
+            account_id: Some(account_id(seed)),
+            account_session_generation,
+            generation: Generation::new(1).map_err(|_| StorageError::InvalidEncoding)?,
+            nickname: NicknameValue::parse("fixture").map_err(|_| StorageError::InvalidEncoding)?,
+            display_name: DisplayNameValue::prepare("Fixture")
+                .map_err(|_| StorageError::InvalidEncoding)?,
+            public_cloak: PublicCloak::parse("aaaaaaaaaa", "bbbbbbbbbbbbbbbb")
+                .map_err(|_| StorageError::InvalidEncoding)?,
+            away: None,
+            operator_notices: false,
+            connection_nonce: [seed.wrapping_add(3); 32],
+            negotiated_capability_hash: [seed.wrapping_add(4); 32],
+            joined_channels: Vec::new(),
+            created_at_utc: UtcSecond::from_unix_seconds(1),
+            revision,
         })
     }
 

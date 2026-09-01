@@ -3,12 +3,13 @@
 use std::cmp::Ordering;
 
 use agenc_ircd_crypto::StorageDigest;
-use agenc_ircd_types::{AccountId, ChannelName, Nickname, RecoveryEpoch};
+use agenc_ircd_types::{AccountId, Nickname, RecoveryEpoch};
 use zeroize::Zeroizing;
 
 use crate::codec::{Decoder, Encoder};
 use crate::domain_records::{
-    AccountRecordBody, ChannelRecordBody, LIVE_RECORD_KIND, SanctionRecordBody,
+    AccountRecordBody, ChannelNameRecordBody, ChannelRecordBody, LIVE_RECORD_KIND,
+    SanctionRecordBody, SessionRecordBody,
 };
 use crate::{
     IntegrityCheckpoint, IntegrityManifest, LoginIndexKeyState, LoginIndexStoredKey,
@@ -801,12 +802,12 @@ fn validate_domain_body(table: TableId, record_kind: u16, body: &[u8]) -> Result
             .map_err(|_| StorageError::InvalidEncoding)
             .and_then(|name| Nickname::parse(name).map_err(|_| StorageError::InvalidEncoding))
             .map(|_| ()),
-        (TableId::ChannelName, 1) => std::str::from_utf8(body)
-            .map_err(|_| StorageError::InvalidEncoding)
-            .and_then(|name| ChannelName::parse(name).map_err(|_| StorageError::InvalidEncoding))
-            .map(|_| ()),
+        (TableId::ChannelName, 1) => ChannelNameRecordBody::decode(body).map(|_| ()),
+        (TableId::ChannelName, 2) if body.is_empty() => Ok(()),
         (TableId::E2eeState, 1) => E2eeRecoveryGate::decode(body).map(|_| ()),
         (TableId::Account, LIVE_RECORD_KIND) => AccountRecordBody::decode(body).map(|_| ()),
+        (TableId::Session, LIVE_RECORD_KIND) => SessionRecordBody::decode(body).map(|_| ()),
+        (TableId::Session, 2) if body.is_empty() => Ok(()),
         (TableId::Channel, LIVE_RECORD_KIND) => ChannelRecordBody::decode(body).map(|_| ()),
         (TableId::Sanction, LIVE_RECORD_KIND) => SanctionRecordBody::decode(body).map(|_| ()),
         _ if uses_protocol_body(table, record_kind) => {

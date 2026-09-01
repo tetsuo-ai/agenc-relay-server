@@ -1,26 +1,25 @@
-//! Durable projections of the domain entities that survive a restart.
+//! Durable projections of authoritative domain entities.
 //!
-//! Sessions, memberships, invites, away state, nicknames, monitor lists, and
-//! fresh-authentication proofs are process state and are never persisted
-//! (spec sections 12 and 17.3). Accounts, registered channels, and sanctions
-//! are. This module owns the exact persisted value of each of those entities
-//! and the logical write set a plan produces, without naming any storage
-//! codec, key, or handle.
+//! Fresh-authentication proofs, monitor query state, sockets, and output queues
+//! remain process-local. Accounts, logical sessions, channels, and sanctions
+//! have canonical durable after-images. This module owns those values and the
+//! logical write set a plan produces without naming a storage codec, key, or
+//! handle.
 
 use std::fmt;
 
 use agenc_ircd_types::{
-    AccountId, ChannelInstanceId, ControlPolicy, EntryId, Generation, MaskSubject, MessageId,
-    Revision, TypedMask, UserId, UtcSecond,
+    AccountId, ChannelInstanceId, ControlPolicy, EntryId, Generation, InviteId, MaskSubject,
+    MessageId, PublicCloak, Revision, ServerId, SessionId, TypedMask, UserId, UtcSecond,
 };
 
 use crate::error::DomainError;
 use crate::model::{
-    AccountLabelValue, AccountState, ChannelKeyVerifier, ChannelModes, ChannelNameValue,
-    ChannelScope, ChannelState, ContentPolicy, DirectMessagePolicy, GuestDirectMessagePolicy,
-    HistoryPolicy, ListEntry, ModerationAction, ModerationReason, ModerationReasonCode,
-    NicknameValue, PersistencePolicy, PlaintextTopic, PresencePolicy, Principal, Role, Sanction,
-    TopicText, Visibility,
+    AccountLabelValue, AccountState, AwayText, ChannelKeyVerifier, ChannelModes, ChannelNameValue,
+    ChannelScope, ChannelState, ContentPolicy, DirectMessagePolicy, DisplayNameValue,
+    GuestDirectMessagePolicy, HistoryPolicy, ListEntry, ModerationAction, ModerationReason,
+    ModerationReasonCode, NicknameValue, PersistencePolicy, PlaintextTopic, PresencePolicy,
+    Principal, Role, Sanction, SessionState, TopicText, Visibility,
 };
 
 /// The persisted value of one account.
@@ -97,6 +96,159 @@ impl DurableAccount {
     }
 }
 
+/// The persisted coordinator-owned portion of one logical session.
+///
+/// Monitor selections and fresh-authentication deadlines are deliberately
+/// absent because they are process-local. The connection nonce is private
+/// origin-binding state and must never enter formatting or diagnostics.
+#[derive(Clone, Eq, PartialEq)]
+pub struct DurableSession {
+    /// Immutable accepted session identity and storage key.
+    pub session_id: SessionId,
+    /// Immutable per-connection user identity.
+    pub user_id: UserId,
+    /// Server that owns the physical connection or suspended origin.
+    pub home_server_id: ServerId,
+    /// Optional authenticated account authority.
+    pub account_id: Option<AccountId>,
+    /// Account-session fence, zero exactly for guests.
+    pub account_session_generation: Generation,
+    /// Session/origin generation used to reject stale completions.
+    pub generation: Generation,
+    /// Current routing nickname.
+    pub nickname: NicknameValue,
+    /// Current prepared presentation name.
+    pub display_name: DisplayNameValue,
+    /// Independently random public cloak.
+    pub public_cloak: PublicCloak,
+    /// Optional bounded away text.
+    pub away: Option<String>,
+    /// Whether bounded operator notices are enabled.
+    pub operator_notices: bool,
+    /// Private companion origin binding.
+    pub connection_nonce: [u8; 32],
+    /// Hash of the sorted negotiated capability names.
+    pub negotiated_capability_hash: [u8; 32],
+    /// Joined channel identities in ascending order without duplicates.
+    pub joined_channels: Vec<ChannelInstanceId>,
+    /// Accepted wall-clock creation second.
+    pub created_at_utc: UtcSecond,
+    /// Revision of the last authoritative session change.
+    pub revision: Revision,
+}
+
+impl DurableSession {
+    /// Captures every persistable field from one validated live session.
+    #[must_use]
+    pub fn from_state(session: &SessionState) -> Self {
+        Self {
+            session_id: session.session_id,
+            user_id: session.user_id,
+            home_server_id: session.home_server_id,
+            account_id: session.account_id,
+            account_session_generation: session.account_session_generation,
+            generation: session.generation,
+            nickname: session.nickname.clone(),
+            display_name: session.display_name.clone(),
+            public_cloak: session.public_cloak,
+            away: session.away.as_ref().map(|away| away.as_str().to_owned()),
+            operator_notices: session.operator_notices,
+            connection_nonce: session.connection_nonce,
+            negotiated_capability_hash: session.negotiated_capability_hash,
+            joined_channels: session.joined_channels.iter().copied().collect(),
+            created_at_utc: session.created_at_utc,
+            revision: session.revision,
+        }
+    }
+
+    /// Rebuilds one live session while clearing process-local state.
+    pub fn into_state(self) -> Result<SessionState, DomainError> {
+        if !strictly_ascending(&self.joined_channels)
+            || self.account_id.is_none() != (self.account_session_generation.get() == 0)
+            || self.generation.get() == 0
+        {
+            return Err(DomainError::InvalidArgument);
+        }
+        let away = self
+            .away
+            .map(|text| AwayText::try_from_str(&text, ControlPolicy::PermitHorizontalTab))
+            .transpose()?;
+        Ok(SessionState {
+            session_id: self.session_id,
+            user_id: self.user_id,
+            home_server_id: self.home_server_id,
+            account_id: self.account_id,
+            account_session_generation: self.account_session_generation,
+            generation: self.generation,
+            nickname: self.nickname,
+            display_name: self.display_name,
+            public_cloak: self.public_cloak,
+            away,
+            operator_notices: self.operator_notices,
+            monitored_nicknames: Default::default(),
+            connection_nonce: self.connection_nonce,
+            negotiated_capability_hash: self.negotiated_capability_hash,
+            joined_channels: self.joined_channels.into_iter().collect(),
+            created_at_utc: self.created_at_utc,
+            fresh_auth_deadline: None,
+            revision: self.revision,
+        })
+    }
+
+    /// Compares every persisted field except the revision.
+    #[must_use]
+    pub fn same_content(&self, other: &Self) -> bool {
+        self.content_key() == other.content_key()
+    }
+
+    fn content_key(&self) -> DurableSessionContentKey<'_> {
+        (
+            (
+                &self.session_id,
+                &self.user_id,
+                &self.home_server_id,
+                &self.account_id,
+                &self.account_session_generation,
+                &self.generation,
+                &self.nickname,
+                &self.display_name,
+                &self.public_cloak,
+            ),
+            (
+                &self.away,
+                &self.operator_notices,
+                &self.connection_nonce,
+                &self.negotiated_capability_hash,
+                &self.joined_channels,
+                &self.created_at_utc,
+            ),
+        )
+    }
+}
+
+/// Every durable session field except the revision, borrowed for comparison.
+type DurableSessionContentKey<'a> = (
+    (
+        &'a SessionId,
+        &'a UserId,
+        &'a ServerId,
+        &'a Option<AccountId>,
+        &'a Generation,
+        &'a Generation,
+        &'a NicknameValue,
+        &'a DisplayNameValue,
+        &'a PublicCloak,
+    ),
+    (
+        &'a Option<String>,
+        &'a bool,
+        &'a [u8; 32],
+        &'a [u8; 32],
+        &'a [ChannelInstanceId],
+        &'a UtcSecond,
+    ),
+);
+
 /// The persisted value of one plaintext topic.
 #[derive(Clone, Eq, PartialEq)]
 pub struct DurableTopic {
@@ -143,6 +295,82 @@ pub struct DurableListEntry {
     pub created_at: UtcSecond,
 }
 
+/// The persisted authority and timing of one live channel membership.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DurableMembership {
+    /// Live user identity and canonical vector key.
+    pub user_id: UserId,
+    /// Optional authenticated account authority.
+    pub account_id: Option<AccountId>,
+    /// Highest role granted to this live session.
+    pub session_role: Role,
+    /// Effective role after any durable account grant.
+    pub effective_role: Role,
+    /// Channel revision that accepted the membership.
+    pub membership_revision: Revision,
+    /// Accepted wall-clock join second.
+    pub joined_at: UtcSecond,
+}
+
+impl DurableMembership {
+    #[expect(
+        dead_code,
+        reason = "enabled with complete channel projection at the Stage 06 writer cutover"
+    )]
+    fn from_state(membership: &crate::Membership) -> Self {
+        Self {
+            user_id: membership.user_id,
+            account_id: membership.account_id,
+            session_role: membership.session_role,
+            effective_role: membership.effective_role,
+            membership_revision: membership.membership_revision,
+            joined_at: membership.joined_at,
+        }
+    }
+
+    fn into_state(self) -> crate::Membership {
+        crate::Membership {
+            user_id: self.user_id,
+            account_id: self.account_id,
+            session_role: self.session_role,
+            effective_role: self.effective_role,
+            membership_revision: self.membership_revision,
+            joined_at: self.joined_at,
+        }
+    }
+}
+
+/// The persisted wall-clock projection of one pending channel invite.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DurableInvite {
+    /// Immutable invite identity and canonical vector key.
+    pub invite_id: InviteId,
+    /// Guest User ID or authenticated Account ID authorized to consume it.
+    pub target: Principal,
+    /// Live user that created the invite.
+    pub inviter: UserId,
+    /// Channel revision that created the invite.
+    pub creation_revision: Revision,
+    /// Absolute expiry used to reconcile the invite after restart.
+    pub expires_at_utc: UtcSecond,
+}
+
+impl DurableInvite {
+    #[expect(
+        dead_code,
+        reason = "enabled with complete channel projection at the Stage 06 writer cutover"
+    )]
+    fn from_state(invite: &crate::model::Invite) -> Self {
+        Self {
+            invite_id: invite.invite_id,
+            target: invite.target,
+            inviter: invite.inviter,
+            creation_revision: invite.creation_revision,
+            expires_at_utc: invite.expires_at_utc,
+        }
+    }
+}
+
 impl DurableListEntry {
     fn from_state(entry: &ListEntry) -> Self {
         Self {
@@ -163,10 +391,10 @@ impl DurableListEntry {
     }
 }
 
-/// The persisted value of one registered channel.
+/// The complete persisted value of one durable-authority channel.
 ///
-/// Memberships, pending invites, and pending E2EE removals are live session
-/// state and are absent from this value.
+/// Every global channel is coordinator-durable while it exists. A local
+/// channel is durable only after registration.
 #[derive(Clone, Eq, PartialEq)]
 pub struct DurableChannel {
     /// Immutable channel creation identity.
@@ -195,6 +423,8 @@ pub struct DurableChannel {
     pub member_limit: Option<u16>,
     /// Optional plaintext topic.
     pub topic: Option<DurableTopic>,
+    /// Live memberships in ascending User ID order.
+    pub memberships: Vec<DurableMembership>,
     /// Durable account role grants in ascending Account ID order.
     pub role_grants: Vec<(AccountId, Role)>,
     /// Ban list in application order.
@@ -203,14 +433,18 @@ pub struct DurableChannel {
     pub exceptions: Vec<DurableListEntry>,
     /// Invite-exception list in application order.
     pub invite_exceptions: Vec<DurableListEntry>,
+    /// Pending invites in ascending Invite ID order.
+    pub invites: Vec<DurableInvite>,
     /// Plaintext history policy.
     pub history: HistoryPolicy,
+    /// Membership removals awaiting the companion E2EE transition.
+    pub e2ee_removal_pending: Vec<UserId>,
     /// Whether new channel delivery is administratively quarantined.
     pub admin_quarantined: bool,
 }
 
 impl DurableChannel {
-    /// Projects a channel when its lifetime policy persists it.
+    /// Projects a registered channel during the decoder-first compatibility phase.
     pub(crate) fn from_state(channel: &ChannelState) -> Option<Self> {
         if channel.persistence != PersistencePolicy::Registered {
             return None;
@@ -229,6 +463,10 @@ impl DurableChannel {
             key_verifier: channel.key_verifier,
             member_limit: channel.member_limit,
             topic: channel.topic.as_ref().map(DurableTopic::from_state),
+            // The decoder-first compatibility phase keeps live projections on
+            // the legacy registered-channel shape until session reconstruction
+            // and startup reconciliation are enabled in the same cutover.
+            memberships: Vec::new(),
             role_grants: channel
                 .role_grants
                 .iter()
@@ -249,13 +487,15 @@ impl DurableChannel {
                 .iter()
                 .map(DurableListEntry::from_state)
                 .collect(),
+            invites: Vec::new(),
             history: channel.history,
+            e2ee_removal_pending: Vec::new(),
             admin_quarantined: channel.admin_quarantined,
         })
     }
 
     pub(crate) fn into_state(self) -> Result<ChannelState, DomainError> {
-        if self.persistence != PersistencePolicy::Registered
+        if (self.scope == ChannelScope::Local && self.persistence == PersistencePolicy::Ephemeral)
             || !strictly_ascending(
                 &self
                     .role_grants
@@ -263,6 +503,15 @@ impl DurableChannel {
                     .map(|(id, _)| *id)
                     .collect::<Vec<_>>(),
             )
+            || !strictly_ascending(
+                &self
+                    .memberships
+                    .iter()
+                    .map(|membership| membership.user_id)
+                    .collect::<Vec<_>>(),
+            )
+            || !self.invites.is_empty()
+            || !strictly_ascending(&self.e2ee_removal_pending)
         {
             return Err(DomainError::InvalidArgument);
         }
@@ -280,14 +529,18 @@ impl DurableChannel {
             key_verifier: self.key_verifier,
             member_limit: self.member_limit,
             topic: self.topic.map(DurableTopic::into_state).transpose()?,
-            memberships: Default::default(),
+            memberships: self
+                .memberships
+                .into_iter()
+                .map(|membership| (membership.user_id, membership.into_state()))
+                .collect(),
             role_grants: self.role_grants.into_iter().collect(),
             bans: entries_into_state(self.bans)?,
             exceptions: entries_into_state(self.exceptions)?,
             invite_exceptions: entries_into_state(self.invite_exceptions)?,
             invites: Default::default(),
             history: self.history,
-            e2ee_removal_pending: Default::default(),
+            e2ee_removal_pending: self.e2ee_removal_pending.into_iter().collect(),
             admin_quarantined: self.admin_quarantined,
         })
     }
@@ -311,16 +564,23 @@ impl DurableChannel {
                 &self.created_at,
             ),
             (
-                &self.modes,
-                &self.key_verifier,
-                &self.member_limit,
-                &self.topic,
-                &self.role_grants,
-                &self.bans,
-                &self.exceptions,
-                &self.invite_exceptions,
-                &self.history,
-                &self.admin_quarantined,
+                (
+                    &self.modes,
+                    &self.key_verifier,
+                    &self.member_limit,
+                    &self.topic,
+                    &self.memberships,
+                    &self.role_grants,
+                ),
+                (
+                    &self.bans,
+                    &self.exceptions,
+                    &self.invite_exceptions,
+                    &self.invites,
+                    &self.history,
+                    &self.e2ee_removal_pending,
+                    &self.admin_quarantined,
+                ),
             ),
         )
     }
@@ -339,16 +599,23 @@ type ChannelContentKey<'a> = (
         &'a UtcSecond,
     ),
     (
-        &'a ChannelModes,
-        &'a Option<ChannelKeyVerifier>,
-        &'a Option<u16>,
-        &'a Option<DurableTopic>,
-        &'a [(AccountId, Role)],
-        &'a [DurableListEntry],
-        &'a [DurableListEntry],
-        &'a [DurableListEntry],
-        &'a HistoryPolicy,
-        &'a bool,
+        (
+            &'a ChannelModes,
+            &'a Option<ChannelKeyVerifier>,
+            &'a Option<u16>,
+            &'a Option<DurableTopic>,
+            &'a [DurableMembership],
+            &'a [(AccountId, Role)],
+        ),
+        (
+            &'a [DurableListEntry],
+            &'a [DurableListEntry],
+            &'a [DurableListEntry],
+            &'a [DurableInvite],
+            &'a HistoryPolicy,
+            &'a [UserId],
+            &'a bool,
+        ),
     ),
 );
 
@@ -477,6 +744,24 @@ impl fmt::Debug for DurableAccount {
             .debug_struct("DurableAccount")
             .field("account_id", &self.account_id)
             .field("session_generation", &self.session_generation)
+            .field("revision", &self.revision)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for DurableSession {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DurableSession")
+            .field("session_id", &self.session_id)
+            .field("user_id", &self.user_id)
+            .field("home_server_id", &self.home_server_id)
+            .field("account_id", &self.account_id)
+            .field(
+                "account_session_generation",
+                &self.account_session_generation,
+            )
+            .field("generation", &self.generation)
             .field("revision", &self.revision)
             .finish_non_exhaustive()
     }

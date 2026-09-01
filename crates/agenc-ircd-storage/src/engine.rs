@@ -10,7 +10,9 @@ use agenc_ircd_crypto::{
     StorageMasterKey, StorageTable, TrackedStateHasher, derive_storage_index,
     derive_storage_integrity_keys, tracked_record_commitment,
 };
-use agenc_ircd_types::{ChannelName, NetworkId, Nickname, RecoveryEpoch, ServerId, TransactionId};
+#[cfg(test)]
+use agenc_ircd_types::ChannelName;
+use agenc_ircd_types::{NetworkId, Nickname, RecoveryEpoch, ServerId, TransactionId};
 use subtle::ConstantTimeEq as _;
 
 use crate::mutation::ReadPlanKind;
@@ -20,13 +22,13 @@ use crate::redb_store::{
 };
 use crate::{
     BACKUP_FIXED_STREAM_BYTES, BackupDestination, BackupHeader, BackupOutput, BackupReceipt,
-    BackupRecord, BackupStreamWriter, BackupTrustKey, CommitOutcome, CommitReceipt, DatabaseHeader,
-    ExistingRecord, FilesystemCapacity, InspectionStateDirectory, IntegrityCheckpoint,
-    IntegrityCheckpointTbs, IntegrityManifest, IntegrityManifestTbs, IntegrityRecordMutation,
-    IntegrityRecordVersion, LoginIndexKeyState, LoginIndexStoredKey, LoginIndexValueKind,
-    NonceReservationState, NonceReservationTbs, ROLLBACK_GUARD_BYTES, ReadPlan, ReadRecord,
-    ReadResult, RecordReference, RecoveryDisposition, RollbackGuard, RollbackGuardPhase,
-    RollbackGuardTbs, SealedRecord, StateDirectory, StateMeta, StateMetaTbs,
+    BackupRecord, BackupStreamWriter, BackupTrustKey, ChannelNameRecordBody, CommitOutcome,
+    CommitReceipt, DatabaseHeader, ExistingRecord, FilesystemCapacity, InspectionStateDirectory,
+    IntegrityCheckpoint, IntegrityCheckpointTbs, IntegrityManifest, IntegrityManifestTbs,
+    IntegrityRecordMutation, IntegrityRecordVersion, LoginIndexKeyState, LoginIndexStoredKey,
+    LoginIndexValueKind, NonceReservationState, NonceReservationTbs, ROLLBACK_GUARD_BYTES,
+    ReadPlan, ReadRecord, ReadResult, RecordReference, RecoveryDisposition, RollbackGuard,
+    RollbackGuardPhase, RollbackGuardTbs, SealedRecord, StateDirectory, StateMeta, StateMetaTbs,
     StorageAccountingLimits, StorageConstruction, StorageConstructionSource, StorageError,
     StorageFaultBoundary, StorageFaultInjector, StorageFaultSite, StorageMutationBatch,
     StorageMutationHead, StorageOperationCompletion, StorageOperationIdentity, StorageSealContext,
@@ -2692,13 +2694,11 @@ impl StorageEngine {
             .canonical()
             .as_bytes()
             .to_vec(),
-            (TableId::ChannelName, 1) => ChannelName::parse(
-                std::str::from_utf8(value.body()).map_err(|_| StorageError::InvalidEncoding)?,
-            )
-            .map_err(|_| StorageError::InvalidEncoding)?
-            .canonical()
-            .as_bytes()
-            .to_vec(),
+            (TableId::ChannelName, 1) => ChannelNameRecordBody::decode(value.body())?
+                .name
+                .canonical()
+                .as_bytes()
+                .to_vec(),
             _ => return Ok(()),
         };
         let expected = derive_storage_index(

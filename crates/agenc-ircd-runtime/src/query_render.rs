@@ -1444,7 +1444,10 @@ mod tests {
             identity,
             CanonicalCommand::join(vec![ChannelTarget::new(name.clone(), false)])?,
             &registered_admission(identity.user_id)?,
-            None,
+            Some(ExternalInputs {
+                utc_now: Some(UtcSecond::from_unix_seconds(1_720_000_001)),
+                ..ExternalInputs::default()
+            }),
         )?;
         Ok(())
     }

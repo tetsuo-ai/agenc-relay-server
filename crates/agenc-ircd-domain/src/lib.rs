@@ -39,7 +39,8 @@ pub use model::{
     PresencePolicy, Principal, Role, Sanction, SessionSeed, SessionState, TopicText, Visibility,
 };
 pub use persist::{
-    DurableAccount, DurableChannel, DurableListEntry, DurableSanction, DurableTopic, DurableWrite,
+    DurableAccount, DurableChannel, DurableInvite, DurableListEntry, DurableMembership,
+    DurableSanction, DurableSession, DurableTopic, DurableWrite,
 };
 pub use projection::{
     AccountProjection, ChannelListProjection, ChannelProjection, MemberProjection,

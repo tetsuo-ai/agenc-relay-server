@@ -59,8 +59,9 @@ fn join_existing(
     now: Option<u64>,
 ) -> Result<(), DomainError> {
     let admission = registered_admission(identity.user_id)?;
-    let external = now.map(|ticks| ExternalInputs {
-        monotonic_now: Some(MonotonicTick::from_ticks(ticks)),
+    let external = Some(ExternalInputs {
+        monotonic_now: now.map(MonotonicTick::from_ticks),
+        utc_now: Some(UtcSecond::from_unix_seconds(1_710_000_001)),
         ..ExternalInputs::default()
     });
     apply_command(
@@ -638,6 +639,7 @@ fn invites_bans_exceptions_quiets_and_mode_roles_are_enforced() -> Result<(), Bo
         &registered_admission(guest.user_id)?,
         Some(ExternalInputs {
             monotonic_now: Some(MonotonicTick::from_ticks(100)),
+            utc_now: Some(UtcSecond::from_unix_seconds(1_710_000_100)),
             ..ExternalInputs::default()
         }),
     );
@@ -664,6 +666,7 @@ fn invites_bans_exceptions_quiets_and_mode_roles_are_enforced() -> Result<(), Bo
         &registered_admission(operator.user_id)?,
         Some(ExternalInputs {
             monotonic_now: Some(MonotonicTick::from_ticks(200)),
+            utc_now: Some(UtcSecond::from_unix_seconds(1_710_000_200)),
             invite_ids: vec![InviteId::from_bytes(bytes(31))],
             ..ExternalInputs::default()
         }),
@@ -714,6 +717,7 @@ fn invites_bans_exceptions_quiets_and_mode_roles_are_enforced() -> Result<(), Bo
         &registered_admission(guest.user_id)?,
         Some(ExternalInputs {
             monotonic_now: Some(MonotonicTick::from_ticks(400)),
+            utc_now: Some(UtcSecond::from_unix_seconds(1_710_000_400)),
             ..ExternalInputs::default()
         }),
     );
@@ -802,6 +806,7 @@ fn invites_bans_exceptions_quiets_and_mode_roles_are_enforced() -> Result<(), Bo
             &registered_admission(operator.user_id)?,
             Some(ExternalInputs {
                 monotonic_now: Some(MonotonicTick::from_ticks(600)),
+                utc_now: Some(UtcSecond::from_unix_seconds(1_710_000_600)),
                 invite_ids: vec![InviteId::from_bytes(bytes(36))],
                 ..ExternalInputs::default()
             }),
@@ -1393,7 +1398,10 @@ fn channel_key_mode_distinguishes_real_and_dummy_verification_without_raw_secret
             false,
         )])?,
         &registered_admission(keyed_joiner.user_id)?,
-        None,
+        Some(ExternalInputs {
+            utc_now: Some(UtcSecond::from_unix_seconds(1_710_000_110)),
+            ..ExternalInputs::default()
+        }),
     )?;
     let PlanDecision::Rejected(no_key) = no_key else {
         return Err("missing channel key was not rejected".into());
@@ -1429,8 +1437,14 @@ fn channel_key_mode_distinguishes_real_and_dummy_verification_without_raw_secret
     let PlanDecision::NeedsExternal(requests) = needs_verification else {
         return Err("supplied key did not request external verification".into());
     };
-    assert_eq!(requests.len(), 1);
-    let request = requests.first().ok_or("missing key verification request")?;
+    assert_eq!(requests.len(), 2);
+    assert!(matches!(
+        requests.first(),
+        Some(ExternalInputRequest::UtcNow {
+            request_sequence: 0
+        })
+    ));
+    let request = requests.get(1).ok_or("missing key verification request")?;
     assert!(matches!(
         request,
         ExternalInputRequest::ChannelKeyVerification {
@@ -1452,6 +1466,7 @@ fn channel_key_mode_distinguishes_real_and_dummy_verification_without_raw_secret
         keyed_command()?,
         &key_admission,
         Some(ExternalInputs {
+            utc_now: Some(UtcSecond::from_unix_seconds(1_710_000_111)),
             key_verdicts: vec![false],
             ..ExternalInputs::default()
         }),
@@ -1473,6 +1488,7 @@ fn channel_key_mode_distinguishes_real_and_dummy_verification_without_raw_secret
         keyed_command()?,
         &key_admission,
         Some(ExternalInputs {
+            utc_now: Some(UtcSecond::from_unix_seconds(1_710_000_112)),
             key_verdicts: vec![true],
             ..ExternalInputs::default()
         }),
@@ -1494,6 +1510,7 @@ fn channel_key_mode_distinguishes_real_and_dummy_verification_without_raw_secret
         )])?,
         &dummy_admission,
         Some(ExternalInputs {
+            utc_now: Some(UtcSecond::from_unix_seconds(1_710_000_113)),
             key_verdicts: vec![false],
             ..ExternalInputs::default()
         }),
@@ -1658,6 +1675,7 @@ fn authority_changes_remove_only_invites_for_the_stale_principal() -> Result<(),
             &admission,
             Some(ExternalInputs {
                 monotonic_now: Some(MonotonicTick::from_ticks(1_000)),
+                utc_now: Some(UtcSecond::from_unix_seconds(1_710_001_000)),
                 invite_ids: vec![InviteId::from_bytes(bytes(seed))],
                 ..ExternalInputs::default()
             }),
