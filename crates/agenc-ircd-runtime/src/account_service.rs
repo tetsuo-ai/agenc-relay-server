@@ -6607,32 +6607,304 @@ fn render_sasl_action(
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, VecDeque};
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    use agenc_ircd_client_wire::{OutputBudget, RenderError};
-    use agenc_ircd_crypto::{LoginIndexDigest, LoginIndexKey, derive_login_index};
+    use agenc_ircd_auth::{AccountServiceEnvelope, OpaqueProfile};
+    use agenc_ircd_client_wire::{
+        FramedLine, OutputBudget, RenderError, SASL_REQUEST_CHARACTERS, SaslAction, SaslNumeric,
+        SecretBytes, parse_message,
+    };
+    use agenc_ircd_crypto::{
+        ACCOUNT_HPKE_REQUEST_CIPHERTEXT_BYTES, AccountHpkePrivateKey, CryptoWorkerConfig,
+        Ed25519SecretKey, LoginIndexDigest, LoginIndexKey, OpaqueFakeCredentialKey,
+        RollbackGuardRootKey, StorageDigest, StorageMasterKey, derive_login_index,
+    };
+    use agenc_ircd_domain::{DirectMessagePolicy, GuestDirectMessagePolicy, PresencePolicy};
     use agenc_ircd_storage::{
-        LoginIndexKeyState, LoginIndexStoredKey, LoginIndexValue, LoginIndexValueKind, StoredKey,
-        TableId,
+        DatabaseHeaderTbs, InitialStorageRecord, LIVE_RECORD_KIND, LOGIN_INDEX_KEY_STATE_KEY,
+        LoginIndexKeyState, LoginIndexStoredKey, LoginIndexValue, LoginIndexValueKind,
+        OPAQUE_FAKE_RECORD_KEY, PersistentRecordValue, QualificationTarget, SCHEMA_GENERATION,
+        StateDirectory, StorageEngineLimits, StorageGrowthCase, StorageInitializationConfig,
+        StorageInitializationMode, StorageInitializationOutcome, StorageOpenConfig, StorageOwner,
+        StorageQualification, StorageQualificationReport, StorageQualificationReportTbs, StoredKey,
+        TableId, initialize_storage,
+    };
+    use agenc_ircd_testkit::{
+        DeterministicMonotonicClock, DeterministicWallClock, ScriptedEntropy,
     };
     use agenc_ircd_types::{
-        AccountId, AccountRandomId, AccountServiceMessageKind, ConnectionId, Generation, InviteId,
-        MonotonicTick, NetworkId, NormalizedLogin, OpaqueCredentialId, OriginId, TransactionId,
-        UtcSecond,
+        AccountId, AccountRandomId, AccountServiceMessageKind, ConnectionId, DatabaseId,
+        Generation, InviteId, MonotonicTick, NetworkId, NormalizedLogin, OpaqueCredentialId,
+        OriginId, RecoveryEpoch, ServerId, ServerIncarnation, TransactionId, UtcSecond,
     };
 
     use crate::admission::{BucketTable, RateLimits};
+    use crate::bridge::crypto::CryptoBridge;
+    use crate::bridge::storage::StorageBridge;
+    use crate::budget::MemoryBudget;
+    use crate::observe::health::Liveness;
+    use crate::runtime_config::AccountRuntimePolicy;
 
     use super::{
-        AccountCarrierAction, AccountCarrierKind, AccountCarrierPhase, ConnectionGeneration,
-        ConnectionRoute, CreationReservation, MAX_OPAQUE_ATTEMPTS_PER_CONNECTION,
-        REQUEST_RESULT_BYTES, REQUEST_RESULT_VERSION, RequestResultRecord, RequestTerminal,
+        AccountCarrierAction, AccountCarrierKind, AccountCarrierPhase, AccountCreationPolicy,
+        AccountDeletionBarrier, AccountServiceConfig, AccountServiceCoordinator, CarrierRoute,
+        ConnectionGeneration, ConnectionRoute, CreationReservation, LiveTransactionClass,
+        MAX_OPAQUE_ATTEMPTS_PER_CONNECTION, MAX_PENDING_TRANSACTION_CLEANUPS, PendingAuthority,
+        PendingCrypto, PendingLoginTombstoneExpiry, REQUEST_RESULT_BYTES, REQUEST_RESULT_VERSION,
+        RequestCarrier, RequestContext, RequestResultCursor, RequestResultRecord, RequestTerminal,
         RuntimeError, TransactionCleanup, account_created_note, account_credential_changed_note,
-        account_deletion_completions, account_deletion_writes, account_failure,
-        consume_opaque_connection_attempt, login_tombstone_expiry_batch, opaque_attempt_demand,
-        render_account_action, replay_terminal_account, select_live_login,
-        transaction_cleanup_batch,
+        account_deletion_completions, account_deletion_writes, account_failure, account_phase_name,
+        consume_opaque_connection_attempt, credential_id, live_login, login_tombstone_expiry_batch,
+        opaque_attempt_demand, render_account_action, render_sasl_action, render_sasl_actions,
+        replay_terminal_account, select_live_login, transaction_cleanup_batch,
     };
-    use crate::state_core::durable::AccountServiceDurableWrite;
+    use crate::StateCoreSeed;
+    use crate::state_core::durable::{AccountServiceDurableWrite, AccountingCeilings, KeyDeriver};
+    use crate::state_core::reconstruct::reconstruct;
+    use crate::state_core::{
+        DefaultRouter, StateCore, StateCoreClocks, StateCoreConfig, StateCoreContext,
+        StateCoreInputs,
+    };
+    use crate::sync::Arc;
+
+    static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    const TEST_STORAGE_LIMITS: StorageEngineLimits = StorageEngineLimits {
+        redb_cache_bytes: 8 * 1_024 * 1_024,
+        fixed_reserve_bytes: 64 * 1_024 * 1_024,
+        reserve_percent: 1,
+        database_max_bytes: 1_073_741_824,
+        backup_max_bytes: 2_147_483_648,
+        integrity_checkpoint_manifests: 100_000,
+    };
+
+    fn signed_test_qualification(
+        tuple: agenc_ircd_storage::FilesystemTuple,
+    ) -> Result<StorageQualification, Box<dyn core::error::Error>> {
+        let target = match tuple.target {
+            "x86_64-unknown-linux-gnu" => QualificationTarget::X86_64UnknownLinuxGnu,
+            "aarch64-unknown-linux-gnu" => QualificationTarget::Aarch64UnknownLinuxGnu,
+            _ => return Err("unsupported test target".into()),
+        };
+        let mut cases = agenc_ircd_storage::REQUIRED_QUALIFICATION_CASES
+            .iter()
+            .map(|name| StorageGrowthCase::new((*name).to_owned(), 1_000, 1_001))
+            .collect::<Result<Vec<_>, _>>()?;
+        cases.sort_by(|left, right| left.name().cmp(right.name()));
+        let key = Ed25519SecretKey::from_bytes([99; 32]);
+        let report = StorageQualificationReport::sign(
+            StorageQualificationReportTbs {
+                target,
+                filesystem_type: tuple.filesystem_type,
+                block_size: tuple.block_size,
+                mount_flags: tuple.mount_flags,
+                kernel_release: "test-kernel".to_owned(),
+                redb_features_hash: StorageDigest::from_bytes([1; 32]),
+                release_profile_hash: StorageDigest::from_bytes([2; 32]),
+                corpus_hash: StorageDigest::from_bytes([3; 32]),
+                cases,
+                maximum_observed_growth: 1,
+                raw_log_hash: StorageDigest::from_bytes([4; 32]),
+            },
+            &key,
+        )?;
+        let verified =
+            StorageQualificationReport::decode_and_verify(&report.encode()?, key.public_key())?;
+        Ok(verified.qualification_for(tuple)?)
+    }
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn create() -> Result<Self, Box<dyn core::error::Error>> {
+            let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "agenc-ircd-account-service-{}-{sequence}",
+                std::process::id()
+            ));
+            fs::create_dir(&path)?;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+            Ok(Self(path))
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _removed = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct CoordinatorFixture {
+        coordinator: AccountServiceCoordinator,
+        state: Option<StateCore>,
+        owner: Option<StorageOwner>,
+        _storage_completions: tokio::sync::mpsc::Receiver<crate::bridge::StorageCompletionMessage>,
+        _storage_reads: tokio::sync::mpsc::Receiver<crate::bridge::StorageReadCompletionMessage>,
+        _crypto_completions: tokio::sync::mpsc::Receiver<
+            crate::bridge::CryptoCompletionMessage<crate::bridge::crypto::CryptoJobOutput>,
+        >,
+        _directory: TestDirectory,
+    }
+
+    impl CoordinatorFixture {
+        fn new(entropy: Vec<u8>) -> Result<Self, Box<dyn core::error::Error>> {
+            let network_id = NetworkId::from_bytes([31; 32]);
+            let server_id = ServerId::from_bytes([32; 16]);
+            let server_incarnation = ServerIncarnation::from_bytes([33; 16]);
+            let recovery_epoch = RecoveryEpoch::from_bytes([34; 16]);
+            let storage_master = [35; 32];
+            let rollback_guard = [36; 32];
+            let login_index = [37; 32];
+            let directory = TestDirectory::create()?;
+            let opaque = Arc::new(OpaqueProfile::generate(network_id)?);
+            let login_key = LoginIndexKey::from_bytes(login_index);
+            let key_state = LoginIndexKeyState::stable(1, login_key.key_id(network_id))?;
+            let key_state_record = InitialStorageRecord::new(
+                TableId::LoginIndexKeyState,
+                StoredKey::new(LOGIN_INDEX_KEY_STATE_KEY.to_vec())?,
+                1,
+                key_state.encode()?,
+            )?;
+            let fake_value = PersistentRecordValue::new(
+                TableId::OpaqueRecord,
+                LIVE_RECORD_KIND,
+                1,
+                0,
+                None,
+                Vec::new(),
+                opaque.expose_fake_record_for_persistence().to_vec(),
+            )?;
+            let fake_record = InitialStorageRecord::new(
+                TableId::OpaqueRecord,
+                StoredKey::new(OPAQUE_FAKE_RECORD_KEY.to_vec())?,
+                1,
+                fake_value.encode()?,
+            )?;
+            let qualification = signed_test_qualification(StateDirectory::probe(&directory.0)?)?;
+            let state_directory =
+                StateDirectory::open(&directory.0, core::slice::from_ref(&qualification))?;
+            let initialized = initialize_storage(StorageInitializationConfig {
+                state_directory,
+                header_tbs: DatabaseHeaderTbs::new(
+                    network_id,
+                    server_id,
+                    server_incarnation,
+                    DatabaseId::from_bytes([38; 16]),
+                    1,
+                    SCHEMA_GENERATION,
+                    recovery_epoch,
+                )?,
+                storage_master_key: StorageMasterKey::from_bytes(storage_master),
+                rollback_guard_root_key: RollbackGuardRootKey::from_bytes(rollback_guard),
+                mode: StorageInitializationMode::Live,
+                initial_records: vec![key_state_record, fake_record],
+                account_service_response_count: 0,
+                state_generation: 0,
+                predecessor_guard_hash: StorageDigest::from_bytes([0; 32]),
+                limits: TEST_STORAGE_LIMITS,
+            })?;
+            if !matches!(initialized, StorageInitializationOutcome::Complete { .. }) {
+                return Err("storage initialization was indeterminate".into());
+            }
+            let state_directory =
+                StateDirectory::open(&directory.0, core::slice::from_ref(&qualification))?;
+            let owner = StorageOwner::start(StorageOpenConfig {
+                expected_network_id: network_id,
+                expected_server_id: server_id,
+                state_directory,
+                storage_master_key: StorageMasterKey::from_bytes(storage_master),
+                rollback_guard_root_key: RollbackGuardRootKey::from_bytes(rollback_guard),
+                login_index_key: LoginIndexKey::from_bytes(login_index),
+                previous_login_index_key: None,
+                limits: TEST_STORAGE_LIMITS,
+            })?;
+            let seed = StateCoreSeed::from_storage(&owner)?;
+            let storage = seed.storage();
+            let keys = KeyDeriver::new(
+                StorageMasterKey::from_bytes(storage_master),
+                storage.database_binding(),
+                storage.storage_key_generation(),
+            )?;
+            let reconstruction = reconstruct(&seed, &owner.port(), &keys)?;
+            let (storage_bridge, storage_completions, storage_reads) =
+                StorageBridge::start(owner.port())?;
+            let crypto_config = CryptoWorkerConfig::new(1, 1, 1)?;
+            let (crypto_bridge, crypto_completions) = CryptoBridge::start(crypto_config)?;
+            let state = StateCore::new(StateCoreInputs {
+                config: StateCoreConfig {
+                    server_prefix: "server.example".to_owned(),
+                    rate_limits: RateLimits::defaults(),
+                    ceilings: AccountingCeilings {
+                        database_max_bytes: TEST_STORAGE_LIMITS.database_max_bytes,
+                        backup_max_bytes: TEST_STORAGE_LIMITS.backup_max_bytes,
+                    },
+                    motd: None,
+                    public_info: None,
+                },
+                reconstruction,
+                keys,
+                bridge: storage_bridge,
+                crypto: crypto_bridge,
+                budget: Arc::new(MemoryBudget::new(512 * 1_024 * 1_024)),
+                liveness: Arc::new(Liveness::new()),
+                clocks: StateCoreClocks {
+                    monotonic: Box::new(DeterministicMonotonicClock::at(10)),
+                    wall: Box::new(DeterministicWallClock::at(1_000)),
+                },
+                entropy: Box::new(ScriptedEntropy::new(entropy)?),
+                router: Box::new(DefaultRouter),
+            });
+            let coordinator = AccountServiceCoordinator::new(AccountServiceConfig {
+                network_id,
+                server_id,
+                server_incarnation,
+                origin_id: OriginId::from_bytes([39; 16]),
+                origin_generation: Generation::new(1)?,
+                recovery_epoch,
+                hpke_private_key: Arc::new(AccountHpkePrivateKey::from_bytes([40; 32])?),
+                opaque_profile: opaque,
+                current_login_index_key: Arc::new(LoginIndexKey::from_bytes(login_index)),
+                previous_login_index_key: None,
+                fake_credential_key: Arc::new(OpaqueFakeCredentialKey::from_bytes([41; 32])),
+                login_index_key_state: key_state,
+                live_login_keys: BTreeMap::new(),
+                login_deletion_tombstones: BTreeMap::new(),
+                startup_transaction_cleanups: Vec::new(),
+                creation_policy: AccountCreationPolicy::Open,
+                default_presence: PresencePolicy::Private,
+                default_guest_direct_messages: GuestDirectMessagePolicy::Deny,
+                default_direct_messages: DirectMessagePolicy::Allow,
+            })?;
+            Ok(Self {
+                coordinator,
+                state: Some(state),
+                owner: Some(owner),
+                _storage_completions: storage_completions,
+                _storage_reads: storage_reads,
+                _crypto_completions: crypto_completions,
+                _directory: directory,
+            })
+        }
+
+        fn parts(
+            &mut self,
+        ) -> Result<(&mut AccountServiceCoordinator, &mut StateCoreContext), RuntimeError> {
+            let state = self.state.as_mut().ok_or(RuntimeError::InvalidValue)?;
+            Ok((&mut self.coordinator, state.context_mut()))
+        }
+    }
+
+    impl Drop for CoordinatorFixture {
+        fn drop(&mut self) {
+            drop(self.state.take());
+            if let Some(owner) = self.owner.take() {
+                let _shutdown = owner.shutdown();
+            }
+        }
+    }
 
     struct ExactBudget(usize);
 
@@ -6654,6 +6926,770 @@ mod tests {
 
     fn account(byte: u8) -> AccountId {
         AccountId::from_random(AccountRandomId::from_bytes([byte; 16]))
+    }
+
+    fn parsed(
+        line: &str,
+    ) -> Result<agenc_ircd_client_wire::ParsedMessage, Box<dyn core::error::Error>> {
+        parse_message(FramedLine::new(line)?)?.ok_or_else(|| "empty test message".into())
+    }
+
+    fn structural_envelope(
+        kind: AccountServiceMessageKind,
+    ) -> Result<AccountServiceEnvelope, Box<dyn core::error::Error>> {
+        let mut encoded = [0_u8; agenc_ircd_auth::ACCOUNT_SERVICE_ENVELOPE_BYTES];
+        encoded
+            .get_mut(..2)
+            .ok_or(RuntimeError::InvalidValue)?
+            .copy_from_slice(&1_u16.to_be_bytes());
+        let kind_offset = 2 + 32 + 32 + 16;
+        encoded
+            .get_mut(kind_offset..kind_offset + 2)
+            .ok_or(RuntimeError::InvalidValue)?
+            .copy_from_slice(&kind.wire_value().to_be_bytes());
+        let ciphertext_length_offset = kind_offset + 2 + 32;
+        let ciphertext_length = u16::try_from(ACCOUNT_HPKE_REQUEST_CIPHERTEXT_BYTES)?;
+        encoded
+            .get_mut(ciphertext_length_offset..ciphertext_length_offset + 2)
+            .ok_or(RuntimeError::InvalidValue)?
+            .copy_from_slice(&ciphertext_length.to_be_bytes());
+        Ok(AccountServiceEnvelope::parse(encoded)?)
+    }
+
+    fn request_context(
+        generation: u64,
+        carrier_generation: u64,
+        carrier: RequestCarrier,
+        phase: AccountCarrierPhase,
+    ) -> Result<RequestContext, Box<dyn core::error::Error>> {
+        let kind = match (carrier, phase) {
+            (RequestCarrier::Sasl, AccountCarrierPhase::Start) => {
+                AccountServiceMessageKind::OpaqueAuthStart
+            }
+            (RequestCarrier::Sasl, AccountCarrierPhase::Finish) => {
+                AccountServiceMessageKind::OpaqueAuthFinish
+            }
+            (RequestCarrier::Account(AccountCarrierKind::Create), AccountCarrierPhase::Start) => {
+                AccountServiceMessageKind::AccountCreateStart
+            }
+            (RequestCarrier::Account(AccountCarrierKind::Create), AccountCarrierPhase::Finish) => {
+                AccountServiceMessageKind::AccountCreateFinish
+            }
+            (
+                RequestCarrier::Account(AccountCarrierKind::Credentials),
+                AccountCarrierPhase::Start,
+            ) => AccountServiceMessageKind::CredentialChangeStart,
+            (
+                RequestCarrier::Account(AccountCarrierKind::Credentials),
+                AccountCarrierPhase::Finish,
+            ) => AccountServiceMessageKind::CredentialChangeFinish,
+        };
+        Ok(RequestContext {
+            generation: ConnectionGeneration::new(generation),
+            carrier_generation,
+            target: "tester".to_owned(),
+            route: ConnectionRoute {
+                origin_id: OriginId::from_bytes([1; 16]),
+                origin_generation: Generation::new(1)?,
+                connection_id: ConnectionId::from_bytes([2; 16]),
+                connection_nonce: [3; 32],
+            },
+            envelope: structural_envelope(kind)?,
+            carrier,
+            phase,
+        })
+    }
+
+    #[test]
+    fn request_context_and_pending_crypto_cover_every_closed_variant()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let cases = [
+            (
+                RequestCarrier::Sasl,
+                AccountCarrierPhase::Start,
+                AccountServiceMessageKind::OpaqueAuthStart,
+            ),
+            (
+                RequestCarrier::Sasl,
+                AccountCarrierPhase::Finish,
+                AccountServiceMessageKind::OpaqueAuthFinish,
+            ),
+            (
+                RequestCarrier::Account(AccountCarrierKind::Create),
+                AccountCarrierPhase::Start,
+                AccountServiceMessageKind::AccountCreateStart,
+            ),
+            (
+                RequestCarrier::Account(AccountCarrierKind::Create),
+                AccountCarrierPhase::Finish,
+                AccountServiceMessageKind::AccountCreateFinish,
+            ),
+            (
+                RequestCarrier::Account(AccountCarrierKind::Credentials),
+                AccountCarrierPhase::Start,
+                AccountServiceMessageKind::CredentialChangeStart,
+            ),
+            (
+                RequestCarrier::Account(AccountCarrierKind::Credentials),
+                AccountCarrierPhase::Finish,
+                AccountServiceMessageKind::CredentialChangeFinish,
+            ),
+        ];
+        for (carrier, phase, expected) in cases {
+            let request = request_context(1, 7, carrier, phase)?;
+            assert_eq!(request.is_finish(), phase == AccountCarrierPhase::Finish);
+            assert_eq!(request.expected_message_kind(), expected);
+        }
+
+        let login = || NormalizedLogin::prepare("bounded-user");
+        let pending = vec![
+            PendingCrypto::Open(request_context(
+                1,
+                1,
+                RequestCarrier::Sasl,
+                AccountCarrierPhase::Start,
+            )?),
+            PendingCrypto::CreationPreflight {
+                request: request_context(
+                    2,
+                    2,
+                    RequestCarrier::Account(AccountCarrierKind::Create),
+                    AccountCarrierPhase::Start,
+                )?,
+            },
+            PendingCrypto::CreationStart {
+                request: request_context(
+                    3,
+                    3,
+                    RequestCarrier::Account(AccountCarrierKind::Create),
+                    AccountCarrierPhase::Start,
+                )?,
+            },
+            PendingCrypto::CreationStartSeal {
+                request: request_context(
+                    4,
+                    4,
+                    RequestCarrier::Account(AccountCarrierKind::Create),
+                    AccountCarrierPhase::Start,
+                )?,
+            },
+            PendingCrypto::CreationFinish {
+                request: request_context(
+                    5,
+                    5,
+                    RequestCarrier::Account(AccountCarrierKind::Create),
+                    AccountCarrierPhase::Finish,
+                )?,
+                transaction_id: TransactionId::from_bytes([5; 16]),
+                reservation: None,
+            },
+            PendingCrypto::CreationFinishSeal {
+                request: request_context(
+                    6,
+                    6,
+                    RequestCarrier::Account(AccountCarrierKind::Create),
+                    AccountCarrierPhase::Finish,
+                )?,
+                transaction_id: TransactionId::from_bytes([6; 16]),
+                reservation: Some(CreationReservation {
+                    login_key: StoredKey::new(vec![6])?,
+                    invitation_id: None,
+                }),
+            },
+            PendingCrypto::CredentialStart {
+                request: request_context(
+                    7,
+                    7,
+                    RequestCarrier::Account(AccountCarrierKind::Credentials),
+                    AccountCarrierPhase::Start,
+                )?,
+                reservation: None,
+            },
+            PendingCrypto::CredentialStartSeal {
+                request: request_context(
+                    8,
+                    8,
+                    RequestCarrier::Account(AccountCarrierKind::Credentials),
+                    AccountCarrierPhase::Start,
+                )?,
+                reservation: Some(account(8)),
+            },
+            PendingCrypto::CredentialFinish {
+                request: request_context(
+                    9,
+                    9,
+                    RequestCarrier::Account(AccountCarrierKind::Credentials),
+                    AccountCarrierPhase::Finish,
+                )?,
+                transaction_id: TransactionId::from_bytes([9; 16]),
+                reservation: None,
+            },
+            PendingCrypto::CredentialFinishSeal {
+                request: request_context(
+                    10,
+                    10,
+                    RequestCarrier::Account(AccountCarrierKind::Credentials),
+                    AccountCarrierPhase::Finish,
+                )?,
+                transaction_id: TransactionId::from_bytes([10; 16]),
+                reservation: Some(account(10)),
+            },
+            PendingCrypto::Start {
+                request: request_context(11, 11, RequestCarrier::Sasl, AccountCarrierPhase::Start)?,
+                account_id: None,
+                login: login()?,
+                previous_value: None,
+            },
+            PendingCrypto::StartSeal {
+                request: request_context(12, 12, RequestCarrier::Sasl, AccountCarrierPhase::Start)?,
+                account_id: Some(account(12)),
+                login: login()?,
+                previous_value: None,
+            },
+            PendingCrypto::Finish {
+                request: request_context(
+                    13,
+                    13,
+                    RequestCarrier::Sasl,
+                    AccountCarrierPhase::Finish,
+                )?,
+                transaction_id: TransactionId::from_bytes([13; 16]),
+                account_id: None,
+                login: login()?,
+                previous_value: None,
+                authenticated_at: MonotonicTick::from_ticks(1),
+            },
+            PendingCrypto::FinishSeal {
+                request: request_context(
+                    14,
+                    14,
+                    RequestCarrier::Sasl,
+                    AccountCarrierPhase::Finish,
+                )?,
+                transaction_id: TransactionId::from_bytes([14; 16]),
+                account_id: Some(account(14)),
+                login: login()?,
+                previous_value: None,
+                authenticated_at: MonotonicTick::from_ticks(1),
+            },
+        ];
+        let mut cleanup_count = 0;
+        for (index, pending) in pending.into_iter().enumerate() {
+            let generation = u64::try_from(index)?.saturating_add(1);
+            assert_eq!(pending.generation(), ConnectionGeneration::new(generation));
+            assert_eq!(pending.carrier_generation(), generation);
+            if pending.into_transaction_cleanup().is_some() {
+                cleanup_count += 1;
+            }
+        }
+        assert_eq!(cleanup_count, 6);
+        Ok(())
+    }
+
+    #[test]
+    fn coordinator_internal_fences_cover_each_independent_busy_source()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let mut fixture = CoordinatorFixture::new(vec![1; 96])?;
+        let coordinator = &mut fixture.coordinator;
+        let generation = ConnectionGeneration::new(1);
+        let transaction = TransactionId::from_bytes([1; 16]);
+        assert!(coordinator.reload_ready());
+        assert!(coordinator.exclusive_account_service_transition_available());
+
+        coordinator.pending_authority = Some(PendingAuthority::Logout {
+            generation,
+            carrier_generation: 1,
+        });
+        assert!(!coordinator.exclusive_account_service_transition_available());
+        coordinator.pending_authority = None;
+
+        coordinator
+            .pending_cleanups
+            .push(TransactionCleanup::authentication(transaction));
+        assert!(!coordinator.exclusive_account_service_transition_available());
+        coordinator.pending_cleanups.clear();
+
+        coordinator
+            .cleanup_queue
+            .push_back(TransactionCleanup::authentication(transaction));
+        assert!(!coordinator.exclusive_account_service_transition_available());
+        coordinator.cleanup_queue.clear();
+
+        coordinator
+            .grant_consumptions
+            .insert(generation, transaction);
+        assert!(!coordinator.exclusive_account_service_transition_available());
+        coordinator.grant_consumptions.clear();
+
+        coordinator.pending_account_deletions.insert(
+            generation,
+            AccountDeletionBarrier {
+                account_id: account(1),
+                tombstone_id: (100, account(1)),
+                authentications: Vec::new(),
+                grants: Vec::new(),
+                completions: Vec::new(),
+            },
+        );
+        assert!(!coordinator.exclusive_account_service_transition_available());
+        coordinator.pending_account_deletions.clear();
+
+        coordinator.pending_login_tombstone_expiry = Some(PendingLoginTombstoneExpiry {
+            tombstones: Vec::new(),
+            resulting_key_state: None,
+        });
+        assert!(!coordinator.exclusive_account_service_transition_available());
+        coordinator.pending_login_tombstone_expiry = None;
+
+        assert!(coordinator.account_deletion_transition_available(account(2)));
+        coordinator
+            .credential_reservations
+            .insert(account(2), generation);
+        assert!(!coordinator.account_deletion_transition_available(account(2)));
+        assert!(coordinator.retains_credential_reservation(generation, true));
+        assert!(!coordinator.retains_credential_reservation(ConnectionGeneration::new(2), false));
+        coordinator.credential_reservations.clear();
+        coordinator.credential_cleanup_owners.insert(generation);
+        assert!(coordinator.retains_credential_reservation(generation, false));
+        coordinator.credential_cleanup_owners.clear();
+        coordinator.transaction_owners.insert(
+            transaction,
+            (generation, LiveTransactionClass::CredentialChange),
+        );
+        assert!(coordinator.retains_credential_reservation(generation, false));
+
+        assert!(
+            coordinator
+                .release_finished_transaction(
+                    generation,
+                    LiveTransactionClass::CredentialChange,
+                    transaction,
+                )
+                .is_ok()
+        );
+        assert!(
+            coordinator
+                .release_finished_transaction(
+                    generation,
+                    LiveTransactionClass::CredentialChange,
+                    transaction,
+                )
+                .is_err()
+        );
+        coordinator.transaction_owners.insert(
+            transaction,
+            (generation, LiveTransactionClass::Authentication),
+        );
+        assert!(
+            coordinator
+                .release_finished_transaction(
+                    generation,
+                    LiveTransactionClass::CredentialChange,
+                    transaction,
+                )
+                .is_err()
+        );
+        assert!(coordinator.transaction_owners.contains_key(&transaction));
+        coordinator.transaction_owners.clear();
+
+        coordinator.reload_policy(AccountRuntimePolicy {
+            allow_guests: false,
+            creation: AccountCreationPolicy::Closed,
+            default_presence: PresencePolicy::Public,
+            default_guest_direct_messages: GuestDirectMessagePolicy::Allow,
+            default_direct_messages: DirectMessagePolicy::Contacts,
+        });
+        assert!(matches!(
+            coordinator.config.creation_policy,
+            AccountCreationPolicy::Closed
+        ));
+        assert_eq!(coordinator.config.default_presence, PresencePolicy::Public);
+        assert_eq!(
+            coordinator.config.default_guest_direct_messages,
+            GuestDirectMessagePolicy::Allow
+        );
+        assert_eq!(
+            coordinator.config.default_direct_messages,
+            DirectMessagePolicy::Contacts
+        );
+
+        coordinator.cleanup_queue = (0..MAX_PENDING_TRANSACTION_CLEANUPS)
+            .map(|_| TransactionCleanup::authentication(transaction))
+            .collect();
+        assert!(!coordinator.transaction_capacity_available());
+        assert!(
+            coordinator
+                .queue_unowned_transaction_cleanup(TransactionCleanup::authentication(
+                    TransactionId::from_bytes([2; 16]),
+                ))
+                .is_err()
+        );
+        coordinator.cleanup_queue.clear();
+        assert!(coordinator.transaction_capacity_available());
+        assert!(
+            coordinator
+                .queue_unowned_transaction_cleanup(TransactionCleanup::authentication(
+                    TransactionId::from_bytes([2; 16]),
+                ))
+                .is_ok()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn carrier_rendering_covers_every_closed_control_and_numeric_arm()
+    -> Result<(), Box<dyn core::error::Error>> {
+        for kind in [AccountCarrierKind::Create, AccountCarrierKind::Credentials] {
+            for phase in [AccountCarrierPhase::Start, AccountCarrierPhase::Finish] {
+                assert!(
+                    render_account_action(
+                        "server.example",
+                        kind,
+                        AccountCarrierAction::Ready(phase)
+                    )
+                    .is_ok()
+                );
+                assert!(
+                    render_account_action(
+                        "server.example",
+                        kind,
+                        AccountCarrierAction::ResponseStart(phase),
+                    )
+                    .is_ok()
+                );
+                assert_eq!(
+                    account_phase_name(phase),
+                    if phase == AccountCarrierPhase::Start {
+                        "START"
+                    } else {
+                        "FINISH"
+                    }
+                );
+            }
+            assert!(
+                render_account_action("server.example", kind, AccountCarrierAction::End).is_ok()
+            );
+            assert!(account_failure("server.example", kind).is_ok());
+            assert!(
+                render_account_action(
+                    "server.example",
+                    kind,
+                    AccountCarrierAction::RequestEnvelope {
+                        phase: AccountCarrierPhase::Start,
+                        bytes: SecretBytes::new(&[])?,
+                    },
+                )
+                .is_err()
+            );
+        }
+
+        assert!(render_sasl_action("server.example", "tester", SaslAction::SendPlus)?.is_some());
+        for numeric in [
+            SaslNumeric::Success,
+            SaslNumeric::Failed,
+            SaslNumeric::TooLong,
+            SaslNumeric::Aborted,
+            SaslNumeric::AlreadyAuthenticated,
+            SaslNumeric::Mechanisms,
+        ] {
+            assert!(
+                render_sasl_action("server.example", "tester", SaslAction::Numeric(numeric),)?
+                    .is_some()
+            );
+        }
+        assert!(render_sasl_action("server.example", "tester", SaslAction::Logout)?.is_none());
+        assert!(
+            render_sasl_action(
+                "server.example",
+                "tester",
+                SaslAction::RequestEnvelope {
+                    finish: false,
+                    bytes: SecretBytes::new(&[])?,
+                },
+            )?
+            .is_none()
+        );
+        assert!(
+            render_sasl_actions("server.example", "tester", vec![SaslAction::Logout])?.is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn coordinator_connection_carriers_and_timer_boundaries_fail_closed()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let mut fixture = CoordinatorFixture::new(vec![7; 48 * 16])?;
+        let unknown = ConnectionGeneration::new(99);
+        {
+            let (coordinator, context) = fixture.parts()?;
+            assert!(matches!(
+                coordinator.route_sasl(
+                    context,
+                    unknown,
+                    1,
+                    "tester",
+                    parsed("AUTHENTICATE AGENC-OPAQUE")?
+                ),
+                CarrierRoute::Close
+            ));
+            assert!(matches!(
+                coordinator.route_account(
+                    context,
+                    unknown,
+                    1,
+                    "tester",
+                    AccountCarrierKind::Create,
+                    parsed("ACCTCREATE START")?,
+                ),
+                CarrierRoute::Close
+            ));
+        }
+
+        for generation in 1..=8 {
+            let (coordinator, context) = fixture.parts()?;
+            coordinator.connection_opened(context, ConnectionGeneration::new(generation))?;
+        }
+        {
+            let (coordinator, context) = fixture.parts()?;
+            assert!(
+                coordinator
+                    .connection_opened(context, ConnectionGeneration::new(1))
+                    .is_err()
+            );
+            assert!(matches!(
+                coordinator.route_sasl(
+                    context,
+                    ConnectionGeneration::new(1),
+                    1,
+                    "tester",
+                    parsed("AUTHENTICATE one two")?,
+                ),
+                CarrierRoute::Close
+            ));
+            assert!(matches!(
+                coordinator.route_sasl(
+                    context,
+                    ConnectionGeneration::new(2),
+                    2,
+                    "tester",
+                    parsed("AUTHENTICATE AGENC-OPAQUE")?,
+                ),
+                CarrierRoute::Finished(_)
+            ));
+            assert!(matches!(
+                coordinator.route_sasl(
+                    context,
+                    ConnectionGeneration::new(2),
+                    2,
+                    "tester",
+                    parsed("AUTHENTICATE !")?,
+                ),
+                CarrierRoute::Close
+            ));
+            assert!(matches!(
+                coordinator.route_account(
+                    context,
+                    ConnectionGeneration::new(3),
+                    3,
+                    "tester",
+                    AccountCarrierKind::Create,
+                    parsed("ACCTCREATE")?,
+                ),
+                CarrierRoute::Close
+            ));
+            assert!(matches!(
+                coordinator.route_account(
+                    context,
+                    ConnectionGeneration::new(4),
+                    4,
+                    "tester",
+                    AccountCarrierKind::Create,
+                    parsed("ACCTCREATE START")?,
+                ),
+                CarrierRoute::Finished(_)
+            ));
+            assert!(matches!(
+                coordinator.route_account(
+                    context,
+                    ConnectionGeneration::new(5),
+                    5,
+                    "tester",
+                    AccountCarrierKind::Create,
+                    parsed("ACCTCREATE BOGUS")?,
+                ),
+                CarrierRoute::Finished(_)
+            ));
+            assert!(matches!(
+                coordinator.route_account(
+                    context,
+                    ConnectionGeneration::new(6),
+                    6,
+                    "tester",
+                    AccountCarrierKind::Credentials,
+                    parsed("ACCTCRED START")?,
+                ),
+                CarrierRoute::Finished(_)
+            ));
+            assert!(matches!(
+                coordinator.route_account(
+                    context,
+                    ConnectionGeneration::new(7),
+                    7,
+                    "tester",
+                    AccountCarrierKind::Create,
+                    parsed("@label=x ACCTCREATE START")?,
+                ),
+                CarrierRoute::Finished(_)
+            ));
+            assert!(matches!(
+                coordinator.fail_route(context, unknown, "tester"),
+                CarrierRoute::Close
+            ));
+            assert!(matches!(
+                coordinator.route_sasl(
+                    context,
+                    ConnectionGeneration::new(8),
+                    8,
+                    "tester",
+                    parsed("AUTHENTICATE AGENC-OPAQUE")?,
+                ),
+                CarrierRoute::Finished(_)
+            ));
+            let mut request = "A".repeat(SASL_REQUEST_CHARACTERS - 2);
+            request.push_str("==");
+            let connection = coordinator
+                .connections
+                .get_mut(&ConnectionGeneration::new(8))
+                .ok_or(RuntimeError::InvalidValue)?;
+            for chunk in request.as_bytes().chunks(400) {
+                let chunk = std::str::from_utf8(chunk)?;
+                let _actions = connection.sasl.client(chunk, context.now().get())?;
+            }
+            assert!(matches!(
+                coordinator.fail_route(context, ConnectionGeneration::new(8), "tester"),
+                CarrierRoute::Finished(_)
+            ));
+            assert!(matches!(
+                coordinator.fail_account_route(context, unknown, AccountCarrierKind::Credentials,),
+                CarrierRoute::Close
+            ));
+        }
+
+        {
+            let (coordinator, context) = fixture.parts()?;
+            context.timers_mut().schedule(
+                MonotonicTick::from_ticks(0),
+                crate::state_core::timers::TimerKind::Ping,
+                crate::state_core::timers::TimedId::Global,
+            )?;
+            let entry = context
+                .timers_mut()
+                .pop_due(MonotonicTick::from_ticks(0))
+                .ok_or(RuntimeError::InvalidValue)?;
+            assert!(!coordinator.timer_fired(context, entry).0);
+
+            context.timers_mut().schedule(
+                MonotonicTick::from_ticks(0),
+                crate::state_core::timers::TimerKind::Reservation,
+                crate::state_core::timers::TimedId::Transaction(TransactionId::from_bytes([9; 16])),
+            )?;
+            let entry = context
+                .timers_mut()
+                .pop_due(MonotonicTick::from_ticks(0))
+                .ok_or(RuntimeError::InvalidValue)?;
+            assert!(coordinator.timer_fired(context, entry).0);
+
+            coordinator.scheduled_login_tombstone = Some((1, account(1)));
+            context.timers_mut().schedule(
+                MonotonicTick::from_ticks(0),
+                crate::state_core::timers::TimerKind::Reservation,
+                crate::state_core::timers::TimedId::Global,
+            )?;
+            let entry = context
+                .timers_mut()
+                .pop_due(MonotonicTick::from_ticks(0))
+                .ok_or(RuntimeError::InvalidValue)?;
+            assert!(coordinator.timer_fired(context, entry).0);
+
+            coordinator.connection_closed(context, unknown);
+            coordinator.connection_closed(context, ConnectionGeneration::new(1));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn connection_open_refuses_partial_entropy_without_installing_state()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let mut fixture = CoordinatorFixture::new(vec![1; 16])?;
+        let generation = ConnectionGeneration::new(1);
+        let (coordinator, context) = fixture.parts()?;
+        assert!(coordinator.connection_opened(context, generation).is_err());
+        assert!(!coordinator.connections.contains_key(&generation));
+        Ok(())
+    }
+
+    #[test]
+    fn request_cursor_login_kinds_and_cleanup_reservations_cover_absent_paths()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let mut complete = RequestResultCursor::new(&[0, 1]);
+        assert_eq!(complete.read_u16()?, 1);
+        assert!(complete.finish().is_ok());
+        let incomplete = RequestResultCursor::new(&[0, 1]);
+        assert!(incomplete.finish().is_err());
+        let mut short = RequestResultCursor::new(&[0]);
+        assert!(short.read_u16().is_err());
+
+        assert_eq!(
+            replay_terminal_account(
+                AccountServiceMessageKind::OpaqueAuthFinish,
+                RequestTerminal::Rejected,
+                None,
+            )?,
+            None
+        );
+        let network = NetworkId::from_bytes([7; 32]);
+        let login = NormalizedLogin::prepare("bounded-user")?;
+        let key = LoginIndexStoredKey::new(
+            1,
+            derive_login_index(&LoginIndexKey::from_bytes([8; 32]), network, &login)?,
+        )?;
+        let reservation = LoginIndexValue::new(
+            &key,
+            LoginIndexValueKind::CreationReservation {
+                transaction_id: TransactionId::from_bytes([9; 16]),
+                expires_at: 10,
+            },
+        )?;
+        let tombstone = LoginIndexValue::new(
+            &key,
+            LoginIndexValueKind::DeletionTombstone {
+                deleted_account_id: account(9),
+                expires_at: 10,
+            },
+        )?;
+        assert!(live_login(&reservation).is_none());
+        assert!(live_login(&tombstone).is_none());
+        assert!(credential_id(&reservation).is_err());
+        assert!(credential_id(&live_value(network, 1, &login, 10)?).is_ok());
+        assert!(select_live_login(&None, &None)?.is_none());
+        assert!(select_live_login(&None, &Some(live_value(network, 1, &login, 11)?))?.is_some());
+
+        let writes = TransactionCleanup::creation(
+            TransactionId::from_bytes([12; 16]),
+            Some(CreationReservation {
+                login_key: key.encode()?,
+                invitation_id: None,
+            }),
+        )
+        .durable_writes()?;
+        assert_eq!(writes.len(), 2);
+        let credential = TransactionCleanup::credential(
+            TransactionId::from_bytes([13; 16]),
+            Some(account(13)),
+            ConnectionGeneration::new(13),
+        );
+        assert_eq!(credential.durable_writes()?.len(), 1);
+        Ok(())
     }
 
     #[test]

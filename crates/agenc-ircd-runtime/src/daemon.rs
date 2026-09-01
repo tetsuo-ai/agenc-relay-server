@@ -2101,9 +2101,20 @@ async fn shutdown_storage(owner: StorageOwner) -> Result<(), DaemonError> {
 
 #[cfg(test)]
 mod tests {
-    use agenc_ircd_config::RateTable;
+    use agenc_ircd_config::{PathResolver, RateTable};
 
     use super::*;
+
+    const PUBLIC_CONFIG: &str = include_str!("../../agenc-ircd-config/tests/golden/public.toml");
+
+    fn public_config() -> Result<Config, DaemonError> {
+        Config::parse_text(
+            PUBLIC_CONFIG,
+            &PathResolver::none(),
+            ValidationDepth::Document,
+        )
+        .map_err(DaemonError::Configuration)
+    }
 
     #[test]
     fn runtime_purposes_enable_admin_but_keep_deferred_transports_closed() {
@@ -2150,6 +2161,153 @@ mod tests {
             assert_eq!(configured.burst, expected.burst());
             runtime_rates.set(kind, expected)?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn core_v1_profile_rejects_each_deferred_role_feature_and_listener() -> Result<(), DaemonError>
+    {
+        let baseline = public_config()?;
+        assert!(validate_profile(&baseline).is_ok());
+
+        let mut edge = baseline.clone();
+        edge.network.role = NodeRole::Edge;
+        assert!(matches!(
+            validate_profile(&edge),
+            Err(DaemonError::UnsupportedProfile)
+        ));
+
+        let mut federation = baseline.clone();
+        federation.federation.enabled = true;
+        assert!(matches!(
+            validate_profile(&federation),
+            Err(DaemonError::UnsupportedProfile)
+        ));
+
+        let mut e2ee = baseline.clone();
+        e2ee.e2ee.enabled = true;
+        assert!(matches!(
+            validate_profile(&e2ee),
+            Err(DaemonError::UnsupportedProfile)
+        ));
+
+        let mut no_clients = baseline.clone();
+        no_clients.accounts.accept_clients = false;
+        assert!(matches!(
+            validate_profile(&no_clients),
+            Err(DaemonError::UnsupportedProfile)
+        ));
+
+        for purpose in [
+            ConfigListenerPurpose::ClientWss,
+            ConfigListenerPurpose::Federation,
+        ] {
+            let mut enabled = baseline.clone();
+            enabled
+                .listeners
+                .first_mut()
+                .ok_or(RuntimeError::InvalidValue)?
+                .purpose = purpose;
+            assert!(matches!(
+                validate_profile(&enabled),
+                Err(DaemonError::UnsupportedProfile)
+            ));
+
+            enabled
+                .listeners
+                .first_mut()
+                .ok_or(RuntimeError::InvalidValue)?
+                .enabled = false;
+            assert!(validate_profile(&enabled).is_ok());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn account_defaults_cover_every_policy_combination() -> Result<(), DaemonError> {
+        let baseline = public_config()?;
+        for (public_presence, expected_presence) in [
+            (false, PresencePolicy::Private),
+            (true, PresencePolicy::Public),
+        ] {
+            for (allow_guest_dm, expected_guest_dm) in [
+                (false, GuestDirectMessagePolicy::Deny),
+                (true, GuestDirectMessagePolicy::Allow),
+            ] {
+                for (configured_dm, expected_dm) in [
+                    (DirectMessageDefault::Allow, DirectMessagePolicy::Allow),
+                    (
+                        DirectMessageDefault::Contacts,
+                        DirectMessagePolicy::Contacts,
+                    ),
+                    (DirectMessageDefault::Deny, DirectMessagePolicy::Deny),
+                ] {
+                    let mut config = baseline.clone();
+                    config.accounts.default_public_presence = public_presence;
+                    config.accounts.default_allow_guest_dm = allow_guest_dm;
+                    config.accounts.default_direct_messages = configured_dm;
+                    assert_eq!(
+                        account_defaults(&config),
+                        (expected_presence, expected_guest_dm, expected_dm)
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn validated_config_builds_exact_runtime_rates_limits_and_budget() -> Result<(), DaemonError> {
+        let config = public_config()?;
+
+        let purposes = enabled_runtime_purposes(&config)?;
+        assert_eq!(
+            purposes,
+            vec![ListenerPurpose::ClientTls, ListenerPurpose::AdminLocal]
+        );
+
+        let rates = configured_rates(&config)?;
+        for kind in BucketKind::ALL {
+            let Some(name) = kind.config_name() else {
+                assert_eq!(rates.rate(kind), RateLimits::defaults().rate(kind));
+                continue;
+            };
+            let row = RATE_ROWS
+                .iter()
+                .find(|row| row.name == name)
+                .ok_or(RuntimeError::InvalidValue)?;
+            let expected = config.limits.rates.get(row.key);
+            let actual = rates.rate(kind);
+            assert_eq!(actual.refill_tokens(), expected.refill_tokens);
+            assert_eq!(actual.refill_seconds(), expected.refill_seconds);
+            assert_eq!(actual.burst(), expected.burst);
+        }
+
+        let connections = connection_limits(&config)?;
+        assert_eq!(connections.reader.requests(), 32);
+        assert_eq!(connections.reader.arena_bytes(), 32_768);
+        assert_eq!(connections.queue.total_bytes(), 1_048_576);
+        assert_eq!(connections.queue.control_bytes(), 65_536);
+        assert_eq!(connections.queue.items(), 4_104);
+
+        assert_eq!(
+            operational_limits(&config)?.values(),
+            OperationalLimitValues {
+                sessions_per_account: 8,
+                channels_per_session: 64,
+                members_per_channel: 4_096,
+                global_channels: 100_000,
+                local_channels: 10_000,
+                invites_per_channel: 256,
+                invites_per_principal: 32,
+                invites_global: 100_000,
+                contacts_per_account: 1_000,
+            }
+        );
+
+        let budget = memory_budget(&config)?;
+        assert!(budget.capacity() > 0);
+        assert_eq!(budget.available(), budget.capacity());
         Ok(())
     }
 }

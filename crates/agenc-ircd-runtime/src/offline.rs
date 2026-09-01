@@ -810,6 +810,148 @@ mod tests {
     }
 
     #[test]
+    fn init_request_and_private_directory_validation_reject_every_path_class()
+    -> Result<(), OfflineError> {
+        let root = TestDirectory::create()?;
+
+        let mut request = test_request(&root.0)?;
+        request.config_path = PathBuf::from("config.toml");
+        assert_eq!(
+            validate_init_request(&request),
+            Err(OfflineError::InvalidRequest)
+        );
+        let mut request = test_request(&root.0)?;
+        request.data_dir = PathBuf::from("data");
+        assert_eq!(
+            validate_init_request(&request),
+            Err(OfflineError::InvalidRequest)
+        );
+        let mut request = test_request(&root.0)?;
+        request.runtime_dir = PathBuf::from("run");
+        assert_eq!(
+            validate_init_request(&request),
+            Err(OfflineError::InvalidRequest)
+        );
+        let mut request = test_request(&root.0)?;
+        request.config_path = request.data_dir.clone();
+        assert_eq!(
+            validate_init_request(&request),
+            Err(OfflineError::InvalidRequest)
+        );
+        for profile in [InitProfile::Public, InitProfile::Dual] {
+            let mut request = test_request(&root.0)?;
+            request.profile = profile;
+            request.dns_name = None;
+            assert_eq!(
+                validate_init_request(&request),
+                Err(OfflineError::InvalidRequest)
+            );
+        }
+        let mut onion = test_request(&root.0)?;
+        onion.profile = InitProfile::Onion;
+        onion.dns_name = None;
+        assert_eq!(validate_init_request(&onion), Ok(()));
+
+        let fresh = root.0.join("fresh-private");
+        ensure_data_directory(&fresh)?;
+        assert_eq!(ensure_data_directory(&fresh), Ok(()));
+        let broad = root.0.join("broad");
+        create_private_directory(&broad)?;
+        fs::set_permissions(&broad, fs::Permissions::from_mode(0o755))
+            .map_err(|_| OfflineError::Filesystem)?;
+        assert_eq!(ensure_data_directory(&broad), Err(OfflineError::Filesystem));
+        let file = root.0.join("not-a-directory");
+        write_secret(&file, b"file")?;
+        assert_eq!(ensure_data_directory(&file), Err(OfflineError::Filesystem));
+        assert_eq!(
+            ensure_data_directory(&file.join("child")),
+            Err(OfflineError::Filesystem)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn descriptor_reader_rejects_size_encoding_shape_and_duplicate_fields()
+    -> Result<(), OfflineError> {
+        let valid = "AGENC-CHAT-CONNECT/1\nnetwork-id=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\nserver-name=chat.example\nrecovery-epoch=AQEBAQEBAQEBAQEBAQEBAQ\nbase-profile-sha256=x\naccount-service-hpke-key-id=x\naccount-service-hpke-public-key=x\ne2ee-profile=IRC-MLS/1\ne2ee-profile-sha256=x\nsequencer-key-set-generation=0\nsequencer-key-set-hash=x\n";
+        assert_eq!(validate_descriptor_shape(valid), Ok(()));
+        for invalid in [
+            valid.replace('\n', "\r\n"),
+            valid.replacen("AGENC-CHAT-CONNECT/1", "WRONG/1", 1),
+            "AGENC-CHAT-CONNECT/1\nnetwork-id=x\n".to_owned(),
+            format!("{valid}extra-1=x\nextra-2=x\nextra-3=x\nextra-4=x\n"),
+            valid.replacen("server-name=chat.example\n", "optional=x\n", 1),
+            format!("{valid}network-id=duplicate\n"),
+        ] {
+            assert_eq!(
+                validate_descriptor_shape(&invalid),
+                Err(OfflineError::InvalidRequest)
+            );
+        }
+
+        let root = TestDirectory::create()?;
+        assert_eq!(
+            read_descriptor(&root.0.join("missing")),
+            Err(OfflineError::Filesystem)
+        );
+        for (name, bytes, expected) in [
+            ("empty", Vec::new(), OfflineError::InvalidRequest),
+            (
+                "oversized",
+                vec![b'x'; MAX_DESCRIPTOR_BYTES + 1],
+                OfflineError::InvalidRequest,
+            ),
+            (
+                "invalid-utf8",
+                vec![0xff, 0xfe, 0xfd],
+                OfflineError::InvalidRequest,
+            ),
+            (
+                "invalid-shape",
+                b"AGENC-CHAT-CONNECT/1".to_vec(),
+                OfflineError::InvalidRequest,
+            ),
+        ] {
+            let path = root.0.join(name);
+            write_secret(&path, &bytes)?;
+            assert_eq!(read_descriptor(&path), Err(expected));
+        }
+        let valid_path = root.0.join("valid");
+        write_secret(&valid_path, valid.as_bytes())?;
+        assert_eq!(read_descriptor(&valid_path)?, valid);
+        assert_eq!(
+            parse_network_id("invalid"),
+            Err(OfflineError::InvalidRequest)
+        );
+        assert_eq!(
+            parse_network_id("AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE"),
+            Ok(NetworkId::from_bytes([1; 32]))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn staging_rename_distinguishes_preinstall_and_partial_failures() -> Result<(), OfflineError> {
+        let root = TestDirectory::create()?;
+        let staging_root = root.0.join("rename-staging");
+        create_private_directory(&staging_root)?;
+        let mut staging = Staging {
+            root: staging_root,
+            installed: false,
+        };
+        assert_eq!(
+            staging.rename(root.0.join("missing"), root.0.join("target")),
+            Err(OfflineError::Filesystem)
+        );
+        staging.installed = true;
+        assert_eq!(
+            staging.rename(root.0.join("missing"), root.0.join("target")),
+            Err(OfflineError::PartialInitialization)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn every_error_has_a_fixed_secret_free_message() {
         for (error, message) in [
             (OfflineError::InvalidRequest, "offline request rejected"),

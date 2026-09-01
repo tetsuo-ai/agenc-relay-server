@@ -825,8 +825,8 @@ fn intent_requires_outcome(event: &AdminAuditEvent) -> Result<bool, RuntimeError
 #[cfg(test)]
 mod tests {
     use agenc_ircd_admin::{
-        AdminAuditCheckpointTbs, AdminAuditEventTbs, AdminCommandTbs, AdminSessionId,
-        OperatorRecord,
+        AdminAuditCheckpointTbs, AdminAuditEventTbs, AdminCommandEvent, AdminCommandTbs,
+        AdminSessionId, ConfirmationState, OperatorRecord,
     };
     use agenc_ircd_crypto::audit_signing_key_id;
     use agenc_ircd_types::{AdminPermission, AdminPermissionSet, NetworkId, OperatorId, ServerId};
@@ -921,6 +921,78 @@ mod tests {
             )
             .map_err(|_| RuntimeError::InvalidValue)
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn signed_event_with(
+        outer_binding: AdminSessionBinding,
+        command_binding: AdminSessionBinding,
+        cursor: AuditChainCursor,
+        command_counter: u64,
+        phase: AdminAuditPhase,
+        command: &[u8],
+        declared_audit_key_id: [u8; 32],
+        audit_key: &Ed25519SecretKey,
+        operator_key: &Ed25519SecretKey,
+        operator_id: OperatorId,
+    ) -> Result<AdminAuditEvent, RuntimeError> {
+        let command_tbs = AdminCommandTbs::new(
+            command_binding.network_id,
+            command_binding.server_id,
+            AdminSessionId::from_bytes([3; 16]),
+            command_counter,
+            None,
+            command,
+        )
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        let operator_signature = command_tbs
+            .sign(operator_key)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        AdminAuditEvent::sign(
+            AdminAuditEventTbs {
+                network_id: outer_binding.network_id,
+                server_id: outer_binding.server_id,
+                audit_signing_key_id: declared_audit_key_id,
+                audit_sequence: cursor.next_sequence,
+                created_at: CREATED_AT,
+                operator_id,
+                command_tbs,
+                operator_signature,
+                phase,
+                previous_event_hash: cursor.previous_event_hash,
+            },
+            audit_key,
+        )
+        .map_err(|_| RuntimeError::InvalidValue)
+    }
+
+    fn command_event(
+        binding: AdminSessionBinding,
+        operator_key: &Ed25519SecretKey,
+        counter: u64,
+        command: &[u8],
+    ) -> Result<AdminCommandEvent, RuntimeError> {
+        let canonical = CanonicalCommand::check(command).map_err(|_| RuntimeError::InvalidValue)?;
+        let parsed = AdminCommand::parse(canonical).map_err(|_| RuntimeError::InvalidValue)?;
+        let tbs = AdminCommandTbs::new(
+            binding.network_id,
+            binding.server_id,
+            AdminSessionId::from_bytes([3; 16]),
+            counter,
+            None,
+            command,
+        )
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        let operator_signature = tbs
+            .sign(operator_key)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        Ok(AdminCommandEvent {
+            command: parsed,
+            counter,
+            tbs,
+            operator_signature,
+            confirmation: ConfirmationState::NotRequired,
+        })
     }
 
     #[test]
@@ -1110,6 +1182,657 @@ mod tests {
             )]),
         };
         assert!(verify_checkpoints(binding, &expired, &[checkpoint]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn audit_trust_rejects_every_key_identity_and_window_failure() -> Result<(), RuntimeError> {
+        let audit_key = Ed25519SecretKey::from_bytes([7; 32]);
+        let entry = trust_entry(&audit_key)?;
+        assert!(AuditTrust::new(&[]).is_err());
+
+        let mut wrong_id = entry;
+        wrong_id.key_id = [0; 32];
+        assert!(AuditTrust::new(&[wrong_id]).is_err());
+
+        let mut empty_window = entry;
+        empty_window.not_before = empty_window.not_after;
+        assert!(AuditTrust::new(&[empty_window]).is_err());
+        assert!(AuditTrust::new(&[entry, entry]).is_err());
+
+        let trust = AuditTrust::new(&[entry])?;
+        assert_eq!(
+            trust.resolve(entry.key_id, CREATED_AT)?,
+            audit_key.public_key()
+        );
+        assert!(trust.resolve([9; 32], CREATED_AT).is_err());
+        assert!(trust.resolve(entry.key_id, entry.not_before - 1).is_err());
+        assert!(trust.resolve(entry.key_id, entry.not_after).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn checkpoint_verification_rejects_every_chain_and_signature_mismatch()
+    -> Result<(), RuntimeError> {
+        let binding = binding();
+        let audit_key = Ed25519SecretKey::from_bytes([7; 32]);
+        let other_key = Ed25519SecretKey::from_bytes([8; 32]);
+        let entry = trust_entry(&audit_key)?;
+        let trust = AuditTrust::new(&[entry])?;
+        let baseline_tbs = AdminAuditCheckpointTbs {
+            network_id: binding.network_id,
+            server_id: binding.server_id,
+            audit_signing_key_id: entry.key_id,
+            checkpoint_sequence: 0,
+            created_at: CREATED_AT,
+            deleted_first_sequence: 0,
+            deleted_last_sequence: 4,
+            deleted_count: 5,
+            deleted_last_event_hash: [8; 32],
+            next_retained_sequence: 5,
+            previous_checkpoint_hash: [0; 32],
+        };
+        let baseline = AdminAuditCheckpoint::sign(baseline_tbs, &audit_key)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+
+        for changed in [
+            AdminAuditCheckpointTbs {
+                network_id: NetworkId::from_bytes([9; 32]),
+                ..baseline_tbs
+            },
+            AdminAuditCheckpointTbs {
+                server_id: ServerId::from_bytes([9; 16]),
+                ..baseline_tbs
+            },
+            AdminAuditCheckpointTbs {
+                checkpoint_sequence: 1,
+                ..baseline_tbs
+            },
+            AdminAuditCheckpointTbs {
+                deleted_first_sequence: 1,
+                deleted_count: 4,
+                ..baseline_tbs
+            },
+        ] {
+            let checkpoint = AdminAuditCheckpoint::sign(changed, &audit_key)
+                .map_err(|_| RuntimeError::InvalidValue)?;
+            assert!(verify_checkpoints(binding, &trust, &[checkpoint]).is_err());
+        }
+
+        let wrong_signature = AdminAuditCheckpoint::sign(baseline_tbs, &other_key)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        assert!(verify_checkpoints(binding, &trust, &[wrong_signature]).is_err());
+
+        let unknown_key_tbs = AdminAuditCheckpointTbs {
+            audit_signing_key_id: [9; 32],
+            ..baseline_tbs
+        };
+        let unknown_key = AdminAuditCheckpoint::sign(unknown_key_tbs, &audit_key)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        assert!(verify_checkpoints(binding, &trust, &[unknown_key]).is_err());
+
+        let second_tbs = AdminAuditCheckpointTbs {
+            checkpoint_sequence: 1,
+            deleted_first_sequence: 5,
+            deleted_last_sequence: 5,
+            deleted_count: 1,
+            deleted_last_event_hash: [10; 32],
+            next_retained_sequence: 6,
+            previous_checkpoint_hash: baseline.checkpoint_hash(),
+            ..baseline_tbs
+        };
+        let second = AdminAuditCheckpoint::sign(second_tbs, &audit_key)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let (cursor, next, previous) = verify_checkpoints(binding, &trust, &[baseline, second])?;
+        assert_eq!(cursor.next_sequence, 6);
+        assert_eq!(next, 2);
+        assert_eq!(previous, second.checkpoint_hash());
+
+        let wrong_deleted = AdminAuditCheckpoint::sign(
+            AdminAuditCheckpointTbs {
+                deleted_first_sequence: 6,
+                deleted_last_sequence: 6,
+                next_retained_sequence: 7,
+                ..second_tbs
+            },
+            &audit_key,
+        )
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        assert!(verify_checkpoints(binding, &trust, &[baseline, wrong_deleted]).is_err());
+
+        let wrong_previous = AdminAuditCheckpoint::sign(
+            AdminAuditCheckpointTbs {
+                previous_checkpoint_hash: [11; 32],
+                ..second_tbs
+            },
+            &audit_key,
+        )
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        assert!(verify_checkpoints(binding, &trust, &[baseline, wrong_previous]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn event_verification_rejects_every_binding_authority_signature_and_chain_failure()
+    -> Result<(), RuntimeError> {
+        let binding = binding();
+        let command_binding = binding;
+        let audit_key = Ed25519SecretKey::from_bytes([4; 32]);
+        let other_audit_key = Ed25519SecretKey::from_bytes([8; 32]);
+        let operator_key = Ed25519SecretKey::from_bytes([5; 32]);
+        let other_operator_key = Ed25519SecretKey::from_bytes([9; 32]);
+        let operator_id = OperatorId::from_bytes([6; 16]);
+        let registry = registry(operator_id, &operator_key)?;
+        let entry = trust_entry(&audit_key)?;
+        let trust = AuditTrust::new(&[entry])?;
+        let cursor = AuditChainCursor::genesis();
+
+        let valid = signed_event_with(
+            binding,
+            command_binding,
+            cursor,
+            0,
+            AdminAuditPhase::Observed,
+            b"MOTD",
+            entry.key_id,
+            &audit_key,
+            &operator_key,
+            operator_id,
+        )?;
+        assert!(verify_events(binding, &trust, &registry, cursor, &[valid]).is_ok());
+
+        let wrong_outer_bindings = [
+            AdminSessionBinding {
+                network_id: NetworkId::from_bytes([9; 32]),
+                ..binding
+            },
+            AdminSessionBinding {
+                server_id: ServerId::from_bytes([9; 16]),
+                ..binding
+            },
+        ];
+        for outer in wrong_outer_bindings {
+            let event = signed_event_with(
+                outer,
+                command_binding,
+                cursor,
+                0,
+                AdminAuditPhase::Observed,
+                b"MOTD",
+                entry.key_id,
+                &audit_key,
+                &operator_key,
+                operator_id,
+            )?;
+            assert!(verify_events(binding, &trust, &registry, cursor, &[event]).is_err());
+        }
+
+        let wrong_command_bindings = [
+            AdminSessionBinding {
+                network_id: NetworkId::from_bytes([9; 32]),
+                ..binding
+            },
+            AdminSessionBinding {
+                server_id: ServerId::from_bytes([9; 16]),
+                ..binding
+            },
+        ];
+        for command_binding in wrong_command_bindings {
+            let event = signed_event_with(
+                binding,
+                command_binding,
+                cursor,
+                0,
+                AdminAuditPhase::Observed,
+                b"MOTD",
+                entry.key_id,
+                &audit_key,
+                &operator_key,
+                operator_id,
+            )?;
+            assert!(verify_events(binding, &trust, &registry, cursor, &[event]).is_err());
+        }
+
+        let unknown_audit_key = signed_event_with(
+            binding,
+            binding,
+            cursor,
+            0,
+            AdminAuditPhase::Observed,
+            b"MOTD",
+            [11; 32],
+            &audit_key,
+            &operator_key,
+            operator_id,
+        )?;
+        assert!(verify_events(binding, &trust, &registry, cursor, &[unknown_audit_key]).is_err());
+
+        let unknown_operator = signed_event_with(
+            binding,
+            binding,
+            cursor,
+            0,
+            AdminAuditPhase::Observed,
+            b"MOTD",
+            entry.key_id,
+            &audit_key,
+            &operator_key,
+            OperatorId::from_bytes([12; 16]),
+        )?;
+        assert!(verify_events(binding, &trust, &registry, cursor, &[unknown_operator]).is_err());
+
+        let wrong_audit_signature = signed_event_with(
+            binding,
+            binding,
+            cursor,
+            0,
+            AdminAuditPhase::Observed,
+            b"MOTD",
+            entry.key_id,
+            &other_audit_key,
+            &operator_key,
+            operator_id,
+        )?;
+        assert!(
+            verify_events(binding, &trust, &registry, cursor, &[wrong_audit_signature]).is_err()
+        );
+
+        let wrong_operator_signature = signed_event_with(
+            binding,
+            binding,
+            cursor,
+            0,
+            AdminAuditPhase::Observed,
+            b"MOTD",
+            entry.key_id,
+            &audit_key,
+            &other_operator_key,
+            operator_id,
+        )?;
+        assert!(
+            verify_events(
+                binding,
+                &trust,
+                &registry,
+                cursor,
+                &[wrong_operator_signature],
+            )
+            .is_err()
+        );
+
+        for broken_cursor in [
+            AuditChainCursor {
+                next_sequence: 1,
+                ..cursor
+            },
+            AuditChainCursor {
+                previous_event_hash: [13; 32],
+                ..cursor
+            },
+        ] {
+            let event = signed_event_with(
+                binding,
+                binding,
+                broken_cursor,
+                0,
+                AdminAuditPhase::Observed,
+                b"MOTD",
+                entry.key_id,
+                &audit_key,
+                &operator_key,
+                operator_id,
+            )?;
+            assert!(verify_events(binding, &trust, &registry, cursor, &[event]).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn audit_mutations_rebuild_policy_and_reject_invalid_phase_pairings() -> Result<(), RuntimeError>
+    {
+        let binding = binding();
+        let audit_key = Ed25519SecretKey::from_bytes([4; 32]);
+        let operator_key = Ed25519SecretKey::from_bytes([5; 32]);
+        let operator_id = OperatorId::from_bytes([6; 16]);
+        let registry = registry(operator_id, &operator_key)?;
+        let entry = trust_entry(&audit_key)?;
+        let trust = AuditTrust::new(&[entry])?;
+        let fixture = EventFixture {
+            binding,
+            audit_key: &audit_key,
+            operator_key: &operator_key,
+            operator_id,
+        };
+        let account = "a_AAAAAAAAAAAAAAAAAAAAAA";
+        let channel = "AAAAAAAAAAAAAAAAAAAAAA";
+        let commands = [
+            format!("ACCOUNT SUSPEND {account} 60 :policy action"),
+            format!("ACCOUNT RESTORE {account} :policy action"),
+            format!("CHANNEL QUARANTINE {channel} :policy action"),
+        ];
+        let mut cursor = AuditChainCursor::genesis();
+        let mut events = Vec::new();
+        for (counter, command) in commands.iter().enumerate() {
+            let counter = u64::try_from(counter).map_err(|_| RuntimeError::Overflow)?;
+            let event = fixture.event(
+                cursor,
+                counter,
+                AdminAuditPhase::CommittedMutation,
+                command.as_bytes(),
+            )?;
+            cursor = cursor
+                .advance(&event)
+                .map_err(|_| RuntimeError::InvalidValue)?;
+            events.push(event);
+        }
+        let (_, policy) = verify_events(
+            binding,
+            &trust,
+            &registry,
+            AuditChainCursor::genesis(),
+            &events,
+        )?;
+        let (suspensions, quarantines) = policy.into_parts();
+        assert!(suspensions.is_empty());
+        assert_eq!(quarantines.len(), 1);
+
+        let invalid_mutation = fixture.event(
+            AuditChainCursor::genesis(),
+            4,
+            AdminAuditPhase::CommittedMutation,
+            b"MOTD",
+        )?;
+        assert!(
+            verify_events(
+                binding,
+                &trust,
+                &registry,
+                AuditChainCursor::genesis(),
+                &[invalid_mutation],
+            )
+            .is_err()
+        );
+
+        let orphan = fixture.event(
+            AuditChainCursor::genesis(),
+            5,
+            AdminAuditPhase::OutcomeFailure,
+            b"BACKUP CREATE :nightly run",
+        )?;
+        assert!(
+            verify_events(
+                binding,
+                &trust,
+                &registry,
+                AuditChainCursor::genesis(),
+                &[orphan],
+            )
+            .is_err()
+        );
+
+        let first = fixture.event(
+            AuditChainCursor::genesis(),
+            6,
+            AdminAuditPhase::Intent,
+            b"REHASH :reload now",
+        )?;
+        let second_cursor = AuditChainCursor::genesis()
+            .advance(&first)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let duplicate = fixture.event(
+            second_cursor,
+            6,
+            AdminAuditPhase::Intent,
+            b"REHASH :reload now",
+        )?;
+        assert!(
+            verify_events(
+                binding,
+                &trust,
+                &registry,
+                AuditChainCursor::genesis(),
+                &[first, duplicate],
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn retention_selection_and_export_coverage_are_total_and_gapless() -> Result<(), RuntimeError> {
+        let binding = binding();
+        let audit_key = Ed25519SecretKey::from_bytes([4; 32]);
+        let operator_key = Ed25519SecretKey::from_bytes([5; 32]);
+        let operator_id = OperatorId::from_bytes([6; 16]);
+        let fixture = EventFixture {
+            binding,
+            audit_key: &audit_key,
+            operator_key: &operator_key,
+            operator_id,
+        };
+        let observed = fixture.event(
+            AuditChainCursor::genesis(),
+            0,
+            AdminAuditPhase::Observed,
+            b"MOTD",
+        )?;
+        assert_eq!(
+            select_expired_prefix(std::slice::from_ref(&observed), CREATED_AT)?,
+            None
+        );
+        assert_eq!(
+            select_expired_prefix(std::slice::from_ref(&observed), CREATED_AT + 1)?,
+            Some((0, observed.event_hash()))
+        );
+
+        let orphan_outcome = fixture.event(
+            AuditChainCursor::genesis(),
+            1,
+            AdminAuditPhase::OutcomeFailure,
+            b"BACKUP CREATE :nightly run",
+        )?;
+        assert!(select_expired_prefix(&[orphan_outcome], CREATED_AT + 1).is_err());
+
+        let invalid_intent = fixture.event(
+            AuditChainCursor::genesis(),
+            2,
+            AdminAuditPhase::Intent,
+            b"MOTD",
+        )?;
+        assert!(select_expired_prefix(&[invalid_intent], CREATED_AT + 1).is_err());
+
+        let range = AuditRange::new(0, 0).map_err(|_| RuntimeError::InvalidValue)?;
+        assert!(verify_export_coverage(range, 0, &[], &[]).is_ok());
+        assert!(verify_export_coverage(range, 0, &[], std::slice::from_ref(&observed)).is_err());
+        assert!(verify_export_coverage(range, 1, &[], std::slice::from_ref(&observed)).is_ok());
+        assert!(
+            verify_export_coverage(range, 1, &[], &[observed.clone(), observed.clone()]).is_err()
+        );
+
+        let entry = trust_entry(&audit_key)?;
+        let checkpoint = AdminAuditCheckpoint::sign(
+            AdminAuditCheckpointTbs {
+                network_id: binding.network_id,
+                server_id: binding.server_id,
+                audit_signing_key_id: entry.key_id,
+                checkpoint_sequence: 0,
+                created_at: CREATED_AT,
+                deleted_first_sequence: 0,
+                deleted_last_sequence: 4,
+                deleted_count: 5,
+                deleted_last_event_hash: [8; 32],
+                next_retained_sequence: 5,
+                previous_checkpoint_hash: [0; 32],
+            },
+            &audit_key,
+        )
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        let event_five = fixture.event(
+            AuditChainCursor {
+                previous_event_hash: checkpoint.tbs().deleted_last_event_hash,
+                next_sequence: 5,
+            },
+            3,
+            AdminAuditPhase::Observed,
+            b"MOTD",
+        )?;
+        let full = AuditRange::new(0, 5).map_err(|_| RuntimeError::InvalidValue)?;
+        assert!(verify_export_coverage(full, 6, &[checkpoint], &[event_five]).is_ok());
+        assert!(verify_export_coverage(full, 6, &[checkpoint], &[]).is_err());
+
+        let disjoint = AuditRange::new(5, 5).map_err(|_| RuntimeError::InvalidValue)?;
+        assert!(verify_export_coverage(disjoint, 6, &[checkpoint], &[]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn authority_checks_event_and_retention_fences_before_advancing() -> Result<(), RuntimeError> {
+        let binding = binding();
+        let operator_key = Ed25519SecretKey::from_bytes([5; 32]);
+        let operator_id = OperatorId::from_bytes([6; 16]);
+        let command = command_event(binding, &operator_key, 0, b"MOTD")?;
+        let mut authority = AuditAuthority::empty_for_test()?;
+        assert!(authority.is_reconciled());
+        assert!(
+            authority
+                .prepare_export(
+                    AuditRange::new(0, 0).map_err(|_| RuntimeError::InvalidValue)?,
+                    [0; 16]
+                )
+                .is_err()
+        );
+        assert!(authority.prepare_retention(CREATED_AT, 1).is_err());
+
+        let mut invalid = AuditAuthority::empty_for_test()?;
+        invalid.reconciled = false;
+        assert!(!invalid.is_reconciled());
+        assert!(
+            invalid
+                .prepare_event(
+                    binding,
+                    operator_id,
+                    &command,
+                    AdminAuditPhase::Observed,
+                    CREATED_AT,
+                )
+                .is_err()
+        );
+
+        let mut wrong_key_id = AuditAuthority::empty_for_test()?;
+        wrong_key_id.signing_key_id = [1; 32];
+        assert!(!wrong_key_id.is_reconciled());
+        let mut wrong_checkpoint_position = AuditAuthority::empty_for_test()?;
+        wrong_checkpoint_position.previous_checkpoint_hash = [2; 32];
+        assert!(!wrong_checkpoint_position.is_reconciled());
+        let mut wrong_event_position = AuditAuthority::empty_for_test()?;
+        wrong_event_position.cursor.previous_event_hash = [3; 32];
+        assert!(!wrong_event_position.is_reconciled());
+
+        authority.signing_not_before = 10;
+        authority.signing_not_after = 100;
+        assert!(
+            authority
+                .prepare_event(binding, operator_id, &command, AdminAuditPhase::Observed, 9,)
+                .is_err()
+        );
+        assert!(
+            authority
+                .prepare_event(
+                    binding,
+                    operator_id,
+                    &command,
+                    AdminAuditPhase::Observed,
+                    100,
+                )
+                .is_err()
+        );
+        let wrong_binding = AdminSessionBinding {
+            network_id: NetworkId::from_bytes([9; 32]),
+            ..binding
+        };
+        assert!(
+            authority
+                .prepare_event(
+                    wrong_binding,
+                    operator_id,
+                    &command,
+                    AdminAuditPhase::Observed,
+                    CREATED_AT,
+                )
+                .is_err()
+        );
+
+        let event = authority.prepare_event(
+            binding,
+            operator_id,
+            &command,
+            AdminAuditPhase::Observed,
+            CREATED_AT,
+        )?;
+        authority.commit_event(&event)?;
+        assert_eq!(authority.cursor.next_sequence, 1);
+        assert!(authority.commit_event(&event).is_err());
+
+        let checkpoint_tbs = AdminAuditCheckpointTbs {
+            network_id: binding.network_id,
+            server_id: binding.server_id,
+            audit_signing_key_id: authority.signing_key_id,
+            checkpoint_sequence: 0,
+            created_at: CREATED_AT,
+            deleted_first_sequence: 0,
+            deleted_last_sequence: 0,
+            deleted_count: 1,
+            deleted_last_event_hash: event.event_hash(),
+            next_retained_sequence: 1,
+            previous_checkpoint_hash: [0; 32],
+        };
+        for changed in [
+            AdminAuditCheckpointTbs {
+                audit_signing_key_id: [4; 32],
+                ..checkpoint_tbs
+            },
+            AdminAuditCheckpointTbs {
+                created_at: 9,
+                ..checkpoint_tbs
+            },
+            AdminAuditCheckpointTbs {
+                created_at: 100,
+                ..checkpoint_tbs
+            },
+            AdminAuditCheckpointTbs {
+                checkpoint_sequence: 1,
+                ..checkpoint_tbs
+            },
+            AdminAuditCheckpointTbs {
+                deleted_first_sequence: 1,
+                ..checkpoint_tbs
+            },
+            AdminAuditCheckpointTbs {
+                previous_checkpoint_hash: [5; 32],
+                ..checkpoint_tbs
+            },
+            AdminAuditCheckpointTbs {
+                next_retained_sequence: 2,
+                ..checkpoint_tbs
+            },
+        ] {
+            assert!(authority.sign_retention(changed).is_err());
+        }
+
+        let other_key = Ed25519SecretKey::from_bytes([8; 32]);
+        let wrong_signature = AdminAuditCheckpoint::sign(checkpoint_tbs, &other_key)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        assert!(authority.commit_retention(&wrong_signature).is_err());
+
+        let checkpoint = authority.sign_retention(checkpoint_tbs)?;
+        authority.commit_retention(&checkpoint)?;
+        assert_eq!(authority.retained_first_sequence, 1);
+        assert_eq!(authority.next_checkpoint_sequence, 1);
+        assert_eq!(
+            authority.previous_checkpoint_hash,
+            checkpoint.checkpoint_hash()
+        );
+        assert!(authority.commit_retention(&checkpoint).is_err());
         Ok(())
     }
 }

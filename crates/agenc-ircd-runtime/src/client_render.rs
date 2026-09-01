@@ -452,4 +452,224 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn standard_reply_matrix_covers_every_closed_failure_class() -> Result<(), Box<dyn Error>> {
+        let capabilities = standard_capabilities()?;
+        for (request, error, code) in [
+            (
+                "MODE #chat +x",
+                DomainError::InvalidArgument,
+                "INVALID_ARGUMENT",
+            ),
+            (
+                "MODE #chat +x",
+                DomainError::DuplicateTarget,
+                "INVALID_ARGUMENT",
+            ),
+            (
+                "MODE #chat +x",
+                DomainError::MixedAuthority,
+                "INVALID_ARGUMENT",
+            ),
+            (
+                "PRIVMSG #chat :hello",
+                DomainError::ServerBusy,
+                "SERVER_BUSY",
+            ),
+            (
+                "PRIVMSG #chat :hello",
+                DomainError::LimitExceeded,
+                "SERVER_BUSY",
+            ),
+            (
+                "PRIVMSG #chat :hello",
+                DomainError::AllocationFailed,
+                "SERVER_BUSY",
+            ),
+            ("PRIVMSG #chat :hello", DomainError::Overflow, "SERVER_BUSY"),
+            (
+                "PRIVMSG #chat :hello",
+                DomainError::StaleGeneration,
+                "SERVER_BUSY",
+            ),
+            (
+                "PRIVMSG #chat :hello",
+                DomainError::StaleRevision,
+                "SERVER_BUSY",
+            ),
+            (
+                "PRIVMSG #chat :hello",
+                DomainError::WallClockUnavailable,
+                "SERVER_BUSY",
+            ),
+            (
+                "PRIVMSG #chat :hello",
+                DomainError::RegistrationRequired,
+                "REGISTRATION_REQUIRED",
+            ),
+            (
+                "PRIVMSG #chat :hello",
+                DomainError::UnsafeCtcp,
+                "UNSAFE_CTCP",
+            ),
+            ("AUTHENTICATE +", DomainError::BadState, "BAD_STATE"),
+            ("ACCT LOGOUT", DomainError::BadState, "BAD_STATE"),
+            ("ACCTCREATE START 4726", DomainError::BadState, "BAD_STATE"),
+            ("ACCTCRED START 4726", DomainError::BadState, "BAD_STATE"),
+        ] {
+            let bytes = encoded(failure_frame(
+                &capabilities,
+                "server",
+                "requester",
+                &parsed(request)?,
+                error,
+                None,
+            )?)?;
+            let text = std::str::from_utf8(&bytes)?;
+            assert!(text.starts_with(":server FAIL "));
+            assert!(text.contains(code));
+        }
+
+        for operation in ["JOIN", "MODE", "NAMES", "TOPIC"] {
+            let request = parsed(&format!("{operation} #secret"))?;
+            let bytes = encoded(failure_frame(
+                &capabilities,
+                "server",
+                "requester",
+                &request,
+                DomainError::SecretUnavailable,
+                None,
+            )?)?;
+            assert!(std::str::from_utf8(&bytes)?.contains("SECRET_UNAVAILABLE"));
+        }
+
+        for request in [
+            "JOIN #encrypted",
+            "JOIN invalid",
+            "PRIVMSG #encrypted :hello",
+        ] {
+            let bytes = encoded(failure_frame(
+                &capabilities,
+                "server",
+                "requester",
+                &parsed(request)?,
+                DomainError::EncryptedRoute,
+                None,
+            )?)?;
+            assert!(std::str::from_utf8(&bytes)?.contains("E2EE_REQUIRED"));
+        }
+
+        for (request, error) in [
+            ("NOTICE #secret :hello", DomainError::SecretUnavailable),
+            ("PRIVMSG User :hello", DomainError::EncryptedRoute),
+            ("NOTICE #encrypted :hello", DomainError::EncryptedRoute),
+            ("NOTICE User :hello", DomainError::UnsafeCtcp),
+            ("MODE #chat +x", DomainError::BadState),
+        ] {
+            let bytes = encoded(failure_frame(
+                &capabilities,
+                "server",
+                "requester",
+                &parsed(request)?,
+                error,
+                None,
+            )?)?;
+            assert!(std::str::from_utf8(&bytes)?.starts_with(":server 4"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_reply_matrix_uses_only_public_channel_and_user_targets() -> Result<(), Box<dyn Error>>
+    {
+        let channel =
+            FailedTarget::Channel(agenc_ircd_domain::ChannelNameValue::parse("#explicit")?);
+        let user = FailedTarget::User(agenc_ircd_domain::NicknameValue::parse("ExplicitUser")?);
+        for (request, error, target, numeric, public_target) in [
+            (
+                "MODE #chat +x",
+                DomainError::InvalidArgument,
+                None,
+                " 461 ",
+                "MODE",
+            ),
+            (
+                "JOIN #hidden",
+                DomainError::NotFound,
+                Some(&channel),
+                " 403 ",
+                "#explicit",
+            ),
+            (
+                "PRIVMSG Missing,Other :hello",
+                DomainError::NotFound,
+                Some(&user),
+                " 401 ",
+                "ExplicitUser",
+            ),
+            (
+                "MODE #hidden +m",
+                DomainError::Forbidden,
+                None,
+                " 482 ",
+                "#hidden",
+            ),
+            (
+                "MODE #hidden +m",
+                DomainError::BadState,
+                None,
+                " 482 ",
+                "#hidden",
+            ),
+            (
+                "PRIVMSG #hidden :hello",
+                DomainError::UnsafeCtcp,
+                None,
+                " 404 ",
+                "#hidden",
+            ),
+            (
+                "PRIVMSG #hidden :hello",
+                DomainError::EncryptedRoute,
+                None,
+                " 404 ",
+                "#hidden",
+            ),
+            (
+                "PRIVMSG #hidden :hello",
+                DomainError::PlaintextRoute,
+                None,
+                " 404 ",
+                "#hidden",
+            ),
+            (
+                "PING token",
+                DomainError::InvariantViolation,
+                None,
+                " 481 ",
+                "requester",
+            ),
+            (
+                "PRIVMSG Missing,Other :hello",
+                DomainError::NotFound,
+                None,
+                " 401 ",
+                "Missing",
+            ),
+        ] {
+            let bytes = encoded(failure_frame(
+                &CapabilityState::default(),
+                "server",
+                "requester",
+                &parsed(request)?,
+                error,
+                target,
+            )?)?;
+            let text = std::str::from_utf8(&bytes)?;
+            assert!(text.contains(numeric));
+            assert!(text.contains(public_target));
+        }
+        Ok(())
+    }
 }
