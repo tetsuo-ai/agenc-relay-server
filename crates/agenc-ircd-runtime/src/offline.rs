@@ -719,12 +719,16 @@ fn write_configuration(
 }
 
 fn init_receipt(request: &InitRequest, identity: InitIdentity) -> InitReceipt {
+    let onion_socket = request.runtime_dir.join("onion.sock");
     InitReceipt {
         network_id: identity.network_id,
         server_id: identity.server_id,
         operator_id: identity.operator_id,
         operator_signing_key_file: request.data_dir.join("keys/operator-signing.key"),
-        tor_snippet: "HiddenServiceDir /var/lib/tor/agenc-ircd\nHiddenServiceVersion 3\nHiddenServicePort 6697 unix:/run/agenc-ircd/onion.sock\n".to_owned(),
+        tor_snippet: format!(
+            "HiddenServiceDir /var/lib/tor/agenc-ircd\nHiddenServiceVersion 3\nHiddenServicePort 6697 unix:{}\n",
+            onion_socket.display(),
+        ),
         systemd_snippet: "Use the packaged agenc-ircd.service and one reviewed address-family profile; socket activation is not supported.\n".to_owned(),
         certificate_instructions: "Enroll TLS certificates for every configured public or onion listener, place them under the configured tls directory, then enable the reviewed listeners.\n".to_owned(),
     }
@@ -1362,6 +1366,29 @@ mod tests {
             initialize_node(test_request(&root.0)?),
             Err(OfflineError::ExistingTarget)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn init_receipt_uses_the_configured_runtime_socket() -> Result<(), OfflineError> {
+        let root = TestDirectory::create()?;
+        let request = test_request(&root.0)?;
+        let receipt = init_receipt(
+            &request,
+            InitIdentity {
+                network_id: NetworkId::from_bytes([1; 32]),
+                server_id: ServerId::from_bytes([2; 16]),
+                server_incarnation: ServerIncarnation::from_bytes([3; 16]),
+                database_id: DatabaseId::from_bytes([4; 16]),
+                recovery_epoch: RecoveryEpoch::from_bytes([5; 16]),
+                operator_id: OperatorId::from_bytes([6; 16]),
+            },
+        );
+        assert!(receipt.tor_snippet.contains(&format!(
+            "HiddenServicePort 6697 unix:{}\n",
+            request.runtime_dir.join("onion.sock").display(),
+        )));
+        assert!(!receipt.tor_snippet.contains("/run/agenc-ircd/onion.sock"));
         Ok(())
     }
 
