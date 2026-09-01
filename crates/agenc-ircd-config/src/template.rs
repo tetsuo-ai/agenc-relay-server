@@ -479,14 +479,16 @@ fn render_e2ee(out: &mut String, values: &InitValues, keys: &Path) {
         "coordinator_server_id = \"{}\"",
         values.coordinator_server_id.to_base64url()
     );
-    let _ = writeln!(
-        out,
-        "# sequencer_private_key_file = \"{}\"",
-        path(keys, "sequencer.key")
-    );
-    let _ = writeln!(
-        out,
-        "# sequencer_credentials_file = \"{}\"",
-        path(keys, "sequencer-credentials.toml")
-    );
+    if values.role == NodeRole::Coordinator {
+        let _ = writeln!(
+            out,
+            "# sequencer_private_key_file = \"{}\"",
+            path(keys, "sequencer.key")
+        );
+        let _ = writeln!(
+            out,
+            "# sequencer_credentials_file = \"{}\"",
+            path(keys, "sequencer-credentials.toml")
+        );
+    }
 }

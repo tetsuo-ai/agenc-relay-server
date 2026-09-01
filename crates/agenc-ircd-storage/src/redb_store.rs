@@ -10,9 +10,9 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use agenc_ircd_crypto::{StorageDigest, TrackedStateHasher, tracked_record_commitment};
 use redb::{
-    CommitError, Database, Durability, ReadTransaction, ReadableDatabase as _, ReadableTable as _,
-    ReadableTableMetadata as _, StorageBackend, TableDefinition, TableHandle as _,
-    WriteTransaction,
+    CommitError, Database, Durability, ReadOnlyDatabase, ReadTransaction, ReadableDatabase as _,
+    ReadableTable as _, ReadableTableMetadata as _, StorageBackend, TableDefinition,
+    TableHandle as _, WriteTransaction,
 };
 use rustix::fs::{AtFlags, unlinkat};
 
@@ -35,9 +35,33 @@ pub(crate) const RESERVATION_META_KEY: &[u8] = b"nonce-reservation/v1";
 const STATE_META_RECORD_KEY: &[u8] = b"agenc-chat/state-meta/v1";
 
 pub(crate) struct RedbStore {
-    database: Database,
+    database: RedbDatabase,
     faults: StorageFaultInjector,
     commit_flushes: Arc<CommitFlushCounter>,
+}
+
+enum RedbDatabase {
+    Writable(Database),
+    ReadOnly(ReadOnlyDatabase),
+}
+
+impl RedbDatabase {
+    fn begin_read(&self) -> Result<ReadTransaction, StorageError> {
+        match self {
+            Self::Writable(database) => database.begin_read(),
+            Self::ReadOnly(database) => database.begin_read(),
+        }
+        .map_err(|_| StorageError::DatabaseRejected)
+    }
+
+    fn begin_write(&self) -> Result<WriteTransaction, StorageError> {
+        let Self::Writable(database) = self else {
+            return Err(StorageError::DatabaseRejected);
+        };
+        database
+            .begin_write()
+            .map_err(|_| StorageError::DatabaseRejected)
+    }
 }
 
 /// Labels the durable flushes redb issues inside one two-phase transaction.
@@ -331,8 +355,7 @@ impl StorageSnapshot {
 
 pub(crate) struct RecoveryScratch {
     database: Database,
-    directory: File,
-    temporary_name: String,
+    cleanup: Option<ScratchCleanup>,
 }
 
 pub(crate) struct RecoveryScratchWriter {
@@ -341,6 +364,10 @@ pub(crate) struct RecoveryScratchWriter {
 
 pub(crate) struct ReferenceScratch {
     database: Database,
+    cleanup: Option<ScratchCleanup>,
+}
+
+struct ScratchCleanup {
     directory: File,
     temporary_name: String,
 }
@@ -355,6 +382,20 @@ impl ReferenceScratch {
         directory: File,
         temporary_name: String,
     ) -> Result<Self, StorageError> {
+        Self::create_inner(
+            file,
+            Some(ScratchCleanup {
+                directory,
+                temporary_name,
+            }),
+        )
+    }
+
+    pub(crate) fn create_anonymous(file: File) -> Result<Self, StorageError> {
+        Self::create_inner(file, None)
+    }
+
+    fn create_inner(file: File, cleanup: Option<ScratchCleanup>) -> Result<Self, StorageError> {
         let mut builder = redb::Builder::new();
         builder.set_cache_size(8 * 1_024 * 1_024);
         let database = builder
@@ -374,11 +415,7 @@ impl ReferenceScratch {
         transaction
             .commit()
             .map_err(|_| StorageError::DatabaseRejected)?;
-        Ok(Self {
-            database,
-            directory,
-            temporary_name,
-        })
+        Ok(Self { database, cleanup })
     }
 
     pub(crate) fn begin(&self) -> Result<ReferenceScratchWriter, StorageError> {
@@ -420,11 +457,13 @@ impl ReferenceScratch {
 
 impl Drop for ReferenceScratch {
     fn drop(&mut self) {
-        let _ = unlinkat(
-            &self.directory,
-            self.temporary_name.as_str(),
-            AtFlags::empty(),
-        );
+        if let Some(cleanup) = &self.cleanup {
+            let _ = unlinkat(
+                &cleanup.directory,
+                cleanup.temporary_name.as_str(),
+                AtFlags::empty(),
+            );
+        }
     }
 }
 
@@ -482,6 +521,20 @@ impl RecoveryScratch {
         directory: File,
         temporary_name: String,
     ) -> Result<Self, StorageError> {
+        Self::create_inner(
+            file,
+            Some(ScratchCleanup {
+                directory,
+                temporary_name,
+            }),
+        )
+    }
+
+    pub(crate) fn create_anonymous(file: File) -> Result<Self, StorageError> {
+        Self::create_inner(file, None)
+    }
+
+    fn create_inner(file: File, cleanup: Option<ScratchCleanup>) -> Result<Self, StorageError> {
         let mut builder = redb::Builder::new();
         builder.set_cache_size(8 * 1_024 * 1_024);
         let database = builder
@@ -498,11 +551,7 @@ impl RecoveryScratch {
         transaction
             .commit()
             .map_err(|_| StorageError::DatabaseRejected)?;
-        Ok(Self {
-            database,
-            directory,
-            temporary_name,
-        })
+        Ok(Self { database, cleanup })
     }
 
     pub(crate) fn begin_current(&self) -> Result<RecoveryScratchWriter, StorageError> {
@@ -587,11 +636,13 @@ impl RecoveryScratch {
 
 impl Drop for RecoveryScratch {
     fn drop(&mut self) {
-        let _ = unlinkat(
-            &self.directory,
-            self.temporary_name.as_str(),
-            AtFlags::empty(),
-        );
+        if let Some(cleanup) = &self.cleanup {
+            let _ = unlinkat(
+                &cleanup.directory,
+                cleanup.temporary_name.as_str(),
+                AtFlags::empty(),
+            );
+        }
     }
 }
 
@@ -764,9 +815,28 @@ impl RedbStore {
                 .map_err(|_| StorageError::DatabaseRejected)?
         };
         Ok(Self {
-            database,
+            database: RedbDatabase::Writable(database),
             faults,
             commit_flushes,
+        })
+    }
+
+    pub(crate) fn open_read_only(
+        descriptor_path: &std::path::Path,
+        cache_bytes: usize,
+    ) -> Result<Self, StorageError> {
+        if cache_bytes == 0 {
+            return Err(StorageError::LimitExceeded);
+        }
+        let mut builder = redb::Builder::new();
+        builder.set_cache_size(cache_bytes);
+        let database = builder
+            .open_read_only(descriptor_path)
+            .map_err(|_| StorageError::DatabaseRejected)?;
+        Ok(Self {
+            database: RedbDatabase::ReadOnly(database),
+            faults: StorageFaultInjector::disabled(),
+            commit_flushes: Arc::new(CommitFlushCounter::default()),
         })
     }
 

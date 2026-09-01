@@ -8,17 +8,18 @@
 use std::fmt;
 use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agenc_ircd_admin::encode_base64url;
 use agenc_ircd_auth::{AccountCreationInvite, OpaqueProfile};
 use agenc_ircd_config::{
     Config, ConfigError, ConfigReport, DEFAULT_REDB_CACHE_BYTES, DisplayLabel, DnsName,
-    InitProfile, InitValues, NodeRole, OnboardingFacts, OperatorTemplate, SecretLength, SecretSet,
-    ValidationDepth, encode_base64url_32, load_config, open_secret_file,
+    InitProfile, InitValues, MAX_ONBOARDING_DESCRIPTOR_BYTES, NodeRole, OnboardingDescriptor,
+    OnboardingFacts, OperatorTemplate, SecretLength, SecretSet, ValidationDepth,
+    encode_base64url_32, load_config, open_secret_file, parse_onboarding_descriptor,
     render_onboarding as render_config_onboarding, render_template,
 };
 use agenc_ircd_crypto::{
@@ -27,11 +28,12 @@ use agenc_ircd_crypto::{
     audit_signing_key_id, backup_signing_key_id, semantic_digest,
 };
 use agenc_ircd_storage::{
-    DatabaseHeaderTbs, InitialStorageRecord, LIVE_RECORD_KIND, LOGIN_INDEX_KEY_STATE_KEY,
-    LoginIndexKeyState, OPAQUE_FAKE_RECORD_KEY, PersistentRecordValue, SCHEMA_GENERATION,
-    StateDirectory, StorageEngineLimits, StorageError, StorageInitializationConfig,
-    StorageInitializationMode, StorageInitializationOutcome, StorageOpenConfig, StorageOwner,
-    StoredKey, TableId, embedded_storage_qualifications, initialize_storage,
+    DatabaseHeaderTbs, InitialStorageRecord, InspectionStateDirectory, LIVE_RECORD_KIND,
+    LOGIN_INDEX_KEY_STATE_KEY, LoginIndexKeyState, OPAQUE_FAKE_RECORD_KEY, PersistentRecordValue,
+    SCHEMA_GENERATION, StateDirectory, StorageEngineLimits, StorageError,
+    StorageInitializationConfig, StorageInitializationMode, StorageInitializationOutcome,
+    StorageInspectionConfig, StoredKey, TableId, embedded_storage_qualifications,
+    initialize_storage, inspect_storage, rename_path_no_replace,
 };
 use agenc_ircd_types::{
     DatabaseId, InviteId, NetworkId, OperatorId, RecoveryEpoch, ServerId, ServerIncarnation,
@@ -39,11 +41,11 @@ use agenc_ircd_types::{
 };
 use zeroize::Zeroizing;
 
-use crate::StateCoreSeed;
+#[cfg(test)]
+use agenc_ircd_storage::{StorageOpenConfig, StorageOwner};
 
 const DIRECTORY_MODE: u32 = 0o700;
 const SECRET_MODE: u32 = 0o600;
-const MAX_DESCRIPTOR_BYTES: usize = 4_096;
 const MAX_INVITE_LIFETIME_SECONDS: u64 = 2_592_000;
 const DEFAULT_DATABASE_BYTES: u64 = 85_899_345_920;
 const DEFAULT_BACKUP_BYTES: u64 = 107_374_182_400;
@@ -51,16 +53,31 @@ const DEFAULT_RESERVE_BYTES: u64 = 1_073_741_824;
 const DEFAULT_RESERVE_PERCENT: u8 = 5;
 const DEFAULT_CHECKPOINT_MANIFESTS: u64 = 100_000;
 
+/// Network authority selected for one stopped-daemon initialization.
+pub enum InitMode {
+    /// Create a coordinator, generating a Network ID unless one is supplied by
+    /// an embedding or deterministic test.
+    Coordinator {
+        /// Optional preselected Network ID.
+        network_id: Option<NetworkId>,
+    },
+    /// Create an edge from one trusted coordinator descriptor.
+    Edge {
+        /// Trusted canonical onboarding descriptor.
+        coordinator_descriptor: PathBuf,
+        /// Coordinator identity confirmed out of band with the descriptor.
+        coordinator_server_id: ServerId,
+    },
+}
+
 /// Inputs for one stopped-daemon first-run initialization.
 pub struct InitRequest {
     /// Configuration file installed last.
     pub config_path: PathBuf,
     /// Convenience listener profile.
     pub profile: InitProfile,
-    /// Imported network identity. Reserved for edge enrollment in Stage 07.
-    pub network_id: Option<NetworkId>,
-    /// Coordinator descriptor. Edge enrollment is not active before Stage 07.
-    pub coordinator_descriptor: Option<PathBuf>,
+    /// Coordinator creation or trusted edge import.
+    pub mode: InitMode,
     /// Dedicated persistent directory.
     pub data_dir: PathBuf,
     /// Dedicated runtime directory.
@@ -178,6 +195,10 @@ struct GeneratedSecrets {
     backup_signing: Zeroizing<[u8; 32]>,
     audit_signing: Zeroizing<[u8; 32]>,
     operator_signing: Zeroizing<[u8; 32]>,
+    coordinator: Option<CoordinatorSecrets>,
+}
+
+struct CoordinatorSecrets {
     account_hpke: Zeroizing<[u8; 32]>,
     opaque_fake_credential: Zeroizing<[u8; 32]>,
     sequencer: Zeroizing<[u8; 32]>,
@@ -185,7 +206,7 @@ struct GeneratedSecrets {
 }
 
 impl GeneratedSecrets {
-    fn generate(network_id: NetworkId) -> Result<Self, OfflineError> {
+    fn generate(network_id: NetworkId, role: NodeRole) -> Result<Self, OfflineError> {
         Ok(Self {
             storage_master: random_32()?,
             rollback_guard: random_32()?,
@@ -194,12 +215,64 @@ impl GeneratedSecrets {
             backup_signing: random_32()?,
             audit_signing: random_32()?,
             operator_signing: random_32()?,
-            account_hpke: random_32()?,
-            opaque_fake_credential: random_32()?,
-            sequencer: random_32()?,
-            opaque: OpaqueProfile::generate(network_id)
-                .map_err(|_| OfflineError::Authentication)?,
+            coordinator: match role {
+                NodeRole::Coordinator => Some(CoordinatorSecrets {
+                    account_hpke: random_32()?,
+                    opaque_fake_credential: random_32()?,
+                    sequencer: random_32()?,
+                    opaque: OpaqueProfile::generate(network_id)
+                        .map_err(|_| OfflineError::Authentication)?,
+                }),
+                NodeRole::Edge => None,
+            },
         })
+    }
+}
+
+enum PreparedInitMode {
+    Coordinator {
+        network_id: Option<NetworkId>,
+    },
+    Edge {
+        network_id: NetworkId,
+        account_service_hpke_public_key: [u8; 32],
+        coordinator_server_id: ServerId,
+    },
+}
+
+impl PreparedInitMode {
+    const fn role(&self) -> NodeRole {
+        match self {
+            Self::Coordinator { .. } => NodeRole::Coordinator,
+            Self::Edge { .. } => NodeRole::Edge,
+        }
+    }
+
+    const fn imported_network_id(&self) -> Option<NetworkId> {
+        match self {
+            Self::Coordinator { network_id } => *network_id,
+            Self::Edge { network_id, .. } => Some(*network_id),
+        }
+    }
+
+    const fn coordinator_server_id(&self, local_server_id: ServerId) -> ServerId {
+        match self {
+            Self::Coordinator { .. } => local_server_id,
+            Self::Edge {
+                coordinator_server_id,
+                ..
+            } => *coordinator_server_id,
+        }
+    }
+
+    const fn imported_hpke_public_key(&self) -> Option<[u8; 32]> {
+        match self {
+            Self::Coordinator { .. } => None,
+            Self::Edge {
+                account_service_hpke_public_key,
+                ..
+            } => Some(*account_service_hpke_public_key),
+        }
     }
 }
 
@@ -214,14 +287,11 @@ struct InitIdentity {
 }
 
 impl InitIdentity {
-    fn generate(request: &InitRequest) -> Result<Self, OfflineError> {
-        if request.coordinator_descriptor.is_some() {
-            return Err(OfflineError::InvalidRequest);
-        }
+    fn generate(mode: &PreparedInitMode) -> Result<Self, OfflineError> {
         let mut entropy = OsEntropy;
-        Ok(Self {
-            network_id: request
-                .network_id
+        let identity = Self {
+            network_id: mode
+                .imported_network_id()
                 .map_or_else(|| NetworkId::generate(&mut entropy), Ok)
                 .map_err(|_| OfflineError::Cryptography)?,
             server_id: ServerId::generate(&mut entropy).map_err(|_| OfflineError::Cryptography)?,
@@ -233,39 +303,60 @@ impl InitIdentity {
                 .map_err(|_| OfflineError::Cryptography)?,
             operator_id: OperatorId::generate(&mut entropy)
                 .map_err(|_| OfflineError::Cryptography)?,
-        })
+        };
+        if mode.role() == NodeRole::Edge
+            && mode.coordinator_server_id(identity.server_id) == identity.server_id
+        {
+            return Err(OfflineError::InvalidRequest);
+        }
+        Ok(identity)
     }
 }
 
 struct Staging {
-    root: PathBuf,
+    data_root: PathBuf,
+    config_file: PathBuf,
     installed: bool,
 }
 
 impl Staging {
-    fn create(data_dir: &Path) -> Result<Self, OfflineError> {
-        ensure_data_directory(data_dir)?;
-        let root = data_dir.join(staging_name()?);
-        create_private_directory(&root)?;
+    fn create(request: &InitRequest) -> Result<Self, OfflineError> {
+        ensure_data_directory(&request.data_dir)?;
+        let data_root = request.data_dir.join(staging_name()?);
+        create_private_directory(&data_root)?;
         for name in ["keys", "trust", "state", "backups"] {
-            create_private_directory(&root.join(name))?;
+            create_private_directory(&data_root.join(name))?;
         }
+        let config_parent = request
+            .config_path
+            .parent()
+            .ok_or(OfflineError::InvalidRequest)?;
+        let config_file = config_parent.join(format!("{}-config.toml", staging_name()?));
         Ok(Self {
-            root,
+            data_root,
+            config_file,
             installed: false,
         })
     }
 
+    fn data_root(&self) -> &Path {
+        &self.data_root
+    }
+
+    fn config_file(&self) -> &Path {
+        &self.config_file
+    }
+
     fn install(&mut self, request: &InitRequest) -> Result<(), OfflineError> {
         for name in ["keys", "trust", "state", "backups"] {
-            self.rename(self.root.join(name), request.data_dir.join(name))?;
+            self.rename(self.data_root.join(name), request.data_dir.join(name))?;
         }
-        self.rename(self.root.join("config.toml"), request.config_path.clone())?;
-        fs::remove_dir(&self.root).map_err(|_| OfflineError::PartialInitialization)
+        self.rename(self.config_file.clone(), request.config_path.clone())?;
+        fs::remove_dir(&self.data_root).map_err(|_| OfflineError::PartialInitialization)
     }
 
     fn rename(&mut self, source: PathBuf, target: PathBuf) -> Result<(), OfflineError> {
-        match fs::rename(source, target) {
+        match rename_path_no_replace(&source, &target) {
             Ok(()) => {
                 self.installed = true;
                 Ok(())
@@ -278,8 +369,9 @@ impl Staging {
 
 impl Drop for Staging {
     fn drop(&mut self) {
+        let _config_cleanup = fs::remove_file(&self.config_file);
         if !self.installed {
-            let _cleanup = fs::remove_dir_all(&self.root);
+            let _cleanup = fs::remove_dir_all(&self.data_root);
         }
     }
 }
@@ -288,15 +380,35 @@ impl Drop for Staging {
 pub fn initialize_node(request: InitRequest) -> Result<InitReceipt, OfflineError> {
     validate_init_request(&request)?;
     refuse_existing_targets(&request)?;
-    let identity = InitIdentity::generate(&request)?;
-    let secrets = GeneratedSecrets::generate(identity.network_id)?;
-    let mut staging = Staging::create(&request.data_dir)?;
-    write_generated_secrets(&staging.root.join("keys"), &secrets)?;
-    write_trust_manifests(&staging.root.join("trust"), &secrets)?;
-    initialize_database(&staging.root.join("state"), identity, &secrets)?;
-    write_configuration(&staging.root, &request, identity, &secrets)?;
+    let mode = prepare_init_mode(&request.mode)?;
+    let identity = InitIdentity::generate(&mode)?;
+    let secrets = GeneratedSecrets::generate(identity.network_id, mode.role())?;
+    let mut staging = Staging::create(&request)?;
+    write_generated_secrets(&staging.data_root().join("keys"), &secrets)?;
+    write_trust_manifests(&staging.data_root().join("trust"), &secrets)?;
+    initialize_database(&staging.data_root().join("state"), identity, &secrets)?;
+    write_configuration(staging.config_file(), &request, &mode, identity, &secrets)?;
     staging.install(&request)?;
     Ok(init_receipt(&request, identity))
+}
+
+fn prepare_init_mode(mode: &InitMode) -> Result<PreparedInitMode, OfflineError> {
+    match mode {
+        InitMode::Coordinator { network_id } => Ok(PreparedInitMode::Coordinator {
+            network_id: *network_id,
+        }),
+        InitMode::Edge {
+            coordinator_descriptor,
+            coordinator_server_id,
+        } => {
+            let descriptor = read_descriptor(coordinator_descriptor)?.descriptor;
+            Ok(PreparedInitMode::Edge {
+                network_id: descriptor.network_id,
+                account_service_hpke_public_key: descriptor.account_service_hpke_public_key,
+                coordinator_server_id: *coordinator_server_id,
+            })
+        }
+    }
 }
 
 /// Parses a command-line network identity without making the binary depend on
@@ -305,20 +417,65 @@ pub fn parse_network_id(text: &str) -> Result<NetworkId, OfflineError> {
     NetworkId::parse(text).map_err(|_| OfflineError::InvalidRequest)
 }
 
+/// Parses a command-line server identity without making the binary depend on
+/// the foundational types crate directly.
+pub fn parse_server_id(text: &str) -> Result<ServerId, OfflineError> {
+    ServerId::parse(text).map_err(|_| OfflineError::InvalidRequest)
+}
+
 fn validate_init_request(request: &InitRequest) -> Result<(), OfflineError> {
-    if !request.config_path.is_absolute()
-        || !request.data_dir.is_absolute()
-        || !request.runtime_dir.is_absolute()
-        || request.config_path == request.data_dir
-    {
-        return Err(OfflineError::InvalidRequest);
-    }
+    validate_init_paths(request)?;
     if matches!(request.profile, InitProfile::Public | InitProfile::Dual)
         && request.dns_name.is_none()
     {
         return Err(OfflineError::InvalidRequest);
     }
+    if matches!(
+        &request.mode,
+        InitMode::Edge {
+            coordinator_descriptor,
+            ..
+        } if !safe_absolute_path(coordinator_descriptor)
+    ) {
+        return Err(OfflineError::InvalidRequest);
+    }
     Ok(())
+}
+
+fn validate_init_paths(request: &InitRequest) -> Result<(), OfflineError> {
+    if !safe_absolute_path(&request.config_path)
+        || request.config_path.file_name().is_none()
+        || !safe_absolute_path(&request.data_dir)
+        || !safe_absolute_path(&request.runtime_dir)
+    {
+        return Err(OfflineError::InvalidRequest);
+    }
+    let generated_directories = [
+        request.data_dir.join("keys"),
+        request.data_dir.join("trust"),
+        request.data_dir.join("state"),
+        request.data_dir.join("backups"),
+    ];
+    if paths_overlap(&request.config_path, &request.data_dir)
+        || paths_overlap(&request.config_path, &request.runtime_dir)
+        || generated_directories
+            .iter()
+            .any(|path| paths_overlap(path, &request.runtime_dir))
+    {
+        return Err(OfflineError::InvalidRequest);
+    }
+    Ok(())
+}
+
+fn safe_absolute_path(path: &Path) -> bool {
+    path.is_absolute()
+        && !path
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
 }
 
 fn refuse_existing_targets(request: &InitRequest) -> Result<(), OfflineError> {
@@ -390,18 +547,28 @@ fn write_generated_secrets(root: &Path, keys: &GeneratedSecrets) -> Result<(), O
         ("backup-signing.key", keys.backup_signing.as_slice()),
         ("audit-signing.key", keys.audit_signing.as_slice()),
         ("operator-signing.key", keys.operator_signing.as_slice()),
-        ("account-service-hpke.key", keys.account_hpke.as_slice()),
+    ] {
+        write_secret(&root.join(name), bytes)?;
+    }
+    let Some(coordinator) = &keys.coordinator else {
+        return Ok(());
+    };
+    for (name, bytes) in [
+        (
+            "account-service-hpke.key",
+            coordinator.account_hpke.as_slice(),
+        ),
         (
             "opaque-fake-credential.key",
-            keys.opaque_fake_credential.as_slice(),
+            coordinator.opaque_fake_credential.as_slice(),
         ),
-        ("sequencer.key", keys.sequencer.as_slice()),
+        ("sequencer.key", coordinator.sequencer.as_slice()),
     ] {
         write_secret(&root.join(name), bytes)?;
     }
     write_secret(
         &root.join("opaque-server-setup.key"),
-        keys.opaque.expose_setup_for_persistence(),
+        coordinator.opaque.expose_setup_for_persistence(),
     )
 }
 
@@ -456,21 +623,27 @@ fn initialize_database(
         1,
         key_state.encode()?,
     )?;
-    let fake_record = PersistentRecordValue::new(
-        TableId::OpaqueRecord,
-        LIVE_RECORD_KIND,
-        1,
-        0,
-        None,
-        Vec::new(),
-        keys.opaque.expose_fake_record_for_persistence().to_vec(),
-    )?;
-    let fake_record = InitialStorageRecord::new(
-        TableId::OpaqueRecord,
-        StoredKey::new(OPAQUE_FAKE_RECORD_KEY.to_vec())?,
-        1,
-        fake_record.encode()?,
-    )?;
+    let mut initial_records = vec![key_state_record];
+    if let Some(coordinator) = &keys.coordinator {
+        let fake_record = PersistentRecordValue::new(
+            TableId::OpaqueRecord,
+            LIVE_RECORD_KIND,
+            1,
+            0,
+            None,
+            Vec::new(),
+            coordinator
+                .opaque
+                .expose_fake_record_for_persistence()
+                .to_vec(),
+        )?;
+        initial_records.push(InitialStorageRecord::new(
+            TableId::OpaqueRecord,
+            StoredKey::new(OPAQUE_FAKE_RECORD_KEY.to_vec())?,
+            1,
+            fake_record.encode()?,
+        )?);
+    }
     let qualifications = embedded_storage_qualifications()?;
     let directory = StateDirectory::open(state, &qualifications)?;
     let outcome = initialize_storage(StorageInitializationConfig {
@@ -487,7 +660,7 @@ fn initialize_database(
         storage_master_key: StorageMasterKey::from_bytes(*keys.storage_master),
         rollback_guard_root_key: RollbackGuardRootKey::from_bytes(*keys.rollback_guard),
         mode: StorageInitializationMode::Live,
-        initial_records: vec![key_state_record, fake_record],
+        initial_records,
         account_service_response_count: 0,
         state_generation: 1,
         predecessor_guard_hash: StorageDigest::from_bytes([0; 32]),
@@ -500,13 +673,24 @@ fn initialize_database(
 }
 
 fn write_configuration(
-    staging: &Path,
+    staging_file: &Path,
     request: &InitRequest,
+    mode: &PreparedInitMode,
     identity: InitIdentity,
     secrets: &GeneratedSecrets,
 ) -> Result<(), OfflineError> {
-    let hpke = AccountHpkePrivateKey::from_bytes(*secrets.account_hpke)
-        .map_err(|_| OfflineError::Cryptography)?;
+    let account_service_hpke_public_key = match (
+        mode.imported_hpke_public_key(),
+        secrets.coordinator.as_ref(),
+    ) {
+        (Some(public), None) => public,
+        (None, Some(coordinator)) => *AccountHpkePrivateKey::from_bytes(*coordinator.account_hpke)
+            .map_err(|_| OfflineError::Cryptography)?
+            .public_key()
+            .map_err(|_| OfflineError::Cryptography)?
+            .as_bytes(),
+        _ => return Err(OfflineError::InvalidRequest),
+    };
     let tls_dir = request
         .config_path
         .parent()
@@ -516,25 +700,22 @@ fn write_configuration(
         profile: request.profile,
         network_id: identity.network_id,
         server_id: identity.server_id,
-        role: NodeRole::Coordinator,
-        coordinator_server_id: identity.server_id,
+        role: mode.role(),
+        coordinator_server_id: mode.coordinator_server_id(identity.server_id),
         server_name: request.server_name.clone(),
         display_name: request.display_name.clone(),
         data_dir: request.data_dir.clone(),
         runtime_dir: request.runtime_dir.clone(),
         tls_dir,
         dns_name: request.dns_name.clone(),
-        account_service_hpke_public_key: *hpke
-            .public_key()
-            .map_err(|_| OfflineError::Cryptography)?
-            .as_bytes(),
+        account_service_hpke_public_key,
         operator: OperatorTemplate {
             operator_id: identity.operator_id,
             signing_public_key: signing_public(&secrets.operator_signing),
         },
     };
     let document = render_template(&values)?;
-    write_secret(&staging.join("config.toml"), document.as_bytes())
+    write_secret(staging_file, document.as_bytes())
 }
 
 fn init_receipt(request: &InitRequest, identity: InitIdentity) -> InitReceipt {
@@ -549,16 +730,17 @@ fn init_receipt(request: &InitRequest, identity: InitIdentity) -> InitReceipt {
     }
 }
 
-/// Opens the configured database through the exclusive storage owner and
-/// returns only authenticated header facts.
+/// Inspects the configured database without taking writer authority and
+/// returns only authenticated facts.
 pub fn verify_database_header(
     config: &Config,
     secrets: &SecretSet,
 ) -> Result<HeaderFacts, OfflineError> {
     validate_account_hpke_pin(config, secrets)?;
     let qualifications = embedded_storage_qualifications()?;
-    let state_directory = StateDirectory::open(&config.storage.state_dir, &qualifications)?;
-    let owner = StorageOwner::start(StorageOpenConfig {
+    let state_directory =
+        InspectionStateDirectory::open(&config.storage.state_dir, &qualifications)?;
+    let recovered = inspect_storage(StorageInspectionConfig {
         expected_network_id: config.network.network_id,
         expected_server_id: config.server.server_id,
         state_directory,
@@ -572,9 +754,6 @@ pub fn verify_database_header(
             .map(|key| LoginIndexKey::from_bytes(*key.expose())),
         limits: limits_from_config(config),
     })?;
-    let _seed = StateCoreSeed::from_storage(&owner)?;
-    let recovered = *owner.recovered_state();
-    owner.shutdown()?;
     Ok(HeaderFacts {
         recovery_epoch: recovered.recovery_epoch(),
         state_generation: recovered.state_generation(),
@@ -594,6 +773,9 @@ fn limits_from_config(config: &Config) -> StorageEngineLimits {
 }
 
 fn validate_account_hpke_pin(config: &Config, secrets: &SecretSet) -> Result<(), OfflineError> {
+    let configured_public =
+        AccountHpkePublicKey::from_bytes(config.accounts.account_service_hpke_public_key)
+            .map_err(|_| OfflineError::Cryptography)?;
     let Some(private) = secrets.account_service_hpke_private() else {
         return Ok(());
     };
@@ -602,7 +784,7 @@ fn validate_account_hpke_pin(config: &Config, secrets: &SecretSet) -> Result<(),
     let public = private
         .public_key()
         .map_err(|_| OfflineError::Cryptography)?;
-    if public.as_bytes() != &config.accounts.account_service_hpke_public_key {
+    if public.as_bytes() != configured_public.as_bytes() {
         return Err(OfflineError::Configuration);
     }
     Ok(())
@@ -636,7 +818,7 @@ pub fn create_account_invite(
         return Err(OfflineError::InvalidRequest);
     }
     let descriptor = read_descriptor(descriptor_path)?;
-    let network_id = descriptor_network_id(&descriptor)?;
+    let network_id = descriptor.descriptor.network_id;
     let (secret, _) = open_secret_file(signing_key_file, SecretLength::Exact(32))?;
     let key_bytes: [u8; 32] = secret
         .as_slice()
@@ -660,56 +842,45 @@ pub fn create_account_invite(
     .map_err(|_| OfflineError::Authentication)?;
     Ok(format!(
         "AGENC-CHAT-ACCOUNT-INVITE/1\nconnect-descriptor={}\naccount-invite={}\n",
-        encode_base64url(descriptor.as_bytes()),
+        encode_base64url(descriptor.text.as_bytes()),
         encode_base64url(invite.expose_for_account_request()),
     ))
 }
 
-fn read_descriptor(path: &Path) -> Result<String, OfflineError> {
-    let bytes = fs::read(path).map_err(|_| OfflineError::Filesystem)?;
-    if bytes.is_empty() || bytes.len() > MAX_DESCRIPTOR_BYTES {
+struct LoadedDescriptor {
+    text: String,
+    descriptor: OnboardingDescriptor,
+}
+
+fn read_descriptor(path: &Path) -> Result<LoadedDescriptor, OfflineError> {
+    let file = OpenOptions::new()
+        .read(true)
+        .open(path)
+        .map_err(|_| OfflineError::Filesystem)?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(MAX_ONBOARDING_DESCRIPTOR_BYTES + 1)
+        .map_err(|_| OfflineError::Filesystem)?;
+    file.take((MAX_ONBOARDING_DESCRIPTOR_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| OfflineError::Filesystem)?;
+    if bytes.is_empty() || bytes.len() > MAX_ONBOARDING_DESCRIPTOR_BYTES {
         return Err(OfflineError::InvalidRequest);
     }
     let text = String::from_utf8(bytes).map_err(|_| OfflineError::InvalidRequest)?;
-    validate_descriptor_shape(&text)?;
-    Ok(text)
+    let descriptor =
+        parse_onboarding_descriptor(&text).map_err(|_| OfflineError::InvalidRequest)?;
+    validate_descriptor_hpke_pin(&descriptor)?;
+    Ok(LoadedDescriptor { text, descriptor })
 }
 
-fn validate_descriptor_shape(text: &str) -> Result<(), OfflineError> {
-    if !text.ends_with('\n') || text.contains('\r') {
-        return Err(OfflineError::InvalidRequest);
-    }
-    let lines: Vec<&str> = text.lines().collect();
-    if lines.first().copied() != Some("AGENC-CHAT-CONNECT/1") || !(10..=14).contains(&lines.len()) {
-        return Err(OfflineError::InvalidRequest);
-    }
-    let required = [
-        "network-id=",
-        "server-name=",
-        "recovery-epoch=",
-        "base-profile-sha256=",
-        "account-service-hpke-key-id=",
-        "account-service-hpke-public-key=",
-        "e2ee-profile=",
-        "e2ee-profile-sha256=",
-        "sequencer-key-set-generation=",
-        "sequencer-key-set-hash=",
-    ];
-    if required
-        .iter()
-        .any(|prefix| lines.iter().filter(|line| line.starts_with(prefix)).count() != 1)
-    {
+fn validate_descriptor_hpke_pin(descriptor: &OnboardingDescriptor) -> Result<(), OfflineError> {
+    let public = AccountHpkePublicKey::from_bytes(descriptor.account_service_hpke_public_key)
+        .map_err(|_| OfflineError::InvalidRequest)?;
+    if public.key_id().as_bytes() != &descriptor.account_service_hpke_key_id {
         return Err(OfflineError::InvalidRequest);
     }
     Ok(())
-}
-
-fn descriptor_network_id(descriptor: &str) -> Result<NetworkId, OfflineError> {
-    let value = descriptor
-        .lines()
-        .find_map(|line| line.strip_prefix("network-id="))
-        .ok_or(OfflineError::InvalidRequest)?;
-    NetworkId::parse(value).map_err(|_| OfflineError::InvalidRequest)
 }
 
 fn current_utc_second() -> Result<UtcSecond, OfflineError> {
@@ -757,14 +928,34 @@ mod tests {
         Ok(InitRequest {
             config_path: root.join("etc/config.toml"),
             profile: InitProfile::Public,
-            network_id: Some(NetworkId::from_bytes([1; 32])),
-            coordinator_descriptor: None,
+            mode: InitMode::Coordinator {
+                network_id: Some(NetworkId::from_bytes([1; 32])),
+            },
             data_dir: root.join("data"),
             runtime_dir: root.join("run"),
             server_name: DnsName::parse("chat.example")?,
             display_name: DisplayLabel::parse("Example")?,
             dns_name: Some(DnsName::parse("chat.example")?),
         })
+    }
+
+    fn valid_descriptor() -> Result<String, OfflineError> {
+        let private =
+            AccountHpkePrivateKey::from_bytes([12; 32]).map_err(|_| OfflineError::Cryptography)?;
+        let public = private
+            .public_key()
+            .map_err(|_| OfflineError::Cryptography)?;
+        Ok(format!(
+            "AGENC-CHAT-CONNECT/1\nnetwork-id={}\nserver-name=chat.example\ndns-endpoint=chat.example:6697\nrecovery-epoch={}\nbase-profile-sha256={}\naccount-service-hpke-key-id={}\naccount-service-hpke-public-key={}\ne2ee-profile={}\ne2ee-profile-sha256={}\nsequencer-key-set-generation=0\nsequencer-key-set-hash={}\n",
+            NetworkId::from_bytes([1; 32]).to_base64url(),
+            RecoveryEpoch::from_bytes([2; 16]).to_base64url(),
+            agenc_ircd_config::BASE_PROFILE_SHA256_TOKEN,
+            encode_base64url_32(public.key_id().as_bytes()),
+            encode_base64url_32(public.as_bytes()),
+            agenc_ircd_config::E2EE_PROFILE_TOKEN,
+            agenc_ircd_config::E2EE_PROFILE_SHA256_TOKEN,
+            encode_base64url_32(&[3; 32]),
+        ))
     }
 
     fn enable_test_listener(root: &Path) -> Result<(), OfflineError> {
@@ -784,13 +975,10 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_shape_and_invite_lifetime_bounds_are_closed() {
-        let descriptor = "AGENC-CHAT-CONNECT/1\nnetwork-id=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\nserver-name=chat.example\nrecovery-epoch=AQEBAQEBAQEBAQEBAQEBAQ\nbase-profile-sha256=x\naccount-service-hpke-key-id=x\naccount-service-hpke-public-key=x\ne2ee-profile=IRC-MLS/1\ne2ee-profile-sha256=x\nsequencer-key-set-generation=0\nsequencer-key-set-hash=x\n";
-        assert!(validate_descriptor_shape(descriptor).is_ok());
-        assert_eq!(
-            descriptor_network_id(descriptor),
-            Ok(NetworkId::from_bytes([1; 32]))
-        );
+    fn descriptor_shape_and_invite_lifetime_bounds_are_closed() -> Result<(), OfflineError> {
+        let descriptor = valid_descriptor()?;
+        let parsed = parse_onboarding_descriptor(&descriptor)?;
+        assert_eq!(parsed.network_id, NetworkId::from_bytes([1; 32]));
         assert_eq!(
             create_account_invite(Path::new("/missing"), Path::new("/missing"), 0),
             Err(OfflineError::InvalidRequest)
@@ -804,9 +992,10 @@ mod tests {
             Err(OfflineError::InvalidRequest)
         );
         assert_eq!(
-            validate_descriptor_shape(descriptor.trim_end()),
-            Err(OfflineError::InvalidRequest)
+            parse_onboarding_descriptor(descriptor.trim_end()),
+            Err(ConfigError::InvalidDocument)
         );
+        Ok(())
     }
 
     #[test]
@@ -873,8 +1062,8 @@ mod tests {
     #[test]
     fn descriptor_reader_rejects_size_encoding_shape_and_duplicate_fields()
     -> Result<(), OfflineError> {
-        let valid = "AGENC-CHAT-CONNECT/1\nnetwork-id=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\nserver-name=chat.example\nrecovery-epoch=AQEBAQEBAQEBAQEBAQEBAQ\nbase-profile-sha256=x\naccount-service-hpke-key-id=x\naccount-service-hpke-public-key=x\ne2ee-profile=IRC-MLS/1\ne2ee-profile-sha256=x\nsequencer-key-set-generation=0\nsequencer-key-set-hash=x\n";
-        assert_eq!(validate_descriptor_shape(valid), Ok(()));
+        let valid = valid_descriptor()?;
+        assert!(parse_onboarding_descriptor(&valid).is_ok());
         for invalid in [
             valid.replace('\n', "\r\n"),
             valid.replacen("AGENC-CHAT-CONNECT/1", "WRONG/1", 1),
@@ -883,22 +1072,19 @@ mod tests {
             valid.replacen("server-name=chat.example\n", "optional=x\n", 1),
             format!("{valid}network-id=duplicate\n"),
         ] {
-            assert_eq!(
-                validate_descriptor_shape(&invalid),
-                Err(OfflineError::InvalidRequest)
-            );
+            assert!(parse_onboarding_descriptor(&invalid).is_err());
         }
 
         let root = TestDirectory::create()?;
-        assert_eq!(
+        assert!(matches!(
             read_descriptor(&root.0.join("missing")),
             Err(OfflineError::Filesystem)
-        );
+        ));
         for (name, bytes, expected) in [
             ("empty", Vec::new(), OfflineError::InvalidRequest),
             (
                 "oversized",
-                vec![b'x'; MAX_DESCRIPTOR_BYTES + 1],
+                vec![b'x'; MAX_ONBOARDING_DESCRIPTOR_BYTES + 1],
                 OfflineError::InvalidRequest,
             ),
             (
@@ -914,11 +1100,33 @@ mod tests {
         ] {
             let path = root.0.join(name);
             write_secret(&path, &bytes)?;
-            assert_eq!(read_descriptor(&path), Err(expected));
+            assert!(matches!(read_descriptor(&path), Err(error) if error == expected));
         }
         let valid_path = root.0.join("valid");
         write_secret(&valid_path, valid.as_bytes())?;
-        assert_eq!(read_descriptor(&valid_path)?, valid);
+        assert_eq!(read_descriptor(&valid_path)?.text, valid);
+        let declared_key_id = valid
+            .lines()
+            .find(|line| line.starts_with("account-service-hpke-key-id="))
+            .ok_or(OfflineError::InvalidRequest)?;
+        let forged = valid.replacen(
+            declared_key_id,
+            &format!(
+                "account-service-hpke-key-id={}",
+                encode_base64url_32(&[0; 32])
+            ),
+            1,
+        );
+        let forged_path = root.0.join("forged");
+        write_secret(&forged_path, forged.as_bytes())?;
+        assert!(matches!(
+            read_descriptor(&forged_path),
+            Err(OfflineError::InvalidRequest)
+        ));
+        assert_eq!(
+            create_account_invite(&forged_path, Path::new("/missing"), 60),
+            Err(OfflineError::InvalidRequest)
+        );
         assert_eq!(
             parse_network_id("invalid"),
             Err(OfflineError::InvalidRequest)
@@ -926,6 +1134,10 @@ mod tests {
         assert_eq!(
             parse_network_id("AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE"),
             Ok(NetworkId::from_bytes([1; 32]))
+        );
+        assert_eq!(
+            parse_server_id("invalid"),
+            Err(OfflineError::InvalidRequest)
         );
         Ok(())
     }
@@ -936,7 +1148,8 @@ mod tests {
         let staging_root = root.0.join("rename-staging");
         create_private_directory(&staging_root)?;
         let mut staging = Staging {
-            root: staging_root,
+            data_root: staging_root,
+            config_file: root.0.join("config-staging"),
             installed: false,
         };
         assert_eq!(
@@ -947,6 +1160,69 @@ mod tests {
         assert_eq!(
             staging.rename(root.0.join("missing"), root.0.join("target")),
             Err(OfflineError::PartialInitialization)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn staging_install_never_replaces_a_target_created_after_preflight() -> Result<(), OfflineError>
+    {
+        let root = TestDirectory::create()?;
+        let request = test_request(&root.0)?;
+        validate_init_request(&request)?;
+        refuse_existing_targets(&request)?;
+        let mut staging = Staging::create(&request)?;
+        let late_target = request.data_dir.join("keys");
+        create_private_directory(&late_target)?;
+        write_secret(&late_target.join("sentinel"), b"preserve")?;
+
+        assert_eq!(staging.install(&request), Err(OfflineError::Filesystem));
+        assert_eq!(
+            fs::read(late_target.join("sentinel")).map_err(|_| OfflineError::Filesystem)?,
+            b"preserve"
+        );
+        assert!(!request.data_dir.join("trust").exists());
+        assert!(!request.config_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn init_rejects_overlapping_and_noncanonical_target_paths() -> Result<(), OfflineError> {
+        let root = TestDirectory::create()?;
+
+        let mut runtime_is_data = test_request(&root.0)?;
+        runtime_is_data.runtime_dir = runtime_is_data.data_dir.clone();
+        assert_eq!(
+            validate_init_request(&runtime_is_data),
+            Err(OfflineError::InvalidRequest)
+        );
+
+        let mut runtime_is_state = test_request(&root.0)?;
+        runtime_is_state.runtime_dir = runtime_is_state.data_dir.join("state");
+        assert_eq!(
+            validate_init_request(&runtime_is_state),
+            Err(OfflineError::InvalidRequest)
+        );
+
+        let mut config_is_keys = test_request(&root.0)?;
+        config_is_keys.config_path = config_is_keys.data_dir.join("keys");
+        assert_eq!(
+            validate_init_request(&config_is_keys),
+            Err(OfflineError::InvalidRequest)
+        );
+
+        let mut config_is_runtime = test_request(&root.0)?;
+        config_is_runtime.config_path = config_is_runtime.runtime_dir.join("config.toml");
+        assert_eq!(
+            validate_init_request(&config_is_runtime),
+            Err(OfflineError::InvalidRequest)
+        );
+
+        let mut parent_component = test_request(&root.0)?;
+        parent_component.config_path = root.0.join("etc/../config.toml");
+        assert_eq!(
+            validate_init_request(&parent_component),
+            Err(OfflineError::InvalidRequest)
         );
         Ok(())
     }
@@ -1086,6 +1362,145 @@ mod tests {
             initialize_node(test_request(&root.0)?),
             Err(OfflineError::ExistingTarget)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn edge_init_imports_public_pins_without_creating_coordinator_secrets()
+    -> Result<(), OfflineError> {
+        let root = TestDirectory::create()?;
+        let descriptor = valid_descriptor()?;
+        let parsed = parse_onboarding_descriptor(&descriptor)?;
+        let descriptor_path = root.0.join("trusted-connect.txt");
+        write_secret(&descriptor_path, descriptor.as_bytes())?;
+        let coordinator_server_id = ServerId::from_bytes([8; 16]);
+        let mut request = test_request(&root.0)?;
+        request.mode = InitMode::Edge {
+            coordinator_descriptor: descriptor_path,
+            coordinator_server_id,
+        };
+        let config_path = request.config_path.clone();
+        let data_dir = request.data_dir.clone();
+        let receipt = initialize_node(request)?;
+        assert_eq!(receipt.network_id, parsed.network_id);
+        assert_ne!(receipt.server_id, coordinator_server_id);
+
+        enable_test_listener(&root.0)?;
+        let config = load_config(&config_path, ValidationDepth::Document)?;
+        assert_eq!(config.network.role, NodeRole::Edge);
+        assert_eq!(config.network.coordinator_server_id, coordinator_server_id);
+        assert_eq!(
+            config.accounts.account_service_hpke_public_key,
+            parsed.account_service_hpke_public_key
+        );
+        let secrets = SecretSet::load(&config)?;
+        assert!(secrets.account_service_hpke_private().is_none());
+        assert!(secrets.opaque_server_setup().is_none());
+        assert!(secrets.opaque_fake_credential().is_none());
+        assert!(secrets.sequencer_private().is_none());
+        for absent in [
+            "account-service-hpke.key",
+            "opaque-server-setup.key",
+            "opaque-fake-credential.key",
+            "sequencer.key",
+        ] {
+            assert_eq!(
+                fs::symlink_metadata(data_dir.join("keys").join(absent))
+                    .err()
+                    .map(|error| error.kind()),
+                Some(std::io::ErrorKind::NotFound),
+                "{absent}"
+            );
+        }
+
+        let qualifications = embedded_storage_qualifications()?;
+        let state_directory = StateDirectory::open(&config.storage.state_dir, &qualifications)?;
+        let owner = StorageOwner::start(StorageOpenConfig {
+            expected_network_id: config.network.network_id,
+            expected_server_id: config.server.server_id,
+            state_directory,
+            storage_master_key: StorageMasterKey::from_bytes(*secrets.storage_master().expose()),
+            rollback_guard_root_key: RollbackGuardRootKey::from_bytes(
+                *secrets.rollback_guard_root().expose(),
+            ),
+            login_index_key: LoginIndexKey::from_bytes(*secrets.login_index().expose()),
+            previous_login_index_key: None,
+            limits: limits_from_config(&config),
+        })?;
+        assert_eq!(
+            owner
+                .recovered_state()
+                .table_record_count(TableId::OpaqueRecord),
+            0
+        );
+        assert_eq!(owner.recovered_state().account_service_response_count(), 0);
+        assert_ne!(
+            owner.recovered_state().recovery_epoch(),
+            parsed.recovery_epoch
+        );
+        owner.shutdown()?;
+        Ok(())
+    }
+
+    #[test]
+    fn edge_onboarding_uses_read_only_reconstruction_without_fake_opaque_state()
+    -> Result<(), OfflineError> {
+        let root = TestDirectory::create()?;
+        let trusted = valid_descriptor()?;
+        let parsed = parse_onboarding_descriptor(&trusted)?;
+        let descriptor_path = root.0.join("trusted-edge-connect.txt");
+        write_secret(&descriptor_path, trusted.as_bytes())?;
+        let mut request = test_request(&root.0)?;
+        request.mode = InitMode::Edge {
+            coordinator_descriptor: descriptor_path,
+            coordinator_server_id: ServerId::from_bytes([8; 16]),
+        };
+        let config_path = request.config_path.clone();
+        initialize_node(request)?;
+        enable_test_listener(&root.0)?;
+
+        let rendered = render_onboarding(&config_path)?;
+        let rendered = parse_onboarding_descriptor(&rendered)?;
+        assert_eq!(rendered.network_id, parsed.network_id);
+        assert_eq!(
+            rendered.account_service_hpke_public_key,
+            parsed.account_service_hpke_public_key
+        );
+        assert_ne!(rendered.recovery_epoch, parsed.recovery_epoch);
+        Ok(())
+    }
+
+    #[test]
+    fn edge_init_rejects_a_forged_hpke_id_before_creating_targets() -> Result<(), OfflineError> {
+        let root = TestDirectory::create()?;
+        let descriptor = valid_descriptor()?;
+        let declared_key_id = descriptor
+            .lines()
+            .find(|line| line.starts_with("account-service-hpke-key-id="))
+            .ok_or(OfflineError::InvalidRequest)?;
+        let forged = descriptor.replacen(
+            declared_key_id,
+            &format!(
+                "account-service-hpke-key-id={}",
+                encode_base64url_32(&[0; 32])
+            ),
+            1,
+        );
+        let descriptor_path = root.0.join("forged-connect.txt");
+        write_secret(&descriptor_path, forged.as_bytes())?;
+        let mut request = test_request(&root.0)?;
+        let config_path = request.config_path.clone();
+        let data_dir = request.data_dir.clone();
+        request.mode = InitMode::Edge {
+            coordinator_descriptor: descriptor_path,
+            coordinator_server_id: ServerId::from_bytes([8; 16]),
+        };
+        assert!(matches!(
+            initialize_node(request),
+            Err(OfflineError::InvalidRequest)
+        ));
+        assert!(fs::symlink_metadata(config_path).is_err());
+        assert!(fs::symlink_metadata(data_dir).is_err());
         Ok(())
     }
 }

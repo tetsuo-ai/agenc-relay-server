@@ -14,8 +14,8 @@ use agenc_ircd_config::{
     load_maintenance_config, probe_host_controls,
 };
 use agenc_ircd_runtime::offline::{
-    InitReceipt, InitRequest, create_account_invite, initialize_node, parse_network_id,
-    render_onboarding, verify_database_header,
+    InitMode, InitReceipt, InitRequest, create_account_invite, initialize_node, parse_network_id,
+    parse_server_id, render_onboarding, verify_database_header,
 };
 use agenc_ircd_storage::{
     RestoreCommandReceipt, RestoreCommandRequest, RestoreTrustKey, StorageEngineLimits,
@@ -138,6 +138,7 @@ const INIT_SPECS: &[OptionSpec] = &[
     OptionSpec::value("--profile"),
     OptionSpec::value("--network-id"),
     OptionSpec::value("--coordinator-descriptor"),
+    OptionSpec::value("--coordinator-server-id"),
     OptionSpec::value("--data-dir"),
     OptionSpec::value("--runtime-dir"),
     OptionSpec::value("--server-name"),
@@ -174,6 +175,18 @@ fn init_request(parsed: &mut ParsedOptions) -> Result<InitRequest, ()> {
         .map(|value| parse_network_id(&value).map_err(|_| ()))
         .transpose()?;
     let coordinator_descriptor = parsed.optional_path("--coordinator-descriptor");
+    let coordinator_server_id = parsed
+        .optional_text("--coordinator-server-id")?
+        .map(|value| parse_server_id(&value).map_err(|_| ()))
+        .transpose()?;
+    let mode = match (network_id, coordinator_descriptor, coordinator_server_id) {
+        (network_id, None, None) => InitMode::Coordinator { network_id },
+        (None, Some(coordinator_descriptor), Some(coordinator_server_id)) => InitMode::Edge {
+            coordinator_descriptor,
+            coordinator_server_id,
+        },
+        _ => return Err(()),
+    };
     let data_dir = parsed
         .optional_path("--data-dir")
         .unwrap_or_else(|| PathBuf::from("/var/lib/agenc-ircd"));
@@ -196,8 +209,7 @@ fn init_request(parsed: &mut ParsedOptions) -> Result<InitRequest, ()> {
     Ok(InitRequest {
         config_path,
         profile,
-        network_id,
-        coordinator_descriptor,
+        mode,
         data_dir,
         runtime_dir,
         server_name,
@@ -482,6 +494,67 @@ mod tests {
             arguments(&["init", "--config", "/a", "--profile", "bad"]),
         ] {
             assert!(run(invalid).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn init_parser_requires_one_complete_coordinator_or_edge_mode() -> Result<(), ()> {
+        const NETWORK_ID: &str = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE";
+        const COORDINATOR_ID: &str = "AgICAgICAgICAgICAgICAg";
+        let parse = |specific: &[&str]| {
+            let mut values = vec![
+                "--config",
+                "/etc/agenc-ircd/config.toml",
+                "--profile",
+                "public",
+            ];
+            values.extend_from_slice(specific);
+            let mut parsed = ParsedOptions::parse(&arguments(&values), INIT_SPECS)?;
+            init_request(&mut parsed)
+        };
+
+        let coordinator = parse(&["--network-id", NETWORK_ID])?;
+        assert!(matches!(
+            coordinator.mode,
+            InitMode::Coordinator {
+                network_id: Some(network_id)
+            } if network_id.to_base64url() == NETWORK_ID
+        ));
+        let edge = parse(&[
+            "--coordinator-descriptor",
+            "/trusted/connect.txt",
+            "--coordinator-server-id",
+            COORDINATOR_ID,
+        ])?;
+        assert!(matches!(
+            edge.mode,
+            InitMode::Edge {
+                coordinator_descriptor,
+                coordinator_server_id,
+            } if coordinator_descriptor == std::path::Path::new("/trusted/connect.txt")
+                && coordinator_server_id.to_base64url() == COORDINATOR_ID
+        ));
+
+        for invalid in [
+            vec!["--coordinator-descriptor", "/trusted/connect.txt"],
+            vec!["--coordinator-server-id", COORDINATOR_ID],
+            vec![
+                "--network-id",
+                NETWORK_ID,
+                "--coordinator-descriptor",
+                "/trusted/connect.txt",
+                "--coordinator-server-id",
+                COORDINATOR_ID,
+            ],
+            vec![
+                "--coordinator-descriptor",
+                "/trusted/connect.txt",
+                "--coordinator-server-id",
+                "invalid",
+            ],
+        ] {
+            assert!(parse(&invalid).is_err());
         }
         Ok(())
     }

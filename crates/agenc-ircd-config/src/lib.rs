@@ -55,8 +55,9 @@ pub use maintenance::{MaintenanceStorageConfig, load_maintenance_config};
 pub use moderation::{ModerationConfig, OperatorConfig};
 pub use network::{DisplayLabel, DnsEndpoint, NetworkConfig, NodeRole, OnionEndpoint};
 pub use onboarding::{
-    BASE_PROFILE_SHA256_TOKEN, E2EE_PROFILE_SHA256_TOKEN, E2EE_PROFILE_TOKEN, OnboardingFacts,
-    render_onboarding,
+    BASE_PROFILE_SHA256_TOKEN, E2EE_PROFILE_SHA256_TOKEN, E2EE_PROFILE_TOKEN,
+    MAX_ONBOARDING_DESCRIPTOR_BYTES, OnboardingDescriptor, OnboardingFacts,
+    parse_onboarding_descriptor, render_onboarding,
 };
 pub use paths::{PathResolver, load_public_text};
 pub use privacy::{HistoryDefault, PrivacyConfig};

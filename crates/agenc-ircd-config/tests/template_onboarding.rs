@@ -7,8 +7,9 @@ mod support;
 
 use agenc_ircd_config::{
     BASE_PROFILE_SHA256_TOKEN, ConfigError, DisplayLabel, DnsName, E2EE_PROFILE_SHA256_TOKEN,
-    InitProfile, InitValues, NodeRole, OnboardingFacts, OperatorTemplate, ValidationStage,
-    render_onboarding, render_template,
+    InitProfile, InitValues, MAX_ONBOARDING_DESCRIPTOR_BYTES, NodeRole, OnboardingFacts,
+    OperatorTemplate, ValidationStage, parse_onboarding_descriptor, render_onboarding,
+    render_template,
 };
 use agenc_ircd_types::{NetworkId, OperatorId, RecoveryEpoch, ServerId};
 use support::{DUAL, ONION, PUBLIC, parse};
@@ -178,5 +179,113 @@ fn descriptor_lines_occur_in_order_and_omit_absent_endpoints_as_units() -> TestR
         render_onboarding(&none, &facts()).err(),
         Some(ConfigError::MissingValue)
     );
+    Ok(())
+}
+
+#[test]
+fn descriptor_parser_requires_exact_order_tokens_and_endpoint_units() -> TestResult {
+    let public = render_onboarding(&parse(PUBLIC)?, &facts())?;
+    let parsed = parse_onboarding_descriptor(&public)?;
+    assert_eq!(parsed.network_id, NetworkId::from_bytes([1; 32]));
+    assert_eq!(parsed.server_name, DnsName::parse("chat.example")?);
+    assert_eq!(parsed.dns.as_ref().map(|dns| dns.port), Some(6697));
+    assert!(parsed.onion.is_none());
+    assert_eq!(parsed.recovery_epoch, RecoveryEpoch::from_bytes([9; 16]));
+    assert_eq!(parsed.account_service_hpke_key_id, [10; 32]);
+    assert_eq!(parsed.account_service_hpke_public_key, [5; 32]);
+    assert_eq!(parsed.sequencer_key_set_generation, 3);
+    assert_eq!(parsed.sequencer_key_set_hash, [11; 32]);
+
+    let onion = render_onboarding(&parse(ONION)?, &facts())?;
+    assert!(parse_onboarding_descriptor(&onion)?.onion.is_some());
+    let dual = render_onboarding(&parse(DUAL)?, &facts())?;
+    let parsed_dual = parse_onboarding_descriptor(&dual)?;
+    assert!(parsed_dual.dns.is_some());
+    assert!(parsed_dual.onion.is_some());
+
+    for invalid in [
+        public.trim_end().to_owned(),
+        public.replace('\n', "\r\n"),
+        public.replacen("AGENC-CHAT-CONNECT/1", "AGENC-CHAT-CONNECT/2", 1),
+        public.replacen("dns-endpoint=chat.example:6697\n", "", 1),
+        public.replacen(BASE_PROFILE_SHA256_TOKEN, "invalid", 1),
+        public.replacen(
+            "sequencer-key-set-generation=3",
+            "sequencer-key-set-generation=03",
+            1,
+        ),
+        format!("{public}extra=value\n"),
+        onion.replacen("onion-tls-spki-sha256=", "unexpected-pin=", 1),
+    ] {
+        assert!(parse_onboarding_descriptor(&invalid).is_err(), "{invalid}");
+    }
+
+    let oversized = format!("{}{}", public, "x".repeat(MAX_ONBOARDING_DESCRIPTOR_BYTES));
+    assert_eq!(
+        parse_onboarding_descriptor(&oversized),
+        Err(ConfigError::InvalidDocument)
+    );
+    Ok(())
+}
+
+#[test]
+fn descriptor_parser_rejects_noncanonical_scalars_and_reordered_fields() -> TestResult {
+    let public = render_onboarding(&parse(PUBLIC)?, &facts())?;
+    let key_id_line = public
+        .lines()
+        .find(|line| line.starts_with("account-service-hpke-key-id="))
+        .ok_or("missing HPKE key ID")?;
+    let sequencer_hash_line = public
+        .lines()
+        .find(|line| line.starts_with("sequencer-key-set-hash="))
+        .ok_or("missing sequencer hash")?;
+    let mut reordered = public.lines().map(str::to_owned).collect::<Vec<_>>();
+    reordered.swap(1, 2);
+    let reordered = format!("{}\n", reordered.join("\n"));
+    let duplicated = public.replacen(
+        "server-name=chat.example\n",
+        "server-name=chat.example\nserver-name=chat.example\n",
+        1,
+    );
+    for invalid in [
+        public.replacen(":6697", ":0", 1),
+        public.replacen(":6697", ":65536", 1),
+        public.replacen(":6697", ":06697", 1),
+        public.replacen(key_id_line, &format!("{key_id_line}="), 1),
+        public.replacen(sequencer_hash_line, &format!("{sequencer_hash_line}="), 1),
+        public.replacen("e2ee-profile=IRC-MLS/1", "e2ee-profile=IRC-MLS/2", 1),
+        public.replacen(E2EE_PROFILE_SHA256_TOKEN, BASE_PROFILE_SHA256_TOKEN, 1),
+        reordered,
+        duplicated,
+    ] {
+        assert!(parse_onboarding_descriptor(&invalid).is_err(), "{invalid}");
+    }
+    assert_eq!(
+        parse_onboarding_descriptor(&"x".repeat(MAX_ONBOARDING_DESCRIPTOR_BYTES + 1)),
+        Err(ConfigError::InvalidDocument)
+    );
+    Ok(())
+}
+
+#[test]
+fn edge_template_omits_every_coordinator_only_secret_path() -> TestResult {
+    let mut edge = values(InitProfile::Public)?;
+    edge.role = NodeRole::Edge;
+    edge.coordinator_server_id = ServerId::from_bytes([7; 16]);
+    let text = render_template(&edge)?;
+    assert!(text.contains("role = \"edge\""));
+    assert!(text.contains(&format!(
+        "coordinator_server_id = \"{}\"",
+        edge.coordinator_server_id.to_base64url()
+    )));
+    for forbidden in [
+        "account_service_hpke_private_key_file",
+        "opaque_server_setup_file",
+        "opaque_fake_credential_key_file",
+        "sequencer_private_key_file",
+        "sequencer_credentials_file",
+    ] {
+        assert!(!text.contains(forbidden), "{forbidden}");
+    }
     Ok(())
 }

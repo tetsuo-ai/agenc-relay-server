@@ -43,7 +43,7 @@ Run the full stopped-node check before the first start and after changing keys, 
 agenc-ircd check-config --config /etc/agenc-ircd/config.toml
 ```
 
-The command parses the complete document, opens every configured secret under the protected-file rules, recovers the authenticated database with an exclusive writer lock, checks the database identity, and prints the observed host controls. Exit status 2 means at least one required control was observed absent. An unreadable control is reported as unknown instead of present.
+The command parses the complete document, opens every configured secret under the protected-file rules, reconstructs the authenticated database through a read-only handle, checks the database identity, and prints the observed host controls. It does not create the writer lock, repair the database, replace the rollback guard, or remove stale temporary files. Exit status 2 means at least one required control was observed absent. An unreadable control is reported as unknown instead of present.
 
 The process cannot observe every service-manager restriction from inside its own namespace. Check the installed unit separately with `systemd-analyze security` and the deployment checker. `check-config` does not prove swap encryption, backup handling, certificate issuance, firewall rules, or Tor routing.
 
@@ -55,7 +55,7 @@ After enabling at least one reviewed client endpoint, print the canonical connec
 agenc-ircd print-onboarding --config /etc/agenc-ircd/config.toml
 ```
 
-The command holds the stopped database writer lock while it reads the authenticated recovery epoch. A running daemon causes the command to fail.
+The command reconstructs the database through the same read-only inspection path while it reads the authenticated recovery epoch. A running writer causes the read-only database open to fail.
 
 Create a time-limited account invitation with a separate offline Ed25519 invitation key:
 

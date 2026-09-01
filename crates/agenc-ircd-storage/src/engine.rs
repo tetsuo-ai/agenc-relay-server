@@ -20,16 +20,17 @@ use crate::redb_store::{
 use crate::{
     BACKUP_FIXED_STREAM_BYTES, BackupDestination, BackupHeader, BackupOutput, BackupReceipt,
     BackupRecord, BackupStreamWriter, BackupTrustKey, CommitOutcome, CommitReceipt, DatabaseHeader,
-    ExistingRecord, FilesystemCapacity, IntegrityCheckpoint, IntegrityCheckpointTbs,
-    IntegrityManifest, IntegrityManifestTbs, IntegrityRecordMutation, IntegrityRecordVersion,
-    LoginIndexKeyState, LoginIndexStoredKey, LoginIndexValueKind, NonceReservationState,
-    NonceReservationTbs, ROLLBACK_GUARD_BYTES, ReadPlan, ReadRecord, ReadResult, RecordReference,
-    RecoveryDisposition, RollbackGuard, RollbackGuardPhase, RollbackGuardTbs, SealedRecord,
-    StateDirectory, StateMeta, StateMetaTbs, StorageAccountingLimits, StorageConstruction,
-    StorageConstructionSource, StorageError, StorageFaultBoundary, StorageFaultInjector,
-    StorageFaultSite, StorageMutationBatch, StorageMutationHead, StorageOperationCompletion,
-    StorageOperationIdentity, StorageSealContext, StoredKey, TableId, classify_recovery_state,
-    logical_meta_charge, logical_record_charge, verify_backup, verify_guard_pair,
+    ExistingRecord, FilesystemCapacity, InspectionStateDirectory, IntegrityCheckpoint,
+    IntegrityCheckpointTbs, IntegrityManifest, IntegrityManifestTbs, IntegrityRecordMutation,
+    IntegrityRecordVersion, LoginIndexKeyState, LoginIndexStoredKey, LoginIndexValueKind,
+    NonceReservationState, NonceReservationTbs, ROLLBACK_GUARD_BYTES, ReadPlan, ReadRecord,
+    ReadResult, RecordReference, RecoveryDisposition, RollbackGuard, RollbackGuardPhase,
+    RollbackGuardTbs, SealedRecord, StateDirectory, StateMeta, StateMetaTbs,
+    StorageAccountingLimits, StorageConstruction, StorageConstructionSource, StorageError,
+    StorageFaultBoundary, StorageFaultInjector, StorageFaultSite, StorageMutationBatch,
+    StorageMutationHead, StorageOperationCompletion, StorageOperationIdentity, StorageSealContext,
+    StoredKey, TableId, classify_recovery_state, logical_meta_charge, logical_record_charge,
+    verify_backup, verify_guard_pair,
 };
 
 const KEY_CHECK_KEY: &[u8] = b"agenc-chat/key-check/v1";
@@ -260,9 +261,159 @@ pub struct StorageOpenConfig {
     pub limits: StorageEngineLimits,
 }
 
+/// Secret-bearing inputs for one non-mutating stopped-daemon inspection.
+pub struct StorageInspectionConfig {
+    /// Expected permanent network identity from validated configuration.
+    pub expected_network_id: NetworkId,
+    /// Expected permanent server identity from validated configuration.
+    pub expected_server_id: ServerId,
+    /// Existing state directory opened without writer authority.
+    pub state_directory: InspectionStateDirectory,
+    /// Active external storage master key.
+    pub storage_master_key: StorageMasterKey,
+    /// Independently provisioned rollback-guard root.
+    pub rollback_guard_root_key: RollbackGuardRootKey,
+    /// Configured current login-index key.
+    pub login_index_key: LoginIndexKey,
+    /// Configured previous login-index key, present only during a transition.
+    pub previous_login_index_key: Option<LoginIndexKey>,
+    /// Final storage and filesystem limits.
+    pub limits: StorageEngineLimits,
+}
+
+struct EngineOpenConfig {
+    expected_network_id: NetworkId,
+    expected_server_id: ServerId,
+    state_directory: EngineStateDirectory,
+    storage_master_key: StorageMasterKey,
+    rollback_guard_root_key: RollbackGuardRootKey,
+    login_index_key: LoginIndexKey,
+    previous_login_index_key: Option<LoginIndexKey>,
+    limits: StorageEngineLimits,
+}
+
+struct AuthenticatedOpenState {
+    integrity_keys: StorageIntegrityKeys,
+    header: DatabaseHeader,
+    binding: DatabaseBinding,
+    state_meta: StateMeta,
+    state_meta_record_id: StorageDigest,
+    reservation: NonceReservationState,
+    guard: RollbackGuard,
+    retained_manifest_count: u64,
+    retained_manifest_bytes: u64,
+}
+
+enum EngineStateDirectory {
+    Writable(StateDirectory),
+    Inspection(InspectionStateDirectory),
+}
+
+impl EngineStateDirectory {
+    fn open_store(&self, cache_bytes: usize) -> Result<RedbStore, StorageError> {
+        match self {
+            Self::Writable(directory) => RedbStore::open_with_faults(
+                directory.open_database_file()?,
+                cache_bytes,
+                directory.faults(),
+            ),
+            Self::Inspection(directory) => {
+                RedbStore::open_read_only(&directory.database_descriptor_path(), cache_bytes)
+            }
+        }
+    }
+
+    fn open_database_file(&self) -> Result<File, StorageError> {
+        match self {
+            Self::Writable(directory) => directory.open_database_file(),
+            Self::Inspection(directory) => directory.open_database_file(),
+        }
+    }
+
+    fn faults(&self) -> StorageFaultInjector {
+        match self {
+            Self::Writable(directory) => directory.faults(),
+            Self::Inspection(_) => StorageFaultInjector::disabled(),
+        }
+    }
+
+    fn read_guard(&self, expected_bytes: usize) -> Result<Vec<u8>, StorageError> {
+        match self {
+            Self::Writable(directory) => directory.read_guard(expected_bytes),
+            Self::Inspection(directory) => directory.read_guard(expected_bytes),
+        }
+    }
+
+    fn replace_guard(&self, bytes: &[u8]) -> Result<(), StorageError> {
+        match self {
+            Self::Writable(directory) => directory.replace_guard(bytes),
+            Self::Inspection(_) => Err(StorageError::FilesystemRejected),
+        }
+    }
+
+    fn capacity(
+        &self,
+        fixed_reserve_bytes: u64,
+        reserve_percent: u8,
+    ) -> Result<FilesystemCapacity, StorageError> {
+        match self {
+            Self::Writable(directory) => directory.capacity(fixed_reserve_bytes, reserve_percent),
+            Self::Inspection(directory) => directory.capacity(fixed_reserve_bytes, reserve_percent),
+        }
+    }
+
+    fn pending_construction(&self) -> Result<u64, StorageError> {
+        match self {
+            Self::Writable(directory) => directory.pending_construction(),
+            Self::Inspection(directory) => directory.pending_construction(),
+        }
+    }
+
+    fn admit_transaction(
+        &self,
+        fixed_reserve_bytes: u64,
+        reserve_percent: u8,
+    ) -> Result<FilesystemCapacity, StorageError> {
+        match self {
+            Self::Writable(directory) => {
+                directory.admit_transaction(fixed_reserve_bytes, reserve_percent)
+            }
+            Self::Inspection(_) => Err(StorageError::FilesystemRejected),
+        }
+    }
+
+    fn reference_scratch(&self) -> Result<ReferenceScratch, StorageError> {
+        match self {
+            Self::Writable(directory) => {
+                let (file, scratch_directory, name) = directory.create_recovery_scratch()?;
+                ReferenceScratch::create(file, scratch_directory, name)
+            }
+            Self::Inspection(directory) => {
+                ReferenceScratch::create_anonymous(directory.create_anonymous_scratch()?)
+            }
+        }
+    }
+
+    fn recovery_scratch(&self) -> Result<RecoveryScratch, StorageError> {
+        match self {
+            Self::Writable(directory) => {
+                let (file, scratch_directory, name) = directory.create_recovery_scratch()?;
+                RecoveryScratch::create(file, scratch_directory, name)
+            }
+            Self::Inspection(directory) => {
+                RecoveryScratch::create_anonymous(directory.create_anonymous_scratch()?)
+            }
+        }
+    }
+
+    const fn installs_repairable_guard(&self) -> bool {
+        matches!(self, Self::Writable(_))
+    }
+}
+
 pub(crate) struct StorageEngine {
     store: RedbStore,
-    state_directory: StateDirectory,
+    state_directory: EngineStateDirectory,
     master_key: StorageMasterKey,
     guard_root_key: RollbackGuardRootKey,
     login_index_key: LoginIndexKey,
@@ -281,84 +432,153 @@ pub(crate) struct StorageEngine {
     backup_job: Option<BackupJob>,
 }
 
+/// Authenticates and reconstructs an existing database without taking writer
+/// authority or changing persistent state.
+pub fn inspect_storage(
+    config: StorageInspectionConfig,
+) -> Result<RecoveredStorageState, StorageError> {
+    StorageEngine::open_inspection(config)?.startup_scan()
+}
+
+fn authenticate_open_state(
+    config: &EngineOpenConfig,
+    store: &RedbStore,
+    limits: StorageEngineLimits,
+) -> Result<AuthenticatedOpenState, StorageError> {
+    let header = DatabaseHeader::decode(&require_meta(store, HEADER_META_KEY)?)?;
+    if header.tbs().network_id != config.expected_network_id
+        || header.tbs().server_id != config.expected_server_id
+    {
+        return Err(StorageError::AuthenticationFailed);
+    }
+    let context = StorageIntegrityContext::new(
+        header.tbs().network_id,
+        header.tbs().server_id,
+        header.tbs().database_instance_id,
+    );
+    let integrity_keys = derive_storage_integrity_keys(&config.rollback_guard_root_key, context)?;
+    let reservation = NonceReservationState::decode_and_verify(
+        &require_meta(store, RESERVATION_META_KEY)?,
+        &integrity_keys,
+    )?;
+    let guard = RollbackGuard::decode_and_verify(
+        &config.state_directory.read_guard(ROLLBACK_GUARD_BYTES)?,
+        &integrity_keys,
+    )?;
+    let binding = database_binding(&header);
+    verify_key_check(store, &config.storage_master_key, binding, &header)?;
+    let (state_meta, state_meta_record_id) = read_state_meta(
+        store,
+        &config.storage_master_key,
+        binding,
+        &header,
+        &integrity_keys,
+    )?;
+    let guard = reconcile_open_guard(
+        &config.state_directory,
+        &header,
+        &state_meta,
+        state_meta_record_id,
+        &reservation,
+        guard,
+        &integrity_keys,
+    )?;
+    let (retained_manifest_count, retained_manifest_bytes) =
+        validate_open_accounting(store, &state_meta, limits)?;
+    Ok(AuthenticatedOpenState {
+        integrity_keys,
+        header,
+        binding,
+        state_meta,
+        state_meta_record_id,
+        reservation,
+        guard,
+        retained_manifest_count,
+        retained_manifest_bytes,
+    })
+}
+
+fn reconcile_open_guard(
+    directory: &EngineStateDirectory,
+    header: &DatabaseHeader,
+    state_meta: &StateMeta,
+    state_meta_record_id: StorageDigest,
+    reservation: &NonceReservationState,
+    guard: RollbackGuard,
+    integrity_keys: &StorageIntegrityKeys,
+) -> Result<RollbackGuard, StorageError> {
+    match classify_recovery_state(
+        header,
+        state_meta,
+        state_meta_record_id,
+        reservation,
+        &guard,
+    )? {
+        RecoveryDisposition::ExactCommitted | RecoveryDisposition::ExactReserved => Ok(guard),
+        RecoveryDisposition::InstallReservedGuard | RecoveryDisposition::InstallCommittedGuard => {
+            let replacement = guard_for_reservation(header, reservation, integrity_keys)?;
+            if directory.installs_repairable_guard() {
+                directory.replace_guard(&replacement.encode()?)?;
+            }
+            Ok(replacement)
+        }
+    }
+}
+
+fn validate_open_accounting(
+    store: &RedbStore,
+    state_meta: &StateMeta,
+    limits: StorageEngineLimits,
+) -> Result<(u64, u64), StorageError> {
+    if state_meta.tbs().logical_database_bytes > limits.database_max_bytes
+        || state_meta.tbs().backup_stream_bytes > limits.backup_max_bytes
+    {
+        return Err(StorageError::LimitExceeded);
+    }
+    let usage = store.table_usage(TableId::IntegrityManifest, MAX_RETAINED_MANIFEST_BYTES)?;
+    let expected_manifest_count = state_meta
+        .tbs()
+        .manifest_sequence
+        .checked_sub(state_meta.tbs().checkpoint_manifest_sequence)
+        .ok_or(StorageError::StaleState)?;
+    if usage.0 != expected_manifest_count || usage.0 > MAX_RETAINED_MANIFESTS {
+        return Err(StorageError::StaleState);
+    }
+    Ok(usage)
+}
+
 impl StorageEngine {
     // agenc-review: focus owner=storage reviewed=2026-08-27 reason=startup orders identity key guard recovery and ceiling validation before ownership
     pub(crate) fn open(config: StorageOpenConfig) -> Result<Self, StorageError> {
+        Self::open_authenticated(EngineOpenConfig {
+            expected_network_id: config.expected_network_id,
+            expected_server_id: config.expected_server_id,
+            state_directory: EngineStateDirectory::Writable(config.state_directory),
+            storage_master_key: config.storage_master_key,
+            rollback_guard_root_key: config.rollback_guard_root_key,
+            login_index_key: config.login_index_key,
+            previous_login_index_key: config.previous_login_index_key,
+            limits: config.limits,
+        })
+    }
+
+    fn open_inspection(config: StorageInspectionConfig) -> Result<Self, StorageError> {
+        Self::open_authenticated(EngineOpenConfig {
+            expected_network_id: config.expected_network_id,
+            expected_server_id: config.expected_server_id,
+            state_directory: EngineStateDirectory::Inspection(config.state_directory),
+            storage_master_key: config.storage_master_key,
+            rollback_guard_root_key: config.rollback_guard_root_key,
+            login_index_key: config.login_index_key,
+            previous_login_index_key: config.previous_login_index_key,
+            limits: config.limits,
+        })
+    }
+
+    fn open_authenticated(config: EngineOpenConfig) -> Result<Self, StorageError> {
         let limits = config.limits.validate()?;
-        let file = config.state_directory.open_database_file()?;
-        let store = RedbStore::open_with_faults(
-            file,
-            limits.redb_cache_bytes,
-            config.state_directory.faults(),
-        )?;
-        let header = DatabaseHeader::decode(&require_meta(&store, HEADER_META_KEY)?)?;
-        if header.tbs().network_id != config.expected_network_id
-            || header.tbs().server_id != config.expected_server_id
-        {
-            return Err(StorageError::AuthenticationFailed);
-        }
-        let context = StorageIntegrityContext::new(
-            header.tbs().network_id,
-            header.tbs().server_id,
-            header.tbs().database_instance_id,
-        );
-        let integrity_keys =
-            derive_storage_integrity_keys(&config.rollback_guard_root_key, context)?;
-        let reservation = NonceReservationState::decode_and_verify(
-            &require_meta(&store, RESERVATION_META_KEY)?,
-            &integrity_keys,
-        )?;
-        let mut guard = RollbackGuard::decode_and_verify(
-            &config.state_directory.read_guard(ROLLBACK_GUARD_BYTES)?,
-            &integrity_keys,
-        )?;
-        let binding = database_binding(&header);
-        verify_key_check(&store, &config.storage_master_key, binding, &header)?;
-        let (state_meta, state_meta_record_id) = read_state_meta(
-            &store,
-            &config.storage_master_key,
-            binding,
-            &header,
-            &integrity_keys,
-        )?;
-        match classify_recovery_state(
-            &header,
-            &state_meta,
-            state_meta_record_id,
-            &reservation,
-            &guard,
-        )? {
-            RecoveryDisposition::ExactCommitted | RecoveryDisposition::ExactReserved => {}
-            RecoveryDisposition::InstallReservedGuard
-            | RecoveryDisposition::InstallCommittedGuard => {
-                let replacement = guard_for_reservation(&header, &reservation, &integrity_keys)?;
-                config
-                    .state_directory
-                    .replace_guard(&replacement.encode()?)?;
-                guard = replacement;
-            }
-        }
-        if (
-            state_meta.tbs().logical_database_bytes > limits.database_max_bytes,
-            state_meta.tbs().backup_stream_bytes > limits.backup_max_bytes,
-        ) != (false, false)
-        {
-            return Err(StorageError::LimitExceeded);
-        }
-        let (retained_manifest_count, retained_manifest_bytes) =
-            store.table_usage(TableId::IntegrityManifest, MAX_RETAINED_MANIFEST_BYTES)?;
-        let expected_manifest_count = state_meta
-            .tbs()
-            .manifest_sequence
-            .checked_sub(state_meta.tbs().checkpoint_manifest_sequence)
-            .ok_or(StorageError::StaleState)?;
-        if (
-            retained_manifest_count != expected_manifest_count,
-            retained_manifest_count > MAX_RETAINED_MANIFESTS,
-        ) != (false, false)
-        {
-            return Err(StorageError::StaleState);
-        }
+        let store = config.state_directory.open_store(limits.redb_cache_bytes)?;
+        let authenticated = authenticate_open_state(&config, &store, limits)?;
         Ok(Self {
             store,
             state_directory: config.state_directory,
@@ -366,16 +586,16 @@ impl StorageEngine {
             guard_root_key: config.rollback_guard_root_key,
             login_index_key: config.login_index_key,
             previous_login_index_key: config.previous_login_index_key,
-            integrity_keys,
-            header,
-            binding,
-            state_meta,
-            state_meta_record_id,
-            reservation,
-            guard,
+            integrity_keys: authenticated.integrity_keys,
+            header: authenticated.header,
+            binding: authenticated.binding,
+            state_meta: authenticated.state_meta,
+            state_meta_record_id: authenticated.state_meta_record_id,
+            reservation: authenticated.reservation,
+            guard: authenticated.guard,
             limits,
-            retained_manifest_count,
-            retained_manifest_bytes,
+            retained_manifest_count: authenticated.retained_manifest_count,
+            retained_manifest_bytes: authenticated.retained_manifest_bytes,
             checkpoint_job: None,
             backup_job: None,
         })
@@ -1797,10 +2017,7 @@ impl StorageEngine {
         self.store.validate_inventory()?;
         self.store.validate_meta_membership()?;
         self.verify_integrity_ledger()?;
-        let (reference_file, reference_directory, reference_name) =
-            self.state_directory.create_recovery_scratch()?;
-        let reference_scratch =
-            ReferenceScratch::create(reference_file, reference_directory, reference_name)?;
+        let reference_scratch = self.state_directory.reference_scratch()?;
         let mut reference_writer = reference_scratch.begin()?;
         let mut logical_bytes =
             logical_meta_charge(HEADER_META_KEY.len(), crate::DATABASE_HEADER_BYTES)?
@@ -2213,9 +2430,7 @@ impl StorageEngine {
         {
             return Err(StorageError::StaleState);
         }
-        let (scratch_file, scratch_directory, scratch_name) =
-            self.state_directory.create_recovery_scratch()?;
-        let scratch = RecoveryScratch::create(scratch_file, scratch_directory, scratch_name)?;
+        let scratch = self.state_directory.recovery_scratch()?;
         let mut scratch_writer = scratch.begin_current()?;
         for number in 0_u16..=26 {
             let table = TableId::from_u16(number)?;
@@ -3078,7 +3293,9 @@ pub(crate) fn draw_nonces_with_faults(
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::path::PathBuf;
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use agenc_ircd_crypto::{StorageDigest, derive_login_index};
@@ -3090,10 +3307,10 @@ pub(crate) mod tests {
     use super::*;
     use crate::{
         InitialStorageRecord, LoginIndexValue, PersistentRecordValue, QualificationTarget,
-        RecordMutation, SCHEMA_GENERATION, StorageConstructionKind, StorageGrowthCase,
-        StorageInitializationConfig, StorageInitializationMode, StorageInitializationOutcome,
-        StorageQualification, StorageQualificationReport, StorageQualificationReportTbs,
-        initialize_storage,
+        RecordMutation, SCHEMA_GENERATION, StorageConstructionKind, StorageFaultCase,
+        StorageGrowthCase, StorageInitializationConfig, StorageInitializationMode,
+        StorageInitializationOutcome, StorageQualification, StorageQualificationReport,
+        StorageQualificationReportTbs, initialize_storage,
     };
 
     const ZERO: StorageDigest = StorageDigest::from_bytes([0; 32]);
@@ -3276,6 +3493,104 @@ pub(crate) mod tests {
         )?;
         StorageQualificationReport::decode_and_verify(&report.encode()?, key.public_key())?
             .qualification_for(tuple)
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct DirectoryFingerprint {
+        directory_inode: u64,
+        directory_mtime: i64,
+        directory_mtime_nanoseconds: i64,
+        entries: Vec<FileFingerprint>,
+    }
+
+    #[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
+    struct FileFingerprint {
+        name: String,
+        inode: u64,
+        mtime: i64,
+        mtime_nanoseconds: i64,
+        bytes: Vec<u8>,
+    }
+
+    fn directory_fingerprint(path: &Path) -> Result<DirectoryFingerprint, StorageError> {
+        let directory =
+            std::fs::symlink_metadata(path).map_err(|_| StorageError::FilesystemRejected)?;
+        let mut entries = std::fs::read_dir(path)
+            .map_err(|_| StorageError::FilesystemRejected)?
+            .map(|entry| {
+                let entry = entry.map_err(|_| StorageError::FilesystemRejected)?;
+                let name = entry
+                    .file_name()
+                    .into_string()
+                    .map_err(|_| StorageError::FilesystemRejected)?;
+                let metadata = entry
+                    .metadata()
+                    .map_err(|_| StorageError::FilesystemRejected)?;
+                let bytes =
+                    std::fs::read(entry.path()).map_err(|_| StorageError::FilesystemRejected)?;
+                Ok(FileFingerprint {
+                    name,
+                    inode: metadata.ino(),
+                    mtime: metadata.mtime(),
+                    mtime_nanoseconds: metadata.mtime_nsec(),
+                    bytes,
+                })
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?;
+        entries.sort();
+        Ok(DirectoryFingerprint {
+            directory_inode: directory.ino(),
+            directory_mtime: directory.mtime(),
+            directory_mtime_nanoseconds: directory.mtime_nsec(),
+            entries,
+        })
+    }
+
+    fn inspection_config(path: &Path) -> Result<StorageInspectionConfig, StorageError> {
+        let qualification = test_qualification(path)?;
+        Ok(StorageInspectionConfig {
+            expected_network_id: NetworkId::from_bytes([21; 32]),
+            expected_server_id: ServerId::from_bytes([22; 16]),
+            state_directory: InspectionStateDirectory::open(path, &[qualification])?,
+            storage_master_key: StorageMasterKey::from_bytes([27; 32]),
+            rollback_guard_root_key: RollbackGuardRootKey::from_bytes([28; 32]),
+            login_index_key: LoginIndexKey::from_bytes([23; 32]),
+            previous_login_index_key: None,
+            limits: engine_limits(),
+        })
+    }
+
+    fn assert_recovered_durable_facts_match(
+        actual: RecoveredStorageState,
+        expected: RecoveredStorageState,
+    ) {
+        assert_eq!(actual.table_record_counts, expected.table_record_counts);
+        assert_eq!(actual.state_generation, expected.state_generation);
+        assert_eq!(
+            actual.account_service_response_count,
+            expected.account_service_response_count
+        );
+        assert_eq!(
+            actual.storage_commit_sequence,
+            expected.storage_commit_sequence
+        );
+        assert_eq!(actual.manifest_sequence, expected.manifest_sequence);
+        assert_eq!(actual.nonce_draw_high_water, expected.nonce_draw_high_water);
+        assert_eq!(
+            actual.maximum_record_revision,
+            expected.maximum_record_revision
+        );
+        assert_eq!(
+            actual.logical_database_bytes,
+            expected.logical_database_bytes
+        );
+        assert_eq!(actual.backup_stream_bytes, expected.backup_stream_bytes);
+        assert_eq!(actual.database_binding, expected.database_binding);
+        assert_eq!(
+            actual.storage_key_generation,
+            expected.storage_key_generation
+        );
+        assert_eq!(actual.recovery_epoch, expected.recovery_epoch);
     }
 
     fn authenticate_state(
@@ -4252,6 +4567,88 @@ pub(crate) mod tests {
             ),
             Err(StorageError::StaleState)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_inspection_matches_startup_without_persistent_changes() -> Result<(), StorageError>
+    {
+        let mut fixture = EngineFixture::create()?;
+        let expected = fixture.engine()?.startup_scan()?;
+        drop(fixture.engine.take());
+        let writer_lock = fixture.path.join("writer.lock");
+        std::fs::remove_file(&writer_lock).map_err(|_| StorageError::FilesystemRejected)?;
+        for name in [
+            format!(".agenc-recovery-scratch-v1-{}", "a".repeat(32)),
+            format!(".rollback.guard.agenc-tmp-v1-{}", "b".repeat(32)),
+        ] {
+            let _file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(fixture.path.join(name))
+                .map_err(|_| StorageError::FilesystemRejected)?;
+        }
+        let before = directory_fingerprint(&fixture.path)?;
+
+        let inspected = inspect_storage(inspection_config(&fixture.path)?)?;
+        assert_recovered_durable_facts_match(inspected, expected);
+        let first = StorageEngine::open_inspection(inspection_config(&fixture.path)?)?;
+        let second = StorageEngine::open_inspection(inspection_config(&fixture.path)?)?;
+        assert_recovered_durable_facts_match(first.startup_scan()?, expected);
+        assert_recovered_durable_facts_match(second.startup_scan()?, expected);
+        drop(first);
+        drop(second);
+
+        assert_eq!(directory_fingerprint(&fixture.path)?, before);
+        assert!(!writer_lock.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_inspection_rejects_a_live_writer() -> Result<(), StorageError> {
+        let fixture = EngineFixture::create()?;
+        assert_eq!(
+            inspect_storage(inspection_config(&fixture.path)?).err(),
+            Some(StorageError::DatabaseRejected)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_inspection_validates_both_guard_successors_without_installing_them()
+    -> Result<(), StorageError> {
+        for (guard_occurrence, expected_commit_sequence) in [(1, 0), (2, 1)] {
+            let faults = StorageFaultInjector::new(
+                StorageFaultCase {
+                    site: StorageFaultSite::GuardTemporaryCreate,
+                    boundary: StorageFaultBoundary::Before,
+                },
+                u64::MAX,
+            )?;
+            let mut fixture = EngineFixture::create_with_faults(faults.clone())?;
+            faults.arm_after_current(guard_occurrence)?;
+            let batch = EngineFixture::advancing_batch(fixture.engine()?, 91)?;
+            assert!(!matches!(
+                fixture.engine_mut()?.commit(batch),
+                CommitOutcome::Committed(_)
+            ));
+            faults.verify_fired()?;
+            drop(fixture.engine.take());
+            let guard_path = fixture.path.join("rollback.guard");
+            let guard_before =
+                std::fs::read(&guard_path).map_err(|_| StorageError::FilesystemRejected)?;
+
+            let recovered = inspect_storage(inspection_config(&fixture.path)?)?;
+            assert_eq!(
+                recovered.storage_commit_sequence(),
+                expected_commit_sequence
+            );
+            assert_eq!(
+                std::fs::read(guard_path).map_err(|_| StorageError::FilesystemRejected)?,
+                guard_before
+            );
+        }
         Ok(())
     }
 
