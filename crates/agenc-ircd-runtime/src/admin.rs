@@ -58,6 +58,9 @@ pub(crate) const ADMIN_EXPORTER_LABEL: &[u8] = b"EXPORTER-agenc-chat-admin-v1";
 const ADMIN_OWNER_CAPACITY: usize = 64;
 /// Lifecycle requests waiting for the administrative owner.
 const ADMIN_LIFECYCLE_CAPACITY: usize = 4;
+/// One selected lifecycle request plus every request that can already be
+/// queued behind it.
+const ADMIN_LIFECYCLE_BATCH_CAPACITY: usize = ADMIN_LIFECYCLE_CAPACITY + 1;
 /// Complete ordered response batches waiting for one writer.
 const ADMIN_OUTPUT_CAPACITY: usize = 4;
 /// Owner notification stall budget, matching the public connection boundary.
@@ -361,7 +364,7 @@ pub(crate) enum AdminLifecycleFailure {
     Busy,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum AdminLifecyclePhase {
     Quiesce,
     Drain,
@@ -379,6 +382,47 @@ type AdminLifecycleResult = Result<AdminLifecycleOutcome, AdminLifecycleFailure>
 struct AdminLifecycleRequest {
     phase: AdminLifecyclePhase,
     reply: oneshot::Sender<AdminLifecycleResult>,
+}
+
+struct AdminLifecycleBatch {
+    requests: [Option<AdminLifecycleRequest>; ADMIN_LIFECYCLE_BATCH_CAPACITY],
+    len: usize,
+}
+
+impl AdminLifecycleBatch {
+    fn new(first: AdminLifecycleRequest) -> Self {
+        let mut requests = std::array::from_fn(|_| None);
+        requests[0] = Some(first);
+        Self { requests, len: 1 }
+    }
+
+    fn collect_queued(&mut self, receiver: &mut mpsc::Receiver<AdminLifecycleRequest>) {
+        while self.len < self.requests.len() {
+            let Ok(request) = receiver.try_recv() else {
+                break;
+            };
+            let Some(slot) = self.requests.get_mut(self.len) else {
+                break;
+            };
+            *slot = Some(request);
+            self.len += 1;
+        }
+    }
+
+    fn contains_stop(&self) -> bool {
+        let Some(requests) = self.requests.get(..self.len) else {
+            return false;
+        };
+        requests.iter().any(|request| {
+            request
+                .as_ref()
+                .is_some_and(|request| request.phase == AdminLifecyclePhase::Stop)
+        })
+    }
+
+    fn into_requests(self) -> impl Iterator<Item = AdminLifecycleRequest> {
+        self.requests.into_iter().take(self.len).flatten()
+    }
 }
 
 pub(crate) struct AdminLifecycleInbox {
@@ -586,6 +630,8 @@ pub(crate) struct AdminOwner {
     shutdown_acknowledgements: BTreeMap<ConnectionGeneration, FlushAcknowledgement>,
     command_observation: Cell<AdminCommandObservation>,
     quiescing: bool,
+    lifecycle_completed: Option<AdminLifecyclePhase>,
+    flush_outcome: Option<Result<(), AdminLifecycleFailure>>,
 }
 
 #[derive(Clone, Copy)]
@@ -693,6 +739,8 @@ impl AdminOwner {
             shutdown_acknowledgements: BTreeMap::new(),
             command_observation: Cell::new(AdminCommandObservation::Inactive),
             quiescing: false,
+            lifecycle_completed: None,
+            flush_outcome: None,
         }
     }
 
@@ -733,7 +781,7 @@ impl AdminOwner {
                         break;
                     }
                 },
-                _ = retention.tick() => {
+                _ = retention.tick(), if !self.quiescing => {
                     if self.retention_sweep(&token).await == Err(AdminLifecycleFailure::Audit) {
                         self.signal_fatal();
                     }
@@ -756,7 +804,10 @@ impl AdminOwner {
             };
             match event {
                 AdminOwnerEvent::Lifecycle(request) => {
-                    if self.handle_lifecycle(request, &token).await {
+                    if self
+                        .handle_lifecycle_batch(request, &mut lifecycle.receiver, &token)
+                        .await
+                    {
                         break;
                     }
                 }
@@ -877,26 +928,100 @@ impl AdminOwner {
         token: &CancellationToken,
     ) -> bool {
         let stop = request.phase == AdminLifecyclePhase::Stop;
-        let outcome = match request.phase {
-            AdminLifecyclePhase::Quiesce => {
-                self.quiescing = true;
-                Ok(AdminLifecycleOutcome::Complete)
-            }
-            AdminLifecyclePhase::Drain => {
-                self.quiescing = true;
-                self.begin_shutdown().map(AdminLifecycleOutcome::Draining)
-            }
-            AdminLifecyclePhase::Flush => self
-                .retention_sweep(token)
-                .await
-                .map(|()| AdminLifecycleOutcome::Complete),
-            AdminLifecyclePhase::Stop => {
-                self.quiescing = true;
-                Ok(AdminLifecycleOutcome::Complete)
-            }
-        };
+        let outcome = self.lifecycle_outcome(request.phase, token).await;
         let _sent = request.reply.send(outcome);
         stop
+    }
+
+    async fn handle_lifecycle_batch(
+        &mut self,
+        first: AdminLifecycleRequest,
+        receiver: &mut mpsc::Receiver<AdminLifecycleRequest>,
+        token: &CancellationToken,
+    ) -> bool {
+        let mut batch = AdminLifecycleBatch::new(first);
+        batch.collect_queued(receiver);
+        if batch.contains_stop() {
+            self.quiescing = true;
+            self.lifecycle_completed = Some(AdminLifecyclePhase::Stop);
+            for request in batch.into_requests() {
+                let outcome = if request.phase == AdminLifecyclePhase::Stop {
+                    Ok(AdminLifecycleOutcome::Complete)
+                } else {
+                    Err(AdminLifecycleFailure::Unavailable)
+                };
+                let _sent = request.reply.send(outcome);
+            }
+            return true;
+        }
+
+        for request in batch.into_requests() {
+            if self.handle_lifecycle(request, token).await {
+                return true;
+            }
+        }
+        false
+    }
+
+    async fn lifecycle_outcome(
+        &mut self,
+        phase: AdminLifecyclePhase,
+        token: &CancellationToken,
+    ) -> AdminLifecycleResult {
+        self.quiescing = true;
+        if phase == AdminLifecyclePhase::Stop {
+            self.lifecycle_completed = Some(AdminLifecyclePhase::Stop);
+            return Ok(AdminLifecycleOutcome::Complete);
+        }
+        if self
+            .lifecycle_completed
+            .is_some_and(|completed| completed >= phase)
+        {
+            return match phase {
+                AdminLifecyclePhase::Drain => {
+                    self.begin_shutdown().map(AdminLifecycleOutcome::Draining)
+                }
+                AdminLifecyclePhase::Quiesce | AdminLifecyclePhase::Flush => {
+                    Ok(AdminLifecycleOutcome::Complete)
+                }
+                AdminLifecyclePhase::Stop => Ok(AdminLifecycleOutcome::Complete),
+            };
+        }
+
+        if !self
+            .lifecycle_completed
+            .is_some_and(|completed| completed >= AdminLifecyclePhase::Quiesce)
+        {
+            self.lifecycle_completed = Some(AdminLifecyclePhase::Quiesce);
+        }
+        if phase == AdminLifecyclePhase::Quiesce {
+            return Ok(AdminLifecycleOutcome::Complete);
+        }
+
+        if !self
+            .lifecycle_completed
+            .is_some_and(|completed| completed >= AdminLifecyclePhase::Drain)
+        {
+            let acknowledgements = self.begin_shutdown()?;
+            self.lifecycle_completed = Some(AdminLifecyclePhase::Drain);
+            if phase == AdminLifecyclePhase::Drain {
+                return Ok(AdminLifecycleOutcome::Draining(acknowledgements));
+            }
+        } else if phase == AdminLifecyclePhase::Drain {
+            return self.begin_shutdown().map(AdminLifecycleOutcome::Draining);
+        }
+
+        let flush = match self.flush_outcome {
+            Some(outcome) => outcome,
+            None => {
+                let outcome = self.retention_sweep(token).await;
+                self.flush_outcome = Some(outcome);
+                outcome
+            }
+        };
+        flush?;
+        self.lifecycle_completed = Some(AdminLifecyclePhase::Flush);
+        Ok(AdminLifecycleOutcome::Complete)
     }
 
     fn begin_shutdown(&mut self) -> Result<Vec<FlushAcknowledgement>, AdminLifecycleFailure> {
@@ -2641,6 +2766,34 @@ mod tests {
         }
     }
 
+    fn lifecycle_owner() -> Result<AdminOwner, RuntimeError> {
+        let (core, _core_inbox) = admin_core_channel();
+        Ok(AdminOwner::new(
+            binding(),
+            registry()?,
+            AdminAdmissionSnapshot::new(vec![1000], Vec::new(), Vec::new()),
+            AuditAuthority::empty_for_test()?,
+            core,
+            AdminOwnerRuntime {
+                health: live_health(),
+                config: None,
+                reload: None,
+                backup: None,
+                process: None,
+                fatal: None,
+                observer: None,
+                budget: Arc::new(MemoryBudget::new(MAX_AUDIT_EXPORT_BYTES * 2)),
+                entropy: Box::new(
+                    ScriptedEntropy::new(vec![0; 64]).map_err(|_| RuntimeError::InvalidValue)?,
+                ),
+                clocks: AdminOwnerClocks {
+                    monotonic: Box::new(SystemMonotonicClock::start()),
+                    wall: Box::new(SystemWallClock),
+                },
+            },
+        ))
+    }
+
     fn oper_line() -> Result<Vec<u8>, RuntimeError> {
         let operator = OperatorId::from_bytes([7; 16]);
         let signature = challenge()
@@ -2862,6 +3015,108 @@ mod tests {
             .stop()
             .await
             .map_err(|_| RuntimeError::InvalidValue)?;
+        owner.await.map_err(|_| RuntimeError::Cancelled)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lifecycle_progress_is_monotonic_and_reuses_the_flush_result()
+    -> Result<(), RuntimeError> {
+        let root = CancellationToken::root();
+        let mut owner = lifecycle_owner()?;
+
+        assert!(matches!(
+            owner
+                .lifecycle_outcome(AdminLifecyclePhase::Drain, &root)
+                .await,
+            Ok(AdminLifecycleOutcome::Draining(acknowledgements))
+                if acknowledgements.is_empty()
+        ));
+        assert_eq!(owner.lifecycle_completed, Some(AdminLifecyclePhase::Drain));
+        assert!(matches!(
+            owner
+                .lifecycle_outcome(AdminLifecyclePhase::Quiesce, &root)
+                .await,
+            Ok(AdminLifecycleOutcome::Complete)
+        ));
+        assert_eq!(owner.lifecycle_completed, Some(AdminLifecyclePhase::Drain));
+        assert!(matches!(
+            owner
+                .lifecycle_outcome(AdminLifecyclePhase::Flush, &root)
+                .await,
+            Ok(AdminLifecycleOutcome::Complete)
+        ));
+        assert_eq!(owner.lifecycle_completed, Some(AdminLifecyclePhase::Flush));
+        assert_eq!(owner.flush_outcome, Some(Ok(())));
+        assert!(matches!(
+            owner
+                .lifecycle_outcome(AdminLifecyclePhase::Flush, &root)
+                .await,
+            Ok(AdminLifecycleOutcome::Complete)
+        ));
+
+        let mut failed = lifecycle_owner()?;
+        failed.quiescing = true;
+        failed.lifecycle_completed = Some(AdminLifecyclePhase::Drain);
+        failed.flush_outcome = Some(Err(AdminLifecycleFailure::Audit));
+        assert!(matches!(
+            failed
+                .lifecycle_outcome(AdminLifecyclePhase::Flush, &root)
+                .await,
+            Err(AdminLifecycleFailure::Audit)
+        ));
+        assert_eq!(
+            failed.flush_outcome,
+            Some(Err(AdminLifecycleFailure::Audit))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn queued_stop_supersedes_every_other_bounded_lifecycle_reply() -> Result<(), RuntimeError>
+    {
+        let (_transport, inbox) = admin_transport_channel(binding());
+        let (lifecycle, lifecycle_inbox) = admin_lifecycle_channel();
+        let root = CancellationToken::root();
+
+        let (quiesce_reply, quiesce_response) = oneshot::channel();
+        lifecycle
+            .sender
+            .try_send(AdminLifecycleRequest {
+                phase: AdminLifecyclePhase::Quiesce,
+                reply: quiesce_reply,
+            })
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let (stop_reply, stop_response) = oneshot::channel();
+        lifecycle
+            .sender
+            .try_send(AdminLifecycleRequest {
+                phase: AdminLifecyclePhase::Stop,
+                reply: stop_reply,
+            })
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let (drain_reply, drain_response) = oneshot::channel();
+        lifecycle
+            .sender
+            .try_send(AdminLifecycleRequest {
+                phase: AdminLifecyclePhase::Drain,
+                reply: drain_reply,
+            })
+            .map_err(|_| RuntimeError::InvalidValue)?;
+
+        let owner = tokio::spawn(lifecycle_owner()?.run(inbox, lifecycle_inbox, root));
+        assert!(matches!(
+            quiesce_response.await,
+            Ok(Err(AdminLifecycleFailure::Unavailable))
+        ));
+        assert!(matches!(
+            stop_response.await,
+            Ok(Ok(AdminLifecycleOutcome::Complete))
+        ));
+        assert!(matches!(
+            drain_response.await,
+            Ok(Err(AdminLifecycleFailure::Unavailable))
+        ));
         owner.await.map_err(|_| RuntimeError::Cancelled)?;
         Ok(())
     }
