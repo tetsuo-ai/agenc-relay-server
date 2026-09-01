@@ -1674,7 +1674,7 @@ async fn run(inputs: DaemonRunInputs) -> Result<DaemonExit, DaemonError> {
     }))
     .await?;
     observer.state_core_ready();
-    let trigger = wait_for_shutdown(ShutdownWaitInputs {
+    let shutdown_wait = wait_for_shutdown(ShutdownWaitInputs {
         config_path: &config_path,
         runtime_config: &runtime_config,
         reload: &reload,
@@ -1707,23 +1707,25 @@ async fn run(inputs: DaemonRunInputs) -> Result<DaemonExit, DaemonError> {
         observer,
         log_control,
         log_shutdown,
+        pending_reload: shutdown_wait.pending_reload,
+        log_flush: TrackedLogFlush::default(),
         stop_failure: None,
     };
     let report = run_shutdown(shutdown, &mut hooks, &mut signals).await;
     let shutdown_result = validate_shutdown_report(report);
-    finish_daemon_run(trigger, shutdown_result)
+    finish_daemon_run(shutdown_wait.trigger, shutdown_result)
 }
 
 fn finish_daemon_run(
     trigger: Result<ShutdownTrigger, DaemonError>,
     shutdown: Result<(), DaemonError>,
 ) -> Result<DaemonExit, DaemonError> {
-    match trigger {
-        Ok(ShutdownTrigger::CommittedDie) => Ok(DaemonExit::Stopped),
-        Ok(ShutdownTrigger::CommittedRestart) => Ok(DaemonExit::RestartRequested),
-        Ok(ShutdownTrigger::Signal) => shutdown.map(|()| DaemonExit::Stopped),
-        Err(error) => Err(error),
-    }
+    let trigger = trigger?;
+    shutdown?;
+    Ok(match trigger {
+        ShutdownTrigger::Signal | ShutdownTrigger::CommittedDie => DaemonExit::Stopped,
+        ShutdownTrigger::CommittedRestart => DaemonExit::RestartRequested,
+    })
 }
 
 struct RunningOwners {
@@ -2153,8 +2155,68 @@ struct ShutdownWaitInputs<'a> {
     observer: Arc<RuntimeObserver>,
 }
 
+type ReloadPreparationFuture =
+    Pin<Box<dyn Future<Output = Result<PreparedReload, ReloadPrepareFailure>> + Send + 'static>>;
+type ReloadActivationFuture = Pin<Box<dyn Future<Output = ReloadOutcome> + Send + 'static>>;
+
+struct PendingReloadWork {
+    preparation: Option<ReloadPreparationFuture>,
+    observe_discarded_signal_preparation: bool,
+    activation: Option<ReloadActivationFuture>,
+}
+
+impl PendingReloadWork {
+    async fn finish(&mut self) -> Option<bool> {
+        let mut observation = None;
+        if let Some(preparation) = self.preparation.as_mut() {
+            let _discarded = preparation.as_mut().await;
+            self.preparation = None;
+            if self.observe_discarded_signal_preparation {
+                observation = Some(false);
+            }
+            self.observe_discarded_signal_preparation = false;
+        }
+        if let Some(activation) = self.activation.as_mut() {
+            let outcome = activation.as_mut().await;
+            self.activation = None;
+            observation = Some(matches!(
+                outcome,
+                ReloadOutcome::Applied(_) | ReloadOutcome::NoChange(_)
+            ));
+        }
+        observation
+    }
+}
+
+struct ShutdownWaitResult {
+    trigger: Result<ShutdownTrigger, DaemonError>,
+    pending_reload: PendingReloadWork,
+}
+
+fn reload_preparation_future(
+    config_path: &Path,
+    runtime_config: &RuntimeConfigHandle,
+    budget: &Arc<MemoryBudget>,
+    storage: &StoragePort,
+) -> ReloadPreparationFuture {
+    Box::pin(prepare_reload(
+        config_path.to_path_buf(),
+        runtime_config.clone(),
+        Arc::clone(budget),
+        storage.clone(),
+    ))
+}
+
+fn reload_activation_future(
+    reload: &ReloadPort,
+    prepared: PreparedReload,
+) -> ReloadActivationFuture {
+    let reload = reload.clone();
+    Box::pin(async move { reload.activate_signal(prepared).await })
+}
+
 // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=closed owner loop keeps termination selectable while serializing admin preparation signal coalescing activation progress and critical owner exits
-async fn wait_for_shutdown(inputs: ShutdownWaitInputs<'_>) -> Result<ShutdownTrigger, DaemonError> {
+async fn wait_for_shutdown(inputs: ShutdownWaitInputs<'_>) -> ShutdownWaitResult {
     let ShutdownWaitInputs {
         config_path,
         runtime_config,
@@ -2171,19 +2233,15 @@ async fn wait_for_shutdown(inputs: ShutdownWaitInputs<'_>) -> Result<ShutdownTri
         monotonic,
         observer,
     } = inputs;
-    type PreparationFuture<'a> =
-        Pin<Box<dyn Future<Output = Result<PreparedReload, ReloadPrepareFailure>> + Send + 'a>>;
-    type ActivationFuture<'a> = Pin<Box<dyn Future<Output = ReloadOutcome> + Send + 'a>>;
-
     let mut progress = tokio::time::interval(Duration::from_secs(5));
     progress.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     progress.tick().await;
     liveness.record_supervisor(monotonic.now());
-    let mut preparation: Option<PreparationFuture<'_>> = None;
+    let mut preparation: Option<ReloadPreparationFuture> = None;
     let mut preparation_origin = None;
-    let mut activation: Option<ActivationFuture<'_>> = None;
+    let mut activation: Option<ReloadActivationFuture> = None;
     let mut pending_sighup = false;
-    loop {
+    let trigger = loop {
         let event = tokio::select! {
             biased;
             signal = signals.recv() => Some(SupervisorEvent::Signal(signal)),
@@ -2221,12 +2279,12 @@ async fn wait_for_shutdown(inputs: ShutdownWaitInputs<'_>) -> Result<ShutdownTri
                 if preparation.is_some() || activation.is_some() || pending_sighup {
                     pending_sighup = true;
                 } else {
-                    preparation = Some(Box::pin(prepare_reload(
+                    preparation = Some(reload_preparation_future(
                         config_path,
                         runtime_config,
                         &budget,
                         storage,
-                    )));
+                    ));
                     preparation_origin = Some(ReloadPreparationOrigin::Signal);
                 }
             }
@@ -2234,12 +2292,12 @@ async fn wait_for_shutdown(inputs: ShutdownWaitInputs<'_>) -> Result<ShutdownTri
                 if preparation.is_some() || activation.is_some() || pending_sighup {
                     reply.send(Err(ReloadPrepareFailure::Busy));
                 } else {
-                    preparation = Some(Box::pin(prepare_reload(
+                    preparation = Some(reload_preparation_future(
                         config_path,
                         runtime_config,
                         &budget,
                         storage,
-                    )));
+                    ));
                     preparation_origin = Some(ReloadPreparationOrigin::Admin(reply));
                 }
             }
@@ -2248,13 +2306,13 @@ async fn wait_for_shutdown(inputs: ShutdownWaitInputs<'_>) -> Result<ShutdownTri
                 match preparation_origin.take() {
                     Some(ReloadPreparationOrigin::Signal) => match result {
                         Ok(prepared) => {
-                            activation = Some(Box::pin(reload.activate_signal(prepared)));
+                            activation = Some(reload_activation_future(reload, prepared));
                         }
                         Err(ReloadPrepareFailure::Busy) => pending_sighup = true,
                         Err(_) => observer.reload(false),
                     },
                     Some(ReloadPreparationOrigin::Admin(reply)) => reply.send(result),
-                    None => return Err(DaemonError::TaskFailed),
+                    None => break Err(DaemonError::TaskFailed),
                 }
             }
             SupervisorEvent::Activated(outcome) => {
@@ -2266,26 +2324,26 @@ async fn wait_for_shutdown(inputs: ShutdownWaitInputs<'_>) -> Result<ShutdownTri
             }
             SupervisorEvent::ReloadIdle => {
                 pending_sighup = false;
-                preparation = Some(Box::pin(prepare_reload(
+                preparation = Some(reload_preparation_future(
                     config_path,
                     runtime_config,
                     &budget,
                     storage,
-                )));
+                ));
                 preparation_origin = Some(ReloadPreparationOrigin::Signal);
             }
             SupervisorEvent::Signal(Some(SignalEvent::Terminate | SignalEvent::Interrupt)) => {
-                return Ok(ShutdownTrigger::Signal);
+                break Ok(ShutdownTrigger::Signal);
             }
             SupervisorEvent::AdminProcess(Some(AdminProcessAction::Die)) => {
-                return Ok(ShutdownTrigger::CommittedDie);
+                break Ok(ShutdownTrigger::CommittedDie);
             }
             SupervisorEvent::AdminProcess(Some(AdminProcessAction::Restart)) => {
-                return Ok(ShutdownTrigger::CommittedRestart);
+                break Ok(ShutdownTrigger::CommittedRestart);
             }
             SupervisorEvent::State(Ok(StateCoreExit::Indeterminate(_))) => {
                 observer.storage_indeterminate();
-                return Err(DaemonError::TaskFailed);
+                break Err(DaemonError::TaskFailed);
             }
             SupervisorEvent::Signal(None)
             | SupervisorEvent::ReloadPreparation(None)
@@ -2293,9 +2351,22 @@ async fn wait_for_shutdown(inputs: ShutdownWaitInputs<'_>) -> Result<ShutdownTri
             | SupervisorEvent::AdminFailure
             | SupervisorEvent::State(_)
             | SupervisorEvent::Listener => {
-                return Err(DaemonError::TaskFailed);
+                break Err(DaemonError::TaskFailed);
             }
         }
+    };
+    let observe_discarded_signal_preparation =
+        matches!(preparation_origin, Some(ReloadPreparationOrigin::Signal));
+    if let Some(ReloadPreparationOrigin::Admin(reply)) = preparation_origin {
+        reply.send(Err(ReloadPrepareFailure::Unavailable));
+    }
+    ShutdownWaitResult {
+        trigger,
+        pending_reload: PendingReloadWork {
+            preparation,
+            observe_discarded_signal_preparation,
+            activation,
+        },
     }
 }
 
@@ -2324,6 +2395,98 @@ enum ReloadPreparationOrigin {
 
 const OWNER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
+type LogFlushFuture = Pin<Box<dyn Future<Output = Result<(), ShutdownFailure>> + Send + 'static>>;
+
+#[derive(Default)]
+struct TrackedLogFlush {
+    future: Option<LogFlushFuture>,
+    result: Option<Result<(), ShutdownFailure>>,
+}
+
+impl TrackedLogFlush {
+    fn start(&mut self, control: &FileLogControl) {
+        if self.future.is_none() && self.result.is_none() {
+            let control = control.clone();
+            self.future = Some(Box::pin(async move {
+                control.flush().await.map_err(|_| ShutdownFailure::Writer)
+            }));
+        }
+    }
+
+    async fn finish(&mut self) -> Result<(), ShutdownFailure> {
+        if let Some(future) = self.future.as_mut() {
+            let result = future.as_mut().await;
+            self.future = None;
+            self.result = Some(result);
+        }
+        self.result.unwrap_or(Ok(()))
+    }
+}
+
+#[derive(Default)]
+struct NestedOwnerJoins {
+    admin: bool,
+    state_core: bool,
+    listeners: bool,
+}
+
+impl NestedOwnerJoins {
+    fn observe(&mut self, name: ChildName) {
+        match name {
+            ChildName::AdminOwner => self.admin = true,
+            ChildName::StateCoreTask => self.state_core = true,
+            ChildName::ListenerSet => self.listeners = true,
+            ChildName::SignalTask
+            | ChildName::StorageBridge
+            | ChildName::CryptoBridge
+            | ChildName::MaintenanceTask
+            | ChildName::Connection => {}
+        }
+    }
+
+    fn observe_report(&mut self, report: &JoinReport) {
+        for exit in &report.exits {
+            self.observe(exit.name);
+        }
+    }
+
+    const fn all_joined(&self) -> bool {
+        self.admin && self.state_core && self.listeners
+    }
+}
+
+async fn join_or_abort_supervised_remainder(
+    supervisor: &mut Supervisor,
+    deadline: tokio::time::Instant,
+    mut nested_owners: NestedOwnerJoins,
+) -> JoinReport {
+    let mut report = JoinReport::default();
+    loop {
+        if supervisor.live_children() == 0 {
+            return report;
+        }
+        if nested_owners.all_joined() {
+            supervisor.abort_all();
+            let forced = supervisor
+                .join_all(deadline.saturating_duration_since(tokio::time::Instant::now()))
+                .await;
+            report.exits.extend(forced.exits);
+            report.unfinished = forced.unfinished;
+            return report;
+        }
+        match tokio::time::timeout_at(deadline, supervisor.next_exit()).await {
+            Ok(Some(exit)) => {
+                nested_owners.observe(exit.name);
+                report.exits.push(exit);
+            }
+            Ok(None) | Err(_) => {
+                report.unfinished = supervisor.live_children();
+                return report;
+            }
+        }
+    }
+}
+
 struct RuntimeShutdownHooks<'a> {
     storage_shutdown: StorageShutdown,
     supervisor: &'a mut Supervisor,
@@ -2337,6 +2500,8 @@ struct RuntimeShutdownHooks<'a> {
     observer: Arc<RuntimeObserver>,
     log_control: FileLogControl,
     log_shutdown: FileLogShutdown,
+    pending_reload: PendingReloadWork,
+    log_flush: TrackedLogFlush,
     stop_failure: Option<ShutdownFailure>,
 }
 
@@ -2347,6 +2512,7 @@ impl ShutdownHooks for RuntimeShutdownHooks<'_> {
             ShutdownPhase::Quiesce => {
                 self.readiness.clear(ReadinessStage::StateCore);
                 self.listeners.stop_accepting();
+                self.finish_pending_reload().await;
                 self.listeners.wait_accept_stopped().await;
                 self.admin.quiesce().await.map_err(map_admin_lifecycle)?;
                 request_lifecycle(self.lifecycle, LifecyclePhase::Quiesce).await
@@ -2368,10 +2534,8 @@ impl ShutdownHooks for RuntimeShutdownHooks<'_> {
                         .map_err(|_| ShutdownFailure::Writer)?;
                     self.listener_joined = true;
                 }
-                self.log_control
-                    .flush()
-                    .await
-                    .map_err(|_| ShutdownFailure::Writer)
+                self.log_flush.start(&self.log_control);
+                self.log_flush.finish().await
             }
             ShutdownPhase::Stop => self.stop(budget).await,
         }
@@ -2398,6 +2562,10 @@ impl RuntimeShutdownHooks<'_> {
         }
         let deadline = tokio::time::Instant::now() + budget;
         self.listeners.stop_accepting();
+        self.finish_pending_reload().await;
+        if let Err(failure) = self.log_flush.finish().await {
+            self.retain_stop_failure(failure);
+        }
         let control_budget =
             (budget / 5).min(deadline.saturating_duration_since(tokio::time::Instant::now()));
         let controls = tokio::time::timeout(control_budget, async {
@@ -2427,8 +2595,10 @@ impl RuntimeShutdownHooks<'_> {
             self.retain_stop_failure(ShutdownFailure::Join);
         }
         if report.unfinished != 0 {
-            let final_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
-            let forced = self.supervisor.join_all(final_budget).await;
+            let mut nested_owners = NestedOwnerJoins::default();
+            nested_owners.observe_report(&report);
+            let forced =
+                join_or_abort_supervised_remainder(self.supervisor, deadline, nested_owners).await;
             if validate_join_report(&forced).is_err() {
                 self.retain_stop_failure(ShutdownFailure::Join);
             }
@@ -2466,6 +2636,12 @@ impl RuntimeShutdownHooks<'_> {
                 fail_stop_shutdown();
             }
             tokio::time::sleep_until(deadline.min(now + OWNER_SHUTDOWN_POLL_INTERVAL)).await;
+        }
+    }
+
+    async fn finish_pending_reload(&mut self) {
+        if let Some(succeeded) = self.pending_reload.finish().await {
+            self.observer.reload(succeeded);
         }
     }
 
@@ -2509,16 +2685,15 @@ fn validate_shutdown_report(report: ShutdownReport) -> Result<(), DaemonError> {
 }
 
 async fn prepare_reload(
-    config_path: &Path,
-    runtime_config: &RuntimeConfigHandle,
-    budget: &MemoryBudget,
-    storage: &StoragePort,
+    config_path: PathBuf,
+    runtime_config: RuntimeConfigHandle,
+    budget: Arc<MemoryBudget>,
+    storage: StoragePort,
 ) -> Result<PreparedReload, ReloadPrepareFailure> {
     let lease = runtime_config.begin_reload()?;
-    let path = config_path.to_path_buf();
     let active = runtime_config.load();
     let (candidate, secrets, operators) = tokio::task::spawn_blocking(move || {
-        let candidate = load_config(&path, ValidationDepth::Host)?;
+        let candidate = load_config(&config_path, ValidationDepth::Host)?;
         validate_profile(&candidate)?;
         let secrets = SecretSet::load(&candidate)?;
         let operators = operator_registry(&candidate)?;
@@ -2540,7 +2715,7 @@ async fn prepare_reload(
     {
         return Err(ReloadPrepareFailure::ResourceFloor);
     }
-    let statistics = reload_storage_statistics(storage).await?;
+    let statistics = reload_storage_statistics(&storage).await?;
     validate_reload_storage(&candidate, statistics)?;
     let (parts, _unused_specs) = prepare_runtime_parts(&candidate, &secrets, operators)
         .await
@@ -3090,22 +3265,29 @@ mod tests {
     }
 
     #[test]
-    fn committed_process_actions_preserve_their_exit_status_after_cleanup_failure()
-    -> Result<(), DaemonError> {
+    fn committed_process_actions_require_successful_cleanup() -> Result<(), DaemonError> {
         assert_eq!(
-            finish_daemon_run(
-                Ok(ShutdownTrigger::CommittedDie),
-                Err(DaemonError::ShutdownTimeout),
-            )?,
+            finish_daemon_run(Ok(ShutdownTrigger::CommittedDie), Ok(()))?,
             DaemonExit::Stopped
         );
         assert_eq!(
+            finish_daemon_run(Ok(ShutdownTrigger::CommittedRestart), Ok(()))?,
+            DaemonExit::RestartRequested
+        );
+        assert!(matches!(
+            finish_daemon_run(
+                Ok(ShutdownTrigger::CommittedDie),
+                Err(DaemonError::ShutdownTimeout),
+            ),
+            Err(DaemonError::ShutdownTimeout)
+        ));
+        assert!(matches!(
             finish_daemon_run(
                 Ok(ShutdownTrigger::CommittedRestart),
                 Err(DaemonError::TaskFailed),
-            )?,
-            DaemonExit::RestartRequested
-        );
+            ),
+            Err(DaemonError::TaskFailed)
+        ));
         assert!(matches!(
             finish_daemon_run(
                 Ok(ShutdownTrigger::Signal),
@@ -3114,6 +3296,127 @@ mod tests {
             Err(DaemonError::ShutdownTimeout)
         ));
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn tracked_shutdown_work_survives_a_dropped_phase_future() -> Result<(), RuntimeError> {
+        let (reload_release, reload_wait) = oneshot::channel();
+        let reload_finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let finished = std::sync::Arc::clone(&reload_finished);
+        let mut pending_reload = PendingReloadWork {
+            preparation: Some(Box::pin(async move {
+                let _released = reload_wait.await;
+                finished.store(true, std::sync::atomic::Ordering::Release);
+                Err(ReloadPrepareFailure::Unavailable)
+            })),
+            observe_discarded_signal_preparation: true,
+            activation: None,
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_millis(5), pending_reload.finish())
+                .await
+                .is_err()
+        );
+        assert!(!reload_finished.load(std::sync::atomic::Ordering::Acquire));
+        reload_release
+            .send(())
+            .map_err(|()| RuntimeError::Cancelled)?;
+        assert_eq!(pending_reload.finish().await, Some(false));
+        assert!(reload_finished.load(std::sync::atomic::Ordering::Acquire));
+
+        let (flush_release, flush_wait) = oneshot::channel();
+        let flush_finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let finished = std::sync::Arc::clone(&flush_finished);
+        let mut log_flush = TrackedLogFlush {
+            future: Some(Box::pin(async move {
+                let _released = flush_wait.await;
+                finished.store(true, std::sync::atomic::Ordering::Release);
+                Ok(())
+            })),
+            result: None,
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_millis(5), log_flush.finish())
+                .await
+                .is_err()
+        );
+        assert!(!flush_finished.load(std::sync::atomic::Ordering::Acquire));
+        flush_release
+            .send(())
+            .map_err(|()| RuntimeError::Cancelled)?;
+        assert_eq!(log_flush.finish().await, Ok(()));
+        assert!(flush_finished.load(std::sync::atomic::Ordering::Acquire));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forced_abort_waits_until_nested_owners_have_joined() -> Result<(), RuntimeError> {
+        let mut supervisor = Supervisor::new();
+        supervisor.spawn(ChildName::AdminOwner, ChildKind::Critical, |_| async {
+            Ok(())
+        })?;
+        supervisor.spawn(ChildName::ListenerSet, ChildKind::Critical, |_| async {
+            Ok(())
+        })?;
+        let (state_release, state_wait) = oneshot::channel();
+        supervisor.spawn(
+            ChildName::StateCoreTask,
+            ChildKind::Critical,
+            |_| async move {
+                let _released = state_wait.await;
+                Ok(())
+            },
+        )?;
+        supervisor.spawn(ChildName::MaintenanceTask, ChildKind::Critical, |_| async {
+            std::future::pending::<()>().await;
+            Ok(())
+        })?;
+
+        let first = join_or_abort_supervised_remainder(
+            &mut supervisor,
+            tokio::time::Instant::now() + Duration::from_millis(10),
+            NestedOwnerJoins::default(),
+        )
+        .await;
+        assert!(first.unfinished >= 2);
+        assert!(
+            first
+                .exits
+                .iter()
+                .all(|exit| !matches!(exit.outcome, Err(ChildFailure::Cancelled)))
+        );
+
+        let mut joined = NestedOwnerJoins::default();
+        joined.observe_report(&first);
+        state_release
+            .send(())
+            .map_err(|()| RuntimeError::Cancelled)?;
+        let forced = join_or_abort_supervised_remainder(
+            &mut supervisor,
+            tokio::time::Instant::now() + Duration::from_secs(1),
+            joined,
+        )
+        .await;
+        assert_eq!(forced.unfinished, 0);
+        assert!(
+            forced
+                .exits
+                .iter()
+                .any(|exit| matches!(exit.outcome, Err(ChildFailure::Cancelled)))
+        );
+        assert_eq!(supervisor.live_children(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn trigger_failure_remains_primary_when_cleanup_also_fails() {
+        assert!(matches!(
+            finish_daemon_run(
+                Err(DaemonError::TaskFailed),
+                Err(DaemonError::ShutdownTimeout),
+            ),
+            Err(DaemonError::TaskFailed)
+        ));
     }
 
     #[test]
