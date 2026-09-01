@@ -13,16 +13,19 @@ use agenc_ircd_auth::{
     AuthenticationGrantRecord, AuthenticationTransactionRecord, CreationTransactionRecord,
     CredentialChangeTransactionRecord, OPAQUE_REGISTRATION_RECORD_BYTES, OpaqueRegistrationRecord,
 };
-use agenc_ircd_domain::{DomainState, DurableAccount, DurableChannel, DurableSanction};
+use agenc_ircd_domain::{
+    DomainState, DurableAccount, DurableChannel, DurableSanction, DurableSession,
+};
 use agenc_ircd_storage::{
     AccountRecordBody, ChannelNameRecordBody, ChannelRecordBody, ExistingRecord, LIVE_RECORD_KIND,
     LOGIN_INDEX_KEY_STATE_KEY, LoginIndexKeyState, LoginIndexStoredKey, LoginIndexValue,
     LoginIndexValueKind, MAX_STORED_KEY_BYTES, OPAQUE_FAKE_RECORD_KEY, PersistentRecordValue,
-    ReadPlan, SanctionRecordBody, SealedRecord, StorageError, StoragePort, StoredKey, TableId,
+    ReadPlan, SanctionRecordBody, SealedRecord, SessionRecordBody, StorageError, StoragePort,
+    StoredKey, TableId,
 };
 use agenc_ircd_types::{
-    AccountId, ChannelInstanceId, InviteId, MonotonicTick, Nickname, Revision, TransactionId,
-    UtcSecond,
+    AccountId, ChannelInstanceId, InviteId, MonotonicTick, Nickname, Revision, SessionId,
+    TransactionId, UtcSecond,
 };
 
 use crate::RuntimeError;
@@ -385,6 +388,7 @@ struct Scan {
     index: DurableIndex,
     accounts: BTreeMap<AccountId, DurableAccount>,
     account_keys: BTreeMap<StoredKey, AccountId>,
+    sessions: BTreeMap<SessionId, DurableSession>,
     channels: BTreeMap<ChannelInstanceId, DurableChannel>,
     channel_keys: BTreeMap<StoredKey, ChannelInstanceId>,
     sanctions: Vec<DurableSanction>,
@@ -398,6 +402,8 @@ pub fn reconstruct(
     seed: &StateCoreSeed,
     port: &StoragePort,
     keys: &KeyDeriver,
+    monotonic_now: MonotonicTick,
+    utc_now: UtcSecond,
 ) -> Result<Reconstruction, RuntimeError> {
     let mut scan = Scan::default();
     for table in RECONSTRUCTED_TABLES {
@@ -410,11 +416,14 @@ pub fn reconstruct(
     let account_service = scan.account_service.finish()?;
     let revision =
         Revision::new(seed.storage().state_generation()).map_err(|_| RuntimeError::InvalidValue)?;
-    let domain = DomainState::restore(
+    let domain = DomainState::restore_authoritative(
         revision,
         scan.accounts.into_values().collect(),
+        scan.sessions.into_values().collect(),
         scan.channels.into_values().collect(),
         scan.sanctions,
+        monotonic_now,
+        utc_now,
     )
     .map_err(|_| RuntimeError::Storage(StorageError::StaleState))?;
     Ok(Reconstruction {
@@ -463,6 +472,12 @@ fn successor(key: &StoredKey) -> Result<StoredKey, RuntimeError> {
         .map_err(|_| RuntimeError::MemoryExhausted)?;
     bytes.push(0);
     Ok(StoredKey::new(bytes)?)
+}
+
+fn session_id_from_key(key: &StoredKey) -> Result<SessionId, RuntimeError> {
+    Ok(SessionId::from_bytes(key.as_bytes().try_into().map_err(
+        |_| RuntimeError::Storage(StorageError::InvalidEncoding),
+    )?))
 }
 
 fn invalid_account_service_record() -> RuntimeError {
@@ -525,8 +540,10 @@ impl Scan {
         self.index.record_known(table, key.clone(), existing);
         match (table, value.record_kind()) {
             (TableId::Account, TOMBSTONE_RECORD_KIND) => self.admit_account_tombstone(&key, &value),
+            (TableId::Session, TOMBSTONE_RECORD_KIND) => self.admit_session_tombstone(&key, &value),
             (TableId::Channel, TOMBSTONE_RECORD_KIND) => Ok(()),
             (TableId::Account, LIVE_RECORD_KIND) => self.admit_account(key, &value),
+            (TableId::Session, LIVE_RECORD_KIND) => self.admit_session(key, &value),
             (TableId::Channel, LIVE_RECORD_KIND) => self.admit_channel(key, &value),
             (TableId::NicknameReservation, LIVE_RECORD_KIND) => {
                 self.nickname_rows.push((key, value));
@@ -545,9 +562,26 @@ impl Scan {
             (TableId::RegistrationInvite, record_kind) => {
                 self.admit_registration_invite(&key, &value, record_kind)
             }
-            (TableId::Session | TableId::RequestResult, _) => Ok(()),
+            (TableId::RequestResult, _) => Ok(()),
             _ => Err(RuntimeError::Storage(StorageError::InvalidEncoding)),
         }
+    }
+
+    fn admit_session_tombstone(
+        &mut self,
+        key: &StoredKey,
+        value: &PersistentRecordValue,
+    ) -> Result<(), RuntimeError> {
+        let session_id = session_id_from_key(key)?;
+        if KeyDeriver::session_key(session_id)? != *key
+            || value.generation() != 0
+            || value.expires_at().is_some()
+            || !value.references().is_empty()
+            || !value.body().is_empty()
+        {
+            return Err(RuntimeError::Storage(StorageError::StaleState));
+        }
+        Ok(())
     }
 
     fn admit_login_index(&mut self, key: &StoredKey, opened: &[u8]) -> Result<(), RuntimeError> {
@@ -933,6 +967,60 @@ impl Scan {
         Ok(())
     }
 
+    fn admit_session(
+        &mut self,
+        key: StoredKey,
+        value: &PersistentRecordValue,
+    ) -> Result<(), RuntimeError> {
+        let keyed_session_id = session_id_from_key(&key)?;
+        let session = SessionRecordBody::decode(value.body())?;
+        if session.session_id != keyed_session_id
+            || KeyDeriver::session_key(session.session_id)? != key
+            || session.generation.get() != value.generation()
+            || session.revision.get() != value.revision()
+            || value.expires_at().is_some()
+        {
+            return Err(RuntimeError::Storage(StorageError::StaleState));
+        }
+        self.validate_session_references(&session, value)?;
+        if self.sessions.insert(session.session_id, session).is_some() {
+            return Err(RuntimeError::Storage(StorageError::StaleState));
+        }
+        Ok(())
+    }
+
+    fn validate_session_references(
+        &self,
+        session: &DurableSession,
+        value: &PersistentRecordValue,
+    ) -> Result<(), RuntimeError> {
+        let mut references = value.references().iter();
+        if let Some(account_id) = session.account_id {
+            let reference = references
+                .next()
+                .ok_or(RuntimeError::Storage(StorageError::StaleState))?;
+            if reference.table() != TableId::Account
+                || self.account_keys.get(reference.key()) != Some(&account_id)
+            {
+                return Err(RuntimeError::Storage(StorageError::StaleState));
+            }
+        }
+        for channel_id in &session.joined_channels {
+            let reference = references
+                .next()
+                .ok_or(RuntimeError::Storage(StorageError::StaleState))?;
+            if reference.table() != TableId::Channel
+                || self.channel_keys.get(reference.key()) != Some(channel_id)
+            {
+                return Err(RuntimeError::Storage(StorageError::StaleState));
+            }
+        }
+        if references.next().is_some() {
+            return Err(RuntimeError::Storage(StorageError::StaleState));
+        }
+        Ok(())
+    }
+
     fn admit_sanction(
         &mut self,
         key: &StoredKey,
@@ -1055,11 +1143,12 @@ mod tests {
         DatabaseBinding, LoginIndexDigest, LoginIndexKey, LoginIndexKeyId, StorageMasterKey,
     };
     use agenc_ircd_domain::{
-        DirectMessagePolicy, DurableSanction, GuestDirectMessagePolicy, ModerationAction,
-        ModerationReasonCode, NicknameValue, PresencePolicy, Principal,
+        DirectMessagePolicy, DisplayNameValue, DurableSanction, DurableWrite,
+        GuestDirectMessagePolicy, ModerationAction, ModerationReasonCode, NicknameValue,
+        PresencePolicy, Principal,
     };
     use agenc_ircd_storage::{RecordReference, StorageSealContext};
-    use agenc_ircd_testkit::account_id;
+    use agenc_ircd_testkit::{account_id, deterministic_cloak};
     use agenc_ircd_types::{
         DatabaseId, Generation, NetworkId, ServerId, ServerIncarnation, UserId, UtcSecond,
     };
@@ -1135,6 +1224,44 @@ mod tests {
             None,
             Vec::new(),
             AccountRecordBody::encode(account)?,
+        )?)
+    }
+
+    fn session(joined_channels: Vec<ChannelInstanceId>) -> Result<DurableSession, RuntimeError> {
+        Ok(DurableSession {
+            session_id: SessionId::from_bytes([41; 16]),
+            user_id: UserId::from_bytes([42; 16]),
+            home_server_id: ServerId::from_bytes([43; 16]),
+            account_id: None,
+            account_session_generation: Generation::new(0)
+                .map_err(|_| RuntimeError::InvalidValue)?,
+            generation: Generation::new(1).map_err(|_| RuntimeError::InvalidValue)?,
+            nickname: NicknameValue::parse("Restarted").map_err(|_| RuntimeError::InvalidValue)?,
+            display_name: DisplayNameValue::prepare("Restarted")
+                .map_err(|_| RuntimeError::InvalidValue)?,
+            public_cloak: deterministic_cloak(44).map_err(|_| RuntimeError::InvalidValue)?,
+            away: Some("back soon".to_owned()),
+            operator_notices: true,
+            connection_nonce: [45; 32],
+            negotiated_capability_hash: [46; 32],
+            joined_channels,
+            created_at_utc: UtcSecond::from_unix_seconds(900),
+            revision: Revision::new(2).map_err(|_| RuntimeError::InvalidValue)?,
+        })
+    }
+
+    fn session_value(
+        session: &DurableSession,
+        references: Vec<RecordReference>,
+    ) -> Result<PersistentRecordValue, RuntimeError> {
+        Ok(PersistentRecordValue::new(
+            TableId::Session,
+            LIVE_RECORD_KIND,
+            session.revision.get(),
+            session.generation.get(),
+            None,
+            references,
+            SessionRecordBody::encode(session)?,
         )?)
     }
 
@@ -1360,6 +1487,108 @@ mod tests {
         )?;
         assert!(scan.accounts.is_empty());
         assert!(scan.index.existing(TableId::Account, &key)?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn live_sessions_restore_and_plan_one_durable_restart_cleanup() -> Result<(), RuntimeError> {
+        let keys = keys()?;
+        let session = session(Vec::new())?;
+        let key = KeyDeriver::session_key(session.session_id)?;
+        let value = session_value(&session, Vec::new())?;
+        let mut scan = Scan::default();
+        scan.admit(
+            &keys,
+            TableId::Session,
+            key.clone(),
+            &seal(TableId::Session, &key, &value, 40)?,
+        )?;
+        let mut domain = DomainState::restore_authoritative(
+            Revision::new(2).map_err(|_| RuntimeError::InvalidValue)?,
+            Vec::new(),
+            scan.sessions.into_values().collect(),
+            Vec::new(),
+            Vec::new(),
+            MonotonicTick::from_ticks(50),
+            UtcSecond::from_unix_seconds(1_000),
+        )
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        let plan = domain
+            .plan_session_disconnected(session.user_id)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        assert!(matches!(
+            plan.durable_writes(),
+            [DurableWrite::TombstoneSession(session_id)] if *session_id == session.session_id
+        ));
+        let prepared = domain
+            .prepare_mutation(plan)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        domain
+            .apply_prepared(prepared)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        assert_eq!(domain.session_count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn session_rows_require_exact_live_channel_references() -> Result<(), RuntimeError> {
+        let keys = keys()?;
+        let channel_id = ChannelInstanceId::from_bytes([47; 16]);
+        let channel_key = KeyDeriver::channel_key(channel_id)?;
+        let session = session(vec![channel_id])?;
+        let session_key = KeyDeriver::session_key(session.session_id)?;
+
+        let mut missing = Scan::default();
+        let missing_value = session_value(&session, Vec::new())?;
+        assert!(matches!(
+            missing.admit(
+                &keys,
+                TableId::Session,
+                session_key.clone(),
+                &seal(TableId::Session, &session_key, &missing_value, 41)?,
+            ),
+            Err(RuntimeError::Storage(StorageError::StaleState))
+        ));
+
+        let mut exact = Scan::default();
+        exact.channel_keys.insert(channel_key.clone(), channel_id);
+        let exact_value = session_value(
+            &session,
+            vec![RecordReference::new(TableId::Channel, channel_key)?],
+        )?;
+        exact.admit(
+            &keys,
+            TableId::Session,
+            session_key.clone(),
+            &seal(TableId::Session, &session_key, &exact_value, 42)?,
+        )?;
+        assert_eq!(exact.sessions.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn session_tombstones_are_indexed_but_not_restored() -> Result<(), RuntimeError> {
+        let keys = keys()?;
+        let session_id = SessionId::from_bytes([48; 16]);
+        let key = KeyDeriver::session_key(session_id)?;
+        let value = PersistentRecordValue::new(
+            TableId::Session,
+            TOMBSTONE_RECORD_KIND,
+            3,
+            0,
+            None,
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let mut scan = Scan::default();
+        scan.admit(
+            &keys,
+            TableId::Session,
+            key.clone(),
+            &seal(TableId::Session, &key, &value, 43)?,
+        )?;
+        assert!(scan.sessions.is_empty());
+        assert!(scan.index.existing(TableId::Session, &key)?.is_some());
         Ok(())
     }
 

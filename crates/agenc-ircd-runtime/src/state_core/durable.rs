@@ -14,16 +14,17 @@ use agenc_ircd_crypto::{
     DatabaseBinding, OpenedStoragePlaintext, StorageMasterKey, StorageTable, derive_storage_index,
 };
 use agenc_ircd_domain::{
-    ChannelNameValue, DurableAccount, DurableChannel, DurableSanction, DurableWrite, MutationPlan,
-    NicknameValue,
+    ChannelNameValue, DurableAccount, DurableChannel, DurableSanction, DurableSession,
+    DurableWrite, MutationPlan, NicknameValue,
 };
 use agenc_ircd_storage::{
-    AccountRecordBody, ChannelRecordBody, CommitReceipt, ExistingRecord, LIVE_RECORD_KIND,
-    MAX_TRANSACTION_PLANS, PersistentRecordValue, ReadResult, RecordMutation, RecordReference,
-    RecoveredStorageState, SanctionRecordBody, SealedRecord, StorageAccountingLimits, StorageError,
-    StorageMutationBatch, StorageMutationHead, StoredKey, TableId, validate_record_plaintext,
+    AccountRecordBody, ChannelNameRecordBody, ChannelRecordBody, CommitReceipt, ExistingRecord,
+    LIVE_RECORD_KIND, MAX_TRANSACTION_PLANS, PersistentRecordValue, ReadResult, RecordMutation,
+    RecordReference, RecoveredStorageState, SanctionRecordBody, SealedRecord, SessionRecordBody,
+    StorageAccountingLimits, StorageError, StorageMutationBatch, StorageMutationHead, StoredKey,
+    TableId, validate_record_plaintext,
 };
-use agenc_ircd_types::{AccountId, ChannelInstanceId, EntropySource, TransactionId};
+use agenc_ircd_types::{AccountId, ChannelInstanceId, EntropySource, SessionId, TransactionId};
 use zeroize::Zeroizing;
 
 use crate::RuntimeError;
@@ -91,6 +92,11 @@ impl KeyDeriver {
     /// The `channel` table key: the 16 instance identity bytes.
     pub fn channel_key(channel_id: ChannelInstanceId) -> Result<StoredKey, RuntimeError> {
         Ok(StoredKey::new(channel_id.as_bytes().to_vec())?)
+    }
+
+    /// The `session` table key: the 16 physical-session identity bytes.
+    pub fn session_key(session_id: SessionId) -> Result<StoredKey, RuntimeError> {
+        Ok(StoredKey::new(session_id.as_bytes().to_vec())?)
     }
 
     /// The `channel_name` table key: the keyed digest of the canonical name.
@@ -461,6 +467,8 @@ fn sealed_length_matches(plaintext_bytes: usize, existing: ExistingRecord) -> bo
 pub enum EntityId {
     /// One account.
     Account(AccountId),
+    /// One logical session.
+    Session(SessionId),
     /// One channel instance.
     Channel(ChannelInstanceId),
 }
@@ -473,6 +481,8 @@ pub fn touched_entities(plan: &MutationPlan) -> BTreeSet<EntityId> {
         .filter_map(|write| match write {
             DurableWrite::PutAccount(account) => Some(EntityId::Account(account.account_id)),
             DurableWrite::TombstoneAccount(account_id) => Some(EntityId::Account(*account_id)),
+            DurableWrite::PutSession(session) => Some(EntityId::Session(session.session_id)),
+            DurableWrite::TombstoneSession(session_id) => Some(EntityId::Session(*session_id)),
             DurableWrite::PutChannel(channel) => Some(EntityId::Channel(channel.channel_id)),
             DurableWrite::TombstoneChannel { channel_id, .. } => {
                 Some(EntityId::Channel(*channel_id))
@@ -1040,6 +1050,10 @@ impl Projection<'_> {
             DurableWrite::TombstoneAccount(account_id) => {
                 self.tombstone_account(*account_id, revision)
             }
+            DurableWrite::PutSession(session) => self.put_session(session, revision),
+            DurableWrite::TombstoneSession(session_id) => {
+                self.tombstone_session(*session_id, revision)
+            }
             DurableWrite::PutChannel(channel) => self.put_channel(channel, revision),
             DurableWrite::TombstoneChannel { channel_id, name } => {
                 self.tombstone_channel(*channel_id, name, revision)
@@ -1138,6 +1152,62 @@ impl Projection<'_> {
         Ok(())
     }
 
+    fn put_session(&mut self, session: &DurableSession, revision: u64) -> Result<(), RuntimeError> {
+        if session.revision.get() != revision {
+            return Err(RuntimeError::Storage(StorageError::StaleState));
+        }
+        let key = KeyDeriver::session_key(session.session_id)?;
+        let reference_count = session
+            .joined_channels
+            .len()
+            .checked_add(usize::from(session.account_id.is_some()))
+            .ok_or(RuntimeError::Overflow)?;
+        let mut references = Vec::new();
+        references
+            .try_reserve_exact(reference_count)
+            .map_err(|_| RuntimeError::MemoryExhausted)?;
+        if let Some(account_id) = session.account_id {
+            references.push(RecordReference::new(
+                TableId::Account,
+                KeyDeriver::account_key(account_id)?,
+            )?);
+        }
+        for channel_id in &session.joined_channels {
+            references.push(RecordReference::new(
+                TableId::Channel,
+                KeyDeriver::channel_key(*channel_id)?,
+            )?);
+        }
+        let value = PersistentRecordValue::new(
+            TableId::Session,
+            LIVE_RECORD_KIND,
+            revision,
+            session.generation.get(),
+            None,
+            references,
+            SessionRecordBody::encode(session)?,
+        )?;
+        self.put(TableId::Session, key, value)
+    }
+
+    fn tombstone_session(
+        &mut self,
+        session_id: SessionId,
+        revision: u64,
+    ) -> Result<(), RuntimeError> {
+        let key = KeyDeriver::session_key(session_id)?;
+        let value = PersistentRecordValue::new(
+            TableId::Session,
+            TOMBSTONE_RECORD_KIND,
+            revision,
+            0,
+            None,
+            Vec::new(),
+            Vec::new(),
+        )?;
+        self.put(TableId::Session, key, value)
+    }
+
     fn put_channel(&mut self, channel: &DurableChannel, revision: u64) -> Result<(), RuntimeError> {
         let key = KeyDeriver::channel_key(channel.channel_id)?;
         let value = PersistentRecordValue::new(
@@ -1147,7 +1217,7 @@ impl Projection<'_> {
             0,
             None,
             Vec::new(),
-            ChannelRecordBody::encode_legacy(channel)?,
+            ChannelRecordBody::encode(channel)?,
         )?;
         self.put(TableId::Channel, key.clone(), value)?;
         if self.index.channel_name_row(channel.channel_id).is_some() {
@@ -1161,7 +1231,7 @@ impl Projection<'_> {
             0,
             None,
             vec![RecordReference::new(TableId::Channel, key)?],
-            channel.name.presentation().as_bytes().to_vec(),
+            ChannelNameRecordBody::encode(channel.channel_id, &channel.name)?,
         )?;
         self.put(TableId::ChannelName, name_key.clone(), name_value)?;
         self.updates.push(IndexUpdate::ChannelNamed {
@@ -1289,15 +1359,17 @@ mod tests {
         AdminCommandTbs, AdminSessionId,
     };
     use agenc_ircd_crypto::{Ed25519SecretKey, LoginIndexKey, StorageDigest, audit_signing_key_id};
-    use agenc_ircd_domain::{AccountState, DomainState};
+    use agenc_ircd_domain::{
+        AccountState, DisplayNameValue, DomainState, NicknameValue, SessionSeed,
+    };
     use agenc_ircd_storage::{
         LOGIN_INDEX_KEY_STATE_KEY, LoginIndexKeyState, MIN_SEALED_RECORD_BYTES,
         logical_record_charge,
     };
-    use agenc_ircd_testkit::{ScriptedEntropy, account_id};
+    use agenc_ircd_testkit::{ScriptedEntropy, account_id, deterministic_cloak};
     use agenc_ircd_types::{
         DatabaseId, Generation, NetworkId, OperatorId, Revision, ServerId, ServerIncarnation,
-        UtcSecond,
+        SessionId, UserId, UtcSecond,
     };
 
     fn binding() -> DatabaseBinding {
@@ -1337,6 +1409,33 @@ mod tests {
         state
             .plan_account_created(account)
             .map_err(|_| RuntimeError::InvalidValue)
+    }
+
+    fn session_plan() -> Result<(DomainState, MutationPlan, SessionId, UserId), RuntimeError> {
+        let state = DomainState::new().map_err(|_| RuntimeError::InvalidValue)?;
+        let session_id = SessionId::from_bytes([40; 16]);
+        let user_id = UserId::from_bytes([41; 16]);
+        let plan = state
+            .plan_session_opened(SessionSeed {
+                session_id,
+                user_id,
+                home_server_id: ServerId::from_bytes([42; 16]),
+                account_id: None,
+                account_session_generation: Generation::new(0)
+                    .map_err(|_| RuntimeError::InvalidValue)?,
+                generation: Generation::new(1).map_err(|_| RuntimeError::InvalidValue)?,
+                nickname: NicknameValue::parse("Projected")
+                    .map_err(|_| RuntimeError::InvalidValue)?,
+                display_name: DisplayNameValue::prepare("Projected")
+                    .map_err(|_| RuntimeError::InvalidValue)?,
+                public_cloak: deterministic_cloak(43).map_err(|_| RuntimeError::InvalidValue)?,
+                connection_nonce: [44; 32],
+                negotiated_capability_hash: [45; 32],
+                created_at_utc: UtcSecond::from_unix_seconds(1_000),
+                revision: state.revision(),
+            })
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        Ok((state, plan, session_id, user_id))
     }
 
     fn audit_event() -> Result<AdminAuditEvent, RuntimeError> {
@@ -1645,6 +1744,85 @@ mod tests {
                 .and_then(|value| value.checked_sub(manifest_growth))
                 .ok_or(RuntimeError::Overflow)?
         );
+        Ok(())
+    }
+
+    #[test]
+    fn session_put_and_tombstone_use_the_exact_session_row() -> Result<(), RuntimeError> {
+        let (mut state, opened, session_id, user_id) = session_plan()?;
+        assert_eq!(
+            touched_entities(&opened),
+            BTreeSet::from([EntityId::Session(session_id)])
+        );
+        let projections = [PlanProjection {
+            plan: &opened,
+            response_count_increment: 0,
+            account_service_writes: &[],
+        }];
+        let mut entropy =
+            ScriptedEntropy::new(Vec::new()).map_err(|_| RuntimeError::InvalidValue)?;
+        let projected = project_batch(
+            TransactionId::from_bytes([46; 16]),
+            &projections,
+            &DurableIndex::new(),
+            &keys()?,
+            head(0, 0),
+            ceilings(),
+            &mut entropy,
+        )?
+        .ok_or(RuntimeError::InvalidValue)?;
+        let [mutation] = projected.batch.mutations() else {
+            return Err(RuntimeError::InvalidValue);
+        };
+        assert_eq!(mutation.table(), TableId::Session);
+        assert!(mutation.key() == &KeyDeriver::session_key(session_id)?);
+
+        let prepared = state
+            .prepare_mutation(opened)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        state
+            .apply_prepared(prepared)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let disconnected = state
+            .plan_session_disconnected(user_id)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let session_key = KeyDeriver::session_key(session_id)?;
+        let mut index = DurableIndex::new();
+        index.record_known(
+            TableId::Session,
+            session_key.clone(),
+            ExistingRecord::new(
+                DOMAIN_RECORD_SCHEMA,
+                StorageDigest::from_bytes([47; 32]),
+                MIN_SEALED_RECORD_BYTES,
+            )?,
+        );
+        let projections = [PlanProjection {
+            plan: &disconnected,
+            response_count_increment: 0,
+            account_service_writes: &[],
+        }];
+        let projected = project_batch(
+            TransactionId::from_bytes([48; 16]),
+            &projections,
+            &index,
+            &keys()?,
+            HeadCounters {
+                state_generation: 1,
+                storage_commit_sequence: 1,
+                account_service_response_count: 0,
+                logical_database_bytes: 10_000,
+                backup_stream_bytes: 10_000,
+            },
+            ceilings(),
+            &mut entropy,
+        )?
+        .ok_or(RuntimeError::InvalidValue)?;
+        let [mutation] = projected.batch.mutations() else {
+            return Err(RuntimeError::InvalidValue);
+        };
+        assert_eq!(mutation.table(), TableId::Session);
+        assert!(mutation.key() == &session_key);
         Ok(())
     }
 

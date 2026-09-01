@@ -1537,8 +1537,14 @@ impl AdminOwner {
             _ => return,
         };
         match self
-            .core
-            .commit_mutation(audit.clone(), mutation, revision, token)
+            .commit_mutation_with_stale_retry(
+                event,
+                &audit,
+                mutation,
+                AdminTarget::Account(account_id),
+                revision,
+                token,
+            )
             .await
         {
             Ok(()) => {
@@ -1576,10 +1582,11 @@ impl AdminOwner {
             return;
         };
         match self
-            .core
-            .commit_mutation(
-                audit.clone(),
+            .commit_mutation_with_stale_retry(
+                event,
+                &audit,
                 AdminMutation::QuarantineChannel(channel_id),
+                AdminTarget::Channel(channel_id),
                 revision,
                 token,
             )
@@ -1597,6 +1604,30 @@ impl AdminOwner {
             }
             Err(failure) => self.output_admin_failure(generation, "CHANNEL", failure),
         }
+    }
+
+    async fn commit_mutation_with_stale_retry(
+        &mut self,
+        event: &AdminCommandEvent,
+        audit: &AdminAuditEvent,
+        mutation: AdminMutation,
+        target: AdminTarget,
+        revision: agenc_ircd_types::Revision,
+        token: &CancellationToken,
+    ) -> Result<(), AdminCoreFailure> {
+        let outcome = self
+            .core
+            .commit_mutation(audit.clone(), mutation, revision, token)
+            .await;
+        if !matches!(outcome, Err(AdminCoreFailure::StaleRevision))
+            || event.confirmation != ConfirmationState::NotRequired
+        {
+            return outcome;
+        }
+        let revision = self.core.target_revision(target, token).await?;
+        self.core
+            .commit_mutation(audit.clone(), mutation, revision, token)
+            .await
     }
 
     // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=confirmation and fresh target revision branches remain adjacent to their closed reply mapping
@@ -3556,13 +3587,14 @@ mod tests {
         .await
         .map_err(|_| RuntimeError::Cancelled)?;
         assert_eq!(target, Some(AdminTarget::Account(account)));
-        let mutation = tokio::time::timeout(
+        let first_mutation = tokio::time::timeout(
             Duration::from_secs(1),
-            core_inbox.complete_mutation_for_test(Ok(())),
+            core_inbox.complete_mutation_for_test(Err(AdminCoreFailure::StaleRevision)),
         )
         .await
         .map_err(|_| RuntimeError::Cancelled)?;
-        let (event, mutation, expected_revision) = mutation.ok_or(RuntimeError::InvalidValue)?;
+        let (event, mutation, expected_revision) =
+            first_mutation.ok_or(RuntimeError::InvalidValue)?;
         assert_eq!(event.tbs().phase, AdminAuditPhase::CommittedMutation);
         assert_eq!(
             event.tbs().command_tbs.canonical_command(),
@@ -3577,6 +3609,26 @@ mod tests {
             } if account_id == account
                 && expires_at.get() == event.tbs().created_at.saturating_add(60)
         ));
+        let retry_revision =
+            agenc_ircd_types::Revision::new(8).map_err(|_| RuntimeError::InvalidValue)?;
+        let target = tokio::time::timeout(
+            Duration::from_secs(1),
+            core_inbox.complete_target_revision_for_test(retry_revision),
+        )
+        .await
+        .map_err(|_| RuntimeError::Cancelled)?;
+        assert_eq!(target, Some(AdminTarget::Account(account)));
+        let retried_mutation = tokio::time::timeout(
+            Duration::from_secs(1),
+            core_inbox.complete_mutation_for_test(Ok(())),
+        )
+        .await
+        .map_err(|_| RuntimeError::Cancelled)?;
+        let (retried_event, retried_mutation, expected_revision) =
+            retried_mutation.ok_or(RuntimeError::InvalidValue)?;
+        assert_eq!(retried_event, event);
+        assert_eq!(retried_mutation, mutation);
+        assert_eq!(expected_revision, retry_revision);
         let reply = tokio::time::timeout(Duration::from_secs(1), output.recv())
             .await
             .map_err(|_| RuntimeError::Cancelled)?

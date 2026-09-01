@@ -117,6 +117,7 @@ struct PendingRegistration {
     event_generation: u64,
     bound: BoundSession,
     nickname: String,
+    authenticated: bool,
 }
 
 /// Registration router for every public client connection.
@@ -833,22 +834,26 @@ impl RegistrationRouter {
                 },
             );
         }
-        let accepted = self.commit_session(context, connection, bound, capabilities, seed)?;
-        if !accepted {
-            record_result(result, ResultClass::Rejected);
+        if self.commit_session(
+            context,
+            connection,
+            event_generation,
+            bound,
+            capabilities,
+            seed,
+            nickname,
+            observation,
+        )? {
+            return Ok(ActionStep::Continue);
         }
-        if accepted {
-            state.bound = Some(bound);
-            state.nickname = Some(nickname.to_owned());
-            self.release_lease(connection, state);
-        }
+        record_result(result, ResultClass::Rejected);
         self.registration_event(
             context,
             connection,
             state,
             RegistrationEvent::RegistrationCommitted {
                 generation: event_generation,
-                accepted,
+                accepted: false,
                 authenticated: false,
             },
         )
@@ -891,6 +896,7 @@ impl RegistrationRouter {
                 event_generation,
                 bound,
                 nickname: owned_nickname,
+                authenticated: true,
             },
         );
         if self
@@ -921,26 +927,55 @@ impl RegistrationRouter {
         Ok(false)
     }
 
+    // agenc-review: allow owner=runtime reviewed=2026-09-01 reason=guest registration binds its complete session projection and command observation to one durable staging boundary
+    #[allow(clippy::too_many_arguments)]
     fn commit_session(
-        &self,
+        &mut self,
         context: &mut StateCoreContext,
         connection: ConnectionGeneration,
+        event_generation: u64,
         bound: BoundSession,
         capabilities: CapabilityState,
         seed: SessionSeed,
+        nickname: &str,
+        observation: &mut Option<CommandObservation>,
     ) -> Result<bool, RuntimeError> {
+        if self.pending_registrations.contains_key(&connection) {
+            return Err(RuntimeError::InvalidValue);
+        }
         let Ok(plan) = context.domain().plan_session_opened(seed) else {
             return Ok(false);
         };
+        let mut owned_nickname = String::new();
+        owned_nickname
+            .try_reserve_exact(nickname.len())
+            .map_err(|_| RuntimeError::MemoryExhausted)?;
+        owned_nickname.push_str(nickname);
+        let request = FanoutRequest::new(Vec::new(), Vec::new())?;
         context
             .sessions_mut()
             .bind_session(connection, bound, capabilities)?;
-        let request = FanoutRequest::new(Vec::new(), Vec::new())?;
-        if context.apply_ephemeral(plan, request).is_err() {
-            context.sessions_mut().unbind_session(connection, bound)?;
-            return Err(RuntimeError::InvalidValue);
+        self.pending_registrations.insert(
+            connection,
+            PendingRegistration {
+                event_generation,
+                bound,
+                nickname: owned_nickname,
+                authenticated: false,
+            },
+        );
+        let staged = context.stage_durable(
+            plan,
+            request,
+            Some(StagedOrigin::silent(connection).with_observation(observation.take())),
+            0,
+        );
+        if matches!(staged, Ok(StageAccepted::Staged { .. })) {
+            return Ok(true);
         }
-        Ok(true)
+        self.pending_registrations.remove(&connection);
+        context.sessions_mut().unbind_session(connection, bound)?;
+        Ok(false)
     }
 
     fn session_seed(
@@ -969,7 +1004,7 @@ impl RegistrationRouter {
             account_session_generation: authenticated_account
                 .map_or_else(|| Generation::new(0), |(_, generation)| Ok(generation))
                 .map_err(|_| RuntimeError::InvalidValue)?,
-            generation: Generation::new(0).map_err(|_| RuntimeError::InvalidValue)?,
+            generation: Generation::new(1).map_err(|_| RuntimeError::InvalidValue)?,
             nickname: NicknameValue::parse(nickname).map_err(|_| RuntimeError::InvalidValue)?,
             display_name: DisplayNameValue::prepare(realname)
                 .map_err(|_| RuntimeError::InvalidValue)?,
@@ -1384,11 +1419,13 @@ impl RegistrationRouter {
                 event_generation,
                 bound,
                 nickname,
+                authenticated,
             } = pending;
-            let account_committed = self
-                .accounts
-                .registration_committed(context, generation, bound.user_id)
-                .is_ok();
+            let account_committed = !authenticated
+                || self
+                    .accounts
+                    .registration_committed(context, generation, bound.user_id)
+                    .is_ok();
             let Some(mut state) = self.connections.remove(&generation) else {
                 self.queue_session_close(context, bound, "connection closed");
                 continue;
@@ -1401,7 +1438,7 @@ impl RegistrationRouter {
                     RegistrationEvent::RegistrationCommitted {
                         generation: event_generation,
                         accepted: true,
-                        authenticated: true,
+                        authenticated,
                     },
                     context.now().get(),
                 ) {
@@ -1445,7 +1482,9 @@ impl RegistrationRouter {
                 .sessions_mut()
                 .unbind_session(generation, pending.bound);
         }
-        let _rejected = self.accounts.registration_rejected(context, generation);
+        if pending.authenticated {
+            let _rejected = self.accounts.registration_rejected(context, generation);
+        }
         close_transport(context, generation);
         true
     }

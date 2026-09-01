@@ -3452,7 +3452,7 @@ impl StateCore {
                     self.context.erase_idle_prefixes();
                     None
                 },
-                request = self.admin_receiver.recv(), if self.admin_open && !refresh_in_flight && !activation_barrier => match request {
+                request = self.admin_receiver.recv(), if self.admin_open && !in_flight && self.context.pending_len() == 0 && !activation_barrier => match request {
                     Some(request) => self.step_admin_request(request),
                     None => {
                         self.admin_open = false;

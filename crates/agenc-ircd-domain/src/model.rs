@@ -1084,10 +1084,6 @@ pub(crate) struct Invite {
     pub(crate) inviter: UserId,
     pub(crate) creation_revision: Revision,
     pub(crate) expires_at: MonotonicTick,
-    #[expect(
-        dead_code,
-        reason = "read by the complete channel projector at the Stage 06 writer cutover"
-    )]
     pub(crate) expires_at_utc: UtcSecond,
 }
 
@@ -2063,11 +2059,11 @@ pub(crate) fn next_revision(revision: Revision) -> Result<Revision, DomainError>
 }
 
 impl DomainState {
-    /// Rebuilds authoritative state from persisted projections and validates it.
+    /// Rebuilds the legacy account/channel projection and validates it.
     ///
-    /// Sessions, memberships, invites, and pending removals start empty because they
-    /// are never persisted. Duplicate identities and any invariant failure reject the
-    /// whole input.
+    /// This compatibility entry point accepts pre-cutover channel rows with no
+    /// sessions, invites, or pending removals. New startup code uses
+    /// [`Self::restore_authoritative`].
     pub fn restore(
         revision: Revision,
         accounts: Vec<DurableAccount>,
@@ -2099,6 +2095,64 @@ impl DomainState {
         Ok(state)
     }
 
+    /// Rebuilds the complete coordinator authority recovered from live rows.
+    ///
+    /// Durable invite expiries are rebased from UTC onto this process's
+    /// monotonic clock before the resulting state is validated.
+    // agenc-review: focus owner=domain reviewed=2026-09-01 reason=single reconstruction boundary rebuilds every uniqueness index before validating complete recovered authority
+    pub fn restore_authoritative(
+        revision: Revision,
+        accounts: Vec<DurableAccount>,
+        sessions: Vec<crate::DurableSession>,
+        channels: Vec<DurableChannel>,
+        sanctions: Vec<DurableSanction>,
+        monotonic_now: MonotonicTick,
+        utc_now: UtcSecond,
+    ) -> Result<Self, DomainError> {
+        let mut state = Self::at_revision(revision);
+        for account in accounts {
+            let account = account.into_state()?;
+            if state.accounts.insert(account.account_id, account).is_some() {
+                return Err(DomainError::InvariantViolation);
+            }
+        }
+        for session in sessions {
+            let session = session.into_state()?;
+            let duplicate_id = state
+                .session_ids
+                .insert(session.session_id, session.user_id)
+                .is_some();
+            let duplicate_nickname = state
+                .nicknames
+                .insert(session.nickname.clone(), session.user_id)
+                .is_some();
+            let duplicate_cloak = state
+                .public_cloaks
+                .insert(session.public_cloak, session.user_id)
+                .is_some();
+            let duplicate_user = state.sessions.insert(session.user_id, session).is_some();
+            if duplicate_id || duplicate_nickname || duplicate_cloak || duplicate_user {
+                return Err(DomainError::InvariantViolation);
+            }
+        }
+        for channel in channels {
+            let channel = channel.into_state_with_clocks(monotonic_now, utc_now)?;
+            let replaced_name = state
+                .channel_names
+                .insert(channel.name.clone(), channel.channel_id)
+                .is_some();
+            let replaced_id = state.channels.insert(channel.channel_id, channel).is_some();
+            if replaced_name || replaced_id {
+                return Err(DomainError::InvariantViolation);
+            }
+        }
+        for sanction in sanctions {
+            state.sanctions.push(sanction.into_state()?);
+        }
+        state.validate()?;
+        Ok(state)
+    }
+
     /// Projects one account into its persisted value.
     #[must_use]
     pub fn durable_account(&self, account_id: AccountId) -> Option<DurableAccount> {
@@ -2107,7 +2161,27 @@ impl DomainState {
             .map(DurableAccount::from_state)
     }
 
-    /// Projects one registered channel into its persisted value.
+    /// Projects one logical session, omitting process-local channel joins.
+    #[must_use]
+    pub fn durable_session(&self, user_id: UserId) -> Option<crate::DurableSession> {
+        self.sessions.get(&user_id).map(|session| {
+            let mut durable = crate::DurableSession::from_state(session);
+            durable.joined_channels.retain(|channel_id| {
+                self.channels.get(channel_id).is_some_and(|channel| {
+                    channel.scope == ChannelScope::Global
+                        || channel.persistence == PersistencePolicy::Registered
+                })
+            });
+            durable
+        })
+    }
+
+    /// Iterates live user identities in canonical order.
+    pub fn session_user_ids(&self) -> impl Iterator<Item = UserId> + '_ {
+        self.sessions.keys().copied()
+    }
+
+    /// Projects one channel whose authority survives a coordinator restart.
     #[must_use]
     pub fn durable_channel(&self, channel_id: ChannelInstanceId) -> Option<DurableChannel> {
         self.channels
@@ -2120,7 +2194,7 @@ impl DomainState {
         self.accounts.values().map(DurableAccount::from_state)
     }
 
-    /// Iterates every registered channel projection in ascending instance order.
+    /// Iterates every durable channel projection in ascending instance order.
     pub fn durable_channels(&self) -> impl Iterator<Item = DurableChannel> + '_ {
         self.channels
             .values()

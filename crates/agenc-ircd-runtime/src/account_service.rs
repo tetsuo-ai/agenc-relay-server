@@ -6931,7 +6931,13 @@ mod tests {
                 storage.database_binding(),
                 storage.storage_key_generation(),
             )?;
-            let reconstruction = reconstruct(&seed, &owner.port(), &keys)?;
+            let reconstruction = reconstruct(
+                &seed,
+                &owner.port(),
+                &keys,
+                MonotonicTick::from_ticks(10),
+                UtcSecond::from_unix_seconds(1_000),
+            )?;
             let (storage_bridge, storage_completions, storage_reads, storage_checkpoints) =
                 StorageBridge::start(owner.port())?;
             let crypto_config = CryptoWorkerConfig::new(1, 1, 1)?;

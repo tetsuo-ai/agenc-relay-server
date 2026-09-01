@@ -3,18 +3,18 @@
 //! Stage 06 persistence boundary: every plan's durable writes equal the change in
 //! the durable projection, and the projection restores to itself.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 
 use agenc_ircd_domain::{
     AccountCommand, AccountLabelValue, AccountState, AdmissionSnapshot, CanonicalCommand,
     ChannelCommand, ChannelKeyVerifier, ChannelNameValue, ChannelTarget, DomainState,
-    DurableAccount, DurableChannel, DurableSanction, DurableWrite, E2eeBindingProof,
-    EntropyPurpose, ExternalInputRequest, ExternalInputs, HistoryPolicy, InformationQuery,
-    MaskList, MessageCommand, MessageKind, MessageTarget, MessageText, ModeChange, ModeOperation,
-    ModerationAction, ModerationReason, ModerationReasonCode, MutationPlan, NicknameValue,
-    PlanDecision, PresenceCommand, PresencePolicy, Principal, RateBucket, Role, SanctionRequest,
-    TopicText,
+    DurableAccount, DurableChannel, DurableSanction, DurableSession, DurableWrite,
+    E2eeBindingProof, EntropyPurpose, ExternalInputRequest, ExternalInputs, HistoryPolicy,
+    InformationQuery, MaskList, MessageCommand, MessageKind, MessageTarget, MessageText,
+    ModeChange, ModeOperation, ModerationAction, ModerationReason, ModerationReasonCode,
+    MutationPlan, NicknameValue, PlanDecision, PresenceCommand, PresencePolicy, Principal,
+    RateBucket, Role, SanctionRequest, TopicText,
 };
 use agenc_ircd_testkit::{
     DomainTestIdentity, account_id, apply_plan, bytes, channel_id, generation, message_admission,
@@ -22,12 +22,13 @@ use agenc_ircd_testkit::{
 };
 use agenc_ircd_types::{
     AccountDeletionToken, AccountId, ChannelInstanceId, ControlPolicy, EntryId, InviteId,
-    MessageId, MonotonicTick, TypedMask, UtcSecond,
+    MessageId, MonotonicTick, Revision, TypedMask, UserId, UtcSecond,
 };
 
 #[derive(Clone, Eq, PartialEq)]
 struct Snapshot {
     accounts: BTreeMap<AccountId, DurableAccount>,
+    sessions: BTreeMap<UserId, DurableSession>,
     channels: BTreeMap<ChannelInstanceId, DurableChannel>,
     sanctions: Vec<DurableSanction>,
 }
@@ -38,6 +39,14 @@ fn snapshot(state: &DomainState) -> Snapshot {
             .durable_accounts()
             .map(|account| (account.account_id, account))
             .collect(),
+        sessions: state
+            .session_user_ids()
+            .filter_map(|user_id| {
+                state
+                    .durable_session(user_id)
+                    .map(|session| (user_id, session))
+            })
+            .collect(),
         channels: state
             .durable_channels()
             .map(|channel| (channel.channel_id, channel))
@@ -46,8 +55,8 @@ fn snapshot(state: &DomainState) -> Snapshot {
     }
 }
 
-/// The canonical write set implied by two projections: accounts in ascending order,
-/// then channels, then appended sanctions. Revision-only changes are not writes.
+/// The canonical write set implied by two projections: accounts, sessions, channels,
+/// then appended sanctions. Revision-only changes are not writes.
 fn projection_diff(before: &Snapshot, after: &Snapshot) -> Vec<DurableWrite> {
     let mut writes = Vec::new();
     for account_id in before.accounts.keys().chain(after.accounts.keys()) {
@@ -66,6 +75,25 @@ fn projection_diff(before: &Snapshot, after: &Snapshot) -> Vec<DurableWrite> {
                 if previous.is_none_or(|previous| !previous.same_content(next)) =>
             {
                 writes.push(DurableWrite::PutAccount(next.clone()));
+            }
+            _ => {}
+        }
+    }
+    let session_user_ids = before
+        .sessions
+        .keys()
+        .chain(after.sessions.keys())
+        .copied()
+        .collect::<BTreeSet<_>>();
+    for user_id in session_user_ids {
+        match (before.sessions.get(&user_id), after.sessions.get(&user_id)) {
+            (Some(previous), None) => {
+                writes.push(DurableWrite::TombstoneSession(previous.session_id));
+            }
+            (previous, Some(next))
+                if previous.is_none_or(|previous| !previous.same_content(next)) =>
+            {
+                writes.push(DurableWrite::PutSession(next.clone()));
             }
             _ => {}
         }
@@ -98,6 +126,21 @@ fn projection_diff(before: &Snapshot, after: &Snapshot) -> Vec<DurableWrite> {
     writes
 }
 
+fn restore_projection(
+    revision: Revision,
+    snapshot: &Snapshot,
+) -> Result<DomainState, Box<dyn Error>> {
+    Ok(DomainState::restore_authoritative(
+        revision,
+        snapshot.accounts.values().cloned().collect(),
+        snapshot.sessions.values().cloned().collect(),
+        snapshot.channels.values().cloned().collect(),
+        snapshot.sanctions.clone(),
+        MonotonicTick::from_ticks(50),
+        UtcSecond::from_unix_seconds(1_710_000_000),
+    )?)
+}
+
 /// Applies one plan and proves its declared writes are exactly the projection change,
 /// then proves the projection restores to an equal projection.
 fn check_plan(state: &mut DomainState, plan: MutationPlan) -> Result<(), Box<dyn Error>> {
@@ -110,12 +153,7 @@ fn check_plan(state: &mut DomainState, plan: MutationPlan) -> Result<(), Box<dyn
         declared == expected,
         "declared writes {declared:?} differ from projection diff {expected:?}"
     );
-    let restored = DomainState::restore(
-        state.revision(),
-        after.accounts.values().cloned().collect(),
-        after.channels.values().cloned().collect(),
-        after.sanctions.clone(),
-    )?;
+    let restored = restore_projection(state.revision(), &after)?;
     assert!(snapshot(&restored) == after, "restored projection differs");
     assert_eq!(restored.revision(), state.revision());
     Ok(())
@@ -247,7 +285,7 @@ fn every_mutation_family_declares_exactly_its_projection_change() -> Result<(), 
     let (bob_account, bob_generation) = create_checked_account(&mut state, 2)?;
     assert_eq!(snapshot(&state).accounts.len(), 2);
 
-    // Sessions are ephemeral.
+    // Logical sessions survive coordinator restart.
     let alice = open_session(
         &mut state,
         10,
@@ -256,18 +294,26 @@ fn every_mutation_family_declares_exactly_its_projection_change() -> Result<(), 
     )?;
     let bob = open_session(&mut state, 11, "Bob", Some((bob_account, bob_generation)))?;
     let carol = open_session(&mut state, 12, "Carol", None)?;
+    assert_eq!(snapshot(&state).sessions.len(), 3);
     assert!(snapshot(&state).channels.is_empty());
     assert!(snapshot(&state).sanctions.is_empty());
 
-    // JOIN on a new ephemeral channel and on an existing one produce nothing durable.
+    // Global channel authority and memberships are durable from the first JOIN.
     join(&mut state, alice, "#room", seed)?;
     join(&mut state, bob, "#room", seed)?;
-    assert!(snapshot(&state).channels.is_empty());
     let room = state
         .resolve_channel(&ChannelNameValue::parse("#room")?)
         .ok_or("room")?;
+    assert!(snapshot(&state).channels.contains_key(&room));
+    assert_eq!(
+        snapshot(&state)
+            .sessions
+            .get(&alice.user_id)
+            .map(|session| session.joined_channels.as_slice()),
+        Some([room].as_slice())
+    );
 
-    // Registration persists the channel; later policy changes rewrite it.
+    // Registration adds durable account ownership; later policy changes rewrite it.
     check_command(
         &mut state,
         alice,
@@ -372,7 +418,7 @@ fn every_mutation_family_declares_exactly_its_projection_change() -> Result<(), 
         seed,
     )?;
 
-    // Invites, joins, kicks, messages, and presence never touch persisted state.
+    // Invites, memberships, and presence update durable authority; messages do not.
     mode(
         &mut state,
         alice,
@@ -445,7 +491,7 @@ fn every_mutation_family_declares_exactly_its_projection_change() -> Result<(), 
         &registered_admission(carol.user_id)?,
         seed,
     )?;
-    let persisted_after_ephemera = snapshot(&state);
+    let durable_after_session_changes = snapshot(&state);
 
     // Account settings persist; the reservation is visible through the index.
     check_command(
@@ -500,7 +546,10 @@ fn every_mutation_family_declares_exactly_its_projection_change() -> Result<(), 
         state.nickname_reserved_by(&NicknameValue::parse("nobody")?),
         None
     );
-    assert_ne!(snapshot(&state).accounts, persisted_after_ephemera.accounts);
+    assert_ne!(
+        snapshot(&state).accounts,
+        durable_after_session_changes.accounts
+    );
 
     // Queries never plan a mutation.
     for query in [
@@ -566,7 +615,7 @@ fn every_mutation_family_declares_exactly_its_projection_change() -> Result<(), 
 
     // Deleting an account tombstones it and rewrites every channel that granted it.
     // Deletion needs exactly one live, channel-free session on the replaced fence.
-    open_session(
+    let bob_again = open_session(
         &mut state,
         13,
         "BobAgain",
@@ -578,14 +627,16 @@ fn every_mutation_family_declares_exactly_its_projection_change() -> Result<(), 
         bob_writes.first(),
         Some(DurableWrite::TombstoneAccount(id)) if *id == bob_account
     ));
-    assert!(matches!(
-        bob_writes.get(1),
-        Some(DurableWrite::PutChannel(channel)) if channel.channel_id == room
-            && !channel.role_grants.iter().any(|(id, _)| *id == bob_account)
+    assert!(bob_writes.iter().any(
+        |write| matches!(write, DurableWrite::TombstoneSession(id) if *id == bob_again.session_id)
     ));
+    assert!(bob_writes.iter().any(|write| {
+        matches!(write, DurableWrite::PutChannel(channel) if channel.channel_id == room
+            && !channel.role_grants.iter().any(|(id, _)| *id == bob_account))
+    }));
     check_plan(&mut state, deletion)?;
 
-    // Unregistering retires the persisted row while the channel keeps living.
+    // Unregistering drops account ownership while the global row remains durable.
     join(&mut state, alice, "#room", seed)?;
     check_command(
         &mut state,
@@ -594,7 +645,7 @@ fn every_mutation_family_declares_exactly_its_projection_change() -> Result<(), 
         &registered_admission(alice.user_id)?,
         seed,
     )?;
-    assert!(snapshot(&state).channels.is_empty());
+    assert!(snapshot(&state).channels.contains_key(&room));
     assert!(state.channel(room).is_some());
 
     // The E2EE binding is a persisted policy change on a registered channel.
@@ -648,64 +699,61 @@ fn restore_rejects_duplicates_unregistered_channels_and_invalid_projections()
     )?;
     let projection = snapshot(&state);
     let account = projection.accounts.get(&alice_account).ok_or("account")?;
+    let session = projection.sessions.get(&alice.user_id).ok_or("session")?;
     let channel = projection.channels.get(&room).ok_or("channel")?;
+    let accounts = || projection.accounts.values().cloned().collect::<Vec<_>>();
+    let sessions = || projection.sessions.values().cloned().collect::<Vec<_>>();
+    let channels = || projection.channels.values().cloned().collect::<Vec<_>>();
+    let restore = |accounts, sessions, channels| {
+        DomainState::restore_authoritative(
+            state.revision(),
+            accounts,
+            sessions,
+            channels,
+            projection.sanctions.clone(),
+            MonotonicTick::from_ticks(50),
+            UtcSecond::from_unix_seconds(1_710_000_000),
+        )
+    };
 
     assert!(
-        DomainState::restore(
-            state.revision(),
+        restore(
             vec![account.clone(), account.clone()],
-            Vec::new(),
-            Vec::new(),
+            sessions(),
+            channels()
         )
         .is_err()
     );
     assert!(
-        DomainState::restore(
-            state.revision(),
-            vec![account.clone()],
-            vec![channel.clone(), channel.clone()],
-            Vec::new(),
+        restore(
+            accounts(),
+            vec![session.clone(), session.clone()],
+            channels()
+        )
+        .is_err()
+    );
+    assert!(
+        restore(
+            accounts(),
+            sessions(),
+            vec![channel.clone(), channel.clone()]
         )
         .is_err()
     );
     let mut ephemeral = channel.clone();
+    ephemeral.name = ChannelNameValue::parse("&room")?;
+    ephemeral.scope = agenc_ircd_domain::ChannelScope::Local;
     ephemeral.persistence = agenc_ircd_domain::PersistencePolicy::Ephemeral;
-    assert!(
-        DomainState::restore(
-            state.revision(),
-            vec![account.clone()],
-            vec![ephemeral],
-            Vec::new()
-        )
-        .is_err()
-    );
+    assert!(restore(accounts(), sessions(), vec![ephemeral]).is_err());
     let mut unsorted = account.clone();
     unsorted.contacts = vec![account_id(3), account_id(2)];
-    assert!(
-        DomainState::restore(state.revision(), vec![unsorted], Vec::new(), Vec::new()).is_err()
-    );
+    assert!(restore(vec![unsorted], sessions(), channels()).is_err());
     let mut ownerless = channel.clone();
     ownerless.role_grants.clear();
-    assert!(
-        DomainState::restore(
-            state.revision(),
-            vec![account.clone()],
-            vec![ownerless],
-            Vec::new()
-        )
-        .is_err()
-    );
+    assert!(restore(accounts(), sessions(), vec![ownerless]).is_err());
     let mut unknown_grant = channel.clone();
     unknown_grant.role_grants = vec![(account_id(9), Role::Owner)];
-    assert!(
-        DomainState::restore(
-            state.revision(),
-            vec![account.clone()],
-            vec![unknown_grant],
-            Vec::new()
-        )
-        .is_err()
-    );
+    assert!(restore(accounts(), sessions(), vec![unknown_grant]).is_err());
     let mut bad_mask = channel.clone();
     bad_mask.bans.push(agenc_ircd_domain::DurableListEntry {
         entry_id: EntryId::from_bytes(bytes(1)),
@@ -713,27 +761,14 @@ fn restore_rejects_duplicates_unregistered_channels_and_invalid_projections()
         setter: Principal::Account(alice_account),
         created_at: UtcSecond::from_unix_seconds(1),
     });
-    assert!(
-        DomainState::restore(
-            state.revision(),
-            vec![account.clone()],
-            vec![bad_mask],
-            Vec::new()
-        )
-        .is_err()
-    );
+    assert!(restore(accounts(), sessions(), vec![bad_mask]).is_err());
 
-    let restored = DomainState::restore(
-        state.revision(),
-        vec![account.clone()],
-        vec![channel.clone()],
-        Vec::new(),
-    )?;
+    let restored = restore(accounts(), sessions(), channels())?;
     assert!(snapshot(&restored) == projection);
-    assert_eq!(restored.session_count(), 0);
+    assert_eq!(restored.session_count(), 1);
     assert_eq!(
         restored.channel(room).map(|channel| channel.member_count()),
-        Some(0)
+        Some(1)
     );
     assert_eq!(
         restored.resolve_channel(&ChannelNameValue::parse("#ROOM")?),

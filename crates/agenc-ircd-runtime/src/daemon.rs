@@ -87,8 +87,8 @@ use crate::runtime_config::{
     reload_channel, reload_preparation_channel,
 };
 use crate::state_core::durable::{
-    AccountingCeilings, AdminMutationAfterImage, KeyDeriver, project_admin_policy_backfill,
-    read_back_record,
+    AccountingCeilings, AdminMutationAfterImage, KeyDeriver, PlanProjection,
+    project_admin_policy_backfill, project_batch, read_back_record,
 };
 use crate::state_core::inbox::{
     ConnectionCloseInbox, ConnectionClosePort, LifecycleControl, LifecycleFailure, LifecyclePhase,
@@ -309,7 +309,7 @@ pub fn serve(config_path: &Path) -> Result<DaemonExit, DaemonError> {
     if !hardening.secrets_locked {
         observer.hardening_warning();
     }
-    let storage = LiveStorage::open(&config, &secrets, &operators)?;
+    let storage = LiveStorage::open(&config, &secrets, &operators, process_clock)?;
     observer.storage_recovered();
     let result = runtime.block_on(run(DaemonRunInputs {
         config_path: config_path.to_path_buf(),
@@ -366,10 +366,12 @@ struct LiveStorage {
 }
 
 impl LiveStorage {
+    // agenc-review: focus owner=runtime reviewed=2026-09-01 reason=single startup storage boundary opens reconstructs reconciles stale sessions and loads audit authority before listener admission
     fn open(
         config: &Config,
         secrets: &SecretSet,
         operators: &OperatorRegistry,
+        process_clock: SystemMonotonicClock,
     ) -> Result<Self, DaemonError> {
         let qualifications = embedded_storage_qualifications()?;
         let state_directory = StateDirectory::open(&config.storage.state_dir, &qualifications)?;
@@ -382,7 +384,25 @@ impl LiveStorage {
             storage.database_binding(),
             storage.storage_key_generation(),
         )?;
-        let reconstruction = reconstruct(&seed, &owner.port(), &keys)?;
+        let reconstruction_utc = SystemWallClock
+            .utc_now()
+            .map_err(|_| DaemonError::Runtime(RuntimeError::InvalidValue))?;
+        let mut reconstruction = reconstruct(
+            &seed,
+            &owner.port(),
+            &keys,
+            process_clock.now(),
+            reconstruction_utc,
+        )?;
+        reconcile_recovered_sessions(
+            &owner.port(),
+            &mut reconstruction,
+            &keys,
+            AccountingCeilings {
+                database_max_bytes: config.storage.database_max_bytes,
+                backup_max_bytes: config.storage.backup_max_bytes,
+            },
+        )?;
         let trust = load_audit_trust_manifest(&config.moderation.audit_trust_manifest_file)?;
         let audit_keys = KeyDeriver::new(
             StorageMasterKey::from_bytes(*secrets.storage_master().expose()),
@@ -735,6 +755,108 @@ fn startup_transaction_id() -> Result<TransactionId, DaemonError> {
         .fill_exact(&mut bytes)
         .map_err(|_| RuntimeError::Storage(StorageError::Unavailable))?;
     Ok(TransactionId::from_bytes(bytes))
+}
+
+fn reconcile_recovered_sessions(
+    storage: &StoragePort,
+    reconstruction: &mut Reconstruction,
+    keys: &KeyDeriver,
+    ceilings: AccountingCeilings,
+) -> Result<(), DaemonError> {
+    loop {
+        let next_user_id = { reconstruction.domain.session_user_ids().next() };
+        let Some(user_id) = next_user_id else {
+            return Ok(());
+        };
+        let plan = reconstruction
+            .domain
+            .plan_session_disconnected(user_id)
+            .map_err(|_| startup_stale_state())?;
+        commit_startup_plan(storage, reconstruction, keys, ceilings, plan)?;
+    }
+}
+
+fn commit_startup_plan(
+    storage: &StoragePort,
+    reconstruction: &mut Reconstruction,
+    keys: &KeyDeriver,
+    ceilings: AccountingCeilings,
+    plan: agenc_ircd_domain::MutationPlan,
+) -> Result<(), DaemonError> {
+    let transaction_id = startup_transaction_id()?;
+    let expected_revision = plan.resulting_revision();
+    let projections = [PlanProjection {
+        plan: &plan,
+        response_count_increment: 0,
+        account_service_writes: &[],
+    }];
+    let mut entropy = OsEntropy;
+    let projected = project_batch(
+        transaction_id,
+        &projections,
+        &reconstruction.index,
+        keys,
+        reconstruction.head,
+        ceilings,
+        &mut entropy,
+    )?
+    .ok_or_else(startup_stale_state)?;
+    let (batch, retained) = projected.into_parts();
+    let receipt = match storage.try_commit(batch)?.wait()? {
+        CommitOutcome::Committed(receipt)
+            if receipt.transaction_id == transaction_id
+                && receipt.state_generation == expected_revision.get() =>
+        {
+            receipt
+        }
+        CommitOutcome::Committed(_) | CommitOutcome::Indeterminate => {
+            return Err(DaemonError::Runtime(RuntimeError::Storage(
+                StorageError::Unavailable,
+            )));
+        }
+        CommitOutcome::Rejected(error) => return Err(DaemonError::Storage(error)),
+    };
+    reconstruction.head = retained.advance(&receipt);
+    reconstruction.index.apply(retained.updates());
+    refresh_startup_rows(storage, reconstruction, receipt.storage_commit_sequence)?;
+    let prepared = reconstruction
+        .domain
+        .prepare_mutation(plan)
+        .map_err(|_| startup_stale_state())?;
+    let applied = reconstruction
+        .domain
+        .apply_prepared(prepared)
+        .map_err(|_| startup_stale_state())?;
+    if applied.revision() != expected_revision {
+        return Err(startup_stale_state());
+    }
+    Ok(())
+}
+
+fn refresh_startup_rows(
+    storage: &StoragePort,
+    reconstruction: &mut Reconstruction,
+    storage_commit_sequence: u64,
+) -> Result<(), DaemonError> {
+    let pending = reconstruction.index.pending_rows();
+    let mut rows = Vec::new();
+    rows.try_reserve_exact(pending.len())
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    for (table, key) in pending {
+        let result = storage
+            .try_read(ReadPlan::exact(table, key.clone()))?
+            .wait()?;
+        if result.storage_commit_sequence != storage_commit_sequence {
+            return Err(startup_stale_state());
+        }
+        rows.push(read_back_record(table, key, result)?);
+    }
+    reconstruction.index.refresh(rows)?;
+    Ok(())
+}
+
+fn startup_stale_state() -> DaemonError {
+    DaemonError::Runtime(RuntimeError::Storage(StorageError::StaleState))
 }
 
 fn registration_config(

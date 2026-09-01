@@ -10,7 +10,8 @@ use std::fmt;
 
 use agenc_ircd_types::{
     AccountId, ChannelInstanceId, ControlPolicy, EntryId, Generation, InviteId, MaskSubject,
-    MessageId, PublicCloak, Revision, ServerId, SessionId, TypedMask, UserId, UtcSecond,
+    MessageId, MonotonicTick, PublicCloak, Revision, ServerId, SessionId, TypedMask, UserId,
+    UtcSecond,
 };
 
 use crate::error::DomainError;
@@ -313,10 +314,6 @@ pub struct DurableMembership {
 }
 
 impl DurableMembership {
-    #[expect(
-        dead_code,
-        reason = "enabled with complete channel projection at the Stage 06 writer cutover"
-    )]
     fn from_state(membership: &crate::Membership) -> Self {
         Self {
             user_id: membership.user_id,
@@ -356,10 +353,6 @@ pub struct DurableInvite {
 }
 
 impl DurableInvite {
-    #[expect(
-        dead_code,
-        reason = "enabled with complete channel projection at the Stage 06 writer cutover"
-    )]
     fn from_state(invite: &crate::model::Invite) -> Self {
         Self {
             invite_id: invite.invite_id,
@@ -368,6 +361,26 @@ impl DurableInvite {
             creation_revision: invite.creation_revision,
             expires_at_utc: invite.expires_at_utc,
         }
+    }
+
+    fn into_state(
+        self,
+        monotonic_now: MonotonicTick,
+        utc_now: UtcSecond,
+    ) -> Result<crate::model::Invite, DomainError> {
+        let remaining_seconds = self.expires_at_utc.get().saturating_sub(utc_now.get());
+        let remaining_milliseconds = remaining_seconds
+            .checked_mul(1_000)
+            .ok_or(DomainError::Overflow)?;
+        let expires_at = monotonic_now.checked_add(remaining_milliseconds)?;
+        Ok(crate::model::Invite {
+            invite_id: self.invite_id,
+            target: self.target,
+            inviter: self.inviter,
+            creation_revision: self.creation_revision,
+            expires_at,
+            expires_at_utc: self.expires_at_utc,
+        })
     }
 }
 
@@ -407,7 +420,7 @@ pub struct DurableChannel {
     pub visibility: Visibility,
     /// Accepted content route.
     pub content_policy: ContentPolicy,
-    /// Lifetime policy; a persisted channel is always registered.
+    /// Lifetime policy; global ephemeral channels persist while they exist.
     pub persistence: PersistencePolicy,
     /// Creator authority.
     pub creator: Principal,
@@ -444,9 +457,11 @@ pub struct DurableChannel {
 }
 
 impl DurableChannel {
-    /// Projects a registered channel during the decoder-first compatibility phase.
+    /// Projects one channel whose authority survives a coordinator restart.
     pub(crate) fn from_state(channel: &ChannelState) -> Option<Self> {
-        if channel.persistence != PersistencePolicy::Registered {
+        if channel.scope == ChannelScope::Local
+            && channel.persistence == PersistencePolicy::Ephemeral
+        {
             return None;
         }
         Some(Self {
@@ -463,10 +478,11 @@ impl DurableChannel {
             key_verifier: channel.key_verifier,
             member_limit: channel.member_limit,
             topic: channel.topic.as_ref().map(DurableTopic::from_state),
-            // The decoder-first compatibility phase keeps live projections on
-            // the legacy registered-channel shape until session reconstruction
-            // and startup reconciliation are enabled in the same cutover.
-            memberships: Vec::new(),
+            memberships: channel
+                .memberships
+                .values()
+                .map(DurableMembership::from_state)
+                .collect(),
             role_grants: channel
                 .role_grants
                 .iter()
@@ -487,14 +503,34 @@ impl DurableChannel {
                 .iter()
                 .map(DurableListEntry::from_state)
                 .collect(),
-            invites: Vec::new(),
+            invites: channel
+                .invites
+                .values()
+                .map(DurableInvite::from_state)
+                .collect(),
             history: channel.history,
-            e2ee_removal_pending: Vec::new(),
+            e2ee_removal_pending: channel.e2ee_removal_pending.iter().copied().collect(),
             admin_quarantined: channel.admin_quarantined,
         })
     }
 
     pub(crate) fn into_state(self) -> Result<ChannelState, DomainError> {
+        self.into_state_inner(None)
+    }
+
+    pub(crate) fn into_state_with_clocks(
+        self,
+        monotonic_now: MonotonicTick,
+        utc_now: UtcSecond,
+    ) -> Result<ChannelState, DomainError> {
+        self.into_state_inner(Some((monotonic_now, utc_now)))
+    }
+
+    // agenc-review: focus owner=domain reviewed=2026-09-01 reason=one channel decoder validates canonical collections and rebases invite clocks before constructing authoritative state
+    fn into_state_inner(
+        self,
+        clocks: Option<(MonotonicTick, UtcSecond)>,
+    ) -> Result<ChannelState, DomainError> {
         if (self.scope == ChannelScope::Local && self.persistence == PersistencePolicy::Ephemeral)
             || !strictly_ascending(
                 &self
@@ -510,11 +546,30 @@ impl DurableChannel {
                     .map(|membership| membership.user_id)
                     .collect::<Vec<_>>(),
             )
-            || !self.invites.is_empty()
+            || !strictly_ascending(
+                &self
+                    .invites
+                    .iter()
+                    .map(|invite| invite.invite_id)
+                    .collect::<Vec<_>>(),
+            )
+            || (clocks.is_none() && !self.invites.is_empty())
             || !strictly_ascending(&self.e2ee_removal_pending)
         {
             return Err(DomainError::InvalidArgument);
         }
+        let invites = match clocks {
+            Some((monotonic_now, utc_now)) => self
+                .invites
+                .into_iter()
+                .map(|invite| {
+                    invite
+                        .into_state(monotonic_now, utc_now)
+                        .map(|invite| (invite.invite_id, invite))
+                })
+                .collect::<Result<_, _>>()?,
+            None => Default::default(),
+        };
         Ok(ChannelState {
             channel_id: self.channel_id,
             name: self.name,
@@ -538,7 +593,7 @@ impl DurableChannel {
             bans: entries_into_state(self.bans)?,
             exceptions: entries_into_state(self.exceptions)?,
             invite_exceptions: entries_into_state(self.invite_exceptions)?,
-            invites: Default::default(),
+            invites,
             history: self.history,
             e2ee_removal_pending: self.e2ee_removal_pending.into_iter().collect(),
             admin_quarantined: self.admin_quarantined,
@@ -691,7 +746,11 @@ pub enum DurableWrite {
     PutAccount(DurableAccount),
     /// Retire one account permanently.
     TombstoneAccount(AccountId),
-    /// Store the complete after-image of one registered channel.
+    /// Store the complete after-image of one logical session.
+    PutSession(DurableSession),
+    /// Retire one connection-bound session permanently.
+    TombstoneSession(SessionId),
+    /// Store the complete after-image of one durable channel.
     PutChannel(DurableChannel),
     /// Retire one channel that stops being registered.
     TombstoneChannel {
@@ -824,6 +883,13 @@ impl fmt::Debug for DurableWrite {
                 .debug_tuple("TombstoneAccount")
                 .field(account_id)
                 .finish(),
+            Self::PutSession(session) => {
+                formatter.debug_tuple("PutSession").field(session).finish()
+            }
+            Self::TombstoneSession(session_id) => formatter
+                .debug_tuple("TombstoneSession")
+                .field(session_id)
+                .finish(),
             Self::PutChannel(channel) => {
                 formatter.debug_tuple("PutChannel").field(channel).finish()
             }
@@ -841,10 +907,25 @@ impl fmt::Debug for DurableWrite {
 
 #[cfg(test)]
 mod tests {
-    use agenc_ircd_types::{AccountRandomId, Generation, Revision, TypedMask, UserId};
+    use agenc_ircd_types::{
+        AccountRandomId, Generation, InviteId, MonotonicTick, Revision, TypedMask, UserId,
+        UtcSecond,
+    };
 
-    use super::{DurableAccount, typed_mask_text};
-    use crate::{DirectMessagePolicy, GuestDirectMessagePolicy, NicknameValue, PresencePolicy};
+    use super::{DurableAccount, DurableInvite, typed_mask_text};
+    use crate::{
+        DirectMessagePolicy, GuestDirectMessagePolicy, NicknameValue, PresencePolicy, Principal,
+    };
+
+    fn durable_invite(expires_at: u64) -> Result<DurableInvite, crate::DomainError> {
+        Ok(DurableInvite {
+            invite_id: InviteId::from_bytes([8; 16]),
+            target: Principal::Guest(UserId::from_bytes([9; 16])),
+            inviter: UserId::from_bytes([10; 16]),
+            creation_revision: Revision::new(1)?,
+            expires_at_utc: UtcSecond::from_unix_seconds(expires_at),
+        })
+    }
 
     #[test]
     fn typed_mask_text_round_trips_every_subject_and_the_quiet_wrapper()
@@ -864,6 +945,26 @@ mod tests {
             assert!(TypedMask::parse(&typed_mask_text(&mask))? == mask);
         }
         assert_eq!(typed_mask_text(&TypedMask::parse("$n:a**b")?), "$n:a*b");
+        Ok(())
+    }
+
+    #[test]
+    fn durable_invite_rebases_remaining_utc_onto_monotonic_time() -> Result<(), crate::DomainError>
+    {
+        let invite = durable_invite(110)?.into_state(
+            MonotonicTick::from_ticks(5_000),
+            UtcSecond::from_unix_seconds(100),
+        )?;
+        assert_eq!(invite.expires_at, MonotonicTick::from_ticks(15_000));
+        assert_eq!(invite.expires_at_utc, UtcSecond::from_unix_seconds(110));
+        Ok(())
+    }
+
+    #[test]
+    fn expired_durable_invite_is_non_live_at_restart_time() -> Result<(), crate::DomainError> {
+        let now = MonotonicTick::from_ticks(5_000);
+        let invite = durable_invite(99)?.into_state(now, UtcSecond::from_unix_seconds(100))?;
+        assert_eq!(invite.expires_at, now);
         Ok(())
     }
 
