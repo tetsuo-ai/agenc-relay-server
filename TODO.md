@@ -56,7 +56,7 @@ References: [Architecture §§1.2–4](docs/ircd-architecture-and-implementation
 | 03 | Pure deterministic domain model | Complete | Pass, 2026-08-27 | [Current checkpoint](conformance/evidence/stage-03-1e5b738468f88b238061cc6e84b732176f5cae65.json) |
 | 04 | Crypto adapters and account authentication | Complete | Pass, 2026-08-29 | [Current checkpoint](conformance/evidence/stage-04-4040796f2c21774d58ea7ce54e70a080678e83ac.json) |
 | 05 | Durable and recoverable persistence | Complete | Pass, 2026-08-29 | [Current checkpoint](conformance/evidence/stage-05-4040796f2c21774d58ea7ce54e70a080678e83ac.json) |
-| 06 | Conforming single-node daemon | Not started | Not run | Absent |
+| 06 | Conforming single-node daemon | Implementation merged; closure in progress | Fail, 2026-09-01 (`check-source`) | Absent |
 | 07 | Conforming base federation | Not started | Not run | Absent |
 | 08 | Conforming E2EE server adapter | Not started | Not run | Absent |
 | 09 | Optional WSS and history profiles | Not started | Not run | Absent |
@@ -948,12 +948,18 @@ TLS-only direct, Tor-exit, and onion profiles.
 
 ### Stage 06 completion checklist
 
-This checklist starts from commit
-`197cbcb3423cecbf424dd3c06046c2d63f9ab02c` on `stage-06-runtime`. The
-local and remote branches match at that commit, the working tree is clean, and
-the branch contains 73 commits beyond the local `main` pointer. Use the task
-definitions below as the acceptance authority. This checklist sets the order
-for closing them without creating another development line.
+This checklist started from commit
+`197cbcb3423cecbf424dd3c06046c2d63f9ab02c` on `stage-06-runtime`.
+Implementation through `S06-001` to `S06-015` was committed on that branch,
+pushed, and merged by PR #14. The branch head was
+`1c91131ce0b411717a1a3ddb15a0202fc8312ce3`; the merge commit is
+`3a517e9482fe51d7983dc5b9c998fd472e41c600`.
+
+The merge did not close Stage 06. The cloud gate failed in `check-source`, the
+coverage and requirement-ledger checkpoints remain open, and no exact-SHA
+Stage 06 evidence exists. The commit-point boxes below record which work
+landed. The `S06-*` task boxes remain open until their required evidence passes
+for one exact revision.
 
 #### Branch and worktree control
 
@@ -962,17 +968,19 @@ for closing them without creating another development line.
 - [x] Keep all Stage 06 commits on `stage-06-runtime` and push them to
   `origin/stage-06-runtime`.
 - [x] Remove the obsolete Stage 06 worktrees and branch pointers.
-- [ ] Do not create another persistent Stage 06 worktree or branch.
-- [ ] Treat `main` only as the comparison and pull-request base.
+- [x] Do not create another persistent Stage 06 worktree or branch.
+- [x] Treat `main` only as the comparison and pull-request base during Stage 06
+  implementation.
 - [ ] Before editing a code symbol, run the required GitNexus upstream impact
   check. Report HIGH or CRITICAL risk before editing and run focused regression
   tests after changing a high-impact symbol.
 - [ ] Before every commit, run GitNexus `detect_changes` for the staged work and
   compare the branch with `main`.
-- [ ] Commit one reviewed slice at a time and push it to the same remote branch.
-- [ ] Do not create empty commits when an audit finds that the existing code and
+- [x] Commit the implementation as focused slices on the same remote branch.
+- [x] Do not create empty commits when an audit finds that the existing code and
   tests already prove a slice.
-- [ ] Do not merge the final pull request.
+- [ ] Do not merge the final pull request before the cloud gate and exact-SHA
+  evidence pass. This was violated when PR #14 was merged.
 
 #### Verified starting state
 
@@ -1033,14 +1041,15 @@ for closing them without creating another development line.
 
 Commit point 1
 
-- [ ] Stage only configuration, initialization, TLS, transport, and directly
-  related test or deployment changes found by the audit.
-- [ ] Run formatting, the config tests, focused TLS and listener tests, the
-  transport transcripts, source checks, and relevant deployment checks.
+- [x] Land configuration, initialization, TLS, transport, and directly related
+  test and deployment changes. The closing commits include `86f56f3`,
+  `128d6e2`, `874e005`, `ea69589`, and `448918f`.
+- [ ] Re-run formatting, config tests, focused TLS and listener tests,
+  transport transcripts, source checks, and deployment checks on the exact
+  closure revision.
 - [ ] Run GitNexus `detect_changes` before committing.
-- [ ] Commit with an imperative subject such as
-  `Close Stage 06 configuration and transport gaps`.
-- [ ] Push `stage-06-runtime`.
+- [x] Commit the changes with imperative subjects.
+- [x] Push the changes to `stage-06-runtime`.
 
 #### Runtime ownership, memory, durability, sessions, and messaging
 
@@ -1127,14 +1136,16 @@ Commit point 1
 
 Commit point 2
 
-- [ ] Stage only task-tree, lifecycle, memory, connection, StateCore, session,
-  channel, timer, and directly related test changes found by the audit.
-- [ ] Run formatting, focused package tests, Stage 06 persistence tests, Loom,
-  runtime transcripts, shutdown tests, and source checks.
+- [x] Land task-tree, lifecycle, memory, connection, StateCore, session,
+  channel, timer, and directly related test changes. The closing commits
+  include `1b335f4`, `70418ec`, `0e508c9`, `0153dbc`, `35c0198`, `1a0c4b3`,
+  `3f91e9a`, `ab97fdb`, `fe0355f`, `f30d61d`, `4daf54a`, and `1c91131`.
+- [ ] Re-run formatting, focused package tests, Stage 06 persistence tests,
+  Loom, runtime transcripts, shutdown tests, and source checks on the exact
+  closure revision.
 - [ ] Run GitNexus `detect_changes` before committing.
-- [ ] Commit with an imperative subject such as
-  `Close Stage 06 runtime ownership gaps`.
-- [ ] Push `stage-06-runtime`.
+- [x] Commit the changes with imperative subjects.
+- [x] Push the changes to `stage-06-runtime`.
 
 #### Isolated administration and audit
 
@@ -1180,14 +1191,15 @@ Commit point 2
 
 Commit point 3
 
-- [ ] Stage only administration, audit, admin transport, and directly related
-  tests found by the audit.
-- [ ] Run formatting, admin crate tests, focused runtime admin tests, admin
-  transcripts, audit reconstruction tests, and source checks.
+- [x] Land administration, audit, admin transport, and directly related test
+  changes. The closing commits include `70418ec`, `30a04fc`, `e3621ea`,
+  `cf7d73b`, and `d1e7a37`.
+- [ ] Re-run formatting, admin crate tests, focused runtime admin tests, admin
+  transcripts, audit reconstruction tests, and source checks on the exact
+  closure revision.
 - [ ] Run GitNexus `detect_changes` before committing.
-- [ ] Commit with an imperative subject such as
-  `Close Stage 06 administration and audit gaps`.
-- [ ] Push `stage-06-runtime`.
+- [x] Commit the changes with imperative subjects.
+- [x] Push the changes to `stage-06-runtime`.
 
 #### Atomic live reload and operational limits
 
@@ -1231,14 +1243,15 @@ Commit point 3
 
 Commit point 4
 
-- [ ] Stage only reload, operational-limit, operator-update, and directly
-  related test changes found by the audit.
-- [ ] Run formatting, config tests, focused runtime reload tests, reload race
-  tests, Loom where applicable, and source checks.
+- [x] Land reload, operational-limit, operator-update, and directly related
+  test changes. The closing commits include `3f89b2b`, `857b524`, `8195592`,
+  `6dd48e2`, `6ab1d61`, `bd43602`, and `6f97477`.
+- [ ] Re-run formatting, config tests, focused runtime reload tests, reload
+  race tests, Loom where applicable, and source checks on the exact closure
+  revision.
 - [ ] Run GitNexus `detect_changes` before committing.
-- [ ] Commit with an imperative subject such as
-  `Close Stage 06 reload and limit gaps`.
-- [ ] Push `stage-06-runtime`.
+- [x] Commit the changes with imperative subjects.
+- [x] Push the changes to `stage-06-runtime`.
 
 #### Observability and authenticated health
 
@@ -1275,14 +1288,15 @@ Commit point 4
 
 Commit point 5
 
-- [ ] Stage only observability, logging, health, readiness, liveness, and
-  directly related test changes found by the audit.
-- [ ] Run formatting, focused observability and health tests, forbidden-value
-  scans, log-retention tests, shutdown-flush tests, and source checks.
+- [x] Land observability, logging, health, readiness, liveness, and directly
+  related test changes. The closing commits include `1b335f4`, `32d2fe1`, and
+  `b29279e`.
+- [ ] Re-run formatting, focused observability and health tests,
+  forbidden-value scans, log-retention tests, shutdown-flush tests, and source
+  checks on the exact closure revision.
 - [ ] Run GitNexus `detect_changes` before committing.
-- [ ] Commit with an imperative subject such as
-  `Close Stage 06 observability and health gaps`.
-- [ ] Push `stage-06-runtime`.
+- [x] Commit the changes with imperative subjects.
+- [x] Push the changes to `stage-06-runtime`.
 
 #### Shutdown and service hardening
 
@@ -1323,20 +1337,20 @@ Commit point 5
 
 Commit point 6
 
-- [ ] Stage only shutdown, lifecycle, binary-exit, systemd, deployment,
-  operator-documentation, and directly related test changes found by the
-  audit.
-- [ ] Run formatting, focused shutdown and daemon tests, Loom, deployment
-  check and self-test, host qualification, and source checks.
+- [x] Land shutdown, lifecycle, binary-exit, systemd, deployment,
+  operator-documentation, and directly related test changes. The closing
+  commits include `2aa113f`, `250a088`, `448918f`, and `d1e7a37`.
+- [ ] Re-run formatting, focused shutdown and daemon tests, Loom, deployment
+  checks, host qualification, and source checks on the exact closure
+  revision.
 - [ ] Run GitNexus `detect_changes` before committing.
-- [ ] Commit with an imperative subject such as
-  `Close Stage 06 shutdown and deployment gaps`.
-- [ ] Push `stage-06-runtime`.
+- [x] Commit the changes with imperative subjects.
+- [x] Push the changes to `stage-06-runtime`.
 
 #### Coverage closure
 
 - [ ] Review the production-source coverage inventory. It records 88 files,
-  while the starting commit contains 193 production Rust source files.
+  while merged `main` contains 196 production Rust source files.
 - [ ] Review every added or changed production file for a new
   security-sensitive 100-percent region before updating the inventory count
   and hash.
@@ -1347,6 +1361,9 @@ Commit point 6
   classification and activation, shutdown transitions, transport admission,
   durable application, and health decisions for new 100-percent regions.
 - [ ] Map uncovered outcomes before adding tests or changing production code.
+- [ ] Generate a fresh full-workspace report. The last available report predates
+  the final implementation commits and records 77.53 percent branch coverage
+  and 90.55 percent line coverage; it is not closure evidence.
 - [ ] Start with the largest uncovered runtime files from the baseline report.
   - [ ] `account_service.rs`, 407 uncovered branch outcomes.
   - [ ] `admin.rs`, 115 uncovered branch outcomes.
@@ -1375,14 +1392,13 @@ Commit point 6
 
 Commit point 7
 
-- [ ] Stage only focused coverage tests, reviewed source changes, and the
-  coverage policy.
+- [x] Add focused Stage 06 coverage tests in commit `137e709`.
 - [ ] Run formatting, affected package tests, the full workspace coverage run,
   the coverage checker, and source checks.
 - [ ] Run GitNexus `detect_changes` before committing.
-- [ ] Commit with an imperative subject such as
-  `Close Stage 06 branch coverage`.
-- [ ] Push `stage-06-runtime`.
+- [x] Commit and push the partial coverage work to `stage-06-runtime`.
+- [ ] Commit point 7 is closed only after the branch and critical-region
+  thresholds pass on the exact closure revision.
 
 #### Requirement ledger and conformance records
 
@@ -1414,14 +1430,14 @@ Commit point 7
 
 Commit point 8
 
-- [ ] Stage only `TODO.md`, requirement bindings, the generated requirement
-  ledger, evidence catalog, runtime profile, transcript catalog, coverage
-  regions, gate maps, CI metadata, and directly related conformance files.
+- [x] Add the Stage 06 gate, task-level evidence catalog, runtime profile,
+  transcript catalog, CI metadata, and related conformance files in commits
+  `e4e2492` and `945977f`.
 - [ ] Run every generator and checker that owns a staged generated file.
 - [ ] Run GitNexus `detect_changes` before committing.
-- [ ] Commit with an imperative subject such as
-  `Close Stage 06 conformance records`.
-- [ ] Push `stage-06-runtime`.
+- [x] Commit and push the partial conformance work to `stage-06-runtime`.
+- [ ] Commit point 8 is closed only after all 39 requirement-level records and
+  all 55 Stage 06 evidence records pass their checks.
 
 #### Full implementation gate
 
@@ -1430,7 +1446,8 @@ Commit point 8
   1.98.0, nightly 2026-08-24, `cargo-deny` 0.20.2, `cargo-audit` 0.22.2,
   `cargo-llvm-cov` 0.9.0, and `cargo-fuzz` 0.13.2.
 - [ ] Run `bash scripts/check-stage-six.sh` without evidence recording until
-  all 75 inherited and Stage 06 commands pass from a clean tree.
+  all 75 inherited and Stage 06 commands pass from a clean tree. The merged
+  revision currently stops at `check-source` before the later commands run.
 - [ ] Confirm that the gate includes formatting, native and cross-target
   checks, Clippy, workspace and documentation tests, dependency denial,
   advisory audit, source and workspace checks, coverage, all earlier-stage
@@ -1438,7 +1455,7 @@ Commit point 8
   host qualification, and fuzzing.
 - [ ] Run both Stage 06 fuzz targets for 10,000 iterations with the fixed seed
   and configured bounds.
-- [ ] Do not claim the seven-day production soak assigned to `S10-007`.
+- [x] Do not claim the seven-day production soak assigned to `S10-007`.
 - [ ] Check `S06-900` only after the full non-recording gate passes.
 - [ ] Update the Stage 06 status text to say that implementation passes and
   exact-revision evidence remains pending.
@@ -1446,11 +1463,11 @@ Commit point 8
 Commit point 9
 
 - [ ] Run GitNexus `detect_changes` for the complete branch against `main`.
-- [ ] Confirm that the working tree contains no unrelated or generated
+- [x] Confirm that the implementation branch contained no unrelated or generated
   residue.
-- [ ] Commit the final source and conformance state with an imperative subject
-  such as `Finish Stage 06 core-v1 implementation`.
-- [ ] Push `stage-06-runtime` and record the exact source commit SHA.
+- [x] Commit and push the last implementation source as
+  `1c91131ce0b411717a1a3ddb15a0202fc8312ce3`.
+- [ ] Commit point 9 is closed only after the full non-recording gate passes.
 
 #### Exact-SHA evidence
 
@@ -1504,20 +1521,24 @@ Commit point 10
 
 #### Pull request and cloud checks
 
-- [ ] Open one pull request from `stage-06-runtime` to `main` containing the
+- [x] Open PR #14 from `stage-06-runtime` to `main` containing the
   full Stage 06 history.
-- [ ] List the affected specification sections and invariants.
-- [ ] Describe wire, persistence, dependency, privacy, and security effects.
-- [ ] List every validation command and its exact result.
-- [ ] Keep WSS assigned to Stage 09, federation behavior assigned to Stage 07,
+- [x] List the affected specification sections and invariants.
+- [x] Describe wire, persistence, dependency, privacy, and security effects.
+- [x] List the validation commands and known host limitations.
+- [x] Keep WSS assigned to Stage 09, federation behavior assigned to Stage 07,
   and E2EE behavior assigned to Stage 08.
-- [ ] Add no HTTP metrics listener, socket-activation claim, plaintext
+- [x] Add no HTTP metrics listener, socket-activation claim, plaintext
   endpoint, wildcard permission, storage-table change, production test double,
   or unreviewed production dependency.
-- [ ] Monitor the cloud-agent checks and fix failures on the same branch.
+- [x] Merge PR #14 as
+  `3a517e9482fe51d7983dc5b9c998fd472e41c600`.
+- [ ] Fix the failed cloud gate. It stopped at `check-source` because
+  `crates/agenc-ircd-config/src/paths.rs` has a lint allowance without the
+  required review annotation.
 - [ ] Repeat exact-SHA evidence after any source fix.
 - [ ] Leave the pull request open for the cloud-agent and repository-owner
-  merge gate.
+  merge gate. This was violated when PR #14 was merged before the gate passed.
 
 - [ ] `S06-001` **Implement strict configuration parsing and validation.**
   Parse TOML into an untrusted intermediate, reject unknowns, validate the full
