@@ -416,6 +416,11 @@ impl SessionTable {
     pub fn queue_snapshot(&self) -> ClientQueueSnapshot {
         let mut queued_bytes = 0_u64;
         let mut capacity_bytes = 0_u64;
+        let mut query_snapshots = 0_u64;
+        let mut query_rows = 0_u64;
+        let mut query_bytes = 0_u64;
+        let mut largest_query_rows = 0_u64;
+        let mut max_query_snapshots_per_session = 0_u64;
         for snapshot in self
             .connections
             .values()
@@ -424,8 +429,22 @@ impl SessionTable {
         {
             queued_bytes = queued_bytes.saturating_add(snapshot.queued_bytes());
             capacity_bytes = capacity_bytes.saturating_add(snapshot.capacity_bytes());
+            query_snapshots = query_snapshots.saturating_add(snapshot.query_snapshots());
+            query_rows = query_rows.saturating_add(snapshot.query_rows());
+            query_bytes = query_bytes.saturating_add(snapshot.query_bytes());
+            largest_query_rows = largest_query_rows.max(snapshot.largest_query_rows());
+            max_query_snapshots_per_session =
+                max_query_snapshots_per_session.max(snapshot.max_query_snapshots_per_session());
         }
-        ClientQueueSnapshot::new(queued_bytes, capacity_bytes)
+        ClientQueueSnapshot::with_query_usage(
+            queued_bytes,
+            capacity_bytes,
+            query_snapshots,
+            query_rows,
+            query_bytes,
+            largest_query_rows,
+            max_query_snapshots_per_session,
+        )
     }
 }
 

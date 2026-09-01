@@ -20,8 +20,8 @@ use crate::budget::{
 };
 use crate::connection::sink::{
     BoundedSharedClientFrames, ClientQueueDemand, ClientQueueReservation, ClientSink,
-    ConnectionGeneration, MAX_DEMAND_FRAMES, QueueAllocationError, SinkReserveError,
-    TentativeClientQueueReservation,
+    ConnectionGeneration, MAX_DEMAND_BYTES, MAX_DEMAND_FRAMES, QuerySnapshotPermit,
+    QueueAllocationError, SinkReserveError, TentativeClientQueueReservation,
 };
 use crate::sync::Arc;
 
@@ -267,8 +267,49 @@ pub fn reserve(
     request: &FanoutRequest,
     budget: &dyn MemoryBudgetPort,
 ) -> Result<FanoutReservation, FanoutRefused> {
+    reserve_bounded(request, budget, MAX_DEMAND_BYTES)
+}
+
+/// Reserves a fanout while enforcing the live per-response byte ceiling on
+/// each sink's exact whole demand.
+pub(crate) fn reserve_bounded(
+    request: &FanoutRequest,
+    budget: &dyn MemoryBudgetPort,
+    max_response_batch_bytes: usize,
+) -> Result<FanoutReservation, FanoutRefused> {
+    reserve_inner(request, budget, max_response_batch_bytes, None)
+}
+
+/// Reserves one query response and transfers its immutable-snapshot lease to
+/// the destination queue only when that whole response commits.
+pub(crate) fn reserve_query(
+    request: &FanoutRequest,
+    budget: &dyn MemoryBudgetPort,
+    max_response_batch_bytes: usize,
+    query_snapshot: QuerySnapshotPermit,
+) -> Result<FanoutReservation, FanoutRefused> {
+    if request.target_count() != 1 {
+        return Err(RuntimeError::InvalidValue.into());
+    }
+    reserve_inner(
+        request,
+        budget,
+        max_response_batch_bytes,
+        Some(query_snapshot),
+    )
+}
+
+fn reserve_inner(
+    request: &FanoutRequest,
+    budget: &dyn MemoryBudgetPort,
+    max_response_batch_bytes: usize,
+    mut query_snapshot: Option<QuerySnapshotPermit>,
+) -> Result<FanoutReservation, FanoutRefused> {
+    if max_response_batch_bytes == 0 || max_response_batch_bytes > MAX_DEMAND_BYTES {
+        return Err(RuntimeError::InvalidValue.into());
+    }
     let sizes = measure_all(&request.frames)?;
-    let pass = reserve_queues(request, &sizes)?;
+    let pass = reserve_queues(request, &sizes, max_response_batch_bytes)?;
     if pass.tentatives.is_empty() {
         return Ok(FanoutReservation {
             entries: Vec::new(),
@@ -288,7 +329,12 @@ pub fn reserve(
         .try_reserve_exact(pass.tentatives.len())
         .map_err(|_| RuntimeError::MemoryExhausted)?;
     for tentative in pass.tentatives {
-        entries.push(prepare_entry(request, tentative, &encoded, &mut batch)?);
+        let snapshot = (tentative.target == 0)
+            .then(|| query_snapshot.take())
+            .flatten();
+        entries.push(prepare_entry(
+            request, tentative, &encoded, &mut batch, snapshot,
+        )?);
     }
     Ok(FanoutReservation {
         entries,
@@ -311,7 +357,11 @@ fn measure_all(frames: &[FanoutFrame]) -> Result<Vec<usize>, FanoutRefused> {
 }
 
 /// Groups the frames per sink in final order and reserves each sink whole.
-fn reserve_queues(request: &FanoutRequest, sizes: &[usize]) -> Result<QueuePass, FanoutRefused> {
+fn reserve_queues(
+    request: &FanoutRequest,
+    sizes: &[usize],
+    max_response_batch_bytes: usize,
+) -> Result<QueuePass, FanoutRefused> {
     let mut per_target: Vec<Vec<usize>> = request.targets.iter().map(|_| Vec::new()).collect();
     for (index, frame) in request.frames.iter().enumerate() {
         for recipient in &frame.recipients {
@@ -334,6 +384,14 @@ fn reserve_queues(request: &FanoutRequest, sizes: &[usize]) -> Result<QueuePass,
             .targets
             .get(target)
             .ok_or(RuntimeError::InvalidValue)?;
+        let response_bytes = frame_indices.iter().try_fold(0_usize, |total, index| {
+            total
+                .checked_add(*sizes.get(*index).ok_or(RuntimeError::InvalidValue)?)
+                .ok_or(RuntimeError::Overflow)
+        })?;
+        if response_bytes > max_response_batch_bytes {
+            return Err(RuntimeError::LimitExceeded.into());
+        }
         let demand = demand_for(&frame_indices, sizes)?;
         match entry.sink.try_reserve(demand) {
             Ok(reservation) => pass.tentatives.push(Tentative {
@@ -423,6 +481,7 @@ fn prepare_entry(
     tentative: Tentative,
     encoded: &[Option<Arc<RenderedMessage<MemoryPermit>>>],
     batch: &mut MemoryPermitBatch,
+    query_snapshot: Option<QuerySnapshotPermit>,
 ) -> Result<FanoutEntry, FanoutRefused> {
     let sink = Arc::clone(
         &request
@@ -439,9 +498,12 @@ fn prepare_entry(
                 .ok_or(RuntimeError::InvalidValue)?,
         ),
     };
-    let reservation = sink
+    let mut reservation = sink
         .prepare(tentative.reservation, backing)
         .map_err(FanoutRefused::Prepare)?;
+    if let Some(snapshot) = query_snapshot {
+        reservation = reservation.with_query_snapshot(snapshot);
+    }
     let mut frames = Vec::new();
     frames
         .try_reserve_exact(tentative.frame_indices.len())
@@ -647,6 +709,25 @@ mod tests {
         assert_ne!(live.ledger.bytes.load(Ordering::SeqCst), 0);
         assert_eq!(live.commits.load(Ordering::SeqCst), 0);
         assert_eq!(full.closes.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn live_response_byte_ceiling_refuses_before_sink_or_budget_reservation()
+    -> Result<(), FanoutRefused> {
+        let sink = RecordingSink::new(1, ReserveMode::Admit);
+        let request = FanoutRequest::new(
+            vec![sink.target()],
+            vec![FanoutFrame::new(message("larger than one byte")?, vec![0])?],
+        )?;
+        let budget = MemoryBudget::new(4_096);
+        assert_eq!(
+            reserve_bounded(&request, &budget, 1).err(),
+            Some(FanoutRefused::Invalid(RuntimeError::LimitExceeded))
+        );
+        assert_eq!(sink.ledger.frames.load(Ordering::SeqCst), 0);
+        assert_eq!(sink.ledger.bytes.load(Ordering::SeqCst), 0);
+        assert_eq!(budget.charged(), 0);
         Ok(())
     }
 

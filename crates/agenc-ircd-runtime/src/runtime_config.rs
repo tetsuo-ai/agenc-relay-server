@@ -22,7 +22,7 @@ use crate::RuntimeError;
 use crate::account_service::AccountCreationPolicy;
 use crate::admin::AdminAdmissionSnapshot;
 use crate::admission::{RateLimits, TransportAdmission};
-use crate::connection::ConnectionLimits;
+use crate::connection::{ClientQueueSnapshot, ConnectionLimits};
 use crate::state_core::durable::AccountingCeilings;
 use crate::supervisor::ShutdownPlan;
 use crate::sync::{Arc, Mutex, lock};
@@ -195,6 +195,92 @@ pub(crate) struct AccountRuntimePolicy {
     pub(crate) default_direct_messages: DirectMessagePolicy,
 }
 
+/// Copy-only resource ceilings enforced at StateCore operation boundaries.
+///
+/// Configuration validation establishes the cross-field relationships. This
+/// second checked view keeps architecture-sized integers out of allocation and
+/// queue APIs and gives StateCore one atomic value to replace during reload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RuntimeResourceLimits {
+    response_batch_bytes: usize,
+    query_snapshot_rows: u64,
+    query_snapshots_per_session: u64,
+    query_snapshot_rows_global: u64,
+    query_snapshot_bytes_global: u64,
+}
+
+impl RuntimeResourceLimits {
+    pub(crate) const HARD_MAX: Self = Self {
+        response_batch_bytes: 262_144,
+        query_snapshot_rows: 100_000,
+        query_snapshots_per_session: 16,
+        query_snapshot_rows_global: 1_000_000,
+        query_snapshot_bytes_global: 536_870_912,
+    };
+
+    fn from_config(config: &Config) -> Option<Self> {
+        let response_batch_bytes =
+            usize::try_from(config.limits.values.get(LimitKey::ResponseBatchBytes)).ok()?;
+        let limits = Self {
+            response_batch_bytes,
+            query_snapshot_rows: config.limits.values.get(LimitKey::QuerySnapshotRows),
+            query_snapshots_per_session: config
+                .limits
+                .values
+                .get(LimitKey::QuerySnapshotsPerSession),
+            query_snapshot_rows_global: config.limits.values.get(LimitKey::QuerySnapshotRowsGlobal),
+            query_snapshot_bytes_global: config
+                .limits
+                .values
+                .get(LimitKey::QuerySnapshotBytesGlobal),
+        };
+        (limits.response_batch_bytes != 0
+            && limits.response_batch_bytes <= Self::HARD_MAX.response_batch_bytes
+            && limits.query_snapshot_rows != 0
+            && limits.query_snapshot_rows <= Self::HARD_MAX.query_snapshot_rows
+            && limits.query_snapshots_per_session != 0
+            && limits.query_snapshots_per_session <= Self::HARD_MAX.query_snapshots_per_session
+            && limits.query_snapshot_rows <= limits.query_snapshot_rows_global
+            && limits.query_snapshot_rows_global <= Self::HARD_MAX.query_snapshot_rows_global
+            && limits.query_snapshot_bytes_global != 0
+            && limits.query_snapshot_bytes_global <= Self::HARD_MAX.query_snapshot_bytes_global)
+            .then_some(limits)
+    }
+
+    pub(crate) const fn response_batch_bytes(self) -> usize {
+        self.response_batch_bytes
+    }
+
+    pub(crate) fn admits_query(
+        self,
+        session: ClientQueueSnapshot,
+        global: ClientQueueSnapshot,
+        rows: u64,
+        bytes: u64,
+    ) -> bool {
+        rows <= self.query_snapshot_rows
+            && session
+                .query_snapshots()
+                .checked_add(1)
+                .is_some_and(|count| count <= self.query_snapshots_per_session)
+            && global
+                .query_rows()
+                .checked_add(rows)
+                .is_some_and(|total| total <= self.query_snapshot_rows_global)
+            && global
+                .query_bytes()
+                .checked_add(bytes)
+                .is_some_and(|total| total <= self.query_snapshot_bytes_global)
+    }
+
+    pub(crate) const fn accepts_query_usage(self, usage: ClientQueueSnapshot) -> bool {
+        usage.largest_query_rows() <= self.query_snapshot_rows
+            && usage.max_query_snapshots_per_session() <= self.query_snapshots_per_session
+            && usage.query_rows() <= self.query_snapshot_rows_global
+            && usage.query_bytes() <= self.query_snapshot_bytes_global
+    }
+}
+
 /// One immutable, ready-to-use runtime policy view.
 ///
 /// The fields remain private so consumers cannot assemble a partially
@@ -352,6 +438,10 @@ impl RuntimeConfigSnapshot {
             usize::try_from(self.config.limits.values.get(LimitKey::ChannelKeyJobs)).ok()?;
         let opaque = usize::try_from(self.config.limits.values.get(LimitKey::OpaqueJobs)).ok()?;
         Some((channel, opaque))
+    }
+
+    pub(crate) fn runtime_resource_limits(&self) -> Option<RuntimeResourceLimits> {
+        RuntimeResourceLimits::from_config(&self.config)
     }
 
     /// Returns the currently configured four-phase shutdown budget.
@@ -1058,6 +1148,58 @@ mod tests {
     {
         let snapshot = snapshot()?;
         assert_eq!(snapshot.crypto_job_ceilings(), Some((4, 8)));
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_carries_the_validated_query_and_response_ceilings()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let limits = snapshot()?
+            .runtime_resource_limits()
+            .ok_or(RuntimeError::InvalidValue)?;
+        assert_eq!(limits.response_batch_bytes(), 65_536);
+        assert_eq!(limits.query_snapshot_rows, 10_000);
+        assert_eq!(limits.query_snapshots_per_session, 4);
+        assert_eq!(limits.query_snapshot_rows_global, 100_000);
+        assert_eq!(limits.query_snapshot_bytes_global, 67_108_864);
+        Ok(())
+    }
+
+    #[test]
+    fn query_ceilings_gate_new_work_and_reload_at_exact_current_use()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let limits = snapshot()?
+            .runtime_resource_limits()
+            .ok_or(RuntimeError::InvalidValue)?;
+        let session = ClientQueueSnapshot::with_query_usage(0, 0, 3, 0, 0, 0, 3);
+        let global = ClientQueueSnapshot::with_query_usage(0, 0, 3, 90_000, 67_104_768, 9_000, 3);
+        assert!(limits.admits_query(session, global, 10_000, 4_096));
+        assert!(!limits.admits_query(session, global, 10_001, 4_096));
+        assert!(!limits.admits_query(
+            ClientQueueSnapshot::with_query_usage(0, 0, 4, 0, 0, 0, 4),
+            global,
+            1,
+            4_096,
+        ));
+        assert!(!limits.admits_query(
+            session,
+            ClientQueueSnapshot::with_query_usage(0, 0, 3, 90_001, 0, 9_000, 3),
+            10_000,
+            4_096,
+        ));
+        assert!(!limits.admits_query(session, global, 10_000, 4_097));
+
+        let exact_use =
+            ClientQueueSnapshot::with_query_usage(0, 0, 4, 100_000, 67_108_864, 10_000, 4);
+        assert!(limits.accepts_query_usage(exact_use));
+        for over in [
+            ClientQueueSnapshot::with_query_usage(0, 0, 4, 100_000, 67_108_864, 10_001, 4),
+            ClientQueueSnapshot::with_query_usage(0, 0, 5, 100_000, 67_108_864, 10_000, 5),
+            ClientQueueSnapshot::with_query_usage(0, 0, 4, 100_001, 67_108_864, 10_000, 4),
+            ClientQueueSnapshot::with_query_usage(0, 0, 4, 100_000, 67_108_865, 10_000, 4),
+        ] {
+            assert!(!limits.accepts_query_usage(over));
+        }
         Ok(())
     }
 

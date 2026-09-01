@@ -18,8 +18,9 @@ use tokio::sync::Notify;
 
 use super::sink::{
     BoundedSharedClientFrames, ClientQueueDemand, ClientQueueReservation, ClientQueueSnapshot,
-    ClientSink, ConnectionGeneration, FlushAcknowledgement, QueueAllocationError,
-    QueueReservationLedger, SinkReserveError, TentativeClientQueueReservation,
+    ClientSink, ConnectionGeneration, FlushAcknowledgement, QuerySnapshotPermit,
+    QueueAllocationError, QueueReservationLedger, SinkReserveError,
+    TentativeClientQueueReservation,
 };
 use crate::RuntimeError;
 use crate::budget::{MemoryCharge, MemoryPermit};
@@ -161,6 +162,7 @@ enum FrameClass {
 struct QueuedFrame {
     class: FrameClass,
     frame: Arc<RenderedMessage<MemoryPermit>>,
+    query_snapshot: Option<QuerySnapshotPermit>,
 }
 
 struct QueueState {
@@ -169,6 +171,10 @@ struct QueueState {
     normal_items: usize,
     control_bytes: usize,
     control_items: usize,
+    query_snapshots: u64,
+    query_rows: u64,
+    query_bytes: u64,
+    largest_query_rows: u64,
     closed: Option<CloseReason>,
     warning_armed: bool,
     warning_pending: bool,
@@ -186,6 +192,32 @@ impl QueueState {
                 self.control_items = self.control_items.saturating_sub(1);
                 self.control_bytes = self.control_bytes.saturating_sub(bytes);
             }
+        }
+    }
+
+    fn retain_query_snapshot(&mut self, rows: u64, bytes: u64) {
+        // StateCore admits these values below the configured hard maxima, so
+        // saturation is unreachable in valid state. Keeping the update total
+        // preserves the queue commit contract even if that invariant is ever
+        // violated: a prepared transfer is never silently discarded here.
+        self.query_snapshots = self.query_snapshots.saturating_add(1);
+        self.query_rows = self.query_rows.saturating_add(rows);
+        self.query_bytes = self.query_bytes.saturating_add(bytes);
+        self.largest_query_rows = self.largest_query_rows.max(rows);
+    }
+
+    fn release_query_snapshot(&mut self, snapshot: &QuerySnapshotPermit) {
+        self.query_snapshots = self.query_snapshots.saturating_sub(1);
+        self.query_rows = self.query_rows.saturating_sub(snapshot.rows());
+        self.query_bytes = self.query_bytes.saturating_sub(snapshot.bytes());
+        if snapshot.rows() == self.largest_query_rows {
+            self.largest_query_rows = self
+                .frames
+                .iter()
+                .filter_map(|queued| queued.query_snapshot.as_ref())
+                .map(QuerySnapshotPermit::rows)
+                .max()
+                .unwrap_or(0);
         }
     }
 }
@@ -236,6 +268,10 @@ impl WriterQueue {
                     normal_items: 0,
                     control_bytes: 0,
                     control_items: 0,
+                    query_snapshots: 0,
+                    query_rows: 0,
+                    query_bytes: 0,
+                    largest_query_rows: 0,
                     closed: None,
                     warning_armed: true,
                     warning_pending: false,
@@ -301,6 +337,7 @@ impl WriterQueue {
         state.frames.push_back(QueuedFrame {
             class: FrameClass::Control,
             frame,
+            query_snapshot: None,
         });
         drop(state);
         self.shared.notify.notify_one();
@@ -320,6 +357,10 @@ impl WriterQueue {
             state.normal_items = 0;
             state.control_bytes = 0;
             state.control_items = 0;
+            state.query_snapshots = 0;
+            state.query_rows = 0;
+            state.query_bytes = 0;
+            state.largest_query_rows = 0;
         }
         drop(state);
         self.shared.notify.notify_one();
@@ -348,6 +389,9 @@ impl WriterQueue {
         let mut state = lock(&self.shared.state);
         if let Some(queued) = state.frames.pop_front() {
             state.release(queued.class, queued.frame.as_bytes().len());
+            if let Some(snapshot) = queued.query_snapshot.as_ref() {
+                state.release_query_snapshot(snapshot);
+            }
             return QueuePop::Frame(queued.frame);
         }
         match state.closed {
@@ -434,10 +478,18 @@ impl ClientSink for WriterQueue {
             transfer.discard();
             return;
         }
-        for frame in frames.into_frames() {
+        if let Some((rows, bytes)) = transfer.query_snapshot_usage() {
+            state.retain_query_snapshot(rows, bytes);
+        }
+        let frame_count = transfer.frame_count();
+        let mut query_snapshot = transfer.take_query_snapshot();
+        for (index, frame) in frames.into_frames().into_iter().enumerate() {
             state.frames.push_back(QueuedFrame {
                 class: FrameClass::Normal,
                 frame,
+                query_snapshot: (index + 1 == frame_count)
+                    .then(|| query_snapshot.take())
+                    .flatten(),
             });
         }
         drop(state);
@@ -465,9 +517,14 @@ impl ClientSink for WriterQueue {
 
     fn queue_snapshot(&self) -> ClientQueueSnapshot {
         let state = lock(&self.shared.state);
-        ClientQueueSnapshot::new(
+        ClientQueueSnapshot::with_query_usage(
             u64::try_from(state.normal_bytes + state.control_bytes).unwrap_or(u64::MAX),
             u64::try_from(self.limits.total_bytes()).unwrap_or(u64::MAX),
+            state.query_snapshots,
+            state.query_rows,
+            state.query_bytes,
+            state.largest_query_rows,
+            state.query_snapshots,
         )
     }
 }
@@ -629,6 +686,48 @@ mod tests {
         );
         let _popped = queue.pop();
         assert_eq!(queue.queue_snapshot(), ClientQueueSnapshot::new(0, 400));
+        Ok(())
+    }
+
+    #[test]
+    fn query_snapshot_lease_drains_only_with_its_final_frame() -> Result<(), RuntimeError> {
+        let budget = budget();
+        let limits = QueueLimits::new(400, 100, 12)?;
+        let queue = queue(&budget, 1, limits)?;
+        let first = frame(&budget, "first query row")?;
+        let last = frame(&budget, "last query row")?;
+        let demand = ClientQueueDemand::new(vec![first.as_bytes().len(), last.as_bytes().len()])?;
+        let tentative = queue
+            .try_reserve(demand)
+            .map_err(|_| RuntimeError::LimitExceeded)?;
+        let snapshot_charge = MemoryCharge::allocation(8_000)?;
+        let mut snapshot_batch =
+            budget.try_acquire_batch(BoundedMemoryCharges::new(&[snapshot_charge])?)?;
+        let snapshot_backing = snapshot_batch
+            .split_exact(snapshot_charge.bytes())
+            .ok_or(RuntimeError::InvalidValue)?;
+        let prepared = queue
+            .prepare(tentative, None)
+            .map_err(|_| RuntimeError::InvalidValue)?
+            .with_query_snapshot(QuerySnapshotPermit::new(17, snapshot_backing));
+        let bound = BoundedSharedClientFrames::for_reservation(&prepared, vec![first, last])?;
+        queue.commit(prepared, bound);
+
+        let live = queue.queue_snapshot();
+        assert_eq!(live.query_snapshots(), 1);
+        assert_eq!(live.query_rows(), 17);
+        assert_eq!(live.query_bytes(), snapshot_charge.bytes());
+        assert_eq!(live.largest_query_rows(), 17);
+        assert_eq!(live.max_query_snapshots_per_session(), 1);
+
+        let _first = queue.pop();
+        assert_eq!(queue.queue_snapshot().query_snapshots(), 1);
+        let _last = queue.pop();
+        let drained = queue.queue_snapshot();
+        assert_eq!(drained.query_snapshots(), 0);
+        assert_eq!(drained.query_rows(), 0);
+        assert_eq!(drained.query_bytes(), 0);
+        assert_eq!(drained.largest_query_rows(), 0);
         Ok(())
     }
 

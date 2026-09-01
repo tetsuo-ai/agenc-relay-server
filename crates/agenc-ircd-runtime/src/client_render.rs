@@ -8,7 +8,7 @@ use agenc_ircd_domain::{DomainError, FailedTarget, RejectedPlan};
 use agenc_ircd_types::{ChannelName, PublicErrorCode, UserId};
 
 use crate::RuntimeError;
-use crate::connection::sink::ConnectionGeneration;
+use crate::connection::sink::{ConnectionGeneration, QuerySnapshotPermit};
 use crate::state_core::StateCoreContext;
 
 struct StandardFailure<'a> {
@@ -334,6 +334,21 @@ pub(crate) fn send_logical(
     let logical = logical_frames(context.server_prefix(), capabilities, request, frames)?;
     context
         .send_to(generation, logical)
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    Ok(())
+}
+
+pub(crate) fn send_logical_query(
+    context: &mut StateCoreContext,
+    generation: ConnectionGeneration,
+    capabilities: &CapabilityState,
+    request: &ParsedMessage,
+    frames: Vec<WireMessage>,
+    snapshot: QuerySnapshotPermit,
+) -> Result<(), RuntimeError> {
+    let logical = logical_frames(context.server_prefix(), capabilities, request, frames)?;
+    context
+        .send_query_to(generation, logical, snapshot)
         .map_err(|_| RuntimeError::MemoryExhausted)?;
     Ok(())
 }

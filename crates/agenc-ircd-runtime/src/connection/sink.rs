@@ -44,6 +44,11 @@ pub struct FlushAcknowledgement {
 pub struct ClientQueueSnapshot {
     queued_bytes: u64,
     capacity_bytes: u64,
+    query_snapshots: u64,
+    query_rows: u64,
+    query_bytes: u64,
+    largest_query_rows: u64,
+    max_query_snapshots_per_session: u64,
 }
 
 impl ClientQueueSnapshot {
@@ -53,6 +58,31 @@ impl ClientQueueSnapshot {
         Self {
             queued_bytes,
             capacity_bytes,
+            query_snapshots: 0,
+            query_rows: 0,
+            query_bytes: 0,
+            largest_query_rows: 0,
+            max_query_snapshots_per_session: 0,
+        }
+    }
+
+    pub(crate) const fn with_query_usage(
+        queued_bytes: u64,
+        capacity_bytes: u64,
+        query_snapshots: u64,
+        query_rows: u64,
+        query_bytes: u64,
+        largest_query_rows: u64,
+        max_query_snapshots_per_session: u64,
+    ) -> Self {
+        Self {
+            queued_bytes,
+            capacity_bytes,
+            query_snapshots,
+            query_rows,
+            query_bytes,
+            largest_query_rows,
+            max_query_snapshots_per_session,
         }
     }
 
@@ -66,6 +96,59 @@ impl ClientQueueSnapshot {
     #[must_use]
     pub const fn capacity_bytes(self) -> u64 {
         self.capacity_bytes
+    }
+
+    /// Returns the number of immutable query snapshots still being delivered.
+    #[must_use]
+    pub const fn query_snapshots(self) -> u64 {
+        self.query_snapshots
+    }
+
+    /// Returns the rows retained across live query snapshots.
+    #[must_use]
+    pub const fn query_rows(self) -> u64 {
+        self.query_rows
+    }
+
+    /// Returns the charged backing bytes retained by live query snapshots.
+    #[must_use]
+    pub const fn query_bytes(self) -> u64 {
+        self.query_bytes
+    }
+
+    /// Returns the largest row count of one live query snapshot.
+    #[must_use]
+    pub const fn largest_query_rows(self) -> u64 {
+        self.largest_query_rows
+    }
+
+    /// Returns the largest live snapshot count held by one session.
+    #[must_use]
+    pub const fn max_query_snapshots_per_session(self) -> u64 {
+        self.max_query_snapshots_per_session
+    }
+}
+
+/// One non-cloneable immutable-query lease retained until its final queued
+/// response frame drains. The permit accounts the snapshot backing in the
+/// process-wide memory budget for the complete lease lifetime.
+#[must_use = "dropping a query snapshot permit releases its row and byte lease"]
+pub(crate) struct QuerySnapshotPermit {
+    rows: u64,
+    backing: MemoryPermit,
+}
+
+impl QuerySnapshotPermit {
+    pub(crate) const fn new(rows: u64, backing: MemoryPermit) -> Self {
+        Self { rows, backing }
+    }
+
+    pub(crate) const fn rows(&self) -> u64 {
+        self.rows
+    }
+
+    pub(crate) const fn bytes(&self) -> u64 {
+        self.backing.bytes()
     }
 }
 
@@ -321,6 +404,7 @@ impl Drop for TentativeClientQueueReservation {
 pub struct ClientQueueReservation {
     tentative: TentativeClientQueueReservation,
     backing: Option<MemoryPermit>,
+    query_snapshot: Option<QuerySnapshotPermit>,
 }
 
 impl ClientQueueReservation {
@@ -340,7 +424,16 @@ impl ClientQueueReservation {
         if !matches {
             return Err(QueueAllocationError::PermitMismatch);
         }
-        Ok(Self { tentative, backing })
+        Ok(Self {
+            tentative,
+            backing,
+            query_snapshot: None,
+        })
+    }
+
+    pub(crate) fn with_query_snapshot(mut self, snapshot: QuerySnapshotPermit) -> Self {
+        self.query_snapshot = Some(snapshot);
+        self
     }
 
     /// Returns the queue generation this reservation is bound to.
@@ -372,6 +465,7 @@ impl ClientQueueReservation {
             frame_count: self.tentative.demand().frame_count(),
             total_bytes: self.tentative.demand().total_bytes(),
             backing: self.backing.take(),
+            query_snapshot: self.query_snapshot.take(),
             ledger,
         }
     }
@@ -384,6 +478,7 @@ pub struct QueueTransfer {
     frame_count: usize,
     total_bytes: usize,
     backing: Option<MemoryPermit>,
+    query_snapshot: Option<QuerySnapshotPermit>,
     ledger: Option<Arc<dyn QueueReservationLedger>>,
 }
 
@@ -411,6 +506,16 @@ impl QueueTransfer {
         self.backing.take()
     }
 
+    pub(crate) fn query_snapshot_usage(&self) -> Option<(u64, u64)> {
+        self.query_snapshot
+            .as_ref()
+            .map(|snapshot| (snapshot.rows(), snapshot.bytes()))
+    }
+
+    pub(crate) fn take_query_snapshot(&mut self) -> Option<QuerySnapshotPermit> {
+        self.query_snapshot.take()
+    }
+
     /// Releases the logical counts and any remaining permit as one operation,
     /// for a commit that arrives after transport cancellation began (spec
     /// 21.3, lines 4104-4106).
@@ -419,6 +524,7 @@ impl QueueTransfer {
             ledger.rollback(self.frame_count, self.total_bytes);
         }
         self.backing = None;
+        self.query_snapshot = None;
     }
 }
 

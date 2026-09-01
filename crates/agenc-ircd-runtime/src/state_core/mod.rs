@@ -52,8 +52,11 @@ use crate::bridge::{
     CryptoCompletionMessage, StorageCheckpointCompletionMessage, StorageCheckpointId,
     StorageCompletionMessage, StorageReadCompletionMessage, StorageReadId,
 };
-use crate::budget::MemoryBudget;
+use crate::budget::{
+    BoundedMemoryCharges, MemoryBudget, MemoryBudgetPort, MemoryCharge, MemoryPermitBatch,
+};
 use crate::cancel::CancellationToken;
+use crate::connection::sink::QuerySnapshotPermit;
 use crate::connection::{ConnectionGeneration, FlushAcknowledgement};
 use crate::observe::adapter::RuntimeObserver;
 use crate::observe::health::Liveness;
@@ -61,6 +64,7 @@ use crate::observe::metrics::{CommandClass, QueueName, ResultClass};
 use crate::runtime_config::{
     AuditedReloadResult, AuditedReloadStart, PreparedReload, ReloadActivation, ReloadCoreInbox,
     ReloadCoreRequest, ReloadOutcome, ReloadRejection, RuntimeConfigHandle, RuntimeConfigSnapshot,
+    RuntimeResourceLimits,
 };
 use crate::state_core::admin::{AdminCoreRequest, AdminCoreResult};
 use crate::state_core::durable::{
@@ -70,7 +74,7 @@ use crate::state_core::durable::{
 };
 use crate::state_core::fanout::{
     FanoutCommitReport, FanoutFrame, FanoutRefused, FanoutRequest, FanoutReservation, FanoutTarget,
-    reserve,
+    reserve_bounded, reserve_query,
 };
 use crate::state_core::inbox::{
     CloseReason, ConnectionCloseInbox, ConnectionOpenOutcome, LifecycleFailure, LifecyclePhase,
@@ -464,6 +468,7 @@ pub struct StateCoreContext {
     ceilings: AccountingCeilings,
     overload: OverloadState,
     budget: Arc<MemoryBudget>,
+    runtime_resource_limits: RuntimeResourceLimits,
     bridge: StorageBridge,
     crypto: CryptoBridge,
     entropy: Box<dyn EntropySource + Send>,
@@ -475,6 +480,35 @@ pub struct StateCoreContext {
     counters: StateCoreCounters,
     quiescing: bool,
     observer: Option<Arc<RuntimeObserver>>,
+}
+
+/// A side-effect-free query allocation reservation sealed only after the
+/// immutable projection reports its exact row count and requested backing.
+pub(crate) struct PreparedQuerySnapshot {
+    max_rows: u64,
+    max_backing_capacity: u64,
+    permits: MemoryPermitBatch,
+}
+
+impl PreparedQuerySnapshot {
+    pub(crate) fn finish(
+        mut self,
+        rows: usize,
+        backing_capacity: usize,
+    ) -> Result<QuerySnapshotPermit, RuntimeError> {
+        let rows = u64::try_from(rows).map_err(|_| RuntimeError::Overflow)?;
+        let backing_capacity =
+            u64::try_from(backing_capacity).map_err(|_| RuntimeError::Overflow)?;
+        if rows > self.max_rows || backing_capacity > self.max_backing_capacity {
+            return Err(RuntimeError::LimitExceeded);
+        }
+        let charge = MemoryCharge::allocation(backing_capacity)?;
+        let permit = self
+            .permits
+            .split_exact(charge.bytes())
+            .ok_or(RuntimeError::InvalidValue)?;
+        Ok(QuerySnapshotPermit::new(rows, permit))
+    }
 }
 
 impl StateCoreContext {
@@ -655,6 +689,51 @@ impl StateCoreContext {
     ) -> Result<FanoutCommitReport, FanoutRefused> {
         let request = self.fanout_request_to(generation, frames)?;
         self.fanout_now(request)
+    }
+
+    /// Reserves all live query ceilings and the maximum backing charge before
+    /// the caller allocates its immutable projection.
+    pub(crate) fn prepare_query_snapshot(
+        &self,
+        generation: ConnectionGeneration,
+        max_rows: usize,
+        max_backing_capacity: usize,
+    ) -> Result<PreparedQuerySnapshot, RuntimeError> {
+        let max_rows = u64::try_from(max_rows).map_err(|_| RuntimeError::Overflow)?;
+        let max_backing_capacity =
+            u64::try_from(max_backing_capacity).map_err(|_| RuntimeError::Overflow)?;
+        let limits = self.runtime_resource_limits;
+        let session = self
+            .sessions
+            .sink_for_generation(generation)
+            .ok_or(RuntimeError::InvalidValue)?
+            .queue_snapshot();
+        let global = self.sessions.queue_snapshot();
+        let charge = MemoryCharge::allocation(max_backing_capacity)?;
+        if !limits.admits_query(session, global, max_rows, charge.bytes()) {
+            return Err(RuntimeError::LimitExceeded);
+        }
+        let permits = self
+            .budget
+            .try_acquire_batch(BoundedMemoryCharges::new(&[charge])?)?;
+        Ok(PreparedQuerySnapshot {
+            max_rows,
+            max_backing_capacity,
+            permits,
+        })
+    }
+
+    /// Sends a query response through the existing fanout path while moving
+    /// its snapshot lease into the final queued frame.
+    pub(crate) fn send_query_to(
+        &mut self,
+        generation: ConnectionGeneration,
+        frames: Vec<WireMessage>,
+        snapshot: QuerySnapshotPermit,
+    ) -> Result<FanoutCommitReport, FanoutRefused> {
+        let request = self.fanout_request_to(generation, frames)?;
+        let reservation = self.reserve_query_fanout(&request, snapshot)?;
+        Ok(self.commit_fanout(reservation))
     }
 
     /// Builds one generation-fenced fanout without making its frames visible.
@@ -883,7 +962,30 @@ impl StateCoreContext {
         &mut self,
         request: &FanoutRequest,
     ) -> Result<FanoutReservation, FanoutRefused> {
-        match reserve(request, self.budget.as_ref()) {
+        match reserve_bounded(
+            request,
+            self.budget.as_ref(),
+            self.runtime_resource_limits.response_batch_bytes(),
+        ) {
+            Ok(reservation) => Ok(reservation),
+            Err(refused) => {
+                self.counters.fanout_refusals = self.counters.fanout_refusals.saturating_add(1);
+                Err(refused)
+            }
+        }
+    }
+
+    fn reserve_query_fanout(
+        &mut self,
+        request: &FanoutRequest,
+        snapshot: QuerySnapshotPermit,
+    ) -> Result<FanoutReservation, FanoutRefused> {
+        match reserve_query(
+            request,
+            self.budget.as_ref(),
+            self.runtime_resource_limits.response_batch_bytes(),
+            snapshot,
+        ) {
             Ok(reservation) => Ok(reservation),
             Err(refused) => {
                 self.counters.fanout_refusals = self.counters.fanout_refusals.saturating_add(1);
@@ -1638,6 +1740,7 @@ impl StateCore {
                 ceilings: inputs.config.ceilings,
                 overload: OverloadState::new(),
                 budget: inputs.budget,
+                runtime_resource_limits: RuntimeResourceLimits::HARD_MAX,
                 bridge: inputs.bridge,
                 crypto: inputs.crypto,
                 entropy: inputs.entropy,
@@ -1701,6 +1804,11 @@ impl StateCore {
             return Err(RuntimeError::InvalidValue);
         }
         let (receiver, handle, admission) = inbox.into_parts();
+        let limits = handle
+            .load()
+            .runtime_resource_limits()
+            .ok_or(RuntimeError::InvalidValue)?;
+        self.context.runtime_resource_limits = limits;
         self.reload_receiver = receiver;
         self.reload_handle = Some(handle);
         self.reload_admission = Some(admission);
@@ -2121,7 +2229,14 @@ impl StateCore {
     }
 
     fn reload_floors_accept(&self, candidate: &RuntimeConfigSnapshot) -> bool {
+        let Some(resource_limits) = candidate.runtime_resource_limits() else {
+            return false;
+        };
         if candidate.crypto_job_ceilings().is_none() {
+            return false;
+        }
+        let query = self.context.sessions.queue_snapshot();
+        if !resource_limits.accepts_query_usage(query) {
             return false;
         }
         let ceilings = candidate.storage_ceilings();
@@ -2130,6 +2245,9 @@ impl StateCore {
     }
 
     fn apply_runtime_snapshot(&mut self, snapshot: &RuntimeConfigSnapshot) {
+        if let Some(limits) = snapshot.runtime_resource_limits() {
+            self.context.runtime_resource_limits = limits;
+        }
         self.context
             .domain
             .set_operational_limits(snapshot.operational_limits());
@@ -2710,8 +2828,8 @@ impl StateCore {
                 usize_u64(self.context.crypto.capacity()),
                 storage_in_flight,
                 usize_u64(STORAGE_HANDOFF_CAPACITY),
-                0,
-                0,
+                client_queues.query_snapshots(),
+                client_queues.query_rows(),
             ],
             [
                 counters.lines_routed,

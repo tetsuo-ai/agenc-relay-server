@@ -1,6 +1,7 @@
 //! Privacy-filtered rendering for read-only registered commands.
 
 use std::collections::BTreeSet;
+use std::mem::size_of;
 
 use agenc_ircd_client_wire::{WireMessage, numeric_reply};
 use agenc_ircd_domain::{
@@ -27,53 +28,13 @@ pub(crate) fn render_query(
         return Err(RuntimeError::InvalidValue);
     }
     let nickname = crate::client_render::requester_nickname(context, reply.requester);
-    let frames = match plan.command().view() {
-        CanonicalCommandView::Mode(mode) => render_mode(
-            context.domain(),
-            context.server_prefix(),
-            &nickname,
-            reply.requester,
-            mode,
-        )?,
-        CanonicalCommandView::TopicQuery(channel) => render_topic(
-            context.domain(),
-            context.server_prefix(),
-            &nickname,
-            reply.requester,
-            channel,
-        )?,
-        CanonicalCommandView::Names(channels) => render_names(
-            context.domain(),
-            context.server_prefix(),
-            &nickname,
-            reply.requester,
-            reply.capabilities.enabled("userhost-in-names"),
-            channels,
-        )?,
-        CanonicalCommandView::List(channels) => render_list(
-            context.domain(),
-            context.server_prefix(),
-            &nickname,
-            channels,
-        )?,
-        CanonicalCommandView::Information(query) => render_information(context, &nickname, query)?,
-        CanonicalCommandView::UserQuery(query) => render_user_query(
-            context.domain(),
-            context.server_prefix(),
-            &nickname,
-            reply.requester,
-            query,
-        )?,
-        CanonicalCommandView::Presence(query) => render_presence_query(
-            context.domain(),
-            context.server_prefix(),
-            &nickname,
-            reply.requester,
-            query,
-        )?,
-        CanonicalCommandView::Chathistory(_, _) => Vec::new(),
-        _ => return Err(RuntimeError::InvalidValue),
-    };
+    if let CanonicalCommandView::List(channels) = plan.command().view() {
+        return render_list_snapshot(context, reply, &nickname, channels);
+    }
+    if let CanonicalCommandView::UserQuery(UserQuery::Who(target)) = plan.command().view() {
+        return render_who_snapshot(context, reply, &nickname, target.as_ref());
+    }
+    let frames = render_non_snapshot_query(context, reply, plan, &nickname)?;
     crate::client_render::send_logical(
         context,
         reply.generation,
@@ -81,6 +42,301 @@ pub(crate) fn render_query(
         reply.request,
         frames,
     )
+}
+
+fn render_non_snapshot_query(
+    context: &StateCoreContext,
+    reply: ReplyInput<'_>,
+    plan: &QueryPlan,
+    nickname: &str,
+) -> Result<Vec<WireMessage>, RuntimeError> {
+    match plan.command().view() {
+        CanonicalCommandView::Mode(mode) => render_mode(
+            context.domain(),
+            context.server_prefix(),
+            nickname,
+            reply.requester,
+            mode,
+        ),
+        CanonicalCommandView::TopicQuery(channel) => render_topic(
+            context.domain(),
+            context.server_prefix(),
+            nickname,
+            reply.requester,
+            channel,
+        ),
+        CanonicalCommandView::Names(channels) => render_names(
+            context.domain(),
+            context.server_prefix(),
+            nickname,
+            reply.requester,
+            reply.capabilities.enabled("userhost-in-names"),
+            channels,
+        ),
+        CanonicalCommandView::Information(query) => render_information(context, nickname, query),
+        CanonicalCommandView::UserQuery(query) => render_user_query(
+            context.domain(),
+            context.server_prefix(),
+            nickname,
+            reply.requester,
+            query,
+        ),
+        CanonicalCommandView::Presence(query) => render_presence_query(
+            context.domain(),
+            context.server_prefix(),
+            nickname,
+            reply.requester,
+            query,
+        ),
+        CanonicalCommandView::Chathistory(_, _) => Ok(Vec::new()),
+        _ => Err(RuntimeError::InvalidValue),
+    }
+}
+
+fn snapshot_backing_bytes<Row>(rows: usize) -> Result<usize, RuntimeError> {
+    rows.checked_mul(size_of::<Row>())
+        .ok_or(RuntimeError::Overflow)
+}
+
+struct WhoSnapshotRow<'a> {
+    session: SessionProjection<'a>,
+    role: Option<char>,
+}
+
+fn render_list_snapshot(
+    context: &mut StateCoreContext,
+    reply: ReplyInput<'_>,
+    nickname: &str,
+    selected: &[agenc_ircd_domain::ChannelNameValue],
+) -> Result<(), RuntimeError> {
+    let max_rows = context.domain().channel_count().min(200);
+    let max_backing = snapshot_backing_bytes::<ChannelListProjection<'static>>(max_rows)?;
+    let prepared = context.prepare_query_snapshot(reply.generation, max_rows, max_backing)?;
+    let (frames, rows, backing) = {
+        let projections = context
+            .domain()
+            .project_channel_list()
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let backing = snapshot_backing_bytes::<ChannelListProjection<'static>>(projections.len())?;
+        let mut frames = Vec::new();
+        push_numeric(
+            &mut frames,
+            context.server_prefix(),
+            321,
+            nickname,
+            &["Channel"],
+            "Users Name",
+        )?;
+        let mut rows = 0_usize;
+        for channel in &projections {
+            if !selected.is_empty() && !selected.iter().any(|name| name == channel.name()) {
+                continue;
+            }
+            rows = rows.checked_add(1).ok_or(RuntimeError::Overflow)?;
+            render_list_row(context.server_prefix(), nickname, channel, &mut frames)?;
+        }
+        push_numeric(
+            &mut frames,
+            context.server_prefix(),
+            323,
+            nickname,
+            &[],
+            "End of LIST",
+        )?;
+        (frames, rows, backing)
+    };
+    let snapshot = prepared.finish(rows, backing)?;
+    crate::client_render::send_logical_query(
+        context,
+        reply.generation,
+        reply.capabilities,
+        reply.request,
+        frames,
+        snapshot,
+    )
+}
+
+fn render_who_snapshot(
+    context: &mut StateCoreContext,
+    reply: ReplyInput<'_>,
+    nickname: &str,
+    target: Option<&WhoTarget>,
+) -> Result<(), RuntimeError> {
+    let (frames, snapshot) = match target {
+        None => snapshot_who_self(context, reply.generation, nickname, reply.requester)?,
+        Some(WhoTarget::Nickname(target)) => {
+            snapshot_who_nickname(context, reply.generation, nickname, reply.requester, target)?
+        }
+        Some(WhoTarget::Channel(target)) => {
+            snapshot_who_channel(context, reply.generation, nickname, reply.requester, target)?
+        }
+    };
+    crate::client_render::send_logical_query(
+        context,
+        reply.generation,
+        reply.capabilities,
+        reply.request,
+        frames,
+        snapshot,
+    )
+}
+
+fn snapshot_who_self(
+    context: &StateCoreContext,
+    generation: crate::connection::ConnectionGeneration,
+    nickname: &str,
+    requester: UserId,
+) -> Result<
+    (
+        Vec<WireMessage>,
+        crate::connection::sink::QuerySnapshotPermit,
+    ),
+    RuntimeError,
+> {
+    let backing = snapshot_backing_bytes::<SessionProjection<'static>>(1)?;
+    let prepared = context.prepare_query_snapshot(generation, 1, backing)?;
+    let mut rows = Vec::new();
+    rows.try_reserve_exact(1)
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    if let ProjectionDecision::Visible(session) =
+        context.domain().project_session(requester, requester)
+    {
+        rows.push(session);
+    }
+    let mut frames = Vec::new();
+    for session in &rows {
+        render_who_session(
+            context.server_prefix(),
+            nickname,
+            "*",
+            session,
+            None,
+            &mut frames,
+        )?;
+    }
+    push_numeric(
+        &mut frames,
+        context.server_prefix(),
+        315,
+        nickname,
+        &[nickname],
+        "End of WHO list",
+    )?;
+    let snapshot = prepared.finish(rows.len(), backing)?;
+    Ok((frames, snapshot))
+}
+
+fn snapshot_who_nickname(
+    context: &StateCoreContext,
+    generation: crate::connection::ConnectionGeneration,
+    nickname: &str,
+    requester: UserId,
+    target: &agenc_ircd_domain::NicknameValue,
+) -> Result<
+    (
+        Vec<WireMessage>,
+        crate::connection::sink::QuerySnapshotPermit,
+    ),
+    RuntimeError,
+> {
+    let backing = snapshot_backing_bytes::<SessionProjection<'static>>(1)?;
+    let prepared = context.prepare_query_snapshot(generation, 1, backing)?;
+    let mut rows = Vec::new();
+    rows.try_reserve_exact(1)
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    if let Some(user_id) = context.domain().resolve_nickname(target)
+        && let ProjectionDecision::Visible(session) =
+            context.domain().project_session(requester, user_id)
+    {
+        rows.push(session);
+    }
+    let mut frames = Vec::new();
+    for session in &rows {
+        render_who_session(
+            context.server_prefix(),
+            nickname,
+            "*",
+            session,
+            None,
+            &mut frames,
+        )?;
+    }
+    push_numeric(
+        &mut frames,
+        context.server_prefix(),
+        315,
+        nickname,
+        &[target.presentation()],
+        "End of WHO list",
+    )?;
+    let snapshot = prepared.finish(rows.len(), backing)?;
+    Ok((frames, snapshot))
+}
+
+fn snapshot_who_channel(
+    context: &StateCoreContext,
+    generation: crate::connection::ConnectionGeneration,
+    nickname: &str,
+    requester: UserId,
+    target: &agenc_ircd_domain::ChannelNameValue,
+) -> Result<
+    (
+        Vec<WireMessage>,
+        crate::connection::sink::QuerySnapshotPermit,
+    ),
+    RuntimeError,
+> {
+    let channel = visible_channel(context.domain(), requester, target)?;
+    let row_count = channel
+        .members()
+        .filter(|user_id| {
+            matches!(
+                context.domain().project_session(requester, *user_id),
+                ProjectionDecision::Visible(_)
+            )
+        })
+        .count();
+    let backing = snapshot_backing_bytes::<WhoSnapshotRow<'static>>(row_count)?;
+    let prepared = context.prepare_query_snapshot(generation, row_count, backing)?;
+    let mut rows = Vec::new();
+    rows.try_reserve_exact(row_count)
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    for user_id in channel.members() {
+        let ProjectionDecision::Visible(session) =
+            context.domain().project_session(requester, user_id)
+        else {
+            continue;
+        };
+        let role = channel.role_of(user_id).ok_or(RuntimeError::InvalidValue)?;
+        rows.push(WhoSnapshotRow {
+            session,
+            role: role_prefix(role),
+        });
+    }
+    if rows.len() != row_count {
+        return Err(RuntimeError::InvalidValue);
+    }
+    let mut frames = Vec::new();
+    for row in &rows {
+        render_who_session(
+            context.server_prefix(),
+            nickname,
+            target.presentation(),
+            &row.session,
+            row.role,
+            &mut frames,
+        )?;
+    }
+    push_numeric(
+        &mut frames,
+        context.server_prefix(),
+        315,
+        nickname,
+        &[target.presentation()],
+        "End of WHO list",
+    )?;
+    let snapshot = prepared.finish(rows.len(), backing)?;
+    Ok((frames, snapshot))
 }
 
 fn render_information(
@@ -565,6 +821,7 @@ fn names_entry(
     Ok(entry)
 }
 
+#[cfg(test)]
 fn render_list(
     domain: &DomainState,
     prefix: &str,
