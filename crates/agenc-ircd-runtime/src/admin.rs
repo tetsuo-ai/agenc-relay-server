@@ -83,7 +83,7 @@ fn acquire_audit_export_memory(
 ) -> Result<MemoryPermitBatch, crate::RuntimeError> {
     let frozen = MemoryCharge::allocation(MAX_AUDIT_EXPORT_BYTES)?;
     let rendered = MemoryCharge::allocation(MAX_AUDIT_EXPORT_BYTES)?;
-    let charges = BoundedMemoryCharges::new(vec![frozen, rendered])?;
+    let charges = BoundedMemoryCharges::new(&[frozen, rendered])?;
     budget.try_acquire_batch(charges).map_err(Into::into)
 }
 
@@ -3466,7 +3466,7 @@ mod tests {
     fn export_memory() -> Result<MemoryPermitBatch, RuntimeError> {
         let budget = MemoryBudget::new(4_096);
         budget
-            .try_acquire_batch(BoundedMemoryCharges::new(vec![MemoryCharge::fixed(1)])?)
+            .try_acquire_batch(BoundedMemoryCharges::new(&[MemoryCharge::fixed(1)])?)
             .map_err(Into::into)
     }
 

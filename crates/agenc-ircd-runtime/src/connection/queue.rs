@@ -489,7 +489,7 @@ mod tests {
         limits: QueueLimits,
     ) -> Result<Arc<WriterQueue>, RuntimeError> {
         let charge = limits.backing_charge()?;
-        let mut batch = budget.try_acquire_batch(BoundedMemoryCharges::new(vec![charge])?)?;
+        let mut batch = budget.try_acquire_batch(BoundedMemoryCharges::new(&[charge])?)?;
         let backing = batch
             .split_exact(charge.bytes())
             .ok_or(RuntimeError::InvalidValue)?;
@@ -504,9 +504,10 @@ mod tests {
             .map_err(|_| RuntimeError::InvalidValue)?;
         let measured = message.measure().map_err(|_| RuntimeError::InvalidValue)?;
         let bytes = u64::try_from(measured.bytes()).map_err(|_| RuntimeError::Overflow)?;
-        let mut batch = budget.try_acquire_batch(BoundedMemoryCharges::new(vec![
-            MemoryCharge::allocation(bytes)?,
-        ])?)?;
+        let mut batch =
+            budget.try_acquire_batch(BoundedMemoryCharges::new(&[MemoryCharge::allocation(
+                bytes,
+            )?])?)?;
         let rendered = measured
             .encode(&mut PermitCursor::new(&mut batch))
             .map_err(|_| RuntimeError::InvalidValue)?;
@@ -564,8 +565,8 @@ mod tests {
     fn construction_requires_the_exact_backing_permit() -> Result<(), RuntimeError> {
         let budget = budget();
         let limits = QueueLimits::DEFAULT;
-        let mut batch = budget
-            .try_acquire_batch(BoundedMemoryCharges::new(vec![MemoryCharge::fixed(4_096)])?)?;
+        let mut batch =
+            budget.try_acquire_batch(BoundedMemoryCharges::new(&[MemoryCharge::fixed(4_096)])?)?;
         let wrong = batch.split_exact(4_096).ok_or(RuntimeError::InvalidValue)?;
         assert!(WriterQueue::new(ConnectionGeneration::new(1), limits, wrong).is_err());
         let queue = queue(&budget, 1, limits)?;

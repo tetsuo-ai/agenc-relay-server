@@ -69,9 +69,9 @@ fn builder() -> loom::model::Builder {
     builder
 }
 
-/// One fixed charge; `None` only for an empty vector, which no model builds.
+/// One fixed charge; `None` only if checked plan construction fails.
 fn charges(bytes: u64) -> Option<BoundedMemoryCharges> {
-    BoundedMemoryCharges::new(vec![MemoryCharge::fixed(bytes)]).ok()
+    BoundedMemoryCharges::new(&[MemoryCharge::fixed(bytes)]).ok()
 }
 
 #[test]

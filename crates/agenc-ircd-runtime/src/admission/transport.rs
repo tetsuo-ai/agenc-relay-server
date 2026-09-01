@@ -466,7 +466,7 @@ mod tests {
     #[test]
     fn memory_overload_closes_new_connections_at_ninety_percent() -> Result<(), RuntimeError> {
         let (admission, _, budget) = admission(16, 100)?;
-        let charges = BoundedMemoryCharges::new(vec![MemoryCharge::fixed(90)])?;
+        let charges = BoundedMemoryCharges::new(&[MemoryCharge::fixed(90)])?;
         let permit = budget.try_acquire_batch(charges)?;
         let source = SourceAddressKey::ipv4([192, 0, 2, 1]);
         assert_eq!(

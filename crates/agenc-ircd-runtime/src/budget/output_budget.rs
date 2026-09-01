@@ -44,9 +44,10 @@ mod tests {
     #[test]
     fn the_cursor_reserves_the_allocation_charge_and_fails_closed() -> Result<(), RuntimeError> {
         let budget = MemoryBudget::new(20_000);
-        let mut batch = budget.try_acquire_batch(BoundedMemoryCharges::new(vec![
-            MemoryCharge::allocation(8_703)?,
-        ])?)?;
+        let mut batch =
+            budget.try_acquire_batch(BoundedMemoryCharges::new(&[MemoryCharge::allocation(
+                8_703,
+            )?])?)?;
         let mut cursor = PermitCursor::new(&mut batch);
         let permit = cursor
             .try_reserve_exact(8_703)

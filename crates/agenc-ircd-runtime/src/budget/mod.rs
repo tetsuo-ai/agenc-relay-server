@@ -102,29 +102,28 @@ impl MemoryCharge {
     }
 }
 
-/// A nonempty, count-bounded vector of checked charges with its exact sum.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// A nonempty, count-bounded allocation-free plan of checked charges.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BoundedMemoryCharges {
-    charges: Vec<MemoryCharge>,
+    count: usize,
     total: u64,
 }
 
 impl BoundedMemoryCharges {
-    /// Validates the count bound and computes the checked total.
-    pub fn new(charges: Vec<MemoryCharge>) -> Result<Self, RuntimeError> {
+    /// Validates a borrowed charge list and computes its checked total without
+    /// allocating.
+    pub fn new(charges: &[MemoryCharge]) -> Result<Self, RuntimeError> {
         if charges.is_empty() {
             return Err(RuntimeError::InvalidValue);
         }
         if charges.len() > MAX_MEMORY_CHARGES {
             return Err(RuntimeError::LimitExceeded);
         }
-        let mut total: u64 = 0;
-        for charge in &charges {
-            total = total
-                .checked_add(charge.bytes())
-                .ok_or(RuntimeError::Overflow)?;
+        let mut accumulator = MemoryChargeAccumulator::new();
+        for charge in charges {
+            accumulator.try_push(*charge)?;
         }
-        Ok(Self { charges, total })
+        accumulator.finish()
     }
 
     /// Returns the exact sum of every charge.
@@ -133,10 +132,49 @@ impl BoundedMemoryCharges {
         self.total
     }
 
-    /// Borrows the charges in submission order.
+    /// Returns the number of charges represented by this plan.
     #[must_use]
-    pub fn charges(&self) -> &[MemoryCharge] {
-        &self.charges
+    pub const fn charge_count(&self) -> usize {
+        self.count
+    }
+}
+
+/// A heap-free checked accumulator for charge sets whose length is known only
+/// while walking bounded runtime state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MemoryChargeAccumulator {
+    count: usize,
+    total: u64,
+}
+
+impl MemoryChargeAccumulator {
+    pub(crate) const fn new() -> Self {
+        Self { count: 0, total: 0 }
+    }
+
+    /// Adds one charge without changing the accumulator on refusal.
+    pub(crate) fn try_push(&mut self, charge: MemoryCharge) -> Result<(), RuntimeError> {
+        if self.count == MAX_MEMORY_CHARGES {
+            return Err(RuntimeError::LimitExceeded);
+        }
+        let total = self
+            .total
+            .checked_add(charge.bytes())
+            .ok_or(RuntimeError::Overflow)?;
+        self.count += 1;
+        self.total = total;
+        Ok(())
+    }
+
+    /// Seals a nonempty accumulator as an acquisition plan.
+    pub(crate) const fn finish(self) -> Result<BoundedMemoryCharges, RuntimeError> {
+        if self.count == 0 {
+            return Err(RuntimeError::InvalidValue);
+        }
+        Ok(BoundedMemoryCharges {
+            count: self.count,
+            total: self.total,
+        })
     }
 }
 
@@ -439,25 +477,49 @@ mod tests {
     fn bounded_charges_are_nonempty_count_bounded_and_overflow_checked() -> Result<(), RuntimeError>
     {
         assert_eq!(
-            BoundedMemoryCharges::new(Vec::new()).err(),
+            BoundedMemoryCharges::new(&[]).err(),
             Some(RuntimeError::InvalidValue)
         );
         let too_many = vec![MemoryCharge::fixed(1); MAX_MEMORY_CHARGES + 1];
         assert_eq!(
-            BoundedMemoryCharges::new(too_many).err(),
+            BoundedMemoryCharges::new(&too_many).err(),
             Some(RuntimeError::LimitExceeded)
         );
-        let overflow = vec![MemoryCharge::fixed(u64::MAX), MemoryCharge::fixed(1)];
+        let overflow = [MemoryCharge::fixed(u64::MAX), MemoryCharge::fixed(1)];
         assert_eq!(
-            BoundedMemoryCharges::new(overflow).err(),
+            BoundedMemoryCharges::new(&overflow).err(),
             Some(RuntimeError::Overflow)
         );
-        let charges = BoundedMemoryCharges::new(vec![
+        let charges = BoundedMemoryCharges::new(&[
             MemoryCharge::fixed(CLIENT_CONNECTION_BASE_BYTES),
             MemoryCharge::fixed(TLS_SETUP_INCREMENT_BYTES),
         ])?;
         assert_eq!(charges.total(), 327_680);
-        assert_eq!(charges.charges().len(), 2);
+        assert_eq!(charges.charge_count(), 2);
+
+        let empty = MemoryChargeAccumulator::new();
+        assert_eq!(empty.finish().err(), Some(RuntimeError::InvalidValue));
+
+        let mut count_bounded = MemoryChargeAccumulator::new();
+        for _ in 0..MAX_MEMORY_CHARGES {
+            count_bounded.try_push(MemoryCharge::fixed(0))?;
+        }
+        assert_eq!(count_bounded.finish()?.charge_count(), MAX_MEMORY_CHARGES);
+        let full = count_bounded;
+        assert_eq!(
+            count_bounded.try_push(MemoryCharge::fixed(0)),
+            Err(RuntimeError::LimitExceeded)
+        );
+        assert_eq!(count_bounded, full);
+
+        let mut overflow_checked = MemoryChargeAccumulator::new();
+        overflow_checked.try_push(MemoryCharge::fixed(u64::MAX))?;
+        let before_overflow = overflow_checked;
+        assert_eq!(
+            overflow_checked.try_push(MemoryCharge::fixed(1)),
+            Err(RuntimeError::Overflow)
+        );
+        assert_eq!(overflow_checked, before_overflow);
         Ok(())
     }
 
@@ -465,12 +527,10 @@ mod tests {
     fn a_batch_is_acquired_whole_or_not_at_all_and_returns_on_drop() -> Result<(), RuntimeError> {
         let budget = MemoryBudget::new(100_000);
         let accepted =
-            budget.try_acquire_batch(BoundedMemoryCharges::new(vec![MemoryCharge::fixed(
-                60_000,
-            )])?)?;
+            budget.try_acquire_batch(BoundedMemoryCharges::new(&[MemoryCharge::fixed(60_000)])?)?;
         assert_eq!(budget.available(), 40_000);
         assert_eq!(budget.charged(), 60_000);
-        let refused = budget.try_acquire_batch(BoundedMemoryCharges::new(vec![
+        let refused = budget.try_acquire_batch(BoundedMemoryCharges::new(&[
             MemoryCharge::fixed(30_000),
             MemoryCharge::fixed(20_000),
         ])?);

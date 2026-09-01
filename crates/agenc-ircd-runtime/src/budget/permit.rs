@@ -78,7 +78,7 @@ mod tests {
     #[test]
     fn splits_are_exact_and_every_byte_returns_exactly_once() -> Result<(), RuntimeError> {
         let budget = MemoryBudget::new(10_000);
-        let mut batch = budget.try_acquire_batch(BoundedMemoryCharges::new(vec![
+        let mut batch = budget.try_acquire_batch(BoundedMemoryCharges::new(&[
             MemoryCharge::fixed(4_096),
             MemoryCharge::fixed(4_096),
         ])?)?;

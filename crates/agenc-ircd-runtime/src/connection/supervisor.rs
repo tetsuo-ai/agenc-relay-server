@@ -346,7 +346,7 @@ mod tests {
 
     fn client_base_permit(budget: &MemoryBudget) -> Result<MemoryPermit, RuntimeError> {
         let charges =
-            BoundedMemoryCharges::new(vec![MemoryCharge::fixed(CLIENT_CONNECTION_BASE_BYTES)])?;
+            BoundedMemoryCharges::new(&[MemoryCharge::fixed(CLIENT_CONNECTION_BASE_BYTES)])?;
         let mut batch = budget.try_acquire_batch(charges)?;
         batch
             .split_exact(CLIENT_CONNECTION_BASE_BYTES)

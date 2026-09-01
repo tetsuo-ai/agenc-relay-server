@@ -15,8 +15,8 @@ use agenc_ircd_client_wire::{RenderError, RenderedMessage, WireMessage};
 
 use crate::RuntimeError;
 use crate::budget::{
-    BoundedMemoryCharges, MemoryBudgetPort, MemoryCharge, MemoryPermit, MemoryPermitBatch,
-    PermitCursor,
+    BoundedMemoryCharges, MemoryBudgetPort, MemoryCharge, MemoryChargeAccumulator, MemoryPermit,
+    MemoryPermitBatch, PermitCursor,
 };
 use crate::connection::sink::{
     BoundedSharedClientFrames, ClientQueueDemand, ClientQueueReservation, ClientSink,
@@ -380,19 +380,19 @@ fn permit_charges(
     needed: &BTreeSet<usize>,
     tentatives: &[Tentative],
 ) -> Result<BoundedMemoryCharges, FanoutRefused> {
-    let mut charges = Vec::new();
+    let mut charges = MemoryChargeAccumulator::new();
     for index in needed {
         let bytes = *sizes.get(*index).ok_or(RuntimeError::InvalidValue)?;
         let capacity = u64::try_from(bytes).map_err(|_| RuntimeError::Overflow)?;
-        charges.push(MemoryCharge::allocation(capacity)?);
+        charges.try_push(MemoryCharge::allocation(capacity)?)?;
     }
     for tentative in tentatives {
         let backing = tentative.reservation.backing_charge();
         if backing != 0 {
-            charges.push(MemoryCharge::fixed(backing));
+            charges.try_push(MemoryCharge::fixed(backing))?;
         }
     }
-    Ok(BoundedMemoryCharges::new(charges)?)
+    Ok(charges.finish()?)
 }
 
 /// Encodes each needed frame exactly once into its permitted capacity.

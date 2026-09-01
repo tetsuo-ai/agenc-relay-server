@@ -370,7 +370,7 @@ fn enqueue(
     let measured = message.measure()?;
     let bytes = u64::try_from(measured.bytes())?;
     let mut batch =
-        budget.try_acquire_batch(BoundedMemoryCharges::new(vec![MemoryCharge::allocation(
+        budget.try_acquire_batch(BoundedMemoryCharges::new(&[MemoryCharge::allocation(
             bytes,
         )?])?)?;
     let rendered = Arc::new(measured.encode(&mut PermitCursor::new(&mut batch))?);

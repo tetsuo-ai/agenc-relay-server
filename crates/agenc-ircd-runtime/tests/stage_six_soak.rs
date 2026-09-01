@@ -25,7 +25,7 @@ fn cancellation_and_memory_ownership_survive_deterministic_churn() -> TestResult
     let charge = MemoryCharge::allocation(8_703)?;
     for _ in 0..CHURN_ROUNDS {
         let child = root.child()?;
-        let permit = budget.try_acquire_batch(BoundedMemoryCharges::new(vec![charge])?)?;
+        let permit = budget.try_acquire_batch(BoundedMemoryCharges::new(&[charge])?)?;
         assert_eq!(permit.total(), charge.bytes());
         drop(permit);
         drop(child);

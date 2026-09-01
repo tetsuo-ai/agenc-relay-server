@@ -98,7 +98,7 @@ mod tests {
     -> Result<(), RuntimeError> {
         let budget = MemoryBudget::new(1_048_576);
         let charge = QueueLimits::DEFAULT.backing_charge()?;
-        let mut permits = budget.try_acquire_batch(BoundedMemoryCharges::new(vec![charge])?)?;
+        let mut permits = budget.try_acquire_batch(BoundedMemoryCharges::new(&[charge])?)?;
         let backing = permits
             .split_exact(charge.bytes())
             .ok_or(RuntimeError::InvalidValue)?;
@@ -127,7 +127,7 @@ mod tests {
     {
         let budget = MemoryBudget::new(1_048_576);
         let charge = QueueLimits::DEFAULT.backing_charge()?;
-        let mut permits = budget.try_acquire_batch(BoundedMemoryCharges::new(vec![charge])?)?;
+        let mut permits = budget.try_acquire_batch(BoundedMemoryCharges::new(&[charge])?)?;
         let backing = permits
             .split_exact(charge.bytes())
             .ok_or(RuntimeError::InvalidValue)?;

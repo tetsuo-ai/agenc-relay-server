@@ -584,8 +584,8 @@ mod tests {
     #[test]
     fn prepare_requires_exactly_the_matching_permit() -> Result<(), RuntimeError> {
         let budget = MemoryBudget::new(100_000);
-        let mut batch = budget
-            .try_acquire_batch(BoundedMemoryCharges::new(vec![MemoryCharge::fixed(8_192)])?)?;
+        let mut batch =
+            budget.try_acquire_batch(BoundedMemoryCharges::new(&[MemoryCharge::fixed(8_192)])?)?;
         let ledger = Arc::new(CountingLedger::default());
         let base = demand(&[100])?;
         let charged = || {
@@ -636,8 +636,8 @@ mod tests {
     fn a_committed_transfer_disarms_rollback_and_discard_releases_once() -> Result<(), RuntimeError>
     {
         let budget = MemoryBudget::new(100_000);
-        let mut batch = budget
-            .try_acquire_batch(BoundedMemoryCharges::new(vec![MemoryCharge::fixed(4_096)])?)?;
+        let mut batch =
+            budget.try_acquire_batch(BoundedMemoryCharges::new(&[MemoryCharge::fixed(4_096)])?)?;
         let ledger = Arc::new(CountingLedger::default());
         let tentative = TentativeClientQueueReservation::new(
             ConnectionGeneration::new(3),

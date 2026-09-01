@@ -886,13 +886,14 @@ fn acquire_charges(
         ListenerPurpose::AdminLocal | ListenerPurpose::AdminTls => ADMIN_CONNECTION_BASE_BYTES,
         _ => CLIENT_CONNECTION_BASE_BYTES,
     };
-    let mut charges = vec![MemoryCharge::fixed(base), limits.queue.backing_charge()?];
-    if tls {
-        charges.push(MemoryCharge::fixed(TLS_SETUP_INCREMENT_BYTES));
-    }
-    Ok(shared
-        .budget
-        .try_acquire_batch(BoundedMemoryCharges::new(charges)?)?)
+    let base = MemoryCharge::fixed(base);
+    let queue = limits.queue.backing_charge()?;
+    let charges = if tls {
+        BoundedMemoryCharges::new(&[base, queue, MemoryCharge::fixed(TLS_SETUP_INCREMENT_BYTES)])?
+    } else {
+        BoundedMemoryCharges::new(&[base, queue])?
+    };
+    Ok(shared.budget.try_acquire_batch(charges)?)
 }
 
 enum ConnectionOutcome {

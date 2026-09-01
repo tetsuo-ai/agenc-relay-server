@@ -518,7 +518,7 @@ mod tests {
             MonotonicTick::from_ticks(1),
         )?;
         let budget = MemoryBudget::new(1);
-        let charges = BoundedMemoryCharges::new(vec![MemoryCharge::fixed(1)])?;
+        let charges = BoundedMemoryCharges::new(&[MemoryCharge::fixed(1)])?;
         let mut permits = budget.try_acquire_batch(charges)?;
         let permit = permits.split_exact(1).ok_or(RuntimeError::InvalidValue)?;
         let (return_permit, returned_permit) = tokio::sync::oneshot::channel();
