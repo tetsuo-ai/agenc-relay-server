@@ -5001,14 +5001,13 @@ fn validate_mode_authority(
             operation: ModeOperation::Add,
             mode: VisibilityMode::Secret,
         } => validate_secret_visibility(actor_role, actor_account),
+        ModeChange::MemberLimit(Some(0)) => Err(DomainError::InvalidArgument),
         ModeChange::Visibility { .. }
         | ModeChange::InviteOnly(_)
         | ModeChange::Moderated(_)
-        | ModeChange::JoinKey(_) => require_role(actor_role, Role::Operator),
-        ModeChange::MemberLimit(Some(0)) => Err(DomainError::InvalidArgument),
-        ModeChange::TopicProtected(_) | ModeChange::MemberLimit(_) => {
-            require_role(actor_role, Role::HalfOperator)
-        }
+        | ModeChange::JoinKey(_)
+        | ModeChange::MemberLimit(_) => require_role(actor_role, Role::Operator),
+        ModeChange::TopicProtected(_) => require_role(actor_role, Role::HalfOperator),
         ModeChange::Role { role, .. } => {
             if *role == Role::Member {
                 return Err(DomainError::InvalidArgument);
@@ -9089,6 +9088,16 @@ mod tests {
                 &fixture.state,
                 &channel,
                 Role::HalfOperator,
+                Some(fixture.owner_account),
+                &ModeChange::MemberLimit(Some(10)),
+            ),
+            Err(DomainError::Forbidden)
+        );
+        assert_eq!(
+            validate_mode_change(
+                &fixture.state,
+                &channel,
+                Role::Operator,
                 Some(fixture.owner_account),
                 &ModeChange::MemberLimit(Some(10)),
             ),

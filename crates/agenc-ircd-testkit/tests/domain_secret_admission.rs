@@ -184,6 +184,31 @@ fn member_count(state: &DomainState, name: &ChannelNameValue) -> Option<usize> {
         .map(agenc_ircd_domain::ChannelState::member_count)
 }
 
+fn member_limit(state: &DomainState, name: &ChannelNameValue) -> Option<u16> {
+    state
+        .resolve_channel(name)
+        .and_then(|id| state.channel(id))
+        .and_then(agenc_ircd_domain::ChannelState::member_limit)
+}
+
+/// Builds a MODE that grants `role` to the visitor.
+fn grant(
+    name: &ChannelNameValue,
+    role: Role,
+) -> impl Fn() -> Result<CanonicalCommand, DomainError> {
+    let name = name.clone();
+    move || {
+        CanonicalCommand::mode(
+            name.clone(),
+            vec![ModeChange::Role {
+                operation: ModeOperation::Add,
+                target: NicknameValue::parse("visitor")?,
+                role,
+            }],
+        )
+    }
+}
+
 /// One channel owner and one authenticated account that is a member of nothing.
 fn owner_and_visitor()
 -> Result<(DomainState, DomainTestIdentity, DomainTestIdentity), Box<dyn Error>> {
@@ -307,6 +332,45 @@ fn hidden_channel_join_admits_only_the_verified_channel_key() -> Result<(), Box<
     apply_auto(&mut state, visitor, PLAIN, &join(&vault, true))?;
     assert_eq!(member_role(&state, &vault, visitor), Some(Role::Member));
     assert_eq!(member_count(&state, &vault), Some(2));
+    state.validate()?;
+    Ok(())
+}
+
+#[test]
+fn member_limit_mode_requires_operator_authority() -> Result<(), Box<dyn Error>> {
+    let (mut state, owner, visitor) = owner_and_visitor()?;
+    let lock = ChannelNameValue::parse("#lock")?;
+    apply_auto(&mut state, owner, creating(13), &join(&lock, false))?;
+    apply_auto(&mut state, visitor, PLAIN, &join(&lock, false))?;
+    let limit = || CanonicalCommand::mode(lock.clone(), vec![ModeChange::MemberLimit(Some(2))]);
+
+    assert_eq!(member_role(&state, &lock, visitor), Some(Role::Member));
+    assert_eq!(
+        plan_auto(&state, visitor, PLAIN, &limit).err(),
+        Some(DomainError::Forbidden)
+    );
+
+    apply_auto(&mut state, owner, PLAIN, &grant(&lock, Role::HalfOperator))?;
+    assert_eq!(
+        member_role(&state, &lock, visitor),
+        Some(Role::HalfOperator)
+    );
+    assert_eq!(
+        plan_auto(&state, visitor, PLAIN, &limit).err(),
+        Some(DomainError::Forbidden)
+    );
+    assert_eq!(member_limit(&state, &lock), None);
+
+    apply_auto(&mut state, owner, PLAIN, &grant(&lock, Role::Operator))?;
+    assert_eq!(member_role(&state, &lock, visitor), Some(Role::Operator));
+    apply_auto(&mut state, visitor, PLAIN, &limit)?;
+    assert_eq!(member_limit(&state, &lock), Some(2));
+
+    let third = open_session(&mut state, 3, "third", None)?;
+    expect_rejected(
+        plan_auto(&state, third, PLAIN, &join(&lock, false))?,
+        DomainError::LimitExceeded,
+    )?;
     state.validate()?;
     Ok(())
 }
