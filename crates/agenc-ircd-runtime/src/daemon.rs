@@ -83,7 +83,7 @@ use crate::runtime_config::{
     AccountRuntimePolicy, ConfigRevision, PreparedReload, ReloadOutcome, ReloadPort,
     ReloadPreparationInbox, ReloadPreparationReply, ReloadPrepareFailure, RestartMaterial,
     RestartMaterialKey, RuntimeConfigHandle, RuntimeConfigParts, RuntimeConfigSnapshot,
-    reload_channel, reload_preparation_channel,
+    SanctionWindows, reload_channel, reload_preparation_channel,
 };
 use crate::state_core::durable::{
     AccountingCeilings, AdminMutationAfterImage, KeyDeriver, project_admin_policy_backfill,
@@ -1145,6 +1145,11 @@ async fn prepare_runtime_parts(
             default_presence,
             default_guest_direct_messages,
             default_direct_messages,
+        },
+        history_default: config.privacy.history_default,
+        sanction_windows: SanctionWindows {
+            session_hours: config.moderation.session_sanction_hours,
+            account_days: config.moderation.account_sanction_days,
         },
         rates: configured_rates(config)?,
         operational_limits: operational_limits(config)?,
