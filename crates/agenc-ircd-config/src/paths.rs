@@ -135,10 +135,13 @@ fn protected_file_status(
     {
         return Err(ConfigError::FileRejected);
     }
+    // `nlink_t` is `u64` on x86_64 Linux and `u32` on AArch64 Linux.
+    #[allow(clippy::useless_conversion)]
+    let links = u64::from(status.st_nlink);
     Ok(ProtectedFileStatus {
         device: status.st_dev,
         inode: status.st_ino,
-        links: status.st_nlink,
+        links,
         size,
         mode,
         modified_seconds,

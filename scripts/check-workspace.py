@@ -170,7 +170,7 @@ EXPECTED_EXTERNAL_EDGES = {
     "agenc-ircd-storage": {"redb", "rustix", "subtle", "zeroize"},
     "agenc-ircd-config": {"base64", "rustix", "toml", "zeroize"},
     "agenc-ircd-admin": {"base64", "subtle", "zeroize"},
-    "agenc-ircd-runtime": {"loom", "rustls", "subtle", "tokio", "zeroize"},
+    "agenc-ircd-runtime": {"loom", "rustix", "rustls", "subtle", "tokio", "zeroize"},
     "agenc-ircd-testkit": {"ed25519-dalek", "sha2", "subtle"},
 }
 CRATES_IO_SOURCES = {

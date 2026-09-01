@@ -13,10 +13,10 @@ from typing import NoReturn
 PROFILE_PATH = "conformance/stage-five-storage-profile.toml"
 EXPECTED_MODULES = {
     "backup.rs", "codec.rs", "construction.rs", "construction_directory.rs",
-    "construction_runtime.rs", "control.rs", "engine.rs", "error.rs", "fault.rs",
-    "initialize.rs", "integrity.rs", "lib.rs", "login_index.rs", "mutation.rs",
-    "owner.rs", "platform.rs", "qualification.rs", "records.rs", "recovery.rs",
-    "redb_store.rs", "restore_command.rs", "schema.rs", "sealed.rs",
+    "construction_runtime.rs", "control.rs", "domain_records.rs", "engine.rs", "error.rs",
+    "fault.rs", "initialize.rs", "integrity.rs", "lib.rs", "login_index.rs",
+    "mutation.rs", "owner.rs", "platform.rs", "qualification.rs", "records.rs",
+    "recovery.rs", "redb_store.rs", "restore_command.rs", "schema.rs", "sealed.rs",
 }
 EXPECTED_TASKS = [f"S05-{number:03d}" for number in range(1, 16)]
 QUALIFICATION_TARGETS = (
