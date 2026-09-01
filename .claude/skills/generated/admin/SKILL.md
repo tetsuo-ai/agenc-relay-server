@@ -1,11 +1,11 @@
 ---
 name: admin
-description: "Skill for the Admin area of agenc-ircd. 94 symbols across 12 files."
+description: "Skill for the Admin area of agenc-ircd. 97 symbols across 11 files."
 ---
 
 # Admin
 
-94 symbols | 12 files | Cohesion: 84%
+97 symbols | 11 files | Cohesion: 84%
 
 ## When to Use
 
@@ -19,12 +19,12 @@ description: "Skill for the Admin area of agenc-ircd. 94 symbols across 12 files
 |------|---------|
 | `crates/agenc-ircd-runtime/src/admin/audit.rs` | prepare_export, prepare_event, commit_event, reconstruct, freeze (+32) |
 | `crates/agenc-ircd-runtime/src/admin.rs` | command, audit_export, issue_confirmation, kill, mutate_account (+31) |
+| `crates/agenc-ircd-runtime/src/daemon.rs` | build_live_state, connection_limits, operational_limits, limit_usize, usize_value (+1) |
 | `crates/agenc-ircd-admin/src/command.rs` | verb, parse, every_registered_command_parses_with_its_permission_and_rules, suspension_and_range_boundaries_are_exact |
 | `crates/agenc-ircd-admin/src/canonical.rs` | check, check_parameter_forms, check_trailing, canonical_form_rejects_every_noncanonical_shape |
 | `crates/agenc-ircd-runtime/src/state_core/admin.rs` | commit_audit, target_revision, matches_event |
 | `crates/agenc-ircd-admin/src/stats.rs` | render_stats_unavailable, render_stats_storage_unavailable |
 | `crates/agenc-ircd-admin/src/audit.rs` | genesis, advance |
-| `crates/agenc-ircd-runtime/src/daemon.rs` | build_live_state, registered_commands |
 | `crates/agenc-ircd-admin/src/operator.rs` | verification_key |
 | `crates/agenc-ircd-crypto/src/storage_integrity.rs` | audit_signing_key_id |
 
@@ -57,10 +57,10 @@ Start here when exploring this area:
 | `reconstruct` | Function | `crates/agenc-ircd-runtime/src/admin/audit.rs` | 86 |
 | `check` | Function | `crates/agenc-ircd-admin/src/canonical.rs` | 44 |
 | `matches_event` | Function | `crates/agenc-ircd-runtime/src/state_core/admin.rs` | 46 |
-| `is_reconciled` | Function | `crates/agenc-ircd-runtime/src/admin/audit.rs` | 142 |
 | `into_parts` | Function | `crates/agenc-ircd-runtime/src/admin/audit.rs` | 45 |
 | `policy_seed` | Function | `crates/agenc-ircd-runtime/src/admin/audit.rs` | 152 |
 | `port` | Function | `crates/agenc-ircd-storage/src/owner.rs` | 178 |
+| `is_reconciled` | Function | `crates/agenc-ircd-runtime/src/admin/audit.rs` | 142 |
 | `command` | Function | `crates/agenc-ircd-runtime/src/admin.rs` | 871 |
 
 ## Execution Flows
@@ -83,13 +83,13 @@ Start here when exploring this area:
 | Area | Connections |
 |------|-------------|
 | Tests | 11 calls |
-| State_core | 8 calls |
+| State_core | 9 calls |
 | Listener | 5 calls |
 | Cluster_178 | 4 calls |
-| Cluster_330 | 3 calls |
 | Cluster_7 | 2 calls |
+| Admission | 1 calls |
 | Cluster_12 | 1 calls |
-| Cluster_289 | 1 calls |
+| Cluster_290 | 1 calls |
 
 ## How to Explore
 

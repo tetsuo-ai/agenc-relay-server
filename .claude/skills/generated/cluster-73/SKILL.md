@@ -1,9 +1,9 @@
 ---
-name: cluster-74
-description: "Skill for the Cluster_74 area of agenc-ircd. 53 symbols across 3 files."
+name: cluster-73
+description: "Skill for the Cluster_73 area of agenc-ircd. 53 symbols across 3 files."
 ---
 
-# Cluster_74
+# Cluster_73
 
 53 symbols | 3 files | Cohesion: 96%
 
@@ -11,7 +11,7 @@ description: "Skill for the Cluster_74 area of agenc-ircd. 53 symbols across 3 f
 
 - Working with code in `crates/`
 - Understanding how blocks_registration, supports_multiline, take_single_parameter work
-- Modifying cluster_74-related functionality
+- Modifying cluster_73-related functionality
 
 ## Key Files
 
@@ -75,6 +75,6 @@ Start here when exploring this area:
 ## How to Explore
 
 1. `context({name: "blocks_registration"})` — see callers and callees
-2. `query({search_query: "cluster_74"})` — find related execution flows
+2. `query({search_query: "cluster_73"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

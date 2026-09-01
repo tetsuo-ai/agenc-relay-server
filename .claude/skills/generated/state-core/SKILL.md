@@ -1,11 +1,11 @@
 ---
 name: state-core
-description: "Skill for the State_core area of agenc-ircd. 653 symbols across 43 files."
+description: "Skill for the State_core area of agenc-ircd. 672 symbols across 46 files."
 ---
 
 # State_core
 
-653 symbols | 43 files | Cohesion: 76%
+672 symbols | 46 files | Cohesion: 74%
 
 ## When to Use
 
@@ -18,14 +18,14 @@ description: "Skill for the State_core area of agenc-ircd. 653 symbols across 43
 | File | Symbols |
 |------|---------|
 | `crates/agenc-ircd-runtime/src/account_service.rs` | tag, from_tag, binding, encode, decode (+157) |
-| `crates/agenc-ircd-storage/src/construction_runtime.rs` | validate, start, start_streaming, start_inner, index_restore_channel_source (+72) |
-| `crates/agenc-ircd-runtime/src/state_core/mod.rs` | route, sessions_mut, buckets_mut, timers_mut, submit_storage_read (+67) |
-| `crates/agenc-ircd-runtime/src/state_core/durable.rs` | new, account_key, channel_key, sanction_key, record_known (+53) |
-| `crates/agenc-ircd-runtime/src/state_core/reconstruct.rs` | admit_opaque_record, admit_fake_opaque_record, admit_live_opaque_record, envelope_revision_and_sanction_metadata_must_match_the_body, finish (+44) |
+| `crates/agenc-ircd-runtime/src/state_core/mod.rs` | route, sessions_mut, buckets_mut, timers_mut, submit_storage_read (+80) |
+| `crates/agenc-ircd-storage/src/construction_runtime.rs` | validate, start, start_streaming, start_inner, index_restore_channel_source (+73) |
+| `crates/agenc-ircd-runtime/src/state_core/durable.rs` | account_key, channel_key, put, delete, revalidate (+51) |
+| `crates/agenc-ircd-runtime/src/state_core/reconstruct.rs` | admit_opaque_record, admit_fake_opaque_record, admit_live_opaque_record, finish, validate_login_index_generations (+44) |
 | `crates/agenc-ircd-runtime/src/registration.rs` | new, access_policy, route_message, refresh_deadline, apply_action (+39) |
-| `crates/agenc-ircd-runtime/src/state_core/session.rs` | unbind_session, close, connection, generation_for_user, live_sinks (+17) |
+| `crates/agenc-ircd-runtime/src/state_core/session.rs` | unbind_session, connection, generation_for_user, begin_physical_close, accept_line (+20) |
 | `crates/agenc-ircd-runtime/src/state_core/timers.rs` | schedule, cancel, compact, wall_trusted, pop_due (+17) |
-| `crates/agenc-ircd-runtime/src/channels.rs` | reload_ready, defer, prepare_crypto_jobs, prepare_join_key_jobs, prepare_mode_key_jobs (+12) |
+| `crates/agenc-ircd-runtime/src/channels.rs` | reload_ready, defer, prepare_crypto_jobs, prepare_join_key_jobs, prepare_mode_key_jobs (+11) |
 | `crates/agenc-ircd-runtime/src/state_core/pending.rs` | silent, with_rejection_frames, into_rejection, staged_origin_moves_retained_rejection_frames, silent_staged_origin_retains_no_public_failure (+10) |
 
 ## Entry Points
@@ -67,7 +67,6 @@ Start here when exploring this area:
 
 | Flow | Type | Steps |
 |------|------|-------|
-| `Registration_committed → New` | cross_community | 7 |
 | `Audit_retention_deletes_prefix_and_puts_checkpoint_in_one_batch → As_bytes` | cross_community | 7 |
 | `Audit_retention_deletes_prefix_and_puts_checkpoint_in_one_batch → Try_from` | cross_community | 7 |
 | `Internal_restore_scans_reject_duplicate_and_cross_kind_inputs → Validate_nonzero_limit` | cross_community | 6 |
@@ -77,19 +76,20 @@ Start here when exploring this area:
 | `Disk_plan_and_preflight_accounting_reject_each_independent_internal_mismatch → Put_fixed` | cross_community | 6 |
 | `Disk_plan_and_preflight_accounting_reject_each_independent_internal_mismatch → New` | cross_community | 6 |
 | `Disk_plan_and_preflight_accounting_reject_each_independent_internal_mismatch → Validate_nonzero_limit` | cross_community | 6 |
+| `Cursor_successor_and_completion_guards_reject_reachable_internal_mismatches → Validate` | cross_community | 6 |
 
 ## Connected Areas
 
 | Area | Connections |
 |------|-------------|
-| Tests | 135 calls |
-| Admission | 23 calls |
-| Cluster_281 | 12 calls |
-| Cluster_277 | 9 calls |
+| Tests | 130 calls |
+| Admission | 28 calls |
+| Cluster_282 | 12 calls |
+| Cluster_278 | 9 calls |
 | Bridge | 7 calls |
-| Listener | 7 calls |
-| Cluster_316 | 7 calls |
-| Cluster_429 | 5 calls |
+| Cluster_322 | 7 calls |
+| Listener | 6 calls |
+| Cluster_436 | 5 calls |
 
 ## How to Explore
 

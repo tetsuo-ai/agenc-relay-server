@@ -1,9 +1,9 @@
 ---
-name: cluster-39
-description: "Skill for the Cluster_39 area of agenc-ircd. 42 symbols across 3 files."
+name: cluster-38
+description: "Skill for the Cluster_38 area of agenc-ircd. 42 symbols across 3 files."
 ---
 
-# Cluster_39
+# Cluster_38
 
 42 symbols | 3 files | Cohesion: 76%
 
@@ -11,7 +11,7 @@ description: "Skill for the Cluster_39 area of agenc-ircd. 42 symbols across 3 f
 
 - Working with code in `crates/`
 - Understanding how authorize_account_transition, new, finish_credential_change work
-- Modifying cluster_39-related functionality
+- Modifying cluster_38-related functionality
 
 ## Key Files
 
@@ -79,13 +79,13 @@ Start here when exploring this area:
 | Cluster_30 | 8 calls |
 | Admission | 7 calls |
 | Tests | 3 calls |
-| Cluster_41 | 1 calls |
+| Cluster_40 | 1 calls |
 | Cluster_32 | 1 calls |
-| Cluster_43 | 1 calls |
+| Cluster_42 | 1 calls |
 
 ## How to Explore
 
 1. `context({name: "authorize_account_transition"})` — see callers and callees
-2. `query({search_query: "cluster_39"})` — find related execution flows
+2. `query({search_query: "cluster_38"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

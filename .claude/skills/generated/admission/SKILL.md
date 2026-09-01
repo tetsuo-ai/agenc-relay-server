@@ -1,11 +1,11 @@
 ---
 name: admission
-description: "Skill for the Admission area of agenc-ircd. 178 symbols across 17 files."
+description: "Skill for the Admission area of agenc-ircd. 185 symbols across 16 files."
 ---
 
 # Admission
 
-178 symbols | 17 files | Cohesion: 76%
+185 symbols | 16 files | Cohesion: 76%
 
 ## When to Use
 
@@ -19,12 +19,12 @@ description: "Skill for the Admission area of agenc-ircd. 178 symbols across 17 
 |------|---------|
 | `crates/agenc-ircd-domain/src/decision.rs` | new, is_empty, user, message, collect (+80) |
 | `crates/agenc-ircd-runtime/src/admission/buckets.rs` | new, fixed, defaults, with_ceiling, len (+26) |
-| `crates/agenc-ircd-runtime/src/admission/transport.rs` | now, admit_direct, admit_onion, charge_connection, release_direct (+10) |
-| `crates/agenc-ircd-runtime/src/admission/prefix.rs` | connection_opened, connection_closed, evict_longest_idle, new, with_ceiling (+7) |
+| `crates/agenc-ircd-runtime/src/admission/transport.rs` | now, new, admission, admission_with_rates, direct_hosts_obey_the_live_ceiling_and_release_exactly_once (+14) |
+| `crates/agenc-ircd-runtime/src/admission/prefix.rs` | new, with_ceiling, connection_opened, connection_closed, erase_idle (+12) |
 | `crates/agenc-ircd-runtime/src/admission/overload.rs` | new, classify, default, usage_reaches, select_evictions (+6) |
 | `crates/agenc-ircd-domain/src/model.rs` | principal, new_ephemeral, role_of, at_revision, next_revision (+1) |
-| `crates/agenc-ircd-runtime/src/state_core/inbox.rs` | host_key, prefix_key, ipv4, onion_listener |
-| `crates/agenc-ircd-runtime/src/channels.rs` | guest_prefix_bucket, guest_prefix_keys_follow_the_transport_profile |
+| `crates/agenc-ircd-runtime/src/state_core/inbox.rs` | ipv4, onion_listener, host_key, prefix_key |
+| `crates/agenc-ircd-runtime/src/channels.rs` | guest_prefix_keys_follow_the_transport_profile, guest_prefix_bucket |
 | `crates/agenc-ircd-runtime/src/daemon.rs` | configured_rates, config_and_runtime_rate_defaults_match |
 | `crates/agenc-ircd-runtime/src/runtime_config.rs` | client_connection_ceiling, tls_handshake_ceiling |
 
@@ -60,8 +60,8 @@ Start here when exploring this area:
 | `tests_support_account_id` | Function | `crates/agenc-ircd-domain/src/model.rs` | 2064 |
 | `now` | Function | `crates/agenc-ircd-testkit/src/lib.rs` | 102 |
 | `from_ticks` | Function | `crates/agenc-ircd-types/src/quantities.rs` | 109 |
-| `new` | Function | `crates/agenc-ircd-runtime/src/admission/buckets.rs` | 165 |
-| `defaults` | Function | `crates/agenc-ircd-runtime/src/admission/buckets.rs` | 233 |
+| `new` | Function | `crates/agenc-ircd-runtime/src/admission/prefix.rs` | 38 |
+| `with_ceiling` | Function | `crates/agenc-ircd-runtime/src/admission/prefix.rs` | 44 |
 
 ## Execution Flows
 
@@ -82,14 +82,14 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Tests | 39 calls |
-| State_core | 15 calls |
+| Tests | 40 calls |
 | Cluster_209 | 13 calls |
+| State_core | 13 calls |
 | Cluster_226 | 2 calls |
 | Cluster_225 | 2 calls |
 | Cluster_207 | 2 calls |
 | Cluster_223 | 2 calls |
-| Listener | 2 calls |
+| Connection | 2 calls |
 
 ## How to Explore
 

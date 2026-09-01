@@ -1,16 +1,16 @@
 ---
 name: connection
-description: "Skill for the Connection area of agenc-ircd. 90 symbols across 18 files."
+description: "Skill for the Connection area of agenc-ircd. 102 symbols across 18 files."
 ---
 
 # Connection
 
-90 symbols | 18 files | Cohesion: 73%
+102 symbols | 18 files | Cohesion: 75%
 
 ## When to Use
 
 - Working with code in `crates/`
-- Understanding how as_bytes, install_observer, reload work
+- Understanding how as_bytes, install_observer, prefix_erasure_delay work
 - Modifying connection-related functionality
 
 ## Key Files
@@ -18,34 +18,35 @@ description: "Skill for the Connection area of agenc-ircd. 90 symbols across 18 
 | File | Symbols |
 |------|---------|
 | `crates/agenc-ircd-runtime/src/connection/queue.rs` | rollback, closed_reason, take_warning, push_control, is_closed (+28) |
-| `crates/agenc-ircd-runtime/src/connection/sink.rs` | for_reservation, len, new, next, frame_count (+17) |
+| `crates/agenc-ircd-runtime/src/connection/sink.rs` | for_reservation, len, new, pending, complete (+17) |
+| `crates/agenc-ircd-runtime/src/connection/supervisor.rs` | new, assign_generation, assign_state_permit, arm, assign_line_counter (+9) |
 | `crates/agenc-ircd-runtime/src/connection/writer.rs` | handle_pop, write_frame, finish, run_writer, next_or_cancel (+2) |
-| `crates/agenc-ircd-runtime/src/connection/reader.rs` | new, accept, run_reader, feed_and_forward, forward_pending |
-| `crates/agenc-ircd-runtime/src/admission/transport.rs` | install_observer, reload, admit, released |
-| `crates/agenc-ircd-runtime/src/connection/supervisor.rs` | run_connection, supervise_tasks, notify_state_core |
+| `crates/agenc-ircd-runtime/src/connection/reader.rs` | new, accept, run_reader, run_reader_sequenced, feed_and_forward (+1) |
+| `crates/agenc-ircd-runtime/src/admission/transport.rs` | install_observer, prefix_erasure_delay, reload, admit, released |
 | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | snapshot, rate_values |
 | `crates/agenc-ircd-client-wire/src/framing.rs` | as_str, feed |
-| `crates/agenc-ircd-runtime/src/state_core/fanout.rs` | commit, close_after_flush |
 | `crates/agenc-ircd-runtime/src/admin.rs` | ordinary, writer_acknowledges_after_the_final_admin_frame_and_transport_close |
+| `crates/agenc-ircd-client-wire/src/render.rs` | as_bytes |
 
 ## Entry Points
 
 Start here when exploring this area:
 
 - **`as_bytes`** (Function) — `crates/agenc-ircd-client-wire/src/render.rs:393`
-- **`install_observer`** (Function) — `crates/agenc-ircd-runtime/src/admission/transport.rs:61`
-- **`reload`** (Function) — `crates/agenc-ircd-runtime/src/admission/transport.rs:73`
-- **`failure`** (Function) — `crates/agenc-ircd-runtime/src/bridge/storage.rs:168`
-- **`live_children`** (Function) — `crates/agenc-ircd-runtime/src/cancel.rs:92`
+- **`install_observer`** (Function) — `crates/agenc-ircd-runtime/src/admission/transport.rs:65`
+- **`prefix_erasure_delay`** (Function) — `crates/agenc-ircd-runtime/src/admission/transport.rs:78`
+- **`reload`** (Function) — `crates/agenc-ircd-runtime/src/admission/transport.rs:94`
+- **`failure`** (Function) — `crates/agenc-ircd-runtime/src/bridge/storage.rs:167`
 
 ## Key Symbols
 
 | Symbol | Type | File | Line |
 |--------|------|------|------|
 | `as_bytes` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 393 |
-| `install_observer` | Function | `crates/agenc-ircd-runtime/src/admission/transport.rs` | 61 |
-| `reload` | Function | `crates/agenc-ircd-runtime/src/admission/transport.rs` | 73 |
-| `failure` | Function | `crates/agenc-ircd-runtime/src/bridge/storage.rs` | 168 |
+| `install_observer` | Function | `crates/agenc-ircd-runtime/src/admission/transport.rs` | 65 |
+| `prefix_erasure_delay` | Function | `crates/agenc-ircd-runtime/src/admission/transport.rs` | 78 |
+| `reload` | Function | `crates/agenc-ircd-runtime/src/admission/transport.rs` | 94 |
+| `failure` | Function | `crates/agenc-ircd-runtime/src/bridge/storage.rs` | 167 |
 | `live_children` | Function | `crates/agenc-ircd-runtime/src/cancel.rs` | 92 |
 | `closed_reason` | Function | `crates/agenc-ircd-runtime/src/connection/queue.rs` | 269 |
 | `take_warning` | Function | `crates/agenc-ircd-runtime/src/connection/queue.rs` | 275 |
@@ -60,31 +61,35 @@ Start here when exploring this area:
 | `backing_charge` | Function | `crates/agenc-ircd-runtime/src/connection/queue.rs` | 126 |
 | `for_reservation` | Function | `crates/agenc-ircd-runtime/src/connection/sink.rs` | 435 |
 | `len` | Function | `crates/agenc-ircd-runtime/src/connection/sink.rs` | 468 |
-| `as_str` | Function | `crates/agenc-ircd-client-wire/src/framing.rs` | 86 |
-| `feed` | Function | `crates/agenc-ircd-client-wire/src/framing.rs` | 116 |
+| `new` | Function | `crates/agenc-ircd-runtime/src/connection/supervisor.rs` | 119 |
 
 ## Execution Flows
 
 | Flow | Type | Steps |
 |------|------|-------|
+| `Registration_committed → Into_frames` | cross_community | 5 |
+| `Registration_committed → Discard` | cross_community | 5 |
+| `Registration_committed → FanoutCommitReport` | cross_community | 5 |
+| `Run_connection → PhysicalCloseNotice` | intra_community | 4 |
 | `Start → Lock` | cross_community | 3 |
 | `Run → Lock` | cross_community | 3 |
 | `Account_mutation_waits_for_one_atomic_state_core_commit → Lock` | cross_community | 3 |
 | `Confirmed_die_commits_intent_before_requesting_stop → Lock` | cross_community | 3 |
 | `Observed_output_waits_for_the_durable_audit_reply → Lock` | cross_community | 3 |
-| `Owner_answers_only_bounded_pre_auth_liveness → Lock` | cross_community | 3 |
+| `Run_connection → MemoryPermit` | cross_community | 3 |
 
 ## Connected Areas
 
 | Area | Connections |
 |------|-------------|
+| Budget | 11 calls |
 | Tests | 10 calls |
-| Budget | 9 calls |
-| Listener | 6 calls |
-| Cluster_313 | 2 calls |
-| Cluster_78 | 1 calls |
+| Listener | 5 calls |
+| State_core | 3 calls |
+| Cluster_319 | 2 calls |
+| Cluster_77 | 1 calls |
 | Observe | 1 calls |
-| Fuzz_targets | 1 calls |
+| Admission | 1 calls |
 
 ## How to Explore
 

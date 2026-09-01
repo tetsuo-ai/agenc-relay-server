@@ -1,11 +1,11 @@
 ---
 name: tests
-description: "Skill for the Tests area of agenc-ircd. 1559 symbols across 158 files."
+description: "Skill for the Tests area of agenc-ircd. 1541 symbols across 155 files."
 ---
 
 # Tests
 
-1559 symbols | 158 files | Cohesion: 72%
+1541 symbols | 155 files | Cohesion: 73%
 
 ## When to Use
 
@@ -17,16 +17,16 @@ description: "Skill for the Tests area of agenc-ircd. 1559 symbols across 158 fi
 
 | File | Symbols |
 |------|---------|
-| `crates/agenc-ircd-storage/tests/stage_five_completion.rs` | every_table_has_one_closed_schema_and_domain_codec_consumes_fully, later_protocol_bodies_are_profile_table_and_arm_bound, storage_crypto_adapters_cover_every_public_boundary, fault_campaign_covers_before_and_after_of_every_site, storage_errors_and_fault_controllers_cover_the_closed_failure_surface (+72) |
+| `crates/agenc-ircd-storage/tests/stage_five_completion.rs` | later_protocol_bodies_are_profile_table_and_arm_bound, login_index_codecs_reject_each_short_circuit_boundary, real_successful_login_batch_injects_lazy_migration_boundaries, login_lookup_and_lazy_migration_are_exactly_two_generation, initialized_lazy_login_fixture (+70) |
 | `crates/agenc-ircd-testkit/tests/domain_reference_model.rs` | apply_production_command, apply_production_join, apply_production, production_authority, production_identity (+64) |
 | `crates/agenc-ircd-federation-wire/src/tests/semantics.rs` | schema, fields, validate, opaque, unsigned (+53) |
 | `crates/agenc-ircd-client-wire/src/registration_command.rs` | validate_post_registration_command, validate_join, validate_part, validate_mode, validate_topic (+50) |
 | `crates/agenc-ircd-auth/tests/stage_four.rs` | hash, new, credential, operation_context, operation_route (+50) |
-| `crates/agenc-ircd/tests/stage_six_daemon.rs` | client_config, hash, new, require_success, failure (+49) |
+| `crates/agenc-ircd/tests/stage_six_daemon.rs` | hash, new, require_success, failure, opaque_context (+48) |
 | `crates/agenc-ircd-domain/src/model.rs` | restore, new, parse, with_policies, from_seed (+33) |
 | `crates/agenc-ircd-federation-wire/src/codec.rs` | encode_canonical, claim_bytes, validate_bounds, is_optional_fixed, validate_optional_fixed_field (+31) |
 | `crates/agenc-ircd-storage/src/domain_records.rs` | decode, expect_version, byte, text, optional_text (+29) |
-| `crates/agenc-ircd-runtime/tests/listener_accept.rs` | default, fixture, server, client, start (+22) |
+| `crates/agenc-ircd-runtime/tests/listener_accept.rs` | snapshot, default, fixture, server, client (+25) |
 
 ## Entry Points
 
@@ -82,12 +82,12 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| State_core | 90 calls |
-| Listener | 32 calls |
-| Cluster_498 | 30 calls |
+| State_core | 96 calls |
+| Listener | 31 calls |
+| Cluster_503 | 30 calls |
 | Admission | 23 calls |
-| Examples | 18 calls |
-| Cluster_59 | 18 calls |
+| Tls | 22 calls |
+| Cluster_58 | 18 calls |
 | Fuzz_targets | 17 calls |
 | Cluster_185 | 16 calls |
 

@@ -1,11 +1,11 @@
 ---
 name: listener
-description: "Skill for the Listener area of agenc-ircd. 106 symbols across 20 files."
+description: "Skill for the Listener area of agenc-ircd. 110 symbols across 19 files."
 ---
 
 # Listener
 
-106 symbols | 20 files | Cohesion: 73%
+110 symbols | 19 files | Cohesion: 72%
 
 ## When to Use
 
@@ -18,15 +18,15 @@ description: "Skill for the Listener area of agenc-ircd. 106 symbols across 20 f
 | File | Symbols |
 |------|---------|
 | `crates/agenc-ircd-runtime/src/admin.rs` | admin_process_channel, new, start, admin_lifecycle_channel, try_export (+25) |
-| `crates/agenc-ircd-runtime/src/listener/mod.rs` | stop_accepting, cancel_connections, serve_inner, negotiate, local_peer_identity (+19) |
+| `crates/agenc-ircd-runtime/src/listener/mod.rs` | stop_accepting, cancel_connections, released, arrived, start (+21) |
 | `crates/agenc-ircd-testkit/src/tls_fixture.rs` | mint, validate_dns_name, derive_seed, encode_length, tlv (+11) |
 | `crates/agenc-ircd-runtime/src/listener/socket.rs` | from, bind, adopt_tcp, adopt_unix, bind_unix (+3) |
+| `crates/agenc-ircd-storage/src/redb_store.rs` | inject, read, set_len, sync_data, write |
 | `crates/agenc-ircd-runtime/src/listener/spki.rs` | the_walker_reproduces_the_fixture_spki_digest, spki_sha256, read_tlv, sha256 |
-| `crates/agenc-ircd-runtime/src/tls/stream.rs` | export_keying_material, peer_certificates, available, acquire |
-| `crates/agenc-ircd-runtime/src/tls/config.rs` | alpn, requires_client_certificate, leaf |
+| `crates/agenc-ircd-runtime/src/tls/stream.rs` | peer_certificates, export_keying_material, available, acquire |
 | `crates/agenc-ircd-runtime/src/cancel.rs` | cancel, is_cancelled |
+| `crates/agenc-ircd-runtime/src/tls/config.rs` | requires_client_certificate, leaf |
 | `crates/agenc-ircd/tests/stage_six_daemon.rs` | drop, reserve_loopback_address |
-| `crates/agenc-ircd-runtime/src/listener/prefix.rs` | source_key, keys_follow_the_family_and_collapse_mapped_addresses |
 
 ## Entry Points
 
@@ -48,20 +48,20 @@ Start here when exploring this area:
 | `admin_transport_channel` | Function | `crates/agenc-ircd-runtime/src/admin.rs` | 429 |
 | `empty_for_test` | Function | `crates/agenc-ircd-runtime/src/admin/audit.rs` | 273 |
 | `cancel` | Function | `crates/agenc-ircd-runtime/src/cancel.rs` | 64 |
-| `stop_accepting` | Function | `crates/agenc-ircd-runtime/src/listener/mod.rs` | 353 |
-| `cancel_connections` | Function | `crates/agenc-ircd-runtime/src/listener/mod.rs` | 358 |
+| `stop_accepting` | Function | `crates/agenc-ircd-runtime/src/listener/mod.rs` | 367 |
+| `cancel_connections` | Function | `crates/agenc-ircd-runtime/src/listener/mod.rs` | 372 |
 | `admin_core_channel` | Function | `crates/agenc-ircd-runtime/src/state_core/admin.rs` | 425 |
 | `spawn` | Function | `crates/agenc-ircd-runtime/src/supervisor/mod.rs` | 161 |
 | `try_backup` | Function | `crates/agenc-ircd-storage/src/owner.rs` | 82 |
 | `mint` | Function | `crates/agenc-ircd-testkit/src/tls_fixture.rs` | 89 |
+| `is_cancelled` | Function | `crates/agenc-ircd-runtime/src/cancel.rs` | 75 |
+| `start` | Function | `crates/agenc-ircd-runtime/src/listener/mod.rs` | 387 |
+| `spki_sha256` | Function | `crates/agenc-ircd-runtime/src/listener/spki.rs` | 25 |
+| `requires_client_certificate` | Function | `crates/agenc-ircd-runtime/src/tls/config.rs` | 86 |
+| `leaf` | Function | `crates/agenc-ircd-runtime/src/tls/config.rs` | 159 |
+| `peer_certificates` | Function | `crates/agenc-ircd-runtime/src/tls/stream.rs` | 225 |
 | `bind` | Function | `crates/agenc-ircd-runtime/src/listener/socket.rs` | 112 |
 | `as_bytes` | Function | `crates/agenc-ircd-admin/src/challenge.rs` | 38 |
-| `split_exact` | Function | `crates/agenc-ircd-runtime/src/budget/permit.rs` | 56 |
-| `alpn` | Function | `crates/agenc-ircd-runtime/src/tls/config.rs` | 76 |
-| `export_keying_material` | Function | `crates/agenc-ircd-runtime/src/tls/stream.rs` | 230 |
-| `is_cancelled` | Function | `crates/agenc-ircd-runtime/src/cancel.rs` | 75 |
-| `start` | Function | `crates/agenc-ircd-runtime/src/listener/mod.rs` | 373 |
-| `spki_sha256` | Function | `crates/agenc-ircd-runtime/src/listener/spki.rs` | 25 |
 
 ## Execution Flows
 
@@ -82,14 +82,14 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Tests | 12 calls |
+| Tests | 10 calls |
 | Admin | 6 calls |
-| Cluster_313 | 6 calls |
-| Admission | 5 calls |
-| Connection | 3 calls |
+| Cluster_319 | 6 calls |
+| Admission | 6 calls |
+| Budget | 2 calls |
+| Connection | 2 calls |
 | Cluster_22 | 2 calls |
-| Cluster_12 | 1 calls |
-| Cluster_3 | 1 calls |
+| Cluster_427 | 1 calls |
 
 ## How to Explore
 

@@ -1,9 +1,9 @@
 ---
-name: cluster-129
-description: "Skill for the Cluster_129 area of agenc-ircd. 63 symbols across 14 files."
+name: cluster-128
+description: "Skill for the Cluster_128 area of agenc-ircd. 63 symbols across 14 files."
 ---
 
-# Cluster_129
+# Cluster_128
 
 63 symbols | 14 files | Cohesion: 90%
 
@@ -11,7 +11,7 @@ description: "Skill for the Cluster_129 area of agenc-ircd. 63 symbols across 14
 
 - Working with code in `crates/`
 - Understanding how parse, check_keys, table_array work
-- Modifying cluster_129-related functionality
+- Modifying cluster_128-related functionality
 
 ## Key Files
 
@@ -67,15 +67,15 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Cluster_130 | 7 calls |
+| Cluster_129 | 7 calls |
 | Tests | 3 calls |
-| Cluster_148 | 3 calls |
-| Cluster_140 | 2 calls |
-| Cluster_139 | 1 calls |
+| Cluster_147 | 3 calls |
+| Cluster_139 | 2 calls |
+| Cluster_138 | 1 calls |
 
 ## How to Explore
 
 1. `context({name: "parse"})` — see callers and callees
-2. `query({search_query: "cluster_129"})` — find related execution flows
+2. `query({search_query: "cluster_128"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`
