@@ -2118,10 +2118,10 @@ impl AdminOwner {
             snapshot = snapshot.with_storage(storage.values());
         }
         if let Some(observer) = &self.observer {
-            let rates = observer
-                .rate_values()
+            let observed = observer
+                .stats_values()
                 .map_err(|_| AdminCoreFailure::StorageUnavailable)?;
-            snapshot = snapshot.with_observed_runtime(observer.runtime_values(), rates);
+            snapshot = snapshot.with_observed_runtime(observed.runtime(), observed.rates());
         }
         let values = StatsValues::new(selector, snapshot.values(selector))
             .map_err(|_| AdminCoreFailure::StorageUnavailable)?;
@@ -2603,6 +2603,7 @@ async fn finish_admin_writer<W: AsyncWrite + Unpin>(writer: &mut W) {
 #[cfg(test)]
 mod tests {
     use std::fs::{self, OpenOptions};
+    use std::io;
     use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -2620,10 +2621,31 @@ mod tests {
     use super::*;
     use crate::RuntimeError;
     use crate::clock::{SystemMonotonicClock, SystemWallClock};
+    use crate::connection::AdmittedConnection;
+    use crate::listener::{ConnectionObserver as _, RefusalReason};
+    use crate::observe::events::{CorrelationSource, Severity};
     use crate::observe::health::ReadinessStage;
+    use crate::observe::log::{LogFilter, LogRetention, LogTarget, LogWriter};
+    use crate::observe::metrics::{CommandClass, MetricsRegistry};
     use crate::state_core::{AdminCoreSnapshot, admin_core_channel};
 
     static NEXT_BACKUP_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    struct DiscardLog;
+
+    impl LogTarget for DiscardLog {
+        fn open_segment(&mut self, _hour: u64) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn write_line(&mut self, _line: &str) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn retire_before(&mut self, _hour: u64, _limit: usize) -> io::Result<bool> {
+            Ok(true)
+        }
+    }
 
     struct BackupTestDirectory(PathBuf);
 
@@ -3303,6 +3325,155 @@ mod tests {
         );
         root.cancel();
         owner.await.map_err(|_| RuntimeError::Cancelled)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn authenticated_stats_read_the_process_metrics_registry() -> Result<(), RuntimeError> {
+        let correlation = Arc::new(CorrelationSource::new(10));
+        let metrics = Arc::new(MetricsRegistry::new());
+        let (log_writer, log) = LogWriter::start(
+            DiscardLog,
+            LogRetention::DEFAULT,
+            LogFilter::new(Severity::Debug),
+            ServerId::from_bytes([2; 16]),
+            Arc::clone(&correlation),
+        );
+        let observer = Arc::new(RuntimeObserver::new(
+            ServerId::from_bytes([2; 16]),
+            SystemMonotonicClock::start(),
+            correlation,
+            log,
+            Arc::clone(&metrics),
+        ));
+        observer.command_classified(CommandClass::Message, ResultClass::Ok);
+        observer.command_classified(CommandClass::Message, ResultClass::Busy);
+        observer.authentication(false);
+        observer.authentication(true);
+        observer.federation_ingress(4, false);
+        observer.federation_ingress(5, true);
+        observer.tls_started();
+        observer.admitted(&AdmittedConnection {
+            generation: ConnectionGeneration::new(1),
+            purpose: ListenerPurpose::ClientTls,
+            source: crate::state_core::inbox::SourceAddressKey::ipv4([127, 0, 0, 1]),
+            peer: crate::connection::PeerIdentity::Anonymous,
+        });
+        observer.refused(ListenerPurpose::ClientTls, RefusalReason::Admission);
+        assert!(
+            !metrics
+                .snapshot(crate::observe::metrics::MetricsView::Operator)
+                .counters
+                .is_empty()
+        );
+
+        let (port, inbox) = admin_transport_channel(binding());
+        let (_lifecycle, lifecycle_inbox) = admin_lifecycle_channel();
+        let (core, mut core_inbox) = admin_core_channel();
+        let root = CancellationToken::root();
+        let owner_observer = Arc::clone(&observer);
+        let owner = tokio::spawn(
+            AdminOwner::new(
+                binding(),
+                registry()?,
+                AdminAdmissionSnapshot::new(vec![1000], Vec::new(), Vec::new()),
+                AuditAuthority::empty_for_test()?,
+                core,
+                AdminOwnerRuntime {
+                    health: live_health(),
+                    config: None,
+                    reload: None,
+                    backup: None,
+                    process: None,
+                    fatal: None,
+                    observer: Some(owner_observer),
+                    budget: Arc::new(MemoryBudget::new(MAX_AUDIT_EXPORT_BYTES * 2)),
+                    entropy: Box::new(
+                        ScriptedEntropy::new(vec![0; 128])
+                            .map_err(|_| RuntimeError::InvalidValue)?,
+                    ),
+                    clocks: AdminOwnerClocks {
+                        monotonic: Box::new(SystemMonotonicClock::start()),
+                        wall: Box::new(SystemWallClock),
+                    },
+                },
+            )
+            .run(inbox, lifecycle_inbox, root.clone()),
+        );
+        let (sender, mut output) = mpsc::channel(ADMIN_OUTPUT_CAPACITY);
+        let generation = ConnectionGeneration::new(9);
+        port.opened(
+            generation,
+            challenge(),
+            PeerIdentity::Local {
+                uid: 1000,
+                gid: 1000,
+            },
+            AdminOutput::new(sender),
+            &root,
+        )
+        .await
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        let _challenge = output.recv().await.ok_or(RuntimeError::InvalidValue)?;
+        port.line(generation, oper_line()?, &root)
+            .await
+            .map_err(|_| RuntimeError::InvalidValue)?;
+
+        port.line(generation, signed_line(0, "STATS RATES")?, &root)
+            .await
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        assert!(
+            core_inbox
+                .complete_snapshot_for_test(AdminCoreSnapshot::new(
+                    [0; 9], [0; 14], [0; 10], [0; 8],
+                ))
+                .await
+        );
+        let _audit = core_inbox
+            .complete_next_for_test(Ok(()))
+            .await
+            .ok_or(RuntimeError::InvalidValue)?;
+        let rates = output.recv().await.ok_or(RuntimeError::InvalidValue)?;
+        for (field, value) in [
+            ("client_commands_accepted_60s", 1),
+            ("client_commands_rate_limited_60s", 1),
+            ("connections_admitted_60s", 1),
+            ("connections_rejected_60s", 1),
+            ("authentication_started_60s", 1),
+            ("authentication_rejected_60s", 1),
+            ("federation_ingress_bytes_60s", 4),
+            ("federation_rejected_bytes_60s", 5),
+        ] {
+            let expected = format!(" {field} {value} :Statistic value").into_bytes();
+            assert!(rates.lines.iter().any(|line| line.ends_with(&expected)));
+        }
+
+        port.line(generation, signed_line(1, "STATS RUNTIME")?, &root)
+            .await
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        assert!(
+            core_inbox
+                .complete_snapshot_for_test(AdminCoreSnapshot::new(
+                    [0; 9], [0; 14], [0; 10], [0; 8],
+                ))
+                .await
+        );
+        let _audit = core_inbox
+            .complete_next_for_test(Ok(()))
+            .await
+            .ok_or(RuntimeError::InvalidValue)?;
+        let runtime = output.recv().await.ok_or(RuntimeError::InvalidValue)?;
+        for expected in [
+            b" live_client_connections 1 :Statistic value".as_slice(),
+            b" tls_handshakes_in_progress 1 :Statistic value".as_slice(),
+        ] {
+            assert!(runtime.lines.iter().any(|line| line.ends_with(expected)));
+        }
+
+        root.cancel();
+        owner.await.map_err(|_| RuntimeError::Cancelled)?;
+        drop(observer);
+        drop(log_writer);
         Ok(())
     }
 

@@ -9,6 +9,7 @@
 
 use std::collections::BTreeMap;
 
+use agenc_ircd_admin::STATS_SIXTY_SECOND_BUCKETS;
 use agenc_ircd_types::ServerId;
 
 use crate::RuntimeError;
@@ -22,6 +23,82 @@ use crate::sync::{Mutex, lock};
 pub const MAX_METRIC_SERIES: usize = 4_096;
 /// Labels one series may carry.
 pub const MAX_LABELS_PER_SERIES: usize = 3;
+
+pub(crate) const STATS_RATE_FIELDS: usize = 8;
+
+#[derive(Clone, Copy)]
+pub(crate) enum StatsRateField {
+    ClientCommandsAccepted = 0,
+    ClientCommandsRateLimited = 1,
+    ConnectionsAdmitted = 2,
+    ConnectionsRejected = 3,
+    AuthenticationStarted = 4,
+    AuthenticationRejected = 5,
+    FederationIngressBytes = 6,
+    FederationRejectedBytes = 7,
+}
+
+#[derive(Clone, Copy)]
+struct StatsRateBucket {
+    second: Option<u64>,
+    values: [u64; STATS_RATE_FIELDS],
+}
+
+impl StatsRateBucket {
+    const EMPTY: Self = Self {
+        second: None,
+        values: [0; STATS_RATE_FIELDS],
+    };
+}
+
+struct StatsRateWindow {
+    buckets: [StatsRateBucket; STATS_SIXTY_SECOND_BUCKETS],
+}
+
+impl StatsRateWindow {
+    fn increment(&mut self, second: u64, field: StatsRateField, by: u64) {
+        let index = usize::try_from(second % STATS_SIXTY_SECOND_BUCKETS as u64).unwrap_or(0);
+        let Some(bucket) = self.buckets.get_mut(index) else {
+            return;
+        };
+        if bucket.second != Some(second) {
+            *bucket = StatsRateBucket {
+                second: Some(second),
+                values: [0; STATS_RATE_FIELDS],
+            };
+        }
+        if let Some(value) = bucket.values.get_mut(field as usize) {
+            *value = value.saturating_add(by);
+        }
+    }
+
+    fn snapshot(&self, second: u64) -> Result<[u64; STATS_RATE_FIELDS], RuntimeError> {
+        let mut values = [0_u64; STATS_RATE_FIELDS];
+        for bucket in &self.buckets {
+            let Some(bucket_second) = bucket.second else {
+                continue;
+            };
+            if bucket_second > second
+                || second.saturating_sub(bucket_second)
+                    >= u64::try_from(STATS_SIXTY_SECOND_BUCKETS).unwrap_or(u64::MAX)
+            {
+                continue;
+            }
+            for (total, value) in values.iter_mut().zip(bucket.values) {
+                *total = total.checked_add(value).ok_or(RuntimeError::Overflow)?;
+            }
+        }
+        Ok(values)
+    }
+}
+
+impl Default for StatsRateWindow {
+    fn default() -> Self {
+        Self {
+            buckets: [StatsRateBucket::EMPTY; STATS_SIXTY_SECOND_BUCKETS],
+        }
+    }
+}
 
 /// The node role label.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -271,6 +348,9 @@ struct MetricsState {
     counters: BTreeMap<MetricKey, u64>,
     durations: BTreeMap<MetricKey, DurationHistogram>,
     counts: BTreeMap<MetricKey, CountHistogram>,
+    live_clients: u64,
+    tls_handshakes: u64,
+    rates: StatsRateWindow,
 }
 
 impl MetricsState {
@@ -336,6 +416,58 @@ impl MetricsRegistry {
         Ok(())
     }
 
+    pub(crate) fn client_admitted(&self, second: u64) {
+        let mut state = lock(&self.state);
+        state.live_clients = state.live_clients.saturating_add(1);
+        state
+            .rates
+            .increment(second, StatsRateField::ConnectionsAdmitted, 1);
+    }
+
+    pub(crate) fn client_closed(&self) {
+        let mut state = lock(&self.state);
+        state.live_clients = state.live_clients.saturating_sub(1);
+    }
+
+    pub(crate) fn tls_started(&self) {
+        let mut state = lock(&self.state);
+        state.tls_handshakes = state.tls_handshakes.saturating_add(1);
+    }
+
+    pub(crate) fn tls_finished(&self) {
+        let mut state = lock(&self.state);
+        state.tls_handshakes = state.tls_handshakes.saturating_sub(1);
+    }
+
+    pub(crate) fn record_rate(&self, second: u64, field: StatsRateField, by: u64) {
+        let mut state = lock(&self.state);
+        state.rates.increment(second, field, by);
+    }
+
+    pub(crate) fn runtime_values(&self, uptime_seconds: u64) -> [u64; 3] {
+        let state = lock(&self.state);
+        [uptime_seconds, state.live_clients, state.tls_handshakes]
+    }
+
+    pub(crate) fn rate_values(
+        &self,
+        second: u64,
+    ) -> Result<[u64; STATS_RATE_FIELDS], RuntimeError> {
+        lock(&self.state).rates.snapshot(second)
+    }
+
+    pub(crate) fn stats_values(
+        &self,
+        uptime_seconds: u64,
+        second: u64,
+    ) -> Result<MetricsStatsValues, RuntimeError> {
+        let state = lock(&self.state);
+        Ok(MetricsStatsValues {
+            runtime: [uptime_seconds, state.live_clients, state.tls_handshakes],
+            rates: state.rates.snapshot(second)?,
+        })
+    }
+
     /// Copies every series the view may see.
     #[must_use]
     pub fn snapshot(&self, view: MetricsView) -> MetricsSnapshot {
@@ -361,6 +493,22 @@ impl MetricsRegistry {
                 .map(|(key, value)| (*key, *value))
                 .collect(),
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MetricsStatsValues {
+    runtime: [u64; 3],
+    rates: [u64; STATS_RATE_FIELDS],
+}
+
+impl MetricsStatsValues {
+    pub(crate) const fn runtime(self) -> [u64; 3] {
+        self.runtime
+    }
+
+    pub(crate) const fn rates(self) -> [u64; STATS_RATE_FIELDS] {
+        self.rates
     }
 }
 

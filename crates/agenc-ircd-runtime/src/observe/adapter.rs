@@ -1,8 +1,5 @@
 //! Closed production adapters for runtime logs, metrics, and STATS windows.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
-use agenc_ircd_admin::STATS_SIXTY_SECOND_BUCKETS;
 use agenc_ircd_types::{MonotonicClock as _, ServerId, WallClock as _};
 
 use crate::RuntimeError;
@@ -15,109 +12,14 @@ use crate::observe::events::{
 };
 use crate::observe::log::{LogEmitOutcome, LogHandle, LogRetention};
 use crate::observe::metrics::{
-    CommandClass, LabelSet, MetricKey, MetricLabel, MetricName, MetricsRegistry, QueueName,
-    ResultClass, TransportFamily,
+    CommandClass, LabelSet, MetricKey, MetricLabel, MetricName, MetricsRegistry,
+    MetricsStatsValues, QueueName, ResultClass, STATS_RATE_FIELDS, StatsRateField, TransportFamily,
 };
 use crate::purpose::ListenerPurpose;
 use crate::state_core::inbox::CloseReason;
 use crate::supervisor::ShutdownPhase;
-use crate::sync::{Arc, Mutex, lock};
+use crate::sync::Arc;
 use crate::tls::TlsHandshakeError;
-
-const RATE_FIELDS: usize = 8;
-
-#[derive(Clone, Copy)]
-enum RateField {
-    ClientCommandsAccepted = 0,
-    ClientCommandsRateLimited = 1,
-    ConnectionsAdmitted = 2,
-    ConnectionsRejected = 3,
-    AuthenticationStarted = 4,
-    AuthenticationRejected = 5,
-    FederationIngressBytes = 6,
-    FederationRejectedBytes = 7,
-}
-
-#[derive(Clone, Copy)]
-struct RateBucket {
-    second: Option<u64>,
-    values: [u64; RATE_FIELDS],
-}
-
-impl RateBucket {
-    const EMPTY: Self = Self {
-        second: None,
-        values: [0; RATE_FIELDS],
-    };
-}
-
-struct RateWindowState {
-    buckets: [RateBucket; STATS_SIXTY_SECOND_BUCKETS],
-}
-
-impl Default for RateWindowState {
-    fn default() -> Self {
-        Self {
-            buckets: [RateBucket::EMPTY; STATS_SIXTY_SECOND_BUCKETS],
-        }
-    }
-}
-
-/// Fixed 60 one-second buckets behind one short-held synchronization cell.
-pub struct SixtySecondRates {
-    state: Mutex<RateWindowState>,
-}
-
-impl SixtySecondRates {
-    /// Creates an empty window. Buckets before process start remain zero.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            state: Mutex::new(RateWindowState::default()),
-        }
-    }
-
-    fn increment(&self, second: u64, field: RateField, by: u64) {
-        let mut state = lock(&self.state);
-        let index = usize::try_from(second % STATS_SIXTY_SECOND_BUCKETS as u64).unwrap_or(0);
-        let Some(bucket) = state.buckets.get_mut(index) else {
-            return;
-        };
-        if bucket.second != Some(second) {
-            *bucket = RateBucket {
-                second: Some(second),
-                values: [0; RATE_FIELDS],
-            };
-        }
-        if let Some(value) = bucket.values.get_mut(field as usize) {
-            *value = value.saturating_add(by);
-        }
-    }
-
-    /// Returns checked sums of the current second and the preceding 59.
-    pub fn snapshot(&self, second: u64) -> Result<[u64; RATE_FIELDS], RuntimeError> {
-        let state = lock(&self.state);
-        let mut values = [0_u64; RATE_FIELDS];
-        for bucket in &state.buckets {
-            let Some(bucket_second) = bucket.second else {
-                continue;
-            };
-            if bucket_second > second || second.saturating_sub(bucket_second) >= 60 {
-                continue;
-            }
-            for (total, value) in values.iter_mut().zip(bucket.values) {
-                *total = total.checked_add(value).ok_or(RuntimeError::Overflow)?;
-            }
-        }
-        Ok(values)
-    }
-}
-
-impl Default for SixtySecondRates {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 /// One process-wide, input-free observer shared by runtime owners.
 pub struct RuntimeObserver {
@@ -127,9 +29,6 @@ pub struct RuntimeObserver {
     correlation: Arc<CorrelationSource>,
     log: LogHandle,
     metrics: Arc<MetricsRegistry>,
-    rates: SixtySecondRates,
-    live_clients: AtomicU64,
-    tls_handshakes: AtomicU64,
 }
 
 impl RuntimeObserver {
@@ -149,9 +48,6 @@ impl RuntimeObserver {
             correlation,
             log,
             metrics,
-            rates: SixtySecondRates::new(),
-            live_clients: AtomicU64::new(0),
-            tls_handshakes: AtomicU64::new(0),
         }
     }
 
@@ -253,30 +149,27 @@ impl RuntimeObserver {
     /// Returns process runtime values owned outside StateCore.
     #[must_use]
     pub fn runtime_values(&self) -> [u64; 3] {
-        [
-            self.monotonic.now().get() / 1_000,
-            self.live_clients.load(Ordering::Acquire),
-            self.tls_handshakes.load(Ordering::Acquire),
-        ]
+        self.metrics.runtime_values(self.monotonic_second())
     }
 
     /// Returns the exact eight 60-second rate fields.
-    pub fn rate_values(&self) -> Result<[u64; RATE_FIELDS], RuntimeError> {
-        self.rates.snapshot(self.monotonic_second())
+    pub fn rate_values(&self) -> Result<[u64; STATS_RATE_FIELDS], RuntimeError> {
+        self.metrics.rate_values(self.monotonic_second())
+    }
+
+    pub(crate) fn stats_values(&self) -> Result<MetricsStatsValues, RuntimeError> {
+        let second = self.monotonic_second();
+        self.metrics.stats_values(second, second)
     }
 
     /// Marks one TLS handshake as in progress.
     pub fn tls_started(&self) {
-        self.tls_handshakes.fetch_add(1, Ordering::AcqRel);
+        self.metrics.tls_started();
     }
 
     /// Marks one TLS handshake as complete or refused.
     pub fn tls_finished(&self, purpose: ListenerPurpose, elapsed_millis: u64, outcome: TlsOutcome) {
-        let _previous =
-            self.tls_handshakes
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-                    value.checked_sub(1)
-                });
+        self.metrics.tls_finished();
         self.observe_duration(
             MetricName::HandshakeDuration,
             &[
@@ -312,32 +205,33 @@ impl RuntimeObserver {
             1,
         );
         let field = if result == ResultClass::Busy {
-            RateField::ClientCommandsRateLimited
+            StatsRateField::ClientCommandsRateLimited
         } else {
-            RateField::ClientCommandsAccepted
+            StatsRateField::ClientCommandsAccepted
         };
-        self.rates.increment(self.monotonic_second(), field, 1);
+        self.metrics.record_rate(self.monotonic_second(), field, 1);
     }
 
     /// Records an authentication attempt without its account or mechanism.
     pub fn authentication(&self, rejected: bool) {
         let field = if rejected {
-            RateField::AuthenticationRejected
+            StatsRateField::AuthenticationRejected
         } else {
-            RateField::AuthenticationStarted
+            StatsRateField::AuthenticationStarted
         };
-        self.rates.increment(self.monotonic_second(), field, 1);
+        self.metrics.record_rate(self.monotonic_second(), field, 1);
     }
 
     /// Records a federation ingress byte count. Core-v1 never calls this,
     /// so both federation rate fields remain zero while federation is off.
     pub fn federation_ingress(&self, bytes: u64, rejected: bool) {
         let field = if rejected {
-            RateField::FederationRejectedBytes
+            StatsRateField::FederationRejectedBytes
         } else {
-            RateField::FederationIngressBytes
+            StatsRateField::FederationIngressBytes
         };
-        self.rates.increment(self.monotonic_second(), field, bytes);
+        self.metrics
+            .record_rate(self.monotonic_second(), field, bytes);
     }
 
     /// Records a bounded queue depth under a closed queue name.
@@ -526,9 +420,7 @@ impl ConnectionObserver for RuntimeObserver {
 
     fn admitted(&self, connection: &AdmittedConnection) {
         if is_client(connection.purpose) {
-            self.live_clients.fetch_add(1, Ordering::AcqRel);
-            self.rates
-                .increment(self.monotonic_second(), RateField::ConnectionsAdmitted, 1);
+            self.metrics.client_admitted(self.monotonic_second());
         }
         self.increment(
             MetricName::ConnectionsAdmitted,
@@ -567,8 +459,11 @@ impl ConnectionObserver for RuntimeObserver {
 
     fn refused(&self, purpose: ListenerPurpose, reason: RefusalReason) {
         if is_client(purpose) {
-            self.rates
-                .increment(self.monotonic_second(), RateField::ConnectionsRejected, 1);
+            self.metrics.record_rate(
+                self.monotonic_second(),
+                StatsRateField::ConnectionsRejected,
+                1,
+            );
         }
         self.increment(
             MetricName::ConnectionsRefused,
@@ -584,11 +479,7 @@ impl ConnectionObserver for RuntimeObserver {
 
     fn closed(&self, exit: &ConnectionExit) {
         if is_client(exit.purpose) {
-            let _previous =
-                self.live_clients
-                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-                        value.checked_sub(1)
-                    });
+            self.metrics.client_closed();
         }
         self.increment(
             MetricName::ConnectionsClosed,
@@ -736,14 +627,18 @@ mod tests {
 
     #[test]
     fn rate_windows_clear_reused_buckets_and_exclude_future_values() -> Result<(), RuntimeError> {
-        let window = SixtySecondRates::new();
-        window.increment(0, RateField::ConnectionsAdmitted, 2);
-        window.increment(59, RateField::ConnectionsAdmitted, 3);
-        assert_eq!(window.snapshot(59)?[2], 5);
-        assert_eq!(window.snapshot(60)?[2], 3);
-        window.increment(60, RateField::ConnectionsAdmitted, 7);
-        assert_eq!(window.snapshot(60)?[2], 10);
-        assert_eq!(window.snapshot(59)?[2], 3, "a future bucket is excluded");
+        let metrics = MetricsRegistry::new();
+        metrics.record_rate(0, StatsRateField::ConnectionsAdmitted, 2);
+        metrics.record_rate(59, StatsRateField::ConnectionsAdmitted, 3);
+        assert_eq!(metrics.rate_values(59)?[2], 5);
+        assert_eq!(metrics.rate_values(60)?[2], 3);
+        metrics.record_rate(60, StatsRateField::ConnectionsAdmitted, 7);
+        assert_eq!(metrics.rate_values(60)?[2], 10);
+        assert_eq!(
+            metrics.rate_values(59)?[2],
+            3,
+            "a future bucket is excluded"
+        );
         Ok(())
     }
 
