@@ -200,8 +200,35 @@ fn listener_union(config: &Config, sink: &mut IssueSink) {
             sink.push(stage, key("allowed_origins"), ConfigError::InvalidValue);
         }
     }
+    ocsp_staple_policy(config, sink);
     listener_key_reuse(config, sink);
     listener_counts(config, sink);
+}
+
+/// Required public-DNS stapling is backed by one prepared response per
+/// configured public TLS certificate.
+fn ocsp_staple_policy(config: &Config, sink: &mut IssueSink) {
+    if !config.tls.require_ocsp_staple {
+        return;
+    }
+    for (index, listener) in config.listeners.iter().enumerate() {
+        if listener.purpose == ListenerPurpose::ClientTls
+            && listener
+                .tls
+                .as_ref()
+                .is_none_or(|tls| tls.ocsp_staple_file.is_none())
+        {
+            sink.push(
+                ValidationStage::ListenerUnion,
+                SchemaKey::indexed(
+                    "listeners.endpoint",
+                    index_u16(index),
+                    "tls_ocsp_staple_file",
+                ),
+                ConfigError::MissingValue,
+            );
+        }
+    }
 }
 
 /// Purpose-specific `max_connections` ceilings (spec 8940-8943).

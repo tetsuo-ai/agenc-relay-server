@@ -12,6 +12,8 @@ use crate::config::Config;
 use crate::error::{ConfigError, IssueSink, SchemaKey, ValidationStage};
 use crate::listeners::ListenerBind;
 
+const MAX_TLS_MATERIAL_BYTES: u64 = 65_536;
+
 /// Resolves relative configuration paths against the configuration file's
 /// canonical parent directory (spec 4277-4279).
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -217,12 +219,23 @@ pub(crate) fn verify_host_paths(config: &Config, sink: &mut IssueSink) {
             sink.push(stage, key, error);
         }
     }
+    check_listener_material_paths(config, sink);
     for (index, listener) in config.listeners.iter().enumerate() {
         if let ListenerBind::Unix(path) = &listener.bind {
             let key = SchemaKey::indexed("listeners.endpoint", index_u16(index), "bind");
             if let Err(error) = socket_parent(path) {
                 sink.push(stage, key, error);
             }
+        }
+    }
+}
+
+fn check_listener_material_paths(config: &Config, sink: &mut IssueSink) {
+    for (key, path) in config.listener_material_paths() {
+        let result = protected_ancestors(&path)
+            .and_then(|()| read_protected_bytes(&path, MAX_TLS_MATERIAL_BYTES).map(|_| ()));
+        if let Err(error) = result {
+            sink.push(ValidationStage::PathsAndFileTypes, key, error);
         }
     }
 }
@@ -274,7 +287,8 @@ pub(crate) fn protected_ancestors(path: &Path) -> Result<(), ConfigError> {
 /// Requires the parent of a Unix socket path to be an existing directory.
 fn socket_parent(path: &Path) -> Result<(), ConfigError> {
     let parent = path.parent().ok_or(ConfigError::FileRejected)?;
-    directory_metadata(parent, None)
+    protected_ancestors(path)?;
+    directory_metadata(parent, Some(0o750))
 }
 
 /// Validates a MOTD or public-info file: UTF-8, at most 64 KiB and 256 lines.

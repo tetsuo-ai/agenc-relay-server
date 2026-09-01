@@ -234,6 +234,29 @@ impl Config {
             ),
         ]
     }
+
+    /// Public listener certificate, private client-CA, and OCSP inputs.
+    pub(crate) fn listener_material_paths(&self) -> Vec<(SchemaKey, PathBuf)> {
+        let mut paths = Vec::new();
+        for (index, listener) in self.listeners.iter().enumerate() {
+            let key =
+                |field| SchemaKey::indexed("listeners.endpoint", paths::index_u16(index), field);
+            if let Some(tls) = &listener.tls {
+                paths.push((key("tls_certificate_file"), tls.certificate_file.clone()));
+                push_optional(
+                    &mut paths,
+                    key("tls_ocsp_staple_file"),
+                    tls.ocsp_staple_file.as_ref(),
+                );
+            }
+            push_optional(
+                &mut paths,
+                key("client_ca_file"),
+                listener.client_ca_file.as_ref(),
+            );
+        }
+        paths
+    }
 }
 
 fn push_optional(paths: &mut Vec<(SchemaKey, PathBuf)>, key: SchemaKey, path: Option<&PathBuf>) {

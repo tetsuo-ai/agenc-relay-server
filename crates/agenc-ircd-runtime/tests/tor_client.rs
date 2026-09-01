@@ -5,16 +5,22 @@
 use std::error::Error;
 use std::io;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use agenc_ircd_config::{
     DnsEndpoint, DnsName, OnboardingDescriptor, OnionAddress, OnionEndpoint, SocksEndpoint,
 };
-use agenc_ircd_runtime::tor_client::{
-    TorClientOwner, TorClientProfile, TorConnectError, TorIsolationContext,
+use agenc_ircd_runtime::tls::{
+    CLIENT_ALPN, CertChain, ClientAuth, PrivateKey, TlsEndpointProfile, TlsStream, TrustStore,
+    build_server_config_blocking,
 };
-use agenc_ircd_testkit::ScriptedEntropy;
+use agenc_ircd_runtime::tor_client::{
+    TorClientOwner, TorClientProfile, TorClientTls, TorConnectError, TorIsolationContext,
+};
+use agenc_ircd_testkit::{ScriptedEntropy, TlsFixture};
 use agenc_ircd_types::{AccountId, AccountRandomId, NetworkId, RecoveryEpoch};
+use rustls::ServerConfig;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -22,9 +28,9 @@ type TestResult = Result<(), Box<dyn Error + Send + Sync>>;
 
 const SOCKS_SUCCESS: [u8; 10] = [5, 0, 0, 1, 127, 0, 0, 1, 26, 41];
 
-#[derive(Clone, Copy)]
 enum ProxyBehavior {
-    Success,
+    TlsSuccess(Arc<ServerConfig>),
+    TlsRejection(Arc<ServerConfig>),
     InvalidSelection,
     AuthenticationRefused,
     TargetRefused,
@@ -38,7 +44,9 @@ struct SocksRequest {
     port: u16,
 }
 
-fn descriptor() -> Result<OnboardingDescriptor, Box<dyn Error + Send + Sync>> {
+fn descriptor(
+    onion_spki_sha256: [u8; 32],
+) -> Result<OnboardingDescriptor, Box<dyn Error + Send + Sync>> {
     Ok(OnboardingDescriptor {
         network_id: NetworkId::from_bytes([7; 32]),
         server_name: DnsName::parse("chat.example")?,
@@ -49,7 +57,7 @@ fn descriptor() -> Result<OnboardingDescriptor, Box<dyn Error + Send + Sync>> {
         onion: Some(OnionEndpoint {
             address: OnionAddress::parse(&format!("{}.onion", "a".repeat(56)))?,
             port: 6697,
-            tls_spki_sha256: [8; 32],
+            tls_spki_sha256: onion_spki_sha256,
         }),
         recovery_epoch: RecoveryEpoch::from_bytes([9; 16]),
         account_service_hpke_key_id: [10; 32],
@@ -57,6 +65,28 @@ fn descriptor() -> Result<OnboardingDescriptor, Box<dyn Error + Send + Sync>> {
         sequencer_key_set_generation: 12,
         sequencer_key_set_hash: [13; 32],
     })
+}
+
+fn client_tls(fixture: &TlsFixture) -> Result<TorClientTls, Box<dyn Error + Send + Sync>> {
+    Ok(TorClientTls::new(TrustStore::parse(
+        fixture.ca_certificate_der(),
+    )?))
+}
+
+fn server_tls(
+    fixture: &TlsFixture,
+    alpn: &[u8],
+) -> Result<Arc<ServerConfig>, Box<dyn Error + Send + Sync>> {
+    let mut config = build_server_config_blocking(
+        TlsEndpointProfile::Client,
+        CertChain::parse(fixture.leaf_certificate_der())?,
+        PrivateKey::parse(fixture.leaf_private_key_pkcs8_der())?,
+        ClientAuth::None,
+    )?;
+    Arc::get_mut(&mut config)
+        .ok_or_else(|| io::Error::other("test TLS config was unexpectedly shared"))?
+        .alpn_protocols = vec![alpn.to_vec()];
+    Ok(config)
 }
 
 fn account(byte: u8) -> AccountId {
@@ -95,31 +125,46 @@ async fn serve_connection(
     let mut greeting = [0_u8; 3];
     stream.read_exact(&mut greeting).await?;
     require_bytes(&greeting, &[5, 1, 2])?;
-    if matches!(behavior, ProxyBehavior::InvalidSelection) {
+    if matches!(&behavior, ProxyBehavior::InvalidSelection) {
         stream.write_all(&[4, 2]).await?;
         return Ok(None);
     }
     stream.write_all(&[5, 2]).await?;
 
     let (username, password) = read_authentication(stream).await?;
-    if matches!(behavior, ProxyBehavior::AuthenticationRefused) {
+    if matches!(&behavior, ProxyBehavior::AuthenticationRefused) {
         stream.write_all(&[1, 1]).await?;
         return Ok(None);
     }
     stream.write_all(&[1, 0]).await?;
 
     let (hostname, port) = read_hostname_request(stream).await?;
-    if matches!(behavior, ProxyBehavior::TargetRefused) {
+    if matches!(&behavior, ProxyBehavior::TargetRefused) {
         stream.write_all(&[5, 5, 0, 1]).await?;
     } else {
         stream.write_all(&SOCKS_SUCCESS).await?;
     }
-    Ok(Some(SocksRequest {
+    let request = SocksRequest {
         username,
         password,
         hostname,
         port,
-    }))
+    };
+    let tls = match behavior {
+        ProxyBehavior::TlsSuccess(config) => Some((config, true)),
+        ProxyBehavior::TlsRejection(config) => Some((config, false)),
+        _ => None,
+    };
+    if let Some((config, expected_success)) = tls {
+        let result =
+            TlsStream::handshake(stream, config, CLIENT_ALPN, Duration::from_secs(1)).await;
+        let succeeded = result.is_ok();
+        drop(result);
+        if succeeded != expected_success {
+            return Err(io::Error::other("unexpected TLS handshake outcome"));
+        }
+    }
+    Ok(Some(request))
 }
 
 async fn read_authentication(stream: &mut TcpStream) -> io::Result<(Vec<u8>, Vec<u8>)> {
@@ -171,12 +216,19 @@ async fn listener() -> io::Result<(TcpListener, SocketAddr)> {
 
 #[tokio::test]
 async fn profiles_send_only_the_selected_hostname_through_socks() -> TestResult {
-    let descriptor = descriptor()?;
+    let direct_fixture = TlsFixture::mint([31; 32], "chat.example")?;
+    let onion_name = format!("{}.onion", "a".repeat(56));
+    let onion_fixture = TlsFixture::mint([36; 32], &onion_name)?;
+    let descriptor = descriptor(*onion_fixture.leaf_spki_sha256())?;
+    let tls = client_tls(&direct_fixture)?;
     let context = TorIsolationContext::network(descriptor.network_id);
     let (listener, address) = listener().await?;
     let server = tokio::spawn(proxy(
         listener,
-        vec![ProxyBehavior::Success, ProxyBehavior::Success],
+        vec![
+            ProxyBehavior::TlsSuccess(server_tls(&direct_fixture, CLIENT_ALPN)?),
+            ProxyBehavior::TlsSuccess(server_tls(&onion_fixture, CLIENT_ALPN)?),
+        ],
     ));
     let mut entropy = entropy_for(1)?;
     let owner = TorClientOwner::new(
@@ -187,16 +239,19 @@ async fn profiles_send_only_the_selected_hostname_through_socks() -> TestResult 
     )?;
 
     let tor_exit = owner
-        .connect(context, TorClientProfile::TorExit, &descriptor)
+        .connect(context, TorClientProfile::TorExit, &descriptor, &tls)
         .await?;
     assert_eq!(tor_exit.tls_server_name(), "chat.example");
     assert_eq!(tor_exit.tls_spki_sha256(), None);
 
     let onion = owner
-        .connect(context, TorClientProfile::Onion, &descriptor)
+        .connect(context, TorClientProfile::Onion, &descriptor, &tls)
         .await?;
     assert_eq!(onion.profile(), TorClientProfile::Onion);
-    assert_eq!(onion.tls_spki_sha256(), Some(&[8; 32]));
+    assert_eq!(
+        onion.tls_spki_sha256(),
+        Some(onion_fixture.leaf_spki_sha256())
+    );
 
     let requests = server.await??;
     let [exit_request, onion_request] = requests.as_slice() else {
@@ -211,7 +266,9 @@ async fn profiles_send_only_the_selected_hostname_through_socks() -> TestResult 
 
 #[tokio::test]
 async fn account_contexts_never_share_credentials_and_reconnects_reuse_them() -> TestResult {
-    let descriptor = descriptor()?;
+    let fixture = TlsFixture::mint([32; 32], "chat.example")?;
+    let descriptor = descriptor(*fixture.leaf_spki_sha256())?;
+    let tls = client_tls(&fixture)?;
     let network = TorIsolationContext::network(descriptor.network_id);
     let account_one = TorIsolationContext::account(descriptor.network_id, account(1));
     let account_two = TorIsolationContext::account(descriptor.network_id, account(2));
@@ -219,10 +276,10 @@ async fn account_contexts_never_share_credentials_and_reconnects_reuse_them() ->
     let server = tokio::spawn(proxy(
         listener,
         vec![
-            ProxyBehavior::Success,
-            ProxyBehavior::Success,
-            ProxyBehavior::Success,
-            ProxyBehavior::Success,
+            ProxyBehavior::TlsSuccess(server_tls(&fixture, CLIENT_ALPN)?),
+            ProxyBehavior::TlsSuccess(server_tls(&fixture, CLIENT_ALPN)?),
+            ProxyBehavior::TlsSuccess(server_tls(&fixture, CLIENT_ALPN)?),
+            ProxyBehavior::TlsSuccess(server_tls(&fixture, CLIENT_ALPN)?),
         ],
     ));
     let mut entropy = entropy_for(3)?;
@@ -235,7 +292,7 @@ async fn account_contexts_never_share_credentials_and_reconnects_reuse_them() ->
 
     for context in [network, account_one, account_two, account_one] {
         let _connection = owner
-            .connect(context, TorClientProfile::TorExit, &descriptor)
+            .connect(context, TorClientProfile::TorExit, &descriptor, &tls)
             .await?;
     }
 
@@ -258,6 +315,8 @@ async fn account_contexts_never_share_credentials_and_reconnects_reuse_them() ->
 
 #[tokio::test]
 async fn malformed_authentication_and_target_refusal_fail_closed() -> TestResult {
+    let fixture = TlsFixture::mint([33; 32], "chat.example")?;
+    let tls = client_tls(&fixture)?;
     for (behavior, expected) in [
         (
             ProxyBehavior::InvalidSelection,
@@ -269,7 +328,7 @@ async fn malformed_authentication_and_target_refusal_fail_closed() -> TestResult
         ),
         (ProxyBehavior::TargetRefused, TorConnectError::TargetRefused),
     ] {
-        let descriptor = descriptor()?;
+        let descriptor = descriptor(*fixture.leaf_spki_sha256())?;
         let context = TorIsolationContext::network(descriptor.network_id);
         let (listener, address) = listener().await?;
         let server = tokio::spawn(proxy(listener, vec![behavior]));
@@ -282,7 +341,7 @@ async fn malformed_authentication_and_target_refusal_fail_closed() -> TestResult
         )?;
 
         let result = owner
-            .connect(context, TorClientProfile::TorExit, &descriptor)
+            .connect(context, TorClientProfile::TorExit, &descriptor, &tls)
             .await;
         assert!(matches!(result, Err(error) if error == expected));
         let _requests = server.await??;
@@ -292,7 +351,9 @@ async fn malformed_authentication_and_target_refusal_fail_closed() -> TestResult
 
 #[tokio::test]
 async fn onion_refusal_does_not_fall_back_to_the_clearnet_profile() -> TestResult {
-    let descriptor = descriptor()?;
+    let fixture = TlsFixture::mint([34; 32], "chat.example")?;
+    let descriptor = descriptor(*fixture.leaf_spki_sha256())?;
+    let tls = client_tls(&fixture)?;
     let context = TorIsolationContext::network(descriptor.network_id);
     let (listener, address) = listener().await?;
     let server = tokio::spawn(proxy(listener, vec![ProxyBehavior::TargetRefused]));
@@ -305,7 +366,7 @@ async fn onion_refusal_does_not_fall_back_to_the_clearnet_profile() -> TestResul
     )?;
 
     let result = owner
-        .connect(context, TorClientProfile::Onion, &descriptor)
+        .connect(context, TorClientProfile::Onion, &descriptor, &tls)
         .await;
     assert!(matches!(result, Err(TorConnectError::TargetRefused)));
     let requests = server.await??;
@@ -314,6 +375,54 @@ async fn onion_refusal_does_not_fall_back_to_the_clearnet_profile() -> TestResul
     };
     assert_eq!(request.hostname, format!("{}.onion", "a".repeat(56)));
     assert_ne!(request.hostname, "chat.example");
+    Ok(())
+}
+
+#[tokio::test]
+async fn tls_name_pin_and_alpn_failures_end_the_tor_attempt() -> TestResult {
+    let trusted = TlsFixture::mint([35; 32], "chat.example")?;
+    let onion_name = format!("{}.onion", "a".repeat(56));
+    let onion = TlsFixture::mint([35; 32], &onion_name)?;
+    let wrong_name = TlsFixture::mint([35; 32], "wrong.example")?;
+    let tls = client_tls(&trusted)?;
+    let correct = descriptor(*onion.leaf_spki_sha256())?;
+    let wrong_pin = descriptor([0xA5; 32])?;
+    let cases = [
+        (
+            TorClientProfile::TorExit,
+            correct.clone(),
+            server_tls(&wrong_name, CLIENT_ALPN)?,
+        ),
+        (
+            TorClientProfile::Onion,
+            wrong_pin,
+            server_tls(&onion, CLIENT_ALPN)?,
+        ),
+        (
+            TorClientProfile::TorExit,
+            correct,
+            server_tls(&trusted, b"agenc-chat-wrong/1")?,
+        ),
+    ];
+    for (profile, descriptor, server_config) in cases {
+        let context = TorIsolationContext::network(descriptor.network_id);
+        let (listener, address) = listener().await?;
+        let server = tokio::spawn(proxy(
+            listener,
+            vec![ProxyBehavior::TlsRejection(server_config)],
+        ));
+        let mut entropy = entropy_for(1)?;
+        let owner = TorClientOwner::new(
+            SocksEndpoint::Loopback(address),
+            vec![context],
+            Duration::from_secs(1),
+            &mut entropy,
+        )?;
+        let result = owner.connect(context, profile, &descriptor, &tls).await;
+        assert!(matches!(result, Err(TorConnectError::TlsRejected)));
+        let requests = server.await??;
+        assert_eq!(requests.len(), 1);
+    }
     Ok(())
 }
 

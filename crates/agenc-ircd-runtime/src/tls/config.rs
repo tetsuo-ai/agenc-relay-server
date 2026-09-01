@@ -12,12 +12,20 @@ use std::error::Error;
 use std::fmt;
 use std::sync::Mutex;
 
+use rustls::client::WebPkiServerVerifier;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::CryptoProvider;
 use rustls::crypto::aws_lc_rs::{self, cipher_suite, kx_group};
 use rustls::pki_types::pem::PemObject as _;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
-use rustls::server::{NoServerSessionStorage, ProducesTickets, WebPkiClientVerifier};
-use rustls::{ClientConfig, RootCertStore, ServerConfig};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
+use rustls::server::{
+    NoServerSessionStorage, ParsedCertificate, ProducesTickets, WebPkiClientVerifier,
+};
+use rustls::{
+    CertificateError, ClientConfig, DigitallySignedStruct, RootCertStore, ServerConfig,
+    SignatureScheme,
+};
+use subtle::ConstantTimeEq as _;
 
 use agenc_ircd_config::{GroupPolicy, read_protected_bytes};
 use agenc_ircd_crypto::{
@@ -623,13 +631,23 @@ pub(crate) async fn load_trust_store_material(
 
 /// Reads one bounded OCSP response on the blocking pool.
 pub async fn load_ocsp_staple(path: std::path::PathBuf) -> Result<OcspStaple, TlsConfigError> {
+    Ok(load_ocsp_staple_material(path).await?.0)
+}
+
+/// Reads one OCSP response once and returns both its parsed form and reload
+/// content fingerprint.
+pub(crate) async fn load_ocsp_staple_material(
+    path: std::path::PathBuf,
+) -> Result<(OcspStaple, [u8; 32]), TlsConfigError> {
     let document = tokio::task::spawn_blocking(move || {
         read_protected_bytes(&path, MAX_TLS_DOCUMENT_BYTES as u64)
             .map_err(|_| TlsConfigError::InvalidOcspStaple)
     })
     .await
     .map_err(|_| TlsConfigError::InvalidOcspStaple)??;
-    OcspStaple::parse(&document)
+    let fingerprint = semantic_digest(SemanticHashDomain::PolicyId, &document)
+        .map_err(|_| TlsConfigError::InvalidOcspStaple)?;
+    Ok((OcspStaple::parse(&document)?, *fingerprint.as_bytes()))
 }
 
 /// A client configuration on the same provider, for tests and native
@@ -654,6 +672,96 @@ pub fn build_client_config(
     }
     config.enable_early_data = false;
     Ok(Arc::new(config))
+}
+
+#[derive(Debug)]
+struct SpkiPinVerifier {
+    inner: Arc<dyn ServerCertVerifier>,
+    expected: [u8; 32],
+}
+
+impl ServerCertVerifier for SpkiPinVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        let actual = certificate_spki_sha256(end_entity)
+            .ok_or_else(|| rustls::Error::InvalidCertificate(CertificateError::BadEncoding))?;
+        if !bool::from(actual.ct_eq(&self.expected)) {
+            return Err(rustls::Error::InvalidCertificate(
+                CertificateError::ApplicationVerificationFailure,
+            ));
+        }
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        certificate: &CertificateDer<'_>,
+        signature: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner
+            .verify_tls12_signature(message, certificate, signature)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        certificate: &CertificateDer<'_>,
+        signature: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner
+            .verify_tls13_signature(message, certificate, signature)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
+}
+
+/// Builds the native onion-client TLS profile around the descriptor's exact
+/// leaf SPKI pin. The verifier still checks handshake signatures so the peer
+/// must possess the private key corresponding to the pinned certificate.
+pub fn build_pinned_client_config(
+    roots: TrustStore,
+    expected_spki_sha256: [u8; 32],
+) -> Result<Arc<ClientConfig>, TlsConfigError> {
+    let crypto = Arc::new(provider());
+    let webpki =
+        WebPkiServerVerifier::builder_with_provider(Arc::clone(&roots.roots), Arc::clone(&crypto))
+            .build()
+            .map_err(|_| TlsConfigError::InvalidTrustStore)?;
+    let verifier = SpkiPinVerifier {
+        inner: webpki,
+        expected: expected_spki_sha256,
+    };
+    let mut config = ClientConfig::builder_with_provider(crypto)
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|_| TlsConfigError::ProviderUnavailable)?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(verifier))
+        .with_no_client_auth();
+    config.alpn_protocols = vec![CLIENT_ALPN.to_vec()];
+    config.enable_early_data = false;
+    Ok(Arc::new(config))
+}
+
+fn certificate_spki_sha256(certificate: &CertificateDer<'_>) -> Option<[u8; 32]> {
+    let parsed = ParsedCertificate::try_from(certificate).ok()?;
+    let spki = parsed.subject_public_key_info();
+    let suite = cipher_suite::TLS13_AES_128_GCM_SHA256.tls13()?;
+    let output = suite.common.hash_provider.hash(spki.as_ref());
+    let mut digest = [0_u8; 32];
+    if output.as_ref().len() != digest.len() {
+        return None;
+    }
+    digest.copy_from_slice(output.as_ref());
+    Some(digest)
 }
 
 fn parse_certificates(document: &[u8]) -> Result<Vec<CertificateDer<'static>>, TlsConfigError> {

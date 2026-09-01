@@ -8,9 +8,16 @@ use std::time::Duration;
 
 use agenc_ircd_config::{OnboardingDescriptor, SocksEndpoint};
 use agenc_ircd_types::{AccountId, EntropySource, NetworkId};
+use rustls::ClientConfig;
+use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf};
 use tokio::net::{TcpStream, UnixStream};
 use zeroize::Zeroizing;
+
+use crate::sync::Arc;
+use crate::tls::{
+    CLIENT_ALPN, ClientTlsStream, TrustStore, build_client_config, build_pinned_client_config,
+};
 
 const SOCKS_VERSION: u8 = 5;
 const SOCKS_USERNAME_PASSWORD: u8 = 2;
@@ -89,6 +96,8 @@ pub enum TorConnectError {
     AuthenticationRefused,
     /// Tor refused the requested destination.
     TargetRefused,
+    /// TLS 1.3, certificate identity, the onion pin, or the client ALPN failed.
+    TlsRejected,
 }
 
 impl fmt::Display for TorConnectError {
@@ -105,6 +114,7 @@ impl fmt::Display for TorConnectError {
             Self::InvalidProxyReply => "invalid Tor proxy reply",
             Self::AuthenticationRefused => "Tor stream isolation refused",
             Self::TargetRefused => "Tor destination refused",
+            Self::TlsRejected => "Tor TLS authentication failed",
         })
     }
 }
@@ -152,6 +162,30 @@ pub struct TorClientOwner {
     contexts: Vec<IsolationEntry>,
 }
 
+/// Validated public roots used by the native Tor client for both DNS-name
+/// and onion-name certificate validation.
+#[derive(Clone)]
+pub struct TorClientTls {
+    roots: TrustStore,
+}
+
+impl TorClientTls {
+    /// Retains one already parsed root set; no platform roots are loaded
+    /// implicitly by the connection path.
+    #[must_use]
+    pub const fn new(roots: TrustStore) -> Self {
+        Self { roots }
+    }
+
+    fn prepare(&self, target: SelectedTarget<'_>) -> Result<Arc<ClientConfig>, TorConnectError> {
+        match target.tls_spki_sha256 {
+            Some(pin) => build_pinned_client_config(self.roots.clone(), pin),
+            None => build_client_config(self.roots.clone(), Some(CLIENT_ALPN), None),
+        }
+        .map_err(|_| TorConnectError::TlsRejected)
+    }
+}
+
 impl TorClientOwner {
     /// Creates a connector for at most 256 unique network/account contexts.
     pub fn new(
@@ -188,12 +222,14 @@ impl TorClientOwner {
         context: TorIsolationContext,
         profile: TorClientProfile,
         descriptor: &OnboardingDescriptor,
+        tls: &TorClientTls,
     ) -> Result<TorConnection, TorConnectError> {
         let credentials = self.credentials(context, descriptor.network_id)?;
         let target = SelectedTarget::from_descriptor(profile, descriptor)?;
+        let tls_config = tls.prepare(target)?;
         match tokio::time::timeout(
             self.connect_timeout,
-            connect_once(&self.proxy, credentials, target),
+            connect_once(&self.proxy, credentials, target, tls_config),
         )
         .await
         {
@@ -304,6 +340,7 @@ async fn connect_once(
     proxy: &SocksEndpoint,
     credentials: &IsolationCredentials,
     target: SelectedTarget<'_>,
+    tls_config: Arc<ClientConfig>,
 ) -> Result<TorConnection, TorConnectError> {
     let mut stream = connect_proxy(proxy).await?;
     negotiate_isolation(&mut stream, credentials).await?;
@@ -313,6 +350,11 @@ async fn connect_once(
         .try_reserve_exact(target.hostname.len())
         .map_err(|_| TorConnectError::ResourceUnavailable)?;
     tls_server_name.push_str(target.hostname);
+    let server_name =
+        ServerName::try_from(tls_server_name.clone()).map_err(|_| TorConnectError::TlsRejected)?;
+    let stream = ClientTlsStream::handshake(stream, tls_config, server_name, CLIENT_ALPN)
+        .await
+        .map_err(|_| TorConnectError::TlsRejected)?;
     Ok(TorConnection {
         stream,
         profile: target.profile,
@@ -514,7 +556,7 @@ impl AsyncWrite for ProxyStream {
 /// A proxy-established stream plus the exact TLS identity policy selected
 /// from the onboarding descriptor.
 pub struct TorConnection {
-    stream: ProxyStream,
+    stream: ClientTlsStream<ProxyStream>,
     profile: TorClientProfile,
     tls_server_name: String,
     tls_spki_sha256: Option<[u8; 32]>,

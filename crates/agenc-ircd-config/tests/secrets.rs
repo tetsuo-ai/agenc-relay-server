@@ -11,7 +11,7 @@ use agenc_ircd_config::{
     Config, ConfigError, PathResolver, SecretLength, SecretSet, ValidationDepth, ValidationStage,
     open_secret_file, open_secret_file_with_hook,
 };
-use support::{DUAL, PUBLIC, Sandbox};
+use support::{DUAL, PUBLIC, Sandbox, mutate};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -253,5 +253,59 @@ fn host_depth_reports_directory_permission_and_public_text_problems() -> TestRes
     )?;
     fs::remove_dir_all(sandbox.root().join("run"))?;
     expect(&text, "bind", ConfigError::FileRejected);
+    Ok(())
+}
+
+#[test]
+fn host_depth_protects_listener_directories_and_tls_material() -> TestResult {
+    let sandbox = Sandbox::create()?;
+    sandbox.populate_host_layout()?;
+    let resolver = PathResolver::with_base(sandbox.root().join("etc"))?;
+    let text = sandbox.localize(PUBLIC);
+
+    fs::set_permissions(
+        sandbox.root().join("run"),
+        fs::Permissions::from_mode(0o755),
+    )?;
+    let report = Config::parse_text(&text, &resolver, ValidationDepth::Host).err();
+    assert!(report.as_ref().is_some_and(|report| {
+        report.issues().iter().any(|issue| {
+            issue.stage == ValidationStage::PathsAndFileTypes
+                && issue.key.field() == "bind"
+                && issue.error == ConfigError::FileRejected
+        })
+    }));
+
+    fs::set_permissions(
+        sandbox.root().join("run"),
+        fs::Permissions::from_mode(0o750),
+    )?;
+    sandbox.file("etc/tls/server.ocsp", b"bounded-der-response", 0o644)?;
+    let with_ocsp = mutate(
+        &text,
+        &format!(
+            "tls_certificate_file = \"{}/etc/tls/server.crt\"",
+            sandbox.root().display()
+        ),
+        &format!(
+            "tls_certificate_file = \"{0}/etc/tls/server.crt\"\n\
+             tls_ocsp_staple_file = \"{0}/etc/tls/server.ocsp\"",
+            sandbox.root().display()
+        ),
+    );
+    assert!(Config::parse_text(&with_ocsp, &resolver, ValidationDepth::Host).is_ok());
+
+    fs::set_permissions(
+        sandbox.root().join("etc/tls/server.ocsp"),
+        fs::Permissions::from_mode(0o666),
+    )?;
+    let report = Config::parse_text(&with_ocsp, &resolver, ValidationDepth::Host).err();
+    assert!(report.as_ref().is_some_and(|report| {
+        report.issues().iter().any(|issue| {
+            issue.stage == ValidationStage::PathsAndFileTypes
+                && issue.key.field() == "tls_ocsp_staple_file"
+                && issue.error == ConfigError::FileRejected
+        })
+    }));
     Ok(())
 }

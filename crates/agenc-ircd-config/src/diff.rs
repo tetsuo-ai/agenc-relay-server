@@ -341,7 +341,10 @@ impl ConfigDiff {
             RestartOnlyField::ListenerKeyMaterial,
         );
         let chain_changed = match (&a.tls, &c.tls) {
-            (Some(at), Some(ct)) => at.certificate_file != ct.certificate_file,
+            (Some(at), Some(ct)) => {
+                at.certificate_file != ct.certificate_file
+                    || at.ocsp_staple_file != ct.ocsp_staple_file
+            }
             _ => false,
         };
         self.push_change(

@@ -510,6 +510,45 @@ fn every_cross_field_rule_reports_its_stage_and_key() {
 }
 
 #[test]
+fn required_ocsp_staples_are_explicit_and_public_tls_only() {
+    let required = mutate(
+        PUBLIC,
+        "require_ocsp_staple = false",
+        "require_ocsp_staple = true",
+    );
+    let report = parse(&required).err();
+    assert!(report.as_ref().is_some_and(|report| {
+        report.issues().iter().any(|issue| {
+            issue.stage == ValidationStage::ListenerUnion
+                && issue.key == SchemaKey::indexed("listeners.endpoint", 0, "tls_ocsp_staple_file")
+                && issue.error == ConfigError::MissingValue
+        })
+    }));
+
+    let configured = mutate(
+        &required,
+        "tls_certificate_file = \"/etc/agenc/tls/server.crt\"",
+        "tls_certificate_file = \"/etc/agenc/tls/server.crt\"\n\
+         tls_ocsp_staple_file = \"/etc/agenc/tls/server.ocsp\"",
+    );
+    assert!(parse(&configured).is_ok());
+
+    let onion = mutate(
+        DUAL,
+        "tls_certificate_file = \"/etc/agenc/tls/onion.crt\"",
+        "tls_certificate_file = \"/etc/agenc/tls/onion.crt\"\n\
+         tls_ocsp_staple_file = \"/etc/agenc/tls/onion.ocsp\"",
+    );
+    let report = parse(&onion).err();
+    assert!(report.as_ref().is_some_and(|report| {
+        report.issues().iter().any(|issue| {
+            issue.key == SchemaKey::indexed("listeners.endpoint", 1, "tls_ocsp_staple_file")
+                && issue.error == ConfigError::InvalidValue
+        })
+    }));
+}
+
+#[test]
 fn cross_field_issues_accumulate_together() {
     let text = mutate(
         &mutate(

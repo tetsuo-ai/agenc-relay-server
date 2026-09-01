@@ -147,6 +147,7 @@ impl RestartMaterial {
 pub(crate) struct RuntimeConfigParts {
     pub(crate) tls_endpoints: BTreeMap<ListenerName, Arc<ServerConfig>>,
     pub(crate) certificate_fingerprints: BTreeMap<ListenerName, [u8; 32]>,
+    pub(crate) ocsp_fingerprints: BTreeMap<ListenerName, [u8; 32]>,
     pub(crate) restart_material: RestartMaterial,
     pub(crate) motd: Option<Arc<str>>,
     pub(crate) public_info: Option<Arc<str>>,
@@ -203,6 +204,7 @@ pub struct RuntimeConfigSnapshot {
     config: Config,
     tls_endpoints: BTreeMap<ListenerName, Arc<ServerConfig>>,
     certificate_fingerprints: BTreeMap<ListenerName, [u8; 32]>,
+    ocsp_fingerprints: BTreeMap<ListenerName, [u8; 32]>,
     restart_material: RestartMaterial,
     motd: Option<Arc<str>>,
     public_info: Option<Arc<str>>,
@@ -230,6 +232,7 @@ impl RuntimeConfigSnapshot {
             config,
             tls_endpoints: parts.tls_endpoints,
             certificate_fingerprints: parts.certificate_fingerprints,
+            ocsp_fingerprints: parts.ocsp_fingerprints,
             restart_material: parts.restart_material,
             motd: parts.motd,
             public_info: parts.public_info,
@@ -378,6 +381,7 @@ impl RuntimeConfigSnapshot {
 
     fn effective_content_matches(&self, other: &Self) -> bool {
         self.certificate_fingerprints == other.certificate_fingerprints
+            && self.ocsp_fingerprints == other.ocsp_fingerprints
             && self.motd == other.motd
             && self.public_info == other.public_info
     }
@@ -954,6 +958,7 @@ mod tests {
         Ok(RuntimeConfigParts {
             tls_endpoints: BTreeMap::new(),
             certificate_fingerprints: BTreeMap::new(),
+            ocsp_fingerprints: BTreeMap::new(),
             restart_material: RestartMaterial::default(),
             motd: None,
             public_info: None,
@@ -1064,6 +1069,13 @@ mod tests {
         content_parts.motd = Some(Arc::from("new text"));
         let content = PreparedReload::new(&active, config()?, content_parts)?;
         assert!(!content.is_noop());
+
+        let mut ocsp_parts = parts()?;
+        ocsp_parts
+            .ocsp_fingerprints
+            .insert(ListenerName::parse("public")?, [8; 32]);
+        let ocsp = PreparedReload::new(&active, config()?, ocsp_parts)?;
+        assert!(!ocsp.is_noop());
 
         let mut material_parts = parts()?;
         material_parts

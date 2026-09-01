@@ -31,6 +31,7 @@ pub(crate) const LISTENER_KEYS: &[&str] = &[
     "name",
     "purpose",
     "tls_certificate_file",
+    "tls_ocsp_staple_file",
     "tls_private_key_file",
 ];
 
@@ -141,6 +142,8 @@ pub struct TlsFiles {
     pub certificate_file: PathBuf,
     /// Private key file under Section 22.2 rules.
     pub private_key_file: PathBuf,
+    /// Optional bounded DER OCSP response for a public DNS certificate.
+    pub ocsp_staple_file: Option<PathBuf>,
 }
 
 /// WebSocket origin policy (spec 8934-8935).
@@ -232,6 +235,10 @@ fn parse_endpoint(
         key("tls_certificate_file"),
         parse_tls(row, purpose, resolver),
     );
+    let ocsp_staple_file = sink.field(
+        key("tls_ocsp_staple_file"),
+        parse_ocsp_staple(row, purpose, resolver),
+    );
     let client_ca_file = sink.field(
         key("client_ca_file"),
         parse_client_ca(row, purpose, resolver),
@@ -239,13 +246,19 @@ fn parse_endpoint(
     let wss = sink.field(key("allowed_origins"), parse_wss(row, purpose));
     let local_admin = sink.field(key("allowed_uids"), parse_local_admin(row, purpose));
     let raw = raw?;
+    let mut tls = tls?;
+    if let Some(files) = tls.as_mut() {
+        files.ocsp_staple_file = ocsp_staple_file?;
+    } else if ocsp_staple_file?.is_some() {
+        return None;
+    }
     Some(ListenerConfig {
         name: raw.name,
         enabled: raw.enabled,
         purpose: raw.purpose,
         bind: bind?,
         max_connections: raw.max_connections,
-        tls: tls?,
+        tls,
         client_ca_file: client_ca_file?,
         wss: wss?,
         local_admin: local_admin?,
@@ -314,8 +327,22 @@ fn parse_tls(
         (Some(certificate), Some(private_key)) if required => Ok(Some(TlsFiles {
             certificate_file: resolver.resolve(certificate)?,
             private_key_file: resolver.resolve(private_key)?,
+            ocsp_staple_file: None,
         })),
         (None, None) => Err(ConfigError::MissingValue),
+        _ => Err(ConfigError::InvalidValue),
+    }
+}
+
+fn parse_ocsp_staple(
+    row: &Table,
+    purpose: Option<ListenerPurpose>,
+    resolver: &PathResolver,
+) -> Result<Option<PathBuf>, ConfigError> {
+    let path = optional_string(row, "tls_ocsp_staple_file")?;
+    match (purpose, path) {
+        (Some(ListenerPurpose::ClientTls), Some(path)) => resolver.resolve(path).map(Some),
+        (_, None) => Ok(None),
         _ => Err(ConfigError::InvalidValue),
     }
 }

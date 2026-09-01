@@ -107,7 +107,7 @@ use crate::sync::Arc;
 use crate::tls::{
     ClientAuth, HandshakeLimiter, MAX_HANDSHAKES_IN_PROGRESS, PrivateKey, TlsConfigError,
     TlsEndpointProfile, TlsServerPolicy, build_server_config_with_policy,
-    load_certificate_chain_material, load_trust_store_material,
+    load_certificate_chain_material, load_ocsp_staple_material, load_trust_store_material,
 };
 
 const RUNTIME_THREAD_NAME: &str = "agenc-ircd-tokio";
@@ -1001,6 +1001,7 @@ struct PreparedListenerSpecs {
     specs: Vec<ListenerSpec>,
     tls_endpoints: BTreeMap<agenc_ircd_config::ListenerName, Arc<rustls::ServerConfig>>,
     certificate_fingerprints: BTreeMap<agenc_ircd_config::ListenerName, [u8; 32]>,
+    ocsp_fingerprints: BTreeMap<agenc_ircd_config::ListenerName, [u8; 32]>,
     client_ca_fingerprints: BTreeMap<agenc_ircd_config::ListenerName, [u8; 32]>,
 }
 
@@ -1012,6 +1013,7 @@ async fn build_listener_specs(
     let mut specs = Vec::new();
     let mut tls_endpoints = BTreeMap::new();
     let mut certificate_fingerprints = BTreeMap::new();
+    let mut ocsp_fingerprints = BTreeMap::new();
     let mut client_ca_fingerprints = BTreeMap::new();
     for listener in config.listeners.iter().filter(|listener| listener.enabled) {
         let purpose = runtime_purpose(listener.purpose)?;
@@ -1055,9 +1057,28 @@ async fn build_listener_specs(
                 config.tls.session_tickets,
                 config.tls.require_ocsp_staple && purpose == ListenerPurpose::ClientTls,
             );
-            let endpoint =
-                build_server_config_with_policy(profile, chain, key, client_auth, policy, None)
-                    .await?;
+            let ocsp_staple = match files.ocsp_staple_file.clone() {
+                Some(path) => {
+                    let (staple, fingerprint) = load_ocsp_staple_material(path).await?;
+                    if ocsp_fingerprints
+                        .insert(listener.name.clone(), fingerprint)
+                        .is_some()
+                    {
+                        return Err(DaemonError::Runtime(RuntimeError::InvalidValue));
+                    }
+                    Some(staple)
+                }
+                None => None,
+            };
+            let endpoint = build_server_config_with_policy(
+                profile,
+                chain,
+                key,
+                client_auth,
+                policy,
+                ocsp_staple,
+            )
+            .await?;
             if tls_endpoints
                 .insert(listener.name.clone(), Arc::clone(&endpoint))
                 .is_some()
@@ -1098,13 +1119,26 @@ async fn build_listener_specs(
                 .ok_or(DaemonError::Tls(TlsConfigError::InvalidPrivateKey))?;
             let key = PrivateKey::parse(private.expose())?;
             let validation_policy = TlsServerPolicy::new(config.tls.group_policy, false, false);
+            let ocsp_staple = match tls.ocsp_staple_file.clone() {
+                Some(path) => {
+                    let (staple, fingerprint) = load_ocsp_staple_material(path).await?;
+                    if ocsp_fingerprints
+                        .insert(listener.name.clone(), fingerprint)
+                        .is_some()
+                    {
+                        return Err(DaemonError::Runtime(RuntimeError::InvalidValue));
+                    }
+                    Some(staple)
+                }
+                None => None,
+            };
             let _validated_identity = build_server_config_with_policy(
                 TlsEndpointProfile::Client,
                 chain,
                 key,
                 ClientAuth::None,
                 validation_policy,
-                None,
+                ocsp_staple,
             )
             .await?;
             if certificate_fingerprints
@@ -1132,6 +1166,7 @@ async fn build_listener_specs(
         specs,
         tls_endpoints,
         certificate_fingerprints,
+        ocsp_fingerprints,
         client_ca_fingerprints,
     })
 }
@@ -1168,6 +1203,7 @@ async fn prepare_runtime_parts(
     let parts = RuntimeConfigParts {
         tls_endpoints: prepared.tls_endpoints,
         certificate_fingerprints: prepared.certificate_fingerprints,
+        ocsp_fingerprints: prepared.ocsp_fingerprints,
         restart_material,
         motd: files.motd,
         public_info: files.public_info,
