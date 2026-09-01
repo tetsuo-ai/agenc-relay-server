@@ -4,14 +4,15 @@ stage = 6
 [[transcript]]
 id = "client-tls-core-v1"
 transport = "client_tls"
-file = "crates/agenc-ircd-runtime/tests/listener_accept.rs"
-test = "an_inherited_tcp_listener_admits_a_client_and_routes_lines_and_frames"
+file = "crates/agenc-ircd/tests/stage_six_daemon.rs"
+test = "production_daemon_core_v1_and_admin_mtls_are_byte_exact"
+fixture = "test-data/transcripts/stage-six-core-v1.transcript"
 
 [[transcript]]
 id = "client-onion-core-v1"
 transport = "client_onion"
-file = "crates/agenc-ircd-runtime/tests/listener_accept.rs"
-test = "local_admin_lines_never_enter_the_public_client_inbox"
+file = "crates/agenc-ircd-runtime/tests/tor_client.rs"
+test = "profiles_send_only_the_selected_hostname_through_socks"
 
 [[transcript]]
 id = "admin-local-isolation"
@@ -28,8 +29,8 @@ test = "admin_tls_lines_never_enter_the_public_client_inbox"
 [[transcript]]
 id = "admin-mtls-exporter"
 transport = "admin_tls"
-file = "crates/agenc-ircd-runtime/tests/tls_endpoint.rs"
-test = "mutual_tls_exposes_the_peer_spki_and_a_shared_exporter"
+file = "crates/agenc-ircd/tests/stage_six_daemon.rs"
+test = "production_daemon_core_v1_and_admin_mtls_are_byte_exact"
 
 [[transcript]]
 id = "admin-command-registry"
@@ -88,8 +89,8 @@ test = "writer_acknowledges_after_the_final_admin_frame_and_transport_close"
 [[transcript]]
 id = "public-oper-denial"
 transport = "client_wire"
-file = "crates/agenc-ircd-client-wire/tests/registration_command.rs"
-test = "post_registration_registry_is_exhaustive_and_public_classification_is_closed"
+file = "crates/agenc-ircd/tests/stage_six_daemon.rs"
+test = "production_daemon_core_v1_and_admin_mtls_are_byte_exact"
 
 [[transcript]]
 id = "tls-hybrid-and-alpn"

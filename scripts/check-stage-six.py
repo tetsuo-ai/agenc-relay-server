@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import sys
 import tomllib
 from pathlib import Path
@@ -15,23 +16,89 @@ TRANSCRIPT_PATH = "conformance/stage-six-transcripts.toml"
 QUALIFICATION_PATH = "conformance/stage-six-qualification.toml"
 EXPECTED_TASKS = [f"S06-{number:03d}" for number in range(1, 16)]
 EXPECTED_TRANSCRIPTS = {
-    "client-tls-core-v1",
-    "client-onion-core-v1",
-    "admin-local-isolation",
-    "admin-tls-isolation",
-    "admin-mtls-exporter",
-    "admin-command-registry",
-    "admin-proof-counter-permission",
-    "admin-confirmation",
-    "admin-authority-reload",
-    "admin-observed-output",
-    "admin-atomic-account-mutation",
-    "admin-die-intent",
-    "admin-framing",
-    "admin-shutdown-order",
-    "public-oper-denial",
-    "tls-hybrid-and-alpn",
+    "client-tls-core-v1": {
+        "transport": "client_tls",
+        "file": "crates/agenc-ircd/tests/stage_six_daemon.rs",
+        "test": "production_daemon_core_v1_and_admin_mtls_are_byte_exact",
+        "fixture": "test-data/transcripts/stage-six-core-v1.transcript",
+    },
+    "client-onion-core-v1": {
+        "transport": "client_onion",
+        "file": "crates/agenc-ircd-runtime/tests/tor_client.rs",
+        "test": "profiles_send_only_the_selected_hostname_through_socks",
+    },
+    "admin-local-isolation": {
+        "transport": "admin_local",
+        "file": "crates/agenc-ircd-runtime/tests/listener_accept.rs",
+        "test": "local_admin_lines_never_enter_the_public_client_inbox",
+    },
+    "admin-tls-isolation": {
+        "transport": "admin_tls",
+        "file": "crates/agenc-ircd-runtime/tests/listener_accept.rs",
+        "test": "admin_tls_lines_never_enter_the_public_client_inbox",
+    },
+    "admin-mtls-exporter": {
+        "transport": "admin_tls",
+        "file": "crates/agenc-ircd/tests/stage_six_daemon.rs",
+        "test": "production_daemon_core_v1_and_admin_mtls_are_byte_exact",
+    },
+    "admin-command-registry": {
+        "transport": "admin_session",
+        "file": "crates/agenc-ircd-admin/src/command.rs",
+        "test": "every_registered_command_parses_with_its_permission_and_rules",
+    },
+    "admin-proof-counter-permission": {
+        "transport": "admin_session",
+        "file": "crates/agenc-ircd-admin/src/session.rs",
+        "test": "authenticated_lines_enforce_counter_signature_form_and_permission",
+    },
+    "admin-confirmation": {
+        "transport": "admin_session",
+        "file": "crates/agenc-ircd-admin/src/session.rs",
+        "test": "two_step_confirmation_binds_token_command_permissions_and_time",
+    },
+    "admin-authority-reload": {
+        "transport": "admin_session",
+        "file": "crates/agenc-ircd-admin/src/session.rs",
+        "test": "authority_reload_updates_permissions_consumes_confirmation_and_disconnects_mismatch",
+    },
+    "admin-observed-output": {
+        "transport": "admin_owner",
+        "file": "crates/agenc-ircd-runtime/src/admin.rs",
+        "test": "observed_output_waits_for_the_durable_audit_reply",
+    },
+    "admin-atomic-account-mutation": {
+        "transport": "admin_owner",
+        "file": "crates/agenc-ircd-runtime/src/admin.rs",
+        "test": "account_mutation_waits_for_one_atomic_state_core_commit",
+    },
+    "admin-die-intent": {
+        "transport": "admin_owner",
+        "file": "crates/agenc-ircd-runtime/src/admin.rs",
+        "test": "confirmed_die_commits_intent_before_requesting_stop",
+    },
+    "admin-framing": {
+        "transport": "admin_owner",
+        "file": "crates/agenc-ircd-runtime/src/admin.rs",
+        "test": "reader_rejects_lf_only_and_overlong_frames",
+    },
+    "admin-shutdown-order": {
+        "transport": "admin_owner",
+        "file": "crates/agenc-ircd-runtime/src/admin.rs",
+        "test": "writer_acknowledges_after_the_final_admin_frame_and_transport_close",
+    },
+    "public-oper-denial": {
+        "transport": "client_wire",
+        "file": "crates/agenc-ircd/tests/stage_six_daemon.rs",
+        "test": "production_daemon_core_v1_and_admin_mtls_are_byte_exact",
+    },
+    "tls-hybrid-and-alpn": {
+        "transport": "client_tls",
+        "file": "crates/agenc-ircd-runtime/tests/tls_endpoint.rs",
+        "test": "hybrid_key_exchange_and_exact_alpn_carry_bytes_both_ways",
+    },
 }
+CORE_V1_FIXTURE_SHA256 = "d541e9c5809bb34172dbe1d4808b754289ed66ccde86146179710c58edc385b0"
 EXPECTED_QUALIFICATION = {
     "deployment-policy",
     "systemd-profiles",
@@ -131,17 +198,17 @@ def validate_named_records(
 
 def validate_transcripts(root: Path, data: dict[str, object]) -> None:
     records = validate_named_records(
-        data, "transcript", EXPECTED_TRANSCRIPTS, "transcript catalog"
+        data, "transcript", set(EXPECTED_TRANSCRIPTS), "transcript catalog"
     )
     for record in records:
-        if set(record) != {"id", "transport", "file", "test"}:
-            raise StageSixError(f"transcript {record.get('id')} has invalid fields")
-        relative = record.get("file")
-        test = record.get("test")
-        if not isinstance(relative, str) or not relative.startswith("crates/"):
-            raise StageSixError(f"transcript {record.get('id')} has an invalid file")
-        if not isinstance(test, str) or not test:
-            raise StageSixError(f"transcript {record.get('id')} has an invalid test")
+        identifier = record.get("id")
+        if not isinstance(identifier, str):
+            raise StageSixError("transcript has an invalid ID")
+        expected = {"id": identifier, **EXPECTED_TRANSCRIPTS[identifier]}
+        if record != expected:
+            raise StageSixError(f"transcript {identifier} mapping is stale")
+        relative = expected["file"]
+        test = expected["test"]
         path = root / relative
         try:
             source = path.read_text(encoding="utf-8")
@@ -149,6 +216,14 @@ def validate_transcripts(root: Path, data: dict[str, object]) -> None:
             raise StageSixError(f"cannot read transcript source {relative}: {error}") from error
         if f"fn {test}" not in source:
             raise StageSixError(f"transcript test is missing: {relative}:{test}")
+        fixture = expected.get("fixture")
+        if fixture is not None:
+            try:
+                fixture_bytes = (root / fixture).read_bytes()
+            except OSError as error:
+                raise StageSixError(f"cannot read transcript fixture {fixture}: {error}") from error
+            if hashlib.sha256(fixture_bytes).hexdigest() != CORE_V1_FIXTURE_SHA256:
+                raise StageSixError("core-v1 byte-exact transcript fixture is stale")
 
 
 def validate_qualification(data: dict[str, object]) -> None:
@@ -258,7 +333,18 @@ def self_test(root: Path) -> int:
             raise StageSixError(f"self-test transcript reached the wrong branch: {error}") from error
     else:
         raise StageSixError("self-test transcript was accepted")
-    return cases + 1
+    remapped = copy.deepcopy(transcripts)
+    remapped["transcript"][0]["transport"] = "admin_local"
+    try:
+        validate_transcripts(root, remapped)
+    except StageSixError as error:
+        if "mapping is stale" not in str(error):
+            raise StageSixError(
+                f"self-test transcript mapping reached the wrong branch: {error}"
+            ) from error
+    else:
+        raise StageSixError("self-test transcript mapping was accepted")
+    return cases + 2
 
 
 def fail(message: str) -> NoReturn:

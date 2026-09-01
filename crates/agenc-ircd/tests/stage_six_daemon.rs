@@ -37,7 +37,9 @@ use agenc_ircd_crypto::{
     LoginIndexKey, OsEntropy, RollbackGuardRootKey, StorageDigest, StorageMasterKey,
     audit_signing_key_id, backup_signing_key_id, seal_account_request,
 };
-use agenc_ircd_runtime::tls::{CLIENT_ALPN, TrustStore, build_client_config};
+use agenc_ircd_runtime::tls::{
+    ADMIN_ALPN, CLIENT_ALPN, CertChain, PrivateKey, TrustStore, build_client_config,
+};
 use agenc_ircd_storage::{
     DatabaseHeaderTbs, InitialStorageRecord, LIVE_RECORD_KIND, LOGIN_INDEX_KEY_STATE_KEY,
     LoginIndexKeyState, OPAQUE_FAKE_RECORD_KEY, PersistentRecordValue, SCHEMA_GENERATION,
@@ -71,6 +73,11 @@ type TestResult<T = ()> = Result<T, TestError>;
 type TlsClient = StreamOwned<ClientConnection, TcpStream>;
 
 const DNS_NAME: &str = "node.test";
+const ADMIN_EXPORTER_LABEL: &[u8] = b"EXPORTER-agenc-chat-admin-v1";
+const CORE_V1_TRANSCRIPT: &str =
+    include_str!("../../../test-data/transcripts/stage-six-core-v1.transcript");
+const CORE_V1_TRANSCRIPT_STEPS: usize = 4;
+const MAX_CORE_V1_TRANSCRIPT_STEP_BYTES: usize = 4_610;
 const DATABASE_MAX_BYTES: u64 = 1_073_741_824;
 const BACKUP_MAX_BYTES: u64 = 2_147_483_648;
 const DISK_RESERVE_BYTES: u64 = 67_108_864;
@@ -499,6 +506,219 @@ impl LiveFixture {
             }
         }
         excerpt
+    }
+}
+
+struct AdminTlsMaterial {
+    address: SocketAddr,
+    server: TlsFixture,
+    operator: TlsFixture,
+}
+
+fn prepare_admin_tls(fixture: &LiveFixture) -> TestResult<AdminTlsMaterial> {
+    let server = TlsFixture::mint([18; 32], DNS_NAME)?;
+    let operator = TlsFixture::mint([19; 32], "operator.test")?;
+    let tls_dir = fixture._root.path().join("etc/tls");
+    let server_certificate = tls_dir.join("admin-server.crt");
+    let server_key = tls_dir.join("admin-server.key");
+    let operator_ca = tls_dir.join("admin-operator-ca.crt");
+    write_private(&server_certificate, server.leaf_certificate_der())?;
+    write_private(&server_key, server.leaf_private_key_pkcs8_der())?;
+    write_private(&operator_ca, operator.ca_certificate_der())?;
+
+    let address = reserve_loopback_address()?;
+    let mut config = fs::read_to_string(&fixture.config_path)?;
+    let listener = format!(
+        "\n[[listeners.endpoint]]\nname = \"admin-tls\"\nenabled = true\npurpose = \"admin_tls\"\nbind = \"{address}\"\nmax_connections = 4\ntls_certificate_file = \"{}\"\ntls_private_key_file = \"{}\"\nclient_ca_file = \"{}\"\n",
+        protected_path_text(&server_certificate)?,
+        protected_path_text(&server_key)?,
+        protected_path_text(&operator_ca)?,
+    );
+    replace_once(&mut config, "\n[tls]", &format!("{listener}\n[tls]"))?;
+    replace_once(
+        &mut config,
+        "\nlocal_uids = [",
+        &format!(
+            "\ncertificate_spki_sha256 = \"{}\"\nlocal_uids = [",
+            encode_base64url_32(operator.leaf_spki_sha256())
+        ),
+    )?;
+    fs::write(&fixture.config_path, config)?;
+
+    Ok(AdminTlsMaterial {
+        address,
+        server,
+        operator,
+    })
+}
+
+fn protected_path_text(path: &Path) -> TestResult<&str> {
+    path.to_str()
+        .ok_or_else(|| failure("test TLS path was not UTF-8"))
+}
+
+fn admin_tls_client_config(material: &AdminTlsMaterial) -> TestResult<Arc<ClientConfig>> {
+    Ok(build_client_config(
+        TrustStore::parse(material.server.ca_certificate_der())?,
+        Some(ADMIN_ALPN),
+        Some((
+            CertChain::parse(material.operator.leaf_certificate_der())?,
+            PrivateKey::parse(material.operator.leaf_private_key_pkcs8_der())?,
+        )),
+    )?)
+}
+
+struct TlsAdminClient<'a> {
+    reader: BufReader<TlsClient>,
+    fixture: &'a LiveFixture,
+    session_id: AdminSessionId,
+    counter: u64,
+}
+
+impl<'a> TlsAdminClient<'a> {
+    fn connect(fixture: &'a LiveFixture, material: &AdminTlsMaterial) -> TestResult<Self> {
+        let socket = connect_tcp(material.address, "admin TLS listener")?;
+        socket.set_read_timeout(Some(IO_TIMEOUT))?;
+        socket.set_write_timeout(Some(IO_TIMEOUT))?;
+        let name = ServerName::try_from(DNS_NAME.to_owned())?;
+        let connection = ClientConnection::new(admin_tls_client_config(material)?, name)?;
+        let mut stream = StreamOwned::new(connection, socket);
+        while stream.conn.is_handshaking() {
+            stream.conn.complete_io(&mut stream.sock)?;
+        }
+        if stream.conn.alpn_protocol() != Some(ADMIN_ALPN) {
+            return Err(failure("admin TLS did not negotiate the exact ALPN"));
+        }
+
+        let mut reader = BufReader::new(stream);
+        let challenge_line = read_line(&mut reader)?;
+        let (challenge, session_id, binding) = parse_tls_admin_challenge(&challenge_line)?;
+        let mut context = Vec::with_capacity(64);
+        context.extend_from_slice(fixture.network_id.as_bytes());
+        context.extend_from_slice(fixture.server_id.as_bytes());
+        context.extend_from_slice(session_id.as_bytes());
+        let mut exporter = [0_u8; 32];
+        reader.get_ref().conn.export_keying_material(
+            &mut exporter,
+            ADMIN_EXPORTER_LABEL,
+            Some(&context),
+        )?;
+        if binding.as_bytes() != &exporter {
+            return Err(failure(
+                "admin challenge did not carry the client-derived TLS exporter",
+            ));
+        }
+
+        let proof =
+            challenge.sign_oper(fixture.network_id, fixture.server_id, &fixture.operator_key)?;
+        let oper = format!(
+            "OPER {} {}\r\n",
+            fixture.operator_id.to_base64url(),
+            encode_base64url(proof.as_bytes())
+        );
+        reader.get_mut().write_all(oper.as_bytes())?;
+        reader.get_mut().flush()?;
+        Ok(Self {
+            reader,
+            fixture,
+            session_id,
+            counter: 0,
+        })
+    }
+
+    fn send(&mut self, command: &str) -> TestResult {
+        let tbs = AdminCommandTbs::new(
+            self.fixture.network_id,
+            self.fixture.server_id,
+            self.session_id,
+            self.counter,
+            None,
+            command.as_bytes(),
+        )?;
+        let signature = tbs.sign(&self.fixture.operator_key)?;
+        let tag = render_admin_tag(self.counter, &signature, None);
+        self.reader
+            .get_mut()
+            .write_all(format!("{tag} {command}\r\n").as_bytes())?;
+        self.reader.get_mut().flush()?;
+        self.counter = self
+            .counter
+            .checked_add(1)
+            .ok_or_else(|| failure("admin TLS command counter overflow"))?;
+        Ok(())
+    }
+
+    fn quit(mut self) -> TestResult {
+        self.send("QUIT")?;
+        let mut byte = [0_u8; 1];
+        match self.reader.read(&mut byte) {
+            Ok(0) => Ok(()),
+            Ok(_) => Err(failure("admin TLS QUIT returned unexpected output")),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::BrokenPipe
+                        | io::ErrorKind::UnexpectedEof
+                ) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+fn parse_tls_admin_challenge(
+    challenge_line: &str,
+) -> TestResult<(AdminChallenge, AdminSessionId, TransportBinding)> {
+    let tokens = challenge_line.split_ascii_whitespace().collect::<Vec<_>>();
+    if tokens.get(..7).is_none_or(|prefix| {
+        prefix.first() != Some(&"NOTE")
+            || prefix.get(1) != Some(&"OPER")
+            || prefix.get(2) != Some(&"CHALLENGE")
+            || prefix.get(5) != Some(&"tls")
+    }) {
+        return Err(failure(format!(
+            "unexpected administrative TLS challenge: {challenge_line}"
+        )));
+    }
+    let session_id = AdminSessionId::from_bytes(decode_fixed_base64url::<16>(
+        tokens
+            .get(3)
+            .ok_or_else(|| failure("TLS challenge session missing"))?
+            .as_bytes(),
+    )?);
+    let nonce = Challenge::from_bytes(decode_fixed_base64url::<32>(
+        tokens
+            .get(4)
+            .ok_or_else(|| failure("TLS challenge nonce missing"))?
+            .as_bytes(),
+    )?);
+    let binding = TransportBinding::from_bytes(decode_fixed_base64url::<32>(
+        tokens
+            .get(6)
+            .ok_or_else(|| failure("TLS challenge binding missing"))?
+            .as_bytes(),
+    )?);
+    Ok((
+        AdminChallenge::new(session_id, nonce, TransportKind::Tls, binding),
+        session_id,
+        binding,
+    ))
+}
+
+fn connect_tcp(address: SocketAddr, label: &str) -> TestResult<TcpStream> {
+    let deadline = Instant::now() + START_TIMEOUT;
+    loop {
+        match TcpStream::connect(address) {
+            Ok(stream) => return Ok(stream),
+            Err(error) if Instant::now() < deadline => {
+                let _transient = error;
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => return Err(failure(format!("{label} did not start: {error}"))),
+        }
     }
 }
 
@@ -1134,6 +1354,124 @@ impl IrcClient {
     }
 }
 
+#[derive(Clone, Copy)]
+enum CoreV1TranscriptOperation {
+    Client,
+    Server,
+}
+
+struct CoreV1TranscriptStep {
+    operation: CoreV1TranscriptOperation,
+    payload: Vec<u8>,
+}
+
+fn parse_core_v1_transcript() -> TestResult<Vec<CoreV1TranscriptStep>> {
+    let mut steps = Vec::new();
+    for line in CORE_V1_TRANSCRIPT.lines() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if steps.len() >= CORE_V1_TRANSCRIPT_STEPS {
+            return Err(failure("Stage 06 core-v1 transcript has too many steps"));
+        }
+        let mut fields = line.split('|');
+        let (Some(evidence), Some(operation), Some(encoding), Some(payload)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            return Err(failure("Stage 06 core-v1 transcript row is incomplete"));
+        };
+        if fields.next().is_some() || evidence != "EVID-S06-004-TRANSPORTS" || encoding != "hex" {
+            return Err(failure("Stage 06 core-v1 transcript metadata is invalid"));
+        }
+        let operation = match operation {
+            "client" => CoreV1TranscriptOperation::Client,
+            "server" => CoreV1TranscriptOperation::Server,
+            _ => return Err(failure("Stage 06 core-v1 transcript operation is invalid")),
+        };
+        if !payload.len().is_multiple_of(2)
+            || payload.len() > MAX_CORE_V1_TRANSCRIPT_STEP_BYTES.saturating_mul(2)
+            || !payload
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        {
+            return Err(failure("Stage 06 core-v1 transcript payload is invalid"));
+        }
+        let (pairs, remainder) = payload.as_bytes().as_chunks::<2>();
+        if !remainder.is_empty() {
+            return Err(failure("Stage 06 core-v1 transcript hex is incomplete"));
+        }
+        let mut decoded = Vec::new();
+        decoded.try_reserve_exact(pairs.len())?;
+        for pair in pairs {
+            let text = std::str::from_utf8(pair)?;
+            decoded.push(
+                u8::from_str_radix(text, 16)
+                    .map_err(|_| failure("Stage 06 core-v1 transcript hex is invalid"))?,
+            );
+        }
+        steps.try_reserve(1)?;
+        steps.push(CoreV1TranscriptStep {
+            operation,
+            payload: decoded,
+        });
+    }
+    Ok(steps)
+}
+
+fn exercise_core_v1_fixture(fixture: &LiveFixture) -> TestResult {
+    let transcript = parse_core_v1_transcript()?;
+    if transcript.len() != CORE_V1_TRANSCRIPT_STEPS {
+        return Err(failure("Stage 06 core-v1 transcript step count changed"));
+    }
+    let mut client = IrcClient::connect(fixture)?;
+    assert_contains(&client.register()?, " 001 LiveUser ")?;
+    for step in transcript {
+        if !step.payload.ends_with(b"\r\n") {
+            return Err(failure("Stage 06 core-v1 transcript metadata is invalid"));
+        }
+        match step.operation {
+            CoreV1TranscriptOperation::Client => {
+                client.reader.get_mut().write_all(&step.payload)?;
+                client.reader.get_mut().flush()?;
+            }
+            CoreV1TranscriptOperation::Server => {
+                let mut actual = vec![0_u8; step.payload.len()];
+                client.reader.read_exact(&mut actual)?;
+                if actual != step.payload {
+                    return Err(failure(format!(
+                        "production core-v1 transcript bytes changed: expected {:?}, received {actual:?}",
+                        step.payload
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn exercise_tls_admin(fixture: &LiveFixture, material: &AdminTlsMaterial) -> TestResult {
+    let mut admin = TlsAdminClient::connect(fixture, material)?;
+    admin.send("PING tls-first")?;
+    admin.send("INFO")?;
+    admin.send("PING tls-last")?;
+    let replies = [
+        read_line(&mut admin.reader)?,
+        read_line(&mut admin.reader)?,
+        read_line(&mut admin.reader)?,
+        read_line(&mut admin.reader)?,
+    ];
+    assert_eq!(
+        replies,
+        [
+            "PONG :tls-first",
+            ":agenc-ircd 371 * :health readiness=1 liveness=1",
+            ":agenc-ircd 374 * :End of INFO",
+            "PONG :tls-last",
+        ]
+    );
+    admin.quit()
+}
+
 fn read_line<R: BufRead>(reader: &mut R) -> TestResult<String> {
     let mut line = String::new();
     if reader.read_line(&mut line)? == 0 {
@@ -1646,6 +1984,36 @@ fn stopped_runtime_check_prepares_listener_tls_material() -> TestResult {
         .clone();
     fs::write(certificate, b"not a certificate")?;
     assert!(agenc_ircd_runtime::daemon::check_configuration(&config, &secrets).is_err());
+    Ok(())
+}
+
+#[test]
+fn production_daemon_core_v1_and_admin_mtls_are_byte_exact() -> TestResult {
+    let fixture = LiveFixture::create()?;
+    let admin_tls = prepare_admin_tls(&fixture)?;
+    let mut daemon = DaemonProcess::start(&fixture.config_path)?;
+    exercise_core_v1_fixture(&fixture).map_err(|error| {
+        failure(format!(
+            "core-v1 byte transcript failed: {error}; logs: {}",
+            fixture.log_excerpt()
+        ))
+    })?;
+    exercise_tls_admin(&fixture, &admin_tls).map_err(|error| {
+        failure(format!(
+            "composed admin mTLS transcript failed: {error}; logs: {}",
+            fixture.log_excerpt()
+        ))
+    })?;
+
+    let mut control = AdminClient::connect(&fixture)?;
+    control.confirm_process("DIE :transcript complete")?;
+    let status = daemon.wait()?;
+    if !status.success() {
+        return Err(failure(format!(
+            "transcript daemon exited with {status}; logs: {}",
+            fixture.log_excerpt()
+        )));
+    }
     Ok(())
 }
 
