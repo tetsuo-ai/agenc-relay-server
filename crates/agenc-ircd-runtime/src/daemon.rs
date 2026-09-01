@@ -2341,9 +2341,10 @@ async fn wait_for_shutdown(inputs: ShutdownWaitInputs<'_>) -> ShutdownWaitResult
                 preparation = None;
                 match preparation_origin.take() {
                     Some(ReloadPreparationOrigin::Signal) => match result {
-                        Ok(prepared) => {
+                        Ok(prepared) if prepared.permits_signal_activation() => {
                             activation = Some(reload_activation_future(reload, prepared));
                         }
+                        Ok(_raised_candidate) => observer.reload(false),
                         Err(ReloadPrepareFailure::Busy) => pending_sighup = true,
                         Err(_) => observer.reload(false),
                     },

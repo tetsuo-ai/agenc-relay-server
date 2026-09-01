@@ -20,6 +20,7 @@ use super::writer::run_writer;
 use crate::budget::{CLIENT_CONNECTION_BASE_BYTES, MemoryPermit, MemoryPermitBatch};
 use crate::cancel::CancellationToken;
 use crate::purpose::ListenerPurpose;
+use crate::runtime_config::RuntimeConfigHandle;
 use crate::state_core::inbox::{
     CloseReason, ConnectionClosePermit, ConnectionOpenOutcome, ConnectionStatePermit,
     PhysicalCloseNotice, SourceAddressKey, StateCoreMessage,
@@ -45,6 +46,24 @@ impl ConnectionLimits {
         reader: ReaderLimits::DEFAULT,
         queue: QueueLimits::DEFAULT,
     };
+}
+
+#[derive(Clone)]
+pub(crate) struct ConnectionPolicy {
+    limits: ConnectionLimits,
+    runtime_config: Option<RuntimeConfigHandle>,
+}
+
+impl ConnectionPolicy {
+    pub(crate) const fn new(
+        limits: ConnectionLimits,
+        runtime_config: Option<RuntimeConfigHandle>,
+    ) -> Self {
+        Self {
+            limits,
+            runtime_config,
+        }
+    }
 }
 
 /// What the transport established about the peer, beyond its address.
@@ -190,7 +209,7 @@ pub(crate) async fn run_connection<T>(
     transport: T,
     admitted: AdmittedConnection,
     resources: ConnectionResources,
-    limits: ConnectionLimits,
+    policy: ConnectionPolicy,
     inbox: mpsc::Sender<StateCoreMessage>,
     token: CancellationToken,
     lease: AdmissionLease,
@@ -214,7 +233,16 @@ where
     };
     let (return_permit, _returned_permit) = oneshot::channel();
     lease.assign_state_permit(state_permit, return_permit);
-    let Ok(queue) = WriterQueue::new(admitted.generation, limits.queue, queue_backing) else {
+    let queue = match policy.runtime_config.clone() {
+        Some(handle) => WriterQueue::new_live(
+            admitted.generation,
+            policy.limits.queue,
+            queue_backing,
+            handle,
+        ),
+        None => WriterQueue::new(admitted.generation, policy.limits.queue, queue_backing),
+    };
+    let Ok(queue) = queue else {
         drop(transport);
         drop((permits, global_slot, listener_slot));
         let _closed_at = lease.release(CloseReason::Overload);
@@ -253,7 +281,7 @@ where
         transport,
         admitted.generation,
         &queue,
-        limits,
+        policy,
         &inbox,
         &token,
         accepted_lines,
@@ -276,7 +304,7 @@ async fn supervise_tasks<T>(
     transport: T,
     generation: ConnectionGeneration,
     queue: &Arc<WriterQueue>,
-    limits: ConnectionLimits,
+    policy: ConnectionPolicy,
     inbox: &mpsc::Sender<StateCoreMessage>,
     token: &CancellationToken,
     accepted_lines: Arc<AtomicU64>,
@@ -291,7 +319,8 @@ where
     let reader = run_reader_sequenced(
         read_half,
         generation,
-        limits.reader,
+        policy.limits.reader,
+        policy.runtime_config,
         inbox.clone(),
         reader_token.clone(),
         accepted_lines,

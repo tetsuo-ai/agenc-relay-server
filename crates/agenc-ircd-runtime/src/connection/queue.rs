@@ -4,11 +4,13 @@
 //! The queue is a `VecDeque` whose slot capacity is fixed at admission and
 //! charged once against the memory budget, so committing a reservation
 //! never allocates and every reservation's additional backing charge is
-//! zero. Normal output may use `client_output_bytes` minus the control
-//! reserve; control frames may use the reserved subrange up to the total
-//! ceiling. Crossing 75% of the normal ceiling raises one warning; a whole
-//! demand that does not fit reports `Full` and the sink joins the
-//! slow-consumer close list. No frame is ever evicted for a newer one.
+//! zero. New reservations use the current runtime byte, item, and response
+//! ceilings. A reload does not remove earlier reservations. Normal output may
+//! use `client_output_bytes` minus the control reserve; control frames may use
+//! the reserved subrange up to the total ceiling. Crossing 75% of the normal
+//! ceiling raises one warning; a whole demand that does not fit reports
+//! `Full` and the sink joins the slow-consumer close list. No frame is ever
+//! evicted for a newer one.
 
 use std::collections::VecDeque;
 use std::mem::size_of;
@@ -18,12 +20,13 @@ use tokio::sync::Notify;
 
 use super::sink::{
     BoundedSharedClientFrames, ClientQueueDemand, ClientQueueReservation, ClientQueueSnapshot,
-    ClientSink, ConnectionGeneration, FlushAcknowledgement, QuerySnapshotPermit,
+    ClientSink, ConnectionGeneration, FlushAcknowledgement, MAX_DEMAND_FRAMES, QuerySnapshotPermit,
     QueueAllocationError, QueueReservationLedger, SinkReserveError,
     TentativeClientQueueReservation,
 };
 use crate::RuntimeError;
 use crate::budget::{MemoryCharge, MemoryPermit};
+use crate::runtime_config::RuntimeConfigHandle;
 use crate::state_core::inbox::CloseReason;
 use crate::sync::{Arc, Mutex, lock};
 
@@ -118,6 +121,14 @@ impl QueueLimits {
         self.items - CONTROL_ITEM_SLOTS
     }
 
+    /// Returns the logical open-response ceiling represented by the normal
+    /// item backing. Production profiles reserve one maximum-sized demand per
+    /// configured response batch; smaller embedding queues still admit one.
+    #[must_use]
+    pub fn response_batches(self) -> usize {
+        self.normal_items().div_ceil(MAX_DEMAND_FRAMES).max(1)
+    }
+
     /// Returns the byte count at which the warning fires.
     #[must_use]
     pub const fn warning_bytes(self) -> usize {
@@ -163,6 +174,7 @@ struct QueuedFrame {
     class: FrameClass,
     frame: Arc<RenderedMessage<MemoryPermit>>,
     query_snapshot: Option<QuerySnapshotPermit>,
+    ends_response_batch: bool,
 }
 
 struct QueueState {
@@ -171,6 +183,7 @@ struct QueueState {
     normal_items: usize,
     control_bytes: usize,
     control_items: usize,
+    normal_batches: usize,
     query_snapshots: u64,
     query_rows: u64,
     query_bytes: u64,
@@ -232,6 +245,7 @@ impl QueueReservationLedger for QueueShared {
         let mut state = lock(&self.state);
         state.normal_items = state.normal_items.saturating_sub(frames);
         state.normal_bytes = state.normal_bytes.saturating_sub(bytes);
+        state.normal_batches = state.normal_batches.saturating_sub(1);
     }
 }
 
@@ -239,6 +253,7 @@ impl QueueReservationLedger for QueueShared {
 pub struct WriterQueue {
     generation: ConnectionGeneration,
     limits: QueueLimits,
+    runtime_config: Option<RuntimeConfigHandle>,
     shared: Arc<QueueShared>,
     _backing: MemoryPermit,
 }
@@ -251,6 +266,24 @@ impl WriterQueue {
         limits: QueueLimits,
         backing: MemoryPermit,
     ) -> Result<Arc<Self>, RuntimeError> {
+        Self::new_with_runtime_config(generation, limits, backing, None)
+    }
+
+    pub(crate) fn new_live(
+        generation: ConnectionGeneration,
+        limits: QueueLimits,
+        backing: MemoryPermit,
+        runtime_config: RuntimeConfigHandle,
+    ) -> Result<Arc<Self>, RuntimeError> {
+        Self::new_with_runtime_config(generation, limits, backing, Some(runtime_config))
+    }
+
+    fn new_with_runtime_config(
+        generation: ConnectionGeneration,
+        limits: QueueLimits,
+        backing: MemoryPermit,
+        runtime_config: Option<RuntimeConfigHandle>,
+    ) -> Result<Arc<Self>, RuntimeError> {
         if backing.bytes() != limits.backing_charge()?.bytes() {
             return Err(RuntimeError::InvalidValue);
         }
@@ -261,6 +294,7 @@ impl WriterQueue {
         Ok(Arc::new(Self {
             generation,
             limits,
+            runtime_config,
             shared: Arc::new(QueueShared {
                 state: Mutex::new(QueueState {
                     frames,
@@ -268,6 +302,7 @@ impl WriterQueue {
                     normal_items: 0,
                     control_bytes: 0,
                     control_items: 0,
+                    normal_batches: 0,
                     query_snapshots: 0,
                     query_rows: 0,
                     query_bytes: 0,
@@ -283,10 +318,11 @@ impl WriterQueue {
         }))
     }
 
-    /// Returns the queue limits.
+    /// Returns the current byte limits and the item capacity available to
+    /// this queue's admission backing.
     #[must_use]
-    pub const fn limits(&self) -> QueueLimits {
-        self.limits
+    pub fn limits(&self) -> QueueLimits {
+        self.current_limits()
     }
 
     /// Returns the normal bytes reserved or queued.
@@ -321,6 +357,7 @@ impl WriterQueue {
         frame: Arc<RenderedMessage<MemoryPermit>>,
     ) -> Result<(), SinkReserveError> {
         let bytes = frame.as_bytes().len();
+        let limits = self.current_limits();
         let mut state = lock(&self.shared.state);
         if state.closed.is_some() {
             return Err(SinkReserveError::Closed);
@@ -329,7 +366,7 @@ impl WriterQueue {
             .control_bytes
             .checked_add(bytes)
             .ok_or(SinkReserveError::Full)?;
-        if next_bytes > self.limits.control_bytes() || state.control_items >= CONTROL_ITEM_SLOTS {
+        if next_bytes > limits.control_bytes() || state.control_items >= CONTROL_ITEM_SLOTS {
             return Err(SinkReserveError::Full);
         }
         state.control_bytes = next_bytes;
@@ -338,6 +375,7 @@ impl WriterQueue {
             class: FrameClass::Control,
             frame,
             query_snapshot: None,
+            ends_response_batch: false,
         });
         drop(state);
         self.shared.notify.notify_one();
@@ -357,6 +395,7 @@ impl WriterQueue {
             state.normal_items = 0;
             state.control_bytes = 0;
             state.control_items = 0;
+            state.normal_batches = 0;
             state.query_snapshots = 0;
             state.query_rows = 0;
             state.query_bytes = 0;
@@ -389,6 +428,9 @@ impl WriterQueue {
         let mut state = lock(&self.shared.state);
         if let Some(queued) = state.frames.pop_front() {
             state.release(queued.class, queued.frame.as_bytes().len());
+            if queued.ends_response_batch {
+                state.normal_batches = state.normal_batches.saturating_sub(1);
+            }
             if let Some(snapshot) = queued.query_snapshot.as_ref() {
                 state.release_query_snapshot(snapshot);
             }
@@ -413,23 +455,50 @@ impl WriterQueue {
         }
     }
 
-    fn admit_normal(&self, state: &mut QueueState, demand: &ClientQueueDemand) -> bool {
+    fn admit_normal(
+        &self,
+        state: &mut QueueState,
+        demand: &ClientQueueDemand,
+        limits: QueueLimits,
+        response_batches: usize,
+    ) -> bool {
         let Some(next_items) = state.normal_items.checked_add(demand.frame_count()) else {
             return false;
         };
         let Some(next_bytes) = state.normal_bytes.checked_add(demand.total_bytes()) else {
             return false;
         };
-        if next_items > self.limits.normal_items() || next_bytes > self.limits.normal_bytes() {
+        let Some(next_batches) = state.normal_batches.checked_add(1) else {
+            return false;
+        };
+        if next_items > limits.normal_items()
+            || next_bytes > limits.normal_bytes()
+            || next_batches > response_batches
+        {
             return false;
         }
         state.normal_items = next_items;
         state.normal_bytes = next_bytes;
-        if state.warning_armed && next_bytes >= self.limits.warning_bytes() {
+        state.normal_batches = next_batches;
+        if state.warning_armed && next_bytes >= limits.warning_bytes() {
             state.warning_armed = false;
             state.warning_pending = true;
         }
         true
+    }
+
+    fn current_limits(&self) -> QueueLimits {
+        self.current_admission_limits().0
+    }
+
+    fn current_admission_limits(&self) -> (QueueLimits, usize) {
+        let Some(runtime_config) = &self.runtime_config else {
+            return (self.limits, self.limits.response_batches());
+        };
+        let mut current = runtime_config.load().connection_limits().queue;
+        let response_batches = current.response_batches();
+        current.items = current.items.min(self.limits.items);
+        (current, response_batches)
     }
 }
 
@@ -442,11 +511,12 @@ impl ClientSink for WriterQueue {
         &self,
         demand: ClientQueueDemand,
     ) -> Result<TentativeClientQueueReservation, SinkReserveError> {
+        let (limits, response_batches) = self.current_admission_limits();
         let mut state = lock(&self.shared.state);
         if state.closed.is_some() {
             return Err(SinkReserveError::Closed);
         }
-        if !self.admit_normal(&mut state, &demand) {
+        if !self.admit_normal(&mut state, &demand, limits, response_batches) {
             return Err(SinkReserveError::Full);
         }
         drop(state);
@@ -490,6 +560,7 @@ impl ClientSink for WriterQueue {
                 query_snapshot: (index + 1 == frame_count)
                     .then(|| query_snapshot.take())
                     .flatten(),
+                ends_response_batch: index + 1 == frame_count,
             });
         }
         drop(state);
@@ -516,10 +587,11 @@ impl ClientSink for WriterQueue {
     }
 
     fn queue_snapshot(&self) -> ClientQueueSnapshot {
+        let limits = self.current_limits();
         let state = lock(&self.shared.state);
         ClientQueueSnapshot::with_query_usage(
             u64::try_from(state.normal_bytes + state.control_bytes).unwrap_or(u64::MAX),
-            u64::try_from(self.limits.total_bytes()).unwrap_or(u64::MAX),
+            u64::try_from(limits.total_bytes()).unwrap_or(u64::MAX),
             state.query_snapshots,
             state.query_rows,
             state.query_bytes,
@@ -667,6 +739,32 @@ mod tests {
         assert_eq!(popped.as_bytes(), second.as_bytes());
         assert_eq!(queue.normal_bytes(), 0);
         assert!(matches!(queue.pop(), QueuePop::Empty));
+        Ok(())
+    }
+
+    #[test]
+    fn response_batch_slot_releases_only_after_its_final_frame() -> Result<(), RuntimeError> {
+        let budget = budget();
+        let limits = QueueLimits::new(400, 100, 12)?;
+        let queue = queue(&budget, 1, limits)?;
+        let first = frame(&budget, "first")?;
+        let last = frame(&budget, "last")?;
+        reserve_and_commit(&queue, vec![first, last])?;
+
+        assert_eq!(
+            queue.try_reserve(ClientQueueDemand::new(vec![1])?).err(),
+            Some(SinkReserveError::Full)
+        );
+        let _first = queue.pop();
+        assert_eq!(
+            queue.try_reserve(ClientQueueDemand::new(vec![1])?).err(),
+            Some(SinkReserveError::Full)
+        );
+        let _last = queue.pop();
+        let next = queue
+            .try_reserve(ClientQueueDemand::new(vec![1])?)
+            .map_err(|_| RuntimeError::LimitExceeded)?;
+        drop(next);
         Ok(())
     }
 

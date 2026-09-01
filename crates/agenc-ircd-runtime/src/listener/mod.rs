@@ -49,7 +49,7 @@ use crate::budget::{
 use crate::cancel::CancellationToken;
 use crate::connection::supervisor::AdmissionLease;
 use crate::connection::{
-    AdmittedConnection, ConnectionExit, ConnectionGeneration, ConnectionLimits,
+    AdmittedConnection, ConnectionExit, ConnectionGeneration, ConnectionLimits, ConnectionPolicy,
     ConnectionResources, PeerIdentity, run_connection,
 };
 use crate::purpose::ListenerPurpose;
@@ -1225,11 +1225,12 @@ where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     shared.observer.admitted(&admitted);
+    let policy = ConnectionPolicy::new(limits, shared.runtime_config.clone());
     run_connection(
         transport,
         admitted,
         resources,
-        limits,
+        policy,
         shared.inbox.clone(),
         token,
         lease,

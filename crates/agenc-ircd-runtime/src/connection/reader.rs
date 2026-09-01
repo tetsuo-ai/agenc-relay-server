@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 use super::sink::ConnectionGeneration;
 use crate::RuntimeError;
 use crate::cancel::CancellationToken;
+use crate::runtime_config::RuntimeConfigHandle;
 use crate::state_core::inbox::{
     CloseReason, MAX_PARSED_ARENA_BYTES, MAX_REQUESTS_PER_CONNECTION, StateCoreMessage,
 };
@@ -112,6 +113,7 @@ pub async fn run_reader<R: AsyncRead + Unpin>(
         transport,
         generation,
         limits,
+        None,
         inbox,
         token,
         Arc::new(AtomicU64::new(0)),
@@ -123,6 +125,7 @@ pub(crate) async fn run_reader_sequenced<R: AsyncRead + Unpin>(
     mut transport: R,
     generation: ConnectionGeneration,
     limits: ReaderLimits,
+    runtime_config: Option<RuntimeConfigHandle>,
     inbox: mpsc::Sender<StateCoreMessage>,
     token: CancellationToken,
     accepted_lines: Arc<AtomicU64>,
@@ -153,6 +156,9 @@ pub(crate) async fn run_reader_sequenced<R: AsyncRead + Unpin>(
         let Some(bytes) = buffer.get(..filled) else {
             return CloseReason::TransportLoss;
         };
+        let limits = runtime_config
+            .as_ref()
+            .map_or(limits, |handle| handle.load().connection_limits().reader);
         if let Err(reason) = feed_and_forward(
             bytes,
             &mut framer,

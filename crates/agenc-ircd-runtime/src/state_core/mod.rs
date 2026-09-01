@@ -24,7 +24,9 @@ use std::time::Duration;
 
 use agenc_ircd_client_wire::{ParsedMessage, WireMessage, numeric_reply};
 use agenc_ircd_crypto::OpenedStoragePlaintext;
-use agenc_ircd_domain::{ApplyReceipt, DomainError, DomainState, MutationPlan};
+use agenc_ircd_domain::{
+    ApplyReceipt, DomainError, DomainState, MutationPlan, OperationalLimits, OperationalUsage,
+};
 use agenc_ircd_storage::{
     CheckpointOutcome, CheckpointReceipt, CommitOutcome, ExistingRecord, ReadPlan, SealedRecord,
     StorageError, StorageLimitWriter, StorageMutationBatch, StoredKey, TableId,
@@ -2239,6 +2241,12 @@ impl StateCore {
         if !resource_limits.accepts_query_usage(query) {
             return false;
         }
+        let Ok(usage) = self.context.domain.operational_usage() else {
+            return false;
+        };
+        if !invite_reload_floor_accepts(candidate.operational_limits(), usage) {
+            return false;
+        }
         let ceilings = candidate.storage_ceilings();
         self.context.head.logical_database_bytes <= ceilings.database_max_bytes
             && self.context.head.backup_stream_bytes <= ceilings.backup_max_bytes
@@ -3631,6 +3639,13 @@ impl StateCore {
     }
 }
 
+fn invite_reload_floor_accepts(limits: OperationalLimits, usage: OperationalUsage) -> bool {
+    let limits = limits.values();
+    usage.invites_per_channel <= limits.invites_per_channel
+        && usage.invites_per_principal <= limits.invites_per_principal
+        && usage.invites_global <= limits.invites_global
+}
+
 fn usize_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
@@ -3638,6 +3653,49 @@ fn usize_u64(value: usize) -> u64 {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+
+    fn invite_limits() -> Result<OperationalLimits, DomainError> {
+        OperationalLimits::new(agenc_ircd_domain::OperationalLimitValues {
+            sessions_per_account: 8,
+            channels_per_session: 64,
+            members_per_channel: 4_096,
+            global_channels: 100_000,
+            local_channels: 10_000,
+            invites_per_channel: 3,
+            invites_per_principal: 2,
+            invites_global: 4,
+            contacts_per_account: 1_000,
+        })
+    }
+
+    #[test]
+    fn invite_reload_floor_checks_each_live_counter() -> Result<(), DomainError> {
+        let limits = invite_limits()?;
+        let exact = OperationalUsage {
+            invites_per_channel: 3,
+            invites_per_principal: 2,
+            invites_global: 4,
+            ..OperationalUsage::default()
+        };
+        assert!(invite_reload_floor_accepts(limits, exact));
+        for over in [
+            OperationalUsage {
+                invites_per_channel: 4,
+                ..exact
+            },
+            OperationalUsage {
+                invites_per_principal: 3,
+                ..exact
+            },
+            OperationalUsage {
+                invites_global: 5,
+                ..exact
+            },
+        ] {
+            assert!(!invite_reload_floor_accepts(limits, over));
+        }
+        Ok(())
+    }
 
     #[tokio::test]
     async fn lifecycle_replies_are_bounded_idempotent_and_stop_supersedes_waiters() {

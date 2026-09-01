@@ -404,7 +404,8 @@ impl RuntimeConfigSnapshot {
         self.sanction_windows
     }
 
-    /// Returns the limits copied by each newly admitted connection.
+    /// Returns the connection limits used for each new reader and queue
+    /// admission. Existing reservations keep their prior admission.
     #[must_use]
     pub const fn connection_limits(&self) -> ConnectionLimits {
         self.connection_limits
@@ -622,6 +623,10 @@ impl PreparedReload {
 
     pub(crate) fn is_noop(&self) -> bool {
         !self.changes_live_state
+    }
+
+    pub(crate) fn permits_signal_activation(&self) -> bool {
+        !self.plan.requires_budget_check()
     }
 
     pub(crate) const fn expected_revision(&self) -> ConfigRevision {
@@ -1012,13 +1017,17 @@ pub(crate) fn reload_preparation_channel(
 #[cfg(test)]
 mod tests {
     use agenc_ircd_admin::{OperatorRecord, OperatorRegistry};
-    use agenc_ircd_config::{Config, PathResolver, ValidationDepth};
+    use agenc_ircd_config::{Config, LimitKey, PathResolver, ValidationDepth};
     use agenc_ircd_crypto::Ed25519SecretKey;
     use agenc_ircd_domain::{OperationalLimitValues, OperationalLimits};
     use agenc_ircd_types::{AdminPermission, AdminPermissionSet, OperatorId};
 
     use super::*;
-    use crate::connection::ConnectionLimits;
+    use crate::budget::{BoundedMemoryCharges, MemoryBudget, MemoryBudgetPort};
+    use crate::connection::{
+        CONTROL_ITEM_SLOTS, ClientQueueDemand, ClientSink, ConnectionGeneration, ConnectionLimits,
+        MAX_DEMAND_FRAMES, QueueLimits, SinkReserveError, WriterQueue,
+    };
 
     const PUBLIC: &str = include_str!("../../agenc-ircd-config/tests/golden/public.toml");
 
@@ -1122,6 +1131,96 @@ mod tests {
         assert!(prepared.plan().changes().is_empty());
         assert_eq!(active.revision().get(), 1);
         assert_eq!(prepared.candidate.revision().get(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn signal_activation_accepts_lowered_limits_but_requires_rehash_for_raises()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let active = snapshot()?;
+        let mut lowered = config()?;
+        lowered.limits.values = lowered
+            .limits
+            .values
+            .with(LimitKey::ClientConnections, 40_000);
+        let lowered = PreparedReload::new(&active, lowered, parts()?)?;
+        assert!(lowered.permits_signal_activation());
+
+        let mut raised = config()?;
+        raised.limits.values = raised
+            .limits
+            .values
+            .with(LimitKey::ClientConnections, 60_000);
+        let raised = PreparedReload::new(&active, raised, parts()?)?;
+        assert!(!raised.permits_signal_activation());
+        Ok(())
+    }
+
+    #[test]
+    fn live_queue_limits_gate_new_work_while_old_reservations_drain()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let initial = snapshot()?;
+        let handle = RuntimeConfigHandle::new(initial);
+        let initial_limits = ConnectionLimits::DEFAULT.queue;
+        let budget = MemoryBudget::new(64 * 1_048_576);
+        let charge = initial_limits.backing_charge()?;
+        let mut batch = budget.try_acquire_batch(BoundedMemoryCharges::new(&[charge])?)?;
+        let backing = batch
+            .split_exact(charge.bytes())
+            .ok_or(RuntimeError::InvalidValue)?;
+        let queue = WriterQueue::new_live(
+            ConnectionGeneration::new(1),
+            initial_limits,
+            backing,
+            handle.clone(),
+        )?;
+        let first = queue
+            .try_reserve(ClientQueueDemand::new(vec![1])?)
+            .map_err(|_| RuntimeError::LimitExceeded)?;
+        let second = queue
+            .try_reserve(ClientQueueDemand::new(vec![1])?)
+            .map_err(|_| RuntimeError::LimitExceeded)?;
+
+        let mut candidate_config = config()?;
+        candidate_config.limits.values = candidate_config
+            .limits
+            .values
+            .with(LimitKey::ResponseBatchesPerConnection, 1)
+            .with(LimitKey::ClientOutputBytes, 262_144);
+        let mut candidate_parts = parts()?;
+        candidate_parts.connection_limits.queue =
+            QueueLimits::new(262_144, 65_536, MAX_DEMAND_FRAMES + CONTROL_ITEM_SLOTS)?;
+        let candidate = Arc::new(RuntimeConfigSnapshot::from_parts(
+            ConfigRevision::new(2)?,
+            candidate_config,
+            candidate_parts,
+        ));
+        let _previous = handle.publish_after(ConfigRevision::INITIAL, candidate, || Ok(()))?;
+
+        assert_eq!(queue.limits().response_batches(), 1);
+        assert_eq!(queue.queue_snapshot().capacity_bytes(), 262_144);
+        assert_eq!(
+            queue.try_reserve(ClientQueueDemand::new(vec![1])?).err(),
+            Some(SinkReserveError::Full)
+        );
+        drop(first);
+        assert_eq!(
+            queue.try_reserve(ClientQueueDemand::new(vec![1])?).err(),
+            Some(SinkReserveError::Full),
+            "the second old reservation remains valid and occupies the lowered ceiling"
+        );
+        drop(second);
+        assert_eq!(
+            queue
+                .try_reserve(ClientQueueDemand::new(vec![4_096; 49])?)
+                .err(),
+            Some(SinkReserveError::Full),
+            "new work observes the lowered byte ceiling"
+        );
+        let newly_admitted = queue
+            .try_reserve(ClientQueueDemand::new(vec![1])?)
+            .map_err(|_| RuntimeError::LimitExceeded)?;
+        drop(newly_admitted);
         Ok(())
     }
 
