@@ -1392,6 +1392,11 @@ fn ascii(bytes: &[u8]) -> Result<&str, RuntimeError> {
 
 #[cfg(test)]
 mod tests {
+    use agenc_ircd_client_wire::{CapabilityProfile, CapabilitySpec};
+    use agenc_ircd_domain::{ChannelTarget, ExternalInputs};
+    use agenc_ircd_testkit::{apply_command, channel_id, open_session, registered_admission};
+    use agenc_ircd_types::{AccountRandomId, EntryId};
+
     use super::*;
 
     #[test]
@@ -1416,5 +1421,151 @@ mod tests {
     fn member_role_has_no_wire_mode_letter() {
         assert_eq!(role_letter(Role::Member), Err(RuntimeError::InvalidValue));
         assert_eq!(role_letter(Role::Voice), Ok('v'));
+    }
+
+    #[test]
+    fn capability_key_sets_each_independent_message_bit() -> Result<(), Box<dyn core::error::Error>>
+    {
+        let profile = CapabilityProfile::new(
+            ["message-tags", "message-ids", "server-time", "account-tag"]
+                .into_iter()
+                .map(|name| CapabilitySpec::new(name, None))
+                .collect::<Result<Vec<_>, _>>()?,
+        )?;
+        let mut capabilities = CapabilityState::default();
+        let _listed = capabilities.ls(Some("302"), &profile)?;
+        let _reply =
+            capabilities.request("message-tags message-ids server-time account-tag", &profile)?;
+        assert_eq!(message_capability_key(&capabilities), 0b1111);
+        Ok(())
+    }
+
+    #[test]
+    fn closed_mode_helpers_cover_every_role_list_direction_and_mask_subject()
+    -> Result<(), Box<dyn core::error::Error>> {
+        assert_eq!(operation(true), ModeOperation::Add);
+        assert_eq!(operation(false), ModeOperation::Remove);
+        for (role, letter, prefix) in [
+            (Role::Owner, Some('q'), Some('~')),
+            (Role::Administrator, Some('a'), Some('&')),
+            (Role::Operator, Some('o'), Some('@')),
+            (Role::HalfOperator, Some('h'), Some('%')),
+            (Role::Voice, Some('v'), Some('+')),
+            (Role::Member, None, None),
+        ] {
+            assert_eq!(role_letter(role).ok(), letter);
+            assert_eq!(role_prefix(role), prefix);
+        }
+        assert_eq!(list_letter(MaskList::Ban), 'b');
+        assert_eq!(list_letter(MaskList::Exception), 'e');
+        assert_eq!(list_letter(MaskList::InviteException), 'I');
+
+        let account = AccountRandomId::from_bytes([1; 16]);
+        let user = UserId::from_bytes([2; 16]);
+        for (text, expected) in [
+            (
+                format!("$a:{}", account.to_text()),
+                format!("$a:{}", account.to_text()),
+            ),
+            (
+                format!("$u:{}", user.to_base64url()),
+                format!("$u:{}", user.to_base64url()),
+            ),
+            ("$n:Te*t".to_owned(), "$n:te*t".to_owned()),
+            ("$c:Host*".to_owned(), "$c:Host*".to_owned()),
+            ("$q:$n:quiet*".to_owned(), "$q:$n:quiet*".to_owned()),
+        ] {
+            assert_eq!(typed_mask_text(&TypedMask::parse(&text)?), expected);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn timestamp_and_ascii_helpers_fail_closed_at_their_outer_bounds() {
+        assert_eq!(
+            server_time(UtcSecond::from_unix_seconds(253_402_300_799)),
+            Ok("9999-12-31T23:59:59.000Z".to_owned())
+        );
+        assert_eq!(
+            server_time(UtcSecond::from_unix_seconds(253_402_300_800)),
+            Err(RuntimeError::InvalidValue)
+        );
+        assert_eq!(
+            server_time(UtcSecond::from_unix_seconds(u64::MAX)),
+            Err(RuntimeError::InvalidValue)
+        );
+        assert_eq!(ascii(b"ascii"), Ok("ascii"));
+        assert_eq!(ascii(&[0xff]), Err(RuntimeError::InvalidValue));
+    }
+
+    #[test]
+    fn mode_change_text_covers_every_state_independent_arm()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let mut state = DomainState::new()?;
+        let identity = open_session(&mut state, 1, "actor", None)?;
+        let name = ChannelNameValue::parse("#room")?;
+        apply_command(
+            &mut state,
+            identity,
+            CanonicalCommand::join(vec![ChannelTarget::new(name.clone(), false)])?,
+            &registered_admission(identity.user_id)?,
+            Some(ExternalInputs {
+                utc_now: Some(UtcSecond::from_unix_seconds(1_700_000_000)),
+                channel_ids: vec![channel_id(1)],
+                ..ExternalInputs::default()
+            }),
+        )?;
+        let channel = state.channel(channel_id(1)).ok_or("missing channel")?;
+        let target = agenc_ircd_domain::NicknameValue::parse("target")?;
+        let mask = TypedMask::parse("$n:mask*")?;
+        let changes = [
+            ModeChange::Visibility {
+                operation: ModeOperation::Add,
+                mode: VisibilityMode::Unlisted,
+            },
+            ModeChange::Visibility {
+                operation: ModeOperation::Remove,
+                mode: VisibilityMode::Secret,
+            },
+            ModeChange::InviteOnly(true),
+            ModeChange::Moderated(false),
+            ModeChange::TopicProtected(true),
+            ModeChange::JoinKey(false),
+            ModeChange::MemberLimit(Some(7)),
+            ModeChange::MemberLimit(None),
+            ModeChange::Role {
+                operation: ModeOperation::Add,
+                target,
+                role: Role::Operator,
+            },
+            ModeChange::AddMask {
+                list: MaskList::Ban,
+                mask,
+            },
+            ModeChange::RemoveMask {
+                list: MaskList::Ban,
+                entry_id: EntryId::from_bytes([9; 16]),
+            },
+        ];
+        let expected = [
+            (ModeOperation::Add, 'p', None),
+            (ModeOperation::Remove, 's', None),
+            (ModeOperation::Add, 'i', None),
+            (ModeOperation::Remove, 'm', None),
+            (ModeOperation::Add, 't', None),
+            (ModeOperation::Remove, 'k', None),
+            (ModeOperation::Add, 'l', Some("7".to_owned())),
+            (ModeOperation::Remove, 'l', None),
+            (ModeOperation::Add, 'o', Some("target".to_owned())),
+            (ModeOperation::Add, 'b', Some("$n:mask*".to_owned())),
+        ];
+        for (change, expected) in changes.iter().zip(expected) {
+            assert_eq!(mode_change_text(channel, change)?, expected);
+        }
+        assert_eq!(
+            mode_change_text(channel, changes.last().ok_or(RuntimeError::InvalidValue)?),
+            Err(RuntimeError::InvalidValue)
+        );
+        Ok(())
     }
 }

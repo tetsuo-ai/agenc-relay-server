@@ -1355,7 +1355,7 @@ fn stage_error(error: StageRefused) -> RuntimeError {
 #[cfg(test)]
 mod tests {
     use agenc_ircd_crypto::{CryptoError, CryptoWorkerError};
-    use agenc_ircd_domain::{RateBucket, RateCharge};
+    use agenc_ircd_domain::{MessageCommand, MessageTarget, NicknameValue, RateBucket, RateCharge};
     use agenc_ircd_types::{MonotonicTick, UserId};
 
     use super::*;
@@ -1364,6 +1364,18 @@ mod tests {
     use crate::state_core::EphemeralRefused;
     use crate::state_core::fanout::FanoutRefused;
     use crate::state_core::inbox::SourceAddressKey;
+
+    struct TestVerifier;
+
+    impl ChannelKeyVerifier for TestVerifier {
+        fn derive(
+            &self,
+            _secret: &[u8],
+            salt: &[u8; crate::bridge::crypto::CHANNEL_KEY_SALT_BYTES],
+        ) -> Result<[u8; crate::bridge::crypto::CHANNEL_KEY_HASH_BYTES], CryptoError> {
+            Ok([salt[0]; crate::bridge::crypto::CHANNEL_KEY_HASH_BYTES])
+        }
+    }
 
     #[test]
     fn ephemeral_refusals_are_public_only_when_safe() {
@@ -1488,10 +1500,12 @@ mod tests {
     #[test]
     fn guest_prefix_keys_follow_the_transport_profile() -> Result<(), RuntimeError> {
         let direct = SourceAddressKey::ipv4([198, 51, 100, 8]);
-        assert!(matches!(
-            guest_prefix_bucket(ListenerPurpose::ClientTls, direct)?,
-            BucketKey::Prefix(prefix) if prefix == direct.prefix_key()
-        ));
+        for purpose in [ListenerPurpose::ClientTls, ListenerPurpose::ClientWss] {
+            assert!(matches!(
+                guest_prefix_bucket(purpose, direct)?,
+                BucketKey::Prefix(prefix) if prefix == direct.prefix_key()
+            ));
+        }
         assert!(matches!(
             guest_prefix_bucket(
                 ListenerPurpose::ClientOnion,
@@ -1499,7 +1513,190 @@ mod tests {
             )?,
             BucketKey::OnionListener
         ));
-        assert!(guest_prefix_bucket(ListenerPurpose::AdminLocal, direct).is_err());
+        for purpose in [
+            ListenerPurpose::Federation,
+            ListenerPurpose::AdminLocal,
+            ListenerPurpose::AdminTls,
+        ] {
+            assert!(guest_prefix_bucket(purpose, direct).is_err());
+        }
         Ok(())
+    }
+
+    #[test]
+    fn executor_reload_fence_checks_each_owned_index() {
+        let verifier: Arc<dyn ChannelKeyVerifier> = Arc::new(TestVerifier);
+        let dummy = ChannelKeyVerifierRecord::new([1; 16], [2; 32]);
+        let mut executor = RegisteredCommandExecutor::new(verifier, dummy);
+        assert!(executor.reload_ready());
+
+        executor
+            .by_connection
+            .insert(ConnectionGeneration::new(1), CryptoJobId::new(1));
+        assert!(!executor.reload_ready());
+        executor.by_connection.clear();
+
+        executor.by_sequence.insert(1, CryptoJobId::new(1));
+        assert!(!executor.reload_ready());
+        executor.by_sequence.clear();
+        assert!(executor.reload_ready());
+    }
+
+    #[test]
+    fn prepared_crypto_jobs_preserve_their_closed_runtime_kind() -> Result<(), RuntimeError> {
+        let verifier: Arc<dyn ChannelKeyVerifier> = Arc::new(TestVerifier);
+        let verify = PreparedCryptoJob::Verify(crate::bridge::crypto::ChannelKeyVerifyJob::new(
+            Arc::clone(&verifier),
+            ChannelKeyTarget::Dummy(ChannelKeyVerifierRecord::new([1; 16], [2; 32])),
+            vec![3; crate::bridge::crypto::MIN_CHANNEL_KEY_BYTES],
+        )?);
+        assert!(matches!(verify.kind(), PendingCryptoKind::Verify));
+        assert!(matches!(
+            verify.into_runtime(),
+            RuntimeCryptoJob::ChannelKeyVerify(_)
+        ));
+
+        let construct = PreparedCryptoJob::Construct(ChannelKeyConstructJob::new(
+            verifier,
+            [4; 16],
+            vec![5; crate::bridge::crypto::MIN_CHANNEL_KEY_BYTES],
+        )?);
+        assert!(matches!(construct.kind(), PendingCryptoKind::Construct));
+        assert!(matches!(
+            construct.into_runtime(),
+            RuntimeCryptoJob::ChannelKeyConstruct(_)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn external_request_selection_and_entropy_routing_cover_every_arm() -> Result<(), RuntimeError>
+    {
+        let requests = [
+            ExternalInputRequest::UtcNow {
+                request_sequence: 0,
+            },
+            ExternalInputRequest::MonotonicNow {
+                request_sequence: 1,
+            },
+            ExternalInputRequest::Entropy {
+                request_sequence: 2,
+                purpose: EntropyPurpose::Invite,
+                bytes: 16,
+            },
+            ExternalInputRequest::ChannelKeyVerification {
+                request_sequence: 3,
+                target_index: 0,
+            },
+            ExternalInputRequest::ChannelKeyConstruction {
+                request_sequence: 4,
+                change_index: 0,
+            },
+        ];
+        assert_eq!(crypto_requests(&requests)?.len(), 2);
+        assert!(crypto_requests(&requests[..3])?.is_empty());
+
+        let mut inputs = ExternalInputs::default();
+        for purpose in [
+            EntropyPurpose::ChannelInstance(0),
+            EntropyPurpose::Message(1),
+            EntropyPurpose::Invite,
+            EntropyPurpose::MaskEntry(2),
+            EntropyPurpose::AccountDeletionChallenge,
+        ] {
+            push_entropy(&mut inputs, purpose, [9; 16])?;
+        }
+        assert_eq!(inputs.channel_ids.len(), 1);
+        assert_eq!(inputs.message_ids.len(), 1);
+        assert_eq!(inputs.invite_ids.len(), 1);
+        assert_eq!(inputs.entry_ids.len(), 1);
+        assert_eq!(inputs.deletion_tokens.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn closed_error_mappings_and_command_silence_are_exhaustive()
+    -> Result<(), Box<dyn core::error::Error>> {
+        assert!(matches!(
+            domain_plan_error(DomainError::ExternalInputMismatch),
+            SessionCommandError::Internal(RuntimeError::InvalidValue)
+        ));
+        assert!(matches!(
+            domain_plan_error(DomainError::InvariantViolation),
+            SessionCommandError::Internal(RuntimeError::InvalidValue)
+        ));
+        assert!(matches!(
+            domain_plan_error(DomainError::Forbidden),
+            SessionCommandError::Public {
+                error: DomainError::Forbidden,
+                silent: false,
+            }
+        ));
+
+        assert_eq!(stage_error(StageRefused::Busy), RuntimeError::LimitExceeded);
+        assert_eq!(
+            stage_error(StageRefused::Quiescing),
+            RuntimeError::LimitExceeded
+        );
+        assert_eq!(
+            stage_error(StageRefused::Domain(DomainError::Forbidden)),
+            RuntimeError::InvalidValue
+        );
+        assert_eq!(
+            stage_error(StageRefused::Fanout(FanoutRefused::MemoryExhausted)),
+            RuntimeError::MemoryExhausted
+        );
+
+        assert!(!command_is_silent(&CanonicalCommand::quit(None)));
+        let notice = MessageCommand::new(
+            MessageKind::Notice,
+            vec![MessageTarget::User(NicknameValue::parse("target")?)],
+            None,
+        )?;
+        assert!(command_is_silent(&CanonicalCommand::message(notice)));
+        let privmsg = MessageCommand::new(
+            MessageKind::Privmsg,
+            vec![MessageTarget::User(NicknameValue::parse("target")?)],
+            Some(agenc_ircd_domain::MessageText::parse("body")?),
+        )?;
+        assert!(!command_is_silent(&CanonicalCommand::message(privmsg)));
+
+        assert_eq!(copy_secret(&[])?, Vec::<u8>::new());
+        assert_eq!(copy_secret(b"secret")?, b"secret");
+        Ok(())
+    }
+
+    #[test]
+    fn crypto_output_rejects_both_crossed_result_kinds() {
+        let verifier = ChannelKeyVerifierRecord::new([1; 16], [2; 32]);
+        let mut external = ExternalInputs::default();
+        assert!(matches!(
+            apply_crypto_output(
+                PendingCryptoKind::Construct,
+                &mut external,
+                Ok(CryptoJobOutput::ChannelKey(ChannelKeyVerdict::for_test(
+                    false
+                ))),
+            ),
+            Err(CryptoCompletionError::Internal(RuntimeError::InvalidValue))
+        ));
+        assert!(matches!(
+            apply_crypto_output(
+                PendingCryptoKind::Verify,
+                &mut external,
+                Ok(CryptoJobOutput::ChannelKeyConstruct(Err(
+                    CryptoError::LimitExceeded
+                ))),
+            ),
+            Err(CryptoCompletionError::Internal(RuntimeError::InvalidValue))
+        ));
+        assert!(matches!(
+            apply_crypto_output(
+                PendingCryptoKind::Verify,
+                &mut external,
+                Ok(CryptoJobOutput::ChannelKeyConstruct(Ok(verifier))),
+            ),
+            Err(CryptoCompletionError::Internal(RuntimeError::InvalidValue))
+        ));
     }
 }

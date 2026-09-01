@@ -2850,4 +2850,265 @@ mod tests {
         owner.await.map_err(|_| RuntimeError::Cancelled)?;
         Ok(())
     }
+
+    fn export_memory() -> Result<MemoryPermitBatch, RuntimeError> {
+        let budget = MemoryBudget::new(4_096);
+        budget
+            .try_acquire_batch(BoundedMemoryCharges::new(vec![MemoryCharge::fixed(1)])?)
+            .map_err(Into::into)
+    }
+
+    #[test]
+    fn bounded_admin_outputs_reject_every_invalid_line_and_queue_state() -> Result<(), RuntimeError>
+    {
+        assert!(matches!(
+            AdminWrite::ordinary(vec!["x".to_owned(); MAX_ORDINARY_BATCH_LINES + 1], None),
+            Err(CloseReason::Overload)
+        ));
+        for invalid in [
+            String::new(),
+            "x".repeat(MAX_ADMIN_OUTPUT_LINE_BYTES + 1),
+            "embedded\rreturn".to_owned(),
+            "embedded\nline".to_owned(),
+        ] {
+            assert!(matches!(
+                AdminWrite::ordinary(vec![invalid.clone()], None),
+                Err(CloseReason::ProtocolError)
+            ));
+            assert!(matches!(
+                AdminWrite::export(vec![invalid], export_memory()?),
+                Err(CloseReason::ProtocolError)
+            ));
+        }
+        assert!(AdminWrite::ordinary(Vec::new(), None).is_ok());
+        assert!(AdminWrite::export(vec!["bounded".to_owned()], export_memory()?).is_ok());
+
+        let (sender, mut receiver) = mpsc::channel(1);
+        let output = AdminOutput::new(sender);
+        output
+            .try_line("first".to_owned())
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        assert_eq!(
+            output.try_line("second".to_owned()),
+            Err(CloseReason::SlowConsumer)
+        );
+        let _first = receiver
+            .try_recv()
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        drop(receiver);
+        assert_eq!(
+            output.try_line("closed".to_owned()),
+            Err(CloseReason::TransportLoss)
+        );
+        assert_eq!(
+            output.try_export(vec!["closed".to_owned()], export_memory()?),
+            Err(CloseReason::TransportLoss)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn admission_and_process_ports_cover_uid_gid_pin_full_and_closed() -> Result<(), RuntimeError> {
+        let pin = [3; 32];
+        let admission =
+            AdminAdmissionSnapshot::new(vec![20, 10, 20], vec![40, 30, 40], vec![pin, pin]);
+        assert!(admission.admits(PeerIdentity::Local { uid: 10, gid: 0 }));
+        assert!(admission.admits(PeerIdentity::Local { uid: 0, gid: 30 }));
+        assert!(!admission.admits(PeerIdentity::Local { uid: 1, gid: 2 }));
+        assert!(admission.admits(PeerIdentity::Pin(pin)));
+        assert!(!admission.admits(PeerIdentity::Pin([4; 32])));
+
+        let (process, mut inbox) = admin_process_channel();
+        assert!(process.request(AdminProcessAction::Die).is_ok());
+        assert_eq!(
+            process.request(AdminProcessAction::Restart),
+            Err(AdminCoreFailure::Busy)
+        );
+        assert_eq!(inbox.receiver.try_recv(), Ok(AdminProcessAction::Die));
+        drop(inbox);
+        assert_eq!(
+            process.request(AdminProcessAction::Restart),
+            Err(AdminCoreFailure::StorageUnavailable)
+        );
+
+        let (transport, _inbox) = admin_transport_channel(binding());
+        assert_eq!(transport.binding(), binding());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lifecycle_control_rejects_wrong_outcomes_and_lost_replies() {
+        let (sender, mut receiver) = mpsc::channel(ADMIN_LIFECYCLE_CAPACITY);
+        let control = AdminLifecycleControl { sender };
+        let responder = tokio::spawn(async move {
+            let outcomes = [
+                AdminLifecycleOutcome::Draining(Vec::new()),
+                AdminLifecycleOutcome::Complete,
+                AdminLifecycleOutcome::Draining(Vec::new()),
+                AdminLifecycleOutcome::Draining(Vec::new()),
+            ];
+            for outcome in outcomes {
+                if let Some(request) = receiver.recv().await {
+                    let _sent = request.reply.send(Ok(outcome));
+                }
+            }
+        });
+        assert_eq!(
+            control.quiesce().await,
+            Err(AdminLifecycleFailure::Unavailable)
+        );
+        assert!(matches!(
+            control.drain().await,
+            Err(AdminLifecycleFailure::Unavailable)
+        ));
+        assert_eq!(
+            control.flush().await,
+            Err(AdminLifecycleFailure::Unavailable)
+        );
+        assert_eq!(
+            control.stop().await,
+            Err(AdminLifecycleFailure::Unavailable)
+        );
+        let _joined = responder.await;
+
+        let (sender, mut receiver) = mpsc::channel(1);
+        let control = AdminLifecycleControl { sender };
+        let responder = tokio::spawn(async move {
+            if let Some(request) = receiver.recv().await {
+                drop(request.reply);
+            }
+        });
+        assert_eq!(
+            control.quiesce().await,
+            Err(AdminLifecycleFailure::Unavailable)
+        );
+        let _joined = responder.await;
+
+        let (sender, receiver) = mpsc::channel(1);
+        drop(receiver);
+        let control = AdminLifecycleControl { sender };
+        assert_eq!(
+            control.stop().await,
+            Err(AdminLifecycleFailure::Unavailable)
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_transport_and_io_cover_shutdown_eof_and_partial_frames()
+    -> Result<(), RuntimeError> {
+        let root = CancellationToken::root();
+        let (port, inbox) = admin_transport_channel(binding());
+        drop(inbox);
+        assert_eq!(
+            port.opened(
+                ConnectionGeneration::new(30),
+                challenge(),
+                PeerIdentity::Local { uid: 1, gid: 1 },
+                AdminOutput::new(mpsc::channel(1).0),
+                &root,
+            )
+            .await,
+            Err(CloseReason::Shutdown)
+        );
+
+        let cancelled = CancellationToken::root();
+        cancelled.cancel();
+        let (port, _inbox) = admin_transport_channel(binding());
+        for generation in 0..ADMIN_OWNER_CAPACITY {
+            port.sender
+                .try_send(AdminOwnerMessage::Closed {
+                    generation: ConnectionGeneration::new(generation as u64),
+                    reason: CloseReason::TransportLoss,
+                })
+                .map_err(|_| RuntimeError::InvalidValue)?;
+        }
+        assert_eq!(
+            port.line(
+                ConnectionGeneration::new(31),
+                b"PING x\r\n".to_vec(),
+                &cancelled,
+            )
+            .await,
+            Err(CloseReason::Shutdown)
+        );
+
+        let (port, mut inbox) = admin_transport_channel(binding());
+        assert_eq!(
+            run_admin_reader(
+                &b"PING x\r\n"[..],
+                ConnectionGeneration::new(32),
+                port,
+                CancellationToken::root(),
+            )
+            .await,
+            CloseReason::TransportLoss
+        );
+        assert!(matches!(
+            inbox.receiver.try_recv(),
+            Ok(AdminOwnerMessage::Line { generation, line })
+                if generation == ConnectionGeneration::new(32) && line == b"PING x\r\n"
+        ));
+
+        let (port, _inbox) = admin_transport_channel(binding());
+        assert_eq!(
+            run_admin_reader(
+                &b"PING partial"[..],
+                ConnectionGeneration::new(33),
+                port,
+                CancellationToken::root(),
+            )
+            .await,
+            CloseReason::ProtocolError
+        );
+
+        let (transport, _peer) = tokio::io::duplex(64);
+        let (sender, receiver) = mpsc::channel(1);
+        drop(sender);
+        assert_eq!(
+            run_admin_writer(
+                transport,
+                receiver,
+                CancellationToken::root(),
+                FlushAcknowledgement::pending(),
+            )
+            .await,
+            CloseReason::TransportLoss
+        );
+
+        let (transport, _peer) = tokio::io::duplex(64);
+        let (_sender, receiver) = mpsc::channel(1);
+        let token = CancellationToken::root();
+        token.cancel();
+        assert_eq!(
+            run_admin_writer(transport, receiver, token, FlushAcknowledgement::pending(),).await,
+            CloseReason::Shutdown
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn backup_failure_mapping_is_closed_over_every_storage_error() {
+        for error in [StorageError::QueueFull, StorageError::AllocationFailed] {
+            assert_eq!(map_backup_failure(error), AdminCoreFailure::Busy);
+        }
+        for error in [
+            StorageError::InvalidEncoding,
+            StorageError::UnsupportedVersion,
+            StorageError::LimitExceeded,
+            StorageError::Overflow,
+            StorageError::AuthenticationFailed,
+            StorageError::StaleState,
+            StorageError::Unavailable,
+            StorageError::FilesystemRejected,
+            StorageError::WriterLocked,
+            StorageError::DatabaseRejected,
+            StorageError::UnsupportedMigration,
+            StorageError::ResumeMismatch,
+        ] {
+            assert_eq!(
+                map_backup_failure(error),
+                AdminCoreFailure::StorageUnavailable
+            );
+        }
+    }
 }

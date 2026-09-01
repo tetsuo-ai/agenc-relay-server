@@ -1,11 +1,11 @@
 ---
 name: tests
-description: "Skill for the Tests area of agenc-ircd. 1575 symbols across 147 files."
+description: "Skill for the Tests area of agenc-ircd. 1559 symbols across 158 files."
 ---
 
 # Tests
 
-1575 symbols | 147 files | Cohesion: 76%
+1559 symbols | 158 files | Cohesion: 72%
 
 ## When to Use
 
@@ -17,16 +17,16 @@ description: "Skill for the Tests area of agenc-ircd. 1575 symbols across 147 fi
 
 | File | Symbols |
 |------|---------|
-| `crates/agenc-ircd-storage/src/construction_runtime.rs` | verify_restore_checkpoint, decode_restore_scratch_key, decode_restore_version, decode_restore_present, validate (+76) |
-| `crates/agenc-ircd-storage/tests/stage_five_completion.rs` | every_table_has_one_closed_schema_and_domain_codec_consumes_fully, later_protocol_bodies_are_profile_table_and_arm_bound, restore_transform_preserves_deleted_accounts_and_rejects_creation_reservations, read_source, signed_growth_report_is_exact_tuple_authority (+75) |
-| `crates/agenc-ircd-testkit/tests/domain_reference_model.rs` | apply_production, production_authority, apply_production_command, apply_production_join, production_identity (+64) |
+| `crates/agenc-ircd-storage/tests/stage_five_completion.rs` | every_table_has_one_closed_schema_and_domain_codec_consumes_fully, later_protocol_bodies_are_profile_table_and_arm_bound, storage_crypto_adapters_cover_every_public_boundary, fault_campaign_covers_before_and_after_of_every_site, storage_errors_and_fault_controllers_cover_the_closed_failure_surface (+72) |
+| `crates/agenc-ircd-testkit/tests/domain_reference_model.rs` | apply_production_command, apply_production_join, apply_production, production_authority, production_identity (+64) |
 | `crates/agenc-ircd-federation-wire/src/tests/semantics.rs` | schema, fields, validate, opaque, unsigned (+53) |
 | `crates/agenc-ircd-client-wire/src/registration_command.rs` | validate_post_registration_command, validate_join, validate_part, validate_mode, validate_topic (+50) |
-| `crates/agenc-ircd-auth/tests/stage_four.rs` | hash, new, operation_route, encode_request_plaintext, encode_response_plaintext (+49) |
-| `crates/agenc-ircd-storage/src/engine.rs` | start_backup, verify_snapshot_accounting, checkpoint_accounting, checkpoint_retired_charges, startup_scan (+31) |
-| `crates/agenc-ircd-domain/src/model.rs` | resolve_channel, restore, parse, new, from_seed (+31) |
+| `crates/agenc-ircd-auth/tests/stage_four.rs` | hash, new, credential, operation_context, operation_route (+50) |
+| `crates/agenc-ircd/tests/stage_six_daemon.rs` | client_config, hash, new, require_success, failure (+49) |
+| `crates/agenc-ircd-domain/src/model.rs` | restore, new, parse, with_policies, from_seed (+33) |
 | `crates/agenc-ircd-federation-wire/src/codec.rs` | encode_canonical, claim_bytes, validate_bounds, is_optional_fixed, validate_optional_fixed_field (+31) |
-| `crates/agenc-ircd-testkit/src/domain_reference.rs` | apply_inner, create_account, open_session, switch_account, rename (+30) |
+| `crates/agenc-ircd-storage/src/domain_records.rs` | decode, expect_version, byte, text, optional_text (+29) |
+| `crates/agenc-ircd-runtime/tests/listener_accept.rs` | default, fixture, server, client, start (+22) |
 
 ## Entry Points
 
@@ -35,8 +35,8 @@ Start here when exploring this area:
 - **`as_u32`** (Function) — `crates/agenc-ircd-config/src/scalar.rs:286`
 - **`from_bytes`** (Function) — `crates/agenc-ircd-crypto/src/storage_integrity.rs:54`
 - **`new`** (Function) — `crates/agenc-ircd-crypto/src/storage_integrity.rs:86`
+- **`sealed_record_id`** (Function) — `crates/agenc-ircd-crypto/src/storage_integrity.rs:259`
 - **`tracked_record_commitment`** (Function) — `crates/agenc-ircd-crypto/src/storage_integrity.rs:274`
-- **`tracked_state_digest`** (Function) — `crates/agenc-ircd-crypto/src/storage_integrity.rs:279`
 
 ## Key Symbols
 
@@ -45,14 +45,16 @@ Start here when exploring this area:
 | `as_u32` | Function | `crates/agenc-ircd-config/src/scalar.rs` | 286 |
 | `from_bytes` | Function | `crates/agenc-ircd-crypto/src/storage_integrity.rs` | 54 |
 | `new` | Function | `crates/agenc-ircd-crypto/src/storage_integrity.rs` | 86 |
+| `sealed_record_id` | Function | `crates/agenc-ircd-crypto/src/storage_integrity.rs` | 259 |
 | `tracked_record_commitment` | Function | `crates/agenc-ircd-crypto/src/storage_integrity.rs` | 274 |
 | `tracked_state_digest` | Function | `crates/agenc-ircd-crypto/src/storage_integrity.rs` | 279 |
 | `update` | Function | `crates/agenc-ircd-crypto/src/storage_integrity.rs` | 315 |
 | `finalize` | Function | `crates/agenc-ircd-crypto/src/storage_integrity.rs` | 328 |
 | `update_entry` | Function | `crates/agenc-ircd-crypto/src/storage_integrity.rs` | 444 |
 | `reserved_memory_bytes` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 102 |
-| `start` | Function | `crates/agenc-ircd-runtime/src/bridge/crypto.rs` | 496 |
-| `start` | Function | `crates/agenc-ircd-storage/src/backup.rs` | 287 |
+| `new` | Function | `crates/agenc-ircd-runtime/src/bridge/crypto.rs` | 105 |
+| `start` | Function | `crates/agenc-ircd-runtime/src/bridge/crypto.rs` | 856 |
+| `listener_ceiling` | Function | `crates/agenc-ircd-runtime/src/runtime_config.rs` | 280 |
 | `backup_stream_bytes` | Function | `crates/agenc-ircd-storage/src/backup.rs` | 1011 |
 | `finish` | Function | `crates/agenc-ircd-storage/src/codec.rs` | 52 |
 | `take` | Function | `crates/agenc-ircd-storage/src/codec.rs` | 67 |
@@ -60,8 +62,6 @@ Start here when exploring this area:
 | `u16` | Function | `crates/agenc-ircd-storage/src/codec.rs` | 86 |
 | `u32` | Function | `crates/agenc-ircd-storage/src/codec.rs` | 90 |
 | `u64` | Function | `crates/agenc-ircd-storage/src/codec.rs` | 94 |
-| `vector_u32` | Function | `crates/agenc-ircd-storage/src/codec.rs` | 98 |
-| `new` | Function | `crates/agenc-ircd-storage/src/control.rs` | 53 |
 
 ## Execution Flows
 
@@ -72,24 +72,24 @@ Start here when exploring this area:
 | `Mutation_application_covers_optional_cleanup_and_destroy_paths → Presentation` | cross_community | 8 |
 | `Mutation_application_covers_optional_cleanup_and_destroy_paths → Canonical` | cross_community | 8 |
 | `Mutation_application_covers_optional_cleanup_and_destroy_paths → Is_global` | cross_community | 8 |
-| `Remaining_mode_and_request_helpers_cover_successful_fallthroughs → Presentation` | cross_community | 8 |
-| `Remaining_mode_and_request_helpers_cover_successful_fallthroughs → Canonical` | cross_community | 8 |
-| `Remaining_mode_and_request_helpers_cover_successful_fallthroughs → Is_global` | cross_community | 8 |
-| `Classify_recovery_state → As_bytes` | cross_community | 7 |
-| `Classify_recovery_state → Try_from` | cross_community | 7 |
+| `Reconstruct → As_bytes` | cross_community | 7 |
+| `Reconstruct → Try_from` | cross_community | 7 |
+| `Audit_mutations_rebuild_policy_and_reject_invalid_phase_pairings → As_bytes` | cross_community | 7 |
+| `Audit_mutations_rebuild_policy_and_reject_invalid_phase_pairings → Try_from` | cross_community | 7 |
+| `Verifies_gapless_events_and_rejects_unmatched_intents → As_bytes` | cross_community | 7 |
 
 ## Connected Areas
 
 | Area | Connections |
 |------|-------------|
-| Fuzz_targets | 35 calls |
-| Cluster_393 | 33 calls |
-| Cluster_316 | 24 calls |
-| Cluster_329 | 22 calls |
-| Cluster_191 | 18 calls |
-| Cluster_47 | 17 calls |
-| Cluster_163 | 17 calls |
-| Cluster_54 | 17 calls |
+| State_core | 90 calls |
+| Listener | 32 calls |
+| Cluster_498 | 30 calls |
+| Admission | 23 calls |
+| Examples | 18 calls |
+| Cluster_59 | 18 calls |
+| Fuzz_targets | 17 calls |
+| Cluster_185 | 16 calls |
 
 ## How to Explore
 

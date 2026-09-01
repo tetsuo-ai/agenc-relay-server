@@ -1688,6 +1688,7 @@ fn reject_staged_origin(context: &mut StateCoreContext, origin: StagedOrigin) {
 
 #[cfg(test)]
 mod tests {
+    use agenc_ircd_client_wire::{FramedLine, parse_message};
     use agenc_ircd_types::MonotonicTick;
 
     use super::*;
@@ -1786,6 +1787,129 @@ mod tests {
             assert!(buckets.charge_all_or_nothing(now, &[demand]).is_ok());
         }
         assert!(buckets.charge_all_or_nothing(now, &[demand]).is_err());
+        Ok(())
+    }
+
+    fn parsed(
+        line: &str,
+    ) -> Result<agenc_ircd_client_wire::ParsedMessage, Box<dyn core::error::Error>> {
+        parse_message(FramedLine::new(line)?)?.ok_or_else(|| "empty test message".into())
+    }
+
+    #[test]
+    fn token_join_array_and_hash_helpers_cover_empty_exact_and_short_inputs()
+    -> Result<(), RuntimeError> {
+        assert_eq!(join_tokens(&[])?, "");
+        assert_eq!(join_tokens(&["one".to_owned()])?, "one");
+        assert_eq!(
+            join_tokens(&["one".to_owned(), "two".to_owned(), "three".to_owned()])?,
+            "one two three"
+        );
+        assert_eq!(capability_hash(&[])?, capability_hash(&[])?);
+        assert_ne!(
+            capability_hash(&[])?,
+            capability_hash(&["batch".to_owned()])?
+        );
+
+        let bytes = (0_u8..64).collect::<Vec<_>>();
+        assert_eq!(
+            array_16(&bytes, 0)?.as_slice(),
+            bytes.get(..16).ok_or(RuntimeError::InvalidValue)?
+        );
+        assert_eq!(
+            array_16(&bytes, 48)?.as_slice(),
+            bytes.get(48..64).ok_or(RuntimeError::InvalidValue)?
+        );
+        assert_eq!(array_16(&bytes, 49), Err(RuntimeError::InvalidValue));
+        assert_eq!(
+            array_16(&bytes, usize::MAX),
+            Err(RuntimeError::InvalidValue)
+        );
+        assert_eq!(
+            array_32(&bytes, 0)?.as_slice(),
+            bytes.get(..32).ok_or(RuntimeError::InvalidValue)?
+        );
+        assert_eq!(
+            array_32(&bytes, 32)?.as_slice(),
+            bytes.get(32..64).ok_or(RuntimeError::InvalidValue)?
+        );
+        assert_eq!(array_32(&bytes, 33), Err(RuntimeError::InvalidValue));
+        assert_eq!(
+            array_32(&bytes, usize::MAX),
+            Err(RuntimeError::InvalidValue)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn registration_deadline_matching_is_exact_for_every_state_and_timer_kind() {
+        let exact = [
+            (DeadlineState::Registration, TimerKind::RegistrationDeadline),
+            (DeadlineState::Idle, TimerKind::Ping),
+            (DeadlineState::Pong, TimerKind::Pong),
+        ];
+        for (deadline, kind) in exact {
+            assert!(deadline_matches(deadline, kind));
+        }
+        for deadline in [
+            DeadlineState::None,
+            DeadlineState::Registration,
+            DeadlineState::Idle,
+            DeadlineState::Pong,
+        ] {
+            for kind in [
+                TimerKind::RegistrationDeadline,
+                TimerKind::Ping,
+                TimerKind::Pong,
+                TimerKind::Reservation,
+            ] {
+                let expected = exact.contains(&(deadline, kind));
+                assert_eq!(deadline_matches(deadline, kind), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn registered_control_charging_exempts_only_closed_command_classes()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let ignored = AccessTokenPolicy::IgnoreCompatibilityPass;
+        let required = AccessTokenPolicy::RequireConfiguredToken;
+        for line in ["NICK tester", "QUIT :bye", "PRIVMSG target :body"] {
+            assert!(!should_charge_registered_control(&parsed(line)?, ignored));
+        }
+        for line in ["CAP LS 302", "AUTHENTICATE AGENC-OPAQUE", "UNKNOWN"] {
+            assert!(should_charge_registered_control(&parsed(line)?, ignored));
+        }
+        assert!(should_charge_registered_control(
+            &parsed("PASS compatibility")?,
+            required,
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn action_step_conversion_and_cloak_alphabet_cover_closed_variants() -> Result<(), RuntimeError>
+    {
+        assert!(matches!(
+            ActionStep::from(RouteOutcome::Continue),
+            ActionStep::Continue
+        ));
+        assert!(matches!(
+            ActionStep::from(RouteOutcome::Close(CloseReason::Shutdown)),
+            ActionStep::Close(CloseReason::Shutdown)
+        ));
+        let random = (0_u8..26).map(|value| value * 7).collect::<Vec<_>>();
+        let cloak = cloak_from_random(&random)?;
+        assert_eq!(cloak.user_component().len(), 10);
+        assert_eq!(cloak.host_component().len(), 16);
+        assert_eq!(
+            cloak_from_random(&[]).err(),
+            Some(RuntimeError::InvalidValue)
+        );
+        assert_eq!(
+            cloak_from_random(&[0; 27]).err(),
+            Some(RuntimeError::InvalidValue)
+        );
         Ok(())
     }
 }
