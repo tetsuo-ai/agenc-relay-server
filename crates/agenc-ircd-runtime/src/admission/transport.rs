@@ -1,18 +1,18 @@
 //! Transport admission before TLS and connection-task creation.
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use agenc_ircd_types::{MonotonicClock, MonotonicTick};
 use tokio::sync::Notify;
 
+use super::buckets::AccountedHashTable;
 use super::{
     BucketDemand, BucketKey, BucketKind, BucketTable, OverloadClass, OverloadState, PrefixRegistry,
     RateLimits,
 };
 use crate::RuntimeError;
 use crate::budget::MemoryBudget;
-use crate::listener::{AcceptAdmission, AdmissionVerdict};
+use crate::listener::{AcceptAdmission, AdmissionVerdict, MAX_CLIENT_CONNECTIONS};
 use crate::observe::adapter::RuntimeObserver;
 use crate::purpose::ListenerPurpose;
 use crate::state_core::inbox::SourceAddressKey;
@@ -32,7 +32,7 @@ struct TransportAdmissionState {
     clock: Box<dyn MonotonicClock + Send>,
     buckets: BucketTable,
     prefixes: PrefixRegistry,
-    direct_hosts: HashMap<SourceAddressKey, u64>,
+    direct_hosts: AccountedHashTable<SourceAddressKey, u64>,
     overload: OverloadState,
 }
 
@@ -50,9 +50,9 @@ impl TransportAdmission {
         Ok(Self {
             state: Mutex::new(TransportAdmissionState {
                 clock,
-                buckets: BucketTable::new(limits),
-                prefixes: PrefixRegistry::new(),
-                direct_hosts: HashMap::new(),
+                buckets: BucketTable::new(limits, Arc::clone(&budget)),
+                prefixes: PrefixRegistry::new(Arc::clone(&budget)),
+                direct_hosts: AccountedHashTable::new(MAX_CLIENT_CONNECTIONS, Arc::clone(&budget)),
                 overload: OverloadState::new(),
             }),
             budget,
@@ -171,12 +171,13 @@ impl TransportAdmissionState {
         let Some(next) = current.checked_add(1) else {
             return false;
         };
-        if !self.direct_hosts.contains_key(&host) && self.direct_hosts.try_reserve(1).is_err() {
+        let Ok(host_mutation) = self.direct_hosts.try_insert_transaction(host, next) else {
             return false;
-        }
+        };
         let prefix = source.prefix_key();
         let evicted = {
             let Ok(opening) = self.prefixes.begin_connection_open(prefix, now) else {
+                self.direct_hosts.rollback(host_mutation);
                 return false;
             };
             if !Self::charge_connection(
@@ -185,9 +186,9 @@ impl TransportAdmissionState {
                 BucketKind::NewDirectTcp,
                 BucketKey::Prefix(prefix),
             ) {
+                self.direct_hosts.rollback(host_mutation);
                 return false;
             }
-            self.direct_hosts.insert(host, next);
             opening.commit()
         };
         self.erase_evicted_prefix(evicted);
@@ -280,6 +281,8 @@ mod tests {
 
     use super::*;
 
+    const TEST_BUDGET_BYTES: u64 = 1_048_576;
+
     #[derive(Clone)]
     struct TestClock(Arc<AtomicU64>);
 
@@ -314,7 +317,7 @@ mod tests {
 
     #[test]
     fn direct_hosts_obey_the_live_ceiling_and_release_exactly_once() -> Result<(), RuntimeError> {
-        let (admission, _, _) = admission(2, 1_000)?;
+        let (admission, _, _) = admission(2, TEST_BUDGET_BYTES)?;
         let source = SourceAddressKey::ipv4([192, 0, 2, 7]);
         assert_eq!(
             admission.admit(ListenerPurpose::ClientTls, source),
@@ -338,8 +341,9 @@ mod tests {
 
     #[test]
     fn prefix_ceiling_eviction_erases_the_coupled_rate_bucket() -> Result<(), RuntimeError> {
-        let (admission, _, _) = admission(16, 1_000)?;
-        lock(&admission.state).prefixes = PrefixRegistry::with_ceiling(1);
+        let (admission, _, _) = admission(16, TEST_BUDGET_BYTES)?;
+        lock(&admission.state).prefixes =
+            PrefixRegistry::with_ceiling(1, Arc::clone(&admission.budget));
         let first = SourceAddressKey::ipv4([192, 0, 2, 1]);
         let second = SourceAddressKey::ipv4([198, 51, 100, 1]);
         assert_eq!(
@@ -369,8 +373,9 @@ mod tests {
         let mut limits = RateLimits::defaults();
         limits.set(BucketKind::NewDirectTcp, BucketRate::new(1, 3_600, 1)?)?;
         limits.set(BucketKind::TlsHandshake, BucketRate::new(1, 3_600, 1)?)?;
-        let (admission, _, _) = admission_with_rates(16, 1_000, limits)?;
-        lock(&admission.state).prefixes = PrefixRegistry::with_ceiling(1);
+        let (admission, _, _) = admission_with_rates(16, TEST_BUDGET_BYTES, limits)?;
+        lock(&admission.state).prefixes =
+            PrefixRegistry::with_ceiling(1, Arc::clone(&admission.budget));
         let first = SourceAddressKey::ipv4([192, 0, 2, 1]);
         let second = SourceAddressKey::ipv4([198, 51, 100, 1]);
 
@@ -392,7 +397,7 @@ mod tests {
 
     #[test]
     fn direct_prefixes_share_the_new_connection_bucket() -> Result<(), RuntimeError> {
-        let (admission, _, _) = admission(16, 1_000)?;
+        let (admission, _, _) = admission(16, TEST_BUDGET_BYTES)?;
         for host in 1..=8 {
             let source = SourceAddressKey::ipv4([198, 51, 100, host]);
             assert_eq!(
@@ -413,7 +418,7 @@ mod tests {
 
     #[test]
     fn onion_connections_share_the_global_tls_bucket() -> Result<(), RuntimeError> {
-        let (admission, _, _) = admission(16, 1_000)?;
+        let (admission, _, _) = admission(16, TEST_BUDGET_BYTES)?;
         let source = SourceAddressKey::onion_listener();
         for _ in 0..16 {
             assert_eq!(
@@ -433,7 +438,7 @@ mod tests {
     fn idle_erasure_drops_the_prefix_buckets_at_the_exact_boundary() -> Result<(), RuntimeError> {
         let mut limits = RateLimits::defaults();
         limits.set(BucketKind::NewDirectTcp, BucketRate::new(1, 3_600, 8)?)?;
-        let (admission, ticks, _) = admission_with_rates(16, 1_000, limits)?;
+        let (admission, ticks, _) = admission_with_rates(16, TEST_BUDGET_BYTES, limits)?;
         for host in 1..=8 {
             let source = SourceAddressKey::ipv4([203, 0, 113, host]);
             assert_eq!(
@@ -477,7 +482,7 @@ mod tests {
     #[tokio::test]
     async fn idle_deadline_notifications_coalesce_without_losing_the_wakeup()
     -> Result<(), RuntimeError> {
-        let (admission, _, _) = admission(16, 1_000)?;
+        let (admission, _, _) = admission(16, TEST_BUDGET_BYTES)?;
         let first = SourceAddressKey::ipv4([192, 0, 2, 1]);
         let second = SourceAddressKey::ipv4([198, 51, 100, 1]);
         assert_eq!(
@@ -505,8 +510,9 @@ mod tests {
 
     #[test]
     fn memory_overload_closes_new_connections_at_ninety_percent() -> Result<(), RuntimeError> {
-        let (admission, _, budget) = admission(16, 100)?;
-        let charges = BoundedMemoryCharges::new(&[MemoryCharge::fixed(90)])?;
+        let (admission, _, budget) = admission(16, TEST_BUDGET_BYTES)?;
+        let high_water = TEST_BUDGET_BYTES.saturating_mul(9).div_ceil(10);
+        let charges = BoundedMemoryCharges::new(&[MemoryCharge::fixed(high_water)])?;
         let permit = budget.try_acquire_batch(charges)?;
         let source = SourceAddressKey::ipv4([192, 0, 2, 1]);
         assert_eq!(

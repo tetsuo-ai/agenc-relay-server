@@ -1665,7 +1665,10 @@ mod tests {
         let prefix = BucketKey::Prefix(SourceAddressKey::ipv4([192, 0, 2, 7]).prefix_key());
         let extra = BucketDemand::new(BucketKind::ChannelKeyAttempt, prefix, 5)?;
         let demands = command_demands(&[charge], Some(extra))?;
-        let mut table = BucketTable::new(RateLimits::defaults());
+        let mut table = BucketTable::new(
+            RateLimits::defaults(),
+            crate::sync::Arc::new(crate::budget::MemoryBudget::new(1 << 20)),
+        );
         let now = MonotonicTick::from_ticks(0);
         assert!(table.charge_all_or_nothing(now, &demands).is_err());
         assert_eq!(

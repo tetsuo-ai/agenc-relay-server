@@ -8213,7 +8213,8 @@ mod tests {
         let network = NetworkId::from_bytes([7; 32]);
         let login = NormalizedLogin::prepare("bounded-user")?;
         let demand = opaque_attempt_demand(&key, network, &login)?;
-        let mut buckets = BucketTable::new(RateLimits::defaults());
+        let mut buckets =
+            BucketTable::new(RateLimits::defaults(), Arc::new(MemoryBudget::new(1 << 20)));
         let now = MonotonicTick::from_ticks(0);
         for _ in 0..5 {
             assert!(buckets.charge_all_or_nothing(now, &[demand]).is_ok());

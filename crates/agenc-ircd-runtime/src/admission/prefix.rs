@@ -6,12 +6,13 @@
 //! using it closes. Erasing earlier is allowed and happens when the registry
 //! reaches its ceiling.
 
-use std::collections::HashMap;
-
 use agenc_ircd_types::MonotonicTick;
 
+use super::buckets::{AccountedHashTable, AccountedTableMutation};
 use crate::RuntimeError;
+use crate::budget::MemoryBudget;
 use crate::state_core::inbox::SourceAddressKey;
+use crate::sync::Arc;
 
 /// Idle prefix rows are erased at or after this delay (spec line 294).
 pub const PREFIX_ERASURE_MILLIS: u64 = 600_000;
@@ -27,18 +28,16 @@ struct PrefixRow {
 }
 
 enum PrefixOpenRollback {
-    Existing {
-        previous: PrefixRow,
-    },
-    Inserted {
-        evicted: Option<(SourceAddressKey, PrefixRow)>,
+    Mutation {
+        mutation: AccountedTableMutation<SourceAddressKey, PrefixRow>,
+        evicted: Option<SourceAddressKey>,
+        eviction_rollback: Option<AccountedTableMutation<SourceAddressKey, PrefixRow>>,
     },
 }
 
 /// One speculative prefix opening that restores the registry unless committed.
 pub(crate) struct PrefixOpenTransaction<'a> {
     registry: &'a mut PrefixRegistry,
-    prefix: SourceAddressKey,
     rollback: Option<PrefixOpenRollback>,
 }
 
@@ -46,8 +45,7 @@ impl PrefixOpenTransaction<'_> {
     /// Keeps the opening and returns the idle prefix displaced by it.
     pub(crate) fn commit(mut self) -> Option<SourceAddressKey> {
         self.rollback.take().and_then(|rollback| match rollback {
-            PrefixOpenRollback::Existing { .. } => None,
-            PrefixOpenRollback::Inserted { evicted } => evicted.map(|(prefix, _)| prefix),
+            PrefixOpenRollback::Mutation { evicted, .. } => evicted,
         })
     }
 }
@@ -58,13 +56,14 @@ impl Drop for PrefixOpenTransaction<'_> {
             return;
         };
         match rollback {
-            PrefixOpenRollback::Existing { previous } => {
-                self.registry.rows.insert(self.prefix, previous);
-            }
-            PrefixOpenRollback::Inserted { evicted } => {
-                self.registry.rows.remove(&self.prefix);
-                if let Some((prefix, row)) = evicted {
-                    self.registry.rows.insert(prefix, row);
+            PrefixOpenRollback::Mutation {
+                mutation,
+                eviction_rollback,
+                ..
+            } => {
+                self.registry.rows.rollback(mutation);
+                if let Some(eviction_rollback) = eviction_rollback {
+                    self.registry.rows.rollback(eviction_rollback);
                 }
                 self.registry.recompute_next_idle_erasure();
             }
@@ -74,7 +73,7 @@ impl Drop for PrefixOpenTransaction<'_> {
 
 /// Live-connection counts per prefix and the erasure clock for idle rows.
 pub struct PrefixRegistry {
-    rows: HashMap<SourceAddressKey, PrefixRow>,
+    rows: AccountedHashTable<SourceAddressKey, PrefixRow>,
     ceiling: usize,
     next_idle_erasure: Option<MonotonicTick>,
 }
@@ -82,15 +81,15 @@ pub struct PrefixRegistry {
 impl PrefixRegistry {
     /// Creates an empty registry under the default ceiling.
     #[must_use]
-    pub fn new() -> Self {
-        Self::with_ceiling(MAX_TRACKED_PREFIXES)
+    pub fn new(budget: Arc<MemoryBudget>) -> Self {
+        Self::with_ceiling(MAX_TRACKED_PREFIXES, budget)
     }
 
     /// Creates an empty registry under an explicit ceiling.
     #[must_use]
-    pub fn with_ceiling(ceiling: usize) -> Self {
+    pub fn with_ceiling(ceiling: usize, budget: Arc<MemoryBudget>) -> Self {
         Self {
-            rows: HashMap::new(),
+            rows: AccountedHashTable::new(ceiling, budget),
             ceiling,
             next_idle_erasure: None,
         }
@@ -115,38 +114,52 @@ impl PrefixRegistry {
         prefix: SourceAddressKey,
         _now: MonotonicTick,
     ) -> Result<PrefixOpenTransaction<'_>, RuntimeError> {
-        if let Some(row) = self.rows.get_mut(&prefix) {
-            let previous = *row;
-            row.live = row.live.checked_add(1).ok_or(RuntimeError::Overflow)?;
+        if let Some(row) = self.rows.get(&prefix).copied() {
+            let updated = PrefixRow {
+                live: row.live.checked_add(1).ok_or(RuntimeError::Overflow)?,
+                last_close: row.last_close,
+            };
+            let mutation = self.rows.try_insert_transaction(prefix, updated)?;
             return Ok(PrefixOpenTransaction {
                 registry: self,
-                prefix,
-                rollback: Some(PrefixOpenRollback::Existing { previous }),
+                rollback: Some(PrefixOpenRollback::Mutation {
+                    mutation,
+                    evicted: None,
+                    eviction_rollback: None,
+                }),
             });
         }
-        let evicted = if self.rows.len() >= self.ceiling {
-            let victim = self.longest_idle().ok_or(RuntimeError::LimitExceeded)?;
-            self.rows.remove_entry(&victim)
-        } else {
-            self.rows
-                .try_reserve(1)
-                .map_err(|_| RuntimeError::MemoryExhausted)?;
-            None
+        let row = PrefixRow {
+            live: 1,
+            last_close: MonotonicTick::from_ticks(0),
         };
-        self.rows.insert(
-            prefix,
-            PrefixRow {
-                live: 1,
-                last_close: MonotonicTick::from_ticks(0),
-            },
-        );
+        let (mutation, evicted, eviction_rollback) = if self.rows.len() >= self.ceiling {
+            let victim = self.longest_idle().ok_or(RuntimeError::LimitExceeded)?;
+            let (_, eviction_rollback) = self
+                .rows
+                .remove_transaction(&victim)
+                .ok_or(RuntimeError::InvalidValue)?;
+            let mutation = match self.rows.try_insert_transaction(prefix, row) {
+                Ok(mutation) => mutation,
+                Err(error) => {
+                    self.rows.rollback(eviction_rollback);
+                    return Err(error);
+                }
+            };
+            (mutation, Some(victim), Some(eviction_rollback))
+        } else {
+            (self.rows.try_insert_transaction(prefix, row)?, None, None)
+        };
         if evicted.is_some() {
             self.recompute_next_idle_erasure();
         }
         Ok(PrefixOpenTransaction {
             registry: self,
-            prefix,
-            rollback: Some(PrefixOpenRollback::Inserted { evicted }),
+            rollback: Some(PrefixOpenRollback::Mutation {
+                mutation,
+                evicted,
+                eviction_rollback,
+            }),
         })
     }
 
@@ -253,15 +266,15 @@ fn idle_erasure_deadline(last_close: MonotonicTick) -> MonotonicTick {
     MonotonicTick::from_ticks(last_close.get().saturating_add(PREFIX_ERASURE_MILLIS))
 }
 
-impl Default for PrefixRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_BUDGET_BYTES: u64 = 1_048_576;
+
+    fn budget() -> Arc<MemoryBudget> {
+        Arc::new(MemoryBudget::new(TEST_BUDGET_BYTES))
+    }
 
     fn tick(millis: u64) -> MonotonicTick {
         MonotonicTick::from_ticks(millis)
@@ -274,7 +287,7 @@ mod tests {
 
     #[test]
     fn idle_rows_are_erased_exactly_at_the_ten_minute_boundary() -> Result<(), RuntimeError> {
-        let mut registry = PrefixRegistry::new();
+        let mut registry = PrefixRegistry::new(budget());
         let key = prefix(1);
         let _evicted = registry.connection_opened(key, tick(0))?;
         let _evicted = registry.connection_opened(key, tick(0))?;
@@ -305,8 +318,8 @@ mod tests {
     fn independently_owned_registries_keep_their_own_last_close_deadlines()
     -> Result<(), RuntimeError> {
         let key = SourceAddressKey::ipv4([203, 0, 113, 9]).prefix_key();
-        let mut transport = PrefixRegistry::new();
-        let mut state_core = PrefixRegistry::new();
+        let mut transport = PrefixRegistry::new(budget());
+        let mut state_core = PrefixRegistry::new(budget());
         let _evicted = transport.connection_opened(key, tick(0))?;
         let _evicted = state_core.connection_opened(key, tick(0))?;
         transport.connection_closed(key, tick(0))?;
@@ -338,7 +351,7 @@ mod tests {
     fn cached_deadline_may_wake_early_after_reopen_but_never_stays_stale()
     -> Result<(), RuntimeError> {
         let key = prefix(2);
-        let mut registry = PrefixRegistry::new();
+        let mut registry = PrefixRegistry::new(budget());
         let _evicted = registry.connection_opened(key, tick(0))?;
         registry.connection_closed(key, tick(0))?;
         let _evicted = registry.connection_opened(key, tick(100))?;
@@ -358,7 +371,7 @@ mod tests {
     #[test]
     fn reordered_close_notices_keep_the_latest_physical_close_tick() -> Result<(), RuntimeError> {
         let key = prefix(3);
-        let mut registry = PrefixRegistry::new();
+        let mut registry = PrefixRegistry::new(budget());
         let _evicted = registry.connection_opened(key, tick(1_000))?;
         let _evicted = registry.connection_opened(key, tick(1_000))?;
         registry.connection_closed(key, tick(900))?;
@@ -376,7 +389,7 @@ mod tests {
 
     #[test]
     fn closing_an_unknown_or_already_idle_prefix_is_an_invariant_violation() {
-        let mut registry = PrefixRegistry::new();
+        let mut registry = PrefixRegistry::new(budget());
         assert_eq!(
             registry.connection_closed(prefix(1), tick(0)).err(),
             Some(RuntimeError::InvalidValue)
@@ -392,7 +405,7 @@ mod tests {
     #[test]
     fn the_ceiling_evicts_the_longest_idle_row_and_refuses_when_all_are_live()
     -> Result<(), RuntimeError> {
-        let mut registry = PrefixRegistry::with_ceiling(2);
+        let mut registry = PrefixRegistry::with_ceiling(2, budget());
         let _evicted = registry.connection_opened(prefix(1), tick(0))?;
         let _evicted = registry.connection_opened(prefix(2), tick(0))?;
         assert_eq!(
@@ -408,7 +421,7 @@ mod tests {
         assert_eq!(registry.live(prefix(2)), 0);
         assert!(registry.erase_idle(tick(30)).is_empty());
         assert_eq!(registry.live(prefix(3)), 1);
-        let defaulted = PrefixRegistry::default();
+        let defaulted = PrefixRegistry::new(budget());
         assert!(defaulted.is_empty());
         Ok(())
     }

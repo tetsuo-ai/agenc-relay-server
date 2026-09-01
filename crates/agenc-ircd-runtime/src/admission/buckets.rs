@@ -8,15 +8,22 @@
 //! fails, so a rejection cannot become an error oracle (spec lines
 //! 2591-2593).
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
+use std::collections::hash_map::RandomState;
 use std::fmt;
+use std::hash::{BuildHasher as _, Hash};
+use std::mem::size_of;
 
 use agenc_ircd_domain::{AdmissionSnapshot, DomainError, Principal, RateBucket, RateCharge};
 use agenc_ircd_types::{AccountId, ChannelInstanceId, InviteId, MonotonicTick, UserId};
 
 use crate::RuntimeError;
+use crate::budget::{
+    BoundedMemoryCharges, MemoryBudget, MemoryBudgetPort as _, MemoryCharge, MemoryPermit,
+};
 use crate::connection::sink::ConnectionGeneration;
 use crate::state_core::inbox::SourceAddressKey;
+use crate::sync::Arc;
 
 /// Milliseconds in one second; the monotonic tick unit is the millisecond.
 pub const MILLIS_PER_SECOND: u64 = 1_000;
@@ -37,6 +44,330 @@ pub const MAX_BURST: u64 = 1_000;
 /// full credit is identical to an absent one, so full rows are swept before
 /// the ceiling refuses admission.
 pub const MAX_TRACKED_BUCKETS: usize = 1_000_000;
+
+/// Initial slot count for a nonempty accounted table.
+const INITIAL_ACCOUNTED_SLOTS: usize = 8;
+/// The table grows before more than half its slots would be occupied.
+const ACCOUNTED_LOAD_DIVISOR: usize = 2;
+
+#[derive(Clone, Copy)]
+enum AccountedSlot<K, V> {
+    Empty,
+    Deleted,
+    Occupied { key: K, value: V },
+}
+
+/// One reversible logical mutation in an [`AccountedHashTable`].
+pub(super) struct AccountedTableMutation<K, V> {
+    index: usize,
+    previous: AccountedSlot<K, V>,
+    previous_len: usize,
+}
+
+/// A randomly hashed table whose retained backing always owns its permit.
+///
+/// The table never asks its `Vec` to grow. A replacement backing is charged
+/// and fully populated while the old backing and permit remain live, then the
+/// complete candidate is swapped in. Deleted slots are reused, so removal and
+/// rollback never allocate.
+pub(super) struct AccountedHashTable<K, V> {
+    slots: Box<[AccountedSlot<K, V>]>,
+    len: usize,
+    ceiling: usize,
+    hash_builder: RandomState,
+    budget: Arc<MemoryBudget>,
+    _backing: Option<MemoryPermit>,
+}
+
+impl<K, V> AccountedHashTable<K, V>
+where
+    K: Copy + Eq + Hash,
+    V: Copy,
+{
+    /// Creates an empty table. The first retained backing is allocated lazily.
+    pub(super) fn new(ceiling: usize, budget: Arc<MemoryBudget>) -> Self {
+        Self {
+            slots: Vec::new().into_boxed_slice(),
+            len: 0,
+            ceiling,
+            hash_builder: RandomState::new(),
+            budget,
+            _backing: None,
+        }
+    }
+
+    /// Returns the logical row ceiling.
+    pub(super) const fn ceiling(&self) -> usize {
+        self.ceiling
+    }
+
+    /// Returns the number of live rows.
+    pub(super) const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Returns whether no row is live.
+    pub(super) const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Returns whether `key` is present.
+    pub(super) fn contains_key(&self, key: &K) -> bool {
+        self.index_of(key).is_some()
+    }
+
+    /// Borrows the value stored for `key`.
+    pub(super) fn get(&self, key: &K) -> Option<&V> {
+        let index = self.index_of(key)?;
+        match self.slots.get(index) {
+            Some(AccountedSlot::Occupied { value, .. }) => Some(value),
+            Some(AccountedSlot::Empty | AccountedSlot::Deleted) | None => None,
+        }
+    }
+
+    /// Mutably borrows the value stored for `key`.
+    pub(super) fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        let index = self.index_of(key)?;
+        match self.slots.get_mut(index) {
+            Some(AccountedSlot::Occupied { value, .. }) => Some(value),
+            Some(AccountedSlot::Empty | AccountedSlot::Deleted) | None => None,
+        }
+    }
+
+    /// Inserts or replaces one row after funding any required backing growth.
+    pub(super) fn try_insert(&mut self, key: K, value: V) -> Result<Option<V>, RuntimeError> {
+        let mutation = self.try_insert_transaction(key, value)?;
+        let previous = match mutation.previous {
+            AccountedSlot::Occupied { value, .. } => Some(value),
+            AccountedSlot::Empty | AccountedSlot::Deleted => None,
+        };
+        Ok(previous)
+    }
+
+    /// Inserts or replaces one row and returns an allocation-free rollback.
+    pub(super) fn try_insert_transaction(
+        &mut self,
+        key: K,
+        value: V,
+    ) -> Result<AccountedTableMutation<K, V>, RuntimeError> {
+        if let Some(index) = self.index_of(&key) {
+            return self.replace_at(index, key, value);
+        }
+        self.reserve_for_one()?;
+        let index = self.vacant_index(&key).ok_or(RuntimeError::InvalidValue)?;
+        self.replace_at(index, key, value)
+    }
+
+    /// Restores one mutation created by this table while its backing was fixed.
+    pub(super) fn rollback(&mut self, mutation: AccountedTableMutation<K, V>) {
+        let Some(slot) = self.slots.get_mut(mutation.index) else {
+            return;
+        };
+        *slot = mutation.previous;
+        self.len = mutation.previous_len;
+    }
+
+    /// Removes one row without shrinking or allocating.
+    pub(super) fn remove(&mut self, key: &K) -> Option<V> {
+        self.remove_transaction(key).map(|(value, _)| value)
+    }
+
+    /// Removes one row and returns an allocation-free rollback.
+    pub(super) fn remove_transaction(
+        &mut self,
+        key: &K,
+    ) -> Option<(V, AccountedTableMutation<K, V>)> {
+        let index = self.index_of(key)?;
+        let slot = self.slots.get_mut(index)?;
+        let previous_len = self.len;
+        let previous = std::mem::replace(slot, AccountedSlot::Deleted);
+        let AccountedSlot::Occupied { value, .. } = previous else {
+            return None;
+        };
+        self.len = self.len.saturating_sub(1);
+        Some((
+            value,
+            AccountedTableMutation {
+                index,
+                previous,
+                previous_len,
+            },
+        ))
+    }
+
+    /// Keeps only rows accepted by `predicate` without changing the backing.
+    pub(super) fn retain(&mut self, mut predicate: impl FnMut(&K, &mut V) -> bool) {
+        let mut removed = 0_usize;
+        for slot in &mut self.slots {
+            let keep = match slot {
+                AccountedSlot::Occupied { key, value } => predicate(key, value),
+                AccountedSlot::Empty | AccountedSlot::Deleted => true,
+            };
+            if !keep {
+                *slot = AccountedSlot::Deleted;
+                removed = removed.saturating_add(1);
+            }
+        }
+        self.len = self.len.saturating_sub(removed);
+    }
+
+    /// Iterates over live values.
+    pub(super) fn values(&self) -> impl Iterator<Item = &V> {
+        self.slots.iter().filter_map(|slot| match slot {
+            AccountedSlot::Occupied { value, .. } => Some(value),
+            AccountedSlot::Empty | AccountedSlot::Deleted => None,
+        })
+    }
+
+    /// Iterates over live keys and values.
+    pub(super) fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.slots.iter().filter_map(|slot| match slot {
+            AccountedSlot::Occupied { key, value } => Some((key, value)),
+            AccountedSlot::Empty | AccountedSlot::Deleted => None,
+        })
+    }
+
+    /// Mutably iterates over live values while borrowing their keys.
+    pub(super) fn iter_mut(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
+        self.slots.iter_mut().filter_map(|slot| match slot {
+            AccountedSlot::Occupied { key, value } => Some((&*key, value)),
+            AccountedSlot::Empty | AccountedSlot::Deleted => None,
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn backing_bytes(&self) -> u64 {
+        self._backing.as_ref().map_or(0, MemoryPermit::bytes)
+    }
+
+    fn reserve_for_one(&mut self) -> Result<(), RuntimeError> {
+        if self.len >= self.ceiling {
+            return Err(RuntimeError::LimitExceeded);
+        }
+        let next_len = self.len.checked_add(1).ok_or(RuntimeError::Overflow)?;
+        if !self.slots.is_empty() && next_len <= self.slots.len() / ACCOUNTED_LOAD_DIVISOR {
+            return Ok(());
+        }
+        let max_slots = self
+            .ceiling
+            .checked_mul(ACCOUNTED_LOAD_DIVISOR)
+            .ok_or(RuntimeError::Overflow)?;
+        let target = if self.slots.is_empty() {
+            INITIAL_ACCOUNTED_SLOTS.min(max_slots)
+        } else {
+            self.slots
+                .len()
+                .checked_mul(2)
+                .ok_or(RuntimeError::Overflow)?
+                .min(max_slots)
+        };
+        if target <= self.slots.len() {
+            return Err(RuntimeError::LimitExceeded);
+        }
+        self.rebuild(target)
+    }
+
+    fn rebuild(&mut self, slot_count: usize) -> Result<(), RuntimeError> {
+        let charge = Self::backing_charge(slot_count)?;
+        let charges = BoundedMemoryCharges::new(&[charge])?;
+        let mut batch = self.budget.try_acquire_batch(charges)?;
+        let backing = batch
+            .split_exact(charge.bytes())
+            .ok_or(RuntimeError::InvalidValue)?;
+        let mut slots = Vec::new();
+        slots
+            .try_reserve_exact(slot_count)
+            .map_err(|_| RuntimeError::MemoryExhausted)?;
+        slots.resize_with(slot_count, || AccountedSlot::Empty);
+        let mut replacement = Self {
+            slots: slots.into_boxed_slice(),
+            len: 0,
+            ceiling: self.ceiling,
+            hash_builder: self.hash_builder.clone(),
+            budget: Arc::clone(&self.budget),
+            _backing: Some(backing),
+        };
+        for (key, value) in self.iter() {
+            replacement.insert_without_growth(*key, *value)?;
+        }
+        std::mem::swap(self, &mut replacement);
+        Ok(())
+    }
+
+    fn backing_charge(slot_count: usize) -> Result<MemoryCharge, RuntimeError> {
+        let bytes = slot_count
+            .checked_mul(size_of::<AccountedSlot<K, V>>())
+            .ok_or(RuntimeError::Overflow)?;
+        MemoryCharge::allocation(u64::try_from(bytes).map_err(|_| RuntimeError::Overflow)?)
+    }
+
+    fn insert_without_growth(&mut self, key: K, value: V) -> Result<(), RuntimeError> {
+        let index = self.vacant_index(&key).ok_or(RuntimeError::InvalidValue)?;
+        let _mutation = self.replace_at(index, key, value)?;
+        Ok(())
+    }
+
+    fn replace_at(
+        &mut self,
+        index: usize,
+        key: K,
+        value: V,
+    ) -> Result<AccountedTableMutation<K, V>, RuntimeError> {
+        let slot = self
+            .slots
+            .get_mut(index)
+            .ok_or(RuntimeError::InvalidValue)?;
+        let previous_len = self.len;
+        let previous = std::mem::replace(slot, AccountedSlot::Occupied { key, value });
+        if !matches!(previous, AccountedSlot::Occupied { .. }) {
+            self.len = self.len.checked_add(1).ok_or(RuntimeError::Overflow)?;
+        }
+        Ok(AccountedTableMutation {
+            index,
+            previous,
+            previous_len,
+        })
+    }
+
+    fn index_of(&self, key: &K) -> Option<usize> {
+        if self.slots.is_empty() {
+            return None;
+        }
+        let start = self.hash_builder.hash_one(key) as usize % self.slots.len();
+        for step in 0..self.slots.len() {
+            let index = start.wrapping_add(step) % self.slots.len();
+            match self.slots.get(index) {
+                Some(AccountedSlot::Occupied { key: live, .. }) if live == key => {
+                    return Some(index);
+                }
+                Some(AccountedSlot::Empty) => return None,
+                Some(AccountedSlot::Deleted | AccountedSlot::Occupied { .. }) => {}
+                None => return None,
+            }
+        }
+        None
+    }
+
+    fn vacant_index(&self, key: &K) -> Option<usize> {
+        if self.slots.is_empty() {
+            return None;
+        }
+        let start = self.hash_builder.hash_one(key) as usize % self.slots.len();
+        let mut first_deleted = None;
+        for step in 0..self.slots.len() {
+            let index = start.wrapping_add(step) % self.slots.len();
+            match self.slots.get(index) {
+                Some(AccountedSlot::Empty) => return first_deleted.or(Some(index)),
+                Some(AccountedSlot::Deleted) => {
+                    first_deleted = first_deleted.or(Some(index));
+                }
+                Some(AccountedSlot::Occupied { .. }) => {}
+                None => return first_deleted,
+            }
+        }
+        first_deleted
+    }
+}
 
 /// The closed rows of the spec 19.1 bucket table.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -428,24 +759,22 @@ impl fmt::Display for AdmissionRefused {
 /// bounded by [`MAX_TRACKED_BUCKETS`].
 pub struct BucketTable {
     limits: RateLimits,
-    buckets: HashMap<(BucketKind, BucketKey), TokenBucket>,
-    ceiling: usize,
+    buckets: AccountedHashTable<(BucketKind, BucketKey), TokenBucket>,
 }
 
 impl BucketTable {
     /// Creates an empty table under the default ceiling.
     #[must_use]
-    pub fn new(limits: RateLimits) -> Self {
-        Self::with_ceiling(limits, MAX_TRACKED_BUCKETS)
+    pub fn new(limits: RateLimits, budget: Arc<MemoryBudget>) -> Self {
+        Self::with_ceiling(limits, MAX_TRACKED_BUCKETS, budget)
     }
 
     /// Creates an empty table under an explicit ceiling.
     #[must_use]
-    pub fn with_ceiling(limits: RateLimits, ceiling: usize) -> Self {
+    pub fn with_ceiling(limits: RateLimits, ceiling: usize, budget: Arc<MemoryBudget>) -> Self {
         Self {
             limits,
-            buckets: HashMap::new(),
-            ceiling,
+            buckets: AccountedHashTable::new(ceiling, budget),
         }
     }
 
@@ -550,7 +879,7 @@ impl BucketTable {
     /// burst, raising creates no immediate credit (spec lines 9162-9164).
     pub fn reload(&mut self, limits: RateLimits) {
         self.limits = limits;
-        for ((kind, _), bucket) in &mut self.buckets {
+        for ((kind, _), bucket) in self.buckets.iter_mut() {
             bucket.clamp(limits.rate(*kind));
         }
     }
@@ -562,15 +891,16 @@ impl BucketTable {
         key: BucketKey,
     ) -> Result<&mut TokenBucket, AdmissionRefused> {
         if !self.buckets.contains_key(&(kind, key)) {
-            if self.buckets.len() >= self.ceiling {
+            if self.buckets.len() >= self.buckets.ceiling() {
                 self.sweep_full(now);
             }
-            if self.buckets.len() >= self.ceiling {
+            if self.buckets.len() >= self.buckets.ceiling() {
                 return Err(AdmissionRefused::TableFull);
             }
             let rate = self.limits.rate(kind);
             self.buckets
-                .insert((kind, key), TokenBucket::full(rate, now));
+                .try_insert((kind, key), TokenBucket::full(rate, now))
+                .map_err(|_| AdmissionRefused::TableFull)?;
         }
         self.buckets
             .get_mut(&(kind, key))
@@ -632,6 +962,12 @@ mod tests {
     use agenc_ircd_types::AccountRandomId;
 
     use super::*;
+
+    const TEST_BUDGET_BYTES: u64 = 1_048_576;
+
+    fn budget() -> Arc<MemoryBudget> {
+        Arc::new(MemoryBudget::new(TEST_BUDGET_BYTES))
+    }
 
     fn tick(millis: u64) -> MonotonicTick {
         MonotonicTick::from_ticks(millis)
@@ -749,7 +1085,7 @@ mod tests {
 
     #[test]
     fn charging_is_all_or_nothing_and_aggregates_repeated_buckets() {
-        let mut table = BucketTable::new(RateLimits::defaults());
+        let mut table = BucketTable::new(RateLimits::defaults(), budget());
         let session = BucketKey::Session(user(1));
         let now = tick(0);
         let command = demand(BucketKind::RegisteredCommand, session, 1);
@@ -799,7 +1135,7 @@ mod tests {
 
     #[test]
     fn the_table_ceiling_reclaims_full_rows_before_refusing() {
-        let mut table = BucketTable::with_ceiling(RateLimits::defaults(), 2);
+        let mut table = BucketTable::with_ceiling(RateLimits::defaults(), 2, budget());
         let now = tick(0);
         let first = demand(BucketKind::PreAuthCommand, connection(1), 1);
         let second = demand(BucketKind::PreAuthCommand, connection(2), 1);
@@ -819,7 +1155,7 @@ mod tests {
 
     #[test]
     fn erase_reload_and_domain_mapping_behave_as_specified() -> Result<(), DomainError> {
-        let mut table = BucketTable::new(RateLimits::defaults());
+        let mut table = BucketTable::new(RateLimits::defaults(), budget());
         let now = tick(0);
         let prefix = BucketKey::Prefix(SourceAddressKey::ipv4([10, 0, 0, 1]).prefix_key());
         let tcp = demand(BucketKind::NewDirectTcp, prefix, 8);
@@ -917,6 +1253,60 @@ mod tests {
         let invite = BucketKey::Invite(InviteId::from_bytes([1; 16]));
         assert!(login != invite);
         assert!(BucketKey::OnionListener == BucketKey::OnionListener);
+        Ok(())
+    }
+
+    #[test]
+    fn accounted_table_refuses_unfunded_backing_without_retaining_state() {
+        let budget = Arc::new(MemoryBudget::new(4_095));
+        let mut table = AccountedHashTable::<u64, u64>::new(8, Arc::clone(&budget));
+
+        assert_eq!(
+            table.try_insert(1, 1).err(),
+            Some(RuntimeError::MemoryExhausted)
+        );
+        assert!(table.is_empty());
+        assert_eq!(table.backing_bytes(), 0);
+        assert_eq!(budget.charged(), 0);
+    }
+
+    #[test]
+    fn accounted_table_holds_old_and_new_permits_until_growth_commits() -> Result<(), RuntimeError>
+    {
+        let budget = Arc::new(MemoryBudget::new(4_096));
+        let mut table = AccountedHashTable::<u64, u64>::new(64, Arc::clone(&budget));
+        for value in 0..4 {
+            let _previous = table.try_insert(value, value)?;
+        }
+        assert_eq!(table.len(), 4);
+        assert_eq!(table.backing_bytes(), 4_096);
+        assert_eq!(budget.charged(), 4_096);
+
+        assert_eq!(
+            table.try_insert(4, 4).err(),
+            Some(RuntimeError::MemoryExhausted)
+        );
+        assert_eq!(table.len(), 4);
+        for value in 0..4 {
+            assert_eq!(table.get(&value), Some(&value));
+        }
+        drop(table);
+        assert_eq!(budget.charged(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn accounted_table_rollback_restores_the_logical_row_without_freeing_backing()
+    -> Result<(), RuntimeError> {
+        let budget = Arc::new(MemoryBudget::new(8_192));
+        let mut table = AccountedHashTable::<u64, u64>::new(8, Arc::clone(&budget));
+        let mutation = table.try_insert_transaction(7, 9)?;
+        assert_eq!(table.get(&7), Some(&9));
+        table.rollback(mutation);
+
+        assert!(table.is_empty());
+        assert_eq!(table.backing_bytes(), 4_096);
+        assert_eq!(budget.charged(), 4_096);
         Ok(())
     }
 }

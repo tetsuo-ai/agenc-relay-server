@@ -1621,12 +1621,14 @@ impl StateCore {
         drop(unused_admin);
         let (unused_reload, reload_receiver) = mpsc::channel(1);
         drop(unused_reload);
+        let bucket_budget = Arc::clone(&inputs.budget);
+        let prefix_budget = Arc::clone(&inputs.budget);
         let mut state = Self {
             context: StateCoreContext {
                 domain: inputs.reconstruction.domain,
                 sessions: SessionTable::new(),
-                buckets: BucketTable::new(inputs.config.rate_limits),
-                prefixes: PrefixRegistry::new(),
+                buckets: BucketTable::new(inputs.config.rate_limits, bucket_budget),
+                prefixes: PrefixRegistry::new(prefix_budget),
                 timers: TimerHeap::new(),
                 drift: DriftMonitor::new(now, wall),
                 pending: None,

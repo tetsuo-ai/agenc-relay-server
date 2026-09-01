@@ -2005,7 +2005,10 @@ mod tests {
     #[test]
     fn preauth_lines_stop_at_the_exact_connection_burst() -> Result<(), RuntimeError> {
         let generation = ConnectionGeneration::new(7);
-        let mut buckets = BucketTable::new(RateLimits::defaults());
+        let mut buckets = BucketTable::new(
+            RateLimits::defaults(),
+            crate::sync::Arc::new(crate::budget::MemoryBudget::new(1 << 20)),
+        );
         let demand = preauth_demand(generation)?;
         let now = MonotonicTick::from_ticks(0);
         for _ in 0..10 {
@@ -2018,7 +2021,10 @@ mod tests {
     #[test]
     fn registered_control_lines_stop_at_the_exact_session_burst() -> Result<(), RuntimeError> {
         let user_id = UserId::from_bytes([7; 16]);
-        let mut buckets = BucketTable::new(RateLimits::defaults());
+        let mut buckets = BucketTable::new(
+            RateLimits::defaults(),
+            crate::sync::Arc::new(crate::budget::MemoryBudget::new(1 << 20)),
+        );
         let demand = registered_command_demand(user_id)?;
         let now = MonotonicTick::from_ticks(0);
         for _ in 0..20 {
