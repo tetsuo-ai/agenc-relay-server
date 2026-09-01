@@ -139,7 +139,11 @@ impl OperationalLimits {
         self.values
     }
 
-    /// Returns whether every current-use floor fits within this view.
+    /// Returns whether a captured live-use view fits within these ceilings.
+    ///
+    /// This is diagnostic only. Reload activation may install ceilings below
+    /// current use so existing state can drain while subsequent decisions are
+    /// fenced by the new values.
     #[must_use]
     pub const fn admits(self, usage: OperationalUsage) -> bool {
         usage.sessions_per_account <= self.values.sessions_per_account
@@ -1561,11 +1565,11 @@ impl DomainState {
         self.operational_limits
     }
 
-    /// Captures exact live-use floors for an atomic limit replacement.
+    /// Captures exact live use for diagnostics and qualification.
     ///
-    /// The caller runs this during reload preparation, before the activation
-    /// safe point is released. Pending invitations are counted conservatively
-    /// until their ordinary expiry mutation removes them.
+    /// Pending invitations are counted conservatively until their ordinary
+    /// expiry mutation removes them. This view is not a reload floor: lowered
+    /// ceilings retain existing state and fence subsequent decisions.
     pub fn operational_usage(&self) -> Result<OperationalUsage, DomainError> {
         let mut account_sessions = BTreeMap::<AccountId, usize>::new();
         let mut invite_principals = BTreeMap::<Principal, usize>::new();

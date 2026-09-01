@@ -6938,6 +6938,35 @@ mod tests {
     }
 
     #[test]
+    fn lowered_session_ceiling_retains_live_state_and_blocks_new_work() -> Result<(), DomainError> {
+        let account = account_id(29);
+        let mut state = DomainState::new()?;
+        state.accounts.insert(
+            account,
+            AccountState::new(
+                account,
+                agenc_ircd_types::Generation::new(1)?,
+                Revision::new(0)?,
+            ),
+        );
+        state.apply_session(session(29, Some(account))?, Revision::new(0)?);
+        state.apply_session(session(30, Some(account))?, Revision::new(0)?);
+
+        let mut values = crate::OperationalLimits::HARD_MAX.values();
+        values.sessions_per_account = 1;
+        state.set_operational_limits(crate::OperationalLimits::new(values)?);
+
+        assert_eq!(state.sessions.len(), 2);
+        assert_eq!(
+            state
+                .plan_session_opened(session_seed(31, Some(account), 1)?)
+                .err(),
+            Some(DomainError::LimitExceeded)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn lifecycle_planning_rejects_stale_duplicate_and_invalid_authority_state()
     -> Result<(), DomainError> {
         let account = account_id(30);

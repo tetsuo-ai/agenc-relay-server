@@ -2119,12 +2119,8 @@ impl StateCore {
     }
 
     fn reload_floors_accept(&self, candidate: &RuntimeConfigSnapshot) -> bool {
-        let Ok(usage) = self.context.domain.operational_usage() else {
-            return false;
-        };
         let ceilings = candidate.storage_ceilings();
-        candidate.operational_limits().admits(usage)
-            && self.context.head.logical_database_bytes <= ceilings.database_max_bytes
+        self.context.head.logical_database_bytes <= ceilings.database_max_bytes
             && self.context.head.backup_stream_bytes <= ceilings.backup_max_bytes
     }
 
