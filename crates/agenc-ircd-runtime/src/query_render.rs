@@ -16,6 +16,22 @@ use crate::client_render::ReplyInput;
 use crate::state_core::StateCoreContext;
 
 const NAMES_CHUNK_BYTES: usize = 8_000;
+const WEAK_MASK_NOTICE: &str = "Nickname and cloak masks are weak, reconnectable rules";
+
+/// Returns whether one mask can be bypassed by reconnecting under a new
+/// nickname or cloak.
+pub(crate) const fn is_reconnectable_mask(mask: &TypedMask) -> bool {
+    matches!(
+        mask.subject(),
+        MaskSubject::Nickname(_) | MaskSubject::Cloak(_)
+    )
+}
+
+/// Builds the one fixed warning shown before a reconnectable mask is exposed.
+pub(crate) fn weak_mask_notice(prefix: &str, target: &str) -> Result<WireMessage, RuntimeError> {
+    WireMessage::new(prefix, "NOTICE", &[target], Some(WEAK_MASK_NOTICE))
+        .map_err(|_| RuntimeError::InvalidValue)
+}
 
 pub(crate) fn render_query(
     context: &mut StateCoreContext,
@@ -600,8 +616,23 @@ fn render_mask_list(
         MaskList::Exception => (348, 349, "End of channel exception list"),
         MaskList::InviteException => (346, 347, "End of channel invite exception list"),
     };
+    let entries = channel.mask_list(list);
+    let warns = entries
+        .iter()
+        .any(|entry| is_reconnectable_mask(entry.mask()));
+    let terminal_frames = if warns { 2 } else { 1 };
+    let frame_count = entries
+        .len()
+        .checked_add(terminal_frames)
+        .ok_or(RuntimeError::Overflow)?;
     let mut frames = Vec::new();
-    for entry in channel.mask_list(list) {
+    frames
+        .try_reserve_exact(frame_count)
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    if warns {
+        frames.push(weak_mask_notice(prefix, nickname)?);
+    }
+    for entry in entries {
         let mask = typed_mask_text(entry.mask());
         let created = entry.created_at().get().to_string();
         let middle = if list == MaskList::Ban {
@@ -1748,6 +1779,88 @@ mod tests {
             let mask = TypedMask::parse(&input)?;
             assert_eq!(typed_mask_text(&mask), input);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn mask_lists_warn_once_before_reconnectable_rules() -> Result<(), Box<dyn Error>> {
+        let mut fixture = fixture()?;
+        apply_command(
+            &mut fixture.state,
+            fixture.owner,
+            CanonicalCommand::mode(
+                fixture.listed.clone(),
+                vec![ModeChange::AddMask {
+                    list: MaskList::Ban,
+                    mask: TypedMask::parse("$n:another*")?,
+                }],
+            )?,
+            &registered_admission(fixture.owner.user_id)?,
+            Some(ExternalInputs {
+                utc_now: Some(UtcSecond::from_unix_seconds(1_720_000_021)),
+                entry_ids: vec![EntryId::from_bytes(bytes(35))],
+                ..ExternalInputs::default()
+            }),
+        )?;
+        apply_command(
+            &mut fixture.state,
+            fixture.owner,
+            CanonicalCommand::mode(
+                fixture.unlisted.clone(),
+                vec![ModeChange::AddMask {
+                    list: MaskList::Ban,
+                    mask: TypedMask::parse(&format!("$a:{}", account_id(50).random().to_text()))?,
+                }],
+            )?,
+            &registered_admission(fixture.owner.user_id)?,
+            Some(ExternalInputs {
+                utc_now: Some(UtcSecond::from_unix_seconds(1_720_000_022)),
+                entry_ids: vec![EntryId::from_bytes(bytes(36))],
+                ..ExternalInputs::default()
+            }),
+        )?;
+
+        let listed = visible_channel(&fixture.state, fixture.owner.user_id, &fixture.listed)?;
+        let rendered = render_mask_list("server.test", "owner", listed, MaskList::Ban)?
+            .into_iter()
+            .map(encoded)
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            rendered.first().map(String::as_str),
+            Some(
+                ":server.test NOTICE owner :Nickname and cloak masks are weak, reconnectable rules\r\n"
+            )
+        );
+        assert_eq!(
+            rendered
+                .iter()
+                .filter(|line| line.contains(" NOTICE "))
+                .count(),
+            1
+        );
+        assert!(
+            rendered
+                .get(1)
+                .is_some_and(|line| line.contains(" 367 owner "))
+        );
+        assert!(
+            rendered
+                .last()
+                .is_some_and(|line| line.contains(" 368 owner "))
+        );
+
+        let user_only = render_mask_list("server.test", "owner", listed, MaskList::Exception)?
+            .into_iter()
+            .map(encoded)
+            .collect::<Result<Vec<_>, _>>()?;
+        assert!(user_only.iter().all(|line| !line.contains(" NOTICE ")));
+
+        let unlisted = visible_channel(&fixture.state, fixture.owner.user_id, &fixture.unlisted)?;
+        let account_only = render_mask_list("server.test", "owner", unlisted, MaskList::Ban)?
+            .into_iter()
+            .map(encoded)
+            .collect::<Result<Vec<_>, _>>()?;
+        assert!(account_only.iter().all(|line| !line.contains(" NOTICE ")));
         Ok(())
     }
 

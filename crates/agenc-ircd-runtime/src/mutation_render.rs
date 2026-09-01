@@ -19,6 +19,7 @@ use agenc_ircd_types::{
 
 use crate::RuntimeError;
 use crate::client_render::ReplyInput;
+use crate::query_render::{is_reconnectable_mask, weak_mask_notice};
 use crate::state_core::StateCoreContext;
 use crate::state_core::fanout::{FanoutFrame, FanoutRequest, FanoutTarget};
 use crate::state_core::session::BoundSession;
@@ -733,14 +734,71 @@ fn render_mode(
                 .domain()
                 .channel(channel_id)
                 .ok_or(RuntimeError::InvalidValue)?;
-            let parameters = mode_parameters(channel, name, changes)?;
-            let users: Vec<_> = channel.members().collect();
-            builder.add_simple(source, "MODE", &parameters, None, &users)
+            let rendering = prepare_channel_mode(
+                builder.context.server_prefix(),
+                source,
+                channel,
+                name,
+                changes,
+            )?;
+            if let Some((common, origin)) = rendering.warning {
+                builder.add_pair(common, origin, &rendering.users)?;
+            }
+            builder.add_pair(rendering.mode.0, rendering.mode.1, &rendering.users)
         }
         ModeCommand::UserQuery(_)
         | ModeCommand::ChannelQuery(_)
         | ModeCommand::ChannelList(_, _) => Err(RuntimeError::InvalidValue),
     }
+}
+
+struct ChannelModeRendering {
+    users: Vec<UserId>,
+    warning: Option<(WireMessage, WireMessage)>,
+    mode: (WireMessage, WireMessage),
+}
+
+fn prepare_channel_mode(
+    prefix: &str,
+    source: &str,
+    channel: &agenc_ircd_domain::ChannelState,
+    name: &ChannelNameValue,
+    changes: &[ModeChange],
+) -> Result<ChannelModeRendering, RuntimeError> {
+    let parameters = mode_parameters(channel, name, changes)?;
+    let parameter_refs: Vec<&str> = parameters.iter().map(String::as_str).collect();
+    let warning = if has_reconnectable_mask_change(channel, changes) {
+        Some((
+            weak_mask_notice(prefix, channel.name().presentation())?,
+            weak_mask_notice(prefix, channel.name().presentation())?,
+        ))
+    } else {
+        None
+    };
+    Ok(ChannelModeRendering {
+        users: channel.members().collect(),
+        warning,
+        mode: (
+            WireMessage::new(source, "MODE", &parameter_refs, None)
+                .map_err(|_| RuntimeError::InvalidValue)?,
+            WireMessage::new(source, "MODE", &parameter_refs, None)
+                .map_err(|_| RuntimeError::InvalidValue)?,
+        ),
+    })
+}
+
+fn has_reconnectable_mask_change(
+    channel: &agenc_ircd_domain::ChannelState,
+    changes: &[ModeChange],
+) -> bool {
+    changes.iter().any(|change| match change {
+        ModeChange::AddMask { mask, .. } => is_reconnectable_mask(mask),
+        ModeChange::RemoveMask { list, entry_id } => channel
+            .mask_list(*list)
+            .iter()
+            .any(|entry| entry.entry_id() == *entry_id && is_reconnectable_mask(entry.mask())),
+        _ => false,
+    })
 }
 
 fn mode_parameters(
@@ -1392,12 +1450,55 @@ fn ascii(bytes: &[u8]) -> Result<&str, RuntimeError> {
 
 #[cfg(test)]
 mod tests {
-    use agenc_ircd_client_wire::{CapabilityProfile, CapabilitySpec};
+    use agenc_ircd_client_wire::{
+        CapRequestReply, CapabilityProfile, CapabilitySpec, FramedLine, OutputBudget,
+        ParsedMessage, RenderError, parse_message,
+    };
     use agenc_ircd_domain::{ChannelTarget, ExternalInputs};
     use agenc_ircd_testkit::{apply_command, channel_id, open_session, registered_admission};
     use agenc_ircd_types::{AccountRandomId, EntryId};
 
     use super::*;
+
+    struct ExactBudget(usize);
+
+    impl OutputBudget for ExactBudget {
+        type Permit = ();
+
+        fn try_reserve_exact(&mut self, bytes: usize) -> Result<Self::Permit, RenderError> {
+            (bytes == self.0)
+                .then_some(())
+                .ok_or(RenderError::ReservationFailed)
+        }
+    }
+
+    fn encoded(message: WireMessage) -> Result<String, Box<dyn core::error::Error>> {
+        let measured = message.measure()?;
+        let mut budget = ExactBudget(measured.bytes());
+        Ok(String::from_utf8(
+            measured.encode(&mut budget)?.as_bytes().to_vec(),
+        )?)
+    }
+
+    fn parsed(line: &str) -> Result<ParsedMessage, Box<dyn core::error::Error>> {
+        parse_message(FramedLine::new(line)?)?.ok_or_else(|| "empty message".into())
+    }
+
+    fn labeled_capabilities() -> Result<CapabilityState, Box<dyn core::error::Error>> {
+        let profile = CapabilityProfile::new(
+            ["batch", "labeled-response"]
+                .into_iter()
+                .map(|name| CapabilitySpec::new(name, None))
+                .collect::<Result<Vec<_>, _>>()?,
+        )?;
+        let mut capabilities = CapabilityState::default();
+        let _listed = capabilities.ls(Some("302"), &profile)?;
+        assert!(matches!(
+            capabilities.request("batch labeled-response", &profile)?,
+            CapRequestReply::Ack(_)
+        ));
+        Ok(capabilities)
+    }
 
     #[test]
     fn server_time_formats_epoch_and_leap_day() -> Result<(), RuntimeError> {
@@ -1566,6 +1667,206 @@ mod tests {
             mode_change_text(channel, changes.last().ok_or(RuntimeError::InvalidValue)?),
             Err(RuntimeError::InvalidValue)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn weak_mask_mode_rendering_warns_the_full_audience_before_labeled_mode_output()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let mut state = DomainState::new()?;
+        let owner = open_session(&mut state, 1, "actor", None)?;
+        let member = open_session(&mut state, 2, "member", None)?;
+        let name = ChannelNameValue::parse("#room")?;
+        apply_command(
+            &mut state,
+            owner,
+            CanonicalCommand::join(vec![ChannelTarget::new(name.clone(), false)])?,
+            &registered_admission(owner.user_id)?,
+            Some(ExternalInputs {
+                utc_now: Some(UtcSecond::from_unix_seconds(1_700_000_000)),
+                channel_ids: vec![channel_id(1)],
+                ..ExternalInputs::default()
+            }),
+        )?;
+        apply_command(
+            &mut state,
+            member,
+            CanonicalCommand::join(vec![ChannelTarget::new(name.clone(), false)])?,
+            &registered_admission(member.user_id)?,
+            None,
+        )?;
+        let existing_entry = EntryId::from_bytes([1; 16]);
+        apply_command(
+            &mut state,
+            owner,
+            CanonicalCommand::mode(
+                name.clone(),
+                vec![ModeChange::AddMask {
+                    list: MaskList::Ban,
+                    mask: TypedMask::parse("$n:old*")?,
+                }],
+            )?,
+            &registered_admission(owner.user_id)?,
+            Some(ExternalInputs {
+                utc_now: Some(UtcSecond::from_unix_seconds(1_700_000_001)),
+                entry_ids: vec![existing_entry],
+                ..ExternalInputs::default()
+            }),
+        )?;
+        let channel = state.channel(channel_id(1)).ok_or("missing channel")?;
+        let changes = [
+            ModeChange::AddMask {
+                list: MaskList::Ban,
+                mask: TypedMask::parse("$n:new*")?,
+            },
+            ModeChange::AddMask {
+                list: MaskList::Exception,
+                mask: TypedMask::parse("$c:h-*.invalid")?,
+            },
+        ];
+        let rendering =
+            prepare_channel_mode("server.test", "actor!u@h.invalid", channel, &name, &changes)?;
+        assert_eq!(rendering.users.len(), 2);
+        assert!(rendering.users.contains(&owner.user_id));
+        assert!(rendering.users.contains(&member.user_id));
+        let (warning_common, warning_origin) =
+            rendering.warning.ok_or("missing weak-mask warning")?;
+        let (mode_common, mode_origin) = rendering.mode;
+        assert_eq!(
+            encoded(warning_common)?,
+            ":server.test NOTICE #room :Nickname and cloak masks are weak, reconnectable rules\r\n"
+        );
+        assert_eq!(
+            encoded(mode_common)?,
+            ":actor!u@h.invalid MODE #room +be $n:new* $c:h-*.invalid\r\n"
+        );
+
+        let logical = crate::client_render::logical_frames(
+            "server.test",
+            &labeled_capabilities()?,
+            &parsed("@label=mode-1 MODE #room +be $n:new* $c:h-*.invalid")?,
+            vec![warning_origin, mode_origin],
+        )?;
+        let labeled = logical
+            .into_iter()
+            .map(encoded)
+            .collect::<Result<Vec<_>, _>>()?;
+        let [open, warning, mode, close] = labeled.as_slice() else {
+            return Err("unexpected labeled response length".into());
+        };
+        assert!(open.contains("@label=mode-1 :server.test BATCH +mode-1"));
+        assert!(warning.contains("NOTICE #room :Nickname and cloak masks"));
+        assert!(mode.contains("MODE #room +be $n:new* $c:h-*.invalid"));
+        assert!(close.contains(":server.test BATCH -mode-1"));
+        assert_eq!(
+            labeled
+                .iter()
+                .filter(|line| line.contains("label=mode-1"))
+                .count(),
+            1
+        );
+
+        let removal = prepare_channel_mode(
+            "server.test",
+            "actor!u@h.invalid",
+            channel,
+            &name,
+            &[ModeChange::RemoveMask {
+                list: MaskList::Ban,
+                entry_id: existing_entry,
+            }],
+        )?;
+        assert!(removal.warning.is_some());
+        assert_eq!(
+            encoded(removal.mode.0)?,
+            ":actor!u@h.invalid MODE #room -b $n:old*\r\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn weak_mask_change_detection_covers_add_remove_and_strong_subjects()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let mut state = DomainState::new()?;
+        let identity = open_session(&mut state, 1, "actor", None)?;
+        let name = ChannelNameValue::parse("#room")?;
+        apply_command(
+            &mut state,
+            identity,
+            CanonicalCommand::join(vec![ChannelTarget::new(name.clone(), false)])?,
+            &registered_admission(identity.user_id)?,
+            Some(ExternalInputs {
+                utc_now: Some(UtcSecond::from_unix_seconds(1_700_000_000)),
+                channel_ids: vec![channel_id(1)],
+                ..ExternalInputs::default()
+            }),
+        )?;
+        let account_entry = EntryId::from_bytes([1; 16]);
+        let nickname_entry = EntryId::from_bytes([2; 16]);
+        apply_command(
+            &mut state,
+            identity,
+            CanonicalCommand::mode(
+                name,
+                vec![
+                    ModeChange::AddMask {
+                        list: MaskList::Ban,
+                        mask: TypedMask::parse(&format!(
+                            "$a:{}",
+                            AccountRandomId::from_bytes([3; 16]).to_text()
+                        ))?,
+                    },
+                    ModeChange::AddMask {
+                        list: MaskList::Ban,
+                        mask: TypedMask::parse("$n:actor*")?,
+                    },
+                ],
+            )?,
+            &registered_admission(identity.user_id)?,
+            Some(ExternalInputs {
+                utc_now: Some(UtcSecond::from_unix_seconds(1_700_000_001)),
+                entry_ids: vec![account_entry, nickname_entry],
+                ..ExternalInputs::default()
+            }),
+        )?;
+        let channel = state.channel(channel_id(1)).ok_or("missing channel")?;
+
+        let strong_adds = [
+            ModeChange::AddMask {
+                list: MaskList::Ban,
+                mask: TypedMask::parse(&format!(
+                    "$a:{}",
+                    AccountRandomId::from_bytes([4; 16]).to_text()
+                ))?,
+            },
+            ModeChange::AddMask {
+                list: MaskList::Exception,
+                mask: TypedMask::parse(&format!("$u:{}", identity.user_id.to_base64url()))?,
+            },
+        ];
+        assert!(!has_reconnectable_mask_change(channel, &strong_adds));
+
+        for mask in ["$n:new*", "$c:h-*.invalid", "$q:$c:h-quiet.invalid"] {
+            let weak_add = [ModeChange::AddMask {
+                list: MaskList::Ban,
+                mask: TypedMask::parse(mask)?,
+            }];
+            assert!(has_reconnectable_mask_change(channel, &weak_add));
+        }
+        assert!(!has_reconnectable_mask_change(
+            channel,
+            &[ModeChange::RemoveMask {
+                list: MaskList::Ban,
+                entry_id: account_entry,
+            }]
+        ));
+        assert!(has_reconnectable_mask_change(
+            channel,
+            &[ModeChange::RemoveMask {
+                list: MaskList::Ban,
+                entry_id: nickname_entry,
+            }]
+        ));
         Ok(())
     }
 }
