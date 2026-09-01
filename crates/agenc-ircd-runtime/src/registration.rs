@@ -193,9 +193,16 @@ impl RegistrationRouter {
             complete_observation(context, &mut observation, ResultClass::Error);
             return RouteOutcome::Close(CloseReason::ProtocolError);
         };
+        let authority_fenced = state.bound.is_some()
+            && !authority_fence_exempt(&message)
+            && self
+                .accounts
+                .registered_authority_fenced(context, generation);
         let admission = if state.bound.is_none() {
             charge_preauth(context, generation)
-        } else if should_charge_registered_control(&message, self.access_policy()) {
+        } else if authority_fenced
+            || should_charge_registered_control(&message, self.access_policy())
+        {
             state
                 .bound
                 .ok_or(RuntimeError::InvalidValue)
@@ -203,17 +210,18 @@ impl RegistrationRouter {
         } else {
             Ok(())
         };
-        if admission.is_err() {
-            let outcome = if self
-                .send_numeric(
-                    context,
-                    generation,
-                    &state,
-                    263,
-                    &[&command],
-                    "Please wait a while and try again.",
-                )
-                .is_ok()
+        if admission.is_err() || authority_fenced {
+            let outcome = if command == "NOTICE"
+                || self
+                    .send_numeric(
+                        context,
+                        generation,
+                        &state,
+                        263,
+                        &[&command],
+                        "Please wait a while and try again.",
+                    )
+                    .is_ok()
             {
                 RouteOutcome::Continue
             } else {
@@ -1481,6 +1489,10 @@ fn should_charge_registered_control(
     )
 }
 
+fn authority_fence_exempt(message: &agenc_ircd_client_wire::ParsedMessage) -> bool {
+    matches!(message.command(), "PING" | "PONG" | "QUIT")
+}
+
 fn charge_registered_control(
     context: &mut StateCoreContext,
     user_id: UserId,
@@ -2110,6 +2122,25 @@ mod tests {
             &parsed("PASS compatibility")?,
             required,
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn pending_authority_fence_exempts_only_ping_pong_and_quit()
+    -> Result<(), Box<dyn core::error::Error>> {
+        for line in ["PING token", "PONG token", "QUIT :bye"] {
+            assert!(authority_fence_exempt(&parsed(line)?));
+        }
+        for line in [
+            "CAP LIST",
+            "AUTHENTICATE *",
+            "ACCTCRED START",
+            "NICK tester",
+            "PRIVMSG target :body",
+            "NOTICE target :body",
+        ] {
+            assert!(!authority_fence_exempt(&parsed(line)?));
+        }
         Ok(())
     }
 

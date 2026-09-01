@@ -965,6 +965,51 @@ impl AccountServiceCoordinator {
             })
     }
 
+    /// Returns whether one registered connection is behind a staged durable
+    /// principal transition and therefore cannot admit later authority-bearing
+    /// input until that batch commits or is rejected.
+    pub(crate) fn registered_authority_fenced(
+        &self,
+        context: &StateCoreContext,
+        generation: ConnectionGeneration,
+    ) -> bool {
+        let authority_fenced = match self.pending_authority.as_ref() {
+            Some(PendingAuthority::Logout {
+                generation: pending,
+                ..
+            }) => *pending == generation,
+            Some(PendingAuthority::CredentialFinish { sealed, fenced, .. }) => {
+                sealed.result().is_ok() && pending_credential_finish_fences(fenced, generation)
+            }
+            Some(PendingAuthority::Finish {
+                generation: pending,
+                fresh_auth_session: Some((user_id, resulting_session_generation, _account_id)),
+                ..
+            }) => context.domain().session(*user_id).is_some_and(|session| {
+                pending_guest_account_switch_fences(
+                    *pending,
+                    generation,
+                    session.account_id(),
+                    session.generation(),
+                    *resulting_session_generation,
+                )
+            }),
+            Some(
+                PendingAuthority::CreationStart { .. }
+                | PendingAuthority::CreationFinish { .. }
+                | PendingAuthority::CredentialStart { .. }
+                | PendingAuthority::Start { .. }
+                | PendingAuthority::Finish { .. },
+            )
+            | None => false,
+        };
+        authority_fenced
+            || self
+                .pending_account_deletions
+                .values()
+                .any(|pending| pending.fences_generation(generation))
+    }
+
     /// Creates fresh connection and nonce bindings for one admitted transport.
     pub(crate) fn connection_opened(
         &mut self,
@@ -5744,6 +5789,43 @@ impl AccountServiceCoordinator {
     }
 }
 
+impl AccountDeletionBarrier {
+    fn fences_generation(&self, generation: ConnectionGeneration) -> bool {
+        self.completions
+            .iter()
+            .any(|completion| completion.generation == generation)
+            || self
+                .authentications
+                .iter()
+                .any(|(pending, _)| *pending == generation)
+            || self
+                .grants
+                .iter()
+                .any(|(pending, _)| *pending == generation)
+    }
+}
+
+fn pending_credential_finish_fences(
+    fenced: &[ConnectionGeneration],
+    generation: ConnectionGeneration,
+) -> bool {
+    fenced.contains(&generation)
+}
+
+fn pending_guest_account_switch_fences(
+    pending_generation: ConnectionGeneration,
+    generation: ConnectionGeneration,
+    current_account_id: Option<AccountId>,
+    current_session_generation: Generation,
+    resulting_session_generation: Generation,
+) -> bool {
+    pending_generation == generation
+        && current_account_id.is_none()
+        && current_session_generation
+            .checked_add(1)
+            .is_ok_and(|successor| successor == resulting_session_generation)
+}
+
 fn login_tombstone_deadline(
     context: &StateCoreContext,
     expires_at: u64,
@@ -6675,9 +6757,10 @@ mod tests {
         account_created_note, account_credential_changed_note, account_deletion_completions,
         account_deletion_writes, account_failure, account_phase_name,
         consume_opaque_connection_attempt, credential_id, live_login, login_tombstone_expiry_batch,
-        opaque_attempt_demand, render_account_action, render_sasl_action, render_sasl_actions,
-        replay_terminal_account, request_terminal_result, sasl_action_result, select_live_login,
-        transaction_cleanup_batch,
+        opaque_attempt_demand, pending_credential_finish_fences,
+        pending_guest_account_switch_fences, render_account_action, render_sasl_action,
+        render_sasl_actions, replay_terminal_account, request_terminal_result, sasl_action_result,
+        select_live_login, transaction_cleanup_batch,
     };
     use crate::StateCoreSeed;
     use crate::state_core::durable::{AccountServiceDurableWrite, AccountingCeilings, KeyDeriver};
@@ -7356,6 +7439,117 @@ mod tests {
                 ))
                 .is_ok()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn pending_session_authority_fences_only_exact_security_generations()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let first = ConnectionGeneration::new(1);
+        let second = ConnectionGeneration::new(2);
+        assert!(pending_credential_finish_fences(&[first], first));
+        assert!(!pending_credential_finish_fences(&[first], second));
+        assert!(!pending_credential_finish_fences(&[], first));
+
+        let current = Generation::new(4)?;
+        let successor = current.checked_add(1)?;
+        assert!(pending_guest_account_switch_fences(
+            first, first, None, current, successor,
+        ));
+        assert!(!pending_guest_account_switch_fences(
+            first, second, None, current, successor,
+        ));
+        assert!(!pending_guest_account_switch_fences(
+            first,
+            first,
+            Some(account(1)),
+            current,
+            successor,
+        ));
+        assert!(!pending_guest_account_switch_fences(
+            first, first, None, current, current,
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn deletion_barrier_fences_origin_authentication_and_grant_generations() {
+        let origin = ConnectionGeneration::new(1);
+        let authentication = ConnectionGeneration::new(2);
+        let grant = ConnectionGeneration::new(3);
+        let barrier = AccountDeletionBarrier {
+            account_id: account(1),
+            tombstone_id: (100, account(1)),
+            authentications: vec![(authentication, TransactionId::from_bytes([2; 16]))],
+            grants: vec![(grant, TransactionId::from_bytes([3; 16]))],
+            completions: vec![CarrierCompletion::closed(origin, 0)],
+        };
+        assert!(barrier.fences_generation(origin));
+        assert!(barrier.fences_generation(authentication));
+        assert!(barrier.fences_generation(grant));
+        assert!(!barrier.fences_generation(ConnectionGeneration::new(4)));
+    }
+
+    #[test]
+    fn pending_authority_fences_release_on_commit_and_rejection()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let mut fixture = CoordinatorFixture::new(vec![1; 96])?;
+        let generation = ConnectionGeneration::new(1);
+        {
+            let (coordinator, context) = fixture.parts()?;
+            coordinator.pending_authority = Some(PendingAuthority::Logout {
+                generation,
+                carrier_generation: 11,
+            });
+            assert!(coordinator.registered_authority_fenced(context, generation));
+            let _completions = coordinator.batch_applied(context);
+            assert!(!coordinator.registered_authority_fenced(context, generation));
+
+            coordinator.pending_authority = Some(PendingAuthority::Logout {
+                generation,
+                carrier_generation: 12,
+            });
+            assert!(coordinator.registered_authority_fenced(context, generation));
+            let _completions = coordinator.batch_rejected(context, Some(generation));
+            assert!(!coordinator.registered_authority_fenced(context, generation));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn deletion_fence_releases_on_commit_and_determinate_rejection()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let mut fixture = CoordinatorFixture::new(vec![1; 96])?;
+        let generation = ConnectionGeneration::new(1);
+        let account_id = account(1);
+        let tombstone_id = (100, account_id);
+        let pending = || AccountDeletionBarrier {
+            account_id,
+            tombstone_id,
+            authentications: Vec::new(),
+            grants: Vec::new(),
+            completions: vec![CarrierCompletion::closed(generation, 0)],
+        };
+        {
+            let (coordinator, context) = fixture.parts()?;
+            coordinator
+                .config
+                .login_deletion_tombstones
+                .insert(tombstone_id, StoredKey::new(vec![1])?);
+            coordinator
+                .pending_account_deletions
+                .insert(generation, pending());
+            assert!(coordinator.registered_authority_fenced(context, generation));
+            assert!(coordinator.account_deletion_rejected(context, generation));
+            assert!(!coordinator.registered_authority_fenced(context, generation));
+
+            coordinator
+                .pending_account_deletions
+                .insert(generation, pending());
+            assert!(coordinator.registered_authority_fenced(context, generation));
+            let _completions = coordinator.batch_applied(context);
+            assert!(!coordinator.registered_authority_fenced(context, generation));
+        }
         Ok(())
     }
 
