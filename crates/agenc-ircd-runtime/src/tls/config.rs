@@ -360,6 +360,7 @@ impl PrivateKey {
 #[derive(Clone, Debug)]
 pub struct TrustStore {
     roots: Arc<RootCertStore>,
+    spki_sha256: Vec<[u8; 32]>,
 }
 
 impl TrustStore {
@@ -369,7 +370,13 @@ impl TrustStore {
         let anchors =
             parse_certificates(document).map_err(|_| TlsConfigError::InvalidTrustStore)?;
         let mut roots = RootCertStore::empty();
+        let mut spki_sha256 = Vec::new();
+        spki_sha256
+            .try_reserve_exact(anchors.len())
+            .map_err(|_| TlsConfigError::InvalidTrustStore)?;
         for anchor in anchors {
+            spki_sha256
+                .push(certificate_spki_sha256(&anchor).ok_or(TlsConfigError::InvalidTrustStore)?);
             roots
                 .add(anchor)
                 .map_err(|_| TlsConfigError::InvalidTrustStore)?;
@@ -379,6 +386,7 @@ impl TrustStore {
         }
         Ok(Self {
             roots: Arc::new(roots),
+            spki_sha256,
         })
     }
 
@@ -392,6 +400,10 @@ impl TrustStore {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.roots.is_empty()
+    }
+
+    pub(crate) fn spki_identities(&self) -> &[[u8; 32]] {
+        &self.spki_sha256
     }
 }
 
@@ -1143,7 +1155,12 @@ mod tests {
         use std::os::unix::fs::{PermissionsExt as _, symlink};
 
         let fixture = fixture()?;
-        let directory = std::env::temp_dir().join(format!(
+        let home = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .ok_or(TlsConfigError::InvalidCertificate)?;
+        let base = home.join(".cache");
+        std::fs::create_dir_all(&base).map_err(|_| TlsConfigError::InvalidCertificate)?;
+        let directory = base.join(format!(
             "agenc-tls-config-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
@@ -1151,7 +1168,9 @@ mod tests {
                 .map(|d| d.as_nanos())
                 .unwrap_or_default()
         ));
-        std::fs::create_dir_all(&directory).map_err(|_| TlsConfigError::InvalidCertificate)?;
+        std::fs::create_dir(&directory).map_err(|_| TlsConfigError::InvalidCertificate)?;
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .map_err(|_| TlsConfigError::InvalidCertificate)?;
         let chain_path = directory.join("chain.der");
         std::fs::write(&chain_path, fixture.leaf_certificate_der())
             .map_err(|_| TlsConfigError::InvalidCertificate)?;

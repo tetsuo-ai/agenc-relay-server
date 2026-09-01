@@ -25,7 +25,7 @@ use agenc_ircd_auth::{
     AuthenticationFinish, AuthenticationStart, Completion, CreationFinish, CreationStart,
     CredentialChangeFinish, CredentialChangeStart, OpaqueKe1, OpaqueKe3, OpaqueProfile,
     OpaqueRegistrationRequest, encode_request_plaintext, finish_registration,
-    open_and_parse_response,
+    opaque_server_public_key, open_and_parse_response,
 };
 use agenc_ircd_config::{
     DEFAULT_REDB_CACHE_BYTES, DisplayLabel, DnsName, InitProfile, InitValues, NodeRole,
@@ -1984,6 +1984,127 @@ fn stopped_runtime_check_prepares_listener_tls_material() -> TestResult {
         .clone();
     fs::write(certificate, b"not a certificate")?;
     assert!(agenc_ircd_runtime::daemon::check_configuration(&config, &secrets).is_err());
+    Ok(())
+}
+
+#[test]
+fn stopped_runtime_check_rejects_cross_purpose_public_identity_reuse() -> TestResult {
+    let fixture = LiveFixture::create()?;
+    let original = fs::read_to_string(&fixture.config_path)?;
+    let mut document = original.clone();
+    let operator_public = fixture.operator_key.public_key();
+    let audit_public = Ed25519SecretKey::from_bytes([12; 32]).public_key();
+    replace_once(
+        &mut document,
+        &format!(
+            "signing_public_key = \"{}\"",
+            encode_base64url_32(operator_public.as_bytes())
+        ),
+        &format!(
+            "signing_public_key = \"{}\"",
+            encode_base64url_32(audit_public.as_bytes())
+        ),
+    )?;
+    fs::write(&fixture.config_path, document)?;
+
+    let config = load_config(&fixture.config_path, ValidationDepth::Host)?;
+    let secrets = SecretSet::load(&config)?;
+    assert!(agenc_ircd_runtime::daemon::check_configuration(&config, &secrets).is_err());
+
+    fs::write(&fixture.config_path, &original)?;
+    let config = load_config(&fixture.config_path, ValidationDepth::Host)?;
+    let secrets = SecretSet::load(&config)?;
+    let setup = secrets
+        .opaque_server_setup()
+        .ok_or_else(|| failure("fixture has no OPAQUE setup"))?
+        .expose()
+        .try_into()
+        .map_err(|_| failure("fixture OPAQUE setup has the wrong length"))?;
+    let opaque_public = opaque_server_public_key(setup)?;
+    let mut document = original;
+    replace_once(
+        &mut document,
+        "\nlocal_uids = [",
+        &format!(
+            "\ncertificate_spki_sha256 = \"{}\"\nlocal_uids = [",
+            encode_base64url_32(&opaque_public)
+        ),
+    )?;
+    fs::write(&fixture.config_path, document)?;
+    let config = load_config(&fixture.config_path, ValidationDepth::Host)?;
+    let secrets = SecretSet::load(&config)?;
+    assert!(agenc_ircd_runtime::daemon::check_configuration(&config, &secrets).is_err());
+    Ok(())
+}
+
+#[test]
+fn stopped_runtime_check_allows_own_trust_alias_and_rejects_cross_purpose_trust() -> TestResult {
+    let fixture = LiveFixture::create()?;
+    let config = load_config(&fixture.config_path, ValidationDepth::Host)?;
+    let secrets = SecretSet::load(&config)?;
+    agenc_ircd_runtime::daemon::check_configuration(&config, &secrets)?;
+
+    let backup_public = Ed25519SecretKey::from_bytes([11; 32]).public_key();
+    let audit_id = audit_signing_key_id(backup_public.as_bytes())?;
+    let manifest = format!(
+        "audit_trust_version = 1\n\n[[key]]\nkey_id = \"{}\"\ned25519_public_key = \"{}\"\nnot_before = 0\nnot_after = {}\n",
+        encode_base64url_32(audit_id.as_bytes()),
+        encode_base64url_32(backup_public.as_bytes()),
+        i64::MAX,
+    );
+    fs::write(&config.moderation.audit_trust_manifest_file, manifest)?;
+    assert!(agenc_ircd_runtime::daemon::check_configuration(&config, &secrets).is_err());
+    Ok(())
+}
+
+#[test]
+fn stopped_runtime_check_rejects_reused_admin_and_federation_ca_identity() -> TestResult {
+    let fixture = LiveFixture::create()?;
+    let admin_tls = prepare_admin_tls(&fixture)?;
+    let federation_ca = fixture
+        ._root
+        .path()
+        .join("etc/tls/federation-reused-ca.crt");
+    write_private(&federation_ca, admin_tls.operator.ca_certificate_der())?;
+    let mut document = fs::read_to_string(&fixture.config_path)?;
+    replace_once(
+        &mut document,
+        "[federation]\n",
+        &format!(
+            "[federation]\nprivate_ca_file = \"{}\"\n",
+            protected_path_text(&federation_ca)?
+        ),
+    )?;
+    fs::write(&fixture.config_path, document)?;
+
+    let config = load_config(&fixture.config_path, ValidationDepth::Host)?;
+    let secrets = SecretSet::load(&config)?;
+    assert!(agenc_ircd_runtime::daemon::check_configuration(&config, &secrets).is_err());
+    Ok(())
+}
+
+#[test]
+fn production_serve_rejects_structural_config_before_binding() -> TestResult {
+    let fixture = LiveFixture::create()?;
+    let mut document = fs::read_to_string(&fixture.config_path)?;
+    replace_once(
+        &mut document,
+        "config_version = 1\n",
+        "config_version = 1\nunknown_stage_six_key = true\n",
+    )?;
+    fs::write(&fixture.config_path, document)?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_agenc-ircd"))
+        .arg("serve")
+        .arg("--config")
+        .arg(&fixture.config_path)
+        .output()?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(stderr.contains("configuration key is outside the closed schema"));
+    assert!(!fixture.admin_socket.exists());
+    let listener = TcpListener::bind(fixture.public_address)?;
+    drop(listener);
     Ok(())
 }
 

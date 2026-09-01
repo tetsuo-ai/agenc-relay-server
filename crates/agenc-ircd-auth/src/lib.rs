@@ -26,6 +26,7 @@ pub use opaque::{
     OPAQUE_SERVER_LOGIN_STATE_BYTES, OPAQUE_SERVER_SETUP_BYTES, OpaqueAuthentication, OpaqueKe1,
     OpaqueKe2, OpaqueKe3, OpaqueProfile, OpaqueRegistrationRecord, OpaqueRegistrationRequest,
     OpaqueRegistrationResponse, OpaqueServerLoginState, finish_authentication, finish_registration,
+    opaque_server_public_key,
 };
 pub use service::{
     AUTHENTICATION_GRANT_RECORD_BYTES, AUTHENTICATION_TRANSACTION_RECORD_BYTES,

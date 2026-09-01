@@ -87,6 +87,9 @@ fn onboarding_endpoints(config: &Config, sink: &mut IssueSink) {
     let stage = ValidationStage::LocalIdentity;
     let dns_served = listener_enabled(config, ListenerPurpose::ClientTls)
         || listener_enabled(config, ListenerPurpose::ClientWss);
+    if config.network.dns.is_none() && config.network.onion.is_none() {
+        issue(sink, stage, "network", "dns_name");
+    }
     if config.network.dns.is_some() && !dns_served {
         issue(sink, stage, "network", "dns_name");
     }

@@ -14,6 +14,7 @@ use agenc_ircd_auth::{
     CHANNEL_KEY_ITERATIONS as AUTH_CHANNEL_ITERATIONS, CHANNEL_KEY_LANES as AUTH_CHANNEL_LANES,
     CHANNEL_KEY_MEMORY_KIB as AUTH_CHANNEL_MEMORY_KIB,
     CHANNEL_KEY_SALT_BYTES as AUTH_CHANNEL_SALT_BYTES, OpaqueProfile, derive_channel_key_verifier,
+    opaque_server_public_key,
 };
 use agenc_ircd_config::{
     Config, ConfigError, ConfigReport, DEFAULT_REDB_CACHE_BYTES, DirectMessageDefault,
@@ -23,9 +24,9 @@ use agenc_ircd_config::{
     load_backup_trust_manifest, load_config, load_public_text,
 };
 use agenc_ircd_crypto::{
-    AccountHpkePrivateKey, CryptoError, CryptoWorkerConfig, Ed25519PublicKey, Ed25519SecretKey,
-    LoginIndexKey, OpaqueFakeCredentialKey, OsEntropy, RollbackGuardRootKey, SemanticHashDomain,
-    StorageDigest, StorageMasterKey, semantic_digest,
+    AccountHpkePrivateKey, AccountHpkePublicKey, CryptoError, CryptoWorkerConfig, Ed25519PublicKey,
+    Ed25519SecretKey, LoginIndexKey, OpaqueFakeCredentialKey, OsEntropy, RollbackGuardRootKey,
+    SemanticHashDomain, StorageDigest, StorageMasterKey, semantic_digest,
 };
 use agenc_ircd_domain::{
     DirectMessagePolicy, GuestDirectMessagePolicy, OperationalLimitValues, OperationalLimits,
@@ -1003,6 +1004,175 @@ struct PreparedListenerSpecs {
     certificate_fingerprints: BTreeMap<agenc_ircd_config::ListenerName, [u8; 32]>,
     ocsp_fingerprints: BTreeMap<agenc_ircd_config::ListenerName, [u8; 32]>,
     client_ca_fingerprints: BTreeMap<agenc_ircd_config::ListenerName, [u8; 32]>,
+    public_identities: PublicIdentitySet,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PublicIdentityPurpose {
+    AccountHpke,
+    AdminCa,
+    AdminListenerTls,
+    AdminOperator,
+    AdminOperatorCertificate,
+    AuditSigning,
+    BackupSigning,
+    ClientListenerTls,
+    FederationCa,
+    FederationListenerTls,
+    FederationPeer,
+    FederationPeerCertificate,
+    FederationSigning,
+    InvitationSigning,
+    OpaqueServer,
+    SequencerSigning,
+}
+
+#[derive(Default)]
+struct PublicIdentitySet {
+    purposes: BTreeMap<[u8; 32], PublicIdentityPurpose>,
+}
+
+impl PublicIdentitySet {
+    fn insert(
+        &mut self,
+        identity: [u8; 32],
+        purpose: PublicIdentityPurpose,
+    ) -> Result<(), DaemonError> {
+        if self.purposes.insert(identity, purpose).is_some() {
+            return Err(DaemonError::Runtime(RuntimeError::InvalidValue));
+        }
+        Ok(())
+    }
+
+    fn insert_alias(
+        &mut self,
+        identity: [u8; 32],
+        purpose: PublicIdentityPurpose,
+    ) -> Result<(), DaemonError> {
+        match self.purposes.get(&identity) {
+            Some(existing) if *existing == purpose => Ok(()),
+            Some(_) => Err(DaemonError::Runtime(RuntimeError::InvalidValue)),
+            None => {
+                self.purposes.insert(identity, purpose);
+                Ok(())
+            }
+        }
+    }
+}
+
+fn prepared_public_identities(
+    config: &Config,
+    secrets: &SecretSet,
+) -> Result<PublicIdentitySet, DaemonError> {
+    let mut identities = PublicIdentitySet::default();
+    insert_signing_identity(
+        &mut identities,
+        secrets.backup_signing().expose(),
+        PublicIdentityPurpose::BackupSigning,
+    )?;
+    insert_signing_identity(
+        &mut identities,
+        secrets.audit_signing().expose(),
+        PublicIdentityPurpose::AuditSigning,
+    )?;
+    if let Some(secret) = secrets.federation_signing() {
+        insert_signing_identity(
+            &mut identities,
+            secret.expose(),
+            PublicIdentityPurpose::FederationSigning,
+        )?;
+    }
+    if let Some(secret) = secrets.sequencer_private() {
+        insert_signing_identity(
+            &mut identities,
+            secret.expose(),
+            PublicIdentityPurpose::SequencerSigning,
+        )?;
+    }
+    if let Some(authority) = secrets.invitation_verification() {
+        let public = Ed25519PublicKey::from_bytes(*authority.expose())?;
+        identities.insert(*public.as_bytes(), PublicIdentityPurpose::InvitationSigning)?;
+    }
+
+    let configured_hpke =
+        AccountHpkePublicKey::from_bytes(config.accounts.account_service_hpke_public_key)?;
+    if let Some(private) = secrets.account_service_hpke_private() {
+        let public = AccountHpkePrivateKey::from_bytes(*private.expose())?.public_key()?;
+        if public != configured_hpke {
+            return Err(DaemonError::Cryptography(CryptoError::AuthenticationFailed));
+        }
+    }
+    identities.insert(
+        *configured_hpke.as_bytes(),
+        PublicIdentityPurpose::AccountHpke,
+    )?;
+
+    if let Some(setup) = secrets.opaque_server_setup() {
+        let setup = setup
+            .expose()
+            .try_into()
+            .map_err(|_| DaemonError::Authentication(AuthError::InvalidEncoding))?;
+        identities.insert(
+            opaque_server_public_key(setup)?,
+            PublicIdentityPurpose::OpaqueServer,
+        )?;
+    }
+
+    for peer in &config.federation.peers {
+        let public = Ed25519PublicKey::from_bytes(peer.signing_public_key)?;
+        identities.insert(*public.as_bytes(), PublicIdentityPurpose::FederationPeer)?;
+        identities.insert(
+            peer.certificate_spki_sha256,
+            PublicIdentityPurpose::FederationPeerCertificate,
+        )?;
+    }
+    for operator in &config.moderation.operators {
+        let public = Ed25519PublicKey::from_bytes(operator.signing_public_key)?;
+        identities.insert(*public.as_bytes(), PublicIdentityPurpose::AdminOperator)?;
+        if let Some(pin) = operator.certificate_spki_sha256 {
+            identities.insert(pin, PublicIdentityPurpose::AdminOperatorCertificate)?;
+        }
+    }
+    Ok(identities)
+}
+
+fn insert_signing_identity(
+    identities: &mut PublicIdentitySet,
+    secret: &[u8; 32],
+    purpose: PublicIdentityPurpose,
+) -> Result<(), DaemonError> {
+    let public = Ed25519SecretKey::from_bytes(*secret).public_key();
+    identities.insert(*public.as_bytes(), purpose)
+}
+
+fn insert_listener_identity(
+    identities: &mut PublicIdentitySet,
+    purpose: ConfigListenerPurpose,
+    chain: &crate::tls::CertChain,
+) -> Result<(), DaemonError> {
+    let identity_purpose = match purpose.key_class() {
+        0 => PublicIdentityPurpose::ClientListenerTls,
+        1 => PublicIdentityPurpose::FederationListenerTls,
+        2 => PublicIdentityPurpose::AdminListenerTls,
+        _ => return Err(DaemonError::Runtime(RuntimeError::InvalidValue)),
+    };
+    let leaf = chain
+        .leaf()
+        .ok_or(DaemonError::Tls(TlsConfigError::InvalidCertificate))?;
+    let identity =
+        spki_sha256(leaf.as_ref()).ok_or(DaemonError::Tls(TlsConfigError::InvalidCertificate))?;
+    identities.insert_alias(identity, identity_purpose)
+}
+
+fn insert_ca_identities(
+    identities: &mut PublicIdentitySet,
+    store: &crate::tls::TrustStore,
+    purpose: PublicIdentityPurpose,
+) -> Result<(), DaemonError> {
+    for identity in store.spki_identities() {
+        identities.insert_alias(*identity, purpose)?;
+    }
+    Ok(())
 }
 
 // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=one closed listener preparation pass validates every enabled and disabled TLS identity CA and admission profile before activation
@@ -1015,6 +1185,7 @@ async fn build_listener_specs(
     let mut certificate_fingerprints = BTreeMap::new();
     let mut ocsp_fingerprints = BTreeMap::new();
     let mut client_ca_fingerprints = BTreeMap::new();
+    let mut public_identities = prepared_public_identities(config, secrets)?;
     for listener in config.listeners.iter().filter(|listener| listener.enabled) {
         let purpose = runtime_purpose(listener.purpose)?;
         let tls = if purpose == ListenerPurpose::AdminLocal {
@@ -1026,6 +1197,7 @@ async fn build_listener_specs(
                 .ok_or(DaemonError::Tls(TlsConfigError::ClientAuthMismatch))?;
             let (chain, certificate_fingerprint) =
                 load_certificate_chain_material(files.certificate_file.clone()).await?;
+            insert_listener_identity(&mut public_identities, listener.purpose, &chain)?;
             validate_onion_pin(config, purpose, &chain)?;
             let private = secrets
                 .tls_private_key(&listener.name)
@@ -1042,6 +1214,12 @@ async fn build_listener_specs(
                     .clone()
                     .ok_or(DaemonError::Tls(TlsConfigError::ClientAuthMismatch))?;
                 let (store, fingerprint) = load_trust_store_material(ca).await?;
+                let ca_purpose = match purpose {
+                    ListenerPurpose::AdminTls => PublicIdentityPurpose::AdminCa,
+                    ListenerPurpose::Federation => PublicIdentityPurpose::FederationCa,
+                    _ => return Err(DaemonError::Runtime(RuntimeError::InvalidValue)),
+                };
+                insert_ca_identities(&mut public_identities, &store, ca_purpose)?;
                 if client_ca_fingerprints
                     .insert(listener.name.clone(), fingerprint)
                     .is_some()
@@ -1114,6 +1292,7 @@ async fn build_listener_specs(
         if let Some(tls) = &listener.tls {
             let (chain, fingerprint) =
                 load_certificate_chain_material(tls.certificate_file.clone()).await?;
+            insert_listener_identity(&mut public_identities, listener.purpose, &chain)?;
             let private = secrets
                 .tls_private_key(&listener.name)
                 .ok_or(DaemonError::Tls(TlsConfigError::InvalidPrivateKey))?;
@@ -1153,7 +1332,13 @@ async fn build_listener_specs(
         if let Some(path) = listener.client_ca_file.clone()
             && !client_ca_fingerprints.contains_key(&listener.name)
         {
-            let (_store, fingerprint) = load_trust_store_material(path).await?;
+            let (store, fingerprint) = load_trust_store_material(path).await?;
+            let ca_purpose = match listener.purpose {
+                ConfigListenerPurpose::AdminTls => PublicIdentityPurpose::AdminCa,
+                ConfigListenerPurpose::Federation => PublicIdentityPurpose::FederationCa,
+                _ => return Err(DaemonError::Runtime(RuntimeError::InvalidValue)),
+            };
+            insert_ca_identities(&mut public_identities, &store, ca_purpose)?;
             if client_ca_fingerprints
                 .insert(listener.name.clone(), fingerprint)
                 .is_some()
@@ -1168,6 +1353,7 @@ async fn build_listener_specs(
         certificate_fingerprints,
         ocsp_fingerprints,
         client_ca_fingerprints,
+        public_identities,
     })
 }
 
@@ -1176,6 +1362,8 @@ struct PreparedRuntimeFiles {
     public_info: Option<Arc<str>>,
     backup_trust: [u8; 32],
     audit_trust: [u8; 32],
+    backup_trust_identities: Vec<[u8; 32]>,
+    audit_trust_identities: Vec<[u8; 32]>,
 }
 
 async fn prepare_runtime_parts(
@@ -1186,20 +1374,9 @@ async fn prepare_runtime_parts(
     let operator_admission = operator_admission(config);
     let (default_presence, default_guest_direct_messages, default_direct_messages) =
         account_defaults(config);
-    let prepared = build_listener_specs(config, secrets).await?;
+    let mut prepared = build_listener_specs(config, secrets).await?;
     let files = load_runtime_files(config).await?;
-    let federation_ca = match config.federation.private_ca_file.clone() {
-        Some(path) => Some(load_trust_store_material(path).await?.1),
-        None => None,
-    };
-    let restart_material = restart_material(
-        config,
-        secrets,
-        files.backup_trust,
-        files.audit_trust,
-        federation_ca,
-        &prepared.client_ca_fingerprints,
-    )?;
+    let restart_material = prepare_restart_material(config, secrets, &mut prepared, &files).await?;
     let parts = RuntimeConfigParts {
         tls_endpoints: prepared.tls_endpoints,
         certificate_fingerprints: prepared.certificate_fingerprints,
@@ -1235,6 +1412,44 @@ async fn prepare_runtime_parts(
     Ok((parts, prepared.specs))
 }
 
+async fn prepare_restart_material(
+    config: &Config,
+    secrets: &SecretSet,
+    prepared: &mut PreparedListenerSpecs,
+    files: &PreparedRuntimeFiles,
+) -> Result<RestartMaterial, DaemonError> {
+    let federation_ca = match config.federation.private_ca_file.clone() {
+        Some(path) => {
+            let (store, fingerprint) = load_trust_store_material(path).await?;
+            insert_ca_identities(
+                &mut prepared.public_identities,
+                &store,
+                PublicIdentityPurpose::FederationCa,
+            )?;
+            Some(fingerprint)
+        }
+        None => None,
+    };
+    for identity in &files.backup_trust_identities {
+        prepared
+            .public_identities
+            .insert_alias(*identity, PublicIdentityPurpose::BackupSigning)?;
+    }
+    for identity in &files.audit_trust_identities {
+        prepared
+            .public_identities
+            .insert_alias(*identity, PublicIdentityPurpose::AuditSigning)?;
+    }
+    restart_material(
+        config,
+        secrets,
+        files.backup_trust,
+        files.audit_trust,
+        federation_ca,
+        &prepared.client_ca_fingerprints,
+    )
+}
+
 async fn load_runtime_files(config: &Config) -> Result<PreparedRuntimeFiles, DaemonError> {
     let motd_path = config.privacy.motd_file.clone();
     let public_info_path = config.privacy.public_info_file.clone();
@@ -1258,10 +1473,27 @@ async fn load_runtime_files(config: &Config) -> Result<PreparedRuntimeFiles, Dae
             public_info,
             backup_trust: backup_trust_fingerprint(&backup)?,
             audit_trust: audit_trust_fingerprint(&audit)?,
+            backup_trust_identities: collect_public_identities(
+                backup.iter().map(|entry| entry.ed25519_public_key),
+            )?,
+            audit_trust_identities: collect_public_identities(
+                audit.iter().map(|entry| entry.ed25519_public_key),
+            )?,
         })
     })
     .await
     .map_err(|_| DaemonError::TaskFailed)?
+}
+
+fn collect_public_identities(
+    identities: impl ExactSizeIterator<Item = [u8; 32]>,
+) -> Result<Vec<[u8; 32]>, DaemonError> {
+    let mut collected = Vec::new();
+    collected
+        .try_reserve_exact(identities.len())
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    collected.extend(identities);
+    Ok(collected)
 }
 
 fn backup_trust_fingerprint(

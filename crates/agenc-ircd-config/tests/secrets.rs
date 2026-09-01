@@ -309,3 +309,124 @@ fn host_depth_protects_listener_directories_and_tls_material() -> TestResult {
     }));
     Ok(())
 }
+
+#[test]
+fn host_depth_rejects_writable_directories_and_symlinked_ancestors() -> TestResult {
+    let sandbox = Sandbox::create()?;
+    sandbox.populate_host_layout()?;
+    let text = sandbox.localize(PUBLIC);
+    let resolver = PathResolver::with_base(sandbox.root().join("etc"))?;
+
+    fs::set_permissions(
+        sandbox.root().join("data"),
+        fs::Permissions::from_mode(0o770),
+    )?;
+    let report = Config::parse_text(&text, &resolver, ValidationDepth::Host).err();
+    assert!(report.as_ref().is_some_and(|report| {
+        report.issues().iter().any(|issue| {
+            issue.stage == ValidationStage::PathsAndFileTypes
+                && issue.key.field() == "data_dir"
+                && issue.error == ConfigError::FileRejected
+        })
+    }));
+
+    fs::set_permissions(
+        sandbox.root().join("data"),
+        fs::Permissions::from_mode(0o700),
+    )?;
+    let physical_backup = sandbox.dir("physical-backup/nested", 0o700)?;
+    let backup_alias = sandbox.root().join("backup-alias");
+    symlink(
+        physical_backup
+            .parent()
+            .ok_or("physical backup has no parent")?,
+        &backup_alias,
+    )?;
+    let aliased = mutate(
+        &text,
+        &format!("backup_dir = \"{}/backups\"", sandbox.root().display()),
+        &format!(
+            "backup_dir = \"{}/backup-alias/nested\"",
+            sandbox.root().display()
+        ),
+    );
+    let report = Config::parse_text(&aliased, &resolver, ValidationDepth::Host).err();
+    assert!(report.as_ref().is_some_and(|report| {
+        report.issues().iter().any(|issue| {
+            issue.stage == ValidationStage::PathsAndFileTypes
+                && issue.key.field() == "backup_dir"
+                && issue.error == ConfigError::FileRejected
+        })
+    }));
+    Ok(())
+}
+
+#[test]
+fn host_depth_rejects_hard_links_and_material_under_protected_roots() -> TestResult {
+    let sandbox = Sandbox::create()?;
+    sandbox.populate_host_layout()?;
+    let text = sandbox.localize(PUBLIC);
+    let resolver = PathResolver::with_base(sandbox.root().join("etc"))?;
+    let expect = |document: &str, field: &str, error: ConfigError| {
+        let report = Config::parse_text(document, &resolver, ValidationDepth::Host).err();
+        assert!(report.as_ref().is_some_and(|report| {
+            report.issues().iter().any(|issue| {
+                issue.stage == ValidationStage::PathsAndFileTypes
+                    && issue.key.field() == field
+                    && issue.error == error
+            })
+        }));
+    };
+
+    let master = sandbox.root().join("etc/keys/storage-master.key");
+    let master_alias = sandbox.root().join("etc/keys/storage-master-alias.key");
+    fs::hard_link(&master, &master_alias)?;
+    let hard_linked = mutate(
+        &text,
+        &format!("master_key_file = \"{}\"", master.display()),
+        &format!("master_key_file = \"{}\"", master_alias.display()),
+    );
+    expect(&hard_linked, "master_key_file", ConfigError::FileRejected);
+    fs::remove_file(master_alias)?;
+
+    let backup_trust = sandbox.root().join("backups/backup-trust.toml");
+    fs::copy(
+        sandbox.root().join("etc/trust/backup-trust.toml"),
+        &backup_trust,
+    )?;
+    fs::set_permissions(&backup_trust, fs::Permissions::from_mode(0o600))?;
+    let trust_under_backup = mutate(
+        &text,
+        &format!(
+            "backup_trust_manifest_file = \"{}/etc/trust/backup-trust.toml\"",
+            sandbox.root().display()
+        ),
+        &format!(
+            "backup_trust_manifest_file = \"{}\"",
+            backup_trust.display()
+        ),
+    );
+    expect(
+        &trust_under_backup,
+        "backup_trust_manifest_file",
+        ConfigError::Topology,
+    );
+
+    let certificate = sandbox.root().join("backups/server.crt");
+    fs::copy(sandbox.root().join("etc/tls/server.crt"), &certificate)?;
+    fs::set_permissions(&certificate, fs::Permissions::from_mode(0o600))?;
+    let listener_under_backup = mutate(
+        &text,
+        &format!(
+            "tls_certificate_file = \"{}/etc/tls/server.crt\"",
+            sandbox.root().display()
+        ),
+        &format!("tls_certificate_file = \"{}\"", certificate.display()),
+    );
+    expect(
+        &listener_under_backup,
+        "tls_certificate_file",
+        ConfigError::Topology,
+    );
+    Ok(())
+}

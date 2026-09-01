@@ -83,6 +83,7 @@ pub fn read_protected_bytes(path: &Path, maximum: u64) -> Result<Vec<u8>, Config
     if !path.is_absolute() || path.components().any(is_unsafe_component) {
         return Err(ConfigError::FileRejected);
     }
+    protected_ancestors(path)?;
 
     let fd = openat(
         CWD,
@@ -104,6 +105,7 @@ pub(crate) fn read_protected_text(path: &Path, maximum: u64) -> Result<String, C
 struct ProtectedFileStatus {
     device: u64,
     inode: u64,
+    links: u64,
     size: u64,
     mode: u32,
     modified_seconds: i64,
@@ -124,8 +126,10 @@ fn protected_file_status(
     let changed_seconds = status.st_ctime;
     let changed_nanoseconds = status.st_ctime_nsec;
     if FileType::from_raw_mode(status.st_mode) != FileType::RegularFile
+        || status.st_nlink != 1
         || size > maximum
         || mode & 0o022 != 0
+        || !owned_by_daemon_or_root(status.st_uid)
         || modified_nanoseconds >= 1_000_000_000
         || changed_nanoseconds >= 1_000_000_000
     {
@@ -134,6 +138,7 @@ fn protected_file_status(
     Ok(ProtectedFileStatus {
         device: status.st_dev,
         inode: status.st_ino,
+        links: status.st_nlink,
         size,
         mode,
         modified_seconds,
@@ -204,6 +209,8 @@ pub(crate) fn verify_host_paths(config: &Config, sink: &mut IssueSink) {
         Some(0o700),
         sink,
     );
+    verify_physical_directory_layout(config, sink);
+    verify_protected_material_locations(config, sink);
     for (key, path) in config.secret_paths() {
         if let Err(error) = protected_ancestors(&path) {
             sink.push(stage, key, error);
@@ -251,18 +258,189 @@ fn check_directory(path: &Path, key: SchemaKey, exact_mode: Option<u32>, sink: &
 }
 
 fn directory_metadata(path: &Path, exact_mode: Option<u32>) -> Result<(), ConfigError> {
+    if !path.is_absolute() || path.components().any(is_unsafe_component) {
+        return Err(ConfigError::FileRejected);
+    }
+    protected_ancestors(&path.join("agenc-host-path-check"))?;
     let metadata = fs::symlink_metadata(path).map_err(|_| ConfigError::FileRejected)?;
     if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
         return Err(ConfigError::FileRejected);
     }
     let mode = metadata.permissions().mode() & 0o777;
-    if exact_mode.is_some_and(|expected| mode != expected) {
+    if mode & 0o022 != 0 || exact_mode.is_some_and(|expected| mode != expected) {
         return Err(ConfigError::FileRejected);
     }
-    if exact_mode.is_some() && !owned_by_daemon_or_root(metadata.uid()) {
+    if !owned_by_daemon_or_root(metadata.uid()) {
         return Err(ConfigError::FileRejected);
     }
     Ok(())
+}
+
+#[derive(Debug)]
+struct PhysicalDirectory {
+    canonical: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+impl PhysicalDirectory {
+    fn open(path: &Path) -> Result<Self, ConfigError> {
+        let canonical = fs::canonicalize(path).map_err(|_| ConfigError::FileRejected)?;
+        let metadata = fs::metadata(&canonical).map_err(|_| ConfigError::FileRejected)?;
+        if !metadata.is_dir() {
+            return Err(ConfigError::FileRejected);
+        }
+        Ok(Self {
+            canonical,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+
+    fn same_as(&self, other: &Self) -> bool {
+        self.canonical == other.canonical
+            || (self.device == other.device && self.inode == other.inode)
+    }
+
+    fn within(&self, other: &Self) -> Result<bool, ConfigError> {
+        if self.same_as(other) {
+            return Ok(true);
+        }
+        other.contains_path(&self.canonical)
+    }
+
+    fn overlaps(&self, other: &Self) -> Result<bool, ConfigError> {
+        if self.within(other)? {
+            return Ok(true);
+        }
+        other.within(self)
+    }
+
+    fn contains_path(&self, path: &Path) -> Result<bool, ConfigError> {
+        if path.starts_with(&self.canonical) {
+            return Ok(true);
+        }
+        let Some(parent) = path.parent() else {
+            return Ok(false);
+        };
+        for ancestor in parent.ancestors() {
+            let metadata = fs::metadata(ancestor).map_err(|_| ConfigError::FileRejected)?;
+            if metadata.dev() == self.device && metadata.ino() == self.inode {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
+fn state_directory_layout_is_valid(
+    state: &PhysicalDirectory,
+    data: &PhysicalDirectory,
+    runtime: &PhysicalDirectory,
+    backup: &PhysicalDirectory,
+) -> Result<bool, ConfigError> {
+    Ok(state.within(data)?
+        && !state.same_as(data)
+        && !state.overlaps(runtime)?
+        && !state.overlaps(backup)?)
+}
+
+fn backup_directory_layout_is_valid(
+    backup: &PhysicalDirectory,
+    data: &PhysicalDirectory,
+    runtime: &PhysicalDirectory,
+) -> Result<bool, ConfigError> {
+    Ok(!backup.overlaps(runtime)? && !backup.same_as(data))
+}
+
+fn contained_by_any(path: &Path, roots: &[&PhysicalDirectory]) -> Result<bool, ConfigError> {
+    for root in roots {
+        if root.contains_path(path)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn verify_physical_directory_layout(config: &Config, sink: &mut IssueSink) {
+    let directories = (
+        PhysicalDirectory::open(&config.server.data_dir),
+        PhysicalDirectory::open(&config.server.runtime_dir),
+        PhysicalDirectory::open(&config.storage.state_dir),
+        PhysicalDirectory::open(&config.storage.backup_dir),
+    );
+    let (Ok(data), Ok(runtime), Ok(state), Ok(backup)) = directories else {
+        return;
+    };
+    let stage = ValidationStage::PathsAndFileTypes;
+    match state_directory_layout_is_valid(&state, &data, &runtime, &backup) {
+        Ok(true) => {}
+        Ok(false) => sink.push(
+            stage,
+            SchemaKey::new("storage", "state_dir"),
+            ConfigError::Topology,
+        ),
+        Err(error) => sink.push(stage, SchemaKey::new("storage", "state_dir"), error),
+    }
+    match backup_directory_layout_is_valid(&backup, &data, &runtime) {
+        Ok(true) => {}
+        Ok(false) => sink.push(
+            stage,
+            SchemaKey::new("storage", "backup_dir"),
+            ConfigError::Topology,
+        ),
+        Err(error) => sink.push(stage, SchemaKey::new("storage", "backup_dir"), error),
+    }
+    if runtime.same_as(&data) {
+        sink.push(
+            stage,
+            SchemaKey::new("server", "runtime_dir"),
+            ConfigError::Topology,
+        );
+    }
+}
+
+fn verify_protected_material_locations(config: &Config, sink: &mut IssueSink) {
+    let roots = (
+        PhysicalDirectory::open(&config.server.runtime_dir),
+        PhysicalDirectory::open(&config.storage.state_dir),
+        PhysicalDirectory::open(&config.storage.backup_dir),
+    );
+    let (Ok(runtime), Ok(state), Ok(backup)) = roots else {
+        return;
+    };
+    let roots = [&runtime, &state, &backup];
+    for (key, path) in config
+        .secret_paths()
+        .into_iter()
+        .chain(config.trust_manifest_paths())
+        .chain(config.listener_material_paths())
+        .chain(config.public_text_paths())
+    {
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.nlink() != 1 {
+            sink.push(
+                ValidationStage::PathsAndFileTypes,
+                key,
+                ConfigError::FileRejected,
+            );
+            continue;
+        }
+        let Ok(canonical) = fs::canonicalize(&path) else {
+            continue;
+        };
+        match contained_by_any(&canonical, &roots) {
+            Ok(true) => sink.push(
+                ValidationStage::PathsAndFileTypes,
+                key,
+                ConfigError::Topology,
+            ),
+            Ok(false) => {}
+            Err(error) => sink.push(ValidationStage::PathsAndFileTypes, key, error),
+        }
+    }
 }
 
 /// Returns whether a file owner is the daemon's effective UID or root (spec 4329).
@@ -309,12 +487,15 @@ pub fn load_public_text(path: &Path) -> Result<String, ConfigError> {
 mod tests {
     use std::fs;
     use std::io;
-    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, SystemTime};
 
-    use super::{read_opened_protected_bytes, read_protected_bytes, read_protected_text};
+    use super::{
+        PhysicalDirectory, protected_ancestors, read_opened_protected_bytes, read_protected_bytes,
+        read_protected_text,
+    };
     use crate::error::ConfigError;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -327,9 +508,10 @@ mod tests {
 
     impl TestDirectory {
         fn create() -> io::Result<Self> {
+            let base = protected_test_base()?;
             for _ in 0..32 {
                 let sequence = NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed);
-                let root = std::env::temp_dir().join(format!(
+                let root = base.join(format!(
                     "agenc-protected-text-{}-{sequence}",
                     std::process::id()
                 ));
@@ -358,6 +540,24 @@ mod tests {
             fs::set_permissions(&path, fs::Permissions::from_mode(mode))?;
             Ok(path)
         }
+    }
+
+    fn protected_test_base() -> io::Result<PathBuf> {
+        let candidates = [
+            std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
+            std::env::var_os("CARGO_TARGET_TMPDIR").map(PathBuf::from),
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")),
+        ];
+        for base in candidates.into_iter().flatten() {
+            if fs::create_dir_all(&base).is_ok()
+                && protected_ancestors(&base.join("agenc-test-entry")).is_ok()
+            {
+                return Ok(base);
+            }
+        }
+        Err(io::Error::other(
+            "no protected base is available for path tests",
+        ))
     }
 
     impl Drop for TestDirectory {
@@ -401,6 +601,84 @@ mod tests {
 
         assert_eq!(
             read_protected_bytes(&link, 64),
+            Err(ConfigError::FileRejected)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn protected_bytes_reject_an_unprotected_ancestor() -> TestResult {
+        let directory = TestDirectory::create()?;
+        let loose = directory.path("loose");
+        fs::create_dir(&loose)?;
+        fs::set_permissions(&loose, fs::Permissions::from_mode(0o770))?;
+        let path = loose.join("public.txt");
+        fs::write(&path, b"public")?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+
+        assert_eq!(
+            read_protected_bytes(&path, 64),
+            Err(ConfigError::FileRejected)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn protected_bytes_reject_a_hard_link() -> TestResult {
+        let directory = TestDirectory::create()?;
+        let path = directory.file("public.txt", b"public", 0o600)?;
+        let alias = directory.path("public-alias.txt");
+        fs::hard_link(&path, &alias)?;
+
+        assert_eq!(
+            read_protected_bytes(&path, 64),
+            Err(ConfigError::FileRejected)
+        );
+        assert_eq!(
+            read_protected_bytes(&alias, 64),
+            Err(ConfigError::FileRejected)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn physical_directories_recognize_a_canonical_alias() -> TestResult {
+        let directory = TestDirectory::create()?;
+        let physical = directory.path("physical");
+        fs::create_dir(&physical)?;
+        fs::set_permissions(&physical, fs::Permissions::from_mode(0o700))?;
+        let material = physical.join("material");
+        fs::write(&material, b"material")?;
+        fs::set_permissions(&material, fs::Permissions::from_mode(0o600))?;
+        let alias = directory.path("alias");
+        symlink(&physical, &alias)?;
+
+        let physical = PhysicalDirectory::open(&physical)?;
+        let alias = PhysicalDirectory::open(&alias)?;
+        assert!(physical.same_as(&alias));
+        assert!(physical.overlaps(&alias)?);
+        assert!(physical.contains_path(&fs::canonicalize(&material)?)?);
+        let root_metadata = fs::metadata(&directory.root)?;
+        let simulated_bind_alias = PhysicalDirectory {
+            canonical: directory.path("simulated-bind-alias"),
+            device: root_metadata.dev(),
+            inode: root_metadata.ino(),
+        };
+        assert!(physical.within(&simulated_bind_alias)?);
+        Ok(())
+    }
+
+    #[test]
+    fn physical_directory_rejects_unreadable_or_changed_ancestry() -> TestResult {
+        let directory = TestDirectory::create()?;
+        let physical = directory.path("physical");
+        fs::create_dir(&physical)?;
+        fs::set_permissions(&physical, fs::Permissions::from_mode(0o700))?;
+        let physical = PhysicalDirectory::open(&physical)?;
+        let missing_path = directory.path("removed-ancestor/material");
+
+        assert_eq!(
+            physical.contains_path(&missing_path),
             Err(ConfigError::FileRejected)
         );
         Ok(())

@@ -120,7 +120,7 @@ impl Sandbox {
     ) -> Result<PathBuf, Box<dyn std::error::Error>> {
         let path = self.root.join(relative);
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+            create_private_parent_directories(&self.root, parent)?;
         }
         fs::write(&path, contents)?;
         fs::set_permissions(&path, fs::Permissions::from_mode(mode))?;
@@ -197,6 +197,23 @@ impl Sandbox {
     pub(crate) fn config_file(&self, text: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
         self.file("etc/config.toml", text.as_bytes(), 0o600)
     }
+}
+
+fn create_private_parent_directories(
+    root: &Path,
+    parent: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let relative = parent.strip_prefix(root)?;
+    let mut cursor = root.to_path_buf();
+    for component in relative.components() {
+        cursor.push(component);
+        match fs::create_dir(&cursor) {
+            Ok(()) => fs::set_permissions(&cursor, fs::Permissions::from_mode(0o700))?,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 impl Drop for Sandbox {

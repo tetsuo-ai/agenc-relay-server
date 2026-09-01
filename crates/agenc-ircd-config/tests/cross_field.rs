@@ -580,3 +580,17 @@ fn cross_field_issues_accumulate_together() {
             .all(|issue| issue.error != ConfigError::UnknownKey)
     }));
 }
+
+#[test]
+fn enabled_client_listener_requires_an_onboarding_target() {
+    let text = mutate(PUBLIC, "dns_name = \"chat.example\"\ndns_port = 6697\n", "");
+    let report = parse(&text).err();
+
+    assert!(report.as_ref().is_some_and(|report| {
+        report.issues().iter().any(|issue| {
+            issue.stage == ValidationStage::LocalIdentity
+                && issue.key == SchemaKey::new("network", "dns_name")
+                && issue.error == ConfigError::Topology
+        })
+    }));
+}
