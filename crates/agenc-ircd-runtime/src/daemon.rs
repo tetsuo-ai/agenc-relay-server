@@ -1921,6 +1921,7 @@ async fn run(inputs: DaemonRunInputs) -> Result<DaemonExit, DaemonError> {
         lifecycle,
         admin_lifecycle,
         mut signals,
+        mut maintenance_exited,
         mut state_exited,
         mut listener_exited,
     } = Box::pin(start_owners(StartOwnersInputs {
@@ -1952,6 +1953,7 @@ async fn run(inputs: DaemonRunInputs) -> Result<DaemonExit, DaemonError> {
         budget: Arc::clone(&budget),
         storage: &reload_storage,
         signals: &mut signals,
+        maintenance_exited: &mut maintenance_exited,
         state_exited: &mut state_exited,
         listener_exited: &mut listener_exited,
         liveness: Arc::clone(&liveness),
@@ -2004,8 +2006,14 @@ struct RunningOwners {
     lifecycle: LifecycleControl,
     admin_lifecycle: AdminLifecycleControl,
     signals: mpsc::Receiver<SignalEvent>,
+    maintenance_exited: oneshot::Receiver<Result<(), RuntimeError>>,
     state_exited: oneshot::Receiver<StateCoreExit>,
     listener_exited: oneshot::Receiver<()>,
+}
+
+struct BackgroundOwners {
+    signals: mpsc::Receiver<SignalEvent>,
+    maintenance_exited: oneshot::Receiver<Result<(), RuntimeError>>,
 }
 
 struct AdminOwnerStart {
@@ -2133,8 +2141,8 @@ async fn start_owners(inputs: StartOwnersInputs) -> Result<RunningOwners, Daemon
             .await);
         }
     };
-    let signals = match spawn_background_owners(&mut supervisor, &inbox, admission) {
-        Ok(signals) => signals,
+    let background = match spawn_background_owners(&mut supervisor, &inbox, admission) {
+        Ok(background) => background,
         Err(error) => {
             return Err(unwind_started_owners(
                 &mut supervisor,
@@ -2153,7 +2161,8 @@ async fn start_owners(inputs: StartOwnersInputs) -> Result<RunningOwners, Daemon
         control,
         lifecycle,
         admin_lifecycle,
-        signals,
+        signals: background.signals,
+        maintenance_exited: background.maintenance_exited,
         state_exited,
         listener_exited,
     })
@@ -2253,16 +2262,35 @@ fn spawn_background_owners(
     supervisor: &mut Supervisor,
     inbox: &mpsc::Sender<StateCoreMessage>,
     admission: Arc<TransportAdmission>,
-) -> Result<mpsc::Receiver<SignalEvent>, DaemonError> {
+) -> Result<BackgroundOwners, DaemonError> {
     let (signals, signal_receiver) = mpsc::channel(SIGNAL_EVENT_CAPACITY);
     supervisor.spawn(ChildName::SignalTask, ChildKind::Critical, |token| {
         run_signal_task(token, signals)
     })?;
     let maintenance_inbox = inbox.clone();
+    let (maintenance_exit, maintenance_exited) = oneshot::channel();
     supervisor.spawn(ChildName::MaintenanceTask, ChildKind::Critical, |token| {
-        run_maintenance(token, maintenance_inbox, admission)
+        report_maintenance_completion(
+            run_maintenance(token, maintenance_inbox, admission),
+            maintenance_exit,
+        )
     })?;
-    Ok(signal_receiver)
+    Ok(BackgroundOwners {
+        signals: signal_receiver,
+        maintenance_exited,
+    })
+}
+
+async fn report_maintenance_completion<F>(
+    task: F,
+    completion: oneshot::Sender<Result<(), RuntimeError>>,
+) -> Result<(), RuntimeError>
+where
+    F: Future<Output = Result<(), RuntimeError>>,
+{
+    let result = task.await;
+    let _sent = completion.send(result);
+    result
 }
 
 // agenc-review: allow owner=runtime reviewed=2026-08-31 reason=listener composition keeps each independently owned bounded port and policy authority visible at the root wiring boundary
@@ -2416,6 +2444,7 @@ struct ShutdownWaitInputs<'a> {
     budget: Arc<MemoryBudget>,
     storage: &'a StoragePort,
     signals: &'a mut mpsc::Receiver<SignalEvent>,
+    maintenance_exited: &'a mut oneshot::Receiver<Result<(), RuntimeError>>,
     state_exited: &'a mut oneshot::Receiver<StateCoreExit>,
     listener_exited: &'a mut oneshot::Receiver<()>,
     liveness: Arc<Liveness>,
@@ -2495,6 +2524,7 @@ async fn wait_for_shutdown(inputs: ShutdownWaitInputs<'_>) -> ShutdownWaitResult
         budget,
         storage,
         signals,
+        maintenance_exited,
         state_exited,
         listener_exited,
         liveness,
@@ -2509,6 +2539,7 @@ async fn wait_for_shutdown(inputs: ShutdownWaitInputs<'_>) -> ShutdownWaitResult
     let mut preparation_origin = None;
     let mut activation: Option<ReloadActivationFuture> = None;
     let mut pending_sighup = false;
+    let mut maintenance_running = true;
     let trigger = loop {
         let event = tokio::select! {
             biased;
@@ -2535,6 +2566,9 @@ async fn wait_for_shutdown(inputs: ShutdownWaitInputs<'_>) -> ShutdownWaitResult
             _failure = admin_failed.recv() => Some(SupervisorEvent::AdminFailure),
             process = admin_process.recv() => Some(SupervisorEvent::AdminProcess(process)),
             exit = &mut *state_exited => Some(SupervisorEvent::State(exit)),
+            maintenance = &mut *maintenance_exited, if maintenance_running => {
+                Some(SupervisorEvent::Maintenance(maintenance))
+            },
             _listener = &mut *listener_exited => Some(SupervisorEvent::Listener),
             _ = progress.tick() => None,
         };
@@ -2610,15 +2644,19 @@ async fn wait_for_shutdown(inputs: ShutdownWaitInputs<'_>) -> ShutdownWaitResult
             SupervisorEvent::AdminProcess(Some(AdminProcessAction::Restart)) => {
                 break Ok(ShutdownTrigger::CommittedRestart);
             }
-            SupervisorEvent::State(Ok(StateCoreExit::Indeterminate(_))) => {
-                observer.storage_indeterminate();
-                break Err(DaemonError::TaskFailed);
+            SupervisorEvent::State(completion) => {
+                break Err(state_completion_failure(completion, observer.as_ref()));
+            }
+            SupervisorEvent::Maintenance(completion) => {
+                if let Some(error) = maintenance_completion_failure(completion) {
+                    break Err(error);
+                }
+                maintenance_running = false;
             }
             SupervisorEvent::Signal(None)
             | SupervisorEvent::ReloadPreparation(None)
             | SupervisorEvent::AdminProcess(None)
             | SupervisorEvent::AdminFailure
-            | SupervisorEvent::State(_)
             | SupervisorEvent::Listener => {
                 break Err(DaemonError::TaskFailed);
             }
@@ -2639,6 +2677,25 @@ async fn wait_for_shutdown(inputs: ShutdownWaitInputs<'_>) -> ShutdownWaitResult
     }
 }
 
+fn maintenance_completion_failure(
+    completion: Result<Result<(), RuntimeError>, oneshot::error::RecvError>,
+) -> Option<DaemonError> {
+    match completion {
+        Ok(Ok(())) => None,
+        Ok(Err(_)) | Err(_) => Some(DaemonError::TaskFailed),
+    }
+}
+
+fn state_completion_failure(
+    completion: Result<StateCoreExit, oneshot::error::RecvError>,
+    observer: &RuntimeObserver,
+) -> DaemonError {
+    if matches!(completion, Ok(StateCoreExit::Indeterminate(_))) {
+        observer.storage_indeterminate();
+    }
+    DaemonError::TaskFailed
+}
+
 enum ShutdownTrigger {
     Signal,
     CommittedDie,
@@ -2653,6 +2710,7 @@ enum SupervisorEvent {
     ReloadIdle,
     AdminProcess(Option<AdminProcessAction>),
     AdminFailure,
+    Maintenance(Result<Result<(), RuntimeError>, oneshot::error::RecvError>),
     State(Result<StateCoreExit, oneshot::error::RecvError>),
     Listener,
 }
@@ -3288,9 +3346,50 @@ mod tests {
     use agenc_ircd_domain::DurableAccount;
     use agenc_ircd_storage::AccountRecordBody;
     use agenc_ircd_testkit::{DeterministicMonotonicClock, account_id};
-    use agenc_ircd_types::{Revision, UtcSecond};
+    use agenc_ircd_types::{Revision, ServerId, UtcSecond};
+
+    use crate::observe::log::{LogTarget, LogWriter};
+    use crate::observe::metrics::{MetricLabel, MetricName, MetricsView, QueueName};
+    use crate::state_core::IndeterminateCause;
 
     use super::*;
+
+    struct MemoryLogTarget(Vec<String>);
+
+    impl LogTarget for MemoryLogTarget {
+        fn open_segment(&mut self, _hour: u64) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn write_line(&mut self, line: &str) -> std::io::Result<()> {
+            self.0.push(line.to_owned());
+            Ok(())
+        }
+
+        fn retire_before(&mut self, _hour: u64, _limit: usize) -> std::io::Result<bool> {
+            Ok(true)
+        }
+    }
+
+    fn test_observer() -> (Arc<RuntimeObserver>, LogWriter<MemoryLogTarget>) {
+        let server_id = ServerId::from_bytes([3; 16]);
+        let correlation = Arc::new(CorrelationSource::new(10));
+        let (writer, log) = LogWriter::start(
+            MemoryLogTarget(Vec::new()),
+            LogRetention::DEFAULT,
+            LogFilter::new(Severity::Debug),
+            server_id,
+            Arc::clone(&correlation),
+        );
+        let observer = Arc::new(RuntimeObserver::new(
+            server_id,
+            SystemMonotonicClock::start(),
+            correlation,
+            log,
+            Arc::new(MetricsRegistry::new()),
+        ));
+        (observer, writer)
+    }
 
     const PUBLIC_CONFIG: &str = include_str!("../../agenc-ircd-config/tests/golden/public.toml");
 
@@ -3373,6 +3472,64 @@ mod tests {
         assert_eq!(pending.take(), Some(MaintenanceEvent::RetentionSweep));
         assert_eq!(pending.take(), None);
         assert!(pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn maintenance_completion_triggers_shutdown_without_consuming_the_join_record()
+    -> Result<(), RuntimeError> {
+        let mut supervisor = Supervisor::new();
+        let (completion, completed) = oneshot::channel();
+        supervisor.spawn(ChildName::MaintenanceTask, ChildKind::Critical, |_| {
+            report_maintenance_completion(async { Err(RuntimeError::InvalidValue) }, completion)
+        })?;
+
+        assert!(matches!(
+            maintenance_completion_failure(completed.await),
+            Some(DaemonError::TaskFailed)
+        ));
+        assert_eq!(supervisor.live_children(), 1);
+        let exit = supervisor
+            .next_exit()
+            .await
+            .ok_or(RuntimeError::Cancelled)?;
+        assert_eq!(exit.name, ChildName::MaintenanceTask);
+        assert!(matches!(
+            exit.outcome,
+            Err(ChildFailure::Failed(RuntimeError::InvalidValue))
+        ));
+
+        let (panicked, panic_observed) = oneshot::channel();
+        drop(panicked);
+        assert!(matches!(
+            maintenance_completion_failure(panic_observed.await),
+            Some(DaemonError::TaskFailed)
+        ));
+        assert!(maintenance_completion_failure(Ok(Ok(()))).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn clean_maintenance_completion_preserves_indeterminate_state_observation() {
+        let (observer, _writer) = test_observer();
+        assert!(maintenance_completion_failure(Ok(Ok(()))).is_none());
+        assert!(matches!(
+            state_completion_failure(
+                Ok(StateCoreExit::Indeterminate(
+                    IndeterminateCause::StorageIndeterminate
+                )),
+                observer.as_ref(),
+            ),
+            DaemonError::TaskFailed
+        ));
+        let snapshot = observer.metrics().snapshot(MetricsView::Operator);
+        assert!(snapshot.counts.iter().any(|(key, histogram)| {
+            key.name == MetricName::QueueDepth
+                && key
+                    .labels
+                    .iter()
+                    .any(|label| label == MetricLabel::QueueName(QueueName::Log))
+                && histogram.counts()[0] == 1
+        }));
     }
 
     #[tokio::test]
