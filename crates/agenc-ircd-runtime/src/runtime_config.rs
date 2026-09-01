@@ -344,6 +344,13 @@ impl RuntimeConfigSnapshot {
             .get(LimitKey::DirectConnectionsPerAddress)
     }
 
+    pub(crate) fn crypto_job_ceilings(&self) -> Option<(usize, usize)> {
+        let channel =
+            usize::try_from(self.config.limits.values.get(LimitKey::ChannelKeyJobs)).ok()?;
+        let opaque = usize::try_from(self.config.limits.values.get(LimitKey::OpaqueJobs)).ok()?;
+        Some((channel, opaque))
+    }
+
     /// Returns the currently configured four-phase shutdown budget.
     #[must_use]
     pub const fn shutdown_plan(&self) -> ShutdownPlan {
@@ -1038,6 +1045,14 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let snapshot = snapshot()?;
         assert_eq!(snapshot.direct_connections_per_address(), 16);
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_carries_the_validated_crypto_job_ceilings() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let snapshot = snapshot()?;
+        assert_eq!(snapshot.crypto_job_ceilings(), Some((4, 8)));
         Ok(())
     }
 

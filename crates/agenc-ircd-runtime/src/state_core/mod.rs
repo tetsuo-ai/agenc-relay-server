@@ -2121,6 +2121,9 @@ impl StateCore {
     }
 
     fn reload_floors_accept(&self, candidate: &RuntimeConfigSnapshot) -> bool {
+        if candidate.crypto_job_ceilings().is_none() {
+            return false;
+        }
         let ceilings = candidate.storage_ceilings();
         self.context.head.logical_database_bytes <= ceilings.database_max_bytes
             && self.context.head.backup_stream_bytes <= ceilings.backup_max_bytes
@@ -2134,6 +2137,11 @@ impl StateCore {
         self.context.ceilings = snapshot.storage_ceilings();
         self.context.motd = snapshot.motd_arc();
         self.context.public_info = snapshot.public_info_arc();
+        if let Some((channel_job_limit, opaque_job_limit)) = snapshot.crypto_job_ceilings() {
+            self.context
+                .crypto
+                .reload_job_limits(channel_job_limit, opaque_job_limit);
+        }
         if let Some(admission) = &self.reload_admission {
             admission.reload(snapshot.rates(), snapshot.direct_connections_per_address());
         }

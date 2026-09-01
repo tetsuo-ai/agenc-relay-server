@@ -985,6 +985,12 @@ impl CryptoBridge {
         self.active.len()
     }
 
+    pub(crate) fn reload_job_limits(&self, channel_job_limit: usize, opaque_job_limit: usize) {
+        if let Some(pool) = &self.pool {
+            pool.reload_job_limits(channel_job_limit, opaque_job_limit);
+        }
+    }
+
     /// Returns the fixed completion/waiter ceiling selected at startup.
     #[must_use]
     pub const fn capacity(&self) -> usize {
