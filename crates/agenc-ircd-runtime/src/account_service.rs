@@ -2978,7 +2978,7 @@ impl AccountServiceCoordinator {
             .connection(generation)
             .ok_or(RuntimeError::InvalidValue)?;
         let key = match entry.admission() {
-            AdmissionClass::Direct => BucketKey::Prefix(entry.source()),
+            AdmissionClass::Direct => BucketKey::Prefix(entry.source_prefix()),
             AdmissionClass::Onion => BucketKey::OnionListener,
             AdmissionClass::Admin => return Err(RuntimeError::InvalidValue),
         };

@@ -742,7 +742,7 @@ fn admit(
     let admitted = AdmittedConnection {
         generation,
         purpose: spec.purpose,
-        source,
+        source: source.prefix_key(),
         peer: PeerIdentity::Anonymous,
     };
     let endpoint = Endpoint {

@@ -99,9 +99,9 @@ impl ConnectionEntry {
         self.purpose
     }
 
-    /// Returns the admission key derived from the raw address.
+    /// Returns the masked rate-prefix or onion admission key.
     #[must_use]
-    pub const fn source(&self) -> SourceAddressKey {
+    pub const fn source_prefix(&self) -> SourceAddressKey {
         self.source
     }
 
@@ -171,7 +171,10 @@ impl SessionTable {
         sink: Arc<dyn ClientSink>,
         now: MonotonicTick,
     ) -> Result<(), RuntimeError> {
-        if generation != sink.generation() || self.connections.contains_key(&generation) {
+        if generation != sink.generation()
+            || source != source.prefix_key()
+            || self.connections.contains_key(&generation)
+        {
             return Err(RuntimeError::InvalidValue);
         }
         if self.connections.len() >= self.ceiling {
@@ -513,7 +516,7 @@ mod tests {
         table.open(
             generation,
             ListenerPurpose::ClientTls,
-            SourceAddressKey::ipv4([10, 0, 0, 5]),
+            SourceAddressKey::ipv4([10, 0, 0, 5]).prefix_key(),
             sink(5),
             MonotonicTick::from_ticks(1),
         )?;
@@ -563,7 +566,7 @@ mod tests {
         table.open(
             generation,
             ListenerPurpose::ClientTls,
-            SourceAddressKey::ipv4([10, 0, 0, 1]),
+            SourceAddressKey::ipv4([10, 0, 0, 1]).prefix_key(),
             sink(7),
             now,
         )?;
@@ -572,7 +575,7 @@ mod tests {
                 .open(
                     generation,
                     ListenerPurpose::ClientTls,
-                    SourceAddressKey::ipv4([10, 0, 0, 1]),
+                    SourceAddressKey::ipv4([10, 0, 0, 1]).prefix_key(),
                     sink(7),
                     now,
                 )
@@ -587,7 +590,7 @@ mod tests {
         assert_eq!(entry.opened_at(), now);
         assert!(entry.session().is_none());
         assert!(!entry.sink_gone());
-        assert!(entry.source() == SourceAddressKey::ipv4([10, 0, 0, 1]));
+        assert!(entry.source_prefix() == SourceAddressKey::ipv4([10, 0, 0, 1]).prefix_key());
         assert_eq!(entry.sink().generation(), generation);
 
         let session = bound(1);
@@ -642,13 +645,31 @@ mod tests {
     }
 
     #[test]
+    fn raw_host_keys_are_rejected_at_the_protocol_state_boundary() {
+        let mut table = SessionTable::new();
+        assert_eq!(
+            table
+                .open(
+                    ConnectionGeneration::new(8),
+                    ListenerPurpose::ClientTls,
+                    SourceAddressKey::ipv4([10, 0, 0, 8]),
+                    sink(8),
+                    MonotonicTick::from_ticks(5),
+                )
+                .err(),
+            Some(RuntimeError::InvalidValue)
+        );
+        assert!(table.is_empty());
+    }
+
+    #[test]
     fn registration_binding_rollback_requires_both_exact_identities() -> Result<(), RuntimeError> {
         let mut table = SessionTable::new();
         let generation = ConnectionGeneration::new(17);
         table.open(
             generation,
             ListenerPurpose::ClientTls,
-            SourceAddressKey::ipv4([10, 0, 0, 17]),
+            SourceAddressKey::ipv4([10, 0, 0, 17]).prefix_key(),
             sink(17),
             MonotonicTick::from_ticks(5),
         )?;
@@ -706,14 +727,14 @@ mod tests {
         larger.open(
             first,
             ListenerPurpose::AdminTls,
-            SourceAddressKey::ipv6([1; 16]),
+            SourceAddressKey::ipv6([1; 16]).prefix_key(),
             sink(1),
             now,
         )?;
         larger.open(
             second,
             ListenerPurpose::ClientTls,
-            SourceAddressKey::ipv6([2; 16]),
+            SourceAddressKey::ipv6([2; 16]).prefix_key(),
             sink(2),
             now,
         )?;

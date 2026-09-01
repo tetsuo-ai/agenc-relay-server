@@ -126,10 +126,10 @@ pub enum AddressFamily {
 /// The rate-prefix key a raw source address is reduced to (spec ID-04, line
 /// 6858).
 ///
-/// Direct peers keep the IPv4 /32 or IPv6 /64 host key; the /24 and /56
-/// bucket prefixes are derived by masking. Onion peers share one key. The
-/// type deliberately has no `Debug` or `Display`: the address never leaves
-/// the transport and admission owners.
+/// Direct transport admission may keep an IPv4 /32 or IPv6 /64 host key;
+/// only the /24 or /56 result of [`Self::prefix_key`] may cross into protocol
+/// state. Onion peers share one key. The type deliberately has no `Debug` or
+/// `Display`.
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 pub struct SourceAddressKey {
     family: AddressFamily,
@@ -333,7 +333,8 @@ pub enum StateCoreMessage {
         generation: ConnectionGeneration,
         /// The listener that accepted it.
         purpose: ListenerPurpose,
-        /// The admission key derived from the raw address.
+        /// The already-masked rate-prefix or onion key. Raw host keys never
+        /// enter StateCore.
         source: SourceAddressKey,
         /// The output owner StateCore reserves against.
         sink: Arc<dyn ClientSink>,

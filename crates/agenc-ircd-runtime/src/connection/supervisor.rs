@@ -75,7 +75,7 @@ pub struct AdmittedConnection {
     pub generation: ConnectionGeneration,
     /// The listener that accepted it.
     pub purpose: ListenerPurpose,
-    /// The admission key derived from the raw address.
+    /// The already-masked rate-prefix or onion admission key.
     pub source: SourceAddressKey,
     /// What the transport established about the peer.
     pub peer: PeerIdentity,

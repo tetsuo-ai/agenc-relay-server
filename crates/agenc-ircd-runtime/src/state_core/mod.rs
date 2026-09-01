@@ -1146,12 +1146,13 @@ impl StateCoreContext {
         &mut self,
         generation: ConnectionGeneration,
         purpose: crate::purpose::ListenerPurpose,
-        source: SourceAddressKey,
+        source_prefix: SourceAddressKey,
         sink: Arc<dyn crate::connection::sink::ClientSink>,
     ) -> Result<(), RuntimeError> {
         let now = self.now();
-        self.sessions.open(generation, purpose, source, sink, now)?;
-        let evicted = match self.prefixes.connection_opened(source.prefix_key(), now) {
+        self.sessions
+            .open(generation, purpose, source_prefix, sink, now)?;
+        let evicted = match self.prefixes.connection_opened(source_prefix, now) {
             Ok(evicted) => evicted,
             Err(error) => {
                 let _closed = self.sessions.close(generation);
@@ -1190,7 +1191,7 @@ impl StateCoreContext {
         if !prefix_recorded {
             let _prefix_result = self
                 .prefixes
-                .connection_closed(entry.source().prefix_key(), closed_at);
+                .connection_closed(entry.source_prefix(), closed_at);
         }
         self.buckets.erase_key(BucketKey::Connection(generation));
         if let Some(session) = entry.session() {
@@ -1204,17 +1205,17 @@ impl StateCoreContext {
         generation: ConnectionGeneration,
         closed_at: Option<MonotonicTick>,
     ) -> bool {
-        let Some(source) = self
+        let Some(source_prefix) = self
             .sessions
             .connection(generation)
-            .map(|entry| entry.source())
+            .map(|entry| entry.source_prefix())
         else {
             return false;
         };
         let observed_now = self.now();
         let closed_at = closed_at.map_or(observed_now, |tick| tick.min(observed_now));
         self.prefixes
-            .connection_closed(source.prefix_key(), closed_at)
+            .connection_closed(source_prefix, closed_at)
             .is_ok()
     }
 

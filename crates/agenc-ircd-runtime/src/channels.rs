@@ -1317,18 +1317,18 @@ fn guest_key_prefix_demand(
         .sessions()
         .connection(generation)
         .ok_or(RuntimeError::InvalidValue)?;
-    let key = guest_prefix_bucket(connection.purpose(), connection.source())?;
+    let key = guest_prefix_bucket(connection.purpose(), connection.source_prefix())?;
     let tokens = u64::try_from(tokens).map_err(|_| RuntimeError::Overflow)?;
     BucketDemand::new(BucketKind::ChannelKeyAttempt, key, tokens).map(Some)
 }
 
 fn guest_prefix_bucket(
     purpose: ListenerPurpose,
-    source: crate::state_core::inbox::SourceAddressKey,
+    source_prefix: crate::state_core::inbox::SourceAddressKey,
 ) -> Result<BucketKey, RuntimeError> {
     match purpose {
         ListenerPurpose::ClientTls | ListenerPurpose::ClientWss => {
-            Ok(BucketKey::Prefix(source.prefix_key()))
+            Ok(BucketKey::Prefix(source_prefix))
         }
         ListenerPurpose::ClientOnion => Ok(BucketKey::OnionListener),
         ListenerPurpose::Federation | ListenerPurpose::AdminLocal | ListenerPurpose::AdminTls => {
@@ -1678,10 +1678,11 @@ mod tests {
     #[test]
     fn guest_prefix_keys_follow_the_transport_profile() -> Result<(), RuntimeError> {
         let direct = SourceAddressKey::ipv4([198, 51, 100, 8]);
+        let direct_prefix = direct.prefix_key();
         for purpose in [ListenerPurpose::ClientTls, ListenerPurpose::ClientWss] {
             assert!(matches!(
-                guest_prefix_bucket(purpose, direct)?,
-                BucketKey::Prefix(prefix) if prefix == direct.prefix_key()
+                guest_prefix_bucket(purpose, direct_prefix)?,
+                BucketKey::Prefix(prefix) if prefix == direct_prefix
             ));
         }
         assert!(matches!(
