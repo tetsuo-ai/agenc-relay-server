@@ -9,11 +9,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agenc_ircd_config::{
-    DnsEndpoint, DnsName, OnboardingDescriptor, OnionAddress, OnionEndpoint, SocksEndpoint,
+    DnsEndpoint, DnsName, GroupPolicy, OnboardingDescriptor, OnionAddress, OnionEndpoint,
+    SocksEndpoint,
 };
 use agenc_ircd_runtime::tls::{
     CLIENT_ALPN, CertChain, ClientAuth, PrivateKey, TlsEndpointProfile, TlsStream, TrustStore,
-    build_server_config_blocking,
+    build_server_config_blocking, provider,
 };
 use agenc_ircd_runtime::tor_client::{
     TorClientOwner, TorClientProfile, TorClientTls, TorConnectError, TorIsolationContext,
@@ -21,6 +22,8 @@ use agenc_ircd_runtime::tor_client::{
 use agenc_ircd_testkit::{ScriptedEntropy, TlsFixture};
 use agenc_ircd_types::{AccountId, AccountRandomId, NetworkId, RecoveryEpoch};
 use rustls::ServerConfig;
+use rustls::crypto::aws_lc_rs::kx_group;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -87,6 +90,26 @@ fn server_tls(
         .ok_or_else(|| io::Error::other("test TLS config was unexpectedly shared"))?
         .alpn_protocols = vec![alpn.to_vec()];
     Ok(config)
+}
+
+fn x25519_only_server_tls(
+    fixture: &TlsFixture,
+) -> Result<Arc<ServerConfig>, Box<dyn Error + Send + Sync>> {
+    let mut crypto = provider();
+    crypto.kx_groups = vec![kx_group::X25519];
+    let mut config = ServerConfig::builder_with_provider(Arc::new(crypto))
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![CertificateDer::from(
+                fixture.leaf_certificate_der().to_vec(),
+            )],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                fixture.leaf_private_key_pkcs8_der().to_vec(),
+            )),
+        )?;
+    config.alpn_protocols = vec![CLIENT_ALPN.to_vec()];
+    Ok(Arc::new(config))
 }
 
 fn account(byte: u8) -> AccountId {
@@ -261,6 +284,57 @@ async fn profiles_send_only_the_selected_hostname_through_socks() -> TestResult 
     assert_eq!(exit_request.port, 6697);
     assert_eq!(onion_request.hostname, format!("{}.onion", "a".repeat(56)));
     assert_eq!(onion_request.port, 6697);
+    Ok(())
+}
+
+#[tokio::test]
+async fn strict_hybrid_client_refuses_x25519_while_default_remains_compatible() -> TestResult {
+    let fixture = TlsFixture::mint([37; 32], "chat.example")?;
+    let descriptor = descriptor(*fixture.leaf_spki_sha256())?;
+    let roots = TrustStore::parse(fixture.ca_certificate_der())?;
+    let compatible_tls = TorClientTls::new(roots.clone());
+    let strict_tls = TorClientTls::new(roots).with_group_policy(GroupPolicy::HybridRequired);
+    let context = TorIsolationContext::network(descriptor.network_id);
+    let fallback_server = x25519_only_server_tls(&fixture)?;
+    let (listener, address) = listener().await?;
+    let server = tokio::spawn(proxy(
+        listener,
+        vec![
+            ProxyBehavior::TlsSuccess(Arc::clone(&fallback_server)),
+            ProxyBehavior::TlsRejection(fallback_server),
+        ],
+    ));
+    let mut entropy = entropy_for(1)?;
+    let owner = TorClientOwner::new(
+        SocksEndpoint::Loopback(address),
+        vec![context],
+        Duration::from_secs(1),
+        &mut entropy,
+    )?;
+
+    let compatible = owner
+        .connect(
+            context,
+            TorClientProfile::TorExit,
+            &descriptor,
+            &compatible_tls,
+        )
+        .await?;
+    drop(compatible);
+    assert!(matches!(
+        owner
+            .connect(context, TorClientProfile::TorExit, &descriptor, &strict_tls,)
+            .await,
+        Err(TorConnectError::TlsRejected)
+    ));
+
+    let requests = server.await??;
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.hostname == "chat.example")
+    );
     Ok(())
 }
 

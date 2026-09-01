@@ -30,6 +30,7 @@ use crate::account_service::{
 use crate::admission::{BucketDemand, BucketKey, BucketKind};
 use crate::connection::sink::ConnectionGeneration;
 use crate::observe::metrics::ResultClass;
+use crate::purpose::ListenerPurpose;
 use crate::state_core::fanout::FanoutRequest;
 use crate::state_core::inbox::CloseReason;
 use crate::state_core::session::BoundSession;
@@ -42,6 +43,7 @@ use crate::sync::Arc;
 const MAX_PENDING_ACTIONS: usize = 64;
 const CAPABILITY_LINE_BYTES: usize = 512;
 const CAPABILITY_FIXED_MARGIN: usize = 320;
+const STS_CAPABILITY_VALUE: &str = "duration=31536000";
 
 /// Fixed public and secret inputs for client registration.
 pub struct RegistrationRouterConfig {
@@ -88,6 +90,7 @@ struct CarrierObservation<'a> {
 
 struct ConnectionState {
     registration: RegistrationState,
+    advertised: Arc<CapabilityProfile>,
     lease: Option<NicknameLease>,
     bound: Option<BoundSession>,
     nickname: Option<String>,
@@ -119,7 +122,7 @@ struct PendingRegistration {
 /// Registration router for every public client connection.
 pub struct RegistrationRouter {
     config: RegistrationRuntimeConfig,
-    advertised: CapabilityProfile,
+    advertised: ClientCapabilityProfiles,
     accounts: AccountServiceCoordinator,
     commands: crate::channels::RegisteredCommandExecutor,
     connections: BTreeMap<ConnectionGeneration, ConnectionState>,
@@ -127,6 +130,42 @@ pub struct RegistrationRouter {
     pending_registrations: BTreeMap<ConnectionGeneration, PendingRegistration>,
     pending_closures: Vec<PendingClosure>,
     pending_observations: BTreeMap<(ConnectionGeneration, u64), CommandObservation>,
+}
+
+struct ClientCapabilityProfiles {
+    dns_tls: Arc<CapabilityProfile>,
+    onion: Arc<CapabilityProfile>,
+}
+
+impl ClientCapabilityProfiles {
+    fn new(
+        creation_policy: AccountCreationPolicy,
+        recovery_epoch: RecoveryEpoch,
+    ) -> Result<Self, RuntimeError> {
+        Ok(Self {
+            dns_tls: Arc::new(core_capabilities(
+                creation_policy,
+                recovery_epoch,
+                ListenerPurpose::ClientTls,
+            )?),
+            onion: Arc::new(core_capabilities(
+                creation_policy,
+                recovery_epoch,
+                ListenerPurpose::ClientOnion,
+            )?),
+        })
+    }
+
+    fn for_purpose(&self, purpose: ListenerPurpose) -> Option<Arc<CapabilityProfile>> {
+        match purpose {
+            ListenerPurpose::ClientTls => Some(Arc::clone(&self.dns_tls)),
+            ListenerPurpose::ClientOnion => Some(Arc::clone(&self.onion)),
+            ListenerPurpose::ClientWss
+            | ListenerPurpose::Federation
+            | ListenerPurpose::AdminLocal
+            | ListenerPurpose::AdminTls => None,
+        }
+    }
 }
 
 impl RegistrationRouter {
@@ -147,7 +186,7 @@ impl RegistrationRouter {
         if account_service.network_id != network_id || account_service.server_id != server_id {
             return Err(RuntimeError::InvalidValue);
         }
-        let advertised = core_capabilities(
+        let advertised = ClientCapabilityProfiles::new(
             account_service.creation_policy,
             account_service.recovery_epoch,
         )?;
@@ -240,9 +279,10 @@ impl RegistrationRouter {
             self.connections.insert(generation, state);
             return outcome;
         }
-        let actions = state
-            .registration
-            .message(message, context.now().get(), &self.advertised);
+        let actions =
+            state
+                .registration
+                .message(message, context.now().get(), state.advertised.as_ref());
         let outcome = match actions {
             Ok(actions) => {
                 self.drive_actions(context, generation, &mut state, actions, &mut observation)
@@ -396,7 +436,7 @@ impl RegistrationRouter {
                         match state.registration.message(
                             message,
                             context.now().get(),
-                            &self.advertised,
+                            state.advertised.as_ref(),
                         ) {
                             Ok(actions) => {
                                 let outcome = self.drive_actions(
@@ -1533,6 +1573,14 @@ impl CommandRouter for RegistrationRouter {
         context: &mut StateCoreContext,
         generation: ConnectionGeneration,
     ) {
+        let Some(advertised) = context
+            .sessions()
+            .connection(generation)
+            .and_then(|entry| self.advertised.for_purpose(entry.purpose()))
+        else {
+            close_transport(context, generation);
+            return;
+        };
         let now = context.now();
         let deadline = now.checked_add(REGISTRATION_TIMEOUT_MILLIS);
         if let (Ok(registration), Ok(deadline)) = (
@@ -1561,6 +1609,7 @@ impl CommandRouter for RegistrationRouter {
                 generation,
                 ConnectionState {
                     registration,
+                    advertised,
                     lease: None,
                     bound: None,
                     nickname: None,
@@ -1741,7 +1790,16 @@ impl From<RouteOutcome> for ActionStep {
 fn core_capabilities(
     creation_policy: AccountCreationPolicy,
     recovery_epoch: RecoveryEpoch,
+    purpose: ListenerPurpose,
 ) -> Result<CapabilityProfile, RuntimeError> {
+    let advertise_sts = match purpose {
+        ListenerPurpose::ClientTls => true,
+        ListenerPurpose::ClientOnion => false,
+        ListenerPurpose::ClientWss
+        | ListenerPurpose::Federation
+        | ListenerPurpose::AdminLocal
+        | ListenerPurpose::AdminTls => return Err(RuntimeError::InvalidValue),
+    };
     let recovery_value = format!("v1.{}", recovery_epoch.to_base64url());
     let mut capabilities = Vec::new();
     for (name, value) in [
@@ -1772,6 +1830,12 @@ fn core_capabilities(
     ] {
         capabilities
             .push(CapabilitySpec::new(name, value).map_err(|_| RuntimeError::InvalidValue)?);
+    }
+    if advertise_sts {
+        capabilities.push(
+            CapabilitySpec::new("sts", Some(STS_CAPABILITY_VALUE))
+                .map_err(|_| RuntimeError::InvalidValue)?,
+        );
     }
     if !matches!(creation_policy, AccountCreationPolicy::Closed) {
         capabilities.push(
@@ -1935,7 +1999,11 @@ mod tests {
     #[test]
     fn core_capabilities_and_cloaks_are_closed() -> Result<(), RuntimeError> {
         let recovery_epoch = RecoveryEpoch::from_bytes([0; 16]);
-        let profile = core_capabilities(AccountCreationPolicy::Closed, recovery_epoch)?;
+        let profile = core_capabilities(
+            AccountCreationPolicy::Closed,
+            recovery_epoch,
+            ListenerPurpose::ClientOnion,
+        )?;
         let names = profile
             .capabilities()
             .iter()
@@ -1978,7 +2046,11 @@ mod tests {
                 .and_then(CapabilitySpec::value),
             Some("v1.AAAAAAAAAAAAAAAAAAAAAA")
         );
-        let open = core_capabilities(AccountCreationPolicy::Open, recovery_epoch)?;
+        let open = core_capabilities(
+            AccountCreationPolicy::Open,
+            recovery_epoch,
+            ListenerPurpose::ClientOnion,
+        )?;
         assert_eq!(
             open.capabilities().last().map(CapabilitySpec::name),
             Some("agenc.ag/account-create")
@@ -1989,6 +2061,36 @@ mod tests {
         assert_eq!(
             cloak_from_random(&[0; 25]).err(),
             Some(RuntimeError::InvalidValue)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn transport_capabilities_advertise_sts_only_on_dns_tls() -> Result<(), RuntimeError> {
+        let profiles = ClientCapabilityProfiles::new(
+            AccountCreationPolicy::Closed,
+            RecoveryEpoch::from_bytes([0; 16]),
+        )?;
+        let direct = profiles
+            .for_purpose(ListenerPurpose::ClientTls)
+            .ok_or(RuntimeError::InvalidValue)?;
+        let onion = profiles
+            .for_purpose(ListenerPurpose::ClientOnion)
+            .ok_or(RuntimeError::InvalidValue)?;
+
+        assert_eq!(
+            direct
+                .capabilities()
+                .iter()
+                .find(|capability| capability.name() == "sts")
+                .and_then(CapabilitySpec::value),
+            Some(STS_CAPABILITY_VALUE)
+        );
+        assert!(
+            onion
+                .capabilities()
+                .iter()
+                .all(|capability| capability.name() != "sts")
         );
         Ok(())
     }

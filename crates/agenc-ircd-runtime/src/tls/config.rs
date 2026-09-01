@@ -657,10 +657,25 @@ pub fn build_client_config(
     alpn: Option<&[u8]>,
     client_certificate: Option<(CertChain, PrivateKey)>,
 ) -> Result<Arc<ClientConfig>, TlsConfigError> {
-    let builder = ClientConfig::builder_with_provider(Arc::new(provider()))
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .map_err(|_| TlsConfigError::ProviderUnavailable)?
-        .with_root_certificates(Arc::clone(&roots.roots));
+    build_client_config_with_group_policy(
+        roots,
+        alpn,
+        client_certificate,
+        GroupPolicy::HybridPreferred,
+    )
+}
+
+pub(crate) fn build_client_config_with_group_policy(
+    roots: TrustStore,
+    alpn: Option<&[u8]>,
+    client_certificate: Option<(CertChain, PrivateKey)>,
+    group_policy: GroupPolicy,
+) -> Result<Arc<ClientConfig>, TlsConfigError> {
+    let builder =
+        ClientConfig::builder_with_provider(Arc::new(provider_for_group_policy(group_policy)))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .map_err(|_| TlsConfigError::ProviderUnavailable)?
+            .with_root_certificates(Arc::clone(&roots.roots));
     let mut config = match client_certificate {
         None => builder.with_no_client_auth(),
         Some((chain, key)) => builder
@@ -731,7 +746,19 @@ pub fn build_pinned_client_config(
     roots: TrustStore,
     expected_spki_sha256: [u8; 32],
 ) -> Result<Arc<ClientConfig>, TlsConfigError> {
-    let crypto = Arc::new(provider());
+    build_pinned_client_config_with_group_policy(
+        roots,
+        expected_spki_sha256,
+        GroupPolicy::HybridPreferred,
+    )
+}
+
+pub(crate) fn build_pinned_client_config_with_group_policy(
+    roots: TrustStore,
+    expected_spki_sha256: [u8; 32],
+    group_policy: GroupPolicy,
+) -> Result<Arc<ClientConfig>, TlsConfigError> {
+    let crypto = Arc::new(provider_for_group_policy(group_policy));
     let webpki =
         WebPkiServerVerifier::builder_with_provider(Arc::clone(&roots.roots), Arc::clone(&crypto))
             .build()

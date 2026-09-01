@@ -6,7 +6,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use agenc_ircd_config::{OnboardingDescriptor, SocksEndpoint};
+use agenc_ircd_config::{GroupPolicy, OnboardingDescriptor, SocksEndpoint};
 use agenc_ircd_types::{AccountId, EntropySource, NetworkId};
 use rustls::ClientConfig;
 use rustls::pki_types::ServerName;
@@ -15,9 +15,10 @@ use tokio::net::{TcpStream, UnixStream};
 use zeroize::Zeroizing;
 
 use crate::sync::Arc;
-use crate::tls::{
-    CLIENT_ALPN, ClientTlsStream, TrustStore, build_client_config, build_pinned_client_config,
+use crate::tls::config::{
+    build_client_config_with_group_policy, build_pinned_client_config_with_group_policy,
 };
+use crate::tls::{CLIENT_ALPN, ClientTlsStream, TrustStore};
 
 const SOCKS_VERSION: u8 = 5;
 const SOCKS_USERNAME_PASSWORD: u8 = 2;
@@ -167,6 +168,7 @@ pub struct TorClientOwner {
 #[derive(Clone)]
 pub struct TorClientTls {
     roots: TrustStore,
+    group_policy: GroupPolicy,
 }
 
 impl TorClientTls {
@@ -174,13 +176,33 @@ impl TorClientTls {
     /// implicitly by the connection path.
     #[must_use]
     pub const fn new(roots: TrustStore) -> Self {
-        Self { roots }
+        Self {
+            roots,
+            group_policy: GroupPolicy::HybridPreferred,
+        }
+    }
+
+    /// Selects the validated hybrid-first compatibility or hybrid-required
+    /// policy for future handshakes. Existing connections are unaffected.
+    #[must_use]
+    pub const fn with_group_policy(mut self, group_policy: GroupPolicy) -> Self {
+        self.group_policy = group_policy;
+        self
     }
 
     fn prepare(&self, target: SelectedTarget<'_>) -> Result<Arc<ClientConfig>, TorConnectError> {
         match target.tls_spki_sha256 {
-            Some(pin) => build_pinned_client_config(self.roots.clone(), pin),
-            None => build_client_config(self.roots.clone(), Some(CLIENT_ALPN), None),
+            Some(pin) => build_pinned_client_config_with_group_policy(
+                self.roots.clone(),
+                pin,
+                self.group_policy,
+            ),
+            None => build_client_config_with_group_policy(
+                self.roots.clone(),
+                Some(CLIENT_ALPN),
+                None,
+                self.group_policy,
+            ),
         }
         .map_err(|_| TorConnectError::TlsRejected)
     }
