@@ -26,6 +26,52 @@ struct PrefixRow {
     last_close: MonotonicTick,
 }
 
+enum PrefixOpenRollback {
+    Existing {
+        previous: PrefixRow,
+    },
+    Inserted {
+        evicted: Option<(SourceAddressKey, PrefixRow)>,
+    },
+}
+
+/// One speculative prefix opening that restores the registry unless committed.
+pub(crate) struct PrefixOpenTransaction<'a> {
+    registry: &'a mut PrefixRegistry,
+    prefix: SourceAddressKey,
+    rollback: Option<PrefixOpenRollback>,
+}
+
+impl PrefixOpenTransaction<'_> {
+    /// Keeps the opening and returns the idle prefix displaced by it.
+    pub(crate) fn commit(mut self) -> Option<SourceAddressKey> {
+        self.rollback.take().and_then(|rollback| match rollback {
+            PrefixOpenRollback::Existing { .. } => None,
+            PrefixOpenRollback::Inserted { evicted } => evicted.map(|(prefix, _)| prefix),
+        })
+    }
+}
+
+impl Drop for PrefixOpenTransaction<'_> {
+    fn drop(&mut self) {
+        let Some(rollback) = self.rollback.take() else {
+            return;
+        };
+        match rollback {
+            PrefixOpenRollback::Existing { previous } => {
+                self.registry.rows.insert(self.prefix, previous);
+            }
+            PrefixOpenRollback::Inserted { evicted } => {
+                self.registry.rows.remove(&self.prefix);
+                if let Some((prefix, row)) = evicted {
+                    self.registry.rows.insert(prefix, row);
+                }
+                self.registry.recompute_next_idle_erasure();
+            }
+        }
+    }
+}
+
 /// Live-connection counts per prefix and the erasure clock for idle rows.
 pub struct PrefixRegistry {
     rows: HashMap<SourceAddressKey, PrefixRow>,
@@ -57,18 +103,34 @@ impl PrefixRegistry {
     pub fn connection_opened(
         &mut self,
         prefix: SourceAddressKey,
-        _now: MonotonicTick,
+        now: MonotonicTick,
     ) -> Result<Option<SourceAddressKey>, RuntimeError> {
+        Ok(self.begin_connection_open(prefix, now)?.commit())
+    }
+
+    /// Begins one reversible opening so coupled admission checks can finish
+    /// before the prefix mutation becomes authoritative.
+    pub(crate) fn begin_connection_open(
+        &mut self,
+        prefix: SourceAddressKey,
+        _now: MonotonicTick,
+    ) -> Result<PrefixOpenTransaction<'_>, RuntimeError> {
         if let Some(row) = self.rows.get_mut(&prefix) {
+            let previous = *row;
             row.live = row.live.checked_add(1).ok_or(RuntimeError::Overflow)?;
-            return Ok(None);
+            return Ok(PrefixOpenTransaction {
+                registry: self,
+                prefix,
+                rollback: Some(PrefixOpenRollback::Existing { previous }),
+            });
         }
         let evicted = if self.rows.len() >= self.ceiling {
-            Some(
-                self.evict_longest_idle()
-                    .ok_or(RuntimeError::LimitExceeded)?,
-            )
+            let victim = self.longest_idle().ok_or(RuntimeError::LimitExceeded)?;
+            self.rows.remove_entry(&victim)
         } else {
+            self.rows
+                .try_reserve(1)
+                .map_err(|_| RuntimeError::MemoryExhausted)?;
             None
         };
         self.rows.insert(
@@ -78,7 +140,14 @@ impl PrefixRegistry {
                 last_close: MonotonicTick::from_ticks(0),
             },
         );
-        Ok(evicted)
+        if evicted.is_some() {
+            self.recompute_next_idle_erasure();
+        }
+        Ok(PrefixOpenTransaction {
+            registry: self,
+            prefix,
+            rollback: Some(PrefixOpenRollback::Inserted { evicted }),
+        })
     }
 
     /// Records one closed connection on `prefix` and starts its idle clock.
@@ -162,18 +231,12 @@ impl PrefixRegistry {
         self.rows.is_empty()
     }
 
-    fn evict_longest_idle(&mut self) -> Option<SourceAddressKey> {
-        let victim = self
-            .rows
+    fn longest_idle(&self) -> Option<SourceAddressKey> {
+        self.rows
             .iter()
             .filter(|(_, row)| row.live == 0)
             .min_by_key(|(_, row)| row.last_close)
-            .map(|(prefix, _)| *prefix);
-        if let Some(prefix) = victim {
-            self.rows.remove(&prefix);
-            self.recompute_next_idle_erasure();
-        }
-        victim
+            .map(|(prefix, _)| *prefix)
     }
 
     fn recompute_next_idle_erasure(&mut self) {

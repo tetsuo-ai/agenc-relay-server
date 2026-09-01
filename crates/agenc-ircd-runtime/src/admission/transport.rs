@@ -164,44 +164,58 @@ impl TransportAdmissionState {
         direct_per_address: u64,
     ) -> bool {
         let host = source.host_key();
-        if self.direct_hosts.get(&host).copied().unwrap_or(0) >= direct_per_address {
+        let current = self.direct_hosts.get(&host).copied().unwrap_or(0);
+        if current >= direct_per_address {
+            return false;
+        }
+        let Some(next) = current.checked_add(1) else {
+            return false;
+        };
+        if !self.direct_hosts.contains_key(&host) && self.direct_hosts.try_reserve(1).is_err() {
             return false;
         }
         let prefix = source.prefix_key();
-        if !self.charge_connection(now, BucketKind::NewDirectTcp, BucketKey::Prefix(prefix)) {
-            return false;
-        }
-        let Ok(evicted) = self.prefixes.connection_opened(prefix, now) else {
-            return false;
+        let evicted = {
+            let Ok(opening) = self.prefixes.begin_connection_open(prefix, now) else {
+                return false;
+            };
+            if !Self::charge_connection(
+                &mut self.buckets,
+                now,
+                BucketKind::NewDirectTcp,
+                BucketKey::Prefix(prefix),
+            ) {
+                return false;
+            }
+            self.direct_hosts.insert(host, next);
+            opening.commit()
         };
         self.erase_evicted_prefix(evicted);
-        let count = self.direct_hosts.entry(host).or_insert(0);
-        let Some(next) = count.checked_add(1) else {
-            let _closed = self.prefixes.connection_closed(prefix, now);
-            return false;
-        };
-        *count = next;
         true
     }
 
     fn admit_onion(&mut self, now: MonotonicTick) -> bool {
         let source = SourceAddressKey::onion_listener();
-        if !self.charge_connection(
-            now,
-            BucketKind::NewOnionConnection,
-            BucketKey::OnionListener,
-        ) {
-            return false;
-        }
-        let Ok(evicted) = self.prefixes.connection_opened(source, now) else {
-            return false;
+        let evicted = {
+            let Ok(opening) = self.prefixes.begin_connection_open(source, now) else {
+                return false;
+            };
+            if !Self::charge_connection(
+                &mut self.buckets,
+                now,
+                BucketKind::NewOnionConnection,
+                BucketKey::OnionListener,
+            ) {
+                return false;
+            }
+            opening.commit()
         };
         self.erase_evicted_prefix(evicted);
         true
     }
 
     fn charge_connection(
-        &mut self,
+        buckets: &mut BucketTable,
         now: MonotonicTick,
         connection_kind: BucketKind,
         key: BucketKey,
@@ -212,7 +226,7 @@ impl TransportAdmissionState {
         let Ok(handshake) = BucketDemand::new(BucketKind::TlsHandshake, key, 1) else {
             return false;
         };
-        self.buckets
+        buckets
             .charge_all_or_nothing(now, &[connection, handshake])
             .is_ok()
     }
@@ -347,6 +361,32 @@ mod tests {
             BucketKey::Prefix(first.prefix_key()),
         );
         assert_eq!(available, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn prefix_refusal_consumes_no_connection_or_handshake_credit() -> Result<(), RuntimeError> {
+        let mut limits = RateLimits::defaults();
+        limits.set(BucketKind::NewDirectTcp, BucketRate::new(1, 3_600, 1)?)?;
+        limits.set(BucketKind::TlsHandshake, BucketRate::new(1, 3_600, 1)?)?;
+        let (admission, _, _) = admission_with_rates(16, 1_000, limits)?;
+        lock(&admission.state).prefixes = PrefixRegistry::with_ceiling(1);
+        let first = SourceAddressKey::ipv4([192, 0, 2, 1]);
+        let second = SourceAddressKey::ipv4([198, 51, 100, 1]);
+
+        assert_eq!(
+            admission.admit(ListenerPurpose::ClientTls, first),
+            AdmissionVerdict::Admit
+        );
+        assert_eq!(
+            admission.admit(ListenerPurpose::ClientTls, second),
+            AdmissionVerdict::Refuse
+        );
+        let _closed_at = admission.released(ListenerPurpose::ClientTls, first);
+        assert_eq!(
+            admission.admit(ListenerPurpose::ClientTls, second),
+            AdmissionVerdict::Admit
+        );
         Ok(())
     }
 

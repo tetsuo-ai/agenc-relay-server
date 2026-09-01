@@ -805,15 +805,32 @@ fn prepare_admission(
         ListenerPurpose::AdminLocal | ListenerPurpose::AdminTls
     );
     let purpose = spec.purpose;
-    let lease = if address_accounted {
-        let close_permit =
+    let close_permit = if address_accounted {
+        Some(
             shared
                 .connection_closes
                 .try_reserve()
                 .map_err(|_| AdmissionFailure {
                     reason: RefusalReason::TaskTree,
                     lease: None,
-                })?;
+                })?,
+        )
+    } else {
+        None
+    };
+    let Ok(permits) = acquire_charges(shared, spec.purpose, limits, tls) else {
+        return Err(AdmissionFailure {
+            reason: RefusalReason::MemoryExhausted,
+            lease: None,
+        });
+    };
+    let Ok(token) = connection_token.child() else {
+        return Err(AdmissionFailure {
+            reason: RefusalReason::TaskTree,
+            lease: None,
+        });
+    };
+    let lease = if let Some(close_permit) = close_permit {
         if shared.admission.admit(spec.purpose, source) == AdmissionVerdict::Refuse {
             return Err(AdmissionFailure {
                 reason: RefusalReason::Admission,
@@ -827,18 +844,6 @@ fn prepare_admission(
         ))
     } else {
         None
-    };
-    let Ok(permits) = acquire_charges(shared, spec.purpose, limits, tls) else {
-        return Err(AdmissionFailure {
-            reason: RefusalReason::MemoryExhausted,
-            lease,
-        });
-    };
-    let Ok(token) = connection_token.child() else {
-        return Err(AdmissionFailure {
-            reason: RefusalReason::TaskTree,
-            lease,
-        });
     };
     Ok(Admission {
         global_slot,

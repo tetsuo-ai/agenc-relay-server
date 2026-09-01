@@ -533,7 +533,7 @@ async fn refusals_close_the_socket_before_tls() -> TestResult {
 }
 
 #[tokio::test]
-async fn post_admission_refusals_release_transport_quota() -> TestResult {
+async fn resource_refusals_happen_before_transport_quota() -> TestResult {
     let fixture = fixture(62)?;
     let tls = server(&fixture, TlsEndpointProfile::Client, ClientAuth::None)?;
     let admission = Arc::new(CountingAdmission::default());
@@ -548,8 +548,8 @@ async fn post_admission_refusals_release_transport_quota() -> TestResult {
     let client = tls_client(address, client(&fixture, CLIENT_ALPN, false)?, Vec::new());
     assert!(joined(client).await?.is_err());
     tokio::time::sleep(SETTLE).await;
-    assert_eq!(admission.admitted.load(Ordering::Relaxed), 1);
-    assert_eq!(admission.released.load(Ordering::Relaxed), 1);
+    assert_eq!(admission.admitted.load(Ordering::Relaxed), 0);
+    assert_eq!(admission.released.load(Ordering::Relaxed), 0);
     let (admitted, refused) = finish(harness).await?;
     assert_eq!((admitted, refused), (0, 1));
     Ok(())
