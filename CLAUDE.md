@@ -1,7 +1,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **agenc-ircd** (75445 symbols, 185864 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **agenc-ircd** (75477 symbols, 185916 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
@@ -43,7 +43,7 @@ This project is indexed by GitNexus as **agenc-ircd** (75445 symbols, 185864 rel
 | Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
 | Work in the Tests area (1559 symbols) | `.claude/skills/generated/tests/SKILL.md` |
 | Work in the State_core area (653 symbols) | `.claude/skills/generated/state-core/SKILL.md` |
-| Work in the Scripts area (340 symbols) | `.claude/skills/generated/scripts/SKILL.md` |
+| Work in the Scripts area (341 symbols) | `.claude/skills/generated/scripts/SKILL.md` |
 | Work in the Admission area (178 symbols) | `.claude/skills/generated/admission/SKILL.md` |
 | Work in the Observe area (120 symbols) | `.claude/skills/generated/observe/SKILL.md` |
 | Work in the Listener area (106 symbols) | `.claude/skills/generated/listener/SKILL.md` |

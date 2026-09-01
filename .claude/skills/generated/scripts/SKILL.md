@@ -1,11 +1,11 @@
 ---
 name: scripts
-description: "Skill for the Scripts area of agenc-ircd. 340 symbols across 20 files."
+description: "Skill for the Scripts area of agenc-ircd. 341 symbols across 20 files."
 ---
 
 # Scripts
 
-340 symbols | 20 files | Cohesion: 87%
+341 symbols | 20 files | Cohesion: 87%
 
 ## When to Use
 
@@ -20,7 +20,7 @@ description: "Skill for the Scripts area of agenc-ircd. 340 symbols across 20 fi
 | `scripts/check-evidence.py` | load_json, load_toml, validate_catalog, validate_schema, git_environment (+36) |
 | `scripts/requirements.py` | task_for, quote, default_binding, task_states, binding_with_current_status (+30) |
 | `scripts/generate-stage-one.py` | lower_snake, upper_camel, rust_string, parse_registry, render_registry_round_trip_tests (+23) |
-| `scripts/check-workspace.py` | load_toml, vendored_tree_sha256, validate_vendored_patches, validate_toolchain_policy, validate_toolchain (+19) |
+| `scripts/check-workspace.py` | load_toml, vendored_tree_sha256, validate_vendored_patches, validate_toolchain_policy, validate_toolchain (+20) |
 | `scripts/check-stage-one.py` | digest, checked_sources, profile_digests, reject_single_byte_changes, parse_registry (+17) |
 | `scripts/run-gate.py` | load_gates, resolve_commands, utc_timestamp, execute, reject_symlink_parents (+14) |
 | `scripts/check-stage-four.py` | load_toml, vendored_tree_sha256, file_sha256, validate_modules, validate_manifests (+14) |
