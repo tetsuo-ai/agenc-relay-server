@@ -73,6 +73,8 @@ const MAX_ORDINARY_BATCH_LINES: usize = 266;
 const ADMIN_PROCESS_CAPACITY: usize = 1;
 /// Periodic opportunity to replace one expired audit prefix.
 const AUDIT_RETENTION_SWEEP: Duration = Duration::from_secs(60 * 60);
+/// Cooperative cadence for polling an admitted storage-owner completion.
+const ADMIN_STORAGE_COMPLETION_POLL: Duration = Duration::from_millis(1);
 /// Checked conversion unit for configured retention days.
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 /// Maximum directory entries examined while reconciling one interrupted
@@ -88,6 +90,16 @@ fn acquire_audit_export_memory(
     let rendered = MemoryCharge::allocation(MAX_AUDIT_EXPORT_BYTES)?;
     let charges = BoundedMemoryCharges::new(&[frozen, rendered])?;
     budget.try_acquire_batch(charges).map_err(Into::into)
+}
+
+// agenc-review: focus owner=runtime reviewed=2026-09-01 reason=cooperative polling leaves admitted storage work owned by the joined storage thread without spawning a detachable blocking waiter
+async fn wait_storage_completion<T>(completion: StorageCompletion<T>) -> Result<T, StorageError> {
+    loop {
+        match completion.try_take()? {
+            Some(result) => return result,
+            None => tokio::time::sleep(ADMIN_STORAGE_COMPLETION_POLL).await,
+        }
+    }
 }
 
 /// A committed administrative process request.
@@ -893,14 +905,14 @@ impl AdminOwner {
         let Ok(job) = self.audit.prepare_retention(now.get(), retention_seconds) else {
             return Err(AdminLifecycleFailure::Audit);
         };
-        let scan = tokio::task::spawn_blocking(move || job.run());
-        let tbs = tokio::select! {
-            () = token.cancelled() => return Err(AdminLifecycleFailure::Unavailable),
-            result = scan => match result {
-                Ok(Ok(Some(tbs))) => tbs,
-                Ok(Ok(None)) => return Ok(()),
-                Ok(Err(_)) | Err(_) => return Err(AdminLifecycleFailure::Audit),
-            }
+        let scan = tokio::task::spawn_blocking(move || job.run()).await;
+        if token.is_cancelled() {
+            return Err(AdminLifecycleFailure::Unavailable);
+        }
+        let tbs = match scan {
+            Ok(Ok(Some(tbs))) => tbs,
+            Ok(Ok(None)) => return Ok(()),
+            Ok(Err(_)) | Err(_) => return Err(AdminLifecycleFailure::Audit),
         };
         let checkpoint = self
             .audit
@@ -1311,18 +1323,11 @@ impl AdminOwner {
             });
         let result = match completion {
             Ok(completion) => {
-                let joined = tokio::task::spawn_blocking(move || completion.wait());
-                tokio::select! {
-                    () = token.cancelled() => return,
-                    result = joined => match result {
-                        Ok(Ok(_receipt)) => Ok(()),
-                        Ok(Err(error)) => Err(map_backup_failure(error)),
-                        Err(_) => {
-                            self.fail_closed(generation);
-                            return;
-                        }
-                    }
+                let completed = wait_storage_completion(completion).await;
+                if token.is_cancelled() {
+                    return;
                 }
+                completed.map(|_receipt| ()).map_err(map_backup_failure)
             }
             Err(failure) => Err(failure),
         };
@@ -2086,14 +2091,10 @@ impl AdminOwner {
         selector: StatsSelector,
         token: &CancellationToken,
     ) -> Result<Vec<String>, AdminCoreFailure> {
-        let mut storage_task = if selector == StatsSelector::Storage {
+        let mut storage_completion = if selector == StatsSelector::Storage {
             self.statistics_storage
                 .as_ref()
-                .map(|storage| {
-                    storage
-                        .try_statistics()
-                        .map(|completion| tokio::task::spawn_blocking(move || completion.wait()))
-                })
+                .map(StoragePort::try_statistics)
                 .transpose()
                 .map_err(|_| AdminCoreFailure::StorageUnavailable)?
         } else {
@@ -2101,10 +2102,10 @@ impl AdminOwner {
         };
         let (mut snapshot, storage) = tokio::time::timeout(Duration::from_secs(1), async {
             let snapshot = self.core.snapshot(token).await?;
-            let storage = if let Some(task) = storage_task.take() {
+            let storage = if let Some(completion) = storage_completion.take() {
                 Some(
-                    task.await
-                        .map_err(|_| AdminCoreFailure::StorageUnavailable)?
+                    wait_storage_completion(completion)
+                        .await
                         .map_err(|_| AdminCoreFailure::StorageUnavailable)?,
                 )
             } else {
