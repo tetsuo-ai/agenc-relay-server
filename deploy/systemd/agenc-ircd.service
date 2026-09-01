@@ -37,6 +37,7 @@ LogsDirectory=agenc-ircd
 LogsDirectoryMode=0700
 ReadOnlyPaths=/var/lib/agenc-ircd/keys /var/lib/agenc-ircd/trust
 ReadWritePaths=/var/lib/agenc-ircd/state /var/lib/agenc-ircd/backups /var/lib/agenc-ircd/logs /var/log/agenc-ircd /run/agenc-ircd
+ExecStartPre=/usr/bin/setfacl --modify group:agenc-ircd-sockets:r-x,default:group:agenc-ircd-sockets:rw- /run/agenc-ircd
 ExecStartPre=/usr/bin/agenc-ircd check-config --config /etc/agenc-ircd/config.toml
 ExecStart=/usr/bin/agenc-ircd serve --config /etc/agenc-ircd/config.toml
 KillSignal=SIGTERM

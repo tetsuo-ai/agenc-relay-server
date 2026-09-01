@@ -14,6 +14,17 @@ SYSUSERS = ROOT / "deploy/sysusers.d/agenc-ircd.conf"
 TMPFILES = ROOT / "deploy/tmpfiles.d/agenc-ircd.conf"
 TOR = ROOT / "deploy/tor/agenc-ircd.torrc.snippet"
 
+SOCKET_ACCESS_GROUP = "agenc-ircd-sockets"
+SOCKET_ACCESS_COMMAND = (
+    "/usr/bin/setfacl --modify "
+    f"group:{SOCKET_ACCESS_GROUP}:r-x,"
+    f"default:group:{SOCKET_ACCESS_GROUP}:rw- /run/agenc-ircd"
+)
+SYSUSER_LINES = [
+    f"g {SOCKET_ACCESS_GROUP} -",
+    'u agenc-ircd - "AgenC IRC daemon" /var/lib/agenc-ircd',
+]
+
 PROFILE_FAMILIES = {
     "direct.conf": "AF_UNIX AF_INET AF_INET6",
     "dual.conf": "AF_UNIX AF_INET AF_INET6",
@@ -55,7 +66,6 @@ SERVICE_VALUES = {
     ("Service", "LogsDirectoryMode"): "0700",
     ("Service", "ReadOnlyPaths"): "/var/lib/agenc-ircd/keys /var/lib/agenc-ircd/trust",
     ("Service", "ReadWritePaths"): "/var/lib/agenc-ircd/state /var/lib/agenc-ircd/backups /var/lib/agenc-ircd/logs /var/log/agenc-ircd /run/agenc-ircd",
-    ("Service", "ExecStartPre"): "/usr/bin/agenc-ircd check-config --config /etc/agenc-ircd/config.toml",
     ("Service", "ExecStart"): "/usr/bin/agenc-ircd serve --config /etc/agenc-ircd/config.toml",
     ("Service", "KillSignal"): "SIGTERM",
     ("Service", "TimeoutStopSec"): "120",
@@ -64,6 +74,10 @@ SERVICE_VALUES = {
 }
 
 SERVICE_MULTI_VALUES = {
+    ("Service", "ExecStartPre"): [
+        SOCKET_ACCESS_COMMAND,
+        "/usr/bin/agenc-ircd check-config --config /etc/agenc-ircd/config.toml",
+    ],
     ("Service", "SystemCallFilter"): [
         "@system-service",
         "~@privileged @resources @debug @mount @raw-io",
@@ -267,8 +281,8 @@ def validate(
         for line in sysusers.splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     ]
-    if sysuser_lines != ['u agenc-ircd - "AgenC IRC daemon" /var/lib/agenc-ircd']:
-        errors.append("sysusers: the dedicated account record is missing or duplicated")
+    if sysuser_lines != SYSUSER_LINES:
+        errors.append("sysusers: the daemon account or socket-access group is invalid")
     tmpfile_errors, tmpfile_entries = validate_tmpfiles(tmpfiles)
     errors.extend(tmpfile_errors)
     errors.extend(validate_tor(tor, service_values, tmpfile_entries))
@@ -312,6 +326,9 @@ def self_test() -> list[str]:
         (service, {**profiles, "onion-local-admin.conf": profiles["onion-local-admin.conf"].replace("AF_UNIX", "AF_UNIX AF_INET")}, sysusers, tmpfiles, tor, False),
         (service, profiles, sysusers, tmpfiles, tor.replace("/var/lib/tor/agenc-ircd", "/var/lib/agenc-ircd/tor"), False),
         (service, profiles, sysusers, tmpfiles + "\nd /var/lib/tor/agenc-ircd 0700 agenc-ircd agenc-ircd -\n", tor, False),
+        (service.replace(SOCKET_ACCESS_COMMAND, SOCKET_ACCESS_COMMAND.replace("r-x", "rwx", 1)), profiles, sysusers, tmpfiles, tor, False),
+        (service.replace(",default:group:agenc-ircd-sockets:rw-", ""), profiles, sysusers, tmpfiles, tor, False),
+        (service, profiles, sysusers.replace("g agenc-ircd-sockets -\n", ""), tmpfiles, tor, False),
     ]
     for index, case in enumerate(cases):
         if not validate(*case):

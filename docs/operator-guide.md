@@ -2,9 +2,9 @@
 
 ## Install the service account and directories
 
-Install the records from `deploy/sysusers.d` and `deploy/tmpfiles.d` with the host's normal systemd tools. The daemon runs as `agenc-ircd`. Keep `/var/lib/agenc-ircd`, its key directory, its state directory, its trust directory, and its backup directory at mode 0700. Secret files use mode 0600.
+Install the records from `deploy/sysusers.d` and `deploy/tmpfiles.d` with the host's normal systemd tools. The daemon runs as `agenc-ircd`. The sysusers record also creates `agenc-ircd-sockets`, the group used only to reach the runtime sockets. Keep `/var/lib/agenc-ircd`, its key directory, its state directory, its trust directory, and its backup directory at mode 0700. Secret files use mode 0600.
 
-Install `deploy/systemd/agenc-ircd.service` under `/etc/systemd/system`. Choose the matching address-family file from `deploy/systemd/profiles` and install it as the service drop-in described in `deploy/README.md`. The daemon opens configured listeners directly; systemd socket activation is not supported. Review the executable and configuration paths before enabling the service. Run the deployment checker from the source tree:
+Install `deploy/systemd/agenc-ircd.service` under `/etc/systemd/system`. Install the host package that provides `/usr/bin/setfacl`. Choose the matching address-family file from `deploy/systemd/profiles` and install it as the service drop-in described in `deploy/README.md`. The daemon opens configured listeners directly; systemd socket activation is not supported. Review the executable and configuration paths before enabling the service. Run the deployment checker from the source tree:
 
 ```sh
 python3 scripts/check-deploy.py check
@@ -34,6 +34,12 @@ Initialization prints a Tor fragment, the service-unit reminder, and certificate
 Place each certificate and private key at the path shown in the generated configuration. Check the certificate identity and the configured DNS name or onion pin. Set `enabled = true` only for listeners whose bind address, certificate, and transport purpose have been reviewed.
 
 For an onion listener, install `deploy/tor/agenc-ircd.torrc.snippet` after checking the hidden-service and Unix-socket paths. Tor creates the onion identity. Copy the resulting onion address and the certificate SPKI hash into the paired configuration fields.
+
+Add the Tor service account to `agenc-ircd-sockets`, then restart Tor so its process receives the new supplementary group. Keep `/var/lib/tor/agenc-ircd` owned by the Tor service account and inaccessible to `agenc-ircd` and `agenc-ircd-sockets`. The shared group applies only to `/run/agenc-ircd` and the sockets below it.
+
+Add each approved local administrator login to the same group and start a new login session. Put each administrator's exact numeric UID in the local listener's `allowed_uids`, and keep the shared group GID out of `allowed_gids`. The group grants directory traversal and socket connection. Administrative access still requires UID admission and the configured Ed25519 operator proof.
+
+At each daemon start, the service gives `agenc-ircd-sockets` traverse access to the mode-0750 runtime directory and installs a default read-write ACL for new mode-0660 sockets. Verify the resulting modes and named ACL entries with the commands in `deploy/README.md` before enabling the onion listener or local administration.
 
 ## Check the stopped configuration
 

@@ -19,6 +19,7 @@ mkdir -p \
     "$qualification_root/usr/bin" \
     "$qualification_root/etc/systemd/system/agenc-ircd.service.d"
 install -m 0755 /bin/true "$qualification_root/usr/bin/agenc-ircd"
+install -m 0755 /bin/true "$qualification_root/usr/bin/setfacl"
 install -m 0644 \
     deploy/systemd/agenc-ircd.service \
     "$qualification_root/etc/systemd/system/agenc-ircd.service"
