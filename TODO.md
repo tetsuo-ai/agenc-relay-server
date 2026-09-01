@@ -946,6 +946,579 @@ Outcome: a standalone core node safely composes wire, domain, authentication,
 storage, configuration, administration, and bounded runtime ownership over
 TLS-only direct, Tor-exit, and onion profiles.
 
+### Stage 06 completion checklist
+
+This checklist starts from commit
+`197cbcb3423cecbf424dd3c06046c2d63f9ab02c` on `stage-06-runtime`. The
+local and remote branches match at that commit, the working tree is clean, and
+the branch contains 73 commits beyond the local `main` pointer. Use the task
+definitions below as the acceptance authority. This checklist sets the order
+for closing them without creating another development line.
+
+#### Branch and worktree control
+
+- [x] Keep the Stage 06 implementation in the existing
+  `/home/tetsuo/git/AgenC/agenc-ircd` worktree.
+- [x] Keep all Stage 06 commits on `stage-06-runtime` and push them to
+  `origin/stage-06-runtime`.
+- [x] Remove the obsolete Stage 06 worktrees and branch pointers.
+- [ ] Do not create another persistent Stage 06 worktree or branch.
+- [ ] Treat `main` only as the comparison and pull-request base.
+- [ ] Before editing a code symbol, run the required GitNexus upstream impact
+  check. Report HIGH or CRITICAL risk before editing and run focused regression
+  tests after changing a high-impact symbol.
+- [ ] Before every commit, run GitNexus `detect_changes` for the staged work and
+  compare the branch with `main`.
+- [ ] Commit one reviewed slice at a time and push it to the same remote branch.
+- [ ] Do not create empty commits when an audit finds that the existing code and
+  tests already prove a slice.
+- [ ] Do not merge the final pull request.
+
+#### Verified starting state
+
+- [x] Run the Stage 06 runtime-profile check and its negative self-test.
+  The profile records 16 transcripts and five qualification checks.
+- [x] Run the deployment check and its negative self-test.
+- [x] Run the runtime package tests. The recorded run passed 292 tests.
+- [x] Run runtime Clippy with warnings denied.
+- [x] Run the full workspace tests through `cargo llvm-cov`.
+- [x] Record the starting coverage result. Branch coverage is 7,650 of 9,608
+  outcomes, or 79.62 percent. Line coverage is 84,898 of 93,220 lines, or
+  91.07 percent.
+- [x] Confirm that no Stage 06 pull request or exact-SHA evidence manifest
+  exists yet.
+
+#### Configuration, initialization, TLS, and transports
+
+- [ ] Audit `S06-001` against every strict-configuration acceptance condition.
+  - [ ] Reject unknown and duplicate TOML fields.
+  - [ ] Exercise every scalar boundary and cross-field combination.
+  - [ ] Validate the full Appendix-C union, Host depth, roles, targets, paths,
+    permissions, supported versions, and unsafe combinations.
+  - [ ] Prove that invalid configuration fails before any listener opens.
+  - [ ] Close the remaining `OPS-02` requirement only after the tests prove it.
+- [ ] Audit `S06-002` initialization and `check-config`.
+  - [ ] Exercise clean, partial, repeated, and failed initialization.
+  - [ ] Verify purpose-separated keys and directories with minimum modes.
+  - [ ] Verify safe onboarding-pin output and host-control checks.
+  - [ ] Prove failure atomicity and refusal to replace an existing durable
+    identity.
+- [ ] Audit `S06-003` TLS endpoints.
+  - [ ] Verify the explicit aws-lc provider and TLS 1.3 only.
+  - [ ] Verify `[X25519MLKEM768, X25519]` group order and the permitted
+    forward-secret cipher suites.
+  - [ ] Reject TLS 1.2 and earlier, 0-RTT, renegotiation, application
+    compression, protocol fallback, and post-handshake client authentication.
+  - [ ] Verify exact client and admin ALPN values.
+  - [ ] Verify DNS certificate identity and pinned onion identity paths.
+  - [ ] Exercise hybrid negotiation, X25519 fallback, certificate failures,
+    pin failures, and bytes sent before the handshake.
+  - [ ] Close all four remaining TLS-owned requirement records.
+- [ ] Audit `S06-004` transport-profile isolation.
+  - [ ] Keep direct, Tor-exit, and onion listener behavior explicit.
+  - [ ] Prove that no reverse DNS or ident path exists.
+  - [ ] Use a source address only for temporary admission and rate buckets.
+  - [ ] Prove that source addresses do not enter protocol messages,
+    persistence, logs, metrics, replies, audit records, or user-visible state.
+  - [ ] Erase each address-derived bucket no later than ten minutes after use.
+  - [ ] Pass hostnames through SOCKS5 without local resolution.
+  - [ ] Use separate Tor stream-isolation credentials for each network and
+    account, and never share them between accounts.
+  - [ ] Refuse direct DNS or TCP fallback after a Tor failure.
+  - [ ] Reject ordinary TCP and HAProxy headers on onion-only listeners.
+  - [ ] Prove that onion clients never try a clearnet endpoint automatically.
+  - [ ] Run profile-mismatch, real-onion, SafeSocks, TestSocks, DNS-leak,
+    packet-capture, and forbidden-field checks.
+  - [ ] Close all 13 remaining transport-owned requirement records.
+
+Commit point 1
+
+- [ ] Stage only configuration, initialization, TLS, transport, and directly
+  related test or deployment changes found by the audit.
+- [ ] Run formatting, the config tests, focused TLS and listener tests, the
+  transport transcripts, source checks, and relevant deployment checks.
+- [ ] Run GitNexus `detect_changes` before committing.
+- [ ] Commit with an imperative subject such as
+  `Close Stage 06 configuration and transport gaps`.
+- [ ] Push `stage-06-runtime`.
+
+#### Runtime ownership, memory, durability, sessions, and messaging
+
+- [ ] Audit `S06-005` task ownership and lifecycle control.
+  - [ ] Supervise listeners, connections, StateCore, storage, crypto, timers,
+    maintenance, administration, logs, and signals as finite children.
+  - [ ] Propagate task panics and startup failures.
+  - [ ] Prove cancellation and joined shutdown at each phase under idle and
+    loaded conditions.
+  - [ ] Prove that no live owner remains after stop.
+  - [ ] Keep the lifecycle channel selectable while a durable batch is in
+    flight.
+  - [ ] Retain the first typed hook failure or timeout.
+  - [ ] Make phase requests idempotent and let stop supersede earlier phases.
+- [ ] Audit `S06-006` global memory admission.
+  - [ ] Acquire the exact charge before every count-scaled allocation.
+  - [ ] Move permits with buffers, queue reservations, and storage
+    reservations.
+  - [ ] Keep fixed emergency headroom separate from ordinary admission.
+  - [ ] Reject exhaustion before side effects.
+  - [ ] Exercise split, drop, rollback, allocation-failure proxy, high-water,
+    and exact permit-return cases.
+- [ ] Audit `S06-007` connection and output ownership.
+  - [ ] Keep bounded generation-bound input and output owners for every
+    client.
+  - [ ] Verify tentative, prepare, and commit queue reservations.
+  - [ ] Verify whole-sink exclusion, exact output order, generation reuse,
+    shared-buffer charging, and slow-consumer closure.
+  - [ ] Prove that commit is infallible and allocation-free after preparation.
+  - [ ] Verify shutdown-after-flush frames and flush acknowledgements.
+- [ ] Audit `S06-008` StateCore durable execution.
+  - [ ] Keep StateCore as the only mutable protocol-state authority.
+  - [ ] Construct every plan at one revision and reserve all runtime resources
+    before submission.
+  - [ ] Submit one complete storage batch and consume only its matching
+    receipt.
+  - [ ] Apply each accepted result once and render success only after durable
+    application.
+  - [ ] Exercise cancellation and disconnect before and after every reserve,
+    submit, receipt, apply, and render boundary.
+  - [ ] Keep channel mutations, indexes, projections, outboxes, result records,
+    and audit effects in their required atomic batches.
+  - [ ] Keep nickname and session changes, indexes, projections, transient
+    events, counters, and results in their required atomic batches.
+  - [ ] Close all three remaining StateCore-owned requirement records.
+- [ ] Audit `S06-009` registration, authentication, and session routing.
+  - [ ] Exercise the path from TLS admission through client framing,
+    registration, SASL, account jobs, domain plans, storage, welcome state,
+    account changes, keepalive, and closure.
+  - [ ] Keep account identity separate from nicknames, masks, addresses, and
+    labels.
+  - [ ] Keep login IDs hidden and separate from public account labels.
+  - [ ] Generate a fresh cloak for each connection without deriving it from
+    an address, account, device, or earlier cloak.
+  - [ ] Bind, expire, and consume authentication and credential contexts once.
+  - [ ] Fence the session generation before principal, device, logout, or
+    account-switch changes can accept new work.
+  - [ ] Verify deletion, recovery, HPKE, and credential-replacement context and
+    transaction rules.
+  - [ ] Run complete lifecycle, restart, malicious-input, and generation-fence
+    transcripts.
+  - [ ] Close all eight remaining registration-owned requirement records.
+- [ ] Audit `S06-010` single-node channel and message behavior.
+  - [ ] Exercise local and global channels, public, unlisted, and secret
+    discovery, roles, moderation, invites, bans, kicks, direct messages, and
+    channel messages.
+  - [ ] Verify recipient reservations, overload behavior, slow-consumer
+    handling, ephemeral defaults, and optional-policy refusal.
+  - [ ] Keep `+n` set, make `+p` and `+s` exclusive, and validate a full mode
+    vector before applying any part of it.
+  - [ ] Present nickname and cloak masks only as weak reconnectable filters.
+  - [ ] Compare runtime snapshots with the deterministic domain model.
+  - [ ] Run byte-exact core-v1 transcripts and privacy cases.
+  - [ ] Close all four remaining messaging-owned requirement records.
+- [ ] Audit `S06-011` timers, admission, and overload behavior.
+  - [ ] Exercise connection deadlines, authentication expiry, keepalive,
+    rate buckets, maintenance, overload classes, and cleanup with an explicit
+    clock.
+  - [ ] Exercise paused-time boundaries, timer replacement and cancellation,
+    slowloris behavior, churn, exhaustion, and recovery after quiescence.
+  - [ ] Prove that admission never demands deanonymization, sends a Tor user
+    over clearnet, or invents a CAPTCHA or proof-of-work challenge.
+  - [ ] Close the remaining admission-owned requirement record.
+
+Commit point 2
+
+- [ ] Stage only task-tree, lifecycle, memory, connection, StateCore, session,
+  channel, timer, and directly related test changes found by the audit.
+- [ ] Run formatting, focused package tests, Stage 06 persistence tests, Loom,
+  runtime transcripts, shutdown tests, and source checks.
+- [ ] Run GitNexus `detect_changes` before committing.
+- [ ] Commit with an imperative subject such as
+  `Close Stage 06 runtime ownership gaps`.
+- [ ] Push `stage-06-runtime`.
+
+#### Isolated administration and audit
+
+- [ ] Audit `S06-012` as a separate authenticated runtime path.
+  - [ ] Keep every admin session, operator snapshot, confirmation, audit
+    cursor, pending action, and response-order token inside `AdminOwner`.
+  - [ ] Dispatch admin traffic after transport authentication and never send
+    credentials, authority, or admin lines through the public client inbox.
+  - [ ] Use the separate 4,610-byte CRLF reader, bounded writer, and bounded
+    admin message channel.
+  - [ ] Admit local administration by UID and GID without TLS, including the
+    configured-GID subset check.
+  - [ ] Admit TLS administration only with the admin ALPN, separate client CA,
+    exact certificate SPKI, fresh RFC 9846 exporter binding, and operator
+    Ed25519 proof.
+  - [ ] Retain only the admitted UID/GID or SPKI and never retain a source
+    address.
+  - [ ] Route admin state requests through a separate bounded StateCore
+    channel.
+  - [ ] Implement and transcript every command through the closed reply table.
+  - [ ] Return fixed `UNAVAILABLE` results for federation commands, keep E2EE
+    statistics zero, and keep public IRC `OPER` denied.
+  - [ ] Reconstruct and verify audit events and checkpoints before accepting
+    admin authority at startup.
+  - [ ] Verify big-endian keys, decoded sequence values, trust windows,
+    signatures, hashes, gapless order, checkpoint coverage, and unmatched
+    intents.
+  - [ ] Couple suspension, restoration, and quarantine with their signed audit
+    events in the same storage transaction.
+  - [ ] Commit read observations before releasing a prepared output batch.
+  - [ ] Use intent, action, and outcome commits for external actions.
+  - [ ] Terminate DIE and RESTART only after their intent commits.
+  - [ ] Replace one expired nonempty audit prefix with one signed checkpoint in
+    the same transaction.
+  - [ ] Make audit export acquire memory permits, freeze and verify the full
+    view, enforce 10,000 records and 64 MiB, and emit no partial batch.
+  - [ ] Keep `STATS STORAGE` at exactly 14 fields.
+  - [ ] Return one signed authenticated `371` health line followed by `374`.
+  - [ ] Run Unix and mTLS transcripts for identity, CA, SPKI, exporter,
+    counters, replay, framing, permissions, confirmations, ordering, every
+    command, audit failures, retention, corruption, and startup reconciliation.
+  - [ ] Close the remaining `OPS-03` and `OPS-05` requirements.
+
+Commit point 3
+
+- [ ] Stage only administration, audit, admin transport, and directly related
+  tests found by the audit.
+- [ ] Run formatting, admin crate tests, focused runtime admin tests, admin
+  transcripts, audit reconstruction tests, and source checks.
+- [ ] Run GitNexus `detect_changes` before committing.
+- [ ] Commit with an imperative subject such as
+  `Close Stage 06 administration and audit gaps`.
+- [ ] Push `stage-06-runtime`.
+
+#### Atomic live reload and operational limits
+
+- [ ] Audit `S06-013` against the full reload contract.
+  - [ ] Keep `ConfigRevision`, `RuntimeConfigSnapshot`,
+    `RuntimeConfigHandle`, `PreparedReload`, and typed reload outcomes.
+  - [ ] Keep one snapshot `Arc` behind the short-held synchronization wrapper
+    and keep StateCore as the only writer.
+  - [ ] Prepare validated configuration, TLS endpoints, loaded MOTD and public
+    information, operators, rates, operational limits, storage limits,
+    registration defaults, and shutdown policy without changing live state.
+  - [ ] Validate Host depth, secret loading, typed diffs, same-path material,
+    certificate/key identity, allocation, working-set capacity, current-use
+    floors, storage counters, and current free space.
+  - [ ] Reject same-path changes to restart-only secrets, trust material, CAs,
+    keys, and identity pins.
+  - [ ] Accept a certificate renewal only when the private-key identity stays
+    the same, and use it only for new handshakes.
+  - [ ] Detect same-path MOTD and public-information content changes.
+  - [ ] Enforce configured operational limits in domain decisions and block
+    new use after lowering a live ceiling without killing existing sessions.
+  - [ ] Apply only at a StateCore safe point with no gathered or submitted
+    durable batch.
+  - [ ] Replace prepared cells without awaiting, publish the snapshot last,
+    and increment the revision exactly once.
+  - [ ] Succeed on a no-op without incrementing the revision.
+  - [ ] Hold the REHASH activation barrier until its outcome audit commits.
+  - [ ] Restore the old snapshot after rejection and stop the daemon after an
+    indeterminate outcome.
+  - [ ] Route SIGHUP through the same single-flight path without creating an
+    operator audit event.
+  - [ ] Serialize concurrent reloads, coalesce SIGHUP requests, reject reload
+    after quiescence, and preserve existing TLS sessions.
+  - [ ] Clamp rate credit after a decrease and grant no credit windfall after
+    an increase.
+  - [ ] Disconnect disabled operators, update retained permissions, and
+    consume confirmations after authority changes.
+  - [ ] Exercise every reloadable and restart-only field, same-path material
+    changes, preparation failures, resource floors, storage failure,
+    admin/SIGHUP races, concurrent readers, and rollback.
+
+Commit point 4
+
+- [ ] Stage only reload, operational-limit, operator-update, and directly
+  related test changes found by the audit.
+- [ ] Run formatting, config tests, focused runtime reload tests, reload race
+  tests, Loom where applicable, and source checks.
+- [ ] Run GitNexus `detect_changes` before committing.
+- [ ] Commit with an imperative subject such as
+  `Close Stage 06 reload and limit gaps`.
+- [ ] Push `stage-06-runtime`.
+
+#### Observability and authenticated health
+
+- [ ] Audit `S06-014` privacy-bounded observability.
+  - [ ] Create one entropy-backed process correlation source and install crash
+    reporting before async owners start.
+  - [ ] Record only closed event names and fixed typed fields for admissions,
+    refusals, TLS outcomes, command classes, queue depth, storage batches,
+    reloads, admin actions, overload changes, and shutdown phases.
+  - [ ] Keep all user-controlled input and every forbidden data class out of
+    logs, metrics, replies, crash output, and audit details.
+  - [ ] Run filesystem log I/O in the named joined blocking owner through the
+    existing 1,024-entry bounded queue.
+  - [ ] Derive `server.data_dir/logs`, create and validate it as mode `0700`,
+    keep 24 hours by default, cap retention at 30 days, and bound directory
+    entries and deletions per sweep.
+  - [ ] Keep closed log segments uncompressed in Stage 06.
+  - [ ] Compose fixed-label metrics and 60-second statistics rings without an
+    HTTP listener.
+  - [ ] Mark readiness only after configuration, key loading, storage
+    reconstruction, and StateCore startup acknowledgement.
+  - [ ] Clear readiness during quiescence and after a security-sensitive owner
+    failure.
+  - [ ] Emit supervisor and StateCore progress ticks every five seconds and
+    report zero progress as not live.
+  - [ ] Expose health only through signed authenticated admin `INFO` as one
+    `371 health readiness=<0|1> liveness=<0|1>` line followed by `374`.
+  - [ ] Keep pre-authentication `PING` limited to token echo and leave public
+    client `INFO` unchanged.
+  - [ ] Run forbidden-value canaries, fixed-cardinality tests, log-queue
+    saturation, retention bounds, initial and stale health, authenticated-only
+    health, and shutdown-flush tests.
+  - [ ] Close the remaining logging-privacy and raw-address requirements.
+
+Commit point 5
+
+- [ ] Stage only observability, logging, health, readiness, liveness, and
+  directly related test changes found by the audit.
+- [ ] Run formatting, focused observability and health tests, forbidden-value
+  scans, log-retention tests, shutdown-flush tests, and source checks.
+- [ ] Run GitNexus `detect_changes` before committing.
+- [ ] Commit with an imperative subject such as
+  `Close Stage 06 observability and health gaps`.
+- [ ] Push `stage-06-runtime`.
+
+#### Shutdown and service hardening
+
+- [ ] Audit production shutdown and `S06-015` deployment behavior.
+  - [ ] Route normal production termination through quiesce, drain, flush, and
+    stop within the 120-second total.
+  - [ ] Stop client and admin accepts, wait for accept-loop barriers, clear
+    readiness, and reject new mutations during quiesce.
+  - [ ] Finish accepted durable work and the current admin action, queue one
+    fixed shutdown frame per safe connection, and close writers after flush.
+  - [ ] Run one due audit-retention checkpoint, await storage receipts, and
+    drain client, admin, log, and TLS close acknowledgements during flush.
+  - [ ] Cancel and join all remaining children before closing crypto, storage
+    bridges, the database owner, and TLS during stop.
+  - [ ] Send a second termination signal directly to stop.
+  - [ ] Return `DaemonExit::Stopped` or `DaemonExit::RestartRequested`; map
+    restart to exit status 75 and keep DIE at status zero.
+  - [ ] Keep inherited-listener constructors only as an embedding and test
+    seam, and make no `LISTEN_FDS` claim.
+  - [ ] Keep the unsupported socket unit and its documentation removed.
+  - [ ] Verify `UMask=0077`, `StateDirectoryMode=0700`, log-directory modes,
+    exact writable paths, and profile-specific address-family restrictions.
+  - [ ] Include `AF_UNIX` for local administration in direct and dual
+    profiles. Keep onion-only at `AF_UNIX` unless remote administration is
+    configured.
+  - [ ] Accept an already-zero core limit before calling `setrlimit` and keep
+    the `@resources` filter.
+  - [ ] Treat ordinary memory-lock failure as a closed warning and strict
+    memory-lock failure as fatal.
+  - [ ] Reject duplicate or weakened service directives.
+  - [ ] Prove that Tor keys are Tor-owned and not readable or writable by the
+    daemon account.
+  - [ ] Run every phase timeout and failure case, first and second signals,
+    durable work around termination, stuck writers, bridge failure, database
+    reopen, idle and loaded shutdown, and zero-live-owner tests.
+  - [ ] Run the missing Loom shutdown schedule.
+  - [ ] Close the remaining Tor-key-ownership requirement.
+
+Commit point 6
+
+- [ ] Stage only shutdown, lifecycle, binary-exit, systemd, deployment,
+  operator-documentation, and directly related test changes found by the
+  audit.
+- [ ] Run formatting, focused shutdown and daemon tests, Loom, deployment
+  check and self-test, host qualification, and source checks.
+- [ ] Run GitNexus `detect_changes` before committing.
+- [ ] Commit with an imperative subject such as
+  `Close Stage 06 shutdown and deployment gaps`.
+- [ ] Push `stage-06-runtime`.
+
+#### Coverage closure
+
+- [ ] Review the production-source coverage inventory. It records 88 files,
+  while the starting commit contains 193 production Rust source files.
+- [ ] Review every added or changed production file for a new
+  security-sensitive 100-percent region before updating the inventory count
+  and hash.
+- [ ] Refresh the two client-message parser regions, domain command
+  authorization region, and domain state-invariant region whose source hashes
+  are stale.
+- [ ] Review Stage 06 admin authorization, audit reconstruction, reload
+  classification and activation, shutdown transitions, transport admission,
+  durable application, and health decisions for new 100-percent regions.
+- [ ] Map uncovered outcomes before adding tests or changing production code.
+- [ ] Start with the largest uncovered runtime files from the baseline report.
+  - [ ] `account_service.rs`, 407 uncovered branch outcomes.
+  - [ ] `admin.rs`, 115 uncovered branch outcomes.
+  - [ ] `state_core/mod.rs`, 112 uncovered branch outcomes.
+  - [ ] `state_core/reconstruct.rs`, 112 uncovered branch outcomes.
+  - [ ] `registration.rs`, 76 uncovered branch outcomes.
+  - [ ] `daemon.rs`, 74 uncovered branch outcomes.
+  - [ ] `mutation_render.rs`, 72 uncovered branch outcomes.
+  - [ ] `channels.rs`, 52 uncovered branch outcomes.
+- [ ] Reach at least 90 percent overall branch coverage. The baseline needs at
+  least 998 more covered outcomes if the denominator does not change.
+- [ ] Keep overall line coverage at or above 90 percent.
+- [ ] Reach 100 percent for every reviewed security-sensitive region.
+- [ ] Run the coverage policy self-test and the coverage checker against a
+  clean workspace report.
+
+  ```sh
+  RUSTC_BOOTSTRAP=1 cargo llvm-cov \
+    --workspace --all-features --branch --locked \
+    --json --output-path target/stage-zero-coverage.json
+  python3 scripts/check-coverage.py self-test
+  python3 scripts/check-coverage.py check \
+    target/stage-zero-coverage.json \
+    conformance/critical-coverage.toml
+  ```
+
+Commit point 7
+
+- [ ] Stage only focused coverage tests, reviewed source changes, and the
+  coverage policy.
+- [ ] Run formatting, affected package tests, the full workspace coverage run,
+  the coverage checker, and source checks.
+- [ ] Run GitNexus `detect_changes` before committing.
+- [ ] Commit with an imperative subject such as
+  `Close Stage 06 branch coverage`.
+- [ ] Push `stage-06-runtime`.
+
+#### Requirement ledger and conformance records
+
+- [ ] Audit and close exactly 39 Stage 06 normative records.
+  - [ ] `S06-001`, one strict-configuration record.
+  - [ ] `S06-003`, four TLS records.
+  - [ ] `S06-004`, 13 transport and address-privacy records.
+  - [ ] `S06-008`, three durable StateCore records.
+  - [ ] `S06-009`, eight account and session-security records.
+  - [ ] `S06-010`, four channel and messaging records.
+  - [ ] `S06-011`, one admission record.
+  - [ ] `S06-012`, two administration records.
+  - [ ] `S06-014`, two observability and address-privacy records.
+  - [ ] `S06-015`, one Tor-key-ownership record.
+- [ ] Do not treat the absence of separate normative records for `S06-002`,
+  `S06-005`, `S06-006`, `S06-007`, or `S06-013` as task completion. Close
+  their task-level evidence above.
+- [ ] Check `S06-001` through `S06-015` only after each task's code, tests, and
+  evidence mapping pass.
+- [ ] Run `python3 scripts/requirements.py generate-bindings` after checking
+  the tasks.
+- [ ] Run `python3 scripts/requirements.py generate`.
+- [ ] Add the 39 requirement-level Stage 06 evidence-catalog records.
+- [ ] Keep the existing 16 task-level Stage 06 records, including `S06-900`.
+- [ ] Verify that Stage 06 has exactly 55 evidence records.
+- [ ] Run the requirement check, Stage 06 ownership check, requirement
+  self-test, Stage 06 profile check and self-test, source check, workspace
+  check, CI check, and evidence-catalog check.
+
+Commit point 8
+
+- [ ] Stage only `TODO.md`, requirement bindings, the generated requirement
+  ledger, evidence catalog, runtime profile, transcript catalog, coverage
+  regions, gate maps, CI metadata, and directly related conformance files.
+- [ ] Run every generator and checker that owns a staged generated file.
+- [ ] Run GitNexus `detect_changes` before committing.
+- [ ] Commit with an imperative subject such as
+  `Close Stage 06 conformance records`.
+- [ ] Push `stage-06-runtime`.
+
+#### Full implementation gate
+
+- [ ] Install or provide the exact required toolchain on the qualification
+  host, including Tor, `systemd-analyze`, the AArch64 cross compiler, Rust
+  1.98.0, nightly 2026-08-24, `cargo-deny` 0.20.2, `cargo-audit` 0.22.2,
+  `cargo-llvm-cov` 0.9.0, and `cargo-fuzz` 0.13.2.
+- [ ] Run `bash scripts/check-stage-six.sh` without evidence recording until
+  all 75 inherited and Stage 06 commands pass from a clean tree.
+- [ ] Confirm that the gate includes formatting, native and cross-target
+  checks, Clippy, workspace and documentation tests, dependency denial,
+  advisory audit, source and workspace checks, coverage, all earlier-stage
+  checks, Stage 06 tests, Loom, transcripts, deterministic soak, deployment,
+  host qualification, and fuzzing.
+- [ ] Run both Stage 06 fuzz targets for 10,000 iterations with the fixed seed
+  and configured bounds.
+- [ ] Do not claim the seven-day production soak assigned to `S10-007`.
+- [ ] Check `S06-900` only after the full non-recording gate passes.
+- [ ] Update the Stage 06 status text to say that implementation passes and
+  exact-revision evidence remains pending.
+
+Commit point 9
+
+- [ ] Run GitNexus `detect_changes` for the complete branch against `main`.
+- [ ] Confirm that the working tree contains no unrelated or generated
+  residue.
+- [ ] Commit the final source and conformance state with an imperative subject
+  such as `Finish Stage 06 core-v1 implementation`.
+- [ ] Push `stage-06-runtime` and record the exact source commit SHA.
+
+#### Exact-SHA evidence
+
+- [ ] Create one temporary detached checkout at the exact source commit. Do
+  not create a branch and do not edit source in that checkout.
+- [ ] Run the recorded gate from the clean detached checkout with
+  `AGENC_IRCD_RECORD_GATE=1`.
+
+  ```sh
+  source_commit="$(git rev-parse HEAD)"
+  env -u GIT_PAGER -u LD_LIBRARY_PATH -u PYTHONPATH \
+    AGENC_IRCD_RECORD_GATE=1 \
+    bash scripts/check-stage-six.sh
+  ```
+
+- [ ] Record
+  `conformance/evidence/artifacts/stage-six-implementation-<sha>.json`.
+- [ ] Generate `conformance/evidence/stage-06-<sha>.json` with evidence schema
+  version 2.
+
+  ```sh
+  python3 scripts/generate-gate-evidence.py \
+    --artifact \
+    "conformance/evidence/artifacts/stage-six-implementation-${source_commit}.json"
+  ```
+
+- [ ] Run the evidence checker, evidence self-test, and Stage 06 `close-stage`
+  command for the exact source SHA.
+
+  ```sh
+  python3 scripts/check-evidence.py check
+  python3 scripts/check-evidence.py self-test
+  python3 scripts/check-evidence.py close-stage \
+    --stage 6 --source-commit "${source_commit}"
+  ```
+
+- [ ] Copy only the generated artifact and manifest back to the active branch,
+  together with the required closure-status documentation updates.
+- [ ] Delete the temporary detached checkout after the artifact is recovered.
+- [ ] If any source changes after recording, discard the stale Stage 06
+  artifact and repeat the exact-SHA gate at the new source commit.
+
+Commit point 10
+
+- [ ] Confirm that the staged diff contains only evidence and closure-status
+  files.
+- [ ] Run every evidence checker and self-test again from the active branch.
+- [ ] Run GitNexus `detect_changes` before committing.
+- [ ] Commit with the subject `Record Stage 06 checkpoint`.
+- [ ] Push `stage-06-runtime`.
+
+#### Pull request and cloud checks
+
+- [ ] Open one pull request from `stage-06-runtime` to `main` containing the
+  full Stage 06 history.
+- [ ] List the affected specification sections and invariants.
+- [ ] Describe wire, persistence, dependency, privacy, and security effects.
+- [ ] List every validation command and its exact result.
+- [ ] Keep WSS assigned to Stage 09, federation behavior assigned to Stage 07,
+  and E2EE behavior assigned to Stage 08.
+- [ ] Add no HTTP metrics listener, socket-activation claim, plaintext
+  endpoint, wildcard permission, storage-table change, production test double,
+  or unreviewed production dependency.
+- [ ] Monitor the cloud-agent checks and fix failures on the same branch.
+- [ ] Repeat exact-SHA evidence after any source fix.
+- [ ] Leave the pull request open for the cloud-agent and repository-owner
+  merge gate.
+
 - [ ] `S06-001` **Implement strict configuration parsing and validation.**
   Parse TOML into an untrusted intermediate, reject unknowns, validate the full
   Appendix-C union and cross-field rules, paths, permissions, bounds, roles,
