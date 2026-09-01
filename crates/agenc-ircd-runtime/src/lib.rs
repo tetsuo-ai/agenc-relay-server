@@ -33,6 +33,7 @@ pub mod state_core;
 pub mod supervisor;
 mod sync;
 pub mod tls;
+pub mod tor_client;
 
 pub use error::RuntimeError;
 
