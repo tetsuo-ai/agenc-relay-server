@@ -80,12 +80,15 @@ pub enum RestartOnlyField {
     AccountFixedLimit,
     /// `accounts.max_contacts` raised.
     MaxContactsRaised,
-    /// `privacy.history_enabled`, WHOWAS, or the secret lookup floor.
+    /// `privacy.history_enabled`, `privacy.history_default`, WHOWAS, or the
+    /// secret lookup floor.
     PrivacyPolicy,
     /// `privacy.log_retention_hours` raised.
     LogRetentionRaised,
     /// Audit signing key, trust manifest, retention, or reason ceiling.
     AuditProfile,
+    /// Default session and account sanction durations.
+    ModerationDefaults,
     /// Any `[e2ee]` key.
     E2eeProfile,
     /// An operator added or removed.
@@ -181,8 +184,6 @@ pub enum ReloadableChange {
     MotdFile,
     /// `privacy.public_info_file`.
     PublicInfoFile,
-    /// `privacy.history_default`.
-    HistoryDefault,
     /// `storage.database_max_bytes`; the runtime checks the current counter.
     DatabaseCeiling {
         /// Old value.
@@ -199,8 +200,6 @@ pub enum ReloadableChange {
     },
     /// `storage.integrity_checkpoint_manifests`.
     IntegrityCheckpointTarget,
-    /// `moderation.session_sanction_hours` or `moderation.account_sanction_days`.
-    SanctionWindows,
     /// An operator enabled or disabled; disabling terminates its sessions.
     OperatorEnabled {
         /// The operator.
@@ -549,6 +548,7 @@ impl ConfigDiff {
 
     fn privacy(&mut self, a: &PrivacyConfig, c: &PrivacyConfig) {
         let policy_changed = a.history_enabled != c.history_enabled
+            || a.history_default != c.history_default
             || a.secret_lookup_floor_milliseconds != c.secret_lookup_floor_milliseconds
             || a.whowas_retention_seconds != c.whowas_retention_seconds
             || a.whowas_records != c.whowas_records;
@@ -566,10 +566,6 @@ impl ConfigDiff {
             a.public_info_file != c.public_info_file,
             ReloadableChange::PublicInfoFile,
         );
-        self.push_change(
-            a.history_default != c.history_default,
-            ReloadableChange::HistoryDefault,
-        );
     }
 
     fn moderation(&mut self, active: &Config, candidate: &Config) {
@@ -579,10 +575,10 @@ impl ConfigDiff {
             || a.audit_retention_days != c.audit_retention_days
             || a.free_reason_bytes != c.free_reason_bytes;
         self.push_restart(audit_changed, RestartOnlyField::AuditProfile);
-        self.push_change(
+        self.push_restart(
             a.session_sanction_hours != c.session_sanction_hours
                 || a.account_sanction_days != c.account_sanction_days,
-            ReloadableChange::SanctionWindows,
+            RestartOnlyField::ModerationDefaults,
         );
         let ids_match = a.operators.len() == c.operators.len()
             && a.operators.iter().all(|ao| {

@@ -345,19 +345,22 @@ fn privacy_moderation_and_e2ee_fields_classify_exactly() -> TestResult {
     candidate.privacy.log_retention_hours -= 1;
     candidate.privacy.motd_file = Some("/etc/agenc/motd.txt".into());
     candidate.privacy.public_info_file = Some("/etc/agenc/info.txt".into());
-    candidate.privacy.history_default = HistoryDefault::SevenDays;
     let diff = ConfigDiff::compute(&active, &candidate);
     assert!(diff.restart_only.is_empty());
-    assert_eq!(diff.reloadable.len(), 4);
+    assert_eq!(diff.reloadable.len(), 3);
+    let mut candidate = active.clone();
+    candidate.privacy.history_default = HistoryDefault::SevenDays;
+    restart_only(&active, &candidate, RestartOnlyField::PrivacyPolicy);
 
     let mut candidate = active.clone();
     candidate.moderation.audit_retention_days += 1;
     restart_only(&active, &candidate, RestartOnlyField::AuditProfile);
     let mut candidate = active.clone();
     candidate.moderation.session_sanction_hours += 1;
-    reloadable(&active, &candidate, |change| {
-        *change == ReloadableChange::SanctionWindows
-    });
+    restart_only(&active, &candidate, RestartOnlyField::ModerationDefaults);
+    let mut candidate = active.clone();
+    candidate.moderation.account_sanction_days += 1;
+    restart_only(&active, &candidate, RestartOnlyField::ModerationDefaults);
     let mut candidate = active.clone();
     candidate.moderation.operators.clear();
     restart_only(&active, &candidate, RestartOnlyField::OperatorSet);

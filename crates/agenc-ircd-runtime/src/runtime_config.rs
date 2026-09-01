@@ -7,8 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use agenc_ircd_admin::AdminAuditEvent;
 use agenc_ircd_admin::OperatorRegistry;
 use agenc_ircd_config::{
-    Config, ConfigDiff, HistoryDefault, LimitKey, ListenerName, ReloadPlan, ReloadRejected,
-    RestartOnlyField,
+    Config, ConfigDiff, LimitKey, ListenerName, ReloadPlan, ReloadRejected, RestartOnlyField,
 };
 use agenc_ircd_domain::{
     DirectMessagePolicy, GuestDirectMessagePolicy, OperationalLimits, PresencePolicy,
@@ -155,34 +154,11 @@ pub(crate) struct RuntimeConfigParts {
     pub(crate) operators: OperatorRegistry,
     pub(crate) operator_admission: AdminAdmissionSnapshot,
     pub(crate) account_policy: AccountRuntimePolicy,
-    pub(crate) history_default: HistoryDefault,
-    pub(crate) sanction_windows: SanctionWindows,
     pub(crate) rates: RateLimits,
     pub(crate) operational_limits: OperationalLimits,
     pub(crate) connection_limits: ConnectionLimits,
     pub(crate) storage_limits: StorageRuntimeLimits,
     pub(crate) shutdown: ShutdownPlan,
-}
-
-/// Copy-only default sanction durations installed with one runtime snapshot.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SanctionWindows {
-    pub(crate) session_hours: u64,
-    pub(crate) account_days: u64,
-}
-
-impl SanctionWindows {
-    /// Returns the default duration for a session-only sanction.
-    #[must_use]
-    pub const fn session_hours(self) -> u64 {
-        self.session_hours
-    }
-
-    /// Returns the default duration for an account sanction.
-    #[must_use]
-    pub const fn account_days(self) -> u64 {
-        self.account_days
-    }
 }
 
 /// Copy-only account policy installed at a StateCore reload safe point.
@@ -298,8 +274,6 @@ pub struct RuntimeConfigSnapshot {
     operators: OperatorRegistry,
     operator_admission: AdminAdmissionSnapshot,
     account_policy: AccountRuntimePolicy,
-    history_default: HistoryDefault,
-    sanction_windows: SanctionWindows,
     rates: RateLimits,
     operational_limits: OperationalLimits,
     connection_limits: ConnectionLimits,
@@ -326,8 +300,6 @@ impl RuntimeConfigSnapshot {
             operators: parts.operators,
             operator_admission: parts.operator_admission,
             account_policy: parts.account_policy,
-            history_default: parts.history_default,
-            sanction_windows: parts.sanction_windows,
             rates: parts.rates,
             operational_limits: parts.operational_limits,
             connection_limits: parts.connection_limits,
@@ -390,18 +362,6 @@ impl RuntimeConfigSnapshot {
 
     pub(crate) const fn account_policy(&self) -> AccountRuntimePolicy {
         self.account_policy
-    }
-
-    /// Returns the retention copied when an owner explicitly enables history.
-    #[must_use]
-    pub const fn history_default(&self) -> HistoryDefault {
-        self.history_default
-    }
-
-    /// Returns the live default sanction durations.
-    #[must_use]
-    pub const fn sanction_windows(&self) -> SanctionWindows {
-        self.sanction_windows
     }
 
     /// Returns the connection limits used for each new reader and queue
@@ -1071,11 +1031,6 @@ mod tests {
                 default_guest_direct_messages: GuestDirectMessagePolicy::Deny,
                 default_direct_messages: DirectMessagePolicy::Contacts,
             },
-            history_default: HistoryDefault::OneDay,
-            sanction_windows: SanctionWindows {
-                session_hours: 24,
-                account_days: 30,
-            },
             rates: RateLimits::defaults(),
             operational_limits: OperationalLimits::new(OperationalLimitValues {
                 sessions_per_account: 8,
@@ -1221,16 +1176,6 @@ mod tests {
             .try_reserve(ClientQueueDemand::new(vec![1])?)
             .map_err(|_| RuntimeError::LimitExceeded)?;
         drop(newly_admitted);
-        Ok(())
-    }
-
-    #[test]
-    fn snapshot_carries_ready_history_and_sanction_defaults()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let snapshot = snapshot()?;
-        assert_eq!(snapshot.history_default(), HistoryDefault::OneDay);
-        assert_eq!(snapshot.sanction_windows().session_hours(), 24);
-        assert_eq!(snapshot.sanction_windows().account_days(), 30);
         Ok(())
     }
 
