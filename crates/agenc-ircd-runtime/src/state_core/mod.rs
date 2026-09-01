@@ -26,7 +26,8 @@ use agenc_ircd_client_wire::{ParsedMessage, WireMessage, numeric_reply};
 use agenc_ircd_crypto::OpenedStoragePlaintext;
 use agenc_ircd_domain::{ApplyReceipt, DomainError, DomainState, MutationPlan};
 use agenc_ircd_storage::{
-    CommitOutcome, ExistingRecord, ReadPlan, SealedRecord, StorageError, StoredKey, TableId,
+    CheckpointOutcome, CheckpointReceipt, CommitOutcome, ExistingRecord, ReadPlan, SealedRecord,
+    StorageError, StorageLimitWriter, StorageMutationBatch, StoredKey, TableId,
 };
 use agenc_ircd_types::{
     ClockError, EntropySource, MonotonicClock, MonotonicTick, Revision, TransactionId, UserId,
@@ -48,7 +49,8 @@ use crate::admission::{
 use crate::bridge::crypto::{CryptoBridge, CryptoJobOutput};
 use crate::bridge::storage::{BridgeFailure, STORAGE_HANDOFF_CAPACITY, StorageBridge, SubmitError};
 use crate::bridge::{
-    CryptoCompletionMessage, StorageCompletionMessage, StorageReadCompletionMessage, StorageReadId,
+    CryptoCompletionMessage, StorageCheckpointCompletionMessage, StorageCheckpointId,
+    StorageCompletionMessage, StorageReadCompletionMessage, StorageReadId,
 };
 use crate::budget::MemoryBudget;
 use crate::cancel::CancellationToken;
@@ -57,8 +59,8 @@ use crate::observe::adapter::RuntimeObserver;
 use crate::observe::health::Liveness;
 use crate::observe::metrics::{CommandClass, QueueName, ResultClass};
 use crate::runtime_config::{
-    PreparedReload, ReloadActivation, ReloadCoreInbox, ReloadCoreRequest, ReloadMode,
-    ReloadOutcome, ReloadRejection, RuntimeConfigHandle, RuntimeConfigSnapshot,
+    AuditedReloadResult, AuditedReloadStart, PreparedReload, ReloadActivation, ReloadCoreInbox,
+    ReloadCoreRequest, ReloadOutcome, ReloadRejection, RuntimeConfigHandle, RuntimeConfigSnapshot,
 };
 use crate::state_core::admin::{AdminCoreRequest, AdminCoreResult};
 use crate::state_core::durable::{
@@ -138,6 +140,8 @@ pub struct StateCoreInputs {
     pub entropy: Box<dyn EntropySource + Send>,
     /// The command router.
     pub router: Box<dyn CommandRouter>,
+    /// The sole writer for storage ceilings applied at reload safe points.
+    pub storage_limit_writer: StorageLimitWriter,
 }
 
 /// What a router asks the loop to do after handling one line.
@@ -1115,6 +1119,39 @@ fn next_transaction_id(entropy: &mut dyn EntropySource) -> Result<TransactionId,
     Ok(TransactionId::from_bytes(bytes))
 }
 
+fn valid_rehash_outcome_pair(
+    success: &agenc_ircd_admin::AdminAuditEvent,
+    failure: &agenc_ircd_admin::AdminAuditEvent,
+) -> bool {
+    if success.tbs().phase != agenc_ircd_admin::AdminAuditPhase::OutcomeSuccess
+        || failure.tbs().phase != agenc_ircd_admin::AdminAuditPhase::OutcomeFailure
+    {
+        return false;
+    }
+    let Ok(canonical) =
+        agenc_ircd_admin::CanonicalCommand::check(success.tbs().command_tbs.canonical_command())
+    else {
+        return false;
+    };
+    if !matches!(
+        agenc_ircd_admin::AdminCommand::parse(canonical),
+        Ok(agenc_ircd_admin::AdminCommand::Rehash(_))
+    ) {
+        return false;
+    }
+    let mut normalized_failure = failure.tbs().clone();
+    normalized_failure.phase = agenc_ircd_admin::AdminAuditPhase::OutcomeSuccess;
+    success.tbs() == &normalized_failure
+}
+
+const fn map_storage_reload_rejection(error: StorageError) -> ReloadRejection {
+    match error {
+        StorageError::LimitExceeded => ReloadRejection::CurrentUse,
+        StorageError::QueueFull => ReloadRejection::Busy,
+        _ => ReloadRejection::StorageUnavailable,
+    }
+}
+
 /// The actor: the context plus the router that interprets commands.
 pub struct StateCore {
     context: StateCoreContext,
@@ -1128,38 +1165,128 @@ pub struct StateCore {
     reload_admission: Option<Arc<crate::admission::TransportAdmission>>,
     reload_pending: Option<PendingReload>,
     reload_provisional: Option<ProvisionalReload>,
+    checkpoint_pending: Option<PendingIntegrityCheckpoint>,
+    checkpoint_retry_suppressed: bool,
+    storage_limit_writer: StorageLimitWriter,
     liveness: Arc<Liveness>,
+}
+
+struct PendingIntegrityCheckpoint {
+    checkpoint_id: StorageCheckpointId,
+    shutdown: bool,
 }
 
 struct PendingAdminCommit {
     transaction_id: TransactionId,
     retained: RetainedProjection,
     mutation: Option<AdminMutation>,
-    reply: tokio::sync::oneshot::Sender<AdminCoreResult>,
+    reload_activation: Option<ReloadActivation>,
+    reply: PendingAdminReply,
+}
+
+enum PendingAdminReply {
+    Admin(tokio::sync::oneshot::Sender<AdminCoreResult>),
+    Reload {
+        activation: ReloadActivation,
+        result: AuditedReloadResult,
+        reply: tokio::sync::oneshot::Sender<Result<AuditedReloadResult, ReloadRejection>>,
+    },
+}
+
+impl PendingAdminReply {
+    fn complete(self) {
+        match self {
+            Self::Admin(reply) => {
+                let _sent = reply.send(Ok(()));
+            }
+            Self::Reload { result, reply, .. } => {
+                let _sent = reply.send(Ok(result));
+            }
+        }
+    }
+
+    const fn reload_activation(&self) -> Option<ReloadActivation> {
+        match self {
+            Self::Admin(_) => None,
+            Self::Reload { activation, .. } => Some(*activation),
+        }
+    }
+
+    const fn reload_result(&self) -> Option<AuditedReloadResult> {
+        match self {
+            Self::Admin(_) => None,
+            Self::Reload { result, .. } => Some(*result),
+        }
+    }
 }
 
 struct PendingReload {
     prepared: PreparedReload,
-    mode: ReloadMode,
-    reply: tokio::sync::oneshot::Sender<ReloadOutcome>,
+    kind: PendingReloadKind,
+}
+
+enum PendingReloadKind {
+    Signal(tokio::sync::oneshot::Sender<ReloadOutcome>),
+    Audited {
+        success: Box<agenc_ircd_admin::AdminAuditEvent>,
+        failure: Box<agenc_ircd_admin::AdminAuditEvent>,
+        reply: tokio::sync::oneshot::Sender<AuditedReloadStart>,
+    },
+}
+
+struct ReservedReloadOutcome {
+    transaction_id: TransactionId,
+    batch: StorageMutationBatch,
+    retained: RetainedProjection,
+    resulting_logical_database_bytes: u64,
+    resulting_backup_stream_bytes: u64,
 }
 
 struct ProvisionalReload {
     activation: ReloadActivation,
     previous: Arc<RuntimeConfigSnapshot>,
     candidate: Arc<RuntimeConfigSnapshot>,
+    changes_live_state: bool,
+    reservation_transaction_id: TransactionId,
+    state: AuditedReloadState,
     _lease: Option<crate::runtime_config::ReloadLease>,
+}
+
+enum AuditedReloadState {
+    ReadySuccess {
+        success: Box<ReservedReloadOutcome>,
+        failure: Box<ReservedReloadOutcome>,
+    },
+    CommittingSuccess {
+        failure: Box<ReservedReloadOutcome>,
+    },
+    DurableSuccess,
+    ReadyFailure {
+        failure: Box<ReservedReloadOutcome>,
+        rejection: ReloadRejection,
+    },
+    CommittingFailure {
+        rejection: ReloadRejection,
+    },
+    DurableFailure,
 }
 
 enum IndexRefreshContinuation {
     Batch,
-    Admin(tokio::sync::oneshot::Sender<AdminCoreResult>),
+    Admin(PendingAdminReply),
 }
 
 impl IndexRefreshContinuation {
+    fn reload_activation(&self) -> Option<ReloadActivation> {
+        match self {
+            Self::Batch => None,
+            Self::Admin(reply) => reply.reload_activation(),
+        }
+    }
+
     fn complete(self) {
         if let Self::Admin(reply) = self {
-            let _sent = reply.send(Ok(()));
+            reply.complete();
         }
     }
 }
@@ -1253,6 +1380,13 @@ enum CompletionStep {
     Refresh(IndexRefreshContinuation),
 }
 
+enum CheckpointCompletionStep {
+    Normal,
+    ShutdownComplete,
+    ShutdownRejected,
+    Exit(StateCoreExit),
+}
+
 #[derive(Default)]
 struct PendingLifecycleReplies {
     drain: Option<tokio::sync::oneshot::Sender<LifecycleResult>>,
@@ -1288,6 +1422,17 @@ impl PendingLifecycleReplies {
         };
         if let Some(reply) = reply {
             let _sent = reply.send(Ok(()));
+        }
+    }
+
+    fn fail(&mut self, phase: LifecyclePhase, failure: LifecycleFailure) {
+        let reply = match phase {
+            LifecyclePhase::Drain => self.drain.take(),
+            LifecyclePhase::Flush => self.flush.take(),
+            LifecyclePhase::Quiesce | LifecyclePhase::Stop => None,
+        };
+        if let Some(reply) = reply {
+            let _sent = reply.send(Err(failure));
         }
     }
 
@@ -1349,6 +1494,9 @@ impl StateCore {
             reload_admission: None,
             reload_pending: None,
             reload_provisional: None,
+            checkpoint_pending: None,
+            checkpoint_retry_suppressed: false,
+            storage_limit_writer: inputs.storage_limit_writer,
             liveness: inputs.liveness,
         };
         state.router.startup(&mut state.context);
@@ -1435,17 +1583,126 @@ impl StateCore {
     }
 
     fn storage_in_flight(&self) -> bool {
-        self.context.in_flight() || self.admin_pending.is_some()
+        self.context.in_flight()
+            || self.admin_pending.is_some()
+            || self.checkpoint_pending.is_some()
+    }
+
+    fn start_integrity_checkpoint(&mut self, shutdown: bool) -> Result<bool, StateCoreExit> {
+        if self.checkpoint_pending.is_some() || (!shutdown && self.checkpoint_retry_suppressed) {
+            return Ok(false);
+        }
+        if !shutdown {
+            match self.storage_limit_writer.checkpoint_due() {
+                Ok(true) => {}
+                Ok(false) => return Ok(false),
+                Err(_) => {
+                    return Err(StateCoreExit::Indeterminate(
+                        IndeterminateCause::StorageIndeterminate,
+                    ));
+                }
+            }
+        }
+        match self.context.bridge.submit_checkpoint() {
+            Ok(checkpoint_id) => {
+                self.checkpoint_pending = Some(PendingIntegrityCheckpoint {
+                    checkpoint_id,
+                    shutdown,
+                });
+                if let Some(observer) = &self.context.observer {
+                    observer.storage_batch(0);
+                }
+                Ok(true)
+            }
+            Err(StorageError::QueueFull) => Ok(false),
+            Err(_) => Err(StateCoreExit::Indeterminate(
+                IndeterminateCause::StorageIndeterminate,
+            )),
+        }
+    }
+
+    fn step_checkpoint_completion(
+        &mut self,
+        message: StorageCheckpointCompletionMessage,
+    ) -> CheckpointCompletionStep {
+        let Some(pending) = self.checkpoint_pending.take() else {
+            return CheckpointCompletionStep::Exit(StateCoreExit::Indeterminate(
+                IndeterminateCause::UnexpectedCompletion,
+            ));
+        };
+        if pending.checkpoint_id != message.checkpoint_id {
+            return CheckpointCompletionStep::Exit(StateCoreExit::Indeterminate(
+                IndeterminateCause::TransactionMismatch,
+            ));
+        }
+        match message.outcome {
+            CheckpointOutcome::NotNeeded => {
+                self.checkpoint_retry_suppressed = false;
+                if pending.shutdown {
+                    CheckpointCompletionStep::ShutdownComplete
+                } else {
+                    CheckpointCompletionStep::Normal
+                }
+            }
+            CheckpointOutcome::Installed(receipt) => {
+                if !self.apply_checkpoint_receipt(receipt) {
+                    return CheckpointCompletionStep::Exit(StateCoreExit::Indeterminate(
+                        IndeterminateCause::TransactionMismatch,
+                    ));
+                }
+                self.checkpoint_retry_suppressed = false;
+                if pending.shutdown {
+                    CheckpointCompletionStep::ShutdownComplete
+                } else {
+                    CheckpointCompletionStep::Normal
+                }
+            }
+            CheckpointOutcome::Rejected(_error) => {
+                self.context.counters.batches_rejected =
+                    self.context.counters.batches_rejected.saturating_add(1);
+                self.checkpoint_retry_suppressed = true;
+                if pending.shutdown {
+                    CheckpointCompletionStep::ShutdownRejected
+                } else {
+                    CheckpointCompletionStep::Normal
+                }
+            }
+            CheckpointOutcome::Indeterminate => CheckpointCompletionStep::Exit(
+                StateCoreExit::Indeterminate(IndeterminateCause::StorageIndeterminate),
+            ),
+        }
+    }
+
+    fn apply_checkpoint_receipt(&mut self, receipt: CheckpointReceipt) -> bool {
+        let head = self.context.head;
+        let Some(expected_commit) = head.storage_commit_sequence.checked_add(1) else {
+            return false;
+        };
+        if receipt.storage_commit_sequence != expected_commit
+            || receipt.state_generation != head.state_generation
+            || receipt.account_service_response_count != head.account_service_response_count
+            || receipt.cut_manifest_sequence > receipt.installation_manifest_sequence
+            || receipt.logical_database_bytes > self.context.ceilings.database_max_bytes
+            || receipt.backup_stream_bytes > self.context.ceilings.backup_max_bytes
+        {
+            return false;
+        }
+        self.context.head = HeadCounters {
+            state_generation: receipt.state_generation,
+            storage_commit_sequence: receipt.storage_commit_sequence,
+            account_service_response_count: receipt.account_service_response_count,
+            logical_database_bytes: receipt.logical_database_bytes,
+            backup_stream_bytes: receipt.backup_stream_bytes,
+        };
+        self.context.counters.batches_committed =
+            self.context.counters.batches_committed.saturating_add(1);
+        true
     }
 
     // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=closed reload request union preserves quiescence single-flight activation finalize and rollback ordering
     fn step_reload_request(&mut self, request: ReloadCoreRequest) -> Option<StateCoreExit> {
         match request {
-            ReloadCoreRequest::Activate {
-                prepared,
-                mode,
-                reply,
-            } => {
+            ReloadCoreRequest::ActivateSignal { prepared, reply } => {
                 if self.context.quiescing {
                     let _sent = reply.send(ReloadOutcome::Rejected(ReloadRejection::Quiescing));
                 } else if self.reload_pending.is_some() || self.reload_provisional.is_some() {
@@ -1453,19 +1710,39 @@ impl StateCore {
                 } else {
                     self.reload_pending = Some(PendingReload {
                         prepared: *prepared,
-                        mode,
-                        reply,
+                        kind: PendingReloadKind::Signal(reply),
                     });
                 }
                 None
             }
-            ReloadCoreRequest::Finalize { activation, reply } => {
-                let result = self.finalize_reload(activation);
-                let _sent = reply.send(result);
+            ReloadCoreRequest::ActivateAudited {
+                prepared,
+                success_event,
+                failure_event,
+                reply,
+            } => {
+                if self.context.quiescing
+                    || self.reload_pending.is_some()
+                    || self.reload_provisional.is_some()
+                {
+                    let _sent = reply.send(AuditedReloadStart::Indeterminate);
+                } else {
+                    self.reload_pending = Some(PendingReload {
+                        prepared: *prepared,
+                        kind: PendingReloadKind::Audited {
+                            success: success_event,
+                            failure: failure_event,
+                            reply,
+                        },
+                    });
+                }
                 None
             }
-            ReloadCoreRequest::Rollback { activation, reply } => {
-                let result = self.rollback_reload(activation);
+            ReloadCoreRequest::CommitOutcome { activation, reply } => {
+                self.commit_reserved_reload_outcome(activation, reply)
+            }
+            ReloadCoreRequest::Finalize { activation, reply } => {
+                let result = self.finalize_reload(activation);
                 let _sent = reply.send(result);
                 None
             }
@@ -1473,71 +1750,208 @@ impl StateCore {
     }
 
     // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=one safe-point transition validates revision current-use floors applies prepared cells and publishes or retains an audited rollback barrier
-    fn activate_pending_reload(&mut self) {
-        let Some(mut pending) = self.reload_pending.take() else {
-            return;
-        };
-        let current = match &self.reload_handle {
-            Some(handle) => handle.load(),
-            None => {
-                let _sent = pending
-                    .reply
-                    .send(ReloadOutcome::Rejected(ReloadRejection::StorageUnavailable));
-                return;
-            }
-        };
-        if current.revision() != pending.prepared.expected_revision() {
-            let _sent = pending
-                .reply
-                .send(ReloadOutcome::Rejected(ReloadRejection::StaleRevision));
-            return;
-        }
-        if pending.prepared.is_noop() {
-            let _sent = pending
-                .reply
-                .send(ReloadOutcome::NoChange(current.revision()));
-            return;
-        }
-        let candidate = pending.prepared.candidate();
-        if !self.reload_floors_accept(&candidate) {
-            let _sent = pending
-                .reply
-                .send(ReloadOutcome::Rejected(ReloadRejection::CurrentUse));
-            return;
-        }
-        self.apply_runtime_snapshot(&candidate);
-        match pending.mode {
-            ReloadMode::Signal => {
-                let published = self
-                    .reload_handle
-                    .as_ref()
-                    .ok_or(ReloadRejection::StorageUnavailable)
-                    .and_then(|handle| handle.publish(current.revision(), Arc::clone(&candidate)));
-                match published {
-                    Ok(_) => {
-                        let _sent = pending
-                            .reply
-                            .send(ReloadOutcome::Applied(candidate.revision()));
-                    }
-                    Err(rejection) => {
-                        self.apply_runtime_snapshot(&current);
-                        let _sent = pending.reply.send(ReloadOutcome::Rejected(rejection));
-                    }
+    fn activate_pending_reload(&mut self) -> Option<StateCoreExit> {
+        let mut pending = self.reload_pending.take()?;
+        let Some(handle) = self.reload_handle.clone() else {
+            match pending.kind {
+                PendingReloadKind::Signal(reply) => {
+                    let _sent =
+                        reply.send(ReloadOutcome::Rejected(ReloadRejection::StorageUnavailable));
+                }
+                PendingReloadKind::Audited { reply, .. } => {
+                    let _sent = reply.send(AuditedReloadStart::Indeterminate);
                 }
             }
-            ReloadMode::AuditedAdmin => {
+            return Some(StateCoreExit::Corrupt(CorruptionCause::ApplyFailed));
+        };
+        let current = handle.load();
+        let candidate = pending.prepared.candidate();
+        let changes_live_state = !pending.prepared.is_noop();
+        match pending.kind {
+            PendingReloadKind::Signal(reply) => {
+                if current.revision() != pending.prepared.expected_revision() {
+                    let _sent = reply.send(ReloadOutcome::Rejected(ReloadRejection::StaleRevision));
+                    return None;
+                }
+                if !changes_live_state {
+                    let _sent = reply.send(ReloadOutcome::NoChange(current.revision()));
+                    return None;
+                }
+                if !self.reload_floors_accept(&candidate) {
+                    let _sent = reply.send(ReloadOutcome::Rejected(ReloadRejection::CurrentUse));
+                    return None;
+                }
+                let publication = Arc::clone(&candidate);
+                let published = handle.publish_after(current.revision(), publication, || {
+                    self.storage_limit_writer
+                        .activate(candidate.storage_limits())
+                        .map_err(map_storage_reload_rejection)?;
+                    self.apply_runtime_snapshot(&candidate);
+                    Ok(())
+                });
+                let outcome = match published {
+                    Ok(_) => {
+                        self.checkpoint_retry_suppressed = false;
+                        ReloadOutcome::Applied(candidate.revision())
+                    }
+                    Err(rejection) => ReloadOutcome::Rejected(rejection),
+                };
+                let _sent = reply.send(outcome);
+                None
+            }
+            PendingReloadKind::Audited {
+                success,
+                failure,
+                reply,
+            } => {
+                if !valid_rehash_outcome_pair(&success, &failure) {
+                    let _sent = reply.send(AuditedReloadStart::Indeterminate);
+                    return Some(StateCoreExit::Corrupt(CorruptionCause::ProjectionFailed));
+                }
+                let Ok(failure) = self.project_reload_audit(&failure, &current) else {
+                    let _sent = reply.send(AuditedReloadStart::Indeterminate);
+                    return Some(StateCoreExit::Corrupt(CorruptionCause::ProjectionFailed));
+                };
+                let rejection = if current.revision() != pending.prepared.expected_revision() {
+                    Some(ReloadRejection::StaleRevision)
+                } else if changes_live_state && !self.reload_floors_accept(&candidate) {
+                    Some(ReloadRejection::CurrentUse)
+                } else {
+                    None
+                };
+                if let Some(rejection) = rejection {
+                    return self.install_failed_reload(
+                        pending.prepared.take_lease(),
+                        current,
+                        failure,
+                        rejection,
+                        reply,
+                    );
+                }
+                let success = match self.project_reload_audit(&success, &candidate) {
+                    Ok(projected) => projected,
+                    Err(RuntimeError::Storage(StorageError::LimitExceeded)) => {
+                        return self.install_failed_reload(
+                            pending.prepared.take_lease(),
+                            current,
+                            failure,
+                            ReloadRejection::CurrentUse,
+                            reply,
+                        );
+                    }
+                    Err(_) => {
+                        return self.install_failed_reload(
+                            pending.prepared.take_lease(),
+                            current,
+                            failure,
+                            ReloadRejection::StorageUnavailable,
+                            reply,
+                        );
+                    }
+                };
+                if let Err(error) = self.storage_limit_writer.reserve(
+                    success.transaction_id,
+                    candidate.storage_limits(),
+                    success.resulting_logical_database_bytes,
+                    success.resulting_backup_stream_bytes,
+                ) {
+                    return self.install_failed_reload(
+                        pending.prepared.take_lease(),
+                        current,
+                        failure,
+                        map_storage_reload_rejection(error),
+                        reply,
+                    );
+                }
                 let activation = ReloadActivation {
                     revision: candidate.revision(),
+                    transaction_id: success.transaction_id,
+                    changes_live_state,
                 };
                 self.reload_provisional = Some(ProvisionalReload {
                     activation,
                     previous: current,
                     candidate,
+                    changes_live_state,
+                    reservation_transaction_id: success.transaction_id,
+                    state: AuditedReloadState::ReadySuccess {
+                        success: Box::new(success),
+                        failure: Box::new(failure),
+                    },
                     _lease: pending.prepared.take_lease(),
                 });
-                let _sent = pending.reply.send(ReloadOutcome::Provisional(activation));
+                let _sent = reply.send(AuditedReloadStart::Provisional(activation));
+                None
             }
         }
+    }
+
+    fn project_reload_audit(
+        &mut self,
+        event: &agenc_ircd_admin::AdminAuditEvent,
+        snapshot: &RuntimeConfigSnapshot,
+    ) -> Result<ReservedReloadOutcome, RuntimeError> {
+        let transaction_id = next_transaction_id(self.context.entropy.as_mut())?;
+        let projected = project_admin_audit_event(
+            transaction_id,
+            event,
+            &self.context.index,
+            &self.context.keys,
+            self.context.head,
+            snapshot.storage_ceilings(),
+        )?;
+        let resulting_logical_database_bytes = projected.resulting_logical_database_bytes();
+        let resulting_backup_stream_bytes = projected.resulting_backup_stream_bytes();
+        let (batch, retained) = projected.into_parts();
+        Ok(ReservedReloadOutcome {
+            transaction_id,
+            batch,
+            retained,
+            resulting_logical_database_bytes,
+            resulting_backup_stream_bytes,
+        })
+    }
+
+    fn install_failed_reload(
+        &mut self,
+        lease: Option<crate::runtime_config::ReloadLease>,
+        current: Arc<RuntimeConfigSnapshot>,
+        failure: ReservedReloadOutcome,
+        rejection: ReloadRejection,
+        reply: tokio::sync::oneshot::Sender<AuditedReloadStart>,
+    ) -> Option<StateCoreExit> {
+        if self
+            .storage_limit_writer
+            .reserve(
+                failure.transaction_id,
+                current.storage_limits(),
+                failure.resulting_logical_database_bytes,
+                failure.resulting_backup_stream_bytes,
+            )
+            .is_err()
+        {
+            let _sent = reply.send(AuditedReloadStart::Indeterminate);
+            return Some(StateCoreExit::Corrupt(CorruptionCause::ProjectionFailed));
+        }
+        let activation = ReloadActivation {
+            revision: current.revision(),
+            transaction_id: failure.transaction_id,
+            changes_live_state: false,
+        };
+        self.reload_provisional = Some(ProvisionalReload {
+            activation,
+            previous: Arc::clone(&current),
+            candidate: current,
+            changes_live_state: false,
+            reservation_transaction_id: failure.transaction_id,
+            state: AuditedReloadState::ReadyFailure {
+                failure: Box::new(failure),
+                rejection,
+            },
+            _lease: lease,
+        });
+        let _sent = reply.send(AuditedReloadStart::Provisional(activation));
+        None
     }
 
     fn reload_floors_accept(&self, candidate: &RuntimeConfigSnapshot) -> bool {
@@ -1568,6 +1982,153 @@ impl StateCore {
         }
     }
 
+    // agenc-review: focus owner=runtime reviewed=2026-09-01 reason=closed submit result keeps exact reserved outcome and determinate rollback distinct from indeterminate closure
+    fn commit_reserved_reload_outcome(
+        &mut self,
+        activation: ReloadActivation,
+        reply: tokio::sync::oneshot::Sender<Result<AuditedReloadResult, ReloadRejection>>,
+    ) -> Option<StateCoreExit> {
+        let (outcome, result) = match self.begin_reserved_reload_outcome(activation) {
+            Ok(outcome) => outcome,
+            Err(rejection) => {
+                let _sent = reply.send(Err(rejection));
+                return None;
+            }
+        };
+        self.submit_reload_outcome(activation, outcome, result, reply)
+    }
+
+    // agenc-review: focus owner=runtime reviewed=2026-09-01 reason=closed bridge outcomes either retain the exact barrier-bound result transition to the prebuilt failure batch or terminate indeterminate
+    fn submit_reload_outcome(
+        &mut self,
+        activation: ReloadActivation,
+        outcome: ReservedReloadOutcome,
+        result: AuditedReloadResult,
+        reply: tokio::sync::oneshot::Sender<Result<AuditedReloadResult, ReloadRejection>>,
+    ) -> Option<StateCoreExit> {
+        let transaction_id = outcome.transaction_id;
+        let retained = outcome.retained;
+        match self.context.bridge.submit(outcome.batch) {
+            Ok(submitted) if submitted == transaction_id => {
+                self.admin_pending = Some(PendingAdminCommit {
+                    transaction_id,
+                    retained,
+                    mutation: None,
+                    reload_activation: Some(activation),
+                    reply: PendingAdminReply::Reload {
+                        activation,
+                        result,
+                        reply,
+                    },
+                });
+                None
+            }
+            Ok(_) => Some(StateCoreExit::Indeterminate(
+                IndeterminateCause::TransactionMismatch,
+            )),
+            Err(SubmitError::Storage(_)) if result == AuditedReloadResult::Success => self
+                .submit_reload_failure_after_rejection(
+                    activation,
+                    ReloadRejection::StorageUnavailable,
+                    reply,
+                ),
+            Err(SubmitError::Storage(_)) => Some(StateCoreExit::Indeterminate(
+                IndeterminateCause::StorageIndeterminate,
+            )),
+            Err(SubmitError::Bridge(failure)) => Some(StateCoreExit::Indeterminate(
+                IndeterminateCause::Bridge(failure),
+            )),
+        }
+    }
+
+    fn begin_reserved_reload_outcome(
+        &mut self,
+        activation: ReloadActivation,
+    ) -> Result<(ReservedReloadOutcome, AuditedReloadResult), ReloadRejection> {
+        if self.storage_in_flight() || self.context.pending_len() != 0 {
+            return Err(ReloadRejection::Busy);
+        }
+        let Some(mut provisional) = self.reload_provisional.take() else {
+            return Err(ReloadRejection::StaleRevision);
+        };
+        if provisional.activation != activation {
+            self.reload_provisional = Some(provisional);
+            return Err(ReloadRejection::StaleRevision);
+        }
+        let (outcome, result, next_state) = match provisional.state {
+            AuditedReloadState::ReadySuccess { success, failure } => (
+                *success,
+                AuditedReloadResult::Success,
+                AuditedReloadState::CommittingSuccess { failure },
+            ),
+            AuditedReloadState::ReadyFailure { failure, rejection } => (
+                *failure,
+                AuditedReloadResult::Failure(rejection),
+                AuditedReloadState::CommittingFailure { rejection },
+            ),
+            state => {
+                provisional.state = state;
+                self.reload_provisional = Some(provisional);
+                return Err(ReloadRejection::Busy);
+            }
+        };
+        provisional.state = next_state;
+        self.reload_provisional = Some(provisional);
+        Ok((outcome, result))
+    }
+
+    fn submit_reload_failure_after_rejection(
+        &mut self,
+        activation: ReloadActivation,
+        rejection: ReloadRejection,
+        reply: tokio::sync::oneshot::Sender<Result<AuditedReloadResult, ReloadRejection>>,
+    ) -> Option<StateCoreExit> {
+        let Some(mut provisional) = self.reload_provisional.take() else {
+            return Some(StateCoreExit::Corrupt(CorruptionCause::ApplyFailed));
+        };
+        if provisional.activation != activation {
+            self.reload_provisional = Some(provisional);
+            return Some(StateCoreExit::Corrupt(CorruptionCause::ApplyFailed));
+        }
+        let failure = match provisional.state {
+            AuditedReloadState::CommittingSuccess { failure } => *failure,
+            state => {
+                provisional.state = state;
+                self.reload_provisional = Some(provisional);
+                return Some(StateCoreExit::Corrupt(CorruptionCause::ApplyFailed));
+            }
+        };
+        if self
+            .storage_limit_writer
+            .rollback(provisional.reservation_transaction_id)
+            .is_err()
+            || self
+                .storage_limit_writer
+                .reserve(
+                    failure.transaction_id,
+                    provisional.previous.storage_limits(),
+                    failure.resulting_logical_database_bytes,
+                    failure.resulting_backup_stream_bytes,
+                )
+                .is_err()
+        {
+            provisional.state = AuditedReloadState::CommittingFailure { rejection };
+            self.reload_provisional = Some(provisional);
+            return Some(StateCoreExit::Indeterminate(
+                IndeterminateCause::StorageIndeterminate,
+            ));
+        }
+        provisional.reservation_transaction_id = failure.transaction_id;
+        provisional.state = AuditedReloadState::CommittingFailure { rejection };
+        self.reload_provisional = Some(provisional);
+        self.submit_reload_outcome(
+            activation,
+            failure,
+            AuditedReloadResult::Failure(rejection),
+            reply,
+        )
+    }
+
     fn finalize_reload(
         &mut self,
         activation: ReloadActivation,
@@ -1580,37 +2141,53 @@ impl StateCore {
             self.reload_provisional = Some(provisional);
             return Err(ReloadRejection::StaleRevision);
         }
-        let result = self
-            .reload_handle
-            .as_ref()
-            .ok_or(ReloadRejection::StorageUnavailable)?
-            .publish(
-                provisional.previous.revision(),
-                Arc::clone(&provisional.candidate),
-            );
+        if !matches!(
+            provisional.state,
+            AuditedReloadState::DurableSuccess | AuditedReloadState::DurableFailure
+        ) {
+            self.reload_provisional = Some(provisional);
+            return Err(ReloadRejection::Busy);
+        }
+        let Some(handle) = self.reload_handle.clone() else {
+            self.reload_provisional = Some(provisional);
+            return Err(ReloadRejection::StorageUnavailable);
+        };
+        let durable_success = matches!(provisional.state, AuditedReloadState::DurableSuccess);
+        if !durable_success || !provisional.changes_live_state {
+            let result = handle.activate_after(provisional.previous.revision(), || {
+                self.storage_limit_writer
+                    .finalize(provisional.reservation_transaction_id)
+                    .map_err(map_storage_reload_rejection)
+            });
+            return match result {
+                Ok(()) => {
+                    self.checkpoint_retry_suppressed = false;
+                    Ok(provisional.previous.revision())
+                }
+                Err(rejection) => {
+                    self.reload_provisional = Some(provisional);
+                    Err(rejection)
+                }
+            };
+        }
+        let publication = Arc::clone(&provisional.candidate);
+        let result = handle.publish_after(provisional.previous.revision(), publication, || {
+            self.storage_limit_writer
+                .finalize(provisional.reservation_transaction_id)
+                .map_err(map_storage_reload_rejection)?;
+            self.apply_runtime_snapshot(&provisional.candidate);
+            Ok(())
+        });
         match result {
-            Ok(_) => Ok(provisional.candidate.revision()),
+            Ok(_) => {
+                self.checkpoint_retry_suppressed = false;
+                Ok(provisional.candidate.revision())
+            }
             Err(rejection) => {
-                self.apply_runtime_snapshot(&provisional.previous);
+                self.reload_provisional = Some(provisional);
                 Err(rejection)
             }
         }
-    }
-
-    fn rollback_reload(
-        &mut self,
-        activation: ReloadActivation,
-    ) -> Result<crate::runtime_config::ConfigRevision, ReloadRejection> {
-        let provisional = self
-            .reload_provisional
-            .take()
-            .ok_or(ReloadRejection::StaleRevision)?;
-        if provisional.activation != activation {
-            self.reload_provisional = Some(provisional);
-            return Err(ReloadRejection::StaleRevision);
-        }
-        self.apply_runtime_snapshot(&provisional.previous);
-        Ok(provisional.previous.revision())
     }
 
     // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=single admin safe-point dispatch owns validation projection submission and closed failure routing
@@ -1684,7 +2261,8 @@ impl StateCore {
                     transaction_id,
                     retained,
                     mutation,
-                    reply,
+                    reload_activation: None,
+                    reply: PendingAdminReply::Admin(reply),
                 });
                 None
             }
@@ -1738,7 +2316,8 @@ impl StateCore {
                     transaction_id,
                     retained,
                     mutation: None,
-                    reply,
+                    reload_activation: None,
+                    reply: PendingAdminReply::Admin(reply),
                 });
                 None
             }
@@ -1915,6 +2494,7 @@ impl StateCore {
         )
     }
 
+    // agenc-review: focus owner=runtime reviewed=2026-09-01 reason=the sole admin receipt router preserves the reload barrier across success rejection and treats failure rejection as indeterminate
     fn step_admin_completion(&mut self, message: StorageCompletionMessage) -> CompletionStep {
         let Some(pending) = self.admin_pending.take() else {
             return CompletionStep::Ready(Some(StateCoreExit::Indeterminate(
@@ -1927,37 +2507,93 @@ impl StateCore {
             )));
         }
         match message.outcome {
-            CommitOutcome::Committed(receipt) => {
-                if receipt.transaction_id != pending.transaction_id {
-                    return CompletionStep::Ready(Some(StateCoreExit::Indeterminate(
-                        IndeterminateCause::TransactionMismatch,
-                    )));
-                }
-                self.context.head = pending.retained.advance(&receipt);
-                self.context.index.apply(pending.retained.updates());
-                self.context.counters.batches_committed =
-                    self.context.counters.batches_committed.saturating_add(1);
-                if let Some(mutation) = pending.mutation
-                    && self.apply_admin_mutation(mutation).is_err()
-                {
-                    return CompletionStep::Ready(Some(StateCoreExit::Corrupt(
-                        CorruptionCause::ApplyFailed,
-                    )));
-                }
-                CompletionStep::Refresh(IndexRefreshContinuation::Admin(pending.reply))
-            }
+            CommitOutcome::Committed(receipt) => match self.apply_committed_admin(pending, receipt)
+            {
+                Ok(reply) => CompletionStep::Refresh(IndexRefreshContinuation::Admin(reply)),
+                Err(exit) => CompletionStep::Ready(Some(exit)),
+            },
             CommitOutcome::Rejected(_error) => {
                 self.context.counters.batches_rejected =
                     self.context.counters.batches_rejected.saturating_add(1);
-                let _sent = pending
-                    .reply
-                    .send(Err(AdminCoreFailure::StorageUnavailable));
-                CompletionStep::Ready(self.step_batch())
+                match pending.reply {
+                    PendingAdminReply::Admin(reply) => {
+                        let _sent = reply.send(Err(AdminCoreFailure::StorageUnavailable));
+                        CompletionStep::Ready(self.step_batch())
+                    }
+                    PendingAdminReply::Reload {
+                        activation,
+                        result: AuditedReloadResult::Success,
+                        reply,
+                    } if pending.reload_activation == Some(activation) => {
+                        CompletionStep::Ready(self.submit_reload_failure_after_rejection(
+                            activation,
+                            ReloadRejection::StorageUnavailable,
+                            reply,
+                        ))
+                    }
+                    PendingAdminReply::Reload { .. } => CompletionStep::Ready(Some(
+                        StateCoreExit::Indeterminate(IndeterminateCause::StorageIndeterminate),
+                    )),
+                }
             }
             CommitOutcome::Indeterminate => CompletionStep::Ready(Some(
                 StateCoreExit::Indeterminate(IndeterminateCause::StorageIndeterminate),
             )),
         }
+    }
+
+    fn apply_committed_admin(
+        &mut self,
+        pending: PendingAdminCommit,
+        receipt: agenc_ircd_storage::CommitReceipt,
+    ) -> Result<PendingAdminReply, StateCoreExit> {
+        if receipt.transaction_id != pending.transaction_id {
+            return Err(StateCoreExit::Indeterminate(
+                IndeterminateCause::TransactionMismatch,
+            ));
+        }
+        self.context.head = pending.retained.advance(&receipt);
+        self.checkpoint_retry_suppressed = false;
+        self.context.index.apply(pending.retained.updates());
+        self.context.counters.batches_committed =
+            self.context.counters.batches_committed.saturating_add(1);
+        if let Some(mutation) = pending.mutation {
+            self.apply_admin_mutation(mutation)
+                .map_err(|_| StateCoreExit::Corrupt(CorruptionCause::ApplyFailed))?;
+        }
+        if let Some(activation) = pending.reload_activation {
+            let result = pending
+                .reply
+                .reload_result()
+                .ok_or(StateCoreExit::Corrupt(CorruptionCause::ApplyFailed))?;
+            self.mark_reload_outcome_committed(activation, result)?;
+        }
+        Ok(pending.reply)
+    }
+
+    fn mark_reload_outcome_committed(
+        &mut self,
+        activation: ReloadActivation,
+        result: AuditedReloadResult,
+    ) -> Result<(), StateCoreExit> {
+        let provisional = self
+            .reload_provisional
+            .as_mut()
+            .ok_or(StateCoreExit::Corrupt(CorruptionCause::ApplyFailed))?;
+        let state_matches = match (&provisional.state, result) {
+            (AuditedReloadState::CommittingSuccess { .. }, AuditedReloadResult::Success) => true,
+            (
+                AuditedReloadState::CommittingFailure {
+                    rejection: expected,
+                },
+                AuditedReloadResult::Failure(actual),
+            ) => *expected == actual,
+            _ => false,
+        };
+        if provisional.activation != activation || !state_matches {
+            return Err(StateCoreExit::Corrupt(CorruptionCause::ApplyFailed));
+        }
+        Ok(())
     }
 
     fn step_physical_close(&mut self, notice: PhysicalCloseNotice) -> Option<StateCoreExit> {
@@ -2122,7 +2758,10 @@ impl StateCore {
 
     /// Drives the pending batch and routes any rejections.
     fn step_batch(&mut self) -> Option<StateCoreExit> {
-        if self.admin_pending.is_some() {
+        if self.admin_pending.is_some()
+            || self.reload_provisional.is_some()
+            || self.checkpoint_pending.is_some()
+        {
             return None;
         }
         match self.context.drive_batch() {
@@ -2166,6 +2805,7 @@ impl StateCore {
         match self.context.consume_completion(message) {
             Ok(BatchStep::Rejected(rejections)) => self.report_rejections(rejections),
             Ok(BatchStep::AppliedInStep(count)) => {
+                self.checkpoint_retry_suppressed = false;
                 self.router.batch_applied(&mut self.context, count);
             }
             Ok(_) => {}
@@ -2180,7 +2820,7 @@ impl StateCore {
     ) -> Result<Option<PendingIndexRefresh>, StateCoreExit> {
         let rows = self.context.pending_index_rows();
         if rows.is_empty() {
-            continuation.complete();
+            self.complete_index_refresh(continuation)?;
             return Ok(None);
         }
         let pending = PendingIndexRefresh::new(
@@ -2216,10 +2856,49 @@ impl StateCore {
                 let continuation = pending
                     .finish(&mut self.context.index)
                     .map_err(|_| StateCoreExit::Corrupt(CorruptionCause::IndexRefreshFailed))?;
-                continuation.complete();
+                self.complete_index_refresh(continuation)?;
                 Ok(None)
             }
         }
+    }
+
+    fn complete_index_refresh(
+        &mut self,
+        continuation: IndexRefreshContinuation,
+    ) -> Result<(), StateCoreExit> {
+        if let Some(activation) = continuation.reload_activation() {
+            let result = match &continuation {
+                IndexRefreshContinuation::Admin(reply) => reply
+                    .reload_result()
+                    .ok_or(StateCoreExit::Corrupt(CorruptionCause::IndexRefreshFailed))?,
+                IndexRefreshContinuation::Batch => {
+                    return Err(StateCoreExit::Corrupt(CorruptionCause::IndexRefreshFailed));
+                }
+            };
+            let provisional = self
+                .reload_provisional
+                .as_mut()
+                .ok_or(StateCoreExit::Corrupt(CorruptionCause::IndexRefreshFailed))?;
+            if provisional.activation != activation {
+                return Err(StateCoreExit::Corrupt(CorruptionCause::IndexRefreshFailed));
+            }
+            provisional.state = match (&provisional.state, result) {
+                (AuditedReloadState::CommittingSuccess { .. }, AuditedReloadResult::Success) => {
+                    AuditedReloadState::DurableSuccess
+                }
+                (
+                    AuditedReloadState::CommittingFailure {
+                        rejection: expected,
+                    },
+                    AuditedReloadResult::Failure(actual),
+                ) if *expected == actual => AuditedReloadState::DurableFailure,
+                _ => {
+                    return Err(StateCoreExit::Corrupt(CorruptionCause::IndexRefreshFailed));
+                }
+            };
+        }
+        continuation.complete();
+        Ok(())
     }
 
     /// Runs the actor until it exits (spec 21.3 channel table, lines
@@ -2234,6 +2913,7 @@ impl StateCore {
         mut lifecycle: mpsc::Receiver<LifecycleRequest>,
         mut storage: mpsc::Receiver<StorageCompletionMessage>,
         mut storage_reads: mpsc::Receiver<StorageReadCompletionMessage>,
+        mut checkpoints: mpsc::Receiver<StorageCheckpointCompletionMessage>,
         mut crypto: mpsc::Receiver<CryptoCompletionMessage<CryptoJobOutput>>,
         token: CancellationToken,
     ) -> StateCoreExit {
@@ -2248,6 +2928,9 @@ impl StateCore {
         let mut lifecycle_replies = PendingLifecycleReplies::default();
         let mut shutdown_connections_started = false;
         let mut shutdown_acknowledgements = Vec::new();
+        let mut shutdown_checkpoint_attempted = false;
+        let mut shutdown_checkpoint_complete = false;
+        let mut shutdown_checkpoint_failed = false;
         let mut index_refresh = None;
         let mut index_refresh_retry = tokio::time::interval(INDEX_REFRESH_RETRY_INTERVAL);
         index_refresh_retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -2267,10 +2950,15 @@ impl StateCore {
             let safe_point =
                 !in_flight && self.context.pending_len() == 0 && self.router.reload_ready();
             if safe_point {
-                if self.reload_pending.is_some() {
-                    self.activate_pending_reload();
+                if self.reload_pending.is_some()
+                    && let Some(exit) = self.activate_pending_reload()
+                {
+                    return exit;
                 }
-                if lifecycle_target.is_some_and(|phase| phase >= LifecyclePhase::Drain)
+                let activation_barrier =
+                    self.reload_pending.is_some() || self.reload_provisional.is_some();
+                if !activation_barrier
+                    && lifecycle_target.is_some_and(|phase| phase >= LifecyclePhase::Drain)
                     && !lifecycle_completed.is_some_and(|phase| phase >= LifecyclePhase::Drain)
                 {
                     if !shutdown_connections_started {
@@ -2280,8 +2968,24 @@ impl StateCore {
                     lifecycle_replies.acknowledge(LifecyclePhase::Drain);
                     lifecycle_completed = Some(LifecyclePhase::Drain);
                 }
-                if lifecycle_target.is_some_and(|phase| phase >= LifecyclePhase::Flush)
+                if !activation_barrier
+                    && lifecycle_target.is_some_and(|phase| phase >= LifecyclePhase::Flush)
                     && !lifecycle_completed.is_some_and(|phase| phase >= LifecyclePhase::Flush)
+                    && shutdown_acknowledgements
+                        .iter()
+                        .all(FlushAcknowledgement::is_acknowledged)
+                    && !shutdown_checkpoint_attempted
+                    && !shutdown_checkpoint_failed
+                {
+                    match self.start_integrity_checkpoint(true) {
+                        Ok(started) => shutdown_checkpoint_attempted = started,
+                        Err(exit) => return exit,
+                    }
+                }
+                if !activation_barrier
+                    && lifecycle_target.is_some_and(|phase| phase >= LifecyclePhase::Flush)
+                    && !lifecycle_completed.is_some_and(|phase| phase >= LifecyclePhase::Flush)
+                    && shutdown_checkpoint_complete
                     && shutdown_acknowledgements
                         .iter()
                         .all(FlushAcknowledgement::is_acknowledged)
@@ -2289,16 +2993,28 @@ impl StateCore {
                     lifecycle_replies.acknowledge(LifecyclePhase::Flush);
                     lifecycle_completed = Some(LifecyclePhase::Flush);
                 }
-                if cancellation_pending {
+                if !activation_barrier && lifecycle_target.is_none() {
+                    match self.start_integrity_checkpoint(false) {
+                        Ok(_started) => {}
+                        Err(exit) => return exit,
+                    }
+                }
+                if cancellation_pending && !activation_barrier && self.checkpoint_pending.is_none()
+                {
                     return StateCoreExit::Cancelled;
                 }
             }
-            let waiting_for_connection_flush = safe_point
+            let activation_barrier =
+                self.reload_pending.is_some() || self.reload_provisional.is_some();
+            let provisional_barrier = self.reload_provisional.is_some();
+            let waiting_for_shutdown_flush = safe_point
                 && lifecycle_target.is_some_and(|phase| phase >= LifecyclePhase::Flush)
                 && !lifecycle_completed.is_some_and(|phase| phase >= LifecyclePhase::Flush)
-                && shutdown_acknowledgements
+                && !shutdown_checkpoint_failed
+                && (shutdown_acknowledgements
                     .iter()
-                    .any(|acknowledgement| !acknowledgement.is_acknowledged());
+                    .any(|acknowledgement| !acknowledgement.is_acknowledged())
+                    || !shutdown_checkpoint_attempted);
             let wake = self.wake_instant();
             let prefix_wake = self.prefix_wake_instant();
             let exit = tokio::select! {
@@ -2307,7 +3023,10 @@ impl StateCore {
                     cancellation_open = false;
                     cancellation_pending = true;
                     self.context.quiescing = true;
-                    safe_point.then_some(StateCoreExit::Cancelled)
+                    (safe_point
+                        && !activation_barrier
+                        && self.checkpoint_pending.is_none())
+                    .then_some(StateCoreExit::Cancelled)
                 },
                 request = lifecycle.recv(), if lifecycle_open => match request {
                     Some(request) => {
@@ -2339,7 +3058,7 @@ impl StateCore {
                         None
                     }
                 },
-                notice = physical_closes.recv(), if physical_closes_open => {
+                notice = physical_closes.recv(), if physical_closes_open && !provisional_barrier => {
                     match notice {
                         Some(notice) => self.step_physical_close(notice),
                         None => {
@@ -2348,11 +3067,11 @@ impl StateCore {
                         }
                     }
                 },
-                () = tokio::time::sleep_until(prefix_wake.unwrap_or_else(Instant::now)), if prefix_wake.is_some() => {
+                () = tokio::time::sleep_until(prefix_wake.unwrap_or_else(Instant::now)), if prefix_wake.is_some() && !provisional_barrier => {
                     self.context.erase_idle_prefixes();
                     None
                 },
-                request = self.admin_receiver.recv(), if self.admin_open && !refresh_in_flight => match request {
+                request = self.admin_receiver.recv(), if self.admin_open && !refresh_in_flight && !activation_barrier => match request {
                     Some(request) => self.step_admin_request(request),
                     None => {
                         self.admin_open = false;
@@ -2365,6 +3084,27 @@ impl StateCore {
                         self.reload_open = false;
                         None
                     }
+                },
+                completion = checkpoints.recv() => match completion {
+                    Some(message) => match self.step_checkpoint_completion(message) {
+                        CheckpointCompletionStep::Normal => None,
+                        CheckpointCompletionStep::ShutdownComplete => {
+                            shutdown_checkpoint_complete = true;
+                            None
+                        }
+                        CheckpointCompletionStep::ShutdownRejected => {
+                            shutdown_checkpoint_failed = true;
+                            lifecycle_replies.fail(
+                                LifecyclePhase::Flush,
+                                LifecycleFailure::Unavailable,
+                            );
+                            None
+                        }
+                        CheckpointCompletionStep::Exit(exit) => Some(exit),
+                    },
+                    None => Some(StateCoreExit::Indeterminate(
+                        IndeterminateCause::CompletionChannelClosed,
+                    )),
                 },
                 completion = storage.recv() => match completion {
                     Some(message) => match self.step_completion(message) {
@@ -2388,7 +3128,7 @@ impl StateCore {
                         IndeterminateCause::CompletionChannelClosed,
                     )),
                 },
-                completion = storage_reads.recv(), if storage_reads_open => {
+                completion = storage_reads.recv(), if storage_reads_open && (!provisional_barrier || refresh_in_flight) => {
                     match completion {
                         Some(message) => {
                             if index_refresh
@@ -2480,14 +3220,14 @@ impl StateCore {
                         )),
                     }
                 },
-                completion = crypto.recv(), if crypto_open => {
+                completion = crypto.recv(), if crypto_open && !provisional_barrier => {
                     match completion {
                         Some(message) => self.router.crypto_completed(&mut self.context, message),
                         None => crypto_open = false,
                     }
                     None
                 },
-                message = inbox.recv(), if !in_flight && self.reload_provisional.is_none() => match message {
+                message = inbox.recv(), if !in_flight && !activation_barrier => match message {
                     Some(StateCoreMessage::Opened { .. }) if self.context.quiescing => None,
                     Some(message) => self.step_message(message),
                     None => Some(StateCoreExit::InboxClosed),
@@ -2511,8 +3251,8 @@ impl StateCore {
                     }
                     None
                 },
-                _ = flush_poll.tick(), if waiting_for_connection_flush => None,
-                () = tokio::time::sleep_until(wake.unwrap_or_else(Instant::now)), if wake.is_some() && !refresh_in_flight => {
+                _ = flush_poll.tick(), if waiting_for_shutdown_flush => None,
+                () = tokio::time::sleep_until(wake.unwrap_or_else(Instant::now)), if wake.is_some() && !refresh_in_flight && !provisional_barrier => {
                     self.step_wake()
                 },
             };

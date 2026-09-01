@@ -6743,6 +6743,8 @@ mod tests {
         owner: Option<StorageOwner>,
         _storage_completions: tokio::sync::mpsc::Receiver<crate::bridge::StorageCompletionMessage>,
         _storage_reads: tokio::sync::mpsc::Receiver<crate::bridge::StorageReadCompletionMessage>,
+        _storage_checkpoints:
+            tokio::sync::mpsc::Receiver<crate::bridge::StorageCheckpointCompletionMessage>,
         _crypto_completions: tokio::sync::mpsc::Receiver<
             crate::bridge::CryptoCompletionMessage<crate::bridge::crypto::CryptoJobOutput>,
         >,
@@ -6811,7 +6813,7 @@ mod tests {
             }
             let state_directory =
                 StateDirectory::open(&directory.0, core::slice::from_ref(&qualification))?;
-            let owner = StorageOwner::start(StorageOpenConfig {
+            let mut owner = StorageOwner::start(StorageOpenConfig {
                 expected_network_id: network_id,
                 expected_server_id: server_id,
                 state_directory,
@@ -6829,10 +6831,11 @@ mod tests {
                 storage.storage_key_generation(),
             )?;
             let reconstruction = reconstruct(&seed, &owner.port(), &keys)?;
-            let (storage_bridge, storage_completions, storage_reads) =
+            let (storage_bridge, storage_completions, storage_reads, storage_checkpoints) =
                 StorageBridge::start(owner.port())?;
             let crypto_config = CryptoWorkerConfig::new(1, 1, 1)?;
             let (crypto_bridge, crypto_completions) = CryptoBridge::start(crypto_config)?;
+            let storage_limit_writer = owner.take_limit_writer()?;
             let state = StateCore::new(StateCoreInputs {
                 config: StateCoreConfig {
                     server_prefix: "server.example".to_owned(),
@@ -6856,6 +6859,7 @@ mod tests {
                 },
                 entropy: Box::new(ScriptedEntropy::new(entropy)?),
                 router: Box::new(DefaultRouter),
+                storage_limit_writer,
             });
             let coordinator = AccountServiceCoordinator::new(AccountServiceConfig {
                 network_id,
@@ -6884,6 +6888,7 @@ mod tests {
                 owner: Some(owner),
                 _storage_completions: storage_completions,
                 _storage_reads: storage_reads,
+                _storage_checkpoints: storage_checkpoints,
                 _crypto_completions: crypto_completions,
                 _directory: directory,
             })

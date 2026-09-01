@@ -5,10 +5,11 @@
 //! `StoragePort::try_commit` never blocks, but its completion is consumed
 //! with a blocking `wait`. That wait must not run on a Tokio worker, so the
 //! bridge thread owns it and hands each outcome into a bounded Tokio
-//! channel with exactly two slots (spec line 4084). The receiver belongs to
-//! StateCore alone; a lost sender, lost receiver, duplicate transaction, or
-//! unknown completion is reported as an indeterminate failure and the
-//! bridge stops (spec lines 4207-4210).
+//! completion channel. The commit lane has exactly two slots (spec line
+//! 4084); read and checkpoint results use separate fixed-capacity lanes.
+//! Every receiver belongs to StateCore alone. A lost sender, lost receiver,
+//! duplicate transaction, or unknown completion is reported as an
+//! indeterminate failure and the bridge stops (spec lines 4207-4210).
 //!
 //! This module keeps its tests in `tests/bridge_storage.rs` so the file can
 //! be compiled unchanged under the loom scheduler for the schedule models.
@@ -18,16 +19,17 @@ use std::fmt;
 use std::thread::{self, JoinHandle};
 
 use agenc_ircd_storage::{
-    CommitOutcome, ReadPlan, ReadResult, StorageCompletion, StorageError, StorageMutationBatch,
-    StoragePort,
+    CheckpointOutcome, CommitOutcome, ReadPlan, ReadResult, StorageCompletion, StorageError,
+    StorageMutationBatch, StoragePort,
 };
 use agenc_ircd_types::TransactionId;
 use tokio::sync::mpsc;
 
 use crate::RuntimeError;
 use crate::bridge::{
-    STORAGE_COMPLETION_CHANNEL_CAPACITY, STORAGE_READ_COMPLETION_CHANNEL_CAPACITY,
-    StorageCompletionMessage, StorageReadCompletionMessage, StorageReadId,
+    STORAGE_CHECKPOINT_COMPLETION_CHANNEL_CAPACITY, STORAGE_COMPLETION_CHANNEL_CAPACITY,
+    STORAGE_READ_COMPLETION_CHANNEL_CAPACITY, StorageCheckpointCompletionMessage,
+    StorageCheckpointId, StorageCompletionMessage, StorageReadCompletionMessage, StorageReadId,
 };
 use crate::sync::{Arc, Mutex, lock};
 
@@ -100,6 +102,8 @@ impl std::error::Error for SubmitError {
 
 struct LedgerState {
     in_flight: BTreeSet<TransactionId>,
+    reads_in_flight: BTreeSet<StorageReadId>,
+    checkpoint_in_flight: Option<StorageCheckpointId>,
     failed: Option<BridgeFailure>,
 }
 
@@ -119,6 +123,8 @@ impl CompletionLedger {
         Self {
             state: Mutex::new(LedgerState {
                 in_flight: BTreeSet::new(),
+                reads_in_flight: BTreeSet::new(),
+                checkpoint_in_flight: None,
                 failed: None,
             }),
         }
@@ -140,6 +146,72 @@ impl CompletionLedger {
     /// Forgets a submission the storage owner never admitted.
     pub fn abandon(&self, transaction_id: TransactionId) {
         lock(&self.state).in_flight.remove(&transaction_id);
+    }
+
+    fn begin_read(&self, read_id: StorageReadId) -> Result<(), StorageError> {
+        let mut state = lock(&self.state);
+        if state.failed.is_some() {
+            return Err(StorageError::Unavailable);
+        }
+        if state.checkpoint_in_flight.is_some() {
+            return Err(StorageError::QueueFull);
+        }
+        if !state.reads_in_flight.insert(read_id) {
+            state.failed = Some(BridgeFailure::DuplicateTransaction);
+            return Err(StorageError::Unavailable);
+        }
+        Ok(())
+    }
+
+    fn abandon_read(&self, read_id: StorageReadId) {
+        lock(&self.state).reads_in_flight.remove(&read_id);
+    }
+
+    fn finish_read(&self, read_id: StorageReadId) -> Result<(), BridgeFailure> {
+        let mut state = lock(&self.state);
+        if let Some(failure) = state.failed {
+            return Err(failure);
+        }
+        if !state.reads_in_flight.remove(&read_id) {
+            state.failed = Some(BridgeFailure::DuplicateTransaction);
+            return Err(BridgeFailure::DuplicateTransaction);
+        }
+        Ok(())
+    }
+
+    fn begin_checkpoint(&self, checkpoint_id: StorageCheckpointId) -> Result<(), StorageError> {
+        let mut state = lock(&self.state);
+        if state.failed.is_some() {
+            return Err(StorageError::Unavailable);
+        }
+        if !state.in_flight.is_empty()
+            || !state.reads_in_flight.is_empty()
+            || state.checkpoint_in_flight.is_some()
+        {
+            return Err(StorageError::QueueFull);
+        }
+        state.checkpoint_in_flight = Some(checkpoint_id);
+        Ok(())
+    }
+
+    fn abandon_checkpoint(&self, checkpoint_id: StorageCheckpointId) {
+        let mut state = lock(&self.state);
+        if state.checkpoint_in_flight == Some(checkpoint_id) {
+            state.checkpoint_in_flight = None;
+        }
+    }
+
+    fn finish_checkpoint(&self, checkpoint_id: StorageCheckpointId) -> Result<(), BridgeFailure> {
+        let mut state = lock(&self.state);
+        if let Some(failure) = state.failed {
+            return Err(failure);
+        }
+        if state.checkpoint_in_flight != Some(checkpoint_id) {
+            state.failed = Some(BridgeFailure::DuplicateTransaction);
+            return Err(BridgeFailure::DuplicateTransaction);
+        }
+        state.checkpoint_in_flight = None;
+        Ok(())
     }
 
     /// Records a completion; an unknown identity fails the ledger.
@@ -191,6 +263,10 @@ enum PendingCompletion {
         read_id: StorageReadId,
         completion: StorageCompletion<ReadResult>,
     },
+    Checkpoint {
+        checkpoint_id: StorageCheckpointId,
+        completion: StorageCompletion<CheckpointOutcome>,
+    },
 }
 
 /// The submitting half of the bridge, owned by StateCore.
@@ -200,30 +276,40 @@ pub struct StorageBridge {
     ledger: Arc<CompletionLedger>,
     thread: Option<JoinHandle<()>>,
     next_read_id: u64,
+    next_checkpoint_id: u64,
 }
 
+/// A started bridge and its three sole StateCore completion receivers.
+pub type StartedStorageBridge = (
+    StorageBridge,
+    mpsc::Receiver<StorageCompletionMessage>,
+    mpsc::Receiver<StorageReadCompletionMessage>,
+    mpsc::Receiver<StorageCheckpointCompletionMessage>,
+);
+
 impl StorageBridge {
-    /// Starts the bridge thread and returns the sole commit and read
-    /// completion receivers.
-    pub fn start(
-        port: StoragePort,
-    ) -> Result<
-        (
-            Self,
-            mpsc::Receiver<StorageCompletionMessage>,
-            mpsc::Receiver<StorageReadCompletionMessage>,
-        ),
-        RuntimeError,
-    > {
+    /// Starts the bridge thread and returns the sole commit, read, and
+    /// checkpoint completion receivers.
+    pub fn start(port: StoragePort) -> Result<StartedStorageBridge, RuntimeError> {
         let (handoff, mut pending) = mpsc::channel(STORAGE_HANDOFF_CAPACITY);
         let (outcomes, receiver) = mpsc::channel(STORAGE_COMPLETION_CHANNEL_CAPACITY);
         let (read_outcomes, read_receiver) =
             mpsc::channel(STORAGE_READ_COMPLETION_CHANNEL_CAPACITY);
+        let (checkpoint_outcomes, checkpoint_receiver) =
+            mpsc::channel(STORAGE_CHECKPOINT_COMPLETION_CHANNEL_CAPACITY);
         let ledger = Arc::new(CompletionLedger::new());
         let thread_ledger = Arc::clone(&ledger);
         let thread = thread::Builder::new()
             .name(STORAGE_BRIDGE_THREAD_NAME.to_owned())
-            .spawn(move || bridge_loop(&mut pending, &outcomes, &read_outcomes, &thread_ledger))
+            .spawn(move || {
+                bridge_loop(
+                    &mut pending,
+                    &outcomes,
+                    &read_outcomes,
+                    &checkpoint_outcomes,
+                    &thread_ledger,
+                );
+            })
             .map_err(|_| RuntimeError::Storage(StorageError::Unavailable))?;
         Ok((
             Self {
@@ -232,9 +318,11 @@ impl StorageBridge {
                 ledger,
                 thread: Some(thread),
                 next_read_id: 1,
+                next_checkpoint_id: 1,
             },
             receiver,
             read_receiver,
+            checkpoint_receiver,
         ))
     }
 
@@ -290,20 +378,73 @@ impl StorageBridge {
             .checked_add(1)
             .ok_or(StorageError::Overflow)?;
         let read_id = StorageReadId::new(self.next_read_id);
+        self.ledger.begin_read(read_id)?;
         let Some(handoff) = &self.handoff else {
+            self.ledger.abandon_read(read_id);
             return Err(StorageError::Unavailable);
         };
-        let permit = handoff.try_reserve().map_err(|error| match error {
-            mpsc::error::TrySendError::Full(()) => StorageError::QueueFull,
-            mpsc::error::TrySendError::Closed(()) => StorageError::Unavailable,
-        })?;
-        let completion = self.port.try_read(plan)?;
+        let permit = match handoff.try_reserve() {
+            Ok(permit) => permit,
+            Err(mpsc::error::TrySendError::Full(())) => {
+                self.ledger.abandon_read(read_id);
+                return Err(StorageError::QueueFull);
+            }
+            Err(mpsc::error::TrySendError::Closed(())) => {
+                self.ledger.abandon_read(read_id);
+                return Err(StorageError::Unavailable);
+            }
+        };
+        let completion = match self.port.try_read(plan) {
+            Ok(completion) => completion,
+            Err(error) => {
+                self.ledger.abandon_read(read_id);
+                return Err(error);
+            }
+        };
         permit.send(PendingCompletion::Read {
             read_id,
             completion,
         });
         self.next_read_id = next;
         Ok(read_id)
+    }
+
+    /// Submits one integrity checkpoint at a StateCore safe point.
+    pub fn submit_checkpoint(&mut self) -> Result<StorageCheckpointId, StorageError> {
+        let next = self
+            .next_checkpoint_id
+            .checked_add(1)
+            .ok_or(StorageError::Overflow)?;
+        let checkpoint_id = StorageCheckpointId::new(self.next_checkpoint_id);
+        self.ledger.begin_checkpoint(checkpoint_id)?;
+        let Some(handoff) = &self.handoff else {
+            self.ledger.abandon_checkpoint(checkpoint_id);
+            return Err(StorageError::Unavailable);
+        };
+        let permit = match handoff.try_reserve() {
+            Ok(permit) => permit,
+            Err(mpsc::error::TrySendError::Full(())) => {
+                self.ledger.abandon_checkpoint(checkpoint_id);
+                return Err(StorageError::QueueFull);
+            }
+            Err(mpsc::error::TrySendError::Closed(())) => {
+                self.ledger.abandon_checkpoint(checkpoint_id);
+                return Err(StorageError::Unavailable);
+            }
+        };
+        let completion = match self.port.try_checkpoint() {
+            Ok(completion) => completion,
+            Err(error) => {
+                self.ledger.abandon_checkpoint(checkpoint_id);
+                return Err(error);
+            }
+        };
+        permit.send(PendingCompletion::Checkpoint {
+            checkpoint_id,
+            completion,
+        });
+        self.next_checkpoint_id = next;
+        Ok(checkpoint_id)
     }
 
     /// Returns the retained bridge failure, if any.
@@ -371,6 +512,7 @@ fn bridge_loop(
     pending: &mut mpsc::Receiver<PendingCompletion>,
     outcomes: &mpsc::Sender<StorageCompletionMessage>,
     read_outcomes: &mpsc::Sender<StorageReadCompletionMessage>,
+    checkpoint_outcomes: &mpsc::Sender<StorageCheckpointCompletionMessage>,
     ledger: &CompletionLedger,
 ) {
     while let Some(next) = pending.blocking_recv() {
@@ -383,6 +525,10 @@ fn bridge_loop(
                 read_id,
                 completion,
             } => forward_read(read_id, completion, read_outcomes, ledger),
+            PendingCompletion::Checkpoint {
+                checkpoint_id,
+                completion,
+            } => forward_checkpoint(checkpoint_id, completion, checkpoint_outcomes, ledger),
         };
         if !keep_running {
             return;
@@ -421,15 +567,48 @@ fn forward_read(
     read_outcomes: &mpsc::Sender<StorageReadCompletionMessage>,
     ledger: &CompletionLedger,
 ) -> bool {
-    let message = StorageReadCompletionMessage {
-        read_id,
-        result: completion.wait(),
-    };
+    let result = completion.wait();
+    if let Err(mismatch) = ledger.finish_read(read_id) {
+        ledger.fail(mismatch);
+        return false;
+    }
+    let message = StorageReadCompletionMessage { read_id, result };
     if read_outcomes.blocking_send(message).is_err() {
         ledger.fail(BridgeFailure::ReceiverLost);
         return false;
     }
     true
+}
+
+fn forward_checkpoint(
+    checkpoint_id: StorageCheckpointId,
+    completion: StorageCompletion<CheckpointOutcome>,
+    checkpoint_outcomes: &mpsc::Sender<StorageCheckpointCompletionMessage>,
+    ledger: &CompletionLedger,
+) -> bool {
+    let (outcome, failure) = match completion.wait() {
+        Ok(outcome) => (outcome, None),
+        Err(_) => (
+            CheckpointOutcome::Indeterminate,
+            Some(BridgeFailure::SenderLost),
+        ),
+    };
+    if let Err(mismatch) = ledger.finish_checkpoint(checkpoint_id) {
+        ledger.fail(mismatch);
+        return false;
+    }
+    if let Some(failure) = failure {
+        ledger.fail(failure);
+    }
+    let message = StorageCheckpointCompletionMessage {
+        checkpoint_id,
+        outcome,
+    };
+    if checkpoint_outcomes.blocking_send(message).is_err() {
+        ledger.fail(BridgeFailure::ReceiverLost);
+        return false;
+    }
+    failure.is_none()
 }
 
 /// Performs one bounded consistent read, blocking the calling thread.

@@ -9,8 +9,10 @@
 
 use std::error::Error;
 use std::fmt;
+use std::fs;
 use std::net::SocketAddr;
-use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
+use std::ops::Deref;
+use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
 use tokio::net::{TcpListener, UnixListener};
@@ -97,12 +99,81 @@ impl From<ListenerError> for RuntimeError {
 /// A bound, non-blocking listener ready for the accept loop.
 pub(crate) enum BoundListener {
     Tcp(TcpListener),
-    Unix(UnixListener),
+    Unix(BoundUnixListener),
 }
 
 impl BoundListener {
     pub(crate) fn is_unix(&self) -> bool {
         matches!(self, Self::Unix(_))
+    }
+}
+
+/// A Tokio Unix listener with optional ownership of its filesystem path.
+pub(crate) struct BoundUnixListener {
+    listener: UnixListener,
+    _owned_path: Option<OwnedUnixSocketPath>,
+}
+
+impl Deref for BoundUnixListener {
+    type Target = UnixListener;
+
+    fn deref(&self) -> &Self::Target {
+        &self.listener
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SocketIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl SocketIdentity {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }
+    }
+
+    fn matches(self, metadata: &fs::Metadata) -> bool {
+        metadata.file_type().is_socket()
+            && metadata.dev() == self.device
+            && metadata.ino() == self.inode
+    }
+}
+
+/// Removal authority for the filesystem node created by one successful bind.
+///
+/// The containing directory is validated as mode 0750 before binding. Cleanup
+/// still compares the current node with the recorded device and inode so a
+/// replacement socket is never mistaken for the node this process created.
+struct OwnedUnixSocketPath {
+    path: PathBuf,
+    identity: SocketIdentity,
+}
+
+impl OwnedUnixSocketPath {
+    fn new(path: PathBuf) -> Result<Self, ListenerError> {
+        let metadata = fs::symlink_metadata(&path).map_err(|_| ListenerError::Bind)?;
+        if !metadata.file_type().is_socket() {
+            return Err(ListenerError::Bind);
+        }
+        Ok(Self {
+            path,
+            identity: SocketIdentity::from_metadata(&metadata),
+        })
+    }
+}
+
+impl Drop for OwnedUnixSocketPath {
+    fn drop(&mut self) {
+        let Ok(current) = fs::symlink_metadata(&self.path) else {
+            return;
+        };
+        if self.identity.matches(&current) {
+            let _removed = fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -118,8 +189,8 @@ pub(crate) fn bind(source: ListenerSource) -> Result<(BoundListener, BoundAddres
         }
         ListenerSource::InheritedTcp(listener) => adopt_tcp(listener),
         ListenerSource::Unix(path) => {
-            let listener = bind_unix(&path)?;
-            adopt_unix(listener, path)
+            let (listener, owned_path) = bind_unix(&path)?;
+            adopt_unix(listener, path, Some(owned_path))
         }
         ListenerSource::InheritedUnix(listener) => {
             let path = listener
@@ -127,7 +198,7 @@ pub(crate) fn bind(source: ListenerSource) -> Result<(BoundListener, BoundAddres
                 .ok()
                 .and_then(|address| address.as_pathname().map(Path::to_path_buf))
                 .unwrap_or_default();
-            adopt_unix(listener, path)
+            adopt_unix(listener, path, None)
         }
     }
 }
@@ -146,35 +217,44 @@ fn adopt_tcp(
 fn adopt_unix(
     listener: std::os::unix::net::UnixListener,
     path: PathBuf,
+    owned_path: Option<OwnedUnixSocketPath>,
 ) -> Result<(BoundListener, BoundAddress), ListenerError> {
     listener
         .set_nonblocking(true)
         .map_err(|_| ListenerError::Bind)?;
     let listener = UnixListener::from_std(listener).map_err(|_| ListenerError::Bind)?;
-    Ok((BoundListener::Unix(listener), BoundAddress::Unix(path)))
+    Ok((
+        BoundListener::Unix(BoundUnixListener {
+            listener,
+            _owned_path: owned_path,
+        }),
+        BoundAddress::Unix(path),
+    ))
 }
 
 /// Binds a daemon-owned socket: the parent directory must already exist
 /// with mode 0750, a stale socket file is replaced, and the new socket is
 /// set to mode 0660 before it is returned.
-fn bind_unix(path: &Path) -> Result<std::os::unix::net::UnixListener, ListenerError> {
+fn bind_unix(
+    path: &Path,
+) -> Result<(std::os::unix::net::UnixListener, OwnedUnixSocketPath), ListenerError> {
     let parent = path.parent().ok_or(ListenerError::SocketDirectory)?;
-    let directory =
-        std::fs::symlink_metadata(parent).map_err(|_| ListenerError::SocketDirectory)?;
+    let directory = fs::symlink_metadata(parent).map_err(|_| ListenerError::SocketDirectory)?;
     if !directory.is_dir() || directory.permissions().mode() & 0o7777 != UNIX_SOCKET_DIRECTORY_MODE
     {
         return Err(ListenerError::SocketDirectory);
     }
-    if let Ok(existing) = std::fs::symlink_metadata(path) {
+    if let Ok(existing) = fs::symlink_metadata(path) {
         if !existing.file_type().is_socket() {
             return Err(ListenerError::Bind);
         }
-        std::fs::remove_file(path).map_err(|_| ListenerError::Bind)?;
+        fs::remove_file(path).map_err(|_| ListenerError::Bind)?;
     }
     let listener = std::os::unix::net::UnixListener::bind(path).map_err(|_| ListenerError::Bind)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(UNIX_SOCKET_MODE))
+    let owned_path = OwnedUnixSocketPath::new(path.to_path_buf())?;
+    fs::set_permissions(path, fs::Permissions::from_mode(UNIX_SOCKET_MODE))
         .map_err(|_| ListenerError::SocketPermissions)?;
-    Ok(listener)
+    Ok((listener, owned_path))
 }
 
 #[cfg(test)]
@@ -263,6 +343,80 @@ mod tests {
             BoundAddress::Unix(directory.join("inherited.sock"))
         );
         let _ = std::fs::remove_dir_all(directory);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn owned_unix_path_cleanup_preserves_a_replacement_inode() -> Result<(), ListenerError> {
+        let directory = scratch("owned-cleanup");
+        fs::create_dir(&directory).map_err(|_| ListenerError::Bind)?;
+        fs::set_permissions(
+            &directory,
+            fs::Permissions::from_mode(UNIX_SOCKET_DIRECTORY_MODE),
+        )
+        .map_err(|_| ListenerError::Bind)?;
+
+        let removed_path = directory.join("removed.sock");
+        let (owned, _) = bind(ListenerSource::Unix(removed_path.clone()))?;
+        drop(owned);
+        assert!(
+            fs::symlink_metadata(&removed_path).is_err(),
+            "dropping a daemon-owned listener removes its socket path"
+        );
+
+        let replaced_path = directory.join("replaced.sock");
+        let (owned, _) = bind(ListenerSource::Unix(replaced_path.clone()))?;
+        let owned_metadata =
+            fs::symlink_metadata(&replaced_path).map_err(|_| ListenerError::Bind)?;
+        fs::remove_file(&replaced_path).map_err(|_| ListenerError::Bind)?;
+        let replacement = std::os::unix::net::UnixListener::bind(&replaced_path)
+            .map_err(|_| ListenerError::Bind)?;
+        let replacement_metadata =
+            fs::symlink_metadata(&replaced_path).map_err(|_| ListenerError::Bind)?;
+        assert_ne!(
+            (owned_metadata.dev(), owned_metadata.ino()),
+            (replacement_metadata.dev(), replacement_metadata.ino())
+        );
+
+        drop(owned);
+        let retained = fs::symlink_metadata(&replaced_path).map_err(|_| ListenerError::Bind)?;
+        assert_eq!(
+            (retained.dev(), retained.ino()),
+            (replacement_metadata.dev(), replacement_metadata.ino()),
+            "owned cleanup must not unlink a replacement socket"
+        );
+
+        drop(replacement);
+        fs::remove_file(replaced_path).map_err(|_| ListenerError::Bind)?;
+        fs::remove_dir(directory).map_err(|_| ListenerError::Bind)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn adopted_unix_path_remains_after_listener_drop() -> Result<(), ListenerError> {
+        let directory = scratch("adopted-cleanup");
+        fs::create_dir(&directory).map_err(|_| ListenerError::Bind)?;
+        fs::set_permissions(
+            &directory,
+            fs::Permissions::from_mode(UNIX_SOCKET_DIRECTORY_MODE),
+        )
+        .map_err(|_| ListenerError::Bind)?;
+        let path = directory.join("inherited.sock");
+        let inherited =
+            std::os::unix::net::UnixListener::bind(&path).map_err(|_| ListenerError::Bind)?;
+        let expected = fs::symlink_metadata(&path).map_err(|_| ListenerError::Bind)?;
+
+        let (adopted, _) = bind(ListenerSource::InheritedUnix(inherited))?;
+        drop(adopted);
+        let retained = fs::symlink_metadata(&path).map_err(|_| ListenerError::Bind)?;
+        assert_eq!(
+            (retained.dev(), retained.ino()),
+            (expected.dev(), expected.ino()),
+            "adopted listeners do not own their filesystem path"
+        );
+
+        fs::remove_file(path).map_err(|_| ListenerError::Bind)?;
+        fs::remove_dir(directory).map_err(|_| ListenerError::Bind)?;
         Ok(())
     }
 

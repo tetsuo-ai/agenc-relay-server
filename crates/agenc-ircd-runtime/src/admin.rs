@@ -39,8 +39,8 @@ use crate::observe::health::{HealthSnapshot, Liveness, ReadinessGate};
 use crate::observe::metrics::ResultClass;
 use crate::purpose::ListenerPurpose;
 use crate::runtime_config::{
-    ReloadOutcome, ReloadPreparationPort, ReloadPrepareFailure, ReloadRejection,
-    RuntimeConfigHandle,
+    AuditedReloadResult, AuditedReloadStart, ReloadAuditCommitOutcome, ReloadPreparationPort,
+    ReloadPrepareFailure, ReloadRejection, RuntimeConfigHandle,
 };
 use crate::state_core::inbox::CloseReason;
 use crate::state_core::{AdminCoreFailure, AdminCorePort, AdminMutation, AdminTarget};
@@ -1364,74 +1364,104 @@ impl AdminOwner {
             self.output_audit_failure(generation, "REHASH", failure);
             return;
         }
+        let Some((success, failure)) = self.prepare_rehash_outcomes(generation, event) else {
+            self.fail_closed(generation);
+            return;
+        };
 
-        match reload.activate(prepared).await {
-            ReloadOutcome::NoChange(_) => {
-                if self
-                    .commit_rehash_outcome(
-                        generation,
-                        event,
-                        AdminAuditPhase::OutcomeSuccess,
-                        token,
-                    )
-                    .await
-                {
-                    if let Some(observer) = &self.observer {
-                        observer.reload(true);
+        match reload
+            .activate(prepared, success.clone(), failure.clone())
+            .await
+        {
+            AuditedReloadStart::Provisional(activation) => {
+                match reload.commit_outcome(activation, token).await {
+                    ReloadAuditCommitOutcome::Committed(result) => {
+                        let committed = match result {
+                            AuditedReloadResult::Success => &success,
+                            AuditedReloadResult::Failure(_) => &failure,
+                        };
+                        if self.audit.commit_event(committed).is_err() {
+                            self.fail_closed(generation);
+                            return;
+                        }
+                        if reload.finalize(activation).await.is_err() {
+                            self.fail_closed(generation);
+                            return;
+                        }
+                        match result {
+                            AuditedReloadResult::Success => {
+                                if let Some(observer) = &self.observer {
+                                    observer.reload(true);
+                                }
+                                if activation.changes_live_state {
+                                    self.reconcile_authority();
+                                    self.output_line(
+                                        generation,
+                                        "NOTE REHASH OK :Configuration reloaded".to_owned(),
+                                    );
+                                } else {
+                                    self.output_line(
+                                        generation,
+                                        "NOTE REHASH OK :Configuration unchanged".to_owned(),
+                                    );
+                                }
+                            }
+                            AuditedReloadResult::Failure(rejection) => {
+                                if let Some(observer) = &self.observer {
+                                    observer.reload(false);
+                                }
+                                self.output_reload_rejection(generation, rejection);
+                            }
+                        }
                     }
-                    self.output_line(
-                        generation,
-                        "NOTE REHASH OK :Configuration unchanged".to_owned(),
-                    );
+                    ReloadAuditCommitOutcome::NotCommitted(_)
+                    | ReloadAuditCommitOutcome::Indeterminate => self.fail_closed(generation),
                 }
             }
-            ReloadOutcome::Provisional(activation) => {
-                if !self
-                    .commit_rehash_outcome(
-                        generation,
-                        event,
-                        AdminAuditPhase::OutcomeSuccess,
-                        token,
-                    )
-                    .await
-                {
-                    let _rollback = reload.rollback(activation).await;
-                    self.fail_closed(generation);
-                    return;
-                }
-                if reload.finalize(activation).await.is_err() {
-                    if let Some(observer) = &self.observer {
-                        observer.reload(false);
-                    }
-                    self.fail_closed(generation);
-                    return;
-                }
-                if let Some(observer) = &self.observer {
-                    observer.reload(true);
-                }
-                self.reconcile_authority();
-                self.output_line(
-                    generation,
-                    "NOTE REHASH OK :Configuration reloaded".to_owned(),
-                );
+            AuditedReloadStart::Indeterminate => self.fail_closed(generation),
+        }
+    }
+
+    fn prepare_rehash_outcomes(
+        &mut self,
+        generation: ConnectionGeneration,
+        event: &AdminCommandEvent,
+    ) -> Option<(AdminAuditEvent, AdminAuditEvent)> {
+        let Some((operator_id, _permissions)) = self
+            .sessions
+            .get(&generation)
+            .and_then(|owned| owned.session.operator())
+        else {
+            self.close(generation, CloseReason::ProtocolError);
+            return None;
+        };
+        let created_at = match self.wall.utc_now() {
+            Ok(now) => now.get(),
+            Err(_) => {
+                self.output_storage_unavailable(generation, event.command.verb());
+                return None;
             }
-            ReloadOutcome::Rejected(rejection) => {
-                if self
-                    .commit_rehash_outcome(
-                        generation,
-                        event,
-                        AdminAuditPhase::OutcomeFailure,
-                        token,
-                    )
-                    .await
-                {
-                    if let Some(observer) = &self.observer {
-                        observer.reload(false);
-                    }
-                    self.output_reload_rejection(generation, rejection);
-                }
+        };
+        let success = self.audit.prepare_event(
+            self.binding,
+            operator_id,
+            event,
+            AdminAuditPhase::OutcomeSuccess,
+            created_at,
+        );
+        let failure = self.audit.prepare_event(
+            self.binding,
+            operator_id,
+            event,
+            AdminAuditPhase::OutcomeFailure,
+            created_at,
+        );
+        match (success, failure) {
+            (Ok(success), Ok(failure)) => Some((success, failure)),
+            _ => {
+                self.output_storage_unavailable(generation, event.command.verb());
+                None
             }
-            ReloadOutcome::Applied(_) => self.fail_closed(generation),
         }
     }
 

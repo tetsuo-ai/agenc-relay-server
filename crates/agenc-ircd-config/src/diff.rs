@@ -70,6 +70,8 @@ pub enum RestartOnlyField {
     BackupProfile,
     /// `storage.disk_reserve_bytes` or `storage.disk_reserve_percent`.
     DiskReserve,
+    /// `storage.database_max_bytes` raised (only lowering is reloadable).
+    DatabaseCeilingRaised,
     /// `accounts.accept_clients`.
     AcceptClients,
     /// Invitation, access token, HPKE, or OPAQUE files and pins.
@@ -438,8 +440,12 @@ impl ConfigDiff {
                 || a.disk_reserve_percent != c.disk_reserve_percent,
             RestartOnlyField::DiskReserve,
         );
+        self.push_restart(
+            c.database_max_bytes > a.database_max_bytes,
+            RestartOnlyField::DatabaseCeilingRaised,
+        );
         self.push_change(
-            a.database_max_bytes != c.database_max_bytes,
+            c.database_max_bytes < a.database_max_bytes,
             ReloadableChange::DatabaseCeiling {
                 from: a.database_max_bytes,
                 to: c.database_max_bytes,

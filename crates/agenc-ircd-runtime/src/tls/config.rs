@@ -2,23 +2,28 @@
 //! 464-513).
 //!
 //! Every endpoint builds its `ServerConfig` from one explicit aws-lc
-//! provider: the three allowed suites, the `[X25519MLKEM768, X25519]` key
-//! exchange order, TLS 1.3 only, no early data, no half-RTT data, an
-//! in-memory ticketer, and exactly one ALPN identifier per listener purpose.
-//! Nothing here reads a secret file; the caller passes certificate and key
-//! bytes that the configuration crate already admitted.
+//! provider: the three allowed suites, the configured hybrid key-exchange
+//! policy, TLS 1.3 only, no early data, no half-RTT data, and exactly one ALPN
+//! identifier per listener purpose. Nothing here reads a secret key file; the
+//! caller passes key bytes that the configuration crate already admitted.
 
+use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt;
+use std::sync::Mutex;
 
 use rustls::crypto::CryptoProvider;
-use rustls::crypto::aws_lc_rs::{self, Ticketer, cipher_suite, kx_group};
+use rustls::crypto::aws_lc_rs::{self, cipher_suite, kx_group};
 use rustls::pki_types::pem::PemObject as _;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls::server::WebPkiClientVerifier;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
+use rustls::server::{NoServerSessionStorage, ProducesTickets, WebPkiClientVerifier};
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 
-use agenc_ircd_crypto::{SemanticHashDomain, semantic_digest};
+use agenc_ircd_config::{GroupPolicy, read_protected_bytes};
+use agenc_ircd_crypto::{
+    CryptoError, SemanticHashDomain, TlsTicketKey, TlsTicketKeyId, semantic_digest,
+    tls_ticket_key_id,
+};
 
 use crate::RuntimeError;
 use crate::purpose::ListenerPurpose;
@@ -30,12 +35,13 @@ pub const CLIENT_ALPN: &[u8] = b"agenc-chat/1";
 pub const FEDERATION_ALPN: &[u8] = b"agenc-chat-fed/1";
 /// ALPN identifier of the remote administrative listener (spec line 489).
 pub const ADMIN_ALPN: &[u8] = b"agenc-chat-admin/1";
-/// Ticket-encryption keys rotate every six hours (spec line 509); the
-/// aws-lc ticketer rotates on exactly this schedule.
+/// Required ticket-encryption-key rotation interval (spec line 509).
 pub const TLS_TICKET_ROTATION_SECONDS: u64 = 21_600;
-/// Tickets expire after 24 hours (spec line 509); the rotator retains the
-/// previous key for one further rotation so no ticket outlives this bound.
+/// Required ticket acceptance lifetime (spec line 509).
 pub const TLS_TICKET_LIFETIME_SECONDS: u64 = 86_400;
+const TLS_TICKET_LIFETIME_SECONDS_U32: u32 = 86_400;
+const TLS_TICKET_KEY_GENERATIONS: usize = 4;
+const TLS_TICKET_KEY_GENERATION_ATTEMPTS: usize = 4;
 /// Bytes of plaintext rustls may buffer for one connection before the
 /// writer sees back-pressure; two complete physical lines (spec line 583).
 pub const TLS_PLAINTEXT_BUFFER_LIMIT_BYTES: usize = 17_406;
@@ -47,6 +53,158 @@ pub const MAX_CHAIN_CERTIFICATES: usize = 4;
 
 /// The DER `SEQUENCE` tag that opens every certificate and key document.
 const DER_SEQUENCE_TAG: u8 = 0x30;
+
+struct TicketKeyGeneration {
+    activated_at: u64,
+    key: TlsTicketKey,
+}
+
+struct TicketKeyRingState {
+    generations: VecDeque<TicketKeyGeneration>,
+}
+
+impl TicketKeyRingState {
+    fn new(initial_key: TlsTicketKey, now: u64) -> Result<Self, CryptoError> {
+        let mut generations = VecDeque::new();
+        generations
+            .try_reserve_exact(TLS_TICKET_KEY_GENERATIONS)
+            .map_err(|_| CryptoError::AllocationFailed)?;
+        generations.push_front(TicketKeyGeneration {
+            activated_at: now,
+            key: initial_key,
+        });
+        Ok(Self { generations })
+    }
+
+    fn rotate_with<F>(&mut self, now: u64, mut generate: F) -> Result<(), CryptoError>
+    where
+        F: FnMut() -> Result<TlsTicketKey, CryptoError>,
+    {
+        self.prune_expired(now);
+        let rotation_due = self.generations.front().is_none_or(|current| {
+            now.saturating_sub(current.activated_at) >= TLS_TICKET_ROTATION_SECONDS
+        });
+        if !rotation_due {
+            return Ok(());
+        }
+        for _ in 0..TLS_TICKET_KEY_GENERATION_ATTEMPTS {
+            let candidate = generate()?;
+            if self.contains(candidate.key_id()) {
+                continue;
+            }
+            if self.generations.len() >= TLS_TICKET_KEY_GENERATIONS {
+                drop(self.generations.pop_back());
+            }
+            self.generations.push_front(TicketKeyGeneration {
+                activated_at: now,
+                key: candidate,
+            });
+            return Ok(());
+        }
+        Err(CryptoError::InvalidEncoding)
+    }
+
+    fn prune_expired(&mut self, now: u64) {
+        loop {
+            let expired = self.generations.back().is_some_and(|generation| {
+                now.saturating_sub(generation.activated_at) >= TLS_TICKET_LIFETIME_SECONDS
+            });
+            if !expired {
+                break;
+            }
+            drop(self.generations.pop_back());
+        }
+    }
+
+    fn contains(&self, key_id: TlsTicketKeyId) -> bool {
+        self.generations
+            .iter()
+            .any(|generation| generation.key.key_id() == key_id)
+    }
+
+    fn current(&self) -> Option<&TlsTicketKey> {
+        self.generations.front().map(|generation| &generation.key)
+    }
+
+    fn find(&self, key_id: TlsTicketKeyId) -> Option<&TlsTicketKey> {
+        self.generations
+            .iter()
+            .find(|generation| generation.key.key_id() == key_id)
+            .map(|generation| &generation.key)
+    }
+}
+
+struct TlsTicketKeyRing {
+    state: Mutex<TicketKeyRingState>,
+}
+
+impl TlsTicketKeyRing {
+    fn new() -> Result<Self, CryptoError> {
+        Self::new_at(UnixTime::now().as_secs())
+    }
+
+    fn new_at(now: u64) -> Result<Self, CryptoError> {
+        let initial_key = TlsTicketKey::generate()?;
+        Ok(Self {
+            state: Mutex::new(TicketKeyRingState::new(initial_key, now)?),
+        })
+    }
+
+    fn encrypt_at(&self, plaintext: &[u8], now: u64) -> Option<Vec<u8>> {
+        self.encrypt_at_with(plaintext, now, TlsTicketKey::generate)
+    }
+
+    fn encrypt_at_with<F>(&self, plaintext: &[u8], now: u64, generate: F) -> Option<Vec<u8>>
+    where
+        F: FnMut() -> Result<TlsTicketKey, CryptoError>,
+    {
+        let mut state = self.state.lock().ok()?;
+        state.rotate_with(now, generate).ok()?;
+        state.current()?.seal(plaintext).ok()
+    }
+
+    fn decrypt_at(&self, ciphertext: &[u8], now: u64) -> Option<Vec<u8>> {
+        self.decrypt_at_with(ciphertext, now, TlsTicketKey::generate)
+    }
+
+    fn decrypt_at_with<F>(&self, ciphertext: &[u8], now: u64, generate: F) -> Option<Vec<u8>>
+    where
+        F: FnMut() -> Result<TlsTicketKey, CryptoError>,
+    {
+        let key_id = tls_ticket_key_id(ciphertext).ok()?;
+        let mut state = self.state.lock().ok()?;
+        state.rotate_with(now, generate).ok()?;
+        state
+            .find(key_id)?
+            .open(ciphertext)
+            .ok()
+            .map(|plaintext| plaintext.into_rustls_plaintext())
+    }
+}
+
+impl fmt::Debug for TlsTicketKeyRing {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("TlsTicketKeyRing { keys: redacted }")
+    }
+}
+
+impl ProducesTickets for TlsTicketKeyRing {
+    fn enabled(&self) -> bool {
+        self.state.lock().is_ok()
+    }
+
+    fn lifetime(&self) -> u32 {
+        TLS_TICKET_LIFETIME_SECONDS_U32
+    }
+
+    fn encrypt(&self, plaintext: &[u8]) -> Option<Vec<u8>> {
+        self.encrypt_at(plaintext, UnixTime::now().as_secs())
+    }
+
+    fn decrypt(&self, ciphertext: &[u8]) -> Option<Vec<u8>> {
+        self.decrypt_at(ciphertext, UnixTime::now().as_secs())
+    }
+}
 
 /// The ALPN and trust profile of one TLS endpoint.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -101,6 +259,10 @@ pub enum TlsConfigError {
     /// The profile requires client certificates but no trust store was given,
     /// or a trust store was given to a server-authentication-only profile.
     ClientAuthMismatch,
+    /// A required OCSP staple was absent.
+    OcspStapleRequired,
+    /// An OCSP staple was empty or over its ceiling.
+    InvalidOcspStaple,
     /// The provider or ticketer could not be constructed.
     ProviderUnavailable,
 }
@@ -112,6 +274,8 @@ impl fmt::Display for TlsConfigError {
             Self::InvalidPrivateKey => "TLS private key document is invalid",
             Self::InvalidTrustStore => "TLS trust store document is invalid",
             Self::ClientAuthMismatch => "TLS client authentication does not match the profile",
+            Self::OcspStapleRequired => "TLS OCSP staple is required",
+            Self::InvalidOcspStaple => "TLS OCSP staple is invalid",
             Self::ProviderUnavailable => "TLS provider is unavailable",
         };
         formatter.write_str(message)
@@ -231,6 +395,52 @@ pub enum ClientAuth {
     MutualTls(TrustStore),
 }
 
+/// Immutable TLS policy prepared for one server endpoint.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TlsServerPolicy {
+    group_policy: GroupPolicy,
+    session_tickets: bool,
+    require_ocsp_staple: bool,
+}
+
+impl TlsServerPolicy {
+    /// Creates one endpoint policy from validated configuration decisions.
+    #[must_use]
+    pub const fn new(
+        group_policy: GroupPolicy,
+        session_tickets: bool,
+        require_ocsp_staple: bool,
+    ) -> Self {
+        Self {
+            group_policy,
+            session_tickets,
+            require_ocsp_staple,
+        }
+    }
+
+    const fn compatibility_default() -> Self {
+        Self::new(GroupPolicy::HybridPreferred, true, false)
+    }
+}
+
+/// One bounded, nonempty DER OCSP response supplied by the certificate owner.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OcspStaple {
+    bytes: Vec<u8>,
+}
+
+impl OcspStaple {
+    /// Admits one opaque DER response for rustls to staple to the leaf.
+    pub fn parse(document: &[u8]) -> Result<Self, TlsConfigError> {
+        if document.is_empty() || document.len() > MAX_TLS_DOCUMENT_BYTES {
+            return Err(TlsConfigError::InvalidOcspStaple);
+        }
+        Ok(Self {
+            bytes: document.to_vec(),
+        })
+    }
+}
+
 /// Builds the exact provider: the three TLS 1.3 suites and the hybrid-first
 /// key exchange order (spec lines 474-485). The order is fixed here, so the
 /// `prefer-post-quantum` feature cannot change it.
@@ -246,6 +456,14 @@ pub fn provider() -> CryptoProvider {
     provider
 }
 
+fn provider_for_group_policy(group_policy: GroupPolicy) -> CryptoProvider {
+    let mut provider = provider();
+    if group_policy == GroupPolicy::HybridRequired {
+        provider.kx_groups = vec![kx_group::X25519MLKEM768];
+    }
+    provider
+}
+
 /// Builds one endpoint's server configuration synchronously.
 ///
 /// Key parsing and verifier construction are cheap, but callers on a Tokio
@@ -257,7 +475,30 @@ pub fn build_server_config_blocking(
     key: PrivateKey,
     client_auth: ClientAuth,
 ) -> Result<Arc<ServerConfig>, TlsConfigError> {
-    let provider = Arc::new(provider());
+    build_server_config_with_policy_blocking(
+        profile,
+        chain,
+        key,
+        client_auth,
+        TlsServerPolicy::compatibility_default(),
+        None,
+    )
+}
+
+/// Builds one endpoint synchronously with an explicit key-exchange, ticket,
+/// and OCSP policy.
+pub fn build_server_config_with_policy_blocking(
+    profile: TlsEndpointProfile,
+    chain: CertChain,
+    key: PrivateKey,
+    client_auth: ClientAuth,
+    policy: TlsServerPolicy,
+    ocsp_staple: Option<OcspStaple>,
+) -> Result<Arc<ServerConfig>, TlsConfigError> {
+    if policy.require_ocsp_staple && ocsp_staple.is_none() {
+        return Err(TlsConfigError::OcspStapleRequired);
+    }
+    let provider = Arc::new(provider_for_group_policy(policy.group_policy));
     let builder = ServerConfig::builder_with_provider(Arc::clone(&provider))
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|_| TlsConfigError::ProviderUnavailable)?;
@@ -271,13 +512,24 @@ pub fn build_server_config_blocking(
         }
         _ => return Err(TlsConfigError::ClientAuthMismatch),
     };
-    let mut config = builder
-        .with_single_cert(chain.certificates, key.key)
-        .map_err(|_| TlsConfigError::InvalidPrivateKey)?;
+    let mut config = match ocsp_staple {
+        Some(staple) => {
+            builder.with_single_cert_with_ocsp(chain.certificates, key.key, staple.bytes)
+        }
+        None => builder.with_single_cert(chain.certificates, key.key),
+    }
+    .map_err(|_| TlsConfigError::InvalidPrivateKey)?;
     config.alpn_protocols = vec![profile.alpn().to_vec()];
     config.max_early_data_size = 0;
     config.send_half_rtt_data = false;
-    config.ticketer = Ticketer::new().map_err(|_| TlsConfigError::ProviderUnavailable)?;
+    if policy.session_tickets {
+        config.ticketer =
+            Arc::new(TlsTicketKeyRing::new().map_err(|_| TlsConfigError::ProviderUnavailable)?);
+    } else {
+        config.send_tls13_tickets = 0;
+        config.max_tls13_tickets = 0;
+        config.session_storage = Arc::new(NoServerSessionStorage {});
+    }
     Ok(Arc::new(config))
 }
 
@@ -288,8 +540,35 @@ pub async fn build_server_config(
     key: PrivateKey,
     client_auth: ClientAuth,
 ) -> Result<Arc<ServerConfig>, TlsConfigError> {
+    build_server_config_with_policy(
+        profile,
+        chain,
+        key,
+        client_auth,
+        TlsServerPolicy::compatibility_default(),
+        None,
+    )
+    .await
+}
+
+/// Builds one policy-bound endpoint on the blocking pool.
+pub async fn build_server_config_with_policy(
+    profile: TlsEndpointProfile,
+    chain: CertChain,
+    key: PrivateKey,
+    client_auth: ClientAuth,
+    policy: TlsServerPolicy,
+    ocsp_staple: Option<OcspStaple>,
+) -> Result<Arc<ServerConfig>, TlsConfigError> {
     tokio::task::spawn_blocking(move || {
-        build_server_config_blocking(profile, chain, key, client_auth)
+        build_server_config_with_policy_blocking(
+            profile,
+            chain,
+            key,
+            client_auth,
+            policy,
+            ocsp_staple,
+        )
     })
     .await
     .map_err(|_| TlsConfigError::ProviderUnavailable)?
@@ -297,8 +576,9 @@ pub async fn build_server_config(
 
 /// Reads a certificate chain document from disk on the blocking pool.
 ///
-/// Certificate chains are public material, so ordinary file reading applies;
-/// private keys go through the configuration crate's secret-file rules.
+/// Certificate chains are public material, but are still read through the
+/// configuration crate's bounded no-follow descriptor path. Private keys use
+/// the stricter secret-file rules.
 pub async fn load_certificate_chain(path: std::path::PathBuf) -> Result<CertChain, TlsConfigError> {
     let document = tokio::task::spawn_blocking(move || read_bounded(&path))
         .await
@@ -339,6 +619,17 @@ pub(crate) async fn load_trust_store_material(
     let fingerprint = semantic_digest(SemanticHashDomain::PolicyId, &document)
         .map_err(|_| TlsConfigError::InvalidTrustStore)?;
     Ok((TrustStore::parse(&document)?, *fingerprint.as_bytes()))
+}
+
+/// Reads one bounded OCSP response on the blocking pool.
+pub async fn load_ocsp_staple(path: std::path::PathBuf) -> Result<OcspStaple, TlsConfigError> {
+    let document = tokio::task::spawn_blocking(move || {
+        read_protected_bytes(&path, MAX_TLS_DOCUMENT_BYTES as u64)
+            .map_err(|_| TlsConfigError::InvalidOcspStaple)
+    })
+    .await
+    .map_err(|_| TlsConfigError::InvalidOcspStaple)??;
+    OcspStaple::parse(&document)
 }
 
 /// A client configuration on the same provider, for tests and native
@@ -384,12 +675,8 @@ fn parse_certificates(document: &[u8]) -> Result<Vec<CertificateDer<'static>>, T
 }
 
 fn read_bounded(path: &std::path::Path) -> Result<Vec<u8>, TlsConfigError> {
-    let metadata =
-        std::fs::symlink_metadata(path).map_err(|_| TlsConfigError::InvalidCertificate)?;
-    if !metadata.is_file() || metadata.len() > MAX_TLS_DOCUMENT_BYTES as u64 {
-        return Err(TlsConfigError::InvalidCertificate);
-    }
-    std::fs::read(path).map_err(|_| TlsConfigError::InvalidCertificate)
+    read_protected_bytes(path, MAX_TLS_DOCUMENT_BYTES as u64)
+        .map_err(|_| TlsConfigError::InvalidCertificate)
 }
 
 #[cfg(test)]
@@ -598,6 +885,85 @@ mod tests {
             .err(),
             Some(TlsConfigError::InvalidPrivateKey)
         );
+        assert_eq!(
+            build_server_config_with_policy_blocking(
+                TlsEndpointProfile::Client,
+                chain()?,
+                PrivateKey::parse(other.leaf_private_key_pkcs8_der())?,
+                ClientAuth::None,
+                TlsServerPolicy::new(GroupPolicy::HybridRequired, false, true),
+                Some(OcspStaple::parse(b"ocsp-response")?),
+            )
+            .err(),
+            Some(TlsConfigError::InvalidPrivateKey)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ticket_key_ring_rotates_four_generations_and_expires_the_oldest() -> Result<(), CryptoError>
+    {
+        let ring = TlsTicketKeyRing::new_at(0)?;
+        let oldest = ring
+            .encrypt_at(b"oldest", 0)
+            .ok_or(CryptoError::AuthenticationFailed)?;
+        let mut newest = oldest.clone();
+        for now in [21_600_u64, 43_200, 64_800] {
+            newest = ring
+                .encrypt_at(b"newest", now)
+                .ok_or(CryptoError::AuthenticationFailed)?;
+        }
+        let state = ring
+            .state
+            .lock()
+            .map_err(|_| CryptoError::AuthenticationFailed)?;
+        assert_eq!(state.generations.len(), TLS_TICKET_KEY_GENERATIONS);
+        drop(state);
+
+        assert_eq!(ring.decrypt_at(&oldest, 86_399), Some(b"oldest".to_vec()));
+        assert!(ring.decrypt_at(&oldest, 86_400).is_none());
+        assert_eq!(ring.decrypt_at(&newest, 86_400), Some(b"newest".to_vec()));
+        let state = ring
+            .state
+            .lock()
+            .map_err(|_| CryptoError::AuthenticationFailed)?;
+        assert_eq!(state.generations.len(), TLS_TICKET_KEY_GENERATIONS);
+        Ok(())
+    }
+
+    #[test]
+    fn ticket_rotation_entropy_failure_is_closed_and_recoverable() -> Result<(), CryptoError> {
+        let ring = TlsTicketKeyRing::new_at(0)?;
+        let initial = ring
+            .encrypt_at(b"initial", 0)
+            .ok_or(CryptoError::AuthenticationFailed)?;
+        let fail = || Err(CryptoError::EntropyUnavailable);
+        assert!(ring.encrypt_at_with(b"new", 21_600, fail).is_none());
+        assert!(
+            ring.decrypt_at_with(&initial, 21_600, || Err(CryptoError::EntropyUnavailable))
+                .is_none()
+        );
+        assert_eq!(ring.decrypt_at(&initial, 21_600), Some(b"initial".to_vec()));
+        assert!(ring.encrypt_at(b"recovered", 21_600).is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn poisoned_ticket_ring_fails_closed_without_exposing_keys() -> Result<(), CryptoError> {
+        let ring = TlsTicketKeyRing::new_at(0)?;
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if let Ok(_guard) = ring.state.lock() {
+                assert!(
+                    std::hint::black_box(false),
+                    "deliberately poison the ticket key ring"
+                );
+            }
+        }));
+        assert!(outcome.is_err());
+        assert!(!ring.enabled());
+        assert!(ring.encrypt_at(b"session", 0).is_none());
+        assert!(ring.decrypt_at(b"attacker input", 0).is_none());
+        assert_eq!(format!("{ring:?}"), "TlsTicketKeyRing { keys: redacted }");
         Ok(())
     }
 
@@ -628,6 +994,8 @@ mod tests {
             TlsConfigError::InvalidPrivateKey,
             TlsConfigError::InvalidTrustStore,
             TlsConfigError::ClientAuthMismatch,
+            TlsConfigError::OcspStapleRequired,
+            TlsConfigError::InvalidOcspStaple,
             TlsConfigError::ProviderUnavailable,
         ] {
             assert!(error.to_string().is_ascii());
@@ -637,6 +1005,8 @@ mod tests {
 
     #[tokio::test]
     async fn async_builders_run_on_the_blocking_pool() -> Result<(), TlsConfigError> {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
         let fixture = fixture()?;
         let directory = std::env::temp_dir().join(format!(
             "agenc-tls-config-{}-{}",
@@ -650,8 +1020,24 @@ mod tests {
         let chain_path = directory.join("chain.der");
         std::fs::write(&chain_path, fixture.leaf_certificate_der())
             .map_err(|_| TlsConfigError::InvalidCertificate)?;
+        std::fs::set_permissions(&chain_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|_| TlsConfigError::InvalidCertificate)?;
         let chain = load_certificate_chain(chain_path.clone()).await?;
         assert_eq!(chain.len(), 1);
+        let chain_link = directory.join("chain-link.der");
+        symlink(&chain_path, &chain_link).map_err(|_| TlsConfigError::InvalidCertificate)?;
+        assert_eq!(
+            load_certificate_chain(chain_link).await.err(),
+            Some(TlsConfigError::InvalidCertificate)
+        );
+        std::fs::set_permissions(&chain_path, std::fs::Permissions::from_mode(0o620))
+            .map_err(|_| TlsConfigError::InvalidCertificate)?;
+        assert_eq!(
+            load_certificate_chain(chain_path.clone()).await.err(),
+            Some(TlsConfigError::InvalidCertificate)
+        );
+        std::fs::set_permissions(&chain_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|_| TlsConfigError::InvalidCertificate)?;
         assert_eq!(
             load_certificate_chain(directory.join("missing.der"))
                 .await
@@ -661,6 +1047,15 @@ mod tests {
         assert_eq!(
             load_certificate_chain(directory.clone()).await.err(),
             Some(TlsConfigError::InvalidCertificate)
+        );
+        let ocsp_path = directory.join("staple.der");
+        std::fs::write(&ocsp_path, b"ocsp-response")
+            .map_err(|_| TlsConfigError::InvalidOcspStaple)?;
+        std::fs::set_permissions(&ocsp_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|_| TlsConfigError::InvalidOcspStaple)?;
+        assert_eq!(
+            load_ocsp_staple(ocsp_path).await?,
+            OcspStaple::parse(b"ocsp-response")?
         );
         let config = build_server_config(
             TlsEndpointProfile::Client,

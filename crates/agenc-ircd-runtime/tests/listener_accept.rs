@@ -1077,3 +1077,93 @@ async fn start_rejects_unsupported_and_mismatched_specs() -> TestResult {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn listener_set_cleans_only_unix_paths_it_still_owns() -> TestResult {
+    let fixture = fixture(72)?;
+    let tls = server(&fixture, TlsEndpointProfile::Client, ClientAuth::None)?;
+    let directory = scratch_directory("socket-lifecycle")?;
+
+    let failed_path = directory.join("failed-start.sock");
+    let first = ListenerSpec {
+        name: ListenerName::parse("failed-first")?,
+        purpose: ListenerPurpose::ClientOnion,
+        source: ListenerSource::Unix(failed_path.clone()),
+        max_connections: 1,
+        tls: Some(Arc::clone(&tls)),
+        local_admin: None,
+    };
+    let unsupported = ListenerSpec {
+        name: ListenerName::parse("failed-second")?,
+        purpose: ListenerPurpose::ClientWss,
+        source: ListenerSource::Tcp(SocketAddr::from(([127, 0, 0, 1], 0))),
+        max_connections: 1,
+        tls: Some(Arc::clone(&tls)),
+        local_admin: None,
+    };
+    assert_eq!(
+        start(vec![first, unsupported], HarnessOptions::default()).err(),
+        Some(ListenerError::UnsupportedPurpose)
+    );
+    assert!(
+        std::fs::symlink_metadata(&failed_path).is_err(),
+        "a later startup failure drops previously bound owned paths"
+    );
+
+    let normal_path = directory.join("normal.sock");
+    let replaced_path = directory.join("replaced.sock");
+    let inherited_path = directory.join("inherited.sock");
+    let inherited = std::os::unix::net::UnixListener::bind(&inherited_path)?;
+    let specs = vec![
+        ListenerSpec {
+            name: ListenerName::parse("normal")?,
+            purpose: ListenerPurpose::ClientOnion,
+            source: ListenerSource::Unix(normal_path.clone()),
+            max_connections: 1,
+            tls: Some(Arc::clone(&tls)),
+            local_admin: None,
+        },
+        ListenerSpec {
+            name: ListenerName::parse("replaced")?,
+            purpose: ListenerPurpose::ClientOnion,
+            source: ListenerSource::Unix(replaced_path.clone()),
+            max_connections: 1,
+            tls: Some(Arc::clone(&tls)),
+            local_admin: None,
+        },
+        ListenerSpec {
+            name: ListenerName::parse("inherited")?,
+            purpose: ListenerPurpose::ClientOnion,
+            source: ListenerSource::InheritedUnix(inherited),
+            max_connections: 1,
+            tls: Some(tls),
+            local_admin: None,
+        },
+    ];
+    let harness = start(specs, HarnessOptions::default())?;
+    std::fs::remove_file(&replaced_path)?;
+    let replacement = std::os::unix::net::UnixListener::bind(&replaced_path)?;
+    let replacement_metadata = std::fs::symlink_metadata(&replaced_path)?;
+
+    finish(harness).await?;
+    assert!(
+        std::fs::symlink_metadata(&normal_path).is_err(),
+        "normal shutdown removes a daemon-owned socket"
+    );
+    let retained_replacement = std::fs::symlink_metadata(&replaced_path)?;
+    assert_eq!(
+        (retained_replacement.dev(), retained_replacement.ino()),
+        (replacement_metadata.dev(), replacement_metadata.ino()),
+        "shutdown must preserve a replacement inode"
+    );
+    assert!(
+        std::fs::symlink_metadata(&inherited_path).is_ok(),
+        "shutdown must preserve an adopted socket"
+    );
+
+    drop(replacement);
+    std::fs::remove_file(replaced_path)?;
+    std::fs::remove_file(inherited_path)?;
+    std::fs::remove_dir(directory)?;
+    Ok(())
+}

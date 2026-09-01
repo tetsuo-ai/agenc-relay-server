@@ -32,8 +32,9 @@ use agenc_ircd_domain::{
     PresencePolicy,
 };
 use agenc_ircd_storage::{
-    StateDirectory, StorageEngineLimits, StorageError, StorageOpenConfig, StorageOwner,
-    embedded_storage_qualifications,
+    MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH, StateDirectory, StorageEngineLimits, StorageError,
+    StorageLimitWriter, StorageOpenConfig, StorageOwner, StoragePort, StorageRuntimeLimits,
+    StorageStatistics, embedded_storage_qualifications,
 };
 use agenc_ircd_types::{
     EntropySource as _, Generation, MonotonicClock as _, OriginId, WallClock as _,
@@ -77,7 +78,7 @@ use crate::observe::metrics::MetricsRegistry;
 use crate::purpose::ListenerPurpose;
 use crate::registration::{AccountServiceConfig, RegistrationRouter, RegistrationRouterConfig};
 use crate::runtime_config::{
-    AccountRuntimePolicy, ConfigRevision, PreparedReload, ReloadMode, ReloadOutcome, ReloadPort,
+    AccountRuntimePolicy, ConfigRevision, PreparedReload, ReloadOutcome, ReloadPort,
     ReloadPreparationInbox, ReloadPreparationReply, ReloadPrepareFailure, RestartMaterial,
     RestartMaterialKey, RuntimeConfigHandle, RuntimeConfigParts, RuntimeConfigSnapshot,
     reload_channel, reload_preparation_channel,
@@ -100,8 +101,8 @@ use crate::supervisor::{
 use crate::sync::Arc;
 use crate::tls::{
     ClientAuth, HandshakeLimiter, MAX_HANDSHAKES_IN_PROGRESS, PrivateKey, TlsConfigError,
-    TlsEndpointProfile, build_server_config, load_certificate_chain_material,
-    load_trust_store_material,
+    TlsEndpointProfile, TlsServerPolicy, build_server_config_with_policy,
+    load_certificate_chain_material, load_trust_store_material,
 };
 
 const RUNTIME_THREAD_NAME: &str = "agenc-ircd-tokio";
@@ -312,6 +313,7 @@ fn harden_process(config: &Config) -> Result<HardeningOutcome, DaemonError> {
 
 struct LiveStorage {
     owner: StorageOwner,
+    limit_writer: StorageLimitWriter,
     seed: StateCoreSeed,
     keys: KeyDeriver,
     reconstruction: Reconstruction,
@@ -326,7 +328,8 @@ impl LiveStorage {
     ) -> Result<Self, DaemonError> {
         let qualifications = embedded_storage_qualifications()?;
         let state_directory = StateDirectory::open(&config.storage.state_dir, &qualifications)?;
-        let owner = StorageOwner::start(storage_open_config(config, secrets, state_directory))?;
+        let mut owner = StorageOwner::start(storage_open_config(config, secrets, state_directory))?;
+        let limit_writer = owner.take_limit_writer()?;
         let seed = StateCoreSeed::from_storage(&owner)?;
         let storage = seed.storage();
         let keys = KeyDeriver::new(
@@ -359,6 +362,7 @@ impl LiveStorage {
         )?;
         Ok(Self {
             owner,
+            limit_writer,
             seed,
             keys,
             reconstruction,
@@ -400,6 +404,7 @@ struct LiveState {
     state: StateCore,
     storage: mpsc::Receiver<crate::bridge::StorageCompletionMessage>,
     storage_reads: mpsc::Receiver<crate::bridge::StorageReadCompletionMessage>,
+    checkpoints: mpsc::Receiver<crate::bridge::StorageCheckpointCompletionMessage>,
     crypto: mpsc::Receiver<
         crate::bridge::CryptoCompletionMessage<crate::bridge::crypto::CryptoJobOutput>,
     >,
@@ -432,6 +437,7 @@ fn build_live_state(inputs: BuildLiveStateInputs<'_>) -> Result<LiveState, Daemo
     } = inputs;
     let LiveStorage {
         owner,
+        limit_writer,
         seed,
         keys,
         mut reconstruction,
@@ -442,7 +448,7 @@ fn build_live_state(inputs: BuildLiveStateInputs<'_>) -> Result<LiveState, Daemo
         .domain
         .install_admin_policy(suspensions, quarantined_channels)
         .map_err(|_| DaemonError::Runtime(RuntimeError::InvalidValue))?;
-    let (bridge, storage, storage_reads) = StorageBridge::start(owner.port())?;
+    let (bridge, storage, storage_reads, checkpoints) = StorageBridge::start(owner.port())?;
     let crypto_config = CryptoWorkerConfig::new(
         limit_usize(config, LimitKey::ChannelKeyJobs)?,
         limit_usize(config, LimitKey::OpaqueJobs)?,
@@ -486,12 +492,14 @@ fn build_live_state(inputs: BuildLiveStateInputs<'_>) -> Result<LiveState, Daemo
         },
         entropy: Box::new(OsEntropy),
         router: Box::new(router),
+        storage_limit_writer: limit_writer,
     });
     Ok(LiveState {
         owner,
         state,
         storage,
         storage_reads,
+        checkpoints,
         crypto,
         audit: Some(audit),
         backup: Some(backup),
@@ -793,7 +801,10 @@ async fn build_listener_specs(
             let key = PrivateKey::parse(private.expose())?;
             let profile =
                 TlsEndpointProfile::for_purpose(purpose).ok_or(DaemonError::UnsupportedProfile)?;
-            let client_auth = if purpose == ListenerPurpose::AdminTls {
+            let client_auth = if matches!(
+                purpose,
+                ListenerPurpose::AdminTls | ListenerPurpose::Federation
+            ) {
                 let ca = listener
                     .client_ca_file
                     .clone()
@@ -809,7 +820,14 @@ async fn build_listener_specs(
             } else {
                 ClientAuth::None
             };
-            let endpoint = build_server_config(profile, chain, key, client_auth).await?;
+            let policy = TlsServerPolicy::new(
+                config.tls.group_policy,
+                config.tls.session_tickets,
+                config.tls.require_ocsp_staple && purpose == ListenerPurpose::ClientTls,
+            );
+            let endpoint =
+                build_server_config_with_policy(profile, chain, key, client_auth, policy, None)
+                    .await?;
             if tls_endpoints
                 .insert(listener.name.clone(), Arc::clone(&endpoint))
                 .is_some()
@@ -843,8 +861,22 @@ async fn build_listener_specs(
     }
     for listener in config.listeners.iter().filter(|listener| !listener.enabled) {
         if let Some(tls) = &listener.tls {
-            let (_chain, fingerprint) =
+            let (chain, fingerprint) =
                 load_certificate_chain_material(tls.certificate_file.clone()).await?;
+            let private = secrets
+                .tls_private_key(&listener.name)
+                .ok_or(DaemonError::Tls(TlsConfigError::InvalidPrivateKey))?;
+            let key = PrivateKey::parse(private.expose())?;
+            let validation_policy = TlsServerPolicy::new(config.tls.group_policy, false, false);
+            let _validated_identity = build_server_config_with_policy(
+                TlsEndpointProfile::Client,
+                chain,
+                key,
+                ClientAuth::None,
+                validation_policy,
+                None,
+            )
+            .await?;
             if certificate_fingerprints
                 .insert(listener.name.clone(), fingerprint)
                 .is_some()
@@ -922,10 +954,11 @@ async fn prepare_runtime_parts(
         rates: configured_rates(config)?,
         operational_limits: operational_limits(config)?,
         connection_limits: connection_limits(config)?,
-        storage_ceilings: AccountingCeilings {
-            database_max_bytes: config.storage.database_max_bytes,
-            backup_max_bytes: config.storage.backup_max_bytes,
-        },
+        storage_limits: StorageRuntimeLimits::new(
+            config.storage.database_max_bytes,
+            config.storage.backup_max_bytes,
+            config.storage.integrity_checkpoint_manifests,
+        )?,
         shutdown: shutdown_plan(config)?,
     };
     Ok((parts, prepared.specs))
@@ -1282,6 +1315,7 @@ async fn run(inputs: DaemonRunInputs) -> Result<DaemonExit, DaemonError> {
         },
     );
     admin_owner.install_statistics_storage(live.owner.port())?;
+    let reload_storage = live.owner.port();
     let context = listener_context(
         &config,
         runtime_config.clone(),
@@ -1325,6 +1359,7 @@ async fn run(inputs: DaemonRunInputs) -> Result<DaemonExit, DaemonError> {
         admin_failed: &mut admin_failed,
         admin_process: &mut admin_process_inbox,
         budget: Arc::clone(&budget),
+        storage: &reload_storage,
         signals: &mut signals,
         state_exited: &mut state_exited,
         listener_exited: &mut listener_exited,
@@ -1412,6 +1447,7 @@ async fn start_owners(inputs: StartOwnersInputs) -> Result<RunningOwners, Daemon
         state,
         storage,
         storage_reads,
+        checkpoints,
         crypto,
         audit: _,
         backup: _,
@@ -1423,6 +1459,7 @@ async fn start_owners(inputs: StartOwnersInputs) -> Result<RunningOwners, Daemon
         lifecycle: lifecycle_receiver,
         storage,
         storage_reads,
+        checkpoints,
         crypto,
     };
     let (state_exited, state_started) = spawn_state_owner(
@@ -1617,6 +1654,7 @@ struct StateOwnerReceivers {
     lifecycle: mpsc::Receiver<crate::state_core::inbox::LifecycleRequest>,
     storage: mpsc::Receiver<crate::bridge::StorageCompletionMessage>,
     storage_reads: mpsc::Receiver<crate::bridge::StorageReadCompletionMessage>,
+    checkpoints: mpsc::Receiver<crate::bridge::StorageCheckpointCompletionMessage>,
     crypto: mpsc::Receiver<
         crate::bridge::CryptoCompletionMessage<crate::bridge::crypto::CryptoJobOutput>,
     >,
@@ -1637,6 +1675,7 @@ async fn run_state_owner(
         lifecycle,
         storage,
         storage_reads,
+        checkpoints,
         crypto,
     } = receivers;
     readiness.mark(ReadinessStage::StateCore);
@@ -1649,6 +1688,7 @@ async fn run_state_owner(
             lifecycle,
             storage,
             storage_reads,
+            checkpoints,
             crypto,
             token,
         )
@@ -1682,6 +1722,7 @@ struct ShutdownWaitInputs<'a> {
     admin_failed: &'a mut mpsc::Receiver<()>,
     admin_process: &'a mut AdminProcessInbox,
     budget: Arc<MemoryBudget>,
+    storage: &'a StoragePort,
     signals: &'a mut mpsc::Receiver<SignalEvent>,
     state_exited: &'a mut oneshot::Receiver<StateCoreExit>,
     listener_exited: &'a mut oneshot::Receiver<()>,
@@ -1700,6 +1741,7 @@ async fn wait_for_shutdown(inputs: ShutdownWaitInputs<'_>) -> Result<DaemonExit,
         admin_failed,
         admin_process,
         budget,
+        storage,
         signals,
         state_exited,
         listener_exited,
@@ -1761,6 +1803,7 @@ async fn wait_for_shutdown(inputs: ShutdownWaitInputs<'_>) -> Result<DaemonExit,
                         config_path,
                         runtime_config,
                         &budget,
+                        storage,
                     )));
                     preparation_origin = Some(ReloadPreparationOrigin::Signal);
                 }
@@ -1773,6 +1816,7 @@ async fn wait_for_shutdown(inputs: ShutdownWaitInputs<'_>) -> Result<DaemonExit,
                         config_path,
                         runtime_config,
                         &budget,
+                        storage,
                     )));
                     preparation_origin = Some(ReloadPreparationOrigin::Admin(reply));
                 }
@@ -1782,8 +1826,7 @@ async fn wait_for_shutdown(inputs: ShutdownWaitInputs<'_>) -> Result<DaemonExit,
                 match preparation_origin.take() {
                     Some(ReloadPreparationOrigin::Signal) => match result {
                         Ok(prepared) => {
-                            activation =
-                                Some(Box::pin(reload.activate(prepared, ReloadMode::Signal)));
+                            activation = Some(Box::pin(reload.activate_signal(prepared)));
                         }
                         Err(ReloadPrepareFailure::Busy) => pending_sighup = true,
                         Err(_) => observer.reload(false),
@@ -1805,6 +1848,7 @@ async fn wait_for_shutdown(inputs: ShutdownWaitInputs<'_>) -> Result<DaemonExit,
                     config_path,
                     runtime_config,
                     &budget,
+                    storage,
                 )));
                 preparation_origin = Some(ReloadPreparationOrigin::Signal);
             }
@@ -2015,6 +2059,7 @@ async fn prepare_reload(
     config_path: &Path,
     runtime_config: &RuntimeConfigHandle,
     budget: &MemoryBudget,
+    storage: &StoragePort,
 ) -> Result<PreparedReload, ReloadPrepareFailure> {
     let lease = runtime_config.begin_reload()?;
     let path = config_path.to_path_buf();
@@ -2042,12 +2087,51 @@ async fn prepare_reload(
     {
         return Err(ReloadPrepareFailure::ResourceFloor);
     }
+    let statistics = reload_storage_statistics(storage).await?;
+    validate_reload_storage(&candidate, statistics)?;
     let (parts, _unused_specs) = prepare_runtime_parts(&candidate, &secrets, operators)
         .await
         .map_err(reload_prepare_failure)?;
     let mut prepared = PreparedReload::new(&active, candidate, parts)?;
     prepared.attach_lease(lease);
     Ok(prepared)
+}
+
+async fn reload_storage_statistics(
+    storage: &StoragePort,
+) -> Result<StorageStatistics, ReloadPrepareFailure> {
+    let completion = storage.try_statistics().map_err(map_reload_storage_error)?;
+    tokio::task::spawn_blocking(move || completion.wait())
+        .await
+        .map_err(|_| ReloadPrepareFailure::Unavailable)?
+        .map_err(map_reload_storage_error)
+}
+
+fn validate_reload_storage(
+    candidate: &Config,
+    statistics: StorageStatistics,
+) -> Result<(), ReloadPrepareFailure> {
+    if statistics.logical_database_bytes() > candidate.storage.database_max_bytes
+        || statistics.backup_stream_bytes() > candidate.storage.backup_max_bytes
+    {
+        return Err(ReloadPrepareFailure::StorageFloor);
+    }
+    let required_available = statistics
+        .filesystem_reserve_bytes()
+        .checked_add(MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH)
+        .ok_or(ReloadPrepareFailure::StorageFloor)?;
+    if statistics.filesystem_available_bytes() < required_available {
+        return Err(ReloadPrepareFailure::StorageFloor);
+    }
+    Ok(())
+}
+
+const fn map_reload_storage_error(error: StorageError) -> ReloadPrepareFailure {
+    match error {
+        StorageError::QueueFull => ReloadPrepareFailure::Busy,
+        StorageError::LimitExceeded => ReloadPrepareFailure::StorageFloor,
+        _ => ReloadPrepareFailure::Unavailable,
+    }
 }
 
 fn reload_prepare_failure(error: DaemonError) -> ReloadPrepareFailure {

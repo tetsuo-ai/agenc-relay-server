@@ -14,6 +14,7 @@ mod secret;
 mod signature;
 mod storage;
 mod storage_integrity;
+mod tls_ticket;
 mod worker;
 
 pub use account_hpke::{
@@ -51,6 +52,10 @@ pub use storage_integrity::{
     rollback_guard_hash, sealed_record_id, storage_operation_id, storage_operation_key_id,
     storage_output_path_hash, storage_qualification_component_hash, tracked_record_commitment,
     tracked_state_digest,
+};
+pub use tls_ticket::{
+    MAX_TLS_TICKET_BYTES, MAX_TLS_TICKET_PLAINTEXT_BYTES, OpenedTlsTicket, TlsTicketKey,
+    TlsTicketKeyId, tls_ticket_key_id,
 };
 pub use worker::{
     BoundedCryptoPool, CRYPTO_QUEUE_SLOTS_PER_WORKER, CRYPTO_WORKER_RESERVED_BYTES, CryptoJob,

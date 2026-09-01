@@ -249,6 +249,9 @@ fn storage_accounts_and_limits_classify_exactly() -> TestResult {
         matches!(change, ReloadableChange::DatabaseCeiling { .. })
     });
     let mut candidate = active.clone();
+    candidate.storage.database_max_bytes += 1;
+    restart_only(&active, &candidate, RestartOnlyField::DatabaseCeilingRaised);
+    let mut candidate = active.clone();
     candidate.storage.backup_max_bytes += 1;
     reloadable(&active, &candidate, |change| {
         matches!(change, ReloadableChange::BackupCeiling { .. })

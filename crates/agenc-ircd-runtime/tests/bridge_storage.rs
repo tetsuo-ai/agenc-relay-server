@@ -20,9 +20,9 @@ use agenc_ircd_runtime::bridge::storage::{
     classify_completion,
 };
 use agenc_ircd_storage::{
-    AccountRecordBody, CommitOutcome, DatabaseHeaderTbs, InitialStorageRecord, LoginIndexKeyState,
-    PersistentRecordValue, QualificationTarget, ReadPlan, RecordMutation, SCHEMA_GENERATION,
-    StateDirectory, StorageAccountingLimits, StorageEngineLimits, StorageError,
+    AccountRecordBody, CheckpointOutcome, CommitOutcome, DatabaseHeaderTbs, InitialStorageRecord,
+    LoginIndexKeyState, PersistentRecordValue, QualificationTarget, ReadPlan, RecordMutation,
+    SCHEMA_GENERATION, StateDirectory, StorageAccountingLimits, StorageEngineLimits, StorageError,
     StorageFaultBoundary, StorageFaultCase, StorageFaultInjector, StorageFaultSite,
     StorageGrowthCase, StorageInitializationConfig, StorageInitializationMode,
     StorageInitializationOutcome, StorageMutationBatch, StorageMutationHead, StorageOpenConfig,
@@ -265,12 +265,25 @@ async fn next_outcome(
     )
 }
 
+async fn next_checkpoint_outcome(
+    receiver: &mut tokio::sync::mpsc::Receiver<
+        agenc_ircd_runtime::bridge::StorageCheckpointCompletionMessage,
+    >,
+) -> Result<agenc_ircd_runtime::bridge::StorageCheckpointCompletionMessage, Box<dyn Error>> {
+    Ok(
+        tokio::time::timeout(Duration::from_secs(60), receiver.recv())
+            .await?
+            .ok_or("checkpoint completion channel closed")?,
+    )
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn committed_and_rejected_outcomes_arrive_with_their_transaction_ids()
 -> Result<(), Box<dyn Error>> {
     let initialized = initialize()?;
     let owner = open_owner(&initialized, StorageFaultInjector::disabled())?;
-    let (mut bridge, mut receiver, mut read_receiver) = StorageBridge::start(owner.port())?;
+    let (mut bridge, mut receiver, mut read_receiver, mut checkpoint_receiver) =
+        StorageBridge::start(owner.port())?;
     assert_eq!(bridge.in_flight(), 0);
     let first = batch(&initialized, 1, 0, 0)?;
     let first_id = first.transaction_id();
@@ -311,6 +324,25 @@ async fn committed_and_rejected_outcomes_arrive_with_their_transaction_ids()
     let read = read_message.result?;
     assert_eq!(read.records.len(), 1);
     assert!(first_logical > initialized.logical_database_bytes);
+
+    let checkpoint_id = bridge.submit_checkpoint()?;
+    let checkpoint = next_checkpoint_outcome(&mut checkpoint_receiver).await?;
+    assert_eq!(checkpoint.checkpoint_id, checkpoint_id);
+    let CheckpointOutcome::Installed(receipt) = checkpoint.outcome else {
+        return Err("checkpoint was not installed".into());
+    };
+    assert_eq!(receipt.cut_manifest_sequence, 1);
+    assert_eq!(receipt.installation_manifest_sequence, 1);
+    assert_eq!(receipt.storage_commit_sequence, 2);
+    assert_eq!(receipt.state_generation, 1);
+    assert_eq!(receipt.account_service_response_count, 0);
+    assert!(receipt.logical_database_bytes > 0);
+    assert!(receipt.backup_stream_bytes > receipt.logical_database_bytes);
+
+    let no_change_id = bridge.submit_checkpoint()?;
+    let no_change = next_checkpoint_outcome(&mut checkpoint_receiver).await?;
+    assert_eq!(no_change.checkpoint_id, no_change_id);
+    assert!(matches!(no_change.outcome, CheckpointOutcome::NotNeeded));
     bridge.shutdown()?;
     owner.shutdown()?;
     Ok(())
@@ -320,7 +352,8 @@ async fn committed_and_rejected_outcomes_arrive_with_their_transaction_ids()
 async fn a_duplicate_transaction_identity_fails_the_bridge_closed() -> Result<(), Box<dyn Error>> {
     let initialized = initialize()?;
     let owner = open_owner(&initialized, StorageFaultInjector::disabled())?;
-    let (bridge, mut receiver, _read_receiver) = StorageBridge::start(owner.port())?;
+    let (bridge, mut receiver, _read_receiver, _checkpoint_receiver) =
+        StorageBridge::start(owner.port())?;
     let first = batch(&initialized, 3, 0, 0)?;
     let duplicate = batch(&initialized, 3, 1, 1)?;
     let id = bridge.submit(first)?;
@@ -365,7 +398,8 @@ async fn a_lost_receiver_stops_the_bridge_and_later_submissions_report_stopped()
 -> Result<(), Box<dyn Error>> {
     let initialized = initialize()?;
     let owner = open_owner(&initialized, StorageFaultInjector::disabled())?;
-    let (bridge, receiver, _read_receiver) = StorageBridge::start(owner.port())?;
+    let (bridge, receiver, _read_receiver, _checkpoint_receiver) =
+        StorageBridge::start(owner.port())?;
     drop(receiver);
     let id = bridge.submit(batch(&initialized, 5, 0, 0)?)?;
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
@@ -388,7 +422,8 @@ async fn a_lost_receiver_stops_the_bridge_and_later_submissions_report_stopped()
 async fn a_storage_refusal_abandons_the_ledger_entry() -> Result<(), Box<dyn Error>> {
     let initialized = initialize()?;
     let owner = open_owner(&initialized, StorageFaultInjector::disabled())?;
-    let (bridge, mut receiver, _read_receiver) = StorageBridge::start(owner.port())?;
+    let (bridge, mut receiver, _read_receiver, _checkpoint_receiver) =
+        StorageBridge::start(owner.port())?;
     owner.shutdown()?;
     let refused = bridge.submit(batch(&initialized, 7, 0, 0)?).err();
     assert!(matches!(
@@ -419,7 +454,8 @@ async fn an_injected_commit_fault_after_the_primary_swap_is_indeterminate()
         boundary: StorageFaultBoundary::After,
     };
     let owner = open_owner(&initialized, StorageFaultInjector::new(case, 1)?)?;
-    let (bridge, mut receiver, _read_receiver) = StorageBridge::start(owner.port())?;
+    let (bridge, mut receiver, _read_receiver, _checkpoint_receiver) =
+        StorageBridge::start(owner.port())?;
     let id = bridge.submit(batch(&initialized, 8, 0, 0)?)?;
     let message = next_outcome(&mut receiver).await?;
     assert_eq!(message.transaction_id, id);

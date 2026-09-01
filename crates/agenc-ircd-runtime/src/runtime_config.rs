@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use agenc_ircd_admin::AdminAuditEvent;
 use agenc_ircd_admin::OperatorRegistry;
 use agenc_ircd_config::{
     Config, ConfigDiff, LimitKey, ListenerName, ReloadPlan, ReloadRejected, RestartOnlyField,
@@ -11,6 +12,8 @@ use agenc_ircd_config::{
 use agenc_ircd_domain::{
     DirectMessagePolicy, GuestDirectMessagePolicy, OperationalLimits, PresencePolicy,
 };
+use agenc_ircd_storage::StorageRuntimeLimits;
+use agenc_ircd_types::TransactionId;
 use rustls::ServerConfig;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 
@@ -153,7 +156,7 @@ pub(crate) struct RuntimeConfigParts {
     pub(crate) rates: RateLimits,
     pub(crate) operational_limits: OperationalLimits,
     pub(crate) connection_limits: ConnectionLimits,
-    pub(crate) storage_ceilings: AccountingCeilings,
+    pub(crate) storage_limits: StorageRuntimeLimits,
     pub(crate) shutdown: ShutdownPlan,
 }
 
@@ -186,7 +189,7 @@ pub struct RuntimeConfigSnapshot {
     rates: RateLimits,
     operational_limits: OperationalLimits,
     connection_limits: ConnectionLimits,
-    storage_ceilings: AccountingCeilings,
+    storage_limits: StorageRuntimeLimits,
     shutdown: ShutdownPlan,
 }
 
@@ -211,7 +214,7 @@ impl RuntimeConfigSnapshot {
             rates: parts.rates,
             operational_limits: parts.operational_limits,
             connection_limits: parts.connection_limits,
-            storage_ceilings: parts.storage_ceilings,
+            storage_limits: parts.storage_limits,
             shutdown: parts.shutdown,
         }
     }
@@ -309,7 +312,14 @@ impl RuntimeConfigSnapshot {
     }
 
     pub(crate) const fn storage_ceilings(&self) -> AccountingCeilings {
-        self.storage_ceilings
+        AccountingCeilings {
+            database_max_bytes: self.storage_limits.database_max_bytes(),
+            backup_max_bytes: self.storage_limits.backup_max_bytes(),
+        }
+    }
+
+    pub(crate) const fn storage_limits(&self) -> StorageRuntimeLimits {
+        self.storage_limits
     }
 
     fn effective_content_matches(&self, other: &Self) -> bool {
@@ -371,20 +381,40 @@ impl RuntimeConfigHandle {
         }
     }
 
-    pub(crate) fn publish(
+    pub(crate) fn publish_after<F>(
         &self,
         expected: ConfigRevision,
         candidate: Arc<RuntimeConfigSnapshot>,
-    ) -> Result<Arc<RuntimeConfigSnapshot>, ReloadRejection> {
+        activate: F,
+    ) -> Result<Arc<RuntimeConfigSnapshot>, ReloadRejection>
+    where
+        F: FnOnce() -> Result<(), ReloadRejection>,
+    {
         let mut current = lock(&self.current);
         if current.revision != expected {
             return Err(ReloadRejection::StaleRevision);
         }
+        activate()?;
         let revision = candidate.revision();
         let previous = std::mem::replace(&mut *current, candidate);
         drop(current);
         self.revision.send_replace(revision);
         Ok(previous)
+    }
+
+    pub(crate) fn activate_after<F>(
+        &self,
+        expected: ConfigRevision,
+        activate: F,
+    ) -> Result<(), ReloadRejection>
+    where
+        F: FnOnce() -> Result<(), ReloadRejection>,
+    {
+        let current = lock(&self.current);
+        if current.revision != expected {
+            return Err(ReloadRejection::StaleRevision);
+        }
+        activate()
     }
 }
 
@@ -540,6 +570,8 @@ impl std::error::Error for ReloadRejection {}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ReloadActivation {
     pub(crate) revision: ConfigRevision,
+    pub(crate) transaction_id: TransactionId,
+    pub(crate) changes_live_state: bool,
 }
 
 /// Typed activation outcomes returned by StateCore.
@@ -547,27 +579,47 @@ pub(crate) struct ReloadActivation {
 pub(crate) enum ReloadOutcome {
     NoChange(ConfigRevision),
     Applied(ConfigRevision),
-    Provisional(ReloadActivation),
     Rejected(ReloadRejection),
 }
 
+/// Result of installing the global barrier for an audited reload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ReloadMode {
-    Signal,
-    AuditedAdmin,
+pub(crate) enum AuditedReloadStart {
+    Provisional(ReloadActivation),
+    Indeterminate,
+}
+
+/// Which exact, signed outcome became durable behind the reload barrier.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AuditedReloadResult {
+    Success,
+    Failure(ReloadRejection),
+}
+
+/// Result of committing the exact audit outcome held by a provisional reload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReloadAuditCommitOutcome {
+    Committed(AuditedReloadResult),
+    NotCommitted(ReloadRejection),
+    Indeterminate,
 }
 
 pub(crate) enum ReloadCoreRequest {
-    Activate {
+    ActivateSignal {
         prepared: Box<PreparedReload>,
-        mode: ReloadMode,
         reply: oneshot::Sender<ReloadOutcome>,
     },
-    Finalize {
-        activation: ReloadActivation,
-        reply: oneshot::Sender<Result<ConfigRevision, ReloadRejection>>,
+    ActivateAudited {
+        prepared: Box<PreparedReload>,
+        success_event: Box<AdminAuditEvent>,
+        failure_event: Box<AdminAuditEvent>,
+        reply: oneshot::Sender<AuditedReloadStart>,
     },
-    Rollback {
+    CommitOutcome {
+        activation: ReloadActivation,
+        reply: oneshot::Sender<Result<AuditedReloadResult, ReloadRejection>>,
+    },
+    Finalize {
         activation: ReloadActivation,
         reply: oneshot::Sender<Result<ConfigRevision, ReloadRejection>>,
     },
@@ -580,17 +632,42 @@ pub(crate) struct ReloadPort {
 }
 
 impl ReloadPort {
-    pub(crate) async fn activate(
+    pub(crate) async fn activate_signal(&self, prepared: PreparedReload) -> ReloadOutcome {
+        let (reply, response) = oneshot::channel();
+        self.send_activation(
+            ReloadCoreRequest::ActivateSignal {
+                prepared: Box::new(prepared),
+                reply,
+            },
+            response,
+        )
+        .await
+    }
+
+    async fn activate_audited(
         &self,
         prepared: PreparedReload,
-        mode: ReloadMode,
-    ) -> ReloadOutcome {
+        success_event: AdminAuditEvent,
+        failure_event: AdminAuditEvent,
+    ) -> AuditedReloadStart {
         let (reply, response) = oneshot::channel();
-        let request = ReloadCoreRequest::Activate {
+        let request = ReloadCoreRequest::ActivateAudited {
             prepared: Box::new(prepared),
-            mode,
+            success_event: Box::new(success_event),
+            failure_event: Box::new(failure_event),
             reply,
         };
+        if self.sender.try_send(request).is_err() {
+            return AuditedReloadStart::Indeterminate;
+        }
+        response.await.unwrap_or(AuditedReloadStart::Indeterminate)
+    }
+
+    async fn send_activation(
+        &self,
+        request: ReloadCoreRequest,
+        response: oneshot::Receiver<ReloadOutcome>,
+    ) -> ReloadOutcome {
         if let Err(error) = self.sender.try_send(request) {
             return match error {
                 mpsc::error::TrySendError::Full(_) => {
@@ -606,31 +683,45 @@ impl ReloadPort {
             .unwrap_or(ReloadOutcome::Rejected(ReloadRejection::StorageUnavailable))
     }
 
+    pub(crate) async fn commit_outcome(
+        &self,
+        activation: ReloadActivation,
+        token: &crate::cancel::CancellationToken,
+    ) -> ReloadAuditCommitOutcome {
+        let (reply, response) = oneshot::channel();
+        let request = ReloadCoreRequest::CommitOutcome { activation, reply };
+        match self.sender.try_send(request) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                return ReloadAuditCommitOutcome::Indeterminate;
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                return ReloadAuditCommitOutcome::Indeterminate;
+            }
+        }
+        tokio::select! {
+            () = token.cancelled() => ReloadAuditCommitOutcome::Indeterminate,
+            result = response => match result {
+                Ok(Ok(outcome)) => ReloadAuditCommitOutcome::Committed(outcome),
+                Ok(Err(rejection)) => ReloadAuditCommitOutcome::NotCommitted(rejection),
+                Err(_) => ReloadAuditCommitOutcome::Indeterminate,
+            }
+        }
+    }
+
     pub(crate) async fn finalize(
         &self,
         activation: ReloadActivation,
     ) -> Result<ConfigRevision, ReloadRejection> {
-        self.finish(activation, true).await
-    }
-
-    pub(crate) async fn rollback(
-        &self,
-        activation: ReloadActivation,
-    ) -> Result<ConfigRevision, ReloadRejection> {
-        self.finish(activation, false).await
+        self.finish(activation).await
     }
 
     async fn finish(
         &self,
         activation: ReloadActivation,
-        commit: bool,
     ) -> Result<ConfigRevision, ReloadRejection> {
         let (reply, response) = oneshot::channel();
-        let request = if commit {
-            ReloadCoreRequest::Finalize { activation, reply }
-        } else {
-            ReloadCoreRequest::Rollback { activation, reply }
-        };
+        let request = ReloadCoreRequest::Finalize { activation, reply };
         self.sender.try_send(request).map_err(|error| match error {
             mpsc::error::TrySendError::Full(_) => ReloadRejection::Busy,
             mpsc::error::TrySendError::Closed(_) => ReloadRejection::StorageUnavailable,
@@ -705,10 +796,23 @@ impl ReloadPreparationPort {
         }
     }
 
-    pub(crate) async fn activate(&self, prepared: PreparedReload) -> ReloadOutcome {
+    pub(crate) async fn activate(
+        &self,
+        prepared: PreparedReload,
+        success_event: AdminAuditEvent,
+        failure_event: AdminAuditEvent,
+    ) -> AuditedReloadStart {
         self.activation
-            .activate(prepared, ReloadMode::AuditedAdmin)
+            .activate_audited(prepared, success_event, failure_event)
             .await
+    }
+
+    pub(crate) async fn commit_outcome(
+        &self,
+        activation: ReloadActivation,
+        token: &crate::cancel::CancellationToken,
+    ) -> ReloadAuditCommitOutcome {
+        self.activation.commit_outcome(activation, token).await
     }
 
     pub(crate) async fn finalize(
@@ -716,13 +820,6 @@ impl ReloadPreparationPort {
         activation: ReloadActivation,
     ) -> Result<ConfigRevision, ReloadRejection> {
         self.activation.finalize(activation).await
-    }
-
-    pub(crate) async fn rollback(
-        &self,
-        activation: ReloadActivation,
-    ) -> Result<ConfigRevision, ReloadRejection> {
-        self.activation.rollback(activation).await
     }
 }
 
@@ -774,7 +871,6 @@ mod tests {
 
     use super::*;
     use crate::connection::ConnectionLimits;
-    use crate::state_core::durable::AccountingCeilings;
 
     const PUBLIC: &str = include_str!("../../agenc-ircd-config/tests/golden/public.toml");
 
@@ -830,10 +926,7 @@ mod tests {
                 contacts_per_account: 1_000,
             })?,
             connection_limits: ConnectionLimits::DEFAULT,
-            storage_ceilings: AccountingCeilings {
-                database_max_bytes: 1 << 30,
-                backup_max_bytes: 1 << 31,
-            },
+            storage_limits: StorageRuntimeLimits::new(1 << 30, 1 << 31, 10_000)?,
             shutdown: ShutdownPlan::DEFAULT,
         })
     }
@@ -856,11 +949,12 @@ mod tests {
             config()?,
             parts()?,
         ));
-        let replaced = handle.publish(ConfigRevision::INITIAL, Arc::clone(&candidate))?;
+        let replaced =
+            handle.publish_after(ConfigRevision::INITIAL, Arc::clone(&candidate), || Ok(()))?;
         assert!(Arc::ptr_eq(&replaced, &initial));
         assert!(Arc::ptr_eq(&handle.load(), &candidate));
         assert!(matches!(
-            handle.publish(ConfigRevision::INITIAL, initial),
+            handle.publish_after(ConfigRevision::INITIAL, initial, || Ok(())),
             Err(ReloadRejection::StaleRevision)
         ));
         Ok(())
@@ -912,15 +1006,14 @@ mod tests {
             let active = snapshot()?;
             let prepared = PreparedReload::new(&active, config()?, parts()?)?;
             let (reply, _response) = oneshot::channel();
-            port.sender.try_send(ReloadCoreRequest::Activate {
+            port.sender.try_send(ReloadCoreRequest::ActivateSignal {
                 prepared: Box::new(prepared),
-                mode: ReloadMode::Signal,
                 reply,
             })?;
         }
         let prepared = PreparedReload::new(&snapshot()?, config()?, parts()?)?;
         assert_eq!(
-            port.activate(prepared, ReloadMode::Signal).await,
+            port.activate_signal(prepared).await,
             ReloadOutcome::Rejected(ReloadRejection::Busy)
         );
         Ok(())

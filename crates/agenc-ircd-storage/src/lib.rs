@@ -60,8 +60,9 @@ pub use domain_records::{
     MAX_CHANNEL_RECORD_BODY_BYTES, MAX_SANCTION_RECORD_BODY_BYTES, SanctionRecordBody,
 };
 pub use engine::{
-    RecoveredStorageState, StorageEngineLimits, StorageInspectionConfig, StorageOpenConfig,
-    StorageStatistics, inspect_storage,
+    CheckpointOutcome, CheckpointReceipt, RecoveredStorageState, StorageEngineLimits,
+    StorageInspectionConfig, StorageOpenConfig, StorageRuntimeLimits, StorageStatistics,
+    inspect_storage,
 };
 pub use error::StorageError;
 pub use fault::{
@@ -90,7 +91,7 @@ pub use mutation::{
 };
 pub use owner::{
     STORAGE_COMPLETION_QUEUE_CAPACITY, STORAGE_REQUEST_QUEUE_CAPACITY, StorageCompletion,
-    StorageOwner, StoragePort,
+    StorageLimitWriter, StorageOwner, StoragePort,
 };
 pub use platform::{
     BackupDestination, BackupOutput, FilesystemCapacity, FilesystemTuple, InspectionStateDirectory,

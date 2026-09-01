@@ -5,13 +5,15 @@ pub mod crypto;
 pub mod storage;
 
 use agenc_ircd_crypto::CryptoWorkerError;
-use agenc_ircd_storage::{CommitOutcome, ReadResult, StorageError};
+use agenc_ircd_storage::{CheckpointOutcome, CommitOutcome, ReadResult, StorageError};
 use agenc_ircd_types::TransactionId;
 
 /// Completions queued from the storage bridge to StateCore (spec line 4084).
 pub const STORAGE_COMPLETION_CHANNEL_CAPACITY: usize = 2;
 /// Read completions queued from the storage bridge to StateCore.
 pub const STORAGE_READ_COMPLETION_CHANNEL_CAPACITY: usize = 2;
+/// Checkpoint completions queued from the storage bridge to StateCore.
+pub const STORAGE_CHECKPOINT_COMPLETION_CHANNEL_CAPACITY: usize = 1;
 
 /// Process-local identity of one submitted crypto job.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -49,6 +51,24 @@ impl StorageReadId {
     }
 }
 
+/// Process-local identity of one submitted integrity checkpoint.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct StorageCheckpointId(u64);
+
+impl StorageCheckpointId {
+    /// Wraps a checkpoint identity issued by the storage bridge.
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Returns the primitive identity.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 /// One storage outcome forwarded to the sole StateCore receiver.
 ///
 /// StateCore compares `transaction_id` with its in-flight batch before it
@@ -69,6 +89,14 @@ pub struct StorageReadCompletionMessage {
     pub result: Result<ReadResult, StorageError>,
 }
 
+/// One integrity-checkpoint result forwarded to StateCore.
+pub struct StorageCheckpointCompletionMessage {
+    /// The process-local checkpoint identity.
+    pub checkpoint_id: StorageCheckpointId,
+    /// The closed storage outcome.
+    pub outcome: CheckpointOutcome,
+}
+
 /// One crypto job outcome forwarded to StateCore.
 pub struct CryptoCompletionMessage<O> {
     /// The job the bridge submitted.
@@ -87,7 +115,9 @@ mod tests {
         assert!(CryptoJobId::new(1) < CryptoJobId::new(2));
         assert_eq!(STORAGE_COMPLETION_CHANNEL_CAPACITY, 2);
         assert_eq!(STORAGE_READ_COMPLETION_CHANNEL_CAPACITY, 2);
+        assert_eq!(STORAGE_CHECKPOINT_COMPLETION_CHANNEL_CAPACITY, 1);
         assert_eq!(StorageReadId::new(8).get(), 8);
+        assert_eq!(StorageCheckpointId::new(10).get(), 10);
         let message = CryptoCompletionMessage::<u8> {
             job_id: CryptoJobId::new(9),
             output: Err(CryptoWorkerError::QueueFull),

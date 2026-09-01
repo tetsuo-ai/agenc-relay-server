@@ -10,19 +10,29 @@ use std::error::Error;
 use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use agenc_ircd_config::GroupPolicy;
 use agenc_ircd_runtime::listener::spki_sha256;
+use agenc_ircd_runtime::tls::config::{
+    OcspStaple, TlsServerPolicy, build_server_config_with_policy_blocking,
+};
 use agenc_ircd_runtime::tls::{
     ACCEPT_TO_TLS_DEADLINE, ADMIN_ALPN, CLIENT_ALPN, CertChain, ClientAuth, PrivateKey,
     TlsConfigError, TlsEndpointProfile, TlsHandshakeError, TlsStream, TrustStore,
     build_client_config, build_server_config_blocking, provider,
 };
 use agenc_ircd_testkit::TlsFixture;
+use rustls::client::WebPkiServerVerifier;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::aws_lc_rs::kx_group;
-use rustls::pki_types::ServerName;
-use rustls::{ClientConfig, ClientConnection, NamedGroup, ServerConfig, StreamOwned};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{
+    ClientConfig, ClientConnection, DigitallySignedStruct, NamedGroup, ServerConfig,
+    SignatureScheme, StreamOwned,
+};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpListener;
 
@@ -31,6 +41,53 @@ type ClientOutcome = Result<Vec<u8>, String>;
 
 const DNS_NAME: &str = "node.test";
 const EXPORTER_LABEL: &[u8] = b"EXPORTER-agenc-chat-admin-v1";
+const TEST_OCSP_STAPLE: &[u8] = b"bounded-test-ocsp-response";
+
+#[derive(Debug)]
+struct StapleObserver {
+    inner: Arc<dyn ServerCertVerifier>,
+    seen_expected: Arc<AtomicBool>,
+}
+
+impl ServerCertVerifier for StapleObserver {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        self.seen_expected
+            .store(ocsp_response == TEST_OCSP_STAPLE, Ordering::SeqCst);
+        self.inner
+            .verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        certificate: &CertificateDer<'_>,
+        signature: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner
+            .verify_tls12_signature(message, certificate, signature)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        certificate: &CertificateDer<'_>,
+        signature: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner
+            .verify_tls13_signature(message, certificate, signature)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
+}
 
 fn fixture(seed: u8) -> Result<TlsFixture, Box<dyn Error + Send + Sync>> {
     Ok(TlsFixture::mint([seed; 32], DNS_NAME)?)
@@ -62,6 +119,30 @@ fn client(
         None => None,
     };
     build_client_config(TrustStore::parse(trusted.ca_certificate_der())?, alpn, auth)
+}
+
+fn client_observing_ocsp(
+    trusted: &TlsFixture,
+    seen_expected: Arc<AtomicBool>,
+) -> Result<Arc<ClientConfig>, Box<dyn Error + Send + Sync>> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(CertificateDer::from(trusted.ca_certificate_der().to_vec()))?;
+    let crypto = Arc::new(provider());
+    let verifier =
+        WebPkiServerVerifier::builder_with_provider(Arc::new(roots), Arc::clone(&crypto))
+            .build()?;
+    let observer = StapleObserver {
+        inner: verifier,
+        seen_expected,
+    };
+    let mut config = ClientConfig::builder_with_provider(crypto)
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(observer))
+        .with_no_client_auth();
+    config.alpn_protocols = vec![CLIENT_ALPN.to_vec()];
+    config.enable_early_data = false;
+    Ok(Arc::new(config))
 }
 
 fn connect(
@@ -162,6 +243,141 @@ async fn a_client_offering_only_x25519_falls_back_to_it() -> TestResult {
     assert_eq!(stream.negotiated_group(), Some(NamedGroup::X25519));
     stream.shutdown().await?;
     assert!(client.join().map_err(|_| "client thread panicked")?.is_ok());
+    Ok(())
+}
+
+#[tokio::test]
+async fn hybrid_required_refuses_a_client_offering_only_x25519() -> TestResult {
+    let fixture = fixture(43)?;
+    let mut fallback_provider = provider();
+    fallback_provider.kx_groups = vec![kx_group::X25519];
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(CertificateDer::from(fixture.ca_certificate_der().to_vec()))?;
+    let mut config = ClientConfig::builder_with_provider(Arc::new(fallback_provider))
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    config.alpn_protocols = vec![CLIENT_ALPN.to_vec()];
+
+    let (listener, address) = bind().await?;
+    let client = exchange(address, Arc::new(config), b"");
+    let (socket, _) = listener.accept().await?;
+    let server = build_server_config_with_policy_blocking(
+        TlsEndpointProfile::Client,
+        CertChain::parse(fixture.leaf_certificate_der())?,
+        PrivateKey::parse(fixture.leaf_private_key_pkcs8_der())?,
+        ClientAuth::None,
+        TlsServerPolicy::new(GroupPolicy::HybridRequired, false, false),
+        None,
+    )?;
+    let outcome = TlsStream::handshake(socket, server, CLIENT_ALPN, ACCEPT_TO_TLS_DEADLINE).await;
+    assert_eq!(outcome.err(), Some(TlsHandshakeError::Protocol));
+    assert!(
+        client
+            .join()
+            .map_err(|_| "client thread panicked")?
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn session_tickets_can_be_disabled_completely() -> TestResult {
+    let fixture = fixture(44)?;
+    let config = build_server_config_with_policy_blocking(
+        TlsEndpointProfile::Client,
+        CertChain::parse(fixture.leaf_certificate_der())?,
+        PrivateKey::parse(fixture.leaf_private_key_pkcs8_der())?,
+        ClientAuth::None,
+        TlsServerPolicy::new(GroupPolicy::HybridPreferred, false, false),
+        None,
+    )?;
+    assert_eq!(config.send_tls13_tickets, 0);
+    assert_eq!(config.max_tls13_tickets, 0);
+    assert!(!config.ticketer.enabled());
+    assert!(!config.session_storage.can_cache());
+    Ok(())
+}
+
+#[test]
+fn enabled_session_tickets_use_the_exact_bounded_lifecycle() -> TestResult {
+    let fixture = fixture(46)?;
+    let config = build_server_config_with_policy_blocking(
+        TlsEndpointProfile::Client,
+        CertChain::parse(fixture.leaf_certificate_der())?,
+        PrivateKey::parse(fixture.leaf_private_key_pkcs8_der())?,
+        ClientAuth::None,
+        TlsServerPolicy::new(GroupPolicy::HybridPreferred, true, false),
+        None,
+    )?;
+    assert!(config.ticketer.enabled());
+    assert_eq!(
+        config.ticketer.lifetime(),
+        u32::try_from(agenc_ircd_runtime::tls::TLS_TICKET_LIFETIME_SECONDS)?
+    );
+    let encoded = config
+        .ticketer
+        .encrypt(b"opaque rustls server session")
+        .ok_or("ticket encryption failed")?;
+    assert!(encoded.len() <= agenc_ircd_crypto::MAX_TLS_TICKET_BYTES);
+    assert_eq!(
+        config.ticketer.decrypt(&encoded),
+        Some(b"opaque rustls server session".to_vec())
+    );
+    let mut changed = encoded;
+    let last = changed.last_mut().ok_or("ticket was empty")?;
+    *last ^= 1;
+    assert!(config.ticketer.decrypt(&changed).is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn required_ocsp_is_fail_closed_and_the_supplied_staple_is_sent() -> TestResult {
+    let fixture = fixture(45)?;
+    let policy = TlsServerPolicy::new(GroupPolicy::HybridPreferred, false, true);
+    let missing = build_server_config_with_policy_blocking(
+        TlsEndpointProfile::Client,
+        CertChain::parse(fixture.leaf_certificate_der())?,
+        PrivateKey::parse(fixture.leaf_private_key_pkcs8_der())?,
+        ClientAuth::None,
+        policy,
+        None,
+    );
+    assert_eq!(missing.err(), Some(TlsConfigError::OcspStapleRequired));
+    assert_eq!(
+        OcspStaple::parse(b"").err(),
+        Some(TlsConfigError::InvalidOcspStaple)
+    );
+    assert_eq!(
+        OcspStaple::parse(&vec![
+            0_u8;
+            agenc_ircd_runtime::tls::MAX_TLS_DOCUMENT_BYTES + 1
+        ])
+        .err(),
+        Some(TlsConfigError::InvalidOcspStaple)
+    );
+
+    let seen_expected = Arc::new(AtomicBool::new(false));
+    let (listener, address) = bind().await?;
+    let client = exchange(
+        address,
+        client_observing_ocsp(&fixture, Arc::clone(&seen_expected))?,
+        b"",
+    );
+    let (socket, _) = listener.accept().await?;
+    let server = build_server_config_with_policy_blocking(
+        TlsEndpointProfile::Client,
+        CertChain::parse(fixture.leaf_certificate_der())?,
+        PrivateKey::parse(fixture.leaf_private_key_pkcs8_der())?,
+        ClientAuth::None,
+        policy,
+        Some(OcspStaple::parse(TEST_OCSP_STAPLE)?),
+    )?;
+    let mut stream =
+        TlsStream::handshake(socket, server, CLIENT_ALPN, ACCEPT_TO_TLS_DEADLINE).await?;
+    stream.shutdown().await?;
+    assert!(client.join().map_err(|_| "client thread panicked")?.is_ok());
+    assert!(seen_expected.load(Ordering::SeqCst));
     Ok(())
 }
 

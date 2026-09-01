@@ -585,6 +585,18 @@ impl ProjectedBatch {
         self.batch.mutations().len()
     }
 
+    /// Returns the exact logical storage use after this batch commits.
+    #[must_use]
+    pub(crate) const fn resulting_logical_database_bytes(&self) -> u64 {
+        self.resulting_logical_database_bytes
+    }
+
+    /// Returns the exact backup-stream size after this batch commits.
+    #[must_use]
+    pub(crate) const fn resulting_backup_stream_bytes(&self) -> u64 {
+        self.resulting_backup_stream_bytes
+    }
+
     /// Splits the projection into the owned batch and the retained updates.
     #[must_use]
     pub fn into_parts(self) -> (StorageMutationBatch, RetainedProjection) {

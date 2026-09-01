@@ -5,11 +5,15 @@ use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_cha
 use std::thread::{self, JoinHandle};
 
 use agenc_ircd_crypto::Ed25519SecretKey;
+use agenc_ircd_types::TransactionId;
 
 use crate::{
-    BackupDestination, BackupReceipt, CommitOutcome, ReadPlan, ReadResult, RecoveredStorageState,
-    StorageError, StorageMutationBatch, StorageStatistics,
-    engine::{EngineCommitFailure, StorageEngine, StorageOpenConfig},
+    BackupDestination, BackupReceipt, CheckpointOutcome, CommitOutcome, ReadPlan, ReadResult,
+    RecoveredStorageState, StorageError, StorageMutationBatch, StorageStatistics,
+    engine::{
+        EngineCommitFailure, StorageEngine, StorageLimitCell, StorageOpenConfig,
+        StorageRuntimeLimits, storage_limit_pair,
+    },
 };
 
 /// Fixed number of complete requests admitted ahead of the storage owner.
@@ -36,9 +40,79 @@ enum StorageRequest {
         backup_id: [u8; 16],
         completion: SyncSender<Result<BackupReceipt, StorageError>>,
     },
+    Checkpoint {
+        completion: SyncSender<Result<CheckpointOutcome, StorageError>>,
+    },
+    LimitsChanged,
     Shutdown {
         completion: SyncSender<Result<(), StorageError>>,
     },
+}
+
+/// Sole StateCore-owned writer for the live storage-limit cell.
+pub struct StorageLimitWriter {
+    limits: StorageLimitCell,
+    requests: SyncSender<StorageRequest>,
+}
+
+impl StorageLimitWriter {
+    /// Reports whether the retained manifest ledger needs a checkpoint.
+    pub fn checkpoint_due(&self) -> Result<bool, StorageError> {
+        self.limits.checkpoint_due()
+    }
+
+    /// Installs an unaudited candidate after checking authoritative current-use floors.
+    pub fn activate(
+        &self,
+        candidate: StorageRuntimeLimits,
+    ) -> Result<StorageRuntimeLimits, StorageError> {
+        let previous = self.limits.activate(candidate)?;
+        if let Err(error) = self.notify_owner() {
+            self.limits.restore_unreserved(previous);
+            return Err(error);
+        }
+        Ok(previous)
+    }
+
+    /// Reserves an audited candidate for one exact projected outcome commit.
+    pub fn reserve(
+        &self,
+        token: TransactionId,
+        candidate: StorageRuntimeLimits,
+        projected_logical_database_bytes: u64,
+        projected_backup_stream_bytes: u64,
+    ) -> Result<(), StorageError> {
+        self.limits.reserve(
+            token,
+            candidate,
+            projected_logical_database_bytes,
+            projected_backup_stream_bytes,
+        )?;
+        if let Err(error) = self.notify_owner() {
+            let _rolled_back = self.limits.rollback(token);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Makes one audited reservation permanent after its exact outcome commit.
+    pub fn finalize(&self, token: TransactionId) -> Result<(), StorageError> {
+        self.limits.finalize(token)?;
+        self.notify_owner()
+    }
+
+    /// Restores the prior limits when an audited outcome did not commit.
+    pub fn rollback(&self, token: TransactionId) -> Result<(), StorageError> {
+        self.limits.rollback(token)?;
+        self.notify_owner()
+    }
+
+    fn notify_owner(&self) -> Result<(), StorageError> {
+        match self.requests.try_send(StorageRequest::LimitsChanged) {
+            Ok(()) | Err(TrySendError::Full(_)) => Ok(()),
+            Err(TrySendError::Disconnected(_)) => Err(StorageError::Unavailable),
+        }
+    }
 }
 
 /// Cloneable, nonblocking submission half of the storage-owner boundary.
@@ -99,6 +173,15 @@ impl StoragePort {
             .map_err(map_submission_error)?;
         Ok(StorageCompletion { receiver })
     }
+
+    /// Submits one explicit integrity checkpoint without waiting for queue space.
+    pub fn try_checkpoint(&self) -> Result<StorageCompletion<CheckpointOutcome>, StorageError> {
+        let (completion, receiver) = sync_channel(STORAGE_COMPLETION_QUEUE_CAPACITY);
+        self.requests
+            .try_send(StorageRequest::Checkpoint { completion })
+            .map_err(map_submission_error)?;
+        Ok(StorageCompletion { receiver })
+    }
 }
 
 /// One owned result handle. Dropping it never cancels work already admitted.
@@ -129,21 +212,29 @@ pub struct StorageOwner {
     requests: SyncSender<StorageRequest>,
     thread: Option<JoinHandle<()>>,
     recovered: RecoveredStorageState,
+    limit_writer: Option<StorageLimitWriter>,
 }
 
 impl StorageOwner {
     /// Starts the sole storage thread and completes full startup validation before returning.
     // agenc-review: focus owner=storage reviewed=2026-08-27 reason=startup handshake owns every thread-success and join failure branch
     pub fn start(config: StorageOpenConfig) -> Result<Self, StorageError> {
+        let initial_limits = StorageRuntimeLimits::from_engine(config.limits)?;
+        let (limit_cell, limit_reader) = storage_limit_pair(initial_limits);
         let (requests, receiver) = sync_channel(STORAGE_REQUEST_QUEUE_CAPACITY);
+        let limit_writer = StorageLimitWriter {
+            limits: limit_cell,
+            requests: requests.clone(),
+        };
         let (startup_sender, startup_receiver) = sync_channel(1);
         let thread = thread::Builder::new()
             .name("agenc-ircd-storage-owner".to_owned())
             .spawn(move || {
-                let engine = StorageEngine::open(config).and_then(|engine| {
-                    let recovered = engine.startup_scan()?;
-                    Ok((engine, recovered))
-                });
+                let engine = StorageEngine::open_with_runtime_limits(config, limit_reader)
+                    .and_then(|engine| {
+                        let recovered = engine.startup_scan()?;
+                        Ok((engine, recovered))
+                    });
                 match engine {
                     Ok((mut engine, recovered)) => {
                         if startup_sender.send(Ok(recovered)).is_err() {
@@ -162,6 +253,7 @@ impl StorageOwner {
                 requests,
                 thread: Some(thread),
                 recovered,
+                limit_writer: Some(limit_writer),
             }),
             Ok(Err(error)) => {
                 let _ = thread.join();
@@ -186,6 +278,11 @@ impl StorageOwner {
     #[must_use]
     pub const fn recovered_state(&self) -> &RecoveredStorageState {
         &self.recovered
+    }
+
+    /// Transfers the sole live-limit writer to the StateCore composition.
+    pub fn take_limit_writer(&mut self) -> Result<StorageLimitWriter, StorageError> {
+        self.limit_writer.take().ok_or(StorageError::Unavailable)
     }
 
     /// Drains prior requests, closes the owner, and joins the blocking thread.
@@ -218,10 +315,10 @@ impl StorageOwner {
 impl Drop for StorageOwner {
     /// Performs the same joined shutdown as [`StorageOwner::shutdown`] and discards its result.
     ///
-    /// The owner thread finishes any active checkpoint, runs one complete checkpoint scan when
-    /// manifests are retained, and only then exits, so dropping blocks for that whole scan and
-    /// waits behind any deferred backup. Callers that need the outcome, including an
-    /// indeterminate failure, must call `shutdown` instead.
+    /// The owner thread finishes any active checkpoint, then runs one complete checkpoint scan
+    /// when manifests are retained. An audited reload reservation skips that final scan so
+    /// startup reconciliation can resolve the reservation. Dropping waits behind any deferred
+    /// backup; callers that need the outcome must call `shutdown` instead.
     fn drop(&mut self) {
         let _ = self.join_owner();
     }
@@ -231,9 +328,7 @@ impl Drop for StorageOwner {
 struct OwnerState {
     deferred: VecDeque<StorageRequest>,
     backup_completion: Option<SyncSender<Result<BackupReceipt, StorageError>>>,
-    /// A checkpoint was rejected before its transaction began. Retrying at once would spin on
-    /// the same rejection, so due checkpoints wait for the next successful commit.
-    checkpoint_suppressed: bool,
+    checkpoint_completion: Option<SyncSender<Result<CheckpointOutcome, StorageError>>>,
 }
 
 impl OwnerState {
@@ -241,7 +336,7 @@ impl OwnerState {
         Self {
             deferred: VecDeque::with_capacity(STORAGE_REQUEST_QUEUE_CAPACITY),
             backup_completion: None,
-            checkpoint_suppressed: false,
+            checkpoint_completion: None,
         }
     }
 }
@@ -258,13 +353,14 @@ fn run_owner(engine: &mut StorageEngine, requests: &Receiver<StorageRequest>) {
 }
 
 /// Runs one owner iteration in priority order: a backup slice, a checkpoint slice, a deferred
-/// request, a due checkpoint start, then one blocking request.
-// agenc-review: focus owner=storage reviewed=2026-08-29 reason=exhaustive request dispatch centralizes cancellation consumption checkpoint suppression and indeterminate closure
+/// request, then one blocking request.
+// agenc-review: focus owner=storage reviewed=2026-09-01 reason=explicit request priority keeps backup and checkpoint slices bounded
 fn owner_step(
     engine: &mut StorageEngine,
     requests: &Receiver<StorageRequest>,
     state: &mut OwnerState,
 ) -> OwnerStep {
+    engine.take_runtime_limit_change();
     if engine.backup_is_active() {
         return service_active_backup(engine, requests, state);
     }
@@ -273,13 +369,6 @@ fn owner_step(
     }
     if let Some(request) = state.deferred.pop_front() {
         return dispatch_or_start_backup(engine, request, state);
-    }
-    if engine.checkpoint_due() && !state.checkpoint_suppressed {
-        // Starting first keeps sustained submission from starving the checkpoint; the active
-        // branch above interleaves requests with scan slices. A failed start changed nothing
-        // durable, so it only waits for the next successful commit.
-        state.checkpoint_suppressed = engine.start_checkpoint().is_err();
-        return OwnerStep::Continue;
     }
     let Ok(request) = requests.recv() else {
         return OwnerStep::Stop;
@@ -294,8 +383,8 @@ enum ActiveJob {
     Checkpoint,
 }
 
-/// Admits at most one queued request beside an active job, deferring the kinds that cannot run
-/// next to it: a second backup beside either job, and shutdown beside a backup.
+/// Admits at most one queued request beside an active job and defers work that would compete with
+/// that job's storage ordering.
 fn admit_request_beside(
     engine: &mut StorageEngine,
     requests: &Receiver<StorageRequest>,
@@ -308,14 +397,9 @@ fn admit_request_beside(
     let request = match requests.try_recv() {
         Ok(request) => request,
         Err(TryRecvError::Empty) => return OwnerStep::Continue,
-        // A backup still finishes for its completion holder after every port is gone; an
-        // abandoned checkpoint scan loses nothing durable.
-        Err(TryRecvError::Disconnected) => {
-            return match job {
-                ActiveJob::Backup => OwnerStep::Continue,
-                ActiveJob::Checkpoint => OwnerStep::Stop,
-            };
-        }
+        // An accepted long-running job still finishes for its completion holder after every
+        // submission port is gone.
+        Err(TryRecvError::Disconnected) => return OwnerStep::Continue,
     };
     if defers_beside(job, &request) {
         state.deferred.push_back(request);
@@ -327,7 +411,13 @@ fn admit_request_beside(
 const fn defers_beside(job: ActiveJob, request: &StorageRequest) -> bool {
     matches!(
         (job, request),
-        (_, StorageRequest::Backup { .. }) | (ActiveJob::Backup, StorageRequest::Shutdown { .. })
+        (_, StorageRequest::Backup { .. })
+            | (ActiveJob::Backup, StorageRequest::Checkpoint { .. })
+            | (ActiveJob::Backup, StorageRequest::Shutdown { .. })
+            | (ActiveJob::Checkpoint, StorageRequest::Commit { .. })
+            | (ActiveJob::Checkpoint, StorageRequest::Checkpoint { .. })
+            | (ActiveJob::Checkpoint, StorageRequest::LimitsChanged)
+            | (ActiveJob::Checkpoint, StorageRequest::Shutdown { .. })
     )
 }
 
@@ -362,15 +452,26 @@ fn service_active_checkpoint(
         return OwnerStep::Stop;
     }
     match engine.service_checkpoint() {
-        Ok(_installed) => OwnerStep::Continue,
-        Err(EngineCommitFailure::Rejected(_error)) => {
-            // Nothing irreversible began: drop the job, keep serving, and stop retrying until a
-            // commit succeeds so a full disk or a rejected scan cannot spin the idle loop.
-            engine.abandon_checkpoint();
-            state.checkpoint_suppressed = true;
+        Ok(Some(receipt)) => {
+            finish_checkpoint(state, CheckpointOutcome::Installed(receipt));
             OwnerStep::Continue
         }
-        Err(EngineCommitFailure::Indeterminate) => OwnerStep::Stop,
+        Ok(None) => OwnerStep::Continue,
+        Err(EngineCommitFailure::Rejected(error)) => {
+            engine.abandon_checkpoint();
+            finish_checkpoint(state, CheckpointOutcome::Rejected(error));
+            OwnerStep::Continue
+        }
+        Err(EngineCommitFailure::Indeterminate) => {
+            finish_checkpoint(state, CheckpointOutcome::Indeterminate);
+            OwnerStep::Stop
+        }
+    }
+}
+
+fn finish_checkpoint(state: &mut OwnerState, outcome: CheckpointOutcome) {
+    if let Some(completion) = state.checkpoint_completion.take() {
+        let _ = completion.send(Ok(outcome));
     }
 }
 
@@ -379,6 +480,7 @@ fn dispatch_or_start_backup(
     request: StorageRequest,
     state: &mut OwnerState,
 ) -> OwnerStep {
+    engine.refresh_runtime_limits();
     let StorageRequest::Backup {
         destination,
         signing_key,
@@ -400,16 +502,16 @@ fn dispatch_or_start_backup(
     OwnerStep::Continue
 }
 
+// agenc-review: focus owner=storage reviewed=2026-09-01 reason=exhaustive closed request dispatch keeps checkpoint completion and indeterminate shutdown in one auditable match
 fn dispatch_request(
     engine: &mut StorageEngine,
     request: StorageRequest,
     state: &mut OwnerState,
 ) -> OwnerStep {
+    engine.refresh_runtime_limits();
     match request {
         StorageRequest::Commit { batch, completion } => {
             let result = engine.commit(batch);
-            // A successful commit lifts any checkpoint suppression.
-            state.checkpoint_suppressed &= !matches!(result, CommitOutcome::Committed(_));
             let closes_owner = matches!(result, CommitOutcome::Indeterminate);
             let _ = completion.send(Ok(result));
             if closes_owner {
@@ -430,6 +532,22 @@ fn dispatch_request(
             let _ = completion.send(Err(StorageError::QueueFull));
             OwnerStep::Continue
         }
+        StorageRequest::Checkpoint { completion } => {
+            if !engine.checkpoint_cut_would_advance() {
+                let _ = completion.send(Ok(CheckpointOutcome::NotNeeded));
+                return OwnerStep::Continue;
+            }
+            match engine.start_checkpoint() {
+                Ok(()) => {
+                    state.checkpoint_completion = Some(completion);
+                }
+                Err(error) => {
+                    let _ = completion.send(Ok(CheckpointOutcome::Rejected(error)));
+                }
+            }
+            OwnerStep::Continue
+        }
+        StorageRequest::LimitsChanged => OwnerStep::Continue,
         StorageRequest::Shutdown { completion } => {
             let result = finish_for_shutdown(engine);
             let _ = completion.send(result);
@@ -439,6 +557,9 @@ fn dispatch_request(
 }
 
 fn finish_for_shutdown(engine: &mut StorageEngine) -> Result<(), StorageError> {
+    if engine.runtime_limit_reservation_active() {
+        return Ok(());
+    }
     while engine.checkpoint_is_active() {
         engine.service_checkpoint().map_err(checkpoint_error)?;
     }
@@ -480,6 +601,11 @@ mod tests {
     fn commit_request(batch: StorageMutationBatch) -> (StorageRequest, Completion<CommitOutcome>) {
         let (completion, receiver) = sync_channel(STORAGE_COMPLETION_QUEUE_CAPACITY);
         (StorageRequest::Commit { batch, completion }, receiver)
+    }
+
+    fn checkpoint_request() -> (StorageRequest, Completion<CheckpointOutcome>) {
+        let (completion, receiver) = sync_channel(STORAGE_COMPLETION_QUEUE_CAPACITY);
+        (StorageRequest::Checkpoint { completion }, receiver)
     }
 
     fn queue(
@@ -572,7 +698,9 @@ mod tests {
         commit_first_account(engine, 1)?;
         engine.mark_checkpoint_due();
         let (sender, requests) = sync_channel(STORAGE_REQUEST_QUEUE_CAPACITY);
+        let (checkpoint, checkpoint_completion) = checkpoint_request();
         let (read, read_completion) = read_request(1)?;
+        queue(&sender, checkpoint)?;
         queue(&sender, read)?;
         let mut state = OwnerState::new();
 
@@ -589,7 +717,35 @@ mod tests {
         assert_eq!(take(&read_completion)?.records.len(), 1);
         drive_checkpoint(engine, &requests, &mut state)?;
         assert!(!engine.checkpoint_due());
-        assert!(!state.checkpoint_suppressed);
+        assert!(matches!(
+            take(&checkpoint_completion)?,
+            CheckpointOutcome::Installed(_)
+        ));
+
+        drop(sender);
+        assert_eq!(owner_step(engine, &requests, &mut state), OwnerStep::Stop);
+        Ok(())
+    }
+
+    #[test]
+    fn a_due_fact_does_not_start_an_owner_checkpoint_without_a_request() -> Result<(), StorageError>
+    {
+        let mut fixture = EngineFixture::create()?;
+        let engine = fixture.engine_mut()?;
+        commit_first_account(engine, 7)?;
+        engine.mark_checkpoint_due();
+        let (sender, requests) = sync_channel(STORAGE_REQUEST_QUEUE_CAPACITY);
+        let (read, read_completion) = read_request(7)?;
+        queue(&sender, read)?;
+        let mut state = OwnerState::new();
+
+        assert_eq!(
+            owner_step(engine, &requests, &mut state),
+            OwnerStep::Continue
+        );
+        assert_eq!(take(&read_completion)?.records.len(), 1);
+        assert!(engine.checkpoint_due());
+        assert!(!engine.checkpoint_is_active());
 
         drop(sender);
         assert_eq!(owner_step(engine, &requests, &mut state), OwnerStep::Stop);
@@ -612,6 +768,8 @@ mod tests {
         engine.mark_checkpoint_due();
         faults.arm_after_current(1)?;
         let (sender, requests) = sync_channel(STORAGE_REQUEST_QUEUE_CAPACITY);
+        let (checkpoint, checkpoint_completion) = checkpoint_request();
+        queue(&sender, checkpoint)?;
         let mut state = OwnerState::new();
 
         assert_eq!(
@@ -625,7 +783,10 @@ mod tests {
         );
         faults.verify_fired()?;
         assert!(!engine.checkpoint_is_active());
-        assert!(state.checkpoint_suppressed);
+        assert!(matches!(
+            take(&checkpoint_completion)?,
+            CheckpointOutcome::Rejected(StorageError::DatabaseRejected)
+        ));
 
         let (read, read_completion) = read_request(2)?;
         queue(&sender, read)?;
@@ -646,7 +807,6 @@ mod tests {
             take(&stale_completion)?,
             CommitOutcome::Rejected(StorageError::StaleState)
         ));
-        assert!(state.checkpoint_suppressed);
 
         let (commit, commit_completion) =
             commit_request(EngineFixture::advancing_batch(engine, 3)?);
@@ -659,8 +819,9 @@ mod tests {
             take(&commit_completion)?,
             CommitOutcome::Committed(_)
         ));
-        assert!(!state.checkpoint_suppressed);
 
+        let (checkpoint, checkpoint_completion) = checkpoint_request();
+        queue(&sender, checkpoint)?;
         assert_eq!(
             owner_step(engine, &requests, &mut state),
             OwnerStep::Continue
@@ -668,6 +829,10 @@ mod tests {
         assert!(engine.checkpoint_is_active());
         drive_checkpoint(engine, &requests, &mut state)?;
         assert!(!engine.checkpoint_due());
+        assert!(matches!(
+            take(&checkpoint_completion)?,
+            CheckpointOutcome::Installed(_)
+        ));
         drop(sender);
         Ok(())
     }
@@ -684,6 +849,8 @@ mod tests {
         commit_first_account(engine, 5)?;
         engine.mark_checkpoint_due();
         let (sender, requests) = sync_channel(STORAGE_REQUEST_QUEUE_CAPACITY);
+        let (checkpoint, checkpoint_completion) = checkpoint_request();
+        queue(&sender, checkpoint)?;
         let mut state = OwnerState::new();
         assert_eq!(
             owner_step(engine, &requests, &mut state),
@@ -709,6 +876,10 @@ mod tests {
         assert_eq!(state.deferred.len(), 1);
         assert!(!engine.backup_is_active());
         drive_checkpoint(engine, &requests, &mut state)?;
+        assert!(matches!(
+            take(&checkpoint_completion)?,
+            CheckpointOutcome::Installed(_)
+        ));
 
         assert_eq!(
             owner_step(engine, &requests, &mut state),
@@ -746,6 +917,8 @@ mod tests {
         engine.mark_checkpoint_due();
         faults.arm_after_current(1)?;
         let (sender, requests) = sync_channel(STORAGE_REQUEST_QUEUE_CAPACITY);
+        let (checkpoint, checkpoint_completion) = checkpoint_request();
+        queue(&sender, checkpoint)?;
         let mut state = OwnerState::new();
         let mut outcome = OwnerStep::Continue;
         for _ in 0..1_000 {
@@ -756,8 +929,43 @@ mod tests {
         }
         assert_eq!(outcome, OwnerStep::Stop);
         faults.verify_fired()?;
-        assert!(!state.checkpoint_suppressed);
+        assert!(matches!(
+            take(&checkpoint_completion)?,
+            CheckpointOutcome::Indeterminate
+        ));
+        assert_eq!(engine.start_checkpoint(), Err(StorageError::Unavailable));
         drop(sender);
+        Ok(())
+    }
+
+    #[test]
+    fn shutdown_skips_the_checkpoint_while_a_reload_limit_reservation_exists()
+    -> Result<(), StorageError> {
+        const CHECKPOINT_TARGET: u64 = 10_000;
+
+        let mut fixture = EngineFixture::create()?;
+        let engine = fixture.engine_mut()?;
+        commit_first_account(engine, 8)?;
+        let statistics = engine.statistics()?;
+        let values = statistics.values();
+        let current = StorageRuntimeLimits::new(values[2], values[4], CHECKPOINT_TARGET)?;
+        let (writer, reader) = storage_limit_pair(current);
+        engine.replace_runtime_limit_reader(reader);
+        let token = TransactionId::from_bytes([88; 16]);
+        writer.reserve(
+            token,
+            current,
+            statistics.logical_database_bytes(),
+            statistics.backup_stream_bytes(),
+        )?;
+
+        assert!(engine.checkpoint_cut_would_advance());
+        finish_for_shutdown(engine)?;
+        assert!(engine.checkpoint_cut_would_advance());
+
+        writer.rollback(token)?;
+        finish_for_shutdown(engine)?;
+        assert!(!engine.checkpoint_cut_would_advance());
         Ok(())
     }
 
