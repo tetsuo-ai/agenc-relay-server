@@ -9,6 +9,9 @@ publish.workspace = true
 agenc-ircd-crypto.workspace = true
 agenc-ircd-domain.workspace = true
 agenc-ircd-types.workspace = true
+base64.workspace = true
+subtle.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true

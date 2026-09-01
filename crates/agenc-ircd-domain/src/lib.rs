@@ -10,6 +10,7 @@ mod command;
 mod decision;
 mod error;
 mod model;
+mod persist;
 mod projection;
 
 pub use command::{
@@ -27,14 +28,19 @@ pub use decision::{
 };
 pub use error::DomainError;
 pub use model::{
-    AccountLabelValue, AccountState, AwayText, ChannelModes, ChannelNameValue, ChannelScope,
-    ChannelState, ContentPolicy, DirectMessagePolicy, DisplayNameValue, DomainState,
+    AccountLabelValue, AccountState, AwayText, ChannelKeyVerifier, ChannelModes, ChannelNameValue,
+    ChannelScope, ChannelState, ContentPolicy, DirectMessagePolicy, DisplayNameValue, DomainState,
     GuestDirectMessagePolicy, HistoryPolicy, ListEntry, MAX_CHANNELS_PER_SESSION,
-    MAX_CONTACTS_PER_ACCOUNT, MAX_INVITES_PER_CHANNEL, MAX_MASK_ENTRIES_PER_LIST,
-    MAX_MEMBERS_PER_CHANNEL, MAX_MONITORED_NICKNAMES, MAX_RESERVED_NICKNAMES,
-    MAX_ROLE_GRANTS_PER_CHANNEL, MAX_SESSIONS_PER_ACCOUNT, Membership, ModerationAction,
-    ModerationReason, ModerationReasonCode, NicknameValue, PersistencePolicy, PlaintextTopic,
+    MAX_CONTACTS_PER_ACCOUNT, MAX_GLOBAL_CHANNELS, MAX_INVITES_PER_CHANNEL, MAX_LOCAL_CHANNELS,
+    MAX_MASK_ENTRIES_PER_LIST, MAX_MEMBERS_PER_CHANNEL, MAX_MONITORED_NICKNAMES,
+    MAX_RESERVED_NICKNAMES, MAX_ROLE_GRANTS_PER_CHANNEL, MAX_SESSIONS_PER_ACCOUNT, Membership,
+    ModerationAction, ModerationReason, ModerationReasonCode, NicknameValue,
+    OperationalLimitValues, OperationalLimits, OperationalUsage, PersistencePolicy, PlaintextTopic,
     PresencePolicy, Principal, Role, Sanction, SessionSeed, SessionState, TopicText, Visibility,
+};
+pub use persist::{
+    DurableAccount, DurableChannel, DurableInvite, DurableListEntry, DurableMembership,
+    DurableSanction, DurableSession, DurableTopic, DurableWrite,
 };
 pub use projection::{
     AccountProjection, ChannelListProjection, ChannelProjection, MemberProjection,

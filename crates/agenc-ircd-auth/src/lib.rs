@@ -6,6 +6,7 @@
 //! HPKE envelope. OPAQUE state, credentials, transaction bindings, and
 //! completion receipts remain coordinator-owned and move-only.
 
+mod channel_key;
 mod error;
 mod invitation;
 mod opaque;
@@ -13,6 +14,10 @@ mod service;
 mod transaction;
 mod wire;
 
+pub use channel_key::{
+    CHANNEL_KEY_HASH_BYTES, CHANNEL_KEY_ITERATIONS, CHANNEL_KEY_LANES, CHANNEL_KEY_MEMORY_KIB,
+    CHANNEL_KEY_SALT_BYTES, derive_channel_key_verifier,
+};
 pub use error::AuthError;
 pub use invitation::{ACCOUNT_CREATION_INVITE_BYTES, AccountCreationInvite};
 pub use opaque::{
@@ -21,13 +26,19 @@ pub use opaque::{
     OPAQUE_SERVER_LOGIN_STATE_BYTES, OPAQUE_SERVER_SETUP_BYTES, OpaqueAuthentication, OpaqueKe1,
     OpaqueKe2, OpaqueKe3, OpaqueProfile, OpaqueRegistrationRecord, OpaqueRegistrationRequest,
     OpaqueRegistrationResponse, OpaqueServerLoginState, finish_authentication, finish_registration,
+    opaque_server_public_key,
 };
 pub use service::{
+    AUTHENTICATION_GRANT_RECORD_BYTES, AUTHENTICATION_TRANSACTION_RECORD_BYTES,
     AccountAuthenticationState, AccountCreationStartParameters, AccountCreationState,
     AccountCredentialRecord, AccountDeletionChallenge, AccountDeletionIntent, AccountFinishOutcome,
     AccountOperationContext, AccountResponseIntent, AccountResponsePlan, AccountStartOutcome,
-    AuthenticationGrant, AuthenticationLookup, AuthenticationStartParameters, CreateAccountIntent,
-    CreationAdmission, CredentialChangeStartParameters, CredentialChangeState,
+    AuthenticationGrant, AuthenticationGrantRecord, AuthenticationGrantRestartMetadata,
+    AuthenticationLookup, AuthenticationStartParameters, AuthenticationTransactionRecord,
+    CREATION_TRANSACTION_RECORD_BYTES, CREDENTIAL_CHANGE_TRANSACTION_RECORD_BYTES,
+    CreateAccountIntent, CreationAdmission, CreationTransactionRecord,
+    CreationTransactionRestartMetadata, CredentialChangeStartParameters, CredentialChangeState,
+    CredentialChangeTransactionRecord, CredentialChangeTransactionRestartMetadata,
     CredentialReplacementIntent, DestructiveAccountSnapshot, FreshAuthenticationProof,
     SealedAccountFinishOutcome, SealedAccountStart, authentication_completion,
     begin_account_creation, begin_account_deletion, begin_authentication, begin_credential_change,

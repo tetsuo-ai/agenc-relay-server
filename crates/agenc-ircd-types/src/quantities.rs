@@ -113,11 +113,19 @@ impl MonotonicTick {
 }
 
 impl UtcSecond {
+    /// The Unix epoch, useful for deterministic fixtures with no wall clock.
+    pub const UNIX_EPOCH: Self = Self(0);
+
     /// Constructs any representable whole-second Unix timestamp.
     #[must_use]
     pub const fn from_unix_seconds(seconds: u64) -> Self {
         Self(seconds)
     }
+}
+
+impl Revision {
+    /// The first nonzero authoritative state revision.
+    pub const INITIAL: Self = Self(1);
 }
 
 /// Supplies unpredictable bytes to identifier constructors.

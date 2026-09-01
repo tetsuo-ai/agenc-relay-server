@@ -3,9 +3,14 @@
 use std::cmp::Ordering;
 
 use agenc_ircd_crypto::StorageDigest;
-use agenc_ircd_types::{AccountId, ChannelName, Nickname, RecoveryEpoch};
+use agenc_ircd_types::{AccountId, Nickname, RecoveryEpoch};
+use zeroize::Zeroizing;
 
 use crate::codec::{Decoder, Encoder};
+use crate::domain_records::{
+    AccountRecordBody, ChannelNameRecordBody, ChannelRecordBody, LIVE_RECORD_KIND,
+    SanctionRecordBody, SessionRecordBody,
+};
 use crate::{
     IntegrityCheckpoint, IntegrityManifest, LoginIndexKeyState, LoginIndexStoredKey,
     LoginIndexValue, SealedRecord, StorageConstruction, StorageError, StorageOperationCompletion,
@@ -21,7 +26,8 @@ pub const KEY_CHECK_STORED_KEY: &[u8] = b"agenc-chat/key-check/v1";
 /// Fixed key of the StateMeta record.
 pub const STATE_META_STORED_KEY: &[u8] = b"agenc-chat/state-meta/v1";
 
-const OPAQUE_FAKE_RECORD_KEY: &[u8] = b"agenc-chat/opaque-fake-record/v1";
+/// Fixed key of the stable fake OPAQUE record used for unknown-login work.
+pub const OPAQUE_FAKE_RECORD_KEY: &[u8] = b"agenc-chat/opaque-fake-record/v1";
 const DOMAIN_RECORD_VERSION: u16 = 1;
 /// Encoded bytes of a schema-one domain record ahead of its references and body: version,
 /// kind, revision, generation, the expiry tag and value, the reference count, and the body length.
@@ -503,7 +509,7 @@ pub struct PersistentRecordValue {
     generation: u64,
     expires_at: Option<u64>,
     references: Vec<RecordReference>,
-    body: Vec<u8>,
+    body: Zeroizing<Vec<u8>>,
 }
 
 impl PersistentRecordValue {
@@ -548,7 +554,7 @@ impl PersistentRecordValue {
             generation,
             expires_at,
             references,
-            body,
+            body: Zeroizing::new(body),
         })
     }
 
@@ -796,11 +802,14 @@ fn validate_domain_body(table: TableId, record_kind: u16, body: &[u8]) -> Result
             .map_err(|_| StorageError::InvalidEncoding)
             .and_then(|name| Nickname::parse(name).map_err(|_| StorageError::InvalidEncoding))
             .map(|_| ()),
-        (TableId::ChannelName, 1) => std::str::from_utf8(body)
-            .map_err(|_| StorageError::InvalidEncoding)
-            .and_then(|name| ChannelName::parse(name).map_err(|_| StorageError::InvalidEncoding))
-            .map(|_| ()),
+        (TableId::ChannelName, 1) => ChannelNameRecordBody::decode(body).map(|_| ()),
+        (TableId::ChannelName, 2) if body.is_empty() => Ok(()),
         (TableId::E2eeState, 1) => E2eeRecoveryGate::decode(body).map(|_| ()),
+        (TableId::Account, LIVE_RECORD_KIND) => AccountRecordBody::decode(body).map(|_| ()),
+        (TableId::Session, LIVE_RECORD_KIND) => SessionRecordBody::decode(body).map(|_| ()),
+        (TableId::Session, 2) if body.is_empty() => Ok(()),
+        (TableId::Channel, LIVE_RECORD_KIND) => ChannelRecordBody::decode(body).map(|_| ()),
+        (TableId::Sanction, LIVE_RECORD_KIND) => SanctionRecordBody::decode(body).map(|_| ()),
         _ if uses_protocol_body(table, record_kind) => {
             ProtocolRecordBody::decode(table, record_kind, body).map(|_| ())
         }
@@ -895,7 +904,7 @@ mod tests {
         };
 
         let exact = PersistentRecordValue::new(
-            TableId::Sanction,
+            TableId::History,
             1,
             1,
             0,
@@ -911,7 +920,7 @@ mod tests {
         );
         assert_eq!(
             PersistentRecordValue::new(
-                TableId::Sanction,
+                TableId::History,
                 1,
                 1,
                 0,
@@ -934,9 +943,16 @@ mod tests {
             Err(StorageError::InvalidEncoding)
         );
 
-        let valid =
-            PersistentRecordValue::new(TableId::Account, 1, 1, 1, None, Vec::new(), Vec::new())?
-                .encode()?;
+        let valid = PersistentRecordValue::new(
+            TableId::Account,
+            1,
+            1,
+            1,
+            None,
+            Vec::new(),
+            crate::domain_records::fixtures::live_body(TableId::Account, 1)?,
+        )?
+        .encode()?;
         let mut wrong_version = valid.clone();
         wrong_version
             .get_mut(..2)

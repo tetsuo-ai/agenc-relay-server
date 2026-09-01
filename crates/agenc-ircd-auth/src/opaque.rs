@@ -43,6 +43,17 @@ pub const OPAQUE_KE3_BYTES: usize = 64;
 /// Exact serialized server-login state length.
 pub const OPAQUE_SERVER_LOGIN_STATE_BYTES: usize = 128;
 
+/// Validates a serialized server setup and returns its pinned-suite AKE public key.
+pub fn opaque_server_public_key(
+    setup_bytes: &[u8; OPAQUE_SERVER_SETUP_BYTES],
+) -> Result<[u8; 32], AuthError> {
+    let _setup = deserialize_setup(setup_bytes)?;
+    setup_bytes
+        .get(96..128)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or(AuthError::InvalidEncoding)
+}
+
 struct AgencOpaqueSuite;
 
 impl CipherSuite for AgencOpaqueSuite {

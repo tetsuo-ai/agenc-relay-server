@@ -14,6 +14,7 @@ mod secret;
 mod signature;
 mod storage;
 mod storage_integrity;
+mod tls_ticket;
 mod worker;
 
 pub use account_hpke::{
@@ -43,14 +44,21 @@ pub use storage::{
 pub use storage_integrity::{
     BackupStreamHasher, ConstructionPlanHasher, RollbackGuardRootKey, StorageAuthenticator,
     StorageDigest, StorageIntegrityContext, StorageIntegrityKeys, TrackedStateHasher,
-    authenticate_nonce_reservation, authenticate_rollback_guard, authenticate_state_meta,
-    backup_signing_key_id, database_header_hash, database_key_check, derive_storage_integrity_keys,
-    integrity_checkpoint_hash, integrity_manifest_hash, nonce_reservation_hash,
-    rekey_transform_profile_hash, restore_transform_profile_hash, rollback_guard_hash,
-    sealed_record_id, storage_operation_id, storage_operation_key_id, storage_output_path_hash,
-    storage_qualification_component_hash, tracked_record_commitment, tracked_state_digest,
+    admin_audit_checkpoint_hash, admin_audit_event_hash, admin_confirmation_token_hash,
+    audit_signing_key_id, authenticate_nonce_reservation, authenticate_rollback_guard,
+    authenticate_state_meta, backup_signing_key_id, database_header_hash, database_key_check,
+    derive_storage_integrity_keys, integrity_checkpoint_hash, integrity_manifest_hash,
+    nonce_reservation_hash, rekey_transform_profile_hash, restore_transform_profile_hash,
+    rollback_guard_hash, sealed_record_id, storage_operation_id, storage_operation_key_id,
+    storage_output_path_hash, storage_qualification_component_hash, tracked_record_commitment,
+    tracked_state_digest,
+};
+pub use tls_ticket::{
+    MAX_TLS_TICKET_BYTES, MAX_TLS_TICKET_PLAINTEXT_BYTES, OpenedTlsTicket, TlsTicketKey,
+    TlsTicketKeyId, tls_ticket_key_id,
 };
 pub use worker::{
     BoundedCryptoPool, CRYPTO_QUEUE_SLOTS_PER_WORKER, CRYPTO_WORKER_RESERVED_BYTES, CryptoJob,
-    CryptoPort, CryptoSubmissionError, CryptoWorkerConfig, JobClass, JobHandle,
+    CryptoPoolShutdown, CryptoPort, CryptoSubmissionError, CryptoWorkerConfig,
+    JobCancellationToken, JobClass, JobHandle,
 };

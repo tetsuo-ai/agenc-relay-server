@@ -109,6 +109,12 @@ impl OpaqueFakeCredentialKey {
 pub struct LoginIndexDigest(Zeroizing<[u8; 32]>);
 
 impl LoginIndexDigest {
+    /// Restores one digest from an authenticated private storage record.
+    #[must_use]
+    pub fn from_storage_key(bytes: [u8; 32]) -> Self {
+        Self(Zeroizing::new(bytes))
+    }
+
     /// Borrows the complete digest only for the private storage lookup key.
     #[must_use]
     pub fn expose_for_storage_key(&self) -> &[u8; 32] {

@@ -202,11 +202,13 @@ enum SaslPhase {
     WaitingFinishResponse,
     AwaitingOutcome,
     Authenticated,
+    WaitingLogout,
 }
 
 /// Fixed `AGENC-OPAQUE` SASL transport state, without OPAQUE or HPKE logic.
 pub struct SaslTransport {
     phase: SaslPhase,
+    authenticated: bool,
     attempts: u8,
     deadline: Option<u64>,
     encoded: String,
@@ -221,6 +223,7 @@ impl SaslTransport {
             .map_err(|_| AuthTransportError::AllocationFailed)?;
         Ok(Self {
             phase: SaslPhase::Idle,
+            authenticated: false,
             attempts: 0,
             deadline: None,
             encoded,
@@ -245,12 +248,16 @@ impl SaslTransport {
         match self.phase {
             SaslPhase::Idle => self.select_mechanism(parameter, now),
             SaslPhase::ReceivingStart | SaslPhase::ReceivingFinish => self.receive_chunk(parameter),
+            SaslPhase::Authenticated if parameter == "AGENC-OPAQUE" => {
+                self.select_mechanism(parameter, now)
+            }
             SaslPhase::Authenticated => {
                 one_action(SaslAction::Numeric(SaslNumeric::AlreadyAuthenticated))
             }
             SaslPhase::WaitingStartResponse
             | SaslPhase::WaitingFinishResponse
-            | SaslPhase::AwaitingOutcome => Err(AuthTransportError::BadState),
+            | SaslPhase::AwaitingOutcome
+            | SaslPhase::WaitingLogout => Err(AuthTransportError::BadState),
         }
     }
 
@@ -299,13 +306,52 @@ impl SaslTransport {
         let mut actions = action_buffer(1)?;
         self.deadline = None;
         if accepted {
+            self.authenticated = true;
             self.phase = SaslPhase::Authenticated;
             actions.push(SaslAction::Numeric(SaslNumeric::Success));
         } else {
-            self.phase = SaslPhase::Idle;
+            self.reset_attempt();
             actions.push(SaslAction::Numeric(SaslNumeric::Failed));
         }
         Ok(actions)
+    }
+
+    /// Ends an in-flight exchange whose account-service request could not
+    /// produce an authenticated response. This preserves the connection-wide
+    /// attempt count while returning the carrier to its idle state.
+    pub fn unavailable(&mut self, now: u64) -> Result<Vec<SaslAction>, AuthTransportError> {
+        if matches!(self.check_deadline(now), Err(AuthTransportError::TimedOut)) {
+            return one_action(SaslAction::Numeric(SaslNumeric::Failed));
+        }
+        if !matches!(
+            self.phase,
+            SaslPhase::WaitingStartResponse
+                | SaslPhase::WaitingFinishResponse
+                | SaslPhase::AwaitingOutcome
+        ) {
+            return Err(AuthTransportError::BadState);
+        }
+        self.reset_attempt();
+        one_action(SaslAction::Numeric(SaslNumeric::Failed))
+    }
+
+    /// Restores the authenticated idle state when the domain refuses logout.
+    pub fn reject_logout(&mut self) -> Result<Vec<SaslAction>, AuthTransportError> {
+        if self.phase != SaslPhase::WaitingLogout || !self.authenticated {
+            return Err(AuthTransportError::BadState);
+        }
+        self.phase = SaslPhase::Authenticated;
+        one_action(SaslAction::Numeric(SaslNumeric::Failed))
+    }
+
+    /// Clears the carrier's account binding only after logout commits.
+    pub fn complete_logout(&mut self) -> Result<(), AuthTransportError> {
+        if self.phase != SaslPhase::WaitingLogout || !self.authenticated {
+            return Err(AuthTransportError::BadState);
+        }
+        self.authenticated = false;
+        self.phase = SaslPhase::Idle;
+        Ok(())
     }
 
     /// Applies the nonextendable 30-second attempt deadline.
@@ -416,7 +462,7 @@ impl SaslTransport {
     fn abort_or_logout(&mut self) -> Result<Vec<SaslAction>, AuthTransportError> {
         if self.phase == SaslPhase::Authenticated {
             let mut actions = action_buffer(1)?;
-            self.phase = SaslPhase::Idle;
+            self.phase = SaslPhase::WaitingLogout;
             self.deadline = None;
             actions.push(SaslAction::Logout);
             return Ok(actions);
@@ -437,7 +483,11 @@ impl SaslTransport {
 
     fn reset_attempt(&mut self) {
         self.clear_encoded();
-        self.phase = SaslPhase::Idle;
+        self.phase = if self.authenticated {
+            SaslPhase::Authenticated
+        } else {
+            SaslPhase::Idle
+        };
         self.deadline = None;
     }
 
@@ -647,6 +697,14 @@ impl AccountTransfer {
     /// Applies the 15-second idle and 60-second absolute deadlines.
     pub fn tick(&mut self, now: u64) -> Result<(), AuthTransportError> {
         self.check_deadlines(now)
+    }
+
+    /// Irreversibly fails this one-use transfer after an external refusal.
+    pub fn reject(&mut self) {
+        self.clear_encoded();
+        self.state = AccountState::Failed;
+        self.total_deadline = None;
+        self.idle_deadline = None;
     }
 
     fn begin(
@@ -890,6 +948,77 @@ mod tests {
     }
 
     #[test]
+    fn sasl_unavailable_preserves_attempt_budget_and_resets_the_exchange()
+    -> Result<(), AuthTransportError> {
+        let mut transport = SaslTransport::new()?;
+        let _selected = transport.client("AGENC-OPAQUE", 10)?;
+        transport.phase = SaslPhase::WaitingStartResponse;
+
+        assert!(matches!(
+            transport.unavailable(11)?.as_slice(),
+            [SaslAction::Numeric(super::SaslNumeric::Failed)]
+        ));
+        assert_eq!(transport.phase, SaslPhase::Idle);
+        assert_eq!(transport.attempts, 1);
+
+        let _selected_again = transport.client("AGENC-OPAQUE", 12)?;
+        assert_eq!(transport.attempts, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_reauthentication_preserves_the_existing_account_binding()
+    -> Result<(), AuthTransportError> {
+        let mut transport = SaslTransport::new()?;
+        transport.authenticated = true;
+        transport.phase = SaslPhase::AwaitingOutcome;
+
+        assert!(matches!(
+            transport.complete(false, 10)?.as_slice(),
+            [SaslAction::Numeric(super::SaslNumeric::Failed)]
+        ));
+        assert_eq!(transport.phase, SaslPhase::Authenticated);
+        assert!(matches!(
+            transport.client("AGENC-OPAQUE", 11)?.as_slice(),
+            [SaslAction::SendPlus]
+        ));
+        assert!(matches!(
+            transport.client("*", 12)?.as_slice(),
+            [SaslAction::Numeric(super::SaslNumeric::Aborted)]
+        ));
+        assert_eq!(transport.phase, SaslPhase::Authenticated);
+        assert!(matches!(
+            transport.client("*", 13)?.as_slice(),
+            [SaslAction::Logout]
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn refused_logout_restores_the_authenticated_carrier() -> Result<(), AuthTransportError> {
+        let mut transport = SaslTransport::new()?;
+        transport.authenticated = true;
+        transport.phase = SaslPhase::Authenticated;
+        assert!(matches!(
+            transport.client("*", 10)?.as_slice(),
+            [SaslAction::Logout]
+        ));
+
+        assert!(matches!(
+            transport.reject_logout()?.as_slice(),
+            [SaslAction::Numeric(super::SaslNumeric::Failed)]
+        ));
+        assert_eq!(transport.phase, SaslPhase::Authenticated);
+        assert!(matches!(
+            transport.client("*", 11)?.as_slice(),
+            [SaslAction::Logout]
+        ));
+        transport.complete_logout()?;
+        assert_eq!(transport.phase, SaslPhase::Idle);
+        Ok(())
+    }
+
+    #[test]
     fn oversized_authenticate_does_not_clear_an_authenticated_session()
     -> Result<(), AuthTransportError> {
         let mut transport = SaslTransport::new()?;
@@ -945,6 +1074,28 @@ mod tests {
         ));
         assert_eq!(finish.state, AccountState::Complete);
         assert_eq!(finish.idle_deadline, None);
+        Ok(())
+    }
+
+    #[test]
+    fn rejected_account_transfer_erases_state_and_cannot_restart() -> Result<(), AuthTransportError>
+    {
+        let mut transfer = AccountTransfer::new(super::AccountCarrierKind::Create)?;
+        transfer.state = AccountState::WaitingResponse(AccountCarrierPhase::Start);
+        transfer.encoded.push_str("secret-carrier-text");
+        transfer.total_deadline = Some(60_000);
+        transfer.idle_deadline = Some(15_000);
+
+        transfer.reject();
+
+        assert_eq!(transfer.state, AccountState::Failed);
+        assert!(transfer.encoded.is_empty());
+        assert_eq!(transfer.total_deadline, None);
+        assert_eq!(transfer.idle_deadline, None);
+        assert_eq!(
+            transfer.client("START", Some("4726"), false, 1).err(),
+            Some(AuthTransportError::BadState)
+        );
         Ok(())
     }
 

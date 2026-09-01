@@ -33,6 +33,7 @@ agenc-ircd-e2ee = { version = "=0.0.0", path = "crates/agenc-ircd-e2ee" }
 agenc-ircd-federation-wire = { version = "=0.0.0", path = "crates/agenc-ircd-federation-wire" }
 agenc-ircd-runtime = { version = "=0.0.0", path = "crates/agenc-ircd-runtime" }
 agenc-ircd-storage = { version = "=0.0.0", path = "crates/agenc-ircd-storage" }
+agenc-ircd-testkit = { version = "=0.0.0", path = "crates/agenc-ircd-testkit" }
 agenc-ircd-types = { version = "=0.0.0", path = "crates/agenc-ircd-types" }
 
 # These exact profiles are frozen by Architecture section 24.4. Crate manifests
@@ -46,11 +47,12 @@ getrandom = { version = "=0.4.3", default-features = false, features = ["std"] }
 hkdf = { version = "=0.13.0", default-features = false }
 hmac = { version = "=0.13.0", default-features = false, features = ["zeroize"] }
 hpke = { version = "=0.14.0", default-features = false, features = ["alloc", "chacha", "x25519", "hkdfsha2"] }
+loom = { version = "=0.7.2", default-features = false }
 opaque-ke = { version = "=4.0.1", default-features = false, features = ["ristretto255", "argon2", "std"] }
 opaque-sha2 = { package = "sha2", version = "=0.10.9", default-features = false }
 precis-profiles = { version = "=0.1.13", default-features = false }
 redb = { version = "=4.2.0", default-features = false, features = ["std"] }
-rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs"] }
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs", "process", "mm"] }
 rustls = { version = "=0.23.43", default-features = false, features = ["std", "aws_lc_rs", "prefer-post-quantum"] }
 sha2 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
 subtle = { version = "=2.6.1", default-features = false }

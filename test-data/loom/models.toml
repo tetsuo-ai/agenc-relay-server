@@ -1,0 +1,54 @@
+schema_version = 1
+test = "crates/agenc-ircd-runtime/tests/loom_models.rs"
+loom = "0.7.2"
+preemption_bound = 2
+max_branches = 20000
+checkpoint_file = "none"
+
+[[model]]
+name = "budget_batch_acquire_release"
+threads = 2
+operations = "MemoryBudget::try_acquire_batch, MemoryPermitBatch::drop"
+property = "every accepted batch returns its bytes exactly; the pool ends at capacity with zero charged"
+invariants = ["CON-05"]
+scope = "public API under loom threads"
+
+[[model]]
+name = "permit_split_and_drop"
+threads = 2
+operations = "MemoryPermitBatch::split_exact, MemoryPermit::drop, MemoryPermitBatch::drop"
+property = "splits preserve the exact total and every permit returns once whichever thread drops it"
+invariants = ["CON-05"]
+scope = "public API under loom threads"
+
+[[model]]
+name = "sink_reserve_prepare_commit"
+threads = 2
+operations = "TentativeClientQueueReservation::drop, ClientQueueReservation::prepare, into_transfer, QueueTransfer::discard"
+property = "a dropped reservation and a discarded transfer each roll back their counts exactly once"
+invariants = ["STA-08", "CON-02"]
+scope = "public API under loom threads"
+
+[[model]]
+name = "storage_completion_single_consumer"
+threads = 2
+operations = "CompletionLedger::begin, CompletionLedger::finish"
+property = "exactly one submission of a transaction identity is admitted and the duplicate fails the ledger closed"
+invariants = ["CON-03", "DUR-01"]
+scope = "production source under the loom scheduler"
+
+[[model]]
+name = "completion_sender_loss"
+threads = 2
+operations = "classify_completion, CompletionLedger::fail, CompletionLedger::begin"
+property = "a lost sender is Indeterminate and every later submission reports the retained failure"
+invariants = ["CON-03", "DUR-01"]
+scope = "production source under the loom scheduler"
+
+[[model]]
+name = "shutdown_stop_supersedes_reordered_phase_requests"
+threads = 3
+operations = "idempotent phase request, second-signal Stop supersession"
+property = "each phase applies at most once, Stop applies exactly once, and no later request regresses the lifecycle"
+invariants = ["CON-01", "CON-04", "OPS-04"]
+scope = "bounded lifecycle state model under the loom scheduler"

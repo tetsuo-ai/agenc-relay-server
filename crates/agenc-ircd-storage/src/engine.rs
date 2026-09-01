@@ -2,6 +2,7 @@
 
 use std::fs::File;
 use std::io::{Seek as _, SeekFrom};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use agenc_ircd_crypto::{
     DatabaseBinding, Ed25519SecretKey, LoginIndexKey, LoginIndexKeyId, OsEntropy,
@@ -9,7 +10,9 @@ use agenc_ircd_crypto::{
     StorageMasterKey, StorageTable, TrackedStateHasher, derive_storage_index,
     derive_storage_integrity_keys, tracked_record_commitment,
 };
-use agenc_ircd_types::{ChannelName, NetworkId, Nickname, ServerId};
+#[cfg(test)]
+use agenc_ircd_types::ChannelName;
+use agenc_ircd_types::{NetworkId, Nickname, RecoveryEpoch, ServerId, TransactionId};
 use subtle::ConstantTimeEq as _;
 
 use crate::mutation::ReadPlanKind;
@@ -19,17 +22,18 @@ use crate::redb_store::{
 };
 use crate::{
     BACKUP_FIXED_STREAM_BYTES, BackupDestination, BackupHeader, BackupOutput, BackupReceipt,
-    BackupRecord, BackupStreamWriter, BackupTrustKey, CommitOutcome, CommitReceipt, DatabaseHeader,
-    ExistingRecord, FilesystemCapacity, IntegrityCheckpoint, IntegrityCheckpointTbs,
-    IntegrityManifest, IntegrityManifestTbs, IntegrityRecordMutation, IntegrityRecordVersion,
-    LoginIndexKeyState, LoginIndexStoredKey, LoginIndexValueKind, NonceReservationState,
-    NonceReservationTbs, ROLLBACK_GUARD_BYTES, ReadPlan, ReadRecord, ReadResult, RecordReference,
-    RecoveryDisposition, RollbackGuard, RollbackGuardPhase, RollbackGuardTbs, SealedRecord,
-    StateDirectory, StateMeta, StateMetaTbs, StorageAccountingLimits, StorageConstruction,
-    StorageConstructionSource, StorageError, StorageFaultBoundary, StorageFaultInjector,
-    StorageFaultSite, StorageMutationBatch, StorageMutationHead, StorageOperationCompletion,
-    StorageOperationIdentity, StorageSealContext, StoredKey, TableId, classify_recovery_state,
-    logical_meta_charge, logical_record_charge, verify_backup, verify_guard_pair,
+    BackupRecord, BackupStreamWriter, BackupTrustKey, ChannelNameRecordBody, CommitOutcome,
+    CommitReceipt, DatabaseHeader, ExistingRecord, FilesystemCapacity, InspectionStateDirectory,
+    IntegrityCheckpoint, IntegrityCheckpointTbs, IntegrityManifest, IntegrityManifestTbs,
+    IntegrityRecordMutation, IntegrityRecordVersion, LoginIndexKeyState, LoginIndexStoredKey,
+    LoginIndexValueKind, NonceReservationState, NonceReservationTbs, ROLLBACK_GUARD_BYTES,
+    ReadPlan, ReadRecord, ReadResult, RecordReference, RecoveryDisposition, RollbackGuard,
+    RollbackGuardPhase, RollbackGuardTbs, SealedRecord, StateDirectory, StateMeta, StateMetaTbs,
+    StorageAccountingLimits, StorageConstruction, StorageConstructionSource, StorageError,
+    StorageFaultBoundary, StorageFaultInjector, StorageFaultSite, StorageMutationBatch,
+    StorageMutationHead, StorageOperationCompletion, StorageOperationIdentity, StorageSealContext,
+    StoredKey, TableId, classify_recovery_state, logical_meta_charge, logical_record_charge,
+    verify_backup, verify_guard_pair,
 };
 
 const KEY_CHECK_KEY: &[u8] = b"agenc-chat/key-check/v1";
@@ -55,10 +59,146 @@ pub struct RecoveredStorageState {
     manifest_sequence: u64,
     nonce_draw_high_water: u64,
     maximum_record_revision: u64,
+    logical_database_bytes: u64,
+    backup_stream_bytes: u64,
+    database_binding: DatabaseBinding,
+    storage_key_generation: u32,
+    recovery_epoch: RecoveryEpoch,
     capacity: FilesystemCapacity,
 }
 
+/// One coherent, input-free storage-owner sample for authenticated
+/// administrative statistics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StorageStatistics {
+    logical_database_bytes: u64,
+    database_file_bytes: u64,
+    database_max_bytes: u64,
+    backup_stream_bytes: u64,
+    backup_max_bytes: u64,
+    state_generation: u64,
+    manifest_sequence: u64,
+    storage_commit_sequence: u64,
+    account_service_response_count: u64,
+    nonce_draw_high_water: u64,
+    checkpoint_manifest_sequence: u64,
+    filesystem_available_bytes: u64,
+    filesystem_reserve_bytes: u64,
+    pending_storage_constructions: u64,
+}
+
+impl StorageStatistics {
+    /// Returns the exact committed logical database charge.
+    #[must_use]
+    pub const fn logical_database_bytes(self) -> u64 {
+        self.logical_database_bytes
+    }
+
+    /// Returns the exact encoded backup-stream length.
+    #[must_use]
+    pub const fn backup_stream_bytes(self) -> u64 {
+        self.backup_stream_bytes
+    }
+
+    /// Returns the fresh filesystem-availability sample.
+    #[must_use]
+    pub const fn filesystem_available_bytes(self) -> u64 {
+        self.filesystem_available_bytes
+    }
+
+    /// Returns the effective filesystem reserve.
+    #[must_use]
+    pub const fn filesystem_reserve_bytes(self) -> u64 {
+        self.filesystem_reserve_bytes
+    }
+
+    /// Returns values in the normative `STATS STORAGE` field order.
+    #[must_use]
+    pub const fn values(self) -> [u64; 14] {
+        [
+            self.logical_database_bytes,
+            self.database_file_bytes,
+            self.database_max_bytes,
+            self.backup_stream_bytes,
+            self.backup_max_bytes,
+            self.state_generation,
+            self.manifest_sequence,
+            self.storage_commit_sequence,
+            self.account_service_response_count,
+            self.nonce_draw_high_water,
+            self.checkpoint_manifest_sequence,
+            self.filesystem_available_bytes,
+            self.filesystem_reserve_bytes,
+            self.pending_storage_constructions,
+        ]
+    }
+}
+
+/// Exact counters committed by one installed integrity checkpoint.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CheckpointReceipt {
+    /// Manifest sequence covered by the immutable checkpoint cut.
+    pub cut_manifest_sequence: u64,
+    /// Manifest sequence present when the checkpoint was installed.
+    pub installation_manifest_sequence: u64,
+    /// Resulting authenticated storage commit sequence.
+    pub storage_commit_sequence: u64,
+    /// Unchanged logical state generation at installation.
+    pub state_generation: u64,
+    /// Unchanged account-service response count at installation.
+    pub account_service_response_count: u64,
+    /// Resulting exact logical database charge.
+    pub logical_database_bytes: u64,
+    /// Resulting exact encoded backup-stream length.
+    pub backup_stream_bytes: u64,
+    /// Complete committed rollback-guard hash.
+    pub rollback_guard_hash: StorageDigest,
+}
+
+/// Closed result of one explicit integrity-checkpoint request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CheckpointOutcome {
+    /// The active checkpoint already covers the current manifest head.
+    NotNeeded,
+    /// The checkpoint transaction and committed guard are durable.
+    Installed(CheckpointReceipt),
+    /// The irreversible checkpoint transaction was proven not to have begun.
+    Rejected(StorageError),
+    /// Persistence may have occurred and startup reconciliation is required.
+    Indeterminate,
+}
+
 impl RecoveredStorageState {
+    /// Returns the exact committed logical database charge.
+    #[must_use]
+    pub const fn logical_database_bytes(&self) -> u64 {
+        self.logical_database_bytes
+    }
+
+    /// Returns the exact committed backup stream length.
+    #[must_use]
+    pub const fn backup_stream_bytes(&self) -> u64 {
+        self.backup_stream_bytes
+    }
+
+    /// Returns the immutable record-encryption binding of the open database.
+    #[must_use]
+    pub const fn database_binding(&self) -> DatabaseBinding {
+        self.database_binding
+    }
+
+    /// Returns the current record-key generation of the open database.
+    #[must_use]
+    pub const fn storage_key_generation(&self) -> u32 {
+        self.storage_key_generation
+    }
+
+    /// Returns the authenticated recovery epoch advertised during onboarding.
+    #[must_use]
+    pub const fn recovery_epoch(&self) -> RecoveryEpoch {
+        self.recovery_epoch
+    }
+
     /// Returns the exact row count reconstructed for one numbered table.
     #[must_use]
     pub fn table_record_count(&self, table: TableId) -> u64 {
@@ -128,6 +268,331 @@ pub struct StorageEngineLimits {
     pub integrity_checkpoint_manifests: u64,
 }
 
+/// The storage ceilings that may change at a StateCore reload safe point.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StorageRuntimeLimits {
+    database_max_bytes: u64,
+    backup_max_bytes: u64,
+    integrity_checkpoint_manifests: u64,
+}
+
+impl StorageRuntimeLimits {
+    /// Validates one coherent live storage-limit view.
+    pub const fn new(
+        database_max_bytes: u64,
+        backup_max_bytes: u64,
+        integrity_checkpoint_manifests: u64,
+    ) -> Result<Self, StorageError> {
+        let candidate = Self {
+            database_max_bytes,
+            backup_max_bytes,
+            integrity_checkpoint_manifests,
+        };
+        if candidate.database_max_bytes < MIN_STORAGE_BYTES
+            || candidate.database_max_bytes > MAX_STORAGE_BYTES
+            || candidate.backup_max_bytes < MIN_STORAGE_BYTES
+            || candidate.backup_max_bytes > MAX_STORAGE_BYTES
+            || candidate.database_max_bytes > candidate.backup_max_bytes
+            || candidate.integrity_checkpoint_manifests < MIN_CHECKPOINT_MANIFESTS
+            || candidate.integrity_checkpoint_manifests > MAX_RETAINED_MANIFESTS
+        {
+            return Err(StorageError::LimitExceeded);
+        }
+        Ok(candidate)
+    }
+
+    pub(crate) const fn from_engine(limits: StorageEngineLimits) -> Result<Self, StorageError> {
+        Self::new(
+            limits.database_max_bytes,
+            limits.backup_max_bytes,
+            limits.integrity_checkpoint_manifests,
+        )
+    }
+
+    const fn install_into(self, limits: &mut StorageEngineLimits) {
+        limits.database_max_bytes = self.database_max_bytes;
+        limits.backup_max_bytes = self.backup_max_bytes;
+        limits.integrity_checkpoint_manifests = self.integrity_checkpoint_manifests;
+    }
+
+    /// Returns the logical database ceiling.
+    #[must_use]
+    pub const fn database_max_bytes(self) -> u64 {
+        self.database_max_bytes
+    }
+
+    /// Returns the exact backup-stream ceiling.
+    #[must_use]
+    pub const fn backup_max_bytes(self) -> u64 {
+        self.backup_max_bytes
+    }
+
+    /// Returns the retained-manifest checkpoint target.
+    #[must_use]
+    pub const fn integrity_checkpoint_manifests(self) -> u64 {
+        self.integrity_checkpoint_manifests
+    }
+}
+
+#[derive(Clone, Copy)]
+struct StorageLimitReservation {
+    token: TransactionId,
+    previous: StorageRuntimeLimits,
+}
+
+struct StorageLimitState {
+    current: StorageRuntimeLimits,
+    logical_database_bytes: Option<u64>,
+    backup_stream_bytes: Option<u64>,
+    retained_manifest_count: Option<u64>,
+    retained_manifest_bytes: Option<u64>,
+    checkpoint_due: Option<bool>,
+    checkpoint_active: bool,
+    poisoned: bool,
+    limit_change_pending: bool,
+    reservation: Option<StorageLimitReservation>,
+}
+
+#[derive(Clone)]
+pub(crate) struct StorageLimitReader {
+    state: Arc<Mutex<StorageLimitState>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct StorageLimitCell {
+    state: Arc<Mutex<StorageLimitState>>,
+}
+
+pub(crate) fn storage_limit_pair(
+    initial: StorageRuntimeLimits,
+) -> (StorageLimitCell, StorageLimitReader) {
+    let state = Arc::new(Mutex::new(StorageLimitState {
+        current: initial,
+        logical_database_bytes: None,
+        backup_stream_bytes: None,
+        retained_manifest_count: None,
+        retained_manifest_bytes: None,
+        checkpoint_due: None,
+        checkpoint_active: false,
+        poisoned: false,
+        limit_change_pending: false,
+        reservation: None,
+    }));
+    (
+        StorageLimitCell {
+            state: Arc::clone(&state),
+        },
+        StorageLimitReader { state },
+    )
+}
+
+fn recover_limit_lock(limits: &Mutex<StorageLimitState>) -> MutexGuard<'_, StorageLimitState> {
+    match limits.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+impl StorageLimitCell {
+    pub(crate) fn activate(
+        &self,
+        candidate: StorageRuntimeLimits,
+    ) -> Result<StorageRuntimeLimits, StorageError> {
+        let mut state = recover_limit_lock(&self.state);
+        validate_limit_activation(&state, candidate, None)?;
+        let previous = state.current;
+        state.current = candidate;
+        refresh_checkpoint_due(&mut state);
+        state.limit_change_pending = true;
+        Ok(previous)
+    }
+
+    pub(crate) fn reserve(
+        &self,
+        token: TransactionId,
+        candidate: StorageRuntimeLimits,
+        projected_logical_database_bytes: u64,
+        projected_backup_stream_bytes: u64,
+    ) -> Result<(), StorageError> {
+        let mut state = recover_limit_lock(&self.state);
+        validate_limit_activation(
+            &state,
+            candidate,
+            Some((
+                projected_logical_database_bytes,
+                projected_backup_stream_bytes,
+            )),
+        )?;
+        let previous = state.current;
+        state.current = candidate;
+        refresh_checkpoint_due(&mut state);
+        state.limit_change_pending = true;
+        state.reservation = Some(StorageLimitReservation { token, previous });
+        Ok(())
+    }
+
+    pub(crate) fn finalize(&self, token: TransactionId) -> Result<(), StorageError> {
+        let mut state = recover_limit_lock(&self.state);
+        if state.poisoned {
+            return Err(StorageError::Unavailable);
+        }
+        let Some(reservation) = state.reservation else {
+            return Err(StorageError::StaleState);
+        };
+        if reservation.token != token {
+            return Err(StorageError::StaleState);
+        }
+        validate_usage_floor(&state, state.current)?;
+        state.reservation = None;
+        state.limit_change_pending = true;
+        Ok(())
+    }
+
+    pub(crate) fn rollback(&self, token: TransactionId) -> Result<(), StorageError> {
+        let mut state = recover_limit_lock(&self.state);
+        if state.poisoned {
+            return Err(StorageError::Unavailable);
+        }
+        let Some(reservation) = state.reservation else {
+            return Err(StorageError::StaleState);
+        };
+        if reservation.token != token {
+            return Err(StorageError::StaleState);
+        }
+        state.current = reservation.previous;
+        state.reservation = None;
+        refresh_checkpoint_due(&mut state);
+        state.limit_change_pending = true;
+        Ok(())
+    }
+
+    pub(crate) fn restore_unreserved(&self, previous: StorageRuntimeLimits) {
+        let mut state = recover_limit_lock(&self.state);
+        if state.reservation.is_none() {
+            state.current = previous;
+            refresh_checkpoint_due(&mut state);
+            state.limit_change_pending = true;
+        }
+    }
+
+    pub(crate) fn checkpoint_due(&self) -> Result<bool, StorageError> {
+        let state = recover_limit_lock(&self.state);
+        if state.poisoned {
+            return Err(StorageError::Unavailable);
+        }
+        state.checkpoint_due.ok_or(StorageError::Unavailable)
+    }
+}
+
+fn validate_limit_activation(
+    state: &StorageLimitState,
+    candidate: StorageRuntimeLimits,
+    projected: Option<(u64, u64)>,
+) -> Result<(), StorageError> {
+    if state.poisoned {
+        return Err(StorageError::Unavailable);
+    }
+    if state.reservation.is_some() || state.checkpoint_active {
+        return Err(StorageError::QueueFull);
+    }
+    validate_usage_floor(state, candidate)?;
+    if let Some((logical, backup)) = projected
+        && (logical > candidate.database_max_bytes || backup > candidate.backup_max_bytes)
+    {
+        return Err(StorageError::LimitExceeded);
+    }
+    Ok(())
+}
+
+fn validate_usage_floor(
+    state: &StorageLimitState,
+    candidate: StorageRuntimeLimits,
+) -> Result<(), StorageError> {
+    let logical = state
+        .logical_database_bytes
+        .ok_or(StorageError::Unavailable)?;
+    let backup = state.backup_stream_bytes.ok_or(StorageError::Unavailable)?;
+    if logical > candidate.database_max_bytes || backup > candidate.backup_max_bytes {
+        return Err(StorageError::LimitExceeded);
+    }
+    Ok(())
+}
+
+impl StorageLimitReader {
+    fn load(&self) -> StorageRuntimeLimits {
+        recover_limit_lock(&self.state).current
+    }
+
+    fn begin_checkpoint(&self) -> Result<StorageRuntimeLimits, StorageError> {
+        let mut state = recover_limit_lock(&self.state);
+        if state.poisoned {
+            return Err(StorageError::Unavailable);
+        }
+        if state.reservation.is_some() || state.checkpoint_active {
+            return Err(StorageError::QueueFull);
+        }
+        state.checkpoint_active = true;
+        Ok(state.current)
+    }
+
+    fn publish_facts(
+        &self,
+        logical_database_bytes: u64,
+        backup_stream_bytes: u64,
+        retained_manifest_count: u64,
+        retained_manifest_bytes: u64,
+    ) {
+        let mut state = recover_limit_lock(&self.state);
+        if state.poisoned {
+            return;
+        }
+        state.logical_database_bytes = Some(logical_database_bytes);
+        state.backup_stream_bytes = Some(backup_stream_bytes);
+        state.retained_manifest_count = Some(retained_manifest_count);
+        state.retained_manifest_bytes = Some(retained_manifest_bytes);
+        refresh_checkpoint_due(&mut state);
+    }
+
+    fn finish_checkpoint(&self) {
+        recover_limit_lock(&self.state).checkpoint_active = false;
+    }
+
+    fn poison_checkpoint(&self) {
+        let mut state = recover_limit_lock(&self.state);
+        state.poisoned = true;
+        state.checkpoint_due = None;
+        state.limit_change_pending = false;
+    }
+
+    fn has_reservation(&self) -> bool {
+        recover_limit_lock(&self.state).reservation.is_some()
+    }
+
+    fn take_limit_change(&self) -> bool {
+        let mut state = recover_limit_lock(&self.state);
+        let pending = state.limit_change_pending;
+        state.limit_change_pending = false;
+        pending
+    }
+}
+
+fn refresh_checkpoint_due(state: &mut StorageLimitState) {
+    state.checkpoint_due = match (state.retained_manifest_count, state.retained_manifest_bytes) {
+        (Some(count), Some(bytes)) => Some(checkpoint_is_due(state.current, count, bytes)),
+        _ => None,
+    };
+}
+
+const fn checkpoint_is_due(
+    limits: StorageRuntimeLimits,
+    retained_manifest_count: u64,
+    retained_manifest_bytes: u64,
+) -> bool {
+    retained_manifest_count >= limits.integrity_checkpoint_manifests
+        || retained_manifest_count >= MAX_RETAINED_MANIFESTS
+        || retained_manifest_bytes >= MAX_RETAINED_MANIFEST_BYTES
+}
+
 impl StorageEngineLimits {
     /// Validates the complete Appendix-C.5 storage limit profile.
     pub const fn validate(self) -> Result<Self, StorageError> {
@@ -182,9 +647,159 @@ pub struct StorageOpenConfig {
     pub limits: StorageEngineLimits,
 }
 
+/// Secret-bearing inputs for one non-mutating stopped-daemon inspection.
+pub struct StorageInspectionConfig {
+    /// Expected permanent network identity from validated configuration.
+    pub expected_network_id: NetworkId,
+    /// Expected permanent server identity from validated configuration.
+    pub expected_server_id: ServerId,
+    /// Existing state directory opened without writer authority.
+    pub state_directory: InspectionStateDirectory,
+    /// Active external storage master key.
+    pub storage_master_key: StorageMasterKey,
+    /// Independently provisioned rollback-guard root.
+    pub rollback_guard_root_key: RollbackGuardRootKey,
+    /// Configured current login-index key.
+    pub login_index_key: LoginIndexKey,
+    /// Configured previous login-index key, present only during a transition.
+    pub previous_login_index_key: Option<LoginIndexKey>,
+    /// Final storage and filesystem limits.
+    pub limits: StorageEngineLimits,
+}
+
+struct EngineOpenConfig {
+    expected_network_id: NetworkId,
+    expected_server_id: ServerId,
+    state_directory: EngineStateDirectory,
+    storage_master_key: StorageMasterKey,
+    rollback_guard_root_key: RollbackGuardRootKey,
+    login_index_key: LoginIndexKey,
+    previous_login_index_key: Option<LoginIndexKey>,
+    limits: StorageEngineLimits,
+}
+
+struct AuthenticatedOpenState {
+    integrity_keys: StorageIntegrityKeys,
+    header: DatabaseHeader,
+    binding: DatabaseBinding,
+    state_meta: StateMeta,
+    state_meta_record_id: StorageDigest,
+    reservation: NonceReservationState,
+    guard: RollbackGuard,
+    retained_manifest_count: u64,
+    retained_manifest_bytes: u64,
+}
+
+enum EngineStateDirectory {
+    Writable(StateDirectory),
+    Inspection(InspectionStateDirectory),
+}
+
+impl EngineStateDirectory {
+    fn open_store(&self, cache_bytes: usize) -> Result<RedbStore, StorageError> {
+        match self {
+            Self::Writable(directory) => RedbStore::open_with_faults(
+                directory.open_database_file()?,
+                cache_bytes,
+                directory.faults(),
+            ),
+            Self::Inspection(directory) => {
+                RedbStore::open_read_only(&directory.database_descriptor_path(), cache_bytes)
+            }
+        }
+    }
+
+    fn open_database_file(&self) -> Result<File, StorageError> {
+        match self {
+            Self::Writable(directory) => directory.open_database_file(),
+            Self::Inspection(directory) => directory.open_database_file(),
+        }
+    }
+
+    fn faults(&self) -> StorageFaultInjector {
+        match self {
+            Self::Writable(directory) => directory.faults(),
+            Self::Inspection(_) => StorageFaultInjector::disabled(),
+        }
+    }
+
+    fn read_guard(&self, expected_bytes: usize) -> Result<Vec<u8>, StorageError> {
+        match self {
+            Self::Writable(directory) => directory.read_guard(expected_bytes),
+            Self::Inspection(directory) => directory.read_guard(expected_bytes),
+        }
+    }
+
+    fn replace_guard(&self, bytes: &[u8]) -> Result<(), StorageError> {
+        match self {
+            Self::Writable(directory) => directory.replace_guard(bytes),
+            Self::Inspection(_) => Err(StorageError::FilesystemRejected),
+        }
+    }
+
+    fn capacity(
+        &self,
+        fixed_reserve_bytes: u64,
+        reserve_percent: u8,
+    ) -> Result<FilesystemCapacity, StorageError> {
+        match self {
+            Self::Writable(directory) => directory.capacity(fixed_reserve_bytes, reserve_percent),
+            Self::Inspection(directory) => directory.capacity(fixed_reserve_bytes, reserve_percent),
+        }
+    }
+
+    fn pending_construction(&self) -> Result<u64, StorageError> {
+        match self {
+            Self::Writable(directory) => directory.pending_construction(),
+            Self::Inspection(directory) => directory.pending_construction(),
+        }
+    }
+
+    fn admit_transaction(
+        &self,
+        fixed_reserve_bytes: u64,
+        reserve_percent: u8,
+    ) -> Result<FilesystemCapacity, StorageError> {
+        match self {
+            Self::Writable(directory) => {
+                directory.admit_transaction(fixed_reserve_bytes, reserve_percent)
+            }
+            Self::Inspection(_) => Err(StorageError::FilesystemRejected),
+        }
+    }
+
+    fn reference_scratch(&self) -> Result<ReferenceScratch, StorageError> {
+        match self {
+            Self::Writable(directory) => {
+                let (file, scratch_directory, name) = directory.create_recovery_scratch()?;
+                ReferenceScratch::create(file, scratch_directory, name)
+            }
+            Self::Inspection(directory) => {
+                ReferenceScratch::create_anonymous(directory.create_anonymous_scratch()?)
+            }
+        }
+    }
+
+    fn recovery_scratch(&self) -> Result<RecoveryScratch, StorageError> {
+        match self {
+            Self::Writable(directory) => {
+                let (file, scratch_directory, name) = directory.create_recovery_scratch()?;
+                RecoveryScratch::create(file, scratch_directory, name)
+            }
+            Self::Inspection(directory) => {
+                RecoveryScratch::create_anonymous(directory.create_anonymous_scratch()?)
+            }
+        }
+    }
+
+    const fn installs_repairable_guard(&self) -> bool {
+        matches!(self, Self::Writable(_))
+    }
+}
+
 pub(crate) struct StorageEngine {
     store: RedbStore,
-    state_directory: StateDirectory,
+    state_directory: EngineStateDirectory,
     master_key: StorageMasterKey,
     guard_root_key: RollbackGuardRootKey,
     login_index_key: LoginIndexKey,
@@ -197,109 +812,243 @@ pub(crate) struct StorageEngine {
     reservation: NonceReservationState,
     guard: RollbackGuard,
     limits: StorageEngineLimits,
+    runtime_limits: StorageLimitReader,
     retained_manifest_count: u64,
     retained_manifest_bytes: u64,
     checkpoint_job: Option<CheckpointJob>,
     backup_job: Option<BackupJob>,
 }
 
+/// Authenticates and reconstructs an existing database without taking writer
+/// authority or changing persistent state.
+pub fn inspect_storage(
+    config: StorageInspectionConfig,
+) -> Result<RecoveredStorageState, StorageError> {
+    StorageEngine::open_inspection(config)?.startup_scan()
+}
+
+fn authenticate_open_state(
+    config: &EngineOpenConfig,
+    store: &RedbStore,
+    limits: StorageEngineLimits,
+) -> Result<AuthenticatedOpenState, StorageError> {
+    let header = DatabaseHeader::decode(&require_meta(store, HEADER_META_KEY)?)?;
+    if header.tbs().network_id != config.expected_network_id
+        || header.tbs().server_id != config.expected_server_id
+    {
+        return Err(StorageError::AuthenticationFailed);
+    }
+    let context = StorageIntegrityContext::new(
+        header.tbs().network_id,
+        header.tbs().server_id,
+        header.tbs().database_instance_id,
+    );
+    let integrity_keys = derive_storage_integrity_keys(&config.rollback_guard_root_key, context)?;
+    let reservation = NonceReservationState::decode_and_verify(
+        &require_meta(store, RESERVATION_META_KEY)?,
+        &integrity_keys,
+    )?;
+    let guard = RollbackGuard::decode_and_verify(
+        &config.state_directory.read_guard(ROLLBACK_GUARD_BYTES)?,
+        &integrity_keys,
+    )?;
+    let binding = database_binding(&header);
+    verify_key_check(store, &config.storage_master_key, binding, &header)?;
+    let (state_meta, state_meta_record_id) = read_state_meta(
+        store,
+        &config.storage_master_key,
+        binding,
+        &header,
+        &integrity_keys,
+    )?;
+    let guard = reconcile_open_guard(
+        &config.state_directory,
+        &header,
+        &state_meta,
+        state_meta_record_id,
+        &reservation,
+        guard,
+        &integrity_keys,
+    )?;
+    let (retained_manifest_count, retained_manifest_bytes) =
+        validate_open_accounting(store, &state_meta, limits)?;
+    Ok(AuthenticatedOpenState {
+        integrity_keys,
+        header,
+        binding,
+        state_meta,
+        state_meta_record_id,
+        reservation,
+        guard,
+        retained_manifest_count,
+        retained_manifest_bytes,
+    })
+}
+
+fn reconcile_open_guard(
+    directory: &EngineStateDirectory,
+    header: &DatabaseHeader,
+    state_meta: &StateMeta,
+    state_meta_record_id: StorageDigest,
+    reservation: &NonceReservationState,
+    guard: RollbackGuard,
+    integrity_keys: &StorageIntegrityKeys,
+) -> Result<RollbackGuard, StorageError> {
+    match classify_recovery_state(
+        header,
+        state_meta,
+        state_meta_record_id,
+        reservation,
+        &guard,
+    )? {
+        RecoveryDisposition::ExactCommitted | RecoveryDisposition::ExactReserved => Ok(guard),
+        RecoveryDisposition::InstallReservedGuard | RecoveryDisposition::InstallCommittedGuard => {
+            let replacement = guard_for_reservation(header, reservation, integrity_keys)?;
+            if directory.installs_repairable_guard() {
+                directory.replace_guard(&replacement.encode()?)?;
+            }
+            Ok(replacement)
+        }
+    }
+}
+
+fn validate_open_accounting(
+    store: &RedbStore,
+    state_meta: &StateMeta,
+    limits: StorageEngineLimits,
+) -> Result<(u64, u64), StorageError> {
+    if state_meta.tbs().logical_database_bytes > limits.database_max_bytes
+        || state_meta.tbs().backup_stream_bytes > limits.backup_max_bytes
+    {
+        return Err(StorageError::LimitExceeded);
+    }
+    let usage = store.table_usage(TableId::IntegrityManifest, MAX_RETAINED_MANIFEST_BYTES)?;
+    let expected_manifest_count = state_meta
+        .tbs()
+        .manifest_sequence
+        .checked_sub(state_meta.tbs().checkpoint_manifest_sequence)
+        .ok_or(StorageError::StaleState)?;
+    if usage.0 != expected_manifest_count || usage.0 > MAX_RETAINED_MANIFESTS {
+        return Err(StorageError::StaleState);
+    }
+    Ok(usage)
+}
+
 impl StorageEngine {
     // agenc-review: focus owner=storage reviewed=2026-08-27 reason=startup orders identity key guard recovery and ceiling validation before ownership
     pub(crate) fn open(config: StorageOpenConfig) -> Result<Self, StorageError> {
+        let initial = StorageRuntimeLimits::from_engine(config.limits)?;
+        let (_writer, reader) = storage_limit_pair(initial);
+        Self::open_with_runtime_limits(config, reader)
+    }
+
+    pub(crate) fn open_with_runtime_limits(
+        config: StorageOpenConfig,
+        runtime_limits: StorageLimitReader,
+    ) -> Result<Self, StorageError> {
+        Self::open_authenticated(
+            EngineOpenConfig {
+                expected_network_id: config.expected_network_id,
+                expected_server_id: config.expected_server_id,
+                state_directory: EngineStateDirectory::Writable(config.state_directory),
+                storage_master_key: config.storage_master_key,
+                rollback_guard_root_key: config.rollback_guard_root_key,
+                login_index_key: config.login_index_key,
+                previous_login_index_key: config.previous_login_index_key,
+                limits: config.limits,
+            },
+            runtime_limits,
+        )
+    }
+
+    fn open_inspection(config: StorageInspectionConfig) -> Result<Self, StorageError> {
+        let initial = StorageRuntimeLimits::from_engine(config.limits)?;
+        let (_writer, reader) = storage_limit_pair(initial);
+        Self::open_authenticated(
+            EngineOpenConfig {
+                expected_network_id: config.expected_network_id,
+                expected_server_id: config.expected_server_id,
+                state_directory: EngineStateDirectory::Inspection(config.state_directory),
+                storage_master_key: config.storage_master_key,
+                rollback_guard_root_key: config.rollback_guard_root_key,
+                login_index_key: config.login_index_key,
+                previous_login_index_key: config.previous_login_index_key,
+                limits: config.limits,
+            },
+            reader,
+        )
+    }
+
+    fn open_authenticated(
+        config: EngineOpenConfig,
+        runtime_limits: StorageLimitReader,
+    ) -> Result<Self, StorageError> {
         let limits = config.limits.validate()?;
-        let file = config.state_directory.open_database_file()?;
-        let store = RedbStore::open_with_faults(
-            file,
-            limits.redb_cache_bytes,
-            config.state_directory.faults(),
-        )?;
-        let header = DatabaseHeader::decode(&require_meta(&store, HEADER_META_KEY)?)?;
-        if header.tbs().network_id != config.expected_network_id
-            || header.tbs().server_id != config.expected_server_id
-        {
-            return Err(StorageError::AuthenticationFailed);
-        }
-        let context = StorageIntegrityContext::new(
-            header.tbs().network_id,
-            header.tbs().server_id,
-            header.tbs().database_instance_id,
-        );
-        let integrity_keys =
-            derive_storage_integrity_keys(&config.rollback_guard_root_key, context)?;
-        let reservation = NonceReservationState::decode_and_verify(
-            &require_meta(&store, RESERVATION_META_KEY)?,
-            &integrity_keys,
-        )?;
-        let mut guard = RollbackGuard::decode_and_verify(
-            &config.state_directory.read_guard(ROLLBACK_GUARD_BYTES)?,
-            &integrity_keys,
-        )?;
-        let binding = database_binding(&header);
-        verify_key_check(&store, &config.storage_master_key, binding, &header)?;
-        let (state_meta, state_meta_record_id) = read_state_meta(
-            &store,
-            &config.storage_master_key,
-            binding,
-            &header,
-            &integrity_keys,
-        )?;
-        match classify_recovery_state(
-            &header,
-            &state_meta,
-            state_meta_record_id,
-            &reservation,
-            &guard,
-        )? {
-            RecoveryDisposition::ExactCommitted | RecoveryDisposition::ExactReserved => {}
-            RecoveryDisposition::InstallReservedGuard
-            | RecoveryDisposition::InstallCommittedGuard => {
-                let replacement = guard_for_reservation(&header, &reservation, &integrity_keys)?;
-                config
-                    .state_directory
-                    .replace_guard(&replacement.encode()?)?;
-                guard = replacement;
-            }
-        }
-        if (
-            state_meta.tbs().logical_database_bytes > limits.database_max_bytes,
-            state_meta.tbs().backup_stream_bytes > limits.backup_max_bytes,
-        ) != (false, false)
-        {
-            return Err(StorageError::LimitExceeded);
-        }
-        let (retained_manifest_count, retained_manifest_bytes) =
-            store.table_usage(TableId::IntegrityManifest, MAX_RETAINED_MANIFEST_BYTES)?;
-        let expected_manifest_count = state_meta
-            .tbs()
-            .manifest_sequence
-            .checked_sub(state_meta.tbs().checkpoint_manifest_sequence)
-            .ok_or(StorageError::StaleState)?;
-        if (
-            retained_manifest_count != expected_manifest_count,
-            retained_manifest_count > MAX_RETAINED_MANIFESTS,
-        ) != (false, false)
-        {
-            return Err(StorageError::StaleState);
-        }
-        Ok(Self {
+        let store = config.state_directory.open_store(limits.redb_cache_bytes)?;
+        let authenticated = authenticate_open_state(&config, &store, limits)?;
+        let engine = Self {
             store,
             state_directory: config.state_directory,
             master_key: config.storage_master_key,
             guard_root_key: config.rollback_guard_root_key,
             login_index_key: config.login_index_key,
             previous_login_index_key: config.previous_login_index_key,
-            integrity_keys,
-            header,
-            binding,
-            state_meta,
-            state_meta_record_id,
-            reservation,
-            guard,
+            integrity_keys: authenticated.integrity_keys,
+            header: authenticated.header,
+            binding: authenticated.binding,
+            state_meta: authenticated.state_meta,
+            state_meta_record_id: authenticated.state_meta_record_id,
+            reservation: authenticated.reservation,
+            guard: authenticated.guard,
             limits,
-            retained_manifest_count,
-            retained_manifest_bytes,
+            runtime_limits,
+            retained_manifest_count: authenticated.retained_manifest_count,
+            retained_manifest_bytes: authenticated.retained_manifest_bytes,
             checkpoint_job: None,
             backup_job: None,
+        };
+        engine.publish_runtime_facts();
+        Ok(engine)
+    }
+
+    pub(crate) fn refresh_runtime_limits(&mut self) {
+        self.runtime_limits.load().install_into(&mut self.limits);
+    }
+
+    pub(crate) fn take_runtime_limit_change(&mut self) -> bool {
+        let changed = self.runtime_limits.take_limit_change();
+        if changed {
+            self.refresh_runtime_limits();
+            self.publish_runtime_facts();
+        }
+        changed
+    }
+
+    pub(crate) fn statistics(&self) -> Result<StorageStatistics, StorageError> {
+        let database_file_bytes = self
+            .state_directory
+            .open_database_file()?
+            .metadata()
+            .map_err(|_| StorageError::FilesystemRejected)?
+            .len();
+        let capacity = self
+            .state_directory
+            .capacity(self.limits.fixed_reserve_bytes, self.limits.reserve_percent)?;
+        Ok(StorageStatistics {
+            logical_database_bytes: self.state_meta.tbs().logical_database_bytes,
+            database_file_bytes,
+            database_max_bytes: self.limits.database_max_bytes,
+            backup_stream_bytes: self.state_meta.tbs().backup_stream_bytes,
+            backup_max_bytes: self.limits.backup_max_bytes,
+            state_generation: self.state_meta.tbs().state_generation,
+            manifest_sequence: self.state_meta.tbs().manifest_sequence,
+            storage_commit_sequence: self.state_meta.tbs().storage_commit_sequence,
+            account_service_response_count: self.state_meta.tbs().account_service_response_count,
+            nonce_draw_high_water: self.state_meta.tbs().nonce_draw_high_water,
+            checkpoint_manifest_sequence: self.state_meta.tbs().checkpoint_manifest_sequence,
+            filesystem_available_bytes: capacity.available_bytes,
+            filesystem_reserve_bytes: capacity.reserve_bytes,
+            pending_storage_constructions: self.state_directory.pending_construction()?,
         })
     }
 
@@ -695,11 +1444,24 @@ impl StorageEngine {
     }
 
     pub(crate) fn commit(&mut self, batch: StorageMutationBatch) -> CommitOutcome {
-        match self.commit_inner(&batch) {
+        let outcome = match self.commit_inner(&batch) {
             Ok(receipt) => CommitOutcome::Committed(receipt),
             Err(EngineCommitFailure::Rejected(error)) => CommitOutcome::Rejected(error),
             Err(EngineCommitFailure::Indeterminate) => CommitOutcome::Indeterminate,
+        };
+        if matches!(outcome, CommitOutcome::Committed(_)) {
+            self.publish_runtime_facts();
         }
+        outcome
+    }
+
+    fn publish_runtime_facts(&self) {
+        self.runtime_limits.publish_facts(
+            self.state_meta.tbs().logical_database_bytes,
+            self.state_meta.tbs().backup_stream_bytes,
+            self.retained_manifest_count,
+            self.retained_manifest_bytes,
+        );
     }
 
     pub(crate) fn start_backup(
@@ -756,6 +1518,7 @@ impl StorageEngine {
             signing_key,
             expected_state_meta: *self.state_meta.tbs(),
             expected_stream_bytes: backup_stream_bytes,
+            maximum_bytes: self.limits.backup_max_bytes,
         });
         Ok(())
     }
@@ -799,12 +1562,7 @@ impl StorageEngine {
             return Ok(None);
         }
         let job = self.backup_job.take().ok_or(StorageError::StaleState)?;
-        job.finish(
-            &self.master_key,
-            &self.guard_root_key,
-            self.limits.backup_max_bytes,
-        )
-        .map(Some)
+        job.finish(&self.master_key, &self.guard_root_key).map(Some)
     }
 
     fn verify_snapshot_accounting(
@@ -849,10 +1607,22 @@ impl StorageEngine {
     }
 
     /// Reports whether retained manifests reached the configured or protocol ceiling.
+    #[cfg(test)]
     pub(crate) fn checkpoint_due(&self) -> bool {
-        self.retained_manifest_count >= self.limits.integrity_checkpoint_manifests
-            || self.retained_manifest_count >= MAX_RETAINED_MANIFESTS
-            || self.retained_manifest_bytes >= MAX_RETAINED_MANIFEST_BYTES
+        checkpoint_is_due(
+            StorageRuntimeLimits {
+                database_max_bytes: self.limits.database_max_bytes,
+                backup_max_bytes: self.limits.backup_max_bytes,
+                integrity_checkpoint_manifests: self.limits.integrity_checkpoint_manifests,
+            },
+            self.retained_manifest_count,
+            self.retained_manifest_bytes,
+        )
+    }
+
+    pub(crate) fn checkpoint_cut_would_advance(&self) -> bool {
+        self.state_meta.tbs().manifest_sequence
+            != self.state_meta.tbs().checkpoint_manifest_sequence
     }
 
     pub(crate) fn checkpoint_is_active(&self) -> bool {
@@ -865,6 +1635,17 @@ impl StorageEngine {
     /// checkpoint burns it exactly as it would after a rejected commit.
     pub(crate) fn abandon_checkpoint(&mut self) {
         self.checkpoint_job = None;
+        self.runtime_limits.finish_checkpoint();
+    }
+
+    pub(crate) fn runtime_limit_reservation_active(&self) -> bool {
+        self.runtime_limits.has_reservation()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_runtime_limit_reader(&mut self, reader: StorageLimitReader) {
+        self.runtime_limits = reader;
+        self.publish_runtime_facts();
     }
 
     /// Makes the next idle owner iteration start a checkpoint without ten thousand commits.
@@ -877,13 +1658,22 @@ impl StorageEngine {
         if self.checkpoint_job.is_some() || self.backup_job.is_some() {
             return Err(StorageError::QueueFull);
         }
-        let cut = *self.state_meta.tbs();
-        let scan = self.store.snapshot_scan()?;
-        self.checkpoint_job = Some(CheckpointJob::new(cut, scan));
-        Ok(())
+        let limits = self.runtime_limits.begin_checkpoint()?;
+        let started = (|| {
+            let cut = *self.state_meta.tbs();
+            let scan = self.store.snapshot_scan()?;
+            self.checkpoint_job = Some(CheckpointJob::new(cut, scan, limits));
+            Ok(())
+        })();
+        if started.is_err() {
+            self.runtime_limits.finish_checkpoint();
+        }
+        started
     }
 
-    pub(crate) fn service_checkpoint(&mut self) -> Result<bool, EngineCommitFailure> {
+    pub(crate) fn service_checkpoint(
+        &mut self,
+    ) -> Result<Option<CheckpointReceipt>, EngineCommitFailure> {
         self.state_directory
             .faults()
             .check(
@@ -892,7 +1682,7 @@ impl StorageEngine {
             )
             .map_err(rejected)?;
         let Some(job) = self.checkpoint_job.as_mut() else {
-            return Ok(false);
+            return Ok(None);
         };
         let completed = job
             .service(
@@ -909,17 +1699,27 @@ impl StorageEngine {
             )
             .map_err(rejected)?;
         let Some(completed) = completed else {
-            return Ok(false);
+            return Ok(None);
         };
         self.checkpoint_job = None;
-        self.install_scanned_checkpoint(completed)?;
-        Ok(true)
+        match self.install_scanned_checkpoint(completed) {
+            Ok(receipt) => {
+                self.publish_runtime_facts();
+                self.runtime_limits.finish_checkpoint();
+                Ok(Some(receipt))
+            }
+            Err(EngineCommitFailure::Rejected(error)) => Err(EngineCommitFailure::Rejected(error)),
+            Err(EngineCommitFailure::Indeterminate) => {
+                self.runtime_limits.poison_checkpoint();
+                Err(EngineCommitFailure::Indeterminate)
+            }
+        }
     }
 
     fn install_scanned_checkpoint(
         &mut self,
         completed: CompletedCheckpointScan,
-    ) -> Result<(), EngineCommitFailure> {
+    ) -> Result<CheckpointReceipt, EngineCommitFailure> {
         self.state_directory
             .faults()
             .check(
@@ -936,7 +1736,11 @@ impl StorageEngine {
         let installation = *self.state_meta.tbs();
         let previous_checkpoint_key = installation.checkpoint_manifest_sequence.to_be_bytes();
         let retired_charges = self
-            .checkpoint_retired_charges(previous_checkpoint_key, completed.cut.manifest_sequence)
+            .checkpoint_retired_charges(
+                previous_checkpoint_key,
+                completed.cut.manifest_sequence,
+                completed.limits,
+            )
             .map_err(rejected)?;
         let reserved = self.reserve_nonce_block(2)?;
         let reserved_guard = self.install_reserved_guard(&reserved)?;
@@ -947,14 +1751,7 @@ impl StorageEngine {
         )
         .map_err(rejected)?;
         let prepared = self
-            .prepare_checkpoint(
-                completed.cut,
-                installation,
-                completed.tracked_record_count,
-                completed.tracked_state_digest,
-                retired_charges,
-                nonces,
-            )
+            .prepare_checkpoint(&completed, installation, retired_charges, nonces)
             .map_err(rejected)?;
         self.commit_prepared_checkpoint(prepared, previous_checkpoint_key)?;
         self.state_directory
@@ -963,7 +1760,17 @@ impl StorageEngine {
                 StorageFaultSite::CheckpointInstall,
                 StorageFaultBoundary::After,
             )
-            .map_err(indeterminate)
+            .map_err(indeterminate)?;
+        Ok(CheckpointReceipt {
+            cut_manifest_sequence: completed.cut.manifest_sequence,
+            installation_manifest_sequence: installation.manifest_sequence,
+            storage_commit_sequence: self.state_meta.tbs().storage_commit_sequence,
+            state_generation: self.state_meta.tbs().state_generation,
+            account_service_response_count: self.state_meta.tbs().account_service_response_count,
+            logical_database_bytes: self.state_meta.tbs().logical_database_bytes,
+            backup_stream_bytes: self.state_meta.tbs().backup_stream_bytes,
+            rollback_guard_hash: self.guard.complete_hash().map_err(indeterminate)?,
+        })
     }
 
     fn verify_checkpoint_cut(&self, cut: &StateMetaTbs) -> Result<(), StorageError> {
@@ -989,9 +1796,7 @@ impl StorageEngine {
     }
 
     pub(crate) fn checkpoint_for_shutdown(&mut self) -> Result<(), EngineCommitFailure> {
-        if self.state_meta.tbs().manifest_sequence
-            == self.state_meta.tbs().checkpoint_manifest_sequence
-        {
+        if !self.checkpoint_cut_would_advance() {
             return Ok(());
         }
         self.start_checkpoint().map_err(rejected)?;
@@ -1003,27 +1808,29 @@ impl StorageEngine {
 
     fn prepare_checkpoint(
         &self,
-        cut: StateMetaTbs,
+        completed: &CompletedCheckpointScan,
         installation: StateMetaTbs,
-        tracked_record_count: u64,
-        tracked_state_digest: StorageDigest,
         retired_charges: (u64, u64),
         nonces: [[u8; 24]; 2],
     ) -> Result<PreparedCheckpoint, StorageError> {
         let [checkpoint_nonce, state_meta_nonce] = nonces;
         let (checkpoint, checkpoint_key, checkpoint_record) = self.seal_checkpoint(
-            cut,
+            completed.cut,
             installation,
-            tracked_record_count,
-            tracked_state_digest,
+            completed.tracked_record_count,
+            completed.tracked_state_digest,
             checkpoint_nonce,
         )?;
-        let (logical_database_bytes, backup_stream_bytes) =
-            self.checkpoint_accounting(installation, &checkpoint_record, retired_charges)?;
+        let (logical_database_bytes, backup_stream_bytes) = self.checkpoint_accounting(
+            installation,
+            &checkpoint_record,
+            retired_charges,
+            completed.limits,
+        )?;
         let (state_meta, state_meta_record, state_meta_record_id) = self
             .seal_checkpoint_state_meta(
                 installation,
-                cut.manifest_sequence,
+                completed.cut.manifest_sequence,
                 checkpoint.checkpoint_hash(),
                 logical_database_bytes,
                 backup_stream_bytes,
@@ -1099,6 +1906,7 @@ impl StorageEngine {
         cut: StateMetaTbs,
         checkpoint_record: &[u8],
         retired_charges: (u64, u64),
+        limits: StorageRuntimeLimits,
     ) -> Result<(u64, u64), StorageError> {
         let new_checkpoint_logical =
             logical_record_charge(u64::BITS as usize / 8, checkpoint_record.len())?;
@@ -1113,8 +1921,8 @@ impl StorageEngine {
             .checked_add(new_checkpoint_backup)
             .and_then(|value| value.checked_sub(retired_charges.1))
             .ok_or(StorageError::Overflow)?;
-        if logical_database_bytes > self.limits.database_max_bytes
-            || backup_stream_bytes > self.limits.backup_max_bytes
+        if logical_database_bytes > limits.database_max_bytes
+            || backup_stream_bytes > limits.backup_max_bytes
         {
             return Err(StorageError::LimitExceeded);
         }
@@ -1248,13 +2056,14 @@ impl StorageEngine {
         &self,
         active_checkpoint_key: [u8; 8],
         cut_manifest_sequence: u64,
+        limits: StorageRuntimeLimits,
     ) -> Result<(u64, u64), StorageError> {
         let mut logical = 0_u64;
         let mut backup = 0_u64;
         let cut_manifest_key = cut_manifest_sequence.to_be_bytes();
         self.store.visit_table(
             TableId::IntegrityManifest,
-            self.limits.database_max_bytes,
+            limits.database_max_bytes,
             |key, value| {
                 if key <= cut_manifest_key.as_slice() {
                     add_retired_charge(&mut logical, &mut backup, key, value)
@@ -1265,7 +2074,7 @@ impl StorageEngine {
         )?;
         self.store.visit_table(
             TableId::IntegrityCheckpoint,
-            self.limits.database_max_bytes,
+            limits.database_max_bytes,
             |key, value| {
                 if key == active_checkpoint_key {
                     Ok(())
@@ -1691,10 +2500,7 @@ impl StorageEngine {
         self.store.validate_inventory()?;
         self.store.validate_meta_membership()?;
         self.verify_integrity_ledger()?;
-        let (reference_file, reference_directory, reference_name) =
-            self.state_directory.create_recovery_scratch()?;
-        let reference_scratch =
-            ReferenceScratch::create(reference_file, reference_directory, reference_name)?;
+        let reference_scratch = self.state_directory.reference_scratch()?;
         let mut reference_writer = reference_scratch.begin()?;
         let mut logical_bytes =
             logical_meta_charge(HEADER_META_KEY.len(), crate::DATABASE_HEADER_BYTES)?
@@ -1865,6 +2671,11 @@ impl StorageEngine {
             manifest_sequence: self.state_meta.tbs().manifest_sequence,
             nonce_draw_high_water: self.state_meta.tbs().nonce_draw_high_water,
             maximum_record_revision,
+            logical_database_bytes: self.state_meta.tbs().logical_database_bytes,
+            backup_stream_bytes: self.state_meta.tbs().backup_stream_bytes,
+            database_binding: self.binding,
+            storage_key_generation: self.header.tbs().storage_key_generation,
+            recovery_epoch: self.header.tbs().recovery_epoch,
             capacity,
         })
     }
@@ -1883,13 +2694,11 @@ impl StorageEngine {
             .canonical()
             .as_bytes()
             .to_vec(),
-            (TableId::ChannelName, 1) => ChannelName::parse(
-                std::str::from_utf8(value.body()).map_err(|_| StorageError::InvalidEncoding)?,
-            )
-            .map_err(|_| StorageError::InvalidEncoding)?
-            .canonical()
-            .as_bytes()
-            .to_vec(),
+            (TableId::ChannelName, 1) => ChannelNameRecordBody::decode(value.body())?
+                .name
+                .canonical()
+                .as_bytes()
+                .to_vec(),
             _ => return Ok(()),
         };
         let expected = derive_storage_index(
@@ -2102,9 +2911,7 @@ impl StorageEngine {
         {
             return Err(StorageError::StaleState);
         }
-        let (scratch_file, scratch_directory, scratch_name) =
-            self.state_directory.create_recovery_scratch()?;
-        let scratch = RecoveryScratch::create(scratch_file, scratch_directory, scratch_name)?;
+        let scratch = self.state_directory.recovery_scratch()?;
         let mut scratch_writer = scratch.begin_current()?;
         for number in 0_u16..=26 {
             let table = TableId::from_u16(number)?;
@@ -2654,6 +3461,7 @@ struct BackupJob {
     signing_key: Ed25519SecretKey,
     expected_state_meta: StateMetaTbs,
     expected_stream_bytes: u64,
+    maximum_bytes: u64,
 }
 
 impl BackupJob {
@@ -2661,7 +3469,6 @@ impl BackupJob {
         mut self,
         master_key: &StorageMasterKey,
         guard_root_key: &RollbackGuardRootKey,
-        maximum_bytes: u64,
     ) -> Result<BackupReceipt, StorageError> {
         let writer = self.writer.take().ok_or(StorageError::StaleState)?;
         let (_file, trailer) = writer.finish(&self.signing_key)?;
@@ -2688,7 +3495,7 @@ impl BackupJob {
             master_key,
             guard_root_key,
             &[trusted_key],
-            maximum_bytes,
+            self.maximum_bytes,
         )?;
         if (
             verified.stream_bytes,
@@ -2704,7 +3511,7 @@ impl BackupJob {
             master_key,
             guard_root_key,
             &[trusted_key],
-            maximum_bytes,
+            self.maximum_bytes,
         )?;
         if (
             published_verified.stream_bytes,
@@ -2725,6 +3532,7 @@ impl BackupJob {
 struct CheckpointJob {
     cut: StateMetaTbs,
     scan: SnapshotScan,
+    limits: StorageRuntimeLimits,
     phase: CheckpointScanPhase,
     tracked_record_count: u64,
 }
@@ -2736,15 +3544,17 @@ enum CheckpointScanPhase {
 
 struct CompletedCheckpointScan {
     cut: StateMetaTbs,
+    limits: StorageRuntimeLimits,
     tracked_record_count: u64,
     tracked_state_digest: StorageDigest,
 }
 
 impl CheckpointJob {
-    fn new(cut: StateMetaTbs, scan: SnapshotScan) -> Self {
+    fn new(cut: StateMetaTbs, scan: SnapshotScan, limits: StorageRuntimeLimits) -> Self {
         Self {
             cut,
             scan,
+            limits,
             phase: CheckpointScanPhase::Count,
             tracked_record_count: 0,
         }
@@ -2810,6 +3620,7 @@ impl CheckpointJob {
                 };
                 Ok(Some(CompletedCheckpointScan {
                     cut: self.cut,
+                    limits: self.limits,
                     tracked_record_count: self.tracked_record_count,
                     tracked_state_digest: hasher.finalize()?,
                 }))
@@ -2967,7 +3778,9 @@ pub(crate) fn draw_nonces_with_faults(
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::path::PathBuf;
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use agenc_ircd_crypto::{StorageDigest, derive_login_index};
@@ -2979,10 +3792,10 @@ pub(crate) mod tests {
     use super::*;
     use crate::{
         InitialStorageRecord, LoginIndexValue, PersistentRecordValue, QualificationTarget,
-        RecordMutation, SCHEMA_GENERATION, StorageConstructionKind, StorageGrowthCase,
-        StorageInitializationConfig, StorageInitializationMode, StorageInitializationOutcome,
-        StorageQualification, StorageQualificationReport, StorageQualificationReportTbs,
-        initialize_storage,
+        RecordMutation, SCHEMA_GENERATION, StorageConstructionKind, StorageFaultCase,
+        StorageGrowthCase, StorageInitializationConfig, StorageInitializationMode,
+        StorageInitializationOutcome, StorageQualification, StorageQualificationReport,
+        StorageQualificationReportTbs, initialize_storage,
     };
 
     const ZERO: StorageDigest = StorageDigest::from_bytes([0; 32]);
@@ -3167,6 +3980,104 @@ pub(crate) mod tests {
             .qualification_for(tuple)
     }
 
+    #[derive(Debug, Eq, PartialEq)]
+    struct DirectoryFingerprint {
+        directory_inode: u64,
+        directory_mtime: i64,
+        directory_mtime_nanoseconds: i64,
+        entries: Vec<FileFingerprint>,
+    }
+
+    #[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
+    struct FileFingerprint {
+        name: String,
+        inode: u64,
+        mtime: i64,
+        mtime_nanoseconds: i64,
+        bytes: Vec<u8>,
+    }
+
+    fn directory_fingerprint(path: &Path) -> Result<DirectoryFingerprint, StorageError> {
+        let directory =
+            std::fs::symlink_metadata(path).map_err(|_| StorageError::FilesystemRejected)?;
+        let mut entries = std::fs::read_dir(path)
+            .map_err(|_| StorageError::FilesystemRejected)?
+            .map(|entry| {
+                let entry = entry.map_err(|_| StorageError::FilesystemRejected)?;
+                let name = entry
+                    .file_name()
+                    .into_string()
+                    .map_err(|_| StorageError::FilesystemRejected)?;
+                let metadata = entry
+                    .metadata()
+                    .map_err(|_| StorageError::FilesystemRejected)?;
+                let bytes =
+                    std::fs::read(entry.path()).map_err(|_| StorageError::FilesystemRejected)?;
+                Ok(FileFingerprint {
+                    name,
+                    inode: metadata.ino(),
+                    mtime: metadata.mtime(),
+                    mtime_nanoseconds: metadata.mtime_nsec(),
+                    bytes,
+                })
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?;
+        entries.sort();
+        Ok(DirectoryFingerprint {
+            directory_inode: directory.ino(),
+            directory_mtime: directory.mtime(),
+            directory_mtime_nanoseconds: directory.mtime_nsec(),
+            entries,
+        })
+    }
+
+    fn inspection_config(path: &Path) -> Result<StorageInspectionConfig, StorageError> {
+        let qualification = test_qualification(path)?;
+        Ok(StorageInspectionConfig {
+            expected_network_id: NetworkId::from_bytes([21; 32]),
+            expected_server_id: ServerId::from_bytes([22; 16]),
+            state_directory: InspectionStateDirectory::open(path, &[qualification])?,
+            storage_master_key: StorageMasterKey::from_bytes([27; 32]),
+            rollback_guard_root_key: RollbackGuardRootKey::from_bytes([28; 32]),
+            login_index_key: LoginIndexKey::from_bytes([23; 32]),
+            previous_login_index_key: None,
+            limits: engine_limits(),
+        })
+    }
+
+    fn assert_recovered_durable_facts_match(
+        actual: RecoveredStorageState,
+        expected: RecoveredStorageState,
+    ) {
+        assert_eq!(actual.table_record_counts, expected.table_record_counts);
+        assert_eq!(actual.state_generation, expected.state_generation);
+        assert_eq!(
+            actual.account_service_response_count,
+            expected.account_service_response_count
+        );
+        assert_eq!(
+            actual.storage_commit_sequence,
+            expected.storage_commit_sequence
+        );
+        assert_eq!(actual.manifest_sequence, expected.manifest_sequence);
+        assert_eq!(actual.nonce_draw_high_water, expected.nonce_draw_high_water);
+        assert_eq!(
+            actual.maximum_record_revision,
+            expected.maximum_record_revision
+        );
+        assert_eq!(
+            actual.logical_database_bytes,
+            expected.logical_database_bytes
+        );
+        assert_eq!(actual.backup_stream_bytes, expected.backup_stream_bytes);
+        assert_eq!(actual.database_binding, expected.database_binding);
+        assert_eq!(
+            actual.storage_key_generation,
+            expected.storage_key_generation
+        );
+        assert_eq!(actual.recovery_epoch, expected.recovery_epoch);
+    }
+
     fn authenticate_state(
         engine: &mut StorageEngine,
         state: StateMetaTbs,
@@ -3315,9 +4226,16 @@ pub(crate) mod tests {
         accounting: StorageAccountingLimits,
     ) -> Result<StorageMutationBatch, StorageError> {
         let key = StoredKey::new(AccountRandomId::from_bytes([40; 16]).to_text().into_bytes())?;
-        let plaintext =
-            PersistentRecordValue::new(TableId::Account, 1, 1, 1, None, Vec::new(), vec![1])?
-                .encode()?;
+        let plaintext = PersistentRecordValue::new(
+            TableId::Account,
+            1,
+            1,
+            1,
+            None,
+            Vec::new(),
+            crate::domain_records::fixtures::live_body(TableId::Account, 1)?,
+        )?
+        .encode()?;
         StorageMutationBatch::new(
             head,
             1,
@@ -3384,8 +4302,16 @@ pub(crate) mod tests {
     }
 
     fn account_plaintext(revision: u64) -> Result<Vec<u8>, StorageError> {
-        PersistentRecordValue::new(TableId::Account, 1, revision, 1, None, Vec::new(), vec![1])?
-            .encode()
+        PersistentRecordValue::new(
+            TableId::Account,
+            1,
+            revision,
+            1,
+            None,
+            Vec::new(),
+            crate::domain_records::fixtures::live_body(TableId::Account, 1)?,
+        )?
+        .encode()
     }
 
     fn existing_record(
@@ -3604,8 +4530,15 @@ pub(crate) mod tests {
             StoredKey::new(channel_key.as_bytes().to_vec())?,
         )?;
 
-        let account =
-            PersistentRecordValue::new(TableId::Account, 1, 1, 1, None, Vec::new(), vec![1])?;
+        let account = PersistentRecordValue::new(
+            TableId::Account,
+            1,
+            1,
+            1,
+            None,
+            Vec::new(),
+            crate::domain_records::fixtures::live_body(TableId::Account, 1)?,
+        )?;
         assert_eq!(
             validate_recovered_domain_record(TableId::Channel, &account),
             Err(StorageError::StaleState)
@@ -3618,7 +4551,7 @@ pub(crate) mod tests {
             1,
             None,
             vec![channel_reference],
-            vec![1],
+            crate::domain_records::fixtures::live_body(TableId::Account, 1)?,
         )?;
         assert_eq!(
             validate_recovered_domain_record(TableId::Account, &illegal),
@@ -3765,6 +4698,116 @@ pub(crate) mod tests {
         for limits in cases {
             assert_eq!(limits.validate(), Err(StorageError::LimitExceeded));
         }
+    }
+
+    #[test]
+    fn live_storage_limits_replace_one_view_and_active_jobs_keep_their_starting_view()
+    -> Result<(), StorageError> {
+        let initial = StorageRuntimeLimits::new(
+            MIN_STORAGE_BYTES * 2,
+            MIN_STORAGE_BYTES * 3,
+            MIN_CHECKPOINT_MANIFESTS + 1,
+        )?;
+        let replacement = StorageRuntimeLimits::new(
+            MIN_STORAGE_BYTES,
+            MIN_STORAGE_BYTES,
+            MIN_CHECKPOINT_MANIFESTS,
+        )?;
+        let (writer, reader) = storage_limit_pair(initial);
+        let mut fixture = EngineFixture::create()?;
+        let backup_directory = fixture.path().join("live-limit-backups");
+        std::fs::create_dir(&backup_directory).map_err(|_| StorageError::FilesystemRejected)?;
+        std::fs::set_permissions(
+            &backup_directory,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .map_err(|_| StorageError::FilesystemRejected)?;
+        let engine = fixture.engine_mut()?;
+        engine.runtime_limits = reader;
+        engine.publish_runtime_facts();
+        engine.refresh_runtime_limits();
+        assert_eq!(
+            engine.limits.database_max_bytes,
+            initial.database_max_bytes()
+        );
+
+        engine.start_backup(
+            BackupDestination::new(&backup_directory, "frozen.backup")?,
+            Ed25519SecretKey::from_bytes([91; 32]),
+            1,
+            [92; 16],
+        )?;
+        writer.activate(replacement)?;
+        engine.refresh_runtime_limits();
+        assert_eq!(
+            engine.limits.database_max_bytes,
+            replacement.database_max_bytes()
+        );
+        assert_eq!(
+            engine
+                .backup_job
+                .as_ref()
+                .ok_or(StorageError::StaleState)?
+                .maximum_bytes,
+            initial.backup_max_bytes()
+        );
+        engine.backup_job = None;
+
+        writer.activate(initial)?;
+        engine.refresh_runtime_limits();
+        engine.start_checkpoint()?;
+        assert_eq!(writer.activate(replacement), Err(StorageError::QueueFull));
+        assert_eq!(
+            engine
+                .checkpoint_job
+                .as_ref()
+                .ok_or(StorageError::StaleState)?
+                .limits,
+            initial
+        );
+        engine.abandon_checkpoint();
+        writer.activate(replacement)?;
+        engine.refresh_runtime_limits();
+        engine.start_checkpoint()?;
+        assert_eq!(
+            engine
+                .checkpoint_job
+                .as_ref()
+                .ok_or(StorageError::StaleState)?
+                .limits,
+            replacement
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn shared_checkpoint_fact_tracks_limits_completion_and_poisoning() -> Result<(), StorageError> {
+        let initial = StorageRuntimeLimits::new(
+            MIN_STORAGE_BYTES,
+            MIN_STORAGE_BYTES,
+            MIN_CHECKPOINT_MANIFESTS + 1,
+        )?;
+        let due = StorageRuntimeLimits::new(
+            MIN_STORAGE_BYTES,
+            MIN_STORAGE_BYTES,
+            MIN_CHECKPOINT_MANIFESTS,
+        )?;
+        let (writer, reader) = storage_limit_pair(initial);
+        reader.publish_facts(1, 1, MIN_CHECKPOINT_MANIFESTS, 1);
+        assert_eq!(writer.checkpoint_due(), Ok(false));
+
+        writer.activate(due)?;
+        assert_eq!(writer.checkpoint_due(), Ok(true));
+        let _frozen = reader.begin_checkpoint()?;
+        reader.publish_facts(1, 1, 0, 0);
+        assert_eq!(writer.checkpoint_due(), Ok(false));
+        reader.finish_checkpoint();
+
+        let _frozen = reader.begin_checkpoint()?;
+        reader.poison_checkpoint();
+        assert_eq!(writer.checkpoint_due(), Err(StorageError::Unavailable));
+        assert_eq!(writer.activate(initial), Err(StorageError::Unavailable));
+        Ok(())
     }
 
     #[test]
@@ -3985,7 +5028,7 @@ pub(crate) mod tests {
         let mut fixture = EngineFixture::create()?;
         let engine = fixture.engine_mut()?;
         assert!(!engine.checkpoint_due());
-        assert!(matches!(engine.service_checkpoint(), Ok(false)));
+        assert!(matches!(engine.service_checkpoint(), Ok(None)));
 
         let batch = mutation_batch(current_head(engine), current_accounting(engine))?;
         assert!(matches!(engine.commit(batch), CommitOutcome::Committed(_)));
@@ -4003,8 +5046,8 @@ pub(crate) mod tests {
         assert_eq!(engine.start_checkpoint(), Err(StorageError::QueueFull));
         loop {
             match engine.service_checkpoint() {
-                Ok(true) => break,
-                Ok(false) => {}
+                Ok(Some(_receipt)) => break,
+                Ok(None) => {}
                 Err(EngineCommitFailure::Rejected(error)) => return Err(error),
                 Err(EngineCommitFailure::Indeterminate) => {
                     let _integrity_result = engine.verify_integrity_ledger();
@@ -4052,30 +5095,36 @@ pub(crate) mod tests {
         );
 
         let checkpoint_record = vec![0; crate::MIN_SEALED_RECORD_BYTES];
+        let limits = StorageRuntimeLimits::from_engine(engine.limits)?;
         assert!(
             engine
-                .checkpoint_accounting(state, &checkpoint_record, (0, 0))
+                .checkpoint_accounting(state, &checkpoint_record, (0, 0), limits)
                 .is_ok()
         );
         let mut overflowing = state;
         overflowing.logical_database_bytes = u64::MAX;
         assert_eq!(
-            engine.checkpoint_accounting(overflowing, &checkpoint_record, (0, 0)),
+            engine.checkpoint_accounting(overflowing, &checkpoint_record, (0, 0), limits),
             Err(StorageError::Overflow)
         );
         assert_eq!(
-            engine.checkpoint_accounting(state, &checkpoint_record, (u64::MAX, 0)),
+            engine.checkpoint_accounting(state, &checkpoint_record, (u64::MAX, 0), limits),
             Err(StorageError::Overflow)
         );
-        engine.limits.database_max_bytes = 1;
+        let database_too_small = StorageRuntimeLimits {
+            database_max_bytes: 1,
+            ..limits
+        };
         assert_eq!(
-            engine.checkpoint_accounting(state, &checkpoint_record, (0, 0)),
+            engine.checkpoint_accounting(state, &checkpoint_record, (0, 0), database_too_small,),
             Err(StorageError::LimitExceeded)
         );
-        engine.limits.database_max_bytes = MIN_STORAGE_BYTES;
-        engine.limits.backup_max_bytes = 1;
+        let backup_too_small = StorageRuntimeLimits {
+            backup_max_bytes: 1,
+            ..limits
+        };
         assert_eq!(
-            engine.checkpoint_accounting(state, &checkpoint_record, (0, 0)),
+            engine.checkpoint_accounting(state, &checkpoint_record, (0, 0), backup_too_small),
             Err(StorageError::LimitExceeded)
         );
         Ok(())
@@ -4119,6 +5168,88 @@ pub(crate) mod tests {
             ),
             Err(StorageError::StaleState)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_inspection_matches_startup_without_persistent_changes() -> Result<(), StorageError>
+    {
+        let mut fixture = EngineFixture::create()?;
+        let expected = fixture.engine()?.startup_scan()?;
+        drop(fixture.engine.take());
+        let writer_lock = fixture.path.join("writer.lock");
+        std::fs::remove_file(&writer_lock).map_err(|_| StorageError::FilesystemRejected)?;
+        for name in [
+            format!(".agenc-recovery-scratch-v1-{}", "a".repeat(32)),
+            format!(".rollback.guard.agenc-tmp-v1-{}", "b".repeat(32)),
+        ] {
+            let _file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(fixture.path.join(name))
+                .map_err(|_| StorageError::FilesystemRejected)?;
+        }
+        let before = directory_fingerprint(&fixture.path)?;
+
+        let inspected = inspect_storage(inspection_config(&fixture.path)?)?;
+        assert_recovered_durable_facts_match(inspected, expected);
+        let first = StorageEngine::open_inspection(inspection_config(&fixture.path)?)?;
+        let second = StorageEngine::open_inspection(inspection_config(&fixture.path)?)?;
+        assert_recovered_durable_facts_match(first.startup_scan()?, expected);
+        assert_recovered_durable_facts_match(second.startup_scan()?, expected);
+        drop(first);
+        drop(second);
+
+        assert_eq!(directory_fingerprint(&fixture.path)?, before);
+        assert!(!writer_lock.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_inspection_rejects_a_live_writer() -> Result<(), StorageError> {
+        let fixture = EngineFixture::create()?;
+        assert_eq!(
+            inspect_storage(inspection_config(&fixture.path)?).err(),
+            Some(StorageError::DatabaseRejected)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_inspection_validates_both_guard_successors_without_installing_them()
+    -> Result<(), StorageError> {
+        for (guard_occurrence, expected_commit_sequence) in [(1, 0), (2, 1)] {
+            let faults = StorageFaultInjector::new(
+                StorageFaultCase {
+                    site: StorageFaultSite::GuardTemporaryCreate,
+                    boundary: StorageFaultBoundary::Before,
+                },
+                u64::MAX,
+            )?;
+            let mut fixture = EngineFixture::create_with_faults(faults.clone())?;
+            faults.arm_after_current(guard_occurrence)?;
+            let batch = EngineFixture::advancing_batch(fixture.engine()?, 91)?;
+            assert!(!matches!(
+                fixture.engine_mut()?.commit(batch),
+                CommitOutcome::Committed(_)
+            ));
+            faults.verify_fired()?;
+            drop(fixture.engine.take());
+            let guard_path = fixture.path.join("rollback.guard");
+            let guard_before =
+                std::fs::read(&guard_path).map_err(|_| StorageError::FilesystemRejected)?;
+
+            let recovered = inspect_storage(inspection_config(&fixture.path)?)?;
+            assert_eq!(
+                recovered.storage_commit_sequence(),
+                expected_commit_sequence
+            );
+            assert_eq!(
+                std::fs::read(guard_path).map_err(|_| StorageError::FilesystemRejected)?,
+                guard_before
+            );
+        }
         Ok(())
     }
 
@@ -4203,8 +5334,15 @@ pub(crate) mod tests {
                 Err(StorageError::AuthenticationFailed)
             );
         }
-        let account =
-            PersistentRecordValue::new(TableId::Account, 1, 1, 1, None, Vec::new(), Vec::new())?;
+        let account = PersistentRecordValue::new(
+            TableId::Account,
+            1,
+            1,
+            1,
+            None,
+            Vec::new(),
+            crate::domain_records::fixtures::live_body(TableId::Account, 1)?,
+        )?;
         let account_key =
             StoredKey::new(AccountRandomId::from_bytes([1; 16]).to_text().into_bytes())?;
         engine.validate_recovered_index_binding(TableId::Account, &account_key, &account)?;
@@ -4845,7 +5983,8 @@ pub(crate) mod tests {
             Err(RedbCommitFailure::Rejected(error)) => return Err(error),
             Err(RedbCommitFailure::Indeterminate) => return Err(StorageError::Unavailable),
         }
-        let retired = engine.checkpoint_retired_charges(0_u64.to_be_bytes(), 1)?;
+        let limits = StorageRuntimeLimits::from_engine(engine.limits)?;
+        let retired = engine.checkpoint_retired_charges(0_u64.to_be_bytes(), 1, limits)?;
         assert!(retired.0 > 0);
         assert!(retired.1 > retired.0);
         drop(fixture);

@@ -50,6 +50,8 @@ EXPECTED_LATER_FUZZ_TARGETS = (
     "crypto_wrappers",
     "storage_codecs",
     "backup_stream",
+    "config_document",
+    "admin_command",
 )
 EXPECTED_FUZZ_POLICY = {
     "schema_version": 1,

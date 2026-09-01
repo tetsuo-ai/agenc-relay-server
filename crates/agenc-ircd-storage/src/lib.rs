@@ -8,6 +8,7 @@ mod construction;
 mod construction_directory;
 mod construction_runtime;
 mod control;
+mod domain_records;
 mod engine;
 mod error;
 mod fault;
@@ -54,7 +55,17 @@ pub use control::{
     RollbackGuardPhase, RollbackGuardTbs, STATE_META_BYTES, StateMeta, StateMetaTbs,
     verify_guard_pair,
 };
-pub use engine::{RecoveredStorageState, StorageEngineLimits, StorageOpenConfig};
+pub use domain_records::{
+    AccountRecordBody, ChannelNameRecordBody, ChannelRecordBody, DecodedChannelNameRecord,
+    LIVE_RECORD_KIND, MAX_ACCOUNT_RECORD_BODY_BYTES, MAX_CHANNEL_NAME_RECORD_BODY_BYTES,
+    MAX_CHANNEL_RECORD_BODY_BYTES, MAX_SANCTION_RECORD_BODY_BYTES, MAX_SESSION_RECORD_BODY_BYTES,
+    SanctionRecordBody, SessionRecordBody,
+};
+pub use engine::{
+    CheckpointOutcome, CheckpointReceipt, RecoveredStorageState, StorageEngineLimits,
+    StorageInspectionConfig, StorageOpenConfig, StorageRuntimeLimits, StorageStatistics,
+    inspect_storage,
+};
 pub use error::StorageError;
 pub use fault::{
     StorageFaultBoundary, StorageFaultCase, StorageFaultInjector, StorageFaultSchedule,
@@ -81,12 +92,13 @@ pub use mutation::{
     StorageAccountingLimits, StorageMutationBatch, StorageMutationHead,
 };
 pub use owner::{
-    STORAGE_COMPLETION_QUEUE_CAPACITY, STORAGE_REQUEST_QUEUE_CAPACITY, StorageCompletion,
-    StorageOwner, StoragePort,
+    STORAGE_COMPLETION_QUEUE_CAPACITY, STORAGE_REQUEST_QUEUE_CAPACITY,
+    STORAGE_SHUTDOWN_THREAD_NAME, StorageCompletion, StorageLimitWriter, StorageOwner, StoragePort,
+    StorageShutdown,
 };
 pub use platform::{
-    BackupDestination, BackupOutput, FilesystemCapacity, FilesystemTuple, StateDirectory,
-    StorageQualification,
+    BackupDestination, BackupDirectoryReader, BackupOutput, FilesystemCapacity, FilesystemTuple,
+    InspectionStateDirectory, StateDirectory, StorageQualification, rename_path_no_replace,
 };
 pub use qualification::{
     MAX_QUALIFICATION_CASES, MAX_QUALIFICATION_REPORT_BYTES, MAX_QUALIFIED_OBSERVED_GROWTH,
@@ -95,9 +107,9 @@ pub use qualification::{
 };
 pub use records::{
     E2eeRecoveryGate, E2eeRecoveryKind, KEY_CHECK_STORED_KEY, MAX_DOMAIN_RECORD_BODY_BYTES,
-    MAX_PROTOCOL_BODY_BYTES, MAX_RECORD_REFERENCES, PersistentRecordValue, ProtocolRecordBody,
-    RecordCodecKind, RecordReference, STATE_META_STORED_KEY, StoredKeyShape, TableSchema,
-    table_schema, table_schemas, validate_record_plaintext, validate_sealed_record,
+    MAX_PROTOCOL_BODY_BYTES, MAX_RECORD_REFERENCES, OPAQUE_FAKE_RECORD_KEY, PersistentRecordValue,
+    ProtocolRecordBody, RecordCodecKind, RecordReference, STATE_META_STORED_KEY, StoredKeyShape,
+    TableSchema, table_schema, table_schemas, validate_record_plaintext, validate_sealed_record,
 };
 pub use recovery::{RecoveryDisposition, classify_recovery_state};
 pub use restore_command::{

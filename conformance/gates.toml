@@ -191,3 +191,57 @@ argv = ["cargo", "deny", "--manifest-path", "fuzz/Cargo.toml", "check"]
 
 [[gate.stage-five-implementation.command]]
 argv = ["bash", "scripts/run-stage-five-fuzz.sh"]
+
+[gate.stage-six-implementation]
+includes = ["stage-five-implementation"]
+
+[[gate.stage-six-implementation.command]]
+argv = ["python3", "scripts/requirements.py", "check-stage-six"]
+
+[[gate.stage-six-implementation.command]]
+argv = ["python3", "scripts/check-stage-six.py", "check"]
+
+[[gate.stage-six-implementation.command]]
+argv = ["python3", "scripts/check-stage-six.py", "self-test"]
+
+[[gate.stage-six-implementation.command]]
+argv = ["cargo", "test", "-p", "agenc-ircd-config", "--all-features", "--locked"]
+
+[[gate.stage-six-implementation.command]]
+argv = ["cargo", "test", "-p", "agenc-ircd-admin", "--all-features", "--locked"]
+
+[[gate.stage-six-implementation.command]]
+argv = ["cargo", "test", "-p", "agenc-ircd-runtime", "--all-features", "--locked"]
+
+[[gate.stage-six-implementation.command]]
+argv = ["cargo", "test", "-p", "agenc-ircd-testkit", "--test", "stage_six_persistence", "--locked"]
+
+[[gate.stage-six-implementation.command]]
+argv = ["bash", "scripts/run-stage-six-loom.sh"]
+
+[[gate.stage-six-implementation.command]]
+argv = ["bash", "scripts/run-stage-six-transcripts.sh"]
+
+[[gate.stage-six-implementation.command]]
+argv = ["bash", "scripts/run-stage-six-soak.sh"]
+
+[[gate.stage-six-implementation.command]]
+argv = ["python3", "scripts/check-deploy.py", "check"]
+
+[[gate.stage-six-implementation.command]]
+argv = ["python3", "scripts/check-deploy.py", "self-test"]
+
+[[gate.stage-six-implementation.command]]
+argv = ["bash", "scripts/qualify-stage-six.sh"]
+
+[[gate.stage-six-implementation.command]]
+argv = ["cargo", "+nightly-2026-08-24", "fmt", "--manifest-path", "fuzz/Cargo.toml", "--", "--check"]
+
+[[gate.stage-six-implementation.command]]
+argv = ["cargo", "+nightly-2026-08-24", "check", "--manifest-path", "fuzz/Cargo.toml", "--bins", "--locked"]
+
+[[gate.stage-six-implementation.command]]
+argv = ["cargo", "deny", "--manifest-path", "fuzz/Cargo.toml", "check"]
+
+[[gate.stage-six-implementation.command]]
+argv = ["bash", "scripts/run-stage-six-fuzz.sh"]

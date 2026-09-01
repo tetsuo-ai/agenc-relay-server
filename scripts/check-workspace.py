@@ -79,6 +79,18 @@ EXPECTED_EDGES = {
     },
     "agenc-ircd": {"agenc-ircd-runtime", "agenc-ircd-config", "agenc-ircd-storage"},
 }
+BINARY_TEST_WORKSPACE_DEPENDENCIES = frozenset(
+    {
+        "agenc-ircd-admin",
+        "agenc-ircd-auth",
+        "agenc-ircd-crypto",
+        "agenc-ircd-testkit",
+        "agenc-ircd-types",
+    }
+)
+BINARY_TEST_EXTERNAL_DEPENDENCIES = frozenset(
+    {"argon2", "base64", "opaque-ke", "opaque-sha2", "rustls"}
+)
 EXTERNAL_DEPENDENCIES = {
     "argon2": ("=0.5.3", {"alloc"}),
     "base64": ("=0.23.1", {"alloc"}),
@@ -92,7 +104,8 @@ EXTERNAL_DEPENDENCIES = {
     "opaque-sha2": ("=0.10.9", set()),
     "precis-profiles": ("=0.1.13", set()),
     "redb": ("=4.2.0", {"std"}),
-    "rustix": ("=1.1.4", {"fs", "std"}),
+    "loom": ("=0.7.2", set()),
+    "rustix": ("=1.1.4", {"fs", "mm", "process", "std"}),
     "rustls": ("=0.23.43", {"aws_lc_rs", "prefer-post-quantum", "std"}),
     "sha2": ("=0.11.0", {"zeroize"}),
     "subtle": ("=2.6.1", set()),
@@ -113,6 +126,7 @@ DIRECT_CHECKSUMS = {
     "hkdf": "4aaa26c720c68b866f2c96ef5c1264b3e6f473fe5d4ce61cd44bbe913e553018",
     "hmac": "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f",
     "hpke": "dd5130e119706b4d8c2180da6126f7e60b6c38c2d340d539219f57051f0a7af7",
+    "loom": "419e0dc8046cb947daa77eb95ae174acfbddb7673b4151f56d1eed8e93fbfaca",
     "opaque-ke": "ded22991b43cd15561b62b2e1cf9ace1344a8534eebec96202d5c96a77a6616a",
     "opaque-sha2": "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283",
     "precis-profiles": "31e2768890a47af73a032af9f0cedbddce3c9d06cf8de201d5b8f2436ded7674",
@@ -154,8 +168,10 @@ EXPECTED_EXTERNAL_EDGES = {
         "zeroize",
     },
     "agenc-ircd-storage": {"redb", "rustix", "subtle", "zeroize"},
-    "agenc-ircd-config": {"base64", "toml"},
-    "agenc-ircd-testkit": {"sha2", "subtle"},
+    "agenc-ircd-config": {"base64", "rustix", "toml", "zeroize"},
+    "agenc-ircd-admin": {"base64", "subtle", "zeroize"},
+    "agenc-ircd-runtime": {"loom", "rustix", "rustls", "subtle", "tokio", "zeroize"},
+    "agenc-ircd-testkit": {"ed25519-dalek", "sha2", "subtle"},
 }
 CRATES_IO_SOURCES = {
     "registry+https://github.com/rust-lang/crates.io-index",
@@ -312,7 +328,7 @@ def validate_workspace_manifest(root: Path) -> dict[str, object]:
 
 def validate_dependency_profiles(dependencies: dict[str, object]) -> None:
     """Validate every root dependency declaration exactly."""
-    expected_names = CRATE_NAMES - {"agenc-ircd", "agenc-ircd-testkit"}
+    expected_names = CRATE_NAMES - {"agenc-ircd"}
     if set(dependencies) != expected_names | set(EXTERNAL_DEPENDENCIES):
         raise WorkspaceError("workspace dependency names differ from the frozen closed set")
 
@@ -364,59 +380,78 @@ def dependency_tables(document: dict[str, object]) -> list[tuple[str, dict[str, 
     return tables
 
 
+def validate_package_manifest(manifest_path: Path, manifest: dict[str, object]) -> None:
+    """Validate one package manifest against its production and test-only roles."""
+    if "patch" in manifest or "replace" in manifest:
+        raise WorkspaceError(f"source override is forbidden in {manifest_path}")
+    package = manifest.get("package")
+    if not isinstance(package, dict) or package.get("name") not in CRATE_NAMES:
+        raise WorkspaceError(f"invalid package metadata in {manifest_path}")
+    for field in ("version", "edition", "rust-version", "publish"):
+        if package.get(field) != {"workspace": True}:
+            raise WorkspaceError(f"{manifest_path} does not inherit package.{field}")
+    if manifest.get("lints") != {"workspace": True}:
+        raise WorkspaceError(f"{manifest_path} does not inherit workspace lints")
+    package_name = str(package["name"])
+    actual_external: set[str] = set()
+    for table_name, table in dependency_tables(manifest):
+        for dependency_name, declaration in table.items():
+            if declaration != {"workspace": True}:
+                raise WorkspaceError(
+                    f"{manifest_path} {table_name}.{dependency_name} must inherit the root pin"
+                )
+            if dependency_name in EXTERNAL_DEPENDENCIES:
+                if not table_name.endswith("dependencies"):
+                    raise WorkspaceError(
+                        f"{manifest_path} places {dependency_name} in an invalid dependency table"
+                    )
+                if (
+                    package_name == "agenc-ircd"
+                    and dependency_name in BINARY_TEST_EXTERNAL_DEPENDENCIES
+                    and table_name != "dev-dependencies"
+                ):
+                    raise WorkspaceError(
+                        f"{manifest_path} must keep {dependency_name} test-only"
+                    )
+                actual_external.add(dependency_name)
+                continue
+            if dependency_name not in CRATE_NAMES:
+                raise WorkspaceError(
+                    f"{manifest_path} names unknown dependency {dependency_name}"
+                )
+            if dependency_name == "agenc-ircd-testkit" and table_name == "dependencies":
+                raise WorkspaceError(
+                    f"{manifest_path} has a production dependency on testkit"
+                )
+            if package_name == "agenc-ircd" and dependency_name in (
+                BINARY_TEST_WORKSPACE_DEPENDENCIES
+            ):
+                if table_name != "dev-dependencies":
+                    raise WorkspaceError(
+                        f"{manifest_path} must keep {dependency_name} test-only"
+                    )
+                continue
+            if table_name == "dependencies":
+                continue
+            if table_name == "dev-dependencies" and dependency_name == "agenc-ircd-testkit":
+                continue
+            raise WorkspaceError(
+                f"{manifest_path} has forbidden {table_name}.{dependency_name} edge"
+            )
+    expected_external = set(EXPECTED_EXTERNAL_EDGES.get(package_name, set()))
+    if package_name == "agenc-ircd":
+        expected_external.update(BINARY_TEST_EXTERNAL_DEPENDENCIES)
+    if actual_external != expected_external:
+        raise WorkspaceError(
+            f"{manifest_path} external dependency set differs: "
+            f"expected={sorted(expected_external)}, actual={sorted(actual_external)}"
+        )
+
+
 def validate_package_manifests(root: Path) -> None:
     """Validate inherited package dependencies and their ownership roles."""
     for manifest_path in sorted((root / "crates").glob("*/Cargo.toml")):
-        manifest = load_toml(manifest_path)
-        if "patch" in manifest or "replace" in manifest:
-            raise WorkspaceError(f"source override is forbidden in {manifest_path}")
-        package = manifest.get("package")
-        if not isinstance(package, dict) or package.get("name") not in CRATE_NAMES:
-            raise WorkspaceError(f"invalid package metadata in {manifest_path}")
-        for field in ("version", "edition", "rust-version", "publish"):
-            if package.get(field) != {"workspace": True}:
-                raise WorkspaceError(f"{manifest_path} does not inherit package.{field}")
-        if manifest.get("lints") != {"workspace": True}:
-            raise WorkspaceError(f"{manifest_path} does not inherit workspace lints")
-        package_name = str(package["name"])
-        actual_external: set[str] = set()
-        for table_name, table in dependency_tables(manifest):
-            for dependency_name, declaration in table.items():
-                if declaration != {"workspace": True}:
-                    raise WorkspaceError(
-                        f"{manifest_path} {table_name}.{dependency_name} must inherit the root pin"
-                    )
-                if dependency_name in EXTERNAL_DEPENDENCIES:
-                    if not table_name.endswith("dependencies"):
-                        raise WorkspaceError(
-                            f"{manifest_path} places {dependency_name} in an invalid dependency table"
-                        )
-                    actual_external.add(dependency_name)
-                    continue
-                if dependency_name not in CRATE_NAMES:
-                    raise WorkspaceError(
-                        f"{manifest_path} names unknown dependency {dependency_name}"
-                    )
-                if dependency_name == "agenc-ircd-testkit" and table_name == "dependencies":
-                    raise WorkspaceError(
-                        f"{manifest_path} has a production dependency on testkit"
-                    )
-                if package_name != "agenc-ircd-testkit" and table_name == "dependencies":
-                    continue
-                if package_name == "agenc-ircd-testkit" and table_name == "dependencies":
-                    continue
-                if table_name == "dev-dependencies" and dependency_name == "agenc-ircd-testkit":
-                    continue
-                if table_name != "dependencies":
-                    raise WorkspaceError(
-                        f"{manifest_path} has forbidden {table_name}.{dependency_name} edge"
-                    )
-        expected_external = EXPECTED_EXTERNAL_EDGES.get(package_name, set())
-        if actual_external != expected_external:
-            raise WorkspaceError(
-                f"{manifest_path} external dependency set differs: "
-                f"expected={sorted(expected_external)}, actual={sorted(actual_external)}"
-            )
+        validate_package_manifest(manifest_path, load_toml(manifest_path))
 
 
 def validate_direct_dependency_evidence(root: Path) -> None:
@@ -441,7 +476,7 @@ def validate_direct_dependency_evidence(root: Path) -> None:
     expected_records = {
         name: (version.removeprefix("="), DIRECT_CHECKSUMS[name])
         for name, (version, _features) in EXTERNAL_DEPENDENCIES.items()
-        if name not in {"rustix", "toml"}
+        if name not in {"loom", "rustix", "toml"}
     }
     if records != expected_records:
         raise WorkspaceError("root dependency pins and frozen crates.io checksum evidence disagree")
@@ -471,6 +506,54 @@ def validate_direct_dependency_evidence(root: Path) -> None:
     }
     if stage_five != expected_stage_five:
         raise WorkspaceError("Stage 05 dependency evidence differs from its reviewed closed form")
+    stage_six = load_toml(root / "conformance/stage-six-dependencies.toml")
+    expected_stage_six = {
+        "schema_version": 1,
+        "dependency": [
+            {
+                "name": "loom",
+                "version": "0.7.2",
+                "checksum": DIRECT_CHECKSUMS["loom"],
+                "default_features": False,
+                "features": [],
+                "scope": "dev",
+                "purpose": "exhaustive schedule exploration of the Stage 06 runtime ownership, receipt, permit, and shutdown models under dev-only compilation",
+                "reviewed_on": "2026-08-29",
+            },
+            {
+                "name": "rustix",
+                "version": "1.1.4",
+                "checksum": DIRECT_CHECKSUMS["rustix"],
+                "default_features": False,
+                "features": ["fs", "mm", "process", "std"],
+                "scope": "production",
+                "purpose": "Stage 06 adds process identity, core-dump control, and secret memory locking to the reviewed filesystem profile",
+                "reviewed_on": "2026-08-29",
+            },
+            {
+                "name": "rustls",
+                "version": "0.23.43",
+                "checksum": DIRECT_CHECKSUMS["rustls"],
+                "default_features": False,
+                "features": ["aws_lc_rs", "prefer-post-quantum", "std"],
+                "scope": "production",
+                "purpose": "TLS 1.3 only client, onion, and administrative listeners on the explicit aws-lc provider with the hybrid key-exchange order",
+                "reviewed_on": "2026-08-29",
+            },
+            {
+                "name": "tokio",
+                "version": "1.53.1",
+                "checksum": DIRECT_CHECKSUMS["tokio"],
+                "default_features": False,
+                "features": ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"],
+                "scope": "production",
+                "purpose": "the owned Stage 06 task tree, bounded channels, listeners, timers, and signal handling",
+                "reviewed_on": "2026-08-29",
+            },
+        ],
+    }
+    if stage_six != expected_stage_six:
+        raise WorkspaceError("Stage 06 dependency evidence differs from its reviewed closed form")
 
 
 def cargo_metadata(root: Path) -> dict[str, object]:
@@ -528,9 +611,13 @@ def graph_from_packages(packages: dict[str, dict[str, object]]) -> dict[str, set
                 continue
             kind = dependency.get("kind")
             if kind == "dev":
-                if dependency_name != "agenc-ircd-testkit":
+                allowed = dependency_name == "agenc-ircd-testkit" or (
+                    name == "agenc-ircd"
+                    and dependency_name in BINARY_TEST_WORKSPACE_DEPENDENCIES
+                )
+                if not allowed:
                     raise WorkspaceError(
-                        f"workspace dev edge {name} -> {dependency_name} is not testkit"
+                        f"workspace dev edge {name} -> {dependency_name} is not reviewed"
                     )
                 continue
             if kind not in {None, "normal"} or dependency.get("target") is not None:
@@ -744,6 +831,30 @@ def self_test(root: Path) -> int:
     validate_lockfile(root)
     validate_dependency_exception(root)
     cases = 0
+
+    binary_manifest_path = root / "crates/agenc-ircd/Cargo.toml"
+    binary_manifest = load_toml(binary_manifest_path)
+    extra_internal_dev = copy.deepcopy(binary_manifest)
+    extra_internal_dev["dev-dependencies"]["agenc-ircd-domain"] = {  # type: ignore[index]
+        "workspace": True
+    }
+    expect_rejection(
+        "unreviewed binary workspace dev dependency",
+        lambda: validate_package_manifest(binary_manifest_path, extra_internal_dev),
+        "forbidden dev-dependencies.agenc-ircd-domain edge",
+    )
+    cases += 1
+
+    extra_external_dev = copy.deepcopy(binary_manifest)
+    extra_external_dev["dev-dependencies"]["sha2"] = {  # type: ignore[index]
+        "workspace": True
+    }
+    expect_rejection(
+        "unreviewed binary external dev dependency",
+        lambda: validate_package_manifest(binary_manifest_path, extra_external_dev),
+        "external dependency set differs",
+    )
+    cases += 1
 
     policy_bytes = (root / "conformance/toolchain-policy.toml").read_bytes()
     changed_policy = policy_bytes.replace(b"cargo-deny 0.20.2", b"cargo-deny 0.20.3", 1)

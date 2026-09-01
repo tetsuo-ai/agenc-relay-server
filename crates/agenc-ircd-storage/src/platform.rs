@@ -2,13 +2,13 @@
 
 use std::fs::File;
 use std::io::{Read as _, Write as _};
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd as _, OwnedFd};
 use std::path::{Component, Path, PathBuf};
 
 use agenc_ircd_crypto::OsEntropy;
 use rustix::fs::{
-    AtFlags, CWD, FileType, Mode, OFlags, RenameFlags, StatVfs, fstat, fstatfs, fstatvfs, fsync,
-    openat, renameat, renameat_with, unlinkat,
+    AtFlags, CWD, Dir, FileType, Mode, OFlags, RenameFlags, StatVfs, fstat, fstatfs, fstatvfs,
+    fsync, openat, renameat, renameat_with, unlinkat,
 };
 
 use crate::{
@@ -106,14 +106,104 @@ pub struct FilesystemCapacity {
 pub struct StateDirectory {
     directory: File,
     writer_lock: File,
+    construction_sibling: PathBuf,
     tuple: FilesystemTuple,
     faults: StorageFaultInjector,
+}
+
+/// Read-only state-directory authority used by stopped-daemon inspection.
+///
+/// Opening this authority never creates the writer lock, removes temporary
+/// files, repairs the database, or replaces the rollback guard.
+pub struct InspectionStateDirectory {
+    directory: File,
+    database: File,
+    construction_sibling: PathBuf,
+    tuple: FilesystemTuple,
+}
+
+/// Atomically moves one initialized path into place without replacing an
+/// entry created after preflight validation.
+pub fn rename_path_no_replace(source: &Path, target: &Path) -> Result<(), StorageError> {
+    renameat_with(CWD, source, CWD, target, RenameFlags::NOREPLACE).map_err(rustix_rejected)
 }
 
 /// Validated backup location that creates no file until source verification completes.
 pub struct BackupDestination {
     directory_path: PathBuf,
     final_name: String,
+}
+
+/// Bounded, descriptor-relative reader for an existing backup directory.
+///
+/// Enumeration and file opens use the same validated directory authority.
+/// Candidate files are accepted only when they are regular mode-0600 files
+/// on that directory's filesystem.
+pub struct BackupDirectoryReader {
+    entries: Dir,
+    examined: usize,
+    maximum_entries: usize,
+}
+
+impl BackupDirectoryReader {
+    /// Opens one mode-0700 backup directory without following a symlink.
+    pub fn open(directory_path: &Path, maximum_entries: usize) -> Result<Self, StorageError> {
+        if maximum_entries == 0 {
+            return Err(StorageError::LimitExceeded);
+        }
+        let directory = openat(
+            CWD,
+            directory_path,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(rustix_rejected)?;
+        validate_file(&directory, FileType::Directory, Mode::RWXU)?;
+        Ok(Self {
+            entries: Dir::new(directory).map_err(rustix_rejected)?,
+            examined: 0,
+            maximum_entries,
+        })
+    }
+
+    /// Returns the next UTF-8 directory entry after accounting for every
+    /// entry the kernel supplied. Dot entries and non-UTF-8 names are skipped.
+    pub fn next_name(&mut self) -> Result<Option<String>, StorageError> {
+        loop {
+            let Some(entry) = self.entries.next() else {
+                return Ok(None);
+            };
+            let entry = entry.map_err(rustix_rejected)?;
+            self.examined = self.examined.checked_add(1).ok_or(StorageError::Overflow)?;
+            if self.examined > self.maximum_entries {
+                return Err(StorageError::LimitExceeded);
+            }
+            let bytes = entry.file_name().to_bytes();
+            if matches!(bytes, b"." | b"..") {
+                continue;
+            }
+            let Ok(name) = std::str::from_utf8(bytes) else {
+                continue;
+            };
+            return Ok(Some(name.to_owned()));
+        }
+    }
+
+    /// Opens one named candidate relative to the validated directory.
+    pub fn open_candidate(&self, name: &str) -> Result<File, StorageError> {
+        validate_single_component(name)?;
+        let directory = self.entries.fd().map_err(rustix_rejected)?;
+        let candidate = openat(
+            directory,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(rustix_rejected)?;
+        validate_file(&candidate, FileType::RegularFile, Mode::RUSR | Mode::WUSR)?;
+        require_same_filesystem(directory, &candidate)?;
+        Ok(File::from(candidate))
+    }
 }
 
 impl BackupDestination {
@@ -293,6 +383,7 @@ impl StateDirectory {
         qualifications: &[StorageQualification],
         faults: StorageFaultInjector,
     ) -> Result<Self, StorageError> {
+        let construction_sibling = construction_sibling(path)?;
         let directory_fd = openat(
             CWD,
             path,
@@ -327,6 +418,7 @@ impl StateDirectory {
         Ok(Self {
             directory: File::from(directory_fd),
             writer_lock,
+            construction_sibling,
             tuple,
             faults,
         })
@@ -351,6 +443,24 @@ impl StateDirectory {
         self.faults.run(StorageFaultSite::CapacityAdmission, || {
             self.capacity_inner(fixed_reserve_bytes, reserve_percent)
         })
+    }
+
+    /// Reports the one fixed sibling used by an interrupted offline
+    /// construction without scanning arbitrary directory entries.
+    pub(crate) fn pending_construction(&self) -> Result<u64, StorageError> {
+        match openat(
+            CWD,
+            &self.construction_sibling,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(directory) => {
+                validate_file(&directory, FileType::Directory, Mode::RWXU)?;
+                Ok(1)
+            }
+            Err(rustix::io::Errno::NOENT) => Ok(0),
+            Err(error) => Err(rustix_rejected(error)),
+        }
     }
 
     fn capacity_inner(
@@ -525,8 +635,162 @@ impl StateDirectory {
     }
 }
 
+impl InspectionStateDirectory {
+    /// Opens an existing mode-0700 state directory without taking write
+    /// authority over any entry.
+    pub fn open(
+        path: &Path,
+        qualifications: &[StorageQualification],
+    ) -> Result<Self, StorageError> {
+        let construction_sibling = construction_sibling(path)?;
+        let directory_fd = openat(
+            CWD,
+            path,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(rustix_rejected)?;
+        validate_file(&directory_fd, FileType::Directory, Mode::RWXU)?;
+        let tuple = filesystem_tuple(&directory_fd)?;
+        if !qualifications
+            .iter()
+            .any(|entry| entry.validate().is_ok() && entry.tuple == tuple)
+        {
+            return Err(StorageError::FilesystemRejected);
+        }
+        let database_fd = openat(
+            &directory_fd,
+            DATABASE_FILE,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(rustix_rejected)?;
+        validate_file(&database_fd, FileType::RegularFile, Mode::RUSR | Mode::WUSR)?;
+        require_same_filesystem(&directory_fd, &database_fd)?;
+        Ok(Self {
+            directory: File::from(directory_fd),
+            database: File::from(database_fd),
+            construction_sibling,
+            tuple,
+        })
+    }
+
+    /// Returns the exact recognized host tuple.
+    #[must_use]
+    pub const fn tuple(&self) -> FilesystemTuple {
+        self.tuple
+    }
+
+    /// Returns a process-local path to the already validated database
+    /// descriptor. redb opens this path read-only and therefore cannot race a
+    /// replacement of the state-directory entry.
+    pub(crate) fn database_descriptor_path(&self) -> PathBuf {
+        PathBuf::from(format!("/proc/self/fd/{}", self.database.as_raw_fd()))
+    }
+
+    pub(crate) fn open_database_file(&self) -> Result<File, StorageError> {
+        self.database.try_clone().map_err(io_rejected)
+    }
+
+    /// Reads and validates the fixed rollback guard without write authority.
+    pub(crate) fn read_guard(&self, expected_bytes: usize) -> Result<Vec<u8>, StorageError> {
+        let fd = openat(
+            &self.directory,
+            GUARD_FILE,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(rustix_rejected)?;
+        validate_file(&fd, FileType::RegularFile, Mode::RUSR | Mode::WUSR)?;
+        require_same_filesystem(&self.directory, &fd)?;
+        let file = File::from(fd);
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(expected_bytes)
+            .map_err(|_| StorageError::AllocationFailed)?;
+        file.take(
+            u64::try_from(
+                expected_bytes
+                    .checked_add(1)
+                    .ok_or(StorageError::Overflow)?,
+            )
+            .map_err(|_| StorageError::Overflow)?,
+        )
+        .read_to_end(&mut bytes)
+        .map_err(io_rejected)?;
+        if bytes.len() != expected_bytes {
+            return Err(StorageError::InvalidEncoding);
+        }
+        Ok(bytes)
+    }
+
+    /// Samples UID-available bytes and computes the checked effective reserve.
+    pub(crate) fn capacity(
+        &self,
+        fixed_reserve_bytes: u64,
+        reserve_percent: u8,
+    ) -> Result<FilesystemCapacity, StorageError> {
+        if reserve_percent > 100 {
+            return Err(StorageError::LimitExceeded);
+        }
+        let statistics = fstatvfs(&self.directory).map_err(rustix_rejected)?;
+        capacity_from_statistics(&statistics, fixed_reserve_bytes, reserve_percent)
+    }
+
+    /// Reports only the one fixed offline-construction sibling.
+    pub(crate) fn pending_construction(&self) -> Result<u64, StorageError> {
+        match openat(
+            CWD,
+            &self.construction_sibling,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(directory) => {
+                validate_file(&directory, FileType::Directory, Mode::RWXU)?;
+                Ok(1)
+            }
+            Err(rustix::io::Errno::NOENT) => Ok(0),
+            Err(error) => Err(rustix_rejected(error)),
+        }
+    }
+
+    /// Creates an anonymous mode-0600 scratch inode on the qualified state
+    /// filesystem. Unsupported `O_TMPFILE` is a closed inspection failure.
+    pub(crate) fn create_anonymous_scratch(&self) -> Result<File, StorageError> {
+        let scratch = openat(
+            &self.directory,
+            ".",
+            OFlags::RDWR | OFlags::TMPFILE | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR,
+        )
+        .map_err(rustix_rejected)?;
+        validate_file(&scratch, FileType::RegularFile, Mode::RUSR | Mode::WUSR)?;
+        let metadata = fstat(&scratch).map_err(rustix_rejected)?;
+        if metadata.st_nlink != 0 {
+            return Err(StorageError::FilesystemRejected);
+        }
+        require_same_filesystem(&self.directory, &scratch)?;
+        Ok(File::from(scratch))
+    }
+}
+
 fn random_guard_temporary_name() -> Result<String, StorageError> {
     random_temporary_name(GUARD_TEMPORARY_PREFIX)
+}
+
+fn construction_sibling(path: &Path) -> Result<PathBuf, StorageError> {
+    let output_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(StorageError::FilesystemRejected)?;
+    validate_single_component(output_name)?;
+    let parent = path.parent().ok_or(StorageError::FilesystemRejected)?;
+    let sibling = format!(
+        ".{output_name}{}",
+        crate::construction_directory::STAGING_SUFFIX
+    );
+    validate_single_component(&sibling)?;
+    Ok(parent.join(sibling))
 }
 
 /// Computes UID-available bytes and the effective reserve `max(fixed, ceil(total * percent / 100))`.
@@ -746,6 +1010,50 @@ mod tests {
     }
 
     #[test]
+    fn backup_directory_reader_is_bounded_and_opens_only_safe_candidates()
+    -> Result<(), StorageError> {
+        use std::io::{Read as _, Write as _};
+        use std::os::unix::fs::symlink;
+
+        let directory = TestDirectory::create("backup-reader")?;
+        let mut file = directory.create_file("candidate.agenc-backup", 0o600)?;
+        file.write_all(b"verified-input").map_err(io_rejected)?;
+        drop(file);
+        symlink(
+            directory.path().join("candidate.agenc-backup"),
+            directory.path().join("linked.agenc-backup"),
+        )
+        .map_err(io_rejected)?;
+
+        let mut reader = BackupDirectoryReader::open(directory.path(), 4)?;
+        let mut names = Vec::new();
+        while let Some(name) = reader.next_name()? {
+            names.push(name);
+        }
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "candidate.agenc-backup".to_owned(),
+                "linked.agenc-backup".to_owned()
+            ]
+        );
+        let mut candidate = reader.open_candidate("candidate.agenc-backup")?;
+        let mut bytes = Vec::new();
+        candidate.read_to_end(&mut bytes).map_err(io_rejected)?;
+        assert_eq!(bytes, b"verified-input");
+        assert_eq!(
+            reader.open_candidate("linked.agenc-backup").err(),
+            Some(StorageError::FilesystemRejected)
+        );
+
+        let mut bounded = BackupDirectoryReader::open(directory.path(), 3)?;
+        assert!(bounded.next_name()?.is_some());
+        assert_eq!(bounded.next_name(), Err(StorageError::LimitExceeded));
+        Ok(())
+    }
+
+    #[test]
     fn temporary_cleanup_removes_only_well_formed_owned_files() -> Result<(), StorageError> {
         let directory = TestDirectory::create("cleanup")?;
         let directory_fd = openat(
@@ -768,6 +1076,52 @@ mod tests {
             cleanup_random_temporaries(&directory_fd, directory.path(), prefix),
             Err(StorageError::FilesystemRejected)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn inspection_keeps_directory_entries_and_uses_anonymous_scratch() -> Result<(), StorageError> {
+        let directory = TestDirectory::create("inspection")?;
+        directory.create_file(DATABASE_FILE, 0o600)?;
+        directory.create_file(GUARD_FILE, 0o600)?;
+        let recovery_temporary = format!("{RECOVERY_SCRATCH_PREFIX}{}", "a".repeat(32));
+        let guard_temporary = format!("{GUARD_TEMPORARY_PREFIX}{}", "b".repeat(32));
+        directory.create_file(&recovery_temporary, 0o600)?;
+        directory.create_file(&guard_temporary, 0o600)?;
+        let entries = || -> Result<Vec<String>, StorageError> {
+            let mut names = fs::read_dir(directory.path())
+                .map_err(io_rejected)?
+                .map(|entry| {
+                    entry
+                        .map_err(io_rejected)?
+                        .file_name()
+                        .into_string()
+                        .map_err(|_| StorageError::FilesystemRejected)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            names.sort();
+            Ok(names)
+        };
+        let before = entries()?;
+        let tuple = StateDirectory::probe(directory.path())?;
+        let qualification = StorageQualification::from_verified_report(tuple, 1).validate()?;
+
+        let inspection = InspectionStateDirectory::open(directory.path(), &[qualification])?;
+        assert_eq!(inspection.tuple(), tuple);
+        assert!(!directory.path().join(WRITER_LOCK_FILE).exists());
+        let scratch = inspection.create_anonymous_scratch()?;
+        let metadata = fstat(&scratch).map_err(rustix_rejected)?;
+        assert_eq!(metadata.st_nlink, 0);
+        assert_eq!(
+            Mode::from_raw_mode(metadata.st_mode),
+            Mode::RUSR | Mode::WUSR
+        );
+        assert_eq!(entries()?, before);
+        drop(scratch);
+        drop(inspection);
+        assert_eq!(entries()?, before);
+        assert!(directory.path().join(recovery_temporary).exists());
+        assert!(directory.path().join(guard_temporary).exists());
         Ok(())
     }
 

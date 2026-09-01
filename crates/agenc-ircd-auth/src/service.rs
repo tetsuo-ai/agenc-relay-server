@@ -1,20 +1,22 @@
 //! Complete coordinator-side account protocol state machines.
 
 use agenc_ircd_crypto::{
-    AccountRequestBinding, Ed25519PublicKey, LoginIndexDigest, LoginIndexKey,
+    AccountHpkeKeyId, AccountRequestBinding, Ed25519PublicKey, LoginIndexDigest, LoginIndexKey,
     OpaqueFakeCredentialKey, OsEntropy, derive_fake_credential_id, derive_login_index,
 };
 use agenc_ircd_types::{
-    AccountDeletionToken, AccountId, AccountRandomId, AccountServiceCompletionStatus, AuthGrantId,
-    ConnectionId, EntropySource, Generation, InviteId, MonotonicTick, NetworkId,
-    OpaqueCredentialId, OriginId, Revision, ServerId, ServerIncarnation, TransactionId, UtcSecond,
+    AccountDeletionToken, AccountId, AccountRandomId, AccountServiceCompletionStatus,
+    AccountServiceMessageKind, AuthGrantId, ConnectionId, EntropySource, Generation, InviteId,
+    MonotonicTick, NetworkId, OpaqueCredentialId, OriginId, RecoveryEpoch, RequestId, Revision,
+    ServerId, ServerIncarnation, TransactionId, UtcSecond,
 };
+use subtle::ConstantTimeEq as _;
 use zeroize::Zeroizing;
 
 use crate::AuthError;
 use crate::opaque::{
-    OpaqueAuthentication, OpaqueProfile, OpaqueRegistrationRecord, OpaqueServerLoginState,
-    finish_authentication,
+    OPAQUE_SERVER_LOGIN_STATE_BYTES, OpaqueAuthentication, OpaqueProfile, OpaqueRegistrationRecord,
+    OpaqueServerLoginState, finish_authentication,
 };
 use crate::transaction::{
     AUTHENTICATION_GRANT_TIMEOUT_SECONDS, AUTHENTICATION_GRANT_TIMEOUT_TICKS, AccountRouteBinding,
@@ -200,6 +202,21 @@ impl<T> SealedAccountFinishOutcome<T> {
     pub const fn response_intent(&self) -> &AccountResponseIntent {
         &self.response
     }
+
+    /// Consumes the terminal result only after storage has committed the
+    /// response-count successor reserved for this response.
+    ///
+    /// The outer result reports a mismatched durable head. The inner result
+    /// is the authenticated operation's committed or rejected outcome.
+    pub fn into_result_after_commit(
+        self,
+        committed_response_count: u64,
+    ) -> Result<Result<T, AuthError>, AuthError> {
+        if committed_response_count < self.response.next_response_count() {
+            return Err(AuthError::ContextMismatch);
+        }
+        Ok(self.result)
+    }
 }
 
 /// A parsed START transaction inseparably paired with its authenticated challenge.
@@ -249,6 +266,13 @@ impl<S> AccountStartOutcome<S> {
 }
 
 /// A START transaction retained with the exact encrypted challenge sent for it.
+///
+/// ```compile_fail
+/// use agenc_ircd_auth::SealedAccountStart;
+/// fn bypass_commit<S>(mut start: SealedAccountStart<S>) {
+///     let _ = start.transaction_mut();
+/// }
+/// ```
 #[must_use = "the transaction and encrypted challenge must remain in one lineage"]
 pub struct SealedAccountStart<S> {
     transaction: AccountTransaction<S>,
@@ -256,14 +280,103 @@ pub struct SealedAccountStart<S> {
 }
 
 impl<S> SealedAccountStart<S> {
-    /// Mutably borrows the retained transaction for its one terminal FINISH.
-    pub fn transaction_mut(&mut self) -> &mut AccountTransaction<S> {
-        &mut self.transaction
+    /// Returns the retained transaction identity used as its durable row key.
+    #[must_use]
+    pub const fn transaction_id(&self) -> TransactionId {
+        self.transaction.binding().transaction_id()
     }
 
     /// Borrows the encrypted START response retained for exact replay.
     pub const fn response_intent(&self) -> &AccountResponseIntent {
         &self.response
+    }
+
+    /// Consumes the retained START lineage only after storage has committed
+    /// the response-count successor reserved for its challenge.
+    pub fn into_transaction_after_commit(
+        self,
+        committed_response_count: u64,
+    ) -> Result<AccountTransaction<S>, AuthError> {
+        if committed_response_count < self.response.next_response_count() {
+            return Err(AuthError::ContextMismatch);
+        }
+        Ok(self.transaction)
+    }
+}
+
+impl SealedAccountStart<AccountAuthenticationState> {
+    /// Captures the retained authentication transaction for encrypted durable
+    /// storage without releasing its post-commit continuation authority.
+    pub fn authentication_transaction_record(
+        &self,
+        now: MonotonicTick,
+        now_utc: UtcSecond,
+    ) -> Result<AuthenticationTransactionRecord, AuthError> {
+        AuthenticationTransactionRecord::capture(&self.transaction, now, now_utc)
+    }
+}
+
+impl SealedAccountStart<AccountCreationState> {
+    /// Captures one creation transaction for encrypted durable storage without
+    /// releasing its post-commit continuation authority.
+    pub fn creation_transaction_record(
+        &self,
+        now: MonotonicTick,
+        now_utc: UtcSecond,
+    ) -> Result<CreationTransactionRecord, AuthError> {
+        CreationTransactionRecord::capture(&self.transaction, now, now_utc)
+    }
+
+    /// Borrows the keyed login digest only when START admitted a reservation.
+    #[must_use]
+    pub fn creation_reservation_login_digest(&self) -> Option<&LoginIndexDigest> {
+        self.transaction.state_ref().and_then(|state| {
+            state
+                .disposition
+                .rejection()
+                .is_none()
+                .then_some(&state.login_digest)
+        })
+    }
+
+    /// Returns verified invitation metadata only when START admitted its
+    /// corresponding reservation.
+    #[must_use]
+    pub fn creation_reservation_invitation(&self) -> Option<(InviteId, UtcSecond)> {
+        self.transaction.state_ref().and_then(|state| {
+            state
+                .disposition
+                .rejection()
+                .is_none()
+                .then_some(state.invitation.as_ref())
+                .flatten()
+                .map(|invitation| (invitation.invite_id, invitation.expires_at))
+        })
+    }
+}
+
+impl SealedAccountStart<CredentialChangeState> {
+    /// Captures one credential-change transaction for encrypted durable storage
+    /// without releasing its post-commit continuation authority.
+    pub fn credential_change_transaction_record(
+        &self,
+        now: MonotonicTick,
+        now_utc: UtcSecond,
+    ) -> Result<CredentialChangeTransactionRecord, AuthError> {
+        CredentialChangeTransactionRecord::capture(&self.transaction, now, now_utc)
+    }
+
+    /// Returns the account reservation only when START retained destructive
+    /// authorization after every latent-rejection check.
+    #[must_use]
+    pub fn credential_reservation_account_id(&self) -> Option<AccountId> {
+        self.transaction.state_ref().and_then(|state| {
+            state
+                .disposition
+                .rejection()
+                .is_none()
+                .then_some(state.account.account_id)
+        })
     }
 }
 
@@ -629,6 +742,918 @@ pub struct AccountAuthenticationState {
     server_state: OpaqueServerLoginState,
 }
 
+/// Exact version-one bytes of one live OPAQUE authentication transaction.
+pub const AUTHENTICATION_TRANSACTION_RECORD_BYTES: usize = 2
+    + 2
+    + 16
+    + 32
+    + (16 + 16 + 16 + 8 + 16 + 32)
+    + 8
+    + (32 + 16 + 32 + 16 + 2)
+    + (1 + 24 + 8 + 8)
+    + 32
+    + OPAQUE_SERVER_LOGIN_STATE_BYTES;
+
+const AUTHENTICATION_TRANSACTION_RECORD_VERSION: u16 = 1;
+const AUTHENTICATION_TRANSACTION_CLASS: u16 = 2;
+const AUTHENTICATION_CANDIDATE_KNOWN: u8 = 1;
+const AUTHENTICATION_CANDIDATE_REJECT: u8 = 2;
+
+/// Move-only encrypted-record plaintext for one live authentication attempt.
+///
+/// The fixed body contains no normalized login. It retains only keyed/private
+/// identities, the exact route and request bindings, and the reviewed OPAQUE
+/// server-state serialization required by a later FINISH.
+pub struct AuthenticationTransactionRecord(
+    Zeroizing<[u8; AUTHENTICATION_TRANSACTION_RECORD_BYTES]>,
+);
+
+impl AuthenticationTransactionRecord {
+    /// Captures an unconsumed transaction with a conservative UTC deadline.
+    ///
+    /// Whole-second persistence rounds the remaining monotonic lifetime down,
+    /// so restart can shorten an attempt but can never extend it.
+    pub fn capture(
+        transaction: &AccountTransaction<AccountAuthenticationState>,
+        now: MonotonicTick,
+        now_utc: UtcSecond,
+    ) -> Result<Self, AuthError> {
+        let binding = transaction.binding();
+        if binding.class() != TransactionClass::Authentication || now >= binding.expires_at() {
+            return Err(AuthError::Expired);
+        }
+        let state = transaction.state_ref().ok_or(AuthError::Consumed)?;
+        let remaining_millis = binding
+            .expires_at()
+            .get()
+            .checked_sub(now.get())
+            .ok_or(AuthError::Expired)?;
+        let remaining_seconds = remaining_millis / 1_000;
+        if remaining_seconds == 0 {
+            return Err(AuthError::Expired);
+        }
+        let durable_expires_at = now_utc
+            .checked_add(remaining_seconds)
+            .map_err(|_| AuthError::Overflow)?;
+        let mut encoded = Zeroizing::new([0_u8; AUTHENTICATION_TRANSACTION_RECORD_BYTES]);
+        let mut writer = AuthenticationRecordWriter::new(encoded.as_mut());
+        writer.put_u16(AUTHENTICATION_TRANSACTION_RECORD_VERSION)?;
+        writer.put_u16(AUTHENTICATION_TRANSACTION_CLASS)?;
+        writer.put(binding.transaction_id().as_bytes())?;
+        writer.put(binding.network_id().as_bytes())?;
+        put_route(&mut writer, binding.route())?;
+        writer.put_u64(durable_expires_at.get())?;
+        put_request_binding(&mut writer, state.start_request_binding)?;
+        put_authentication_candidate(&mut writer, state.candidate)?;
+        writer.put(state.credential_id.expose_for_account_service())?;
+        writer.put(state.server_state.expose_for_persistence())?;
+        writer.finish()?;
+        Ok(Self(encoded))
+    }
+
+    /// Copies one opened storage body into a fixed zeroizing allocation.
+    pub fn parse(encoded: &[u8]) -> Result<Self, AuthError> {
+        let bytes: [u8; AUTHENTICATION_TRANSACTION_RECORD_BYTES] =
+            encoded.try_into().map_err(|_| AuthError::InvalidEncoding)?;
+        Ok(Self(Zeroizing::new(bytes)))
+    }
+
+    /// Borrows the exact body only for encrypted persistence.
+    #[must_use]
+    pub fn expose_for_persistence(&self) -> &[u8; AUTHENTICATION_TRANSACTION_RECORD_BYTES] {
+        &self.0
+    }
+
+    /// Returns the conservative exclusive UTC deadline encoded in this row.
+    pub fn durable_expires_at_utc(&self) -> Result<UtcSecond, AuthError> {
+        let mut reader = AuthenticationRecordReader::new(self.0.as_ref());
+        if reader.read_u16()? != AUTHENTICATION_TRANSACTION_RECORD_VERSION
+            || reader.read_u16()? != AUTHENTICATION_TRANSACTION_CLASS
+        {
+            return Err(AuthError::InvalidEncoding);
+        }
+        let _transaction_id = reader.read_array::<16>()?;
+        let _network_id = reader.read_array::<32>()?;
+        let _route = read_route(&mut reader)?;
+        Ok(UtcSecond::from_unix_seconds(reader.read_u64()?))
+    }
+
+    /// Restores a still-live transaction under new process-local monotonic time.
+    pub fn restore(
+        self,
+        now: MonotonicTick,
+        now_utc: UtcSecond,
+    ) -> Result<AccountTransaction<AccountAuthenticationState>, AuthError> {
+        let mut reader = AuthenticationRecordReader::new(self.0.as_ref());
+        if reader.read_u16()? != AUTHENTICATION_TRANSACTION_RECORD_VERSION
+            || reader.read_u16()? != AUTHENTICATION_TRANSACTION_CLASS
+        {
+            return Err(AuthError::InvalidEncoding);
+        }
+        let transaction_id = TransactionId::from_bytes(reader.read_array()?);
+        let network_id = NetworkId::from_bytes(reader.read_array()?);
+        let route = read_route(&mut reader)?;
+        let durable_expires_at = UtcSecond::from_unix_seconds(reader.read_u64()?);
+        if now_utc >= durable_expires_at {
+            return Err(AuthError::Expired);
+        }
+        let start_request_binding = read_request_binding(&mut reader)?;
+        if start_request_binding.network_id() != network_id
+            || start_request_binding.message_kind() != AccountServiceMessageKind::OpaqueAuthStart
+        {
+            return Err(AuthError::ContextMismatch);
+        }
+        let candidate = read_authentication_candidate(&mut reader)?;
+        let credential_id = OpaqueCredentialId::from_bytes(reader.read_array()?);
+        let server_state = OpaqueServerLoginState::from_persisted_bytes(reader.read_array()?)?;
+        reader.finish()?;
+        let remaining_seconds = durable_expires_at
+            .get()
+            .checked_sub(now_utc.get())
+            .ok_or(AuthError::Expired)?;
+        let remaining_millis = remaining_seconds
+            .checked_mul(1_000)
+            .ok_or(AuthError::Overflow)?;
+        let expires_at = now
+            .checked_add(remaining_millis)
+            .map_err(|_| AuthError::Overflow)?;
+        let binding = AccountTransactionBinding::restore_authentication(
+            transaction_id,
+            network_id,
+            route,
+            expires_at,
+        );
+        Ok(AccountTransaction::new(
+            binding,
+            AccountAuthenticationState {
+                start_request_binding,
+                candidate,
+                credential_id,
+                server_state,
+            },
+        ))
+    }
+}
+
+/// Exact version-one bytes of one live account-creation transaction.
+pub const CREATION_TRANSACTION_RECORD_BYTES: usize = 2
+    + 2
+    + 16
+    + 32
+    + (16 + 16 + 16 + 8 + 16 + 32)
+    + 8
+    + (32 + 16 + 32 + 16 + 2)
+    + 2
+    + 32
+    + 32
+    + 1
+    + 16
+    + 8;
+
+const CREATION_TRANSACTION_RECORD_VERSION: u16 = 1;
+const CREATION_TRANSACTION_CLASS: u16 = 1;
+
+/// Move-only encrypted-record plaintext for one live account-creation attempt.
+///
+/// The fixed body contains no normalized login or invitation bearer. It stores
+/// only the keyed login digest and already-verified invitation metadata.
+pub struct CreationTransactionRecord(Zeroizing<[u8; CREATION_TRANSACTION_RECORD_BYTES]>);
+
+/// Authenticated creation-row facts needed to remove connection-bound state
+/// after a process restart.
+///
+/// This value carries no route, request, credential, or transaction
+/// continuation authority. A reservation is present only when START admitted
+/// it before the prior process stopped.
+pub struct CreationTransactionRestartMetadata {
+    transaction_id: TransactionId,
+    durable_expires_at_utc: UtcSecond,
+    reservation_login_digest: Option<LoginIndexDigest>,
+    reservation_invitation: Option<(InviteId, UtcSecond)>,
+}
+
+impl CreationTransactionRestartMetadata {
+    /// Returns the connection-bound transaction that owns the durable row.
+    #[must_use]
+    pub const fn transaction_id(&self) -> TransactionId {
+        self.transaction_id
+    }
+
+    /// Returns the exclusive durable transaction deadline.
+    #[must_use]
+    pub const fn durable_expires_at_utc(&self) -> UtcSecond {
+        self.durable_expires_at_utc
+    }
+
+    /// Borrows the private login digest only when START admitted a reservation.
+    #[must_use]
+    pub const fn reservation_login_digest(&self) -> Option<&LoginIndexDigest> {
+        self.reservation_login_digest.as_ref()
+    }
+
+    /// Returns verified invitation metadata only when START admitted its
+    /// corresponding reservation.
+    #[must_use]
+    pub const fn reservation_invitation(&self) -> Option<(InviteId, UtcSecond)> {
+        self.reservation_invitation
+    }
+}
+
+impl CreationTransactionRecord {
+    fn capture(
+        transaction: &AccountTransaction<AccountCreationState>,
+        now: MonotonicTick,
+        now_utc: UtcSecond,
+    ) -> Result<Self, AuthError> {
+        let binding = transaction.binding();
+        let durable_expires_at =
+            durable_transaction_expiry(binding, TransactionClass::AccountCreation, now, now_utc)?;
+        let state = transaction.state_ref().ok_or(AuthError::Consumed)?;
+        let mut encoded = Zeroizing::new([0_u8; CREATION_TRANSACTION_RECORD_BYTES]);
+        let mut writer = AuthenticationRecordWriter::new(encoded.as_mut());
+        put_transaction_record_header(
+            &mut writer,
+            binding,
+            CREATION_TRANSACTION_RECORD_VERSION,
+            CREATION_TRANSACTION_CLASS,
+            durable_expires_at,
+        )?;
+        put_request_binding(&mut writer, state.start_request_binding)?;
+        put_start_disposition(&mut writer, state.disposition)?;
+        writer.put(state.login_digest.expose_for_storage_key())?;
+        writer.put(state.credential_id.expose_for_account_service())?;
+        put_validated_invitation(&mut writer, state.invitation.as_ref())?;
+        writer.finish()?;
+        Ok(Self(encoded))
+    }
+
+    /// Copies one opened storage body into a fixed zeroizing allocation.
+    pub fn parse(encoded: &[u8]) -> Result<Self, AuthError> {
+        let bytes: [u8; CREATION_TRANSACTION_RECORD_BYTES] =
+            encoded.try_into().map_err(|_| AuthError::InvalidEncoding)?;
+        Ok(Self(Zeroizing::new(bytes)))
+    }
+
+    /// Borrows the exact body only for encrypted persistence.
+    #[must_use]
+    pub fn expose_for_persistence(&self) -> &[u8; CREATION_TRANSACTION_RECORD_BYTES] {
+        &self.0
+    }
+
+    /// Returns the conservative exclusive UTC deadline encoded in this row.
+    pub fn durable_expires_at_utc(&self) -> Result<UtcSecond, AuthError> {
+        let mut reader = AuthenticationRecordReader::new(self.0.as_ref());
+        let (_, _, _, durable_expires_at) = read_transaction_record_header(
+            &mut reader,
+            CREATION_TRANSACTION_RECORD_VERSION,
+            CREATION_TRANSACTION_CLASS,
+        )?;
+        Ok(durable_expires_at)
+    }
+
+    /// Fully validates an opened row and returns only the facts needed to
+    /// delete its connection-bound transaction and admitted reservations.
+    pub fn into_restart_cleanup_metadata(
+        self,
+    ) -> Result<CreationTransactionRestartMetadata, AuthError> {
+        let durable_expires_at_utc = self.durable_expires_at_utc()?;
+        let transaction = self.restore(
+            MonotonicTick::from_ticks(0),
+            UtcSecond::from_unix_seconds(0),
+        )?;
+        let transaction_id = transaction.binding().transaction_id();
+        let state = transaction.state_ref().ok_or(AuthError::Consumed)?;
+        let admitted = state.disposition.rejection().is_none();
+        let reservation_login_digest = admitted.then(|| {
+            LoginIndexDigest::from_storage_key(*state.login_digest.expose_for_storage_key())
+        });
+        let reservation_invitation = admitted
+            .then_some(state.invitation.as_ref())
+            .flatten()
+            .map(|invitation| (invitation.invite_id, invitation.expires_at));
+        Ok(CreationTransactionRestartMetadata {
+            transaction_id,
+            durable_expires_at_utc,
+            reservation_login_digest,
+            reservation_invitation,
+        })
+    }
+
+    /// Restores a still-live transaction under new process-local monotonic time.
+    pub fn restore(
+        self,
+        now: MonotonicTick,
+        now_utc: UtcSecond,
+    ) -> Result<AccountTransaction<AccountCreationState>, AuthError> {
+        let mut reader = AuthenticationRecordReader::new(self.0.as_ref());
+        let (transaction_id, network_id, route, durable_expires_at) =
+            read_transaction_record_header(
+                &mut reader,
+                CREATION_TRANSACTION_RECORD_VERSION,
+                CREATION_TRANSACTION_CLASS,
+            )?;
+        let expires_at = restore_transaction_deadline(durable_expires_at, now, now_utc)?;
+        let start_request_binding = read_request_binding(&mut reader)?;
+        validate_start_request_binding(
+            start_request_binding,
+            network_id,
+            AccountServiceMessageKind::AccountCreateStart,
+        )?;
+        let disposition = read_start_disposition(&mut reader)?;
+        let login_digest = LoginIndexDigest::from_storage_key(reader.read_array()?);
+        let credential_id = OpaqueCredentialId::from_bytes(reader.read_array()?);
+        let invitation = read_validated_invitation(&mut reader)?;
+        reader.finish()?;
+        let binding = AccountTransactionBinding::restore(
+            transaction_id,
+            TransactionClass::AccountCreation,
+            network_id,
+            route,
+            expires_at,
+        );
+        Ok(AccountTransaction::new(
+            binding,
+            AccountCreationState {
+                start_request_binding,
+                disposition,
+                login_digest,
+                credential_id,
+                invitation,
+            },
+        ))
+    }
+}
+
+/// Exact version-one bytes of one live credential-change transaction.
+pub const CREDENTIAL_CHANGE_TRANSACTION_RECORD_BYTES: usize = 2
+    + 2
+    + 16
+    + 32
+    + (16 + 16 + 16 + 8 + 16 + 32)
+    + 8
+    + (32 + 16 + 32 + 16 + 2)
+    + 2
+    + 24
+    + 8
+    + 8
+    + 32;
+
+const CREDENTIAL_CHANGE_TRANSACTION_RECORD_VERSION: u16 = 1;
+const CREDENTIAL_CHANGE_TRANSACTION_CLASS: u16 = 3;
+
+/// Move-only encrypted-record plaintext for one live credential-change attempt.
+///
+/// Process-local fresh-auth proof material is deliberately absent. Proof is
+/// consumed before this state can be captured.
+pub struct CredentialChangeTransactionRecord(
+    Zeroizing<[u8; CREDENTIAL_CHANGE_TRANSACTION_RECORD_BYTES]>,
+);
+
+/// Authenticated credential-change row facts needed after process restart.
+///
+/// The optional account identity reports whether START admitted the
+/// process-local credential reservation. The reservation itself is not
+/// restored because process restart destroys all live connection authority.
+pub struct CredentialChangeTransactionRestartMetadata {
+    transaction_id: TransactionId,
+    durable_expires_at_utc: UtcSecond,
+    reservation_account_id: Option<AccountId>,
+}
+
+impl CredentialChangeTransactionRestartMetadata {
+    /// Returns the connection-bound transaction that owns the durable row.
+    #[must_use]
+    pub const fn transaction_id(&self) -> TransactionId {
+        self.transaction_id
+    }
+
+    /// Returns the exclusive durable transaction deadline.
+    #[must_use]
+    pub const fn durable_expires_at_utc(&self) -> UtcSecond {
+        self.durable_expires_at_utc
+    }
+
+    /// Returns the account whose process-local credential reservation was
+    /// admitted, if any.
+    #[must_use]
+    pub const fn reservation_account_id(&self) -> Option<AccountId> {
+        self.reservation_account_id
+    }
+}
+
+impl CredentialChangeTransactionRecord {
+    fn capture(
+        transaction: &AccountTransaction<CredentialChangeState>,
+        now: MonotonicTick,
+        now_utc: UtcSecond,
+    ) -> Result<Self, AuthError> {
+        let binding = transaction.binding();
+        let durable_expires_at =
+            durable_transaction_expiry(binding, TransactionClass::CredentialChange, now, now_utc)?;
+        let state = transaction.state_ref().ok_or(AuthError::Consumed)?;
+        let mut encoded = Zeroizing::new([0_u8; CREDENTIAL_CHANGE_TRANSACTION_RECORD_BYTES]);
+        let mut writer = AuthenticationRecordWriter::new(encoded.as_mut());
+        put_transaction_record_header(
+            &mut writer,
+            binding,
+            CREDENTIAL_CHANGE_TRANSACTION_RECORD_VERSION,
+            CREDENTIAL_CHANGE_TRANSACTION_CLASS,
+            durable_expires_at,
+        )?;
+        put_request_binding(&mut writer, state.start_request_binding)?;
+        put_start_disposition(&mut writer, state.disposition)?;
+        writer.put(state.account.account_id.to_text().as_bytes())?;
+        writer.put_u64(state.account.account_revision.get())?;
+        writer.put_u64(state.account.account_session_generation.get())?;
+        writer.put(state.credential_id.expose_for_account_service())?;
+        writer.finish()?;
+        Ok(Self(encoded))
+    }
+
+    /// Copies one opened storage body into a fixed zeroizing allocation.
+    pub fn parse(encoded: &[u8]) -> Result<Self, AuthError> {
+        let bytes: [u8; CREDENTIAL_CHANGE_TRANSACTION_RECORD_BYTES] =
+            encoded.try_into().map_err(|_| AuthError::InvalidEncoding)?;
+        Ok(Self(Zeroizing::new(bytes)))
+    }
+
+    /// Borrows the exact body only for encrypted persistence.
+    #[must_use]
+    pub fn expose_for_persistence(&self) -> &[u8; CREDENTIAL_CHANGE_TRANSACTION_RECORD_BYTES] {
+        &self.0
+    }
+
+    /// Returns the conservative exclusive UTC deadline encoded in this row.
+    pub fn durable_expires_at_utc(&self) -> Result<UtcSecond, AuthError> {
+        let mut reader = AuthenticationRecordReader::new(self.0.as_ref());
+        let (_, _, _, durable_expires_at) = read_transaction_record_header(
+            &mut reader,
+            CREDENTIAL_CHANGE_TRANSACTION_RECORD_VERSION,
+            CREDENTIAL_CHANGE_TRANSACTION_CLASS,
+        )?;
+        Ok(durable_expires_at)
+    }
+
+    /// Fully validates an opened row and returns only restart cleanup facts.
+    pub fn into_restart_cleanup_metadata(
+        self,
+    ) -> Result<CredentialChangeTransactionRestartMetadata, AuthError> {
+        let durable_expires_at_utc = self.durable_expires_at_utc()?;
+        let transaction = self.restore(
+            MonotonicTick::from_ticks(0),
+            UtcSecond::from_unix_seconds(0),
+        )?;
+        let transaction_id = transaction.binding().transaction_id();
+        let state = transaction.state_ref().ok_or(AuthError::Consumed)?;
+        let reservation_account_id = state
+            .disposition
+            .rejection()
+            .is_none()
+            .then_some(state.account.account_id);
+        Ok(CredentialChangeTransactionRestartMetadata {
+            transaction_id,
+            durable_expires_at_utc,
+            reservation_account_id,
+        })
+    }
+
+    /// Restores a still-live transaction under new process-local monotonic time.
+    pub fn restore(
+        self,
+        now: MonotonicTick,
+        now_utc: UtcSecond,
+    ) -> Result<AccountTransaction<CredentialChangeState>, AuthError> {
+        let mut reader = AuthenticationRecordReader::new(self.0.as_ref());
+        let (transaction_id, network_id, route, durable_expires_at) =
+            read_transaction_record_header(
+                &mut reader,
+                CREDENTIAL_CHANGE_TRANSACTION_RECORD_VERSION,
+                CREDENTIAL_CHANGE_TRANSACTION_CLASS,
+            )?;
+        let expires_at = restore_transaction_deadline(durable_expires_at, now, now_utc)?;
+        let start_request_binding = read_request_binding(&mut reader)?;
+        validate_start_request_binding(
+            start_request_binding,
+            network_id,
+            AccountServiceMessageKind::CredentialChangeStart,
+        )?;
+        let disposition = read_start_disposition(&mut reader)?;
+        let account_id = AccountId::parse_wire_bytes(&reader.read_array::<24>()?)
+            .map_err(|_| AuthError::InvalidEncoding)?;
+        let account_revision =
+            Revision::new(reader.read_u64()?).map_err(|_| AuthError::InvalidEncoding)?;
+        let account_session_generation =
+            Generation::new(reader.read_u64()?).map_err(|_| AuthError::InvalidEncoding)?;
+        if account_session_generation.get() == 0 {
+            return Err(AuthError::InvalidEncoding);
+        }
+        let credential_id = OpaqueCredentialId::from_bytes(reader.read_array()?);
+        reader.finish()?;
+        let binding = AccountTransactionBinding::restore(
+            transaction_id,
+            TransactionClass::CredentialChange,
+            network_id,
+            route,
+            expires_at,
+        );
+        Ok(AccountTransaction::new(
+            binding,
+            CredentialChangeState {
+                start_request_binding,
+                disposition,
+                account: AccountSnapshot {
+                    account_id,
+                    account_revision,
+                    account_session_generation,
+                },
+                credential_id,
+            },
+        ))
+    }
+}
+
+fn durable_transaction_expiry(
+    binding: AccountTransactionBinding,
+    expected_class: TransactionClass,
+    now: MonotonicTick,
+    now_utc: UtcSecond,
+) -> Result<UtcSecond, AuthError> {
+    if binding.class() != expected_class || now >= binding.expires_at() {
+        return Err(AuthError::Expired);
+    }
+    let remaining_millis = binding
+        .expires_at()
+        .get()
+        .checked_sub(now.get())
+        .ok_or(AuthError::Expired)?;
+    let remaining_seconds = remaining_millis / 1_000;
+    if remaining_seconds == 0 {
+        return Err(AuthError::Expired);
+    }
+    now_utc
+        .checked_add(remaining_seconds)
+        .map_err(|_| AuthError::Overflow)
+}
+
+fn restore_transaction_deadline(
+    durable_expires_at: UtcSecond,
+    now: MonotonicTick,
+    now_utc: UtcSecond,
+) -> Result<MonotonicTick, AuthError> {
+    if now_utc >= durable_expires_at {
+        return Err(AuthError::Expired);
+    }
+    let remaining_seconds = durable_expires_at
+        .get()
+        .checked_sub(now_utc.get())
+        .ok_or(AuthError::Expired)?;
+    let remaining_millis = remaining_seconds
+        .checked_mul(1_000)
+        .ok_or(AuthError::Overflow)?;
+    now.checked_add(remaining_millis)
+        .map_err(|_| AuthError::Overflow)
+}
+
+fn put_transaction_record_header(
+    writer: &mut AuthenticationRecordWriter<'_>,
+    binding: AccountTransactionBinding,
+    version: u16,
+    class: u16,
+    durable_expires_at: UtcSecond,
+) -> Result<(), AuthError> {
+    writer.put_u16(version)?;
+    writer.put_u16(class)?;
+    writer.put(binding.transaction_id().as_bytes())?;
+    writer.put(binding.network_id().as_bytes())?;
+    put_route(writer, binding.route())?;
+    writer.put_u64(durable_expires_at.get())
+}
+
+fn read_transaction_record_header(
+    reader: &mut AuthenticationRecordReader<'_>,
+    expected_version: u16,
+    expected_class: u16,
+) -> Result<(TransactionId, NetworkId, AccountRouteBinding, UtcSecond), AuthError> {
+    if reader.read_u16()? != expected_version || reader.read_u16()? != expected_class {
+        return Err(AuthError::InvalidEncoding);
+    }
+    let transaction_id = TransactionId::from_bytes(reader.read_array()?);
+    let network_id = NetworkId::from_bytes(reader.read_array()?);
+    let route = read_route(reader)?;
+    let durable_expires_at = UtcSecond::from_unix_seconds(reader.read_u64()?);
+    Ok((transaction_id, network_id, route, durable_expires_at))
+}
+
+fn validate_start_request_binding(
+    binding: AccountRequestBinding,
+    network_id: NetworkId,
+    message_kind: AccountServiceMessageKind,
+) -> Result<(), AuthError> {
+    if binding.network_id() != network_id || binding.message_kind() != message_kind {
+        return Err(AuthError::ContextMismatch);
+    }
+    Ok(())
+}
+
+fn put_start_disposition(
+    writer: &mut AuthenticationRecordWriter<'_>,
+    disposition: StartDisposition,
+) -> Result<(), AuthError> {
+    let code = match disposition {
+        StartDisposition::SuccessCandidate => 0,
+        StartDisposition::RejectAtFinish(error) => auth_error_record_code(error),
+    };
+    writer.put_u16(code)
+}
+
+fn read_start_disposition(
+    reader: &mut AuthenticationRecordReader<'_>,
+) -> Result<StartDisposition, AuthError> {
+    let code = reader.read_u16()?;
+    if code == 0 {
+        return Ok(StartDisposition::SuccessCandidate);
+    }
+    Ok(StartDisposition::RejectAtFinish(
+        auth_error_from_record_code(code)?,
+    ))
+}
+
+const fn auth_error_record_code(error: AuthError) -> u16 {
+    match error {
+        AuthError::InvalidEncoding => 1,
+        AuthError::ContextMismatch => 2,
+        AuthError::Consumed => 3,
+        AuthError::Expired => 4,
+        AuthError::WrongConnection => 5,
+        AuthError::WrongOrigin => 6,
+        AuthError::AuthenticationFailed => 7,
+        AuthError::InvitationRejected => 8,
+        AuthError::EntropyUnavailable => 9,
+        AuthError::AllocationFailed => 10,
+        AuthError::Overflow => 11,
+        AuthError::WorkerUnavailable => 12,
+        AuthError::WrongState => 13,
+    }
+}
+
+const fn auth_error_from_record_code(code: u16) -> Result<AuthError, AuthError> {
+    match code {
+        1 => Ok(AuthError::InvalidEncoding),
+        2 => Ok(AuthError::ContextMismatch),
+        3 => Ok(AuthError::Consumed),
+        4 => Ok(AuthError::Expired),
+        5 => Ok(AuthError::WrongConnection),
+        6 => Ok(AuthError::WrongOrigin),
+        7 => Ok(AuthError::AuthenticationFailed),
+        8 => Ok(AuthError::InvitationRejected),
+        9 => Ok(AuthError::EntropyUnavailable),
+        10 => Ok(AuthError::AllocationFailed),
+        11 => Ok(AuthError::Overflow),
+        12 => Ok(AuthError::WorkerUnavailable),
+        13 => Ok(AuthError::WrongState),
+        _ => Err(AuthError::InvalidEncoding),
+    }
+}
+
+fn put_validated_invitation(
+    writer: &mut AuthenticationRecordWriter<'_>,
+    invitation: Option<&ValidatedInvitation>,
+) -> Result<(), AuthError> {
+    match invitation {
+        Some(invitation) => {
+            writer.put(&[1])?;
+            writer.put(invitation.invite_id.as_bytes())?;
+            writer.put_u64(invitation.expires_at.get())
+        }
+        None => {
+            writer.put(&[0])?;
+            writer.put(&[0_u8; 16])?;
+            writer.put_u64(0)
+        }
+    }
+}
+
+fn read_validated_invitation(
+    reader: &mut AuthenticationRecordReader<'_>,
+) -> Result<Option<ValidatedInvitation>, AuthError> {
+    let tag = reader.read_array::<1>()?[0];
+    let invite_id = reader.read_array::<16>()?;
+    let expires_at = reader.read_u64()?;
+    match tag {
+        0 if invite_id == [0_u8; 16] && expires_at == 0 => Ok(None),
+        1 if expires_at != 0 => Ok(Some(ValidatedInvitation {
+            invite_id: InviteId::from_bytes(invite_id),
+            expires_at: UtcSecond::from_unix_seconds(expires_at),
+        })),
+        _ => Err(AuthError::InvalidEncoding),
+    }
+}
+
+fn put_route(
+    writer: &mut AuthenticationRecordWriter<'_>,
+    route: AccountRouteBinding,
+) -> Result<(), AuthError> {
+    writer.put(route.edge_server_id().as_bytes())?;
+    writer.put(route.edge_incarnation().as_bytes())?;
+    writer.put(route.origin_id().as_bytes())?;
+    writer.put_u64(route.origin_generation().get())?;
+    writer.put(route.connection_id().as_bytes())?;
+    writer.put(route.connection_nonce())
+}
+
+fn read_route(
+    reader: &mut AuthenticationRecordReader<'_>,
+) -> Result<AccountRouteBinding, AuthError> {
+    let edge_server_id = ServerId::from_bytes(reader.read_array()?);
+    let edge_incarnation = ServerIncarnation::from_bytes(reader.read_array()?);
+    let origin_id = OriginId::from_bytes(reader.read_array()?);
+    let origin_generation =
+        Generation::new(reader.read_u64()?).map_err(|_| AuthError::InvalidEncoding)?;
+    if origin_generation.get() == 0 {
+        return Err(AuthError::InvalidEncoding);
+    }
+    let connection_id = ConnectionId::from_bytes(reader.read_array()?);
+    let connection_nonce = reader.read_array()?;
+    Ok(AccountRouteBinding::new(
+        edge_server_id,
+        edge_incarnation,
+        origin_id,
+        origin_generation,
+        connection_id,
+        connection_nonce,
+    ))
+}
+
+fn put_request_binding(
+    writer: &mut AuthenticationRecordWriter<'_>,
+    binding: AccountRequestBinding,
+) -> Result<(), AuthError> {
+    writer.put(binding.network_id().as_bytes())?;
+    writer.put(binding.recovery_epoch().as_bytes())?;
+    writer.put(binding.recipient_key_id().as_bytes())?;
+    writer.put(binding.client_request_id().as_bytes())?;
+    writer.put_u16(binding.message_kind().wire_value())
+}
+
+fn read_request_binding(
+    reader: &mut AuthenticationRecordReader<'_>,
+) -> Result<AccountRequestBinding, AuthError> {
+    let network_id = NetworkId::from_bytes(reader.read_array()?);
+    let recovery_epoch = RecoveryEpoch::from_bytes(reader.read_array()?);
+    let recipient_key_id = AccountHpkeKeyId::from_bytes(reader.read_array()?);
+    let client_request_id = RequestId::from_bytes(reader.read_array()?);
+    let message_kind = AccountServiceMessageKind::from_wire(reader.read_u16()?)
+        .map_err(|_| AuthError::InvalidEncoding)?;
+    Ok(AccountRequestBinding::new(
+        network_id,
+        recovery_epoch,
+        recipient_key_id,
+        client_request_id,
+        message_kind,
+    ))
+}
+
+fn put_authentication_candidate(
+    writer: &mut AuthenticationRecordWriter<'_>,
+    candidate: AuthenticationCandidate,
+) -> Result<(), AuthError> {
+    match candidate {
+        AuthenticationCandidate::Known(account) => {
+            writer.put(&[AUTHENTICATION_CANDIDATE_KNOWN])?;
+            writer.put(account.account_id.to_text().as_bytes())?;
+            writer.put_u64(account.account_revision.get())?;
+            writer.put_u64(account.account_session_generation.get())
+        }
+        AuthenticationCandidate::RejectAtFinish => {
+            writer.put(&[AUTHENTICATION_CANDIDATE_REJECT])?;
+            writer.put(&[0_u8; 24])?;
+            writer.put_u64(0)?;
+            writer.put_u64(0)
+        }
+    }
+}
+
+fn read_authentication_candidate(
+    reader: &mut AuthenticationRecordReader<'_>,
+) -> Result<AuthenticationCandidate, AuthError> {
+    let tag = reader.read_array::<1>()?[0];
+    let account_bytes = reader.read_array::<24>()?;
+    let account_revision = reader.read_u64()?;
+    let account_session_generation = reader.read_u64()?;
+    match tag {
+        AUTHENTICATION_CANDIDATE_KNOWN => {
+            let account_id = AccountId::parse_wire_bytes(&account_bytes)
+                .map_err(|_| AuthError::InvalidEncoding)?;
+            let account_revision =
+                Revision::new(account_revision).map_err(|_| AuthError::InvalidEncoding)?;
+            let account_session_generation = Generation::new(account_session_generation)
+                .map_err(|_| AuthError::InvalidEncoding)?;
+            if account_session_generation.get() == 0 {
+                return Err(AuthError::InvalidEncoding);
+            }
+            Ok(AuthenticationCandidate::Known(AccountSnapshot {
+                account_id,
+                account_revision,
+                account_session_generation,
+            }))
+        }
+        AUTHENTICATION_CANDIDATE_REJECT
+            if account_bytes == [0_u8; 24]
+                && account_revision == 0
+                && account_session_generation == 0 =>
+        {
+            Ok(AuthenticationCandidate::RejectAtFinish)
+        }
+        _ => Err(AuthError::InvalidEncoding),
+    }
+}
+
+struct AuthenticationRecordWriter<'a> {
+    encoded: &'a mut [u8],
+    position: usize,
+}
+
+impl<'a> AuthenticationRecordWriter<'a> {
+    const fn new(encoded: &'a mut [u8]) -> Self {
+        Self {
+            encoded,
+            position: 0,
+        }
+    }
+
+    fn put(&mut self, bytes: &[u8]) -> Result<(), AuthError> {
+        let end = self
+            .position
+            .checked_add(bytes.len())
+            .ok_or(AuthError::Overflow)?;
+        let destination = self
+            .encoded
+            .get_mut(self.position..end)
+            .ok_or(AuthError::InvalidEncoding)?;
+        destination.copy_from_slice(bytes);
+        self.position = end;
+        Ok(())
+    }
+
+    fn put_u16(&mut self, value: u16) -> Result<(), AuthError> {
+        self.put(&value.to_be_bytes())
+    }
+
+    fn put_u64(&mut self, value: u64) -> Result<(), AuthError> {
+        self.put(&value.to_be_bytes())
+    }
+
+    fn finish(self) -> Result<(), AuthError> {
+        if self.position == self.encoded.len() {
+            Ok(())
+        } else {
+            Err(AuthError::InvalidEncoding)
+        }
+    }
+}
+
+struct AuthenticationRecordReader<'a> {
+    encoded: &'a [u8],
+    position: usize,
+}
+
+impl<'a> AuthenticationRecordReader<'a> {
+    const fn new(encoded: &'a [u8]) -> Self {
+        Self {
+            encoded,
+            position: 0,
+        }
+    }
+
+    fn read_array<const N: usize>(&mut self) -> Result<[u8; N], AuthError> {
+        let end = self.position.checked_add(N).ok_or(AuthError::Overflow)?;
+        let value = self
+            .encoded
+            .get(self.position..end)
+            .ok_or(AuthError::InvalidEncoding)?
+            .try_into()
+            .map_err(|_| AuthError::InvalidEncoding)?;
+        self.position = end;
+        Ok(value)
+    }
+
+    fn read_u16(&mut self) -> Result<u16, AuthError> {
+        self.read_array().map(u16::from_be_bytes)
+    }
+
+    fn read_u64(&mut self) -> Result<u64, AuthError> {
+        self.read_array().map(u64::from_be_bytes)
+    }
+
+    fn finish(self) -> Result<(), AuthError> {
+        if self.position == self.encoded.len() {
+            Ok(())
+        } else {
+            Err(AuthError::InvalidEncoding)
+        }
+    }
+}
+
 /// One-use bearer grant and exact route binding to commit when OPAQUE
 /// authentication succeeds.
 ///
@@ -751,6 +1776,138 @@ impl AuthenticationGrant {
     #[must_use]
     pub const fn grant_id_for_persistence_or_session_open(&self) -> &AuthGrantId {
         &self.grant_id
+    }
+
+    /// Consumes a durably released authentication grant and returns its
+    /// process-local, one-use destructive-operation proof.
+    ///
+    /// External callers can obtain an owned grant only from
+    /// [`SealedAccountFinishOutcome::into_result_after_commit`], so the proof
+    /// cannot cross the durable completion barrier early.
+    #[must_use]
+    pub fn into_fresh_authentication_after_commit(self) -> FreshAuthenticationProof {
+        self.fresh_authentication
+    }
+}
+
+/// Exact version-one bytes of one durable, unconsumed authentication grant.
+pub const AUTHENTICATION_GRANT_RECORD_BYTES: usize =
+    2 + 2 + 16 + 32 + 32 + (16 + 16 + 16 + 8 + 16 + 32) + 24 + 8 + 8;
+
+const AUTHENTICATION_GRANT_RECORD_VERSION: u16 = 1;
+const AUTHENTICATION_GRANT_RECORD_CLASS: u16 = 4;
+
+/// Move-only encrypted-record plaintext for one one-use authentication grant.
+///
+/// The process-local fresh-authentication proof is deliberately absent. A
+/// restarted coordinator may validate and consume the durable bearer, but it
+/// cannot recreate the separate monotonic proof.
+pub struct AuthenticationGrantRecord(Zeroizing<[u8; AUTHENTICATION_GRANT_RECORD_BYTES]>);
+
+/// Authenticated grant-row facts needed during startup reconstruction.
+pub struct AuthenticationGrantRestartMetadata {
+    transaction_id: TransactionId,
+    account_id: AccountId,
+    account_session_generation: Generation,
+    durable_expires_at_utc: UtcSecond,
+}
+
+impl AuthenticationGrantRestartMetadata {
+    /// Returns the transaction key that owns the durable grant row.
+    #[must_use]
+    pub const fn transaction_id(&self) -> TransactionId {
+        self.transaction_id
+    }
+
+    /// Returns the account bound to the one-use grant.
+    #[must_use]
+    pub const fn account_id(&self) -> AccountId {
+        self.account_id
+    }
+
+    /// Returns the credential generation that fences the grant.
+    #[must_use]
+    pub const fn account_session_generation(&self) -> Generation {
+        self.account_session_generation
+    }
+
+    /// Returns the exclusive durable UTC deadline.
+    #[must_use]
+    pub const fn durable_expires_at_utc(&self) -> UtcSecond {
+        self.durable_expires_at_utc
+    }
+}
+
+impl AuthenticationGrantRecord {
+    /// Captures a successful authentication grant under its transaction key.
+    pub fn capture(
+        transaction_id: TransactionId,
+        grant: &AuthenticationGrant,
+    ) -> Result<Self, AuthError> {
+        if grant.account_session_generation().get() == 0
+            || grant.durable_expires_at_utc().get() == 0
+        {
+            return Err(AuthError::InvalidEncoding);
+        }
+        let mut encoded = Zeroizing::new([0_u8; AUTHENTICATION_GRANT_RECORD_BYTES]);
+        let mut writer = AuthenticationRecordWriter::new(encoded.as_mut());
+        writer.put_u16(AUTHENTICATION_GRANT_RECORD_VERSION)?;
+        writer.put_u16(AUTHENTICATION_GRANT_RECORD_CLASS)?;
+        writer.put(transaction_id.as_bytes())?;
+        writer.put(
+            grant
+                .grant_id_for_persistence_or_session_open()
+                .expose_for_session_open(),
+        )?;
+        writer.put(grant.network_id().as_bytes())?;
+        put_route(&mut writer, grant.route)?;
+        writer.put(grant.account_id().to_text().as_bytes())?;
+        writer.put_u64(grant.account_session_generation().get())?;
+        writer.put_u64(grant.durable_expires_at_utc().get())?;
+        writer.finish()?;
+        Ok(Self(encoded))
+    }
+
+    /// Copies one opened storage body into a fixed zeroizing allocation.
+    pub fn parse(encoded: &[u8]) -> Result<Self, AuthError> {
+        let bytes: [u8; AUTHENTICATION_GRANT_RECORD_BYTES] =
+            encoded.try_into().map_err(|_| AuthError::InvalidEncoding)?;
+        Ok(Self(Zeroizing::new(bytes)))
+    }
+
+    /// Borrows the exact body only for encrypted persistence.
+    #[must_use]
+    pub fn expose_for_persistence(&self) -> &[u8; AUTHENTICATION_GRANT_RECORD_BYTES] {
+        &self.0
+    }
+
+    /// Fully validates an opened grant row and returns its restart facts.
+    pub fn into_restart_metadata(self) -> Result<AuthenticationGrantRestartMetadata, AuthError> {
+        let mut reader = AuthenticationRecordReader::new(self.0.as_ref());
+        if reader.read_u16()? != AUTHENTICATION_GRANT_RECORD_VERSION
+            || reader.read_u16()? != AUTHENTICATION_GRANT_RECORD_CLASS
+        {
+            return Err(AuthError::InvalidEncoding);
+        }
+        let transaction_id = TransactionId::from_bytes(reader.read_array()?);
+        let _grant_id = AuthGrantId::from_bytes(reader.read_array()?);
+        let _network_id = NetworkId::from_bytes(reader.read_array()?);
+        let _route = read_route(&mut reader)?;
+        let account_id = AccountId::parse_wire_bytes(&reader.read_array::<24>()?)
+            .map_err(|_| AuthError::InvalidEncoding)?;
+        let account_session_generation =
+            Generation::new(reader.read_u64()?).map_err(|_| AuthError::InvalidEncoding)?;
+        let durable_expires_at_utc = UtcSecond::from_unix_seconds(reader.read_u64()?);
+        if account_session_generation.get() == 0 || durable_expires_at_utc.get() == 0 {
+            return Err(AuthError::InvalidEncoding);
+        }
+        reader.finish()?;
+        Ok(AuthenticationGrantRestartMetadata {
+            transaction_id,
+            account_id,
+            account_session_generation,
+            durable_expires_at_utc,
+        })
     }
 }
 
@@ -898,9 +2055,9 @@ fn finish_account_authentication_with_entropy(
         expected_transaction,
         finish_request_binding,
     );
-    let (account, authentication) = match authentication? {
-        AuthenticationFinishEvaluation::Accepted(account, authentication) => {
-            (account, authentication)
+    let (account, credential_id, authentication) = match authentication? {
+        AuthenticationFinishEvaluation::Accepted(account, credential_id, authentication) => {
+            (account, credential_id, authentication)
         }
         AuthenticationFinishEvaluation::Rejected => {
             let response = rejected_authentication_response(response_lineage, claimed_transaction)?;
@@ -911,7 +2068,7 @@ fn finish_account_authentication_with_entropy(
         }
     };
     authorize_opaque(authentication);
-    let grant = create_authentication_grant(account, context, entropy)?;
+    let grant = create_authentication_grant(account, credential_id, context, entropy)?;
     let response = AccountResponsePlan::new(
         response_lineage,
         expected_transaction,
@@ -921,7 +2078,7 @@ fn finish_account_authentication_with_entropy(
 }
 
 enum AuthenticationFinishEvaluation {
-    Accepted(AccountSnapshot, OpaqueAuthentication),
+    Accepted(AccountSnapshot, OpaqueCredentialId, OpaqueAuthentication),
     Rejected,
 }
 
@@ -961,12 +2118,14 @@ fn evaluate_authentication_finish(
     };
     Ok(AuthenticationFinishEvaluation::Accepted(
         account,
+        credential_id,
         authentication,
     ))
 }
 
 fn create_authentication_grant(
     account: AccountSnapshot,
+    credential_id: OpaqueCredentialId,
     context: AccountOperationContext,
     entropy: &mut impl EntropySource,
 ) -> Result<AuthenticationGrant, AuthError> {
@@ -987,6 +2146,7 @@ fn create_authentication_grant(
     let grant_id = AuthGrantId::generate(entropy).map_err(|_| AuthError::EntropyUnavailable)?;
     let fresh_authentication = FreshAuthenticationProof {
         account,
+        credential_id,
         network_id: context.network_id,
         route: context.route,
         expires_at: MonotonicTick::from_ticks(fresh_authentication_expires_at),
@@ -1009,12 +2169,38 @@ fn authorize_opaque(authentication: OpaqueAuthentication) {
 /// Process-local, one-use proof for one destructive same-account start.
 pub struct FreshAuthenticationProof {
     account: AccountSnapshot,
+    credential_id: OpaqueCredentialId,
     network_id: NetworkId,
     route: AccountRouteBinding,
     expires_at: MonotonicTick,
 }
 
 impl FreshAuthenticationProof {
+    /// Borrows the authenticated private credential identity for the one
+    /// consistency read that precedes credential replacement.
+    #[must_use]
+    pub const fn credential_id_for_replacement(&self) -> &OpaqueCredentialId {
+        &self.credential_id
+    }
+
+    fn consume_for_credential_change(
+        self,
+        context: AccountOperationContext,
+        account: AccountSnapshot,
+        credential_id: &OpaqueCredentialId,
+    ) -> Result<(), AuthError> {
+        let credential_matches = self
+            .credential_id
+            .expose_for_account_service()
+            .ct_eq(credential_id.expose_for_account_service());
+        self.consume(context, account)?;
+        if bool::from(credential_matches) {
+            Ok(())
+        } else {
+            Err(AuthError::WrongState)
+        }
+    }
+
     fn consume(
         self,
         context: AccountOperationContext,
@@ -1054,6 +2240,24 @@ impl DestructiveAccountSnapshot {
             account_session_generation,
         })
     }
+
+    /// Returns the immutable account identity.
+    #[must_use]
+    pub const fn account_id(self) -> AccountId {
+        self.0.account_id
+    }
+
+    /// Returns the exact account revision observed before the operation.
+    #[must_use]
+    pub const fn account_revision(self) -> Revision {
+        self.0.account_revision
+    }
+
+    /// Returns the credential generation observed before the operation.
+    #[must_use]
+    pub const fn account_session_generation(self) -> Generation {
+        self.0.account_session_generation
+    }
 }
 
 /// Credential-change challenge state bound to one account incarnation and credential ID.
@@ -1070,8 +2274,8 @@ pub struct CredentialChangeState {
 pub struct CredentialChangeStartParameters {
     /// Complete route identity and clock binding.
     pub context: AccountOperationContext,
-    /// Consumed same-account OPAQUE proof.
-    pub proof: FreshAuthenticationProof,
+    /// Consumed same-account OPAQUE proof, or absence for a latent rejection.
+    pub proof: Option<FreshAuthenticationProof>,
     /// Current storage-validated account state.
     pub account: DestructiveAccountSnapshot,
     /// Existing private credential identity, which must not change.
@@ -1130,10 +2334,10 @@ impl CredentialReplacementIntent {
 
 /// Starts credential replacement after consuming a fresh same-account proof.
 ///
-/// Stage 04 withholds the `FreshAuthenticationProof` accessor, so this entry
-/// point becomes reachable only when Stage 06 consumes an authentication
-/// grant through `session_open`. A grant reconstructed from storage must never
-/// yield a proof; the client reauthenticates before a destructive control.
+/// Stage 06 reaches this entry point only after a sealed authentication grant
+/// crosses its durable completion barrier. A grant reconstructed from storage
+/// must never yield a proof; the client reauthenticates before a destructive
+/// control.
 pub fn begin_credential_change(
     profile: &OpaqueProfile,
     parameters: CredentialChangeStartParameters,
@@ -1160,7 +2364,9 @@ fn begin_credential_change_with_entropy(
     if request.network_id != context.network_id {
         return Err(AuthError::ContextMismatch);
     }
-    let proof_result = proof.consume(context, account.0);
+    let proof_result = proof.map_or(Err(AuthError::WrongState), |proof| {
+        proof.consume_for_credential_change(context, account.0, &credential_id)
+    });
     let mut disposition = StartDisposition::SuccessCandidate;
     if request.account_id != account.0.account_id {
         disposition = disposition.reject(AuthError::ContextMismatch);
@@ -1272,6 +2478,25 @@ impl AccountFinishOutcome<CreateAccountIntent> {
 }
 
 impl AccountFinishOutcome<AuthenticationGrant> {
+    /// Converts an otherwise successful login into the same latent rejected
+    /// completion used for authentication failure when the runtime cannot
+    /// safely bind the account to the live session.
+    ///
+    /// This decision happens before sealing so the encrypted completion,
+    /// durable terminal row, and IRC carrier result cannot disagree.
+    pub fn reject_when_unavailable(self, operation_is_available: bool) -> Result<Self, AuthError> {
+        if operation_is_available || self.result.is_err() {
+            return Ok(self);
+        }
+        let AccountResponsePlan {
+            lineage,
+            transaction_id,
+            payload: _,
+        } = self.response;
+        let response = rejected_authentication_response(lineage, transaction_id)?;
+        Ok(Self::rejected(AuthError::AuthenticationFailed, response))
+    }
+
     /// Verifies the authentication receipt against the exact grant and seals
     /// both as one checked terminal outcome.
     pub fn seal(
@@ -1603,8 +2828,8 @@ fn duplicate_credential_id(credential_id: &OpaqueCredentialId) -> OpaqueCredenti
 #[cfg(test)]
 mod tests {
     use agenc_ircd_crypto::{
-        AccountHpkePrivateKey, AccountRequestBinding, AccountResponseOpenToken, LoginIndexKey,
-        OpaqueFakeCredentialKey, seal_account_request,
+        AccountHpkePrivateKey, AccountRequestBinding, AccountResponseOpenToken, LoginIndexDigest,
+        LoginIndexKey, OpaqueFakeCredentialKey, seal_account_request,
     };
     use agenc_ircd_types::{
         AccountRandomId, AccountServiceCompletionStatus, AccountServiceMessageKind, ConnectionId,
@@ -1614,15 +2839,20 @@ mod tests {
     };
 
     use super::{
-        AccountAuthenticationState, AccountCreationStartParameters, AccountOperationContext,
-        AccountSnapshot, AuthError, AuthenticationCandidate, AuthenticationLookup,
-        AuthenticationStartParameters, CreationAdmission, CredentialChangeStartParameters,
-        DestructiveAccountSnapshot, FreshAuthenticationProof, begin_account_creation_with_entropy,
-        begin_account_deletion, begin_account_deletion_with_entropy,
-        begin_authentication_with_entropy, begin_credential_change_with_entropy,
-        create_authentication_grant, finish_account_authentication_with_entropy,
-        finish_credential_change, fresh_account_id, fresh_opaque_credential_id,
-        fresh_transaction_id,
+        AUTHENTICATION_GRANT_RECORD_BYTES, AUTHENTICATION_TRANSACTION_RECORD_BYTES,
+        AccountAuthenticationState, AccountCreationStartParameters, AccountCreationState,
+        AccountFinishOutcome, AccountOperationContext, AccountResponsePlan, AccountSnapshot,
+        AuthError, AuthenticationCandidate, AuthenticationGrantRecord, AuthenticationLookup,
+        AuthenticationStartParameters, AuthenticationTransactionRecord,
+        CREATION_TRANSACTION_RECORD_BYTES, CREDENTIAL_CHANGE_TRANSACTION_RECORD_BYTES,
+        CreationAdmission, CreationTransactionRecord, CredentialChangeStartParameters,
+        CredentialChangeState, CredentialChangeTransactionRecord, DestructiveAccountSnapshot,
+        FreshAuthenticationProof, StartDisposition, ValidatedInvitation, authentication_completion,
+        begin_account_creation_with_entropy, begin_account_deletion,
+        begin_account_deletion_with_entropy, begin_authentication_with_entropy,
+        begin_credential_change_with_entropy, create_authentication_grant,
+        finish_account_authentication_with_entropy, finish_credential_change, fresh_account_id,
+        fresh_opaque_credential_id, fresh_transaction_id,
     };
     use crate::opaque::{
         OpaqueKe1, OpaqueKe3, OpaqueProfile, OpaqueRegistrationRecord, OpaqueRegistrationRequest,
@@ -1701,6 +2931,7 @@ mod tests {
     ) -> Result<FreshAuthenticationProof, agenc_ircd_types::ValidationError> {
         Ok(FreshAuthenticationProof {
             account: account()?.0,
+            credential_id: OpaqueCredentialId::from_bytes([9_u8; 32]),
             network_id: context(0)?.network_id,
             route: context(0)?.route,
             expires_at: MonotonicTick::from_ticks(expires_at),
@@ -1721,11 +2952,12 @@ mod tests {
         ProofConnectionNonce,
         ProofRevision,
         ProofGeneration,
+        ProofCredential,
         ProofExpired,
     }
 
     impl CredentialStartRejectionCase {
-        const ALL: [Self; 13] = [
+        const ALL: [Self; 14] = [
             Self::RequestedAccount,
             Self::OperationUnavailable,
             Self::ProofNetwork,
@@ -1738,6 +2970,7 @@ mod tests {
             Self::ProofConnectionNonce,
             Self::ProofRevision,
             Self::ProofGeneration,
+            Self::ProofCredential,
             Self::ProofExpired,
         ];
 
@@ -1749,6 +2982,7 @@ mod tests {
         ) -> Result<CredentialRejectionInputs, agenc_ircd_types::ValidationError> {
             let mut proof = FreshAuthenticationProof {
                 account: snapshot,
+                credential_id: OpaqueCredentialId::from_bytes([40_u8; 32]),
                 network_id: operation.network_id,
                 route: operation.route,
                 expires_at: MonotonicTick::from_ticks(20),
@@ -1844,6 +3078,10 @@ mod tests {
                 }
                 Self::ProofGeneration => {
                     proof.account.account_session_generation = Generation::new(10)?;
+                    AuthError::WrongState
+                }
+                Self::ProofCredential => {
+                    proof.credential_id = OpaqueCredentialId::from_bytes([41_u8; 32]);
                     AuthError::WrongState
                 }
                 Self::ProofExpired => {
@@ -2059,7 +3297,7 @@ mod tests {
     fn assert_rejected_credential_start(
         profile: &OpaqueProfile,
         request_id: u8,
-        proof: FreshAuthenticationProof,
+        proof: Option<FreshAuthenticationProof>,
         account: DestructiveAccountSnapshot,
         requested_account: agenc_ircd_types::AccountId,
         operation_is_available: bool,
@@ -2094,7 +3332,7 @@ mod tests {
             &mut entropy,
         )?;
         let transaction_id = start.transaction_id();
-        let mut start = start.seal(0)?;
+        let start = start.seal(0)?;
         assert_eq!(
             start.response_intent().response().as_bytes().len(),
             ACCOUNT_SERVICE_RESPONSE_BYTES
@@ -2122,8 +3360,8 @@ mod tests {
         else {
             return Err("opened request kind changed".into());
         };
-        let outcome =
-            finish_credential_change(start.transaction_mut(), context(11)?, finish_request)?;
+        let mut transaction = start.into_transaction_after_commit(1)?;
+        let outcome = finish_credential_change(&mut transaction, context(11)?, finish_request)?;
         assert_eq!(outcome.result().err(), Some(expected_error));
         let outcome = outcome.seal(1)?;
         assert_eq!(
@@ -2216,7 +3454,7 @@ mod tests {
         let destructive_account = account()?;
         let credential_change = CredentialChangeStartParameters {
             context: context(10)?,
-            proof: fresh_proof(20)?,
+            proof: Some(fresh_proof(20)?),
             account: destructive_account,
             credential_id: OpaqueCredentialId::from_bytes([9_u8; 32]),
             request: credential_start_request(22, destructive_account.0.account_id)?,
@@ -2285,6 +3523,429 @@ mod tests {
     }
 
     #[test]
+    fn authentication_transaction_record_round_trips_without_login_plaintext()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let network_id = NetworkId::from_bytes(vector_bytes("network")?);
+        let operation = context_for_network(network_id, 100)?;
+        let transaction_id = TransactionId::from_bytes([41_u8; 16]);
+        let private_key = AccountHpkePrivateKey::from_bytes([6_u8; 32])?;
+        let start_request_binding = AccountRequestBinding::new(
+            network_id,
+            TEST_RECOVERY_EPOCH,
+            private_key.public_key()?.key_id(),
+            RequestId::from_bytes([42_u8; 16]),
+            AccountServiceMessageKind::OpaqueAuthStart,
+        );
+        let transaction_binding = AccountTransactionBinding::new(
+            transaction_id,
+            TransactionClass::Authentication,
+            network_id,
+            operation.route,
+            operation.now,
+        )?;
+        let expected_account = account()?.0;
+        let state = AccountAuthenticationState {
+            start_request_binding,
+            candidate: AuthenticationCandidate::Known(expected_account),
+            credential_id: OpaqueCredentialId::from_bytes(vector_bytes("credential_id")?),
+            server_state: OpaqueServerLoginState::from_persisted_bytes(vector_bytes(
+                "server_login_state",
+            )?)?,
+        };
+        let transaction = AccountTransaction::new(transaction_binding, state);
+        let record = AuthenticationTransactionRecord::capture(
+            &transaction,
+            MonotonicTick::from_ticks(1_100),
+            UtcSecond::from_unix_seconds(500),
+        )?;
+        assert_eq!(
+            record.expose_for_persistence().len(),
+            AUTHENTICATION_TRANSACTION_RECORD_BYTES
+        );
+        assert_eq!(
+            record.durable_expires_at_utc()?,
+            UtcSecond::from_unix_seconds(529)
+        );
+        assert!(
+            !record
+                .expose_for_persistence()
+                .windows("entropy-user".len())
+                .any(|window| window == b"entropy-user")
+        );
+
+        let restored = AuthenticationTransactionRecord::parse(record.expose_for_persistence())?
+            .restore(
+                MonotonicTick::from_ticks(2_000),
+                UtcSecond::from_unix_seconds(501),
+            )?;
+        let restored_binding = restored.binding();
+        assert_eq!(restored_binding.transaction_id(), transaction_id);
+        assert_eq!(restored_binding.network_id(), network_id);
+        assert_eq!(
+            restored_binding.expires_at(),
+            MonotonicTick::from_ticks(30_000)
+        );
+        restored_binding.route().validate_match(operation.route)?;
+        let restored_state = restored.state_ref().ok_or(AuthError::Consumed)?;
+        assert_eq!(restored_state.start_request_binding, start_request_binding);
+        let AuthenticationCandidate::Known(restored_account) = restored_state.candidate else {
+            return Err("restored known account became a rejection candidate".into());
+        };
+        assert_eq!(restored_account, expected_account);
+        assert_eq!(
+            restored_state.credential_id.expose_for_account_service(),
+            vector_bytes::<32>("credential_id")?.as_slice()
+        );
+        assert_eq!(
+            restored_state.server_state.expose_for_persistence(),
+            vector_bytes::<128>("server_login_state")?.as_slice()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn authentication_transaction_record_rejects_expiry_and_corruption()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let network_id = NetworkId::from_bytes(vector_bytes("network")?);
+        let operation = context_for_network(network_id, 100)?;
+        let transaction_id = TransactionId::from_bytes([51_u8; 16]);
+        let private_key = AccountHpkePrivateKey::from_bytes([6_u8; 32])?;
+        let state = AccountAuthenticationState {
+            start_request_binding: AccountRequestBinding::new(
+                network_id,
+                TEST_RECOVERY_EPOCH,
+                private_key.public_key()?.key_id(),
+                RequestId::from_bytes([52_u8; 16]),
+                AccountServiceMessageKind::OpaqueAuthStart,
+            ),
+            candidate: AuthenticationCandidate::RejectAtFinish,
+            credential_id: OpaqueCredentialId::from_bytes(vector_bytes("credential_id")?),
+            server_state: OpaqueServerLoginState::from_persisted_bytes(vector_bytes(
+                "fake_server_login_state",
+            )?)?,
+        };
+        let binding = AccountTransactionBinding::new(
+            transaction_id,
+            TransactionClass::Authentication,
+            network_id,
+            operation.route,
+            operation.now,
+        )?;
+        let transaction = AccountTransaction::new(binding, state);
+        let record = AuthenticationTransactionRecord::capture(
+            &transaction,
+            MonotonicTick::from_ticks(1_100),
+            UtcSecond::from_unix_seconds(700),
+        )?;
+        assert_eq!(
+            AuthenticationTransactionRecord::parse(record.expose_for_persistence())?
+                .restore(
+                    MonotonicTick::from_ticks(0),
+                    UtcSecond::from_unix_seconds(729),
+                )
+                .err(),
+            Some(AuthError::Expired)
+        );
+        assert_eq!(
+            AuthenticationTransactionRecord::parse(
+                &record.expose_for_persistence()[..AUTHENTICATION_TRANSACTION_RECORD_BYTES - 1],
+            )
+            .err(),
+            Some(AuthError::InvalidEncoding)
+        );
+
+        let mut corrupted = *record.expose_for_persistence();
+        corrupted[0] ^= 1;
+        assert_eq!(
+            AuthenticationTransactionRecord::parse(&corrupted)?
+                .restore(
+                    MonotonicTick::from_ticks(0),
+                    UtcSecond::from_unix_seconds(701),
+                )
+                .err(),
+            Some(AuthError::InvalidEncoding)
+        );
+        let candidate_tag_offset = 262;
+        let mut corrupted = *record.expose_for_persistence();
+        *corrupted
+            .get_mut(candidate_tag_offset)
+            .ok_or("candidate-tag fixture offset is out of bounds")? = 9;
+        assert_eq!(
+            AuthenticationTransactionRecord::parse(&corrupted)?
+                .restore(
+                    MonotonicTick::from_ticks(0),
+                    UtcSecond::from_unix_seconds(701),
+                )
+                .err(),
+            Some(AuthError::InvalidEncoding)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn creation_transaction_record_round_trips_private_reservations()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let network_id = NetworkId::from_bytes(vector_bytes("network")?);
+        let operation = context_for_network(network_id, 100)?;
+        let transaction_id = TransactionId::from_bytes([61_u8; 16]);
+        let private_key = AccountHpkePrivateKey::from_bytes([6_u8; 32])?;
+        let start_request_binding = AccountRequestBinding::new(
+            network_id,
+            TEST_RECOVERY_EPOCH,
+            private_key.public_key()?.key_id(),
+            RequestId::from_bytes([62_u8; 16]),
+            AccountServiceMessageKind::AccountCreateStart,
+        );
+        let login_digest = [63_u8; 32];
+        let credential_id = [64_u8; 32];
+        let invite_id = agenc_ircd_types::InviteId::from_bytes([65_u8; 16]);
+        let binding = AccountTransactionBinding::new(
+            transaction_id,
+            TransactionClass::AccountCreation,
+            network_id,
+            operation.route,
+            operation.now,
+        )?;
+        let transaction = AccountTransaction::new(
+            binding,
+            AccountCreationState {
+                start_request_binding,
+                disposition: StartDisposition::RejectAtFinish(AuthError::InvitationRejected),
+                login_digest: LoginIndexDigest::from_storage_key(login_digest),
+                credential_id: OpaqueCredentialId::from_bytes(credential_id),
+                invitation: Some(ValidatedInvitation {
+                    invite_id,
+                    expires_at: UtcSecond::from_unix_seconds(900),
+                }),
+            },
+        );
+        let record = CreationTransactionRecord::capture(
+            &transaction,
+            MonotonicTick::from_ticks(1_100),
+            UtcSecond::from_unix_seconds(500),
+        )?;
+        assert_eq!(
+            record.expose_for_persistence().len(),
+            CREATION_TRANSACTION_RECORD_BYTES
+        );
+        assert_eq!(
+            record.durable_expires_at_utc()?,
+            UtcSecond::from_unix_seconds(559)
+        );
+        assert!(
+            !record
+                .expose_for_persistence()
+                .windows("entropy-user".len())
+                .any(|window| window == b"entropy-user")
+        );
+        let restart = CreationTransactionRecord::parse(record.expose_for_persistence())?
+            .into_restart_cleanup_metadata()?;
+        assert_eq!(restart.transaction_id(), transaction_id);
+        assert_eq!(
+            restart.durable_expires_at_utc(),
+            UtcSecond::from_unix_seconds(559)
+        );
+        assert!(restart.reservation_login_digest().is_none());
+        assert!(restart.reservation_invitation().is_none());
+
+        let restored = CreationTransactionRecord::parse(record.expose_for_persistence())?.restore(
+            MonotonicTick::from_ticks(2_000),
+            UtcSecond::from_unix_seconds(501),
+        )?;
+        assert_eq!(restored.binding().transaction_id(), transaction_id);
+        assert_eq!(
+            restored.binding().expires_at(),
+            MonotonicTick::from_ticks(60_000)
+        );
+        let state = restored.state_ref().ok_or(AuthError::Consumed)?;
+        assert_eq!(state.start_request_binding, start_request_binding);
+        assert!(matches!(
+            state.disposition,
+            StartDisposition::RejectAtFinish(AuthError::InvitationRejected)
+        ));
+        assert_eq!(state.login_digest.expose_for_storage_key(), &login_digest);
+        assert_eq!(
+            state.credential_id.expose_for_account_service(),
+            &credential_id
+        );
+        let invitation = state.invitation.as_ref().ok_or("invitation was lost")?;
+        assert_eq!(invitation.invite_id, invite_id);
+        assert_eq!(invitation.expires_at, UtcSecond::from_unix_seconds(900));
+        Ok(())
+    }
+
+    #[test]
+    fn credential_transaction_record_round_trips_consumed_proof_result()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let network_id = NetworkId::from_bytes(vector_bytes("network")?);
+        let operation = context_for_network(network_id, 100)?;
+        let transaction_id = TransactionId::from_bytes([71_u8; 16]);
+        let private_key = AccountHpkePrivateKey::from_bytes([6_u8; 32])?;
+        let start_request_binding = AccountRequestBinding::new(
+            network_id,
+            TEST_RECOVERY_EPOCH,
+            private_key.public_key()?.key_id(),
+            RequestId::from_bytes([72_u8; 16]),
+            AccountServiceMessageKind::CredentialChangeStart,
+        );
+        let account = account()?.0;
+        let credential_id = [73_u8; 32];
+        let binding = AccountTransactionBinding::new(
+            transaction_id,
+            TransactionClass::CredentialChange,
+            network_id,
+            operation.route,
+            operation.now,
+        )?;
+        let transaction = AccountTransaction::new(
+            binding,
+            CredentialChangeState {
+                start_request_binding,
+                disposition: StartDisposition::RejectAtFinish(AuthError::WrongOrigin),
+                account,
+                credential_id: OpaqueCredentialId::from_bytes(credential_id),
+            },
+        );
+        let record = CredentialChangeTransactionRecord::capture(
+            &transaction,
+            MonotonicTick::from_ticks(1_100),
+            UtcSecond::from_unix_seconds(700),
+        )?;
+        assert_eq!(
+            record.expose_for_persistence().len(),
+            CREDENTIAL_CHANGE_TRANSACTION_RECORD_BYTES
+        );
+        assert_eq!(
+            record.durable_expires_at_utc()?,
+            UtcSecond::from_unix_seconds(759)
+        );
+        let restart = CredentialChangeTransactionRecord::parse(record.expose_for_persistence())?
+            .into_restart_cleanup_metadata()?;
+        assert_eq!(restart.transaction_id(), transaction_id);
+        assert_eq!(
+            restart.durable_expires_at_utc(),
+            UtcSecond::from_unix_seconds(759)
+        );
+        assert!(restart.reservation_account_id().is_none());
+
+        let restored = CredentialChangeTransactionRecord::parse(record.expose_for_persistence())?
+            .restore(
+            MonotonicTick::from_ticks(3_000),
+            UtcSecond::from_unix_seconds(702),
+        )?;
+        assert_eq!(restored.binding().transaction_id(), transaction_id);
+        assert_eq!(
+            restored.binding().expires_at(),
+            MonotonicTick::from_ticks(60_000)
+        );
+        let state = restored.state_ref().ok_or(AuthError::Consumed)?;
+        assert_eq!(state.start_request_binding, start_request_binding);
+        assert!(matches!(
+            state.disposition,
+            StartDisposition::RejectAtFinish(AuthError::WrongOrigin)
+        ));
+        assert_eq!(state.account, account);
+        assert_eq!(
+            state.credential_id.expose_for_account_service(),
+            &credential_id
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn durable_transaction_records_reject_expiry_truncation_and_bad_tags()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let operation = context(100)?;
+        let private_key = AccountHpkePrivateKey::from_bytes([6_u8; 32])?;
+        let binding = AccountTransactionBinding::new(
+            TransactionId::from_bytes([81_u8; 16]),
+            TransactionClass::AccountCreation,
+            operation.network_id,
+            operation.route,
+            operation.now,
+        )?;
+        let transaction = AccountTransaction::new(
+            binding,
+            AccountCreationState {
+                start_request_binding: AccountRequestBinding::new(
+                    operation.network_id,
+                    TEST_RECOVERY_EPOCH,
+                    private_key.public_key()?.key_id(),
+                    RequestId::from_bytes([82_u8; 16]),
+                    AccountServiceMessageKind::AccountCreateStart,
+                ),
+                disposition: StartDisposition::SuccessCandidate,
+                login_digest: LoginIndexDigest::from_storage_key([83_u8; 32]),
+                credential_id: OpaqueCredentialId::from_bytes([84_u8; 32]),
+                invitation: None,
+            },
+        );
+        let record = CreationTransactionRecord::capture(
+            &transaction,
+            MonotonicTick::from_ticks(1_100),
+            UtcSecond::from_unix_seconds(800),
+        )?;
+        let restart = CreationTransactionRecord::parse(record.expose_for_persistence())?
+            .into_restart_cleanup_metadata()?;
+        assert_eq!(
+            restart
+                .reservation_login_digest()
+                .ok_or(AuthError::InvalidEncoding)?
+                .expose_for_storage_key(),
+            &[83_u8; 32]
+        );
+        assert!(restart.reservation_invitation().is_none());
+        assert_eq!(
+            CreationTransactionRecord::parse(record.expose_for_persistence())?
+                .restore(
+                    MonotonicTick::from_ticks(0),
+                    UtcSecond::from_unix_seconds(859),
+                )
+                .err(),
+            Some(AuthError::Expired)
+        );
+        assert_eq!(
+            CreationTransactionRecord::parse(
+                &record.expose_for_persistence()[..CREATION_TRANSACTION_RECORD_BYTES - 1]
+            )
+            .err(),
+            Some(AuthError::InvalidEncoding)
+        );
+
+        let disposition_offset = 262;
+        let mut corrupted = *record.expose_for_persistence();
+        corrupted
+            .get_mut(disposition_offset..disposition_offset + 2)
+            .ok_or("disposition fixture offset is out of bounds")?
+            .copy_from_slice(&u16::MAX.to_be_bytes());
+        assert_eq!(
+            CreationTransactionRecord::parse(&corrupted)?
+                .restore(
+                    MonotonicTick::from_ticks(0),
+                    UtcSecond::from_unix_seconds(801),
+                )
+                .err(),
+            Some(AuthError::InvalidEncoding)
+        );
+
+        let invitation_tag_offset = 328;
+        let mut corrupted = *record.expose_for_persistence();
+        *corrupted
+            .get_mut(invitation_tag_offset)
+            .ok_or("invitation fixture offset is out of bounds")? = 2;
+        assert_eq!(
+            CreationTransactionRecord::parse(&corrupted)?
+                .restore(
+                    MonotonicTick::from_ticks(0),
+                    UtcSecond::from_unix_seconds(801),
+                )
+                .err(),
+            Some(AuthError::InvalidEncoding)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn authentication_grant_deadlines_fail_closed_on_overflow()
     -> Result<(), Box<dyn core::error::Error>> {
         let account = account()?.0;
@@ -2295,7 +3956,13 @@ mod tests {
             ..base
         };
         assert_eq!(
-            create_authentication_grant(account, monotonic_overflow, &mut entropy).err(),
+            create_authentication_grant(
+                account,
+                OpaqueCredentialId::from_bytes([9_u8; 32]),
+                monotonic_overflow,
+                &mut entropy,
+            )
+            .err(),
             Some(AuthError::Overflow)
         );
         let utc_overflow = AccountOperationContext {
@@ -2303,12 +3970,112 @@ mod tests {
             ..base
         };
         assert_eq!(
-            create_authentication_grant(account, utc_overflow, &mut entropy).err(),
+            create_authentication_grant(
+                account,
+                OpaqueCredentialId::from_bytes([9_u8; 32]),
+                utc_overflow,
+                &mut entropy,
+            )
+            .err(),
             Some(AuthError::Overflow)
         );
-        let grant = create_authentication_grant(account, context(100)?, &mut entropy)?;
+        let grant = create_authentication_grant(
+            account,
+            OpaqueCredentialId::from_bytes([9_u8; 32]),
+            context(100)?,
+            &mut entropy,
+        )?;
         assert_eq!(grant.grant_id.expose_for_session_open(), &[30_u8; 32]);
         assert_eq!(grant.route.connection_nonce(), &[8_u8; 32]);
+        Ok(())
+    }
+
+    #[test]
+    fn unavailable_authentication_rewrites_the_completion_before_sealing()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let transaction_id = TransactionId::from_bytes([91_u8; 16]);
+        let request = authentication_finish_request(context(0)?.network_id, 92, transaction_id)?;
+        let (_finish, lineage) = request.into_parts();
+        let mut entropy = FilledEntropy(93);
+        let grant = create_authentication_grant(
+            account()?.0,
+            OpaqueCredentialId::from_bytes([94_u8; 32]),
+            context(10)?,
+            &mut entropy,
+        )?;
+        let response = AccountResponsePlan::new(
+            lineage,
+            transaction_id,
+            authentication_completion(transaction_id, &grant),
+        )?;
+        let outcome =
+            AccountFinishOutcome::committed(grant, response).reject_when_unavailable(false)?;
+
+        assert_eq!(
+            outcome.result().err(),
+            Some(AuthError::AuthenticationFailed)
+        );
+        assert!(matches!(
+            outcome.response_plan().payload(),
+            AccountServiceResponsePayload::AuthenticationCompletion(completion)
+                if completion.status() == AccountServiceCompletionStatus::Rejected
+                    && completion.transaction_id() == transaction_id
+        ));
+        let sealed = outcome.seal(0)?;
+        assert_eq!(sealed.result().err(), Some(AuthError::AuthenticationFailed));
+        Ok(())
+    }
+
+    #[test]
+    fn authentication_grant_record_validates_restart_identity_and_fences()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let transaction_id = TransactionId::from_bytes([95_u8; 16]);
+        let mut entropy = FilledEntropy(96);
+        let grant = create_authentication_grant(
+            account()?.0,
+            OpaqueCredentialId::from_bytes([97_u8; 32]),
+            context(10)?,
+            &mut entropy,
+        )?;
+        let record = AuthenticationGrantRecord::capture(transaction_id, &grant)?;
+        assert_eq!(
+            record.expose_for_persistence().len(),
+            AUTHENTICATION_GRANT_RECORD_BYTES
+        );
+
+        let metadata = AuthenticationGrantRecord::parse(record.expose_for_persistence())?
+            .into_restart_metadata()?;
+        assert_eq!(metadata.transaction_id(), transaction_id);
+        assert_eq!(metadata.account_id(), grant.account_id());
+        assert_eq!(
+            metadata.account_session_generation(),
+            grant.account_session_generation()
+        );
+        assert_eq!(
+            metadata.durable_expires_at_utc(),
+            grant.durable_expires_at_utc()
+        );
+
+        let mut wrong_class = *record.expose_for_persistence();
+        wrong_class[3] = 5;
+        assert_eq!(
+            AuthenticationGrantRecord::parse(&wrong_class)?
+                .into_restart_metadata()
+                .err(),
+            Some(AuthError::InvalidEncoding)
+        );
+        let mut zero_generation = *record.expose_for_persistence();
+        let generation_start = AUTHENTICATION_GRANT_RECORD_BYTES - 16;
+        zero_generation
+            .get_mut(generation_start..generation_start + 8)
+            .ok_or(AuthError::InvalidEncoding)?
+            .fill(0);
+        assert_eq!(
+            AuthenticationGrantRecord::parse(&zero_generation)?
+                .into_restart_metadata()
+                .err(),
+            Some(AuthError::InvalidEncoding)
+        );
         Ok(())
     }
 
@@ -2323,7 +4090,13 @@ mod tests {
             &profile,
             CredentialChangeStartParameters {
                 context: context(10)?,
-                proof: fresh_proof(20)?,
+                proof: Some(FreshAuthenticationProof {
+                    account: destructive_account.0,
+                    credential_id: OpaqueCredentialId::from_bytes(credential_bytes),
+                    network_id: context(0)?.network_id,
+                    route: context(0)?.route,
+                    expires_at: MonotonicTick::from_ticks(20),
+                }),
                 account: destructive_account,
                 credential_id: OpaqueCredentialId::from_bytes(credential_bytes),
                 request: credential_start_request(23, destructive_account.0.account_id)?,
@@ -2338,9 +4111,9 @@ mod tests {
                 if credential_id.expose_for_account_service() == &credential_bytes
         ));
         let transaction_id = start.transaction_id();
-        let mut start = start.seal(0)?;
+        let mut transaction = start.seal(0)?.into_transaction_after_commit(1)?;
         let outcome = finish_credential_change(
-            start.transaction_mut(),
+            &mut transaction,
             context(11)?,
             credential_finish_request(24, transaction_id)?,
         )?;
@@ -2372,6 +4145,7 @@ mod tests {
         );
         let proof = FreshAuthenticationProof {
             account: account.0,
+            credential_id: OpaqueCredentialId::from_bytes([10_u8; 32]),
             network_id: operation.network_id,
             route: operation.route,
             expires_at: MonotonicTick::from_ticks(20),
@@ -2381,7 +4155,7 @@ mod tests {
             &profile,
             CredentialChangeStartParameters {
                 context: operation,
-                proof,
+                proof: Some(proof),
                 account,
                 credential_id: OpaqueCredentialId::from_bytes([10_u8; 32]),
                 request: credential_start_request(25, account.0.account_id)?,
@@ -2390,18 +4164,18 @@ mod tests {
             &mut entropy,
         )?;
         let transaction_id = start.transaction_id();
-        let mut start = start.seal(0)?;
+        let mut transaction = start.seal(0)?.into_transaction_after_commit(1)?;
 
         assert_eq!(
             finish_credential_change(
-                start.transaction_mut(),
+                &mut transaction,
                 context(11)?,
                 credential_finish_request(26, transaction_id)?,
             )
             .err(),
             Some(AuthError::Overflow)
         );
-        assert!(start.transaction_mut().state_ref().is_none());
+        assert!(transaction.state_ref().is_none());
         Ok(())
     }
 
@@ -2426,13 +4200,22 @@ mod tests {
             assert_rejected_credential_start(
                 &profile,
                 request_id,
-                proof,
+                Some(proof),
                 current,
                 requested_account,
                 available,
                 expected,
             )?;
         }
+        assert_rejected_credential_start(
+            &profile,
+            118,
+            None,
+            current,
+            snapshot.account_id,
+            true,
+            AuthError::WrongState,
+        )?;
         Ok(())
     }
 
@@ -2488,6 +4271,7 @@ mod tests {
         let operation = context(10)?;
         let proof = |expires_at| FreshAuthenticationProof {
             account: expected,
+            credential_id: OpaqueCredentialId::from_bytes([9_u8; 32]),
             network_id: operation.network_id,
             route: operation.route,
             expires_at: MonotonicTick::from_ticks(expires_at),

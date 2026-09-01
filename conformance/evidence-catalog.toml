@@ -400,6 +400,86 @@ id = "EVID-S05-900-STAGE-GATE"
 claim_ids = ["S05-900"]
 kind = "stage-gate"
 
+[[evidence]]
+id = "EVID-S06-001-CONFIGURATION"
+claim_ids = ["S06-001"]
+kind = "strict-configuration"
+
+[[evidence]]
+id = "EVID-S06-002-INITIALIZATION"
+claim_ids = ["S06-002"]
+kind = "node-initialization"
+
+[[evidence]]
+id = "EVID-S06-003-TLS"
+claim_ids = ["S06-003"]
+kind = "tls-endpoints"
+
+[[evidence]]
+id = "EVID-S06-004-TRANSPORTS"
+claim_ids = ["S06-004"]
+kind = "transport-profile-isolation"
+
+[[evidence]]
+id = "EVID-S06-005-TASK-TREE"
+claim_ids = ["S06-005"]
+kind = "runtime-task-tree"
+
+[[evidence]]
+id = "EVID-S06-006-MEMORY"
+claim_ids = ["S06-006"]
+kind = "memory-admission"
+
+[[evidence]]
+id = "EVID-S06-007-CONNECTIONS"
+claim_ids = ["S06-007"]
+kind = "connection-output-owners"
+
+[[evidence]]
+id = "EVID-S06-008-STATE-CORE"
+claim_ids = ["S06-008"]
+kind = "state-core-durability"
+
+[[evidence]]
+id = "EVID-S06-009-SESSIONS"
+claim_ids = ["S06-009"]
+kind = "registration-session-routing"
+
+[[evidence]]
+id = "EVID-S06-010-MESSAGING"
+claim_ids = ["S06-010"]
+kind = "single-node-messaging"
+
+[[evidence]]
+id = "EVID-S06-011-ADMISSION"
+claim_ids = ["S06-011"]
+kind = "timers-admission-overload"
+
+[[evidence]]
+id = "EVID-S06-012-ADMIN"
+claim_ids = ["S06-012"]
+kind = "isolated-administration"
+
+[[evidence]]
+id = "EVID-S06-013-RELOAD"
+claim_ids = ["S06-013"]
+kind = "atomic-live-reload"
+
+[[evidence]]
+id = "EVID-S06-014-OBSERVABILITY"
+claim_ids = ["S06-014"]
+kind = "privacy-observability"
+
+[[evidence]]
+id = "EVID-S06-015-HARDENING"
+claim_ids = ["S06-015"]
+kind = "service-hardening"
+
+[[evidence]]
+id = "EVID-S06-900-STAGE-GATE"
+claim_ids = ["S06-900"]
+kind = "stage-gate"
+
 # Normative evidence enters this catalog only after its full closure task is
 # implemented. Unimplemented requirement IDs stay reserved in the requirement
 # ledger and cannot appear in a closing manifest.

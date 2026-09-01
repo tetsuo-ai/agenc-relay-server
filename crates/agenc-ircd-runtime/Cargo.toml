@@ -16,6 +16,15 @@ agenc-ircd-e2ee.workspace = true
 agenc-ircd-federation-wire.workspace = true
 agenc-ircd-storage.workspace = true
 agenc-ircd-types.workspace = true
+rustls.workspace = true
+rustix.workspace = true
+subtle.workspace = true
+tokio.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+agenc-ircd-testkit.workspace = true
+loom.workspace = true
 
 [lints]
 workspace = true

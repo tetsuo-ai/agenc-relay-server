@@ -1290,7 +1290,14 @@ fn renderer_covers_registry_syntax_budgets_labels_and_batch_stack() -> Result<()
         Some(RenderError::UnknownRegistryValue)
     );
     assert_eq!(
-        numeric_reply("server", 401, "nick", &["missing"], Some("No such nick")).err(),
+        numeric_reply(
+            "server",
+            401,
+            "nick",
+            &["missing", "extra"],
+            Some("No such nick"),
+        )
+        .err(),
         Some(RenderError::InapplicableReply)
     );
     assert_eq!(

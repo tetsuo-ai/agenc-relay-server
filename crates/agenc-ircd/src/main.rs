@@ -1,52 +1,309 @@
 #![forbid(unsafe_code)]
 
-//! AgenC daemon composition entry point.
+//! AgenC daemon and stopped-daemon command entry point.
+
+mod options;
 
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use agenc_ircd_config::{
-    BackupTrustManifestEntry, MaintenanceStorageConfig, load_backup_trust_manifest,
-    load_maintenance_config,
+    BackupTrustManifestEntry, DisplayLabel, DnsName, InitProfile, MaintenanceStorageConfig,
+    SecretSet, SystemHostReader, ValidationDepth, load_backup_trust_manifest, load_config,
+    load_maintenance_config, probe_host_controls,
+};
+use agenc_ircd_runtime::offline::{
+    InitMode, InitReceipt, InitRequest, create_account_invite, initialize_node, parse_network_id,
+    parse_server_id, render_onboarding, verify_database_header,
 };
 use agenc_ircd_storage::{
     RestoreCommandReceipt, RestoreCommandRequest, RestoreTrustKey, StorageEngineLimits,
     embedded_storage_qualifications, execute_restore_command,
 };
+use options::{OptionSpec, ParsedOptions};
 
-const DAEMON_UNAVAILABLE_MESSAGE: &str =
-    "daemon behavior is unavailable until the Stage 06 runtime is implemented";
+const EXIT_USAGE: u8 = 1;
+const EXIT_HOST_CONTROL: u8 = 2;
+const EXIT_PARTIAL_INIT: u8 = 3;
+
+const USAGE: &str = concat!(
+    "usage: agenc-ircd <command> [options]\n",
+    "commands:\n",
+    "  serve --config <file>\n",
+    "  check-config --config <file>\n",
+    "  init --config <file> --profile <public|onion|dual> [options]\n",
+    "  print-onboarding --config <file>\n",
+    "  account-invite create --descriptor <file> --signing-key-file <file> --expires-in <seconds>\n",
+    "  storage restore --config <file> --backup <file> [restore options]",
+);
 const RESTORE_USAGE: &str = "usage: agenc-ircd storage restore --config <file> --backup <file> \
 --source-master-key-file <file> --source-rollback-guard-key-file <file> \
 --output-state-directory <new-directory> --target-rollback-guard-key-file <file> \
 [--target-master-key-file <file>] [--resume] --declare-recovery-epoch";
 
-fn main() -> ExitCode {
-    match run(std::env::args_os().skip(1).collect()) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(message) => {
-            eprintln!("agenc-ircd: {message}");
-            ExitCode::FAILURE
+struct CliFailure {
+    code: u8,
+    message: String,
+}
+
+impl CliFailure {
+    fn usage(message: &str) -> Self {
+        Self {
+            code: EXIT_USAGE,
+            message: message.to_owned(),
+        }
+    }
+
+    fn command(code: u8, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
         }
     }
 }
 
-fn run(arguments: Vec<OsString>) -> Result<(), String> {
-    let Some(first) = arguments.first().and_then(|value| value.to_str()) else {
-        return Err(DAEMON_UNAVAILABLE_MESSAGE.to_owned());
+fn main() -> ExitCode {
+    match run(std::env::args_os().skip(1).collect()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(failure) => {
+            eprintln!("agenc-ircd: {}", failure.message);
+            ExitCode::from(failure.code)
+        }
+    }
+}
+
+fn run(arguments: Vec<OsString>) -> Result<(), CliFailure> {
+    let Some(command) = arguments.first().and_then(|value| value.to_str()) else {
+        return Err(CliFailure::usage(USAGE));
     };
-    if first != "storage" {
-        return Err(DAEMON_UNAVAILABLE_MESSAGE.to_owned());
+    if command == "--help" {
+        println!("{USAGE}");
+        return Ok(());
     }
-    if arguments.get(1).and_then(|value| value.to_str()) != Some("restore") {
-        return Err(RESTORE_USAGE.to_owned());
+    let rest = arguments.get(1..).ok_or_else(|| CliFailure::usage(USAGE))?;
+    match command {
+        "serve" => serve(rest),
+        "check-config" => check_config(rest),
+        "init" => init(rest),
+        "print-onboarding" => print_onboarding(rest),
+        "account-invite" => account_invite(rest),
+        "storage" => storage(rest),
+        _ => Err(CliFailure::usage(USAGE)),
     }
-    let option_arguments = arguments.get(2..).ok_or_else(|| RESTORE_USAGE.to_owned())?;
-    let options = RestoreOptions::parse(option_arguments).map_err(|()| RESTORE_USAGE.to_owned())?;
-    // Storage and configuration errors display fixed, secret-free messages, so the
-    // operator sees which stage of the restore refused the command.
-    restore(options).map_err(|error| format!("storage restore failed: {error}"))
+}
+
+fn one_config(arguments: &[OsString], usage: &str) -> Result<PathBuf, CliFailure> {
+    let mut parsed = ParsedOptions::parse(arguments, &[OptionSpec::value("--config")])
+        .map_err(|()| CliFailure::usage(usage))?;
+    parsed
+        .required_path("--config")
+        .map_err(|()| CliFailure::usage(usage))
+}
+
+fn serve(arguments: &[OsString]) -> Result<(), CliFailure> {
+    let config = one_config(arguments, "usage: agenc-ircd serve --config <file>")?;
+    match agenc_ircd_runtime::daemon::serve(&config) {
+        Ok(agenc_ircd_runtime::daemon::DaemonExit::Stopped) => Ok(()),
+        Ok(agenc_ircd_runtime::daemon::DaemonExit::RestartRequested) => Err(CliFailure::command(
+            agenc_ircd_runtime::daemon::RESTART_EXIT_CODE,
+            "service restart requested",
+        )),
+        Err(error) => Err(CliFailure::command(EXIT_USAGE, error.to_string())),
+    }
+}
+
+fn check_config(arguments: &[OsString]) -> Result<(), CliFailure> {
+    let path = one_config(arguments, "usage: agenc-ircd check-config --config <file>")?;
+    let config = load_config(&path, ValidationDepth::Host)
+        .map_err(|report| CliFailure::command(EXIT_USAGE, report.to_string()))?;
+    let secrets = SecretSet::load(&config)
+        .map_err(|report| CliFailure::command(EXIT_USAGE, report.to_string()))?;
+    agenc_ircd_runtime::daemon::check_configuration(&config, &secrets)
+        .map_err(|error| CliFailure::command(EXIT_USAGE, error.to_string()))?;
+    verify_database_header(&config, &secrets)
+        .map_err(|error| CliFailure::command(EXIT_USAGE, error.to_string()))?;
+    let report = probe_host_controls(&SystemHostReader, config.server.memory_budget_bytes);
+    print!("{report}");
+    if report.absent().is_empty() {
+        Ok(())
+    } else {
+        Err(CliFailure::command(
+            EXIT_HOST_CONTROL,
+            "one or more required host controls are absent",
+        ))
+    }
+}
+
+const INIT_SPECS: &[OptionSpec] = &[
+    OptionSpec::value("--config"),
+    OptionSpec::value("--profile"),
+    OptionSpec::value("--network-id"),
+    OptionSpec::value("--coordinator-descriptor"),
+    OptionSpec::value("--coordinator-server-id"),
+    OptionSpec::value("--data-dir"),
+    OptionSpec::value("--runtime-dir"),
+    OptionSpec::value("--operator-signing-key-file"),
+    OptionSpec::value("--server-name"),
+    OptionSpec::value("--display-name"),
+    OptionSpec::value("--dns-name"),
+];
+
+fn init(arguments: &[OsString]) -> Result<(), CliFailure> {
+    let usage = "usage: agenc-ircd init --config <file> --profile <public|onion|dual> [options]";
+    let mut parsed =
+        ParsedOptions::parse(arguments, INIT_SPECS).map_err(|()| CliFailure::usage(usage))?;
+    let request = init_request(&mut parsed).map_err(|()| CliFailure::usage(usage))?;
+    match initialize_node(request) {
+        Ok(receipt) => {
+            print_init_receipt(&receipt);
+            Ok(())
+        }
+        Err(error) => {
+            let code = if error.is_partial_initialization() {
+                EXIT_PARTIAL_INIT
+            } else {
+                EXIT_USAGE
+            };
+            Err(CliFailure::command(code, error.to_string()))
+        }
+    }
+}
+
+fn init_request(parsed: &mut ParsedOptions) -> Result<InitRequest, ()> {
+    let config_path = parsed.required_path("--config")?;
+    let profile = InitProfile::parse(&parsed.required_text("--profile")?).map_err(|_| ())?;
+    let network_id = parsed
+        .optional_text("--network-id")?
+        .map(|value| parse_network_id(&value).map_err(|_| ()))
+        .transpose()?;
+    let coordinator_descriptor = parsed.optional_path("--coordinator-descriptor");
+    let coordinator_server_id = parsed
+        .optional_text("--coordinator-server-id")?
+        .map(|value| parse_server_id(&value).map_err(|_| ()))
+        .transpose()?;
+    let mode = match (network_id, coordinator_descriptor, coordinator_server_id) {
+        (network_id, None, None) => InitMode::Coordinator { network_id },
+        (None, Some(coordinator_descriptor), Some(coordinator_server_id)) => InitMode::Edge {
+            coordinator_descriptor,
+            coordinator_server_id,
+        },
+        _ => return Err(()),
+    };
+    let data_dir = parsed
+        .optional_path("--data-dir")
+        .unwrap_or_else(|| PathBuf::from("/var/lib/agenc-ircd"));
+    let runtime_dir = parsed
+        .optional_path("--runtime-dir")
+        .unwrap_or_else(|| PathBuf::from("/run/agenc-ircd"));
+    let operator_signing_key_file = parsed
+        .optional_path("--operator-signing-key-file")
+        .unwrap_or_else(|| PathBuf::from("/var/lib/agenc-ircd-operator/operator-signing.key"));
+    let server_name = DnsName::parse(
+        &parsed
+            .optional_text("--server-name")?
+            .unwrap_or_else(|| "chat.local".to_owned()),
+    )
+    .map_err(|_| ())?;
+    let display_name = DisplayLabel::parse(
+        &parsed
+            .optional_text("--display-name")?
+            .unwrap_or_else(|| "AgenC".to_owned()),
+    )
+    .map_err(|_| ())?;
+    let dns_name = init_dns_name(parsed, profile, &server_name)?;
+    Ok(InitRequest {
+        config_path,
+        profile,
+        mode,
+        data_dir,
+        runtime_dir,
+        operator_signing_key_file,
+        server_name,
+        display_name,
+        dns_name,
+    })
+}
+
+fn init_dns_name(
+    parsed: &mut ParsedOptions,
+    profile: InitProfile,
+    server_name: &DnsName,
+) -> Result<Option<DnsName>, ()> {
+    let configured = parsed
+        .optional_text("--dns-name")?
+        .map(|value| DnsName::parse(&value).map_err(|_| ()))
+        .transpose()?;
+    Ok(match (profile, configured) {
+        (InitProfile::Onion, None) => None,
+        (_, Some(name)) => Some(name),
+        _ => Some(server_name.clone()),
+    })
+}
+
+fn print_init_receipt(receipt: &InitReceipt) {
+    println!("network-id={}", receipt.network_id.to_base64url());
+    println!("server-id={}", receipt.server_id.to_base64url());
+    println!("operator-id={}", receipt.operator_id.to_base64url());
+    println!(
+        "operator-signing-key-file={}",
+        receipt.operator_signing_key_file.display()
+    );
+    print!("{}", receipt.tor_snippet);
+    print!("{}", receipt.systemd_snippet);
+    print!("{}", receipt.certificate_instructions);
+}
+
+fn print_onboarding(arguments: &[OsString]) -> Result<(), CliFailure> {
+    let path = one_config(
+        arguments,
+        "usage: agenc-ircd print-onboarding --config <file>",
+    )?;
+    let descriptor = render_onboarding(&path)
+        .map_err(|error| CliFailure::command(EXIT_USAGE, error.to_string()))?;
+    print!("{descriptor}");
+    Ok(())
+}
+
+fn account_invite(arguments: &[OsString]) -> Result<(), CliFailure> {
+    let usage = "usage: agenc-ircd account-invite create --descriptor <file> --signing-key-file <file> --expires-in <seconds>";
+    if arguments.first().and_then(|value| value.to_str()) != Some("create") {
+        return Err(CliFailure::usage(usage));
+    }
+    let rest = arguments.get(1..).ok_or_else(|| CliFailure::usage(usage))?;
+    let specs = [
+        OptionSpec::value("--descriptor"),
+        OptionSpec::value("--signing-key-file"),
+        OptionSpec::value("--expires-in"),
+    ];
+    let mut parsed = ParsedOptions::parse(rest, &specs).map_err(|()| CliFailure::usage(usage))?;
+    let descriptor = parsed
+        .required_path("--descriptor")
+        .map_err(|()| CliFailure::usage(usage))?;
+    let key = parsed
+        .required_path("--signing-key-file")
+        .map_err(|()| CliFailure::usage(usage))?;
+    let expires = parsed
+        .required_text("--expires-in")
+        .and_then(|value| value.parse::<u64>().map_err(|_| ()))
+        .map_err(|()| CliFailure::usage(usage))?;
+    let envelope = create_account_invite(&descriptor, &key, expires)
+        .map_err(|error| CliFailure::command(EXIT_USAGE, error.to_string()))?;
+    print!("{envelope}");
+    Ok(())
+}
+
+fn storage(arguments: &[OsString]) -> Result<(), CliFailure> {
+    if arguments.first().and_then(|value| value.to_str()) != Some("restore") {
+        return Err(CliFailure::usage(RESTORE_USAGE));
+    }
+    let rest = arguments
+        .get(1..)
+        .ok_or_else(|| CliFailure::usage(RESTORE_USAGE))?;
+    let options = RestoreOptions::parse(rest).map_err(|()| CliFailure::usage(RESTORE_USAGE))?;
+    restore(options).map_err(|error| {
+        CliFailure::command(EXIT_USAGE, format!("storage restore failed: {error}"))
+    })
 }
 
 fn restore(options: RestoreOptions) -> Result<(), Box<dyn std::error::Error>> {
@@ -133,6 +390,18 @@ fn print_restore_receipt(receipt: &RestoreCommandReceipt) {
     }
 }
 
+const RESTORE_SPECS: &[OptionSpec] = &[
+    OptionSpec::value("--config"),
+    OptionSpec::value("--backup"),
+    OptionSpec::value("--source-master-key-file"),
+    OptionSpec::value("--source-rollback-guard-key-file"),
+    OptionSpec::value("--output-state-directory"),
+    OptionSpec::value("--target-rollback-guard-key-file"),
+    OptionSpec::value("--target-master-key-file"),
+    OptionSpec::flag("--resume"),
+    OptionSpec::flag("--declare-recovery-epoch"),
+];
+
 struct RestoreOptions {
     config: PathBuf,
     backup: PathBuf,
@@ -147,127 +416,36 @@ struct RestoreOptions {
 
 impl RestoreOptions {
     fn parse(arguments: &[OsString]) -> Result<Self, ()> {
-        let mut parser = OptionParser::new(arguments);
-        while parser.advance()? {}
-        if !parser.declare_recovery_epoch {
+        let mut parsed = ParsedOptions::parse(arguments, RESTORE_SPECS)?;
+        if !parsed.flag("--declare-recovery-epoch") {
             return Err(());
         }
         Ok(Self {
-            config: parser.config.ok_or(())?,
-            backup: parser.backup.ok_or(())?,
-            source_master_key_file: parser.source_master_key_file.ok_or(())?,
-            source_rollback_guard_key_file: parser.source_rollback_guard_key_file.ok_or(())?,
-            output_state_directory: parser.output_state_directory.ok_or(())?,
-            target_rollback_guard_key_file: parser.target_rollback_guard_key_file.ok_or(())?,
-            target_master_key_file: parser.target_master_key_file,
-            resume: parser.resume,
-            declare_recovery_epoch: parser.declare_recovery_epoch,
+            config: parsed.required_path("--config")?,
+            backup: parsed.required_path("--backup")?,
+            source_master_key_file: parsed.required_path("--source-master-key-file")?,
+            source_rollback_guard_key_file: parsed
+                .required_path("--source-rollback-guard-key-file")?,
+            output_state_directory: parsed.required_path("--output-state-directory")?,
+            target_rollback_guard_key_file: parsed
+                .required_path("--target-rollback-guard-key-file")?,
+            target_master_key_file: parsed.optional_path("--target-master-key-file"),
+            resume: parsed.flag("--resume"),
+            declare_recovery_epoch: true,
         })
-    }
-}
-
-struct OptionParser<'a> {
-    arguments: &'a [OsString],
-    cursor: usize,
-    config: Option<PathBuf>,
-    backup: Option<PathBuf>,
-    source_master_key_file: Option<PathBuf>,
-    source_rollback_guard_key_file: Option<PathBuf>,
-    output_state_directory: Option<PathBuf>,
-    target_rollback_guard_key_file: Option<PathBuf>,
-    target_master_key_file: Option<PathBuf>,
-    resume: bool,
-    declare_recovery_epoch: bool,
-}
-
-impl<'a> OptionParser<'a> {
-    const fn new(arguments: &'a [OsString]) -> Self {
-        Self {
-            arguments,
-            cursor: 0,
-            config: None,
-            backup: None,
-            source_master_key_file: None,
-            source_rollback_guard_key_file: None,
-            output_state_directory: None,
-            target_rollback_guard_key_file: None,
-            target_master_key_file: None,
-            resume: false,
-            declare_recovery_epoch: false,
-        }
-    }
-
-    fn advance(&mut self) -> Result<bool, ()> {
-        let Some(value) = self.arguments.get(self.cursor) else {
-            return Ok(false);
-        };
-        let option = value.to_str().ok_or(())?;
-        self.cursor = self.cursor.checked_add(1).ok_or(())?;
-        match option {
-            "--config" => {
-                let value = self.take_value()?;
-                Self::set_path(&mut self.config, value)?;
-            }
-            "--backup" => {
-                let value = self.take_value()?;
-                Self::set_path(&mut self.backup, value)?;
-            }
-            "--source-master-key-file" => {
-                let value = self.take_value()?;
-                Self::set_path(&mut self.source_master_key_file, value)?;
-            }
-            "--source-rollback-guard-key-file" => {
-                let value = self.take_value()?;
-                Self::set_path(&mut self.source_rollback_guard_key_file, value)?;
-            }
-            "--output-state-directory" => {
-                let value = self.take_value()?;
-                Self::set_path(&mut self.output_state_directory, value)?;
-            }
-            "--target-rollback-guard-key-file" => {
-                let value = self.take_value()?;
-                Self::set_path(&mut self.target_rollback_guard_key_file, value)?;
-            }
-            "--target-master-key-file" => {
-                let value = self.take_value()?;
-                Self::set_path(&mut self.target_master_key_file, value)?;
-            }
-            "--resume" if !self.resume => self.resume = true,
-            "--declare-recovery-epoch" if !self.declare_recovery_epoch => {
-                self.declare_recovery_epoch = true;
-            }
-            _ => return Err(()),
-        }
-        Ok(self.cursor < self.arguments.len())
-    }
-
-    fn take_value(&mut self) -> Result<PathBuf, ()> {
-        let value = self.arguments.get(self.cursor).ok_or(())?;
-        if value.to_str().is_some_and(|text| text.starts_with("--")) {
-            return Err(());
-        }
-        self.cursor = self.cursor.checked_add(1).ok_or(())?;
-        Ok(PathBuf::from(value))
-    }
-
-    fn set_path(slot: &mut Option<PathBuf>, value: PathBuf) -> Result<(), ()> {
-        if slot.is_some() || value.as_os_str().is_empty() {
-            return Err(());
-        }
-        *slot = Some(value);
-        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agenc_ircd_runtime::offline::OfflineError;
 
     fn arguments(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
     }
 
-    fn complete_options() -> Vec<OsString> {
+    fn complete_restore_options() -> Vec<OsString> {
         arguments(&[
             "--config",
             "/config.toml",
@@ -289,81 +467,148 @@ mod tests {
     }
 
     #[test]
-    fn restore_option_parser_accepts_complete_command_in_any_order()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let options = RestoreOptions::parse(&complete_options())
-            .map_err(|()| "complete restore options were rejected")?;
-        assert_eq!(options.config, PathBuf::from("/config.toml"));
+    fn dispatch_lists_help_and_keeps_serve_closed() {
         assert_eq!(
-            options.target_master_key_file,
-            Some(PathBuf::from("/target-master.key"))
+            run(Vec::new()).err().map(|failure| failure.message),
+            Some(USAGE.to_owned())
         );
-        assert!(options.resume);
-        assert!(options.declare_recovery_epoch);
+        assert!(run(arguments(&["--help"])).is_ok());
+        assert!(run(arguments(&["serve", "--config", "/config.toml"])).is_err());
+        assert!(run(arguments(&["serve", "--config", "--bad"])).is_err());
+    }
 
-        let mut reversed = complete_options();
-        reversed.reverse();
-        assert!(RestoreOptions::parse(&reversed).is_err());
+    #[test]
+    fn init_parser_accepts_reordered_options_and_rejects_bad_values() -> Result<(), ()> {
+        let mut parsed = ParsedOptions::parse(
+            &arguments(&[
+                "--display-name",
+                "Example",
+                "--profile",
+                "public",
+                "--config",
+                "/etc/agenc-ircd/config.toml",
+                "--server-name",
+                "chat.example",
+            ]),
+            INIT_SPECS,
+        )?;
+        let request = init_request(&mut parsed)?;
+        assert_eq!(request.profile, InitProfile::Public);
+        assert!(request.dns_name.is_some());
+        for invalid in [
+            arguments(&["init"]),
+            arguments(&["init", "--config", "/a"]),
+            arguments(&["init", "--config", "/a", "--profile", "bad"]),
+        ] {
+            assert!(run(invalid).is_err());
+        }
         Ok(())
     }
 
     #[test]
-    fn restore_option_parser_rejects_missing_duplicate_and_unknown_arguments() {
-        assert!(RestoreOptions::parse(&[]).is_err());
+    fn init_parser_requires_one_complete_coordinator_or_edge_mode() -> Result<(), ()> {
+        const NETWORK_ID: &str = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE";
+        const COORDINATOR_ID: &str = "AgICAgICAgICAgICAgICAg";
+        let parse = |specific: &[&str]| {
+            let mut values = vec![
+                "--config",
+                "/etc/agenc-ircd/config.toml",
+                "--profile",
+                "public",
+            ];
+            values.extend_from_slice(specific);
+            let mut parsed = ParsedOptions::parse(&arguments(&values), INIT_SPECS)?;
+            init_request(&mut parsed)
+        };
+
+        let coordinator = parse(&["--network-id", NETWORK_ID])?;
+        assert!(matches!(
+            coordinator.mode,
+            InitMode::Coordinator {
+                network_id: Some(network_id)
+            } if network_id.to_base64url() == NETWORK_ID
+        ));
+        let edge = parse(&[
+            "--coordinator-descriptor",
+            "/trusted/connect.txt",
+            "--coordinator-server-id",
+            COORDINATOR_ID,
+        ])?;
+        assert!(matches!(
+            edge.mode,
+            InitMode::Edge {
+                coordinator_descriptor,
+                coordinator_server_id,
+            } if coordinator_descriptor == std::path::Path::new("/trusted/connect.txt")
+                && coordinator_server_id.to_base64url() == COORDINATOR_ID
+        ));
+
         for invalid in [
-            arguments(&["--config"]),
-            arguments(&["--config", "--backup"]),
-            arguments(&["--unknown"]),
-            arguments(&["--resume", "--resume"]),
-            arguments(&["--declare-recovery-epoch", "--declare-recovery-epoch"]),
-            arguments(&["--config", "/a", "--config", "/b"]),
-            vec![OsString::from("--config"), OsString::new()],
+            vec!["--coordinator-descriptor", "/trusted/connect.txt"],
+            vec!["--coordinator-server-id", COORDINATOR_ID],
+            vec![
+                "--network-id",
+                NETWORK_ID,
+                "--coordinator-descriptor",
+                "/trusted/connect.txt",
+                "--coordinator-server-id",
+                COORDINATOR_ID,
+            ],
+            vec![
+                "--coordinator-descriptor",
+                "/trusted/connect.txt",
+                "--coordinator-server-id",
+                "invalid",
+            ],
         ] {
-            assert!(RestoreOptions::parse(&invalid).is_err());
+            assert!(parse(&invalid).is_err());
         }
-        let mut without_acknowledgement = complete_options();
-        without_acknowledgement.pop();
-        assert!(RestoreOptions::parse(&without_acknowledgement).is_err());
+        Ok(())
     }
 
     #[test]
-    fn command_dispatch_keeps_daemon_closed_and_restore_usage_exact() {
-        assert_eq!(
-            run(Vec::new()).err().as_deref(),
-            Some(DAEMON_UNAVAILABLE_MESSAGE)
-        );
-        assert_eq!(
-            run(arguments(&["serve"])).err().as_deref(),
-            Some(DAEMON_UNAVAILABLE_MESSAGE)
-        );
-        assert_eq!(
-            run(arguments(&["storage"])).err().as_deref(),
-            Some(RESTORE_USAGE)
-        );
-        assert_eq!(
-            run(arguments(&["storage", "unknown"])).err().as_deref(),
-            Some(RESTORE_USAGE)
-        );
-        assert_eq!(
-            run(arguments(&["storage", "restore"])).err().as_deref(),
-            Some(RESTORE_USAGE)
-        );
-        let mut without_acknowledgement = arguments(&["storage", "restore"]);
-        without_acknowledgement.extend(complete_options());
-        without_acknowledgement.pop();
-        assert_eq!(
-            run(without_acknowledgement).err().as_deref(),
-            Some(RESTORE_USAGE)
+    fn restore_parser_preserves_every_required_acknowledgement() -> Result<(), ()> {
+        let options = RestoreOptions::parse(&complete_restore_options())?;
+        assert_eq!(options.config, PathBuf::from("/config.toml"));
+        assert!(options.resume);
+        let mut missing = complete_restore_options();
+        missing.pop();
+        assert!(RestoreOptions::parse(&missing).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn invite_dispatch_rejects_missing_and_out_of_range_values() {
+        assert!(run(arguments(&["account-invite"])).is_err());
+        assert!(
+            run(arguments(&[
+                "account-invite",
+                "create",
+                "--descriptor",
+                "/missing",
+                "--signing-key-file",
+                "/missing",
+                "--expires-in",
+                "0",
+            ]))
+            .is_err()
         );
     }
 
     #[test]
-    fn restore_failures_report_the_refusing_stage() {
-        let mut command = arguments(&["storage", "restore"]);
-        command.extend(complete_options());
+    fn offline_error_statuses_distinguish_partial_initialization() {
+        let status = |error: OfflineError| {
+            if error.is_partial_initialization() {
+                EXIT_PARTIAL_INIT
+            } else {
+                EXIT_USAGE
+            }
+        };
         assert_eq!(
-            run(command).err().as_deref(),
-            Some("storage restore failed: configuration file rejected")
+            status(OfflineError::PartialInitialization),
+            EXIT_PARTIAL_INIT
         );
+        assert_eq!(status(OfflineError::Indeterminate), EXIT_PARTIAL_INIT);
+        assert_eq!(status(OfflineError::ExistingTarget), EXIT_USAGE);
     }
 }

@@ -8,7 +8,7 @@ use agenc_ircd_crypto::{
     RollbackGuardRootKey, StorageDigest, StorageMasterKey, StorageTable, TrackedStateHasher,
     derive_storage_index, tracked_record_commitment,
 };
-use agenc_ircd_types::{ChannelName, Nickname, RecoveryEpoch, TransactionId};
+use agenc_ircd_types::{Generation, Nickname, RecoveryEpoch, Revision, TransactionId};
 use redb::{
     Database, Durability, ReadableDatabase as _, ReadableTable as _, ReadableTableMetadata as _,
     TableDefinition,
@@ -18,7 +18,8 @@ use zeroize::Zeroizing;
 
 use crate::engine::{StorageEngine, StorageOpenConfig};
 use crate::{
-    BACKUP_FIXED_STREAM_BYTES, BackupRecord, BackupTrustKey, DatabaseHeader, ExistingRecord,
+    AccountRecordBody, BACKUP_FIXED_STREAM_BYTES, BackupRecord, BackupTrustKey,
+    ChannelNameRecordBody, ChannelRecordBody, DatabaseHeader, ExistingRecord,
     INTEGRITY_CHECKPOINT_BYTES, IntegrityCheckpoint, IntegrityManifest, IntegrityRecordVersion,
     MAX_CONSTRUCTION_PLAN_BYTES, MIN_SEALED_RECORD_BYTES, PersistentRecordValue, ReadPlan,
     RecordMutation, RecordReference, STATE_META_BYTES, SealedRecord, StateMetaTbs,
@@ -1689,10 +1690,8 @@ fn rekey_target_stored_key(
         }
         TableId::ChannelName => {
             let value = PersistentRecordValue::decode(source.table(), record.plaintext())?;
-            let spelling =
-                std::str::from_utf8(value.body()).map_err(|_| StorageError::InvalidEncoding)?;
-            ChannelName::parse(spelling)
-                .map_err(|_| StorageError::InvalidEncoding)?
+            ChannelNameRecordBody::decode(value.body())?
+                .name
                 .canonical()
                 .as_bytes()
                 .to_vec()
@@ -3171,6 +3170,15 @@ fn transform_channel_name(
     {
         return Err(StorageError::StaleState);
     }
+    let channel_body = ChannelRecordBody::decode(channel.body())?;
+    let name_body = ChannelNameRecordBody::decode(name.body())?;
+    if name_body.name != channel_body.name
+        || name_body
+            .channel_id
+            .is_some_and(|channel_id| channel_id != channel_body.channel_id)
+    {
+        return Err(StorageError::StaleState);
+    }
     let revision = channel
         .revision()
         .checked_add(1)
@@ -3292,6 +3300,7 @@ pub fn recovery_transform_prefix(table: TableId, encoded: &[u8]) -> Result<Vec<u
     } else {
         value.references().to_vec()
     };
+    let body = recovery_domain_body(&value, table, revision, generation)?;
     PersistentRecordValue::new(
         table,
         value.record_kind(),
@@ -3299,9 +3308,33 @@ pub fn recovery_transform_prefix(table: TableId, encoded: &[u8]) -> Result<Vec<u
         generation,
         value.expires_at(),
         references,
-        value.body().to_vec(),
+        body,
     )?
     .encode()
+}
+
+fn recovery_domain_body(
+    value: &PersistentRecordValue,
+    table: TableId,
+    revision: u64,
+    generation: u64,
+) -> Result<Vec<u8>, StorageError> {
+    match (table, value.record_kind()) {
+        (TableId::Account, 1) => {
+            let mut account = AccountRecordBody::decode(value.body())?;
+            account.revision = Revision::new(revision).map_err(|_| StorageError::Overflow)?;
+            account.session_generation =
+                Generation::new(generation).map_err(|_| StorageError::Overflow)?;
+            AccountRecordBody::encode(&account)
+        }
+        (TableId::Channel, 1) => {
+            let mut channel = ChannelRecordBody::decode(value.body())?;
+            channel.revision = Revision::new(revision).map_err(|_| StorageError::Overflow)?;
+            ChannelRecordBody::encode(&channel)
+        }
+        (TableId::Account, 2) => Ok(value.body().to_vec()),
+        _ => Err(StorageError::InvalidEncoding),
+    }
 }
 
 #[cfg(test)]
@@ -3510,6 +3543,8 @@ mod tests {
         ) || (table == TableId::E2eeState && kind != 1)
         {
             crate::ProtocolRecordBody::new(table, kind, 1, vec![1])?.encode()?
+        } else if kind == 1 {
+            crate::domain_records::fixtures::live_body(table, 1)?
         } else {
             Vec::new()
         };
@@ -4042,9 +4077,16 @@ mod tests {
     fn exact_copy_and_recovery_prefix_enforce_table_schema_and_counter_rules()
     -> Result<(), StorageError> {
         let stored_account_key = account_key(1)?;
-        let account_plaintext =
-            PersistentRecordValue::new(TableId::Account, 1, 1, 1, None, Vec::new(), vec![1])?
-                .encode()?;
+        let account_plaintext = PersistentRecordValue::new(
+            TableId::Account,
+            1,
+            1,
+            1,
+            None,
+            Vec::new(),
+            crate::domain_records::fixtures::live_body(TableId::Account, 1)?,
+        )?
+        .encode()?;
         let entry = rekey_entry(
             TableId::Account,
             StoredKey::new(stored_account_key.as_bytes().to_vec())?,
@@ -4085,9 +4127,16 @@ mod tests {
         let unchanged = PersistentRecordValue::decode(TableId::Account, &unchanged)?;
         assert_eq!((unchanged.revision(), unchanged.generation()), (0, 0));
 
-        let channel =
-            PersistentRecordValue::new(TableId::Channel, 1, 1, 0, None, Vec::new(), vec![2])?
-                .encode()?;
+        let channel = PersistentRecordValue::new(
+            TableId::Channel,
+            1,
+            1,
+            0,
+            None,
+            Vec::new(),
+            crate::domain_records::fixtures::live_body(TableId::Channel, 2)?,
+        )?
+        .encode()?;
         let channel = recovery_transform_prefix(TableId::Channel, &channel)?;
         assert_eq!(
             PersistentRecordValue::decode(TableId::Channel, &channel)?.revision(),
@@ -4101,7 +4150,7 @@ mod tests {
             1,
             None,
             Vec::new(),
-            Vec::new(),
+            crate::domain_records::fixtures::live_body(TableId::Account, 1)?,
         )?
         .encode()?;
         assert_eq!(
@@ -4115,7 +4164,7 @@ mod tests {
             u64::MAX,
             None,
             Vec::new(),
-            Vec::new(),
+            crate::domain_records::fixtures::live_body(TableId::Account, 1)?,
         )?
         .encode()?;
         assert_eq!(
@@ -4124,7 +4173,7 @@ mod tests {
         );
         assert_eq!(
             recovery_transform_prefix(TableId::Session, &account_plaintext),
-            Err(StorageError::InvalidEncoding)
+            Err(StorageError::UnsupportedVersion)
         );
         Ok(())
     }
@@ -4296,7 +4345,7 @@ mod tests {
             1,
             None,
             vec![account_reference],
-            Vec::new(),
+            crate::domain_records::fixtures::live_body(TableId::Account, 1)?,
         )?
         .encode()?;
         let account_source = StorageConstructionSource::new(
@@ -4774,9 +4823,16 @@ mod tests {
             StorageConstructionAction::RestoreChannelName,
             0,
         )?;
-        let channel_plaintext =
-            PersistentRecordValue::new(TableId::Channel, 1, 7, 0, None, Vec::new(), Vec::new())?
-                .encode()?;
+        let channel_plaintext = PersistentRecordValue::new(
+            TableId::Channel,
+            1,
+            7,
+            0,
+            None,
+            Vec::new(),
+            crate::domain_records::fixtures::live_body(TableId::Channel, 1)?,
+        )?
+        .encode()?;
         let reference = RecordReference::new(
             TableId::Channel,
             StoredKey::new(channel_key.as_bytes().to_vec())?,
@@ -4788,7 +4844,7 @@ mod tests {
             0,
             None,
             vec![reference],
-            b"#restored".to_vec(),
+            b"#fixture".to_vec(),
         )?
         .encode()?;
         let sources = [
@@ -4803,7 +4859,7 @@ mod tests {
             transformer.transform(StorageConstructionKind::Restore, &entry, &sources)?;
         let name = PersistentRecordValue::decode(TableId::ChannelName, &transformed)?;
         assert_eq!(name.revision(), 8);
-        assert_eq!(name.body(), b"#restored");
+        assert_eq!(name.body(), b"#fixture");
         Ok(())
     }
 
@@ -5457,9 +5513,16 @@ mod tests {
             TableId::Channel,
             StoredKey::new(channel_key.as_bytes().to_vec())?,
         )?;
-        let valid_channel =
-            PersistentRecordValue::new(TableId::Channel, 1, 1, 0, None, Vec::new(), Vec::new())?
-                .encode()?;
+        let valid_channel = PersistentRecordValue::new(
+            TableId::Channel,
+            1,
+            1,
+            0,
+            None,
+            Vec::new(),
+            crate::domain_records::fixtures::live_body(TableId::Channel, 1)?,
+        )?
+        .encode()?;
         let valid_name = PersistentRecordValue::new(
             TableId::ChannelName,
             1,

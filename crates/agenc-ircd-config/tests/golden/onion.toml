@@ -1,0 +1,76 @@
+# Golden configuration for the `onion` profile: an onion endpoint only, so the
+# registration default resolves to `closed` (Appendix C.5).
+config_version = 1
+
+[network]
+network_id = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE"
+display_name = "example"
+role = "coordinator"
+coordinator_server_id = "AgICAgICAgICAgICAgICAg"
+onion_address = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion"
+onion_port = 6697
+onion_tls_spki_sha256 = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc"
+
+[server]
+server_id = "AgICAgICAgICAgICAgICAg"
+name = "chat.example"
+data_dir = "/srv/agenc"
+runtime_dir = "/run/agenc"
+
+[listeners]
+
+[[listeners.endpoint]]
+name = "onion"
+enabled = true
+purpose = "client_onion"
+bind = "/run/agenc/onion.sock"
+max_connections = 50000
+tls_certificate_file = "/etc/agenc/tls/onion.crt"
+tls_private_key_file = "/etc/agenc/tls/onion.key"
+
+[[listeners.endpoint]]
+name = "admin"
+enabled = true
+purpose = "admin_local"
+bind = "/run/agenc/admin.sock"
+max_connections = 4
+allowed_uids = [1000]
+
+[tls]
+
+[federation]
+enabled = false
+
+[storage]
+state_dir = "/srv/agenc/state"
+master_key_file = "/etc/agenc/keys/storage-master.key"
+rollback_guard_key_file = "/etc/agenc/keys/rollback-guard.key"
+login_index_key_file = "/etc/agenc/keys/login-index-g1.key"
+backup_dir = "/srv/agenc-backups"
+backup_signing_private_key_file = "/etc/agenc/keys/backup-signing.key"
+backup_trust_manifest_file = "/etc/agenc/trust/backup-trust.toml"
+
+[accounts]
+account_service_hpke_public_key = "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU"
+account_service_hpke_private_key_file = "/etc/agenc/keys/account-service-hpke.key"
+opaque_server_setup_file = "/etc/agenc/keys/opaque-server-setup.key"
+opaque_fake_credential_key_file = "/etc/agenc/keys/opaque-fake-credential.key"
+
+[limits]
+
+[privacy]
+
+[moderation]
+audit_signing_private_key_file = "/etc/agenc/keys/audit-signing.key"
+audit_trust_manifest_file = "/etc/agenc/trust/audit-trust.toml"
+
+[[moderation.operator]]
+operator_id = "BAQEBAQEBAQEBAQEBAQEBA"
+display_label = "ops"
+signing_public_key = "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY"
+local_uids = [1000]
+permissions = ["observe"]
+enabled = true
+
+[e2ee]
+enabled = false

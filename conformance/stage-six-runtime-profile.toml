@@ -1,0 +1,79 @@
+schema_version = 1
+stage = 6
+tasks = [
+  "S06-001", "S06-002", "S06-003", "S06-004", "S06-005",
+  "S06-006", "S06-007", "S06-008", "S06-009", "S06-010",
+  "S06-011", "S06-012", "S06-013", "S06-014", "S06-015",
+]
+
+[target]
+name = "core-v1"
+standalone = true
+public_tls = true
+public_onion = true
+admin_local = true
+admin_tls = true
+http_metrics = false
+socket_activation = false
+
+[admin]
+input_line_bytes = 4610
+storage_stats_fields = 14
+audit_export_records = 10000
+audit_export_bytes = 67108864
+public_oper = "denied"
+federation_commands = "UNAVAILABLE"
+e2ee_stats = "zero"
+
+[reload]
+revision = "separate ConfigRevision"
+single_writer = "StateCore"
+publication = "snapshot last"
+no_op_increments_revision = false
+existing_tls_sessions_survive = true
+new_tls_handshakes_use_renewed_chain = true
+
+[observability]
+log_directory = "server.data_dir/logs"
+log_queue_entries = 1024
+log_format = "one closed event name and fixed typed fields per line"
+default_retention_hours = 24
+maximum_retention_days = 30
+closed_segments_compressed = false
+stats_window_seconds = 60
+
+[health]
+transport = "signed authenticated admin INFO"
+payload = "health readiness=<0|1> liveness=<0|1>"
+payload_numeric = 371
+end_numeric = 374
+pre_authentication = "PING token echo only"
+public_info_unchanged = true
+progress_tick_seconds = 5
+
+[shutdown]
+total_seconds = 120
+phases = ["quiesce", "drain", "flush", "stop"]
+second_signal = "stop"
+normal_exit = 0
+restart_exit = 75
+
+[excluded]
+wss = "Stage 09"
+federation = "Stage 07"
+e2ee = "Stage 08"
+production_soak = "S10-007"
+
+[fuzz]
+targets = ["config_document", "admin_command"]
+seed = 20260831
+runs = 10000
+max_len = 65536
+timeout_seconds = 2
+rss_limit_mb = 512
+
+[closure]
+implementation_gate = "stage-six-implementation"
+exact_sha_checkpoint_required = true
+evidence_schema = 2
+stage_records = 55

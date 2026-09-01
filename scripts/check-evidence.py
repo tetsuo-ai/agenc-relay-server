@@ -111,6 +111,22 @@ STAGE_BINDINGS = {
     "EVID-S05-014-LOGIN-INDEX": (["S05-014"], "login-index-transition"),
     "EVID-S05-015-QUALIFICATION": (["S05-015"], "storage-fault-qualification"),
     "EVID-S05-900-STAGE-GATE": (["S05-900"], "stage-gate"),
+    "EVID-S06-001-CONFIGURATION": (["S06-001"], "strict-configuration"),
+    "EVID-S06-002-INITIALIZATION": (["S06-002"], "node-initialization"),
+    "EVID-S06-003-TLS": (["S06-003"], "tls-endpoints"),
+    "EVID-S06-004-TRANSPORTS": (["S06-004"], "transport-profile-isolation"),
+    "EVID-S06-005-TASK-TREE": (["S06-005"], "runtime-task-tree"),
+    "EVID-S06-006-MEMORY": (["S06-006"], "memory-admission"),
+    "EVID-S06-007-CONNECTIONS": (["S06-007"], "connection-output-owners"),
+    "EVID-S06-008-STATE-CORE": (["S06-008"], "state-core-durability"),
+    "EVID-S06-009-SESSIONS": (["S06-009"], "registration-session-routing"),
+    "EVID-S06-010-MESSAGING": (["S06-010"], "single-node-messaging"),
+    "EVID-S06-011-ADMISSION": (["S06-011"], "timers-admission-overload"),
+    "EVID-S06-012-ADMIN": (["S06-012"], "isolated-administration"),
+    "EVID-S06-013-RELOAD": (["S06-013"], "atomic-live-reload"),
+    "EVID-S06-014-OBSERVABILITY": (["S06-014"], "privacy-observability"),
+    "EVID-S06-015-HARDENING": (["S06-015"], "service-hardening"),
+    "EVID-S06-900-STAGE-GATE": (["S06-900"], "stage-gate"),
 }
 
 NORMATIVE_BINDINGS = {
@@ -256,7 +272,7 @@ TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z")
 ARTIFACT_PATH_RE = re.compile(
     r"conformance/evidence/artifacts/[A-Za-z0-9][A-Za-z0-9_./-]{0,511}"
 )
-CLOSABLE_STAGES = frozenset(range(6))
+CLOSABLE_STAGES = frozenset(range(7))
 REVIEWED_EVIDENCE_TARGETS = (
     "aarch64-unknown-linux-gnu",
     "x86_64-unknown-linux-gnu",
@@ -269,6 +285,7 @@ STAGE_NAMES = {
     3: "three",
     4: "four",
     5: "five",
+    6: "six",
 }
 RUN_ARTIFACT_FIELDS = {
     "schema_version",
@@ -746,7 +763,7 @@ def parse_toolchain_policy(
 ) -> tuple[str, list[dict[str, object]], list[str]]:
     """Parse one closed toolchain policy and select the requested stage profile."""
     if stage not in CLOSABLE_STAGES:
-        raise EvidenceError("toolchain profiles currently cover only Stages 00 through 05")
+        raise EvidenceError("toolchain profiles currently cover only Stages 00 through 06")
     policy_hash = hashlib.sha256(policy_bytes).hexdigest()
     try:
         policy = tomllib.loads(policy_bytes.decode("utf-8"))
@@ -822,7 +839,7 @@ def parse_toolchain_policy(
             or first_stage < previous_first_stage
         ):
             raise EvidenceError(
-                f"{tool_label}.first_stage must be ordered within Stages 00 through 04"
+                f"{tool_label}.first_stage must be ordered within Stages 00 through 06"
             )
         previous_first_stage = first_stage
         normalized = validate_toolchain(
@@ -1612,7 +1629,7 @@ def validate_closure_entries(
 def validate_closure(root: Path, stage: int, source_commit: str) -> tuple[int, int]:
     """Validate exact-revision evidence needed to close one stage."""
     if stage not in CLOSABLE_STAGES:
-        raise EvidenceError("closure evidence catalogs currently cover only Stages 00 through 05")
+        raise EvidenceError("closure evidence catalogs currently cover only Stages 00 through 06")
     if COMMIT_RE.fullmatch(source_commit) is None:
         raise EvidenceError("closure source commit must be an exact lowercase 40-character Git ID")
     validate(root)
@@ -2082,9 +2099,9 @@ kind = "normative-requirement"
     cases += 1
 
     try:
-        validate_closure(root, 6, "2" * 40)
+        validate_closure(root, 7, "2" * 40)
     except EvidenceError as error:
-        if "only Stages 00 through 05" not in str(error):
+        if "only Stages 00 through 06" not in str(error):
             raise EvidenceError(
                 f"self-test 'unsupported closure stage' reached the wrong branch: {error}"
             ) from error

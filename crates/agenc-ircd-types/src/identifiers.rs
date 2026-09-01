@@ -125,6 +125,11 @@ identifier!(DatabaseId, 16, "A 16-byte durable database identity.");
 identifier!(ConnectionId, 16, "A 16-byte accepted transport identity.");
 identifier!(InviteId, 16, "A 16-byte invitation identity.");
 identifier!(EntryId, 16, "A 16-byte list-mode entry identity.");
+identifier!(
+    OperatorId,
+    16,
+    "A 16-byte administrative operator identity."
+);
 
 /// A one-use account-deletion confirmation token.
 ///

@@ -3,7 +3,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 
 use tokio::sync::oneshot;
@@ -130,20 +130,26 @@ impl Default for CryptoWorkerConfig {
 struct AdmissionCounters {
     channel: AtomicUsize,
     opaque: AtomicUsize,
-    config: CryptoWorkerConfig,
+    config: RwLock<CryptoWorkerConfig>,
 }
 
 impl AdmissionCounters {
     fn try_acquire(&self, class: JobClass) -> bool {
-        let (counter, limit) = match class {
-            JobClass::Channel => (&self.channel, self.config.channel_job_limit),
-            JobClass::Opaque => (&self.opaque, self.config.opaque_job_limit),
+        let config = match self.config.read() {
+            Ok(config) => config,
+            Err(poisoned) => poisoned.into_inner(),
         };
-        counter
+        let (counter, limit) = match class {
+            JobClass::Channel => (&self.channel, config.channel_job_limit),
+            JobClass::Opaque => (&self.opaque, config.opaque_job_limit),
+        };
+        let acquired = counter
             .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 (current < limit).then_some(current + 1)
             })
-            .is_ok()
+            .is_ok();
+        drop(config);
+        acquired
     }
 
     fn release(&self, class: JobClass) -> bool {
@@ -156,6 +162,15 @@ impl AdmissionCounters {
                 current.checked_sub(1)
             })
             .is_ok()
+    }
+
+    fn reload_job_limits(&self, channel_job_limit: usize, opaque_job_limit: usize) {
+        let mut config = match self.config.write() {
+            Ok(config) => config,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        config.channel_job_limit = channel_job_limit;
+        config.opaque_job_limit = opaque_job_limit;
     }
 }
 
@@ -175,6 +190,41 @@ pub struct BoundedCryptoPool<J: CryptoJob> {
     shutting_down: Arc<AtomicBool>,
 }
 
+/// Pollable ownership of crypto worker threads after admission has closed.
+///
+/// Normal async shutdown polls until every worker is finished. Dropping is a
+/// joined synchronous fallback for startup failure paths outside Tokio.
+pub struct CryptoPoolShutdown {
+    workers: Vec<JoinHandle<()>>,
+}
+
+impl Drop for CryptoPoolShutdown {
+    fn drop(&mut self) {
+        for worker in self.workers.drain(..) {
+            let _join_result = worker.join();
+        }
+    }
+}
+
+impl CryptoPoolShutdown {
+    /// Joins workers that have already finished and reports whether all are joined.
+    pub fn try_complete(&mut self) -> bool {
+        while self.workers.last().is_some_and(JoinHandle::is_finished) {
+            let Some(worker) = self.workers.pop() else {
+                break;
+            };
+            let _join_result = worker.join();
+        }
+        self.workers.is_empty()
+    }
+
+    fn wait(mut self) {
+        for worker in self.workers.drain(..) {
+            let _join_result = worker.join();
+        }
+    }
+}
+
 impl<J: CryptoJob> BoundedCryptoPool<J> {
     /// Starts exactly the validated number of named OS worker threads.
     pub fn start(config: CryptoWorkerConfig) -> Result<Self, CryptoWorkerError> {
@@ -187,7 +237,7 @@ impl<J: CryptoJob> BoundedCryptoPool<J> {
         let counters = Arc::new(AdmissionCounters {
             channel: AtomicUsize::new(0),
             opaque: AtomicUsize::new(0),
-            config,
+            config: RwLock::new(config),
         });
         let failed = Arc::new(AtomicBool::new(false));
         let shutting_down = Arc::new(AtomicBool::new(false));
@@ -235,8 +285,25 @@ impl<J: CryptoJob> BoundedCryptoPool<J> {
     /// This blocks the calling thread for up to one full job per worker, so a
     /// Tokio caller should run it through the runtime's blocking pool. Dropping
     /// the pool performs the same join.
-    pub fn shutdown(mut self) {
-        self.join_workers();
+    pub fn shutdown(self) {
+        self.into_shutdown().wait();
+    }
+
+    /// Refuses new work and transfers workers into a nonblocking shutdown value.
+    #[must_use]
+    pub fn into_shutdown(mut self) -> CryptoPoolShutdown {
+        self.shutting_down.store(true, Ordering::Release);
+        drop(self.sender.take());
+        CryptoPoolShutdown {
+            workers: std::mem::take(&mut self.workers),
+        }
+    }
+
+    /// Installs already validated logical job ceilings without changing the
+    /// fixed worker count, physical queue, or admitted-job counters.
+    pub fn reload_job_limits(&self, channel_job_limit: usize, opaque_job_limit: usize) {
+        self.counters
+            .reload_job_limits(channel_job_limit, opaque_job_limit);
     }
 
     fn join_workers(&mut self) {
@@ -389,10 +456,31 @@ pub struct JobHandle<O> {
     cancelled: Arc<AtomicBool>,
 }
 
+/// Cloneable authority to request cancellation before a worker starts a job.
+#[derive(Clone)]
+pub struct JobCancellationToken {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl JobCancellationToken {
+    /// Requests cancellation if the worker has not started the job.
+    pub fn cancel_before_start(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+}
+
 impl<O> JobHandle<O> {
     /// Requests cancellation if the worker has not started this job.
     pub fn cancel_before_start(&self) {
-        self.cancelled.store(true, Ordering::Release);
+        self.cancellation_token().cancel_before_start();
+    }
+
+    /// Returns cloneable cancellation authority for a separate waiter owner.
+    #[must_use]
+    pub fn cancellation_token(&self) -> JobCancellationToken {
+        JobCancellationToken {
+            cancelled: Arc::clone(&self.cancelled),
+        }
     }
 
     /// Waits without blocking a Tokio worker.
@@ -424,7 +512,7 @@ mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, RwLock};
     use std::time::Duration;
 
     use tokio::sync::oneshot;
@@ -467,6 +555,28 @@ mod tests {
         }
     }
 
+    struct ClassifiedBlockingJob {
+        class: JobClass,
+        started: SyncSender<()>,
+        release: Arc<Mutex<Receiver<()>>>,
+    }
+
+    impl CryptoJob for ClassifiedBlockingJob {
+        type Output = u64;
+
+        fn class(&self) -> JobClass {
+            self.class
+        }
+
+        fn execute(self) -> Self::Output {
+            let _started = self.started.send(());
+            if let Ok(release) = self.release.lock() {
+                let _released = release.recv();
+            }
+            1
+        }
+    }
+
     struct PanicJob;
 
     impl CryptoJob for PanicJob {
@@ -503,11 +613,11 @@ mod tests {
         Arc::new(AdmissionCounters {
             channel: AtomicUsize::new(0),
             opaque: AtomicUsize::new(0),
-            config: CryptoWorkerConfig {
+            config: RwLock::new(CryptoWorkerConfig {
                 channel_job_limit: 1,
                 opaque_job_limit: 1,
                 workers: 1,
-            },
+            }),
         })
     }
 
@@ -575,6 +685,63 @@ mod tests {
         );
         release_sender.send(())?;
         assert_eq!(first.completion().await?, 1);
+        Ok(())
+    }
+
+    async fn exercise_reloaded_limit(class: JobClass) -> Result<(), Box<dyn core::error::Error>> {
+        let pool = BoundedCryptoPool::start(CryptoWorkerConfig::new(2, 2, 1)?)?;
+        let (started_sender, started_receiver) = sync_channel(4);
+        let (release_sender, release_receiver) = sync_channel(4);
+        let release = Arc::new(Mutex::new(release_receiver));
+        let make_job = || ClassifiedBlockingJob {
+            class,
+            started: started_sender.clone(),
+            release: Arc::clone(&release),
+        };
+
+        let first = pool
+            .try_submit(make_job())
+            .map_err(|error| error.reason())?;
+        started_receiver.recv_timeout(Duration::from_secs(1))?;
+        let second = pool
+            .try_submit(make_job())
+            .map_err(|error| error.reason())?;
+        pool.reload_job_limits(1, 1);
+        assert_eq!(
+            pool.try_submit(make_job())
+                .err()
+                .map(|error| error.reason()),
+            Some(CryptoWorkerError::QueueFull)
+        );
+        pool.reload_job_limits(3, 3);
+        let third = pool
+            .try_submit(make_job())
+            .map_err(|error| error.reason())?;
+        assert_eq!(
+            pool.try_submit(make_job())
+                .err()
+                .map(|error| error.reason()),
+            Some(CryptoWorkerError::QueueFull),
+            "raising the ceiling preserves the three existing charges"
+        );
+
+        release_sender.send(())?;
+        assert_eq!(first.completion().await?, 1);
+        started_receiver.recv_timeout(Duration::from_secs(1))?;
+        release_sender.send(())?;
+        assert_eq!(second.completion().await?, 1);
+        started_receiver.recv_timeout(Duration::from_secs(1))?;
+        release_sender.send(())?;
+        assert_eq!(third.completion().await?, 1);
+        pool.shutdown();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reload_gates_both_job_classes_without_resetting_admitted_work()
+    -> Result<(), Box<dyn core::error::Error>> {
+        exercise_reloaded_limit(JobClass::Channel).await?;
+        exercise_reloaded_limit(JobClass::Opaque).await?;
         Ok(())
     }
 

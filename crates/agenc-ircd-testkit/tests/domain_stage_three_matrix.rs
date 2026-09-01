@@ -6,13 +6,14 @@ use std::error::Error;
 
 use agenc_ircd_domain::{
     AccountCommand, AccountLabelValue, AdmissionSnapshot, CanonicalCommand, CanonicalCommandView,
-    ChannelCommand, ChannelNameValue, ChannelTarget, DirectMessagePolicy, DisplayNameValue,
-    DomainCommandKind, DomainError, ExternalInputRequest, ExternalInputs, GuestDirectMessagePolicy,
-    HistoryPolicy, InformationQuery, MaskList, MessageCommand, MessageKind, MessageTarget,
-    MessageText, ModeChange, ModeOperation, ModerationAction, ModerationReason,
-    ModerationReasonCode, NicknameValue, PlanDecision, PresenceCommand, PresencePolicy,
-    PresenceProjection, Principal, ProjectionDecision, RateBucket, ResolvedMessageTarget, Role,
-    SanctionRequest, TopicProjection, TopicText, UserQuery, Visibility, VisibilityMode,
+    ChannelCommand, ChannelKeyVerifier, ChannelNameValue, ChannelTarget, DirectMessagePolicy,
+    DisplayNameValue, DomainCommandKind, DomainError, ExternalInputRequest, ExternalInputs,
+    GuestDirectMessagePolicy, HistoryPolicy, InformationQuery, MaskList, MessageCommand,
+    MessageKind, MessageTarget, MessageText, ModeChange, ModeOperation, ModerationAction,
+    ModerationReason, ModerationReasonCode, NicknameValue, PlanDecision, PresenceCommand,
+    PresencePolicy, PresenceProjection, Principal, ProjectionDecision, RateBucket,
+    ResolvedMessageTarget, Role, SanctionRequest, TopicProjection, TopicText, UserQuery,
+    Visibility, VisibilityMode,
 };
 use agenc_ircd_testkit::{
     DomainTestIdentity, account_id, apply_command, apply_plan, bytes, channel_id, create_account,
@@ -58,8 +59,9 @@ fn join_existing(
     now: Option<u64>,
 ) -> Result<(), DomainError> {
     let admission = registered_admission(identity.user_id)?;
-    let external = now.map(|ticks| ExternalInputs {
-        monotonic_now: Some(MonotonicTick::from_ticks(ticks)),
+    let external = Some(ExternalInputs {
+        monotonic_now: now.map(MonotonicTick::from_ticks),
+        utc_now: Some(UtcSecond::from_unix_seconds(1_710_000_001)),
         ..ExternalInputs::default()
     });
     apply_command(
@@ -83,10 +85,15 @@ fn apply_modes(
     entry_ids: Vec<EntryId>,
 ) -> Result<(), DomainError> {
     let has_entries = !entry_ids.is_empty();
+    let key_verifier_count = changes
+        .iter()
+        .filter(|change| matches!(change, ModeChange::JoinKey(true)))
+        .count();
     let admission = registered_admission(actor.user_id)?;
-    let external = has_entries.then_some(ExternalInputs {
-        utc_now: Some(UtcSecond::from_unix_seconds(1_710_000_010)),
+    let external = (has_entries || key_verifier_count != 0).then_some(ExternalInputs {
+        utc_now: has_entries.then_some(UtcSecond::from_unix_seconds(1_710_000_010)),
         entry_ids,
+        key_verifiers: vec![ChannelKeyVerifier::new([0xa5; 16], [0x5a; 32]); key_verifier_count],
         ..ExternalInputs::default()
     });
     apply_command(
@@ -632,6 +639,7 @@ fn invites_bans_exceptions_quiets_and_mode_roles_are_enforced() -> Result<(), Bo
         &registered_admission(guest.user_id)?,
         Some(ExternalInputs {
             monotonic_now: Some(MonotonicTick::from_ticks(100)),
+            utc_now: Some(UtcSecond::from_unix_seconds(1_710_000_100)),
             ..ExternalInputs::default()
         }),
     );
@@ -658,6 +666,7 @@ fn invites_bans_exceptions_quiets_and_mode_roles_are_enforced() -> Result<(), Bo
         &registered_admission(operator.user_id)?,
         Some(ExternalInputs {
             monotonic_now: Some(MonotonicTick::from_ticks(200)),
+            utc_now: Some(UtcSecond::from_unix_seconds(1_710_000_200)),
             invite_ids: vec![InviteId::from_bytes(bytes(31))],
             ..ExternalInputs::default()
         }),
@@ -708,6 +717,7 @@ fn invites_bans_exceptions_quiets_and_mode_roles_are_enforced() -> Result<(), Bo
         &registered_admission(guest.user_id)?,
         Some(ExternalInputs {
             monotonic_now: Some(MonotonicTick::from_ticks(400)),
+            utc_now: Some(UtcSecond::from_unix_seconds(1_710_000_400)),
             ..ExternalInputs::default()
         }),
     );
@@ -796,6 +806,7 @@ fn invites_bans_exceptions_quiets_and_mode_roles_are_enforced() -> Result<(), Bo
             &registered_admission(operator.user_id)?,
             Some(ExternalInputs {
                 monotonic_now: Some(MonotonicTick::from_ticks(600)),
+                utc_now: Some(UtcSecond::from_unix_seconds(1_710_000_600)),
                 invite_ids: vec![InviteId::from_bytes(bytes(36))],
                 ..ExternalInputs::default()
             }),
@@ -1341,6 +1352,27 @@ fn channel_key_mode_distinguishes_real_and_dummy_verification_without_raw_secret
     let dummy_joiner = open_session(&mut state, 112, "DummyJoiner", None)?;
     join_new(&mut state, owner, "#keyed", 110)?;
     join_new(&mut state, owner, "#unkeyed", 111)?;
+    let construct_key = CanonicalCommand::mode(
+        ChannelNameValue::parse("#keyed")?,
+        vec![ModeChange::JoinKey(true)],
+    )?;
+    let PlanDecision::NeedsExternal(requests) = plan(
+        &state,
+        owner,
+        construct_key,
+        &registered_admission(owner.user_id)?,
+        None,
+    )?
+    else {
+        return Err("setting a channel key did not request verifier construction".into());
+    };
+    assert!(matches!(
+        requests.as_slice(),
+        [ExternalInputRequest::ChannelKeyConstruction {
+            change_index: 0,
+            ..
+        }]
+    ));
     apply_modes(
         &mut state,
         owner,
@@ -1348,13 +1380,15 @@ fn channel_key_mode_distinguishes_real_and_dummy_verification_without_raw_secret
         vec![ModeChange::JoinKey(true)],
         Vec::new(),
     )?;
-    assert!(
-        state
-            .channel(channel_id(110))
-            .ok_or("keyed channel missing")?
-            .modes()
-            .join_key
-    );
+    let keyed_channel = state
+        .channel(channel_id(110))
+        .ok_or("keyed channel missing")?;
+    assert!(keyed_channel.modes().join_key);
+    let verifier = keyed_channel
+        .key_verifier()
+        .ok_or("keyed channel did not retain its verifier")?;
+    assert_eq!(verifier.salt(), &[0xa5; 16]);
+    assert_eq!(verifier.hash(), &[0x5a; 32]);
 
     let no_key = plan(
         &state,
@@ -1364,7 +1398,10 @@ fn channel_key_mode_distinguishes_real_and_dummy_verification_without_raw_secret
             false,
         )])?,
         &registered_admission(keyed_joiner.user_id)?,
-        None,
+        Some(ExternalInputs {
+            utc_now: Some(UtcSecond::from_unix_seconds(1_710_000_110)),
+            ..ExternalInputs::default()
+        }),
     )?;
     let PlanDecision::Rejected(no_key) = no_key else {
         return Err("missing channel key was not rejected".into());
@@ -1400,8 +1437,14 @@ fn channel_key_mode_distinguishes_real_and_dummy_verification_without_raw_secret
     let PlanDecision::NeedsExternal(requests) = needs_verification else {
         return Err("supplied key did not request external verification".into());
     };
-    assert_eq!(requests.len(), 1);
-    let request = requests.first().ok_or("missing key verification request")?;
+    assert_eq!(requests.len(), 2);
+    assert!(matches!(
+        requests.first(),
+        Some(ExternalInputRequest::UtcNow {
+            request_sequence: 0
+        })
+    ));
+    let request = requests.get(1).ok_or("missing key verification request")?;
     assert!(matches!(
         request,
         ExternalInputRequest::ChannelKeyVerification {
@@ -1423,6 +1466,7 @@ fn channel_key_mode_distinguishes_real_and_dummy_verification_without_raw_secret
         keyed_command()?,
         &key_admission,
         Some(ExternalInputs {
+            utc_now: Some(UtcSecond::from_unix_seconds(1_710_000_111)),
             key_verdicts: vec![false],
             ..ExternalInputs::default()
         }),
@@ -1444,6 +1488,7 @@ fn channel_key_mode_distinguishes_real_and_dummy_verification_without_raw_secret
         keyed_command()?,
         &key_admission,
         Some(ExternalInputs {
+            utc_now: Some(UtcSecond::from_unix_seconds(1_710_000_112)),
             key_verdicts: vec![true],
             ..ExternalInputs::default()
         }),
@@ -1465,6 +1510,7 @@ fn channel_key_mode_distinguishes_real_and_dummy_verification_without_raw_secret
         )])?,
         &dummy_admission,
         Some(ExternalInputs {
+            utc_now: Some(UtcSecond::from_unix_seconds(1_710_000_113)),
             key_verdicts: vec![false],
             ..ExternalInputs::default()
         }),
@@ -1475,6 +1521,18 @@ fn channel_key_mode_distinguishes_real_and_dummy_verification_without_raw_secret
             .ok_or("dummy joiner disappeared")?
             .is_joined(channel_id(111))
     );
+    apply_modes(
+        &mut state,
+        owner,
+        "#keyed",
+        vec![ModeChange::JoinKey(false)],
+        Vec::new(),
+    )?;
+    let keyed_channel = state
+        .channel(channel_id(110))
+        .ok_or("keyed channel missing after key removal")?;
+    assert!(!keyed_channel.modes().join_key);
+    assert!(keyed_channel.key_verifier().is_none());
     state.validate()?;
     Ok(())
 }
@@ -1617,6 +1675,7 @@ fn authority_changes_remove_only_invites_for_the_stale_principal() -> Result<(),
             &admission,
             Some(ExternalInputs {
                 monotonic_now: Some(MonotonicTick::from_ticks(1_000)),
+                utc_now: Some(UtcSecond::from_unix_seconds(1_710_001_000)),
                 invite_ids: vec![InviteId::from_bytes(bytes(seed))],
                 ..ExternalInputs::default()
             }),

@@ -6,11 +6,12 @@ use std::hash::{Hash, Hasher};
 
 use agenc_ircd_types::{
     AccountDeletionToken, AccountId, AccountLabel, BoundedUtf8, ChannelInstanceId, ChannelName,
-    DisplayName, EntryId, Generation, InviteId, MessageId, MonotonicTick, Nickname, PublicCloak,
-    Revision, ServerId, SessionId, TypedMask, UserId, UtcSecond,
+    ControlPolicy, DisplayName, EntryId, Generation, InviteId, MessageId, MonotonicTick, Nickname,
+    PublicCloak, Revision, ServerId, SessionId, TypedMask, UserId, UtcSecond,
 };
 
 use crate::DomainError;
+use crate::persist::{DurableAccount, DurableChannel, DurableSanction};
 
 /// Maximum live sessions belonging to one account.
 pub const MAX_SESSIONS_PER_ACCOUNT: usize = 32;
@@ -34,6 +35,164 @@ pub const MAX_RESERVED_NICKNAMES: usize = 5;
 pub const MAX_MONITORED_NICKNAMES: usize = 100;
 /// Maximum pending invitations across the network.
 pub(crate) const MAX_INVITES_NETWORK_WIDE: usize = 1_000_000;
+/// Maximum coordinator-owned global channel instances.
+pub const MAX_GLOBAL_CHANNELS: usize = 1_000_000;
+/// Maximum server-local channel instances.
+pub const MAX_LOCAL_CHANNELS: usize = 100_000;
+
+/// Unvalidated values used to construct the live operational ceiling view.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OperationalLimitValues {
+    /// Live sessions belonging to one account.
+    pub sessions_per_account: usize,
+    /// Channels joined by one session.
+    pub channels_per_session: usize,
+    /// Live members in one channel.
+    pub members_per_channel: usize,
+    /// Coordinator-owned global channels.
+    pub global_channels: usize,
+    /// Server-local channels.
+    pub local_channels: usize,
+    /// Pending invitations in one channel.
+    pub invites_per_channel: usize,
+    /// Pending invitations naming one principal.
+    pub invites_per_principal: usize,
+    /// Pending invitations across the network.
+    pub invites_global: usize,
+    /// Contacts stored by one account.
+    pub contacts_per_account: usize,
+}
+
+/// Validated reloadable ceilings consulted by domain decisions.
+///
+/// Hard protocol maxima remain fixed. Lowering this view blocks new use but
+/// does not invalidate or remove already accepted state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OperationalLimits {
+    values: OperationalLimitValues,
+}
+
+/// Exact live-use floors captured before a configuration activation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct OperationalUsage {
+    /// Greatest live session count belonging to one account.
+    pub sessions_per_account: usize,
+    /// Greatest joined-channel count on one live session.
+    pub channels_per_session: usize,
+    /// Greatest live membership count in one channel.
+    pub members_per_channel: usize,
+    /// Current coordinator-owned global channel count.
+    pub global_channels: usize,
+    /// Current server-local channel count.
+    pub local_channels: usize,
+    /// Greatest pending-invite count in one channel.
+    pub invites_per_channel: usize,
+    /// Greatest pending-invite count naming one principal.
+    pub invites_per_principal: usize,
+    /// Current pending-invite count across all channels.
+    pub invites_global: usize,
+    /// Greatest contact count on one account.
+    pub contacts_per_account: usize,
+}
+
+impl OperationalLimits {
+    /// The hard protocol maxima used until a validated runtime profile is installed.
+    pub const HARD_MAX: Self = Self {
+        values: OperationalLimitValues {
+            sessions_per_account: MAX_SESSIONS_PER_ACCOUNT,
+            channels_per_session: MAX_CHANNELS_PER_SESSION,
+            members_per_channel: MAX_MEMBERS_PER_CHANNEL,
+            global_channels: MAX_GLOBAL_CHANNELS,
+            local_channels: MAX_LOCAL_CHANNELS,
+            invites_per_channel: MAX_INVITES_PER_CHANNEL,
+            invites_per_principal: MAX_INVITES_PER_PRINCIPAL,
+            invites_global: MAX_INVITES_NETWORK_WIDE,
+            contacts_per_account: MAX_CONTACTS_PER_ACCOUNT,
+        },
+    };
+
+    /// Validates nonzero ceilings at or below every hard protocol maximum.
+    pub fn new(values: OperationalLimitValues) -> Result<Self, DomainError> {
+        let pairs = [
+            (values.sessions_per_account, MAX_SESSIONS_PER_ACCOUNT),
+            (values.channels_per_session, MAX_CHANNELS_PER_SESSION),
+            (values.members_per_channel, MAX_MEMBERS_PER_CHANNEL),
+            (values.global_channels, MAX_GLOBAL_CHANNELS),
+            (values.local_channels, MAX_LOCAL_CHANNELS),
+            (values.invites_per_channel, MAX_INVITES_PER_CHANNEL),
+            (values.invites_per_principal, MAX_INVITES_PER_PRINCIPAL),
+            (values.invites_global, MAX_INVITES_NETWORK_WIDE),
+            (values.contacts_per_account, MAX_CONTACTS_PER_ACCOUNT),
+        ];
+        if pairs
+            .into_iter()
+            .any(|(value, hard_maximum)| value == 0 || value > hard_maximum)
+        {
+            return Err(DomainError::InvalidArgument);
+        }
+        Ok(Self { values })
+    }
+
+    /// Returns the validated values.
+    #[must_use]
+    pub const fn values(self) -> OperationalLimitValues {
+        self.values
+    }
+
+    /// Returns whether a captured live-use view fits within these ceilings.
+    ///
+    /// This is diagnostic only. Reload activation may install ceilings below
+    /// current use so existing state can drain while subsequent decisions are
+    /// fenced by the new values.
+    #[must_use]
+    pub const fn admits(self, usage: OperationalUsage) -> bool {
+        usage.sessions_per_account <= self.values.sessions_per_account
+            && usage.channels_per_session <= self.values.channels_per_session
+            && usage.members_per_channel <= self.values.members_per_channel
+            && usage.global_channels <= self.values.global_channels
+            && usage.local_channels <= self.values.local_channels
+            && usage.invites_per_channel <= self.values.invites_per_channel
+            && usage.invites_per_principal <= self.values.invites_per_principal
+            && usage.invites_global <= self.values.invites_global
+            && usage.contacts_per_account <= self.values.contacts_per_account
+    }
+
+    pub(crate) const fn sessions_per_account(self) -> usize {
+        self.values.sessions_per_account
+    }
+
+    pub(crate) const fn channels_per_session(self) -> usize {
+        self.values.channels_per_session
+    }
+
+    pub(crate) const fn members_per_channel(self) -> usize {
+        self.values.members_per_channel
+    }
+
+    pub(crate) const fn global_channels(self) -> usize {
+        self.values.global_channels
+    }
+
+    pub(crate) const fn local_channels(self) -> usize {
+        self.values.local_channels
+    }
+
+    pub(crate) const fn invites_per_channel(self) -> usize {
+        self.values.invites_per_channel
+    }
+
+    pub(crate) const fn invites_per_principal(self) -> usize {
+        self.values.invites_per_principal
+    }
+
+    pub(crate) const fn invites_global(self) -> usize {
+        self.values.invites_global
+    }
+
+    pub(crate) const fn contacts_per_account(self) -> usize {
+        self.values.contacts_per_account
+    }
+}
 
 /// A validated away message.
 pub type AwayText = BoundedUtf8<0, 256>;
@@ -339,6 +498,7 @@ pub enum DirectMessagePolicy {
 }
 
 /// One account's public and authorization-relevant domain state.
+#[derive(Clone)]
 pub struct AccountState {
     pub(crate) account_id: AccountId,
     pub(crate) label: Option<AccountLabelValue>,
@@ -349,6 +509,7 @@ pub struct AccountState {
     pub(crate) reserved_nicknames: BTreeSet<NicknameValue>,
     pub(crate) session_generation: Generation,
     pub(crate) revision: Revision,
+    pub(crate) admin_suspension_expires_at: Option<UtcSecond>,
 }
 
 impl AccountState {
@@ -365,6 +526,31 @@ impl AccountState {
             reserved_nicknames: BTreeSet::new(),
             session_generation,
             revision,
+            admin_suspension_expires_at: None,
+        }
+    }
+
+    /// Creates an account with deployment-selected initial policy.
+    #[must_use]
+    pub fn with_policies(
+        account_id: AccountId,
+        session_generation: Generation,
+        revision: Revision,
+        presence: PresencePolicy,
+        guest_direct_messages: GuestDirectMessagePolicy,
+        direct_messages: DirectMessagePolicy,
+    ) -> Self {
+        Self {
+            account_id,
+            label: None,
+            presence,
+            guest_direct_messages,
+            direct_messages,
+            contacts: BTreeSet::new(),
+            reserved_nicknames: BTreeSet::new(),
+            session_generation,
+            revision,
+            admin_suspension_expires_at: None,
         }
     }
 
@@ -414,6 +600,18 @@ impl AccountState {
     #[must_use]
     pub fn contains_contact(&self, account_id: AccountId) -> bool {
         self.contacts.contains(&account_id)
+    }
+}
+
+impl AccountState {
+    /// Iterates reserved nicknames in canonical order.
+    pub fn reserved_nicknames(&self) -> impl Iterator<Item = &NicknameValue> {
+        self.reserved_nicknames.iter()
+    }
+
+    /// Iterates unilateral contacts in ascending Account ID order.
+    pub fn contacts(&self) -> impl Iterator<Item = AccountId> + '_ {
+        self.contacts.iter().copied()
     }
 }
 
@@ -564,6 +762,11 @@ impl SessionState {
         self.monitored_nicknames.iter()
     }
 
+    /// Iterates joined immutable channel identities in canonical order.
+    pub fn joined_channels(&self) -> impl Iterator<Item = ChannelInstanceId> + '_ {
+        self.joined_channels.iter().copied()
+    }
+
     /// Reports whether this session is joined to one immutable channel instance.
     #[must_use]
     pub fn is_joined(&self, channel_id: ChannelInstanceId) -> bool {
@@ -672,6 +875,37 @@ impl Default for ChannelModes {
     }
 }
 
+/// Fixed-size Argon2id verifier material for one channel join secret.
+///
+/// The domain stores and persists only the random salt and derived hash. Raw
+/// channel keys remain runtime-owned external inputs and never enter domain
+/// state, plans, events, or formatted diagnostics.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct ChannelKeyVerifier {
+    salt: [u8; 16],
+    hash: [u8; 32],
+}
+
+impl ChannelKeyVerifier {
+    /// Wraps one already-derived verifier.
+    #[must_use]
+    pub const fn new(salt: [u8; 16], hash: [u8; 32]) -> Self {
+        Self { salt, hash }
+    }
+
+    /// Returns the random Argon2id salt.
+    #[must_use]
+    pub const fn salt(&self) -> &[u8; 16] {
+        &self.salt
+    }
+
+    /// Returns the derived Argon2id hash.
+    #[must_use]
+    pub const fn hash(&self) -> &[u8; 32] {
+        &self.hash
+    }
+}
+
 /// One live channel membership with session and effective roles separated.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Membership {
@@ -679,6 +913,8 @@ pub struct Membership {
     pub(crate) account_id: Option<AccountId>,
     pub(crate) session_role: Role,
     pub(crate) effective_role: Role,
+    pub(crate) membership_revision: Revision,
+    pub(crate) joined_at: UtcSecond,
 }
 
 impl Membership {
@@ -690,6 +926,27 @@ impl Membership {
             account_id,
             session_role: role,
             effective_role: role,
+            membership_revision: Revision::INITIAL,
+            joined_at: UtcSecond::UNIX_EPOCH,
+        }
+    }
+
+    /// Creates a membership with its accepted channel revision and UTC second.
+    #[must_use]
+    pub const fn joined(
+        user_id: UserId,
+        account_id: Option<AccountId>,
+        role: Role,
+        membership_revision: Revision,
+        joined_at: UtcSecond,
+    ) -> Self {
+        Self {
+            user_id,
+            account_id,
+            session_role: role,
+            effective_role: role,
+            membership_revision,
+            joined_at,
         }
     }
 
@@ -740,6 +997,18 @@ impl PlaintextTopic {
     }
 }
 
+impl PlaintextTopic {
+    /// Copies the topic by re-validating its text under the most permissive policy.
+    pub(crate) fn duplicate(&self) -> Result<Self, DomainError> {
+        Ok(Self {
+            text: TopicText::try_from_str(self.text.as_str(), ControlPolicy::PermitHorizontalTab)?,
+            message_id: self.message_id,
+            setter: self.setter,
+            set_at: self.set_at,
+        })
+    }
+}
+
 /// One typed channel list entry.
 pub struct ListEntry {
     pub(crate) entry_id: EntryId,
@@ -771,6 +1040,18 @@ impl ListEntry {
         self.mask.is_quiet()
     }
 
+    /// Returns the immutable list-entry identity used for removals.
+    #[must_use]
+    pub const fn entry_id(&self) -> EntryId {
+        self.entry_id
+    }
+
+    /// Borrows the canonical typed mask.
+    #[must_use]
+    pub const fn mask(&self) -> &TypedMask {
+        &self.mask
+    }
+
     /// Returns the principal that created this entry.
     #[must_use]
     pub const fn setter(&self) -> Principal {
@@ -784,12 +1065,26 @@ impl ListEntry {
     }
 }
 
+impl ListEntry {
+    /// Copies the entry by rebuilding its mask from the canonical text.
+    pub(crate) fn duplicate(&self) -> Result<Self, DomainError> {
+        Ok(Self {
+            entry_id: self.entry_id,
+            mask: crate::persist::duplicate_typed_mask(&self.mask)?,
+            setter: self.setter,
+            created_at: self.created_at,
+        })
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct Invite {
     pub(crate) invite_id: InviteId,
     pub(crate) target: Principal,
     pub(crate) inviter: UserId,
     pub(crate) creation_revision: Revision,
     pub(crate) expires_at: MonotonicTick,
+    pub(crate) expires_at_utc: UtcSecond,
 }
 
 /// Process-local, single-use account-deletion challenge bound to one session fence.
@@ -816,6 +1111,7 @@ pub struct ChannelState {
     pub(crate) created_at: UtcSecond,
     pub(crate) revision: Revision,
     pub(crate) modes: ChannelModes,
+    pub(crate) key_verifier: Option<ChannelKeyVerifier>,
     pub(crate) member_limit: Option<u16>,
     pub(crate) topic: Option<PlaintextTopic>,
     pub(crate) memberships: BTreeMap<UserId, Membership>,
@@ -826,6 +1122,7 @@ pub struct ChannelState {
     pub(crate) invites: BTreeMap<InviteId, Invite>,
     pub(crate) history: HistoryPolicy,
     pub(crate) e2ee_removal_pending: BTreeSet<UserId>,
+    pub(crate) admin_quarantined: bool,
 }
 
 impl ChannelState {
@@ -851,6 +1148,7 @@ impl ChannelState {
             created_at,
             revision,
             modes: ChannelModes::default(),
+            key_verifier: None,
             member_limit: None,
             topic: None,
             memberships,
@@ -861,6 +1159,7 @@ impl ChannelState {
             invites: BTreeMap::new(),
             history: HistoryPolicy::Off,
             e2ee_removal_pending: BTreeSet::new(),
+            admin_quarantined: false,
         }
     }
 
@@ -880,6 +1179,27 @@ impl ChannelState {
     #[must_use]
     pub const fn revision(&self) -> Revision {
         self.revision
+    }
+
+    /// Returns the accepted UTC creation second.
+    #[must_use]
+    pub const fn created_at(&self) -> UtcSecond {
+        self.created_at
+    }
+
+    /// Iterates live membership identities in canonical user order.
+    pub fn members(&self) -> impl Iterator<Item = UserId> + '_ {
+        self.memberships.keys().copied()
+    }
+
+    /// Borrows one typed mask list.
+    #[must_use]
+    pub fn mask_list(&self, list: crate::MaskList) -> &[ListEntry] {
+        match list {
+            crate::MaskList::Ban => &self.bans,
+            crate::MaskList::Exception => &self.exceptions,
+            crate::MaskList::InviteException => &self.invite_exceptions,
+        }
     }
 
     /// Returns the channel authority scope.
@@ -916,6 +1236,18 @@ impl ChannelState {
     #[must_use]
     pub const fn modes(&self) -> ChannelModes {
         self.modes
+    }
+
+    /// Borrows the optional channel-key verifier without exposing a raw key.
+    #[must_use]
+    pub const fn key_verifier(&self) -> Option<&ChannelKeyVerifier> {
+        self.key_verifier.as_ref()
+    }
+
+    /// Returns the optional simultaneous-membership limit.
+    #[must_use]
+    pub const fn member_limit(&self) -> Option<u16> {
+        self.member_limit
     }
 
     /// Borrows the optional plaintext topic.
@@ -959,7 +1291,9 @@ impl ChannelState {
         })
     }
 
-    pub(crate) fn effective_role(&self, membership: Membership) -> Role {
+    /// Computes the effective role for a prospective or current membership.
+    #[must_use]
+    pub fn effective_role(&self, membership: Membership) -> Role {
         let grant = membership
             .account_id
             .and_then(|account_id| self.role_grants.get(&account_id).copied())
@@ -980,6 +1314,9 @@ impl ChannelState {
 
     pub(crate) fn validate(&self) -> Result<(), DomainError> {
         if !self.identities_and_limits_are_valid() {
+            return Err(DomainError::InvariantViolation);
+        }
+        if self.modes.join_key != self.key_verifier.is_some() {
             return Err(DomainError::InvariantViolation);
         }
         if !self.content_policy_is_valid() {
@@ -1022,12 +1359,40 @@ impl ChannelState {
 
     fn identities_and_limits_are_valid(&self) -> bool {
         self.scope == self.name.scope()
-            && self.memberships.len() <= MAX_MEMBERS_PER_CHANNEL
+            && self.lifetime_shape_is_valid()
+            && self.collection_limits_are_valid()
+            && self.membership_identities_are_valid()
+            && self.invite_identities_are_valid()
+    }
+
+    fn lifetime_shape_is_valid(&self) -> bool {
+        self.persistence == PersistencePolicy::Registered
+            || (!self.memberships.is_empty() && self.role_grants.is_empty())
+    }
+
+    fn collection_limits_are_valid(&self) -> bool {
+        self.memberships.len() <= MAX_MEMBERS_PER_CHANNEL
             && self.role_grants.len() <= MAX_ROLE_GRANTS_PER_CHANNEL
             && self.bans.len() <= MAX_MASK_ENTRIES_PER_LIST
             && self.exceptions.len() <= MAX_MASK_ENTRIES_PER_LIST
             && self.invite_exceptions.len() <= MAX_MASK_ENTRIES_PER_LIST
             && self.invites.len() <= MAX_INVITES_PER_CHANNEL
+    }
+
+    fn membership_identities_are_valid(&self) -> bool {
+        self.memberships.iter().all(|(user_id, membership)| {
+            *user_id == membership.user_id
+                && membership.membership_revision.get() != 0
+                && membership.membership_revision <= self.revision
+        })
+    }
+
+    fn invite_identities_are_valid(&self) -> bool {
+        self.invites.iter().all(|(invite_id, invite)| {
+            *invite_id == invite.invite_id
+                && invite.creation_revision.get() != 0
+                && invite.creation_revision <= self.revision
+        })
     }
 
     fn registered_owner_is_preserved(&self) -> bool {
@@ -1043,6 +1408,44 @@ impl ChannelState {
                     || membership.session_role == Role::Member)
         })
     }
+}
+
+impl ChannelState {
+    /// Copies the complete live channel for plan projection.
+    pub(crate) fn duplicate(&self) -> Result<Self, DomainError> {
+        Ok(Self {
+            channel_id: self.channel_id,
+            name: self.name.clone(),
+            scope: self.scope,
+            visibility: self.visibility,
+            content_policy: self.content_policy,
+            persistence: self.persistence,
+            creator: self.creator,
+            created_at: self.created_at,
+            revision: self.revision,
+            modes: self.modes,
+            key_verifier: self.key_verifier,
+            member_limit: self.member_limit,
+            topic: self
+                .topic
+                .as_ref()
+                .map(PlaintextTopic::duplicate)
+                .transpose()?,
+            memberships: self.memberships.clone(),
+            role_grants: self.role_grants.clone(),
+            bans: duplicate_entries(&self.bans)?,
+            exceptions: duplicate_entries(&self.exceptions)?,
+            invite_exceptions: duplicate_entries(&self.invite_exceptions)?,
+            invites: self.invites.clone(),
+            history: self.history,
+            e2ee_removal_pending: self.e2ee_removal_pending.clone(),
+            admin_quarantined: self.admin_quarantined,
+        })
+    }
+}
+
+fn duplicate_entries(entries: &[ListEntry]) -> Result<Vec<ListEntry>, DomainError> {
+    entries.iter().map(ListEntry::duplicate).collect()
 }
 
 /// Closed reason code for an auditable moderation decision.
@@ -1140,6 +1543,30 @@ impl Sanction {
     }
 }
 
+impl Sanction {
+    /// Copies the sanction by re-validating its reason under the most permissive policy.
+    pub(crate) fn duplicate(&self) -> Result<Self, DomainError> {
+        let reason = match &self.reason {
+            Some(reason) => Some(ModerationReason::try_from_str(
+                reason.as_str(),
+                ControlPolicy::PermitHorizontalTab,
+            )?),
+            None => None,
+        };
+        Ok(Self {
+            actor: self.actor,
+            target: self.target,
+            channel_id: self.channel_id,
+            action: self.action,
+            reason_code: self.reason_code,
+            reason,
+            created_at: self.created_at,
+            expires_at: self.expires_at,
+            revision: self.revision,
+        })
+    }
+}
+
 /// Complete pure authoritative state for Stage 03.
 pub struct DomainState {
     pub(crate) revision: Revision,
@@ -1152,6 +1579,7 @@ pub struct DomainState {
     pub(crate) channel_names: BTreeMap<ChannelNameValue, ChannelInstanceId>,
     pub(crate) account_deletion_challenges: BTreeMap<SessionId, AccountDeletionChallengeState>,
     pub(crate) sanctions: Vec<Sanction>,
+    pub(crate) operational_limits: OperationalLimits,
 }
 
 impl DomainState {
@@ -1174,7 +1602,71 @@ impl DomainState {
             channel_names: BTreeMap::new(),
             account_deletion_challenges: BTreeMap::new(),
             sanctions: Vec::new(),
+            operational_limits: OperationalLimits::HARD_MAX,
         }
+    }
+
+    /// Installs validated operational ceilings for subsequent decisions.
+    pub fn set_operational_limits(&mut self, limits: OperationalLimits) {
+        self.operational_limits = limits;
+    }
+
+    /// Returns the operational ceilings consulted by subsequent decisions.
+    #[must_use]
+    pub const fn operational_limits(&self) -> OperationalLimits {
+        self.operational_limits
+    }
+
+    /// Captures exact live use for diagnostics and qualification.
+    ///
+    /// Pending invitations are counted conservatively until their ordinary
+    /// expiry mutation removes them. This view is not a reload floor: lowered
+    /// ceilings retain existing state and fence subsequent decisions.
+    pub fn operational_usage(&self) -> Result<OperationalUsage, DomainError> {
+        let mut account_sessions = BTreeMap::<AccountId, usize>::new();
+        let mut invite_principals = BTreeMap::<Principal, usize>::new();
+        let mut usage = OperationalUsage::default();
+        for session in self.sessions.values() {
+            usage.channels_per_session = usage
+                .channels_per_session
+                .max(session.joined_channels.len());
+            if let Some(account_id) = session.account_id {
+                let count = account_sessions.entry(account_id).or_default();
+                *count = count.checked_add(1).ok_or(DomainError::Overflow)?;
+                usage.sessions_per_account = usage.sessions_per_account.max(*count);
+            }
+        }
+        for channel in self.channels.values() {
+            match channel.scope {
+                ChannelScope::Global => {
+                    usage.global_channels = usage
+                        .global_channels
+                        .checked_add(1)
+                        .ok_or(DomainError::Overflow)?;
+                }
+                ChannelScope::Local => {
+                    usage.local_channels = usage
+                        .local_channels
+                        .checked_add(1)
+                        .ok_or(DomainError::Overflow)?;
+                }
+            }
+            usage.members_per_channel = usage.members_per_channel.max(channel.memberships.len());
+            usage.invites_per_channel = usage.invites_per_channel.max(channel.invites.len());
+            usage.invites_global = usage
+                .invites_global
+                .checked_add(channel.invites.len())
+                .ok_or(DomainError::Overflow)?;
+            for invite in channel.invites.values() {
+                let count = invite_principals.entry(invite.target).or_default();
+                *count = count.checked_add(1).ok_or(DomainError::Overflow)?;
+                usage.invites_per_principal = usage.invites_per_principal.max(*count);
+            }
+        }
+        for account in self.accounts.values() {
+            usage.contacts_per_account = usage.contacts_per_account.max(account.contacts.len());
+        }
+        Ok(usage)
     }
 
     /// Returns the current authoritative revision.
@@ -1201,6 +1693,117 @@ impl DomainState {
         self.channels.get(&channel_id)
     }
 
+    /// Applies retained audit policy to legacy rows that predate durable
+    /// administrative policy fields. Existing durable policy is never
+    /// cleared merely because retention removed its originating event.
+    pub fn install_admin_policy(
+        &mut self,
+        suspensions: Vec<(AccountId, UtcSecond)>,
+        quarantined_channels: Vec<ChannelInstanceId>,
+    ) -> Result<(), DomainError> {
+        for (account_id, expires_at) in suspensions {
+            if let Some(account) = self.accounts.get_mut(&account_id) {
+                account.admin_suspension_expires_at = Some(expires_at);
+            }
+        }
+        for channel_id in quarantined_channels {
+            if let Some(channel) = self
+                .channels
+                .get_mut(&channel_id)
+                .filter(|channel| channel.persistence == PersistencePolicy::Registered)
+            {
+                channel.admin_quarantined = true;
+            }
+        }
+        Ok(())
+    }
+
+    /// Applies one committed bounded account suspension.
+    pub fn admin_suspend_account(
+        &mut self,
+        account_id: AccountId,
+        expires_at: UtcSecond,
+    ) -> Result<(), DomainError> {
+        let revision = next_revision(self.revision)?;
+        let account = self
+            .accounts
+            .get_mut(&account_id)
+            .ok_or(DomainError::NotFound)?;
+        account.admin_suspension_expires_at = Some(expires_at);
+        self.revision = revision;
+        Ok(())
+    }
+
+    /// Removes one committed account suspension.
+    pub fn admin_restore_account(&mut self, account_id: AccountId) -> Result<(), DomainError> {
+        let revision = next_revision(self.revision)?;
+        let account = self
+            .accounts
+            .get_mut(&account_id)
+            .ok_or(DomainError::NotFound)?;
+        if account.admin_suspension_expires_at.take().is_none() {
+            return Err(DomainError::NotFound);
+        }
+        self.revision = revision;
+        Ok(())
+    }
+
+    /// Applies one committed channel-delivery quarantine.
+    pub fn admin_quarantine_channel(
+        &mut self,
+        channel_id: ChannelInstanceId,
+    ) -> Result<(), DomainError> {
+        let revision = next_revision(self.revision)?;
+        let channel = self
+            .channels
+            .get_mut(&channel_id)
+            .ok_or(DomainError::NotFound)?;
+        if channel.persistence != PersistencePolicy::Registered || channel.admin_quarantined {
+            return Err(DomainError::NotFound);
+        }
+        channel.admin_quarantined = true;
+        channel.revision = revision;
+        self.revision = revision;
+        Ok(())
+    }
+
+    /// Returns whether account authority is suspended at `now`.
+    #[must_use]
+    pub fn account_is_suspended(&self, account_id: AccountId, now: UtcSecond) -> bool {
+        self.accounts
+            .get(&account_id)
+            .and_then(|account| account.admin_suspension_expires_at)
+            .is_some_and(|expires_at| now < expires_at)
+    }
+
+    /// Returns whether the verified audit chain retains a suspension entry,
+    /// including one whose bounded effect has already expired.
+    #[must_use]
+    pub fn account_has_admin_suspension(&self, account_id: AccountId) -> bool {
+        self.accounts
+            .get(&account_id)
+            .is_some_and(|account| account.admin_suspension_expires_at.is_some())
+    }
+
+    /// Returns every live user currently bound to one account.
+    #[must_use]
+    pub fn users_for_account(&self, account_id: AccountId) -> Vec<UserId> {
+        self.sessions
+            .iter()
+            .filter_map(|(user_id, session)| {
+                (session.account_id() == Some(account_id)).then_some(*user_id)
+            })
+            .collect()
+    }
+
+    /// Returns whether new delivery to a channel is quarantined.
+    #[must_use]
+    pub fn channel_is_quarantined(&self, channel_id: ChannelInstanceId) -> bool {
+        self.channels
+            .get(&channel_id)
+            .is_some_and(|channel| channel.admin_quarantined)
+    }
+
     /// Returns the number of live account authorities.
     #[must_use]
     pub fn account_count(&self) -> usize {
@@ -1213,10 +1816,33 @@ impl DomainState {
         self.sessions.len()
     }
 
+    /// Returns the number of live sessions bound to account authority.
+    #[must_use]
+    pub fn authenticated_session_count(&self) -> usize {
+        self.sessions
+            .values()
+            .filter(|session| session.account_id().is_some())
+            .count()
+    }
+
     /// Returns the number of current channel instances.
     #[must_use]
     pub fn channel_count(&self) -> usize {
         self.channels.len()
+    }
+
+    /// Returns `(local, global)` channel counts without exposing the maps.
+    #[must_use]
+    pub fn channel_scope_counts(&self) -> (usize, usize) {
+        let mut local = 0_usize;
+        let mut global = 0_usize;
+        for channel in self.channels.values() {
+            match channel.scope() {
+                ChannelScope::Local => local = local.saturating_add(1),
+                ChannelScope::Global => global = global.saturating_add(1),
+            }
+        }
+        (local, global)
     }
 
     /// Returns the number of content-free audit sanctions.
@@ -1432,6 +2058,169 @@ pub(crate) fn next_revision(revision: Revision) -> Result<Revision, DomainError>
     revision.checked_add(1).map_err(Into::into)
 }
 
+impl DomainState {
+    /// Rebuilds the legacy account/channel projection and validates it.
+    ///
+    /// This compatibility entry point accepts pre-cutover channel rows with no
+    /// sessions, invites, or pending removals. New startup code uses
+    /// [`Self::restore_authoritative`].
+    pub fn restore(
+        revision: Revision,
+        accounts: Vec<DurableAccount>,
+        channels: Vec<DurableChannel>,
+        sanctions: Vec<DurableSanction>,
+    ) -> Result<Self, DomainError> {
+        let mut state = Self::at_revision(revision);
+        for account in accounts {
+            let account = account.into_state()?;
+            if state.accounts.insert(account.account_id, account).is_some() {
+                return Err(DomainError::InvariantViolation);
+            }
+        }
+        for channel in channels {
+            let channel = channel.into_state()?;
+            let replaced_name = state
+                .channel_names
+                .insert(channel.name.clone(), channel.channel_id)
+                .is_some();
+            let replaced_id = state.channels.insert(channel.channel_id, channel).is_some();
+            if replaced_name || replaced_id {
+                return Err(DomainError::InvariantViolation);
+            }
+        }
+        for sanction in sanctions {
+            state.sanctions.push(sanction.into_state()?);
+        }
+        state.validate()?;
+        Ok(state)
+    }
+
+    /// Rebuilds the complete coordinator authority recovered from live rows.
+    ///
+    /// Durable invite expiries are rebased from UTC onto this process's
+    /// monotonic clock before the resulting state is validated.
+    // agenc-review: focus owner=domain reviewed=2026-09-01 reason=single reconstruction boundary rebuilds every uniqueness index before validating complete recovered authority
+    pub fn restore_authoritative(
+        revision: Revision,
+        accounts: Vec<DurableAccount>,
+        sessions: Vec<crate::DurableSession>,
+        channels: Vec<DurableChannel>,
+        sanctions: Vec<DurableSanction>,
+        monotonic_now: MonotonicTick,
+        utc_now: UtcSecond,
+    ) -> Result<Self, DomainError> {
+        let mut state = Self::at_revision(revision);
+        for account in accounts {
+            let account = account.into_state()?;
+            if state.accounts.insert(account.account_id, account).is_some() {
+                return Err(DomainError::InvariantViolation);
+            }
+        }
+        for session in sessions {
+            let session = session.into_state()?;
+            let duplicate_id = state
+                .session_ids
+                .insert(session.session_id, session.user_id)
+                .is_some();
+            let duplicate_nickname = state
+                .nicknames
+                .insert(session.nickname.clone(), session.user_id)
+                .is_some();
+            let duplicate_cloak = state
+                .public_cloaks
+                .insert(session.public_cloak, session.user_id)
+                .is_some();
+            let duplicate_user = state.sessions.insert(session.user_id, session).is_some();
+            if duplicate_id || duplicate_nickname || duplicate_cloak || duplicate_user {
+                return Err(DomainError::InvariantViolation);
+            }
+        }
+        for channel in channels {
+            let channel = channel.into_state_with_clocks(monotonic_now, utc_now)?;
+            let replaced_name = state
+                .channel_names
+                .insert(channel.name.clone(), channel.channel_id)
+                .is_some();
+            let replaced_id = state.channels.insert(channel.channel_id, channel).is_some();
+            if replaced_name || replaced_id {
+                return Err(DomainError::InvariantViolation);
+            }
+        }
+        for sanction in sanctions {
+            state.sanctions.push(sanction.into_state()?);
+        }
+        state.validate()?;
+        Ok(state)
+    }
+
+    /// Projects one account into its persisted value.
+    #[must_use]
+    pub fn durable_account(&self, account_id: AccountId) -> Option<DurableAccount> {
+        self.accounts
+            .get(&account_id)
+            .map(DurableAccount::from_state)
+    }
+
+    /// Projects one logical session, omitting process-local channel joins.
+    #[must_use]
+    pub fn durable_session(&self, user_id: UserId) -> Option<crate::DurableSession> {
+        self.sessions.get(&user_id).map(|session| {
+            let mut durable = crate::DurableSession::from_state(session);
+            durable.joined_channels.retain(|channel_id| {
+                self.channels.get(channel_id).is_some_and(|channel| {
+                    channel.scope == ChannelScope::Global
+                        || channel.persistence == PersistencePolicy::Registered
+                })
+            });
+            durable
+        })
+    }
+
+    /// Iterates live user identities in canonical order.
+    pub fn session_user_ids(&self) -> impl Iterator<Item = UserId> + '_ {
+        self.sessions.keys().copied()
+    }
+
+    /// Projects one channel whose authority survives a coordinator restart.
+    #[must_use]
+    pub fn durable_channel(&self, channel_id: ChannelInstanceId) -> Option<DurableChannel> {
+        self.channels
+            .get(&channel_id)
+            .and_then(DurableChannel::from_state)
+    }
+
+    /// Iterates every account projection in ascending Account ID order.
+    pub fn durable_accounts(&self) -> impl Iterator<Item = DurableAccount> + '_ {
+        self.accounts.values().map(DurableAccount::from_state)
+    }
+
+    /// Iterates every durable channel projection in ascending instance order.
+    pub fn durable_channels(&self) -> impl Iterator<Item = DurableChannel> + '_ {
+        self.channels
+            .values()
+            .filter_map(DurableChannel::from_state)
+    }
+
+    /// Iterates every sanction projection in application order.
+    pub fn durable_sanctions(&self) -> impl Iterator<Item = DurableSanction> + '_ {
+        self.sanctions.iter().map(DurableSanction::from_state)
+    }
+
+    /// Finds the account holding a durable reservation for one canonical nickname.
+    #[must_use]
+    pub fn nickname_reserved_by(&self, nickname: &NicknameValue) -> Option<AccountId> {
+        self.accounts
+            .values()
+            .find(|account| account.reserved_nicknames.contains(nickname))
+            .map(|account| account.account_id)
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn tests_support_account_id(seed: u8) -> AccountId {
+    AccountId::from_random(agenc_ircd_types::AccountRandomId::from_bytes([seed; 16]))
+}
+
 #[cfg(test)]
 pub(crate) fn test_public_cloak(seed: u8) -> Result<PublicCloak, DomainError> {
     const BASE32: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
@@ -1447,6 +2236,60 @@ pub(crate) fn test_public_cloak(seed: u8) -> Result<PublicCloak, DomainError> {
 mod tests {
     use super::*;
     use agenc_ircd_types::{AccountRandomId, ControlPolicy};
+
+    #[test]
+    fn operational_limits_validate_hard_bounds_and_replace_atomically() -> Result<(), DomainError> {
+        let lowered = OperationalLimits::new(OperationalLimitValues {
+            sessions_per_account: 2,
+            channels_per_session: 3,
+            members_per_channel: 4,
+            global_channels: 5,
+            local_channels: 6,
+            invites_per_channel: 7,
+            invites_per_principal: 8,
+            invites_global: 9,
+            contacts_per_account: 10,
+        })?;
+        let mut state = DomainState::new()?;
+        assert_eq!(state.operational_limits(), OperationalLimits::HARD_MAX);
+        state.set_operational_limits(lowered);
+        assert_eq!(state.operational_limits(), lowered);
+
+        let mut invalid = lowered.values();
+        invalid.sessions_per_account = 0;
+        assert_eq!(
+            OperationalLimits::new(invalid),
+            Err(DomainError::InvalidArgument)
+        );
+        invalid = OperationalLimits::HARD_MAX.values();
+        invalid.local_channels = MAX_LOCAL_CHANNELS.saturating_add(1);
+        assert_eq!(
+            OperationalLimits::new(invalid),
+            Err(DomainError::InvalidArgument)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn operational_usage_blocks_a_ceiling_below_live_state() -> Result<(), DomainError> {
+        let mut state = DomainState::new()?;
+        let account_id = account(1);
+        state.accounts.insert(
+            account_id,
+            AccountState::new(account_id, Generation::new(1)?, Revision::new(0)?),
+        );
+        insert_session(&mut state, session(1, Some(account_id))?);
+        insert_session(&mut state, session(2, Some(account_id))?);
+        let usage = state.operational_usage()?;
+        assert_eq!(usage.sessions_per_account, 2);
+        assert!(OperationalLimits::HARD_MAX.admits(usage));
+
+        let mut values = OperationalLimits::HARD_MAX.values();
+        values.sessions_per_account = 1;
+        let lowered = OperationalLimits::new(values)?;
+        assert!(!lowered.admits(usage));
+        Ok(())
+    }
 
     fn id(seed: u8) -> [u8; 16] {
         [seed; 16]
@@ -1671,6 +2514,7 @@ mod tests {
                     inviter: UserId::from_bytes(id(1)),
                     creation_revision: Revision::new(1)?,
                     expires_at: MonotonicTick::from_ticks(100),
+                    expires_at_utc: UtcSecond::from_unix_seconds(610),
                 },
             );
         }
@@ -2091,6 +2935,7 @@ mod tests {
                     inviter: UserId::from_bytes(id(28)),
                     creation_revision: state.revision,
                     expires_at: MonotonicTick::from_ticks(100),
+                    expires_at_utc: UtcSecond::from_unix_seconds(610),
                 },
             );
         assert_eq!(state.validate(), Err(DomainError::InvariantViolation));
@@ -2110,6 +2955,7 @@ mod tests {
                     inviter: user_id,
                     creation_revision: state.revision,
                     expires_at: MonotonicTick::from_ticks(100),
+                    expires_at_utc: UtcSecond::from_unix_seconds(610),
                 },
             );
         assert_eq!(state.validate(), Err(DomainError::InvariantViolation));
