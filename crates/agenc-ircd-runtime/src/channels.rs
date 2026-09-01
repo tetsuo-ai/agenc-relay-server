@@ -30,11 +30,14 @@ use crate::bridge::crypto::{
 };
 use crate::bridge::{CryptoCompletionMessage, CryptoJobId};
 use crate::connection::sink::ConnectionGeneration;
+use crate::observe::metrics::ResultClass;
 use crate::purpose::ListenerPurpose;
 use crate::state_core::inbox::CloseReason;
 use crate::state_core::session::BoundSession;
 use crate::state_core::timers::{TimedId, TimerEntry, TimerKind};
-use crate::state_core::{RouteOutcome, StageRefused, StagedOrigin, StateCoreContext};
+use crate::state_core::{
+    CommandObservation, RouteOutcome, StageRefused, StagedOrigin, StateCoreContext,
+};
 use crate::sync::Arc;
 
 const COMMAND_DEADLINE_MILLIS: u64 = 30_000;
@@ -50,6 +53,13 @@ struct ClientReply<'a> {
     generation: ConnectionGeneration,
     capabilities: &'a CapabilityState,
     request: RetryCommand<'a>,
+}
+
+struct SessionCommandInput<'a> {
+    reply: Option<ClientReply<'a>>,
+    command: CanonicalCommand,
+    close_reason: Option<&'a str>,
+    metered: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -99,8 +109,13 @@ struct DeferredPlan {
 }
 
 enum CommandExecution {
-    Complete(bool),
+    Complete(ResultClass),
     Crypto(Box<DeferredPlan>),
+}
+
+enum ConvertedCommand {
+    Ready(CanonicalCommand),
+    Rejected(ResultClass),
 }
 
 enum PreparedCryptoJob {
@@ -147,6 +162,7 @@ struct PendingCryptoCommand {
     render_command: CanonicalCommand,
     current: PendingCryptoKind,
     remaining: VecDeque<PreparedCryptoJob>,
+    observation: CommandObservation,
 }
 
 /// Bounded registered-command crypto continuations owned by StateCore's
@@ -182,47 +198,69 @@ impl RegisteredCommandExecutor {
 }
 
 impl RegisteredCommandExecutor {
+    // agenc-review: focus owner=runtime reviewed=2026-09-01 reason=one crypto deferral transaction validates ownership prepares bounded jobs installs every continuation index and accounts final command outcome
     fn defer(
         &mut self,
         context: &mut StateCoreContext,
         origin: DeferredOrigin<'_>,
         mut message: ParsedMessage,
         plan: Box<DeferredPlan>,
+        observation: CommandObservation,
     ) -> Result<(), RuntimeError> {
         if self.by_connection.contains_key(&origin.generation) {
-            return render_busy(
+            let rendered = render_busy(
                 context,
                 origin.bound,
                 origin.generation,
                 origin.capabilities,
                 &message,
             );
+            context.complete_command_observation(
+                observation,
+                if rendered.is_ok() {
+                    ResultClass::Busy
+                } else {
+                    ResultClass::Error
+                },
+            );
+            return rendered;
         }
-        let mut jobs = prepare_crypto_jobs(
-            context,
-            origin.bound,
-            &mut message,
-            &plan.render_command,
-            &plan.requests,
-            &self.verifier,
-            self.dummy,
-        )?;
-        let first = jobs.pop_front().ok_or(RuntimeError::InvalidValue)?;
-        let sequence = self.next_sequence;
-        self.next_sequence = sequence.checked_add(1).ok_or(RuntimeError::Overflow)?;
-        let capabilities = origin
-            .capabilities
-            .try_clone()
-            .map_err(|_| RuntimeError::MemoryExhausted)?;
-        let deadline = context
-            .now()
-            .checked_add(COMMAND_DEADLINE_MILLIS)
-            .map_err(|_| RuntimeError::Overflow)?;
-        context.timers_mut().schedule(
-            deadline,
-            TimerKind::CommandDeadline,
-            TimedId::Sequence(sequence),
-        )?;
+        let prepared = (|| {
+            let mut jobs = prepare_crypto_jobs(
+                context,
+                origin.bound,
+                &mut message,
+                &plan.render_command,
+                &plan.requests,
+                &self.verifier,
+                self.dummy,
+            )?;
+            let first = jobs.pop_front().ok_or(RuntimeError::InvalidValue)?;
+            let sequence = self.next_sequence;
+            let next_sequence = sequence.checked_add(1).ok_or(RuntimeError::Overflow)?;
+            let capabilities = origin
+                .capabilities
+                .try_clone()
+                .map_err(|_| RuntimeError::MemoryExhausted)?;
+            let deadline = context
+                .now()
+                .checked_add(COMMAND_DEADLINE_MILLIS)
+                .map_err(|_| RuntimeError::Overflow)?;
+            context.timers_mut().schedule(
+                deadline,
+                TimerKind::CommandDeadline,
+                TimedId::Sequence(sequence),
+            )?;
+            Ok((jobs, first, sequence, next_sequence, capabilities))
+        })();
+        let (jobs, first, sequence, next_sequence, capabilities) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                context.complete_command_observation(observation, ResultClass::Error);
+                return Err(error);
+            }
+        };
+        self.next_sequence = next_sequence;
         let DeferredPlan {
             authorized,
             external,
@@ -241,6 +279,7 @@ impl RegisteredCommandExecutor {
             render_command,
             current: first.kind(),
             remaining: jobs,
+            observation,
         };
         self.submit(context, pending, first)
     }
@@ -258,7 +297,16 @@ impl RegisteredCommandExecutor {
             Ok(job_id) => job_id,
             Err(_refused) => {
                 cancel_command_timer(context, sequence);
-                return render_pending_busy(context, &pending);
+                let rendered = render_pending_busy(context, &pending);
+                context.complete_command_observation(
+                    pending.observation,
+                    if rendered.is_ok() {
+                        ResultClass::Busy
+                    } else {
+                        ResultClass::Error
+                    },
+                );
+                return rendered;
             }
         };
         if self.pending.contains_key(&job_id)
@@ -267,6 +315,7 @@ impl RegisteredCommandExecutor {
         {
             let _cancelled = context.crypto_mut().cancel(job_id);
             cancel_command_timer(context, sequence);
+            context.complete_command_observation(pending.observation, ResultClass::Error);
             return Err(RuntimeError::InvalidValue);
         }
         self.by_connection.insert(generation, job_id);
@@ -290,10 +339,20 @@ impl RegisteredCommandExecutor {
             Ok(()) => {}
             Err(CryptoCompletionError::Busy) => {
                 cancel_command_timer(context, pending.sequence);
-                return render_pending_busy(context, &pending).map_err(|error| (generation, error));
+                let rendered = render_pending_busy(context, &pending);
+                context.complete_command_observation(
+                    pending.observation,
+                    if rendered.is_ok() {
+                        ResultClass::Busy
+                    } else {
+                        ResultClass::Error
+                    },
+                );
+                return rendered.map_err(|error| (generation, error));
             }
             Err(CryptoCompletionError::Internal(error)) => {
                 cancel_command_timer(context, pending.sequence);
+                context.complete_command_observation(pending.observation, ResultClass::Error);
                 return Err((generation, error));
             }
         }
@@ -319,6 +378,7 @@ impl RegisteredCommandExecutor {
         if let Some(pending) = self.take_pending(job_id) {
             let _cancelled = context.crypto_mut().cancel(job_id);
             cancel_command_timer(context, pending.sequence);
+            context.complete_command_observation(pending.observation, ResultClass::Closed);
         }
     }
 
@@ -342,9 +402,16 @@ impl RegisteredCommandExecutor {
         };
         let _cancelled = context.crypto_mut().cancel(job_id);
         let generation = pending.generation;
-        render_pending_busy(context, &pending)
-            .map(|()| true)
-            .map_err(|error| (generation, error))
+        let rendered = render_pending_busy(context, &pending);
+        context.complete_command_observation(
+            pending.observation,
+            if rendered.is_ok() {
+                ResultClass::Busy
+            } else {
+                ResultClass::Error
+            },
+        );
+        rendered.map(|()| true).map_err(|error| (generation, error))
     }
 
     fn take_pending(&mut self, job_id: CryptoJobId) -> Option<PendingCryptoCommand> {
@@ -363,6 +430,7 @@ impl From<RuntimeError> for SessionCommandError {
 
 impl RegisteredCommandExecutor {
     /// Executes one registered handoff or owns its deferred crypto continuation.
+    // agenc-review: focus owner=runtime reviewed=2026-09-01 reason=registered routing retains one command observation through synchronous crypto and durable completion without copying input data
     // agenc-review: allow owner=runtime reviewed=2026-08-30 reason=registered routing binds the account deletion coordinator connection session capabilities nickname and owned handoff at one entry boundary
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn route_registered(
@@ -374,10 +442,13 @@ impl RegisteredCommandExecutor {
         capabilities: &CapabilityState,
         current_nickname: &mut Option<String>,
         handoff: RegisteredCommandHandoff,
+        observation: CommandObservation,
     ) -> Result<RouteOutcome, RuntimeError> {
         let Some(bound) = bound else {
+            context.complete_command_observation(observation, ResultClass::Rejected);
             return Ok(RouteOutcome::Close(CloseReason::ProtocolError));
         };
+        let mut observation = Some(observation);
         let (kind, message) = handoff.into_parts();
         let request = RetryCommand {
             kind,
@@ -388,9 +459,16 @@ impl RegisteredCommandExecutor {
             capabilities,
             request,
         };
-        let Some(command) = convert_registered_command(context, bound, reply, kind, &message)?
-        else {
-            return Ok(RouteOutcome::Continue);
+        let command = match convert_registered_command(context, bound, reply, kind, &message) {
+            Ok(ConvertedCommand::Ready(command)) => command,
+            Ok(ConvertedCommand::Rejected(result)) => {
+                complete_observation(context, &mut observation, result);
+                return Ok(RouteOutcome::Continue);
+            }
+            Err(error) => {
+                complete_observation(context, &mut observation, ResultClass::Error);
+                return Err(error);
+            }
         };
         let next_nickname = match command.view() {
             CanonicalCommandView::Nick(nickname) => Some(nickname.presentation().to_owned()),
@@ -400,17 +478,26 @@ impl RegisteredCommandExecutor {
             context,
             Some(accounts),
             bound,
-            Some(reply),
-            command,
-            None,
-            true,
-        )? {
-            CommandExecution::Complete(accepted) => {
-                if accepted && let Some(nickname) = next_nickname {
+            SessionCommandInput {
+                reply: Some(reply),
+                command,
+                close_reason: None,
+                metered: true,
+            },
+            &mut observation,
+        ) {
+            Ok(CommandExecution::Complete(result)) => {
+                complete_observation(context, &mut observation, result);
+                if result == ResultClass::Ok
+                    && let Some(nickname) = next_nickname
+                {
                     *current_nickname = Some(nickname);
                 }
             }
-            CommandExecution::Crypto(plan) => {
+            Ok(CommandExecution::Crypto(plan)) => {
+                let Some(observation) = observation.take() else {
+                    return Err(RuntimeError::InvalidValue);
+                };
                 self.defer(
                     context,
                     DeferredOrigin {
@@ -421,7 +508,12 @@ impl RegisteredCommandExecutor {
                     },
                     message,
                     plan,
+                    observation,
                 )?;
+            }
+            Err(error) => {
+                complete_observation(context, &mut observation, ResultClass::Error);
+                return Err(error);
             }
         }
         Ok(RouteOutcome::Continue)
@@ -434,16 +526,20 @@ fn convert_registered_command(
     reply: ClientReply<'_>,
     kind: RegisteredCommandKind,
     message: &ParsedMessage,
-) -> Result<Option<CanonicalCommand>, RuntimeError> {
+) -> Result<ConvertedCommand, RuntimeError> {
     match crate::command_convert::convert(context.domain(), kind, message) {
-        Ok(command) => Ok(Some(command)),
+        Ok(command) => Ok(ConvertedCommand::Ready(command)),
         Err(RuntimeError::InvalidValue | RuntimeError::LimitExceeded) => {
-            let (error, silent) = if charge_registered_command_only(context, bound.user_id).is_ok()
-            {
-                (DomainError::InvalidArgument, false)
-            } else {
-                (DomainError::ServerBusy, message.command() == "NOTICE")
-            };
+            let (error, silent, result) =
+                if charge_registered_command_only(context, bound.user_id).is_ok() {
+                    (DomainError::InvalidArgument, false, ResultClass::Rejected)
+                } else {
+                    (
+                        DomainError::ServerBusy,
+                        message.command() == "NOTICE",
+                        ResultClass::Busy,
+                    )
+                };
             crate::client_render::render_domain_failure(
                 context,
                 reply.render_input(bound.user_id),
@@ -451,7 +547,7 @@ fn convert_registered_command(
                 silent,
                 None,
             )?;
-            Ok(None)
+            Ok(ConvertedCommand::Rejected(result))
         }
         Err(error) => Err(error),
     }
@@ -618,6 +714,7 @@ fn apply_crypto_output(
     }
 }
 
+// agenc-review: focus owner=runtime reviewed=2026-09-01 reason=crypto completion validates the retained command once renders its bounded result and transfers observation ownership into the durable boundary
 fn finish_pending(
     context: &mut StateCoreContext,
     pending: PendingCryptoCommand,
@@ -631,8 +728,10 @@ fn finish_pending(
         authorized,
         external,
         render_command,
+        observation,
         ..
     } = pending;
+    let mut observation = Some(observation);
     let reply = ClientReply {
         generation,
         capabilities: &capabilities,
@@ -645,20 +744,49 @@ fn finish_pending(
         Ok(decision) => decision,
         Err(error) => match domain_plan_error(error) {
             SessionCommandError::Public { error, silent } => {
-                crate::client_render::render_domain_failure(
+                let rendered = crate::client_render::render_domain_failure(
                     context,
                     reply.render_input(bound.user_id),
                     error,
                     silent,
                     None,
-                )?;
+                );
+                complete_observation(
+                    context,
+                    &mut observation,
+                    if rendered.is_ok() {
+                        result_for_domain_error(error)
+                    } else {
+                        ResultClass::Error
+                    },
+                );
+                rendered?;
                 return Ok(());
             }
-            SessionCommandError::Internal(error) => return Err(error),
+            SessionCommandError::Internal(error) => {
+                complete_observation(context, &mut observation, ResultClass::Error);
+                return Err(error);
+            }
         },
     };
-    execute_planned_command(context, None, bound, Some(reply), &render_command, decision)
-        .map(|_| ())
+    match execute_planned_command(
+        context,
+        None,
+        bound,
+        Some(reply),
+        &render_command,
+        decision,
+        &mut observation,
+    ) {
+        Ok(result) => {
+            complete_observation(context, &mut observation, result);
+            Ok(())
+        }
+        Err(error) => {
+            complete_observation(context, &mut observation, ResultClass::Error);
+            Err(error)
+        }
+    }
 }
 
 fn render_pending_busy(
@@ -701,6 +829,24 @@ fn cancel_command_timer(context: &mut StateCoreContext, sequence: u64) {
         .cancel(TimerKind::CommandDeadline, TimedId::Sequence(sequence));
 }
 
+fn complete_observation(
+    context: &StateCoreContext,
+    observation: &mut Option<CommandObservation>,
+    result: ResultClass,
+) {
+    if let Some(observation) = observation.take() {
+        context.complete_command_observation(observation, result);
+    }
+}
+
+const fn result_for_domain_error(error: DomainError) -> ResultClass {
+    if matches!(error, DomainError::ServerBusy) {
+        ResultClass::Busy
+    } else {
+        ResultClass::Rejected
+    }
+}
+
 /// Stages removal of one registered domain session after its transport ends.
 pub(crate) fn close_registered(context: &mut StateCoreContext, bound: BoundSession, reason: &str) {
     let reason = BoundedUtf8::try_from_str(reason, ControlPolicy::RejectAll).ok();
@@ -708,14 +854,18 @@ pub(crate) fn close_registered(context: &mut StateCoreContext, bound: BoundSessi
         .as_ref()
         .map_or("connection closed", BoundedUtf8::as_str)
         .to_owned();
+    let mut observation = None;
     let _result = execute_session_command(
         context,
         None,
         bound,
-        None,
-        CanonicalCommand::quit(reason),
-        Some(&wire_reason),
-        false,
+        SessionCommandInput {
+            reply: None,
+            command: CanonicalCommand::quit(reason),
+            close_reason: Some(&wire_reason),
+            metered: false,
+        },
+        &mut observation,
     );
 }
 
@@ -723,11 +873,15 @@ fn execute_session_command(
     context: &mut StateCoreContext,
     accounts: Option<&mut AccountServiceCoordinator>,
     bound: BoundSession,
-    reply: Option<ClientReply<'_>>,
-    command: CanonicalCommand,
-    close_reason: Option<&str>,
-    metered: bool,
+    input: SessionCommandInput<'_>,
+    observation: &mut Option<CommandObservation>,
 ) -> Result<CommandExecution, RuntimeError> {
+    let SessionCommandInput {
+        reply,
+        command,
+        close_reason,
+        metered,
+    } = input;
     let planned =
         match plan_session_command(context, bound, command, reply.map(|r| r.request), metered) {
             Ok(planned) => planned,
@@ -740,7 +894,7 @@ fn execute_session_command(
                     silent,
                     None,
                 )?;
-                return Ok(CommandExecution::Complete(false));
+                return Ok(CommandExecution::Complete(result_for_domain_error(error)));
             }
             Err(SessionCommandError::Internal(error)) => return Err(error),
         };
@@ -761,8 +915,16 @@ fn execute_session_command(
             CanonicalCommand::quit(reason)
         }
     };
-    execute_planned_command(context, accounts, bound, reply, &render_command, decision)
-        .map(CommandExecution::Complete)
+    execute_planned_command(
+        context,
+        accounts,
+        bound,
+        reply,
+        &render_command,
+        decision,
+        observation,
+    )
+    .map(CommandExecution::Complete)
 }
 
 fn execute_planned_command(
@@ -772,7 +934,8 @@ fn execute_planned_command(
     reply: Option<ClientReply<'_>>,
     render_command: &CanonicalCommand,
     decision: PlanDecision,
-) -> Result<bool, RuntimeError> {
+    observation: &mut Option<CommandObservation>,
+) -> Result<ResultClass, RuntimeError> {
     let PlanDecision::Mutation(plan) = decision else {
         return complete_nonmutation(context, bound, reply, decision);
     };
@@ -785,11 +948,11 @@ fn execute_planned_command(
     )?;
     match plan.storage_class() {
         StorageClass::Ephemeral => match context.apply_ephemeral(plan, fanout) {
-            Ok(_) => Ok(true),
+            Ok(_) => Ok(ResultClass::Ok),
             Err(error) => render_ephemeral_refusal(context, bound, reply, error),
         },
         StorageClass::Durable => {
-            stage_durable_command(context, accounts, bound, plan, fanout, reply)
+            stage_durable_command(context, accounts, bound, plan, fanout, reply, observation)
         }
     }
 }
@@ -799,7 +962,7 @@ fn render_ephemeral_refusal(
     bound: BoundSession,
     reply: Option<ClientReply<'_>>,
     error: crate::state_core::EphemeralRefused,
-) -> Result<bool, RuntimeError> {
+) -> Result<ResultClass, RuntimeError> {
     let Some(reply) = reply else {
         return Err(match error {
             crate::state_core::EphemeralRefused::Fanout(_) => RuntimeError::MemoryExhausted,
@@ -807,6 +970,7 @@ fn render_ephemeral_refusal(
         });
     };
     let error = ephemeral_refusal_error(error)?;
+    let result = result_for_domain_error(error);
     crate::client_render::render_domain_failure(
         context,
         reply.render_input(bound.user_id),
@@ -814,7 +978,7 @@ fn render_ephemeral_refusal(
         reply.request.message.command() == "NOTICE",
         None,
     )?;
-    Ok(false)
+    Ok(result)
 }
 
 fn ephemeral_refusal_error(
@@ -836,8 +1000,9 @@ fn stage_durable_command(
     plan: MutationPlan,
     fanout: crate::state_core::fanout::FanoutRequest,
     reply: Option<ClientReply<'_>>,
-) -> Result<bool, RuntimeError> {
-    let origin = durable_command_origin(context, bound, reply)?;
+    observation: &mut Option<CommandObservation>,
+) -> Result<ResultClass, RuntimeError> {
+    let origin = durable_command_origin(context, bound, reply, observation)?;
     let Some(account_id) = deleted_account(&plan)? else {
         let staged = if reply.is_none() {
             context.stage_shutdown_session_close(plan, fanout)
@@ -845,7 +1010,7 @@ fn stage_durable_command(
             context.stage_durable(plan, fanout, origin, 0)
         };
         return match staged {
-            Ok(_) => Ok(true),
+            Ok(_) => Ok(ResultClass::Ok),
             Err(error) => render_durable_stage_refusal(context, bound, reply, error),
         };
     };
@@ -856,7 +1021,7 @@ fn stage_durable_command(
     let writes = accounts.begin_account_deletion(context, generation, account_id)?;
     let staged = context.stage_durable_with_account_service(plan, fanout, origin, 0, writes);
     match staged {
-        Ok(crate::state_core::StageAccepted::Staged { .. }) => Ok(true),
+        Ok(crate::state_core::StageAccepted::Staged { .. }) => Ok(ResultClass::Ok),
         Ok(crate::state_core::StageAccepted::AppliedInStep(_)) => {
             accounts.cancel_account_deletion(context, generation)?;
             Err(RuntimeError::InvalidValue)
@@ -873,11 +1038,12 @@ fn render_durable_stage_refusal(
     bound: BoundSession,
     reply: Option<ClientReply<'_>>,
     error: StageRefused,
-) -> Result<bool, RuntimeError> {
+) -> Result<ResultClass, RuntimeError> {
     let Some(reply) = reply else {
         return Err(stage_error(error));
     };
     let error = durable_stage_refusal_error(error)?;
+    let result = result_for_domain_error(error);
     crate::client_render::render_domain_failure(
         context,
         reply.render_input(bound.user_id),
@@ -885,7 +1051,7 @@ fn render_durable_stage_refusal(
         reply.request.message.command() == "NOTICE",
         None,
     )?;
-    Ok(false)
+    Ok(result)
 }
 
 fn durable_stage_refusal_error(error: StageRefused) -> Result<DomainError, RuntimeError> {
@@ -904,12 +1070,15 @@ fn durable_command_origin(
     context: &StateCoreContext,
     bound: BoundSession,
     reply: Option<ClientReply<'_>>,
+    observation: &mut Option<CommandObservation>,
 ) -> Result<Option<StagedOrigin>, RuntimeError> {
     let Some(reply) = reply else {
         return Ok(None);
     };
     if reply.request.message.command() == "NOTICE" {
-        return Ok(Some(StagedOrigin::silent(reply.generation)));
+        return Ok(Some(
+            StagedOrigin::silent(reply.generation).with_observation(observation.take()),
+        ));
     }
     let nickname = crate::client_render::requester_nickname(context, bound.user_id);
     let frame = crate::client_render::failure_frame(
@@ -926,10 +1095,10 @@ fn durable_command_origin(
         reply.request.message,
         vec![frame],
     )?;
-    Ok(Some(StagedOrigin::with_rejection_frames(
-        reply.generation,
-        frames,
-    )))
+    Ok(Some(
+        StagedOrigin::with_rejection_frames(reply.generation, frames)
+            .with_observation(observation.take()),
+    ))
 }
 
 fn deleted_account(plan: &MutationPlan) -> Result<Option<AccountId>, RuntimeError> {
@@ -949,12 +1118,12 @@ fn complete_nonmutation(
     bound: BoundSession,
     reply: Option<ClientReply<'_>>,
     decision: PlanDecision,
-) -> Result<bool, RuntimeError> {
+) -> Result<ResultClass, RuntimeError> {
     match decision {
         PlanDecision::Query(plan) => {
             let reply = reply.ok_or(RuntimeError::InvalidValue)?;
             crate::query_render::render_query(context, reply.render_input(bound.user_id), &plan)?;
-            Ok(true)
+            Ok(ResultClass::Ok)
         }
         PlanDecision::Rejected(plan) => {
             if let Some(reply) = reply {
@@ -964,7 +1133,16 @@ fn complete_nonmutation(
                     &plan,
                 )?;
             }
-            Ok(false)
+            let result = if plan
+                .failures()
+                .iter()
+                .all(|failure| failure.error() == DomainError::ServerBusy)
+            {
+                ResultClass::Busy
+            } else {
+                ResultClass::Rejected
+            };
+            Ok(result)
         }
         PlanDecision::Mutation(_) | PlanDecision::NeedsExternal(_) => {
             Err(RuntimeError::InvalidValue)

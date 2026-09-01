@@ -29,12 +29,13 @@ use crate::account_service::{
 };
 use crate::admission::{BucketDemand, BucketKey, BucketKind};
 use crate::connection::sink::ConnectionGeneration;
+use crate::observe::metrics::ResultClass;
 use crate::state_core::fanout::FanoutRequest;
 use crate::state_core::inbox::CloseReason;
 use crate::state_core::session::BoundSession;
 use crate::state_core::timers::{TimedId, TimerEntry, TimerKind};
 use crate::state_core::{
-    CommandRouter, RouteOutcome, StageAccepted, StagedOrigin, StateCoreContext,
+    CommandObservation, CommandRouter, RouteOutcome, StageAccepted, StagedOrigin, StateCoreContext,
 };
 use crate::sync::Arc;
 
@@ -74,6 +75,17 @@ struct NicknameLease {
     nickname: NicknameValue,
 }
 
+struct RegistrationCommit<'a> {
+    event_generation: u64,
+    nickname: &'a str,
+    realname: &'a str,
+}
+
+struct CarrierObservation<'a> {
+    token: &'a mut Option<CommandObservation>,
+    result: &'a mut ResultClass,
+}
+
 struct ConnectionState {
     registration: RegistrationState,
     lease: Option<NicknameLease>,
@@ -82,6 +94,7 @@ struct ConnectionState {
     departure_reason: Option<String>,
     deadline: DeadlineState,
     allow_guests: bool,
+    deferred_observations: VecDeque<CommandObservation>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -113,6 +126,7 @@ pub struct RegistrationRouter {
     leases: BTreeMap<NicknameValue, ConnectionGeneration>,
     pending_registrations: BTreeMap<ConnectionGeneration, PendingRegistration>,
     pending_closures: Vec<PendingClosure>,
+    pending_observations: BTreeMap<(ConnectionGeneration, u64), CommandObservation>,
 }
 
 impl RegistrationRouter {
@@ -153,6 +167,7 @@ impl RegistrationRouter {
             leases: BTreeMap::new(),
             pending_registrations: BTreeMap::new(),
             pending_closures: Vec::new(),
+            pending_observations: BTreeMap::new(),
         })
     }
 
@@ -164,14 +179,18 @@ impl RegistrationRouter {
         }
     }
 
+    // agenc-review: focus owner=runtime reviewed=2026-09-01 reason=registration routing keeps parsing admission state-machine effects and final observation ownership in one ordered command boundary
     fn route_message(
         &mut self,
         context: &mut StateCoreContext,
         generation: ConnectionGeneration,
         message: agenc_ircd_client_wire::ParsedMessage,
+        observation: CommandObservation,
     ) -> RouteOutcome {
+        let mut observation = Some(observation);
         let command = message.command().to_owned();
         let Some(mut state) = self.connections.remove(&generation) else {
+            complete_observation(context, &mut observation, ResultClass::Error);
             return RouteOutcome::Close(CloseReason::ProtocolError);
         };
         let admission = if state.bound.is_none() {
@@ -200,6 +219,15 @@ impl RegistrationRouter {
             } else {
                 RouteOutcome::Close(CloseReason::ProtocolError)
             };
+            complete_observation(
+                context,
+                &mut observation,
+                if matches!(outcome, RouteOutcome::Continue) {
+                    ResultClass::Busy
+                } else {
+                    ResultClass::Error
+                },
+            );
             self.refresh_deadline(context, generation, &mut state, outcome);
             self.connections.insert(generation, state);
             return outcome;
@@ -208,9 +236,22 @@ impl RegistrationRouter {
             .registration
             .message(message, context.now().get(), &self.advertised);
         let outcome = match actions {
-            Ok(actions) => self.drive_actions(context, generation, &mut state, actions),
+            Ok(actions) => {
+                self.drive_actions(context, generation, &mut state, actions, &mut observation)
+            }
             Err(error) => {
-                self.render_registration_error(context, generation, &state, &command, error)
+                let outcome =
+                    self.render_registration_error(context, generation, &state, &command, error);
+                complete_observation(
+                    context,
+                    &mut observation,
+                    if matches!(outcome, RouteOutcome::Continue) {
+                        ResultClass::Rejected
+                    } else {
+                        ResultClass::Error
+                    },
+                );
+                outcome
             }
         };
         if matches!(outcome, RouteOutcome::Close(_)) {
@@ -287,8 +328,11 @@ impl RegistrationRouter {
         let actions = state
             .registration
             .tick(context.now().get(), ping.as_deref());
+        let mut observation = None;
         let outcome = match actions {
-            Ok(actions) => self.drive_actions(context, generation, &mut state, actions),
+            Ok(actions) => {
+                self.drive_actions(context, generation, &mut state, actions, &mut observation)
+            }
             Err(_) => RouteOutcome::Close(CloseReason::ProtocolError),
         };
         self.refresh_deadline(context, generation, &mut state, outcome);
@@ -315,24 +359,82 @@ impl RegistrationRouter {
         generation: ConnectionGeneration,
         state: &mut ConnectionState,
         actions: Vec<RegistrationAction>,
+        observation: &mut Option<CommandObservation>,
     ) -> RouteOutcome {
+        let mut result = ResultClass::Ok;
         let mut pending: VecDeque<RegistrationAction> = actions.into();
         while let Some(action) = pending.pop_front() {
             if pending.len() >= MAX_PENDING_ACTIONS {
+                complete_observation(context, observation, ResultClass::Error);
                 return RouteOutcome::Close(CloseReason::ProtocolError);
             }
-            match self.apply_action(context, generation, state, action) {
+            match self.apply_action(context, generation, state, action, observation, &mut result) {
                 Ok(ActionStep::Continue) => {}
                 Ok(ActionStep::FollowUp(actions)) => {
                     if pending.len().saturating_add(actions.len()) > MAX_PENDING_ACTIONS {
+                        complete_observation(context, observation, ResultClass::Error);
                         return RouteOutcome::Close(CloseReason::ProtocolError);
                     }
                     pending.extend(actions);
                 }
-                Ok(ActionStep::Close(reason)) => return RouteOutcome::Close(reason),
-                Err(_) => return RouteOutcome::Close(CloseReason::ProtocolError),
+                Ok(ActionStep::Resume(messages)) => {
+                    for message in messages {
+                        let Some(deferred) = state.deferred_observations.pop_front() else {
+                            complete_observation(context, observation, ResultClass::Error);
+                            return RouteOutcome::Close(CloseReason::ProtocolError);
+                        };
+                        let mut deferred = Some(deferred);
+                        let command = message.command().to_owned();
+                        match state.registration.message(
+                            message,
+                            context.now().get(),
+                            &self.advertised,
+                        ) {
+                            Ok(actions) => {
+                                let outcome = self.drive_actions(
+                                    context,
+                                    generation,
+                                    state,
+                                    actions,
+                                    &mut deferred,
+                                );
+                                if matches!(outcome, RouteOutcome::Close(_)) {
+                                    complete_observation(context, observation, ResultClass::Closed);
+                                    return outcome;
+                                }
+                            }
+                            Err(error) => {
+                                let outcome = self.render_registration_error(
+                                    context, generation, state, &command, error,
+                                );
+                                complete_observation(
+                                    context,
+                                    &mut deferred,
+                                    if matches!(outcome, RouteOutcome::Continue) {
+                                        ResultClass::Rejected
+                                    } else {
+                                        ResultClass::Error
+                                    },
+                                );
+                                if matches!(outcome, RouteOutcome::Close(_)) {
+                                    complete_observation(context, observation, ResultClass::Closed);
+                                    return outcome;
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(ActionStep::Close(reason)) => {
+                    complete_observation(context, observation, result);
+                    return RouteOutcome::Close(reason);
+                }
+                Err(_) => {
+                    complete_observation(context, observation, ResultClass::Error);
+                    return RouteOutcome::Close(CloseReason::ProtocolError);
+                }
             }
         }
+        complete_observation(context, observation, result);
         RouteOutcome::Continue
     }
 
@@ -343,6 +445,8 @@ impl RegistrationRouter {
         generation: ConnectionGeneration,
         state: &mut ConnectionState,
         action: RegistrationAction,
+        observation: &mut Option<CommandObservation>,
+        result: &mut ResultClass,
     ) -> Result<ActionStep, RuntimeError> {
         match action {
             RegistrationAction::CapabilityLs(tokens) => {
@@ -353,6 +457,7 @@ impl RegistrationRouter {
                     self.send_capabilities(context, generation, state, "ACK", false, &tokens)?;
                 }
                 CapRequestReply::Nak(tokens) => {
+                    record_result(result, ResultClass::Rejected);
                     self.send_capabilities(context, generation, state, "NAK", false, &tokens)?;
                 }
             },
@@ -366,6 +471,7 @@ impl RegistrationRouter {
                 self.send_capabilities(context, generation, state, "DEL", false, &[name])?;
             }
             RegistrationAction::CapabilityReconnectRequired(_) => {
+                record_result(result, ResultClass::Error);
                 return Ok(ActionStep::Close(CloseReason::ProtocolError));
             }
             RegistrationAction::ReserveNickname {
@@ -378,6 +484,7 @@ impl RegistrationRouter {
                     state,
                     lease_generation,
                     &nickname,
+                    result,
                 );
             }
             RegistrationAction::CancelNicknameReservation {
@@ -400,6 +507,7 @@ impl RegistrationRouter {
                     state,
                     lease_generation,
                     &nickname,
+                    result,
                 );
             }
             RegistrationAction::CheckAccessToken {
@@ -410,6 +518,9 @@ impl RegistrationRouter {
                     self.config.access_token.as_ref().is_some_and(|configured| {
                         configured.as_slice().ct_eq(token.expose()).into()
                     });
+                if !accepted {
+                    record_result(result, ResultClass::Rejected);
+                }
                 return self.registration_event(
                     context,
                     generation,
@@ -430,9 +541,13 @@ impl RegistrationRouter {
                     context,
                     generation,
                     state,
-                    commit_generation,
-                    &nickname,
-                    &realname,
+                    RegistrationCommit {
+                        event_generation: commit_generation,
+                        nickname: &nickname,
+                        realname: &realname,
+                    },
+                    observation,
+                    result,
                 );
             }
             RegistrationAction::WelcomeBurst(steps) => {
@@ -478,9 +593,14 @@ impl RegistrationRouter {
                     state,
                     carrier_generation,
                     route,
+                    CarrierObservation {
+                        token: observation,
+                        result,
+                    },
                 );
             }
             RegistrationAction::ForwardRegisteredCommand(handoff) => {
+                let observation = observation.take().ok_or(RuntimeError::InvalidValue)?;
                 let capabilities = state.registration.capability_state();
                 return self
                     .commands
@@ -492,23 +612,23 @@ impl RegistrationRouter {
                         capabilities,
                         &mut state.nickname,
                         handoff,
+                        observation,
                     )
                     .map(ActionStep::from);
             }
             RegistrationAction::ResumeDeferredInput(queue) => {
-                let mut follow_up = Vec::new();
-                for message in queue.into_messages() {
-                    follow_up.extend(
-                        state
-                            .registration
-                            .message(message, context.now().get(), &self.advertised)
-                            .map_err(|_| RuntimeError::InvalidValue)?,
-                    );
-                }
-                return Ok(ActionStep::FollowUp(follow_up));
+                return Ok(ActionStep::Resume(queue.into_messages()));
             }
-            RegistrationAction::InputDeferred => {}
+            RegistrationAction::InputDeferred => {
+                state
+                    .deferred_observations
+                    .try_reserve(1)
+                    .map_err(|_| RuntimeError::MemoryExhausted)?;
+                let observation = observation.take().ok_or(RuntimeError::InvalidValue)?;
+                state.deferred_observations.push_back(observation);
+            }
             RegistrationAction::NotRegistered => {
+                record_result(result, ResultClass::Rejected);
                 self.send_numeric(
                     context,
                     generation,
@@ -519,6 +639,7 @@ impl RegistrationRouter {
                 )?;
             }
             RegistrationAction::AlreadyRegistered => {
+                record_result(result, ResultClass::Rejected);
                 self.send_numeric(
                     context,
                     generation,
@@ -565,6 +686,7 @@ impl RegistrationRouter {
         state: &mut ConnectionState,
         lease_generation: u64,
         nickname: &str,
+        result: &mut ResultClass,
     ) -> Result<ActionStep, RuntimeError> {
         let nickname = NicknameValue::parse(nickname).map_err(|_| RuntimeError::InvalidValue)?;
         let domain_taken = context.domain().resolve_nickname(&nickname).is_some()
@@ -574,6 +696,9 @@ impl RegistrationRouter {
             .get(&nickname)
             .is_some_and(|owner| *owner != generation);
         let accepted = !domain_taken && !lease_taken;
+        if !accepted {
+            record_result(result, ResultClass::Rejected);
+        }
         if accepted {
             self.release_lease(generation, state);
             self.leases.insert(nickname.clone(), generation);
@@ -599,14 +724,20 @@ impl RegistrationRouter {
         context: &mut StateCoreContext,
         connection: ConnectionGeneration,
         state: &mut ConnectionState,
-        event_generation: u64,
-        nickname: &str,
-        realname: &str,
+        commit: RegistrationCommit<'_>,
+        observation: &mut Option<CommandObservation>,
+        result: &mut ResultClass,
     ) -> Result<ActionStep, RuntimeError> {
+        let RegistrationCommit {
+            event_generation,
+            nickname,
+            realname,
+        } = commit;
         let authenticated_account = self
             .accounts
             .authenticated_binding(connection, context.now())?;
         if authenticated_account.is_none() && !state.allow_guests {
+            record_result(result, ResultClass::Rejected);
             return self.registration_event(
                 context,
                 connection,
@@ -638,9 +769,11 @@ impl RegistrationRouter {
                 capabilities,
                 seed,
                 nickname,
+                observation,
             )? {
                 return Ok(ActionStep::Continue);
             }
+            record_result(result, ResultClass::Rejected);
             return self.registration_event(
                 context,
                 connection,
@@ -653,6 +786,9 @@ impl RegistrationRouter {
             );
         }
         let accepted = self.commit_session(context, connection, bound, capabilities, seed)?;
+        if !accepted {
+            record_result(result, ResultClass::Rejected);
+        }
         if accepted {
             state.bound = Some(bound);
             state.nickname = Some(nickname.to_owned());
@@ -681,6 +817,7 @@ impl RegistrationRouter {
         capabilities: CapabilityState,
         seed: SessionSeed,
         nickname: &str,
+        observation: &mut Option<CommandObservation>,
     ) -> Result<bool, RuntimeError> {
         if self.pending_registrations.contains_key(&connection) {
             return Err(RuntimeError::InvalidValue);
@@ -720,7 +857,7 @@ impl RegistrationRouter {
         let staged = context.stage_durable_with_account_service(
             plan,
             fanout,
-            Some(StagedOrigin::silent(connection)),
+            Some(StagedOrigin::silent(connection).with_observation(observation.take())),
             0,
             vec![grant_write],
         );
@@ -991,14 +1128,19 @@ impl RegistrationRouter {
         state: &mut ConnectionState,
         carrier_generation: u64,
         route: CarrierRoute,
+        observation: CarrierObservation<'_>,
     ) -> Result<ActionStep, RuntimeError> {
         match route {
-            CarrierRoute::Finished(frames) => {
+            CarrierRoute::Finished {
+                frames,
+                result: carrier_result,
+            } => {
                 if !frames.is_empty() {
                     context
                         .send_to(generation, frames)
                         .map_err(|_| RuntimeError::MemoryExhausted)?;
                 }
+                record_result(observation.result, carrier_result);
                 self.registration_event(
                     context,
                     generation,
@@ -1008,8 +1150,23 @@ impl RegistrationRouter {
                     },
                 )
             }
-            CarrierRoute::Pending => Ok(ActionStep::Continue),
-            CarrierRoute::Close => Ok(ActionStep::Close(CloseReason::ProtocolError)),
+            CarrierRoute::Pending => {
+                if self
+                    .pending_observations
+                    .contains_key(&(generation, carrier_generation))
+                {
+                    complete_observation(context, observation.token, ResultClass::Error);
+                    return Err(RuntimeError::InvalidValue);
+                }
+                let observation = observation.token.take().ok_or(RuntimeError::InvalidValue)?;
+                self.pending_observations
+                    .insert((generation, carrier_generation), observation);
+                Ok(ActionStep::Continue)
+            }
+            CarrierRoute::Close => {
+                record_result(observation.result, ResultClass::Error);
+                Ok(ActionStep::Close(CloseReason::ProtocolError))
+            }
         }
     }
 
@@ -1172,6 +1329,7 @@ impl RegistrationRouter {
         });
     }
 
+    // agenc-review: focus owner=runtime reviewed=2026-09-01 reason=durable registration completion atomically installs each retained session or closes it and resolves its one command observation
     fn finalize_pending_registrations(&mut self, context: &mut StateCoreContext) {
         for (generation, pending) in std::mem::take(&mut self.pending_registrations) {
             let PendingRegistration {
@@ -1199,7 +1357,16 @@ impl RegistrationRouter {
                     },
                     context.now().get(),
                 ) {
-                    Ok(actions) => self.drive_actions(context, generation, &mut state, actions),
+                    Ok(actions) => {
+                        let mut observation = None;
+                        self.drive_actions(
+                            context,
+                            generation,
+                            &mut state,
+                            actions,
+                            &mut observation,
+                        )
+                    }
                     Err(_) => RouteOutcome::Close(CloseReason::ProtocolError),
                 }
             } else {
@@ -1241,6 +1408,13 @@ impl RegistrationRouter {
         completions: Vec<CarrierCompletion>,
     ) {
         for completion in completions {
+            if completion.carrier_generation != 0
+                && let Some(observation) = self
+                    .pending_observations
+                    .remove(&(completion.generation, completion.carrier_generation))
+            {
+                context.complete_command_observation(observation, completion.result);
+            }
             if completion.close {
                 close_transport(context, completion.generation);
                 continue;
@@ -1254,10 +1428,15 @@ impl RegistrationRouter {
                 },
                 context.now().get(),
             );
+            let mut observation = None;
             let outcome = match actions {
-                Ok(actions) => {
-                    self.drive_actions(context, completion.generation, &mut state, actions)
-                }
+                Ok(actions) => self.drive_actions(
+                    context,
+                    completion.generation,
+                    &mut state,
+                    actions,
+                    &mut observation,
+                ),
                 Err(_) => RouteOutcome::Close(CloseReason::ProtocolError),
             };
             if matches!(outcome, RouteOutcome::Close(_)) {
@@ -1332,8 +1511,9 @@ impl CommandRouter for RegistrationRouter {
         context: &mut StateCoreContext,
         generation: ConnectionGeneration,
         message: agenc_ircd_client_wire::ParsedMessage,
+        observation: CommandObservation,
     ) -> RouteOutcome {
-        self.route_message(context, generation, message)
+        self.route_message(context, generation, message, observation)
     }
 
     fn connection_opened(
@@ -1375,6 +1555,7 @@ impl CommandRouter for RegistrationRouter {
                     departure_reason: None,
                     deadline: DeadlineState::Registration,
                     allow_guests: self.config.allow_guests,
+                    deferred_observations: VecDeque::new(),
                 },
             );
         } else {
@@ -1390,9 +1571,22 @@ impl CommandRouter for RegistrationRouter {
     ) {
         self.accounts.connection_closed(context, generation);
         self.commands.connection_closed(context, generation);
+        while let Some(key) = self
+            .pending_observations
+            .keys()
+            .find(|(pending_generation, _)| *pending_generation == generation)
+            .copied()
+        {
+            if let Some(observation) = self.pending_observations.remove(&key) {
+                context.complete_command_observation(observation, ResultClass::Closed);
+            }
+        }
         let Some(mut state) = self.connections.remove(&generation) else {
             return;
         };
+        for observation in state.deferred_observations.drain(..) {
+            context.complete_command_observation(observation, ResultClass::Closed);
+        }
         cancel_connection_timers(context, generation);
         let _event = state
             .registration
@@ -1420,6 +1614,11 @@ impl CommandRouter for RegistrationRouter {
     fn reload_ready(&self) -> bool {
         self.pending_registrations.is_empty()
             && self.pending_closures.is_empty()
+            && self.pending_observations.is_empty()
+            && self
+                .connections
+                .values()
+                .all(|state| state.deferred_observations.is_empty())
             && self.accounts.reload_ready()
             && self.commands.reload_ready()
     }
@@ -1514,6 +1713,7 @@ impl CommandRouter for RegistrationRouter {
 enum ActionStep {
     Continue,
     FollowUp(Vec<RegistrationAction>),
+    Resume(std::vec::IntoIter<agenc_ircd_client_wire::ParsedMessage>),
     Close(CloseReason),
 }
 
@@ -1677,6 +1877,32 @@ fn close_transport(context: &mut StateCoreContext, generation: ConnectionGenerat
         sink.begin_slow_consumer_close();
     }
     context.sessions_mut().mark_sink_gone(generation);
+}
+
+fn complete_observation(
+    context: &StateCoreContext,
+    observation: &mut Option<CommandObservation>,
+    result: ResultClass,
+) {
+    if let Some(observation) = observation.take() {
+        context.complete_command_observation(observation, result);
+    }
+}
+
+fn record_result(current: &mut ResultClass, candidate: ResultClass) {
+    if result_class_rank(candidate) > result_class_rank(*current) {
+        *current = candidate;
+    }
+}
+
+const fn result_class_rank(result: ResultClass) -> u8 {
+    match result {
+        ResultClass::Ok => 0,
+        ResultClass::Rejected => 1,
+        ResultClass::Busy => 2,
+        ResultClass::Closed => 3,
+        ResultClass::Error => 4,
+    }
 }
 
 fn reject_staged_origin(context: &mut StateCoreContext, origin: StagedOrigin) {
@@ -1911,5 +2137,19 @@ mod tests {
             Some(RuntimeError::InvalidValue)
         );
         Ok(())
+    }
+
+    #[test]
+    fn command_result_accumulates_the_strongest_final_outcome() {
+        let mut result = ResultClass::Ok;
+        record_result(&mut result, ResultClass::Rejected);
+        record_result(&mut result, ResultClass::Ok);
+        assert_eq!(result, ResultClass::Rejected);
+
+        record_result(&mut result, ResultClass::Busy);
+        record_result(&mut result, ResultClass::Closed);
+        record_result(&mut result, ResultClass::Error);
+        record_result(&mut result, ResultClass::Rejected);
+        assert_eq!(result, ResultClass::Error);
     }
 }

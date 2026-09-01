@@ -1646,7 +1646,14 @@ fn production_daemon_serves_restarts_reconciles_and_stops() -> TestResult {
     let mut admin = exercise_admin(&fixture, account_id)?;
     account_client.expect_closed_without_output()?;
     let mut restored_account =
-        connect_registered_account(&fixture, "AccountRestored", 49, account_id)?;
+        connect_registered_account(&fixture, "AccountRestored", 49, account_id).map_err(
+            |error| {
+                failure(format!(
+                    "post-restore account reconnect failed: {error}; logs: {}",
+                    fixture.log_excerpt()
+                ))
+            },
+        )?;
 
     let disposable = AdminClient::connect(&fixture)?;
     disposable.quit()?;
@@ -1665,7 +1672,14 @@ fn production_daemon_serves_restarts_reconciles_and_stops() -> TestResult {
 
     let mut second = DaemonProcess::start(&fixture.config_path)?;
     let mut persisted_account =
-        connect_registered_account(&fixture, "AccountPersisted", 51, account_id)?;
+        connect_registered_account(&fixture, "AccountPersisted", 51, account_id).map_err(
+            |error| {
+                failure(format!(
+                    "post-restart account reconnect failed: {error}; logs: {}",
+                    fixture.log_excerpt()
+                ))
+            },
+        )?;
     let mut admin = AdminClient::connect(&fixture)?;
     let info = admin.command_until("INFO", " 374 ")?;
     assert_eq!(

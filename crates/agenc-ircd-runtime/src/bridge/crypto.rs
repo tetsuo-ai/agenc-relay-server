@@ -14,6 +14,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::time::Duration;
 
 use agenc_ircd_auth::{
     AccountAuthenticationState, AccountCreationStartParameters, AccountCreationState,
@@ -28,9 +29,9 @@ use agenc_ircd_auth::{
 };
 use agenc_ircd_crypto::{
     ACCOUNT_HPKE_RESPONSE_PLAINTEXT_BYTES, AccountHpkePrivateKey, AccountResponseSealToken,
-    BoundedCryptoPool, CRYPTO_WORKER_RESERVED_BYTES, CryptoError, CryptoJob, CryptoPort,
-    CryptoWorkerConfig, CryptoWorkerError, Ed25519PublicKey, JobCancellationToken, JobClass,
-    LoginIndexKey, OpaqueFakeCredentialKey, SealedAccountResponse,
+    BoundedCryptoPool, CRYPTO_WORKER_RESERVED_BYTES, CryptoError, CryptoJob, CryptoPoolShutdown,
+    CryptoPort, CryptoWorkerConfig, CryptoWorkerError, Ed25519PublicKey, JobCancellationToken,
+    JobClass, LoginIndexKey, OpaqueFakeCredentialKey, SealedAccountResponse,
 };
 use agenc_ircd_types::{
     AccountServiceMessageKind, AccountServiceResponseKind, InviteId, NetworkId, RecoveryEpoch,
@@ -52,6 +53,8 @@ pub const CHANNEL_KEY_ARGON2_MEMORY_KIB: u32 = 65_536;
 pub const CHANNEL_KEY_ARGON2_ITERATIONS: u32 = 3;
 /// Argon2id parallelism for channel secrets (spec line 1851).
 pub const CHANNEL_KEY_ARGON2_PARALLELISM: u32 = 4;
+/// Delay between nonblocking crypto-worker shutdown polls.
+const CRYPTO_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(1);
 /// Random salt bytes stored beside each channel-key hash (spec line 1852).
 pub const CHANNEL_KEY_SALT_BYTES: usize = 16;
 /// Derived hash bytes compared in constant time.
@@ -844,6 +847,23 @@ pub struct CryptoBridge {
     next_job: u64,
 }
 
+struct CryptoBridgeShutdown {
+    pool: Option<CryptoPoolShutdown>,
+    waiters: JoinSet<CryptoJobId>,
+}
+
+impl CryptoBridgeShutdown {
+    async fn wait(mut self) {
+        self.waiters.shutdown().await;
+        let Some(pool) = self.pool.as_mut() else {
+            return;
+        };
+        while !pool.try_complete() {
+            tokio::time::sleep(CRYPTO_SHUTDOWN_POLL_INTERVAL).await;
+        }
+    }
+}
+
 struct ActiveCryptoJob {
     abort: AbortHandle,
     cancellation: JobCancellationToken,
@@ -971,17 +991,19 @@ impl CryptoBridge {
         self.waiter_ceiling
     }
 
-    /// Aborts every waiter (cancelling unstarted jobs) and joins the pool
-    /// on the blocking thread pool.
-    pub async fn shutdown(mut self) -> Result<(), RuntimeError> {
-        self.cancel_all();
-        self.waiters.shutdown().await;
-        if let Some(pool) = self.pool.take() {
-            tokio::task::spawn_blocking(move || pool.shutdown())
-                .await
-                .map_err(|_| RuntimeError::Cancelled)?;
-        }
+    /// Aborts every waiter and polls workers until every pool thread is joined.
+    pub async fn shutdown(self) -> Result<(), RuntimeError> {
+        self.into_shutdown().wait().await;
         Ok(())
+    }
+
+    fn into_shutdown(mut self) -> CryptoBridgeShutdown {
+        self.cancel_all();
+        self.waiters.abort_all();
+        CryptoBridgeShutdown {
+            pool: self.pool.take().map(BoundedCryptoPool::into_shutdown),
+            waiters: std::mem::take(&mut self.waiters),
+        }
     }
 
     fn reap_finished(&mut self) {
@@ -1001,8 +1023,8 @@ impl CryptoBridge {
     }
 }
 
-/// Dropping aborts the waiters and joins the pool on the current thread;
-/// use [`CryptoBridge::shutdown`] from async code.
+/// Dropping aborts waiters and joins pool workers. Production async ownership
+/// paths call [`CryptoBridge::shutdown`] before Drop.
 impl Drop for CryptoBridge {
     fn drop(&mut self) {
         self.cancel_all();

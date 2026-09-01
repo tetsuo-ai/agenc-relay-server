@@ -220,6 +220,13 @@ pub struct AccountingCeilings {
     pub backup_max_bytes: u64,
 }
 
+/// Full durable entity after-image coupled to one committed administrative
+/// mutation audit event.
+pub(crate) enum AdminMutationAfterImage {
+    Account(DurableAccount),
+    Channel(DurableChannel),
+}
+
 /// One change the index applies after the batch it belongs to commits.
 #[derive(Clone, Eq, PartialEq)]
 pub enum IndexUpdate {
@@ -759,18 +766,42 @@ pub(crate) fn project_admin_audit_event(
     head: HeadCounters,
     ceilings: AccountingCeilings,
 ) -> Result<ProjectedBatch, RuntimeError> {
-    let sequence = event.tbs().audit_sequence;
-    let revision = sequence.checked_add(1).ok_or(RuntimeError::Overflow)?;
-    let key = StoredKey::new(sequence.to_be_bytes().to_vec())?;
-    let value = PersistentRecordValue::new(
-        TableId::Audit,
-        LIVE_RECORD_KIND,
-        revision,
-        0,
-        None,
-        Vec::new(),
-        event.encode().map_err(|_| RuntimeError::InvalidValue)?,
-    )?;
+    project_admin_event(transaction_id, event, None, index, keys, head, ceilings)
+}
+
+/// Projects one state-changing administrative action and its signed audit
+/// event into the same storage transaction.
+pub(crate) fn project_admin_mutation_event(
+    transaction_id: TransactionId,
+    event: &AdminAuditEvent,
+    after_image: &AdminMutationAfterImage,
+    index: &DurableIndex,
+    keys: &KeyDeriver,
+    head: HeadCounters,
+    ceilings: AccountingCeilings,
+) -> Result<ProjectedBatch, RuntimeError> {
+    project_admin_event(
+        transaction_id,
+        event,
+        Some(after_image),
+        index,
+        keys,
+        head,
+        ceilings,
+    )
+}
+
+/// Rewrites one legacy administrative policy after-image before live owners
+/// start. The originating signed mutation already advanced protocol state, so
+/// this codec migration advances only the storage commit sequence.
+pub(crate) fn project_admin_policy_backfill(
+    transaction_id: TransactionId,
+    after_image: &AdminMutationAfterImage,
+    index: &DurableIndex,
+    keys: &KeyDeriver,
+    head: HeadCounters,
+    ceilings: AccountingCeilings,
+) -> Result<ProjectedBatch, RuntimeError> {
     let mut projection = Projection {
         index,
         keys,
@@ -778,7 +809,14 @@ pub(crate) fn project_admin_audit_event(
         updates: Vec::new(),
         touched: BTreeSet::new(),
     };
-    projection.put(TableId::Audit, key, value)?;
+    match after_image {
+        AdminMutationAfterImage::Account(account) => {
+            projection.put_account(account, account.revision.get())?;
+        }
+        AdminMutationAfterImage::Channel(channel) => {
+            projection.put_channel(channel, channel.revision.get())?;
+        }
+    }
     let batch = StorageMutationBatch::new(
         StorageMutationHead {
             transaction_id,
@@ -805,6 +843,78 @@ pub(crate) fn project_admin_audit_event(
         batch,
         updates: projection.updates,
         advancing_plans: 0,
+    })
+}
+
+fn project_admin_event(
+    transaction_id: TransactionId,
+    event: &AdminAuditEvent,
+    after_image: Option<&AdminMutationAfterImage>,
+    index: &DurableIndex,
+    keys: &KeyDeriver,
+    head: HeadCounters,
+    ceilings: AccountingCeilings,
+) -> Result<ProjectedBatch, RuntimeError> {
+    let sequence = event.tbs().audit_sequence;
+    let revision = sequence.checked_add(1).ok_or(RuntimeError::Overflow)?;
+    let key = StoredKey::new(sequence.to_be_bytes().to_vec())?;
+    let value = PersistentRecordValue::new(
+        TableId::Audit,
+        LIVE_RECORD_KIND,
+        revision,
+        0,
+        None,
+        Vec::new(),
+        event.encode().map_err(|_| RuntimeError::InvalidValue)?,
+    )?;
+    let mut projection = Projection {
+        index,
+        keys,
+        mutations: Vec::new(),
+        updates: Vec::new(),
+        touched: BTreeSet::new(),
+    };
+    let advancing_plans = match after_image {
+        Some(AdminMutationAfterImage::Account(account)) => {
+            projection.put_account(account, account.revision.get())?;
+            1
+        }
+        Some(AdminMutationAfterImage::Channel(channel)) => {
+            projection.put_channel(channel, channel.revision.get())?;
+            1
+        }
+        None => 0,
+    };
+    projection.put(TableId::Audit, key, value)?;
+    let batch = StorageMutationBatch::new(
+        StorageMutationHead {
+            transaction_id,
+            expected_storage_commit_sequence: head.storage_commit_sequence,
+            expected_state_generation: head.state_generation,
+            resulting_state_generation: head
+                .state_generation
+                .checked_add(u64::from(advancing_plans))
+                .ok_or(RuntimeError::Overflow)?,
+            state_advancing_plan_count: advancing_plans,
+            expected_account_service_response_count: head.account_service_response_count,
+            resulting_account_service_response_count: head.account_service_response_count,
+        },
+        1,
+        StorageAccountingLimits {
+            current_logical_database_bytes: head.logical_database_bytes,
+            current_backup_stream_bytes: head.backup_stream_bytes,
+            database_max_bytes: ceilings.database_max_bytes,
+            backup_max_bytes: ceilings.backup_max_bytes,
+        },
+        projection.mutations,
+    )?;
+    Ok(ProjectedBatch {
+        resulting_logical_database_bytes: batch.resulting_logical_database_bytes(),
+        resulting_backup_stream_bytes: batch.resulting_backup_stream_bytes(),
+        resulting_account_service_response_count: head.account_service_response_count,
+        batch,
+        updates: projection.updates,
+        advancing_plans,
     })
 }
 
@@ -1183,6 +1293,7 @@ mod tests {
     use agenc_ircd_testkit::{ScriptedEntropy, account_id};
     use agenc_ircd_types::{
         DatabaseId, Generation, NetworkId, OperatorId, Revision, ServerId, ServerIncarnation,
+        UtcSecond,
     };
 
     fn binding() -> DatabaseBinding {
@@ -1290,6 +1401,89 @@ mod tests {
         assert_eq!(mutation.table(), TableId::Audit);
         assert_eq!(mutation.key().as_bytes(), 0_u64.to_be_bytes());
         assert_eq!(projected.updates().len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn admin_mutation_projection_couples_entity_and_audit_in_one_advancing_batch()
+    -> Result<(), RuntimeError> {
+        let plan = account_plan()?;
+        let mut account = match plan.durable_writes().first() {
+            Some(DurableWrite::PutAccount(account)) => account.clone(),
+            _ => return Err(RuntimeError::InvalidValue),
+        };
+        account.admin_suspension_expires_at = Some(UtcSecond::from_unix_seconds(100));
+        let projected = project_admin_mutation_event(
+            TransactionId::from_bytes([26; 16]),
+            &audit_event()?,
+            &AdminMutationAfterImage::Account(account),
+            &DurableIndex::new(),
+            &keys()?,
+            head(0, 0),
+            ceilings(),
+        )?;
+        assert_eq!(projected.advancing_plans(), 1);
+        assert_eq!(projected.batch.resulting_state_generation(), 1);
+        assert_eq!(projected.batch.state_advancing_plan_count(), 1);
+        assert_eq!(projected.batch.plan_count(), 1);
+        assert_eq!(projected.batch.mutations().len(), 2);
+        assert_eq!(
+            projected
+                .batch
+                .mutations()
+                .first()
+                .map(RecordMutation::table),
+            Some(TableId::Account)
+        );
+        assert_eq!(
+            projected
+                .batch
+                .mutations()
+                .get(1)
+                .map(RecordMutation::table),
+            Some(TableId::Audit)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn admin_policy_backfill_rewrites_one_row_without_advancing_protocol_state()
+    -> Result<(), RuntimeError> {
+        let plan = account_plan()?;
+        let mut account = match plan.durable_writes().first() {
+            Some(DurableWrite::PutAccount(account)) => account.clone(),
+            _ => return Err(RuntimeError::InvalidValue),
+        };
+        account.admin_suspension_expires_at = Some(UtcSecond::from_unix_seconds(500));
+        let current = HeadCounters {
+            state_generation: 9,
+            storage_commit_sequence: 4,
+            account_service_response_count: 3,
+            logical_database_bytes: 10_000,
+            backup_stream_bytes: 20_000,
+        };
+        let projected = project_admin_policy_backfill(
+            TransactionId::from_bytes([27; 16]),
+            &AdminMutationAfterImage::Account(account),
+            &DurableIndex::new(),
+            &keys()?,
+            current,
+            ceilings(),
+        )?;
+        assert_eq!(projected.advancing_plans(), 0);
+        assert_eq!(projected.batch.expected_state_generation(), 9);
+        assert_eq!(projected.batch.resulting_state_generation(), 9);
+        assert_eq!(projected.batch.state_advancing_plan_count(), 0);
+        assert_eq!(projected.batch.plan_count(), 1);
+        assert_eq!(projected.batch.mutations().len(), 1);
+        assert_eq!(
+            projected
+                .batch
+                .mutations()
+                .first()
+                .map(RecordMutation::table),
+            Some(TableId::Account)
+        );
         Ok(())
     }
 

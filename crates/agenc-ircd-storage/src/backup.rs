@@ -154,6 +154,12 @@ impl BackupHeader {
     pub const fn created_at(&self) -> u64 {
         self.created_at
     }
+
+    /// Returns the authenticated random identity used in the published name.
+    #[must_use]
+    pub const fn backup_id(&self) -> [u8; 16] {
+        self.backup_id
+    }
 }
 
 /// One numbered-table record in canonical backup order.

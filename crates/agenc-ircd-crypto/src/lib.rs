@@ -59,6 +59,6 @@ pub use tls_ticket::{
 };
 pub use worker::{
     BoundedCryptoPool, CRYPTO_QUEUE_SLOTS_PER_WORKER, CRYPTO_WORKER_RESERVED_BYTES, CryptoJob,
-    CryptoPort, CryptoSubmissionError, CryptoWorkerConfig, JobCancellationToken, JobClass,
-    JobHandle,
+    CryptoPoolShutdown, CryptoPort, CryptoSubmissionError, CryptoWorkerConfig,
+    JobCancellationToken, JobClass, JobHandle,
 };

@@ -67,7 +67,7 @@ impl CrashReporter {
 }
 
 /// Terminates the process with `code`; the production exit function.
-pub fn exit_process(code: i32) {
+pub fn exit_process(code: i32) -> ! {
     std::process::exit(code)
 }
 

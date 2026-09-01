@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use agenc_ircd_admin::{
     AdminAuditCheckpoint, AdminAuditCheckpointTbs, AdminAuditEvent, AdminAuditEventTbs,
     AdminAuditPhase, AdminCommand, AdminCommandEvent, AdminSessionBinding, AuditChainCursor,
-    AuditRange, CanonicalCommand, OperatorRegistry, render_export_batch,
+    AuditRange, CanonicalCommand, MAX_AUDIT_EXPORT_RECORDS, OperatorRegistry, render_export_batch,
 };
 use agenc_ircd_config::AuditTrustManifestEntry;
 use agenc_ircd_crypto::{Ed25519PublicKey, Ed25519SecretKey, audit_signing_key_id};
@@ -13,7 +13,7 @@ use agenc_ircd_storage::{
     PersistentRecordValue, ReadPlan, SealedRecord, StoragePort, StoredKey, TableId,
     validate_record_plaintext,
 };
-use agenc_ircd_types::{AccountId, ChannelInstanceId, OperatorId, UtcSecond};
+use agenc_ircd_types::{AccountId, ChannelInstanceId, OperatorId, UserId, UtcSecond};
 
 use crate::RuntimeError;
 use crate::state_core::durable::{DOMAIN_RECORD_SCHEMA, KeyDeriver, MAX_AUDIT_RETENTION_EVENTS};
@@ -34,6 +34,56 @@ pub(crate) struct AuditAuthority {
     policy: AdminPolicySeed,
     export: Option<Arc<AuditExportSource>>,
     reconciled: bool,
+    pending_startup_action: Option<PendingStartupAction>,
+    startup_action_in_progress: Option<[u8; 32]>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum PendingStartupActionKind {
+    Kill(UserId),
+    Rehash,
+    BackupCreate,
+}
+
+/// A single verified trailing external-action intent that must be reconciled
+/// before the owner accepts administrative authority.
+pub(crate) struct PendingStartupAction {
+    kind: PendingStartupActionKind,
+    intent: AdminAuditEvent,
+}
+
+impl PendingStartupAction {
+    fn from_verified(
+        intent: &AdminAuditEvent,
+        command: &AdminCommand,
+    ) -> Result<Self, RuntimeError> {
+        let kind = match command {
+            AdminCommand::Kill { user, .. } => PendingStartupActionKind::Kill(*user),
+            AdminCommand::Rehash(_) => PendingStartupActionKind::Rehash,
+            AdminCommand::BackupCreate(_) => PendingStartupActionKind::BackupCreate,
+            _ => return Err(RuntimeError::InvalidValue),
+        };
+        Ok(Self {
+            kind,
+            intent: intent.clone(),
+        })
+    }
+
+    pub(crate) const fn kind(&self) -> PendingStartupActionKind {
+        self.kind
+    }
+
+    pub(crate) const fn audit_sequence(&self) -> u64 {
+        self.intent.tbs().audit_sequence
+    }
+
+    pub(crate) const fn created_at(&self) -> u64 {
+        self.intent.tbs().created_at
+    }
+
+    const fn intent_hash(&self) -> [u8; 32] {
+        self.intent.event_hash()
+    }
 }
 
 #[derive(Clone, Default)]
@@ -102,21 +152,19 @@ impl AuditAuthority {
             return Err(RuntimeError::InvalidValue);
         }
 
-        let checkpoints = read_checkpoints(&storage, &keys)?;
-        let (checkpoint_cursor, next_checkpoint_sequence, previous_checkpoint_hash) =
-            verify_checkpoints(binding, &trust, &checkpoints.records)?;
-        let retained_first_sequence = checkpoint_cursor.next_sequence;
-        let events = read_events(&storage, &keys)?;
-        if checkpoints.storage_commit_sequence != events.storage_commit_sequence {
+        let mut checkpoint_verifier = CheckpointVerifier::new(binding, &trust);
+        let checkpoint_commit_sequence = scan_checkpoints(&storage, &keys, |checkpoint| {
+            checkpoint_verifier.observe(&checkpoint)
+        })?;
+        let checkpoints = checkpoint_verifier.finish();
+        let retained_first_sequence = checkpoints.cursor.next_sequence;
+        let mut event_verifier = EventVerifier::new(binding, &trust, operators, checkpoints.cursor);
+        let event_commit_sequence =
+            scan_events(&storage, &keys, |event| event_verifier.observe(&event))?;
+        if checkpoint_commit_sequence != event_commit_sequence {
             return Err(RuntimeError::InvalidValue);
         }
-        let (cursor, policy) = verify_events(
-            binding,
-            &trust,
-            operators,
-            checkpoint_cursor,
-            &events.records,
-        )?;
+        let events = event_verifier.finish();
         let export = Arc::new(AuditExportSource {
             binding,
             storage,
@@ -130,17 +178,25 @@ impl AuditAuthority {
             signing_key_id,
             signing_not_before: current.not_before,
             signing_not_after: current.not_after,
-            cursor,
+            cursor: events.cursor,
             retained_first_sequence,
-            next_checkpoint_sequence,
-            previous_checkpoint_hash,
-            policy,
+            next_checkpoint_sequence: checkpoints.next_sequence,
+            previous_checkpoint_hash: checkpoints.previous_hash,
+            policy: events.policy,
             export: Some(export),
             reconciled: true,
+            pending_startup_action: events.pending_startup_action,
+            startup_action_in_progress: None,
         })
     }
 
     pub(crate) fn is_reconciled(&self) -> bool {
+        self.base_authority_is_valid()
+            && self.pending_startup_action.is_none()
+            && self.startup_action_in_progress.is_none()
+    }
+
+    fn base_authority_is_valid(&self) -> bool {
         let key_matches = audit_signing_key_id(self.signing_key.public_key().as_bytes())
             .is_ok_and(|derived| derived.as_bytes() == &self.signing_key_id);
         let checkpoint_position_valid =
@@ -148,6 +204,79 @@ impl AuditAuthority {
         let event_position_valid =
             self.cursor.next_sequence != 0 || self.cursor.previous_event_hash == [0; 32];
         self.reconciled && key_matches && checkpoint_position_valid && event_position_valid
+    }
+
+    pub(crate) fn take_pending_startup_action(&mut self) -> Option<PendingStartupAction> {
+        if !self.base_authority_is_valid() || self.startup_action_in_progress.is_some() {
+            return None;
+        }
+        let action = self.pending_startup_action.take()?;
+        self.startup_action_in_progress = Some(action.intent_hash());
+        Some(action)
+    }
+
+    pub(crate) fn prepare_startup_outcome(
+        &self,
+        action: &PendingStartupAction,
+        phase: AdminAuditPhase,
+        created_at: u64,
+    ) -> Result<AdminAuditEvent, RuntimeError> {
+        let intent = action.intent.tbs();
+        let expected_sequence = intent
+            .audit_sequence
+            .checked_add(1)
+            .ok_or(RuntimeError::Overflow)?;
+        if !self.base_authority_is_valid()
+            || self.startup_action_in_progress != Some(action.intent_hash())
+            || !matches!(
+                phase,
+                AdminAuditPhase::OutcomeSuccess | AdminAuditPhase::OutcomeFailure
+            )
+            || created_at < self.signing_not_before
+            || created_at >= self.signing_not_after
+            || self.cursor.next_sequence != expected_sequence
+            || self.cursor.previous_event_hash != action.intent_hash()
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
+        AdminAuditEvent::sign(
+            AdminAuditEventTbs {
+                network_id: intent.network_id,
+                server_id: intent.server_id,
+                audit_signing_key_id: self.signing_key_id,
+                audit_sequence: self.cursor.next_sequence,
+                created_at,
+                operator_id: intent.operator_id,
+                command_tbs: intent.command_tbs.clone(),
+                operator_signature: intent.operator_signature,
+                phase,
+                previous_event_hash: self.cursor.previous_event_hash,
+            },
+            &self.signing_key,
+        )
+        .map_err(|_| RuntimeError::InvalidValue)
+    }
+
+    /// Advances authority only after the caller durably committed this exact
+    /// startup outcome. A mismatch leaves authority permanently closed for
+    /// this process so startup reconstruction must run again.
+    pub(crate) fn resolve_committed_startup_action(
+        &mut self,
+        action: PendingStartupAction,
+        outcome: &AdminAuditEvent,
+    ) -> Result<(), RuntimeError> {
+        let expected =
+            self.prepare_startup_outcome(&action, outcome.tbs().phase, outcome.tbs().created_at)?;
+        if expected != *outcome {
+            return Err(RuntimeError::InvalidValue);
+        }
+        let next = self
+            .cursor
+            .advance(outcome)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        self.cursor = next;
+        self.startup_action_in_progress = None;
+        Ok(())
     }
 
     pub(crate) fn policy_seed(&self) -> AdminPolicySeed {
@@ -159,6 +288,9 @@ impl AuditAuthority {
         range: AuditRange,
         batch_id: [u8; 16],
     ) -> Result<AuditExportJob, RuntimeError> {
+        if !self.is_reconciled() {
+            return Err(RuntimeError::InvalidValue);
+        }
         let source = self.export.as_ref().ok_or(RuntimeError::InvalidValue)?;
         Ok(AuditExportJob {
             source: Arc::clone(source),
@@ -175,6 +307,9 @@ impl AuditAuthority {
         now: u64,
         retention_seconds: u64,
     ) -> Result<AuditRetentionJob, RuntimeError> {
+        if !self.is_reconciled() {
+            return Err(RuntimeError::InvalidValue);
+        }
         let source = self.export.as_ref().ok_or(RuntimeError::InvalidValue)?;
         Ok(AuditRetentionJob {
             source: Arc::clone(source),
@@ -192,7 +327,8 @@ impl AuditAuthority {
         &self,
         tbs: AdminAuditCheckpointTbs,
     ) -> Result<AdminAuditCheckpoint, RuntimeError> {
-        if tbs.audit_signing_key_id != self.signing_key_id
+        if !self.is_reconciled()
+            || tbs.audit_signing_key_id != self.signing_key_id
             || tbs.created_at < self.signing_not_before
             || tbs.created_at >= self.signing_not_after
             || tbs.checkpoint_sequence != self.next_checkpoint_sequence
@@ -210,7 +346,8 @@ impl AuditAuthority {
         checkpoint: &AdminAuditCheckpoint,
     ) -> Result<(), RuntimeError> {
         let tbs = checkpoint.tbs();
-        if tbs.checkpoint_sequence != self.next_checkpoint_sequence
+        if !self.is_reconciled()
+            || tbs.checkpoint_sequence != self.next_checkpoint_sequence
             || tbs.deleted_first_sequence != self.retained_first_sequence
             || tbs.previous_checkpoint_hash != self.previous_checkpoint_hash
         {
@@ -236,7 +373,7 @@ impl AuditAuthority {
         phase: AdminAuditPhase,
         created_at: u64,
     ) -> Result<AdminAuditEvent, RuntimeError> {
-        if !self.reconciled
+        if !self.is_reconciled()
             || created_at < self.signing_not_before
             || created_at >= self.signing_not_after
             || command.tbs.network_id() != binding.network_id
@@ -263,6 +400,9 @@ impl AuditAuthority {
     }
 
     pub(crate) fn commit_event(&mut self, event: &AdminAuditEvent) -> Result<(), RuntimeError> {
+        if !self.is_reconciled() {
+            return Err(RuntimeError::InvalidValue);
+        }
         self.cursor = self
             .cursor
             .advance(event)
@@ -289,6 +429,8 @@ impl AuditAuthority {
             policy: AdminPolicySeed::default(),
             export: None,
             reconciled: true,
+            pending_startup_action: None,
+            startup_action_in_progress: None,
         })
     }
 }
@@ -328,7 +470,7 @@ pub(crate) struct AuditExportJob {
 }
 
 impl AuditExportJob {
-    pub(crate) fn run(self) -> Result<Vec<String>, RuntimeError> {
+    pub(crate) fn run(self) -> Result<PreparedAuditExport, RuntimeError> {
         self.source.freeze(
             self.range,
             self.batch_id,
@@ -336,6 +478,57 @@ impl AuditExportJob {
             self.expected_checkpoint_sequence,
             self.expected_checkpoint_hash,
         )
+    }
+}
+
+/// One fully verified and bounded storage view waiting for its own signed
+/// `Observed` event. The object is consumed when that event is appended, so a
+/// frozen view cannot be released twice or with two different cursor advances.
+pub(crate) struct PreparedAuditExport {
+    binding: AdminSessionBinding,
+    trust: AuditTrust,
+    operators: OperatorRegistry,
+    range: AuditRange,
+    batch_id: [u8; 16],
+    expected_cursor: AuditChainCursor,
+    selection: ExportSelection,
+}
+
+impl PreparedAuditExport {
+    pub(crate) fn finish_with_observed(
+        mut self,
+        observed: &AdminAuditEvent,
+    ) -> Result<Vec<String>, RuntimeError> {
+        if observed.tbs().phase != AdminAuditPhase::Observed {
+            return Err(RuntimeError::InvalidValue);
+        }
+        match parse_event_command(observed)? {
+            AdminCommand::AuditExport(range) if range == self.range => {}
+            _ => return Err(RuntimeError::InvalidValue),
+        }
+        let mut verifier = EventVerifier::new(
+            self.binding,
+            &self.trust,
+            &self.operators,
+            self.expected_cursor,
+        );
+        verifier.observe(observed)?;
+        let verified = verifier.finish_reconciled()?;
+        self.selection.consider_event(observed.clone())?;
+        self.selection.ensure_bounded()?;
+        verify_export_coverage(
+            self.range,
+            verified.cursor.next_sequence,
+            &self.selection.checkpoints,
+            &self.selection.events,
+        )?;
+        render_export_batch(
+            &self.batch_id,
+            self.range,
+            &self.selection.checkpoints,
+            &self.selection.events,
+        )
+        .map_err(|_| RuntimeError::InvalidValue)
     }
 }
 
@@ -355,51 +548,47 @@ impl AuditExportSource {
         expected_cursor: AuditChainCursor,
         expected_checkpoint_sequence: u64,
         expected_checkpoint_hash: [u8; 32],
-    ) -> Result<Vec<String>, RuntimeError> {
-        let checkpoints = read_checkpoints(&self.storage, &self.keys)?;
-        let events = read_events(&self.storage, &self.keys)?;
-        if checkpoints.storage_commit_sequence != events.storage_commit_sequence {
-            return Err(RuntimeError::InvalidValue);
-        }
-        let (checkpoint_cursor, next_checkpoint_sequence, previous_checkpoint_hash) =
-            verify_checkpoints(self.binding, &self.trust, &checkpoints.records)?;
-        if next_checkpoint_sequence != expected_checkpoint_sequence
-            || previous_checkpoint_hash != expected_checkpoint_hash
+    ) -> Result<PreparedAuditExport, RuntimeError> {
+        let mut selection = ExportSelection::new(range);
+        let mut checkpoint_verifier = CheckpointVerifier::new(self.binding, &self.trust);
+        let checkpoint_commit_sequence =
+            scan_checkpoints(&self.storage, &self.keys, |checkpoint| {
+                checkpoint_verifier.observe(&checkpoint)?;
+                selection.consider_checkpoint(checkpoint)
+            })?;
+        let checkpoints = checkpoint_verifier.finish();
+        if checkpoints.next_sequence != expected_checkpoint_sequence
+            || checkpoints.previous_hash != expected_checkpoint_hash
         {
             return Err(RuntimeError::InvalidValue);
         }
-        let (cursor, _policy) = verify_events(
+        let mut event_verifier = EventVerifier::new(
             self.binding,
             &self.trust,
             &self.operators,
-            checkpoint_cursor,
-            &events.records,
-        )?;
-        if cursor != expected_cursor {
+            checkpoints.cursor,
+        );
+        let event_commit_sequence = scan_events(&self.storage, &self.keys, |event| {
+            event_verifier.observe(&event)?;
+            selection.consider_event(event)
+        })?;
+        if checkpoint_commit_sequence != event_commit_sequence {
             return Err(RuntimeError::InvalidValue);
         }
-        let selected_checkpoints: Vec<_> = checkpoints
-            .records
-            .into_iter()
-            .filter(|checkpoint| {
-                let tbs = checkpoint.tbs();
-                tbs.deleted_first_sequence <= range.to()
-                    && tbs.deleted_last_sequence >= range.from()
-            })
-            .collect();
-        let selected_events: Vec<_> = events
-            .records
-            .into_iter()
-            .filter(|event| range.contains(event.tbs().audit_sequence))
-            .collect();
-        verify_export_coverage(
+        let events = event_verifier.finish_reconciled()?;
+        if events.cursor != expected_cursor {
+            return Err(RuntimeError::InvalidValue);
+        }
+        selection.ensure_bounded()?;
+        Ok(PreparedAuditExport {
+            binding: self.binding,
+            trust: self.trust.clone(),
+            operators: self.operators.clone(),
             range,
-            cursor.next_sequence,
-            &selected_checkpoints,
-            &selected_events,
-        )?;
-        render_export_batch(&batch_id, range, &selected_checkpoints, &selected_events)
-            .map_err(|_| RuntimeError::InvalidValue)
+            batch_id,
+            expected_cursor,
+            selection,
+        })
     }
 
     // agenc-review: allow owner=runtime reviewed=2026-08-30 reason=retention freeze keeps every expected audit and checkpoint fence explicit at the blocking boundary
@@ -415,46 +604,49 @@ impl AuditExportSource {
         expected_checkpoint_sequence: u64,
         expected_checkpoint_hash: [u8; 32],
     ) -> Result<Option<AdminAuditCheckpointTbs>, RuntimeError> {
-        let checkpoints = read_checkpoints(&self.storage, &self.keys)?;
-        let events = read_events(&self.storage, &self.keys)?;
-        if checkpoints.storage_commit_sequence != events.storage_commit_sequence {
-            return Err(RuntimeError::InvalidValue);
-        }
-        let (checkpoint_cursor, next_checkpoint_sequence, previous_checkpoint_hash) =
-            verify_checkpoints(self.binding, &self.trust, &checkpoints.records)?;
-        if checkpoint_cursor.next_sequence != expected_retained_first_sequence
-            || next_checkpoint_sequence != expected_checkpoint_sequence
-            || previous_checkpoint_hash != expected_checkpoint_hash
+        let cutoff = now.checked_sub(retention_seconds);
+        let mut selector = cutoff.map(RetentionSelector::new);
+        let mut checkpoint_verifier = CheckpointVerifier::new(self.binding, &self.trust);
+        let checkpoint_commit_sequence =
+            scan_checkpoints(&self.storage, &self.keys, |checkpoint| {
+                checkpoint_verifier.observe(&checkpoint)
+            })?;
+        let checkpoints = checkpoint_verifier.finish();
+        if checkpoints.cursor.next_sequence != expected_retained_first_sequence
+            || checkpoints.next_sequence != expected_checkpoint_sequence
+            || checkpoints.previous_hash != expected_checkpoint_hash
         {
             return Err(RuntimeError::InvalidValue);
         }
-        let (cursor, _policy) = verify_events(
+        let mut event_verifier = EventVerifier::new(
             self.binding,
             &self.trust,
             &self.operators,
-            checkpoint_cursor,
-            &events.records,
-        )?;
-        if cursor != expected_cursor {
+            checkpoints.cursor,
+        );
+        let event_commit_sequence = scan_events(&self.storage, &self.keys, |event| {
+            event_verifier.observe(&event)?;
+            if let Some(selector) = &mut selector {
+                selector.observe(&event)?;
+            }
+            Ok(())
+        })?;
+        if checkpoint_commit_sequence != event_commit_sequence {
             return Err(RuntimeError::InvalidValue);
         }
-        let latest_created_at = checkpoints
-            .records
-            .iter()
-            .map(|checkpoint| checkpoint.tbs().created_at)
-            .chain(events.records.iter().map(|event| event.tbs().created_at))
-            .max()
-            .unwrap_or(0);
-        let Some(cutoff) = now.checked_sub(retention_seconds) else {
-            return Ok(None);
-        };
+        let events = event_verifier.finish_reconciled()?;
+        if events.cursor != expected_cursor {
+            return Err(RuntimeError::InvalidValue);
+        }
+        let latest_created_at = checkpoints.latest_created_at.max(events.latest_created_at);
         if now < latest_created_at {
             return Ok(None);
         }
 
-        let Some((deleted_last_sequence, deleted_last_event_hash)) =
-            select_expired_prefix(&events.records, cutoff)?
-        else {
+        let Some(selector) = selector else {
+            return Ok(None);
+        };
+        let Some((deleted_last_sequence, deleted_last_event_hash)) = selector.candidate() else {
             return Ok(None);
         };
         let deleted_count = deleted_last_sequence
@@ -479,29 +671,148 @@ impl AuditExportSource {
     }
 }
 
-fn select_expired_prefix(
-    events: &[AdminAuditEvent],
-    cutoff: u64,
-) -> Result<Option<(u64, [u8; 32])>, RuntimeError> {
-    let mut pending = BTreeSet::<Vec<u8>>::new();
-    let mut candidate = None;
-    for event in events.iter().take(MAX_AUDIT_RETENTION_EVENTS) {
-        if event.tbs().created_at >= cutoff {
-            break;
+struct ExportSelection {
+    range: AuditRange,
+    checkpoints: Vec<AdminAuditCheckpoint>,
+    events: Vec<AdminAuditEvent>,
+    overflowed: bool,
+}
+
+impl ExportSelection {
+    const fn new(range: AuditRange) -> Self {
+        Self {
+            range,
+            checkpoints: Vec::new(),
+            events: Vec::new(),
+            overflowed: false,
         }
+    }
+
+    fn consider_checkpoint(
+        &mut self,
+        checkpoint: AdminAuditCheckpoint,
+    ) -> Result<(), RuntimeError> {
+        let tbs = checkpoint.tbs();
+        if tbs.deleted_first_sequence <= self.range.to()
+            && tbs.deleted_last_sequence >= self.range.from()
+        {
+            self.push_checkpoint(checkpoint)?;
+        }
+        Ok(())
+    }
+
+    fn consider_event(&mut self, event: AdminAuditEvent) -> Result<(), RuntimeError> {
+        if self.range.contains(event.tbs().audit_sequence) {
+            self.push_event(event)?;
+        }
+        Ok(())
+    }
+
+    fn push_checkpoint(&mut self, checkpoint: AdminAuditCheckpoint) -> Result<(), RuntimeError> {
+        if !self.reserve_record()? {
+            return Ok(());
+        }
+        self.checkpoints
+            .try_reserve(1)
+            .map_err(|_| RuntimeError::MemoryExhausted)?;
+        self.checkpoints.push(checkpoint);
+        Ok(())
+    }
+
+    fn push_event(&mut self, event: AdminAuditEvent) -> Result<(), RuntimeError> {
+        if !self.reserve_record()? {
+            return Ok(());
+        }
+        self.events
+            .try_reserve(1)
+            .map_err(|_| RuntimeError::MemoryExhausted)?;
+        self.events.push(event);
+        Ok(())
+    }
+
+    fn reserve_record(&mut self) -> Result<bool, RuntimeError> {
+        if self.overflowed {
+            return Ok(false);
+        }
+        let selected = self
+            .checkpoints
+            .len()
+            .checked_add(self.events.len())
+            .ok_or(RuntimeError::Overflow)?;
+        if selected == MAX_AUDIT_EXPORT_RECORDS {
+            self.overflowed = true;
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    fn ensure_bounded(&self) -> Result<(), RuntimeError> {
+        if self.overflowed {
+            Err(RuntimeError::LimitExceeded)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+struct RetentionSelector {
+    cutoff: u64,
+    examined: usize,
+    pending: BTreeSet<Vec<u8>>,
+    candidate: Option<(u64, [u8; 32])>,
+    complete: bool,
+}
+
+impl RetentionSelector {
+    const fn new(cutoff: u64) -> Self {
+        Self {
+            cutoff,
+            examined: 0,
+            pending: BTreeSet::new(),
+            candidate: None,
+            complete: false,
+        }
+    }
+
+    fn observe(&mut self, event: &AdminAuditEvent) -> Result<(), RuntimeError> {
+        if self.complete || self.examined == MAX_AUDIT_RETENTION_EVENTS {
+            self.complete = true;
+            return Ok(());
+        }
+        if event.tbs().created_at >= self.cutoff {
+            self.complete = true;
+            return Ok(());
+        }
+        self.examined = self.examined.checked_add(1).ok_or(RuntimeError::Overflow)?;
+        let parsed = parse_event_command(event)?;
+        if !super::audit_phase_is_valid(&parsed, event.tbs().phase) {
+            return Err(RuntimeError::InvalidValue);
+        }
+        self.observe_phase(event, &parsed)?;
+        if self.pending.is_empty() {
+            self.candidate = Some((event.tbs().audit_sequence, event.event_hash()));
+        }
+        Ok(())
+    }
+
+    fn observe_phase(
+        &mut self,
+        event: &AdminAuditEvent,
+        parsed: &AdminCommand,
+    ) -> Result<(), RuntimeError> {
         let command = event
             .tbs()
             .command_tbs
             .encode()
             .map_err(|_| RuntimeError::InvalidValue)?;
         match event.tbs().phase {
-            AdminAuditPhase::Intent if intent_requires_outcome(event)? => {
-                if !pending.insert(command) {
+            AdminAuditPhase::Intent if command_requires_outcome(parsed)? => {
+                if !self.pending.insert(command) {
                     return Err(RuntimeError::InvalidValue);
                 }
             }
             AdminAuditPhase::OutcomeSuccess | AdminAuditPhase::OutcomeFailure => {
-                if !pending.remove(&command) {
+                if !command_requires_outcome(parsed)? || !self.pending.remove(&command) {
                     return Err(RuntimeError::InvalidValue);
                 }
             }
@@ -509,11 +820,24 @@ fn select_expired_prefix(
             | AdminAuditPhase::CommittedMutation
             | AdminAuditPhase::Observed => {}
         }
-        if pending.is_empty() {
-            candidate = Some((event.tbs().audit_sequence, event.event_hash()));
-        }
+        Ok(())
     }
-    Ok(candidate)
+
+    fn candidate(self) -> Option<(u64, [u8; 32])> {
+        self.candidate
+    }
+}
+
+#[cfg(test)]
+fn select_expired_prefix(
+    events: &[AdminAuditEvent],
+    cutoff: u64,
+) -> Result<Option<(u64, [u8; 32])>, RuntimeError> {
+    let mut selector = RetentionSelector::new(cutoff);
+    for event in events {
+        selector.observe(event)?;
+    }
+    Ok(selector.candidate())
 }
 
 fn verify_export_coverage(
@@ -557,6 +881,7 @@ fn verify_export_coverage(
     Ok(())
 }
 
+#[derive(Clone)]
 struct AuditTrust {
     keys: BTreeMap<[u8; 32], TrustedAuditKey>,
 }
@@ -612,44 +937,45 @@ impl AuditTrust {
     }
 }
 
-fn read_checkpoints(
+fn scan_checkpoints(
     storage: &StoragePort,
     keys: &KeyDeriver,
-) -> Result<TableRead<AdminAuditCheckpoint>, RuntimeError> {
-    read_table(storage, keys, TableId::AuditCheckpoint, |sequence, body| {
+    mut visit: impl FnMut(AdminAuditCheckpoint) -> Result<(), RuntimeError>,
+) -> Result<u64, RuntimeError> {
+    scan_table(storage, keys, TableId::AuditCheckpoint, |sequence, body| {
         let checkpoint =
             AdminAuditCheckpoint::decode_exact(body).map_err(|_| RuntimeError::InvalidValue)?;
         if checkpoint.tbs().checkpoint_sequence != sequence {
             return Err(RuntimeError::InvalidValue);
         }
-        Ok(checkpoint)
+        visit(checkpoint)
     })
 }
 
-fn read_events(
+fn scan_events(
     storage: &StoragePort,
     keys: &KeyDeriver,
-) -> Result<TableRead<AdminAuditEvent>, RuntimeError> {
-    read_table(storage, keys, TableId::Audit, |sequence, body| {
+    mut visit: impl FnMut(AdminAuditEvent) -> Result<(), RuntimeError>,
+) -> Result<u64, RuntimeError> {
+    scan_table(storage, keys, TableId::Audit, |sequence, body| {
         let event = AdminAuditEvent::decode_exact(body).map_err(|_| RuntimeError::InvalidValue)?;
         if event.tbs().audit_sequence != sequence {
             return Err(RuntimeError::InvalidValue);
         }
-        Ok(event)
+        visit(event)
     })
 }
 
 // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=bounded paged audit reconstruction validates one consistent encrypted table view and exact sequence keys
-fn read_table<T>(
+fn scan_table(
     storage: &StoragePort,
     keys: &KeyDeriver,
     table: TableId,
-    mut decode: impl FnMut(u64, &[u8]) -> Result<T, RuntimeError>,
-) -> Result<TableRead<T>, RuntimeError> {
+    mut visit: impl FnMut(u64, &[u8]) -> Result<(), RuntimeError>,
+) -> Result<u64, RuntimeError> {
     let mut start = 0_u64;
     let end = StoredKey::new(vec![0xff; 9])?;
     let mut expected_commit = None;
-    let mut output = Vec::new();
     loop {
         let plan = ReadPlan::range(
             table,
@@ -664,6 +990,9 @@ fn read_table<T>(
             Some(_) => return Err(RuntimeError::InvalidValue),
         }
         let count = result.records.len();
+        if count > usize::from(RANGE_READ_LIMIT) {
+            return Err(RuntimeError::LimitExceeded);
+        }
         let mut last = None;
         for record in result.records {
             let sequence = sequence_key(&record.key)?;
@@ -688,7 +1017,7 @@ fn read_table<T>(
             {
                 return Err(RuntimeError::InvalidValue);
             }
-            output.push(decode(sequence, value.body())?);
+            visit(sequence, value.body())?;
             last = Some(sequence);
         }
         if count < usize::from(RANGE_READ_LIMIT) {
@@ -700,15 +1029,7 @@ fn read_table<T>(
         }
         start = last.checked_add(1).ok_or(RuntimeError::Overflow)?;
     }
-    Ok(TableRead {
-        records: output,
-        storage_commit_sequence: expected_commit.ok_or(RuntimeError::InvalidValue)?,
-    })
-}
-
-struct TableRead<T> {
-    records: Vec<T>,
-    storage_commit_sequence: u64,
+    expected_commit.ok_or(RuntimeError::InvalidValue)
 }
 
 fn sequence_key(key: &StoredKey) -> Result<u64, RuntimeError> {
@@ -719,101 +1040,276 @@ fn sequence_key(key: &StoredKey) -> Result<u64, RuntimeError> {
     Ok(u64::from_be_bytes(bytes))
 }
 
+#[cfg(test)]
 fn verify_checkpoints(
     binding: AdminSessionBinding,
     trust: &AuditTrust,
     checkpoints: &[AdminAuditCheckpoint],
 ) -> Result<(AuditChainCursor, u64, [u8; 32]), RuntimeError> {
-    let mut next_sequence = 0_u64;
-    let mut next_deleted = 0_u64;
-    let mut previous_hash = [0_u8; 32];
-    let mut cursor = AuditChainCursor::genesis();
+    let mut verifier = CheckpointVerifier::new(binding, trust);
     for checkpoint in checkpoints {
+        verifier.observe(checkpoint)?;
+    }
+    let verified = verifier.finish();
+    Ok((
+        verified.cursor,
+        verified.next_sequence,
+        verified.previous_hash,
+    ))
+}
+
+struct CheckpointVerification {
+    cursor: AuditChainCursor,
+    next_sequence: u64,
+    previous_hash: [u8; 32],
+    latest_created_at: u64,
+}
+
+struct CheckpointVerifier<'a> {
+    binding: AdminSessionBinding,
+    trust: &'a AuditTrust,
+    next_sequence: u64,
+    next_deleted: u64,
+    previous_hash: [u8; 32],
+    cursor: AuditChainCursor,
+    latest_created_at: u64,
+}
+
+impl<'a> CheckpointVerifier<'a> {
+    const fn new(binding: AdminSessionBinding, trust: &'a AuditTrust) -> Self {
+        Self {
+            binding,
+            trust,
+            next_sequence: 0,
+            next_deleted: 0,
+            previous_hash: [0; 32],
+            cursor: AuditChainCursor::genesis(),
+            latest_created_at: 0,
+        }
+    }
+
+    fn observe(&mut self, checkpoint: &AdminAuditCheckpoint) -> Result<(), RuntimeError> {
         let tbs = checkpoint.tbs();
-        if tbs.network_id != binding.network_id
-            || tbs.server_id != binding.server_id
-            || tbs.checkpoint_sequence != next_sequence
-            || tbs.deleted_first_sequence != next_deleted
-            || tbs.previous_checkpoint_hash != previous_hash
+        if tbs.network_id != self.binding.network_id
+            || tbs.server_id != self.binding.server_id
+            || tbs.checkpoint_sequence != self.next_sequence
+            || tbs.deleted_first_sequence != self.next_deleted
+            || tbs.previous_checkpoint_hash != self.previous_hash
         {
             return Err(RuntimeError::InvalidValue);
         }
-        let key = trust.resolve(tbs.audit_signing_key_id, tbs.created_at)?;
+        let key = self
+            .trust
+            .resolve(tbs.audit_signing_key_id, tbs.created_at)?;
         checkpoint
             .verify(key)
             .map_err(|_| RuntimeError::InvalidValue)?;
-        cursor = AuditChainCursor::after_checkpoint(tbs);
-        next_deleted = tbs.next_retained_sequence;
-        previous_hash = checkpoint.checkpoint_hash();
-        next_sequence = next_sequence.checked_add(1).ok_or(RuntimeError::Overflow)?;
+        self.cursor = AuditChainCursor::after_checkpoint(tbs);
+        self.next_deleted = tbs.next_retained_sequence;
+        self.previous_hash = checkpoint.checkpoint_hash();
+        self.next_sequence = self
+            .next_sequence
+            .checked_add(1)
+            .ok_or(RuntimeError::Overflow)?;
+        self.latest_created_at = self.latest_created_at.max(tbs.created_at);
+        Ok(())
     }
-    Ok((cursor, next_sequence, previous_hash))
+
+    const fn finish(self) -> CheckpointVerification {
+        CheckpointVerification {
+            cursor: self.cursor,
+            next_sequence: self.next_sequence,
+            previous_hash: self.previous_hash,
+            latest_created_at: self.latest_created_at,
+        }
+    }
 }
 
 // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=single gapless verification pass binds trust signatures hashes chain position and intent outcome pairing
+#[cfg(test)]
 fn verify_events(
     binding: AdminSessionBinding,
     trust: &AuditTrust,
     operators: &OperatorRegistry,
-    mut cursor: AuditChainCursor,
+    cursor: AuditChainCursor,
     events: &[AdminAuditEvent],
 ) -> Result<(AuditChainCursor, AdminPolicySeed), RuntimeError> {
-    let mut unmatched_intents: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
-    let mut policy = AdminPolicySeed::default();
+    let mut verifier = EventVerifier::new(binding, trust, operators, cursor);
     for event in events {
+        verifier.observe(event)?;
+    }
+    let verified = verifier.finish_reconciled()?;
+    Ok((verified.cursor, verified.policy))
+}
+
+struct EventVerification {
+    cursor: AuditChainCursor,
+    policy: AdminPolicySeed,
+    latest_created_at: u64,
+    pending_startup_action: Option<PendingStartupAction>,
+}
+
+struct EventVerifier<'a> {
+    binding: AdminSessionBinding,
+    trust: &'a AuditTrust,
+    operators: &'a OperatorRegistry,
+    cursor: AuditChainCursor,
+    unmatched_intent: Option<PendingStartupAction>,
+    policy: AdminPolicySeed,
+    latest_created_at: u64,
+}
+
+impl<'a> EventVerifier<'a> {
+    fn new(
+        binding: AdminSessionBinding,
+        trust: &'a AuditTrust,
+        operators: &'a OperatorRegistry,
+        cursor: AuditChainCursor,
+    ) -> Self {
+        Self {
+            binding,
+            trust,
+            operators,
+            cursor,
+            unmatched_intent: None,
+            policy: AdminPolicySeed::default(),
+            latest_created_at: 0,
+        }
+    }
+
+    fn observe(&mut self, event: &AdminAuditEvent) -> Result<(), RuntimeError> {
+        let parsed = self.verify_event(event)?;
+        self.cursor = self
+            .cursor
+            .advance(event)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        self.observe_phase(event, &parsed)?;
+        self.latest_created_at = self.latest_created_at.max(event.tbs().created_at);
+        Ok(())
+    }
+
+    fn verify_event(&self, event: &AdminAuditEvent) -> Result<AdminCommand, RuntimeError> {
         let tbs = event.tbs();
-        if tbs.network_id != binding.network_id
-            || tbs.server_id != binding.server_id
-            || tbs.command_tbs.network_id() != binding.network_id
-            || tbs.command_tbs.server_id() != binding.server_id
+        if tbs.network_id != self.binding.network_id
+            || tbs.server_id != self.binding.server_id
+            || tbs.command_tbs.network_id() != self.binding.network_id
+            || tbs.command_tbs.server_id() != self.binding.server_id
         {
             return Err(RuntimeError::InvalidValue);
         }
-        let audit_key = trust.resolve(tbs.audit_signing_key_id, tbs.created_at)?;
-        let operator_key = operators
+        let audit_key = self
+            .trust
+            .resolve(tbs.audit_signing_key_id, tbs.created_at)?;
+        let operator_key = self
+            .operators
             .verification_key(tbs.operator_id)
             .map_err(|_| RuntimeError::InvalidValue)?;
         event
             .verify(audit_key, operator_key)
             .map_err(|_| RuntimeError::InvalidValue)?;
-        cursor = cursor
-            .advance(event)
-            .map_err(|_| RuntimeError::InvalidValue)?;
+        let parsed = parse_event_command(event)?;
+        if !super::audit_phase_is_valid(&parsed, tbs.phase) {
+            return Err(RuntimeError::InvalidValue);
+        }
+        Ok(parsed)
+    }
 
-        let command = tbs
-            .command_tbs
-            .encode()
-            .map_err(|_| RuntimeError::InvalidValue)?;
+    fn observe_phase(
+        &mut self,
+        event: &AdminAuditEvent,
+        parsed: &AdminCommand,
+    ) -> Result<(), RuntimeError> {
+        let tbs = event.tbs();
+        if self.unmatched_intent.is_some()
+            && !matches!(
+                tbs.phase,
+                AdminAuditPhase::OutcomeSuccess | AdminAuditPhase::OutcomeFailure
+            )
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
         match tbs.phase {
-            AdminAuditPhase::Intent => {
-                if intent_requires_outcome(event)?
-                    && unmatched_intents
-                        .insert(command, tbs.audit_sequence)
-                        .is_some()
-                {
-                    return Err(RuntimeError::InvalidValue);
-                }
-            }
+            AdminAuditPhase::Intent => self.observe_intent(event, parsed)?,
             AdminAuditPhase::OutcomeSuccess | AdminAuditPhase::OutcomeFailure => {
-                if !intent_requires_outcome(event)? || unmatched_intents.remove(&command).is_none()
-                {
-                    return Err(RuntimeError::InvalidValue);
-                }
+                self.observe_outcome(event, parsed)?;
             }
-            AdminAuditPhase::CommittedMutation => policy.observe(event)?,
+            AdminAuditPhase::CommittedMutation => self.policy.observe(event)?,
             AdminAuditPhase::Observed => {}
         }
+        Ok(())
     }
-    if !unmatched_intents.is_empty() {
-        return Err(RuntimeError::InvalidValue);
+
+    fn observe_intent(
+        &mut self,
+        event: &AdminAuditEvent,
+        parsed: &AdminCommand,
+    ) -> Result<(), RuntimeError> {
+        if !command_requires_outcome(parsed)? {
+            return Ok(());
+        }
+        if self.unmatched_intent.is_some() {
+            return Err(RuntimeError::InvalidValue);
+        }
+        self.unmatched_intent = Some(PendingStartupAction::from_verified(event, parsed)?);
+        Ok(())
     }
-    Ok((cursor, policy))
+
+    fn observe_outcome(
+        &mut self,
+        event: &AdminAuditEvent,
+        parsed: &AdminCommand,
+    ) -> Result<(), RuntimeError> {
+        if !command_requires_outcome(parsed)? {
+            return Err(RuntimeError::InvalidValue);
+        }
+        let command = encoded_command(event)?;
+        match self.unmatched_intent.take() {
+            Some(pending)
+                if pending.intent.tbs().operator_id == event.tbs().operator_id
+                    && pending.intent.tbs().operator_signature
+                        == event.tbs().operator_signature
+                    && encoded_command(&pending.intent)? == command =>
+            {
+                Ok(())
+            }
+            _ => Err(RuntimeError::InvalidValue),
+        }
+    }
+
+    fn finish(self) -> EventVerification {
+        EventVerification {
+            cursor: self.cursor,
+            policy: self.policy,
+            latest_created_at: self.latest_created_at,
+            pending_startup_action: self.unmatched_intent,
+        }
+    }
+
+    fn finish_reconciled(self) -> Result<EventVerification, RuntimeError> {
+        let verified = self.finish();
+        if verified.pending_startup_action.is_some() {
+            return Err(RuntimeError::InvalidValue);
+        }
+        Ok(verified)
+    }
 }
 
-fn intent_requires_outcome(event: &AdminAuditEvent) -> Result<bool, RuntimeError> {
+fn parse_event_command(event: &AdminAuditEvent) -> Result<AdminCommand, RuntimeError> {
     let canonical = CanonicalCommand::check(event.tbs().command_tbs.canonical_command())
         .map_err(|_| RuntimeError::InvalidValue)?;
-    match AdminCommand::parse(canonical).map_err(|_| RuntimeError::InvalidValue)? {
+    AdminCommand::parse(canonical).map_err(|_| RuntimeError::InvalidValue)
+}
+
+fn encoded_command(event: &AdminAuditEvent) -> Result<Vec<u8>, RuntimeError> {
+    event
+        .tbs()
+        .command_tbs
+        .encode()
+        .map_err(|_| RuntimeError::InvalidValue)
+}
+
+const fn command_requires_outcome(command: &AdminCommand) -> Result<bool, RuntimeError> {
+    match command {
         AdminCommand::Kill { .. } | AdminCommand::Rehash(_) | AdminCommand::BackupCreate(_) => {
             Ok(true)
         }
@@ -1078,6 +1574,208 @@ mod tests {
                 &[terminal, invalid_terminal_outcome],
             )
             .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn streaming_verifier_allows_only_one_pending_external_intent() -> Result<(), RuntimeError> {
+        let binding = binding();
+        let audit_key = Ed25519SecretKey::from_bytes([4; 32]);
+        let operator_key = Ed25519SecretKey::from_bytes([5; 32]);
+        let operator_id = OperatorId::from_bytes([6; 16]);
+        let registry = registry(operator_id, &operator_key)?;
+        let trust = AuditTrust::new(&[trust_entry(&audit_key)?])?;
+        let fixture = EventFixture {
+            binding,
+            audit_key: &audit_key,
+            operator_key: &operator_key,
+            operator_id,
+        };
+        let first = fixture.event(
+            AuditChainCursor::genesis(),
+            0,
+            AdminAuditPhase::Intent,
+            b"KILL AAAAAAAAAAAAAAAAAAAAAA :policy action",
+        )?;
+        let cursor = AuditChainCursor::genesis()
+            .advance(&first)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let second = fixture.event(cursor, 1, AdminAuditPhase::Intent, b"REHASH :reload now")?;
+        let mut verifier =
+            EventVerifier::new(binding, &trust, &registry, AuditChainCursor::genesis());
+        verifier.observe(&first)?;
+        assert!(verifier.observe(&second).is_err());
+
+        let action_observed = fixture.event(
+            AuditChainCursor::genesis(),
+            2,
+            AdminAuditPhase::Observed,
+            b"KILL AAAAAAAAAAAAAAAAAAAAAA :policy action",
+        )?;
+        let mut phase_verifier =
+            EventVerifier::new(binding, &trust, &registry, AuditChainCursor::genesis());
+        assert!(phase_verifier.observe(&action_observed).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn trailing_intent_blocks_authority_until_exact_outcome_commits() -> Result<(), RuntimeError> {
+        let binding = binding();
+        let audit_key = Ed25519SecretKey::from_bytes([4; 32]);
+        let operator_key = Ed25519SecretKey::from_bytes([5; 32]);
+        let operator_id = OperatorId::from_bytes([6; 16]);
+        let registry = registry(operator_id, &operator_key)?;
+        let trust = AuditTrust::new(&[trust_entry(&audit_key)?])?;
+        let fixture = EventFixture {
+            binding,
+            audit_key: &audit_key,
+            operator_key: &operator_key,
+            operator_id,
+        };
+        let intent = fixture.event(
+            AuditChainCursor::genesis(),
+            0,
+            AdminAuditPhase::Intent,
+            b"KILL AAAAAAAAAAAAAAAAAAAAAA :policy action",
+        )?;
+        let mut verifier =
+            EventVerifier::new(binding, &trust, &registry, AuditChainCursor::genesis());
+        verifier.observe(&intent)?;
+        let verified = verifier.finish();
+
+        let mut authority = AuditAuthority::empty_for_test()?;
+        authority.cursor = verified.cursor;
+        authority.pending_startup_action = verified.pending_startup_action;
+        assert!(!authority.is_reconciled());
+        let action = authority
+            .take_pending_startup_action()
+            .ok_or(RuntimeError::InvalidValue)?;
+        assert!(matches!(action.kind(), PendingStartupActionKind::Kill(_)));
+        assert!(authority.take_pending_startup_action().is_none());
+        assert!(
+            authority
+                .prepare_startup_outcome(&action, AdminAuditPhase::Observed, CREATED_AT)
+                .is_err()
+        );
+        let outcome = authority.prepare_startup_outcome(
+            &action,
+            AdminAuditPhase::OutcomeSuccess,
+            CREATED_AT,
+        )?;
+        assert_eq!(outcome.tbs().operator_id, intent.tbs().operator_id);
+        assert_eq!(
+            outcome.tbs().operator_signature,
+            intent.tbs().operator_signature
+        );
+        assert_eq!(outcome.tbs().command_tbs, intent.tbs().command_tbs);
+        authority.resolve_committed_startup_action(action, &outcome)?;
+        assert!(authority.is_reconciled());
+        assert_eq!(authority.cursor.next_sequence, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn outcome_cannot_close_another_operators_intent() -> Result<(), RuntimeError> {
+        let binding = binding();
+        let audit_key = Ed25519SecretKey::from_bytes([4; 32]);
+        let first_operator_key = Ed25519SecretKey::from_bytes([5; 32]);
+        let second_operator_key = Ed25519SecretKey::from_bytes([8; 32]);
+        let first_operator = OperatorId::from_bytes([6; 16]);
+        let second_operator = OperatorId::from_bytes([7; 16]);
+        let mut permissions = AdminPermissionSet::EMPTY;
+        permissions.insert(AdminPermission::Observe);
+        let records = [
+            (first_operator, &first_operator_key, 1_000),
+            (second_operator, &second_operator_key, 1_001),
+        ]
+        .into_iter()
+        .map(|(operator_id, operator_key, uid)| {
+            OperatorRecord::new(
+                operator_id,
+                operator_key.public_key(),
+                None,
+                vec![uid],
+                Vec::new(),
+                permissions,
+                false,
+            )
+            .map_err(|_| RuntimeError::InvalidValue)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+        let registry =
+            OperatorRegistry::from_records(records).map_err(|_| RuntimeError::InvalidValue)?;
+        let trust = AuditTrust::new(&[trust_entry(&audit_key)?])?;
+        let first = EventFixture {
+            binding,
+            audit_key: &audit_key,
+            operator_key: &first_operator_key,
+            operator_id: first_operator,
+        };
+        let intent = first.event(
+            AuditChainCursor::genesis(),
+            0,
+            AdminAuditPhase::Intent,
+            b"KILL AAAAAAAAAAAAAAAAAAAAAA :policy action",
+        )?;
+        let cursor = AuditChainCursor::genesis()
+            .advance(&intent)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let second = EventFixture {
+            binding,
+            audit_key: &audit_key,
+            operator_key: &second_operator_key,
+            operator_id: second_operator,
+        };
+        let outcome = second.event(
+            cursor,
+            0,
+            AdminAuditPhase::OutcomeSuccess,
+            b"KILL AAAAAAAAAAAAAAAAAAAAAA :policy action",
+        )?;
+        let mut verifier =
+            EventVerifier::new(binding, &trust, &registry, AuditChainCursor::genesis());
+        verifier.observe(&intent)?;
+        assert!(verifier.observe(&outcome).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn prepared_export_verifies_and_includes_its_own_observed_event() -> Result<(), RuntimeError> {
+        let binding = binding();
+        let audit_key = Ed25519SecretKey::from_bytes([4; 32]);
+        let operator_key = Ed25519SecretKey::from_bytes([5; 32]);
+        let operator_id = OperatorId::from_bytes([6; 16]);
+        let operators = registry(operator_id, &operator_key)?;
+        let trust = AuditTrust::new(&[trust_entry(&audit_key)?])?;
+        let fixture = EventFixture {
+            binding,
+            audit_key: &audit_key,
+            operator_key: &operator_key,
+            operator_id,
+        };
+        let range = AuditRange::new(0, 0).map_err(|_| RuntimeError::InvalidValue)?;
+        let observed = fixture.event(
+            AuditChainCursor::genesis(),
+            0,
+            AdminAuditPhase::Observed,
+            b"AUDIT EXPORT 0 0",
+        )?;
+        let prepared = PreparedAuditExport {
+            binding,
+            trust,
+            operators,
+            range,
+            batch_id: [0; 16],
+            expected_cursor: AuditChainCursor::genesis(),
+            selection: ExportSelection::new(range),
+        };
+        let lines = prepared.finish_with_observed(&observed)?;
+        assert_eq!(lines.len(), 3);
+        assert!(
+            lines
+                .get(1)
+                .is_some_and(|line| line.contains("NOTE AUDIT EVENT"))
         );
         Ok(())
     }

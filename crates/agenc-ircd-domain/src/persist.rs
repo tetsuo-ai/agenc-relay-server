@@ -44,6 +44,8 @@ pub struct DurableAccount {
     pub session_generation: Generation,
     /// Revision of the last persisted change to this account.
     pub revision: Revision,
+    /// Optional bounded administrative suspension that survives audit retention.
+    pub admin_suspension_expires_at: Option<UtcSecond>,
 }
 
 impl DurableAccount {
@@ -58,6 +60,7 @@ impl DurableAccount {
             reserved_nicknames: account.reserved_nicknames.iter().cloned().collect(),
             session_generation: account.session_generation,
             revision: account.revision,
+            admin_suspension_expires_at: account.admin_suspension_expires_at,
         }
     }
 
@@ -75,6 +78,7 @@ impl DurableAccount {
             reserved_nicknames: self.reserved_nicknames.into_iter().collect(),
             session_generation: self.session_generation,
             revision: self.revision,
+            admin_suspension_expires_at: self.admin_suspension_expires_at,
         })
     }
 
@@ -89,6 +93,7 @@ impl DurableAccount {
             && self.contacts == other.contacts
             && self.reserved_nicknames == other.reserved_nicknames
             && self.session_generation == other.session_generation
+            && self.admin_suspension_expires_at == other.admin_suspension_expires_at
     }
 }
 
@@ -200,6 +205,8 @@ pub struct DurableChannel {
     pub invite_exceptions: Vec<DurableListEntry>,
     /// Plaintext history policy.
     pub history: HistoryPolicy,
+    /// Whether new channel delivery is administratively quarantined.
+    pub admin_quarantined: bool,
 }
 
 impl DurableChannel {
@@ -243,6 +250,7 @@ impl DurableChannel {
                 .map(DurableListEntry::from_state)
                 .collect(),
             history: channel.history,
+            admin_quarantined: channel.admin_quarantined,
         })
     }
 
@@ -280,6 +288,7 @@ impl DurableChannel {
             invites: Default::default(),
             history: self.history,
             e2ee_removal_pending: Default::default(),
+            admin_quarantined: self.admin_quarantined,
         })
     }
 
@@ -311,6 +320,7 @@ impl DurableChannel {
                 &self.exceptions,
                 &self.invite_exceptions,
                 &self.history,
+                &self.admin_quarantined,
             ),
         )
     }
@@ -338,6 +348,7 @@ type ChannelContentKey<'a> = (
         &'a [DurableListEntry],
         &'a [DurableListEntry],
         &'a HistoryPolicy,
+        &'a bool,
     ),
 );
 
@@ -583,6 +594,7 @@ mod tests {
             reserved_nicknames: vec![NicknameValue::parse("Alice")?],
             session_generation: Generation::new(1)?,
             revision: Revision::new(1)?,
+            admin_suspension_expires_at: None,
         };
         let mut later = account.clone();
         later.revision = Revision::new(9)?;
@@ -609,6 +621,7 @@ mod tests {
             reserved_nicknames: vec![NicknameValue::parse("bob")?, NicknameValue::parse("alice")?],
             session_generation: Generation::new(1)?,
             revision: Revision::new(1)?,
+            admin_suspension_expires_at: None,
         };
         assert_eq!(
             account.into_state().map(|_| ()),

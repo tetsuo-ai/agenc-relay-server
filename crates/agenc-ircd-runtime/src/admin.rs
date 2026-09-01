@@ -7,6 +7,7 @@
 
 mod audit;
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -14,13 +15,14 @@ use std::time::Duration;
 use agenc_ircd_admin::{
     AdminAuditEvent, AdminAuditPhase, AdminChallenge, AdminCommand, AdminCommandEvent,
     AdminSession, AdminSessionBinding, ConfirmationState, ConfirmationToken, MAX_ADMIN_LINE_BYTES,
-    MAX_ADMIN_OUTPUT_LINE_BYTES, MAX_AUDIT_EXPORT_BYTES, OperatorRegistry, PeerIdentity,
-    StatsSelector, StatsValues, TransportKind, encode_base64url, render_stats_batch,
-    render_stats_storage_unavailable, render_stats_unavailable,
+    MAX_ADMIN_OUTPUT_LINE_BYTES, MAX_AUDIT_EXPORT_BYTES, MAX_AUDIT_EXPORT_RECORDS,
+    OperatorRegistry, PeerIdentity, StatsSelector, StatsValues, TransportKind, encode_base64url,
+    render_stats_batch, render_stats_storage_unavailable, render_stats_unavailable,
 };
-use agenc_ircd_crypto::Ed25519SecretKey;
+use agenc_ircd_crypto::{Ed25519SecretKey, RollbackGuardRootKey, StorageMasterKey};
 use agenc_ircd_storage::{
-    BackupDestination, BackupReceipt, StorageCompletion, StorageError, StoragePort,
+    BackupDestination, BackupDirectoryReader, BackupReceipt, BackupTrustKey, StorageCompletion,
+    StorageError, StoragePort, verify_backup,
 };
 use agenc_ircd_types::{EntropySource, MonotonicClock, WallClock};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
@@ -48,6 +50,7 @@ use crate::sync::Arc;
 use crate::tls::{CLOSE_NOTIFY_GRACE, WRITE_STALL_BUDGET};
 
 pub(crate) use audit::AuditAuthority;
+use audit::PendingStartupActionKind;
 
 /// RFC 9846 exporter label for the remote administrative session binding.
 pub(crate) const ADMIN_EXPORTER_LABEL: &[u8] = b"EXPORTER-agenc-chat-admin-v1";
@@ -69,8 +72,20 @@ const ADMIN_PROCESS_CAPACITY: usize = 1;
 const AUDIT_RETENTION_SWEEP: Duration = Duration::from_secs(60 * 60);
 /// Checked conversion unit for configured retention days.
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
+/// Maximum directory entries examined while reconciling one interrupted
+/// administrative backup action.
+const MAX_ADMIN_BACKUP_DIRECTORY_ENTRIES: usize = 4_096;
 /// One input-free final frame queued for each administrative connection.
 const ADMIN_SHUTDOWN_LINE: &str = "ERROR :Server shutting down";
+
+fn acquire_audit_export_memory(
+    budget: &MemoryBudget,
+) -> Result<MemoryPermitBatch, crate::RuntimeError> {
+    let frozen = MemoryCharge::allocation(MAX_AUDIT_EXPORT_BYTES)?;
+    let rendered = MemoryCharge::allocation(MAX_AUDIT_EXPORT_BYTES)?;
+    let charges = BoundedMemoryCharges::new(vec![frozen, rendered])?;
+    budget.try_acquire_batch(charges).map_err(Into::into)
+}
 
 /// A committed administrative process request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -114,14 +129,30 @@ pub(crate) struct AdminBackupRuntime {
     storage: StoragePort,
     directory: PathBuf,
     signing_key: Zeroizing<[u8; 32]>,
+    source_master_key: Zeroizing<[u8; 32]>,
+    source_guard_root_key: Zeroizing<[u8; 32]>,
+    trusted_keys: Vec<BackupTrustKey>,
+    maximum_bytes: u64,
 }
 
 impl AdminBackupRuntime {
-    pub(crate) fn new(storage: StoragePort, directory: PathBuf, signing_key: [u8; 32]) -> Self {
+    pub(crate) fn new(
+        storage: StoragePort,
+        directory: PathBuf,
+        signing_key: [u8; 32],
+        source_master_key: [u8; 32],
+        source_guard_root_key: [u8; 32],
+        trusted_keys: Vec<BackupTrustKey>,
+        maximum_bytes: u64,
+    ) -> Self {
         Self {
             storage,
             directory,
             signing_key: Zeroizing::new(signing_key),
+            source_master_key: Zeroizing::new(source_master_key),
+            source_guard_root_key: Zeroizing::new(source_guard_root_key),
+            trusted_keys,
+            maximum_bytes,
         }
     }
 
@@ -142,6 +173,64 @@ impl AdminBackupRuntime {
             created_at,
             backup_id,
         )
+    }
+
+    fn reconciliation_job(&self, audit_sequence: u64, created_at: u64) -> BackupReconciliationJob {
+        BackupReconciliationJob {
+            directory: self.directory.clone(),
+            source_master_key: self.source_master_key.clone(),
+            source_guard_root_key: self.source_guard_root_key.clone(),
+            trusted_keys: self.trusted_keys.clone(),
+            maximum_bytes: self.maximum_bytes,
+            audit_sequence,
+            created_at,
+        }
+    }
+}
+
+struct BackupReconciliationJob {
+    directory: PathBuf,
+    source_master_key: Zeroizing<[u8; 32]>,
+    source_guard_root_key: Zeroizing<[u8; 32]>,
+    trusted_keys: Vec<BackupTrustKey>,
+    maximum_bytes: u64,
+    audit_sequence: u64,
+    created_at: u64,
+}
+
+impl BackupReconciliationJob {
+    fn run(self) -> Result<bool, StorageError> {
+        let prefix = format!("admin-{:020}-", self.audit_sequence);
+        let suffix = ".agenc-backup";
+        let mut directory =
+            BackupDirectoryReader::open(&self.directory, MAX_ADMIN_BACKUP_DIRECTORY_ENTRIES)?;
+        let mut completed = false;
+        while let Some(name) = directory.next_name()? {
+            let Some(encoded_id) = name
+                .strip_prefix(&prefix)
+                .and_then(|name| name.strip_suffix(suffix))
+            else {
+                continue;
+            };
+            if encoded_id.len() != 22 || completed {
+                return Err(StorageError::AuthenticationFailed);
+            }
+            let candidate = directory.open_candidate(&name)?;
+            let verified = verify_backup(
+                candidate,
+                &StorageMasterKey::from_bytes(*self.source_master_key),
+                &RollbackGuardRootKey::from_bytes(*self.source_guard_root_key),
+                &self.trusted_keys,
+                self.maximum_bytes,
+            )?;
+            if verified.header.created_at() != self.created_at
+                || encode_base64url(&verified.header.backup_id()) != encoded_id
+            {
+                return Err(StorageError::AuthenticationFailed);
+            }
+            completed = true;
+        }
+        Ok(completed)
     }
 }
 
@@ -364,8 +453,7 @@ impl AdminOutput {
         })
     }
 
-    fn try_export(&self, lines: Vec<String>, memory: MemoryPermitBatch) -> Result<(), CloseReason> {
-        let batch = AdminWrite::export(lines, memory)?;
+    fn try_export(&self, batch: AdminWrite) -> Result<(), CloseReason> {
         self.sender.try_send(batch).map_err(|error| match error {
             mpsc::error::TrySendError::Full(_) => CloseReason::SlowConsumer,
             mpsc::error::TrySendError::Closed(_) => CloseReason::TransportLoss,
@@ -403,10 +491,29 @@ impl AdminWrite {
     }
 
     fn export(lines: Vec<String>, memory: MemoryPermitBatch) -> Result<Self, CloseReason> {
+        Self::export_bounded(
+            lines,
+            memory,
+            MAX_AUDIT_EXPORT_RECORDS,
+            MAX_AUDIT_EXPORT_BYTES,
+        )
+    }
+
+    fn export_bounded(
+        lines: Vec<String>,
+        memory: MemoryPermitBatch,
+        max_records: usize,
+        max_wire_bytes: u64,
+    ) -> Result<Self, CloseReason> {
+        let max_lines = max_records.checked_add(2).ok_or(CloseReason::Overload)?;
+        if lines.len() > max_lines {
+            return Err(CloseReason::Overload);
+        }
         let mut encoded = Vec::new();
         encoded
             .try_reserve_exact(lines.len())
             .map_err(|_| CloseReason::Overload)?;
+        let mut wire_bytes = 0_u64;
         for line in lines {
             let bytes = line.into_bytes();
             if bytes.is_empty()
@@ -414,6 +521,16 @@ impl AdminWrite {
                 || bytes.iter().any(|byte| matches!(byte, b'\r' | b'\n'))
             {
                 return Err(CloseReason::ProtocolError);
+            }
+            let line_wire_bytes = u64::try_from(bytes.len())
+                .ok()
+                .and_then(|length| length.checked_add(2))
+                .ok_or(CloseReason::Overload)?;
+            wire_bytes = wire_bytes
+                .checked_add(line_wire_bytes)
+                .ok_or(CloseReason::Overload)?;
+            if wire_bytes > max_wire_bytes {
+                return Err(CloseReason::Overload);
             }
             encoded.push(bytes);
         }
@@ -467,7 +584,15 @@ pub(crate) struct AdminOwner {
     wall: Box<dyn WallClock + Send>,
     sessions: BTreeMap<ConnectionGeneration, OwnedAdminSession>,
     shutdown_acknowledgements: BTreeMap<ConnectionGeneration, FlushAcknowledgement>,
+    command_observation: Cell<AdminCommandObservation>,
     quiescing: bool,
+}
+
+#[derive(Clone, Copy)]
+enum AdminCommandObservation {
+    Inactive,
+    Pending,
+    Complete(ResultClass),
 }
 
 pub(crate) struct AdminOwnerClocks {
@@ -566,6 +691,7 @@ impl AdminOwner {
             wall: runtime.clocks.wall,
             sessions: BTreeMap::new(),
             shutdown_acknowledgements: BTreeMap::new(),
+            command_observation: Cell::new(AdminCommandObservation::Inactive),
             quiescing: false,
         }
     }
@@ -588,6 +714,10 @@ impl AdminOwner {
         mut lifecycle: AdminLifecycleInbox,
         token: CancellationToken,
     ) {
+        if self.reconcile_pending_startup_action(&token).await.is_err() {
+            self.signal_fatal();
+            return;
+        }
         let first_retention = tokio::time::Instant::now() + AUDIT_RETENTION_SWEEP;
         let mut retention = tokio::time::interval_at(first_retention, AUDIT_RETENTION_SWEEP);
         retention.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -636,6 +766,59 @@ impl AdminOwner {
         for (_, owned) in self.sessions {
             let _ = owned.output.try_close(CloseReason::Shutdown);
         }
+    }
+
+    async fn reconcile_pending_startup_action(
+        &mut self,
+        token: &CancellationToken,
+    ) -> Result<(), AdminLifecycleFailure> {
+        let Some(action) = self.audit.take_pending_startup_action() else {
+            return self
+                .audit
+                .is_reconciled()
+                .then_some(())
+                .ok_or(AdminLifecycleFailure::Audit);
+        };
+        let phase = match action.kind() {
+            PendingStartupActionKind::Kill(user) => match self.core.kill(user, token).await {
+                Ok(()) | Err(AdminCoreFailure::InvalidTarget) => AdminAuditPhase::OutcomeSuccess,
+                Err(
+                    AdminCoreFailure::Busy
+                    | AdminCoreFailure::Quiescing
+                    | AdminCoreFailure::StaleRevision
+                    | AdminCoreFailure::StorageUnavailable,
+                ) => AdminAuditPhase::OutcomeFailure,
+            },
+            PendingStartupActionKind::Rehash => AdminAuditPhase::OutcomeFailure,
+            PendingStartupActionKind::BackupCreate => {
+                let backup = self.backup.as_ref().ok_or(AdminLifecycleFailure::Audit)?;
+                let job = backup.reconciliation_job(action.audit_sequence(), action.created_at());
+                match tokio::task::spawn_blocking(move || job.run())
+                    .await
+                    .map_err(|_| AdminLifecycleFailure::Audit)?
+                    .map_err(|_| AdminLifecycleFailure::Audit)?
+                {
+                    true => AdminAuditPhase::OutcomeSuccess,
+                    false => AdminAuditPhase::OutcomeFailure,
+                }
+            }
+        };
+        let created_at = self
+            .wall
+            .utc_now()
+            .map_err(|_| AdminLifecycleFailure::Audit)?
+            .get();
+        let outcome = self
+            .audit
+            .prepare_startup_outcome(&action, phase, created_at)
+            .map_err(|_| AdminLifecycleFailure::Audit)?;
+        self.core
+            .commit_audit(outcome.clone(), token)
+            .await
+            .map_err(|_| AdminLifecycleFailure::Audit)?;
+        self.audit
+            .resolve_committed_startup_action(action, &outcome)
+            .map_err(|_| AdminLifecycleFailure::Audit)
     }
 
     async fn retention_sweep(
@@ -842,10 +1025,23 @@ impl AdminOwner {
                 }
             }
             Ok(agenc_ircd_admin::AdminEvent::Command(event)) => {
-                if let Some(observer) = &self.observer {
-                    observer.admin_action(ResultClass::Ok);
-                }
+                self.command_observation
+                    .set(AdminCommandObservation::Pending);
+                let observer = self.observer.as_ref().map(Arc::clone);
                 self.command(generation, *event, token).await;
+                let result = match self
+                    .command_observation
+                    .replace(AdminCommandObservation::Inactive)
+                {
+                    AdminCommandObservation::Complete(result) => result,
+                    AdminCommandObservation::Pending if token.is_cancelled() => ResultClass::Closed,
+                    AdminCommandObservation::Pending | AdminCommandObservation::Inactive => {
+                        ResultClass::Error
+                    }
+                };
+                if let Some(observer) = observer {
+                    observer.admin_action(result);
+                }
             }
             Ok(agenc_ircd_admin::AdminEvent::PermissionDenied { verb, .. }) => {
                 if let Some(observer) = &self.observer {
@@ -880,7 +1076,10 @@ impl AdminOwner {
                 self.output_line(generation, format!("PONG :{}", ping.as_str()));
                 return;
             }
-            AdminCommand::Pong(_) => return,
+            AdminCommand::Pong(_) => {
+                self.record_command_result(ResultClass::Ok);
+                return;
+            }
             AdminCommand::Connect { .. }
             | AdminCommand::Squit { .. }
             | AdminCommand::PeerQuarantine { .. } => {
@@ -1027,10 +1226,7 @@ impl AdminOwner {
         range: agenc_ircd_admin::AuditRange,
         token: &CancellationToken,
     ) {
-        let Ok(memory) = MemoryCharge::allocation(MAX_AUDIT_EXPORT_BYTES)
-            .and_then(|charge| BoundedMemoryCharges::new(vec![charge]))
-            .and_then(|charges| self.budget.try_acquire_batch(charges).map_err(Into::into))
-        else {
+        let Ok(memory) = acquire_audit_export_memory(&self.budget) else {
             self.output_line(
                 generation,
                 "FAIL AUDIT BUSY :Administrative action busy".to_owned(),
@@ -1042,16 +1238,15 @@ impl AdminOwner {
             self.output_storage_unavailable(generation, "AUDIT");
             return;
         }
-        let preflight = match self.audit.prepare_export(range, batch_id) {
+        let export = match self.audit.prepare_export(range, batch_id) {
             Ok(job) => job,
             Err(error) => {
                 self.output_export_failure(generation, error);
                 return;
             }
         };
-        let preflight = tokio::task::spawn_blocking(move || preflight.run()).await;
-        match preflight {
-            Ok(Ok(_prepared)) => {}
+        let frozen = match tokio::task::spawn_blocking(move || export.run()).await {
+            Ok(Ok(frozen)) => frozen,
             Ok(Err(error)) => {
                 self.output_export_failure(generation, error);
                 return;
@@ -1060,26 +1255,44 @@ impl AdminOwner {
                 self.fail_closed(generation);
                 return;
             }
-        }
+        };
         let Some(observed) = self.prepare_observed_event(generation, event) else {
             return;
+        };
+        let rendered_observed = observed.clone();
+        let rendered =
+            tokio::task::spawn_blocking(move || frozen.finish_with_observed(&rendered_observed))
+                .await;
+        let lines = match rendered {
+            Ok(Ok(lines)) => lines,
+            Ok(Err(error)) => {
+                self.output_export_failure(generation, error);
+                return;
+            }
+            Err(_) => {
+                self.fail_closed(generation);
+                return;
+            }
+        };
+        let prepared = match AdminWrite::export(lines, memory) {
+            Ok(prepared) => prepared,
+            Err(CloseReason::Overload) => {
+                self.output_line(
+                    generation,
+                    "FAIL AUDIT UNAVAILABLE :Audit export unavailable".to_owned(),
+                );
+                return;
+            }
+            Err(_) => {
+                self.fail_closed(generation);
+                return;
+            }
         };
         if let Err(failure) = self.commit_action_audit(generation, observed, token).await {
             self.output_audit_failure(generation, "AUDIT", failure);
             return;
         }
-        let export = match self.audit.prepare_export(range, batch_id) {
-            Ok(job) => job,
-            Err(error) => {
-                self.output_export_failure(generation, error);
-                return;
-            }
-        };
-        match tokio::task::spawn_blocking(move || export.run()).await {
-            Ok(Ok(lines)) => self.output_export(generation, lines, memory),
-            Ok(Err(error)) => self.output_export_failure(generation, error),
-            Err(_) => self.fail_closed(generation),
-        }
+        self.output_export(generation, prepared);
     }
 
     async fn issue_confirmation(
@@ -1323,15 +1536,13 @@ impl AdminOwner {
             self.output_audit_failure(generation, event.command.verb(), failure);
             return;
         }
-        if let Err(failure) = process.request(action) {
-            if !self
-                .commit_rehash_outcome(generation, event, AdminAuditPhase::OutcomeFailure, token)
-                .await
-            {
-                self.fail_closed(generation);
-                return;
-            }
-            self.output_admin_failure(generation, event.command.verb(), failure);
+        // Process intents are terminal audit records. A failed handoff is
+        // indeterminate and must stop the daemon without inventing an outcome.
+        self.quiescing = true;
+        if process.request(action).is_err() {
+            self.fail_closed(generation);
+        } else {
+            self.record_command_result(ResultClass::Ok);
         }
     }
 
@@ -1427,6 +1638,12 @@ impl AdminOwner {
         generation: ConnectionGeneration,
         event: &AdminCommandEvent,
     ) -> Option<(AdminAuditEvent, AdminAuditEvent)> {
+        if !audit_phase_is_valid(&event.command, AdminAuditPhase::OutcomeSuccess)
+            || !audit_phase_is_valid(&event.command, AdminAuditPhase::OutcomeFailure)
+        {
+            self.fail_closed(generation);
+            return None;
+        }
         let Some((operator_id, _permissions)) = self
             .sessions
             .get(&generation)
@@ -1471,6 +1688,10 @@ impl AdminOwner {
         event: &AdminCommandEvent,
         phase: AdminAuditPhase,
     ) -> Option<AdminAuditEvent> {
+        if !audit_phase_is_valid(&event.command, phase) {
+            self.fail_closed(generation);
+            return None;
+        }
         let Some((operator_id, _permissions)) = self
             .sessions
             .get(&generation)
@@ -1607,6 +1828,7 @@ impl AdminOwner {
     }
 
     fn fail_closed(&self, generation: ConnectionGeneration) {
+        self.record_command_result(ResultClass::Error);
         self.close(generation, CloseReason::ProtocolError);
         self.signal_fatal();
     }
@@ -1667,6 +1889,10 @@ impl AdminOwner {
         event: &AdminCommandEvent,
     ) -> Option<AdminAuditEvent> {
         let verb = event.command.verb();
+        if !audit_phase_is_valid(&event.command, AdminAuditPhase::Observed) {
+            self.fail_closed(generation);
+            return None;
+        }
         let Some((operator_id, _permissions)) = self
             .sessions
             .get(&generation)
@@ -1882,6 +2108,7 @@ impl AdminOwner {
     }
 
     fn output_export_failure(&self, generation: ConnectionGeneration, error: crate::RuntimeError) {
+        self.record_command_result(ResultClass::Error);
         match error {
             crate::RuntimeError::Storage(_) => self.output_storage_unavailable(generation, "AUDIT"),
             crate::RuntimeError::LimitExceeded | crate::RuntimeError::MemoryExhausted => self
@@ -1893,16 +2120,17 @@ impl AdminOwner {
         }
     }
 
-    fn output_export(
-        &self,
-        generation: ConnectionGeneration,
-        lines: Vec<String>,
-        memory: MemoryPermitBatch,
-    ) {
-        if let Some(owned) = self.sessions.get(&generation)
-            && owned.output.try_export(lines, memory).is_err()
-        {
-            let _ = owned.output.try_close(CloseReason::SlowConsumer);
+    fn output_export(&self, generation: ConnectionGeneration, prepared: AdminWrite) {
+        if let Some(owned) = self.sessions.get(&generation) {
+            match owned.output.try_export(prepared) {
+                Ok(()) => self.record_command_result(ResultClass::Ok),
+                Err(_) => {
+                    self.record_command_result(ResultClass::Closed);
+                    let _ = owned.output.try_close(CloseReason::SlowConsumer);
+                }
+            }
+        } else {
+            self.record_command_result(ResultClass::Closed);
         }
     }
 
@@ -1911,17 +2139,102 @@ impl AdminOwner {
     }
 
     fn output_batch(&self, generation: ConnectionGeneration, lines: Vec<String>) {
-        if let Some(owned) = self.sessions.get(&generation)
-            && owned.output.try_batch(lines, None).is_err()
-        {
-            let _ = owned.output.try_close(CloseReason::SlowConsumer);
+        self.record_command_result(classify_admin_output(&lines));
+        if let Some(owned) = self.sessions.get(&generation) {
+            if owned.output.try_batch(lines, None).is_err() {
+                self.record_command_result(ResultClass::Closed);
+                let _ = owned.output.try_close(CloseReason::SlowConsumer);
+            }
+        } else {
+            self.record_command_result(ResultClass::Closed);
         }
     }
 
     fn close(&self, generation: ConnectionGeneration, reason: CloseReason) {
+        self.record_command_result(ResultClass::Closed);
         if let Some(owned) = self.sessions.get(&generation) {
             let _ = owned.output.try_close(reason);
         }
+    }
+
+    fn record_command_result(&self, result: ResultClass) {
+        let next = match self.command_observation.get() {
+            AdminCommandObservation::Inactive => return,
+            AdminCommandObservation::Pending => result,
+            AdminCommandObservation::Complete(current) => merge_result_class(current, result),
+        };
+        self.command_observation
+            .set(AdminCommandObservation::Complete(next));
+    }
+}
+
+fn classify_admin_output(lines: &[String]) -> ResultClass {
+    lines
+        .iter()
+        .filter_map(|line| {
+            let mut words = line.split_ascii_whitespace();
+            if words.next() != Some("FAIL") {
+                return None;
+            }
+            let _verb = words.next();
+            match words.next() {
+                Some("BUSY") => Some(ResultClass::Busy),
+                Some("STORAGE_UNAVAILABLE") => Some(ResultClass::Error),
+                Some(_) | None => Some(ResultClass::Rejected),
+            }
+        })
+        .fold(ResultClass::Ok, merge_result_class)
+}
+
+const fn merge_result_class(left: ResultClass, right: ResultClass) -> ResultClass {
+    if result_class_rank(left) >= result_class_rank(right) {
+        left
+    } else {
+        right
+    }
+}
+
+const fn result_class_rank(result: ResultClass) -> u8 {
+    match result {
+        ResultClass::Ok => 0,
+        ResultClass::Rejected => 1,
+        ResultClass::Busy => 2,
+        ResultClass::Closed => 3,
+        ResultClass::Error => 4,
+    }
+}
+
+const fn audit_phase_is_valid(command: &AdminCommand, phase: AdminAuditPhase) -> bool {
+    match command {
+        AdminCommand::Motd
+        | AdminCommand::Version
+        | AdminCommand::Time
+        | AdminCommand::Info
+        | AdminCommand::Links
+        | AdminCommand::Stats(_)
+        | AdminCommand::AuditExport(_) => matches!(phase, AdminAuditPhase::Observed),
+        AdminCommand::Rehash(_) | AdminCommand::Kill { .. } | AdminCommand::BackupCreate(_) => {
+            matches!(
+                phase,
+                AdminAuditPhase::Intent
+                    | AdminAuditPhase::OutcomeSuccess
+                    | AdminAuditPhase::OutcomeFailure
+            )
+        }
+        AdminCommand::AccountSuspend { .. }
+        | AdminCommand::AccountRestore { .. }
+        | AdminCommand::ChannelQuarantine { .. } => {
+            matches!(phase, AdminAuditPhase::CommittedMutation)
+        }
+        AdminCommand::Restart(_) | AdminCommand::Die(_) => {
+            matches!(phase, AdminAuditPhase::Intent)
+        }
+        AdminCommand::Ping(_)
+        | AdminCommand::Pong(_)
+        | AdminCommand::Quit
+        | AdminCommand::Connect { .. }
+        | AdminCommand::Squit { .. }
+        | AdminCommand::PeerQuarantine { .. } => false,
     }
 }
 
@@ -2164,6 +2477,10 @@ async fn finish_admin_writer<W: AsyncWrite + Unpin>(writer: &mut W) {
 
 #[cfg(test)]
 mod tests {
+    use std::fs::{self, OpenOptions};
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use agenc_ircd_admin::{
         AdminChallenge, AdminCommandTbs, AdminSessionBinding, AdminSessionId, Challenge,
         OperatorRecord, OperatorRegistry, PeerIdentity, TransportBinding, TransportKind,
@@ -2180,6 +2497,49 @@ mod tests {
     use crate::clock::{SystemMonotonicClock, SystemWallClock};
     use crate::observe::health::ReadinessStage;
     use crate::state_core::{AdminCoreSnapshot, admin_core_channel};
+
+    static NEXT_BACKUP_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    struct BackupTestDirectory(PathBuf);
+
+    impl BackupTestDirectory {
+        fn create() -> Result<Self, RuntimeError> {
+            let sequence = NEXT_BACKUP_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "agenc-admin-backup-{}-{sequence}",
+                std::process::id()
+            ));
+            fs::create_dir(&path)
+                .map_err(|_| RuntimeError::Storage(StorageError::FilesystemRejected))?;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+                .map_err(|_| RuntimeError::Storage(StorageError::FilesystemRejected))?;
+            Ok(Self(path))
+        }
+    }
+
+    impl Drop for BackupTestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn backup_reconciliation_job(
+        directory: &BackupTestDirectory,
+        audit_sequence: u64,
+        created_at: u64,
+    ) -> Result<BackupReconciliationJob, RuntimeError> {
+        Ok(BackupReconciliationJob {
+            directory: directory.0.clone(),
+            source_master_key: Zeroizing::new([31; 32]),
+            source_guard_root_key: Zeroizing::new([32; 32]),
+            trusted_keys: vec![BackupTrustKey::new(
+                Ed25519SecretKey::from_bytes([33; 32]).public_key(),
+            )?],
+            maximum_bytes: 1_048_576,
+            audit_sequence,
+            created_at,
+        })
+    }
 
     fn registry() -> Result<OperatorRegistry, RuntimeError> {
         let mut permissions = AdminPermissionSet::EMPTY;
@@ -2220,6 +2580,36 @@ mod tests {
             network_id: NetworkId::from_bytes([1; 32]),
             server_id: ServerId::from_bytes([2; 16]),
         }
+    }
+
+    #[test]
+    fn backup_startup_reconciliation_never_invents_completion() -> Result<(), RuntimeError> {
+        use std::io::Write as _;
+
+        let directory = BackupTestDirectory::create()?;
+        assert_eq!(
+            backup_reconciliation_job(&directory, 7, 50)?.run(),
+            Ok(false)
+        );
+
+        let name = format!(
+            "admin-{:020}-{}.agenc-backup",
+            7,
+            encode_base64url(&[41; 16])
+        );
+        let mut candidate = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(directory.0.join(name))
+            .map_err(|_| RuntimeError::Storage(StorageError::FilesystemRejected))?;
+        candidate
+            .write_all(b"not a signed backup")
+            .map_err(|_| RuntimeError::Storage(StorageError::FilesystemRejected))?;
+        drop(candidate);
+
+        assert!(backup_reconciliation_job(&directory, 7, 50)?.run().is_err());
+        Ok(())
     }
 
     fn challenge() -> AdminChallenge {
@@ -2875,9 +3265,201 @@ mod tests {
             .await
             .map_err(|_| RuntimeError::Cancelled)?;
         assert_eq!(action, Some(AdminProcessAction::Die));
+        port.line(
+            ConnectionGeneration::new(13),
+            signed_line(2, "MOTD")?,
+            &root,
+        )
+        .await
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                core_inbox.complete_next_for_test(Ok(())),
+            )
+            .await
+            .is_err(),
+            "terminal intent admitted a later audit event"
+        );
+        let close = output.recv().await.ok_or(RuntimeError::InvalidValue)?;
+        assert!(close.lines.is_empty());
+        assert_eq!(close.close, Some(CloseReason::Shutdown));
 
         root.cancel();
         owner.await.map_err(|_| RuntimeError::Cancelled)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn terminal_delivery_failure_keeps_the_committed_intent_terminal()
+    -> Result<(), RuntimeError> {
+        let (port, inbox) = admin_transport_channel(binding());
+        let (_lifecycle, lifecycle_inbox) = admin_lifecycle_channel();
+        let (core, mut core_inbox) = admin_core_channel();
+        let (process, process_inbox) = admin_process_channel();
+        drop(process_inbox);
+        let root = CancellationToken::root();
+        let owner = tokio::spawn(
+            AdminOwner::new(
+                binding(),
+                all_permissions_registry()?,
+                AdminAdmissionSnapshot::new(vec![1000], Vec::new(), Vec::new()),
+                AuditAuthority::empty_for_test()?,
+                core,
+                AdminOwnerRuntime {
+                    health: live_health(),
+                    config: None,
+                    reload: None,
+                    backup: None,
+                    process: Some(process),
+                    fatal: None,
+                    observer: None,
+                    budget: Arc::new(MemoryBudget::new(MAX_AUDIT_EXPORT_BYTES * 2)),
+                    entropy: Box::new(
+                        ScriptedEntropy::new(vec![0; 64])
+                            .map_err(|_| RuntimeError::InvalidValue)?,
+                    ),
+                    clocks: AdminOwnerClocks {
+                        monotonic: Box::new(SystemMonotonicClock::start()),
+                        wall: Box::new(SystemWallClock),
+                    },
+                },
+            )
+            .run(inbox, lifecycle_inbox, root.clone()),
+        );
+        let (sender, mut output) = mpsc::channel(ADMIN_OUTPUT_CAPACITY);
+        let generation = ConnectionGeneration::new(14);
+        port.opened(
+            generation,
+            challenge(),
+            PeerIdentity::Local {
+                uid: 1000,
+                gid: 1000,
+            },
+            AdminOutput::new(sender),
+            &root,
+        )
+        .await
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        let _challenge = output.recv().await.ok_or(RuntimeError::InvalidValue)?;
+        port.line(generation, oper_line()?, &root)
+            .await
+            .map_err(|_| RuntimeError::InvalidValue)?;
+
+        let command = "DIE :terminal intent";
+        port.line(generation, signed_line(0, command)?, &root)
+            .await
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let revision =
+            agenc_ircd_types::Revision::new(10).map_err(|_| RuntimeError::InvalidValue)?;
+        assert_eq!(
+            core_inbox.complete_target_revision_for_test(revision).await,
+            Some(AdminTarget::Process)
+        );
+        let _confirmation = output.recv().await.ok_or(RuntimeError::InvalidValue)?;
+        let confirmation_token = ConfirmationToken::from_bytes([0; 16]);
+        port.line(
+            generation,
+            confirmed_line(1, command, &confirmation_token)?,
+            &root,
+        )
+        .await
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        assert_eq!(
+            core_inbox.complete_target_revision_for_test(revision).await,
+            Some(AdminTarget::Process)
+        );
+        let intent = core_inbox
+            .complete_next_for_test(Ok(()))
+            .await
+            .ok_or(RuntimeError::InvalidValue)?;
+        assert_eq!(intent.tbs().phase, AdminAuditPhase::Intent);
+
+        let second_audit = tokio::time::timeout(
+            Duration::from_millis(100),
+            core_inbox.complete_next_for_test(Ok(())),
+        )
+        .await;
+        assert!(
+            second_audit.is_err(),
+            "terminal intent gained an outcome event"
+        );
+        let close = tokio::time::timeout(Duration::from_secs(1), output.recv())
+            .await
+            .map_err(|_| RuntimeError::Cancelled)?
+            .ok_or(RuntimeError::InvalidValue)?;
+        assert!(close.lines.is_empty());
+        assert_eq!(close.close, Some(CloseReason::ProtocolError));
+
+        root.cancel();
+        owner.await.map_err(|_| RuntimeError::Cancelled)?;
+        Ok(())
+    }
+
+    #[test]
+    fn audit_phase_contract_is_exhaustive_for_every_command_variant() -> Result<(), RuntimeError> {
+        const USER: &str = "AAAAAAAAAAAAAAAAAAAAAA";
+        const ACCOUNT: &str = "a_AAAAAAAAAAAAAAAAAAAAAA";
+        let observed = vec![AdminAuditPhase::Observed];
+        let external = vec![
+            AdminAuditPhase::Intent,
+            AdminAuditPhase::OutcomeSuccess,
+            AdminAuditPhase::OutcomeFailure,
+        ];
+        let mutation = vec![AdminAuditPhase::CommittedMutation];
+        let terminal = vec![AdminAuditPhase::Intent];
+        let cases = [
+            ("PING token".to_owned(), Vec::new()),
+            ("PONG token".to_owned(), Vec::new()),
+            ("QUIT".to_owned(), Vec::new()),
+            ("MOTD".to_owned(), observed.clone()),
+            ("VERSION".to_owned(), observed.clone()),
+            ("TIME".to_owned(), observed.clone()),
+            ("INFO".to_owned(), observed.clone()),
+            ("LINKS".to_owned(), observed.clone()),
+            ("STATS RUNTIME".to_owned(), observed.clone()),
+            ("REHASH :reload now".to_owned(), external.clone()),
+            (format!("KILL {USER} :policy action"), external.clone()),
+            (
+                format!("ACCOUNT SUSPEND {ACCOUNT} 60 :policy action"),
+                mutation.clone(),
+            ),
+            (
+                format!("ACCOUNT RESTORE {ACCOUNT} :policy action"),
+                mutation.clone(),
+            ),
+            (
+                format!("CHANNEL QUARANTINE {USER} :policy action"),
+                mutation,
+            ),
+            (format!("CONNECT {USER} :policy action"), Vec::new()),
+            (format!("SQUIT {USER} :policy action"), Vec::new()),
+            (format!("PEER QUARANTINE {USER} :policy action"), Vec::new()),
+            ("BACKUP CREATE :policy action".to_owned(), external),
+            ("AUDIT EXPORT 0 10".to_owned(), observed),
+            ("RESTART :policy action".to_owned(), terminal.clone()),
+            ("DIE :policy action".to_owned(), terminal),
+        ];
+        let phases = [
+            AdminAuditPhase::CommittedMutation,
+            AdminAuditPhase::Intent,
+            AdminAuditPhase::OutcomeSuccess,
+            AdminAuditPhase::OutcomeFailure,
+            AdminAuditPhase::Observed,
+        ];
+
+        for (line, allowed) in cases {
+            let canonical = agenc_ircd_admin::CanonicalCommand::check(line.as_bytes())
+                .map_err(|_| RuntimeError::InvalidValue)?;
+            let command = AdminCommand::parse(canonical).map_err(|_| RuntimeError::InvalidValue)?;
+            for phase in phases {
+                assert_eq!(
+                    audit_phase_is_valid(&command, phase),
+                    allowed.contains(&phase),
+                    "{line} accepted the wrong audit phase {phase:?}"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -2886,6 +3468,21 @@ mod tests {
         budget
             .try_acquire_batch(BoundedMemoryCharges::new(vec![MemoryCharge::fixed(1)])?)
             .map_err(Into::into)
+    }
+
+    #[test]
+    fn audit_export_memory_holds_frozen_and_rendered_peaks() -> Result<(), RuntimeError> {
+        let one_peak = MemoryCharge::allocation(MAX_AUDIT_EXPORT_BYTES)?.bytes();
+        let two_peaks = one_peak.checked_mul(2).ok_or(RuntimeError::Overflow)?;
+        let budget = MemoryBudget::new(two_peaks);
+        let permit = acquire_audit_export_memory(&budget)?;
+        assert_eq!(budget.charged(), two_peaks);
+        drop(permit);
+        assert_eq!(budget.charged(), 0);
+
+        let undersized = MemoryBudget::new(two_peaks.saturating_sub(1));
+        assert!(acquire_audit_export_memory(&undersized).is_err());
+        Ok(())
     }
 
     #[test]
@@ -2912,6 +3509,17 @@ mod tests {
         }
         assert!(AdminWrite::ordinary(Vec::new(), None).is_ok());
         assert!(AdminWrite::export(vec!["bounded".to_owned()], export_memory()?).is_ok());
+        assert!(matches!(
+            AdminWrite::export_bounded(vec!["record".to_owned(); 4], export_memory()?, 1, u64::MAX,),
+            Err(CloseReason::Overload)
+        ));
+        assert!(matches!(
+            AdminWrite::export_bounded(vec!["four".to_owned()], export_memory()?, 1, 5),
+            Err(CloseReason::Overload)
+        ));
+        assert!(
+            AdminWrite::export_bounded(vec!["four".to_owned()], export_memory()?, 1, 6).is_ok()
+        );
 
         let (sender, mut receiver) = mpsc::channel(1);
         let output = AdminOutput::new(sender);
@@ -2931,7 +3539,10 @@ mod tests {
             Err(CloseReason::TransportLoss)
         );
         assert_eq!(
-            output.try_export(vec!["closed".to_owned()], export_memory()?),
+            output.try_export(
+                AdminWrite::export(vec!["closed".to_owned()], export_memory()?)
+                    .map_err(|_| RuntimeError::InvalidValue)?,
+            ),
             Err(CloseReason::TransportLoss)
         );
         Ok(())
@@ -3140,5 +3751,29 @@ mod tests {
                 AdminCoreFailure::StorageUnavailable
             );
         }
+    }
+
+    #[test]
+    fn admin_output_classification_uses_only_closed_final_result_codes() {
+        assert_eq!(
+            classify_admin_output(&["NOTE REHASH OK :Configuration reloaded".to_owned()]),
+            ResultClass::Ok
+        );
+        assert_eq!(
+            classify_admin_output(&["FAIL REHASH BUSY :Administrative action busy".to_owned()]),
+            ResultClass::Busy
+        );
+        assert_eq!(
+            classify_admin_output(&[
+                "FAIL REHASH STORAGE_UNAVAILABLE :Administrative reload unavailable".to_owned(),
+            ]),
+            ResultClass::Error
+        );
+        assert_eq!(
+            classify_admin_output(&[
+                "FAIL REHASH INVALID_CONFIG :Configuration rejected".to_owned(),
+            ]),
+            ResultClass::Rejected
+        );
     }
 }

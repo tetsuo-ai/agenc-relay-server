@@ -505,6 +505,7 @@ pub struct AccountState {
     pub(crate) reserved_nicknames: BTreeSet<NicknameValue>,
     pub(crate) session_generation: Generation,
     pub(crate) revision: Revision,
+    pub(crate) admin_suspension_expires_at: Option<UtcSecond>,
 }
 
 impl AccountState {
@@ -521,6 +522,7 @@ impl AccountState {
             reserved_nicknames: BTreeSet::new(),
             session_generation,
             revision,
+            admin_suspension_expires_at: None,
         }
     }
 
@@ -544,6 +546,7 @@ impl AccountState {
             reserved_nicknames: BTreeSet::new(),
             session_generation,
             revision,
+            admin_suspension_expires_at: None,
         }
     }
 
@@ -1091,6 +1094,7 @@ pub struct ChannelState {
     pub(crate) invites: BTreeMap<InviteId, Invite>,
     pub(crate) history: HistoryPolicy,
     pub(crate) e2ee_removal_pending: BTreeSet<UserId>,
+    pub(crate) admin_quarantined: bool,
 }
 
 impl ChannelState {
@@ -1127,6 +1131,7 @@ impl ChannelState {
             invites: BTreeMap::new(),
             history: HistoryPolicy::Off,
             e2ee_removal_pending: BTreeSet::new(),
+            admin_quarantined: false,
         }
     }
 
@@ -1378,6 +1383,7 @@ impl ChannelState {
             invites: self.invites.clone(),
             history: self.history,
             e2ee_removal_pending: self.e2ee_removal_pending.clone(),
+            admin_quarantined: self.admin_quarantined,
         })
     }
 }
@@ -1517,8 +1523,6 @@ pub struct DomainState {
     pub(crate) channel_names: BTreeMap<ChannelNameValue, ChannelInstanceId>,
     pub(crate) account_deletion_challenges: BTreeMap<SessionId, AccountDeletionChallengeState>,
     pub(crate) sanctions: Vec<Sanction>,
-    pub(crate) admin_suspensions: BTreeMap<AccountId, UtcSecond>,
-    pub(crate) quarantined_channels: BTreeSet<ChannelInstanceId>,
     pub(crate) operational_limits: OperationalLimits,
 }
 
@@ -1542,8 +1546,6 @@ impl DomainState {
             channel_names: BTreeMap::new(),
             account_deletion_challenges: BTreeMap::new(),
             sanctions: Vec::new(),
-            admin_suspensions: BTreeMap::new(),
-            quarantined_channels: BTreeSet::new(),
             operational_limits: OperationalLimits::HARD_MAX,
         }
     }
@@ -1635,28 +1637,28 @@ impl DomainState {
         self.channels.get(&channel_id)
     }
 
-    /// Installs the policy derived from the verified administrative audit
-    /// chain. Entries whose durable target no longer exists have no live
-    /// effect and are discarded at the reconstruction boundary.
+    /// Applies retained audit policy to legacy rows that predate durable
+    /// administrative policy fields. Existing durable policy is never
+    /// cleared merely because retention removed its originating event.
     pub fn install_admin_policy(
         &mut self,
         suspensions: Vec<(AccountId, UtcSecond)>,
         quarantined_channels: Vec<ChannelInstanceId>,
     ) -> Result<(), DomainError> {
-        let mut installed_suspensions = BTreeMap::new();
         for (account_id, expires_at) in suspensions {
-            if self.accounts.contains_key(&account_id) {
-                installed_suspensions.insert(account_id, expires_at);
+            if let Some(account) = self.accounts.get_mut(&account_id) {
+                account.admin_suspension_expires_at = Some(expires_at);
             }
         }
-        let mut installed_quarantines = BTreeSet::new();
         for channel_id in quarantined_channels {
-            if self.channels.contains_key(&channel_id) {
-                installed_quarantines.insert(channel_id);
+            if let Some(channel) = self
+                .channels
+                .get_mut(&channel_id)
+                .filter(|channel| channel.persistence == PersistencePolicy::Registered)
+            {
+                channel.admin_quarantined = true;
             }
         }
-        self.admin_suspensions = installed_suspensions;
-        self.quarantined_channels = installed_quarantines;
         Ok(())
     }
 
@@ -1666,20 +1668,27 @@ impl DomainState {
         account_id: AccountId,
         expires_at: UtcSecond,
     ) -> Result<(), DomainError> {
-        if !self.accounts.contains_key(&account_id) {
-            return Err(DomainError::NotFound);
-        }
-        self.admin_suspensions.insert(account_id, expires_at);
+        let revision = next_revision(self.revision)?;
+        let account = self
+            .accounts
+            .get_mut(&account_id)
+            .ok_or(DomainError::NotFound)?;
+        account.admin_suspension_expires_at = Some(expires_at);
+        self.revision = revision;
         Ok(())
     }
 
     /// Removes one committed account suspension.
     pub fn admin_restore_account(&mut self, account_id: AccountId) -> Result<(), DomainError> {
-        if !self.accounts.contains_key(&account_id)
-            || self.admin_suspensions.remove(&account_id).is_none()
-        {
+        let revision = next_revision(self.revision)?;
+        let account = self
+            .accounts
+            .get_mut(&account_id)
+            .ok_or(DomainError::NotFound)?;
+        if account.admin_suspension_expires_at.take().is_none() {
             return Err(DomainError::NotFound);
         }
+        self.revision = revision;
         Ok(())
     }
 
@@ -1688,26 +1697,36 @@ impl DomainState {
         &mut self,
         channel_id: ChannelInstanceId,
     ) -> Result<(), DomainError> {
-        if !self.channels.contains_key(&channel_id) || !self.quarantined_channels.insert(channel_id)
-        {
+        let revision = next_revision(self.revision)?;
+        let channel = self
+            .channels
+            .get_mut(&channel_id)
+            .ok_or(DomainError::NotFound)?;
+        if channel.persistence != PersistencePolicy::Registered || channel.admin_quarantined {
             return Err(DomainError::NotFound);
         }
+        channel.admin_quarantined = true;
+        channel.revision = revision;
+        self.revision = revision;
         Ok(())
     }
 
     /// Returns whether account authority is suspended at `now`.
     #[must_use]
     pub fn account_is_suspended(&self, account_id: AccountId, now: UtcSecond) -> bool {
-        self.admin_suspensions
+        self.accounts
             .get(&account_id)
-            .is_some_and(|expires_at| now < *expires_at)
+            .and_then(|account| account.admin_suspension_expires_at)
+            .is_some_and(|expires_at| now < expires_at)
     }
 
     /// Returns whether the verified audit chain retains a suspension entry,
     /// including one whose bounded effect has already expired.
     #[must_use]
     pub fn account_has_admin_suspension(&self, account_id: AccountId) -> bool {
-        self.admin_suspensions.contains_key(&account_id)
+        self.accounts
+            .get(&account_id)
+            .is_some_and(|account| account.admin_suspension_expires_at.is_some())
     }
 
     /// Returns every live user currently bound to one account.
@@ -1724,7 +1743,9 @@ impl DomainState {
     /// Returns whether new delivery to a channel is quarantined.
     #[must_use]
     pub fn channel_is_quarantined(&self, channel_id: ChannelInstanceId) -> bool {
-        self.quarantined_channels.contains(&channel_id)
+        self.channels
+            .get(&channel_id)
+            .is_some_and(|channel| channel.admin_quarantined)
     }
 
     /// Returns the number of live account authorities.

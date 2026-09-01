@@ -7,8 +7,8 @@ use std::path::{Component, Path, PathBuf};
 
 use agenc_ircd_crypto::OsEntropy;
 use rustix::fs::{
-    AtFlags, CWD, FileType, Mode, OFlags, RenameFlags, StatVfs, fstat, fstatfs, fstatvfs, fsync,
-    openat, renameat, renameat_with, unlinkat,
+    AtFlags, CWD, Dir, FileType, Mode, OFlags, RenameFlags, StatVfs, fstat, fstatfs, fstatvfs,
+    fsync, openat, renameat, renameat_with, unlinkat,
 };
 
 use crate::{
@@ -132,6 +132,78 @@ pub fn rename_path_no_replace(source: &Path, target: &Path) -> Result<(), Storag
 pub struct BackupDestination {
     directory_path: PathBuf,
     final_name: String,
+}
+
+/// Bounded, descriptor-relative reader for an existing backup directory.
+///
+/// Enumeration and file opens use the same validated directory authority.
+/// Candidate files are accepted only when they are regular mode-0600 files
+/// on that directory's filesystem.
+pub struct BackupDirectoryReader {
+    entries: Dir,
+    examined: usize,
+    maximum_entries: usize,
+}
+
+impl BackupDirectoryReader {
+    /// Opens one mode-0700 backup directory without following a symlink.
+    pub fn open(directory_path: &Path, maximum_entries: usize) -> Result<Self, StorageError> {
+        if maximum_entries == 0 {
+            return Err(StorageError::LimitExceeded);
+        }
+        let directory = openat(
+            CWD,
+            directory_path,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(rustix_rejected)?;
+        validate_file(&directory, FileType::Directory, Mode::RWXU)?;
+        Ok(Self {
+            entries: Dir::new(directory).map_err(rustix_rejected)?,
+            examined: 0,
+            maximum_entries,
+        })
+    }
+
+    /// Returns the next UTF-8 directory entry after accounting for every
+    /// entry the kernel supplied. Dot entries and non-UTF-8 names are skipped.
+    pub fn next_name(&mut self) -> Result<Option<String>, StorageError> {
+        loop {
+            let Some(entry) = self.entries.next() else {
+                return Ok(None);
+            };
+            let entry = entry.map_err(rustix_rejected)?;
+            self.examined = self.examined.checked_add(1).ok_or(StorageError::Overflow)?;
+            if self.examined > self.maximum_entries {
+                return Err(StorageError::LimitExceeded);
+            }
+            let bytes = entry.file_name().to_bytes();
+            if matches!(bytes, b"." | b"..") {
+                continue;
+            }
+            let Ok(name) = std::str::from_utf8(bytes) else {
+                continue;
+            };
+            return Ok(Some(name.to_owned()));
+        }
+    }
+
+    /// Opens one named candidate relative to the validated directory.
+    pub fn open_candidate(&self, name: &str) -> Result<File, StorageError> {
+        validate_single_component(name)?;
+        let directory = self.entries.fd().map_err(rustix_rejected)?;
+        let candidate = openat(
+            directory,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(rustix_rejected)?;
+        validate_file(&candidate, FileType::RegularFile, Mode::RUSR | Mode::WUSR)?;
+        require_same_filesystem(directory, &candidate)?;
+        Ok(File::from(candidate))
+    }
 }
 
 impl BackupDestination {
@@ -935,6 +1007,50 @@ mod tests {
                 Err(StorageError::FilesystemRejected)
             ));
         }
+    }
+
+    #[test]
+    fn backup_directory_reader_is_bounded_and_opens_only_safe_candidates()
+    -> Result<(), StorageError> {
+        use std::io::{Read as _, Write as _};
+        use std::os::unix::fs::symlink;
+
+        let directory = TestDirectory::create("backup-reader")?;
+        let mut file = directory.create_file("candidate.agenc-backup", 0o600)?;
+        file.write_all(b"verified-input").map_err(io_rejected)?;
+        drop(file);
+        symlink(
+            directory.path().join("candidate.agenc-backup"),
+            directory.path().join("linked.agenc-backup"),
+        )
+        .map_err(io_rejected)?;
+
+        let mut reader = BackupDirectoryReader::open(directory.path(), 4)?;
+        let mut names = Vec::new();
+        while let Some(name) = reader.next_name()? {
+            names.push(name);
+        }
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "candidate.agenc-backup".to_owned(),
+                "linked.agenc-backup".to_owned()
+            ]
+        );
+        let mut candidate = reader.open_candidate("candidate.agenc-backup")?;
+        let mut bytes = Vec::new();
+        candidate.read_to_end(&mut bytes).map_err(io_rejected)?;
+        assert_eq!(bytes, b"verified-input");
+        assert_eq!(
+            reader.open_candidate("linked.agenc-backup").err(),
+            Some(StorageError::FilesystemRejected)
+        );
+
+        let mut bounded = BackupDirectoryReader::open(directory.path(), 3)?;
+        assert!(bounded.next_name()?.is_some());
+        assert_eq!(bounded.next_name(), Err(StorageError::LimitExceeded));
+        Ok(())
     }
 
     #[test]

@@ -55,6 +55,7 @@ use crate::bridge::{
 };
 use crate::connection::sink::ConnectionGeneration;
 use crate::mutation_render::render_account_credential_replacement;
+use crate::observe::metrics::ResultClass;
 use crate::state_core::durable::AccountServiceDurableWrite;
 use crate::state_core::fanout::FanoutRequest;
 use crate::state_core::inbox::CloseReason;
@@ -146,7 +147,10 @@ pub struct AccountServiceConfig {
 /// One carrier line either finished synchronously or remains owned by an
 /// asynchronous account-service continuation.
 pub(crate) enum CarrierRoute {
-    Finished(Vec<WireMessage>),
+    Finished {
+        frames: Vec<WireMessage>,
+        result: ResultClass,
+    },
     Pending,
     Close,
 }
@@ -158,6 +162,44 @@ pub(crate) struct CarrierCompletion {
     pub(crate) generation: ConnectionGeneration,
     pub(crate) carrier_generation: u64,
     pub(crate) close: bool,
+    pub(crate) result: ResultClass,
+}
+
+impl CarrierCompletion {
+    const fn finished(
+        generation: ConnectionGeneration,
+        carrier_generation: u64,
+        result: ResultClass,
+    ) -> Self {
+        Self {
+            generation,
+            carrier_generation,
+            close: false,
+            result,
+        }
+    }
+
+    const fn closed(generation: ConnectionGeneration, carrier_generation: u64) -> Self {
+        Self {
+            generation,
+            carrier_generation,
+            close: true,
+            result: ResultClass::Error,
+        }
+    }
+
+    const fn with_close(
+        generation: ConnectionGeneration,
+        carrier_generation: u64,
+        close: bool,
+        result: ResultClass,
+    ) -> Self {
+        if close {
+            Self::closed(generation, carrier_generation)
+        } else {
+            Self::finished(generation, carrier_generation, result)
+        }
+    }
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -1167,11 +1209,7 @@ impl AccountServiceCoordinator {
         let _queued = self.queue_transaction_cleanup(context, generation, class, cleanup);
         let mut completions = self.progress(context);
         if expired_grant {
-            completions.push(CarrierCompletion {
-                generation,
-                carrier_generation: 0,
-                close: true,
-            });
+            completions.push(CarrierCompletion::closed(generation, 0));
         }
         (true, completions)
     }
@@ -1862,7 +1900,11 @@ impl AccountServiceCoordinator {
         };
         let route = connection.route;
         let mut frames = Vec::new();
+        let mut result = ResultClass::Ok;
         for action in actions {
+            if sasl_action_result(&action) == ResultClass::Rejected {
+                result = ResultClass::Rejected;
+            }
             match action {
                 SaslAction::RequestEnvelope { finish, bytes } => {
                     return self.route_envelope(
@@ -1885,7 +1927,7 @@ impl AccountServiceCoordinator {
                 },
             }
         }
-        CarrierRoute::Finished(frames)
+        CarrierRoute::Finished { frames, result }
     }
 
     /// Routes one grammar-validated account-creation or credential carrier line.
@@ -1941,7 +1983,10 @@ impl AccountServiceCoordinator {
                 },
             }
         }
-        CarrierRoute::Finished(frames)
+        CarrierRoute::Finished {
+            frames,
+            result: ResultClass::Ok,
+        }
     }
 
     // agenc-review: allow owner=runtime reviewed=2026-08-29 reason=the fixed account carrier tuple preserves the exact connection route and transfer phase
@@ -2075,7 +2120,10 @@ impl AccountServiceCoordinator {
                 if connection.sasl.complete_logout().is_err() {
                     return CarrierRoute::Close;
                 }
-                CarrierRoute::Finished(Vec::new())
+                CarrierRoute::Finished {
+                    frames: Vec::new(),
+                    result: ResultClass::Ok,
+                }
             }
             Err(_) => self.reject_logout(context, generation, target),
         }
@@ -2114,7 +2162,10 @@ impl AccountServiceCoordinator {
         if !logout_completed || !queued {
             return CarrierRoute::Close;
         }
-        CarrierRoute::Finished(Vec::new())
+        CarrierRoute::Finished {
+            frames: Vec::new(),
+            result: ResultClass::Ok,
+        }
     }
 
     fn reject_logout(
@@ -2130,7 +2181,10 @@ impl AccountServiceCoordinator {
             return CarrierRoute::Close;
         };
         match render_sasl_actions(context.server_prefix(), target, actions) {
-            Ok(frames) => CarrierRoute::Finished(frames),
+            Ok(frames) => CarrierRoute::Finished {
+                frames,
+                result: ResultClass::Rejected,
+            },
             Err(_) => CarrierRoute::Close,
         }
     }
@@ -2148,7 +2202,10 @@ impl AccountServiceCoordinator {
             return CarrierRoute::Close;
         };
         match render_sasl_actions(context.server_prefix(), target, actions) {
-            Ok(frames) => CarrierRoute::Finished(frames),
+            Ok(frames) => CarrierRoute::Finished {
+                frames,
+                result: ResultClass::Rejected,
+            },
             Err(_) => CarrierRoute::Close,
         }
     }
@@ -2167,7 +2224,10 @@ impl AccountServiceCoordinator {
             AccountCarrierKind::Credentials => connection.credentials.reject(),
         }
         match account_failure(context.server_prefix(), kind) {
-            Ok(frame) => CarrierRoute::Finished(vec![frame]),
+            Ok(frame) => CarrierRoute::Finished {
+                frames: vec![frame],
+                result: ResultClass::Rejected,
+            },
             Err(_) => CarrierRoute::Close,
         }
     }
@@ -2205,6 +2265,7 @@ impl AccountServiceCoordinator {
             return Vec::new();
         };
         let generation = pending.generation();
+        let carrier_generation = pending.carrier_generation();
         let Ok(output) = message.output else {
             return vec![self.close_completion(&pending)];
         };
@@ -2214,11 +2275,7 @@ impl AccountServiceCoordinator {
                 completions.extend(self.progress(context));
                 completions
             }
-            Err(_) => vec![CarrierCompletion {
-                generation,
-                carrier_generation: 0,
-                close: true,
-            }],
+            Err(_) => vec![CarrierCompletion::closed(generation, carrier_generation)],
         }
     }
 
@@ -3105,11 +3162,7 @@ impl AccountServiceCoordinator {
         let Some(pending) = self.reads.remove(&message.read_id) else {
             return Vec::new();
         };
-        let close = CarrierCompletion {
-            generation: pending.generation(),
-            carrier_generation: pending.carrier_generation(),
-            close: true,
-        };
+        let close = CarrierCompletion::closed(pending.generation(), pending.carrier_generation());
         let result = match message.result {
             Ok(result) => self.apply_read_result(context, pending, result),
             Err(_) => Err(RuntimeError::InvalidValue),
@@ -3713,11 +3766,12 @@ impl AccountServiceCoordinator {
         if credential_changed {
             close_account_authority_after_flush(context, request.generation);
         }
-        Ok(vec![CarrierCompletion {
-            generation: request.generation,
-            carrier_generation: request.carrier_generation,
-            close: false,
-        }])
+        let result = request_terminal_result(stored.terminal);
+        Ok(vec![CarrierCompletion::finished(
+            request.generation,
+            request.carrier_generation,
+            result,
+        )])
     }
 
     fn progress(&mut self, context: &mut StateCoreContext) -> Vec<CarrierCompletion> {
@@ -3880,11 +3934,8 @@ impl AccountServiceCoordinator {
                 ))),
             ),
         };
-        let completion = CarrierCompletion {
-            generation: pending.generation(),
-            carrier_generation: pending.carrier_generation(),
-            close: true,
-        };
+        let completion =
+            CarrierCompletion::closed(pending.generation(), pending.carrier_generation());
         if self.submit_crypto(context, pending, job).is_ok() {
             return Ok(());
         }
@@ -3895,16 +3946,11 @@ impl AccountServiceCoordinator {
     }
 
     fn stage_ready(&mut self, context: &mut StateCoreContext) -> Result<(), CarrierCompletion> {
-        let ready = self.ready_stage.take().ok_or(CarrierCompletion {
-            generation: ConnectionGeneration::new(0),
-            carrier_generation: 0,
-            close: true,
-        })?;
-        let completion = CarrierCompletion {
-            generation: ready.generation(),
-            carrier_generation: ready.carrier_generation(),
-            close: true,
-        };
+        let ready = self
+            .ready_stage
+            .take()
+            .ok_or(CarrierCompletion::closed(ConnectionGeneration::new(0), 0))?;
+        let completion = CarrierCompletion::closed(ready.generation(), ready.carrier_generation());
         let cleanup = ready.transaction_cleanup();
         if self.stage_ready_work(context, ready).is_ok() {
             return Ok(());
@@ -4892,25 +4938,21 @@ impl AccountServiceCoordinator {
                 self.fail_account_route(context, request.generation, kind)
             }
         };
-        let CarrierRoute::Finished(frames) = route else {
+        let CarrierRoute::Finished { frames, result } = route else {
             return Err(RuntimeError::InvalidValue);
         };
         context
             .send_to(request.generation, frames)
             .map_err(|_| RuntimeError::MemoryExhausted)?;
-        Ok(vec![CarrierCompletion {
-            generation: request.generation,
-            carrier_generation: request.carrier_generation,
-            close: false,
-        }])
+        Ok(vec![CarrierCompletion::finished(
+            request.generation,
+            request.carrier_generation,
+            result,
+        )])
     }
 
     fn close_completion(&self, pending: &PendingCrypto) -> CarrierCompletion {
-        CarrierCompletion {
-            generation: pending.generation(),
-            carrier_generation: pending.carrier_generation(),
-            close: true,
-        }
+        CarrierCompletion::closed(pending.generation(), pending.carrier_generation())
     }
 
     fn commit_logout(
@@ -4922,11 +4964,7 @@ impl AccountServiceCoordinator {
             .connections
             .get_mut(&generation)
             .is_none_or(|connection| connection.sasl.complete_logout().is_err());
-        CarrierCompletion {
-            generation,
-            carrier_generation,
-            close,
-        }
+        CarrierCompletion::with_close(generation, carrier_generation, close, ResultClass::Ok)
     }
 
     // agenc-review: allow owner=runtime reviewed=2026-08-30 reason=authentication postcommit retains its account candidate login migration and exact carrier ownership explicitly
@@ -4943,11 +4981,7 @@ impl AccountServiceCoordinator {
         previous_value: Option<LoginIndexValue>,
     ) -> Option<CarrierCompletion> {
         let Ok(transaction) = sealed.into_transaction_after_commit(committed_count) else {
-            return Some(CarrierCompletion {
-                generation,
-                carrier_generation,
-                close: true,
-            });
+            return Some(CarrierCompletion::closed(generation, carrier_generation));
         };
         let transaction_id = transaction.binding().transaction_id();
         let deadline = transaction.binding().expires_at();
@@ -4968,11 +5002,7 @@ impl AccountServiceCoordinator {
                 LiveTransactionClass::Authentication,
                 cleanup,
             );
-            return Some(CarrierCompletion {
-                generation,
-                carrier_generation,
-                close: true,
-            });
+            return Some(CarrierCompletion::closed(generation, carrier_generation));
         }
         let Some(connection) = self.connections.get_mut(&generation) else {
             let cleanup = TransactionCleanup::authentication(transaction_id);
@@ -4990,11 +5020,11 @@ impl AccountServiceCoordinator {
             login,
             previous_value,
         });
-        Some(CarrierCompletion {
+        Some(CarrierCompletion::finished(
             generation,
             carrier_generation,
-            close: false,
-        })
+            ResultClass::Ok,
+        ))
     }
 
     fn commit_creation_start(
@@ -5007,11 +5037,7 @@ impl AccountServiceCoordinator {
         reservation: Option<CreationReservation>,
     ) -> Option<CarrierCompletion> {
         let Ok(transaction) = sealed.into_transaction_after_commit(committed_count) else {
-            return Some(CarrierCompletion {
-                generation,
-                carrier_generation,
-                close: true,
-            });
+            return Some(CarrierCompletion::closed(generation, carrier_generation));
         };
         let transaction_id = transaction.binding().transaction_id();
         let deadline = transaction.binding().expires_at();
@@ -5032,11 +5058,7 @@ impl AccountServiceCoordinator {
                 LiveTransactionClass::Creation,
                 cleanup,
             );
-            return Some(CarrierCompletion {
-                generation,
-                carrier_generation,
-                close: true,
-            });
+            return Some(CarrierCompletion::closed(generation, carrier_generation));
         }
         let Some(connection) = self.connections.get_mut(&generation) else {
             let cleanup = TransactionCleanup::creation(transaction_id, reservation);
@@ -5052,11 +5074,11 @@ impl AccountServiceCoordinator {
             transaction,
             reservation,
         });
-        Some(CarrierCompletion {
+        Some(CarrierCompletion::finished(
             generation,
             carrier_generation,
-            close: false,
-        })
+            ResultClass::Ok,
+        ))
     }
 
     fn commit_creation_finish(
@@ -5076,6 +5098,11 @@ impl AccountServiceCoordinator {
             )
             .is_err();
         let result = sealed.into_result_after_commit(committed_count);
+        let result_class = match result.as_ref() {
+            Ok(Ok(_)) => ResultClass::Ok,
+            Ok(Err(_)) => ResultClass::Rejected,
+            Err(_) => ResultClass::Error,
+        };
         let install_failed = match (result.as_ref(), reservation) {
             (Ok(Ok(intent)), Some(reservation)) => {
                 let account_id = intent.account_id();
@@ -5089,11 +5116,12 @@ impl AccountServiceCoordinator {
             (Ok(Err(_)), _) => false,
             _ => true,
         };
-        CarrierCompletion {
+        CarrierCompletion::with_close(
             generation,
             carrier_generation,
-            close: release_failed || install_failed,
-        }
+            release_failed || install_failed,
+            result_class,
+        )
     }
 
     fn commit_credential_start(
@@ -5106,11 +5134,7 @@ impl AccountServiceCoordinator {
         reservation: Option<AccountId>,
     ) -> Option<CarrierCompletion> {
         let Ok(transaction) = sealed.into_transaction_after_commit(committed_count) else {
-            return Some(CarrierCompletion {
-                generation,
-                carrier_generation,
-                close: true,
-            });
+            return Some(CarrierCompletion::closed(generation, carrier_generation));
         };
         let transaction_id = transaction.binding().transaction_id();
         let deadline = transaction.binding().expires_at();
@@ -5131,11 +5155,7 @@ impl AccountServiceCoordinator {
                 LiveTransactionClass::CredentialChange,
                 cleanup,
             );
-            return Some(CarrierCompletion {
-                generation,
-                carrier_generation,
-                close: true,
-            });
+            return Some(CarrierCompletion::closed(generation, carrier_generation));
         }
         let Some(connection) = self.connections.get_mut(&generation) else {
             let cleanup = TransactionCleanup::credential(transaction_id, reservation, generation);
@@ -5151,11 +5171,11 @@ impl AccountServiceCoordinator {
             transaction,
             reservation,
         });
-        Some(CarrierCompletion {
+        Some(CarrierCompletion::finished(
             generation,
             carrier_generation,
-            close: false,
-        })
+            ResultClass::Ok,
+        ))
     }
 
     // agenc-review: allow owner=runtime reviewed=2026-08-30 reason=credential postcommit keeps reservation sealed result and independently fenced authority sets explicit
@@ -5182,36 +5202,24 @@ impl AccountServiceCoordinator {
             )
             .is_err()
         {
-            return vec![CarrierCompletion {
-                generation,
-                carrier_generation,
-                close: true,
-            }];
+            return vec![CarrierCompletion::closed(generation, carrier_generation)];
         }
         if let Some(account_id) = reservation
             && self
                 .release_credential_reservation(account_id, generation)
                 .is_err()
         {
-            return vec![CarrierCompletion {
-                generation,
-                carrier_generation,
-                close: true,
-            }];
+            return vec![CarrierCompletion::closed(generation, carrier_generation)];
         }
         let Ok(result) = sealed.into_result_after_commit(committed_count) else {
-            return vec![CarrierCompletion {
-                generation,
-                carrier_generation,
-                close: true,
-            }];
+            return vec![CarrierCompletion::closed(generation, carrier_generation)];
         };
         let Ok(_intent) = result else {
-            return vec![CarrierCompletion {
+            return vec![CarrierCompletion::finished(
                 generation,
                 carrier_generation,
-                close: false,
-            }];
+                ResultClass::Rejected,
+            )];
         };
         for invalidated in invalidated_authentications {
             if let Some(connection) = self.connections.get_mut(&invalidated)
@@ -5262,11 +5270,11 @@ impl AccountServiceCoordinator {
             close_account_authority_after_flush(context, fenced_generation);
         }
         close_account_authority_after_flush(context, generation);
-        vec![CarrierCompletion {
+        vec![CarrierCompletion::finished(
             generation,
             carrier_generation,
-            close: false,
-        }]
+            ResultClass::Ok,
+        )]
     }
 
     // agenc-review: allow owner=runtime reviewed=2026-08-29 reason=the postcommit finish authority carries every independently fenced session and key-transition result explicitly
@@ -5293,18 +5301,10 @@ impl AccountServiceCoordinator {
             )
             .is_err()
         {
-            return CarrierCompletion {
-                generation,
-                carrier_generation,
-                close: true,
-            };
+            return CarrierCompletion::closed(generation, carrier_generation);
         }
         let Ok(result) = sealed.into_result_after_commit(committed_count) else {
-            return CarrierCompletion {
-                generation,
-                carrier_generation,
-                close: true,
-            };
+            return CarrierCompletion::closed(generation, carrier_generation);
         };
         if let Some(key_state) = resulting_key_state {
             self.config.login_index_key_state = key_state;
@@ -5316,16 +5316,13 @@ impl AccountServiceCoordinator {
                         == Some(&migration.previous_key)
             });
             if !valid {
-                return CarrierCompletion {
-                    generation,
-                    carrier_generation,
-                    close: true,
-                };
+                return CarrierCompletion::closed(generation, carrier_generation);
             }
             self.config
                 .live_login_keys
                 .insert(migration.account_id, migration.current_key);
         }
+        let accepted = result.is_ok() && sasl_accepted;
         let close = match result {
             Ok(grant) if sasl_accepted => self.install_committed_grant(
                 context,
@@ -5337,11 +5334,16 @@ impl AccountServiceCoordinator {
             ),
             _ => false,
         };
-        CarrierCompletion {
+        CarrierCompletion::with_close(
             generation,
             carrier_generation,
             close,
-        }
+            if accepted {
+                ResultClass::Ok
+            } else {
+                ResultClass::Rejected
+            },
+        )
     }
 
     fn install_committed_grant(
@@ -5736,11 +5738,7 @@ impl AccountServiceCoordinator {
         {
             self.credential_reservations.remove(&account_id);
         }
-        let mut completions = vec![CarrierCompletion {
-            generation,
-            carrier_generation,
-            close: true,
-        }];
+        let mut completions = vec![CarrierCompletion::closed(generation, carrier_generation)];
         completions.extend(self.progress(context));
         completions
     }
@@ -5893,21 +5891,13 @@ fn account_deletion_completions(
     completions
         .try_reserve_exact(completion_capacity)
         .map_err(|_| RuntimeError::MemoryExhausted)?;
-    completions.push(CarrierCompletion {
-        generation,
-        carrier_generation: 0,
-        close: true,
-    });
+    completions.push(CarrierCompletion::closed(generation, 0));
     for (closing_generation, _) in authentications.iter().chain(grants) {
         if !completions
             .iter()
             .any(|completion| completion.generation == *closing_generation)
         {
-            completions.push(CarrierCompletion {
-                generation: *closing_generation,
-                carrier_generation: 0,
-                close: true,
-            });
+            completions.push(CarrierCompletion::closed(*closing_generation, 0));
         }
     }
     Ok(completions)
@@ -6604,6 +6594,30 @@ fn render_sasl_action(
     Ok(Some(frame))
 }
 
+const fn sasl_action_result(action: &SaslAction) -> ResultClass {
+    match action {
+        SaslAction::Numeric(SaslNumeric::Success) => ResultClass::Ok,
+        SaslAction::Numeric(
+            SaslNumeric::Failed
+            | SaslNumeric::TooLong
+            | SaslNumeric::Aborted
+            | SaslNumeric::AlreadyAuthenticated
+            | SaslNumeric::Mechanisms,
+        ) => ResultClass::Rejected,
+        SaslAction::SendPlus
+        | SaslAction::SendChunk(_)
+        | SaslAction::RequestEnvelope { .. }
+        | SaslAction::Logout => ResultClass::Ok,
+    }
+}
+
+const fn request_terminal_result(terminal: RequestTerminal) -> ResultClass {
+    match terminal {
+        RequestTerminal::Start | RequestTerminal::Accepted => ResultClass::Ok,
+        RequestTerminal::Rejected => ResultClass::Rejected,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, VecDeque};
@@ -6642,24 +6656,28 @@ mod tests {
     };
 
     use crate::admission::{BucketTable, RateLimits};
-    use crate::bridge::crypto::CryptoBridge;
+    use crate::bridge::crypto::{ChannelKeyVerdict, CryptoBridge, CryptoJobOutput};
     use crate::bridge::storage::StorageBridge;
+    use crate::bridge::{CryptoCompletionMessage, CryptoJobId};
     use crate::budget::MemoryBudget;
     use crate::observe::health::Liveness;
+    use crate::observe::metrics::ResultClass;
     use crate::runtime_config::AccountRuntimePolicy;
 
     use super::{
         AccountCarrierAction, AccountCarrierKind, AccountCarrierPhase, AccountCreationPolicy,
-        AccountDeletionBarrier, AccountServiceConfig, AccountServiceCoordinator, CarrierRoute,
-        ConnectionGeneration, ConnectionRoute, CreationReservation, LiveTransactionClass,
-        MAX_OPAQUE_ATTEMPTS_PER_CONNECTION, MAX_PENDING_TRANSACTION_CLEANUPS, PendingAuthority,
-        PendingCrypto, PendingLoginTombstoneExpiry, REQUEST_RESULT_BYTES, REQUEST_RESULT_VERSION,
-        RequestCarrier, RequestContext, RequestResultCursor, RequestResultRecord, RequestTerminal,
-        RuntimeError, TransactionCleanup, account_created_note, account_credential_changed_note,
-        account_deletion_completions, account_deletion_writes, account_failure, account_phase_name,
+        AccountDeletionBarrier, AccountServiceConfig, AccountServiceCoordinator, CarrierCompletion,
+        CarrierRoute, ConnectionGeneration, ConnectionRoute, CreationReservation,
+        LiveTransactionClass, MAX_OPAQUE_ATTEMPTS_PER_CONNECTION, MAX_PENDING_TRANSACTION_CLEANUPS,
+        PendingAuthority, PendingCrypto, PendingLoginTombstoneExpiry, REQUEST_RESULT_BYTES,
+        REQUEST_RESULT_VERSION, RequestCarrier, RequestContext, RequestResultCursor,
+        RequestResultRecord, RequestTerminal, RuntimeError, TransactionCleanup,
+        account_created_note, account_credential_changed_note, account_deletion_completions,
+        account_deletion_writes, account_failure, account_phase_name,
         consume_opaque_connection_attempt, credential_id, live_login, login_tombstone_expiry_batch,
         opaque_attempt_demand, render_account_action, render_sasl_action, render_sasl_actions,
-        replay_terminal_account, select_live_login, transaction_cleanup_batch,
+        replay_terminal_account, request_terminal_result, sasl_action_result, select_live_login,
+        transaction_cleanup_batch,
     };
     use crate::StateCoreSeed;
     use crate::state_core::durable::{AccountServiceDurableWrite, AccountingCeilings, KeyDeriver};
@@ -7421,6 +7439,83 @@ mod tests {
     }
 
     #[test]
+    fn carrier_completion_preserves_closed_final_result_classes() {
+        assert_eq!(
+            sasl_action_result(&SaslAction::Numeric(SaslNumeric::Success)),
+            ResultClass::Ok
+        );
+        for numeric in [
+            SaslNumeric::Failed,
+            SaslNumeric::TooLong,
+            SaslNumeric::Aborted,
+            SaslNumeric::AlreadyAuthenticated,
+            SaslNumeric::Mechanisms,
+        ] {
+            assert_eq!(
+                sasl_action_result(&SaslAction::Numeric(numeric)),
+                ResultClass::Rejected
+            );
+        }
+        assert_eq!(
+            request_terminal_result(RequestTerminal::Start),
+            ResultClass::Ok
+        );
+        assert_eq!(
+            request_terminal_result(RequestTerminal::Accepted),
+            ResultClass::Ok
+        );
+        assert_eq!(
+            request_terminal_result(RequestTerminal::Rejected),
+            ResultClass::Rejected
+        );
+
+        let rejected =
+            CarrierCompletion::finished(ConnectionGeneration::new(1), 7, ResultClass::Rejected);
+        assert!(!rejected.close);
+        assert_eq!(rejected.result, ResultClass::Rejected);
+        let closed = CarrierCompletion::closed(ConnectionGeneration::new(1), 7);
+        assert!(closed.close);
+        assert_eq!(closed.result, ResultClass::Error);
+    }
+
+    #[test]
+    fn crypto_apply_error_completes_the_exact_pending_carrier_as_error()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let mut fixture = CoordinatorFixture::new(vec![7; 48 * 16])?;
+        let generation = ConnectionGeneration::new(11);
+        let carrier_generation = 37;
+        let job_id = CryptoJobId::new(23);
+        let pending = PendingCrypto::Open(request_context(
+            generation.get(),
+            carrier_generation,
+            RequestCarrier::Sasl,
+            AccountCarrierPhase::Start,
+        )?);
+        assert!(fixture.coordinator.crypto.insert(job_id, pending).is_none());
+
+        let completions = {
+            let (coordinator, context) = fixture.parts()?;
+            coordinator.crypto_completed(
+                context,
+                CryptoCompletionMessage {
+                    job_id,
+                    output: Ok(CryptoJobOutput::ChannelKey(ChannelKeyVerdict::for_test(
+                        true,
+                    ))),
+                },
+            )
+        };
+        let [completion] = completions.as_slice() else {
+            return Err("crypto apply mismatch did not close exactly one carrier".into());
+        };
+        assert_eq!(completion.generation, generation);
+        assert_eq!(completion.carrier_generation, carrier_generation);
+        assert!(completion.close);
+        assert_eq!(completion.result, ResultClass::Error);
+        Ok(())
+    }
+
+    #[test]
     fn coordinator_connection_carriers_and_timer_boundaries_fail_closed()
     -> Result<(), Box<dyn core::error::Error>> {
         let mut fixture = CoordinatorFixture::new(vec![7; 48 * 16])?;
@@ -7477,9 +7572,25 @@ mod tests {
                     ConnectionGeneration::new(2),
                     2,
                     "tester",
+                    parsed("AUTHENTICATE SCRAM-SHA-256")?,
+                ),
+                CarrierRoute::Finished {
+                    result: ResultClass::Rejected,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                coordinator.route_sasl(
+                    context,
+                    ConnectionGeneration::new(2),
+                    2,
+                    "tester",
                     parsed("AUTHENTICATE AGENC-OPAQUE")?,
                 ),
-                CarrierRoute::Finished(_)
+                CarrierRoute::Finished {
+                    result: ResultClass::Ok,
+                    ..
+                }
             ));
             assert!(matches!(
                 coordinator.route_sasl(
@@ -7511,7 +7622,7 @@ mod tests {
                     AccountCarrierKind::Create,
                     parsed("ACCTCREATE START")?,
                 ),
-                CarrierRoute::Finished(_)
+                CarrierRoute::Finished { .. }
             ));
             assert!(matches!(
                 coordinator.route_account(
@@ -7522,7 +7633,10 @@ mod tests {
                     AccountCarrierKind::Create,
                     parsed("ACCTCREATE BOGUS")?,
                 ),
-                CarrierRoute::Finished(_)
+                CarrierRoute::Finished {
+                    result: ResultClass::Rejected,
+                    ..
+                }
             ));
             assert!(matches!(
                 coordinator.route_account(
@@ -7533,7 +7647,7 @@ mod tests {
                     AccountCarrierKind::Credentials,
                     parsed("ACCTCRED START")?,
                 ),
-                CarrierRoute::Finished(_)
+                CarrierRoute::Finished { .. }
             ));
             assert!(matches!(
                 coordinator.route_account(
@@ -7544,7 +7658,7 @@ mod tests {
                     AccountCarrierKind::Create,
                     parsed("@label=x ACCTCREATE START")?,
                 ),
-                CarrierRoute::Finished(_)
+                CarrierRoute::Finished { .. }
             ));
             assert!(matches!(
                 coordinator.fail_route(context, unknown, "tester"),
@@ -7558,7 +7672,7 @@ mod tests {
                     "tester",
                     parsed("AUTHENTICATE AGENC-OPAQUE")?,
                 ),
-                CarrierRoute::Finished(_)
+                CarrierRoute::Finished { .. }
             ));
             let mut request = "A".repeat(SASL_REQUEST_CHARACTERS - 2);
             request.push_str("==");
@@ -7572,7 +7686,7 @@ mod tests {
             }
             assert!(matches!(
                 coordinator.fail_route(context, ConnectionGeneration::new(8), "tester"),
-                CarrierRoute::Finished(_)
+                CarrierRoute::Finished { .. }
             ));
             assert!(matches!(
                 coordinator.fail_account_route(context, unknown, AccountCarrierKind::Credentials,),

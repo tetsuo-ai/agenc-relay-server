@@ -20,6 +20,8 @@ use crate::{
 pub const STORAGE_REQUEST_QUEUE_CAPACITY: usize = 2;
 /// Fixed number of results retained by an individual completion.
 pub const STORAGE_COMPLETION_QUEUE_CAPACITY: usize = 2;
+/// Operating-system thread that performs the blocking storage-owner join.
+pub const STORAGE_SHUTDOWN_THREAD_NAME: &str = "agenc-ircd-storage-shutdown";
 
 enum StorageRequest {
     Commit {
@@ -211,8 +213,113 @@ impl<T> StorageCompletion<T> {
 pub struct StorageOwner {
     requests: SyncSender<StorageRequest>,
     thread: Option<JoinHandle<()>>,
+    shutdown_sender: Option<SyncSender<StorageShutdownWork>>,
+    shutdown_thread: Option<JoinHandle<Result<(), StorageError>>>,
     recovered: RecoveredStorageState,
     limit_writer: Option<StorageLimitWriter>,
+}
+
+struct StorageShutdownWork {
+    requests: SyncSender<StorageRequest>,
+    thread: JoinHandle<()>,
+}
+
+impl StorageShutdownWork {
+    fn run(self) -> Result<(), StorageError> {
+        let (completion, receiver) = sync_channel(1);
+        let shutdown_result = if self
+            .requests
+            .send(StorageRequest::Shutdown { completion })
+            .is_ok()
+        {
+            match receiver.recv() {
+                Ok(result) => result,
+                Err(_) => Ok(()),
+            }
+        } else {
+            Ok(())
+        };
+        self.thread.join().map_err(|_| StorageError::Unavailable)?;
+        shutdown_result
+    }
+}
+
+/// Pollable ownership of a storage thread prepared for bounded shutdown.
+///
+/// The named helper is created before the database owner starts, so shutdown
+/// never needs to create an operating-system thread while resources are low.
+pub struct StorageShutdown {
+    work: Option<StorageShutdownWork>,
+    sender: Option<SyncSender<StorageShutdownWork>>,
+    thread: Option<JoinHandle<Result<(), StorageError>>>,
+    result: Option<Result<(), StorageError>>,
+}
+
+impl StorageShutdown {
+    /// Starts the blocking owner close on its named helper thread.
+    pub fn start(&mut self) -> Result<(), StorageError> {
+        if self.work.is_none() {
+            return self.result.unwrap_or(Ok(()));
+        }
+        let work = self.work.take().ok_or(StorageError::Unavailable)?;
+        let Some(sender) = self.sender.take() else {
+            self.work = Some(work);
+            return Err(StorageError::Unavailable);
+        };
+        match sender.try_send(work) {
+            Ok(()) => {
+                drop(sender);
+                Ok(())
+            }
+            Err(TrySendError::Full(work) | TrySendError::Disconnected(work)) => {
+                self.work = Some(work);
+                Err(StorageError::Unavailable)
+            }
+        }
+    }
+
+    /// Polls once, joining only after the helper reports it has finished.
+    pub fn try_complete(&mut self) -> Option<Result<(), StorageError>> {
+        if let Some(result) = self.result {
+            return Some(result);
+        }
+        let thread = self.thread.as_ref()?;
+        if !thread.is_finished() {
+            return None;
+        }
+        let result = self
+            .thread
+            .take()
+            .and_then(|thread| thread.join().ok())
+            .unwrap_or(Err(StorageError::Unavailable));
+        self.result = Some(result);
+        Some(result)
+    }
+
+    fn wait(mut self) -> Result<(), StorageError> {
+        if let Err(start_error) = self.start() {
+            let cleanup = self.work.take().ok_or(StorageError::Unavailable)?.run();
+            drop(self.sender.take());
+            let helper = self
+                .thread
+                .take()
+                .map(|thread| thread.join().map_err(|_| StorageError::Unavailable))
+                .transpose()?;
+            cleanup?;
+            if let Some(result) = helper {
+                result?;
+            }
+            return Err(start_error);
+        }
+        if let Some(result) = self.result {
+            return result;
+        }
+        self.thread
+            .take()
+            .ok_or(StorageError::Unavailable)?
+            .join()
+            .map_err(|_| StorageError::Unavailable)?
+    }
 }
 
 impl StorageOwner {
@@ -222,12 +329,20 @@ impl StorageOwner {
         let initial_limits = StorageRuntimeLimits::from_engine(config.limits)?;
         let (limit_cell, limit_reader) = storage_limit_pair(initial_limits);
         let (requests, receiver) = sync_channel(STORAGE_REQUEST_QUEUE_CAPACITY);
+        let (shutdown_sender, shutdown_receiver) = sync_channel(1);
+        let shutdown_thread = thread::Builder::new()
+            .name(STORAGE_SHUTDOWN_THREAD_NAME.to_owned())
+            .spawn(move || match shutdown_receiver.recv() {
+                Ok(work) => StorageShutdownWork::run(work),
+                Err(_) => Ok(()),
+            })
+            .map_err(|_| StorageError::Unavailable)?;
         let limit_writer = StorageLimitWriter {
             limits: limit_cell,
             requests: requests.clone(),
         };
         let (startup_sender, startup_receiver) = sync_channel(1);
-        let thread = thread::Builder::new()
+        let Ok(thread) = thread::Builder::new()
             .name("agenc-ircd-storage-owner".to_owned())
             .spawn(move || {
                 let engine = StorageEngine::open_with_runtime_limits(config, limit_reader)
@@ -247,20 +362,34 @@ impl StorageOwner {
                     }
                 }
             })
-            .map_err(|_| StorageError::Unavailable)?;
+        else {
+            drop(shutdown_sender);
+            let _ = shutdown_thread.join();
+            return Err(StorageError::Unavailable);
+        };
         match startup_receiver.recv() {
             Ok(Ok(recovered)) => Ok(Self {
                 requests,
                 thread: Some(thread),
+                shutdown_sender: Some(shutdown_sender),
+                shutdown_thread: Some(shutdown_thread),
                 recovered,
                 limit_writer: Some(limit_writer),
             }),
             Ok(Err(error)) => {
-                let _ = thread.join();
+                let work = StorageShutdownWork { requests, thread };
+                if let Err(send_error) = shutdown_sender.send(work) {
+                    let _ = send_error.0.run();
+                }
+                let _ = shutdown_thread.join();
                 Err(error)
             }
             Err(_) => {
-                let _ = thread.join();
+                let work = StorageShutdownWork { requests, thread };
+                if let Err(send_error) = shutdown_sender.send(work) {
+                    let _ = send_error.0.run();
+                }
+                let _ = shutdown_thread.join();
                 Err(StorageError::Unavailable)
             }
         }
@@ -285,30 +414,41 @@ impl StorageOwner {
         self.limit_writer.take().ok_or(StorageError::Unavailable)
     }
 
+    /// Transfers the owner into a pollable shutdown value without blocking.
+    #[must_use]
+    pub fn into_shutdown(mut self) -> StorageShutdown {
+        let work = self.thread.take().map(|thread| StorageShutdownWork {
+            requests: self.requests.clone(),
+            thread,
+        });
+        StorageShutdown {
+            result: (work.is_none() && self.shutdown_thread.is_none()).then_some(Ok(())),
+            work,
+            sender: self.shutdown_sender.take(),
+            thread: self.shutdown_thread.take(),
+        }
+    }
+
     /// Drains prior requests, closes the owner, and joins the blocking thread.
-    pub fn shutdown(mut self) -> Result<(), StorageError> {
-        self.join_owner()
+    pub fn shutdown(self) -> Result<(), StorageError> {
+        self.into_shutdown().wait()
     }
 
     fn join_owner(&mut self) -> Result<(), StorageError> {
-        let Some(thread) = self.thread.take() else {
+        let work = self.thread.take().map(|thread| StorageShutdownWork {
+            requests: self.requests.clone(),
+            thread,
+        });
+        if work.is_none() && self.shutdown_thread.is_none() {
             return Ok(());
-        };
-        let (completion, receiver) = sync_channel(1);
-        let shutdown_result = if self
-            .requests
-            .send(StorageRequest::Shutdown { completion })
-            .is_ok()
-        {
-            match receiver.recv() {
-                Ok(result) => result,
-                Err(_) => Ok(()),
-            }
-        } else {
-            Ok(())
-        };
-        thread.join().map_err(|_| StorageError::Unavailable)?;
-        shutdown_result
+        }
+        StorageShutdown {
+            result: None,
+            work,
+            sender: self.shutdown_sender.take(),
+            thread: self.shutdown_thread.take(),
+        }
+        .wait()
     }
 }
 
@@ -582,15 +722,36 @@ fn map_submission_error<T>(error: TrySendError<T>) -> StorageError {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt as _;
-
     use super::*;
     use crate::engine::tests::EngineFixture;
     use crate::{
         StorageFaultBoundary, StorageFaultCase, StorageFaultInjector, StorageFaultSite, TableId,
     };
+    use std::os::unix::fs::PermissionsExt as _;
 
     type Completion<T> = Receiver<Result<T, StorageError>>;
+
+    #[test]
+    fn an_unavailable_helper_retains_and_synchronously_joins_the_owner() {
+        let (requests, receiver) = sync_channel(STORAGE_REQUEST_QUEUE_CAPACITY);
+        let owner = std::thread::spawn(move || {
+            if let Ok(StorageRequest::Shutdown { completion }) = receiver.recv() {
+                let _ = completion.send(Ok(()));
+            }
+        });
+        let mut shutdown = StorageShutdown {
+            work: Some(StorageShutdownWork {
+                requests,
+                thread: owner,
+            }),
+            sender: None,
+            thread: None,
+            result: None,
+        };
+        assert_eq!(shutdown.start(), Err(StorageError::Unavailable));
+        assert!(shutdown.work.is_some(), "the real owner remains retained");
+        assert_eq!(shutdown.wait(), Err(StorageError::Unavailable));
+    }
 
     fn read_request(byte: u8) -> Result<(StorageRequest, Completion<ReadResult>), StorageError> {
         let (completion, receiver) = sync_channel(STORAGE_COMPLETION_QUEUE_CAPACITY);

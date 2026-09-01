@@ -25,19 +25,21 @@ use agenc_ircd_config::{
 use agenc_ircd_crypto::{
     AccountHpkePrivateKey, CryptoError, CryptoWorkerConfig, Ed25519PublicKey, Ed25519SecretKey,
     LoginIndexKey, OpaqueFakeCredentialKey, OsEntropy, RollbackGuardRootKey, SemanticHashDomain,
-    StorageMasterKey, semantic_digest,
+    StorageDigest, StorageMasterKey, semantic_digest,
 };
 use agenc_ircd_domain::{
     DirectMessagePolicy, GuestDirectMessagePolicy, OperationalLimitValues, OperationalLimits,
     PresencePolicy,
 };
 use agenc_ircd_storage::{
-    MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH, StateDirectory, StorageEngineLimits, StorageError,
-    StorageLimitWriter, StorageOpenConfig, StorageOwner, StoragePort, StorageRuntimeLimits,
-    StorageStatistics, embedded_storage_qualifications,
+    BackupTrustKey, CommitOutcome, MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH, ReadPlan,
+    StateDirectory, StorageEngineLimits, StorageError, StorageLimitWriter, StorageOpenConfig,
+    StorageOwner, StoragePort, StorageRuntimeLimits, StorageShutdown, StorageStatistics, TableId,
+    embedded_storage_qualifications,
 };
 use agenc_ircd_types::{
-    EntropySource as _, Generation, MonotonicClock as _, OriginId, WallClock as _,
+    AccountId, ChannelInstanceId, EntropySource as _, Generation, MonotonicClock as _, OriginId,
+    TransactionId, WallClock as _,
 };
 use tokio::runtime::Builder;
 use tokio::sync::{Semaphore, mpsc, oneshot};
@@ -73,7 +75,7 @@ use crate::listener::{
 use crate::observe::adapter::RuntimeObserver;
 use crate::observe::events::{CorrelationSource, Severity};
 use crate::observe::health::{Liveness, ReadinessGate, ReadinessStage};
-use crate::observe::log::{FileLogControl, FileLogOwner, LogFilter, LogRetention};
+use crate::observe::log::{FileLogControl, FileLogOwner, FileLogShutdown, LogFilter, LogRetention};
 use crate::observe::metrics::MetricsRegistry;
 use crate::purpose::ListenerPurpose;
 use crate::registration::{AccountServiceConfig, RegistrationRouter, RegistrationRouterConfig};
@@ -83,7 +85,10 @@ use crate::runtime_config::{
     RestartMaterialKey, RuntimeConfigHandle, RuntimeConfigParts, RuntimeConfigSnapshot,
     reload_channel, reload_preparation_channel,
 };
-use crate::state_core::durable::{AccountingCeilings, KeyDeriver};
+use crate::state_core::durable::{
+    AccountingCeilings, AdminMutationAfterImage, KeyDeriver, project_admin_policy_backfill,
+    read_back_record,
+};
 use crate::state_core::inbox::{
     ConnectionCloseInbox, ConnectionClosePort, LifecycleControl, LifecycleFailure, LifecyclePhase,
     MaintenanceEvent, SIGNAL_EVENT_CAPACITY, SignalEvent, StateCoreMessage,
@@ -94,9 +99,9 @@ use crate::state_core::{
     StateCore, StateCoreClocks, StateCoreConfig, StateCoreExit, StateCoreInputs, admin_core_channel,
 };
 use crate::supervisor::{
-    ChildFailure, ChildKind, ChildName, CrashReporter, JoinReport, ShutdownFailure, ShutdownHooks,
-    ShutdownPhase, ShutdownPlan, ShutdownProblemKind, ShutdownReport, Supervisor, exit_process,
-    run_shutdown, run_signal_task,
+    CRASH_EXIT_CODE, ChildFailure, ChildKind, ChildName, CrashReporter, JoinReport,
+    ShutdownFailure, ShutdownHooks, ShutdownPhase, ShutdownPlan, ShutdownProblemKind,
+    ShutdownReport, Supervisor, exit_process, run_shutdown, run_signal_task,
 };
 use crate::sync::Arc;
 use crate::tls::{
@@ -244,7 +249,7 @@ pub fn serve(config_path: &Path) -> Result<DaemonExit, DaemonError> {
         config.server.server_id,
         Arc::clone(&correlation),
         Arc::new(SystemWallClock),
-        exit_process,
+        |code| exit_process(code),
     )
     .ok_or(DaemonError::Runtime(RuntimeError::InvalidValue))?
     .install();
@@ -269,7 +274,8 @@ pub fn serve(config_path: &Path) -> Result<DaemonExit, DaemonError> {
         observer.hardening_warning();
     }
     let storage = LiveStorage::open(&config, &secrets, &operators)?;
-    runtime.block_on(run(DaemonRunInputs {
+    observer.storage_recovered();
+    let result = runtime.block_on(run(DaemonRunInputs {
         config_path: config_path.to_path_buf(),
         config,
         secrets,
@@ -278,7 +284,9 @@ pub fn serve(config_path: &Path) -> Result<DaemonExit, DaemonError> {
         process_clock,
         observer,
         log_owner,
-    }))
+    }));
+    runtime.shutdown_timeout(Duration::ZERO);
+    result
 }
 
 fn validate_profile(config: &Config) -> Result<(), DaemonError> {
@@ -318,6 +326,7 @@ struct LiveStorage {
     keys: KeyDeriver,
     reconstruction: Reconstruction,
     audit: AuditAuthority,
+    backup_trust: Vec<BackupTrustKey>,
 }
 
 impl LiveStorage {
@@ -360,6 +369,9 @@ impl LiveStorage {
             operators,
             now,
         )?;
+        let backup_trust = backup_trust_keys(load_backup_trust_manifest(
+            &config.storage.backup_trust_manifest_file,
+        )?)?;
         Ok(Self {
             owner,
             limit_writer,
@@ -367,6 +379,7 @@ impl LiveStorage {
             keys,
             reconstruction,
             audit,
+            backup_trust,
         })
     }
 }
@@ -423,51 +436,109 @@ struct BuildLiveStateInputs<'a> {
     liveness: Arc<Liveness>,
 }
 
+struct BuildLiveStateFailure {
+    error: DaemonError,
+    storage: LiveStorage,
+}
+
 // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=single startup composition consumes one validated input bundle and constructs the exact storage crypto router and StateCore ownership graph
-fn build_live_state(inputs: BuildLiveStateInputs<'_>) -> Result<LiveState, DaemonError> {
+fn build_live_state(
+    inputs: BuildLiveStateInputs<'_>,
+) -> Result<LiveState, Box<BuildLiveStateFailure>> {
     let BuildLiveStateInputs {
         config,
         secrets,
         runtime_config,
-        storage,
+        mut storage,
         budget,
         rates,
         monotonic,
         liveness,
     } = inputs;
+    let prepared = (|| -> Result<_, DaemonError> {
+        let (suspensions, quarantined_channels) = storage.audit.policy_seed().into_parts();
+        let backfills = missing_admin_policy_backfills(
+            &storage.reconstruction.domain,
+            &suspensions,
+            &quarantined_channels,
+        )?;
+        storage
+            .reconstruction
+            .domain
+            .install_admin_policy(suspensions, quarantined_channels)
+            .map_err(|_| DaemonError::Runtime(RuntimeError::InvalidValue))?;
+        persist_admin_policy_backfills(
+            &storage.owner.port(),
+            &mut storage.reconstruction,
+            &storage.keys,
+            AccountingCeilings {
+                database_max_bytes: config.storage.database_max_bytes,
+                backup_max_bytes: config.storage.backup_max_bytes,
+            },
+            backfills,
+        )?;
+        let crypto_config = CryptoWorkerConfig::new(
+            limit_usize(config, LimitKey::ChannelKeyJobs)?,
+            limit_usize(config, LimitKey::OpaqueJobs)?,
+            usize_value(config.server.crypto_worker_threads)?,
+        )
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        let commands = registered_commands()?;
+        let router = RegistrationRouter::new(
+            registration_config(
+                config,
+                secrets,
+                runtime_config,
+                &storage.seed,
+                &storage.reconstruction,
+            )?,
+            commands,
+        )?;
+        let limits = operational_limits(config)?;
+        Ok((crypto_config, router, limits))
+    })();
+    let (crypto_config, router, limits) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => return Err(Box::new(BuildLiveStateFailure { error, storage })),
+    };
+    storage.reconstruction.domain.set_operational_limits(limits);
+    let (bridge, completions, storage_reads, checkpoints) =
+        match StorageBridge::start(storage.owner.port()) {
+            Ok(bridge) => bridge,
+            Err(error) => {
+                return Err(Box::new(BuildLiveStateFailure {
+                    error: error.into(),
+                    storage,
+                }));
+            }
+        };
+    let (crypto_bridge, crypto) = match CryptoBridge::start(crypto_config) {
+        Ok(bridge) => bridge,
+        Err(error) => {
+            let _closed = bridge.shutdown();
+            return Err(Box::new(BuildLiveStateFailure {
+                error: error.into(),
+                storage,
+            }));
+        }
+    };
     let LiveStorage {
         owner,
         limit_writer,
-        seed,
+        seed: _,
         keys,
-        mut reconstruction,
+        reconstruction,
         audit,
+        backup_trust,
     } = storage;
-    let (suspensions, quarantined_channels) = audit.policy_seed().into_parts();
-    reconstruction
-        .domain
-        .install_admin_policy(suspensions, quarantined_channels)
-        .map_err(|_| DaemonError::Runtime(RuntimeError::InvalidValue))?;
-    let (bridge, storage, storage_reads, checkpoints) = StorageBridge::start(owner.port())?;
-    let crypto_config = CryptoWorkerConfig::new(
-        limit_usize(config, LimitKey::ChannelKeyJobs)?,
-        limit_usize(config, LimitKey::OpaqueJobs)?,
-        usize_value(config.server.crypto_worker_threads)?,
-    )
-    .map_err(|_| RuntimeError::InvalidValue)?;
-    let (crypto_bridge, crypto) = CryptoBridge::start(crypto_config)?;
-    let commands = registered_commands()?;
-    let router = RegistrationRouter::new(
-        registration_config(config, secrets, runtime_config, &seed, &reconstruction)?,
-        commands,
-    )?;
-    reconstruction
-        .domain
-        .set_operational_limits(operational_limits(config)?);
     let backup = AdminBackupRuntime::new(
         owner.port(),
         config.storage.backup_dir.clone(),
         *secrets.backup_signing().expose(),
+        *secrets.storage_master().expose(),
+        *secrets.rollback_guard_root().expose(),
+        backup_trust,
+        config.storage.backup_max_bytes,
     );
     let state = StateCore::new(StateCoreInputs {
         config: StateCoreConfig {
@@ -497,13 +568,137 @@ fn build_live_state(inputs: BuildLiveStateInputs<'_>) -> Result<LiveState, Daemo
     Ok(LiveState {
         owner,
         state,
-        storage,
+        storage: completions,
         storage_reads,
         checkpoints,
         crypto,
         audit: Some(audit),
         backup: Some(backup),
     })
+}
+
+enum AdminPolicyBackfill {
+    Account(AccountId),
+    Channel(ChannelInstanceId),
+}
+
+fn missing_admin_policy_backfills(
+    domain: &agenc_ircd_domain::DomainState,
+    suspensions: &[(AccountId, agenc_ircd_types::UtcSecond)],
+    quarantined_channels: &[ChannelInstanceId],
+) -> Result<Vec<AdminPolicyBackfill>, DaemonError> {
+    let capacity = suspensions
+        .len()
+        .checked_add(quarantined_channels.len())
+        .ok_or(RuntimeError::Overflow)?;
+    let mut backfills = Vec::new();
+    backfills
+        .try_reserve_exact(capacity)
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    for (account_id, expires_at) in suspensions {
+        if domain
+            .durable_account(*account_id)
+            .is_some_and(|account| account.admin_suspension_expires_at != Some(*expires_at))
+        {
+            backfills.push(AdminPolicyBackfill::Account(*account_id));
+        }
+    }
+    for channel_id in quarantined_channels {
+        if domain
+            .durable_channel(*channel_id)
+            .is_some_and(|channel| !channel.admin_quarantined)
+        {
+            backfills.push(AdminPolicyBackfill::Channel(*channel_id));
+        }
+    }
+    Ok(backfills)
+}
+
+fn persist_admin_policy_backfills(
+    storage: &StoragePort,
+    reconstruction: &mut Reconstruction,
+    keys: &KeyDeriver,
+    ceilings: AccountingCeilings,
+    backfills: Vec<AdminPolicyBackfill>,
+) -> Result<(), DaemonError> {
+    for backfill in backfills {
+        let after_image = match backfill {
+            AdminPolicyBackfill::Account(account_id) => AdminMutationAfterImage::Account(
+                reconstruction
+                    .domain
+                    .durable_account(account_id)
+                    .ok_or(RuntimeError::InvalidValue)?,
+            ),
+            AdminPolicyBackfill::Channel(channel_id) => AdminMutationAfterImage::Channel(
+                reconstruction
+                    .domain
+                    .durable_channel(channel_id)
+                    .ok_or(RuntimeError::InvalidValue)?,
+            ),
+        };
+        commit_admin_policy_backfill(storage, reconstruction, keys, ceilings, &after_image)?;
+    }
+    Ok(())
+}
+
+fn commit_admin_policy_backfill(
+    storage: &StoragePort,
+    reconstruction: &mut Reconstruction,
+    keys: &KeyDeriver,
+    ceilings: AccountingCeilings,
+    after_image: &AdminMutationAfterImage,
+) -> Result<(), DaemonError> {
+    let (table, key) = match after_image {
+        AdminMutationAfterImage::Account(account) => (
+            TableId::Account,
+            KeyDeriver::account_key(account.account_id)?,
+        ),
+        AdminMutationAfterImage::Channel(channel) => (
+            TableId::Channel,
+            KeyDeriver::channel_key(channel.channel_id)?,
+        ),
+    };
+    let transaction_id = startup_transaction_id()?;
+    let projected = project_admin_policy_backfill(
+        transaction_id,
+        after_image,
+        &reconstruction.index,
+        keys,
+        reconstruction.head,
+        ceilings,
+    )?;
+    let (batch, retained) = projected.into_parts();
+    let receipt = match storage.try_commit(batch)?.wait()? {
+        CommitOutcome::Committed(receipt) if receipt.transaction_id == transaction_id => receipt,
+        CommitOutcome::Committed(_) | CommitOutcome::Indeterminate => {
+            return Err(DaemonError::Runtime(RuntimeError::Storage(
+                StorageError::Unavailable,
+            )));
+        }
+        CommitOutcome::Rejected(error) => return Err(DaemonError::Storage(error)),
+    };
+    reconstruction.head = retained.advance(&receipt);
+    reconstruction.index.apply(retained.updates());
+    let result = storage
+        .try_read(ReadPlan::exact(table, key.clone()))?
+        .wait()?;
+    if result.storage_commit_sequence != receipt.storage_commit_sequence {
+        return Err(DaemonError::Runtime(RuntimeError::Storage(
+            StorageError::StaleState,
+        )));
+    }
+    reconstruction
+        .index
+        .refresh(vec![read_back_record(table, key, result)?])?;
+    Ok(())
+}
+
+fn startup_transaction_id() -> Result<TransactionId, DaemonError> {
+    let mut bytes = [0_u8; 16];
+    OsEntropy
+        .fill_exact(&mut bytes)
+        .map_err(|_| RuntimeError::Storage(StorageError::Unavailable))?;
+    Ok(TransactionId::from_bytes(bytes))
 }
 
 fn registration_config(
@@ -1019,6 +1214,24 @@ fn audit_trust_fingerprint(
     }))
 }
 
+fn backup_trust_keys(
+    entries: Vec<agenc_ircd_config::BackupTrustManifestEntry>,
+) -> Result<Vec<BackupTrustKey>, DaemonError> {
+    let mut trusted = Vec::new();
+    trusted
+        .try_reserve_exact(entries.len())
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    for entry in entries {
+        trusted.push(BackupTrustKey::with_validity(
+            StorageDigest::from_bytes(entry.key_id),
+            Ed25519PublicKey::from_bytes(entry.ed25519_public_key)?,
+            entry.not_before,
+            entry.not_after,
+        )?);
+    }
+    Ok(trusted)
+}
+
 fn trust_fingerprint(
     entries: impl ExactSizeIterator<Item = ([u8; 32], [u8; 32], u64, u64)>,
 ) -> Result<[u8; 32], DaemonError> {
@@ -1232,21 +1445,36 @@ async fn run(inputs: DaemonRunInputs) -> Result<DaemonExit, DaemonError> {
         observer,
         log_owner,
     } = inputs;
+    let startup_deadline = tokio::time::Instant::now() + crate::supervisor::MAX_TOTAL;
     let readiness = Arc::new(ReadinessGate::new());
     readiness.mark(ReadinessStage::Configuration);
     readiness.mark(ReadinessStage::Keys);
     readiness.mark(ReadinessStage::StorageRecovered);
     let liveness = Arc::new(Liveness::new());
-    let (parts, specs) = prepare_runtime_parts(&config, &secrets, operators.clone()).await?;
+    let (parts, specs) = match prepare_runtime_parts(&config, &secrets, operators.clone()).await {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return Err(
+                unwind_live_storage_and_log(storage, log_owner, startup_deadline, error).await,
+            );
+        }
+    };
     let snapshot = Arc::new(RuntimeConfigSnapshot::from_parts(
         ConfigRevision::INITIAL,
         config.clone(),
         parts,
     ));
     let runtime_config = RuntimeConfigHandle::new(Arc::clone(&snapshot));
-    let budget = memory_budget(&config)?;
+    let budget = match memory_budget(&config) {
+        Ok(budget) => budget,
+        Err(error) => {
+            return Err(
+                unwind_live_storage_and_log(storage, log_owner, startup_deadline, error).await,
+            );
+        }
+    };
     let rates = snapshot.rates();
-    let admission = Arc::new(TransportAdmission::new(
+    let admission = match TransportAdmission::new(
         rates,
         config
             .limits
@@ -1254,9 +1482,20 @@ async fn run(inputs: DaemonRunInputs) -> Result<DaemonExit, DaemonError> {
             .get(LimitKey::DirectConnectionsPerAddress),
         Arc::clone(&budget),
         Box::new(process_clock),
-    )?);
+    ) {
+        Ok(admission) => Arc::new(admission),
+        Err(error) => {
+            return Err(unwind_live_storage_and_log(
+                storage,
+                log_owner,
+                startup_deadline,
+                error.into(),
+            )
+            .await);
+        }
+    };
     admission.install_observer(Arc::clone(&observer));
-    let mut live = build_live_state(BuildLiveStateInputs {
+    let mut live = match build_live_state(BuildLiveStateInputs {
         config: &config,
         secrets: &secrets,
         runtime_config: snapshot.as_ref(),
@@ -1265,7 +1504,18 @@ async fn run(inputs: DaemonRunInputs) -> Result<DaemonExit, DaemonError> {
         rates,
         monotonic: process_clock,
         liveness: Arc::clone(&liveness),
-    })?;
+    }) {
+        Ok(live) => live,
+        Err(failure) => {
+            return Err(unwind_live_storage_and_log(
+                failure.storage,
+                log_owner,
+                startup_deadline,
+                failure.error,
+            )
+            .await);
+        }
+    };
     let (inbox, inbox_receiver) = mpsc::channel(SIGNAL_EVENT_CAPACITY);
     let (connection_closes, connection_close_inbox) = connection_close_channel();
     let admin_binding = AdminSessionBinding {
@@ -1274,21 +1524,56 @@ async fn run(inputs: DaemonRunInputs) -> Result<DaemonExit, DaemonError> {
     };
     let (admin_port, admin_inbox) = admin_transport_channel(admin_binding);
     let (admin_core, admin_core_inbox) = admin_core_channel();
-    live.state.install_admin_inbox(admin_core_inbox)?;
+    if let Err(error) = live.state.install_admin_inbox(admin_core_inbox) {
+        return Err(
+            unwind_live_state_and_log(live, log_owner, startup_deadline, error.into()).await,
+        );
+    }
     live.state.install_observer(Arc::clone(&observer));
     let (reload, reload_inbox) = reload_channel(runtime_config.clone(), Arc::clone(&admission));
-    live.state.install_reload_inbox(reload_inbox)?;
+    if let Err(error) = live.state.install_reload_inbox(reload_inbox) {
+        return Err(
+            unwind_live_state_and_log(live, log_owner, startup_deadline, error.into()).await,
+        );
+    }
     let (admin_reload, mut reload_preparation) = reload_preparation_channel(reload.clone());
     let (admin_fatal, mut admin_failed) = mpsc::channel(1);
     let (admin_process, mut admin_process_inbox) = admin_process_channel();
-    let audit = live
-        .audit
-        .take()
-        .ok_or(DaemonError::Runtime(RuntimeError::InvalidValue))?;
-    let backup = live
-        .backup
-        .take()
-        .ok_or(DaemonError::Runtime(RuntimeError::InvalidValue))?;
+    let reload_storage = live.owner.port();
+    let context = match listener_context(
+        &config,
+        runtime_config.clone(),
+        &inbox,
+        connection_closes,
+        admin_port,
+        Arc::clone(&budget),
+        Arc::clone(&admission),
+        Arc::clone(&observer),
+    ) {
+        Ok(context) => context,
+        Err(error) => {
+            return Err(unwind_live_state_and_log(live, log_owner, startup_deadline, error).await);
+        }
+    };
+    let Some(audit) = live.audit.take() else {
+        return Err(unwind_live_state_and_log(
+            live,
+            log_owner,
+            startup_deadline,
+            DaemonError::Runtime(RuntimeError::InvalidValue),
+        )
+        .await);
+    };
+    let Some(backup) = live.backup.take() else {
+        drop(audit);
+        return Err(unwind_live_state_and_log(
+            live,
+            log_owner,
+            startup_deadline,
+            DaemonError::Runtime(RuntimeError::InvalidValue),
+        )
+        .await);
+    };
     let mut admin_owner = AdminOwner::new(
         admin_binding,
         operators,
@@ -1314,20 +1599,15 @@ async fn run(inputs: DaemonRunInputs) -> Result<DaemonExit, DaemonError> {
             },
         },
     );
-    admin_owner.install_statistics_storage(live.owner.port())?;
-    let reload_storage = live.owner.port();
-    let context = listener_context(
-        &config,
-        runtime_config.clone(),
-        &inbox,
-        connection_closes,
-        admin_port,
-        Arc::clone(&budget),
-        Arc::clone(&admission),
-        Arc::clone(&observer),
-    )?;
+    if let Err(error) = admin_owner.install_statistics_storage(live.owner.port()) {
+        drop(admin_owner);
+        return Err(
+            unwind_live_state_and_log(live, log_owner, startup_deadline, error.into()).await,
+        );
+    }
     let RunningOwners {
         owner,
+        log_owner,
         mut supervisor,
         control,
         lifecycle,
@@ -1335,10 +1615,12 @@ async fn run(inputs: DaemonRunInputs) -> Result<DaemonExit, DaemonError> {
         mut signals,
         mut state_exited,
         mut listener_exited,
-    } = start_owners(StartOwnersInputs {
+    } = Box::pin(start_owners(StartOwnersInputs {
         specs,
         context,
         live,
+        log_owner,
+        startup_deadline,
         inbox_receiver,
         connection_close_inbox,
         inbox: inbox.clone(),
@@ -1349,8 +1631,9 @@ async fn run(inputs: DaemonRunInputs) -> Result<DaemonExit, DaemonError> {
         },
         readiness: Arc::clone(&readiness),
         liveness: Arc::clone(&liveness),
-    })
+    }))
     .await?;
+    observer.state_core_ready();
     let trigger = wait_for_shutdown(ShutdownWaitInputs {
         config_path: &config_path,
         runtime_config: &runtime_config,
@@ -1369,8 +1652,10 @@ async fn run(inputs: DaemonRunInputs) -> Result<DaemonExit, DaemonError> {
     })
     .await;
     let shutdown = runtime_config.load().shutdown_plan();
+    let log_control = log_owner.control();
+    let log_shutdown = log_owner.into_shutdown();
     let mut hooks = RuntimeShutdownHooks {
-        owner: Some(owner),
+        storage_shutdown: owner.into_shutdown(),
         supervisor: &mut supervisor,
         listeners: &control,
         lifecycle: &lifecycle,
@@ -1378,21 +1663,32 @@ async fn run(inputs: DaemonRunInputs) -> Result<DaemonExit, DaemonError> {
         admin_acknowledgements: Vec::new(),
         listener_exited: &mut listener_exited,
         listener_joined: false,
-        stopped: false,
         readiness,
         observer,
-        log_control: log_owner.control(),
-        log_owner: Some(log_owner),
+        log_control,
+        log_shutdown,
+        stop_failure: None,
     };
     let report = run_shutdown(shutdown, &mut hooks, &mut signals).await;
     let shutdown_result = validate_shutdown_report(report);
-    let exit = trigger?;
-    shutdown_result?;
-    Ok(exit)
+    finish_daemon_run(trigger, shutdown_result)
+}
+
+fn finish_daemon_run(
+    trigger: Result<ShutdownTrigger, DaemonError>,
+    shutdown: Result<(), DaemonError>,
+) -> Result<DaemonExit, DaemonError> {
+    match trigger {
+        Ok(ShutdownTrigger::CommittedDie) => Ok(DaemonExit::Stopped),
+        Ok(ShutdownTrigger::CommittedRestart) => Ok(DaemonExit::RestartRequested),
+        Ok(ShutdownTrigger::Signal) => shutdown.map(|()| DaemonExit::Stopped),
+        Err(error) => Err(error),
+    }
 }
 
 struct RunningOwners {
     owner: StorageOwner,
+    log_owner: FileLogOwner,
     supervisor: Supervisor,
     control: ListenerControl,
     lifecycle: LifecycleControl,
@@ -1411,6 +1707,8 @@ struct StartOwnersInputs {
     specs: Vec<ListenerSpec>,
     context: ListenerContext,
     live: LiveState,
+    log_owner: FileLogOwner,
+    startup_deadline: tokio::time::Instant,
     inbox_receiver: mpsc::Receiver<StateCoreMessage>,
     connection_close_inbox: ConnectionCloseInbox,
     inbox: mpsc::Sender<StateCoreMessage>,
@@ -1426,6 +1724,8 @@ async fn start_owners(inputs: StartOwnersInputs) -> Result<RunningOwners, Daemon
         specs,
         context,
         live,
+        log_owner,
+        startup_deadline,
         inbox_receiver,
         connection_close_inbox,
         inbox,
@@ -1436,12 +1736,14 @@ async fn start_owners(inputs: StartOwnersInputs) -> Result<RunningOwners, Daemon
     } = inputs;
     let mut supervisor = Supervisor::new();
     let (admin_lifecycle, admin_lifecycle_inbox) = admin_lifecycle_channel();
-    spawn_admin_owner(
+    if let Err(error) = spawn_admin_owner(
         &mut supervisor,
         admin.owner,
         admin.inbox,
         admin_lifecycle_inbox,
-    )?;
+    ) {
+        return Err(unwind_live_state_and_log(live, log_owner, startup_deadline, error).await);
+    }
     let LiveState {
         owner,
         state,
@@ -1462,7 +1764,7 @@ async fn start_owners(inputs: StartOwnersInputs) -> Result<RunningOwners, Daemon
         checkpoints,
         crypto,
     };
-    let (state_exited, state_started) = spawn_state_owner(
+    let state_owner = spawn_state_owner(
         &mut supervisor,
         StateOwnerStart {
             state,
@@ -1470,19 +1772,73 @@ async fn start_owners(inputs: StartOwnersInputs) -> Result<RunningOwners, Daemon
             readiness: Arc::clone(&readiness),
             liveness,
         },
-    )?;
+    );
+    let (state_exited, state_started) = match state_owner {
+        Ok(started) => started,
+        Err(error) => {
+            return Err(unwind_started_owners(
+                &mut supervisor,
+                owner,
+                log_owner,
+                startup_deadline,
+                error,
+            )
+            .await);
+        }
+    };
     if state_started.await.is_err() {
-        supervisor.cancel();
-        let _report = supervisor.join_all(crate::supervisor::MAX_TOTAL).await;
-        shutdown_storage(owner).await?;
-        return Err(DaemonError::TaskFailed);
+        return Err(unwind_started_owners(
+            &mut supervisor,
+            owner,
+            log_owner,
+            startup_deadline,
+            DaemonError::TaskFailed,
+        )
+        .await);
     }
-    let listeners = ListenerSet::start(specs, context, &supervisor.root_token())?;
+    let listeners = match ListenerSet::start(specs, context, &supervisor.root_token()) {
+        Ok(listeners) => listeners,
+        Err(error) => {
+            return Err(unwind_started_owners(
+                &mut supervisor,
+                owner,
+                log_owner,
+                startup_deadline,
+                error.into(),
+            )
+            .await);
+        }
+    };
     let control = listeners.control();
-    let listener_exited = spawn_listener_owner(&mut supervisor, listeners)?;
-    let signals = spawn_background_owners(&mut supervisor, &inbox, admission)?;
+    let listener_exited = match spawn_listener_owner(&mut supervisor, listeners) {
+        Ok(exited) => exited,
+        Err(error) => {
+            return Err(unwind_started_owners(
+                &mut supervisor,
+                owner,
+                log_owner,
+                startup_deadline,
+                error,
+            )
+            .await);
+        }
+    };
+    let signals = match spawn_background_owners(&mut supervisor, &inbox, admission) {
+        Ok(signals) => signals,
+        Err(error) => {
+            return Err(unwind_started_owners(
+                &mut supervisor,
+                owner,
+                log_owner,
+                startup_deadline,
+                error,
+            )
+            .await);
+        }
+    };
     Ok(RunningOwners {
         owner,
+        log_owner,
         supervisor,
         control,
         lifecycle,
@@ -1491,6 +1847,24 @@ async fn start_owners(inputs: StartOwnersInputs) -> Result<RunningOwners, Daemon
         state_exited,
         listener_exited,
     })
+}
+
+async fn unwind_started_owners(
+    supervisor: &mut Supervisor,
+    owner: StorageOwner,
+    log_owner: FileLogOwner,
+    deadline: tokio::time::Instant,
+    first_failure: DaemonError,
+) -> DaemonError {
+    supervisor.cancel();
+    let report = supervisor
+        .join_all(deadline.saturating_duration_since(tokio::time::Instant::now()))
+        .await;
+    if report.unfinished != 0 {
+        fail_stop_shutdown();
+    }
+    let _closed = shutdown_blocking_owners(owner, log_owner, deadline).await;
+    first_failure
 }
 
 fn spawn_admin_owner(
@@ -1695,10 +2069,18 @@ async fn run_state_owner(
         .await;
     readiness.clear(ReadinessStage::StateCore);
     let (storage_bridge, crypto_bridge) = state.into_bridges();
-    crypto_bridge.shutdown().await?;
-    tokio::task::spawn_blocking(move || storage_bridge.shutdown())
-        .await
-        .map_err(|_| RuntimeError::Cancelled)??;
+    let mut storage_shutdown = storage_bridge.into_shutdown();
+    let storage_wait = async {
+        loop {
+            if let Some(result) = storage_shutdown.try_complete() {
+                return result;
+            }
+            tokio::time::sleep(OWNER_SHUTDOWN_POLL_INTERVAL).await;
+        }
+    };
+    let (storage_result, crypto_result) = tokio::join!(storage_wait, crypto_bridge.shutdown());
+    storage_result?;
+    crypto_result?;
     let healthy = matches!(
         exit,
         StateCoreExit::Cancelled
@@ -1732,7 +2114,7 @@ struct ShutdownWaitInputs<'a> {
 }
 
 // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=closed owner loop keeps termination selectable while serializing admin preparation signal coalescing activation progress and critical owner exits
-async fn wait_for_shutdown(inputs: ShutdownWaitInputs<'_>) -> Result<DaemonExit, DaemonError> {
+async fn wait_for_shutdown(inputs: ShutdownWaitInputs<'_>) -> Result<ShutdownTrigger, DaemonError> {
     let ShutdownWaitInputs {
         config_path,
         runtime_config,
@@ -1786,7 +2168,7 @@ async fn wait_for_shutdown(inputs: ShutdownWaitInputs<'_>) -> Result<DaemonExit,
                 },
             _failure = admin_failed.recv() => Some(SupervisorEvent::AdminFailure),
             process = admin_process.recv() => Some(SupervisorEvent::AdminProcess(process)),
-            _exit = &mut *state_exited => Some(SupervisorEvent::State),
+            exit = &mut *state_exited => Some(SupervisorEvent::State(exit)),
             _listener = &mut *listener_exited => Some(SupervisorEvent::Listener),
             _ = progress.tick() => None,
         };
@@ -1853,24 +2235,34 @@ async fn wait_for_shutdown(inputs: ShutdownWaitInputs<'_>) -> Result<DaemonExit,
                 preparation_origin = Some(ReloadPreparationOrigin::Signal);
             }
             SupervisorEvent::Signal(Some(SignalEvent::Terminate | SignalEvent::Interrupt)) => {
-                return Ok(DaemonExit::Stopped);
+                return Ok(ShutdownTrigger::Signal);
             }
             SupervisorEvent::AdminProcess(Some(AdminProcessAction::Die)) => {
-                return Ok(DaemonExit::Stopped);
+                return Ok(ShutdownTrigger::CommittedDie);
             }
             SupervisorEvent::AdminProcess(Some(AdminProcessAction::Restart)) => {
-                return Ok(DaemonExit::RestartRequested);
+                return Ok(ShutdownTrigger::CommittedRestart);
+            }
+            SupervisorEvent::State(Ok(StateCoreExit::Indeterminate(_))) => {
+                observer.storage_indeterminate();
+                return Err(DaemonError::TaskFailed);
             }
             SupervisorEvent::Signal(None)
             | SupervisorEvent::ReloadPreparation(None)
             | SupervisorEvent::AdminProcess(None)
             | SupervisorEvent::AdminFailure
-            | SupervisorEvent::State
+            | SupervisorEvent::State(_)
             | SupervisorEvent::Listener => {
                 return Err(DaemonError::TaskFailed);
             }
         }
     }
+}
+
+enum ShutdownTrigger {
+    Signal,
+    CommittedDie,
+    CommittedRestart,
 }
 
 enum SupervisorEvent {
@@ -1881,7 +2273,7 @@ enum SupervisorEvent {
     ReloadIdle,
     AdminProcess(Option<AdminProcessAction>),
     AdminFailure,
-    State,
+    State(Result<StateCoreExit, oneshot::error::RecvError>),
     Listener,
 }
 
@@ -1890,8 +2282,10 @@ enum ReloadPreparationOrigin {
     Admin(ReloadPreparationReply),
 }
 
+const OWNER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(1);
+
 struct RuntimeShutdownHooks<'a> {
-    owner: Option<StorageOwner>,
+    storage_shutdown: StorageShutdown,
     supervisor: &'a mut Supervisor,
     listeners: &'a ListenerControl,
     lifecycle: &'a LifecycleControl,
@@ -1899,11 +2293,11 @@ struct RuntimeShutdownHooks<'a> {
     admin_acknowledgements: Vec<FlushAcknowledgement>,
     listener_exited: &'a mut oneshot::Receiver<()>,
     listener_joined: bool,
-    stopped: bool,
     readiness: Arc<ReadinessGate>,
     observer: Arc<RuntimeObserver>,
     log_control: FileLogControl,
-    log_owner: Option<FileLogOwner>,
+    log_shutdown: FileLogShutdown,
+    stop_failure: Option<ShutdownFailure>,
 }
 
 impl ShutdownHooks for RuntimeShutdownHooks<'_> {
@@ -1942,17 +2336,30 @@ impl ShutdownHooks for RuntimeShutdownHooks<'_> {
             ShutdownPhase::Stop => self.stop(budget).await,
         }
     }
+
+    fn retained_failure(&self, phase: ShutdownPhase) -> Option<ShutdownFailure> {
+        if phase == ShutdownPhase::Stop {
+            self.stop_failure
+        } else {
+            None
+        }
+    }
+
+    fn stop_deadline_expired(&mut self) {
+        fail_stop_shutdown();
+    }
 }
 
 impl RuntimeShutdownHooks<'_> {
     // agenc-review: focus owner=runtime reviewed=2026-08-31 reason=one stop budget retains first failure while ordering control cancellation forced join storage and log closure
     async fn stop(&mut self, budget: Duration) -> Result<(), ShutdownFailure> {
-        if self.stopped {
-            return Ok(());
+        if budget.is_zero() {
+            fail_stop_shutdown();
         }
-        self.stopped = true;
+        let deadline = tokio::time::Instant::now() + budget;
         self.listeners.stop_accepting();
-        let control_budget = budget / 5;
+        let control_budget =
+            (budget / 5).min(deadline.saturating_duration_since(tokio::time::Instant::now()));
         let controls = tokio::time::timeout(control_budget, async {
             tokio::join!(
                 self.admin.stop(),
@@ -1960,71 +2367,77 @@ impl RuntimeShutdownHooks<'_> {
             )
         })
         .await;
-        let mut first_failure = None;
         match controls {
             Ok((admin, state)) => {
                 if let Err(failure) = admin.map_err(map_admin_lifecycle) {
-                    first_failure = Some(failure);
+                    self.retain_stop_failure(failure);
                 }
-                if let Err(failure) = state
-                    && first_failure.is_none()
-                {
-                    first_failure = Some(failure);
+                if let Err(failure) = state {
+                    self.retain_stop_failure(failure);
                 }
             }
-            Err(_) => first_failure = Some(ShutdownFailure::StateCore),
+            Err(_) => self.retain_stop_failure(ShutdownFailure::StateCore),
         }
         self.listeners.cancel_connections();
         self.supervisor.cancel();
-        let report = self.supervisor.join_all(budget / 3).await;
-        if validate_join_report(&report).is_err() && first_failure.is_none() {
-            first_failure = Some(ShutdownFailure::Join);
+        let cooperative_budget =
+            (budget / 3).min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+        let report = self.supervisor.join_all(cooperative_budget).await;
+        if validate_join_report(&report).is_err() {
+            self.retain_stop_failure(ShutdownFailure::Join);
         }
         if report.unfinished != 0 {
-            self.supervisor.abort_all();
-            let forced = self.supervisor.join_all(budget / 10).await;
-            if validate_join_report(&forced).is_err() && first_failure.is_none() {
-                first_failure = Some(ShutdownFailure::Join);
+            let final_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let forced = self.supervisor.join_all(final_budget).await;
+            if validate_join_report(&forced).is_err() {
+                self.retain_stop_failure(ShutdownFailure::Join);
+            }
+            if forced.unfinished != 0 {
+                fail_stop_shutdown();
             }
         }
-        let owner = self.owner.take();
-        let log_owner = self.log_owner.take();
-        let closed = tokio::time::timeout(budget / 4, async move {
-            let storage = async move {
-                match owner {
-                    Some(owner) => shutdown_storage(owner)
-                        .await
-                        .map_err(|_| ShutdownFailure::Storage),
-                    None => Ok(()),
-                }
-            };
-            let logs = async move {
-                match log_owner {
-                    Some(owner) => match owner.shutdown().await {
-                        Ok(0) => Ok(()),
-                        Ok(_) | Err(_) => Err(ShutdownFailure::Writer),
-                    },
-                    None => Ok(()),
-                }
-            };
-            tokio::join!(storage, logs)
-        })
-        .await;
-        match closed {
-            Ok((storage, logs)) => {
-                for result in [storage, logs] {
-                    if let Err(failure) = result
-                        && first_failure.is_none()
-                    {
-                        first_failure = Some(failure);
-                    }
-                }
-            }
-            Err(_) if first_failure.is_none() => first_failure = Some(ShutdownFailure::Storage),
-            Err(_) => {}
+        if self.storage_shutdown.start().is_err() {
+            self.retain_stop_failure(ShutdownFailure::Storage);
+            fail_stop_shutdown();
         }
-        first_failure.map_or(Ok(()), Err)
+        if self.log_shutdown.start().is_err() {
+            self.retain_stop_failure(ShutdownFailure::Writer);
+            fail_stop_shutdown();
+        }
+        self.wait_for_blocking_owners(deadline).await;
+        self.stop_failure.map_or(Ok(()), Err)
     }
+
+    async fn wait_for_blocking_owners(&mut self, deadline: tokio::time::Instant) {
+        loop {
+            let storage = self.storage_shutdown.try_complete();
+            if matches!(storage, Some(Err(_))) {
+                self.retain_stop_failure(ShutdownFailure::Storage);
+            }
+            let logs = self.log_shutdown.try_complete();
+            if !matches!(logs, None | Some(Ok(0))) {
+                self.retain_stop_failure(ShutdownFailure::Writer);
+            }
+            if storage.is_some() && logs.is_some() {
+                return;
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                fail_stop_shutdown();
+            }
+            tokio::time::sleep_until(deadline.min(now + OWNER_SHUTDOWN_POLL_INTERVAL)).await;
+        }
+    }
+
+    fn retain_stop_failure(&mut self, failure: ShutdownFailure) {
+        if self.stop_failure.is_none() {
+            self.stop_failure = Some(failure);
+        }
+    }
+}
+
+fn fail_stop_shutdown() -> ! {
+    exit_process(CRASH_EXIT_CODE)
 }
 
 fn map_admin_lifecycle(failure: AdminLifecycleFailure) -> ShutdownFailure {
@@ -2277,17 +2690,99 @@ fn validate_join_report(report: &JoinReport) -> Result<(), DaemonError> {
     Ok(())
 }
 
-async fn shutdown_storage(owner: StorageOwner) -> Result<(), DaemonError> {
-    tokio::task::spawn_blocking(move || owner.shutdown())
-        .await
-        .map_err(|_| DaemonError::TaskFailed)??;
-    Ok(())
+async fn unwind_live_storage_and_log(
+    storage: LiveStorage,
+    log_owner: FileLogOwner,
+    deadline: tokio::time::Instant,
+    first_failure: DaemonError,
+) -> DaemonError {
+    let LiveStorage { owner, .. } = storage;
+    let _closed = shutdown_blocking_owners(owner, log_owner, deadline).await;
+    first_failure
+}
+
+async fn unwind_live_state_and_log(
+    live: LiveState,
+    log_owner: FileLogOwner,
+    deadline: tokio::time::Instant,
+    first_failure: DaemonError,
+) -> DaemonError {
+    let LiveState {
+        owner,
+        state,
+        storage,
+        storage_reads,
+        checkpoints,
+        crypto,
+        audit,
+        backup,
+    } = live;
+    drop((storage, storage_reads, checkpoints, crypto, audit, backup));
+    let (storage_bridge, crypto_bridge) = state.into_bridges();
+    let _bridges = shutdown_startup_bridges(storage_bridge, crypto_bridge, deadline).await;
+    let _closed = shutdown_blocking_owners(owner, log_owner, deadline).await;
+    first_failure
+}
+
+async fn shutdown_startup_bridges(
+    storage_bridge: StorageBridge,
+    crypto_bridge: CryptoBridge,
+    deadline: tokio::time::Instant,
+) -> (Result<(), RuntimeError>, Result<(), RuntimeError>) {
+    let mut storage_shutdown = storage_bridge.into_shutdown();
+    let storage = async {
+        loop {
+            if let Some(result) = storage_shutdown.try_complete() {
+                return result;
+            }
+            tokio::time::sleep(OWNER_SHUTDOWN_POLL_INTERVAL).await;
+        }
+    };
+    let cleanup = async { tokio::join!(storage, crypto_bridge.shutdown()) };
+    tokio::pin!(cleanup);
+    tokio::select! {
+        result = &mut cleanup => result,
+        () = tokio::time::sleep_until(deadline) => fail_stop_shutdown(),
+    }
+}
+
+async fn shutdown_blocking_owners(
+    owner: StorageOwner,
+    log_owner: FileLogOwner,
+    deadline: tokio::time::Instant,
+) -> (Result<(), StorageError>, Result<u64, RuntimeError>) {
+    let mut storage = owner.into_shutdown();
+    let mut logs = log_owner.into_shutdown();
+    if storage.start().is_err() || logs.start().is_err() {
+        fail_stop_shutdown();
+    }
+    let mut storage_result = None;
+    let mut log_result = None;
+    loop {
+        if storage_result.is_none() {
+            storage_result = storage.try_complete();
+        }
+        if log_result.is_none() {
+            log_result = logs.try_complete();
+        }
+        if let (Some(storage_result), Some(log_result)) = (storage_result, log_result) {
+            return (storage_result, log_result);
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            fail_stop_shutdown();
+        }
+        tokio::time::sleep_until(deadline.min(now + OWNER_SHUTDOWN_POLL_INTERVAL)).await;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use agenc_ircd_config::{PathResolver, RateTable};
-    use agenc_ircd_testkit::DeterministicMonotonicClock;
+    use agenc_ircd_domain::DurableAccount;
+    use agenc_ircd_storage::AccountRecordBody;
+    use agenc_ircd_testkit::{DeterministicMonotonicClock, account_id};
+    use agenc_ircd_types::{Revision, UtcSecond};
 
     use super::*;
 
@@ -2300,6 +2795,64 @@ mod tests {
             ValidationDepth::Document,
         )
         .map_err(DaemonError::Configuration)
+    }
+
+    #[test]
+    fn legacy_admin_policy_backfill_survives_retention_and_restart() -> Result<(), DaemonError> {
+        let account_id = account_id(91);
+        let revision = Revision::new(1).map_err(|_| RuntimeError::InvalidValue)?;
+        let legacy = DurableAccount {
+            account_id,
+            label: None,
+            presence: PresencePolicy::Private,
+            guest_direct_messages: GuestDirectMessagePolicy::Deny,
+            direct_messages: DirectMessagePolicy::Deny,
+            contacts: Vec::new(),
+            reserved_nicknames: Vec::new(),
+            session_generation: Generation::new(1).map_err(|_| RuntimeError::InvalidValue)?,
+            revision,
+            admin_suspension_expires_at: None,
+        };
+        let mut domain = agenc_ircd_domain::DomainState::restore(
+            revision,
+            vec![AccountRecordBody::decode(&AccountRecordBody::encode(
+                &legacy,
+            )?)?],
+            Vec::new(),
+            Vec::new(),
+        )
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        let expires_at = UtcSecond::from_unix_seconds(10_000);
+        let suspensions = vec![(account_id, expires_at)];
+        let backfills = missing_admin_policy_backfills(&domain, &suspensions, &[])?;
+        assert!(matches!(
+            backfills.as_slice(),
+            [AdminPolicyBackfill::Account(found)] if *found == account_id
+        ));
+        domain
+            .install_admin_policy(suspensions, Vec::new())
+            .map_err(|_| RuntimeError::InvalidValue)?;
+
+        let persisted = AccountRecordBody::encode(
+            &domain
+                .durable_account(account_id)
+                .ok_or(RuntimeError::InvalidValue)?,
+        )?;
+        let restarted = agenc_ircd_domain::DomainState::restore(
+            revision,
+            vec![AccountRecordBody::decode(&persisted)?],
+            Vec::new(),
+            Vec::new(),
+        )
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        assert_eq!(
+            restarted
+                .durable_account(account_id)
+                .and_then(|account| account.admin_suspension_expires_at),
+            Some(expires_at)
+        );
+        assert!(missing_admin_policy_backfills(&restarted, &[], &[])?.is_empty());
+        Ok(())
     }
 
     #[test]
@@ -2493,6 +3046,33 @@ mod tests {
                 .enabled = false;
             assert!(validate_profile(&enabled).is_ok());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn committed_process_actions_preserve_their_exit_status_after_cleanup_failure()
+    -> Result<(), DaemonError> {
+        assert_eq!(
+            finish_daemon_run(
+                Ok(ShutdownTrigger::CommittedDie),
+                Err(DaemonError::ShutdownTimeout),
+            )?,
+            DaemonExit::Stopped
+        );
+        assert_eq!(
+            finish_daemon_run(
+                Ok(ShutdownTrigger::CommittedRestart),
+                Err(DaemonError::TaskFailed),
+            )?,
+            DaemonExit::RestartRequested
+        );
+        assert!(matches!(
+            finish_daemon_run(
+                Ok(ShutdownTrigger::Signal),
+                Err(DaemonError::ShutdownTimeout),
+            ),
+            Err(DaemonError::ShutdownTimeout)
+        ));
         Ok(())
     }
 

@@ -191,16 +191,35 @@ impl fmt::Display for RefusalReason {
 
 impl Error for RefusalReason {}
 
+/// Closed outcome of a completed TLS handshake attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TlsOutcome {
+    /// TLS 1.3 and the exact listener ALPN completed.
+    Established,
+    /// The handshake timed out, failed, or negotiated the wrong ALPN.
+    Refused,
+}
+
 /// Observes admissions, refusals, and closes for logging and metrics.
 pub trait ConnectionObserver: Send + Sync {
+    /// A configured listener began accepting its closed purpose.
+    fn listener_opened(&self, purpose: ListenerPurpose) {
+        let _ = purpose;
+    }
+
+    /// A configured listener stopped accepting and joined its children.
+    fn listener_closed(&self, purpose: ListenerPurpose) {
+        let _ = purpose;
+    }
+
     /// A TLS handshake began after the global permit was acquired.
     fn tls_started(&self, purpose: ListenerPurpose) {
         let _ = purpose;
     }
 
     /// A TLS handshake released its permit, successfully or otherwise.
-    fn tls_finished(&self, purpose: ListenerPurpose, elapsed_millis: u64) {
-        let _ = (purpose, elapsed_millis);
+    fn tls_finished(&self, purpose: ListenerPurpose, elapsed_millis: u64, outcome: TlsOutcome) {
+        let _ = (purpose, elapsed_millis, outcome);
     }
 
     /// A connection was admitted and its supervisor started.
@@ -224,11 +243,6 @@ pub trait ConnectionObserver: Send + Sync {
         let _ = exit;
     }
 }
-
-/// Observes nothing.
-pub struct NoObserver;
-
-impl ConnectionObserver for NoObserver {}
 
 /// One configured endpoint.
 pub struct ListenerSpec {
@@ -551,6 +565,7 @@ async fn run_listener(
     connection_token: CancellationToken,
     accept_barrier: Arc<AcceptBarrier>,
 ) -> ListenerExit {
+    shared.observer.listener_opened(spec.purpose);
     let slot_capacity = if shared.runtime_config.is_some() {
         purpose_ceiling(spec.purpose).unwrap_or(spec.max_connections)
     } else {
@@ -599,6 +614,7 @@ async fn run_listener(
     while let Some(outcome) = connections.join_next().await {
         let _failed = record_outcome(&shared, spec.purpose, outcome, &mut exit);
     }
+    shared.observer.listener_closed(spec.purpose);
     exit
 }
 
@@ -944,6 +960,11 @@ async fn serve_inner(
             endpoint.shared.observer.tls_finished(
                 admitted.purpose,
                 u64::try_from(handshake_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                if negotiated.is_ok() {
+                    TlsOutcome::Established
+                } else {
+                    TlsOutcome::Refused
+                },
             );
             let stream = negotiated?;
             admitted.peer = tls_peer_identity(&stream, profile)?;
@@ -984,6 +1005,11 @@ async fn serve_inner(
             endpoint.shared.observer.tls_finished(
                 admitted.purpose,
                 u64::try_from(handshake_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                if negotiated.is_ok() {
+                    TlsOutcome::Established
+                } else {
+                    TlsOutcome::Refused
+                },
             );
             let stream = negotiated?;
             let lease = lease.take().ok_or(RefusalReason::Admission)?;

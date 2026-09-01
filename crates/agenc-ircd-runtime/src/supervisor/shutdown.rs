@@ -8,10 +8,12 @@
 //! stop. A reload signal during shutdown is ignored without interrupting
 //! the running phase.
 
-use std::future::Future;
+use std::future::{Future, poll_fn};
+use std::task::Poll;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 
 use crate::RuntimeError;
 use crate::state_core::inbox::SignalEvent;
@@ -221,6 +223,16 @@ pub trait ShutdownHooks {
         phase: ShutdownPhase,
         budget: Duration,
     ) -> impl Future<Output = Result<(), ShutdownFailure>> + Send;
+
+    /// Returns a typed failure already observed by a hook that is still cleaning up.
+    fn retained_failure(&self, _phase: ShutdownPhase) -> Option<ShutdownFailure> {
+        None
+    }
+
+    /// Enforces the process-level fail-stop policy after Stop exhausts the
+    /// absolute shutdown deadline. A production implementation must not
+    /// return while it still owns live tasks or operating-system threads.
+    fn stop_deadline_expired(&mut self);
 }
 
 /// Drives the four phases, honoring budgets and the second-signal skip.
@@ -230,6 +242,7 @@ pub async fn run_shutdown<H: ShutdownHooks>(
     hooks: &mut H,
     signals: &mut mpsc::Receiver<SignalEvent>,
 ) -> ShutdownReport {
+    let absolute_deadline = Instant::now() + plan.total();
     let mut outcomes = [PhaseOutcome::Skipped; 4];
     let mut skip_to_stop = false;
     let mut first_problem = None;
@@ -238,10 +251,30 @@ pub async fn run_shutdown<H: ShutdownHooks>(
             *slot = PhaseOutcome::Skipped;
             continue;
         }
-        let budget = plan.budget(phase);
-        let outcome = run_phase(phase, budget, hooks.run(phase, budget), signals).await;
+        let now = Instant::now();
+        let remaining = absolute_deadline.saturating_duration_since(now);
+        let budget = plan.budget(phase).min(remaining);
+        let phase_deadline = now + budget;
+        let outcome = if phase == ShutdownPhase::Stop && budget.is_zero() {
+            poll_stop_once(hooks.run(phase, budget)).await
+        } else if budget.is_zero() {
+            PhaseOutcome::TimedOut
+        } else {
+            run_phase(phase, phase_deadline, hooks.run(phase, budget), signals).await
+        };
+        if phase == ShutdownPhase::Stop && outcome == PhaseOutcome::TimedOut {
+            hooks.stop_deadline_expired();
+        }
         if outcome == PhaseOutcome::Skipped {
             skip_to_stop = true;
+        }
+        if first_problem.is_none() {
+            first_problem = hooks
+                .retained_failure(phase)
+                .map(|failure| ShutdownProblem {
+                    phase,
+                    kind: ShutdownProblemKind::Failed(failure),
+                });
         }
         if first_problem.is_none() {
             first_problem = match outcome {
@@ -265,21 +298,32 @@ pub async fn run_shutdown<H: ShutdownHooks>(
     }
 }
 
+async fn poll_stop_once<F: Future<Output = Result<(), ShutdownFailure>>>(phase: F) -> PhaseOutcome {
+    tokio::pin!(phase);
+    match poll_fn(|context| Poll::Ready(phase.as_mut().poll(context))).await {
+        Poll::Ready(Ok(())) => PhaseOutcome::Completed,
+        Poll::Ready(Err(failure)) => PhaseOutcome::Failed(failure),
+        Poll::Pending => PhaseOutcome::TimedOut,
+    }
+}
+
 /// Runs one phase under its budget; a termination signal skips it, a
-/// reload signal is ignored without dropping the phase future.
-// agenc-review: focus owner=runtime reviewed=2026-08-31 reason=bounded phase select keeps timeout completion and signal supersession explicit without dropping Stop cleanup
+/// reload signal is ignored without dropping the phase future. A timed-out
+/// Stop is followed immediately by the hook's process-level fail-stop policy.
+// agenc-review: focus owner=runtime reviewed=2026-08-31 reason=bounded phase select keeps timeout completion signal supersession and stop fail-stop explicit
 async fn run_phase<F: Future<Output = Result<(), ShutdownFailure>>>(
     phase_name: ShutdownPhase,
-    budget: Duration,
+    deadline: Instant,
     phase: F,
     signals: &mut mpsc::Receiver<SignalEvent>,
 ) -> PhaseOutcome {
-    let bounded = tokio::time::timeout(budget, phase);
+    let bounded = tokio::time::timeout_at(deadline, phase);
     tokio::pin!(bounded);
+    let mut signals_open = true;
     loop {
         let event = tokio::select! {
             result = &mut bounded => PhaseEvent::Finished(result),
-            signal = signals.recv() => PhaseEvent::Signal(signal),
+            signal = signals.recv(), if signals_open => PhaseEvent::Signal(signal),
         };
         match event {
             PhaseEvent::Finished(Ok(Ok(()))) => return PhaseOutcome::Completed,
@@ -290,7 +334,8 @@ async fn run_phase<F: Future<Output = Result<(), ShutdownFailure>>>(
                     return PhaseOutcome::Skipped;
                 }
             }
-            PhaseEvent::Signal(_) => {}
+            PhaseEvent::Signal(Some(SignalEvent::Reload)) => {}
+            PhaseEvent::Signal(None) => signals_open = false,
         }
     }
 }
@@ -303,6 +348,20 @@ enum PhaseEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn an_expired_stop_is_polled_once_before_fail_stop() {
+        let entered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let phase_entered = std::sync::Arc::clone(&entered);
+        let outcome = poll_stop_once(async move {
+            phase_entered.store(true, std::sync::atomic::Ordering::Release);
+            std::future::pending::<()>().await;
+            Ok(())
+        })
+        .await;
+        assert_eq!(outcome, PhaseOutcome::TimedOut);
+        assert!(entered.load(std::sync::atomic::Ordering::Acquire));
+    }
 
     #[test]
     fn plans_follow_the_ranges_and_the_120_second_total() -> Result<(), RuntimeError> {

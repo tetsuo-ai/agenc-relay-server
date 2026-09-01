@@ -7,6 +7,7 @@
 
 use std::error::Error;
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -22,6 +23,7 @@ type TestResult = Result<(), Box<dyn Error + Send + Sync>>;
 
 struct RecordingHooks {
     phases: Arc<Mutex<Vec<ShutdownPhase>>>,
+    stop_deadline_expired: Arc<AtomicBool>,
     delay: Option<(ShutdownPhase, Duration)>,
     release: Option<(ShutdownPhase, mpsc::Sender<()>)>,
     failure: Option<(ShutdownPhase, ShutdownFailure)>,
@@ -60,6 +62,10 @@ impl ShutdownHooks for RecordingHooks {
             failure.map_or(Ok(()), Err)
         }
     }
+
+    fn stop_deadline_expired(&mut self) {
+        self.stop_deadline_expired.store(true, Ordering::Release);
+    }
 }
 
 fn hooks() -> (RecordingHooks, Arc<Mutex<Vec<ShutdownPhase>>>) {
@@ -67,6 +73,7 @@ fn hooks() -> (RecordingHooks, Arc<Mutex<Vec<ShutdownPhase>>>) {
     (
         RecordingHooks {
             phases: Arc::clone(&phases),
+            stop_deadline_expired: Arc::new(AtomicBool::new(false)),
             delay: None,
             release: None,
             failure: None,
@@ -80,6 +87,37 @@ fn recorded(phases: &Arc<Mutex<Vec<ShutdownPhase>>>) -> Vec<ShutdownPhase> {
         .lock()
         .map(|phases| phases.clone())
         .unwrap_or_default()
+}
+
+struct RetainedFailureHooks {
+    stop_entered: Arc<AtomicBool>,
+    stop_deadline_expired: Arc<AtomicBool>,
+}
+
+impl ShutdownHooks for RetainedFailureHooks {
+    fn run(
+        &mut self,
+        phase: ShutdownPhase,
+        _budget: Duration,
+    ) -> impl Future<Output = Result<(), ShutdownFailure>> + Send {
+        let stop_entered = Arc::clone(&self.stop_entered);
+        async move {
+            if phase == ShutdownPhase::Stop {
+                stop_entered.store(true, Ordering::Release);
+                std::future::pending::<()>().await;
+            }
+            Ok(())
+        }
+    }
+
+    fn retained_failure(&self, phase: ShutdownPhase) -> Option<ShutdownFailure> {
+        (phase == ShutdownPhase::Stop && self.stop_entered.load(Ordering::Acquire))
+            .then_some(ShutdownFailure::Join)
+    }
+
+    fn stop_deadline_expired(&mut self) {
+        self.stop_deadline_expired.store(true, Ordering::Release);
+    }
 }
 
 #[tokio::test]
@@ -148,6 +186,33 @@ async fn the_first_hook_failure_is_retained_while_later_phases_still_run() -> Te
         Some(ShutdownProblem {
             phase: ShutdownPhase::Drain,
             kind: ShutdownProblemKind::Failed(ShutdownFailure::Storage),
+        })
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_typed_stop_failure_precedes_the_timeout_that_ends_cleanup() -> TestResult {
+    let stop_deadline_expired = Arc::new(AtomicBool::new(false));
+    let mut hooks = RetainedFailureHooks {
+        stop_entered: Arc::new(AtomicBool::new(false)),
+        stop_deadline_expired: Arc::clone(&stop_deadline_expired),
+    };
+    let plan = ShutdownPlan::new(
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+    )?;
+    let (_signals, mut receiver) = mpsc::channel(1);
+    let report = run_shutdown(plan, &mut hooks, &mut receiver).await;
+    assert_eq!(report.outcome(ShutdownPhase::Stop), PhaseOutcome::TimedOut);
+    assert!(stop_deadline_expired.load(Ordering::Acquire));
+    assert_eq!(
+        report.first_problem(),
+        Some(ShutdownProblem {
+            phase: ShutdownPhase::Stop,
+            kind: ShutdownProblemKind::Failed(ShutdownFailure::Join),
         })
     );
     Ok(())

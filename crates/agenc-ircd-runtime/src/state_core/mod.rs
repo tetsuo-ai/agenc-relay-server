@@ -64,9 +64,9 @@ use crate::runtime_config::{
 };
 use crate::state_core::admin::{AdminCoreRequest, AdminCoreResult};
 use crate::state_core::durable::{
-    AccountServiceDurableWrite, AccountingCeilings, DurableIndex, HeadCounters, KeyDeriver,
-    PlanProjection, RetainedProjection, project_admin_audit_event, project_admin_audit_retention,
-    project_batch, read_back_record,
+    AccountServiceDurableWrite, AccountingCeilings, AdminMutationAfterImage, DurableIndex,
+    HeadCounters, KeyDeriver, PlanProjection, RetainedProjection, project_admin_audit_event,
+    project_admin_audit_retention, project_admin_mutation_event, project_batch, read_back_record,
 };
 use crate::state_core::fanout::{
     FanoutCommitReport, FanoutFrame, FanoutRefused, FanoutRequest, FanoutReservation, FanoutTarget,
@@ -80,7 +80,7 @@ use crate::state_core::inbox::{
 use crate::state_core::pending::{PendingMutationBatch, StagedPlan};
 use crate::state_core::reconstruct::Reconstruction;
 use crate::state_core::session::SessionTable;
-use crate::state_core::timers::{DriftMonitor, TimerEntry, TimerHeap};
+use crate::state_core::timers::{DriftMonitor, DriftTransition, TimerEntry, TimerHeap};
 use crate::sync::Arc;
 
 /// The numeric a registered session receives for an unknown command.
@@ -153,6 +153,18 @@ pub enum RouteOutcome {
     Close(CloseReason),
 }
 
+/// Input-free observation ownership for exactly one client command.
+#[must_use = "a command observation must be completed or transferred to pending work"]
+pub struct CommandObservation {
+    class: CommandClass,
+}
+
+impl CommandObservation {
+    const fn new(class: CommandClass) -> Self {
+        Self { class }
+    }
+}
+
 /// The command boundary composition stages plug into.
 ///
 /// Every method receives the state owner's context; the loop itself never
@@ -169,6 +181,7 @@ pub trait CommandRouter: Send {
         context: &mut StateCoreContext,
         generation: ConnectionGeneration,
         message: ParsedMessage,
+        observation: CommandObservation,
     ) -> RouteOutcome;
 
     /// A connection was admitted and recorded.
@@ -251,6 +264,7 @@ impl CommandRouter for DefaultRouter {
         context: &mut StateCoreContext,
         generation: ConnectionGeneration,
         message: ParsedMessage,
+        observation: CommandObservation,
     ) -> RouteOutcome {
         let registered = context
             .sessions()
@@ -273,9 +287,17 @@ impl CommandRouter for DefaultRouter {
                 Some("You have not registered"),
             )
         };
-        if let Ok(frame) = reply {
-            let _refused = context.send_to(generation, vec![frame]);
-        }
+        let result = match reply {
+            Ok(frame) => {
+                if context.send_to(generation, vec![frame]).is_ok() {
+                    ResultClass::Rejected
+                } else {
+                    ResultClass::Busy
+                }
+            }
+            Err(_) => ResultClass::Error,
+        };
+        context.complete_command_observation(observation, result);
         RouteOutcome::Continue
     }
 }
@@ -456,6 +478,30 @@ pub struct StateCoreContext {
 }
 
 impl StateCoreContext {
+    fn begin_command_observation(&self, command: &str) -> CommandObservation {
+        let class = RuntimeObserver::classify_command(command);
+        if class == CommandClass::Authentication
+            && let Some(observer) = &self.observer
+        {
+            observer.authentication(false);
+        }
+        CommandObservation::new(class)
+    }
+
+    pub(crate) fn complete_command_observation(
+        &self,
+        observation: CommandObservation,
+        result: ResultClass,
+    ) {
+        let Some(observer) = &self.observer else {
+            return;
+        };
+        observer.command_classified(observation.class, result);
+        if observation.class == CommandClass::Authentication && result != ResultClass::Ok {
+            observer.authentication(true);
+        }
+    }
+
     /// Borrows the committed domain state.
     #[must_use]
     pub const fn domain(&self) -> &DomainState {
@@ -723,35 +769,59 @@ impl StateCoreContext {
         )
     }
 
+    // agenc-review: focus owner=runtime reviewed=2026-09-01 reason=one safe-point admission transaction owns validation fanout reservation batch joining and final command-observation transfer
     fn stage_durable_inner(
         &mut self,
         plan: MutationPlan,
         request: FanoutRequest,
-        origin: Option<StagedOrigin>,
+        mut origin: Option<StagedOrigin>,
         response_count_increment: u64,
         account_service_writes: Vec<AccountServiceDurableWrite>,
         admission: DurableAdmission,
     ) -> Result<StageAccepted, StageRefused> {
-        let account_service_writes = account_service_writes
+        let Ok(account_service_writes) = account_service_writes
             .into_iter()
             .map(AccountServiceDurableWrite::revalidate)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| StageRefused::Domain(DomainError::InvariantViolation))?;
+        else {
+            self.complete_staged_origin(&mut origin, ResultClass::Error);
+            return Err(StageRefused::Domain(DomainError::InvariantViolation));
+        };
         if self.quiescing && admission == DurableAdmission::Ordinary {
+            self.complete_staged_origin(&mut origin, ResultClass::Busy);
             return Err(StageRefused::Quiescing);
         }
         if self.in_flight() || self.conflicts(&plan) {
+            self.complete_staged_origin(&mut origin, ResultClass::Busy);
             return Err(StageRefused::Busy);
         }
-        let reservation = self
-            .reserve_fanout(&request)
-            .map_err(StageRefused::Fanout)?;
+        let reservation = match self.reserve_fanout(&request) {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                self.complete_staged_origin(&mut origin, ResultClass::Busy);
+                return Err(StageRefused::Fanout(error));
+            }
+        };
         if plan.durable_writes().is_empty()
             && account_service_writes.is_empty()
             && self.pending.is_none()
         {
-            let receipt = self.apply_plan(plan).map_err(StageRefused::Domain)?;
+            let receipt = match self.apply_plan(plan) {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    self.complete_staged_origin(
+                        &mut origin,
+                        if error == DomainError::ServerBusy {
+                            ResultClass::Busy
+                        } else {
+                            ResultClass::Rejected
+                        },
+                    );
+                    return Err(StageRefused::Domain(error));
+                }
+            };
             self.commit_fanout(reservation);
+            self.complete_staged_origin(&mut origin, ResultClass::Ok);
             return Ok(StageAccepted::AppliedInStep(Box::new(receipt)));
         }
         let staged = StagedPlan::with_account_service_writes(
@@ -764,13 +834,28 @@ impl StateCoreContext {
         let now = self.now();
         match self.pending.take() {
             None => {
-                self.pending = Some(
-                    PendingMutationBatch::start(staged, now)
-                        .map_err(|error| StageRefused::Fanout(FanoutRefused::Invalid(error)))?,
-                );
+                self.pending = match PendingMutationBatch::start(staged, now) {
+                    Ok(batch) => Some(batch),
+                    Err((error, staged)) => {
+                        let mut staged = *staged;
+                        if let Some(observation) = staged.take_observation() {
+                            self.complete_command_observation(observation, ResultClass::Error);
+                        }
+                        return Err(StageRefused::Fanout(FanoutRefused::Invalid(error)));
+                    }
+                };
             }
             Some(mut batch) => {
-                let joined = batch.try_stage(staged).is_ok();
+                let joined = match batch.try_stage(staged) {
+                    Ok(()) => true,
+                    Err((_refusal, staged)) => {
+                        let mut staged = *staged;
+                        if let Some(observation) = staged.take_observation() {
+                            self.complete_command_observation(observation, ResultClass::Busy);
+                        }
+                        false
+                    }
+                };
                 self.pending = Some(batch);
                 if !joined {
                     return Err(StageRefused::Busy);
@@ -780,6 +865,12 @@ impl StateCoreContext {
         Ok(StageAccepted::Staged {
             plans_in_batch: self.pending_len(),
         })
+    }
+
+    fn complete_staged_origin(&self, origin: &mut Option<StagedOrigin>, result: ResultClass) {
+        if let Some(observation) = origin.as_mut().and_then(StagedOrigin::take_observation) {
+            self.complete_command_observation(observation, result);
+        }
     }
 
     fn conflicts(&self, plan: &MutationPlan) -> bool {
@@ -847,6 +938,7 @@ impl StateCoreContext {
             return Ok(BatchStep::Idle);
         };
         let Ok(transaction_id) = next_transaction_id(self.entropy.as_mut()) else {
+            self.complete_batch_observations(batch, ResultClass::Error);
             return Err(StateCoreExit::Corrupt(CorruptionCause::ProjectionFailed));
         };
         let projections: Vec<PlanProjection<'_>> = batch
@@ -873,7 +965,10 @@ impl StateCoreContext {
             Err(RuntimeError::Storage(error @ StorageError::LimitExceeded)) => {
                 Ok(BatchStep::Rejected(self.reject_batch(batch, error)))
             }
-            Err(_) => Err(StateCoreExit::Corrupt(CorruptionCause::ProjectionFailed)),
+            Err(_) => {
+                self.complete_batch_observations(batch, ResultClass::Error);
+                Err(StateCoreExit::Corrupt(CorruptionCause::ProjectionFailed))
+            }
         }
     }
 
@@ -898,9 +993,12 @@ impl StateCoreContext {
             Err(SubmitError::Storage(error)) => {
                 Ok(BatchStep::Rejected(self.reject_batch(batch, error)))
             }
-            Err(SubmitError::Bridge(failure)) => Err(StateCoreExit::Indeterminate(
-                IndeterminateCause::Bridge(failure),
-            )),
+            Err(SubmitError::Bridge(failure)) => {
+                self.complete_batch_observations(batch, ResultClass::Error);
+                Err(StateCoreExit::Indeterminate(IndeterminateCause::Bridge(
+                    failure,
+                )))
+            }
         }
     }
 
@@ -910,12 +1008,21 @@ impl StateCoreContext {
     ) -> Result<BatchStep, StateCoreExit> {
         let (plans, _retained) = batch.finish();
         let count = plans.len();
-        for staged in plans {
+        let mut plans = plans.into_iter();
+        while let Some(mut staged) = plans.next() {
+            let observation = staged.take_observation();
             let (plan, fanout, _origin) = staged.into_parts();
             if self.apply_plan(plan).is_err() {
+                if let Some(observation) = observation {
+                    self.complete_command_observation(observation, ResultClass::Error);
+                }
+                self.complete_plan_observations(plans, ResultClass::Error);
                 return Err(StateCoreExit::Corrupt(CorruptionCause::ApplyFailed));
             }
             self.commit_fanout(fanout);
+            if let Some(observation) = observation {
+                self.complete_command_observation(observation, ResultClass::Ok);
+            }
         }
         Ok(BatchStep::AppliedInStep(count))
     }
@@ -943,6 +1050,7 @@ impl StateCoreContext {
             ));
         };
         if batch.transaction_id() != Some(message.transaction_id) {
+            self.complete_batch_observations(batch, ResultClass::Error);
             return Err(StateCoreExit::Indeterminate(
                 IndeterminateCause::TransactionMismatch,
             ));
@@ -954,9 +1062,12 @@ impl StateCoreContext {
             CommitOutcome::Rejected(error) => {
                 Ok(BatchStep::Rejected(self.reject_batch(batch, error)))
             }
-            CommitOutcome::Indeterminate => Err(StateCoreExit::Indeterminate(
-                IndeterminateCause::StorageIndeterminate,
-            )),
+            CommitOutcome::Indeterminate => {
+                self.complete_batch_observations(batch, ResultClass::Error);
+                Err(StateCoreExit::Indeterminate(
+                    IndeterminateCause::StorageIndeterminate,
+                ))
+            }
         }
     }
 
@@ -967,12 +1078,14 @@ impl StateCoreContext {
         receipt: agenc_ircd_storage::CommitReceipt,
     ) -> Result<BatchStep, StateCoreExit> {
         if receipt.transaction_id != transaction_id {
+            self.complete_batch_observations(batch, ResultClass::Error);
             return Err(StateCoreExit::Indeterminate(
                 IndeterminateCause::TransactionMismatch,
             ));
         }
         let (plans, retained) = batch.finish();
         let Some(retained) = retained else {
+            self.complete_plan_observations(plans.into_iter(), ResultClass::Error);
             return Err(StateCoreExit::Indeterminate(
                 IndeterminateCause::UnexpectedCompletion,
             ));
@@ -986,14 +1099,40 @@ impl StateCoreContext {
     }
 
     fn apply_staged_plans(&mut self, plans: Vec<StagedPlan>) -> Result<(), StateCoreExit> {
-        for staged in plans {
+        let mut plans = plans.into_iter();
+        while let Some(mut staged) = plans.next() {
+            let observation = staged.take_observation();
             let (plan, fanout, _origin) = staged.into_parts();
             if self.apply_plan(plan).is_err() {
+                if let Some(observation) = observation {
+                    self.complete_command_observation(observation, ResultClass::Error);
+                }
+                self.complete_plan_observations(plans, ResultClass::Error);
                 return Err(StateCoreExit::Corrupt(CorruptionCause::ApplyFailed));
             }
             self.commit_fanout(fanout);
+            if let Some(observation) = observation {
+                self.complete_command_observation(observation, ResultClass::Ok);
+            }
         }
         Ok(())
+    }
+
+    fn complete_batch_observations(&self, batch: PendingMutationBatch, result: ResultClass) {
+        let (plans, _retained) = batch.finish();
+        self.complete_plan_observations(plans.into_iter(), result);
+    }
+
+    fn complete_plan_observations(
+        &self,
+        plans: impl Iterator<Item = StagedPlan>,
+        result: ResultClass,
+    ) {
+        for mut staged in plans {
+            if let Some(observation) = staged.take_observation() {
+                self.complete_command_observation(observation, result);
+            }
+        }
     }
 
     /// The rows whose sealed identity must be read back after a commit.
@@ -1107,7 +1246,14 @@ impl StateCoreContext {
     fn check_drift(&mut self) {
         let now = self.now();
         let wall = self.wall.utc_now().ok();
-        let _transition = self.drift.observe(now, wall);
+        let transition = self.drift.observe(now, wall);
+        if let Some(observer) = &self.observer {
+            match transition {
+                DriftTransition::Distrusted => observer.clock_trust_changed(false),
+                DriftTransition::Trusted => observer.clock_trust_changed(true),
+                DriftTransition::Unchanged => {}
+            }
+        }
     }
 }
 
@@ -1117,6 +1263,23 @@ fn next_transaction_id(entropy: &mut dyn EntropySource) -> Result<TransactionId,
         .fill_exact(&mut bytes)
         .map_err(|_| RuntimeError::Storage(StorageError::Unavailable))?;
     Ok(TransactionId::from_bytes(bytes))
+}
+
+const fn storage_rejection_result(error: StorageError) -> ResultClass {
+    match error {
+        StorageError::LimitExceeded | StorageError::StaleState => ResultClass::Rejected,
+        StorageError::AllocationFailed | StorageError::QueueFull => ResultClass::Busy,
+        StorageError::InvalidEncoding
+        | StorageError::UnsupportedVersion
+        | StorageError::Overflow
+        | StorageError::AuthenticationFailed
+        | StorageError::Unavailable
+        | StorageError::FilesystemRejected
+        | StorageError::WriterLocked
+        | StorageError::DatabaseRejected
+        | StorageError::UnsupportedMigration
+        | StorageError::ResumeMismatch => ResultClass::Error,
+    }
 }
 
 fn valid_rehash_outcome_pair(
@@ -2192,8 +2355,8 @@ impl StateCore {
 
     // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=single admin safe-point dispatch owns validation projection submission and closed failure routing
     fn step_admin_request(&mut self, request: AdminCoreRequest) -> Option<StateCoreExit> {
-        let (event, mutation, reply) = match request {
-            AdminCoreRequest::CommitAudit { event, reply } => (event, None, reply),
+        let (event, mutation, after_image, reply) = match request {
+            AdminCoreRequest::CommitAudit { event, reply } => (event, None, None, reply),
             AdminCoreRequest::CommitMutation {
                 event,
                 mutation,
@@ -2204,7 +2367,13 @@ impl StateCore {
                     return Some(StateCoreExit::Corrupt(CorruptionCause::ProjectionFailed));
                 }
                 match self.validate_admin_mutation(mutation, expected_revision) {
-                    Ok(()) => (event, Some(mutation), reply),
+                    Ok(()) => match self.prepare_admin_after_image(mutation) {
+                        Ok(after_image) => (event, Some(mutation), Some(after_image), reply),
+                        Err(failure) => {
+                            let _sent = reply.send(Err(failure));
+                            return None;
+                        }
+                    },
                     Err(failure) => {
                         let _sent = reply.send(Err(failure));
                         return None;
@@ -2238,14 +2407,25 @@ impl StateCore {
         let Ok(transaction_id) = next_transaction_id(self.context.entropy.as_mut()) else {
             return Some(StateCoreExit::Corrupt(CorruptionCause::ProjectionFailed));
         };
-        let projected = project_admin_audit_event(
-            transaction_id,
-            &event,
-            &self.context.index,
-            &self.context.keys,
-            self.context.head,
-            self.context.ceilings,
-        );
+        let projected = match &after_image {
+            Some(after_image) => project_admin_mutation_event(
+                transaction_id,
+                &event,
+                after_image,
+                &self.context.index,
+                &self.context.keys,
+                self.context.head,
+                self.context.ceilings,
+            ),
+            None => project_admin_audit_event(
+                transaction_id,
+                &event,
+                &self.context.index,
+                &self.context.keys,
+                self.context.head,
+                self.context.ceilings,
+            ),
+        };
         let projected = match projected {
             Ok(projected) => projected,
             Err(RuntimeError::Storage(StorageError::LimitExceeded)) => {
@@ -2385,6 +2565,51 @@ impl StateCore {
             }
         }
         Ok(())
+    }
+
+    fn prepare_admin_after_image(
+        &self,
+        mutation: AdminMutation,
+    ) -> Result<AdminMutationAfterImage, AdminCoreFailure> {
+        let revision = self
+            .context
+            .domain
+            .revision()
+            .checked_add(1)
+            .map_err(|_| AdminCoreFailure::StorageUnavailable)?;
+        match mutation {
+            AdminMutation::SuspendAccount {
+                account_id,
+                expires_at,
+            } => {
+                let mut account = self
+                    .context
+                    .domain
+                    .durable_account(account_id)
+                    .ok_or(AdminCoreFailure::InvalidTarget)?;
+                account.admin_suspension_expires_at = Some(expires_at);
+                Ok(AdminMutationAfterImage::Account(account))
+            }
+            AdminMutation::RestoreAccount(account_id) => {
+                let mut account = self
+                    .context
+                    .domain
+                    .durable_account(account_id)
+                    .ok_or(AdminCoreFailure::InvalidTarget)?;
+                account.admin_suspension_expires_at = None;
+                Ok(AdminMutationAfterImage::Account(account))
+            }
+            AdminMutation::QuarantineChannel(channel_id) => {
+                let mut channel = self
+                    .context
+                    .domain
+                    .durable_channel(channel_id)
+                    .ok_or(AdminCoreFailure::InvalidTarget)?;
+                channel.admin_quarantined = true;
+                channel.revision = revision;
+                Ok(AdminMutationAfterImage::Channel(channel))
+            }
+        }
     }
 
     fn admin_kill(&mut self, user_id: UserId) -> AdminCoreResult {
@@ -2698,25 +2923,10 @@ impl StateCore {
                 .and_then(|notice| self.finish_physical_close(notice));
         }
         self.context.counters.lines_routed = self.context.counters.lines_routed.saturating_add(1);
-        let observer = self.context.observer.clone();
-        let class = observer
-            .as_ref()
-            .map(|_| RuntimeObserver::classify_command(message.command()));
-        let outcome = self.router.route(&mut self.context, generation, message);
-        if let (Some(observer), Some(class)) = (&observer, class) {
-            let result = if matches!(outcome, RouteOutcome::Close(_)) {
-                ResultClass::Rejected
-            } else {
-                ResultClass::Ok
-            };
-            observer.command_classified(class, result);
-            if class == CommandClass::Authentication {
-                observer.authentication(false);
-                if result == ResultClass::Rejected {
-                    observer.authentication(true);
-                }
-            }
-        }
+        let observation = self.context.begin_command_observation(message.command());
+        let outcome = self
+            .router
+            .route(&mut self.context, generation, message, observation);
         if let RouteOutcome::Close(_reason) = outcome {
             // The sink contract exposes one close path; the transport owner
             // ends the connection and reports it on the reserved close lane.
@@ -2779,7 +2989,17 @@ impl StateCore {
     }
 
     fn report_rejections(&mut self, rejections: Vec<Rejection>) {
-        for rejection in rejections {
+        for mut rejection in rejections {
+            if let Some(observation) = rejection
+                .origin
+                .as_mut()
+                .and_then(StagedOrigin::take_observation)
+            {
+                self.context.complete_command_observation(
+                    observation,
+                    storage_rejection_result(rejection.error),
+                );
+            }
             self.router
                 .batch_rejected(&mut self.context, rejection.origin, rejection.error);
         }
@@ -3058,6 +3278,34 @@ impl StateCore {
                         None
                     }
                 },
+                _ = progress.tick() => {
+                    self.liveness.record_state_core(self.context.now());
+                    if let Some(observer) = &self.context.observer {
+                        let client_queues = self.context.sessions.queue_snapshot();
+                        observer.queue_depth(
+                            QueueName::ClientWriter,
+                            client_queues.queued_bytes(),
+                        );
+                        observer.queue_depth(
+                            QueueName::StateCoreInbox,
+                            usize_u64(inbox.len().saturating_add(physical_closes.len())),
+                        );
+                        observer.queue_depth(
+                            QueueName::StorageBatches,
+                            usize_u64(self.context.bridge.in_flight()),
+                        );
+                        observer.queue_depth(
+                            QueueName::StorageCompletions,
+                            usize_u64(storage.len()),
+                        );
+                        observer.queue_depth(QueueName::CryptoJobs, usize_u64(crypto.len()));
+                        observer.queue_depth(
+                            QueueName::SignalMaintenance,
+                            usize_u64(lifecycle.len()),
+                        );
+                    }
+                    None
+                },
                 notice = physical_closes.recv(), if physical_closes_open && !provisional_barrier => {
                     match notice {
                         Some(notice) => self.step_physical_close(notice),
@@ -3231,25 +3479,6 @@ impl StateCore {
                     Some(StateCoreMessage::Opened { .. }) if self.context.quiescing => None,
                     Some(message) => self.step_message(message),
                     None => Some(StateCoreExit::InboxClosed),
-                },
-                _ = progress.tick() => {
-                    self.liveness.record_state_core(self.context.now());
-                    if let Some(observer) = &self.context.observer {
-                        observer.queue_depth(
-                            QueueName::StateCoreInbox,
-                            usize_u64(inbox.len().saturating_add(physical_closes.len())),
-                        );
-                        observer.queue_depth(
-                            QueueName::StorageCompletions,
-                            usize_u64(storage.len()),
-                        );
-                        observer.queue_depth(QueueName::CryptoJobs, usize_u64(crypto.len()));
-                        observer.queue_depth(
-                            QueueName::SignalMaintenance,
-                            usize_u64(lifecycle.len()),
-                        );
-                    }
-                    None
                 },
                 _ = flush_poll.tick(), if waiting_for_shutdown_flush => None,
                 () = tokio::time::sleep_until(wake.unwrap_or_else(Instant::now)), if wake.is_some() && !refresh_in_flight && !provisional_barrier => {

@@ -9,11 +9,11 @@ use crate::RuntimeError;
 use crate::admission::OverloadClass;
 use crate::clock::{SystemMonotonicClock, SystemWallClock};
 use crate::connection::{AdmittedConnection, ConnectionExit, PeerIdentity};
-use crate::listener::{ConnectionObserver, RefusalReason};
+use crate::listener::{ConnectionObserver, RefusalReason, TlsOutcome};
 use crate::observe::events::{
     CorrelationSource, CountBucket, LogEvent, LogEventCode, PublicErrorCode, Severity,
 };
-use crate::observe::log::{LogHandle, LogRetention};
+use crate::observe::log::{LogEmitOutcome, LogHandle, LogRetention};
 use crate::observe::metrics::{
     CommandClass, LabelSet, MetricKey, MetricLabel, MetricName, MetricsRegistry, QueueName,
     ResultClass, TransportFamily,
@@ -166,6 +166,73 @@ impl RuntimeObserver {
         );
     }
 
+    /// Records successful storage recovery without exposing its path.
+    pub fn storage_recovered(&self) {
+        self.emit(
+            LogEventCode::StorageRecovered,
+            Severity::Info,
+            None,
+            None,
+            None,
+        );
+    }
+
+    /// Records an indeterminate durable outcome before shutdown.
+    pub fn storage_indeterminate(&self) {
+        self.emit(
+            LogEventCode::StorageIndeterminate,
+            Severity::Critical,
+            None,
+            None,
+            None,
+        );
+    }
+
+    /// Records the StateCore startup acknowledgement.
+    pub fn state_core_ready(&self) {
+        self.emit(
+            LogEventCode::StateCoreReady,
+            Severity::Info,
+            None,
+            None,
+            None,
+        );
+    }
+
+    /// Records one listener lifecycle edge under its closed purpose.
+    pub fn listener_lifecycle(&self, purpose: ListenerPurpose, opened: bool) {
+        self.emit(
+            if opened {
+                LogEventCode::ListenerOpened
+            } else {
+                LogEventCode::ListenerClosed
+            },
+            Severity::Info,
+            Some(purpose),
+            None,
+            None,
+        );
+    }
+
+    /// Records one transition of the closed wall-clock trust state.
+    pub fn clock_trust_changed(&self, trusted: bool) {
+        self.emit(
+            if trusted {
+                LogEventCode::ClockTrusted
+            } else {
+                LogEventCode::ClockDistrusted
+            },
+            if trusted {
+                Severity::Info
+            } else {
+                Severity::Warning
+            },
+            None,
+            None,
+            None,
+        );
+    }
+
     /// Records the fixed warning emitted when ordinary memory locking is unavailable.
     pub fn hardening_warning(&self) {
         self.emit(
@@ -204,7 +271,7 @@ impl RuntimeObserver {
     }
 
     /// Marks one TLS handshake as complete or refused.
-    pub fn tls_finished(&self, purpose: ListenerPurpose, elapsed_millis: u64) {
+    pub fn tls_finished(&self, purpose: ListenerPurpose, elapsed_millis: u64, outcome: TlsOutcome) {
         let _previous =
             self.tls_handshakes
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
@@ -212,7 +279,13 @@ impl RuntimeObserver {
                 });
         self.observe_duration(
             MetricName::HandshakeDuration,
-            &[MetricLabel::ListenerPurpose(purpose)],
+            &[
+                MetricLabel::ListenerPurpose(purpose),
+                MetricLabel::ResultClass(match outcome {
+                    TlsOutcome::Established => ResultClass::Ok,
+                    TlsOutcome::Refused => ResultClass::Rejected,
+                }),
+            ],
             elapsed_millis,
         );
     }
@@ -300,14 +373,7 @@ impl RuntimeObserver {
             )
         };
         self.emit(code, severity, None, None, None);
-        self.increment(
-            MetricName::CommandsHandled,
-            &[
-                MetricLabel::CommandClass(CommandClass::Administration),
-                MetricLabel::ResultClass(result),
-            ],
-            1,
-        );
+        self.increment(MetricName::Reloads, &[MetricLabel::ResultClass(result)], 1);
     }
 
     /// Publishes the validated live log-retention policy.
@@ -405,7 +471,7 @@ impl RuntimeObserver {
         if let Some(count) = count {
             event = event.with_count(count);
         }
-        if !self.log.try_emit(event) {
+        if self.log.try_emit_outcome(event) == LogEmitOutcome::Full {
             self.increment(MetricName::LogEventsDropped, &[], 1);
         }
         self.observe_count(
@@ -442,12 +508,20 @@ impl RuntimeObserver {
 }
 
 impl ConnectionObserver for RuntimeObserver {
+    fn listener_opened(&self, purpose: ListenerPurpose) {
+        self.listener_lifecycle(purpose, true);
+    }
+
+    fn listener_closed(&self, purpose: ListenerPurpose) {
+        self.listener_lifecycle(purpose, false);
+    }
+
     fn tls_started(&self, _purpose: ListenerPurpose) {
         self.tls_started();
     }
 
-    fn tls_finished(&self, purpose: ListenerPurpose, elapsed_millis: u64) {
-        self.tls_finished(purpose, elapsed_millis);
+    fn tls_finished(&self, purpose: ListenerPurpose, elapsed_millis: u64, outcome: TlsOutcome) {
+        self.tls_finished(purpose, elapsed_millis, outcome);
     }
 
     fn admitted(&self, connection: &AdmittedConnection) {
@@ -636,8 +710,8 @@ mod tests {
             Ok(())
         }
 
-        fn retire_before(&mut self, _hour: u64, _limit: usize) -> io::Result<usize> {
-            Ok(0)
+        fn retire_before(&mut self, _hour: u64, _limit: usize) -> io::Result<bool> {
+            Ok(true)
         }
     }
 
@@ -703,6 +777,30 @@ mod tests {
         assert!(rendered.contains("event=connection_admitted"));
     }
 
+    #[tokio::test]
+    async fn lifecycle_events_use_only_closed_codes_and_purpose() {
+        let (observer, writer) = observer();
+        observer.storage_recovered();
+        observer.storage_indeterminate();
+        observer.state_core_ready();
+        observer.clock_trust_changed(false);
+        observer.clock_trust_changed(true);
+        observer.listener_opened(ListenerPurpose::ClientTls);
+        observer.listener_closed(ListenerPurpose::ClientTls);
+        drop(observer);
+        let (target, failures) = writer.run().await;
+        assert_eq!(failures, 0);
+        let rendered = target.0.join("\n");
+        assert!(rendered.contains("event=storage_recovered"));
+        assert!(rendered.contains("event=storage_indeterminate"));
+        assert!(rendered.contains("event=state_core_ready"));
+        assert!(rendered.contains("event=clock_distrusted"));
+        assert!(rendered.contains("event=clock_trusted"));
+        assert!(rendered.contains("event=listener_opened"));
+        assert!(rendered.contains("event=listener_closed"));
+        assert!(rendered.contains("purpose=client_tls"));
+    }
+
     #[test]
     fn every_command_maps_to_a_closed_class_without_retaining_input() {
         assert_eq!(command_class("CAP"), CommandClass::Capability);
@@ -710,5 +808,123 @@ mod tests {
         assert_eq!(command_class("PRIVMSG"), CommandClass::Message);
         assert_eq!(command_class("attacker supplied text"), CommandClass::Other);
         assert_eq!(UtcSecond::from_unix_seconds(0).get(), 0);
+    }
+
+    #[test]
+    fn command_classification_does_not_count_an_attempt_and_completion_counts_once() {
+        let (observer, _writer) = observer();
+        let class = RuntimeObserver::classify_command("PRIVMSG");
+        let before = observer.metrics().snapshot(MetricsView::Operator);
+        assert!(
+            before
+                .counters
+                .iter()
+                .all(|(key, _)| key.name != MetricName::CommandsHandled)
+        );
+
+        observer.command_classified(class, ResultClass::Rejected);
+        let completed = observer.metrics().snapshot(MetricsView::Operator);
+        let handled = completed
+            .counters
+            .iter()
+            .filter(|(key, _)| key.name == MetricName::CommandsHandled)
+            .collect::<Vec<_>>();
+        assert_eq!(handled.len(), 1);
+        assert_eq!(handled.iter().map(|entry| entry.1).next(), Some(1));
+    }
+
+    #[test]
+    fn signal_reload_records_no_fabricated_command() {
+        let (observer, _writer) = observer();
+        observer.reload(true);
+
+        let snapshot = observer.metrics().snapshot(MetricsView::Operator);
+        assert!(
+            snapshot
+                .counters
+                .iter()
+                .all(|(key, _)| key.name != MetricName::CommandsHandled)
+        );
+        assert_eq!(
+            counter_value(&snapshot, MetricName::Reloads, ResultClass::Ok),
+            1
+        );
+    }
+
+    #[test]
+    fn rehash_reload_and_admin_completion_count_one_command() {
+        let (observer, _writer) = observer();
+        observer.reload(false);
+        observer.admin_action(ResultClass::Rejected);
+
+        let snapshot = observer.metrics().snapshot(MetricsView::Operator);
+        assert_eq!(
+            counter_value(
+                &snapshot,
+                MetricName::CommandsHandled,
+                ResultClass::Rejected
+            ),
+            1
+        );
+        assert_eq!(
+            counter_value(&snapshot, MetricName::Reloads, ResultClass::Rejected),
+            1
+        );
+    }
+
+    fn counter_value(
+        snapshot: &crate::observe::metrics::MetricsSnapshot,
+        name: MetricName,
+        result: ResultClass,
+    ) -> u64 {
+        snapshot
+            .counters
+            .iter()
+            .find(|(key, _)| {
+                key.name == name
+                    && key
+                        .labels
+                        .iter()
+                        .any(|label| label == MetricLabel::ResultClass(result))
+            })
+            .map_or(0, |(_, value)| *value)
+    }
+
+    #[test]
+    fn closed_log_owner_is_not_reported_as_queue_saturation() {
+        let (observer, writer) = observer();
+        drop(writer);
+        observer.process_started();
+        let snapshot = observer.metrics().snapshot(MetricsView::Operator);
+        assert!(
+            snapshot
+                .counters
+                .iter()
+                .all(|(key, _)| key.name != MetricName::LogEventsDropped)
+        );
+    }
+
+    #[test]
+    fn tls_durations_carry_only_the_closed_handshake_outcome() -> Result<(), RuntimeError> {
+        let (observer, writer) = observer();
+        observer.tls_started();
+        observer.tls_finished(ListenerPurpose::ClientTls, 7, TlsOutcome::Established);
+        observer.tls_started();
+        observer.tls_finished(ListenerPurpose::ClientTls, 7, TlsOutcome::Refused);
+        assert_eq!(observer.runtime_values()[2], 0);
+        let snapshot = observer.metrics().snapshot(MetricsView::Operator);
+        let result_labels = snapshot
+            .durations
+            .iter()
+            .filter(|(key, _)| key.name == MetricName::HandshakeDuration)
+            .flat_map(|(key, _)| key.labels.iter())
+            .filter_map(|label| match label {
+                MetricLabel::ResultClass(result) => Some(result),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(result_labels, vec![ResultClass::Ok, ResultClass::Rejected]);
+        drop(writer);
+        Ok(())
     }
 }

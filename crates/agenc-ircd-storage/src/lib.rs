@@ -90,12 +90,13 @@ pub use mutation::{
     StorageAccountingLimits, StorageMutationBatch, StorageMutationHead,
 };
 pub use owner::{
-    STORAGE_COMPLETION_QUEUE_CAPACITY, STORAGE_REQUEST_QUEUE_CAPACITY, StorageCompletion,
-    StorageLimitWriter, StorageOwner, StoragePort,
+    STORAGE_COMPLETION_QUEUE_CAPACITY, STORAGE_REQUEST_QUEUE_CAPACITY,
+    STORAGE_SHUTDOWN_THREAD_NAME, StorageCompletion, StorageLimitWriter, StorageOwner, StoragePort,
+    StorageShutdown,
 };
 pub use platform::{
-    BackupDestination, BackupOutput, FilesystemCapacity, FilesystemTuple, InspectionStateDirectory,
-    StateDirectory, StorageQualification, rename_path_no_replace,
+    BackupDestination, BackupDirectoryReader, BackupOutput, FilesystemCapacity, FilesystemTuple,
+    InspectionStateDirectory, StateDirectory, StorageQualification, rename_path_no_replace,
 };
 pub use qualification::{
     MAX_QUALIFICATION_CASES, MAX_QUALIFICATION_REPORT_BYTES, MAX_QUALIFIED_OBSERVED_GROWTH,

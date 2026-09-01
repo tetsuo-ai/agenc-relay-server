@@ -219,6 +219,7 @@ fn batch(
         reserved_nicknames: Vec::new(),
         session_generation: Generation::new(1)?,
         revision: Revision::new(1)?,
+        admin_suspension_expires_at: None,
     };
     let value = PersistentRecordValue::new(
         TableId::Account,

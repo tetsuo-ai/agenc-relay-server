@@ -5295,7 +5295,7 @@ mod projection_tests {
 mod tests {
     use super::*;
     use crate::model::{
-        MAX_CONTACTS_PER_ACCOUNT, MAX_INVITES_PER_CHANNEL, MAX_INVITES_PER_PRINCIPAL,
+        MAX_CONTACTS_PER_ACCOUNT, MAX_INVITES_PER_CHANNEL, MAX_INVITES_PER_PRINCIPAL, next_revision,
     };
     use crate::{MessageCommand, MessageText};
     use agenc_ircd_types::{AccountRandomId, ControlPolicy, ServerId, SessionId};
@@ -5795,10 +5795,28 @@ mod tests {
     fn committed_admin_policy_suspends_accounts_and_quarantines_delivery() -> Result<(), DomainError>
     {
         let mut fixture = fixture()?;
+        let initial_state_revision = fixture.state.revision();
+        let initial_account_revision = fixture
+            .state
+            .account(fixture.owner_account)
+            .ok_or(DomainError::NotFound)?
+            .revision();
         let expires_at = UtcSecond::from_unix_seconds(100);
         fixture
             .state
             .admin_suspend_account(fixture.owner_account, expires_at)?;
+        assert_eq!(
+            fixture.state.revision(),
+            next_revision(initial_state_revision)?
+        );
+        assert_eq!(
+            fixture
+                .state
+                .account(fixture.owner_account)
+                .ok_or(DomainError::NotFound)?
+                .revision(),
+            initial_account_revision
+        );
         assert!(
             fixture
                 .state
@@ -5814,12 +5832,34 @@ mod tests {
             vec![fixture.owner.user_id]
         );
         fixture.state.admin_restore_account(fixture.owner_account)?;
+        assert_eq!(
+            fixture.state.revision(),
+            next_revision(next_revision(initial_state_revision)?)?
+        );
+        assert_eq!(
+            fixture
+                .state
+                .account(fixture.owner_account)
+                .ok_or(DomainError::NotFound)?
+                .revision(),
+            initial_account_revision
+        );
         assert!(
             !fixture
                 .state
                 .account_has_admin_suspension(fixture.owner_account)
         );
 
+        assert_eq!(
+            fixture.state.admin_quarantine_channel(fixture.channel_id),
+            Err(DomainError::NotFound)
+        );
+        let channel = fixture
+            .state
+            .channels
+            .get_mut(&fixture.channel_id)
+            .ok_or(DomainError::NotFound)?;
+        register_channel_roles(channel);
         fixture.state.admin_quarantine_channel(fixture.channel_id)?;
         let message = MessageCommand::new(
             MessageKind::Privmsg,

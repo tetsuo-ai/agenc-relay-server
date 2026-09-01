@@ -13,6 +13,7 @@ use agenc_ircd_types::{MonotonicTick, TransactionId};
 
 use crate::RuntimeError;
 use crate::connection::sink::ConnectionGeneration;
+use crate::state_core::CommandObservation;
 use crate::state_core::durable::{
     AccountServiceDurableWrite, EntityId, RetainedProjection, touched_entities,
 };
@@ -29,6 +30,7 @@ pub struct StagedOrigin {
     /// The originating connection's queue generation.
     generation: ConnectionGeneration,
     rejection_frames: Vec<WireMessage>,
+    observation: Option<CommandObservation>,
 }
 
 impl StagedOrigin {
@@ -38,6 +40,7 @@ impl StagedOrigin {
         Self {
             generation,
             rejection_frames: Vec::new(),
+            observation: None,
         }
     }
 
@@ -50,7 +53,20 @@ impl StagedOrigin {
         Self {
             generation,
             rejection_frames,
+            observation: None,
         }
+    }
+
+    /// Attaches the input-free observation token for this client command.
+    #[must_use]
+    pub(crate) fn with_observation(mut self, observation: Option<CommandObservation>) -> Self {
+        self.observation = observation;
+        self
+    }
+
+    /// Moves the observation token to the durable completion boundary.
+    pub(crate) fn take_observation(&mut self) -> Option<CommandObservation> {
+        self.observation.take()
     }
 
     /// Returns the generation fenced to this origin.
@@ -111,6 +127,13 @@ impl StagedPlan {
         &self.account_service_writes
     }
 
+    /// Moves the client command observation to its final durable boundary.
+    pub(super) fn take_observation(&mut self) -> Option<CommandObservation> {
+        self.origin
+            .as_mut()
+            .and_then(StagedOrigin::take_observation)
+    }
+
     /// Splits the staged plan into its domain plan and fanout reservation.
     pub(super) fn into_parts(self) -> (MutationPlan, FanoutReservation, Option<StagedOrigin>) {
         (self.plan, self.fanout, self.origin)
@@ -153,12 +176,14 @@ pub(super) enum StageRefusal {
 
 impl PendingMutationBatch {
     /// Opens a batch with its first plan and starts the gather window.
-    pub(super) fn start(plan: StagedPlan, now: MonotonicTick) -> Result<Self, RuntimeError> {
-        let deadline = MonotonicTick::from_ticks(
-            now.get()
-                .checked_add(GATHER_WINDOW_MILLIS)
-                .ok_or(RuntimeError::Overflow)?,
-        );
+    pub(super) fn start(
+        plan: StagedPlan,
+        now: MonotonicTick,
+    ) -> Result<Self, (RuntimeError, Box<StagedPlan>)> {
+        let Some(deadline) = now.get().checked_add(GATHER_WINDOW_MILLIS) else {
+            return Err((RuntimeError::Overflow, Box::new(plan)));
+        };
+        let deadline = MonotonicTick::from_ticks(deadline);
         let reserved = touched_entities(&plan.plan);
         Ok(Self {
             plans: vec![plan],
@@ -169,12 +194,15 @@ impl PendingMutationBatch {
 
     /// Adds a plan to a gathering batch when it chains on the previous plan's
     /// resulting revision and touches no reserved entity.
-    pub(super) fn try_stage(&mut self, plan: StagedPlan) -> Result<(), StageRefusal> {
+    pub(super) fn try_stage(
+        &mut self,
+        plan: StagedPlan,
+    ) -> Result<(), (StageRefusal, Box<StagedPlan>)> {
         if matches!(self.phase, BatchPhase::InFlight { .. }) {
-            return Err(StageRefusal::InFlight);
+            return Err((StageRefusal::InFlight, Box::new(plan)));
         }
         if self.plans.len() >= MAX_BATCH_PLANS {
-            return Err(StageRefusal::Full);
+            return Err((StageRefusal::Full, Box::new(plan)));
         }
         let chained = self
             .plans
@@ -182,7 +210,7 @@ impl PendingMutationBatch {
             .is_some_and(|last| last.plan.resulting_revision() == plan.plan.expected_revision());
         let touched = touched_entities(&plan.plan);
         if !chained || !self.reserved.is_disjoint(&touched) {
-            return Err(StageRefusal::Incompatible);
+            return Err((StageRefusal::Incompatible, Box::new(plan)));
         }
         self.reserved.extend(touched);
         self.plans.push(plan);
@@ -269,6 +297,7 @@ impl PendingMutationBatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::observe::metrics::CommandClass;
     use agenc_ircd_client_wire::numeric_reply;
     use agenc_ircd_domain::{AccountState, DomainState};
     use agenc_ircd_testkit::account_id;
@@ -314,9 +343,18 @@ mod tests {
     }
 
     #[test]
+    fn staged_observation_can_move_to_only_one_completion_boundary() {
+        let mut origin = StagedOrigin::silent(ConnectionGeneration::new(43))
+            .with_observation(Some(CommandObservation::new(CommandClass::Message)));
+        assert!(origin.take_observation().is_some());
+        assert!(origin.take_observation().is_none());
+    }
+
+    #[test]
     fn gathering_closes_at_one_millisecond_and_rejects_entity_conflicts() -> Result<(), RuntimeError>
     {
-        let mut batch = PendingMutationBatch::start(staged(0, 1)?, MonotonicTick::from_ticks(10))?;
+        let mut batch = PendingMutationBatch::start(staged(0, 1)?, MonotonicTick::from_ticks(10))
+            .map_err(|(error, _plan)| error)?;
         assert_eq!(batch.gather_deadline(), Some(MonotonicTick::from_ticks(11)));
         assert!(!batch.gather_due(MonotonicTick::from_ticks(10)));
         batch
@@ -325,7 +363,7 @@ mod tests {
         assert_eq!(batch.len(), 2);
         assert!(matches!(
             batch.try_stage(staged(2, 1)?),
-            Err(StageRefusal::Incompatible)
+            Err((StageRefusal::Incompatible, _))
         ));
         assert!(batch.gather_due(MonotonicTick::from_ticks(11)));
         Ok(())
@@ -333,7 +371,8 @@ mod tests {
 
     #[test]
     fn gathering_accepts_exactly_the_256_plan_boundary() -> Result<(), RuntimeError> {
-        let mut batch = PendingMutationBatch::start(staged(0, 0)?, MonotonicTick::from_ticks(0))?;
+        let mut batch = PendingMutationBatch::start(staged(0, 0)?, MonotonicTick::from_ticks(0))
+            .map_err(|(error, _plan)| error)?;
         for index in 1..MAX_BATCH_PLANS {
             let seed = u8::try_from(index).map_err(|_| RuntimeError::Overflow)?;
             batch
@@ -350,17 +389,17 @@ mod tests {
                 u64::try_from(MAX_BATCH_PLANS).map_err(|_| RuntimeError::Overflow)?,
                 0,
             )?),
-            Err(StageRefusal::Full)
+            Err((StageRefusal::Full, _))
         ));
         Ok(())
     }
 
     #[test]
     fn gathering_deadline_overflow_is_rejected() -> Result<(), RuntimeError> {
-        assert_eq!(
-            PendingMutationBatch::start(staged(0, 1)?, MonotonicTick::from_ticks(u64::MAX)).err(),
-            Some(RuntimeError::Overflow)
-        );
+        let error = PendingMutationBatch::start(staged(0, 1)?, MonotonicTick::from_ticks(u64::MAX))
+            .err()
+            .map(|(error, _plan)| error);
+        assert_eq!(error, Some(RuntimeError::Overflow));
         Ok(())
     }
 }

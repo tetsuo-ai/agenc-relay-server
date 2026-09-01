@@ -175,6 +175,41 @@ pub struct BoundedCryptoPool<J: CryptoJob> {
     shutting_down: Arc<AtomicBool>,
 }
 
+/// Pollable ownership of crypto worker threads after admission has closed.
+///
+/// Normal async shutdown polls until every worker is finished. Dropping is a
+/// joined synchronous fallback for startup failure paths outside Tokio.
+pub struct CryptoPoolShutdown {
+    workers: Vec<JoinHandle<()>>,
+}
+
+impl Drop for CryptoPoolShutdown {
+    fn drop(&mut self) {
+        for worker in self.workers.drain(..) {
+            let _join_result = worker.join();
+        }
+    }
+}
+
+impl CryptoPoolShutdown {
+    /// Joins workers that have already finished and reports whether all are joined.
+    pub fn try_complete(&mut self) -> bool {
+        while self.workers.last().is_some_and(JoinHandle::is_finished) {
+            let Some(worker) = self.workers.pop() else {
+                break;
+            };
+            let _join_result = worker.join();
+        }
+        self.workers.is_empty()
+    }
+
+    fn wait(mut self) {
+        for worker in self.workers.drain(..) {
+            let _join_result = worker.join();
+        }
+    }
+}
+
 impl<J: CryptoJob> BoundedCryptoPool<J> {
     /// Starts exactly the validated number of named OS worker threads.
     pub fn start(config: CryptoWorkerConfig) -> Result<Self, CryptoWorkerError> {
@@ -235,8 +270,18 @@ impl<J: CryptoJob> BoundedCryptoPool<J> {
     /// This blocks the calling thread for up to one full job per worker, so a
     /// Tokio caller should run it through the runtime's blocking pool. Dropping
     /// the pool performs the same join.
-    pub fn shutdown(mut self) {
-        self.join_workers();
+    pub fn shutdown(self) {
+        self.into_shutdown().wait();
+    }
+
+    /// Refuses new work and transfers workers into a nonblocking shutdown value.
+    #[must_use]
+    pub fn into_shutdown(mut self) -> CryptoPoolShutdown {
+        self.shutting_down.store(true, Ordering::Release);
+        drop(self.sender.take());
+        CryptoPoolShutdown {
+            workers: std::mem::take(&mut self.workers),
+        }
     }
 
     fn join_workers(&mut self) {

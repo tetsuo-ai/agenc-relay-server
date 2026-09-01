@@ -6,7 +6,7 @@
 //! older than the retention window in bounded sweeps, and never enables
 //! debug output for a public listener.
 
-use std::fs::{DirBuilder, File, OpenOptions};
+use std::fs::{DirBuilder, File, OpenOptions, ReadDir};
 use std::io::{self, Write as _};
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
@@ -45,6 +45,8 @@ pub const LOG_DIRECTORY_MODE: u32 = 0o700;
 pub const LOG_SEGMENT_MODE: u32 = 0o600;
 /// The operating-system name of the joined blocking log owner.
 pub const LOG_OWNER_THREAD_NAME: &str = "agenc-ircd-log";
+/// The operating-system name of the helper that joins the blocking log owner.
+pub const LOG_SHUTDOWN_THREAD_NAME: &str = "agenc-ircd-log-shutdown";
 
 /// Retention in whole hours, 1..=720.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -119,15 +121,20 @@ impl LogHandle {
     ///
     /// A filtered event is not counted as dropped; a full queue is.
     pub fn try_emit(&self, event: LogEvent) -> bool {
+        self.try_emit_outcome(event) == LogEmitOutcome::Queued
+    }
+
+    pub(crate) fn try_emit_outcome(&self, event: LogEvent) -> LogEmitOutcome {
         if !self.filter.admits(&event) {
-            return false;
+            return LogEmitOutcome::Filtered;
         }
         match self.sender.try_send(LogQueueItem::Event(event)) {
-            Ok(()) => true,
-            Err(_) => {
+            Ok(()) => LogEmitOutcome::Queued,
+            Err(mpsc::error::TrySendError::Full(_)) => {
                 self.dropped.fetch_add(1, Ordering::AcqRel);
-                false
+                LogEmitOutcome::Full
             }
+            Err(mpsc::error::TrySendError::Closed(_)) => LogEmitOutcome::Closed,
         }
     }
 
@@ -151,8 +158,17 @@ impl LogHandle {
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum LogEmitOutcome {
+    Queued,
+    Filtered,
+    Full,
+    Closed,
+}
+
 enum LogQueueItem {
     Event(LogEvent),
+    ContinueRetention,
     Flush(std::sync::mpsc::SyncSender<()>),
     Stop(std::sync::mpsc::SyncSender<()>),
 }
@@ -165,17 +181,21 @@ pub trait LogTarget: Send {
     /// Appends one line to the open segment.
     fn write_line(&mut self, line: &str) -> io::Result<()>;
 
-    /// Deletes at most `limit` segments strictly older than `hour` and
-    /// returns how many were deleted.
-    fn retire_before(&mut self, hour: u64, limit: usize) -> io::Result<usize>;
+    /// Examines and deletes one bounded slice of segments strictly older than
+    /// `hour`, returning whether the complete directory pass finished.
+    fn retire_before(&mut self, hour: u64, limit: usize) -> io::Result<bool>;
 }
 
 /// The writer task state.
 pub struct LogWriter<T: LogTarget> {
     receiver: mpsc::Receiver<LogQueueItem>,
+    maintenance: mpsc::WeakSender<LogQueueItem>,
     target: T,
     retention: Arc<AtomicU64>,
     applied_retention: u64,
+    retention_pending: bool,
+    retention_retry_ready: bool,
+    retention_queued: bool,
     current_hour: Option<u64>,
     dropped: Arc<AtomicU64>,
     reported_dropped: u64,
@@ -205,9 +225,13 @@ impl<T: LogTarget> LogWriter<T> {
         };
         let writer = Self {
             receiver,
+            maintenance: handle.sender.downgrade(),
             target,
             retention: retention_hours,
             applied_retention: retention.get(),
+            retention_pending: false,
+            retention_retry_ready: false,
+            retention_queued: false,
             current_hour: None,
             dropped,
             reported_dropped: 0,
@@ -241,10 +265,15 @@ impl<T: LogTarget> LogWriter<T> {
 
     // agenc-review: focus owner=runtime reviewed=2026-08-31 reason=single blocking-owner dispatch preserves event flush stop drain and acknowledgement ordering on the bounded queue
     fn handle_item(&mut self, item: LogQueueItem) -> bool {
-        match item {
+        let stopped = match item {
             LogQueueItem::Event(event) => {
                 self.write(&event);
                 self.report_dropped(event.utc_second());
+                false
+            }
+            LogQueueItem::ContinueRetention => {
+                self.retention_queued = false;
+                self.continue_retention();
                 false
             }
             LogQueueItem::Flush(reply) => {
@@ -259,6 +288,10 @@ impl<T: LogTarget> LogWriter<T> {
                             self.write(&event);
                             self.report_dropped(event.utc_second());
                         }
+                        LogQueueItem::ContinueRetention => {
+                            self.retention_queued = false;
+                            self.continue_retention();
+                        }
                         LogQueueItem::Flush(waiter) | LogQueueItem::Stop(waiter) => {
                             let _sent = waiter.send(());
                         }
@@ -267,7 +300,11 @@ impl<T: LogTarget> LogWriter<T> {
                 let _sent = reply.send(());
                 true
             }
+        };
+        if !stopped {
+            self.schedule_retention();
         }
+        stopped
     }
 
     /// Writes one event synchronously; segments roll at hour boundaries.
@@ -278,15 +315,12 @@ impl<T: LogTarget> LogWriter<T> {
                 self.write_failures = self.write_failures.saturating_add(1);
                 return;
             }
-        } else {
-            let retention = self.retention.load(Ordering::Acquire);
-            if retention != self.applied_retention {
-                if self.sweep(hour, retention).is_err() {
-                    self.write_failures = self.write_failures.saturating_add(1);
-                } else {
-                    self.applied_retention = retention;
-                }
-            }
+            self.advance_retention(hour);
+        } else if !self.retention_queued
+            && (self.retention_pending
+                || self.retention.load(Ordering::Acquire) != self.applied_retention)
+        {
+            self.advance_retention(hour);
         }
         if self.target.write_line(&event.to_string()).is_err() {
             self.write_failures = self.write_failures.saturating_add(1);
@@ -296,17 +330,60 @@ impl<T: LogTarget> LogWriter<T> {
     fn roll(&mut self, hour: u64) -> io::Result<()> {
         self.target.open_segment(hour)?;
         self.current_hour = Some(hour);
-        let retention = self.retention.load(Ordering::Acquire);
-        self.sweep(hour, retention)?;
-        self.applied_retention = retention;
         Ok(())
     }
 
-    fn sweep(&mut self, hour: u64, retention: u64) -> io::Result<()> {
+    fn sweep(&mut self, hour: u64, retention: u64) -> io::Result<bool> {
         let oldest_kept = hour.saturating_sub(retention.saturating_sub(1));
         self.target
-            .retire_before(oldest_kept, MAX_SEGMENT_DELETIONS_PER_SWEEP)?;
-        Ok(())
+            .retire_before(oldest_kept, MAX_SEGMENT_DELETIONS_PER_SWEEP)
+    }
+
+    fn advance_retention(&mut self, hour: u64) {
+        let retention = self.retention.load(Ordering::Acquire);
+        match self.sweep(hour, retention) {
+            Ok(true) => {
+                self.applied_retention = retention;
+                self.retention_pending = false;
+                self.retention_retry_ready = false;
+            }
+            Ok(false) => {
+                self.retention_pending = true;
+                self.retention_retry_ready = true;
+            }
+            Err(_) => {
+                self.write_failures = self.write_failures.saturating_add(1);
+                self.retention_pending = true;
+                self.retention_retry_ready = false;
+            }
+        }
+    }
+
+    fn continue_retention(&mut self) {
+        let Some(hour) = self.current_hour else {
+            self.retention_pending = false;
+            self.retention_retry_ready = false;
+            return;
+        };
+        if !self.retention_pending
+            && self.retention.load(Ordering::Acquire) == self.applied_retention
+        {
+            self.retention_retry_ready = false;
+            return;
+        }
+        self.advance_retention(hour);
+    }
+
+    fn schedule_retention(&mut self) {
+        if !self.retention_pending || !self.retention_retry_ready || self.retention_queued {
+            return;
+        }
+        let Some(sender) = self.maintenance.upgrade() else {
+            return;
+        };
+        if sender.try_send(LogQueueItem::ContinueRetention).is_ok() {
+            self.retention_queued = true;
+        }
     }
 
     fn report_dropped(&mut self, utc_second: UtcSecond) {
@@ -332,6 +409,12 @@ impl<T: LogTarget> LogWriter<T> {
 pub struct FileLogTarget {
     directory: PathBuf,
     open: Option<File>,
+    retention_cursor: Option<RetentionCursor>,
+}
+
+struct RetentionCursor {
+    oldest_kept: u64,
+    entries: ReadDir,
 }
 
 impl FileLogTarget {
@@ -342,6 +425,7 @@ impl FileLogTarget {
         Self {
             directory,
             open: None,
+            retention_cursor: None,
         }
     }
 
@@ -401,6 +485,103 @@ impl FileLogControl {
 pub struct FileLogOwner {
     control: FileLogControl,
     thread: Option<JoinHandle<u64>>,
+    shutdown_sender: Option<std::sync::mpsc::SyncSender<FileLogShutdownWork>>,
+    shutdown_thread: Option<JoinHandle<Result<u64, RuntimeError>>>,
+}
+
+struct FileLogShutdownWork {
+    control: FileLogControl,
+    thread: JoinHandle<u64>,
+}
+
+impl FileLogShutdownWork {
+    fn run(self) -> Result<u64, RuntimeError> {
+        let stop_result = self.control.stop_blocking();
+        let join_result = self.thread.join().map_err(|_| RuntimeError::Cancelled);
+        stop_result?;
+        join_result
+    }
+}
+
+/// Pollable ownership of the log thread prepared for bounded shutdown.
+///
+/// The named helper is created before the log owner starts, so shutdown never
+/// needs to create an operating-system thread while resources are low.
+pub struct FileLogShutdown {
+    work: Option<FileLogShutdownWork>,
+    sender: Option<std::sync::mpsc::SyncSender<FileLogShutdownWork>>,
+    thread: Option<JoinHandle<Result<u64, RuntimeError>>>,
+    result: Option<Result<u64, RuntimeError>>,
+}
+
+impl FileLogShutdown {
+    /// Starts the blocking owner close on its named helper thread.
+    pub fn start(&mut self) -> Result<(), RuntimeError> {
+        if self.work.is_none() {
+            return self.result.map_or(Ok(()), |result| result.map(|_| ()));
+        }
+        let work = self.work.take().ok_or(RuntimeError::Cancelled)?;
+        let Some(sender) = self.sender.take() else {
+            self.work = Some(work);
+            return Err(RuntimeError::Cancelled);
+        };
+        match sender.try_send(work) {
+            Ok(()) => {
+                drop(sender);
+                Ok(())
+            }
+            Err(
+                std::sync::mpsc::TrySendError::Full(work)
+                | std::sync::mpsc::TrySendError::Disconnected(work),
+            ) => {
+                self.work = Some(work);
+                Err(RuntimeError::Cancelled)
+            }
+        }
+    }
+
+    /// Polls once, joining only after the helper reports it has finished.
+    pub fn try_complete(&mut self) -> Option<Result<u64, RuntimeError>> {
+        if let Some(result) = self.result {
+            return Some(result);
+        }
+        let thread = self.thread.as_ref()?;
+        if !thread.is_finished() {
+            return None;
+        }
+        let result = self
+            .thread
+            .take()
+            .and_then(|thread| thread.join().ok())
+            .unwrap_or(Err(RuntimeError::Cancelled));
+        self.result = Some(result);
+        Some(result)
+    }
+
+    fn wait(mut self) -> Result<u64, RuntimeError> {
+        if let Err(start_error) = self.start() {
+            let cleanup = self.work.take().ok_or(RuntimeError::Cancelled)?.run();
+            drop(self.sender.take());
+            let helper = self
+                .thread
+                .take()
+                .map(|thread| thread.join().map_err(|_| RuntimeError::Cancelled))
+                .transpose()?;
+            cleanup?;
+            if let Some(result) = helper {
+                result?;
+            }
+            return Err(start_error);
+        }
+        if let Some(result) = self.result {
+            return result;
+        }
+        self.thread
+            .take()
+            .ok_or(RuntimeError::Cancelled)?
+            .join()
+            .map_err(|_| RuntimeError::Cancelled)?
+    }
 }
 
 impl FileLogOwner {
@@ -423,13 +604,30 @@ impl FileLogOwner {
         let control = FileLogControl {
             sender: handle.sender.clone(),
         };
-        let thread = thread::Builder::new()
+        let (shutdown_sender, shutdown_receiver) = std::sync::mpsc::sync_channel(1);
+        let shutdown_thread = thread::Builder::new()
+            .name(LOG_SHUTDOWN_THREAD_NAME.to_owned())
+            .spawn(move || match shutdown_receiver.recv() {
+                Ok(work) => FileLogShutdownWork::run(work),
+                Err(_) => Err(RuntimeError::Cancelled),
+            })?;
+        let thread = match thread::Builder::new()
             .name(LOG_OWNER_THREAD_NAME.to_owned())
-            .spawn(move || writer.run_blocking())?;
+            .spawn(move || writer.run_blocking())
+        {
+            Ok(thread) => thread,
+            Err(error) => {
+                drop(shutdown_sender);
+                let _ = shutdown_thread.join();
+                return Err(error);
+            }
+        };
         Ok((
             Self {
                 control,
                 thread: Some(thread),
+                shutdown_sender: Some(shutdown_sender),
+                shutdown_thread: Some(shutdown_thread),
             },
             handle,
         ))
@@ -449,26 +647,45 @@ impl FileLogOwner {
             .and_then(|thread| thread.thread().name())
     }
 
+    /// Transfers the owner into a pollable shutdown value without blocking.
+    #[must_use]
+    pub fn into_shutdown(mut self) -> FileLogShutdown {
+        let work = self.thread.take().map(|thread| FileLogShutdownWork {
+            control: self.control.clone(),
+            thread,
+        });
+        FileLogShutdown {
+            result: (work.is_none() && self.shutdown_thread.is_none()).then_some(Ok(0)),
+            work,
+            sender: self.shutdown_sender.take(),
+            thread: self.shutdown_thread.take(),
+        }
+    }
+
     /// Stops and joins the named thread on Tokio's blocking pool.
-    pub async fn shutdown(mut self) -> Result<u64, RuntimeError> {
-        let thread = self.thread.take().ok_or(RuntimeError::InvalidValue)?;
-        let control = self.control.clone();
-        tokio::task::spawn_blocking(move || {
-            control.stop_blocking()?;
-            thread.join().map_err(|_| RuntimeError::Cancelled)
-        })
-        .await
-        .map_err(|_| RuntimeError::Cancelled)?
+    pub async fn shutdown(self) -> Result<u64, RuntimeError> {
+        tokio::task::spawn_blocking(move || self.into_shutdown().wait())
+            .await
+            .map_err(|_| RuntimeError::Cancelled)?
     }
 }
 
 impl Drop for FileLogOwner {
     fn drop(&mut self) {
-        let Some(thread) = self.thread.take() else {
+        let work = self.thread.take().map(|thread| FileLogShutdownWork {
+            control: self.control.clone(),
+            thread,
+        });
+        if work.is_none() && self.shutdown_thread.is_none() {
             return;
+        }
+        let shutdown = FileLogShutdown {
+            result: None,
+            work,
+            sender: self.shutdown_sender.take(),
+            thread: self.shutdown_thread.take(),
         };
-        let _stopped = self.control.stop_blocking();
-        let _joined = thread.join();
+        let _result = shutdown.wait();
     }
 }
 
@@ -538,23 +755,61 @@ impl LogTarget for FileLogTarget {
         file.write_all(b"\n")
     }
 
-    fn retire_before(&mut self, hour: u64, limit: usize) -> io::Result<usize> {
-        let mut deleted = 0;
-        for entry in std::fs::read_dir(&self.directory)?.take(MAX_DIRECTORY_ENTRIES_PER_SWEEP) {
-            if deleted >= limit {
-                break;
-            }
-            let entry = entry?;
-            let name = entry.file_name();
-            let Some(segment) = name.to_str().and_then(segment_hour) else {
-                continue;
-            };
-            if segment < hour && remove_segment(&entry.path())? {
-                deleted = deleted.saturating_add(1);
-            }
-        }
-        Ok(deleted)
+    fn retire_before(&mut self, hour: u64, limit: usize) -> io::Result<bool> {
+        self.retire_before_bounded(hour, limit, MAX_DIRECTORY_ENTRIES_PER_SWEEP)
     }
+}
+
+impl FileLogTarget {
+    fn retire_before_bounded(
+        &mut self,
+        hour: u64,
+        deletion_limit: usize,
+        entry_limit: usize,
+    ) -> io::Result<bool> {
+        if self
+            .retention_cursor
+            .as_ref()
+            .is_none_or(|cursor| cursor.oldest_kept != hour)
+        {
+            self.retention_cursor = Some(RetentionCursor {
+                oldest_kept: hour,
+                entries: std::fs::read_dir(&self.directory)?,
+            });
+        }
+        let result = match self.retention_cursor.as_mut() {
+            Some(cursor) => scan_retention_cursor(cursor, deletion_limit, entry_limit),
+            None => Ok(true),
+        };
+        if !matches!(&result, Ok(false)) {
+            self.retention_cursor = None;
+        }
+        result
+    }
+}
+
+fn scan_retention_cursor(
+    cursor: &mut RetentionCursor,
+    deletion_limit: usize,
+    entry_limit: usize,
+) -> io::Result<bool> {
+    let mut deleted = 0_usize;
+    let mut examined = 0_usize;
+    while deleted < deletion_limit && examined < entry_limit {
+        let Some(entry) = cursor.entries.next() else {
+            return Ok(true);
+        };
+        let entry = entry?;
+        examined = examined.saturating_add(1);
+        let name = entry.file_name();
+        let Some(segment) = name.to_str().and_then(segment_hour) else {
+            continue;
+        };
+        if segment < cursor.oldest_kept && remove_segment(&entry.path())? {
+            deleted = deleted.saturating_add(1);
+        }
+    }
+    Ok(false)
 }
 
 fn remove_segment(path: &Path) -> io::Result<bool> {
@@ -609,7 +864,7 @@ mod tests {
             Ok(())
         }
 
-        fn retire_before(&mut self, hour: u64, limit: usize) -> io::Result<usize> {
+        fn retire_before(&mut self, hour: u64, limit: usize) -> io::Result<bool> {
             let victims: Vec<u64> = self
                 .segments
                 .keys()
@@ -620,7 +875,7 @@ mod tests {
             for victim in &victims {
                 self.segments.remove(victim);
             }
-            Ok(victims.len())
+            Ok(!self.segments.keys().any(|segment| *segment < hour))
         }
     }
 
@@ -736,6 +991,14 @@ mod tests {
     }
 
     #[test]
+    fn a_closed_writer_is_not_counted_as_queue_saturation() {
+        let (writer, handle) = writer(MemoryTarget::new(), 24);
+        drop(writer);
+        assert!(!handle.try_emit(event(LogEventCode::ConnectionAdmitted, Severity::Info, 1,)));
+        assert_eq!(handle.dropped(), 0);
+    }
+
+    #[test]
     fn target_failures_are_counted_and_never_block() {
         let mut failing = MemoryTarget::new();
         failing.fail_open = true;
@@ -788,8 +1051,8 @@ mod tests {
         target.open_segment(2)?;
         target.write_line("three")?;
         std::fs::write(directory.join("unrelated.txt"), b"keep")?;
-        assert_eq!(target.retire_before(2, 64)?, 1);
-        assert_eq!(target.retire_before(2, 64)?, 0);
+        assert!(target.retire_before(2, 64)?);
+        assert!(target.retire_before(2, 64)?);
         let remaining = std::fs::read_to_string(directory.join("agenc-ircd-2.log"))?;
         assert_eq!(remaining, "three\n");
         assert!(!directory.join("agenc-ircd-1.log").exists());
@@ -797,6 +1060,64 @@ mod tests {
         assert!(remove_segment(&directory.join("agenc-ircd-9.log")).is_ok_and(|removed| !removed));
         std::fs::remove_dir_all(&directory)?;
         Ok(())
+    }
+
+    #[test]
+    fn file_retention_cursor_resumes_after_the_entry_bound() -> io::Result<()> {
+        let directory = std::env::temp_dir().join(format!(
+            "agenc-ircd-log-cursor-{}-{}",
+            std::process::id(),
+            CorrelationSource::new(8).next().get()
+        ));
+        std::fs::create_dir_all(&directory)?;
+        for hour in 0..3 {
+            std::fs::write(
+                directory.join(format!("{SEGMENT_PREFIX}{hour}{SEGMENT_SUFFIX}")),
+                b"old\n",
+            )?;
+        }
+        let mut target = FileLogTarget::new(directory.clone());
+        assert!(!target.retire_before_bounded(3, 64, 2)?);
+        assert_eq!(std::fs::read_dir(&directory)?.count(), 1);
+        assert!(target.retire_before_bounded(3, 64, 2)?);
+        assert_eq!(std::fs::read_dir(&directory)?.count(), 0);
+        std::fs::remove_dir_all(&directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn writer_schedules_bounded_retention_until_the_pass_completes() {
+        let mut target = MemoryTarget::new();
+        for hour in 0..130 {
+            target.segments.insert(hour, Vec::new());
+        }
+        let (mut writer, _handle) = writer(target, 1);
+        assert!(!writer.handle_item(LogQueueItem::Event(event(
+            LogEventCode::ProcessStarted,
+            Severity::Info,
+            200 * SECONDS_PER_HOUR,
+        ))));
+        assert_eq!(
+            writer
+                .target
+                .segments
+                .keys()
+                .filter(|hour| **hour < 200)
+                .count(),
+            66
+        );
+        let mut continuations = 0_usize;
+        while let Ok(item) = writer.receiver.try_recv() {
+            assert!(matches!(&item, LogQueueItem::ContinueRetention));
+            continuations = continuations.saturating_add(1);
+            assert!(!writer.handle_item(item));
+        }
+        assert_eq!(continuations, 2);
+        assert_eq!(
+            writer.target.segments.keys().copied().collect::<Vec<_>>(),
+            vec![200]
+        );
+        assert!(!writer.retention_pending);
     }
 
     #[test]
@@ -863,13 +1184,31 @@ mod tests {
             LOG_SEGMENT_MODE
         );
         drop(handle);
+        let mut shutdown = owner.into_shutdown();
+        shutdown
+            .start()
+            .map_err(|_| io::Error::other("shutdown start failed"))?;
         assert_eq!(
-            owner
-                .shutdown()
-                .await
-                .map_err(|_| io::Error::other("shutdown failed"))?,
-            0
+            shutdown
+                .thread
+                .as_ref()
+                .and_then(|thread| thread.thread().name()),
+            Some(LOG_SHUTDOWN_THREAD_NAME)
         );
+        let failures = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if let Some(result) = shutdown.try_complete() {
+                    break result;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| io::Error::other("shutdown timed out"))?
+        .map_err(|_| io::Error::other("shutdown failed"))?;
+        assert_eq!(failures, 0);
+        assert_eq!(shutdown.try_complete(), Some(Ok(0)));
+        assert!(shutdown.start().is_ok(), "completed shutdown is idempotent");
         std::fs::remove_dir_all(data_directory)?;
         Ok(())
     }

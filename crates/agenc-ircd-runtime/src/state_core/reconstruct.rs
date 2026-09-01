@@ -1122,6 +1122,7 @@ mod tests {
             reserved_nicknames: nickname.into_iter().collect(),
             session_generation: Generation::new(1).map_err(|_| RuntimeError::InvalidValue)?,
             revision: Revision::new(1).map_err(|_| RuntimeError::InvalidValue)?,
+            admin_suspension_expires_at: None,
         })
     }
 

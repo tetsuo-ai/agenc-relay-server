@@ -142,6 +142,8 @@ pub enum MetricName {
     ConnectionsClosed,
     /// Commands handled, by class and result.
     CommandsHandled,
+    /// Configuration reload outcomes, by result.
+    Reloads,
     /// Current depth of a bounded queue.
     QueueDepth,
     /// TLS handshake duration.

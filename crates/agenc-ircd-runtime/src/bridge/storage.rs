@@ -279,6 +279,58 @@ pub struct StorageBridge {
     next_checkpoint_id: u64,
 }
 
+/// Pollable ownership of a storage bridge thread after its handoff is closed.
+///
+/// Normal async shutdown polls until the bridge finishes. Dropping is a joined
+/// synchronous fallback for startup failure paths outside Tokio.
+pub struct StorageBridgeShutdown {
+    thread: Option<JoinHandle<()>>,
+    result: Option<Result<(), RuntimeError>>,
+}
+
+impl Drop for StorageBridgeShutdown {
+    fn drop(&mut self) {
+        if let Some(thread) = self.thread.take() {
+            let _join_result = thread.join();
+        }
+    }
+}
+
+impl StorageBridgeShutdown {
+    /// Polls once, joining only after the bridge thread reports it has finished.
+    pub fn try_complete(&mut self) -> Option<Result<(), RuntimeError>> {
+        if let Some(result) = self.result {
+            return Some(result);
+        }
+        let thread = self.thread.as_ref()?;
+        if !thread.is_finished() {
+            return None;
+        }
+        let result = self
+            .thread
+            .take()
+            .and_then(|thread| thread.join().ok())
+            .map_or_else(
+                || Err(RuntimeError::Storage(StorageError::Unavailable)),
+                |()| Ok(()),
+            );
+        self.result = Some(result);
+        Some(result)
+    }
+
+    fn wait(mut self) -> Result<(), RuntimeError> {
+        if let Some(result) = self.result {
+            return result;
+        }
+        let Some(thread) = self.thread.take() else {
+            return Ok(());
+        };
+        thread
+            .join()
+            .map_err(|_| RuntimeError::Storage(StorageError::Unavailable))
+    }
+}
+
 /// A started bridge and its three sole StateCore completion receivers.
 pub type StartedStorageBridge = (
     StorageBridge,
@@ -465,23 +517,26 @@ impl StorageBridge {
         &self.port
     }
 
+    /// Closes the handoff and transfers the thread into pollable ownership.
+    #[must_use]
+    pub fn into_shutdown(mut self) -> StorageBridgeShutdown {
+        drop(self.handoff.take());
+        StorageBridgeShutdown {
+            result: self.thread.is_none().then_some(Ok(())),
+            thread: self.thread.take(),
+        }
+    }
+
     /// Closes the handoff and joins the bridge thread after it forwards
     /// every pending outcome.
-    pub fn shutdown(mut self) -> Result<(), RuntimeError> {
-        drop(self.handoff.take());
-        let Some(thread) = self.thread.take() else {
-            return Ok(());
-        };
-        thread
-            .join()
-            .map_err(|_| RuntimeError::Storage(StorageError::Unavailable))
+    pub fn shutdown(self) -> Result<(), RuntimeError> {
+        self.into_shutdown().wait()
     }
 }
 
 impl Drop for StorageBridge {
-    /// Dropping closes the handoff and joins the thread, blocking until every
-    /// pending outcome was forwarded or the receiver is gone; call
-    /// [`StorageBridge::shutdown`] to observe the join result.
+    /// Dropping closes the handoff and joins the thread. Production async
+    /// ownership paths call [`StorageBridge::into_shutdown`] before Drop.
     fn drop(&mut self) {
         drop(self.handoff.take());
         if let Some(thread) = self.thread.take() {
