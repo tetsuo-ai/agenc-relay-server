@@ -23,7 +23,6 @@ use crate::sync::{Arc, Mutex, lock};
 pub struct TransportAdmission {
     state: Mutex<TransportAdmissionState>,
     budget: Arc<MemoryBudget>,
-    direct_per_address: u64,
     observer: Mutex<Option<Arc<RuntimeObserver>>>,
     prefix_expiry_changed: Notify,
 }
@@ -33,6 +32,7 @@ struct TransportAdmissionState {
     buckets: BucketTable,
     prefixes: PrefixRegistry,
     direct_hosts: AccountedHashTable<SourceAddressKey, u64>,
+    direct_per_address: u64,
     overload: OverloadState,
 }
 
@@ -53,10 +53,10 @@ impl TransportAdmission {
                 buckets: BucketTable::new(limits, Arc::clone(&budget)),
                 prefixes: PrefixRegistry::new(Arc::clone(&budget)),
                 direct_hosts: AccountedHashTable::new(MAX_CLIENT_CONNECTIONS, Arc::clone(&budget)),
+                direct_per_address,
                 overload: OverloadState::new(),
             }),
             budget,
-            direct_per_address,
             observer: Mutex::new(None),
             prefix_expiry_changed: Notify::new(),
         })
@@ -91,9 +91,12 @@ impl TransportAdmission {
         self.prefix_expiry_changed.notified().await;
     }
 
-    /// Atomically installs validated transport bucket rates.
-    pub fn reload(&self, limits: RateLimits) {
-        lock(&self.state).buckets.reload(limits);
+    /// Atomically installs validated transport rates and the direct-host
+    /// ceiling without changing retained connection counts.
+    pub(crate) fn reload(&self, limits: RateLimits, direct_per_address: u64) {
+        let mut state = lock(&self.state);
+        state.buckets.reload(limits);
+        state.direct_per_address = direct_per_address;
     }
 }
 
@@ -109,9 +112,7 @@ impl AcceptAdmission for TransportAdmission {
         } else {
             let now = state.clock.now();
             let admitted = match purpose {
-                ListenerPurpose::ClientTls => {
-                    state.admit_direct(source, now, self.direct_per_address)
-                }
+                ListenerPurpose::ClientTls => state.admit_direct(source, now),
                 ListenerPurpose::ClientOnion => state.admit_onion(now),
                 ListenerPurpose::ClientWss
                 | ListenerPurpose::Federation
@@ -157,15 +158,10 @@ impl AcceptAdmission for TransportAdmission {
 }
 
 impl TransportAdmissionState {
-    fn admit_direct(
-        &mut self,
-        source: SourceAddressKey,
-        now: MonotonicTick,
-        direct_per_address: u64,
-    ) -> bool {
+    fn admit_direct(&mut self, source: SourceAddressKey, now: MonotonicTick) -> bool {
         let host = source.host_key();
         let current = self.direct_hosts.get(&host).copied().unwrap_or(0);
-        if current >= direct_per_address {
+        if current >= self.direct_per_address {
             return false;
         }
         let Some(next) = current.checked_add(1) else {
@@ -335,6 +331,44 @@ mod tests {
         assert_eq!(
             admission.admit(ListenerPurpose::ClientTls, source),
             AdmissionVerdict::Admit
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reload_changes_the_direct_host_ceiling_without_resetting_live_counts()
+    -> Result<(), RuntimeError> {
+        let (admission, _, _) = admission(3, TEST_BUDGET_BYTES)?;
+        let source = SourceAddressKey::ipv4([192, 0, 2, 8]);
+        assert_eq!(
+            admission.admit(ListenerPurpose::ClientTls, source),
+            AdmissionVerdict::Admit
+        );
+        assert_eq!(
+            admission.admit(ListenerPurpose::ClientTls, source),
+            AdmissionVerdict::Admit
+        );
+
+        admission.reload(RateLimits::defaults(), 1);
+        assert_eq!(
+            admission.admit(ListenerPurpose::ClientTls, source),
+            AdmissionVerdict::Refuse
+        );
+        let _closed_at = admission.released(ListenerPurpose::ClientTls, source);
+        assert_eq!(
+            admission.admit(ListenerPurpose::ClientTls, source),
+            AdmissionVerdict::Refuse,
+            "the surviving connection still occupies the lowered ceiling"
+        );
+
+        admission.reload(RateLimits::defaults(), 2);
+        assert_eq!(
+            admission.admit(ListenerPurpose::ClientTls, source),
+            AdmissionVerdict::Admit
+        );
+        assert_eq!(
+            admission.admit(ListenerPurpose::ClientTls, source),
+            AdmissionVerdict::Refuse
         );
         Ok(())
     }

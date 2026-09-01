@@ -2135,7 +2135,7 @@ impl StateCore {
         self.context.motd = snapshot.motd_arc();
         self.context.public_info = snapshot.public_info_arc();
         if let Some(admission) = &self.reload_admission {
-            admission.reload(snapshot.rates());
+            admission.reload(snapshot.rates(), snapshot.direct_connections_per_address());
         }
         self.router.config_reloaded(&mut self.context, snapshot);
         if let Some(observer) = &self.context.observer {

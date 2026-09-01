@@ -337,6 +337,13 @@ impl RuntimeConfigSnapshot {
         usize::try_from(self.config.limits.values.get(LimitKey::TlsHandshakes)).ok()
     }
 
+    pub(crate) fn direct_connections_per_address(&self) -> u64 {
+        self.config
+            .limits
+            .values
+            .get(LimitKey::DirectConnectionsPerAddress)
+    }
+
     /// Returns the currently configured four-phase shutdown budget.
     #[must_use]
     pub const fn shutdown_plan(&self) -> ShutdownPlan {
@@ -1023,6 +1030,14 @@ mod tests {
         assert_eq!(snapshot.history_default(), HistoryDefault::OneDay);
         assert_eq!(snapshot.sanction_windows().session_hours(), 24);
         assert_eq!(snapshot.sanction_windows().account_days(), 30);
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_carries_the_validated_direct_connection_ceiling()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let snapshot = snapshot()?;
+        assert_eq!(snapshot.direct_connections_per_address(), 16);
         Ok(())
     }
 
