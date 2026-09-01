@@ -15,6 +15,8 @@ TMPFILES = ROOT / "deploy/tmpfiles.d/agenc-ircd.conf"
 TOR = ROOT / "deploy/tor/agenc-ircd.torrc.snippet"
 
 SOCKET_ACCESS_GROUP = "agenc-ircd-sockets"
+TOR_HIDDEN_SERVICE_DIRECTORY = "/var/lib/tor/agenc-ircd"
+TOR_INACCESSIBLE_PATH = f"-{TOR_HIDDEN_SERVICE_DIRECTORY}"
 SOCKET_ACCESS_COMMAND = (
     "/usr/bin/setfacl --modify "
     f"group:{SOCKET_ACCESS_GROUP}:r-x,"
@@ -33,6 +35,7 @@ PROFILE_FAMILIES = {
 }
 
 SERVICE_VALUES = {
+    ("Unit", "Description"): "AgenC IRC daemon",
     ("Unit", "After"): "network-online.target",
     ("Unit", "Wants"): "network-online.target",
     ("Service", "Type"): "simple",
@@ -42,6 +45,7 @@ SERVICE_VALUES = {
     ("Service", "NoNewPrivileges"): "yes",
     ("Service", "ProtectSystem"): "strict",
     ("Service", "ProtectHome"): "yes",
+    ("Service", "InaccessiblePaths"): TOR_INACCESSIBLE_PATH,
     ("Service", "PrivateTmp"): "yes",
     ("Service", "PrivateDevices"): "yes",
     ("Service", "ProtectKernelModules"): "yes",
@@ -85,15 +89,21 @@ SERVICE_MULTI_VALUES = {
 }
 
 TMPFILE_VALUES = {
-    "/etc/agenc-ircd": ("d", "0750", "root", "agenc-ircd"),
-    "/etc/agenc-ircd/tls": ("d", "0750", "root", "agenc-ircd"),
-    "/var/lib/agenc-ircd": ("d", "0700", "agenc-ircd", "agenc-ircd"),
-    "/var/lib/agenc-ircd/backups": ("d", "0700", "agenc-ircd", "agenc-ircd"),
-    "/var/lib/agenc-ircd/keys": ("d", "0700", "agenc-ircd", "agenc-ircd"),
-    "/var/lib/agenc-ircd/logs": ("d", "0700", "agenc-ircd", "agenc-ircd"),
-    "/var/lib/agenc-ircd/state": ("d", "0700", "agenc-ircd", "agenc-ircd"),
-    "/var/lib/agenc-ircd/trust": ("d", "0700", "agenc-ircd", "agenc-ircd"),
-    "/var/log/agenc-ircd": ("d", "0700", "agenc-ircd", "agenc-ircd"),
+    "/etc/agenc-ircd": ("d", "0750", "root", "agenc-ircd", "-"),
+    "/etc/agenc-ircd/tls": ("d", "0750", "root", "agenc-ircd", "-"),
+    "/var/lib/agenc-ircd": ("d", "0700", "agenc-ircd", "agenc-ircd", "-"),
+    "/var/lib/agenc-ircd/backups": (
+        "d",
+        "0700",
+        "agenc-ircd",
+        "agenc-ircd",
+        "-",
+    ),
+    "/var/lib/agenc-ircd/keys": ("d", "0700", "agenc-ircd", "agenc-ircd", "-"),
+    "/var/lib/agenc-ircd/logs": ("d", "0700", "agenc-ircd", "agenc-ircd", "-"),
+    "/var/lib/agenc-ircd/state": ("d", "0700", "agenc-ircd", "agenc-ircd", "-"),
+    "/var/lib/agenc-ircd/trust": ("d", "0700", "agenc-ircd", "agenc-ircd", "-"),
+    "/var/log/agenc-ircd": ("d", "0700", "agenc-ircd", "agenc-ircd", "-"),
 }
 
 
@@ -132,12 +142,12 @@ def validate_service(text: str) -> tuple[list[str], dict[tuple[str, str], list[s
         if values.get(key, []) != expected:
             errors.append(f"service: {key[0]}.{key[1]} has an invalid directive set")
     allowed_multi = set(SERVICE_MULTI_VALUES)
+    allowed = set(SERVICE_VALUES) | allowed_multi
     for key, entries in values.items():
+        if key not in allowed:
+            errors.append(f"service: unreviewed directive {key[0]}.{key[1]}")
         if len(entries) > 1 and key not in allowed_multi:
             errors.append(f"service: duplicate directive {key[0]}.{key[1]}")
-    for forbidden in ("BindPaths", "TemporaryFileSystem"):
-        if ("Service", forbidden) in values:
-            errors.append(f"service: unreviewed writable mapping {forbidden}")
     if "ListenStream=" in text or "LISTEN_FDS" in text:
         errors.append("service: socket activation is not supported")
     return errors, values
@@ -164,27 +174,33 @@ def validate_profiles(profiles: dict[str, str]) -> list[str]:
     return errors
 
 
-def parse_tmpfiles(text: str) -> tuple[dict[str, list[tuple[str, str, str, str]]], list[str]]:
-    entries: dict[str, list[tuple[str, str, str, str]]] = {}
+def parse_tmpfiles(
+    text: str,
+) -> tuple[dict[str, list[tuple[str, str, str, str, str]]], list[str]]:
+    entries: dict[str, list[tuple[str, str, str, str, str]]] = {}
     errors: list[str] = []
     for line_number, raw_line in enumerate(text.splitlines(), 1):
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
         fields = line.split()
-        if len(fields) < 5:
+        if len(fields) != 6:
             errors.append(f"tmpfiles:{line_number}: malformed entry")
             continue
-        kind, path, mode, user, group = fields[:5]
-        entries.setdefault(path, []).append((kind, mode, user, group))
+        kind, path, mode, user, group, age = fields
+        entries.setdefault(path, []).append((kind, mode, user, group, age))
     return entries, errors
 
 
-def validate_tmpfiles(text: str) -> tuple[list[str], dict[str, list[tuple[str, str, str, str]]]]:
+def validate_tmpfiles(
+    text: str,
+) -> tuple[list[str], dict[str, list[tuple[str, str, str, str, str]]]]:
     entries, errors = parse_tmpfiles(text)
     for path, expected in TMPFILE_VALUES.items():
         if entries.get(path, []) != [expected]:
             errors.append(f"tmpfiles: {path} must occur once with mode and ownership {expected}")
+    for path in sorted(set(entries) - set(TMPFILE_VALUES)):
+        errors.append(f"tmpfiles: unreviewed path {path}")
     return errors, entries
 
 
@@ -219,26 +235,14 @@ def managed_paths(
     ]
 
 
-def daemon_can_write(mode_text: str, user: str, group: str) -> bool:
-    try:
-        mode = int(mode_text, 8)
-    except ValueError:
-        return True
-    return bool(
-        (user == "agenc-ircd" and mode & 0o200)
-        or (group == "agenc-ircd" and mode & 0o020)
-        or mode & 0o002
-    )
-
-
 def validate_tor(
     text: str,
     service_values: dict[tuple[str, str], list[str]],
-    tmpfile_entries: dict[str, list[tuple[str, str, str, str]]],
+    tmpfile_entries: dict[str, list[tuple[str, str, str, str, str]]],
 ) -> list[str]:
     values, errors = parse_tor(text)
     expected = {
-        "HiddenServiceDir": ["/var/lib/tor/agenc-ircd"],
+        "HiddenServiceDir": [TOR_HIDDEN_SERVICE_DIRECTORY],
         "HiddenServiceVersion": ["3"],
         "HiddenServicePort": ["6697 unix:/run/agenc-ircd/onion.sock"],
     }
@@ -247,6 +251,10 @@ def validate_tor(
         return errors
 
     hidden = PurePosixPath(values["HiddenServiceDir"][0])
+    if service_values.get(("Service", "InaccessiblePaths"), []) != [
+        f"-{hidden}"
+    ]:
+        errors.append("tor: hidden-service keys are not masked from the daemon")
     writable = service_values.get(("Service", "ReadWritePaths"), [""])[0].split()
     writable.extend(managed_paths(service_values, "StateDirectory", "/var/lib"))
     writable.extend(managed_paths(service_values, "LogsDirectory", "/var/log"))
@@ -254,13 +262,10 @@ def validate_tor(
     if any(is_within(hidden, PurePosixPath(path)) for path in writable):
         errors.append("tor: hidden-service keys are inside a daemon-writable service path")
 
-    for path_text, records in tmpfile_entries.items():
+    for path_text in tmpfile_entries:
         path = PurePosixPath(path_text)
-        if not is_within(hidden, path):
-            continue
-        for _, mode, user, group in records:
-            if daemon_can_write(mode, user, group):
-                errors.append("tor: hidden-service keys inherit daemon-writable ownership")
+        if is_within(path, hidden) or is_within(hidden, path):
+            errors.append("tor: hidden-service directory ownership must be left to Tor")
     return errors
 
 
@@ -317,15 +322,21 @@ def self_test() -> list[str]:
     cases = [
         (service.replace("NoNewPrivileges=yes", "NoNewPrivileges=no"), profiles, sysusers, tmpfiles, tor, False),
         (service + "\n[Service]\nNoNewPrivileges=no\n", profiles, sysusers, tmpfiles, tor, False),
+        (service + "\n[Service]\nSupplementaryGroups=debian-tor\n", profiles, sysusers, tmpfiles, tor, False),
+        (service.replace("InaccessiblePaths=-/var/lib/tor/agenc-ircd\n", ""), profiles, sysusers, tmpfiles, tor, False),
+        (service.replace("@resources ", ""), profiles, sysusers, tmpfiles, tor, False),
         (service.replace("StateDirectory=agenc-ircd/state agenc-ircd/backups agenc-ircd/logs", "StateDirectory=agenc-ircd"), profiles, sysusers, tmpfiles, tor, False),
         (service.replace("/var/lib/agenc-ircd/state", "/var/lib"), profiles, sysusers, tmpfiles, tor, False),
         (service, profiles, sysusers, tmpfiles, tor, True),
         (service, profiles, "", tmpfiles, tor, False),
         (service, profiles, sysusers, tmpfiles.replace("/var/lib/agenc-ircd/keys 0700", "/var/lib/agenc-ircd/keys 0755"), tor, False),
+        (service, profiles, sysusers, tmpfiles.replace("/var/lib/agenc-ircd/keys 0700 agenc-ircd agenc-ircd -", "/var/lib/agenc-ircd/keys 0700 agenc-ircd agenc-ircd 1s"), tor, False),
         (service, {**profiles, "direct.conf": profiles["direct.conf"].replace("AF_UNIX ", "")}, sysusers, tmpfiles, tor, False),
         (service, {**profiles, "onion-local-admin.conf": profiles["onion-local-admin.conf"].replace("AF_UNIX", "AF_UNIX AF_INET")}, sysusers, tmpfiles, tor, False),
         (service, profiles, sysusers, tmpfiles, tor.replace("/var/lib/tor/agenc-ircd", "/var/lib/agenc-ircd/tor"), False),
         (service, profiles, sysusers, tmpfiles + "\nd /var/lib/tor/agenc-ircd 0700 agenc-ircd agenc-ircd -\n", tor, False),
+        (service, profiles, sysusers, tmpfiles + "\nd /var/lib/tor/agenc-ircd 0700 root root -\n", tor, False),
+        (service, profiles, sysusers, tmpfiles + "\nd /run/other 0700 agenc-ircd agenc-ircd -\n", tor, False),
         (service.replace(SOCKET_ACCESS_COMMAND, SOCKET_ACCESS_COMMAND.replace("r-x", "rwx", 1)), profiles, sysusers, tmpfiles, tor, False),
         (service.replace(",default:group:agenc-ircd-sockets:rw-", ""), profiles, sysusers, tmpfiles, tor, False),
         (service, profiles, sysusers.replace("g agenc-ircd-sockets -\n", ""), tmpfiles, tor, False),

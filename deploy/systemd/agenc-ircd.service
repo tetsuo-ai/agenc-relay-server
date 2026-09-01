@@ -11,6 +11,7 @@ UMask=0077
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
+InaccessiblePaths=-/var/lib/tor/agenc-ircd
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectKernelModules=yes
