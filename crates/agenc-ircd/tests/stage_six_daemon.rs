@@ -29,7 +29,8 @@ use agenc_ircd_auth::{
 };
 use agenc_ircd_config::{
     DEFAULT_REDB_CACHE_BYTES, DisplayLabel, DnsName, InitProfile, InitValues, NodeRole,
-    OperatorTemplate, encode_base64url_32, render_template,
+    OperatorTemplate, SecretSet, ValidationDepth, encode_base64url_32, load_config,
+    render_template,
 };
 use agenc_ircd_crypto::{
     AccountHpkePrivateKey, AccountRequestBinding, AccountResponseOpenToken, Ed25519SecretKey,
@@ -1627,6 +1628,25 @@ fn exercise_admin(fixture: &LiveFixture, live_account: AccountId) -> TestResult<
     let export = admin.command_batch("AUDIT EXPORT 0 0")?;
     assert_contains(&export, "agenc.ag/audit 0 0")?;
     Ok(admin)
+}
+
+#[test]
+fn stopped_runtime_check_prepares_listener_tls_material() -> TestResult {
+    let fixture = LiveFixture::create()?;
+    let config = load_config(&fixture.config_path, ValidationDepth::Host)?;
+    let secrets = SecretSet::load(&config)?;
+    agenc_ircd_runtime::daemon::check_configuration(&config, &secrets)?;
+
+    let certificate = config
+        .listeners
+        .iter()
+        .find_map(|listener| listener.tls.as_ref())
+        .ok_or_else(|| failure("fixture has no TLS listener"))?
+        .certificate_file
+        .clone();
+    fs::write(certificate, b"not a certificate")?;
+    assert!(agenc_ircd_runtime::daemon::check_configuration(&config, &secrets).is_err());
+    Ok(())
 }
 
 #[test]

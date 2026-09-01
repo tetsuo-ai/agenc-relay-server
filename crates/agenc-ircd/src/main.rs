@@ -119,6 +119,8 @@ fn check_config(arguments: &[OsString]) -> Result<(), CliFailure> {
         .map_err(|report| CliFailure::command(EXIT_USAGE, report.to_string()))?;
     let secrets = SecretSet::load(&config)
         .map_err(|report| CliFailure::command(EXIT_USAGE, report.to_string()))?;
+    agenc_ircd_runtime::daemon::check_configuration(&config, &secrets)
+        .map_err(|error| CliFailure::command(EXIT_USAGE, error.to_string()))?;
     verify_database_header(&config, &secrets)
         .map_err(|error| CliFailure::command(EXIT_USAGE, error.to_string()))?;
     let report = probe_host_controls(&SystemHostReader, config.server.memory_budget_bytes);

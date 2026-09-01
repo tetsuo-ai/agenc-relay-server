@@ -229,6 +229,41 @@ impl From<ListenerError> for DaemonError {
     }
 }
 
+/// Performs the complete read-only runtime preparation used by `serve`.
+///
+/// This validates the core-v1 profile, memory and crypto-worker arithmetic,
+/// operator authority, listener/TLS identities, trust inputs, public text,
+/// and every ready-to-use runtime policy without binding a listener or
+/// starting a storage or crypto owner.
+pub fn check_configuration(config: &Config, secrets: &SecretSet) -> Result<(), DaemonError> {
+    validate_profile(config)?;
+    let operators = operator_registry(config)?;
+    let _budget = memory_budget(config)?;
+    let _crypto = CryptoWorkerConfig::new(
+        limit_usize(config, LimitKey::ChannelKeyJobs)?,
+        limit_usize(config, LimitKey::OpaqueJobs)?,
+        usize_value(config.server.crypto_worker_threads)?,
+    )
+    .map_err(|_| RuntimeError::InvalidValue)?;
+    std::thread::scope(|scope| {
+        let task = std::thread::Builder::new()
+            .name("agenc-ircd-config-check".to_owned())
+            .spawn_scoped(scope, move || {
+                let runtime = Builder::new_current_thread()
+                    .thread_name(RUNTIME_THREAD_NAME)
+                    .enable_all()
+                    .build()
+                    .map_err(|_| DaemonError::RuntimeStart)?;
+                let prepared = runtime.block_on(prepare_runtime_parts(config, secrets, operators));
+                runtime.shutdown_timeout(Duration::ZERO);
+                let _prepared = prepared?;
+                Ok(())
+            })
+            .map_err(|_| DaemonError::RuntimeStart)?;
+        task.join().map_err(|_| DaemonError::TaskFailed)?
+    })
+}
+
 /// Loads, reconstructs, serves, and joins one standalone coordinator.
 pub fn serve(config_path: &Path) -> Result<DaemonExit, DaemonError> {
     let config = load_config(config_path, ValidationDepth::Host)?;
