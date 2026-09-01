@@ -923,6 +923,7 @@ mod tests {
         }
     }
 
+    // agenc-review: allow owner=runtime reviewed=2026-08-31 reason=negative audit vectors name every independently corrupted binding and signing input at one test boundary
     #[allow(clippy::too_many_arguments)]
     fn signed_event_with(
         outer_binding: AdminSessionBinding,

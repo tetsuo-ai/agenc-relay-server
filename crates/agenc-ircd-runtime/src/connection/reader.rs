@@ -9,6 +9,7 @@
 //! seconds of stall it closes the connection.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use agenc_ircd_client_wire::{FramedLine, MAX_PHYSICAL_LINE_BYTES, StreamFramer, parse_message};
@@ -21,6 +22,7 @@ use crate::cancel::CancellationToken;
 use crate::state_core::inbox::{
     CloseReason, MAX_PARSED_ARENA_BYTES, MAX_REQUESTS_PER_CONNECTION, StateCoreMessage,
 };
+use crate::sync::Arc;
 
 /// Default outstanding requests per connection (spec line 2657).
 pub const DEFAULT_REQUESTS_PER_CONNECTION: usize = 32;
@@ -81,6 +83,7 @@ struct Pending {
     messages: VecDeque<Box<agenc_ircd_client_wire::ParsedMessage>>,
     bytes: usize,
     rejected: bool,
+    accepted_lines: Arc<AtomicU64>,
 }
 
 impl Pending {
@@ -99,11 +102,30 @@ impl Pending {
 
 /// Runs the reader until the transport, the inbox, or the token ends it.
 pub async fn run_reader<R: AsyncRead + Unpin>(
+    transport: R,
+    generation: ConnectionGeneration,
+    limits: ReaderLimits,
+    inbox: mpsc::Sender<StateCoreMessage>,
+    token: CancellationToken,
+) -> CloseReason {
+    run_reader_sequenced(
+        transport,
+        generation,
+        limits,
+        inbox,
+        token,
+        Arc::new(AtomicU64::new(0)),
+    )
+    .await
+}
+
+pub(crate) async fn run_reader_sequenced<R: AsyncRead + Unpin>(
     mut transport: R,
     generation: ConnectionGeneration,
     limits: ReaderLimits,
     inbox: mpsc::Sender<StateCoreMessage>,
     token: CancellationToken,
+    accepted_lines: Arc<AtomicU64>,
 ) -> CloseReason {
     let Ok(mut framer) = StreamFramer::new() else {
         return CloseReason::Overload;
@@ -113,6 +135,7 @@ pub async fn run_reader<R: AsyncRead + Unpin>(
         messages: VecDeque::new(),
         bytes: 0,
         rejected: false,
+        accepted_lines,
     };
     loop {
         let read = tokio::select! {
@@ -186,8 +209,14 @@ async fn forward_pending(
     token: &CancellationToken,
 ) -> Result<(), CloseReason> {
     while let Some(message) = pending.messages.pop_front() {
+        let sequence = pending
+            .accepted_lines
+            .load(Ordering::Relaxed)
+            .checked_add(1)
+            .ok_or(CloseReason::Overload)?;
         let line = StateCoreMessage::Line {
             generation,
+            sequence,
             message,
         };
         let sent = tokio::select! {
@@ -195,7 +224,7 @@ async fn forward_pending(
             sent = tokio::time::timeout(READ_STALL_BUDGET, inbox.send(line)) => sent,
         };
         match sent {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => pending.accepted_lines.store(sequence, Ordering::Release),
             Ok(Err(_)) => return Err(CloseReason::Shutdown),
             Err(_) => return Err(CloseReason::ReadStall),
         }

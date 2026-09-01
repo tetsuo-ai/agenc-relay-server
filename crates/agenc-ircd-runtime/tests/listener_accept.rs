@@ -21,7 +21,8 @@ use std::time::Duration;
 use agenc_ircd_client_wire::WireMessage;
 use agenc_ircd_config::ListenerName;
 use agenc_ircd_runtime::budget::{
-    BoundedMemoryCharges, MemoryBudget, MemoryBudgetPort as _, MemoryCharge, PermitCursor,
+    BoundedMemoryCharges, CLIENT_CONNECTION_BASE_BYTES, MemoryBudget, MemoryBudgetPort as _,
+    MemoryCharge, PermitCursor,
 };
 use agenc_ircd_runtime::cancel::CancellationToken;
 use agenc_ircd_runtime::connection::{
@@ -34,13 +35,17 @@ use agenc_ircd_runtime::listener::{
     PermissiveAdmission, RefusalReason, UNIX_SOCKET_MODE,
 };
 use agenc_ircd_runtime::purpose::ListenerPurpose;
-use agenc_ircd_runtime::state_core::inbox::{CloseReason, SourceAddressKey, StateCoreMessage};
+use agenc_ircd_runtime::state_core::inbox::{
+    CloseReason, ConnectionCloseInbox, ConnectionOpenOutcome, SourceAddressKey, StateCoreMessage,
+    connection_close_channel,
+};
 use agenc_ircd_runtime::tls::{
     ADMIN_ALPN, CLIENT_ALPN, CertChain, ClientAuth, HandshakeLimiter, PrivateKey, TlsConfigError,
     TlsEndpointProfile, TlsHandshakeError, TrustStore, build_client_config,
     build_server_config_blocking,
 };
 use agenc_ircd_testkit::TlsFixture;
+use agenc_ircd_types::MonotonicTick;
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, ServerConfig, StreamOwned};
 use tokio::sync::{Semaphore, mpsc};
@@ -120,8 +125,9 @@ impl AcceptAdmission for CountingAdmission {
         AdmissionVerdict::Admit
     }
 
-    fn released(&self, _: ListenerPurpose, _: SourceAddressKey) {
+    fn released(&self, _: ListenerPurpose, _: SourceAddressKey) -> Option<MonotonicTick> {
         self.released.fetch_add(1, Ordering::Relaxed);
+        Some(MonotonicTick::from_ticks(77))
     }
 }
 
@@ -131,6 +137,7 @@ struct Harness {
     client_slots: Arc<Semaphore>,
     recorder: Arc<Recorder>,
     inbox: mpsc::Receiver<StateCoreMessage>,
+    _connection_closes: ConnectionCloseInbox,
     root: CancellationToken,
     set: ListenerSet,
 }
@@ -198,6 +205,7 @@ fn start(specs: Vec<ListenerSpec>, options: HarnessOptions) -> Result<Harness, L
     let client_slots = Arc::new(Semaphore::new(options.client_slots));
     let recorder = Arc::new(Recorder::default());
     let (sender, inbox) = mpsc::channel(options.inbox_capacity);
+    let (connection_closes, connection_close_inbox) = connection_close_channel();
     let root = CancellationToken::root();
     let context = ListenerContext {
         budget: Arc::clone(&budget),
@@ -206,6 +214,7 @@ fn start(specs: Vec<ListenerSpec>, options: HarnessOptions) -> Result<Harness, L
         admission: options.admission,
         observer: recorder.clone(),
         inbox: sender,
+        connection_closes,
         admin: None,
         limits: ConnectionLimits::DEFAULT,
         runtime_config: None,
@@ -217,6 +226,7 @@ fn start(specs: Vec<ListenerSpec>, options: HarnessOptions) -> Result<Harness, L
         client_slots,
         recorder,
         inbox,
+        _connection_closes: connection_close_inbox,
         root,
         set,
     })
@@ -304,8 +314,12 @@ async fn expect_opened(
             generation,
             purpose: opened,
             sink,
+            acknowledgement,
             ..
-        } if opened == purpose => Ok((generation, sink)),
+        } if opened == purpose => {
+            let _sent = acknowledgement.send(ConnectionOpenOutcome::Accepted);
+            Ok((generation, sink))
+        }
         _ => Err("expected an opened message".into()),
     }
 }
@@ -318,22 +332,33 @@ async fn expect_line(
         StateCoreMessage::Line {
             generation: line_generation,
             message,
+            ..
         } if line_generation == generation => Ok(message.command().to_owned()),
         _ => Err("expected a line".into()),
     }
 }
 
 async fn expect_closed(
-    inbox: &mut mpsc::Receiver<StateCoreMessage>,
+    recorder: &Recorder,
     generation: ConnectionGeneration,
 ) -> Result<CloseReason, Box<dyn Error + Send + Sync>> {
-    match next_message(inbox).await? {
-        StateCoreMessage::Closed {
-            generation: closed,
-            reason,
-        } if closed == generation => Ok(reason),
-        _ => Err("expected a close".into()),
-    }
+    Ok(tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(reason) = recorder
+                .snapshot()
+                .iter()
+                .rev()
+                .find_map(|event| match event {
+                    Observed::Closed(closed, reason) if *closed == generation => Some(*reason),
+                    _ => None,
+                })
+            {
+                break reason;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?)
 }
 
 fn enqueue(
@@ -360,9 +385,10 @@ fn enqueue(
 async fn finish(harness: Harness) -> Result<(u64, u64), Box<dyn Error + Send + Sync>> {
     harness.set.stop_accepting();
     harness.set.cancel_connections();
-    let exits = tokio::time::timeout(Duration::from_secs(10), harness.set.join()).await?;
+    let exits = tokio::time::timeout(Duration::from_secs(10), harness.set.join()).await??;
     let admitted = exits.iter().map(|exit| exit.admitted).sum();
     let refused = exits.iter().map(|exit| exit.refused).sum();
+    drop(harness._connection_closes);
     assert_eq!(
         harness.budget.available(),
         harness.budget.capacity(),
@@ -409,7 +435,7 @@ async fn the_accept_barrier_closes_sockets_before_live_connections_are_cancelled
     let acknowledgement = sink.shutdown_after_flush();
     tokio::time::timeout(Duration::from_secs(2), acknowledgement.wait()).await?;
     assert_eq!(
-        expect_closed(&mut harness.inbox, generation).await?,
+        expect_closed(harness.recorder.as_ref(), generation).await?,
         CloseReason::Shutdown
     );
     assert!(joined(client).await?.is_ok());
@@ -446,7 +472,7 @@ async fn an_inherited_tcp_listener_admits_a_client_and_routes_lines_and_frames()
     tokio::time::sleep(SETTLE).await;
     sink.begin_slow_consumer_close();
     assert_eq!(
-        expect_closed(&mut harness.inbox, generation).await?,
+        expect_closed(harness.recorder.as_ref(), generation).await?,
         CloseReason::SlowConsumer
     );
     let received = joined(client).await??;
@@ -586,7 +612,7 @@ async fn ceilings_pause_accepts_until_a_slot_frees() -> TestResult {
     )));
     sink.begin_slow_consumer_close();
     assert_eq!(
-        expect_closed(&mut harness.inbox, generation).await?,
+        expect_closed(harness.recorder.as_ref(), generation).await?,
         CloseReason::SlowConsumer
     );
     assert!(joined(waiting).await?.is_ok());
@@ -670,7 +696,7 @@ async fn local_admin_lines_never_enter_the_public_client_inbox() -> TestResult {
     );
     onion_sink.begin_slow_consumer_close();
     assert_eq!(
-        expect_closed(&mut harness.inbox, onion_generation).await?,
+        expect_closed(harness.recorder.as_ref(), onion_generation).await?,
         CloseReason::SlowConsumer
     );
     assert!(joined(onion_client).await?.is_ok());
@@ -770,7 +796,7 @@ async fn protocol_errors_and_transport_loss_close_with_their_reasons() -> TestRe
     let bad = tls_client(address, Arc::clone(&config), b"NICK a\0b\r\n".to_vec());
     let (generation, _) = expect_opened(&mut harness.inbox, ListenerPurpose::ClientTls).await?;
     assert_eq!(
-        expect_closed(&mut harness.inbox, generation).await?,
+        expect_closed(harness.recorder.as_ref(), generation).await?,
         CloseReason::ProtocolError
     );
     let _ = joined(bad).await?;
@@ -795,7 +821,7 @@ async fn protocol_errors_and_transport_loss_close_with_their_reasons() -> TestRe
     assert_eq!(expect_line(&mut harness.inbox, generation).await?, "NICK");
     joined(leaving).await??;
     assert_eq!(
-        expect_closed(&mut harness.inbox, generation).await?,
+        expect_closed(harness.recorder.as_ref(), generation).await?,
         CloseReason::TransportLoss
     );
     let (admitted, _) = finish(harness).await?;
@@ -835,12 +861,96 @@ async fn the_reader_pauses_while_the_inbox_is_full_and_loses_nothing() -> TestRe
     }
     sink.begin_slow_consumer_close();
     assert_eq!(
-        expect_closed(&mut harness.inbox, generation).await?,
+        expect_closed(harness.recorder.as_ref(), generation).await?,
         CloseReason::SlowConsumer
     );
     assert!(joined(client).await?.is_ok());
     drop(sink);
     finish(harness).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_state_core_open_refusal_returns_every_unarmed_resource() -> TestResult {
+    let fixture = fixture(65)?;
+    let spec = tcp_spec(
+        ListenerPurpose::ClientTls,
+        1,
+        Some(server(
+            &fixture,
+            TlsEndpointProfile::Client,
+            ClientAuth::None,
+        )?),
+    )?;
+    let mut harness = start(vec![spec], HarnessOptions::default())?;
+    let address = tcp_address(&harness, 0)?;
+    let client = tls_client(address, client(&fixture, CLIENT_ALPN, false)?, Vec::new());
+    let StateCoreMessage::Opened {
+        generation,
+        sink,
+        acknowledgement,
+        ..
+    } = next_message(&mut harness.inbox).await?
+    else {
+        return Err("expected an opened message".into());
+    };
+    assert!(acknowledgement.send(ConnectionOpenOutcome::Refused).is_ok());
+    drop(sink);
+    let _client_outcome = joined(client).await?;
+    assert_eq!(
+        expect_closed(harness.recorder.as_ref(), generation).await?,
+        CloseReason::Overload
+    );
+    assert_eq!(harness.budget.available(), harness.budget.capacity());
+    let (admitted, refused) = finish(harness).await?;
+    assert_eq!((admitted, refused), (1, 0));
+    Ok(())
+}
+
+#[tokio::test]
+async fn physical_close_releases_admission_before_a_blocked_close_notice() -> TestResult {
+    let fixture = fixture(64)?;
+    let spec = tcp_spec(
+        ListenerPurpose::ClientTls,
+        1,
+        Some(server(
+            &fixture,
+            TlsEndpointProfile::Client,
+            ClientAuth::None,
+        )?),
+    )?;
+    let admission = Arc::new(CountingAdmission::default());
+    let options = HarnessOptions {
+        admission: admission.clone(),
+        inbox_capacity: 1,
+        ..HarnessOptions::default()
+    };
+    let mut harness = start(vec![spec], options)?;
+    let address = tcp_address(&harness, 0)?;
+    let client = tls_client(
+        address,
+        client(&fixture, CLIENT_ALPN, false)?,
+        b"NICK bob\r\n".to_vec(),
+    );
+    let (generation, sink) = expect_opened(&mut harness.inbox, ListenerPurpose::ClientTls).await?;
+    tokio::time::sleep(SETTLE).await;
+    sink.begin_slow_consumer_close();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while admission.released.load(Ordering::Relaxed) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert_eq!(admission.released.load(Ordering::Relaxed), 1);
+    assert_eq!(expect_line(&mut harness.inbox, generation).await?, "NICK");
+    assert_eq!(
+        expect_closed(harness.recorder.as_ref(), generation).await?,
+        CloseReason::SlowConsumer
+    );
+    assert!(joined(client).await?.is_ok());
+    drop(sink);
+    let (admitted, refused) = finish(harness).await?;
+    assert_eq!((admitted, refused), (1, 0));
     Ok(())
 }
 
@@ -874,14 +984,21 @@ async fn connection_churn_returns_every_permit_slot_and_task() -> TestResult {
         assert_eq!(expect_line(&mut harness.inbox, generation).await?, "NICK");
         sink.begin_slow_consumer_close();
         assert_eq!(
-            expect_closed(&mut harness.inbox, generation).await?,
+            expect_closed(harness.recorder.as_ref(), generation).await?,
             CloseReason::SlowConsumer
         );
         assert!(joined(handle).await?.is_ok());
     }
     tokio::time::sleep(SETTLE).await;
     assert_eq!(harness.client_slots.available_permits(), 8);
-    assert_eq!(harness.budget.available(), harness.budget.capacity());
+    assert_eq!(
+        harness
+            .budget
+            .capacity()
+            .saturating_sub(harness.budget.available()),
+        20 * CLIENT_CONNECTION_BASE_BYTES,
+        "the StateCore seam retains one client base charge per pending close"
+    );
     assert!(
         harness.root.live_children() <= 2,
         "only the listener tokens remain"
@@ -941,6 +1058,7 @@ async fn start_rejects_unsupported_and_mismatched_specs() -> TestResult {
     let root = CancellationToken::root();
     root.cancel();
     let (sender, _inbox) = mpsc::channel(1);
+    let (connection_closes, _connection_close_inbox) = connection_close_channel();
     let context = ListenerContext {
         budget: Arc::new(MemoryBudget::new(BUDGET_BYTES)),
         handshakes: HandshakeLimiter::new(1)?,
@@ -948,6 +1066,7 @@ async fn start_rejects_unsupported_and_mismatched_specs() -> TestResult {
         admission: Arc::new(PermissiveAdmission),
         observer: Arc::new(Recorder::default()),
         inbox: sender,
+        connection_closes,
         admin: None,
         limits: ConnectionLimits::DEFAULT,
         runtime_config: None,

@@ -22,14 +22,14 @@ use rustls::ServerConfig;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpStream, UnixStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
-use tokio::task::JoinSet;
+use tokio::task::{JoinError, JoinSet};
 
 use agenc_ircd_admin::{
     ADMIN_CHALLENGE_BYTES, ADMIN_SESSION_ID_BYTES, ADMIN_TRANSPORT_BINDING_BYTES, AdminChallenge,
     AdminSessionId, Challenge, PeerIdentity as AdminPeerIdentity, TransportBinding, TransportKind,
 };
 use agenc_ircd_config::ListenerName;
-use agenc_ircd_types::EntropySource as _;
+use agenc_ircd_types::{EntropySource as _, MonotonicTick};
 
 pub use prefix::{PREFIX_ERASURE_DELAY, source_key};
 pub use socket::{
@@ -47,13 +47,16 @@ use crate::budget::{
     MemoryBudgetPort as _, MemoryCharge, MemoryPermitBatch, TLS_SETUP_INCREMENT_BYTES,
 };
 use crate::cancel::CancellationToken;
+use crate::connection::supervisor::AdmissionLease;
 use crate::connection::{
     AdmittedConnection, ConnectionExit, ConnectionGeneration, ConnectionLimits,
     ConnectionResources, PeerIdentity, run_connection,
 };
 use crate::purpose::ListenerPurpose;
 use crate::runtime_config::RuntimeConfigHandle;
-use crate::state_core::inbox::{CloseReason, SourceAddressKey, StateCoreMessage};
+use crate::state_core::inbox::{
+    CloseReason, ConnectionClosePort, SourceAddressKey, StateCoreMessage,
+};
 use crate::sync::Arc;
 use crate::tls::{
     ACCEPT_TO_TLS_DEADLINE, HandshakeLimiter, TlsEndpointProfile, TlsHandshakeError, TlsStream,
@@ -126,9 +129,15 @@ pub trait AcceptAdmission: Send + Sync {
     /// Decides whether a socket from `source` may proceed on `purpose`.
     fn admit(&self, purpose: ListenerPurpose, source: SourceAddressKey) -> AdmissionVerdict;
 
-    /// Records that a connection from `source` closed.
-    fn released(&self, purpose: ListenerPurpose, source: SourceAddressKey) {
+    /// Records that a connection from `source` closed and returns the
+    /// admission owner's physical-close tick when it owns one.
+    fn released(
+        &self,
+        purpose: ListenerPurpose,
+        source: SourceAddressKey,
+    ) -> Option<MonotonicTick> {
         let _ = (purpose, source);
+        None
     }
 }
 
@@ -252,6 +261,8 @@ pub struct ListenerContext {
     pub observer: Arc<dyn ConnectionObserver>,
     /// The StateCore inbox.
     pub inbox: mpsc::Sender<StateCoreMessage>,
+    /// Reserved physical-close delivery to StateCore.
+    pub connection_closes: ConnectionClosePort,
     /// Isolated administrative owner, absent when no admin listener is enabled.
     pub admin: Option<AdminTransportPort>,
     /// Per-connection reader and queue ceilings.
@@ -271,6 +282,8 @@ pub struct ListenerExit {
     /// Sockets refused before a connection existed, handshake failures
     /// included.
     pub refused: u64,
+    /// A connection task panicked or was aborted.
+    pub task_failed: bool,
 }
 
 struct ListenerShared {
@@ -281,6 +294,7 @@ struct ListenerShared {
     admission: Arc<dyn AcceptAdmission>,
     observer: Arc<dyn ConnectionObserver>,
     inbox: mpsc::Sender<StateCoreMessage>,
+    connection_closes: ConnectionClosePort,
     admin: Option<AdminTransportPort>,
     limits: ConnectionLimits,
     runtime_config: Option<RuntimeConfigHandle>,
@@ -389,6 +403,7 @@ impl ListenerSet {
             admission: context.admission,
             observer: context.observer,
             inbox: context.inbox,
+            connection_closes: context.connection_closes,
             admin: context.admin,
             limits: context.limits,
             runtime_config: context.runtime_config,
@@ -454,14 +469,13 @@ impl ListenerSet {
     }
 
     /// Waits for every listener task, each of which joins its connections.
-    pub async fn join(mut self) -> Vec<ListenerExit> {
+    pub async fn join(mut self) -> Result<Vec<ListenerExit>, RuntimeError> {
         let mut exits = Vec::with_capacity(self.addresses.len());
         while let Some(joined) = self.tasks.join_next().await {
-            if let Ok(exit) = joined {
-                exits.push(exit);
-            }
+            let exit = joined.map_err(|_| RuntimeError::InvalidValue)?;
+            exits.push(exit);
         }
-        exits
+        Ok(exits)
     }
 }
 
@@ -524,10 +538,11 @@ enum AcceptedTransport {
 
 enum ListenerStep {
     Stop,
-    Joined(Option<ConnectionOutcome>),
+    Joined(Result<ConnectionOutcome, JoinError>),
     Accepted(Option<Accepted>),
 }
 
+// agenc-review: focus owner=runtime reviewed=2026-08-31 reason=the bounded listener loop keeps cancellation accept and joined-child outcomes in one closed dispatcher
 async fn run_listener(
     listener: BoundListener,
     spec: ValidatedSpec,
@@ -547,11 +562,12 @@ async fn run_listener(
         purpose: spec.purpose,
         admitted: 0,
         refused: 0,
+        task_failed: false,
     };
     loop {
         let step = tokio::select! {
             () = accept_token.cancelled() => ListenerStep::Stop,
-            Some(outcome) = connections.join_next() => ListenerStep::Joined(outcome.ok()),
+            Some(outcome) = connections.join_next() => ListenerStep::Joined(outcome),
             accepted = next_accept(&listener, &slots, slot_capacity, &shared, &spec) => {
                 ListenerStep::Accepted(accepted)
             }
@@ -559,7 +575,11 @@ async fn run_listener(
         match step {
             ListenerStep::Stop => break,
             ListenerStep::Joined(outcome) => {
-                record_outcome(&shared, spec.purpose, outcome, &mut exit)
+                if record_outcome(&shared, spec.purpose, outcome, &mut exit) {
+                    accept_token.cancel();
+                    connection_token.cancel();
+                    break;
+                }
             }
             ListenerStep::Accepted(Some(accepted)) => {
                 admit(
@@ -577,7 +597,7 @@ async fn run_listener(
     drop(listener);
     accept_barrier.arrived();
     while let Some(outcome) = connections.join_next().await {
-        record_outcome(&shared, spec.purpose, outcome.ok(), &mut exit);
+        let _failed = record_outcome(&shared, spec.purpose, outcome, &mut exit);
     }
     exit
 }
@@ -585,25 +605,26 @@ async fn run_listener(
 fn record_outcome(
     shared: &ListenerShared,
     purpose: ListenerPurpose,
-    outcome: Option<ConnectionOutcome>,
+    outcome: Result<ConnectionOutcome, JoinError>,
     exit: &mut ListenerExit,
-) {
+) -> bool {
     match outcome {
-        Some(ConnectionOutcome::Served(connection, source)) => {
+        Ok(ConnectionOutcome::Served(connection)) => {
             exit.admitted = exit.admitted.saturating_add(1);
             shared.observer.closed(&connection);
-            if let Some(source) = source {
-                shared.admission.released(purpose, source);
-            }
+            false
         }
-        Some(ConnectionOutcome::Refused(reason, source)) => {
+        Ok(ConnectionOutcome::Refused(reason)) => {
             exit.refused = exit.refused.saturating_add(1);
             shared.observer.refused(purpose, reason);
-            if let Some(source) = source {
-                shared.admission.released(purpose, source);
-            }
+            false
         }
-        None => exit.refused = exit.refused.saturating_add(1),
+        Err(_error) => {
+            exit.refused = exit.refused.saturating_add(1);
+            exit.task_failed = true;
+            shared.observer.refused(purpose, RefusalReason::TaskTree);
+            true
+        }
     }
 }
 
@@ -688,13 +709,20 @@ fn admit(
         tls.is_some(),
     ) {
         Ok(admission) => admission,
-        Err(reason) => {
+        Err(AdmissionFailure { reason, lease }) => {
+            drop(accepted);
+            drop(lease);
             exit.refused = exit.refused.saturating_add(1);
             shared.observer.refused(spec.purpose, reason);
             return;
         }
     };
+    let accepted = accepted;
     let generation = ConnectionGeneration::new(shared.generations.fetch_add(1, Ordering::Relaxed));
+    let mut admission = admission;
+    if let Some(lease) = admission.lease.as_mut() {
+        lease.assign_generation(generation);
+    }
     let admitted = AdmittedConnection {
         generation,
         purpose: spec.purpose,
@@ -736,6 +764,12 @@ struct Admission {
     global_slot: Option<OwnedSemaphorePermit>,
     permits: MemoryPermitBatch,
     token: CancellationToken,
+    lease: Option<AdmissionLease>,
+}
+
+struct AdmissionFailure {
+    reason: RefusalReason,
+    lease: Option<AdmissionLease>,
 }
 
 fn prepare_admission(
@@ -745,32 +779,56 @@ fn prepare_admission(
     source: SourceAddressKey,
     limits: ConnectionLimits,
     tls: bool,
-) -> Result<Admission, RefusalReason> {
-    let global_slot = global_slot(shared, spec.purpose)?;
+) -> Result<Admission, AdmissionFailure> {
+    let global_slot = global_slot(shared, spec.purpose).map_err(|reason| AdmissionFailure {
+        reason,
+        lease: None,
+    })?;
     let address_accounted = !matches!(
         spec.purpose,
         ListenerPurpose::AdminLocal | ListenerPurpose::AdminTls
     );
-    if address_accounted && shared.admission.admit(spec.purpose, source) == AdmissionVerdict::Refuse
-    {
-        return Err(RefusalReason::Admission);
-    }
-    let Ok(permits) = acquire_charges(shared, spec.purpose, limits, tls) else {
-        if address_accounted {
-            shared.admission.released(spec.purpose, source);
+    let purpose = spec.purpose;
+    let lease = if address_accounted {
+        let close_permit =
+            shared
+                .connection_closes
+                .try_reserve()
+                .map_err(|_| AdmissionFailure {
+                    reason: RefusalReason::TaskTree,
+                    lease: None,
+                })?;
+        if shared.admission.admit(spec.purpose, source) == AdmissionVerdict::Refuse {
+            return Err(AdmissionFailure {
+                reason: RefusalReason::Admission,
+                lease: None,
+            });
         }
-        return Err(RefusalReason::MemoryExhausted);
+        let admission = Arc::clone(&shared.admission);
+        Some(AdmissionLease::new(
+            Box::new(move || admission.released(purpose, source)),
+            close_permit,
+        ))
+    } else {
+        None
+    };
+    let Ok(permits) = acquire_charges(shared, spec.purpose, limits, tls) else {
+        return Err(AdmissionFailure {
+            reason: RefusalReason::MemoryExhausted,
+            lease,
+        });
     };
     let Ok(token) = connection_token.child() else {
-        if address_accounted {
-            shared.admission.released(spec.purpose, source);
-        }
-        return Err(RefusalReason::TaskTree);
+        return Err(AdmissionFailure {
+            reason: RefusalReason::TaskTree,
+            lease,
+        });
     };
     Ok(Admission {
         global_slot,
         permits,
         token,
+        lease,
     })
 }
 
@@ -822,8 +880,8 @@ fn acquire_charges(
 }
 
 enum ConnectionOutcome {
-    Served(ConnectionExit, Option<SourceAddressKey>),
-    Refused(RefusalReason, Option<SourceAddressKey>),
+    Served(ConnectionExit),
+    Refused(RefusalReason),
 }
 
 /// The listener facts one connection task carries.
@@ -841,14 +899,9 @@ async fn serve(
     admission: Admission,
     endpoint: Endpoint,
 ) -> ConnectionOutcome {
-    let source = (!matches!(
-        admitted.purpose,
-        ListenerPurpose::AdminLocal | ListenerPurpose::AdminTls
-    ))
-    .then_some(admitted.source);
     match serve_inner(accepted, admitted, admission, endpoint).await {
-        Ok(exit) => ConnectionOutcome::Served(exit, source),
-        Err(reason) => ConnectionOutcome::Refused(reason, source),
+        Ok(exit) => ConnectionOutcome::Served(exit),
+        Err(reason) => ConnectionOutcome::Refused(reason),
     }
 }
 
@@ -859,16 +912,17 @@ async fn serve_inner(
     admission: Admission,
     endpoint: Endpoint,
 ) -> Result<ConnectionExit, RefusalReason> {
+    let Admission {
+        global_slot,
+        mut permits,
+        token,
+        mut lease,
+    } = admission;
     let Accepted {
         transport,
         listener_slot,
         handshake_slot,
     } = accepted;
-    let Admission {
-        global_slot,
-        mut permits,
-        token,
-    } = admission;
     let queue_backing = endpoint
         .limits
         .queue
@@ -911,6 +965,7 @@ async fn serve_inner(
                 )
                 .await);
             }
+            let lease = lease.take().ok_or(RefusalReason::Admission)?;
             Ok(finish_serving(
                 stream,
                 admitted,
@@ -918,6 +973,7 @@ async fn serve_inner(
                 endpoint.shared,
                 endpoint.limits,
                 token,
+                lease,
             )
             .await)
         }
@@ -930,6 +986,7 @@ async fn serve_inner(
                 u64::try_from(handshake_started.elapsed().as_millis()).unwrap_or(u64::MAX),
             );
             let stream = negotiated?;
+            let lease = lease.take().ok_or(RefusalReason::Admission)?;
             Ok(finish_serving(
                 stream,
                 admitted,
@@ -937,6 +994,7 @@ async fn serve_inner(
                 endpoint.shared,
                 endpoint.limits,
                 token,
+                lease,
             )
             .await)
         }
@@ -970,6 +1028,7 @@ async fn serve_inner(
                 )
                 .await);
             }
+            let lease = lease.take().ok_or(RefusalReason::Admission)?;
             Ok(finish_serving(
                 stream,
                 admitted,
@@ -977,6 +1036,7 @@ async fn serve_inner(
                 endpoint.shared,
                 endpoint.limits,
                 token,
+                lease,
             )
             .await)
         }
@@ -1127,6 +1187,7 @@ async fn finish_serving<T>(
     shared: Arc<ListenerShared>,
     limits: ConnectionLimits,
     token: CancellationToken,
+    lease: AdmissionLease,
 ) -> ConnectionExit
 where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -1139,6 +1200,7 @@ where
         limits,
         shared.inbox.clone(),
         token,
+        lease,
     )
     .await
 }
@@ -1231,7 +1293,7 @@ mod tests {
             ),
             AdmissionVerdict::Admit
         );
-        PermissiveAdmission.released(
+        let _closed_at = PermissiveAdmission.released(
             ListenerPurpose::ClientTls,
             SourceAddressKey::onion_listener(),
         );

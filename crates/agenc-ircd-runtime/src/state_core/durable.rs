@@ -19,16 +19,14 @@ use agenc_ircd_domain::{
 };
 use agenc_ircd_storage::{
     AccountRecordBody, ChannelRecordBody, CommitReceipt, ExistingRecord, LIVE_RECORD_KIND,
-    MAX_TRANSACTION_PLANS, PersistentRecordValue, ReadPlan, RecordMutation, RecordReference,
+    MAX_TRANSACTION_PLANS, PersistentRecordValue, ReadResult, RecordMutation, RecordReference,
     RecoveredStorageState, SanctionRecordBody, SealedRecord, StorageAccountingLimits, StorageError,
-    StorageMutationBatch, StorageMutationHead, StoragePort, StoredKey, TableId,
-    validate_record_plaintext,
+    StorageMutationBatch, StorageMutationHead, StoredKey, TableId, validate_record_plaintext,
 };
 use agenc_ircd_types::{AccountId, ChannelInstanceId, EntropySource, TransactionId};
 use zeroize::Zeroizing;
 
 use crate::RuntimeError;
-use crate::bridge::storage::read_blocking;
 
 /// The record kind Stage 5 reserves for an account or channel tombstone
 /// (`validate_record_counters`, storage records.rs).
@@ -631,42 +629,27 @@ impl RetainedProjection {
     }
 }
 
-/// Reads the exact sealed identity and length of rows written by a committed
-/// batch. This runs on the caller's blocking thread, never on a Tokio worker.
-pub(crate) fn read_back(
-    port: &StoragePort,
-    rows: Vec<(TableId, StoredKey)>,
-) -> Result<Vec<(TableId, StoredKey, Option<ExistingRecord>)>, RuntimeError> {
-    let mut read_rows = Vec::new();
-    read_rows
-        .try_reserve_exact(rows.len())
-        .map_err(|_| RuntimeError::MemoryExhausted)?;
-    for (table, key) in rows {
-        let existing = read_existing(port, table, &key)?;
-        read_rows.push((table, key, existing));
-    }
-    Ok(read_rows)
-}
-
-fn read_existing(
-    port: &StoragePort,
+/// Validates one exact readback and returns the durable identity needed by
+/// the in-memory before-image index.
+pub(crate) fn read_back_record(
     table: TableId,
-    key: &StoredKey,
-) -> Result<Option<ExistingRecord>, RuntimeError> {
-    let result = read_blocking(port, ReadPlan::exact(table, key.clone()))?;
+    key: StoredKey,
+    result: ReadResult,
+) -> Result<(TableId, StoredKey, Option<ExistingRecord>), RuntimeError> {
     let mut records = result.records.into_iter();
     let Some(record) = records.next() else {
-        return Ok(None);
+        return Ok((table, key, None));
     };
-    if records.next().is_some() || record.table != table || record.key != *key {
+    if records.next().is_some() || record.table != table || record.key != key {
         return Err(RuntimeError::Storage(StorageError::StaleState));
     }
     let sealed = SealedRecord::decode(&record.sealed_record)?;
-    Ok(Some(ExistingRecord::new(
+    let existing = ExistingRecord::new(
         sealed.record_schema(),
         sealed.record_id()?,
         record.sealed_record.len(),
-    )?))
+    )?;
+    Ok((table, key, Some(existing)))
 }
 
 struct Projection<'a> {

@@ -1,8 +1,10 @@
 //! Transport admission before TLS and connection-task creation.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use agenc_ircd_types::{MonotonicClock, MonotonicTick};
+use tokio::sync::Notify;
 
 use super::{
     BucketDemand, BucketKey, BucketKind, BucketTable, OverloadClass, OverloadState, PrefixRegistry,
@@ -23,6 +25,7 @@ pub struct TransportAdmission {
     budget: Arc<MemoryBudget>,
     direct_per_address: u64,
     observer: Mutex<Option<Arc<RuntimeObserver>>>,
+    prefix_expiry_changed: Notify,
 }
 
 struct TransportAdmissionState {
@@ -55,6 +58,7 @@ impl TransportAdmission {
             budget,
             direct_per_address,
             observer: Mutex::new(None),
+            prefix_expiry_changed: Notify::new(),
         })
     }
 
@@ -68,6 +72,23 @@ impl TransportAdmission {
         let mut state = lock(&self.state);
         let now = state.clock.now();
         state.erase_idle(now);
+    }
+
+    /// Returns the delay before the earliest address-derived row must be
+    /// erased, or `None` while no idle row exists.
+    pub(crate) fn prefix_erasure_delay(&self) -> Option<Duration> {
+        let state = lock(&self.state);
+        let now = state.clock.now();
+        state
+            .prefixes
+            .millis_until_next_erasure(now)
+            .map(Duration::from_millis)
+    }
+
+    /// Waits until a connection close may have changed the earliest prefix
+    /// erasure deadline. Notifications coalesce without consuming inbox space.
+    pub(crate) async fn prefix_expiry_changed(&self) {
+        self.prefix_expiry_changed.notified().await;
     }
 
     /// Atomically installs validated transport bucket rates.
@@ -112,17 +133,26 @@ impl AcceptAdmission for TransportAdmission {
         verdict
     }
 
-    fn released(&self, purpose: ListenerPurpose, source: SourceAddressKey) {
+    fn released(
+        &self,
+        purpose: ListenerPurpose,
+        source: SourceAddressKey,
+    ) -> Option<MonotonicTick> {
         let mut state = lock(&self.state);
         let now = state.clock.now();
-        match purpose {
+        let became_idle = match purpose {
             ListenerPurpose::ClientTls => state.release_direct(source, now),
             ListenerPurpose::ClientOnion => state.release_onion(now),
             ListenerPurpose::ClientWss
             | ListenerPurpose::Federation
             | ListenerPurpose::AdminLocal
-            | ListenerPurpose::AdminTls => {}
+            | ListenerPurpose::AdminTls => false,
+        };
+        drop(state);
+        if became_idle {
+            self.prefix_expiry_changed.notify_one();
         }
+        Some(now)
     }
 }
 
@@ -141,9 +171,10 @@ impl TransportAdmissionState {
         if !self.charge_connection(now, BucketKind::NewDirectTcp, BucketKey::Prefix(prefix)) {
             return false;
         }
-        if self.prefixes.connection_opened(prefix, now).is_err() {
+        let Ok(evicted) = self.prefixes.connection_opened(prefix, now) else {
             return false;
-        }
+        };
+        self.erase_evicted_prefix(evicted);
         let count = self.direct_hosts.entry(host).or_insert(0);
         let Some(next) = count.checked_add(1) else {
             let _closed = self.prefixes.connection_closed(prefix, now);
@@ -162,7 +193,11 @@ impl TransportAdmissionState {
         ) {
             return false;
         }
-        self.prefixes.connection_opened(source, now).is_ok()
+        let Ok(evicted) = self.prefixes.connection_opened(source, now) else {
+            return false;
+        };
+        self.erase_evicted_prefix(evicted);
+        true
     }
 
     fn charge_connection(
@@ -182,8 +217,10 @@ impl TransportAdmissionState {
             .is_ok()
     }
 
-    fn release_direct(&mut self, source: SourceAddressKey, now: MonotonicTick) {
-        let _closed = self.prefixes.connection_closed(source.prefix_key(), now);
+    fn release_direct(&mut self, source: SourceAddressKey, now: MonotonicTick) -> bool {
+        let prefix = source.prefix_key();
+        let became_idle =
+            self.prefixes.connection_closed(prefix, now).is_ok() && self.prefixes.live(prefix) == 0;
         let host = source.host_key();
         let remove = self.direct_hosts.get_mut(&host).is_some_and(|count| {
             *count = count.saturating_sub(1);
@@ -192,20 +229,30 @@ impl TransportAdmissionState {
         if remove {
             self.direct_hosts.remove(&host);
         }
+        became_idle
     }
 
-    fn release_onion(&mut self, now: MonotonicTick) {
-        let _closed = self
-            .prefixes
-            .connection_closed(SourceAddressKey::onion_listener(), now);
+    fn release_onion(&mut self, now: MonotonicTick) -> bool {
+        let source = SourceAddressKey::onion_listener();
+        self.prefixes.connection_closed(source, now).is_ok() && self.prefixes.live(source) == 0
     }
 
     fn erase_idle(&mut self, now: MonotonicTick) {
         for prefix in self.prefixes.erase_idle(now) {
-            self.buckets.erase_key(BucketKey::Prefix(prefix));
-            if prefix == SourceAddressKey::onion_listener() {
-                self.buckets.erase_key(BucketKey::OnionListener);
-            }
+            self.erase_prefix_buckets(prefix);
+        }
+    }
+
+    fn erase_evicted_prefix(&mut self, evicted: Option<SourceAddressKey>) {
+        if let Some(prefix) = evicted {
+            self.erase_prefix_buckets(prefix);
+        }
+    }
+
+    fn erase_prefix_buckets(&mut self, prefix: SourceAddressKey) {
+        self.buckets.erase_key(BucketKey::Prefix(prefix));
+        if prefix == SourceAddressKey::onion_listener() {
+            self.buckets.erase_key(BucketKey::OnionListener);
         }
     }
 }
@@ -267,11 +314,39 @@ mod tests {
             admission.admit(ListenerPurpose::ClientTls, source),
             AdmissionVerdict::Refuse
         );
-        admission.released(ListenerPurpose::ClientTls, source);
+        let _closed_at = admission.released(ListenerPurpose::ClientTls, source);
         assert_eq!(
             admission.admit(ListenerPurpose::ClientTls, source),
             AdmissionVerdict::Admit
         );
+        Ok(())
+    }
+
+    #[test]
+    fn prefix_ceiling_eviction_erases_the_coupled_rate_bucket() -> Result<(), RuntimeError> {
+        let (admission, _, _) = admission(16, 1_000)?;
+        lock(&admission.state).prefixes = PrefixRegistry::with_ceiling(1);
+        let first = SourceAddressKey::ipv4([192, 0, 2, 1]);
+        let second = SourceAddressKey::ipv4([198, 51, 100, 1]);
+        assert_eq!(
+            admission.admit(ListenerPurpose::ClientTls, first),
+            AdmissionVerdict::Admit
+        );
+        let _closed_at = admission.released(ListenerPurpose::ClientTls, first);
+        assert_eq!(
+            admission.admit(ListenerPurpose::ClientTls, second),
+            AdmissionVerdict::Admit
+        );
+
+        let mut state = lock(&admission.state);
+        let kind = BucketKind::NewDirectTcp;
+        let expected = state.buckets.limits().rate(kind).burst();
+        let available = state.buckets.available(
+            MonotonicTick::from_ticks(0),
+            kind,
+            BucketKey::Prefix(first.prefix_key()),
+        );
+        assert_eq!(available, expected);
         Ok(())
     }
 
@@ -284,7 +359,7 @@ mod tests {
                 admission.admit(ListenerPurpose::ClientTls, source),
                 AdmissionVerdict::Admit
             );
-            admission.released(ListenerPurpose::ClientTls, source);
+            let _closed_at = admission.released(ListenerPurpose::ClientTls, source);
         }
         assert_eq!(
             admission.admit(
@@ -305,7 +380,7 @@ mod tests {
                 admission.admit(ListenerPurpose::ClientOnion, source),
                 AdmissionVerdict::Admit
             );
-            admission.released(ListenerPurpose::ClientOnion, source);
+            let _closed_at = admission.released(ListenerPurpose::ClientOnion, source);
         }
         assert_eq!(
             admission.admit(ListenerPurpose::ClientOnion, source),
@@ -325,9 +400,19 @@ mod tests {
                 admission.admit(ListenerPurpose::ClientTls, source),
                 AdmissionVerdict::Admit
             );
-            admission.released(ListenerPurpose::ClientTls, source);
+            let _closed_at = admission.released(ListenerPurpose::ClientTls, source);
         }
+        assert_eq!(
+            admission.prefix_erasure_delay(),
+            Some(Duration::from_millis(
+                crate::admission::prefix::PREFIX_ERASURE_MILLIS
+            ))
+        );
         ticks.store(599_999, Ordering::Relaxed);
+        assert_eq!(
+            admission.prefix_erasure_delay(),
+            Some(Duration::from_millis(1))
+        );
         admission.erase_idle();
         assert_eq!(
             admission.admit(
@@ -338,12 +423,42 @@ mod tests {
         );
         ticks.store(600_000, Ordering::Relaxed);
         admission.erase_idle();
+        assert_eq!(admission.prefix_erasure_delay(), None);
         assert_eq!(
             admission.admit(
                 ListenerPurpose::ClientTls,
                 SourceAddressKey::ipv4([203, 0, 113, 9]),
             ),
             AdmissionVerdict::Admit
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn idle_deadline_notifications_coalesce_without_losing_the_wakeup()
+    -> Result<(), RuntimeError> {
+        let (admission, _, _) = admission(16, 1_000)?;
+        let first = SourceAddressKey::ipv4([192, 0, 2, 1]);
+        let second = SourceAddressKey::ipv4([198, 51, 100, 1]);
+        assert_eq!(
+            admission.admit(ListenerPurpose::ClientTls, first),
+            AdmissionVerdict::Admit
+        );
+        assert_eq!(
+            admission.admit(ListenerPurpose::ClientTls, second),
+            AdmissionVerdict::Admit
+        );
+        let _closed_at = admission.released(ListenerPurpose::ClientTls, first);
+        let _closed_at = admission.released(ListenerPurpose::ClientTls, second);
+
+        tokio::time::timeout(Duration::from_secs(1), admission.prefix_expiry_changed())
+            .await
+            .map_err(|_| RuntimeError::Cancelled)?;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(5), admission.prefix_expiry_changed(),)
+                .await
+                .is_err(),
+            "Notify stores at most one pending maintenance wakeup"
         );
         Ok(())
     }

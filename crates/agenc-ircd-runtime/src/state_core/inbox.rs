@@ -1,10 +1,13 @@
 //! Messages that reach StateCore through its bounded inbox (spec 21.3).
 
 use agenc_ircd_client_wire::ParsedMessage;
+use agenc_ircd_types::MonotonicTick;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::budget::MemoryPermit;
 use crate::connection::sink::{ClientSink, ConnectionGeneration};
 use crate::purpose::ListenerPurpose;
+use crate::state_core::session::MAX_TRACKED_CONNECTIONS;
 use crate::sync::Arc;
 
 /// Signal and maintenance events queued ahead of StateCore (spec line 4086).
@@ -14,6 +17,8 @@ pub const SIGNAL_EVENT_CAPACITY: usize = 64;
 /// The dedicated channel remains selectable while a durable batch is in
 /// flight, so shutdown cannot be held behind client work (spec 21.8).
 pub const LIFECYCLE_EVENT_CAPACITY: usize = 8;
+/// One reserved physical-close slot for every tracked client connection.
+pub const CONNECTION_CLOSE_CAPACITY: usize = MAX_TRACKED_CONNECTIONS;
 /// Mutation batches queued from StateCore to storage (spec line 4083).
 pub const STORAGE_BATCH_CAPACITY: usize = 2;
 /// Completions queued from storage back to StateCore (spec line 4084).
@@ -24,6 +29,88 @@ pub const CRYPTO_COMPLETION_SLOTS_PER_WORKER: usize = 2;
 pub const MAX_REQUESTS_PER_CONNECTION: usize = 128;
 /// Hard maximum parsed command arena per connection (spec line 2672).
 pub const MAX_PARSED_ARENA_BYTES: usize = 131_072;
+
+/// Sender used only by connection admission leases.
+#[derive(Clone)]
+pub struct ConnectionClosePort {
+    sender: mpsc::Sender<PhysicalCloseNotice>,
+}
+
+/// StateCore's sole receiver for physical connection-close notices.
+pub struct ConnectionCloseInbox {
+    receiver: mpsc::Receiver<PhysicalCloseNotice>,
+}
+
+pub(crate) type ConnectionClosePermit = mpsc::OwnedPermit<PhysicalCloseNotice>;
+
+/// Client base charge transferred to StateCore for close reconciliation.
+/// Dropping the guard returns the charge to the connection task when it is
+/// still live, including during abnormal StateCore exit.
+pub(crate) struct ConnectionStatePermit {
+    permit: Option<MemoryPermit>,
+    return_permit: Option<oneshot::Sender<MemoryPermit>>,
+}
+
+impl ConnectionStatePermit {
+    pub(crate) fn new(permit: MemoryPermit, return_permit: oneshot::Sender<MemoryPermit>) -> Self {
+        Self {
+            permit: Some(permit),
+            return_permit: Some(return_permit),
+        }
+    }
+}
+
+impl Drop for ConnectionStatePermit {
+    fn drop(&mut self) {
+        if let (Some(permit), Some(return_permit)) = (self.permit.take(), self.return_permit.take())
+        {
+            let _returned = return_permit.send(permit);
+        }
+    }
+}
+
+/// Constructs the bounded physical-close channel.
+#[must_use]
+pub fn connection_close_channel() -> (ConnectionClosePort, ConnectionCloseInbox) {
+    let (sender, receiver) = mpsc::channel(CONNECTION_CLOSE_CAPACITY);
+    (
+        ConnectionClosePort { sender },
+        ConnectionCloseInbox { receiver },
+    )
+}
+
+impl ConnectionClosePort {
+    pub(crate) fn try_reserve(&self) -> Result<ConnectionClosePermit, ()> {
+        self.sender.clone().try_reserve_owned().map_err(|_| ())
+    }
+}
+
+impl ConnectionCloseInbox {
+    pub(crate) async fn recv(&mut self) -> Option<PhysicalCloseNotice> {
+        self.receiver.recv().await
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.receiver.len()
+    }
+}
+
+pub(crate) struct PhysicalCloseNotice {
+    pub(crate) generation: ConnectionGeneration,
+    pub(crate) reason: CloseReason,
+    pub(crate) closed_at: Option<MonotonicTick>,
+    pub(crate) final_line_sequence: u64,
+    pub(crate) state_permit: ConnectionStatePermit,
+}
+
+/// StateCore's closed response to one connection-open request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConnectionOpenOutcome {
+    /// The session and its source-prefix state are installed.
+    Accepted,
+    /// The generation was refused without installing session state.
+    Refused,
+}
 
 /// Address family of an admitted transport peer.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -250,20 +337,17 @@ pub enum StateCoreMessage {
         source: SourceAddressKey,
         /// The output owner StateCore reserves against.
         sink: Arc<dyn ClientSink>,
+        /// Completed only after StateCore accepts or rejects the generation.
+        acknowledgement: oneshot::Sender<ConnectionOpenOutcome>,
     },
     /// One complete parsed line from an admitted connection.
     Line {
         /// The queue generation the line arrived on.
         generation: ConnectionGeneration,
+        /// Per-connection order assigned after the inbox accepts the line.
+        sequence: u64,
         /// The parsed message; boxed to keep the inbox item small.
         message: Box<ParsedMessage>,
-    },
-    /// A connection left the transport.
-    Closed {
-        /// The queue generation that ended.
-        generation: ConnectionGeneration,
-        /// Why it ended.
-        reason: CloseReason,
     },
     /// A process signal.
     Signal(SignalEvent),
@@ -306,6 +390,7 @@ mod tests {
     fn inbox_capacities_match_the_channel_table() {
         assert_eq!(SIGNAL_EVENT_CAPACITY, 64);
         assert_eq!(LIFECYCLE_EVENT_CAPACITY, 8);
+        assert_eq!(CONNECTION_CLOSE_CAPACITY, MAX_TRACKED_CONNECTIONS);
         assert_eq!(STORAGE_BATCH_CAPACITY, 2);
         assert_eq!(STORAGE_COMPLETION_CAPACITY, 2);
         assert_eq!(CRYPTO_COMPLETION_SLOTS_PER_WORKER, 2);

@@ -23,8 +23,8 @@ pub use sink::{
     QueueAllocationError, QueueReservationLedger, QueueTransfer, ReservationToken,
     SinkReserveError, TentativeClientQueueReservation,
 };
+pub(crate) use supervisor::run_connection;
 pub use supervisor::{
     AdmittedConnection, ConnectionExit, ConnectionLimits, ConnectionResources, PeerIdentity,
-    run_connection,
 };
 pub use writer::run_writer;

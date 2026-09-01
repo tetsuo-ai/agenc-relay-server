@@ -15,7 +15,6 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
-use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::thread::{self, JoinHandle};
 
 use agenc_ircd_storage::{
@@ -197,7 +196,7 @@ enum PendingCompletion {
 /// The submitting half of the bridge, owned by StateCore.
 pub struct StorageBridge {
     port: StoragePort,
-    handoff: Option<SyncSender<PendingCompletion>>,
+    handoff: Option<mpsc::Sender<PendingCompletion>>,
     ledger: Arc<CompletionLedger>,
     thread: Option<JoinHandle<()>>,
     next_read_id: u64,
@@ -216,7 +215,7 @@ impl StorageBridge {
         ),
         RuntimeError,
     > {
-        let (handoff, pending) = sync_channel(STORAGE_HANDOFF_CAPACITY);
+        let (handoff, mut pending) = mpsc::channel(STORAGE_HANDOFF_CAPACITY);
         let (outcomes, receiver) = mpsc::channel(STORAGE_COMPLETION_CHANNEL_CAPACITY);
         let (read_outcomes, read_receiver) =
             mpsc::channel(STORAGE_READ_COMPLETION_CHANNEL_CAPACITY);
@@ -224,7 +223,7 @@ impl StorageBridge {
         let thread_ledger = Arc::clone(&ledger);
         let thread = thread::Builder::new()
             .name(STORAGE_BRIDGE_THREAD_NAME.to_owned())
-            .spawn(move || bridge_loop(&pending, &outcomes, &read_outcomes, &thread_ledger))
+            .spawn(move || bridge_loop(&mut pending, &outcomes, &read_outcomes, &thread_ledger))
             .map_err(|_| RuntimeError::Storage(StorageError::Unavailable))?;
         Ok((
             Self {
@@ -249,6 +248,22 @@ impl StorageBridge {
         self.ledger
             .begin(transaction_id)
             .map_err(SubmitError::Bridge)?;
+        let Some(handoff) = &self.handoff else {
+            self.ledger.fail(BridgeFailure::Stopped);
+            return Err(SubmitError::Bridge(BridgeFailure::Stopped));
+        };
+        let permit = match handoff.try_reserve() {
+            Ok(permit) => permit,
+            Err(mpsc::error::TrySendError::Full(())) => {
+                self.ledger.abandon(transaction_id);
+                return Err(SubmitError::Storage(StorageError::QueueFull));
+            }
+            Err(mpsc::error::TrySendError::Closed(())) => {
+                self.ledger.abandon(transaction_id);
+                self.ledger.fail(BridgeFailure::Stopped);
+                return Err(SubmitError::Bridge(BridgeFailure::Stopped));
+            }
+        };
         let completion = match self.port.try_commit(batch) {
             Ok(completion) => completion,
             Err(error) => {
@@ -256,26 +271,11 @@ impl StorageBridge {
                 return Err(SubmitError::Storage(error));
             }
         };
-        let Some(handoff) = &self.handoff else {
-            self.ledger.fail(BridgeFailure::Stopped);
-            return Err(SubmitError::Bridge(BridgeFailure::Stopped));
-        };
-        match handoff.try_send(PendingCompletion::Commit {
+        permit.send(PendingCompletion::Commit {
             transaction_id,
             completion,
-        }) {
-            Ok(()) => Ok(transaction_id),
-            Err(TrySendError::Full(_)) => {
-                // The batch is admitted but its completion has no thread to
-                // wait on it: the outcome is unknowable to StateCore.
-                self.ledger.fail(BridgeFailure::HandoffFull);
-                Err(SubmitError::Bridge(BridgeFailure::HandoffFull))
-            }
-            Err(TrySendError::Disconnected(_)) => {
-                self.ledger.fail(BridgeFailure::Stopped);
-                Err(SubmitError::Bridge(BridgeFailure::Stopped))
-            }
-        }
+        });
+        Ok(transaction_id)
     }
 
     /// Submits one bounded read without blocking and assigns its completion a
@@ -290,21 +290,20 @@ impl StorageBridge {
             .checked_add(1)
             .ok_or(StorageError::Overflow)?;
         let read_id = StorageReadId::new(self.next_read_id);
-        let completion = self.port.try_read(plan)?;
         let Some(handoff) = &self.handoff else {
             return Err(StorageError::Unavailable);
         };
-        match handoff.try_send(PendingCompletion::Read {
+        let permit = handoff.try_reserve().map_err(|error| match error {
+            mpsc::error::TrySendError::Full(()) => StorageError::QueueFull,
+            mpsc::error::TrySendError::Closed(()) => StorageError::Unavailable,
+        })?;
+        let completion = self.port.try_read(plan)?;
+        permit.send(PendingCompletion::Read {
             read_id,
             completion,
-        }) {
-            Ok(()) => {
-                self.next_read_id = next;
-                Ok(read_id)
-            }
-            Err(TrySendError::Full(_)) => Err(StorageError::QueueFull),
-            Err(TrySendError::Disconnected(_)) => Err(StorageError::Unavailable),
-        }
+        });
+        self.next_read_id = next;
+        Ok(read_id)
     }
 
     /// Returns the retained bridge failure, if any.
@@ -369,12 +368,12 @@ pub fn classify_completion(
 }
 
 fn bridge_loop(
-    pending: &Receiver<PendingCompletion>,
+    pending: &mut mpsc::Receiver<PendingCompletion>,
     outcomes: &mpsc::Sender<StorageCompletionMessage>,
     read_outcomes: &mpsc::Sender<StorageReadCompletionMessage>,
     ledger: &CompletionLedger,
 ) {
-    while let Ok(next) = pending.recv() {
+    while let Some(next) = pending.blocking_recv() {
         let keep_running = match next {
             PendingCompletion::Commit {
                 transaction_id,

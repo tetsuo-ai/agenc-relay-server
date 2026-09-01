@@ -84,8 +84,9 @@ use crate::runtime_config::{
 };
 use crate::state_core::durable::{AccountingCeilings, KeyDeriver};
 use crate::state_core::inbox::{
-    LifecycleControl, LifecycleFailure, LifecyclePhase, MaintenanceEvent, SIGNAL_EVENT_CAPACITY,
-    SignalEvent, StateCoreMessage, lifecycle_channel,
+    ConnectionCloseInbox, ConnectionClosePort, LifecycleControl, LifecycleFailure, LifecyclePhase,
+    MaintenanceEvent, SIGNAL_EVENT_CAPACITY, SignalEvent, StateCoreMessage,
+    connection_close_channel, lifecycle_channel,
 };
 use crate::state_core::reconstruct::{Reconstruction, reconstruct};
 use crate::state_core::{
@@ -105,7 +106,6 @@ use crate::tls::{
 
 const RUNTIME_THREAD_NAME: &str = "agenc-ircd-tokio";
 const MAINTENANCE_MINUTE: Duration = Duration::from_secs(60);
-const PREFIX_ERASURE_INTERVAL: Duration = Duration::from_secs(600);
 const RETENTION_INTERVAL: Duration = Duration::from_secs(3_600);
 /// Fixed process status used only for a committed service-manager restart.
 pub const RESTART_EXIT_CODE: u8 = 75;
@@ -1220,7 +1220,7 @@ async fn run(inputs: DaemonRunInputs) -> Result<DaemonExit, DaemonError> {
             .values
             .get(LimitKey::DirectConnectionsPerAddress),
         Arc::clone(&budget),
-        Box::new(SystemMonotonicClock::start()),
+        Box::new(process_clock),
     )?);
     admission.install_observer(Arc::clone(&observer));
     let mut live = build_live_state(BuildLiveStateInputs {
@@ -1234,6 +1234,7 @@ async fn run(inputs: DaemonRunInputs) -> Result<DaemonExit, DaemonError> {
         liveness: Arc::clone(&liveness),
     })?;
     let (inbox, inbox_receiver) = mpsc::channel(SIGNAL_EVENT_CAPACITY);
+    let (connection_closes, connection_close_inbox) = connection_close_channel();
     let admin_binding = AdminSessionBinding {
         network_id: config.network.network_id,
         server_id: config.server.server_id,
@@ -1285,6 +1286,7 @@ async fn run(inputs: DaemonRunInputs) -> Result<DaemonExit, DaemonError> {
         &config,
         runtime_config.clone(),
         &inbox,
+        connection_closes,
         admin_port,
         Arc::clone(&budget),
         Arc::clone(&admission),
@@ -1304,6 +1306,7 @@ async fn run(inputs: DaemonRunInputs) -> Result<DaemonExit, DaemonError> {
         context,
         live,
         inbox_receiver,
+        connection_close_inbox,
         inbox: inbox.clone(),
         admission,
         admin: AdminOwnerStart {
@@ -1374,6 +1377,7 @@ struct StartOwnersInputs {
     context: ListenerContext,
     live: LiveState,
     inbox_receiver: mpsc::Receiver<StateCoreMessage>,
+    connection_close_inbox: ConnectionCloseInbox,
     inbox: mpsc::Sender<StateCoreMessage>,
     admission: Arc<TransportAdmission>,
     admin: AdminOwnerStart,
@@ -1388,6 +1392,7 @@ async fn start_owners(inputs: StartOwnersInputs) -> Result<RunningOwners, Daemon
         context,
         live,
         inbox_receiver,
+        connection_close_inbox,
         inbox,
         admission,
         admin,
@@ -1414,6 +1419,7 @@ async fn start_owners(inputs: StartOwnersInputs) -> Result<RunningOwners, Daemon
     let (lifecycle, lifecycle_receiver) = lifecycle_channel();
     let receivers = StateOwnerReceivers {
         inbox: inbox_receiver,
+        connection_closes: connection_close_inbox,
         lifecycle: lifecycle_receiver,
         storage,
         storage_reads,
@@ -1476,9 +1482,14 @@ fn spawn_listener_owner(
         ChildName::ListenerSet,
         ChildKind::Critical,
         |_token| async move {
-            let _exits = listeners.join().await;
+            let exits = listeners.join().await;
             let _sent = listener_exit.send(());
-            Ok(())
+            let exits = exits?;
+            if exits.iter().any(|exit| exit.task_failed) {
+                Err(RuntimeError::InvalidValue)
+            } else {
+                Ok(())
+            }
         },
     )?;
     Ok(listener_exited)
@@ -1533,10 +1544,13 @@ fn spawn_background_owners(
     Ok(signal_receiver)
 }
 
+// agenc-review: allow owner=runtime reviewed=2026-08-31 reason=listener composition keeps each independently owned bounded port and policy authority visible at the root wiring boundary
+#[allow(clippy::too_many_arguments)]
 fn listener_context(
     config: &Config,
     runtime_config: RuntimeConfigHandle,
     inbox: &mpsc::Sender<StateCoreMessage>,
+    connection_closes: ConnectionClosePort,
     admin: AdminTransportPort,
     budget: Arc<MemoryBudget>,
     admission: Arc<TransportAdmission>,
@@ -1551,6 +1565,7 @@ fn listener_context(
         admission,
         observer,
         inbox: inbox.clone(),
+        connection_closes,
         admin: Some(admin),
         limits: connection_limits(config)?,
         runtime_config: Some(runtime_config),
@@ -1598,6 +1613,7 @@ fn operator_admission(config: &Config) -> AdminAdmissionSnapshot {
 
 struct StateOwnerReceivers {
     inbox: mpsc::Receiver<StateCoreMessage>,
+    connection_closes: ConnectionCloseInbox,
     lifecycle: mpsc::Receiver<crate::state_core::inbox::LifecycleRequest>,
     storage: mpsc::Receiver<crate::bridge::StorageCompletionMessage>,
     storage_reads: mpsc::Receiver<crate::bridge::StorageReadCompletionMessage>,
@@ -1617,6 +1633,7 @@ async fn run_state_owner(
 ) -> Result<(), RuntimeError> {
     let StateOwnerReceivers {
         inbox,
+        connection_closes,
         lifecycle,
         storage,
         storage_reads,
@@ -1626,7 +1643,15 @@ async fn run_state_owner(
     liveness.record_state_core(state.context().now());
     let _sent = started.send(());
     let exit = state
-        .run(inbox, lifecycle, storage, storage_reads, crypto, token)
+        .run(
+            inbox,
+            connection_closes,
+            lifecycle,
+            storage,
+            storage_reads,
+            crypto,
+            token,
+        )
         .await;
     readiness.clear(ReadinessStage::StateCore);
     let (storage_bridge, crypto_bridge) = state.into_bridges();
@@ -2042,27 +2067,103 @@ async fn run_maintenance(
     admission: Arc<TransportAdmission>,
 ) -> Result<(), RuntimeError> {
     let mut minute = tokio::time::interval(MAINTENANCE_MINUTE);
-    let mut prefixes = tokio::time::interval(PREFIX_ERASURE_INTERVAL);
     let mut retention = tokio::time::interval(RETENTION_INTERVAL);
+    let mut pending = PendingMaintenance::default();
     minute.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    prefixes.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     retention.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     minute.tick().await;
-    prefixes.tick().await;
     retention.tick().await;
+    while maintenance_iteration(
+        &token,
+        &inbox,
+        admission.as_ref(),
+        &mut minute,
+        &mut retention,
+        &mut pending,
+    )
+    .await?
+    {}
+    Ok(())
+}
+
+async fn maintenance_iteration(
+    token: &crate::cancel::CancellationToken,
+    inbox: &mpsc::Sender<StateCoreMessage>,
+    admission: &TransportAdmission,
+    minute: &mut tokio::time::Interval,
+    retention: &mut tokio::time::Interval,
+    pending: &mut PendingMaintenance,
+) -> Result<bool, RuntimeError> {
+    tokio::select! {
+        biased;
+        () = token.cancelled() => Ok(false),
+        () = inbox.closed() => Ok(false),
+        _ = minute.tick() => {
+            pending.record_clock_drift_check();
+            Ok(true)
+        },
+        () = wait_for_prefix_erasure(admission) => {
+            admission.erase_idle();
+            Ok(true)
+        },
+        _ = retention.tick() => {
+            pending.record_retention_sweep();
+            Ok(true)
+        },
+        permit = inbox.reserve(), if !pending.is_empty() => {
+            let Ok(permit) = permit else {
+                return Ok(false);
+            };
+            let event = pending.take().ok_or(RuntimeError::InvalidValue)?;
+            permit.send(StateCoreMessage::Maintenance(event));
+            Ok(true)
+        },
+    }
+}
+
+#[derive(Default)]
+struct PendingMaintenance {
+    clock_drift_check: bool,
+    retention_sweep: bool,
+}
+
+impl PendingMaintenance {
+    const fn record_clock_drift_check(&mut self) {
+        self.clock_drift_check = true;
+    }
+
+    const fn record_retention_sweep(&mut self) {
+        self.retention_sweep = true;
+    }
+
+    const fn is_empty(&self) -> bool {
+        !self.clock_drift_check && !self.retention_sweep
+    }
+
+    fn take(&mut self) -> Option<MaintenanceEvent> {
+        if self.clock_drift_check {
+            self.clock_drift_check = false;
+            return Some(MaintenanceEvent::ClockDriftCheck);
+        }
+        if self.retention_sweep {
+            self.retention_sweep = false;
+            return Some(MaintenanceEvent::RetentionSweep);
+        }
+        None
+    }
+}
+
+async fn wait_for_prefix_erasure(admission: &TransportAdmission) {
     loop {
-        let event = tokio::select! {
-            () = token.cancelled() => return Ok(()),
-            _ = minute.tick() => MaintenanceEvent::ClockDriftCheck,
-            _ = prefixes.tick() => {
-                admission.erase_idle();
-                MaintenanceEvent::PrefixErasure
-            },
-            _ = retention.tick() => MaintenanceEvent::RetentionSweep,
+        let changed = admission.prefix_expiry_changed();
+        tokio::pin!(changed);
+        let Some(delay) = admission.prefix_erasure_delay() else {
+            changed.as_mut().await;
+            continue;
         };
-        match inbox.try_send(StateCoreMessage::Maintenance(event)) {
-            Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
-            Err(mpsc::error::TrySendError::Closed(_)) => return Ok(()),
+        tokio::select! {
+            () = tokio::time::sleep(delay) => return,
+            () = changed.as_mut() => {}
         }
     }
 }
@@ -2102,6 +2203,7 @@ async fn shutdown_storage(owner: StorageOwner) -> Result<(), DaemonError> {
 #[cfg(test)]
 mod tests {
     use agenc_ircd_config::{PathResolver, RateTable};
+    use agenc_ircd_testkit::DeterministicMonotonicClock;
 
     use super::*;
 
@@ -2114,6 +2216,93 @@ mod tests {
             ValidationDepth::Document,
         )
         .map_err(DaemonError::Configuration)
+    }
+
+    #[test]
+    fn pending_maintenance_coalesces_without_dropping_distinct_work() {
+        let mut pending = PendingMaintenance::default();
+        pending.record_retention_sweep();
+        pending.record_clock_drift_check();
+        pending.record_retention_sweep();
+        pending.record_clock_drift_check();
+
+        assert_eq!(pending.take(), Some(MaintenanceEvent::ClockDriftCheck));
+        assert_eq!(pending.take(), Some(MaintenanceEvent::RetentionSweep));
+        assert_eq!(pending.take(), None);
+        assert!(pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pending_maintenance_survives_full_inbox_and_stops_on_close() -> Result<(), RuntimeError>
+    {
+        let admission = TransportAdmission::new(
+            RateLimits::defaults(),
+            1,
+            Arc::new(MemoryBudget::new(1_024 * 1_024)),
+            Box::new(DeterministicMonotonicClock::at(0)),
+        )?;
+        let token = crate::cancel::CancellationToken::root();
+        let (sender, mut receiver) = mpsc::channel(1);
+        sender
+            .send(StateCoreMessage::Maintenance(
+                MaintenanceEvent::CheckpointDue,
+            ))
+            .await
+            .map_err(|_| RuntimeError::Cancelled)?;
+        let mut minute = tokio::time::interval(Duration::from_secs(3_600));
+        let mut retention = tokio::time::interval(Duration::from_secs(3_600));
+        minute.tick().await;
+        retention.tick().await;
+        let mut pending = PendingMaintenance::default();
+        pending.record_clock_drift_check();
+        pending.record_retention_sweep();
+
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(5),
+                maintenance_iteration(
+                    &token,
+                    &sender,
+                    &admission,
+                    &mut minute,
+                    &mut retention,
+                    &mut pending,
+                ),
+            )
+            .await
+            .is_err()
+        );
+        assert!(receiver.recv().await.is_some());
+        assert!(
+            maintenance_iteration(
+                &token,
+                &sender,
+                &admission,
+                &mut minute,
+                &mut retention,
+                &mut pending,
+            )
+            .await?
+        );
+        assert!(matches!(
+            receiver.recv().await,
+            Some(StateCoreMessage::Maintenance(
+                MaintenanceEvent::ClockDriftCheck
+            ))
+        ));
+        drop(receiver);
+        assert!(
+            !maintenance_iteration(
+                &token,
+                &sender,
+                &admission,
+                &mut minute,
+                &mut retention,
+                &mut pending,
+            )
+            .await?
+        );
+        Ok(())
     }
 
     #[test]

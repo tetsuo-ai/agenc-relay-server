@@ -18,7 +18,7 @@ use agenc_ircd_types::{MonotonicTick, SessionId, UserId};
 use crate::RuntimeError;
 use crate::connection::sink::{ClientQueueSnapshot, ClientSink, ConnectionGeneration};
 use crate::purpose::ListenerPurpose;
-use crate::state_core::inbox::SourceAddressKey;
+use crate::state_core::inbox::{PhysicalCloseNotice, SourceAddressKey};
 use crate::sync::Arc;
 
 /// Hard maximum client connections one node tracks (spec line 2639).
@@ -72,6 +72,18 @@ pub struct ConnectionEntry {
     session: Option<BoundSession>,
     capabilities: Option<CapabilityState>,
     sink_gone: bool,
+    last_line_sequence: u64,
+    pending_physical_close: Option<PendingPhysicalClose>,
+}
+
+struct PendingPhysicalClose {
+    notice: PhysicalCloseNotice,
+    route_buffered_lines: bool,
+}
+
+pub(crate) struct LineAcceptance {
+    pub(crate) route: bool,
+    pub(crate) completed_close: Option<PhysicalCloseNotice>,
 }
 
 impl ConnectionEntry {
@@ -176,9 +188,78 @@ impl SessionTable {
                 session: None,
                 capabilities: None,
                 sink_gone: false,
+                last_line_sequence: 0,
+                pending_physical_close: None,
             },
         );
         Ok(())
+    }
+
+    pub(crate) fn begin_physical_close(
+        &mut self,
+        notice: PhysicalCloseNotice,
+    ) -> Result<Option<PhysicalCloseNotice>, PhysicalCloseNotice> {
+        let Some(entry) = self.connections.get_mut(&notice.generation) else {
+            return Err(notice);
+        };
+        if entry.pending_physical_close.is_some()
+            || notice.final_line_sequence < entry.last_line_sequence
+        {
+            return Err(notice);
+        }
+        let route_buffered_lines = !entry.sink_gone;
+        entry.sink_gone = true;
+        if notice.final_line_sequence == entry.last_line_sequence {
+            return Ok(Some(notice));
+        }
+        entry.pending_physical_close = Some(PendingPhysicalClose {
+            notice,
+            route_buffered_lines,
+        });
+        Ok(None)
+    }
+
+    pub(crate) fn accept_line(
+        &mut self,
+        generation: ConnectionGeneration,
+        sequence: u64,
+    ) -> Result<Option<LineAcceptance>, RuntimeError> {
+        let Some(entry) = self.connections.get_mut(&generation) else {
+            return Ok(None);
+        };
+        let expected = entry
+            .last_line_sequence
+            .checked_add(1)
+            .ok_or(RuntimeError::InvalidValue)?;
+        if sequence != expected
+            || entry
+                .pending_physical_close
+                .as_ref()
+                .is_some_and(|pending| sequence > pending.notice.final_line_sequence)
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
+        entry.last_line_sequence = sequence;
+        let route = entry
+            .pending_physical_close
+            .as_ref()
+            .map_or_else(|| !entry.sink_gone, |pending| pending.route_buffered_lines);
+        let completed_close = if entry
+            .pending_physical_close
+            .as_ref()
+            .is_some_and(|pending| sequence == pending.notice.final_line_sequence)
+        {
+            entry
+                .pending_physical_close
+                .take()
+                .map(|pending| pending.notice)
+        } else {
+            None
+        };
+        Ok(Some(LineAcceptance {
+            route,
+            completed_close,
+        }))
     }
 
     /// Binds a registered identity to a connection exactly once.
@@ -231,6 +312,9 @@ impl SessionTable {
         match self.connections.get_mut(&generation) {
             Some(entry) => {
                 entry.sink_gone = true;
+                if let Some(pending) = &mut entry.pending_physical_close {
+                    pending.route_buffered_lines = false;
+                }
                 true
             }
             None => false,
@@ -345,6 +429,7 @@ impl SessionTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::budget::{BoundedMemoryCharges, MemoryBudget, MemoryBudgetPort, MemoryCharge};
     use crate::connection::sink::{
         BoundedSharedClientFrames, ClientQueueDemand, ClientQueueReservation, QueueAllocationError,
         SinkReserveError, TentativeClientQueueReservation,
@@ -418,6 +503,56 @@ mod tests {
             return Err(RuntimeError::InvalidValue);
         }
         Ok(state)
+    }
+
+    #[tokio::test]
+    async fn physical_close_waits_for_accepted_lines_without_reopening_a_policy_close()
+    -> Result<(), RuntimeError> {
+        let mut table = SessionTable::new();
+        let generation = ConnectionGeneration::new(5);
+        table.open(
+            generation,
+            ListenerPurpose::ClientTls,
+            SourceAddressKey::ipv4([10, 0, 0, 5]),
+            sink(5),
+            MonotonicTick::from_ticks(1),
+        )?;
+        let budget = MemoryBudget::new(1);
+        let charges = BoundedMemoryCharges::new(vec![MemoryCharge::fixed(1)])?;
+        let mut permits = budget.try_acquire_batch(charges)?;
+        let permit = permits.split_exact(1).ok_or(RuntimeError::InvalidValue)?;
+        let (return_permit, returned_permit) = tokio::sync::oneshot::channel();
+        let notice = PhysicalCloseNotice {
+            generation,
+            reason: crate::state_core::inbox::CloseReason::TransportLoss,
+            closed_at: Some(MonotonicTick::from_ticks(2)),
+            final_line_sequence: 2,
+            state_permit: crate::state_core::inbox::ConnectionStatePermit::new(
+                permit,
+                return_permit,
+            ),
+        };
+        assert!(
+            table
+                .begin_physical_close(notice)
+                .is_ok_and(|ready| ready.is_none())
+        );
+        let first = table
+            .accept_line(generation, 1)?
+            .ok_or(RuntimeError::InvalidValue)?;
+        assert!(first.route);
+        assert!(first.completed_close.is_none());
+        table.mark_sink_gone(generation);
+        let second = table
+            .accept_line(generation, 2)?
+            .ok_or(RuntimeError::InvalidValue)?;
+        assert!(!second.route);
+        let completed = second.completed_close.ok_or(RuntimeError::InvalidValue)?;
+        drop(completed.state_permit);
+        drop(returned_permit.await.map_err(|_| RuntimeError::Cancelled)?);
+        assert_eq!(budget.available(), 1);
+        assert!(table.close(generation).is_some());
+        Ok(())
     }
 
     #[test]

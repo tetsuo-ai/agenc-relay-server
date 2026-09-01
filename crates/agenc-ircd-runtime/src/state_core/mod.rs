@@ -18,13 +18,16 @@ pub mod reconstruct;
 pub mod session;
 pub mod timers;
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::time::Duration;
 
 use agenc_ircd_client_wire::{ParsedMessage, WireMessage, numeric_reply};
 use agenc_ircd_crypto::OpenedStoragePlaintext;
 use agenc_ircd_domain::{ApplyReceipt, DomainError, DomainState, MutationPlan};
-use agenc_ircd_storage::{CommitOutcome, ReadPlan, SealedRecord, StorageError, StoredKey, TableId};
+use agenc_ircd_storage::{
+    CommitOutcome, ExistingRecord, ReadPlan, SealedRecord, StorageError, StoredKey, TableId,
+};
 use agenc_ircd_types::{
     ClockError, EntropySource, MonotonicClock, MonotonicTick, Revision, TransactionId, UserId,
     UtcSecond, WallClock,
@@ -61,15 +64,16 @@ use crate::state_core::admin::{AdminCoreRequest, AdminCoreResult};
 use crate::state_core::durable::{
     AccountServiceDurableWrite, AccountingCeilings, DurableIndex, HeadCounters, KeyDeriver,
     PlanProjection, RetainedProjection, project_admin_audit_event, project_admin_audit_retention,
-    project_batch, read_back,
+    project_batch, read_back_record,
 };
 use crate::state_core::fanout::{
     FanoutCommitReport, FanoutFrame, FanoutRefused, FanoutRequest, FanoutReservation, FanoutTarget,
     reserve,
 };
 use crate::state_core::inbox::{
-    CloseReason, LifecycleFailure, LifecyclePhase, LifecycleRequest, LifecycleResult,
-    MaintenanceEvent, SignalEvent, SourceAddressKey, StateCoreMessage,
+    CloseReason, ConnectionCloseInbox, ConnectionOpenOutcome, LifecycleFailure, LifecyclePhase,
+    LifecycleRequest, LifecycleResult, MaintenanceEvent, PhysicalCloseNotice, SignalEvent,
+    SourceAddressKey, StateCoreMessage,
 };
 use crate::state_core::pending::{PendingMutationBatch, StagedPlan};
 use crate::state_core::reconstruct::Reconstruction;
@@ -84,6 +88,9 @@ const ERR_UNKNOWNCOMMAND: u16 = 421;
 const ERR_NOTREGISTERED: u16 = 451;
 /// Owner progress cadence used by authenticated liveness.
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
+/// Retry cadence after a bounded storage queue temporarily refuses index
+/// readback without producing a StateCore completion wake.
+const INDEX_REFRESH_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 /// Bounded cadence used only while orderly connection flushes are pending.
 const SHUTDOWN_FLUSH_POLL: Duration = Duration::from_millis(10);
 
@@ -314,6 +321,8 @@ pub enum CorruptionCause {
     IndexRefreshFailed,
     /// A plan projection failed for a reason other than a storage ceiling.
     ProjectionFailed,
+    /// A physical close named a generation StateCore had not admitted.
+    ConnectionStateFailed,
 }
 
 impl fmt::Display for StateCoreExit {
@@ -627,7 +636,7 @@ impl StateCoreContext {
         request: FanoutRequest,
     ) -> Result<FanoutCommitReport, FanoutRefused> {
         let reservation = self.reserve_fanout(&request)?;
-        Ok(reservation.commit())
+        Ok(self.commit_fanout(reservation))
     }
 
     /// Applies an ephemeral plan after reserving its complete fanout.
@@ -640,7 +649,7 @@ impl StateCoreContext {
             .reserve_fanout(&request)
             .map_err(EphemeralRefused::Fanout)?;
         let receipt = self.apply_plan(plan).map_err(EphemeralRefused::Domain)?;
-        reservation.commit();
+        self.commit_fanout(reservation);
         Ok(receipt)
     }
 
@@ -738,7 +747,7 @@ impl StateCoreContext {
             && self.pending.is_none()
         {
             let receipt = self.apply_plan(plan).map_err(StageRefused::Domain)?;
-            reservation.commit();
+            self.commit_fanout(reservation);
             return Ok(StageAccepted::AppliedInStep(Box::new(receipt)));
         }
         let staged = StagedPlan::with_account_service_writes(
@@ -788,6 +797,14 @@ impl StateCoreContext {
         }
     }
 
+    fn commit_fanout(&mut self, reservation: FanoutReservation) -> FanoutCommitReport {
+        let report = reservation.commit();
+        for generation in report.slow_consumer_generations() {
+            self.sessions.mark_sink_gone(generation);
+        }
+        report
+    }
+
     fn apply_plan(&mut self, plan: MutationPlan) -> Result<ApplyReceipt, DomainError> {
         let prepared = self.domain.prepare_mutation(plan)?;
         let receipt = self.domain.apply_prepared(prepared)?;
@@ -803,11 +820,8 @@ impl StateCoreContext {
             .pending
             .as_ref()
             .and_then(PendingMutationBatch::gather_deadline);
-        match (timer, gather) {
-            (Some(timer), Some(gather)) => Some(timer.min(gather)),
-            (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
-            (None, None) => None,
-        }
+        let prefix = self.prefixes.next_erasure_deadline();
+        [timer, gather, prefix].into_iter().flatten().min()
     }
 
     /// Submits the pending batch when its gather window closed.
@@ -897,7 +911,7 @@ impl StateCoreContext {
             if self.apply_plan(plan).is_err() {
                 return Err(StateCoreExit::Corrupt(CorruptionCause::ApplyFailed));
             }
-            fanout.commit();
+            self.commit_fanout(fanout);
         }
         Ok(BatchStep::AppliedInStep(count))
     }
@@ -973,7 +987,7 @@ impl StateCoreContext {
             if self.apply_plan(plan).is_err() {
                 return Err(StateCoreExit::Corrupt(CorruptionCause::ApplyFailed));
             }
-            fanout.commit();
+            self.commit_fanout(fanout);
         }
         Ok(())
     }
@@ -994,8 +1008,17 @@ impl StateCoreContext {
     ) -> Result<(), RuntimeError> {
         let now = self.now();
         self.sessions.open(generation, purpose, source, sink, now)?;
+        let evicted = match self.prefixes.connection_opened(source.prefix_key(), now) {
+            Ok(evicted) => evicted,
+            Err(error) => {
+                let _closed = self.sessions.close(generation);
+                return Err(error);
+            }
+        };
+        if let Some(prefix) = evicted {
+            self.erase_prefix_buckets(prefix);
+        }
         self.counters.connections_opened = self.counters.connections_opened.saturating_add(1);
-        let _prefix_result = self.prefixes.connection_opened(source.prefix_key(), now);
         let previous = self.overload.class();
         let current = self
             .overload
@@ -1009,15 +1032,23 @@ impl StateCoreContext {
     }
 
     /// Removes one connection and every bucket keyed by it.
-    fn release_connection(&mut self, generation: ConnectionGeneration) -> bool {
-        let now = self.now();
+    fn release_connection(
+        &mut self,
+        generation: ConnectionGeneration,
+        closed_at: Option<MonotonicTick>,
+        prefix_recorded: bool,
+    ) -> bool {
+        let observed_now = self.now();
+        let closed_at = closed_at.map_or(observed_now, |tick| tick.min(observed_now));
         let Some(entry) = self.sessions.close(generation) else {
             return false;
         };
         self.counters.connections_closed = self.counters.connections_closed.saturating_add(1);
-        let _prefix_result = self
-            .prefixes
-            .connection_closed(entry.source().prefix_key(), now);
+        if !prefix_recorded {
+            let _prefix_result = self
+                .prefixes
+                .connection_closed(entry.source().prefix_key(), closed_at);
+        }
         self.buckets.erase_key(BucketKey::Connection(generation));
         if let Some(session) = entry.session() {
             self.buckets.erase_key(BucketKey::Session(session.user_id));
@@ -1025,10 +1056,47 @@ impl StateCoreContext {
         true
     }
 
+    fn record_physical_close(
+        &mut self,
+        generation: ConnectionGeneration,
+        closed_at: Option<MonotonicTick>,
+    ) -> bool {
+        let Some(source) = self
+            .sessions
+            .connection(generation)
+            .map(|entry| entry.source())
+        else {
+            return false;
+        };
+        let observed_now = self.now();
+        let closed_at = closed_at.map_or(observed_now, |tick| tick.min(observed_now));
+        self.prefixes
+            .connection_closed(source.prefix_key(), closed_at)
+            .is_ok()
+    }
+
     fn erase_idle_prefixes(&mut self) {
         let now = self.now();
+        self.erase_idle_prefixes_at(now);
+    }
+
+    fn erase_idle_prefixes_at(&mut self, now: MonotonicTick) {
+        if !self
+            .prefixes
+            .next_erasure_deadline()
+            .is_some_and(|deadline| deadline <= now)
+        {
+            return;
+        }
         for prefix in self.prefixes.erase_idle(now) {
-            self.buckets.erase_key(BucketKey::Prefix(prefix));
+            self.erase_prefix_buckets(prefix);
+        }
+    }
+
+    fn erase_prefix_buckets(&mut self, prefix: SourceAddressKey) {
+        self.buckets.erase_key(BucketKey::Prefix(prefix));
+        if prefix == SourceAddressKey::onion_listener() {
+            self.buckets.erase_key(BucketKey::OnionListener);
         }
     }
 
@@ -1081,6 +1149,108 @@ struct ProvisionalReload {
     previous: Arc<RuntimeConfigSnapshot>,
     candidate: Arc<RuntimeConfigSnapshot>,
     _lease: Option<crate::runtime_config::ReloadLease>,
+}
+
+enum IndexRefreshContinuation {
+    Batch,
+    Admin(tokio::sync::oneshot::Sender<AdminCoreResult>),
+}
+
+impl IndexRefreshContinuation {
+    fn complete(self) {
+        if let Self::Admin(reply) = self {
+            let _sent = reply.send(Ok(()));
+        }
+    }
+}
+
+struct PendingIndexRefresh {
+    expected_commit_sequence: u64,
+    remaining: VecDeque<(TableId, StoredKey)>,
+    waiting: Option<(StorageReadId, TableId, StoredKey)>,
+    refreshed: Vec<(TableId, StoredKey, Option<ExistingRecord>)>,
+    continuation: IndexRefreshContinuation,
+}
+
+enum IndexReadSubmission {
+    Complete,
+    Submitted,
+    Blocked,
+}
+
+impl PendingIndexRefresh {
+    fn new(
+        rows: Vec<(TableId, StoredKey)>,
+        expected_commit_sequence: u64,
+        continuation: IndexRefreshContinuation,
+    ) -> Result<Self, RuntimeError> {
+        let mut refreshed = Vec::new();
+        refreshed
+            .try_reserve_exact(rows.len())
+            .map_err(|_| RuntimeError::MemoryExhausted)?;
+        Ok(Self {
+            expected_commit_sequence,
+            remaining: VecDeque::from(rows),
+            waiting: None,
+            refreshed,
+            continuation,
+        })
+    }
+
+    fn submit_next(
+        &mut self,
+        bridge: &mut StorageBridge,
+    ) -> Result<IndexReadSubmission, RuntimeError> {
+        if self.waiting.is_some() {
+            return Err(RuntimeError::InvalidValue);
+        }
+        let Some((table, key)) = self.remaining.front().cloned() else {
+            return Ok(IndexReadSubmission::Complete);
+        };
+        match bridge.submit_read(ReadPlan::exact(table, key.clone())) {
+            Ok(read_id) => {
+                let _submitted = self.remaining.pop_front();
+                self.waiting = Some((read_id, table, key));
+                Ok(IndexReadSubmission::Submitted)
+            }
+            Err(StorageError::QueueFull) => Ok(IndexReadSubmission::Blocked),
+            Err(error) => Err(RuntimeError::Storage(error)),
+        }
+    }
+
+    fn owns(&self, read_id: StorageReadId) -> bool {
+        self.waiting
+            .as_ref()
+            .is_some_and(|(expected, _, _)| *expected == read_id)
+    }
+
+    fn complete_read(&mut self, message: StorageReadCompletionMessage) -> Result<(), RuntimeError> {
+        let Some((read_id, table, key)) = self.waiting.take() else {
+            return Err(RuntimeError::InvalidValue);
+        };
+        if read_id != message.read_id {
+            return Err(RuntimeError::InvalidValue);
+        }
+        let result = message.result?;
+        if result.storage_commit_sequence != self.expected_commit_sequence {
+            return Err(RuntimeError::Storage(StorageError::StaleState));
+        }
+        self.refreshed.push(read_back_record(table, key, result)?);
+        Ok(())
+    }
+
+    fn finish(self, index: &mut DurableIndex) -> Result<IndexRefreshContinuation, RuntimeError> {
+        if self.waiting.is_some() || !self.remaining.is_empty() {
+            return Err(RuntimeError::InvalidValue);
+        }
+        index.refresh(self.refreshed)?;
+        Ok(self.continuation)
+    }
+}
+
+enum CompletionStep {
+    Ready(Option<StateCoreExit>),
+    Refresh(IndexRefreshContinuation),
 }
 
 #[derive(Default)]
@@ -1745,26 +1915,23 @@ impl StateCore {
         )
     }
 
-    async fn step_admin_completion(
-        &mut self,
-        message: StorageCompletionMessage,
-    ) -> Option<StateCoreExit> {
+    fn step_admin_completion(&mut self, message: StorageCompletionMessage) -> CompletionStep {
         let Some(pending) = self.admin_pending.take() else {
-            return Some(StateCoreExit::Indeterminate(
+            return CompletionStep::Ready(Some(StateCoreExit::Indeterminate(
                 IndeterminateCause::UnexpectedCompletion,
-            ));
+            )));
         };
         if pending.transaction_id != message.transaction_id {
-            return Some(StateCoreExit::Indeterminate(
+            return CompletionStep::Ready(Some(StateCoreExit::Indeterminate(
                 IndeterminateCause::TransactionMismatch,
-            ));
+            )));
         }
         match message.outcome {
             CommitOutcome::Committed(receipt) => {
                 if receipt.transaction_id != pending.transaction_id {
-                    return Some(StateCoreExit::Indeterminate(
+                    return CompletionStep::Ready(Some(StateCoreExit::Indeterminate(
                         IndeterminateCause::TransactionMismatch,
-                    ));
+                    )));
                 }
                 self.context.head = pending.retained.advance(&receipt);
                 self.context.index.apply(pending.retained.updates());
@@ -1773,13 +1940,11 @@ impl StateCore {
                 if let Some(mutation) = pending.mutation
                     && self.apply_admin_mutation(mutation).is_err()
                 {
-                    return Some(StateCoreExit::Corrupt(CorruptionCause::ApplyFailed));
+                    return CompletionStep::Ready(Some(StateCoreExit::Corrupt(
+                        CorruptionCause::ApplyFailed,
+                    )));
                 }
-                if let Some(exit) = self.refresh_index().await {
-                    return Some(exit);
-                }
-                let _sent = pending.reply.send(Ok(()));
-                self.step_batch()
+                CompletionStep::Refresh(IndexRefreshContinuation::Admin(pending.reply))
             }
             CommitOutcome::Rejected(_error) => {
                 self.context.counters.batches_rejected =
@@ -1787,12 +1952,50 @@ impl StateCore {
                 let _sent = pending
                     .reply
                     .send(Err(AdminCoreFailure::StorageUnavailable));
-                self.step_batch()
+                CompletionStep::Ready(self.step_batch())
             }
-            CommitOutcome::Indeterminate => Some(StateCoreExit::Indeterminate(
-                IndeterminateCause::StorageIndeterminate,
+            CommitOutcome::Indeterminate => CompletionStep::Ready(Some(
+                StateCoreExit::Indeterminate(IndeterminateCause::StorageIndeterminate),
             )),
         }
+    }
+
+    fn step_physical_close(&mut self, notice: PhysicalCloseNotice) -> Option<StateCoreExit> {
+        if !self
+            .context
+            .record_physical_close(notice.generation, notice.closed_at)
+        {
+            drop(notice.state_permit);
+            return Some(StateCoreExit::Corrupt(
+                CorruptionCause::ConnectionStateFailed,
+            ));
+        }
+        match self.context.sessions.begin_physical_close(notice) {
+            Ok(Some(ready)) => self.finish_physical_close(ready),
+            Ok(None) => None,
+            Err(rejected) => {
+                drop(rejected.state_permit);
+                Some(StateCoreExit::Corrupt(
+                    CorruptionCause::ConnectionStateFailed,
+                ))
+            }
+        }
+    }
+
+    fn finish_physical_close(&mut self, notice: PhysicalCloseNotice) -> Option<StateCoreExit> {
+        if !self
+            .context
+            .release_connection(notice.generation, notice.closed_at, true)
+        {
+            drop(notice.state_permit);
+            return Some(StateCoreExit::Corrupt(
+                CorruptionCause::ConnectionStateFailed,
+            ));
+        }
+        self.router
+            .connection_closed(&mut self.context, notice.generation, notice.reason);
+        drop(notice.state_permit);
+        None
     }
 
     /// Handles one inbox message; `Some` ends the loop.
@@ -1803,30 +2006,26 @@ impl StateCore {
                 purpose,
                 source,
                 sink,
+                acknowledgement,
             } => {
-                if self
+                let outcome = if self
                     .context
                     .admit_connection(generation, purpose, source, sink)
                     .is_ok()
                 {
                     self.router.connection_opened(&mut self.context, generation);
-                }
+                    ConnectionOpenOutcome::Accepted
+                } else {
+                    ConnectionOpenOutcome::Refused
+                };
+                let _sent = acknowledgement.send(outcome);
                 None
             }
             StateCoreMessage::Line {
                 generation,
+                sequence,
                 message,
-            } => {
-                self.route_line(generation, *message);
-                None
-            }
-            StateCoreMessage::Closed { generation, reason } => {
-                if self.context.release_connection(generation) {
-                    self.router
-                        .connection_closed(&mut self.context, generation, reason);
-                }
-                None
-            }
+            } => self.route_line(generation, sequence, *message),
             StateCoreMessage::Signal(signal) => self.step_signal(signal),
             StateCoreMessage::Maintenance(event) => {
                 self.step_maintenance(event);
@@ -1836,11 +2035,31 @@ impl StateCore {
         exit.or_else(|| self.step_batch())
     }
 
-    fn route_line(&mut self, generation: ConnectionGeneration, message: ParsedMessage) {
-        if self.context.sessions.connection(generation).is_none() {
+    fn route_line(
+        &mut self,
+        generation: ConnectionGeneration,
+        sequence: u64,
+        message: ParsedMessage,
+    ) -> Option<StateCoreExit> {
+        let acceptance = match self.context.sessions.accept_line(generation, sequence) {
+            Ok(Some(acceptance)) => acceptance,
+            Ok(None) => {
+                self.context.counters.lines_dropped =
+                    self.context.counters.lines_dropped.saturating_add(1);
+                return None;
+            }
+            Err(_) => {
+                return Some(StateCoreExit::Corrupt(
+                    CorruptionCause::ConnectionStateFailed,
+                ));
+            }
+        };
+        if !acceptance.route || self.context.quiescing {
             self.context.counters.lines_dropped =
                 self.context.counters.lines_dropped.saturating_add(1);
-            return;
+            return acceptance
+                .completed_close
+                .and_then(|notice| self.finish_physical_close(notice));
         }
         self.context.counters.lines_routed = self.context.counters.lines_routed.saturating_add(1);
         let observer = self.context.observer.clone();
@@ -1864,12 +2083,15 @@ impl StateCore {
         }
         if let RouteOutcome::Close(_reason) = outcome {
             // The sink contract exposes one close path; the transport owner
-            // ends the connection and reports it back through `Closed`.
+            // ends the connection and reports it on the reserved close lane.
             if let Some(sink) = self.context.sessions.sink_for_generation(generation) {
                 sink.begin_slow_consumer_close();
             }
             self.context.sessions.mark_sink_gone(generation);
         }
+        acceptance
+            .completed_close
+            .and_then(|notice| self.finish_physical_close(notice))
     }
 
     fn step_signal(&mut self, signal: SignalEvent) -> Option<StateCoreExit> {
@@ -1927,6 +2149,7 @@ impl StateCore {
     /// Fires every due timer; `Some` ends the loop.
     pub fn step_wake(&mut self) -> Option<StateCoreExit> {
         let now = self.context.now();
+        self.context.erase_idle_prefixes_at(now);
         while let Some(entry) = self.context.timers.pop_due(now) {
             self.context.counters.timers_fired =
                 self.context.counters.timers_fired.saturating_add(1);
@@ -1935,14 +2158,10 @@ impl StateCore {
         self.step_batch()
     }
 
-    /// Consumes one storage receipt, applies committed plans, and reads the
-    /// written rows back into the index; `Some` ends the loop.
-    pub async fn step_completion(
-        &mut self,
-        message: StorageCompletionMessage,
-    ) -> Option<StateCoreExit> {
+    /// Consumes one storage receipt and starts bounded index readback.
+    fn step_completion(&mut self, message: StorageCompletionMessage) -> CompletionStep {
         if self.admin_pending.is_some() {
-            return self.step_admin_completion(message).await;
+            return self.step_admin_completion(message);
         }
         match self.context.consume_completion(message) {
             Ok(BatchStep::Rejected(rejections)) => self.report_rejections(rejections),
@@ -1950,36 +2169,68 @@ impl StateCore {
                 self.router.batch_applied(&mut self.context, count);
             }
             Ok(_) => {}
-            Err(exit) => return Some(exit),
+            Err(exit) => return CompletionStep::Ready(Some(exit)),
         }
-        if let Some(exit) = self.refresh_index().await {
-            return Some(exit);
-        }
-        self.step_batch()
+        CompletionStep::Refresh(IndexRefreshContinuation::Batch)
     }
 
-    async fn refresh_index(&mut self) -> Option<StateCoreExit> {
+    fn start_index_refresh(
+        &mut self,
+        continuation: IndexRefreshContinuation,
+    ) -> Result<Option<PendingIndexRefresh>, StateCoreExit> {
         let rows = self.context.pending_index_rows();
         if rows.is_empty() {
-            return None;
+            continuation.complete();
+            return Ok(None);
         }
-        let port = self.context.bridge.port().clone();
-        let joined = tokio::task::spawn_blocking(move || read_back(&port, rows)).await;
-        let Ok(Ok(refreshed)) = joined else {
-            return Some(StateCoreExit::Corrupt(CorruptionCause::IndexRefreshFailed));
-        };
-        if self.context.index.refresh(refreshed).is_err() {
-            return Some(StateCoreExit::Corrupt(CorruptionCause::IndexRefreshFailed));
+        let pending = PendingIndexRefresh::new(
+            rows,
+            self.context.head.storage_commit_sequence,
+            continuation,
+        )
+        .map_err(|_| StateCoreExit::Corrupt(CorruptionCause::IndexRefreshFailed))?;
+        self.continue_index_refresh(pending)
+    }
+
+    fn advance_index_refresh(
+        &mut self,
+        mut pending: PendingIndexRefresh,
+        message: StorageReadCompletionMessage,
+    ) -> Result<Option<PendingIndexRefresh>, StateCoreExit> {
+        pending
+            .complete_read(message)
+            .map_err(|_| StateCoreExit::Corrupt(CorruptionCause::IndexRefreshFailed))?;
+        self.continue_index_refresh(pending)
+    }
+
+    fn continue_index_refresh(
+        &mut self,
+        mut pending: PendingIndexRefresh,
+    ) -> Result<Option<PendingIndexRefresh>, StateCoreExit> {
+        match pending
+            .submit_next(&mut self.context.bridge)
+            .map_err(|_| StateCoreExit::Corrupt(CorruptionCause::IndexRefreshFailed))?
+        {
+            IndexReadSubmission::Submitted | IndexReadSubmission::Blocked => Ok(Some(pending)),
+            IndexReadSubmission::Complete => {
+                let continuation = pending
+                    .finish(&mut self.context.index)
+                    .map_err(|_| StateCoreExit::Corrupt(CorruptionCause::IndexRefreshFailed))?;
+                continuation.complete();
+                Ok(None)
+            }
         }
-        None
     }
 
     /// Runs the actor until it exits (spec 21.3 channel table, lines
     /// 4077-4090).
     // agenc-review: focus owner=runtime reviewed=2026-08-29 reason=single bounded select owns actor cancellation completion inbox crypto and timer ordering
+    // agenc-review: allow owner=runtime reviewed=2026-08-31 reason=the sole actor select names every independently bounded completion and control receiver at its ownership boundary
+    #[allow(clippy::too_many_arguments)]
     pub async fn run(
         &mut self,
         mut inbox: mpsc::Receiver<StateCoreMessage>,
+        mut physical_closes: ConnectionCloseInbox,
         mut lifecycle: mpsc::Receiver<LifecycleRequest>,
         mut storage: mpsc::Receiver<StorageCompletionMessage>,
         mut storage_reads: mpsc::Receiver<StorageReadCompletionMessage>,
@@ -1990,12 +2241,17 @@ impl StateCore {
         let mut crypto_open = true;
         let mut cancellation_open = true;
         let mut lifecycle_open = true;
+        let mut physical_closes_open = true;
         let mut cancellation_pending = false;
         let mut lifecycle_target = None;
         let mut lifecycle_completed = None;
         let mut lifecycle_replies = PendingLifecycleReplies::default();
         let mut shutdown_connections_started = false;
         let mut shutdown_acknowledgements = Vec::new();
+        let mut index_refresh = None;
+        let mut index_refresh_retry = tokio::time::interval(INDEX_REFRESH_RETRY_INTERVAL);
+        index_refresh_retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        index_refresh_retry.tick().await;
         let mut flush_poll = tokio::time::interval(SHUTDOWN_FLUSH_POLL);
         flush_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         flush_poll.tick().await;
@@ -2003,7 +2259,11 @@ impl StateCore {
         progress.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         progress.tick().await;
         loop {
-            let in_flight = self.storage_in_flight();
+            let refresh_in_flight = index_refresh.is_some();
+            let refresh_blocked = index_refresh
+                .as_ref()
+                .is_some_and(|pending: &PendingIndexRefresh| pending.waiting.is_none());
+            let in_flight = self.storage_in_flight() || refresh_in_flight;
             let safe_point =
                 !in_flight && self.context.pending_len() == 0 && self.router.reload_ready();
             if safe_point {
@@ -2040,6 +2300,7 @@ impl StateCore {
                     .iter()
                     .any(|acknowledgement| !acknowledgement.is_acknowledged());
             let wake = self.wake_instant();
+            let prefix_wake = self.prefix_wake_instant();
             let exit = tokio::select! {
                 biased;
                 () = token.cancelled(), if cancellation_open => {
@@ -2078,7 +2339,20 @@ impl StateCore {
                         None
                     }
                 },
-                request = self.admin_receiver.recv(), if self.admin_open => match request {
+                notice = physical_closes.recv(), if physical_closes_open => {
+                    match notice {
+                        Some(notice) => self.step_physical_close(notice),
+                        None => {
+                            physical_closes_open = false;
+                            None
+                        }
+                    }
+                },
+                () = tokio::time::sleep_until(prefix_wake.unwrap_or_else(Instant::now)), if prefix_wake.is_some() => {
+                    self.context.erase_idle_prefixes();
+                    None
+                },
+                request = self.admin_receiver.recv(), if self.admin_open && !refresh_in_flight => match request {
                     Some(request) => self.step_admin_request(request),
                     None => {
                         self.admin_open = false;
@@ -2093,7 +2367,23 @@ impl StateCore {
                     }
                 },
                 completion = storage.recv() => match completion {
-                    Some(message) => self.step_completion(message).await,
+                    Some(message) => match self.step_completion(message) {
+                        CompletionStep::Ready(exit) => exit,
+                        CompletionStep::Refresh(continuation) => {
+                            match self.start_index_refresh(continuation) {
+                                Ok(pending) => {
+                                    let complete = pending.is_none();
+                                    index_refresh = pending;
+                                    if complete {
+                                        self.step_batch()
+                                    } else {
+                                        None
+                                    }
+                                }
+                                Err(exit) => Some(exit),
+                            }
+                        }
+                    },
                     None => Some(StateCoreExit::Indeterminate(
                         IndeterminateCause::CompletionChannelClosed,
                     )),
@@ -2101,11 +2391,94 @@ impl StateCore {
                 completion = storage_reads.recv(), if storage_reads_open => {
                     match completion {
                         Some(message) => {
-                            self.router.storage_read_completed(&mut self.context, message);
+                            if index_refresh
+                                .as_ref()
+                                .is_some_and(|pending| pending.owns(message.read_id))
+                            {
+                                match index_refresh.take() {
+                                    Some(pending) => {
+                                        match self.advance_index_refresh(pending, message) {
+                                            Ok(next) => {
+                                                let complete = next.is_none();
+                                                index_refresh = next;
+                                                if complete {
+                                                    self.step_batch()
+                                                } else {
+                                                    None
+                                                }
+                                            }
+                                            Err(exit) => Some(exit),
+                                        }
+                                    }
+                                    None => Some(StateCoreExit::Corrupt(
+                                        CorruptionCause::IndexRefreshFailed,
+                                    )),
+                                }
+                            } else {
+                                let refresh_step = if index_refresh
+                                    .as_ref()
+                                    .is_some_and(|pending| pending.waiting.is_none())
+                                {
+                                    match index_refresh.take() {
+                                        Some(pending) => {
+                                            match self.continue_index_refresh(pending) {
+                                                Ok(next) => {
+                                                    let complete = next.is_none();
+                                                    index_refresh = next;
+                                                    Ok(complete)
+                                                }
+                                                Err(exit) => Err(exit),
+                                            }
+                                        }
+                                        None => Err(StateCoreExit::Corrupt(
+                                            CorruptionCause::IndexRefreshFailed,
+                                        )),
+                                    }
+                                } else {
+                                    Ok(false)
+                                };
+                                match refresh_step {
+                                    Ok(complete) => {
+                                        self.router.storage_read_completed(
+                                            &mut self.context,
+                                            message,
+                                        );
+                                        if complete {
+                                            self.step_batch()
+                                        } else {
+                                            None
+                                        }
+                                    }
+                                    Err(exit) => Some(exit),
+                                }
+                            }
                         }
-                        None => storage_reads_open = false,
+                        None => {
+                            storage_reads_open = false;
+                            index_refresh.is_some().then_some(StateCoreExit::Corrupt(
+                                CorruptionCause::IndexRefreshFailed,
+                            ))
+                        }
                     }
-                    None
+                },
+                _ = index_refresh_retry.tick(), if refresh_blocked => {
+                    match index_refresh.take() {
+                        Some(pending) => match self.continue_index_refresh(pending) {
+                            Ok(next) => {
+                                let complete = next.is_none();
+                                index_refresh = next;
+                                if complete {
+                                    self.step_batch()
+                                } else {
+                                    None
+                                }
+                            }
+                            Err(exit) => Some(exit),
+                        },
+                        None => Some(StateCoreExit::Corrupt(
+                            CorruptionCause::IndexRefreshFailed,
+                        )),
+                    }
                 },
                 completion = crypto.recv(), if crypto_open => {
                     match completion {
@@ -2115,15 +2488,17 @@ impl StateCore {
                     None
                 },
                 message = inbox.recv(), if !in_flight && self.reload_provisional.is_none() => match message {
-                    Some(StateCoreMessage::Line { .. } | StateCoreMessage::Opened { .. })
-                        if self.context.quiescing => None,
+                    Some(StateCoreMessage::Opened { .. }) if self.context.quiescing => None,
                     Some(message) => self.step_message(message),
                     None => Some(StateCoreExit::InboxClosed),
                 },
                 _ = progress.tick() => {
                     self.liveness.record_state_core(self.context.now());
                     if let Some(observer) = &self.context.observer {
-                        observer.queue_depth(QueueName::StateCoreInbox, usize_u64(inbox.len()));
+                        observer.queue_depth(
+                            QueueName::StateCoreInbox,
+                            usize_u64(inbox.len().saturating_add(physical_closes.len())),
+                        );
                         observer.queue_depth(
                             QueueName::StorageCompletions,
                             usize_u64(storage.len()),
@@ -2137,7 +2512,7 @@ impl StateCore {
                     None
                 },
                 _ = flush_poll.tick(), if waiting_for_connection_flush => None,
-                () = tokio::time::sleep_until(wake.unwrap_or_else(Instant::now)), if wake.is_some() => {
+                () = tokio::time::sleep_until(wake.unwrap_or_else(Instant::now)), if wake.is_some() && !refresh_in_flight => {
                     self.step_wake()
                 },
             };
@@ -2149,6 +2524,13 @@ impl StateCore {
 
     fn wake_instant(&mut self) -> Option<Instant> {
         let deadline = self.context.next_wake()?;
+        let now = self.context.now();
+        let delay = deadline.get().saturating_sub(now.get());
+        Some(Instant::now() + Duration::from_millis(delay))
+    }
+
+    fn prefix_wake_instant(&self) -> Option<Instant> {
+        let deadline = self.context.prefixes.next_erasure_deadline()?;
         let now = self.context.now();
         let delay = deadline.get().saturating_sub(now.get());
         Some(Instant::now() + Duration::from_millis(delay))

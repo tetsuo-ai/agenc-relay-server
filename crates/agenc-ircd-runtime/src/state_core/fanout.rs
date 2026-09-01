@@ -163,18 +163,22 @@ struct FanoutEntry {
     frames: BoundedSharedClientFrames,
 }
 
+struct SlowConsumer {
+    generation: ConnectionGeneration,
+    sink: Arc<dyn ClientSink>,
+}
+
 /// Every remaining sink reservation plus the sinks marked for slow-consumer
 /// close, held until the owning batch commits or drops.
 #[must_use = "dropping a fanout reservation rolls back every sink reservation and permit"]
 pub struct FanoutReservation {
     entries: Vec<FanoutEntry>,
-    slow_consumers: Vec<Arc<dyn ClientSink>>,
+    slow_consumers: Vec<SlowConsumer>,
     excluded_closed: usize,
     remainder: Option<MemoryPermitBatch>,
 }
 
 /// What a committed fanout did.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FanoutCommitReport {
     /// Sinks that received their complete frame group.
     pub committed_sinks: usize,
@@ -182,6 +186,17 @@ pub struct FanoutCommitReport {
     pub slow_consumers_closed: usize,
     /// Sinks skipped because they were already closed.
     pub excluded_closed: usize,
+    slow_consumers: Vec<SlowConsumer>,
+}
+
+impl FanoutCommitReport {
+    /// Iterates the generations whose policy close became visible during
+    /// this commit.
+    pub fn slow_consumer_generations(&self) -> impl Iterator<Item = ConnectionGeneration> + '_ {
+        self.slow_consumers
+            .iter()
+            .map(|consumer| consumer.generation)
+    }
 }
 
 impl FanoutReservation {
@@ -218,8 +233,8 @@ impl FanoutReservation {
     /// 2231-2235).
     pub fn commit(self) -> FanoutCommitReport {
         let slow_consumers_closed = self.slow_consumers.len();
-        for sink in &self.slow_consumers {
-            sink.begin_slow_consumer_close();
+        for consumer in &self.slow_consumers {
+            consumer.sink.begin_slow_consumer_close();
         }
         let committed_sinks = self.entries.len();
         for entry in self.entries {
@@ -230,6 +245,7 @@ impl FanoutReservation {
             committed_sinks,
             slow_consumers_closed,
             excluded_closed: self.excluded_closed,
+            slow_consumers: self.slow_consumers,
         }
     }
 }
@@ -242,7 +258,7 @@ struct Tentative {
 
 struct QueuePass {
     tentatives: Vec<Tentative>,
-    slow_consumers: Vec<Arc<dyn ClientSink>>,
+    slow_consumers: Vec<SlowConsumer>,
     excluded_closed: usize,
 }
 
@@ -326,7 +342,10 @@ fn reserve_queues(request: &FanoutRequest, sizes: &[usize]) -> Result<QueuePass,
                 frame_indices,
             }),
             Err(SinkReserveError::Closed) => pass.excluded_closed += 1,
-            Err(SinkReserveError::Full) => pass.slow_consumers.push(Arc::clone(&entry.sink)),
+            Err(SinkReserveError::Full) => pass.slow_consumers.push(SlowConsumer {
+                generation: entry.generation,
+                sink: Arc::clone(&entry.sink),
+            }),
         }
     }
     Ok(pass)
@@ -581,6 +600,10 @@ mod tests {
         assert_eq!(report.committed_sinks, 1);
         assert_eq!(report.slow_consumers_closed, 1);
         assert_eq!(report.excluded_closed, 1);
+        assert_eq!(
+            report.slow_consumer_generations().collect::<Vec<_>>(),
+            vec![ConnectionGeneration::new(2)]
+        );
         assert_eq!(live.commits.load(Ordering::SeqCst), 1);
         assert_eq!(full.closes.load(Ordering::SeqCst), 1);
         assert_eq!(closed.closes.load(Ordering::SeqCst), 0);
