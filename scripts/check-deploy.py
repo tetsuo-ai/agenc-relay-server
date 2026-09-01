@@ -16,7 +16,10 @@ TOR = ROOT / "deploy/tor/agenc-ircd.torrc.snippet"
 
 SOCKET_ACCESS_GROUP = "agenc-ircd-sockets"
 TOR_HIDDEN_SERVICE_DIRECTORY = "/var/lib/tor/agenc-ircd"
-TOR_INACCESSIBLE_PATH = f"-{TOR_HIDDEN_SERVICE_DIRECTORY}"
+OPERATOR_AUTHORITY_DIRECTORY = "/var/lib/agenc-ircd-operator"
+INACCESSIBLE_PATHS = (
+    f"-{TOR_HIDDEN_SERVICE_DIRECTORY} {OPERATOR_AUTHORITY_DIRECTORY}"
+)
 SOCKET_ACCESS_COMMAND = (
     "/usr/bin/setfacl --modify "
     f"group:{SOCKET_ACCESS_GROUP}:r-x,"
@@ -45,7 +48,7 @@ SERVICE_VALUES = {
     ("Service", "NoNewPrivileges"): "yes",
     ("Service", "ProtectSystem"): "strict",
     ("Service", "ProtectHome"): "yes",
-    ("Service", "InaccessiblePaths"): TOR_INACCESSIBLE_PATH,
+    ("Service", "InaccessiblePaths"): INACCESSIBLE_PATHS,
     ("Service", "PrivateTmp"): "yes",
     ("Service", "PrivateDevices"): "yes",
     ("Service", "ProtectKernelModules"): "yes",
@@ -64,6 +67,7 @@ SERVICE_VALUES = {
     ("Service", "LimitMEMLOCK"): "infinity",
     ("Service", "RuntimeDirectory"): "agenc-ircd",
     ("Service", "RuntimeDirectoryMode"): "0750",
+    ("Service", "RuntimeDirectoryPreserve"): "yes",
     ("Service", "StateDirectory"): "agenc-ircd/state agenc-ircd/backups agenc-ircd/logs",
     ("Service", "StateDirectoryMode"): "0700",
     ("Service", "LogsDirectory"): "agenc-ircd",
@@ -91,6 +95,8 @@ SERVICE_MULTI_VALUES = {
 TMPFILE_VALUES = {
     "/etc/agenc-ircd": ("d", "0750", "root", "agenc-ircd", "-"),
     "/etc/agenc-ircd/tls": ("d", "0750", "root", "agenc-ircd", "-"),
+    OPERATOR_AUTHORITY_DIRECTORY: ("d", "0700", "root", "root", "-"),
+    "/run/agenc-ircd": ("d", "0750", "agenc-ircd", "agenc-ircd", "-"),
     "/var/lib/agenc-ircd": ("d", "0700", "agenc-ircd", "agenc-ircd", "-"),
     "/var/lib/agenc-ircd/backups": (
         "d",
@@ -251,9 +257,7 @@ def validate_tor(
         return errors
 
     hidden = PurePosixPath(values["HiddenServiceDir"][0])
-    if service_values.get(("Service", "InaccessiblePaths"), []) != [
-        f"-{hidden}"
-    ]:
+    if service_values.get(("Service", "InaccessiblePaths"), []) != [INACCESSIBLE_PATHS]:
         errors.append("tor: hidden-service keys are not masked from the daemon")
     writable = service_values.get(("Service", "ReadWritePaths"), [""])[0].split()
     writable.extend(managed_paths(service_values, "StateDirectory", "/var/lib"))
@@ -323,7 +327,9 @@ def self_test() -> list[str]:
         (service.replace("NoNewPrivileges=yes", "NoNewPrivileges=no"), profiles, sysusers, tmpfiles, tor, False),
         (service + "\n[Service]\nNoNewPrivileges=no\n", profiles, sysusers, tmpfiles, tor, False),
         (service + "\n[Service]\nSupplementaryGroups=debian-tor\n", profiles, sysusers, tmpfiles, tor, False),
-        (service.replace("InaccessiblePaths=-/var/lib/tor/agenc-ircd\n", ""), profiles, sysusers, tmpfiles, tor, False),
+        (service.replace(f"InaccessiblePaths={INACCESSIBLE_PATHS}\n", ""), profiles, sysusers, tmpfiles, tor, False),
+        (service.replace(f" {OPERATOR_AUTHORITY_DIRECTORY}", ""), profiles, sysusers, tmpfiles, tor, False),
+        (service.replace("RuntimeDirectoryPreserve=yes", "RuntimeDirectoryPreserve=no"), profiles, sysusers, tmpfiles, tor, False),
         (service.replace("@resources ", ""), profiles, sysusers, tmpfiles, tor, False),
         (service.replace("StateDirectory=agenc-ircd/state agenc-ircd/backups agenc-ircd/logs", "StateDirectory=agenc-ircd"), profiles, sysusers, tmpfiles, tor, False),
         (service.replace("/var/lib/agenc-ircd/state", "/var/lib"), profiles, sysusers, tmpfiles, tor, False),
@@ -331,6 +337,8 @@ def self_test() -> list[str]:
         (service, profiles, "", tmpfiles, tor, False),
         (service, profiles, sysusers, tmpfiles.replace("/var/lib/agenc-ircd/keys 0700", "/var/lib/agenc-ircd/keys 0755"), tor, False),
         (service, profiles, sysusers, tmpfiles.replace("/var/lib/agenc-ircd/keys 0700 agenc-ircd agenc-ircd -", "/var/lib/agenc-ircd/keys 0700 agenc-ircd agenc-ircd 1s"), tor, False),
+        (service, profiles, sysusers, tmpfiles.replace(f"{OPERATOR_AUTHORITY_DIRECTORY} 0700 root root", f"{OPERATOR_AUTHORITY_DIRECTORY} 0700 agenc-ircd agenc-ircd"), tor, False),
+        (service, profiles, sysusers, tmpfiles.replace("/run/agenc-ircd 0750 agenc-ircd agenc-ircd", "/run/agenc-ircd 0700 agenc-ircd agenc-ircd"), tor, False),
         (service, {**profiles, "direct.conf": profiles["direct.conf"].replace("AF_UNIX ", "")}, sysusers, tmpfiles, tor, False),
         (service, {**profiles, "onion-local-admin.conf": profiles["onion-local-admin.conf"].replace("AF_UNIX", "AF_UNIX AF_INET")}, sysusers, tmpfiles, tor, False),
         (service, profiles, sysusers, tmpfiles, tor.replace("/var/lib/tor/agenc-ircd", "/var/lib/agenc-ircd/tor"), False),

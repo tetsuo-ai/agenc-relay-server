@@ -9,7 +9,7 @@ use std::fmt;
 use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::{Read as _, Write as _};
-use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _, chown};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -39,6 +39,8 @@ use agenc_ircd_types::{
     DatabaseId, InviteId, NetworkId, OperatorId, RecoveryEpoch, ServerId, ServerIncarnation,
     UtcSecond,
 };
+use rustix::fs::{CWD, FileType, Mode, OFlags, fstat, fsync, openat};
+use rustix::process::geteuid;
 use zeroize::Zeroizing;
 
 #[cfg(test)]
@@ -46,6 +48,9 @@ use agenc_ircd_storage::{StorageOpenConfig, StorageOwner};
 
 const DIRECTORY_MODE: u32 = 0o700;
 const SECRET_MODE: u32 = 0o600;
+const CONFIG_MODE: u32 = 0o640;
+const MAX_STAGED_PATHS: usize = 256;
+const INSTALL_DIRECTORY_NAMES: [&str; 4] = ["keys", "trust", "state", "backups"];
 const MAX_INVITE_LIFETIME_SECONDS: u64 = 2_592_000;
 const DEFAULT_DATABASE_BYTES: u64 = 85_899_345_920;
 const DEFAULT_BACKUP_BYTES: u64 = 107_374_182_400;
@@ -82,6 +87,8 @@ pub struct InitRequest {
     pub data_dir: PathBuf,
     /// Dedicated runtime directory.
     pub runtime_dir: PathBuf,
+    /// Offline operator signing authority, outside daemon-readable roots.
+    pub operator_signing_key_file: PathBuf,
     /// Local DNS-style server name.
     pub server_name: DnsName,
     /// Public network display label.
@@ -313,30 +320,72 @@ impl InitIdentity {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Ownership {
+    uid: u32,
+    gid: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DirectoryIdentity {
+    device: u64,
+    inode: u64,
+    mode: u32,
+    owner: Ownership,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DirectoryTarget {
+    name: &'static str,
+    precreated: Option<DirectoryIdentity>,
+}
+
 struct Staging {
     data_root: PathBuf,
     config_file: PathBuf,
+    operator_signing_key_file: PathBuf,
+    directory_targets: Vec<DirectoryTarget>,
+    data_owner: Ownership,
+    config_owner: Ownership,
+    operator_owner: Ownership,
     installed: bool,
 }
 
 impl Staging {
     fn create(request: &InitRequest) -> Result<Self, OfflineError> {
         ensure_data_directory(&request.data_dir)?;
+        validate_physical_root_separation(request)?;
+        let data_identity = private_directory_identity(&request.data_dir, DIRECTORY_MODE)?;
+        let directory_targets = prepare_directory_targets(request, data_identity.owner)?;
         let data_root = request.data_dir.join(staging_name()?);
-        create_private_directory(&data_root)?;
-        for name in ["keys", "trust", "state", "backups"] {
-            create_private_directory(&data_root.join(name))?;
-        }
         let config_parent = request
             .config_path
             .parent()
             .ok_or(OfflineError::InvalidRequest)?;
+        let config_owner = directory_identity(config_parent)?.owner;
         let config_file = config_parent.join(format!("{}-config.toml", staging_name()?));
-        Ok(Self {
+        let operator_parent = request
+            .operator_signing_key_file
+            .parent()
+            .ok_or(OfflineError::InvalidRequest)?;
+        let operator_owner = private_directory_identity(operator_parent, DIRECTORY_MODE)?.owner;
+        let operator_signing_key_file =
+            operator_parent.join(format!("{}-operator-signing.key", staging_name()?));
+        create_staging_directory(&data_root)?;
+        let staging = Self {
             data_root,
             config_file,
+            operator_signing_key_file,
+            directory_targets,
+            data_owner: data_identity.owner,
+            config_owner,
+            operator_owner,
             installed: false,
-        })
+        };
+        for name in INSTALL_DIRECTORY_NAMES {
+            create_staging_directory(&staging.data_root.join(name))?;
+        }
+        Ok(staging)
     }
 
     fn data_root(&self) -> &Path {
@@ -347,22 +396,105 @@ impl Staging {
         &self.config_file
     }
 
+    fn operator_signing_key_file(&self) -> &Path {
+        &self.operator_signing_key_file
+    }
+
     fn install(&mut self, request: &InitRequest) -> Result<(), OfflineError> {
-        for name in ["keys", "trust", "state", "backups"] {
-            self.rename(self.data_root.join(name), request.data_dir.join(name))?;
+        self.verify_publish_targets(request)?;
+        self.prepare_ownership()?;
+        for target in self.directory_targets.clone() {
+            self.install_directory_target(request, target)?;
         }
+        self.rename(
+            self.operator_signing_key_file.clone(),
+            request.operator_signing_key_file.clone(),
+        )?;
         self.rename(self.config_file.clone(), request.config_path.clone())?;
-        fs::remove_dir(&self.data_root).map_err(|_| OfflineError::PartialInitialization)
+        fs::remove_dir(&self.data_root).map_err(|_| OfflineError::PartialInitialization)?;
+        sync_directory(&request.data_dir).map_err(|_| OfflineError::PartialInitialization)
+    }
+
+    fn install_directory_target(
+        &mut self,
+        request: &InitRequest,
+        target: DirectoryTarget,
+    ) -> Result<(), OfflineError> {
+        let final_path = request.data_dir.join(target.name);
+        self.remove_precreated_target(&final_path, target.precreated)?;
+        let source = self.data_root.join(target.name);
+        match self.rename(source, final_path.clone()) {
+            Ok(()) => Ok(()),
+            Err(error) => restore_target_after_failure(&final_path, target.precreated, error),
+        }
+    }
+
+    fn remove_precreated_target(
+        &self,
+        path: &Path,
+        expected: Option<DirectoryIdentity>,
+    ) -> Result<(), OfflineError> {
+        let Some(expected) = expected else {
+            return Ok(());
+        };
+        verify_precreated_directory(path, expected).map_err(|error| self.install_error(error))?;
+        fs::remove_dir(path).map_err(|_| self.install_error(OfflineError::Filesystem))
     }
 
     fn rename(&mut self, source: PathBuf, target: PathBuf) -> Result<(), OfflineError> {
         match rename_path_no_replace(&source, &target) {
             Ok(()) => {
                 self.installed = true;
-                Ok(())
+                sync_parent(&target).map_err(|_| OfflineError::PartialInitialization)
             }
             Err(_) if self.installed => Err(OfflineError::PartialInitialization),
             Err(_) => Err(OfflineError::Filesystem),
+        }
+    }
+
+    fn verify_publish_targets(&self, request: &InitRequest) -> Result<(), OfflineError> {
+        require_absent(&request.config_path)
+            .map_err(|_| self.install_error(OfflineError::Filesystem))?;
+        require_absent(&request.operator_signing_key_file)
+            .map_err(|_| self.install_error(OfflineError::Filesystem))?;
+        for target in &self.directory_targets {
+            let path = request.data_dir.join(target.name);
+            match target.precreated {
+                Some(expected) => verify_precreated_directory(&path, expected),
+                None => require_absent(&path),
+            }
+            .map_err(|_| self.install_error(OfflineError::Filesystem))?;
+        }
+        Ok(())
+    }
+
+    fn prepare_ownership(&self) -> Result<(), OfflineError> {
+        for target in &self.directory_targets {
+            let owner = target
+                .precreated
+                .map_or(self.data_owner, |identity| identity.owner);
+            let path = self.data_root.join(target.name);
+            set_tree_ownership(&path, owner)?;
+            sync_directory(&path)?;
+        }
+        set_path_ownership(&self.operator_signing_key_file, self.operator_owner)?;
+        fs::set_permissions(
+            &self.operator_signing_key_file,
+            fs::Permissions::from_mode(SECRET_MODE),
+        )
+        .map_err(|_| OfflineError::Filesystem)?;
+        sync_regular_file(&self.operator_signing_key_file)?;
+        set_path_ownership(&self.config_file, self.config_owner)?;
+        fs::set_permissions(&self.config_file, fs::Permissions::from_mode(CONFIG_MODE))
+            .map_err(|_| OfflineError::Filesystem)?;
+        sync_regular_file(&self.config_file)
+    }
+
+    const fn install_error(&self, error: OfflineError) -> OfflineError {
+        if self.installed {
+            OfflineError::PartialInitialization
+        } else {
+            error
         }
     }
 }
@@ -370,6 +502,7 @@ impl Staging {
 impl Drop for Staging {
     fn drop(&mut self) {
         let _config_cleanup = fs::remove_file(&self.config_file);
+        let _operator_cleanup = fs::remove_file(&self.operator_signing_key_file);
         if !self.installed {
             let _cleanup = fs::remove_dir_all(&self.data_root);
         }
@@ -385,6 +518,10 @@ pub fn initialize_node(request: InitRequest) -> Result<InitReceipt, OfflineError
     let secrets = GeneratedSecrets::generate(identity.network_id, mode.role())?;
     let mut staging = Staging::create(&request)?;
     write_generated_secrets(&staging.data_root().join("keys"), &secrets)?;
+    write_secret(
+        staging.operator_signing_key_file(),
+        secrets.operator_signing.as_slice(),
+    )?;
     write_trust_manifests(&staging.data_root().join("trust"), &secrets)?;
     initialize_database(&staging.data_root().join("state"), identity, &secrets)?;
     write_configuration(staging.config_file(), &request, &mode, identity, &secrets)?;
@@ -443,26 +580,62 @@ fn validate_init_request(request: &InitRequest) -> Result<(), OfflineError> {
 }
 
 fn validate_init_paths(request: &InitRequest) -> Result<(), OfflineError> {
-    if !safe_absolute_path(&request.config_path)
-        || request.config_path.file_name().is_none()
-        || !safe_absolute_path(&request.data_dir)
-        || !safe_absolute_path(&request.runtime_dir)
-    {
+    if !valid_init_path_shapes(request) {
         return Err(OfflineError::InvalidRequest);
     }
-    let generated_directories = [
-        request.data_dir.join("keys"),
-        request.data_dir.join("trust"),
-        request.data_dir.join("state"),
-        request.data_dir.join("backups"),
-    ];
-    if paths_overlap(&request.config_path, &request.data_dir)
-        || paths_overlap(&request.config_path, &request.runtime_dir)
-        || generated_directories
-            .iter()
-            .any(|path| paths_overlap(path, &request.runtime_dir))
-    {
+    validate_lexical_root_separation(request)?;
+    validate_init_path_controls(request)?;
+    validate_physical_root_separation(request)?;
+    validate_edge_descriptor_path(request)
+}
+
+fn valid_init_path_shapes(request: &InitRequest) -> bool {
+    valid_output_path(&request.config_path)
+        && safe_absolute_path(&request.data_dir)
+        && safe_absolute_path(&request.runtime_dir)
+        && valid_output_path(&request.operator_signing_key_file)
+}
+
+fn valid_output_path(path: &Path) -> bool {
+    safe_absolute_path(path) && path.file_name().is_some()
+}
+
+fn validate_lexical_root_separation(request: &InitRequest) -> Result<(), OfflineError> {
+    let config_root = request
+        .config_path
+        .parent()
+        .ok_or(OfflineError::InvalidRequest)?;
+    let operator_root = request
+        .operator_signing_key_file
+        .parent()
+        .ok_or(OfflineError::InvalidRequest)?;
+    let root_overlap = paths_overlap(config_root, &request.data_dir)
+        || paths_overlap(config_root, &request.runtime_dir)
+        || paths_overlap(config_root, operator_root)
+        || paths_overlap(operator_root, &request.data_dir)
+        || paths_overlap(operator_root, &request.runtime_dir)
+        || paths_overlap(&request.data_dir, &request.runtime_dir);
+    if root_overlap {
         return Err(OfflineError::InvalidRequest);
+    }
+    Ok(())
+}
+
+fn validate_init_path_controls(request: &InitRequest) -> Result<(), OfflineError> {
+    validate_creation_parent(&request.config_path, None)?;
+    validate_data_path(&request.data_dir)?;
+    private_directory_identity(&request.runtime_dir, 0o750)?;
+    validate_creation_parent(&request.operator_signing_key_file, Some(DIRECTORY_MODE))?;
+    Ok(())
+}
+
+fn validate_edge_descriptor_path(request: &InitRequest) -> Result<(), OfflineError> {
+    if let InitMode::Edge {
+        coordinator_descriptor,
+        ..
+    } = &request.mode
+    {
+        validate_existing_file_path(coordinator_descriptor)?;
     }
     Ok(())
 }
@@ -478,19 +651,371 @@ fn paths_overlap(left: &Path, right: &Path) -> bool {
     left.starts_with(right) || right.starts_with(left)
 }
 
-fn refuse_existing_targets(request: &InitRequest) -> Result<(), OfflineError> {
-    let targets = [
-        request.config_path.clone(),
-        request.data_dir.join("keys"),
-        request.data_dir.join("trust"),
-        request.data_dir.join("state"),
-        request.data_dir.join("backups"),
-    ];
-    if targets
-        .iter()
-        .any(|path| fs::symlink_metadata(path).is_ok())
+fn validate_physical_root_separation(request: &InitRequest) -> Result<(), OfflineError> {
+    let config_root = request
+        .config_path
+        .parent()
+        .ok_or(OfflineError::InvalidRequest)?;
+    let operator_root = request
+        .operator_signing_key_file
+        .parent()
+        .ok_or(OfflineError::InvalidRequest)?;
+    let mut roots = vec![config_root, request.runtime_dir.as_path(), operator_root];
+    if fs::symlink_metadata(&request.data_dir).is_ok() {
+        roots.push(&request.data_dir);
+    }
+    for (index, left) in roots.iter().enumerate() {
+        for right in roots.iter().skip(index + 1) {
+            if physical_directories_overlap(left, right)? {
+                return Err(OfflineError::InvalidRequest);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn physical_directories_overlap(left: &Path, right: &Path) -> Result<bool, OfflineError> {
+    let left_identity = directory_identity(left)?;
+    let right_identity = directory_identity(right)?;
+    if same_directory(left_identity, right_identity) {
+        return Ok(true);
+    }
+    Ok(physical_directory_contains(left_identity, right)?
+        || physical_directory_contains(right_identity, left)?)
+}
+
+fn physical_directory_contains(
+    ancestor: DirectoryIdentity,
+    descendant: &Path,
+) -> Result<bool, OfflineError> {
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut directory = open_physical_directory(descendant)?;
+    for _ in 0..MAX_STAGED_PATHS {
+        let current = opened_directory_identity(&directory)?;
+        if same_directory(ancestor, current) {
+            return Ok(true);
+        }
+        let parent = openat(&directory, Path::new(".."), flags, Mode::empty())
+            .map_err(|_| OfflineError::Filesystem)?;
+        let parent_file = fs::File::from(parent);
+        let parent_identity = opened_directory_identity(&parent_file)?;
+        if same_directory(current, parent_identity) {
+            return Ok(false);
+        }
+        directory = parent_file;
+    }
+    Err(OfflineError::Filesystem)
+}
+
+const fn same_directory(left: DirectoryIdentity, right: DirectoryIdentity) -> bool {
+    left.device == right.device && left.inode == right.inode
+}
+
+fn open_physical_directory(path: &Path) -> Result<fs::File, OfflineError> {
+    if !safe_absolute_path(path) {
+        return Err(OfflineError::InvalidRequest);
+    }
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut directory =
+        openat(CWD, Path::new("/"), flags, Mode::empty()).map_err(|_| OfflineError::Filesystem)?;
+    for component in path.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(name) => {
+                directory = openat(&directory, Path::new(name), flags, Mode::empty())
+                    .map_err(|_| OfflineError::Filesystem)?;
+            }
+            Component::CurDir | Component::ParentDir | Component::Prefix(_) => {
+                return Err(OfflineError::InvalidRequest);
+            }
+        }
+    }
+    Ok(fs::File::from(directory))
+}
+
+fn directory_identity(path: &Path) -> Result<DirectoryIdentity, OfflineError> {
+    let directory = open_physical_directory(path)?;
+    opened_directory_identity(&directory)
+}
+
+fn opened_directory_identity(directory: &fs::File) -> Result<DirectoryIdentity, OfflineError> {
+    let status = fstat(directory).map_err(|_| OfflineError::Filesystem)?;
+    if FileType::from_raw_mode(status.st_mode) != FileType::Directory {
+        return Err(OfflineError::Filesystem);
+    }
+    Ok(DirectoryIdentity {
+        device: status.st_dev,
+        inode: status.st_ino,
+        mode: status.st_mode & 0o777,
+        owner: Ownership {
+            uid: status.st_uid,
+            gid: status.st_gid,
+        },
+    })
+}
+
+fn private_directory_identity(
+    path: &Path,
+    expected_mode: u32,
+) -> Result<DirectoryIdentity, OfflineError> {
+    let identity = directory_identity(path)?;
+    if identity.mode != expected_mode {
+        return Err(OfflineError::Filesystem);
+    }
+    Ok(identity)
+}
+
+fn validate_creation_parent(path: &Path, exact_mode: Option<u32>) -> Result<(), OfflineError> {
+    let parent = path.parent().ok_or(OfflineError::InvalidRequest)?;
+    let identity = directory_identity(parent)?;
+    if exact_mode.is_some_and(|mode| identity.mode != mode)
+        || exact_mode.is_none() && identity.mode & 0o022 != 0
     {
+        return Err(OfflineError::Filesystem);
+    }
+    Ok(())
+}
+
+fn validate_data_path(path: &Path) -> Result<(), OfflineError> {
+    validate_data_path_for_privilege(path, geteuid().is_root())
+}
+
+fn validate_data_path_for_privilege(path: &Path, is_root: bool) -> Result<(), OfflineError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => private_directory_identity(path, DIRECTORY_MODE).map(|_| ()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !is_root => {
+            validate_creation_parent(path, None)
+        }
+        Err(_) => Err(OfflineError::Filesystem),
+    }
+}
+
+fn validate_existing_file_path(path: &Path) -> Result<(), OfflineError> {
+    if !safe_absolute_path(path) || path.file_name().is_none() {
+        return Err(OfflineError::InvalidRequest);
+    }
+    validate_creation_parent(path, None)?;
+    let metadata = fs::symlink_metadata(path).map_err(|_| OfflineError::Filesystem)?;
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.permissions().mode() & 0o022 != 0
+    {
+        return Err(OfflineError::Filesystem);
+    }
+    Ok(())
+}
+
+fn require_absent(path: &Path) -> Result<(), OfflineError> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err(OfflineError::ExistingTarget),
+        Err(_) => Err(OfflineError::Filesystem),
+    }
+}
+
+fn inspect_precreated_directory(
+    path: &Path,
+    required_owner: Ownership,
+) -> Result<Option<DirectoryIdentity>, OfflineError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(OfflineError::Filesystem),
+    };
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
         return Err(OfflineError::ExistingTarget);
+    }
+    let identity = private_directory_identity(path, DIRECTORY_MODE)?;
+    if identity.owner != required_owner {
+        return Err(OfflineError::Filesystem);
+    }
+    if directory_has_entry(path)? {
+        return Err(OfflineError::ExistingTarget);
+    }
+    if directory_identity(path)? != identity {
+        return Err(OfflineError::Filesystem);
+    }
+    Ok(Some(identity))
+}
+
+fn directory_has_entry(path: &Path) -> Result<bool, OfflineError> {
+    fs::read_dir(path)
+        .map_err(|_| OfflineError::Filesystem)?
+        .next()
+        .transpose()
+        .map(|entry| entry.is_some())
+        .map_err(|_| OfflineError::Filesystem)
+}
+
+fn verify_precreated_directory(
+    path: &Path,
+    expected: DirectoryIdentity,
+) -> Result<(), OfflineError> {
+    if private_directory_identity(path, DIRECTORY_MODE)? != expected || directory_has_entry(path)? {
+        return Err(OfflineError::Filesystem);
+    }
+    Ok(())
+}
+
+fn prepare_directory_targets(
+    request: &InitRequest,
+    data_owner: Ownership,
+) -> Result<Vec<DirectoryTarget>, OfflineError> {
+    let mut targets = Vec::new();
+    targets
+        .try_reserve_exact(INSTALL_DIRECTORY_NAMES.len())
+        .map_err(|_| OfflineError::Filesystem)?;
+    for name in INSTALL_DIRECTORY_NAMES {
+        targets.push(DirectoryTarget {
+            name,
+            precreated: inspect_precreated_directory(&request.data_dir.join(name), data_owner)?,
+        });
+    }
+    Ok(targets)
+}
+
+fn restore_precreated_directory(
+    path: &Path,
+    identity: DirectoryIdentity,
+) -> Result<(), OfflineError> {
+    create_private_directory(path)?;
+    set_path_ownership(path, identity.owner)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(identity.mode))
+        .map_err(|_| OfflineError::Filesystem)?;
+    sync_directory(path)?;
+    sync_parent(path)
+}
+
+fn restore_target_after_failure(
+    path: &Path,
+    expected: Option<DirectoryIdentity>,
+    error: OfflineError,
+) -> Result<(), OfflineError> {
+    let Some(expected) = expected else {
+        return Err(error);
+    };
+    restore_precreated_directory(path, expected)
+        .map_err(|_| OfflineError::PartialInitialization)?;
+    Err(error)
+}
+
+fn set_tree_ownership(root: &Path, owner: Ownership) -> Result<(), OfflineError> {
+    let paths = collect_staged_tree_paths(root)?;
+    for path in paths.iter().rev() {
+        set_path_ownership(path, owner)?;
+    }
+    Ok(())
+}
+
+fn collect_staged_tree_paths(root: &Path) -> Result<Vec<PathBuf>, OfflineError> {
+    let mut pending = Vec::new();
+    let mut paths = Vec::new();
+    pending
+        .try_reserve_exact(MAX_STAGED_PATHS)
+        .map_err(|_| OfflineError::Filesystem)?;
+    paths
+        .try_reserve_exact(MAX_STAGED_PATHS)
+        .map_err(|_| OfflineError::Filesystem)?;
+    pending.push(root.to_path_buf());
+    while let Some(path) = pending.pop() {
+        if paths.len() == MAX_STAGED_PATHS {
+            return Err(OfflineError::Filesystem);
+        }
+        collect_staged_path(&path, &mut pending, paths.len())?;
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+fn collect_staged_path(
+    path: &Path,
+    pending: &mut Vec<PathBuf>,
+    observed: usize,
+) -> Result<(), OfflineError> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| OfflineError::Filesystem)?;
+    if metadata.file_type().is_symlink()
+        || !(metadata.file_type().is_dir() || metadata.file_type().is_file())
+    {
+        return Err(OfflineError::Filesystem);
+    }
+    if metadata.file_type().is_dir() {
+        collect_directory_entries(path, pending, observed)?;
+    }
+    Ok(())
+}
+
+fn collect_directory_entries(
+    path: &Path,
+    pending: &mut Vec<PathBuf>,
+    observed: usize,
+) -> Result<(), OfflineError> {
+    let remaining = MAX_STAGED_PATHS.saturating_sub(observed + pending.len());
+    let entries = fs::read_dir(path).map_err(|_| OfflineError::Filesystem)?;
+    for entry in entries.take(remaining.saturating_add(1)) {
+        if pending.len() + observed == MAX_STAGED_PATHS {
+            return Err(OfflineError::Filesystem);
+        }
+        pending.push(entry.map_err(|_| OfflineError::Filesystem)?.path());
+    }
+    Ok(())
+}
+
+fn set_path_ownership(path: &Path, owner: Ownership) -> Result<(), OfflineError> {
+    let before = fs::symlink_metadata(path).map_err(|_| OfflineError::Filesystem)?;
+    if before.file_type().is_symlink() {
+        return Err(OfflineError::Filesystem);
+    }
+    if before.uid() != owner.uid || before.gid() != owner.gid {
+        chown(path, Some(owner.uid), Some(owner.gid)).map_err(|_| OfflineError::Filesystem)?;
+    }
+    let after = fs::symlink_metadata(path).map_err(|_| OfflineError::Filesystem)?;
+    if after.file_type().is_symlink() || after.uid() != owner.uid || after.gid() != owner.gid {
+        return Err(OfflineError::Filesystem);
+    }
+    if after.file_type().is_dir() {
+        sync_directory(path)
+    } else if after.file_type().is_file() {
+        sync_regular_file(path)
+    } else {
+        Err(OfflineError::Filesystem)
+    }
+}
+
+fn sync_parent(path: &Path) -> Result<(), OfflineError> {
+    let parent = path.parent().ok_or(OfflineError::InvalidRequest)?;
+    sync_directory(parent)
+}
+
+fn sync_directory(path: &Path) -> Result<(), OfflineError> {
+    let directory = open_physical_directory(path)?;
+    fsync(&directory).map_err(|_| OfflineError::Filesystem)
+}
+
+fn sync_regular_file(path: &Path) -> Result<(), OfflineError> {
+    let file = openat(
+        CWD,
+        path,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| OfflineError::Filesystem)?;
+    let status = fstat(&file).map_err(|_| OfflineError::Filesystem)?;
+    if FileType::from_raw_mode(status.st_mode) != FileType::RegularFile {
+        return Err(OfflineError::Filesystem);
+    }
+    fsync(&file).map_err(|_| OfflineError::Filesystem)
+}
+
+fn refuse_existing_targets(request: &InitRequest) -> Result<(), OfflineError> {
+    require_absent(&request.config_path)?;
+    require_absent(&request.operator_signing_key_file)?;
+    let data_owner = match fs::symlink_metadata(&request.data_dir) {
+        Ok(_) => private_directory_identity(&request.data_dir, DIRECTORY_MODE)?.owner,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(OfflineError::Filesystem),
+    };
+    for name in INSTALL_DIRECTORY_NAMES {
+        inspect_precreated_directory(&request.data_dir.join(name), data_owner)?;
     }
     Ok(())
 }
@@ -510,6 +1035,14 @@ fn create_private_directory(path: &Path) -> Result<(), OfflineError> {
     fs::create_dir(path).map_err(|_| OfflineError::Filesystem)?;
     fs::set_permissions(path, fs::Permissions::from_mode(DIRECTORY_MODE))
         .map_err(|_| OfflineError::Filesystem)
+}
+
+fn create_staging_directory(path: &Path) -> Result<(), OfflineError> {
+    if let Err(error) = create_private_directory(path) {
+        let _cleanup = fs::remove_dir(path);
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn staging_name() -> Result<String, OfflineError> {
@@ -546,7 +1079,6 @@ fn write_generated_secrets(root: &Path, keys: &GeneratedSecrets) -> Result<(), O
         ("federation-signing.key", keys.federation_signing.as_slice()),
         ("backup-signing.key", keys.backup_signing.as_slice()),
         ("audit-signing.key", keys.audit_signing.as_slice()),
-        ("operator-signing.key", keys.operator_signing.as_slice()),
     ] {
         write_secret(&root.join(name), bytes)?;
     }
@@ -724,7 +1256,7 @@ fn init_receipt(request: &InitRequest, identity: InitIdentity) -> InitReceipt {
         network_id: identity.network_id,
         server_id: identity.server_id,
         operator_id: identity.operator_id,
-        operator_signing_key_file: request.data_dir.join("keys/operator-signing.key"),
+        operator_signing_key_file: request.operator_signing_key_file.clone(),
         tor_snippet: format!(
             "HiddenServiceDir /var/lib/tor/agenc-ircd\nHiddenServiceVersion 3\nHiddenServicePort 6697 unix:{}\n",
             onion_socket.display(),
@@ -907,19 +1439,74 @@ mod tests {
 
     impl TestDirectory {
         fn create() -> Result<Self, OfflineError> {
-            let sequence = DIRECTORY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-            let target =
-                fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"))
-                    .map_err(|_| OfflineError::Filesystem)?;
-            let root = target.join(format!(
-                "offline-runtime-test-{}-{sequence}",
-                std::process::id()
-            ));
-            create_private_directory(&root)?;
-            create_private_directory(&root.join("etc"))?;
-            create_private_directory(&root.join("run"))?;
-            Ok(Self(root))
+            let base = protected_test_base()?;
+            for _ in 0..32 {
+                let sequence = DIRECTORY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+                let root = base.join(format!(
+                    "offline-runtime-test-{}-{sequence}",
+                    std::process::id()
+                ));
+                match fs::create_dir(&root) {
+                    Ok(()) => return Self::finish(root),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(_) => return Err(OfflineError::Filesystem),
+                }
+            }
+            Err(OfflineError::Filesystem)
         }
+
+        fn finish(root: PathBuf) -> Result<Self, OfflineError> {
+            fs::set_permissions(&root, fs::Permissions::from_mode(DIRECTORY_MODE))
+                .map_err(|_| OfflineError::Filesystem)?;
+            let directory = Self(root);
+            create_private_directory(&directory.0.join("etc"))?;
+            create_private_directory(&directory.0.join("run"))?;
+            Ok(directory)
+        }
+    }
+
+    fn protected_test_base() -> Result<PathBuf, OfflineError> {
+        let candidates = [
+            std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
+            std::env::var_os("CARGO_TARGET_TMPDIR").map(PathBuf::from),
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")),
+        ];
+        for base in candidates.into_iter().flatten() {
+            if fs::create_dir_all(&base).is_ok()
+                && test_ancestors_are_protected(&base).is_ok()
+                && test_base_is_storage_qualified(&base).is_ok()
+            {
+                return Ok(base);
+            }
+        }
+        Err(OfflineError::Filesystem)
+    }
+
+    fn test_base_is_storage_qualified(path: &Path) -> Result<(), OfflineError> {
+        let observed = StateDirectory::probe(path)?;
+        let accepted = embedded_storage_qualifications()?
+            .into_iter()
+            .any(|qualification| {
+                qualification.validate().is_ok() && qualification.tuple() == observed
+            });
+        if accepted {
+            Ok(())
+        } else {
+            Err(OfflineError::Storage)
+        }
+    }
+
+    fn test_ancestors_are_protected(path: &Path) -> Result<(), OfflineError> {
+        let effective_uid = geteuid().as_raw();
+        for ancestor in path.ancestors() {
+            let identity = directory_identity(ancestor)?;
+            if identity.mode & 0o022 != 0
+                || !(identity.owner.uid == 0 || identity.owner.uid == effective_uid)
+            {
+                return Err(OfflineError::Filesystem);
+            }
+        }
+        Ok(())
     }
 
     impl Drop for TestDirectory {
@@ -929,6 +1516,10 @@ mod tests {
     }
 
     fn test_request(root: &Path) -> Result<InitRequest, OfflineError> {
+        let operator_dir = root.join("operator");
+        ensure_data_directory(&operator_dir)?;
+        fs::set_permissions(root.join("run"), fs::Permissions::from_mode(0o750))
+            .map_err(|_| OfflineError::Filesystem)?;
         Ok(InitRequest {
             config_path: root.join("etc/config.toml"),
             profile: InitProfile::Public,
@@ -937,10 +1528,19 @@ mod tests {
             },
             data_dir: root.join("data"),
             runtime_dir: root.join("run"),
+            operator_signing_key_file: operator_dir.join("operator-signing.key"),
             server_name: DnsName::parse("chat.example")?,
             display_name: DisplayLabel::parse("Example")?,
             dns_name: Some(DnsName::parse("chat.example")?),
         })
+    }
+
+    fn precreate_data_layout(request: &InitRequest) -> Result<(), OfflineError> {
+        ensure_data_directory(&request.data_dir)?;
+        for name in INSTALL_DIRECTORY_NAMES {
+            create_private_directory(&request.data_dir.join(name))?;
+        }
+        Ok(())
     }
 
     fn valid_descriptor() -> Result<String, OfflineError> {
@@ -1064,6 +1664,22 @@ mod tests {
     }
 
     #[test]
+    fn root_init_requires_precreated_data_while_non_root_may_create_private_data()
+    -> Result<(), OfflineError> {
+        let root = TestDirectory::create()?;
+        let data_dir = root.0.join("missing-data");
+
+        assert_eq!(
+            validate_data_path_for_privilege(&data_dir, true),
+            Err(OfflineError::Filesystem)
+        );
+        assert!(!data_dir.exists());
+        assert_eq!(validate_data_path_for_privilege(&data_dir, false), Ok(()));
+        assert!(!data_dir.exists());
+        Ok(())
+    }
+
+    #[test]
     fn descriptor_reader_rejects_size_encoding_shape_and_duplicate_fields()
     -> Result<(), OfflineError> {
         let valid = valid_descriptor()?;
@@ -1154,6 +1770,11 @@ mod tests {
         let mut staging = Staging {
             data_root: staging_root,
             config_file: root.0.join("config-staging"),
+            operator_signing_key_file: root.0.join("operator-staging"),
+            directory_targets: Vec::new(),
+            data_owner: directory_identity(&root.0)?.owner,
+            config_owner: directory_identity(&root.0)?.owner,
+            operator_owner: directory_identity(&root.0)?.owner,
             installed: false,
         };
         assert_eq!(
@@ -1281,7 +1902,7 @@ mod tests {
                 .permissions()
                 .mode()
                 & 0o777,
-            SECRET_MODE
+            CONFIG_MODE
         );
         for name in ["keys", "trust", "state", "backups"] {
             assert_eq!(
@@ -1366,6 +1987,94 @@ mod tests {
             initialize_node(test_request(&root.0)?),
             Err(OfflineError::ExistingTarget)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn init_adopts_only_the_empty_precreated_layout_and_separates_operator_authority()
+    -> Result<(), OfflineError> {
+        let root = TestDirectory::create()?;
+        let request = test_request(&root.0)?;
+        precreate_data_layout(&request)?;
+        let operator_key = request.operator_signing_key_file.clone();
+        let data_dir = request.data_dir.clone();
+
+        let receipt = initialize_node(request)?;
+
+        assert_eq!(receipt.operator_signing_key_file, operator_key);
+        assert!(operator_key.is_file());
+        assert!(!data_dir.join("keys/operator-signing.key").exists());
+        assert_eq!(
+            fs::symlink_metadata(&operator_key)
+                .map_err(|_| OfflineError::Filesystem)?
+                .permissions()
+                .mode()
+                & 0o777,
+            SECRET_MODE
+        );
+        for name in INSTALL_DIRECTORY_NAMES {
+            assert!(data_dir.join(name).is_dir());
+        }
+        assert!(!directory_has_entry(&data_dir.join("backups"))?);
+        Ok(())
+    }
+
+    #[test]
+    fn init_rejects_nonempty_and_symlinked_precreated_targets_without_output()
+    -> Result<(), OfflineError> {
+        let nonempty_root = TestDirectory::create()?;
+        let nonempty = test_request(&nonempty_root.0)?;
+        ensure_data_directory(&nonempty.data_dir)?;
+        create_private_directory(&nonempty.data_dir.join("keys"))?;
+        write_secret(&nonempty.data_dir.join("keys/sentinel"), b"existing")?;
+        let config_path = nonempty.config_path.clone();
+        let operator_key = nonempty.operator_signing_key_file.clone();
+        assert!(matches!(
+            initialize_node(nonempty),
+            Err(OfflineError::ExistingTarget)
+        ));
+        assert!(!config_path.exists());
+        assert!(!operator_key.exists());
+
+        let symlink_root = TestDirectory::create()?;
+        let symlinked = test_request(&symlink_root.0)?;
+        ensure_data_directory(&symlinked.data_dir)?;
+        let displaced = symlink_root.0.join("displaced-keys");
+        create_private_directory(&displaced)?;
+        std::os::unix::fs::symlink(&displaced, symlinked.data_dir.join("keys"))
+            .map_err(|_| OfflineError::Filesystem)?;
+        let config_path = symlinked.config_path.clone();
+        let operator_key = symlinked.operator_signing_key_file.clone();
+        assert!(matches!(
+            initialize_node(symlinked),
+            Err(OfflineError::ExistingTarget)
+        ));
+        assert!(!config_path.exists());
+        assert!(!operator_key.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn init_rejects_symlinked_ancestors_and_operator_paths_inside_daemon_roots()
+    -> Result<(), OfflineError> {
+        let root = TestDirectory::create()?;
+        let physical = root.0.join("physical");
+        create_private_directory(&physical)?;
+        let alias = root.0.join("alias");
+        std::os::unix::fs::symlink(&physical, &alias).map_err(|_| OfflineError::Filesystem)?;
+        let mut symlinked = test_request(&root.0)?;
+        symlinked.data_dir = alias.join("data");
+        assert_eq!(
+            validate_init_request(&symlinked),
+            Err(OfflineError::Filesystem)
+        );
+
+        let mut exposed = test_request(&root.0)?;
+        exposed.operator_signing_key_file = exposed.data_dir.join("operator-signing.key");
+        assert_eq!(
+            validate_init_request(&exposed),
+            Err(OfflineError::InvalidRequest)
+        );
         Ok(())
     }
 

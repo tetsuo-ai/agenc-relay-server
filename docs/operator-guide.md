@@ -2,7 +2,7 @@
 
 ## Install the service account and directories
 
-Install the records from `deploy/sysusers.d` and `deploy/tmpfiles.d` with the host's normal systemd tools. The daemon runs as `agenc-ircd`. The sysusers record also creates `agenc-ircd-sockets`, the group used only to reach the runtime sockets. Keep `/var/lib/agenc-ircd`, its key directory, its state directory, its trust directory, and its backup directory at mode 0700. Secret files use mode 0600.
+Install the records from `deploy/sysusers.d` and `deploy/tmpfiles.d` before initialization. The daemon runs as `agenc-ircd`. The sysusers record also creates `agenc-ircd-sockets`, the group used only to reach the runtime sockets. Tmpfiles creates the empty daemon-owned data layout and the root-owned `/var/lib/agenc-ircd-operator` directory. Initialization accepts those empty directories, preserves their ownership, and refuses any nonempty, replaced, or symlinked target. Keep `/var/lib/agenc-ircd`, its key directory, its state directory, its trust directory, and its backup directory at mode 0700. Secret files use mode 0600.
 
 Install `deploy/systemd/agenc-ircd.service` under `/etc/systemd/system`. Install the host package that provides `/usr/bin/setfacl`. Choose the matching address-family file from `deploy/systemd/profiles` and install it as the service drop-in described in `deploy/README.md`. The daemon opens configured listeners directly; systemd socket activation is not supported. Review the executable and configuration paths before enabling the service. Run the deployment checker from the source tree:
 
@@ -15,17 +15,18 @@ python3 scripts/check-deploy.py check
 Create a new stopped coordinator with one of the three listener templates:
 
 ```sh
-agenc-ircd init \
+sudo agenc-ircd init \
   --config /etc/agenc-ircd/config.toml \
   --profile public \
   --data-dir /var/lib/agenc-ircd \
   --runtime-dir /run/agenc-ircd \
+  --operator-signing-key-file /var/lib/agenc-ircd-operator/operator-signing.key \
   --server-name chat.example \
   --display-name Example \
   --dns-name chat.example
 ```
 
-The `public`, `onion`, and `dual` profiles write a complete configuration with every listener disabled. Initialization creates independent key files, trust manifests, and an authenticated database. The command refuses existing targets and writes the configuration last. Save the printed operator signing-key path in protected operator storage.
+The `public`, `onion`, and `dual` profiles write a complete configuration with every listener disabled. Run initialization as root after applying the tmpfiles record. Root initialization refuses a missing data directory instead of creating root-owned state that the service cannot use. It installs daemon files with the ownership of the precreated data directories, keeps the operator signing key in the separate root-owned operator directory, and writes the configuration last. The command never replaces an existing operator key or durable identity. Save the printed operator signing-key path with the other protected operator credentials; do not copy it into `/var/lib/agenc-ircd`, the configuration directory, or the runtime directory.
 
 Initialization prints a Tor fragment, the service-unit reminder, and certificate enrollment instructions. It does not install them. It does not contact a certificate authority or bind a public socket.
 
@@ -50,6 +51,8 @@ agenc-ircd check-config --config /etc/agenc-ircd/config.toml
 ```
 
 The command parses the complete document, opens every configured secret under the protected-file rules, reconstructs the authenticated database through a read-only handle, checks the database identity, and prints the observed host controls. It does not create the writer lock, repair the database, replace the rollback guard, or remove stale temporary files. Exit status 2 means at least one required control was observed absent. An unreadable control is reported as unknown instead of present.
+
+The packaged tmpfiles and service records keep `/run/agenc-ircd` at mode 0750 while the daemon is stopped. This allows the same Host-depth path checks to run before the first start and between service runs.
 
 The process cannot observe every service-manager restriction from inside its own namespace. Check the installed unit separately with `systemd-analyze security` and the deployment checker. `check-config` does not prove swap encryption, backup handling, certificate issuance, firewall rules, or Tor routing.
 

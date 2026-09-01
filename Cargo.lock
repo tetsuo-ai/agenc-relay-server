@@ -139,6 +139,7 @@ dependencies = [
  "agenc-ircd-testkit",
  "agenc-ircd-types",
  "loom",
+ "rustix",
  "rustls",
  "subtle",
  "tokio",

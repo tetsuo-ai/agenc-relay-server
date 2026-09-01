@@ -143,6 +143,7 @@ const INIT_SPECS: &[OptionSpec] = &[
     OptionSpec::value("--coordinator-server-id"),
     OptionSpec::value("--data-dir"),
     OptionSpec::value("--runtime-dir"),
+    OptionSpec::value("--operator-signing-key-file"),
     OptionSpec::value("--server-name"),
     OptionSpec::value("--display-name"),
     OptionSpec::value("--dns-name"),
@@ -195,6 +196,9 @@ fn init_request(parsed: &mut ParsedOptions) -> Result<InitRequest, ()> {
     let runtime_dir = parsed
         .optional_path("--runtime-dir")
         .unwrap_or_else(|| PathBuf::from("/run/agenc-ircd"));
+    let operator_signing_key_file = parsed
+        .optional_path("--operator-signing-key-file")
+        .unwrap_or_else(|| PathBuf::from("/var/lib/agenc-ircd-operator/operator-signing.key"));
     let server_name = DnsName::parse(
         &parsed
             .optional_text("--server-name")?
@@ -214,6 +218,7 @@ fn init_request(parsed: &mut ParsedOptions) -> Result<InitRequest, ()> {
         mode,
         data_dir,
         runtime_dir,
+        operator_signing_key_file,
         server_name,
         display_name,
         dns_name,
