@@ -920,13 +920,15 @@ impl RedbStore {
             .transpose()
     }
 
+    /// Reads up to `limit` rows in `start..end` within the byte budget and
+    /// reports whether any row remains in the range after the last one copied.
     pub(crate) fn read_range(
         &self,
         table: TableId,
         start: &[u8],
         end: &[u8],
         limit: usize,
-    ) -> Result<Vec<OwnedRow>, StorageError> {
+    ) -> Result<(Vec<OwnedRow>, bool), StorageError> {
         let transaction = self
             .database
             .begin_read()
@@ -940,12 +942,32 @@ impl RedbStore {
         let range = table
             .range(start..end)
             .map_err(|_| StorageError::DatabaseRejected)?;
-        for entry in range.take(limit) {
+        let mut copied = 0_usize;
+        let mut truncated = false;
+        for entry in range {
             let (key, value) = entry.map_err(|_| StorageError::DatabaseRejected)?;
             validate_row_shape(key.value(), value.value())?;
+            let row_bytes = key
+                .value()
+                .len()
+                .checked_add(value.value().len())
+                .ok_or(StorageError::Overflow)?;
+            let next = copied
+                .checked_add(row_bytes)
+                .ok_or(StorageError::Overflow)?;
+            // The first row always fits so a page never stalls; a later row that
+            // would exceed the row limit or the byte budget ends the page and
+            // proves that more rows remain.
+            if rows.len() >= limit
+                || (!rows.is_empty() && next > crate::mutation::MAX_RANGE_READ_BYTES)
+            {
+                truncated = true;
+                break;
+            }
+            copied = next;
             rows.push((key.value().to_vec(), value.value().to_vec()));
         }
-        Ok(rows)
+        Ok((rows, truncated))
     }
 
     pub(crate) fn visit_table<F>(
@@ -1645,6 +1667,53 @@ mod tests {
     }
 
     #[test]
+    fn range_reads_stop_at_the_byte_budget_but_always_return_one_row() -> Result<(), StorageError> {
+        let (_directory, store) = open_store("range-byte-budget")?;
+        initialize(&store, &[])?;
+        // Three rows of six MiB: two fit the sixteen MiB budget, the third does not.
+        let row = vec![0_u8; 6 * 1_048_576];
+        let transaction = store
+            .database
+            .begin_write()
+            .map_err(|_| StorageError::DatabaseRejected)?;
+        {
+            let mut table = transaction
+                .open_table(table_definition(TableId::E2eeObject))
+                .map_err(|_| StorageError::DatabaseRejected)?;
+            for index in 1_u8..=3 {
+                table
+                    .insert([index; 32].as_slice(), row.as_slice())
+                    .map_err(|_| StorageError::DatabaseRejected)?;
+            }
+        }
+        transaction
+            .commit()
+            .map_err(|_| StorageError::DatabaseRejected)?;
+
+        let (first, first_truncated) =
+            store.read_range(TableId::E2eeObject, &[0; 32], &[255; 32], 4)?;
+        assert!(first_truncated);
+        assert_eq!(first.len(), 2);
+        assert_eq!(
+            first.last().map(|(key, _)| key.as_slice()),
+            Some([2; 32].as_slice())
+        );
+        let (rest, rest_truncated) =
+            store.read_range(TableId::E2eeObject, &[2, 255], &[255; 32], 4)?;
+        assert!(!rest_truncated);
+        assert_eq!(rest.len(), 1);
+        let (limited, limit_truncated) =
+            store.read_range(TableId::E2eeObject, &[0; 32], &[255; 32], 1)?;
+        assert!(limit_truncated);
+        assert_eq!(limited.len(), 1);
+        assert_eq!(
+            rest.first().map(|(key, _)| key.as_slice()),
+            Some([3; 32].as_slice())
+        );
+        Ok(())
+    }
+
+    #[test]
     fn oversized_rows_are_rejected_before_any_read_path_copies_them() -> Result<(), StorageError> {
         let (_directory, store) = open_store("oversized-rows")?;
         initialize(&store, &[])?;
@@ -1673,7 +1742,7 @@ mod tests {
         assert_eq!(
             store
                 .read_range(TableId::E2eeObject, &[0; 32], &[255; 32], 4)
-                .map(|rows| rows.len()),
+                .map(|(rows, _)| rows.len()),
             Err(StorageError::InvalidEncoding)
         );
         let mut scan = store.snapshot_scan()?;

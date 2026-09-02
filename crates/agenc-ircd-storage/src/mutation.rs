@@ -19,6 +19,10 @@ const MAX_TRACKED_MUTATION_BYTES: usize = 16_777_216;
 pub const MAX_RETENTION_DELETIONS: usize = 1_000;
 /// Greatest rows one consistent range read returns.
 const MAX_RANGE_READ_RECORDS: u16 = 4_096;
+/// Greatest key and value bytes one consistent range read copies. A page stops
+/// before the row that would exceed it, so rows larger than the budget still
+/// come back one per page.
+pub(crate) const MAX_RANGE_READ_BYTES: usize = 16_777_216;
 
 /// Existing record metadata required to validate replacement/deletion accounting.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -607,6 +611,10 @@ impl ReadPlan {
     }
 
     /// Creates a bounded range request.
+    ///
+    /// A result holds at most `limit` rows and stops early at the byte budget;
+    /// `ReadResult::truncated` says whether rows remain, so callers page from
+    /// the last returned key only while it is set.
     pub fn range(
         table: TableId,
         start: StoredKey,
@@ -647,6 +655,10 @@ pub struct ReadResult {
     pub storage_commit_sequence: u64,
     /// Rows in canonical table/key order.
     pub records: Vec<ReadRecord>,
+    /// Whether rows remain in the requested range past the last returned row
+    /// because the row limit or the byte budget stopped the page. Callers
+    /// continue from the last key only when this is set.
+    pub truncated: bool,
 }
 
 /// Successful durable receipt returned only after guard installation.

@@ -993,6 +993,7 @@ fn scan_table(
         if count > usize::from(RANGE_READ_LIMIT) {
             return Err(RuntimeError::LimitExceeded);
         }
+        let truncated = result.truncated;
         let mut last = None;
         for record in result.records {
             let sequence = sequence_key(&record.key)?;
@@ -1020,11 +1021,12 @@ fn scan_table(
             visit(sequence, value.body())?;
             last = Some(sequence);
         }
-        if count < usize::from(RANGE_READ_LIMIT) {
+        // A page may stop short of the row limit at the storage byte budget,
+        // so the store's own truncation flag decides whether rows remain.
+        let Some(last) = last else {
             break;
-        }
-        let last = last.ok_or(RuntimeError::InvalidValue)?;
-        if last == u64::MAX {
+        };
+        if !truncated || last == u64::MAX {
             break;
         }
         start = last.checked_add(1).ok_or(RuntimeError::Overflow)?;

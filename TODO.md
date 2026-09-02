@@ -1777,6 +1777,77 @@ the closure branch at review time.
   - Invariants: applicable `TRN-*`, `ID-*`, `AUTH-*`, `PRV-*`, `STA-*`, `DUR-*`, `CON-*`, `OPS-*`.
   - Evidence: core-v1 transcripts, Loom models, shutdown/overload/soak tests, host checks, and mandatory build gates pass.
 
+
+#### Stages 1 to 6 review follow-ups
+
+The 2026-09-02 legibility pass over every crate from Stage 01 to Stage 06
+fixed its definite defects on `review/stages-1-6` (mask-list setter
+attribution, backup record ceiling, range-read byte budget, restore resume
+after finalize). The findings below were verified against the code but
+deferred because each needs a design decision or a specification reading.
+None blocks the core-v1 gate.
+
+- [ ] `verify_integrity_ledger` writes a full recovery scratch database inside
+  the state directory after a checkpoint has committed (`engine.rs`
+  `commit_prepared_checkpoint`, `platform.rs` `create_recovery_scratch`). The
+  scratch is O(N) and outside the admission reserve, so ENOSPC there maps to
+  `Indeterminate` and poisons the owner although the durable state is
+  consistent. Size the scratch against capacity first or give a post-commit
+  verification failure its own non-poisoning outcome.
+- [ ] `start_backup` runs `startup_scan` and `verify_snapshot_accounting`
+  (two full decrypts) before the first slice, and `BackupJob::finish` runs
+  `verify_backup` twice, all on the owner thread, so commit and read latency
+  during a backup is O(database) rather than O(slice). Reuse the checkpoint
+  slicing for the accounting pass and drop one post-write verification.
+- [ ] `initialize_storage` requires `database.redb` to be absent but installs
+  `rollback.guard` with a replacing rename (`initialize.rs`, `platform.rs`
+  `replace_guard`), so pointing initialization at a directory whose database
+  was removed silently overwrites the previous lineage's anti-rollback anchor.
+  Refuse when a guard already exists.
+- [ ] Backup trust-key validity windows are checked against the header
+  `created_at` that the same key signs (`backup.rs` `accepts_creation_time`),
+  so a key compromised after `not_after` can still produce accepted backups
+  by back-dating. Document the limit or bind `created_at` to an external fact.
+- [ ] If the second `verify_backup` in `BackupJob::finish` fails after
+  `publish`, the file stays under its final name while the caller gets an
+  error, and a retry then fails on `RENAME_NOREPLACE`. Unlink on post-publish
+  failure or return a published-but-unverified receipt.
+- [ ] `cleanup_random_temporaries` lists by path and unlinks relative to the
+  locked directory descriptor (`platform.rs`), so the two can name different
+  directories if a parent is swapped in between; the prefix check fails
+  closed. List through the descriptor instead.
+- [ ] `sealed.rs` `decode` copies the ciphertext with `to_vec` and `open`
+  clones it again, so every full scan pays two 16 MiB copies per record.
+- [ ] `construction_runtime.rs` `state.checkpoint_manifest_sequence + 1` is
+  the one unchecked add in the storage crate; safe under its guard but
+  outside the crate's checked-arithmetic convention.
+- [ ] `io_rejected` and `rustix_rejected` collapse every errno to
+  `FilesystemRejected`, so a missing guard, EACCES, ENOSPC, and EIO are
+  indistinguishable to operators and tests.
+- [ ] `domain_records.rs` decodes topic text and list-entry masks as bounded
+  raw strings while nicknames, channel names, away text, and display names go
+  through their domain parsers; persisted bytes could carry control
+  characters into the domain layer.
+- [ ] `PersistentRecordValue::decode` accepts references in any order and
+  re-sorts them, so two byte strings decode to one value although the module
+  documents the envelope as canonical. Reject unsorted input in `decode`.
+- [ ] `project_channel` (`domain/projection.rs`) hides an unlisted (`+p`)
+  channel from non-members, while the specification defines `+p` as
+  list-hiding rather than existence-hiding. Confirm the intended reading.
+- [ ] The JOIN key list in `client-wire` rejects the same key given for two
+  channels because its duplicate check compares key text rather than
+  channel-key pairs. Confirm whether the specification forbids reuse.
+- [ ] `reserved_nickname_owner`, `validate_new_invite_id`, the invite purge
+  in `apply_close_session`, and the `DeleteAccount` touched-entity walk scan
+  their maps linearly per command (`domain/decision.rs`). Fine at Stage 06
+  scale; index them before the limits table is raised.
+- [ ] `agenc-ircd init` writes `allowed_uids = [0]` and operator
+  `local_uids = [0]` into the template, so the generated local admin listener
+  admits only root until the operator edits it. Consider the invoking user's
+  uid or an explicit `--admin-uid` option.
+- [ ] `account-invite create --expires-in` parses through `u64::from_str`,
+  which accepts a leading `+`; the other decimal inputs use the canonical
+  parser.
 ## Stage 07 — Base federation
 
 Outcome: one coordinator and its authenticated edges converge through bounded,

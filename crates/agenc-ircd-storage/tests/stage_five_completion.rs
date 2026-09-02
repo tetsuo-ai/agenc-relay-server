@@ -3336,6 +3336,22 @@ fn stopped_daemon_restore_installs_and_reverifies_a_signed_backup() -> Result<()
         receipt
     );
 
+    // A process that died after finalizing the construction but before the
+    // rename leaves a finalized staging directory with no marker row. Recreate
+    // that state from the installed output and prove resume still installs it.
+    let staging = command_directory
+        .path()
+        .join(".restored-state.agenc-construction-v1");
+    std::fs::rename(&output, &staging)?;
+    let mut finalized = request();
+    finalized.resume = true;
+    assert_eq!(
+        execute_restore_command(finalized, &[source.qualification])?,
+        receipt
+    );
+    assert!(output.join("database.redb").is_file());
+    assert!(!staging.exists());
+
     let mut undeclared = request();
     undeclared.output_state_directory = command_directory.path().join("undeclared");
     undeclared.declare_recovery_epoch = false;

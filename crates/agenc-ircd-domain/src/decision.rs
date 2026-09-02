@@ -24,6 +24,16 @@ use crate::{
 
 /// Maximum number of expired invitations removed by one timer plan.
 pub const MAX_INVITE_EXPIRATIONS_PER_PLAN: usize = 256;
+/// How long a same-account OPAQUE authentication stays fresh for destructive
+/// account controls, in monotonic milliseconds (spec 1485-1486: 300 seconds).
+const FRESH_AUTH_WINDOW_MILLIS: u64 = 300_000;
+/// Lifetime of one account-deletion challenge token in monotonic milliseconds
+/// (spec 2113: 60-second monotonic expiry).
+const DELETION_CHALLENGE_LIFETIME_MILLIS: u64 = 60_000;
+/// Lifetime of one channel invite in wall-clock seconds (spec 2049: 10 minutes).
+const INVITE_LIFETIME_SECONDS: u64 = 600;
+/// The invite lifetime in monotonic milliseconds.
+const INVITE_LIFETIME_MILLIS: u64 = INVITE_LIFETIME_SECONDS * 1_000;
 
 /// One hierarchical admission bucket selected without peer-controlled text.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -695,6 +705,7 @@ enum Mutation {
     },
     ApplyModes {
         channel_id: ChannelInstanceId,
+        setter: Principal,
         changes: Vec<ModeChange>,
         entry_ids: Vec<EntryId>,
         key_verifiers: Vec<crate::ChannelKeyVerifier>,
@@ -1137,12 +1148,14 @@ impl Mutation {
             },
             Self::ApplyModes {
                 channel_id,
+                setter,
                 changes,
                 entry_ids,
                 key_verifiers,
                 created_at,
             } => Self::ApplyModes {
                 channel_id: *channel_id,
+                setter: *setter,
                 changes: changes
                     .iter()
                     .map(duplicate_mode_change)
@@ -1193,6 +1206,14 @@ fn duplicate_mode_change(change: &ModeChange) -> Result<ModeChange, DomainError>
     })
 }
 
+/// One atomic mode vector with the external inputs its mask and key arms consume.
+struct ModeBatch {
+    setter: Principal,
+    changes: Vec<ModeChange>,
+    entry_ids: Vec<EntryId>,
+    key_verifiers: Vec<crate::ChannelKeyVerifier>,
+    created_at: Option<UtcSecond>,
+}
 struct JoinPlanAccumulator {
     user_id: UserId,
     principal: Principal,
@@ -1722,7 +1743,7 @@ impl DomainState {
         {
             return Err(DomainError::BadState);
         }
-        let deadline = authenticated_at.checked_add(300_000)?;
+        let deadline = authenticated_at.checked_add(FRESH_AUTH_WINDOW_MILLIS)?;
         let mut recipients = RecipientSet::new();
         recipients.insert(user_id);
         self.assemble_plan(PlanParts {
@@ -2562,7 +2583,7 @@ impl DomainState {
                 self.plan_topic(user_id, name, topic, charges, inputs)
             }
             CanonicalCommandData::Mode(ModeCommand::ChannelChange(name, changes)) => {
-                self.plan_modes(user_id, name, changes, charges, inputs)
+                self.plan_modes(user_id, principal, name, changes, charges, inputs)
             }
             CanonicalCommandData::Mode(ModeCommand::UserOperatorNotices(_, enabled)) => {
                 self.plan_operator_notices(user_id, enabled, charges)
@@ -3003,6 +3024,7 @@ impl DomainState {
     fn plan_modes(
         &self,
         user_id: UserId,
+        principal: Principal,
         name: ChannelNameValue,
         changes: Vec<ModeChange>,
         charges: Vec<RateCharge>,
@@ -3023,6 +3045,7 @@ impl DomainState {
         self.command_plan(
             vec![Mutation::ApplyModes {
                 channel_id,
+                setter: principal,
                 changes,
                 entry_ids: inputs.entry_ids,
                 key_verifiers: inputs.key_verifiers,
@@ -3064,7 +3087,7 @@ impl DomainState {
             .ok_or(DomainError::ExternalInputMismatch)?;
         let expires_at = invite_expiry(now)?;
         let created_at_utc = inputs.utc_now.ok_or(DomainError::ExternalInputMismatch)?;
-        let expires_at_utc = created_at_utc.checked_add(600)?;
+        let expires_at_utc = created_at_utc.checked_add(INVITE_LIFETIME_SECONDS)?;
         let channel = self
             .channels
             .get(&channel_id)
@@ -3464,7 +3487,7 @@ impl DomainState {
             return Err(DomainError::BadState);
         }
         let token = take_one(&mut inputs.deletion_tokens)?;
-        let expires_at = now.checked_add(60_000)?;
+        let expires_at = now.checked_add(DELETION_CHALLENGE_LIFETIME_MILLIS)?;
         let challenge = AccountDeletionChallengeState {
             token,
             account_id,
@@ -3810,6 +3833,7 @@ impl DomainState {
             }
             Mutation::ApplyModes {
                 channel_id,
+                setter,
                 changes,
                 entry_ids,
                 key_verifiers,
@@ -3817,10 +3841,13 @@ impl DomainState {
             } => {
                 self.apply_modes(
                     channel_id,
-                    changes,
-                    entry_ids,
-                    key_verifiers,
-                    created_at,
+                    ModeBatch {
+                        setter,
+                        changes,
+                        entry_ids,
+                        key_verifiers,
+                        created_at,
+                    },
                     revision,
                 );
             }
@@ -4126,20 +4153,20 @@ impl DomainState {
         }
     }
 
-    fn apply_modes(
-        &mut self,
-        channel_id: ChannelInstanceId,
-        changes: Vec<ModeChange>,
-        entry_ids: Vec<EntryId>,
-        key_verifiers: Vec<crate::ChannelKeyVerifier>,
-        created_at: Option<UtcSecond>,
-        revision: Revision,
-    ) {
+    fn apply_modes(&mut self, channel_id: ChannelInstanceId, batch: ModeBatch, revision: Revision) {
+        let ModeBatch {
+            setter,
+            changes,
+            entry_ids,
+            key_verifiers,
+            created_at,
+        } = batch;
         let mut entry_ids = entry_ids.into_iter();
         let mut key_verifiers = key_verifiers.into_iter();
         for change in changes {
             self.apply_mode_change(
                 channel_id,
+                setter,
                 change,
                 &mut entry_ids,
                 &mut key_verifiers,
@@ -4152,6 +4179,7 @@ impl DomainState {
     fn apply_mode_change(
         &mut self,
         channel_id: ChannelInstanceId,
+        setter: Principal,
         change: ModeChange,
         entry_ids: &mut impl Iterator<Item = EntryId>,
         key_verifiers: &mut impl Iterator<Item = crate::ChannelKeyVerifier>,
@@ -4181,10 +4209,12 @@ impl DomainState {
             }
             ModeChange::AddMask { list, mask } => {
                 if let Some(entry_id) = entry_ids.next() {
+                    // Spec 21.4 records the principal that created the entry,
+                    // which is the acting operator, not the channel creator.
                     let entry = crate::ListEntry::new(
                         entry_id,
                         mask,
-                        channel.creator,
+                        setter,
                         created_at.unwrap_or(channel.created_at),
                     );
                     mask_list_mut(channel, list).push(entry);
@@ -4548,7 +4578,7 @@ fn contains_duplicate<Value: Eq>(values: &[Value]) -> bool {
 fn invite_expiry(now: MonotonicTick) -> Result<MonotonicTick, DomainError> {
     let ticks = now
         .get()
-        .checked_add(600_000)
+        .checked_add(INVITE_LIFETIME_MILLIS)
         .ok_or(DomainError::Overflow)?;
     Ok(MonotonicTick::from_ticks(ticks))
 }
@@ -8074,6 +8104,7 @@ mod tests {
 
         fixture.state.apply_mode_change(
             missing_channel,
+            Principal::Account(fixture.owner_account),
             ModeChange::Moderated(true),
             &mut Vec::<EntryId>::new().into_iter(),
             &mut Vec::<crate::ChannelKeyVerifier>::new().into_iter(),
@@ -8081,6 +8112,7 @@ mod tests {
         );
         fixture.state.apply_mode_change(
             fixture.channel_id,
+            Principal::Account(fixture.owner_account),
             ModeChange::AddMask {
                 list: MaskList::Exception,
                 mask: TypedMask::parse("$n:no-id")?,
@@ -8091,6 +8123,7 @@ mod tests {
         );
         fixture.state.apply_mode_change(
             fixture.channel_id,
+            Principal::Account(fixture.owner_account),
             ModeChange::AddMask {
                 list: MaskList::Exception,
                 mask: TypedMask::parse("$n:with-id")?,
@@ -8101,6 +8134,7 @@ mod tests {
         );
         fixture.state.apply_mode_change(
             fixture.channel_id,
+            Principal::Account(fixture.owner_account),
             ModeChange::RemoveMask {
                 list: MaskList::Exception,
                 entry_id: EntryId::from_bytes(bytes(216)),
@@ -10238,6 +10272,53 @@ mod tests {
             ),
             Ok(())
         );
+        Ok(())
+    }
+
+    #[test]
+    fn mask_list_entries_record_the_operator_that_added_them() -> Result<(), DomainError> {
+        let mut fixture = fixture()?;
+        let state = &mut fixture.state;
+        let channel = state
+            .channels
+            .get_mut(&fixture.channel_id)
+            .ok_or(DomainError::NotFound)?;
+        let membership = channel
+            .memberships
+            .get_mut(&fixture.member.user_id)
+            .ok_or(DomainError::NotFound)?;
+        membership.session_role = Role::Operator;
+        membership.effective_role = Role::Operator;
+        let command = CanonicalCommand::mode(
+            fixture.name.clone(),
+            vec![ModeChange::AddMask {
+                list: MaskList::Ban,
+                mask: TypedMask::parse("$n:troll")?,
+            }],
+        )?;
+        let authorized = state
+            .authorize(
+                envelope(&fixture.member, state.revision, command),
+                &admission(fixture.member.user_id)?,
+            )
+            .map_err(|failure| failure.error())?;
+        let inputs = ExternalInputs {
+            utc_now: Some(UtcSecond::from_unix_seconds(20)),
+            entry_ids: vec![EntryId::from_bytes(bytes(90))],
+            ..ExternalInputs::default()
+        };
+        let PlanDecision::Mutation(plan) = state.plan_authorized(authorized, Some(inputs))? else {
+            return Err(DomainError::InvariantViolation);
+        };
+        let prepared = state.prepare_mutation(plan)?;
+        state.apply_prepared(prepared)?;
+        let entry = state
+            .channel(fixture.channel_id)
+            .and_then(|channel| channel.mask_list(MaskList::Ban).first())
+            .ok_or(DomainError::NotFound)?;
+        assert_eq!(entry.setter(), Principal::Account(fixture.member_account));
+        assert_ne!(entry.setter(), Principal::Account(fixture.owner_account));
+        assert_eq!(entry.created_at(), UtcSecond::from_unix_seconds(20));
         Ok(())
     }
 }

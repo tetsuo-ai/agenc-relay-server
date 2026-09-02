@@ -371,7 +371,15 @@ impl RestoreExecution<'_> {
                 self.limits,
             )?;
         }
-        let mut target_writer = ConstructionTarget::open(self.target_config()?)?;
+        let mut target_writer = match ConstructionTarget::open(self.target_config()?) {
+            Ok(target_writer) => target_writer,
+            // A construction that was finalized but never renamed into place
+            // has no marker row left to reopen; install it from its completion.
+            Err(open_error) if !self.target.fresh => {
+                return self.install_finalized(identity, open_error);
+            }
+            Err(error) => return Err(error),
+        };
         let marker = target_writer.marker()?;
         if (self.target.fresh, marker.identity != identity) == (false, true) {
             return Err(StorageError::ResumeMismatch);
@@ -388,6 +396,37 @@ impl RestoreExecution<'_> {
         if verification.completion().storage_operation_id != operation_id {
             return Err(StorageError::StaleState);
         }
+        let output = self.directory.install(verification)?;
+        Ok(restore_receipt(
+            output,
+            operation_id,
+            self.source_facts,
+            self.current_facts,
+            self.target.header,
+        ))
+    }
+
+    /// Resumes a staging database whose construction already committed its
+    /// completion row (the process died between finalization and the rename).
+    /// The completion is reverified exactly as a fresh installation would be;
+    /// any other open failure keeps the original error.
+    fn install_finalized(
+        self,
+        identity: StorageOperationIdentity,
+        open_error: StorageError,
+    ) -> Result<RestoreCommandReceipt, StorageError> {
+        let Ok(verification) = ConstructionTarget::verify_completed(
+            self.target_config()?,
+            identity,
+            self.directory.output_path_hash(),
+        ) else {
+            return Err(open_error);
+        };
+        let operation_id = identity.operation_id()?;
+        if verification.completion().storage_operation_id != operation_id {
+            return Err(StorageError::StaleState);
+        }
+        self.directory.remove_plan_file()?;
         let output = self.directory.install(verification)?;
         Ok(restore_receipt(
             output,
@@ -539,17 +578,26 @@ fn select_target_identity(
     if request.resume {
         let header = match directory.phase() {
             ConstructionDirectoryPhase::Staging => {
-                let target = ConstructionTarget::open(target_open_config(
-                    request,
-                    directory,
-                    qualifications,
-                    target_master_bytes,
-                    target_guard_bytes,
-                    login_key_bytes,
-                    previous_login_key_bytes,
-                    limits,
-                )?)?;
-                target.header()
+                let config = || {
+                    target_open_config(
+                        request,
+                        directory,
+                        qualifications,
+                        target_master_bytes,
+                        target_guard_bytes,
+                        login_key_bytes,
+                        previous_login_key_bytes,
+                        limits,
+                    )
+                };
+                match ConstructionTarget::open(config()?) {
+                    Ok(target) => target.header(),
+                    // A finalized construction that was never renamed has no
+                    // marker row; its completed header is the target identity.
+                    Err(open_error) => {
+                        ConstructionTarget::completed_header(config()?).map_err(|_| open_error)?
+                    }
+                }
             }
             ConstructionDirectoryPhase::Installed => {
                 ConstructionTarget::completed_header(target_open_config(
