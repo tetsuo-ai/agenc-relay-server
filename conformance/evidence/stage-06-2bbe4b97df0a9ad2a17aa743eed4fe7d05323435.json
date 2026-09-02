@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
-  "manifest_id": "EVID-MANIFEST-STAGE-06-B1FC07A99F845795",
-  "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-  "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+  "manifest_id": "EVID-MANIFEST-STAGE-06-2BBE4B97DF0A9AD2",
+  "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+  "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
   "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
   "entries": [
     {
@@ -175,20 +175,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -368,20 +368,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -561,20 +561,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -754,20 +754,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -947,20 +947,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -1140,20 +1140,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -1333,20 +1333,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -1526,20 +1526,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -1719,20 +1719,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -1912,20 +1912,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -2105,20 +2105,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -2298,20 +2298,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -2491,20 +2491,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -2684,20 +2684,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -2877,20 +2877,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -3070,20 +3070,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -3263,20 +3263,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -3456,20 +3456,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -3649,20 +3649,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -3842,20 +3842,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -4035,20 +4035,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -4228,20 +4228,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -4421,20 +4421,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -4614,20 +4614,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -4807,20 +4807,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -5000,20 +5000,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -5193,20 +5193,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -5386,20 +5386,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -5579,20 +5579,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -5772,20 +5772,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -5965,20 +5965,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -6158,20 +6158,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -6351,20 +6351,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -6544,20 +6544,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -6737,20 +6737,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -6930,20 +6930,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -7123,20 +7123,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -7316,20 +7316,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -7509,20 +7509,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -7702,20 +7702,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -7895,20 +7895,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -8088,20 +8088,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -8281,20 +8281,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -8474,20 +8474,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -8667,20 +8667,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -8860,20 +8860,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -9053,20 +9053,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -9246,20 +9246,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -9439,20 +9439,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -9632,20 +9632,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -9825,20 +9825,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -10018,20 +10018,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -10211,20 +10211,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -10404,20 +10404,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",
@@ -10597,20 +10597,20 @@
           "version": "cargo-fuzz 0.13.2"
         }
       ],
-      "source_commit": "b1fc07a99f8457958d52df6be6763ce3ba5a8e7f",
-      "source_sha256": "11774094be94eae2c4b6fb19d5ba385cb12a574a48d77889c81529c795ae1ce8",
+      "source_commit": "2bbe4b97df0a9ad2a17aa743eed4fe7d05323435",
+      "source_sha256": "84f8280e417d65e9328fd1460478d469e49bd2f88cebdc9dc831cf9614b93037",
       "lock_sha256": "2992ad41ae9aa0d7088402bf490fe38c3249dfef08ee83e552b449cce53eef7c",
       "target": "x86_64-unknown-linux-gnu",
       "features": [
         "all-features"
       ],
-      "started_at": "2026-09-02T02:55:45.262030Z",
-      "ended_at": "2026-09-02T03:01:18.024152Z",
+      "started_at": "2026-09-02T03:27:59.389286Z",
+      "ended_at": "2026-09-02T03:33:31.219604Z",
       "result": "passed",
       "artifact": {
         "label": "Stage 06 exact-source gate run",
-        "sha256": "52164dfca8ff91bcd4839c4d94af04b34638eb328660ec2e2c467fb72344f978",
-        "path": "conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json"
+        "sha256": "29824d8212f221550f6f4a359a6891a85dffbc1c8fc2656709ec1c85be7965bd",
+        "path": "conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json"
       },
       "limitations": [
         "Command output is not captured.",

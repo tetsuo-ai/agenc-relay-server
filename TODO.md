@@ -56,7 +56,7 @@ References: [Architecture §§1.2–4](docs/ircd-architecture-and-implementation
 | 03 | Pure deterministic domain model | Complete | Pass, 2026-08-27 | [Current checkpoint](conformance/evidence/stage-03-1e5b738468f88b238061cc6e84b732176f5cae65.json) |
 | 04 | Crypto adapters and account authentication | Complete | Pass, 2026-08-29 | [Current checkpoint](conformance/evidence/stage-04-4040796f2c21774d58ea7ce54e70a080678e83ac.json) |
 | 05 | Durable and recoverable persistence | Complete | Pass, 2026-08-29 | [Current checkpoint](conformance/evidence/stage-05-4040796f2c21774d58ea7ce54e70a080678e83ac.json) |
-| 06 | Conforming single-node daemon | Complete | Pass, 2026-09-01 | [Current checkpoint](conformance/evidence/stage-06-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json) |
+| 06 | Conforming single-node daemon | Complete | Pass, 2026-09-01 | [Current checkpoint](conformance/evidence/stage-06-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json) |
 | 07 | Conforming base federation | Not started | Not run | Absent |
 | 08 | Conforming E2EE server adapter | Not started | Not run | Absent |
 | 09 | Optional WSS and history profiles | Not started | Not run | Absent |
@@ -963,7 +963,7 @@ adopted the interim coverage floor, closed the ledger and catalog, and passed
 the full 75-command gate on 2026-09-01. The commit-point boxes below record
 which work landed. The `S06-*` task boxes are checked because the gate passes
 on the closure branch. The exact-revision checkpoint closes source commit
-`b1fc07a99f8457958d52df6be6763ce3ba5a8e7f`.
+`2bbe4b97df0a9ad2a17aa743eed4fe7d05323435`.
 
 #### Branch and worktree control
 
@@ -1490,8 +1490,8 @@ Commit point 9
   ```
 
 - [x] Record
-  `conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json`.
-- [x] Generate `conformance/evidence/stage-06-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json` with evidence schema
+  `conformance/evidence/artifacts/stage-six-implementation-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json`.
+- [x] Generate `conformance/evidence/stage-06-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json` with evidence schema
   version 2.
 
   ```sh
