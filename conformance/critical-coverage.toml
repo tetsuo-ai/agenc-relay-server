@@ -4,7 +4,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 197
-reviewed_source_sha256 = "76a9b47b864d22871ac3e8e0d0706a7f9c1f34f5919bb9af2bc872e91997c757"
+reviewed_source_sha256 = "81bb2b9f6bdb2de8db90cbfea4cc96c8ed5054d7a75b5d09acd8a477ed3daeb3"
 deferred = []
 
 [[region]]
@@ -31,7 +31,7 @@ reason = "Every accepted and rejected syntax path must be exercised at the clien
 id = "domain-command-authorization"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-domain/src/decision.rs"
-source_sha256 = "2b28bbddbd41dbfd452b853d605b857772bd3a396ca911beff1d30471591a1bc"
+source_sha256 = "760d67fee49521d724612b7673f135fda368788b48a293b69b990f16b0bfe59f"
 start_line = 2080
 end_line = 2346
 metric = "branches"

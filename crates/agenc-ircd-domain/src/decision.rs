@@ -24,6 +24,16 @@ use crate::{
 
 /// Maximum number of expired invitations removed by one timer plan.
 pub const MAX_INVITE_EXPIRATIONS_PER_PLAN: usize = 256;
+/// How long a same-account OPAQUE authentication stays fresh for destructive
+/// account controls, in monotonic milliseconds (spec 1485-1486: 300 seconds).
+const FRESH_AUTH_WINDOW_MILLIS: u64 = 300_000;
+/// Lifetime of one account-deletion challenge token in monotonic milliseconds
+/// (spec 2113: 60-second monotonic expiry).
+const DELETION_CHALLENGE_LIFETIME_MILLIS: u64 = 60_000;
+/// Lifetime of one channel invite in wall-clock seconds (spec 2049: 10 minutes).
+const INVITE_LIFETIME_SECONDS: u64 = 600;
+/// The invite lifetime in monotonic milliseconds.
+const INVITE_LIFETIME_MILLIS: u64 = INVITE_LIFETIME_SECONDS * 1_000;
 
 /// One hierarchical admission bucket selected without peer-controlled text.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -1733,7 +1743,7 @@ impl DomainState {
         {
             return Err(DomainError::BadState);
         }
-        let deadline = authenticated_at.checked_add(300_000)?;
+        let deadline = authenticated_at.checked_add(FRESH_AUTH_WINDOW_MILLIS)?;
         let mut recipients = RecipientSet::new();
         recipients.insert(user_id);
         self.assemble_plan(PlanParts {
@@ -3077,7 +3087,7 @@ impl DomainState {
             .ok_or(DomainError::ExternalInputMismatch)?;
         let expires_at = invite_expiry(now)?;
         let created_at_utc = inputs.utc_now.ok_or(DomainError::ExternalInputMismatch)?;
-        let expires_at_utc = created_at_utc.checked_add(600)?;
+        let expires_at_utc = created_at_utc.checked_add(INVITE_LIFETIME_SECONDS)?;
         let channel = self
             .channels
             .get(&channel_id)
@@ -3477,7 +3487,7 @@ impl DomainState {
             return Err(DomainError::BadState);
         }
         let token = take_one(&mut inputs.deletion_tokens)?;
-        let expires_at = now.checked_add(60_000)?;
+        let expires_at = now.checked_add(DELETION_CHALLENGE_LIFETIME_MILLIS)?;
         let challenge = AccountDeletionChallengeState {
             token,
             account_id,
@@ -4568,7 +4578,7 @@ fn contains_duplicate<Value: Eq>(values: &[Value]) -> bool {
 fn invite_expiry(now: MonotonicTick) -> Result<MonotonicTick, DomainError> {
     let ticks = now
         .get()
-        .checked_add(600_000)
+        .checked_add(INVITE_LIFETIME_MILLIS)
         .ok_or(DomainError::Overflow)?;
     Ok(MonotonicTick::from_ticks(ticks))
 }
