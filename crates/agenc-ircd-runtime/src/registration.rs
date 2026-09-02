@@ -1826,7 +1826,7 @@ impl From<RouteOutcome> for ActionStep {
     }
 }
 
-fn core_capabilities(
+pub(crate) fn core_capabilities(
     creation_policy: AccountCreationPolicy,
     recovery_epoch: RecoveryEpoch,
     purpose: ListenerPurpose,

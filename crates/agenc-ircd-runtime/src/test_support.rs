@@ -8,9 +8,10 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use agenc_ircd_auth::OpaqueProfile;
+use agenc_ircd_client_wire::{CapRequestReply, CapabilityState};
 use agenc_ircd_crypto::{
     CryptoWorkerConfig, Ed25519SecretKey, LoginIndexKey, RollbackGuardRootKey, StorageDigest,
     StorageMasterKey,
@@ -23,9 +24,12 @@ use agenc_ircd_storage::{
     StorageOpenConfig, StorageOwner, StorageQualification, StorageQualificationReport,
     StorageQualificationReportTbs, StoredKey, TableId, initialize_storage,
 };
-use agenc_ircd_testkit::{DeterministicMonotonicClock, DeterministicWallClock, ScriptedEntropy};
+use agenc_ircd_testkit::{
+    DeterministicMonotonicClock, DeterministicWallClock, DomainTestIdentity, ScriptedEntropy,
+};
 use agenc_ircd_types::{
-    DatabaseId, MonotonicTick, NetworkId, RecoveryEpoch, ServerId, ServerIncarnation, UtcSecond,
+    AccountId, DatabaseId, Generation, MonotonicTick, NetworkId, RecoveryEpoch, ServerId,
+    ServerIncarnation, SessionId, UserId, UtcSecond,
 };
 
 use crate::RuntimeError;
@@ -34,9 +38,17 @@ use crate::admission::RateLimits;
 use crate::bridge::crypto::CryptoBridge;
 use crate::bridge::storage::StorageBridge;
 use crate::budget::MemoryBudget;
+use crate::connection::{
+    BoundedSharedClientFrames, ClientQueueDemand, ClientQueueReservation, ClientQueueSnapshot,
+    ClientSink, ConnectionGeneration, FlushAcknowledgement, QueueAllocationError,
+    QueueReservationLedger, SinkReserveError, TentativeClientQueueReservation,
+};
 use crate::observe::health::Liveness;
 use crate::state_core::durable::{AccountingCeilings, KeyDeriver};
+use crate::state_core::fanout::FanoutRequest;
+use crate::state_core::inbox::{CloseReason, SourceAddressKey};
 use crate::state_core::reconstruct::reconstruct;
+use crate::state_core::session::BoundSession;
 use crate::state_core::{
     DefaultRouter, StateCore, StateCoreClocks, StateCoreConfig, StateCoreContext, StateCoreInputs,
 };
@@ -340,4 +352,292 @@ impl Drop for StateCoreFixture {
             let _shutdown = owner.shutdown();
         }
     }
+}
+
+/// Applies one plan to the live domain behind an empty fanout.
+pub(crate) fn apply_live_plan(
+    context: &mut StateCoreContext,
+    plan: agenc_ircd_domain::MutationPlan,
+) -> TestResult {
+    let request = FanoutRequest::new(Vec::new(), Vec::new())?;
+    context
+        .apply_ephemeral(plan, request)
+        .map_err(|_| "ephemeral apply was refused")?;
+    Ok(())
+}
+
+/// Creates one account in the live domain.
+pub(crate) fn seed_account(
+    context: &mut StateCoreContext,
+    seed: u8,
+    account_generation: u64,
+) -> TestResult<(AccountId, Generation)> {
+    let account = agenc_ircd_testkit::account_id(seed);
+    let account_generation = agenc_ircd_testkit::generation(account_generation)?;
+    let plan = context
+        .domain()
+        .plan_account_created(agenc_ircd_domain::AccountState::new(
+            account,
+            account_generation,
+            context.domain().revision(),
+        ))?;
+    apply_live_plan(context, plan)?;
+    Ok((account, account_generation))
+}
+
+/// Opens one session in the live domain the way the testkit does, without
+/// binding it to a connection.
+pub(crate) fn seed_session(
+    context: &mut StateCoreContext,
+    seed: u8,
+    nickname: &str,
+    account: Option<(AccountId, Generation)>,
+) -> TestResult<DomainTestIdentity> {
+    let session_generation = agenc_ircd_testkit::generation(1)?;
+    let (account_id, account_session_generation) = match account {
+        Some((account_id, account_generation)) => (Some(account_id), account_generation),
+        None => (None, agenc_ircd_testkit::generation(0)?),
+    };
+    let identity = DomainTestIdentity {
+        session_id: SessionId::from_bytes(agenc_ircd_testkit::bytes(seed)),
+        user_id: UserId::from_bytes(agenc_ircd_testkit::bytes(seed.wrapping_add(64))),
+        generation: session_generation,
+        account_id,
+    };
+    let plan = context
+        .domain()
+        .plan_session_opened(agenc_ircd_domain::SessionSeed {
+            session_id: identity.session_id,
+            user_id: identity.user_id,
+            home_server_id: ServerId::from_bytes(agenc_ircd_testkit::bytes(240)),
+            account_id,
+            account_session_generation,
+            generation: session_generation,
+            nickname: agenc_ircd_domain::NicknameValue::parse(nickname)?,
+            display_name: agenc_ircd_domain::DisplayNameValue::prepare(nickname)?,
+            public_cloak: agenc_ircd_testkit::deterministic_cloak(seed)?,
+            connection_nonce: [seed; 32],
+            negotiated_capability_hash: [seed.wrapping_add(1); 32],
+            created_at_utc: UtcSecond::from_unix_seconds(1_700_000_000 + u64::from(seed)),
+            revision: context.domain().revision(),
+        })?;
+    apply_live_plan(context, plan)?;
+    Ok(identity)
+}
+
+/// The bound-session view of a seeded identity.
+pub(crate) const fn bound(identity: DomainTestIdentity) -> BoundSession {
+    BoundSession {
+        session_id: identity.session_id,
+        user_id: identity.user_id,
+        capability_hash: [0; 32],
+    }
+}
+
+/// Negotiates `names` from the real core-v1 capability profile of an onion
+/// client listener with account creation open.
+pub(crate) fn negotiated_capabilities(names: &[&str]) -> TestResult<CapabilityState> {
+    let profile = crate::registration::core_capabilities(
+        crate::account_service::AccountCreationPolicy::Open,
+        RecoveryEpoch::from_bytes([0; 16]),
+        crate::purpose::ListenerPurpose::ClientOnion,
+    )?;
+    let mut capabilities = CapabilityState::default();
+    let _listed = capabilities.ls(Some("302"), &profile)?;
+    if names.is_empty() {
+        return Ok(capabilities);
+    }
+    if !matches!(
+        capabilities.request(&names.join(" "), &profile)?,
+        CapRequestReply::Ack(_)
+    ) {
+        return Err("capability request was refused".into());
+    }
+    Ok(capabilities)
+}
+
+/// Fills one purpose-bound entropy request and returns the next channel seed.
+fn answer_entropy(
+    purpose: &agenc_ircd_domain::EntropyPurpose,
+    inputs: &mut agenc_ircd_domain::ExternalInputs,
+    next_channel: u8,
+) -> u8 {
+    use agenc_ircd_domain::EntropyPurpose;
+    use agenc_ircd_testkit::bytes;
+    match purpose {
+        EntropyPurpose::ChannelInstance(_) => {
+            inputs
+                .channel_ids
+                .push(agenc_ircd_testkit::channel_id(next_channel));
+            return next_channel.wrapping_add(1);
+        }
+        EntropyPurpose::Message(_) => inputs
+            .message_ids
+            .push(agenc_ircd_types::MessageId::from_bytes(bytes(2))),
+        EntropyPurpose::Invite => inputs
+            .invite_ids
+            .push(agenc_ircd_types::InviteId::from_bytes(bytes(3))),
+        EntropyPurpose::MaskEntry(_) => inputs
+            .entry_ids
+            .push(agenc_ircd_types::EntryId::from_bytes(bytes(4))),
+        EntropyPurpose::AccountDeletionChallenge => inputs
+            .deletion_tokens
+            .push(agenc_ircd_types::AccountDeletionToken::from_bytes(bytes(5))),
+    }
+    next_channel
+}
+
+/// Answers one external request vector deterministically; fresh channel
+/// identities derive from `channel_seed` in request order.
+pub(crate) fn answer_external(
+    requests: &[agenc_ircd_domain::ExternalInputRequest],
+    channel_seed: u8,
+) -> agenc_ircd_domain::ExternalInputs {
+    use agenc_ircd_domain::{ExternalInputRequest, ExternalInputs};
+    let mut inputs = ExternalInputs::default();
+    let mut next_channel = channel_seed;
+    for request in requests {
+        match request {
+            ExternalInputRequest::UtcNow { .. } => {
+                inputs.utc_now = Some(UtcSecond::from_unix_seconds(1_720_000_100));
+            }
+            ExternalInputRequest::MonotonicNow { .. } => {
+                inputs.monotonic_now = Some(MonotonicTick::from_ticks(11));
+            }
+            ExternalInputRequest::Entropy { purpose, .. } => {
+                next_channel = answer_entropy(purpose, &mut inputs, next_channel);
+            }
+            ExternalInputRequest::ChannelKeyVerification { .. } => inputs.key_verdicts.push(true),
+            // Key construction needs a crypto verifier; tests that set a key answer it themselves.
+            ExternalInputRequest::ChannelKeyConstruction { .. } => {}
+        }
+    }
+    inputs
+}
+
+/// Plans one registered command against the live domain, answering any
+/// external request vector exactly once.
+pub(crate) fn plan_live(
+    context: &StateCoreContext,
+    identity: DomainTestIdentity,
+    command: &dyn Fn()
+        -> Result<agenc_ircd_domain::CanonicalCommand, agenc_ircd_domain::DomainError>,
+    channel_seed: u8,
+) -> TestResult<agenc_ircd_domain::PlanDecision> {
+    use agenc_ircd_domain::PlanDecision;
+    // A superset admission: registered-command credit plus message credit
+    // for the caller and for the channels this seed range can create.
+    let channels: Vec<_> = (channel_seed..channel_seed.saturating_add(4))
+        .map(agenc_ircd_testkit::channel_id)
+        .collect();
+    let admission = agenc_ircd_testkit::message_admission(identity, &channels)?;
+    match agenc_ircd_testkit::plan(context.domain(), identity, command()?, &admission, None)? {
+        PlanDecision::NeedsExternal(requests) => {
+            let inputs = answer_external(&requests, channel_seed);
+            Ok(agenc_ircd_testkit::plan(
+                context.domain(),
+                identity,
+                command()?,
+                &admission,
+                Some(inputs),
+            )?)
+        }
+        decision => Ok(decision),
+    }
+}
+
+struct NoopLedger;
+
+impl QueueReservationLedger for NoopLedger {
+    fn rollback(&self, _frames: usize, _bytes: usize) {}
+}
+
+/// A client sink that counts commits and never blocks.
+pub(crate) struct FrameSink {
+    generation: ConnectionGeneration,
+    admit: bool,
+    commits: AtomicUsize,
+}
+
+impl FrameSink {
+    pub(crate) fn new(generation: ConnectionGeneration, admit: bool) -> Arc<Self> {
+        Arc::new(Self {
+            generation,
+            admit,
+            commits: AtomicUsize::new(0),
+        })
+    }
+
+    pub(crate) fn commits(&self) -> usize {
+        self.commits.load(Ordering::SeqCst)
+    }
+}
+
+impl ClientSink for FrameSink {
+    fn generation(&self) -> ConnectionGeneration {
+        self.generation
+    }
+
+    fn try_reserve(
+        &self,
+        demand: ClientQueueDemand,
+    ) -> Result<TentativeClientQueueReservation, SinkReserveError> {
+        if !self.admit {
+            return Err(SinkReserveError::Closed);
+        }
+        Ok(TentativeClientQueueReservation::new(
+            self.generation,
+            demand,
+            0,
+            Arc::new(NoopLedger) as Arc<dyn QueueReservationLedger>,
+        ))
+    }
+
+    fn prepare(
+        &self,
+        tentative: TentativeClientQueueReservation,
+        backing: Option<crate::budget::MemoryPermit>,
+    ) -> Result<ClientQueueReservation, QueueAllocationError> {
+        ClientQueueReservation::prepare(tentative, backing)
+    }
+
+    fn commit(&self, reservation: ClientQueueReservation, _frames: BoundedSharedClientFrames) {
+        self.commits.fetch_add(1, Ordering::SeqCst);
+        reservation.into_transfer().discard();
+    }
+
+    fn begin_slow_consumer_close(&self) {}
+
+    fn close_after_flush(&self, _reason: CloseReason) -> FlushAcknowledgement {
+        FlushAcknowledgement::complete()
+    }
+
+    fn queue_snapshot(&self) -> ClientQueueSnapshot {
+        ClientQueueSnapshot::default()
+    }
+}
+
+/// Opens one onion client connection whose sink admits or refuses every
+/// reservation, and binds a seeded session to it.
+pub(crate) fn bind_live_session(
+    context: &mut StateCoreContext,
+    generation: u64,
+    identity: DomainTestIdentity,
+    capabilities: CapabilityState,
+    admit: bool,
+) -> TestResult<Arc<FrameSink>> {
+    let generation = ConnectionGeneration::new(generation);
+    let sink = FrameSink::new(generation, admit);
+    let now = context.now();
+    context.sessions_mut().open(
+        generation,
+        crate::purpose::ListenerPurpose::ClientOnion,
+        SourceAddressKey::onion_listener(),
+        Arc::clone(&sink) as Arc<dyn ClientSink>,
+        now,
+    )?;
+    context
+        .sessions_mut()
+        .bind_session(generation, bound(identity), capabilities)?;
+    Ok(sink)
 }
