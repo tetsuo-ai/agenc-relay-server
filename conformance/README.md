@@ -99,7 +99,7 @@ fuzz targets. The
 [schema version 2 manifest](evidence/stage-06-65cce9d66f7bcfb0c0830a2ab1d42b52bff82942.json)
 contains 55 passed records and closes exact source commit
 `65cce9d66f7bcfb0c0830a2ab1d42b52bff82942`. The recorded run of 75 commands reached
-79.79% branch coverage, 91.82% line coverage, and 100% coverage in all six
+79.79% branch coverage, 91.79% line coverage, and 100% coverage in all six
 critical regions against the interim 75% branch floor.
 
 For an evidence-only check:

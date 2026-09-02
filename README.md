@@ -140,7 +140,7 @@ x86_64 and AArch64, signed native ext4 growth reports for both targets, and
 The [Stage 06 manifest](conformance/evidence/stage-06-65cce9d66f7bcfb0c0830a2ab1d42b52bff82942.json)
 contains 55 passed records and closes exact source commit
 `65cce9d66f7bcfb0c0830a2ab1d42b52bff82942`. Its recorded gate ran 75 commands.
-Coverage is 79.79% of branches and 91.82% of lines against the interim 75%
+Coverage is 79.79% of branches and 91.79% of lines against the interim 75%
 branch floor, with all six critical regions at 100%. The gate includes the
 Stage 06 requirement set, cross-target checks for x86_64 and AArch64, Loom
 models, 16 transcripts, the deterministic soak, deployment and host
