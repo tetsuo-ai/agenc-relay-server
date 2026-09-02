@@ -9,7 +9,7 @@
 //! delegated to a [`CommandRouter`] so registration, channel, and admin
 //! composition plug in without touching the loop or the durable path.
 
-mod admin;
+pub(crate) mod admin;
 pub mod durable;
 pub mod fanout;
 pub mod inbox;
@@ -3746,6 +3746,29 @@ mod tests {
     where
         Driver: Future<Output = TestResult<Output>>,
     {
+        run_core_with(
+            registration,
+            |_| Ok(()),
+            |inbox, lifecycle, token, ()| driver(inbox, lifecycle, token),
+        )
+        .await
+    }
+
+    /// Like `run_core`, with a setup step that may install private ports on
+    /// the fixture before the actor starts and hand them to the driver.
+    async fn run_core_with<Ports, Driver, Output>(
+        registration: bool,
+        setup: impl FnOnce(&mut StateCoreFixture) -> TestResult<Ports>,
+        driver: impl FnOnce(
+            mpsc::Sender<StateCoreMessage>,
+            LifecycleControl,
+            CancellationToken,
+            Ports,
+        ) -> Driver,
+    ) -> TestResult<(StateCoreExit, Output)>
+    where
+        Driver: Future<Output = TestResult<Output>>,
+    {
         let mut fixture = if registration {
             // Distinct bytes per draw so every session seed and transaction
             // identity differs; a constant script would collide on the second
@@ -3758,12 +3781,13 @@ mod tests {
         } else {
             StateCoreFixture::new(Vec::new())?
         };
+        let ports = setup(&mut fixture)?;
         let mut parts = fixture.take_run_parts()?;
         let (inbox, inbox_receiver) = mpsc::channel(8);
         let (_close_port, close_inbox) = connection_close_channel();
         let (lifecycle, lifecycle_receiver) = lifecycle_channel();
         let token = CancellationToken::root();
-        let driven = driver(inbox, lifecycle, token.child()?);
+        let driven = driver(inbox, lifecycle, token.child()?, ports);
         let run = parts.state.run(
             inbox_receiver,
             close_inbox,
@@ -4077,6 +4101,111 @@ mod tests {
         assert!(
             matches!(commits[..], [first, second, 0] if first > 0 && second > 0),
             "{commits:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn admin_requests_reach_a_running_core() -> TestResult {
+        use agenc_ircd_types::{ChannelInstanceId, UserId};
+
+        use crate::state_core::admin::{AdminCoreFailure, AdminTarget};
+
+        let (exit, (_open, results)) = run_core_with(
+            false,
+            |fixture| fixture.install_admin_port(),
+            |inbox, lifecycle, token, port| async move {
+                let snapshot = port.snapshot(&token).await;
+                let process = port.target_revision(AdminTarget::Process, &token).await;
+                let account = port
+                    .target_revision(
+                        AdminTarget::Account(agenc_ircd_testkit::account_id(9)),
+                        &token,
+                    )
+                    .await;
+                let channel = port
+                    .target_revision(
+                        AdminTarget::Channel(ChannelInstanceId::from_bytes([9; 16])),
+                        &token,
+                    )
+                    .await;
+                let kill = port.kill(UserId::from_bytes([9; 16]), &token).await;
+                let stopped = lifecycle.request(LifecyclePhase::Stop).await;
+                Ok((
+                    inbox,
+                    (
+                        snapshot.is_ok(),
+                        process.is_ok(),
+                        account.err(),
+                        channel.err(),
+                        kill.err(),
+                        stopped.is_ok(),
+                    ),
+                ))
+            },
+        )
+        .await?;
+        assert!(matches!(exit, StateCoreExit::Stopped), "{exit:?}");
+        assert!(results.0, "snapshot");
+        assert!(results.1, "process revision");
+        assert_eq!(results.2, Some(AdminCoreFailure::InvalidTarget));
+        assert_eq!(results.3, Some(AdminCoreFailure::InvalidTarget));
+        assert_eq!(results.4, Some(AdminCoreFailure::InvalidTarget));
+        assert!(results.5, "stop");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn live_reloads_apply_no_change_and_refuse_stale_revisions() -> TestResult {
+        use crate::runtime_config::{PreparedReload, ReloadOutcome, RuntimeConfigHandle};
+        use crate::test_support::{golden_config, golden_parts, golden_snapshot};
+
+        let handle = RuntimeConfigHandle::new(golden_snapshot("AgenC", None)?);
+        let driver_handle = handle.clone();
+        let (exit, (_open, outcomes)) = run_core_with(
+            false,
+            move |fixture| fixture.install_reload_port(handle),
+            |inbox, lifecycle, _token, (port, _admission)| async move {
+                let mut outcomes = Vec::new();
+                // The same live values again: nothing to activate.
+                let mut prepared = PreparedReload::new(
+                    &driver_handle.load(),
+                    golden_config()?,
+                    golden_parts("AgenC", None)?,
+                )?;
+                prepared.attach_lease(driver_handle.begin_reload()?);
+                outcomes.push(port.activate_signal(prepared).await);
+                // A changed display name and message of the day: applied live.
+                let mut prepared = PreparedReload::new(
+                    &driver_handle.load(),
+                    golden_config()?,
+                    golden_parts("Renamed", Some("Welcome"))?,
+                )?;
+                prepared.attach_lease(driver_handle.begin_reload()?);
+                outcomes.push(port.activate_signal(prepared).await);
+                // Prepared against the old revision: stale.
+                let stale = golden_snapshot("AgenC", None)?;
+                let mut prepared =
+                    PreparedReload::new(&stale, golden_config()?, golden_parts("Again", None)?)?;
+                prepared.attach_lease(driver_handle.begin_reload()?);
+                outcomes.push(port.activate_signal(prepared).await);
+                let stopped = lifecycle.request(LifecyclePhase::Stop).await;
+                assert!(stopped.is_ok());
+                Ok((inbox, outcomes))
+            },
+        )
+        .await?;
+        assert!(matches!(exit, StateCoreExit::Stopped), "{exit:?}");
+        assert!(
+            matches!(
+                outcomes[..],
+                [
+                    ReloadOutcome::NoChange(_),
+                    ReloadOutcome::Applied(_),
+                    ReloadOutcome::Rejected(_)
+                ]
+            ),
+            "{outcomes:?}"
         );
         Ok(())
     }

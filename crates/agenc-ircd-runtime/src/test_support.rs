@@ -819,3 +819,122 @@ pub(crate) fn bind_live_session(
         .bind_session(generation, bound(identity), capabilities)?;
     Ok(sink)
 }
+
+/// The golden public configuration parsed at document depth.
+pub(crate) fn golden_config() -> TestResult<agenc_ircd_config::Config> {
+    const PUBLIC: &str = include_str!("../../agenc-ircd-config/tests/golden/public.toml");
+    Ok(agenc_ircd_config::Config::parse_text(
+        PUBLIC,
+        &agenc_ircd_config::PathResolver::none(),
+        agenc_ircd_config::ValidationDepth::Document,
+    )?)
+}
+
+/// One observe-only operator so the registry is non-empty.
+fn golden_operators() -> TestResult<agenc_ircd_admin::OperatorRegistry> {
+    use agenc_ircd_types::{AdminPermission, AdminPermissionSet, OperatorId};
+    let mut permissions = AdminPermissionSet::EMPTY;
+    permissions.insert(AdminPermission::Observe);
+    Ok(agenc_ircd_admin::OperatorRegistry::from_records(vec![
+        agenc_ircd_admin::OperatorRecord::new(
+            OperatorId::from_bytes([4; 16]),
+            Ed25519SecretKey::from_bytes([5; 32]).public_key(),
+            None,
+            vec![1_000],
+            Vec::new(),
+            permissions,
+            true,
+        )?,
+    ])?)
+}
+
+/// Runtime parts for the golden configuration; `display_name` and `motd`
+/// are the live values a reload test varies.
+pub(crate) fn golden_parts(
+    display_name: &str,
+    motd: Option<&str>,
+) -> TestResult<crate::runtime_config::RuntimeConfigParts> {
+    use agenc_ircd_domain::{OperationalLimitValues, OperationalLimits};
+    Ok(crate::runtime_config::RuntimeConfigParts {
+        tls_endpoints: BTreeMap::new(),
+        certificate_fingerprints: BTreeMap::new(),
+        ocsp_fingerprints: BTreeMap::new(),
+        restart_material: crate::runtime_config::RestartMaterial::default(),
+        motd: motd.map(Arc::from),
+        public_info: None,
+        display_name: Arc::from(display_name),
+        operators: golden_operators()?,
+        operator_admission: crate::admin::AdminAdmissionSnapshot::new(
+            vec![1_000],
+            Vec::new(),
+            Vec::new(),
+        ),
+        account_policy: crate::runtime_config::AccountRuntimePolicy {
+            allow_guests: true,
+            creation: AccountCreationPolicy::Open,
+            default_presence: PresencePolicy::Private,
+            default_guest_direct_messages: GuestDirectMessagePolicy::Deny,
+            default_direct_messages: DirectMessagePolicy::Contacts,
+        },
+        rates: RateLimits::defaults(),
+        operational_limits: OperationalLimits::new(OperationalLimitValues {
+            sessions_per_account: 8,
+            channels_per_session: 64,
+            members_per_channel: 4_096,
+            global_channels: 100_000,
+            local_channels: 10_000,
+            invites_per_channel: 256,
+            invites_per_principal: 32,
+            invites_global: 100_000,
+            contacts_per_account: 1_000,
+        })?,
+        connection_limits: crate::connection::ConnectionLimits::DEFAULT,
+        storage_limits: agenc_ircd_storage::StorageRuntimeLimits::new(1 << 30, 1 << 31, 10_000)?,
+        shutdown: crate::supervisor::ShutdownPlan::DEFAULT,
+    })
+}
+
+/// The initial runtime configuration snapshot over the golden configuration.
+pub(crate) fn golden_snapshot(
+    display_name: &str,
+    motd: Option<&str>,
+) -> TestResult<Arc<crate::runtime_config::RuntimeConfigSnapshot>> {
+    Ok(Arc::new(
+        crate::runtime_config::RuntimeConfigSnapshot::from_parts(
+            crate::runtime_config::ConfigRevision::INITIAL,
+            golden_config()?,
+            golden_parts(display_name, motd)?,
+        ),
+    ))
+}
+
+impl StateCoreFixture {
+    /// Installs the private admin channel and returns its port.
+    pub(crate) fn install_admin_port(
+        &mut self,
+    ) -> TestResult<crate::state_core::admin::AdminCorePort> {
+        let (port, inbox) = crate::state_core::admin::admin_core_channel();
+        self.state_mut()?.install_admin_inbox(inbox)?;
+        Ok(port)
+    }
+
+    /// Installs the private reload channel over `handle` and returns its port
+    /// together with the transport admission the reload updates.
+    pub(crate) fn install_reload_port(
+        &mut self,
+        handle: crate::runtime_config::RuntimeConfigHandle,
+    ) -> TestResult<(
+        crate::runtime_config::ReloadPort,
+        Arc<crate::admission::TransportAdmission>,
+    )> {
+        let admission = Arc::new(crate::admission::TransportAdmission::new(
+            handle.load().rates(),
+            1,
+            Arc::new(MemoryBudget::new(64 * 1_024 * 1_024)),
+            Box::new(crate::clock::SystemMonotonicClock::start()),
+        )?);
+        let (port, inbox) = crate::runtime_config::reload_channel(handle, Arc::clone(&admission));
+        self.state_mut()?.install_reload_inbox(inbox)?;
+        Ok((port, admission))
+    }
+}
