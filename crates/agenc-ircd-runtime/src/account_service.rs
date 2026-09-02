@@ -4160,6 +4160,16 @@ impl AccountServiceCoordinator {
             .fanout_request_to(request.generation, frames)
             .map_err(|_| RuntimeError::MemoryExhausted)?;
         let next = sealed.response_intent().next_response_count();
+        // The response count is checked before anything is staged so a
+        // mismatch never leaves a committed batch without its live owner.
+        if next
+            != context
+                .head()
+                .account_service_response_count
+                .saturating_add(1)
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
         let accepted = context.stage_durable_with_account_service(
             plan,
             fanout,
@@ -4167,13 +4177,7 @@ impl AccountServiceCoordinator {
             1,
             writes,
         );
-        if !matches!(accepted, Ok(StageAccepted::Staged { .. }))
-            || next
-                != context
-                    .head()
-                    .account_service_response_count
-                    .saturating_add(1)
-        {
+        if !matches!(accepted, Ok(StageAccepted::Staged { .. })) {
             return Err(RuntimeError::InvalidValue);
         }
         self.pending_authority = Some(PendingAuthority::CreationStart {
@@ -4292,6 +4296,16 @@ impl AccountServiceCoordinator {
             .fanout_request_to(request.generation, frames)
             .map_err(|_| RuntimeError::MemoryExhausted)?;
         let next = sealed.response_intent().next_response_count();
+        // The response count is checked before anything is staged so a
+        // mismatch never leaves a committed batch without its live owner.
+        if next
+            != context
+                .head()
+                .account_service_response_count
+                .saturating_add(1)
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
         let accepted = context.stage_durable_with_account_service(
             plan,
             fanout,
@@ -4299,13 +4313,7 @@ impl AccountServiceCoordinator {
             1,
             writes,
         );
-        if !matches!(accepted, Ok(StageAccepted::Staged { .. }))
-            || next
-                != context
-                    .head()
-                    .account_service_response_count
-                    .saturating_add(1)
-        {
+        if !matches!(accepted, Ok(StageAccepted::Staged { .. })) {
             return Err(RuntimeError::InvalidValue);
         }
         self.pending_authority = Some(PendingAuthority::CreationFinish {
@@ -4458,6 +4466,16 @@ impl AccountServiceCoordinator {
             .fanout_request_to(request.generation, frames)
             .map_err(|_| RuntimeError::MemoryExhausted)?;
         let next = sealed.response_intent().next_response_count();
+        // The response count is checked before anything is staged so a
+        // mismatch never leaves a committed batch without its live owner.
+        if next
+            != context
+                .head()
+                .account_service_response_count
+                .saturating_add(1)
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
         let accepted = context.stage_durable_with_account_service(
             plan,
             fanout,
@@ -4465,13 +4483,7 @@ impl AccountServiceCoordinator {
             1,
             writes,
         );
-        if !matches!(accepted, Ok(StageAccepted::Staged { .. }))
-            || next
-                != context
-                    .head()
-                    .account_service_response_count
-                    .saturating_add(1)
-        {
+        if !matches!(accepted, Ok(StageAccepted::Staged { .. })) {
             return Err(RuntimeError::InvalidValue);
         }
         self.pending_authority = Some(PendingAuthority::CredentialStart {
@@ -4613,6 +4625,16 @@ impl AccountServiceCoordinator {
                 .map_err(|_| RuntimeError::MemoryExhausted)?
         };
         let next = sealed.response_intent().next_response_count();
+        // The response count is checked before anything is staged so a
+        // mismatch never leaves a committed batch without its live owner.
+        if next
+            != context
+                .head()
+                .account_service_response_count
+                .saturating_add(1)
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
         let accepted = context.stage_durable_with_account_service(
             plan,
             fanout,
@@ -4620,13 +4642,7 @@ impl AccountServiceCoordinator {
             1,
             writes,
         );
-        if !matches!(accepted, Ok(StageAccepted::Staged { .. }))
-            || next
-                != context
-                    .head()
-                    .account_service_response_count
-                    .saturating_add(1)
-        {
+        if !matches!(accepted, Ok(StageAccepted::Staged { .. })) {
             return Err(RuntimeError::InvalidValue);
         }
         self.pending_authority = Some(PendingAuthority::CredentialFinish {
@@ -4692,6 +4708,16 @@ impl AccountServiceCoordinator {
             .fanout_request_to(request.generation, frames)
             .map_err(|_| RuntimeError::MemoryExhausted)?;
         let next = sealed.response_intent().next_response_count();
+        // The response count is checked before anything is staged so a
+        // mismatch never leaves a committed batch without its live owner.
+        if next
+            != context
+                .head()
+                .account_service_response_count
+                .saturating_add(1)
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
         let accepted = context.stage_durable_with_account_service(
             plan,
             fanout,
@@ -4699,13 +4725,7 @@ impl AccountServiceCoordinator {
             1,
             vec![transaction_write, result_write],
         );
-        if !matches!(accepted, Ok(StageAccepted::Staged { .. }))
-            || next
-                != context
-                    .head()
-                    .account_service_response_count
-                    .saturating_add(1)
-        {
+        if !matches!(accepted, Ok(StageAccepted::Staged { .. })) {
             return Err(RuntimeError::InvalidValue);
         }
         self.pending_authority = Some(PendingAuthority::Start {
@@ -4870,6 +4890,16 @@ impl AccountServiceCoordinator {
             .fanout_request_to(request.generation, frames)
             .map_err(|_| RuntimeError::MemoryExhausted)?;
         let next = sealed.response_intent().next_response_count();
+        // The response count is checked before anything is staged so a
+        // mismatch never leaves a committed batch without its live owner.
+        if next
+            != context
+                .head()
+                .account_service_response_count
+                .saturating_add(1)
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
         let accepted = context.stage_durable_with_account_service(
             plan,
             fanout,
@@ -4877,13 +4907,7 @@ impl AccountServiceCoordinator {
             1,
             writes,
         );
-        if !matches!(accepted, Ok(StageAccepted::Staged { .. }))
-            || next
-                != context
-                    .head()
-                    .account_service_response_count
-                    .saturating_add(1)
-        {
+        if !matches!(accepted, Ok(StageAccepted::Staged { .. })) {
             return Err(RuntimeError::InvalidValue);
         }
         self.pending_authority = Some(PendingAuthority::Finish {
@@ -5759,7 +5783,7 @@ impl AccountServiceCoordinator {
         context: &mut StateCoreContext,
         origin: Option<ConnectionGeneration>,
     ) -> Vec<CarrierCompletion> {
-        if self.pending_login_tombstone_expiry.take().is_some() && origin.is_none() {
+        if origin.is_none() && self.pending_login_tombstone_expiry.take().is_some() {
             let _scheduled = self.schedule_next_login_tombstone(context);
             return self.progress(context);
         }

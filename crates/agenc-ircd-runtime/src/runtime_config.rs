@@ -701,6 +701,8 @@ pub(crate) enum ReloadOutcome {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AuditedReloadStart {
     Provisional(ReloadActivation),
+    /// Refused before any state changed; the configuration is retained.
+    Refused(ReloadRejection),
     Indeterminate,
 }
 

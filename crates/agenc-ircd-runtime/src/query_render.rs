@@ -302,28 +302,34 @@ fn snapshot_who_channel(
     ),
     RuntimeError,
 > {
-    let channel = visible_channel(context.domain(), requester, target)?;
-    let row_count = channel
-        .members()
-        .filter(|user_id| {
-            matches!(
-                context.domain().project_session(requester, *user_id),
-                ProjectionDecision::Visible(_)
-            )
-        })
-        .count();
+    // An unknown, unlisted, or secret channel takes the same path as an empty
+    // one: only the terminator is sent (spec 13.5, STA-10).
+    let channel = visible_channel(context.domain(), requester, target).ok();
+    let row_count = channel.map_or(0, |channel| {
+        channel
+            .members()
+            .filter(|user_id| {
+                matches!(
+                    context.domain().project_session(requester, *user_id),
+                    ProjectionDecision::Visible(_)
+                )
+            })
+            .count()
+    });
     let backing = snapshot_backing_bytes::<WhoSnapshotRow<'static>>(row_count)?;
     let prepared = context.prepare_query_snapshot(generation, row_count, backing)?;
     let mut rows = Vec::new();
     rows.try_reserve_exact(row_count)
         .map_err(|_| RuntimeError::MemoryExhausted)?;
-    for user_id in channel.members() {
+    for user_id in channel.into_iter().flat_map(|channel| channel.members()) {
         let ProjectionDecision::Visible(session) =
             context.domain().project_session(requester, user_id)
         else {
             continue;
         };
-        let role = channel.role_of(user_id).ok_or(RuntimeError::InvalidValue)?;
+        let role = channel
+            .and_then(|channel| channel.role_of(user_id))
+            .ok_or(RuntimeError::InvalidValue)?;
         rows.push(WhoSnapshotRow {
             session,
             role: role_prefix(role),
@@ -1147,18 +1153,34 @@ fn render_whois_channels(
         else {
             continue;
         };
-        if !channels.is_empty() {
-            channels.push(' ');
-        }
+        let mut entry = String::new();
         if let Some(member) = channel
             .members()
             .iter()
             .find(|member| member.user_id() == target)
             && let Some(role) = role_prefix(member.role())
         {
-            channels.push(role);
+            entry.push(role);
         }
-        channels.push_str(channel.name().presentation());
+        entry.push_str(channel.name().presentation());
+        // Many long channel names overflow one line; split like NAMES does.
+        if !channels.is_empty()
+            && channels.len().saturating_add(entry.len()).saturating_add(1) > NAMES_CHUNK_BYTES
+        {
+            push_numeric(
+                frames,
+                prefix,
+                319,
+                nickname,
+                &[session.nickname().presentation()],
+                &channels,
+            )?;
+            channels.clear();
+        }
+        if !channels.is_empty() {
+            channels.push(' ');
+        }
+        channels.push_str(&entry);
     }
     push_numeric(
         frames,

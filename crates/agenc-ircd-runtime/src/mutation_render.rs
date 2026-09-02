@@ -9,8 +9,8 @@ use agenc_ircd_client_wire::{
 use agenc_ircd_domain::{
     AccountCommand, CanonicalCommand, CanonicalCommandView, ChannelCommand, ChannelNameValue,
     DomainEvent, DomainState, MaskList, Membership, MessageBatch, MessageKind, ModeChange,
-    ModeCommand, ModeOperation, MutationPlan, PresenceCommand, ResolvedMessageTarget, Role,
-    VisibilityMode,
+    ModeCommand, ModeOperation, MutationPlan, PresenceCommand, ProjectionDecision,
+    ResolvedMessageTarget, Role, TopicProjection, VisibilityMode,
 };
 use agenc_ircd_types::{
     AccountDeletionToken, AccountId, ChannelName, MaskSubject, PublicErrorCode, TypedMask, UserId,
@@ -529,7 +529,7 @@ fn render_join_burst(
         .ok_or(RuntimeError::InvalidValue)?
         .nickname()
         .presentation();
-    render_join_topic(builder, nickname, name, channel)?;
+    render_join_topic(builder, nickname, name, user_id, channel)?;
     render_join_names(
         builder,
         reply.capabilities,
@@ -544,10 +544,13 @@ fn render_join_topic(
     builder: &mut FanoutBuilder<'_, '_>,
     nickname: &str,
     name: &ChannelNameValue,
+    user_id: UserId,
     channel: Option<&agenc_ircd_domain::ChannelState>,
 ) -> Result<(), RuntimeError> {
     let prefix = builder.context.server_prefix();
-    let Some(topic) = channel.and_then(agenc_ircd_domain::ChannelState::topic) else {
+    let Some((channel, topic)) =
+        channel.and_then(|channel| channel.topic().map(|topic| (channel, topic)))
+    else {
         return builder.push_origin(numeric(
             prefix,
             331,
@@ -556,12 +559,27 @@ fn render_join_topic(
             Some("No topic is set"),
         )?);
     };
+    // The burst shows what TOPIC would show: an E2EE-bound channel never
+    // reveals its plaintext topic text (spec 14.3).
+    let placeholder = matches!(
+        builder
+            .context
+            .domain()
+            .project_channel(user_id, channel.channel_id()),
+        Ok(ProjectionDecision::Visible(projection))
+            if matches!(projection.topic(), TopicProjection::EncryptedPlaceholder)
+    );
+    let text = if placeholder {
+        "Encrypted channel topic"
+    } else {
+        topic.text()
+    };
     builder.push_origin(numeric(
         prefix,
         332,
         nickname,
         &[name.presentation()],
-        Some(topic.text()),
+        Some(text),
     )?)?;
     let setter = builder
         .context

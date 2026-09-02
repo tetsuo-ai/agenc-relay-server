@@ -541,7 +541,7 @@ impl Scan {
         match (table, value.record_kind()) {
             (TableId::Account, TOMBSTONE_RECORD_KIND) => self.admit_account_tombstone(&key, &value),
             (TableId::Session, TOMBSTONE_RECORD_KIND) => self.admit_session_tombstone(&key, &value),
-            (TableId::Channel, TOMBSTONE_RECORD_KIND) => Ok(()),
+            (TableId::Channel, TOMBSTONE_RECORD_KIND) => self.admit_channel_tombstone(&key, &value),
             (TableId::Account, LIVE_RECORD_KIND) => self.admit_account(key, &value),
             (TableId::Session, LIVE_RECORD_KIND) => self.admit_session(key, &value),
             (TableId::Channel, LIVE_RECORD_KIND) => self.admit_channel(key, &value),
@@ -565,6 +565,27 @@ impl Scan {
             (TableId::RequestResult, _) => Ok(()),
             _ => Err(RuntimeError::Storage(StorageError::InvalidEncoding)),
         }
+    }
+
+    fn admit_channel_tombstone(
+        &mut self,
+        key: &StoredKey,
+        value: &PersistentRecordValue,
+    ) -> Result<(), RuntimeError> {
+        let channel_id = ChannelInstanceId::from_bytes(
+            key.as_bytes()
+                .try_into()
+                .map_err(|_| RuntimeError::Storage(StorageError::InvalidEncoding))?,
+        );
+        if KeyDeriver::channel_key(channel_id)? != *key
+            || value.generation() != 0
+            || value.expires_at().is_some()
+            || !value.references().is_empty()
+            || !value.body().is_empty()
+        {
+            return Err(RuntimeError::Storage(StorageError::StaleState));
+        }
+        Ok(())
     }
 
     fn admit_session_tombstone(

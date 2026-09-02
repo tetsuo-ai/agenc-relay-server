@@ -776,6 +776,12 @@ impl StateCoreContext {
         plan: MutationPlan,
         request: FanoutRequest,
     ) -> Result<ApplyReceipt, EphemeralRefused> {
+        // A gathering or in-flight batch was planned against the current
+        // revision; applying anything underneath it would make that batch
+        // fail after its storage commit. Refuse until the batch settles.
+        if self.pending.is_some() {
+            return Err(EphemeralRefused::Domain(DomainError::ServerBusy));
+        }
         let reservation = self
             .reserve_fanout(&request)
             .map_err(EphemeralRefused::Fanout)?;
@@ -1997,11 +2003,10 @@ impl StateCore {
                 failure_event,
                 reply,
             } => {
-                if self.context.quiescing
-                    || self.reload_pending.is_some()
-                    || self.reload_provisional.is_some()
-                {
-                    let _sent = reply.send(AuditedReloadStart::Indeterminate);
+                if self.context.quiescing {
+                    let _sent = reply.send(AuditedReloadStart::Refused(ReloadRejection::Quiescing));
+                } else if self.reload_pending.is_some() || self.reload_provisional.is_some() {
+                    let _sent = reply.send(AuditedReloadStart::Refused(ReloadRejection::Busy));
                 } else {
                     self.reload_pending = Some(PendingReload {
                         prepared: *prepared,
@@ -2615,7 +2620,8 @@ impl StateCore {
         let projected = match projected {
             Ok(projected) => projected,
             Err(
-                RuntimeError::Storage(StorageError::LimitExceeded) | RuntimeError::LimitExceeded,
+                RuntimeError::Storage(StorageError::LimitExceeded | StorageError::StaleState)
+                | RuntimeError::LimitExceeded,
             ) => {
                 let _sent = reply.send(Err(AdminCoreFailure::StorageUnavailable));
                 return None;
@@ -2647,20 +2653,30 @@ impl StateCore {
         }
     }
 
+    /// The revision a confirmation token binds to: the entity revision for an
+    /// account or channel, and the state generation for the process, so a
+    /// client commit elsewhere never invalidates an operator's confirmation
+    /// (spec 22.4).
     fn admin_target_revision(&self, target: AdminTarget) -> Result<Revision, AdminCoreFailure> {
         if self.context.quiescing {
             return Err(AdminCoreFailure::Quiescing);
         }
-        let exists = match target {
-            AdminTarget::Account(account_id) => self.context.domain.account(account_id).is_some(),
-            AdminTarget::Channel(channel_id) => self.context.domain.channel(channel_id).is_some(),
-            AdminTarget::Process => true,
+        let revision = match target {
+            AdminTarget::Account(account_id) => self
+                .context
+                .domain
+                .account(account_id)
+                .map(agenc_ircd_domain::AccountState::revision),
+            AdminTarget::Channel(channel_id) => self
+                .context
+                .domain
+                .channel(channel_id)
+                .map(agenc_ircd_domain::ChannelState::revision),
+            AdminTarget::Process => {
+                Revision::new(self.context.head.state_generation.saturating_add(1)).ok()
+            }
         };
-        if !exists {
-            return Err(AdminCoreFailure::InvalidTarget);
-        }
-        Revision::new(self.context.head.storage_commit_sequence)
-            .map_err(|_| AdminCoreFailure::StorageUnavailable)
+        revision.ok_or(AdminCoreFailure::InvalidTarget)
     }
 
     fn validate_admin_mutation(
@@ -4269,6 +4285,48 @@ mod tests {
                 ]
             ),
             "{outcomes:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_ephemeral_command_pipelined_behind_a_durable_one_is_refused_not_fatal() -> TestResult
+    {
+        const REGISTER: &[(u64, &str)] = &[
+            (1, "NICK alice"),
+            (1, "USER alice 0 * :Alice"),
+            (1, "WAIT  001 "),
+        ];
+        let sinks = vec![FrameSink::new(ConnectionGeneration::new(1), true)];
+        let (exit, (_open, sinks, stopped)) =
+            run_core(true, |inbox, lifecycle, _token| async move {
+                let _outcomes = open_connections(&inbox, &sinks).await?;
+                drive_script(&inbox, &sinks, REGISTER).await?;
+                // AWAY stages a durable batch; MONITOR is ephemeral and arrives
+                // inside the gather window with no pacing at all.
+                for (sequence, line) in [(3, "AWAY :busy"), (4, "MONITOR + alice")] {
+                    let message = parse_message(FramedLine::new(line)?)?.ok_or("empty line")?;
+                    send(
+                        &inbox,
+                        StateCoreMessage::Line {
+                            generation: ConnectionGeneration::new(1),
+                            sequence,
+                            message: Box::new(message),
+                        },
+                    )
+                    .await?;
+                }
+                drive_script(&inbox, &sinks, &[(1, "WAIT  306 ")]).await?;
+                let stopped = lifecycle.request(LifecyclePhase::Stop).await;
+                Ok((inbox, sinks, stopped))
+            })
+            .await?;
+        assert!(stopped.is_ok());
+        assert!(matches!(exit, StateCoreExit::Stopped), "{exit:?}");
+        let lines = sinks.first().ok_or("no sink")?.lines();
+        assert!(
+            lines.iter().any(|line| line.contains(" 306 alice ")),
+            "{lines:?}"
         );
         Ok(())
     }

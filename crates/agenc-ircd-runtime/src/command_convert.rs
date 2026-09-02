@@ -388,7 +388,11 @@ fn message_command(
         .map_err(closed)?;
     let mut parsed = Vec::new();
     for target in targets.split(',') {
-        let target = target.strip_prefix(['@', '+']).unwrap_or(target);
+        // Status-prefixed delivery is not modeled; refusing keeps a message
+        // meant for operators from reaching the whole channel.
+        if target.starts_with(['@', '+']) {
+            return Err(RuntimeError::InvalidValue);
+        }
         parsed.push(if target.starts_with(['#', '&']) {
             MessageTarget::Channel(parse_channel(target)?)
         } else {
