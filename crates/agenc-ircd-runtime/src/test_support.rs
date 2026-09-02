@@ -38,7 +38,7 @@ use agenc_ircd_types::{
 use crate::RuntimeError;
 use crate::StateCoreSeed;
 use crate::account_service::{AccountCreationPolicy, AccountServiceConfig};
-use crate::admission::RateLimits;
+use crate::admission::{BucketKind, RateLimits};
 use crate::bridge::crypto::{
     CHANNEL_KEY_HASH_BYTES, CHANNEL_KEY_SALT_BYTES, ChannelKeyVerifier, ChannelKeyVerifierRecord,
     CryptoBridge,
@@ -267,6 +267,7 @@ fn compose_test_state(
     owner: &mut StorageOwner,
     entropy: Vec<u8>,
     router: Box<dyn CommandRouter>,
+    real_clocks: bool,
 ) -> TestResult<(StateCore, StorageReceivers, CryptoReceiver)> {
     let seed = StateCoreSeed::from_storage(owner)?;
     let storage = seed.storage();
@@ -287,10 +288,18 @@ fn compose_test_state(
     let (crypto_bridge, crypto_completions) =
         CryptoBridge::start(CryptoWorkerConfig::new(1, 1, 1)?)?;
     let storage_limit_writer = owner.take_limit_writer()?;
+    // Scripted sessions send many commands within one second, so the actor
+    // fixture lifts every bucket far above the production defaults.
+    let mut rate_limits = RateLimits::defaults();
+    if real_clocks {
+        for kind in BucketKind::ALL {
+            rate_limits.set(kind, kind.hard_rate())?;
+        }
+    }
     let state = StateCore::new(StateCoreInputs {
         config: StateCoreConfig {
             server_prefix: "server.example".to_owned(),
-            rate_limits: RateLimits::defaults(),
+            rate_limits,
             ceilings: AccountingCeilings {
                 database_max_bytes: TEST_STORAGE_LIMITS.database_max_bytes,
                 backup_max_bytes: TEST_STORAGE_LIMITS.backup_max_bytes,
@@ -304,9 +313,19 @@ fn compose_test_state(
         crypto: crypto_bridge,
         budget: Arc::new(MemoryBudget::new(512 * 1_024 * 1_024)),
         liveness: Arc::new(Liveness::new()),
-        clocks: StateCoreClocks {
-            monotonic: Box::new(DeterministicMonotonicClock::at(10)),
-            wall: Box::new(DeterministicWallClock::at(1_000)),
+        // The actor loop gathers durable batches against monotonic time, so a
+        // frozen clock would never submit them; the synchronous fixture keeps
+        // deterministic clocks for exact timer and expiry assertions.
+        clocks: if real_clocks {
+            StateCoreClocks {
+                monotonic: Box::new(crate::clock::SystemMonotonicClock::start()),
+                wall: Box::new(crate::clock::SystemWallClock),
+            }
+        } else {
+            StateCoreClocks {
+                monotonic: Box::new(DeterministicMonotonicClock::at(10)),
+                wall: Box::new(DeterministicWallClock::at(1_000)),
+            }
         },
         entropy: Box::new(ScriptedEntropy::new(entropy)?),
         router,
@@ -378,7 +397,7 @@ fn registration_router(
             network_id: identity.network_id,
             server_id: identity.server_id,
             server_prefix: "server.example".to_owned(),
-            display_name: "Test Network".to_owned(),
+            display_name: "TestNetwork".to_owned(),
             allow_guests: true,
             access_token: None,
             account_service: account_service_config(identity, opaque, key_state)?,
@@ -420,7 +439,7 @@ impl StateCoreFixture {
             Box::new(DefaultRouter)
         };
         let (state, storage_receivers, crypto_completions) =
-            compose_test_state(&mut owner, entropy, router)?;
+            compose_test_state(&mut owner, entropy, router, registration)?;
         Ok(Self {
             identity,
             opaque,
@@ -695,11 +714,12 @@ impl QueueReservationLedger for NoopLedger {
     fn rollback(&self, _frames: usize, _bytes: usize) {}
 }
 
-/// A client sink that counts commits and never blocks.
+/// A client sink that records every delivered line and never blocks.
 pub(crate) struct FrameSink {
     generation: ConnectionGeneration,
     admit: bool,
     commits: AtomicUsize,
+    lines: std::sync::Mutex<Vec<String>>,
 }
 
 impl FrameSink {
@@ -708,11 +728,20 @@ impl FrameSink {
             generation,
             admit,
             commits: AtomicUsize::new(0),
+            lines: std::sync::Mutex::new(Vec::new()),
         })
     }
 
     pub(crate) fn commits(&self) -> usize {
         self.commits.load(Ordering::SeqCst)
+    }
+
+    /// Every line delivered so far, in order, without the trailing CRLF.
+    pub(crate) fn lines(&self) -> Vec<String> {
+        self.lines
+            .lock()
+            .map(|lines| lines.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -744,8 +773,14 @@ impl ClientSink for FrameSink {
         ClientQueueReservation::prepare(tentative, backing)
     }
 
-    fn commit(&self, reservation: ClientQueueReservation, _frames: BoundedSharedClientFrames) {
+    fn commit(&self, reservation: ClientQueueReservation, frames: BoundedSharedClientFrames) {
         self.commits.fetch_add(1, Ordering::SeqCst);
+        if let Ok(mut lines) = self.lines.lock() {
+            for frame in frames.into_frames() {
+                let text = String::from_utf8_lossy(frame.as_bytes());
+                lines.push(text.trim_end_matches("\r\n").to_owned());
+            }
+        }
         reservation.into_transfer().discard();
     }
 

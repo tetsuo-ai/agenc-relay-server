@@ -3717,15 +3717,19 @@ mod lifecycle_tests {
 
 #[cfg(test)]
 mod tests {
-    use tokio::sync::mpsc;
+    use agenc_ircd_client_wire::{FramedLine, parse_message};
+    use tokio::sync::{mpsc, oneshot};
 
     use super::{StateCoreExit, StateCoreMessage};
     use crate::cancel::CancellationToken;
+    use crate::connection::{ClientSink, ConnectionGeneration};
+    use crate::purpose::ListenerPurpose;
     use crate::state_core::inbox::{
-        LifecycleControl, LifecyclePhase, MaintenanceEvent, SignalEvent, connection_close_channel,
-        lifecycle_channel,
+        ConnectionOpenOutcome, LifecycleControl, LifecyclePhase, MaintenanceEvent, SignalEvent,
+        SourceAddressKey, connection_close_channel, lifecycle_channel,
     };
-    use crate::test_support::{StateCoreFixture, TestResult};
+    use crate::sync::Arc;
+    use crate::test_support::{FrameSink, StateCoreFixture, TestResult};
 
     /// Runs the actor with fresh control channels and returns its exit
     /// together with whatever the driver produced. The driver must keep the
@@ -3743,7 +3747,14 @@ mod tests {
         Driver: Future<Output = TestResult<Output>>,
     {
         let mut fixture = if registration {
-            StateCoreFixture::with_registration_router(vec![5; 4_096])?
+            // Distinct bytes per draw so every session seed and transaction
+            // identity differs; a constant script would collide on the second
+            // registration.
+            StateCoreFixture::with_registration_router(
+                (0_u32..65_536)
+                    .map(|index| u8::try_from((index * 7 + 3) % 256).unwrap_or_default())
+                    .collect(),
+            )?
         } else {
             StateCoreFixture::new(Vec::new())?
         };
@@ -3835,76 +3846,238 @@ mod tests {
         Ok(())
     }
 
+    /// Opens one admitted onion connection per sink, acknowledging each.
+    async fn open_connections(
+        inbox: &mpsc::Sender<StateCoreMessage>,
+        sinks: &[Arc<FrameSink>],
+    ) -> TestResult<Vec<ConnectionOpenOutcome>> {
+        let mut outcomes = Vec::new();
+        for (index, sink) in sinks.iter().enumerate() {
+            let (acknowledgement, accepted) = oneshot::channel();
+            send(
+                inbox,
+                StateCoreMessage::Opened {
+                    generation: ConnectionGeneration::new(u64::try_from(index)? + 1),
+                    purpose: ListenerPurpose::ClientOnion,
+                    source: SourceAddressKey::onion_listener(),
+                    sink: Arc::clone(sink) as Arc<dyn ClientSink>,
+                    acknowledgement,
+                },
+            )
+            .await?;
+            outcomes.push(accepted.await?);
+        }
+        Ok(outcomes)
+    }
+
+    /// Feeds `(connection, line)` entries in order. A line of the form
+    /// `WAIT <text>` blocks until that connection has received a line
+    /// containing `<text>`, which is how the script stays behind durable
+    /// commits without racing the actor.
+    async fn drive_script(
+        inbox: &mpsc::Sender<StateCoreMessage>,
+        sinks: &[Arc<FrameSink>],
+        script: &[(u64, &str)],
+    ) -> TestResult {
+        let mut sequences = vec![0_u64; sinks.len()];
+        for (connection, line) in script {
+            let slot = usize::try_from(*connection)? - 1;
+            let sink = sinks.get(slot).ok_or("unknown connection")?;
+            let sequence = sequences.get_mut(slot).ok_or("unknown connection")?;
+            if let Some(needle) = line.strip_prefix("WAIT ") {
+                let mut delivered = false;
+                for _ in 0..5_000 {
+                    if sink.lines().iter().any(|line| line.contains(needle)) {
+                        delivered = true;
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                }
+                if !delivered {
+                    let lines: Vec<_> = sinks.iter().map(|sink| sink.lines()).collect();
+                    return Err(format!(
+                        "connection {connection} never received {needle:?}: {lines:?}"
+                    )
+                    .into());
+                }
+                continue;
+            }
+            *sequence += 1;
+            let message = parse_message(FramedLine::new(line)?)?.ok_or("empty line")?;
+            send(
+                inbox,
+                StateCoreMessage::Line {
+                    generation: ConnectionGeneration::new(*connection),
+                    sequence: *sequence,
+                    message: Box::new(message),
+                },
+            )
+            .await?;
+            // A connection with a durable mutation in flight refuses the next
+            // one, so give each line time to gather and commit.
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        Ok(())
+    }
+
     #[tokio::test]
     async fn a_guest_session_registers_and_commands_flow_through_the_router() -> TestResult {
-        use agenc_ircd_client_wire::{FramedLine, parse_message};
-        use tokio::sync::oneshot;
-
-        use crate::connection::{ClientSink, ConnectionGeneration};
-        use crate::purpose::ListenerPurpose;
-        use crate::state_core::inbox::{ConnectionOpenOutcome, SourceAddressKey};
-        use crate::sync::Arc;
-        use crate::test_support::FrameSink;
-
-        const LINES: &[&str] = &[
-            "CAP LS 302",
-            "NICK alice",
-            "USER alice 0 * :Alice",
-            "CAP REQ :multi-prefix userhost-in-names",
-            "CAP END",
-            "PING :probe",
-            "JOIN #room",
-            "TOPIC #room :welcome",
-            "NAMES #room",
-            "WHO #room",
-            "MODE #room +m",
-            "PRIVMSG #room :hello",
-            "AWAY :busy",
-            "AWAY",
-            "LIST",
-            "MOTD",
-            "PART #room :bye",
-            "JOIN #room",
-            "QUIT :done",
+        const SCRIPT: &[(u64, &str)] = &[
+            (1, "CAP LS 302"),
+            (1, "NICK alice"),
+            (1, "USER alice 0 * :Alice"),
+            (1, "CAP REQ :multi-prefix userhost-in-names"),
+            (1, "CAP END"),
+            (1, "WAIT  001 "),
+            (1, "PING :probe"),
+            (1, "JOIN #room"),
+            (1, "WAIT JOIN #room"),
+            (1, "TOPIC #room :welcome"),
+            (1, "NAMES #room"),
+            (1, "WHO #room"),
+            (1, "MODE #room +m"),
+            (1, "PRIVMSG #room :hello"),
+            (1, "AWAY :busy"),
+            (1, "AWAY"),
+            (1, "LIST"),
+            (1, "MOTD"),
+            (1, "PART #room :bye"),
+            (1, "WAIT PART #room"),
+            (1, "JOIN #room"),
+            (1, "WAIT 366 "),
+            (1, "QUIT :done"),
         ];
-        let generation = ConnectionGeneration::new(1);
-        let sink = FrameSink::new(generation, true);
-        let core_sink = Arc::clone(&sink) as Arc<dyn ClientSink>;
-        let (exit, (_open, outcome, stopped)) =
+        let sinks = vec![FrameSink::new(ConnectionGeneration::new(1), true)];
+        let (exit, (_open, sinks, outcomes, stopped)) =
             run_core(true, |inbox, lifecycle, _token| async move {
-                let (acknowledgement, accepted) = oneshot::channel();
-                send(
-                    &inbox,
-                    StateCoreMessage::Opened {
-                        generation,
-                        purpose: ListenerPurpose::ClientOnion,
-                        source: SourceAddressKey::onion_listener(),
-                        sink: core_sink,
-                        acknowledgement,
-                    },
-                )
-                .await?;
-                let outcome = accepted.await?;
-                for (index, line) in LINES.iter().enumerate() {
-                    let message = parse_message(FramedLine::new(line)?)?.ok_or("empty line")?;
-                    send(
-                        &inbox,
-                        StateCoreMessage::Line {
-                            generation,
-                            sequence: u64::try_from(index)? + 1,
-                            message: Box::new(message),
-                        },
-                    )
-                    .await?;
-                }
+                let outcomes = open_connections(&inbox, &sinks).await?;
+                drive_script(&inbox, &sinks, SCRIPT).await?;
                 let stopped = lifecycle.request(LifecyclePhase::Stop).await;
-                Ok((inbox, outcome, stopped))
+                Ok((inbox, sinks, outcomes, stopped))
             })
             .await?;
-        assert!(matches!(outcome, ConnectionOpenOutcome::Accepted));
+        assert!(matches!(outcomes[..], [ConnectionOpenOutcome::Accepted]));
         assert!(stopped.is_ok());
         assert!(matches!(exit, StateCoreExit::Stopped), "{exit:?}");
-        assert!(sink.commits() > 0);
+        let lines = sinks.first().ok_or("no sink")?.lines();
+        for expected in [
+            " 001 alice ",
+            " TOPIC #room :welcome",
+            " MODE #room +m",
+            " 306 alice ",
+            " 305 alice ",
+            " 322 alice #room 1 :welcome",
+            " PART #room :bye",
+            " 366 alice #room ",
+            "ERROR :done",
+        ] {
+            assert!(
+                lines.iter().any(|line| line.contains(expected)),
+                "{expected}: {lines:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn two_guests_share_a_channel_and_exercise_moderation_and_failures() -> TestResult {
+        // (connection, line) in delivery order; connection 3 refuses output.
+        const SCRIPT: &[(u64, &str)] = &[
+            (1, "NICK alice"),
+            (1, "USER alice 0 * :Alice"),
+            (1, "WAIT  001 "),
+            (2, "CAP LS"),
+            (2, "NICK bob"),
+            (2, "USER bob 0 * :Bob"),
+            (
+                2,
+                "CAP REQ :away-notify invite-notify extended-join account-notify setname",
+            ),
+            (2, "CAP END"),
+            (2, "WAIT  001 "),
+            (3, "NICK carol"),
+            (3, "USER carol 0 * :Carol"),
+            (1, "JOIN #room"),
+            (1, "WAIT JOIN #room"),
+            (2, "JOIN #room"),
+            (2, "WAIT JOIN #room"),
+            (3, "JOIN #room"),
+            (1, "PRIVMSG bob :hi bob"),
+            (2, "NOTICE alice :hi alice"),
+            (2, "@+draft/react=hi TAGMSG #room"),
+            (1, "PRIVMSG nobody :nobody home"),
+            (1, "JOIN !bad"),
+            (1, "BOGUS command"),
+            (1, "MODE #room +o bob"),
+            (1, "WAIT +o bob"),
+            (2, "MODE #room +b $n:troll"),
+            (2, "MODE #room +b"),
+            (2, "MODE #room -b $n:troll"),
+            (1, "MODE #room -o bob"),
+            (1, "WAIT -o bob"),
+            (2, "MODE #room +m"),
+            (1, "TOPIC #room :moderated"),
+            (2, "WHOIS alice"),
+            (2, "ISON alice carol dave"),
+            (2, "USERHOST alice"),
+            (2, "SETNAME :Robert"),
+            (2, "NICK bobby"),
+            (2, "WAIT NICK :bobby"),
+            (1, "MONITOR + bobby"),
+            (1, "MONITOR L"),
+            (1, "MONITOR S"),
+            (1, "MONITOR - bobby"),
+            (1, "MONITOR C"),
+            (1, "KICK #room bobby :out"),
+            (1, "WAIT KICK #room bobby"),
+            (1, "INVITE bobby #room"),
+            (2, "WAIT INVITE"),
+            (2, "JOIN #room"),
+            (2, "WAIT 366 "),
+            (1, "MODE #room +i"),
+            (2, "PART #room"),
+            (2, "WAIT PART #room"),
+            (2, "JOIN #room"),
+            (1, "MODE #room +l 1"),
+            (1, "MODE #room -i-l"),
+            (2, "JOIN #room"),
+            (1, "PING"),
+            (1, "PONG :probe"),
+            (1, "CAP LS 302"),
+            (1, "VERSION"),
+            (1, "TIME"),
+            (1, "LUSERS"),
+            (1, "ADMIN"),
+            (1, "INFO"),
+            (1, "LINKS"),
+            (1, "WHOWAS bob"),
+            (1, "LIST #room"),
+            (2, "QUIT"),
+            (1, "PART #room"),
+        ];
+        let sinks: Vec<_> = (1..=3)
+            .map(|index| FrameSink::new(ConnectionGeneration::new(index), index != 3))
+            .collect();
+        let (exit, (_open, sinks, outcomes, stopped)) =
+            run_core(true, |inbox, lifecycle, _token| async move {
+                let outcomes = open_connections(&inbox, &sinks).await?;
+                drive_script(&inbox, &sinks, SCRIPT).await?;
+                let stopped = lifecycle.request(LifecyclePhase::Stop).await;
+                Ok((inbox, sinks, outcomes, stopped))
+            })
+            .await?;
+        assert!(
+            outcomes
+                .iter()
+                .all(|outcome| matches!(outcome, ConnectionOpenOutcome::Accepted))
+        );
+        assert!(stopped.is_ok());
+        assert!(matches!(exit, StateCoreExit::Stopped), "{exit:?}");
+        let commits: Vec<_> = sinks.iter().map(|sink| sink.commits()).collect();
+        assert!(
+            matches!(commits[..], [first, second, 0] if first > 0 && second > 0),
+            "{commits:?}"
+        );
         Ok(())
     }
 
