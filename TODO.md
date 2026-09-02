@@ -1565,10 +1565,13 @@ the closure branch at review time.
   existing secret channel answers 481. Map an unresolved name to the same
   public error the domain gives for an unauthorized existing channel
   (`PRV-01`, `STA-10`).
-- [ ] Batch gathering from Architecture 21.5 is unreachable: every plan uses
-  the committed revision, so `pending.rs` never chains a second plan and
-  refuses it `Busy`. Either document batch size one and drop the 1 ms gather
-  window, or give StateCore a staged revision to plan against.
+- [x] Batch gathering from Architecture 21.5 is unreachable: every plan uses
+  the committed revision, so `pending.rs` never chains a second plan. The
+  state core now holds its inbox while a batch is pending, so batch size one
+  is explicit, every connection observes its own commands in order, and a
+  message pipelined behind a JOIN reaches the channel instead of drawing 403
+  or SERVERBUSY. Gathering more than one plan per batch still needs a staged
+  revision to plan against; the 1 ms gather window stays as specified.
 - [ ] A refused shutdown session close stays in `pending_closures`
   (`channels.rs` `close_registered`) and is retried only on the next batch
   event, so an idle server keeps the dead session and nickname (`STA-01`).

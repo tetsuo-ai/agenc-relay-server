@@ -778,7 +778,8 @@ impl StateCoreContext {
     ) -> Result<ApplyReceipt, EphemeralRefused> {
         // A gathering or in-flight batch was planned against the current
         // revision; applying anything underneath it would make that batch
-        // fail after its storage commit. Refuse until the batch settles.
+        // fail after its storage commit. The run loop holds the inbox while a
+        // batch is pending, so this refusal guards the non-inbox callers.
         if self.pending.is_some() {
             return Err(EphemeralRefused::Domain(DomainError::ServerBusy));
         }
@@ -3316,6 +3317,12 @@ impl StateCore {
                 .as_ref()
                 .is_some_and(|pending: &PendingIndexRefresh| pending.waiting.is_none());
             let in_flight = self.storage_in_flight() || refresh_in_flight;
+            // A staged batch holds the inbox until storage answers, so every
+            // connection observes its own commands in order and no ephemeral
+            // plan advances the revision underneath a staged plan. Spec 21.5
+            // gathering therefore carries one plan per batch; `wake_instant`
+            // still fires the gather deadline and `step_wake` submits it.
+            let hold_inbox = in_flight || self.context.pending_len() != 0;
             let safe_point =
                 !in_flight && self.context.pending_len() == 0 && self.router.reload_ready();
             if safe_point {
@@ -3624,7 +3631,7 @@ impl StateCore {
                     }
                     None
                 },
-                message = inbox.recv(), if !in_flight && !activation_barrier => match message {
+                message = inbox.recv(), if !hold_inbox && !activation_barrier => match message {
                     Some(StateCoreMessage::Opened { .. }) if self.context.quiescing => None,
                     Some(message) => self.step_message(message),
                     None => Some(StateCoreExit::InboxClosed),
@@ -3953,8 +3960,8 @@ mod tests {
                 },
             )
             .await?;
-            // A connection with a durable mutation in flight refuses the next
-            // one, so give each line time to gather and commit.
+            // The inbox is held while a batch is pending; pacing keeps the
+            // WAIT markers simple rather than being required for correctness.
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
         Ok(())
@@ -4290,7 +4297,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_ephemeral_command_pipelined_behind_a_durable_one_is_refused_not_fatal() -> TestResult
+    async fn an_ephemeral_command_pipelined_behind_a_durable_one_is_applied_in_order() -> TestResult
     {
         const REGISTER: &[(u64, &str)] = &[
             (1, "NICK alice"),
@@ -4302,9 +4309,11 @@ mod tests {
             run_core(true, |inbox, lifecycle, _token| async move {
                 let _outcomes = open_connections(&inbox, &sinks).await?;
                 drive_script(&inbox, &sinks, REGISTER).await?;
-                // AWAY stages a durable batch; MONITOR is ephemeral and arrives
-                // inside the gather window with no pacing at all.
-                for (sequence, line) in [(3, "AWAY :busy"), (4, "MONITOR + alice")] {
+                // AWAY stages a durable batch; the MONITOR pair is ephemeral
+                // and arrives inside the gather window with no pacing at all.
+                for (sequence, line) in
+                    [(3, "AWAY :busy"), (4, "MONITOR + alice"), (5, "MONITOR S")]
+                {
                     let message = parse_message(FramedLine::new(line)?)?.ok_or("empty line")?;
                     send(
                         &inbox,
@@ -4316,7 +4325,7 @@ mod tests {
                     )
                     .await?;
                 }
-                drive_script(&inbox, &sinks, &[(1, "WAIT  306 ")]).await?;
+                drive_script(&inbox, &sinks, &[(1, "WAIT  303 ")]).await?;
                 let stopped = lifecycle.request(LifecyclePhase::Stop).await;
                 Ok((inbox, sinks, stopped))
             })
@@ -4324,9 +4333,66 @@ mod tests {
         assert!(stopped.is_ok());
         assert!(matches!(exit, StateCoreExit::Stopped), "{exit:?}");
         let lines = sinks.first().ok_or("no sink")?.lines();
+        let away = lines.iter().position(|line| line.contains(" 306 alice "));
+        let monitor = lines
+            .iter()
+            .position(|line| line.contains(" 303 alice ") && line.ends_with(":alice"));
         assert!(
-            lines.iter().any(|line| line.contains(" 306 alice ")),
+            away.is_some_and(|away| monitor.is_some_and(|monitor| away < monitor)),
             "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("SERVERBUSY")),
+            "{lines:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_message_pipelined_behind_a_join_reaches_the_channel() -> TestResult {
+        const SETUP: &[(u64, &str)] = &[
+            (2, "NICK bob"),
+            (2, "USER bob 0 * :Bob"),
+            (2, "WAIT  001 "),
+            (2, "JOIN #room"),
+            (2, "WAIT JOIN #room"),
+            (1, "NICK alice"),
+            (1, "USER alice 0 * :Alice"),
+            (1, "WAIT  001 "),
+        ];
+        let sinks = vec![
+            FrameSink::new(ConnectionGeneration::new(1), true),
+            FrameSink::new(ConnectionGeneration::new(2), true),
+        ];
+        let (exit, (_open, sinks, stopped)) =
+            run_core(true, |inbox, lifecycle, _token| async move {
+                let _outcomes = open_connections(&inbox, &sinks).await?;
+                drive_script(&inbox, &sinks, SETUP).await?;
+                // JOIN stages a durable batch; the PRIVMSG arrives behind it
+                // in the same write and must see the committed membership.
+                for (sequence, line) in [(3, "JOIN #room"), (4, "PRIVMSG #room :hi")] {
+                    let message = parse_message(FramedLine::new(line)?)?.ok_or("empty line")?;
+                    send(
+                        &inbox,
+                        StateCoreMessage::Line {
+                            generation: ConnectionGeneration::new(1),
+                            sequence,
+                            message: Box::new(message),
+                        },
+                    )
+                    .await?;
+                }
+                drive_script(&inbox, &sinks, &[(2, "WAIT PRIVMSG #room :hi")]).await?;
+                let stopped = lifecycle.request(LifecyclePhase::Stop).await;
+                Ok((inbox, sinks, stopped))
+            })
+            .await?;
+        assert!(stopped.is_ok());
+        assert!(matches!(exit, StateCoreExit::Stopped), "{exit:?}");
+        let alice = sinks.first().ok_or("no sink")?.lines();
+        assert!(
+            !alice.iter().any(|line| line.contains(" 403 ")),
+            "{alice:?}"
         );
         Ok(())
     }
