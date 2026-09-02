@@ -26,7 +26,10 @@ pub(crate) const BACKUP_RECORDS_OFFSET: u64 = 21 + 4 + BACKUP_HEADER_BYTES as u6
 pub(crate) const BACKUP_TRAILER_FRAME_BYTES: u64 = 4 + BACKUP_TRAILER_BYTES as u64;
 /// Exact version-one stream bytes excluding numbered records.
 pub const BACKUP_FIXED_STREAM_BYTES: u64 = 869;
-pub(crate) const MAX_BACKUP_RECORD_BYTES: usize = 16_781_364;
+/// Largest encoded record body: table, key length, key, schema, sealed length,
+/// and the sealed bytes, matching `BackupRecord::encode` field for field.
+pub(crate) const MAX_BACKUP_RECORD_BYTES: usize =
+    2 + 4 + crate::MAX_STORED_KEY_BYTES + 4 + 4 + crate::MAX_SEALED_RECORD_BYTES;
 /// Greatest number of offline-authorized backup signing keys one verification accepts.
 pub const MAX_BACKUP_TRUST_KEYS: usize = 1_024;
 /// Bytes a stream adds over the logical record charge: the 4-byte frame length prefix
@@ -1808,6 +1811,19 @@ mod tests {
             ),
             Err(StorageError::LimitExceeded)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn largest_record_body_encodes_exactly_at_the_record_ceiling() -> Result<(), StorageError> {
+        let record = BackupRecord {
+            table: TableId::E2eeObject,
+            stored_key: StoredKey::new(vec![1; crate::MAX_STORED_KEY_BYTES])?,
+            record_schema: 1,
+            sealed_record: vec![2; crate::MAX_SEALED_RECORD_BYTES],
+        };
+        let encoded = record.encode()?;
+        assert_eq!(encoded.len(), MAX_BACKUP_RECORD_BYTES);
         Ok(())
     }
 
