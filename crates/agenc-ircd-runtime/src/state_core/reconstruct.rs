@@ -1138,22 +1138,38 @@ impl Scan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agenc_ircd_auth::{AUTHENTICATION_GRANT_RECORD_BYTES, OpaqueProfile};
+    use agenc_ircd_auth::{
+        AUTHENTICATION_GRANT_RECORD_BYTES, AUTHENTICATION_TRANSACTION_RECORD_BYTES,
+        CREATION_TRANSACTION_RECORD_BYTES, CREDENTIAL_CHANGE_TRANSACTION_RECORD_BYTES,
+        OPAQUE_SERVER_LOGIN_STATE_BYTES, OpaqueProfile,
+    };
     use agenc_ircd_crypto::{
         DatabaseBinding, LoginIndexDigest, LoginIndexKey, LoginIndexKeyId, StorageMasterKey,
     };
     use agenc_ircd_domain::{
-        DirectMessagePolicy, DisplayNameValue, DurableSanction, DurableWrite,
-        GuestDirectMessagePolicy, ModerationAction, ModerationReasonCode, NicknameValue,
-        PresencePolicy, Principal,
+        ChannelModes, ChannelNameValue, ChannelScope, ContentPolicy, DirectMessagePolicy,
+        DisplayNameValue, DurableSanction, DurableWrite, GuestDirectMessagePolicy, HistoryPolicy,
+        ModerationAction, ModerationReasonCode, NicknameValue, PersistencePolicy, PresencePolicy,
+        Principal, Role, Visibility,
     };
     use agenc_ircd_storage::{RecordReference, StorageSealContext};
     use agenc_ircd_testkit::{account_id, deterministic_cloak};
     use agenc_ircd_types::{
-        DatabaseId, Generation, NetworkId, ServerId, ServerIncarnation, UserId, UtcSecond,
+        AccountServiceMessageKind, DatabaseId, Generation, NetworkId, ServerId, ServerIncarnation,
+        UserId, UtcSecond,
     };
 
     const MASTER_BYTES: [u8; 32] = [7; 32];
+    /// The network identity written into every hand-built transaction body.
+    const TEST_NETWORK: [u8; 32] = [1; 32];
+    /// The START disposition code that admits reservations.
+    const ADMITTED_DISPOSITION: u16 = 0;
+    /// The record code of `AuthError::InvitationRejected`.
+    const REJECTED_DISPOSITION: u16 = 8;
+
+    fn stale<T>(result: Result<T, RuntimeError>) -> bool {
+        matches!(result, Err(RuntimeError::Storage(StorageError::StaleState)))
+    }
 
     fn binding() -> DatabaseBinding {
         DatabaseBinding::new(
@@ -1193,11 +1209,277 @@ mod tests {
         value: &[u8],
         nonce: u8,
     ) -> Result<Vec<u8>, RuntimeError> {
+        seal_with_schema(table, key, value, nonce, DOMAIN_RECORD_SCHEMA)
+    }
+
+    fn seal_with_schema(
+        table: TableId,
+        key: &StoredKey,
+        value: &[u8],
+        nonce: u8,
+        record_schema: u32,
+    ) -> Result<Vec<u8>, RuntimeError> {
         let master = StorageMasterKey::from_bytes(MASTER_BYTES);
         let context = StorageSealContext::new(&master, binding(), 1)?;
         Ok(context
-            .seal(table, DOMAIN_RECORD_SCHEMA, [nonce; 24], key, value)?
+            .seal(table, record_schema, [nonce; 24], key, value)?
             .encode()?)
+    }
+
+    fn admit_sealed(
+        scan: &mut Scan,
+        keys: &KeyDeriver,
+        table: TableId,
+        key: &StoredKey,
+        value: &PersistentRecordValue,
+        nonce: u8,
+    ) -> Result<(), RuntimeError> {
+        scan.admit(keys, table, key.clone(), &seal(table, key, value, nonce)?)
+    }
+
+    fn scan_with_account(
+        keys: &KeyDeriver,
+        account: &DurableAccount,
+        nonce: u8,
+    ) -> Result<Scan, RuntimeError> {
+        let mut scan = Scan::default();
+        let key = KeyDeriver::account_key(account.account_id)?;
+        admit_sealed(
+            &mut scan,
+            keys,
+            TableId::Account,
+            &key,
+            &account_value(account)?,
+            nonce,
+        )?;
+        Ok(scan)
+    }
+
+    fn account_seeded(seed: u8) -> Result<DurableAccount, RuntimeError> {
+        let mut account = account(None)?;
+        account.account_id = account_id(seed);
+        Ok(account)
+    }
+
+    fn channel(seed: u8, name: &str) -> Result<DurableChannel, RuntimeError> {
+        Ok(DurableChannel {
+            channel_id: ChannelInstanceId::from_bytes([seed; 16]),
+            name: ChannelNameValue::parse(name).map_err(|_| RuntimeError::InvalidValue)?,
+            scope: ChannelScope::Global,
+            visibility: Visibility::Listed,
+            content_policy: ContentPolicy::Plaintext,
+            persistence: PersistencePolicy::Registered,
+            creator: Principal::Account(account_id(seed)),
+            created_at: UtcSecond::from_unix_seconds(1),
+            revision: Revision::new(1).map_err(|_| RuntimeError::InvalidValue)?,
+            modes: ChannelModes::default(),
+            key_verifier: None,
+            member_limit: None,
+            topic: None,
+            memberships: Vec::new(),
+            role_grants: vec![(account_id(seed), Role::Owner)],
+            bans: Vec::new(),
+            exceptions: Vec::new(),
+            invite_exceptions: Vec::new(),
+            invites: Vec::new(),
+            history: HistoryPolicy::Off,
+            e2ee_removal_pending: Vec::new(),
+            admin_quarantined: false,
+        })
+    }
+
+    fn channel_value(
+        channel: &DurableChannel,
+        revision: u64,
+    ) -> Result<PersistentRecordValue, RuntimeError> {
+        Ok(PersistentRecordValue::new(
+            TableId::Channel,
+            LIVE_RECORD_KIND,
+            revision,
+            0,
+            None,
+            Vec::new(),
+            ChannelRecordBody::encode(channel)?,
+        )?)
+    }
+
+    fn channel_name_row(
+        channel_key: &StoredKey,
+        body: Vec<u8>,
+    ) -> Result<PersistentRecordValue, RuntimeError> {
+        Ok(PersistentRecordValue::new(
+            TableId::ChannelName,
+            LIVE_RECORD_KIND,
+            1,
+            0,
+            None,
+            vec![RecordReference::new(TableId::Channel, channel_key.clone())?],
+            body,
+        )?)
+    }
+
+    fn sanction(
+        channel_id: Option<ChannelInstanceId>,
+        expires_at: Option<u64>,
+    ) -> Result<DurableSanction, RuntimeError> {
+        Ok(DurableSanction {
+            actor: Principal::Account(account_id(1)),
+            target: Principal::Guest(UserId::from_bytes([8; 16])),
+            channel_id,
+            action: ModerationAction::Mute,
+            reason_code: ModerationReasonCode::Spam,
+            reason: None,
+            created_at: UtcSecond::from_unix_seconds(1),
+            expires_at: expires_at.map(UtcSecond::from_unix_seconds),
+            revision: Revision::new(1).map_err(|_| RuntimeError::InvalidValue)?,
+        })
+    }
+
+    fn sanction_value(
+        sanction: &DurableSanction,
+        revision: u64,
+        expires_at: Option<u64>,
+    ) -> Result<PersistentRecordValue, RuntimeError> {
+        Ok(PersistentRecordValue::new(
+            TableId::Sanction,
+            LIVE_RECORD_KIND,
+            revision,
+            0,
+            expires_at,
+            Vec::new(),
+            SanctionRecordBody::encode(sanction)?,
+        )?)
+    }
+
+    /// Writes the fixed route the account service binds a transaction to.
+    fn put_route(body: &mut Vec<u8>) {
+        body.extend_from_slice(&[21; 16]);
+        body.extend_from_slice(&[22; 16]);
+        body.extend_from_slice(&[23; 16]);
+        body.extend_from_slice(&1_u64.to_be_bytes());
+        body.extend_from_slice(&[24; 16]);
+        body.extend_from_slice(&[25; 32]);
+    }
+
+    /// Writes a START request binding for `message_kind` on `TEST_NETWORK`.
+    fn put_request_binding(body: &mut Vec<u8>, message_kind: AccountServiceMessageKind) {
+        body.extend_from_slice(&TEST_NETWORK);
+        body.extend_from_slice(&[26; 16]);
+        body.extend_from_slice(&[27; 32]);
+        body.extend_from_slice(&[28; 16]);
+        body.extend_from_slice(&message_kind.wire_value().to_be_bytes());
+    }
+
+    /// Writes the version-one header shared by every transaction record class.
+    fn transaction_header(class: u16, transaction_id: TransactionId, expires_at: u64) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&1_u16.to_be_bytes());
+        body.extend_from_slice(&class.to_be_bytes());
+        body.extend_from_slice(transaction_id.as_bytes());
+        body.extend_from_slice(&TEST_NETWORK);
+        put_route(&mut body);
+        body.extend_from_slice(&expires_at.to_be_bytes());
+        body
+    }
+
+    fn sized(body: Vec<u8>, expected: usize) -> Result<Vec<u8>, RuntimeError> {
+        if body.len() != expected {
+            return Err(RuntimeError::InvalidValue);
+        }
+        Ok(body)
+    }
+
+    fn disposition(admitted: bool) -> u16 {
+        if admitted {
+            ADMITTED_DISPOSITION
+        } else {
+            REJECTED_DISPOSITION
+        }
+    }
+
+    fn authentication_body(
+        transaction_id: TransactionId,
+        expires_at: u64,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        let mut body =
+            transaction_header(AUTHENTICATION_TRANSACTION_KIND, transaction_id, expires_at);
+        put_request_binding(&mut body, AccountServiceMessageKind::OpaqueAuthStart);
+        // A reject-at-finish candidate carries all-zero account fields.
+        body.extend_from_slice(&[2]);
+        body.extend_from_slice(&[0; 24]);
+        body.extend_from_slice(&0_u64.to_be_bytes());
+        body.extend_from_slice(&0_u64.to_be_bytes());
+        body.extend_from_slice(&[29; 32]);
+        // All-zero server login state is structurally valid.
+        body.extend_from_slice(&[0; OPAQUE_SERVER_LOGIN_STATE_BYTES]);
+        sized(body, AUTHENTICATION_TRANSACTION_RECORD_BYTES)
+    }
+
+    fn creation_body(
+        transaction_id: TransactionId,
+        expires_at: u64,
+        admitted: bool,
+        invitation: Option<InviteId>,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        let mut body = transaction_header(CREATION_TRANSACTION_KIND, transaction_id, expires_at);
+        put_request_binding(&mut body, AccountServiceMessageKind::AccountCreateStart);
+        body.extend_from_slice(&disposition(admitted).to_be_bytes());
+        body.extend_from_slice(&[30; 32]);
+        body.extend_from_slice(&[29; 32]);
+        match invitation {
+            Some(invite_id) => {
+                body.extend_from_slice(&[1]);
+                body.extend_from_slice(invite_id.as_bytes());
+                body.extend_from_slice(&3_600_u64.to_be_bytes());
+            }
+            None => {
+                body.extend_from_slice(&[0]);
+                body.extend_from_slice(&[0; 16]);
+                body.extend_from_slice(&0_u64.to_be_bytes());
+            }
+        }
+        sized(body, CREATION_TRANSACTION_RECORD_BYTES)
+    }
+
+    fn credential_change_body(
+        transaction_id: TransactionId,
+        expires_at: u64,
+        admitted: bool,
+        account: &DurableAccount,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        let mut body = transaction_header(
+            CREDENTIAL_CHANGE_TRANSACTION_KIND,
+            transaction_id,
+            expires_at,
+        );
+        put_request_binding(&mut body, AccountServiceMessageKind::CredentialChangeStart);
+        body.extend_from_slice(&disposition(admitted).to_be_bytes());
+        body.extend_from_slice(account.account_id.to_text().as_bytes());
+        body.extend_from_slice(&account.revision.get().to_be_bytes());
+        body.extend_from_slice(&account.session_generation.get().to_be_bytes());
+        body.extend_from_slice(&[29; 32]);
+        sized(body, CREDENTIAL_CHANGE_TRANSACTION_RECORD_BYTES)
+    }
+
+    fn transaction_value(
+        record_kind: u16,
+        expires_at: u64,
+        references: Vec<RecordReference>,
+        body: Vec<u8>,
+    ) -> Result<PersistentRecordValue, RuntimeError> {
+        Ok(PersistentRecordValue::new(
+            TableId::AuthTransaction,
+            record_kind,
+            1,
+            0,
+            Some(expires_at),
+            references,
+            body,
+        )?)
+    }
+
+    fn transaction_key(transaction_id: TransactionId) -> Result<StoredKey, RuntimeError> {
+        Ok(StoredKey::new(transaction_id.as_bytes().to_vec())?)
     }
 
     fn account(nickname: Option<NicknameValue>) -> Result<DurableAccount, RuntimeError> {
@@ -2143,6 +2425,1682 @@ mod tests {
             validate_login_index_generations(transition, &BTreeMap::from([(1, 1)])),
             Err(RuntimeError::Storage(StorageError::StaleState))
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn finish_rejects_every_live_account_row_mismatch() -> Result<(), RuntimeError> {
+        let login_key =
+            LoginIndexStoredKey::new(3, LoginIndexDigest::from_storage_key([50; 32]))?.encode()?;
+
+        let mut missing_opaque = account_service_scan()?;
+        missing_opaque.live_accounts.insert(account_id(1));
+        missing_opaque
+            .live_login_keys
+            .insert(account_id(1), login_key.clone());
+        assert!(stale(missing_opaque.finish()));
+
+        let mut foreign_login = account_service_scan()?;
+        foreign_login.live_accounts.insert(account_id(1));
+        foreign_login
+            .live_login_keys
+            .insert(account_id(2), login_key.clone());
+        foreign_login.opaque_accounts.insert(account_id(1));
+        assert!(stale(foreign_login.finish()));
+
+        let mut foreign_opaque = account_service_scan()?;
+        foreign_opaque.live_accounts.insert(account_id(1));
+        foreign_opaque
+            .live_login_keys
+            .insert(account_id(1), login_key.clone());
+        foreign_opaque.opaque_accounts.insert(account_id(2));
+        assert!(stale(foreign_opaque.finish()));
+
+        let mut deleted = account_service_scan()?;
+        deleted.deleted_accounts.insert(account_id(3));
+        deleted.login_deletion_accounts.insert(account_id(3));
+        deleted
+            .login_deletion_tombstones
+            .insert((2_592_100, account_id(3)), login_key.clone());
+        let reconstruction = deleted.finish()?;
+        assert!(
+            reconstruction
+                .login_deletion_tombstones()
+                .get(&(2_592_100, account_id(3)))
+                == Some(&login_key)
+        );
+        assert!(reconstruction.live_login_keys().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn login_index_generation_counts_must_match_the_key_state() -> Result<(), RuntimeError> {
+        let stable = LoginIndexKeyState::stable(1, LoginIndexKeyId::from_bytes([51; 32]))?;
+        validate_login_index_generations(stable, &BTreeMap::from([(1, 3)]))?;
+        validate_login_index_generations(stable, &BTreeMap::new())?;
+
+        let transition = LoginIndexKeyState::transition(
+            1,
+            LoginIndexKeyId::from_bytes([52; 32]),
+            LoginIndexKeyId::from_bytes([53; 32]),
+            2,
+        )?;
+        validate_login_index_generations(transition, &BTreeMap::from([(1, 2), (2, 1)]))?;
+        assert!(stale(validate_login_index_generations(
+            transition,
+            &BTreeMap::from([(1, 2), (5, 1)]),
+        )));
+        assert!(stale(validate_login_index_generations(
+            transition,
+            &BTreeMap::new(),
+        )));
+        Ok(())
+    }
+
+    #[test]
+    fn leftover_reservations_without_an_owning_transaction_are_stale() -> Result<(), RuntimeError> {
+        let transaction_id = TransactionId::from_bytes([54; 16]);
+        let login_key =
+            LoginIndexStoredKey::new(3, LoginIndexDigest::from_storage_key([55; 32]))?.encode()?;
+
+        let mut login_only = account_service_scan()?;
+        login_only.login_reservations.insert(
+            transaction_id,
+            RecoveredLoginReservation {
+                key: login_key,
+                expires_at: 905,
+            },
+        );
+        assert!(stale(login_only.finish()));
+
+        let mut invitation_only = account_service_scan()?;
+        invitation_only.invitation_reservations.insert(
+            transaction_id,
+            RecoveredInvitationReservation {
+                invitation_id: InviteId::from_bytes([56; 16]),
+                expires_at: 905,
+            },
+        );
+        assert!(stale(invitation_only.finish()));
+        Ok(())
+    }
+
+    #[test]
+    fn non_creation_transactions_recover_only_their_own_row() -> Result<(), RuntimeError> {
+        let authentication_id = TransactionId::from_bytes([57; 16]);
+        let grant_id = TransactionId::from_bytes([58; 16]);
+        let change_id = TransactionId::from_bytes([59; 16]);
+
+        let mut plain = account_service_scan()?;
+        plain
+            .transactions
+            .insert(authentication_id, RecoveredTransaction::Authentication);
+        plain
+            .transactions
+            .insert(grant_id, RecoveredTransaction::AuthenticationGrant);
+        plain
+            .transactions
+            .insert(change_id, RecoveredTransaction::CredentialChange);
+        let reconstruction = plain.finish()?;
+        let cleanups = reconstruction.startup_transaction_cleanups();
+        let recovered: Vec<TransactionId> = cleanups
+            .iter()
+            .map(RecoveredAccountTransactionCleanup::transaction_id)
+            .collect();
+        assert_eq!(recovered, vec![authentication_id, grant_id, change_id]);
+        assert!(
+            cleanups
+                .iter()
+                .all(|cleanup| cleanup.login_key().is_none() && cleanup.invitation_id().is_none())
+        );
+
+        let login_key =
+            LoginIndexStoredKey::new(3, LoginIndexDigest::from_storage_key([60; 32]))?.encode()?;
+        let mut with_login = account_service_scan()?;
+        with_login
+            .transactions
+            .insert(authentication_id, RecoveredTransaction::Authentication);
+        with_login.login_reservations.insert(
+            authentication_id,
+            RecoveredLoginReservation {
+                key: login_key,
+                expires_at: 906,
+            },
+        );
+        assert!(stale(with_login.finish()));
+
+        let mut with_invitation = account_service_scan()?;
+        with_invitation
+            .transactions
+            .insert(change_id, RecoveredTransaction::CredentialChange);
+        with_invitation.invitation_reservations.insert(
+            change_id,
+            RecoveredInvitationReservation {
+                invitation_id: InviteId::from_bytes([61; 16]),
+                expires_at: 906,
+            },
+        );
+        assert!(stale(with_invitation.finish()));
+        Ok(())
+    }
+
+    #[test]
+    fn rejected_creation_must_not_own_any_reservation() -> Result<(), RuntimeError> {
+        let transaction_id = TransactionId::from_bytes([62; 16]);
+        let invitation_id = InviteId::from_bytes([63; 16]);
+        let rejected = || RecoveredTransaction::Creation {
+            expires_at: 907,
+            reservation_digest: None,
+            reservation_invitation: None,
+        };
+        let login_key =
+            LoginIndexStoredKey::new(3, LoginIndexDigest::from_storage_key([64; 32]))?.encode()?;
+
+        let mut with_login = account_service_scan()?;
+        with_login.transactions.insert(transaction_id, rejected());
+        with_login.login_reservations.insert(
+            transaction_id,
+            RecoveredLoginReservation {
+                key: login_key,
+                expires_at: 907,
+            },
+        );
+        assert!(stale(with_login.finish()));
+
+        let mut with_invitation = account_service_scan()?;
+        with_invitation
+            .transactions
+            .insert(transaction_id, rejected());
+        with_invitation.invitation_reservations.insert(
+            transaction_id,
+            RecoveredInvitationReservation {
+                invitation_id,
+                expires_at: 907,
+            },
+        );
+        assert!(stale(with_invitation.finish()));
+
+        let mut with_metadata = account_service_scan()?;
+        with_metadata.transactions.insert(
+            transaction_id,
+            RecoveredTransaction::Creation {
+                expires_at: 907,
+                reservation_digest: None,
+                reservation_invitation: Some(invitation_id),
+            },
+        );
+        assert!(stale(with_metadata.finish()));
+        Ok(())
+    }
+
+    #[test]
+    fn creation_login_reservation_must_use_the_current_generation_key() -> Result<(), RuntimeError>
+    {
+        let transaction_id = TransactionId::from_bytes([65; 16]);
+        let digest_bytes = [66; 32];
+        let previous_generation_key =
+            LoginIndexStoredKey::new(2, LoginIndexDigest::from_storage_key(digest_bytes))?
+                .encode()?;
+        let mut scan = account_service_scan()?;
+        scan.transactions.insert(
+            transaction_id,
+            RecoveredTransaction::Creation {
+                expires_at: 908,
+                reservation_digest: Some(LoginIndexDigest::from_storage_key(digest_bytes)),
+                reservation_invitation: None,
+            },
+        );
+        scan.login_reservations.insert(
+            transaction_id,
+            RecoveredLoginReservation {
+                key: previous_generation_key,
+                expires_at: 908,
+            },
+        );
+        assert!(stale(scan.finish()));
+        Ok(())
+    }
+
+    #[test]
+    fn creation_invitation_reservation_must_match_the_transaction_exactly()
+    -> Result<(), RuntimeError> {
+        let transaction_id = TransactionId::from_bytes([67; 16]);
+        let invitation_id = InviteId::from_bytes([68; 16]);
+        let digest_bytes = [69; 32];
+        let expires_at = 909;
+        let creation = |reservation_invitation: Option<InviteId>| RecoveredTransaction::Creation {
+            expires_at,
+            reservation_digest: Some(LoginIndexDigest::from_storage_key(digest_bytes)),
+            reservation_invitation,
+        };
+        let login_key =
+            LoginIndexStoredKey::new(3, LoginIndexDigest::from_storage_key(digest_bytes))?
+                .encode()?;
+        let login = || RecoveredLoginReservation {
+            key: login_key.clone(),
+            expires_at,
+        };
+
+        let mut unexpected = account_service_scan()?;
+        unexpected
+            .transactions
+            .insert(transaction_id, creation(None));
+        unexpected
+            .login_reservations
+            .insert(transaction_id, login());
+        unexpected.invitation_reservations.insert(
+            transaction_id,
+            RecoveredInvitationReservation {
+                invitation_id,
+                expires_at,
+            },
+        );
+        assert!(stale(unexpected.finish()));
+
+        let mut missing = account_service_scan()?;
+        missing
+            .transactions
+            .insert(transaction_id, creation(Some(invitation_id)));
+        missing.login_reservations.insert(transaction_id, login());
+        assert!(stale(missing.finish()));
+
+        let mut wrong_id = account_service_scan()?;
+        wrong_id
+            .transactions
+            .insert(transaction_id, creation(Some(invitation_id)));
+        wrong_id.login_reservations.insert(transaction_id, login());
+        wrong_id.invitation_reservations.insert(
+            transaction_id,
+            RecoveredInvitationReservation {
+                invitation_id: InviteId::from_bytes([70; 16]),
+                expires_at,
+            },
+        );
+        assert!(stale(wrong_id.finish()));
+
+        let mut wrong_expiry = account_service_scan()?;
+        wrong_expiry
+            .transactions
+            .insert(transaction_id, creation(Some(invitation_id)));
+        wrong_expiry
+            .login_reservations
+            .insert(transaction_id, login());
+        wrong_expiry.invitation_reservations.insert(
+            transaction_id,
+            RecoveredInvitationReservation {
+                invitation_id,
+                expires_at: 910,
+            },
+        );
+        assert!(stale(wrong_expiry.finish()));
+        Ok(())
+    }
+
+    #[test]
+    fn foreign_record_schema_is_rejected_before_decoding() -> Result<(), RuntimeError> {
+        let keys = keys()?;
+        let account = account(None)?;
+        let key = KeyDeriver::account_key(account.account_id)?;
+        let sealed = seal_with_schema(
+            TableId::Account,
+            &key,
+            &account_value(&account)?.encode()?,
+            71,
+            2,
+        )?;
+        let mut scan = Scan::default();
+        assert!(matches!(
+            scan.admit(&keys, TableId::Account, key, &sealed),
+            Err(RuntimeError::Storage(StorageError::UnsupportedVersion))
+        ));
+        assert!(scan.index.is_empty());
+        Ok(())
+    }
+
+    fn sealed_key_state(
+        key: &StoredKey,
+        state: LoginIndexKeyState,
+        nonce: u8,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        seal_raw(TableId::LoginIndexKeyState, key, &state.encode()?, nonce)
+    }
+
+    #[test]
+    fn login_index_key_state_row_must_use_its_fixed_key_exactly_once() -> Result<(), RuntimeError> {
+        let keys = keys()?;
+        let state = LoginIndexKeyState::stable(1, LoginIndexKeyId::from_bytes([72; 32]))?;
+        let wrong_key = StoredKey::new(vec![73; 8])?;
+        let mut wrong = Scan::default();
+        assert!(stale(wrong.admit(
+            &keys,
+            TableId::LoginIndexKeyState,
+            wrong_key.clone(),
+            &sealed_key_state(&wrong_key, state, 73)?,
+        )));
+        assert!(wrong.account_service.login_index_key_state.is_none());
+
+        let fixed_key = StoredKey::new(LOGIN_INDEX_KEY_STATE_KEY.to_vec())?;
+        let mut duplicate = Scan::default();
+        duplicate.admit(
+            &keys,
+            TableId::LoginIndexKeyState,
+            fixed_key.clone(),
+            &sealed_key_state(&fixed_key, state, 74)?,
+        )?;
+        assert!(stale(duplicate.admit(
+            &keys,
+            TableId::LoginIndexKeyState,
+            fixed_key.clone(),
+            &sealed_key_state(&fixed_key, state, 75)?,
+        )));
+        assert_eq!(duplicate.account_service.login_index_key_state, Some(state));
+        Ok(())
+    }
+
+    #[test]
+    fn opaque_tombstones_admit_only_empty_bodies() -> Result<(), RuntimeError> {
+        let keys = keys()?;
+        let key = KeyDeriver::account_key(account_id(76))?;
+        let empty = PersistentRecordValue::new(
+            TableId::OpaqueRecord,
+            TOMBSTONE_RECORD_KIND,
+            1,
+            0,
+            None,
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let mut scan = Scan::default();
+        admit_sealed(&mut scan, &keys, TableId::OpaqueRecord, &key, &empty, 76)?;
+        assert!(scan.account_service.opaque_accounts.is_empty());
+        assert!(scan.index.existing(TableId::OpaqueRecord, &key)?.is_some());
+
+        let stray = PersistentRecordValue::new(
+            TableId::OpaqueRecord,
+            TOMBSTONE_RECORD_KIND,
+            1,
+            0,
+            None,
+            Vec::new(),
+            vec![1],
+        )?;
+        let mut rejected = Scan::default();
+        assert!(matches!(
+            admit_sealed(
+                &mut rejected,
+                &keys,
+                TableId::OpaqueRecord,
+                &key,
+                &stray,
+                77
+            ),
+            Err(RuntimeError::Storage(StorageError::InvalidEncoding))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn session_tombstones_require_bare_metadata() -> Result<(), RuntimeError> {
+        let keys = keys()?;
+        let key = KeyDeriver::session_key(SessionId::from_bytes([78; 16]))?;
+        let account_reference =
+            RecordReference::new(TableId::Account, KeyDeriver::account_key(account_id(1))?)?;
+        let tombstone = |generation: u64,
+                         expires_at: Option<u64>,
+                         references: Vec<RecordReference>,
+                         body: Vec<u8>| {
+            PersistentRecordValue::new(
+                TableId::Session,
+                TOMBSTONE_RECORD_KIND,
+                1,
+                generation,
+                expires_at,
+                references,
+                body,
+            )
+        };
+        for value in [
+            tombstone(1, None, Vec::new(), Vec::new())?,
+            tombstone(0, Some(79), Vec::new(), Vec::new())?,
+            tombstone(0, None, vec![account_reference], Vec::new())?,
+            tombstone(0, None, Vec::new(), vec![1])?,
+        ] {
+            let mut scan = Scan::default();
+            assert!(stale(admit_sealed(
+                &mut scan,
+                &keys,
+                TableId::Session,
+                &key,
+                &value,
+                79,
+            )));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn account_tombstones_require_bare_metadata_and_one_row() -> Result<(), RuntimeError> {
+        let keys = keys()?;
+        let key = KeyDeriver::account_key(account_id(80))?;
+        let channel_reference = RecordReference::new(
+            TableId::Channel,
+            KeyDeriver::channel_key(ChannelInstanceId::from_bytes([81; 16]))?,
+        )?;
+        let tombstone = |generation: u64,
+                         expires_at: Option<u64>,
+                         references: Vec<RecordReference>,
+                         body: Vec<u8>| {
+            PersistentRecordValue::new(
+                TableId::Account,
+                TOMBSTONE_RECORD_KIND,
+                1,
+                generation,
+                expires_at,
+                references,
+                body,
+            )
+        };
+        for value in [
+            tombstone(1, None, Vec::new(), Vec::new())?,
+            tombstone(0, Some(82), Vec::new(), Vec::new())?,
+            tombstone(0, None, vec![channel_reference], Vec::new())?,
+            tombstone(0, None, Vec::new(), vec![1])?,
+        ] {
+            let mut scan = Scan::default();
+            assert!(stale(admit_sealed(
+                &mut scan,
+                &keys,
+                TableId::Account,
+                &key,
+                &value,
+                82,
+            )));
+        }
+
+        let mut duplicate = Scan::default();
+        let bare = tombstone(0, None, Vec::new(), Vec::new())?;
+        admit_sealed(&mut duplicate, &keys, TableId::Account, &key, &bare, 83)?;
+        assert!(stale(admit_sealed(
+            &mut duplicate,
+            &keys,
+            TableId::Account,
+            &key,
+            &bare,
+            84,
+        )));
+        assert_eq!(duplicate.account_service.deleted_accounts.len(), 1);
+        Ok(())
+    }
+
+    fn login_row(
+        key: &LoginIndexStoredKey,
+        kind: LoginIndexValueKind,
+    ) -> Result<(StoredKey, Vec<u8>), RuntimeError> {
+        Ok((key.encode()?, LoginIndexValue::new(key, kind)?.encode()?))
+    }
+
+    #[test]
+    fn login_index_rows_reject_duplicate_bindings() -> Result<(), RuntimeError> {
+        let keys = keys()?;
+        let account = account(None)?;
+        let mut scan = scan_with_account(&keys, &account, 85)?;
+        let admit_login = |scan: &mut Scan, row: &(StoredKey, Vec<u8>), nonce: u8| {
+            scan.admit(
+                &keys,
+                TableId::LoginIndex,
+                row.0.clone(),
+                &seal_raw(TableId::LoginIndex, &row.0, &row.1, nonce)?,
+            )
+        };
+        let live = |digest: u8| {
+            login_row(
+                &LoginIndexStoredKey::new(1, LoginIndexDigest::from_storage_key([digest; 32]))?,
+                LoginIndexValueKind::Live {
+                    account_id: account.account_id,
+                    opaque_credential_id: agenc_ircd_types::OpaqueCredentialId::from_bytes(
+                        [digest; 32],
+                    ),
+                },
+            )
+        };
+        admit_login(&mut scan, &live(86)?, 86)?;
+        assert!(stale(admit_login(&mut scan, &live(87)?, 87)));
+        assert_eq!(scan.account_service.live_login_keys.len(), 1);
+
+        let transaction_id = TransactionId::from_bytes([88; 16]);
+        let reservation = |digest: u8| {
+            login_row(
+                &LoginIndexStoredKey::new(1, LoginIndexDigest::from_storage_key([digest; 32]))?,
+                LoginIndexValueKind::CreationReservation {
+                    transaction_id,
+                    expires_at: 911,
+                },
+            )
+        };
+        let reserved = reservation(89)?;
+        admit_login(&mut scan, &reserved, 89)?;
+        assert!(
+            scan.account_service
+                .login_reservations
+                .get(&transaction_id)
+                .is_some_and(|login| login.key == reserved.0 && login.expires_at == 911)
+        );
+        assert!(stale(admit_login(&mut scan, &reservation(90)?, 90)));
+        assert_eq!(scan.account_service.login_reservations.len(), 1);
+
+        let deleted_account_id = account_id(91);
+        let tombstone = |digest: u8| {
+            login_row(
+                &LoginIndexStoredKey::new(1, LoginIndexDigest::from_storage_key([digest; 32]))?,
+                LoginIndexValueKind::DeletionTombstone {
+                    deleted_account_id,
+                    expires_at: 2_592_100,
+                },
+            )
+        };
+        admit_login(&mut scan, &tombstone(92)?, 92)?;
+        assert!(stale(admit_login(&mut scan, &tombstone(93)?, 93)));
+        assert_eq!(scan.account_service.login_deletion_tombstones.len(), 1);
+        assert_eq!(scan.account_service.login_entry_counts.get(&1), Some(&6));
+        Ok(())
+    }
+
+    #[test]
+    fn auth_transaction_rows_require_zero_generation_and_one_row_per_key()
+    -> Result<(), RuntimeError> {
+        let keys = keys()?;
+        let account = account(None)?;
+        let account_key = KeyDeriver::account_key(account.account_id)?;
+        let transaction_id = TransactionId::from_bytes([94; 16]);
+        let key = transaction_key(transaction_id)?;
+        let grant = authentication_grant_value(
+            transaction_id,
+            &account,
+            &account_key,
+            account.session_generation.get(),
+        )?;
+        let mut scan = scan_with_account(&keys, &account, 94)?;
+        let generation_one = PersistentRecordValue::new(
+            TableId::AuthTransaction,
+            AUTHENTICATION_GRANT_KIND,
+            1,
+            1,
+            grant.expires_at(),
+            grant.references().to_vec(),
+            grant.body().to_vec(),
+        )?;
+        assert!(stale(admit_sealed(
+            &mut scan,
+            &keys,
+            TableId::AuthTransaction,
+            &key,
+            &generation_one,
+            95,
+        )));
+        admit_sealed(&mut scan, &keys, TableId::AuthTransaction, &key, &grant, 96)?;
+        assert!(stale(admit_sealed(
+            &mut scan,
+            &keys,
+            TableId::AuthTransaction,
+            &key,
+            &grant,
+            97,
+        )));
+        assert_eq!(scan.account_service.transactions.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn authentication_transactions_bind_key_expiry_and_carry_no_references()
+    -> Result<(), RuntimeError> {
+        let keys = keys()?;
+        let transaction_id = TransactionId::from_bytes([98; 16]);
+        let key = transaction_key(transaction_id)?;
+        let account_reference =
+            RecordReference::new(TableId::Account, KeyDeriver::account_key(account_id(1))?)?;
+        let authentication = |body_transaction_id: TransactionId,
+                              value_expires_at: u64,
+                              references: Vec<RecordReference>| {
+            transaction_value(
+                AUTHENTICATION_TRANSACTION_KIND,
+                value_expires_at,
+                references,
+                authentication_body(body_transaction_id, 912)?,
+            )
+        };
+
+        let mut valid = Scan::default();
+        admit_sealed(
+            &mut valid,
+            &keys,
+            TableId::AuthTransaction,
+            &key,
+            &authentication(transaction_id, 912, Vec::new())?,
+            98,
+        )?;
+        assert!(matches!(
+            valid.account_service.transactions.get(&transaction_id),
+            Some(RecoveredTransaction::Authentication)
+        ));
+
+        for value in [
+            authentication(TransactionId::from_bytes([99; 16]), 912, Vec::new())?,
+            authentication(transaction_id, 913, Vec::new())?,
+            authentication(transaction_id, 912, vec![account_reference])?,
+        ] {
+            let mut scan = Scan::default();
+            assert!(stale(admit_sealed(
+                &mut scan,
+                &keys,
+                TableId::AuthTransaction,
+                &key,
+                &value,
+                99,
+            )));
+            assert!(scan.account_service.transactions.is_empty());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn creation_transactions_bind_key_expiry_and_invitation_reference() -> Result<(), RuntimeError>
+    {
+        let keys = keys()?;
+        let transaction_id = TransactionId::from_bytes([100; 16]);
+        let key = transaction_key(transaction_id)?;
+        let invitation_id = InviteId::from_bytes([101; 16]);
+        let invitation_reference = RecordReference::new(
+            TableId::RegistrationInvite,
+            StoredKey::new(invitation_id.as_bytes().to_vec())?,
+        )?;
+        let creation = |body_transaction_id: TransactionId,
+                        value_expires_at: u64,
+                        admitted: bool,
+                        invitation: Option<InviteId>,
+                        references: Vec<RecordReference>| {
+            transaction_value(
+                CREATION_TRANSACTION_KIND,
+                value_expires_at,
+                references,
+                creation_body(body_transaction_id, 914, admitted, invitation)?,
+            )
+        };
+
+        let mut admitted = Scan::default();
+        admit_sealed(
+            &mut admitted,
+            &keys,
+            TableId::AuthTransaction,
+            &key,
+            &creation(
+                transaction_id,
+                914,
+                true,
+                Some(invitation_id),
+                vec![invitation_reference.clone()],
+            )?,
+            100,
+        )?;
+        assert!(matches!(
+            admitted.account_service.transactions.get(&transaction_id),
+            Some(RecoveredTransaction::Creation {
+                expires_at: 914,
+                reservation_digest: Some(_),
+                reservation_invitation: Some(reserved),
+            }) if *reserved == invitation_id
+        ));
+
+        let mut rejected = Scan::default();
+        admit_sealed(
+            &mut rejected,
+            &keys,
+            TableId::AuthTransaction,
+            &key,
+            &creation(transaction_id, 914, false, Some(invitation_id), Vec::new())?,
+            101,
+        )?;
+        assert!(matches!(
+            rejected.account_service.transactions.get(&transaction_id),
+            Some(RecoveredTransaction::Creation {
+                reservation_digest: None,
+                reservation_invitation: None,
+                ..
+            })
+        ));
+
+        let account_reference =
+            RecordReference::new(TableId::Account, KeyDeriver::account_key(account_id(1))?)?;
+        let foreign_invitation =
+            RecordReference::new(TableId::RegistrationInvite, StoredKey::new(vec![102; 16])?)?;
+        for value in [
+            creation(
+                TransactionId::from_bytes([103; 16]),
+                914,
+                true,
+                None,
+                Vec::new(),
+            )?,
+            creation(transaction_id, 915, true, None, Vec::new())?,
+            creation(transaction_id, 914, true, Some(invitation_id), Vec::new())?,
+            creation(
+                transaction_id,
+                914,
+                true,
+                Some(invitation_id),
+                vec![account_reference],
+            )?,
+            creation(
+                transaction_id,
+                914,
+                true,
+                Some(invitation_id),
+                vec![foreign_invitation],
+            )?,
+            creation(transaction_id, 914, true, None, vec![invitation_reference])?,
+        ] {
+            let mut scan = Scan::default();
+            assert!(stale(admit_sealed(
+                &mut scan,
+                &keys,
+                TableId::AuthTransaction,
+                &key,
+                &value,
+                103,
+            )));
+            assert!(scan.account_service.transactions.is_empty());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn credential_changes_bind_key_expiry_and_reserved_account_reference()
+    -> Result<(), RuntimeError> {
+        let keys = keys()?;
+        let account = account(None)?;
+        let account_key = KeyDeriver::account_key(account.account_id)?;
+        let account_reference = RecordReference::new(TableId::Account, account_key)?;
+        let transaction_id = TransactionId::from_bytes([104; 16]);
+        let key = transaction_key(transaction_id)?;
+        let change = |body_transaction_id: TransactionId,
+                      value_expires_at: u64,
+                      admitted: bool,
+                      references: Vec<RecordReference>| {
+            transaction_value(
+                CREDENTIAL_CHANGE_TRANSACTION_KIND,
+                value_expires_at,
+                references,
+                credential_change_body(body_transaction_id, 916, admitted, &account)?,
+            )
+        };
+
+        let mut admitted = scan_with_account(&keys, &account, 104)?;
+        admit_sealed(
+            &mut admitted,
+            &keys,
+            TableId::AuthTransaction,
+            &key,
+            &change(transaction_id, 916, true, vec![account_reference.clone()])?,
+            105,
+        )?;
+        assert!(matches!(
+            admitted.account_service.transactions.get(&transaction_id),
+            Some(RecoveredTransaction::CredentialChange)
+        ));
+
+        let mut rejected = Scan::default();
+        admit_sealed(
+            &mut rejected,
+            &keys,
+            TableId::AuthTransaction,
+            &key,
+            &change(transaction_id, 916, false, Vec::new())?,
+            106,
+        )?;
+        assert!(matches!(
+            rejected.account_service.transactions.get(&transaction_id),
+            Some(RecoveredTransaction::CredentialChange)
+        ));
+
+        let other_reference =
+            RecordReference::new(TableId::Account, KeyDeriver::account_key(account_id(2))?)?;
+        let channel_reference = RecordReference::new(
+            TableId::Channel,
+            KeyDeriver::channel_key(ChannelInstanceId::from_bytes([107; 16]))?,
+        )?;
+        for value in [
+            change(
+                TransactionId::from_bytes([108; 16]),
+                916,
+                true,
+                vec![account_reference.clone()],
+            )?,
+            change(transaction_id, 917, true, vec![account_reference.clone()])?,
+            change(transaction_id, 916, true, vec![channel_reference])?,
+            change(transaction_id, 916, true, vec![other_reference])?,
+            change(transaction_id, 916, true, Vec::new())?,
+            change(transaction_id, 916, false, vec![account_reference])?,
+        ] {
+            let mut scan = scan_with_account(&keys, &account, 108)?;
+            assert!(stale(admit_sealed(
+                &mut scan,
+                &keys,
+                TableId::AuthTransaction,
+                &key,
+                &value,
+                109,
+            )));
+            assert!(scan.account_service.transactions.is_empty());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn authentication_grants_bind_key_expiry_and_referenced_account() -> Result<(), RuntimeError> {
+        let keys = keys()?;
+        let account = account(None)?;
+        let account_key = KeyDeriver::account_key(account.account_id)?;
+        let transaction_id = TransactionId::from_bytes([110; 16]);
+        let key = transaction_key(transaction_id)?;
+        let grant = authentication_grant_value(transaction_id, &account, &account_key, 1)?;
+
+        let foreign = authentication_grant_value(
+            TransactionId::from_bytes([111; 16]),
+            &account,
+            &account_key,
+            1,
+        )?;
+        let mut foreign_scan = scan_with_account(&keys, &account, 110)?;
+        assert!(stale(admit_sealed(
+            &mut foreign_scan,
+            &keys,
+            TableId::AuthTransaction,
+            &key,
+            &foreign,
+            111,
+        )));
+
+        let wrong_expiry = PersistentRecordValue::new(
+            TableId::AuthTransaction,
+            AUTHENTICATION_GRANT_KIND,
+            1,
+            0,
+            Some(931),
+            grant.references().to_vec(),
+            grant.body().to_vec(),
+        )?;
+        let mut expiry_scan = scan_with_account(&keys, &account, 112)?;
+        assert!(stale(admit_sealed(
+            &mut expiry_scan,
+            &keys,
+            TableId::AuthTransaction,
+            &key,
+            &wrong_expiry,
+            113,
+        )));
+
+        let other = account_seeded(2)?;
+        let other_key = KeyDeriver::account_key(other.account_id)?;
+        let mut other_scan = scan_with_account(&keys, &account, 114)?;
+        admit_sealed(
+            &mut other_scan,
+            &keys,
+            TableId::Account,
+            &other_key,
+            &account_value(&other)?,
+            115,
+        )?;
+        let misbound = authentication_grant_value(transaction_id, &account, &other_key, 1)?;
+        assert!(stale(admit_sealed(
+            &mut other_scan,
+            &keys,
+            TableId::AuthTransaction,
+            &key,
+            &misbound,
+            116,
+        )));
+        assert!(other_scan.account_service.transactions.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn registration_invite_rows_are_validated_by_kind() -> Result<(), RuntimeError> {
+        let keys = keys()?;
+        let invitation_id = InviteId::from_bytes([117; 16]);
+        let invitation_key = StoredKey::new(invitation_id.as_bytes().to_vec())?;
+        let transaction_id = TransactionId::from_bytes([118; 16]);
+        let transaction_reference =
+            RecordReference::new(TableId::AuthTransaction, transaction_key(transaction_id)?)?;
+        let account_reference =
+            RecordReference::new(TableId::Account, KeyDeriver::account_key(account_id(119))?)?;
+        let invite =
+            |record_kind: u16, generation: u64, references: Vec<RecordReference>, body: Vec<u8>| {
+                PersistentRecordValue::new(
+                    TableId::RegistrationInvite,
+                    record_kind,
+                    1,
+                    generation,
+                    Some(918),
+                    references,
+                    body,
+                )
+            };
+
+        let mut reserved = Scan::default();
+        admit_sealed(
+            &mut reserved,
+            &keys,
+            TableId::RegistrationInvite,
+            &invitation_key,
+            &invite(
+                INVITATION_RESERVATION_KIND,
+                0,
+                vec![transaction_reference.clone()],
+                Vec::new(),
+            )?,
+            117,
+        )?;
+        assert!(
+            reserved
+                .account_service
+                .invitation_reservations
+                .get(&transaction_id)
+                .is_some_and(|reservation| reservation.invitation_id == invitation_id
+                    && reservation.expires_at == 918)
+        );
+        let second_key = StoredKey::new(InviteId::from_bytes([120; 16]).as_bytes().to_vec())?;
+        assert!(stale(admit_sealed(
+            &mut reserved,
+            &keys,
+            TableId::RegistrationInvite,
+            &second_key,
+            &invite(
+                INVITATION_RESERVATION_KIND,
+                0,
+                vec![transaction_reference.clone()],
+                Vec::new(),
+            )?,
+            118,
+        )));
+
+        for value in [
+            invite(
+                INVITATION_RESERVATION_KIND,
+                1,
+                vec![transaction_reference.clone()],
+                Vec::new(),
+            )?,
+            invite(
+                INVITATION_RESERVATION_KIND,
+                0,
+                vec![transaction_reference.clone()],
+                vec![1],
+            )?,
+            invite(
+                INVITATION_RESERVATION_KIND,
+                0,
+                vec![account_reference.clone()],
+                Vec::new(),
+            )?,
+            invite(
+                INVITATION_TOMBSTONE_KIND,
+                0,
+                vec![transaction_reference],
+                Vec::new(),
+            )?,
+            invite(
+                INVITATION_TOMBSTONE_KIND,
+                0,
+                vec![account_reference],
+                Vec::new(),
+            )?,
+            invite(INVITATION_TOMBSTONE_KIND, 0, Vec::new(), Vec::new())?,
+        ] {
+            let mut scan = Scan::default();
+            assert!(stale(admit_sealed(
+                &mut scan,
+                &keys,
+                TableId::RegistrationInvite,
+                &invitation_key,
+                &value,
+                119,
+            )));
+            assert!(scan.account_service.invitation_reservations.is_empty());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn fake_opaque_record_requires_bare_metadata_and_one_row() -> Result<(), RuntimeError> {
+        let keys = keys()?;
+        let profile = OpaqueProfile::generate(NetworkId::from_bytes([1; 32]))
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let fake_key = StoredKey::new(OPAQUE_FAKE_RECORD_KEY.to_vec())?;
+        let fake = |generation: u64, expires_at: Option<u64>, references: Vec<RecordReference>| {
+            PersistentRecordValue::new(
+                TableId::OpaqueRecord,
+                LIVE_RECORD_KIND,
+                1,
+                generation,
+                expires_at,
+                references,
+                profile.expose_fake_record_for_persistence().to_vec(),
+            )
+        };
+        let account_reference =
+            RecordReference::new(TableId::Account, KeyDeriver::account_key(account_id(1))?)?;
+        for value in [
+            fake(1, None, Vec::new())?,
+            fake(0, Some(919), Vec::new())?,
+            fake(0, None, vec![account_reference])?,
+        ] {
+            let mut scan = Scan::default();
+            assert!(stale(admit_sealed(
+                &mut scan,
+                &keys,
+                TableId::OpaqueRecord,
+                &fake_key,
+                &value,
+                121,
+            )));
+            assert!(scan.account_service.fake_opaque_record.is_none());
+        }
+
+        let mut duplicate = Scan::default();
+        admit_sealed(
+            &mut duplicate,
+            &keys,
+            TableId::OpaqueRecord,
+            &fake_key,
+            &fake(0, None, Vec::new())?,
+            122,
+        )?;
+        assert!(stale(admit_sealed(
+            &mut duplicate,
+            &keys,
+            TableId::OpaqueRecord,
+            &fake_key,
+            &fake(0, None, Vec::new())?,
+            123,
+        )));
+        assert!(duplicate.account_service.fake_opaque_record.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn live_opaque_records_bind_generation_reference_and_one_row() -> Result<(), RuntimeError> {
+        let keys = keys()?;
+        let account = account(None)?;
+        let account_key = KeyDeriver::account_key(account.account_id)?;
+        let profile = OpaqueProfile::generate(NetworkId::from_bytes([1; 32]))
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let opaque = |generation: u64, expires_at: Option<u64>, reference: RecordReference| {
+            PersistentRecordValue::new(
+                TableId::OpaqueRecord,
+                LIVE_RECORD_KIND,
+                1,
+                generation,
+                expires_at,
+                vec![reference],
+                profile.expose_fake_record_for_persistence().to_vec(),
+            )
+        };
+        let self_reference = RecordReference::new(TableId::Account, account_key.clone())?;
+        let other_reference =
+            RecordReference::new(TableId::Account, KeyDeriver::account_key(account_id(2))?)?;
+        let channel_reference = RecordReference::new(
+            TableId::Channel,
+            KeyDeriver::channel_key(ChannelInstanceId::from_bytes([124; 16]))?,
+        )?;
+        let generation = account.session_generation.get();
+        for value in [
+            opaque(2, None, self_reference.clone())?,
+            opaque(generation, Some(920), self_reference.clone())?,
+            opaque(generation, None, channel_reference)?,
+            opaque(generation, None, other_reference)?,
+        ] {
+            let mut scan = scan_with_account(&keys, &account, 124)?;
+            assert!(stale(admit_sealed(
+                &mut scan,
+                &keys,
+                TableId::OpaqueRecord,
+                &account_key,
+                &value,
+                125,
+            )));
+            assert!(scan.account_service.opaque_accounts.is_empty());
+        }
+
+        let mut duplicate = scan_with_account(&keys, &account, 126)?;
+        admit_sealed(
+            &mut duplicate,
+            &keys,
+            TableId::OpaqueRecord,
+            &account_key,
+            &opaque(generation, None, self_reference.clone())?,
+            127,
+        )?;
+        assert!(
+            duplicate
+                .account_service
+                .opaque_accounts
+                .contains(&account.account_id)
+        );
+        assert!(stale(admit_sealed(
+            &mut duplicate,
+            &keys,
+            TableId::OpaqueRecord,
+            &account_key,
+            &opaque(generation, None, self_reference)?,
+            128,
+        )));
+        Ok(())
+    }
+
+    #[test]
+    fn live_accounts_bind_key_generation_and_one_row() -> Result<(), RuntimeError> {
+        let keys = keys()?;
+        let account = account(None)?;
+        let account_key = KeyDeriver::account_key(account.account_id)?;
+
+        let foreign_key = KeyDeriver::account_key(account_id(2))?;
+        let mut foreign = Scan::default();
+        assert!(stale(admit_sealed(
+            &mut foreign,
+            &keys,
+            TableId::Account,
+            &foreign_key,
+            &account_value(&account)?,
+            129,
+        )));
+        assert!(foreign.accounts.is_empty());
+
+        let wrong_generation = PersistentRecordValue::new(
+            TableId::Account,
+            LIVE_RECORD_KIND,
+            account.revision.get(),
+            2,
+            None,
+            Vec::new(),
+            AccountRecordBody::encode(&account)?,
+        )?;
+        let mut generation = Scan::default();
+        assert!(stale(admit_sealed(
+            &mut generation,
+            &keys,
+            TableId::Account,
+            &account_key,
+            &wrong_generation,
+            130,
+        )));
+        assert!(generation.accounts.is_empty());
+
+        let mut duplicate = scan_with_account(&keys, &account, 131)?;
+        assert!(stale(admit_sealed(
+            &mut duplicate,
+            &keys,
+            TableId::Account,
+            &account_key,
+            &account_value(&account)?,
+            132,
+        )));
+        assert_eq!(duplicate.accounts.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn live_channels_bind_key_revision_and_one_row() -> Result<(), RuntimeError> {
+        let keys = keys()?;
+        let channel = channel(133, "#fixture")?;
+        let channel_key = KeyDeriver::channel_key(channel.channel_id)?;
+
+        let mut valid = Scan::default();
+        admit_sealed(
+            &mut valid,
+            &keys,
+            TableId::Channel,
+            &channel_key,
+            &channel_value(&channel, 1)?,
+            133,
+        )?;
+        assert!(valid.channel_keys.get(&channel_key) == Some(&channel.channel_id));
+        assert!(stale(admit_sealed(
+            &mut valid,
+            &keys,
+            TableId::Channel,
+            &channel_key,
+            &channel_value(&channel, 1)?,
+            134,
+        )));
+        assert_eq!(valid.channels.len(), 1);
+
+        let foreign_key = KeyDeriver::channel_key(ChannelInstanceId::from_bytes([135; 16]))?;
+        let mut foreign = Scan::default();
+        assert!(stale(admit_sealed(
+            &mut foreign,
+            &keys,
+            TableId::Channel,
+            &foreign_key,
+            &channel_value(&channel, 1)?,
+            135,
+        )));
+        assert!(foreign.channels.is_empty());
+
+        let mut revision = Scan::default();
+        assert!(stale(admit_sealed(
+            &mut revision,
+            &keys,
+            TableId::Channel,
+            &channel_key,
+            &channel_value(&channel, 2)?,
+            136,
+        )));
+        assert!(revision.channels.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn live_sessions_bind_identity_counters_and_one_row() -> Result<(), RuntimeError> {
+        let keys = keys()?;
+        let session = session(Vec::new())?;
+        let session_key = KeyDeriver::session_key(session.session_id)?;
+        let body = SessionRecordBody::encode(&session)?;
+        let value = |generation: u64, revision: u64, expires_at: Option<u64>| {
+            PersistentRecordValue::new(
+                TableId::Session,
+                LIVE_RECORD_KIND,
+                revision,
+                generation,
+                expires_at,
+                Vec::new(),
+                body.clone(),
+            )
+        };
+
+        let foreign_key = KeyDeriver::session_key(SessionId::from_bytes([137; 16]))?;
+        let mut foreign = Scan::default();
+        assert!(stale(admit_sealed(
+            &mut foreign,
+            &keys,
+            TableId::Session,
+            &foreign_key,
+            &value(1, 2, None)?,
+            137,
+        )));
+        assert!(foreign.sessions.is_empty());
+
+        for row in [
+            value(2, 2, None)?,
+            value(1, 3, None)?,
+            value(1, 2, Some(921))?,
+        ] {
+            let mut scan = Scan::default();
+            assert!(stale(admit_sealed(
+                &mut scan,
+                &keys,
+                TableId::Session,
+                &session_key,
+                &row,
+                138,
+            )));
+            assert!(scan.sessions.is_empty());
+        }
+
+        let mut duplicate = Scan::default();
+        admit_sealed(
+            &mut duplicate,
+            &keys,
+            TableId::Session,
+            &session_key,
+            &value(1, 2, None)?,
+            139,
+        )?;
+        assert!(stale(admit_sealed(
+            &mut duplicate,
+            &keys,
+            TableId::Session,
+            &session_key,
+            &value(1, 2, None)?,
+            140,
+        )));
+        assert_eq!(duplicate.sessions.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn session_account_references_must_name_the_live_account_exactly() -> Result<(), RuntimeError> {
+        let keys = keys()?;
+        let account = account(None)?;
+        let account_key = KeyDeriver::account_key(account.account_id)?;
+        let mut linked = session(Vec::new())?;
+        linked.account_id = Some(account.account_id);
+        linked.account_session_generation = account.session_generation;
+        let session_key = KeyDeriver::session_key(linked.session_id)?;
+        let account_reference = RecordReference::new(TableId::Account, account_key)?;
+
+        let mut bound = scan_with_account(&keys, &account, 141)?;
+        admit_sealed(
+            &mut bound,
+            &keys,
+            TableId::Session,
+            &session_key,
+            &session_value(&linked, vec![account_reference.clone()])?,
+            142,
+        )?;
+        assert_eq!(bound.sessions.len(), 1);
+
+        let channel_id = ChannelInstanceId::from_bytes([143; 16]);
+        let channel_key = KeyDeriver::channel_key(channel_id)?;
+        let channel_reference = RecordReference::new(TableId::Channel, channel_key.clone())?;
+        let other_reference =
+            RecordReference::new(TableId::Account, KeyDeriver::account_key(account_id(2))?)?;
+        for references in [
+            Vec::new(),
+            vec![channel_reference.clone()],
+            vec![other_reference],
+        ] {
+            let mut scan = scan_with_account(&keys, &account, 144)?;
+            assert!(stale(admit_sealed(
+                &mut scan,
+                &keys,
+                TableId::Session,
+                &session_key,
+                &session_value(&linked, references)?,
+                145,
+            )));
+            assert!(scan.sessions.is_empty());
+        }
+
+        let joined = session(vec![channel_id])?;
+        let joined_key = KeyDeriver::session_key(joined.session_id)?;
+        let mut wrong_table = Scan::default();
+        wrong_table
+            .channel_keys
+            .insert(channel_key.clone(), channel_id);
+        assert!(stale(admit_sealed(
+            &mut wrong_table,
+            &keys,
+            TableId::Session,
+            &joined_key,
+            &session_value(&joined, vec![account_reference.clone()])?,
+            146,
+        )));
+
+        let unknown_reference = RecordReference::new(
+            TableId::Channel,
+            KeyDeriver::channel_key(ChannelInstanceId::from_bytes([147; 16]))?,
+        )?;
+        let mut unknown_channel = Scan::default();
+        unknown_channel.channel_keys.insert(channel_key, channel_id);
+        assert!(stale(admit_sealed(
+            &mut unknown_channel,
+            &keys,
+            TableId::Session,
+            &joined_key,
+            &session_value(&joined, vec![unknown_reference])?,
+            147,
+        )));
+
+        let guest = session(Vec::new())?;
+        let mut stray = Scan::default();
+        assert!(stale(admit_sealed(
+            &mut stray,
+            &keys,
+            TableId::Session,
+            &session_key,
+            &session_value(&guest, vec![account_reference])?,
+            148,
+        )));
+        assert!(stray.sessions.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn sanctions_bind_scope_key_revision_and_expiry() -> Result<(), RuntimeError> {
+        let keys = keys()?;
+        let channel_id = ChannelInstanceId::from_bytes([149; 16]);
+        let scoped = sanction(Some(channel_id), Some(10))?;
+        let scoped_key =
+            KeyDeriver::sanction_key(Some(channel_id), [150; SANCTION_KEY_RANDOM_BYTES])?;
+        let mut valid = Scan::default();
+        admit_sealed(
+            &mut valid,
+            &keys,
+            TableId::Sanction,
+            &scoped_key,
+            &sanction_value(&scoped, 1, Some(10))?,
+            149,
+        )?;
+        assert_eq!(valid.sanctions.len(), 1);
+
+        let mut long_key_bytes = scoped_key.as_bytes().to_vec();
+        long_key_bytes.push(0);
+        let long_key = StoredKey::new(long_key_bytes)?;
+        let mut long = Scan::default();
+        assert!(stale(admit_sealed(
+            &mut long,
+            &keys,
+            TableId::Sanction,
+            &long_key,
+            &sanction_value(&scoped, 1, Some(10))?,
+            150,
+        )));
+        assert!(long.sanctions.is_empty());
+
+        let network = sanction(None, Some(10))?;
+        let network_key = KeyDeriver::sanction_key(None, [151; SANCTION_KEY_RANDOM_BYTES])?;
+        let mut revision = Scan::default();
+        assert!(stale(admit_sealed(
+            &mut revision,
+            &keys,
+            TableId::Sanction,
+            &network_key,
+            &sanction_value(&network, 2, Some(10))?,
+            151,
+        )));
+        let mut expiry = Scan::default();
+        assert!(stale(admit_sealed(
+            &mut expiry,
+            &keys,
+            TableId::Sanction,
+            &network_key,
+            &sanction_value(&network, 1, None)?,
+            152,
+        )));
+        assert!(expiry.sanctions.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn nickname_rows_must_match_account_reservations_exactly() -> Result<(), RuntimeError> {
+        let keys = keys()?;
+        let nickname = NicknameValue::parse("Alice").map_err(|_| RuntimeError::InvalidValue)?;
+        let nickname_key = keys.nickname_key(&nickname)?;
+        let reserving = account(Some(nickname.clone()))?;
+        let account_key = KeyDeriver::account_key(reserving.account_id)?;
+
+        let mut missing_row = scan_with_account(&keys, &reserving, 153)?;
+        assert!(stale(missing_row.bind_nicknames(&keys)));
+
+        let unreferenced = PersistentRecordValue::new(
+            TableId::NicknameReservation,
+            LIVE_RECORD_KIND,
+            1,
+            0,
+            None,
+            Vec::new(),
+            nickname.presentation().as_bytes().to_vec(),
+        )?;
+        let mut no_reference = scan_with_account(&keys, &reserving, 154)?;
+        admit_sealed(
+            &mut no_reference,
+            &keys,
+            TableId::NicknameReservation,
+            &nickname_key,
+            &unreferenced,
+            155,
+        )?;
+        assert!(stale(no_reference.bind_nicknames(&keys)));
+
+        let unreserved = account(None)?;
+        let mut not_reserved = scan_with_account(&keys, &unreserved, 156)?;
+        admit_sealed(
+            &mut not_reserved,
+            &keys,
+            TableId::NicknameReservation,
+            &nickname_key,
+            &reservation_value(&account_key, &nickname)?,
+            157,
+        )?;
+        assert!(stale(not_reserved.bind_nicknames(&keys)));
+
+        let mut duplicate = scan_with_account(&keys, &reserving, 158)?;
+        admit_sealed(
+            &mut duplicate,
+            &keys,
+            TableId::NicknameReservation,
+            &nickname_key,
+            &reservation_value(&account_key, &nickname)?,
+            159,
+        )?;
+        admit_sealed(
+            &mut duplicate,
+            &keys,
+            TableId::NicknameReservation,
+            &nickname_key,
+            &reservation_value(&account_key, &nickname)?,
+            160,
+        )?;
+        assert!(stale(duplicate.bind_nicknames(&keys)));
+        Ok(())
+    }
+
+    #[test]
+    fn channel_name_rows_must_match_live_channels_exactly() -> Result<(), RuntimeError> {
+        let keys = keys()?;
+        let channel = channel(161, "#fixture")?;
+        let channel_key = KeyDeriver::channel_key(channel.channel_id)?;
+        let name_key = keys.channel_name_key(&channel.name)?;
+        let typed_body = ChannelNameRecordBody::encode(channel.channel_id, &channel.name)?;
+        let scan_with_channel = |nonce: u8| {
+            let mut scan = Scan::default();
+            admit_sealed(
+                &mut scan,
+                &keys,
+                TableId::Channel,
+                &channel_key,
+                &channel_value(&channel, 1)?,
+                nonce,
+            )?;
+            Ok::<Scan, RuntimeError>(scan)
+        };
+
+        let mut typed = scan_with_channel(161)?;
+        admit_sealed(
+            &mut typed,
+            &keys,
+            TableId::ChannelName,
+            &name_key,
+            &channel_name_row(&channel_key, typed_body.clone())?,
+            162,
+        )?;
+        typed.bind_channel_names(&keys)?;
+        assert!(typed.index.channel_name_row(channel.channel_id) == Some(&name_key));
+
+        let mut legacy = scan_with_channel(163)?;
+        admit_sealed(
+            &mut legacy,
+            &keys,
+            TableId::ChannelName,
+            &name_key,
+            &channel_name_row(
+                &channel_key,
+                channel.name.presentation().as_bytes().to_vec(),
+            )?,
+            164,
+        )?;
+        legacy.bind_channel_names(&keys)?;
+        assert!(legacy.index.channel_name_row(channel.channel_id) == Some(&name_key));
+
+        let mut unnamed = scan_with_channel(165)?;
+        assert!(stale(unnamed.bind_channel_names(&keys)));
+
+        let other_name =
+            ChannelNameValue::parse("#other").map_err(|_| RuntimeError::InvalidValue)?;
+        let other_key = keys.channel_name_key(&other_name)?;
+        let mut wrong_key = scan_with_channel(166)?;
+        admit_sealed(
+            &mut wrong_key,
+            &keys,
+            TableId::ChannelName,
+            &other_key,
+            &channel_name_row(&channel_key, typed_body.clone())?,
+            167,
+        )?;
+        assert!(stale(wrong_key.bind_channel_names(&keys)));
+
+        let unreferenced = PersistentRecordValue::new(
+            TableId::ChannelName,
+            LIVE_RECORD_KIND,
+            1,
+            0,
+            None,
+            Vec::new(),
+            typed_body.clone(),
+        )?;
+        let mut no_reference = scan_with_channel(168)?;
+        admit_sealed(
+            &mut no_reference,
+            &keys,
+            TableId::ChannelName,
+            &name_key,
+            &unreferenced,
+            169,
+        )?;
+        assert!(stale(no_reference.bind_channel_names(&keys)));
+
+        let misbound_body =
+            ChannelNameRecordBody::encode(ChannelInstanceId::from_bytes([170; 16]), &channel.name)?;
+        let mut misbound = scan_with_channel(170)?;
+        admit_sealed(
+            &mut misbound,
+            &keys,
+            TableId::ChannelName,
+            &name_key,
+            &channel_name_row(&channel_key, misbound_body)?,
+            171,
+        )?;
+        assert!(stale(misbound.bind_channel_names(&keys)));
+
+        let renamed_body = ChannelNameRecordBody::encode(channel.channel_id, &other_name)?;
+        let mut renamed = scan_with_channel(172)?;
+        admit_sealed(
+            &mut renamed,
+            &keys,
+            TableId::ChannelName,
+            &other_key,
+            &channel_name_row(&channel_key, renamed_body)?,
+            173,
+        )?;
+        assert!(stale(renamed.bind_channel_names(&keys)));
+
+        let mut doubled = scan_with_channel(174)?;
+        admit_sealed(
+            &mut doubled,
+            &keys,
+            TableId::ChannelName,
+            &name_key,
+            &channel_name_row(&channel_key, typed_body.clone())?,
+            175,
+        )?;
+        admit_sealed(
+            &mut doubled,
+            &keys,
+            TableId::ChannelName,
+            &name_key,
+            &channel_name_row(&channel_key, typed_body)?,
+            176,
+        )?;
+        assert!(stale(doubled.bind_channel_names(&keys)));
         Ok(())
     }
 }

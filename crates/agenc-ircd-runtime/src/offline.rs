@@ -1440,19 +1440,14 @@ mod tests {
     impl TestDirectory {
         fn create() -> Result<Self, OfflineError> {
             let base = protected_test_base()?;
-            for _ in 0..32 {
-                let sequence = DIRECTORY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-                let root = base.join(format!(
-                    "offline-runtime-test-{}-{sequence}",
-                    std::process::id()
-                ));
-                match fs::create_dir(&root) {
-                    Ok(()) => return Self::finish(root),
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                    Err(_) => return Err(OfflineError::Filesystem),
-                }
-            }
-            Err(OfflineError::Filesystem)
+            let sequence = DIRECTORY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let root = base.join(format!(
+                "offline-runtime-test-{}-{sequence}-{}",
+                std::process::id(),
+                unique_suffix()?
+            ));
+            fs::create_dir(&root).map_err(|_| OfflineError::Filesystem)?;
+            Self::finish(root)
         }
 
         fn finish(root: PathBuf) -> Result<Self, OfflineError> {
@@ -1472,14 +1467,26 @@ mod tests {
             std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")),
         ];
         for base in candidates.into_iter().flatten() {
-            if fs::create_dir_all(&base).is_ok()
-                && test_ancestors_are_protected(&base).is_ok()
-                && test_base_is_storage_qualified(&base).is_ok()
-            {
+            if qualified_test_base(&base).is_ok() {
                 return Ok(base);
             }
         }
         Err(OfflineError::Filesystem)
+    }
+
+    fn qualified_test_base(base: &Path) -> Result<(), OfflineError> {
+        fs::create_dir_all(base).map_err(|_| OfflineError::Filesystem)?;
+        test_ancestors_are_protected(base)?;
+        test_base_is_storage_qualified(base)
+    }
+
+    fn unique_suffix() -> Result<String, OfflineError> {
+        let bytes = random_32()?;
+        let mut suffix = String::new();
+        for byte in bytes.iter().take(8) {
+            write!(suffix, "{byte:02x}").map_err(|_| OfflineError::Filesystem)?;
+        }
+        Ok(suffix)
     }
 
     fn test_base_is_storage_qualified(path: &Path) -> Result<(), OfflineError> {
@@ -1487,7 +1494,9 @@ mod tests {
         let accepted = embedded_storage_qualifications()?
             .into_iter()
             .any(|qualification| {
-                qualification.validate().is_ok() && qualification.tuple() == observed
+                qualification
+                    .validate()
+                    .is_ok_and(|_| qualification.tuple() == observed)
             });
         if accepted {
             Ok(())
@@ -1720,7 +1729,7 @@ mod tests {
         ] {
             let path = root.0.join(name);
             write_secret(&path, &bytes)?;
-            assert!(matches!(read_descriptor(&path), Err(error) if error == expected));
+            assert_eq!(read_descriptor(&path).err(), Some(expected), "{name}");
         }
         let valid_path = root.0.join("valid");
         write_secret(&valid_path, valid.as_bytes())?;
@@ -1956,8 +1965,12 @@ mod tests {
             .port()
             .try_read(ReadPlan::exact(TableId::OpaqueRecord, fake_key.clone()))?
             .wait()?;
-        assert!(matches!(fake_rows.records.as_slice(), [record]
-                if record.table == TableId::OpaqueRecord && record.key == fake_key));
+        let fake_row_keys: Vec<(TableId, StoredKey)> = fake_rows
+            .records
+            .iter()
+            .map(|record| (record.table, record.key.clone()))
+            .collect();
+        assert!(fake_row_keys == vec![(TableId::OpaqueRecord, fake_key)]);
         owner.shutdown()?;
         let descriptor = render_onboarding(&config_path)?;
         assert!(descriptor.starts_with("AGENC-CHAT-CONNECT/1\n"));
@@ -2237,6 +2250,504 @@ mod tests {
         ));
         assert!(fs::symlink_metadata(config_path).is_err());
         assert!(fs::symlink_metadata(data_dir).is_err());
+        Ok(())
+    }
+
+    /// Owner and group identifiers no unprivileged process can grant.
+    const UNGRANTABLE_ID: u32 = u32::MAX - 2;
+
+    fn set_mode(path: &Path, mode: u32) -> Result<(), OfflineError> {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+            .map_err(|_| OfflineError::Filesystem)
+    }
+
+    fn owner_of(path: &Path) -> Result<Ownership, OfflineError> {
+        Ok(directory_identity(path)?.owner)
+    }
+
+    fn file_owner(path: &Path) -> Result<Ownership, OfflineError> {
+        let metadata = fs::symlink_metadata(path).map_err(|_| OfflineError::Filesystem)?;
+        Ok(Ownership {
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+        })
+    }
+
+    fn create_fifo(path: &Path) -> Result<(), OfflineError> {
+        rustix::fs::mkfifoat(CWD, path, Mode::RUSR | Mode::WUSR)
+            .map_err(|_| OfflineError::Filesystem)
+    }
+
+    fn fill_directory(path: &Path, count: usize) -> Result<(), OfflineError> {
+        create_private_directory(path)?;
+        for index in 0..count {
+            fs::write(path.join(format!("entry-{index}")), b"")
+                .map_err(|_| OfflineError::Filesystem)?;
+        }
+        Ok(())
+    }
+
+    fn write_staged_files(staging: &Staging) -> Result<(), OfflineError> {
+        write_secret(staging.operator_signing_key_file(), &[9; 32])?;
+        write_secret(staging.config_file(), b"staged config")
+    }
+
+    #[test]
+    fn init_rejects_operator_authority_beside_config_or_inside_runtime() -> Result<(), OfflineError>
+    {
+        let root = TestDirectory::create()?;
+        let mut beside_config = test_request(&root.0)?;
+        beside_config.operator_signing_key_file = root.0.join("etc/operator-signing.key");
+        assert_eq!(
+            validate_init_request(&beside_config),
+            Err(OfflineError::InvalidRequest)
+        );
+        let mut inside_runtime = test_request(&root.0)?;
+        inside_runtime.operator_signing_key_file = root.0.join("run/operator-signing.key");
+        assert_eq!(
+            validate_init_request(&inside_runtime),
+            Err(OfflineError::InvalidRequest)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn init_rejects_parent_directories_with_the_wrong_mode() -> Result<(), OfflineError> {
+        let root = TestDirectory::create()?;
+        let request = test_request(&root.0)?;
+        assert_eq!(validate_init_request(&request), Ok(()));
+
+        let etc = root.0.join("etc");
+        set_mode(&etc, 0o775)?;
+        assert_eq!(
+            validate_init_request(&request),
+            Err(OfflineError::Filesystem)
+        );
+        set_mode(&etc, DIRECTORY_MODE)?;
+
+        let run = root.0.join("run");
+        set_mode(&run, DIRECTORY_MODE)?;
+        assert_eq!(
+            validate_init_request(&request),
+            Err(OfflineError::Filesystem)
+        );
+        set_mode(&run, 0o750)?;
+
+        let operator = root.0.join("operator");
+        set_mode(&operator, 0o750)?;
+        assert_eq!(
+            validate_init_request(&request),
+            Err(OfflineError::Filesystem)
+        );
+        set_mode(&operator, DIRECTORY_MODE)?;
+        assert_eq!(validate_init_request(&request), Ok(()));
+        Ok(())
+    }
+
+    #[test]
+    fn physical_root_separation_rejects_shared_and_nested_roots() -> Result<(), OfflineError> {
+        let root = TestDirectory::create()?;
+        let separated = test_request(&root.0)?;
+        assert_eq!(validate_physical_root_separation(&separated), Ok(()));
+
+        let mut shared = test_request(&root.0)?;
+        shared.config_path = shared.runtime_dir.join("config.toml");
+        assert_eq!(
+            validate_physical_root_separation(&shared),
+            Err(OfflineError::InvalidRequest)
+        );
+
+        let mut config_above_runtime = test_request(&root.0)?;
+        config_above_runtime.config_path = root.0.join("config.toml");
+        assert_eq!(
+            validate_physical_root_separation(&config_above_runtime),
+            Err(OfflineError::InvalidRequest)
+        );
+
+        let mut config_below_runtime = test_request(&root.0)?;
+        let nested = root.0.join("run/nested");
+        create_private_directory(&nested)?;
+        config_below_runtime.config_path = nested.join("config.toml");
+        assert_eq!(
+            validate_physical_root_separation(&config_below_runtime),
+            Err(OfflineError::InvalidRequest)
+        );
+
+        let identity = DirectoryIdentity {
+            device: 1,
+            inode: 2,
+            mode: DIRECTORY_MODE,
+            owner: Ownership { uid: 0, gid: 0 },
+        };
+        assert!(same_directory(identity, identity));
+        assert!(!same_directory(
+            identity,
+            DirectoryIdentity {
+                device: 3,
+                ..identity
+            }
+        ));
+        assert!(!same_directory(
+            identity,
+            DirectoryIdentity {
+                inode: 3,
+                ..identity
+            }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn physical_directory_helpers_reject_relative_paths_and_non_directories()
+    -> Result<(), OfflineError> {
+        let root = TestDirectory::create()?;
+        assert_eq!(
+            open_physical_directory(Path::new("relative/path")).err(),
+            Some(OfflineError::InvalidRequest)
+        );
+        assert_eq!(
+            directory_identity(Path::new("../parent")),
+            Err(OfflineError::InvalidRequest)
+        );
+        let file = root.0.join("regular");
+        write_secret(&file, b"regular")?;
+        let handle = fs::File::open(&file).map_err(|_| OfflineError::Filesystem)?;
+        assert_eq!(
+            opened_directory_identity(&handle),
+            Err(OfflineError::Filesystem)
+        );
+        assert_eq!(sync_regular_file(&root.0), Err(OfflineError::Filesystem));
+        assert_eq!(sync_regular_file(&file), Ok(()));
+        assert_eq!(
+            private_directory_identity(&root.0, 0o750),
+            Err(OfflineError::Filesystem)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn path_probes_report_unreadable_paths_as_filesystem_failures() -> Result<(), OfflineError> {
+        let root = TestDirectory::create()?;
+        let file = root.0.join("not-a-directory");
+        write_secret(&file, b"file")?;
+        let below_file = file.join("child");
+        let owner = owner_of(&root.0)?;
+        assert_eq!(require_absent(&below_file), Err(OfflineError::Filesystem));
+        assert_eq!(
+            validate_data_path_for_privilege(&below_file, false),
+            Err(OfflineError::Filesystem)
+        );
+        assert_eq!(
+            inspect_precreated_directory(&below_file, owner),
+            Err(OfflineError::Filesystem)
+        );
+        let mut request = test_request(&root.0)?;
+        request.data_dir = below_file;
+        assert_eq!(
+            refuse_existing_targets(&request),
+            Err(OfflineError::Filesystem)
+        );
+        let missing_parent = root.0.join("missing");
+        assert_eq!(
+            create_staging_directory(&missing_parent.join("staging")),
+            Err(OfflineError::Filesystem)
+        );
+        assert!(!missing_parent.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn precreated_target_checks_reject_foreign_owner_replacement_and_entries()
+    -> Result<(), OfflineError> {
+        let root = TestDirectory::create()?;
+        let target = root.0.join("precreated");
+        create_private_directory(&target)?;
+        let owner = owner_of(&root.0)?;
+        let foreign = Ownership {
+            uid: UNGRANTABLE_ID,
+            gid: owner.gid,
+        };
+        assert_eq!(
+            inspect_precreated_directory(&target, foreign),
+            Err(OfflineError::Filesystem)
+        );
+        let identity =
+            inspect_precreated_directory(&target, owner)?.ok_or(OfflineError::Filesystem)?;
+        assert_eq!(verify_precreated_directory(&target, identity), Ok(()));
+        let replaced = DirectoryIdentity {
+            inode: identity.inode.wrapping_add(1),
+            ..identity
+        };
+        assert_eq!(
+            verify_precreated_directory(&target, replaced),
+            Err(OfflineError::Filesystem)
+        );
+        write_secret(&target.join("entry"), b"entry")?;
+        assert_eq!(
+            verify_precreated_directory(&target, identity),
+            Err(OfflineError::Filesystem)
+        );
+        assert_eq!(
+            inspect_precreated_directory(&target, owner),
+            Err(OfflineError::ExistingTarget)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn failed_target_rename_restores_only_precreated_directories() -> Result<(), OfflineError> {
+        let root = TestDirectory::create()?;
+        let fresh = root.0.join("fresh-target");
+        assert_eq!(
+            restore_target_after_failure(&fresh, None, OfflineError::Filesystem),
+            Err(OfflineError::Filesystem)
+        );
+        assert!(!fresh.exists());
+
+        let precreated = root.0.join("precreated-target");
+        create_private_directory(&precreated)?;
+        let identity = directory_identity(&precreated)?;
+        fs::remove_dir(&precreated).map_err(|_| OfflineError::Filesystem)?;
+        assert_eq!(
+            restore_target_after_failure(&precreated, Some(identity), OfflineError::Filesystem),
+            Err(OfflineError::Filesystem)
+        );
+        let restored = private_directory_identity(&precreated, DIRECTORY_MODE)?;
+        assert_eq!(restored.owner, identity.owner);
+        assert!(!directory_has_entry(&precreated)?);
+
+        let unrestorable = root.0.join("missing/precreated-target");
+        assert_eq!(
+            restore_target_after_failure(&unrestorable, Some(identity), OfflineError::Filesystem),
+            Err(OfflineError::PartialInitialization)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn staged_tree_walk_rejects_symlinks_special_files_and_oversized_trees()
+    -> Result<(), OfflineError> {
+        let root = TestDirectory::create()?;
+        let owner = owner_of(&root.0)?;
+
+        let linked = root.0.join("linked");
+        create_private_directory(&linked)?;
+        let target = root.0.join("link-target");
+        write_secret(&target, b"target")?;
+        std::os::unix::fs::symlink(&target, linked.join("link"))
+            .map_err(|_| OfflineError::Filesystem)?;
+        assert_eq!(
+            collect_staged_tree_paths(&linked),
+            Err(OfflineError::Filesystem)
+        );
+        assert_eq!(
+            set_path_ownership(&linked.join("link"), owner),
+            Err(OfflineError::Filesystem)
+        );
+
+        let special = root.0.join("special");
+        create_private_directory(&special)?;
+        create_fifo(&special.join("fifo"))?;
+        assert_eq!(
+            collect_staged_tree_paths(&special),
+            Err(OfflineError::Filesystem)
+        );
+        assert_eq!(
+            set_path_ownership(&special.join("fifo"), owner),
+            Err(OfflineError::Filesystem)
+        );
+
+        let bounded = root.0.join("bounded");
+        fill_directory(&bounded, MAX_STAGED_PATHS - 1)?;
+        assert_eq!(collect_staged_tree_paths(&bounded)?.len(), MAX_STAGED_PATHS);
+        let full = root.0.join("full");
+        fill_directory(&full, MAX_STAGED_PATHS)?;
+        assert_eq!(
+            collect_staged_tree_paths(&full),
+            Err(OfflineError::Filesystem)
+        );
+        let overflowing = root.0.join("overflowing");
+        fill_directory(&overflowing, MAX_STAGED_PATHS + 1)?;
+        assert_eq!(
+            collect_staged_tree_paths(&overflowing),
+            Err(OfflineError::Filesystem)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ownership_repair_refuses_identities_the_process_cannot_grant() -> Result<(), OfflineError> {
+        if geteuid().is_root() {
+            return Ok(());
+        }
+        let root = TestDirectory::create()?;
+        let file = root.0.join("owned");
+        write_secret(&file, b"owned")?;
+        let owner = owner_of(&root.0)?;
+        assert_eq!(set_path_ownership(&file, owner), Ok(()));
+        let foreign_user = Ownership {
+            uid: UNGRANTABLE_ID,
+            gid: owner.gid,
+        };
+        assert_eq!(
+            set_path_ownership(&file, foreign_user),
+            Err(OfflineError::Filesystem)
+        );
+        let foreign_group = Ownership {
+            uid: owner.uid,
+            gid: UNGRANTABLE_ID,
+        };
+        assert_eq!(
+            set_path_ownership(&file, foreign_group),
+            Err(OfflineError::Filesystem)
+        );
+        assert_eq!(file_owner(&file)?, owner);
+        Ok(())
+    }
+
+    #[test]
+    fn descriptor_path_validation_rejects_relative_bare_directory_symlink_and_shared_files()
+    -> Result<(), OfflineError> {
+        let root = TestDirectory::create()?;
+        assert_eq!(
+            validate_existing_file_path(Path::new("relative/connect.txt")),
+            Err(OfflineError::InvalidRequest)
+        );
+        assert_eq!(
+            validate_existing_file_path(Path::new("/")),
+            Err(OfflineError::InvalidRequest)
+        );
+        let directory = root.0.join("descriptor-directory");
+        create_private_directory(&directory)?;
+        assert_eq!(
+            validate_existing_file_path(&directory),
+            Err(OfflineError::Filesystem)
+        );
+        let descriptor = root.0.join("connect.txt");
+        write_secret(&descriptor, b"descriptor")?;
+        assert_eq!(validate_existing_file_path(&descriptor), Ok(()));
+        let link = root.0.join("connect-link.txt");
+        std::os::unix::fs::symlink(&descriptor, &link).map_err(|_| OfflineError::Filesystem)?;
+        assert_eq!(
+            validate_existing_file_path(&link),
+            Err(OfflineError::Filesystem)
+        );
+        set_mode(&descriptor, 0o660)?;
+        assert_eq!(
+            validate_existing_file_path(&descriptor),
+            Err(OfflineError::Filesystem)
+        );
+
+        let mut relative_edge = test_request(&root.0)?;
+        relative_edge.mode = InitMode::Edge {
+            coordinator_descriptor: PathBuf::from("relative/connect.txt"),
+            coordinator_server_id: ServerId::from_bytes([8; 16]),
+        };
+        assert_eq!(
+            validate_init_request(&relative_edge),
+            Err(OfflineError::InvalidRequest)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn config_install_failure_after_data_install_is_partial_and_inspectable()
+    -> Result<(), OfflineError> {
+        if geteuid().is_root() {
+            return Ok(());
+        }
+        let root = TestDirectory::create()?;
+        let request = test_request(&root.0)?;
+        validate_init_request(&request)?;
+        refuse_existing_targets(&request)?;
+        let mut staging = Staging::create(&request)?;
+        write_staged_files(&staging)?;
+        let staging_root = staging.data_root().to_path_buf();
+        let etc = root.0.join("etc");
+        set_mode(&etc, 0o500)?;
+        let outcome = staging.install(&request);
+        drop(staging);
+        set_mode(&etc, DIRECTORY_MODE)?;
+
+        assert_eq!(outcome, Err(OfflineError::PartialInitialization));
+        for name in INSTALL_DIRECTORY_NAMES {
+            assert!(request.data_dir.join(name).is_dir(), "{name}");
+        }
+        assert!(request.operator_signing_key_file.is_file());
+        assert!(!request.config_path.exists());
+        assert!(staging_root.is_dir());
+        assert!(!directory_has_entry(&staging_root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_first_target_rename_restores_the_precreated_layout_without_output()
+    -> Result<(), OfflineError> {
+        if geteuid().is_root() {
+            return Ok(());
+        }
+        let root = TestDirectory::create()?;
+        let request = test_request(&root.0)?;
+        precreate_data_layout(&request)?;
+        validate_init_request(&request)?;
+        refuse_existing_targets(&request)?;
+        let mut staging = Staging::create(&request)?;
+        write_staged_files(&staging)?;
+        let staging_root = staging.data_root().to_path_buf();
+        set_mode(&staging_root, 0o500)?;
+        let outcome = staging.install(&request);
+        set_mode(&staging_root, DIRECTORY_MODE)?;
+        drop(staging);
+
+        assert_eq!(outcome, Err(OfflineError::Filesystem));
+        let data_owner = owner_of(&request.data_dir)?;
+        for name in INSTALL_DIRECTORY_NAMES {
+            let target = request.data_dir.join(name);
+            assert_eq!(
+                private_directory_identity(&target, DIRECTORY_MODE)?.owner,
+                data_owner,
+                "{name}"
+            );
+            assert!(!directory_has_entry(&target)?, "{name}");
+        }
+        assert!(!request.operator_signing_key_file.exists());
+        assert!(!request.config_path.exists());
+        assert!(!staging_root.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn onboarding_rejects_an_hpke_pin_that_does_not_match_the_private_key()
+    -> Result<(), OfflineError> {
+        let root = TestDirectory::create()?;
+        let request = test_request(&root.0)?;
+        let config_path = request.config_path.clone();
+        initialize_node(request)?;
+        enable_test_listener(&root.0)?;
+        assert!(render_onboarding(&config_path).is_ok());
+
+        let text = fs::read_to_string(&config_path).map_err(|_| OfflineError::Filesystem)?;
+        let pinned = text
+            .lines()
+            .find(|line| line.starts_with("account_service_hpke_public_key = "))
+            .ok_or(OfflineError::Configuration)?;
+        let other = AccountHpkePrivateKey::from_bytes([12; 32])
+            .map_err(|_| OfflineError::Cryptography)?
+            .public_key()
+            .map_err(|_| OfflineError::Cryptography)?;
+        let repinned = text.replacen(
+            pinned,
+            &format!(
+                "account_service_hpke_public_key = \"{}\"",
+                encode_base64url_32(other.as_bytes())
+            ),
+            1,
+        );
+        fs::write(&config_path, repinned).map_err(|_| OfflineError::Filesystem)?;
+        assert_eq!(
+            render_onboarding(&config_path).err(),
+            Some(OfflineError::Configuration)
+        );
         Ok(())
     }
 }
