@@ -12,12 +12,20 @@ import tomllib
 from pathlib import Path
 from typing import NoReturn
 
-EXPECTED_MODULES = {"command.rs", "decision.rs", "error.rs", "model.rs", "projection.rs"}
+EXPECTED_MODULES = {
+    "command.rs",
+    "decision.rs",
+    "error.rs",
+    "model.rs",
+    "persist.rs",
+    "projection.rs",
+}
 EXPECTED_TESTS = {
     "domain_channels.rs",
     "domain_commands.rs",
     "domain_lifecycle.rs",
     "domain_reference_model.rs",
+    "domain_secret_admission.rs",
     "domain_stage_three_matrix.rs",
 }
 EXPECTED_TASKS = tuple(f"S03-{number:03d}" for number in range(1, 13)) + ("S03-900",)

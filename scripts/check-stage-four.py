@@ -23,9 +23,11 @@ EXPECTED_CRYPTO_MODULES = {
     "signature.rs",
     "storage.rs",
     "storage_integrity.rs",
+    "tls_ticket.rs",
     "worker.rs",
 }
 EXPECTED_AUTH_MODULES = {
+    "channel_key.rs",
     "error.rs",
     "invitation.rs",
     "opaque.rs",
