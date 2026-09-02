@@ -96,10 +96,10 @@ checks, the config, admin, and runtime package tests, the Stage 06
 persistence tests, Loom models, transcripts, the deterministic soak,
 deployment checks, controlled-host and Tor qualification, and both Stage 06
 fuzz targets. The
-[schema version 2 manifest](evidence/stage-06-2bbe4b97df0a9ad2a17aa743eed4fe7d05323435.json)
+[schema version 2 manifest](evidence/stage-06-f6e82d97aa167097fc6093443cf3bf8abbb30a90.json)
 contains 55 passed records and closes exact source commit
-`2bbe4b97df0a9ad2a17aa743eed4fe7d05323435`. The recorded run of 75 commands reached
-79.80% branch coverage, 91.82% line coverage, and 100% coverage in all six
+`f6e82d97aa167097fc6093443cf3bf8abbb30a90`. The recorded run of 75 commands reached
+79.79% branch coverage, 91.82% line coverage, and 100% coverage in all six
 critical regions against the interim 75% branch floor.
 
 For an evidence-only check:
