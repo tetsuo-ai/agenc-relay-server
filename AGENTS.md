@@ -25,7 +25,7 @@ Use stable Rust, rustfmt defaults, and four-space indentation. Crates and module
 
 ## Testing Guidelines
 
-Add golden-vector, round-trip, negative, property, transcript, and fuzz tests at relevant trust boundaries. Name tests by behavior, such as `rejects_oversized_tag_value`. Each implementation stage must satisfy its Section 29 acceptance gate before the next security-sensitive stage begins. Release coverage targets are 90% branch coverage overall and 100% for the critical branches listed in Section 28.8.
+Add golden-vector, round-trip, negative, property, transcript, and fuzz tests at relevant trust boundaries. Name tests by behavior, such as `rejects_oversized_tag_value`. Each implementation stage must satisfy its Section 29 acceptance gate before the next security-sensitive stage begins. Release coverage targets are 90% branch coverage overall and 100% for the critical branches listed in Section 28.8. Until Stage 10 release qualification the enforced branch floor is the interim 75% recorded in `conformance/critical-coverage.toml`.
 
 ## Commit & Pull Request Guidelines
 

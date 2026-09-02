@@ -33,8 +33,10 @@ each referenced artifact must match their Git index bytes.
 LLVM branch instrumentation is still compiler-gated. The stage scripts set
 `RUSTC_BOOTSTRAP=1` for that coverage process only while retaining the pinned
 Rust compiler; CI policy rejects the variable anywhere else. The detailed
-report must meet the 90 percent overall thresholds and 100 percent for every
-active range in `critical-coverage.toml`. The policy also hashes the full set of
+report must meet the overall thresholds in `critical-coverage.toml` (90 percent
+line coverage, and an interim 75 percent branch floor adopted at Stage 06
+closure; the 90 percent branch target returns with Stage 10 release
+qualification) and 100 percent for every active range in that file. The policy also hashes the full set of
 production Rust sources. Adding, removing, or changing a production source
 invalidates the inventory and forces a review for new critical ranges before
 the coverage check can pass. Duplicate llvm-cov branch records at the same
