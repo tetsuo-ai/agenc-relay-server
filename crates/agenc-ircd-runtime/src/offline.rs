@@ -1448,15 +1448,25 @@ mod tests {
 
     impl TestDirectory {
         fn create() -> Result<Self, OfflineError> {
-            let base = protected_test_base()?;
             let sequence = DIRECTORY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-            let root = base.join(format!(
+            let name = format!(
                 "offline-runtime-test-{}-{sequence}-{}",
                 std::process::id(),
                 unique_suffix()?
-            ));
-            fs::create_dir(&root).map_err(|_| OfflineError::Filesystem)?;
-            Self::finish(root)
+            );
+            // A candidate base can pass every ancestor and storage check and
+            // still refuse the mkdir, for example a root-owned `~/.cache` on a
+            // hosted runner, so the first base that accepts the directory wins.
+            for base in protected_test_bases() {
+                if qualified_test_base(&base).is_err() {
+                    continue;
+                }
+                let root = base.join(&name);
+                if fs::create_dir(&root).is_ok() {
+                    return Self::finish(root);
+                }
+            }
+            Err(OfflineError::Filesystem)
         }
 
         fn finish(root: PathBuf) -> Result<Self, OfflineError> {
@@ -1469,18 +1479,20 @@ mod tests {
         }
     }
 
-    fn protected_test_base() -> Result<PathBuf, OfflineError> {
-        let candidates = [
+    /// Candidate scratch bases in preference order; the home directory itself
+    /// is the last resort because the daemon integration fixture already
+    /// qualifies it on every supported host.
+    fn protected_test_bases() -> Vec<PathBuf> {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        [
             std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
             std::env::var_os("CARGO_TARGET_TMPDIR").map(PathBuf::from),
-            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")),
-        ];
-        for base in candidates.into_iter().flatten() {
-            if qualified_test_base(&base).is_ok() {
-                return Ok(base);
-            }
-        }
-        Err(OfflineError::Filesystem)
+            home.as_ref().map(|home| home.join(".cache")),
+            home,
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 
     fn qualified_test_base(base: &Path) -> Result<(), OfflineError> {
