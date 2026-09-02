@@ -1,11 +1,11 @@
 ---
 name: state-core
-description: "Skill for the State_core area of agenc-ircd. 834 symbols across 47 files."
+description: "Skill for the State_core area of agenc-ircd. 835 symbols across 47 files."
 ---
 
 # State_core
 
-834 symbols | 47 files | Cohesion: 78%
+835 symbols | 47 files | Cohesion: 78%
 
 ## When to Use
 
@@ -18,7 +18,7 @@ description: "Skill for the State_core area of agenc-ircd. 834 symbols across 47
 | File | Symbols |
 |------|---------|
 | `crates/agenc-ircd-runtime/src/account_service.rs` | tag, from_tag, binding, encode, decode (+146) |
-| `crates/agenc-ircd-runtime/src/state_core/mod.rs` | route, complete_command_observation, sessions_mut, buckets_mut, timers_mut (+116) |
+| `crates/agenc-ircd-runtime/src/state_core/mod.rs` | route, complete_command_observation, sessions_mut, buckets_mut, timers_mut (+117) |
 | `crates/agenc-ircd-runtime/src/state_core/reconstruct.rs` | admit_opaque_record, admit_fake_opaque_record, admit_live_opaque_record, finish, reconstruct (+101) |
 | `crates/agenc-ircd-storage/src/construction_runtime.rs` | validate, start, start_streaming, start_inner, push (+79) |
 | `crates/agenc-ircd-runtime/src/state_core/durable.rs` | account_key, put, delete, revalidate, account_service_table (+59) |
