@@ -5,7 +5,7 @@ description: "Skill for the Fuzz_targets area of agenc-ircd. 74 symbols across 1
 
 # Fuzz_targets
 
-74 symbols | 13 files | Cohesion: 71%
+74 symbols | 13 files | Cohesion: 70%
 
 ## When to Use
 
@@ -56,8 +56,8 @@ Start here when exploring this area:
 | `parser_covers_empty_prefix_command_and_parameter_shapes` | Function | `crates/agenc-ircd-client-wire/src/message.rs` | 339 |
 | `taking_parameters_moves_middle_and_trailing_secrets_without_losing_context` | Function | `crates/agenc-ircd-client-wire/src/message.rs` | 373 |
 | `grammar_rejection_refreshes_complete_message_activity` | Function | `crates/agenc-ircd-client-wire/src/registration.rs` | 1461 |
-| `parsed` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 6930 |
-| `parsed` | Function | `crates/agenc-ircd-runtime/src/registration.rs` | 1792 |
+| `parsed` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 6818 |
+| `parsed` | Function | `crates/agenc-ircd-runtime/src/registration.rs` | 2177 |
 | `client_wire_and_domain_agree_on_ctcp_message_semantics` | Function | `crates/agenc-ircd-testkit/tests/domain_commands.rs` | 24 |
 | `exercise_post_registration_grammar` | Function | `fuzz/fuzz_targets/client_state.rs` | 97 |
 | `exercise_post_registration_line` | Function | `fuzz/fuzz_targets/client_state.rs` | 113 |
@@ -74,13 +74,13 @@ Start here when exploring this area:
 | Area | Connections |
 |------|-------------|
 | Tests | 14 calls |
-| Cluster_70 | 5 calls |
-| Cluster_69 | 5 calls |
-| Cluster_93 | 3 calls |
-| Cluster_73 | 3 calls |
+| Cluster_79 | 5 calls |
+| Cluster_78 | 5 calls |
+| Cluster_105 | 3 calls |
+| Cluster_82 | 3 calls |
 | Connection | 2 calls |
 | State_core | 2 calls |
-| Cluster_110 | 1 calls |
+| Cluster_122 | 1 calls |
 
 ## How to Explore
 

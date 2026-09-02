@@ -1,11 +1,11 @@
 ---
 name: scripts
-description: "Skill for the Scripts area of agenc-ircd. 341 symbols across 20 files."
+description: "Skill for the Scripts area of agenc-ircd. 340 symbols across 20 files."
 ---
 
 # Scripts
 
-341 symbols | 20 files | Cohesion: 87%
+340 symbols | 20 files | Cohesion: 87%
 
 ## When to Use
 
@@ -32,36 +32,36 @@ description: "Skill for the Scripts area of agenc-ircd. 341 symbols across 20 fi
 
 Start here when exploring this area:
 
-- **`load_json`** (Function) — `scripts/check-evidence.py:330`
-- **`load_toml`** (Function) — `scripts/check-evidence.py:349`
-- **`validate_catalog`** (Function) — `scripts/check-evidence.py:357`
-- **`validate_schema`** (Function) — `scripts/check-evidence.py:466`
-- **`git_environment`** (Function) — `scripts/check-evidence.py:518`
+- **`load_json`** (Function) — `scripts/check-evidence.py:369`
+- **`load_toml`** (Function) — `scripts/check-evidence.py:388`
+- **`validate_catalog`** (Function) — `scripts/check-evidence.py:396`
+- **`validate_schema`** (Function) — `scripts/check-evidence.py:505`
+- **`git_environment`** (Function) — `scripts/check-evidence.py:557`
 
 ## Key Symbols
 
 | Symbol | Type | File | Line |
 |--------|------|------|------|
-| `load_json` | Function | `scripts/check-evidence.py` | 330 |
-| `load_toml` | Function | `scripts/check-evidence.py` | 349 |
-| `validate_catalog` | Function | `scripts/check-evidence.py` | 357 |
-| `validate_schema` | Function | `scripts/check-evidence.py` | 466 |
-| `git_environment` | Function | `scripts/check-evidence.py` | 518 |
-| `git_bytes` | Function | `scripts/check-evidence.py` | 534 |
-| `require_complete_history` | Function | `scripts/check-evidence.py` | 552 |
-| `validate_index_bytes` | Function | `scripts/check-evidence.py` | 565 |
-| `commit_blob` | Function | `scripts/check-evidence.py` | 607 |
-| `commit_blob_sha256` | Function | `scripts/check-evidence.py` | 612 |
-| `canonical_source_sha256` | Function | `scripts/check-evidence.py` | 617 |
-| `load_toolchain_policy` | Function | `scripts/check-evidence.py` | 871 |
-| `source_toolchain_policy` | Function | `scripts/check-evidence.py` | 895 |
-| `validate` | Function | `scripts/check-evidence.py` | 1115 |
-| `source_gate_policy` | Function | `scripts/check-evidence.py` | 1256 |
-| `resolve` | Function | `scripts/check-evidence.py` | 1290 |
-| `validate_closure_entries` | Function | `scripts/check-evidence.py` | 1541 |
-| `validate_closure` | Function | `scripts/check-evidence.py` | 1628 |
-| `expect_rejection` | Function | `scripts/check-evidence.py` | 1679 |
-| `self_test` | Function | `scripts/check-evidence.py` | 1695 |
+| `load_json` | Function | `scripts/check-evidence.py` | 369 |
+| `load_toml` | Function | `scripts/check-evidence.py` | 388 |
+| `validate_catalog` | Function | `scripts/check-evidence.py` | 396 |
+| `validate_schema` | Function | `scripts/check-evidence.py` | 505 |
+| `git_environment` | Function | `scripts/check-evidence.py` | 557 |
+| `git_bytes` | Function | `scripts/check-evidence.py` | 573 |
+| `require_complete_history` | Function | `scripts/check-evidence.py` | 591 |
+| `validate_index_bytes` | Function | `scripts/check-evidence.py` | 604 |
+| `commit_blob` | Function | `scripts/check-evidence.py` | 646 |
+| `commit_blob_sha256` | Function | `scripts/check-evidence.py` | 651 |
+| `canonical_source_sha256` | Function | `scripts/check-evidence.py` | 656 |
+| `load_toolchain_policy` | Function | `scripts/check-evidence.py` | 910 |
+| `source_toolchain_policy` | Function | `scripts/check-evidence.py` | 934 |
+| `validate` | Function | `scripts/check-evidence.py` | 1154 |
+| `source_gate_policy` | Function | `scripts/check-evidence.py` | 1295 |
+| `resolve` | Function | `scripts/check-evidence.py` | 1329 |
+| `validate_closure_entries` | Function | `scripts/check-evidence.py` | 1580 |
+| `validate_closure` | Function | `scripts/check-evidence.py` | 1667 |
+| `expect_rejection` | Function | `scripts/check-evidence.py` | 1718 |
+| `self_test` | Function | `scripts/check-evidence.py` | 1734 |
 
 ## Execution Flows
 

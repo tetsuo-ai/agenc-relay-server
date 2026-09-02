@@ -1,11 +1,11 @@
 ---
 name: tests
-description: "Skill for the Tests area of agenc-ircd. 1541 symbols across 155 files."
+description: "Skill for the Tests area of agenc-ircd. 1693 symbols across 164 files."
 ---
 
 # Tests
 
-1541 symbols | 155 files | Cohesion: 73%
+1693 symbols | 164 files | Cohesion: 73%
 
 ## When to Use
 
@@ -17,16 +17,16 @@ description: "Skill for the Tests area of agenc-ircd. 1541 symbols across 155 fi
 
 | File | Symbols |
 |------|---------|
-| `crates/agenc-ircd-storage/tests/stage_five_completion.rs` | later_protocol_bodies_are_profile_table_and_arm_bound, login_index_codecs_reject_each_short_circuit_boundary, real_successful_login_batch_injects_lazy_migration_boundaries, login_lookup_and_lazy_migration_are_exactly_two_generation, initialized_lazy_login_fixture (+70) |
-| `crates/agenc-ircd-testkit/tests/domain_reference_model.rs` | apply_production_command, apply_production_join, apply_production, production_authority, production_identity (+64) |
+| `crates/agenc-ircd/tests/stage_six_daemon.rs` | hash, new, require_success, failure, opaque_context (+72) |
+| `crates/agenc-ircd-storage/tests/stage_five_completion.rs` | later_protocol_bodies_are_profile_table_and_arm_bound, domain_body, account_key_bytes, every_table_has_one_closed_schema_and_domain_codec_consumes_fully, persistent_record_schema_rejects_every_key_kind_and_counter_mismatch (+71) |
+| `crates/agenc-ircd-testkit/tests/domain_reference_model.rs` | apply_production, production_authority, apply_production_command, apply_production_join, reference_model_executes_every_command_with_real_behavior (+64) |
 | `crates/agenc-ircd-federation-wire/src/tests/semantics.rs` | schema, fields, validate, opaque, unsigned (+53) |
+| `crates/agenc-ircd-auth/tests/stage_four.rs` | hash, new, credential, operation_context, operation_route (+51) |
 | `crates/agenc-ircd-client-wire/src/registration_command.rs` | validate_post_registration_command, validate_join, validate_part, validate_mode, validate_topic (+50) |
-| `crates/agenc-ircd-auth/tests/stage_four.rs` | hash, new, credential, operation_context, operation_route (+50) |
-| `crates/agenc-ircd/tests/stage_six_daemon.rs` | hash, new, require_success, failure, opaque_context (+48) |
-| `crates/agenc-ircd-domain/src/model.rs` | restore, new, parse, with_policies, from_seed (+33) |
+| `crates/agenc-ircd-storage/src/domain_records.rs` | decode, validate_session, optional_account_id, decode_channel, validate_channel (+49) |
+| `crates/agenc-ircd-domain/src/model.rs` | new, parse, with_policies, from_seed, test_public_cloak (+32) |
 | `crates/agenc-ircd-federation-wire/src/codec.rs` | encode_canonical, claim_bytes, validate_bounds, is_optional_fixed, validate_optional_fixed_field (+31) |
-| `crates/agenc-ircd-storage/src/domain_records.rs` | decode, expect_version, byte, text, optional_text (+29) |
-| `crates/agenc-ircd-runtime/tests/listener_accept.rs` | snapshot, default, fixture, server, client (+25) |
+| `crates/agenc-ircd-runtime/tests/listener_accept.rs` | default, fixture, server, client, start (+26) |
 
 ## Entry Points
 
@@ -49,47 +49,47 @@ Start here when exploring this area:
 | `tracked_record_commitment` | Function | `crates/agenc-ircd-crypto/src/storage_integrity.rs` | 274 |
 | `tracked_state_digest` | Function | `crates/agenc-ircd-crypto/src/storage_integrity.rs` | 279 |
 | `update` | Function | `crates/agenc-ircd-crypto/src/storage_integrity.rs` | 315 |
-| `finalize` | Function | `crates/agenc-ircd-crypto/src/storage_integrity.rs` | 328 |
 | `update_entry` | Function | `crates/agenc-ircd-crypto/src/storage_integrity.rs` | 444 |
 | `reserved_memory_bytes` | Function | `crates/agenc-ircd-crypto/src/worker.rs` | 102 |
-| `new` | Function | `crates/agenc-ircd-runtime/src/bridge/crypto.rs` | 105 |
-| `start` | Function | `crates/agenc-ircd-runtime/src/bridge/crypto.rs` | 856 |
-| `listener_ceiling` | Function | `crates/agenc-ircd-runtime/src/runtime_config.rs` | 280 |
-| `backup_stream_bytes` | Function | `crates/agenc-ircd-storage/src/backup.rs` | 1011 |
+| `new` | Function | `crates/agenc-ircd-runtime/src/bridge/crypto.rs` | 108 |
+| `start` | Function | `crates/agenc-ircd-runtime/src/bridge/crypto.rs` | 876 |
+| `listener_ceiling` | Function | `crates/agenc-ircd-runtime/src/runtime_config.rs` | 373 |
+| `refresh` | Function | `crates/agenc-ircd-runtime/src/state_core/durable.rs` | 418 |
+| `finish` | Function | `crates/agenc-ircd-runtime/src/state_core/mod.rs` | 495 |
+| `backup_stream_bytes` | Function | `crates/agenc-ircd-storage/src/backup.rs` | 1017 |
 | `finish` | Function | `crates/agenc-ircd-storage/src/codec.rs` | 52 |
 | `take` | Function | `crates/agenc-ircd-storage/src/codec.rs` | 67 |
 | `array` | Function | `crates/agenc-ircd-storage/src/codec.rs` | 80 |
 | `u16` | Function | `crates/agenc-ircd-storage/src/codec.rs` | 86 |
 | `u32` | Function | `crates/agenc-ircd-storage/src/codec.rs` | 90 |
-| `u64` | Function | `crates/agenc-ircd-storage/src/codec.rs` | 94 |
 
 ## Execution Flows
 
 | Flow | Type | Steps |
 |------|------|-------|
+| `Connection_opened → FixtureIdentity` | cross_community | 8 |
+| `Connection_opened → Create` | cross_community | 8 |
 | `Mode_vectors_simulate_client_order_and_check_only_the_final_state → Presentation` | cross_community | 8 |
 | `Mode_vectors_simulate_client_order_and_check_only_the_final_state → Canonical` | cross_community | 8 |
 | `Mutation_application_covers_optional_cleanup_and_destroy_paths → Presentation` | cross_community | 8 |
 | `Mutation_application_covers_optional_cleanup_and_destroy_paths → Canonical` | cross_community | 8 |
 | `Mutation_application_covers_optional_cleanup_and_destroy_paths → Is_global` | cross_community | 8 |
-| `Reconstruct → As_bytes` | cross_community | 7 |
-| `Reconstruct → Try_from` | cross_community | 7 |
 | `Audit_mutations_rebuild_policy_and_reject_invalid_phase_pairings → As_bytes` | cross_community | 7 |
-| `Audit_mutations_rebuild_policy_and_reject_invalid_phase_pairings → Try_from` | cross_community | 7 |
-| `Verifies_gapless_events_and_rejects_unmatched_intents → As_bytes` | cross_community | 7 |
+| `Rebuild_rekey_plan → As_bytes` | cross_community | 6 |
+| `Rebuild_rekey_plan → Validate` | cross_community | 6 |
 
 ## Connected Areas
 
 | Area | Connections |
 |------|-------------|
-| State_core | 96 calls |
-| Listener | 31 calls |
-| Cluster_503 | 30 calls |
-| Admission | 23 calls |
-| Tls | 22 calls |
-| Cluster_58 | 18 calls |
-| Fuzz_targets | 17 calls |
-| Cluster_185 | 16 calls |
+| State_core | 106 calls |
+| Listener | 48 calls |
+| Admission | 32 calls |
+| Cluster_577 | 30 calls |
+| Tls | 23 calls |
+| Cluster_218 | 19 calls |
+| Fuzz_targets | 19 calls |
+| Cluster_64 | 18 calls |
 
 ## How to Explore
 
