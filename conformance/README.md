@@ -84,6 +84,21 @@ branch coverage, 95.65% line coverage, and 100% coverage in all six critical
 regions. The earlier manifest for `bd7518fe7f5c7420debdbaa958aa444ecb5c80c9`
 remains archive-only.
 
+Run the Stage 06 implementation checks:
+
+```sh
+bash scripts/check-stage-six.sh
+```
+
+This command inherits the Stage 05 gate and adds the Stage 06 requirement
+set, the runtime profile with 16 transcripts and five host qualification
+checks, the config, admin, and runtime package tests, the Stage 06
+persistence tests, Loom models, transcripts, the deterministic soak,
+deployment checks, controlled-host and Tor qualification, and both Stage 06
+fuzz targets. The closing manifest for the exact Stage 06 source commit is
+recorded beside the earlier checkpoints under `evidence/` when the gate run
+is captured with `AGENC_IRCD_RECORD_GATE=1`.
+
 For an evidence-only check:
 
 ```sh
