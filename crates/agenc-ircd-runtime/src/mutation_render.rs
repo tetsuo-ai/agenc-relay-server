@@ -1909,7 +1909,7 @@ mod tests {
                       command: &dyn Fn() -> Result<CanonicalCommand, DomainError>|
          -> Result<(), Box<dyn core::error::Error>> {
             let request = parsed(line)?;
-            let PlanDecision::Mutation(plan) = plan_live(context, identity, command, 20)? else {
+            let PlanDecision::Mutation(plan) = plan_live(context, identity, command)? else {
                 return Err("command was not planned as a mutation".into());
             };
             let reply = ReplyInput {
@@ -2004,7 +2004,7 @@ mod tests {
                      command: &dyn Fn() -> Result<CanonicalCommand, DomainError>|
          -> Result<usize, Box<dyn core::error::Error>> {
             let request = parsed(line)?;
-            let decision = plan_live(context, identity, command, 30)
+            let decision = plan_live(context, identity, command)
                 .map_err(|error| format!("{line}: {error}"))?;
             let PlanDecision::Mutation(plan) = decision else {
                 return Err(format!("{line} was not planned as a mutation").into());

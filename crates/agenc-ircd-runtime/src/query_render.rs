@@ -2051,4 +2051,201 @@ mod tests {
         assert!(frames.len() >= 6);
         Ok(())
     }
+
+    #[test]
+    fn live_queries_render_lists_names_who_whois_topics_modes_and_information()
+    -> Result<(), Box<dyn Error>> {
+        use agenc_ircd_client_wire::{FramedLine, parse_message};
+        use agenc_ircd_domain::{
+            AwayText, DomainError, InformationQuery, MaskList, NicknameValue, PlanDecision,
+            UserQuery, WhoTarget,
+        };
+
+        use crate::client_render::ReplyInput;
+        use crate::connection::ConnectionGeneration;
+        use crate::test_support::{
+            StateCoreFixture, apply_live_plan, bind_live_session, negotiated_capabilities,
+            plan_live, seed_account, seed_session,
+        };
+
+        const CAPABILITIES: &[&str] = &[
+            "batch",
+            "labeled-response",
+            "userhost-in-names",
+            "multi-prefix",
+            "server-time",
+            "message-tags",
+            "away-notify",
+            "account-notify",
+            "extended-join",
+            "standard-replies",
+        ];
+        let mut fixture = StateCoreFixture::new(Vec::new())?;
+        let context = fixture.context_mut()?;
+        let account = seed_account(context, 1, 1)?;
+        let owner = seed_session(context, 1, "QueryOwner", Some(account))?;
+        let member = seed_session(context, 2, "QueryMember", None)?;
+        let _owner_sink = bind_live_session(
+            context,
+            1,
+            owner,
+            negotiated_capabilities(CAPABILITIES)?,
+            true,
+        )?;
+        let member_sink = bind_live_session(
+            context,
+            2,
+            member,
+            negotiated_capabilities(CAPABILITIES)?,
+            true,
+        )?;
+        let capabilities = negotiated_capabilities(CAPABILITIES)?;
+        let listed = ChannelNameValue::parse("#query-listed")?;
+        let secret = ChannelNameValue::parse("#query-secret")?;
+        let mutate = |context: &mut StateCoreContext,
+                      identity: DomainTestIdentity,
+                      label: &str,
+                      command: &dyn Fn() -> Result<CanonicalCommand, DomainError>|
+         -> Result<(), Box<dyn Error>> {
+            let decision = plan_live(context, identity, command)
+                .map_err(|error| format!("{label}: {error}"))?;
+            let PlanDecision::Mutation(plan) = decision else {
+                return Err(format!("{label}: expected a mutation").into());
+            };
+            apply_live_plan(context, plan)
+        };
+        mutate(context, owner, "join listed owner", &|| {
+            CanonicalCommand::join(vec![ChannelTarget::new(listed.clone(), false)])
+        })?;
+        mutate(context, member, "join listed member", &|| {
+            CanonicalCommand::join(vec![ChannelTarget::new(listed.clone(), false)])
+        })?;
+        mutate(context, owner, "join secret owner", &|| {
+            CanonicalCommand::join(vec![ChannelTarget::new(secret.clone(), false)])
+        })?;
+        mutate(context, owner, "mode secret", &|| {
+            CanonicalCommand::mode(
+                secret.clone(),
+                vec![ModeChange::Visibility {
+                    operation: ModeOperation::Add,
+                    mode: VisibilityMode::Secret,
+                }],
+            )
+        })?;
+        mutate(context, owner, "topic listed", &|| {
+            let topic = TopicText::try_from_str("topic", ControlPolicy::RejectAll)
+                .map_err(|_| DomainError::InvalidArgument)?;
+            Ok(CanonicalCommand::topic_set(listed.clone(), topic))
+        })?;
+        mutate(context, owner, "ban listed", &|| {
+            CanonicalCommand::mode(
+                listed.clone(),
+                vec![ModeChange::AddMask {
+                    list: MaskList::Ban,
+                    mask: TypedMask::parse("$n:banned")
+                        .map_err(|_| DomainError::InvalidArgument)?,
+                }],
+            )
+        })?;
+        mutate(context, owner, "away owner", &|| {
+            let away = AwayText::try_from_str("away", ControlPolicy::RejectAll)
+                .map_err(|_| DomainError::InvalidArgument)?;
+            CanonicalCommand::presence(PresenceCommand::Away(Some(away)))
+        })?;
+
+        let query = |context: &mut StateCoreContext,
+                     identity: DomainTestIdentity,
+                     generation: u64,
+                     line: &str,
+                     command: &dyn Fn() -> Result<CanonicalCommand, DomainError>|
+         -> Result<(), Box<dyn Error>> {
+            let request = parse_message(FramedLine::new(line)?)?.ok_or("empty request")?;
+            let decision = plan_live(context, identity, command)
+                .map_err(|error| format!("{line}: {error}"))?;
+            let PlanDecision::Query(plan) = decision else {
+                return Err(format!("{line} was not planned as a query").into());
+            };
+            let reply = ReplyInput {
+                requester: identity.user_id,
+                generation: ConnectionGeneration::new(generation),
+                capabilities: &capabilities,
+                request: &request,
+            };
+            render_query(context, reply, &plan).map_err(|_| format!("{line} failed to render"))?;
+            Ok(())
+        };
+        let nick = |name: &str| NicknameValue::parse(name);
+        query(context, owner, 1, "LIST", &|| {
+            CanonicalCommand::list(Vec::new())
+        })?;
+        query(context, member, 2, "LIST #query-listed", &|| {
+            CanonicalCommand::list(vec![listed.clone()])
+        })?;
+        query(context, member, 2, "NAMES #query-listed", &|| {
+            CanonicalCommand::names(vec![listed.clone()])
+        })?;
+        query(context, owner, 1, "NAMES #query-secret", &|| {
+            CanonicalCommand::names(vec![secret.clone()])
+        })?;
+        query(context, member, 2, "TOPIC #query-listed", &|| {
+            Ok(CanonicalCommand::topic_query(listed.clone()))
+        })?;
+        query(context, member, 2, "MODE #query-listed", &|| {
+            Ok(CanonicalCommand::channel_mode_query(listed.clone()))
+        })?;
+        query(context, member, 2, "MODE #query-listed +b", &|| {
+            Ok(CanonicalCommand::channel_mode_list(
+                listed.clone(),
+                MaskList::Ban,
+            ))
+        })?;
+        query(context, member, 2, "MODE QueryMember", &|| {
+            Ok(CanonicalCommand::user_mode_query(nick("QueryMember")?))
+        })?;
+        query(context, member, 2, "WHO", &|| {
+            CanonicalCommand::user_query(UserQuery::Who(None))
+        })?;
+        query(context, member, 2, "WHO #query-listed", &|| {
+            CanonicalCommand::user_query(UserQuery::Who(Some(WhoTarget::Channel(listed.clone()))))
+        })?;
+        query(context, member, 2, "WHO QueryOwner", &|| {
+            CanonicalCommand::user_query(UserQuery::Who(Some(WhoTarget::Nickname(nick(
+                "QueryOwner",
+            )?))))
+        })?;
+        query(context, member, 2, "WHOIS QueryOwner", &|| {
+            CanonicalCommand::user_query(UserQuery::Whois(nick("QueryOwner")?))
+        })?;
+        query(context, owner, 1, "WHOIS QueryOwner", &|| {
+            CanonicalCommand::user_query(UserQuery::Whois(nick("QueryOwner")?))
+        })?;
+        query(context, member, 2, "WHOWAS QueryOwner 1", &|| {
+            CanonicalCommand::user_query(UserQuery::Whowas(nick("QueryOwner")?, 1))
+        })?;
+        query(context, member, 2, "ISON QueryOwner Nobody", &|| {
+            CanonicalCommand::user_query(UserQuery::Ison(vec![
+                nick("QueryOwner")?,
+                nick("Nobody")?,
+            ]))
+        })?;
+        query(context, member, 2, "USERHOST QueryOwner", &|| {
+            CanonicalCommand::user_query(UserQuery::Userhost(vec![nick("QueryOwner")?]))
+        })?;
+        let information = [
+            ("MOTD", InformationQuery::Motd),
+            ("LUSERS", InformationQuery::Lusers),
+            ("VERSION", InformationQuery::Version),
+            ("TIME", InformationQuery::Time),
+            ("ADMIN", InformationQuery::Admin),
+            ("INFO", InformationQuery::Info),
+            ("LINKS", InformationQuery::Links),
+        ];
+        for (line, information) in information {
+            query(context, member, 2, line, &|| {
+                Ok(CanonicalCommand::information(information))
+            })?;
+        }
+        assert!(member_sink.commits() > 0);
+        Ok(())
+    }
 }

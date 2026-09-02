@@ -58,6 +58,7 @@ use crate::sync::Arc;
 pub(crate) type TestResult<T = ()> = Result<T, Box<dyn core::error::Error>>;
 
 static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static NEXT_CHANNEL_SEED: AtomicU64 = AtomicU64::new(100);
 
 /// Storage limits small enough for unit tests and large enough for every
 /// mutation batch a test stages.
@@ -487,15 +488,16 @@ fn answer_entropy(
     next_channel
 }
 
-/// Answers one external request vector deterministically; fresh channel
-/// identities derive from `channel_seed` in request order.
+/// Answers one external request vector deterministically; every fresh channel
+/// identity comes from a process-wide counter so repeated creations never
+/// collide.
 pub(crate) fn answer_external(
     requests: &[agenc_ircd_domain::ExternalInputRequest],
-    channel_seed: u8,
 ) -> agenc_ircd_domain::ExternalInputs {
     use agenc_ircd_domain::{ExternalInputRequest, ExternalInputs};
     let mut inputs = ExternalInputs::default();
-    let mut next_channel = channel_seed;
+    let mut next_channel =
+        u8::try_from(NEXT_CHANNEL_SEED.fetch_add(8, Ordering::Relaxed) % 256).unwrap_or_default();
     for request in requests {
         match request {
             ExternalInputRequest::UtcNow { .. } => {
@@ -522,18 +524,40 @@ pub(crate) fn plan_live(
     identity: DomainTestIdentity,
     command: &dyn Fn()
         -> Result<agenc_ircd_domain::CanonicalCommand, agenc_ircd_domain::DomainError>,
-    channel_seed: u8,
 ) -> TestResult<agenc_ircd_domain::PlanDecision> {
     use agenc_ircd_domain::PlanDecision;
     // A superset admission: registered-command credit plus message credit
-    // for the caller and for the channels this seed range can create.
-    let channels: Vec<_> = (channel_seed..channel_seed.saturating_add(4))
-        .map(agenc_ircd_testkit::channel_id)
-        .collect();
-    let admission = agenc_ircd_testkit::message_admission(identity, &channels)?;
+    // for the caller and for every channel the counter could have created.
+    let mut entries = vec![
+        (
+            agenc_ircd_domain::RateBucket::RegisteredCommand(identity.user_id),
+            100,
+        ),
+        (
+            agenc_ircd_domain::RateBucket::ExpensiveQuery(identity.user_id),
+            100,
+        ),
+    ];
+    entries.push(match identity.account_id {
+        Some(account_id) => (
+            agenc_ircd_domain::RateBucket::AccountMessage(account_id),
+            100,
+        ),
+        None => (
+            agenc_ircd_domain::RateBucket::GuestMessage(identity.user_id),
+            100,
+        ),
+    });
+    entries.extend((0..=u8::MAX).map(|seed| {
+        (
+            agenc_ircd_domain::RateBucket::ChannelMessage(agenc_ircd_testkit::channel_id(seed)),
+            100,
+        )
+    }));
+    let admission = agenc_ircd_domain::AdmissionSnapshot::new(entries)?;
     match agenc_ircd_testkit::plan(context.domain(), identity, command()?, &admission, None)? {
         PlanDecision::NeedsExternal(requests) => {
-            let inputs = answer_external(&requests, channel_seed);
+            let inputs = answer_external(&requests);
             Ok(agenc_ircd_testkit::plan(
                 context.domain(),
                 identity,
