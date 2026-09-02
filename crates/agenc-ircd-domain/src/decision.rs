@@ -695,6 +695,7 @@ enum Mutation {
     },
     ApplyModes {
         channel_id: ChannelInstanceId,
+        setter: Principal,
         changes: Vec<ModeChange>,
         entry_ids: Vec<EntryId>,
         key_verifiers: Vec<crate::ChannelKeyVerifier>,
@@ -1137,12 +1138,14 @@ impl Mutation {
             },
             Self::ApplyModes {
                 channel_id,
+                setter,
                 changes,
                 entry_ids,
                 key_verifiers,
                 created_at,
             } => Self::ApplyModes {
                 channel_id: *channel_id,
+                setter: *setter,
                 changes: changes
                     .iter()
                     .map(duplicate_mode_change)
@@ -1193,6 +1196,14 @@ fn duplicate_mode_change(change: &ModeChange) -> Result<ModeChange, DomainError>
     })
 }
 
+/// One atomic mode vector with the external inputs its mask and key arms consume.
+struct ModeBatch {
+    setter: Principal,
+    changes: Vec<ModeChange>,
+    entry_ids: Vec<EntryId>,
+    key_verifiers: Vec<crate::ChannelKeyVerifier>,
+    created_at: Option<UtcSecond>,
+}
 struct JoinPlanAccumulator {
     user_id: UserId,
     principal: Principal,
@@ -2562,7 +2573,7 @@ impl DomainState {
                 self.plan_topic(user_id, name, topic, charges, inputs)
             }
             CanonicalCommandData::Mode(ModeCommand::ChannelChange(name, changes)) => {
-                self.plan_modes(user_id, name, changes, charges, inputs)
+                self.plan_modes(user_id, principal, name, changes, charges, inputs)
             }
             CanonicalCommandData::Mode(ModeCommand::UserOperatorNotices(_, enabled)) => {
                 self.plan_operator_notices(user_id, enabled, charges)
@@ -3003,6 +3014,7 @@ impl DomainState {
     fn plan_modes(
         &self,
         user_id: UserId,
+        principal: Principal,
         name: ChannelNameValue,
         changes: Vec<ModeChange>,
         charges: Vec<RateCharge>,
@@ -3023,6 +3035,7 @@ impl DomainState {
         self.command_plan(
             vec![Mutation::ApplyModes {
                 channel_id,
+                setter: principal,
                 changes,
                 entry_ids: inputs.entry_ids,
                 key_verifiers: inputs.key_verifiers,
@@ -3810,6 +3823,7 @@ impl DomainState {
             }
             Mutation::ApplyModes {
                 channel_id,
+                setter,
                 changes,
                 entry_ids,
                 key_verifiers,
@@ -3817,10 +3831,13 @@ impl DomainState {
             } => {
                 self.apply_modes(
                     channel_id,
-                    changes,
-                    entry_ids,
-                    key_verifiers,
-                    created_at,
+                    ModeBatch {
+                        setter,
+                        changes,
+                        entry_ids,
+                        key_verifiers,
+                        created_at,
+                    },
                     revision,
                 );
             }
@@ -4126,20 +4143,20 @@ impl DomainState {
         }
     }
 
-    fn apply_modes(
-        &mut self,
-        channel_id: ChannelInstanceId,
-        changes: Vec<ModeChange>,
-        entry_ids: Vec<EntryId>,
-        key_verifiers: Vec<crate::ChannelKeyVerifier>,
-        created_at: Option<UtcSecond>,
-        revision: Revision,
-    ) {
+    fn apply_modes(&mut self, channel_id: ChannelInstanceId, batch: ModeBatch, revision: Revision) {
+        let ModeBatch {
+            setter,
+            changes,
+            entry_ids,
+            key_verifiers,
+            created_at,
+        } = batch;
         let mut entry_ids = entry_ids.into_iter();
         let mut key_verifiers = key_verifiers.into_iter();
         for change in changes {
             self.apply_mode_change(
                 channel_id,
+                setter,
                 change,
                 &mut entry_ids,
                 &mut key_verifiers,
@@ -4152,6 +4169,7 @@ impl DomainState {
     fn apply_mode_change(
         &mut self,
         channel_id: ChannelInstanceId,
+        setter: Principal,
         change: ModeChange,
         entry_ids: &mut impl Iterator<Item = EntryId>,
         key_verifiers: &mut impl Iterator<Item = crate::ChannelKeyVerifier>,
@@ -4181,10 +4199,12 @@ impl DomainState {
             }
             ModeChange::AddMask { list, mask } => {
                 if let Some(entry_id) = entry_ids.next() {
+                    // Spec 21.4 records the principal that created the entry,
+                    // which is the acting operator, not the channel creator.
                     let entry = crate::ListEntry::new(
                         entry_id,
                         mask,
-                        channel.creator,
+                        setter,
                         created_at.unwrap_or(channel.created_at),
                     );
                     mask_list_mut(channel, list).push(entry);
@@ -8074,6 +8094,7 @@ mod tests {
 
         fixture.state.apply_mode_change(
             missing_channel,
+            Principal::Account(fixture.owner_account),
             ModeChange::Moderated(true),
             &mut Vec::<EntryId>::new().into_iter(),
             &mut Vec::<crate::ChannelKeyVerifier>::new().into_iter(),
@@ -8081,6 +8102,7 @@ mod tests {
         );
         fixture.state.apply_mode_change(
             fixture.channel_id,
+            Principal::Account(fixture.owner_account),
             ModeChange::AddMask {
                 list: MaskList::Exception,
                 mask: TypedMask::parse("$n:no-id")?,
@@ -8091,6 +8113,7 @@ mod tests {
         );
         fixture.state.apply_mode_change(
             fixture.channel_id,
+            Principal::Account(fixture.owner_account),
             ModeChange::AddMask {
                 list: MaskList::Exception,
                 mask: TypedMask::parse("$n:with-id")?,
@@ -8101,6 +8124,7 @@ mod tests {
         );
         fixture.state.apply_mode_change(
             fixture.channel_id,
+            Principal::Account(fixture.owner_account),
             ModeChange::RemoveMask {
                 list: MaskList::Exception,
                 entry_id: EntryId::from_bytes(bytes(216)),
@@ -10238,6 +10262,53 @@ mod tests {
             ),
             Ok(())
         );
+        Ok(())
+    }
+
+    #[test]
+    fn mask_list_entries_record_the_operator_that_added_them() -> Result<(), DomainError> {
+        let mut fixture = fixture()?;
+        let state = &mut fixture.state;
+        let channel = state
+            .channels
+            .get_mut(&fixture.channel_id)
+            .ok_or(DomainError::NotFound)?;
+        let membership = channel
+            .memberships
+            .get_mut(&fixture.member.user_id)
+            .ok_or(DomainError::NotFound)?;
+        membership.session_role = Role::Operator;
+        membership.effective_role = Role::Operator;
+        let command = CanonicalCommand::mode(
+            fixture.name.clone(),
+            vec![ModeChange::AddMask {
+                list: MaskList::Ban,
+                mask: TypedMask::parse("$n:troll")?,
+            }],
+        )?;
+        let authorized = state
+            .authorize(
+                envelope(&fixture.member, state.revision, command),
+                &admission(fixture.member.user_id)?,
+            )
+            .map_err(|failure| failure.error())?;
+        let inputs = ExternalInputs {
+            utc_now: Some(UtcSecond::from_unix_seconds(20)),
+            entry_ids: vec![EntryId::from_bytes(bytes(90))],
+            ..ExternalInputs::default()
+        };
+        let PlanDecision::Mutation(plan) = state.plan_authorized(authorized, Some(inputs))? else {
+            return Err(DomainError::InvariantViolation);
+        };
+        let prepared = state.prepare_mutation(plan)?;
+        state.apply_prepared(prepared)?;
+        let entry = state
+            .channel(fixture.channel_id)
+            .and_then(|channel| channel.mask_list(MaskList::Ban).first())
+            .ok_or(DomainError::NotFound)?;
+        assert_eq!(entry.setter(), Principal::Account(fixture.member_account));
+        assert_ne!(entry.setter(), Principal::Account(fixture.owner_account));
+        assert_eq!(entry.created_at(), UtcSecond::from_unix_seconds(20));
         Ok(())
     }
 }
