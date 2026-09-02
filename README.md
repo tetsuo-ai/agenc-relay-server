@@ -18,7 +18,7 @@
 > **This is pre-alpha infrastructure, not a deployable server.** Stages 00
 > through 06 are complete. The Stage 04 and Stage 05 checkpoints close exact
 > source commit `4040796f2c21774d58ea7ce54e70a080678e83ac`, and the Stage 06
-> checkpoint closes `f6e82d97aa167097fc6093443cf3bf8abbb30a90`. The daemon serves TLS-only direct,
+> checkpoint closes `65cce9d66f7bcfb0c0830a2ab1d42b52bff82942`. The daemon serves TLS-only direct,
 > Tor-exit, and onion profiles on one node. Federation, E2EE, and WebSocket
 > transports belong to later stages and are not advertised.
 
@@ -68,7 +68,7 @@ messaging, isolated administration with an audit chain, atomic live reload,
 privacy-bounded observability, and hardened shutdown. Stage 07 base federation
 is the next implementation stage. The complete dependency-ordered roadmap
 lives in [TODO.md](TODO.md). See the
-[Stage 06 checkpoint](conformance/evidence/stage-06-f6e82d97aa167097fc6093443cf3bf8abbb30a90.json), the
+[Stage 06 checkpoint](conformance/evidence/stage-06-65cce9d66f7bcfb0c0830a2ab1d42b52bff82942.json), the
 [Stage 05 storage profile](conformance/stage-five-storage-profile.toml), the
 [current Stage 05 checkpoint](conformance/evidence/stage-05-4040796f2c21774d58ea7ce54e70a080678e83ac.json), the
 [previous Stage 05 checkpoint](conformance/evidence/stage-05-bd7518fe7f5c7420debdbaa958aa444ecb5c80c9.json), the
@@ -137,9 +137,9 @@ includes 191 storage tests, cross-target checks for
 x86_64 and AArch64, signed native ext4 growth reports for both targets, and
 10,000 deterministic runs of each storage fuzz target.
 
-The [Stage 06 manifest](conformance/evidence/stage-06-f6e82d97aa167097fc6093443cf3bf8abbb30a90.json)
+The [Stage 06 manifest](conformance/evidence/stage-06-65cce9d66f7bcfb0c0830a2ab1d42b52bff82942.json)
 contains 55 passed records and closes exact source commit
-`f6e82d97aa167097fc6093443cf3bf8abbb30a90`. Its recorded gate ran 75 commands.
+`65cce9d66f7bcfb0c0830a2ab1d42b52bff82942`. Its recorded gate ran 75 commands.
 Coverage is 79.79% of branches and 91.82% of lines against the interim 75%
 branch floor, with all six critical regions at 100%. The gate includes the
 Stage 06 requirement set, cross-target checks for x86_64 and AArch64, Loom
