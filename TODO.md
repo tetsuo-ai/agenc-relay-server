@@ -56,7 +56,7 @@ References: [Architecture §§1.2–4](docs/ircd-architecture-and-implementation
 | 03 | Pure deterministic domain model | Complete | Pass, 2026-08-27 | [Current checkpoint](conformance/evidence/stage-03-1e5b738468f88b238061cc6e84b732176f5cae65.json) |
 | 04 | Crypto adapters and account authentication | Complete | Pass, 2026-08-29 | [Current checkpoint](conformance/evidence/stage-04-4040796f2c21774d58ea7ce54e70a080678e83ac.json) |
 | 05 | Durable and recoverable persistence | Complete | Pass, 2026-08-29 | [Current checkpoint](conformance/evidence/stage-05-4040796f2c21774d58ea7ce54e70a080678e83ac.json) |
-| 06 | Conforming single-node daemon | Implementation passes; exact-revision evidence pending | Pass, 2026-09-01 | Absent |
+| 06 | Conforming single-node daemon | Complete | Pass, 2026-09-01 | [Current checkpoint](conformance/evidence/stage-06-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json) |
 | 07 | Conforming base federation | Not started | Not run | Absent |
 | 08 | Conforming E2EE server adapter | Not started | Not run | Absent |
 | 09 | Optional WSS and history profiles | Not started | Not run | Absent |
@@ -962,7 +962,8 @@ source-policy failure, repaired the inherited Stage 03 and Stage 04 checks,
 adopted the interim coverage floor, closed the ledger and catalog, and passed
 the full 75-command gate on 2026-09-01. The commit-point boxes below record
 which work landed. The `S06-*` task boxes are checked because the gate passes
-on the closure branch; the exact-revision checkpoint is recorded separately.
+on the closure branch. The exact-revision checkpoint closes source commit
+`b1fc07a99f8457958d52df6be6763ce3ba5a8e7f`.
 
 #### Branch and worktree control
 
@@ -1476,9 +1477,9 @@ Commit point 9
 
 #### Exact-SHA evidence
 
-- [ ] Create one temporary detached checkout at the exact source commit. Do
+- [x] Create one temporary detached checkout at the exact source commit. Do
   not create a branch and do not edit source in that checkout.
-- [ ] Run the recorded gate from the clean detached checkout with
+- [x] Run the recorded gate from the clean detached checkout with
   `AGENC_IRCD_RECORD_GATE=1`.
 
   ```sh
@@ -1488,9 +1489,9 @@ Commit point 9
     bash scripts/check-stage-six.sh
   ```
 
-- [ ] Record
-  `conformance/evidence/artifacts/stage-six-implementation-<sha>.json`.
-- [ ] Generate `conformance/evidence/stage-06-<sha>.json` with evidence schema
+- [x] Record
+  `conformance/evidence/artifacts/stage-six-implementation-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json`.
+- [x] Generate `conformance/evidence/stage-06-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json` with evidence schema
   version 2.
 
   ```sh
@@ -1499,7 +1500,7 @@ Commit point 9
     "conformance/evidence/artifacts/stage-six-implementation-${source_commit}.json"
   ```
 
-- [ ] Run the evidence checker, evidence self-test, and Stage 06 `close-stage`
+- [x] Run the evidence checker, evidence self-test, and Stage 06 `close-stage`
   command for the exact source SHA.
 
   ```sh
@@ -1509,20 +1510,21 @@ Commit point 9
     --stage 6 --source-commit "${source_commit}"
   ```
 
-- [ ] Copy only the generated artifact and manifest back to the active branch,
+- [x] Copy only the generated artifact and manifest back to the active branch,
   together with the required closure-status documentation updates.
-- [ ] Delete the temporary detached checkout after the artifact is recovered.
-- [ ] If any source changes after recording, discard the stale Stage 06
+- [x] Delete the temporary detached checkout after the artifact is recovered.
+- [x] If any source changes after recording, discard the stale Stage 06
   artifact and repeat the exact-SHA gate at the new source commit.
 
 Commit point 10
 
-- [ ] Confirm that the staged diff contains only evidence and closure-status
+- [x] Confirm that the staged diff contains only evidence and closure-status
   files.
-- [ ] Run every evidence checker and self-test again from the active branch.
-- [ ] Run GitNexus `detect_changes` before committing.
-- [ ] Commit with the subject `Record Stage 06 checkpoint`.
-- [ ] Push `stage-06-runtime`.
+- [x] Run every evidence checker and self-test again from the active branch.
+- [x] Run GitNexus `detect_changes` before committing.
+- [x] Commit with the subject `Record Stage 06 checkpoint`.
+- [x] Push `stage-06-closure`, the closure branch that replaced
+  `stage-06-runtime` after PR #14 deleted it.
 
 #### Pull request and cloud checks
 
@@ -1541,7 +1543,7 @@ Commit point 10
 - [x] Fix the failed cloud gate. It stopped at `check-source` because
   `crates/agenc-ircd-config/src/paths.rs` has a lint allowance without the
   required review annotation.
-- [ ] Repeat exact-SHA evidence after any source fix.
+- [x] Repeat exact-SHA evidence after any source fix.
 - [ ] Leave the pull request open for the cloud-agent and repository-owner
   merge gate. This was violated when PR #14 was merged before the gate passed.
 

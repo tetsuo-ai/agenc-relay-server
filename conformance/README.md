@@ -95,9 +95,12 @@ set, the runtime profile with 16 transcripts and five host qualification
 checks, the config, admin, and runtime package tests, the Stage 06
 persistence tests, Loom models, transcripts, the deterministic soak,
 deployment checks, controlled-host and Tor qualification, and both Stage 06
-fuzz targets. The closing manifest for the exact Stage 06 source commit is
-recorded beside the earlier checkpoints under `evidence/` when the gate run
-is captured with `AGENC_IRCD_RECORD_GATE=1`.
+fuzz targets. The
+[schema version 2 manifest](evidence/stage-06-b1fc07a99f8457958d52df6be6763ce3ba5a8e7f.json)
+contains 55 passed records and closes exact source commit
+`b1fc07a99f8457958d52df6be6763ce3ba5a8e7f`. The recorded run of 75 commands reached
+79.79% branch coverage, 91.82% line coverage, and 100% coverage in all six
+critical regions against the interim 75% branch floor.
 
 For an evidence-only check:
 
