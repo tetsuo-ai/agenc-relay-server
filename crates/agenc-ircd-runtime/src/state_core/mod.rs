@@ -4211,6 +4211,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_reloads_race_to_one_revision_and_quiescing_refuses_more() -> TestResult {
+        use crate::runtime_config::{
+            PreparedReload, ReloadOutcome, ReloadRejection, RuntimeConfigHandle,
+        };
+        use crate::test_support::{golden_config, golden_parts, golden_snapshot};
+
+        let handle = RuntimeConfigHandle::new(golden_snapshot("AgenC", None)?);
+        let driver_handle = handle.clone();
+        let (exit, (_open, outcomes)) = run_core_with(
+            false,
+            move |fixture| fixture.install_reload_port(handle),
+            |inbox, lifecycle, _token, (port, _admission)| async move {
+                let mut outcomes = Vec::new();
+                // Two activations prepared from the same revision: only one applies.
+                let mut first = PreparedReload::new(
+                    &driver_handle.load(),
+                    golden_config()?,
+                    golden_parts("AgenC", Some("One"))?,
+                )?;
+                first.attach_lease(driver_handle.begin_reload()?);
+                let second = PreparedReload::new(
+                    &driver_handle.load(),
+                    golden_config()?,
+                    golden_parts("AgenC", Some("Two"))?,
+                )?;
+                let (first, second) =
+                    tokio::join!(port.activate_signal(first), port.activate_signal(second));
+                outcomes.push(first);
+                outcomes.push(second);
+                // Once quiescing, no reload may start.
+                lifecycle
+                    .request(LifecyclePhase::Quiesce)
+                    .await
+                    .map_err(|failure| format!("{failure:?}"))?;
+                let mut late = PreparedReload::new(
+                    &driver_handle.load(),
+                    golden_config()?,
+                    golden_parts("Late", None)?,
+                )?;
+                late.attach_lease(driver_handle.begin_reload()?);
+                outcomes.push(port.activate_signal(late).await);
+                let stopped = lifecycle.request(LifecyclePhase::Stop).await;
+                assert!(stopped.is_ok());
+                Ok((inbox, outcomes))
+            },
+        )
+        .await?;
+        assert!(matches!(exit, StateCoreExit::Stopped), "{exit:?}");
+        assert!(
+            matches!(
+                outcomes[..],
+                [
+                    ReloadOutcome::Applied(_),
+                    ReloadOutcome::Rejected(ReloadRejection::StaleRevision),
+                    ReloadOutcome::Rejected(ReloadRejection::Quiescing),
+                ]
+            ),
+            "{outcomes:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn a_closed_inbox_exits_the_core() -> TestResult {
         let (exit, ()) = run_core(false, |inbox, _lifecycle, _token| async move {
             drop(inbox);
