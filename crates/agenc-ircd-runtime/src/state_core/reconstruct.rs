@@ -445,7 +445,7 @@ fn scan_table(
     loop {
         let plan = ReadPlan::range(table, start.clone(), end.clone(), RECONSTRUCTION_PAGE_ROWS)?;
         let result = read_blocking(port, plan)?;
-        let page_rows = result.records.len();
+        let truncated = result.truncated;
         let mut last: Option<StoredKey> = None;
         for record in result.records {
             if record.table != table {
@@ -454,10 +454,12 @@ fn scan_table(
             last = Some(record.key.clone());
             visit(record.key, record.sealed_record)?;
         }
+        // A page may stop short of the row limit at the storage byte budget,
+        // so the store's own truncation flag decides whether rows remain.
         let Some(last) = last else {
             return Ok(());
         };
-        if page_rows < usize::from(RECONSTRUCTION_PAGE_ROWS) {
+        if !truncated {
             return Ok(());
         }
         start = successor(&last)?;

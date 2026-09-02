@@ -1054,43 +1054,47 @@ impl StorageEngine {
 
     // agenc-review: focus owner=storage reviewed=2026-08-27 reason=closed exact-or-range dispatch preserves one immutable read result contract
     pub(crate) fn read(&self, plan: &ReadPlan) -> Result<ReadResult, StorageError> {
-        let records = match plan.kind() {
+        let (records, truncated) = match plan.kind() {
             ReadPlanKind::Exact { table, key } => {
-                match self.store.read_record(*table, key.as_bytes())? {
+                let records = match self.store.read_record(*table, key.as_bytes())? {
                     Some(sealed_record) => vec![ReadRecord {
                         table: *table,
                         key: StoredKey::new(key.as_bytes().to_vec())?,
                         sealed_record,
                     }],
                     None => Vec::new(),
-                }
+                };
+                (records, false)
             }
             ReadPlanKind::Range {
                 table,
                 start,
                 end,
                 limit,
-            } => self
-                .store
-                .read_range(
+            } => {
+                let (rows, truncated) = self.store.read_range(
                     *table,
                     start.as_bytes(),
                     end.as_bytes(),
                     usize::from(*limit),
-                )?
-                .into_iter()
-                .map(|(key, sealed_record)| {
-                    Ok(ReadRecord {
-                        table: *table,
-                        key: StoredKey::new(key)?,
-                        sealed_record,
+                )?;
+                let records = rows
+                    .into_iter()
+                    .map(|(key, sealed_record)| {
+                        Ok(ReadRecord {
+                            table: *table,
+                            key: StoredKey::new(key)?,
+                            sealed_record,
+                        })
                     })
-                })
-                .collect::<Result<Vec<_>, StorageError>>()?,
+                    .collect::<Result<Vec<_>, StorageError>>()?;
+                (records, truncated)
+            }
         };
         Ok(ReadResult {
             storage_commit_sequence: self.state_meta.tbs().storage_commit_sequence,
             records,
+            truncated,
         })
     }
 
