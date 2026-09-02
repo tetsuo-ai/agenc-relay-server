@@ -523,7 +523,15 @@ pub fn initialize_node(request: InitRequest) -> Result<InitReceipt, OfflineError
         secrets.operator_signing.as_slice(),
     )?;
     write_trust_manifests(&staging.data_root().join("trust"), &secrets)?;
-    initialize_database(&staging.data_root().join("state"), identity, &secrets)?;
+    if let Err(error) = initialize_database(&staging.data_root().join("state"), identity, &secrets)
+    {
+        // An indeterminate storage outcome leaves the staged tree in place so
+        // the operator can inspect it; nothing was published.
+        if error == OfflineError::Indeterminate {
+            staging.installed = true;
+        }
+        return Err(error);
+    }
     write_configuration(staging.config_file(), &request, &mode, identity, &secrets)?;
     staging.install(&request)?;
     Ok(init_receipt(&request, identity))
@@ -642,6 +650,7 @@ fn validate_edge_descriptor_path(request: &InitRequest) -> Result<(), OfflineErr
 
 fn safe_absolute_path(path: &Path) -> bool {
     path.is_absolute()
+        && path.to_str().is_some()
         && !path
             .components()
             .any(|component| matches!(component, Component::CurDir | Component::ParentDir))

@@ -102,7 +102,29 @@ fn is_disabled_listener_issue(issue: &ConfigIssue) -> bool {
 }
 
 fn path(base: &Path, name: &str) -> String {
-    base.join(name).display().to_string()
+    toml_basic(&base.join(name).display().to_string())
+}
+
+/// Escapes one value for a TOML basic string so a backslash, quote, or
+/// control character in a path survives the round trip exactly.
+fn toml_basic(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\u{08}' => out.push_str("\\b"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\u{0c}' => out.push_str("\\f"),
+            '\r' => out.push_str("\\r"),
+            control if control.is_control() => {
+                let _ = write!(out, "\\u{:04X}", u32::from(control));
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 fn render(values: &InitValues) -> String {
@@ -171,8 +193,16 @@ fn render_server(out: &mut String, values: &InitValues) {
         "# Lowercase DNS-style name with a dot, at most 253 bytes (127 with federation)."
     );
     let _ = writeln!(out, "name = \"{}\"", values.server_name.as_str());
-    let _ = writeln!(out, "data_dir = \"{}\"", values.data_dir.display());
-    let _ = writeln!(out, "runtime_dir = \"{}\"", values.runtime_dir.display());
+    let _ = writeln!(
+        out,
+        "data_dir = \"{}\"",
+        toml_basic(&values.data_dir.display().to_string())
+    );
+    let _ = writeln!(
+        out,
+        "runtime_dir = \"{}\"",
+        toml_basic(&values.runtime_dir.display().to_string())
+    );
     let _ = writeln!(out, "# 536870912..1099511627776 bytes; restart-only.");
     let _ = writeln!(out, "memory_budget_bytes = 4294967296");
     let _ = writeln!(out, "# 2..128; restart-only.");

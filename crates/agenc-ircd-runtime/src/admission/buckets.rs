@@ -806,6 +806,15 @@ impl BucketTable {
         demands: &[BucketDemand],
     ) -> Result<(), AdmissionRefused> {
         let aggregated = aggregate(demands)?;
+        // Reclaim full rows once, before any row for this charge exists, so a
+        // sweep can never discard a row the same charge just created.
+        let new_rows = aggregated
+            .iter()
+            .filter(|(kind, key, _)| !self.buckets.contains_key(&(*kind, *key)))
+            .count();
+        if self.buckets.len().saturating_add(new_rows) > self.buckets.ceiling() {
+            self.sweep_full(now);
+        }
         for (kind, key, tokens) in &aggregated {
             let rate = self.limits.rate(*kind);
             let bucket = self.bucket_mut(now, *kind, *key)?;
@@ -891,9 +900,6 @@ impl BucketTable {
         key: BucketKey,
     ) -> Result<&mut TokenBucket, AdmissionRefused> {
         if !self.buckets.contains_key(&(kind, key)) {
-            if self.buckets.len() >= self.buckets.ceiling() {
-                self.sweep_full(now);
-            }
             if self.buckets.len() >= self.buckets.ceiling() {
                 return Err(AdmissionRefused::TableFull);
             }
@@ -1151,6 +1157,51 @@ mod tests {
         assert_eq!(table.len(), 1);
         table.sweep_full(tick(20_000));
         assert!(table.is_empty());
+    }
+
+    #[test]
+    fn a_charge_at_the_ceiling_never_loses_one_of_its_own_rows() {
+        let mut table = BucketTable::with_ceiling(RateLimits::defaults(), 2, budget());
+        let now = tick(0);
+        let occupied = demand(BucketKind::PreAuthCommand, connection(1), 1);
+        assert_eq!(table.charge_all_or_nothing(now, &[occupied]), Ok(()));
+        let prefix = BucketKey::Prefix(SourceAddressKey::ipv4([10, 0, 0, 2]).prefix_key());
+        let tcp = demand(BucketKind::NewDirectTcp, prefix, 1);
+        let handshake = demand(BucketKind::TlsHandshake, prefix, 1);
+        let tcp_burst = RateLimits::defaults()
+            .rate(BucketKind::NewDirectTcp)
+            .burst();
+        let handshake_burst = RateLimits::defaults()
+            .rate(BucketKind::TlsHandshake)
+            .burst();
+        // Only one slot is free and the other row is not reclaimable yet, so
+        // the two-row charge is refused whole; neither prefix row is charged.
+        assert_eq!(
+            table.charge_all_or_nothing(now, &[tcp, handshake]),
+            Err(AdmissionRefused::TableFull)
+        );
+        assert_eq!(
+            table.available(now, BucketKind::NewDirectTcp, prefix),
+            tcp_burst
+        );
+        assert_eq!(
+            table.available(now, BucketKind::TlsHandshake, prefix),
+            handshake_burst
+        );
+        // Once the occupied row refills it is reclaimed and both rows charge.
+        let later = tick(10_000);
+        assert_eq!(
+            table.charge_all_or_nothing(later, &[tcp, handshake]),
+            Ok(())
+        );
+        assert_eq!(
+            table.available(later, BucketKind::NewDirectTcp, prefix),
+            tcp_burst - 1
+        );
+        assert_eq!(
+            table.available(later, BucketKind::TlsHandshake, prefix),
+            handshake_burst - 1
+        );
     }
 
     #[test]

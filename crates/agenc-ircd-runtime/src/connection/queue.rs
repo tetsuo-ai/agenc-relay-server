@@ -541,9 +541,10 @@ impl ClientSink for WriterQueue {
     }
 
     fn commit(&self, reservation: ClientQueueReservation, frames: BoundedSharedClientFrames) {
+        let bound = frames.token() == reservation.token();
         let mut transfer = reservation.into_transfer();
         let mut state = lock(&self.shared.state);
-        if state.closed.is_some() || transfer.generation() != self.generation {
+        if !bound || state.closed.is_some() || transfer.generation() != self.generation {
             drop(state);
             transfer.discard();
             return;

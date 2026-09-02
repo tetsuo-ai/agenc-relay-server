@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 use crate::config::Config;
 use crate::error::{ConfigError, ConfigReport, IssueSink, SchemaKey, ValidationStage};
 use crate::listeners::ListenerName;
-use crate::paths::{is_unsafe_component, owned_by_daemon_or_root};
+use crate::paths::{is_unsafe_component, owned_by_daemon_or_root, protected_ancestors};
 
 /// Exact secret file mode (spec 4330).
 pub const SECRET_FILE_MODE: u32 = 0o600;
@@ -91,6 +91,7 @@ pub fn open_secret_file_with_hook(
     if !path.is_absolute() || path.components().any(is_unsafe_component) {
         return Err(ConfigError::FileRejected);
     }
+    protected_ancestors(path)?;
     let before = fs::symlink_metadata(path).map_err(|_| ConfigError::FileRejected)?;
     check_metadata(&before, length)?;
     between_stat_and_open();
@@ -104,6 +105,7 @@ pub fn open_secret_file_with_hook(
     let after = fstat(&fd).map_err(|_| ConfigError::FileRejected)?;
     let same = FileType::from_raw_mode(after.st_mode) == FileType::RegularFile
         && Mode::from_raw_mode(after.st_mode) == Mode::from_raw_mode(SECRET_FILE_MODE)
+        && after.st_nlink == 1
         && after.st_dev == before.dev()
         && after.st_ino == before.ino()
         && after.st_uid == before.uid()
@@ -125,7 +127,11 @@ fn check_metadata(metadata: &fs::Metadata, length: SecretLength) -> Result<(), C
     let regular = metadata.file_type().is_file() && !metadata.file_type().is_symlink();
     let mode = metadata.permissions().mode() & 0o7777;
     let size_ok = usize::try_from(metadata.len()).is_ok_and(|size| length.accepts(size));
-    if !regular || mode != SECRET_FILE_MODE || !owned_by_daemon_or_root(metadata.uid()) || !size_ok
+    if !regular
+        || metadata.nlink() != 1
+        || mode != SECRET_FILE_MODE
+        || !owned_by_daemon_or_root(metadata.uid())
+        || !size_ok
     {
         return Err(ConfigError::FileRejected);
     }
@@ -169,10 +175,12 @@ fn trusted_metadata(path: &Path) -> Result<(fs::Metadata, u32), ConfigError> {
     if !path.is_absolute() || path.components().any(is_unsafe_component) {
         return Err(ConfigError::FileRejected);
     }
+    protected_ancestors(path)?;
     let before = fs::symlink_metadata(path).map_err(|_| ConfigError::FileRejected)?;
     let before_mode = before.permissions().mode() & 0o7777;
     if !before.file_type().is_file()
         || before.file_type().is_symlink()
+        || before.nlink() != 1
         || before.len() != 32
         || before_mode & 0o022 != 0
         || !owned_by_daemon_or_root(before.uid())

@@ -490,6 +490,8 @@ impl RuntimeConfigHandle {
         }
     }
 
+    /// `activate` runs while the snapshot lock is held: it must not call
+    /// `load` on this handle and must not block, or the reload deadlocks.
     pub(crate) fn publish_after<F>(
         &self,
         expected: ConfigRevision,
