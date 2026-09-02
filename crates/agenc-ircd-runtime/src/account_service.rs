@@ -6704,14 +6704,13 @@ const fn request_terminal_result(terminal: RequestTerminal) -> ResultClass {
 mod tests {
     use super::{
         AccountCarrierAction, AccountCarrierKind, AccountCarrierPhase, AccountCreationPolicy,
-        AccountDeletionBarrier, AccountServiceConfig, AccountServiceCoordinator, CarrierCompletion,
-        CarrierRoute, ConnectionGeneration, ConnectionRoute, CreationReservation,
-        LiveTransactionClass, MAX_OPAQUE_ATTEMPTS_PER_CONNECTION, MAX_PENDING_TRANSACTION_CLEANUPS,
-        PendingAuthority, PendingCrypto, PendingLoginTombstoneExpiry, REQUEST_RESULT_BYTES,
-        REQUEST_RESULT_VERSION, RequestCarrier, RequestContext, RequestResultCursor,
-        RequestResultRecord, RequestTerminal, RuntimeError, TransactionCleanup,
-        account_created_note, account_credential_changed_note, account_deletion_completions,
-        account_deletion_writes, account_failure, account_phase_name,
+        AccountDeletionBarrier, AccountServiceCoordinator, CarrierCompletion, CarrierRoute,
+        ConnectionGeneration, ConnectionRoute, CreationReservation, LiveTransactionClass,
+        MAX_OPAQUE_ATTEMPTS_PER_CONNECTION, MAX_PENDING_TRANSACTION_CLEANUPS, PendingAuthority,
+        PendingCrypto, PendingLoginTombstoneExpiry, REQUEST_RESULT_BYTES, REQUEST_RESULT_VERSION,
+        RequestCarrier, RequestContext, RequestResultCursor, RequestResultRecord, RequestTerminal,
+        RuntimeError, TransactionCleanup, account_created_note, account_credential_changed_note,
+        account_deletion_completions, account_deletion_writes, account_failure, account_phase_name,
         consume_opaque_connection_attempt, credential_id, live_login, login_tombstone_expiry_batch,
         opaque_attempt_demand, pending_credential_finish_fences,
         pending_guest_account_switch_fences, render_account_action, render_sasl_action,
@@ -6727,15 +6726,14 @@ mod tests {
     use crate::state_core::StateCoreContext;
     use crate::state_core::durable::AccountServiceDurableWrite;
     use crate::sync::Arc;
-    use crate::test_support::StateCoreFixture;
+    use crate::test_support::{StateCoreFixture, account_service_config};
     use agenc_ircd_auth::AccountServiceEnvelope;
     use agenc_ircd_client_wire::{
         FramedLine, OutputBudget, RenderError, SASL_REQUEST_CHARACTERS, SaslAction, SaslNumeric,
         SecretBytes, parse_message,
     };
     use agenc_ircd_crypto::{
-        ACCOUNT_HPKE_REQUEST_CIPHERTEXT_BYTES, AccountHpkePrivateKey, LoginIndexDigest,
-        LoginIndexKey, OpaqueFakeCredentialKey, derive_login_index,
+        ACCOUNT_HPKE_REQUEST_CIPHERTEXT_BYTES, LoginIndexDigest, LoginIndexKey, derive_login_index,
     };
     use agenc_ircd_domain::{DirectMessagePolicy, GuestDirectMessagePolicy, PresencePolicy};
     use agenc_ircd_storage::{
@@ -6757,28 +6755,11 @@ mod tests {
     impl CoordinatorFixture {
         fn new(entropy: Vec<u8>) -> Result<Self, Box<dyn core::error::Error>> {
             let core = StateCoreFixture::new(entropy)?;
-            let identity = &core.identity;
-            let coordinator = AccountServiceCoordinator::new(AccountServiceConfig {
-                network_id: identity.network_id,
-                server_id: identity.server_id,
-                server_incarnation: identity.server_incarnation,
-                origin_id: OriginId::from_bytes([39; 16]),
-                origin_generation: Generation::new(1)?,
-                recovery_epoch: identity.recovery_epoch,
-                hpke_private_key: Arc::new(AccountHpkePrivateKey::from_bytes([40; 32])?),
-                opaque_profile: Arc::clone(&core.opaque),
-                current_login_index_key: Arc::new(LoginIndexKey::from_bytes(identity.login_index)),
-                previous_login_index_key: None,
-                fake_credential_key: Arc::new(OpaqueFakeCredentialKey::from_bytes([41; 32])),
-                login_index_key_state: core.key_state,
-                live_login_keys: BTreeMap::new(),
-                login_deletion_tombstones: BTreeMap::new(),
-                startup_transaction_cleanups: Vec::new(),
-                creation_policy: AccountCreationPolicy::Open,
-                default_presence: PresencePolicy::Private,
-                default_guest_direct_messages: GuestDirectMessagePolicy::Deny,
-                default_direct_messages: DirectMessagePolicy::Allow,
-            })?;
+            let coordinator = AccountServiceCoordinator::new(account_service_config(
+                &core.identity,
+                &core.opaque,
+                core.key_state,
+            )?)?;
             Ok(Self { coordinator, core })
         }
 

@@ -10,12 +10,15 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+use std::collections::BTreeMap;
+
 use agenc_ircd_auth::OpaqueProfile;
 use agenc_ircd_client_wire::{CapRequestReply, CapabilityState};
 use agenc_ircd_crypto::{
-    CryptoWorkerConfig, Ed25519SecretKey, LoginIndexKey, RollbackGuardRootKey, StorageDigest,
-    StorageMasterKey,
+    AccountHpkePrivateKey, CryptoWorkerConfig, Ed25519SecretKey, LoginIndexKey,
+    OpaqueFakeCredentialKey, RollbackGuardRootKey, StorageDigest, StorageMasterKey,
 };
+use agenc_ircd_domain::{DirectMessagePolicy, GuestDirectMessagePolicy, PresencePolicy};
 use agenc_ircd_storage::{
     DatabaseHeaderTbs, InitialStorageRecord, LIVE_RECORD_KIND, LOGIN_INDEX_KEY_STATE_KEY,
     LoginIndexKeyState, OPAQUE_FAKE_RECORD_KEY, PersistentRecordValue, QualificationTarget,
@@ -28,29 +31,36 @@ use agenc_ircd_testkit::{
     DeterministicMonotonicClock, DeterministicWallClock, DomainTestIdentity, ScriptedEntropy,
 };
 use agenc_ircd_types::{
-    AccountId, DatabaseId, Generation, MonotonicTick, NetworkId, RecoveryEpoch, ServerId,
+    AccountId, DatabaseId, Generation, MonotonicTick, NetworkId, OriginId, RecoveryEpoch, ServerId,
     ServerIncarnation, SessionId, UserId, UtcSecond,
 };
 
 use crate::RuntimeError;
 use crate::StateCoreSeed;
+use crate::account_service::{AccountCreationPolicy, AccountServiceConfig};
 use crate::admission::RateLimits;
-use crate::bridge::crypto::CryptoBridge;
+use crate::bridge::crypto::{
+    CHANNEL_KEY_HASH_BYTES, CHANNEL_KEY_SALT_BYTES, ChannelKeyVerifier, ChannelKeyVerifierRecord,
+    CryptoBridge,
+};
 use crate::bridge::storage::StorageBridge;
 use crate::budget::MemoryBudget;
+use crate::channels::RegisteredCommandExecutor;
 use crate::connection::{
     BoundedSharedClientFrames, ClientQueueDemand, ClientQueueReservation, ClientQueueSnapshot,
     ClientSink, ConnectionGeneration, FlushAcknowledgement, QueueAllocationError,
     QueueReservationLedger, SinkReserveError, TentativeClientQueueReservation,
 };
 use crate::observe::health::Liveness;
+use crate::registration::{RegistrationRouter, RegistrationRouterConfig};
 use crate::state_core::durable::{AccountingCeilings, KeyDeriver};
 use crate::state_core::fanout::FanoutRequest;
 use crate::state_core::inbox::{CloseReason, SourceAddressKey};
 use crate::state_core::reconstruct::reconstruct;
 use crate::state_core::session::BoundSession;
 use crate::state_core::{
-    DefaultRouter, StateCore, StateCoreClocks, StateCoreConfig, StateCoreContext, StateCoreInputs,
+    CommandRouter, DefaultRouter, StateCore, StateCoreClocks, StateCoreConfig, StateCoreContext,
+    StateCoreInputs,
 };
 use crate::sync::Arc;
 
@@ -256,6 +266,7 @@ fn open_test_storage(
 fn compose_test_state(
     owner: &mut StorageOwner,
     entropy: Vec<u8>,
+    router: Box<dyn CommandRouter>,
 ) -> TestResult<(StateCore, StorageReceivers, CryptoReceiver)> {
     let seed = StateCoreSeed::from_storage(owner)?;
     let storage = seed.storage();
@@ -298,7 +309,7 @@ fn compose_test_state(
             wall: Box::new(DeterministicWallClock::at(1_000)),
         },
         entropy: Box::new(ScriptedEntropy::new(entropy)?),
-        router: Box::new(DefaultRouter),
+        router,
         storage_limit_writer,
     });
     Ok((
@@ -308,9 +319,88 @@ fn compose_test_state(
     ))
 }
 
+/// The coordinator-only account-service configuration of a fixture.
+pub(crate) fn account_service_config(
+    identity: &FixtureIdentity,
+    opaque: &Arc<OpaqueProfile>,
+    key_state: LoginIndexKeyState,
+) -> TestResult<AccountServiceConfig> {
+    Ok(AccountServiceConfig {
+        network_id: identity.network_id,
+        server_id: identity.server_id,
+        server_incarnation: identity.server_incarnation,
+        origin_id: OriginId::from_bytes([39; 16]),
+        origin_generation: Generation::new(1)?,
+        recovery_epoch: identity.recovery_epoch,
+        hpke_private_key: Arc::new(AccountHpkePrivateKey::from_bytes([40; 32])?),
+        opaque_profile: Arc::clone(opaque),
+        current_login_index_key: Arc::new(LoginIndexKey::from_bytes(identity.login_index)),
+        previous_login_index_key: None,
+        fake_credential_key: Arc::new(OpaqueFakeCredentialKey::from_bytes([41; 32])),
+        login_index_key_state: key_state,
+        live_login_keys: BTreeMap::new(),
+        login_deletion_tombstones: BTreeMap::new(),
+        startup_transaction_cleanups: Vec::new(),
+        creation_policy: AccountCreationPolicy::Open,
+        default_presence: PresencePolicy::Private,
+        default_guest_direct_messages: GuestDirectMessagePolicy::Deny,
+        default_direct_messages: DirectMessagePolicy::Allow,
+    })
+}
+
+/// A channel-key verifier whose hash is the first salt byte repeated.
+struct TestChannelKeyVerifier;
+
+impl ChannelKeyVerifier for TestChannelKeyVerifier {
+    fn derive(
+        &self,
+        _secret: &[u8],
+        salt: &[u8; CHANNEL_KEY_SALT_BYTES],
+    ) -> Result<[u8; CHANNEL_KEY_HASH_BYTES], agenc_ircd_crypto::CryptoError> {
+        Ok([salt[0]; CHANNEL_KEY_HASH_BYTES])
+    }
+}
+
+/// The production registration router over the fixture identity with guests
+/// allowed and no connection password.
+fn registration_router(
+    identity: &FixtureIdentity,
+    opaque: &Arc<OpaqueProfile>,
+    key_state: LoginIndexKeyState,
+) -> TestResult<RegistrationRouter> {
+    let verifier: Arc<dyn ChannelKeyVerifier> = Arc::new(TestChannelKeyVerifier);
+    let salt = [7; CHANNEL_KEY_SALT_BYTES];
+    let hash = verifier.derive(b"dummy", &salt)?;
+    let commands =
+        RegisteredCommandExecutor::new(verifier, ChannelKeyVerifierRecord::new(salt, hash));
+    Ok(RegistrationRouter::new(
+        RegistrationRouterConfig {
+            network_id: identity.network_id,
+            server_id: identity.server_id,
+            server_prefix: "server.example".to_owned(),
+            display_name: "Test Network".to_owned(),
+            allow_guests: true,
+            access_token: None,
+            account_service: account_service_config(identity, opaque, key_state)?,
+        },
+        commands,
+    )?)
+}
+
 impl StateCoreFixture {
-    /// Builds the fixture; `entropy` scripts every entropy draw the test makes.
+    /// Builds the fixture with the pre-composition router that rejects every
+    /// line; `entropy` scripts every entropy draw the test makes.
     pub(crate) fn new(entropy: Vec<u8>) -> TestResult<Self> {
+        Self::build(entropy, false)
+    }
+
+    /// Builds the fixture with the production registration router so lines
+    /// register sessions and reach the registered command executor.
+    pub(crate) fn with_registration_router(entropy: Vec<u8>) -> TestResult<Self> {
+        Self::build(entropy, true)
+    }
+
+    fn build(entropy: Vec<u8>, registration: bool) -> TestResult<Self> {
         let identity = FixtureIdentity {
             network_id: NetworkId::from_bytes([31; 32]),
             server_id: ServerId::from_bytes([32; 16]),
@@ -324,8 +414,13 @@ impl StateCoreFixture {
         let key_state = LoginIndexKeyState::stable(1, login_key.key_id(identity.network_id))?;
         let qualification = initialize_test_storage(&identity, &directory, &opaque, &key_state)?;
         let mut owner = open_test_storage(&identity, &directory, &qualification)?;
+        let router: Box<dyn CommandRouter> = if registration {
+            Box::new(registration_router(&identity, &opaque, key_state)?)
+        } else {
+            Box::new(DefaultRouter)
+        };
         let (state, storage_receivers, crypto_completions) =
-            compose_test_state(&mut owner, entropy)?;
+            compose_test_state(&mut owner, entropy, router)?;
         Ok(Self {
             identity,
             opaque,

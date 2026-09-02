@@ -3721,22 +3721,32 @@ mod tests {
 
     use super::{StateCoreExit, StateCoreMessage};
     use crate::cancel::CancellationToken;
-    use crate::state_core::inbox::{LifecyclePhase, connection_close_channel, lifecycle_channel};
+    use crate::state_core::inbox::{
+        LifecycleControl, LifecyclePhase, MaintenanceEvent, SignalEvent, connection_close_channel,
+        lifecycle_channel,
+    };
     use crate::test_support::{StateCoreFixture, TestResult};
 
     /// Runs the actor with fresh control channels and returns its exit
-    /// together with whatever the driver produced.
+    /// together with whatever the driver produced. The driver must keep the
+    /// inbox sender alive until the actor exits, otherwise the closed inbox
+    /// ends the run first.
     async fn run_core<Driver, Output>(
+        registration: bool,
         driver: impl FnOnce(
             mpsc::Sender<StateCoreMessage>,
-            crate::state_core::inbox::LifecycleControl,
+            LifecycleControl,
             CancellationToken,
         ) -> Driver,
     ) -> TestResult<(StateCoreExit, Output)>
     where
-        Driver: Future<Output = Output>,
+        Driver: Future<Output = TestResult<Output>>,
     {
-        let mut fixture = StateCoreFixture::new(Vec::new())?;
+        let mut fixture = if registration {
+            StateCoreFixture::with_registration_router(vec![5; 4_096])?
+        } else {
+            StateCoreFixture::new(Vec::new())?
+        };
         let mut parts = fixture.take_run_parts()?;
         let (inbox, inbox_receiver) = mpsc::channel(8);
         let (_close_port, close_inbox) = connection_close_channel();
@@ -3754,13 +3764,20 @@ mod tests {
             token,
         );
         let (exit, output) = tokio::join!(run, driven);
-        Ok((exit, output))
+        Ok((exit, output?))
+    }
+
+    async fn send(inbox: &mpsc::Sender<StateCoreMessage>, message: StateCoreMessage) -> TestResult {
+        inbox
+            .send(message)
+            .await
+            .map_err(|_| "the core closed its inbox")?;
+        Ok(())
     }
 
     #[tokio::test]
     async fn ordered_lifecycle_requests_stop_an_idle_core() -> TestResult {
-        let (exit, replies) = run_core(|inbox, lifecycle, _token| async move {
-            let _open = inbox;
+        let (exit, (_open, replies)) = run_core(false, |inbox, lifecycle, _token| async move {
             let mut replies = Vec::new();
             for phase in [
                 LifecyclePhase::Quiesce,
@@ -3771,7 +3788,7 @@ mod tests {
             ] {
                 replies.push(lifecycle.request(phase).await);
             }
-            replies
+            Ok((inbox, replies))
         })
         .await?;
         assert!(matches!(exit, StateCoreExit::Stopped), "{exit:?}");
@@ -3781,20 +3798,121 @@ mod tests {
 
     #[tokio::test]
     async fn stop_may_skip_straight_past_earlier_phases() -> TestResult {
-        let (exit, reply) = run_core(|inbox, lifecycle, _token| async move {
-            let _open = inbox;
-            lifecycle.request(LifecyclePhase::Stop).await
+        let (exit, (_open, reply)) = run_core(false, |inbox, lifecycle, _token| async move {
+            Ok((inbox, lifecycle.request(LifecyclePhase::Stop).await))
         })
         .await?;
-        assert!(matches!(exit, StateCoreExit::Stopped));
+        assert!(matches!(exit, StateCoreExit::Stopped), "{exit:?}");
         assert!(reply.is_ok());
         Ok(())
     }
 
     #[tokio::test]
+    async fn termination_signals_quiesce_or_interrupt_an_idle_core() -> TestResult {
+        let (exit, (_open, _lifecycle)) = run_core(false, |inbox, lifecycle, _token| async move {
+            for event in [
+                MaintenanceEvent::RetentionSweep,
+                MaintenanceEvent::ClockDriftCheck,
+                MaintenanceEvent::PrefixErasure,
+                MaintenanceEvent::CheckpointDue,
+                MaintenanceEvent::CheckpointDue,
+            ] {
+                send(&inbox, StateCoreMessage::Maintenance(event)).await?;
+            }
+            send(&inbox, StateCoreMessage::Signal(SignalEvent::Reload)).await?;
+            send(&inbox, StateCoreMessage::Signal(SignalEvent::Terminate)).await?;
+            Ok((inbox, lifecycle))
+        })
+        .await?;
+        assert!(matches!(exit, StateCoreExit::Quiesced), "{exit:?}");
+
+        let (exit, (_open, _lifecycle)) = run_core(false, |inbox, lifecycle, _token| async move {
+            send(&inbox, StateCoreMessage::Signal(SignalEvent::Interrupt)).await?;
+            Ok((inbox, lifecycle))
+        })
+        .await?;
+        assert!(matches!(exit, StateCoreExit::Interrupted), "{exit:?}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_guest_session_registers_and_commands_flow_through_the_router() -> TestResult {
+        use agenc_ircd_client_wire::{FramedLine, parse_message};
+        use tokio::sync::oneshot;
+
+        use crate::connection::{ClientSink, ConnectionGeneration};
+        use crate::purpose::ListenerPurpose;
+        use crate::state_core::inbox::{ConnectionOpenOutcome, SourceAddressKey};
+        use crate::sync::Arc;
+        use crate::test_support::FrameSink;
+
+        const LINES: &[&str] = &[
+            "CAP LS 302",
+            "NICK alice",
+            "USER alice 0 * :Alice",
+            "CAP REQ :multi-prefix userhost-in-names",
+            "CAP END",
+            "PING :probe",
+            "JOIN #room",
+            "TOPIC #room :welcome",
+            "NAMES #room",
+            "WHO #room",
+            "MODE #room +m",
+            "PRIVMSG #room :hello",
+            "AWAY :busy",
+            "AWAY",
+            "LIST",
+            "MOTD",
+            "PART #room :bye",
+            "JOIN #room",
+            "QUIT :done",
+        ];
+        let generation = ConnectionGeneration::new(1);
+        let sink = FrameSink::new(generation, true);
+        let core_sink = Arc::clone(&sink) as Arc<dyn ClientSink>;
+        let (exit, (_open, outcome, stopped)) =
+            run_core(true, |inbox, lifecycle, _token| async move {
+                let (acknowledgement, accepted) = oneshot::channel();
+                send(
+                    &inbox,
+                    StateCoreMessage::Opened {
+                        generation,
+                        purpose: ListenerPurpose::ClientOnion,
+                        source: SourceAddressKey::onion_listener(),
+                        sink: core_sink,
+                        acknowledgement,
+                    },
+                )
+                .await?;
+                let outcome = accepted.await?;
+                for (index, line) in LINES.iter().enumerate() {
+                    let message = parse_message(FramedLine::new(line)?)?.ok_or("empty line")?;
+                    send(
+                        &inbox,
+                        StateCoreMessage::Line {
+                            generation,
+                            sequence: u64::try_from(index)? + 1,
+                            message: Box::new(message),
+                        },
+                    )
+                    .await?;
+                }
+                let stopped = lifecycle.request(LifecyclePhase::Stop).await;
+                Ok((inbox, outcome, stopped))
+            })
+            .await?;
+        assert!(matches!(outcome, ConnectionOpenOutcome::Accepted));
+        assert!(stopped.is_ok());
+        assert!(matches!(exit, StateCoreExit::Stopped), "{exit:?}");
+        assert!(sink.commits() > 0);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn a_closed_inbox_exits_the_core() -> TestResult {
-        let (exit, ()) = run_core(|inbox, _lifecycle, _token| async move {
+        let (exit, ()) = run_core(false, |inbox, _lifecycle, _token| async move {
             drop(inbox);
+            Ok(())
         })
         .await?;
         assert!(matches!(exit, StateCoreExit::InboxClosed));
