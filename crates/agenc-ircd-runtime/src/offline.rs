@@ -1455,17 +1455,20 @@ mod tests {
                 unique_suffix()?
             );
             // A candidate base can pass every ancestor and storage check and
-            // still refuse the mkdir, for example a root-owned `~/.cache` on a
-            // hosted runner, so the first base that accepts the directory wins.
+            // still refuse the mkdir, so the first base that accepts the
+            // directory wins. When none does, the rejection reasons go to
+            // stderr because `OfflineError` carries no detail.
+            let mut rejected = Vec::new();
             for base in protected_test_bases() {
-                if qualified_test_base(&base).is_err() {
-                    continue;
-                }
-                let root = base.join(&name);
-                if fs::create_dir(&root).is_ok() {
-                    return Self::finish(root);
+                match qualify_and_create(&base, &name) {
+                    Ok(root) => return Self::finish(root),
+                    Err(reason) => rejected.push(format!("{}: {reason}", base.display())),
                 }
             }
+            eprintln!(
+                "no scratch base accepted the offline tests: {}",
+                rejected.join("; ")
+            );
             Err(OfflineError::Filesystem)
         }
 
@@ -1495,10 +1498,50 @@ mod tests {
         .collect()
     }
 
-    fn qualified_test_base(base: &Path) -> Result<(), OfflineError> {
-        fs::create_dir_all(base).map_err(|_| OfflineError::Filesystem)?;
-        test_ancestors_are_protected(base)?;
-        test_base_is_storage_qualified(base)
+    /// Creates the scratch root under one candidate base, describing the
+    /// first rejected step so a hosted runner can be diagnosed from its log.
+    fn qualify_and_create(base: &Path, name: &str) -> Result<PathBuf, String> {
+        fs::create_dir_all(base).map_err(|error| format!("create_dir_all failed: {error}"))?;
+        test_ancestors_are_protected(base).map_err(|_| describe_ancestors(base))?;
+        test_base_is_storage_qualified(base).map_err(|_| describe_storage(base))?;
+        let root = base.join(name);
+        fs::create_dir(&root).map_err(|error| format!("create_dir failed: {error}"))?;
+        Ok(root)
+    }
+
+    fn describe_ancestors(base: &Path) -> String {
+        let mut text = String::from("unprotected ancestors:");
+        for ancestor in base.ancestors() {
+            match directory_identity(ancestor) {
+                Ok(identity) => {
+                    let _ = write!(
+                        text,
+                        " {}=uid{}:gid{}:{:o}",
+                        ancestor.display(),
+                        identity.owner.uid,
+                        identity.owner.gid,
+                        identity.mode
+                    );
+                }
+                Err(error) => {
+                    let _ = write!(text, " {}=<{error:?}>", ancestor.display());
+                }
+            }
+        }
+        text
+    }
+
+    fn describe_storage(base: &Path) -> String {
+        let observed = StateDirectory::probe(base);
+        let embedded = embedded_storage_qualifications()
+            .map(|qualifications| {
+                qualifications
+                    .iter()
+                    .map(|qualification| format!("{:?}", qualification.tuple()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        format!("storage not qualified: observed {observed:?}, embedded {embedded:?}")
     }
 
     fn unique_suffix() -> Result<String, OfflineError> {
