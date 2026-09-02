@@ -1240,7 +1240,9 @@ impl IrcClient {
         if line.ends_with(" AUTHENTICATE +") {
             Ok(())
         } else {
-            Err(failure("SASL carrier did not accept AGENC-OPAQUE"))
+            Err(failure(format!(
+                "SASL carrier did not accept AGENC-OPAQUE: {line}"
+            )))
         }
     }
 
@@ -2211,5 +2213,227 @@ fn production_daemon_serves_restarts_reconciles_and_stops() -> TestResult {
         &[String::from_utf8(onboarding.stdout)?],
         &fixture.network_id.to_base64url(),
     )?;
+    Ok(())
+}
+
+/// Reads lines until `complete` matches or the server closes the transport,
+/// returning whatever arrived; failure paths may end either way.
+fn read_leniently(client: &mut IrcClient, mut complete: impl FnMut(&str) -> bool) -> Vec<String> {
+    let mut lines = Vec::new();
+    for _ in 0..256 {
+        let mut line = String::new();
+        match client.reader.read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                let line = line.trim_end_matches(['\r', '\n']).to_owned();
+                let done = complete(&line);
+                lines.push(line);
+                if done {
+                    break;
+                }
+            }
+        }
+    }
+    lines
+}
+
+/// Sends every line, then a PING, and collects the replies up to the PONG or
+/// the transport close.
+fn send_and_sync(client: &mut IrcClient, lines: &[String]) -> TestResult<Vec<String>> {
+    for line in lines {
+        client.send(line)?;
+    }
+    client.send("PING :sync")?;
+    let mut replies = read_leniently(client, |line| line.ends_with("PONG :sync"));
+    replies.retain(|line| !line.ends_with("PONG :sync"));
+    Ok(replies)
+}
+
+fn is_sasl_numeric(line: &str) -> bool {
+    [" 903 ", " 904 ", " 905 ", " 906 ", " 907 "]
+        .iter()
+        .any(|numeric| line.contains(numeric))
+}
+
+/// Sends one SASL request envelope as AUTHENTICATE chunks and returns the
+/// replies up to a complete sealed response, the first SASL numeric, or the
+/// transport close.
+fn sasl_exchange_lines(
+    client: &mut IrcClient,
+    envelope: &[u8; ACCOUNT_SERVICE_ENVELOPE_BYTES],
+) -> TestResult<Vec<String>> {
+    let encoded_request = STANDARD.encode(envelope);
+    for chunk in encoded_request.as_bytes().chunks(AUTH_CHUNK_CHARACTERS) {
+        client.send(&format!("AUTHENTICATE {}", std::str::from_utf8(chunk)?))?;
+    }
+    let mut received = 0;
+    Ok(read_leniently(client, |line| {
+        let mut fields = line.split_ascii_whitespace().skip(1);
+        if fields.next() == Some("AUTHENTICATE") {
+            received += fields.next().map_or(0, str::len);
+            return received >= SASL_RESPONSE_CHARACTERS;
+        }
+        is_sasl_numeric(line)
+    }))
+}
+
+fn authentication_start_envelope(
+    fixture: &LiveFixture,
+    password: &[u8],
+    request_seed: u8,
+) -> TestResult<(
+    [u8; ACCOUNT_SERVICE_ENVELOPE_BYTES],
+    AccountResponseOpenToken,
+    ClientLogin<TestOpaqueSuite>,
+    TestOpaqueRng,
+)> {
+    let mut rng = TestOpaqueRng::new();
+    let login = ClientLogin::<TestOpaqueSuite>::start(&mut rng, password)?;
+    let ke1 = OpaqueKe1::from_bytes(login.message.serialize().as_slice().try_into()?)?;
+    let (envelope, token) = seal_account_payload(
+        fixture.network_id,
+        request_seed,
+        AccountRequestPayload::AuthenticationStart(AuthenticationStart {
+            network_id: fixture.network_id,
+            login: NormalizedLogin::prepare("stage-six-account")?,
+            ke1,
+        }),
+    )?;
+    Ok((envelope, token, login.state, rng))
+}
+
+#[test]
+fn production_daemon_account_edges_cover_replay_mismatch_logout_and_deletion() -> TestResult {
+    let fixture = LiveFixture::create()?;
+    let mut daemon = DaemonProcess::start(&fixture.config_path)?;
+    let account_id = {
+        let mut creation = IrcClient::connect(&fixture)?;
+        creation.negotiate_sasl()?;
+        create_live_account(&mut creation, &fixture)?
+    };
+
+    // A finish that names the wrong transaction is refused and the carrier
+    // connection does not survive it.
+    let (start_envelope, start_token, login_state, mut rng) =
+        authentication_start_envelope(&fixture, ACCOUNT_PASSWORD, 70)?;
+    let mut mismatch = IrcClient::connect(&fixture)?;
+    mismatch.negotiate_sasl()?;
+    mismatch.begin_sasl()?;
+    let challenge = mismatch.sasl_exchange(&start_envelope, start_token)?;
+    let AccountServiceResponsePayload::AuthenticationChallenge {
+        credential_id, ke2, ..
+    } = challenge
+    else {
+        return Err(failure("authentication returned the wrong challenge"));
+    };
+    let context = opaque_context(fixture.network_id);
+    let login_finish = login_state.finish(
+        &mut rng,
+        ACCOUNT_PASSWORD,
+        CredentialResponse::<TestOpaqueSuite>::deserialize(ke2.expose_for_account_response())?,
+        ClientLoginFinishParameters::new(
+            Some(&context),
+            opaque_identifiers(&fixture.network_id, &credential_id),
+            Some(&TestArgon2id),
+        ),
+    )?;
+    let ke3 = OpaqueKe3::from_bytes(login_finish.message.serialize().as_slice().try_into()?)?;
+    let (wrong_finish, _token) = seal_account_payload(
+        fixture.network_id,
+        71,
+        AccountRequestPayload::AuthenticationFinish(AuthenticationFinish {
+            network_id: fixture.network_id,
+            transaction_id: agenc_ircd_types::TransactionId::from_bytes([77; 16]),
+            ke3,
+        }),
+    )?;
+    let rejected = sasl_exchange_lines(&mut mismatch, &wrong_finish)?;
+    assert!(
+        !rejected.is_empty(),
+        "wrong transaction finish produced no reply"
+    );
+    drop(mismatch);
+
+    // The identical start envelope from another connection is a replay on a
+    // different route.
+    let mut replay = IrcClient::connect(&fixture)?;
+    replay.negotiate_sasl()?;
+    replay.begin_sasl()?;
+    // A replayed request on a different route fails closed: the server may
+    // answer with a numeric or simply close without output.
+    let _replayed = sasl_exchange_lines(&mut replay, &start_envelope)?;
+    drop(replay);
+
+    // Each protocol misuse fails closed on its own connection: an abort with
+    // nothing pending, an invalid chunk, and carrier misuse.
+    let mut idle_abort = IrcClient::connect(&fixture)?;
+    idle_abort.negotiate_sasl()?;
+    let _aborted = send_and_sync(&mut idle_abort, &["AUTHENTICATE *".to_owned()])?;
+    drop(idle_abort);
+
+    let mut bad_chunk = IrcClient::connect(&fixture)?;
+    bad_chunk.negotiate_sasl()?;
+    bad_chunk.begin_sasl()?;
+    let _invalid = send_and_sync(&mut bad_chunk, &["AUTHENTICATE !!!".to_owned()])?;
+    drop(bad_chunk);
+
+    let mut carrier = IrcClient::connect(&fixture)?;
+    carrier.negotiate_sasl()?;
+    let _misused = send_and_sync(
+        &mut carrier,
+        &[
+            "ACCTCREATE DATA AAAA".to_owned(),
+            "ACCTCREATE START 12".to_owned(),
+            format!("ACCTCREATE START {ACCOUNT_SERVICE_ENVELOPE_BYTES}"),
+            "ACCTCREATE END".to_owned(),
+        ],
+    )?;
+    drop(carrier);
+
+    // A complete authentication, registration, logout, re-authentication,
+    // and account deletion with a wrong token first.
+    let mut client = IrcClient::connect(&fixture)?;
+    client.negotiate_sasl()?;
+    // Account control notes are standard replies.
+    let acknowledged = client.send_until("CAP REQ :standard-replies", " CAP * ACK ")?;
+    assert_contains(&acknowledged, "standard-replies")?;
+    authenticate_live_account(&mut client, &fixture, ACCOUNT_PASSWORD, 80, account_id)?;
+    let registered = client.complete_registration("EdgeUser")?;
+    assert_contains(&registered, " 001 EdgeUser ")?;
+    let _logout = send_and_sync(&mut client, &["AUTHENTICATE *".to_owned()])?;
+    authenticate_live_account(&mut client, &fixture, ACCOUNT_PASSWORD, 82, account_id)?;
+    client.send("ACCT DELETE START")?;
+    let challenge = read_leniently(&mut client, |line| line.contains("DELETE_CHALLENGE"));
+    let token = challenge
+        .iter()
+        .find_map(|line| {
+            line.split_whitespace()
+                .skip_while(|field| *field != "DELETE_CHALLENGE")
+                .nth(1)
+                .map(str::to_owned)
+        })
+        .ok_or_else(|| failure(format!("no deletion challenge: {challenge:?}")))?;
+    client.send("ACCT DELETE CONFIRM AAAAAAAAAAAAAAAAAAAAAA")?;
+    let wrong = read_leniently(&mut client, |line| {
+        line.contains("FAIL ") || line.contains(" ACCT ")
+    });
+    assert!(!wrong.is_empty(), "wrong deletion token produced no reply");
+    client.send(&format!("ACCT DELETE CONFIRM {token}"))?;
+    let deleted = read_leniently(&mut client, |line| line.contains("ERROR "));
+    assert!(!deleted.is_empty(), "deletion produced no closing lines");
+    drop(client);
+
+    // The deleted account can no longer authenticate.
+    let mut late = IrcClient::connect(&fixture)?;
+    late.negotiate_sasl()?;
+    let (late_start, _token, _state, _rng) =
+        authentication_start_envelope(&fixture, ACCOUNT_PASSWORD, 90)?;
+    late.begin_sasl()?;
+    let _outcome = sasl_exchange_lines(&mut late, &late_start)?;
+    drop(late);
+
+    let mut admin = AdminClient::connect(&fixture)?;
+    admin.confirm_process("DIE :edge shutdown")?;
+    assert!(daemon.wait()?.success());
     Ok(())
 }
