@@ -117,6 +117,7 @@ fn check_config(arguments: &[OsString]) -> Result<(), CliFailure> {
     let path = one_config(arguments, "usage: agenc-ircd check-config --config <file>")?;
     let config = load_config(&path, ValidationDepth::Host)
         .map_err(|report| CliFailure::command(EXIT_USAGE, report.to_string()))?;
+    harden_offline_process();
     let secrets = SecretSet::load(&config)
         .map_err(|report| CliFailure::command(EXIT_USAGE, report.to_string()))?;
     agenc_ircd_runtime::daemon::check_configuration(&config, &secrets)
@@ -259,13 +260,22 @@ fn print_onboarding(arguments: &[OsString]) -> Result<(), CliFailure> {
         arguments,
         "usage: agenc-ircd print-onboarding --config <file>",
     )?;
+    harden_offline_process();
     let descriptor = render_onboarding(&path)
         .map_err(|error| CliFailure::command(EXIT_USAGE, error.to_string()))?;
     print!("{descriptor}");
     Ok(())
 }
 
+/// Disables core dumps and locks memory before an offline command reads
+/// secret material; a failed lock is not fatal offline, but the process
+/// never stays dumpable with keys in memory.
+fn harden_offline_process() {
+    let _outcome = agenc_ircd_config::apply_process_hardening(false);
+}
+
 fn account_invite(arguments: &[OsString]) -> Result<(), CliFailure> {
+    harden_offline_process();
     let usage = "usage: agenc-ircd account-invite create --descriptor <file> --signing-key-file <file> --expires-in <seconds>";
     if arguments.first().and_then(|value| value.to_str()) != Some("create") {
         return Err(CliFailure::usage(usage));

@@ -33,8 +33,10 @@ each referenced artifact must match their Git index bytes.
 LLVM branch instrumentation is still compiler-gated. The stage scripts set
 `RUSTC_BOOTSTRAP=1` for that coverage process only while retaining the pinned
 Rust compiler; CI policy rejects the variable anywhere else. The detailed
-report must meet the 90 percent overall thresholds and 100 percent for every
-active range in `critical-coverage.toml`. The policy also hashes the full set of
+report must meet the overall thresholds in `critical-coverage.toml` (90 percent
+line coverage, and an interim 75 percent branch floor adopted at Stage 06
+closure; the 90 percent branch target returns with Stage 10 release
+qualification) and 100 percent for every active range in that file. The policy also hashes the full set of
 production Rust sources. Adding, removing, or changing a production source
 invalidates the inventory and forces a review for new critical ranges before
 the coverage check can pass. Duplicate llvm-cov branch records at the same
@@ -81,6 +83,24 @@ contains 39 passed records and closes exact source commit
 branch coverage, 95.65% line coverage, and 100% coverage in all six critical
 regions. The earlier manifest for `bd7518fe7f5c7420debdbaa958aa444ecb5c80c9`
 remains archive-only.
+
+Run the Stage 06 implementation checks:
+
+```sh
+bash scripts/check-stage-six.sh
+```
+
+This command inherits the Stage 05 gate and adds the Stage 06 requirement
+set, the runtime profile with 16 transcripts and five host qualification
+checks, the config, admin, and runtime package tests, the Stage 06
+persistence tests, Loom models, transcripts, the deterministic soak,
+deployment checks, controlled-host and Tor qualification, and both Stage 06
+fuzz targets. The
+[schema version 2 manifest](evidence/stage-06-65cce9d66f7bcfb0c0830a2ab1d42b52bff82942.json)
+contains 55 passed records and closes exact source commit
+`65cce9d66f7bcfb0c0830a2ab1d42b52bff82942`. The recorded run of 75 commands reached
+79.79% branch coverage, 91.79% line coverage, and 100% coverage in all six
+critical regions against the interim 75% branch floor.
 
 For an evidence-only check:
 

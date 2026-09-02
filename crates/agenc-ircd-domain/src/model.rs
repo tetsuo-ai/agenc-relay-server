@@ -1963,12 +1963,13 @@ impl DomainState {
         }) {
             return Err(DomainError::InvariantViolation);
         }
+        // `ChannelState::validate` already proved every membership is keyed
+        // by its own user, so only the cross-index relations remain.
         for (user_id, membership) in &channel.memberships {
             let Some(session) = self.sessions.get(user_id) else {
                 return Err(DomainError::InvariantViolation);
             };
-            if membership.user_id != *user_id
-                || membership.account_id != session.account_id
+            if membership.account_id != session.account_id
                 || !session.joined_channels.contains(&channel.channel_id)
             {
                 return Err(DomainError::InvariantViolation);
@@ -2803,6 +2804,60 @@ mod tests {
         value.memberships.insert(
             live_user,
             Membership::new(live_user, Some(account_id), Role::Member),
+        );
+        state
+            .channel_names
+            .insert(value.name.clone(), value.channel_id);
+        state.channels.insert(value.channel_id, value);
+        assert_eq!(state.validate(), Err(DomainError::InvariantViolation));
+
+        // An invite whose guest target has no live session dangles.
+        let mut state = DomainState::new()?;
+        let live = session(23, None)?;
+        let live_user = live.user_id;
+        insert_session(&mut state, live);
+        let mut value = channel(23, "#dangling-invite")?;
+        value.memberships.clear();
+        value
+            .memberships
+            .insert(live_user, Membership::new(live_user, None, Role::Owner));
+        value.invites.insert(
+            InviteId::from_bytes(id(23)),
+            Invite {
+                invite_id: InviteId::from_bytes(id(23)),
+                target: Principal::Guest(UserId::from_bytes(id(98))),
+                inviter: live_user,
+                creation_revision: Revision::new(1)?,
+                expires_at: MonotonicTick::from_ticks(100),
+                expires_at_utc: UtcSecond::from_unix_seconds(100),
+            },
+        );
+        state
+            .channel_names
+            .insert(value.name.clone(), value.channel_id);
+        state.channels.insert(value.channel_id, value);
+        assert_eq!(state.validate(), Err(DomainError::InvariantViolation));
+
+        // A membership stored under one live user but naming another user is
+        // rejected by the channel-level identity check before the cross-index
+        // relations are examined.
+        let mut state = DomainState::new()?;
+        let mut owner = session(24, None)?;
+        let owner_user = owner.user_id;
+        let mut member = session(25, None)?;
+        let member_user = member.user_id;
+        let mut value = channel(24, "#member-identity")?;
+        owner.joined_channels.insert(value.channel_id);
+        member.joined_channels.insert(value.channel_id);
+        insert_session(&mut state, owner);
+        insert_session(&mut state, member);
+        value.memberships.clear();
+        value
+            .memberships
+            .insert(owner_user, Membership::new(owner_user, None, Role::Owner));
+        value.memberships.insert(
+            member_user,
+            Membership::new(UserId::from_bytes(id(99)), None, Role::Member),
         );
         state
             .channel_names

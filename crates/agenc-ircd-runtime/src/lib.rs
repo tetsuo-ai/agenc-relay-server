@@ -32,6 +32,8 @@ pub mod runtime_config;
 pub mod state_core;
 pub mod supervisor;
 mod sync;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod tls;
 pub mod tor_client;
 

@@ -213,6 +213,45 @@ NORMATIVE_BINDINGS = {
     "EVID-ARCH-DUR-10": (["ARCH-DUR-10"], "normative-requirement"),
     "EVID-ARCH-DUR-11": (["ARCH-DUR-11"], "normative-requirement"),
     "EVID-ARCH-DUR-12": (["ARCH-DUR-12"], "normative-requirement"),
+    "EVID-ARCH-AUTH-02": (["ARCH-AUTH-02"], "normative-requirement"),
+    "EVID-ARCH-AUTH-05": (["ARCH-AUTH-05"], "normative-requirement"),
+    "EVID-ARCH-AUTH-07": (["ARCH-AUTH-07"], "normative-requirement"),
+    "EVID-ARCH-AUTH-08": (["ARCH-AUTH-08"], "normative-requirement"),
+    "EVID-ARCH-AUTH-11": (["ARCH-AUTH-11"], "normative-requirement"),
+    "EVID-ARCH-ID-03": (["ARCH-ID-03"], "normative-requirement"),
+    "EVID-ARCH-ID-04": (["ARCH-ID-04"], "normative-requirement"),
+    "EVID-ARCH-OPS-02": (["ARCH-OPS-02"], "normative-requirement"),
+    "EVID-ARCH-OPS-03": (["ARCH-OPS-03"], "normative-requirement"),
+    "EVID-ARCH-OPS-05": (["ARCH-OPS-05"], "normative-requirement"),
+    "EVID-ARCH-REQ-081595C2CCFFAF608E38": (["ARCH-REQ-081595C2CCFFAF608E38"], "normative-requirement"),
+    "EVID-ARCH-REQ-0A2DFA591F93494434CA": (["ARCH-REQ-0A2DFA591F93494434CA"], "normative-requirement"),
+    "EVID-ARCH-REQ-0EC008E51ACF33B486A7": (["ARCH-REQ-0EC008E51ACF33B486A7"], "normative-requirement"),
+    "EVID-ARCH-REQ-0ED2BB6143B32AC67530": (["ARCH-REQ-0ED2BB6143B32AC67530"], "normative-requirement"),
+    "EVID-ARCH-REQ-1077079A5B8E236B2E7E": (["ARCH-REQ-1077079A5B8E236B2E7E"], "normative-requirement"),
+    "EVID-ARCH-REQ-1BC68D62C88F9901863C": (["ARCH-REQ-1BC68D62C88F9901863C"], "normative-requirement"),
+    "EVID-ARCH-REQ-1F847B93E38E57D5492E": (["ARCH-REQ-1F847B93E38E57D5492E"], "normative-requirement"),
+    "EVID-ARCH-REQ-239F20852008EFEBC14C": (["ARCH-REQ-239F20852008EFEBC14C"], "normative-requirement"),
+    "EVID-ARCH-REQ-2DE781FEE0904A7D417F": (["ARCH-REQ-2DE781FEE0904A7D417F"], "normative-requirement"),
+    "EVID-ARCH-REQ-3EDADEB5374091A7FCD9": (["ARCH-REQ-3EDADEB5374091A7FCD9"], "normative-requirement"),
+    "EVID-ARCH-REQ-437D151873A9CD5C587B": (["ARCH-REQ-437D151873A9CD5C587B"], "normative-requirement"),
+    "EVID-ARCH-REQ-533C4FC96F4E21250FF2": (["ARCH-REQ-533C4FC96F4E21250FF2"], "normative-requirement"),
+    "EVID-ARCH-REQ-6ED8CC0935B62D48C171": (["ARCH-REQ-6ED8CC0935B62D48C171"], "normative-requirement"),
+    "EVID-ARCH-REQ-76933F949C4BA311D15E": (["ARCH-REQ-76933F949C4BA311D15E"], "normative-requirement"),
+    "EVID-ARCH-REQ-89A52EAEFEB27B78EA3F": (["ARCH-REQ-89A52EAEFEB27B78EA3F"], "normative-requirement"),
+    "EVID-ARCH-REQ-8E6BD0E1ADFA47B0488A": (["ARCH-REQ-8E6BD0E1ADFA47B0488A"], "normative-requirement"),
+    "EVID-ARCH-REQ-91A4F778BFA1744C7579": (["ARCH-REQ-91A4F778BFA1744C7579"], "normative-requirement"),
+    "EVID-ARCH-REQ-951E6893F2B754847C8E": (["ARCH-REQ-951E6893F2B754847C8E"], "normative-requirement"),
+    "EVID-ARCH-REQ-97C72A89521508665EA0": (["ARCH-REQ-97C72A89521508665EA0"], "normative-requirement"),
+    "EVID-ARCH-REQ-A8B38178C6FCDD5EB7ED": (["ARCH-REQ-A8B38178C6FCDD5EB7ED"], "normative-requirement"),
+    "EVID-ARCH-REQ-AC500B2D79C7A16B554A": (["ARCH-REQ-AC500B2D79C7A16B554A"], "normative-requirement"),
+    "EVID-ARCH-REQ-AF83DC2BF6651C1ADCAB": (["ARCH-REQ-AF83DC2BF6651C1ADCAB"], "normative-requirement"),
+    "EVID-ARCH-REQ-B640E662E68B7720C8CE": (["ARCH-REQ-B640E662E68B7720C8CE"], "normative-requirement"),
+    "EVID-ARCH-REQ-C33F2C188FAB745A4008": (["ARCH-REQ-C33F2C188FAB745A4008"], "normative-requirement"),
+    "EVID-ARCH-REQ-D8752DA6EC2A4D543D27": (["ARCH-REQ-D8752DA6EC2A4D543D27"], "normative-requirement"),
+    "EVID-ARCH-REQ-D9709F92FF869A201DA0": (["ARCH-REQ-D9709F92FF869A201DA0"], "normative-requirement"),
+    "EVID-ARCH-REQ-DE27E4D7727B11384C1F": (["ARCH-REQ-DE27E4D7727B11384C1F"], "normative-requirement"),
+    "EVID-ARCH-STA-04": (["ARCH-STA-04"], "normative-requirement"),
+    "EVID-ARCH-TRN-02": (["ARCH-TRN-02"], "normative-requirement"),
 }
 
 REVIEWED_BINDINGS = STAGE_BINDINGS | NORMATIVE_BINDINGS
@@ -1793,11 +1832,11 @@ kind = "normative-requirement"
         + """
 
 [[evidence]]
-id = "EVID-ARCH-AUTH-08"
-claim_ids = ["ARCH-AUTH-08"]
+id = "EVID-ARCH-AUTH-03"
+claim_ids = ["ARCH-AUTH-03"]
 kind = "normative-requirement"
 """,
-        "unimplemented requirement ARCH-AUTH-08 must not have closing catalog evidence",
+        "unimplemented requirement ARCH-AUTH-03 must not have closing catalog evidence",
     )
     reject_catalog(
         "unrelated catalog evidence",
@@ -1813,7 +1852,7 @@ kind = "normative-requirement"
     )
 
     try:
-        closure_evidence_inventory({"EVID-ARCH-AUTH-08"})
+        closure_evidence_inventory({"EVID-ARCH-AUTH-03"})
     except EvidenceError as error:
         if "lacks a reviewed catalog kind" not in str(error):
             raise EvidenceError(

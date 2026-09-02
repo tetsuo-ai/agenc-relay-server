@@ -4160,6 +4160,16 @@ impl AccountServiceCoordinator {
             .fanout_request_to(request.generation, frames)
             .map_err(|_| RuntimeError::MemoryExhausted)?;
         let next = sealed.response_intent().next_response_count();
+        // The response count is checked before anything is staged so a
+        // mismatch never leaves a committed batch without its live owner.
+        if next
+            != context
+                .head()
+                .account_service_response_count
+                .saturating_add(1)
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
         let accepted = context.stage_durable_with_account_service(
             plan,
             fanout,
@@ -4167,13 +4177,7 @@ impl AccountServiceCoordinator {
             1,
             writes,
         );
-        if !matches!(accepted, Ok(StageAccepted::Staged { .. }))
-            || next
-                != context
-                    .head()
-                    .account_service_response_count
-                    .saturating_add(1)
-        {
+        if !matches!(accepted, Ok(StageAccepted::Staged { .. })) {
             return Err(RuntimeError::InvalidValue);
         }
         self.pending_authority = Some(PendingAuthority::CreationStart {
@@ -4292,6 +4296,16 @@ impl AccountServiceCoordinator {
             .fanout_request_to(request.generation, frames)
             .map_err(|_| RuntimeError::MemoryExhausted)?;
         let next = sealed.response_intent().next_response_count();
+        // The response count is checked before anything is staged so a
+        // mismatch never leaves a committed batch without its live owner.
+        if next
+            != context
+                .head()
+                .account_service_response_count
+                .saturating_add(1)
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
         let accepted = context.stage_durable_with_account_service(
             plan,
             fanout,
@@ -4299,13 +4313,7 @@ impl AccountServiceCoordinator {
             1,
             writes,
         );
-        if !matches!(accepted, Ok(StageAccepted::Staged { .. }))
-            || next
-                != context
-                    .head()
-                    .account_service_response_count
-                    .saturating_add(1)
-        {
+        if !matches!(accepted, Ok(StageAccepted::Staged { .. })) {
             return Err(RuntimeError::InvalidValue);
         }
         self.pending_authority = Some(PendingAuthority::CreationFinish {
@@ -4458,6 +4466,16 @@ impl AccountServiceCoordinator {
             .fanout_request_to(request.generation, frames)
             .map_err(|_| RuntimeError::MemoryExhausted)?;
         let next = sealed.response_intent().next_response_count();
+        // The response count is checked before anything is staged so a
+        // mismatch never leaves a committed batch without its live owner.
+        if next
+            != context
+                .head()
+                .account_service_response_count
+                .saturating_add(1)
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
         let accepted = context.stage_durable_with_account_service(
             plan,
             fanout,
@@ -4465,13 +4483,7 @@ impl AccountServiceCoordinator {
             1,
             writes,
         );
-        if !matches!(accepted, Ok(StageAccepted::Staged { .. }))
-            || next
-                != context
-                    .head()
-                    .account_service_response_count
-                    .saturating_add(1)
-        {
+        if !matches!(accepted, Ok(StageAccepted::Staged { .. })) {
             return Err(RuntimeError::InvalidValue);
         }
         self.pending_authority = Some(PendingAuthority::CredentialStart {
@@ -4613,6 +4625,16 @@ impl AccountServiceCoordinator {
                 .map_err(|_| RuntimeError::MemoryExhausted)?
         };
         let next = sealed.response_intent().next_response_count();
+        // The response count is checked before anything is staged so a
+        // mismatch never leaves a committed batch without its live owner.
+        if next
+            != context
+                .head()
+                .account_service_response_count
+                .saturating_add(1)
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
         let accepted = context.stage_durable_with_account_service(
             plan,
             fanout,
@@ -4620,13 +4642,7 @@ impl AccountServiceCoordinator {
             1,
             writes,
         );
-        if !matches!(accepted, Ok(StageAccepted::Staged { .. }))
-            || next
-                != context
-                    .head()
-                    .account_service_response_count
-                    .saturating_add(1)
-        {
+        if !matches!(accepted, Ok(StageAccepted::Staged { .. })) {
             return Err(RuntimeError::InvalidValue);
         }
         self.pending_authority = Some(PendingAuthority::CredentialFinish {
@@ -4692,6 +4708,16 @@ impl AccountServiceCoordinator {
             .fanout_request_to(request.generation, frames)
             .map_err(|_| RuntimeError::MemoryExhausted)?;
         let next = sealed.response_intent().next_response_count();
+        // The response count is checked before anything is staged so a
+        // mismatch never leaves a committed batch without its live owner.
+        if next
+            != context
+                .head()
+                .account_service_response_count
+                .saturating_add(1)
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
         let accepted = context.stage_durable_with_account_service(
             plan,
             fanout,
@@ -4699,13 +4725,7 @@ impl AccountServiceCoordinator {
             1,
             vec![transaction_write, result_write],
         );
-        if !matches!(accepted, Ok(StageAccepted::Staged { .. }))
-            || next
-                != context
-                    .head()
-                    .account_service_response_count
-                    .saturating_add(1)
-        {
+        if !matches!(accepted, Ok(StageAccepted::Staged { .. })) {
             return Err(RuntimeError::InvalidValue);
         }
         self.pending_authority = Some(PendingAuthority::Start {
@@ -4870,6 +4890,16 @@ impl AccountServiceCoordinator {
             .fanout_request_to(request.generation, frames)
             .map_err(|_| RuntimeError::MemoryExhausted)?;
         let next = sealed.response_intent().next_response_count();
+        // The response count is checked before anything is staged so a
+        // mismatch never leaves a committed batch without its live owner.
+        if next
+            != context
+                .head()
+                .account_service_response_count
+                .saturating_add(1)
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
         let accepted = context.stage_durable_with_account_service(
             plan,
             fanout,
@@ -4877,13 +4907,7 @@ impl AccountServiceCoordinator {
             1,
             writes,
         );
-        if !matches!(accepted, Ok(StageAccepted::Staged { .. }))
-            || next
-                != context
-                    .head()
-                    .account_service_response_count
-                    .saturating_add(1)
-        {
+        if !matches!(accepted, Ok(StageAccepted::Staged { .. })) {
             return Err(RuntimeError::InvalidValue);
         }
         self.pending_authority = Some(PendingAuthority::Finish {
@@ -5759,7 +5783,7 @@ impl AccountServiceCoordinator {
         context: &mut StateCoreContext,
         origin: Option<ConnectionGeneration>,
     ) -> Vec<CarrierCompletion> {
-        if self.pending_login_tombstone_expiry.take().is_some() && origin.is_none() {
+        if origin.is_none() && self.pending_login_tombstone_expiry.take().is_some() {
             let _scheduled = self.schedule_next_login_tombstone(context);
             return self.progress(context);
         }
@@ -6702,319 +6726,71 @@ const fn request_terminal_result(terminal: RequestTerminal) -> ResultClass {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, VecDeque};
-    use std::fs;
-    use std::os::unix::fs::PermissionsExt as _;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    use agenc_ircd_auth::{AccountServiceEnvelope, OpaqueProfile};
-    use agenc_ircd_client_wire::{
-        FramedLine, OutputBudget, RenderError, SASL_REQUEST_CHARACTERS, SaslAction, SaslNumeric,
-        SecretBytes, parse_message,
-    };
-    use agenc_ircd_crypto::{
-        ACCOUNT_HPKE_REQUEST_CIPHERTEXT_BYTES, AccountHpkePrivateKey, CryptoWorkerConfig,
-        Ed25519SecretKey, LoginIndexDigest, LoginIndexKey, OpaqueFakeCredentialKey,
-        RollbackGuardRootKey, StorageDigest, StorageMasterKey, derive_login_index,
-    };
-    use agenc_ircd_domain::{DirectMessagePolicy, GuestDirectMessagePolicy, PresencePolicy};
-    use agenc_ircd_storage::{
-        DatabaseHeaderTbs, InitialStorageRecord, LIVE_RECORD_KIND, LOGIN_INDEX_KEY_STATE_KEY,
-        LoginIndexKeyState, LoginIndexStoredKey, LoginIndexValue, LoginIndexValueKind,
-        OPAQUE_FAKE_RECORD_KEY, PersistentRecordValue, QualificationTarget, SCHEMA_GENERATION,
-        StateDirectory, StorageEngineLimits, StorageGrowthCase, StorageInitializationConfig,
-        StorageInitializationMode, StorageInitializationOutcome, StorageOpenConfig, StorageOwner,
-        StorageQualification, StorageQualificationReport, StorageQualificationReportTbs, StoredKey,
-        TableId, initialize_storage,
-    };
-    use agenc_ircd_testkit::{
-        DeterministicMonotonicClock, DeterministicWallClock, ScriptedEntropy,
-    };
-    use agenc_ircd_types::{
-        AccountId, AccountRandomId, AccountServiceMessageKind, ConnectionId, DatabaseId,
-        Generation, InviteId, MonotonicTick, NetworkId, NormalizedLogin, OpaqueCredentialId,
-        OriginId, RecoveryEpoch, ServerId, ServerIncarnation, TransactionId, UtcSecond,
-    };
-
-    use crate::admission::{BucketTable, RateLimits};
-    use crate::bridge::crypto::{ChannelKeyVerdict, CryptoBridge, CryptoJobOutput};
-    use crate::bridge::storage::StorageBridge;
-    use crate::bridge::{CryptoCompletionMessage, CryptoJobId};
-    use crate::budget::MemoryBudget;
-    use crate::observe::health::Liveness;
-    use crate::observe::metrics::ResultClass;
-    use crate::runtime_config::AccountRuntimePolicy;
-
     use super::{
         AccountCarrierAction, AccountCarrierKind, AccountCarrierPhase, AccountCreationPolicy,
-        AccountDeletionBarrier, AccountServiceConfig, AccountServiceCoordinator, CarrierCompletion,
-        CarrierRoute, ConnectionGeneration, ConnectionRoute, CreationReservation,
-        LiveTransactionClass, MAX_OPAQUE_ATTEMPTS_PER_CONNECTION, MAX_PENDING_TRANSACTION_CLEANUPS,
-        PendingAuthority, PendingCrypto, PendingLoginTombstoneExpiry, REQUEST_RESULT_BYTES,
-        REQUEST_RESULT_VERSION, RequestCarrier, RequestContext, RequestResultCursor,
-        RequestResultRecord, RequestTerminal, RuntimeError, TransactionCleanup,
-        account_created_note, account_credential_changed_note, account_deletion_completions,
-        account_deletion_writes, account_failure, account_phase_name,
+        AccountDeletionBarrier, AccountServiceCoordinator, CarrierCompletion, CarrierRoute,
+        ConnectionGeneration, ConnectionRoute, CreationReservation, LiveTransactionClass,
+        MAX_OPAQUE_ATTEMPTS_PER_CONNECTION, MAX_PENDING_TRANSACTION_CLEANUPS, PendingAuthority,
+        PendingCrypto, PendingLoginTombstoneExpiry, REQUEST_RESULT_BYTES, REQUEST_RESULT_VERSION,
+        RequestCarrier, RequestContext, RequestResultCursor, RequestResultRecord, RequestTerminal,
+        RuntimeError, TransactionCleanup, account_created_note, account_credential_changed_note,
+        account_deletion_completions, account_deletion_writes, account_failure, account_phase_name,
         consume_opaque_connection_attempt, credential_id, live_login, login_tombstone_expiry_batch,
         opaque_attempt_demand, pending_credential_finish_fences,
         pending_guest_account_switch_fences, render_account_action, render_sasl_action,
         render_sasl_actions, replay_terminal_account, request_terminal_result, sasl_action_result,
         select_live_login, transaction_cleanup_batch,
     };
-    use crate::StateCoreSeed;
-    use crate::state_core::durable::{AccountServiceDurableWrite, AccountingCeilings, KeyDeriver};
-    use crate::state_core::reconstruct::reconstruct;
-    use crate::state_core::{
-        DefaultRouter, StateCore, StateCoreClocks, StateCoreConfig, StateCoreContext,
-        StateCoreInputs,
-    };
+    use crate::admission::{BucketTable, RateLimits};
+    use crate::bridge::crypto::{ChannelKeyVerdict, CryptoJobOutput};
+    use crate::bridge::{CryptoCompletionMessage, CryptoJobId};
+    use crate::budget::MemoryBudget;
+    use crate::observe::metrics::ResultClass;
+    use crate::runtime_config::AccountRuntimePolicy;
+    use crate::state_core::StateCoreContext;
+    use crate::state_core::durable::AccountServiceDurableWrite;
     use crate::sync::Arc;
-
-    static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
-    const TEST_STORAGE_LIMITS: StorageEngineLimits = StorageEngineLimits {
-        redb_cache_bytes: 8 * 1_024 * 1_024,
-        fixed_reserve_bytes: 64 * 1_024 * 1_024,
-        reserve_percent: 1,
-        database_max_bytes: 1_073_741_824,
-        backup_max_bytes: 2_147_483_648,
-        integrity_checkpoint_manifests: 100_000,
+    use crate::test_support::{StateCoreFixture, account_service_config};
+    use agenc_ircd_auth::AccountServiceEnvelope;
+    use agenc_ircd_client_wire::{
+        FramedLine, OutputBudget, RenderError, SASL_REQUEST_CHARACTERS, SaslAction, SaslNumeric,
+        SecretBytes, parse_message,
     };
-
-    fn signed_test_qualification(
-        tuple: agenc_ircd_storage::FilesystemTuple,
-    ) -> Result<StorageQualification, Box<dyn core::error::Error>> {
-        let target = match tuple.target {
-            "x86_64-unknown-linux-gnu" => QualificationTarget::X86_64UnknownLinuxGnu,
-            "aarch64-unknown-linux-gnu" => QualificationTarget::Aarch64UnknownLinuxGnu,
-            _ => return Err("unsupported test target".into()),
-        };
-        let mut cases = agenc_ircd_storage::REQUIRED_QUALIFICATION_CASES
-            .iter()
-            .map(|name| StorageGrowthCase::new((*name).to_owned(), 1_000, 1_001))
-            .collect::<Result<Vec<_>, _>>()?;
-        cases.sort_by(|left, right| left.name().cmp(right.name()));
-        let key = Ed25519SecretKey::from_bytes([99; 32]);
-        let report = StorageQualificationReport::sign(
-            StorageQualificationReportTbs {
-                target,
-                filesystem_type: tuple.filesystem_type,
-                block_size: tuple.block_size,
-                mount_flags: tuple.mount_flags,
-                kernel_release: "test-kernel".to_owned(),
-                redb_features_hash: StorageDigest::from_bytes([1; 32]),
-                release_profile_hash: StorageDigest::from_bytes([2; 32]),
-                corpus_hash: StorageDigest::from_bytes([3; 32]),
-                cases,
-                maximum_observed_growth: 1,
-                raw_log_hash: StorageDigest::from_bytes([4; 32]),
-            },
-            &key,
-        )?;
-        let verified =
-            StorageQualificationReport::decode_and_verify(&report.encode()?, key.public_key())?;
-        Ok(verified.qualification_for(tuple)?)
-    }
-
-    struct TestDirectory(PathBuf);
-
-    impl TestDirectory {
-        fn create() -> Result<Self, Box<dyn core::error::Error>> {
-            let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
-                "agenc-ircd-account-service-{}-{sequence}",
-                std::process::id()
-            ));
-            fs::create_dir(&path)?;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
-            Ok(Self(path))
-        }
-    }
-
-    impl Drop for TestDirectory {
-        fn drop(&mut self) {
-            let _removed = fs::remove_dir_all(&self.0);
-        }
-    }
+    use agenc_ircd_crypto::{
+        ACCOUNT_HPKE_REQUEST_CIPHERTEXT_BYTES, LoginIndexDigest, LoginIndexKey, derive_login_index,
+    };
+    use agenc_ircd_domain::{DirectMessagePolicy, GuestDirectMessagePolicy, PresencePolicy};
+    use agenc_ircd_storage::{
+        LoginIndexKeyState, LoginIndexStoredKey, LoginIndexValue, LoginIndexValueKind, StoredKey,
+        TableId,
+    };
+    use agenc_ircd_types::{
+        AccountId, AccountRandomId, AccountServiceMessageKind, ConnectionId, Generation, InviteId,
+        MonotonicTick, NetworkId, NormalizedLogin, OpaqueCredentialId, OriginId, TransactionId,
+        UtcSecond,
+    };
+    use std::collections::{BTreeMap, VecDeque};
 
     struct CoordinatorFixture {
         coordinator: AccountServiceCoordinator,
-        state: Option<StateCore>,
-        owner: Option<StorageOwner>,
-        _storage_completions: tokio::sync::mpsc::Receiver<crate::bridge::StorageCompletionMessage>,
-        _storage_reads: tokio::sync::mpsc::Receiver<crate::bridge::StorageReadCompletionMessage>,
-        _storage_checkpoints:
-            tokio::sync::mpsc::Receiver<crate::bridge::StorageCheckpointCompletionMessage>,
-        _crypto_completions: tokio::sync::mpsc::Receiver<
-            crate::bridge::CryptoCompletionMessage<crate::bridge::crypto::CryptoJobOutput>,
-        >,
-        _directory: TestDirectory,
+        core: StateCoreFixture,
     }
 
     impl CoordinatorFixture {
         fn new(entropy: Vec<u8>) -> Result<Self, Box<dyn core::error::Error>> {
-            let network_id = NetworkId::from_bytes([31; 32]);
-            let server_id = ServerId::from_bytes([32; 16]);
-            let server_incarnation = ServerIncarnation::from_bytes([33; 16]);
-            let recovery_epoch = RecoveryEpoch::from_bytes([34; 16]);
-            let storage_master = [35; 32];
-            let rollback_guard = [36; 32];
-            let login_index = [37; 32];
-            let directory = TestDirectory::create()?;
-            let opaque = Arc::new(OpaqueProfile::generate(network_id)?);
-            let login_key = LoginIndexKey::from_bytes(login_index);
-            let key_state = LoginIndexKeyState::stable(1, login_key.key_id(network_id))?;
-            let key_state_record = InitialStorageRecord::new(
-                TableId::LoginIndexKeyState,
-                StoredKey::new(LOGIN_INDEX_KEY_STATE_KEY.to_vec())?,
-                1,
-                key_state.encode()?,
-            )?;
-            let fake_value = PersistentRecordValue::new(
-                TableId::OpaqueRecord,
-                LIVE_RECORD_KIND,
-                1,
-                0,
-                None,
-                Vec::new(),
-                opaque.expose_fake_record_for_persistence().to_vec(),
-            )?;
-            let fake_record = InitialStorageRecord::new(
-                TableId::OpaqueRecord,
-                StoredKey::new(OPAQUE_FAKE_RECORD_KEY.to_vec())?,
-                1,
-                fake_value.encode()?,
-            )?;
-            let qualification = signed_test_qualification(StateDirectory::probe(&directory.0)?)?;
-            let state_directory =
-                StateDirectory::open(&directory.0, core::slice::from_ref(&qualification))?;
-            let initialized = initialize_storage(StorageInitializationConfig {
-                state_directory,
-                header_tbs: DatabaseHeaderTbs::new(
-                    network_id,
-                    server_id,
-                    server_incarnation,
-                    DatabaseId::from_bytes([38; 16]),
-                    1,
-                    SCHEMA_GENERATION,
-                    recovery_epoch,
-                )?,
-                storage_master_key: StorageMasterKey::from_bytes(storage_master),
-                rollback_guard_root_key: RollbackGuardRootKey::from_bytes(rollback_guard),
-                mode: StorageInitializationMode::Live,
-                initial_records: vec![key_state_record, fake_record],
-                account_service_response_count: 0,
-                state_generation: 0,
-                predecessor_guard_hash: StorageDigest::from_bytes([0; 32]),
-                limits: TEST_STORAGE_LIMITS,
-            })?;
-            if !matches!(initialized, StorageInitializationOutcome::Complete { .. }) {
-                return Err("storage initialization was indeterminate".into());
-            }
-            let state_directory =
-                StateDirectory::open(&directory.0, core::slice::from_ref(&qualification))?;
-            let mut owner = StorageOwner::start(StorageOpenConfig {
-                expected_network_id: network_id,
-                expected_server_id: server_id,
-                state_directory,
-                storage_master_key: StorageMasterKey::from_bytes(storage_master),
-                rollback_guard_root_key: RollbackGuardRootKey::from_bytes(rollback_guard),
-                login_index_key: LoginIndexKey::from_bytes(login_index),
-                previous_login_index_key: None,
-                limits: TEST_STORAGE_LIMITS,
-            })?;
-            let seed = StateCoreSeed::from_storage(&owner)?;
-            let storage = seed.storage();
-            let keys = KeyDeriver::new(
-                StorageMasterKey::from_bytes(storage_master),
-                storage.database_binding(),
-                storage.storage_key_generation(),
-            )?;
-            let reconstruction = reconstruct(
-                &seed,
-                &owner.port(),
-                &keys,
-                MonotonicTick::from_ticks(10),
-                UtcSecond::from_unix_seconds(1_000),
-            )?;
-            let (storage_bridge, storage_completions, storage_reads, storage_checkpoints) =
-                StorageBridge::start(owner.port())?;
-            let crypto_config = CryptoWorkerConfig::new(1, 1, 1)?;
-            let (crypto_bridge, crypto_completions) = CryptoBridge::start(crypto_config)?;
-            let storage_limit_writer = owner.take_limit_writer()?;
-            let state = StateCore::new(StateCoreInputs {
-                config: StateCoreConfig {
-                    server_prefix: "server.example".to_owned(),
-                    rate_limits: RateLimits::defaults(),
-                    ceilings: AccountingCeilings {
-                        database_max_bytes: TEST_STORAGE_LIMITS.database_max_bytes,
-                        backup_max_bytes: TEST_STORAGE_LIMITS.backup_max_bytes,
-                    },
-                    motd: None,
-                    public_info: None,
-                },
-                reconstruction,
-                keys,
-                bridge: storage_bridge,
-                crypto: crypto_bridge,
-                budget: Arc::new(MemoryBudget::new(512 * 1_024 * 1_024)),
-                liveness: Arc::new(Liveness::new()),
-                clocks: StateCoreClocks {
-                    monotonic: Box::new(DeterministicMonotonicClock::at(10)),
-                    wall: Box::new(DeterministicWallClock::at(1_000)),
-                },
-                entropy: Box::new(ScriptedEntropy::new(entropy)?),
-                router: Box::new(DefaultRouter),
-                storage_limit_writer,
-            });
-            let coordinator = AccountServiceCoordinator::new(AccountServiceConfig {
-                network_id,
-                server_id,
-                server_incarnation,
-                origin_id: OriginId::from_bytes([39; 16]),
-                origin_generation: Generation::new(1)?,
-                recovery_epoch,
-                hpke_private_key: Arc::new(AccountHpkePrivateKey::from_bytes([40; 32])?),
-                opaque_profile: opaque,
-                current_login_index_key: Arc::new(LoginIndexKey::from_bytes(login_index)),
-                previous_login_index_key: None,
-                fake_credential_key: Arc::new(OpaqueFakeCredentialKey::from_bytes([41; 32])),
-                login_index_key_state: key_state,
-                live_login_keys: BTreeMap::new(),
-                login_deletion_tombstones: BTreeMap::new(),
-                startup_transaction_cleanups: Vec::new(),
-                creation_policy: AccountCreationPolicy::Open,
-                default_presence: PresencePolicy::Private,
-                default_guest_direct_messages: GuestDirectMessagePolicy::Deny,
-                default_direct_messages: DirectMessagePolicy::Allow,
-            })?;
-            Ok(Self {
-                coordinator,
-                state: Some(state),
-                owner: Some(owner),
-                _storage_completions: storage_completions,
-                _storage_reads: storage_reads,
-                _storage_checkpoints: storage_checkpoints,
-                _crypto_completions: crypto_completions,
-                _directory: directory,
-            })
+            let core = StateCoreFixture::new(entropy)?;
+            let coordinator = AccountServiceCoordinator::new(account_service_config(
+                &core.identity,
+                &core.opaque,
+                core.key_state,
+            )?)?;
+            Ok(Self { coordinator, core })
         }
 
         fn parts(
             &mut self,
         ) -> Result<(&mut AccountServiceCoordinator, &mut StateCoreContext), RuntimeError> {
-            let state = self.state.as_mut().ok_or(RuntimeError::InvalidValue)?;
-            Ok((&mut self.coordinator, state.context_mut()))
-        }
-    }
-
-    impl Drop for CoordinatorFixture {
-        fn drop(&mut self) {
-            drop(self.state.take());
-            if let Some(owner) = self.owner.take() {
-                let _shutdown = owner.shutdown();
-            }
+            Ok((&mut self.coordinator, self.core.context_mut()?))
         }
     }
 
@@ -8503,5 +8279,95 @@ mod tests {
             AccountServiceDurableWrite::Delete { table, key }
                 if *table == expected_table && key == expected_key
         ));
+    }
+
+    #[test]
+    fn batch_rejection_and_expiry_timers_release_authority_without_live_transactions()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let mut fixture = CoordinatorFixture::new(vec![3; 192])?;
+        let (coordinator, context) = fixture.parts()?;
+        let generation = ConnectionGeneration::new(1);
+        let transaction = TransactionId::from_bytes([5; 16]);
+        coordinator.connection_opened(context, generation)?;
+
+        // A rejected tombstone batch reschedules the sweep and reports nothing.
+        coordinator.pending_login_tombstone_expiry = Some(PendingLoginTombstoneExpiry {
+            tombstones: Vec::new(),
+            resulting_key_state: None,
+        });
+        assert!(coordinator.batch_rejected(context, None).is_empty());
+        assert!(coordinator.pending_login_tombstone_expiry.is_none());
+
+        // Rejected cleanups return to the front of the queue in their original order.
+        coordinator
+            .pending_cleanups
+            .push(TransactionCleanup::authentication(transaction));
+        coordinator
+            .pending_cleanups
+            .push(TransactionCleanup::authentication(
+                TransactionId::from_bytes([6; 16]),
+            ));
+        assert!(coordinator.batch_rejected(context, None).is_empty());
+        assert!(coordinator.pending_cleanups.is_empty());
+        assert_eq!(coordinator.cleanup_queue.len(), 2);
+        coordinator.cleanup_queue.clear();
+
+        // Without pending authority a rejection only reports progress.
+        assert!(
+            coordinator
+                .batch_rejected(context, Some(generation))
+                .is_empty()
+        );
+
+        // A rejected logout closes exactly its originating carrier.
+        coordinator.pending_authority = Some(PendingAuthority::Logout {
+            generation,
+            carrier_generation: 7,
+        });
+        let completions = coordinator.batch_rejected(context, Some(generation));
+        assert!(coordinator.pending_authority.is_none());
+        assert_eq!(completions.len(), 1);
+
+        // A non-reservation timer for a transaction is not the coordinator's, and a
+        // reservation timer for an owned transaction without live state is consumed.
+        context.timers_mut().schedule(
+            MonotonicTick::from_ticks(0),
+            crate::state_core::timers::TimerKind::Ping,
+            crate::state_core::timers::TimedId::Transaction(transaction),
+        )?;
+        let entry = context
+            .timers_mut()
+            .pop_due(MonotonicTick::from_ticks(0))
+            .ok_or(RuntimeError::InvalidValue)?;
+        let (consumed, completions) = coordinator.timer_fired(context, entry);
+        assert!(!consumed && completions.is_empty());
+        coordinator.transaction_owners.insert(
+            transaction,
+            (generation, LiveTransactionClass::Authentication),
+        );
+        context.timers_mut().schedule(
+            MonotonicTick::from_ticks(0),
+            crate::state_core::timers::TimerKind::Reservation,
+            crate::state_core::timers::TimedId::Transaction(transaction),
+        )?;
+        let entry = context
+            .timers_mut()
+            .pop_due(MonotonicTick::from_ticks(0))
+            .ok_or(RuntimeError::InvalidValue)?;
+        let (consumed, completions) = coordinator.timer_fired(context, entry);
+        assert!(consumed && completions.is_empty());
+        coordinator.transaction_owners.clear();
+
+        // A logout before registration without an authenticated binding closes the
+        // carrier, and so does a logout from an unknown connection.
+        assert!(matches!(
+            coordinator.route_logout(context, generation, 1, "tester"),
+            CarrierRoute::Close
+        ));
+        assert!(matches!(
+            coordinator.route_logout(context, ConnectionGeneration::new(9), 1, "tester"),
+            CarrierRoute::Close
+        ));
+        Ok(())
     }
 }

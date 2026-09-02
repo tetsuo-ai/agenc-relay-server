@@ -4,12 +4,13 @@
 
 use agenc_ircd_auth::{
     ACCOUNT_CREATION_INVITE_BYTES, ACCOUNT_SERVICE_ENVELOPE_BYTES, ACCOUNT_SERVICE_RESPONSE_BYTES,
-    AccountAuthenticationState, AccountCreationStartParameters, AccountCreationState,
-    AccountCredentialRecord, AccountOperationContext, AccountRequestPayload, AccountRouteBinding,
-    AccountServiceEnvelope, AccountServiceResponse, AccountServiceResponsePayload,
-    AccountTransaction, AccountTransactionBinding, AuthError, AuthenticatedAccountRequest,
-    AuthenticationFinish, AuthenticationLookup, AuthenticationStart, AuthenticationStartParameters,
-    Completion, CreationAdmission, CreationFinish, CreationStart, CredentialChangeFinish,
+    AUTHENTICATION_GRANT_RECORD_BYTES, AccountAuthenticationState, AccountCreationStartParameters,
+    AccountCreationState, AccountCredentialRecord, AccountOperationContext, AccountRequestPayload,
+    AccountRouteBinding, AccountServiceEnvelope, AccountServiceResponse,
+    AccountServiceResponsePayload, AccountTransaction, AccountTransactionBinding, AuthError,
+    AuthenticatedAccountRequest, AuthenticationFinish, AuthenticationGrantRecord,
+    AuthenticationLookup, AuthenticationStart, AuthenticationStartParameters, Completion,
+    CreationAdmission, CreationFinish, CreationStart, CredentialChangeFinish,
     CredentialChangeStart, CredentialChangeState, OPAQUE_KE2_BYTES, OpaqueKe1, OpaqueKe2,
     OpaqueKe3, OpaqueProfile, OpaqueRegistrationRecord, OpaqueRegistrationRequest,
     OpaqueRegistrationResponse, OpenedAccountServiceRequest, SealedAccountStart, TransactionClass,
@@ -3039,4 +3040,60 @@ fn transaction_state_types_are_nameable_by_downstream_composition() {
             "{name} is not the expected state type"
         );
     }
+}
+
+#[test]
+fn authentication_grant_record_rejects_a_foreign_version_and_zero_deadline()
+-> Result<(), Box<dyn core::error::Error>> {
+    let profile = OpaqueProfile::generate(TEST_NETWORK)?;
+    let login_key = LoginIndexKey::from_bytes([170_u8; 32]);
+    let fake_key = OpaqueFakeCredentialKey::from_bytes([171_u8; 32]);
+    let password = b"grant record password";
+    let fixture = protocol_fixture(&profile, &credential(172), password)?;
+    let account_id = AccountRandomId::from_bytes([173_u8; 16]).to_account_id();
+    let sealed = authenticate_account(
+        &profile,
+        &login_key,
+        &fake_key,
+        password,
+        StoredAccountFixture {
+            account_id,
+            account_revision: Revision::new(7)?,
+            generation: Generation::new(9)?,
+            credential_bytes: [172_u8; 32],
+            record: fixture.record,
+        },
+    )?;
+    let grant = sealed.into_result_after_commit(2)??;
+    let transaction_id = TransactionId::from_bytes([174_u8; 16]);
+    let record = AuthenticationGrantRecord::capture(transaction_id, &grant)?;
+    let metadata = AuthenticationGrantRecord::parse(record.expose_for_persistence())?
+        .into_restart_metadata()?;
+    assert_eq!(metadata.transaction_id(), transaction_id);
+    assert_eq!(metadata.account_id(), account_id);
+    assert_eq!(
+        metadata.durable_expires_at_utc(),
+        grant.durable_expires_at_utc()
+    );
+
+    let mut wrong_version = *record.expose_for_persistence();
+    replace_u16(&mut wrong_version, 0, 2)?;
+    assert_eq!(
+        AuthenticationGrantRecord::parse(&wrong_version)?
+            .into_restart_metadata()
+            .err(),
+        Some(AuthError::InvalidEncoding)
+    );
+    let mut zero_deadline = *record.expose_for_persistence();
+    zero_deadline
+        .get_mut(AUTHENTICATION_GRANT_RECORD_BYTES - 8..)
+        .ok_or("grant deadline slot is absent")?
+        .fill(0);
+    assert_eq!(
+        AuthenticationGrantRecord::parse(&zero_deadline)?
+            .into_restart_metadata()
+            .err(),
+        Some(AuthError::InvalidEncoding)
+    );
+    Ok(())
 }

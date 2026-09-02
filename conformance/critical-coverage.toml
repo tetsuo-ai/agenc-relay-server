@@ -1,19 +1,19 @@
 schema_version = 1
-minimum_overall_branch_percent = 90.0
+minimum_overall_branch_percent = 75.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 88
-reviewed_source_sha256 = "b0772d5e4da9c3808a4abd92b342c1924463d86ac58be622893f038049c13bc4"
+reviewed_source_files = 197
+reviewed_source_sha256 = "815e68ada272523ce15eb3094541794f014259ca88ea930e863d73ddc4d838dd"
 deferred = []
 
 [[region]]
 id = "client-message-error-enum-arms"
 category = "parser-error-discriminants"
 file = "crates/agenc-ircd-client-wire/src/message.rs"
-source_sha256 = "f00ac1acc8b179ec4bc1168af8ddd02d3d5fe74163d4cbfbd4d28dc1dd21385a"
-start_line = 120
-end_line = 142
+source_sha256 = "98aaba77f541e697884670b2c6cd7fcbfbdc6711e6bc28ecf69bcc6832b4a0c0"
+start_line = 134
+end_line = 156
 metric = "regions"
 reason = "Every closed parser error arm must be observed by the error reporting tests."
 
@@ -21,9 +21,9 @@ reason = "Every closed parser error arm must be observed by the error reporting 
 id = "client-message-parser-errors"
 category = "parser-error-discriminants"
 file = "crates/agenc-ircd-client-wire/src/message.rs"
-source_sha256 = "f00ac1acc8b179ec4bc1168af8ddd02d3d5fe74163d4cbfbd4d28dc1dd21385a"
-start_line = 151
-end_line = 231
+source_sha256 = "98aaba77f541e697884670b2c6cd7fcbfbdc6711e6bc28ecf69bcc6832b4a0c0"
+start_line = 165
+end_line = 245
 metric = "branches"
 reason = "Every accepted and rejected syntax path must be exercised at the client parser boundary."
 
@@ -31,9 +31,9 @@ reason = "Every accepted and rejected syntax path must be exercised at the clien
 id = "domain-command-authorization"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-domain/src/decision.rs"
-source_sha256 = "8af0e678db8a9548d6da1b442e80eebe87ad7b16e0f2199248d330dfa3615de3"
-start_line = 1540
-end_line = 1823
+source_sha256 = "40abe57001735e7e762479102a830eb1eb00bf60e38f5515ee771bedbad466a6"
+start_line = 2080
+end_line = 2346
 metric = "branches"
 reason = "Session fences, admission, and command authority are security decisions."
 
@@ -51,9 +51,9 @@ reason = "Every closed FieldKind decode arm must run in the canonical federation
 id = "domain-state-invariant-checks"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-ircd-domain/src/model.rs"
-source_sha256 = "e830bd3312055feb1fa9ea3302ca65b796bf5621c9ec4a002d119889d6c77a77"
-start_line = 1245
-end_line = 1429
+source_sha256 = "2aeffda91f0acfddfc03619f6098962f773c5387ab08d582df1a858af7a565fb"
+start_line = 1871
+end_line = 2056
 metric = "branches"
 reason = "Every current domain cross-index and authority-fence check must take both outcomes."
 

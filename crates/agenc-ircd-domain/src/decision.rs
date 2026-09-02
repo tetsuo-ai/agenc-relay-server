@@ -2852,10 +2852,11 @@ impl DomainState {
         }
         let session = self.sessions.get(&user_id).ok_or(DomainError::NotFound)?;
         validate_guest_join(channel, principal)?;
+        let matching_invite = matching_join_invite(channel, principal, now)?;
+        validate_hidden_channel_join(channel, session, matching_invite, key_supplied, key_ok)?;
         if effective_mask(channel, session, false) {
             return Err(DomainError::Forbidden);
         }
-        let matching_invite = matching_join_invite(channel, principal, now)?;
         validate_join_admission(channel, session, matching_invite, key_supplied, key_ok)?;
         Ok(matching_invite)
     }
@@ -4591,6 +4592,29 @@ fn matching_join_invite(
     Ok(channel.matching_invite(principal, now))
 }
 
+// A non-member joins an unlisted or secret channel only through a matching
+// invite, a matching invite exception, or the channel's own verified key.
+// Every other non-member gets the nonexistent-channel failure, so this runs
+// before the ban and limit checks that would otherwise confirm existence.
+fn validate_hidden_channel_join(
+    channel: &crate::ChannelState,
+    session: &SessionState,
+    matching_invite: Option<InviteId>,
+    key_supplied: bool,
+    key_ok: bool,
+) -> Result<(), DomainError> {
+    if channel.visibility == Visibility::Listed {
+        return Ok(());
+    }
+    let invited =
+        matching_invite.is_some() || matches_mask_list(&channel.invite_exceptions, session);
+    let keyed = channel.modes.join_key && key_supplied && key_ok;
+    if invited || keyed {
+        return Ok(());
+    }
+    Err(DomainError::SecretUnavailable)
+}
+
 fn validate_join_admission(
     channel: &crate::ChannelState,
     session: &SessionState,
@@ -4977,14 +5001,13 @@ fn validate_mode_authority(
             operation: ModeOperation::Add,
             mode: VisibilityMode::Secret,
         } => validate_secret_visibility(actor_role, actor_account),
+        ModeChange::MemberLimit(Some(0)) => Err(DomainError::InvalidArgument),
         ModeChange::Visibility { .. }
         | ModeChange::InviteOnly(_)
         | ModeChange::Moderated(_)
-        | ModeChange::JoinKey(_) => require_role(actor_role, Role::Operator),
-        ModeChange::MemberLimit(Some(0)) => Err(DomainError::InvalidArgument),
-        ModeChange::TopicProtected(_) | ModeChange::MemberLimit(_) => {
-            require_role(actor_role, Role::HalfOperator)
-        }
+        | ModeChange::JoinKey(_)
+        | ModeChange::MemberLimit(_) => require_role(actor_role, Role::Operator),
+        ModeChange::TopicProtected(_) => require_role(actor_role, Role::HalfOperator),
         ModeChange::Role { role, .. } => {
             if *role == Role::Member {
                 return Err(DomainError::InvalidArgument);
@@ -8138,6 +8161,129 @@ mod tests {
     }
 
     #[test]
+    fn hidden_channel_join_admits_non_members_only_by_invite_exception_or_key()
+    -> Result<(), DomainError> {
+        let mut fixture = fixture()?;
+        let visitor_account = account_id(4);
+        fixture.state.apply_account(
+            AccountState::new(
+                visitor_account,
+                agenc_ircd_types::Generation::new(1)?,
+                Revision::new(1)?,
+            ),
+            Revision::new(1)?,
+        );
+        fixture
+            .state
+            .apply_session(session(4, Some(visitor_account))?, Revision::new(1)?);
+        let visitor = session(4, Some(visitor_account))?;
+        let owner_principal = fixture.owner.principal();
+        let mut channel = fixture
+            .state
+            .channels
+            .remove(&fixture.channel_id)
+            .ok_or(DomainError::InvariantViolation)?;
+        let visitor_entry = |seed: u8| -> Result<crate::ListEntry, DomainError> {
+            Ok(crate::ListEntry::new(
+                EntryId::from_bytes(bytes(seed)),
+                TypedMask::parse("$n:test4")?,
+                owner_principal,
+                UtcSecond::from_unix_seconds(10),
+            ))
+        };
+        let join = |state: &DomainState,
+                    target: &crate::ChannelState,
+                    key_supplied: bool,
+                    key_ok: bool,
+                    now: Option<MonotonicTick>| {
+            state.check_join_existing(
+                visitor.user_id,
+                visitor.principal(),
+                target,
+                key_supplied,
+                key_ok,
+                now,
+            )
+        };
+
+        assert_eq!(join(&fixture.state, &channel, false, true, None), Ok(None));
+        for visibility in [Visibility::Unlisted, Visibility::Secret] {
+            channel.visibility = visibility;
+            assert_eq!(
+                join(&fixture.state, &channel, false, true, None),
+                Err(DomainError::SecretUnavailable)
+            );
+        }
+
+        channel.bans.push(visitor_entry(230)?);
+        assert_eq!(
+            join(&fixture.state, &channel, false, true, None),
+            Err(DomainError::SecretUnavailable)
+        );
+        channel.invite_exceptions.push(visitor_entry(231)?);
+        assert_eq!(
+            join(&fixture.state, &channel, false, true, None),
+            Err(DomainError::Forbidden)
+        );
+        channel.bans.clear();
+        assert_eq!(join(&fixture.state, &channel, false, true, None), Ok(None));
+        channel.invite_exceptions.clear();
+
+        let invite_id = InviteId::from_bytes(bytes(232));
+        channel.invites.insert(
+            invite_id,
+            Invite {
+                invite_id,
+                target: visitor.principal(),
+                inviter: fixture.owner.user_id,
+                creation_revision: Revision::new(1)?,
+                expires_at: MonotonicTick::from_ticks(100),
+                expires_at_utc: UtcSecond::from_unix_seconds(610),
+            },
+        );
+        assert_eq!(
+            join(
+                &fixture.state,
+                &channel,
+                false,
+                true,
+                Some(MonotonicTick::from_ticks(50)),
+            ),
+            Ok(Some(invite_id))
+        );
+        assert_eq!(
+            join(
+                &fixture.state,
+                &channel,
+                false,
+                true,
+                Some(MonotonicTick::from_ticks(100)),
+            ),
+            Err(DomainError::SecretUnavailable)
+        );
+        channel.invites.clear();
+
+        assert_eq!(
+            join(&fixture.state, &channel, true, true, None),
+            Err(DomainError::SecretUnavailable)
+        );
+        channel.modes.join_key = true;
+        assert_eq!(
+            join(&fixture.state, &channel, false, true, None),
+            Err(DomainError::SecretUnavailable)
+        );
+        assert_eq!(
+            join(&fixture.state, &channel, true, false, None),
+            Err(DomainError::SecretUnavailable)
+        );
+        assert_eq!(join(&fixture.state, &channel, true, true, None), Ok(None));
+        channel.modes.join_key = false;
+        channel.visibility = Visibility::Listed;
+        fixture.state.channels.insert(fixture.channel_id, channel);
+        Ok(())
+    }
+
+    #[test]
     fn join_and_part_planners_cover_masks_invites_keys_and_identity_collisions()
     -> Result<(), DomainError> {
         let mut fixture = fixture()?;
@@ -8942,6 +9088,16 @@ mod tests {
                 &fixture.state,
                 &channel,
                 Role::HalfOperator,
+                Some(fixture.owner_account),
+                &ModeChange::MemberLimit(Some(10)),
+            ),
+            Err(DomainError::Forbidden)
+        );
+        assert_eq!(
+            validate_mode_change(
+                &fixture.state,
+                &channel,
+                Role::Operator,
                 Some(fixture.owner_account),
                 &ModeChange::MemberLimit(Some(10)),
             ),

@@ -16,11 +16,11 @@
 
 > [!IMPORTANT]
 > **This is pre-alpha infrastructure, not a deployable server.** Stages 00
-> through 05 are complete. The Stage 04 and Stage 05 checkpoints close exact
-> source commit `4040796f2c21774d58ea7ce54e70a080678e83ac`. There are no
-> sockets or daemon executor yet. The binary intentionally exits unsuccessfully
-> until Stage 06 composes the runtime, except for its stopped-daemon storage-
-> restore command.
+> through 06 are complete. The Stage 04 and Stage 05 checkpoints close exact
+> source commit `4040796f2c21774d58ea7ce54e70a080678e83ac`, and the Stage 06
+> checkpoint closes `65cce9d66f7bcfb0c0830a2ab1d42b52bff82942`. The daemon serves TLS-only direct,
+> Tor-exit, and onion profiles on one node. Federation, E2EE, and WebSocket
+> transports belong to later stages and are not advertised.
 
 ## What is being built
 
@@ -61,9 +61,14 @@ through a disposable on-disk index before the storage port becomes available.
 Backup, stopped-daemon restore, rekey, login-index transitions, and bounded
 checkpoint work all use resumable authenticated construction records.
 
-Stage 05 is closed, so Stage 06 runtime composition is the next implementation
-stage. The complete dependency-ordered roadmap lives in
-[TODO.md](TODO.md). See the
+Stages 05 and 06 are closed. Stage 06 composes the runtime: strict configuration,
+first-run initialization, TLS endpoints, transport-profile isolation, the
+single StateCore owner, registration and account sessions, channels and
+messaging, isolated administration with an audit chain, atomic live reload,
+privacy-bounded observability, and hardened shutdown. Stage 07 base federation
+is the next implementation stage. The complete dependency-ordered roadmap
+lives in [TODO.md](TODO.md). See the
+[Stage 06 checkpoint](conformance/evidence/stage-06-65cce9d66f7bcfb0c0830a2ab1d42b52bff82942.json), the
 [Stage 05 storage profile](conformance/stage-five-storage-profile.toml), the
 [current Stage 05 checkpoint](conformance/evidence/stage-05-4040796f2c21774d58ea7ce54e70a080678e83ac.json), the
 [previous Stage 05 checkpoint](conformance/evidence/stage-05-bd7518fe7f5c7420debdbaa958aa444ecb5c80c9.json), the
@@ -132,8 +137,20 @@ includes 191 storage tests, cross-target checks for
 x86_64 and AArch64, signed native ext4 growth reports for both targets, and
 10,000 deterministic runs of each storage fuzz target.
 
-There is no server start command yet. The binary fails closed until its runtime
-is composed in Stage 06.
+The [Stage 06 manifest](conformance/evidence/stage-06-65cce9d66f7bcfb0c0830a2ab1d42b52bff82942.json)
+contains 55 passed records and closes exact source commit
+`65cce9d66f7bcfb0c0830a2ab1d42b52bff82942`. Its recorded gate ran 75 commands.
+Coverage is 79.79% of branches and 91.79% of lines against the interim 75%
+branch floor, with all six critical regions at 100%. The gate includes the
+Stage 06 requirement set, cross-target checks for x86_64 and AArch64, Loom
+models, 16 transcripts, the deterministic soak, deployment and host
+qualification checks, and 10,000 deterministic runs of each Stage 06 fuzz
+target.
+
+The binary starts the node with `agenc-ircd serve --config <file>` after
+`agenc-ircd init` created the layout and `agenc-ircd check-config` verified the
+host controls. Every command fails closed on a configuration, secret, or host
+problem; see [docs/operator-guide.md](docs/operator-guide.md).
 
 ## Find your way around
 

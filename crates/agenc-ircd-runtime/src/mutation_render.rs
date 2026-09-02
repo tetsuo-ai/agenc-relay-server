@@ -9,8 +9,8 @@ use agenc_ircd_client_wire::{
 use agenc_ircd_domain::{
     AccountCommand, CanonicalCommand, CanonicalCommandView, ChannelCommand, ChannelNameValue,
     DomainEvent, DomainState, MaskList, Membership, MessageBatch, MessageKind, ModeChange,
-    ModeCommand, ModeOperation, MutationPlan, PresenceCommand, ResolvedMessageTarget, Role,
-    VisibilityMode,
+    ModeCommand, ModeOperation, MutationPlan, PresenceCommand, ProjectionDecision,
+    ResolvedMessageTarget, Role, TopicProjection, VisibilityMode,
 };
 use agenc_ircd_types::{
     AccountDeletionToken, AccountId, ChannelName, MaskSubject, PublicErrorCode, TypedMask, UserId,
@@ -529,7 +529,7 @@ fn render_join_burst(
         .ok_or(RuntimeError::InvalidValue)?
         .nickname()
         .presentation();
-    render_join_topic(builder, nickname, name, channel)?;
+    render_join_topic(builder, nickname, name, user_id, channel)?;
     render_join_names(
         builder,
         reply.capabilities,
@@ -544,10 +544,13 @@ fn render_join_topic(
     builder: &mut FanoutBuilder<'_, '_>,
     nickname: &str,
     name: &ChannelNameValue,
+    user_id: UserId,
     channel: Option<&agenc_ircd_domain::ChannelState>,
 ) -> Result<(), RuntimeError> {
     let prefix = builder.context.server_prefix();
-    let Some(topic) = channel.and_then(agenc_ircd_domain::ChannelState::topic) else {
+    let Some((channel, topic)) =
+        channel.and_then(|channel| channel.topic().map(|topic| (channel, topic)))
+    else {
         return builder.push_origin(numeric(
             prefix,
             331,
@@ -556,12 +559,27 @@ fn render_join_topic(
             Some("No topic is set"),
         )?);
     };
+    // The burst shows what TOPIC would show: an E2EE-bound channel never
+    // reveals its plaintext topic text (spec 14.3).
+    let placeholder = matches!(
+        builder
+            .context
+            .domain()
+            .project_channel(user_id, channel.channel_id()),
+        Ok(ProjectionDecision::Visible(projection))
+            if matches!(projection.topic(), TopicProjection::EncryptedPlaceholder)
+    );
+    let text = if placeholder {
+        "Encrypted channel topic"
+    } else {
+        topic.text()
+    };
     builder.push_origin(numeric(
         prefix,
         332,
         nickname,
         &[name.presentation()],
-        Some(topic.text()),
+        Some(text),
     )?)?;
     let setter = builder
         .context
@@ -1870,6 +1888,238 @@ mod tests {
                 entry_id: nickname_entry,
             }]
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn join_topic_and_part_renderings_use_the_live_context()
+    -> Result<(), Box<dyn core::error::Error>> {
+        use agenc_ircd_domain::{DomainError, PlanDecision, TopicText};
+        use agenc_ircd_types::ControlPolicy;
+
+        use crate::connection::ConnectionGeneration;
+        use crate::test_support::{
+            StateCoreFixture, apply_live_plan, bound, negotiated_capabilities, plan_live,
+            seed_account, seed_session,
+        };
+
+        let mut fixture = StateCoreFixture::new(Vec::new())?;
+        let context = fixture.context_mut()?;
+        let account = seed_account(context, 1, 1)?;
+        let owner = seed_session(context, 1, "LiveOwner", Some(account))?;
+        let member = seed_session(context, 2, "LiveMember", None)?;
+        let capabilities = negotiated_capabilities(&[
+            "batch",
+            "labeled-response",
+            "userhost-in-names",
+            "account-notify",
+            "extended-join",
+            "server-time",
+            "message-tags",
+            "account-tag",
+            "multi-prefix",
+        ])?;
+        let name = ChannelNameValue::parse("#live")?;
+        let join = || CanonicalCommand::join(vec![ChannelTarget::new(name.clone(), false)]);
+        let render = |context: &mut StateCoreContext,
+                      identity: agenc_ircd_testkit::DomainTestIdentity,
+                      line: &str,
+                      command: &dyn Fn() -> Result<CanonicalCommand, DomainError>|
+         -> Result<(), Box<dyn core::error::Error>> {
+            let request = parsed(line)?;
+            let PlanDecision::Mutation(plan) = plan_live(context, identity, command)? else {
+                return Err("command was not planned as a mutation".into());
+            };
+            let reply = ReplyInput {
+                requester: identity.user_id,
+                generation: ConnectionGeneration::new(1),
+                capabilities: &capabilities,
+                request: &request,
+            };
+            let command = command()?;
+            let fanout = render_mutation(context, bound(identity), Some(reply), &command, &plan)?;
+            assert_eq!(fanout.target_count(), 0);
+            apply_live_plan(context, plan)
+        };
+        render(context, owner, "JOIN #live", &join)?;
+        render(context, member, "JOIN #live", &join)?;
+        render(context, owner, "TOPIC #live :hello", &|| {
+            Ok(CanonicalCommand::topic_set(
+                name.clone(),
+                TopicText::try_from_str("hello", ControlPolicy::RejectAll)?,
+            ))
+        })?;
+        render(context, member, "PART #live", &|| {
+            CanonicalCommand::part(vec![name.clone()], None)
+        })?;
+        render(context, owner, "JOIN 0", &|| {
+            Ok(CanonicalCommand::part_all())
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    fn notifications_reach_bound_sessions_with_matching_capabilities()
+    -> Result<(), Box<dyn core::error::Error>> {
+        use agenc_ircd_domain::{
+            AccountCommand, AwayText, DisplayNameValue, DomainError, MaskList, MessageCommand,
+            MessageKind, MessageTarget, MessageText, ModeChange, NicknameValue, PlanDecision,
+            PresenceCommand, PresencePolicy,
+        };
+        use agenc_ircd_types::{ControlPolicy, TypedMask};
+
+        use crate::connection::ConnectionGeneration;
+        use crate::test_support::{
+            StateCoreFixture, apply_live_plan, bind_live_session, bound, negotiated_capabilities,
+            plan_live, seed_account, seed_session,
+        };
+
+        const CAPABILITIES: &[&str] = &[
+            "batch",
+            "labeled-response",
+            "account-notify",
+            "extended-join",
+            "away-notify",
+            "setname",
+            "invite-notify",
+            "userhost-in-names",
+            "multi-prefix",
+            "message-tags",
+            "server-time",
+            "account-tag",
+            "echo-message",
+            "standard-replies",
+        ];
+        let mut fixture = StateCoreFixture::new(Vec::new())?;
+        let context = fixture.context_mut()?;
+        let account = seed_account(context, 1, 1)?;
+        let owner = seed_session(context, 1, "NotifyOwner", Some(account))?;
+        let member = seed_session(context, 2, "NotifyMember", None)?;
+        let silent = seed_session(context, 3, "NotifySilent", None)?;
+        let owner_sink = bind_live_session(
+            context,
+            1,
+            owner,
+            negotiated_capabilities(CAPABILITIES)?,
+            true,
+        )?;
+        let member_sink = bind_live_session(
+            context,
+            2,
+            member,
+            negotiated_capabilities(CAPABILITIES)?,
+            true,
+        )?;
+        let _refused = bind_live_session(context, 3, silent, negotiated_capabilities(&[])?, false)?;
+        let capabilities = negotiated_capabilities(CAPABILITIES)?;
+        let name = ChannelNameValue::parse("#notify")?;
+        let join = || CanonicalCommand::join(vec![ChannelTarget::new(name.clone(), false)]);
+        let member_nick = NicknameValue::parse("NotifyMember")?;
+        let drive = |context: &mut StateCoreContext,
+                     identity: agenc_ircd_testkit::DomainTestIdentity,
+                     generation: u64,
+                     line: &str,
+                     command: &dyn Fn() -> Result<CanonicalCommand, DomainError>|
+         -> Result<usize, Box<dyn core::error::Error>> {
+            let request = parsed(line)?;
+            let decision = plan_live(context, identity, command)
+                .map_err(|error| format!("{line}: {error}"))?;
+            let PlanDecision::Mutation(plan) = decision else {
+                return Err(format!("{line} was not planned as a mutation").into());
+            };
+            let reply = ReplyInput {
+                requester: identity.user_id,
+                generation: ConnectionGeneration::new(generation),
+                capabilities: &capabilities,
+                request: &request,
+            };
+            let command = command()?;
+            let fanout = render_mutation(context, bound(identity), Some(reply), &command, &plan)?;
+            let targets = fanout.target_count();
+            context
+                .fanout_now(fanout)
+                .map_err(|_| format!("{line} fanout was refused"))?;
+            apply_live_plan(context, plan)?;
+            Ok(targets)
+        };
+        drive(context, owner, 1, "JOIN #notify", &join)?;
+        drive(context, silent, 3, "JOIN #notify", &join)?;
+        assert!(drive(context, member, 2, "JOIN #notify", &join)? >= 2);
+        drive(context, owner, 1, "MODE #notify +m", &|| {
+            CanonicalCommand::mode(name.clone(), vec![ModeChange::Moderated(true)])
+        })?;
+        drive(context, owner, 1, "MODE #notify +b $n:baduser", &|| {
+            CanonicalCommand::mode(
+                name.clone(),
+                vec![ModeChange::AddMask {
+                    list: MaskList::Ban,
+                    mask: TypedMask::parse("$n:baduser")
+                        .map_err(|_| DomainError::InvalidArgument)?,
+                }],
+            )
+        })?;
+        drive(context, owner, 1, "PRIVMSG #notify :hello", &|| {
+            Ok(CanonicalCommand::message(MessageCommand::new(
+                MessageKind::Privmsg,
+                vec![MessageTarget::Channel(name.clone())],
+                Some(MessageText::parse("hello")?),
+            )?))
+        })?;
+        drive(context, owner, 1, "NOTICE NotifyMember :psst", &|| {
+            Ok(CanonicalCommand::message(MessageCommand::new(
+                MessageKind::Notice,
+                vec![MessageTarget::User(member_nick.clone())],
+                Some(MessageText::parse("psst")?),
+            )?))
+        })?;
+        drive(
+            context,
+            owner,
+            1,
+            "@+draft/react=hi TAGMSG #notify",
+            &|| {
+                Ok(CanonicalCommand::message(MessageCommand::new(
+                    MessageKind::Tagmsg,
+                    vec![MessageTarget::Channel(name.clone())],
+                    None,
+                )?))
+            },
+        )?;
+        drive(context, owner, 1, "AWAY :brb", &|| {
+            let away = AwayText::try_from_str("brb", ControlPolicy::RejectAll)
+                .map_err(|_| DomainError::InvalidArgument)?;
+            CanonicalCommand::presence(PresenceCommand::Away(Some(away)))
+        })?;
+        drive(context, owner, 1, "AWAY", &|| {
+            CanonicalCommand::presence(PresenceCommand::Away(None))
+        })?;
+        drive(context, owner, 1, "SETNAME :Fresh Name", &|| {
+            Ok(CanonicalCommand::setname(DisplayNameValue::prepare(
+                "Fresh Name",
+            )?))
+        })?;
+        drive(context, owner, 1, "NICK NotifyOwner2", &|| {
+            Ok(CanonicalCommand::nick(NicknameValue::parse(
+                "NotifyOwner2",
+            )?))
+        })?;
+        drive(context, owner, 1, "ACCT PRESENCE public", &|| {
+            Ok(CanonicalCommand::account(AccountCommand::Presence(
+                PresencePolicy::Public,
+            )))
+        })?;
+        drive(context, owner, 1, "KICK #notify NotifyMember", &|| {
+            CanonicalCommand::kick(name.clone(), vec![member_nick.clone()], None)
+        })?;
+        drive(context, owner, 1, "INVITE NotifyMember #notify", &|| {
+            Ok(CanonicalCommand::invite(member_nick.clone(), name.clone()))
+        })?;
+        drive(context, member, 2, "JOIN #notify", &join)?;
+        drive(context, member, 2, "QUIT", &|| {
+            Ok(CanonicalCommand::quit(None))
+        })?;
+        assert!(owner_sink.commits() > 0);
+        assert!(member_sink.commits() > 0);
         Ok(())
     }
 }

@@ -9,7 +9,7 @@
 //! delegated to a [`CommandRouter`] so registration, channel, and admin
 //! composition plug in without touching the loop or the durable path.
 
-mod admin;
+pub(crate) mod admin;
 pub mod durable;
 pub mod fanout;
 pub mod inbox;
@@ -776,6 +776,12 @@ impl StateCoreContext {
         plan: MutationPlan,
         request: FanoutRequest,
     ) -> Result<ApplyReceipt, EphemeralRefused> {
+        // A gathering or in-flight batch was planned against the current
+        // revision; applying anything underneath it would make that batch
+        // fail after its storage commit. Refuse until the batch settles.
+        if self.pending.is_some() {
+            return Err(EphemeralRefused::Domain(DomainError::ServerBusy));
+        }
         let reservation = self
             .reserve_fanout(&request)
             .map_err(EphemeralRefused::Fanout)?;
@@ -1997,11 +2003,10 @@ impl StateCore {
                 failure_event,
                 reply,
             } => {
-                if self.context.quiescing
-                    || self.reload_pending.is_some()
-                    || self.reload_provisional.is_some()
-                {
-                    let _sent = reply.send(AuditedReloadStart::Indeterminate);
+                if self.context.quiescing {
+                    let _sent = reply.send(AuditedReloadStart::Refused(ReloadRejection::Quiescing));
+                } else if self.reload_pending.is_some() || self.reload_provisional.is_some() {
+                    let _sent = reply.send(AuditedReloadStart::Refused(ReloadRejection::Busy));
                 } else {
                     self.reload_pending = Some(PendingReload {
                         prepared: *prepared,
@@ -2615,7 +2620,8 @@ impl StateCore {
         let projected = match projected {
             Ok(projected) => projected,
             Err(
-                RuntimeError::Storage(StorageError::LimitExceeded) | RuntimeError::LimitExceeded,
+                RuntimeError::Storage(StorageError::LimitExceeded | StorageError::StaleState)
+                | RuntimeError::LimitExceeded,
             ) => {
                 let _sent = reply.send(Err(AdminCoreFailure::StorageUnavailable));
                 return None;
@@ -2647,20 +2653,30 @@ impl StateCore {
         }
     }
 
+    /// The revision a confirmation token binds to: the entity revision for an
+    /// account or channel, and the state generation for the process, so a
+    /// client commit elsewhere never invalidates an operator's confirmation
+    /// (spec 22.4).
     fn admin_target_revision(&self, target: AdminTarget) -> Result<Revision, AdminCoreFailure> {
         if self.context.quiescing {
             return Err(AdminCoreFailure::Quiescing);
         }
-        let exists = match target {
-            AdminTarget::Account(account_id) => self.context.domain.account(account_id).is_some(),
-            AdminTarget::Channel(channel_id) => self.context.domain.channel(channel_id).is_some(),
-            AdminTarget::Process => true,
+        let revision = match target {
+            AdminTarget::Account(account_id) => self
+                .context
+                .domain
+                .account(account_id)
+                .map(agenc_ircd_domain::AccountState::revision),
+            AdminTarget::Channel(channel_id) => self
+                .context
+                .domain
+                .channel(channel_id)
+                .map(agenc_ircd_domain::ChannelState::revision),
+            AdminTarget::Process => {
+                Revision::new(self.context.head.state_generation.saturating_add(1)).ok()
+            }
         };
-        if !exists {
-            return Err(AdminCoreFailure::InvalidTarget);
-        }
-        Revision::new(self.context.head.storage_commit_sequence)
-            .map_err(|_| AdminCoreFailure::StorageUnavailable)
+        revision.ok_or(AdminCoreFailure::InvalidTarget)
     }
 
     fn validate_admin_mutation(
@@ -3712,5 +3728,617 @@ mod lifecycle_tests {
         pending.install(LifecyclePhase::Flush, flush_reply);
         pending.supersede();
         assert_eq!(flush.await, Ok(Err(LifecycleFailure::Superseded)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use agenc_ircd_client_wire::{FramedLine, parse_message};
+    use tokio::sync::{mpsc, oneshot};
+
+    use super::{StateCoreExit, StateCoreMessage};
+    use crate::cancel::CancellationToken;
+    use crate::connection::{ClientSink, ConnectionGeneration};
+    use crate::purpose::ListenerPurpose;
+    use crate::state_core::inbox::{
+        ConnectionOpenOutcome, LifecycleControl, LifecyclePhase, MaintenanceEvent, SignalEvent,
+        SourceAddressKey, connection_close_channel, lifecycle_channel,
+    };
+    use crate::sync::Arc;
+    use crate::test_support::{FrameSink, StateCoreFixture, TestResult};
+
+    /// Runs the actor with fresh control channels and returns its exit
+    /// together with whatever the driver produced. The driver must keep the
+    /// inbox sender alive until the actor exits, otherwise the closed inbox
+    /// ends the run first.
+    async fn run_core<Driver, Output>(
+        registration: bool,
+        driver: impl FnOnce(
+            mpsc::Sender<StateCoreMessage>,
+            LifecycleControl,
+            CancellationToken,
+        ) -> Driver,
+    ) -> TestResult<(StateCoreExit, Output)>
+    where
+        Driver: Future<Output = TestResult<Output>>,
+    {
+        run_core_with(
+            registration,
+            |_| Ok(()),
+            |inbox, lifecycle, token, ()| driver(inbox, lifecycle, token),
+        )
+        .await
+    }
+
+    /// Like `run_core`, with a setup step that may install private ports on
+    /// the fixture before the actor starts and hand them to the driver.
+    async fn run_core_with<Ports, Driver, Output>(
+        registration: bool,
+        setup: impl FnOnce(&mut StateCoreFixture) -> TestResult<Ports>,
+        driver: impl FnOnce(
+            mpsc::Sender<StateCoreMessage>,
+            LifecycleControl,
+            CancellationToken,
+            Ports,
+        ) -> Driver,
+    ) -> TestResult<(StateCoreExit, Output)>
+    where
+        Driver: Future<Output = TestResult<Output>>,
+    {
+        let mut fixture = if registration {
+            // Distinct bytes per draw so every session seed and transaction
+            // identity differs; a constant script would collide on the second
+            // registration.
+            StateCoreFixture::with_registration_router(
+                (0_u32..65_536)
+                    .map(|index| u8::try_from((index * 7 + 3) % 256).unwrap_or_default())
+                    .collect(),
+            )?
+        } else {
+            StateCoreFixture::new(Vec::new())?
+        };
+        let ports = setup(&mut fixture)?;
+        let mut parts = fixture.take_run_parts()?;
+        let (inbox, inbox_receiver) = mpsc::channel(8);
+        let (_close_port, close_inbox) = connection_close_channel();
+        let (lifecycle, lifecycle_receiver) = lifecycle_channel();
+        let token = CancellationToken::root();
+        let driven = driver(inbox, lifecycle, token.child()?, ports);
+        let run = parts.state.run(
+            inbox_receiver,
+            close_inbox,
+            lifecycle_receiver,
+            parts.storage,
+            parts.storage_reads,
+            parts.checkpoints,
+            parts.crypto,
+            token,
+        );
+        let (exit, output) = tokio::join!(run, driven);
+        Ok((exit, output?))
+    }
+
+    async fn send(inbox: &mpsc::Sender<StateCoreMessage>, message: StateCoreMessage) -> TestResult {
+        inbox
+            .send(message)
+            .await
+            .map_err(|_| "the core closed its inbox")?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ordered_lifecycle_requests_stop_an_idle_core() -> TestResult {
+        let (exit, (_open, replies)) = run_core(false, |inbox, lifecycle, _token| async move {
+            let mut replies = Vec::new();
+            for phase in [
+                LifecyclePhase::Quiesce,
+                LifecyclePhase::Quiesce,
+                LifecyclePhase::Drain,
+                LifecyclePhase::Flush,
+                LifecyclePhase::Stop,
+            ] {
+                replies.push(lifecycle.request(phase).await);
+            }
+            Ok((inbox, replies))
+        })
+        .await?;
+        assert!(matches!(exit, StateCoreExit::Stopped), "{exit:?}");
+        assert!(replies.iter().all(Result::is_ok), "{replies:?}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stop_may_skip_straight_past_earlier_phases() -> TestResult {
+        let (exit, (_open, reply)) = run_core(false, |inbox, lifecycle, _token| async move {
+            Ok((inbox, lifecycle.request(LifecyclePhase::Stop).await))
+        })
+        .await?;
+        assert!(matches!(exit, StateCoreExit::Stopped), "{exit:?}");
+        assert!(reply.is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn termination_signals_quiesce_or_interrupt_an_idle_core() -> TestResult {
+        let (exit, (_open, _lifecycle)) = run_core(false, |inbox, lifecycle, _token| async move {
+            for event in [
+                MaintenanceEvent::RetentionSweep,
+                MaintenanceEvent::ClockDriftCheck,
+                MaintenanceEvent::PrefixErasure,
+                MaintenanceEvent::CheckpointDue,
+                MaintenanceEvent::CheckpointDue,
+            ] {
+                send(&inbox, StateCoreMessage::Maintenance(event)).await?;
+            }
+            send(&inbox, StateCoreMessage::Signal(SignalEvent::Reload)).await?;
+            send(&inbox, StateCoreMessage::Signal(SignalEvent::Terminate)).await?;
+            Ok((inbox, lifecycle))
+        })
+        .await?;
+        assert!(matches!(exit, StateCoreExit::Quiesced), "{exit:?}");
+
+        let (exit, (_open, _lifecycle)) = run_core(false, |inbox, lifecycle, _token| async move {
+            send(&inbox, StateCoreMessage::Signal(SignalEvent::Interrupt)).await?;
+            Ok((inbox, lifecycle))
+        })
+        .await?;
+        assert!(matches!(exit, StateCoreExit::Interrupted), "{exit:?}");
+        Ok(())
+    }
+
+    /// Opens one admitted onion connection per sink, acknowledging each.
+    async fn open_connections(
+        inbox: &mpsc::Sender<StateCoreMessage>,
+        sinks: &[Arc<FrameSink>],
+    ) -> TestResult<Vec<ConnectionOpenOutcome>> {
+        let mut outcomes = Vec::new();
+        for (index, sink) in sinks.iter().enumerate() {
+            let (acknowledgement, accepted) = oneshot::channel();
+            send(
+                inbox,
+                StateCoreMessage::Opened {
+                    generation: ConnectionGeneration::new(u64::try_from(index)? + 1),
+                    purpose: ListenerPurpose::ClientOnion,
+                    source: SourceAddressKey::onion_listener(),
+                    sink: Arc::clone(sink) as Arc<dyn ClientSink>,
+                    acknowledgement,
+                },
+            )
+            .await?;
+            outcomes.push(accepted.await?);
+        }
+        Ok(outcomes)
+    }
+
+    /// Feeds `(connection, line)` entries in order. A line of the form
+    /// `WAIT <text>` blocks until that connection has received a line
+    /// containing `<text>`, which is how the script stays behind durable
+    /// commits without racing the actor.
+    async fn drive_script(
+        inbox: &mpsc::Sender<StateCoreMessage>,
+        sinks: &[Arc<FrameSink>],
+        script: &[(u64, &str)],
+    ) -> TestResult {
+        let mut sequences = vec![0_u64; sinks.len()];
+        for (connection, line) in script {
+            let slot = usize::try_from(*connection)? - 1;
+            let sink = sinks.get(slot).ok_or("unknown connection")?;
+            let sequence = sequences.get_mut(slot).ok_or("unknown connection")?;
+            if let Some(needle) = line.strip_prefix("WAIT ") {
+                let mut delivered = false;
+                for _ in 0..5_000 {
+                    if sink.lines().iter().any(|line| line.contains(needle)) {
+                        delivered = true;
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                }
+                if !delivered {
+                    let lines: Vec<_> = sinks.iter().map(|sink| sink.lines()).collect();
+                    return Err(format!(
+                        "connection {connection} never received {needle:?}: {lines:?}"
+                    )
+                    .into());
+                }
+                continue;
+            }
+            *sequence += 1;
+            let message = parse_message(FramedLine::new(line)?)?.ok_or("empty line")?;
+            send(
+                inbox,
+                StateCoreMessage::Line {
+                    generation: ConnectionGeneration::new(*connection),
+                    sequence: *sequence,
+                    message: Box::new(message),
+                },
+            )
+            .await?;
+            // A connection with a durable mutation in flight refuses the next
+            // one, so give each line time to gather and commit.
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_guest_session_registers_and_commands_flow_through_the_router() -> TestResult {
+        const SCRIPT: &[(u64, &str)] = &[
+            (1, "CAP LS 302"),
+            (1, "NICK alice"),
+            (1, "USER alice 0 * :Alice"),
+            (1, "CAP REQ :multi-prefix userhost-in-names"),
+            (1, "CAP END"),
+            (1, "WAIT  001 "),
+            (1, "PING :probe"),
+            (1, "JOIN #room"),
+            (1, "WAIT JOIN #room"),
+            (1, "TOPIC #room :welcome"),
+            (1, "NAMES #room"),
+            (1, "WHO #room"),
+            (1, "MODE #room +m"),
+            (1, "PRIVMSG #room :hello"),
+            (1, "AWAY :busy"),
+            (1, "AWAY"),
+            (1, "LIST"),
+            (1, "MOTD"),
+            (1, "PART #room :bye"),
+            (1, "WAIT PART #room"),
+            (1, "JOIN #room"),
+            (1, "WAIT 366 "),
+            (1, "QUIT :done"),
+        ];
+        let sinks = vec![FrameSink::new(ConnectionGeneration::new(1), true)];
+        let (exit, (_open, sinks, outcomes, stopped)) =
+            run_core(true, |inbox, lifecycle, _token| async move {
+                let outcomes = open_connections(&inbox, &sinks).await?;
+                drive_script(&inbox, &sinks, SCRIPT).await?;
+                let stopped = lifecycle.request(LifecyclePhase::Stop).await;
+                Ok((inbox, sinks, outcomes, stopped))
+            })
+            .await?;
+        assert!(matches!(outcomes[..], [ConnectionOpenOutcome::Accepted]));
+        assert!(stopped.is_ok());
+        assert!(matches!(exit, StateCoreExit::Stopped), "{exit:?}");
+        let lines = sinks.first().ok_or("no sink")?.lines();
+        for expected in [
+            " 001 alice ",
+            " TOPIC #room :welcome",
+            " MODE #room +m",
+            " 306 alice ",
+            " 305 alice ",
+            " 322 alice #room 1 :welcome",
+            " PART #room :bye",
+            " 366 alice #room ",
+            "ERROR :done",
+        ] {
+            assert!(
+                lines.iter().any(|line| line.contains(expected)),
+                "{expected}: {lines:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn two_guests_share_a_channel_and_exercise_moderation_and_failures() -> TestResult {
+        // (connection, line) in delivery order; connection 3 refuses output.
+        const SCRIPT: &[(u64, &str)] = &[
+            (1, "NICK alice"),
+            (1, "USER alice 0 * :Alice"),
+            (1, "WAIT  001 "),
+            (2, "CAP LS"),
+            (2, "NICK bob"),
+            (2, "USER bob 0 * :Bob"),
+            (
+                2,
+                "CAP REQ :away-notify invite-notify extended-join account-notify setname",
+            ),
+            (2, "CAP END"),
+            (2, "WAIT  001 "),
+            (3, "NICK carol"),
+            (3, "USER carol 0 * :Carol"),
+            (1, "JOIN #room"),
+            (1, "WAIT JOIN #room"),
+            (2, "JOIN #room"),
+            (2, "WAIT JOIN #room"),
+            (3, "JOIN #room"),
+            (1, "PRIVMSG bob :hi bob"),
+            (2, "NOTICE alice :hi alice"),
+            (2, "@+draft/react=hi TAGMSG #room"),
+            (1, "PRIVMSG nobody :nobody home"),
+            (1, "JOIN !bad"),
+            (1, "BOGUS command"),
+            (1, "MODE #room +o bob"),
+            (1, "WAIT +o bob"),
+            (2, "MODE #room +b $n:troll"),
+            (2, "MODE #room +b"),
+            (2, "MODE #room -b $n:troll"),
+            (1, "MODE #room -o bob"),
+            (1, "WAIT -o bob"),
+            (2, "MODE #room +m"),
+            (1, "TOPIC #room :moderated"),
+            (2, "WHOIS alice"),
+            (2, "ISON alice carol dave"),
+            (2, "USERHOST alice"),
+            (2, "SETNAME :Robert"),
+            (2, "NICK bobby"),
+            (2, "WAIT NICK :bobby"),
+            (1, "MONITOR + bobby"),
+            (1, "MONITOR L"),
+            (1, "MONITOR S"),
+            (1, "MONITOR - bobby"),
+            (1, "MONITOR C"),
+            (1, "KICK #room bobby :out"),
+            (1, "WAIT KICK #room bobby"),
+            (1, "INVITE bobby #room"),
+            (2, "WAIT INVITE"),
+            (2, "JOIN #room"),
+            (2, "WAIT 366 "),
+            (1, "MODE #room +i"),
+            (2, "PART #room"),
+            (2, "WAIT PART #room"),
+            (2, "JOIN #room"),
+            (1, "MODE #room +l 1"),
+            (1, "MODE #room -i-l"),
+            (2, "JOIN #room"),
+            (1, "PING"),
+            (1, "PONG :probe"),
+            (1, "CAP LS 302"),
+            (1, "VERSION"),
+            (1, "TIME"),
+            (1, "LUSERS"),
+            (1, "ADMIN"),
+            (1, "INFO"),
+            (1, "LINKS"),
+            (1, "WHOWAS bob"),
+            (1, "LIST #room"),
+            (2, "QUIT"),
+            (1, "PART #room"),
+        ];
+        let sinks: Vec<_> = (1..=3)
+            .map(|index| FrameSink::new(ConnectionGeneration::new(index), index != 3))
+            .collect();
+        let (exit, (_open, sinks, outcomes, stopped)) =
+            run_core(true, |inbox, lifecycle, _token| async move {
+                let outcomes = open_connections(&inbox, &sinks).await?;
+                drive_script(&inbox, &sinks, SCRIPT).await?;
+                let stopped = lifecycle.request(LifecyclePhase::Stop).await;
+                Ok((inbox, sinks, outcomes, stopped))
+            })
+            .await?;
+        assert!(
+            outcomes
+                .iter()
+                .all(|outcome| matches!(outcome, ConnectionOpenOutcome::Accepted))
+        );
+        assert!(stopped.is_ok());
+        assert!(matches!(exit, StateCoreExit::Stopped), "{exit:?}");
+        let commits: Vec<_> = sinks.iter().map(|sink| sink.commits()).collect();
+        assert!(
+            matches!(commits[..], [first, second, 0] if first > 0 && second > 0),
+            "{commits:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn admin_requests_reach_a_running_core() -> TestResult {
+        use agenc_ircd_types::{ChannelInstanceId, UserId};
+
+        use crate::state_core::admin::{AdminCoreFailure, AdminTarget};
+
+        let (exit, (_open, results)) = run_core_with(
+            false,
+            |fixture| fixture.install_admin_port(),
+            |inbox, lifecycle, token, port| async move {
+                let snapshot = port.snapshot(&token).await;
+                let process = port.target_revision(AdminTarget::Process, &token).await;
+                let account = port
+                    .target_revision(
+                        AdminTarget::Account(agenc_ircd_testkit::account_id(9)),
+                        &token,
+                    )
+                    .await;
+                let channel = port
+                    .target_revision(
+                        AdminTarget::Channel(ChannelInstanceId::from_bytes([9; 16])),
+                        &token,
+                    )
+                    .await;
+                let kill = port.kill(UserId::from_bytes([9; 16]), &token).await;
+                let stopped = lifecycle.request(LifecyclePhase::Stop).await;
+                Ok((
+                    inbox,
+                    (
+                        snapshot.is_ok(),
+                        process.is_ok(),
+                        account.err(),
+                        channel.err(),
+                        kill.err(),
+                        stopped.is_ok(),
+                    ),
+                ))
+            },
+        )
+        .await?;
+        assert!(matches!(exit, StateCoreExit::Stopped), "{exit:?}");
+        assert!(results.0, "snapshot");
+        assert!(results.1, "process revision");
+        assert_eq!(results.2, Some(AdminCoreFailure::InvalidTarget));
+        assert_eq!(results.3, Some(AdminCoreFailure::InvalidTarget));
+        assert_eq!(results.4, Some(AdminCoreFailure::InvalidTarget));
+        assert!(results.5, "stop");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn live_reloads_apply_no_change_and_refuse_stale_revisions() -> TestResult {
+        use crate::runtime_config::{PreparedReload, ReloadOutcome, RuntimeConfigHandle};
+        use crate::test_support::{golden_config, golden_parts, golden_snapshot};
+
+        let handle = RuntimeConfigHandle::new(golden_snapshot("AgenC", None)?);
+        let driver_handle = handle.clone();
+        let (exit, (_open, outcomes)) = run_core_with(
+            false,
+            move |fixture| fixture.install_reload_port(handle),
+            |inbox, lifecycle, _token, (port, _admission)| async move {
+                let mut outcomes = Vec::new();
+                // The same live values again: nothing to activate.
+                let mut prepared = PreparedReload::new(
+                    &driver_handle.load(),
+                    golden_config()?,
+                    golden_parts("AgenC", None)?,
+                )?;
+                prepared.attach_lease(driver_handle.begin_reload()?);
+                outcomes.push(port.activate_signal(prepared).await);
+                // A changed display name and message of the day: applied live.
+                let mut prepared = PreparedReload::new(
+                    &driver_handle.load(),
+                    golden_config()?,
+                    golden_parts("Renamed", Some("Welcome"))?,
+                )?;
+                prepared.attach_lease(driver_handle.begin_reload()?);
+                outcomes.push(port.activate_signal(prepared).await);
+                // Prepared against the old revision: stale.
+                let stale = golden_snapshot("AgenC", None)?;
+                let mut prepared =
+                    PreparedReload::new(&stale, golden_config()?, golden_parts("Again", None)?)?;
+                prepared.attach_lease(driver_handle.begin_reload()?);
+                outcomes.push(port.activate_signal(prepared).await);
+                let stopped = lifecycle.request(LifecyclePhase::Stop).await;
+                assert!(stopped.is_ok());
+                Ok((inbox, outcomes))
+            },
+        )
+        .await?;
+        assert!(matches!(exit, StateCoreExit::Stopped), "{exit:?}");
+        assert!(
+            matches!(
+                outcomes[..],
+                [
+                    ReloadOutcome::NoChange(_),
+                    ReloadOutcome::Applied(_),
+                    ReloadOutcome::Rejected(_)
+                ]
+            ),
+            "{outcomes:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_reloads_race_to_one_revision_and_quiescing_refuses_more() -> TestResult {
+        use crate::runtime_config::{
+            PreparedReload, ReloadOutcome, ReloadRejection, RuntimeConfigHandle,
+        };
+        use crate::test_support::{golden_config, golden_parts, golden_snapshot};
+
+        let handle = RuntimeConfigHandle::new(golden_snapshot("AgenC", None)?);
+        let driver_handle = handle.clone();
+        let (exit, (_open, outcomes)) = run_core_with(
+            false,
+            move |fixture| fixture.install_reload_port(handle),
+            |inbox, lifecycle, _token, (port, _admission)| async move {
+                let mut outcomes = Vec::new();
+                // Two activations prepared from the same revision: only one applies.
+                let mut first = PreparedReload::new(
+                    &driver_handle.load(),
+                    golden_config()?,
+                    golden_parts("AgenC", Some("One"))?,
+                )?;
+                first.attach_lease(driver_handle.begin_reload()?);
+                let second = PreparedReload::new(
+                    &driver_handle.load(),
+                    golden_config()?,
+                    golden_parts("AgenC", Some("Two"))?,
+                )?;
+                let (first, second) =
+                    tokio::join!(port.activate_signal(first), port.activate_signal(second));
+                outcomes.push(first);
+                outcomes.push(second);
+                // Once quiescing, no reload may start.
+                lifecycle
+                    .request(LifecyclePhase::Quiesce)
+                    .await
+                    .map_err(|failure| format!("{failure:?}"))?;
+                let mut late = PreparedReload::new(
+                    &driver_handle.load(),
+                    golden_config()?,
+                    golden_parts("Late", None)?,
+                )?;
+                late.attach_lease(driver_handle.begin_reload()?);
+                outcomes.push(port.activate_signal(late).await);
+                let stopped = lifecycle.request(LifecyclePhase::Stop).await;
+                assert!(stopped.is_ok());
+                Ok((inbox, outcomes))
+            },
+        )
+        .await?;
+        assert!(matches!(exit, StateCoreExit::Stopped), "{exit:?}");
+        assert!(
+            matches!(
+                outcomes[..],
+                [
+                    ReloadOutcome::Applied(_),
+                    ReloadOutcome::Rejected(ReloadRejection::StaleRevision),
+                    ReloadOutcome::Rejected(ReloadRejection::Quiescing),
+                ]
+            ),
+            "{outcomes:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_ephemeral_command_pipelined_behind_a_durable_one_is_refused_not_fatal() -> TestResult
+    {
+        const REGISTER: &[(u64, &str)] = &[
+            (1, "NICK alice"),
+            (1, "USER alice 0 * :Alice"),
+            (1, "WAIT  001 "),
+        ];
+        let sinks = vec![FrameSink::new(ConnectionGeneration::new(1), true)];
+        let (exit, (_open, sinks, stopped)) =
+            run_core(true, |inbox, lifecycle, _token| async move {
+                let _outcomes = open_connections(&inbox, &sinks).await?;
+                drive_script(&inbox, &sinks, REGISTER).await?;
+                // AWAY stages a durable batch; MONITOR is ephemeral and arrives
+                // inside the gather window with no pacing at all.
+                for (sequence, line) in [(3, "AWAY :busy"), (4, "MONITOR + alice")] {
+                    let message = parse_message(FramedLine::new(line)?)?.ok_or("empty line")?;
+                    send(
+                        &inbox,
+                        StateCoreMessage::Line {
+                            generation: ConnectionGeneration::new(1),
+                            sequence,
+                            message: Box::new(message),
+                        },
+                    )
+                    .await?;
+                }
+                drive_script(&inbox, &sinks, &[(1, "WAIT  306 ")]).await?;
+                let stopped = lifecycle.request(LifecyclePhase::Stop).await;
+                Ok((inbox, sinks, stopped))
+            })
+            .await?;
+        assert!(stopped.is_ok());
+        assert!(matches!(exit, StateCoreExit::Stopped), "{exit:?}");
+        let lines = sinks.first().ok_or("no sink")?.lines();
+        assert!(
+            lines.iter().any(|line| line.contains(" 306 alice ")),
+            "{lines:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_closed_inbox_exits_the_core() -> TestResult {
+        let (exit, ()) = run_core(false, |inbox, _lifecycle, _token| async move {
+            drop(inbox);
+            Ok(())
+        })
+        .await?;
+        assert!(matches!(exit, StateCoreExit::InboxClosed));
+        Ok(())
     }
 }

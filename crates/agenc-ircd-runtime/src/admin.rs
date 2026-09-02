@@ -1790,6 +1790,16 @@ impl AdminOwner {
                     | ReloadAuditCommitOutcome::Indeterminate => self.fail_closed(generation),
                 }
             }
+            AuditedReloadStart::Refused(rejection) => {
+                if self.audit.commit_event(&failure).is_err() {
+                    self.fail_closed(generation);
+                    return;
+                }
+                if let Some(observer) = &self.observer {
+                    observer.reload(false);
+                }
+                self.output_reload_rejection(generation, rejection);
+            }
             AuditedReloadStart::Indeterminate => self.fail_closed(generation),
         }
     }

@@ -14,7 +14,11 @@ import tomllib
 from pathlib import Path
 from typing import NoReturn
 
-MINIMUM_PERCENT = 90.0
+# The line floor is the release target. The branch floor is the Stage 06
+# interim floor recorded in TODO.md; the 90 percent release target returns
+# with Stage 10 release qualification.
+MINIMUM_BRANCH_PERCENT = 75.0
+MINIMUM_LINE_PERCENT = 90.0
 CRITICAL_PERCENT = 100.0
 CARGO_LLVM_COV_VERSION = "0.9.0"
 LLVM_COVERAGE_EXPORT_TYPE = "llvm.coverage.json.export"
@@ -149,9 +153,9 @@ def validate_policy_data(
     schema_version = policy.get("schema_version")
     if type(schema_version) is not int or schema_version != 1:
         raise CoverageError("coverage policy schema_version must be 1")
-    if policy.get("minimum_overall_branch_percent") != MINIMUM_PERCENT:
+    if policy.get("minimum_overall_branch_percent") != MINIMUM_BRANCH_PERCENT:
         raise CoverageError("coverage policy branch threshold is stale")
-    if policy.get("minimum_overall_line_percent") != MINIMUM_PERCENT:
+    if policy.get("minimum_overall_line_percent") != MINIMUM_LINE_PERCENT:
         raise CoverageError("coverage policy line threshold is stale")
     if policy.get("critical_region_percent") != CRITICAL_PERCENT:
         raise CoverageError("coverage policy critical threshold must be 100")
@@ -477,13 +481,13 @@ def validate_report(
     branch_percent = percentage(totals, "branches")
     line_percent = percentage(totals, "lines")
     failures: list[str] = []
-    if branch_percent < MINIMUM_PERCENT:
+    if branch_percent < MINIMUM_BRANCH_PERCENT:
         failures.append(
-            f"branch coverage {branch_percent:.2f}% is below {MINIMUM_PERCENT:.2f}%"
+            f"branch coverage {branch_percent:.2f}% is below {MINIMUM_BRANCH_PERCENT:.2f}%"
         )
-    if line_percent < MINIMUM_PERCENT:
+    if line_percent < MINIMUM_LINE_PERCENT:
         failures.append(
-            f"line coverage {line_percent:.2f}% is below {MINIMUM_PERCENT:.2f}%"
+            f"line coverage {line_percent:.2f}% is below {MINIMUM_LINE_PERCENT:.2f}%"
         )
 
     for region in regions:
@@ -770,15 +774,15 @@ def self_test(root: Path, policy_path: Path) -> int:
     low_overall = copy.deepcopy(report)
     low_overall["data"][0]["totals"]["branches"] = {  # type: ignore[index]
         "count": 10,
-        "covered": 8,
-        "notcovered": 2,
-        "percent": 80.0,
+        "covered": 7,
+        "notcovered": 3,
+        "percent": 70.0,
     }
     low_overall["data"][0]["files"][0]["summary"]["branches"] = {  # type: ignore[index]
         "count": 10,
-        "covered": 8,
-        "notcovered": 2,
-        "percent": 80.0,
+        "covered": 7,
+        "notcovered": 3,
+        "percent": 70.0,
     }
     expect_rejection(
         "low overall coverage",

@@ -82,7 +82,7 @@ text = "Onion-only connection profiles use a pinned onion address and MUST NOT u
 target_crates = ["agenc-ircd-types"]
 task_ids = ["S06-004"]
 evidence_ids = ["EVID-ARCH-REQ-951E6893F2B754847C8E"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -98,7 +98,7 @@ text = "The daemon MUST preserve the familiar nickname, direct-message, `/join #
 target_crates = ["agenc-ircd-types"]
 task_ids = ["S06-010"]
 evidence_ids = ["EVID-ARCH-REQ-0EC008E51ACF33B486A7"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -114,7 +114,7 @@ text = "The daemon MUST support discoverable public channels, unlisted channels,
 target_crates = ["agenc-ircd-types"]
 task_ids = ["S06-010"]
 evidence_ids = ["EVID-ARCH-REQ-2DE781FEE0904A7D417F"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -130,7 +130,7 @@ text = "The daemon MUST provide pseudonymous accounts whose security identity is
 target_crates = ["agenc-ircd-types"]
 task_ids = ["S06-009"]
 evidence_ids = ["EVID-ARCH-REQ-76933F949C4BA311D15E"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -146,7 +146,7 @@ text = "The daemon MUST offer direct TLS, Tor SOCKS client guidance, and a versi
 target_crates = ["agenc-ircd-types"]
 task_ids = ["S06-004"]
 evidence_ids = ["EVID-ARCH-REQ-8E6BD0E1ADFA47B0488A"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -210,7 +210,7 @@ text = "The daemon MUST persist acknowledged security state before making it ext
 target_crates = ["agenc-ircd-types"]
 task_ids = ["S06-008"]
 evidence_ids = ["EVID-ARCH-REQ-437D151873A9CD5C587B"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -290,7 +290,7 @@ text = "It MUST use that address only for admission and abuse buckets, MUST NOT 
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S06-004"]
 evidence_ids = ["EVID-ARCH-REQ-239F20852008EFEBC14C"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -306,7 +306,7 @@ text = "It MUST use that address only for admission and abuse buckets, MUST NOT 
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S06-004"]
 evidence_ids = ["EVID-ARCH-REQ-6ED8CC0935B62D48C171"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -322,7 +322,7 @@ text = "It MUST use that address only for admission and abuse buckets, MUST NOT 
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S06-004"]
 evidence_ids = ["EVID-ARCH-REQ-91A4F778BFA1744C7579"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -338,7 +338,7 @@ text = "It MUST use that address only for admission and abuse buckets, MUST NOT 
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S06-004"]
 evidence_ids = ["EVID-ARCH-REQ-1077079A5B8E236B2E7E"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -354,7 +354,7 @@ text = "It MUST use that address only for admission and abuse buckets, MUST NOT 
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S06-004"]
 evidence_ids = ["EVID-ARCH-REQ-AF83DC2BF6651C1ADCAB"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -370,7 +370,7 @@ text = "Native clients MUST send the DNS hostname through SOCKS5 rather than res
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S06-004"]
 evidence_ids = ["EVID-ARCH-REQ-1BC68D62C88F9901863C"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -386,7 +386,7 @@ text = "Native clients MUST send the DNS hostname through SOCKS5 rather than res
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S06-004"]
 evidence_ids = ["EVID-ARCH-REQ-0ED2BB6143B32AC67530"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -402,7 +402,7 @@ text = "They MUST NOT fall back to direct DNS or TCP after a Tor failure."
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S06-004"]
 evidence_ids = ["EVID-ARCH-REQ-D8752DA6EC2A4D543D27"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -418,7 +418,7 @@ text = "The daemon MUST reject TCP on the onion-only listener path and MUST NOT 
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S06-004"]
 evidence_ids = ["EVID-ARCH-REQ-89A52EAEFEB27B78EA3F"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -434,7 +434,7 @@ text = "The daemon MUST reject TCP on the onion-only listener path and MUST NOT 
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S06-004"]
 evidence_ids = ["EVID-ARCH-REQ-B640E662E68B7720C8CE"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -450,7 +450,7 @@ text = "A native client configured for `onion` MUST NOT try a clearnet endpoint 
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S06-004"]
 evidence_ids = ["EVID-ARCH-REQ-97C72A89521508665EA0"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -466,7 +466,7 @@ text = "The server MUST disable TLS 1.2 and earlier, renegotiation, 0-RTT, appli
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S06-003"]
 evidence_ids = ["EVID-ARCH-REQ-C33F2C188FAB745A4008"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -482,7 +482,7 @@ text = "The provider MAY reorder AES and ChaCha20 based on hardware capability, 
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S06-003"]
 evidence_ids = ["EVID-ARCH-REQ-3EDADEB5374091A7FCD9"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -498,7 +498,7 @@ text = "The provider MAY reorder AES and ChaCha20 based on hardware capability, 
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S06-003"]
 evidence_ids = ["EVID-ARCH-REQ-1F847B93E38E57D5492E"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -514,7 +514,7 @@ text = "The key directory MUST be owned by the Tor service account and inaccessi
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S06-015"]
 evidence_ids = ["EVID-ARCH-REQ-533C4FC96F4E21250FF2"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -530,7 +530,7 @@ text = "The normalized login identifier and account label MUST NOT be equal by d
 target_crates = ["agenc-ircd-auth"]
 task_ids = ["S06-009"]
 evidence_ids = ["EVID-ARCH-REQ-D9709F92FF869A201DA0"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -594,7 +594,7 @@ text = "Nickname and cloak masks are convenience filters and MUST be shown as we
 target_crates = ["agenc-ircd-domain"]
 task_ids = ["S06-010"]
 evidence_ids = ["EVID-ARCH-REQ-0A2DFA591F93494434CA"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -658,7 +658,7 @@ text = "It MUST NOT silently demand deanonymization, route Tor users to clearnet
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S06-011"]
 evidence_ids = ["EVID-ARCH-REQ-AC500B2D79C7A16B554A"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -834,7 +834,7 @@ text = "These sets MUST be one database transaction channel mutation: channel re
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S06-008"]
 evidence_ids = ["EVID-ARCH-REQ-081595C2CCFFAF608E38"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -850,7 +850,7 @@ text = "These sets MUST be one database transaction nickname/session mutation: i
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S06-008"]
 evidence_ids = ["EVID-ARCH-REQ-DE27E4D7727B11384C1F"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1010,7 +1010,7 @@ text = "Logs MUST NOT contain source or destination IPs, ports tied to users, on
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S06-014"]
 evidence_ids = ["EVID-ARCH-REQ-A8B38178C6FCDD5EB7ED"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1042,7 +1042,7 @@ text = "TLS early data, TLS 1.2 or earlier, plaintext listeners, STARTTLS, reneg
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S06-003"]
 evidence_ids = ["EVID-ARCH-TRN-02"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1154,7 +1154,7 @@ text = "A public cloak is fresh per connection and statistically independent of 
 target_crates = ["agenc-ircd-types"]
 task_ids = ["S06-009"]
 evidence_ids = ["EVID-ARCH-ID-03"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1170,7 +1170,7 @@ text = "Raw source addresses leave the transport/admission owner only as an in-m
 target_crates = ["agenc-ircd-types"]
 task_ids = ["S06-014"]
 evidence_ids = ["EVID-ARCH-ID-04"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1250,7 +1250,7 @@ text = "An authentication, account-creation, or credential-change transaction is
 target_crates = ["agenc-ircd-auth"]
 task_ids = ["S06-009"]
 evidence_ids = ["EVID-ARCH-AUTH-02"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1298,7 +1298,7 @@ text = "Logout, account switch, device attach/detach, or principal replacement a
 target_crates = ["agenc-ircd-auth"]
 task_ids = ["S06-009"]
 evidence_ids = ["EVID-ARCH-AUTH-05"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1330,7 +1330,7 @@ text = "Account deletion requires fresh same-account OPAQUE authentication, a si
 target_crates = ["agenc-ircd-auth"]
 task_ids = ["S06-009"]
 evidence_ids = ["EVID-ARCH-AUTH-07"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1346,7 +1346,7 @@ text = "Every account creation/login/credential-change inner message reaches sem
 target_crates = ["agenc-ircd-auth"]
 task_ids = ["S06-009"]
 evidence_ids = ["EVID-ARCH-AUTH-08"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1394,7 +1394,7 @@ text = "Credential replacement requires fresh same-account OPAQUE proof, reuses 
 target_crates = ["agenc-ircd-auth"]
 task_ids = ["S06-009"]
 evidence_ids = ["EVID-ARCH-AUTH-11"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1522,7 +1522,7 @@ text = "`+n` is always set; `+p` and `+s` are mutually exclusive; mode vectors a
 target_crates = ["agenc-ircd-domain"]
 task_ids = ["S06-010"]
 evidence_ids = ["EVID-ARCH-STA-04"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2242,7 +2242,7 @@ text = "Configuration unknowns, unsafe permissions, missing keys, role conflicts
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S06-001"]
 evidence_ids = ["EVID-ARCH-OPS-02"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2258,7 +2258,7 @@ text = "No administrative authority is obtainable through a public client sessio
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S06-012"]
 evidence_ids = ["EVID-ARCH-OPS-03"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2290,7 +2290,7 @@ text = "Every post-authentication administrative command is counter-contiguous, 
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S06-012"]
 evidence_ids = ["EVID-ARCH-OPS-05"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]

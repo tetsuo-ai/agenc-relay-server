@@ -430,3 +430,29 @@ fn host_depth_rejects_hard_links_and_material_under_protected_roots() -> TestRes
     );
     Ok(())
 }
+
+#[test]
+fn secret_files_reject_unprotected_ancestors_and_hard_links() -> TestResult {
+    let sandbox = Sandbox::create()?;
+    let loose = sandbox.dir("loose", 0o770)?;
+    let under_loose = loose.join("key.key");
+    fs::write(&under_loose, [7; 32])?;
+    fs::set_permissions(&under_loose, fs::Permissions::from_mode(0o600))?;
+    assert_eq!(
+        open_secret_file(&under_loose, SecretLength::Exact(32)).err(),
+        Some(ConfigError::FileRejected)
+    );
+
+    let linked = sandbox.file("keys/linked.key", &[7; 32], 0o600)?;
+    let alias = sandbox.root().join("keys/alias.key");
+    fs::hard_link(&linked, &alias)?;
+    assert_eq!(
+        open_secret_file(&linked, SecretLength::Exact(32)).err(),
+        Some(ConfigError::FileRejected)
+    );
+    assert_eq!(
+        open_secret_file(&alias, SecretLength::Exact(32)).err(),
+        Some(ConfigError::FileRejected)
+    );
+    Ok(())
+}

@@ -11,6 +11,7 @@ use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt;
 use std::sync::Mutex;
+use std::time::Instant;
 
 use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -144,18 +145,26 @@ impl TicketKeyRingState {
 
 struct TlsTicketKeyRing {
     state: Mutex<TicketKeyRingState>,
+    /// Rotation and pruning run on this process clock, so a wall-clock step
+    /// can neither extend nor shorten a key's life (spec 21.6).
+    origin: Instant,
 }
 
 impl TlsTicketKeyRing {
     fn new() -> Result<Self, CryptoError> {
-        Self::new_at(UnixTime::now().as_secs())
+        Self::new_at(0)
     }
 
     fn new_at(now: u64) -> Result<Self, CryptoError> {
         let initial_key = TlsTicketKey::generate()?;
         Ok(Self {
             state: Mutex::new(TicketKeyRingState::new(initial_key, now)?),
+            origin: Instant::now(),
         })
+    }
+
+    fn elapsed_seconds(&self) -> u64 {
+        self.origin.elapsed().as_secs()
     }
 
     fn encrypt_at(&self, plaintext: &[u8], now: u64) -> Option<Vec<u8>> {
@@ -206,11 +215,11 @@ impl ProducesTickets for TlsTicketKeyRing {
     }
 
     fn encrypt(&self, plaintext: &[u8]) -> Option<Vec<u8>> {
-        self.encrypt_at(plaintext, UnixTime::now().as_secs())
+        self.encrypt_at(plaintext, self.elapsed_seconds())
     }
 
     fn decrypt(&self, ciphertext: &[u8]) -> Option<Vec<u8>> {
-        self.decrypt_at(ciphertext, UnixTime::now().as_secs())
+        self.decrypt_at(ciphertext, self.elapsed_seconds())
     }
 }
 

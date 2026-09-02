@@ -263,10 +263,14 @@ where
         let _closed_at = lease.release(CloseReason::Shutdown);
         return connection_exit(&admitted, CloseReason::Shutdown);
     }
-    let open_failure = match open_outcome.await {
-        Ok(ConnectionOpenOutcome::Accepted) => None,
-        Ok(ConnectionOpenOutcome::Refused) => Some(CloseReason::Overload),
-        Err(_closed) => Some(CloseReason::Shutdown),
+    let outcome = tokio::select! {
+        () = token.cancelled() => None,
+        outcome = tokio::time::timeout(INBOX_NOTICE_BUDGET, open_outcome) => outcome.ok(),
+    };
+    let open_failure = match outcome {
+        Some(Ok(ConnectionOpenOutcome::Accepted)) => None,
+        Some(Ok(ConnectionOpenOutcome::Refused)) => Some(CloseReason::Overload),
+        Some(Err(_)) | None => Some(CloseReason::Shutdown),
     };
     if let Some(reason) = open_failure {
         drop(transport);

@@ -40,7 +40,8 @@ REQUIRED_WORKFLOW_SNIPPETS = (
     "cargo +1.98.0 install --locked cargo-audit --version 0.22.2",
     "cargo +1.98.0 install --locked cargo-llvm-cov --version 0.9.0",
     "cargo +1.98.0 install --locked cargo-fuzz --version 0.13.2",
-    "sudo apt-get install --no-install-recommends gcc-aarch64-linux-gnu tor",
+    "sudo apt-get install --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross tor",
+    "sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL",
 )
 REQUIRED_GATE_STEP = (
     "      - name: Run Stage 06 implementation checks\n"

@@ -2231,6 +2231,21 @@ async fn start_owners(inputs: StartOwnersInputs) -> Result<RunningOwners, Daemon
         )
         .await);
     }
+    // Signal handlers are installed before any listener accepts, so a stop
+    // request during startup always reaches the phased shutdown.
+    let background = match spawn_background_owners(&mut supervisor, &inbox, admission) {
+        Ok(background) => background,
+        Err(error) => {
+            return Err(unwind_started_owners(
+                &mut supervisor,
+                owner,
+                log_owner,
+                startup_deadline,
+                error,
+            )
+            .await);
+        }
+    };
     let listeners = match ListenerSet::start(specs, context, &supervisor.root_token()) {
         Ok(listeners) => listeners,
         Err(error) => {
@@ -2247,19 +2262,6 @@ async fn start_owners(inputs: StartOwnersInputs) -> Result<RunningOwners, Daemon
     let control = listeners.control();
     let listener_exited = match spawn_listener_owner(&mut supervisor, listeners) {
         Ok(exited) => exited,
-        Err(error) => {
-            return Err(unwind_started_owners(
-                &mut supervisor,
-                owner,
-                log_owner,
-                startup_deadline,
-                error,
-            )
-            .await);
-        }
-    };
-    let background = match spawn_background_owners(&mut supervisor, &inbox, admission) {
-        Ok(background) => background,
         Err(error) => {
             return Err(unwind_started_owners(
                 &mut supervisor,
