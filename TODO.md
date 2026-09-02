@@ -56,7 +56,7 @@ References: [Architecture §§1.2–4](docs/ircd-architecture-and-implementation
 | 03 | Pure deterministic domain model | Complete | Pass, 2026-08-27 | [Current checkpoint](conformance/evidence/stage-03-1e5b738468f88b238061cc6e84b732176f5cae65.json) |
 | 04 | Crypto adapters and account authentication | Complete | Pass, 2026-08-29 | [Current checkpoint](conformance/evidence/stage-04-4040796f2c21774d58ea7ce54e70a080678e83ac.json) |
 | 05 | Durable and recoverable persistence | Complete | Pass, 2026-08-29 | [Current checkpoint](conformance/evidence/stage-05-4040796f2c21774d58ea7ce54e70a080678e83ac.json) |
-| 06 | Conforming single-node daemon | Implementation merged; closure in progress | Fail, 2026-09-01 (`check-source`) | Absent |
+| 06 | Conforming single-node daemon | Implementation passes; exact-revision evidence pending | Pass, 2026-09-01 | Absent |
 | 07 | Conforming base federation | Not started | Not run | Absent |
 | 08 | Conforming E2EE server adapter | Not started | Not run | Absent |
 | 09 | Optional WSS and history profiles | Not started | Not run | Absent |
@@ -955,11 +955,14 @@ pushed, and merged by PR #14. The branch head was
 `1c91131ce0b411717a1a3ddb15a0202fc8312ce3`; the merge commit is
 `3a517e9482fe51d7983dc5b9c998fd472e41c600`.
 
-The merge did not close Stage 06. The cloud gate failed in `check-source`, the
-coverage and requirement-ledger checkpoints remain open, and no exact-SHA
-Stage 06 evidence exists. The commit-point boxes below record which work
-landed. The `S06-*` task boxes remain open until their required evidence passes
-for one exact revision.
+The merge did not close Stage 06: the cloud gate failed in `check-source`,
+the coverage and requirement-ledger checkpoints were open, and no exact-SHA
+Stage 06 evidence existed. The closure work on `stage-06-closure` fixed the
+source-policy failure, repaired the inherited Stage 03 and Stage 04 checks,
+adopted the interim coverage floor, closed the ledger and catalog, and passed
+the full 75-command gate on 2026-09-01. The commit-point boxes below record
+which work landed. The `S06-*` task boxes are checked because the gate passes
+on the closure branch; the exact-revision checkpoint is recorded separately.
 
 #### Branch and worktree control
 
@@ -1442,33 +1445,34 @@ Commit point 8
 
 #### Full implementation gate
 
-- [ ] Install or provide the exact required toolchain on the qualification
+- [x] Install or provide the exact required toolchain on the qualification
   host, including Tor, `systemd-analyze`, the AArch64 cross compiler, Rust
   1.98.0, nightly 2026-08-24, `cargo-deny` 0.20.2, `cargo-audit` 0.22.2,
   `cargo-llvm-cov` 0.9.0, and `cargo-fuzz` 0.13.2.
-- [ ] Run `bash scripts/check-stage-six.sh` without evidence recording until
-  all 75 inherited and Stage 06 commands pass from a clean tree. The merged
-  revision currently stops at `check-source` before the later commands run.
-- [ ] Confirm that the gate includes formatting, native and cross-target
+- [x] Run `bash scripts/check-stage-six.sh` without evidence recording until
+  all 75 inherited and Stage 06 commands pass from a clean tree. The closure
+  branch passes all 75 commands on 2026-09-01 after repairing the Stage 03 and
+  Stage 04 module-set checks and rebinding the constant-time review hashes.
+- [x] Confirm that the gate includes formatting, native and cross-target
   checks, Clippy, workspace and documentation tests, dependency denial,
   advisory audit, source and workspace checks, coverage, all earlier-stage
   checks, Stage 06 tests, Loom, transcripts, deterministic soak, deployment,
   host qualification, and fuzzing.
-- [ ] Run both Stage 06 fuzz targets for 10,000 iterations with the fixed seed
+- [x] Run both Stage 06 fuzz targets for 10,000 iterations with the fixed seed
   and configured bounds.
 - [x] Do not claim the seven-day production soak assigned to `S10-007`.
-- [ ] Check `S06-900` only after the full non-recording gate passes.
-- [ ] Update the Stage 06 status text to say that implementation passes and
+- [x] Check `S06-900` only after the full non-recording gate passes.
+- [x] Update the Stage 06 status text to say that implementation passes and
   exact-revision evidence remains pending.
 
 Commit point 9
 
-- [ ] Run GitNexus `detect_changes` for the complete branch against `main`.
+- [x] Run GitNexus `detect_changes` for the complete branch against `main`.
 - [x] Confirm that the implementation branch contained no unrelated or generated
   residue.
 - [x] Commit and push the last implementation source as
   `1c91131ce0b411717a1a3ddb15a0202fc8312ce3`.
-- [ ] Commit point 9 is closed only after the full non-recording gate passes.
+- [x] Commit point 9 is closed only after the full non-recording gate passes.
 
 #### Exact-SHA evidence
 
@@ -1534,12 +1538,75 @@ Commit point 10
   or unreviewed production dependency.
 - [x] Merge PR #14 as
   `3a517e9482fe51d7983dc5b9c998fd472e41c600`.
-- [ ] Fix the failed cloud gate. It stopped at `check-source` because
+- [x] Fix the failed cloud gate. It stopped at `check-source` because
   `crates/agenc-ircd-config/src/paths.rs` has a lint allowance without the
   required review annotation.
 - [ ] Repeat exact-SHA evidence after any source fix.
 - [ ] Leave the pull request open for the cloud-agent and repository-owner
   merge gate. This was violated when PR #14 was merged before the gate passed.
+
+#### Stage 06 review follow-ups
+
+The 2026-09-01 legibility review of the merged runtime closed its definite
+defects on `stage-06-closure`. The findings below were verified against the
+code but deferred because each needs a design decision, a domain change, or a
+specification revision. None blocks the core-v1 gate. Line references are to
+the closure branch at review time.
+
+- [ ] Keyed JOIN and `MODE +k` replan after the Argon2 worker with
+  `plan_authorized` at the original revision (`channels.rs` `finish_pending`),
+  so any durable commit during the hash window returns `StaleRevision` and
+  renders SERVERBUSY. Re-authorize at the current revision with an unmetered
+  snapshot before replanning.
+- [ ] `CHANCTL`, `CHATHISTORY`, and `MODE -b` resolve the channel name before
+  authorization (`command_convert.rs`), so an unknown name answers 461 while an
+  existing secret channel answers 481. Map an unresolved name to the same
+  public error the domain gives for an unauthorized existing channel
+  (`PRV-01`, `STA-10`).
+- [ ] Batch gathering from Architecture 21.5 is unreachable: every plan uses
+  the committed revision, so `pending.rs` never chains a second plan and
+  refuses it `Busy`. Either document batch size one and drop the 1 ms gather
+  window, or give StateCore a staged revision to plan against.
+- [ ] A refused shutdown session close stays in `pending_closures`
+  (`channels.rs` `close_registered`) and is retried only on the next batch
+  event, so an idle server keeps the dead session and nickname (`STA-01`).
+  Retry from a timer or from connection-closed events.
+- [ ] The account admin after-image does not advance `account.revision`
+  while the channel arm does (`state_core/mod.rs`), so `durable.rs` rewrites
+  the row under the old revision. Not verified against the storage engine.
+- [ ] Committed `ACCT` and `CHANCTL` mutations emit no reply when
+  `standard-replies` was not negotiated (`mutation_render.rs`), although
+  Section 14.6 promises `NOTE ... UPDATED`; `CHATHISTORY` renders zero frames.
+  Gate at the wire or fail closed with a bounded reply.
+- [ ] Audit rows written before the last restart are not indexed by
+  `reconstruct`, so retention deletes of those rows fail. The closure branch
+  maps that failure to `StorageUnavailable` instead of stopping the daemon;
+  the sweep still cannot delete pre-restart rows until `reconstruct` scans the
+  audit tables.
+- [ ] Listener key `tls_ocsp_staple_file` is accepted by the configuration
+  parser but absent from Appendix C.3, which closes the listener key set.
+  Either add it to the specification as a protocol revision or reject it.
+- [ ] With euid 0, secret file checks accept only root-owned files, so root
+  cannot run `print-onboarding`, `check-config`, or `account-invite create`
+  against keys installed for the service account.
+- [ ] Disabled listeners still load TLS material, and `listener_key_reuse`
+  and the runtime disagree about same-path key sharing. Decide one policy.
+- [ ] `runtime_config.rs` maps `TrySendError::Full` to
+  `AuditedReloadStart::Indeterminate` in `activate_audited` and
+  `commit_outcome` while `send_activation` maps it to `Busy`. `Full` is a
+  determinate rejection; unreachable today because the single-flight lease
+  keeps one prepared reload alive.
+- [ ] The connection reader to StateCore channel is one process-wide 64-slot
+  mpsc sized with the signal constant and shared with `Opened` notices and
+  maintenance events (`daemon.rs`), so the per-connection
+  `requests_per_connection` bound and the separate maintenance channel of
+  Architecture 21.3 do not exist as specified.
+- [ ] A `JoinError` from one connection task cancels the shared accept and
+  connection tokens (`listener/mod.rs`, `supervisor/mod.rs`), against
+  Architecture 21.2. Unreachable while the panic hook exits the process.
+- [ ] `parsed_arena_bytes` is dead configuration: `connection/reader.rs`
+  accumulates `pending.bytes` but never compares it with `limits.arena_bytes`.
+  Refuse in the accumulator when the bound is exceeded.
 
 - [x] `S06-001` **Implement strict configuration parsing and validation.**
   Parse TOML into an untrusted intermediate, reject unknowns, validate the full
@@ -1687,7 +1754,7 @@ Commit point 10
   - Invariants: `OPS-01`, `OPS-02`, `OPS-04`.
   - Evidence: host-hardening checks, permissions, locked-secret modes, crash behavior, signal shutdown, and incident-mode tests.
 
-- [ ] `S06-900` **Pass the Stage 06 core-v1 gate.** A standalone TLS-only node
+- [x] `S06-900` **Pass the Stage 06 core-v1 gate.** A standalone TLS-only node
   must satisfy the core conformance target with bounded ownership, durable
   results, privacy-safe operations, clean shutdown, and no federation/E2EE
   behavior falsely advertised.
