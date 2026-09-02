@@ -84,6 +84,10 @@ const DISK_RESERVE_BYTES: u64 = 67_108_864;
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
 const START_TIMEOUT: Duration = Duration::from_secs(20);
 const STOP_TIMEOUT: Duration = Duration::from_secs(20);
+/// Fresh connections the guest helpers open before giving up on a silent close.
+const FRESH_CONNECTION_ATTEMPTS: usize = 4;
+/// Pause between those attempts.
+const FRESH_CONNECTION_PAUSE: Duration = Duration::from_millis(250);
 const ACCOUNT_HPKE_PRIVATE: [u8; 32] = [14; 32];
 const ACCOUNT_PASSWORD: &[u8] = b"stage six live account password";
 const REPLACEMENT_PASSWORD: &[u8] = b"stage six replacement password";
@@ -2249,6 +2253,24 @@ fn send_and_sync(client: &mut IrcClient, lines: &[String]) -> TestResult<Vec<Str
     Ok(replies)
 }
 
+/// Connects and registers a guest, reconnecting a bounded number of times
+/// when the daemon closes the fresh connection before its first reply.
+fn connect_registered_guest(fixture: &LiveFixture) -> TestResult<(IrcClient, Vec<String>)> {
+    let mut last = None;
+    for _ in 0..FRESH_CONNECTION_ATTEMPTS {
+        let mut client = IrcClient::connect(fixture)?;
+        match client.register() {
+            Ok(registered) => return Ok((client, registered)),
+            Err(error) if error.to_string().contains("received []") => {
+                last = Some(error);
+                std::thread::sleep(FRESH_CONNECTION_PAUSE);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last.unwrap_or_else(|| failure("guest registration never received a reply")))
+}
+
 fn is_sasl_numeric(line: &str) -> bool {
     [" 903 ", " 904 ", " 905 ", " 906 ", " 907 "]
         .iter()
@@ -2578,16 +2600,12 @@ fn production_daemon_credential_and_lookup_edges_fail_closed() -> TestResult {
 
     // A registered guest cannot log out of an account or delete one; each
     // refusal may close the connection, so each gets its own.
-    let mut guest = IrcClient::connect(&fixture)?;
-    let registered = guest
-        .register()
+    let (mut guest, registered) = connect_registered_guest(&fixture)
         .map_err(|error| failure(format!("guest register: {error}")))?;
     assert_contains(&registered, " 001 LiveUser ")?;
     let _logout = send_and_sync(&mut guest, &["AUTHENTICATE *".to_owned()]);
     drop(guest);
-    let mut deleter = IrcClient::connect(&fixture)?;
-    let registered = deleter
-        .register()
+    let (mut deleter, registered) = connect_registered_guest(&fixture)
         .map_err(|error| failure(format!("deleter register: {error}")))?;
     assert_contains(&registered, " 001 LiveUser ")?;
     deleter.send("ACCT DELETE START")?;

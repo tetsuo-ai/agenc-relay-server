@@ -1609,6 +1609,14 @@ the closure branch at review time.
 - [ ] `parsed_arena_bytes` is dead configuration: `connection/reader.rs`
   accumulates `pending.bytes` but never compares it with `limits.arena_bytes`.
   Refuse in the accumulator when the bound is exceeded.
+- [ ] One recorded gate run closed a fresh guest connection after the TLS
+  handshake and before its first reply
+  (`production_daemon_credential_and_lookup_edges_fail_closed`), which the
+  listener code only does on a StateCore open refusal or a shutdown. It did
+  not reproduce in thirteen local suite runs, including nine concurrent
+  suites. The daemon tests now reconnect a bounded number of times on a
+  silent close; find the refusal path and give the fixture a way to keep the
+  daemon log when a test fails.
 
 - [x] `S06-001` **Implement strict configuration parsing and validation.**
   Parse TOML into an untrusted intermediate, reject unknowns, validate the full
