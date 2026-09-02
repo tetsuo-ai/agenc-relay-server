@@ -59,7 +59,7 @@ Start here when exploring this area:
 | `export_keying_material` | Function | `crates/agenc-ircd-runtime/src/tls/stream.rs` | 230 |
 | `mint` | Function | `crates/agenc-ircd-testkit/src/tls_fixture.rs` | 89 |
 | `bind` | Function | `crates/agenc-ircd-runtime/src/listener/socket.rs` | 183 |
-| `channel` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 496 |
+| `channel` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 506 |
 | `join` | Function | `crates/agenc-ircd-runtime/src/listener/mod.rs` | 485 |
 | `activate_signal` | Function | `crates/agenc-ircd-runtime/src/runtime_config.rs` | 751 |
 

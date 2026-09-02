@@ -1,11 +1,11 @@
 ---
 name: admission
-description: "Skill for the Admission area of agenc-ircd. 236 symbols across 14 files."
+description: "Skill for the Admission area of agenc-ircd. 237 symbols across 14 files."
 ---
 
 # Admission
 
-236 symbols | 14 files | Cohesion: 78%
+237 symbols | 14 files | Cohesion: 78%
 
 ## When to Use
 
@@ -17,7 +17,7 @@ description: "Skill for the Admission area of agenc-ircd. 236 symbols across 14 
 
 | File | Symbols |
 |------|---------|
-| `crates/agenc-ircd-domain/src/decision.rs` | new, insert, is_empty, user, message (+105) |
+| `crates/agenc-ircd-domain/src/decision.rs` | new, insert, is_empty, user, message (+106) |
 | `crates/agenc-ircd-runtime/src/admission/buckets.rs` | new, default_rate, hard_rate, fixed, defaults (+46) |
 | `crates/agenc-ircd-runtime/src/admission/transport.rs` | now, release_direct, erase_idle, admit_direct, admit_onion (+16) |
 | `crates/agenc-ircd-runtime/src/admission/prefix.rs` | new, with_ceiling, connection_opened, connection_closed, erase_idle (+14) |
@@ -34,9 +34,9 @@ Start here when exploring this area:
 
 - **`into_name`** (Function) — `crates/agenc-ircd-domain/src/command.rs:197`
 - **`into_parts`** (Function) — `crates/agenc-ircd-domain/src/command.rs:339`
-- **`new`** (Function) — `crates/agenc-ircd-domain/src/decision.rs:53`
-- **`is_empty`** (Function) — `crates/agenc-ircd-domain/src/decision.rs:391`
-- **`user`** (Function) — `crates/agenc-ircd-domain/src/decision.rs:505`
+- **`new`** (Function) — `crates/agenc-ircd-domain/src/decision.rs:63`
+- **`is_empty`** (Function) — `crates/agenc-ircd-domain/src/decision.rs:401`
+- **`user`** (Function) — `crates/agenc-ircd-domain/src/decision.rs:515`
 
 ## Key Symbols
 
@@ -44,21 +44,21 @@ Start here when exploring this area:
 |--------|------|------|------|
 | `into_name` | Function | `crates/agenc-ircd-domain/src/command.rs` | 197 |
 | `into_parts` | Function | `crates/agenc-ircd-domain/src/command.rs` | 339 |
-| `new` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 53 |
-| `is_empty` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 391 |
-| `user` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 505 |
-| `plan_account_service_checkpoint` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 1489 |
-| `plan_account_created` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 1502 |
-| `plan_session_opened` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 1517 |
-| `plan_session_account_switch` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 1548 |
-| `plan_account_deleted` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 1632 |
-| `plan_account_deleted_at_revision` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 1686 |
-| `plan_session_fresh_authentication` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 1703 |
-| `plan_account_credential_replaced` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 1739 |
-| `plan_e2ee_binding` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 1799 |
-| `plan_e2ee_removal_finalized` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 1847 |
-| `plan_expired_invites` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 1879 |
-| `plan_sanction` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 2036 |
+| `new` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 63 |
+| `is_empty` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 401 |
+| `user` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 515 |
+| `plan_account_service_checkpoint` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 1510 |
+| `plan_account_created` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 1523 |
+| `plan_session_opened` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 1538 |
+| `plan_session_account_switch` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 1569 |
+| `plan_account_deleted` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 1653 |
+| `plan_account_deleted_at_revision` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 1707 |
+| `plan_session_fresh_authentication` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 1724 |
+| `plan_account_credential_replaced` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 1760 |
+| `plan_e2ee_binding` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 1820 |
+| `plan_e2ee_removal_finalized` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 1868 |
+| `plan_expired_invites` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 1900 |
+| `plan_sanction` | Function | `crates/agenc-ircd-domain/src/decision.rs` | 2057 |
 | `principal` | Function | `crates/agenc-ircd-domain/src/model.rs` | 807 |
 | `joined` | Function | `crates/agenc-ircd-domain/src/model.rs` | 935 |
 | `new_ephemeral` | Function | `crates/agenc-ircd-domain/src/model.rs` | 1128 |
@@ -82,7 +82,7 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Tests | 45 calls |
+| Tests | 46 calls |
 | State_core | 16 calls |
 | Cluster_243 | 9 calls |
 | Listener | 3 calls |

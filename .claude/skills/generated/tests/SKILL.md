@@ -1,11 +1,11 @@
 ---
 name: tests
-description: "Skill for the Tests area of agenc-ircd. 1693 symbols across 164 files."
+description: "Skill for the Tests area of agenc-ircd. 1692 symbols across 164 files."
 ---
 
 # Tests
 
-1693 symbols | 164 files | Cohesion: 73%
+1692 symbols | 164 files | Cohesion: 73%
 
 ## When to Use
 
@@ -35,8 +35,8 @@ Start here when exploring this area:
 - **`as_u32`** (Function) — `crates/agenc-ircd-config/src/scalar.rs:286`
 - **`from_bytes`** (Function) — `crates/agenc-ircd-crypto/src/storage_integrity.rs:54`
 - **`new`** (Function) — `crates/agenc-ircd-crypto/src/storage_integrity.rs:86`
+- **`expose_for_storage`** (Function) — `crates/agenc-ircd-crypto/src/storage_integrity.rs:137`
 - **`sealed_record_id`** (Function) — `crates/agenc-ircd-crypto/src/storage_integrity.rs:259`
-- **`tracked_record_commitment`** (Function) — `crates/agenc-ircd-crypto/src/storage_integrity.rs:274`
 
 ## Key Symbols
 
@@ -45,6 +45,7 @@ Start here when exploring this area:
 | `as_u32` | Function | `crates/agenc-ircd-config/src/scalar.rs` | 286 |
 | `from_bytes` | Function | `crates/agenc-ircd-crypto/src/storage_integrity.rs` | 54 |
 | `new` | Function | `crates/agenc-ircd-crypto/src/storage_integrity.rs` | 86 |
+| `expose_for_storage` | Function | `crates/agenc-ircd-crypto/src/storage_integrity.rs` | 137 |
 | `sealed_record_id` | Function | `crates/agenc-ircd-crypto/src/storage_integrity.rs` | 259 |
 | `tracked_record_commitment` | Function | `crates/agenc-ircd-crypto/src/storage_integrity.rs` | 274 |
 | `tracked_state_digest` | Function | `crates/agenc-ircd-crypto/src/storage_integrity.rs` | 279 |
@@ -56,12 +57,11 @@ Start here when exploring this area:
 | `listener_ceiling` | Function | `crates/agenc-ircd-runtime/src/runtime_config.rs` | 373 |
 | `refresh` | Function | `crates/agenc-ircd-runtime/src/state_core/durable.rs` | 418 |
 | `finish` | Function | `crates/agenc-ircd-runtime/src/state_core/mod.rs` | 495 |
-| `backup_stream_bytes` | Function | `crates/agenc-ircd-storage/src/backup.rs` | 1017 |
+| `backup_stream_bytes` | Function | `crates/agenc-ircd-storage/src/backup.rs` | 1020 |
 | `finish` | Function | `crates/agenc-ircd-storage/src/codec.rs` | 52 |
 | `take` | Function | `crates/agenc-ircd-storage/src/codec.rs` | 67 |
 | `array` | Function | `crates/agenc-ircd-storage/src/codec.rs` | 80 |
 | `u16` | Function | `crates/agenc-ircd-storage/src/codec.rs` | 86 |
-| `u32` | Function | `crates/agenc-ircd-storage/src/codec.rs` | 90 |
 
 ## Execution Flows
 
@@ -82,10 +82,10 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| State_core | 106 calls |
+| State_core | 104 calls |
 | Listener | 48 calls |
 | Admission | 32 calls |
-| Cluster_577 | 30 calls |
+| Cluster_576 | 30 calls |
 | Tls | 23 calls |
 | Cluster_218 | 19 calls |
 | Fuzz_targets | 19 calls |
