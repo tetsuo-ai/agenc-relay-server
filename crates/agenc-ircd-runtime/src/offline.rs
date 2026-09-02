@@ -1500,12 +1500,23 @@ mod tests {
 
     /// Creates the scratch root under one candidate base, describing the
     /// first rejected step so a hosted runner can be diagnosed from its log.
+    /// The storage probe accepts only a mode-0700 directory, so it runs on
+    /// the private root rather than on the base, which may be a shared home
+    /// directory such as `/home/runner` on a hosted runner.
     fn qualify_and_create(base: &Path, name: &str) -> Result<PathBuf, String> {
         fs::create_dir_all(base).map_err(|error| format!("create_dir_all failed: {error}"))?;
         test_ancestors_are_protected(base).map_err(|_| describe_ancestors(base))?;
-        test_base_is_storage_qualified(base).map_err(|_| describe_storage(base))?;
         let root = base.join(name);
         fs::create_dir(&root).map_err(|error| format!("create_dir failed: {error}"))?;
+        let qualified = fs::set_permissions(&root, fs::Permissions::from_mode(DIRECTORY_MODE))
+            .map_err(|error| format!("set_permissions failed: {error}"))
+            .and_then(|()| {
+                test_base_is_storage_qualified(&root).map_err(|_| describe_storage(&root))
+            });
+        if let Err(reason) = qualified {
+            let _ = fs::remove_dir(&root);
+            return Err(reason);
+        }
         Ok(root)
     }
 
