@@ -2437,3 +2437,202 @@ fn production_daemon_account_edges_cover_replay_mismatch_logout_and_deletion() -
     assert!(daemon.wait()?.success());
     Ok(())
 }
+
+#[test]
+fn production_daemon_credential_and_lookup_edges_fail_closed() -> TestResult {
+    let fixture = LiveFixture::create()?;
+    let mut daemon = DaemonProcess::start(&fixture.config_path)?;
+    let account_id = {
+        let mut creation = IrcClient::connect(&fixture)?;
+        creation.negotiate_sasl()?;
+        create_live_account(&mut creation, &fixture)?
+    };
+
+    // Creating the same login twice is refused after the index lookup.
+    let mut duplicate = IrcClient::connect(&fixture)?;
+    duplicate.negotiate_sasl()?;
+    let outcome = create_live_account(&mut duplicate, &fixture);
+    assert!(outcome.is_err(), "a duplicate login was created");
+    drop(duplicate);
+
+    // An unknown login still receives a challenge from the fake record and
+    // the finish then fails closed.
+    let mut unknown = IrcClient::connect(&fixture)?;
+    unknown
+        .negotiate_sasl()
+        .map_err(|error| failure(format!("unknown negotiate: {error}")))?;
+    let mut rng = TestOpaqueRng::new();
+    let login = ClientLogin::<TestOpaqueSuite>::start(&mut rng, ACCOUNT_PASSWORD)?;
+    let ke1 = OpaqueKe1::from_bytes(login.message.serialize().as_slice().try_into()?)?;
+    let (start_envelope, start_token) = seal_account_payload(
+        fixture.network_id,
+        100,
+        AccountRequestPayload::AuthenticationStart(AuthenticationStart {
+            network_id: fixture.network_id,
+            login: NormalizedLogin::prepare("nobody-here")?,
+            ke1,
+        }),
+    )?;
+    unknown
+        .begin_sasl()
+        .map_err(|error| failure(format!("unknown begin: {error}")))?;
+    let challenge = unknown
+        .sasl_exchange(&start_envelope, start_token)
+        .map_err(|error| failure(format!("unknown start: {error}")))?;
+    let AccountServiceResponsePayload::AuthenticationChallenge {
+        transaction_id,
+        credential_id,
+        ke2,
+    } = challenge
+    else {
+        return Err(failure("unknown login did not receive a challenge"));
+    };
+    let context = opaque_context(fixture.network_id);
+    let finish = login.state.finish(
+        &mut rng,
+        ACCOUNT_PASSWORD,
+        CredentialResponse::<TestOpaqueSuite>::deserialize(ke2.expose_for_account_response())?,
+        ClientLoginFinishParameters::new(
+            Some(&context),
+            opaque_identifiers(&fixture.network_id, &credential_id),
+            Some(&TestArgon2id),
+        ),
+    );
+    // The client cannot complete against a fake record; send a structurally
+    // valid but unrelated finish instead so the server-side check runs.
+    let ke3 = match finish {
+        Ok(finish) => OpaqueKe3::from_bytes(finish.message.serialize().as_slice().try_into()?)?,
+        Err(_) => OpaqueKe3::from_bytes([7; agenc_ircd_auth::OPAQUE_KE3_BYTES])?,
+    };
+    let (finish_envelope, _token) = seal_account_payload(
+        fixture.network_id,
+        101,
+        AccountRequestPayload::AuthenticationFinish(AuthenticationFinish {
+            network_id: fixture.network_id,
+            transaction_id,
+            ke3,
+        }),
+    )?;
+    let _refused = sasl_exchange_lines(&mut unknown, &finish_envelope)?;
+    drop(unknown);
+
+    // Credential change before authentication, for another account, and
+    // with the wrong transaction.
+    let mut early = IrcClient::connect(&fixture)?;
+    early
+        .negotiate_sasl()
+        .map_err(|error| failure(format!("early negotiate: {error}")))?;
+    let mut rng = TestOpaqueRng::new();
+    let registration =
+        ClientRegistration::<TestOpaqueSuite>::start(&mut rng, REPLACEMENT_PASSWORD)?;
+    let registration_request = OpaqueRegistrationRequest::from_bytes(
+        registration.message.serialize().as_slice().try_into()?,
+    )?;
+    let (foreign_start, _token) = seal_account_payload(
+        fixture.network_id,
+        102,
+        AccountRequestPayload::CredentialChangeStart(CredentialChangeStart {
+            network_id: fixture.network_id,
+            account_id: agenc_ircd_testkit::account_id(200),
+            registration_request,
+        }),
+    )?;
+    let command = AccountCarrier::Credentials.command();
+    early.send(&format!(
+        "{command} {} {ACCOUNT_SERVICE_ENVELOPE_BYTES}",
+        AccountPhase::Start.command()
+    ))?;
+    let _early = read_leniently(&mut early, |line| {
+        line.contains(" READY ") || line.contains("FAIL ")
+    });
+    drop(early);
+
+    let mut client = IrcClient::connect(&fixture)?;
+    client
+        .negotiate_sasl()
+        .map_err(|error| failure(format!("client negotiate: {error}")))?;
+    authenticate_live_account(&mut client, &fixture, ACCOUNT_PASSWORD, 104, account_id)
+        .map_err(|error| failure(format!("client auth: {error}")))?;
+    let registered = client
+        .complete_registration("CredUser")
+        .map_err(|error| failure(format!("client register: {error}")))?;
+    assert_contains(&registered, " 001 CredUser ")?;
+    client.send(&format!(
+        "{command} {} {ACCOUNT_SERVICE_ENVELOPE_BYTES}",
+        AccountPhase::Start.command()
+    ))?;
+    let ready = read_leniently(&mut client, |line| {
+        line.contains(" READY ") || line.contains("FAIL ")
+    });
+    if ready.iter().any(|line| line.contains(" READY ")) {
+        let encoded = URL_SAFE_NO_PAD.encode(foreign_start);
+        for chunk in encoded.as_bytes().chunks(AUTH_CHUNK_CHARACTERS) {
+            client.send(&format!("{command} DATA {}", std::str::from_utf8(chunk)?))?;
+        }
+        client.send(&format!("{command} END"))?;
+        let _foreign = read_leniently(&mut client, |line| {
+            line.contains(&format!(" {command} END")) || line.contains("FAIL ")
+        });
+    }
+    drop(client);
+
+    // A registered guest cannot log out of an account or delete one; each
+    // refusal may close the connection, so each gets its own.
+    let mut guest = IrcClient::connect(&fixture)?;
+    let registered = guest
+        .register()
+        .map_err(|error| failure(format!("guest register: {error}")))?;
+    assert_contains(&registered, " 001 LiveUser ")?;
+    let _logout = send_and_sync(&mut guest, &["AUTHENTICATE *".to_owned()]);
+    drop(guest);
+    let mut deleter = IrcClient::connect(&fixture)?;
+    let registered = deleter
+        .register()
+        .map_err(|error| failure(format!("deleter register: {error}")))?;
+    assert_contains(&registered, " 001 LiveUser ")?;
+    deleter.send("ACCT DELETE START")?;
+    let _deletion = read_leniently(&mut deleter, |line| {
+        line.contains("FAIL ") || line.contains(" ACCT ") || line.contains(" 4")
+    });
+    drop(deleter);
+
+    // Account settings from an authenticated session are acknowledged.
+    let mut settings = IrcClient::connect(&fixture)?;
+    settings
+        .negotiate_sasl()
+        .map_err(|error| failure(format!("settings negotiate: {error}")))?;
+    let acknowledged = settings
+        .send_until("CAP REQ :standard-replies", " CAP * ACK ")
+        .map_err(|error| failure(format!("settings cap: {error}")))?;
+    assert_contains(&acknowledged, "standard-replies")?;
+    authenticate_live_account(&mut settings, &fixture, ACCOUNT_PASSWORD, 106, account_id)
+        .map_err(|error| failure(format!("settings auth: {error}")))?;
+    let registered = settings
+        .complete_registration("SettingsUser")
+        .map_err(|error| failure(format!("settings register: {error}")))?;
+    assert_contains(&registered, " 001 SettingsUser ")?;
+    for line in [
+        "ACCT PRESENCE PUBLIC",
+        "ACCT GUEST-DM ALLOW",
+        "ACCT DIRECT-MESSAGES CONTACTS",
+        "ACCT LABEL :Settings",
+        "ACCT LABEL *",
+        "ACCT NICK SettingsUser",
+        "ACCT CONTACT ADD SettingsUser",
+        "ACCT CONTACT DEL SettingsUser",
+        "ACCT BOGUS",
+    ] {
+        if settings.send(line).is_err() {
+            break;
+        }
+        let _reply = read_leniently(&mut settings, |reply| {
+            reply.contains(" ACCT ") || reply.contains("FAIL ") || reply.contains(" 4")
+        });
+    }
+    drop(settings);
+
+    let mut admin = AdminClient::connect(&fixture)?;
+    admin.confirm_process("DIE :credential edge shutdown")?;
+    assert!(daemon.wait()?.success());
+    Ok(())
+}
