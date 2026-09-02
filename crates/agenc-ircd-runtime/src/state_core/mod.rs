@@ -3714,3 +3714,90 @@ mod lifecycle_tests {
         assert_eq!(flush.await, Ok(Err(LifecycleFailure::Superseded)));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::mpsc;
+
+    use super::{StateCoreExit, StateCoreMessage};
+    use crate::cancel::CancellationToken;
+    use crate::state_core::inbox::{LifecyclePhase, connection_close_channel, lifecycle_channel};
+    use crate::test_support::{StateCoreFixture, TestResult};
+
+    /// Runs the actor with fresh control channels and returns its exit
+    /// together with whatever the driver produced.
+    async fn run_core<Driver, Output>(
+        driver: impl FnOnce(
+            mpsc::Sender<StateCoreMessage>,
+            crate::state_core::inbox::LifecycleControl,
+            CancellationToken,
+        ) -> Driver,
+    ) -> TestResult<(StateCoreExit, Output)>
+    where
+        Driver: Future<Output = Output>,
+    {
+        let mut fixture = StateCoreFixture::new(Vec::new())?;
+        let mut parts = fixture.take_run_parts()?;
+        let (inbox, inbox_receiver) = mpsc::channel(8);
+        let (_close_port, close_inbox) = connection_close_channel();
+        let (lifecycle, lifecycle_receiver) = lifecycle_channel();
+        let token = CancellationToken::root();
+        let driven = driver(inbox, lifecycle, token.child()?);
+        let run = parts.state.run(
+            inbox_receiver,
+            close_inbox,
+            lifecycle_receiver,
+            parts.storage,
+            parts.storage_reads,
+            parts.checkpoints,
+            parts.crypto,
+            token,
+        );
+        let (exit, output) = tokio::join!(run, driven);
+        Ok((exit, output))
+    }
+
+    #[tokio::test]
+    async fn ordered_lifecycle_requests_stop_an_idle_core() -> TestResult {
+        let (exit, replies) = run_core(|inbox, lifecycle, _token| async move {
+            let _open = inbox;
+            let mut replies = Vec::new();
+            for phase in [
+                LifecyclePhase::Quiesce,
+                LifecyclePhase::Quiesce,
+                LifecyclePhase::Drain,
+                LifecyclePhase::Flush,
+                LifecyclePhase::Stop,
+            ] {
+                replies.push(lifecycle.request(phase).await);
+            }
+            replies
+        })
+        .await?;
+        assert!(matches!(exit, StateCoreExit::Stopped), "{exit:?}");
+        assert!(replies.iter().all(Result::is_ok), "{replies:?}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stop_may_skip_straight_past_earlier_phases() -> TestResult {
+        let (exit, reply) = run_core(|inbox, lifecycle, _token| async move {
+            let _open = inbox;
+            lifecycle.request(LifecyclePhase::Stop).await
+        })
+        .await?;
+        assert!(matches!(exit, StateCoreExit::Stopped));
+        assert!(reply.is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_closed_inbox_exits_the_core() -> TestResult {
+        let (exit, ()) = run_core(|inbox, _lifecycle, _token| async move {
+            drop(inbox);
+        })
+        .await?;
+        assert!(matches!(exit, StateCoreExit::InboxClosed));
+        Ok(())
+    }
+}

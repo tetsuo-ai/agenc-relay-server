@@ -145,14 +145,20 @@ pub(crate) struct StateCoreFixture {
     pub(crate) key_state: LoginIndexKeyState,
     state: Option<StateCore>,
     owner: Option<StorageOwner>,
-    _storage_completions: tokio::sync::mpsc::Receiver<crate::bridge::StorageCompletionMessage>,
-    _storage_reads: tokio::sync::mpsc::Receiver<crate::bridge::StorageReadCompletionMessage>,
-    _storage_checkpoints:
-        tokio::sync::mpsc::Receiver<crate::bridge::StorageCheckpointCompletionMessage>,
-    _crypto_completions: tokio::sync::mpsc::Receiver<
-        crate::bridge::CryptoCompletionMessage<crate::bridge::crypto::CryptoJobOutput>,
-    >,
+    storage_receivers: Option<StorageReceivers>,
+    crypto_completions: Option<CryptoReceiver>,
     _directory: TestDirectory,
+}
+
+/// The owned parts a test needs to drive `StateCore::run` to completion.
+pub(crate) struct RunParts {
+    pub(crate) state: StateCore,
+    pub(crate) storage: tokio::sync::mpsc::Receiver<crate::bridge::StorageCompletionMessage>,
+    pub(crate) storage_reads:
+        tokio::sync::mpsc::Receiver<crate::bridge::StorageReadCompletionMessage>,
+    pub(crate) checkpoints:
+        tokio::sync::mpsc::Receiver<crate::bridge::StorageCheckpointCompletionMessage>,
+    pub(crate) crypto: CryptoReceiver,
 }
 
 type StorageReceivers = (
@@ -320,18 +326,36 @@ impl StateCoreFixture {
         let mut owner = open_test_storage(&identity, &directory, &qualification)?;
         let (state, storage_receivers, crypto_completions) =
             compose_test_state(&mut owner, entropy)?;
-        let (storage_completions, storage_reads, storage_checkpoints) = storage_receivers;
         Ok(Self {
             identity,
             opaque,
             key_state,
             state: Some(state),
             owner: Some(owner),
-            _storage_completions: storage_completions,
-            _storage_reads: storage_reads,
-            _storage_checkpoints: storage_checkpoints,
-            _crypto_completions: crypto_completions,
+            storage_receivers: Some(storage_receivers),
+            crypto_completions: Some(crypto_completions),
             _directory: directory,
+        })
+    }
+
+    /// Moves the core and its completion receivers out so a test can run the
+    /// actor loop; the storage owner stays with the fixture until drop.
+    pub(crate) fn take_run_parts(&mut self) -> Result<RunParts, RuntimeError> {
+        let state = self.state.take().ok_or(RuntimeError::InvalidValue)?;
+        let (storage, storage_reads, checkpoints) = self
+            .storage_receivers
+            .take()
+            .ok_or(RuntimeError::InvalidValue)?;
+        let crypto = self
+            .crypto_completions
+            .take()
+            .ok_or(RuntimeError::InvalidValue)?;
+        Ok(RunParts {
+            state,
+            storage,
+            storage_reads,
+            checkpoints,
+            crypto,
         })
     }
 
