@@ -19,8 +19,14 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     let reencoded = object.encode().expect("accepted envelope must re-encode");
-    assert_eq!(reencoded, data, "accepted envelope did not re-encode canonically");
-    assert_eq!(ObjectId::compute(data), object.object_id().expect("object id"));
+    assert_eq!(
+        reencoded, data,
+        "accepted envelope did not re-encode canonically"
+    );
+    assert_eq!(
+        ObjectId::compute(data),
+        object.object_id().expect("object id")
+    );
     let mut body_budget = DecodeBudget::new(BUDGET_BYTES, BUDGET_VALUES);
     let Ok(body) = decode_body(&object, &mut body_budget) else {
         return;
@@ -63,6 +69,10 @@ fuzz_target!(|data: &[u8]| {
     };
     if let Some(encoded) = typed {
         let encoded = encoded.expect("accepted body must re-encode");
-        assert_eq!(encoded, object.body(), "accepted body did not re-encode canonically");
+        assert_eq!(
+            encoded,
+            object.body(),
+            "accepted body did not re-encode canonically"
+        );
     }
 });
