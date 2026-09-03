@@ -56,6 +56,7 @@ EXPECTED_LATER_FUZZ_TARGETS = (
     "federation_fragment",
     "e2ee_object",
     "e2ee_mls_outer",
+    "e2ee_fragment",
 )
 EXPECTED_FUZZ_POLICY = {
     "schema_version": 1,

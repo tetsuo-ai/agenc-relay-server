@@ -75,3 +75,24 @@ fn every_mls_seed_parses() -> TestResult {
     }
     Ok(())
 }
+
+#[test]
+fn every_fragment_seed_parses_as_its_kind() -> TestResult {
+    use agenc_ircd_e2ee::wire::command::parse_command;
+    use agenc_ircd_e2ee::wire::fragment::{FragmentTag, ReceiptTag};
+    for name in ["fragment-single", "fragment-zero", "fragment-last"] {
+        let text = fs::read_to_string(corpus("e2ee-fragment").join(name))?;
+        let tag = FragmentTag::parse(&text)?;
+        assert_eq!(tag.render(), text, "{name}");
+    }
+    let receipt = fs::read_to_string(corpus("e2ee-fragment").join("receipt"))?;
+    assert_eq!(ReceiptTag::parse(&receipt)?.render(), receipt);
+    for name in ["command-bind", "command-binding-locks", "command-edirect"] {
+        let text = fs::read_to_string(corpus("e2ee-fragment").join(name))?;
+        let mut words = text.split(' ');
+        let command = words.next().ok_or("command")?;
+        let params: Vec<&str> = words.collect();
+        parse_command(command, &params)?;
+    }
+    Ok(())
+}

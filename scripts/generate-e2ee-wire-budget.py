@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+"""Compute the IRC-MLS wire budget table independently of the Rust crate.
+
+The companion specification (Section 11.2, 11.7, and 11.10) states exact byte
+counts for the largest tag and line forms. This script recomputes each from
+the grammar alone (field widths, literal lengths, base64url expansion) and
+writes ``conformance/e2ee-wire-budget.toml``. The Rust integration test
+``crates/agenc-ircd-e2ee/tests/wire_budget.rs`` renders the same forms with
+the production code and requires the same numbers.
+
+Usage:
+    python3 scripts/generate-e2ee-wire-budget.py          # write the table
+    python3 scripts/generate-e2ee-wire-budget.py --check  # compare only
+"""
+
+from __future__ import annotations
+
+import math
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+OUTPUT = ROOT / "conformance/e2ee-wire-budget.toml"
+
+MAX_FRAGMENT_RAW = 2940
+CLIENT_TAG = "+agenc.ag/e2ee"
+SERVER_TAG = "agenc.ag/e2ee"
+RECEIPT_TAG = "agenc.ag/e2ee-receipt"
+HASH_CHARS = 43
+ID16_CHARS = 22
+ACCOUNT_CHARS = 32
+LABEL_CHARS = 64
+BATCH_CHARS = 64
+MAX_SERVER_PREFIX = 127
+MAX_ACCOUNT_TAG = 512
+CANDIDATE_RECEIPT_BYTES = 294
+MAX_CLIENT_TAG_DATA = 4094
+MAX_SERVER_TAG_DATA = 4094
+MAX_COMBINED_TAGS = 8191
+MAX_NON_TAG_LINE = 512
+LONGEST_OBJECT_KIND = "REINIT-ACTIVATION-CERTIFICATE"
+
+
+def b64_chars(byte_count: int) -> int:
+    return math.ceil(byte_count * 8 / 6)
+
+
+def fragment_value(total: int, part: int) -> int:
+    count = math.ceil(total / MAX_FRAGMENT_RAW)
+    if part + 1 == count:
+        segment = total - part * MAX_FRAGMENT_RAW
+    else:
+        segment = MAX_FRAGMENT_RAW
+    return (
+        len("v1.")
+        + HASH_CHARS
+        + 1
+        + len(str(part))
+        + 1
+        + len(str(count))
+        + 1
+        + len(str(total))
+        + 1
+        + b64_chars(segment)
+    )
+
+
+def client_fragment_zero_with_label(total: int) -> int:
+    return len(CLIENT_TAG) + 1 + fragment_value(total, 0) + len(";label=") + LABEL_CHARS
+
+
+def mailbox_fragment_with_batch(total: int) -> int:
+    # The widest value is a full non-final segment carrying a four-digit index.
+    count = math.ceil(total / MAX_FRAGMENT_RAW)
+    return (
+        len(SERVER_TAG)
+        + 1
+        + fragment_value(total, count - 2)
+        + len(";batch=")
+        + BATCH_CHARS
+    )
+
+
+def receipt_tag_with_separator() -> int:
+    return 1 + len(RECEIPT_TAG) + 1 + len("v1.") + HASH_CHARS + 1 + b64_chars(
+        CANDIDATE_RECEIPT_BYTES
+    )
+
+
+def candidate_echo_combined_tags() -> int:
+    return (
+        1
+        + len("label=")
+        + LABEL_CHARS
+        + 1
+        + MAX_ACCOUNT_TAG
+        + receipt_tag_with_separator()
+        + 1
+        + len(CLIENT_TAG)
+        + 1
+        + fragment_value(262_144, 0)
+    )
+
+
+def non_tag(body_chars: int) -> int:
+    return 1 + MAX_SERVER_PREFIX + 1 + body_chars + 2
+
+
+def table() -> dict[str, int]:
+    return {
+        "application_fragment_zero_tag": client_fragment_zero_with_label(65_536),
+        "live_control_fragment_zero_tag": client_fragment_zero_with_label(262_144),
+        "control_fragment_zero_tag": client_fragment_zero_with_label(4_194_304),
+        "mailbox_fragment_tag_with_batch": mailbox_fragment_with_batch(4_194_304),
+        "receipt_tag_with_separator": receipt_tag_with_separator(),
+        "candidate_echo_combined_tags": candidate_echo_combined_tags(),
+        "candidate_receipt_bytes": CANDIDATE_RECEIPT_BYTES,
+        "longest_client_command_non_tag": len("EKEY FETCH BINDING-LOCKS ")
+        + ACCOUNT_CHARS
+        + 1
+        + HASH_CHARS
+        + 1
+        + 20
+        + 1
+        + HASH_CHARS
+        + 2,
+        "longest_success_non_tag": non_tag(len("EGROUP REINIT-ACTIVATED ") + 4 * HASH_CHARS + 3),
+        "longest_batch_child_non_tag": non_tag(
+            len("EKEY CLAIMED ") + ID16_CHARS + len(" NORMAL ") + HASH_CHARS + 1 + HASH_CHARS
+        ),
+        "longest_eobject_non_tag": non_tag(
+            len("EOBJECT ") + len(LONGEST_OBJECT_KIND) + 1 + ID16_CHARS + 1 + HASH_CHARS
+        ),
+        "eobject_tags": mailbox_fragment_with_batch(4_194_304),
+        "max_client_tag_data": MAX_CLIENT_TAG_DATA,
+        "max_server_tag_data": MAX_SERVER_TAG_DATA,
+        "max_combined_tags": MAX_COMBINED_TAGS,
+        "max_non_tag_line": MAX_NON_TAG_LINE,
+        "max_client_physical_line": 1 + MAX_CLIENT_TAG_DATA + 1 + MAX_NON_TAG_LINE,
+        "max_server_physical_line": MAX_COMBINED_TAGS + MAX_NON_TAG_LINE,
+    }
+
+
+SPEC_CLAIMS = {
+    "application_fragment_zero_tag": 4064,
+    "live_control_fragment_zero_tag": 4065,
+    "control_fragment_zero_tag": 4068,
+    "mailbox_fragment_tag_with_batch": 4070,
+    "receipt_tag_with_separator": 462,
+    "candidate_echo_combined_tags": 5041,
+    "longest_client_command_non_tag": 168,
+    "max_client_physical_line": 4608,
+    "max_server_physical_line": 8703,
+}
+
+
+def render(values: dict[str, int]) -> str:
+    lines = [
+        "# Generated by scripts/generate-e2ee-wire-budget.py from the companion",
+        "# grammar alone. Byte counts of the largest IRC-MLS tag and line forms.",
+        "",
+        "[budget]",
+    ]
+    for key, value in values.items():
+        lines.append(f"{key} = {value}")
+    lines.append("")
+    lines.append("[claims]")
+    for key, value in SPEC_CLAIMS.items():
+        lines.append(f"{key} = {value}")
+    return "\n".join(lines) + "\n"
+
+
+def main(argv: list[str]) -> int:
+    values = table()
+    for key, claim in SPEC_CLAIMS.items():
+        if values[key] != claim:
+            print(f"budget disagrees with the specification: {key} {values[key]} != {claim}")
+            return 1
+    for key in ("longest_success_non_tag", "longest_batch_child_non_tag", "longest_eobject_non_tag"):
+        if values[key] > MAX_NON_TAG_LINE:
+            print(f"{key} exceeds the traditional line: {values[key]}")
+            return 1
+    for key in (
+        "application_fragment_zero_tag",
+        "live_control_fragment_zero_tag",
+        "control_fragment_zero_tag",
+        "mailbox_fragment_tag_with_batch",
+        "eobject_tags",
+    ):
+        if values[key] > MAX_CLIENT_TAG_DATA:
+            print(f"{key} exceeds the tag budget: {values[key]}")
+            return 1
+    if values["candidate_echo_combined_tags"] > MAX_COMBINED_TAGS:
+        print("candidate echo exceeds the combined tag budget")
+        return 1
+    text = render(values)
+    if "--check" in argv:
+        if not OUTPUT.is_file() or OUTPUT.read_text() != text:
+            print(f"{OUTPUT} is stale; rerun without --check")
+            return 1
+        print("e2ee wire budget: ok")
+        return 0
+    OUTPUT.write_text(text)
+    print(f"wrote {OUTPUT}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
