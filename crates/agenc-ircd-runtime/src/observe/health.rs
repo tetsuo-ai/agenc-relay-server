@@ -31,6 +31,10 @@ pub enum ReadinessStage {
     StorageRecovered,
     /// StateCore reconstruction completed.
     StateCore,
+    /// Federation synchronization reached the state the node role requires:
+    /// immediately on a coordinator or a core-only node, and an ACTIVE
+    /// coordinator link on an edge.
+    Federation,
 }
 
 /// Readiness flags set once by their owners.
@@ -40,6 +44,7 @@ pub struct ReadinessGate {
     keys: AtomicBool,
     storage_recovered: AtomicBool,
     state_core: AtomicBool,
+    federation: AtomicBool,
 }
 
 impl ReadinessGate {
@@ -51,6 +56,7 @@ impl ReadinessGate {
             keys: AtomicBool::new(false),
             storage_recovered: AtomicBool::new(false),
             state_core: AtomicBool::new(false),
+            federation: AtomicBool::new(false),
         }
     }
 
@@ -79,6 +85,7 @@ impl ReadinessGate {
             keys: self.keys.load(Ordering::Acquire),
             storage_recovered: self.storage_recovered.load(Ordering::Acquire),
             state_core: self.state_core.load(Ordering::Acquire),
+            federation: self.federation.load(Ordering::Acquire),
         }
     }
 
@@ -88,6 +95,7 @@ impl ReadinessGate {
             ReadinessStage::Keys => &self.keys,
             ReadinessStage::StorageRecovered => &self.storage_recovered,
             ReadinessStage::StateCore => &self.state_core,
+            ReadinessStage::Federation => &self.federation,
         }
     }
 }
@@ -103,13 +111,19 @@ pub struct ReadinessSnapshot {
     pub storage_recovered: bool,
     /// StateCore reconstructed.
     pub state_core: bool,
+    /// Federation synchronization reached the role's required state.
+    pub federation: bool,
 }
 
 impl ReadinessSnapshot {
     /// Returns the conjunction (spec line 6708).
     #[must_use]
     pub const fn ready(self) -> bool {
-        self.configuration && self.keys && self.storage_recovered && self.state_core
+        self.configuration
+            && self.keys
+            && self.storage_recovered
+            && self.state_core
+            && self.federation
     }
 }
 
@@ -233,6 +247,7 @@ mod tests {
             ReadinessStage::Keys,
             ReadinessStage::StorageRecovered,
             ReadinessStage::StateCore,
+            ReadinessStage::Federation,
         ];
         for (index, stage) in stages.iter().enumerate() {
             gate.mark(*stage);

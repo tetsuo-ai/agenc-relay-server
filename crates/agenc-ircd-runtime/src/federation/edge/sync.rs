@@ -78,6 +78,7 @@ fn resume(edge: &mut EdgeFederation, context: &mut StateCoreContext) {
         },
     };
     edge.phase = Phase::Resuming;
+    edge.note_phase();
     edge.send_frame(
         context,
         &FederationFrame::Resume {
@@ -110,6 +111,7 @@ pub(super) fn resume_ok(
         edge.installed_epoch = Some(live.coordinator_epoch);
     }
     edge.phase = Phase::Active;
+    edge.note_phase();
     request::resend_pending(edge, context);
     Ok(())
 }
@@ -120,6 +122,7 @@ pub(super) fn resume_snapshot(edge: &mut EdgeFederation) -> Result<(), Violation
         return Err(Violation::Phase);
     }
     edge.phase = Phase::Snapshot;
+    edge.note_phase();
     Ok(())
 }
 
@@ -388,6 +391,7 @@ pub(super) fn snapshot_active(
     edge.snapshot = None;
     edge.installed_epoch = Some(identity.recovery_epoch);
     edge.phase = Phase::Active;
+    edge.note_phase();
     request::resend_pending(edge, context);
     Ok(())
 }

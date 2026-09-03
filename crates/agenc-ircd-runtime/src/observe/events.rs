@@ -79,6 +79,10 @@ pub enum LogEventCode {
     ClockDistrusted,
     /// Wall time was trusted again after ten continuous minutes.
     ClockTrusted,
+    /// One federation link completed its authenticated hello.
+    FederationLinkEstablished,
+    /// One federation link ended; a failure reason raises the severity.
+    FederationLinkClosed,
     /// A task panicked; the process terminates after this event.
     Crash,
     /// Events were dropped because the log queue was full; the count bucket
@@ -88,7 +92,7 @@ pub enum LogEventCode {
 
 impl LogEventCode {
     /// Every registered code.
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 32] = [
         Self::ProcessStarted,
         Self::ConfigurationRejected,
         Self::StorageRecovered,
@@ -117,6 +121,8 @@ impl LogEventCode {
         Self::HardeningWarning,
         Self::ClockDistrusted,
         Self::ClockTrusted,
+        Self::FederationLinkEstablished,
+        Self::FederationLinkClosed,
         Self::Crash,
         Self::LogDropped,
     ];
@@ -153,6 +159,8 @@ impl LogEventCode {
             Self::HardeningWarning => "hardening_warning",
             Self::ClockDistrusted => "clock_distrusted",
             Self::ClockTrusted => "clock_trusted",
+            Self::FederationLinkEstablished => "federation_link_established",
+            Self::FederationLinkClosed => "federation_link_closed",
             Self::Crash => "crash",
             Self::LogDropped => "log_dropped",
         }

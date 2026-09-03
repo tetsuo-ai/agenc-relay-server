@@ -39,7 +39,8 @@ use crate::state_core::inbox::CloseReason;
 use crate::state_core::session::BoundSession;
 use crate::state_core::timers::{TimedId, TimerEntry, TimerKind};
 use crate::state_core::{
-    CommandObservation, CommandRouter, RouteOutcome, StageAccepted, StagedOrigin, StateCoreContext,
+    CommandObservation, CommandRouter, PeerQuarantineRefusal, RouteOutcome, StageAccepted,
+    StagedOrigin, StateCoreContext,
 };
 use crate::sync::Arc;
 
@@ -2028,6 +2029,26 @@ impl CommandRouter for RegistrationRouter {
         }
         if let Some(federation) = self.federation.as_mut() {
             federation.inbound(context, message);
+        }
+    }
+
+    fn federation_stats(&self) -> Option<[u64; 7]> {
+        if let Some(edge) = &self.edge {
+            return Some(edge.federation_stats());
+        }
+        self.federation
+            .as_ref()
+            .map(FederationCoordinator::federation_stats)
+    }
+
+    fn admin_peer_quarantine(
+        &mut self,
+        context: &mut StateCoreContext,
+        server: ServerId,
+    ) -> Result<(), PeerQuarantineRefusal> {
+        match self.federation.as_mut() {
+            Some(federation) => federation.admin_quarantine_peer(context, server),
+            None => Err(PeerQuarantineRefusal::UnknownPeer),
         }
     }
 

@@ -34,7 +34,9 @@ use crate::federation::link::LinkHandle;
 use crate::federation::{
     FederationInbound, IngressCharge, LinkEvent, LinkId, LinkSession, ObjectCarrier, PeerIdentity,
 };
+use crate::observe::health::{ReadinessGate, ReadinessStage};
 use crate::state_core::StateCoreContext;
+use crate::sync::Arc;
 
 pub use request::EdgeCompletion;
 
@@ -136,6 +138,7 @@ pub struct EdgeFederation {
     next_origin: u64,
     client_resync_epoch: u64,
     counters: EdgeCounters,
+    readiness: Option<Arc<ReadinessGate>>,
 }
 
 impl EdgeFederation {
@@ -163,6 +166,7 @@ impl EdgeFederation {
             next_origin: 1,
             client_resync_epoch: 0,
             counters: EdgeCounters::default(),
+            readiness: None,
         }
     }
 
@@ -170,6 +174,42 @@ impl EdgeFederation {
     #[must_use]
     pub const fn counters(&self) -> EdgeCounters {
         self.counters
+    }
+
+    /// Reports the coordinator link state through the process readiness
+    /// gate: an edge is ready only while its link is ACTIVE (spec 21.5).
+    #[must_use]
+    pub fn with_readiness(mut self, readiness: Arc<ReadinessGate>) -> Self {
+        self.readiness = Some(readiness);
+        self
+    }
+
+    /// The seven `STATS FEDERATION` values from the edge's view: its one
+    /// coordinator, whether the link is ACTIVE, no quarantines, the pending
+    /// request count, no outbox bytes, results applied, and no barriers.
+    #[must_use]
+    pub fn federation_stats(&self) -> [u64; 7] {
+        [
+            1,
+            u64::from(self.network_available()),
+            0,
+            u64::try_from(self.pending.len()).unwrap_or(u64::MAX),
+            0,
+            self.counters.results_applied,
+            0,
+        ]
+    }
+
+    /// Mirrors the phase into the readiness gate after every transition.
+    pub(super) fn note_phase(&self) {
+        let Some(readiness) = &self.readiness else {
+            return;
+        };
+        if self.network_available() {
+            readiness.mark(ReadinessStage::Federation);
+        } else {
+            readiness.clear(ReadinessStage::Federation);
+        }
     }
 
     /// Reports whether the coordinator link accepts global work.
@@ -258,6 +298,7 @@ impl EdgeFederation {
             coordinator_epoch: session.peer_recovery_epoch,
         });
         self.phase = Phase::Origins;
+        self.note_phase();
         sync::begin(self, context);
     }
 
@@ -267,6 +308,7 @@ impl EdgeFederation {
         }
         self.live = None;
         self.phase = Phase::Down;
+        self.note_phase();
         self.snapshot = None;
         self.queued_events.clear();
         for pending in self.pending.values_mut() {

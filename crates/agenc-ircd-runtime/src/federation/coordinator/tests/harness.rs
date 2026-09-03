@@ -21,13 +21,16 @@ use agenc_ircd_types::{
 use tokio::sync::mpsc;
 
 use super::*;
+use agenc_ircd_admin::StatsSelector;
+
 use crate::cancel::CancellationToken;
 use crate::federation::codec::events::projected_event_of;
 use crate::federation::codec::operations::{FederatedOperation, JoinTarget, MessageTargetArg};
 use crate::federation::codec::results::ResultArm;
 use crate::federation::link::{LinkQueue, carrier_of, link_queue, parse_frame};
-use crate::state_core::StateCoreExit;
+use crate::state_core::admin::AdminCorePort;
 use crate::state_core::inbox::{LifecyclePhase, connection_close_channel, lifecycle_channel};
+use crate::state_core::{AdminCoreFailure, StateCoreExit};
 use crate::test_support::StateCoreFixture;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -513,6 +516,97 @@ where
         return Err(format!("coordinator exited with {exit:?}").into());
     }
     output
+}
+
+/// Like `run_coordinator`, with the private admin port installed so the
+/// driver can issue `PEER QUARANTINE` and read `STATS FEDERATION`.
+async fn run_coordinator_with_admin<Driver, Output>(
+    edges: &[PeerIdentity],
+    driver: impl FnOnce(mpsc::Sender<FederationInbound>, AdminCorePort) -> Driver,
+) -> TestResult<Output>
+where
+    Driver: Future<Output = TestResult<Output>>,
+{
+    let mut fixture =
+        StateCoreFixture::with_federation_coordinator(entropy_script(), edges.to_vec())?;
+    let port = fixture.install_admin_port()?;
+    let mut parts = fixture.take_run_parts()?;
+    let (inbox, inbox_receiver) = mpsc::channel(8);
+    let (federation, federation_receiver) = mpsc::channel(64);
+    parts.state.install_federation_inbox(federation_receiver)?;
+    let (_close_port, close_inbox) = connection_close_channel();
+    let (lifecycle, lifecycle_receiver) = lifecycle_channel();
+    let token = CancellationToken::root();
+    let driven = async move {
+        let output = driver(federation, port).await;
+        let _stopped = lifecycle.request(LifecyclePhase::Stop).await;
+        drop(inbox);
+        output
+    };
+    let run = parts.state.run(
+        inbox_receiver,
+        close_inbox,
+        lifecycle_receiver,
+        parts.storage,
+        parts.storage_reads,
+        parts.checkpoints,
+        parts.crypto,
+        token,
+    );
+    let (exit, output) = tokio::join!(run, driven);
+    if !matches!(exit, StateCoreExit::Stopped) {
+        return Err(format!("coordinator exited with {exit:?}").into());
+    }
+    output
+}
+
+#[tokio::test]
+async fn peer_quarantine_closes_the_link_and_stats_report_it() -> TestResult {
+    let peer = ServerId::from_bytes([49; 16]);
+    let identity = peer_identity(peer, "edge.example");
+    run_coordinator_with_admin(&[identity], |inbox, port| async move {
+        let token = CancellationToken::root();
+        let mut edge = Edge::new(inbox.clone(), 49);
+        let mut origin = Origin::new(69);
+        edge.establish().await?;
+        synchronize_ok(&mut edge, &mut [&mut origin]).await?;
+        let before = port
+            .snapshot(&token)
+            .await
+            .map_err(|failure| format!("{failure:?}"))?;
+        assert_eq!(
+            before.values(StatsSelector::Federation),
+            &[1, 1, 0, 0, 0, 0, 0]
+        );
+        port.peer_quarantine(peer, &token)
+            .await
+            .map_err(|failure| format!("{failure:?}"))?;
+        edge.expect_closed().await?;
+        let after = port
+            .snapshot(&token)
+            .await
+            .map_err(|failure| format!("{failure:?}"))?;
+        assert_eq!(
+            after.values(StatsSelector::Federation),
+            &[1, 0, 1, 0, 0, 0, 0]
+        );
+        // The fence holds: a fresh link is closed at once and the second
+        // quarantine names no valid target.
+        let mut again = Edge::new(inbox, 49);
+        again.establish().await?;
+        again.expect_closed().await?;
+        assert_eq!(
+            port.peer_quarantine(peer, &token).await,
+            Err(AdminCoreFailure::InvalidTarget)
+        );
+        assert_eq!(
+            port.peer_quarantine(ServerId::from_bytes([50; 16]), &token)
+                .await,
+            Err(AdminCoreFailure::InvalidTarget)
+        );
+        Ok(())
+    })
+    .await
 }
 
 fn session_open(seed: u8, nickname: &str) -> FederatedOperation {

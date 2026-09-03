@@ -33,15 +33,15 @@ use agenc_ircd_storage::{
     StorageError, StorageLimitWriter, StorageMutationBatch, StoredKey, TableId,
 };
 use agenc_ircd_types::{
-    ClockError, EntropySource, MonotonicClock, MonotonicTick, Revision, TransactionId, UserId,
-    UtcSecond, WallClock,
+    ClockError, EntropySource, MonotonicClock, MonotonicTick, Revision, ServerId, TransactionId,
+    UserId, UtcSecond, WallClock,
 };
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 pub(crate) use admin::{
-    AdminCoreFailure, AdminCoreInbox, AdminCorePort, AdminCoreSnapshot, AdminMutation, AdminTarget,
-    admin_core_channel,
+    AdminCoreFailure, AdminCoreInbox, AdminCorePort, AdminCoreResult, AdminCoreSnapshot,
+    AdminMutation, AdminTarget, admin_core_channel,
 };
 pub use pending::{GATHER_WINDOW_MILLIS, MAX_BATCH_PLANS, StagedOrigin};
 
@@ -70,7 +70,7 @@ use crate::runtime_config::{
     ReloadCoreRequest, ReloadOutcome, ReloadRejection, RuntimeConfigHandle, RuntimeConfigSnapshot,
     RuntimeResourceLimits,
 };
-use crate::state_core::admin::{AdminCoreRequest, AdminCoreResult};
+use crate::state_core::admin::AdminCoreRequest;
 use crate::state_core::durable::{
     AccountServiceDurableWrite, AccountingCeilings, AdminMutationAfterImage, DurableIndex,
     HeadCounters, KeyDeriver, PlanProjection, RetainedProjection, project_admin_audit_event,
@@ -271,6 +271,34 @@ pub trait CommandRouter: Send {
     /// may stage exactly one durable plan per message.
     fn federation_inbound(&mut self, _context: &mut StateCoreContext, _message: FederationInbound) {
     }
+
+    /// The seven `STATS FEDERATION` values when a federation role is
+    /// attached (spec 22.3); `None` keeps every field zero.
+    fn federation_stats(&self) -> Option<[u64; 7]> {
+        None
+    }
+
+    /// `PEER QUARANTINE`: durably denies one configured peer and fences its
+    /// incarnation. Only a coordinator can honour it.
+    fn admin_peer_quarantine(
+        &mut self,
+        _context: &mut StateCoreContext,
+        _server: ServerId,
+    ) -> Result<(), PeerQuarantineRefusal> {
+        Err(PeerQuarantineRefusal::UnknownPeer)
+    }
+}
+
+/// Why `PEER QUARANTINE` was refused by the router's federation role.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PeerQuarantineRefusal {
+    /// The Server ID is not a configured peer, or this node has no
+    /// coordinator role.
+    UnknownPeer,
+    /// The peer is already quarantined.
+    AlreadyQuarantined,
+    /// A federation batch is in flight; retry after it commits.
+    Busy,
 }
 
 /// The router installed before composition: every line is unknown.
@@ -2729,6 +2757,10 @@ impl StateCore {
                 let _sent = reply.send(self.admin_kill(user_id));
                 return None;
             }
+            AdminCoreRequest::PeerQuarantine { server, reply } => {
+                let _sent = reply.send(self.admin_peer_quarantine(server));
+                return None;
+            }
             AdminCoreRequest::CommitRetention { checkpoint, reply } => {
                 return self.step_admin_retention(*checkpoint, reply);
             }
@@ -3014,7 +3046,7 @@ impl StateCore {
         let head = self.context.head;
         let storage_in_flight = u64::from(self.context.in_flight());
         let client_queues = self.context.sessions.queue_snapshot();
-        AdminCoreSnapshot::new(
+        let snapshot = AdminCoreSnapshot::new(
             [
                 self.context.now().get() / 1_000,
                 usize_u64(self.context.sessions.len()),
@@ -3064,7 +3096,26 @@ impl StateCore {
                 0,
                 0,
             ],
-        )
+        );
+        match self.router.federation_stats() {
+            Some(values) => snapshot.with_federation(values),
+            None => snapshot,
+        }
+    }
+
+    /// `PEER QUARANTINE` through the router's federation role.
+    fn admin_peer_quarantine(&mut self, server: ServerId) -> AdminCoreResult {
+        if self.context.quiescing {
+            return Err(AdminCoreFailure::Quiescing);
+        }
+        self.router
+            .admin_peer_quarantine(&mut self.context, server)
+            .map_err(|refusal| match refusal {
+                PeerQuarantineRefusal::UnknownPeer | PeerQuarantineRefusal::AlreadyQuarantined => {
+                    AdminCoreFailure::InvalidTarget
+                }
+                PeerQuarantineRefusal::Busy => AdminCoreFailure::Busy,
+            })
     }
 
     // agenc-review: focus owner=runtime reviewed=2026-09-01 reason=the sole admin receipt router preserves the reload barrier across success rejection and treats failure rejection as indeterminate

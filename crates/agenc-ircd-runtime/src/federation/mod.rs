@@ -17,6 +17,7 @@ pub mod edge;
 pub mod hello;
 pub mod line;
 pub mod link;
+pub mod owner;
 
 use std::fmt;
 use std::sync::Arc;

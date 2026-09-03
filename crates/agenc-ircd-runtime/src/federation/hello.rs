@@ -22,7 +22,8 @@ use crate::federation::link::{FrameReader, ReadFailure, write_line};
 use crate::federation::{LocalIdentity, PeerIdentity};
 
 /// The one deadline applied to each hello message.
-const HELLO_DEADLINE: Duration = Duration::from_secs(FHELLO_TIMEOUT_SECONDS);
+/// The fixed hello and READY deadline (spec 20.3).
+pub const HELLO_DEADLINE: Duration = Duration::from_secs(FHELLO_TIMEOUT_SECONDS);
 
 /// Why the hello exchange failed; every value is safe to log.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -174,7 +175,7 @@ pub async fn exchange_hello<S>(
     peer: &PeerIdentity,
     exporter: [u8; 32],
     history: PeerHistory<'_>,
-    entropy: &mut dyn EntropySource,
+    entropy: &mut (dyn EntropySource + Send),
 ) -> Result<HelloOutcome, HelloFailure>
 where
     S: AsyncRead + AsyncWrite + Unpin,

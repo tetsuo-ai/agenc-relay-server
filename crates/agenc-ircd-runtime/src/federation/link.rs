@@ -155,6 +155,25 @@ impl<S: AsyncRead + Unpin> FrameReader<S> {
     }
 }
 
+impl<S: AsyncRead + AsyncWrite + Unpin> FrameReader<S> {
+    /// Splits the transport after the hello so the link loop can own the
+    /// read and write halves separately. Frames already buffered survive.
+    pub fn split(self) -> (FrameReader<tokio::io::ReadHalf<S>>, tokio::io::WriteHalf<S>) {
+        let (read, write) = tokio::io::split(self.stream);
+        (
+            FrameReader {
+                stream: read,
+                framer: self.framer,
+                pending: self.pending,
+                rejected: self.rejected,
+                buffer: self.buffer,
+                expected_prefix: self.expected_prefix,
+            },
+            write,
+        )
+    }
+}
+
 /// Parses one complete line into a typed frame.
 pub fn parse_frame(line: &str, expected_prefix: &str) -> Result<FederationFrame, ReadFailure> {
     let parts = split_line(line).map_err(|_| ReadFailure::Framing)?;

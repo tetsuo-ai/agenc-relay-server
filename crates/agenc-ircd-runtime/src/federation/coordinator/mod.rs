@@ -41,9 +41,9 @@ use crate::federation::{
     FederationInbound, IngressCharge, LinkCloseReason, LinkEvent, LinkId, LinkSession,
     ObjectCarrier, PeerIdentity,
 };
-use crate::state_core::StateCoreContext;
 use crate::state_core::durable::AccountServiceDurableWrite;
 use crate::state_core::projector::{EdgeDelivery, OutboundEvent};
+use crate::state_core::{PeerQuarantineRefusal, StateCoreContext};
 use crate::sync::Arc;
 
 pub(crate) use request::PendingCrypto;
@@ -275,6 +275,61 @@ impl FederationCoordinator {
         self.config.server_id
     }
 
+    /// The seven `STATS FEDERATION` values: configured, active, and
+    /// quarantined peers, unacknowledged outbox objects and bytes, replayed
+    /// requests, and the cross-profile barrier count (zero before Stage 08).
+    #[must_use]
+    pub fn federation_stats(&self) -> [u64; 7] {
+        let count = |predicate: fn(&PeerState) -> bool| {
+            u64::try_from(self.peers.values().filter(|state| predicate(state)).count())
+                .unwrap_or(u64::MAX)
+        };
+        let outbox_objects = self
+            .peers
+            .values()
+            .map(|state| u64::try_from(state.outbox.unacked.len()).unwrap_or(u64::MAX))
+            .fold(0_u64, u64::saturating_add);
+        let outbox_bytes = self
+            .peers
+            .values()
+            .map(|state| state.outbox.unacked_bytes)
+            .fold(0_u64, u64::saturating_add);
+        [
+            count(|_| true),
+            count(|state| state.active),
+            count(|state| state.quarantined),
+            outbox_objects,
+            outbox_bytes,
+            self.counters.requests_replayed,
+            0,
+        ]
+    }
+
+    /// `PEER QUARANTINE`: marks the peer denied in memory, closes its live
+    /// link, and stages the durable peer row so the fence survives restart.
+    pub fn admin_quarantine_peer(
+        &mut self,
+        context: &mut StateCoreContext,
+        peer: ServerId,
+    ) -> Result<(), PeerQuarantineRefusal> {
+        let Some(state) = self.peers.get_mut(&peer) else {
+            return Err(PeerQuarantineRefusal::UnknownPeer);
+        };
+        if state.quarantined {
+            return Err(PeerQuarantineRefusal::AlreadyQuarantined);
+        }
+        if self.pending.is_some() {
+            return Err(PeerQuarantineRefusal::Busy);
+        }
+        state.quarantined = true;
+        let live = state.live.as_ref().map(|live| live.link);
+        if let Some(link) = live {
+            self.fail_link(context, link, peer, Violation::Phase);
+        }
+        self.stage_rows(context, Vec::new(), PendingCommit::Acknowledged, Some(peer))
+            .map_err(|_| PeerQuarantineRefusal::Busy)
+    }
+
     /// Returns the configured identity of one edge.
     #[must_use]
     pub fn peer_identity(&self, peer: ServerId) -> Option<&PeerIdentity> {
@@ -348,6 +403,12 @@ impl FederationCoordinator {
         let Some(state) = self.peers.get_mut(&session.peer) else {
             return;
         };
+        if state.quarantined {
+            // A quarantined peer never regains a link until an operator
+            // re-enables it through configuration and a restart.
+            handle.close();
+            return;
+        }
         if let Some(previous) = state.live.take() {
             self.links.remove(&previous.link);
         }

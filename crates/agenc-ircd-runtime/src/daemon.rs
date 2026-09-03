@@ -39,8 +39,8 @@ use agenc_ircd_storage::{
     embedded_storage_qualifications,
 };
 use agenc_ircd_types::{
-    AccountId, ChannelInstanceId, EntropySource as _, Generation, MonotonicClock as _, OriginId,
-    TransactionId, WallClock as _,
+    AccountId, ChannelInstanceId, EntropySource as _, FederationRole, Generation,
+    MonotonicClock as _, OriginId, TransactionId, WallClock as _,
 };
 use tokio::runtime::Builder;
 use tokio::sync::{Semaphore, mpsc, oneshot};
@@ -68,6 +68,15 @@ use crate::clock::{SystemMonotonicClock, SystemWallClock};
 use crate::connection::{
     CONTROL_ITEM_SLOTS, ConnectionLimits, FlushAcknowledgement, MAX_DEMAND_FRAMES, QueueLimits,
     ReaderLimits,
+};
+use crate::federation::coordinator::{CoordinatorConfig, FederationCoordinator};
+use crate::federation::edge::{EdgeConfig, EdgeFederation};
+use crate::federation::link::INBOUND_QUEUE_ITEMS;
+use crate::federation::owner::{
+    DialOwnerPlan, FederationControl, LinkOwnerShared, run_accept_owner, run_dial_owner,
+};
+use crate::federation::{
+    AcceptedFederationSocket, LocalIdentity, MAX_FEDERATION_PEERS, PeerIdentity,
 };
 use crate::listener::{
     ListenerContext, ListenerControl, ListenerError, ListenerSet, ListenerSource, ListenerSpec,
@@ -107,8 +116,9 @@ use crate::supervisor::{
 use crate::sync::Arc;
 use crate::tls::{
     ClientAuth, HandshakeLimiter, MAX_HANDSHAKES_IN_PROGRESS, PrivateKey, TlsConfigError,
-    TlsEndpointProfile, TlsServerPolicy, build_server_config_with_policy,
-    load_certificate_chain_material, load_ocsp_staple_material, load_trust_store_material,
+    TlsEndpointProfile, TlsServerPolicy, build_federation_client_config,
+    build_server_config_with_policy, load_certificate_chain_material, load_ocsp_staple_material,
+    load_trust_store_material,
 };
 
 const RUNTIME_THREAD_NAME: &str = "agenc-ircd-tokio";
@@ -325,22 +335,28 @@ pub fn serve(config_path: &Path) -> Result<DaemonExit, DaemonError> {
     result
 }
 
+/// The profiles this build serves: a core-only coordinator, a federated
+/// coordinator, and a federated edge. E2EE and worker-only nodes remain
+/// deferred. Listener topology rules stay with configuration validation.
 fn validate_profile(config: &Config) -> Result<(), DaemonError> {
-    if config.network.role != NodeRole::Coordinator
-        || config.federation.enabled
-        || config.e2ee.enabled
-        || !config.accounts.accept_clients
-    {
+    if config.e2ee.enabled || !config.accounts.accept_clients {
         return Err(DaemonError::UnsupportedProfile);
     }
+    if config.network.role == NodeRole::Edge && !config.federation.enabled {
+        return Err(DaemonError::UnsupportedProfile);
+    }
+    let federated_coordinator =
+        config.federation.enabled && config.network.role == NodeRole::Coordinator;
     for listener in config.listeners.iter().filter(|listener| listener.enabled) {
-        if !matches!(
-            listener.purpose,
+        let supported = match listener.purpose {
             ConfigListenerPurpose::ClientTls
-                | ConfigListenerPurpose::ClientOnion
-                | ConfigListenerPurpose::AdminLocal
-                | ConfigListenerPurpose::AdminTls
-        ) {
+            | ConfigListenerPurpose::ClientOnion
+            | ConfigListenerPurpose::AdminLocal
+            | ConfigListenerPurpose::AdminTls => true,
+            ConfigListenerPurpose::Federation => federated_coordinator,
+            ConfigListenerPurpose::ClientWss => false,
+        };
+        if !supported {
             return Err(DaemonError::UnsupportedProfile);
         }
     }
@@ -485,6 +501,7 @@ struct BuildLiveStateInputs<'a> {
     config: &'a Config,
     secrets: &'a SecretSet,
     runtime_config: &'a RuntimeConfigSnapshot,
+    federation: Option<&'a FederationSetup>,
     storage: LiveStorage,
     budget: Arc<MemoryBudget>,
     rates: RateLimits,
@@ -505,6 +522,7 @@ fn build_live_state(
         config,
         secrets,
         runtime_config,
+        federation,
         mut storage,
         budget,
         rates,
@@ -550,6 +568,7 @@ fn build_live_state(
             )?,
             commands,
         )?;
+        let router = attach_federation_role(config, federation, router)?;
         let limits = operational_limits(config)?;
         Ok((crypto_config, router, limits))
     })();
@@ -1011,6 +1030,14 @@ impl ChannelKeyVerifier for ReviewedChannelKeyVerifier {
 }
 
 fn registered_commands() -> Result<RegisteredCommandExecutor, DaemonError> {
+    let (verifier, dummy) = channel_key_verifier()?;
+    Ok(RegisteredCommandExecutor::new(verifier, dummy))
+}
+
+/// The production channel-key verifier with a fresh dummy record for
+/// constant-shape verification of unknown channels.
+fn channel_key_verifier()
+-> Result<(Arc<dyn ChannelKeyVerifier>, ChannelKeyVerifierRecord), DaemonError> {
     let verifier: Arc<dyn ChannelKeyVerifier> = Arc::new(ReviewedChannelKeyVerifier);
     let mut entropy = OsEntropy;
     let mut salt = [0_u8; CHANNEL_KEY_SALT_BYTES];
@@ -1022,8 +1049,186 @@ fn registered_commands() -> Result<RegisteredCommandExecutor, DaemonError> {
         .fill_exact(secret.as_mut())
         .map_err(|_| CryptoError::EntropyUnavailable)?;
     let hash = verifier.derive(secret.as_ref(), &salt)?;
-    let dummy = ChannelKeyVerifierRecord::new(salt, hash);
-    Ok(RegisteredCommandExecutor::new(verifier, dummy))
+    Ok((verifier, ChannelKeyVerifierRecord::new(salt, hash)))
+}
+
+/// The federation role composed before the state owner starts: the local
+/// identity, the static peer table, the operator control surface, and on an
+/// edge the dial plan for its coordinator.
+struct FederationSetup {
+    local: LocalIdentity,
+    peers: Vec<PeerIdentity>,
+    control: FederationControl,
+    readiness: Arc<ReadinessGate>,
+    dial: Option<DialOwnerPlan>,
+}
+
+async fn federation_setup(
+    config: &Config,
+    secrets: &SecretSet,
+    seed: &StateCoreSeed,
+    readiness: Arc<ReadinessGate>,
+) -> Result<Option<FederationSetup>, DaemonError> {
+    if !config.federation.enabled {
+        return Ok(None);
+    }
+    let signing = secrets
+        .federation_signing()
+        .ok_or(DaemonError::UnsupportedProfile)?;
+    let role = match config.network.role {
+        NodeRole::Coordinator => FederationRole::Coordinator,
+        NodeRole::Edge => FederationRole::Edge,
+    };
+    let storage = seed.storage();
+    let local = LocalIdentity::new(
+        config.network.network_id,
+        config.server.server_id,
+        config.server.name.as_str(),
+        storage.database_binding().server_incarnation(),
+        storage.recovery_epoch(),
+        role,
+        Arc::new(Ed25519SecretKey::from_bytes(*signing.expose())),
+    )?;
+    let peers = config
+        .federation
+        .peers
+        .iter()
+        .filter(|peer| peer.enabled)
+        .map(PeerIdentity::from_config)
+        .collect::<Result<Vec<_>, _>>()?;
+    let control = FederationControl::new(role, peers.iter().map(PeerIdentity::server_id));
+    let dial = if role == FederationRole::Edge {
+        Some(edge_dial_plan(config, secrets, &peers).await?)
+    } else {
+        None
+    };
+    Ok(Some(FederationSetup {
+        local,
+        peers,
+        control,
+        readiness,
+        dial,
+    }))
+}
+
+/// Builds the edge's dial plan. The edge presents the certificate of its
+/// `federation` listener entry, which stays disabled because an edge never
+/// accepts (spec C.3); the private CA bundle anchors the coordinator chain.
+async fn edge_dial_plan(
+    config: &Config,
+    secrets: &SecretSet,
+    peers: &[PeerIdentity],
+) -> Result<DialOwnerPlan, DaemonError> {
+    let peer_config = config
+        .federation
+        .peers
+        .iter()
+        .find(|peer| peer.enabled && peer.role == NodeRole::Coordinator)
+        .ok_or(DaemonError::UnsupportedProfile)?;
+    let peer = peers
+        .iter()
+        .find(|peer| peer.server_id() == peer_config.server_id)
+        .cloned()
+        .ok_or(DaemonError::UnsupportedProfile)?;
+    let listener = config
+        .listeners
+        .iter()
+        .find(|listener| listener.purpose == ConfigListenerPurpose::Federation)
+        .ok_or(DaemonError::UnsupportedProfile)?;
+    let files = listener
+        .tls
+        .as_ref()
+        .ok_or(DaemonError::Tls(TlsConfigError::ClientAuthMismatch))?;
+    let (chain, _fingerprint) =
+        load_certificate_chain_material(files.certificate_file.clone()).await?;
+    let private = secrets
+        .tls_private_key(&listener.name)
+        .ok_or(DaemonError::Tls(TlsConfigError::InvalidPrivateKey))?;
+    let key = PrivateKey::parse(private.expose())?;
+    let ca = config
+        .federation
+        .private_ca_file
+        .clone()
+        .ok_or(DaemonError::UnsupportedProfile)?;
+    let (roots, _fingerprint) = load_trust_store_material(ca).await?;
+    let tls = build_federation_client_config(
+        roots,
+        (chain, key),
+        *peer.certificate_spki_sha256(),
+        peer.server_id(),
+    )?;
+    Ok(DialOwnerPlan {
+        peer,
+        endpoints: peer_config.endpoints.clone(),
+        tls,
+        connect_timeout: Duration::from_secs(config.federation.connect_timeout_seconds),
+        reconnect_max: Duration::from_secs(config.federation.reconnect_max_seconds),
+        tor_proxy: config.federation.tor_socks_endpoint.clone(),
+    })
+}
+
+/// Attaches the coordinator or edge role to the registration router.
+fn attach_federation_role(
+    config: &Config,
+    setup: Option<&FederationSetup>,
+    router: RegistrationRouter,
+) -> Result<RegistrationRouter, DaemonError> {
+    let Some(setup) = setup else {
+        return Ok(router);
+    };
+    let server_name = config.server.name.as_str().to_owned();
+    match config.network.role {
+        NodeRole::Coordinator => {
+            let mut entropy = OsEntropy;
+            let mut query_cursor_key = [0_u8; 32];
+            let mut process_nonce = [0_u8; 16];
+            entropy
+                .fill_exact(&mut query_cursor_key)
+                .map_err(|_| CryptoError::EntropyUnavailable)?;
+            entropy
+                .fill_exact(&mut process_nonce)
+                .map_err(|_| CryptoError::EntropyUnavailable)?;
+            let (verifier, dummy) = channel_key_verifier()?;
+            Ok(router.with_federation(FederationCoordinator::new(
+                CoordinatorConfig {
+                    network_id: config.network.network_id,
+                    server_id: config.server.server_id,
+                    server_name,
+                    recovery_epoch: setup.local.recovery_epoch(),
+                    query_cursor_key,
+                    process_nonce,
+                    outbox_bytes_per_edge: config
+                        .limits
+                        .values
+                        .get(LimitKey::BaseOutboxBytesPerEdge),
+                    outbox_objects_per_edge: config
+                        .limits
+                        .values
+                        .get(LimitKey::BaseOutboxObjectsPerEdge),
+                },
+                setup.peers.clone(),
+                verifier,
+                dummy,
+            )))
+        }
+        NodeRole::Edge => {
+            let coordinator = setup
+                .peers
+                .first()
+                .cloned()
+                .ok_or(DaemonError::UnsupportedProfile)?;
+            Ok(router.with_edge(
+                EdgeFederation::new(EdgeConfig {
+                    network_id: config.network.network_id,
+                    server_id: config.server.server_id,
+                    server_name,
+                    incarnation: setup.local.incarnation(),
+                    coordinator,
+                })
+                .with_readiness(Arc::clone(&setup.readiness)),
+            ))
+        }
+    }
 }
 
 fn memory_budget(config: &Config) -> Result<Arc<MemoryBudget>, DaemonError> {
@@ -1053,9 +1258,8 @@ fn runtime_purpose(purpose: ConfigListenerPurpose) -> Result<ListenerPurpose, Da
         ConfigListenerPurpose::ClientOnion => Ok(ListenerPurpose::ClientOnion),
         ConfigListenerPurpose::AdminLocal => Ok(ListenerPurpose::AdminLocal),
         ConfigListenerPurpose::AdminTls => Ok(ListenerPurpose::AdminTls),
-        ConfigListenerPurpose::ClientWss | ConfigListenerPurpose::Federation => {
-            Err(DaemonError::UnsupportedProfile)
-        }
+        ConfigListenerPurpose::Federation => Ok(ListenerPurpose::Federation),
+        ConfigListenerPurpose::ClientWss => Err(DaemonError::UnsupportedProfile),
     }
 }
 
@@ -1920,10 +2124,29 @@ async fn run(inputs: DaemonRunInputs) -> Result<DaemonExit, DaemonError> {
         }
     };
     admission.install_observer(Arc::clone(&observer));
+    let federation =
+        match federation_setup(&config, &secrets, &storage.seed, Arc::clone(&readiness)).await {
+            Ok(federation) => federation,
+            Err(error) => {
+                return Err(unwind_live_storage_and_log(
+                    storage,
+                    log_owner,
+                    startup_deadline,
+                    error,
+                )
+                .await);
+            }
+        };
+    // An edge becomes ready only once its coordinator link is ACTIVE; every
+    // other profile has no synchronization to wait for.
+    if !(config.network.role == NodeRole::Edge && federation.is_some()) {
+        readiness.mark(ReadinessStage::Federation);
+    }
     let mut live = match build_live_state(BuildLiveStateInputs {
         config: &config,
         secrets: &secrets,
         runtime_config: snapshot.as_ref(),
+        federation: federation.as_ref(),
         storage,
         budget: Arc::clone(&budget),
         rates,
@@ -1955,6 +2178,16 @@ async fn run(inputs: DaemonRunInputs) -> Result<DaemonExit, DaemonError> {
         );
     }
     live.state.install_observer(Arc::clone(&observer));
+    let (federation_inbound, federation_receiver) = mpsc::channel(INBOUND_QUEUE_ITEMS);
+    if federation.is_some()
+        && let Err(error) = live.state.install_federation_inbox(federation_receiver)
+    {
+        return Err(
+            unwind_live_state_and_log(live, log_owner, startup_deadline, error.into()).await,
+        );
+    }
+    let (federation_accepts, federation_sockets) = mpsc::channel(MAX_FEDERATION_PEERS);
+    let accepts_federation = federation.is_some() && config.network.role == NodeRole::Coordinator;
     let (reload, reload_inbox) = reload_channel(runtime_config.clone(), Arc::clone(&admission));
     if let Err(error) = live.state.install_reload_inbox(reload_inbox) {
         return Err(
@@ -1974,6 +2207,7 @@ async fn run(inputs: DaemonRunInputs) -> Result<DaemonExit, DaemonError> {
         Arc::clone(&budget),
         Arc::clone(&admission),
         Arc::clone(&observer),
+        accepts_federation.then_some(federation_accepts),
     ) {
         Ok(context) => context,
         Err(error) => {
@@ -2030,6 +2264,33 @@ async fn run(inputs: DaemonRunInputs) -> Result<DaemonExit, DaemonError> {
             unwind_live_state_and_log(live, log_owner, startup_deadline, error.into()).await,
         );
     }
+    if let Some(setup) = &federation
+        && let Err(error) = admin_owner.install_federation_control(setup.control.clone())
+    {
+        drop(admin_owner);
+        return Err(
+            unwind_live_state_and_log(live, log_owner, startup_deadline, error.into()).await,
+        );
+    }
+    let federation_owner = federation.map(|setup| {
+        let outbound_bytes = config.limits.values.get(LimitKey::FederationOutputBytes);
+        let shared = Arc::new(LinkOwnerShared::new(
+            setup.local,
+            setup.peers,
+            federation_inbound,
+            Some(Arc::clone(&observer)),
+            outbound_bytes,
+        ));
+        let kind = match setup.dial {
+            Some(plan) => FederationOwnerKind::Dial(Box::new(plan)),
+            None => FederationOwnerKind::Accept(federation_sockets),
+        };
+        FederationOwnerStart {
+            shared,
+            control: setup.control,
+            kind,
+        }
+    });
     let RunningOwners {
         owner,
         log_owner,
@@ -2055,6 +2316,7 @@ async fn run(inputs: DaemonRunInputs) -> Result<DaemonExit, DaemonError> {
             owner: admin_owner,
             inbox: admin_inbox,
         },
+        federation: federation_owner,
         readiness: Arc::clone(&readiness),
         liveness: Arc::clone(&liveness),
     }))
@@ -2138,6 +2400,20 @@ struct AdminOwnerStart {
     inbox: AdminOwnerInbox,
 }
 
+/// Which link owner the federation role runs.
+enum FederationOwnerKind {
+    /// The coordinator's accept owner over the federation listener's sockets.
+    Accept(mpsc::Receiver<AcceptedFederationSocket>),
+    /// The edge's dial owner for its coordinator.
+    Dial(Box<DialOwnerPlan>),
+}
+
+struct FederationOwnerStart {
+    shared: Arc<LinkOwnerShared>,
+    control: FederationControl,
+    kind: FederationOwnerKind,
+}
+
 struct StartOwnersInputs {
     specs: Vec<ListenerSpec>,
     context: ListenerContext,
@@ -2149,6 +2425,7 @@ struct StartOwnersInputs {
     inbox: mpsc::Sender<StateCoreMessage>,
     admission: Arc<TransportAdmission>,
     admin: AdminOwnerStart,
+    federation: Option<FederationOwnerStart>,
     readiness: Arc<ReadinessGate>,
     liveness: Arc<Liveness>,
 }
@@ -2166,6 +2443,7 @@ async fn start_owners(inputs: StartOwnersInputs) -> Result<RunningOwners, Daemon
         inbox,
         admission,
         admin,
+        federation,
         readiness,
         liveness,
     } = inputs;
@@ -2228,6 +2506,20 @@ async fn start_owners(inputs: StartOwnersInputs) -> Result<RunningOwners, Daemon
             log_owner,
             startup_deadline,
             DaemonError::TaskFailed,
+        )
+        .await);
+    }
+    // The link owners start after the state owner so every `Established`
+    // reaches a running federation inbox, and before any listener accepts.
+    if let Some(start) = federation
+        && let Err(error) = spawn_federation_owner(&mut supervisor, start)
+    {
+        return Err(unwind_started_owners(
+            &mut supervisor,
+            owner,
+            log_owner,
+            startup_deadline,
+            error,
         )
         .await);
     }
@@ -2377,6 +2669,32 @@ fn spawn_state_owner(
     Ok((state_exited, state_ready))
 }
 
+fn spawn_federation_owner(
+    supervisor: &mut Supervisor,
+    start: FederationOwnerStart,
+) -> Result<(), DaemonError> {
+    let FederationOwnerStart {
+        shared,
+        control,
+        kind,
+    } = start;
+    supervisor.spawn(
+        ChildName::FederationLinks,
+        ChildKind::Critical,
+        |token| async move {
+            match kind {
+                FederationOwnerKind::Accept(sockets) => {
+                    run_accept_owner(sockets, shared, control, token).await
+                }
+                FederationOwnerKind::Dial(plan) => {
+                    run_dial_owner(*plan, shared, control, token).await
+                }
+            }
+        },
+    )?;
+    Ok(())
+}
+
 fn spawn_background_owners(
     supervisor: &mut Supervisor,
     inbox: &mpsc::Sender<StateCoreMessage>,
@@ -2423,6 +2741,7 @@ fn listener_context(
     budget: Arc<MemoryBudget>,
     admission: Arc<TransportAdmission>,
     observer: Arc<RuntimeObserver>,
+    federation_accepts: Option<mpsc::Sender<AcceptedFederationSocket>>,
 ) -> Result<ListenerContext, DaemonError> {
     let _clients = limit_usize(config, LimitKey::ClientConnections)?;
     let _handshakes = limit_usize(config, LimitKey::TlsHandshakes)?;
@@ -2437,7 +2756,7 @@ fn listener_context(
         admin: Some(admin),
         limits: connection_limits(config)?,
         runtime_config: Some(runtime_config),
-        federation_accepts: None,
+        federation_accepts,
     })
 }
 
@@ -2907,6 +3226,7 @@ impl NestedOwnerJoins {
             | ChildName::StorageBridge
             | ChildName::CryptoBridge
             | ChildName::MaintenanceTask
+            | ChildName::FederationLinks
             | ChildName::Connection => {}
         }
     }
@@ -3743,12 +4063,11 @@ mod tests {
             runtime_purpose(ConfigListenerPurpose::AdminTls).ok(),
             Some(ListenerPurpose::AdminTls)
         );
-        for purpose in [
-            ConfigListenerPurpose::ClientWss,
-            ConfigListenerPurpose::Federation,
-        ] {
-            assert!(runtime_purpose(purpose).is_err());
-        }
+        assert_eq!(
+            runtime_purpose(ConfigListenerPurpose::Federation).ok(),
+            Some(ListenerPurpose::Federation)
+        );
+        assert!(runtime_purpose(ConfigListenerPurpose::ClientWss).is_err());
     }
 
     #[test]
@@ -3779,19 +4098,20 @@ mod tests {
         let baseline = public_config()?;
         assert!(validate_profile(&baseline).is_ok());
 
+        // An edge without federation has no coordinator and is refused; a
+        // federated edge and a federated coordinator are both served.
         let mut edge = baseline.clone();
         edge.network.role = NodeRole::Edge;
         assert!(matches!(
             validate_profile(&edge),
             Err(DaemonError::UnsupportedProfile)
         ));
+        edge.federation.enabled = true;
+        assert!(validate_profile(&edge).is_ok());
 
         let mut federation = baseline.clone();
         federation.federation.enabled = true;
-        assert!(matches!(
-            validate_profile(&federation),
-            Err(DaemonError::UnsupportedProfile)
-        ));
+        assert!(validate_profile(&federation).is_ok());
 
         let mut e2ee = baseline.clone();
         e2ee.e2ee.enabled = true;

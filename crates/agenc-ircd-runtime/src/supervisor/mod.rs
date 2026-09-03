@@ -51,6 +51,8 @@ pub enum ChildName {
     AdminOwner,
     /// One connection supervisor.
     Connection,
+    /// The federation link owner (accept or dial).
+    FederationLinks,
 }
 
 impl ChildName {
@@ -66,6 +68,7 @@ impl ChildName {
             Self::MaintenanceTask => "maintenance_task",
             Self::AdminOwner => "admin_owner",
             Self::Connection => "connection",
+            Self::FederationLinks => "federation_links",
         }
     }
 }
