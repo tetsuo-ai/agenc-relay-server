@@ -349,7 +349,7 @@ TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z")
 ARTIFACT_PATH_RE = re.compile(
     r"conformance/evidence/artifacts/[A-Za-z0-9][A-Za-z0-9_./-]{0,511}"
 )
-CLOSABLE_STAGES = frozenset(range(7))
+CLOSABLE_STAGES = frozenset(range(8))
 REVIEWED_EVIDENCE_TARGETS = (
     "aarch64-unknown-linux-gnu",
     "x86_64-unknown-linux-gnu",
@@ -840,7 +840,7 @@ def parse_toolchain_policy(
 ) -> tuple[str, list[dict[str, object]], list[str]]:
     """Parse one closed toolchain policy and select the requested stage profile."""
     if stage not in CLOSABLE_STAGES:
-        raise EvidenceError("toolchain profiles currently cover only Stages 00 through 06")
+        raise EvidenceError("toolchain profiles currently cover only Stages 00 through 07")
     policy_hash = hashlib.sha256(policy_bytes).hexdigest()
     try:
         policy = tomllib.loads(policy_bytes.decode("utf-8"))
@@ -916,7 +916,7 @@ def parse_toolchain_policy(
             or first_stage < previous_first_stage
         ):
             raise EvidenceError(
-                f"{tool_label}.first_stage must be ordered within Stages 00 through 06"
+                f"{tool_label}.first_stage must be ordered within Stages 00 through 07"
             )
         previous_first_stage = first_stage
         normalized = validate_toolchain(
@@ -1706,7 +1706,7 @@ def validate_closure_entries(
 def validate_closure(root: Path, stage: int, source_commit: str) -> tuple[int, int]:
     """Validate exact-revision evidence needed to close one stage."""
     if stage not in CLOSABLE_STAGES:
-        raise EvidenceError("closure evidence catalogs currently cover only Stages 00 through 06")
+        raise EvidenceError("closure evidence catalogs currently cover only Stages 00 through 07")
     if COMMIT_RE.fullmatch(source_commit) is None:
         raise EvidenceError("closure source commit must be an exact lowercase 40-character Git ID")
     validate(root)
@@ -2176,9 +2176,9 @@ kind = "normative-requirement"
     cases += 1
 
     try:
-        validate_closure(root, 7, "2" * 40)
+        validate_closure(root, 8, "2" * 40)
     except EvidenceError as error:
-        if "only Stages 00 through 06" not in str(error):
+        if "only Stages 00 through 07" not in str(error):
             raise EvidenceError(
                 f"self-test 'unsupported closure stage' reached the wrong branch: {error}"
             ) from error
