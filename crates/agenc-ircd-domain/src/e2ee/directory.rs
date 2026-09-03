@@ -211,6 +211,13 @@ impl Directory {
         Self::default()
     }
 
+    /// The number of stored directory entries: account heads and
+    /// published packages.
+    #[must_use]
+    pub fn entry_count(&self) -> usize {
+        self.accounts.len().saturating_add(self.packages.len())
+    }
+
     /// The state of one account.
     #[must_use]
     pub fn account(&self, account_digest: &Id) -> Option<&AccountEntry> {

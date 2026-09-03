@@ -393,6 +393,8 @@ pub struct LinkContext {
     pub token: CancellationToken,
     /// The keepalive and sweep intervals.
     pub timing: LinkTiming,
+    /// The process observer for the closed companion log codes.
+    pub observer: Option<Arc<crate::observe::adapter::RuntimeObserver>>,
 }
 
 struct Keepalive {
@@ -505,6 +507,11 @@ impl<W: AsyncWrite + Unpin> LinkLoop<W> {
         let frame = match line {
             ParsedLine::Base(frame) => frame,
             ParsedLine::Companion(frame) => {
+                if let (CompanionFrame::EcapAck(_), Some(observer)) =
+                    (&frame, &self.context.observer)
+                {
+                    observer.e2ee_profile_acknowledged();
+                }
                 let bytes = frame
                     .fragment()
                     .map_or(0, |fragment| fragment.segment.len());

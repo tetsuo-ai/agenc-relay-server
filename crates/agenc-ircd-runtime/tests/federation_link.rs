@@ -567,6 +567,7 @@ where
     let (inbound_sender, inbound) = mpsc::channel(256);
     let token = CancellationToken::root();
     let context = LinkContext {
+        observer: None,
         link: LinkId::new(id),
         peer,
         local_name: local_name.to_owned(),

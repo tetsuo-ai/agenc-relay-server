@@ -151,6 +151,12 @@ pub struct SequencerLog {
 }
 
 impl SequencerLog {
+    /// Whether one Commit candidate is open for the accepted epoch.
+    #[must_use]
+    pub fn has_candidate(&self) -> bool {
+        self.candidate.is_some()
+    }
+
     /// A log anchored at the genesis state of a new conversation.
     #[must_use]
     pub fn genesis(conversation_id: Id, genesis_state_id: Id) -> Self {

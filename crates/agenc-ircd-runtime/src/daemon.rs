@@ -19,8 +19,8 @@ use agenc_ircd_auth::{
 use agenc_ircd_config::{
     Config, ConfigError, ConfigReport, DEFAULT_REDB_CACHE_BYTES, DirectMessageDefault,
     HardeningOutcome, LimitKey, ListenerBind as ConfigListenerBind,
-    ListenerPurpose as ConfigListenerPurpose, NodeRole, RATE_ROWS, RegistrationPolicy, SecretSet,
-    ValidationDepth, apply_process_hardening, load_audit_trust_manifest,
+    ListenerPurpose as ConfigListenerPurpose, NodeRole, RATE_ROWS, RegistrationPolicy,
+    SecretBytes32, SecretSet, ValidationDepth, apply_process_hardening, load_audit_trust_manifest,
     load_backup_trust_manifest, load_config, load_public_text,
 };
 use agenc_ircd_crypto::{
@@ -69,6 +69,9 @@ use crate::connection::{
     CONTROL_ITEM_SLOTS, ConnectionLimits, FlushAcknowledgement, MAX_DEMAND_FRAMES, QueueLimits,
     ReaderLimits,
 };
+use crate::e2ee::coordinator::CompanionCoordinator;
+use crate::e2ee::edge::{E2eeEdge, E2eeEdgeConfig};
+use crate::e2ee::link::CompanionProfile;
 use crate::federation::coordinator::{CoordinatorConfig, FederationCoordinator};
 use crate::federation::edge::{EdgeConfig, EdgeFederation};
 use crate::federation::link::INBOUND_QUEUE_ITEMS;
@@ -163,6 +166,9 @@ pub enum DaemonError {
     TaskFailed,
     /// One or more owners did not join within the configured shutdown budget.
     ShutdownTimeout,
+    /// The sequencer credentials file did not parse, did not verify for
+    /// this network, or names no key the coordinator holds.
+    E2eeCredentials,
 }
 
 impl fmt::Display for DaemonError {
@@ -183,6 +189,9 @@ impl fmt::Display for DaemonError {
             Self::RuntimeStart => formatter.write_str("Tokio runtime startup failed"),
             Self::TaskFailed => formatter.write_str("a supervised daemon owner failed"),
             Self::ShutdownTimeout => formatter.write_str("daemon shutdown exceeded its deadline"),
+            Self::E2eeCredentials => formatter.write_str(
+                "E2EE sequencer credentials file is invalid or does not match the sequencer key",
+            ),
         }
     }
 }
@@ -342,12 +351,13 @@ pub fn serve(config_path: &Path) -> Result<DaemonExit, DaemonError> {
 /// coordinator, and a federated edge. E2EE and worker-only nodes remain
 /// deferred. Listener topology rules stay with configuration validation.
 fn validate_profile(config: &Config) -> Result<(), DaemonError> {
-    if config.e2ee.enabled || !config.accounts.accept_clients {
+    if !config.accounts.accept_clients {
         return Err(DaemonError::UnsupportedProfile);
     }
     if config.network.role == NodeRole::Edge && !config.federation.enabled {
         return Err(DaemonError::UnsupportedProfile);
     }
+    validate_e2ee_profile(config)?;
     let federated_coordinator =
         config.federation.enabled && config.network.role == NodeRole::Coordinator;
     for listener in config.listeners.iter().filter(|listener| listener.enabled) {
@@ -362,6 +372,21 @@ fn validate_profile(config: &Config) -> Result<(), DaemonError> {
         if !supported {
             return Err(DaemonError::UnsupportedProfile);
         }
+    }
+    Ok(())
+}
+
+/// The encrypted profile rides on the federation link (companion 12.5):
+/// both roles need federation, the coordinator named by `[e2ee]` is the
+/// network coordinator, and only that coordinator holds the sequencer key
+/// (the configuration cross-check pins the key file to that role).
+fn validate_e2ee_profile(config: &Config) -> Result<(), DaemonError> {
+    if !config.e2ee.enabled {
+        return Ok(());
+    }
+    let coordinator = Some(config.network.coordinator_server_id);
+    if !config.federation.enabled || config.e2ee.coordinator_server_id != coordinator {
+        return Err(DaemonError::UnsupportedProfile);
     }
     Ok(())
 }
@@ -576,7 +601,11 @@ fn build_live_state(
             )?,
             commands,
         )?;
-        let router = attach_federation_role(config, federation, router)?;
+        let e2ee = e2ee_setup(
+            config,
+            secrets.sequencer_private().map(SecretBytes32::expose),
+        )?;
+        let router = attach_federation_role(config, federation, e2ee, router)?;
         let limits = operational_limits(config)?;
         Ok((crypto_config, router, limits))
     })();
@@ -1212,68 +1241,173 @@ async fn edge_dial_plan(
     })
 }
 
-/// Attaches the coordinator or edge role to the registration router.
+/// The companion profile of an encrypted node and, on the coordinator, the
+/// executor with its sequencer installed.
+struct E2eeSetup {
+    profile: CompanionProfile,
+    executor: Option<CompanionCoordinator>,
+}
+
+/// Reads and verifies the sequencer credentials file when `[e2ee]` is
+/// enabled: the key set must verify for this network, and the coordinator's
+/// sequencer key must be one of the credentials (spec 9200, 9201).
+fn e2ee_setup(
+    config: &Config,
+    sequencer: Option<&[u8; 32]>,
+) -> Result<Option<E2eeSetup>, DaemonError> {
+    use agenc_ircd_e2ee::profile::EcapTuple;
+    use agenc_ircd_e2ee::sequencer::{
+        MAX_SEQUENCER_CREDENTIALS_FILE_BYTES, SequencerCredentialsFile,
+    };
+    use agenc_ircd_e2ee::wire::tokens::base64url_encode;
+    if !config.e2ee.enabled {
+        return Ok(None);
+    }
+    let path = config
+        .e2ee
+        .sequencer_credentials_file
+        .as_ref()
+        .ok_or(DaemonError::UnsupportedProfile)?;
+    let bytes = std::fs::read(path).map_err(|_| DaemonError::E2eeCredentials)?;
+    if bytes.len() > MAX_SEQUENCER_CREDENTIALS_FILE_BYTES {
+        return Err(DaemonError::E2eeCredentials);
+    }
+    let document =
+        SequencerCredentialsFile::parse(&bytes).map_err(|_| DaemonError::E2eeCredentials)?;
+    let network = *config.network.network_id.as_bytes();
+    let key_set = document
+        .key_set(&network)
+        .map_err(|_| DaemonError::E2eeCredentials)?;
+    let coordinator = config
+        .e2ee
+        .coordinator_server_id
+        .ok_or(DaemonError::UnsupportedProfile)?;
+    let tuple = EcapTuple::local(
+        &base64url_encode(&network),
+        &base64url_encode(coordinator.as_bytes()),
+        key_set.set_generation,
+        &base64url_encode(&key_set.digest),
+    )
+    .map_err(|_| DaemonError::E2eeCredentials)?;
+    let profile = CompanionProfile { local: tuple };
+    let executor = match config.network.role {
+        NodeRole::Coordinator => {
+            let seed = sequencer.ok_or(DaemonError::UnsupportedProfile)?;
+            let key = Ed25519SecretKey::from_bytes(*seed);
+            let public = *key.public_key().as_bytes();
+            let current = document
+                .credentials
+                .as_slice()
+                .iter()
+                .find(|credential| credential.tbs.sequencer_public_key == public)
+                .cloned()
+                .ok_or(DaemonError::E2eeCredentials)?;
+            let mut executor = CompanionCoordinator::new(
+                network,
+                config.server.server_id,
+                config.server.name.as_str().to_owned(),
+            );
+            executor.install_sequencer(key, key_set, current);
+            executor.set_global_disk_bytes(config.e2ee.global_disk_bytes);
+            Some(executor)
+        }
+        NodeRole::Edge => None,
+    };
+    Ok(Some(E2eeSetup { profile, executor }))
+}
+
+/// Attaches the coordinator or edge role to the registration router, with
+/// the companion profile and the E2EE router or executor when `[e2ee]` is
+/// enabled.
 fn attach_federation_role(
     config: &Config,
     setup: Option<&FederationSetup>,
+    e2ee: Option<E2eeSetup>,
     router: RegistrationRouter,
 ) -> Result<RegistrationRouter, DaemonError> {
     let Some(setup) = setup else {
         return Ok(router);
     };
-    let server_name = config.server.name.as_str().to_owned();
     match config.network.role {
-        NodeRole::Coordinator => {
-            let mut entropy = OsEntropy;
-            let mut query_cursor_key = [0_u8; 32];
-            let mut process_nonce = [0_u8; 16];
-            entropy
-                .fill_exact(&mut query_cursor_key)
-                .map_err(|_| CryptoError::EntropyUnavailable)?;
-            entropy
-                .fill_exact(&mut process_nonce)
-                .map_err(|_| CryptoError::EntropyUnavailable)?;
-            let (verifier, dummy) = channel_key_verifier()?;
-            Ok(router.with_federation(FederationCoordinator::new(
-                CoordinatorConfig {
-                    network_id: config.network.network_id,
-                    server_id: config.server.server_id,
-                    server_name,
-                    recovery_epoch: setup.local.recovery_epoch(),
-                    query_cursor_key,
-                    process_nonce,
-                    outbox_bytes_per_edge: config
-                        .limits
-                        .values
-                        .get(LimitKey::BaseOutboxBytesPerEdge),
-                    outbox_objects_per_edge: config
-                        .limits
-                        .values
-                        .get(LimitKey::BaseOutboxObjectsPerEdge),
-                },
-                setup.peers.clone(),
-                verifier,
-                dummy,
-            )))
-        }
-        NodeRole::Edge => {
-            let coordinator = setup
-                .peers
-                .first()
-                .cloned()
-                .ok_or(DaemonError::UnsupportedProfile)?;
-            Ok(router.with_edge(
-                EdgeFederation::new(EdgeConfig {
-                    network_id: config.network.network_id,
-                    server_id: config.server.server_id,
-                    server_name,
-                    incarnation: setup.local.incarnation(),
-                    coordinator,
-                })
-                .with_readiness(Arc::clone(&setup.readiness)),
-            ))
+        NodeRole::Coordinator => attach_coordinator_role(config, setup, e2ee, router),
+        NodeRole::Edge => attach_edge_role(config, setup, e2ee, router),
+    }
+}
+
+fn attach_coordinator_role(
+    config: &Config,
+    setup: &FederationSetup,
+    e2ee: Option<E2eeSetup>,
+    router: RegistrationRouter,
+) -> Result<RegistrationRouter, DaemonError> {
+    let mut entropy = OsEntropy;
+    let mut query_cursor_key = [0_u8; 32];
+    let mut process_nonce = [0_u8; 16];
+    entropy
+        .fill_exact(&mut query_cursor_key)
+        .map_err(|_| CryptoError::EntropyUnavailable)?;
+    entropy
+        .fill_exact(&mut process_nonce)
+        .map_err(|_| CryptoError::EntropyUnavailable)?;
+    let (verifier, dummy) = channel_key_verifier()?;
+    let mut coordinator = FederationCoordinator::new(
+        CoordinatorConfig {
+            network_id: config.network.network_id,
+            server_id: config.server.server_id,
+            server_name: config.server.name.as_str().to_owned(),
+            recovery_epoch: setup.local.recovery_epoch(),
+            query_cursor_key,
+            process_nonce,
+            outbox_bytes_per_edge: config.limits.values.get(LimitKey::BaseOutboxBytesPerEdge),
+            outbox_objects_per_edge: config.limits.values.get(LimitKey::BaseOutboxObjectsPerEdge),
+        },
+        setup.peers.clone(),
+        verifier,
+        dummy,
+    );
+    if let Some(e2ee) = e2ee {
+        coordinator.set_companion_profile(Some(e2ee.profile));
+        if let Some(executor) = e2ee.executor {
+            coordinator.install_companion_executor(executor);
         }
     }
+    Ok(router.with_federation(coordinator))
+}
+
+fn attach_edge_role(
+    config: &Config,
+    setup: &FederationSetup,
+    e2ee: Option<E2eeSetup>,
+    router: RegistrationRouter,
+) -> Result<RegistrationRouter, DaemonError> {
+    let server_name = config.server.name.as_str().to_owned();
+    let coordinator = setup
+        .peers
+        .first()
+        .cloned()
+        .ok_or(DaemonError::UnsupportedProfile)?;
+    let coordinator_server_id = coordinator.server_id();
+    let mut edge = EdgeFederation::new(EdgeConfig {
+        network_id: config.network.network_id,
+        server_id: config.server.server_id,
+        server_name: server_name.clone(),
+        incarnation: setup.local.incarnation(),
+        coordinator,
+    })
+    .with_readiness(Arc::clone(&setup.readiness));
+    let Some(e2ee) = e2ee else {
+        return Ok(router.with_edge(edge));
+    };
+    edge.set_companion_profile(Some(e2ee.profile));
+    let e2ee_edge = E2eeEdge::new(E2eeEdgeConfig {
+        network_id: *config.network.network_id.as_bytes(),
+        server_id: config.server.server_id,
+        server_name,
+        coordinator_server_id,
+        incarnation: *setup.local.incarnation().as_bytes(),
+        global_disk_bytes: config.e2ee.global_disk_bytes,
+    });
+    Ok(router.with_edge(edge).with_e2ee_edge(e2ee_edge)?)
 }
 
 fn memory_budget(config: &Config) -> Result<Arc<MemoryBudget>, DaemonError> {
@@ -4158,8 +4292,19 @@ mod tests {
         federation.federation.enabled = true;
         assert!(validate_profile(&federation).is_ok());
 
+        // The encrypted profile needs federation and the network coordinator
+        // named in `[e2ee]`; both federated roles then serve it.
         let mut e2ee = baseline.clone();
         e2ee.e2ee.enabled = true;
+        assert!(matches!(
+            validate_profile(&e2ee),
+            Err(DaemonError::UnsupportedProfile)
+        ));
+        e2ee.federation.enabled = true;
+        assert!(validate_profile(&e2ee).is_ok());
+        e2ee.network.role = NodeRole::Edge;
+        assert!(validate_profile(&e2ee).is_ok());
+        e2ee.e2ee.coordinator_server_id = Some(ServerId::from_bytes([200; 16]));
         assert!(matches!(
             validate_profile(&e2ee),
             Err(DaemonError::UnsupportedProfile)
@@ -4194,6 +4339,79 @@ mod tests {
                 .enabled = false;
             assert!(validate_profile(&enabled).is_ok());
         }
+        Ok(())
+    }
+
+    fn sequencer_credentials_document(
+        secret: &agenc_ircd_crypto::Ed25519SecretKey,
+    ) -> Result<Vec<u8>, DaemonError> {
+        use crate::e2ee::coordinator::tests::support::sequencer_credential_in;
+        use agenc_ircd_e2ee::sequencer::SequencerCredentialsFile;
+        use agenc_ircd_e2ee::tls::{TlsEncode, TlsVec};
+        let network = *public_config()?.network.network_id.as_bytes();
+        let credential = sequencer_credential_in(network, secret, 0, (0, 4_000_000_000), None)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let document = SequencerCredentialsFile {
+            set_generation: 0,
+            credentials: TlsVec::new(vec![credential]).map_err(|_| RuntimeError::InvalidValue)?,
+        };
+        document
+            .encode()
+            .map_err(|_| RuntimeError::InvalidValue.into())
+    }
+
+    #[test]
+    fn e2ee_setup_verifies_the_credentials_file_for_both_roles() -> Result<(), DaemonError> {
+        use crate::e2ee::coordinator::tests::support::key;
+        let directory =
+            crate::test_support::TestDirectory::create().map_err(|_| RuntimeError::InvalidValue)?;
+        let path = directory.0.join("sequencer-credentials.bin");
+        let sequencer = key(90);
+        std::fs::write(&path, sequencer_credentials_document(&sequencer)?)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let seed = [90_u8; 32];
+
+        let mut disabled = public_config()?;
+        disabled.federation.enabled = true;
+        assert!(e2ee_setup(&disabled, Some(&seed))?.is_none());
+
+        let mut coordinator = disabled.clone();
+        coordinator.e2ee.enabled = true;
+        coordinator.e2ee.sequencer_credentials_file = Some(path.clone());
+        let setup = e2ee_setup(&coordinator, Some(&seed))?.ok_or(RuntimeError::InvalidValue)?;
+        assert!(setup.executor.is_some());
+        assert_eq!(setup.profile.local.key_set_generation, 0);
+        // The sequencer key must be one of the credentials.
+        assert!(matches!(
+            e2ee_setup(&coordinator, Some(&[91; 32])),
+            Err(DaemonError::E2eeCredentials)
+        ));
+        assert!(matches!(
+            e2ee_setup(&coordinator, None),
+            Err(DaemonError::UnsupportedProfile)
+        ));
+
+        let mut edge = coordinator.clone();
+        edge.network.role = NodeRole::Edge;
+        let setup = e2ee_setup(&edge, None)?.ok_or(RuntimeError::InvalidValue)?;
+        assert!(setup.executor.is_none());
+
+        // A document that does not parse, or one for another network, is
+        // refused before any role composes.
+        std::fs::write(&path, b"not a credentials document")
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        assert!(matches!(
+            e2ee_setup(&edge, None),
+            Err(DaemonError::E2eeCredentials)
+        ));
+        let mut other = edge.clone();
+        other.network.network_id = agenc_ircd_types::NetworkId::from_bytes([77; 32]);
+        std::fs::write(&path, sequencer_credentials_document(&sequencer)?)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        assert!(matches!(
+            e2ee_setup(&other, None),
+            Err(DaemonError::E2eeCredentials)
+        ));
         Ok(())
     }
 

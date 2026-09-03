@@ -398,11 +398,18 @@ pub enum BucketKind {
     OpaqueAttempt,
     /// Credential change per Account ID; not operator configurable.
     CredentialChange,
+    /// E2EE client command per session (companion 16); not operator
+    /// configurable.
+    E2eeCommand,
+    /// E2EE signature-verification charge per Account ID (companion
+    /// `MAX_SIGNATURE_VERIFICATIONS_PER_ACCOUNT_PER_MINUTE`); not operator
+    /// configurable.
+    E2eeSignature,
 }
 
 impl BucketKind {
     /// Every row in spec order.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 15] = [
         Self::NewDirectTcp,
         Self::NewOnionConnection,
         Self::TlsHandshake,
@@ -416,6 +423,8 @@ impl BucketKind {
         Self::AccountCreation,
         Self::OpaqueAttempt,
         Self::CredentialChange,
+        Self::E2eeCommand,
+        Self::E2eeSignature,
     ];
 
     /// Returns the Appendix C.6 table name, or `None` for the fixed
@@ -435,7 +444,7 @@ impl BucketKind {
             Self::ChannelKeyAttempt => Some("channel_key_attempt"),
             Self::AccountCreation => Some("account_creation"),
             Self::OpaqueAttempt => Some("opaque_attempt"),
-            Self::CredentialChange => None,
+            Self::CredentialChange | Self::E2eeCommand | Self::E2eeSignature => None,
         }
     }
 
@@ -456,6 +465,8 @@ impl BucketKind {
             Self::AccountCreation => (1, 3_600, 2),
             Self::OpaqueAttempt => (1, 180, 5),
             Self::CredentialChange => (1, 600, 2),
+            Self::E2eeCommand => (4, 1, 20),
+            Self::E2eeSignature => (1_024, 60, 1_024),
         };
         BucketRate::fixed(tokens, seconds, burst)
     }
@@ -478,6 +489,8 @@ impl BucketKind {
             Self::AccountCreation => (10, 3_600, 10),
             Self::OpaqueAttempt => (1, 10, 10),
             Self::CredentialChange => (1, 600, 2),
+            Self::E2eeCommand => (4, 1, 20),
+            Self::E2eeSignature => (1_024, 60, 1_024),
         };
         BucketRate::fixed(tokens, seconds, burst)
     }
@@ -556,7 +569,7 @@ impl BucketRate {
 /// The complete configured rate table.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RateLimits {
-    rates: [BucketRate; 13],
+    rates: [BucketRate; 15],
 }
 
 impl RateLimits {
@@ -578,6 +591,8 @@ impl RateLimits {
                 BucketKind::AccountCreation.default_rate(),
                 BucketKind::OpaqueAttempt.default_rate(),
                 BucketKind::CredentialChange.default_rate(),
+                BucketKind::E2eeCommand.default_rate(),
+                BucketKind::E2eeSignature.default_rate(),
             ],
         }
     }
@@ -1006,6 +1021,8 @@ mod tests {
             Some("channel_key_attempt"),
             Some("account_creation"),
             Some("opaque_attempt"),
+            None,
+            None,
             None,
         ];
         for (kind, name) in BucketKind::ALL.iter().zip(expected_names) {

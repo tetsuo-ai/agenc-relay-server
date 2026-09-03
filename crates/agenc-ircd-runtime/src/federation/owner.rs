@@ -485,6 +485,7 @@ where
             local_name: shared.local.server_name().to_owned(),
             inbound: shared.inbound.clone(),
             budget: ingress_budget(),
+            observer: shared.observer.clone(),
             token,
             timing: shared.timing,
         };

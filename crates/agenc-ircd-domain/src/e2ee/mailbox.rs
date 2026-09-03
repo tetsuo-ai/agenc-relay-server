@@ -142,6 +142,12 @@ pub struct Mailboxes {
 }
 
 impl Mailboxes {
+    /// The number of undelivered or unacknowledged items.
+    #[must_use]
+    pub fn item_count(&self) -> usize {
+        self.items.len()
+    }
+
     /// Empty mailboxes.
     #[must_use]
     pub fn new() -> Self {

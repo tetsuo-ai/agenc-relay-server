@@ -254,6 +254,12 @@ impl EdgeFederation {
         self.companion = CompanionLinks::new(profile, self.config.server_name.clone());
     }
 
+    /// Whether a companion profile is installed on this edge.
+    #[must_use]
+    pub fn has_companion_profile(&self) -> bool {
+        self.companion.has_profile()
+    }
+
     /// Whether the companion profile is active on the live link.
     #[must_use]
     pub fn companion_active(&self) -> bool {
@@ -466,7 +472,10 @@ impl EdgeFederation {
         let Some(readiness) = &self.readiness else {
             return;
         };
-        if self.network_available() {
+        // An encrypted node is ready only once the companion profile is
+        // active on the same link (companion 12.5).
+        let companion_ready = !self.companion.has_profile() || self.companion_active();
+        if self.network_available() && companion_ready {
             readiness.mark(ReadinessStage::Federation);
         } else {
             readiness.clear(ReadinessStage::Federation);
@@ -525,6 +534,7 @@ impl EdgeFederation {
             }
             LinkEvent::Companion(frame) if self.link_is(link) => {
                 let outcome = self.handle_companion(frame);
+                self.note_phase();
                 self.settle(context, link, outcome)
             }
             LinkEvent::Frame(_) | LinkEvent::Object { .. } | LinkEvent::Companion(_) => Vec::new(),

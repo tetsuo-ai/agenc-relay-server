@@ -141,7 +141,13 @@ impl CompanionLinks {
             .map(|state| state.negotiation.deadline())
     }
 
-    /// Whether the link's profile is active.
+    /// Whether a companion profile is installed at all.
+    #[must_use]
+    pub fn has_profile(&self) -> bool {
+        self.profile.is_some()
+    }
+
+    /// Whether the profile is active on `link`.
     #[must_use]
     pub fn profile_active(&self, link: LinkId) -> bool {
         self.links

@@ -173,3 +173,41 @@ impl SequencerKeySet {
 #[cfg(test)]
 #[path = "tests/sequencer.rs"]
 mod tests;
+
+/// Byte ceiling of one `sequencer_credentials_file` document.
+pub const MAX_SEQUENCER_CREDENTIALS_FILE_BYTES: usize = 4_096;
+
+crate::tls::tls_struct! {
+    /// The `e2ee.sequencer_credentials_file` document: the key-set
+    /// generation and the one or two canonical public credentials the set
+    /// holds, active first and the overlap successor second (spec 9201,
+    /// companion 12.5). The file carries no private material.
+    pub struct SequencerCredentialsFile {
+        /// The key-set generation the ECAP tuple advertises.
+        pub set_generation: u64,
+        /// The credentials, in key-generation order.
+        pub credentials: crate::tls::TlsVec<IrcSequencerCredential, 1, MAX_SEQUENCER_CREDENTIALS_FILE_BYTES>,
+    }
+}
+
+impl SequencerCredentialsFile {
+    /// Parses one complete document.
+    pub fn parse(bytes: &[u8]) -> Result<Self, E2eeError> {
+        use crate::tls::TlsDecode;
+        if bytes.len() > MAX_SEQUENCER_CREDENTIALS_FILE_BYTES {
+            return Err(E2eeError::LimitExceeded);
+        }
+        let mut budget = crate::tls::DecodeBudget::new(MAX_SEQUENCER_CREDENTIALS_FILE_BYTES, 64);
+        Self::decode_exact(bytes, &mut budget)
+    }
+
+    /// Verifies the credentials as the key set of `network_id`.
+    pub fn key_set(&self, network_id: &[u8; 32]) -> Result<SequencerKeySet, E2eeError> {
+        SequencerKeySet::verify(
+            network_id,
+            self.credentials.as_slice(),
+            self.set_generation,
+            None,
+        )
+    }
+}

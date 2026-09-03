@@ -489,6 +489,7 @@ fn edge_router(
         server_name: prefix.to_owned(),
         coordinator_server_id,
         incarnation: *identity.server_incarnation.as_bytes(),
+        global_disk_bytes: 1 << 30,
     });
     Ok(router.with_edge(edge).with_e2ee_edge(e2ee)?)
 }

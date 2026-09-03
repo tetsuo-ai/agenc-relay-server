@@ -42,6 +42,8 @@ pub struct E2eeEdgeConfig {
     pub coordinator_server_id: ServerId,
     /// This edge's incarnation.
     pub incarnation: [u8; 16],
+    /// The configured logical E2EE disk ceiling, reported by `STATS E2EE`.
+    pub global_disk_bytes: u64,
 }
 
 /// What the registration router knows about the connection issuing a line.
@@ -257,6 +259,45 @@ impl E2eeEdge {
         self.routes.channel_route(channel).is_some_and(|route| {
             !self.routes.channel_plaintext_allowed(channel) || route.accepts_traffic()
         })
+    }
+
+    /// The nine `STATS E2EE` values of an edge (spec 22.3): the enabled
+    /// flag, the projected routes accepting traffic, and the configured
+    /// disk ceiling; every coordinator-only counter stays zero.
+    #[must_use]
+    pub fn stats(&self) -> [u64; 9] {
+        let active = self
+            .routes
+            .routes()
+            .filter(|route| route.accepts_traffic())
+            .count();
+        [
+            1,
+            u64::try_from(active).unwrap_or(u64::MAX),
+            0,
+            0,
+            0,
+            0,
+            0,
+            self.config.global_disk_bytes,
+            0,
+        ]
+    }
+
+    /// The `FAIL <command> E2EE_RATE_LIMITED` line for a line the admission
+    /// buckets refused before any parsing.
+    #[must_use]
+    pub fn rate_limited(
+        &mut self,
+        generation: ConnectionGeneration,
+        message: &agenc_ircd_client_wire::ParsedMessage,
+    ) -> Vec<ClientOutput> {
+        self.counters.refusals = self.counters.refusals.saturating_add(1);
+        self.refuse(
+            generation,
+            message.command(),
+            &agenc_ircd_e2ee::wire::reply::E2eeReplyCode::RateLimited.into(),
+        )
     }
 
     /// Lines produced outside a frame or batch hook; none today, kept so the

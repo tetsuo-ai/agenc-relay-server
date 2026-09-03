@@ -307,11 +307,46 @@ impl RegistrationRouter {
         else {
             return ResultClass::Rejected;
         };
-        let account = edge
+        let account_id = edge
             .replica()
             .session(bound.user_id)
             .and_then(|record| record.account)
-            .and_then(|(account, _)| account.to_text().as_bytes().try_into().ok());
+            .map(|(account, _)| account);
+        let account = account_id.and_then(|account| account.to_text().as_bytes().try_into().ok());
+        // Admission runs before parsing, crypto, and storage (companion
+        // 16): one E2EE command per session, and one signature-verification
+        // charge per account when the line carries object bytes.
+        let mut demands = Vec::new();
+        demands.push(BucketDemand::new(
+            BucketKind::E2eeCommand,
+            BucketKey::Session(bound.user_id),
+            1,
+        ));
+        let carries_object = message
+            .tags()
+            .iter()
+            .any(|tag| tag.key() == "+agenc.ag/e2ee");
+        if let (true, Some(account_id)) = (carries_object, account_id) {
+            demands.push(BucketDemand::new(
+                BucketKind::E2eeSignature,
+                BucketKey::Account(account_id),
+                1,
+            ));
+        }
+        let demands: Result<Vec<BucketDemand>, _> = demands.into_iter().collect();
+        let now = context.now();
+        let admitted = demands.is_ok_and(|demands| {
+            context
+                .buckets_mut()
+                .charge_all_or_nothing(now, &demands)
+                .is_ok()
+        });
+        if !admitted {
+            for output in e2ee.rate_limited(generation, message) {
+                let _sent = context.send_to(output.generation, output.frames);
+            }
+            return ResultClass::Rejected;
+        }
         let nickname = state.nickname.as_deref().unwrap_or("*").to_owned();
         let facts = crate::e2ee::edge::SessionFacts {
             user_id: bound.user_id,
@@ -2174,6 +2209,16 @@ impl CommandRouter for RegistrationRouter {
         if let Some(federation) = self.federation.as_mut() {
             federation.startup(context);
         }
+    }
+
+    fn e2ee_stats(&self) -> Option<[u64; 9]> {
+        if let Some(e2ee) = self.e2ee.as_ref() {
+            return Some(e2ee.stats());
+        }
+        self.federation
+            .as_ref()
+            .and_then(|federation| federation.companion_executor())
+            .map(crate::e2ee::coordinator::CompanionCoordinator::stats)
     }
 
     fn federation_inbound(
