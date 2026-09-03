@@ -1,0 +1,16 @@
+schema_version = 1
+stage = 7
+model = "explicit-state exploration of base federation"
+source = "crates/agenc-ircd-testkit/src/federation_model.rs"
+test = "crates/agenc-ircd-testkit/tests/federation_model.rs"
+edges = 2
+clients = 3
+channels = 2
+actions = 36
+depth = 5
+states = 1528
+transitions = 4845
+paths = 4167
+refusals = 19599
+violations = 0
+invariants = ["FED-05", "FED-06", "FED-07", "STA-01"]

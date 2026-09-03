@@ -16,6 +16,7 @@ use agenc_ircd_types::{
 mod client_transcript;
 mod domain_fixture;
 mod domain_reference;
+pub mod federation_model;
 mod reference_codec;
 mod tls_fixture;
 
