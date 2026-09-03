@@ -52,6 +52,8 @@ EXPECTED_LATER_FUZZ_TARGETS = (
     "backup_stream",
     "config_document",
     "admin_command",
+    "federation_object",
+    "federation_fragment",
 )
 EXPECTED_FUZZ_POLICY = {
     "schema_version": 1,

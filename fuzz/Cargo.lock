@@ -112,6 +112,7 @@ dependencies = [
  "agenc-ircd-client-wire",
  "agenc-ircd-config",
  "agenc-ircd-crypto",
+ "agenc-ircd-federation-wire",
  "agenc-ircd-storage",
  "agenc-ircd-types",
  "libfuzzer-sys",
