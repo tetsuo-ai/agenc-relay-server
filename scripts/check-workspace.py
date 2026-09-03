@@ -88,6 +88,11 @@ BINARY_TEST_WORKSPACE_DEPENDENCIES = frozenset(
         "agenc-ircd-types",
     }
 )
+# Package-name prefixes of MLS client engines. Companion Section 20 and
+# architecture Section 24.1 forbid any production daemon crate from depending
+# on one; only the dev-only testkit may, for cross-implementation tests.
+MLS_CLIENT_ENGINE_PREFIXES = ("openmls", "mls-rs", "mls_rs")
+MLS_CLIENT_ALLOWED_PACKAGE = "agenc-ircd-testkit"
 BINARY_TEST_EXTERNAL_DEPENDENCIES = frozenset(
     {"argon2", "base64", "opaque-ke", "opaque-sha2", "rustls"}
 )
@@ -362,6 +367,32 @@ def validate_dependency_profiles(dependencies: dict[str, object]) -> None:
             raise WorkspaceError(f"external dependency {name} has forbidden source/profile keys")
 
 
+def is_mls_client_engine(name: object) -> bool:
+    """Return whether a dependency name denotes an MLS client engine."""
+    return isinstance(name, str) and name.startswith(MLS_CLIENT_ENGINE_PREFIXES)
+
+
+def validate_mls_client_separation(packages: dict[str, dict[str, object]]) -> int:
+    """Reject any MLS client engine edge outside the dev-only testkit."""
+    engine_edges = 0
+    for name, package in packages.items():
+        dependencies = package.get("dependencies")
+        if not isinstance(dependencies, list):
+            raise WorkspaceError(f"package {name} has invalid dependency metadata")
+        for dependency in dependencies:
+            if not isinstance(dependency, dict):
+                continue
+            dependency_name = dependency.get("name")
+            if not is_mls_client_engine(dependency_name):
+                continue
+            if name != MLS_CLIENT_ALLOWED_PACKAGE:
+                raise WorkspaceError(
+                    f"MLS client engine {dependency_name} reaches production crate {name}"
+                )
+            engine_edges += 1
+    return engine_edges
+
+
 def dependency_tables(document: dict[str, object]) -> list[tuple[str, dict[str, object]]]:
     """Return dependency tables, including target-conditional tables."""
     tables: list[tuple[str, dict[str, object]]] = []
@@ -400,6 +431,10 @@ def validate_package_manifest(manifest_path: Path, manifest: dict[str, object]) 
             if declaration != {"workspace": True}:
                 raise WorkspaceError(
                     f"{manifest_path} {table_name}.{dependency_name} must inherit the root pin"
+                )
+            if is_mls_client_engine(dependency_name) and package_name != MLS_CLIENT_ALLOWED_PACKAGE:
+                raise WorkspaceError(
+                    f"MLS client engine {dependency_name} reaches production crate {package_name}"
                 )
             if dependency_name in EXTERNAL_DEPENDENCIES:
                 if not table_name.endswith("dependencies"):
@@ -801,6 +836,7 @@ def validate(root: Path) -> tuple[int, int]:
     metadata = cargo_metadata(root)
     packages = packages_from_metadata(metadata)
     validate_graph(packages)
+    validate_mls_client_separation(packages)
     lock_packages = validate_lockfile(root)
     validate_dependency_exception(root)
     return len(packages), lock_packages
@@ -829,9 +865,39 @@ def self_test(root: Path) -> int:
     validate_direct_dependency_evidence(root)
     packages = packages_from_metadata(cargo_metadata(root))
     validate_graph(packages)
+    validate_mls_client_separation(packages)
     validate_lockfile(root)
     validate_dependency_exception(root)
     cases = 0
+
+    e2ee_manifest_path = root / "crates/agenc-ircd-e2ee/Cargo.toml"
+    engine_manifest = copy.deepcopy(load_toml(e2ee_manifest_path))
+    engine_manifest["dependencies"]["openmls"] = {"workspace": True}  # type: ignore[index]
+    expect_rejection(
+        "MLS client engine in a production manifest",
+        lambda: validate_package_manifest(e2ee_manifest_path, engine_manifest),
+        "MLS client engine openmls reaches production crate agenc-ircd-e2ee",
+    )
+    cases += 1
+
+    engine_metadata = copy.deepcopy(packages)
+    engine_metadata["agenc-ircd-runtime"]["dependencies"].append(  # type: ignore[index]
+        {"name": "mls-rs", "kind": None}
+    )
+    expect_rejection(
+        "MLS client engine in production metadata",
+        lambda: validate_mls_client_separation(engine_metadata),
+        "MLS client engine mls-rs reaches production crate agenc-ircd-runtime",
+    )
+    cases += 1
+
+    testkit_metadata = copy.deepcopy(packages)
+    testkit_metadata["agenc-ircd-testkit"]["dependencies"].append(  # type: ignore[index]
+        {"name": "openmls", "kind": None}
+    )
+    if validate_mls_client_separation(testkit_metadata) != 1:
+        raise WorkspaceError("self-test: testkit MLS client edge was not counted")
+    cases += 1
 
     binary_manifest_path = root / "crates/agenc-ircd/Cargo.toml"
     binary_manifest = load_toml(binary_manifest_path)
