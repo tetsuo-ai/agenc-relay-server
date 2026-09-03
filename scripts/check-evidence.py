@@ -363,6 +363,7 @@ STAGE_NAMES = {
     4: "four",
     5: "five",
     6: "six",
+    7: "seven",
 }
 RUN_ARTIFACT_FIELDS = {
     "schema_version",
