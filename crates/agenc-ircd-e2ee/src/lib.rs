@@ -29,6 +29,12 @@
 //! - [`route`]: canonical channel names, concrete and semantic routes,
 //!   binding packages with unanimous approvals and root locks, and close
 //!   authorization identifiers.
+//! - [`policy`]: conversation policies, controller sets, councils, and the
+//!   finality quorum arithmetic.
+//! - [`sequencer`]: sequencer credential chains and the federation key set.
+//! - [`authorization`]: candidate-specific commit authorizations, the action
+//!   bit table, and approval envelopes.
+//! - [`finality`]: disposition votes, sign-once slots, and quorum ledgers.
 //! - [`profile`]: the exact capability value and ECAP tuple.
 //! - [`limits`]: the Section 16 constants.
 //!
@@ -53,15 +59,19 @@
 //! let _ = IrcWireObject::new(IrcWireObjectKind::RootIdentity, secret);
 //! ```
 
+pub mod authorization;
 pub mod error;
+pub mod finality;
 pub mod identity;
 pub mod ids;
 pub mod limits;
 pub mod mls_outer;
 pub mod object;
 pub mod objects;
+pub mod policy;
 pub mod profile;
 pub mod route;
+pub mod sequencer;
 pub mod signature;
 pub mod tls;
 

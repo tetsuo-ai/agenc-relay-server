@@ -588,3 +588,280 @@ pub(crate) fn direct_route(
         predecessor_close_id: [0; 32],
     })
 }
+
+use crate::objects::conversation::{
+    IrcCommitApproval, IrcCommitApprovalEnvelope, IrcCommitAuthorization,
+    IrcCommitAuthorizationRule, IrcCommitAuthorizationTbs, IrcConversationKind,
+    IrcFinalityPrincipal, IrcMembershipPolicy, IrcPolicy, IrcPolicyApproval, IrcPolicyTbs,
+    IrcSequencerCredential, IrcSequencerCredentialTbs,
+};
+use crate::objects::sequencing::{IrcDispositionVoteTbs, IrcFinalityVote};
+
+pub(crate) fn sequencer_credential(
+    secret: &Ed25519SecretKey,
+    generation: u64,
+    interval: (u64, u64),
+    previous: Option<(&Ed25519SecretKey, &IrcSequencerCredential)>,
+) -> Result<IrcSequencerCredential, E2eeError> {
+    let previous_key_id = match previous {
+        Some((_, credential)) => semantic_id_of(SemanticHashDomain::SequencerKey, &credential.tbs)?,
+        None => [0; 32],
+    };
+    let tbs = IrcSequencerCredentialTbs {
+        profile_version: 1,
+        network_id: NETWORK,
+        key_generation: generation,
+        sequencer_public_key: public(secret),
+        not_before: interval.0,
+        not_after: interval.1,
+        previous_key_id,
+    };
+    let continuity = match previous {
+        Some((previous_secret, _)) => {
+            sign(previous_secret, SignatureDomain::SequencerContinuity, &tbs)?.to_vec()
+        }
+        None => Vec::new(),
+    };
+    Ok(IrcSequencerCredential {
+        tbs,
+        continuity_signature: Opaque::new(continuity)?,
+    })
+}
+
+pub(crate) fn certificate_id_of(
+    principal: &Principal,
+    device: u8,
+) -> Result<SemanticId, E2eeError> {
+    let certificate = certificate(
+        &principal.root_secret,
+        &principal.root,
+        &DeviceSpec::new(device),
+    )?;
+    semantic_id_of(SemanticHashDomain::DeviceCertificateId, &certificate.tbs)
+}
+
+pub(crate) struct PolicySpec<'a> {
+    pub(crate) principals: &'a [Principal],
+    pub(crate) conversation_id: [u8; 32],
+    pub(crate) generation: u64,
+    pub(crate) previous_policy_id: [u8; 32],
+    pub(crate) kind: IrcConversationKind,
+    pub(crate) membership: IrcMembershipPolicy,
+    /// Indices into `principals` whose roots are controllers.
+    pub(crate) controllers: Vec<usize>,
+    pub(crate) threshold: u16,
+    /// `(principal index, device seed)` council members.
+    pub(crate) council: Vec<(usize, u8)>,
+    pub(crate) fault_bound: u16,
+    /// `(principal index, device seed)` approvers.
+    pub(crate) approvers: Vec<(usize, u8)>,
+    pub(crate) suites: Vec<u16>,
+    pub(crate) selected_suite: u16,
+}
+
+impl<'a> PolicySpec<'a> {
+    pub(crate) fn moderated(principals: &'a [Principal], conversation_id: [u8; 32]) -> Self {
+        Self {
+            principals,
+            conversation_id,
+            generation: 0,
+            previous_policy_id: [0; 32],
+            kind: IrcConversationKind::Channel,
+            membership: IrcMembershipPolicy::Moderated,
+            controllers: (0..principals.len()).collect(),
+            threshold: 1,
+            council: principals
+                .iter()
+                .enumerate()
+                .flat_map(|(index, principal)| {
+                    principal.devices.iter().map(move |device| (index, *device))
+                })
+                .collect(),
+            fault_bound: 0,
+            approvers: principals
+                .iter()
+                .enumerate()
+                .filter_map(|(index, principal)| {
+                    principal.devices.first().map(|device| (index, *device))
+                })
+                .collect(),
+            suites: vec![1, 3],
+            selected_suite: 1,
+        }
+    }
+}
+
+fn principal_at(principals: &[Principal], index: usize) -> Result<&Principal, E2eeError> {
+    principals.get(index).ok_or(E2eeError::InvalidValue)
+}
+
+pub(crate) fn policy_tbs(spec: &PolicySpec<'_>) -> Result<IrcPolicyTbs, E2eeError> {
+    let mut controllers: Vec<[u8; 32]> = spec
+        .controllers
+        .iter()
+        .map(|index| root_fingerprint(&principal_at(spec.principals, *index)?.root))
+        .collect::<Result<_, _>>()?;
+    controllers.sort_unstable();
+    let mut council: Vec<IrcFinalityPrincipal> = spec
+        .council
+        .iter()
+        .map(|(index, device)| {
+            let principal = principal_at(spec.principals, *index)?;
+            Ok(IrcFinalityPrincipal {
+                root_fingerprint: root_fingerprint(&principal.root)?,
+                device_id: [*device; 16],
+                device_certificate_id: certificate_id_of(principal, *device)?,
+            })
+        })
+        .collect::<Result<_, E2eeError>>()?;
+    council.sort_by_key(|member| {
+        (
+            member.root_fingerprint,
+            member.device_id,
+            member.device_certificate_id,
+        )
+    });
+    Ok(IrcPolicyTbs {
+        profile_version: 1,
+        network_id: NETWORK,
+        conversation_id: spec.conversation_id,
+        policy_generation: spec.generation,
+        previous_policy_id: spec.previous_policy_id,
+        kind: spec.kind,
+        membership_policy: spec.membership,
+        mls_version: 1,
+        selected_suite: spec.selected_suite,
+        allowed_suites: TlsVec::new(spec.suites.clone())?,
+        controller_root_fingerprints: Opaque::new(controllers.concat())?,
+        controller_threshold: spec.threshold,
+        finality_principals: TlsVec::new(council)?,
+        finality_fault_bound: spec.fault_bound,
+        require_oob_verified_roots: 0,
+        max_devices_per_account: 64,
+        max_group_leaves: 512,
+    })
+}
+
+pub(crate) fn policy(spec: &PolicySpec<'_>) -> Result<IrcPolicy, E2eeError> {
+    let tbs = policy_tbs(spec)?;
+    let mut approvals: Vec<IrcPolicyApproval> = spec
+        .approvers
+        .iter()
+        .map(|(index, device)| {
+            let principal = principal_at(spec.principals, *index)?;
+            Ok(IrcPolicyApproval {
+                signer_root_fingerprint: root_fingerprint(&principal.root)?,
+                signer_device_id: [*device; 16],
+                signer_device_certificate_id: certificate_id_of(principal, *device)?,
+                device_signature: sign(&key(*device), SignatureDomain::PolicyApproval, &tbs)?,
+            })
+        })
+        .collect::<Result<_, E2eeError>>()?;
+    approvals.sort_by_key(|approval| (approval.signer_root_fingerprint, approval.signer_device_id));
+    Ok(IrcPolicy {
+        tbs,
+        approvals: TlsVec::new(approvals)?,
+    })
+}
+
+pub(crate) fn commit_approval(
+    principal: &Principal,
+    device: u8,
+    tbs: &impl TlsEncode,
+    domain: SignatureDomain,
+) -> Result<IrcCommitApproval, E2eeError> {
+    Ok(IrcCommitApproval {
+        signer_root_fingerprint: root_fingerprint(&principal.root)?,
+        signer_device_id: [device; 16],
+        signer_device_certificate_id: certificate_id_of(principal, device)?,
+        device_signature: sign(&key(device), domain, tbs)?,
+    })
+}
+
+pub(crate) fn authorization_tbs(
+    conversation_id: [u8; 32],
+    old_policy_id: [u8; 32],
+    rule: IrcCommitAuthorizationRule,
+    bits: u32,
+) -> IrcCommitAuthorizationTbs {
+    IrcCommitAuthorizationTbs {
+        profile_version: 1,
+        network_id: NETWORK,
+        conversation_id,
+        prior_epoch: 0,
+        prior_state_id: [50; 32],
+        candidate_id: [52; 32],
+        commit_object_id: [49; 32],
+        canonical_validation_time: 7,
+        old_policy_id,
+        authorization_rule: rule,
+        action_bits: bits,
+        resulting_policy_id: old_policy_id,
+        resulting_group_context_digest: [53; 32],
+        resulting_ratchet_tree_digest: [54; 32],
+        transition_target_digest: [0; 32],
+    }
+}
+
+pub(crate) fn commit_authorization(
+    tbs: IrcCommitAuthorizationTbs,
+    approvers: &[(&Principal, u8)],
+) -> Result<IrcCommitAuthorization, E2eeError> {
+    let mut approvals: Vec<IrcCommitApproval> = approvers
+        .iter()
+        .map(|(principal, device)| {
+            commit_approval(
+                principal,
+                *device,
+                &tbs,
+                SignatureDomain::CommitAuthorization,
+            )
+        })
+        .collect::<Result<_, _>>()?;
+    approvals.sort_by_key(|approval| (approval.signer_root_fingerprint, approval.signer_device_id));
+    Ok(IrcCommitAuthorization {
+        tbs,
+        approvals: TlsVec::new(approvals)?,
+    })
+}
+
+pub(crate) fn approval_envelope(
+    tbs: IrcCommitAuthorizationTbs,
+    principal: &Principal,
+    device: u8,
+) -> Result<IrcCommitApprovalEnvelope, E2eeError> {
+    Ok(IrcCommitApprovalEnvelope {
+        approval: commit_approval(
+            principal,
+            device,
+            &tbs,
+            SignatureDomain::CommitAuthorization,
+        )?,
+        tbs,
+    })
+}
+
+pub(crate) fn finality_vote(
+    principal: &Principal,
+    device: u8,
+    tbs: &IrcDispositionVoteTbs,
+) -> Result<IrcFinalityVote, E2eeError> {
+    Ok(IrcFinalityVote {
+        signer_root_fingerprint: root_fingerprint(&principal.root)?,
+        signer_device_id: [device; 16],
+        signer_device_certificate_id: certificate_id_of(principal, device)?,
+        device_signature: sign(&key(device), SignatureDomain::DispositionVote, tbs)?,
+    })
+}
+
+pub(crate) fn principal_rosters(
+    principals: &[Principal],
+) -> Result<crate::route::PrincipalRosters, E2eeError> {
+    let mut map = crate::route::PrincipalRosters::new();
+    for principal in principals {
+        let root = crate::identity::verify_root_identity(&NETWORK, &principal.root, None)?;
+        let roster = crate::identity::verify_roster(&root, &principal.roster, None)?;
+        map.insert(root.account_id, (root, roster));
+    }
+    Ok(map)
+}
