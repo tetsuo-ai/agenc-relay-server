@@ -1,99 +1,99 @@
 ---
 name: federation
-description: "Skill for the Federation area of agenc-ircd. 289 symbols across 39 files."
+description: "Skill for the Federation area of agenc-ircd. 275 symbols across 34 files."
 ---
 
 # Federation
 
-289 symbols | 39 files | Cohesion: 78%
+275 symbols | 34 files | Cohesion: 69%
 
 ## When to Use
 
 - Working with code in `crates/`
-- Understanding how state, iter, absent work
+- Understanding how new, derive, validate_schema_semantics work
 - Modifying federation-related functionality
 
 ## Key Files
 
 | File | Symbols |
 |------|---------|
-| `crates/agenc-ircd-domain/src/federation/projection.rs` | empty, new, derive, home_of, hosts (+86) |
-| `crates/agenc-ircd-domain/src/federation/replica.rs` | new, membership, invite, account, local_members (+27) |
-| `crates/agenc-ircd-runtime/src/federation/link.rs` | split, stream_mut, next_deadline, frame_received, run_link (+14) |
-| `crates/agenc-ircd-auth/src/service.rs` | durable_expires_at_utc, restore, into_restart_cleanup_metadata, restore_transaction_deadline, read_transaction_record_header (+12) |
-| `crates/agenc-ircd-testkit/src/tls_fixture.rs` | mint, mint_federation, validate_dns_name, derive_seed, encode_length (+12) |
-| `crates/agenc-ircd-runtime/src/federation/owner.rs` | setup_failed, run_accept_owner, admit, run_dial_owner, history (+11) |
-| `crates/agenc-ircd-domain/src/federation/origin.rs` | ready, link_lost, link_mut, add, update (+8) |
-| `crates/agenc-ircd-domain/src/federation/record.rs` | session, channel_detail, membership, invite, key (+5) |
+| `crates/agenc-ircd-domain/src/federation/projection.rs` | empty, new, derive, home_of, hosts (+78) |
+| `crates/agenc-ircd-federation-wire/src/semantics.rs` | validate_schema_semantics, validate_matching_structure_fields, structure_field, semantic, validate_normalized_login (+34) |
+| `crates/agenc-ircd-domain/src/federation/replica.rs` | new, membership, account, local_members, apply (+27) |
+| `crates/agenc-ircd-runtime/src/federation/link.rs` | new, parse_base_frame, handle_frame, admit_fragment, acquire (+18) |
+| `crates/agenc-ircd-e2ee/src/tls.rs` | new, for_maximum, remaining, finish, take (+12) |
+| `crates/agenc-ircd-runtime/src/federation/owner.rs` | admit, accept_link, squit, is_suspended, wait_until_wanted (+7) |
+| `crates/agenc-ircd-domain/src/federation/origin.rs` | reset, expire, fence_incarnation, add, update (+3) |
 | `crates/agenc-ircd-runtime/src/federation/certificate.rs` | verify_peer_certificate, peer, federation_fixture_carries_exactly_one_server_uri, server_id_from_certificate, tbs_extensions (+3) |
-| `crates/agenc-ircd-runtime/src/federation/owner/tests/harness.rs` | node, trust, material, next_event, accept_and_dial_owners_establish_squit_and_reconnect (+1) |
+| `crates/agenc-ircd-e2ee/src/federation/frames.rs` | is_companion_command, id, parameters, resume_parameters, origin_parameters (+2) |
+| `crates/agenc-ircd-domain/src/federation/record.rs` | session, channel_detail, membership, invite, key (+1) |
 
 ## Entry Points
 
 Start here when exploring this area:
 
-- **`state`** (Function) — `crates/agenc-ircd-config/src/host.rs:110`
-- **`iter`** (Function) — `crates/agenc-ircd-config/src/host.rs:122`
-- **`absent`** (Function) — `crates/agenc-ircd-config/src/host.rs:131`
 - **`new`** (Function) — `crates/agenc-ircd-domain/src/federation/projection.rs:285`
 - **`derive`** (Function) — `crates/agenc-ircd-domain/src/federation/projection.rs:343`
+- **`validate_schema_semantics`** (Function) — `crates/agenc-ircd-federation-wire/src/semantics.rs:41`
+- **`parse`** (Function) — `crates/agenc-ircd-types/src/identifiers.rs:253`
+- **`parse_wire_bytes`** (Function) — `crates/agenc-ircd-types/src/identifiers.rs:305`
 
 ## Key Symbols
 
 | Symbol | Type | File | Line |
 |--------|------|------|------|
-| `state` | Function | `crates/agenc-ircd-config/src/host.rs` | 110 |
-| `iter` | Function | `crates/agenc-ircd-config/src/host.rs` | 122 |
-| `absent` | Function | `crates/agenc-ircd-config/src/host.rs` | 131 |
 | `new` | Function | `crates/agenc-ircd-domain/src/federation/projection.rs` | 285 |
 | `derive` | Function | `crates/agenc-ircd-domain/src/federation/projection.rs` | 343 |
-| `durable_expires_at_utc` | Function | `crates/agenc-ircd-auth/src/service.rs` | 827 |
-| `restore` | Function | `crates/agenc-ircd-auth/src/service.rs` | 841 |
-| `into_restart_cleanup_metadata` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1015 |
-| `into_restart_metadata` | Function | `crates/agenc-ircd-auth/src/service.rs` | 1884 |
-| `restore_authentication` | Function | `crates/agenc-ircd-auth/src/transaction.rs` | 193 |
+| `validate_schema_semantics` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 41 |
 | `parse` | Function | `crates/agenc-ircd-types/src/identifiers.rs` | 253 |
 | `parse_wire_bytes` | Function | `crates/agenc-ircd-types/src/identifiers.rs` | 305 |
+| `encode` | Function | `crates/agenc-ircd-e2ee/src/federation/keyset_file.rs` | 34 |
+| `decode` | Function | `crates/agenc-ircd-e2ee/src/federation/keyset_file.rs` | 49 |
+| `new` | Function | `crates/agenc-ircd-e2ee/src/tls.rs` | 27 |
+| `for_maximum` | Function | `crates/agenc-ircd-e2ee/src/tls.rs` | 89 |
+| `remaining` | Function | `crates/agenc-ircd-e2ee/src/tls.rs` | 121 |
+| `finish` | Function | `crates/agenc-ircd-e2ee/src/tls.rs` | 126 |
+| `u8` | Function | `crates/agenc-ircd-e2ee/src/tls.rs` | 148 |
+| `u16` | Function | `crates/agenc-ircd-e2ee/src/tls.rs` | 154 |
+| `u32` | Function | `crates/agenc-ircd-e2ee/src/tls.rs` | 160 |
+| `u64` | Function | `crates/agenc-ircd-e2ee/src/tls.rs` | 166 |
+| `fixed` | Function | `crates/agenc-ircd-e2ee/src/tls.rs` | 172 |
+| `opaque` | Function | `crates/agenc-ircd-e2ee/src/tls.rs` | 194 |
+| `vector` | Function | `crates/agenc-ircd-e2ee/src/tls.rs` | 206 |
+| `len` | Function | `crates/agenc-ircd-e2ee/src/tls.rs` | 254 |
 | `new` | Function | `crates/agenc-ircd-domain/src/federation/replica.rs` | 90 |
-| `membership` | Function | `crates/agenc-ircd-domain/src/federation/replica.rs` | 133 |
-| `invite` | Function | `crates/agenc-ircd-domain/src/federation/replica.rs` | 143 |
-| `account` | Function | `crates/agenc-ircd-domain/src/federation/replica.rs` | 153 |
-| `local_members` | Function | `crates/agenc-ircd-domain/src/federation/replica.rs` | 158 |
-| `install` | Function | `crates/agenc-ircd-domain/src/federation/replica.rs` | 237 |
-| `apply` | Function | `crates/agenc-ircd-domain/src/federation/replica.rs` | 323 |
-| `verify_peer_certificate` | Function | `crates/agenc-ircd-runtime/src/federation/certificate.rs` | 150 |
 
 ## Execution Flows
 
 | Flow | Type | Steps |
 |------|------|-------|
-| `From_object → Unpadded_base64_len` | cross_community | 6 |
+| `Origin_state → Take` | cross_community | 6 |
 | `Batch_applied → Len` | cross_community | 5 |
-| `Batch_applied → Try_from` | cross_community | 5 |
-| `Batch_applied → LinkOutbound` | cross_community | 5 |
-| `Batch_applied → Release_queued` | cross_community | 5 |
+| `Origin_state → Remaining` | cross_community | 5 |
+| `Origin_state → Len` | cross_community | 5 |
+| `Batch_applied → Session` | cross_community | 5 |
+| `Batch_applied → Channel_detail` | cross_community | 5 |
+| `Batch_applied → Membership` | cross_community | 5 |
 | `Batch_applied → Kind` | cross_community | 4 |
-| `Into_restart_cleanup_metadata → Read_array` | intra_community | 4 |
-| `Into_restart_cleanup_metadata → Transaction_id` | cross_community | 4 |
-| `Into_restart_cleanup_metadata → Matches_request_kind` | cross_community | 4 |
-| `Into_restart_cleanup_metadata → Message_kind` | cross_community | 4 |
+| `Batch_applied → Kind` | cross_community | 4 |
+| `Batch_applied → New` | cross_community | 4 |
 
 ## Connected Areas
 
 | Area | Connections |
 |------|-------------|
-| Tests | 36 calls |
-| State_core | 24 calls |
-| Admission | 8 calls |
-| Tls | 7 calls |
+| Cluster_422 | 50 calls |
+| Tests | 28 calls |
+| Coordinator | 21 calls |
+| Validate_ | 13 calls |
+| State_core | 5 calls |
+| Codec | 5 calls |
 | Edge | 4 calls |
-| Listener | 3 calls |
-| Coordinator | 2 calls |
-| Connection | 1 calls |
+| Cluster_913 | 2 calls |
 
 ## How to Explore
 
-1. `context({name: "state"})` — see callers and callees
+1. `context({name: "new"})` — see callers and callees
 2. `query({search_query: "federation"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

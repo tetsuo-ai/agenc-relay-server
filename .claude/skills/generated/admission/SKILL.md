@@ -1,67 +1,67 @@
 ---
 name: admission
-description: "Skill for the Admission area of agenc-ircd. 133 symbols across 13 files."
+description: "Skill for the Admission area of agenc-ircd. 104 symbols across 10 files."
 ---
 
 # Admission
 
-133 symbols | 13 files | Cohesion: 66%
+104 symbols | 10 files | Cohesion: 61%
 
 ## When to Use
 
 - Working with code in `crates/`
-- Understanding how expose_for_persistence, from_persisted_bytes, new work
+- Understanding how new, with_ceiling, connection_opened work
 - Modifying admission-related functionality
 
 ## Key Files
 
 | File | Symbols |
 |------|---------|
-| `crates/agenc-ircd-runtime/src/admission/buckets.rs` | new, default_rate, hard_rate, fixed, defaults (+50) |
-| `crates/agenc-ircd-runtime/src/admission/transport.rs` | now, release_direct, erase_idle, admit_direct, admit_onion (+16) |
-| `crates/agenc-ircd-runtime/src/admission/prefix.rs` | new, with_ceiling, connection_opened, connection_closed, erase_idle (+14) |
-| `crates/agenc-ircd-auth/src/service.rs` | new, parse, context_for_network, inputs, decode_nibble (+8) |
-| `crates/agenc-ircd-runtime/src/admission/overload.rs` | new, classify, default, usage_reaches, select_evictions (+6) |
-| `crates/agenc-ircd-runtime/src/state_core/inbox.rs` | host_key, onion_listener, ipv4, prefix_key |
-| `crates/agenc-ircd-domain/src/decision.rs` | process_local_arms_project_to_no_write, complete_external_inputs, external_input_validation_covers_every_shape_and_clock_combination |
-| `crates/agenc-ircd-auth/src/opaque.rs` | expose_for_persistence, from_persisted_bytes |
-| `crates/agenc-ircd-testkit/src/lib.rs` | now |
-| `crates/agenc-ircd-types/src/quantities.rs` | from_ticks |
+| `crates/agenc-ircd-runtime/src/admission/buckets.rs` | new, defaults, with_ceiling, domain_snapshot, apply_domain_charges (+44) |
+| `crates/agenc-ircd-runtime/src/admission/transport.rs` | admission, direct_hosts_obey_the_live_ceiling_and_release_exactly_once, reload_changes_the_direct_host_ceiling_without_resetting_live_counts, prefix_ceiling_eviction_erases_the_coupled_rate_bucket, direct_prefixes_share_the_new_connection_bucket (+15) |
+| `crates/agenc-ircd-runtime/src/admission/prefix.rs` | new, with_ceiling, connection_opened, connection_closed, erase_idle (+13) |
+| `crates/agenc-ircd-runtime/src/admission/overload.rs` | new, default, usage_reaches, select_evictions, classes_switch_at_exact_thresholds_with_eviction_hysteresis |
+| `crates/agenc-ircd-runtime/src/state_core/inbox.rs` | ipv4, prefix_key, onion_listener, host_key |
+| `crates/agenc-ircd-runtime/src/state_core/mod.rs` | record_physical_close, apply_runtime_snapshot |
+| `crates/agenc-ircd-runtime/src/runtime_config.rs` | from_config, runtime_resource_limits |
+| `crates/agenc-ircd-runtime/src/account_service.rs` | opaque_attempt_demand, opaque_attempts_stop_at_the_keyed_login_burst_before_lookup |
+| `crates/agenc-ircd-runtime/src/channels.rs` | guest_prefix_keys_follow_the_transport_profile |
+| `crates/agenc-ircd-runtime/src/daemon.rs` | config_and_runtime_rate_defaults_match |
 
 ## Entry Points
 
 Start here when exploring this area:
 
-- **`expose_for_persistence`** (Function) — `crates/agenc-ircd-auth/src/opaque.rs:497`
-- **`from_persisted_bytes`** (Function) — `crates/agenc-ircd-auth/src/opaque.rs:578`
-- **`new`** (Function) — `crates/agenc-ircd-auth/src/service.rs:44`
-- **`parse`** (Function) — `crates/agenc-ircd-auth/src/service.rs:814`
-- **`now`** (Function) — `crates/agenc-ircd-testkit/src/lib.rs:103`
+- **`new`** (Function) — `crates/agenc-ircd-runtime/src/admission/prefix.rs:83`
+- **`with_ceiling`** (Function) — `crates/agenc-ircd-runtime/src/admission/prefix.rs:89`
+- **`connection_opened`** (Function) — `crates/agenc-ircd-runtime/src/admission/prefix.rs:101`
+- **`connection_closed`** (Function) — `crates/agenc-ircd-runtime/src/admission/prefix.rs:166`
+- **`erase_idle`** (Function) — `crates/agenc-ircd-runtime/src/admission/prefix.rs:195`
 
 ## Key Symbols
 
 | Symbol | Type | File | Line |
 |--------|------|------|------|
-| `expose_for_persistence` | Function | `crates/agenc-ircd-auth/src/opaque.rs` | 497 |
-| `from_persisted_bytes` | Function | `crates/agenc-ircd-auth/src/opaque.rs` | 578 |
-| `new` | Function | `crates/agenc-ircd-auth/src/service.rs` | 44 |
-| `parse` | Function | `crates/agenc-ircd-auth/src/service.rs` | 814 |
-| `now` | Function | `crates/agenc-ircd-testkit/src/lib.rs` | 103 |
-| `from_ticks` | Function | `crates/agenc-ircd-types/src/quantities.rs` | 109 |
+| `new` | Function | `crates/agenc-ircd-runtime/src/admission/prefix.rs` | 83 |
+| `with_ceiling` | Function | `crates/agenc-ircd-runtime/src/admission/prefix.rs` | 89 |
+| `connection_opened` | Function | `crates/agenc-ircd-runtime/src/admission/prefix.rs` | 101 |
+| `connection_closed` | Function | `crates/agenc-ircd-runtime/src/admission/prefix.rs` | 166 |
+| `erase_idle` | Function | `crates/agenc-ircd-runtime/src/admission/prefix.rs` | 195 |
 | `new` | Function | `crates/agenc-ircd-runtime/src/admission/buckets.rs` | 87 |
-| `default_rate` | Function | `crates/agenc-ircd-runtime/src/admission/buckets.rs` | 443 |
-| `hard_rate` | Function | `crates/agenc-ircd-runtime/src/admission/buckets.rs` | 465 |
 | `defaults` | Function | `crates/agenc-ircd-runtime/src/admission/buckets.rs` | 564 |
 | `with_ceiling` | Function | `crates/agenc-ircd-runtime/src/admission/buckets.rs` | 773 |
 | `domain_snapshot` | Function | `crates/agenc-ircd-runtime/src/admission/buckets.rs` | 842 |
 | `apply_domain_charges` | Function | `crates/agenc-ircd-runtime/src/admission/buckets.rs` | 857 |
 | `domain_bucket` | Function | `crates/agenc-ircd-runtime/src/admission/buckets.rs` | 943 |
-| `contains_key` | Function | `crates/agenc-ircd-runtime/src/admission/buckets.rs` | 114 |
-| `get_mut` | Function | `crates/agenc-ircd-runtime/src/admission/buckets.rs` | 128 |
-| `try_insert` | Function | `crates/agenc-ircd-runtime/src/admission/buckets.rs` | 137 |
-| `remove` | Function | `crates/agenc-ircd-runtime/src/admission/buckets.rs` | 170 |
-| `remove_transaction` | Function | `crates/agenc-ircd-runtime/src/admission/buckets.rs` | 175 |
-| `full` | Function | `crates/agenc-ircd-runtime/src/admission/buckets.rs` | 654 |
+| `ipv4` | Function | `crates/agenc-ircd-runtime/src/state_core/inbox.rs` | 141 |
+| `prefix_key` | Function | `crates/agenc-ircd-runtime/src/state_core/inbox.rs` | 185 |
+| `get` | Function | `crates/agenc-ircd-runtime/src/admission/buckets.rs` | 119 |
+| `rollback` | Function | `crates/agenc-ircd-runtime/src/admission/buckets.rs` | 161 |
+| `begin_connection_open` | Function | `crates/agenc-ircd-runtime/src/admission/prefix.rs` | 111 |
+| `try_insert_transaction` | Function | `crates/agenc-ircd-runtime/src/admission/buckets.rs` | 147 |
+| `iter` | Function | `crates/agenc-ircd-runtime/src/admission/buckets.rs` | 222 |
+| `set` | Function | `crates/agenc-ircd-runtime/src/admission/buckets.rs` | 595 |
+| `new` | Function | `crates/agenc-ircd-runtime/src/admission/transport.rs` | 40 |
 
 ## Execution Flows
 
@@ -69,31 +69,27 @@ Start here when exploring this area:
 |------|------|-------|
 | `Run → Iter_mut` | cross_community | 5 |
 | `Erase_reload_and_domain_mapping_behave_as_specified → Fixed` | cross_community | 5 |
-| `Creation_transaction_record_round_trips_private_reservations → New` | cross_community | 5 |
 | `Live_queries_render_lists_names_who_whois_topics_modes_and_information → Prefix_key` | cross_community | 4 |
-| `Into_restart_cleanup_metadata → Transaction_id` | cross_community | 4 |
-| `Into_restart_cleanup_metadata → Matches_request_kind` | cross_community | 4 |
-| `Into_restart_cleanup_metadata → Message_kind` | cross_community | 4 |
-| `Creation_transaction_record_round_trips_private_reservations → Transaction_id` | intra_community | 4 |
-| `Creation_transaction_record_round_trips_private_reservations → Matches_request_kind` | cross_community | 4 |
-| `Creation_transaction_record_round_trips_private_reservations → Message_kind` | intra_community | 4 |
+| `Run → Operational_limits` | cross_community | 4 |
+| `Run → Rates` | cross_community | 4 |
+| `Erase_reload_and_domain_mapping_behave_as_specified → Retain` | cross_community | 3 |
+| `Erase_reload_and_domain_mapping_behave_as_specified → Within` | cross_community | 3 |
+| `Erase_reload_and_domain_mapping_behave_as_specified → Iter_mut` | cross_community | 3 |
 
 ## Connected Areas
 
 | Area | Connections |
 |------|-------------|
-| State_core | 11 calls |
-| Tests | 11 calls |
-| Cluster_58 | 5 calls |
-| Cluster_46 | 5 calls |
-| Bridge | 3 calls |
-| Coordinator | 2 calls |
-| Cluster_146 | 1 calls |
-| Cluster_43 | 1 calls |
+| State_core | 17 calls |
+| Tests | 5 calls |
+| Cluster_160 | 4 calls |
+| Coordinator | 4 calls |
+| Observe | 3 calls |
+| Budget | 1 calls |
 
 ## How to Explore
 
-1. `context({name: "expose_for_persistence"})` — see callers and callees
+1. `context({name: "new"})` — see callers and callees
 2. `query({search_query: "admission"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

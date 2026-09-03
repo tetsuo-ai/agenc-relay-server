@@ -1,11 +1,11 @@
 ---
 name: state-core
-description: "Skill for the State_core area of agenc-ircd. 1000 symbols across 77 files."
+description: "Skill for the State_core area of agenc-ircd. 756 symbols across 49 files."
 ---
 
 # State_core
 
-1000 symbols | 77 files | Cohesion: 67%
+756 symbols | 49 files | Cohesion: 71%
 
 ## When to Use
 
@@ -17,16 +17,16 @@ description: "Skill for the State_core area of agenc-ircd. 1000 symbols across 7
 
 | File | Symbols |
 |------|---------|
-| `crates/agenc-ircd-runtime/src/account_service.rs` | tag, from_tag, binding, encode, decode (+152) |
-| `crates/agenc-ircd-runtime/src/state_core/mod.rs` | sessions_mut, buckets_mut, timers_mut, submit_storage_read, entropy_mut (+123) |
-| `crates/agenc-ircd-runtime/src/state_core/reconstruct.rs` | admit_opaque_record, admit_fake_opaque_record, admit_live_opaque_record, finish, reconstruct (+100) |
-| `crates/agenc-ircd-storage/src/construction_runtime.rs` | validate, start, start_streaming, start_inner, push (+85) |
-| `crates/agenc-ircd-runtime/src/registration.rs` | new, for_purpose, access_policy, route_message, refresh_deadline (+71) |
+| `crates/agenc-ircd-runtime/src/account_service.rs` | closed, binding, encode, decode, new (+126) |
+| `crates/agenc-ircd-runtime/src/state_core/mod.rs` | timers_mut, submit_storage_read, utc_now, pending_len, fanout_request_to (+107) |
+| `crates/agenc-ircd-domain/src/decision.rs` | new, insert, user, message, collect (+106) |
+| `crates/agenc-ircd-runtime/src/state_core/reconstruct.rs` | finish, reconstruct, session_id_from_key, admit, admit_channel_tombstone (+97) |
 | `crates/agenc-ircd-runtime/src/state_core/durable.rs` | account_key, put, delete, revalidate, account_service_table (+61) |
-| `crates/agenc-ircd-runtime/src/admin.rs` | acquire_audit_export_memory, admin_process_channel, new, start, admin_lifecycle_channel (+40) |
-| `crates/agenc-ircd-runtime/src/state_core/session.rs` | begin_physical_close, unbind_session, mark_sink_gone, connection, sink_for_generation (+20) |
-| `crates/agenc-ircd-runtime/src/state_core/timers.rs` | schedule, cancel, compact, wall_trusted, pop_due (+17) |
-| `crates/agenc-ircd-storage/src/engine.rs` | open_construction_source_record, start_backup, verify_snapshot_accounting, checkpoint_accounting, checkpoint_retired_charges (+17) |
+| `crates/agenc-ircd-runtime/src/registration.rs` | stage_authenticated_session, commit_session, connection_opened, cancel_connection_timers, access_policy (+34) |
+| `crates/agenc-ircd-runtime/src/state_core/session.rs` | unbind_session, connection, generation_for_user, new, with_ceiling (+16) |
+| `crates/agenc-ircd-runtime/src/state_core/timers.rs` | schedule, cancel, wall_trusted, pop_due, next_deadline (+12) |
+| `crates/agenc-ircd-runtime/src/channels.rs` | guest_key_prefix_demand, admit_command, charge_command, charge_registered_command_only, defer (+11) |
+| `crates/agenc-ircd-runtime/src/state_core/pending.rs` | silent, with_account_service_writes, start, try_stage, staged (+8) |
 
 ## Entry Points
 
@@ -36,7 +36,7 @@ Start here when exploring this area:
 - **`invitation_id`** (Function) — `crates/agenc-ircd-auth/src/service.rs:486`
 - **`invitation_expires_at`** (Function) — `crates/agenc-ircd-auth/src/service.rs:495`
 - **`as_bytes`** (Function) — `crates/agenc-ircd-auth/src/wire.rs:252`
-- **`has_outstanding_ping`** (Function) — `crates/agenc-ircd-client-wire/src/registration.rs:578`
+- **`as_bytes`** (Function) — `crates/agenc-ircd-crypto/src/hash.rs:23`
 
 ## Key Symbols
 
@@ -46,50 +46,50 @@ Start here when exploring this area:
 | `invitation_id` | Function | `crates/agenc-ircd-auth/src/service.rs` | 486 |
 | `invitation_expires_at` | Function | `crates/agenc-ircd-auth/src/service.rs` | 495 |
 | `as_bytes` | Function | `crates/agenc-ircd-auth/src/wire.rs` | 252 |
-| `has_outstanding_ping` | Function | `crates/agenc-ircd-client-wire/src/registration.rs` | 578 |
 | `as_bytes` | Function | `crates/agenc-ircd-crypto/src/hash.rs` | 23 |
-| `session` | Function | `crates/agenc-ircd-domain/src/model.rs` | 1679 |
+| `new` | Function | `crates/agenc-ircd-domain/src/e2ee/route_table.rs` | 32 |
 | `account` | Function | `crates/agenc-ircd-domain/src/model.rs` | 1685 |
-| `account_is_suspended` | Function | `crates/agenc-ircd-domain/src/model.rs` | 1771 |
-| `users_for_account` | Function | `crates/agenc-ircd-domain/src/model.rs` | 1789 |
-| `user_for_session` | Function | `crates/agenc-ircd-domain/src/model.rs` | 2186 |
-| `reload_ready` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 958 |
-| `registered_authority_fenced` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 970 |
 | `connection_opened` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 1013 |
 | `connection_closed` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 1062 |
 | `timer_fired` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 1227 |
 | `startup` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 1574 |
 | `registration_grant_write` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 1602 |
 | `begin_registration_grant_consumption` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 1626 |
-| `registration_committed` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 1681 |
+| `registration_rejected` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 1736 |
+| `begin_account_deletion` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 1764 |
+| `route_sasl` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 1924 |
+| `crypto_completed` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 2303 |
+| `storage_read_completed` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 3201 |
+| `batch_rejected` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 5780 |
+| `submit_read` | Function | `crates/agenc-ircd-runtime/src/bridge/storage.rs` | 423 |
 
 ## Execution Flows
 
 | Flow | Type | Steps |
 |------|------|-------|
-| `Connection_opened → FixtureIdentity` | cross_community | 9 |
-| `Connection_opened → Create` | cross_community | 9 |
-| `Registration_committed → New` | cross_community | 8 |
-| `Route_sasl → Into_parts` | cross_community | 7 |
+| `Route_sasl → Into_parts` | intra_community | 7 |
 | `Route_sasl → CreationReservation` | intra_community | 7 |
 | `Route_sasl → AccountServiceConfig` | cross_community | 7 |
 | `Route_sasl → Try_from` | cross_community | 7 |
-| `Registration_committed → QueuePass` | cross_community | 7 |
-| `Registration_committed → Tentative` | cross_community | 7 |
-| `Serve → Try_from` | cross_community | 6 |
+| `Batch_applied → Into_parts` | cross_community | 5 |
+| `Batch_applied → Link_is_live` | cross_community | 5 |
+| `Batch_applied → Link_closed` | cross_community | 5 |
+| `Batch_applied → Timers_mut` | cross_community | 5 |
+| `Batch_applied → Cancel` | cross_community | 5 |
+| `Batch_applied → Len` | cross_community | 5 |
 
 ## Connected Areas
 
 | Area | Connections |
 |------|-------------|
-| Tests | 143 calls |
-| Admission | 37 calls |
-| Bridge | 35 calls |
-| Coordinator | 16 calls |
-| Admin | 13 calls |
-| Cluster_602 | 12 calls |
-| Federation | 11 calls |
-| Connection | 9 calls |
+| Tests | 122 calls |
+| Coordinator | 61 calls |
+| Admission | 20 calls |
+| Cluster_688 | 10 calls |
+| Cluster_456 | 9 calls |
+| Cluster_90 | 8 calls |
+| Observe | 7 calls |
+| Supervisor | 7 calls |
 
 ## How to Explore
 
