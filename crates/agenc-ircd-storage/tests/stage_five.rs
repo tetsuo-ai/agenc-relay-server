@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod domain_records;
+mod federation_records;
 mod recovery_matrix;
 
 use std::error::Error;

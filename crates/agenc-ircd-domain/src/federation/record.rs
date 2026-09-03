@@ -473,7 +473,8 @@ pub struct DeliveredMessageRecord {
     pub sender: SourceView,
     /// The installed channel revision, or zero for a direct message.
     pub target_revision: Revision,
-    /// Nonzero per-channel sequence, zero for a direct message.
+    /// The accepting state generation for a channel target, zero for a
+    /// direct message; nonzero and strictly increasing per channel.
     pub channel_event_sequence: u64,
     /// The acceptance time in UTC milliseconds.
     pub received_unix_milliseconds: u64,

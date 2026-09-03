@@ -315,13 +315,15 @@ fn sessions_channels_messages_and_departures_project_least_information() -> Resu
         let Some(ProjectedEvent::MessageDelivered(record)) = events.first().copied() else {
             return Err(DomainError::InvariantViolation);
         };
-        assert_eq!(record.channel_event_sequence, 1);
+        assert_eq!(
+            record.channel_event_sequence,
+            harness.state.revision().get()
+        );
         assert_eq!(record.target, DeliveryTarget::Channel(channel_id));
         assert_eq!(record.body, "hello");
         assert_eq!(record.received_unix_milliseconds, 1_234);
         assert_eq!(record.sender.user_id, alice);
     }
-    assert_eq!(harness.index.channel_sequence(channel_id), 1);
 
     let topic = || {
         Ok(CanonicalCommand::topic_set(

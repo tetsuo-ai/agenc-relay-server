@@ -335,7 +335,6 @@ impl EdgeDelta {
 pub struct MutationProjection {
     /// Per-edge deltas.
     pub edges: Vec<EdgeDelta>,
-    channel_sequences: BTreeMap<ChannelInstanceId, u64>,
 }
 
 impl MutationProjection {
@@ -369,7 +368,6 @@ struct ResolvedDelivery {
 pub struct CoordinatorProjection {
     local_server_id: ServerId,
     edges: BTreeMap<ServerId, EdgeStanding>,
-    channel_sequences: BTreeMap<ChannelInstanceId, u64>,
 }
 
 impl CoordinatorProjection {
@@ -379,7 +377,6 @@ impl CoordinatorProjection {
         Self {
             local_server_id,
             edges: BTreeMap::new(),
-            channel_sequences: BTreeMap::new(),
         }
     }
 
@@ -394,20 +391,6 @@ impl CoordinatorProjection {
         self.edges.entry(edge).or_default().insert(record);
     }
 
-    /// Restores one channel's message sequence counter.
-    pub fn restore_channel_sequence(&mut self, channel_id: ChannelInstanceId, sequence: u64) {
-        self.channel_sequences.insert(channel_id, sequence);
-    }
-
-    /// Returns the last allocated message sequence of a channel.
-    #[must_use]
-    pub fn channel_sequence(&self, channel_id: ChannelInstanceId) -> u64 {
-        self.channel_sequences
-            .get(&channel_id)
-            .copied()
-            .unwrap_or(0)
-    }
-
     /// Commits a derived projection into the standing index after the
     /// storage transaction that carried it is durable.
     pub fn apply(&mut self, projection: &MutationProjection) {
@@ -419,9 +402,6 @@ impl CoordinatorProjection {
             for record in &delta.upserts {
                 standing.insert(record);
             }
-        }
-        for (channel_id, sequence) in &projection.channel_sequences {
-            self.channel_sequences.insert(*channel_id, *sequence);
         }
     }
 
@@ -443,7 +423,6 @@ impl CoordinatorProjection {
             touched_channels: BTreeSet::new(),
             touched_users: BTreeSet::new(),
             touched_accounts: BTreeSet::new(),
-            channel_sequences: BTreeMap::new(),
         };
         for (position, event) in receipt.events().iter().enumerate() {
             let target_index = u16::try_from(position).map_err(|_| DomainError::LimitExceeded)?;
@@ -463,7 +442,6 @@ struct Derivation<'a> {
     touched_channels: BTreeSet<ChannelInstanceId>,
     touched_users: BTreeSet<UserId>,
     touched_accounts: BTreeSet<AccountId>,
-    channel_sequences: BTreeMap<ChannelInstanceId, u64>,
 }
 
 impl Derivation<'_> {
@@ -1505,7 +1483,7 @@ impl Derivation<'_> {
     /// Resolves one accepted route into its target, revision, sequence, and
     /// recipient edges, or `None` when the target does not federate.
     fn resolve_delivery(
-        &mut self,
+        &self,
         route: &crate::MessageRoute,
         sender: UserId,
     ) -> Result<Option<ResolvedDelivery>, DomainError> {
@@ -1518,7 +1496,7 @@ impl Derivation<'_> {
                     return Ok(None);
                 }
                 let target_revision = channel.revision();
-                let sequence = self.next_channel_sequence(channel_id)?;
+                let sequence = self.resulting_revision().get();
                 let edges = route
                     .recipients()
                     .iter()
@@ -1543,17 +1521,6 @@ impl Derivation<'_> {
                 }))
             }
         }
-    }
-
-    fn next_channel_sequence(&mut self, channel_id: ChannelInstanceId) -> Result<u64, DomainError> {
-        let current = self
-            .channel_sequences
-            .get(&channel_id)
-            .copied()
-            .unwrap_or_else(|| self.index.channel_sequence(channel_id));
-        let next = current.checked_add(1).ok_or(DomainError::LimitExceeded)?;
-        self.channel_sequences.insert(channel_id, next);
-        Ok(next)
     }
 
     fn invited_event(
@@ -1763,7 +1730,6 @@ impl Derivation<'_> {
         }
         Ok(MutationProjection {
             edges: deltas.into_values().collect(),
-            channel_sequences: self.channel_sequences,
         })
     }
 
