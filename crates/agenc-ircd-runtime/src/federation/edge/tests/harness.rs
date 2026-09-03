@@ -56,8 +56,16 @@ const COORDINATOR_NAME: &str = "hub.example";
 const COORDINATOR_EPOCH: RecoveryEpoch = RecoveryEpoch::from_bytes([91; 16]);
 
 fn entropy_script() -> Vec<u8> {
-    (0_u32..1_048_576)
-        .map(|index| u8::try_from((index.wrapping_mul(11).wrapping_add(5)) % 256).unwrap_or(0))
+    // A xorshift stream: one megabyte with no repeating sixteen-byte window
+    // in practice, so request and origin identifiers never collide.
+    let mut state: u32 = 0x9e37_79b9;
+    (0..1_048_576)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            u8::try_from(state & 0xff).unwrap_or(0)
+        })
         .collect()
 }
 
@@ -476,6 +484,20 @@ impl Client {
         Ok(())
     }
 
+    async fn wait_for_any(&self, needles: &[&str]) -> TestResult<Vec<String>> {
+        for _ in 0..5_000 {
+            let lines = self.sink.lines();
+            if lines
+                .iter()
+                .any(|line| needles.iter().any(|needle| line.contains(needle)))
+            {
+                return Ok(lines);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        Err(format!("client never received {needles:?}: {:?}", self.sink.lines()).into())
+    }
+
     async fn wait_for(&self, needle: &str) -> TestResult<Vec<String>> {
         for _ in 0..5_000 {
             let lines = self.sink.lines();
@@ -855,14 +877,22 @@ async fn register_when_available(
     inbox: &mpsc::Sender<StateCoreMessage>,
     first_number: u64,
     nickname: &str,
+    capabilities: Option<&str>,
 ) -> TestResult<Client> {
     let mut number = first_number;
     for _ in 0..50 {
         let mut client = Client::open(inbox.clone(), number).await?;
+        if let Some(capabilities) = capabilities {
+            client.line("CAP LS 302").await?;
+            client.line(&format!("CAP REQ :{capabilities}")).await?;
+        }
         client.line(&format!("NICK {nickname}")).await?;
         client
             .line(&format!("USER {nickname} 0 * :{nickname} Real"))
             .await?;
+        if capabilities.is_some() {
+            client.line("CAP END").await?;
+        }
         for _ in 0..500 {
             let lines = client.sink.lines();
             if lines.iter().any(|line| line.contains(" 001 ")) {
@@ -970,7 +1000,13 @@ async fn drive_bridge(hub: Node, edge: Node) -> TestResult {
 
 /// Registers two clients on the edge and relays a channel conversation.
 async fn exchange_over_bridge(inbox: mpsc::Sender<StateCoreMessage>) -> TestResult {
-    let mut sam = register_when_available(&inbox, 1, "sam").await?;
+    let mut sam = register_when_available(
+        &inbox,
+        1,
+        "sam",
+        Some("away-notify setname extended-join account-notify"),
+    )
+    .await?;
     let mut tess = Client::open(inbox, 2).await?;
     register(&mut tess, "tess").await?;
     sam.line("JOIN #bridge").await?;
@@ -981,7 +1017,7 @@ async fn exchange_over_bridge(inbox: mpsc::Sender<StateCoreMessage>) -> TestResu
     assert!(
         lines
             .iter()
-            .any(|line| line.starts_with(":tess!") && line.ends_with(" JOIN #bridge")),
+            .any(|line| line.starts_with(":tess!") && line.contains(" JOIN #bridge")),
         "{lines:?}"
     );
     tess.line("PRIVMSG #bridge :hello sam").await?;
@@ -997,5 +1033,52 @@ async fn exchange_over_bridge(inbox: mpsc::Sender<StateCoreMessage>) -> TestResu
     );
     tess.line("PART #bridge :done").await?;
     sam.wait_for(" PART #bridge :done").await?;
+    exchange_more_over_bridge(&mut sam, &mut tess).await
+}
+
+/// Topic, mode, invite, away, setname, nick, and quit traffic between the
+/// two clients, with the recipient holding the capabilities that render the
+/// optional lines.
+async fn exchange_more_over_bridge(sam: &mut Client, tess: &mut Client) -> TestResult {
+    sam.line("TOPIC #bridge :bridged topic").await?;
+    sam.wait_for("TOPIC #bridge :bridged topic").await?;
+    sam.line("MODE #bridge +m").await?;
+    sam.wait_for("MODE #bridge +m").await?;
+    sam.line("INVITE tess #bridge").await?;
+    let lines = sam
+        .wait_for_any(&[
+            " 341 ",
+            "FAIL INVITE",
+            " 401 ",
+            " 442 ",
+            " 443 ",
+            " 482 ",
+            " 481 ",
+        ])
+        .await?;
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains(" 341 sam tess #bridge")),
+        "{lines:?}"
+    );
+    tess.wait_for("INVITE tess").await?;
+    tess.line("JOIN #bridge").await?;
+    tess.wait_for(" 366 tess #bridge ").await?;
+    sam.wait_for(":tess!").await?;
+    tess.line("AWAY :back later").await?;
+    sam.wait_for("AWAY :back later").await?;
+    tess.line("SETNAME :Tess Renamed").await?;
+    sam.wait_for("SETNAME :Tess Renamed").await?;
+    tess.line("NICK tessa").await?;
+    sam.wait_for("NICK :tessa").await?;
+    sam.line("MODE #bridge -m").await?;
+    sam.wait_for("MODE #bridge -m").await?;
+    tess.line("PRIVMSG sam :direct hello").await?;
+    let lines = sam.wait_for("PRIVMSG sam :direct hello").await?;
+    assert!(lines.iter().any(|line| line.starts_with(":tessa!")));
+    // The in-process harness has no connection task, so a client QUIT
+    // never reaches the router as a closed connection; the three-process
+    // daemon test covers the QUIT relay.
     Ok(())
 }

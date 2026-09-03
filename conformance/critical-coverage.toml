@@ -3,8 +3,8 @@ minimum_overall_branch_percent = 75.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 246
-reviewed_source_sha256 = "9bec858bc715c39d71a8d23a88ece8a3738f1ea6fd0add92e79767edce8a9c40"
+reviewed_source_files = 247
+reviewed_source_sha256 = "2045b94c773ab30bba2d3a777bf9ed7ec941444e65f956847d8f4d8e0243cc4a"
 deferred = []
 
 [[region]]
@@ -42,8 +42,8 @@ id = "federation-field-kind-decode"
 category = "protocol-enum-arms"
 file = "crates/agenc-ircd-federation-wire/src/codec.rs"
 source_sha256 = "9d4e7877fd2dcf5816648f416d19b5799c5c57902843ae9754d8f55344accf9e"
-start_line = 1280
-end_line = 1347
+start_line = 1360
+end_line = 1427
 metric = "regions"
 reason = "Every closed FieldKind decode arm must run in the canonical federation codec suite."
 

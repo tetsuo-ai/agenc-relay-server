@@ -491,8 +491,14 @@ impl EdgeReplica {
                 invite_id,
                 resulting_revision,
                 local_projection,
+                inviter,
                 ..
             } => {
+                // A local inviter sees the confirmation numeric whether or
+                // not this edge hosts the target.
+                if self.sessions.contains_key(&inviter.user_id) {
+                    outcome.local_recipients.insert(inviter.user_id);
+                }
                 if let Some(record) = local_projection {
                     if record.channel_id != *channel_id || record.invite_id != *invite_id {
                         return Err(ReplicaError::InvalidRecord);

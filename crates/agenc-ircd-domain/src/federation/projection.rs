@@ -1706,9 +1706,22 @@ impl Derivation<'_> {
                 let mut edges = BTreeSet::new();
                 edges.extend(self.home_of(sender));
                 edges.extend(self.home_of(user_id));
+                // A direct message binds to the recipient's session revision
+                // at the committed state, so the edge can check it applied to
+                // the session it knows.
+                let target_revision = self
+                    .view
+                    .post_session(user_id)
+                    .map(|session| session.revision)
+                    .or_else(|| {
+                        self.view
+                            .pre_session(user_id)
+                            .map(|session| session.revision)
+                    })
+                    .ok_or(DomainError::NotFound)?;
                 Ok(Some(ResolvedDelivery {
                     target: DeliveryTarget::User(user_id),
-                    target_revision: Revision::new(0).map_err(|_| DomainError::LimitExceeded)?,
+                    target_revision,
                     sequence: 0,
                     edges,
                 }))

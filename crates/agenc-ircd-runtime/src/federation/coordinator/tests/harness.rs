@@ -40,8 +40,16 @@ const COORDINATOR: ServerId = ServerId::from_bytes([32; 16]);
 const COORDINATOR_NAME: &str = "server.example";
 
 fn entropy_script() -> Vec<u8> {
-    (0_u32..1_048_576)
-        .map(|index| u8::try_from((index.wrapping_mul(7).wrapping_add(3)) % 256).unwrap_or(0))
+    // A xorshift stream: one megabyte with no repeating sixteen-byte window
+    // in practice, so request and origin identifiers never collide.
+    let mut state: u32 = 0x2545_f491;
+    (0..1_048_576)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            u8::try_from(state & 0xff).unwrap_or(0)
+        })
         .collect()
 }
 

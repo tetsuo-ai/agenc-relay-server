@@ -800,3 +800,8 @@ pub(crate) fn delivered_message_of(
         body: owned_text(object, "body")?,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    mod round_trip;
+}
