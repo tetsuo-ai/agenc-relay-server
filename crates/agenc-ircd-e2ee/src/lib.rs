@@ -20,6 +20,8 @@
 //! - [`object`]: the `IrcWireObject` envelope, per-kind maxima, and the
 //!   transport object identifier.
 //! - [`ids`]: semantic identifiers and digests over TBS encodings.
+//! - [`identity`]: root chains, device certificates, rosters, capability
+//!   statements, leaf authorizations, credential bundles, and pinned heads.
 //! - [`signature`]: registered-label verification with role-bound public
 //!   keys; there is no signing entry point.
 //! - [`mls_outer`]: RFC 9420 outer framing, the public KeyPackage, and its
@@ -49,6 +51,7 @@
 //! ```
 
 pub mod error;
+pub mod identity;
 pub mod ids;
 pub mod limits;
 pub mod mls_outer;
@@ -61,3 +64,7 @@ pub mod tls;
 pub use error::E2eeError;
 pub use object::{IrcWireObject, IrcWireObjectKind, ObjectId};
 pub use tls::{DecodeBudget, Opaque, TlsDecode, TlsEncode, TlsVec};
+
+#[cfg(test)]
+#[path = "tests/support.rs"]
+pub(crate) mod test_support;
