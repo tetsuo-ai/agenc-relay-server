@@ -35,6 +35,10 @@
 //! - [`authorization`]: candidate-specific commit authorizations, the action
 //!   bit table, and approval envelopes.
 //! - [`finality`]: disposition votes, sign-once slots, and quorum ledgers.
+//! - [`context`]: the required MLS context extension and the context core.
+//! - [`envelope`]: application and Commit outer objects and the padding
+//!   arithmetic.
+//! - [`welcome`]: Welcome and staged ReInit wrappers and proof bundles.
 //! - [`profile`]: the exact capability value and ECAP tuple.
 //! - [`limits`]: the Section 16 constants.
 //!
@@ -60,6 +64,8 @@
 //! ```
 
 pub mod authorization;
+pub mod context;
+pub mod envelope;
 pub mod error;
 pub mod finality;
 pub mod identity;
@@ -74,6 +80,7 @@ pub mod route;
 pub mod sequencer;
 pub mod signature;
 pub mod tls;
+pub mod welcome;
 
 pub use error::E2eeError;
 pub use object::{IrcWireObject, IrcWireObjectKind, ObjectId};

@@ -865,3 +865,33 @@ pub(crate) fn principal_rosters(
     }
     Ok(map)
 }
+
+/// An MLS `Welcome` message addressing `refs`.
+pub(crate) fn welcome_message(refs: &[Vec<u8>]) -> Result<Vec<u8>, E2eeError> {
+    let mut out = vec![0, 1, 0, 3, 0, 1];
+    let mut secrets = Vec::new();
+    for reference in refs {
+        opaque_v(&mut secrets, reference)?;
+        opaque_v(&mut secrets, &[5; 32])?;
+        opaque_v(&mut secrets, &[6; 64])?;
+    }
+    opaque_v(&mut out, &secrets)?;
+    opaque_v(&mut out, &[8; 100])?;
+    Ok(out)
+}
+
+/// An MLS `PrivateMessage` with the given content type and authenticated data.
+pub(crate) fn private_message_bytes(
+    group_id: &[u8],
+    content_type: u8,
+    aad: &[u8],
+) -> Result<Vec<u8>, E2eeError> {
+    let mut out = vec![0, 1, 0, 2];
+    opaque_v(&mut out, group_id)?;
+    out.extend_from_slice(&9_u64.to_be_bytes());
+    out.push(content_type);
+    opaque_v(&mut out, aad)?;
+    opaque_v(&mut out, &[1; 40])?;
+    opaque_v(&mut out, &[2; 300])?;
+    Ok(out)
+}
