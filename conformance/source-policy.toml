@@ -9,3 +9,4 @@ forbid_unsafe = true
 forbid_panic_macros = true
 forbid_unbounded_channels = true
 forbid_unreviewed_allows = true
+e2ee_separation = true

@@ -42,7 +42,20 @@ POLICY = {
     "forbid_panic_macros": True,
     "forbid_unbounded_channels": True,
     "forbid_unreviewed_allows": True,
+    "e2ee_separation": True,
 }
+# Companion Section 20 and architecture Section 18: the server-side E2EE
+# surfaces never name an MLS secret, plaintext, decryption, or a private key.
+# The e2ee crate additionally never signs; the runtime's sequencer does.
+E2EE_CRATE_ROOT = ("crates", "agenc-ircd-e2ee", "src")
+E2EE_RUNTIME_ROOT = ("crates", "agenc-ircd-runtime", "src", "e2ee")
+E2EE_CRATE_FORBIDDEN_RE = re.compile(
+    r"\b(?:epoch_secret|init_key_private|private_key|plaintext|decrypt\w*|"
+    r"Ed25519SecretKey|SecretBytes|OpenedStoragePlaintext|sign_canonical|SigningKey)\b"
+)
+E2EE_RUNTIME_FORBIDDEN_RE = re.compile(
+    r"\b(?:epoch_secret|init_key_private|plaintext|decrypt\w*|group_secret|mls_secret)\b"
+)
 BANNED_PATTERNS = (
     (re.compile(r"\bunsafe\b"), "unsafe Rust token"),
     (re.compile(r"\.(?:unwrap|expect)\s*\("), "unwrap/expect panic path"),
@@ -261,6 +274,16 @@ def is_compilation_root(relative: Path) -> bool:
     return any(part in {"tests", "examples", "benches"} for part in parts)
 
 
+def e2ee_separation_pattern(relative: Path) -> re.Pattern[str] | None:
+    """Return the separation rule that governs a production E2EE source."""
+    parts = relative.parts
+    if parts[: len(E2EE_CRATE_ROOT)] == E2EE_CRATE_ROOT:
+        return E2EE_CRATE_FORBIDDEN_RE
+    if parts[: len(E2EE_RUNTIME_ROOT)] == E2EE_RUNTIME_ROOT:
+        return E2EE_RUNTIME_FORBIDDEN_RE
+    return None
+
+
 def is_test_source(relative: Path) -> bool:
     """Return whether assertions are inherently confined to a test target."""
     return any(part in {"tests", "benches"} for part in relative.parts)
@@ -283,6 +306,16 @@ def scan_source(relative: Path, source: str) -> list[str]:
         source_line = line_number(sanitized, match.start())
         if not has_annotation(lines, source_line, ALLOW_ANNOTATION_RE):
             errors.append(f"{relative}:{source_line}: lint allow lacks review annotation")
+
+    separation = e2ee_separation_pattern(relative)
+    if separation is not None and not is_test_source(relative):
+        for match in separation.finditer(sanitized):
+            if offset_in_ranges(match.start(), test_ranges):
+                continue
+            errors.append(
+                f"{relative}:{line_number(sanitized, match.start())}: "
+                f"E2EE separation forbids {match.group(0)!r} in a server-side E2EE surface"
+            )
 
     if not is_test_source(relative):
         for match in ASSERT_RE.finditer(sanitized):
@@ -470,6 +503,24 @@ def self_test(root: Path) -> int:
     if harmless_errors:
         raise SourcePolicyError(f"comment/string false-positive guard failed: {harmless_errors}")
     cases += 1
+    e2ee_root = Path("crates/agenc-ircd-e2ee/src/lib.rs")
+    e2ee_secret = valid + "fn bad(epoch_secret: &[u8]) -> usize { epoch_secret.len() }\n"
+    if not any("E2EE separation" in error for error in scan_source(e2ee_root, e2ee_secret)):
+        raise SourcePolicyError("self-test 'e2ee secret surface' was not rejected")
+    e2ee_signing = valid + "fn bad() { let _ = sign_canonical; }\n"
+    if not any("E2EE separation" in error for error in scan_source(e2ee_root, e2ee_signing)):
+        raise SourcePolicyError("self-test 'e2ee signing surface' was not rejected")
+    e2ee_test = valid + "#[cfg(test)]\nmod tests { fn ok(epoch_secret: u8) -> u8 { epoch_secret } }\n"
+    if any("E2EE separation" in error for error in scan_source(e2ee_root, e2ee_test)):
+        raise SourcePolicyError("self-test 'e2ee test surface' was rejected")
+    runtime_root = Path("crates/agenc-ircd-runtime/src/e2ee/mod.rs")
+    runtime_signing = valid + "fn ok() { let _ = sign_canonical; }\n"
+    if any("E2EE separation" in error for error in scan_source(runtime_root, runtime_signing)):
+        raise SourcePolicyError("self-test 'runtime sequencer signing' was rejected")
+    runtime_secret = valid + "fn bad(plaintext: &[u8]) -> usize { plaintext.len() }\n"
+    if not any("E2EE separation" in error for error in scan_source(runtime_root, runtime_secret)):
+        raise SourcePolicyError("self-test 'runtime plaintext surface' was not rejected")
+    cases += 5
     cfg_test_assertion = valid + "#[cfg(test)]\nmod tests { #[test] fn works() { assert!(true); } }\n"
     cfg_test_errors = scan_source(Path("crates/fixture/src/lib.rs"), cfg_test_assertion)
     if cfg_test_errors:
