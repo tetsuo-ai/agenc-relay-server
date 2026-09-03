@@ -359,3 +359,232 @@ pub(crate) fn encoded_capabilities(vectors: &[Vec<u8>]) -> Result<Vec<u8>, E2eeE
     }
     Ok(out)
 }
+
+/// A principal for a binding package: its root secret, root, and roster.
+pub(crate) struct Principal {
+    pub(crate) root_secret: Ed25519SecretKey,
+    pub(crate) root: IrcRootIdentity,
+    pub(crate) roster: IrcDeviceRoster,
+    /// Device seeds active in the roster, all with binding authority.
+    pub(crate) devices: Vec<u8>,
+}
+
+pub(crate) fn principal(
+    root_seed: u8,
+    account: &[u8; 24],
+    devices: &[u8],
+) -> Result<Principal, E2eeError> {
+    let root_secret = key(root_seed);
+    let root = root(&root_secret, account, 0, (0, 2_000_000), None)?;
+    let mut certificates = devices
+        .iter()
+        .map(|seed| certificate(&root_secret, &root, &DeviceSpec::new(*seed)))
+        .collect::<Result<Vec<_>, _>>()?;
+    certificates.sort_by_key(|certificate| certificate.tbs.device_id);
+    let roster = roster(
+        &root_secret,
+        &root,
+        0,
+        [0; 32],
+        (100, 100 + 6 * 24 * 3600),
+        certificates,
+        Vec::new(),
+    )?;
+    Ok(Principal {
+        root_secret,
+        root,
+        roster,
+        devices: devices.to_vec(),
+    })
+}
+
+pub(crate) struct BindingSpec<'a> {
+    pub(crate) principals: &'a [Principal],
+    pub(crate) route: crate::objects::conversation::IrcSemanticRouteTbs,
+    pub(crate) channel_instance_id: Option<[u8; 16]>,
+    pub(crate) conversation_nonce: Option<[u8; 32]>,
+    pub(crate) group_id: [u8; 32],
+    pub(crate) generation: u64,
+    pub(crate) previous_binding_id: [u8; 32],
+    pub(crate) lock_sequence: u64,
+    pub(crate) plan_devices: Vec<(&'a [u8; 24], [u8; 32], u8)>,
+}
+
+/// A complete binding package signed by every binding-authorized device of
+/// every principal, with one root lock per principal.
+pub(crate) fn binding_package(
+    spec: &BindingSpec<'_>,
+) -> Result<crate::objects::conversation::IrcConversationBindingPackage, E2eeError> {
+    use crate::objects::conversation::*;
+    let lock_id = semantic_id_of(SemanticHashDomain::SemanticRouteLock, &spec.route)?;
+    let route_binding = match (spec.channel_instance_id, spec.conversation_nonce) {
+        (Some(instance), None) => crate::route::channel_route_binding(&NETWORK, &instance)?,
+        (None, Some(nonce)) => {
+            let a = spec.route.direct_account_a.exactly::<24>()?;
+            let b = spec.route.direct_account_b.exactly::<24>()?;
+            crate::route::direct_route_binding(&NETWORK, &nonce, &a, &b)?
+        }
+        _ => return Err(E2eeError::InvalidValue),
+    };
+    let mut principals: Vec<IrcBindingPrincipal> = spec
+        .principals
+        .iter()
+        .map(|principal| {
+            Ok(IrcBindingPrincipal {
+                account_id: principal.root.tbs.account_id.clone(),
+                root_fingerprint: root_fingerprint(&principal.root)?,
+                roster_generation: 0,
+                roster_id: roster_id(&principal.roster)?,
+            })
+        })
+        .collect::<Result<_, E2eeError>>()?;
+    principals.sort_by_key(|principal| principal.account_id.clone());
+    let mut entries: Vec<IrcInitialMemberPlanEntry> = spec
+        .plan_devices
+        .iter()
+        .map(|(account, fingerprint, device)| {
+            Ok(IrcInitialMemberPlanEntry {
+                account_id: account_field(account)?,
+                root_fingerprint: *fingerprint,
+                device_id: [*device; 16],
+                capability_id: [device.wrapping_add(200); 32],
+            })
+        })
+        .collect::<Result<_, E2eeError>>()?;
+    entries.sort_by_key(|entry| {
+        (
+            entry.account_id.clone(),
+            entry.root_fingerprint,
+            entry.device_id,
+        )
+    });
+    let plan = IrcInitialMemberPlan {
+        entries: TlsVec::new(entries)?,
+    };
+    let tbs = IrcConversationBindingTbs {
+        profile_version: 1,
+        network_id: NETWORK,
+        kind: spec.route.kind,
+        binding_generation: spec.generation,
+        previous_binding_id: spec.previous_binding_id,
+        semantic_route: spec.route.clone(),
+        semantic_route_lock_id: lock_id,
+        channel_instance_id: Opaque::new(
+            spec.channel_instance_id
+                .map(|id| id.to_vec())
+                .unwrap_or_default(),
+        )?,
+        conversation_nonce: Opaque::new(
+            spec.conversation_nonce
+                .map(|nonce| nonce.to_vec())
+                .unwrap_or_default(),
+        )?,
+        group_id: Opaque::new(spec.group_id.to_vec())?,
+        conversation_id: crate::ids::conversation_id(&NETWORK, &spec.group_id)?,
+        route_binding,
+        mls_version: 1,
+        cipher_suite: 1,
+        initial_policy_id: [27; 32],
+        required_operational_policy_id: [28; 32],
+        initial_member_plan_id: semantic_id_of(SemanticHashDomain::InitialMemberPlanId, &plan)?,
+        context_core_id: [30; 32],
+        sequencer_credential_id: [31; 32],
+        principals: TlsVec::new(principals)?,
+    };
+    let binding_id = semantic_id_of(SemanticHashDomain::BindingId, &tbs)?;
+    let mut approvals = Vec::new();
+    let mut locks = Vec::new();
+    if spec.generation == 0 {
+        for principal in spec.principals {
+            let fingerprint = root_fingerprint(&principal.root)?;
+            for device in &principal.devices {
+                let certificate = certificate(
+                    &principal.root_secret,
+                    &principal.root,
+                    &DeviceSpec::new(*device),
+                )?;
+                approvals.push(IrcBindingApproval {
+                    signer_root_fingerprint: fingerprint,
+                    signer_device_id: [*device; 16],
+                    signer_device_certificate_id: semantic_id_of(
+                        SemanticHashDomain::DeviceCertificateId,
+                        &certificate.tbs,
+                    )?,
+                    device_signature: sign(
+                        &key(*device),
+                        SignatureDomain::ConversationBinding,
+                        &tbs,
+                    )?,
+                });
+            }
+            let lock_tbs = IrcRootBindingLockTbs {
+                profile_version: 1,
+                network_id: NETWORK,
+                account_id: principal.root.tbs.account_id.clone(),
+                root_fingerprint: fingerprint,
+                root_binding_sequence: spec.lock_sequence,
+                previous_root_binding_lock_id: if spec.lock_sequence == 0 {
+                    [0; 32]
+                } else {
+                    [66; 32]
+                },
+                semantic_route_lock_id: lock_id,
+                binding_id,
+                roster_generation: 0,
+                roster_id: roster_id(&principal.roster)?,
+            };
+            locks.push(IrcRootBindingLock {
+                root_signature: sign(
+                    &principal.root_secret,
+                    SignatureDomain::RootBindingLock,
+                    &lock_tbs,
+                )?,
+                tbs: lock_tbs,
+            });
+        }
+    }
+    approvals.sort_by_key(|approval| (approval.signer_root_fingerprint, approval.signer_device_id));
+    locks.sort_by_key(|lock| lock.tbs.account_id.clone());
+    Ok(IrcConversationBindingPackage {
+        binding: IrcConversationBinding {
+            tbs,
+            approvals: TlsVec::new(approvals)?,
+        },
+        initial_member_plan: plan,
+        root_binding_locks: TlsVec::new(locks)?,
+    })
+}
+
+pub(crate) fn channel_route(
+    name: &[u8],
+    authority_root: [u8; 32],
+) -> Result<crate::objects::conversation::IrcSemanticRouteTbs, E2eeError> {
+    Ok(crate::objects::conversation::IrcSemanticRouteTbs {
+        profile_version: 1,
+        network_id: NETWORK,
+        kind: crate::objects::conversation::IrcConversationKind::Channel,
+        direct_account_a: Opaque::new(Vec::new())?,
+        direct_account_b: Opaque::new(Vec::new())?,
+        canonical_channel_name: Opaque::from_slice(name)?,
+        channel_authority_root_fingerprint: authority_root,
+        semantic_incarnation: 0,
+        predecessor_close_id: [0; 32],
+    })
+}
+
+pub(crate) fn direct_route(
+    a: &[u8; 24],
+    b: &[u8; 24],
+) -> Result<crate::objects::conversation::IrcSemanticRouteTbs, E2eeError> {
+    Ok(crate::objects::conversation::IrcSemanticRouteTbs {
+        profile_version: 1,
+        network_id: NETWORK,
+        kind: crate::objects::conversation::IrcConversationKind::Direct,
+        direct_account_a: Opaque::from_slice(a)?,
+        direct_account_b: Opaque::from_slice(b)?,
+        canonical_channel_name: Opaque::new(Vec::new())?,
+        channel_authority_root_fingerprint: [0; 32],
+        semantic_incarnation: 0,
+        predecessor_close_id: [0; 32],
+    })
+}

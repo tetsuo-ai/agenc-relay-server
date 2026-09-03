@@ -8,6 +8,7 @@
 
 mod command;
 mod decision;
+pub mod e2ee;
 mod error;
 pub mod federation;
 mod model;

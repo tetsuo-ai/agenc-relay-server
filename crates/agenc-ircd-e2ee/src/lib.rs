@@ -26,6 +26,9 @@
 //!   keys; there is no signing entry point.
 //! - [`mls_outer`]: RFC 9420 outer framing, the public KeyPackage, and its
 //!   reference and signatures.
+//! - [`route`]: canonical channel names, concrete and semantic routes,
+//!   binding packages with unanimous approvals and root locks, and close
+//!   authorization identifiers.
 //! - [`profile`]: the exact capability value and ECAP tuple.
 //! - [`limits`]: the Section 16 constants.
 //!
@@ -58,6 +61,7 @@ pub mod mls_outer;
 pub mod object;
 pub mod objects;
 pub mod profile;
+pub mod route;
 pub mod signature;
 pub mod tls;
 
