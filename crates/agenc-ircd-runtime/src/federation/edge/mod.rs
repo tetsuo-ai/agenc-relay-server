@@ -30,11 +30,17 @@ use agenc_ircd_types::{
 
 use crate::RuntimeError;
 use crate::connection::ConnectionGeneration;
+use crate::e2ee::link::{
+    CompanionAction, CompanionLinks, CompanionProfile, CompanionViolation, tick_millis,
+};
 use crate::federation::link::{LinkHandle, SendRefusal};
 use crate::federation::{
     FederationInbound, IngressCharge, LinkEvent, LinkId, LinkSession, ObjectCarrier, PeerIdentity,
 };
+use crate::state_core::timers::{TimedId, TimerEntry, TimerKind};
 use agenc_ircd_client_wire::RegisteredCommandKind;
+use agenc_ircd_e2ee::federation::frames::CompanionFrame;
+use agenc_ircd_types::MonotonicTick;
 
 use crate::observe::health::{ReadinessGate, ReadinessStage};
 use crate::state_core::StateCoreContext;
@@ -145,6 +151,7 @@ pub struct EdgeFederation {
     /// so the revisions they carry are read from a replica that already
     /// reflects that request (spec 20.5 ordering per origin).
     deferred: BTreeMap<ConnectionGeneration, VecDeque<DeferredCommand>>,
+    companion: CompanionLinks,
 }
 
 /// One client command held back behind an in-flight request.
@@ -182,7 +189,9 @@ impl EdgeFederation {
     pub fn new(config: EdgeConfig) -> Self {
         let mut replica = EdgeReplica::new(config.server_id);
         let _installed = replica.install(1, Vec::new());
+        let companion = CompanionLinks::new(None, config.server_name.clone());
         Self {
+            companion,
             config,
             live: None,
             phase: Phase::Down,
@@ -203,6 +212,95 @@ impl EdgeFederation {
             readiness: None,
             deferred: BTreeMap::new(),
         }
+    }
+
+    /// Installs the companion profile before any link exists; `None`
+    /// refuses every companion frame.
+    pub fn set_companion_profile(&mut self, profile: Option<CompanionProfile>) {
+        self.companion = CompanionLinks::new(profile, self.config.server_name.clone());
+    }
+
+    /// Whether the companion profile is active on the live link.
+    #[must_use]
+    pub fn companion_active(&self) -> bool {
+        self.live
+            .as_ref()
+            .is_some_and(|live| self.companion.profile_active(live.link))
+    }
+
+    /// Drains the admitted companion frames of the live link.
+    pub fn drain_companion(&mut self) -> Vec<CompanionFrame> {
+        match self.live.as_ref() {
+            Some(live) => self.companion.drain(live.link),
+            None => Vec::new(),
+        }
+    }
+
+    fn handle_companion(
+        &mut self,
+        frame: CompanionFrame,
+    ) -> Result<Vec<EdgeCompletion>, Violation> {
+        let Some(live) = self.live.as_ref() else {
+            return Ok(Vec::new());
+        };
+        match self.companion.on_frame(live.link, frame) {
+            Ok(CompanionAction::Quiet) => Ok(Vec::new()),
+            Ok(CompanionAction::Send(line)) => match live.handle.try_send(line) {
+                Ok(()) | Err(SendRefusal::Closed) => Ok(Vec::new()),
+                Err(SendRefusal::QueueFull) => Err(Violation::SlowConsumer),
+            },
+            Err(violation) => {
+                if let Ok(line) = self.companion.violation_line() {
+                    let _ = live.handle.try_send(line);
+                }
+                Err(Violation::Companion(violation))
+            }
+        }
+    }
+
+    fn start_companion(&mut self, context: &mut StateCoreContext) {
+        let Some(live) = self.live.as_ref() else {
+            return;
+        };
+        let now = context.now();
+        let link = live.link;
+        match self.companion.link_established(link, tick_millis(now)) {
+            Ok(Some(offer)) => {
+                let _ = live.handle.try_send(offer);
+                let deadline = self
+                    .companion
+                    .deadline(link)
+                    .map_or(now, MonotonicTick::from_ticks);
+                let _ = context.timers_mut().schedule(
+                    deadline,
+                    TimerKind::CompanionProfileDeadline,
+                    TimedId::Peer(self.config.coordinator.server_id()),
+                );
+            }
+            Ok(None) => {}
+            Err(violation) => self.fail_link(context, Violation::Companion(violation)),
+        }
+    }
+
+    /// Handles a due timer; returns `false` when it was not the edge's.
+    pub fn timer_fired(&mut self, context: &mut StateCoreContext, entry: TimerEntry) -> bool {
+        let (TimerKind::CompanionProfileDeadline, TimedId::Peer(peer)) = (entry.kind, entry.id)
+        else {
+            return false;
+        };
+        if peer != self.config.coordinator.server_id() {
+            return false;
+        }
+        let Some(link) = self.live.as_ref().map(|live| live.link) else {
+            return true;
+        };
+        if let Err(violation) = self
+            .companion
+            .deadline_fired(link, tick_millis(entry.deadline))
+        {
+            self.fail_link(context, Violation::Companion(violation));
+        }
+        true
     }
 
     /// Returns the STATS counters.
@@ -297,7 +395,11 @@ impl EdgeFederation {
                 let outcome = self.handle_object(context, carrier, object, charge);
                 self.settle(context, link, outcome)
             }
-            LinkEvent::Frame(_) | LinkEvent::Object { .. } => Vec::new(),
+            LinkEvent::Companion(frame) if self.link_is(link) => {
+                let outcome = self.handle_companion(frame);
+                self.settle(context, link, outcome)
+            }
+            LinkEvent::Frame(_) | LinkEvent::Object { .. } | LinkEvent::Companion(_) => Vec::new(),
         }
     }
 
@@ -339,13 +441,19 @@ impl EdgeFederation {
         });
         self.phase = Phase::Origins;
         self.note_phase();
+        self.start_companion(context);
         sync::begin(self, context);
     }
 
-    fn link_closed(&mut self, _context: &mut StateCoreContext, link: LinkId) {
+    fn link_closed(&mut self, context: &mut StateCoreContext, link: LinkId) {
         if !self.link_is(link) {
             return;
         }
+        self.companion.link_closed(link);
+        let _cancelled = context.timers_mut().cancel(
+            TimerKind::CompanionProfileDeadline,
+            TimedId::Peer(self.config.coordinator.server_id()),
+        );
         self.live = None;
         self.phase = Phase::Down;
         self.note_phase();
@@ -761,6 +869,8 @@ pub enum Violation {
     SlowConsumer,
     /// A bounded ceiling was crossed.
     Ceiling,
+    /// A companion frame or its negotiation violated the IRC-MLS profile.
+    Companion(CompanionViolation),
 }
 
 impl From<RuntimeError> for Violation {

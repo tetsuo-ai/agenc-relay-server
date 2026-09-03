@@ -7,6 +7,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use agenc_ircd_client_wire::{FramingError, StreamFramer};
+use agenc_ircd_e2ee::federation::frames::{
+    CompanionFrame, is_companion_command, parse_companion_frame,
+};
 use agenc_ircd_federation_wire::{
     AssemblyProgress, FederationCommandTag, FederationFrame, FederationLine, FederationLineText,
     FragmentAssembler, FragmentDescriptorKey, FrameError,
@@ -74,11 +77,19 @@ pub enum ReadFailure {
     Frame(FrameError),
 }
 
+/// One parsed line: a base federation frame or a companion frame.
+pub enum ParsedLine {
+    /// A base `F*` frame.
+    Base(FederationFrame),
+    /// A companion `E*` frame.
+    Companion(CompanionFrame),
+}
+
 /// Reads complete typed frames from one transport.
 pub struct FrameReader<S> {
     stream: S,
     framer: StreamFramer,
-    pending: VecDeque<FederationFrame>,
+    pending: VecDeque<ParsedLine>,
     rejected: bool,
     buffer: Vec<u8>,
     expected_prefix: String,
@@ -113,8 +124,19 @@ impl<S: AsyncRead + Unpin> FrameReader<S> {
         self.stream
     }
 
-    /// Returns the next complete frame, reading as needed.
+    /// Returns the next base frame; a companion frame here is a grammar
+    /// failure, as it was before the companion profile existed.
     pub async fn next_frame(&mut self) -> Result<FederationFrame, ReadFailure> {
+        match self.next_line().await? {
+            ParsedLine::Base(frame) => Ok(frame),
+            ParsedLine::Companion(_) => Err(ReadFailure::Frame(FrameError::Text(
+                agenc_ircd_federation_wire::FederationTextError::UnknownCommandForm,
+            ))),
+        }
+    }
+
+    /// Returns the next complete line, reading as needed.
+    pub async fn next_line(&mut self) -> Result<ParsedLine, ReadFailure> {
         loop {
             if let Some(frame) = self.pending.pop_front() {
                 return Ok(frame);
@@ -135,7 +157,7 @@ impl<S: AsyncRead + Unpin> FrameReader<S> {
                 if failure.is_some() {
                     return;
                 }
-                match parse_frame(line.as_str(), expected_prefix) {
+                match parse_line(line.as_str(), expected_prefix) {
                     Ok(frame) => pending.push_back(frame),
                     Err(error) => failure = Some(error),
                 }
@@ -174,9 +196,40 @@ impl<S: AsyncRead + AsyncWrite + Unpin> FrameReader<S> {
     }
 }
 
-/// Parses one complete line into a typed frame.
-pub fn parse_frame(line: &str, expected_prefix: &str) -> Result<FederationFrame, ReadFailure> {
+/// Parses one complete line into a base or companion frame. A companion
+/// line must carry the authenticated peer prefix and, when tagged, the
+/// companion tag key; a base line never carries the companion key.
+pub fn parse_line(line: &str, expected_prefix: &str) -> Result<ParsedLine, ReadFailure> {
     let parts = split_line(line).map_err(|_| ReadFailure::Framing)?;
+    if is_companion_command(parts.command) {
+        if parts.prefix != expected_prefix {
+            return Err(ReadFailure::Frame(FrameError::WrongPrefix));
+        }
+        if parts.tag_value.is_some() && !parts.companion_tag {
+            return Err(ReadFailure::Framing);
+        }
+        return parse_companion_frame(parts.command, &parts.parameters, parts.tag_value)
+            .map(ParsedLine::Companion)
+            .map_err(|_| ReadFailure::Framing);
+    }
+    if parts.companion_tag {
+        return Err(ReadFailure::Framing);
+    }
+    parse_base_frame(parts, expected_prefix).map(ParsedLine::Base)
+}
+
+/// Parses one complete line into a base frame; a companion line fails.
+pub fn parse_frame(line: &str, expected_prefix: &str) -> Result<FederationFrame, ReadFailure> {
+    match parse_line(line, expected_prefix)? {
+        ParsedLine::Base(frame) => Ok(frame),
+        ParsedLine::Companion(_) => Err(ReadFailure::Framing),
+    }
+}
+
+fn parse_base_frame(
+    parts: crate::federation::line::LineParts<'_>,
+    expected_prefix: &str,
+) -> Result<FederationFrame, ReadFailure> {
     let tags: Vec<FederationCommandTag<'_>> = parts
         .tag_value
         .into_iter()
@@ -395,7 +448,7 @@ where
         let step = tokio::select! {
             () = link.context.token.cancelled() => return LinkCloseReason::Cancelled,
             outbound = queue.receiver.recv() => Step::Outbound(outbound),
-            frame = reader.next_frame() => Step::Inbound(frame.map(Box::new)),
+            frame = reader.next_line() => Step::Inbound(frame.map(Box::new)),
             () = tokio::time::sleep_until(deadline) => Step::Deadline,
         };
         let now = Instant::now();
@@ -446,13 +499,22 @@ impl<W: AsyncWrite + Unpin> LinkLoop<W> {
         written.map_err(|_| LinkCloseReason::Transport)
     }
 
-    async fn on_inbound(
-        &mut self,
-        frame: FederationFrame,
-        now: Instant,
-    ) -> Result<(), LinkCloseReason> {
+    async fn on_inbound(&mut self, line: ParsedLine, now: Instant) -> Result<(), LinkCloseReason> {
         self.keepalive.frame_received(now);
         let now_millis = millis_since(self.started, now);
+        let frame = match line {
+            ParsedLine::Base(frame) => frame,
+            ParsedLine::Companion(frame) => {
+                let bytes = frame
+                    .fragment()
+                    .map_or(0, |fragment| fragment.segment.len());
+                let charge = u32::try_from(bytes)
+                    .ok()
+                    .and_then(|bytes| bytes.checked_add(CONTROL_FRAME_CHARGE_BYTES))
+                    .ok_or(LinkCloseReason::Transport)?;
+                return forward(&self.context, LinkEvent::Companion(frame), charge).await;
+            }
+        };
         handle_frame(
             frame,
             &mut self.writer,
@@ -498,7 +560,7 @@ impl<W: AsyncWrite + Unpin> LinkLoop<W> {
 
 enum Step {
     Outbound(Option<LinkOutbound>),
-    Inbound(Result<Box<FederationFrame>, ReadFailure>),
+    Inbound(Result<Box<ParsedLine>, ReadFailure>),
     Deadline,
 }
 
@@ -757,4 +819,45 @@ pub async fn notify(
         charge: None,
     };
     inbound.send(message).await.is_ok()
+}
+
+#[cfg(test)]
+mod companion_line_tests {
+    use agenc_ircd_e2ee::wire::tokens::base64url_encode;
+
+    use super::*;
+
+    #[test]
+    fn companion_lines_parse_only_under_the_peer_prefix_and_key() {
+        let sid = base64url_encode(&[1; 16]);
+        let ack = format!(":edge.example EACK {sid} 1 2 {sid}");
+        assert!(matches!(
+            parse_line(&ack, "edge.example"),
+            Ok(ParsedLine::Companion(CompanionFrame::Ack(_)))
+        ));
+        assert!(matches!(
+            parse_line(&ack, "other.example"),
+            Err(ReadFailure::Frame(FrameError::WrongPrefix))
+        ));
+        assert!(matches!(
+            parse_frame(&ack, "edge.example"),
+            Err(ReadFailure::Framing)
+        ));
+        let tagged = format!("@agenc.ag/fed=v1.x.0.1.3.YWJj :edge.example EACK {sid} 1 2 {sid}");
+        assert!(matches!(
+            parse_line(&tagged, "edge.example"),
+            Err(ReadFailure::Framing)
+        ));
+        let base_with_companion_tag =
+            format!("@agenc.ag/e2ee=v1.x.0.1.3.YWJj :edge.example FACK {sid} 1 {sid}");
+        assert!(matches!(
+            parse_line(&base_with_companion_tag, "edge.example"),
+            Err(ReadFailure::Framing)
+        ));
+        let malformed = format!(":edge.example EACK {sid} 01 2 {sid}");
+        assert!(matches!(
+            parse_line(&malformed, "edge.example"),
+            Err(ReadFailure::Framing)
+        ));
+    }
 }

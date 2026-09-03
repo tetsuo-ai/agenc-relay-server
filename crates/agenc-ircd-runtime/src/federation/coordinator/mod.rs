@@ -36,6 +36,9 @@ use agenc_ircd_types::{
 use crate::RuntimeError;
 use crate::bridge::StorageReadId;
 use crate::bridge::crypto::{ChannelKeyVerifier, ChannelKeyVerifierRecord};
+use crate::e2ee::link::{
+    CompanionAction, CompanionLinks, CompanionProfile, CompanionViolation, tick_millis,
+};
 use crate::federation::link::{LinkHandle, SendRefusal};
 use crate::federation::{
     FederationInbound, IngressCharge, LinkCloseReason, LinkEvent, LinkId, LinkSession,
@@ -43,8 +46,10 @@ use crate::federation::{
 };
 use crate::state_core::durable::AccountServiceDurableWrite;
 use crate::state_core::projector::{EdgeDelivery, OutboundEvent};
+use crate::state_core::timers::{TimedId, TimerEntry, TimerKind};
 use crate::state_core::{PeerQuarantineRefusal, StateCoreContext};
 use crate::sync::Arc;
+use agenc_ircd_e2ee::federation::frames::CompanionFrame;
 
 pub(crate) use request::PendingCrypto;
 
@@ -135,6 +140,8 @@ pub enum Violation {
     SlowConsumer,
     /// A per-link ceiling was crossed.
     Ceiling,
+    /// A companion frame or its negotiation violated the IRC-MLS profile.
+    Companion(CompanionViolation),
 }
 
 /// What one staged batch must finish once it commits.
@@ -210,6 +217,7 @@ pub struct FederationCoordinator {
     backlog: VecDeque<FederationInbound>,
     queries: query::Queries,
     counters: CoordinatorCounters,
+    companion: CompanionLinks,
 }
 
 impl FederationCoordinator {
@@ -250,7 +258,9 @@ impl FederationCoordinator {
             })
             .collect();
         let queries = query::Queries::new(config.query_cursor_key, config.process_nonce);
+        let companion = CompanionLinks::new(None, config.server_name.clone());
         Self {
+            companion,
             config,
             verifier,
             dummy,
@@ -370,7 +380,11 @@ impl FederationCoordinator {
         if !self.peers.contains_key(&peer) {
             return;
         }
-        if self.pending.is_some() && matches!(event, LinkEvent::Frame(_) | LinkEvent::Object { .. })
+        if self.pending.is_some()
+            && matches!(
+                event,
+                LinkEvent::Frame(_) | LinkEvent::Object { .. } | LinkEvent::Companion(_)
+            )
         {
             if self.backlog.len() >= MAX_BACKLOG {
                 self.fail_link(context, link, peer, Violation::SlowConsumer);
@@ -392,10 +406,113 @@ impl FederationCoordinator {
                 self.backlog.retain(|message| message.link != link);
                 self.link_closed(context, link, peer, reason);
             }
-            LinkEvent::Frame(_) | LinkEvent::Object { .. } => {
+            LinkEvent::Frame(_) | LinkEvent::Object { .. } | LinkEvent::Companion(_) => {
                 self.handle_traffic(context, link, peer, event, charge);
             }
         }
+    }
+
+    /// Installs the companion profile before any link exists; `None`
+    /// refuses every companion frame.
+    pub fn set_companion_profile(&mut self, profile: Option<CompanionProfile>) {
+        self.companion = CompanionLinks::new(profile, self.config.server_name.clone());
+    }
+
+    /// Whether the companion profile is active on the live link of `peer`.
+    #[must_use]
+    pub fn companion_active(&self, peer: ServerId) -> bool {
+        self.peers
+            .get(&peer)
+            .and_then(|state| state.live.as_ref())
+            .is_some_and(|live| self.companion.profile_active(live.link))
+    }
+
+    /// Drains the admitted companion frames of `peer`'s live link.
+    pub fn drain_companion(&mut self, peer: ServerId) -> Vec<CompanionFrame> {
+        match self.peers.get(&peer).and_then(|state| state.live.as_ref()) {
+            Some(live) => self.companion.drain(live.link),
+            None => Vec::new(),
+        }
+    }
+
+    fn handle_companion(
+        &mut self,
+        link: LinkId,
+        peer: ServerId,
+        frame: CompanionFrame,
+    ) -> Result<(), Violation> {
+        let Some(live) = self
+            .peers
+            .get(&peer)
+            .and_then(|state| state.live.as_ref())
+            .filter(|live| live.link == link)
+        else {
+            return Ok(());
+        };
+        match self.companion.on_frame(link, frame) {
+            Ok(CompanionAction::Quiet) => Ok(()),
+            Ok(CompanionAction::Send(line)) => match live.handle.try_send(line) {
+                Ok(()) | Err(SendRefusal::Closed) => Ok(()),
+                Err(SendRefusal::QueueFull) => Err(Violation::SlowConsumer),
+            },
+            Err(violation) => {
+                if let Ok(line) = self.companion.violation_line() {
+                    let _ = live.handle.try_send(line);
+                }
+                Err(Violation::Companion(violation))
+            }
+        }
+    }
+
+    fn start_companion(&mut self, context: &mut StateCoreContext, link: LinkId, peer: ServerId) {
+        let now = context.now();
+        let outcome = self.companion.link_established(link, tick_millis(now));
+        let Some(live) = self
+            .peers
+            .get(&peer)
+            .and_then(|state| state.live.as_ref())
+            .filter(|live| live.link == link)
+        else {
+            return;
+        };
+        match outcome {
+            Ok(Some(offer)) => {
+                let _ = live.handle.try_send(offer);
+                let deadline = self
+                    .companion
+                    .deadline(link)
+                    .map_or(now, MonotonicTick::from_ticks);
+                let _ = context.timers_mut().schedule(
+                    deadline,
+                    TimerKind::CompanionProfileDeadline,
+                    TimedId::Peer(peer),
+                );
+            }
+            Ok(None) => {}
+            Err(violation) => self.fail_link(context, link, peer, Violation::Companion(violation)),
+        }
+    }
+
+    fn companion_timer_fired(&mut self, context: &mut StateCoreContext, entry: TimerEntry) -> bool {
+        let (TimerKind::CompanionProfileDeadline, TimedId::Peer(peer)) = (entry.kind, entry.id)
+        else {
+            return false;
+        };
+        let Some(link) = self
+            .peers
+            .get(&peer)
+            .and_then(|state| state.live.as_ref())
+            .map(|live| live.link)
+        else {
+            return true;
+        };
+        if let Err(violation) = self
+            .companion
+            .deadline_fired(link, tick_millis(entry.deadline))
+        {
+            self.fail_link(context, link, peer, Violation::Companion(violation));
+        }
+        true
     }
 
     /// Runs one frame or object handler on a live link. A handler may
@@ -417,6 +534,7 @@ impl FederationCoordinator {
             LinkEvent::Object { carrier, object } => {
                 self.handle_object(context, link, peer, carrier, object, charge)
             }
+            LinkEvent::Companion(frame) => self.handle_companion(link, peer, frame),
             LinkEvent::Established { .. } | LinkEvent::Closed(_) => return,
         };
         if let Err(violation) = outcome
@@ -479,6 +597,7 @@ impl FederationCoordinator {
                 );
             }
         }
+        self.start_companion(context, session.link, session.peer);
     }
 
     fn link_closed(
@@ -492,6 +611,10 @@ impl FederationCoordinator {
             return;
         }
         self.links.remove(&link);
+        self.companion.link_closed(link);
+        let _cancelled = context
+            .timers_mut()
+            .cancel(TimerKind::CompanionProfileDeadline, TimedId::Peer(peer));
         if let Some(state) = self.peers.get_mut(&peer) {
             state.live = None;
             state.queued.clear();
@@ -806,7 +929,9 @@ impl FederationCoordinator {
         context: &mut StateCoreContext,
         entry: crate::state_core::timers::TimerEntry,
     ) -> bool {
-        grace::timer_fired(self, context, entry) || snapshot::timer_fired(self, context, entry)
+        grace::timer_fired(self, context, entry)
+            || snapshot::timer_fired(self, context, entry)
+            || self.companion_timer_fired(context, entry)
     }
 
     /// Finishes the batch that just committed and delivers its events.

@@ -496,7 +496,26 @@ pub struct FederationLineText {
     text: String,
 }
 
+/// The physical S2S line ceiling (spec 20.3): 8,191 tag bytes plus a
+/// 512-byte line.
+const MAX_RENDERED_LINE_BYTES: usize = 8_703;
+
 impl FederationLineText {
+    /// Wraps a line rendered elsewhere (a companion frame): it must end with
+    /// CRLF, contain no other control byte, and fit the physical ceiling.
+    pub fn from_rendered(text: String) -> Result<Self, FrameError> {
+        let body = text.strip_suffix(CRLF).ok_or(FrameError::MissingPrefix)?;
+        if body.is_empty()
+            || text.len() > MAX_RENDERED_LINE_BYTES
+            || body
+                .bytes()
+                .any(|byte| byte == b'\r' || byte == b'\n' || byte == 0)
+        {
+            return Err(FrameError::Text(FederationTextError::UnknownCommandForm));
+        }
+        Ok(Self { text })
+    }
+
     /// Borrows the complete line including CRLF.
     #[must_use]
     pub fn as_str(&self) -> &str {
