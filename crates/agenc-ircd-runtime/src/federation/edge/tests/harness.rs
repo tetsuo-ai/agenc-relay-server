@@ -1082,3 +1082,40 @@ async fn exchange_more_over_bridge(sam: &mut Client, tess: &mut Client) -> TestR
     // daemon test covers the QUIT relay.
     Ok(())
 }
+
+#[tokio::test]
+async fn a_closed_queue_retires_the_link_without_a_violation() -> TestResult {
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let context = fixture.context_mut()?;
+    let mut edge = EdgeFederation::new(EdgeConfig {
+        network_id: NETWORK,
+        server_id: EDGE,
+        server_name: EDGE_NAME.to_owned(),
+        incarnation: EDGE_INCARNATION,
+        coordinator: coordinator_identity(),
+    });
+    // The link task is already gone when the edge writes its FORIGIN RESET.
+    let (handle, queue) = link_queue(1 << 20);
+    drop(queue);
+    let link = LinkId::new(7);
+    let session = LinkSession {
+        link,
+        peer: COORDINATOR,
+        peer_incarnation: ServerIncarnation::from_bytes([92; 16]),
+        peer_recovery_epoch: COORDINATOR_EPOCH,
+        transition: agenc_ircd_federation_wire::EpochTransition::Initial,
+    };
+    edge.inbound(
+        context,
+        FederationInbound {
+            link,
+            peer: COORDINATOR,
+            event: LinkEvent::Established { session, handle },
+            charge: None,
+        },
+    );
+    assert_eq!(edge.counters().violations, 0);
+    assert!(edge.live.is_none(), "the dead link is retired at once");
+    assert_eq!(edge.phase, Phase::Down);
+    Ok(())
+}

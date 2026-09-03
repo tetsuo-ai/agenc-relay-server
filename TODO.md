@@ -2011,7 +2011,16 @@ rediscover them.
 - `PEER QUARANTINE` confirms against the process revision; a quarantined
   peer's live link closes and every later link is closed at once.
 - A federated coordinator keeps edge-hosted sessions across a restart; the
-  origin exchange and the grace sweep reconcile them.
+  origin exchange and the grace sweep reconcile them. The grace timer does
+  not survive the restart, so every restored peer without a live link gets
+  one fresh grace interval measured from the boot, and an expiry the
+  restart interrupted resumes hiding the sessions it still hosts.
+- An edge that returns under a new incarnation fences the previous one
+  (FED-04); the sessions the previous incarnation hosted are hidden as soon
+  as its FORIGIN RESET is accepted rather than after a grace interval.
+- A write that finds a link task already gone retires the link at once
+  without counting a protocol violation; the owner's `Closed` event then
+  finds nothing live.
 - Deferred: durable edge pending-request rows and edge startup reload (an
   edge resynchronizes through a snapshot when its cursor is unknown), old
   projection generation cleanup on the coordinator, a Loom model of link

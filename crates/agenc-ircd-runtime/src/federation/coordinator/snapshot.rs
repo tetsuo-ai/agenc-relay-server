@@ -104,8 +104,9 @@ pub(super) fn resume(
         projection_generation: generation,
         next_delivery_sequence: next,
     };
-    coordinator.send_frame(context, link, peer, &frame);
-    start_resend(coordinator, context, peer, next);
+    if coordinator.send_frame(context, link, peer, &frame) {
+        start_resend(coordinator, context, peer, next);
+    }
     Ok(())
 }
 
@@ -296,8 +297,8 @@ fn replay_row(
             coordinator.counters.events_sent = coordinator.counters.events_sent.saturating_add(1);
             true
         }
-        Err(violation) => {
-            coordinator.fail_link(context, link, peer, violation);
+        Err(failure) => {
+            coordinator.send_failed(context, link, peer, failure);
             false
         }
     }
@@ -392,7 +393,11 @@ fn begin_snapshot(
             TimedId::Peer(peer),
         )
         .map_err(|_| Violation::Ceiling)?;
-    announce(coordinator, context, link, peer, identity);
+    if !announce(coordinator, context, link, peer, identity) {
+        // The link ended under the announcement; its loss already dropped
+        // the opened generation.
+        return Ok(());
+    }
     stage_marker(
         coordinator,
         context,
@@ -403,14 +408,15 @@ fn begin_snapshot(
     Ok(())
 }
 
-/// Sends FRESUME SNAPSHOT and FSNAPSHOT BEGIN for the opened generation.
+/// Sends FRESUME SNAPSHOT and FSNAPSHOT BEGIN for the opened generation;
+/// returns whether the link is still live afterwards.
 fn announce(
     coordinator: &mut FederationCoordinator,
     context: &mut StateCoreContext,
     link: LinkId,
     peer: ServerId,
     identity: SnapshotIdentity,
-) {
+) -> bool {
     let entry_count = coordinator
         .peers
         .get(&peer)
@@ -425,8 +431,7 @@ fn announce(
         &FederationFrame::ResumeSnapshot {
             edge_server_id: peer,
         },
-    );
-    coordinator.send_frame(
+    ) && coordinator.send_frame(
         context,
         link,
         peer,
@@ -435,7 +440,7 @@ fn announce(
             identity,
             entry_count,
         },
-    );
+    )
 }
 
 /// From this safe point every event and standing delta for the edge is
@@ -536,14 +541,14 @@ pub(super) fn continue_send(
             object_id: federation_object_id(encoded),
             fragment,
         };
-        if let Err(violation) = send_object(
+        if let Err(failure) = send_object(
             &live.handle,
             &coordinator.config.server_name,
             encoded,
             frame,
         ) {
             let link = live.link;
-            coordinator.fail_link(context, link, peer, violation);
+            coordinator.send_failed(context, link, peer, failure);
             return;
         }
         snapshot.next_send = snapshot.next_send.saturating_add(1);
@@ -829,8 +834,9 @@ pub(super) fn ready(
             edge_server_id: peer,
             identity,
         };
-        coordinator.send_frame(context, link, peer, &frame);
-        start_resend(coordinator, context, peer, 0);
+        if coordinator.send_frame(context, link, peer, &frame) {
+            start_resend(coordinator, context, peer, 0);
+        }
         return Ok(());
     }
     let Some(snapshot) = state.snapshot.as_mut() else {
@@ -871,8 +877,9 @@ pub(super) fn ready_committed(
         identity: snapshot.identity,
     };
     let link = snapshot.link;
-    coordinator.send_frame(context, link, peer, &frame);
-    start_resend(coordinator, context, peer, 0);
+    if coordinator.send_frame(context, link, peer, &frame) {
+        start_resend(coordinator, context, peer, 0);
+    }
 }
 
 /// Handles the pacing and expiry timers; returns whether one was federation's.

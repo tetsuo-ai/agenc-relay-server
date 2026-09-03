@@ -20,8 +20,8 @@ use agenc_ircd_runtime::federation::hello::{
     HelloFailure, PeerHistory, build_hello, exchange_hello,
 };
 use agenc_ircd_runtime::federation::link::{
-    FrameReader, LinkContext, LinkHandle, LinkTiming, ingress_budget, link_queue, notify, run_link,
-    write_line,
+    FrameReader, LinkContext, LinkHandle, LinkTiming, SendRefusal, ingress_budget, link_queue,
+    notify, run_link, write_line,
 };
 use agenc_ircd_runtime::federation::{
     FederationInbound, LinkCloseReason, LinkEvent, LinkId, LocalIdentity, ObjectCarrier,
@@ -859,5 +859,27 @@ async fn server_reader_accepts_a_scripted_client_line() -> TestResult {
         matches!(frame, Ok(FederationFrame::Ack { .. })),
         "server read the wrong frame"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_queue_names_a_full_ceiling_and_a_closed_link_apart() -> TestResult {
+    let ready = FederationFrame::OriginReady {
+        edge_server_id: ServerId::from_bytes([2; 16]),
+        server_incarnation: ServerIncarnation::from_bytes([3; 16]),
+    };
+    let (tiny, _queue) = link_queue(1);
+    assert_eq!(
+        tiny.try_send(ready.render(EDGE_NAME)?),
+        Err(SendRefusal::QueueFull)
+    );
+    assert_eq!(tiny.queued_bytes(), 0);
+    let (handle, queue) = link_queue(1 << 20);
+    drop(queue);
+    assert_eq!(
+        handle.try_send(ready.render(EDGE_NAME)?),
+        Err(SendRefusal::Closed)
+    );
+    assert_eq!(handle.queued_bytes(), 0, "a refused line holds no bytes");
     Ok(())
 }

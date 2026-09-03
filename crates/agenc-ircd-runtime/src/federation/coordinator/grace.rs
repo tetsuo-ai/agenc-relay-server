@@ -3,6 +3,7 @@
 
 use agenc_ircd_domain::CanonicalCommand;
 use agenc_ircd_domain::federation::{MutationContext, SessionHideKind};
+use agenc_ircd_storage::federation_records::PeerPhase;
 use agenc_ircd_types::{ServerId, UserId};
 
 use super::{FederationCoordinator, PendingCommit};
@@ -26,11 +27,52 @@ pub(super) fn link_lost(
         return;
     };
     state.grace_deadline = Some(deadline);
-    state.phase = agenc_ircd_storage::federation_records::PeerPhase::Suspended;
+    state.phase = PeerPhase::Suspended;
     let _scheduled =
         context
             .timers_mut()
             .schedule(deadline, TimerKind::FederationGrace, TimedId::Peer(peer));
+}
+
+/// Applies link loss to every peer the reload restored without a live link.
+/// The grace timer does not survive a restart, so the interval restarts
+/// here; an incarnation already expired resumes its interrupted cleanup.
+pub(super) fn restored(coordinator: &mut FederationCoordinator, context: &mut StateCoreContext) {
+    let restored: Vec<(ServerId, PeerPhase)> = coordinator
+        .peers
+        .iter()
+        .filter(|(_, state)| state.live.is_none() && state.incarnation.is_some())
+        .map(|(peer, state)| (*peer, state.phase))
+        .collect();
+    for (peer, phase) in restored {
+        match phase {
+            PeerPhase::Ready | PeerPhase::Suspended => link_lost(coordinator, context, peer),
+            PeerPhase::Expired => queue_hosted_cleanup(coordinator, context, peer),
+            PeerPhase::Clean => {}
+        }
+    }
+}
+
+/// Queues every session the edge still hosts for hiding and starts on it.
+pub(super) fn queue_hosted_cleanup(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    peer: ServerId,
+) {
+    let hosted: Vec<UserId> = context
+        .domain()
+        .session_user_ids()
+        .filter(|user_id| {
+            context
+                .domain()
+                .session(*user_id)
+                .is_some_and(|session| session.home_server_id() == peer)
+        })
+        .collect();
+    if let Some(state) = coordinator.peers.get_mut(&peer) {
+        state.cleanup.extend(hosted);
+    }
+    continue_cleanup(coordinator, context, peer);
 }
 
 /// Cancels a pending grace timer when the edge reconnects in time.
@@ -55,37 +97,44 @@ pub(super) fn timer_fired(
     if coordinator.origins.expire(peer, entry.deadline).is_none() {
         return true;
     }
-    let hosted: Vec<UserId> = context
-        .domain()
-        .session_user_ids()
-        .filter(|user_id| {
-            context
-                .domain()
-                .session(*user_id)
-                .is_some_and(|session| session.home_server_id() == peer)
-        })
-        .collect();
     if let Some(state) = coordinator.peers.get_mut(&peer) {
-        state.phase = agenc_ircd_storage::federation_records::PeerPhase::Expired;
+        state.phase = PeerPhase::Expired;
         state.grace_deadline = None;
-        state.cleanup.extend(hosted);
     }
-    continue_cleanup(coordinator, context, peer);
+    queue_hosted_cleanup(coordinator, context, peer);
     true
 }
 
 /// Hides the next queued session of one edge as its own durable plan.
-/// Each commit re-enters here until the queue is empty.
+/// Each commit re-enters here until the queue is empty; another edge whose
+/// queue filled meanwhile is taken up once this one is drained.
 pub(super) fn continue_cleanup(
     coordinator: &mut FederationCoordinator,
     context: &mut StateCoreContext,
     peer: ServerId,
 ) {
-    if coordinator.pending.is_some() {
+    if coordinator.pending.is_some() || hide_next(coordinator, context, peer) {
         return;
     }
+    let waiting = coordinator
+        .peers
+        .iter()
+        .find(|(other, state)| **other != peer && !state.cleanup.is_empty())
+        .map(|(other, _)| *other);
+    if let Some(next) = waiting {
+        let _staged = hide_next(coordinator, context, next);
+    }
+}
+
+/// Stages the hide plan of the next queued session; returns whether one
+/// batch is now pending.
+fn hide_next(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    peer: ServerId,
+) -> bool {
     let Some(state) = coordinator.peers.get_mut(&peer) else {
-        return;
+        return false;
     };
     while let Some(user_id) = state.cleanup.pop_front() {
         let Some(bound) = super::request::bound_for(context, user_id) else {
@@ -109,9 +158,10 @@ pub(super) fn continue_cleanup(
             coordinator.counters.sessions_expired =
                 coordinator.counters.sessions_expired.saturating_add(1);
             coordinator.pending = Some(PendingCommit::Cleanup { peer });
-            return;
+            return true;
         }
         state.cleanup.push_front(user_id);
-        return;
+        return false;
     }
+    false
 }

@@ -23,7 +23,7 @@ const ORIGIN_DECODE_VALUES: usize = 64;
 /// Accepts FORIGIN RESET for the live incarnation.
 pub(super) fn reset(
     coordinator: &mut FederationCoordinator,
-    _context: &mut StateCoreContext,
+    context: &mut StateCoreContext,
     peer: ServerId,
     incarnation: ServerIncarnation,
 ) -> Result<(), Violation> {
@@ -36,8 +36,14 @@ pub(super) fn reset(
         return Err(Violation::Misaddressed);
     }
     coordinator.origins.reset(peer, incarnation);
-    state.incarnation = Some(incarnation);
+    let previous = state.incarnation.replace(incarnation);
     state.phase = agenc_ircd_storage::federation_records::PeerPhase::Suspended;
+    if previous.is_some_and(|previous| previous != incarnation) {
+        // A new incarnation permanently fences the previous one (FED-04), so
+        // the sessions it hosted can never be closed by their owners again;
+        // they are hidden now instead of waiting for a grace interval.
+        grace::queue_hosted_cleanup(coordinator, context, peer);
+    }
     Ok(())
 }
 

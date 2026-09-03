@@ -36,7 +36,7 @@ use agenc_ircd_types::{
 use crate::RuntimeError;
 use crate::bridge::StorageReadId;
 use crate::bridge::crypto::{ChannelKeyVerifier, ChannelKeyVerifierRecord};
-use crate::federation::link::LinkHandle;
+use crate::federation::link::{LinkHandle, SendRefusal};
 use crate::federation::{
     FederationInbound, IngressCharge, LinkCloseReason, LinkEvent, LinkId, LinkSession,
     ObjectCarrier, PeerIdentity,
@@ -392,24 +392,37 @@ impl FederationCoordinator {
                 self.backlog.retain(|message| message.link != link);
                 self.link_closed(context, link, peer, reason);
             }
-            LinkEvent::Frame(frame) => {
-                if !self.link_is_live(link, peer) {
-                    return;
-                }
-                if let Err(violation) = self.handle_frame(context, link, peer, frame) {
-                    self.fail_link(context, link, peer, violation);
-                }
+            LinkEvent::Frame(_) | LinkEvent::Object { .. } => {
+                self.handle_traffic(context, link, peer, event, charge);
             }
+        }
+    }
+
+    /// Runs one frame or object handler on a live link. A handler may
+    /// retire the link itself when a write finds the link task gone; a
+    /// failure after that is moot.
+    fn handle_traffic(
+        &mut self,
+        context: &mut StateCoreContext,
+        link: LinkId,
+        peer: ServerId,
+        event: LinkEvent,
+        charge: Option<IngressCharge>,
+    ) {
+        if !self.link_is_live(link, peer) {
+            return;
+        }
+        let outcome = match event {
+            LinkEvent::Frame(frame) => self.handle_frame(context, link, peer, frame),
             LinkEvent::Object { carrier, object } => {
-                if !self.link_is_live(link, peer) {
-                    return;
-                }
-                if let Err(violation) =
-                    self.handle_object(context, link, peer, carrier, object, charge)
-                {
-                    self.fail_link(context, link, peer, violation);
-                }
+                self.handle_object(context, link, peer, carrier, object, charge)
             }
+            LinkEvent::Established { .. } | LinkEvent::Closed(_) => return,
+        };
+        if let Err(violation) = outcome
+            && self.link_is_live(link, peer)
+        {
+            self.fail_link(context, link, peer, violation);
         }
     }
 
@@ -824,7 +837,9 @@ impl FederationCoordinator {
             }
             Some(PendingCommit::OriginAck {
                 peer, link, frame, ..
-            }) => self.send_frame(context, link, peer, &frame),
+            }) => {
+                let _live = self.send_frame(context, link, peer, &frame);
+            }
             Some(PendingCommit::Cleanup { peer }) => grace::continue_cleanup(self, context, peer),
             Some(PendingCommit::SnapshotRows { peer }) => {
                 snapshot::continue_write(self, context, peer)
@@ -925,7 +940,7 @@ impl FederationCoordinator {
             );
             match sent {
                 Ok(()) => self.counters.events_sent = self.counters.events_sent.saturating_add(1),
-                Err(violation) => self.fail_link(context, link, event.target, violation),
+                Err(failure) => self.send_failed(context, link, event.target, failure),
             }
         }
     }
@@ -952,35 +967,68 @@ impl FederationCoordinator {
             descriptor,
             fragment,
         };
-        if let Err(violation) = send_object(&live.handle, &self.config.server_name, encoded, frame)
-        {
-            self.fail_link(context, link, peer, violation);
+        if let Err(failure) = send_object(&live.handle, &self.config.server_name, encoded, frame) {
+            self.send_failed(context, link, peer, failure);
         }
     }
 
+    /// Queues one frame for the link; returns whether the link is still
+    /// live afterwards, so a caller can stop a sequence the write ended.
     fn send_frame(
         &mut self,
         context: &mut StateCoreContext,
         link: LinkId,
         peer: ServerId,
         frame: &FederationFrame,
-    ) {
+    ) -> bool {
         let Some(live) = self.peers.get(&peer).and_then(|state| state.live.as_ref()) else {
-            return;
+            return false;
         };
         if live.link != link {
-            return;
+            return false;
         }
         let sent = frame
             .render(&self.config.server_name)
-            .map_err(|_| Violation::Codec)
-            .and_then(|line| {
-                live.handle
-                    .try_send(line)
-                    .map_err(|_| Violation::SlowConsumer)
-            });
-        if let Err(violation) = sent {
-            self.fail_link(context, link, peer, violation);
+            .map_err(|_| SendFailure::Violation(Violation::Codec))
+            .and_then(|line| live.handle.try_send(line).map_err(SendFailure::from));
+        if let Err(failure) = sent {
+            self.send_failed(context, link, peer, failure);
+        }
+        self.link_is_live(link, peer)
+    }
+
+    /// Handles a refused outbound write: a violation fails the link, while a
+    /// queue whose task already ended retires the link without a violation.
+    fn send_failed(
+        &mut self,
+        context: &mut StateCoreContext,
+        link: LinkId,
+        peer: ServerId,
+        failure: SendFailure,
+    ) {
+        match failure {
+            SendFailure::Violation(violation) => self.fail_link(context, link, peer, violation),
+            SendFailure::Closed => {
+                self.link_closed(context, link, peer, LinkCloseReason::PeerClosed)
+            }
+        }
+    }
+}
+
+/// Why an outbound write did not reach the link task.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SendFailure {
+    /// The frame or the queue violated a bound.
+    Violation(Violation),
+    /// The link task already ended; its `Closed` event follows.
+    Closed,
+}
+
+impl From<SendRefusal> for SendFailure {
+    fn from(refusal: SendRefusal) -> Self {
+        match refusal {
+            SendRefusal::QueueFull => Self::Violation(Violation::SlowConsumer),
+            SendRefusal::Closed => Self::Closed,
         }
     }
 }
@@ -998,22 +1046,23 @@ fn send_object(
     server_name: &str,
     encoded: &[u8],
     frame: impl Fn(agenc_ircd_federation_wire::FederationFragment) -> FederationFrame,
-) -> Result<(), Violation> {
+) -> Result<(), SendFailure> {
     let object_id = federation_object_id(encoded);
-    let fragments = split_fragments(object_id, encoded).map_err(|_| Violation::Codec)?;
+    let fragments = split_fragments(object_id, encoded)
+        .map_err(|_| SendFailure::Violation(Violation::Codec))?;
     let mut lines: Vec<FederationLineText> = Vec::new();
     lines
         .try_reserve_exact(fragments.len())
-        .map_err(|_| Violation::Ceiling)?;
+        .map_err(|_| SendFailure::Violation(Violation::Ceiling))?;
     for fragment in fragments {
         lines.push(
             frame(fragment)
                 .render(server_name)
-                .map_err(|_| Violation::Codec)?,
+                .map_err(|_| SendFailure::Violation(Violation::Codec))?,
         );
     }
     for line in lines {
-        handle.try_send(line).map_err(|_| Violation::SlowConsumer)?;
+        handle.try_send(line)?;
     }
     Ok(())
 }

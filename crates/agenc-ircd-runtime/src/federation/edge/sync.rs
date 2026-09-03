@@ -34,13 +34,16 @@ pub(super) struct SnapshotInstall {
 
 /// Starts the origin exchange on a fresh link.
 pub(super) fn begin(edge: &mut EdgeFederation, context: &mut StateCoreContext) {
-    edge.send_frame(
+    let reset_sent = edge.send_frame(
         context,
         &FederationFrame::OriginReset {
             coordinator_server_id: edge.config.coordinator.server_id(),
             server_incarnation: edge.config.incarnation,
         },
     );
+    if !reset_sent {
+        return;
+    }
     let generations: Vec<_> = edge.origins.keys().copied().collect();
     for generation in generations {
         let update = edge
@@ -49,14 +52,16 @@ pub(super) fn begin(edge: &mut EdgeFederation, context: &mut StateCoreContext) {
             .is_some_and(|origin| origin.generation > 0);
         request::declare_origin(edge, context, generation, update);
     }
-    edge.send_frame(
+    let ready_sent = edge.send_frame(
         context,
         &FederationFrame::OriginReady {
             edge_server_id: edge.config.server_id,
             server_incarnation: edge.config.incarnation,
         },
     );
-    resume(edge, context);
+    if ready_sent {
+        resume(edge, context);
+    }
 }
 
 /// Sends FRESUME from the durable cursor, or asks for a snapshot outright

@@ -30,7 +30,7 @@ use agenc_ircd_types::{
 
 use crate::RuntimeError;
 use crate::connection::ConnectionGeneration;
-use crate::federation::link::LinkHandle;
+use crate::federation::link::{LinkHandle, SendRefusal};
 use crate::federation::{
     FederationInbound, IngressCharge, LinkEvent, LinkId, LinkSession, ObjectCarrier, PeerIdentity,
 };
@@ -157,6 +157,24 @@ pub(super) struct DeferredCommand {
 /// request before further commands answer `SERVER_BUSY`.
 pub(super) const MAX_DEFERRED_COMMANDS: usize = 32;
 
+/// Why an outbound write did not reach the link task.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SendFailure {
+    /// The frame or the queue violated a bound.
+    Violation(Violation),
+    /// The link task already ended; its `Closed` event follows.
+    Closed,
+}
+
+impl From<SendRefusal> for SendFailure {
+    fn from(refusal: SendRefusal) -> Self {
+        match refusal {
+            SendRefusal::QueueFull => Self::Violation(Violation::SlowConsumer),
+            SendRefusal::Closed => Self::Closed,
+        }
+    }
+}
+
 impl EdgeFederation {
     /// Creates an edge with no link and an empty replica at the first
     /// projection generation, matching a coordinator that never snapshotted.
@@ -273,11 +291,11 @@ impl EdgeFederation {
             }
             LinkEvent::Frame(frame) if self.link_is(link) => {
                 let outcome = self.handle_frame(context, frame);
-                self.settle(context, outcome)
+                self.settle(context, link, outcome)
             }
             LinkEvent::Object { carrier, object } if self.link_is(link) => {
                 let outcome = self.handle_object(context, carrier, object, charge);
-                self.settle(context, outcome)
+                self.settle(context, link, outcome)
             }
             LinkEvent::Frame(_) | LinkEvent::Object { .. } => Vec::new(),
         }
@@ -285,15 +303,20 @@ impl EdgeFederation {
 
     /// Turns a handler outcome into completions, failing the link on a
     /// violation.
+    /// Applies a handler's outcome. A handler may retire the link itself
+    /// when a write finds the link task gone; a failure after that is moot.
     fn settle(
         &mut self,
         context: &mut StateCoreContext,
+        link: LinkId,
         outcome: Result<Vec<EdgeCompletion>, Violation>,
     ) -> Vec<EdgeCompletion> {
         match outcome {
             Ok(completions) => completions,
             Err(violation) => {
-                self.fail_link(context, violation);
+                if self.link_is(link) {
+                    self.fail_link(context, violation);
+                }
                 Vec::new()
             }
         }
@@ -448,20 +471,32 @@ impl EdgeFederation {
     }
 
     /// Sends one rendered control frame over the live link.
-    fn send_frame(&mut self, context: &mut StateCoreContext, frame: &FederationFrame) {
+    /// Queues one frame for the link; returns whether the link is still
+    /// live afterwards, so a caller can stop a sequence the write ended.
+    fn send_frame(&mut self, context: &mut StateCoreContext, frame: &FederationFrame) -> bool {
         let Some(live) = self.live.as_ref() else {
-            return;
+            return false;
         };
         let sent = frame
             .render(&self.config.server_name)
-            .map_err(|_| Violation::Codec)
-            .and_then(|line| {
-                live.handle
-                    .try_send(line)
-                    .map_err(|_| Violation::SlowConsumer)
-            });
-        if let Err(violation) = sent {
-            self.fail_link(context, violation);
+            .map_err(|_| SendFailure::Violation(Violation::Codec))
+            .and_then(|line| live.handle.try_send(line).map_err(SendFailure::from));
+        if let Err(failure) = sent {
+            self.send_failed(context, failure);
+        }
+        self.live.is_some()
+    }
+
+    /// Handles a refused outbound write: a violation fails the link, while a
+    /// queue whose task already ended retires the link without a violation.
+    fn send_failed(&mut self, context: &mut StateCoreContext, failure: SendFailure) {
+        match failure {
+            SendFailure::Violation(violation) => self.fail_link(context, violation),
+            SendFailure::Closed => {
+                if let Some(link) = self.live.as_ref().map(|live| live.link) {
+                    self.link_closed(context, link);
+                }
+            }
         }
     }
 
@@ -477,30 +512,28 @@ impl EdgeFederation {
         };
         let object_id = federation_object_id(encoded);
         let sent = split_fragments(object_id, encoded)
-            .map_err(|_| Violation::Codec)
+            .map_err(|_| SendFailure::Violation(Violation::Codec))
             .and_then(|fragments| {
                 let mut lines: Vec<FederationLineText> = Vec::new();
                 lines
                     .try_reserve_exact(fragments.len())
-                    .map_err(|_| Violation::Ceiling)?;
+                    .map_err(|_| SendFailure::Violation(Violation::Ceiling))?;
                 for fragment in fragments {
                     lines.push(
                         frame(fragment)
                             .render(&self.config.server_name)
-                            .map_err(|_| Violation::Codec)?,
+                            .map_err(|_| SendFailure::Violation(Violation::Codec))?,
                     );
                 }
                 for line in lines {
-                    live.handle
-                        .try_send(line)
-                        .map_err(|_| Violation::SlowConsumer)?;
+                    live.handle.try_send(line)?;
                 }
                 Ok(())
             });
         match sent {
             Ok(()) => true,
-            Err(violation) => {
-                self.fail_link(context, violation);
+            Err(failure) => {
+                self.send_failed(context, failure);
                 false
             }
         }

@@ -6,14 +6,14 @@
 //! link is accepted.
 
 use agenc_ircd_domain::federation::{
-    OperationKey, OriginBinding, OriginEntry, OriginKey, OriginPrincipal, OriginStatus,
-    RetainedRequest,
+    EdgeLink, EdgePhase, OperationKey, OriginBinding, OriginEntry, OriginKey, OriginPrincipal,
+    OriginStatus, RetainedRequest,
 };
 use agenc_ircd_federation_wire::{DecodeBudget, OriginRecord, SchemaObject, decode_projection_arm};
 use agenc_ircd_storage::federation_records::{
     COORDINATOR_RESULT_KIND, CoordinatorResultRecord, FederationOriginRecord, FederationPeerRecord,
     ORIGIN_RECORD_KIND, OriginRowStatus, PEER_RECORD_KIND, PROJECTION_ENTRY_KIND,
-    PROJECTION_MARKER_KIND, ProjectionEntryRecord, ProjectionGenerationState,
+    PROJECTION_MARKER_KIND, PeerPhase, ProjectionEntryRecord, ProjectionGenerationState,
     ProjectionMarkerRecord, parse_origin_key, parse_projection_key,
 };
 use agenc_ircd_storage::{
@@ -21,7 +21,7 @@ use agenc_ircd_storage::{
 };
 use agenc_ircd_types::{Generation, OriginId, RecoveryEpoch, ServerId, ServerIncarnation};
 
-use super::FederationCoordinator;
+use super::{FederationCoordinator, grace};
 use crate::bridge::{StorageReadCompletionMessage, StorageReadId};
 use crate::federation::codec::projection::projection_record_of;
 use crate::state_core::StateCoreContext;
@@ -75,7 +75,7 @@ fn request_page(
     start: Option<StoredKey>,
 ) {
     let Some(table) = TABLES.get(coordinator.loader.position).copied() else {
-        coordinator.loader.complete = true;
+        finish(coordinator, context);
         return;
     };
     let plan = start
@@ -83,8 +83,16 @@ fn request_page(
         .and_then(|(start, end)| ReadPlan::range(table, start, end, PAGE_ROWS).ok());
     match plan.and_then(|plan| context.submit_storage_read(plan).ok()) {
         Some(read_id) => coordinator.loader.pending = Some(read_id),
-        None => coordinator.loader.complete = true,
+        None => finish(coordinator, context),
     }
+}
+
+/// Ends the reload. Every restored peer is treated as freshly lost: a link
+/// that has not returned gets one grace interval measured from this boot,
+/// and an expiry interrupted by the restart resumes hiding its sessions.
+fn finish(coordinator: &mut FederationCoordinator, context: &mut StateCoreContext) {
+    coordinator.loader.complete = true;
+    grace::restored(coordinator, context);
 }
 
 /// Consumes one page; returns whether the message belonged to the loader.
@@ -101,7 +109,7 @@ pub(super) fn read_completed(
         return true;
     };
     let Ok(result) = &message.result else {
-        coordinator.loader.complete = true;
+        finish(coordinator, context);
         return true;
     };
     let mut last = None;
@@ -189,6 +197,21 @@ fn admit_peer(
     state.outbox.snapshot_required = record.snapshot_required;
     state.quarantined = record.quarantined;
     state.client_resync_epoch = record.client_resync_epoch;
+    if let Some(incarnation) = state.incarnation {
+        // The origin table must know the incarnation before grace, expiry,
+        // or a RESET under a new incarnation can fence it.
+        let phase = match record.phase {
+            PeerPhase::Ready | PeerPhase::Suspended => EdgePhase::Ready,
+            PeerPhase::Expired | PeerPhase::Clean => EdgePhase::Expired,
+        };
+        coordinator.origins.restore_edge(
+            peer,
+            EdgeLink {
+                server_incarnation: incarnation,
+                phase,
+            },
+        );
+    }
     if let Some(projector) = context.federation_mut() {
         projector.set_edge(
             peer,

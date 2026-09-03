@@ -212,17 +212,25 @@ pub struct LinkOutbound {
     line: Option<FederationLineText>,
 }
 
-/// The outbound queue is full or closed.
+/// Why one line was not queued.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct QueueFull;
+pub enum SendRefusal {
+    /// The item or byte ceiling would be exceeded.
+    QueueFull,
+    /// The link task already ended; the owner's `Closed` event follows.
+    Closed,
+}
 
-impl std::fmt::Display for QueueFull {
+impl std::fmt::Display for SendRefusal {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("federation link queue is full or closed")
+        formatter.write_str(match self {
+            Self::QueueFull => "federation link queue is full",
+            Self::Closed => "federation link is closed",
+        })
     }
 }
 
-impl std::error::Error for QueueFull {}
+impl std::error::Error for SendRefusal {}
 
 /// The state owner's handle to one link's writer queue.
 #[derive(Clone)]
@@ -233,9 +241,10 @@ pub struct LinkHandle {
 }
 
 impl LinkHandle {
-    /// Queues one line unless the item or byte ceiling would be exceeded.
-    pub fn try_send(&self, line: FederationLineText) -> Result<(), QueueFull> {
-        let bytes = u64::try_from(line.len()).map_err(|_| QueueFull)?;
+    /// Queues one line unless the item or byte ceiling would be exceeded
+    /// or the link task already ended.
+    pub fn try_send(&self, line: FederationLineText) -> Result<(), SendRefusal> {
+        let bytes = u64::try_from(line.len()).map_err(|_| SendRefusal::QueueFull)?;
         let capacity = self.capacity_bytes;
         let reserved =
             self.queued_bytes
@@ -243,13 +252,16 @@ impl LinkHandle {
                     queued.checked_add(bytes).filter(|total| *total <= capacity)
                 });
         if reserved.is_err() {
-            return Err(QueueFull);
+            return Err(SendRefusal::QueueFull);
         }
         match self.sender.try_send(LinkOutbound { line: Some(line) }) {
             Ok(()) => Ok(()),
-            Err(_) => {
+            Err(error) => {
                 release_queued(&self.queued_bytes, bytes);
-                Err(QueueFull)
+                Err(match error {
+                    mpsc::error::TrySendError::Full(_) => SendRefusal::QueueFull,
+                    mpsc::error::TrySendError::Closed(_) => SendRefusal::Closed,
+                })
             }
         }
     }

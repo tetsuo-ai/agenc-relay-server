@@ -192,6 +192,7 @@ fn initialize_test_storage(
     directory: &TestDirectory,
     opaque: &OpaqueProfile,
     key_state: &LoginIndexKeyState,
+    records: Vec<InitialStorageRecord>,
 ) -> TestResult<StorageQualification> {
     let key_state_record = InitialStorageRecord::new(
         TableId::LoginIndexKeyState,
@@ -231,7 +232,10 @@ fn initialize_test_storage(
         storage_master_key: StorageMasterKey::from_bytes(STORAGE_MASTER),
         rollback_guard_root_key: RollbackGuardRootKey::from_bytes(ROLLBACK_GUARD),
         mode: StorageInitializationMode::Live,
-        initial_records: vec![key_state_record, fake_record],
+        initial_records: [key_state_record, fake_record]
+            .into_iter()
+            .chain(records)
+            .collect(),
         account_service_response_count: 0,
         state_generation: 0,
         predecessor_guard_hash: StorageDigest::from_bytes([0; 32]),
@@ -462,14 +466,43 @@ impl StateCoreFixture {
         Self::build(entropy, true)
     }
 
+    /// Like `with_registration_router`, over storage that already holds
+    /// `records`, as a restarted process finds them.
+    pub(crate) fn with_registration_router_and_records(
+        entropy: Vec<u8>,
+        records: Vec<InitialStorageRecord>,
+    ) -> TestResult<Self> {
+        Self::build_with(entropy, true, None, records)
+    }
+
+    /// The next storage read completion, for a test that drives a router's
+    /// reload by hand instead of running the actor loop.
+    pub(crate) async fn next_storage_read(
+        &mut self,
+    ) -> TestResult<crate::bridge::StorageReadCompletionMessage> {
+        let receivers = self
+            .storage_receivers
+            .as_mut()
+            .ok_or("storage receivers were taken")?;
+        receivers
+            .1
+            .recv()
+            .await
+            .ok_or_else(|| "storage read channel closed".into())
+    }
+
     /// Builds the fixture with the registration router acting as the
     /// federation coordinator for `peers`, with the projector installed.
     pub(crate) fn with_federation_coordinator(
         entropy: Vec<u8>,
         peers: Vec<crate::federation::PeerIdentity>,
     ) -> TestResult<Self> {
-        let mut fixture =
-            Self::build_with(entropy, true, Some(FederationRole::Coordinator(peers)))?;
+        let mut fixture = Self::build_with(
+            entropy,
+            true,
+            Some(FederationRole::Coordinator(peers)),
+            Vec::new(),
+        )?;
         let network_id = fixture.identity.network_id;
         let server_id = fixture.identity.server_id;
         fixture.context_mut()?.install_federation_projector(
@@ -479,7 +512,7 @@ impl StateCoreFixture {
     }
 
     fn build(entropy: Vec<u8>, registration: bool) -> TestResult<Self> {
-        Self::build_with(entropy, registration, None)
+        Self::build_with(entropy, registration, None, Vec::new())
     }
 
     /// Builds the fixture with the registration router acting as an edge of
@@ -488,13 +521,19 @@ impl StateCoreFixture {
         entropy: Vec<u8>,
         coordinator: crate::federation::PeerIdentity,
     ) -> TestResult<Self> {
-        Self::build_with(entropy, true, Some(FederationRole::Edge(coordinator)))
+        Self::build_with(
+            entropy,
+            true,
+            Some(FederationRole::Edge(coordinator)),
+            Vec::new(),
+        )
     }
 
     fn build_with(
         entropy: Vec<u8>,
         registration: bool,
         role: Option<FederationRole>,
+        records: Vec<InitialStorageRecord>,
     ) -> TestResult<Self> {
         // An edge fixture carries its own server identity so it never shares
         // the coordinator fixture's Server ID inside one test.
@@ -519,7 +558,8 @@ impl StateCoreFixture {
         let opaque = Arc::new(OpaqueProfile::generate(identity.network_id)?);
         let login_key = LoginIndexKey::from_bytes(identity.login_index);
         let key_state = LoginIndexKeyState::stable(1, login_key.key_id(identity.network_id))?;
-        let qualification = initialize_test_storage(&identity, &directory, &opaque, &key_state)?;
+        let qualification =
+            initialize_test_storage(&identity, &directory, &opaque, &key_state, records)?;
         let mut owner = open_test_storage(&identity, &directory, &qualification)?;
         let router: Box<dyn CommandRouter> = match (registration, role) {
             (true, Some(FederationRole::Coordinator(peers))) => Box::new(

@@ -14,6 +14,10 @@ use agenc_ircd_federation_wire::{
     ReplayKey, RequestHeader, ResultHeader, SchemaObject, decode_event_arm, decode_result_arm,
     federation_object_id, split_fragments,
 };
+use agenc_ircd_storage::federation_records::{
+    FederationPeerRecord, PEER_RECORD_KIND, PeerPhase, peer_key,
+};
+use agenc_ircd_storage::{InitialStorageRecord, PersistentRecordValue, TableId};
 use agenc_ircd_types::{
     ConnectionId, FederationResultKind, FederationRole, NetworkId, ORIGIN_DISCONNECT_GRACE_SECONDS,
     OriginId, RecoveryEpoch, RequestId, ServerId, ServerIncarnation, SessionId, UserId,
@@ -1112,13 +1116,9 @@ async fn reconnect_replays_origins_and_continues_the_sequence() -> TestResult {
     .await
 }
 
-#[tokio::test]
-async fn synchronous_grace_expiry_hides_every_hosted_session() -> TestResult {
-    use crate::state_core::timers::{TimedId, TimerEntry, TimerKind};
-    let peer = ServerId::from_bytes([50; 16]);
-    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
-    let context = fixture.context_mut()?;
-    let mut coordinator = FederationCoordinator::new(
+/// Builds a coordinator outside the actor loop for exact timer assertions.
+fn standalone_coordinator(peer: ServerId) -> FederationCoordinator {
+    FederationCoordinator::new(
         CoordinatorConfig {
             network_id: NETWORK,
             server_id: COORDINATOR,
@@ -1132,63 +1132,107 @@ async fn synchronous_grace_expiry_hides_every_hosted_session() -> TestResult {
         vec![peer_identity(peer, "edge.example")],
         std::sync::Arc::new(crate::test_support::TestChannelKeyVerifier),
         ChannelKeyVerifierRecord::new([7; 16], [1; 32]),
-    );
-    let (handle, _queue) = link_queue(1 << 20);
-    let incarnation = ServerIncarnation::from_bytes([51; 16]);
-    coordinator.inbound(
-        context,
-        FederationInbound {
-            link: LinkId::new(1),
-            peer,
-            event: LinkEvent::Established {
-                session: LinkSession {
-                    link: LinkId::new(1),
-                    peer,
-                    peer_incarnation: incarnation,
-                    peer_recovery_epoch: RecoveryEpoch::from_bytes([0; 16]),
-                    transition: agenc_ircd_federation_wire::EpochTransition::Initial,
-                },
-                handle,
+    )
+}
+
+fn established(
+    link: u64,
+    peer: ServerId,
+    incarnation: ServerIncarnation,
+    handle: LinkHandle,
+) -> FederationInbound {
+    FederationInbound {
+        link: LinkId::new(link),
+        peer,
+        event: LinkEvent::Established {
+            session: LinkSession {
+                link: LinkId::new(link),
+                peer,
+                peer_incarnation: incarnation,
+                peer_recovery_epoch: RecoveryEpoch::from_bytes([0; 16]),
+                transition: agenc_ircd_federation_wire::EpochTransition::Initial,
             },
-            charge: None,
+            handle,
         },
-    );
-    coordinator.inbound(
-        context,
-        FederationInbound {
-            link: LinkId::new(1),
-            peer,
-            event: LinkEvent::Frame(FederationFrame::OriginReset {
-                coordinator_server_id: COORDINATOR,
-                server_incarnation: incarnation,
-            }),
-            charge: None,
-        },
-    );
-    // A session hosted by the edge exists in the live domain.
-    let seed = crate::test_support::remote_session_seed(context, peer, "kate")?;
+        charge: None,
+    }
+}
+
+fn reset_frame(link: u64, peer: ServerId, incarnation: ServerIncarnation) -> FederationInbound {
+    FederationInbound {
+        link: LinkId::new(link),
+        peer,
+        event: LinkEvent::Frame(FederationFrame::OriginReset {
+            coordinator_server_id: COORDINATOR,
+            server_incarnation: incarnation,
+        }),
+        charge: None,
+    }
+}
+
+fn closed(link: u64, peer: ServerId) -> FederationInbound {
+    FederationInbound {
+        link: LinkId::new(link),
+        peer,
+        event: LinkEvent::Closed(LinkCloseReason::PeerClosed),
+        charge: None,
+    }
+}
+
+/// Opens one session hosted by `peer` in the live domain.
+fn host_session(
+    context: &mut crate::state_core::StateCoreContext,
+    peer: ServerId,
+    nickname: &str,
+) -> TestResult<UserId> {
+    let seed = crate::test_support::remote_session_seed(context, peer, nickname)?;
     let user_id = seed.user_id;
     let plan = context.domain().plan_session_opened(seed)?;
     crate::test_support::apply_live_plan(context, plan)?;
-    coordinator.inbound(
-        context,
-        FederationInbound {
-            link: LinkId::new(1),
-            peer,
-            event: LinkEvent::Closed(LinkCloseReason::PeerClosed),
-            charge: None,
-        },
-    );
-    let deadline = context
+    Ok(user_id)
+}
+
+/// The exclusive end of a grace interval that starts now.
+fn grace_deadline(
+    context: &crate::state_core::StateCoreContext,
+) -> TestResult<agenc_ircd_types::MonotonicTick> {
+    Ok(context
         .now()
-        .checked_add(ORIGIN_DISCONNECT_GRACE_SECONDS.saturating_mul(1_000))?;
-    let entry: TimerEntry = context
+        .checked_add(ORIGIN_DISCONNECT_GRACE_SECONDS.saturating_mul(1_000))?)
+}
+
+/// Pops the grace timer of `peer` due exactly at `deadline`.
+fn pop_grace_timer(
+    context: &mut crate::state_core::StateCoreContext,
+    peer: ServerId,
+    deadline: agenc_ircd_types::MonotonicTick,
+) -> TestResult<crate::state_core::timers::TimerEntry> {
+    use crate::state_core::timers::{TimedId, TimerKind};
+    let entry = context
         .timers_mut()
         .pop_due(deadline)
-        .ok_or("link loss scheduled no grace timer")?;
+        .ok_or("no grace timer was scheduled")?;
     assert_eq!(entry.kind, TimerKind::FederationGrace);
     assert_eq!(entry.id, TimedId::Peer(peer));
     assert_eq!(entry.deadline, deadline);
+    Ok(entry)
+}
+
+#[tokio::test]
+async fn synchronous_grace_expiry_hides_every_hosted_session() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let context = fixture.context_mut()?;
+    let mut coordinator = standalone_coordinator(peer);
+    let (handle, _queue) = link_queue(1 << 20);
+    let incarnation = ServerIncarnation::from_bytes([51; 16]);
+    coordinator.inbound(context, established(1, peer, incarnation, handle));
+    coordinator.inbound(context, reset_frame(1, peer, incarnation));
+    // A session hosted by the edge exists in the live domain.
+    let user_id = host_session(context, peer, "kate")?;
+    coordinator.inbound(context, closed(1, peer));
+    let deadline = grace_deadline(context)?;
+    let entry = pop_grace_timer(context, peer, deadline)?;
     let handled = coordinator.timer_fired(context, entry);
     assert!(handled);
     assert_eq!(coordinator.counters().sessions_expired, 1);
@@ -1201,6 +1245,198 @@ async fn synchronous_grace_expiry_hides_every_hosted_session() -> TestResult {
         context.domain().session(user_id).is_some(),
         "the session hides only after commit"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_closed_queue_retires_the_link_without_a_violation() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let context = fixture.context_mut()?;
+    let mut coordinator = standalone_coordinator(peer);
+    let incarnation = ServerIncarnation::from_bytes([51; 16]);
+    // The link task is already gone when the coordinator first writes.
+    let (handle, queue) = link_queue(1 << 20);
+    drop(queue);
+    coordinator.inbound(context, established(1, peer, incarnation, handle));
+    coordinator.inbound(context, reset_frame(1, peer, incarnation));
+    coordinator.inbound(
+        context,
+        FederationInbound {
+            link: LinkId::new(1),
+            peer,
+            event: LinkEvent::Frame(FederationFrame::Resume {
+                coordinator_server_id: COORDINATOR,
+                projection_generation: 1,
+                cursor: agenc_ircd_federation_wire::DeliveryCursor::Empty,
+            }),
+            charge: None,
+        },
+    );
+    assert_eq!(coordinator.counters().violations, 0);
+    // The refused FRESUME OK retired the link at once: grace is running.
+    let deadline = grace_deadline(context)?;
+    let _entry = pop_grace_timer(context, peer, deadline)?;
+    // The owner's own Closed event then finds nothing live.
+    coordinator.inbound(context, closed(1, peer));
+    assert_eq!(coordinator.counters().violations, 0);
+    assert!(context.timers_mut().pop_due(deadline).is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_closed_queue_under_a_snapshot_announcement_is_not_a_violation() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let context = fixture.context_mut()?;
+    let mut coordinator = standalone_coordinator(peer);
+    let incarnation = ServerIncarnation::from_bytes([51; 16]);
+    let (handle, queue) = link_queue(1 << 20);
+    drop(queue);
+    coordinator.inbound(context, established(1, peer, incarnation, handle));
+    coordinator.inbound(context, reset_frame(1, peer, incarnation));
+    // A generation the coordinator does not retain forces the snapshot route.
+    coordinator.inbound(
+        context,
+        FederationInbound {
+            link: LinkId::new(1),
+            peer,
+            event: LinkEvent::Frame(FederationFrame::Resume {
+                coordinator_server_id: COORDINATOR,
+                projection_generation: 0,
+                cursor: agenc_ircd_federation_wire::DeliveryCursor::Empty,
+            }),
+            charge: None,
+        },
+    );
+    assert_eq!(coordinator.counters().violations, 0);
+    assert_eq!(
+        context.pending_len(),
+        0,
+        "no marker is staged for a dead link"
+    );
+    let deadline = grace_deadline(context)?;
+    let _entry = pop_grace_timer(context, peer, deadline)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_new_incarnation_hides_the_sessions_of_the_previous_one() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let context = fixture.context_mut()?;
+    let mut coordinator = standalone_coordinator(peer);
+    let first = ServerIncarnation::from_bytes([51; 16]);
+    let second = ServerIncarnation::from_bytes([52; 16]);
+    let (handle, _queue) = link_queue(1 << 20);
+    coordinator.inbound(context, established(1, peer, first, handle));
+    coordinator.inbound(context, reset_frame(1, peer, first));
+    let user_id = host_session(context, peer, "kate")?;
+    coordinator.inbound(context, closed(1, peer));
+    let deadline = grace_deadline(context)?;
+    // The edge returns restarted, well inside the grace interval.
+    let (again, _queue_again) = link_queue(1 << 20);
+    coordinator.inbound(context, established(2, peer, second, again));
+    assert_eq!(coordinator.counters().sessions_expired, 0);
+    coordinator.inbound(context, reset_frame(2, peer, second));
+    assert_eq!(coordinator.counters().sessions_expired, 1);
+    assert_eq!(context.pending_len(), 1, "the hide plan is staged");
+    assert!(context.domain().session(user_id).is_some());
+    assert!(
+        context.timers_mut().pop_due(deadline).is_none(),
+        "the returning link cancelled the grace timer"
+    );
+    Ok(())
+}
+
+/// The peer row a previous process left behind for `peer`.
+fn restored_peer_record(
+    peer: ServerId,
+    incarnation: ServerIncarnation,
+    phase: PeerPhase,
+) -> TestResult<InitialStorageRecord> {
+    let body = FederationPeerRecord {
+        server_incarnation: *incarnation.as_bytes(),
+        recovery_epoch: [0; 16],
+        accepted_epochs: Vec::new(),
+        phase,
+        projection_generation: 0,
+        next_delivery_sequence: 0,
+        cursor: None,
+        active_entry_count: 0,
+        active_entry_bytes: 0,
+        pending_generation: None,
+        snapshot_required: false,
+        cleanup_cursor: None,
+        quarantined: false,
+        client_resync_epoch: 0,
+    }
+    .encode()?;
+    let value = PersistentRecordValue::new(
+        TableId::FederationPeer,
+        PEER_RECORD_KIND,
+        1,
+        0,
+        None,
+        Vec::new(),
+        body,
+    )?
+    .encode()?;
+    Ok(InitialStorageRecord::new(
+        TableId::FederationPeer,
+        peer_key(peer)?,
+        1,
+        value,
+    )?)
+}
+
+/// Boots a coordinator over storage holding one peer row from a previous
+/// process while a session that peer hosted is still live.
+async fn boot_restored(
+    peer: ServerId,
+    phase: PeerPhase,
+) -> TestResult<(StateCoreFixture, FederationCoordinator)> {
+    let incarnation = ServerIncarnation::from_bytes([51; 16]);
+    let record = restored_peer_record(peer, incarnation, phase)?;
+    let mut fixture =
+        StateCoreFixture::with_registration_router_and_records(entropy_script(), vec![record])?;
+    let mut coordinator = standalone_coordinator(peer);
+    host_session(fixture.context_mut()?, peer, "kate")?;
+    coordinator.startup(fixture.context_mut()?);
+    while !coordinator.loaded() {
+        let message = fixture.next_storage_read().await?;
+        coordinator.storage_read_completed(fixture.context_mut()?, message);
+    }
+    Ok((fixture, coordinator))
+}
+
+#[tokio::test]
+async fn a_restart_starts_a_fresh_grace_interval_for_a_restored_peer() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let (mut fixture, mut coordinator) = boot_restored(peer, PeerPhase::Ready).await?;
+    let context = fixture.context_mut()?;
+    assert_eq!(coordinator.counters().sessions_expired, 0);
+    let deadline = grace_deadline(context)?;
+    let entry = pop_grace_timer(context, peer, deadline)?;
+    assert!(coordinator.timer_fired(context, entry));
+    assert_eq!(coordinator.counters().sessions_expired, 1);
+    assert_eq!(context.pending_len(), 1, "the hide plan is staged");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_restart_resumes_an_interrupted_expiry_cleanup() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let (mut fixture, mut coordinator) = boot_restored(peer, PeerPhase::Expired).await?;
+    let context = fixture.context_mut()?;
+    assert_eq!(coordinator.counters().sessions_expired, 1);
+    assert_eq!(context.pending_len(), 1, "the hide plan is staged");
+    let deadline = grace_deadline(context)?;
+    assert!(
+        context.timers_mut().pop_due(deadline).is_none(),
+        "an expired incarnation gets no second grace interval"
+    );
+    let _ = &mut coordinator;
     Ok(())
 }
 
