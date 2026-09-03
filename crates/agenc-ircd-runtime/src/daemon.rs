@@ -2437,6 +2437,7 @@ fn listener_context(
         admin: Some(admin),
         limits: connection_limits(config)?,
         runtime_config: Some(runtime_config),
+        federation_accepts: None,
     })
 }
 

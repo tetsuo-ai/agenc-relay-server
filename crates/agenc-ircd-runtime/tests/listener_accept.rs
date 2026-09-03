@@ -218,6 +218,7 @@ fn start(specs: Vec<ListenerSpec>, options: HarnessOptions) -> Result<Harness, L
         admin: None,
         limits: ConnectionLimits::DEFAULT,
         runtime_config: None,
+        federation_accepts: None,
     };
     let set = ListenerSet::start(specs, context, &root)?;
     Ok(Harness {
@@ -1070,6 +1071,7 @@ async fn start_rejects_unsupported_and_mismatched_specs() -> TestResult {
         admin: None,
         limits: ConnectionLimits::DEFAULT,
         runtime_config: None,
+        federation_accepts: None,
     };
     assert_eq!(
         ListenerSet::start(Vec::new(), context, &root).err(),

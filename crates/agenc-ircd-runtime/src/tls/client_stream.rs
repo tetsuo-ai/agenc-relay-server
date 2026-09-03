@@ -11,6 +11,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::config::TLS_PLAINTEXT_BUFFER_LIMIT_BYTES;
 use super::stream::{CLOSE_NOTIFY_GRACE, TlsHandshakeError};
+use crate::RuntimeError;
 use crate::sync::Arc;
 
 /// A TLS-authenticated client stream whose application I/O is unavailable
@@ -92,6 +93,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ClientTlsStream<S> {
     #[must_use]
     pub fn alpn(&self) -> Option<&[u8]> {
         self.connection.alpn_protocol()
+    }
+
+    /// Derives RFC 9846 exporter material for the federation hello binding.
+    pub fn export_keying_material(
+        &self,
+        output: &mut [u8; 32],
+        label: &[u8],
+        context: &[u8],
+    ) -> Result<(), RuntimeError> {
+        self.connection
+            .export_keying_material(output, label, Some(context))
+            .map(|_| ())
+            .map_err(|_| RuntimeError::InvalidValue)
     }
 
     fn poll_handshake(&mut self, context: &mut Context<'_>) -> Poll<Result<(), TlsHandshakeError>> {

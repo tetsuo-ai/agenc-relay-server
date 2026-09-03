@@ -9,6 +9,7 @@
 use std::error::Error;
 use std::fmt;
 
+use agenc_ircd_types::ServerId;
 use ed25519_dalek::{Signer as _, SigningKey};
 use sha2::{Digest as _, Sha256};
 
@@ -29,6 +30,10 @@ const TAG_SET: u8 = 0x31;
 const TAG_EXPLICIT_0: u8 = 0xA0;
 const TAG_EXPLICIT_3: u8 = 0xA3;
 const TAG_SAN_DNS_NAME: u8 = 0x82;
+/// `GeneralName` choice `uniformResourceIdentifier [6]`.
+const TAG_SAN_URI: u8 = 0x86;
+/// The federation identity URI prefix (spec 20.2).
+const FEDERATION_URI_PREFIX: &str = "urn:agenc-chat:server:";
 
 /// `1.3.101.112`, the Ed25519 algorithm identifier (RFC 8410 section 3).
 const OID_ED25519: [u8; 5] = [0x06, 0x03, 0x2B, 0x65, 0x70];
@@ -117,6 +122,42 @@ impl TlsFixture {
             leaf_private_key_pkcs8: pkcs8(&leaf_key.to_bytes())?,
             leaf_spki_sha256: Sha256::digest(&leaf_spki).into(),
             dns_name: dns_name.to_owned(),
+        })
+    }
+
+    /// Mints the CA and a federation leaf whose only subjectAltName is the
+    /// `urn:agenc-chat:server:<id>` URI of `server_id`; the leaf carries no
+    /// extended key usage so it serves both link directions.
+    pub fn mint_federation(seed: [u8; 32], server_id: ServerId) -> Result<Self, TlsFixtureError> {
+        let ca_key = SigningKey::from_bytes(&derive_seed(CA_SEED_LABEL, &seed));
+        let leaf_key = SigningKey::from_bytes(&derive_seed(LEAF_SEED_LABEL, &seed));
+        let ca_name = name(CA_COMMON_NAME)?;
+        let ca_spki = subject_public_key_info(&ca_key.verifying_key().to_bytes())?;
+        let ca_extensions = sequence(&[
+            extension(&OID_BASIC_CONSTRAINTS, true, &sequence(&[boolean_true()])?)?,
+            extension(&OID_KEY_USAGE, true, &tlv(TAG_BIT_STRING, &CA_KEY_USAGE)?)?,
+        ])?;
+        let ca_tbs = tbs_certificate(1, &ca_name, &ca_name, &ca_spki, &ca_extensions)?;
+        let ca_certificate = certificate(&ca_tbs, &ca_key)?;
+
+        let uri = format!("{FEDERATION_URI_PREFIX}{}", server_id.to_base64url());
+        let leaf_name = name(uri.as_bytes())?;
+        let leaf_spki = subject_public_key_info(&leaf_key.verifying_key().to_bytes())?;
+        let san = sequence(&[tlv(TAG_SAN_URI, uri.as_bytes())?])?;
+        let leaf_extensions = sequence(&[
+            extension(&OID_BASIC_CONSTRAINTS, true, &sequence(&[])?)?,
+            extension(&OID_KEY_USAGE, true, &tlv(TAG_BIT_STRING, &LEAF_KEY_USAGE)?)?,
+            extension(&OID_SUBJECT_ALT_NAME, false, &san)?,
+        ])?;
+        let leaf_tbs = tbs_certificate(2, &ca_name, &leaf_name, &leaf_spki, &leaf_extensions)?;
+        let leaf_certificate = certificate(&leaf_tbs, &ca_key)?;
+
+        Ok(Self {
+            ca_certificate,
+            leaf_certificate,
+            leaf_private_key_pkcs8: pkcs8(&leaf_key.to_bytes())?,
+            leaf_spki_sha256: Sha256::digest(&leaf_spki).into(),
+            dns_name: uri,
         })
     }
 
