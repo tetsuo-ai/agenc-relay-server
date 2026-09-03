@@ -57,7 +57,7 @@ References: [Architecture §§1.2–4](docs/ircd-architecture-and-implementation
 | 04 | Crypto adapters and account authentication | Complete | Pass, 2026-08-29 | [Current checkpoint](conformance/evidence/stage-04-4040796f2c21774d58ea7ce54e70a080678e83ac.json) |
 | 05 | Durable and recoverable persistence | Complete | Pass, 2026-08-29 | [Current checkpoint](conformance/evidence/stage-05-4040796f2c21774d58ea7ce54e70a080678e83ac.json) |
 | 06 | Conforming single-node daemon | Complete | Pass, 2026-09-01 | [Current checkpoint](conformance/evidence/stage-06-65cce9d66f7bcfb0c0830a2ab1d42b52bff82942.json) |
-| 07 | Conforming base federation | Not started | Not run | Absent |
+| 07 | Conforming base federation | Implementation passes | Pass, 2026-09-03 | Exact-SHA checkpoint pending |
 | 08 | Conforming E2EE server adapter | Not started | Not run | Absent |
 | 09 | Optional WSS and history profiles | Not started | Not run | Absent |
 | 10 | Production qualification and release evidence | Not started | Not run | Absent |
@@ -1984,6 +1984,39 @@ partitions, and recovery.
   - References: [Architecture §§1.1 and 29 phase 7](docs/ircd-architecture-and-implementation-spec.md#11-conformance-targets).
   - Invariants: `FED-01` through `FED-13` and all coupled privacy/durability/concurrency invariants.
   - Evidence: bounded model, multi-edge fault simulation, replay, privacy scans, and mandatory workspace gates pass.
+
+### Stage 07 completion notes
+
+The federated-v1 implementation closed on branch `stage-07-federation` on
+2026-09-03. The following interpretations and deferrals were made while
+implementing it and are recorded here so a later reviewer does not have to
+rediscover them.
+
+- Coordinator admission does not meter federated commands; the edge meters
+  its own clients and the coordinator trusts the peer link.
+- An edge holds no account-service keys (spec 22.2). Account creation,
+  credential change, and SASL carriers on an edge answer
+  `FAIL <command> UNAVAILABLE`; forwarding sealed envelopes across the
+  federation is deferred with the cross-profile work.
+- An edge presents the certificate and key of its `federation` listener
+  entry, which stays disabled because an edge never accepts. The
+  configuration schema has no separate edge certificate field.
+- Federation certificates carry no extended key usage so one leaf serves
+  both link directions; the SAN URI and SPKI pin are the identity.
+- Expected revisions are compared for equality (`STALE_STATE` on any
+  mismatch). An edge therefore holds a connection's next command until its
+  earlier request completed, so the revision it sends reflects that request.
+- The coordinator backlogs link traffic that arrives while a federation
+  batch is in flight instead of refusing pipelined synchronization frames.
+- `PEER QUARANTINE` confirms against the process revision; a quarantined
+  peer's live link closes and every later link is closed at once.
+- A federated coordinator keeps edge-hosted sessions across a restart; the
+  origin exchange and the grace sweep reconcile them.
+- Deferred: durable edge pending-request rows and edge startup reload (an
+  edge resynchronizes through a snapshot when its cursor is unknown), old
+  projection generation cleanup on the coordinator, a Loom model of link
+  replacement, pinned byte transcripts for the federation exchanges, and
+  history queries, which answer `UNAVAILABLE`.
 
 ## Stage 08 — E2EE server adapter and joint transactions
 

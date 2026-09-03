@@ -16,11 +16,13 @@
 
 > [!IMPORTANT]
 > **This is pre-alpha infrastructure, not a deployable server.** Stages 00
-> through 06 are complete. The Stage 04 and Stage 05 checkpoints close exact
-> source commit `4040796f2c21774d58ea7ce54e70a080678e83ac`, and the Stage 06
-> checkpoint closes `65cce9d66f7bcfb0c0830a2ab1d42b52bff82942`. The daemon serves TLS-only direct,
-> Tor-exit, and onion profiles on one node. Federation, E2EE, and WebSocket
-> transports belong to later stages and are not advertised.
+> through 06 are complete and Stage 07 implementation checks pass. The Stage
+> 04 and Stage 05 checkpoints close exact source commit
+> `4040796f2c21774d58ea7ce54e70a080678e83ac`, and the Stage 06 checkpoint
+> closes `65cce9d66f7bcfb0c0830a2ab1d42b52bff82942`. The daemon serves TLS-only
+> direct, Tor-exit, and onion profiles on one coordinator, and one coordinator
+> with authenticated edges over base federation. E2EE and WebSocket transports
+> belong to later stages and are not advertised.
 
 ## What is being built
 
@@ -61,12 +63,17 @@ through a disposable on-disk index before the storage port becomes available.
 Backup, stopped-daemon restore, rekey, login-index transitions, and bounded
 checkpoint work all use resumable authenticated construction records.
 
-Stages 05 and 06 are closed. Stage 06 composes the runtime: strict configuration,
-first-run initialization, TLS endpoints, transport-profile isolation, the
-single StateCore owner, registration and account sessions, channels and
-messaging, isolated administration with an audit chain, atomic live reload,
-privacy-bounded observability, and hardened shutdown. Stage 07 base federation
-is the next implementation stage. The complete dependency-ordered roadmap
+Stages 05 and 06 are closed and Stage 07 implementation checks pass. Stage 06
+composes the runtime: strict configuration, first-run initialization, TLS
+endpoints, transport-profile isolation, the single StateCore owner,
+registration and account sessions, channels and messaging, isolated
+administration with an audit chain, atomic live reload, privacy-bounded
+observability, and hardened shutdown. Stage 07 adds base federation: mutually
+authenticated links with a signed hello, origin lifecycles, idempotent
+requests with durable results, least-information projections and events,
+acknowledged delivery, snapshots and resume, partition handling, paged
+directory queries, and the coordinator and edge roles of the daemon. Stage 08
+E2EE is the next implementation stage. The complete dependency-ordered roadmap
 lives in [TODO.md](TODO.md). See the
 [Stage 06 checkpoint](conformance/evidence/stage-06-65cce9d66f7bcfb0c0830a2ab1d42b52bff82942.json), the
 [Stage 05 storage profile](conformance/stage-five-storage-profile.toml), the
@@ -105,7 +112,7 @@ from a clean checkout:
 ```sh
 git clone https://github.com/tetsuo-ai/agenc-ircd.git
 cd agenc-ircd
-bash scripts/check-stage-five.sh
+bash scripts/check-stage-seven.sh
 ```
 
 The Stage 05 implementation checks inherit every Stage 00 through 04 command.
