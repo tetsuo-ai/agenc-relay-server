@@ -380,6 +380,12 @@ impl ChannelKeyVerifier for TestChannelKeyVerifier {
     }
 }
 
+/// Which federation role the fixture's router plays.
+pub(crate) enum FederationRole {
+    Coordinator(Vec<crate::federation::PeerIdentity>),
+    Edge(crate::federation::PeerIdentity),
+}
+
 /// The coordinator role over the fixture identity with generous outbox
 /// ceilings so tests exercise ordering rather than backpressure.
 fn federation_coordinator(
@@ -412,6 +418,7 @@ fn registration_router(
     identity: &FixtureIdentity,
     opaque: &Arc<OpaqueProfile>,
     key_state: LoginIndexKeyState,
+    prefix: &str,
 ) -> TestResult<RegistrationRouter> {
     let verifier: Arc<dyn ChannelKeyVerifier> = Arc::new(TestChannelKeyVerifier);
     let salt = [7; CHANNEL_KEY_SALT_BYTES];
@@ -422,7 +429,7 @@ fn registration_router(
         RegistrationRouterConfig {
             network_id: identity.network_id,
             server_id: identity.server_id,
-            server_prefix: "server.example".to_owned(),
+            server_prefix: prefix.to_owned(),
             display_name: "TestNetwork".to_owned(),
             allow_guests: true,
             access_token: None,
@@ -451,7 +458,8 @@ impl StateCoreFixture {
         entropy: Vec<u8>,
         peers: Vec<crate::federation::PeerIdentity>,
     ) -> TestResult<Self> {
-        let mut fixture = Self::build_with(entropy, true, Some(peers))?;
+        let mut fixture =
+            Self::build_with(entropy, true, Some(FederationRole::Coordinator(peers)))?;
         let network_id = fixture.identity.network_id;
         let server_id = fixture.identity.server_id;
         fixture.context_mut()?.install_federation_projector(
@@ -464,17 +472,38 @@ impl StateCoreFixture {
         Self::build_with(entropy, registration, None)
     }
 
+    /// Builds the fixture with the registration router acting as an edge of
+    /// `coordinator`.
+    pub(crate) fn with_edge(
+        entropy: Vec<u8>,
+        coordinator: crate::federation::PeerIdentity,
+    ) -> TestResult<Self> {
+        Self::build_with(entropy, true, Some(FederationRole::Edge(coordinator)))
+    }
+
     fn build_with(
         entropy: Vec<u8>,
         registration: bool,
-        peers: Option<Vec<crate::federation::PeerIdentity>>,
+        role: Option<FederationRole>,
     ) -> TestResult<Self> {
+        // An edge fixture carries its own server identity so it never shares
+        // the coordinator fixture's Server ID inside one test.
+        let edge_role = matches!(role, Some(FederationRole::Edge(_)));
         let identity = FixtureIdentity {
             network_id: NetworkId::from_bytes([31; 32]),
-            server_id: ServerId::from_bytes([32; 16]),
-            server_incarnation: ServerIncarnation::from_bytes([33; 16]),
+            server_id: ServerId::from_bytes(if edge_role { [36; 16] } else { [32; 16] }),
+            server_incarnation: ServerIncarnation::from_bytes(if edge_role {
+                [35; 16]
+            } else {
+                [33; 16]
+            }),
             recovery_epoch: RecoveryEpoch::from_bytes([34; 16]),
             login_index: [37; 32],
+        };
+        let prefix = if edge_role {
+            "edge.example"
+        } else {
+            "server.example"
         };
         let directory = TestDirectory::create()?;
         let opaque = Arc::new(OpaqueProfile::generate(identity.network_id)?);
@@ -482,12 +511,25 @@ impl StateCoreFixture {
         let key_state = LoginIndexKeyState::stable(1, login_key.key_id(identity.network_id))?;
         let qualification = initialize_test_storage(&identity, &directory, &opaque, &key_state)?;
         let mut owner = open_test_storage(&identity, &directory, &qualification)?;
-        let router: Box<dyn CommandRouter> = match (registration, peers) {
-            (true, Some(peers)) => Box::new(
-                registration_router(&identity, &opaque, key_state)?
+        let router: Box<dyn CommandRouter> = match (registration, role) {
+            (true, Some(FederationRole::Coordinator(peers))) => Box::new(
+                registration_router(&identity, &opaque, key_state, prefix)?
                     .with_federation(federation_coordinator(&identity, peers)?),
             ),
-            (true, None) => Box::new(registration_router(&identity, &opaque, key_state)?),
+            (true, Some(FederationRole::Edge(coordinator))) => Box::new(
+                registration_router(&identity, &opaque, key_state, prefix)?.with_edge(
+                    crate::federation::edge::EdgeFederation::new(
+                        crate::federation::edge::EdgeConfig {
+                            network_id: identity.network_id,
+                            server_id: identity.server_id,
+                            server_name: prefix.to_owned(),
+                            incarnation: identity.server_incarnation,
+                            coordinator,
+                        },
+                    ),
+                ),
+            ),
+            (true, None) => Box::new(registration_router(&identity, &opaque, key_state, prefix)?),
             (false, _) => Box::new(DefaultRouter),
         };
         let (state, storage_receivers, crypto_completions) =

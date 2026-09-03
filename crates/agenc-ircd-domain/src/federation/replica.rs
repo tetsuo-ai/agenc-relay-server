@@ -168,6 +168,38 @@ impl EdgeReplica {
             .map(|((_, user), _)| *user)
     }
 
+    /// Resolves a channel by its canonical name among the entitled details.
+    #[must_use]
+    pub fn channel_by_name(&self, name: &crate::ChannelNameValue) -> Option<&ChannelDetailRecord> {
+        self.channels
+            .values()
+            .find(|channel| channel.name.canonical() == name.canonical())
+    }
+
+    /// Returns the current record under one standing key.
+    #[must_use]
+    pub fn record(&self, key: &ProjectionKey) -> Option<ProjectionRecord> {
+        self.entries().find(|entry| entry.key() == *key)
+    }
+
+    /// Iterates the channels this edge is entitled to.
+    pub fn channels(&self) -> impl Iterator<Item = &ChannelDetailRecord> + '_ {
+        self.channels.values()
+    }
+
+    /// Iterates the local sessions.
+    pub fn sessions(&self) -> impl Iterator<Item = &SessionRecord> + '_ {
+        self.sessions.values()
+    }
+
+    /// Iterates every channel a local user belongs to.
+    pub fn channels_of(&self, user_id: UserId) -> impl Iterator<Item = ChannelInstanceId> + '_ {
+        self.memberships
+            .keys()
+            .filter(move |(_, member)| *member == user_id)
+            .map(|(channel_id, _)| *channel_id)
+    }
+
     /// Iterates every standing entry in snapshot order.
     pub fn entries(&self) -> impl Iterator<Item = ProjectionRecord> + '_ {
         let sessions = self

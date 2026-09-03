@@ -13,6 +13,7 @@ pub mod certificate;
 pub(crate) mod codec;
 pub mod coordinator;
 pub mod dial;
+pub mod edge;
 pub mod hello;
 pub mod line;
 pub mod link;

@@ -1,0 +1,1001 @@
+#![forbid(unsafe_code)]
+
+//! Edge tests: a scripted coordinator on the link and a scripted client
+//! connection drive the real registration router in edge mode through the
+//! actor loop and storage.
+
+use std::error::Error;
+use std::future::Future;
+
+use agenc_ircd_client_wire::{FramedLine, WireMessage, parse_message};
+use agenc_ircd_domain::federation::{
+    ChannelDetailRecord, MembershipRecord, MembershipView, ProjectedEvent, SessionEventView,
+    SessionRecord, SourceView,
+};
+use agenc_ircd_domain::{
+    ChannelNameValue, ContentPolicy, DisplayNameValue, HistoryPolicy, NicknameValue,
+    PersistencePolicy, Role, Visibility,
+};
+use agenc_ircd_federation_wire::{
+    AssembledObject, AssemblyProgress, CanonicalEncode, DecodeBudget, EventHeader, FederationFrame,
+    FragmentAssembler, OperationDescriptor, RequestCorrelation, RequestHeader, ResultHeader,
+    SchemaObject, decode_request_operation, federation_object_id, split_fragments,
+};
+use agenc_ircd_types::{
+    ChannelInstanceId, EventId, FederationRole, NetworkId, PublicCloak, RecoveryEpoch, Revision,
+    ServerId, ServerIncarnation, SessionId, UserId, UtcSecond,
+};
+use tokio::sync::{mpsc, oneshot};
+
+use super::*;
+use crate::connection::sink::ClientSink;
+use crate::federation::codec::events::event_arm_object;
+use crate::federation::codec::operations::FederatedOperation;
+use crate::federation::codec::results::{ResultArm, SessionRegistered, reply_object};
+use crate::federation::link::{LinkQueue, carrier_of, link_queue, parse_frame};
+use crate::purpose::ListenerPurpose;
+use crate::state_core::StateCoreExit;
+use crate::state_core::inbox::{
+    LifecyclePhase, SourceAddressKey, StateCoreMessage, connection_close_channel, lifecycle_channel,
+};
+use crate::test_support::{FrameSink, StateCoreFixture};
+
+type TestResult<T = ()> = Result<T, Box<dyn Error>>;
+
+const NETWORK: NetworkId = NetworkId::from_bytes([31; 32]);
+const EDGE: ServerId = ServerId::from_bytes([36; 16]);
+const EDGE_NAME: &str = "edge.example";
+const EDGE_INCARNATION: ServerIncarnation = ServerIncarnation::from_bytes([35; 16]);
+/// The coordinator fixture's own identity.
+const HUB: ServerId = ServerId::from_bytes([32; 16]);
+const HUB_NAME: &str = "server.example";
+const HUB_INCARNATION: ServerIncarnation = ServerIncarnation::from_bytes([33; 16]);
+const HUB_EPOCH: RecoveryEpoch = RecoveryEpoch::from_bytes([34; 16]);
+const COORDINATOR: ServerId = ServerId::from_bytes([90; 16]);
+const COORDINATOR_NAME: &str = "hub.example";
+const COORDINATOR_EPOCH: RecoveryEpoch = RecoveryEpoch::from_bytes([91; 16]);
+
+fn entropy_script() -> Vec<u8> {
+    (0_u32..1_048_576)
+        .map(|index| u8::try_from((index.wrapping_mul(11).wrapping_add(5)) % 256).unwrap_or(0))
+        .collect()
+}
+
+fn coordinator_identity() -> PeerIdentity {
+    PeerIdentity::new(
+        COORDINATOR,
+        COORDINATOR_NAME,
+        FederationRole::Coordinator,
+        COORDINATOR_EPOCH,
+        agenc_ircd_crypto::Ed25519SecretKey::from_bytes([12; 32]).public_key(),
+        [13; 32],
+    )
+}
+
+/// The scripted coordinator side of the link.
+struct Hub {
+    link: LinkId,
+    handle: LinkHandle,
+    queue: LinkQueue,
+    assembler: FragmentAssembler,
+    inbox: mpsc::Sender<FederationInbound>,
+    next_sequence: u64,
+    state_generation: u64,
+}
+
+impl Hub {
+    fn new(inbox: mpsc::Sender<FederationInbound>) -> Self {
+        let (handle, queue) = link_queue(1 << 20);
+        Self {
+            link: LinkId::new(7),
+            handle,
+            queue,
+            assembler: FragmentAssembler::new(),
+            inbox,
+            next_sequence: 0,
+            state_generation: 10,
+        }
+    }
+
+    async fn send(&self, event: LinkEvent) -> TestResult {
+        self.inbox
+            .send(FederationInbound {
+                link: self.link,
+                peer: COORDINATOR,
+                event,
+                charge: None,
+            })
+            .await
+            .map_err(|_| "edge inbox closed")?;
+        Ok(())
+    }
+
+    async fn establish(&mut self) -> TestResult {
+        let session = LinkSession {
+            link: self.link,
+            peer: COORDINATOR,
+            peer_incarnation: ServerIncarnation::from_bytes([92; 16]),
+            peer_recovery_epoch: COORDINATOR_EPOCH,
+            transition: agenc_ircd_federation_wire::EpochTransition::Initial,
+        };
+        self.send(LinkEvent::Established {
+            session,
+            handle: self.handle.clone(),
+        })
+        .await
+    }
+
+    async fn frame(&self, frame: FederationFrame) -> TestResult {
+        self.send(LinkEvent::Frame(frame)).await
+    }
+
+    async fn object(
+        &mut self,
+        encoded: &[u8],
+        frame: impl Fn(agenc_ircd_federation_wire::FederationFragment) -> FederationFrame,
+    ) -> TestResult {
+        let object_id = federation_object_id(encoded);
+        let mut assembled = None;
+        let mut carrier = None;
+        for fragment in split_fragments(object_id, encoded)? {
+            let built = frame(fragment);
+            let (this_carrier, key) = carrier_of(&built).map_err(|error| error.to_string())?;
+            let fragment = built.fragment().ok_or("frame without fragment")?;
+            carrier = Some(this_carrier);
+            if let AssemblyProgress::Complete(object) = self.assembler.admit(key, fragment, 0)? {
+                assembled = Some(object);
+            }
+        }
+        let (Some(object), Some(carrier)) = (assembled, carrier) else {
+            return Err("scripted object did not assemble".into());
+        };
+        self.send(LinkEvent::Object { carrier, object }).await
+    }
+
+    async fn next_frame(&mut self) -> TestResult<FederationFrame> {
+        let line = tokio::time::timeout(std::time::Duration::from_secs(20), self.queue.recv())
+            .await
+            .map_err(|_| "no line from the edge")?
+            .ok_or("edge closed the link")?;
+        let text = line.as_str().trim_end_matches("\r\n").to_owned();
+        Ok(parse_frame(&text, EDGE_NAME).map_err(|error| format!("{error:?}: {text}"))?)
+    }
+
+    /// Reads frames until one satisfies `accept`, assembling objects.
+    async fn expect_frame(
+        &mut self,
+        accept: impl Fn(&FederationFrame, Option<&AssembledObject>) -> bool,
+    ) -> TestResult<(FederationFrame, Option<AssembledObject>)> {
+        for _ in 0..512 {
+            let frame = self.next_frame().await?;
+            let object = match frame.fragment() {
+                Some(fragment) => {
+                    let (_, key) = carrier_of(&frame).map_err(|error| error.to_string())?;
+                    match self.assembler.admit(key, fragment, 0)? {
+                        AssemblyProgress::Complete(object) => Some(object),
+                        AssemblyProgress::Incomplete { .. } => continue,
+                    }
+                }
+                None => None,
+            };
+            if accept(&frame, object.as_ref()) {
+                return Ok((frame, object));
+            }
+        }
+        Err("the edge never sent the expected frame".into())
+    }
+
+    /// Reads the next request and returns its header and decoded operation.
+    async fn next_request(&mut self) -> TestResult<(RequestHeader, FederatedOperation, Vec<u8>)> {
+        let (_, object) = self
+            .expect_frame(|frame, object| {
+                matches!(frame, FederationFrame::Request { .. }) && object.is_some()
+            })
+            .await?;
+        let object = object.ok_or("request without object")?;
+        let mut budget = DecodeBudget::new(1 << 20, 4_096);
+        let request =
+            SchemaObject::decode_exact("FederationRequest", object.as_slice(), &mut budget)?;
+        let header = RequestHeader::from_object(&request)?;
+        let arm = decode_request_operation(&request, &mut budget)?;
+        let operation = FederatedOperation::from_object(header.opcode, &arm)?;
+        Ok((header, operation, object.as_slice().to_vec()))
+    }
+
+    /// Sends one event to the edge and waits for its ACK.
+    async fn event(
+        &mut self,
+        event: &ProjectedEvent,
+        correlation: Option<RequestCorrelation>,
+    ) -> TestResult<EventId> {
+        let sequence = self.next_sequence;
+        self.next_sequence += 1;
+        let mut id = [0_u8; 16];
+        id[..8].copy_from_slice(&sequence.to_be_bytes());
+        id[15] = 1;
+        let event_id = EventId::from_bytes(id);
+        let header = EventHeader {
+            network_id: NETWORK,
+            target_server_id: EDGE,
+            projection_generation: 1,
+            coordinator_state_generation: self.state_generation,
+            delivery_sequence: sequence,
+            event_id,
+            event_kind: event.kind(),
+            correlation,
+            cross_profile: None,
+        };
+        let arm = event_arm_object(event).map_err(|error| format!("event arm: {error:?}"))?;
+        let object = header
+            .build(&arm)
+            .map_err(|error| format!("event header: {error:?}"))?;
+        let encoded = object
+            .encode_canonical()
+            .map_err(|error| format!("event encode: {error:?}"))?
+            .as_slice()
+            .to_vec();
+        let descriptor = agenc_ircd_federation_wire::EventDescriptor {
+            target_server_id: EDGE,
+            delivery_sequence: sequence,
+            event_id,
+            object_id: federation_object_id(&encoded),
+        };
+        self.object(&encoded, |fragment| FederationFrame::Event {
+            descriptor,
+            fragment,
+        })
+        .await?;
+        let (frame, _) = self
+            .expect_frame(|frame, _| matches!(frame, FederationFrame::Ack { .. }))
+            .await?;
+        let FederationFrame::Ack {
+            delivery_sequence,
+            event_id: acked,
+            ..
+        } = frame
+        else {
+            return Err("expected FACK".into());
+        };
+        assert_eq!(delivery_sequence, sequence);
+        assert_eq!(acked, event_id);
+        Ok(event_id)
+    }
+
+    /// Sends one result for a request.
+    async fn result(
+        &mut self,
+        header: &RequestHeader,
+        request_bytes: &[u8],
+        arm: &ResultArm,
+        replies: Vec<WireMessage>,
+        completion: Option<EventId>,
+    ) -> TestResult {
+        let result_header = ResultHeader {
+            network_id: NETWORK,
+            replay_key: header.replay_key,
+            request_id: header.request_id,
+            request_object_id: federation_object_id(request_bytes),
+            completion_event_id: completion,
+            result_kind: arm.kind(),
+        };
+        let mut reply_objects = Vec::new();
+        for reply in &replies {
+            reply_objects.push(reply_object(reply)?);
+        }
+        let arm_object = arm
+            .to_object()
+            .map_err(|error| format!("result arm: {error:?}"))?;
+        let encoded = result_header
+            .build(&arm_object, reply_objects)
+            .map_err(|error| format!("result header: {error:?}"))?
+            .encode_canonical()
+            .map_err(|error| format!("result encode: {error:?}"))?
+            .as_slice()
+            .to_vec();
+        let descriptor = OperationDescriptor {
+            addressed_server_id: COORDINATOR,
+            server_incarnation: header.replay_key.server_incarnation,
+            origin_id: header.replay_key.origin_id,
+            origin_generation: header.replay_key.origin_generation,
+            operation_sequence: header.replay_key.operation_sequence,
+            request_id: header.request_id,
+            object_id: federation_object_id(&encoded),
+        };
+        self.object(&encoded, |fragment| FederationFrame::Result {
+            descriptor,
+            fragment,
+        })
+        .await
+    }
+
+    /// Answers the origin exchange and FRESUME on a fresh link.
+    async fn synchronize(&mut self) -> TestResult {
+        self.expect_frame(|frame, _| matches!(frame, FederationFrame::OriginReset { .. }))
+            .await?;
+        self.expect_frame(|frame, _| matches!(frame, FederationFrame::OriginReady { .. }))
+            .await?;
+        let (frame, _) = self
+            .expect_frame(|frame, _| matches!(frame, FederationFrame::Resume { .. }))
+            .await?;
+        let FederationFrame::Resume {
+            projection_generation,
+            ..
+        } = frame
+        else {
+            return Err("expected FRESUME".into());
+        };
+        self.frame(FederationFrame::ResumeOk {
+            edge_server_id: EDGE,
+            projection_generation,
+            next_delivery_sequence: self.next_sequence,
+        })
+        .await
+    }
+
+    /// Acknowledges an origin declaration.
+    async fn ack_origin(&mut self) -> TestResult {
+        let (frame, object) = self
+            .expect_frame(|frame, object| {
+                matches!(
+                    frame,
+                    FederationFrame::OriginAdd { .. } | FederationFrame::OriginUpdate { .. }
+                ) && object.is_some()
+            })
+            .await?;
+        let (FederationFrame::OriginAdd { descriptor, .. }
+        | FederationFrame::OriginUpdate { descriptor, .. }) = frame
+        else {
+            return Err("expected an origin declaration".into());
+        };
+        let object = object.ok_or("origin without object")?;
+        self.frame(FederationFrame::OriginAck {
+            edge_server_id: EDGE,
+            server_incarnation: descriptor.server_incarnation,
+            origin_id: descriptor.origin_id,
+            generation: descriptor.generation,
+            object_id: Some(object.object_id()),
+        })
+        .await
+    }
+}
+
+fn cloak(seed: u8) -> TestResult<PublicCloak> {
+    Ok(agenc_ircd_testkit::deterministic_cloak(seed)?)
+}
+
+fn source(user_id: UserId, nickname: &str, seed: u8) -> TestResult<SourceView> {
+    Ok(SourceView {
+        user_id,
+        nickname: NicknameValue::parse(nickname)?,
+        public_cloak: cloak(seed)?,
+        account_label: None,
+    })
+}
+
+fn session_record(
+    session_id: SessionId,
+    user_id: UserId,
+    nickname: &str,
+    revision: u64,
+    seed: u8,
+) -> TestResult<SessionRecord> {
+    Ok(SessionRecord {
+        session_id,
+        user_id,
+        home_server_id: EDGE,
+        session_revision: Revision::new(revision)?,
+        account: None,
+        nickname: NicknameValue::parse(nickname)?,
+        display_name: DisplayNameValue::prepare("Real Name")?,
+        public_cloak: cloak(seed)?,
+        account_label: None,
+        user_mode_bits: 1,
+        away: None,
+    })
+}
+
+async fn run_edge<Driver, Output>(
+    driver: impl FnOnce(mpsc::Sender<FederationInbound>, mpsc::Sender<StateCoreMessage>) -> Driver,
+) -> TestResult<Output>
+where
+    Driver: Future<Output = TestResult<Output>>,
+{
+    let mut fixture = StateCoreFixture::with_edge(entropy_script(), coordinator_identity())?;
+    let mut parts = fixture.take_run_parts()?;
+    let (inbox, inbox_receiver) = mpsc::channel(8);
+    let (federation, federation_receiver) = mpsc::channel(64);
+    parts.state.install_federation_inbox(federation_receiver)?;
+    let (_close_port, close_inbox) = connection_close_channel();
+    let (lifecycle, lifecycle_receiver) = lifecycle_channel();
+    let token = crate::cancel::CancellationToken::root();
+    let driven = async move {
+        let output = driver(federation, inbox).await;
+        let _stopped = lifecycle.request(LifecyclePhase::Stop).await;
+        output
+    };
+    let run = parts.state.run(
+        inbox_receiver,
+        close_inbox,
+        lifecycle_receiver,
+        parts.storage,
+        parts.storage_reads,
+        parts.checkpoints,
+        parts.crypto,
+        token,
+    );
+    let (exit, output) = tokio::join!(run, driven);
+    if !matches!(exit, StateCoreExit::Stopped) {
+        return Err(format!("edge exited with {exit:?}").into());
+    }
+    output
+}
+
+/// One scripted client.
+struct Client {
+    generation: ConnectionGeneration,
+    sink: std::sync::Arc<FrameSink>,
+    inbox: mpsc::Sender<StateCoreMessage>,
+    sequence: u64,
+}
+
+impl Client {
+    async fn open(inbox: mpsc::Sender<StateCoreMessage>, number: u64) -> TestResult<Self> {
+        let generation = ConnectionGeneration::new(number);
+        let sink = FrameSink::new(generation, true);
+        let (acknowledgement, accepted) = oneshot::channel();
+        inbox
+            .send(StateCoreMessage::Opened {
+                generation,
+                purpose: ListenerPurpose::ClientOnion,
+                source: SourceAddressKey::onion_listener(),
+                sink: std::sync::Arc::clone(&sink) as std::sync::Arc<dyn ClientSink>,
+                acknowledgement,
+            })
+            .await
+            .map_err(|_| "edge inbox closed")?;
+        let _outcome = accepted.await?;
+        Ok(Self {
+            generation,
+            sink,
+            inbox,
+            sequence: 0,
+        })
+    }
+
+    async fn line(&mut self, line: &str) -> TestResult {
+        self.sequence += 1;
+        let message = parse_message(FramedLine::new(line)?)?.ok_or("empty line")?;
+        self.inbox
+            .send(StateCoreMessage::Line {
+                generation: self.generation,
+                sequence: self.sequence,
+                message: Box::new(message),
+            })
+            .await
+            .map_err(|_| "edge inbox closed")?;
+        Ok(())
+    }
+
+    async fn wait_for(&self, needle: &str) -> TestResult<Vec<String>> {
+        for _ in 0..5_000 {
+            let lines = self.sink.lines();
+            if lines.iter().any(|line| line.contains(needle)) {
+                return Ok(lines);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        Err(format!("client never received {needle:?}: {:?}", self.sink.lines()).into())
+    }
+}
+
+#[tokio::test]
+async fn edge_registers_joins_and_relays_names_through_the_coordinator() -> TestResult {
+    run_edge(|federation, inbox| async move {
+        let mut hub = Hub::new(federation);
+        hub.establish().await?;
+        hub.synchronize().await?;
+        let mut client = Client::open(inbox, 1).await?;
+        hub.ack_origin().await?;
+        client.line("NICK quinn").await?;
+        client.line("USER quinn 0 * :Quinn Real").await?;
+        // The edge asks the coordinator for the session.
+        let (header, operation, bytes) = hub.next_request().await?;
+        let FederatedOperation::SessionOpen { nickname, .. } = &operation else {
+            return Err("expected session_open".into());
+        };
+        assert_eq!(nickname, "quinn");
+        let session_id = SessionId::from_bytes([61; 16]);
+        let user_id = UserId::from_bytes([62; 16]);
+        hub.state_generation += 1;
+        let generation = hub.state_generation;
+        let visible = hub
+            .event(
+                &ProjectedEvent::SessionVisible(SessionEventView {
+                    source: source(user_id, "quinn", 1)?,
+                    home_projection: Some(session_record(
+                        session_id, user_id, "quinn", generation, 1,
+                    )?),
+                }),
+                None,
+            )
+            .await?;
+        let _ = visible;
+        let completion = hub
+            .event(
+                &ProjectedEvent::RequestCompleted {
+                    resulting_state_generation: generation,
+                },
+                Some(RequestCorrelation {
+                    replay_key: header.replay_key,
+                    request_id: header.request_id,
+                }),
+            )
+            .await?;
+        hub.result(
+            &header,
+            &bytes,
+            &ResultArm::SessionRegistered(SessionRegistered {
+                session_id,
+                user_id,
+                session_revision: generation,
+                account: None,
+                resulting_state_generation: generation,
+            }),
+            Vec::new(),
+            Some(completion),
+        )
+        .await?;
+        client.wait_for(" 001 quinn ").await?;
+        // The origin now carries the session.
+        hub.ack_origin().await?;
+        // JOIN goes to the coordinator; the events render the JOIN echo and
+        // the NAMES page follows from a directory query.
+        client.line("JOIN #edge").await?;
+        let (join_header, join_operation, join_bytes) = hub.next_request().await?;
+        let FederatedOperation::Join { targets, .. } = &join_operation else {
+            return Err("expected join".into());
+        };
+        assert_eq!(targets.len(), 1);
+        let channel_id = ChannelInstanceId::from_bytes([63; 16]);
+        hub.state_generation += 1;
+        let generation = hub.state_generation;
+        hub.event(
+            &ProjectedEvent::ChannelVisible(ChannelDetailRecord {
+                channel_id,
+                name: ChannelNameValue::parse("#edge")?,
+                channel_revision: Revision::new(generation)?,
+                visibility: Visibility::Listed,
+                content_policy: ContentPolicy::Plaintext,
+                persistence: PersistencePolicy::Ephemeral,
+                simple_mode_bits: 4,
+                history: HistoryPolicy::Off,
+                e2ee_route_binding: None,
+            }),
+            None,
+        )
+        .await?;
+        hub.event(
+            &ProjectedEvent::MemberJoined {
+                view: MembershipView {
+                    membership: MembershipRecord {
+                        channel_id,
+                        user_id,
+                        role: Role::Owner,
+                        membership_revision: Revision::new(generation)?,
+                        joined_at: UtcSecond::from_unix_seconds(5),
+                    },
+                    source: source(user_id, "quinn", 1)?,
+                },
+                home_session_revision: Some(Revision::new(generation)?),
+                display_name: DisplayNameValue::prepare("Quinn Real")?,
+            },
+            None,
+        )
+        .await?;
+        let completion = hub
+            .event(
+                &ProjectedEvent::RequestCompleted {
+                    resulting_state_generation: generation,
+                },
+                Some(RequestCorrelation {
+                    replay_key: join_header.replay_key,
+                    request_id: join_header.request_id,
+                }),
+            )
+            .await?;
+        hub.result(
+            &join_header,
+            &join_bytes,
+            &ResultArm::Committed {
+                resulting_state_generation: generation,
+            },
+            Vec::new(),
+            Some(completion),
+        )
+        .await?;
+        client.wait_for(" JOIN #edge").await?;
+        let (names_header, names_operation, names_bytes) = hub.next_request().await?;
+        assert!(matches!(
+            names_operation,
+            FederatedOperation::DirectoryQuery { .. }
+        ));
+        let replies = vec![
+            agenc_ircd_client_wire::numeric_reply(
+                COORDINATOR_NAME,
+                353,
+                "quinn",
+                &["=", "#edge"],
+                Some("~quinn"),
+            )?,
+            agenc_ircd_client_wire::numeric_reply(
+                COORDINATOR_NAME,
+                366,
+                "quinn",
+                &["#edge"],
+                Some("End of NAMES list"),
+            )?,
+        ];
+        hub.result(
+            &names_header,
+            &names_bytes,
+            &ResultArm::ReplyPage {
+                snapshot_token: [3; 32],
+                page_sequence: 0,
+                next_cursor: None,
+            },
+            replies,
+            None,
+        )
+        .await?;
+        let lines = client.wait_for(" 366 quinn #edge ").await?;
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains(" 353 quinn = #edge :~quinn"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with(":edge.example 353")),
+            "{lines:?}"
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn global_commands_fail_closed_while_the_link_is_down() -> TestResult {
+    run_edge(|federation, inbox| async move {
+        let mut hub = Hub::new(federation);
+        hub.establish().await?;
+        hub.synchronize().await?;
+        let mut client = Client::open(inbox, 1).await?;
+        hub.ack_origin().await?;
+        client.line("NICK rosa").await?;
+        client.line("USER rosa 0 * :Rosa Real").await?;
+        let (header, _, bytes) = hub.next_request().await?;
+        let session_id = SessionId::from_bytes([71; 16]);
+        let user_id = UserId::from_bytes([72; 16]);
+        hub.state_generation += 1;
+        let generation = hub.state_generation;
+        hub.event(
+            &ProjectedEvent::SessionVisible(SessionEventView {
+                source: source(user_id, "rosa", 2)?,
+                home_projection: Some(session_record(session_id, user_id, "rosa", generation, 2)?),
+            }),
+            None,
+        )
+        .await?;
+        let completion = hub
+            .event(
+                &ProjectedEvent::RequestCompleted {
+                    resulting_state_generation: generation,
+                },
+                Some(RequestCorrelation {
+                    replay_key: header.replay_key,
+                    request_id: header.request_id,
+                }),
+            )
+            .await?;
+        hub.result(
+            &header,
+            &bytes,
+            &ResultArm::SessionRegistered(SessionRegistered {
+                session_id,
+                user_id,
+                session_revision: generation,
+                account: None,
+                resulting_state_generation: generation,
+            }),
+            Vec::new(),
+            Some(completion),
+        )
+        .await?;
+        client.wait_for(" 001 rosa ").await?;
+        hub.ack_origin().await?;
+        // The coordinator link drops; global work fails closed, PING works.
+        hub.send(LinkEvent::Closed(
+            crate::federation::LinkCloseReason::PeerClosed,
+        ))
+        .await?;
+        client.line("PRIVMSG #edge :anyone").await?;
+        let lines = client.wait_for("FAIL PRIVMSG NETWORK_UNAVAILABLE").await?;
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("NETWORK_UNAVAILABLE"))
+        );
+        client.line("PING :still-here").await?;
+        client.wait_for("PONG").await?;
+        Ok(())
+    })
+    .await
+}
+
+/// Pumps rendered lines from one side's link queue into the other side's
+/// inbox exactly as the link task would, assembling objects on the way.
+async fn pump(
+    mut queue: LinkQueue,
+    expected_prefix: &str,
+    inbox: mpsc::Sender<FederationInbound>,
+    link: LinkId,
+    peer: ServerId,
+) {
+    let mut assembler = FragmentAssembler::new();
+    while let Some(line) = queue.recv().await {
+        let text = line.as_str().trim_end_matches("\r\n").to_owned();
+        let Ok(frame) = parse_frame(&text, expected_prefix) else {
+            break;
+        };
+        let event = match frame.fragment() {
+            Some(fragment) => {
+                let Ok((carrier, key)) = carrier_of(&frame) else {
+                    break;
+                };
+                match assembler.admit(key, fragment, 0) {
+                    Ok(AssemblyProgress::Complete(object)) => LinkEvent::Object { carrier, object },
+                    Ok(AssemblyProgress::Incomplete { .. }) => continue,
+                    Err(_) => break,
+                }
+            }
+            None => LinkEvent::Frame(frame),
+        };
+        if inbox
+            .send(FederationInbound {
+                link,
+                peer,
+                event,
+                charge: None,
+            })
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+    let _closed = inbox
+        .send(FederationInbound {
+            link,
+            peer,
+            event: LinkEvent::Closed(crate::federation::LinkCloseReason::PeerClosed),
+            charge: None,
+        })
+        .await;
+}
+
+/// A running state owner with its inboxes.
+struct Node {
+    federation: mpsc::Sender<FederationInbound>,
+    inbox: mpsc::Sender<StateCoreMessage>,
+    lifecycle: crate::state_core::inbox::LifecycleControl,
+}
+
+fn start_node(
+    fixture: &mut StateCoreFixture,
+) -> TestResult<(Node, impl Future<Output = StateCoreExit> + use<>)> {
+    let mut parts = fixture.take_run_parts()?;
+    let (inbox, inbox_receiver) = mpsc::channel(8);
+    let (federation, federation_receiver) = mpsc::channel(64);
+    parts.state.install_federation_inbox(federation_receiver)?;
+    let (close_port, close_inbox) = connection_close_channel();
+    let (lifecycle, lifecycle_receiver) = lifecycle_channel();
+    let token = crate::cancel::CancellationToken::root();
+    let run = async move {
+        let _keep = close_port;
+        parts
+            .state
+            .run(
+                inbox_receiver,
+                close_inbox,
+                lifecycle_receiver,
+                parts.storage,
+                parts.storage_reads,
+                parts.checkpoints,
+                parts.crypto,
+                token,
+            )
+            .await
+    };
+    Ok((
+        Node {
+            federation,
+            inbox,
+            lifecycle,
+        },
+        run,
+    ))
+}
+
+fn hub_identity() -> PeerIdentity {
+    PeerIdentity::new(
+        HUB,
+        HUB_NAME,
+        FederationRole::Coordinator,
+        HUB_EPOCH,
+        agenc_ircd_crypto::Ed25519SecretKey::from_bytes([16; 32]).public_key(),
+        [17; 32],
+    )
+}
+
+fn edge_identity() -> PeerIdentity {
+    PeerIdentity::new(
+        EDGE,
+        EDGE_NAME,
+        FederationRole::Edge,
+        RecoveryEpoch::from_bytes([0; 16]),
+        agenc_ircd_crypto::Ed25519SecretKey::from_bytes([14; 32]).public_key(),
+        [15; 32],
+    )
+}
+
+/// Registers a fresh connection once the edge reports the network as
+/// available; the link synchronizes concurrently with the first client.
+async fn register_when_available(
+    inbox: &mpsc::Sender<StateCoreMessage>,
+    first_number: u64,
+    nickname: &str,
+) -> TestResult<Client> {
+    let mut number = first_number;
+    for _ in 0..50 {
+        let mut client = Client::open(inbox.clone(), number).await?;
+        client.line(&format!("NICK {nickname}")).await?;
+        client
+            .line(&format!("USER {nickname} 0 * :{nickname} Real"))
+            .await?;
+        for _ in 0..500 {
+            let lines = client.sink.lines();
+            if lines.iter().any(|line| line.contains(" 001 ")) {
+                return Ok(client);
+            }
+            if lines
+                .iter()
+                .any(|line| line.contains("NETWORK_UNAVAILABLE"))
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        number = number.saturating_add(100);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    Err("the edge never reported the network as available".into())
+}
+
+async fn register(client: &mut Client, nickname: &str) -> TestResult {
+    client.line(&format!("NICK {nickname}")).await?;
+    client
+        .line(&format!("USER {nickname} 0 * :{nickname} Real"))
+        .await?;
+    client.wait_for(&format!(" 001 {nickname} ")).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn edge_and_coordinator_interoperate_over_a_bridged_link() -> TestResult {
+    let mut coordinator_fixture =
+        StateCoreFixture::with_federation_coordinator(entropy_script(), vec![edge_identity()])?;
+    let mut edge_fixture = StateCoreFixture::with_edge(entropy_script(), hub_identity())?;
+    let (hub, hub_run) = start_node(&mut coordinator_fixture)?;
+    let (edge, edge_run) = start_node(&mut edge_fixture)?;
+    let hub_task = tokio::spawn(hub_run);
+    let edge_task = tokio::spawn(edge_run);
+    let hub_lifecycle = hub.lifecycle.clone();
+    let edge_lifecycle = edge.lifecycle.clone();
+    // The coordinator serves no clients here; its inbox stays open until stop.
+    let _hub_inbox = hub.inbox.clone();
+    let outcome = drive_bridge(hub, edge).await;
+    let _stop_edge = edge_lifecycle.request(LifecyclePhase::Stop).await;
+    let _stop_hub = hub_lifecycle.request(LifecyclePhase::Stop).await;
+    let hub_exit = tokio::time::timeout(std::time::Duration::from_secs(10), hub_task).await??;
+    let edge_exit = tokio::time::timeout(std::time::Duration::from_secs(10), edge_task).await??;
+    outcome?;
+    assert!(matches!(hub_exit, StateCoreExit::Stopped), "{hub_exit:?}");
+    assert!(matches!(edge_exit, StateCoreExit::Stopped), "{edge_exit:?}");
+    Ok(())
+}
+
+/// Establishes the bridged link and exercises two clients on the edge.
+async fn drive_bridge(hub: Node, edge: Node) -> TestResult {
+    let (to_edge_handle, to_edge_queue) = link_queue(1 << 20);
+    let (to_hub_handle, to_hub_queue) = link_queue(1 << 20);
+    let hub_link = LinkId::new(1);
+    let edge_link = LinkId::new(2);
+    hub.federation
+        .send(FederationInbound {
+            link: hub_link,
+            peer: EDGE,
+            event: LinkEvent::Established {
+                session: LinkSession {
+                    link: hub_link,
+                    peer: EDGE,
+                    peer_incarnation: EDGE_INCARNATION,
+                    peer_recovery_epoch: RecoveryEpoch::from_bytes([0; 16]),
+                    transition: agenc_ircd_federation_wire::EpochTransition::Initial,
+                },
+                handle: to_edge_handle,
+            },
+            charge: None,
+        })
+        .await
+        .map_err(|_| "hub inbox closed")?;
+    edge.federation
+        .send(FederationInbound {
+            link: edge_link,
+            peer: HUB,
+            event: LinkEvent::Established {
+                session: LinkSession {
+                    link: edge_link,
+                    peer: HUB,
+                    peer_incarnation: HUB_INCARNATION,
+                    peer_recovery_epoch: HUB_EPOCH,
+                    transition: agenc_ircd_federation_wire::EpochTransition::Initial,
+                },
+                handle: to_hub_handle,
+            },
+            charge: None,
+        })
+        .await
+        .map_err(|_| "edge inbox closed")?;
+    let pumps = tokio::spawn(async move {
+        tokio::join!(
+            pump(to_edge_queue, HUB_NAME, edge.federation, edge_link, HUB),
+            pump(to_hub_queue, EDGE_NAME, hub.federation, hub_link, EDGE),
+        );
+    });
+    let outcome = exchange_over_bridge(edge.inbox).await;
+    pumps.abort();
+    outcome
+}
+
+/// Registers two clients on the edge and relays a channel conversation.
+async fn exchange_over_bridge(inbox: mpsc::Sender<StateCoreMessage>) -> TestResult {
+    let mut sam = register_when_available(&inbox, 1, "sam").await?;
+    let mut tess = Client::open(inbox, 2).await?;
+    register(&mut tess, "tess").await?;
+    sam.line("JOIN #bridge").await?;
+    sam.wait_for(" JOIN #bridge").await?;
+    sam.wait_for(" 366 sam #bridge ").await?;
+    tess.line("JOIN #bridge").await?;
+    let lines = sam.wait_for(":tess!").await?;
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with(":tess!") && line.ends_with(" JOIN #bridge")),
+        "{lines:?}"
+    );
+    tess.line("PRIVMSG #bridge :hello sam").await?;
+    let lines = sam.wait_for("PRIVMSG #bridge :hello sam").await?;
+    assert!(lines.iter().any(|line| line.starts_with(":tess!")));
+    assert!(
+        !tess
+            .sink
+            .lines()
+            .iter()
+            .any(|line| line.contains("PRIVMSG #bridge :hello sam")),
+        "no echo without echo-message"
+    );
+    tess.line("PART #bridge :done").await?;
+    sam.wait_for(" PART #bridge :done").await?;
+    Ok(())
+}
