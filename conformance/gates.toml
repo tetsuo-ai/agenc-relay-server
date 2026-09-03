@@ -245,3 +245,36 @@ argv = ["cargo", "deny", "--manifest-path", "fuzz/Cargo.toml", "check"]
 
 [[gate.stage-six-implementation.command]]
 argv = ["bash", "scripts/run-stage-six-fuzz.sh"]
+
+[gate.stage-seven-implementation]
+includes = ["stage-six-implementation"]
+
+[[gate.stage-seven-implementation.command]]
+argv = ["python3", "scripts/requirements.py", "check-stage-seven"]
+
+[[gate.stage-seven-implementation.command]]
+argv = ["python3", "scripts/check-stage-seven.py", "check"]
+
+[[gate.stage-seven-implementation.command]]
+argv = ["python3", "scripts/check-stage-seven.py", "self-test"]
+
+[[gate.stage-seven-implementation.command]]
+argv = ["cargo", "test", "-p", "agenc-ircd-federation-wire", "--all-features", "--locked"]
+
+[[gate.stage-seven-implementation.command]]
+argv = ["cargo", "test", "-p", "agenc-ircd-domain", "--all-features", "--locked"]
+
+[[gate.stage-seven-implementation.command]]
+argv = ["cargo", "test", "-p", "agenc-ircd-storage", "--test", "stage_five", "--locked", "federation_records"]
+
+[[gate.stage-seven-implementation.command]]
+argv = ["cargo", "test", "-p", "agenc-ircd-crypto", "--all-features", "--locked"]
+
+[[gate.stage-seven-implementation.command]]
+argv = ["bash", "scripts/run-stage-seven-model.sh"]
+
+[[gate.stage-seven-implementation.command]]
+argv = ["bash", "scripts/run-stage-seven-transcripts.sh"]
+
+[[gate.stage-seven-implementation.command]]
+argv = ["bash", "scripts/run-stage-seven-fuzz.sh"]

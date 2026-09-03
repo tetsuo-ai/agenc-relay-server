@@ -52,6 +52,7 @@ use crate::connection::{
     AdmittedConnection, ConnectionExit, ConnectionGeneration, ConnectionLimits, ConnectionPolicy,
     ConnectionResources, PeerIdentity, run_connection,
 };
+use crate::federation::{AcceptedFederationSocket, MAX_FEDERATION_PEERS};
 use crate::purpose::ListenerPurpose;
 use crate::runtime_config::RuntimeConfigHandle;
 use crate::state_core::inbox::{
@@ -283,6 +284,9 @@ pub struct ListenerContext {
     pub limits: ConnectionLimits,
     /// Published live policy; absent only at an embedding or test seam.
     pub runtime_config: Option<RuntimeConfigHandle>,
+    /// The federation link owner's accept queue; absent when no federation
+    /// listener is enabled, in which case a federation socket is refused.
+    pub federation_accepts: Option<mpsc::Sender<AcceptedFederationSocket>>,
 }
 
 /// How one listener task ended.
@@ -312,6 +316,7 @@ struct ListenerShared {
     admin: Option<AdminTransportPort>,
     limits: ConnectionLimits,
     runtime_config: Option<RuntimeConfigHandle>,
+    federation_accepts: Option<mpsc::Sender<AcceptedFederationSocket>>,
     generations: AtomicU64,
 }
 
@@ -421,6 +426,7 @@ impl ListenerSet {
             admin: context.admin,
             limits: context.limits,
             runtime_config: context.runtime_config,
+            federation_accepts: context.federation_accepts,
             generations: AtomicU64::new(1),
         });
         let mut bound = Vec::with_capacity(specs.len());
@@ -532,9 +538,8 @@ fn purpose_ceiling(purpose: ListenerPurpose) -> Result<usize, ListenerError> {
     match purpose {
         ListenerPurpose::ClientTls | ListenerPurpose::ClientOnion => Ok(MAX_CLIENT_CONNECTIONS),
         ListenerPurpose::AdminLocal | ListenerPurpose::AdminTls => Ok(MAX_ADMIN_CONNECTIONS),
-        ListenerPurpose::ClientWss | ListenerPurpose::Federation => {
-            Err(ListenerError::UnsupportedPurpose)
-        }
+        ListenerPurpose::Federation => Ok(MAX_FEDERATION_PEERS),
+        ListenerPurpose::ClientWss => Err(ListenerError::UnsupportedPurpose),
     }
 }
 
@@ -704,6 +709,10 @@ fn admit(
     connections: &mut JoinSet<ConnectionOutcome>,
     exit: &mut ListenerExit,
 ) {
+    if spec.purpose == ListenerPurpose::Federation {
+        hand_off_federation(accepted, spec, shared, exit);
+        return;
+    }
     let source = match &accepted.transport {
         AcceptedTransport::Tcp(_, source) => *source,
         AcceptedTransport::Unix(_) => SourceAddressKey::onion_listener(),
@@ -753,6 +762,35 @@ fn admit(
         limits,
     };
     connections.spawn(serve(accepted, admitted, admission, endpoint));
+}
+
+/// Hands an accepted federation socket to the link owner before TLS; the
+/// owner completes the handshake, the hello, and every later frame.
+fn hand_off_federation(
+    accepted: Accepted,
+    spec: &ValidatedSpec,
+    shared: &Arc<ListenerShared>,
+    exit: &mut ListenerExit,
+) {
+    let refuse = |exit: &mut ListenerExit, reason: RefusalReason| {
+        exit.refused = exit.refused.saturating_add(1);
+        shared.observer.refused(spec.purpose, reason);
+    };
+    let (Some(sink), Some(tls)) = (&shared.federation_accepts, spec.tls.clone()) else {
+        refuse(exit, RefusalReason::PeerCredentials);
+        return;
+    };
+    let AcceptedTransport::Tcp(stream, _) = accepted.transport else {
+        refuse(exit, RefusalReason::Admission);
+        return;
+    };
+    let socket =
+        AcceptedFederationSocket::new(stream, tls, accepted.listener_slot, accepted.handshake_slot);
+    if sink.try_send(socket).is_err() {
+        refuse(exit, RefusalReason::GlobalCeiling);
+        return;
+    }
+    exit.admitted = exit.admitted.saturating_add(1);
 }
 
 fn connection_policy(
@@ -1281,7 +1319,15 @@ mod tests {
         };
         assert_eq!(
             validate_spec(&federation).err(),
-            Some(ListenerError::UnsupportedPurpose)
+            Some(ListenerError::MissingTls)
+        );
+        let oversized_federation = ListenerSpec {
+            max_connections: MAX_FEDERATION_PEERS + 1,
+            ..federation
+        };
+        assert_eq!(
+            validate_spec(&oversized_federation).err(),
+            Some(ListenerError::ConnectionCeiling)
         );
         let zero = ListenerSpec {
             name: ListenerName::parse("test")?,

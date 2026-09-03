@@ -21,7 +21,7 @@ id = "ARCH-AUTH-03"
 target_crates = ["agenc-ircd-auth"]
 task_ids = ["S07-003"]
 evidence_ids = ["EVID-ARCH-AUTH-03"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-AUTH-04"
@@ -42,7 +42,7 @@ id = "ARCH-AUTH-06"
 target_crates = ["agenc-ircd-auth"]
 task_ids = ["S07-003"]
 evidence_ids = ["EVID-ARCH-AUTH-06"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-AUTH-07"
@@ -252,7 +252,7 @@ id = "ARCH-FED-01"
 target_crates = ["agenc-ircd-federation-wire"]
 task_ids = ["S07-010"]
 evidence_ids = ["EVID-ARCH-FED-01"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-FED-02"
@@ -273,42 +273,42 @@ id = "ARCH-FED-04"
 target_crates = ["agenc-ircd-federation-wire"]
 task_ids = ["S07-004"]
 evidence_ids = ["EVID-ARCH-FED-04"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-FED-05"
 target_crates = ["agenc-ircd-federation-wire"]
 task_ids = ["S07-009"]
 evidence_ids = ["EVID-ARCH-FED-05"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-FED-06"
 target_crates = ["agenc-ircd-federation-wire"]
 task_ids = ["S07-009"]
 evidence_ids = ["EVID-ARCH-FED-06"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-FED-07"
 target_crates = ["agenc-ircd-federation-wire"]
 task_ids = ["S07-007"]
 evidence_ids = ["EVID-ARCH-FED-07"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-FED-08"
 target_crates = ["agenc-ircd-federation-wire"]
 task_ids = ["S07-008"]
 evidence_ids = ["EVID-ARCH-FED-08"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-FED-09"
 target_crates = ["agenc-ircd-federation-wire"]
 task_ids = ["S07-010"]
 evidence_ids = ["EVID-ARCH-FED-09"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-FED-10"
@@ -336,7 +336,7 @@ id = "ARCH-FED-13"
 target_crates = ["agenc-ircd-federation-wire"]
 task_ids = ["S07-011"]
 evidence_ids = ["EVID-ARCH-FED-13"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-ID-01"
@@ -371,7 +371,7 @@ id = "ARCH-ID-05"
 target_crates = ["agenc-ircd-types"]
 task_ids = ["S07-003"]
 evidence_ids = ["EVID-ARCH-ID-05"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-ID-06"
@@ -483,7 +483,7 @@ id = "ARCH-REQ-0B5E5D62113344CD5B9E"
 target_crates = ["agenc-ircd-federation-wire"]
 task_ids = ["S07-008"]
 evidence_ids = ["EVID-ARCH-REQ-0B5E5D62113344CD5B9E"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-REQ-0EC008E51ACF33B486A7"
@@ -518,7 +518,7 @@ id = "ARCH-REQ-17B30148DD5160683953"
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S07-009"]
 evidence_ids = ["EVID-ARCH-REQ-17B30148DD5160683953"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-REQ-1BC68D62C88F9901863C"
@@ -595,7 +595,7 @@ id = "ARCH-REQ-32BBA90BC88CB72E6AD1"
 target_crates = ["agenc-ircd-auth"]
 task_ids = ["S07-003"]
 evidence_ids = ["EVID-ARCH-REQ-32BBA90BC88CB72E6AD1"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-REQ-351F91DD2F9F7B09DD4C"
@@ -623,7 +623,7 @@ id = "ARCH-REQ-415192C9AE3C7492C527"
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S07-009"]
 evidence_ids = ["EVID-ARCH-REQ-415192C9AE3C7492C527"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-REQ-437D151873A9CD5C587B"
@@ -763,14 +763,14 @@ id = "ARCH-REQ-A028640A3B71B72E5F38"
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S07-004"]
 evidence_ids = ["EVID-ARCH-REQ-A028640A3B71B72E5F38"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-REQ-A1C186F162F73F71282D"
 target_crates = ["agenc-ircd-types"]
 task_ids = ["S07-010"]
 evidence_ids = ["EVID-ARCH-REQ-A1C186F162F73F71282D"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-REQ-A8B38178C6FCDD5EB7ED"
@@ -924,7 +924,7 @@ id = "ARCH-STA-01"
 target_crates = ["agenc-ircd-domain"]
 task_ids = ["S07-006"]
 evidence_ids = ["EVID-ARCH-STA-01"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-STA-02"
@@ -938,7 +938,7 @@ id = "ARCH-STA-03"
 target_crates = ["agenc-ircd-domain"]
 task_ids = ["S07-006"]
 evidence_ids = ["EVID-ARCH-STA-03"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-STA-04"
@@ -959,14 +959,14 @@ id = "ARCH-STA-06"
 target_crates = ["agenc-ircd-domain"]
 task_ids = ["S07-007"]
 evidence_ids = ["EVID-ARCH-STA-06"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-STA-07"
 target_crates = ["agenc-ircd-domain"]
 task_ids = ["S07-005"]
 evidence_ids = ["EVID-ARCH-STA-07"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-STA-08"
@@ -987,14 +987,14 @@ id = "ARCH-STA-10"
 target_crates = ["agenc-ircd-domain"]
 task_ids = ["S07-011"]
 evidence_ids = ["EVID-ARCH-STA-10"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-TRN-01"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S07-001"]
 evidence_ids = ["EVID-ARCH-TRN-01"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-TRN-02"
@@ -1008,7 +1008,7 @@ id = "ARCH-TRN-03"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S07-001"]
 evidence_ids = ["EVID-ARCH-TRN-03"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-TRN-04"

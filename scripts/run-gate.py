@@ -36,6 +36,7 @@ STAGE_GATES = {
     "stage-four-implementation": 4,
     "stage-five-implementation": 5,
     "stage-six-implementation": 6,
+    "stage-seven-implementation": 7,
 }
 NATIVE_TARGET_OVERRIDE_ENVIRONMENT = (
     "AR",

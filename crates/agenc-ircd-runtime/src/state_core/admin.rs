@@ -4,7 +4,7 @@ use agenc_ircd_admin::{
     AdminAuditCheckpoint, AdminAuditEvent, AdminAuditPhase, AdminCommand, CanonicalCommand,
     StatsSelector,
 };
-use agenc_ircd_types::{AccountId, ChannelInstanceId, Revision, UserId, UtcSecond};
+use agenc_ircd_types::{AccountId, ChannelInstanceId, Revision, ServerId, UserId, UtcSecond};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::cancel::CancellationToken;
@@ -135,6 +135,11 @@ impl AdminCoreSnapshot {
         self
     }
 
+    pub(crate) fn with_federation(mut self, federation: [u64; 7]) -> Self {
+        self.federation = federation;
+        self
+    }
+
     pub(crate) fn with_storage(mut self, storage: [u64; 14]) -> Self {
         self.storage = storage;
         self
@@ -244,6 +249,22 @@ impl AdminCorePort {
         }
     }
 
+    /// Durably quarantines one configured federation peer.
+    pub(crate) async fn peer_quarantine(
+        &self,
+        server: ServerId,
+        token: &CancellationToken,
+    ) -> AdminCoreResult {
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .try_send(AdminCoreRequest::PeerQuarantine { server, reply })
+            .map_err(map_send_failure)?;
+        tokio::select! {
+            () = token.cancelled() => Err(AdminCoreFailure::StorageUnavailable),
+            outcome = response => outcome.unwrap_or(Err(AdminCoreFailure::StorageUnavailable)),
+        }
+    }
+
     /// Replaces one verified expired audit prefix with its signed checkpoint.
     pub(crate) async fn commit_retention(
         &self,
@@ -298,6 +319,7 @@ impl AdminCoreInbox {
             }
             AdminCoreRequest::CommitMutation { reply, .. }
             | AdminCoreRequest::Kill { reply, .. }
+            | AdminCoreRequest::PeerQuarantine { reply, .. }
             | AdminCoreRequest::CommitRetention { reply, .. } => {
                 let _sent = reply.send(outcome);
                 None
@@ -322,6 +344,7 @@ impl AdminCoreInbox {
             }
             AdminCoreRequest::CommitMutation { reply, .. }
             | AdminCoreRequest::Kill { reply, .. }
+            | AdminCoreRequest::PeerQuarantine { reply, .. }
             | AdminCoreRequest::CommitRetention { reply, .. } => {
                 let _sent = reply.send(Err(AdminCoreFailure::StorageUnavailable));
                 false
@@ -347,6 +370,7 @@ impl AdminCoreInbox {
             AdminCoreRequest::CommitAudit { reply, .. }
             | AdminCoreRequest::CommitMutation { reply, .. }
             | AdminCoreRequest::Kill { reply, .. }
+            | AdminCoreRequest::PeerQuarantine { reply, .. }
             | AdminCoreRequest::CommitRetention { reply, .. } => {
                 let _sent = reply.send(Err(AdminCoreFailure::StorageUnavailable));
                 None
@@ -374,7 +398,9 @@ impl AdminCoreInbox {
                 let _sent = reply.send(outcome);
                 Some((*event, mutation, expected_revision))
             }
-            AdminCoreRequest::CommitAudit { reply, .. } | AdminCoreRequest::Kill { reply, .. } => {
+            AdminCoreRequest::CommitAudit { reply, .. }
+            | AdminCoreRequest::Kill { reply, .. }
+            | AdminCoreRequest::PeerQuarantine { reply, .. } => {
                 let _sent = reply.send(Err(AdminCoreFailure::StorageUnavailable));
                 None
             }
@@ -414,6 +440,10 @@ pub(super) enum AdminCoreRequest {
     },
     Kill {
         user_id: UserId,
+        reply: oneshot::Sender<AdminCoreResult>,
+    },
+    PeerQuarantine {
+        server: ServerId,
         reply: oneshot::Sender<AdminCoreResult>,
     },
     CommitRetention {

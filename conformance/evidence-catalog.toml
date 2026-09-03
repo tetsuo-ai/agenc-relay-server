@@ -853,3 +853,193 @@ kind = "normative-requirement"
 id = "EVID-ARCH-TRN-02"
 claim_ids = ["ARCH-TRN-02"]
 kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-S07-001-TRANSPORT"
+claim_ids = ["S07-001"]
+kind = "federation-transport"
+
+[[evidence]]
+id = "EVID-S07-002-HELLO"
+claim_ids = ["S07-002"]
+kind = "federation-hello"
+
+[[evidence]]
+id = "EVID-S07-003-AUTHORITY"
+claim_ids = ["S07-003"]
+kind = "coordinator-authority"
+
+[[evidence]]
+id = "EVID-S07-004-ORIGINS"
+claim_ids = ["S07-004"]
+kind = "origin-lifecycle"
+
+[[evidence]]
+id = "EVID-S07-005-REQUESTS"
+claim_ids = ["S07-005"]
+kind = "idempotent-requests"
+
+[[evidence]]
+id = "EVID-S07-006-PROJECTIONS"
+claim_ids = ["S07-006"]
+kind = "least-information-projections"
+
+[[evidence]]
+id = "EVID-S07-007-ACKS"
+claim_ids = ["S07-007"]
+kind = "durable-event-acknowledgement"
+
+[[evidence]]
+id = "EVID-S07-008-OBJECTS"
+claim_ids = ["S07-008"]
+kind = "bounded-object-transport"
+
+[[evidence]]
+id = "EVID-S07-009-SNAPSHOTS"
+claim_ids = ["S07-009"]
+kind = "snapshot-resume"
+
+[[evidence]]
+id = "EVID-S07-010-PARTITIONS"
+claim_ids = ["S07-010"]
+kind = "partition-keepalive-recovery"
+
+[[evidence]]
+id = "EVID-S07-011-QUERIES"
+claim_ids = ["S07-011"]
+kind = "paged-directory-queries"
+
+[[evidence]]
+id = "EVID-S07-012-MODEL"
+claim_ids = ["S07-012"]
+kind = "bounded-federation-model"
+
+[[evidence]]
+id = "EVID-S07-013-INTEROP"
+claim_ids = ["S07-013"]
+kind = "multi-process-federation"
+
+[[evidence]]
+id = "EVID-S07-900-STAGE-GATE"
+claim_ids = ["S07-900"]
+kind = "stage-gate"
+
+[[evidence]]
+id = "EVID-ARCH-AUTH-03"
+claim_ids = ["ARCH-AUTH-03"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-AUTH-06"
+claim_ids = ["ARCH-AUTH-06"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-FED-01"
+claim_ids = ["ARCH-FED-01"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-FED-04"
+claim_ids = ["ARCH-FED-04"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-FED-05"
+claim_ids = ["ARCH-FED-05"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-FED-06"
+claim_ids = ["ARCH-FED-06"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-FED-07"
+claim_ids = ["ARCH-FED-07"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-FED-08"
+claim_ids = ["ARCH-FED-08"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-FED-09"
+claim_ids = ["ARCH-FED-09"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-FED-13"
+claim_ids = ["ARCH-FED-13"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-ID-05"
+claim_ids = ["ARCH-ID-05"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-0B5E5D62113344CD5B9E"
+claim_ids = ["ARCH-REQ-0B5E5D62113344CD5B9E"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-17B30148DD5160683953"
+claim_ids = ["ARCH-REQ-17B30148DD5160683953"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-32BBA90BC88CB72E6AD1"
+claim_ids = ["ARCH-REQ-32BBA90BC88CB72E6AD1"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-415192C9AE3C7492C527"
+claim_ids = ["ARCH-REQ-415192C9AE3C7492C527"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-A028640A3B71B72E5F38"
+claim_ids = ["ARCH-REQ-A028640A3B71B72E5F38"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-A1C186F162F73F71282D"
+claim_ids = ["ARCH-REQ-A1C186F162F73F71282D"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-STA-01"
+claim_ids = ["ARCH-STA-01"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-STA-03"
+claim_ids = ["ARCH-STA-03"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-STA-06"
+claim_ids = ["ARCH-STA-06"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-STA-07"
+claim_ids = ["ARCH-STA-07"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-STA-10"
+claim_ids = ["ARCH-STA-10"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-TRN-01"
+claim_ids = ["ARCH-TRN-01"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-TRN-03"
+claim_ids = ["ARCH-TRN-03"]
+kind = "normative-requirement"

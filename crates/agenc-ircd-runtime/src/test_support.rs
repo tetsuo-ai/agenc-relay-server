@@ -52,7 +52,7 @@ use crate::connection::{
     QueueReservationLedger, SinkReserveError, TentativeClientQueueReservation,
 };
 use crate::observe::health::Liveness;
-use crate::registration::{RegistrationRouter, RegistrationRouterConfig};
+use crate::registration::{AccountServiceRole, RegistrationRouter, RegistrationRouterConfig};
 use crate::state_core::durable::{AccountingCeilings, KeyDeriver};
 use crate::state_core::fanout::FanoutRequest;
 use crate::state_core::inbox::{CloseReason, SourceAddressKey};
@@ -368,7 +368,7 @@ pub(crate) fn account_service_config(
 }
 
 /// A channel-key verifier whose hash is the first salt byte repeated.
-struct TestChannelKeyVerifier;
+pub(crate) struct TestChannelKeyVerifier;
 
 impl ChannelKeyVerifier for TestChannelKeyVerifier {
     fn derive(
@@ -380,12 +380,45 @@ impl ChannelKeyVerifier for TestChannelKeyVerifier {
     }
 }
 
+/// Which federation role the fixture's router plays.
+pub(crate) enum FederationRole {
+    Coordinator(Vec<crate::federation::PeerIdentity>),
+    Edge(crate::federation::PeerIdentity),
+}
+
+/// The coordinator role over the fixture identity with generous outbox
+/// ceilings so tests exercise ordering rather than backpressure.
+fn federation_coordinator(
+    identity: &FixtureIdentity,
+    peers: Vec<crate::federation::PeerIdentity>,
+) -> TestResult<crate::federation::coordinator::FederationCoordinator> {
+    let verifier: Arc<dyn ChannelKeyVerifier> = Arc::new(TestChannelKeyVerifier);
+    let salt = [7; CHANNEL_KEY_SALT_BYTES];
+    let hash = verifier.derive(b"dummy", &salt)?;
+    Ok(crate::federation::coordinator::FederationCoordinator::new(
+        crate::federation::coordinator::CoordinatorConfig {
+            network_id: identity.network_id,
+            server_id: identity.server_id,
+            server_name: "server.example".to_owned(),
+            recovery_epoch: identity.recovery_epoch,
+            query_cursor_key: [21; 32],
+            process_nonce: [22; 16],
+            outbox_bytes_per_edge: 1 << 20,
+            outbox_objects_per_edge: 64,
+        },
+        peers,
+        verifier,
+        ChannelKeyVerifierRecord::new(salt, hash),
+    ))
+}
+
 /// The production registration router over the fixture identity with guests
 /// allowed and no connection password.
 fn registration_router(
     identity: &FixtureIdentity,
     opaque: &Arc<OpaqueProfile>,
     key_state: LoginIndexKeyState,
+    prefix: &str,
 ) -> TestResult<RegistrationRouter> {
     let verifier: Arc<dyn ChannelKeyVerifier> = Arc::new(TestChannelKeyVerifier);
     let salt = [7; CHANNEL_KEY_SALT_BYTES];
@@ -396,11 +429,21 @@ fn registration_router(
         RegistrationRouterConfig {
             network_id: identity.network_id,
             server_id: identity.server_id,
-            server_prefix: "server.example".to_owned(),
+            server_prefix: prefix.to_owned(),
             display_name: "TestNetwork".to_owned(),
             allow_guests: true,
             access_token: None,
-            account_service: account_service_config(identity, opaque, key_state)?,
+            account_service: if prefix == "edge.example" {
+                // An edge holds no account-service keys (spec 22.2).
+                AccountServiceRole::Advertised {
+                    creation_policy: AccountCreationPolicy::Open,
+                    recovery_epoch: identity.recovery_epoch,
+                }
+            } else {
+                AccountServiceRole::Hosted(Box::new(account_service_config(
+                    identity, opaque, key_state,
+                )?))
+            },
         },
         commands,
     )?)
@@ -419,13 +462,58 @@ impl StateCoreFixture {
         Self::build(entropy, true)
     }
 
+    /// Builds the fixture with the registration router acting as the
+    /// federation coordinator for `peers`, with the projector installed.
+    pub(crate) fn with_federation_coordinator(
+        entropy: Vec<u8>,
+        peers: Vec<crate::federation::PeerIdentity>,
+    ) -> TestResult<Self> {
+        let mut fixture =
+            Self::build_with(entropy, true, Some(FederationRole::Coordinator(peers)))?;
+        let network_id = fixture.identity.network_id;
+        let server_id = fixture.identity.server_id;
+        fixture.context_mut()?.install_federation_projector(
+            crate::state_core::projector::FederationProjector::new(network_id, server_id),
+        );
+        Ok(fixture)
+    }
+
     fn build(entropy: Vec<u8>, registration: bool) -> TestResult<Self> {
+        Self::build_with(entropy, registration, None)
+    }
+
+    /// Builds the fixture with the registration router acting as an edge of
+    /// `coordinator`.
+    pub(crate) fn with_edge(
+        entropy: Vec<u8>,
+        coordinator: crate::federation::PeerIdentity,
+    ) -> TestResult<Self> {
+        Self::build_with(entropy, true, Some(FederationRole::Edge(coordinator)))
+    }
+
+    fn build_with(
+        entropy: Vec<u8>,
+        registration: bool,
+        role: Option<FederationRole>,
+    ) -> TestResult<Self> {
+        // An edge fixture carries its own server identity so it never shares
+        // the coordinator fixture's Server ID inside one test.
+        let edge_role = matches!(role, Some(FederationRole::Edge(_)));
         let identity = FixtureIdentity {
             network_id: NetworkId::from_bytes([31; 32]),
-            server_id: ServerId::from_bytes([32; 16]),
-            server_incarnation: ServerIncarnation::from_bytes([33; 16]),
+            server_id: ServerId::from_bytes(if edge_role { [36; 16] } else { [32; 16] }),
+            server_incarnation: ServerIncarnation::from_bytes(if edge_role {
+                [35; 16]
+            } else {
+                [33; 16]
+            }),
             recovery_epoch: RecoveryEpoch::from_bytes([34; 16]),
             login_index: [37; 32],
+        };
+        let prefix = if edge_role {
+            "edge.example"
+        } else {
+            "server.example"
         };
         let directory = TestDirectory::create()?;
         let opaque = Arc::new(OpaqueProfile::generate(identity.network_id)?);
@@ -433,10 +521,26 @@ impl StateCoreFixture {
         let key_state = LoginIndexKeyState::stable(1, login_key.key_id(identity.network_id))?;
         let qualification = initialize_test_storage(&identity, &directory, &opaque, &key_state)?;
         let mut owner = open_test_storage(&identity, &directory, &qualification)?;
-        let router: Box<dyn CommandRouter> = if registration {
-            Box::new(registration_router(&identity, &opaque, key_state)?)
-        } else {
-            Box::new(DefaultRouter)
+        let router: Box<dyn CommandRouter> = match (registration, role) {
+            (true, Some(FederationRole::Coordinator(peers))) => Box::new(
+                registration_router(&identity, &opaque, key_state, prefix)?
+                    .with_federation(federation_coordinator(&identity, peers)?),
+            ),
+            (true, Some(FederationRole::Edge(coordinator))) => Box::new(
+                registration_router(&identity, &opaque, key_state, prefix)?.with_edge(
+                    crate::federation::edge::EdgeFederation::new(
+                        crate::federation::edge::EdgeConfig {
+                            network_id: identity.network_id,
+                            server_id: identity.server_id,
+                            server_name: prefix.to_owned(),
+                            incarnation: identity.server_incarnation,
+                            coordinator,
+                        },
+                    ),
+                ),
+            ),
+            (true, None) => Box::new(registration_router(&identity, &opaque, key_state, prefix)?),
+            (false, _) => Box::new(DefaultRouter),
         };
         let (state, storage_receivers, crypto_completions) =
             compose_test_state(&mut owner, entropy, router, registration)?;
@@ -562,6 +666,30 @@ pub(crate) fn seed_session(
         })?;
     apply_live_plan(context, plan)?;
     Ok(identity)
+}
+
+/// A session seed homed on a remote edge, for coordinator tests.
+pub(crate) fn remote_session_seed(
+    context: &mut StateCoreContext,
+    home: ServerId,
+    nickname: &str,
+) -> TestResult<agenc_ircd_domain::SessionSeed> {
+    let seed = home.as_bytes()[0];
+    Ok(agenc_ircd_domain::SessionSeed {
+        session_id: SessionId::from_bytes(agenc_ircd_testkit::bytes(seed)),
+        user_id: UserId::from_bytes(agenc_ircd_testkit::bytes(seed.wrapping_add(64))),
+        home_server_id: home,
+        account_id: None,
+        account_session_generation: agenc_ircd_testkit::generation(0)?,
+        generation: agenc_ircd_testkit::generation(1)?,
+        nickname: agenc_ircd_domain::NicknameValue::parse(nickname)?,
+        display_name: agenc_ircd_domain::DisplayNameValue::prepare(nickname)?,
+        public_cloak: agenc_ircd_testkit::deterministic_cloak(seed)?,
+        connection_nonce: [seed; 32],
+        negotiated_capability_hash: [seed.wrapping_add(1); 32],
+        created_at_utc: UtcSecond::from_unix_seconds(1_700_000_000 + u64::from(seed)),
+        revision: context.domain().revision(),
+    })
 }
 
 /// The bound-session view of a seeded identity.

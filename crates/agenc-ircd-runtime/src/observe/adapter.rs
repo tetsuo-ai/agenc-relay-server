@@ -110,6 +110,29 @@ impl RuntimeObserver {
         );
     }
 
+    /// Records one federation link edge under the federation purpose. Only
+    /// the closed event code and severity leave the process: never the peer
+    /// address, its Server ID, or the frame that ended the link.
+    pub fn federation_link(&self, established: bool, failure: bool) {
+        let code = if established {
+            LogEventCode::FederationLinkEstablished
+        } else {
+            LogEventCode::FederationLinkClosed
+        };
+        let severity = if failure {
+            Severity::Warning
+        } else {
+            Severity::Info
+        };
+        self.emit(
+            code,
+            severity,
+            Some(ListenerPurpose::Federation),
+            None,
+            None,
+        );
+    }
+
     /// Records one transition of the closed wall-clock trust state.
     pub fn clock_trust_changed(&self, trusted: bool) {
         self.emit(

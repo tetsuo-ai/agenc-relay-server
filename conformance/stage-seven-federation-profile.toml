@@ -1,0 +1,76 @@
+schema_version = 1
+stage = 7
+tasks = [
+  "S07-001", "S07-002", "S07-003", "S07-004", "S07-005",
+  "S07-006", "S07-007", "S07-008", "S07-009", "S07-010",
+  "S07-011", "S07-012", "S07-013",
+]
+
+[target]
+name = "federated-v1"
+coordinator = true
+edges = true
+max_peers = 64
+link_alpn = "agenc-chat-fed/1"
+exporter_label = "EXPORTER-agenc-chat-federation-v1"
+san_uri_prefix = "urn:agenc-chat:server:"
+
+[link]
+hello_bytes = 260
+hello_line_bytes = 508
+hello_deadline_seconds = 5
+line_bytes = 8703
+fragment_bytes = 2940
+fragment_idle_seconds = 15
+ingress_bytes = 16777216
+inbound_items = 256
+outbound_items = 1024
+keepalive_idle_seconds = 15
+keepalive_timeout_seconds = 10
+reconnect_min_seconds = 1
+reconnect_max_seconds = 60
+
+[origin]
+grace_seconds = 120
+declarations_pipelined = true
+
+[snapshot]
+max_bytes = 536870912
+token_seconds = 900
+
+[query]
+cursor_idle_seconds = 60
+cursor_absolute_seconds = 600
+reply_page_bytes = 65536
+
+[edge]
+account_service = "advertised only; every carrier answers UNAVAILABLE"
+history_queries = "UNAVAILABLE"
+partition = "FAIL <command> NETWORK_UNAVAILABLE"
+readiness_requires_active_link = true
+certificate_source = "the disabled federation listener entry"
+
+[admin]
+federation_commands = ["CONNECT", "SQUIT", "PEER QUARANTINE"]
+federation_stats_fields = 7
+peer_quarantine_confirmation_target = "process"
+
+[excluded]
+wss = "Stage 09"
+e2ee = "Stage 08"
+cross_profile_barrier = "Stage 08"
+account_envelopes_over_federation = "deferred"
+
+[fuzz]
+targets = ["federation_object", "federation_fragment"]
+seed = 20260903
+runs = 10000
+max_len = 65536
+timeout_seconds = 2
+rss_limit_mb = 512
+
+[closure]
+implementation_gate = "stage-seven-implementation"
+exact_sha_checkpoint_required = true
+evidence_schema = 2
+stage_records = 38

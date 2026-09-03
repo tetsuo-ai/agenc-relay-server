@@ -240,6 +240,24 @@ impl WireMessage {
         })
     }
 
+    /// Borrows the command or numeric.
+    #[must_use]
+    pub fn command(&self) -> &str {
+        &self.command
+    }
+
+    /// Borrows the middle parameters in order.
+    #[must_use]
+    pub fn middle(&self) -> &[String] {
+        &self.middle
+    }
+
+    /// Borrows the trailing parameter.
+    #[must_use]
+    pub fn trailing(&self) -> Option<&str> {
+        self.trailing.as_deref()
+    }
+
     /// Adds one ordinary server-originated tag.
     ///
     /// Correlation tags are excluded: `label` is owned by

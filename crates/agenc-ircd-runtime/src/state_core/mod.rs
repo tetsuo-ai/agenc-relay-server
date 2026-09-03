@@ -14,6 +14,7 @@ pub mod durable;
 pub mod fanout;
 pub mod inbox;
 mod pending;
+pub mod projector;
 pub mod reconstruct;
 pub mod session;
 pub mod timers;
@@ -32,15 +33,15 @@ use agenc_ircd_storage::{
     StorageError, StorageLimitWriter, StorageMutationBatch, StoredKey, TableId,
 };
 use agenc_ircd_types::{
-    ClockError, EntropySource, MonotonicClock, MonotonicTick, Revision, TransactionId, UserId,
-    UtcSecond, WallClock,
+    ClockError, EntropySource, MonotonicClock, MonotonicTick, Revision, ServerId, TransactionId,
+    UserId, UtcSecond, WallClock,
 };
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 pub(crate) use admin::{
-    AdminCoreFailure, AdminCoreInbox, AdminCorePort, AdminCoreSnapshot, AdminMutation, AdminTarget,
-    admin_core_channel,
+    AdminCoreFailure, AdminCoreInbox, AdminCorePort, AdminCoreResult, AdminCoreSnapshot,
+    AdminMutation, AdminTarget, admin_core_channel,
 };
 pub use pending::{GATHER_WINDOW_MILLIS, MAX_BATCH_PLANS, StagedOrigin};
 
@@ -60,6 +61,7 @@ use crate::budget::{
 use crate::cancel::CancellationToken;
 use crate::connection::sink::QuerySnapshotPermit;
 use crate::connection::{ConnectionGeneration, FlushAcknowledgement};
+use crate::federation::FederationInbound;
 use crate::observe::adapter::RuntimeObserver;
 use crate::observe::health::Liveness;
 use crate::observe::metrics::{CommandClass, QueueName, ResultClass};
@@ -68,7 +70,7 @@ use crate::runtime_config::{
     ReloadCoreRequest, ReloadOutcome, ReloadRejection, RuntimeConfigHandle, RuntimeConfigSnapshot,
     RuntimeResourceLimits,
 };
-use crate::state_core::admin::{AdminCoreRequest, AdminCoreResult};
+use crate::state_core::admin::AdminCoreRequest;
 use crate::state_core::durable::{
     AccountServiceDurableWrite, AccountingCeilings, AdminMutationAfterImage, DurableIndex,
     HeadCounters, KeyDeriver, PlanProjection, RetainedProjection, project_admin_audit_event,
@@ -84,10 +86,14 @@ use crate::state_core::inbox::{
     SourceAddressKey, StateCoreMessage,
 };
 use crate::state_core::pending::{PendingMutationBatch, StagedPlan};
+use crate::state_core::projector::{
+    FederationProjector, OutboundEvent, PendingProjection, RequestBinding,
+};
 use crate::state_core::reconstruct::Reconstruction;
 use crate::state_core::session::SessionTable;
 use crate::state_core::timers::{DriftMonitor, DriftTransition, TimerEntry, TimerHeap};
 use crate::sync::Arc;
+use agenc_ircd_domain::federation::MutationContext;
 
 /// The numeric a registered session receives for an unknown command.
 const ERR_UNKNOWNCOMMAND: u16 = 421;
@@ -259,6 +265,40 @@ pub trait CommandRouter: Send {
 
     /// A maintenance tick the loop does not consume itself.
     fn maintenance(&mut self, _context: &mut StateCoreContext, _event: MaintenanceEvent) {}
+
+    /// One federation link delivered an event, frame, or object. The loop
+    /// only calls this at a safe point with no batch pending, so the router
+    /// may stage exactly one durable plan per message.
+    fn federation_inbound(&mut self, _context: &mut StateCoreContext, _message: FederationInbound) {
+    }
+
+    /// The seven `STATS FEDERATION` values when a federation role is
+    /// attached (spec 22.3); `None` keeps every field zero.
+    fn federation_stats(&self) -> Option<[u64; 7]> {
+        None
+    }
+
+    /// `PEER QUARANTINE`: durably denies one configured peer and fences its
+    /// incarnation. Only a coordinator can honour it.
+    fn admin_peer_quarantine(
+        &mut self,
+        _context: &mut StateCoreContext,
+        _server: ServerId,
+    ) -> Result<(), PeerQuarantineRefusal> {
+        Err(PeerQuarantineRefusal::UnknownPeer)
+    }
+}
+
+/// Why `PEER QUARANTINE` was refused by the router's federation role.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PeerQuarantineRefusal {
+    /// The Server ID is not a configured peer, or this node has no
+    /// coordinator role.
+    UnknownPeer,
+    /// The peer is already quarantined.
+    AlreadyQuarantined,
+    /// A federation batch is in flight; retry after it commits.
+    Busy,
 }
 
 /// The router installed before composition: every line is unknown.
@@ -396,6 +436,19 @@ pub struct StateCoreCounters {
     pub timers_fired: u64,
     /// Maintenance events consumed.
     pub maintenance_events: u64,
+    /// Ephemeral plans whose edge events could not be reserved durably.
+    pub projection_refusals: u64,
+}
+
+/// One fully prepared durable staging request.
+struct Staging {
+    plan: MutationPlan,
+    request: FanoutRequest,
+    origin: Option<StagedOrigin>,
+    response_count_increment: u64,
+    account_service_writes: Vec<AccountServiceDurableWrite>,
+    admission: DurableAdmission,
+    projection: Option<PendingProjection>,
 }
 
 /// Why a durable plan could not be staged; nothing changed.
@@ -482,6 +535,10 @@ pub struct StateCoreContext {
     counters: StateCoreCounters,
     quiescing: bool,
     observer: Option<Arc<RuntimeObserver>>,
+    federation: Option<FederationProjector>,
+    next_mutation: MutationContext,
+    next_correlation: Option<RequestBinding>,
+    outbound_events: Vec<OutboundEvent>,
 }
 
 /// A side-effect-free query allocation reservation sealed only after the
@@ -770,7 +827,68 @@ impl StateCoreContext {
         Ok(self.commit_fanout(reservation))
     }
 
+    /// Installs the coordinator's federation projector before the actor
+    /// starts. Every later durable plan projects into edge outboxes.
+    pub fn install_federation_projector(&mut self, projector: FederationProjector) {
+        self.federation = Some(projector);
+    }
+
+    /// Borrows the federation projector when this node coordinates.
+    #[must_use]
+    pub fn federation(&self) -> Option<&FederationProjector> {
+        self.federation.as_ref()
+    }
+
+    /// Mutably borrows the federation projector.
+    pub fn federation_mut(&mut self) -> Option<&mut FederationProjector> {
+        self.federation.as_mut()
+    }
+
+    /// Supplies the intent of the next staged or ephemeral plan that the
+    /// plan alone cannot express (actor, reason, hide kind, client tags).
+    /// The value is consumed by exactly the next plan.
+    pub fn set_mutation_context(&mut self, mutation: MutationContext) {
+        self.next_mutation = mutation;
+    }
+
+    /// Binds the next staged plan to the federated request that caused it,
+    /// so its `request_completed` event carries the correlation tuple and
+    /// the event identity the result already names.
+    pub fn set_request_binding(&mut self, binding: RequestBinding) {
+        self.next_correlation = Some(binding);
+    }
+
+    /// Takes every event reserved by batches that committed since the last
+    /// call, in commit and delivery order.
+    pub fn take_outbound_events(&mut self) -> Vec<OutboundEvent> {
+        std::mem::take(&mut self.outbound_events)
+    }
+
+    fn project_next(
+        &mut self,
+        plan: &MutationPlan,
+        row_revision: u64,
+    ) -> Result<Option<(Vec<AccountServiceDurableWrite>, PendingProjection)>, RuntimeError> {
+        let mutation = std::mem::take(&mut self.next_mutation);
+        let correlation = self.next_correlation.take();
+        let Some(projector) = self.federation.as_ref() else {
+            return Ok(None);
+        };
+        projector.project(
+            &self.domain,
+            plan,
+            &mutation,
+            correlation.as_ref(),
+            self.entropy.as_mut(),
+            row_revision,
+        )
+    }
+
     /// Applies an ephemeral plan after reserving its complete fanout.
+    ///
+    /// On a coordinator the plan's edge events are reserved in a durable
+    /// checkpoint batch staged immediately after the apply, so delivery is
+    /// still at-least-once while the plan itself stays ephemeral.
     pub fn apply_ephemeral(
         &mut self,
         plan: MutationPlan,
@@ -783,12 +901,51 @@ impl StateCoreContext {
         if self.pending.is_some() {
             return Err(EphemeralRefused::Domain(DomainError::ServerBusy));
         }
+        let checkpoint_revision = plan
+            .resulting_revision()
+            .checked_add(1)
+            .map_err(|_| EphemeralRefused::Domain(DomainError::Overflow))?;
+        let projected = self
+            .project_next(&plan, checkpoint_revision.get())
+            .map_err(|_| EphemeralRefused::Domain(DomainError::InvariantViolation))?;
         let reservation = self
             .reserve_fanout(&request)
             .map_err(EphemeralRefused::Fanout)?;
         let receipt = self.apply_plan(plan).map_err(EphemeralRefused::Domain)?;
         self.commit_fanout(reservation);
+        if let Some((writes, projection)) = projected {
+            self.stage_projection_checkpoint(writes, projection);
+        }
         Ok(receipt)
+    }
+
+    /// Stages the outbox rows of an already applied ephemeral plan behind a
+    /// revision-fenced checkpoint plan. A refusal is counted; the edge
+    /// recovers through its next snapshot rather than a lost event.
+    fn stage_projection_checkpoint(
+        &mut self,
+        writes: Vec<AccountServiceDurableWrite>,
+        projection: PendingProjection,
+    ) {
+        let staged = self
+            .domain
+            .plan_account_service_checkpoint()
+            .ok()
+            .zip(FanoutRequest::new(Vec::new(), Vec::new()).ok())
+            .map(|(plan, request)| {
+                self.stage_prepared(Staging {
+                    plan,
+                    request,
+                    origin: None,
+                    response_count_increment: 0,
+                    account_service_writes: writes,
+                    admission: DurableAdmission::Ordinary,
+                    projection: Some(projection),
+                })
+            });
+        if !matches!(staged, Some(Ok(_))) {
+            self.counters.projection_refusals = self.counters.projection_refusals.saturating_add(1);
+        }
     }
 
     /// Stages a durable plan behind its complete fanout reservation.
@@ -875,6 +1032,40 @@ impl StateCoreContext {
             self.complete_staged_origin(&mut origin, ResultClass::Error);
             return Err(StageRefused::Domain(DomainError::InvariantViolation));
         };
+        let Ok(projected) = self.project_next(&plan, plan.resulting_revision().get()) else {
+            self.complete_staged_origin(&mut origin, ResultClass::Error);
+            return Err(StageRefused::Domain(DomainError::InvariantViolation));
+        };
+        let (account_service_writes, projection) = match projected {
+            Some((rows, projection)) => {
+                let mut writes = account_service_writes;
+                writes.extend(rows);
+                (writes, Some(projection))
+            }
+            None => (account_service_writes, None),
+        };
+        self.stage_prepared(Staging {
+            plan,
+            request,
+            origin,
+            response_count_increment,
+            account_service_writes,
+            admission,
+            projection,
+        })
+    }
+
+    // agenc-review: focus owner=runtime reviewed=2026-09-02 reason=one safe-point admission transaction owns validation fanout reservation batch joining and final command-observation transfer
+    fn stage_prepared(&mut self, staging: Staging) -> Result<StageAccepted, StageRefused> {
+        let Staging {
+            plan,
+            request,
+            mut origin,
+            response_count_increment,
+            account_service_writes,
+            admission,
+            projection,
+        } = staging;
         if self.quiescing && admission == DurableAdmission::Ordinary {
             self.complete_staged_origin(&mut origin, ResultClass::Busy);
             return Err(StageRefused::Quiescing);
@@ -918,7 +1109,8 @@ impl StateCoreContext {
             origin,
             response_count_increment,
             account_service_writes,
-        );
+        )
+        .with_projection(projection);
         let now = self.now();
         match self.pending.take() {
             None => {
@@ -1122,6 +1314,7 @@ impl StateCoreContext {
         let mut plans = plans.into_iter();
         while let Some(mut staged) = plans.next() {
             let observation = staged.take_observation();
+            let projection = staged.take_projection();
             let (plan, fanout, _origin) = staged.into_parts();
             if self.apply_plan(plan).is_err() {
                 if let Some(observation) = observation {
@@ -1131,6 +1324,7 @@ impl StateCoreContext {
                 return Err(StateCoreExit::Corrupt(CorruptionCause::ApplyFailed));
             }
             self.commit_fanout(fanout);
+            self.commit_projection(projection);
             if let Some(observation) = observation {
                 self.complete_command_observation(observation, ResultClass::Ok);
             }
@@ -1213,6 +1407,7 @@ impl StateCoreContext {
         let mut plans = plans.into_iter();
         while let Some(mut staged) = plans.next() {
             let observation = staged.take_observation();
+            let projection = staged.take_projection();
             let (plan, fanout, _origin) = staged.into_parts();
             if self.apply_plan(plan).is_err() {
                 if let Some(observation) = observation {
@@ -1222,11 +1417,18 @@ impl StateCoreContext {
                 return Err(StateCoreExit::Corrupt(CorruptionCause::ApplyFailed));
             }
             self.commit_fanout(fanout);
+            self.commit_projection(projection);
             if let Some(observation) = observation {
                 self.complete_command_observation(observation, ResultClass::Ok);
             }
         }
         Ok(())
+    }
+
+    fn commit_projection(&mut self, projection: Option<PendingProjection>) {
+        if let (Some(projection), Some(projector)) = (projection, self.federation.as_mut()) {
+            self.outbound_events.extend(projector.committed(projection));
+        }
     }
 
     fn complete_batch_observations(&self, batch: PendingMutationBatch, result: ResultClass) {
@@ -1434,6 +1636,8 @@ pub struct StateCore {
     admin_receiver: mpsc::Receiver<AdminCoreRequest>,
     admin_open: bool,
     admin_pending: Option<PendingAdminCommit>,
+    federation_receiver: mpsc::Receiver<FederationInbound>,
+    federation_open: bool,
     reload_receiver: mpsc::Receiver<ReloadCoreRequest>,
     reload_open: bool,
     reload_handle: Option<RuntimeConfigHandle>,
@@ -1721,6 +1925,7 @@ impl PendingLifecycleReplies {
 impl StateCore {
     /// Builds the state owner from reconstructed state.
     #[must_use]
+    // agenc-review: focus owner=runtime reviewed=2026-09-02 reason=the constructor lists every owned field once so the ownership inventory stays in one place
     pub fn new(inputs: StateCoreInputs) -> Self {
         let now = inputs.clocks.monotonic.now();
         let wall = inputs
@@ -1732,6 +1937,8 @@ impl StateCore {
         drop(unused_admin);
         let (unused_reload, reload_receiver) = mpsc::channel(1);
         drop(unused_reload);
+        let (unused_federation, federation_receiver) = mpsc::channel(1);
+        drop(unused_federation);
         let bucket_budget = Arc::clone(&inputs.budget);
         let prefix_budget = Arc::clone(&inputs.budget);
         let mut state = Self {
@@ -1761,11 +1968,17 @@ impl StateCore {
                 counters: StateCoreCounters::default(),
                 quiescing: false,
                 observer: None,
+                federation: None,
+                next_mutation: MutationContext::default(),
+                next_correlation: None,
+                outbound_events: Vec::new(),
             },
             router: inputs.router,
             admin_receiver,
             admin_open: false,
             admin_pending: None,
+            federation_receiver,
+            federation_open: false,
             reload_receiver,
             reload_open: false,
             reload_handle: None,
@@ -1797,6 +2010,19 @@ impl StateCore {
         }
         self.admin_receiver = inbox.into_receiver();
         self.admin_open = true;
+        Ok(())
+    }
+
+    /// Installs the bounded federation link inbox before the actor starts.
+    pub fn install_federation_inbox(
+        &mut self,
+        receiver: mpsc::Receiver<FederationInbound>,
+    ) -> Result<(), RuntimeError> {
+        if self.federation_open {
+            return Err(RuntimeError::InvalidValue);
+        }
+        self.federation_receiver = receiver;
+        self.federation_open = true;
         Ok(())
     }
 
@@ -2531,6 +2757,10 @@ impl StateCore {
                 let _sent = reply.send(self.admin_kill(user_id));
                 return None;
             }
+            AdminCoreRequest::PeerQuarantine { server, reply } => {
+                let _sent = reply.send(self.admin_peer_quarantine(server));
+                return None;
+            }
             AdminCoreRequest::CommitRetention { checkpoint, reply } => {
                 return self.step_admin_retention(*checkpoint, reply);
             }
@@ -2816,7 +3046,7 @@ impl StateCore {
         let head = self.context.head;
         let storage_in_flight = u64::from(self.context.in_flight());
         let client_queues = self.context.sessions.queue_snapshot();
-        AdminCoreSnapshot::new(
+        let snapshot = AdminCoreSnapshot::new(
             [
                 self.context.now().get() / 1_000,
                 usize_u64(self.context.sessions.len()),
@@ -2866,7 +3096,26 @@ impl StateCore {
                 0,
                 0,
             ],
-        )
+        );
+        match self.router.federation_stats() {
+            Some(values) => snapshot.with_federation(values),
+            None => snapshot,
+        }
+    }
+
+    /// `PEER QUARANTINE` through the router's federation role.
+    fn admin_peer_quarantine(&mut self, server: ServerId) -> AdminCoreResult {
+        if self.context.quiescing {
+            return Err(AdminCoreFailure::Quiescing);
+        }
+        self.router
+            .admin_peer_quarantine(&mut self.context, server)
+            .map_err(|refusal| match refusal {
+                PeerQuarantineRefusal::UnknownPeer | PeerQuarantineRefusal::AlreadyQuarantined => {
+                    AdminCoreFailure::InvalidTarget
+                }
+                PeerQuarantineRefusal::Busy => AdminCoreFailure::Busy,
+            })
     }
 
     // agenc-review: focus owner=runtime reviewed=2026-09-01 reason=the sole admin receipt router preserves the reload barrier across success rejection and treats failure rejection as indeterminate
@@ -3479,6 +3728,16 @@ impl StateCore {
                     Some(request) => self.step_admin_request(request),
                     None => {
                         self.admin_open = false;
+                        None
+                    }
+                },
+                message = self.federation_receiver.recv(), if self.federation_open && !hold_inbox && !activation_barrier => match message {
+                    Some(message) => {
+                        self.router.federation_inbound(&mut self.context, message);
+                        self.step_batch()
+                    }
+                    None => {
+                        self.federation_open = false;
                         None
                     }
                 },

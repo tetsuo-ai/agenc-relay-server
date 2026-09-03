@@ -2182,6 +2182,12 @@ impl DomainState {
         self.sessions.keys().copied()
     }
 
+    /// Resolves an accepted session identity to its live user.
+    #[must_use]
+    pub fn user_for_session(&self, session_id: SessionId) -> Option<UserId> {
+        self.session_ids.get(&session_id).copied()
+    }
+
     /// Projects one channel whose authority survives a coordinator restart.
     #[must_use]
     pub fn durable_channel(&self, channel_id: ChannelInstanceId) -> Option<DurableChannel> {

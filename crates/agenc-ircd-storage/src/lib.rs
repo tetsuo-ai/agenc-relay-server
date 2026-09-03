@@ -12,6 +12,7 @@ mod domain_records;
 mod engine;
 mod error;
 mod fault;
+pub mod federation_records;
 mod initialize;
 mod integrity;
 mod login_index;
@@ -70,6 +71,17 @@ pub use error::StorageError;
 pub use fault::{
     StorageFaultBoundary, StorageFaultCase, StorageFaultInjector, StorageFaultSchedule,
     StorageFaultSite,
+};
+pub use federation_records::{
+    COMPLETION_COVERAGE_KIND, COORDINATOR_RESULT_KIND, CompletionCoverageRecord,
+    CoordinatorResultRecord, DeliveryCursorRecord, EDGE_REQUEST_KIND, EdgeRequestPhase,
+    EdgeRequestRecord, FederationOriginRecord, FederationPeerRecord, MAX_ACCEPTED_EPOCHS,
+    ORIGIN_FLAG_PENDING_DEL, ORIGIN_FLAG_SINK_GONE, ORIGIN_RECORD_KIND, OUTBOX_EVENT_KIND,
+    OriginKeyParts, OriginRowStatus, OutboxEventRecord, OutboxKeyParts, PEER_RECORD_KIND,
+    PROJECTION_ENTRY_KIND, PROJECTION_MARKER_KIND, PeerPhase, ProjectionEntryRecord,
+    ProjectionGenerationState, ProjectionKeyParts, ProjectionMarkerRecord, origin_key, outbox_key,
+    outbox_range, parse_origin_key, parse_outbox_key, parse_projection_key, peer_key,
+    projection_entry_key, projection_marker_key, projection_range, request_result_key,
 };
 pub use initialize::{
     InitialStorageRecord, StorageInitializationConfig, StorageInitializationMode,

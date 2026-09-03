@@ -358,6 +358,21 @@ impl<'a> SelectedTarget<'a> {
     }
 }
 
+/// Opens one proxied stream to `hostname:port` under a fresh isolation
+/// credential, for a federation link that completes its own TLS.
+pub(crate) async fn connect_federation_hostname<E: EntropySource>(
+    proxy: &SocksEndpoint,
+    entropy: &mut E,
+    hostname: &str,
+    port: u16,
+) -> Result<ProxyStream, TorConnectError> {
+    let credentials = IsolationCredentials::draw(entropy)?;
+    let mut stream = connect_proxy(proxy).await?;
+    negotiate_isolation(&mut stream, &credentials).await?;
+    request_hostname(&mut stream, hostname, port).await?;
+    Ok(stream)
+}
+
 async fn connect_once(
     proxy: &SocksEndpoint,
     credentials: &IsolationCredentials,
@@ -530,8 +545,11 @@ async fn read_proxy(stream: &mut ProxyStream, bytes: &mut [u8]) -> Result<(), To
         .map_err(|_| TorConnectError::ProxyUnavailable)
 }
 
-enum ProxyStream {
+/// The raw stream to the local SOCKS proxy before TLS.
+pub enum ProxyStream {
+    /// A loopback TCP proxy.
     Tcp(TcpStream),
+    /// A Unix-socket proxy.
     Unix(UnixStream),
 }
 

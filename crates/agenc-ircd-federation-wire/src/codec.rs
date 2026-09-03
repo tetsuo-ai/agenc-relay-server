@@ -235,6 +235,65 @@ impl Drop for WireValue {
     }
 }
 
+impl PartialEq for WireValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Unsigned(left), Self::Unsigned(right)) => left == right,
+            (Self::Opaque(left), Self::Opaque(right)) => left == right,
+            (Self::Structure(left), Self::Structure(right)) => left == right,
+            (Self::Vector(left), Self::Vector(right)) => left == right,
+            (
+                Self::ProjectionUnion {
+                    discriminant: left_discriminant,
+                    value: left,
+                },
+                Self::ProjectionUnion {
+                    discriminant: right_discriminant,
+                    value: right,
+                },
+            ) => left_discriminant == right_discriminant && left == right,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for WireValue {}
+
+impl WireValue {
+    /// Deep-copies the value with checked allocation.
+    pub fn try_clone(&self) -> Result<Self, CodecError> {
+        Ok(match self {
+            Self::Unsigned(value) => Self::Unsigned(*value),
+            Self::Opaque(bytes) => {
+                let mut owned = Vec::new();
+                owned
+                    .try_reserve_exact(bytes.len())
+                    .map_err(|_| CodecError::AllocationFailed)?;
+                owned.extend_from_slice(bytes);
+                Self::Opaque(owned)
+            }
+            Self::Structure(object) => Self::Structure(object.try_clone()?),
+            Self::Vector(items) => {
+                let mut owned = Vec::new();
+                owned
+                    .try_reserve_exact(items.len())
+                    .map_err(|_| CodecError::AllocationFailed)?;
+                for item in items {
+                    owned.push(item.try_clone()?);
+                }
+                Self::Vector(owned)
+            }
+            Self::ProjectionUnion {
+                discriminant,
+                value,
+            } => Self::ProjectionUnion {
+                discriminant: *discriminant,
+                value: value.try_clone()?,
+            },
+        })
+    }
+}
+
 /// A complete value validated against one frozen Appendix-B schema.
 pub struct SchemaObject {
     pub(crate) schema: &'static SchemaDescriptor,
@@ -262,7 +321,28 @@ pub(crate) trait SemanticValidator {
 /// The only semantic policy accepted by the frozen federation codec.
 pub(crate) struct FederationSemanticValidator;
 
+impl PartialEq for SchemaObject {
+    fn eq(&self, other: &Self) -> bool {
+        self.schema.name == other.schema.name && self.fields == other.fields
+    }
+}
+
+impl Eq for SchemaObject {}
+
 impl SchemaObject {
+    /// Deep-copies the object with checked allocation, revalidating it
+    /// against the same schema.
+    pub fn try_clone(&self) -> Result<Self, CodecError> {
+        let mut fields = Vec::new();
+        fields
+            .try_reserve_exact(self.fields.len())
+            .map_err(|_| CodecError::AllocationFailed)?;
+        for field in &self.fields {
+            fields.push(field.try_clone()?);
+        }
+        Self::new(self.schema.name, fields)
+    }
+
     /// Validates a complete field vector against one exact schema.
     pub fn new(schema_name: &str, fields: Vec<WireValue>) -> Result<Self, CodecError> {
         let schema = schema_by_name(schema_name).ok_or(CodecError::UnknownSchema)?;

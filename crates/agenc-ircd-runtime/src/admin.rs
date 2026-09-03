@@ -24,7 +24,7 @@ use agenc_ircd_storage::{
     BackupDestination, BackupDirectoryReader, BackupReceipt, BackupTrustKey, StorageCompletion,
     StorageError, StoragePort, verify_backup,
 };
-use agenc_ircd_types::{EntropySource, MonotonicClock, WallClock};
+use agenc_ircd_types::{EntropySource, MonotonicClock, ServerId, WallClock};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::sync::{mpsc, oneshot, watch};
 use zeroize::Zeroizing;
@@ -36,6 +36,7 @@ use crate::cancel::CancellationToken;
 use crate::connection::{
     ConnectionExit, ConnectionGeneration, ConnectionResources, FlushAcknowledgement,
 };
+use crate::federation::owner::FederationControl;
 use crate::observe::adapter::RuntimeObserver;
 use crate::observe::health::{HealthSnapshot, Liveness, ReadinessGate};
 use crate::observe::metrics::ResultClass;
@@ -45,7 +46,9 @@ use crate::runtime_config::{
     ReloadPrepareFailure, ReloadRejection, RuntimeConfigHandle,
 };
 use crate::state_core::inbox::CloseReason;
-use crate::state_core::{AdminCoreFailure, AdminCorePort, AdminMutation, AdminTarget};
+use crate::state_core::{
+    AdminCoreFailure, AdminCorePort, AdminCoreResult, AdminMutation, AdminTarget,
+};
 use crate::sync::Arc;
 use crate::tls::{CLOSE_NOTIFY_GRACE, WRITE_STALL_BUDGET};
 
@@ -626,6 +629,7 @@ pub(crate) struct AdminOwner {
     audit: AuditAuthority,
     core: AdminCorePort,
     statistics_storage: Option<StoragePort>,
+    federation: Option<FederationControl>,
     health: AdminOwnerHealth,
     config: Option<RuntimeConfigHandle>,
     config_changes: Option<watch::Receiver<crate::runtime_config::ConfigRevision>>,
@@ -735,6 +739,7 @@ impl AdminOwner {
             audit,
             core,
             statistics_storage: None,
+            federation: None,
             health: runtime.health,
             config: runtime.config,
             config_changes,
@@ -754,6 +759,18 @@ impl AdminOwner {
             lifecycle_completed: None,
             flush_outcome: None,
         }
+    }
+
+    /// Installs the link control surface behind `CONNECT` and `SQUIT`.
+    pub(crate) fn install_federation_control(
+        &mut self,
+        control: FederationControl,
+    ) -> Result<(), crate::RuntimeError> {
+        if self.federation.is_some() {
+            return Err(crate::RuntimeError::InvalidValue);
+        }
+        self.federation = Some(control);
+        Ok(())
     }
 
     pub(crate) fn install_statistics_storage(
@@ -1219,7 +1236,9 @@ impl AdminOwner {
             }
             AdminCommand::Connect { .. }
             | AdminCommand::Squit { .. }
-            | AdminCommand::PeerQuarantine { .. } => {
+            | AdminCommand::PeerQuarantine { .. }
+                if self.federation.is_none() =>
+            {
                 self.output_line(
                     generation,
                     format!(
@@ -1239,6 +1258,11 @@ impl AdminOwner {
             AdminCommand::Rehash(_) => self.rehash(generation, &event, token).await,
             AdminCommand::Kill { user, .. } => {
                 self.kill(generation, &event, *user, token).await;
+            }
+            AdminCommand::Connect { .. }
+            | AdminCommand::Squit { .. }
+            | AdminCommand::PeerQuarantine { .. } => {
+                self.federation_action(generation, &event, token).await;
             }
             AdminCommand::AccountSuspend { account, .. }
             | AdminCommand::AccountRestore { account, .. } => {
@@ -1502,6 +1526,69 @@ impl AdminOwner {
             Ok(()) => self.output_line(generation, "NOTE KILL OK :Session terminated".to_owned()),
             Err(failure) => self.output_admin_failure(generation, "KILL", failure),
         }
+    }
+
+    /// `CONNECT`, `SQUIT`, and `PEER QUARANTINE` (spec 22.3): an intent
+    /// record, the link or durable action, then the outcome record.
+    async fn federation_action(
+        &mut self,
+        generation: ConnectionGeneration,
+        event: &AdminCommandEvent,
+        token: &CancellationToken,
+    ) {
+        let verb = event.command.verb();
+        let Some(intent) = self.prepare_action_event(generation, event, AdminAuditPhase::Intent)
+        else {
+            return;
+        };
+        if let Err(failure) = self.commit_action_audit(generation, intent, token).await {
+            self.output_audit_failure(generation, verb, failure);
+            return;
+        }
+        let result = match &event.command {
+            AdminCommand::Connect { server, .. } => {
+                self.link_control(*server, true).map(|()| "Link requested")
+            }
+            AdminCommand::Squit { server, .. } => {
+                self.link_control(*server, false).map(|()| "Link closed")
+            }
+            AdminCommand::PeerQuarantine { server, .. } => self
+                .core
+                .peer_quarantine(*server, token)
+                .await
+                .map(|()| "Peer quarantined"),
+            _ => return,
+        };
+        let phase = if result.is_ok() {
+            AdminAuditPhase::OutcomeSuccess
+        } else {
+            AdminAuditPhase::OutcomeFailure
+        };
+        if !self
+            .commit_rehash_outcome(generation, event, phase, token)
+            .await
+        {
+            self.fail_closed(generation);
+            return;
+        }
+        match result {
+            Ok(text) => self.output_line(generation, format!("NOTE {verb} OK :{text}")),
+            Err(failure) => self.output_admin_failure(generation, verb, failure),
+        }
+    }
+
+    /// Applies one link command through the installed control surface.
+    fn link_control(&self, server: ServerId, connect: bool) -> AdminCoreResult {
+        let control = self
+            .federation
+            .as_ref()
+            .ok_or(AdminCoreFailure::StorageUnavailable)?;
+        let outcome = if connect {
+            control.connect(server)
+        } else {
+            control.squit(server)
+        };
+        outcome.map_err(|_| AdminCoreFailure::InvalidTarget)
     }
 
     async fn mutate_account(
@@ -2380,7 +2467,12 @@ const fn audit_phase_is_valid(command: &AdminCommand, phase: AdminAuditPhase) ->
         | AdminCommand::Links
         | AdminCommand::Stats(_)
         | AdminCommand::AuditExport(_) => matches!(phase, AdminAuditPhase::Observed),
-        AdminCommand::Rehash(_) | AdminCommand::Kill { .. } | AdminCommand::BackupCreate(_) => {
+        AdminCommand::Rehash(_)
+        | AdminCommand::Kill { .. }
+        | AdminCommand::BackupCreate(_)
+        | AdminCommand::Connect { .. }
+        | AdminCommand::Squit { .. }
+        | AdminCommand::PeerQuarantine { .. } => {
             matches!(
                 phase,
                 AdminAuditPhase::Intent
@@ -2396,20 +2488,18 @@ const fn audit_phase_is_valid(command: &AdminCommand, phase: AdminAuditPhase) ->
         AdminCommand::Restart(_) | AdminCommand::Die(_) => {
             matches!(phase, AdminAuditPhase::Intent)
         }
-        AdminCommand::Ping(_)
-        | AdminCommand::Pong(_)
-        | AdminCommand::Quit
-        | AdminCommand::Connect { .. }
-        | AdminCommand::Squit { .. }
-        | AdminCommand::PeerQuarantine { .. } => false,
+        AdminCommand::Ping(_) | AdminCommand::Pong(_) | AdminCommand::Quit => false,
     }
 }
 
 fn confirmation_target(command: &AdminCommand) -> Option<AdminTarget> {
     match command {
         AdminCommand::AccountSuspend { account, .. } => Some(AdminTarget::Account(*account)),
-        AdminCommand::Restart(_) | AdminCommand::Die(_) => Some(AdminTarget::Process),
-        AdminCommand::PeerQuarantine { .. } => None,
+        // A peer has no domain revision; the durable deny confirms against
+        // the state generation like the process actions do.
+        AdminCommand::Restart(_) | AdminCommand::Die(_) | AdminCommand::PeerQuarantine { .. } => {
+            Some(AdminTarget::Process)
+        }
         _ => None,
     }
 }
@@ -2817,6 +2907,7 @@ mod tests {
             ReadinessStage::Keys,
             ReadinessStage::StorageRecovered,
             ReadinessStage::StateCore,
+            ReadinessStage::Federation,
         ] {
             readiness.mark(stage);
         }
@@ -3243,6 +3334,198 @@ mod tests {
         )
         .await;
         assert_eq!(reason, CloseReason::ProtocolError);
+    }
+
+    /// One authenticated owner with the edge control surface installed.
+    async fn federation_owner_session(
+        control: FederationControl,
+    ) -> Result<FederationOwnerSession, RuntimeError> {
+        let (port, inbox) = admin_transport_channel(binding());
+        let (lifecycle, lifecycle_inbox) = admin_lifecycle_channel();
+        let (core, core_inbox) = admin_core_channel();
+        let root = CancellationToken::root();
+        let mut owner = AdminOwner::new(
+            binding(),
+            all_permissions_registry()?,
+            AdminAdmissionSnapshot::new(vec![1000], Vec::new(), Vec::new()),
+            AuditAuthority::empty_for_test()?,
+            core,
+            AdminOwnerRuntime {
+                health: live_health(),
+                config: None,
+                reload: None,
+                backup: None,
+                process: None,
+                fatal: None,
+                observer: None,
+                budget: Arc::new(MemoryBudget::new(MAX_AUDIT_EXPORT_BYTES * 2)),
+                entropy: Box::new(
+                    ScriptedEntropy::new(vec![0; 64]).map_err(|_| RuntimeError::InvalidValue)?,
+                ),
+                clocks: AdminOwnerClocks {
+                    monotonic: Box::new(SystemMonotonicClock::start()),
+                    wall: Box::new(SystemWallClock),
+                },
+            },
+        );
+        owner.install_federation_control(control)?;
+        let task = tokio::spawn(owner.run(inbox, lifecycle_inbox, root.clone()));
+        let (sender, mut output) = mpsc::channel(ADMIN_OUTPUT_CAPACITY);
+        port.opened(
+            ConnectionGeneration::new(9),
+            challenge(),
+            PeerIdentity::Local {
+                uid: 1000,
+                gid: 1000,
+            },
+            AdminOutput::new(sender),
+            &root,
+        )
+        .await
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        let _challenge = output.recv().await.ok_or(RuntimeError::InvalidValue)?;
+        port.line(ConnectionGeneration::new(9), oper_line()?, &root)
+            .await
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        Ok(FederationOwnerSession {
+            port,
+            core_inbox,
+            output,
+            root,
+            task,
+            _lifecycle: lifecycle,
+        })
+    }
+
+    /// The live pieces of one federation admin session; the lifecycle
+    /// control must outlive the owner or it stops.
+    struct FederationOwnerSession {
+        port: AdminTransportPort,
+        core_inbox: crate::state_core::AdminCoreInbox,
+        output: mpsc::Receiver<AdminWrite>,
+        root: CancellationToken,
+        task: tokio::task::JoinHandle<()>,
+        _lifecycle: AdminLifecycleControl,
+    }
+
+    #[tokio::test]
+    async fn federation_commands_record_intent_and_outcome() -> Result<(), RuntimeError> {
+        const PEER: &str = "AAAAAAAAAAAAAAAAAAAAAA";
+        let peer =
+            agenc_ircd_types::ServerId::parse(PEER).map_err(|_| RuntimeError::InvalidValue)?;
+        let control = FederationControl::new(agenc_ircd_types::FederationRole::Edge, [peer]);
+        let FederationOwnerSession {
+            port,
+            mut core_inbox,
+            mut output,
+            root,
+            task: owner,
+            _lifecycle,
+        } = federation_owner_session(control.clone()).await?;
+        let generation = ConnectionGeneration::new(9);
+
+        // CONNECT on an edge succeeds through the control surface alone.
+        port.line(
+            generation,
+            signed_line(0, &format!("CONNECT {PEER} :bring up"))?,
+            &root,
+        )
+        .await
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        let intent = core_inbox
+            .complete_next_for_test(Ok(()))
+            .await
+            .ok_or(RuntimeError::InvalidValue)?;
+        assert_eq!(intent.tbs().phase, AdminAuditPhase::Intent);
+        let outcome = core_inbox
+            .complete_next_for_test(Ok(()))
+            .await
+            .ok_or(RuntimeError::InvalidValue)?;
+        assert_eq!(outcome.tbs().phase, AdminAuditPhase::OutcomeSuccess);
+        let reply = output.recv().await.ok_or(RuntimeError::InvalidValue)?;
+        assert_eq!(
+            reply.lines,
+            vec![b"NOTE CONNECT OK :Link requested".to_vec()]
+        );
+
+        // SQUIT on an unknown peer fails after its intent record.
+        port.line(
+            generation,
+            signed_line(1, "SQUIT AAAAAAAAAAAAAAAAAAAAAQ :take down")?,
+            &root,
+        )
+        .await
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        let _intent = core_inbox
+            .complete_next_for_test(Ok(()))
+            .await
+            .ok_or(RuntimeError::InvalidValue)?;
+        let outcome = core_inbox
+            .complete_next_for_test(Ok(()))
+            .await
+            .ok_or(RuntimeError::InvalidValue)?;
+        assert_eq!(outcome.tbs().phase, AdminAuditPhase::OutcomeFailure);
+        let reply = output.recv().await.ok_or(RuntimeError::InvalidValue)?;
+        assert!(
+            reply
+                .lines
+                .iter()
+                .any(|line| line.starts_with(b"FAIL SQUIT "))
+        );
+
+        // PEER QUARANTINE is a confirmed action: the first submission binds a
+        // token to the state generation, the repeat runs it, and the durable
+        // deny goes to the state core between its two records.
+        let quarantine = format!("PEER QUARANTINE {PEER} :deny now");
+        port.line(generation, signed_line(2, &quarantine)?, &root)
+            .await
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let revision =
+            agenc_ircd_types::Revision::new(9).map_err(|_| RuntimeError::InvalidValue)?;
+        assert_eq!(
+            core_inbox.complete_target_revision_for_test(revision).await,
+            Some(AdminTarget::Process)
+        );
+        let confirmation = output.recv().await.ok_or(RuntimeError::InvalidValue)?;
+        assert!(
+            confirmation
+                .lines
+                .iter()
+                .any(|line| line.starts_with(b"NOTE PEER CONFIRM "))
+        );
+        port.line(
+            generation,
+            confirmed_line(3, &quarantine, &ConfirmationToken::from_bytes([0; 16]))?,
+            &root,
+        )
+        .await
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        let _intent = core_inbox
+            .complete_next_for_test(Ok(()))
+            .await
+            .ok_or(RuntimeError::InvalidValue)?;
+        assert!(
+            core_inbox
+                .complete_next_for_test(Err(AdminCoreFailure::InvalidTarget))
+                .await
+                .is_none()
+        );
+        let outcome = core_inbox
+            .complete_next_for_test(Ok(()))
+            .await
+            .ok_or(RuntimeError::InvalidValue)?;
+        assert_eq!(outcome.tbs().phase, AdminAuditPhase::OutcomeFailure);
+        let reply = output.recv().await.ok_or(RuntimeError::InvalidValue)?;
+        assert!(
+            reply
+                .lines
+                .iter()
+                .any(|line| line.starts_with(b"FAIL PEER "))
+        );
+
+        root.cancel();
+        owner.await.map_err(|_| RuntimeError::Cancelled)?;
+        Ok(())
     }
 
     #[tokio::test]
@@ -3921,9 +4204,12 @@ mod tests {
                 format!("CHANNEL QUARANTINE {USER} :policy action"),
                 mutation,
             ),
-            (format!("CONNECT {USER} :policy action"), Vec::new()),
-            (format!("SQUIT {USER} :policy action"), Vec::new()),
-            (format!("PEER QUARANTINE {USER} :policy action"), Vec::new()),
+            (format!("CONNECT {USER} :policy action"), external.clone()),
+            (format!("SQUIT {USER} :policy action"), external.clone()),
+            (
+                format!("PEER QUARANTINE {USER} :policy action"),
+                external.clone(),
+            ),
             ("BACKUP CREATE :policy action".to_owned(), external),
             ("AUDIT EXPORT 0 10".to_owned(), observed),
             ("RESTART :policy action".to_owned(), terminal.clone()),

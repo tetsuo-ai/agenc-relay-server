@@ -13,10 +13,10 @@ use std::fmt;
 use std::sync::Mutex;
 use std::time::Instant;
 
-use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::crypto::CryptoProvider;
+use rustls::client::{WebPkiServerVerifier, verify_server_cert_signed_by_trust_anchor};
 use rustls::crypto::aws_lc_rs::{self, cipher_suite, kx_group};
+use rustls::crypto::{CryptoProvider, WebPkiSupportedAlgorithms};
 use rustls::pki_types::pem::PemObject as _;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::server::{
@@ -34,7 +34,10 @@ use agenc_ircd_crypto::{
     tls_ticket_key_id,
 };
 
+use agenc_ircd_types::ServerId;
+
 use crate::RuntimeError;
+use crate::federation::certificate::server_id_from_certificate;
 use crate::purpose::ListenerPurpose;
 use crate::sync::Arc;
 
@@ -758,6 +761,109 @@ impl ServerCertVerifier for SpkiPinVerifier {
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.inner.supported_verify_schemes()
     }
+}
+
+/// Verifies a federation coordinator's certificate: private-CA chain, the
+/// configured SPKI pin, and the single `urn:agenc-chat:server:` SAN URI.
+/// Host names are deliberately not checked; the URI is the identity.
+struct FederationServerVerifier {
+    roots: Arc<RootCertStore>,
+    algorithms: WebPkiSupportedAlgorithms,
+    expected_spki: [u8; 32],
+    expected_server_id: ServerId,
+}
+
+impl fmt::Debug for FederationServerVerifier {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("FederationServerVerifier")
+    }
+}
+
+impl ServerCertVerifier for FederationServerVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        let parsed = ParsedCertificate::try_from(end_entity)?;
+        verify_server_cert_signed_by_trust_anchor(
+            &parsed,
+            &self.roots,
+            intermediates,
+            now,
+            self.algorithms.all,
+        )?;
+        let actual = certificate_spki_sha256(end_entity)
+            .ok_or_else(|| rustls::Error::InvalidCertificate(CertificateError::BadEncoding))?;
+        if !bool::from(actual.ct_eq(&self.expected_spki)) {
+            return Err(rustls::Error::InvalidCertificate(
+                CertificateError::ApplicationVerificationFailure,
+            ));
+        }
+        match server_id_from_certificate(end_entity.as_ref()) {
+            Some(server_id) if server_id == self.expected_server_id => {
+                Ok(ServerCertVerified::assertion())
+            }
+            _ => Err(rustls::Error::InvalidCertificate(
+                CertificateError::ApplicationVerificationFailure,
+            )),
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        certificate: &CertificateDer<'_>,
+        signature: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(message, certificate, signature, &self.algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        certificate: &CertificateDer<'_>,
+        signature: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, certificate, signature, &self.algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.algorithms.supported_schemes()
+    }
+}
+
+/// Builds the edge's client configuration for one coordinator: mutual TLS
+/// with the local federation certificate, the coordinator's SPKI pin, its
+/// SAN URI identity, and the exact federation ALPN.
+pub fn build_federation_client_config(
+    roots: TrustStore,
+    client_certificate: (CertChain, PrivateKey),
+    expected_spki_sha256: [u8; 32],
+    expected_server_id: ServerId,
+) -> Result<Arc<ClientConfig>, TlsConfigError> {
+    let provider = provider();
+    let algorithms = provider.signature_verification_algorithms;
+    let verifier = FederationServerVerifier {
+        roots: Arc::clone(&roots.roots),
+        algorithms,
+        expected_spki: expected_spki_sha256,
+        expected_server_id,
+    };
+    let (chain, key) = client_certificate;
+    let mut config = ClientConfig::builder_with_provider(Arc::new(provider))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|_| TlsConfigError::ProviderUnavailable)?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(verifier))
+        .with_client_auth_cert(chain.certificates, key.key)
+        .map_err(|_| TlsConfigError::InvalidPrivateKey)?;
+    config.alpn_protocols = vec![FEDERATION_ALPN.to_vec()];
+    config.enable_early_data = false;
+    Ok(Arc::new(config))
 }
 
 /// Builds the native onion-client TLS profile around the descriptor's exact

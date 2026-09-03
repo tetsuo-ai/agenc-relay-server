@@ -3,8 +3,8 @@ minimum_overall_branch_percent = 75.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 197
-reviewed_source_sha256 = "a9f93ef3ec8dceaf949f5dba3893f83dc7fcc338a604e29b6a1593c0a1d25971"
+reviewed_source_files = 247
+reviewed_source_sha256 = "2045b94c773ab30bba2d3a777bf9ed7ec941444e65f956847d8f4d8e0243cc4a"
 deferred = []
 
 [[region]]
@@ -41,9 +41,9 @@ reason = "Session fences, admission, and command authority are security decision
 id = "federation-field-kind-decode"
 category = "protocol-enum-arms"
 file = "crates/agenc-ircd-federation-wire/src/codec.rs"
-source_sha256 = "ad2f1c630c28026a8f39f6308be562ba4eee654c81fe5f4f6976ada8c4664291"
-start_line = 1280
-end_line = 1347
+source_sha256 = "9d4e7877fd2dcf5816648f416d19b5799c5c57902843ae9754d8f55344accf9e"
+start_line = 1360
+end_line = 1427
 metric = "regions"
 reason = "Every closed FieldKind decode arm must run in the canonical federation codec suite."
 
@@ -51,7 +51,7 @@ reason = "Every closed FieldKind decode arm must run in the canonical federation
 id = "domain-state-invariant-checks"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-ircd-domain/src/model.rs"
-source_sha256 = "2aeffda91f0acfddfc03619f6098962f773c5387ab08d582df1a858af7a565fb"
+source_sha256 = "6abd6f5a3a7f95fb9c86effecba6e9b8de7927848d6ceecab36f8bf1e20620d5"
 start_line = 1871
 end_line = 2056
 metric = "branches"

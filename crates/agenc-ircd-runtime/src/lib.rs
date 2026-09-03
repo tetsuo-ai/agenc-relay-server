@@ -21,6 +21,7 @@ mod command_convert;
 pub mod connection;
 pub mod daemon;
 mod error;
+pub mod federation;
 pub mod listener;
 mod mutation_render;
 pub mod observe;

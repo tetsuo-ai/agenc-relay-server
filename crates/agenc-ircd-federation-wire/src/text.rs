@@ -71,6 +71,12 @@ impl Error for FederationTextError {}
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct FederationId16([u8; 16]);
 
+impl fmt::Debug for FederationId16 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("FederationId16([redacted])")
+    }
+}
+
 impl FederationId16 {
     /// Parses the unique unpadded URL-safe encoding.
     pub fn parse(token: &str) -> Result<Self, FederationTextError> {
@@ -99,6 +105,12 @@ impl FederationId16 {
 /// One exact 32-byte digest represented as 43 Base64url characters.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct FederationHash32([u8; 32]);
+
+impl fmt::Debug for FederationHash32 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("FederationHash32([redacted])")
+    }
+}
 
 impl FederationHash32 {
     /// Parses the unique unpadded URL-safe encoding.
@@ -717,6 +729,12 @@ impl FederationCommandTags {
     #[must_use]
     pub const fn fragment(&self) -> Option<&FederationFragment> {
         self.fragment.as_ref()
+    }
+
+    /// Moves the validated fragment out of the tag set.
+    #[must_use]
+    pub fn into_fragment(self) -> Option<FederationFragment> {
+        self.fragment
     }
 }
 
