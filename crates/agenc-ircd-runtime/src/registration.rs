@@ -63,8 +63,22 @@ pub struct RegistrationRouterConfig {
     pub allow_guests: bool,
     /// Optional configured connection PASS token.
     pub access_token: Option<Zeroizing<[u8; 32]>>,
-    /// Coordinator-only account-service keys and route identity.
-    pub account_service: AccountServiceConfig,
+    /// The account service this node hosts or merely advertises.
+    pub account_service: AccountServiceRole,
+}
+
+/// Whether this node hosts the account service (spec 22.2 keeps its keys on
+/// the coordinator) or only advertises the network policy, as an edge does.
+pub enum AccountServiceRole {
+    /// The coordinator's account-service keys and route identity.
+    Hosted(Box<AccountServiceConfig>),
+    /// An edge: the policy to advertise; every carrier answers unavailable.
+    Advertised {
+        /// The account creation policy to advertise.
+        creation_policy: AccountCreationPolicy,
+        /// The recovery epoch to advertise.
+        recovery_epoch: RecoveryEpoch,
+    },
 }
 
 struct RegistrationRuntimeConfig {
@@ -128,7 +142,7 @@ struct PendingRegistration {
 pub struct RegistrationRouter {
     config: RegistrationRuntimeConfig,
     advertised: ClientCapabilityProfiles,
-    accounts: AccountServiceCoordinator,
+    accounts: Option<AccountServiceCoordinator>,
     commands: crate::channels::RegisteredCommandExecutor,
     connections: BTreeMap<ConnectionGeneration, ConnectionState>,
     leases: BTreeMap<NicknameValue, ConnectionGeneration>,
@@ -190,13 +204,19 @@ impl RegistrationRouter {
             access_token,
             account_service,
         } = config;
-        if account_service.network_id != network_id || account_service.server_id != server_id {
-            return Err(RuntimeError::InvalidValue);
-        }
-        let advertised = ClientCapabilityProfiles::new(
-            account_service.creation_policy,
-            account_service.recovery_epoch,
-        )?;
+        let (creation_policy, recovery_epoch, hosted) = match account_service {
+            AccountServiceRole::Hosted(config) => {
+                if config.network_id != network_id || config.server_id != server_id {
+                    return Err(RuntimeError::InvalidValue);
+                }
+                (config.creation_policy, config.recovery_epoch, Some(*config))
+            }
+            AccountServiceRole::Advertised {
+                creation_policy,
+                recovery_epoch,
+            } => (creation_policy, recovery_epoch, None),
+        };
+        let advertised = ClientCapabilityProfiles::new(creation_policy, recovery_epoch)?;
         Ok(Self {
             config: RegistrationRuntimeConfig {
                 network_id,
@@ -207,7 +227,7 @@ impl RegistrationRouter {
                 access_token,
             },
             advertised,
-            accounts: AccountServiceCoordinator::new(account_service)?,
+            accounts: hosted.map(AccountServiceCoordinator::new).transpose()?,
             commands,
             connections: BTreeMap::new(),
             leases: BTreeMap::new(),
@@ -273,7 +293,8 @@ impl RegistrationRouter {
             && !authority_fence_exempt(&message)
             && self
                 .accounts
-                .registered_authority_fenced(context, generation);
+                .as_mut()
+                .is_some_and(|accounts| accounts.registered_authority_fenced(context, generation));
         let admission = if state.bound.is_none() {
             charge_preauth(context, generation)
         } else if authority_fenced
@@ -646,7 +667,7 @@ impl RegistrationRouter {
                 carrier,
                 message,
             } => {
-                if self.edge.is_some() {
+                if self.edge.is_some() || self.accounts.is_none() {
                     // Account service envelopes cross the federation in a
                     // later stage; an edge answers them unavailable.
                     record_result(result, ResultClass::Rejected);
@@ -673,15 +694,18 @@ impl RegistrationRouter {
                     );
                 }
                 let target = self.target(state).to_owned();
+                let Some(accounts) = self.accounts.as_mut() else {
+                    return Err(RuntimeError::InvalidValue);
+                };
                 let route = match carrier {
-                    RegistrationAuthCarrier::Sasl => self.accounts.route_sasl(
+                    RegistrationAuthCarrier::Sasl => accounts.route_sasl(
                         context,
                         generation,
                         carrier_generation,
                         &target,
                         message,
                     ),
-                    RegistrationAuthCarrier::AccountCreate => self.accounts.route_account(
+                    RegistrationAuthCarrier::AccountCreate => accounts.route_account(
                         context,
                         generation,
                         carrier_generation,
@@ -689,7 +713,7 @@ impl RegistrationRouter {
                         AccountCarrierKind::Create,
                         message,
                     ),
-                    RegistrationAuthCarrier::AccountCredentials => self.accounts.route_account(
+                    RegistrationAuthCarrier::AccountCredentials => accounts.route_account(
                         context,
                         generation,
                         carrier_generation,
@@ -726,7 +750,7 @@ impl RegistrationRouter {
                     .commands
                     .route_registered(
                         context,
-                        &mut self.accounts,
+                        self.accounts.as_mut(),
                         generation,
                         state.bound,
                         capabilities,
@@ -871,7 +895,7 @@ impl RegistrationRouter {
                 .commands
                 .route_registered(
                     context,
-                    &mut self.accounts,
+                    self.accounts.as_mut(),
                     generation,
                     state.bound,
                     capabilities,
@@ -905,12 +929,7 @@ impl RegistrationRouter {
             )?;
             return Ok(ActionStep::Continue);
         }
-        let converted = crate::command_convert::convert(context.domain(), kind, &message);
-        let outcome = match converted {
-            Ok(command) => edge.send_command(context, generation, message, &command),
-            Err(_) => Err((Box::new(message), DomainError::InvalidArgument)),
-        };
-        match outcome {
+        match edge.send_command(context, generation, kind, message) {
             Ok(()) => {
                 context.complete_command_observation(observation, ResultClass::Ok);
             }
@@ -1199,9 +1218,10 @@ impl RegistrationRouter {
                 result,
             );
         }
-        let authenticated_account = self
-            .accounts
-            .authenticated_binding(connection, context.now())?;
+        let authenticated_account = match self.accounts.as_mut() {
+            Some(accounts) => accounts.authenticated_binding(connection, context.now())?,
+            None => None,
+        };
         if authenticated_account.is_none() && !state.allow_guests {
             record_result(result, ResultClass::Rejected);
             return self.registration_event(
@@ -1295,9 +1315,10 @@ impl RegistrationRouter {
         let Ok(plan) = context.domain().plan_session_opened(seed) else {
             return Ok(false);
         };
-        let grant_write = self
-            .accounts
-            .registration_grant_write(connection, context.now())?;
+        let grant_writes = match self.accounts.as_mut() {
+            Some(accounts) => vec![accounts.registration_grant_write(connection, context.now())?],
+            None => Vec::new(),
+        };
         let mut owned_nickname = String::new();
         owned_nickname
             .try_reserve_exact(nickname.len())
@@ -1316,11 +1337,11 @@ impl RegistrationRouter {
                 authenticated: true,
             },
         );
-        if self
-            .accounts
-            .begin_registration_grant_consumption(context, connection)
-            .is_err()
-        {
+        if self.accounts.as_mut().is_some_and(|accounts| {
+            accounts
+                .begin_registration_grant_consumption(context, connection)
+                .is_err()
+        }) {
             self.pending_registrations.remove(&connection);
             context.sessions_mut().unbind_session(connection, bound)?;
             return Err(RuntimeError::InvalidValue);
@@ -1330,14 +1351,14 @@ impl RegistrationRouter {
             fanout,
             Some(StagedOrigin::silent(connection).with_observation(observation.take())),
             0,
-            vec![grant_write],
+            grant_writes,
         );
         if matches!(staged, Ok(StageAccepted::Staged { .. })) {
             return Ok(true);
         }
-        let cancelled = self
-            .accounts
-            .cancel_registration_grant_consumption(context, connection);
+        let cancelled = self.accounts.as_mut().map_or(Ok(()), |accounts| {
+            accounts.cancel_registration_grant_consumption(context, connection)
+        });
         self.pending_registrations.remove(&connection);
         context.sessions_mut().unbind_session(connection, bound)?;
         cancelled?;
@@ -1839,10 +1860,11 @@ impl RegistrationRouter {
                 authenticated,
             } = pending;
             let account_committed = !authenticated
-                || self
-                    .accounts
-                    .registration_committed(context, generation, bound.user_id)
-                    .is_ok();
+                || self.accounts.as_mut().is_some_and(|accounts| {
+                    accounts
+                        .registration_committed(context, generation, bound.user_id)
+                        .is_ok()
+                });
             let Some(mut state) = self.connections.remove(&generation) else {
                 self.queue_session_close(context, bound, "connection closed");
                 continue;
@@ -1899,8 +1921,10 @@ impl RegistrationRouter {
                 .sessions_mut()
                 .unbind_session(generation, pending.bound);
         }
-        if pending.authenticated {
-            let _rejected = self.accounts.registration_rejected(context, generation);
+        if pending.authenticated
+            && let Some(accounts) = self.accounts.as_mut()
+        {
+            let _rejected = accounts.registration_rejected(context, generation);
         }
         close_transport(context, generation);
         true
@@ -2011,7 +2035,9 @@ fn registered_command_demand(user_id: UserId) -> Result<BucketDemand, RuntimeErr
 
 impl CommandRouter for RegistrationRouter {
     fn startup(&mut self, context: &mut StateCoreContext) {
-        self.accounts.startup(context);
+        if let Some(accounts) = self.accounts.as_mut() {
+            accounts.startup(context);
+        }
         if let Some(federation) = self.federation.as_mut() {
             federation.startup(context);
         }
@@ -2092,8 +2118,8 @@ impl CommandRouter for RegistrationRouter {
             }
             if self
                 .accounts
-                .connection_opened(context, generation)
-                .is_err()
+                .as_mut()
+                .is_some_and(|accounts| accounts.connection_opened(context, generation).is_err())
             {
                 cancel_connection_timers(context, generation);
                 close_transport(context, generation);
@@ -2127,7 +2153,9 @@ impl CommandRouter for RegistrationRouter {
         generation: ConnectionGeneration,
         _reason: CloseReason,
     ) {
-        self.accounts.connection_closed(context, generation);
+        if let Some(accounts) = self.accounts.as_mut() {
+            accounts.connection_closed(context, generation);
+        }
         self.commands.connection_closed(context, generation);
         while let Some(key) = self
             .pending_observations
@@ -2171,7 +2199,9 @@ impl CommandRouter for RegistrationRouter {
     ) {
         self.config.display_name = snapshot.display_name();
         self.config.allow_guests = snapshot.account_policy().allow_guests;
-        self.accounts.reload_policy(snapshot.account_policy());
+        if let Some(accounts) = self.accounts.as_mut() {
+            accounts.reload_policy(snapshot.account_policy());
+        }
     }
 
     fn reload_ready(&self) -> bool {
@@ -2186,14 +2216,19 @@ impl CommandRouter for RegistrationRouter {
                 .connections
                 .values()
                 .all(|state| state.deferred_observations.is_empty())
-            && self.accounts.reload_ready()
+            && self
+                .accounts
+                .as_ref()
+                .is_none_or(AccountServiceCoordinator::reload_ready)
             && self.commands.reload_ready()
     }
 
     fn batch_applied(&mut self, context: &mut StateCoreContext, _plan_count: usize) {
         self.finalize_pending_registrations(context);
-        let completions = self.accounts.batch_applied(context);
-        self.apply_account_completions(context, completions);
+        if let Some(accounts) = self.accounts.as_mut() {
+            let completions = accounts.batch_applied(context);
+            self.apply_account_completions(context, completions);
+        }
         self.retry_session_closes(context);
         if let Some(federation) = self.federation.as_mut() {
             federation.batch_applied(context);
@@ -2209,8 +2244,12 @@ impl CommandRouter for RegistrationRouter {
         context: &mut StateCoreContext,
         message: crate::bridge::CryptoCompletionMessage<crate::bridge::crypto::CryptoJobOutput>,
     ) {
-        if self.accounts.owns_crypto_job(message.job_id) {
-            let completions = self.accounts.crypto_completed(context, message);
+        if let Some(accounts) = self
+            .accounts
+            .as_mut()
+            .filter(|accounts| accounts.owns_crypto_job(message.job_id))
+        {
+            let completions = accounts.crypto_completed(context, message);
             self.apply_account_completions(context, completions);
             return;
         }
@@ -2240,8 +2279,10 @@ impl CommandRouter for RegistrationRouter {
             federation.storage_read_completed(context, message);
             return;
         }
-        let completions = self.accounts.storage_read_completed(context, message);
-        self.apply_account_completions(context, completions);
+        if let Some(accounts) = self.accounts.as_mut() {
+            let completions = accounts.storage_read_completed(context, message);
+            self.apply_account_completions(context, completions);
+        }
     }
 
     fn batch_rejected(
@@ -2263,8 +2304,8 @@ impl CommandRouter for RegistrationRouter {
             self.retry_session_closes(context);
             return;
         }
-        if generation
-            .is_some_and(|generation| self.accounts.account_deletion_rejected(context, generation))
+        if let Some((generation, accounts)) = generation.zip(self.accounts.as_mut())
+            && accounts.account_deletion_rejected(context, generation)
         {
             if let Some(origin) = origin {
                 reject_staged_origin(context, origin);
@@ -2272,11 +2313,16 @@ impl CommandRouter for RegistrationRouter {
             self.retry_session_closes(context);
             return;
         }
-        let completions = self.accounts.batch_rejected(context, generation);
+        let completions = self
+            .accounts
+            .as_mut()
+            .map(|accounts| accounts.batch_rejected(context, generation));
         if let Some(origin) = origin {
             reject_staged_origin(context, origin);
         }
-        self.apply_account_completions(context, completions);
+        if let Some(completions) = completions {
+            self.apply_account_completions(context, completions);
+        }
         self.retry_session_closes(context);
     }
 
@@ -2286,7 +2332,10 @@ impl CommandRouter for RegistrationRouter {
         {
             return;
         }
-        let (handled, completions) = self.accounts.timer_fired(context, entry);
+        let Some(accounts) = self.accounts.as_mut() else {
+            return;
+        };
+        let (handled, completions) = accounts.timer_fired(context, entry);
         self.apply_account_completions(context, completions);
         if handled {
             return;

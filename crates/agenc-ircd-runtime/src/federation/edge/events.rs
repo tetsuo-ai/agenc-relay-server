@@ -101,13 +101,14 @@ fn apply(
     header: EventHeader,
     projected: ProjectedEvent,
 ) -> Result<Vec<EdgeCompletion>, Violation> {
+    let label = super::render::event_channel_label(edge, &projected);
     let outcome = edge
         .replica
         .apply(&projected, header.coordinator_state_generation)
         .map_err(|_| Violation::Consistency)?;
     edge.counters.events_applied = edge.counters.events_applied.saturating_add(1);
     super::render::remember_nicknames(edge, &projected);
-    super::render::render_event(edge, context, &projected, &outcome);
+    super::render::render_event(edge, context, &projected, &outcome, label.as_deref());
     let completion = match &projected {
         ProjectedEvent::RequestCompleted { .. } => completion_of(edge, &header)?,
         _ => None,

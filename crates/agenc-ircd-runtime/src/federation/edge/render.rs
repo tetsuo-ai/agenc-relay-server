@@ -79,12 +79,29 @@ fn channel_name(edge: &EdgeFederation, channel_id: ChannelInstanceId) -> Option<
         .map(|channel| channel.name.presentation().to_owned())
 }
 
+/// The channel name an event refers to, read before the replica applies
+/// it: a removal that unreferences the channel drops the record, and the
+/// rendered line still has to name it.
+pub(super) fn event_channel_label(edge: &EdgeFederation, event: &ProjectedEvent) -> Option<String> {
+    match event {
+        ProjectedEvent::ChannelHidden { channel_id, .. }
+        | ProjectedEvent::MemberParted { channel_id, .. }
+        | ProjectedEvent::ChannelModesChanged { channel_id, .. }
+        | ProjectedEvent::TopicChanged { channel_id, .. }
+        | ProjectedEvent::Invited { channel_id, .. }
+        | ProjectedEvent::InviteRemoved { channel_id, .. }
+        | ProjectedEvent::Kicked { channel_id, .. } => channel_name(edge, *channel_id),
+        _ => None,
+    }
+}
+
 /// Renders one applied event to every local recipient.
 pub(super) fn render_event(
     edge: &mut EdgeFederation,
     context: &mut StateCoreContext,
     event: &ProjectedEvent,
     outcome: &ApplyOutcome,
+    label: Option<&str>,
 ) {
     for user_id in &outcome.local_recipients {
         let Some(generation) = context.sessions().generation_for_user(*user_id) else {
@@ -94,7 +111,7 @@ pub(super) fn render_event(
             .sessions()
             .capabilities_for_user(*user_id)
             .cloned_state();
-        let Ok(frames) = frames_for(edge, event, *user_id, capabilities.as_ref()) else {
+        let Ok(frames) = frames_for(edge, event, *user_id, capabilities.as_ref(), label) else {
             continue;
         };
         if !frames.is_empty() {
@@ -124,8 +141,12 @@ fn frames_for(
     event: &ProjectedEvent,
     recipient: UserId,
     capabilities: Option<&CapabilityState>,
+    label: Option<&str>,
 ) -> Result<Vec<WireMessage>, RuntimeError> {
     let server = edge.config.server_name.as_str();
+    let name_of = |channel_id: ChannelInstanceId| {
+        channel_name(edge, channel_id).or_else(|| label.map(str::to_owned))
+    };
     let frames = match event {
         ProjectedEvent::SessionHidden { source, reason, .. } => {
             if source.user_id == recipient {
@@ -173,7 +194,7 @@ fn frames_for(
             reason,
             ..
         } => {
-            let Some(name) = channel_name(edge, *channel_id) else {
+            let Some(name) = name_of(*channel_id) else {
                 return Ok(Vec::new());
             };
             let trailing = (!reason.is_empty()).then_some(reason.as_str());
@@ -186,7 +207,7 @@ fn frames_for(
             reason,
             ..
         } => {
-            let Some(name) = channel_name(edge, *channel_id) else {
+            let Some(name) = name_of(*channel_id) else {
                 return Ok(Vec::new());
             };
             vec![line(
@@ -202,7 +223,7 @@ fn frames_for(
             topic,
             ..
         } => {
-            let Some(name) = channel_name(edge, *channel_id) else {
+            let Some(name) = name_of(*channel_id) else {
                 return Ok(Vec::new());
             };
             let text = topic.as_ref().map_or("", |(text, _, _)| text.as_str());
@@ -214,7 +235,7 @@ fn frames_for(
             changes,
             ..
         } => {
-            let Some(name) = channel_name(edge, *channel_id) else {
+            let Some(name) = name_of(*channel_id) else {
                 return Ok(Vec::new());
             };
             let (modes, arguments) = mode_text(changes);
@@ -228,7 +249,7 @@ fn frames_for(
             named_target,
             ..
         } => {
-            let Some(name) = channel_name(edge, *channel_id) else {
+            let Some(name) = name_of(*channel_id) else {
                 return Ok(Vec::new());
             };
             if recipient == named_target.user_id {

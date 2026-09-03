@@ -167,6 +167,9 @@ enum PendingCommit {
     Acknowledged,
 }
 
+/// The most backlogged link items held across one in-flight batch.
+const MAX_BACKLOG: usize = 1_024;
+
 /// Counters exposed through STATS FEDERATION.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CoordinatorCounters {
@@ -200,6 +203,11 @@ pub struct FederationCoordinator {
     crypto: Option<PendingCrypto>,
     replays: BTreeMap<StorageReadId, (LinkId, ServerId, OperationDescriptor)>,
     loader: startup::Loader,
+    /// Frames and objects that arrived while a federation batch was in
+    /// flight; they replay in order once the batch commits. Peers pipeline
+    /// their synchronization frames, so refusing them would close every
+    /// reconnecting link.
+    backlog: VecDeque<FederationInbound>,
     queries: query::Queries,
     counters: CoordinatorCounters,
 }
@@ -255,6 +263,7 @@ impl FederationCoordinator {
             crypto: None,
             replays: BTreeMap::new(),
             loader: startup::Loader::default(),
+            backlog: VecDeque::new(),
             queries,
             counters: CoordinatorCounters::default(),
         }
@@ -361,11 +370,28 @@ impl FederationCoordinator {
         if !self.peers.contains_key(&peer) {
             return;
         }
+        if self.pending.is_some() && matches!(event, LinkEvent::Frame(_) | LinkEvent::Object { .. })
+        {
+            if self.backlog.len() >= MAX_BACKLOG {
+                self.fail_link(context, link, peer, Violation::SlowConsumer);
+                return;
+            }
+            self.backlog.push_back(FederationInbound {
+                link,
+                peer,
+                event,
+                charge,
+            });
+            return;
+        }
         match event {
             LinkEvent::Established { session, handle } => {
                 self.link_established(context, session, handle);
             }
-            LinkEvent::Closed(reason) => self.link_closed(context, link, peer, reason),
+            LinkEvent::Closed(reason) => {
+                self.backlog.retain(|message| message.link != link);
+                self.link_closed(context, link, peer, reason);
+            }
             LinkEvent::Frame(frame) => {
                 if !self.link_is_live(link, peer) {
                     return;
@@ -811,6 +837,7 @@ impl FederationCoordinator {
         self.deliver(context, events);
         self.continue_background(context);
         request::drain_queued(self, context);
+        self.drain_backlog(context);
     }
 
     /// Resumes bounded background work that waits for a free batch slot:
@@ -833,6 +860,18 @@ impl FederationCoordinator {
     pub fn batch_rejected(&mut self, context: &mut StateCoreContext) {
         if let Some(PendingCommit::Cleanup { peer }) = self.pending.take() {
             grace::continue_cleanup(self, context, peer);
+        }
+        self.drain_backlog(context);
+    }
+
+    /// Replays backlogged link traffic in arrival order until a replayed
+    /// item stages the next batch.
+    fn drain_backlog(&mut self, context: &mut StateCoreContext) {
+        while self.pending.is_none() {
+            let Some(message) = self.backlog.pop_front() else {
+                break;
+            };
+            self.inbound(context, message);
         }
     }
 

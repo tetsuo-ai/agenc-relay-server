@@ -1,7 +1,7 @@
 //! Requests an edge sends on behalf of its clients and the results it
 //! receives (spec 20.4, 20.5).
 
-use agenc_ircd_client_wire::ParsedMessage;
+use agenc_ircd_client_wire::{ParsedMessage, RegisteredCommandKind};
 use agenc_ircd_domain::federation::ModeDirection;
 use agenc_ircd_domain::{
     CanonicalCommand, CanonicalCommandView, DomainError, MessageKind, MessageTarget, ModeChange,
@@ -13,9 +13,10 @@ use agenc_ircd_federation_wire::{
     decode_result_arm, federation_object_id,
 };
 use agenc_ircd_types::{FederationResultKind, RequestId, SessionId, UserId};
+use std::collections::VecDeque;
 use zeroize::Zeroizing;
 
-use super::{EdgeFederation, Phase, Violation};
+use super::{DeferredCommand, EdgeFederation, MAX_DEFERRED_COMMANDS, Phase, Violation};
 use crate::connection::ConnectionGeneration;
 use crate::federation::codec::operations::{
     FederatedOperation, JoinTarget, MessageTargetArg, ModeChangeArg,
@@ -360,10 +361,9 @@ pub(super) fn send_command(
     edge: &mut EdgeFederation,
     context: &mut StateCoreContext,
     generation: ConnectionGeneration,
-    message: ParsedMessage,
-    command: &CanonicalCommand,
+    kind: RegisteredCommandKind,
+    message: Box<ParsedMessage>,
 ) -> Result<(), (Box<ParsedMessage>, DomainError)> {
-    let message = Box::new(message);
     if edge.phase != Phase::Active {
         return Err((message, DomainError::ServerBusy));
     }
@@ -374,7 +374,22 @@ pub(super) fn send_command(
     else {
         return Err((message, DomainError::RegistrationRequired));
     };
-    let operation = match operation_of(edge, session_id, user_id, &message, command) {
+    if edge
+        .pending
+        .values()
+        .any(|pending| pending.generation == generation)
+    {
+        let queue = edge.deferred.entry(generation).or_default();
+        if queue.len() >= MAX_DEFERRED_COMMANDS {
+            return Err((message, DomainError::ServerBusy));
+        }
+        queue.push_back(DeferredCommand { kind, message });
+        return Ok(());
+    }
+    let Ok(command) = crate::command_convert::convert(context.domain(), kind, &message) else {
+        return Err((message, DomainError::InvalidArgument));
+    };
+    let operation = match operation_of(edge, session_id, user_id, &message, &command) {
         Ok(operation) => operation,
         Err(error) => return Err((message, error)),
     };
@@ -801,9 +816,59 @@ fn reply_frame(
 /// Finishes one request whose result and completion are both known.
 pub(super) fn completed(
     edge: &mut EdgeFederation,
-    _context: &mut StateCoreContext,
+    context: &mut StateCoreContext,
     request_id: RequestId,
 ) -> Vec<EdgeCompletion> {
+    let generation = edge
+        .pending
+        .get(&request_id)
+        .map(|pending| pending.generation);
+    let mut completions = completed_request(edge, request_id);
+    if let Some(generation) = generation {
+        completions.extend(dispatch_deferred(edge, context, generation));
+    }
+    completions
+}
+
+/// Sends the connection's next deferred commands once nothing of its is
+/// in flight; a command that cannot be sent fails to the client in order.
+fn dispatch_deferred(
+    edge: &mut EdgeFederation,
+    context: &mut StateCoreContext,
+    generation: ConnectionGeneration,
+) -> Vec<EdgeCompletion> {
+    let mut completions = Vec::new();
+    loop {
+        let in_flight = edge
+            .pending
+            .values()
+            .any(|pending| pending.generation == generation);
+        if in_flight {
+            break;
+        }
+        let Some(next) = edge
+            .deferred
+            .get_mut(&generation)
+            .and_then(VecDeque::pop_front)
+        else {
+            edge.deferred.remove(&generation);
+            break;
+        };
+        if let Err((message, error)) =
+            send_command(edge, context, generation, next.kind, next.message)
+        {
+            completions.push(EdgeCompletion::CommandFailed {
+                generation,
+                message,
+                error,
+            });
+        }
+    }
+    completions
+}
+
+/// Resolves one finished request into its client-facing completion.
+fn completed_request(edge: &mut EdgeFederation, request_id: RequestId) -> Vec<EdgeCompletion> {
     let Some(pending) = edge.pending.remove(&request_id) else {
         return Vec::new();
     };

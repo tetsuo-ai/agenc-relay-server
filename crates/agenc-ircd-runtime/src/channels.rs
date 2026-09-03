@@ -436,7 +436,7 @@ impl RegisteredCommandExecutor {
     pub(crate) fn route_registered(
         &mut self,
         context: &mut StateCoreContext,
-        accounts: &mut AccountServiceCoordinator,
+        accounts: Option<&mut AccountServiceCoordinator>,
         generation: ConnectionGeneration,
         bound: Option<BoundSession>,
         capabilities: &CapabilityState,
@@ -476,7 +476,7 @@ impl RegisteredCommandExecutor {
         };
         match execute_session_command(
             context,
-            Some(accounts),
+            accounts,
             bound,
             SessionCommandInput {
                 reply: Some(reply),

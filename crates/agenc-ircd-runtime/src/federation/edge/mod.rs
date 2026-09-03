@@ -34,6 +34,8 @@ use crate::federation::link::LinkHandle;
 use crate::federation::{
     FederationInbound, IngressCharge, LinkEvent, LinkId, LinkSession, ObjectCarrier, PeerIdentity,
 };
+use agenc_ircd_client_wire::RegisteredCommandKind;
+
 use crate::observe::health::{ReadinessGate, ReadinessStage};
 use crate::state_core::StateCoreContext;
 use crate::sync::Arc;
@@ -139,7 +141,21 @@ pub struct EdgeFederation {
     client_resync_epoch: u64,
     counters: EdgeCounters,
     readiness: Option<Arc<ReadinessGate>>,
+    /// Commands waiting for the connection's earlier request to complete,
+    /// so the revisions they carry are read from a replica that already
+    /// reflects that request (spec 20.5 ordering per origin).
+    deferred: BTreeMap<ConnectionGeneration, VecDeque<DeferredCommand>>,
 }
+
+/// One client command held back behind an in-flight request.
+pub(super) struct DeferredCommand {
+    pub(super) kind: RegisteredCommandKind,
+    pub(super) message: Box<agenc_ircd_client_wire::ParsedMessage>,
+}
+
+/// The most commands one connection may queue behind its in-flight
+/// request before further commands answer `SERVER_BUSY`.
+pub(super) const MAX_DEFERRED_COMMANDS: usize = 32;
 
 impl EdgeFederation {
     /// Creates an edge with no link and an empty replica at the first
@@ -167,6 +183,7 @@ impl EdgeFederation {
             client_resync_epoch: 0,
             counters: EdgeCounters::default(),
             readiness: None,
+            deferred: BTreeMap::new(),
         }
     }
 
@@ -549,6 +566,7 @@ impl EdgeFederation {
             request::send_session_close(self, context, generation, session_id, reason);
         }
         request::delete_origin(self, context, generation);
+        self.deferred.remove(&generation);
         let stale: Vec<RequestId> = self
             .pending
             .iter()
@@ -592,8 +610,8 @@ impl EdgeFederation {
         &mut self,
         context: &mut StateCoreContext,
         generation: ConnectionGeneration,
+        kind: RegisteredCommandKind,
         message: agenc_ircd_client_wire::ParsedMessage,
-        command: &agenc_ircd_domain::CanonicalCommand,
     ) -> Result<
         (),
         (
@@ -601,7 +619,7 @@ impl EdgeFederation {
             agenc_ircd_domain::DomainError,
         ),
     > {
-        request::send_command(self, context, generation, message, command)
+        request::send_command(self, context, generation, kind, Box::new(message))
     }
 
     /// The router bound the coordinator-assigned session: the origin moves

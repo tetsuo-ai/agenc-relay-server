@@ -52,7 +52,7 @@ use crate::connection::{
     QueueReservationLedger, SinkReserveError, TentativeClientQueueReservation,
 };
 use crate::observe::health::Liveness;
-use crate::registration::{RegistrationRouter, RegistrationRouterConfig};
+use crate::registration::{AccountServiceRole, RegistrationRouter, RegistrationRouterConfig};
 use crate::state_core::durable::{AccountingCeilings, KeyDeriver};
 use crate::state_core::fanout::FanoutRequest;
 use crate::state_core::inbox::{CloseReason, SourceAddressKey};
@@ -433,7 +433,17 @@ fn registration_router(
             display_name: "TestNetwork".to_owned(),
             allow_guests: true,
             access_token: None,
-            account_service: account_service_config(identity, opaque, key_state)?,
+            account_service: if prefix == "edge.example" {
+                // An edge holds no account-service keys (spec 22.2).
+                AccountServiceRole::Advertised {
+                    creation_policy: AccountCreationPolicy::Open,
+                    recovery_epoch: identity.recovery_epoch,
+                }
+            } else {
+                AccountServiceRole::Hosted(Box::new(account_service_config(
+                    identity, opaque, key_state,
+                )?))
+            },
         },
         commands,
     )?)

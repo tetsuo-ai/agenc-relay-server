@@ -40,7 +40,7 @@ use agenc_ircd_storage::{
 };
 use agenc_ircd_types::{
     AccountId, ChannelInstanceId, EntropySource as _, FederationRole, Generation,
-    MonotonicClock as _, OriginId, TransactionId, WallClock as _,
+    MonotonicClock as _, OriginId, ServerId, TransactionId, UserId, WallClock as _,
 };
 use tokio::runtime::Builder;
 use tokio::sync::{Semaphore, mpsc, oneshot};
@@ -88,7 +88,9 @@ use crate::observe::health::{Liveness, ReadinessGate, ReadinessStage};
 use crate::observe::log::{FileLogControl, FileLogOwner, FileLogShutdown, LogFilter, LogRetention};
 use crate::observe::metrics::MetricsRegistry;
 use crate::purpose::ListenerPurpose;
-use crate::registration::{AccountServiceConfig, RegistrationRouter, RegistrationRouterConfig};
+use crate::registration::{
+    AccountServiceConfig, AccountServiceRole, RegistrationRouter, RegistrationRouterConfig,
+};
 use crate::runtime_config::{
     AccountRuntimePolicy, ConfigRevision, PreparedReload, ReloadOutcome, ReloadPort,
     ReloadPreparationInbox, ReloadPreparationReply, ReloadPrepareFailure, RestartMaterial,
@@ -104,6 +106,7 @@ use crate::state_core::inbox::{
     MaintenanceEvent, SIGNAL_EVENT_CAPACITY, SignalEvent, StateCoreMessage,
     connection_close_channel, lifecycle_channel,
 };
+use crate::state_core::projector::FederationProjector;
 use crate::state_core::reconstruct::{Reconstruction, reconstruct};
 use crate::state_core::{
     StateCore, StateCoreClocks, StateCoreConfig, StateCoreExit, StateCoreInputs, admin_core_channel,
@@ -418,6 +421,11 @@ impl LiveStorage {
                 database_max_bytes: config.storage.database_max_bytes,
                 backup_max_bytes: config.storage.backup_max_bytes,
             },
+            RecoveredSessionScope {
+                local_server_id: config.server.server_id,
+                keep_remote: config.federation.enabled
+                    && config.network.role == NodeRole::Coordinator,
+            },
         )?;
         let trust = load_audit_trust_manifest(&config.moderation.audit_trust_manifest_file)?;
         let audit_keys = KeyDeriver::new(
@@ -640,6 +648,17 @@ fn build_live_state(
         router: Box::new(router),
         storage_limit_writer: limit_writer,
     });
+    let mut state = state;
+    if federation.is_some() && config.network.role == NodeRole::Coordinator {
+        // The coordinator derives edge projections from every committed
+        // plan; without the projector no FEVENT would ever be produced.
+        state
+            .context_mut()
+            .install_federation_projector(FederationProjector::new(
+                config.network.network_id,
+                config.server.server_id,
+            ));
+    }
     Ok(LiveState {
         owner,
         state,
@@ -776,23 +795,38 @@ fn startup_transaction_id() -> Result<TransactionId, DaemonError> {
     Ok(TransactionId::from_bytes(bytes))
 }
 
+/// Which recovered sessions startup closes: every local session lost its
+/// connection with the process, while a federated coordinator keeps the
+/// sessions its edges host so their origins can resume (spec 20.5).
+#[derive(Clone, Copy)]
+struct RecoveredSessionScope {
+    local_server_id: ServerId,
+    keep_remote: bool,
+}
+
 fn reconcile_recovered_sessions(
     storage: &StoragePort,
     reconstruction: &mut Reconstruction,
     keys: &KeyDeriver,
     ceilings: AccountingCeilings,
+    scope: RecoveredSessionScope,
 ) -> Result<(), DaemonError> {
-    loop {
-        let next_user_id = { reconstruction.domain.session_user_ids().next() };
-        let Some(user_id) = next_user_id else {
-            return Ok(());
-        };
+    let recovered: Vec<UserId> = reconstruction.domain.session_user_ids().collect();
+    for user_id in recovered {
+        let remote = reconstruction
+            .domain
+            .session(user_id)
+            .is_some_and(|session| session.home_server_id() != scope.local_server_id);
+        if scope.keep_remote && remote {
+            continue;
+        }
         let plan = reconstruction
             .domain
             .plan_session_disconnected(user_id)
             .map_err(|_| startup_stale_state())?;
         commit_startup_plan(storage, reconstruction, keys, ceilings, plan)?;
     }
+    Ok(())
 }
 
 fn commit_startup_plan(
@@ -885,7 +919,18 @@ fn registration_config(
     seed: &StateCoreSeed,
     reconstruction: &Reconstruction,
 ) -> Result<RegistrationRouterConfig, DaemonError> {
-    let account_service = account_service_config(config, secrets, seed, reconstruction)?;
+    let account_service = match config.network.role {
+        NodeRole::Coordinator => AccountServiceRole::Hosted(Box::new(account_service_config(
+            config,
+            secrets,
+            seed,
+            reconstruction,
+        )?)),
+        NodeRole::Edge => AccountServiceRole::Advertised {
+            creation_policy: creation_policy(config, secrets)?,
+            recovery_epoch: seed.storage().recovery_epoch(),
+        },
+    };
     let access_token = secrets
         .access_token()
         .map(|secret| Zeroizing::new(*secret.expose()));

@@ -79,6 +79,14 @@ impl LinkOwnerShared {
         self
     }
 
+    /// Records a link attempt that ended before the hello completed, under
+    /// the same closed event as a failed link.
+    fn setup_failed(&self) {
+        if let Some(observer) = &self.observer {
+            observer.federation_link(false, true);
+        }
+    }
+
     fn next_link(&self) -> LinkId {
         LinkId::new(self.next_link.fetch_add(1, Ordering::Relaxed))
     }
@@ -280,7 +288,12 @@ async fn admit(
     let shared = Arc::clone(shared);
     let control = control.clone();
     links.spawn(async move {
-        let _outcome = accept_link(socket, shared, control, child).await;
+        if accept_link(socket, Arc::clone(&shared), control, child)
+            .await
+            .is_err()
+        {
+            shared.setup_failed();
+        }
     });
 }
 
@@ -365,7 +378,10 @@ pub async fn run_dial_owner(
         };
         attempt = match outcome {
             Ok(_reason) => 0,
-            Err(_failure) => attempt.saturating_add(1),
+            Err(_failure) => {
+                shared.setup_failed();
+                attempt.saturating_add(1)
+            }
         };
         let delay = reconnect_delay(attempt, &mut entropy).min(plan.reconnect_max);
         tokio::select! {
