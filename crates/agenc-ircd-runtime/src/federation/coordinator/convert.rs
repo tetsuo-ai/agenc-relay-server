@@ -13,10 +13,12 @@ use agenc_ircd_domain::{
     MessageCommand, MessageKind, MessageTarget, MessageText, ModeChange, ModeOperation,
     NicknameValue, PresenceCommand, PresencePolicy, SessionSeed, TopicText, UserQuery, WhoTarget,
 };
+use agenc_ircd_federation_wire::CanonicalEncode as _;
 use agenc_ircd_federation_wire::access::{
     opaque_field, structure, text, unsigned, unsigned_u16, vector,
 };
 use agenc_ircd_federation_wire::{DecodeBudget, SchemaObject};
+use agenc_ircd_types::FederationOpcode;
 use agenc_ircd_types::{
     AccountDeletionToken, AccountId, ChannelInstanceId, ControlPolicy,
     FederationDirectoryQueryKind, Generation, Revision, ServerId, SessionId, UserId,
@@ -36,6 +38,14 @@ const USER_MODE_CODE_WALLOPS: u16 = 2;
 pub(super) enum ConvertedRequest {
     /// A new session hosted by the requesting edge.
     SessionOpen(Box<SessionSeed>),
+    /// A session whose account a pre-registration grant proves.
+    SessionOpenWithGrant(Box<SessionSeed>, [u8; 32]),
+    /// A sealed account-service envelope a pre-registration client sent
+    /// through its edge (spec 22.2).
+    AccountService {
+        opcode: FederationOpcode,
+        envelope: Vec<u8>,
+    },
     /// A session close with its hide kind.
     SessionClose {
         user_id: UserId,
@@ -79,11 +89,7 @@ pub(super) fn convert_operation(
             connection_nonce,
             ..
         } => {
-            if auth_grant_id.is_some() {
-                // Authentication grants arrive with the account-service slice.
-                return Err(DomainError::BadState);
-            }
-            session_seed(
+            let seed = session_seed(
                 context,
                 peer,
                 nickname,
@@ -91,8 +97,11 @@ pub(super) fn convert_operation(
                 *capability_hash,
                 *connection_nonce,
             )
-            .map(Box::new)
-            .map(ConvertedRequest::SessionOpen)
+            .map(Box::new)?;
+            Ok(match auth_grant_id {
+                Some(grant_id) => ConvertedRequest::SessionOpenWithGrant(seed, *grant_id),
+                None => ConvertedRequest::SessionOpen(seed),
+            })
         }
         FederatedOperation::SessionClose {
             session_id,
@@ -106,6 +115,19 @@ pub(super) fn convert_operation(
         FederatedOperation::DirectoryQuery { session_id, query } => {
             let (user_id, bound) = hosted_session(context.domain(), peer, *session_id)?;
             directory_query(context.domain(), bound, user_id, query)
+        }
+        FederatedOperation::AccountService {
+            opcode,
+            session_id: None,
+            envelope,
+        } => {
+            let bytes = envelope
+                .encode_canonical()
+                .map_err(|_| DomainError::InvalidArgument)?;
+            Ok(ConvertedRequest::AccountService {
+                opcode: *opcode,
+                envelope: bytes.as_slice().to_vec(),
+            })
         }
         FederatedOperation::HistoryQuery { .. } | FederatedOperation::AccountService { .. } => {
             Ok(ConvertedRequest::Unavailable)

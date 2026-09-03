@@ -1202,3 +1202,79 @@ impl StateCoreFixture {
         Ok((port, admission))
     }
 }
+
+/// A sealed authentication-start envelope for the fixture's account service:
+/// the OPAQUE KE1 carries valid group elements so the server round runs.
+pub(crate) fn sealed_authentication_start(
+    network_id: agenc_ircd_types::NetworkId,
+    recovery_epoch: agenc_ircd_types::RecoveryEpoch,
+    login: &str,
+    request_seed: u8,
+) -> TestResult<Vec<u8>> {
+    use agenc_ircd_auth::{
+        AccountRequestPayload, AccountServiceEnvelope, AuthenticationStart, OpaqueKe1,
+        encode_request_plaintext,
+    };
+    use agenc_ircd_crypto::{AccountHpkePrivateKey, AccountRequestBinding, seal_account_request};
+    const BASEPOINT: [u8; 32] = [
+        0xe2, 0xf2, 0xae, 0x0a, 0x6a, 0xbc, 0x4e, 0x71, 0xa8, 0x84, 0xa9, 0x61, 0xc5, 0x00, 0x51,
+        0x5f, 0x58, 0xe3, 0x0b, 0x6a, 0xa5, 0x82, 0xdd, 0x8d, 0xb6, 0xa6, 0x59, 0x45, 0xe0, 0x8d,
+        0x2d, 0x76,
+    ];
+    let private_key = AccountHpkePrivateKey::from_bytes([40; 32])?;
+    let public_key = private_key.public_key()?;
+    let mut ke1 = [0_u8; 96];
+    ke1[..32].copy_from_slice(&BASEPOINT);
+    ke1[32..64].copy_from_slice(&[7; 32]);
+    ke1[64..].copy_from_slice(&BASEPOINT);
+    let payload = AccountRequestPayload::AuthenticationStart(AuthenticationStart {
+        network_id,
+        login: agenc_ircd_types::NormalizedLogin::prepare(login)?,
+        ke1: OpaqueKe1::from_bytes(ke1)?,
+    });
+    let binding = AccountRequestBinding::new(
+        network_id,
+        recovery_epoch,
+        public_key.key_id(),
+        agenc_ircd_types::RequestId::from_bytes([request_seed; 16]),
+        payload.message_kind(),
+    );
+    let plaintext = encode_request_plaintext(&payload)?;
+    let (sealed, _token) = seal_account_request(public_key, binding, plaintext.expose_for_hpke())?;
+    Ok(AccountServiceEnvelope::from_sealed(sealed)?
+        .as_bytes()
+        .to_vec())
+}
+
+/// A sealed authentication-finish envelope for the fixture's account
+/// service; the edge relays it without opening it.
+pub(crate) fn sealed_authentication_finish(
+    network_id: agenc_ircd_types::NetworkId,
+    recovery_epoch: agenc_ircd_types::RecoveryEpoch,
+    request_seed: u8,
+) -> TestResult<Vec<u8>> {
+    use agenc_ircd_auth::{
+        AccountRequestPayload, AccountServiceEnvelope, AuthenticationFinish, OpaqueKe3,
+        encode_request_plaintext,
+    };
+    use agenc_ircd_crypto::{AccountHpkePrivateKey, AccountRequestBinding, seal_account_request};
+    let private_key = AccountHpkePrivateKey::from_bytes([40; 32])?;
+    let public_key = private_key.public_key()?;
+    let payload = AccountRequestPayload::AuthenticationFinish(AuthenticationFinish {
+        network_id,
+        transaction_id: agenc_ircd_types::TransactionId::from_bytes([request_seed; 16]),
+        ke3: OpaqueKe3::from_bytes([3; 64])?,
+    });
+    let binding = AccountRequestBinding::new(
+        network_id,
+        recovery_epoch,
+        public_key.key_id(),
+        agenc_ircd_types::RequestId::from_bytes([request_seed; 16]),
+        payload.message_kind(),
+    );
+    let plaintext = encode_request_plaintext(&payload)?;
+    let (sealed, _token) = seal_account_request(public_key, binding, plaintext.expose_for_hpke())?;
+    Ok(AccountServiceEnvelope::from_sealed(sealed)?
+        .as_bytes()
+        .to_vec())
+}

@@ -1598,6 +1598,43 @@ impl AccountServiceCoordinator {
         }
     }
 
+    /// The account, session generation, and grant identifier of a live
+    /// pre-registration authentication a remote edge will consume through
+    /// `session_open` (spec 22.2).
+    pub(crate) fn preregistration_grant(
+        &self,
+        generation: ConnectionGeneration,
+        now: MonotonicTick,
+    ) -> Option<(AccountId, Generation, [u8; 32])> {
+        let binding = self.connections.get(&generation)?.authenticated.as_ref()?;
+        if now >= binding.process_expires_at() {
+            return None;
+        }
+        Some((
+            binding.account_id(),
+            binding.account_session_generation(),
+            *binding
+                .grant
+                .grant_id_for_persistence_or_session_open()
+                .expose_for_session_open(),
+        ))
+    }
+
+    /// The connection holding the live grant `grant_id`.
+    pub(crate) fn grant_owner(&self, grant_id: &[u8; 32]) -> Option<ConnectionGeneration> {
+        self.connections
+            .iter()
+            .find_map(|(generation, connection)| {
+                let binding = connection.authenticated.as_ref()?;
+                let owned = binding
+                    .grant
+                    .grant_id_for_persistence_or_session_open()
+                    .expose_for_session_open()
+                    == grant_id;
+                owned.then_some(*generation)
+            })
+    }
+
     /// Constructs the one durable delete that consumes a pre-registration
     /// grant with its matching session-open plan.
     pub(crate) fn registration_grant_write(
@@ -6456,7 +6493,10 @@ fn request_result_write(
     )
 }
 
-fn account_created_note(prefix: &str, account_id: AccountId) -> Result<WireMessage, RuntimeError> {
+pub(crate) fn account_created_note(
+    prefix: &str,
+    account_id: AccountId,
+) -> Result<WireMessage, RuntimeError> {
     let account = account_id.to_text();
     WireMessage::new(
         prefix,
@@ -6587,7 +6627,7 @@ fn duplicate_credential_id(
     agenc_ircd_types::OpaqueCredentialId::from_bytes(*credential_id.expose_for_account_service())
 }
 
-fn render_sasl_actions(
+pub(crate) fn render_sasl_actions(
     prefix: &str,
     target: &str,
     actions: Vec<SaslAction>,
@@ -6604,7 +6644,7 @@ fn render_sasl_actions(
     Ok(frames)
 }
 
-fn render_account_actions(
+pub(crate) fn render_account_actions(
     prefix: &str,
     kind: AccountCarrierKind,
     actions: Vec<AccountCarrierAction>,
@@ -6657,7 +6697,10 @@ const fn account_phase_name(phase: AccountCarrierPhase) -> &'static str {
     }
 }
 
-fn account_failure(prefix: &str, kind: AccountCarrierKind) -> Result<WireMessage, RuntimeError> {
+pub(crate) fn account_failure(
+    prefix: &str,
+    kind: AccountCarrierKind,
+) -> Result<WireMessage, RuntimeError> {
     let description = match kind {
         AccountCarrierKind::Create => "Account creation unavailable",
         AccountCarrierKind::Credentials => "Credential change unavailable",
@@ -6700,7 +6743,7 @@ fn render_sasl_action(
     Ok(Some(frame))
 }
 
-const fn sasl_action_result(action: &SaslAction) -> ResultClass {
+pub(crate) const fn sasl_action_result(action: &SaslAction) -> ResultClass {
     match action {
         SaslAction::Numeric(SaslNumeric::Success) => ResultClass::Ok,
         SaslAction::Numeric(

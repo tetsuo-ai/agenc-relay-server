@@ -2091,3 +2091,82 @@ async fn companion_requests_execute_after_negotiation_and_synchronization() -> T
     })
     .await
 }
+
+// ---------------------------------------------------------------------------
+// Remote account carriers (spec 22.2).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_forwarded_authentication_start_is_answered_through_a_virtual_connection() -> TestResult {
+    let identity = peer_identity(ServerId::from_bytes([44; 16]), "edge.example");
+    run_coordinator(&[identity], |inbox| async move {
+        let mut edge = Edge::new(inbox, 44);
+        let mut origin = Origin::new(64);
+        edge.establish().await?;
+        synchronize_ok(&mut edge, &mut [&mut origin]).await?;
+        let mut events = Vec::new();
+        let envelope = crate::test_support::sealed_authentication_start(
+            NETWORK,
+            RecoveryEpoch::from_bytes([34; 16]),
+            "quinn-account",
+            71,
+        )?;
+        let mut budget = DecodeBudget::new(8_192, 64);
+        let envelope = SchemaObject::decode_exact("AccountServiceEnvelope", &envelope, &mut budget)
+            .map_err(|error| format!("envelope decode: {error:?}"))?;
+        let operation = FederatedOperation::AccountService {
+            opcode: agenc_ircd_types::FederationOpcode::OpaqueAuthStart,
+            session_id: None,
+            envelope,
+        };
+        let _probe = operation
+            .to_object()
+            .map_err(|error| format!("operation object: {error:?}"))?;
+        request(&mut edge, &mut origin, &operation)
+            .await
+            .map_err(|error| format!("request: {error}"))?;
+        // The virtual connection ran the SASL carrier; an unknown login still
+        // receives its sealed challenge so logins cannot be enumerated.
+        let challenge = answer(&mut edge, &mut events).await?;
+        if let ResultArm::Failed { code, context } = &challenge.arm {
+            return Err(format!("start refused: {code} {context}").into());
+        }
+        assert_eq!(
+            challenge.header.result_kind,
+            FederationResultKind::AuthChallenge
+        );
+        assert!(challenge.header.completion_event_id.is_none());
+        let ResultArm::AuthChallenge(response) = challenge.arm else {
+            return Err("expected the sealed challenge".into());
+        };
+        assert_eq!(
+            response.encode_canonical()?.as_slice().len(),
+            agenc_ircd_auth::ACCOUNT_SERVICE_RESPONSE_BYTES
+        );
+
+        // A session open naming a grant nobody holds is refused, and the
+        // link stays up for ordinary work afterwards.
+        origin.sequence += 1;
+        let connection_id = origin.connection_id;
+        request(
+            &mut edge,
+            &mut origin,
+            &FederatedOperation::SessionOpen {
+                connection_id,
+                auth_grant_id: Some([9; 32]),
+                nickname: "quinn".to_owned(),
+                realname: "Quinn".to_owned(),
+                capability_hash: [0; 32],
+                connection_nonce: [1; 32],
+            },
+        )
+        .await?;
+        let refused = answer(&mut edge, &mut events).await?;
+        assert_eq!(refused.header.result_kind, FederationResultKind::Failed);
+        origin.sequence += 1;
+        let (_session_id, _, _) =
+            open_session(&mut edge, &mut origin, "quinn", &mut events).await?;
+        Ok(())
+    })
+    .await
+}

@@ -1799,3 +1799,199 @@ mod e2ee {
         .await
     }
 }
+
+// ---------------------------------------------------------------------------
+// Remote account carriers (spec 22.2).
+// ---------------------------------------------------------------------------
+
+mod accounts {
+    use super::*;
+    use agenc_ircd_client_wire::{AUTH_CHUNK_CHARACTERS, encode_sasl_payload};
+    use agenc_ircd_federation_wire::WireValue;
+    use agenc_ircd_types::{AccountId, FederationOpcode};
+
+    /// A schema-valid sealed response: the header names the challenge kind
+    /// and the ciphertext has its exact length.
+    fn challenge_response() -> TestResult<SchemaObject> {
+        let header = SchemaObject::new(
+            "AccountServiceResponseHeader",
+            vec![
+                WireValue::Unsigned(1),
+                WireValue::Opaque(vec![0; 32]),
+                WireValue::Opaque(vec![0; 32]),
+                WireValue::Opaque(vec![0; 16]),
+                WireValue::Unsigned(2),
+                WireValue::Opaque(vec![0; 32]),
+            ],
+        )?;
+        Ok(SchemaObject::new(
+            "AccountServiceResponse",
+            vec![
+                WireValue::Structure(header),
+                WireValue::Opaque(vec![0; 4224]),
+            ],
+        )?)
+    }
+
+    /// The SASL chunk frames of one sealed response, as the coordinator
+    /// relays them in the reply block.
+    fn response_chunks(response: &SchemaObject) -> TestResult<Vec<WireMessage>> {
+        let bytes = response.encode_canonical()?;
+        let encoded = encode_sasl_payload(bytes.as_slice());
+        let mut frames = Vec::new();
+        for chunk in encoded.as_bytes().chunks(AUTH_CHUNK_CHARACTERS) {
+            frames.push(WireMessage::new(
+                COORDINATOR_NAME,
+                "AUTHENTICATE",
+                &[std::str::from_utf8(chunk)?],
+                None,
+            )?);
+        }
+        Ok(frames)
+    }
+
+    /// Sends one sealed envelope as the client's SASL chunks.
+    async fn send_envelope(client: &mut Client, envelope: &[u8]) -> TestResult {
+        let encoded = encode_sasl_payload(envelope);
+        for chunk in encoded.as_bytes().chunks(AUTH_CHUNK_CHARACTERS) {
+            client
+                .line(&format!("AUTHENTICATE {}", std::str::from_utf8(chunk)?))
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Waits until the client received `count` payload chunks after `skip`
+    /// earlier AUTHENTICATE lines.
+    async fn wait_for_chunks(
+        client: &Client,
+        skip: usize,
+        count: usize,
+    ) -> TestResult<Vec<String>> {
+        for _ in 0..500 {
+            let chunks: Vec<String> = client
+                .sink
+                .lines()
+                .into_iter()
+                .filter(|line| {
+                    line.contains(" AUTHENTICATE ") && !line.ends_with(" AUTHENTICATE +")
+                })
+                .skip(skip)
+                .collect();
+            if chunks.len() >= count {
+                return Ok(chunks);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        Err("the edge never relayed the response chunks".into())
+    }
+
+    #[tokio::test]
+    async fn sasl_crosses_the_federation_and_its_grant_opens_the_session() -> TestResult {
+        run_edge(|federation, inbox| async move {
+            let mut hub = Hub::new(federation);
+            hub.establish().await?;
+            hub.synchronize().await?;
+            let mut client = Client::open(inbox, 1).await?;
+            hub.ack_origin().await?;
+            client.line("CAP LS 302").await?;
+            client.line("CAP REQ :sasl").await?;
+            client.line("AUTHENTICATE AGENC-OPAQUE").await?;
+            client.wait_for(" AUTHENTICATE +").await?;
+
+            // The start envelope leaves as one federated request and the
+            // sealed challenge comes back through the edge transport.
+            let envelope = crate::test_support::sealed_authentication_start(
+                NETWORK,
+                RecoveryEpoch::from_bytes([34; 16]),
+                "quinn-account",
+                71,
+            )?;
+            send_envelope(&mut client, &envelope).await?;
+            let (header, operation, bytes) = match hub.next_request().await {
+                Ok(request) => request,
+                Err(error) => {
+                    return Err(format!("{error}; client saw {:?}", client.sink.lines()).into());
+                }
+            };
+            let FederatedOperation::AccountService {
+                opcode: FederationOpcode::OpaqueAuthStart,
+                session_id: None,
+                ..
+            } = operation
+            else {
+                return Err("expected a forwarded authentication start".into());
+            };
+            let response = challenge_response()?;
+            hub.result(
+                &header,
+                &bytes,
+                &ResultArm::AuthChallenge(response.try_clone()?),
+                Vec::new(),
+                None,
+            )
+            .await?;
+            let chunks = wait_for_chunks(&client, 0, 15).await?;
+            assert_eq!(chunks.len(), 15);
+
+            // The finish envelope is answered with the grant and the sealed
+            // completion in the reply block; the client sees 903.
+            let finish = crate::test_support::sealed_authentication_finish(
+                NETWORK,
+                RecoveryEpoch::from_bytes([34; 16]),
+                72,
+            )?;
+            send_envelope(&mut client, &finish).await?;
+            let (header, operation, bytes) = match hub.next_request().await {
+                Ok(request) => request,
+                Err(error) => {
+                    let lines = client.sink.lines();
+                    let tail: Vec<&String> = lines.iter().rev().take(3).collect();
+                    return Err(format!("finish: {error}; client tail {tail:?}").into());
+                }
+            };
+            let FederatedOperation::AccountService {
+                opcode: FederationOpcode::OpaqueAuthFinish,
+                ..
+            } = operation
+            else {
+                return Err("expected a forwarded authentication finish".into());
+            };
+            let account = AccountId::parse("a_AAAAAAAAAAAAAAAAAAAAAA")?;
+            hub.result(
+                &header,
+                &bytes,
+                &ResultArm::Authenticated {
+                    account_id: account,
+                    account_session_generation: 1,
+                    auth_grant_id: [9; 32],
+                },
+                response_chunks(&response)?,
+                None,
+            )
+            .await?;
+            let chunks = wait_for_chunks(&client, 15, 15).await?;
+            assert_eq!(chunks.len(), 15);
+            client.wait_for(" 903 ").await?;
+
+            // Registration presents the grant in the session open.
+            client.line("NICK quinn").await?;
+            client.line("USER quinn 0 * :Quinn Real").await?;
+            client.line("CAP END").await?;
+            let (_, operation, _) = match hub.next_request().await {
+                Ok(request) => request,
+                Err(error) => {
+                    return Err(
+                        format!("open: {error}; client saw {:?}", client.sink.lines()).into(),
+                    );
+                }
+            };
+            let FederatedOperation::SessionOpen { auth_grant_id, .. } = operation else {
+                return Err("expected session_open".into());
+            };
+            assert_eq!(auth_grant_id, Some([9; 32]));
+            Ok(())
+        })
+        .await
+    }
+}

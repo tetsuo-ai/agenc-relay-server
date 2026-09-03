@@ -152,6 +152,28 @@ pub struct RegistrationRouter {
     federation: Option<FederationCoordinator>,
     edge: Option<EdgeFederation>,
     e2ee: Option<crate::e2ee::edge::E2eeEdge>,
+    edge_carriers: BTreeMap<ConnectionGeneration, EdgeCarrier>,
+}
+
+/// The carrier transports of one pre-registration client on an edge; the
+/// sealed envelopes they assemble cross the federation and the answers
+/// come back through them (spec 22.2).
+struct EdgeCarrier {
+    sasl: agenc_ircd_client_wire::SaslTransport,
+    creation: agenc_ircd_client_wire::AccountTransfer,
+    grant: Option<(agenc_ircd_types::AccountId, u64, [u8; 32])>,
+}
+
+impl EdgeCarrier {
+    fn new() -> Result<Self, RuntimeError> {
+        Ok(Self {
+            sasl: agenc_ircd_client_wire::SaslTransport::new()
+                .map_err(|_| RuntimeError::MemoryExhausted)?,
+            creation: agenc_ircd_client_wire::AccountTransfer::new(AccountCarrierKind::Create)
+                .map_err(|_| RuntimeError::MemoryExhausted)?,
+            grant: None,
+        })
+    }
 }
 
 struct ClientCapabilityProfiles {
@@ -260,6 +282,7 @@ impl RegistrationRouter {
             federation: None,
             edge: None,
             e2ee: None,
+            edge_carriers: BTreeMap::new(),
         })
     }
 
@@ -830,9 +853,24 @@ impl RegistrationRouter {
                 carrier,
                 message,
             } => {
+                if self.edge.is_some() && carrier != RegistrationAuthCarrier::AccountCredentials {
+                    return self.route_edge_carrier(
+                        context,
+                        generation,
+                        state,
+                        carrier_generation,
+                        carrier,
+                        message,
+                        CarrierObservation {
+                            token: observation,
+                            result,
+                        },
+                    );
+                }
                 if self.edge.is_some() || self.accounts.is_none() {
-                    // Account service envelopes cross the federation in a
-                    // later stage; an edge answers them unavailable.
+                    // Credential changes need the registered session's
+                    // account authority, which stays with the coordinator; an
+                    // edge answers them unavailable.
                     record_result(result, ResultClass::Rejected);
                     let command = message.command().to_owned();
                     self.send_one(
@@ -1002,6 +1040,11 @@ impl RegistrationRouter {
             realname,
         } = commit;
         let capability_hash = capability_hash(state.registration.enabled_capabilities())?;
+        let auth_grant_id = self
+            .edge_carriers
+            .get(&connection)
+            .and_then(|carrier| carrier.grant)
+            .map(|(_, _, grant_id)| grant_id);
         let sent = self.edge.as_mut().is_some_and(|edge| {
             edge.open_session(
                 context,
@@ -1010,6 +1053,7 @@ impl RegistrationRouter {
                 nickname,
                 realname,
                 capability_hash,
+                auth_grant_id,
             )
         });
         if sent {
@@ -1141,6 +1185,7 @@ impl RegistrationRouter {
         }
     }
 
+    // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one match dispatches every edge completion kind to its handler with the exact fields the result carried
     fn apply_edge_completion(
         &mut self,
         context: &mut StateCoreContext,
@@ -1208,7 +1253,275 @@ impl RegistrationRouter {
                 message,
             } => self.deliver_edge_replies(context, generation, frames, next_cursor, &message),
             EdgeCompletion::Resync { generation } => self.resync_edge_client(context, generation),
+            EdgeCompletion::AccountCarrier {
+                generation,
+                carrier_generation,
+                sasl,
+                finish,
+                outcome,
+            } => self.edge_carrier_answered(
+                context,
+                generation,
+                carrier_generation,
+                (sasl, finish),
+                outcome,
+            ),
         }
+    }
+
+    /// Drives one carrier line of a pre-registration client on an edge:
+    /// the transport assembles the sealed envelope, which crosses the
+    /// federation; every other action renders locally.
+    // agenc-review: allow owner=runtime reviewed=2026-09-03 reason=the carrier route keeps the connection state transfer generation carrier class message and observation of one client line together
+    #[allow(clippy::too_many_arguments)]
+    // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=each carrier class takes its parameters from the line in its own grammar before the shared completion path
+    fn route_edge_carrier(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+        state: &mut ConnectionState,
+        carrier_generation: u64,
+        carrier: RegistrationAuthCarrier,
+        mut message: agenc_ircd_client_wire::ParsedMessage,
+        observation: CarrierObservation<'_>,
+    ) -> Result<ActionStep, RuntimeError> {
+        let now = context.now().get();
+        let target = self.target(state).to_owned();
+        let prefix = self.config.server_prefix.clone();
+        if let std::collections::btree_map::Entry::Vacant(slot) =
+            self.edge_carriers.entry(generation)
+        {
+            slot.insert(EdgeCarrier::new()?);
+        }
+        let route = match carrier {
+            RegistrationAuthCarrier::Sasl => {
+                let parameter = (message.parameter_count() == 1)
+                    .then(|| message.take_parameter(0))
+                    .flatten();
+                match parameter {
+                    Some(parameter) => self.edge_sasl_line(
+                        context,
+                        generation,
+                        carrier_generation,
+                        (&prefix, &target),
+                        &parameter,
+                        now,
+                    ),
+                    None => CarrierRoute::Close,
+                }
+            }
+            RegistrationAuthCarrier::AccountCreate => {
+                let has_tags = !message.tags().is_empty();
+                match message.take_parameter(0) {
+                    Some(subcommand) => {
+                        let parameter = message.take_parameter(1);
+                        self.edge_account_line(
+                            context,
+                            generation,
+                            carrier_generation,
+                            &prefix,
+                            (&subcommand, parameter.as_deref(), has_tags),
+                            now,
+                        )
+                    }
+                    None => CarrierRoute::Close,
+                }
+            }
+            RegistrationAuthCarrier::AccountCredentials => CarrierRoute::Close,
+        };
+        self.complete_carrier_route(
+            context,
+            generation,
+            state,
+            carrier_generation,
+            route,
+            observation,
+        )
+    }
+
+    // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=the SASL line loop forwards the assembled envelope and renders every other transport action in the order the transport produced them
+    fn edge_sasl_line(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+        carrier_generation: u64,
+        names: (&str, &str),
+        parameter: &str,
+        now: u64,
+    ) -> CarrierRoute {
+        use agenc_ircd_client_wire::SaslAction;
+        let (prefix, target) = names;
+        let Some(carrier) = self.edge_carriers.get_mut(&generation) else {
+            return CarrierRoute::Close;
+        };
+        let Ok(actions) = carrier.sasl.client(parameter, now) else {
+            return CarrierRoute::Close;
+        };
+        let mut rendered = Vec::new();
+        let mut result = ResultClass::Ok;
+        for action in actions {
+            match action {
+                SaslAction::RequestEnvelope { finish, bytes } => {
+                    let opcode = if finish {
+                        agenc_ircd_types::FederationOpcode::OpaqueAuthFinish
+                    } else {
+                        agenc_ircd_types::FederationOpcode::OpaqueAuthStart
+                    };
+                    let sent = self.edge.as_mut().is_some_and(|edge| {
+                        edge.send_account_carrier(
+                            context,
+                            generation,
+                            opcode,
+                            bytes.expose(),
+                            finish,
+                            carrier_generation,
+                        )
+                    });
+                    if sent {
+                        return CarrierRoute::Pending;
+                    }
+                    let Ok(actions) = carrier.sasl.unavailable(now) else {
+                        return CarrierRoute::Close;
+                    };
+                    return match crate::account_service::render_sasl_actions(
+                        prefix, target, actions,
+                    ) {
+                        Ok(frames) => CarrierRoute::Finished {
+                            frames,
+                            result: ResultClass::Rejected,
+                        },
+                        Err(_) => CarrierRoute::Close,
+                    };
+                }
+                SaslAction::Logout => {
+                    let Ok(actions) = carrier.sasl.reject_logout() else {
+                        return CarrierRoute::Close;
+                    };
+                    rendered.extend(actions);
+                    result = ResultClass::Rejected;
+                }
+                action => {
+                    if crate::account_service::sasl_action_result(&action) == ResultClass::Rejected
+                    {
+                        result = ResultClass::Rejected;
+                    }
+                    rendered.push(action);
+                }
+            }
+        }
+        match crate::account_service::render_sasl_actions(prefix, target, rendered) {
+            Ok(frames) => CarrierRoute::Finished { frames, result },
+            Err(_) => CarrierRoute::Close,
+        }
+    }
+
+    // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=the account carrier loop forwards the assembled envelope and renders every other transport action in the order the transport produced them
+    fn edge_account_line(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+        carrier_generation: u64,
+        prefix: &str,
+        line: (&str, Option<&str>, bool),
+        now: u64,
+    ) -> CarrierRoute {
+        use agenc_ircd_client_wire::{AccountCarrierAction, AccountCarrierPhase};
+        let (subcommand, parameter, has_tags) = line;
+        let Some(carrier) = self.edge_carriers.get_mut(&generation) else {
+            return CarrierRoute::Close;
+        };
+        let Ok(actions) = carrier
+            .creation
+            .client(subcommand, parameter, has_tags, now)
+        else {
+            return account_unavailable(prefix);
+        };
+        let mut rendered = Vec::new();
+        for action in actions {
+            match action {
+                AccountCarrierAction::RequestEnvelope { phase, bytes } => {
+                    let finish = phase == AccountCarrierPhase::Finish;
+                    let opcode = if finish {
+                        agenc_ircd_types::FederationOpcode::AccountCreateFinish
+                    } else {
+                        agenc_ircd_types::FederationOpcode::AccountCreateStart
+                    };
+                    let sent = self.edge.as_mut().is_some_and(|edge| {
+                        edge.send_account_carrier(
+                            context,
+                            generation,
+                            opcode,
+                            bytes.expose(),
+                            finish,
+                            carrier_generation,
+                        )
+                    });
+                    if sent {
+                        return CarrierRoute::Pending;
+                    }
+                    carrier.creation.reject();
+                    return account_unavailable(prefix);
+                }
+                action => rendered.push(action),
+            }
+        }
+        match crate::account_service::render_account_actions(
+            prefix,
+            AccountCarrierKind::Create,
+            rendered,
+        ) {
+            Ok(frames) => CarrierRoute::Finished {
+                frames,
+                result: ResultClass::Ok,
+            },
+            Err(_) => CarrierRoute::Close,
+        }
+    }
+
+    /// The coordinator answered one forwarded carrier envelope: the edge
+    /// transport renders the sealed response and outcome for the client,
+    /// and a successful SASL finish keeps its grant for session open.
+    fn edge_carrier_answered(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+        carrier_generation: u64,
+        phase: (bool, bool),
+        outcome: crate::federation::edge::RemoteCarrierOutcome,
+    ) {
+        let (sasl, finish) = phase;
+        let now = context.now().get();
+        let prefix = self.config.server_prefix.clone();
+        let target = self
+            .connections
+            .get(&generation)
+            .map_or_else(|| "*".to_owned(), |state| self.target(state).to_owned());
+        let Some(carrier) = self.edge_carriers.get_mut(&generation) else {
+            return;
+        };
+        let answered = if sasl {
+            edge_sasl_answer(carrier, (&prefix, &target), finish, outcome, now)
+        } else {
+            edge_account_answer(carrier, &prefix, finish, outcome, now)
+        };
+        let completion = match answered {
+            Some((frames, result)) => {
+                let _sent = context.send_to(generation, frames);
+                CarrierCompletion {
+                    generation,
+                    carrier_generation,
+                    close: false,
+                    result,
+                }
+            }
+            None => CarrierCompletion {
+                generation,
+                carrier_generation,
+                close: true,
+                result: ResultClass::Error,
+            },
+        };
+        self.apply_account_completions(context, vec![completion]);
     }
 
     fn deliver_edge_replies(
@@ -1281,7 +1594,11 @@ impl RegistrationRouter {
             RegistrationEvent::RegistrationCommitted {
                 generation: event_generation,
                 accepted,
-                authenticated: false,
+                authenticated: accepted
+                    && self
+                        .edge_carriers
+                        .get(&generation)
+                        .is_some_and(|carrier| carrier.grant.is_some()),
             },
             context.now().get(),
         ) {
@@ -2098,12 +2415,27 @@ impl RegistrationRouter {
         true
     }
 
+    /// Runs the remote account carriers the coordinator queued.
+    fn drive_remote_accounts(&mut self, context: &mut StateCoreContext) {
+        if let (Some(accounts), Some(federation)) =
+            (self.accounts.as_mut(), self.federation.as_mut())
+        {
+            crate::remote_accounts::drive(context, accounts, federation);
+        }
+    }
+
     fn apply_account_completions(
         &mut self,
         context: &mut StateCoreContext,
         completions: Vec<CarrierCompletion>,
     ) {
         for completion in completions {
+            if let (Some(accounts), Some(federation)) =
+                (self.accounts.as_mut(), self.federation.as_mut())
+                && crate::remote_accounts::completion(context, accounts, federation, &completion)
+            {
+                continue;
+            }
             if completion.carrier_generation != 0
                 && let Some(observation) = self
                     .pending_observations
@@ -2234,6 +2566,7 @@ impl CommandRouter for RegistrationRouter {
         }
         if let Some(federation) = self.federation.as_mut() {
             federation.inbound(context, message);
+            self.drive_remote_accounts(context);
         }
     }
 
@@ -2362,6 +2695,7 @@ impl CommandRouter for RegistrationRouter {
             .as_deref()
             .unwrap_or("connection closed")
             .to_owned();
+        self.edge_carriers.remove(&generation);
         if let Some(edge) = self.edge.as_mut() {
             if let Some(e2ee) = self.e2ee.as_mut() {
                 e2ee.delete_origin(context, edge, generation);
@@ -2415,6 +2749,12 @@ impl CommandRouter for RegistrationRouter {
         if let Some(federation) = self.federation.as_mut() {
             federation.batch_applied(context);
         }
+        if let (Some(accounts), Some(federation)) =
+            (self.accounts.as_mut(), self.federation.as_mut())
+        {
+            crate::remote_accounts::batch_settled(context, accounts, federation);
+        }
+        self.drive_remote_accounts(context);
         if let Some(edge) = self.edge.as_mut() {
             let completions = edge.batch_applied(context);
             self.apply_edge_completions(context, completions);
@@ -2447,6 +2787,7 @@ impl CommandRouter for RegistrationRouter {
             .filter(|federation| federation.owns_crypto_job(message.job_id))
         {
             federation.crypto_completed(context, message);
+            self.drive_remote_accounts(context);
             return;
         }
         if let Err((generation, _error)) = self.commands.crypto_completed(context, message) {
@@ -2465,6 +2806,7 @@ impl CommandRouter for RegistrationRouter {
             .filter(|federation| federation.owns_storage_read(message.read_id))
         {
             federation.storage_read_completed(context, message);
+            self.drive_remote_accounts(context);
             return;
         }
         if let Some(accounts) = self.accounts.as_mut() {
@@ -2473,6 +2815,7 @@ impl CommandRouter for RegistrationRouter {
         }
     }
 
+    // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=a rejected batch notifies every attached role in a fixed order so no role observes the others' rollback out of sequence
     fn batch_rejected(
         &mut self,
         context: &mut StateCoreContext,
@@ -2481,6 +2824,11 @@ impl CommandRouter for RegistrationRouter {
     ) {
         if let Some(federation) = self.federation.as_mut() {
             federation.batch_rejected(context);
+        }
+        if let (Some(accounts), Some(federation)) =
+            (self.accounts.as_mut(), self.federation.as_mut())
+        {
+            crate::remote_accounts::batch_settled(context, accounts, federation);
         }
         if let Some(edge) = self.edge.as_mut() {
             edge.batch_rejected(context);
@@ -2771,6 +3119,110 @@ fn reject_staged_origin(context: &mut StateCoreContext, origin: StagedOrigin) {
     if !frames.is_empty() && context.send_to(generation, frames).is_err() {
         close_transport(context, generation);
     }
+}
+
+/// The `FAIL ACCTCREATE UNAVAILABLE` route of an edge carrier.
+fn account_unavailable(prefix: &str) -> CarrierRoute {
+    match crate::account_service::account_failure(prefix, AccountCarrierKind::Create) {
+        Ok(frame) => CarrierRoute::Finished {
+            frames: vec![frame],
+            result: ResultClass::Rejected,
+        },
+        Err(_) => CarrierRoute::Close,
+    }
+}
+
+/// Renders the coordinator's answer to a forwarded SASL envelope through
+/// the edge transport; `None` closes the transport.
+fn edge_sasl_answer(
+    carrier: &mut EdgeCarrier,
+    names: (&str, &str),
+    finish: bool,
+    outcome: crate::federation::edge::RemoteCarrierOutcome,
+    now: u64,
+) -> Option<(Vec<WireMessage>, ResultClass)> {
+    use crate::federation::edge::RemoteCarrierOutcome;
+    let (prefix, target) = names;
+    let (mut actions, accepted) = match outcome {
+        RemoteCarrierOutcome::Challenge(bytes) if !finish => {
+            (carrier.sasl.server_response(&bytes, now).ok()?, None)
+        }
+        RemoteCarrierOutcome::Authenticated {
+            account_id,
+            account_session_generation,
+            auth_grant_id,
+            chunks,
+        } if finish => {
+            let bytes = agenc_ircd_client_wire::decode_sasl_payload(&chunks.concat())?;
+            let actions = carrier.sasl.server_response(&bytes, now).ok()?;
+            carrier.grant = Some((account_id, account_session_generation, auth_grant_id));
+            (actions, Some(true))
+        }
+        RemoteCarrierOutcome::Failed { chunks } if finish && !chunks.is_empty() => {
+            let bytes = agenc_ircd_client_wire::decode_sasl_payload(&chunks.concat())?;
+            (carrier.sasl.server_response(&bytes, now).ok()?, Some(false))
+        }
+        _ => (carrier.sasl.unavailable(now).ok()?, None),
+    };
+    let result = match accepted {
+        Some(accepted) => {
+            actions.extend(carrier.sasl.complete(accepted, now).ok()?);
+            if accepted {
+                ResultClass::Ok
+            } else {
+                ResultClass::Rejected
+            }
+        }
+        None if actions.is_empty() => ResultClass::Rejected,
+        None => ResultClass::Ok,
+    };
+    let frames = crate::account_service::render_sasl_actions(prefix, target, actions).ok()?;
+    Some((frames, result))
+}
+
+/// Renders the coordinator's answer to a forwarded account-creation
+/// envelope through the edge transport; `None` closes the transport.
+fn edge_account_answer(
+    carrier: &mut EdgeCarrier,
+    prefix: &str,
+    finish: bool,
+    outcome: crate::federation::edge::RemoteCarrierOutcome,
+    now: u64,
+) -> Option<(Vec<WireMessage>, ResultClass)> {
+    use crate::federation::edge::RemoteCarrierOutcome;
+    use agenc_ircd_client_wire::AccountCarrierPhase;
+    let (actions, created) = match outcome {
+        RemoteCarrierOutcome::Challenge(bytes) if !finish => (
+            carrier
+                .creation
+                .server_response(AccountCarrierPhase::Start, &bytes, now)
+                .ok()?,
+            None,
+        ),
+        RemoteCarrierOutcome::Created { account_id, chunks } if finish => {
+            let bytes = agenc_ircd_client_wire::decode_account_payload(&chunks.concat())?;
+            (
+                carrier
+                    .creation
+                    .server_response(AccountCarrierPhase::Finish, &bytes, now)
+                    .ok()?,
+                Some(account_id),
+            )
+        }
+        _ => {
+            carrier.creation.reject();
+            let frame =
+                crate::account_service::account_failure(prefix, AccountCarrierKind::Create).ok()?;
+            return Some((vec![frame], ResultClass::Rejected));
+        }
+    };
+    let mut frames =
+        crate::account_service::render_account_actions(prefix, AccountCarrierKind::Create, actions)
+            .ok()?;
+    if let Some(account_id) = created {
+        frames.push(crate::account_service::account_created_note(prefix, account_id).ok()?);
+    }
+    Some((frames, ResultClass::Ok))
 }
 
 #[cfg(test)]

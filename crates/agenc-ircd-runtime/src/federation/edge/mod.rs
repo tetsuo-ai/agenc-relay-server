@@ -48,7 +48,7 @@ use crate::observe::health::{ReadinessGate, ReadinessStage};
 use crate::state_core::StateCoreContext;
 use crate::sync::Arc;
 
-pub use request::EdgeCompletion;
+pub use request::{EdgeCompletion, RemoteCarrierOutcome};
 
 /// Events held while one durable batch is in flight.
 const MAX_QUEUED_EVENTS: usize = 256;
@@ -862,6 +862,8 @@ impl EdgeFederation {
 
     /// Requests a session for a connection that completed local
     /// registration; returns whether the request was accepted for sending.
+    // agenc-review: allow owner=runtime reviewed=2026-09-03 reason=a session open carries the connection its registration facts capability hash and optional grant in the exact field order of the operation
+    #[allow(clippy::too_many_arguments)]
     pub fn open_session(
         &mut self,
         context: &mut StateCoreContext,
@@ -870,6 +872,7 @@ impl EdgeFederation {
         nickname: &str,
         realname: &str,
         capability_hash: [u8; 32],
+        auth_grant_id: Option<[u8; 32]>,
     ) -> bool {
         self.network_available()
             && request::send_session_open(
@@ -880,6 +883,32 @@ impl EdgeFederation {
                 nickname,
                 realname,
                 capability_hash,
+                auth_grant_id,
+            )
+            .is_ok()
+    }
+
+    /// Forwards one sealed account carrier envelope of a pre-registration
+    /// client to the coordinator (spec 22.2); `false` when the link is not
+    /// active or the envelope does not decode.
+    pub fn send_account_carrier(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+        opcode: agenc_ircd_types::FederationOpcode,
+        envelope: &[u8],
+        finish: bool,
+        carrier_generation: u64,
+    ) -> bool {
+        self.network_available()
+            && request::send_account_carrier(
+                self,
+                context,
+                generation,
+                opcode,
+                envelope,
+                finish,
+                carrier_generation,
             )
             .is_ok()
     }

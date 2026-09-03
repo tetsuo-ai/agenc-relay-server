@@ -43,7 +43,7 @@ pub(crate) struct PendingCrypto {
 }
 
 /// The identity of one fresh request being executed.
-pub(super) struct FreshRequest {
+pub(crate) struct FreshRequest {
     pub(super) key: OperationKey,
     pub(super) header: RequestHeader,
     pub(super) descriptor: OperationDescriptor,
@@ -321,6 +321,13 @@ fn run_operation(
         ConvertedRequest::SessionOpen(seed) => {
             open_session(coordinator, context, link, peer, fresh, *seed)
         }
+        ConvertedRequest::SessionOpenWithGrant(seed, grant_id) => {
+            coordinator.queue_remote_session_open(link, peer, fresh, *seed, grant_id);
+            Ok(())
+        }
+        ConvertedRequest::AccountService { opcode, envelope } => {
+            coordinator.queue_remote_carrier(link, peer, fresh, opcode, envelope)
+        }
         ConvertedRequest::SessionClose { user_id, kind } => {
             close_session(coordinator, context, link, peer, fresh, user_id, kind)
         }
@@ -493,11 +500,28 @@ fn open_session(
     fresh: FreshRequest,
     seed: SessionSeed,
 ) -> Result<(), Violation> {
+    open_session_with_writes(coordinator, context, link, peer, fresh, seed, Vec::new())
+}
+
+/// Opens a session; `writes` are the account-service rows that join the
+/// transaction, the consumed pre-registration grant of a remote client.
+pub(super) fn open_session_with_writes(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    link: LinkId,
+    peer: ServerId,
+    fresh: FreshRequest,
+    seed: SessionSeed,
+    writes: Vec<AccountServiceDurableWrite>,
+) -> Result<(), Violation> {
+    let account = seed
+        .account_id
+        .map(|account| (account, seed.account_session_generation.get(), 0));
     let registered = SessionRegistered {
         session_id: seed.session_id,
         user_id: seed.user_id,
         session_revision: seed.revision.get(),
-        account: None,
+        account,
         resulting_state_generation: 0,
     };
     let plan = match context.domain().plan_session_opened(seed) {
@@ -512,7 +536,17 @@ fn open_session(
     });
     let fanout = crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())
         .map_err(|_| Violation::Ceiling)?;
-    stage_with_plan(coordinator, context, link, peer, fresh, arm, plan, fanout)
+    stage_with_plan_and_writes(
+        coordinator,
+        context,
+        link,
+        peer,
+        fresh,
+        arm,
+        plan,
+        fanout,
+        writes,
+    )
 }
 
 fn close_session(
@@ -768,6 +802,32 @@ fn stage_with_plan(
     plan: agenc_ircd_domain::MutationPlan,
     fanout: crate::state_core::fanout::FanoutRequest,
 ) -> Result<(), Violation> {
+    stage_with_plan_and_writes(
+        coordinator,
+        context,
+        link,
+        peer,
+        fresh,
+        arm,
+        plan,
+        fanout,
+        Vec::new(),
+    )
+}
+
+// agenc-review: allow owner=runtime reviewed=2026-09-03 reason=a staged request carries its link peer request result plan fanout and joined account rows to one durable staging boundary
+#[allow(clippy::too_many_arguments)]
+fn stage_with_plan_and_writes(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    link: LinkId,
+    peer: ServerId,
+    fresh: FreshRequest,
+    arm: ResultArm,
+    plan: agenc_ircd_domain::MutationPlan,
+    fanout: crate::state_core::fanout::FanoutRequest,
+    extra_writes: Vec<AccountServiceDurableWrite>,
+) -> Result<(), Violation> {
     let completion_event_id = fresh_event_id(context)?;
     let generation = plan.resulting_revision().get();
     let encoded = encode_result(
@@ -777,7 +837,7 @@ fn stage_with_plan(
         Some(completion_event_id),
         Vec::new(),
     )?;
-    let writes = request_rows(
+    let mut writes = request_rows(
         coordinator,
         &fresh,
         &encoded,
@@ -785,6 +845,7 @@ fn stage_with_plan(
         generation,
         generation,
     )?;
+    writes.extend(extra_writes);
     context.set_mutation_context(fresh.mutation.clone());
     context.set_request_binding(RequestBinding {
         home: peer,
@@ -827,7 +888,7 @@ fn stage_with_plan(
 }
 
 /// Answers a request that produced no plan with a durable `failed` result.
-fn finish_failed(
+pub(super) fn finish_failed(
     coordinator: &mut FederationCoordinator,
     context: &mut StateCoreContext,
     link: LinkId,
@@ -844,7 +905,7 @@ fn finish_failed(
 
 /// Answers a request that produced no plan with a durable result carrying
 /// `arm` and `replies`, staged behind a checkpoint plan.
-fn finish_without_plan(
+pub(super) fn finish_without_plan(
     coordinator: &mut FederationCoordinator,
     context: &mut StateCoreContext,
     link: LinkId,
