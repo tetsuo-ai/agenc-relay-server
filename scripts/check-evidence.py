@@ -127,9 +127,47 @@ STAGE_BINDINGS = {
     "EVID-S06-014-OBSERVABILITY": (["S06-014"], "privacy-observability"),
     "EVID-S06-015-HARDENING": (["S06-015"], "service-hardening"),
     "EVID-S06-900-STAGE-GATE": (["S06-900"], "stage-gate"),
+    "EVID-S07-001-TRANSPORT": (["S07-001"], "federation-transport"),
+    "EVID-S07-002-HELLO": (["S07-002"], "federation-hello"),
+    "EVID-S07-003-AUTHORITY": (["S07-003"], "coordinator-authority"),
+    "EVID-S07-004-ORIGINS": (["S07-004"], "origin-lifecycle"),
+    "EVID-S07-005-REQUESTS": (["S07-005"], "idempotent-requests"),
+    "EVID-S07-006-PROJECTIONS": (["S07-006"], "least-information-projections"),
+    "EVID-S07-007-ACKS": (["S07-007"], "durable-event-acknowledgement"),
+    "EVID-S07-008-OBJECTS": (["S07-008"], "bounded-object-transport"),
+    "EVID-S07-009-SNAPSHOTS": (["S07-009"], "snapshot-resume"),
+    "EVID-S07-010-PARTITIONS": (["S07-010"], "partition-keepalive-recovery"),
+    "EVID-S07-011-QUERIES": (["S07-011"], "paged-directory-queries"),
+    "EVID-S07-012-MODEL": (["S07-012"], "bounded-federation-model"),
+    "EVID-S07-013-INTEROP": (["S07-013"], "multi-process-federation"),
+    "EVID-S07-900-STAGE-GATE": (["S07-900"], "stage-gate"),
 }
 
 NORMATIVE_BINDINGS = {
+    "EVID-ARCH-AUTH-03": (["ARCH-AUTH-03"], "normative-requirement"),
+    "EVID-ARCH-AUTH-06": (["ARCH-AUTH-06"], "normative-requirement"),
+    "EVID-ARCH-FED-01": (["ARCH-FED-01"], "normative-requirement"),
+    "EVID-ARCH-FED-04": (["ARCH-FED-04"], "normative-requirement"),
+    "EVID-ARCH-FED-05": (["ARCH-FED-05"], "normative-requirement"),
+    "EVID-ARCH-FED-06": (["ARCH-FED-06"], "normative-requirement"),
+    "EVID-ARCH-FED-07": (["ARCH-FED-07"], "normative-requirement"),
+    "EVID-ARCH-FED-08": (["ARCH-FED-08"], "normative-requirement"),
+    "EVID-ARCH-FED-09": (["ARCH-FED-09"], "normative-requirement"),
+    "EVID-ARCH-FED-13": (["ARCH-FED-13"], "normative-requirement"),
+    "EVID-ARCH-ID-05": (["ARCH-ID-05"], "normative-requirement"),
+    "EVID-ARCH-REQ-0B5E5D62113344CD5B9E": (["ARCH-REQ-0B5E5D62113344CD5B9E"], "normative-requirement"),
+    "EVID-ARCH-REQ-17B30148DD5160683953": (["ARCH-REQ-17B30148DD5160683953"], "normative-requirement"),
+    "EVID-ARCH-REQ-32BBA90BC88CB72E6AD1": (["ARCH-REQ-32BBA90BC88CB72E6AD1"], "normative-requirement"),
+    "EVID-ARCH-REQ-415192C9AE3C7492C527": (["ARCH-REQ-415192C9AE3C7492C527"], "normative-requirement"),
+    "EVID-ARCH-REQ-A028640A3B71B72E5F38": (["ARCH-REQ-A028640A3B71B72E5F38"], "normative-requirement"),
+    "EVID-ARCH-REQ-A1C186F162F73F71282D": (["ARCH-REQ-A1C186F162F73F71282D"], "normative-requirement"),
+    "EVID-ARCH-STA-01": (["ARCH-STA-01"], "normative-requirement"),
+    "EVID-ARCH-STA-03": (["ARCH-STA-03"], "normative-requirement"),
+    "EVID-ARCH-STA-06": (["ARCH-STA-06"], "normative-requirement"),
+    "EVID-ARCH-STA-07": (["ARCH-STA-07"], "normative-requirement"),
+    "EVID-ARCH-STA-10": (["ARCH-STA-10"], "normative-requirement"),
+    "EVID-ARCH-TRN-01": (["ARCH-TRN-01"], "normative-requirement"),
+    "EVID-ARCH-TRN-03": (["ARCH-TRN-03"], "normative-requirement"),
     "EVID-ARCH-AUTH-01": (["ARCH-AUTH-01"], "normative-requirement"),
     "EVID-ARCH-AUTH-04": (["ARCH-AUTH-04"], "normative-requirement"),
     "EVID-ARCH-AUTH-09": (["ARCH-AUTH-09"], "normative-requirement"),
@@ -1832,11 +1870,11 @@ kind = "normative-requirement"
         + """
 
 [[evidence]]
-id = "EVID-ARCH-AUTH-03"
-claim_ids = ["ARCH-AUTH-03"]
+id = "EVID-ARCH-CON-01"
+claim_ids = ["ARCH-CON-01"]
 kind = "normative-requirement"
 """,
-        "unimplemented requirement ARCH-AUTH-03 must not have closing catalog evidence",
+        "unimplemented requirement ARCH-CON-01 must not have closing catalog evidence",
     )
     reject_catalog(
         "unrelated catalog evidence",
@@ -1852,7 +1890,7 @@ kind = "normative-requirement"
     )
 
     try:
-        closure_evidence_inventory({"EVID-ARCH-AUTH-03"})
+        closure_evidence_inventory({"EVID-ARCH-CON-01"})
     except EvidenceError as error:
         if "lacks a reviewed catalog kind" not in str(error):
             raise EvidenceError(

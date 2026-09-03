@@ -1854,7 +1854,7 @@ Outcome: one coordinator and its authenticated edges converge through bounded,
 durable, privacy-minimized requests, results, events, projections, snapshots,
 partitions, and recovery.
 
-- [ ] `S07-001` **Implement authenticated federation transport.** Require
+- [x] `S07-001` **Implement authenticated federation transport.** Require
   TLS 1.3, exact ALPN, static certificate/application-signature pins, exporter
   binding, bounded framing, and independent peer authorization before role use.
   - After: `S06-900`.
@@ -1863,7 +1863,7 @@ partitions, and recovery.
   - Invariants: `TRN-01`, `TRN-03`, `FED-02`, `FED-10`.
   - Evidence: TLS/pin/exporter/ALPN/role/recovery-epoch positive and negative matrices.
 
-- [ ] `S07-002` **Implement FHELLO/READY negotiation.** Exchange exact role,
+- [x] `S07-002` **Implement FHELLO/READY negotiation.** Exchange exact role,
   identity, incarnation, recovery epoch, base profile hash, features, cursors,
   and readiness state; block activation until required synchronization finishes.
   - After: `S07-001`.
@@ -1872,7 +1872,7 @@ partitions, and recovery.
   - Invariants: `FED-02`, `FED-10`, `E2E-07`.
   - Evidence: every tuple mismatch, stale/gap/exhausted incarnation/epoch, early READY, and reconnect transition test.
 
-- [ ] `S07-003` **Enforce coordinator/edge authority.** Route every global
+- [x] `S07-003` **Enforce coordinator/edge authority.** Route every global
   mutation to exactly one logical coordinator; prohibit edge self-promotion,
   edge-to-edge transit, state merge, and guessed partition outcomes.
   - After: `S07-002`.
@@ -1881,7 +1881,7 @@ partitions, and recovery.
   - Invariants: `FED-01`, `FED-02`, `OPS-04`.
   - Evidence: topology, partition, coordinator loss/restart, role-conflict, and no-merge model tests.
 
-- [ ] `S07-004` **Implement origin lifecycle and fencing.** Maintain live
+- [x] `S07-004` **Implement origin lifecycle and fencing.** Maintain live
   origin incarnations, contiguous operation sequences, expiry, deletion
   tombstones, recovery-epoch changes, and permanent fencing of earlier states.
   - After: `S07-002`, `S07-003`.
@@ -1890,7 +1890,7 @@ partitions, and recovery.
   - Invariants: `FED-03`, `FED-04`, `FED-09`, `FED-10`.
   - Evidence: duplicate/gap/conflict, incarnation replacement, expiry boundary, tombstone, restart, and replay tests.
 
-- [ ] `S07-005` **Implement idempotent requests and durable results.** Validate
+- [x] `S07-005` **Implement idempotent requests and durable results.** Validate
   every operation arm, origin sequence, canonical request hash, target revision,
   replay key, result descriptor, and exact stored outcome before forwarding or
   replaying it.
@@ -1900,7 +1900,7 @@ partitions, and recovery.
   - Invariants: `FED-03`, `FED-04`, `FED-12`, `DUR-01`.
   - Evidence: every opcode/result arm, exact retry, conflicting reuse, gap, crash, descriptor mismatch, and original-sink test.
 
-- [ ] `S07-006` **Implement least-information events and projections.** Derive
+- [x] `S07-006` **Implement least-information events and projections.** Derive
   target-edge records at one committed revision, include only authorized data,
   durably erase it when authorization ends, and never project addresses,
   secrets, auth state, or unrelated channels.
@@ -1910,7 +1910,7 @@ partitions, and recovery.
   - Invariants: `PRV-02`, `FED-05`, `FED-07`.
   - Evidence: multi-edge projection diffs, grant/revoke, secret-channel, deletion-before-ACK, and forbidden-field canaries.
 
-- [ ] `S07-007` **Implement durable event ACKs and completion coverage.** ACK
+- [x] `S07-007` **Implement durable event ACKs and completion coverage.** ACK
   only in the same transaction that applies an event and advances its cursor;
   render a committed result only after its completion is durably covered.
   - After: `S07-005`, `S07-006`.
@@ -1919,7 +1919,7 @@ partitions, and recovery.
   - Invariants: `FED-05`, `FED-12`, `DUR-01`, `DUR-02`.
   - Evidence: result-first/completion-first, lost ACK, duplicate, crash at each boundary, and successor-snapshot coverage tests.
 
-- [ ] `S07-008` **Implement bounded federation object transport.** Validate
+- [x] `S07-008` **Implement bounded federation object transport.** Validate
   direction, authenticated prefix, descriptor, carrier, length, object hash,
   fragment order/count, reassembly budget, and typed payload before dispatch.
   - After: `S07-001`, `S07-005`.
@@ -1928,7 +1928,7 @@ partitions, and recovery.
   - Invariants: `TRN-04`, `TRN-05`, `FED-08`, `CON-05`.
   - Evidence: fragment flood, collision, direction/prefix/descriptor/hash/length/count mismatch, timeout, and budget tests.
 
-- [ ] `S07-009` **Implement snapshots and resume.** Validate immutable snapshot
+- [x] `S07-009` **Implement snapshots and resume.** Validate immutable snapshot
   count, order, IDs, digest, cut, cross-references, pagination, pending state,
   replay, ACTIVE authorization, atomic swap, and old-generation quarantine.
   - After: `S07-006` through `S07-008`.
@@ -1937,7 +1937,7 @@ partitions, and recovery.
   - Invariants: `FED-05`, `FED-06`, `FED-07`, `FED-10`.
   - Evidence: empty/one/maximum pages, reorder/duplicate/missing/cross-reference failures, crash, stale ACTIVE, and atomic-swap tests.
 
-- [ ] `S07-010` **Implement partition, keepalive, and outbox recovery.** Detect
+- [x] `S07-010` **Implement partition, keepalive, and outbox recovery.** Detect
   silent peers, apply one nonextendable origin grace interval, fence a full
   durable outbox into snapshot recovery, coalesce only safe notifications, and
   never drop durable state.
@@ -1947,7 +1947,7 @@ partitions, and recovery.
   - Invariants: `FED-01`, `FED-09`, `CON-02`, `OPS-04`.
   - Evidence: silent/lost/slow peer, grace boundaries, full outbox, dropped notification, restart, and resynchronization tests.
 
-- [ ] `S07-011` **Implement bounded paged directory queries.** Retain one
+- [x] `S07-011` **Implement bounded paged directory queries.** Retain one
   immutable snapshot and one session/account/query/page-bound cursor slot;
   atomically replace it on continuation and return only `QUERY_EXPIRED` for
   invalid, consumed, restarted, or mismatched cursors.
@@ -1957,7 +1957,7 @@ partitions, and recovery.
   - Invariants: `FED-13`, `PRV-02`, `STA-10`.
   - Evidence: page size/cut, expiry, consume, restart, wrong binding, mutation between pages, and no-splice tests.
 
-- [ ] `S07-012` **Extend the reference model and fault simulator.** Model
+- [x] `S07-012` **Extend the reference model and fault simulator.** Model
   multiple edges, origins, requests, results, events, snapshots, ACKs,
   partitions, recovery, storage failures, and privacy projections deterministically.
   - After: `S07-003` through `S07-011`.
@@ -1966,7 +1966,7 @@ partitions, and recovery.
   - Invariants: `FED-*`, applicable `PRV-*`, `DUR-*`, `CON-*`.
   - Evidence: bounded formal model, generated fault schedules, model/implementation equality, and exact replay convergence.
 
-- [ ] `S07-013` **Complete federation privacy and interoperability tests.**
+- [x] `S07-013` **Complete federation privacy and interoperability tests.**
   Exercise all wire arms, legacy-client-facing results, least-information
   projections, reconnect/resume, resource ceilings, and server incarnation
   changes across real multi-process nodes.
@@ -1976,7 +1976,7 @@ partitions, and recovery.
   - Invariants: `FED-*`, `PRV-*`, `TRN-*`, `DUR-*`.
   - Evidence: multi-edge test matrix, packet/log/database canaries, capacity limits, and pinned transcript outputs.
 
-- [ ] `S07-900` **Pass the Stage 07 federated-v1 gate.** Coordinator and edges
+- [x] `S07-900` **Pass the Stage 07 federated-v1 gate.** Coordinator and edges
   must converge safely across duplicates, gaps, crashes, partitions, snapshots,
   and recovery without leaking unauthorized projected state.
   - After: `S07-001` through `S07-013`.
