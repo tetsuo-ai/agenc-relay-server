@@ -243,7 +243,7 @@ fn mode_letter_consumes_parameter(
     }
 }
 
-fn mode_change_for(
+pub(crate) fn mode_change_for(
     domain: &DomainState,
     channel: &ChannelNameValue,
     operation: ModeOperation,

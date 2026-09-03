@@ -50,6 +50,13 @@ pub use objects::{
     projection_schema_name, result_kind_permitted, result_kind_registry_name, result_mapping_value,
     result_schema_name, snapshot_digest,
 };
+/// Field accessors and builders over validated schema objects.
+pub mod access {
+    pub use crate::objects::{
+        expect_schema, field, fixed, opaque, opaque_field, optional_fixed, projection_union,
+        structure, text, unsigned, unsigned_u16, unsigned_u32, vector,
+    };
+}
 pub use schema::{
     FieldDescriptor, FieldKind, LengthWidth, SCHEMA_REGISTRY, SchemaDescriptor, schema_by_name,
 };

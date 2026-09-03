@@ -65,6 +65,8 @@ pub enum TimerKind {
     SecretChannelFloor,
     /// The fixed 30-second pre-commit command deadline (spec line 2624).
     CommandDeadline,
+    /// The fixed origin grace interval after a federation link is lost.
+    FederationGrace,
 }
 
 /// Typed identity a timer entry names; never a protocol string.

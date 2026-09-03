@@ -1068,9 +1068,11 @@ fn render_message_route(
 ) -> Result<(), RuntimeError> {
     let mut groups: BTreeMap<u8, Vec<UserId>> = BTreeMap::new();
     for user_id in users {
-        let capabilities = builder
-            .capabilities(*user_id)
-            .ok_or(RuntimeError::InvalidValue)?;
+        // A recipient homed on another server has no local capabilities; its
+        // edge renders the delivery from the projected event instead.
+        let Some(capabilities) = builder.capabilities(*user_id) else {
+            continue;
+        };
         let key = message_capability_key(capabilities);
         if batch.kind() == MessageKind::Tagmsg && key & 1 == 0 {
             continue;

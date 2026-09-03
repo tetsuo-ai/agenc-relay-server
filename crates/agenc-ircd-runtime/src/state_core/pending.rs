@@ -18,6 +18,7 @@ use crate::state_core::durable::{
     AccountServiceDurableWrite, EntityId, RetainedProjection, touched_entities,
 };
 use crate::state_core::fanout::FanoutReservation;
+use crate::state_core::projector::PendingProjection;
 
 /// Plans one batch may gather (spec line 4152).
 pub const MAX_BATCH_PLANS: usize = 256;
@@ -88,6 +89,7 @@ pub(super) struct StagedPlan {
     origin: Option<StagedOrigin>,
     response_count_increment: u64,
     account_service_writes: Vec<AccountServiceDurableWrite>,
+    projection: Option<PendingProjection>,
 }
 
 impl StagedPlan {
@@ -106,7 +108,20 @@ impl StagedPlan {
             origin,
             response_count_increment,
             account_service_writes,
+            projection: None,
         }
+    }
+
+    /// Attaches the federation projection reserved with this plan.
+    #[must_use]
+    pub(super) fn with_projection(mut self, projection: Option<PendingProjection>) -> Self {
+        self.projection = projection;
+        self
+    }
+
+    /// Moves the reserved projection out at the durable boundary.
+    pub(super) fn take_projection(&mut self) -> Option<PendingProjection> {
+        self.projection.take()
     }
 
     /// Borrows the domain plan.

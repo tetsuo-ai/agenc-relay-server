@@ -29,6 +29,7 @@ use crate::account_service::{
 };
 use crate::admission::{BucketDemand, BucketKey, BucketKind};
 use crate::connection::sink::ConnectionGeneration;
+use crate::federation::coordinator::FederationCoordinator;
 use crate::observe::metrics::ResultClass;
 use crate::purpose::ListenerPurpose;
 use crate::state_core::fanout::FanoutRequest;
@@ -131,6 +132,7 @@ pub struct RegistrationRouter {
     pending_registrations: BTreeMap<ConnectionGeneration, PendingRegistration>,
     pending_closures: Vec<PendingClosure>,
     pending_observations: BTreeMap<(ConnectionGeneration, u64), CommandObservation>,
+    federation: Option<FederationCoordinator>,
 }
 
 struct ClientCapabilityProfiles {
@@ -208,7 +210,22 @@ impl RegistrationRouter {
             pending_registrations: BTreeMap::new(),
             pending_closures: Vec::new(),
             pending_observations: BTreeMap::new(),
+            federation: None,
         })
+    }
+
+    /// Attaches the coordinator role so federated edges are served through
+    /// this router's safe points.
+    #[must_use]
+    pub fn with_federation(mut self, coordinator: FederationCoordinator) -> Self {
+        self.federation = Some(coordinator);
+        self
+    }
+
+    /// Borrows the coordinator role when attached.
+    #[must_use]
+    pub fn federation(&self) -> Option<&FederationCoordinator> {
+        self.federation.as_ref()
     }
 
     fn access_policy(&self) -> AccessTokenPolicy {
@@ -1595,6 +1612,19 @@ fn registered_command_demand(user_id: UserId) -> Result<BucketDemand, RuntimeErr
 impl CommandRouter for RegistrationRouter {
     fn startup(&mut self, context: &mut StateCoreContext) {
         self.accounts.startup(context);
+        if let Some(federation) = self.federation.as_mut() {
+            federation.startup(context);
+        }
+    }
+
+    fn federation_inbound(
+        &mut self,
+        context: &mut StateCoreContext,
+        message: crate::federation::FederationInbound,
+    ) {
+        if let Some(federation) = self.federation.as_mut() {
+            federation.inbound(context, message);
+        }
     }
 
     fn route(
@@ -1712,7 +1742,10 @@ impl CommandRouter for RegistrationRouter {
     }
 
     fn reload_ready(&self) -> bool {
-        self.pending_registrations.is_empty()
+        self.federation
+            .as_ref()
+            .is_none_or(FederationCoordinator::reload_ready)
+            && self.pending_registrations.is_empty()
             && self.pending_closures.is_empty()
             && self.pending_observations.is_empty()
             && self
@@ -1728,6 +1761,9 @@ impl CommandRouter for RegistrationRouter {
         let completions = self.accounts.batch_applied(context);
         self.apply_account_completions(context, completions);
         self.retry_session_closes(context);
+        if let Some(federation) = self.federation.as_mut() {
+            federation.batch_applied(context);
+        }
     }
 
     fn crypto_completed(
@@ -1740,6 +1776,14 @@ impl CommandRouter for RegistrationRouter {
             self.apply_account_completions(context, completions);
             return;
         }
+        if let Some(federation) = self
+            .federation
+            .as_mut()
+            .filter(|federation| federation.owns_crypto_job(message.job_id))
+        {
+            federation.crypto_completed(context, message);
+            return;
+        }
         if let Err((generation, _error)) = self.commands.crypto_completed(context, message) {
             close_transport(context, generation);
         }
@@ -1750,6 +1794,14 @@ impl CommandRouter for RegistrationRouter {
         context: &mut StateCoreContext,
         message: crate::bridge::StorageReadCompletionMessage,
     ) {
+        if let Some(federation) = self
+            .federation
+            .as_mut()
+            .filter(|federation| federation.owns_storage_read(message.read_id))
+        {
+            federation.storage_read_completed(context, message);
+            return;
+        }
         let completions = self.accounts.storage_read_completed(context, message);
         self.apply_account_completions(context, completions);
     }
@@ -1760,6 +1812,9 @@ impl CommandRouter for RegistrationRouter {
         origin: Option<crate::state_core::StagedOrigin>,
         _error: agenc_ircd_storage::StorageError,
     ) {
+        if let Some(federation) = self.federation.as_mut() {
+            federation.batch_rejected(context);
+        }
         let generation = origin.as_ref().map(StagedOrigin::generation);
         if generation
             .is_some_and(|generation| self.reject_pending_registration(context, generation))
@@ -1785,6 +1840,11 @@ impl CommandRouter for RegistrationRouter {
     }
 
     fn timer_fired(&mut self, context: &mut StateCoreContext, entry: TimerEntry) {
+        if let Some(federation) = self.federation.as_mut()
+            && federation.timer_fired(context, entry)
+        {
+            return;
+        }
         let (handled, completions) = self.accounts.timer_fired(context, entry);
         self.apply_account_completions(context, completions);
         if handled {
@@ -1914,7 +1974,7 @@ fn capability_hash(names: &[String]) -> Result<[u8; 32], RuntimeError> {
         .map_err(|_| RuntimeError::InvalidValue)
 }
 
-fn cloak_from_random(random: &[u8]) -> Result<PublicCloak, RuntimeError> {
+pub(crate) fn cloak_from_random(random: &[u8]) -> Result<PublicCloak, RuntimeError> {
     if random.len() != 26 {
         return Err(RuntimeError::InvalidValue);
     }

@@ -7,7 +7,11 @@
 //! through one bounded channel and takes rendered lines back through another.
 //! Nothing here executes protocol state: that is `StateCore`'s job.
 
+// agenc-review: allow owner=runtime reviewed=2026-09-02 reason=the decode half of the shared codec is consumed by the edge router slice of this stage and stays crate-private until then
 pub mod certificate;
+#[allow(dead_code)]
+pub(crate) mod codec;
+pub mod coordinator;
 pub mod dial;
 pub mod hello;
 pub mod line;
@@ -379,7 +383,12 @@ impl IngressCharge {
 /// One item a link delivers to the state owner.
 pub enum LinkEvent {
     /// The hello completed and the link is authenticated.
-    Established(LinkSession),
+    Established {
+        /// The authenticated link identity.
+        session: LinkSession,
+        /// The bounded outbound queue of the link writer.
+        handle: crate::federation::link::LinkHandle,
+    },
     /// A complete control frame.
     Frame(FederationFrame),
     /// A complete reassembled object with its carrier descriptor.

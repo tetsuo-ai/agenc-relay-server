@@ -12,7 +12,7 @@ mod domain_records;
 mod engine;
 mod error;
 mod fault;
-mod federation_records;
+pub mod federation_records;
 mod initialize;
 mod integrity;
 mod login_index;

@@ -1,13 +1,13 @@
 //! Coordinator-side derivation of least-information events and standing
 //! projection deltas for every target edge (spec 20.6, 20.8, B.4, B.5).
 //!
-//! The derivation is a pure function of the pre-image captured before apply,
-//! the post-apply state, the apply receipt, and the coordinator's standing
-//! index of what each edge already holds. It emits per-edge event copies in
-//! the Section-20.6 order and the exact standing upserts and removals the
-//! storage transaction must carry. Nothing here allocates identities, encodes
-//! bytes, or touches a socket.
+//! The derivation runs before the storage commit, because the outbox rows
+//! it produces belong to the same transaction as the mutation. It therefore
+//! never looks at an applied state: it reads the committed pre-state and
+//! overlays the plan's own durable after-images on top of it. Nothing here
+//! allocates identities, encodes bytes, or touches a socket.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use agenc_ircd_types::{
@@ -21,9 +21,9 @@ use crate::federation::record::{
     SessionEventView, SessionHideKind, SessionRecord, SourceView,
 };
 use crate::{
-    ApplyReceipt, ChannelScope, ChannelState, DomainError, DomainEvent, DomainState,
-    DurableAccount, DurableChannel, DurableListEntry, DurableSession, MessageKind, NicknameValue,
-    PersistencePolicy, Principal, ResolvedMessageTarget, Role, SessionState, Visibility,
+    DomainError, DomainEvent, DomainState, DurableAccount, DurableChannel, DurableListEntry,
+    DurableSession, DurableWrite, MessageKind, MutationPlan, NicknameValue, Principal,
+    ResolvedMessageTarget, Role, Visibility,
 };
 
 /// Simple-mode bit for `i`.
@@ -51,7 +51,7 @@ const MODE_CODE_PRIVATE: u16 = 9;
 const MODE_CODE_SECRET: u16 = 10;
 const MODE_CODE_TOPIC_PROTECTED: u16 = 11;
 
-/// Runtime-supplied intent that the receipt alone cannot express.
+/// Runtime-supplied intent that the plan alone cannot express.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MutationContext {
     /// The acting user for topic, mode, kick, invite, and recompute events.
@@ -68,102 +68,6 @@ pub struct MutationContext {
     pub client_tags: Vec<(String, String)>,
     /// The acceptance time of a message in UTC milliseconds.
     pub received_unix_milliseconds: u64,
-}
-
-/// Entities captured before apply so removals can still be projected.
-#[derive(Default)]
-pub struct PreImage {
-    sessions: BTreeMap<UserId, DurableSession>,
-    channels: BTreeMap<ChannelInstanceId, DurableChannel>,
-    accounts: BTreeMap<AccountId, DurableAccount>,
-    monitors: BTreeMap<UserId, (ServerId, Vec<NicknameValue>)>,
-}
-
-impl PreImage {
-    /// Captures every entity a plan's events name, plus the channels and
-    /// account of every named session, from the state before apply.
-    pub fn capture(state: &DomainState, events: &[DomainEvent]) -> Self {
-        let mut image = Self::default();
-        for event in events {
-            match event {
-                DomainEvent::SessionOpened(user)
-                | DomainEvent::SessionAuthorityChanged(user)
-                | DomainEvent::SessionHidden(user)
-                | DomainEvent::NicknameChanged(user)
-                | DomainEvent::DisplayNameChanged(user)
-                | DomainEvent::AwayChanged(user)
-                | DomainEvent::MessageAccepted(_, user) => image.capture_session(state, *user),
-                DomainEvent::Joined(channel, user) | DomainEvent::Parted(channel, user) => {
-                    image.capture_session(state, *user);
-                    image.capture_channel(state, *channel);
-                }
-                DomainEvent::ChannelCreated(channel)
-                | DomainEvent::ChannelDestroyed(channel)
-                | DomainEvent::TopicChanged(channel, _)
-                | DomainEvent::ChannelModesChanged(channel)
-                | DomainEvent::InviteCreated(channel, _)
-                | DomainEvent::InviteExpired(channel, _)
-                | DomainEvent::ChannelPolicyChanged(channel)
-                | DomainEvent::E2eeRemovalPending(channel, _) => {
-                    image.capture_channel(state, *channel);
-                }
-                DomainEvent::ChannelMembershipsRecomputed(channel, account) => {
-                    image.capture_channel(state, *channel);
-                    image.capture_account(state, *account);
-                }
-                DomainEvent::AccountUpdated(account)
-                | DomainEvent::AccountDeleted(account)
-                | DomainEvent::AccountCredentialReplaced(account) => {
-                    image.capture_account(state, *account);
-                }
-                DomainEvent::AccountCreated(_)
-                | DomainEvent::AccountDeletionChallengeStarted(_)
-                | DomainEvent::AccountDeletionConfirmationRejected(_)
-                | DomainEvent::SanctionRecorded(_) => {}
-            }
-        }
-        for session in state.sessions.values() {
-            let monitored: Vec<NicknameValue> =
-                session.monitored_nicknames.iter().cloned().collect();
-            if !monitored.is_empty() {
-                image
-                    .monitors
-                    .insert(session.user_id, (session.home_server_id, monitored));
-            }
-        }
-        image
-    }
-
-    fn capture_session(&mut self, state: &DomainState, user_id: UserId) {
-        let Some(session) = state.durable_session(user_id) else {
-            return;
-        };
-        for channel_id in &session.joined_channels {
-            self.capture_channel(state, *channel_id);
-        }
-        if let Some(account_id) = session.account_id {
-            self.capture_account(state, account_id);
-        }
-        self.sessions.insert(user_id, session);
-    }
-
-    fn capture_channel(&mut self, state: &DomainState, channel_id: ChannelInstanceId) {
-        if self.channels.contains_key(&channel_id) {
-            return;
-        }
-        if let Some(channel) = state.durable_channel(channel_id) {
-            self.channels.insert(channel_id, channel);
-        }
-    }
-
-    fn capture_account(&mut self, state: &DomainState, account_id: AccountId) {
-        if self.accounts.contains_key(&account_id) {
-            return;
-        }
-        if let Some(account) = state.durable_account(account_id) {
-            self.accounts.insert(account_id, account);
-        }
-    }
 }
 
 /// What one edge currently holds, by key.
@@ -204,6 +108,12 @@ impl EdgeStanding {
     #[must_use]
     pub fn holds_account(&self, account_id: AccountId) -> bool {
         self.accounts.contains(&account_id)
+    }
+
+    /// Reports whether the edge holds the session projection.
+    #[must_use]
+    pub fn holds_session(&self, user_id: UserId) -> bool {
+        self.sessions.contains(&user_id)
     }
 
     /// Iterates every standing key in snapshot order.
@@ -405,26 +315,29 @@ impl CoordinatorProjection {
         }
     }
 
-    /// Derives every event copy and standing delta for one applied mutation.
+    /// Derives every event copy and standing delta for one plan that has
+    /// been prepared against `base` but not yet applied.
     pub fn derive(
         &self,
-        pre: &PreImage,
-        post: &DomainState,
-        receipt: &ApplyReceipt,
+        base: &DomainState,
+        plan: &MutationPlan,
         context: &MutationContext,
     ) -> Result<MutationProjection, DomainError> {
+        if plan.expected_revision() != base.revision() {
+            return Err(DomainError::StaleRevision);
+        }
+        let view = Overlay::new(base, plan);
         let mut derivation = Derivation {
             index: self,
-            pre,
-            post,
-            receipt,
+            view,
+            plan,
             context,
             emissions: Vec::new(),
             touched_channels: BTreeSet::new(),
             touched_users: BTreeSet::new(),
             touched_accounts: BTreeSet::new(),
         };
-        for (position, event) in receipt.events().iter().enumerate() {
+        for (position, event) in plan.events().iter().enumerate() {
             let target_index = u16::try_from(position).map_err(|_| DomainError::LimitExceeded)?;
             derivation.project_event(target_index, event)?;
         }
@@ -432,11 +345,130 @@ impl CoordinatorProjection {
     }
 }
 
+/// The committed pre-state with the plan's after-images laid over it.
+struct Overlay<'a> {
+    base: &'a DomainState,
+    sessions: BTreeMap<UserId, Option<DurableSession>>,
+    channels: BTreeMap<ChannelInstanceId, Option<DurableChannel>>,
+    accounts: BTreeMap<AccountId, Option<DurableAccount>>,
+}
+
+impl<'a> Overlay<'a> {
+    fn new(base: &'a DomainState, plan: &MutationPlan) -> Self {
+        let mut overlay = Self {
+            base,
+            sessions: BTreeMap::new(),
+            channels: BTreeMap::new(),
+            accounts: BTreeMap::new(),
+        };
+        for write in plan.durable_writes() {
+            overlay.lay(write);
+        }
+        overlay
+    }
+
+    fn lay(&mut self, write: &DurableWrite) {
+        match write {
+            DurableWrite::PutSession(session) => {
+                self.sessions.insert(session.user_id, Some(session.clone()));
+            }
+            DurableWrite::TombstoneSession(session_id) => {
+                if let Some(user_id) = self.base.session_ids.get(session_id) {
+                    self.sessions.insert(*user_id, None);
+                }
+            }
+            DurableWrite::PutChannel(channel) => {
+                self.channels
+                    .insert(channel.channel_id, Some(channel.clone()));
+            }
+            DurableWrite::TombstoneChannel { channel_id, .. } => {
+                self.channels.insert(*channel_id, None);
+            }
+            DurableWrite::PutAccount(account) => {
+                self.accounts
+                    .insert(account.account_id, Some(account.clone()));
+            }
+            DurableWrite::TombstoneAccount(account_id) => {
+                self.accounts.insert(*account_id, None);
+            }
+            DurableWrite::AppendSanction(_) => {}
+        }
+    }
+
+    fn pre_session(&self, user_id: UserId) -> Option<DurableSession> {
+        self.base.durable_session(user_id)
+    }
+
+    fn post_session(&self, user_id: UserId) -> Option<Cow<'_, DurableSession>> {
+        match self.sessions.get(&user_id) {
+            Some(Some(session)) => Some(Cow::Borrowed(session)),
+            Some(None) => None,
+            None => self.base.durable_session(user_id).map(Cow::Owned),
+        }
+    }
+
+    fn post_sessions(&self) -> Vec<Cow<'_, DurableSession>> {
+        let mut sessions: Vec<Cow<'_, DurableSession>> = self
+            .base
+            .session_user_ids()
+            .filter(|user| !self.sessions.contains_key(user))
+            .filter_map(|user| self.base.durable_session(user).map(Cow::Owned))
+            .collect();
+        sessions.extend(self.sessions.values().flatten().map(Cow::Borrowed));
+        sessions
+    }
+
+    fn pre_channel(&self, channel_id: ChannelInstanceId) -> Option<DurableChannel> {
+        self.base.durable_channel(channel_id)
+    }
+
+    fn post_channel(&self, channel_id: ChannelInstanceId) -> Option<Cow<'_, DurableChannel>> {
+        match self.channels.get(&channel_id) {
+            Some(Some(channel)) => Some(Cow::Borrowed(channel)),
+            Some(None) => None,
+            None => self.base.durable_channel(channel_id).map(Cow::Owned),
+        }
+    }
+
+    fn post_channels(&self) -> Vec<Cow<'_, DurableChannel>> {
+        let mut channels: Vec<Cow<'_, DurableChannel>> = self
+            .base
+            .durable_channels()
+            .filter(|channel| !self.channels.contains_key(&channel.channel_id))
+            .map(Cow::Owned)
+            .collect();
+        channels.extend(self.channels.values().flatten().map(Cow::Borrowed));
+        channels
+    }
+
+    fn pre_account(&self, account_id: AccountId) -> Option<DurableAccount> {
+        self.base.durable_account(account_id)
+    }
+
+    fn post_account(&self, account_id: AccountId) -> Option<Cow<'_, DurableAccount>> {
+        match self.accounts.get(&account_id) {
+            Some(Some(account)) => Some(Cow::Borrowed(account)),
+            Some(None) => None,
+            None => self.base.durable_account(account_id).map(Cow::Owned),
+        }
+    }
+
+    /// Edges with a live session that monitors the nickname; MONITOR sets are
+    /// process-local, so the committed base state is authoritative.
+    fn monitor_edges(&self, nickname: &NicknameValue) -> BTreeSet<ServerId> {
+        self.base
+            .sessions
+            .values()
+            .filter(|session| session.monitored_nicknames.contains(nickname))
+            .map(|session| session.home_server_id)
+            .collect()
+    }
+}
+
 struct Derivation<'a> {
     index: &'a CoordinatorProjection,
-    pre: &'a PreImage,
-    post: &'a DomainState,
-    receipt: &'a ApplyReceipt,
+    view: Overlay<'a>,
+    plan: &'a MutationPlan,
     context: &'a MutationContext,
     emissions: Vec<Emission>,
     touched_channels: BTreeSet<ChannelInstanceId>,
@@ -446,7 +478,7 @@ struct Derivation<'a> {
 
 impl Derivation<'_> {
     fn resulting_revision(&self) -> Revision {
-        self.receipt.revision()
+        self.plan.resulting_revision()
     }
 
     fn emit(&mut self, target_index: u16, edge: ServerId, event: ProjectedEvent) {
@@ -460,40 +492,49 @@ impl Derivation<'_> {
         });
     }
 
-    fn post_session(&self, user_id: UserId) -> Option<&SessionState> {
-        self.post.sessions.get(&user_id)
-    }
-
     fn home_of(&self, user_id: UserId) -> Option<ServerId> {
-        self.post_session(user_id)
-            .map(SessionState::home_server_id)
+        self.view
+            .post_session(user_id)
+            .map(|session| session.home_server_id)
             .or_else(|| {
-                self.pre
-                    .sessions
-                    .get(&user_id)
+                self.view
+                    .pre_session(user_id)
                     .map(|session| session.home_server_id)
             })
     }
 
+    fn label_of(&self, account_id: Option<AccountId>) -> Option<crate::AccountLabelValue> {
+        account_id.and_then(|account| {
+            self.view
+                .post_account(account)
+                .and_then(|account| account.label.clone())
+        })
+    }
+
     fn source_view(&self, user_id: UserId) -> Option<SourceView> {
-        if let Some(session) = self.post_session(user_id) {
-            return Some(source_view_of(session, self.post));
-        }
-        let session = self.pre.sessions.get(&user_id)?;
+        let session = self
+            .view
+            .post_session(user_id)
+            .map(Cow::into_owned)
+            .or_else(|| self.view.pre_session(user_id))?;
+        let account_label = self.label_of(session.account_id).or_else(|| {
+            session
+                .account_id
+                .and_then(|account| self.view.pre_account(account))
+                .and_then(|account| account.label)
+        });
         Some(SourceView {
             user_id,
-            nickname: session.nickname.clone(),
+            nickname: session.nickname,
             public_cloak: session.public_cloak,
-            account_label: session
-                .account_id
-                .and_then(|account| self.pre.accounts.get(&account))
-                .and_then(|account| account.label.clone()),
+            account_label,
         })
     }
 
     fn session_record(&self, user_id: UserId) -> Option<SessionRecord> {
-        let session = self.post_session(user_id)?;
-        Some(session_record_of(session, self.post))
+        let session = self.view.post_session(user_id)?;
+        let label = self.label_of(session.account_id);
+        Some(session_record_from(&session, label))
     }
 
     fn event_view(&self, user_id: UserId, edge: ServerId) -> Option<SessionEventView> {
@@ -509,31 +550,9 @@ impl Derivation<'_> {
         })
     }
 
-    /// Edges with a session that currently monitors the nickname.
-    fn monitor_edges(&self, nickname: &NicknameValue) -> BTreeSet<ServerId> {
-        self.post
-            .sessions
-            .values()
-            .filter(|session| session.monitored_nicknames.contains(nickname))
-            .map(SessionState::home_server_id)
-            .collect()
-    }
-
     /// Edges with a local member in the channel after apply.
     fn member_edges(&self, channel_id: ChannelInstanceId) -> BTreeSet<ServerId> {
-        let Some(channel) = self.post.channels.get(&channel_id) else {
-            return BTreeSet::new();
-        };
-        channel
-            .memberships
-            .keys()
-            .filter_map(|user| self.home_of(*user))
-            .collect()
-    }
-
-    /// Edges with a local member in the channel before apply.
-    fn pre_member_edges(&self, channel_id: ChannelInstanceId) -> BTreeSet<ServerId> {
-        let Some(channel) = self.pre.channels.get(&channel_id) else {
+        let Some(channel) = self.view.post_channel(channel_id) else {
             return BTreeSet::new();
         };
         channel
@@ -543,15 +562,27 @@ impl Derivation<'_> {
             .collect()
     }
 
-    /// Edges sharing at least one channel with the user after apply, plus
-    /// those that shared one before apply when the user left.
+    /// Edges with a local member in the channel before apply.
+    fn pre_member_edges(&self, channel_id: ChannelInstanceId) -> BTreeSet<ServerId> {
+        let Some(channel) = self.view.pre_channel(channel_id) else {
+            return BTreeSet::new();
+        };
+        channel
+            .memberships
+            .iter()
+            .filter_map(|membership| self.home_of(membership.user_id))
+            .collect()
+    }
+
+    /// Edges sharing at least one channel with the user after apply, or
+    /// before apply when the user left.
     fn shared_edges(&self, user_id: UserId) -> BTreeSet<ServerId> {
         let mut edges = BTreeSet::new();
-        if let Some(session) = self.post_session(user_id) {
-            for channel_id in session.joined_channels() {
-                edges.extend(self.member_edges(channel_id));
+        if let Some(session) = self.view.post_session(user_id) {
+            for channel_id in &session.joined_channels {
+                edges.extend(self.member_edges(*channel_id));
             }
-        } else if let Some(session) = self.pre.sessions.get(&user_id) {
+        } else if let Some(session) = self.view.pre_session(user_id) {
             for channel_id in &session.joined_channels {
                 edges.extend(self.pre_member_edges(*channel_id));
             }
@@ -564,32 +595,29 @@ impl Derivation<'_> {
         match principal {
             Principal::Guest(user_id) => self.home_of(user_id).into_iter().collect(),
             Principal::Account(account_id) => self
-                .post
-                .sessions
-                .values()
+                .view
+                .post_sessions()
+                .iter()
                 .filter(|session| session.account_id == Some(account_id))
-                .map(SessionState::home_server_id)
+                .map(|session| session.home_server_id)
                 .collect(),
         }
     }
 
     fn entitled_after(&self, edge: ServerId, channel_id: ChannelInstanceId) -> bool {
-        let Some(channel) = self.post.channels.get(&channel_id) else {
+        let Some(channel) = self.view.post_channel(channel_id) else {
             return false;
         };
-        if !projects(channel) {
-            return false;
-        }
         if channel
             .memberships
-            .keys()
-            .any(|user| self.home_of(*user) == Some(edge))
+            .iter()
+            .any(|membership| self.home_of(membership.user_id) == Some(edge))
         {
             return true;
         }
         channel
             .invites
-            .values()
+            .iter()
             .any(|invite| self.hosting_edges(invite.target).contains(&edge))
     }
 
@@ -601,7 +629,9 @@ impl Derivation<'_> {
     }
 
     fn detail(&self, channel_id: ChannelInstanceId) -> Option<ChannelDetailRecord> {
-        self.post.channels.get(&channel_id).map(channel_detail_of)
+        self.view
+            .post_channel(channel_id)
+            .map(|channel| channel_detail_from(&channel))
     }
 
     fn actor_view(&self) -> ActorView {
@@ -633,7 +663,7 @@ impl Derivation<'_> {
             }
             DomainEvent::Joined(channel, user) => self.project_joined(index, *channel, *user),
             DomainEvent::Parted(channel, user) => {
-                let hidden = self.receipt.events().iter().any(
+                let hidden = self.plan.events().iter().any(
                     |other| matches!(other, DomainEvent::SessionHidden(hidden) if hidden == user),
                 );
                 if hidden {
@@ -698,7 +728,7 @@ impl Derivation<'_> {
         };
         let nickname = view.source.nickname.clone();
         self.emit(index, home, ProjectedEvent::SessionVisible(view));
-        for edge in self.monitor_edges(&nickname) {
+        for edge in self.view.monitor_edges(&nickname) {
             if edge == home {
                 continue;
             }
@@ -717,9 +747,8 @@ impl Derivation<'_> {
     ) -> Result<(), DomainError> {
         self.touched_users.insert(user_id);
         if let Some(previous) = self
-            .pre
-            .sessions
-            .get(&user_id)
+            .view
+            .pre_session(user_id)
             .and_then(|session| session.account_id)
         {
             self.touched_accounts.insert(previous);
@@ -737,8 +766,9 @@ impl Derivation<'_> {
     /// Emits the account projection to the home edge when it is new there.
     fn project_account_hosting(&mut self, index: u16, user_id: UserId, home: ServerId) {
         let Some(account_id) = self
+            .view
             .post_session(user_id)
-            .and_then(SessionState::account_id)
+            .and_then(|session| session.account_id)
         else {
             return;
         };
@@ -764,21 +794,24 @@ impl Derivation<'_> {
         user_id: UserId,
         home: ServerId,
     ) -> Result<(), DomainError> {
-        let principal = self.post_session(user_id).map(SessionState::principal);
-        let Some(principal) = principal else {
+        let Some(principal) = self
+            .view
+            .post_session(user_id)
+            .map(|session| principal_of(&session))
+        else {
             return Ok(());
         };
         let mut pending: Vec<(ChannelInstanceId, InviteId)> = self
-            .post
-            .channels
-            .values()
-            .filter(|channel| projects(channel))
+            .view
+            .post_channels()
+            .iter()
             .flat_map(|channel| {
                 channel
                     .invites
-                    .values()
+                    .iter()
                     .filter(|invite| invite.target == principal)
                     .map(|invite| (channel.channel_id, invite.invite_id))
+                    .collect::<Vec<_>>()
             })
             .collect();
         pending.sort_unstable();
@@ -806,7 +839,7 @@ impl Derivation<'_> {
         kind: SessionHideKind,
     ) -> Result<(), DomainError> {
         self.touched_users.insert(user_id);
-        let Some(pre) = self.pre.sessions.get(&user_id) else {
+        let Some(pre) = self.view.pre_session(user_id) else {
             return Ok(());
         };
         let home = pre.home_server_id;
@@ -820,7 +853,6 @@ impl Derivation<'_> {
         let departed: Vec<(ChannelInstanceId, Revision)> = pre
             .joined_channels
             .iter()
-            .filter(|channel_id| self.pre.channels.contains_key(channel_id))
             .map(|channel_id| (*channel_id, resulting))
             .collect();
         for (channel_id, _) in &departed {
@@ -845,7 +877,7 @@ impl Derivation<'_> {
                     .push((*channel_id, *revision));
             }
         }
-        for edge in self.monitor_edges(&source.nickname) {
+        for edge in self.view.monitor_edges(&source.nickname) {
             recipients.entry(edge).or_default();
         }
         for (edge, mut channels) in recipients {
@@ -888,16 +920,7 @@ impl Derivation<'_> {
             .invites
             .iter()
             .filter(|(channel_id, invite_id)| {
-                self.post
-                    .channels
-                    .get(channel_id)
-                    .and_then(|channel| channel.invites.get(invite_id))
-                    .is_some_and(|invite| invite.target == principal)
-                    || self.pre.channels.get(channel_id).is_some_and(|channel| {
-                        channel.invites.iter().any(|invite| {
-                            invite.invite_id == *invite_id && invite.target == principal
-                        })
-                    })
+                self.invite_targets(*channel_id, *invite_id, principal)
             })
             .copied()
             .collect();
@@ -917,6 +940,27 @@ impl Derivation<'_> {
         }
     }
 
+    /// Whether the invite, before or after apply, targets the principal.
+    fn invite_targets(
+        &self,
+        channel_id: ChannelInstanceId,
+        invite_id: InviteId,
+        principal: Principal,
+    ) -> bool {
+        let post = self.view.post_channel(channel_id).is_some_and(|channel| {
+            channel
+                .invites
+                .iter()
+                .any(|invite| invite.invite_id == invite_id && invite.target == principal)
+        });
+        post || self.view.pre_channel(channel_id).is_some_and(|channel| {
+            channel
+                .invites
+                .iter()
+                .any(|invite| invite.invite_id == invite_id && invite.target == principal)
+        })
+    }
+
     fn project_account_sessions_gone(
         &mut self,
         index: u16,
@@ -925,13 +969,15 @@ impl Derivation<'_> {
     ) -> Result<(), DomainError> {
         self.touched_accounts.insert(account_id);
         let gone: Vec<UserId> = self
-            .pre
-            .sessions
-            .iter()
-            .filter(|(user_id, session)| {
-                session.account_id == Some(account_id) && !self.post.sessions.contains_key(user_id)
+            .view
+            .base
+            .session_user_ids()
+            .filter(|user| {
+                self.view
+                    .pre_session(*user)
+                    .is_some_and(|session| session.account_id == Some(account_id))
+                    && self.view.post_session(*user).is_none()
             })
-            .map(|(user_id, _)| *user_id)
             .collect();
         for user_id in gone {
             self.project_session_hidden(index, user_id, kind)?;
@@ -942,10 +988,9 @@ impl Derivation<'_> {
     fn project_nickname_changed(&mut self, index: u16, user_id: UserId) -> Result<(), DomainError> {
         self.touched_users.insert(user_id);
         let Some(old) = self
-            .pre
-            .sessions
-            .get(&user_id)
-            .map(|session| session.nickname.clone())
+            .view
+            .pre_session(user_id)
+            .map(|session| session.nickname)
         else {
             return Ok(());
         };
@@ -953,14 +998,15 @@ impl Derivation<'_> {
             return Ok(());
         };
         let Some(new_nickname) = self
+            .view
             .post_session(user_id)
-            .map(|session| session.nickname().clone())
+            .map(|session| session.nickname.clone())
         else {
             return Ok(());
         };
         let mut edges = self.shared_edges(user_id);
-        edges.extend(self.monitor_edges(&old));
-        edges.extend(self.monitor_edges(&new_nickname));
+        edges.extend(self.view.monitor_edges(&old));
+        edges.extend(self.view.monitor_edges(&new_nickname));
         edges.insert(home);
         for edge in edges {
             if let Some(view) = self.event_view(user_id, edge) {
@@ -983,8 +1029,9 @@ impl Derivation<'_> {
             return Ok(());
         };
         let away = self
+            .view
             .post_session(user_id)
-            .and_then(|session| session.away().map(|text| text.as_str().to_owned()));
+            .and_then(|session| session.away.clone());
         let mut edges = self.shared_edges(user_id);
         edges.insert(home);
         for edge in edges {
@@ -1012,8 +1059,9 @@ impl Derivation<'_> {
             return Ok(());
         };
         let Some(display_name) = self
+            .view
             .post_session(user_id)
-            .map(|session| session.display_name().clone())
+            .map(|session| session.display_name.clone())
         else {
             return Ok(());
         };
@@ -1039,14 +1087,17 @@ impl Derivation<'_> {
         channel_id: ChannelInstanceId,
         user_id: UserId,
     ) -> Option<MembershipView> {
-        let channel = self.post.channels.get(&channel_id)?;
-        let membership = channel.memberships.get(&user_id)?;
+        let channel = self.view.post_channel(channel_id)?;
+        let membership = channel
+            .memberships
+            .iter()
+            .find(|membership| membership.user_id == user_id)?;
         let source = self.source_view(user_id)?;
         Some(MembershipView {
             membership: MembershipRecord {
                 channel_id,
                 user_id,
-                role: channel.effective_role(*membership),
+                role: membership.effective_role,
                 membership_revision: membership.membership_revision,
                 joined_at: membership.joined_at,
             },
@@ -1062,22 +1113,14 @@ impl Derivation<'_> {
     ) -> Result<(), DomainError> {
         self.touched_users.insert(user_id);
         self.touch_channel(channel_id);
-        let Some(channel) = self.post.channels.get(&channel_id) else {
-            return Ok(());
-        };
-        if !projects(channel) {
-            return Ok(());
-        }
         let Some(view) = self.membership_view(channel_id, user_id) else {
             return Ok(());
         };
-        let Some(session) = self.post_session(user_id) else {
+        let Some(session) = self.view.post_session(user_id).map(Cow::into_owned) else {
             return Ok(());
         };
-        let home = session.home_server_id();
-        let display_name = session.display_name().clone();
-        let session_revision = session.revision();
-        let principal = session.principal();
+        let home = session.home_server_id;
+        let principal = principal_of(&session);
         let mut edges = self.member_edges(channel_id);
         edges.insert(home);
         for edge in edges {
@@ -1086,28 +1129,29 @@ impl Derivation<'_> {
                 edge,
                 ProjectedEvent::MemberJoined {
                     view: view.clone(),
-                    home_session_revision: (edge == home).then_some(session_revision),
-                    display_name: display_name.clone(),
+                    home_session_revision: (edge == home).then_some(session.revision),
+                    display_name: session.display_name.clone(),
                 },
             );
         }
-        let consumed: Vec<InviteId> =
-            self.pre
-                .channels
-                .get(&channel_id)
-                .map(|pre| {
-                    pre.invites
-                        .iter()
-                        .filter(|invite| {
-                            invite.target == principal
-                                && !self.post.channels.get(&channel_id).is_some_and(|post| {
-                                    post.invites.contains_key(&invite.invite_id)
-                                })
-                        })
-                        .map(|invite| invite.invite_id)
-                        .collect()
-                })
-                .unwrap_or_default();
+        let consumed: Vec<InviteId> = self
+            .view
+            .pre_channel(channel_id)
+            .map(|pre| {
+                pre.invites
+                    .iter()
+                    .filter(|invite| {
+                        invite.target == principal
+                            && !self.view.post_channel(channel_id).is_some_and(|post| {
+                                post.invites
+                                    .iter()
+                                    .any(|current| current.invite_id == invite.invite_id)
+                            })
+                    })
+                    .map(|invite| invite.invite_id)
+                    .collect()
+            })
+            .unwrap_or_default();
         for invite_id in consumed {
             self.project_invite_removed(index, channel_id, invite_id, InviteRemovalKind::Consumed);
         }
@@ -1122,7 +1166,7 @@ impl Derivation<'_> {
     ) -> Result<(), DomainError> {
         self.touched_users.insert(user_id);
         self.touch_channel(channel_id);
-        if !self.pre.channels.contains_key(&channel_id) {
+        if self.view.pre_channel(channel_id).is_none() {
             return Ok(());
         }
         let Some(source) = self.source_view(user_id) else {
@@ -1131,7 +1175,10 @@ impl Derivation<'_> {
         let Some(home) = self.home_of(user_id) else {
             return Ok(());
         };
-        let home_revision = self.post_session(user_id).map(SessionState::revision);
+        let home_revision = self
+            .view
+            .post_session(user_id)
+            .map(|session| session.revision);
         let resulting = self.resulting_revision();
         let mut edges = self.member_edges(channel_id);
         edges.extend(self.pre_member_edges(channel_id));
@@ -1190,16 +1237,13 @@ impl Derivation<'_> {
         _message_id: MessageId,
     ) -> Result<(), DomainError> {
         self.touch_channel(channel_id);
-        let Some(channel) = self.post.channels.get(&channel_id) else {
+        let Some(channel) = self.view.post_channel(channel_id).map(Cow::into_owned) else {
             return Ok(());
         };
-        let topic = channel.topic.as_ref().map(|topic| {
-            (
-                topic.text.as_str().to_owned(),
-                topic.set_at,
-                topic.message_id,
-            )
-        });
+        let topic = channel
+            .topic
+            .as_ref()
+            .map(|topic| (topic.text.clone(), topic.set_at, topic.message_id));
         let Some(actor) = self
             .context
             .actor
@@ -1231,12 +1275,12 @@ impl Derivation<'_> {
     ) -> Result<(), DomainError> {
         self.touch_channel(channel_id);
         let (Some(pre), Some(post)) = (
-            self.pre.channels.get(&channel_id),
-            self.post.channels.get(&channel_id),
+            self.view.pre_channel(channel_id),
+            self.view.post_channel(channel_id).map(Cow::into_owned),
         ) else {
             return Ok(());
         };
-        let changes = self.mode_changes(pre, post)?;
+        let changes = self.mode_changes(&pre, &post)?;
         if changes.is_empty() {
             return Ok(());
         }
@@ -1260,46 +1304,33 @@ impl Derivation<'_> {
     fn mode_changes(
         &self,
         pre: &DurableChannel,
-        post: &ChannelState,
+        post: &DurableChannel,
     ) -> Result<Vec<ProjectedModeChange>, DomainError> {
         let mut changes = Vec::new();
-        self.list_mode_changes(pre, post, &mut changes)?;
+        self.diff_list(
+            post.channel_id,
+            MODE_CODE_BAN,
+            &pre.bans,
+            &post.bans,
+            &mut changes,
+        )?;
+        self.diff_list(
+            post.channel_id,
+            MODE_CODE_EXCEPTION,
+            &pre.exceptions,
+            &post.exceptions,
+            &mut changes,
+        )?;
+        self.diff_list(
+            post.channel_id,
+            MODE_CODE_INVITE_EXCEPTION,
+            &pre.invite_exceptions,
+            &post.invite_exceptions,
+            &mut changes,
+        )?;
         scalar_mode_changes(pre, post, &mut changes);
         self.prefix_mode_changes(pre, post, &mut changes);
         Ok(changes)
-    }
-
-    fn list_mode_changes(
-        &self,
-        pre: &DurableChannel,
-        post: &ChannelState,
-        changes: &mut Vec<ProjectedModeChange>,
-    ) -> Result<(), DomainError> {
-        let post_durable = DurableChannel::from_state(post);
-        let after = post_durable.as_ref();
-        let channel_id = post.channel_id;
-        let empty: &[DurableListEntry] = &[];
-        self.diff_list(
-            channel_id,
-            MODE_CODE_BAN,
-            &pre.bans,
-            after.map_or(empty, |channel| channel.bans.as_slice()),
-            changes,
-        )?;
-        self.diff_list(
-            channel_id,
-            MODE_CODE_EXCEPTION,
-            &pre.exceptions,
-            after.map_or(empty, |channel| channel.exceptions.as_slice()),
-            changes,
-        )?;
-        self.diff_list(
-            channel_id,
-            MODE_CODE_INVITE_EXCEPTION,
-            &pre.invite_exceptions,
-            after.map_or(empty, |channel| channel.invite_exceptions.as_slice()),
-            changes,
-        )
     }
 
     fn diff_list(
@@ -1333,22 +1364,25 @@ impl Derivation<'_> {
     fn prefix_mode_changes(
         &self,
         pre: &DurableChannel,
-        post: &ChannelState,
+        post: &DurableChannel,
         changes: &mut Vec<ProjectedModeChange>,
     ) {
         for membership in &pre.memberships {
-            let Some(after) = post.memberships.get(&membership.user_id) else {
+            let Some(after) = post
+                .memberships
+                .iter()
+                .find(|candidate| candidate.user_id == membership.user_id)
+            else {
                 continue;
             };
-            let after_role = after.role();
-            if after_role == membership.session_role {
+            if after.session_role == membership.session_role {
                 continue;
             }
             let Some(view) = self.membership_view(post.channel_id, membership.user_id) else {
                 continue;
             };
-            let (direction, code) = if after_role > membership.session_role {
-                (ModeDirection::Add, prefix_code(after_role))
+            let (direction, code) = if after.session_role > membership.session_role {
+                (ModeDirection::Add, prefix_code(after.session_role))
             } else {
                 (ModeDirection::Remove, prefix_code(membership.session_role))
             };
@@ -1371,11 +1405,11 @@ impl Derivation<'_> {
         let setter = match entry.setter {
             Principal::Guest(user_id) => self.source_view(user_id),
             Principal::Account(account_id) => self
-                .post
-                .sessions
-                .values()
+                .view
+                .post_sessions()
+                .iter()
                 .find(|session| session.account_id == Some(account_id))
-                .map(|session| source_view_of(session, self.post)),
+                .and_then(|session| self.source_view(session.user_id)),
         }
         .ok_or(DomainError::NotFound)?;
         Ok(ModeListEntryRecord {
@@ -1397,21 +1431,14 @@ impl Derivation<'_> {
     ) -> Result<(), DomainError> {
         self.touch_channel(channel_id);
         self.touched_accounts.insert(account_id);
-        let Some(channel) = self.post.channels.get(&channel_id) else {
+        let Some(channel) = self.view.post_channel(channel_id).map(Cow::into_owned) else {
             return Ok(());
         };
-        let affected: Vec<UserId> = channel
+        let memberships: Vec<MembershipView> = channel
             .memberships
-            .keys()
-            .copied()
-            .filter(|user| {
-                self.post_session(*user)
-                    .is_some_and(|session| session.account_id() == Some(account_id))
-            })
-            .collect();
-        let memberships: Vec<MembershipView> = affected
             .iter()
-            .filter_map(|user| self.membership_view(channel_id, *user))
+            .filter(|membership| membership.account_id == Some(account_id))
+            .filter_map(|membership| self.membership_view(channel_id, membership.user_id))
             .collect();
         if memberships.is_empty() {
             return Ok(());
@@ -1440,7 +1467,7 @@ impl Derivation<'_> {
         sender: UserId,
     ) -> Result<(), DomainError> {
         self.touched_users.insert(sender);
-        let Some(batch) = self.receipt.message_batch() else {
+        let Some(batch) = self.plan.message_batch() else {
             return Ok(());
         };
         let Some(route) = batch
@@ -1489,14 +1516,9 @@ impl Derivation<'_> {
     ) -> Result<Option<ResolvedDelivery>, DomainError> {
         match route.target() {
             ResolvedMessageTarget::Channel(channel_id) => {
-                let Some(channel) = self.post.channels.get(&channel_id) else {
+                let Some(channel) = self.view.post_channel(channel_id) else {
                     return Ok(None);
                 };
-                if !projects(channel) {
-                    return Ok(None);
-                }
-                let target_revision = channel.revision();
-                let sequence = self.resulting_revision().get();
                 let edges = route
                     .recipients()
                     .iter()
@@ -1504,8 +1526,8 @@ impl Derivation<'_> {
                     .collect();
                 Ok(Some(ResolvedDelivery {
                     target: DeliveryTarget::Channel(channel_id),
-                    target_revision,
-                    sequence,
+                    target_revision: channel.revision,
+                    sequence: self.resulting_revision().get(),
                     edges,
                 }))
             }
@@ -1529,17 +1551,20 @@ impl Derivation<'_> {
         invite_id: InviteId,
         with_projection: bool,
     ) -> Option<ProjectedEvent> {
-        let channel = self.post.channels.get(&channel_id)?;
-        let invite = channel.invites.get(&invite_id)?;
+        let channel = self.view.post_channel(channel_id)?;
+        let invite = channel
+            .invites
+            .iter()
+            .find(|invite| invite.invite_id == invite_id)?;
         let inviter = self.source_view(invite.inviter)?;
         let named_target_user = match invite.target {
             Principal::Guest(user_id) => Some(user_id),
             Principal::Account(account_id) => self.context.named_target.or_else(|| {
-                self.post
-                    .sessions
-                    .values()
+                self.view
+                    .post_sessions()
+                    .iter()
                     .find(|session| session.account_id == Some(account_id))
-                    .map(SessionState::user_id)
+                    .map(|session| session.user_id)
             }),
         }?;
         let named_target = self.source_view(named_target_user)?;
@@ -1568,13 +1593,13 @@ impl Derivation<'_> {
         invite_id: InviteId,
     ) -> Result<(), DomainError> {
         self.touch_channel(channel_id);
-        let Some(target) = self
-            .post
-            .channels
-            .get(&channel_id)
-            .and_then(|channel| channel.invites.get(&invite_id))
-            .map(|invite| invite.target)
-        else {
+        let Some(target) = self.view.post_channel(channel_id).and_then(|channel| {
+            channel
+                .invites
+                .iter()
+                .find(|invite| invite.invite_id == invite_id)
+                .map(|invite| invite.target)
+        }) else {
             return Ok(());
         };
         let target_edges = self.hosting_edges(target);
@@ -1624,11 +1649,11 @@ impl Derivation<'_> {
     }
 
     fn account_record(&self, account_id: AccountId) -> Option<AccountRecord> {
-        let account = self.post.accounts.get(&account_id)?;
+        let account = self.view.post_account(account_id)?;
         Some(AccountRecord {
             account_id,
-            account_session_generation: account.session_generation(),
-            account_revision: account.revision(),
+            account_session_generation: account.session_generation,
+            account_revision: account.revision,
         })
     }
 
@@ -1642,11 +1667,11 @@ impl Derivation<'_> {
             return Ok(());
         };
         let sessions: Vec<UserId> = self
-            .post
-            .sessions
-            .values()
+            .view
+            .post_sessions()
+            .iter()
             .filter(|session| session.account_id == Some(account_id))
-            .map(SessionState::user_id)
+            .map(|session| session.user_id)
             .collect();
         let hosting: BTreeSet<ServerId> = sessions
             .iter()
@@ -1656,15 +1681,13 @@ impl Derivation<'_> {
             self.emit(index, *edge, ProjectedEvent::AccountStateChanged(record));
         }
         let label_changed = self
-            .pre
-            .accounts
-            .get(&account_id)
-            .map(|account| account.label.clone())
+            .view
+            .pre_account(account_id)
+            .map(|account| account.label)
             != self
-                .post
-                .accounts
-                .get(&account_id)
-                .map(|account| account.label().cloned());
+                .view
+                .post_account(account_id)
+                .map(|account| account.label.clone());
         if !label_changed {
             return Ok(());
         }
@@ -1740,9 +1763,8 @@ impl Derivation<'_> {
         for user in &self.touched_users {
             edges.extend(self.home_of(*user));
             edges.extend(
-                self.pre
-                    .sessions
-                    .get(user)
+                self.view
+                    .pre_session(*user)
                     .map(|session| session.home_server_id),
             );
         }
@@ -1761,8 +1783,8 @@ impl Derivation<'_> {
         }
         for channel_id in &self.touched_channels {
             edges.extend(self.member_edges(*channel_id));
-            if let Some(channel) = self.post.channels.get(channel_id) {
-                for invite in channel.invites.values() {
+            if let Some(channel) = self.view.post_channel(*channel_id) {
+                for invite in &channel.invites {
                     edges.extend(self.hosting_edges(invite.target));
                 }
             }
@@ -1778,7 +1800,7 @@ impl Derivation<'_> {
         let mut edges: BTreeSet<ServerId> = self.index.edges.keys().copied().collect();
         edges.extend(self.touched_edges());
         let announced: BTreeSet<ChannelInstanceId> = self
-            .receipt
+            .plan
             .events()
             .iter()
             .filter_map(|event| match event {
@@ -1787,8 +1809,8 @@ impl Derivation<'_> {
             })
             .collect();
         for channel_id in channels {
-            let destroyed = self.pre.channels.contains_key(&channel_id)
-                && !self.post.channels.contains_key(&channel_id);
+            let destroyed = self.view.pre_channel(channel_id).is_some()
+                && self.view.post_channel(channel_id).is_none();
             if destroyed && !announced.contains(&channel_id) {
                 let index = self.last_index_for(channel_id);
                 self.project_channel_destroyed(index, channel_id);
@@ -1852,7 +1874,7 @@ impl Derivation<'_> {
     }
 
     /// Computes the standing upserts and removals for one edge from the
-    /// post-state restricted to touched entities.
+    /// overlay restricted to touched entities.
     fn standing_delta(&self, edge: ServerId) -> (Vec<ProjectionRecord>, Vec<ProjectionKey>) {
         let mut delta = StandingDelta::default();
         self.session_standing(edge, &mut delta);
@@ -1869,13 +1891,14 @@ impl Derivation<'_> {
     fn session_standing(&self, edge: ServerId, delta: &mut StandingDelta) {
         let standing = self.index.edges.get(&edge);
         for user_id in &self.touched_users {
-            let was_home = standing.is_some_and(|standing| standing.sessions.contains(user_id));
-            match self.post_session(*user_id) {
-                Some(session) if session.home_server_id() == edge => {
+            let was_home = standing.is_some_and(|standing| standing.holds_session(*user_id));
+            match self.view.post_session(*user_id) {
+                Some(session) if session.home_server_id == edge => {
+                    let label = self.label_of(session.account_id);
                     delta
                         .upserts
-                        .push(ProjectionRecord::Session(session_record_of(
-                            session, self.post,
+                        .push(ProjectionRecord::Session(session_record_from(
+                            &session, label,
                         )));
                 }
                 _ if was_home => delta.removals.push(ProjectionKey::session(*user_id)),
@@ -1911,10 +1934,15 @@ impl Derivation<'_> {
     ) {
         let standing = self.index.edges.get(&edge);
         let post_users: BTreeSet<UserId> = self
-            .post
-            .channels
-            .get(&channel_id)
-            .map(|channel| channel.memberships.keys().copied().collect())
+            .view
+            .post_channel(channel_id)
+            .map(|channel| {
+                channel
+                    .memberships
+                    .iter()
+                    .map(|membership| membership.user_id)
+                    .collect()
+            })
             .unwrap_or_default();
         let mut considered: BTreeSet<UserId> = self.touched_users.clone();
         if let Some(standing) = standing {
@@ -1977,12 +2005,12 @@ impl Derivation<'_> {
         edge: ServerId,
         channel_id: ChannelInstanceId,
     ) -> BTreeMap<InviteId, InviteRecord> {
-        let Some(channel) = self.post.channels.get(&channel_id) else {
+        let Some(channel) = self.view.post_channel(channel_id) else {
             return BTreeMap::new();
         };
         channel
             .invites
-            .values()
+            .iter()
             .filter(|invite| self.hosting_edges(invite.target).contains(&edge))
             .map(|invite| {
                 (
@@ -2045,7 +2073,7 @@ fn group_emissions(mut emissions: Vec<Emission>) -> BTreeMap<ServerId, EdgeDelta
 
 fn scalar_mode_changes(
     pre: &DurableChannel,
-    post: &ChannelState,
+    post: &DurableChannel,
     changes: &mut Vec<ProjectedModeChange>,
 ) {
     let key_before = pre.key_verifier.is_some();
@@ -2088,8 +2116,10 @@ const fn direction_of(set: bool) -> ModeDirection {
     }
 }
 
-fn projects(channel: &ChannelState) -> bool {
-    channel.scope == ChannelScope::Global || channel.persistence == PersistencePolicy::Registered
+fn principal_of(session: &DurableSession) -> Principal {
+    session
+        .account_id
+        .map_or(Principal::Guest(session.user_id), Principal::Account)
 }
 
 fn prefix_code(role: Role) -> Option<u16> {
@@ -2134,51 +2164,41 @@ pub const fn user_mode_bits(operator_notices: bool) -> u16 {
     }
 }
 
-fn source_view_of(session: &SessionState, state: &DomainState) -> SourceView {
-    SourceView {
-        user_id: session.user_id(),
-        nickname: session.nickname().clone(),
-        public_cloak: session.public_cloak(),
-        account_label: session
-            .account_id()
-            .and_then(|account| state.accounts.get(&account))
-            .and_then(|account| account.label().cloned()),
-    }
-}
-
-/// Builds the standing session projection of one live session.
+/// Builds the standing session projection of one persisted session.
 #[must_use]
-pub fn session_record_of(session: &SessionState, state: &DomainState) -> SessionRecord {
-    let source = source_view_of(session, state);
+pub fn session_record_from(
+    session: &DurableSession,
+    account_label: Option<crate::AccountLabelValue>,
+) -> SessionRecord {
     SessionRecord {
-        session_id: session.session_id(),
-        user_id: session.user_id(),
-        home_server_id: session.home_server_id(),
-        session_revision: session.revision(),
+        session_id: session.session_id,
+        user_id: session.user_id,
+        home_server_id: session.home_server_id,
+        session_revision: session.revision,
         account: session
-            .account_id()
-            .map(|account| (account, session.account_session_generation())),
-        nickname: source.nickname,
-        display_name: session.display_name().clone(),
-        public_cloak: source.public_cloak,
-        account_label: source.account_label,
-        user_mode_bits: user_mode_bits(session.operator_notices()),
-        away: session.away().map(|text| text.as_str().to_owned()),
+            .account_id
+            .map(|account| (account, session.account_session_generation)),
+        nickname: session.nickname.clone(),
+        display_name: session.display_name.clone(),
+        public_cloak: session.public_cloak,
+        account_label,
+        user_mode_bits: user_mode_bits(session.operator_notices),
+        away: session.away.clone(),
     }
 }
 
-/// Builds the standing channel detail of one channel.
+/// Builds the standing channel detail of one persisted channel.
 #[must_use]
-pub fn channel_detail_of(channel: &ChannelState) -> ChannelDetailRecord {
+pub fn channel_detail_from(channel: &DurableChannel) -> ChannelDetailRecord {
     ChannelDetailRecord {
-        channel_id: channel.channel_id(),
-        name: channel.name().clone(),
-        channel_revision: channel.revision(),
-        visibility: channel.visibility(),
-        content_policy: channel.content_policy(),
-        persistence: channel.persistence_policy(),
-        simple_mode_bits: simple_mode_bits(channel.modes(), channel.visibility()),
-        history: channel.history_policy(),
+        channel_id: channel.channel_id,
+        name: channel.name.clone(),
+        channel_revision: channel.revision,
+        visibility: channel.visibility,
+        content_policy: channel.content_policy,
+        persistence: channel.persistence,
+        simple_mode_bits: simple_mode_bits(channel.modes, channel.visibility),
+        history: channel.history,
         e2ee_route_binding: None,
     }
 }

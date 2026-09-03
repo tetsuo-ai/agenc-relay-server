@@ -49,6 +49,20 @@ impl SessionHideKind {
         }
     }
 
+    /// Maps a registered wire discriminant back to the kind.
+    #[must_use]
+    pub const fn from_wire(value: u16) -> Option<Self> {
+        match value {
+            1 => Some(Self::ClientQuit),
+            2 => Some(Self::TransportLost),
+            3 => Some(Self::OriginExpired),
+            4 => Some(Self::AccountDeleted),
+            5 => Some(Self::OperatorRemoved),
+            6 => Some(Self::SecurityFenced),
+            _ => None,
+        }
+    }
+
     /// Returns the registered generic reason text for a non-client kind.
     #[must_use]
     pub const fn generic_reason(self) -> &'static str {
@@ -85,6 +99,18 @@ impl InviteRemovalKind {
             Self::Expired => 2,
             Self::TargetGone => 3,
             Self::ProjectionHidden => 4,
+        }
+    }
+
+    /// Maps a registered wire discriminant back to the kind.
+    #[must_use]
+    pub const fn from_wire(value: u16) -> Option<Self> {
+        match value {
+            1 => Some(Self::Consumed),
+            2 => Some(Self::Expired),
+            3 => Some(Self::TargetGone),
+            4 => Some(Self::ProjectionHidden),
+            _ => None,
         }
     }
 }

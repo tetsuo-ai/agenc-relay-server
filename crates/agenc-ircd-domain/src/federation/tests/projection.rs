@@ -77,10 +77,9 @@ impl Harness {
         plan: crate::MutationPlan,
         context: &MutationContext,
     ) -> Result<MutationProjection, DomainError> {
-        let pre = PreImage::capture(&self.state, plan.events());
+        let projection = self.index.derive(&self.state, &plan, context)?;
         let prepared = self.state.prepare_mutation(plan)?;
         let receipt = self.state.apply_prepared(prepared)?;
-        let projection = self.index.derive(&pre, &self.state, &receipt, context)?;
         self.index.apply(&projection);
         for delta in &projection.edges {
             let replica = self

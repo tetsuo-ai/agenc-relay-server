@@ -368,7 +368,7 @@ pub(crate) fn account_service_config(
 }
 
 /// A channel-key verifier whose hash is the first salt byte repeated.
-struct TestChannelKeyVerifier;
+pub(crate) struct TestChannelKeyVerifier;
 
 impl ChannelKeyVerifier for TestChannelKeyVerifier {
     fn derive(
@@ -378,6 +378,29 @@ impl ChannelKeyVerifier for TestChannelKeyVerifier {
     ) -> Result<[u8; CHANNEL_KEY_HASH_BYTES], agenc_ircd_crypto::CryptoError> {
         Ok([salt[0]; CHANNEL_KEY_HASH_BYTES])
     }
+}
+
+/// The coordinator role over the fixture identity with generous outbox
+/// ceilings so tests exercise ordering rather than backpressure.
+fn federation_coordinator(
+    identity: &FixtureIdentity,
+    peers: Vec<crate::federation::PeerIdentity>,
+) -> TestResult<crate::federation::coordinator::FederationCoordinator> {
+    let verifier: Arc<dyn ChannelKeyVerifier> = Arc::new(TestChannelKeyVerifier);
+    let salt = [7; CHANNEL_KEY_SALT_BYTES];
+    let hash = verifier.derive(b"dummy", &salt)?;
+    Ok(crate::federation::coordinator::FederationCoordinator::new(
+        crate::federation::coordinator::CoordinatorConfig {
+            network_id: identity.network_id,
+            server_id: identity.server_id,
+            server_name: "server.example".to_owned(),
+            outbox_bytes_per_edge: 1 << 20,
+            outbox_objects_per_edge: 64,
+        },
+        peers,
+        verifier,
+        ChannelKeyVerifierRecord::new(salt, hash),
+    ))
 }
 
 /// The production registration router over the fixture identity with guests
@@ -419,7 +442,30 @@ impl StateCoreFixture {
         Self::build(entropy, true)
     }
 
+    /// Builds the fixture with the registration router acting as the
+    /// federation coordinator for `peers`, with the projector installed.
+    pub(crate) fn with_federation_coordinator(
+        entropy: Vec<u8>,
+        peers: Vec<crate::federation::PeerIdentity>,
+    ) -> TestResult<Self> {
+        let mut fixture = Self::build_with(entropy, true, Some(peers))?;
+        let network_id = fixture.identity.network_id;
+        let server_id = fixture.identity.server_id;
+        fixture.context_mut()?.install_federation_projector(
+            crate::state_core::projector::FederationProjector::new(network_id, server_id),
+        );
+        Ok(fixture)
+    }
+
     fn build(entropy: Vec<u8>, registration: bool) -> TestResult<Self> {
+        Self::build_with(entropy, registration, None)
+    }
+
+    fn build_with(
+        entropy: Vec<u8>,
+        registration: bool,
+        peers: Option<Vec<crate::federation::PeerIdentity>>,
+    ) -> TestResult<Self> {
         let identity = FixtureIdentity {
             network_id: NetworkId::from_bytes([31; 32]),
             server_id: ServerId::from_bytes([32; 16]),
@@ -433,10 +479,13 @@ impl StateCoreFixture {
         let key_state = LoginIndexKeyState::stable(1, login_key.key_id(identity.network_id))?;
         let qualification = initialize_test_storage(&identity, &directory, &opaque, &key_state)?;
         let mut owner = open_test_storage(&identity, &directory, &qualification)?;
-        let router: Box<dyn CommandRouter> = if registration {
-            Box::new(registration_router(&identity, &opaque, key_state)?)
-        } else {
-            Box::new(DefaultRouter)
+        let router: Box<dyn CommandRouter> = match (registration, peers) {
+            (true, Some(peers)) => Box::new(
+                registration_router(&identity, &opaque, key_state)?
+                    .with_federation(federation_coordinator(&identity, peers)?),
+            ),
+            (true, None) => Box::new(registration_router(&identity, &opaque, key_state)?),
+            (false, _) => Box::new(DefaultRouter),
         };
         let (state, storage_receivers, crypto_completions) =
             compose_test_state(&mut owner, entropy, router, registration)?;
@@ -562,6 +611,30 @@ pub(crate) fn seed_session(
         })?;
     apply_live_plan(context, plan)?;
     Ok(identity)
+}
+
+/// A session seed homed on a remote edge, for coordinator tests.
+pub(crate) fn remote_session_seed(
+    context: &mut StateCoreContext,
+    home: ServerId,
+    nickname: &str,
+) -> TestResult<agenc_ircd_domain::SessionSeed> {
+    let seed = home.as_bytes()[0];
+    Ok(agenc_ircd_domain::SessionSeed {
+        session_id: SessionId::from_bytes(agenc_ircd_testkit::bytes(seed)),
+        user_id: UserId::from_bytes(agenc_ircd_testkit::bytes(seed.wrapping_add(64))),
+        home_server_id: home,
+        account_id: None,
+        account_session_generation: agenc_ircd_testkit::generation(0)?,
+        generation: agenc_ircd_testkit::generation(1)?,
+        nickname: agenc_ircd_domain::NicknameValue::parse(nickname)?,
+        display_name: agenc_ircd_domain::DisplayNameValue::prepare(nickname)?,
+        public_cloak: agenc_ircd_testkit::deterministic_cloak(seed)?,
+        connection_nonce: [seed; 32],
+        negotiated_capability_hash: [seed.wrapping_add(1); 32],
+        created_at_utc: UtcSecond::from_unix_seconds(1_700_000_000 + u64::from(seed)),
+        revision: context.domain().revision(),
+    })
 }
 
 /// The bound-session view of a seeded identity.

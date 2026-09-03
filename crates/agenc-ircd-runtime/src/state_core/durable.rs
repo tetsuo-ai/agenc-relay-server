@@ -546,6 +546,10 @@ impl AccountServiceDurableWrite {
     }
 }
 
+/// The closed set of tables whose rows may ride a domain plan's batch as
+/// already encoded records: the account-service set and the coordinator's
+/// federation set (spec 20.5 and 20.6 require result, outbox, origin, and
+/// projection rows to commit with the mutation that produced them).
 const fn account_service_table(table: TableId) -> bool {
     matches!(
         table,
@@ -557,6 +561,10 @@ const fn account_service_table(table: TableId) -> bool {
             | TableId::Session
             | TableId::RequestResult
             | TableId::LoginIndexKeyState
+            | TableId::FederationPeer
+            | TableId::FederationOrigin
+            | TableId::EdgeOutbox
+            | TableId::EdgeProjection
     )
 }
 

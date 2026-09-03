@@ -1005,7 +1005,8 @@ fn registry_error(_: RegistryValueError) -> CodecError {
     CodecError::UnknownDiscriminant
 }
 
-fn opaque(bytes: &[u8]) -> Result<WireValue, CodecError> {
+/// Copies bytes into one opaque wire value without a peer-sized overshoot.
+pub fn opaque(bytes: &[u8]) -> Result<WireValue, CodecError> {
     let mut owned = Vec::new();
     owned
         .try_reserve_exact(bytes.len())
@@ -1014,14 +1015,16 @@ fn opaque(bytes: &[u8]) -> Result<WireValue, CodecError> {
     Ok(WireValue::Opaque(owned))
 }
 
-fn expect_schema(object: &SchemaObject, name: &str) -> Result<(), CodecError> {
+/// Requires the object to carry the named schema.
+pub fn expect_schema(object: &SchemaObject, name: &str) -> Result<(), CodecError> {
     if object.schema().name == name {
         return Ok(());
     }
     Err(CodecError::SchemaMismatch)
 }
 
-fn field<'a>(object: &'a SchemaObject, name: &str) -> Result<&'a WireValue, CodecError> {
+/// Borrows one named field of a validated object.
+pub fn field<'a>(object: &'a SchemaObject, name: &str) -> Result<&'a WireValue, CodecError> {
     object
         .schema()
         .fields
@@ -1031,32 +1034,64 @@ fn field<'a>(object: &'a SchemaObject, name: &str) -> Result<&'a WireValue, Code
         .ok_or(CodecError::SchemaMismatch)
 }
 
-fn opaque_field<'a>(object: &'a SchemaObject, name: &str) -> Result<&'a [u8], CodecError> {
+/// Borrows one named opaque field.
+pub fn opaque_field<'a>(object: &'a SchemaObject, name: &str) -> Result<&'a [u8], CodecError> {
     match field(object, name)? {
         WireValue::Opaque(bytes) => Ok(bytes),
         _ => Err(CodecError::TypeMismatch),
     }
 }
 
-fn structure<'a>(object: &'a SchemaObject, name: &str) -> Result<&'a SchemaObject, CodecError> {
+/// Borrows one named nested structure.
+pub fn structure<'a>(object: &'a SchemaObject, name: &str) -> Result<&'a SchemaObject, CodecError> {
     match field(object, name)? {
         WireValue::Structure(nested) => Ok(nested),
         _ => Err(CodecError::TypeMismatch),
     }
 }
 
-fn unsigned(object: &SchemaObject, name: &str) -> Result<u64, CodecError> {
+/// Borrows one named projection-union arm with its discriminant.
+pub fn projection_union<'a>(
+    object: &'a SchemaObject,
+    name: &str,
+) -> Result<(u16, &'a SchemaObject), CodecError> {
+    match field(object, name)? {
+        WireValue::ProjectionUnion {
+            discriminant,
+            value,
+        } => Ok((*discriminant, value)),
+        _ => Err(CodecError::TypeMismatch),
+    }
+}
+
+/// Borrows one named vector of nested structures.
+pub fn vector<'a>(object: &'a SchemaObject, name: &str) -> Result<&'a [SchemaObject], CodecError> {
+    match field(object, name)? {
+        WireValue::Vector(items) => Ok(items),
+        _ => Err(CodecError::TypeMismatch),
+    }
+}
+
+/// Reads one named unsigned or enumeration field.
+pub fn unsigned(object: &SchemaObject, name: &str) -> Result<u64, CodecError> {
     match field(object, name)? {
         WireValue::Unsigned(value) => Ok(*value),
         _ => Err(CodecError::TypeMismatch),
     }
 }
 
-fn unsigned_u16(object: &SchemaObject, name: &str) -> Result<u16, CodecError> {
+/// Reads one named unsigned field that must fit sixteen bits.
+pub fn unsigned_u16(object: &SchemaObject, name: &str) -> Result<u16, CodecError> {
     u16::try_from(unsigned(object, name)?).map_err(|_| CodecError::IntegerOutOfRange)
 }
 
-fn fixed<const LENGTH: usize>(
+/// Reads one named unsigned field that must fit thirty-two bits.
+pub fn unsigned_u32(object: &SchemaObject, name: &str) -> Result<u32, CodecError> {
+    u32::try_from(unsigned(object, name)?).map_err(|_| CodecError::IntegerOutOfRange)
+}
+
+/// Reads one named fixed-length opaque field.
+pub fn fixed<const LENGTH: usize>(
     object: &SchemaObject,
     name: &str,
 ) -> Result<[u8; LENGTH], CodecError> {
@@ -1065,7 +1100,8 @@ fn fixed<const LENGTH: usize>(
         .map_err(|_| CodecError::CrossReference)
 }
 
-fn optional_fixed<const LENGTH: usize>(
+/// Reads one named opaque field that is empty or exactly `LENGTH` bytes.
+pub fn optional_fixed<const LENGTH: usize>(
     object: &SchemaObject,
     name: &str,
 ) -> Result<Option<[u8; LENGTH]>, CodecError> {
@@ -1076,6 +1112,11 @@ fn optional_fixed<const LENGTH: usize>(
             .map(Some)
             .map_err(|_| CodecError::CrossReference),
     }
+}
+
+/// Reads one named opaque field as validated UTF-8 text.
+pub fn text<'a>(object: &'a SchemaObject, name: &str) -> Result<&'a str, CodecError> {
+    std::str::from_utf8(opaque_field(object, name)?).map_err(|_| CodecError::TypeMismatch)
 }
 
 #[cfg(test)]

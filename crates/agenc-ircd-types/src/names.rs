@@ -390,6 +390,18 @@ impl PublicCloak {
         })
     }
 
+    /// Rebuilds a cloak from already validated wire components.
+    pub fn from_components(
+        user_component: [u8; 10],
+        host_component: [u8; 16],
+    ) -> Result<Self, ValidationError> {
+        let user =
+            std::str::from_utf8(&user_component).map_err(|_| ValidationError::InvalidUtf8)?;
+        let host =
+            std::str::from_utf8(&host_component).map_err(|_| ValidationError::InvalidUtf8)?;
+        Self::parse(user, host)
+    }
+
     /// Borrows the ten-character visible user component.
     #[must_use]
     pub const fn user_component(&self) -> &[u8; 10] {

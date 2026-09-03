@@ -189,7 +189,8 @@ pub async fn write_line<W: AsyncWrite + Unpin>(
 
 /// One rendered line queued for the writer.
 pub struct LinkOutbound {
-    line: FederationLineText,
+    /// The line to write, or `None` when the owner asks the link to close.
+    line: Option<FederationLineText>,
 }
 
 /// The outbound queue is full or closed.
@@ -225,13 +226,18 @@ impl LinkHandle {
         if reserved.is_err() {
             return Err(QueueFull);
         }
-        match self.sender.try_send(LinkOutbound { line }) {
+        match self.sender.try_send(LinkOutbound { line: Some(line) }) {
             Ok(()) => Ok(()),
             Err(_) => {
                 release_queued(&self.queued_bytes, bytes);
                 Err(QueueFull)
             }
         }
+    }
+
+    /// Asks the link task to close after the lines already queued.
+    pub fn close(&self) {
+        let _sent = self.sender.try_send(LinkOutbound { line: None });
     }
 
     /// Returns the bytes currently queued.
@@ -251,6 +257,16 @@ fn release_queued(queued_bytes: &AtomicU64, bytes: u64) {
 pub struct LinkQueue {
     receiver: mpsc::Receiver<LinkOutbound>,
     queued_bytes: Arc<AtomicU64>,
+}
+
+impl LinkQueue {
+    /// Receives the next queued line, releasing its byte reservation.
+    pub async fn recv(&mut self) -> Option<FederationLineText> {
+        let line = self.receiver.recv().await?.line?;
+        let bytes = u64::try_from(line.len()).unwrap_or(u64::MAX);
+        release_queued(&self.queued_bytes, bytes);
+        Some(line)
+    }
 }
 
 /// Creates one bounded writer queue with the configured byte ceiling.
@@ -390,8 +406,11 @@ impl<W: AsyncWrite + Unpin> LinkLoop<W> {
         item: LinkOutbound,
         queue: &LinkQueue,
     ) -> Result<(), LinkCloseReason> {
-        let bytes = u64::try_from(item.line.len()).unwrap_or(u64::MAX);
-        let written = write_line(&mut self.writer, &item.line).await;
+        let Some(line) = item.line else {
+            return Err(LinkCloseReason::QueueClosed);
+        };
+        let bytes = u64::try_from(line.len()).unwrap_or(u64::MAX);
+        let written = write_line(&mut self.writer, &line).await;
         release_queued(&queue.queued_bytes, bytes);
         written.map_err(|_| LinkCloseReason::Transport)
     }
@@ -559,7 +578,7 @@ async fn admit_fragment(
     }
 }
 
-fn carrier_of(
+pub(crate) fn carrier_of(
     frame: &FederationFrame,
 ) -> Result<(ObjectCarrier, FragmentDescriptorKey), LinkCloseReason> {
     let carrier = match frame {
@@ -590,7 +609,7 @@ fn carrier_of(
 
 /// Fingerprints the command form and every descriptor parameter so later
 /// fragments must repeat them exactly.
-fn descriptor_key(carrier: &ObjectCarrier) -> FragmentDescriptorKey {
+pub(crate) fn descriptor_key(carrier: &ObjectCarrier) -> FragmentDescriptorKey {
     match carrier {
         ObjectCarrier::Request(descriptor) | ObjectCarrier::Result(descriptor) => {
             let form = if matches!(carrier, ObjectCarrier::Request(_)) {

@@ -12,7 +12,7 @@ use agenc_ircd_client_wire::{
 };
 use agenc_ircd_domain::{
     AdmissionSnapshot, AuthorizationFailure, AuthorizedCommand, CanonicalCommand,
-    CanonicalCommandView, CommandEnvelope, DomainError, DomainEvent, EntropyPurpose,
+    CanonicalCommandView, CommandEnvelope, DomainError, DomainEvent, DomainState, EntropyPurpose,
     ExternalInputRequest, ExternalInputs, MessageKind, MutationPlan, PlanDecision, StorageClass,
 };
 use agenc_ircd_types::{
@@ -118,7 +118,7 @@ enum ConvertedCommand {
     Rejected(ResultClass),
 }
 
-enum PreparedCryptoJob {
+pub(crate) enum PreparedCryptoJob {
     Verify(crate::bridge::crypto::ChannelKeyVerifyJob),
     Construct(ChannelKeyConstructJob),
 }
@@ -140,7 +140,7 @@ impl PreparedCryptoJob {
 }
 
 #[derive(Clone, Copy)]
-enum PendingCryptoKind {
+pub(crate) enum PendingCryptoKind {
     Verify,
     Construct,
 }
@@ -1527,6 +1527,194 @@ fn stage_error(error: StageRefused) -> RuntimeError {
         StageRefused::Fanout(_) => RuntimeError::MemoryExhausted,
         StageRefused::Busy | StageRefused::Quiescing => RuntimeError::LimitExceeded,
         StageRefused::Domain(_) => RuntimeError::InvalidValue,
+    }
+}
+
+/// The planning outcome of one federated command executed for a remote
+/// session (spec 20.5). Key material comes from the request object rather
+/// than a client line, so the coordinator supplies it per external request.
+// agenc-review: allow owner=runtime reviewed=2026-09-02 reason=the hot ready path keeps its bounded plan inline while only the cold deferred crypto path allocates
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum FederatedPlan {
+    /// The domain decided without asynchronous work.
+    Ready(PlanDecision),
+    /// Channel-key jobs must run before the plan completes.
+    Crypto(Box<FederatedDeferred>),
+}
+
+/// A federated plan waiting on channel-key crypto jobs.
+pub(crate) struct FederatedDeferred {
+    pub(crate) authorized: AuthorizedCommand,
+    pub(crate) external: ExternalInputs,
+    pub(crate) requests: Vec<ExternalInputRequest>,
+    pub(crate) jobs: VecDeque<PreparedCryptoJob>,
+    pub(crate) current: PendingCryptoKind,
+}
+
+/// The public failure of one federated command, with the client-facing
+/// error the edge renders.
+pub(crate) enum FederatedRefusal {
+    Public(DomainError),
+    Internal(RuntimeError),
+}
+
+impl From<SessionCommandError> for FederatedRefusal {
+    fn from(error: SessionCommandError) -> Self {
+        match error {
+            SessionCommandError::Public { error, .. } => Self::Public(error),
+            SessionCommandError::Internal(error) => Self::Internal(error),
+        }
+    }
+}
+
+impl From<RuntimeError> for FederatedRefusal {
+    fn from(error: RuntimeError) -> Self {
+        Self::Internal(error)
+    }
+}
+
+/// Plans one command for a remote session. Admission is unmetered here
+/// because the edge charged its own client buckets; the coordinator still
+/// enforces every domain authorization rule.
+pub(crate) fn plan_federated_command(
+    context: &mut StateCoreContext,
+    bound: BoundSession,
+    rebuild: &dyn Fn(&DomainState) -> Result<CanonicalCommand, RuntimeError>,
+    key_for: &dyn Fn(&ExternalInputRequest) -> Option<Zeroizing<Vec<u8>>>,
+    verifier: &Arc<dyn ChannelKeyVerifier>,
+    dummy: ChannelKeyVerifierRecord,
+) -> Result<FederatedPlan, FederatedRefusal> {
+    let command = rebuild(context.domain())?;
+    let (authorized, _admission) = authorize_unmetered_command(context, bound, command)?;
+    let decision = context
+        .domain()
+        .plan_authorized(authorized, None)
+        .map_err(domain_plan_error)?;
+    let PlanDecision::NeedsExternal(requests) = decision else {
+        return Ok(FederatedPlan::Ready(decision));
+    };
+    let command = rebuild(context.domain())?;
+    let (authorized, _) = authorize_unmetered_command(context, bound, command)?;
+    let external = satisfy_external(context, &requests)?;
+    let crypto_requests = crypto_requests(&requests)?;
+    if crypto_requests.is_empty() {
+        return context
+            .domain()
+            .plan_authorized(authorized, Some(external))
+            .map(FederatedPlan::Ready)
+            .map_err(|error| domain_plan_error(error).into());
+    }
+    let command = rebuild(context.domain())?;
+    let mut jobs = federated_key_jobs(
+        context,
+        bound,
+        &command,
+        &crypto_requests,
+        key_for,
+        verifier,
+        dummy,
+    )?;
+    let first = jobs.pop_front().ok_or(RuntimeError::InvalidValue)?;
+    let current = first.kind();
+    jobs.push_front(first);
+    Ok(FederatedPlan::Crypto(Box::new(FederatedDeferred {
+        authorized,
+        external,
+        requests: crypto_requests,
+        jobs,
+        current,
+    })))
+}
+
+fn federated_key_jobs(
+    context: &mut StateCoreContext,
+    bound: BoundSession,
+    command: &CanonicalCommand,
+    requests: &[ExternalInputRequest],
+    key_for: &dyn Fn(&ExternalInputRequest) -> Option<Zeroizing<Vec<u8>>>,
+    verifier: &Arc<dyn ChannelKeyVerifier>,
+    dummy: ChannelKeyVerifierRecord,
+) -> Result<VecDeque<PreparedCryptoJob>, RuntimeError> {
+    let mut jobs = VecDeque::new();
+    jobs.try_reserve_exact(requests.len())
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    for request in requests {
+        let candidate = key_for(request).ok_or(RuntimeError::InvalidValue)?;
+        let job = match (request, command.view()) {
+            (
+                ExternalInputRequest::ChannelKeyVerification { target_index, .. },
+                CanonicalCommandView::Join(targets),
+            ) => {
+                let target = targets
+                    .get(usize::from(*target_index))
+                    .ok_or(RuntimeError::InvalidValue)?;
+                let key_target = channel_key_target(context, bound, target, dummy);
+                PreparedCryptoJob::Verify(crate::bridge::crypto::ChannelKeyVerifyJob::new(
+                    Arc::clone(verifier),
+                    key_target,
+                    candidate.as_slice().to_vec(),
+                )?)
+            }
+            (ExternalInputRequest::ChannelKeyConstruction { .. }, _) => {
+                let mut salt = [0_u8; crate::bridge::crypto::CHANNEL_KEY_SALT_BYTES];
+                context
+                    .entropy_mut()
+                    .fill_exact(&mut salt)
+                    .map_err(|_| RuntimeError::InvalidValue)?;
+                PreparedCryptoJob::Construct(ChannelKeyConstructJob::new(
+                    Arc::clone(verifier),
+                    salt,
+                    candidate.as_slice().to_vec(),
+                )?)
+            }
+            _ => return Err(RuntimeError::InvalidValue),
+        };
+        jobs.push_back(job);
+    }
+    Ok(jobs)
+}
+
+impl FederatedDeferred {
+    /// Submits the next job, returning its ID, or `None` when every job ran.
+    pub(crate) fn submit_next(
+        &mut self,
+        context: &mut StateCoreContext,
+    ) -> Result<Option<CryptoJobId>, RuntimeError> {
+        let Some(job) = self.jobs.pop_front() else {
+            return Ok(None);
+        };
+        self.current = job.kind();
+        context
+            .crypto_mut()
+            .try_submit(job.into_runtime())
+            .map(Some)
+            .map_err(|_| RuntimeError::LimitExceeded)
+    }
+
+    /// Records one completed job's output into the external inputs.
+    pub(crate) fn complete(
+        &mut self,
+        output: Result<CryptoJobOutput, agenc_ircd_crypto::CryptoWorkerError>,
+    ) -> Result<(), FederatedRefusal> {
+        match apply_crypto_output(self.current, &mut self.external, output) {
+            Ok(()) => Ok(()),
+            Err(CryptoCompletionError::Busy) => {
+                Err(FederatedRefusal::Public(DomainError::ServerBusy))
+            }
+            Err(CryptoCompletionError::Internal(error)) => Err(FederatedRefusal::Internal(error)),
+        }
+    }
+
+    /// Finishes the plan once every job completed.
+    pub(crate) fn finish(
+        self,
+        context: &StateCoreContext,
+    ) -> Result<PlanDecision, FederatedRefusal> {
+        let _ = &self.requests;
+        context
+            .domain()
+            .plan_authorized(self.authorized, Some(self.external))
+            .map_err(|error| domain_plan_error(error).into())
     }
 }
 

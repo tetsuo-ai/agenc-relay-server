@@ -45,7 +45,7 @@ const AUTHENTICATION_GRANT_KIND: u16 = 4;
 const INVITATION_RESERVATION_KIND: u16 = 1;
 const INVITATION_TOMBSTONE_KIND: u16 = 2;
 /// The tables Stage 06 reconstructs, in scan order.
-pub const RECONSTRUCTED_TABLES: [TableId; 12] = [
+pub const RECONSTRUCTED_TABLES: [TableId; 16] = [
     TableId::Account,
     TableId::NicknameReservation,
     TableId::Channel,
@@ -58,6 +58,10 @@ pub const RECONSTRUCTED_TABLES: [TableId; 12] = [
     TableId::Session,
     TableId::RequestResult,
     TableId::LoginIndexKeyState,
+    TableId::FederationPeer,
+    TableId::FederationOrigin,
+    TableId::EdgeOutbox,
+    TableId::EdgeProjection,
 ];
 
 /// Account-service rows needed before the first live request is accepted.
@@ -564,7 +568,16 @@ impl Scan {
             (TableId::RegistrationInvite, record_kind) => {
                 self.admit_registration_invite(&key, &value, record_kind)
             }
-            (TableId::RequestResult, _) => Ok(()),
+            // Federation rows are indexed for identity and sizing here; the
+            // federation router reloads their contents through bounded reads.
+            (
+                TableId::RequestResult
+                | TableId::FederationPeer
+                | TableId::FederationOrigin
+                | TableId::EdgeOutbox
+                | TableId::EdgeProjection,
+                _,
+            ) => Ok(()),
             _ => Err(RuntimeError::Storage(StorageError::InvalidEncoding)),
         }
     }
