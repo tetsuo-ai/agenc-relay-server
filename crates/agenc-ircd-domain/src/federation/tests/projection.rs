@@ -102,6 +102,20 @@ impl Harness {
             let mut sorted_replica = replica_keys.clone();
             sorted_replica.sort();
             assert_eq!(sorted_replica, index_keys, "replica and index keys differ");
+            // The snapshot cut derived from the live state must equal what
+            // the incremental events built on the edge, record for record.
+            let cut = CoordinatorProjection::standing_of(&self.state, delta.target);
+            let cut_keys: Vec<ProjectionKey> = cut.iter().map(ProjectionRecord::key).collect();
+            let mut replica_entries: Vec<ProjectionRecord> = replica.entries().collect();
+            replica_entries.sort_by_key(ProjectionRecord::key);
+            assert_eq!(
+                cut_keys, index_keys,
+                "snapshot cut keys differ from the index"
+            );
+            assert!(
+                cut == replica_entries,
+                "snapshot cut records differ from the replica"
+            );
         }
         Ok(projection)
     }

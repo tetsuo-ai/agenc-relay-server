@@ -13,7 +13,8 @@ use agenc_ircd_federation_wire::{DecodeBudget, OriginRecord, SchemaObject, decod
 use agenc_ircd_storage::federation_records::{
     COORDINATOR_RESULT_KIND, CoordinatorResultRecord, FederationOriginRecord, FederationPeerRecord,
     ORIGIN_RECORD_KIND, OriginRowStatus, PEER_RECORD_KIND, PROJECTION_ENTRY_KIND,
-    ProjectionEntryRecord, parse_origin_key, parse_projection_key,
+    PROJECTION_MARKER_KIND, ProjectionEntryRecord, ProjectionGenerationState,
+    ProjectionMarkerRecord, parse_origin_key, parse_projection_key,
 };
 use agenc_ircd_storage::{
     MAX_STORED_KEY_BYTES, PersistentRecordValue, ReadPlan, StoredKey, TableId,
@@ -145,6 +146,7 @@ fn admit(
         (TableId::FederationOrigin, ORIGIN_RECORD_KIND) => admit_origin(coordinator, key, value),
         (TableId::RequestResult, COORDINATOR_RESULT_KIND) => admit_result(coordinator, key, value),
         (TableId::EdgeProjection, PROJECTION_ENTRY_KIND) => admit_entry(context, key, value),
+        (TableId::EdgeProjection, PROJECTION_MARKER_KIND) => admit_marker(coordinator, key, value),
         _ => {}
     }
 }
@@ -305,6 +307,39 @@ fn admit_result(
         agenc_ircd_types::RequestId::from_bytes(record.request_id),
         key,
     );
+}
+
+/// Restores the durable READY identity of the peer's current generation so
+/// a re-sent READY after restart still gets the byte-identical ACTIVE.
+fn admit_marker(
+    coordinator: &mut FederationCoordinator,
+    key: &StoredKey,
+    value: &PersistentRecordValue,
+) {
+    let (Ok(parts), Ok(record)) = (
+        parse_projection_key(key),
+        ProjectionMarkerRecord::decode(value.body()),
+    ) else {
+        return;
+    };
+    let Some(state) = coordinator.peers.get_mut(&parts.target) else {
+        return;
+    };
+    if parts.projection_generation != state.projection_generation
+        || record.state != ProjectionGenerationState::Active
+    {
+        return;
+    }
+    let Some(token) = record.snapshot_token else {
+        return;
+    };
+    state.ready_identity = Some(agenc_ircd_federation_wire::SnapshotIdentity {
+        snapshot_token: agenc_ircd_federation_wire::FederationHash32::from_bytes(token),
+        recovery_epoch: RecoveryEpoch::from_bytes(record.recovery_epoch),
+        projection_generation: parts.projection_generation,
+        state_generation: record.state_generation,
+        snapshot_digest: agenc_ircd_federation_wire::FederationHash32::from_bytes(record.digest),
+    });
 }
 
 fn admit_entry(context: &mut StateCoreContext, key: &StoredKey, value: &PersistentRecordValue) {

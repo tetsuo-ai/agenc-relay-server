@@ -9,19 +9,23 @@ use agenc_ircd_domain::federation::{MutationContext, SessionHideKind};
 use agenc_ircd_domain::{
     AccountCommand, AccountLabelValue, AwayText, CanonicalCommand, ChannelCommand,
     ChannelNameValue, ChannelTarget, DirectMessagePolicy, DisplayNameValue, DomainError,
-    DomainState, ExternalInputRequest, GuestDirectMessagePolicy, MessageCommand, MessageKind,
-    MessageTarget, MessageText, ModeChange, ModeOperation, NicknameValue, PresenceCommand,
-    PresencePolicy, SessionSeed, TopicText,
+    DomainState, ExternalInputRequest, GuestDirectMessagePolicy, InformationQuery, MaskList,
+    MessageCommand, MessageKind, MessageTarget, MessageText, ModeChange, ModeOperation,
+    NicknameValue, PresenceCommand, PresencePolicy, SessionSeed, TopicText, UserQuery, WhoTarget,
 };
+use agenc_ircd_federation_wire::access::{
+    opaque_field, structure, text, unsigned, unsigned_u16, vector,
+};
+use agenc_ircd_federation_wire::{DecodeBudget, SchemaObject};
 use agenc_ircd_types::{
-    AccountDeletionToken, AccountId, ChannelInstanceId, ControlPolicy, Generation, Revision,
-    ServerId, SessionId, UserId,
+    AccountDeletionToken, AccountId, ChannelInstanceId, ControlPolicy,
+    FederationDirectoryQueryKind, Generation, Revision, ServerId, SessionId, UserId,
 };
 use zeroize::Zeroizing;
 
 use crate::RuntimeError;
-use crate::federation::codec::history_of_value;
 use crate::federation::codec::operations::{FederatedOperation, MessageTargetArg, ModeChangeArg};
+use crate::federation::codec::{channel_name_of, history_of_value, nickname_of};
 use crate::state_core::StateCoreContext;
 use crate::state_core::session::BoundSession;
 
@@ -39,8 +43,18 @@ pub(super) enum ConvertedRequest {
     },
     /// A command for an existing remote session.
     Command(Box<CommandRequest>),
-    /// An operation the base coordinator does not execute in this slice.
-    Unsupported,
+    /// A directory query, fresh or continued.
+    Query(Box<QueryRequest>),
+    /// An operation this coordinator cannot answer (history has no store).
+    Unavailable,
+}
+
+/// A converted directory query with its cursor identity.
+pub(super) struct QueryRequest {
+    pub(super) bound: BoundSession,
+    pub(super) command: CanonicalCommand,
+    pub(super) identity: super::query::QueryIdentity,
+    pub(super) cursor: Option<[u8; 32]>,
 }
 
 /// A converted command with the session it acts for and its intent.
@@ -89,9 +103,13 @@ pub(super) fn convert_operation(
                 SessionHideKind::from_wire(*reason_code).ok_or(DomainError::InvalidArgument)?;
             Ok(ConvertedRequest::SessionClose { user_id, kind })
         }
-        FederatedOperation::HistoryQuery { .. }
-        | FederatedOperation::DirectoryQuery { .. }
-        | FederatedOperation::AccountService { .. } => Ok(ConvertedRequest::Unsupported),
+        FederatedOperation::DirectoryQuery { session_id, query } => {
+            let (user_id, bound) = hosted_session(context.domain(), peer, *session_id)?;
+            directory_query(context.domain(), bound, user_id, query)
+        }
+        FederatedOperation::HistoryQuery { .. } | FederatedOperation::AccountService { .. } => {
+            Ok(ConvertedRequest::Unavailable)
+        }
         _ => {
             let session_id = operation.session_id().ok_or(DomainError::InvalidArgument)?;
             let (user_id, bound) = hosted_session(context.domain(), peer, session_id)?;
@@ -650,4 +668,191 @@ fn mutation_context(
         _ => {}
     }
     mutation
+}
+
+/// Maps a directory query kind onto its registered arm schema.
+const fn directory_schema(kind: FederationDirectoryQueryKind) -> &'static str {
+    match kind {
+        FederationDirectoryQueryKind::List => "directory.list",
+        FederationDirectoryQueryKind::Names => "directory.names",
+        FederationDirectoryQueryKind::Who => "directory.who",
+        FederationDirectoryQueryKind::Whois => "directory.whois",
+        FederationDirectoryQueryKind::Whowas => "directory.whowas",
+        FederationDirectoryQueryKind::Ison => "directory.ison",
+        FederationDirectoryQueryKind::Userhost => "directory.userhost",
+        FederationDirectoryQueryKind::Links => "directory.links",
+        FederationDirectoryQueryKind::MonitorAdd => "directory.monitor_add",
+        FederationDirectoryQueryKind::MonitorRemove => "directory.monitor_remove",
+        FederationDirectoryQueryKind::MonitorClear => "directory.monitor_clear",
+        FederationDirectoryQueryKind::MonitorList => "directory.monitor_list",
+        FederationDirectoryQueryKind::MonitorStatus => "directory.monitor_status",
+        FederationDirectoryQueryKind::ChannelTopic => "directory.channel_topic",
+        FederationDirectoryQueryKind::ChannelModes => "directory.channel_modes",
+        FederationDirectoryQueryKind::ChannelModeList => "directory.channel_mode_list",
+    }
+}
+
+/// Rebuilds the canonical command of an already decoded query identity;
+/// the domain consumes commands, so authorization passes rebuild it.
+pub(super) fn rebuild_query(
+    _domain: &DomainState,
+    identity: &super::query::QueryIdentity,
+) -> Result<CanonicalCommand, RuntimeError> {
+    let mut budget = DecodeBudget::new(4_096, 256);
+    let arm =
+        SchemaObject::decode_exact(directory_schema(identity.kind), &identity.arm, &mut budget)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+    directory_command(identity.kind, &arm).map_err(|_| RuntimeError::InvalidValue)
+}
+
+/// Decodes a `DirectoryQuery` into the canonical command and its cursor.
+fn directory_query(
+    domain: &DomainState,
+    bound: BoundSession,
+    user_id: UserId,
+    query: &SchemaObject,
+) -> Result<ConvertedRequest, DomainError> {
+    let invalid = |_| DomainError::InvalidArgument;
+    let kind = FederationDirectoryQueryKind::from_wire(
+        unsigned_u16(query, "query_kind").map_err(invalid)?,
+    )
+    .map_err(|_| DomainError::InvalidArgument)?;
+    let arm_bytes = opaque_field(query, "query").map_err(invalid)?.to_vec();
+    let cursor = match opaque_field(query, "cursor").map_err(invalid)? {
+        [] => None,
+        bytes => Some(<[u8; 32]>::try_from(bytes).map_err(|_| DomainError::InvalidArgument)?),
+    };
+    let mut budget = DecodeBudget::new(4_096, 256);
+    let arm = SchemaObject::decode_exact(directory_schema(kind), &arm_bytes, &mut budget)
+        .map_err(invalid)?;
+    let command = directory_command(kind, &arm)?;
+    let session = domain.session(user_id).ok_or(DomainError::NotFound)?;
+    let account = session
+        .account_id()
+        .map(|account| (account, session.account_session_generation()));
+    Ok(ConvertedRequest::Query(Box::new(QueryRequest {
+        bound,
+        command,
+        identity: super::query::QueryIdentity {
+            session_id: bound.session_id,
+            user_id,
+            account,
+            kind,
+            arm: arm_bytes,
+        },
+        cursor,
+    })))
+}
+
+fn nicknames_of(arm: &SchemaObject, field: &str) -> Result<Vec<NicknameValue>, DomainError> {
+    let items = vector(arm, field).map_err(|_| DomainError::InvalidArgument)?;
+    let mut nicknames = Vec::new();
+    nicknames
+        .try_reserve_exact(items.len())
+        .map_err(|_| DomainError::AllocationFailed)?;
+    for item in items {
+        nicknames.push(nickname_of(item).map_err(|_| DomainError::InvalidArgument)?);
+    }
+    Ok(nicknames)
+}
+
+fn channel_names_of(arm: &SchemaObject) -> Result<Vec<ChannelNameValue>, DomainError> {
+    let items = vector(arm, "channels").map_err(|_| DomainError::InvalidArgument)?;
+    let mut names = Vec::new();
+    names
+        .try_reserve_exact(items.len())
+        .map_err(|_| DomainError::AllocationFailed)?;
+    for item in items {
+        names.push(channel_name_of(item).map_err(|_| DomainError::InvalidArgument)?);
+    }
+    Ok(names)
+}
+
+fn channel_name_field(arm: &SchemaObject) -> Result<ChannelNameValue, DomainError> {
+    structure(arm, "channel_name")
+        .map_err(|_| DomainError::InvalidArgument)
+        .and_then(|name| channel_name_of(name).map_err(|_| DomainError::InvalidArgument))
+}
+
+fn nickname_field(arm: &SchemaObject) -> Result<NicknameValue, DomainError> {
+    structure(arm, "nickname")
+        .map_err(|_| DomainError::InvalidArgument)
+        .and_then(|name| nickname_of(name).map_err(|_| DomainError::InvalidArgument))
+}
+
+/// Builds the canonical command of one decoded directory arm.
+// agenc-review: focus owner=runtime reviewed=2026-09-02 reason=one closed match maps every registered directory query kind onto its canonical command
+fn directory_command(
+    kind: FederationDirectoryQueryKind,
+    arm: &SchemaObject,
+) -> Result<CanonicalCommand, DomainError> {
+    let invalid = |_| DomainError::InvalidArgument;
+    match kind {
+        FederationDirectoryQueryKind::List => CanonicalCommand::list(channel_names_of(arm)?),
+        FederationDirectoryQueryKind::Names => CanonicalCommand::names(channel_names_of(arm)?),
+        FederationDirectoryQueryKind::Who => {
+            let target = structure(arm, "target").map_err(invalid)?;
+            let value = text(target, "value").map_err(invalid)?;
+            let who = match unsigned(target, "target_kind").map_err(invalid)? {
+                0 if value.is_empty() => None,
+                1 => Some(WhoTarget::Nickname(NicknameValue::parse(value)?)),
+                2 => Some(WhoTarget::Channel(ChannelNameValue::parse(value)?)),
+                _ => return Err(DomainError::InvalidArgument),
+            };
+            CanonicalCommand::user_query(UserQuery::Who(who))
+        }
+        FederationDirectoryQueryKind::Whois => {
+            CanonicalCommand::user_query(UserQuery::Whois(nickname_field(arm)?))
+        }
+        FederationDirectoryQueryKind::Whowas => {
+            let count = unsigned_u16(arm, "count").map_err(invalid)?;
+            if !(1..=10).contains(&count) {
+                return Err(DomainError::InvalidArgument);
+            }
+            let count = u8::try_from(count).map_err(|_| DomainError::InvalidArgument)?;
+            CanonicalCommand::user_query(UserQuery::Whowas(nickname_field(arm)?, count))
+        }
+        FederationDirectoryQueryKind::Ison => {
+            CanonicalCommand::user_query(UserQuery::Ison(nicknames_of(arm, "nicknames")?))
+        }
+        FederationDirectoryQueryKind::Userhost => {
+            CanonicalCommand::user_query(UserQuery::Userhost(nicknames_of(arm, "nicknames")?))
+        }
+        FederationDirectoryQueryKind::Links => {
+            Ok(CanonicalCommand::information(InformationQuery::Links))
+        }
+        FederationDirectoryQueryKind::MonitorAdd => {
+            CanonicalCommand::presence(PresenceCommand::MonitorAdd(nicknames_of(arm, "nicknames")?))
+        }
+        FederationDirectoryQueryKind::MonitorRemove => CanonicalCommand::presence(
+            PresenceCommand::MonitorRemove(nicknames_of(arm, "nicknames")?),
+        ),
+        FederationDirectoryQueryKind::MonitorClear => {
+            CanonicalCommand::presence(PresenceCommand::MonitorClear)
+        }
+        FederationDirectoryQueryKind::MonitorList => {
+            CanonicalCommand::presence(PresenceCommand::MonitorList)
+        }
+        FederationDirectoryQueryKind::MonitorStatus => {
+            CanonicalCommand::presence(PresenceCommand::MonitorStatus)
+        }
+        FederationDirectoryQueryKind::ChannelTopic => {
+            Ok(CanonicalCommand::topic_query(channel_name_field(arm)?))
+        }
+        FederationDirectoryQueryKind::ChannelModes => Ok(CanonicalCommand::channel_mode_query(
+            channel_name_field(arm)?,
+        )),
+        FederationDirectoryQueryKind::ChannelModeList => {
+            let list = match unsigned_u16(arm, "mode_code").map_err(invalid)? {
+                1 => MaskList::Ban,
+                2 => MaskList::Exception,
+                3 => MaskList::InviteException,
+                _ => return Err(DomainError::InvalidArgument),
+            };
+            Ok(CanonicalCommand::channel_mode_list(
+                channel_name_field(arm)?,
+                list,
+            ))
+        }
+    }
 }

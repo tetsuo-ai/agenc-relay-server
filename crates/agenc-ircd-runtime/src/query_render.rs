@@ -1388,6 +1388,184 @@ fn numeric_bare(
     numeric_reply(prefix, code, nickname, middle, None).map_err(|_| RuntimeError::InvalidValue)
 }
 
+/// Renders one query for a remote session into reply frames without a
+/// connection: the coordinator packs them into `reply_page` results and the
+/// requesting edge relays them (spec 20.4). Snapshot permits are not taken;
+/// the page ceiling and the cursor table bound the retained frames instead.
+pub(crate) fn federated_query_frames(
+    context: &StateCoreContext,
+    requester: UserId,
+    userhost_in_names: bool,
+    plan: &QueryPlan,
+) -> Result<Vec<WireMessage>, RuntimeError> {
+    if plan.requester() != requester || plan.expected_revision() != context.domain().revision() {
+        return Err(RuntimeError::InvalidValue);
+    }
+    let nickname = crate::client_render::requester_nickname(context, requester);
+    match plan.command().view() {
+        CanonicalCommandView::List(channels) => list_frames(context, &nickname, channels),
+        CanonicalCommandView::UserQuery(UserQuery::Who(target)) => {
+            who_frames(context, &nickname, requester, target.as_ref())
+        }
+        CanonicalCommandView::Mode(mode) => render_mode(
+            context.domain(),
+            context.server_prefix(),
+            &nickname,
+            requester,
+            mode,
+        ),
+        CanonicalCommandView::TopicQuery(channel) => render_topic(
+            context.domain(),
+            context.server_prefix(),
+            &nickname,
+            requester,
+            channel,
+        ),
+        CanonicalCommandView::Names(channels) => render_names(
+            context.domain(),
+            context.server_prefix(),
+            &nickname,
+            requester,
+            userhost_in_names,
+            channels,
+        ),
+        CanonicalCommandView::Information(query) => render_information(context, &nickname, query),
+        CanonicalCommandView::UserQuery(query) => render_user_query(
+            context.domain(),
+            context.server_prefix(),
+            &nickname,
+            requester,
+            query,
+        ),
+        CanonicalCommandView::Presence(query) => render_presence_query(
+            context.domain(),
+            context.server_prefix(),
+            &nickname,
+            requester,
+            query,
+        ),
+        _ => Err(RuntimeError::InvalidValue),
+    }
+}
+
+fn list_frames(
+    context: &StateCoreContext,
+    nickname: &str,
+    selected: &[agenc_ircd_domain::ChannelNameValue],
+) -> Result<Vec<WireMessage>, RuntimeError> {
+    let projections = context
+        .domain()
+        .project_channel_list()
+        .map_err(|_| RuntimeError::InvalidValue)?;
+    let mut frames = Vec::new();
+    push_numeric(
+        &mut frames,
+        context.server_prefix(),
+        321,
+        nickname,
+        &["Channel"],
+        "Users Name",
+    )?;
+    for channel in &projections {
+        if !selected.is_empty() && !selected.iter().any(|name| name == channel.name()) {
+            continue;
+        }
+        render_list_row(context.server_prefix(), nickname, channel, &mut frames)?;
+    }
+    push_numeric(
+        &mut frames,
+        context.server_prefix(),
+        323,
+        nickname,
+        &[],
+        "End of LIST",
+    )?;
+    Ok(frames)
+}
+
+fn who_frames(
+    context: &StateCoreContext,
+    nickname: &str,
+    requester: UserId,
+    target: Option<&WhoTarget>,
+) -> Result<Vec<WireMessage>, RuntimeError> {
+    let mut frames = Vec::new();
+    let (label, rows) = who_rows(context, requester, target)?;
+    for (session, role) in &rows {
+        render_who_session(
+            context.server_prefix(),
+            nickname,
+            label,
+            session,
+            *role,
+            &mut frames,
+        )?;
+    }
+    push_numeric(
+        &mut frames,
+        context.server_prefix(),
+        315,
+        nickname,
+        &[label],
+        "End of WHO list",
+    )?;
+    Ok(frames)
+}
+
+type WhoRows<'a> = (&'a str, Vec<(SessionProjection<'a>, Option<char>)>);
+
+fn who_rows<'a>(
+    context: &'a StateCoreContext,
+    requester: UserId,
+    target: Option<&'a WhoTarget>,
+) -> Result<WhoRows<'a>, RuntimeError> {
+    let visible = |user_id: UserId| match context.domain().project_session(requester, user_id) {
+        ProjectionDecision::Visible(session) => Some(session),
+        _ => None,
+    };
+    match target {
+        None => Ok((
+            "*",
+            visible(requester)
+                .map(|session| vec![(session, None)])
+                .unwrap_or_default(),
+        )),
+        Some(WhoTarget::Nickname(target)) => Ok((
+            target.presentation(),
+            context
+                .domain()
+                .resolve_nickname(target)
+                .and_then(visible)
+                .map(|session| vec![(session, None)])
+                .unwrap_or_default(),
+        )),
+        Some(WhoTarget::Channel(target)) => {
+            who_channel_rows(context, requester, target).map(|rows| (target.presentation(), rows))
+        }
+    }
+}
+
+fn who_channel_rows<'a>(
+    context: &'a StateCoreContext,
+    requester: UserId,
+    target: &agenc_ircd_domain::ChannelNameValue,
+) -> Result<Vec<(SessionProjection<'a>, Option<char>)>, RuntimeError> {
+    let channel = visible_channel(context.domain(), requester, target).ok();
+    let mut rows = Vec::new();
+    for user_id in channel.into_iter().flat_map(|channel| channel.members()) {
+        let ProjectionDecision::Visible(session) =
+            context.domain().project_session(requester, user_id)
+        else {
+            continue;
+        };
+        let role = channel
+            .and_then(|channel| channel.role_of(user_id))
+            .ok_or(RuntimeError::InvalidValue)?;
+        rows.push((session, role_prefix(role)));
+    }
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use std::error::Error;

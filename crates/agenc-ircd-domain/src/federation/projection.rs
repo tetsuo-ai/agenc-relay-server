@@ -21,9 +21,9 @@ use crate::federation::record::{
     SessionEventView, SessionHideKind, SessionRecord, SourceView,
 };
 use crate::{
-    DomainError, DomainEvent, DomainState, DurableAccount, DurableChannel, DurableListEntry,
-    DurableSession, DurableWrite, MessageKind, MutationPlan, NicknameValue, Principal,
-    ResolvedMessageTarget, Role, Visibility,
+    DomainError, DomainEvent, DomainState, DurableAccount, DurableChannel, DurableInvite,
+    DurableListEntry, DurableMembership, DurableSession, DurableWrite, MessageKind, MutationPlan,
+    NicknameValue, Principal, ResolvedMessageTarget, Role, Visibility,
 };
 
 /// Simple-mode bit for `i`.
@@ -315,6 +315,30 @@ impl CoordinatorProjection {
         }
     }
 
+    /// Derives the complete standing projection of one edge from the live
+    /// state: the snapshot cut of spec 20.9, in B.4 `(kind, primary)` order.
+    /// The incremental deltas converge to exactly this set.
+    #[must_use]
+    pub fn standing_of(domain: &DomainState, edge: ServerId) -> Vec<ProjectionRecord> {
+        let view = CutView::new(domain, edge);
+        let mut records = Vec::new();
+        view.sessions(&mut records);
+        view.channels(&mut records);
+        view.memberships(&mut records);
+        view.invites(&mut records);
+        view.accounts(&mut records);
+        records
+    }
+
+    /// Replaces one edge's standing with a snapshot cut.
+    pub fn install_edge(&mut self, edge: ServerId, records: &[ProjectionRecord]) {
+        let mut standing = EdgeStanding::default();
+        for record in records {
+            standing.insert(record);
+        }
+        self.edges.insert(edge, standing);
+    }
+
     /// Derives every event copy and standing delta for one plan that has
     /// been prepared against `base` but not yet applied.
     pub fn derive(
@@ -342,6 +366,153 @@ impl CoordinatorProjection {
             derivation.project_event(target_index, event)?;
         }
         derivation.finish()
+    }
+}
+
+/// The live sessions and channels an edge's snapshot cut is read from.
+struct CutView<'a> {
+    domain: &'a DomainState,
+    edge: ServerId,
+    sessions: Vec<DurableSession>,
+    channels: Vec<DurableChannel>,
+}
+
+impl<'a> CutView<'a> {
+    fn new(domain: &'a DomainState, edge: ServerId) -> Self {
+        let sessions = domain
+            .session_user_ids()
+            .filter_map(|user| domain.durable_session(user))
+            .collect();
+        let mut channels: Vec<DurableChannel> = domain.durable_channels().collect();
+        channels.sort_by(|left, right| left.channel_id.as_bytes().cmp(right.channel_id.as_bytes()));
+        Self {
+            domain,
+            edge,
+            sessions,
+            channels,
+        }
+    }
+
+    fn home_of(&self, user: UserId) -> Option<ServerId> {
+        self.sessions
+            .iter()
+            .find(|session| session.user_id == user)
+            .map(|session| session.home_server_id)
+    }
+
+    fn hosts(&self, principal: Principal) -> bool {
+        match principal {
+            Principal::Guest(user) => self.home_of(user) == Some(self.edge),
+            Principal::Account(account) => self.sessions.iter().any(|session| {
+                session.home_server_id == self.edge && session.account_id == Some(account)
+            }),
+        }
+    }
+
+    fn entitled(&self, channel: &DurableChannel) -> bool {
+        channel
+            .memberships
+            .iter()
+            .any(|membership| self.home_of(membership.user_id) == Some(self.edge))
+            || channel
+                .invites
+                .iter()
+                .any(|invite| self.hosts(invite.target))
+    }
+
+    fn sessions(&self, records: &mut Vec<ProjectionRecord>) {
+        for session in self
+            .sessions
+            .iter()
+            .filter(|session| session.home_server_id == self.edge)
+        {
+            let label = session
+                .account_id
+                .and_then(|account| self.domain.durable_account(account))
+                .and_then(|account| account.label);
+            records.push(ProjectionRecord::Session(session_record_from(
+                session, label,
+            )));
+        }
+    }
+
+    fn channels(&self, records: &mut Vec<ProjectionRecord>) {
+        for channel in self
+            .channels
+            .iter()
+            .filter(|channel| self.entitled(channel))
+        {
+            records.push(ProjectionRecord::ChannelDetail(channel_detail_from(
+                channel,
+            )));
+        }
+    }
+
+    fn memberships(&self, records: &mut Vec<ProjectionRecord>) {
+        for channel in self
+            .channels
+            .iter()
+            .filter(|channel| self.entitled(channel))
+        {
+            let mut memberships: Vec<&DurableMembership> = channel
+                .memberships
+                .iter()
+                .filter(|membership| self.home_of(membership.user_id) == Some(self.edge))
+                .collect();
+            memberships
+                .sort_by(|left, right| left.user_id.as_bytes().cmp(right.user_id.as_bytes()));
+            for membership in memberships {
+                records.push(ProjectionRecord::Membership(MembershipRecord {
+                    channel_id: channel.channel_id,
+                    user_id: membership.user_id,
+                    role: membership.effective_role,
+                    membership_revision: membership.membership_revision,
+                    joined_at: membership.joined_at,
+                }));
+            }
+        }
+    }
+
+    fn invites(&self, records: &mut Vec<ProjectionRecord>) {
+        for channel in &self.channels {
+            let mut invites: Vec<&DurableInvite> = channel
+                .invites
+                .iter()
+                .filter(|invite| self.hosts(invite.target))
+                .collect();
+            invites
+                .sort_by(|left, right| left.invite_id.as_bytes().cmp(right.invite_id.as_bytes()));
+            for invite in invites {
+                records.push(ProjectionRecord::Invite(InviteRecord {
+                    channel_id: channel.channel_id,
+                    invite_id: invite.invite_id,
+                    target: invite.target,
+                    inviter_user_id: invite.inviter,
+                    creation_revision: invite.creation_revision,
+                    expires_at: invite.expires_at_utc,
+                }));
+            }
+        }
+    }
+
+    fn accounts(&self, records: &mut Vec<ProjectionRecord>) {
+        let mut hosted: Vec<AccountId> = self
+            .sessions
+            .iter()
+            .filter(|session| session.home_server_id == self.edge)
+            .filter_map(|session| session.account_id)
+            .collect();
+        hosted.sort_unstable();
+        hosted.dedup();
+        for account_id in hosted {
+            if let Some(account) = self.domain.durable_account(account_id) {
+                records.push(ProjectionRecord::Account(AccountRecord {
+                    account_id,
+                    account_session_generation: account.session_generation,
+                    account_revision: account.revision,
+                }));
+            }
+        }
     }
 }
 

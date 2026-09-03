@@ -67,6 +67,10 @@ pub enum TimerKind {
     CommandDeadline,
     /// The fixed origin grace interval after a federation link is lost.
     FederationGrace,
+    /// The pacing step between snapshot entry sends.
+    FederationSnapshotSend,
+    /// The fixed snapshot token lifetime.
+    FederationSnapshotExpiry,
 }
 
 /// Typed identity a timer entry names; never a protocol string.

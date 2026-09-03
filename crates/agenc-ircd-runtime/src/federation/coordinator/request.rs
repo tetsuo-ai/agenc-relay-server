@@ -158,26 +158,16 @@ fn execute(
         generation: header.replay_key.origin_generation,
         sequence: header.replay_key.operation_sequence,
     };
-    let retained = coordinator.retained.get(&key).copied();
-    let decision = coordinator
-        .origins
-        .classify_request(
-            key,
-            header.request_id,
-            *object.object_id().as_bytes(),
-            retained,
-        )
-        .map_err(|_| Violation::Origin)?;
-    match decision {
-        ReplayDecision::Fresh => {}
-        ReplayDecision::ExactDuplicate => {
+    match classify(coordinator, &key, &header, object.object_id())? {
+        Classified::Fresh => {}
+        Classified::Replay => {
             return replay(coordinator, context, link, peer, descriptor, &header);
         }
-        ReplayDecision::Conflict | ReplayDecision::RequestIdReuse | ReplayDecision::Gap => {
-            let _ = coordinator.origins.block(&key.origin);
-            return Err(Violation::Origin);
-        }
-        ReplayDecision::Expired => {
+        Classified::Expired => {
+            let arm = ResultArm::Failed {
+                code: failure_code(DomainError::ServerBusy).to_owned(),
+                context: String::new(),
+            };
             return fail_without_plan(
                 coordinator,
                 context,
@@ -187,7 +177,7 @@ fn execute(
                 &header,
                 descriptor,
                 object.object_id(),
-                DomainError::ServerBusy,
+                (arm, Vec::new()),
                 charge,
             );
         }
@@ -206,6 +196,37 @@ fn execute(
         charge,
     };
     run_operation(coordinator, context, link, peer, fresh, operation)
+}
+
+/// What the replay classifier decided for a request.
+enum Classified {
+    Fresh,
+    Replay,
+    Expired,
+}
+
+/// Classifies one request against the origin table; a conflict, request
+/// identity reuse, or gap blocks the origin and fails the link.
+fn classify(
+    coordinator: &mut FederationCoordinator,
+    key: &OperationKey,
+    header: &RequestHeader,
+    object_id: FederationHash32,
+) -> Result<Classified, Violation> {
+    let retained = coordinator.retained.get(key).copied();
+    let decision = coordinator
+        .origins
+        .classify_request(*key, header.request_id, *object_id.as_bytes(), retained)
+        .map_err(|_| Violation::Origin)?;
+    match decision {
+        ReplayDecision::Fresh => Ok(Classified::Fresh),
+        ReplayDecision::ExactDuplicate => Ok(Classified::Replay),
+        ReplayDecision::Conflict | ReplayDecision::RequestIdReuse | ReplayDecision::Gap => {
+            let _ = coordinator.origins.block(&key.origin);
+            Err(Violation::Origin)
+        }
+        ReplayDecision::Expired => Ok(Classified::Expired),
+    }
 }
 
 fn check_descriptor(
@@ -316,14 +337,151 @@ fn run_operation(
                 &operation,
             )
         }
-        ConvertedRequest::Unsupported => finish_failed(
+        ConvertedRequest::Query(query) => {
+            fresh.bound = Some(query.bound);
+            run_query(coordinator, context, link, peer, fresh, *query)
+        }
+        ConvertedRequest::Unavailable => {
+            let arm = ResultArm::Failed {
+                code: "UNAVAILABLE".to_owned(),
+                context: String::new(),
+            };
+            finish_without_plan(coordinator, context, link, peer, fresh, arm, Vec::new())
+        }
+    }
+}
+
+/// Executes one directory query: a continuation answers from the retained
+/// pages, a fresh query plans and renders its first page, and a monitor
+/// mutation commits as `no_content`.
+fn run_query(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    link: LinkId,
+    peer: ServerId,
+    mut fresh: FreshRequest,
+    query: convert::QueryRequest,
+) -> Result<(), Violation> {
+    let scope = super::query::CursorScope {
+        coordinator: coordinator.config.server_id,
+        network_id: coordinator.config.network_id,
+    };
+    coordinator.queries.expire(context.now());
+    if let Some(cursor) = query.cursor {
+        let page = coordinator
+            .queries
+            .next_page(context, &scope, &query.identity, cursor)?;
+        return finish_without_plan(
             coordinator,
             context,
             link,
             peer,
             fresh,
-            DomainError::BadState,
+            page.arm,
+            page.replies,
+        );
+    }
+    let rebuild =
+        |domain: &agenc_ircd_domain::DomainState| convert::rebuild_query(domain, &query.identity);
+    let key_for = |_: &agenc_ircd_domain::ExternalInputRequest| None;
+    let planned = plan_federated_command(
+        context,
+        query.bound,
+        &rebuild,
+        &key_for,
+        &coordinator.verifier,
+        coordinator.dummy,
+    );
+    fresh.command = Some(query.command);
+    match planned {
+        Ok(FederatedPlan::Ready(decision)) => finish_query_decision(
+            coordinator,
+            context,
+            link,
+            peer,
+            fresh,
+            &scope,
+            &query.identity,
+            decision,
         ),
+        Ok(FederatedPlan::Crypto(_)) => Err(Violation::Codec),
+        Err(FederatedRefusal::Public(error)) => {
+            finish_failed(coordinator, context, link, peer, fresh, error)
+        }
+        Err(FederatedRefusal::Internal(error)) => Err(internal_violation(error)),
+    }
+}
+
+/// Commits a rendered page, or the failure the renderer reported.
+fn answer_page(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    link: LinkId,
+    peer: ServerId,
+    fresh: FreshRequest,
+    page: Result<super::query::Page, DomainError>,
+) -> Result<(), Violation> {
+    match page {
+        Ok(page) => finish_without_plan(
+            coordinator,
+            context,
+            link,
+            peer,
+            fresh,
+            page.arm,
+            page.replies,
+        ),
+        Err(error) => finish_failed(coordinator, context, link, peer, fresh, error),
+    }
+}
+
+// agenc-review: allow owner=runtime reviewed=2026-09-02 reason=a query decision carries its link peer request cursor scope identity and decision to one result boundary
+#[allow(clippy::too_many_arguments)]
+fn finish_query_decision(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    link: LinkId,
+    peer: ServerId,
+    fresh: FreshRequest,
+    scope: &super::query::CursorScope,
+    identity: &super::query::QueryIdentity,
+    decision: PlanDecision,
+) -> Result<(), Violation> {
+    match decision {
+        PlanDecision::Query(plan) => {
+            let page = coordinator
+                .queries
+                .first_page(context, scope, identity, &plan);
+            answer_page(coordinator, context, link, peer, fresh, page)
+        }
+        PlanDecision::Mutation(plan) => {
+            let (Some(bound), Some(command)) = (fresh.bound, fresh.command.as_ref()) else {
+                return Err(Violation::Codec);
+            };
+            let Ok(fanout) =
+                crate::mutation_render::render_mutation(context, bound, None, command, &plan)
+            else {
+                return finish_failed(
+                    coordinator,
+                    context,
+                    link,
+                    peer,
+                    fresh,
+                    DomainError::ServerBusy,
+                );
+            };
+            stage_with_plan(
+                coordinator,
+                context,
+                link,
+                peer,
+                fresh,
+                ResultArm::NoContent,
+                plan,
+                fanout,
+            )
+        }
+        other => finish_decision(coordinator, context, link, peer, fresh, other),
     }
 }
 
@@ -612,7 +770,13 @@ fn stage_with_plan(
 ) -> Result<(), Violation> {
     let completion_event_id = fresh_event_id(context)?;
     let generation = plan.resulting_revision().get();
-    let encoded = encode_result(coordinator, &fresh, &arm, Some(completion_event_id))?;
+    let encoded = encode_result(
+        coordinator,
+        &fresh,
+        &arm,
+        Some(completion_event_id),
+        Vec::new(),
+    )?;
     let writes = request_rows(
         coordinator,
         &fresh,
@@ -671,6 +835,24 @@ fn finish_failed(
     fresh: FreshRequest,
     error: DomainError,
 ) -> Result<(), Violation> {
+    let arm = ResultArm::Failed {
+        code: failure_code(error).to_owned(),
+        context: String::new(),
+    };
+    finish_without_plan(coordinator, context, link, peer, fresh, arm, Vec::new())
+}
+
+/// Answers a request that produced no plan with a durable result carrying
+/// `arm` and `replies`, staged behind a checkpoint plan.
+fn finish_without_plan(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    link: LinkId,
+    peer: ServerId,
+    fresh: FreshRequest,
+    arm: ResultArm,
+    replies: Vec<agenc_ircd_federation_wire::SchemaObject>,
+) -> Result<(), Violation> {
     let FreshRequest {
         key,
         header,
@@ -688,12 +870,12 @@ fn finish_failed(
         &header,
         descriptor,
         request_object_id,
-        error,
+        (arm, replies),
         charge,
     )
 }
 
-// agenc-review: allow owner=runtime reviewed=2026-09-02 reason=a request outcome carries its link peer replay key header descriptor object identity error and charge to one durable staging boundary
+// agenc-review: allow owner=runtime reviewed=2026-09-02 reason=a request outcome carries its link peer replay key header descriptor object identity result and charge to one durable staging boundary
 #[allow(clippy::too_many_arguments)]
 fn fail_without_plan(
     coordinator: &mut FederationCoordinator,
@@ -704,10 +886,14 @@ fn fail_without_plan(
     header: &RequestHeader,
     descriptor: OperationDescriptor,
     request_object_id: FederationHash32,
-    error: DomainError,
+    result: (ResultArm, Vec<agenc_ircd_federation_wire::SchemaObject>),
     charge: Option<IngressCharge>,
 ) -> Result<(), Violation> {
-    coordinator.counters.requests_failed = coordinator.counters.requests_failed.saturating_add(1);
+    let (arm, replies) = result;
+    if matches!(arm, ResultArm::Failed { .. }) {
+        coordinator.counters.requests_failed =
+            coordinator.counters.requests_failed.saturating_add(1);
+    }
     let fresh = FreshRequest {
         key,
         header: *header,
@@ -718,11 +904,7 @@ fn fail_without_plan(
         mutation: MutationContext::default(),
         charge,
     };
-    let arm = ResultArm::Failed {
-        code: failure_code(error).to_owned(),
-        context: String::new(),
-    };
-    let encoded = encode_result(coordinator, &fresh, &arm, None)?;
+    let encoded = encode_result(coordinator, &fresh, &arm, None, replies)?;
     let plan = context
         .domain()
         .plan_account_service_checkpoint()
@@ -769,6 +951,7 @@ fn encode_result(
     fresh: &FreshRequest,
     arm: &ResultArm,
     completion_event_id: Option<EventId>,
+    replies: Vec<agenc_ircd_federation_wire::SchemaObject>,
 ) -> Result<Vec<u8>, Violation> {
     if !result_kind_permitted(fresh.header.opcode, arm.kind()) {
         return Err(Violation::Codec);
@@ -783,7 +966,7 @@ fn encode_result(
     };
     let object = arm
         .to_object()
-        .and_then(|object| header.build(&object, Vec::new()))
+        .and_then(|object| header.build(&object, replies))
         .map_err(|_| Violation::Codec)?;
     encode_object(&object).map_err(|_| Violation::Codec)
 }

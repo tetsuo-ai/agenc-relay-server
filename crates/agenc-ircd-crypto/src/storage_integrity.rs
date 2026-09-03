@@ -16,6 +16,7 @@ const GUARD_KEY_LABEL: &[u8] = b"agenc-chat rollback guard file mac key v1";
 const STATE_META_MAC_LABEL: &[u8] = b"agenc-chat state meta commit authorization v1";
 const RESERVATION_MAC_LABEL: &[u8] = b"agenc-chat nonce reservation state mac v1";
 const GUARD_MAC_LABEL: &[u8] = b"agenc-chat rollback guard mac v1";
+const QUERY_CURSOR_MAC_LABEL: &[u8] = b"agenc-chat query cursor v1";
 const HEADER_HASH_LABEL: &[u8] = b"agenc-chat complete database header v1";
 const KEY_CHECK_LABEL: &[u8] = b"agenc-chat database header v1";
 const RESERVATION_HASH_LABEL: &[u8] = b"agenc-chat nonce reservation state hash v1";
@@ -183,6 +184,26 @@ pub fn authenticate_state_meta(
         STATE_META_MAC_LABEL,
         &[database_header_hash.as_bytes(), encoded_tbs],
     )
+}
+
+/// The per-process key behind federation query cursors (spec B.3).
+pub struct QueryCursorKey(SecretBytes<32>);
+
+impl QueryCursorKey {
+    /// Wraps thirty-two bytes drawn from the operating-system CSPRNG at
+    /// startup.
+    #[must_use]
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(SecretBytes::new(bytes))
+    }
+}
+
+/// Computes one federation query cursor over its canonical binding TBS.
+pub fn authenticate_query_cursor(
+    key: &QueryCursorKey,
+    encoded_tbs: &[u8],
+) -> Result<StorageAuthenticator, CryptoError> {
+    keyed_authenticator(&key.0, QUERY_CURSOR_MAC_LABEL, &[encoded_tbs])
 }
 
 /// Authenticates one canonical nonce-reservation TBS value.

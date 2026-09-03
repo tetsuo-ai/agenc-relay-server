@@ -42,16 +42,16 @@ pub use storage::{
     derive_storage_record_key, open_storage_record, seal_storage_record,
 };
 pub use storage_integrity::{
-    BackupStreamHasher, ConstructionPlanHasher, RollbackGuardRootKey, StorageAuthenticator,
-    StorageDigest, StorageIntegrityContext, StorageIntegrityKeys, TrackedStateHasher,
-    admin_audit_checkpoint_hash, admin_audit_event_hash, admin_confirmation_token_hash,
-    audit_signing_key_id, authenticate_nonce_reservation, authenticate_rollback_guard,
-    authenticate_state_meta, backup_signing_key_id, database_header_hash, database_key_check,
-    derive_storage_integrity_keys, integrity_checkpoint_hash, integrity_manifest_hash,
-    nonce_reservation_hash, rekey_transform_profile_hash, restore_transform_profile_hash,
-    rollback_guard_hash, sealed_record_id, storage_operation_id, storage_operation_key_id,
-    storage_output_path_hash, storage_qualification_component_hash, tracked_record_commitment,
-    tracked_state_digest,
+    BackupStreamHasher, ConstructionPlanHasher, QueryCursorKey, RollbackGuardRootKey,
+    StorageAuthenticator, StorageDigest, StorageIntegrityContext, StorageIntegrityKeys,
+    TrackedStateHasher, admin_audit_checkpoint_hash, admin_audit_event_hash,
+    admin_confirmation_token_hash, audit_signing_key_id, authenticate_nonce_reservation,
+    authenticate_query_cursor, authenticate_rollback_guard, authenticate_state_meta,
+    backup_signing_key_id, database_header_hash, database_key_check, derive_storage_integrity_keys,
+    integrity_checkpoint_hash, integrity_manifest_hash, nonce_reservation_hash,
+    rekey_transform_profile_hash, restore_transform_profile_hash, rollback_guard_hash,
+    sealed_record_id, storage_operation_id, storage_operation_key_id, storage_output_path_hash,
+    storage_qualification_component_hash, tracked_record_commitment, tracked_state_digest,
 };
 pub use tls_ticket::{
     MAX_TLS_TICKET_BYTES, MAX_TLS_TICKET_PLAINTEXT_BYTES, OpenedTlsTicket, TlsTicketKey,

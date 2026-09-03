@@ -63,6 +63,12 @@ struct Edge {
     assembler: FragmentAssembler,
     inbox: mpsc::Sender<FederationInbound>,
     next_link: u64,
+    /// The last event this edge acknowledged.
+    last_ack: Option<(u64, agenc_ircd_types::EventId)>,
+    /// The projection generation this edge has active.
+    projection_generation: u64,
+    /// The channel revisions this edge last learned from events.
+    channel_revisions: std::collections::BTreeMap<agenc_ircd_types::ChannelInstanceId, u64>,
 }
 
 impl Edge {
@@ -77,6 +83,9 @@ impl Edge {
             assembler: FragmentAssembler::new(),
             inbox,
             next_link: u64::from(seed).saturating_add(100),
+            last_ack: None,
+            projection_generation: 1,
+            channel_revisions: std::collections::BTreeMap::new(),
         }
     }
 
@@ -284,7 +293,9 @@ async fn declare(edge: &mut Edge, origin: &mut Origin, update: bool) -> TestResu
     Ok(())
 }
 
-async fn synchronize(edge: &mut Edge, origins: &mut [&mut Origin]) -> TestResult {
+/// Replays the origins and resumes from the edge's last acknowledged
+/// cursor, returning the coordinator's FRESUME reply.
+async fn synchronize(edge: &mut Edge, origins: &mut [&mut Origin]) -> TestResult<FederationFrame> {
     edge.frame(FederationFrame::OriginReset {
         coordinator_server_id: COORDINATOR,
         server_incarnation: edge.incarnation,
@@ -300,7 +311,29 @@ async fn synchronize(edge: &mut Edge, origins: &mut [&mut Origin]) -> TestResult
         edge_server_id: edge.server_id,
         server_incarnation: edge.incarnation,
     })
-    .await
+    .await?;
+    let cursor = match edge.last_ack {
+        Some((delivery_sequence, event_id)) => agenc_ircd_federation_wire::DeliveryCursor::At {
+            delivery_sequence,
+            event_id,
+        },
+        None => agenc_ircd_federation_wire::DeliveryCursor::Empty,
+    };
+    edge.frame(FederationFrame::Resume {
+        coordinator_server_id: COORDINATOR,
+        projection_generation: edge.projection_generation,
+        cursor,
+    })
+    .await?;
+    edge.next_frame().await
+}
+
+/// Synchronizes and requires FRESUME OK.
+async fn synchronize_ok(edge: &mut Edge, origins: &mut [&mut Origin]) -> TestResult {
+    match synchronize(edge, origins).await? {
+        FederationFrame::ResumeOk { .. } => Ok(()),
+        other => Err(format!("expected FRESUME OK, got {:?}", other.kind()).into()),
+    }
 }
 
 /// The decoded answer to one request: the result arm plus the events the
@@ -399,12 +432,39 @@ async fn decode_event(
     }
     let arm = decode_event_arm(&event, &mut budget)?;
     let projected = projected_event_of(header.event_kind, &arm, &mut budget)?;
+    match &projected {
+        ProjectedEvent::ChannelVisible(detail) => {
+            edge.channel_revisions
+                .insert(detail.channel_id, detail.channel_revision.get());
+        }
+        ProjectedEvent::MemberJoined { view, .. } => {
+            edge.channel_revisions.insert(
+                view.membership.channel_id,
+                view.membership.membership_revision.get(),
+            );
+        }
+        ProjectedEvent::MemberParted {
+            channel_id,
+            resulting_revision,
+            ..
+        }
+        | ProjectedEvent::TopicChanged {
+            channel_id,
+            resulting_revision,
+            ..
+        } => {
+            edge.channel_revisions
+                .insert(*channel_id, resulting_revision.get());
+        }
+        _ => {}
+    }
     edge.frame(FederationFrame::Ack {
         coordinator_server_id: COORDINATOR,
         delivery_sequence,
         event_id: header.event_id,
     })
     .await?;
+    edge.last_ack = Some((delivery_sequence, header.event_id));
     Ok((header, projected))
 }
 
@@ -520,7 +580,7 @@ async fn origin_exchange_and_session_open_commit_result_then_events() -> TestRes
         let mut edge = Edge::new(inbox, 40);
         let mut origin = Origin::new(60);
         edge.establish().await?;
-        synchronize(&mut edge, &mut [&mut origin]).await?;
+        synchronize_ok(&mut edge, &mut [&mut origin]).await?;
         let mut events = Vec::new();
         let (session_id, user_id, revision) =
             open_session(&mut edge, &mut origin, "alice", &mut events).await?;
@@ -571,7 +631,7 @@ async fn exact_duplicate_replays_identical_result_bytes_from_storage() -> TestRe
         let mut edge = Edge::new(inbox, 41);
         let mut origin = Origin::new(61);
         edge.establish().await?;
-        synchronize(&mut edge, &mut [&mut origin]).await?;
+        synchronize_ok(&mut edge, &mut [&mut origin]).await?;
         let operation = session_open(61, "bob");
         let bytes = request(&mut edge, &mut origin, &operation).await?;
         let mut events = Vec::new();
@@ -608,7 +668,7 @@ async fn sequence_gap_closes_the_link() -> TestResult {
         let mut edge = Edge::new(inbox, 42);
         let mut origin = Origin::new(62);
         edge.establish().await?;
-        synchronize(&mut edge, &mut [&mut origin]).await?;
+        synchronize_ok(&mut edge, &mut [&mut origin]).await?;
         origin.sequence = 3;
         request(&mut edge, &mut origin, &session_open(62, "carol")).await?;
         edge.expect_closed().await
@@ -623,7 +683,7 @@ async fn stale_expected_revision_yields_a_failed_result() -> TestResult {
         let mut edge = Edge::new(inbox, 43);
         let mut origin = Origin::new(63);
         edge.establish().await?;
-        synchronize(&mut edge, &mut [&mut origin]).await?;
+        synchronize_ok(&mut edge, &mut [&mut origin]).await?;
         let mut events = Vec::new();
         let (session_id, _, revision) =
             open_session(&mut edge, &mut origin, "dave", &mut events).await?;
@@ -660,8 +720,8 @@ async fn joins_and_messages_project_across_two_edges() -> TestResult {
         let mut origin_b = Origin::new(65);
         edge_a.establish().await?;
         edge_b.establish().await?;
-        synchronize(&mut edge_a, &mut [&mut origin_a]).await?;
-        synchronize(&mut edge_b, &mut [&mut origin_b]).await?;
+        synchronize_ok(&mut edge_a, &mut [&mut origin_a]).await?;
+        synchronize_ok(&mut edge_b, &mut [&mut origin_b]).await?;
         let mut events_a = Vec::new();
         let mut events_b = Vec::new();
         let (session_a, user_a, revision_a) =
@@ -812,7 +872,7 @@ async fn wrong_acknowledgement_closes_the_link() -> TestResult {
         let mut edge = Edge::new(inbox, 46);
         let mut origin = Origin::new(66);
         edge.establish().await?;
-        synchronize(&mut edge, &mut [&mut origin]).await?;
+        synchronize_ok(&mut edge, &mut [&mut origin]).await?;
         request(&mut edge, &mut origin, &session_open(66, "gina")).await?;
         // Read the result and first event without acknowledging, then ack
         // the wrong sequence.
@@ -843,8 +903,8 @@ async fn session_close_hides_the_session_on_every_sharing_edge() -> TestResult {
         let mut origin_b = Origin::new(68);
         edge_a.establish().await?;
         edge_b.establish().await?;
-        synchronize(&mut edge_a, &mut [&mut origin_a]).await?;
-        synchronize(&mut edge_b, &mut [&mut origin_b]).await?;
+        synchronize_ok(&mut edge_a, &mut [&mut origin_a]).await?;
+        synchronize_ok(&mut edge_b, &mut [&mut origin_b]).await?;
         let mut events_a = Vec::new();
         let mut events_b = Vec::new();
         let (session_a, _, revision_a) =
@@ -923,13 +983,13 @@ async fn reconnect_replays_origins_and_continues_the_sequence() -> TestResult {
         let mut edge = Edge::new(inbox, 49);
         let mut origin = Origin::new(69);
         edge.establish().await?;
-        synchronize(&mut edge, &mut [&mut origin]).await?;
+        synchronize_ok(&mut edge, &mut [&mut origin]).await?;
         let mut events = Vec::new();
         let (session_id, _, revision) =
             open_session(&mut edge, &mut origin, "june", &mut events).await?;
         edge.close().await?;
         edge.establish().await?;
-        synchronize(&mut edge, &mut [&mut origin]).await?;
+        synchronize_ok(&mut edge, &mut [&mut origin]).await?;
         request(
             &mut edge,
             &mut origin,
@@ -961,6 +1021,9 @@ async fn synchronous_grace_expiry_hides_every_hosted_session() -> TestResult {
             network_id: NETWORK,
             server_id: COORDINATOR,
             server_name: COORDINATOR_NAME.to_owned(),
+            recovery_epoch: RecoveryEpoch::from_bytes([34; 16]),
+            query_cursor_key: [21; 32],
+            process_nonce: [22; 16],
             outbox_bytes_per_edge: 1 << 20,
             outbox_objects_per_edge: 64,
         },
@@ -1037,4 +1100,352 @@ async fn synchronous_grace_expiry_hides_every_hosted_session() -> TestResult {
         "the session hides only after commit"
     );
     Ok(())
+}
+
+/// Joins one channel from the origin and reads its own events through the
+/// completion, returning the channel identity.
+async fn join_channel(
+    edge: &mut Edge,
+    origin: &mut Origin,
+    session_id: SessionId,
+    revision: u64,
+    channel_name: &str,
+) -> TestResult<agenc_ircd_types::ChannelInstanceId> {
+    let mut events = Vec::new();
+    request(
+        edge,
+        origin,
+        &FederatedOperation::Join {
+            session_id,
+            expected_session_revision: revision,
+            targets: vec![JoinTarget {
+                channel_name: channel_name.to_owned(),
+                join_key: zeroize::Zeroizing::new(Vec::new()),
+            }],
+        },
+    )
+    .await?;
+    let joined = answer(edge, &mut events).await?;
+    origin.sequence += 1;
+    if joined.header.result_kind != FederationResultKind::Committed {
+        return Err("join was not committed".into());
+    }
+    let completion = joined.header.completion_event_id.ok_or("no completion")?;
+    while !events
+        .iter()
+        .any(|(header, _)| header.event_id == completion)
+    {
+        events.push(next_event(edge).await?);
+    }
+    events
+        .iter()
+        .find_map(|(_, event)| match event {
+            ProjectedEvent::ChannelVisible(detail) => Some(detail.channel_id),
+            _ => None,
+        })
+        .ok_or_else(|| "join produced no channel_visible".into())
+}
+
+#[tokio::test]
+async fn resume_with_the_retained_cursor_replays_events_reserved_while_away() -> TestResult {
+    let a = peer_identity(ServerId::from_bytes([52; 16]), "edge-a.example");
+    let b = peer_identity(ServerId::from_bytes([53; 16]), "edge-b.example");
+    run_coordinator(&[a, b], |inbox| async move {
+        let mut edge_a = Edge::new(inbox.clone(), 52);
+        let mut edge_b = Edge::new(inbox, 53);
+        let mut origin_a = Origin::new(72);
+        let mut origin_b = Origin::new(73);
+        for (edge, origin) in [(&mut edge_a, &mut origin_a), (&mut edge_b, &mut origin_b)] {
+            edge.establish().await?;
+            let FederationFrame::ResumeOk {
+                next_delivery_sequence,
+                ..
+            } = synchronize(edge, &mut [origin]).await?
+            else {
+                return Err("expected FRESUME OK on an empty projection".into());
+            };
+            assert_eq!(next_delivery_sequence, 0);
+        }
+        let mut events_a = Vec::new();
+        let mut events_b = Vec::new();
+        let (session_a, _, revision_a) =
+            open_session(&mut edge_a, &mut origin_a, "lena", &mut events_a).await?;
+        let (session_b, _, revision_b) =
+            open_session(&mut edge_b, &mut origin_b, "milo", &mut events_b).await?;
+        join_channel(&mut edge_a, &mut origin_a, session_a, revision_a, "#away").await?;
+        // Edge a drops its link with everything acknowledged so far.
+        let cursor_a = edge_a.last_ack;
+        edge_a.close().await?;
+        // Milo joins while edge a is away; the member_joined is reserved.
+        let channel =
+            join_channel(&mut edge_b, &mut origin_b, session_b, revision_b, "#away").await?;
+        // Edge a reconnects and resumes from its exact cursor.
+        edge_a.establish().await?;
+        let (sequence, _) = cursor_a.ok_or("edge a acknowledged nothing")?;
+        let FederationFrame::ResumeOk {
+            next_delivery_sequence,
+            projection_generation,
+            ..
+        } = synchronize(&mut edge_a, &mut [&mut origin_a]).await?
+        else {
+            return Err("expected FRESUME OK".into());
+        };
+        assert_eq!(projection_generation, 1);
+        assert_eq!(next_delivery_sequence, sequence + 1);
+        let (header, event) = next_event(&mut edge_a).await?;
+        assert_eq!(header.delivery_sequence, sequence + 1);
+        let ProjectedEvent::MemberJoined { view, .. } = event else {
+            return Err("expected the reserved member_joined after resume".into());
+        };
+        assert_eq!(view.membership.channel_id, channel);
+        assert_eq!(view.source.nickname.presentation(), "milo");
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn unknown_cursor_triggers_a_verified_snapshot_and_active_swap() -> TestResult {
+    let a = peer_identity(ServerId::from_bytes([54; 16]), "edge-a.example");
+    let b = peer_identity(ServerId::from_bytes([55; 16]), "edge-b.example");
+    run_coordinator(&[a, b], |inbox| async move {
+        let mut edge_a = Edge::new(inbox.clone(), 54);
+        let mut edge_b = Edge::new(inbox, 55);
+        let mut origin_a = Origin::new(74);
+        let mut origin_b = Origin::new(75);
+        for (edge, origin) in [(&mut edge_a, &mut origin_a), (&mut edge_b, &mut origin_b)] {
+            edge.establish().await?;
+            synchronize_ok(edge, &mut [origin]).await?;
+        }
+        let mut events_a = Vec::new();
+        let mut events_b = Vec::new();
+        let (session_a, user_a, revision_a) =
+            open_session(&mut edge_a, &mut origin_a, "nora", &mut events_a).await?;
+        let (session_b, _, revision_b) =
+            open_session(&mut edge_b, &mut origin_b, "omar", &mut events_b).await?;
+        let channel =
+            join_channel(&mut edge_a, &mut origin_a, session_a, revision_a, "#snap").await?;
+        join_channel(&mut edge_b, &mut origin_b, session_b, revision_b, "#snap").await?;
+        let (_, joined) = next_event(&mut edge_a).await?;
+        assert!(matches!(joined, ProjectedEvent::MemberJoined { .. }));
+        // Edge a loses its durable cursor and resumes from a stale one.
+        edge_a.close().await?;
+        edge_a.establish().await?;
+        edge_a.last_ack = Some((0, agenc_ircd_types::EventId::from_bytes([1; 16])));
+        let FederationFrame::ResumeSnapshot { .. } =
+            synchronize(&mut edge_a, &mut [&mut origin_a]).await?
+        else {
+            return Err("expected FRESUME SNAPSHOT".into());
+        };
+        let FederationFrame::SnapshotBegin {
+            identity,
+            entry_count,
+            ..
+        } = edge_a.next_frame().await?
+        else {
+            return Err("expected FSNAPSHOT BEGIN".into());
+        };
+        assert_eq!(identity.projection_generation, 2);
+        assert_eq!(identity.recovery_epoch, RecoveryEpoch::from_bytes([34; 16]));
+        let mut ids = Vec::new();
+        let mut keys = Vec::new();
+        for index in 0..entry_count {
+            let (carrier, object) = edge_a.next_object().await?;
+            let ObjectCarrier::SnapshotEntry {
+                entry_index,
+                snapshot_token,
+                object_id,
+                ..
+            } = carrier
+            else {
+                return Err("expected a snapshot entry".into());
+            };
+            assert_eq!(u64::from(entry_index), index);
+            assert_eq!(snapshot_token, identity.snapshot_token);
+            assert_eq!(object_id, object.object_id());
+            let mut budget = DecodeBudget::new(1 << 20, 4_096);
+            let entry = SchemaObject::decode_exact(
+                "FederationProjectionEntry",
+                object.as_slice(),
+                &mut budget,
+            )?;
+            let (_, key) = agenc_ircd_federation_wire::decode_projection_arm(&entry, &mut budget)?;
+            keys.push(key);
+            ids.push(object.object_id());
+        }
+        let mut sorted = keys.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            keys, sorted,
+            "entries are strictly ordered by (kind, primary)"
+        );
+        assert_eq!(
+            agenc_ircd_federation_wire::snapshot_digest(
+                &identity.recovery_epoch,
+                2,
+                identity.state_generation,
+                &ids
+            )?,
+            identity.snapshot_digest
+        );
+        // Nora's session, the channel, her membership: three entries.
+        assert_eq!(entry_count, 3);
+        let FederationFrame::SnapshotEnd { cursor, .. } = edge_a.next_frame().await? else {
+            return Err("expected FSNAPSHOT END".into());
+        };
+        assert_eq!(cursor, agenc_ircd_federation_wire::DeliveryCursor::Empty);
+        edge_a
+            .frame(FederationFrame::SnapshotReady {
+                coordinator_server_id: COORDINATOR,
+                identity,
+            })
+            .await?;
+        let FederationFrame::SnapshotActive {
+            identity: active, ..
+        } = edge_a.next_frame().await?
+        else {
+            return Err("expected FSNAPSHOT ACTIVE".into());
+        };
+        assert_eq!(active, identity);
+        // A re-sent READY is answered with the byte-identical ACTIVE.
+        edge_a
+            .frame(FederationFrame::SnapshotReady {
+                coordinator_server_id: COORDINATOR,
+                identity,
+            })
+            .await?;
+        let FederationFrame::SnapshotActive {
+            identity: again, ..
+        } = edge_a.next_frame().await?
+        else {
+            return Err("expected the repeated FSNAPSHOT ACTIVE".into());
+        };
+        assert_eq!(again, identity);
+        // Live events now arrive under generation 2 from sequence zero.
+        let mut spoke = Vec::new();
+        let expected_revision = *edge_b
+            .channel_revisions
+            .get(&channel)
+            .ok_or("edge b never learned the channel revision")?;
+        request(
+            &mut edge_b,
+            &mut origin_b,
+            &FederatedOperation::Message {
+                session_id: session_b,
+                kind: agenc_ircd_domain::MessageKind::Privmsg,
+                targets: vec![MessageTargetArg::Channel {
+                    channel_id: channel,
+                    expected_revision,
+                }],
+                tags: Vec::new(),
+                body: "after the snapshot".to_owned(),
+            },
+        )
+        .await?;
+        let result = answer(&mut edge_b, &mut spoke).await?;
+        assert_eq!(result.header.result_kind, FederationResultKind::Committed);
+        let (header, event) = next_event(&mut edge_a).await?;
+        assert_eq!(header.projection_generation, 2);
+        assert_eq!(header.delivery_sequence, 0);
+        let ProjectedEvent::MessageDelivered(record) = event else {
+            return Err("expected message_delivered under the new generation".into());
+        };
+        assert_eq!(record.body, "after the snapshot");
+        let _ = user_a;
+        Ok(())
+    })
+    .await
+}
+
+fn directory_query(
+    session_id: SessionId,
+    kind: agenc_ircd_types::FederationDirectoryQueryKind,
+    arm: SchemaObject,
+    cursor: Option<[u8; 32]>,
+) -> TestResult<FederatedOperation> {
+    let cursor_bytes: &[u8] = cursor.as_ref().map_or(&[], |cursor| cursor);
+    let query = SchemaObject::new(
+        "DirectoryQuery",
+        vec![
+            agenc_ircd_federation_wire::WireValue::Unsigned(u64::from(kind.wire_value())),
+            agenc_ircd_federation_wire::access::opaque(arm.encode_canonical()?.as_slice())?,
+            agenc_ircd_federation_wire::access::opaque(cursor_bytes)?,
+        ],
+    )?;
+    Ok(FederatedOperation::DirectoryQuery { session_id, query })
+}
+
+#[tokio::test]
+async fn names_query_answers_one_reply_page_and_a_bad_cursor_expires() -> TestResult {
+    let identity = peer_identity(ServerId::from_bytes([56; 16]), "edge.example");
+    run_coordinator(&[identity], |inbox| async move {
+        let mut edge = Edge::new(inbox, 56);
+        let mut origin = Origin::new(76);
+        edge.establish().await?;
+        synchronize_ok(&mut edge, &mut [&mut origin]).await?;
+        let mut events = Vec::new();
+        let (session_id, _, revision) =
+            open_session(&mut edge, &mut origin, "pia", &mut events).await?;
+        join_channel(&mut edge, &mut origin, session_id, revision, "#names").await?;
+        let arm = SchemaObject::new(
+            "directory.names",
+            vec![agenc_ircd_federation_wire::WireValue::Vector(vec![
+                agenc_ircd_federation_wire::SchemaObject::new(
+                    "FederationChannelName",
+                    vec![agenc_ircd_federation_wire::access::opaque(b"#names")?],
+                )?,
+            ])],
+        )?;
+        let operation = directory_query(
+            session_id,
+            agenc_ircd_types::FederationDirectoryQueryKind::Names,
+            arm,
+            None,
+        )?;
+        request(&mut edge, &mut origin, &operation).await?;
+        origin.sequence += 1;
+        let page = answer(&mut edge, &mut events).await?;
+        assert_eq!(page.header.result_kind, FederationResultKind::ReplyPage);
+        let ResultArm::ReplyPage {
+            page_sequence,
+            next_cursor,
+            ..
+        } = page.arm
+        else {
+            return Err("expected reply_page".into());
+        };
+        assert_eq!(page_sequence, 0);
+        assert!(next_cursor.is_none(), "one page holds the NAMES reply");
+        let mut budget = DecodeBudget::new(1 << 20, 4_096);
+        let result = SchemaObject::decode_exact("FederationResult", &page.bytes, &mut budget)?;
+        let replies = agenc_ircd_federation_wire::access::vector(&result, "replies")?;
+        let commands: Vec<String> = replies
+            .iter()
+            .map(crate::federation::codec::results::reply_parts_of)
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|parts| parts.command)
+            .collect();
+        assert_eq!(commands, vec!["353".to_owned(), "366".to_owned()]);
+        // A cursor the coordinator never issued expires the query.
+        let arm = SchemaObject::new(
+            "directory.list",
+            vec![agenc_ircd_federation_wire::WireValue::Vector(Vec::new())],
+        )?;
+        let operation = directory_query(
+            session_id,
+            agenc_ircd_types::FederationDirectoryQueryKind::List,
+            arm,
+            Some([9; 32]),
+        )?;
+        request(&mut edge, &mut origin, &operation).await?;
+        let expired = answer(&mut edge, &mut events).await?;
+        let ResultArm::Failed { code, .. } = expired.arm else {
+            return Err("expected failed for an unknown cursor".into());
+        };
+        assert_eq!(code, "QUERY_EXPIRED");
+        Ok(())
+    })
+    .await
 }

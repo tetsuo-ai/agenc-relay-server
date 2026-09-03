@@ -184,6 +184,12 @@ impl QueryCursorTable {
         Ok(())
     }
 
+    /// Reports whether a cursor is live, regardless of expiry.
+    #[must_use]
+    pub fn contains(&self, cursor: &[u8; 32]) -> bool {
+        self.cursors.contains_key(cursor)
+    }
+
     /// Validates a presented cursor for one continuation without consuming it.
     pub fn check(
         &self,

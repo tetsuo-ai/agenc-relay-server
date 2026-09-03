@@ -137,6 +137,11 @@ impl FederationProjector {
         self.index.restore_key(edge, record);
     }
 
+    /// Replaces one edge's standing with a snapshot cut.
+    pub fn install_edge(&mut self, edge: ServerId, records: &[ProjectionRecord]) {
+        self.index.install_edge(edge, records);
+    }
+
     /// Derives the events and rows one plan commits alongside its writes.
     /// Returns `None` when nothing projects, so callers can skip the batch.
     pub(crate) fn project(

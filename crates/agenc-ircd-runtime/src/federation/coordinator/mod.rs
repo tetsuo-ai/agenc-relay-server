@@ -10,7 +10,9 @@
 mod convert;
 mod grace;
 mod origin;
+mod query;
 mod request;
+mod snapshot;
 mod startup;
 #[cfg(test)]
 #[path = "tests/harness.rs"]
@@ -58,6 +60,12 @@ pub struct CoordinatorConfig {
     pub server_id: ServerId,
     /// The local server name used as the prefix of every rendered line.
     pub server_name: String,
+    /// The recovery epoch advertised in this coordinator's FHELLO.
+    pub recovery_epoch: RecoveryEpoch,
+    /// The per-process query cursor key drawn from the CSPRNG at startup.
+    pub query_cursor_key: [u8; 32],
+    /// The per-process nonce bound into every query cursor.
+    pub process_nonce: [u8; 16],
     /// Unacknowledged outbox bytes per edge before a snapshot is required.
     pub outbox_bytes_per_edge: u64,
     /// Unacknowledged outbox objects per edge before a snapshot is required.
@@ -95,6 +103,11 @@ struct PeerState {
     quarantined: bool,
     client_resync_epoch: u64,
     queued: VecDeque<QueuedRequest>,
+    /// Whether the link finished FRESUME or ACTIVE and receives live events.
+    active: bool,
+    snapshot: Option<snapshot::Snapshot>,
+    resend: Option<snapshot::Resend>,
+    ready_identity: Option<agenc_ircd_federation_wire::SnapshotIdentity>,
 }
 
 /// One request held while the same link waits on crypto.
@@ -145,6 +158,12 @@ enum PendingCommit {
     Cleanup {
         peer: ServerId,
     },
+    SnapshotRows {
+        peer: ServerId,
+    },
+    SnapshotReady {
+        peer: ServerId,
+    },
     Acknowledged,
 }
 
@@ -163,6 +182,8 @@ pub struct CoordinatorCounters {
     pub violations: u64,
     /// Sessions hidden by origin expiry cleanup.
     pub sessions_expired: u64,
+    /// Live query cursors.
+    pub live_cursors: u64,
 }
 
 /// The coordinator's federation state machine.
@@ -179,6 +200,7 @@ pub struct FederationCoordinator {
     crypto: Option<PendingCrypto>,
     replays: BTreeMap<StorageReadId, (LinkId, ServerId, OperationDescriptor)>,
     loader: startup::Loader,
+    queries: query::Queries,
     counters: CoordinatorCounters,
 }
 
@@ -211,10 +233,15 @@ impl FederationCoordinator {
                         quarantined: false,
                         client_resync_epoch: 0,
                         queued: VecDeque::new(),
+                        active: false,
+                        snapshot: None,
+                        resend: None,
+                        ready_identity: None,
                     },
                 )
             })
             .collect();
+        let queries = query::Queries::new(config.query_cursor_key, config.process_nonce);
         Self {
             config,
             verifier,
@@ -228,14 +255,18 @@ impl FederationCoordinator {
             crypto: None,
             replays: BTreeMap::new(),
             loader: startup::Loader::default(),
+            queries,
             counters: CoordinatorCounters::default(),
         }
     }
 
     /// Returns the STATS counters.
     #[must_use]
-    pub const fn counters(&self) -> CoordinatorCounters {
-        self.counters
+    pub fn counters(&self) -> CoordinatorCounters {
+        CoordinatorCounters {
+            live_cursors: u64::try_from(self.queries.live_cursors()).unwrap_or(u64::MAX),
+            ..self.counters
+        }
     }
 
     /// Returns the configured Server ID.
@@ -364,6 +395,15 @@ impl FederationCoordinator {
         if let Some(state) = self.peers.get_mut(&peer) {
             state.live = None;
             state.queued.clear();
+            state.active = false;
+            state.resend = None;
+            if state
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| !snapshot.ready)
+            {
+                state.snapshot = None;
+            }
         }
         if self
             .crypto
@@ -449,10 +489,20 @@ impl FederationCoordinator {
                 }
                 origin::ready(self, context, peer, server_incarnation)
             }
-            FederationFrame::Resume { .. } | FederationFrame::SnapshotActive { .. } => {
-                // Resume and snapshot handling is the next slice; a base
-                // link answers these only after the origin exchange.
-                Err(Violation::Phase)
+            FederationFrame::Resume {
+                coordinator_server_id,
+                projection_generation,
+                cursor,
+            } => {
+                self.require_self(coordinator_server_id)?;
+                snapshot::resume(self, context, link, peer, projection_generation, cursor)
+            }
+            FederationFrame::SnapshotReady {
+                coordinator_server_id,
+                identity,
+            } => {
+                self.require_self(coordinator_server_id)?;
+                snapshot::ready(self, context, link, peer, identity)
             }
             _ => Err(Violation::Phase),
         }
@@ -620,7 +670,9 @@ impl FederationCoordinator {
     /// Reports whether a storage read belongs to the coordinator.
     #[must_use]
     pub fn owns_storage_read(&self, read_id: StorageReadId) -> bool {
-        self.loader.owns(read_id) || self.replays.contains_key(&read_id)
+        self.loader.owns(read_id)
+            || self.replays.contains_key(&read_id)
+            || snapshot::owns_read(self, read_id)
     }
 
     /// Consumes a completed storage read that belongs to the coordinator.
@@ -630,6 +682,10 @@ impl FederationCoordinator {
         message: crate::bridge::StorageReadCompletionMessage,
     ) {
         if startup::read_completed(self, context, &message) {
+            return;
+        }
+        if snapshot::owns_read(self, message.read_id) {
+            snapshot::resend_completed(self, context, message);
             return;
         }
         request::replay_completed(self, context, message);
@@ -650,7 +706,7 @@ impl FederationCoordinator {
         context: &mut StateCoreContext,
         entry: crate::state_core::timers::TimerEntry,
     ) -> bool {
-        grace::timer_fired(self, context, entry)
+        grace::timer_fired(self, context, entry) || snapshot::timer_fired(self, context, entry)
     }
 
     /// Finishes the batch that just committed and delivers its events.
@@ -683,10 +739,33 @@ impl FederationCoordinator {
                 peer, link, frame, ..
             }) => self.send_frame(context, link, peer, &frame),
             Some(PendingCommit::Cleanup { peer }) => grace::continue_cleanup(self, context, peer),
+            Some(PendingCommit::SnapshotRows { peer }) => {
+                snapshot::continue_write(self, context, peer)
+            }
+            Some(PendingCommit::SnapshotReady { peer }) => {
+                snapshot::ready_committed(self, context, peer)
+            }
             Some(PendingCommit::Acknowledged) | None => {}
         }
         self.deliver(context, events);
+        self.continue_background(context);
         request::drain_queued(self, context);
+    }
+
+    /// Resumes bounded background work that waits for a free batch slot:
+    /// pending snapshot rows and expiry cleanup.
+    fn continue_background(&mut self, context: &mut StateCoreContext) {
+        let peers: Vec<ServerId> = self.peers.keys().copied().collect();
+        for peer in peers {
+            if self.pending.is_some() {
+                return;
+            }
+            snapshot::continue_write(self, context, peer);
+            if self.pending.is_some() {
+                return;
+            }
+            grace::continue_cleanup(self, context, peer);
+        }
     }
 
     /// Drops the work behind a rejected batch; the edge retries it.
@@ -703,13 +782,18 @@ impl FederationCoordinator {
             let Some(state) = self.peers.get_mut(&event.target) else {
                 continue;
             };
+            // A link that is not active yet replays the durable outbox when
+            // it resumes; only live delivery tracks the window here.
+            if !state.active || event.projection_generation != state.projection_generation {
+                continue;
+            }
             let bytes = u64::try_from(event.encoded.len()).unwrap_or(u64::MAX);
             state
                 .outbox
                 .unacked
                 .push_back((event.delivery_sequence, event.event_id, bytes));
             state.outbox.unacked_bytes = state.outbox.unacked_bytes.saturating_add(bytes);
-            let over_ceiling = state.outbox.unacked.len() as u64
+            let over_ceiling = u64::try_from(state.outbox.unacked.len()).unwrap_or(u64::MAX)
                 > self.config.outbox_objects_per_edge
                 || state.outbox.unacked_bytes > self.config.outbox_bytes_per_edge;
             if over_ceiling {
