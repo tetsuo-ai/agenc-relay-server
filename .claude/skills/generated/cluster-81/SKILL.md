@@ -1,9 +1,9 @@
 ---
-name: cluster-82
-description: "Skill for the Cluster_82 area of agenc-ircd. 53 symbols across 3 files."
+name: cluster-81
+description: "Skill for the Cluster_81 area of agenc-ircd. 53 symbols across 3 files."
 ---
 
-# Cluster_82
+# Cluster_81
 
 53 symbols | 3 files | Cohesion: 96%
 
@@ -11,7 +11,7 @@ description: "Skill for the Cluster_82 area of agenc-ircd. 53 symbols across 3 f
 
 - Working with code in `crates/`
 - Understanding how blocks_registration, supports_multiline, take_single_parameter work
-- Modifying cluster_82-related functionality
+- Modifying cluster_81-related functionality
 
 ## Key Files
 
@@ -71,10 +71,11 @@ Start here when exploring this area:
 |------|-------------|
 | Tests | 4 calls |
 | Fuzz_targets | 2 calls |
+| Coordinator | 1 calls |
 
 ## How to Explore
 
 1. `context({name: "blocks_registration"})` — see callers and callees
-2. `query({search_query: "cluster_82"})` — find related execution flows
+2. `query({search_query: "cluster_81"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

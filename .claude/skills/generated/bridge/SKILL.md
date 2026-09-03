@@ -1,11 +1,11 @@
 ---
 name: bridge
-description: "Skill for the Bridge area of agenc-ircd. 79 symbols across 17 files."
+description: "Skill for the Bridge area of agenc-ircd. 92 symbols across 19 files."
 ---
 
 # Bridge
 
-79 symbols | 17 files | Cohesion: 78%
+92 symbols | 19 files | Cohesion: 78%
 
 ## When to Use
 
@@ -18,14 +18,14 @@ description: "Skill for the Bridge area of agenc-ircd. 79 symbols across 17 file
 | File | Symbols |
 |------|---------|
 | `crates/agenc-ircd-runtime/src/bridge/storage.rs` | begin, abandon, begin_read, abandon_read, finish_read (+20) |
+| `crates/agenc-ircd-runtime/src/channels.rs` | into_runtime, defer, submit, crypto_completed, connection_closed (+8) |
 | `crates/agenc-ircd-runtime/src/observe/metrics.rs` | snapshot, is_public, iter, client_admitted, client_closed (+5) |
-| `crates/agenc-ircd-runtime/src/bridge/crypto.rs` | cancel, wait, shutdown, into_shutdown, cancel_all (+4) |
+| `crates/agenc-ircd-runtime/src/bridge/crypto.rs` | try_submit, cancel, in_flight, reap_finished, wait (+4) |
 | `crates/agenc-ircd-runtime/src/connection/queue.rs` | rollback, closed_reason, take_warning, is_closed, pop (+3) |
 | `crates/agenc-ircd-runtime/src/admission/transport.rs` | install_observer, prefix_erasure_delay, reload, admit, released |
 | `crates/agenc-ircd-storage/src/owner.rs` | wait, into_shutdown, shutdown, checkpoint_due, try_checkpoint |
 | `crates/agenc-ircd-runtime/src/daemon.rs` | wait_for_prefix_erasure, unwind_live_state_and_log, shutdown_startup_bridges |
-| `crates/agenc-ircd-runtime/src/channels.rs` | connection_closed, timer_fired, take_pending |
-| `crates/agenc-ircd-runtime/src/state_core/mod.rs` | crypto_mut, start_integrity_checkpoint |
+| `crates/agenc-ircd-runtime/src/state_core/mod.rs` | complete_command_observation, crypto_mut, start_integrity_checkpoint |
 | `crates/agenc-ircd-runtime/src/bridge/mod.rs` | new, job_ids_round_trip_and_the_completion_capacity_is_two |
 
 ## Entry Points
@@ -67,27 +67,27 @@ Start here when exploring this area:
 
 | Flow | Type | Steps |
 |------|------|-------|
-| `Replay_read → Reap_finished` | cross_community | 4 |
-| `Replay_read → CryptoSubmitRefused` | cross_community | 4 |
-| `Replay_read → New` | cross_community | 4 |
-| `Replay_read → CryptoCompletionMessage` | cross_community | 4 |
-| `Start → Lock` | cross_community | 3 |
+| `Route_registered → Compact` | cross_community | 4 |
+| `Route_registered → HeapEntry` | cross_community | 4 |
+| `Connection_closed → Reap_finished` | cross_community | 4 |
 | `Run → Lock` | cross_community | 3 |
+| `Start → Lock` | cross_community | 3 |
 | `Terminal_delivery_failure_keeps_the_committed_intent_terminal → Lock` | cross_community | 3 |
+| `Route_registered → Complete_command_observation` | intra_community | 3 |
+| `Route_registered → Now` | cross_community | 3 |
+| `Route_registered → Timers_mut` | cross_community | 3 |
 | `Authenticated_stats_read_the_process_metrics_registry → Lock` | cross_community | 3 |
-| `Account_mutation_waits_for_one_atomic_state_core_commit → Lock` | cross_community | 3 |
-| `Confirmed_die_commits_intent_before_requesting_stop → Lock` | cross_community | 3 |
 
 ## Connected Areas
 
 | Area | Connections |
 |------|-------------|
-| Tests | 4 calls |
-| State_core | 3 calls |
-| Cluster_529 | 2 calls |
+| State_core | 13 calls |
+| Cluster_610 | 2 calls |
 | Observe | 2 calls |
-| Cluster_364 | 2 calls |
-| Listener | 1 calls |
+| Tests | 2 calls |
+| Cluster_90 | 1 calls |
+| Cluster_403 | 1 calls |
 
 ## How to Explore
 

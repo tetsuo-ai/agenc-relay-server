@@ -1,11 +1,11 @@
 ---
 name: observe
-description: "Skill for the Observe area of agenc-ircd. 153 symbols across 9 files."
+description: "Skill for the Observe area of agenc-ircd. 154 symbols across 9 files."
 ---
 
 # Observe
 
-153 symbols | 9 files | Cohesion: 75%
+154 symbols | 9 files | Cohesion: 75%
 
 ## When to Use
 
@@ -17,7 +17,7 @@ description: "Skill for the Observe area of agenc-ircd. 153 symbols across 9 fil
 
 | File | Symbols |
 |------|---------|
-| `crates/agenc-ircd-runtime/src/observe/adapter.rs` | process_started, storage_recovered, state_core_ready, listener_lifecycle, clock_trust_changed (+45) |
+| `crates/agenc-ircd-runtime/src/observe/adapter.rs` | process_started, storage_recovered, state_core_ready, listener_lifecycle, federation_link (+46) |
 | `crates/agenc-ircd-runtime/src/observe/log.rs` | depth, hours, get, new, set_retention (+45) |
 | `crates/agenc-ircd-runtime/src/observe/health.rs` | mark, clear, flag, readiness_is_the_conjunction_of_every_stage_and_can_be_cleared, ready (+10) |
 | `crates/agenc-ircd-runtime/src/daemon.rs` | stop_deadline_expired, wait_for_blocking_owners, fail_stop_shutdown, unwind_live_storage_and_log, shutdown_blocking_owners (+7) |
@@ -35,7 +35,7 @@ Start here when exploring this area:
 - **`storage_recovered`** (Function) — `crates/agenc-ircd-runtime/src/observe/adapter.rs:65`
 - **`state_core_ready`** (Function) — `crates/agenc-ircd-runtime/src/observe/adapter.rs:87`
 - **`listener_lifecycle`** (Function) — `crates/agenc-ircd-runtime/src/observe/adapter.rs:98`
-- **`clock_trust_changed`** (Function) — `crates/agenc-ircd-runtime/src/observe/adapter.rs:113`
+- **`federation_link`** (Function) — `crates/agenc-ircd-runtime/src/observe/adapter.rs:115`
 
 ## Key Symbols
 
@@ -45,41 +45,35 @@ Start here when exploring this area:
 | `storage_recovered` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 65 |
 | `state_core_ready` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 87 |
 | `listener_lifecycle` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 98 |
-| `clock_trust_changed` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 113 |
-| `hardening_warning` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 132 |
-| `reload` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 258 |
-| `admin_action` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 280 |
-| `admin_authentication` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 298 |
-| `overload_transition` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 314 |
-| `shutdown_phase` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 332 |
-| `with_count` | Function | `crates/agenc-ircd-runtime/src/observe/events.rs` | 449 |
+| `federation_link` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 115 |
+| `clock_trust_changed` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 136 |
+| `hardening_warning` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 155 |
+| `reload` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 281 |
+| `admin_action` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 303 |
+| `admin_authentication` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 321 |
+| `overload_transition` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 337 |
+| `shutdown_phase` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 355 |
+| `with_count` | Function | `crates/agenc-ircd-runtime/src/observe/events.rs` | 457 |
 | `depth` | Function | `crates/agenc-ircd-runtime/src/observe/log.rs` | 148 |
-| `set_log_retention` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 273 |
-| `with_purpose` | Function | `crates/agenc-ircd-runtime/src/observe/events.rs` | 428 |
-| `with_error` | Function | `crates/agenc-ircd-runtime/src/observe/events.rs` | 435 |
+| `set_log_retention` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 296 |
+| `with_purpose` | Function | `crates/agenc-ircd-runtime/src/observe/events.rs` | 436 |
+| `with_error` | Function | `crates/agenc-ircd-runtime/src/observe/events.rs` | 443 |
 | `hours` | Function | `crates/agenc-ircd-runtime/src/observe/log.rs` | 59 |
 | `get` | Function | `crates/agenc-ircd-runtime/src/observe/log.rs` | 68 |
 | `new` | Function | `crates/agenc-ircd-runtime/src/observe/log.rs` | 82 |
-| `set_retention` | Function | `crates/agenc-ircd-runtime/src/observe/log.rs` | 155 |
-
-## Execution Flows
-
-| Flow | Type | Steps |
-|------|------|-------|
-| `Run → FileLogShutdownWork` | cross_community | 3 |
 
 ## Connected Areas
 
 | Area | Connections |
 |------|-------------|
-| Tests | 8 calls |
+| State_core | 7 calls |
 | Bridge | 7 calls |
-| Cluster_369 | 4 calls |
-| State_core | 3 calls |
-| Listener | 2 calls |
-| Cluster_386 | 2 calls |
+| Tests | 6 calls |
+| Cluster_407 | 4 calls |
+| Cluster_428 | 2 calls |
 | Admission | 2 calls |
-| Cluster_529 | 1 calls |
+| Cluster_610 | 1 calls |
+| Examples | 1 calls |
 
 ## How to Explore
 
