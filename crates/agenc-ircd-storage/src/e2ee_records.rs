@@ -1890,7 +1890,7 @@ pub struct ReplayRow {
 }
 
 /// The parsed components of one replay key.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct ReplayKey {
     /// Home server.
     pub home_server_id: [u8; ID_BYTES],

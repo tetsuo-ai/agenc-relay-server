@@ -565,6 +565,8 @@ const fn account_service_table(table: TableId) -> bool {
             | TableId::FederationOrigin
             | TableId::EdgeOutbox
             | TableId::EdgeProjection
+            | TableId::E2eeObject
+            | TableId::E2eeState
     )
 }
 

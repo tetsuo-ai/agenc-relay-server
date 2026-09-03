@@ -7,6 +7,7 @@
 //! peer rows commit with the domain mutation that caused them, and the
 //! coordinator only renders FRESULT and FEVENT lines after that commit.
 
+mod companion;
 mod convert;
 mod grace;
 mod origin;
@@ -36,6 +37,7 @@ use agenc_ircd_types::{
 use crate::RuntimeError;
 use crate::bridge::StorageReadId;
 use crate::bridge::crypto::{ChannelKeyVerifier, ChannelKeyVerifierRecord};
+use crate::e2ee::coordinator::CompanionCoordinator;
 use crate::e2ee::link::{
     CompanionAction, CompanionLinks, CompanionProfile, CompanionViolation, tick_millis,
 };
@@ -165,6 +167,11 @@ enum PendingCommit {
     Cleanup {
         peer: ServerId,
     },
+    /// A companion request batch; the executor holds its result.
+    Companion {
+        peer: ServerId,
+        link: LinkId,
+    },
     SnapshotRows {
         peer: ServerId,
     },
@@ -218,6 +225,8 @@ pub struct FederationCoordinator {
     queries: query::Queries,
     counters: CoordinatorCounters,
     companion: CompanionLinks,
+    /// The E2EE executor; `None` on a node without a sequencer.
+    companion_exec: Option<CompanionCoordinator>,
 }
 
 impl FederationCoordinator {
@@ -276,7 +285,19 @@ impl FederationCoordinator {
             backlog: VecDeque::new(),
             queries,
             counters: CoordinatorCounters::default(),
+            companion_exec: None,
         }
+    }
+
+    /// Installs the companion executor before any link exists.
+    pub fn install_companion_executor(&mut self, executor: CompanionCoordinator) {
+        self.companion_exec = Some(executor);
+    }
+
+    /// The companion executor, if one is installed.
+    #[must_use]
+    pub fn companion_executor(&self) -> Option<&CompanionCoordinator> {
+        self.companion_exec.as_ref()
     }
 
     /// Returns the STATS counters.
@@ -437,6 +458,7 @@ impl FederationCoordinator {
 
     fn handle_companion(
         &mut self,
+        context: &mut StateCoreContext,
         link: LinkId,
         peer: ServerId,
         frame: CompanionFrame,
@@ -450,18 +472,22 @@ impl FederationCoordinator {
             return Ok(());
         };
         match self.companion.on_frame(link, frame) {
-            Ok(CompanionAction::Quiet) => Ok(()),
+            Ok(CompanionAction::Quiet) => {}
             Ok(CompanionAction::Send(line)) => match live.handle.try_send(line) {
-                Ok(()) | Err(SendRefusal::Closed) => Ok(()),
-                Err(SendRefusal::QueueFull) => Err(Violation::SlowConsumer),
+                Ok(()) | Err(SendRefusal::Closed) => {}
+                Err(SendRefusal::QueueFull) => return Err(Violation::SlowConsumer),
             },
             Err(violation) => {
                 if let Ok(line) = self.companion.violation_line() {
                     let _ = live.handle.try_send(line);
                 }
-                Err(Violation::Companion(violation))
+                return Err(Violation::Companion(violation));
             }
         }
+        for admitted in self.companion.drain(link) {
+            companion::admitted(self, context, link, peer, admitted)?;
+        }
+        Ok(())
     }
 
     fn start_companion(&mut self, context: &mut StateCoreContext, link: LinkId, peer: ServerId) {
@@ -534,7 +560,7 @@ impl FederationCoordinator {
             LinkEvent::Object { carrier, object } => {
                 self.handle_object(context, link, peer, carrier, object, charge)
             }
-            LinkEvent::Companion(frame) => self.handle_companion(link, peer, frame),
+            LinkEvent::Companion(frame) => self.handle_companion(context, link, peer, frame),
             LinkEvent::Established { .. } | LinkEvent::Closed(_) => return,
         };
         if let Err(violation) = outcome
@@ -612,6 +638,9 @@ impl FederationCoordinator {
         }
         self.links.remove(&link);
         self.companion.link_closed(link);
+        if let Some(executor) = self.companion_exec.as_mut() {
+            executor.link_closed(peer);
+        }
         let _cancelled = context
             .timers_mut()
             .cancel(TimerKind::CompanionProfileDeadline, TimedId::Peer(peer));
@@ -966,6 +995,9 @@ impl FederationCoordinator {
                 let _live = self.send_frame(context, link, peer, &frame);
             }
             Some(PendingCommit::Cleanup { peer }) => grace::continue_cleanup(self, context, peer),
+            Some(PendingCommit::Companion { peer, link }) => {
+                companion::committed(self, context, link, peer);
+            }
             Some(PendingCommit::SnapshotRows { peer }) => {
                 snapshot::continue_write(self, context, peer)
             }
@@ -977,6 +1009,7 @@ impl FederationCoordinator {
         self.deliver(context, events);
         self.continue_background(context);
         request::drain_queued(self, context);
+        companion::drain_queued(self, context);
         self.drain_backlog(context);
     }
 
@@ -998,8 +1031,14 @@ impl FederationCoordinator {
 
     /// Drops the work behind a rejected batch; the edge retries it.
     pub fn batch_rejected(&mut self, context: &mut StateCoreContext) {
-        if let Some(PendingCommit::Cleanup { peer }) = self.pending.take() {
-            grace::continue_cleanup(self, context, peer);
+        match self.pending.take() {
+            Some(PendingCommit::Cleanup { peer }) => grace::continue_cleanup(self, context, peer),
+            Some(PendingCommit::Companion { .. }) => {
+                if let Some(executor) = self.companion_exec.as_mut() {
+                    executor.batch_rejected();
+                }
+            }
+            _ => {}
         }
         self.drain_backlog(context);
     }

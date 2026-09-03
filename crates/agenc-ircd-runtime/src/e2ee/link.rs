@@ -45,6 +45,11 @@ pub enum CompanionViolation {
     Backlog,
     /// A rendered line did not fit the link.
     Render,
+    /// A companion request violated the federation grammar, order, or
+    /// replay rules.
+    Request,
+    /// The executor could not stage or answer the request.
+    Executor,
 }
 
 impl fmt::Display for CompanionViolation {
@@ -53,6 +58,8 @@ impl fmt::Display for CompanionViolation {
             Self::Unsupported => formatter.write_str("companion frames are not supported here"),
             Self::Profile(violation) => violation.fmt(formatter),
             Self::Backlog => formatter.write_str("companion frame backlog exceeded"),
+            Self::Request => formatter.write_str("companion request violated the profile"),
+            Self::Executor => formatter.write_str("companion executor unavailable"),
             Self::Render => formatter.write_str("companion line could not be rendered"),
         }
     }
