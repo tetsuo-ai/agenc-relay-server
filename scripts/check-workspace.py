@@ -146,6 +146,7 @@ EXPECTED_EXTERNAL_EDGES = {
     "agenc-ircd-types": {"base64", "precis-profiles", "subtle", "zeroize"},
     "agenc-ircd-client-wire": {"base64", "zeroize"},
     "agenc-ircd-federation-wire": {"base64", "sha2", "tls_codec", "zeroize"},
+    "agenc-ircd-e2ee": {"sha2"},
     "agenc-ircd-crypto": {
         "chacha20poly1305",
         "ed25519-dalek",

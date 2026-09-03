@@ -11,6 +11,9 @@ const MAX_SIGNATURE_CONTENT_BYTES: usize = 16_777_215;
 enum SignatureEncoding {
     IrcSignatureInput,
     DirectPrefix,
+    /// RFC 9420 `SignWithLabel`: `SignContent { "MLS 1.0 " || label, content }`
+    /// with QUIC-style variable-length vector prefixes.
+    MlsSignWithLabel,
 }
 
 /// Exhaustive set of protocol domains that use Ed25519.
@@ -90,6 +93,10 @@ pub enum SignatureDomain {
     ReinitActivation,
     /// Sequencer reinitialization-attempt abort.
     ReinitAttemptAbort,
+    /// RFC 9420 `KeyPackageTBS`, signed by the leaf signature key.
+    MlsKeyPackageTbs,
+    /// RFC 9420 `LeafNodeTBS`, signed by the leaf signature key.
+    MlsLeafNodeTbs,
 }
 
 impl SignatureDomain {
@@ -132,6 +139,8 @@ impl SignatureDomain {
             Self::ReinitDisposition => b"IRC-MLS/1 reinit disposition",
             Self::ReinitActivation => b"IRC-MLS/1 reinit activation",
             Self::ReinitAttemptAbort => b"IRC-MLS/1 reinit attempt abort",
+            Self::MlsKeyPackageTbs => b"MLS 1.0 KeyPackageTBS",
+            Self::MlsLeafNodeTbs => b"MLS 1.0 LeafNodeTBS",
         }
     }
 
@@ -174,6 +183,7 @@ impl SignatureDomain {
             | Self::AdminAuditCheckpoint
             | Self::BackupSignature
             | Self::StorageQualificationReport => SignatureEncoding::DirectPrefix,
+            Self::MlsKeyPackageTbs | Self::MlsLeafNodeTbs => SignatureEncoding::MlsSignWithLabel,
         }
     }
 }
@@ -289,7 +299,42 @@ fn signature_input(domain: SignatureDomain, content: &[u8]) -> Result<Vec<u8>, C
     match domain.encoding() {
         SignatureEncoding::DirectPrefix => concatenate_direct(label, content),
         SignatureEncoding::IrcSignatureInput => encode_irc_signature_input(label, content),
+        SignatureEncoding::MlsSignWithLabel => encode_mls_sign_content(label, content),
     }
+}
+
+/// Encodes the RFC 9420 `SignContent` structure: two variable-length
+/// vectors whose prefixes are the Section 2.1.3 QUIC-style integers.
+fn encode_mls_sign_content(label: &[u8], content: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    let capacity = label
+        .len()
+        .checked_add(content.len())
+        .and_then(|length| length.checked_add(8))
+        .ok_or(CryptoError::Overflow)?;
+    let mut input = Vec::new();
+    input
+        .try_reserve_exact(capacity)
+        .map_err(|_| CryptoError::AllocationFailed)?;
+    push_mls_varint(&mut input, label.len())?;
+    input.extend_from_slice(label);
+    push_mls_varint(&mut input, content.len())?;
+    input.extend_from_slice(content);
+    Ok(input)
+}
+
+/// Appends the minimal RFC 9420 variable-length integer for `value`.
+fn push_mls_varint(output: &mut Vec<u8>, value: usize) -> Result<(), CryptoError> {
+    let value = u32::try_from(value).map_err(|_| CryptoError::LimitExceeded)?;
+    if value < 0x40 {
+        output.extend_from_slice(&[u8::try_from(value).map_err(|_| CryptoError::Overflow)?]);
+    } else if value < 0x4000 {
+        output.extend_from_slice((value | 0x4000).to_be_bytes().get(2..).unwrap_or_default());
+    } else if value < 0x4000_0000 {
+        output.extend_from_slice(&(value | 0x8000_0000).to_be_bytes());
+    } else {
+        return Err(CryptoError::LimitExceeded);
+    }
+    Ok(())
 }
 
 fn concatenate_direct(label: &[u8], content: &[u8]) -> Result<Vec<u8>, CryptoError> {
@@ -332,6 +377,31 @@ fn encode_irc_signature_input(label: &[u8], content: &[u8]) -> Result<Vec<u8>, C
 #[cfg(test)]
 mod tests {
     use super::{Ed25519SecretKey, SignatureDomain, sign_canonical, verify_canonical};
+
+    #[test]
+    fn mls_sign_with_label_uses_every_varint_width() -> Result<(), Box<dyn core::error::Error>> {
+        let key = Ed25519SecretKey::from_bytes([12_u8; 32]);
+        for length in [1_usize, 63, 64, 16_383, 16_384, 70_000] {
+            let content = vec![7_u8; length];
+            let signature = sign_canonical(&key, SignatureDomain::MlsKeyPackageTbs, &content)?;
+            verify_canonical(
+                key.public_key(),
+                SignatureDomain::MlsKeyPackageTbs,
+                &content,
+                signature,
+            )?;
+            assert!(
+                verify_canonical(
+                    key.public_key(),
+                    SignatureDomain::MlsLeafNodeTbs,
+                    &content,
+                    signature,
+                )
+                .is_err()
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn strict_verification_rejects_domain_substitution() -> Result<(), Box<dyn core::error::Error>>

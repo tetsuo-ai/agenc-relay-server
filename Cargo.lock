@@ -110,6 +110,7 @@ dependencies = [
  "agenc-ircd-domain",
  "agenc-ircd-federation-wire",
  "agenc-ircd-types",
+ "sha2 0.11.0",
 ]
 
 [[package]]

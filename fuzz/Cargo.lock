@@ -90,6 +90,7 @@ dependencies = [
  "agenc-ircd-domain",
  "agenc-ircd-federation-wire",
  "agenc-ircd-types",
+ "sha2 0.11.0",
 ]
 
 [[package]]
@@ -112,6 +113,7 @@ dependencies = [
  "agenc-ircd-client-wire",
  "agenc-ircd-config",
  "agenc-ircd-crypto",
+ "agenc-ircd-e2ee",
  "agenc-ircd-federation-wire",
  "agenc-ircd-storage",
  "agenc-ircd-types",
