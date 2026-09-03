@@ -9,6 +9,7 @@
 mod command;
 mod decision;
 mod error;
+pub mod federation;
 mod model;
 mod persist;
 mod projection;
