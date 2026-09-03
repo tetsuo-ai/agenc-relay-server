@@ -7,6 +7,7 @@
 //! instance and forwards the seams that differ from a coordinator: session
 //! open and close, registered commands, and connection origins.
 
+mod barrier;
 mod events;
 mod render;
 mod request;
@@ -18,7 +19,7 @@ mod tests;
 use std::collections::{BTreeMap, VecDeque};
 
 use agenc_ircd_domain::NicknameValue;
-use agenc_ircd_domain::federation::{EdgeReplica, ProjectedEvent};
+use agenc_ircd_domain::federation::EdgeReplica;
 use agenc_ircd_federation_wire::{
     EventHeader, FederationFrame, FederationLineText, OriginDescriptor, federation_object_id,
     split_fragments,
@@ -70,6 +71,7 @@ struct LiveLink {
     link: LinkId,
     handle: LinkHandle,
     coordinator_epoch: RecoveryEpoch,
+    coordinator_incarnation: ServerIncarnation,
 }
 
 /// Where the link is in the synchronization protocol.
@@ -103,6 +105,14 @@ struct ConnectionOrigin {
 
 /// The durable batch the edge is waiting on.
 enum PendingCommit {
+    /// One cross-profile part was staged.
+    BarrierPart,
+    /// The complete barrier applied.
+    BarrierApplied {
+        receipt: Box<agenc_ircd_storage::e2ee_records::barrier::BarrierReceipt>,
+        base_last: (u64, EventId),
+        companion_last: (u64, u64, [u8; 16]),
+    },
     /// An event was applied; ACK follows the commit.
     Event {
         header: Box<EventHeader>,
@@ -125,6 +135,8 @@ pub struct EdgeCounters {
     pub snapshots_installed: u64,
     /// Protocol violations that closed the link.
     pub violations: u64,
+    /// Cross-profile barriers applied.
+    pub barriers_applied: u64,
 }
 
 /// The edge's federation state machine.
@@ -141,7 +153,7 @@ pub struct EdgeFederation {
     applied_completions: std::collections::BTreeSet<EventId>,
     nicknames: BTreeMap<UserId, NicknameValue>,
     commit: Option<PendingCommit>,
-    queued_events: VecDeque<(EventHeader, ProjectedEvent)>,
+    queued_events: VecDeque<events::QueuedEvent>,
     snapshot: Option<sync::SnapshotInstall>,
     next_origin: u64,
     client_resync_epoch: u64,
@@ -152,6 +164,7 @@ pub struct EdgeFederation {
     /// reflects that request (spec 20.5 ordering per origin).
     deferred: BTreeMap<ConnectionGeneration, VecDeque<DeferredCommand>>,
     companion: CompanionLinks,
+    barrier: barrier::BarrierState,
 }
 
 /// One client command held back behind an in-flight request.
@@ -211,6 +224,7 @@ impl EdgeFederation {
             counters: EdgeCounters::default(),
             readiness: None,
             deferred: BTreeMap::new(),
+            barrier: barrier::BarrierState::default(),
         }
     }
 
@@ -303,6 +317,32 @@ impl EdgeFederation {
         true
     }
 
+    /// Stages one companion part of a cross-profile barrier handed over by
+    /// the E2EE router; a violation closes the link and returns `false`.
+    pub fn companion_barrier_part(
+        &mut self,
+        context: &mut StateCoreContext,
+        part: agenc_ircd_storage::e2ee_records::barrier::BarrierPart,
+    ) -> bool {
+        match barrier::companion_part(self, context, part) {
+            Ok(()) => true,
+            Err(violation) => {
+                self.fail_link(context, violation);
+                false
+            }
+        }
+    }
+
+    /// The companion delivery generation and last acknowledged position the
+    /// barrier owner tracks.
+    #[must_use]
+    pub fn companion_cursor(&self) -> (u64, Option<(u64, [u8; 16])>) {
+        (
+            self.barrier.companion_generation,
+            self.barrier.companion_cursor,
+        )
+    }
+
     /// Returns the STATS counters.
     #[must_use]
     pub const fn counters(&self) -> EdgeCounters {
@@ -329,7 +369,7 @@ impl EdgeFederation {
             u64::try_from(self.pending.len()).unwrap_or(u64::MAX),
             0,
             self.counters.results_applied,
-            0,
+            self.counters.barriers_applied,
         ]
     }
 
@@ -438,6 +478,7 @@ impl EdgeFederation {
             link: session.link,
             handle,
             coordinator_epoch: session.peer_recovery_epoch,
+            coordinator_incarnation: session.peer_incarnation,
         });
         self.phase = Phase::Origins;
         self.note_phase();
@@ -819,6 +860,12 @@ impl EdgeFederation {
                 }
             }
             Some(PendingCommit::SnapshotInstalled) => sync::installed(self, context),
+            Some(PendingCommit::BarrierPart) => barrier::part_committed(self, context),
+            Some(PendingCommit::BarrierApplied {
+                receipt,
+                base_last,
+                companion_last,
+            }) => barrier::applied(self, context, *receipt, base_last, companion_last),
             None => {}
         }
         completions.extend(events::drain_queued(self, context));
@@ -827,7 +874,12 @@ impl EdgeFederation {
 
     /// Drops the work behind a rejected batch; the coordinator re-delivers.
     pub fn batch_rejected(&mut self, context: &mut StateCoreContext) {
-        if let Some(PendingCommit::Event { .. }) = self.commit.take() {
+        if let Some(
+            PendingCommit::Event { .. }
+            | PendingCommit::BarrierPart
+            | PendingCommit::BarrierApplied { .. },
+        ) = self.commit.take()
+        {
             // The replica already applied the event; without the durable
             // row the only safe course is a fresh synchronization.
             self.fail_link(context, Violation::Ceiling);

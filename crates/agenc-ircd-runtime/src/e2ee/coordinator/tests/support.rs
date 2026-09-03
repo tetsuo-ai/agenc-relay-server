@@ -12,21 +12,26 @@ use agenc_ircd_e2ee::E2eeError;
 use agenc_ircd_e2ee::ids::{SemanticId, semantic_id_of};
 use agenc_ircd_e2ee::mls_outer::mls_varint_encode;
 use agenc_ircd_e2ee::objects::AccountIdField;
-use agenc_ircd_e2ee::objects::conversation::{IrcSequencerCredential, IrcSequencerCredentialTbs};
+use agenc_ircd_e2ee::objects::conversation::{
+    IrcCommitApproval, IrcCommitApprovalEnvelope, IrcCommitAuthorization,
+    IrcCommitAuthorizationRule, IrcCommitAuthorizationTbs, IrcSequencerCredential,
+    IrcSequencerCredentialTbs,
+};
 use agenc_ircd_e2ee::objects::identity::*;
+use agenc_ircd_e2ee::objects::sequencing::{IrcDispositionVoteTbs, IrcFinalityVote};
 use agenc_ircd_e2ee::tls::{Opaque, TlsEncode, TlsVec};
 
-pub(super) const NETWORK: [u8; 32] = [1; 32];
+pub(crate) const NETWORK: [u8; 32] = [1; 32];
 
-pub(super) fn key(seed: u8) -> Ed25519SecretKey {
+pub(crate) fn key(seed: u8) -> Ed25519SecretKey {
     Ed25519SecretKey::from_bytes([seed; 32])
 }
 
-pub(super) fn public(secret: &Ed25519SecretKey) -> [u8; 32] {
+pub(crate) fn public(secret: &Ed25519SecretKey) -> [u8; 32] {
     *secret.public_key().as_bytes()
 }
 
-pub(super) fn sign(
+pub(crate) fn sign(
     secret: &Ed25519SecretKey,
     domain: SignatureDomain,
     tbs: &impl TlsEncode,
@@ -37,12 +42,12 @@ pub(super) fn sign(
         .map_err(|_| E2eeError::SignatureInvalid)
 }
 
-pub(super) fn account_field(account: &[u8; 24]) -> Result<AccountIdField, E2eeError> {
+pub(crate) fn account_field(account: &[u8; 24]) -> Result<AccountIdField, E2eeError> {
     Opaque::from_slice(account)
 }
 
 /// A root identity signed by `secret`, continuing `previous` when given.
-pub(super) fn root(
+pub(crate) fn root(
     secret: &Ed25519SecretKey,
     account: &[u8; 24],
     generation: u64,
@@ -77,22 +82,22 @@ pub(super) fn root(
     })
 }
 
-pub(super) fn root_fingerprint(root: &IrcRootIdentity) -> Result<SemanticId, E2eeError> {
+pub(crate) fn root_fingerprint(root: &IrcRootIdentity) -> Result<SemanticId, E2eeError> {
     semantic_id_of(SemanticHashDomain::RootFingerprint, &root.tbs)
 }
 
-pub(super) struct DeviceSpec {
-    pub(super) seed: u8,
-    pub(super) device_id: [u8; 16],
-    pub(super) flags: u32,
-    pub(super) target_roster_generation: u64,
-    pub(super) interval: (u64, u64),
-    pub(super) enrollment: (u64, u64),
-    pub(super) serial: u64,
+pub(crate) struct DeviceSpec {
+    pub(crate) seed: u8,
+    pub(crate) device_id: [u8; 16],
+    pub(crate) flags: u32,
+    pub(crate) target_roster_generation: u64,
+    pub(crate) interval: (u64, u64),
+    pub(crate) enrollment: (u64, u64),
+    pub(crate) serial: u64,
 }
 
 impl DeviceSpec {
-    pub(super) fn new(seed: u8) -> Self {
+    pub(crate) fn new(seed: u8) -> Self {
         Self {
             seed,
             device_id: [seed; 16],
@@ -105,7 +110,7 @@ impl DeviceSpec {
     }
 }
 
-pub(super) fn certificate(
+pub(crate) fn certificate(
     root_secret: &Ed25519SecretKey,
     root: &IrcRootIdentity,
     spec: &DeviceSpec,
@@ -160,7 +165,7 @@ pub(super) fn certificate(
     })
 }
 
-pub(super) fn roster(
+pub(crate) fn roster(
     root_secret: &Ed25519SecretKey,
     root: &IrcRootIdentity,
     generation: u64,
@@ -195,11 +200,11 @@ pub(super) fn roster(
     })
 }
 
-pub(super) fn roster_id(roster: &IrcDeviceRoster) -> Result<SemanticId, E2eeError> {
+pub(crate) fn roster_id(roster: &IrcDeviceRoster) -> Result<SemanticId, E2eeError> {
     semantic_id_of(SemanticHashDomain::RosterId, &roster.tbs)
 }
 
-pub(super) fn capabilities(
+pub(crate) fn capabilities(
     device_seed: u8,
     roster: &IrcDeviceRoster,
     generation: u64,
@@ -231,18 +236,18 @@ pub(super) fn capabilities(
     })
 }
 
-pub(super) struct LeafSpec {
-    pub(super) device_seed: u8,
-    pub(super) leaf_seed: u8,
-    pub(super) suite: u16,
-    pub(super) interval: (u64, u64),
-    pub(super) capabilities_hash: [u8; 32],
-    pub(super) last_resort: u8,
-    pub(super) credential_generation: u64,
+pub(crate) struct LeafSpec {
+    pub(crate) device_seed: u8,
+    pub(crate) leaf_seed: u8,
+    pub(crate) suite: u16,
+    pub(crate) interval: (u64, u64),
+    pub(crate) capabilities_hash: [u8; 32],
+    pub(crate) last_resort: u8,
+    pub(crate) credential_generation: u64,
 }
 
 impl LeafSpec {
-    pub(super) fn new(device_seed: u8, leaf_seed: u8) -> Self {
+    pub(crate) fn new(device_seed: u8, leaf_seed: u8) -> Self {
         Self {
             device_seed,
             leaf_seed,
@@ -255,7 +260,7 @@ impl LeafSpec {
     }
 }
 
-pub(super) fn leaf_authorization(
+pub(crate) fn leaf_authorization(
     roster: &IrcDeviceRoster,
     spec: &LeafSpec,
 ) -> Result<IrcLeafAuthorization, E2eeError> {
@@ -291,22 +296,22 @@ pub(super) fn leaf_authorization(
 
 /// A public KeyPackage whose credential identity is `identity`, signed by
 /// the leaf key `leaf_seed`, with the exact `capabilities` encoding.
-pub(super) struct KeyPackageSpec<'a> {
-    pub(super) identity: &'a [u8],
-    pub(super) leaf_seed: u8,
-    pub(super) suite: u16,
-    pub(super) lifetime: (u64, u64),
-    pub(super) capabilities: Vec<Vec<u8>>,
-    pub(super) leaf_extensions: Vec<(u16, Vec<u8>)>,
+pub(crate) struct KeyPackageSpec<'a> {
+    pub(crate) identity: &'a [u8],
+    pub(crate) leaf_seed: u8,
+    pub(crate) suite: u16,
+    pub(crate) lifetime: (u64, u64),
+    pub(crate) capabilities: Vec<Vec<u8>>,
+    pub(crate) leaf_extensions: Vec<(u16, Vec<u8>)>,
 }
 
-pub(super) fn opaque_v(output: &mut Vec<u8>, bytes: &[u8]) -> Result<(), E2eeError> {
+pub(crate) fn opaque_v(output: &mut Vec<u8>, bytes: &[u8]) -> Result<(), E2eeError> {
     mls_varint_encode(output, bytes.len())?;
     output.extend_from_slice(bytes);
     Ok(())
 }
 
-pub(super) fn default_capabilities() -> Vec<Vec<u8>> {
+pub(crate) fn default_capabilities() -> Vec<Vec<u8>> {
     vec![
         vec![0, 1],
         vec![0, 1, 0, 3],
@@ -316,7 +321,7 @@ pub(super) fn default_capabilities() -> Vec<Vec<u8>> {
     ]
 }
 
-pub(super) fn key_package(spec: &KeyPackageSpec<'_>) -> Result<Vec<u8>, E2eeError> {
+pub(crate) fn key_package(spec: &KeyPackageSpec<'_>) -> Result<Vec<u8>, E2eeError> {
     let leaf_secret = key(spec.leaf_seed);
     let mut leaf = Vec::new();
     opaque_v(&mut leaf, &[11; 32])?;
@@ -353,7 +358,7 @@ pub(super) fn key_package(spec: &KeyPackageSpec<'_>) -> Result<Vec<u8>, E2eeErro
 }
 
 /// The canonical capabilities encoding of `vectors` as the leaf carries it.
-pub(super) fn encoded_capabilities(vectors: &[Vec<u8>]) -> Result<Vec<u8>, E2eeError> {
+pub(crate) fn encoded_capabilities(vectors: &[Vec<u8>]) -> Result<Vec<u8>, E2eeError> {
     let mut out = Vec::new();
     for vector in vectors {
         opaque_v(&mut out, vector)?;
@@ -362,15 +367,15 @@ pub(super) fn encoded_capabilities(vectors: &[Vec<u8>]) -> Result<Vec<u8>, E2eeE
 }
 
 /// A principal for a binding package: its root secret, root, and roster.
-pub(super) struct Principal {
-    pub(super) root_secret: Ed25519SecretKey,
-    pub(super) root: IrcRootIdentity,
-    pub(super) roster: IrcDeviceRoster,
+pub(crate) struct Principal {
+    pub(crate) root_secret: Ed25519SecretKey,
+    pub(crate) root: IrcRootIdentity,
+    pub(crate) roster: IrcDeviceRoster,
     /// Device seeds active in the roster, all with binding authority.
-    pub(super) devices: Vec<u8>,
+    pub(crate) devices: Vec<u8>,
 }
 
-pub(super) fn principal(
+pub(crate) fn principal(
     root_seed: u8,
     account: &[u8; 24],
     devices: &[u8],
@@ -399,21 +404,21 @@ pub(super) fn principal(
     })
 }
 
-pub(super) struct BindingSpec<'a> {
-    pub(super) principals: &'a [Principal],
-    pub(super) route: agenc_ircd_e2ee::objects::conversation::IrcSemanticRouteTbs,
-    pub(super) channel_instance_id: Option<[u8; 16]>,
-    pub(super) conversation_nonce: Option<[u8; 32]>,
-    pub(super) group_id: [u8; 32],
-    pub(super) generation: u64,
-    pub(super) previous_binding_id: [u8; 32],
-    pub(super) lock_sequence: u64,
-    pub(super) plan_devices: Vec<(&'a [u8; 24], [u8; 32], u8)>,
+pub(crate) struct BindingSpec<'a> {
+    pub(crate) principals: &'a [Principal],
+    pub(crate) route: agenc_ircd_e2ee::objects::conversation::IrcSemanticRouteTbs,
+    pub(crate) channel_instance_id: Option<[u8; 16]>,
+    pub(crate) conversation_nonce: Option<[u8; 32]>,
+    pub(crate) group_id: [u8; 32],
+    pub(crate) generation: u64,
+    pub(crate) previous_binding_id: [u8; 32],
+    pub(crate) lock_sequence: u64,
+    pub(crate) plan_devices: Vec<(&'a [u8; 24], [u8; 32], u8)>,
 }
 
 /// A complete binding package signed by every binding-authorized device of
 /// every principal, with one root lock per principal.
-pub(super) fn binding_package(
+pub(crate) fn binding_package(
     spec: &BindingSpec<'_>,
 ) -> Result<agenc_ircd_e2ee::objects::conversation::IrcConversationBindingPackage, E2eeError> {
     use agenc_ircd_e2ee::objects::conversation::*;
@@ -558,7 +563,7 @@ pub(super) fn binding_package(
     })
 }
 
-pub(super) fn channel_route(
+pub(crate) fn channel_route(
     name: &[u8],
     authority_root: [u8; 32],
 ) -> Result<agenc_ircd_e2ee::objects::conversation::IrcSemanticRouteTbs, E2eeError> {
@@ -577,7 +582,18 @@ pub(super) fn channel_route(
     )
 }
 
-pub(super) fn sequencer_credential(
+pub(crate) fn sequencer_credential(
+    secret: &Ed25519SecretKey,
+    generation: u64,
+    interval: (u64, u64),
+    previous: Option<(&Ed25519SecretKey, &IrcSequencerCredential)>,
+) -> Result<IrcSequencerCredential, E2eeError> {
+    sequencer_credential_in(NETWORK, secret, generation, interval, previous)
+}
+
+/// A sequencer credential under `network_id`.
+pub(crate) fn sequencer_credential_in(
+    network_id: [u8; 32],
     secret: &Ed25519SecretKey,
     generation: u64,
     interval: (u64, u64),
@@ -589,7 +605,7 @@ pub(super) fn sequencer_credential(
     };
     let tbs = IrcSequencerCredentialTbs {
         profile_version: 1,
-        network_id: NETWORK,
+        network_id,
         key_generation: generation,
         sequencer_public_key: public(secret),
         not_before: interval.0,
@@ -609,17 +625,130 @@ pub(super) fn sequencer_credential(
 }
 
 /// An MLS `PrivateMessage` with the given content type and authenticated data.
-pub(super) fn private_message_bytes(
+pub(crate) fn private_message_bytes(
     group_id: &[u8],
+    content_type: u8,
+    aad: &[u8],
+) -> Result<Vec<u8>, E2eeError> {
+    private_message_at_epoch(group_id, 9, content_type, aad)
+}
+
+/// An MLS `PrivateMessage` at `epoch` with the given content type and
+/// authenticated data.
+pub(crate) fn private_message_at_epoch(
+    group_id: &[u8],
+    epoch: u64,
     content_type: u8,
     aad: &[u8],
 ) -> Result<Vec<u8>, E2eeError> {
     let mut out = vec![0, 1, 0, 2];
     opaque_v(&mut out, group_id)?;
-    out.extend_from_slice(&9_u64.to_be_bytes());
+    out.extend_from_slice(&epoch.to_be_bytes());
     out.push(content_type);
     opaque_v(&mut out, aad)?;
     opaque_v(&mut out, &[1; 40])?;
     opaque_v(&mut out, &[2; 300])?;
     Ok(out)
+}
+
+pub(crate) fn certificate_id_of(
+    principal: &Principal,
+    device: u8,
+) -> Result<SemanticId, E2eeError> {
+    let certificate = certificate(
+        &principal.root_secret,
+        &principal.root,
+        &DeviceSpec::new(device),
+    )?;
+    semantic_id_of(SemanticHashDomain::DeviceCertificateId, &certificate.tbs)
+}
+
+pub(crate) fn commit_approval(
+    principal: &Principal,
+    device: u8,
+    tbs: &impl TlsEncode,
+    domain: SignatureDomain,
+) -> Result<IrcCommitApproval, E2eeError> {
+    Ok(IrcCommitApproval {
+        signer_root_fingerprint: root_fingerprint(&principal.root)?,
+        signer_device_id: [device; 16],
+        signer_device_certificate_id: certificate_id_of(principal, device)?,
+        device_signature: sign(&key(device), domain, tbs)?,
+    })
+}
+
+pub(crate) fn authorization_tbs(
+    conversation_id: [u8; 32],
+    old_policy_id: [u8; 32],
+    rule: IrcCommitAuthorizationRule,
+    bits: u32,
+) -> IrcCommitAuthorizationTbs {
+    IrcCommitAuthorizationTbs {
+        profile_version: 1,
+        network_id: NETWORK,
+        conversation_id,
+        prior_epoch: 0,
+        prior_state_id: [50; 32],
+        candidate_id: [52; 32],
+        commit_object_id: [49; 32],
+        canonical_validation_time: 7,
+        old_policy_id,
+        authorization_rule: rule,
+        action_bits: bits,
+        resulting_policy_id: old_policy_id,
+        resulting_group_context_digest: [53; 32],
+        resulting_ratchet_tree_digest: [54; 32],
+        transition_target_digest: [0; 32],
+    }
+}
+
+pub(crate) fn commit_authorization(
+    tbs: IrcCommitAuthorizationTbs,
+    approvers: &[(&Principal, u8)],
+) -> Result<IrcCommitAuthorization, E2eeError> {
+    let mut approvals: Vec<IrcCommitApproval> = approvers
+        .iter()
+        .map(|(principal, device)| {
+            commit_approval(
+                principal,
+                *device,
+                &tbs,
+                SignatureDomain::CommitAuthorization,
+            )
+        })
+        .collect::<Result<_, _>>()?;
+    approvals.sort_by_key(|approval| (approval.signer_root_fingerprint, approval.signer_device_id));
+    Ok(IrcCommitAuthorization {
+        tbs,
+        approvals: TlsVec::new(approvals)?,
+    })
+}
+
+pub(crate) fn approval_envelope(
+    tbs: IrcCommitAuthorizationTbs,
+    principal: &Principal,
+    device: u8,
+) -> Result<IrcCommitApprovalEnvelope, E2eeError> {
+    Ok(IrcCommitApprovalEnvelope {
+        approval: commit_approval(
+            principal,
+            device,
+            &tbs,
+            SignatureDomain::CommitAuthorization,
+        )?,
+        tbs,
+    })
+}
+
+pub(crate) fn finality_vote(
+    principal: &Principal,
+    device: u8,
+    tbs: &IrcDispositionVoteTbs,
+) -> Result<IrcFinalityVote, E2eeError> {
+    Ok(IrcFinalityVote {
+        signer_root_fingerprint: root_fingerprint(&principal.root)?,
+        signer_device_id: [device; 16],
+        signer_device_certificate_id: certificate_id_of(principal, device)?,
+        device_signature: sign(&key(device), SignatureDomain::DispositionVote, tbs)?,
+    })
 }

@@ -4,18 +4,20 @@
 //! and after commit the effects apply and the lines go out.
 
 use agenc_ircd_domain::e2ee::projection::{
-    Completion, EventKind, EventPlan, Opcode, PlannedEvent, completion_for,
+    Completion, EventKind, EventPlan, Opcode, PlannedEvent, completion_for, plan_barriers,
 };
 use agenc_ircd_domain::federation::OriginKey as BaseOriginKey;
-use agenc_ircd_domain::federation::session_record_from;
+use agenc_ircd_domain::federation::{MutationContext, session_record_from};
 use agenc_ircd_e2ee::federation::frames::{CompanionFrame, Correlation};
+use std::collections::BTreeMap;
+
 use agenc_ircd_e2ee::limits::S2S_IDEMPOTENCY_RETENTION_SECONDS;
 use agenc_ircd_e2ee::wire::fragment::fragment_object;
 use agenc_ircd_e2ee::wire::reply::E2eeReplyCode;
 use agenc_ircd_federation_wire::CanonicalEncode;
 use agenc_ircd_types::{ChannelInstanceId, OriginId, ServerId, ServerIncarnation, UserId};
 
-use super::events::{self, EventContent};
+use super::events::{self, BarrierAssignment, EventContent};
 use super::ops::{self, Exec, Fail};
 use super::request::{self, Classified, Decoded, Outcome, ResponseObject};
 use super::{
@@ -26,6 +28,7 @@ use crate::federation::LinkId;
 use crate::federation::codec::source_view_object;
 use crate::state_core::StateCoreContext;
 use crate::state_core::durable::AccountServiceDurableWrite;
+use crate::state_core::projector::CrossProfileAssignment;
 
 /// A security-state mutation stays replayable for seven days (companion
 /// 12.5).
@@ -88,6 +91,24 @@ pub struct BaseView<'a> {
     pub context: &'a mut StateCoreContext,
     /// Every configured edge.
     pub peers: Vec<ServerId>,
+    /// Whether `target`'s base outbox admits `count` more events of
+    /// `bytes` under its unacknowledged ceilings (spec 20.8).
+    pub base_capacity: Box<dyn Fn(ServerId, usize, u64) -> bool + 'a>,
+}
+
+/// One cross-profile barrier the batch opens at one target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BarrierPlanned {
+    /// The target edge.
+    pub target: ServerId,
+    /// The per-target mutation identity.
+    pub mutation_id: [u8; 16],
+    /// Base parts, indices `0..base_parts`.
+    pub base_parts: u16,
+    /// Base plus companion parts.
+    pub part_count: u16,
+    /// The last companion delivery sequence of the barrier.
+    pub companion_last: u64,
 }
 
 /// The base origin principal the companion origin mirrors.
@@ -182,7 +203,7 @@ pub fn run(
     let state_generation = plan.resulting_revision().get();
     let source_view = source_view_bytes(view.context, facts);
     let mut pool = EntropyPool::fill(view.context.entropy_mut())?;
-    let outcome = execute(
+    let mut outcome = execute(
         coordinator,
         view.context,
         &view.peers,
@@ -195,20 +216,65 @@ pub fn run(
         source_view,
         &mut pool,
     );
-    let (result, responses, copies, writes, effects) = assemble(
+    let base_plan = outcome.base_plan.take();
+    let base_counts = match &base_plan {
+        Some(plan) if plan.resulting_revision().get() == state_generation => Some(
+            view.context
+                .preview_projection(plan)
+                .map_err(|_| E2eeReplyCode::RateLimited)?,
+        ),
+        Some(_) => return Err(E2eeReplyCode::RateLimited),
+        None => None,
+    };
+    let assembled = assemble(
         coordinator,
-        view.context,
         home,
         peer,
         &decoded,
         outcome,
         state_generation,
         now,
+        BarrierInputs {
+            base_counts: base_counts.as_ref(),
+            base_capacity: &*view.base_capacity,
+            entropy: &mut pool,
+        },
     )?;
     let fanout = crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())
         .map_err(|_| E2eeReplyCode::RateLimited)?;
+    let staged_plan = match base_plan {
+        Some(base_plan) => {
+            view.context.set_mutation_context(MutationContext {
+                actor: facts.user_id,
+                ..MutationContext::default()
+            });
+            view.context.set_cross_profile(
+                assembled
+                    .barriers
+                    .iter()
+                    .map(|barrier| {
+                        (
+                            barrier.target,
+                            CrossProfileAssignment {
+                                mutation_id: barrier.mutation_id,
+                                part_count: barrier.part_count,
+                            },
+                        )
+                    })
+                    .collect(),
+            );
+            base_plan
+        }
+        None => plan,
+    };
+    let writes = assembled
+        .writes
+        .into_iter()
+        .map(|write| write.at_revision(state_generation))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| E2eeReplyCode::RateLimited)?;
     view.context
-        .stage_durable_with_account_service(plan, fanout, None, 0, writes)
+        .stage_durable_with_account_service(staged_plan, fanout, None, 0, writes)
         .map_err(|_| E2eeReplyCode::RateLimited)?;
     coordinator.pending = Some(super::sync::PendingWork::Request(Box::new(
         PendingCompanion {
@@ -216,10 +282,11 @@ pub fn run(
             peer,
             correlation: complete.correlation,
             request_object_id: decoded.request_object_id,
-            result,
-            responses,
-            events: copies,
-            effects,
+            result: assembled.result,
+            responses: assembled.responses,
+            events: assembled.copies,
+            effects: assembled.effects,
+            barriers: assembled.barriers,
         },
     )));
     Ok(Staged::Batch)
@@ -273,6 +340,9 @@ fn execute(
                 .is_some_and(|state| state.members().any(|member| member == user))
         })
     };
+    let plan_binding = |channel: ChannelInstanceId, principals: &[[u8; 24]]| {
+        binding_plan(domain, user_id, channel, principals).map(Some)
+    };
     let mut exec = Exec {
         coordinator,
         home,
@@ -285,6 +355,7 @@ fn execute(
         hosting: &hosting,
         attached_edges: &attached_edges,
         channel_member: &channel_member,
+        plan_binding: &plan_binding,
         state_generation,
         source_view,
     };
@@ -294,25 +365,112 @@ fn execute(
     }
 }
 
-type Assembled = (
-    Vec<u8>,
-    Vec<Vec<u8>>,
-    Vec<events::CopyToSend>,
-    Vec<AccountServiceDurableWrite>,
-    Vec<super::Effect>,
-);
+/// The base binding plan of a channel whose member accounts are exactly
+/// the binding principals; the actor is the requesting origin's session.
+fn binding_plan(
+    domain: &agenc_ircd_domain::DomainState,
+    user_id: Option<UserId>,
+    channel: ChannelInstanceId,
+    principals: &[[u8; 24]],
+) -> Result<agenc_ircd_domain::MutationPlan, E2eeReplyCode> {
+    let actor = user_id.ok_or(E2eeReplyCode::AccountRequired)?;
+    let state = domain.channel(channel).ok_or(E2eeReplyCode::RouteInvalid)?;
+    let mut roster = Vec::new();
+    let mut accounts: Vec<[u8; 24]> = Vec::new();
+    for member in state.members() {
+        let account = domain
+            .session(member)
+            .and_then(|session| session.account_id())
+            .ok_or(E2eeReplyCode::BindingAuthInvalid)?;
+        let text: [u8; 24] = account
+            .to_text()
+            .as_bytes()
+            .try_into()
+            .map_err(|_| E2eeReplyCode::BindingAuthInvalid)?;
+        accounts.push(text);
+        roster.push((member, account));
+    }
+    accounts.sort_unstable();
+    accounts.dedup();
+    let mut expected = principals.to_vec();
+    expected.sort_unstable();
+    if accounts != expected {
+        return Err(E2eeReplyCode::BindingAuthInvalid);
+    }
+    let proof = agenc_ircd_domain::E2eeBindingProof::new(channel, state.revision(), roster)
+        .map_err(|_| E2eeReplyCode::BindingAuthInvalid)?;
+    domain
+        .plan_e2ee_binding(actor, proof)
+        .map_err(|_| E2eeReplyCode::BindingAuthInvalid)
+}
+
+/// One assembled batch.
+struct Assembled {
+    result: Vec<u8>,
+    responses: Vec<Vec<u8>>,
+    copies: Vec<events::CopyToSend>,
+    writes: Vec<AccountServiceDurableWrite>,
+    effects: Vec<super::Effect>,
+    barriers: Vec<BarrierPlanned>,
+}
+
+/// What barrier planning needs from the base side.
+struct BarrierInputs<'a> {
+    base_counts: Option<&'a BTreeMap<ServerId, (usize, u64)>>,
+    base_capacity: &'a dyn Fn(ServerId, usize, u64) -> bool,
+    entropy: &'a mut dyn agenc_ircd_types::EntropySource,
+}
+
+/// Plans one barrier per target that receives both base and companion
+/// events, sampling its mutation identity (spec 20.8).
+fn plan_barrier_assignments(
+    base_counts: Option<&BTreeMap<ServerId, (usize, u64)>>,
+    plan: &EventPlan,
+    base_capacity: &dyn Fn(ServerId, usize, u64) -> bool,
+    entropy: &mut dyn agenc_ircd_types::EntropySource,
+) -> Result<BTreeMap<ServerId, BarrierAssignment>, E2eeReplyCode> {
+    let Some(base_counts) = base_counts else {
+        return Ok(BTreeMap::new());
+    };
+    let mut assignments = BTreeMap::new();
+    for barrier in plan_barriers(base_counts, plan).map_err(|_| E2eeReplyCode::InvalidFragment)? {
+        let base_bytes = base_counts
+            .get(&barrier.target)
+            .map_or(0, |(_, bytes)| *bytes);
+        if !base_capacity(barrier.target, barrier.base_parts, base_bytes) {
+            return Err(E2eeReplyCode::Syncing);
+        }
+        let mut mutation_id = [0; 16];
+        entropy
+            .fill_exact(&mut mutation_id)
+            .map_err(|_| E2eeReplyCode::RateLimited)?;
+        let base_parts =
+            u16::try_from(barrier.base_parts).map_err(|_| E2eeReplyCode::InvalidFragment)?;
+        let part_count =
+            u16::try_from(barrier.part_count()).map_err(|_| E2eeReplyCode::InvalidFragment)?;
+        assignments.insert(
+            barrier.target,
+            BarrierAssignment {
+                mutation_id,
+                base_parts,
+                part_count,
+            },
+        );
+    }
+    Ok(assignments)
+}
 
 // agenc-review: allow owner=runtime reviewed=2026-09-03 reason=assembling a batch needs the coordinator context home peer decoded request outcome generation and time together
 #[allow(clippy::too_many_arguments)]
 fn assemble(
     coordinator: &CompanionCoordinator,
-    context: &mut StateCoreContext,
     home: [u8; 16],
     peer: ServerId,
     decoded: &Decoded,
     mut outcome: Outcome,
     state_generation: u64,
     now: u64,
+    barrier_inputs: BarrierInputs<'_>,
 ) -> Result<Assembled, E2eeReplyCode> {
     let opcode = Opcode(decoded.request.opcode.value());
     let completion = completion_for(opcode, outcome.result.kind())
@@ -346,13 +504,36 @@ fn assemble(
             .iter()
             .position(|planned| *planned == content.planned)
     });
-    let (copies, mut writes, streams) = events::sequence_copies(
+    let assignments = plan_barrier_assignments(
+        barrier_inputs.base_counts,
+        &plan,
+        barrier_inputs.base_capacity,
+        barrier_inputs.entropy,
+    )?;
+    let sequenced = events::sequence_copies(
         coordinator,
         &plan,
         &outcome.events,
         state_generation,
-        context.entropy_mut(),
+        barrier_inputs.entropy,
+        &assignments,
     )?;
+    let barriers: Vec<BarrierPlanned> = assignments
+        .iter()
+        .filter_map(|(target, assignment)| {
+            sequenced
+                .barrier_last
+                .get(target)
+                .map(|last| BarrierPlanned {
+                    target: *target,
+                    mutation_id: assignment.mutation_id,
+                    base_parts: assignment.base_parts,
+                    part_count: assignment.part_count,
+                    companion_last: *last,
+                })
+        })
+        .collect();
+    let (copies, mut writes, streams) = (sequenced.copies, sequenced.writes, sequenced.streams);
     let completion_event_id = copies
         .iter()
         .zip(plan.events())
@@ -424,7 +605,14 @@ fn assemble(
             state.streams.insert(target, stream);
         }
     }));
-    Ok((result, responses, copies, writes, effects))
+    Ok(Assembled {
+        result,
+        responses,
+        copies,
+        writes,
+        effects,
+        barriers,
+    })
 }
 
 /// Applies the completion table: a semantic completion marks the home copy
@@ -565,7 +753,7 @@ pub fn replay_lines(
 pub fn committed_lines(
     coordinator: &CompanionCoordinator,
     pending: &PendingCompanion,
-) -> Result<Vec<(ServerId, agenc_ircd_federation_wire::FederationLineText)>, E2eeReplyCode> {
+) -> Result<Vec<CommittedLine>, E2eeReplyCode> {
     let mut lines = Vec::new();
     for line in replay_lines(
         coordinator,
@@ -574,12 +762,31 @@ pub fn committed_lines(
         &pending.result,
         &pending.responses,
     )? {
-        lines.push((pending.peer, line));
+        lines.push(CommittedLine {
+            target: pending.peer,
+            sequence: None,
+            line,
+        });
     }
     for copy in &pending.events {
         for line in events::render_copy(&coordinator.server_name, copy)? {
-            lines.push((copy.target, line));
+            lines.push(CommittedLine {
+                target: copy.target,
+                sequence: Some(copy.row.sequence),
+                line,
+            });
         }
     }
     Ok(lines)
+}
+
+/// One line a committed request sends: the answer to the requester, or an
+/// event copy at its delivery sequence.
+pub struct CommittedLine {
+    /// The target edge.
+    pub target: ServerId,
+    /// The delivery sequence of an event copy; `None` for the answer.
+    pub sequence: Option<u64>,
+    /// The line.
+    pub line: agenc_ircd_federation_wire::FederationLineText,
 }

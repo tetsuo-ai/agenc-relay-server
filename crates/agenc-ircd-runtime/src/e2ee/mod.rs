@@ -3,5 +3,6 @@
 //! slices that follow. Nothing here holds an MLS client, an epoch secret,
 //! or a private key; objects pass through as validated bytes.
 
+pub mod barrier;
 pub mod coordinator;
 pub mod link;

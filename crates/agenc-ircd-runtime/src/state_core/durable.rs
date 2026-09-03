@@ -534,6 +534,33 @@ impl AccountServiceDurableWrite {
         Ok(Self::Delete { table, key })
     }
 
+    /// Restamps a put row with the revision of the batch that commits it;
+    /// companion rows are built before their plan exists (spec 20.5 keeps
+    /// every row at the resulting revision). Deletes are unchanged.
+    pub(crate) fn at_revision(self, revision: u64) -> Result<Self, RuntimeError> {
+        match self {
+            Self::Put {
+                table,
+                key,
+                plaintext,
+            } => {
+                let value = PersistentRecordValue::decode(table, plaintext.as_slice())?;
+                let restamped = PersistentRecordValue::new(
+                    table,
+                    value.record_kind(),
+                    revision,
+                    value.generation(),
+                    value.expires_at(),
+                    value.references().to_vec(),
+                    value.body().to_vec(),
+                )?
+                .encode()?;
+                Self::put(table, key, restamped)
+            }
+            delete @ Self::Delete { .. } => Ok(delete),
+        }
+    }
+
     pub(crate) fn revalidate(self) -> Result<Self, RuntimeError> {
         match self {
             Self::Put {

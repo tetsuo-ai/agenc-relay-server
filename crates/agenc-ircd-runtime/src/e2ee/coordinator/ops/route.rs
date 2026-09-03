@@ -533,6 +533,13 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         binding_object_id: state.binding_object_id,
     });
     outcome.security_mutation = true;
+    if let Some(instance) = verified.channel_instance_id {
+        outcome.base_plan = (exec.plan_binding)(
+            ChannelInstanceId::from_bytes(instance),
+            &verified.principals,
+        )
+        .map_err(|code| Fail::with(code, &conversation_id))?;
+    }
     outcome
         .writes
         .push(CompanionCoordinator::object_write(bytes)?);

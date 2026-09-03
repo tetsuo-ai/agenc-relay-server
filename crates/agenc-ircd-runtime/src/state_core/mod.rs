@@ -19,7 +19,7 @@ pub mod reconstruct;
 pub mod session;
 pub mod timers;
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::time::Duration;
 
@@ -538,6 +538,7 @@ pub struct StateCoreContext {
     federation: Option<FederationProjector>,
     next_mutation: MutationContext,
     next_correlation: Option<RequestBinding>,
+    next_cross_profile: BTreeMap<ServerId, projector::CrossProfileAssignment>,
     outbound_events: Vec<OutboundEvent>,
 }
 
@@ -871,6 +872,7 @@ impl StateCoreContext {
     ) -> Result<Option<(Vec<AccountServiceDurableWrite>, PendingProjection)>, RuntimeError> {
         let mutation = std::mem::take(&mut self.next_mutation);
         let correlation = self.next_correlation.take();
+        let cross_profile = std::mem::take(&mut self.next_cross_profile);
         let Some(projector) = self.federation.as_ref() else {
             return Ok(None);
         };
@@ -881,7 +883,29 @@ impl StateCoreContext {
             correlation.as_ref(),
             self.entropy.as_mut(),
             row_revision,
+            &cross_profile,
         )
+    }
+
+    /// Marks the targets whose base events of the next staged plan join a
+    /// cross-profile barrier (spec 20.8). Consumed by exactly the next plan.
+    pub(crate) fn set_cross_profile(
+        &mut self,
+        assignments: BTreeMap<ServerId, projector::CrossProfileAssignment>,
+    ) {
+        self.next_cross_profile = assignments;
+    }
+
+    /// The base event count and bytes `plan` would project per target under
+    /// the pending mutation context, without reserving anything.
+    pub(crate) fn preview_projection(
+        &self,
+        plan: &MutationPlan,
+    ) -> Result<BTreeMap<ServerId, (usize, u64)>, RuntimeError> {
+        match self.federation.as_ref() {
+            Some(projector) => projector.preview(&self.domain, plan, &self.next_mutation),
+            None => Ok(BTreeMap::new()),
+        }
     }
 
     /// Applies an ephemeral plan after reserving its complete fanout.
@@ -1971,6 +1995,7 @@ impl StateCore {
                 federation: None,
                 next_mutation: MutationContext::default(),
                 next_correlation: None,
+                next_cross_profile: BTreeMap::new(),
                 outbound_events: Vec::new(),
             },
             router: inputs.router,

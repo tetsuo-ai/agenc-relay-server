@@ -14,8 +14,8 @@ use agenc_ircd_domain::federation::{
 use agenc_ircd_domain::{DomainState, MutationPlan};
 use agenc_ircd_federation_wire::FederationHash32;
 use agenc_ircd_federation_wire::{
-    CanonicalEncode, EventHeader, ProjectionEntryHeader, ProjectionPrimaryKey, RequestCorrelation,
-    federation_object_id,
+    CanonicalEncode, CrossProfilePart, EventHeader, ProjectionEntryHeader, ProjectionPrimaryKey,
+    RequestCorrelation, federation_object_id,
 };
 use agenc_ircd_storage::federation_records::{
     OUTBOX_EVENT_KIND, OutboxEventRecord, PROJECTION_ENTRY_KIND, ProjectionEntryRecord, outbox_key,
@@ -72,6 +72,16 @@ struct ProjectedOutput {
     advances: BTreeMap<ServerId, u64>,
     revision: u64,
     state_generation: u64,
+}
+
+/// The barrier tuple one target's base events carry (spec 20.8): every
+/// base event of the plan for that edge takes the next index from zero.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CrossProfileAssignment {
+    /// The per-target mutation identity.
+    pub mutation_id: [u8; 16],
+    /// Base plus companion parts.
+    pub part_count: u16,
 }
 
 /// The delivery position one event is reserved at.
@@ -144,6 +154,8 @@ impl FederationProjector {
 
     /// Derives the events and rows one plan commits alongside its writes.
     /// Returns `None` when nothing projects, so callers can skip the batch.
+    // agenc-review: allow owner=runtime reviewed=2026-09-03 reason=one projection pass takes the plan its mutation context binding entropy revision and the barrier assignments together
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn project(
         &self,
         domain: &DomainState,
@@ -152,6 +164,7 @@ impl FederationProjector {
         binding: Option<&RequestBinding>,
         entropy: &mut dyn EntropySource,
         row_revision: u64,
+        cross_profile: &BTreeMap<ServerId, CrossProfileAssignment>,
     ) -> Result<Option<(Vec<AccountServiceDurableWrite>, PendingProjection)>, RuntimeError> {
         let mut projection = self
             .index
@@ -178,7 +191,8 @@ impl FederationProjector {
             let Some(delivery) = self.edges.get(&delta.target) else {
                 continue;
             };
-            self.project_edge(delta, *delivery, binding, entropy, &mut output)?;
+            let assignment = cross_profile.get(&delta.target).copied();
+            self.project_edge(delta, *delivery, binding, entropy, &mut output, assignment)?;
         }
         Ok(Some((
             output.writes,
@@ -190,6 +204,56 @@ impl FederationProjector {
         )))
     }
 
+    /// The base event count and barrier-form encoded bytes per target the
+    /// plan would project, without reserving anything (spec 20.8).
+    pub(crate) fn preview(
+        &self,
+        domain: &DomainState,
+        plan: &MutationPlan,
+        mutation: &MutationContext,
+    ) -> Result<BTreeMap<ServerId, (usize, u64)>, RuntimeError> {
+        let projection = self
+            .index
+            .derive(domain, plan, mutation)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let mut counts = BTreeMap::new();
+        let placeholder = CrossProfilePart {
+            mutation_id: [0; 16],
+            part_index: 0,
+            part_count: 2,
+        };
+        for delta in &projection.edges {
+            if delta.events.is_empty() || !self.edges.contains_key(&delta.target) {
+                continue;
+            }
+            let mut bytes: u64 = 0;
+            for event in &delta.events {
+                let header = EventHeader {
+                    network_id: self.network_id,
+                    target_server_id: delta.target,
+                    projection_generation: 0,
+                    coordinator_state_generation: plan.resulting_revision().get(),
+                    delivery_sequence: 0,
+                    event_id: EventId::from_bytes([0; 16]),
+                    event_kind: event.kind(),
+                    correlation: None,
+                    cross_profile: Some(placeholder),
+                };
+                let arm = event_arm_object(event).map_err(|_| RuntimeError::InvalidValue)?;
+                let object = header.build(&arm).map_err(|_| RuntimeError::InvalidValue)?;
+                let encoded = object
+                    .encode_canonical()
+                    .map_err(|_| RuntimeError::InvalidValue)?;
+                bytes = bytes
+                    .saturating_add(u64::try_from(encoded.as_slice().len()).unwrap_or(u64::MAX));
+            }
+            counts.insert(delta.target, (delta.events.len(), bytes));
+        }
+        Ok(counts)
+    }
+
+    // agenc-review: allow owner=runtime reviewed=2026-09-03 reason=one edge projection takes the delta its delivery binding entropy output and barrier assignment together
+    #[allow(clippy::too_many_arguments)]
     fn project_edge(
         &self,
         delta: &agenc_ircd_domain::federation::EdgeDelta,
@@ -197,16 +261,28 @@ impl FederationProjector {
         binding: Option<&RequestBinding>,
         entropy: &mut dyn EntropySource,
         output: &mut ProjectedOutput,
+        assignment: Option<CrossProfileAssignment>,
     ) -> Result<(), RuntimeError> {
         let mut sequence = delivery.next_delivery_sequence;
-        for event in &delta.events {
+        for (index, event) in delta.events.iter().enumerate() {
             let slot = EventSlot {
                 target: delta.target,
                 projection_generation: delivery.projection_generation,
                 delivery_sequence: sequence,
                 state_generation: output.state_generation,
             };
-            let outbound = self.encode_event(slot, event, binding, entropy)?;
+            let part = assignment
+                .map(|assignment| {
+                    u16::try_from(index)
+                        .map(|part_index| CrossProfilePart {
+                            mutation_id: assignment.mutation_id,
+                            part_index,
+                            part_count: assignment.part_count,
+                        })
+                        .map_err(|_| RuntimeError::Overflow)
+                })
+                .transpose()?;
+            let outbound = self.encode_event(slot, event, binding, entropy, part)?;
             output.writes.push(outbox_write(
                 &outbound,
                 output.revision,
@@ -246,6 +322,7 @@ impl FederationProjector {
         event: &ProjectedEvent,
         binding: Option<&RequestBinding>,
         entropy: &mut dyn EntropySource,
+        cross_profile: Option<CrossProfilePart>,
     ) -> Result<OutboundEvent, RuntimeError> {
         let EventSlot {
             target,
@@ -274,7 +351,7 @@ impl FederationProjector {
             event_id,
             event_kind: event.kind(),
             correlation: bound.map(|binding| binding.correlation),
-            cross_profile: None,
+            cross_profile,
         };
         let arm = event_arm_object(event).map_err(|_| RuntimeError::InvalidValue)?;
         let object = header.build(&arm).map_err(|_| RuntimeError::InvalidValue)?;

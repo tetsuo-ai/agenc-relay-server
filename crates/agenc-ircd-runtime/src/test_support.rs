@@ -390,6 +390,14 @@ pub(crate) enum FederationRole {
     Edge(crate::federation::PeerIdentity),
 }
 
+/// The companion profile and executor a coordinator fixture starts with.
+pub(crate) struct CompanionSetup {
+    /// The local ECAP tuple.
+    pub(crate) profile: crate::e2ee::link::CompanionProfile,
+    /// The executor with its sequencer installed.
+    pub(crate) executor: crate::e2ee::coordinator::CompanionCoordinator,
+}
+
 /// The coordinator role over the fixture identity with generous outbox
 /// ceilings so tests exercise ordering rather than backpressure.
 fn federation_coordinator(
@@ -535,6 +543,38 @@ impl StateCoreFixture {
         role: Option<FederationRole>,
         records: Vec<InitialStorageRecord>,
     ) -> TestResult<Self> {
+        Self::build_with_companion(entropy, registration, role, records, None)
+    }
+
+    /// Builds a coordinator fixture whose federation coordinator carries the
+    /// companion profile and executor before any link exists.
+    pub(crate) fn with_companion_coordinator(
+        entropy: Vec<u8>,
+        peers: Vec<crate::federation::PeerIdentity>,
+        companion: CompanionSetup,
+    ) -> TestResult<Self> {
+        let mut fixture = Self::build_with_companion(
+            entropy,
+            true,
+            Some(FederationRole::Coordinator(peers)),
+            Vec::new(),
+            Some(companion),
+        )?;
+        let network_id = fixture.identity.network_id;
+        let server_id = fixture.identity.server_id;
+        fixture.context_mut()?.install_federation_projector(
+            crate::state_core::projector::FederationProjector::new(network_id, server_id),
+        );
+        Ok(fixture)
+    }
+
+    fn build_with_companion(
+        entropy: Vec<u8>,
+        registration: bool,
+        role: Option<FederationRole>,
+        records: Vec<InitialStorageRecord>,
+        companion: Option<CompanionSetup>,
+    ) -> TestResult<Self> {
         // An edge fixture carries its own server identity so it never shares
         // the coordinator fixture's Server ID inside one test.
         let edge_role = matches!(role, Some(FederationRole::Edge(_)));
@@ -562,10 +602,17 @@ impl StateCoreFixture {
             initialize_test_storage(&identity, &directory, &opaque, &key_state, records)?;
         let mut owner = open_test_storage(&identity, &directory, &qualification)?;
         let router: Box<dyn CommandRouter> = match (registration, role) {
-            (true, Some(FederationRole::Coordinator(peers))) => Box::new(
-                registration_router(&identity, &opaque, key_state, prefix)?
-                    .with_federation(federation_coordinator(&identity, peers)?),
-            ),
+            (true, Some(FederationRole::Coordinator(peers))) => {
+                let mut coordinator = federation_coordinator(&identity, peers)?;
+                if let Some(setup) = companion {
+                    coordinator.set_companion_profile(Some(setup.profile));
+                    coordinator.install_companion_executor(setup.executor);
+                }
+                Box::new(
+                    registration_router(&identity, &opaque, key_state, prefix)?
+                        .with_federation(coordinator),
+                )
+            }
             (true, Some(FederationRole::Edge(coordinator))) => Box::new(
                 registration_router(&identity, &opaque, key_state, prefix)?.with_edge(
                     crate::federation::edge::EdgeFederation::new(

@@ -752,6 +752,44 @@ impl CompanionCoordinator {
         expired
     }
 
+    /// The highest companion sequence `peer` acknowledged.
+    #[must_use]
+    pub fn acked_through(&self, peer: ServerId) -> Option<u64> {
+        self.state
+            .streams
+            .get(&peer)
+            .and_then(|stream| stream.acked)
+            .map(|(sequence, _)| sequence)
+    }
+
+    /// The unacknowledged rows of `peer` after `sequence`, rendered for a
+    /// barrier release.
+    pub fn retransmit_after(
+        &self,
+        peer: ServerId,
+        sequence: u64,
+    ) -> Result<Vec<FederationLineText>, CompanionFault> {
+        let Some(stream) = self.state.streams.get(&peer) else {
+            return Ok(Vec::new());
+        };
+        let mut lines = Vec::new();
+        for row in stream.unacked_rows() {
+            if row.sequence <= sequence {
+                continue;
+            }
+            let copy = events::CopyToSend {
+                target: peer,
+                row: row.clone(),
+                generation: stream.generation,
+            };
+            lines.extend(
+                events::render_copy(&self.server_name, &copy)
+                    .map_err(|_| CompanionFault::Protocol)?,
+            );
+        }
+        Ok(lines)
+    }
+
     /// Whether event copies flow to `peer` now.
     #[must_use]
     pub fn delivering(&self, peer: ServerId) -> bool {

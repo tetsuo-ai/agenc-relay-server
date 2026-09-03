@@ -311,18 +311,31 @@ fn event_header_round_trips_correlation_and_refuses_barriers() -> TestResult {
         Some(CodecError::SchemaMismatch)
     );
 
+    let part = CrossProfilePart {
+        mutation_id: [1; 16],
+        part_index: 0,
+        part_count: 2,
+    };
     let barrier = EventHeader {
-        cross_profile: Some(CrossProfilePart {
-            mutation_id: [1; 16],
-            part_index: 0,
-            part_count: 2,
-        }),
+        cross_profile: Some(part),
         ..plain
     };
-    assert_eq!(
-        barrier.build(&hidden).err(),
-        Some(CodecError::CrossReference)
-    );
+    let built = barrier.build(&hidden)?;
+    assert_eq!(EventHeader::from_object(&built)?.cross_profile, Some(part));
+    for (part_index, part_count) in [(0, 1), (2, 2), (0, 2_049)] {
+        let invalid = EventHeader {
+            cross_profile: Some(CrossProfilePart {
+                mutation_id: [1; 16],
+                part_index,
+                part_count,
+            }),
+            ..plain
+        };
+        assert_eq!(
+            invalid.build(&hidden).err(),
+            Some(CodecError::CrossReference)
+        );
+    }
 
     let raw_barrier = SchemaObject::new(
         "FederationEvent",
@@ -537,5 +550,38 @@ fn schema_name_tables_match_the_frozen_registry() -> TestResult {
         FederationOpcode::Join,
         FederationResultKind::ReplyPage
     ));
+    Ok(())
+}
+
+#[test]
+fn barrier_parts_build_for_every_index_below_the_count() -> TestResult {
+    let hidden = SchemaObject::new(
+        "event.channel_hidden",
+        vec![WireValue::Opaque(vec![14; 16]), WireValue::Unsigned(2)],
+    )?;
+    let header = EventHeader {
+        network_id: NetworkId::from_bytes([1; 32]),
+        target_server_id: ServerId::from_bytes([2; 16]),
+        projection_generation: 1,
+        coordinator_state_generation: 3,
+        delivery_sequence: 4,
+        event_id: EventId::from_bytes([5; 16]),
+        event_kind: FederationEventKind::ChannelHidden,
+        correlation: None,
+        cross_profile: None,
+    };
+    for (part_index, part_count) in [(0, 3), (1, 3), (2, 3), (2_047, 2_048)] {
+        let part = CrossProfilePart {
+            mutation_id: [7; 16],
+            part_index,
+            part_count,
+        };
+        let built = EventHeader {
+            cross_profile: Some(part),
+            ..header
+        }
+        .build(&hidden)?;
+        assert_eq!(EventHeader::from_object(&built)?.cross_profile, Some(part));
+    }
     Ok(())
 }

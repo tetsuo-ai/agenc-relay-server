@@ -227,6 +227,24 @@ pub struct FederationCoordinator {
     companion: CompanionLinks,
     /// The E2EE executor; `None` on a node without a sequencer.
     companion_exec: Option<CompanionCoordinator>,
+    /// Open cross-profile barriers by target (spec 20.8): later events on
+    /// either stream wait until both final acknowledgements arrive.
+    barriers: BTreeMap<ServerId, OpenBarrier>,
+}
+
+/// One cross-profile barrier awaiting both cumulative acknowledgements.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct OpenBarrier {
+    /// The per-target mutation identity.
+    pub(super) mutation_id: [u8; 16],
+    /// The last base delivery sequence of the barrier.
+    pub(super) base_last: u64,
+    /// Whether the base stream acknowledged through `base_last`.
+    pub(super) base_acked: bool,
+    /// The last companion delivery sequence of the barrier.
+    pub(super) companion_last: u64,
+    /// Whether the companion stream acknowledged through `companion_last`.
+    pub(super) companion_acked: bool,
 }
 
 impl FederationCoordinator {
@@ -286,6 +304,7 @@ impl FederationCoordinator {
             queries,
             counters: CoordinatorCounters::default(),
             companion_exec: None,
+            barriers: BTreeMap::new(),
         }
     }
 
@@ -799,6 +818,7 @@ impl FederationCoordinator {
     }
 
     /// Records one cumulative acknowledgement of exactly the oldest event.
+    // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one acknowledgement walks the unacknowledged window once under both the exact-next and the barrier-cumulative rules
     fn acknowledge(
         &mut self,
         context: &mut StateCoreContext,
@@ -806,26 +826,52 @@ impl FederationCoordinator {
         delivery_sequence: u64,
         event_id: EventId,
     ) -> Result<(), Violation> {
+        // Inside an open barrier the edge acknowledges the last base part
+        // cumulatively; elsewhere the ACK advances by exactly one.
+        let barrier_last = self
+            .barriers
+            .get(&peer)
+            .filter(|barrier| !barrier.base_acked)
+            .map(|barrier| barrier.base_last);
         let state = self.peers.get_mut(&peer).ok_or(Violation::Misaddressed)?;
-        let Some((sequence, expected, bytes)) = state.outbox.unacked.front().copied() else {
+        let Some((front, expected, _)) = state.outbox.unacked.front().copied() else {
             return Err(Violation::Acknowledgement);
         };
-        if sequence != delivery_sequence || expected != event_id {
+        let cumulative = barrier_last == Some(delivery_sequence) && delivery_sequence >= front;
+        if !cumulative && (front != delivery_sequence || expected != event_id) {
             return Err(Violation::Acknowledgement);
         }
-        state.outbox.unacked.pop_front();
-        state.outbox.unacked_bytes = state.outbox.unacked_bytes.saturating_sub(bytes);
-        state.outbox.cursor = Some((sequence, event_id));
         let generation = state.projection_generation;
         let mut writes = Vec::new();
-        let key = agenc_ircd_storage::federation_records::outbox_key(peer, generation, sequence)
-            .map_err(|_| Violation::Ceiling)?;
-        writes.push(
-            AccountServiceDurableWrite::delete(TableId::EdgeOutbox, key)
-                .map_err(|_| Violation::Ceiling)?,
-        );
+        let mut matched = false;
+        while let Some((sequence, id, bytes)) = state.outbox.unacked.front().copied() {
+            if sequence > delivery_sequence {
+                break;
+            }
+            state.outbox.unacked.pop_front();
+            state.outbox.unacked_bytes = state.outbox.unacked_bytes.saturating_sub(bytes);
+            matched |= sequence == delivery_sequence && id == event_id;
+            let key =
+                agenc_ircd_storage::federation_records::outbox_key(peer, generation, sequence)
+                    .map_err(|_| Violation::Ceiling)?;
+            writes.push(
+                AccountServiceDurableWrite::delete(TableId::EdgeOutbox, key)
+                    .map_err(|_| Violation::Ceiling)?,
+            );
+        }
+        if !matched {
+            return Err(Violation::Acknowledgement);
+        }
+        state.outbox.cursor = Some((delivery_sequence, event_id));
         self.stage_rows(context, writes, PendingCommit::Acknowledged, Some(peer))
-            .map_err(|_| Violation::Ceiling)
+            .map_err(|_| Violation::Ceiling)?;
+        if barrier_last == Some(delivery_sequence) {
+            if let Some(barrier) = self.barriers.get_mut(&peer) {
+                barrier.base_acked = true;
+            }
+            companion::try_close_barrier(self, context, peer);
+        }
+        Ok(())
     }
 
     /// Stages rows that carry no domain mutation behind a checkpoint plan,
@@ -1002,7 +1048,7 @@ impl FederationCoordinator {
             }
             Some(PendingCommit::Cleanup { peer }) => grace::continue_cleanup(self, context, peer),
             Some(PendingCommit::Companion { peer, link }) => {
-                companion::committed(self, context, link, peer);
+                companion::committed(self, context, link, peer, &events);
             }
             Some(PendingCommit::SnapshotRows { peer }) => {
                 snapshot::continue_write(self, context, peer)
@@ -1070,6 +1116,15 @@ impl FederationCoordinator {
             // A link that is not active yet replays the durable outbox when
             // it resumes; only live delivery tracks the window here.
             if !state.active || event.projection_generation != state.projection_generation {
+                continue;
+            }
+            // Later events wait behind an open barrier; the durable outbox
+            // replays them once both streams acknowledged (spec 20.8).
+            if self
+                .barriers
+                .get(&event.target)
+                .is_some_and(|barrier| event.delivery_sequence > barrier.base_last)
+            {
                 continue;
             }
             let bytes = u64::try_from(event.encoded.len()).unwrap_or(u64::MAX);

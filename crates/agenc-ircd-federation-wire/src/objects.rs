@@ -502,14 +502,23 @@ impl EventHeader {
 
     /// Wraps one validated `event.<kind>` arm into a complete base event.
     ///
-    /// Base Stage 07 events never carry a cross-profile tuple; the field is
-    /// read on decode only so a Stage 08 barrier part is recognized and
-    /// refused by the base link.
+    /// A present cross-profile tuple marks one part of a Stage 08 barrier;
+    /// its count must lie in `2..=2048` with the index below it.
     pub fn build(&self, event: &SchemaObject) -> Result<SchemaObject, CodecError> {
         expect_schema(event, event_schema_name(self.event_kind))?;
-        if self.cross_profile.is_some() {
-            return Err(CodecError::CrossReference);
-        }
+        let (mutation_id, part_index, part_count) = match &self.cross_profile {
+            None => (&[][..], 0, 0),
+            Some(part) => {
+                if !(2..=2048).contains(&part.part_count) || part.part_index >= part.part_count {
+                    return Err(CodecError::CrossReference);
+                }
+                (
+                    &part.mutation_id[..],
+                    u64::from(part.part_index),
+                    u64::from(part.part_count),
+                )
+            }
+        };
         let encoded = event.encode_canonical()?;
         let (home, incarnation, origin, generation, sequence, request) = match &self.correlation {
             None => (&[][..], &[][..], &[][..], 0, 0, &[][..]),
@@ -534,9 +543,9 @@ impl EventHeader {
                 opaque(self.event_id.as_bytes())?,
                 WireValue::Unsigned(u64::from(self.event_kind.wire_value())),
                 opaque(encoded.as_slice())?,
-                opaque(&[])?,
-                WireValue::Unsigned(0),
-                WireValue::Unsigned(0),
+                opaque(mutation_id)?,
+                WireValue::Unsigned(part_index),
+                WireValue::Unsigned(part_count),
                 opaque(home)?,
                 opaque(incarnation)?,
                 opaque(origin)?,

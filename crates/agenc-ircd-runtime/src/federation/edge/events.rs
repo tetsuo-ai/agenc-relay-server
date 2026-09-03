@@ -37,16 +37,59 @@ pub(super) fn receive(
     let arm = decode_event_arm(&event, &mut budget).map_err(|_| Violation::Codec)?;
     let projected =
         projected_event_of(header.event_kind, &arm, &mut budget).map_err(|_| Violation::Codec)?;
+    let queued = if header.cross_profile.is_some() {
+        QueuedEvent::BarrierPart {
+            header,
+            projected,
+            object_id: *object.object_id().as_bytes(),
+            bytes: object.as_slice().to_vec(),
+        }
+    } else {
+        QueuedEvent::Base { header, projected }
+    };
     if edge.commit.is_some() {
         if edge.queued_events.len() >= MAX_QUEUED_EVENTS {
             return Err(Violation::Ceiling);
         }
-        edge.queued_events.push_back((header, projected));
+        edge.queued_events.push_back(queued);
         // The cursor advances only after the durable ACK; queued events are
         // sequenced by their headers when they drain.
         return Ok(Vec::new());
     }
-    apply(edge, context, header, projected)
+    apply_queued(edge, context, queued)
+}
+
+/// One event waiting behind the batch in flight.
+pub(super) enum QueuedEvent {
+    /// An ordinary base event.
+    Base {
+        header: EventHeader,
+        projected: ProjectedEvent,
+    },
+    /// A base part of a cross-profile barrier, with its exact bytes.
+    BarrierPart {
+        header: EventHeader,
+        projected: ProjectedEvent,
+        object_id: [u8; 32],
+        bytes: Vec<u8>,
+    },
+}
+
+fn apply_queued(
+    edge: &mut EdgeFederation,
+    context: &mut StateCoreContext,
+    queued: QueuedEvent,
+) -> Result<Vec<EdgeCompletion>, Violation> {
+    match queued {
+        QueuedEvent::Base { header, projected } => apply(edge, context, header, projected),
+        QueuedEvent::BarrierPart {
+            header,
+            projected,
+            object_id,
+            bytes,
+        } => super::barrier::base_part(edge, context, header, projected, object_id, bytes)
+            .map(|()| Vec::new()),
+    }
 }
 
 /// Checks the event header against its carrier, the link, the replica
@@ -62,12 +105,20 @@ fn check_header(
         && header.delivery_sequence == descriptor.delivery_sequence
         && header.event_id == descriptor.event_id
         && descriptor.object_id == object.object_id()
-        && header.projection_generation == edge.replica.projection_generation()
-        && header.cross_profile.is_none();
+        && header.projection_generation == edge.replica.projection_generation();
+    if !matches {
+        return Err(Violation::Consistency);
+    }
+    // A barrier part is checked against the cursor when the set completes;
+    // an ordinary event must follow the cursor and may not interleave with
+    // an open barrier (spec 20.8).
+    if header.cross_profile.is_some() {
+        return Ok(());
+    }
     let expected = edge
         .cursor
         .map_or(0, |(sequence, _)| sequence.saturating_add(1));
-    if !matches || header.delivery_sequence != expected {
+    if edge.barrier.is_open() || header.delivery_sequence != expected {
         return Err(Violation::Consistency);
     }
     Ok(())
@@ -80,10 +131,10 @@ pub(super) fn drain_queued(
 ) -> Vec<EdgeCompletion> {
     let mut completions = Vec::new();
     while edge.commit.is_none() {
-        let Some((header, projected)) = edge.queued_events.pop_front() else {
+        let Some(queued) = edge.queued_events.pop_front() else {
             break;
         };
-        match apply(edge, context, header, projected) {
+        match apply_queued(edge, context, queued) {
             Ok(more) => completions.extend(more),
             Err(violation) => {
                 edge.fail_link(context, violation);
@@ -155,7 +206,7 @@ fn completion_of(
 }
 
 /// The delete of one replica entry, only when its row exists.
-fn removal_write(
+pub(super) fn removal_write(
     edge: &EdgeFederation,
     context: &StateCoreContext,
     key: &ProjectionKey,
@@ -174,7 +225,7 @@ fn removal_write(
 }
 
 /// The durable row of one replica entry under the active generation.
-fn entry_row(
+pub(super) fn entry_row(
     edge: &EdgeFederation,
     key: &ProjectionKey,
     revision: u64,

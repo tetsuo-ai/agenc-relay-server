@@ -3,7 +3,7 @@
 //! plan, `EEVENT` and `EDATA` lines from durable rows, cumulative `EACK`
 //! handling, the per-edge unacknowledged ceilings, and replay trimming.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use agenc_ircd_domain::e2ee::limits::{
     MAX_UNACKED_E2EE_EVENT_BYTES_PER_EDGE, MAX_UNACKED_E2EE_EVENTS_PER_EDGE,
@@ -53,6 +53,9 @@ pub struct DeliveryStream {
     pub rows: VecDeque<StreamRow>,
     /// Whether the edge is `EVENT_BLOCKED`.
     pub blocked: bool,
+    /// The first and last sequence of an open cross-profile barrier; the
+    /// edge acknowledges the last one cumulatively.
+    pub barrier: Option<(u64, u64)>,
 }
 
 impl DeliveryStream {
@@ -90,13 +93,19 @@ impl DeliveryStream {
             return Ok(());
         }
         let expected = self.acked.map_or(0, |(acked, _)| acked.saturating_add(1));
-        if sequence != expected {
+        let within_barrier = self
+            .barrier
+            .is_some_and(|(first, last)| sequence == last && expected >= first);
+        if sequence != expected && !within_barrier {
             return Err(CompanionFault::Protocol);
         }
         for row in self.rows.iter_mut().filter(|row| row.sequence <= sequence) {
             row.acked = true;
         }
         self.acked = Some((sequence, event_id));
+        if self.barrier.is_some_and(|(_, last)| sequence >= last) {
+            self.barrier = None;
+        }
         while self.rows.iter().filter(|row| row.acked).count() > MAX_ACKED_REPLAY_ROWS {
             if self.rows.front().is_some_and(|row| row.acked) {
                 self.rows.pop_front();
@@ -182,12 +191,29 @@ fn optional<const N: usize>(value: Option<[u8; N]>) -> Result<Opaque<0, N>, E2ee
 /// from `entropy` after the plan is ordered, sequences are assigned per
 /// target stream, and the rows to write and copies to send are returned.
 /// The streams are not mutated until the effects apply.
-/// The copies, durable rows, and advanced streams of one sequenced plan.
-pub(crate) type Sequenced = (
-    Vec<CopyToSend>,
-    Vec<AccountServiceDurableWrite>,
-    Vec<(ServerId, DeliveryStream)>,
-);
+/// The companion half of one cross-profile barrier at one target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BarrierAssignment {
+    /// The per-target mutation identity.
+    pub mutation_id: [u8; 16],
+    /// Base parts, indices `0..base_parts`.
+    pub base_parts: u16,
+    /// Base plus companion parts.
+    pub part_count: u16,
+}
+
+/// The copies, durable rows, advanced streams, and the last barrier
+/// sequence per target of one sequenced plan.
+pub(crate) struct Sequenced {
+    /// Copies to send after commit.
+    pub copies: Vec<CopyToSend>,
+    /// Durable rows.
+    pub writes: Vec<AccountServiceDurableWrite>,
+    /// The advanced streams.
+    pub streams: Vec<(ServerId, DeliveryStream)>,
+    /// The last companion sequence of each barrier target.
+    pub barrier_last: BTreeMap<ServerId, u64>,
+}
 
 // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one pass assigns every planned copy its delivery position and outbox row so the per-target stream advances exactly once per batch
 pub(crate) fn sequence_copies(
@@ -196,10 +222,13 @@ pub(crate) fn sequence_copies(
     contents: &[EventContent],
     state_generation: u64,
     entropy: &mut dyn agenc_ircd_types::EntropySource,
+    barriers: &BTreeMap<ServerId, BarrierAssignment>,
 ) -> Result<Sequenced, E2eeReplyCode> {
     let mut copies = Vec::new();
     let mut writes = Vec::new();
     let mut streams: Vec<(ServerId, DeliveryStream)> = Vec::new();
+    let mut part_indices: BTreeMap<ServerId, u16> = BTreeMap::new();
+    let mut barrier_last = BTreeMap::new();
     for (index, planned) in plan.events().iter().enumerate() {
         let content = contents
             .get(index)
@@ -241,14 +270,33 @@ pub(crate) fn sequence_copies(
             .payload
             .as_ref()
             .map(|bytes| *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes());
+        let cross_profile = match barriers.get(&planned.target) {
+            None => None,
+            Some(assignment) => {
+                let next = part_indices.entry(planned.target).or_insert(0);
+                let part_index = assignment
+                    .base_parts
+                    .checked_add(*next)
+                    .filter(|index| *index < assignment.part_count)
+                    .ok_or(E2eeReplyCode::InvalidFragment)?;
+                *next = next.saturating_add(1);
+                let first = stream.barrier.map_or(sequence, |(first, _)| first);
+                stream.barrier = Some((first, sequence));
+                barrier_last.insert(planned.target, sequence);
+                Some((assignment.mutation_id, part_index, assignment.part_count))
+            }
+        };
         let event = encode_event(
             coordinator,
             content,
-            stream.generation,
-            state_generation,
-            sequence,
-            event_id,
-            payload_id,
+            EventPosition {
+                delivery_generation: stream.generation,
+                state_generation,
+                sequence,
+                event_id,
+                payload_id,
+                cross_profile,
+            },
         )?;
         let row = StreamRow {
             sequence,
@@ -268,20 +316,45 @@ pub(crate) fn sequence_copies(
     for (target, stream) in &streams {
         writes.push(cursor_write(*target, stream)?);
     }
-    Ok((copies, writes, streams))
+    let barrier_targets_missing = barriers
+        .keys()
+        .any(|target| !barrier_last.contains_key(target));
+    if barrier_targets_missing {
+        return Err(E2eeReplyCode::InvalidFragment);
+    }
+    Ok(Sequenced {
+        copies,
+        writes,
+        streams,
+        barrier_last,
+    })
 }
 
-fn encode_event(
-    coordinator: &CompanionCoordinator,
-    content: &EventContent,
+/// Where one event copy sits in its stream and barrier.
+struct EventPosition {
     delivery_generation: u64,
     state_generation: u64,
     sequence: u64,
     event_id: [u8; 16],
     payload_id: Option<[u8; 32]>,
+    cross_profile: Option<([u8; 16], u16, u16)>,
+}
+
+fn encode_event(
+    coordinator: &CompanionCoordinator,
+    content: &EventContent,
+    position: EventPosition,
 ) -> Result<Vec<u8>, E2eeReplyCode> {
     let planned = &content.planned;
     let correlation = content.correlation.as_ref();
+    let EventPosition {
+        delivery_generation,
+        state_generation,
+        sequence,
+        event_id,
+        payload_id,
+        cross_profile,
+    } = position;
     let event = IrcFederationEvent {
         profile_version: 1,
         network_id: coordinator.network_id,
@@ -291,9 +364,9 @@ fn encode_event(
         delivery_sequence: sequence,
         event_id,
         event_kind: wire_kind(planned.kind),
-        cross_profile_mutation_id: optional::<16>(None)?,
-        cross_profile_part_index: 0,
-        cross_profile_part_count: 0,
+        cross_profile_mutation_id: optional::<16>(cross_profile.map(|(id, _, _)| id))?,
+        cross_profile_part_index: cross_profile.map_or(0, |(_, index, _)| index),
+        cross_profile_part_count: cross_profile.map_or(0, |(_, _, count)| count),
         conversation_id: optional(planned.conversation_id)?,
         route_sequence: planned.route_sequence,
         origin_id: optional(content.origin.map(|(id, _)| id))?,

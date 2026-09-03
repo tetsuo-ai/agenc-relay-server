@@ -48,6 +48,14 @@ impl Fail {
     }
 }
 
+/// The base binding planner: the channel and its principal accounts give
+/// the base plan, or `None` on a node without base state.
+pub type PlanBinding<'a> = dyn Fn(
+        ChannelInstanceId,
+        &[[u8; 24]],
+    ) -> Result<Option<agenc_ircd_domain::MutationPlan>, E2eeReplyCode>
+    + 'a;
+
 /// What every handler sees.
 pub struct Exec<'a> {
     /// The coordinator (committed state).
@@ -72,6 +80,9 @@ pub struct Exec<'a> {
     pub attached_edges: &'a dyn Fn(&[u8; 32]) -> Vec<ServerId>,
     /// Whether the requesting origin's base session is a member of a channel.
     pub channel_member: &'a dyn Fn(ChannelInstanceId) -> bool,
+    /// The base binding plan for a channel whose members are exactly the
+    /// named principal accounts; `None` on a node without base state.
+    pub plan_binding: &'a PlanBinding<'a>,
     /// The coordinator state generation the batch will commit.
     pub state_generation: u64,
     /// The encoded base source view of the requesting origin.

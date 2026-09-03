@@ -37,7 +37,9 @@ use super::{
     CompanionCoordinator, CompanionOrigin, CompanionOriginKey, CompleteRequest, StoredResult,
 };
 
-mod support;
+mod barrier;
+mod sequence;
+pub(crate) mod support;
 mod sync;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -220,6 +222,9 @@ impl Harness {
         let hosting = |_: ChannelInstanceId| vec![home];
         let attached = |_: &[u8; 32]| vec![home];
         let member = |_: ChannelInstanceId| true;
+        // The harness carries no base channel state; the coordinator glue
+        // supplies the binding plan there.
+        let plan_binding = |_: ChannelInstanceId, _: &[[u8; 24]]| Ok(None);
         let mut exec = Exec {
             coordinator: &self.coordinator,
             home,
@@ -232,6 +237,7 @@ impl Harness {
             hosting: &hosting,
             attached_edges: &attached,
             channel_member: &member,
+            plan_binding: &plan_binding,
             state_generation: STATE_GENERATION,
             source_view: Vec::new(),
         };
@@ -322,6 +328,28 @@ impl Harness {
             plan_devices: vec![(&self.account, fingerprint, DEVICE)],
         })?;
         wire(IrcWireObjectKind::ConversationBinding, &package)
+    }
+
+    /// Publishes the principal, attaches its device, reserves the channel,
+    /// and binds it; returns the conversation identifier.
+    fn bind_channel(&mut self) -> TestResult<[u8; 32]> {
+        self.publish_identity_and_roster()?;
+        self.attach()?;
+        let mut reserve = INSTANCE.to_vec();
+        reserve.push(5);
+        reserve.extend_from_slice(b"#room");
+        let outcome = ok(self.run(Op::ReserveChannel, &reserve, None)?)?;
+        let ResultBody::Reserved(reservation_id, _) = outcome.result else {
+            return Err("expected a reservation".into());
+        };
+        let binding = self.binding_bytes()?;
+        let conversation = conversation_id(&NETWORK, &GROUP)?;
+        let mut bind = reservation_id.to_vec();
+        bind.extend_from_slice(&conversation);
+        bind.extend_from_slice(&[44; 32]);
+        let outcome = ok(self.run(Op::BindGroup, &bind, Some(&binding))?)?;
+        assert!(matches!(outcome.result, ResultBody::Bound { .. }));
+        Ok(conversation)
     }
 
     fn device(&self) -> Option<([u8; 16], u64)> {

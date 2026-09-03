@@ -41,7 +41,7 @@ pub mod ops;
 pub mod request;
 pub mod sync;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// The largest retained in-memory object set, in bytes, before new objects
 /// are refused with `E2EE_RATE_LIMITED`.
@@ -242,6 +242,8 @@ pub struct PendingCompanion {
     pub events: Vec<events::CopyToSend>,
     /// The in-memory effects to apply on commit.
     pub effects: Vec<Effect>,
+    /// The cross-profile barriers the batch opens.
+    pub barriers: Vec<execute::BarrierPlanned>,
 }
 
 /// A request waiting behind an in-flight batch.

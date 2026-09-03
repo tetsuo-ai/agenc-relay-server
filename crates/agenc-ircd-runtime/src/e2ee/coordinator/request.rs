@@ -303,6 +303,11 @@ pub struct Outcome {
     pub effects: Vec<Effect>,
     /// Whether the mutation is a security-state mutation (seven-day replay).
     pub security_mutation: bool,
+    /// The base domain plan the same batch applies, when the operation
+    /// changes base state (a channel binding); its events join a
+    /// cross-profile barrier at every target that also receives companion
+    /// events.
+    pub base_plan: Option<agenc_ircd_domain::MutationPlan>,
 }
 
 impl Outcome {
@@ -318,6 +323,7 @@ impl Outcome {
             writes: Vec::new(),
             effects: Vec::new(),
             security_mutation: false,
+            base_plan: None,
         }
     }
 
@@ -333,6 +339,7 @@ impl Outcome {
             writes: Vec::new(),
             effects: Vec::new(),
             security_mutation: false,
+            base_plan: None,
         }
     }
 }
