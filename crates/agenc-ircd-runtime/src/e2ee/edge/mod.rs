@@ -1,0 +1,341 @@
+//! The edge E2EE router (companion 11, 12.5, 13, 17): client `EGROUP`,
+//! `EKEY`, `EDIRECT`, and bound-channel `TAGMSG` lines become companion
+//! requests under the connection's origin; results render only after their
+//! completion coverage; events project route state, fan out opaque objects
+//! to attached local sessions, and are acknowledged after their durable
+//! apply; and until the companion link reaches `STATE_ACTIVE` every E2EE
+//! command fails with `E2EE_SYNCING`.
+
+mod events;
+mod origins;
+mod result;
+mod router;
+mod sync;
+
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+use agenc_ircd_client_wire::{CapabilityState, WireMessage};
+use agenc_ircd_domain::e2ee::RouteTable;
+use agenc_ircd_e2ee::federation::frames::CompanionFrame;
+use agenc_ircd_e2ee::wire::assembly::{E2eeAssembler, QuotaLimits};
+use agenc_ircd_federation_wire::FederationLineText;
+use agenc_ircd_types::{ChannelInstanceId, ServerId, UserId};
+
+use crate::connection::ConnectionGeneration;
+
+use crate::federation::edge::EdgeFederation;
+use crate::state_core::StateCoreContext;
+
+pub use result::{DecodedResult, ResultValue, decode_result, decode_value};
+pub use router::{E2EE_CAPABILITY, is_e2ee_line};
+
+/// The fixed identities of the edge and its coordinator.
+#[derive(Clone, Debug)]
+pub struct E2eeEdgeConfig {
+    /// Network identity.
+    pub network_id: [u8; 32],
+    /// This edge's Server ID.
+    pub server_id: ServerId,
+    /// The server name every client line carries as its prefix.
+    pub server_name: String,
+    /// The coordinator's Server ID.
+    pub coordinator_server_id: ServerId,
+    /// This edge's incarnation.
+    pub incarnation: [u8; 16],
+}
+
+/// What the registration router knows about the connection issuing a line.
+pub struct SessionFacts<'a> {
+    /// The bound session user.
+    pub user_id: UserId,
+    /// The authenticated Account ID in its 24-byte wire form.
+    pub account: Option<[u8; 24]>,
+    /// The negotiated capabilities.
+    pub capabilities: &'a CapabilityState,
+    /// The nickname, for failure lines.
+    pub nickname: &'a str,
+}
+
+/// Lines for one client connection.
+#[derive(Debug)]
+pub struct ClientOutput {
+    /// The connection.
+    pub generation: ConnectionGeneration,
+    /// The frames in order.
+    pub frames: Vec<WireMessage>,
+}
+
+/// Where the companion link stands (12.5 STATE_ACTIVE).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Phase {
+    /// No companion link.
+    Down,
+    /// The profile is active; ERESUME went out.
+    Resuming,
+    /// An ESTATE transfer is in progress.
+    Transferring,
+    /// READY went out; ACTIVE is awaited.
+    AwaitingActive,
+    /// The origin set replays; EORIGIN READY is awaited.
+    Origins,
+    /// Requests and events flow.
+    Active,
+}
+
+/// The companion origin of one local connection.
+#[derive(Clone, Debug)]
+pub(crate) struct LocalOrigin {
+    /// The base origin identity.
+    pub(crate) origin_id: [u8; 16],
+    /// The base generation the last declaration mirrored.
+    pub(crate) declared: Option<u64>,
+    /// The generation the coordinator acknowledged.
+    pub(crate) acked: Option<u64>,
+    /// The next companion operation sequence.
+    pub(crate) next_sequence: u64,
+    /// The semantic identifier of the accepted declaration.
+    pub(crate) state_id: [u8; 32],
+    /// The bound user.
+    pub(crate) user_id: Option<UserId>,
+    /// The authenticated account.
+    pub(crate) account: Option<[u8; 24]>,
+    /// The attached device and its session generation.
+    pub(crate) device: Option<([u8; 16], u64)>,
+}
+
+/// One request awaiting its result, its responses, and its completion.
+pub(crate) struct PendingRequest {
+    pub(crate) generation: ConnectionGeneration,
+    pub(crate) label: Option<String>,
+    pub(crate) command: router::Resolved,
+    pub(crate) request_object_id: [u8; 32],
+    pub(crate) result: Option<DecodedResult>,
+    pub(crate) responses: BTreeMap<u16, Vec<u8>>,
+    pub(crate) completion_seen: bool,
+    pub(crate) rendered: bool,
+}
+
+/// One local ingress assembly: one in-progress object per sender (11.8).
+pub(crate) struct Ingress {
+    pub(crate) key: agenc_ircd_e2ee::wire::assembly::AssemblyKey,
+    pub(crate) command: router::Resolved,
+}
+
+/// The durable apply one event batch completes.
+pub(crate) enum PendingCommit {
+    /// An event applied; its EACK goes out on commit.
+    Event {
+        position: agenc_ircd_e2ee::federation::frames::DeliveryPosition,
+        outputs: Vec<ClientOutput>,
+    },
+    /// The READY of a snapshot was recorded.
+    Ready,
+}
+
+/// The edge E2EE router.
+pub struct E2eeEdge {
+    config: E2eeEdgeConfig,
+    phase: Phase,
+    delivery: sync::DeliveryState,
+    snapshot: Option<sync::SnapshotInstall>,
+    origins: BTreeMap<ConnectionGeneration, LocalOrigin>,
+    pending: BTreeMap<[u8; 16], PendingRequest>,
+    by_completion: BTreeMap<[u8; 16], [u8; 16]>,
+    covered: BTreeSet<[u8; 16]>,
+    assembler: E2eeAssembler,
+    ingress: BTreeMap<ConnectionGeneration, Ingress>,
+    routes: RouteTable,
+    route_objects: BTreeMap<[u8; 32], Vec<u8>>,
+    conversations: BTreeMap<[u8; 32], events::Conversation>,
+    commit: Option<PendingCommit>,
+    queued: VecDeque<(CompanionFrame, Vec<u8>)>,
+    events_in: BTreeMap<[u8; 16], events::OpenEvent>,
+    channel_names: BTreeMap<ChannelInstanceId, String>,
+    attachments: Vec<(ConnectionGeneration, [u8; 16], u64)>,
+    counters: E2eeEdgeCounters,
+}
+
+/// Counters exposed through `STATS E2EE`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct E2eeEdgeCounters {
+    /// Requests sent to the coordinator.
+    pub requests_sent: u64,
+    /// Results rendered to clients.
+    pub results_rendered: u64,
+    /// Events applied and acknowledged.
+    pub events_applied: u64,
+    /// Client lines refused with a companion reply code.
+    pub refusals: u64,
+    /// Protocol violations that closed the companion link.
+    pub violations: u64,
+}
+
+impl E2eeEdge {
+    /// Creates a router with no companion link.
+    #[must_use]
+    pub fn new(config: E2eeEdgeConfig) -> Self {
+        Self {
+            config,
+            phase: Phase::Down,
+            delivery: sync::DeliveryState::default(),
+            snapshot: None,
+            origins: BTreeMap::new(),
+            pending: BTreeMap::new(),
+            by_completion: BTreeMap::new(),
+            covered: BTreeSet::new(),
+            assembler: E2eeAssembler::new(QuotaLimits::default()),
+            ingress: BTreeMap::new(),
+            routes: RouteTable::new(),
+            route_objects: BTreeMap::new(),
+            conversations: BTreeMap::new(),
+            commit: None,
+            queued: VecDeque::new(),
+            events_in: BTreeMap::new(),
+            channel_names: BTreeMap::new(),
+            attachments: Vec::new(),
+            counters: E2eeEdgeCounters::default(),
+        }
+    }
+
+    /// The counters.
+    #[must_use]
+    pub const fn counters(&self) -> E2eeEdgeCounters {
+        self.counters
+    }
+
+    /// Where the companion link stands.
+    #[must_use]
+    pub const fn phase(&self) -> Phase {
+        self.phase
+    }
+
+    /// Whether requests and events flow.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.phase == Phase::Active
+    }
+
+    /// The projected route table, for downgrade checks.
+    #[must_use]
+    pub const fn routes(&self) -> &RouteTable {
+        &self.routes
+    }
+
+    /// Whether the companion link and every retained assembly of a closed
+    /// link are gone.
+    pub fn link_down(&mut self) {
+        self.phase = Phase::Down;
+        self.snapshot = None;
+        self.queued.clear();
+        self.events_in.clear();
+        for origin in self.origins.values_mut() {
+            origin.declared = None;
+            origin.acked = None;
+        }
+    }
+
+    /// A client connection ended: its origin, ingress, and pending
+    /// requests are gone; a result that still arrives is dropped.
+    pub fn connection_closed(&mut self, generation: ConnectionGeneration) {
+        self.origins.remove(&generation);
+        if let Some(ingress) = self.ingress.remove(&generation) {
+            self.assembler.discard(&ingress.key);
+        }
+        self.pending
+            .retain(|_, pending| pending.generation != generation);
+    }
+
+    /// Remembers the presentation name of a channel the replica projects,
+    /// so live copies can name it.
+    pub fn remember_channel(&mut self, channel: ChannelInstanceId, name: &str) {
+        self.channel_names.insert(channel, name.to_owned());
+    }
+
+    /// Whether `channel` is bound to an active encrypted route here.
+    #[must_use]
+    pub fn channel_bound(&self, channel: &ChannelInstanceId) -> bool {
+        self.routes.channel_route(channel).is_some_and(|route| {
+            !self.routes.channel_plaintext_allowed(channel) || route.accepts_traffic()
+        })
+    }
+
+    /// Lines produced outside a frame or batch hook; none today, kept so the
+    /// owner's drive order stays fixed.
+    #[must_use]
+    pub fn batch_applied_outputs(&mut self) -> Vec<ClientOutput> {
+        Vec::new()
+    }
+
+    /// Applies the device attachments results announced since the last
+    /// call: each advances the shared origin generation with its device.
+    pub fn apply_attachments(&mut self, context: &mut StateCoreContext, edge: &mut EdgeFederation) {
+        for (generation, device, session_generation) in std::mem::take(&mut self.attachments) {
+            self.device_attached(context, edge, generation, device, session_generation);
+        }
+    }
+
+    /// The `FAIL <command> E2EE_REQUIRED` line when a plaintext line targets
+    /// a bound channel or a bound direct pair (companion 11.3, 11.4, 17).
+    #[must_use]
+    pub fn plaintext_refusal(
+        &self,
+        edge: &EdgeFederation,
+        message: &agenc_ircd_client_wire::ParsedMessage,
+        sender_account: Option<[u8; 24]>,
+    ) -> Option<WireMessage> {
+        let command = message.command();
+        if !matches!(command, "PRIVMSG" | "NOTICE" | "TAGMSG" | "TOPIC") {
+            return None;
+        }
+        let target = message.middle().first()?;
+        let bound = if target.starts_with('#') {
+            self.bound_channel(edge, target).is_some()
+                || agenc_ircd_domain::ChannelNameValue::parse(target)
+                    .ok()
+                    .and_then(|name| edge.replica().channel_by_name(&name))
+                    .is_some_and(|record| {
+                        record.content_policy == agenc_ircd_domain::ContentPolicy::E2eeBound
+                    })
+        } else {
+            self.direct_pair_bound(edge, target, sender_account?)
+        };
+        if !bound {
+            return None;
+        }
+        let body = agenc_ircd_e2ee::wire::reply::E2eeReplyCode::Required
+            .render_fail(command, Some(target));
+        agenc_ircd_e2ee::wire::response::render_fail(&self.config.server_name, &body)
+            .ok()
+            .and_then(|line| WireMessage::extension_line(&line).ok())
+    }
+
+    /// Whether the sender's account and the account behind `nickname` hold
+    /// a live direct binding.
+    fn direct_pair_bound(&self, edge: &EdgeFederation, nickname: &str, sender: [u8; 24]) -> bool {
+        let Some(peer) = edge
+            .replica()
+            .sessions()
+            .find(|session| session.nickname.presentation() == nickname)
+            .and_then(|session| session.account.map(|(account, _)| account))
+        else {
+            return false;
+        };
+        let Ok(sender) = agenc_ircd_types::AccountId::parse_wire_bytes(&sender) else {
+            return false;
+        };
+        agenc_ircd_domain::e2ee::DirectPair::new(sender, peer)
+            .ok()
+            .and_then(|pair| self.routes.direct_route(&pair))
+            .is_some_and(|route| route.accepts_traffic())
+    }
+
+    /// Sends companion lines over the base edge's live link.
+    fn send(
+        &mut self,
+        context: &mut StateCoreContext,
+        edge: &mut EdgeFederation,
+        lines: Vec<FederationLineText>,
+    ) -> bool {
+        edge.send_companion_lines(context, lines)
+    }
+}

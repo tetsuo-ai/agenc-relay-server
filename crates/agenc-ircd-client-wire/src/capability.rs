@@ -25,7 +25,7 @@ const CAP_LIST_FIXED_BYTES: usize = 1
 const MAX_CAP_TOKEN_LIST_BYTES: usize = MAX_CAP_COMMAND_BYTES - CAP_LIST_FIXED_BYTES;
 
 /// One currently advertisable capability and optional LS/NEW value.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CapabilitySpec {
     name: String,
     value: Option<String>,

@@ -461,6 +461,38 @@ fn registration_router(
     )?)
 }
 
+/// The edge role over `router`, with the companion profile and the edge
+/// E2EE router attached when `edge_profile` is given.
+fn edge_router(
+    router: RegistrationRouter,
+    identity: &FixtureIdentity,
+    prefix: &str,
+    coordinator: crate::federation::PeerIdentity,
+    edge_profile: Option<crate::e2ee::link::CompanionProfile>,
+) -> TestResult<RegistrationRouter> {
+    let coordinator_server_id = coordinator.server_id();
+    let mut edge =
+        crate::federation::edge::EdgeFederation::new(crate::federation::edge::EdgeConfig {
+            network_id: identity.network_id,
+            server_id: identity.server_id,
+            server_name: prefix.to_owned(),
+            incarnation: identity.server_incarnation,
+            coordinator,
+        });
+    let Some(profile) = edge_profile else {
+        return Ok(router.with_edge(edge));
+    };
+    edge.set_companion_profile(Some(profile));
+    let e2ee = crate::e2ee::edge::E2eeEdge::new(crate::e2ee::edge::E2eeEdgeConfig {
+        network_id: *identity.network_id.as_bytes(),
+        server_id: identity.server_id,
+        server_name: prefix.to_owned(),
+        coordinator_server_id,
+        incarnation: *identity.server_incarnation.as_bytes(),
+    });
+    Ok(router.with_edge(edge).with_e2ee_edge(e2ee)?)
+}
+
 impl StateCoreFixture {
     /// Builds the fixture with the pre-composition router that rejects every
     /// line; `entropy` scripts every entropy draw the test makes.
@@ -543,7 +575,24 @@ impl StateCoreFixture {
         role: Option<FederationRole>,
         records: Vec<InitialStorageRecord>,
     ) -> TestResult<Self> {
-        Self::build_with_companion(entropy, registration, role, records, None)
+        Self::build_with_companion(entropy, registration, role, records, None, None)
+    }
+
+    /// Builds an edge fixture whose edge role negotiates the companion
+    /// profile and routes E2EE client lines through the edge E2EE router.
+    pub(crate) fn with_e2ee_edge(
+        entropy: Vec<u8>,
+        coordinator: crate::federation::PeerIdentity,
+        profile: crate::e2ee::link::CompanionProfile,
+    ) -> TestResult<Self> {
+        Self::build_with_companion(
+            entropy,
+            true,
+            Some(FederationRole::Edge(coordinator)),
+            Vec::new(),
+            None,
+            Some(profile),
+        )
     }
 
     /// Builds a coordinator fixture whose federation coordinator carries the
@@ -559,6 +608,7 @@ impl StateCoreFixture {
             Some(FederationRole::Coordinator(peers)),
             Vec::new(),
             Some(companion),
+            None,
         )?;
         let network_id = fixture.identity.network_id;
         let server_id = fixture.identity.server_id;
@@ -574,6 +624,7 @@ impl StateCoreFixture {
         role: Option<FederationRole>,
         records: Vec<InitialStorageRecord>,
         companion: Option<CompanionSetup>,
+        edge_profile: Option<crate::e2ee::link::CompanionProfile>,
     ) -> TestResult<Self> {
         // An edge fixture carries its own server identity so it never shares
         // the coordinator fixture's Server ID inside one test.
@@ -613,19 +664,16 @@ impl StateCoreFixture {
                         .with_federation(coordinator),
                 )
             }
-            (true, Some(FederationRole::Edge(coordinator))) => Box::new(
-                registration_router(&identity, &opaque, key_state, prefix)?.with_edge(
-                    crate::federation::edge::EdgeFederation::new(
-                        crate::federation::edge::EdgeConfig {
-                            network_id: identity.network_id,
-                            server_id: identity.server_id,
-                            server_name: prefix.to_owned(),
-                            incarnation: identity.server_incarnation,
-                            coordinator,
-                        },
-                    ),
-                ),
-            ),
+            (true, Some(FederationRole::Edge(coordinator))) => {
+                let router = registration_router(&identity, &opaque, key_state, prefix)?;
+                Box::new(edge_router(
+                    router,
+                    &identity,
+                    prefix,
+                    coordinator,
+                    edge_profile,
+                )?)
+            }
             (true, None) => Box::new(registration_router(&identity, &opaque, key_state, prefix)?),
             (false, _) => Box::new(DefaultRouter),
         };

@@ -19,6 +19,10 @@ use crate::{
 };
 
 const E2EE_TAG: &str = "+agenc.ag/e2ee";
+/// The companion-profile server commands `extension_line` admits.
+const EXTENSION_COMMANDS: [&str; 7] = [
+    "EGROUP", "EKEY", "EDIRECT", "EOBJECT", "BATCH", "TAGMSG", "FAIL",
+];
 const LABEL_TAG: &str = "label";
 const BATCH_TAG: &str = "batch";
 const STANDARD_REPLIES_CAPABILITY: &str = "standard-replies";
@@ -256,6 +260,83 @@ impl WireMessage {
     #[must_use]
     pub fn trailing(&self) -> Option<&str> {
         self.trailing.as_deref()
+    }
+
+    /// Builds one companion-profile line the IRC-MLS renderers produced:
+    /// `EGROUP`, `EKEY`, `EDIRECT`, `EOBJECT`, and their `BATCH`, `TAGMSG`,
+    /// and `FAIL` forms (E2EE 11.7). The companion registries live outside
+    /// the frozen server command table, so the closed set here is the only
+    /// bypass of that table; every budget of this crate still applies.
+    // agenc-review: focus owner=client-wire reviewed=2026-09-03 reason=the parser walks tags prefix command middles and trailing in wire order; each branch is one grammar production
+    pub fn extension_line(line: &str) -> Result<Self, RenderError> {
+        let line = line.trim_end_matches("\r\n");
+        let (tags, rest) = match line.strip_prefix('@') {
+            Some(tagged) => {
+                let (tags, rest) = tagged.split_once(' ').ok_or(RenderError::InvalidSyntax)?;
+                (Some(tags), rest)
+            }
+            None => (None, line),
+        };
+        let rest = rest.strip_prefix(':').ok_or(RenderError::InvalidSyntax)?;
+        let (prefix, rest) = rest.split_once(' ').ok_or(RenderError::InvalidSyntax)?;
+        let (body, trailing) = match rest.split_once(" :") {
+            Some((body, trailing)) => (body, Some(trailing)),
+            None => (rest, None),
+        };
+        let mut words = body.split(' ');
+        let command = words.next().ok_or(RenderError::InvalidSyntax)?;
+        if !EXTENSION_COMMANDS.contains(&command) {
+            return Err(RenderError::UnknownRegistryValue);
+        }
+        let middle: Vec<&str> = words.collect();
+        if middle.iter().any(|word| word.is_empty()) {
+            return Err(RenderError::InvalidSyntax);
+        }
+        validate_parameter_count(&middle, trailing)?;
+        if command_bytes(prefix, command, &middle, trailing)? > MAX_COMMAND_BYTES {
+            return Err(RenderError::LineBudget);
+        }
+        validate_prefix(prefix)?;
+        validate_parameters(&middle, trailing)?;
+        let mut message = Self {
+            prefix: copy_string(prefix)?,
+            command: copy_string(command)?,
+            middle: copy_strings(&middle)?,
+            trailing: trailing.map(copy_string).transpose()?,
+            server_tags: Vec::new(),
+            client_tags: Vec::new(),
+        };
+        for tag in tags.into_iter().flat_map(|tags| tags.split(';')) {
+            let (key, value) = match tag.split_once('=') {
+                Some((key, value)) => (key, Some(value)),
+                None => (tag, None),
+            };
+            if key.is_empty() {
+                return Err(RenderError::InvalidSyntax);
+            }
+            if key.starts_with('+') {
+                insert_tag(
+                    &mut message.client_tags,
+                    key,
+                    value,
+                    MAX_CLIENT_TAG_DATA_BYTES,
+                )?;
+            } else {
+                insert_tag(
+                    &mut message.server_tags,
+                    key,
+                    value,
+                    MAX_SERVER_TAG_DATA_BYTES,
+                )?;
+            }
+        }
+        if tag_data_bytes(&message.server_tags)?
+            .saturating_add(tag_data_bytes(&message.client_tags)?)
+            > MAX_COMBINED_TAG_SECTION_BYTES
+        {
+            return Err(RenderError::LineBudget);
+        }
+        Ok(message)
     }
 
     /// Adds one ordinary server-originated tag.

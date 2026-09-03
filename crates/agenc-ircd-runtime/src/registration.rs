@@ -151,6 +151,7 @@ pub struct RegistrationRouter {
     pending_observations: BTreeMap<(ConnectionGeneration, u64), CommandObservation>,
     federation: Option<FederationCoordinator>,
     edge: Option<EdgeFederation>,
+    e2ee: Option<crate::e2ee::edge::E2eeEdge>,
 }
 
 struct ClientCapabilityProfiles {
@@ -174,6 +175,28 @@ impl ClientCapabilityProfiles {
                 recovery_epoch,
                 ListenerPurpose::ClientOnion,
             )?),
+        })
+    }
+
+    /// The same profiles with the E2EE capability and its fixed value added
+    /// (companion 11.1).
+    fn with_e2ee(&self) -> Result<Self, RuntimeError> {
+        let extend = |profile: &CapabilityProfile| -> Result<Arc<CapabilityProfile>, RuntimeError> {
+            let mut capabilities = profile.capabilities().to_vec();
+            capabilities.push(
+                CapabilitySpec::new(
+                    crate::e2ee::edge::E2EE_CAPABILITY,
+                    Some(agenc_ircd_e2ee::limits::CAPABILITY_VALUE),
+                )
+                .map_err(|_| RuntimeError::InvalidValue)?,
+            );
+            CapabilityProfile::new(capabilities)
+                .map(Arc::new)
+                .map_err(|_| RuntimeError::InvalidValue)
+        };
+        Ok(Self {
+            dns_tls: extend(&self.dns_tls)?,
+            onion: extend(&self.onion)?,
         })
     }
 
@@ -236,6 +259,7 @@ impl RegistrationRouter {
             pending_observations: BTreeMap::new(),
             federation: None,
             edge: None,
+            e2ee: None,
         })
     }
 
@@ -251,6 +275,101 @@ impl RegistrationRouter {
     #[must_use]
     pub fn edge(&self) -> Option<&EdgeFederation> {
         self.edge.as_ref()
+    }
+
+    /// Attaches the edge E2EE router beside the edge role and advertises the
+    /// E2EE capability with its fixed value.
+    pub fn with_e2ee_edge(
+        mut self,
+        e2ee: crate::e2ee::edge::E2eeEdge,
+    ) -> Result<Self, RuntimeError> {
+        self.advertised = self.advertised.with_e2ee()?;
+        self.e2ee = Some(e2ee);
+        Ok(self)
+    }
+
+    /// Borrows the edge E2EE router when attached.
+    #[must_use]
+    pub fn e2ee(&self) -> Option<&crate::e2ee::edge::E2eeEdge> {
+        self.e2ee.as_ref()
+    }
+
+    /// Routes one E2EE client line through the edge E2EE router.
+    fn route_e2ee_line(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+        state: &ConnectionState,
+        message: &agenc_ircd_client_wire::ParsedMessage,
+    ) -> ResultClass {
+        let (Some(e2ee), Some(edge), Some(bound)) =
+            (self.e2ee.as_mut(), self.edge.as_mut(), state.bound)
+        else {
+            return ResultClass::Rejected;
+        };
+        let account = edge
+            .replica()
+            .session(bound.user_id)
+            .and_then(|record| record.account)
+            .and_then(|(account, _)| account.to_text().as_bytes().try_into().ok());
+        let nickname = state.nickname.as_deref().unwrap_or("*").to_owned();
+        let facts = crate::e2ee::edge::SessionFacts {
+            user_id: bound.user_id,
+            account,
+            capabilities: state.registration.capability_state(),
+            nickname: &nickname,
+        };
+        let outputs = e2ee.client_line(context, edge, generation, message, &facts);
+        let refused = !outputs.is_empty();
+        for output in outputs {
+            let _sent = context.send_to(output.generation, output.frames);
+        }
+        if refused {
+            ResultClass::Rejected
+        } else {
+            ResultClass::Ok
+        }
+    }
+
+    /// The `E2EE_REQUIRED` refusal for a plaintext line aimed at a bound
+    /// target, when the edge E2EE router is attached.
+    fn e2ee_downgrade_refusal(
+        &self,
+        state: &ConnectionState,
+        message: &agenc_ircd_client_wire::ParsedMessage,
+    ) -> Option<WireMessage> {
+        let (Some(e2ee), Some(edge), Some(bound)) =
+            (self.e2ee.as_ref(), self.edge.as_ref(), state.bound)
+        else {
+            return None;
+        };
+        let account = edge
+            .replica()
+            .session(bound.user_id)
+            .and_then(|record| record.account)
+            .and_then(|(account, _)| account.to_text().as_bytes().try_into().ok());
+        e2ee.plaintext_refusal(edge, message, account)
+    }
+
+    /// Drains the companion frames the edge admitted and applies what the
+    /// E2EE router produced.
+    fn drive_e2ee(&mut self, context: &mut StateCoreContext) {
+        let (Some(e2ee), Some(edge)) = (self.e2ee.as_mut(), self.edge.as_mut()) else {
+            return;
+        };
+        if edge.companion_active() {
+            e2ee.link_active(context, edge);
+        } else if e2ee.phase() != crate::e2ee::edge::Phase::Down {
+            e2ee.link_down();
+        }
+        let frames = edge.drain_companion();
+        let mut outputs = e2ee.handle_frames(context, edge, frames);
+        e2ee.apply_attachments(context, edge);
+        e2ee.declare_origins(context, edge);
+        outputs.extend(e2ee.batch_applied_outputs());
+        for output in outputs {
+            let _sent = context.send_to(output.generation, output.frames);
+        }
     }
 
     /// Attaches the coordinator role so federated edges are served through
@@ -333,6 +452,15 @@ impl RegistrationRouter {
                     ResultClass::Error
                 },
             );
+            self.refresh_deadline(context, generation, &mut state, outcome);
+            self.connections.insert(generation, state);
+            return outcome;
+        }
+        if state.bound.is_some() && self.e2ee.is_some() && crate::e2ee::edge::is_e2ee_line(&message)
+        {
+            let class = self.route_e2ee_line(context, generation, &state, &message);
+            complete_observation(context, &mut observation, class);
+            let outcome = RouteOutcome::Continue;
             self.refresh_deadline(context, generation, &mut state, outcome);
             self.connections.insert(generation, state);
             return outcome;
@@ -911,6 +1039,11 @@ impl RegistrationRouter {
             return Ok(ActionStep::Close(CloseReason::ProtocolError));
         }
         let command_name = message.command().to_owned();
+        if let Some(frame) = self.e2ee_downgrade_refusal(state, &message) {
+            context.complete_command_observation(observation, ResultClass::Rejected);
+            self.send_one(context, generation, frame)?;
+            return Ok(ActionStep::Continue);
+        }
         let Some(edge) = self.edge.as_mut() else {
             return Err(RuntimeError::InvalidValue);
         };
@@ -2051,6 +2184,7 @@ impl CommandRouter for RegistrationRouter {
         if let Some(edge) = self.edge.as_mut() {
             let completions = edge.inbound(context, message);
             self.apply_edge_completions(context, completions);
+            self.drive_e2ee(context);
             return;
         }
         if let Some(federation) = self.federation.as_mut() {
@@ -2184,6 +2318,9 @@ impl CommandRouter for RegistrationRouter {
             .unwrap_or("connection closed")
             .to_owned();
         if let Some(edge) = self.edge.as_mut() {
+            if let Some(e2ee) = self.e2ee.as_mut() {
+                e2ee.delete_origin(context, edge, generation);
+            }
             edge.connection_closed(context, generation, &reason);
             return;
         }
@@ -2236,6 +2373,12 @@ impl CommandRouter for RegistrationRouter {
         if let Some(edge) = self.edge.as_mut() {
             let completions = edge.batch_applied(context);
             self.apply_edge_completions(context, completions);
+        }
+        if let (Some(e2ee), Some(edge)) = (self.e2ee.as_mut(), self.edge.as_mut()) {
+            let outputs = e2ee.batch_applied(context, edge);
+            for output in outputs {
+                let _sent = context.send_to(output.generation, output.frames);
+            }
         }
     }
 
@@ -2296,6 +2439,9 @@ impl CommandRouter for RegistrationRouter {
         }
         if let Some(edge) = self.edge.as_mut() {
             edge.batch_rejected(context);
+        }
+        if let Some(e2ee) = self.e2ee.as_mut() {
+            e2ee.batch_rejected();
         }
         let generation = origin.as_ref().map(StagedOrigin::generation);
         if generation

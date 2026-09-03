@@ -9,6 +9,7 @@
 
 mod barrier;
 mod events;
+pub(crate) use render::prefix as source_prefix;
 mod render;
 mod request;
 mod sync;
@@ -64,6 +65,25 @@ pub struct EdgeConfig {
     pub incarnation: ServerIncarnation,
     /// The configured coordinator.
     pub coordinator: PeerIdentity,
+}
+
+/// The base origin facts a companion declaration mirrors.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BaseOriginFacts {
+    /// The origin identity.
+    pub origin_id: [u8; 16],
+    /// The current base generation.
+    pub generation: u64,
+    /// The generation the coordinator acknowledged.
+    pub acked_generation: Option<u64>,
+    /// The connection identity.
+    pub connection_id: [u8; 16],
+    /// The connection nonce.
+    pub connection_nonce: [u8; 32],
+    /// The session and user, when registered.
+    pub session: Option<([u8; 16], [u8; 16])>,
+    /// The account and its session generation, when authenticated.
+    pub account: Option<([u8; 24], u64)>,
 }
 
 /// One authenticated live link to the coordinator.
@@ -315,6 +335,74 @@ impl EdgeFederation {
             self.fail_link(context, Violation::Companion(violation));
         }
         true
+    }
+
+    /// The base origin facts of one connection the companion origin mirrors.
+    #[must_use]
+    pub fn origin_facts(&self, generation: ConnectionGeneration) -> Option<BaseOriginFacts> {
+        let origin = self.origins.get(&generation)?;
+        Some(BaseOriginFacts {
+            origin_id: *origin.origin_id.as_bytes(),
+            generation: origin.generation,
+            acked_generation: origin.acked_generation,
+            connection_id: *origin.connection_id.as_bytes(),
+            connection_nonce: origin.connection_nonce,
+            session: origin
+                .session
+                .map(|(session, user)| (*session.as_bytes(), *user.as_bytes())),
+            account: None,
+        })
+    }
+
+    /// Every connection with a base origin.
+    #[must_use]
+    pub fn connection_generations(&self) -> Vec<ConnectionGeneration> {
+        self.origins.keys().copied().collect()
+    }
+
+    /// Advances the connection's shared origin generation after a device
+    /// attachment and declares the update (E2EE 12.5).
+    pub fn advance_origin(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+    ) {
+        self.session_bound(context, generation);
+    }
+
+    /// The coordinator's recovery epoch and incarnation on the live link.
+    #[must_use]
+    pub fn coordinator_link_identity(&self) -> Option<([u8; 16], [u8; 16])> {
+        self.live.as_ref().map(|live| {
+            (
+                *live.coordinator_epoch.as_bytes(),
+                *live.coordinator_incarnation.as_bytes(),
+            )
+        })
+    }
+
+    /// Sends companion lines over the live link; returns whether every line
+    /// was queued.
+    pub fn send_companion_lines(
+        &mut self,
+        context: &mut StateCoreContext,
+        lines: Vec<agenc_ircd_federation_wire::FederationLineText>,
+    ) -> bool {
+        for line in lines {
+            let Some(live) = self.live.as_ref() else {
+                return false;
+            };
+            if let Err(refusal) = live.handle.try_send(line) {
+                self.send_failed(context, SendFailure::from(refusal));
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Closes the link after a companion violation.
+    pub fn fail_companion_link(&mut self, context: &mut StateCoreContext) {
+        self.fail_link(context, Violation::Companion(CompanionViolation::Request));
     }
 
     /// Stages one companion part of a cross-profile barrier handed over by
