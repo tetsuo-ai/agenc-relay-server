@@ -1,16 +1,16 @@
 ---
 name: tests
-description: "Skill for the Tests area of agenc-ircd. 2004 symbols across 209 files."
+description: "Skill for the Tests area of agenc-ircd. 2023 symbols across 209 files."
 ---
 
 # Tests
 
-2004 symbols | 209 files | Cohesion: 75%
+2023 symbols | 209 files | Cohesion: 75%
 
 ## When to Use
 
 - Working with code in `crates/`
-- Understanding how nick, quit, part_all work
+- Understanding how parse, allocation_charge, enabled_purposes work
 - Modifying tests-related functionality
 
 ## Key Files
@@ -24,44 +24,44 @@ description: "Skill for the Tests area of agenc-ircd. 2004 symbols across 209 fi
 | `crates/agenc-ircd-auth/tests/stage_four.rs` | hash, new, credential, operation_context, operation_route (+51) |
 | `crates/agenc-ircd-client-wire/src/registration_command.rs` | validate_post_registration_command, validate_join, validate_part, validate_mode, validate_topic (+50) |
 | `crates/agenc-ircd-storage/src/domain_records.rs` | decode, validate_session, optional_account_id, decode_channel, validate_channel (+49) |
-| `crates/agenc-ircd-runtime/src/federation/coordinator/tests/harness.rs` | entropy_script, peer_identity, new, send, establish (+36) |
+| `crates/agenc-ircd-runtime/src/federation/coordinator/tests/harness.rs` | entropy_script, peer_identity, new, send, establish (+47) |
 | `crates/agenc-ircd-federation-wire/src/codec.rs` | decode_exact, encode_canonical, claim_bytes, validate_bounds, is_optional_fixed (+31) |
-| `crates/agenc-ircd-domain/src/model.rs` | new, parse, with_policies, from_seed, test_public_cloak (+30) |
+| `crates/agenc-ircd-runtime/src/federation/edge/tests/harness.rs` | new, send, establish, frame, object (+30) |
 
 ## Entry Points
 
 Start here when exploring this area:
 
-- **`nick`** (Function) — `crates/agenc-ircd-domain/src/command.rs:725`
-- **`quit`** (Function) — `crates/agenc-ircd-domain/src/command.rs:731`
-- **`part_all`** (Function) — `crates/agenc-ircd-domain/src/command.rs:760`
-- **`user_operator_notices`** (Function) — `crates/agenc-ircd-domain/src/command.rs:789`
-- **`channel_mode_query`** (Function) — `crates/agenc-ircd-domain/src/command.rs:797`
+- **`parse`** (Function) — `crates/agenc-ircd-config/src/accounts.rs:123`
+- **`allocation_charge`** (Function) — `crates/agenc-ircd-config/src/bounds.rs:186`
+- **`enabled_purposes`** (Function) — `crates/agenc-ircd-config/src/config.rs:117`
+- **`secret_paths`** (Function) — `crates/agenc-ircd-config/src/config.rs:130`
+- **`public_text_paths`** (Function) — `crates/agenc-ircd-config/src/config.rs:208`
 
 ## Key Symbols
 
 | Symbol | Type | File | Line |
 |--------|------|------|------|
-| `nick` | Function | `crates/agenc-ircd-domain/src/command.rs` | 725 |
-| `quit` | Function | `crates/agenc-ircd-domain/src/command.rs` | 731 |
-| `part_all` | Function | `crates/agenc-ircd-domain/src/command.rs` | 760 |
-| `user_operator_notices` | Function | `crates/agenc-ircd-domain/src/command.rs` | 789 |
-| `channel_mode_query` | Function | `crates/agenc-ircd-domain/src/command.rs` | 797 |
-| `topic_set` | Function | `crates/agenc-ircd-domain/src/command.rs` | 819 |
-| `apply` | Function | `crates/agenc-ircd-domain/src/federation/projection.rs` | 305 |
-| `install_edge` | Function | `crates/agenc-ircd-domain/src/federation/projection.rs` | 333 |
-| `close_registered` | Function | `crates/agenc-ircd-runtime/src/channels.rs` | 850 |
-| `install_edge` | Function | `crates/agenc-ircd-runtime/src/state_core/projector.rs` | 140 |
-| `committed` | Function | `crates/agenc-ircd-runtime/src/state_core/projector.rs` | 338 |
-| `bytes` | Function | `crates/agenc-ircd-testkit/src/domain_fixture.rs` | 26 |
-| `account_id` | Function | `crates/agenc-ircd-testkit/src/domain_fixture.rs` | 32 |
-| `channel_id` | Function | `crates/agenc-ircd-testkit/src/domain_fixture.rs` | 38 |
-| `generation` | Function | `crates/agenc-ircd-testkit/src/domain_fixture.rs` | 48 |
-| `apply_plan` | Function | `crates/agenc-ircd-testkit/src/domain_fixture.rs` | 53 |
-| `create_account` | Function | `crates/agenc-ircd-testkit/src/domain_fixture.rs` | 64 |
-| `open_session` | Function | `crates/agenc-ircd-testkit/src/domain_fixture.rs` | 81 |
-| `registered_admission` | Function | `crates/agenc-ircd-testkit/src/domain_fixture.rs` | 119 |
-| `message_admission` | Function | `crates/agenc-ircd-testkit/src/domain_fixture.rs` | 124 |
+| `parse` | Function | `crates/agenc-ircd-config/src/accounts.rs` | 123 |
+| `allocation_charge` | Function | `crates/agenc-ircd-config/src/bounds.rs` | 186 |
+| `enabled_purposes` | Function | `crates/agenc-ircd-config/src/config.rs` | 117 |
+| `secret_paths` | Function | `crates/agenc-ircd-config/src/config.rs` | 130 |
+| `public_text_paths` | Function | `crates/agenc-ircd-config/src/config.rs` | 208 |
+| `trust_manifest_paths` | Function | `crates/agenc-ircd-config/src/config.rs` | 224 |
+| `listener_material_paths` | Function | `crates/agenc-ircd-config/src/config.rs` | 238 |
+| `validate` | Function | `crates/agenc-ircd-config/src/cross.rs` | 23 |
+| `protocol_pool` | Function | `crates/agenc-ircd-config/src/cross.rs` | 632 |
+| `working_set` | Function | `crates/agenc-ircd-config/src/cross.rs` | 648 |
+| `check_keys` | Function | `crates/agenc-ircd-config/src/document.rs` | 19 |
+| `table_array` | Function | `crates/agenc-ircd-config/src/document.rs` | 45 |
+| `string` | Function | `crates/agenc-ircd-config/src/document.rs` | 71 |
+| `optional_string` | Function | `crates/agenc-ircd-config/src/document.rs` | 76 |
+| `unsigned` | Function | `crates/agenc-ircd-config/src/document.rs` | 89 |
+| `optional_unsigned` | Function | `crates/agenc-ircd-config/src/document.rs` | 94 |
+| `boolean` | Function | `crates/agenc-ircd-config/src/document.rs` | 105 |
+| `optional_boolean` | Function | `crates/agenc-ircd-config/src/document.rs` | 110 |
+| `string_array` | Function | `crates/agenc-ircd-config/src/document.rs` | 119 |
+| `parse` | Function | `crates/agenc-ircd-config/src/e2ee.rs` | 66 |
 
 ## Execution Flows
 
@@ -82,18 +82,18 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| State_core | 212 calls |
-| Federation | 66 calls |
-| Codec | 36 calls |
-| Admission | 35 calls |
+| State_core | 218 calls |
+| Federation | 68 calls |
+| Codec | 37 calls |
+| Admission | 36 calls |
 | Tls | 32 calls |
-| Cluster_658 | 30 calls |
+| Cluster_668 | 30 calls |
+| Coordinator | 19 calls |
 | Fuzz_targets | 18 calls |
-| Cluster_63 | 18 calls |
 
 ## How to Explore
 
-1. `context({name: "nick"})` — see callers and callees
+1. `context({name: "parse"})` — see callers and callees
 2. `query({search_query: "tests"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

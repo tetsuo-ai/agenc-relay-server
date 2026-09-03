@@ -81,14 +81,14 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| State_core | 18 calls |
+| State_core | 19 calls |
 | Tests | 14 calls |
 | Cluster_201 | 4 calls |
-| Cluster_459 | 3 calls |
-| Cluster_420 | 3 calls |
+| Cluster_471 | 3 calls |
+| Cluster_427 | 3 calls |
 | Cluster_4 | 2 calls |
-| Coordinator | 2 calls |
 | Federation | 2 calls |
+| Cluster_22 | 2 calls |
 
 ## How to Explore
 

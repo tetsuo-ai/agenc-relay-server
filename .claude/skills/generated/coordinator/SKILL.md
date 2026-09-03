@@ -1,11 +1,11 @@
 ---
 name: coordinator
-description: "Skill for the Coordinator area of agenc-ircd. 145 symbols across 27 files."
+description: "Skill for the Coordinator area of agenc-ircd. 158 symbols across 29 files."
 ---
 
 # Coordinator
 
-145 symbols | 27 files | Cohesion: 65%
+158 symbols | 29 files | Cohesion: 65%
 
 ## When to Use
 
@@ -17,16 +17,16 @@ description: "Skill for the Coordinator area of agenc-ircd. 145 symbols across 2
 
 | File | Symbols |
 |------|---------|
-| `crates/agenc-ircd-runtime/src/federation/coordinator/mod.rs` | owns_storage_read, storage_read_completed, batch_applied, continue_background, batch_rejected (+18) |
+| `crates/agenc-ircd-runtime/src/federation/coordinator/mod.rs` | handle_traffic, link_is_live, link_closed, fail_link, owns_storage_read (+21) |
 | `crates/agenc-ircd-runtime/src/federation/coordinator/request.rs` | run_operation, run_query, answer_page, finish_query_decision, open_session (+16) |
-| `crates/agenc-ircd-runtime/src/federation/coordinator/snapshot.rs` | continue_resend, owns_read, resend_completed, replay_row, announce (+10) |
+| `crates/agenc-ircd-runtime/src/federation/coordinator/snapshot.rs` | owns_read, resend_completed, replay_row, timer_fired, expire (+11) |
 | `crates/agenc-ircd-runtime/src/federation/coordinator/convert.rs` | key_for, channel_mode_letter, channel_mode_changes, channel_name, reason (+9) |
 | `crates/agenc-ircd-runtime/src/federation/coordinator/query.rs` | expire, new, first_page, next_page, binding (+7) |
 | `crates/agenc-ircd-storage/src/federation_records.rs` | origin_key, parse_origin_key, outbox_key, parse_outbox_key, outbox_range (+6) |
-| `crates/agenc-ircd-runtime/src/federation/coordinator/startup.rs` | begin, first_key, request_page, read_completed, successor (+4) |
+| `crates/agenc-ircd-runtime/src/federation/coordinator/startup.rs` | admit_marker, begin, first_key, request_page, finish (+2) |
 | `crates/agenc-ircd-domain/src/federation/query_cursor.rs` | contains, expire, draw, install_new, check (+1) |
-| `crates/agenc-ircd-runtime/src/state_core/mod.rs` | set_request_binding, open_storage_plaintext, set_mutation_context, take_outbound_events, federation_mut |
-| `crates/agenc-ircd-domain/src/federation/tests/query_cursor.rs` | binding, request, tick, cursor_table_installs_checks_replaces_and_releases, absolute_lifetime_expires_despite_activity_and_expire_sweeps |
+| `crates/agenc-ircd-runtime/src/federation/coordinator/grace.rs` | hide_next, continue_cleanup, restored, queue_hosted_cleanup, timer_fired |
+| `crates/agenc-ircd-runtime/src/state_core/mod.rs` | set_mutation_context, set_request_binding, open_storage_plaintext, take_outbound_events, federation_mut |
 
 ## Entry Points
 
@@ -48,9 +48,11 @@ Start here when exploring this area:
 | `failure_code` | Function | `crates/agenc-ircd-runtime/src/federation/codec/results.rs` | 251 |
 | `key_for` | Function | `crates/agenc-ircd-runtime/src/federation/coordinator/convert.rs` | 615 |
 | `expire` | Function | `crates/agenc-ircd-runtime/src/federation/coordinator/query.rs` | 86 |
+| `bound_for` | Function | `crates/agenc-ircd-runtime/src/federation/coordinator/request.rs` | 564 |
 | `crypto_completed` | Function | `crates/agenc-ircd-runtime/src/federation/coordinator/request.rs` | 655 |
 | `row` | Function | `crates/agenc-ircd-runtime/src/federation/coordinator/request.rs` | 1011 |
 | `render_mutation` | Function | `crates/agenc-ircd-runtime/src/mutation_render.rs` | 28 |
+| `set_mutation_context` | Function | `crates/agenc-ircd-runtime/src/state_core/mod.rs` | 849 |
 | `set_request_binding` | Function | `crates/agenc-ircd-runtime/src/state_core/mod.rs` | 856 |
 | `authenticate_query_cursor` | Function | `crates/agenc-ircd-crypto/src/storage_integrity.rs` | 201 |
 | `draw` | Function | `crates/agenc-ircd-domain/src/federation/query_cursor.rs` | 94 |
@@ -60,8 +62,6 @@ Start here when exploring this area:
 | `new` | Function | `crates/agenc-ircd-runtime/src/federation/coordinator/query.rs` | 75 |
 | `first_page` | Function | `crates/agenc-ircd-runtime/src/federation/coordinator/query.rs` | 106 |
 | `next_page` | Function | `crates/agenc-ircd-runtime/src/federation/coordinator/query.rs` | 161 |
-| `expose_for_storage_codec` | Function | `crates/agenc-ircd-crypto/src/storage.rs` | 252 |
-| `read_blocking` | Function | `crates/agenc-ircd-runtime/src/bridge/storage.rs` | 672 |
 
 ## Execution Flows
 
@@ -82,13 +82,13 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| State_core | 45 calls |
-| Tests | 27 calls |
-| Codec | 5 calls |
-| Federation | 4 calls |
-| Edge | 3 calls |
+| State_core | 47 calls |
+| Tests | 33 calls |
+| Federation | 7 calls |
+| Codec | 4 calls |
 | Bridge | 2 calls |
-| Cluster_405 | 2 calls |
+| Cluster_412 | 2 calls |
+| Cluster_241 | 1 calls |
 | Cluster_190 | 1 calls |
 
 ## How to Explore

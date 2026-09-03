@@ -1,11 +1,11 @@
 ---
 name: federation
-description: "Skill for the Federation area of agenc-ircd. 292 symbols across 38 files."
+description: "Skill for the Federation area of agenc-ircd. 289 symbols across 39 files."
 ---
 
 # Federation
 
-292 symbols | 38 files | Cohesion: 79%
+289 symbols | 39 files | Cohesion: 78%
 
 ## When to Use
 
@@ -17,16 +17,16 @@ description: "Skill for the Federation area of agenc-ircd. 292 symbols across 38
 
 | File | Symbols |
 |------|---------|
-| `crates/agenc-ircd-domain/src/federation/projection.rs` | empty, new, derive, home_of, hosts (+84) |
-| `crates/agenc-ircd-domain/src/federation/replica.rs` | new, membership, invite, account, local_members (+26) |
+| `crates/agenc-ircd-domain/src/federation/projection.rs` | empty, new, derive, home_of, hosts (+86) |
+| `crates/agenc-ircd-domain/src/federation/replica.rs` | new, membership, invite, account, local_members (+27) |
 | `crates/agenc-ircd-runtime/src/federation/link.rs` | split, stream_mut, next_deadline, frame_received, run_link (+14) |
 | `crates/agenc-ircd-auth/src/service.rs` | durable_expires_at_utc, restore, into_restart_cleanup_metadata, restore_transaction_deadline, read_transaction_record_header (+12) |
 | `crates/agenc-ircd-testkit/src/tls_fixture.rs` | mint, mint_federation, validate_dns_name, derive_seed, encode_length (+12) |
 | `crates/agenc-ircd-runtime/src/federation/owner.rs` | setup_failed, run_accept_owner, admit, run_dial_owner, history (+11) |
-| `crates/agenc-ircd-domain/src/federation/origin.rs` | reset, ready, add, update, delete (+9) |
+| `crates/agenc-ircd-domain/src/federation/origin.rs` | ready, link_lost, link_mut, add, update (+8) |
 | `crates/agenc-ircd-domain/src/federation/record.rs` | session, channel_detail, membership, invite, key (+5) |
 | `crates/agenc-ircd-runtime/src/federation/certificate.rs` | verify_peer_certificate, peer, federation_fixture_carries_exactly_one_server_uri, server_id_from_certificate, tbs_extensions (+3) |
-| `crates/agenc-ircd-domain/src/federation/tests/origin.rs` | binding, add, registered, update, ready_table (+3) |
+| `crates/agenc-ircd-runtime/src/federation/owner/tests/harness.rs` | node, trust, material, next_event, accept_and_dial_owners_establish_squit_and_reconnect (+1) |
 
 ## Entry Points
 
@@ -82,13 +82,13 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Tests | 35 calls |
+| Tests | 36 calls |
 | State_core | 24 calls |
-| Admission | 9 calls |
+| Admission | 8 calls |
 | Tls | 7 calls |
 | Edge | 4 calls |
-| Coordinator | 3 calls |
 | Listener | 3 calls |
+| Coordinator | 2 calls |
 | Connection | 1 calls |
 
 ## How to Explore

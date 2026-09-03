@@ -1,11 +1,11 @@
 ---
 name: admission
-description: "Skill for the Admission area of agenc-ircd. 129 symbols across 13 files."
+description: "Skill for the Admission area of agenc-ircd. 133 symbols across 13 files."
 ---
 
 # Admission
 
-129 symbols | 13 files | Cohesion: 67%
+133 symbols | 13 files | Cohesion: 66%
 
 ## When to Use
 
@@ -17,7 +17,7 @@ description: "Skill for the Admission area of agenc-ircd. 129 symbols across 13 
 
 | File | Symbols |
 |------|---------|
-| `crates/agenc-ircd-runtime/src/admission/buckets.rs` | new, default_rate, hard_rate, fixed, defaults (+46) |
+| `crates/agenc-ircd-runtime/src/admission/buckets.rs` | new, default_rate, hard_rate, fixed, defaults (+50) |
 | `crates/agenc-ircd-runtime/src/admission/transport.rs` | now, release_direct, erase_idle, admit_direct, admit_onion (+16) |
 | `crates/agenc-ircd-runtime/src/admission/prefix.rs` | new, with_ceiling, connection_opened, connection_closed, erase_idle (+14) |
 | `crates/agenc-ircd-auth/src/service.rs` | new, parse, context_for_network, inputs, decode_nibble (+8) |
@@ -61,12 +61,13 @@ Start here when exploring this area:
 | `try_insert` | Function | `crates/agenc-ircd-runtime/src/admission/buckets.rs` | 137 |
 | `remove` | Function | `crates/agenc-ircd-runtime/src/admission/buckets.rs` | 170 |
 | `remove_transaction` | Function | `crates/agenc-ircd-runtime/src/admission/buckets.rs` | 175 |
-| `rate` | Function | `crates/agenc-ircd-runtime/src/admission/buckets.rs` | 586 |
+| `full` | Function | `crates/agenc-ircd-runtime/src/admission/buckets.rs` | 654 |
 
 ## Execution Flows
 
 | Flow | Type | Steps |
 |------|------|-------|
+| `Run → Iter_mut` | cross_community | 5 |
 | `Erase_reload_and_domain_mapping_behave_as_specified → Fixed` | cross_community | 5 |
 | `Creation_transaction_record_round_trips_private_reservations → New` | cross_community | 5 |
 | `Live_queries_render_lists_names_who_whois_topics_modes_and_information → Prefix_key` | cross_community | 4 |
@@ -76,13 +77,12 @@ Start here when exploring this area:
 | `Creation_transaction_record_round_trips_private_reservations → Transaction_id` | intra_community | 4 |
 | `Creation_transaction_record_round_trips_private_reservations → Matches_request_kind` | cross_community | 4 |
 | `Creation_transaction_record_round_trips_private_reservations → Message_kind` | intra_community | 4 |
-| `Erase_reload_and_domain_mapping_behave_as_specified → Retain` | cross_community | 3 |
 
 ## Connected Areas
 
 | Area | Connections |
 |------|-------------|
-| State_core | 15 calls |
+| State_core | 11 calls |
 | Tests | 11 calls |
 | Cluster_58 | 5 calls |
 | Cluster_46 | 5 calls |

@@ -83,11 +83,11 @@ Start here when exploring this area:
 | Area | Connections |
 |------|-------------|
 | State_core | 13 calls |
-| Cluster_610 | 2 calls |
+| Cluster_620 | 2 calls |
 | Observe | 2 calls |
 | Tests | 2 calls |
 | Cluster_90 | 1 calls |
-| Cluster_403 | 1 calls |
+| Cluster_410 | 1 calls |
 
 ## How to Explore
 

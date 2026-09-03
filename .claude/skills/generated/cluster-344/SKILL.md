@@ -1,9 +1,9 @@
 ---
-name: cluster-340
-description: "Skill for the Cluster_340 area of agenc-ircd. 49 symbols across 1 files."
+name: cluster-344
+description: "Skill for the Cluster_344 area of agenc-ircd. 49 symbols across 1 files."
 ---
 
-# Cluster_340
+# Cluster_344
 
 49 symbols | 1 files | Cohesion: 62%
 
@@ -11,7 +11,7 @@ description: "Skill for the Cluster_340 area of agenc-ircd. 49 symbols across 1 
 
 - Working with code in `crates/`
 - Understanding how validate_schema_semantics work
-- Modifying cluster_340-related functionality
+- Modifying cluster_344-related functionality
 
 ## Key Files
 
@@ -54,13 +54,13 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Cluster_323 | 56 calls |
+| Cluster_327 | 56 calls |
 | Validate_ | 14 calls |
 | Federation | 4 calls |
 
 ## How to Explore
 
 1. `context({name: "validate_schema_semantics"})` — see callers and callees
-2. `query({search_query: "cluster_340"})` — find related execution flows
+2. `query({search_query: "cluster_344"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

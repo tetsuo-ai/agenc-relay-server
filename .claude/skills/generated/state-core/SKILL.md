@@ -1,11 +1,11 @@
 ---
 name: state-core
-description: "Skill for the State_core area of agenc-ircd. 999 symbols across 78 files."
+description: "Skill for the State_core area of agenc-ircd. 1000 symbols across 77 files."
 ---
 
 # State_core
 
-999 symbols | 78 files | Cohesion: 67%
+1000 symbols | 77 files | Cohesion: 67%
 
 ## When to Use
 
@@ -19,7 +19,7 @@ description: "Skill for the State_core area of agenc-ircd. 999 symbols across 78
 |------|---------|
 | `crates/agenc-ircd-runtime/src/account_service.rs` | tag, from_tag, binding, encode, decode (+152) |
 | `crates/agenc-ircd-runtime/src/state_core/mod.rs` | sessions_mut, buckets_mut, timers_mut, submit_storage_read, entropy_mut (+123) |
-| `crates/agenc-ircd-runtime/src/state_core/reconstruct.rs` | admit_opaque_record, admit_fake_opaque_record, admit_live_opaque_record, finish, reconstruct (+98) |
+| `crates/agenc-ircd-runtime/src/state_core/reconstruct.rs` | admit_opaque_record, admit_fake_opaque_record, admit_live_opaque_record, finish, reconstruct (+100) |
 | `crates/agenc-ircd-storage/src/construction_runtime.rs` | validate, start, start_streaming, start_inner, push (+85) |
 | `crates/agenc-ircd-runtime/src/registration.rs` | new, for_purpose, access_policy, route_message, refresh_deadline (+71) |
 | `crates/agenc-ircd-runtime/src/state_core/durable.rs` | account_key, put, delete, revalidate, account_service_table (+61) |
@@ -82,14 +82,14 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Tests | 138 calls |
-| Admission | 36 calls |
+| Tests | 143 calls |
+| Admission | 37 calls |
 | Bridge | 35 calls |
-| Coordinator | 14 calls |
+| Coordinator | 16 calls |
 | Admin | 13 calls |
-| Cluster_592 | 12 calls |
-| Federation | 12 calls |
-| Connection | 11 calls |
+| Cluster_602 | 12 calls |
+| Federation | 11 calls |
+| Connection | 9 calls |
 
 ## How to Explore
 

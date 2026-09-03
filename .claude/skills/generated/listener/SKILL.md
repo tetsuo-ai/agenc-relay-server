@@ -1,16 +1,16 @@
 ---
 name: listener
-description: "Skill for the Listener area of agenc-ircd. 63 symbols across 11 files."
+description: "Skill for the Listener area of agenc-ircd. 61 symbols across 11 files."
 ---
 
 # Listener
 
-63 symbols | 11 files | Cohesion: 71%
+61 symbols | 11 files | Cohesion: 71%
 
 ## When to Use
 
 - Working with code in `crates/`
-- Understanding how backing_charge, new_live, new work
+- Understanding how backing_charge, new, start work
 - Modifying listener-related functionality
 
 ## Key Files
@@ -21,11 +21,11 @@ description: "Skill for the Listener area of agenc-ircd. 63 symbols across 11 fi
 | `crates/agenc-ircd-runtime/src/listener/socket.rs` | from, from_metadata, matches, new, drop (+9) |
 | `crates/agenc-ircd-runtime/src/tls/stream.rs` | peer_certificates, export_keying_material, available, acquire |
 | `crates/agenc-ircd-runtime/src/daemon.rs` | runtime_purpose, insert_listener_identity, build_listener_specs, validate_onion_pin |
-| `crates/agenc-ircd-runtime/src/connection/queue.rs` | backing_charge, new_live, new_with_runtime_config |
 | `crates/agenc-ircd-runtime/src/tls/config.rs` | alpn, requires_client_certificate, leaf |
 | `crates/agenc-ircd-runtime/src/listener/spki.rs` | spki_sha256, read_tlv, sha256 |
 | `crates/agenc-ircd-runtime/src/listener/prefix.rs` | source_key, keys_follow_the_family_and_collapse_mapped_addresses |
 | `crates/agenc-ircd-runtime/src/state_core/inbox.rs` | ipv6, source_keys_mask_to_the_spec_prefixes_and_stay_distinct_per_family |
+| `crates/agenc-ircd-runtime/src/connection/queue.rs` | backing_charge |
 | `crates/agenc-ircd-admin/src/challenge.rs` | as_bytes |
 
 ## Entry Points
@@ -33,17 +33,16 @@ description: "Skill for the Listener area of agenc-ircd. 63 symbols across 11 fi
 Start here when exploring this area:
 
 - **`backing_charge`** (Function) — `crates/agenc-ircd-runtime/src/connection/queue.rs:138`
-- **`new_live`** (Function) — `crates/agenc-ircd-runtime/src/connection/queue.rs:271`
 - **`new`** (Function) — `crates/agenc-ircd-runtime/src/listener/mod.rs:82`
 - **`start`** (Function) — `crates/agenc-ircd-runtime/src/listener/mod.rs:406`
 - **`bind`** (Function) — `crates/agenc-ircd-runtime/src/listener/socket.rs:183`
+- **`as_bytes`** (Function) — `crates/agenc-ircd-admin/src/challenge.rs:38`
 
 ## Key Symbols
 
 | Symbol | Type | File | Line |
 |--------|------|------|------|
 | `backing_charge` | Function | `crates/agenc-ircd-runtime/src/connection/queue.rs` | 138 |
-| `new_live` | Function | `crates/agenc-ircd-runtime/src/connection/queue.rs` | 271 |
 | `new` | Function | `crates/agenc-ircd-runtime/src/listener/mod.rs` | 82 |
 | `start` | Function | `crates/agenc-ircd-runtime/src/listener/mod.rs` | 406 |
 | `bind` | Function | `crates/agenc-ircd-runtime/src/listener/socket.rs` | 183 |
@@ -59,9 +58,10 @@ Start here when exploring this area:
 | `ipv6` | Function | `crates/agenc-ircd-runtime/src/state_core/inbox.rs` | 152 |
 | `available` | Function | `crates/agenc-ircd-runtime/src/tls/stream.rs` | 107 |
 | `acquire` | Function | `crates/agenc-ircd-runtime/src/tls/stream.rs` | 112 |
-| `new_with_runtime_config` | Function | `crates/agenc-ircd-runtime/src/connection/queue.rs` | 280 |
 | `released` | Function | `crates/agenc-ircd-runtime/src/listener/mod.rs` | 134 |
 | `arrived` | Function | `crates/agenc-ircd-runtime/src/listener/mod.rs` | 361 |
+| `uses_unix_socket` | Function | `crates/agenc-ircd-runtime/src/listener/mod.rs` | 501 |
+| `validate_spec` | Function | `crates/agenc-ircd-runtime/src/listener/mod.rs` | 508 |
 
 ## Execution Flows
 
@@ -81,8 +81,8 @@ Start here when exploring this area:
 | Tests | 4 calls |
 | Federation | 3 calls |
 | Cluster_174 | 2 calls |
-| Connection | 2 calls |
 | Cluster_32 | 1 calls |
+| Cluster_427 | 1 calls |
 
 ## How to Explore
 

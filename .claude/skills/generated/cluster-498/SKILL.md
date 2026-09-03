@@ -1,23 +1,23 @@
 ---
-name: cluster-486
-description: "Skill for the Cluster_486 area of agenc-ircd. 79 symbols across 2 files."
+name: cluster-498
+description: "Skill for the Cluster_498 area of agenc-ircd. 86 symbols across 2 files."
 ---
 
-# Cluster_486
+# Cluster_498
 
-79 symbols | 2 files | Cohesion: 87%
+86 symbols | 2 files | Cohesion: 87%
 
 ## When to Use
 
 - Working with code in `crates/`
 - Understanding how initialize_node, verify_database_header, render_onboarding work
-- Modifying cluster_486-related functionality
+- Modifying cluster_498-related functionality
 
 ## Key Files
 
 | File | Symbols |
 |------|---------|
-| `crates/agenc-ircd-runtime/src/offline.rs` | from, role, imported_hpke_public_key, create, drop (+73) |
+| `crates/agenc-ircd-runtime/src/offline.rs` | from, generate, role, imported_network_id, imported_hpke_public_key (+80) |
 | `crates/agenc-ircd-storage/src/qualification.rs` | embedded_storage_qualifications |
 
 ## Entry Points
@@ -27,6 +27,7 @@ Start here when exploring this area:
 - **`initialize_node`** (Function) — `crates/agenc-ircd-runtime/src/offline.rs:512`
 - **`verify_database_header`** (Function) — `crates/agenc-ircd-runtime/src/offline.rs:1279`
 - **`render_onboarding`** (Function) — `crates/agenc-ircd-runtime/src/offline.rs:1338`
+- **`create_account_invite`** (Function) — `crates/agenc-ircd-runtime/src/offline.rs:1356`
 - **`embedded_storage_qualifications`** (Function) — `crates/agenc-ircd-storage/src/qualification.rs:558`
 
 ## Key Symbols
@@ -36,12 +37,16 @@ Start here when exploring this area:
 | `initialize_node` | Function | `crates/agenc-ircd-runtime/src/offline.rs` | 512 |
 | `verify_database_header` | Function | `crates/agenc-ircd-runtime/src/offline.rs` | 1279 |
 | `render_onboarding` | Function | `crates/agenc-ircd-runtime/src/offline.rs` | 1338 |
+| `create_account_invite` | Function | `crates/agenc-ircd-runtime/src/offline.rs` | 1356 |
 | `embedded_storage_qualifications` | Function | `crates/agenc-ircd-storage/src/qualification.rs` | 558 |
 | `from` | Function | `crates/agenc-ircd-runtime/src/offline.rs` | 179 |
+| `generate` | Function | `crates/agenc-ircd-runtime/src/offline.rs` | 215 |
 | `role` | Function | `crates/agenc-ircd-runtime/src/offline.rs` | 250 |
+| `imported_network_id` | Function | `crates/agenc-ircd-runtime/src/offline.rs` | 257 |
 | `imported_hpke_public_key` | Function | `crates/agenc-ircd-runtime/src/offline.rs` | 274 |
 | `create` | Function | `crates/agenc-ircd-runtime/src/offline.rs` | 354 |
 | `drop` | Function | `crates/agenc-ircd-runtime/src/offline.rs` | 502 |
+| `prepare_init_mode` | Function | `crates/agenc-ircd-runtime/src/offline.rs` | 539 |
 | `validate_init_request` | Function | `crates/agenc-ircd-runtime/src/offline.rs` | 570 |
 | `validate_init_paths` | Function | `crates/agenc-ircd-runtime/src/offline.rs` | 589 |
 | `valid_init_path_shapes` | Function | `crates/agenc-ircd-runtime/src/offline.rs` | 599 |
@@ -49,10 +54,6 @@ Start here when exploring this area:
 | `validate_lexical_root_separation` | Function | `crates/agenc-ircd-runtime/src/offline.rs` | 610 |
 | `validate_edge_descriptor_path` | Function | `crates/agenc-ircd-runtime/src/offline.rs` | 639 |
 | `safe_absolute_path` | Function | `crates/agenc-ircd-runtime/src/offline.rs` | 650 |
-| `paths_overlap` | Function | `crates/agenc-ircd-runtime/src/offline.rs` | 658 |
-| `validate_physical_root_separation` | Function | `crates/agenc-ircd-runtime/src/offline.rs` | 662 |
-| `open_physical_directory` | Function | `crates/agenc-ircd-runtime/src/offline.rs` | 722 |
-| `directory_identity` | Function | `crates/agenc-ircd-runtime/src/offline.rs` | 744 |
 
 ## Execution Flows
 
@@ -71,18 +72,18 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Tests | 10 calls |
+| Tests | 12 calls |
 | Cluster_172 | 3 calls |
-| Cluster_487 | 3 calls |
+| Cluster_162 | 3 calls |
+| Examples | 2 calls |
 | Validate_ | 2 calls |
-| Cluster_493 | 2 calls |
-| Cluster_489 | 2 calls |
-| Cluster_162 | 2 calls |
-| Examples | 1 calls |
+| Cluster_504 | 2 calls |
+| Cluster_500 | 2 calls |
+| Cluster_201 | 1 calls |
 
 ## How to Explore
 
 1. `context({name: "initialize_node"})` — see callers and callees
-2. `query({search_query: "cluster_486"})` — find related execution flows
+2. `query({search_query: "cluster_498"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

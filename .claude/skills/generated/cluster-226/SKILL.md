@@ -65,7 +65,7 @@ Start here when exploring this area:
 | State_core | 11 calls |
 | Admission | 8 calls |
 | Cluster_232 | 7 calls |
-| Cluster_292 | 5 calls |
+| Cluster_296 | 5 calls |
 | Cluster_252 | 2 calls |
 | Cluster_241 | 2 calls |
 | Cluster_36 | 2 calls |
