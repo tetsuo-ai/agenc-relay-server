@@ -1489,7 +1489,7 @@ impl PackageRow {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AttachChallenge {
     /// The connection the challenge was issued to.
-    pub connection_id: u64,
+    pub connection_id: [u8; ID_BYTES],
     /// The edge connection nonce.
     pub connection_nonce: [u8; HASH_BYTES],
     /// The coordinator's server challenge.
@@ -1526,14 +1526,14 @@ impl AttachRow {
         encoder.put_u64(self.session_generation)?;
         put_bool(&mut encoder, self.challenge.is_some())?;
         let challenge = self.challenge.unwrap_or(AttachChallenge {
-            connection_id: 0,
+            connection_id: [0; ID_BYTES],
             connection_nonce: [0; HASH_BYTES],
             server_challenge: [0; HASH_BYTES],
             reserved_generation: 0,
             expires_at: 0,
             object_id: [0; HASH_BYTES],
         });
-        encoder.put_u64(challenge.connection_id)?;
+        encoder.put_fixed(&challenge.connection_id)?;
         encoder.put_fixed(&challenge.connection_nonce)?;
         encoder.put_fixed(&challenge.server_challenge)?;
         encoder.put_u64(challenge.reserved_generation)?;
@@ -1549,7 +1549,7 @@ impl AttachRow {
         let session_generation = decoder.u64()?;
         let present = take_bool(&mut decoder)?;
         let challenge = AttachChallenge {
-            connection_id: decoder.u64()?,
+            connection_id: decoder.array()?,
             connection_nonce: decoder.array()?,
             server_challenge: decoder.array()?,
             reserved_generation: decoder.u64()?,
@@ -1557,7 +1557,7 @@ impl AttachRow {
             object_id: decoder.array()?,
         };
         decoder.finish()?;
-        let blank = challenge.connection_id == 0
+        let blank = challenge.connection_id == [0; ID_BYTES]
             && challenge.reserved_generation == 0
             && challenge.expires_at == 0
             && challenge.connection_nonce == [0; HASH_BYTES]

@@ -38,6 +38,7 @@ use super::{
 };
 
 mod support;
+mod sync;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -134,7 +135,12 @@ impl Harness {
             account_digest: Some(account_id_digest(&NETWORK, &account)?),
             device: None,
             connection_nonce: NONCE,
-            connection_id: 11,
+            connection_id: [11; 16],
+            object_id: [0; 32],
+            state_id: [0; 32],
+            previous_state_id: [0; 32],
+            suspended: false,
+            fenced: false,
         });
         Ok(Self {
             coordinator,
@@ -294,6 +300,11 @@ impl Harness {
             return Err("expected an attached result".into());
         };
         assert_eq!(named, DEVICE_ID);
+        // The edge follows with the base generation transition and the
+        // EORIGIN UPDATE that carries the attachment; mirror its outcome.
+        if let Some(origin) = self.coordinator.state.origins.get_mut(&origin_key()) {
+            origin.device = Some((DEVICE_ID, generation));
+        }
         Ok((generation, attach))
     }
 

@@ -50,6 +50,8 @@ pub enum CompanionViolation {
     Request,
     /// The executor could not stage or answer the request.
     Executor,
+    /// The ESTATE token expired before READY.
+    SnapshotExpired,
 }
 
 impl fmt::Display for CompanionViolation {
@@ -60,6 +62,7 @@ impl fmt::Display for CompanionViolation {
             Self::Backlog => formatter.write_str("companion frame backlog exceeded"),
             Self::Request => formatter.write_str("companion request violated the profile"),
             Self::Executor => formatter.write_str("companion executor unavailable"),
+            Self::SnapshotExpired => formatter.write_str("companion state transfer expired"),
             Self::Render => formatter.write_str("companion line could not be rendered"),
         }
     }

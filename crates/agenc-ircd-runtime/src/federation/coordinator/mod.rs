@@ -644,6 +644,9 @@ impl FederationCoordinator {
         let _cancelled = context
             .timers_mut()
             .cancel(TimerKind::CompanionProfileDeadline, TimedId::Peer(peer));
+        let _cancelled = context
+            .timers_mut()
+            .cancel(TimerKind::CompanionSnapshotExpiry, TimedId::Peer(peer));
         if let Some(state) = self.peers.get_mut(&peer) {
             state.live = None;
             state.queued.clear();
@@ -739,7 +742,9 @@ impl FederationCoordinator {
                 if edge_server_id != peer {
                     return Err(Violation::Misaddressed);
                 }
-                origin::ready(self, context, peer, server_incarnation)
+                origin::ready(self, context, peer, server_incarnation)?;
+                companion::base_ready(self, context, peer, server_incarnation);
+                Ok(())
             }
             FederationFrame::Resume {
                 coordinator_server_id,
@@ -961,6 +966,7 @@ impl FederationCoordinator {
         grace::timer_fired(self, context, entry)
             || snapshot::timer_fired(self, context, entry)
             || self.companion_timer_fired(context, entry)
+            || companion::snapshot_timer_fired(self, context, entry)
     }
 
     /// Finishes the batch that just committed and delivers its events.

@@ -772,7 +772,11 @@ pub fn close(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         companion.routes = routes;
         companion.logs.insert(conversation_id, log);
         let _ = CompanionCoordinator::retain_object(companion, retained);
+        let route_object_id = *agenc_ircd_e2ee::ObjectId::compute(&route_object).as_bytes();
         let _ = CompanionCoordinator::retain_object(companion, route_object);
+        if let Some(state) = companion.conversations.get_mut(&conversation_id) {
+            state.route_object_id = route_object_id;
+        }
     }));
     Ok(outcome)
 }

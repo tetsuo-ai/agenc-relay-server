@@ -39,6 +39,7 @@ pub mod events;
 pub mod execute;
 pub mod ops;
 pub mod request;
+pub mod sync;
 #[cfg(test)]
 mod tests;
 
@@ -92,7 +93,17 @@ pub struct CompanionOrigin {
     /// The connection nonce registered by the edge.
     pub connection_nonce: [u8; 32],
     /// The base connection identity, for attach challenges.
-    pub connection_id: u64,
+    pub connection_id: [u8; 16],
+    /// The object identifier of the accepted origin state object.
+    pub object_id: [u8; 32],
+    /// The semantic identifier of the accepted origin state object.
+    pub state_id: [u8; 32],
+    /// The predecessor state identifier the object named.
+    pub previous_state_id: [u8; 32],
+    /// Set while the link is down or before the origin is re-declared.
+    pub suspended: bool,
+    /// Set by EORIGIN DEL or an incarnation change; never cleared.
+    pub fenced: bool,
 }
 
 /// The origin key of one companion origin.
@@ -202,6 +213,8 @@ pub struct ConversationState {
     pub records: BTreeMap<u64, [u8; 32]>,
     /// The retained finality request object per terminal identifier.
     pub proofs: BTreeMap<[u8; 32], [u8; 32]>,
+    /// The current route state object identifier.
+    pub route_object_id: [u8; 32],
     /// Bytes stored for this conversation.
     pub stored_bytes: u64,
     /// The last validation time accepted on a Commit AAD.
@@ -255,6 +268,16 @@ pub struct CompleteRequest {
     pub payload: Option<Vec<u8>>,
 }
 
+/// What one fragment did to its assembly.
+enum Ingested {
+    /// The object is complete.
+    Complete(Vec<u8>),
+    /// More fragments are needed, or this one repeated.
+    Pending,
+    /// The object completed recently; the prior outcome applies.
+    Recent,
+}
+
 /// An EREQUEST whose EPAYLOAD has not arrived.
 struct OpenRequest {
     correlation: Correlation,
@@ -279,7 +302,9 @@ pub struct CompanionCoordinator {
     /// The state.
     pub state: CompanionState,
     /// The batch in flight.
-    pub pending: Option<PendingCompanion>,
+    pub pending: Option<sync::PendingWork>,
+    /// The synchronization state of every edge.
+    pub peers: BTreeMap<ServerId, sync::PeerSync>,
     /// Lines to send, drained by the owner.
     pub outbound: VecDeque<(ServerId, FederationLineText)>,
 }
@@ -297,6 +322,21 @@ pub enum CompanionFault {
     Storage,
 }
 
+impl std::fmt::Display for CompanionFault {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Protocol => {
+                formatter.write_str("companion frame violated the federation grammar")
+            }
+            Self::Assembly(code) => write!(formatter, "reassembly refused: {}", code.token()),
+            Self::Ceiling => formatter.write_str("companion per-peer ceiling crossed"),
+            Self::Storage => formatter.write_str("companion batch could not be staged"),
+        }
+    }
+}
+
+impl std::error::Error for CompanionFault {}
+
 impl CompanionCoordinator {
     /// A coordinator for `network_id` at `server_id`.
     #[must_use]
@@ -313,6 +353,7 @@ impl CompanionCoordinator {
             queued: BTreeMap::new(),
             state: CompanionState::default(),
             pending: None,
+            peers: BTreeMap::new(),
             outbound: VecDeque::new(),
         }
     }
@@ -364,29 +405,31 @@ impl CompanionCoordinator {
     }
 
     /// Handles one admitted companion frame from `peer` on `link`.
-    pub fn on_frame(
+    pub(crate) fn on_frame(
         &mut self,
         link: LinkId,
         peer: ServerId,
         frame: CompanionFrame,
         now_millis: u64,
-    ) -> Result<Option<CompleteRequest>, CompanionFault> {
+        host: &dyn sync::CompanionHost,
+        entropy: &mut dyn agenc_ircd_types::EntropySource,
+    ) -> Result<Vec<sync::Action>, CompanionFault> {
         match frame {
             CompanionFrame::Request {
                 correlation,
                 object_id,
                 fragment,
-            } => self.on_request_fragment(link, peer, correlation, object_id, fragment, now_millis),
+            } => self.on_request_fragment(peer, correlation, object_id, fragment, now_millis),
             CompanionFrame::Payload {
                 correlation,
                 object_id,
                 fragment,
-            } => self.on_payload_fragment(link, peer, correlation, object_id, fragment, now_millis),
+            } => self.on_payload_fragment(peer, correlation, object_id, fragment, now_millis),
             CompanionFrame::Ack(position) => {
                 events::on_ack(self, peer, position)?;
-                Ok(None)
+                Ok(Vec::new())
             }
-            _ => Err(CompanionFault::Protocol),
+            other => self.on_sync_frame(link, peer, other, now_millis, host, entropy),
         }
     }
 
@@ -414,7 +457,7 @@ impl CompanionCoordinator {
         command: CarrierCommand,
         fragment: &agenc_ircd_e2ee::wire::fragment::FragmentTag,
         now_millis: u64,
-    ) -> Result<Option<Vec<u8>>, CompanionFault> {
+    ) -> Result<Ingested, CompanionFault> {
         let scopes = QuotaScopes {
             peer: Some(*peer.as_bytes()),
             ..QuotaScopes::default()
@@ -423,28 +466,38 @@ impl CompanionCoordinator {
             .assembler
             .ingest(key, scopes, command.limit(), fragment, now_millis / 1_000)
         {
-            Ok(Ingest::Complete(bytes)) => Ok(Some(bytes)),
-            Ok(Ingest::Incomplete | Ingest::Duplicate | Ingest::Recent) => Ok(None),
+            Ok(Ingest::Complete(bytes)) => Ok(Ingested::Complete(bytes)),
+            Ok(Ingest::Incomplete | Ingest::Duplicate) => Ok(Ingested::Pending),
+            Ok(Ingest::Recent) => Ok(Ingested::Recent),
             Err(error) => Err(CompanionFault::Assembly(error.reply_code())),
         }
     }
 
+    /// EREQUEST: a complete request executes; a retransmitted request the
+    /// coordinator already answered replays its stored result.
     fn on_request_fragment(
         &mut self,
-        link: LinkId,
         peer: ServerId,
         correlation: Correlation,
         object_id: [u8; 32],
         fragment: agenc_ircd_e2ee::wire::fragment::FragmentTag,
         now_millis: u64,
-    ) -> Result<Option<CompleteRequest>, CompanionFault> {
+    ) -> Result<Vec<sync::Action>, CompanionFault> {
         if correlation.peer_server_id != *self.server_id.as_bytes() {
             return Err(CompanionFault::Protocol);
         }
+        // On the wire the request names this coordinator; inside, every
+        // correlation names the home edge the request came from.
+        let correlation = Correlation {
+            peer_server_id: *peer.as_bytes(),
+            ..correlation
+        };
         let command = CarrierCommand::Federation(IrcWireObjectKind::FederationRequest);
         let key = Self::assembly_key(peer, &correlation, command, object_id);
-        let Some(bytes) = self.ingest(key, peer, command, &fragment, now_millis)? else {
-            return Ok(None);
+        let bytes = match self.ingest(key, peer, command, &fragment, now_millis)? {
+            Ingested::Complete(bytes) => bytes,
+            Ingested::Pending => return Ok(Vec::new()),
+            Ingested::Recent => return self.replay_recent(peer, &correlation, object_id),
         };
         let payload_object_id =
             request::payload_object_id(&bytes).map_err(|_| CompanionFault::Protocol)?;
@@ -458,25 +511,71 @@ impl CompanionCoordinator {
                 return Err(CompanionFault::Ceiling);
             }
             self.open.insert((peer, correlation.request_id), open);
-            return Ok(None);
+            return Ok(Vec::new());
         }
-        let _ = link;
-        Ok(Some(CompleteRequest {
+        Ok(vec![sync::Action::Execute(CompleteRequest {
             correlation: open.correlation,
             request: open.request,
             payload: None,
-        }))
+        })])
     }
 
+    /// The stored answer of a request object the assembler already saw;
+    /// its replay row must name this object under this correlation.
+    fn replay_recent(
+        &self,
+        peer: ServerId,
+        correlation: &Correlation,
+        object_id: [u8; 32],
+    ) -> Result<Vec<sync::Action>, CompanionFault> {
+        let home = *peer.as_bytes();
+        let key = agenc_ircd_storage::e2ee_records::ReplayKey {
+            home_server_id: home,
+            server_incarnation: correlation.server_incarnation,
+            origin_id: correlation.origin_id,
+            origin_generation: correlation.origin_generation,
+            operation_sequence: correlation.operation_sequence,
+        };
+        let row = self
+            .state
+            .replays
+            .get(&key)
+            .filter(|row| {
+                row.request_object_id == object_id && row.request_id == correlation.request_id
+            })
+            .ok_or(CompanionFault::Protocol)?;
+        let stored = self
+            .state
+            .results
+            .get(&row.request_object_id)
+            .ok_or(CompanionFault::Protocol)?;
+        let responses: Vec<Vec<u8>> = stored
+            .responses
+            .iter()
+            .filter_map(|id| self.state.objects.get(id).cloned())
+            .collect();
+        let lines = execute::replay_lines(self, correlation, home, &stored.result, &responses)
+            .map_err(|_| CompanionFault::Protocol)?;
+        Ok(vec![sync::Action::Send(lines)])
+    }
+
+    /// EPAYLOAD: completes the open request; a retransmitted payload the
+    /// coordinator retains completes it from the retained bytes.
     fn on_payload_fragment(
         &mut self,
-        _link: LinkId,
         peer: ServerId,
         correlation: Correlation,
         object_id: [u8; 32],
         fragment: agenc_ircd_e2ee::wire::fragment::FragmentTag,
         now_millis: u64,
-    ) -> Result<Option<CompleteRequest>, CompanionFault> {
+    ) -> Result<Vec<sync::Action>, CompanionFault> {
+        if correlation.peer_server_id != *self.server_id.as_bytes() {
+            return Err(CompanionFault::Protocol);
+        }
+        let correlation = Correlation {
+            peer_server_id: *peer.as_bytes(),
+            ..correlation
+        };
         let expected = self
             .open
             .get(&(peer, correlation.request_id))
@@ -489,18 +588,25 @@ impl CompanionCoordinator {
         let command = CarrierCommand::Federation(IrcWireObjectKind::FederationRequest);
         let key = Self::assembly_key(peer, &correlation, command, object_id);
         let limit_command = CarrierCommand::DeliverWelcome;
-        let Some(bytes) = self.ingest(key, peer, limit_command, &fragment, now_millis)? else {
-            return Ok(None);
+        let bytes = match self.ingest(key, peer, limit_command, &fragment, now_millis)? {
+            Ingested::Complete(bytes) => bytes,
+            Ingested::Pending => return Ok(Vec::new()),
+            Ingested::Recent => self
+                .state
+                .objects
+                .get(&object_id)
+                .cloned()
+                .ok_or(CompanionFault::Protocol)?,
         };
         let open = self
             .open
             .remove(&(peer, correlation.request_id))
             .ok_or(CompanionFault::Protocol)?;
-        Ok(Some(CompleteRequest {
+        Ok(vec![sync::Action::Execute(CompleteRequest {
             correlation: open.correlation,
             request: open.request,
             payload: Some(bytes),
-        }))
+        })])
     }
 
     /// Queues a complete request behind an in-flight batch.
@@ -548,35 +654,39 @@ impl CompanionCoordinator {
 
     /// Drops every open assembly and queued request of `peer`.
     pub fn link_closed(&mut self, peer: ServerId) {
+        self.link_lost(peer);
         self.open.retain(|(open_peer, _), _| *open_peer != peer);
         self.queued.remove(&peer);
         self.assembler
             .discard_sender(&Sender::Peer(*peer.as_bytes()));
     }
 
-    /// Applies the committed batch's effects and hands back what to send.
-    pub fn batch_applied(&mut self) -> Option<PendingCompanion> {
-        let pending = self.pending.take()?;
-        let mut effects = Vec::new();
-        let mut committed = PendingCompanion {
-            link: pending.link,
-            peer: pending.peer,
-            correlation: pending.correlation,
-            request_object_id: pending.request_object_id,
-            result: pending.result,
-            responses: pending.responses,
-            events: pending.events,
-            effects: Vec::new(),
-        };
-        std::mem::swap(&mut effects, &mut committed.effects);
-        for effect in pending.effects {
-            effect(&mut self.state);
-        }
-        Some(committed)
+    /// Marks the batch the owner just staged for this executor.
+    pub fn set_pending(&mut self, work: sync::PendingWork) {
+        self.pending = Some(work);
     }
 
-    /// Drops the batch behind a rejected commit; in-memory state is
-    /// untouched because effects apply only on commit.
+    /// Applies the committed batch's effects and hands back what to send.
+    /// `resync_epoch` is the base resync epoch an activation covers.
+    pub fn batch_applied(
+        &mut self,
+        resync_epoch: Option<u64>,
+    ) -> Result<Option<sync::Committed>, CompanionFault> {
+        match self.pending.take() {
+            None => Ok(None),
+            Some(sync::PendingWork::Activate { peer, .. }) => self
+                .activate_committed(peer, resync_epoch)
+                .map(|lines| Some(sync::Committed::Lines(lines))),
+            Some(sync::PendingWork::Request(mut pending)) => {
+                for effect in std::mem::take(&mut pending.effects) {
+                    effect(&mut self.state);
+                }
+                Ok(Some(sync::Committed::Request(pending)))
+            }
+        }
+    }
+
+    /// Drops the staged batch after a rejected commit.
     pub fn batch_rejected(&mut self) {
         self.pending = None;
     }

@@ -630,19 +630,13 @@ pub fn attach_finish(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         .encode()
         .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
     )?);
-    let origin_key = super::super::CompanionOriginKey {
-        home_server_id: exec.origin.home_server_id,
-        server_incarnation: exec.origin.server_incarnation,
-        origin_id: exec.origin.origin_id,
-    };
+    // The attachment reaches the origin only through the EORIGIN UPDATE
+    // that follows the base generation transition (companion 12.5).
     let retained = bytes.to_vec();
     outcome.effects.push(Box::new(move |companion| {
         companion.directory = directory;
         companion.challenges.remove(&(account_digest, device_id));
         CompanionCoordinator::retain_object(companion, retained).ok();
-        if let Some(origin) = companion.origins.get_mut(&origin_key) {
-            origin.device = Some((device_id, generation));
-        }
     }));
     Ok(outcome)
 }

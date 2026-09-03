@@ -7,11 +7,16 @@
 //! parser deliberately rejects prefixed lines, so this splitter exists
 //! instead of widening it.
 
+use agenc_ircd_e2ee::federation::frames::is_companion_command;
 use agenc_ircd_e2ee::wire::fragment::SERVER_FRAGMENT_TAG as COMPANION_FRAGMENT_TAG_NAME;
 use agenc_ircd_federation_wire::FEDERATION_FRAGMENT_TAG_NAME;
 
-/// The most parameters any registered form carries, plus its subcommand.
+/// The most parameters any registered base form carries, plus its
+/// subcommand.
 pub const MAX_LINE_PARAMETERS: usize = 8;
+/// The most parameters any companion form carries: `ECAP IRCMLS OFFER`
+/// with its fourteen-value tuple.
+pub const MAX_COMPANION_LINE_PARAMETERS: usize = 16;
 
 /// Closed reasons a line cannot be split.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -65,9 +70,14 @@ pub fn split_line(line: &str) -> Result<LineParts<'_>, LineError> {
         .next()
         .filter(|command| !command.is_empty())
         .ok_or(LineError::Empty)?;
+    let limit = if is_companion_command(command) {
+        MAX_COMPANION_LINE_PARAMETERS
+    } else {
+        MAX_LINE_PARAMETERS
+    };
     let mut parameters = Vec::new();
     for token in tokens {
-        if token.starts_with(':') || parameters.len() >= MAX_LINE_PARAMETERS {
+        if token.starts_with(':') || parameters.len() >= limit {
             return Err(LineError::Parameters);
         }
         parameters.push(token);
@@ -147,6 +157,27 @@ mod tests {
             split_line(":a FACK 1 2 3 4 5 6 7 8 9"),
             Err(LineError::Parameters)
         );
+    }
+
+    #[test]
+    fn companion_lines_carry_the_ecap_arity() -> Result<(), LineError> {
+        let sixteen = ":a ECAP IRCMLS OFFER 3 4 5 6 7 8 9 10 11 12 13 14 15 16";
+        assert_eq!(split_line(sixteen)?.parameters.len(), 16);
+        assert_eq!(
+            split_line(":a ECAP IRCMLS OFFER 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17"),
+            Err(LineError::Parameters)
+        );
+        assert_eq!(
+            split_line(":a ESTATE BEGIN 1 2 3 4 5 6 7 8")?
+                .parameters
+                .len(),
+            9
+        );
+        assert_eq!(
+            split_line(":a FSTATE BEGIN 1 2 3 4 5 6 7 8"),
+            Err(LineError::Parameters)
+        );
+        Ok(())
     }
 }
 

@@ -108,7 +108,7 @@ pub struct CapabilityHead {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Challenge {
     /// The connection it was issued to.
-    pub connection_id: u64,
+    pub connection_id: Id16,
     /// The reserved next session generation.
     pub reserved_generation: u64,
     /// Expiry second.
@@ -373,7 +373,7 @@ impl Directory {
         &mut self,
         account_digest: Id,
         device_id: Id16,
-        connection_id: u64,
+        connection_id: Id16,
         now: u64,
     ) -> Result<Challenge, DirectoryError> {
         let entry = self
@@ -404,7 +404,7 @@ impl Directory {
         &mut self,
         account_digest: Id,
         device_id: Id16,
-        connection_id: u64,
+        connection_id: Id16,
         reserved_generation: u64,
         now: u64,
     ) -> Result<u64, DirectoryError> {

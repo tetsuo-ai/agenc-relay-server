@@ -567,7 +567,7 @@ fn package_attach_and_mailbox_rows_round_trip() -> TestResult {
     let attached = AttachRow {
         session_generation: 2,
         challenge: Some(AttachChallenge {
-            connection_id: 9,
+            connection_id: [9; 16],
             connection_nonce: [1; 32],
             server_challenge: [2; 32],
             reserved_generation: 3,

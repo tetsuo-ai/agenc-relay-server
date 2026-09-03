@@ -210,16 +210,18 @@ pub fn run(
     view.context
         .stage_durable_with_account_service(plan, fanout, None, 0, writes)
         .map_err(|_| E2eeReplyCode::RateLimited)?;
-    coordinator.pending = Some(PendingCompanion {
-        link,
-        peer,
-        correlation: complete.correlation,
-        request_object_id: decoded.request_object_id,
-        result,
-        responses,
-        events: copies,
-        effects,
-    });
+    coordinator.pending = Some(super::sync::PendingWork::Request(Box::new(
+        PendingCompanion {
+            link,
+            peer,
+            correlation: complete.correlation,
+            request_object_id: decoded.request_object_id,
+            result,
+            responses,
+            events: copies,
+            effects,
+        },
+    )));
     Ok(Staged::Batch)
 }
 

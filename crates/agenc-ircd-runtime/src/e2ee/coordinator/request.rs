@@ -475,7 +475,9 @@ pub fn classify(state: &CompanionState, home: [u8; 16], decoded: &Decoded) -> Cl
     let Some(origin) = state.origins.get(&origin_key) else {
         return Classified::Violation;
     };
-    if origin.generation != decoded.request.origin_generation
+    if origin.fenced
+        || origin.suspended
+        || origin.generation != decoded.request.origin_generation
         || origin.next_sequence != decoded.request.operation_sequence
     {
         return Classified::Violation;
