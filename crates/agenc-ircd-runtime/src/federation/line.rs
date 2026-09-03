@@ -7,10 +7,16 @@
 //! parser deliberately rejects prefixed lines, so this splitter exists
 //! instead of widening it.
 
+use agenc_ircd_e2ee::federation::frames::is_companion_command;
+use agenc_ircd_e2ee::wire::fragment::SERVER_FRAGMENT_TAG as COMPANION_FRAGMENT_TAG_NAME;
 use agenc_ircd_federation_wire::FEDERATION_FRAGMENT_TAG_NAME;
 
-/// The most parameters any registered form carries, plus its subcommand.
+/// The most parameters any registered base form carries, plus its
+/// subcommand.
 pub const MAX_LINE_PARAMETERS: usize = 8;
+/// The most parameters any companion form carries: `ECAP IRCMLS OFFER`
+/// with its fourteen-value tuple.
+pub const MAX_COMPANION_LINE_PARAMETERS: usize = 16;
 
 /// Closed reasons a line cannot be split.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -32,6 +38,9 @@ pub enum LineError {
 pub struct LineParts<'a> {
     /// The fragment tag value, when present.
     pub tag_value: Option<&'a str>,
+    /// Whether the tag is the companion `agenc.ag/e2ee` key rather than
+    /// the base fragment key.
+    pub companion_tag: bool,
     /// The server prefix without its leading colon.
     pub prefix: &'a str,
     /// The command token.
@@ -46,8 +55,11 @@ pub fn split_line(line: &str) -> Result<LineParts<'_>, LineError> {
     let mut tokens = line.split(' ');
     let mut first = tokens.next().ok_or(LineError::Empty)?;
     let mut tag_value = None;
+    let mut companion_tag = false;
     if let Some(tag) = first.strip_prefix('@') {
-        tag_value = Some(split_tag(tag)?);
+        let (companion, value) = split_tag(tag)?;
+        tag_value = Some(value);
+        companion_tag = companion;
         first = tokens.next().ok_or(LineError::MissingPrefix)?;
     }
     let prefix = first.strip_prefix(':').ok_or(LineError::MissingPrefix)?;
@@ -58,15 +70,21 @@ pub fn split_line(line: &str) -> Result<LineParts<'_>, LineError> {
         .next()
         .filter(|command| !command.is_empty())
         .ok_or(LineError::Empty)?;
+    let limit = if is_companion_command(command) {
+        MAX_COMPANION_LINE_PARAMETERS
+    } else {
+        MAX_LINE_PARAMETERS
+    };
     let mut parameters = Vec::new();
     for token in tokens {
-        if token.starts_with(':') || parameters.len() >= MAX_LINE_PARAMETERS {
+        if token.starts_with(':') || parameters.len() >= limit {
             return Err(LineError::Parameters);
         }
         parameters.push(token);
     }
     Ok(LineParts {
         tag_value,
+        companion_tag,
         prefix,
         command,
         parameters,
@@ -86,12 +104,17 @@ fn validate_line_bytes(line: &str) -> Result<(), LineError> {
     Ok(())
 }
 
-fn split_tag(tag: &str) -> Result<&str, LineError> {
+/// Splits the one tag: the base fragment key or the companion key.
+fn split_tag(tag: &str) -> Result<(bool, &str), LineError> {
     let (name, value) = tag.split_once('=').ok_or(LineError::Tag)?;
-    if name != FEDERATION_FRAGMENT_TAG_NAME || value.is_empty() || value.contains(';') {
+    let companion = name == COMPANION_FRAGMENT_TAG_NAME;
+    if (name != FEDERATION_FRAGMENT_TAG_NAME && !companion)
+        || value.is_empty()
+        || value.contains(';')
+    {
         return Err(LineError::Tag);
     }
-    Ok(value)
+    Ok((companion, value))
 }
 
 #[cfg(test)]
@@ -134,5 +157,42 @@ mod tests {
             split_line(":a FACK 1 2 3 4 5 6 7 8 9"),
             Err(LineError::Parameters)
         );
+    }
+
+    #[test]
+    fn companion_lines_carry_the_ecap_arity() -> Result<(), LineError> {
+        let sixteen = ":a ECAP IRCMLS OFFER 3 4 5 6 7 8 9 10 11 12 13 14 15 16";
+        assert_eq!(split_line(sixteen)?.parameters.len(), 16);
+        assert_eq!(
+            split_line(":a ECAP IRCMLS OFFER 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17"),
+            Err(LineError::Parameters)
+        );
+        assert_eq!(
+            split_line(":a ESTATE BEGIN 1 2 3 4 5 6 7 8")?
+                .parameters
+                .len(),
+            9
+        );
+        assert_eq!(
+            split_line(":a FSTATE BEGIN 1 2 3 4 5 6 7 8"),
+            Err(LineError::Parameters)
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod companion_tests {
+    use super::*;
+
+    #[test]
+    fn splits_the_companion_tag_and_marks_it() -> Result<(), LineError> {
+        let parts = split_line("@agenc.ag/e2ee=v1.x.0.1.3.YWJj :edge.example EREQUEST a b")?;
+        assert_eq!(parts.tag_value, Some("v1.x.0.1.3.YWJj"));
+        assert!(parts.companion_tag);
+        let base = split_line("@agenc.ag/fed=v1.x.0.1.3.YWJj :edge.example FREQUEST a b")?;
+        assert!(!base.companion_tag);
+        assert_eq!(split_line("@agenc.ag/e2ee= :a EACK"), Err(LineError::Tag));
+        Ok(())
     }
 }

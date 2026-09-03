@@ -140,6 +140,10 @@ pub(super) fn snapshot_begin(
     if edge.phase != Phase::Snapshot || edge.snapshot.is_some() {
         return Err(Violation::Phase);
     }
+    // A snapshot cannot supersede an open barrier (spec 20.8).
+    if edge.barrier.is_open() {
+        return Err(Violation::Consistency);
+    }
     let epoch = edge
         .live
         .as_ref()

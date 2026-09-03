@@ -103,7 +103,8 @@ def candidate_echo_combined_tags() -> int:
 
 
 def non_tag(body_chars: int) -> int:
-    return 1 + MAX_SERVER_PREFIX + 1 + body_chars + 2
+    # The 127-byte prefix ceiling counts the serialized prefix with its colon.
+    return MAX_SERVER_PREFIX + 1 + body_chars + 2
 
 
 def table() -> dict[str, int]:

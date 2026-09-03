@@ -7,6 +7,7 @@
 //! instance and forwards the seams that differ from a coordinator: session
 //! open and close, registered commands, and connection origins.
 
+mod barrier;
 mod events;
 mod render;
 mod request;
@@ -18,7 +19,7 @@ mod tests;
 use std::collections::{BTreeMap, VecDeque};
 
 use agenc_ircd_domain::NicknameValue;
-use agenc_ircd_domain::federation::{EdgeReplica, ProjectedEvent};
+use agenc_ircd_domain::federation::EdgeReplica;
 use agenc_ircd_federation_wire::{
     EventHeader, FederationFrame, FederationLineText, OriginDescriptor, federation_object_id,
     split_fragments,
@@ -30,11 +31,17 @@ use agenc_ircd_types::{
 
 use crate::RuntimeError;
 use crate::connection::ConnectionGeneration;
+use crate::e2ee::link::{
+    CompanionAction, CompanionLinks, CompanionProfile, CompanionViolation, tick_millis,
+};
 use crate::federation::link::{LinkHandle, SendRefusal};
 use crate::federation::{
     FederationInbound, IngressCharge, LinkEvent, LinkId, LinkSession, ObjectCarrier, PeerIdentity,
 };
+use crate::state_core::timers::{TimedId, TimerEntry, TimerKind};
 use agenc_ircd_client_wire::RegisteredCommandKind;
+use agenc_ircd_e2ee::federation::frames::CompanionFrame;
+use agenc_ircd_types::MonotonicTick;
 
 use crate::observe::health::{ReadinessGate, ReadinessStage};
 use crate::state_core::StateCoreContext;
@@ -64,6 +71,7 @@ struct LiveLink {
     link: LinkId,
     handle: LinkHandle,
     coordinator_epoch: RecoveryEpoch,
+    coordinator_incarnation: ServerIncarnation,
 }
 
 /// Where the link is in the synchronization protocol.
@@ -97,6 +105,14 @@ struct ConnectionOrigin {
 
 /// The durable batch the edge is waiting on.
 enum PendingCommit {
+    /// One cross-profile part was staged.
+    BarrierPart,
+    /// The complete barrier applied.
+    BarrierApplied {
+        receipt: Box<agenc_ircd_storage::e2ee_records::barrier::BarrierReceipt>,
+        base_last: (u64, EventId),
+        companion_last: (u64, u64, [u8; 16]),
+    },
     /// An event was applied; ACK follows the commit.
     Event {
         header: Box<EventHeader>,
@@ -119,6 +135,8 @@ pub struct EdgeCounters {
     pub snapshots_installed: u64,
     /// Protocol violations that closed the link.
     pub violations: u64,
+    /// Cross-profile barriers applied.
+    pub barriers_applied: u64,
 }
 
 /// The edge's federation state machine.
@@ -135,7 +153,7 @@ pub struct EdgeFederation {
     applied_completions: std::collections::BTreeSet<EventId>,
     nicknames: BTreeMap<UserId, NicknameValue>,
     commit: Option<PendingCommit>,
-    queued_events: VecDeque<(EventHeader, ProjectedEvent)>,
+    queued_events: VecDeque<events::QueuedEvent>,
     snapshot: Option<sync::SnapshotInstall>,
     next_origin: u64,
     client_resync_epoch: u64,
@@ -145,6 +163,8 @@ pub struct EdgeFederation {
     /// so the revisions they carry are read from a replica that already
     /// reflects that request (spec 20.5 ordering per origin).
     deferred: BTreeMap<ConnectionGeneration, VecDeque<DeferredCommand>>,
+    companion: CompanionLinks,
+    barrier: barrier::BarrierState,
 }
 
 /// One client command held back behind an in-flight request.
@@ -182,7 +202,9 @@ impl EdgeFederation {
     pub fn new(config: EdgeConfig) -> Self {
         let mut replica = EdgeReplica::new(config.server_id);
         let _installed = replica.install(1, Vec::new());
+        let companion = CompanionLinks::new(None, config.server_name.clone());
         Self {
+            companion,
             config,
             live: None,
             phase: Phase::Down,
@@ -202,7 +224,123 @@ impl EdgeFederation {
             counters: EdgeCounters::default(),
             readiness: None,
             deferred: BTreeMap::new(),
+            barrier: barrier::BarrierState::default(),
         }
+    }
+
+    /// Installs the companion profile before any link exists; `None`
+    /// refuses every companion frame.
+    pub fn set_companion_profile(&mut self, profile: Option<CompanionProfile>) {
+        self.companion = CompanionLinks::new(profile, self.config.server_name.clone());
+    }
+
+    /// Whether the companion profile is active on the live link.
+    #[must_use]
+    pub fn companion_active(&self) -> bool {
+        self.live
+            .as_ref()
+            .is_some_and(|live| self.companion.profile_active(live.link))
+    }
+
+    /// Drains the admitted companion frames of the live link.
+    pub fn drain_companion(&mut self) -> Vec<CompanionFrame> {
+        match self.live.as_ref() {
+            Some(live) => self.companion.drain(live.link),
+            None => Vec::new(),
+        }
+    }
+
+    fn handle_companion(
+        &mut self,
+        frame: CompanionFrame,
+    ) -> Result<Vec<EdgeCompletion>, Violation> {
+        let Some(live) = self.live.as_ref() else {
+            return Ok(Vec::new());
+        };
+        match self.companion.on_frame(live.link, frame) {
+            Ok(CompanionAction::Quiet) => Ok(Vec::new()),
+            Ok(CompanionAction::Send(line)) => match live.handle.try_send(line) {
+                Ok(()) | Err(SendRefusal::Closed) => Ok(Vec::new()),
+                Err(SendRefusal::QueueFull) => Err(Violation::SlowConsumer),
+            },
+            Err(violation) => {
+                if let Ok(line) = self.companion.violation_line() {
+                    let _ = live.handle.try_send(line);
+                }
+                Err(Violation::Companion(violation))
+            }
+        }
+    }
+
+    fn start_companion(&mut self, context: &mut StateCoreContext) {
+        let Some(live) = self.live.as_ref() else {
+            return;
+        };
+        let now = context.now();
+        let link = live.link;
+        match self.companion.link_established(link, tick_millis(now)) {
+            Ok(Some(offer)) => {
+                let _ = live.handle.try_send(offer);
+                let deadline = self
+                    .companion
+                    .deadline(link)
+                    .map_or(now, MonotonicTick::from_ticks);
+                let _ = context.timers_mut().schedule(
+                    deadline,
+                    TimerKind::CompanionProfileDeadline,
+                    TimedId::Peer(self.config.coordinator.server_id()),
+                );
+            }
+            Ok(None) => {}
+            Err(violation) => self.fail_link(context, Violation::Companion(violation)),
+        }
+    }
+
+    /// Handles a due timer; returns `false` when it was not the edge's.
+    pub fn timer_fired(&mut self, context: &mut StateCoreContext, entry: TimerEntry) -> bool {
+        let (TimerKind::CompanionProfileDeadline, TimedId::Peer(peer)) = (entry.kind, entry.id)
+        else {
+            return false;
+        };
+        if peer != self.config.coordinator.server_id() {
+            return false;
+        }
+        let Some(link) = self.live.as_ref().map(|live| live.link) else {
+            return true;
+        };
+        if let Err(violation) = self
+            .companion
+            .deadline_fired(link, tick_millis(entry.deadline))
+        {
+            self.fail_link(context, Violation::Companion(violation));
+        }
+        true
+    }
+
+    /// Stages one companion part of a cross-profile barrier handed over by
+    /// the E2EE router; a violation closes the link and returns `false`.
+    pub fn companion_barrier_part(
+        &mut self,
+        context: &mut StateCoreContext,
+        part: agenc_ircd_storage::e2ee_records::barrier::BarrierPart,
+    ) -> bool {
+        match barrier::companion_part(self, context, part) {
+            Ok(()) => true,
+            Err(violation) => {
+                self.fail_link(context, violation);
+                false
+            }
+        }
+    }
+
+    /// The companion delivery generation and last acknowledged position the
+    /// barrier owner tracks.
+    #[must_use]
+    pub fn companion_cursor(&self) -> (u64, Option<(u64, [u8; 16])>) {
+        (
+            self.barrier.companion_generation,
+            self.barrier.companion_cursor,
+        )
     }
 
     /// Returns the STATS counters.
@@ -231,7 +369,7 @@ impl EdgeFederation {
             u64::try_from(self.pending.len()).unwrap_or(u64::MAX),
             0,
             self.counters.results_applied,
-            0,
+            self.counters.barriers_applied,
         ]
     }
 
@@ -297,7 +435,11 @@ impl EdgeFederation {
                 let outcome = self.handle_object(context, carrier, object, charge);
                 self.settle(context, link, outcome)
             }
-            LinkEvent::Frame(_) | LinkEvent::Object { .. } => Vec::new(),
+            LinkEvent::Companion(frame) if self.link_is(link) => {
+                let outcome = self.handle_companion(frame);
+                self.settle(context, link, outcome)
+            }
+            LinkEvent::Frame(_) | LinkEvent::Object { .. } | LinkEvent::Companion(_) => Vec::new(),
         }
     }
 
@@ -336,16 +478,23 @@ impl EdgeFederation {
             link: session.link,
             handle,
             coordinator_epoch: session.peer_recovery_epoch,
+            coordinator_incarnation: session.peer_incarnation,
         });
         self.phase = Phase::Origins;
         self.note_phase();
+        self.start_companion(context);
         sync::begin(self, context);
     }
 
-    fn link_closed(&mut self, _context: &mut StateCoreContext, link: LinkId) {
+    fn link_closed(&mut self, context: &mut StateCoreContext, link: LinkId) {
         if !self.link_is(link) {
             return;
         }
+        self.companion.link_closed(link);
+        let _cancelled = context.timers_mut().cancel(
+            TimerKind::CompanionProfileDeadline,
+            TimedId::Peer(self.config.coordinator.server_id()),
+        );
         self.live = None;
         self.phase = Phase::Down;
         self.note_phase();
@@ -711,6 +860,12 @@ impl EdgeFederation {
                 }
             }
             Some(PendingCommit::SnapshotInstalled) => sync::installed(self, context),
+            Some(PendingCommit::BarrierPart) => barrier::part_committed(self, context),
+            Some(PendingCommit::BarrierApplied {
+                receipt,
+                base_last,
+                companion_last,
+            }) => barrier::applied(self, context, *receipt, base_last, companion_last),
             None => {}
         }
         completions.extend(events::drain_queued(self, context));
@@ -719,7 +874,12 @@ impl EdgeFederation {
 
     /// Drops the work behind a rejected batch; the coordinator re-delivers.
     pub fn batch_rejected(&mut self, context: &mut StateCoreContext) {
-        if let Some(PendingCommit::Event { .. }) = self.commit.take() {
+        if let Some(
+            PendingCommit::Event { .. }
+            | PendingCommit::BarrierPart
+            | PendingCommit::BarrierApplied { .. },
+        ) = self.commit.take()
+        {
             // The replica already applied the event; without the durable
             // row the only safe course is a fresh synchronization.
             self.fail_link(context, Violation::Ceiling);
@@ -761,6 +921,8 @@ pub enum Violation {
     SlowConsumer,
     /// A bounded ceiling was crossed.
     Ceiling,
+    /// A companion frame or its negotiation violated the IRC-MLS profile.
+    Companion(CompanionViolation),
 }
 
 impl From<RuntimeError> for Violation {

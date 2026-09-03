@@ -7,6 +7,7 @@
 //! peer rows commit with the domain mutation that caused them, and the
 //! coordinator only renders FRESULT and FEVENT lines after that commit.
 
+mod companion;
 mod convert;
 mod grace;
 mod origin;
@@ -36,6 +37,10 @@ use agenc_ircd_types::{
 use crate::RuntimeError;
 use crate::bridge::StorageReadId;
 use crate::bridge::crypto::{ChannelKeyVerifier, ChannelKeyVerifierRecord};
+use crate::e2ee::coordinator::CompanionCoordinator;
+use crate::e2ee::link::{
+    CompanionAction, CompanionLinks, CompanionProfile, CompanionViolation, tick_millis,
+};
 use crate::federation::link::{LinkHandle, SendRefusal};
 use crate::federation::{
     FederationInbound, IngressCharge, LinkCloseReason, LinkEvent, LinkId, LinkSession,
@@ -43,8 +48,10 @@ use crate::federation::{
 };
 use crate::state_core::durable::AccountServiceDurableWrite;
 use crate::state_core::projector::{EdgeDelivery, OutboundEvent};
+use crate::state_core::timers::{TimedId, TimerEntry, TimerKind};
 use crate::state_core::{PeerQuarantineRefusal, StateCoreContext};
 use crate::sync::Arc;
+use agenc_ircd_e2ee::federation::frames::CompanionFrame;
 
 pub(crate) use request::PendingCrypto;
 
@@ -135,6 +142,8 @@ pub enum Violation {
     SlowConsumer,
     /// A per-link ceiling was crossed.
     Ceiling,
+    /// A companion frame or its negotiation violated the IRC-MLS profile.
+    Companion(CompanionViolation),
 }
 
 /// What one staged batch must finish once it commits.
@@ -157,6 +166,11 @@ enum PendingCommit {
     },
     Cleanup {
         peer: ServerId,
+    },
+    /// A companion request batch; the executor holds its result.
+    Companion {
+        peer: ServerId,
+        link: LinkId,
     },
     SnapshotRows {
         peer: ServerId,
@@ -210,6 +224,27 @@ pub struct FederationCoordinator {
     backlog: VecDeque<FederationInbound>,
     queries: query::Queries,
     counters: CoordinatorCounters,
+    companion: CompanionLinks,
+    /// The E2EE executor; `None` on a node without a sequencer.
+    companion_exec: Option<CompanionCoordinator>,
+    /// Open cross-profile barriers by target (spec 20.8): later events on
+    /// either stream wait until both final acknowledgements arrive.
+    barriers: BTreeMap<ServerId, OpenBarrier>,
+}
+
+/// One cross-profile barrier awaiting both cumulative acknowledgements.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct OpenBarrier {
+    /// The per-target mutation identity.
+    pub(super) mutation_id: [u8; 16],
+    /// The last base delivery sequence of the barrier.
+    pub(super) base_last: u64,
+    /// Whether the base stream acknowledged through `base_last`.
+    pub(super) base_acked: bool,
+    /// The last companion delivery sequence of the barrier.
+    pub(super) companion_last: u64,
+    /// Whether the companion stream acknowledged through `companion_last`.
+    pub(super) companion_acked: bool,
 }
 
 impl FederationCoordinator {
@@ -250,7 +285,9 @@ impl FederationCoordinator {
             })
             .collect();
         let queries = query::Queries::new(config.query_cursor_key, config.process_nonce);
+        let companion = CompanionLinks::new(None, config.server_name.clone());
         Self {
+            companion,
             config,
             verifier,
             dummy,
@@ -266,7 +303,20 @@ impl FederationCoordinator {
             backlog: VecDeque::new(),
             queries,
             counters: CoordinatorCounters::default(),
+            companion_exec: None,
+            barriers: BTreeMap::new(),
         }
+    }
+
+    /// Installs the companion executor before any link exists.
+    pub fn install_companion_executor(&mut self, executor: CompanionCoordinator) {
+        self.companion_exec = Some(executor);
+    }
+
+    /// The companion executor, if one is installed.
+    #[must_use]
+    pub fn companion_executor(&self) -> Option<&CompanionCoordinator> {
+        self.companion_exec.as_ref()
     }
 
     /// Returns the STATS counters.
@@ -370,7 +420,11 @@ impl FederationCoordinator {
         if !self.peers.contains_key(&peer) {
             return;
         }
-        if self.pending.is_some() && matches!(event, LinkEvent::Frame(_) | LinkEvent::Object { .. })
+        if self.pending.is_some()
+            && matches!(
+                event,
+                LinkEvent::Frame(_) | LinkEvent::Object { .. } | LinkEvent::Companion(_)
+            )
         {
             if self.backlog.len() >= MAX_BACKLOG {
                 self.fail_link(context, link, peer, Violation::SlowConsumer);
@@ -392,10 +446,118 @@ impl FederationCoordinator {
                 self.backlog.retain(|message| message.link != link);
                 self.link_closed(context, link, peer, reason);
             }
-            LinkEvent::Frame(_) | LinkEvent::Object { .. } => {
+            LinkEvent::Frame(_) | LinkEvent::Object { .. } | LinkEvent::Companion(_) => {
                 self.handle_traffic(context, link, peer, event, charge);
             }
         }
+    }
+
+    /// Installs the companion profile before any link exists; `None`
+    /// refuses every companion frame.
+    pub fn set_companion_profile(&mut self, profile: Option<CompanionProfile>) {
+        self.companion = CompanionLinks::new(profile, self.config.server_name.clone());
+    }
+
+    /// Whether the companion profile is active on the live link of `peer`.
+    #[must_use]
+    pub fn companion_active(&self, peer: ServerId) -> bool {
+        self.peers
+            .get(&peer)
+            .and_then(|state| state.live.as_ref())
+            .is_some_and(|live| self.companion.profile_active(live.link))
+    }
+
+    /// Drains the admitted companion frames of `peer`'s live link.
+    pub fn drain_companion(&mut self, peer: ServerId) -> Vec<CompanionFrame> {
+        match self.peers.get(&peer).and_then(|state| state.live.as_ref()) {
+            Some(live) => self.companion.drain(live.link),
+            None => Vec::new(),
+        }
+    }
+
+    fn handle_companion(
+        &mut self,
+        context: &mut StateCoreContext,
+        link: LinkId,
+        peer: ServerId,
+        frame: CompanionFrame,
+    ) -> Result<(), Violation> {
+        let Some(live) = self
+            .peers
+            .get(&peer)
+            .and_then(|state| state.live.as_ref())
+            .filter(|live| live.link == link)
+        else {
+            return Ok(());
+        };
+        match self.companion.on_frame(link, frame) {
+            Ok(CompanionAction::Quiet) => {}
+            Ok(CompanionAction::Send(line)) => match live.handle.try_send(line) {
+                Ok(()) | Err(SendRefusal::Closed) => {}
+                Err(SendRefusal::QueueFull) => return Err(Violation::SlowConsumer),
+            },
+            Err(violation) => {
+                if let Ok(line) = self.companion.violation_line() {
+                    let _ = live.handle.try_send(line);
+                }
+                return Err(Violation::Companion(violation));
+            }
+        }
+        for admitted in self.companion.drain(link) {
+            companion::admitted(self, context, link, peer, admitted)?;
+        }
+        Ok(())
+    }
+
+    fn start_companion(&mut self, context: &mut StateCoreContext, link: LinkId, peer: ServerId) {
+        let now = context.now();
+        let outcome = self.companion.link_established(link, tick_millis(now));
+        let Some(live) = self
+            .peers
+            .get(&peer)
+            .and_then(|state| state.live.as_ref())
+            .filter(|live| live.link == link)
+        else {
+            return;
+        };
+        match outcome {
+            Ok(Some(offer)) => {
+                let _ = live.handle.try_send(offer);
+                let deadline = self
+                    .companion
+                    .deadline(link)
+                    .map_or(now, MonotonicTick::from_ticks);
+                let _ = context.timers_mut().schedule(
+                    deadline,
+                    TimerKind::CompanionProfileDeadline,
+                    TimedId::Peer(peer),
+                );
+            }
+            Ok(None) => {}
+            Err(violation) => self.fail_link(context, link, peer, Violation::Companion(violation)),
+        }
+    }
+
+    fn companion_timer_fired(&mut self, context: &mut StateCoreContext, entry: TimerEntry) -> bool {
+        let (TimerKind::CompanionProfileDeadline, TimedId::Peer(peer)) = (entry.kind, entry.id)
+        else {
+            return false;
+        };
+        let Some(link) = self
+            .peers
+            .get(&peer)
+            .and_then(|state| state.live.as_ref())
+            .map(|live| live.link)
+        else {
+            return true;
+        };
+        if let Err(violation) = self
+            .companion
+            .deadline_fired(link, tick_millis(entry.deadline))
+        {
+            self.fail_link(context, link, peer, Violation::Companion(violation));
+        }
+        true
     }
 
     /// Runs one frame or object handler on a live link. A handler may
@@ -417,6 +579,7 @@ impl FederationCoordinator {
             LinkEvent::Object { carrier, object } => {
                 self.handle_object(context, link, peer, carrier, object, charge)
             }
+            LinkEvent::Companion(frame) => self.handle_companion(context, link, peer, frame),
             LinkEvent::Established { .. } | LinkEvent::Closed(_) => return,
         };
         if let Err(violation) = outcome
@@ -479,6 +642,7 @@ impl FederationCoordinator {
                 );
             }
         }
+        self.start_companion(context, session.link, session.peer);
     }
 
     fn link_closed(
@@ -492,6 +656,16 @@ impl FederationCoordinator {
             return;
         }
         self.links.remove(&link);
+        self.companion.link_closed(link);
+        if let Some(executor) = self.companion_exec.as_mut() {
+            executor.link_closed(peer);
+        }
+        let _cancelled = context
+            .timers_mut()
+            .cancel(TimerKind::CompanionProfileDeadline, TimedId::Peer(peer));
+        let _cancelled = context
+            .timers_mut()
+            .cancel(TimerKind::CompanionSnapshotExpiry, TimedId::Peer(peer));
         if let Some(state) = self.peers.get_mut(&peer) {
             state.live = None;
             state.queued.clear();
@@ -587,7 +761,9 @@ impl FederationCoordinator {
                 if edge_server_id != peer {
                     return Err(Violation::Misaddressed);
                 }
-                origin::ready(self, context, peer, server_incarnation)
+                origin::ready(self, context, peer, server_incarnation)?;
+                companion::base_ready(self, context, peer, server_incarnation);
+                Ok(())
             }
             FederationFrame::Resume {
                 coordinator_server_id,
@@ -642,6 +818,7 @@ impl FederationCoordinator {
     }
 
     /// Records one cumulative acknowledgement of exactly the oldest event.
+    // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one acknowledgement walks the unacknowledged window once under both the exact-next and the barrier-cumulative rules
     fn acknowledge(
         &mut self,
         context: &mut StateCoreContext,
@@ -649,26 +826,52 @@ impl FederationCoordinator {
         delivery_sequence: u64,
         event_id: EventId,
     ) -> Result<(), Violation> {
+        // Inside an open barrier the edge acknowledges the last base part
+        // cumulatively; elsewhere the ACK advances by exactly one.
+        let barrier_last = self
+            .barriers
+            .get(&peer)
+            .filter(|barrier| !barrier.base_acked)
+            .map(|barrier| barrier.base_last);
         let state = self.peers.get_mut(&peer).ok_or(Violation::Misaddressed)?;
-        let Some((sequence, expected, bytes)) = state.outbox.unacked.front().copied() else {
+        let Some((front, expected, _)) = state.outbox.unacked.front().copied() else {
             return Err(Violation::Acknowledgement);
         };
-        if sequence != delivery_sequence || expected != event_id {
+        let cumulative = barrier_last == Some(delivery_sequence) && delivery_sequence >= front;
+        if !cumulative && (front != delivery_sequence || expected != event_id) {
             return Err(Violation::Acknowledgement);
         }
-        state.outbox.unacked.pop_front();
-        state.outbox.unacked_bytes = state.outbox.unacked_bytes.saturating_sub(bytes);
-        state.outbox.cursor = Some((sequence, event_id));
         let generation = state.projection_generation;
         let mut writes = Vec::new();
-        let key = agenc_ircd_storage::federation_records::outbox_key(peer, generation, sequence)
-            .map_err(|_| Violation::Ceiling)?;
-        writes.push(
-            AccountServiceDurableWrite::delete(TableId::EdgeOutbox, key)
-                .map_err(|_| Violation::Ceiling)?,
-        );
+        let mut matched = false;
+        while let Some((sequence, id, bytes)) = state.outbox.unacked.front().copied() {
+            if sequence > delivery_sequence {
+                break;
+            }
+            state.outbox.unacked.pop_front();
+            state.outbox.unacked_bytes = state.outbox.unacked_bytes.saturating_sub(bytes);
+            matched |= sequence == delivery_sequence && id == event_id;
+            let key =
+                agenc_ircd_storage::federation_records::outbox_key(peer, generation, sequence)
+                    .map_err(|_| Violation::Ceiling)?;
+            writes.push(
+                AccountServiceDurableWrite::delete(TableId::EdgeOutbox, key)
+                    .map_err(|_| Violation::Ceiling)?,
+            );
+        }
+        if !matched {
+            return Err(Violation::Acknowledgement);
+        }
+        state.outbox.cursor = Some((delivery_sequence, event_id));
         self.stage_rows(context, writes, PendingCommit::Acknowledged, Some(peer))
-            .map_err(|_| Violation::Ceiling)
+            .map_err(|_| Violation::Ceiling)?;
+        if barrier_last == Some(delivery_sequence) {
+            if let Some(barrier) = self.barriers.get_mut(&peer) {
+                barrier.base_acked = true;
+            }
+            companion::try_close_barrier(self, context, peer);
+        }
+        Ok(())
     }
 
     /// Stages rows that carry no domain mutation behind a checkpoint plan,
@@ -806,7 +1009,10 @@ impl FederationCoordinator {
         context: &mut StateCoreContext,
         entry: crate::state_core::timers::TimerEntry,
     ) -> bool {
-        grace::timer_fired(self, context, entry) || snapshot::timer_fired(self, context, entry)
+        grace::timer_fired(self, context, entry)
+            || snapshot::timer_fired(self, context, entry)
+            || self.companion_timer_fired(context, entry)
+            || companion::snapshot_timer_fired(self, context, entry)
     }
 
     /// Finishes the batch that just committed and delivers its events.
@@ -841,6 +1047,9 @@ impl FederationCoordinator {
                 let _live = self.send_frame(context, link, peer, &frame);
             }
             Some(PendingCommit::Cleanup { peer }) => grace::continue_cleanup(self, context, peer),
+            Some(PendingCommit::Companion { peer, link }) => {
+                companion::committed(self, context, link, peer, &events);
+            }
             Some(PendingCommit::SnapshotRows { peer }) => {
                 snapshot::continue_write(self, context, peer)
             }
@@ -852,6 +1061,7 @@ impl FederationCoordinator {
         self.deliver(context, events);
         self.continue_background(context);
         request::drain_queued(self, context);
+        companion::drain_queued(self, context);
         self.drain_backlog(context);
     }
 
@@ -873,8 +1083,14 @@ impl FederationCoordinator {
 
     /// Drops the work behind a rejected batch; the edge retries it.
     pub fn batch_rejected(&mut self, context: &mut StateCoreContext) {
-        if let Some(PendingCommit::Cleanup { peer }) = self.pending.take() {
-            grace::continue_cleanup(self, context, peer);
+        match self.pending.take() {
+            Some(PendingCommit::Cleanup { peer }) => grace::continue_cleanup(self, context, peer),
+            Some(PendingCommit::Companion { .. }) => {
+                if let Some(executor) = self.companion_exec.as_mut() {
+                    executor.batch_rejected();
+                }
+            }
+            _ => {}
         }
         self.drain_backlog(context);
     }
@@ -900,6 +1116,15 @@ impl FederationCoordinator {
             // A link that is not active yet replays the durable outbox when
             // it resumes; only live delivery tracks the window here.
             if !state.active || event.projection_generation != state.projection_generation {
+                continue;
+            }
+            // Later events wait behind an open barrier; the durable outbox
+            // replays them once both streams acknowledged (spec 20.8).
+            if self
+                .barriers
+                .get(&event.target)
+                .is_some_and(|barrier| event.delivery_sequence > barrier.base_last)
+            {
                 continue;
             }
             let bytes = u64::try_from(event.encoded.len()).unwrap_or(u64::MAX);

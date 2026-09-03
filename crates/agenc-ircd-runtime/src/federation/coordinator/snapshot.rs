@@ -152,6 +152,11 @@ pub(super) fn continue_resend(
         .federation()
         .and_then(|projector| projector.edge(peer))
         .map_or(0, |delivery| delivery.next_delivery_sequence);
+    // A replay stops at the last part of an open cross-profile barrier;
+    // the release replays the rest (spec 20.8).
+    let reserved = coordinator.barriers.get(&peer).map_or(reserved, |barrier| {
+        reserved.min(barrier.base_last.saturating_add(1))
+    });
     let Some(state) = coordinator.peers.get_mut(&peer) else {
         return;
     };

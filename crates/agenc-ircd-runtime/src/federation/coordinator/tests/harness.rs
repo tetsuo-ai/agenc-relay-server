@@ -31,11 +31,14 @@ use crate::cancel::CancellationToken;
 use crate::federation::codec::events::projected_event_of;
 use crate::federation::codec::operations::{FederatedOperation, JoinTarget, MessageTargetArg};
 use crate::federation::codec::results::ResultArm;
-use crate::federation::link::{LinkQueue, carrier_of, link_queue, parse_frame};
+use crate::federation::link::{
+    LinkQueue, ParsedLine, carrier_of, link_queue, parse_frame, parse_line,
+};
 use crate::state_core::admin::AdminCorePort;
 use crate::state_core::inbox::{LifecyclePhase, connection_close_channel, lifecycle_channel};
 use crate::state_core::{AdminCoreFailure, StateCoreExit};
 use crate::test_support::StateCoreFixture;
+use agenc_ircd_e2ee::federation::frames::CompanionFrame;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -139,6 +142,29 @@ impl Edge {
 
     async fn frame(&self, frame: FederationFrame) -> TestResult {
         self.send(LinkEvent::Frame(frame)).await
+    }
+
+    async fn companion(&self, frame: CompanionFrame) -> TestResult {
+        self.send(LinkEvent::Companion(frame)).await
+    }
+
+    /// The next line, base or companion.
+    async fn next_parsed(&mut self) -> TestResult<ParsedLine> {
+        let line = tokio::time::timeout(std::time::Duration::from_secs(20), self.queue.recv())
+            .await
+            .map_err(|_| "no line from the coordinator")?
+            .ok_or("coordinator closed the link")?;
+        let text = line.as_str().trim_end_matches("\r\n").to_owned();
+        Ok(parse_line(&text, COORDINATOR_NAME).map_err(|error| format!("{error:?}: {text}"))?)
+    }
+
+    /// The next companion frame, skipping base lines.
+    async fn next_companion(&mut self) -> TestResult<CompanionFrame> {
+        loop {
+            if let ParsedLine::Companion(frame) = self.next_parsed().await? {
+                return Ok(frame);
+            }
+        }
     }
 
     /// Splits and locally reassembles an object exactly as the link would,
@@ -1783,6 +1809,284 @@ async fn names_query_answers_one_reply_page_and_a_bad_cursor_expires() -> TestRe
             return Err("expected failed for an unknown cursor".into());
         };
         assert_eq!(code, "QUERY_EXPIRED");
+        Ok(())
+    })
+    .await
+}
+
+/// The companion executor of the fixture coordinator with a sequencer.
+fn companion_setup() -> TestResult<crate::test_support::CompanionSetup> {
+    use crate::e2ee::coordinator::tests::support::{key, sequencer_credential_in};
+    use agenc_ircd_e2ee::profile::EcapTuple;
+    use agenc_ircd_e2ee::sequencer::SequencerKeySet;
+    use agenc_ircd_e2ee::wire::tokens::base64url_encode;
+    let network = *NETWORK.as_bytes();
+    let mut executor = crate::e2ee::coordinator::CompanionCoordinator::new(
+        network,
+        COORDINATOR,
+        COORDINATOR_NAME.to_owned(),
+    );
+    let sequencer = key(90);
+    let credential = sequencer_credential_in(network, &sequencer, 0, (0, 4_000_000_000), None)?;
+    let key_set = SequencerKeySet::verify(&network, std::slice::from_ref(&credential), 0, None)?;
+    let tuple = EcapTuple::local(
+        &base64url_encode(&network),
+        &base64url_encode(COORDINATOR.as_bytes()),
+        key_set.set_generation,
+        &base64url_encode(&key_set.digest),
+    )?;
+    executor.install_sequencer(sequencer, key_set, credential);
+    Ok(crate::test_support::CompanionSetup {
+        profile: crate::e2ee::link::CompanionProfile { local: tuple },
+        executor,
+    })
+}
+
+/// Runs the coordinator with the companion executor installed.
+async fn run_companion_coordinator<Driver, Output>(
+    edges: &[PeerIdentity],
+    driver: impl FnOnce(mpsc::Sender<FederationInbound>) -> Driver,
+) -> TestResult<Output>
+where
+    Driver: Future<Output = TestResult<Output>>,
+{
+    let mut fixture = StateCoreFixture::with_companion_coordinator(
+        entropy_script(),
+        edges.to_vec(),
+        companion_setup()?,
+    )?;
+    let mut parts = fixture.take_run_parts()?;
+    let (inbox, inbox_receiver) = mpsc::channel(8);
+    let (federation, federation_receiver) = mpsc::channel(64);
+    parts.state.install_federation_inbox(federation_receiver)?;
+    let (_close_port, close_inbox) = connection_close_channel();
+    let (lifecycle, lifecycle_receiver) = lifecycle_channel();
+    let token = CancellationToken::root();
+    let driven = async move {
+        let output = driver(federation).await;
+        let _stopped = lifecycle.request(LifecyclePhase::Stop).await;
+        drop(inbox);
+        output
+    };
+    let run = parts.state.run(
+        inbox_receiver,
+        close_inbox,
+        lifecycle_receiver,
+        parts.storage,
+        parts.storage_reads,
+        parts.checkpoints,
+        parts.crypto,
+        token,
+    );
+    let (exit, output) = tokio::join!(run, driven);
+    if !matches!(exit, StateCoreExit::Stopped) {
+        return Err(format!("coordinator exited with {exit:?}").into());
+    }
+    output
+}
+
+/// Answers the coordinator's ECAP OFFER with the edge's own OFFER and ACK,
+/// and consumes the coordinator's ACK.
+async fn negotiate_companion(edge: &mut Edge) -> TestResult {
+    let CompanionFrame::EcapOffer(tuple) = edge.next_companion().await? else {
+        return Err("expected ECAP OFFER".into());
+    };
+    edge.companion(CompanionFrame::EcapOffer(tuple.clone()))
+        .await?;
+    edge.companion(CompanionFrame::EcapAck(tuple)).await?;
+    match edge.next_companion().await? {
+        CompanionFrame::EcapAck(_) => Ok(()),
+        other => Err(format!("expected ECAP ACK, got {}", other.command()).into()),
+    }
+}
+
+/// Sends one companion object as its fragments.
+async fn companion_object(
+    edge: &mut Edge,
+    bytes: &[u8],
+    frame: impl Fn(agenc_ircd_e2ee::wire::fragment::FragmentTag) -> CompanionFrame,
+) -> TestResult {
+    for fragment in agenc_ircd_e2ee::wire::fragment::fragment_object(bytes)? {
+        edge.companion(frame(fragment)).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn companion_requests_execute_after_negotiation_and_synchronization() -> TestResult {
+    use agenc_ircd_e2ee::federation::frames::Correlation;
+    use agenc_ircd_e2ee::object::{IrcWireObject, IrcWireObjectKind};
+    use agenc_ircd_e2ee::objects::federation::{
+        IrcFederationOpcode, IrcFederationOrigin, IrcFederationRequest,
+    };
+    use agenc_ircd_e2ee::tls::{Opaque, TlsEncode};
+
+    let edge_identity = peer_identity(ServerId::from_bytes([3; 16]), "edge.example");
+    run_companion_coordinator(&[edge_identity], |federation| async move {
+        let mut edge = Edge::new(federation, 3);
+        let mut origin = Origin::new(9);
+        edge.establish().await?;
+        negotiate_companion(&mut edge).await?;
+        synchronize_ok(&mut edge, &mut [&mut origin]).await?;
+        let incarnation = *edge.incarnation.as_bytes();
+        let coordinator = *COORDINATOR.as_bytes();
+
+        // ERESUME on a fresh scope opens the empty ESTATE transfer; READY
+        // records the cut and ACTIVE follows.
+        edge.companion(CompanionFrame::Resume {
+            coordinator_server_id: coordinator,
+            server_incarnation: incarnation,
+            delivery_generation: 0,
+            last: None,
+        })
+        .await?;
+        let CompanionFrame::StateBegin {
+            snapshot_token,
+            state_generation,
+            delivery_generation,
+            total_entry_count,
+            snapshot_digest,
+            ..
+        } = edge.next_companion().await?
+        else {
+            return Err("expected ESTATE BEGIN".into());
+        };
+        assert_eq!(total_entry_count, 0);
+        let CompanionFrame::StateEnd {
+            next_cursor: None, ..
+        } = edge.next_companion().await?
+        else {
+            return Err("expected the final ESTATE END".into());
+        };
+        edge.companion(CompanionFrame::StateCut {
+            active: false,
+            server_id: coordinator,
+            snapshot_token,
+            state_generation,
+            delivery_generation,
+            snapshot_digest,
+        })
+        .await?;
+        let CompanionFrame::StateCut { active: true, .. } = edge.next_companion().await? else {
+            return Err("expected ESTATE ACTIVE".into());
+        };
+
+        // The companion origin set mirrors the ACKed base origin.
+        edge.companion(CompanionFrame::OriginReset {
+            coordinator_server_id: coordinator,
+            server_incarnation: incarnation,
+        })
+        .await?;
+        let CompanionFrame::OriginReady { .. } = edge.next_companion().await? else {
+            return Err("expected EORIGIN READY".into());
+        };
+        let record = origin.record(&edge);
+        let companion_origin = IrcFederationOrigin {
+            profile_version: 1,
+            network_id: *NETWORK.as_bytes(),
+            home_server_id: *edge.server_id.as_bytes(),
+            server_incarnation: incarnation,
+            origin_id: *origin.id.as_bytes(),
+            origin_generation: 0,
+            previous_origin_state_id: [0; 32],
+            connection_id: *record.connection_id.as_bytes(),
+            session_id: Opaque::new(Vec::new())?,
+            user_id: Opaque::new(Vec::new())?,
+            account_id: Opaque::new(Vec::new())?,
+            account_session_generation: 0,
+            connection_nonce: record.connection_nonce,
+            attached_device_id: Opaque::new(Vec::new())?,
+            device_session_generation: 0,
+        };
+        let origin_bytes = IrcWireObject::new(
+            IrcWireObjectKind::FederationOrigin,
+            companion_origin.encode()?,
+        )?
+        .encode()?;
+        let origin_object = *agenc_ircd_e2ee::ObjectId::compute(&origin_bytes).as_bytes();
+        let origin_id = *origin.id.as_bytes();
+        companion_object(&mut edge, &origin_bytes, |fragment| {
+            CompanionFrame::OriginState {
+                update: false,
+                coordinator_server_id: coordinator,
+                server_incarnation: incarnation,
+                origin_id,
+                origin_generation: 0,
+                object_id: origin_object,
+                fragment,
+            }
+        })
+        .await?;
+        let CompanionFrame::OriginAck {
+            object_id: Some(acked),
+            ..
+        } = edge.next_companion().await?
+        else {
+            return Err("expected EORIGIN ACK".into());
+        };
+        assert_eq!(acked, origin_object);
+
+        // A guest origin asking `whoami` is answered with the failed result;
+        // a failed result completes nothing, so no event follows it.
+        let request = IrcFederationRequest {
+            profile_version: 1,
+            network_id: *NETWORK.as_bytes(),
+            home_server_id: *edge.server_id.as_bytes(),
+            server_incarnation: incarnation,
+            origin_id,
+            origin_generation: 0,
+            operation_sequence: 0,
+            request_id: [1; 16],
+            opcode: IrcFederationOpcode::Whoami,
+            encoded_parameters: Opaque::new(Vec::new())?,
+            payload_object_id: Opaque::new(Vec::new())?,
+        };
+        let request_bytes =
+            IrcWireObject::new(IrcWireObjectKind::FederationRequest, request.encode()?)?
+                .encode()?;
+        let request_object = *agenc_ircd_e2ee::ObjectId::compute(&request_bytes).as_bytes();
+        let correlation = Correlation {
+            peer_server_id: coordinator,
+            server_incarnation: incarnation,
+            origin_id,
+            origin_generation: 0,
+            operation_sequence: 0,
+            request_id: [1; 16],
+        };
+        companion_object(&mut edge, &request_bytes, |fragment| {
+            CompanionFrame::Request {
+                correlation,
+                object_id: request_object,
+                fragment,
+            }
+        })
+        .await?;
+        let CompanionFrame::Result {
+            correlation: answered,
+            ..
+        } = edge.next_companion().await?
+        else {
+            return Err("expected ERESULT".into());
+        };
+        assert_eq!(answered.request_id, [1; 16]);
+
+        // The identical request again replays the stored result.
+        companion_object(&mut edge, &request_bytes, |fragment| {
+            CompanionFrame::Request {
+                correlation,
+                object_id: request_object,
+                fragment,
+            }
+        })
+        .await?;
+        let CompanionFrame::Result {
+            correlation: replayed,
+            ..
+        } = edge.next_companion().await?
+        else {
+            return Err("expected the replayed ERESULT".into());
+        };
+        assert_eq!(replayed.request_id, [1; 16]);
         Ok(())
     })
     .await

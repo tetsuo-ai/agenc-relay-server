@@ -254,10 +254,10 @@ impl SuccessLine {
 }
 
 /// Checks a server prefix (without the leading colon) against the profile
-/// bound.
+/// bound, which counts the serialized prefix with its colon.
 pub fn check_server_prefix(server: &str) -> Result<(), E2eeError> {
     if server.is_empty()
-        || server.len() > MAX_E2EE_SERVER_PREFIX_BYTES
+        || server.len() >= MAX_E2EE_SERVER_PREFIX_BYTES
         || server.bytes().any(|byte| byte == b' ' || byte < 0x21)
     {
         return Err(E2eeError::LimitExceeded);

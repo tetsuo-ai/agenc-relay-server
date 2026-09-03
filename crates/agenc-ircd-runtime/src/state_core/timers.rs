@@ -71,6 +71,10 @@ pub enum TimerKind {
     FederationSnapshotSend,
     /// The fixed snapshot token lifetime.
     FederationSnapshotExpiry,
+    /// The companion ECAP negotiation deadline of one link.
+    CompanionProfileDeadline,
+    /// A companion ESTATE snapshot token lifetime.
+    CompanionSnapshotExpiry,
 }
 
 /// Typed identity a timer entry names; never a protocol string.

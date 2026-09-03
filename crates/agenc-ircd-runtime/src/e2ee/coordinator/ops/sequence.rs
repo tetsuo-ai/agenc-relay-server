@@ -1,0 +1,1151 @@
+//! Sequencing operations: candidates, approvals, ACKs, finalization and
+//! abort, ReInit attempts and terminals, and the retained-record fetches
+//! (companion Sections 12.1 to 12.4, 13.8).
+//!
+//! Interpretation recorded for the completion notes: the sequencer cannot
+//! evaluate the private finality quorum, so it wraps the first non-empty
+//! vote snapshot into the terminal certificate and later snapshots only grow
+//! the proof accumulator without a new record; a proof-only request returns
+//! `PENDING`. Endpoints, not the sequencer, decide finality.
+
+use agenc_ircd_crypto::{SemanticHashDomain, SignatureDomain};
+use agenc_ircd_domain::e2ee::limits::MAX_BATCH_OBJECTS;
+use agenc_ircd_domain::e2ee::projection::{EmptyKind, EventKind, PendingKind, StoreKind};
+use agenc_ircd_domain::e2ee::sequencer_log::SequencerLog;
+use agenc_ircd_e2ee::envelope::verify_commit_object;
+use agenc_ircd_e2ee::limits::{
+    MAX_ABORT_OBJECT, MAX_COMMIT_ACK_OBJECT, MAX_COMMIT_APPROVAL_OBJECT, MAX_FINALIZATION_OBJECT,
+    MAX_LIVE_OBJECT, MAX_REINIT_ACK_OBJECT, MAX_REINIT_OBJECT,
+};
+use agenc_ircd_e2ee::object::{IrcWireObject, IrcWireObjectKind};
+use agenc_ircd_e2ee::objects::conversation::IrcCommitApprovalEnvelope;
+use agenc_ircd_e2ee::objects::reinit::{
+    IrcReInitAbortCertificate, IrcReInitAbortRequest, IrcReInitAbortTbs, IrcReInitAck,
+    IrcReInitActivationCertificate, IrcReInitActivationRequest, IrcReInitActivationTbs,
+    IrcReInitAttempt, IrcReInitAttemptReceipt, IrcReInitAttemptReceiptTbs,
+};
+use agenc_ircd_e2ee::objects::sequencing::{
+    IrcAbortRequest, IrcCandidateReceipt, IrcCandidateReceiptTbs, IrcCommitAbortCertificate,
+    IrcCommitAbortTbs, IrcCommitAck, IrcCommitFinalizationCertificate, IrcCommitFinalizationTbs,
+    IrcFinalizationRequest, IrcSequencerRecord,
+};
+use agenc_ircd_e2ee::tls::{DecodeBudget, TlsDecode, TlsEncode};
+use agenc_ircd_e2ee::wire::reply::E2eeReplyCode;
+use agenc_ircd_storage::TableId;
+use agenc_ircd_storage::e2ee_records::{
+    CandidateState, ProofRole, SEQUENCER_ROW_KIND, SequencerRow,
+};
+
+use super::super::request::{Outcome, ResponseObject, ResultBody, state_row};
+use super::super::{CompanionCoordinator, CompanionState};
+use super::route::audience;
+use super::{Exec, Fail, cursor};
+
+fn log<'a>(exec: &Exec<'a>, conversation_id: &[u8; 32]) -> Result<&'a SequencerLog, Fail> {
+    exec.coordinator
+        .state
+        .logs
+        .get(conversation_id)
+        .ok_or_else(|| Fail::with(E2eeReplyCode::RouteInvalid, conversation_id))
+}
+
+fn wire(kind: IrcWireObjectKind, body: Vec<u8>) -> Result<Vec<u8>, Fail> {
+    IrcWireObject::new(kind, body)
+        .and_then(|object| object.encode())
+        .map_err(|_| Fail::from(E2eeReplyCode::ObjectTooLarge))
+}
+
+fn record_bytes(record: &IrcSequencerRecord) -> Result<Vec<u8>, Fail> {
+    let body = record
+        .encode()
+        .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
+    wire(IrcWireObjectKind::SequencerRecord, body)
+}
+
+fn decode<T: TlsDecode>(bytes: &[u8], limit: usize) -> Result<T, Fail> {
+    let mut budget = DecodeBudget::new(limit, 1 << 18);
+    T::decode_exact(bytes, &mut budget).map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))
+}
+
+fn sequencer_row(
+    conversation_id: &[u8; 32],
+    route_sequence: u64,
+    row: &SequencerRow,
+) -> Result<crate::state_core::durable::AccountServiceDurableWrite, Fail> {
+    state_row(
+        TableId::E2eeState,
+        SEQUENCER_ROW_KIND,
+        SequencerRow::record_key(conversation_id, route_sequence)
+            .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
+        row.encode()
+            .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
+    )
+    .map_err(Fail::from)
+}
+
+fn retain(state: &mut CompanionState, bytes: Vec<u8>) -> Option<[u8; 32]> {
+    CompanionCoordinator::retain_object(state, bytes).ok()
+}
+
+fn ids(values: &[&[u8]]) -> Vec<u8> {
+    values
+        .iter()
+        .flat_map(|value| value.iter().copied())
+        .collect()
+}
+
+// agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one handler verifies the Commit object, records the candidate, signs the receipt, and stages the rows and events as one atomic set
+/// `submit_candidate`.
+pub fn submit_candidate(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
+    let conversation_id = exec.params().read(|reader| reader.fixed::<32>())?;
+    exec.attached_device()?;
+    let (object, bytes) = exec.payload()?;
+    let log = log(exec, &conversation_id)?;
+    let lifecycle = exec
+        .coordinator
+        .state
+        .lifecycles
+        .get(&conversation_id)
+        .ok_or_else(|| Fail::with(E2eeReplyCode::RouteInvalid, &conversation_id))?;
+    lifecycle
+        .check_candidate(log)
+        .map_err(|_| Fail::with(E2eeReplyCode::RouteInvalid, &conversation_id))?;
+    let state = exec
+        .coordinator
+        .state
+        .conversations
+        .get(&conversation_id)
+        .ok_or_else(|| Fail::with(E2eeReplyCode::RouteInvalid, &conversation_id))?;
+    let mut budget = DecodeBudget::new(MAX_LIVE_OBJECT, 1 << 16);
+    let expectation = super::route::expectation_for(exec, conversation_id)?;
+    let envelope = verify_commit_object(
+        object,
+        &expectation,
+        log.accepted_state_id(),
+        state.last_validation_time,
+        &mut budget,
+    )
+    .map_err(|_| Fail::with(E2eeReplyCode::EpochStale, &conversation_id))?;
+    let prior_epoch = envelope.header.epoch;
+    let position = log.candidate_position(prior_epoch).map_err(|error| {
+        use agenc_ircd_domain::e2ee::sequencer_log::LogError;
+        match error {
+            LogError::CandidateActive => {
+                Fail::with(E2eeReplyCode::CandidateActive, &conversation_id)
+            }
+            LogError::EpochStale => Fail::with(E2eeReplyCode::EpochStale, &conversation_id),
+            _ => Fail::with(E2eeReplyCode::RateLimited, &conversation_id),
+        }
+    })?;
+    let signer = exec
+        .coordinator
+        .signer()
+        .ok_or_else(|| Fail::from(E2eeReplyCode::Syncing))?;
+    let commit_object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
+    let tbs = IrcCandidateReceiptTbs {
+        profile_version: 1,
+        network_id: exec.coordinator.network_id,
+        conversation_id,
+        route_sequence: position.route_sequence,
+        prior_epoch,
+        resulting_epoch: prior_epoch
+            .checked_add(1)
+            .ok_or_else(|| Fail::from(E2eeReplyCode::EpochStale))?,
+        candidate_sequence: position.candidate_sequence,
+        commit_object_id,
+        prior_state_id: position.prior_state_id,
+        predecessor_record_id: position.predecessor_record_id,
+        sequenced_at: exec.now,
+        sequencer_key_id: signer.credential_id,
+    };
+    let candidate_id = CompanionCoordinator::id_of(SemanticHashDomain::CandidateId, &tbs)?;
+    let receipt = IrcCandidateReceipt {
+        sequencer_signature: signer
+            .sign(SignatureDomain::CandidateReceipt, &tbs)
+            .map_err(|_| Fail::from(E2eeReplyCode::Syncing))?,
+        tbs,
+    };
+    let receipt_encoded = receipt
+        .encode()
+        .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
+    let record = record_bytes(&IrcSequencerRecord::Candidate(receipt))?;
+    let record_id = *agenc_ircd_e2ee::ObjectId::compute(&record).as_bytes();
+    let mut next_log = log.clone();
+    next_log
+        .record_candidate(candidate_id, commit_object_id, position)
+        .map_err(|_| Fail::with(E2eeReplyCode::CandidateActive, &conversation_id))?;
+    let mut outcome = Outcome::scalar(ResultBody::AcceptedEvent);
+    outcome.security_mutation = true;
+    outcome
+        .writes
+        .push(CompanionCoordinator::object_write(bytes)?);
+    outcome
+        .writes
+        .push(CompanionCoordinator::object_write(&record)?);
+    outcome.writes.push(sequencer_row(
+        &conversation_id,
+        position.route_sequence,
+        &SequencerRow::Record {
+            record_object_id: record_id,
+            record_id: candidate_id,
+            record_kind: 1,
+            terminal: false,
+            security_proof: true,
+            predecessor_record_id: position.predecessor_record_id,
+        },
+    )?);
+    outcome.writes.push(state_row(
+        TableId::E2eeState,
+        SEQUENCER_ROW_KIND,
+        SequencerRow::candidate_key(&conversation_id, prior_epoch)
+            .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
+        SequencerRow::Candidate {
+            candidate_id,
+            commit_object_id,
+            route_sequence: position.route_sequence,
+            candidate_sequence: position.candidate_sequence,
+            attempts: 0,
+            state: CandidateState::Active,
+            terminal_id: None,
+        }
+        .encode()
+        .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
+    )?);
+    for target in audience(exec, &conversation_id)? {
+        outcome.events.push(exec.event(
+            EventKind::Candidate,
+            Some(conversation_id),
+            target,
+            position.route_sequence,
+            receipt_encoded.clone(),
+            Some(bytes.to_vec()),
+        ));
+    }
+    let commit = bytes.to_vec();
+    let validation_time = envelope.aad.validation_time;
+    outcome.effects.push(Box::new(move |companion| {
+        companion.logs.insert(conversation_id, next_log);
+        retain(companion, commit);
+        retain(companion, record);
+        if let Some(state) = companion.conversations.get_mut(&conversation_id) {
+            state.records.insert(position.route_sequence, record_id);
+            state.last_validation_time = validation_time;
+        }
+    }));
+    Ok(outcome)
+}
+
+/// `submit_authorization`: the server bounds, stores, and groups identical
+/// TBS bytes; controller validity is an endpoint matter.
+pub fn submit_authorization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
+    let conversation_id = exec.params().read(|reader| reader.fixed::<32>())?;
+    let (device, _) = exec.attached_device()?;
+    let (object, bytes) = exec.payload()?;
+    log(exec, &conversation_id)?;
+    let envelope: IrcCommitApprovalEnvelope = decode(object.body(), MAX_COMMIT_APPROVAL_OBJECT)?;
+    if envelope.tbs.conversation_id != conversation_id
+        || envelope.tbs.network_id != exec.coordinator.network_id
+    {
+        return Err(Fail::with(E2eeReplyCode::RouteInvalid, &conversation_id));
+    }
+    if envelope.approval.signer_device_id != device {
+        return Err(Fail::with(E2eeReplyCode::DeviceRequired, &conversation_id));
+    }
+    let authorization_id =
+        CompanionCoordinator::id_of(SemanticHashDomain::CommitAuthorizationId, &envelope.tbs)?;
+    let candidate_id = envelope.tbs.candidate_id;
+    let signer = (
+        envelope.approval.signer_root_fingerprint,
+        envelope.approval.signer_device_id,
+    );
+    let object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
+    let mut outcome = Outcome::scalar(ResultBody::Stored(StoreKind::Authorization, object_id));
+    outcome
+        .writes
+        .push(CompanionCoordinator::object_write(bytes)?);
+    outcome.writes.push(state_row(
+        TableId::E2eeState,
+        SEQUENCER_ROW_KIND,
+        SequencerRow::proof_key(
+            ProofRole::Approval,
+            &conversation_id,
+            &candidate_id,
+            &signer.0,
+            &signer.1,
+        )
+        .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
+        SequencerRow::Proof {
+            role: ProofRole::Approval,
+            object_id,
+            slot: 0,
+        }
+        .encode()
+        .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
+    )?);
+    let retained = bytes.to_vec();
+    outcome.effects.push(Box::new(move |companion| {
+        retain(companion, retained);
+        if let Some(state) = companion.conversations.get_mut(&conversation_id) {
+            state
+                .approvals
+                .entry(candidate_id)
+                .or_default()
+                .insert(signer, object_id);
+            let _ = authorization_id;
+        }
+    }));
+    Ok(outcome)
+}
+
+// agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one handler verifies the ACK, merges it into the accumulator, and stages the row and event as one atomic set
+/// `submit_commit_ack`.
+pub fn submit_commit_ack(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
+    let conversation_id = exec.params().read(|reader| reader.fixed::<32>())?;
+    exec.attached_device()?;
+    let (object, bytes) = exec.payload()?;
+    let log = log(exec, &conversation_id)?;
+    let ack: IrcCommitAck = decode(object.body(), MAX_COMMIT_ACK_OBJECT)?;
+    let slot = log
+        .candidate()
+        .filter(|slot| {
+            slot.candidate_id == ack.tbs.candidate_id
+                && slot.commit_object_id == ack.tbs.commit_object_id
+        })
+        .ok_or_else(|| Fail::with(E2eeReplyCode::FinalityRequired, &conversation_id))?;
+    if ack.tbs.conversation_id != conversation_id
+        || ack.tbs.prior_epoch != slot.position.prior_epoch
+    {
+        return Err(Fail::with(E2eeReplyCode::EpochStale, &conversation_id));
+    }
+    let candidate_id = slot.candidate_id;
+    let object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
+    let leaf = ack.tbs.old_leaf_index;
+    let mut outcome = Outcome::scalar(ResultBody::CommitAcked(
+        conversation_id,
+        candidate_id,
+        object_id,
+    ));
+    outcome
+        .writes
+        .push(CompanionCoordinator::object_write(bytes)?);
+    outcome.writes.push(state_row(
+        TableId::E2eeState,
+        SEQUENCER_ROW_KIND,
+        SequencerRow::proof_key(
+            ProofRole::Ack,
+            &conversation_id,
+            &candidate_id,
+            &[0; 32],
+            &leaf_device(leaf),
+        )
+        .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
+        SequencerRow::Proof {
+            role: ProofRole::Ack,
+            object_id,
+            slot: 0,
+        }
+        .encode()
+        .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
+    )?);
+    for target in audience(exec, &conversation_id)? {
+        outcome.events.push(exec.event(
+            EventKind::CommitAck,
+            Some(conversation_id),
+            target,
+            slot.position.route_sequence,
+            candidate_id.to_vec(),
+            Some(bytes.to_vec()),
+        ));
+    }
+    let retained = bytes.to_vec();
+    outcome.effects.push(Box::new(move |companion| {
+        retain(companion, retained);
+        if let Some(state) = companion.conversations.get_mut(&conversation_id) {
+            state
+                .acks
+                .entry(candidate_id)
+                .or_default()
+                .insert(leaf, object_id);
+        }
+    }));
+    Ok(outcome)
+}
+
+/// ACKs are keyed by old leaf index; the accumulator key uses it as a
+/// synthetic device slot.
+fn leaf_device(leaf: u32) -> [u8; 16] {
+    let mut device = [0; 16];
+    if let Some(tail) = device.get_mut(12..) {
+        tail.copy_from_slice(&leaf.to_be_bytes());
+    }
+    device
+}
+
+// agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one handler verifies the finality votes, signs the finalization, advances the log, and stages the rows and events as one atomic set
+/// `submit_finalization` and `submit_abort` share one shape: a request with
+/// votes becomes the signed terminal certificate at the next position.
+pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
+    let conversation_id = exec.params().read(|reader| reader.fixed::<32>())?;
+    exec.attached_device()?;
+    let (object, bytes) = exec.payload()?;
+    let log = log(exec, &conversation_id)?;
+    let request: IrcFinalizationRequest = decode(object.body(), MAX_FINALIZATION_OBJECT)?;
+    let core = request.proof.core.clone();
+    let core = &core;
+    let slot = log
+        .candidate()
+        .filter(|slot| {
+            slot.candidate_id == core.candidate_id && slot.commit_object_id == core.commit_object_id
+        })
+        .ok_or_else(|| Fail::with(E2eeReplyCode::FinalityRequired, &conversation_id))?;
+    if core.conversation_id != conversation_id
+        || core.prior_state_id != slot.position.prior_state_id
+    {
+        return Err(Fail::with(E2eeReplyCode::EpochStale, &conversation_id));
+    }
+    let finalization_id = CompanionCoordinator::id_of(SemanticHashDomain::FinalizationId, core)?;
+    let request_object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
+    if request.votes.is_empty() {
+        let mut outcome = Outcome::scalar(ResultBody::Pending(
+            conversation_id,
+            PendingKind::Finalization,
+            request_object_id,
+        ));
+        outcome
+            .writes
+            .push(CompanionCoordinator::object_write(bytes)?);
+        let retained = bytes.to_vec();
+        outcome.effects.push(Box::new(move |companion| {
+            retain(companion, retained);
+        }));
+        return Ok(outcome);
+    }
+    let position = log
+        .terminal_position(&core.candidate_id)
+        .map_err(|_| Fail::with(E2eeReplyCode::FinalityRequired, &conversation_id))?;
+    let signer = exec
+        .coordinator
+        .signer()
+        .ok_or_else(|| Fail::from(E2eeReplyCode::Syncing))?;
+    let tbs = IrcCommitFinalizationTbs {
+        profile_version: 1,
+        network_id: exec.coordinator.network_id,
+        conversation_id,
+        route_sequence: position.route_sequence,
+        predecessor_record_id: position.predecessor_record_id,
+        finalization_id,
+        sequencer_key_id: signer.credential_id,
+        request,
+    };
+    let certificate = IrcCommitFinalizationCertificate {
+        sequencer_signature: signer
+            .sign(SignatureDomain::CommitFinalization, &tbs)
+            .map_err(|_| Fail::from(E2eeReplyCode::Syncing))?,
+        tbs,
+    };
+    let resulting_epoch = certificate.tbs.request.proof.core.resulting_epoch;
+    let record = record_bytes(&IrcSequencerRecord::Finalization(certificate))?;
+    let record_id = *agenc_ircd_e2ee::ObjectId::compute(&record).as_bytes();
+    let mut next_log = log.clone();
+    next_log
+        .finalize(&core.candidate_id, finalization_id, resulting_epoch)
+        .map_err(|_| Fail::with(E2eeReplyCode::EpochStale, &conversation_id))?;
+    let mut outcome = Outcome::scalar(ResultBody::Finalized(
+        conversation_id,
+        resulting_epoch,
+        finalization_id,
+        record_id,
+    ));
+    outcome.security_mutation = true;
+    outcome
+        .writes
+        .push(CompanionCoordinator::object_write(bytes)?);
+    outcome
+        .writes
+        .push(CompanionCoordinator::object_write(&record)?);
+    outcome.writes.push(sequencer_row(
+        &conversation_id,
+        position.route_sequence,
+        &SequencerRow::Record {
+            record_object_id: record_id,
+            record_id: finalization_id,
+            record_kind: 2,
+            terminal: true,
+            security_proof: true,
+            predecessor_record_id: position.predecessor_record_id,
+        },
+    )?);
+    let mut encoded = resulting_epoch.to_be_bytes().to_vec();
+    encoded.extend_from_slice(&finalization_id);
+    encoded.extend_from_slice(&record_id);
+    for target in audience(exec, &conversation_id)? {
+        outcome.events.push(exec.event(
+            EventKind::Finalized,
+            Some(conversation_id),
+            target,
+            position.route_sequence,
+            encoded.clone(),
+            None,
+        ));
+    }
+    let candidate_id = core.candidate_id;
+    let retained = bytes.to_vec();
+    outcome.effects.push(Box::new(move |companion| {
+        companion.logs.insert(conversation_id, next_log);
+        retain(companion, retained);
+        retain(companion, record);
+        if let Some(state) = companion.conversations.get_mut(&conversation_id) {
+            state.records.insert(position.route_sequence, record_id);
+            state.proofs.insert(finalization_id, request_object_id);
+            state.acks.remove(&candidate_id);
+        }
+    }));
+    Ok(outcome)
+}
+
+// agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one handler verifies the abort votes, signs the abort, resets the candidate, and stages the rows and events as one atomic set
+/// `submit_abort`.
+pub fn submit_abort(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
+    let conversation_id = exec.params().read(|reader| reader.fixed::<32>())?;
+    exec.attached_device()?;
+    let (object, bytes) = exec.payload()?;
+    let log = log(exec, &conversation_id)?;
+    let request: IrcAbortRequest = decode(object.body(), MAX_ABORT_OBJECT)?;
+    let core = request.core.clone();
+    let core = &core;
+    let slot = log
+        .candidate()
+        .filter(|slot| slot.candidate_id == core.candidate_id)
+        .ok_or_else(|| Fail::with(E2eeReplyCode::FinalityRequired, &conversation_id))?;
+    if core.conversation_id != conversation_id
+        || core.prior_state_id != slot.position.prior_state_id
+    {
+        return Err(Fail::with(E2eeReplyCode::EpochStale, &conversation_id));
+    }
+    let abort_id = CompanionCoordinator::id_of(SemanticHashDomain::AbortId, core)?;
+    let request_object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
+    if request.votes.is_empty() {
+        let mut outcome = Outcome::scalar(ResultBody::Pending(
+            conversation_id,
+            PendingKind::Abort,
+            request_object_id,
+        ));
+        outcome
+            .writes
+            .push(CompanionCoordinator::object_write(bytes)?);
+        let retained = bytes.to_vec();
+        outcome.effects.push(Box::new(move |companion| {
+            retain(companion, retained);
+        }));
+        return Ok(outcome);
+    }
+    let position = log
+        .terminal_position(&core.candidate_id)
+        .map_err(|_| Fail::with(E2eeReplyCode::FinalityRequired, &conversation_id))?;
+    let signer = exec
+        .coordinator
+        .signer()
+        .ok_or_else(|| Fail::from(E2eeReplyCode::Syncing))?;
+    let candidate_id = core.candidate_id;
+    let tbs = IrcCommitAbortTbs {
+        profile_version: 1,
+        network_id: exec.coordinator.network_id,
+        conversation_id,
+        route_sequence: position.route_sequence,
+        predecessor_record_id: position.predecessor_record_id,
+        abort_id,
+        sequencer_key_id: signer.credential_id,
+        request,
+    };
+    let certificate = IrcCommitAbortCertificate {
+        sequencer_signature: signer
+            .sign(SignatureDomain::CandidateAbort, &tbs)
+            .map_err(|_| Fail::from(E2eeReplyCode::Syncing))?,
+        tbs,
+    };
+    let record = record_bytes(&IrcSequencerRecord::Abort(certificate))?;
+    let record_id = *agenc_ircd_e2ee::ObjectId::compute(&record).as_bytes();
+    let mut next_log = log.clone();
+    next_log
+        .abort(&candidate_id, abort_id)
+        .map_err(|_| Fail::with(E2eeReplyCode::EpochStale, &conversation_id))?;
+    let mut outcome = Outcome::scalar(ResultBody::Aborted(
+        conversation_id,
+        candidate_id,
+        abort_id,
+        record_id,
+    ));
+    outcome.security_mutation = true;
+    outcome
+        .writes
+        .push(CompanionCoordinator::object_write(bytes)?);
+    outcome
+        .writes
+        .push(CompanionCoordinator::object_write(&record)?);
+    outcome.writes.push(sequencer_row(
+        &conversation_id,
+        position.route_sequence,
+        &SequencerRow::Record {
+            record_object_id: record_id,
+            record_id: abort_id,
+            record_kind: 3,
+            terminal: true,
+            security_proof: true,
+            predecessor_record_id: position.predecessor_record_id,
+        },
+    )?);
+    for target in audience(exec, &conversation_id)? {
+        outcome.events.push(exec.event(
+            EventKind::Aborted,
+            Some(conversation_id),
+            target,
+            position.route_sequence,
+            ids(&[&candidate_id, &abort_id, &record_id]),
+            None,
+        ));
+    }
+    let retained = bytes.to_vec();
+    outcome.effects.push(Box::new(move |companion| {
+        companion.logs.insert(conversation_id, next_log);
+        retain(companion, retained);
+        retain(companion, record);
+        if let Some(state) = companion.conversations.get_mut(&conversation_id) {
+            state.records.insert(position.route_sequence, record_id);
+            state.proofs.insert(abort_id, request_object_id);
+            state.acks.remove(&candidate_id);
+        }
+    }));
+    Ok(outcome)
+}
+
+// agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one handler verifies the staged ReInit, records the attempt, signs the receipt, and stages the rows and events as one atomic set
+/// `submit_reinit_attempt`.
+pub fn submit_reinit_attempt(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
+    let old_conversation_id = exec.params().read(|reader| reader.fixed::<32>())?;
+    exec.attached_device()?;
+    let (object, bytes) = exec.payload()?;
+    let log = log(exec, &old_conversation_id)?;
+    let attempt: IrcReInitAttempt = decode(object.body(), MAX_REINIT_OBJECT)?;
+    let tbs = &attempt.tbs;
+    if tbs.old_conversation_id != old_conversation_id
+        || tbs.network_id != exec.coordinator.network_id
+    {
+        return Err(Fail::with(
+            E2eeReplyCode::RouteInvalid,
+            &old_conversation_id,
+        ));
+    }
+    let mut next_log = log.clone();
+    if !matches!(
+        log.phase(),
+        agenc_ircd_domain::e2ee::sequencer_log::Phase::Reinit { .. }
+    ) {
+        next_log
+            .enter_reinit(tbs.old_reinit_state_id)
+            .map_err(|_| Fail::with(E2eeReplyCode::FinalityRequired, &old_conversation_id))?;
+    }
+    let slot = next_log
+        .attempt_position()
+        .map_err(|_| Fail::with(E2eeReplyCode::CandidateActive, &old_conversation_id))?;
+    if slot.attempt_sequence != tbs.attempt_sequence {
+        return Err(Fail::with(E2eeReplyCode::EpochStale, &old_conversation_id));
+    }
+    let attempt_id = CompanionCoordinator::id_of(SemanticHashDomain::ReinitAttemptId, tbs)?;
+    let attempt_object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
+    let signer = exec
+        .coordinator
+        .signer()
+        .ok_or_else(|| Fail::from(E2eeReplyCode::Syncing))?;
+    let receipt_tbs = IrcReInitAttemptReceiptTbs {
+        profile_version: 1,
+        network_id: exec.coordinator.network_id,
+        old_conversation_id,
+        old_reinit_state_id: tbs.old_reinit_state_id,
+        route_sequence: slot.route_sequence,
+        attempt_sequence: slot.attempt_sequence,
+        predecessor_record_id: slot.predecessor_record_id,
+        reinit_attempt_id: attempt_id,
+        attempt_object_id,
+        sequenced_at: exec.now,
+        sequencer_key_id: signer.credential_id,
+    };
+    let receipt = IrcReInitAttemptReceipt {
+        sequencer_signature: signer
+            .sign(SignatureDomain::ReinitAttemptReceipt, &receipt_tbs)
+            .map_err(|_| Fail::from(E2eeReplyCode::Syncing))?,
+        tbs: receipt_tbs,
+    };
+    let record = record_bytes(&IrcSequencerRecord::ReinitAttempt(receipt))?;
+    let record_id = *agenc_ircd_e2ee::ObjectId::compute(&record).as_bytes();
+    next_log
+        .record_attempt(attempt_id)
+        .map_err(|_| Fail::with(E2eeReplyCode::CandidateActive, &old_conversation_id))?;
+    let mut outcome = Outcome::scalar(ResultBody::ReinitStaged(
+        old_conversation_id,
+        attempt_id,
+        attempt_object_id,
+    ));
+    outcome.security_mutation = true;
+    outcome
+        .writes
+        .push(CompanionCoordinator::object_write(bytes)?);
+    outcome
+        .writes
+        .push(CompanionCoordinator::object_write(&record)?);
+    outcome.writes.push(sequencer_row(
+        &old_conversation_id,
+        slot.route_sequence,
+        &SequencerRow::Record {
+            record_object_id: record_id,
+            record_id: attempt_id,
+            record_kind: 4,
+            terminal: false,
+            security_proof: true,
+            predecessor_record_id: slot.predecessor_record_id,
+        },
+    )?);
+    for target in audience(exec, &old_conversation_id)? {
+        outcome.events.push(exec.event(
+            EventKind::ReinitStaged,
+            Some(old_conversation_id),
+            target,
+            slot.route_sequence,
+            ids(&[&attempt_id, &attempt_object_id]),
+            None,
+        ));
+    }
+    let retained = bytes.to_vec();
+    outcome.effects.push(Box::new(move |companion| {
+        companion.logs.insert(old_conversation_id, next_log);
+        retain(companion, retained);
+        retain(companion, record);
+        if let Some(state) = companion.conversations.get_mut(&old_conversation_id) {
+            state.records.insert(slot.route_sequence, record_id);
+        }
+    }));
+    Ok(outcome)
+}
+
+// agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one handler verifies the ReInit ACK, merges it, and stages the row and event as one atomic set
+/// `submit_reinit_ack`.
+pub fn submit_reinit_ack(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
+    let old_conversation_id = exec.params().read(|reader| reader.fixed::<32>())?;
+    exec.attached_device()?;
+    let (object, bytes) = exec.payload()?;
+    let log = log(exec, &old_conversation_id)?;
+    let ack: IrcReInitAck = decode(object.body(), MAX_REINIT_ACK_OBJECT)?;
+    let slot = log
+        .reinit_attempt()
+        .filter(|slot| slot.attempt_id == ack.tbs.reinit_attempt_id)
+        .ok_or_else(|| Fail::with(E2eeReplyCode::FinalityRequired, &old_conversation_id))?;
+    if ack.tbs.old_conversation_id != old_conversation_id {
+        return Err(Fail::with(
+            E2eeReplyCode::RouteInvalid,
+            &old_conversation_id,
+        ));
+    }
+    let attempt_id = slot.attempt_id;
+    let object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
+    let leaf = ack.tbs.old_leaf_index;
+    let mut outcome = Outcome::scalar(ResultBody::ReinitAcked(
+        old_conversation_id,
+        attempt_id,
+        object_id,
+    ));
+    outcome
+        .writes
+        .push(CompanionCoordinator::object_write(bytes)?);
+    outcome.writes.push(state_row(
+        TableId::E2eeState,
+        SEQUENCER_ROW_KIND,
+        SequencerRow::proof_key(
+            ProofRole::Ack,
+            &old_conversation_id,
+            &attempt_id,
+            &[0; 32],
+            &leaf_device(leaf),
+        )
+        .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
+        SequencerRow::Proof {
+            role: ProofRole::Ack,
+            object_id,
+            slot: 0,
+        }
+        .encode()
+        .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
+    )?);
+    for target in audience(exec, &old_conversation_id)? {
+        outcome.events.push(exec.event(
+            EventKind::ReinitAck,
+            Some(old_conversation_id),
+            target,
+            slot.route_sequence,
+            attempt_id.to_vec(),
+            Some(bytes.to_vec()),
+        ));
+    }
+    let retained = bytes.to_vec();
+    outcome.effects.push(Box::new(move |companion| {
+        retain(companion, retained);
+        if let Some(state) = companion.conversations.get_mut(&old_conversation_id) {
+            state
+                .acks
+                .entry(attempt_id)
+                .or_default()
+                .insert(leaf, object_id);
+        }
+    }));
+    Ok(outcome)
+}
+
+// agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one handler verifies the terminal votes, signs activation or abort, migrates or resets the log, and stages the rows and events as one atomic set
+/// `submit_reinit_activate` (`activate`) and `submit_reinit_abort`.
+pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Outcome, Fail> {
+    let old_conversation_id = exec.params().read(|reader| reader.fixed::<32>())?;
+    exec.attached_device()?;
+    let (object, bytes) = exec.payload()?;
+    let log = log(exec, &old_conversation_id)?;
+    let request_object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
+    let signer = exec
+        .coordinator
+        .signer()
+        .ok_or_else(|| Fail::from(E2eeReplyCode::Syncing))?;
+    let (attempt_id, votes_empty, terminal_id, new_conversation, record) = if activate {
+        let request: IrcReInitActivationRequest = decode(object.body(), MAX_REINIT_OBJECT)?;
+        let core = request.core.clone();
+        let core = &core;
+        if core.old_conversation_id != old_conversation_id {
+            return Err(Fail::with(
+                E2eeReplyCode::RouteInvalid,
+                &old_conversation_id,
+            ));
+        }
+        let terminal_id =
+            CompanionCoordinator::id_of(SemanticHashDomain::ReinitActivationId, core)?;
+        let attempt_id = core.reinit_attempt_id;
+        let new_conversation = core.new_conversation_id;
+        let empty = request.votes.is_empty();
+        let position = log
+            .attempt_terminal_position(&attempt_id)
+            .map_err(|_| Fail::with(E2eeReplyCode::FinalityRequired, &old_conversation_id))?;
+        let tbs = IrcReInitActivationTbs {
+            profile_version: 1,
+            network_id: exec.coordinator.network_id,
+            old_conversation_id,
+            route_sequence: position.route_sequence,
+            predecessor_record_id: position.predecessor_record_id,
+            reinit_activation_id: terminal_id,
+            sequencer_key_id: signer.credential_id,
+            request,
+        };
+        let certificate = IrcReInitActivationCertificate {
+            sequencer_signature: signer
+                .sign(SignatureDomain::ReinitActivation, &tbs)
+                .map_err(|_| Fail::from(E2eeReplyCode::Syncing))?,
+            tbs,
+        };
+        (
+            attempt_id,
+            empty,
+            terminal_id,
+            Some(new_conversation),
+            IrcSequencerRecord::ReinitActivation(certificate),
+        )
+    } else {
+        let request: IrcReInitAbortRequest = decode(object.body(), MAX_REINIT_OBJECT)?;
+        let core = request.core.clone();
+        let core = &core;
+        if core.old_conversation_id != old_conversation_id {
+            return Err(Fail::with(
+                E2eeReplyCode::RouteInvalid,
+                &old_conversation_id,
+            ));
+        }
+        let terminal_id = CompanionCoordinator::id_of(SemanticHashDomain::ReinitAbortId, core)?;
+        let attempt_id = core.reinit_attempt_id;
+        let empty = request.votes.is_empty();
+        let position = log
+            .attempt_terminal_position(&attempt_id)
+            .map_err(|_| Fail::with(E2eeReplyCode::FinalityRequired, &old_conversation_id))?;
+        let tbs = IrcReInitAbortTbs {
+            profile_version: 1,
+            network_id: exec.coordinator.network_id,
+            old_conversation_id,
+            route_sequence: position.route_sequence,
+            predecessor_record_id: position.predecessor_record_id,
+            reinit_abort_id: terminal_id,
+            sequencer_key_id: signer.credential_id,
+            request,
+        };
+        let certificate = IrcReInitAbortCertificate {
+            sequencer_signature: signer
+                .sign(SignatureDomain::ReinitAttemptAbort, &tbs)
+                .map_err(|_| Fail::from(E2eeReplyCode::Syncing))?,
+            tbs,
+        };
+        (
+            attempt_id,
+            empty,
+            terminal_id,
+            None,
+            IrcSequencerRecord::ReinitAbort(certificate),
+        )
+    };
+    if votes_empty {
+        let kind = if activate {
+            PendingKind::ReinitActivate
+        } else {
+            PendingKind::ReinitAbort
+        };
+        let mut outcome = Outcome::scalar(ResultBody::Pending(
+            old_conversation_id,
+            kind,
+            request_object_id,
+        ));
+        outcome
+            .writes
+            .push(CompanionCoordinator::object_write(bytes)?);
+        let retained = bytes.to_vec();
+        outcome.effects.push(Box::new(move |companion| {
+            retain(companion, retained);
+        }));
+        return Ok(outcome);
+    }
+    let position = log
+        .attempt_terminal_position(&attempt_id)
+        .map_err(|_| Fail::with(E2eeReplyCode::FinalityRequired, &old_conversation_id))?;
+    let record = record_bytes(&record)?;
+    let record_id = *agenc_ircd_e2ee::ObjectId::compute(&record).as_bytes();
+    let mut next_log = log.clone();
+    let (result, event_kind, encoded) = match new_conversation {
+        Some(new_conversation_id) => {
+            next_log
+                .activate(&attempt_id, terminal_id, new_conversation_id)
+                .map_err(|_| Fail::with(E2eeReplyCode::EpochStale, &old_conversation_id))?;
+            (
+                ResultBody::ReinitActivated(
+                    old_conversation_id,
+                    new_conversation_id,
+                    terminal_id,
+                    record_id,
+                ),
+                EventKind::ReinitActivated,
+                ids(&[&new_conversation_id, &terminal_id, &record_id]),
+            )
+        }
+        None => {
+            next_log
+                .abort_attempt(&attempt_id, terminal_id)
+                .map_err(|_| Fail::with(E2eeReplyCode::EpochStale, &old_conversation_id))?;
+            (
+                ResultBody::ReinitAborted(old_conversation_id, attempt_id, terminal_id, record_id),
+                EventKind::ReinitAborted,
+                ids(&[&attempt_id, &terminal_id, &record_id]),
+            )
+        }
+    };
+    let mut outcome = Outcome::scalar(result);
+    outcome.security_mutation = true;
+    outcome
+        .writes
+        .push(CompanionCoordinator::object_write(bytes)?);
+    outcome
+        .writes
+        .push(CompanionCoordinator::object_write(&record)?);
+    outcome.writes.push(sequencer_row(
+        &old_conversation_id,
+        position.route_sequence,
+        &SequencerRow::Record {
+            record_object_id: record_id,
+            record_id: terminal_id,
+            record_kind: if activate { 5 } else { 6 },
+            terminal: true,
+            security_proof: true,
+            predecessor_record_id: position.predecessor_record_id,
+        },
+    )?);
+    for target in audience(exec, &old_conversation_id)? {
+        outcome.events.push(exec.event(
+            event_kind,
+            Some(old_conversation_id),
+            target,
+            position.route_sequence,
+            encoded.clone(),
+            None,
+        ));
+    }
+    let retained = bytes.to_vec();
+    outcome.effects.push(Box::new(move |companion| {
+        if let Some(new_conversation_id) = new_conversation {
+            let successor = SequencerLog::from_activation(new_conversation_id, terminal_id);
+            companion.logs.insert(new_conversation_id, successor);
+            companion.lifecycles.insert(
+                new_conversation_id,
+                agenc_ircd_domain::e2ee::lifecycle::Lifecycle::successor(),
+            );
+        }
+        companion.logs.insert(old_conversation_id, next_log);
+        retain(companion, retained);
+        retain(companion, record);
+        if let Some(state) = companion.conversations.get_mut(&old_conversation_id) {
+            state.records.insert(position.route_sequence, record_id);
+            state.proofs.insert(terminal_id, request_object_id);
+        }
+    }));
+    Ok(outcome)
+}
+
+fn page(
+    exec: &mut Exec<'_>,
+    objects: Vec<Vec<u8>>,
+    empty: EmptyKind,
+    cursor_after: Option<[u8; 32]>,
+) -> Result<Outcome, Fail> {
+    if objects.is_empty() {
+        return Ok(Outcome::scalar(ResultBody::Empty(empty)));
+    }
+    let mut outcome = Outcome::scalar(ResultBody::ObjectPage);
+    outcome.snapshot_token = Some(exec.random()?);
+    outcome.next_cursor = cursor_after;
+    outcome.responses = objects
+        .into_iter()
+        .map(|bytes| ResponseObject {
+            bytes,
+            delivery_token: None,
+            target_device_id: None,
+        })
+        .collect();
+    Ok(outcome)
+}
+
+/// `fetch_object`.
+pub fn fetch_object(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
+    let (conversation_id, object_id) = exec
+        .params()
+        .read(|reader| Ok((reader.fixed::<32>()?, reader.fixed::<32>()?)))?;
+    exec.attached_device()?;
+    log(exec, &conversation_id)?;
+    let bytes = exec
+        .coordinator
+        .state
+        .objects
+        .get(&object_id)
+        .filter(|bytes| {
+            CompanionCoordinator::kind_of(bytes).is_some_and(|kind| !kind.is_server_only())
+        })
+        .cloned();
+    page(exec, bytes.into_iter().collect(), EmptyKind::Objects, None)
+}
+
+/// A page of retained proof objects sorted by their accumulator key.
+fn proof_page(
+    exec: &mut Exec<'_>,
+    ids: Vec<[u8; 32]>,
+    cursor: Option<[u8; 32]>,
+    empty: EmptyKind,
+) -> Result<Outcome, Fail> {
+    let start = cursor.map_or(0, |cursor| {
+        ids.iter()
+            .position(|id| *id == cursor)
+            .map_or(ids.len(), |index| index + 1)
+    });
+    let window: Vec<[u8; 32]> = ids
+        .iter()
+        .skip(start)
+        .take(MAX_BATCH_OBJECTS + 1)
+        .copied()
+        .collect();
+    let next = window
+        .get(MAX_BATCH_OBJECTS)
+        .and_then(|_| window.get(MAX_BATCH_OBJECTS - 1).copied());
+    let objects: Vec<Vec<u8>> = window
+        .iter()
+        .take(MAX_BATCH_OBJECTS)
+        .filter_map(|id| exec.coordinator.state.objects.get(id).cloned())
+        .collect();
+    page(exec, objects, empty, next)
+}
+
+/// `fetch_authorizations`.
+pub fn fetch_authorizations(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
+    let (conversation_id, candidate_id, cursor) = exec.params().read(|reader| {
+        Ok((
+            reader.fixed::<32>()?,
+            reader.fixed::<32>()?,
+            cursor(reader)?,
+        ))
+    })?;
+    exec.attached_device()?;
+    let ids: Vec<[u8; 32]> = exec
+        .coordinator
+        .state
+        .conversations
+        .get(&conversation_id)
+        .and_then(|state| state.approvals.get(&candidate_id))
+        .map(|approvals| approvals.values().copied().collect())
+        .unwrap_or_default();
+    proof_page(exec, ids, cursor, EmptyKind::Authorizations)
+}
+
+/// `fetch_acks`.
+pub fn fetch_acks(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
+    let (conversation_id, selector, cursor) = exec.params().read(|reader| {
+        Ok((
+            reader.fixed::<32>()?,
+            reader.fixed::<32>()?,
+            cursor(reader)?,
+        ))
+    })?;
+    exec.attached_device()?;
+    let ids: Vec<[u8; 32]> = exec
+        .coordinator
+        .state
+        .conversations
+        .get(&conversation_id)
+        .and_then(|state| state.acks.get(&selector))
+        .map(|acks| acks.values().copied().collect())
+        .unwrap_or_default();
+    proof_page(exec, ids, cursor, EmptyKind::Acks)
+}
+
+/// `fetch_receipts`: contiguous records from the requested sequence.
+pub fn fetch_receipts(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
+    let (conversation_id, first, cursor) = exec
+        .params()
+        .read(|reader| Ok((reader.fixed::<32>()?, reader.u64()?, cursor(reader)?)))?;
+    exec.attached_device()?;
+    let state = exec
+        .coordinator
+        .state
+        .conversations
+        .get(&conversation_id)
+        .ok_or_else(|| Fail::with(E2eeReplyCode::RouteInvalid, &conversation_id))?;
+    let start = cursor
+        .and_then(|cursor| {
+            state
+                .records
+                .iter()
+                .find(|(_, id)| **id == cursor)
+                .map(|(sequence, _)| sequence.saturating_add(1))
+        })
+        .unwrap_or(first);
+    let mut objects = Vec::new();
+    let mut next = None;
+    let mut expected = start;
+    for (sequence, id) in state.records.range(start..) {
+        if *sequence != expected {
+            break;
+        }
+        if objects.len() == MAX_BATCH_OBJECTS {
+            next = objects
+                .last()
+                .and_then(|_| state.records.get(&(expected - 1)).copied());
+            break;
+        }
+        if let Some(bytes) = exec.coordinator.state.objects.get(id) {
+            objects.push(bytes.clone());
+        }
+        expected = expected.saturating_add(1);
+    }
+    page(exec, objects, EmptyKind::Receipts, next)
+}

@@ -20,6 +20,7 @@ pub mod clock;
 mod command_convert;
 pub mod connection;
 pub mod daemon;
+pub mod e2ee;
 mod error;
 pub mod federation;
 pub mod listener;

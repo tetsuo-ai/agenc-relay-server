@@ -2332,6 +2332,11 @@ impl CommandRouter for RegistrationRouter {
         {
             return;
         }
+        if let Some(edge) = self.edge.as_mut()
+            && edge.timer_fired(context, entry)
+        {
+            return;
+        }
         let Some(accounts) = self.accounts.as_mut() else {
             return;
         };

@@ -269,6 +269,64 @@ impl Hub {
         Ok(event_id)
     }
 
+    /// Sends one base event carrying a cross-profile tuple and expects no
+    /// acknowledgement: the barrier waits for its companion parts.
+    async fn barrier_part(
+        &mut self,
+        event: &ProjectedEvent,
+        tuple: agenc_ircd_federation_wire::CrossProfilePart,
+    ) -> TestResult {
+        let sequence = self.next_sequence;
+        self.next_sequence += 1;
+        let mut id = [0_u8; 16];
+        id[..8].copy_from_slice(&sequence.to_be_bytes());
+        id[15] = 2;
+        let event_id = EventId::from_bytes(id);
+        let header = EventHeader {
+            network_id: NETWORK,
+            target_server_id: EDGE,
+            projection_generation: 1,
+            coordinator_state_generation: self.state_generation,
+            delivery_sequence: sequence,
+            event_id,
+            event_kind: event.kind(),
+            correlation: None,
+            cross_profile: Some(tuple),
+        };
+        let arm = event_arm_object(event).map_err(|error| format!("event arm: {error:?}"))?;
+        let encoded = header
+            .build(&arm)
+            .map_err(|error| format!("part header {tuple:?}: {error:?}"))?
+            .encode_canonical()
+            .map_err(|error| format!("event encode: {error:?}"))?
+            .as_slice()
+            .to_vec();
+        let descriptor = agenc_ircd_federation_wire::EventDescriptor {
+            target_server_id: EDGE,
+            delivery_sequence: sequence,
+            event_id,
+            object_id: federation_object_id(&encoded),
+        };
+        self.object(&encoded, |fragment| FederationFrame::Event {
+            descriptor,
+            fragment,
+        })
+        .await
+    }
+
+    /// Drains whatever the edge queued before it noticed the fault, then
+    /// requires the close request.
+    async fn expect_closed(&mut self) -> TestResult {
+        loop {
+            let line = tokio::time::timeout(std::time::Duration::from_secs(20), self.queue.recv())
+                .await
+                .map_err(|_| "link stayed open")?;
+            if line.is_none() {
+                return Ok(());
+            }
+        }
+    }
+
     /// Sends one result for a request.
     async fn result(
         &mut self,
@@ -1118,4 +1176,76 @@ async fn a_closed_queue_retires_the_link_without_a_violation() -> TestResult {
     assert!(edge.live.is_none(), "the dead link is retired at once");
     assert_eq!(edge.phase, Phase::Down);
     Ok(())
+}
+
+#[tokio::test]
+async fn a_barrier_part_is_staged_and_an_ordinary_event_behind_it_is_fatal() -> TestResult {
+    run_edge(|federation, inbox| async move {
+        // The client inbox stays open for the whole exchange.
+        let _clients = inbox;
+        let mut hub = Hub::new(federation);
+        hub.establish().await?;
+        hub.synchronize().await?;
+        hub.state_generation += 1;
+        let generation = hub.state_generation;
+        let tuple = agenc_ircd_federation_wire::CrossProfilePart {
+            mutation_id: [7; 16],
+            part_index: 0,
+            part_count: 3,
+        };
+        let hidden = ProjectedEvent::ChannelHidden {
+            channel_id: ChannelInstanceId::from_bytes([14; 16]),
+            last_revision: Revision::new(generation)?,
+        };
+        hub.barrier_part(&hidden, tuple).await?;
+        // A second part of the same barrier is staged too; still no FACK.
+        hub.barrier_part(
+            &hidden,
+            agenc_ircd_federation_wire::CrossProfilePart {
+                part_index: 1,
+                ..tuple
+            },
+        )
+        .await?;
+        // An ordinary event before the barrier finishes closes the link.
+        let sequence = hub.next_sequence;
+        hub.next_sequence += 1;
+        let event_id = EventId::from_bytes([u8::try_from(sequence)? + 40; 16]);
+        let completed = ProjectedEvent::ChannelHidden {
+            channel_id: ChannelInstanceId::from_bytes([15; 16]),
+            last_revision: Revision::new(generation)?,
+        };
+        let header = EventHeader {
+            network_id: NETWORK,
+            target_server_id: EDGE,
+            projection_generation: 1,
+            coordinator_state_generation: generation,
+            delivery_sequence: sequence,
+            event_id,
+            event_kind: completed.kind(),
+            correlation: None,
+            cross_profile: None,
+        };
+        let arm = event_arm_object(&completed).map_err(|error| format!("event arm: {error:?}"))?;
+        let encoded = header
+            .build(&arm)
+            .map_err(|error| format!("event header: {error:?}"))?
+            .encode_canonical()
+            .map_err(|error| format!("event encode: {error:?}"))?
+            .as_slice()
+            .to_vec();
+        let descriptor = agenc_ircd_federation_wire::EventDescriptor {
+            target_server_id: EDGE,
+            delivery_sequence: sequence,
+            event_id,
+            object_id: federation_object_id(&encoded),
+        };
+        hub.object(&encoded, |fragment| FederationFrame::Event {
+            descriptor,
+            fragment,
+        })
+        .await?;
+        hub.expect_closed().await
+    })
+    .await
 }

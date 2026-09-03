@@ -41,6 +41,8 @@
 //! - [`welcome`]: Welcome and staged ReInit wrappers and proof bundles.
 //! - [`wire`]: tokens, fragment tags, the carrier matrix, reassembly,
 //!   command and response productions, and reply codes.
+//! - [`federation`]: the `E*` frame grammar, the ECAP negotiation, and the
+//!   sequencer credentials file.
 //! - [`profile`]: the exact capability value and ECAP tuple.
 //! - [`limits`]: the Section 16 constants.
 //!
@@ -69,6 +71,7 @@ pub mod authorization;
 pub mod context;
 pub mod envelope;
 pub mod error;
+pub mod federation;
 pub mod finality;
 pub mod identity;
 pub mod ids;

@@ -393,6 +393,9 @@ pub enum LinkEvent {
     },
     /// A complete control frame.
     Frame(FederationFrame),
+    /// A complete companion (IRC-MLS) frame; its object fragment, if any,
+    /// is reassembled by the state owner under the companion quotas.
+    Companion(agenc_ircd_e2ee::federation::frames::CompanionFrame),
     /// A complete reassembled object with its carrier descriptor.
     Object {
         /// The descriptor every fragment repeated.

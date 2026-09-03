@@ -143,47 +143,47 @@ fn attachment_is_a_compare_and_swap_on_the_session_generation() -> Result<(), Di
     let mut directory = provisioned()?;
     assert_eq!(directory.session_generation(&ACCOUNT, &DEVICE_A), 0);
     assert_eq!(
-        directory.attach_begin(ACCOUNT, [12; 16], 1, 100),
+        directory.attach_begin(ACCOUNT, [12; 16], [1; 16], 100),
         Err(DirectoryError::DeviceInactive)
     );
-    let first = directory.attach_begin(ACCOUNT, DEVICE_A, 1, 100)?;
+    let first = directory.attach_begin(ACCOUNT, DEVICE_A, [1; 16], 100)?;
     assert_eq!(first.reserved_generation, 1);
     assert_eq!(first.expires_at, 160);
-    let second = directory.attach_begin(ACCOUNT, DEVICE_A, 2, 101)?;
+    let second = directory.attach_begin(ACCOUNT, DEVICE_A, [2; 16], 101)?;
     assert_eq!(
-        directory.attach_finish(ACCOUNT, DEVICE_A, 1, 1, 102),
+        directory.attach_finish(ACCOUNT, DEVICE_A, [1; 16], 1, 102),
         Err(DirectoryError::AttachConflict),
         "the earlier challenge was invalidated"
     );
     assert_eq!(
-        directory.attach_finish(ACCOUNT, DEVICE_A, 2, 2, 102),
+        directory.attach_finish(ACCOUNT, DEVICE_A, [2; 16], 2, 102),
         Err(DirectoryError::AttachConflict),
         "the reserved generation must match"
     );
     assert_eq!(
-        directory.attach_finish(ACCOUNT, DEVICE_A, 2, second.reserved_generation, 200),
+        directory.attach_finish(ACCOUNT, DEVICE_A, [2; 16], second.reserved_generation, 200),
         Err(DirectoryError::AttachConflict),
         "expired"
     );
     assert_eq!(
-        directory.attach_finish(ACCOUNT, DEVICE_A, 2, second.reserved_generation, 150)?,
+        directory.attach_finish(ACCOUNT, DEVICE_A, [2; 16], second.reserved_generation, 150)?,
         1
     );
     assert_eq!(directory.session_generation(&ACCOUNT, &DEVICE_A), 1);
     assert_eq!(
-        directory.attach_finish(ACCOUNT, DEVICE_A, 2, 1, 151),
+        directory.attach_finish(ACCOUNT, DEVICE_A, [2; 16], 1, 151),
         Err(DirectoryError::AttachConflict),
         "no outstanding challenge"
     );
-    let third = directory.attach_begin(ACCOUNT, DEVICE_A, 3, 160)?;
+    let third = directory.attach_begin(ACCOUNT, DEVICE_A, [3; 16], 160)?;
     assert_eq!(third.reserved_generation, 2);
     directory.expire(230);
     assert_eq!(
-        directory.attach_finish(ACCOUNT, DEVICE_A, 3, 2, 231),
+        directory.attach_finish(ACCOUNT, DEVICE_A, [3; 16], 2, 231),
         Err(DirectoryError::AttachConflict)
     );
     assert_eq!(
-        directory.attach_finish([9; 32], DEVICE_A, 3, 2, 231),
+        directory.attach_finish([9; 32], DEVICE_A, [3; 16], 2, 231),
         Err(DirectoryError::HeadMismatch)
     );
     Ok(())
