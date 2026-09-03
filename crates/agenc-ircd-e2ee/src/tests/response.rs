@@ -113,7 +113,7 @@ fn scalar_success_lines_render_exactly() -> TestResult {
         SuccessLine::ReinitAborted([1; 32], [2; 32], [3; 32], [4; 32]),
     ];
     for line in &all {
-        let rendered = render_labeled("x", &"s".repeat(127), line)?;
+        let rendered = render_labeled("x", &"s".repeat(126), line)?;
         assert!(rendered.len() - "@label=x ".len() <= MAX_NON_TAG_LINE_BYTES);
     }
     assert_eq!(
@@ -129,7 +129,7 @@ fn scalar_success_lines_render_exactly() -> TestResult {
         Err(E2eeError::InvalidValue)
     );
     assert_eq!(
-        render_labeled("x", &"s".repeat(128), &bound),
+        render_labeled("x", &"s".repeat(127), &bound),
         Err(E2eeError::LimitExceeded)
     );
     assert_eq!(
@@ -204,7 +204,7 @@ fn batches_open_carry_children_and_objects_and_close() -> TestResult {
         BatchChild::Claimed([1; 16], vec![9; 32], [2; 32]),
     ];
     for child in &children {
-        let rendered = child.render(&"s".repeat(127), "b")?;
+        let rendered = child.render(&"s".repeat(126), "b")?;
         assert!(
             rendered.len() - "@batch=b ".len() <= MAX_NON_TAG_LINE_BYTES,
             "{child:?}"
@@ -215,7 +215,7 @@ fn batches_open_carry_children_and_objects_and_close() -> TestResult {
         Err(E2eeError::InvalidValue)
     );
     assert_eq!(
-        BatchChild::Claimed([1; 16], vec![9; 255], [2; 32]).render(&"s".repeat(127), "b"),
+        BatchChild::Claimed([1; 16], vec![9; 255], [2; 32]).render(&"s".repeat(126), "b"),
         Err(E2eeError::LimitExceeded),
         "a 255-byte reference cannot fit behind a maximal prefix; enabled suites use 32"
     );

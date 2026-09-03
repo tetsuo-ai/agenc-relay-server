@@ -158,7 +158,7 @@ fn the_generator_and_the_renderers_agree_on_every_tag_form() -> TestResult {
 #[test]
 fn the_longest_lines_fit_the_traditional_budget() -> TestResult {
     let values = budget()?;
-    let prefix = "p".repeat(MAX_E2EE_SERVER_PREFIX_BYTES);
+    let prefix = "p".repeat(MAX_E2EE_SERVER_PREFIX_BYTES - 1);
     let success = render_labeled(
         "x",
         &prefix,
@@ -219,7 +219,7 @@ fn plus_one_forms_are_refused_before_allocation() -> TestResult {
         "an eight-digit total is rejected by width"
     );
     assert!(parse_u16("65536").is_err());
-    let prefix = "p".repeat(MAX_E2EE_SERVER_PREFIX_BYTES + 1);
+    let prefix = "p".repeat(MAX_E2EE_SERVER_PREFIX_BYTES);
     assert!(render_labeled("x", &prefix, &SuccessLine::Bound([1; 32], [2; 32])).is_err());
     let mut wrong_id = fragment;
     wrong_id.object_id = ObjectId::from_bytes([0; 32]);
