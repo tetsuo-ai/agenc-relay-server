@@ -265,7 +265,7 @@ argv = ["cargo", "test", "-p", "agenc-ircd-federation-wire", "--all-features", "
 argv = ["cargo", "test", "-p", "agenc-ircd-domain", "--all-features", "--locked"]
 
 [[gate.stage-seven-implementation.command]]
-argv = ["cargo", "test", "-p", "agenc-ircd-storage", "--test", "federation_records", "--locked"]
+argv = ["cargo", "test", "-p", "agenc-ircd-storage", "--test", "stage_five", "--locked", "federation_records"]
 
 [[gate.stage-seven-implementation.command]]
 argv = ["cargo", "test", "-p", "agenc-ircd-crypto", "--all-features", "--locked"]

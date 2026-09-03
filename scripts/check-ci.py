@@ -202,7 +202,10 @@ REQUIRED_STAGE_SEVEN = (
     ("python3", "scripts/check-stage-seven.py", "self-test"),
     ("cargo", "test", "-p", "agenc-ircd-federation-wire", "--all-features", "--locked"),
     ("cargo", "test", "-p", "agenc-ircd-domain", "--all-features", "--locked"),
-    ("cargo", "test", "-p", "agenc-ircd-storage", "--test", "federation_records", "--locked"),
+    (
+        "cargo", "test", "-p", "agenc-ircd-storage",
+        "--test", "stage_five", "--locked", "federation_records",
+    ),
     ("cargo", "test", "-p", "agenc-ircd-crypto", "--all-features", "--locked"),
     ("bash", "scripts/run-stage-seven-model.sh"),
     ("bash", "scripts/run-stage-seven-transcripts.sh"),
