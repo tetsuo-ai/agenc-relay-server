@@ -14,7 +14,8 @@ PROFILE_PATH = "conformance/stage-five-storage-profile.toml"
 EXPECTED_MODULES = {
     "backup.rs", "codec.rs", "construction.rs", "construction_directory.rs",
     "construction_runtime.rs", "control.rs", "domain_records.rs", "engine.rs", "error.rs",
-    "fault.rs", "federation_records.rs", "initialize.rs", "integrity.rs", "lib.rs", "login_index.rs",
+    "fault.rs", "e2ee_records.rs",
+    "federation_records.rs", "initialize.rs", "integrity.rs", "lib.rs", "login_index.rs",
     "mutation.rs", "owner.rs", "platform.rs", "qualification.rs", "records.rs",
     "recovery.rs", "redb_store.rs", "restore_command.rs", "schema.rs", "sealed.rs",
 }
@@ -167,7 +168,7 @@ def main() -> None:
         if command == "check":
             validate_profile(load_profile(root / PROFILE_PATH))
             validate_sources(root)
-            print("Stage-05 storage profile: ok (24 modules, 2 fuzz targets)")
+            print("Stage-05 storage profile: ok (25 modules, 2 fuzz targets)")
         else:
             print(f"Stage-05 storage profile self-test: ok ({self_test(root)} rejection cases)")
     except (OSError, StageFiveError, tomllib.TOMLDecodeError) as error:

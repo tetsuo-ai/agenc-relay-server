@@ -804,6 +804,8 @@ fn validate_domain_body(table: TableId, record_kind: u16, body: &[u8]) -> Result
             .map(|_| ()),
         (TableId::ChannelName, 1) => ChannelNameRecordBody::decode(body).map(|_| ()),
         (TableId::E2eeState, 1) => E2eeRecoveryGate::decode(body).map(|_| ()),
+        (TableId::E2eeState, kind) => crate::e2ee_records::validate_state_body(kind, body),
+        (TableId::E2eeObject, 1) => crate::e2ee_records::validate_object_body(body),
         (TableId::Account, LIVE_RECORD_KIND) => AccountRecordBody::decode(body).map(|_| ()),
         (TableId::Session, LIVE_RECORD_KIND) => SessionRecordBody::decode(body).map(|_| ()),
         (TableId::Channel, LIVE_RECORD_KIND) => ChannelRecordBody::decode(body).map(|_| ()),

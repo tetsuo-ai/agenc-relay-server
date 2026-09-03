@@ -3532,16 +3532,18 @@ mod tests {
     }
 
     fn domain_plaintext(table: TableId, kind: u16) -> Result<Vec<u8>, StorageError> {
-        let body = if matches!(
+        let body = if table == TableId::E2eeState && kind != 1 {
+            crate::e2ee_records::fixtures::state_body(kind, 1)?
+        } else if table == TableId::E2eeObject {
+            crate::e2ee_records::fixtures::object_body(1)?
+        } else if matches!(
             table,
             TableId::FederationPeer
                 | TableId::FederationOrigin
                 | TableId::RequestResult
                 | TableId::EdgeOutbox
                 | TableId::EdgeProjection
-                | TableId::E2eeObject
-        ) || (table == TableId::E2eeState && kind != 1)
-        {
+        ) {
             crate::ProtocolRecordBody::new(table, kind, 1, vec![1])?.encode()?
         } else if kind == 1 {
             crate::domain_records::fixtures::live_body(table, 1)?

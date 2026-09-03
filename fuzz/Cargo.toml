@@ -118,5 +118,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "e2ee_fragment"
+path = "fuzz_targets/e2ee_fragment.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

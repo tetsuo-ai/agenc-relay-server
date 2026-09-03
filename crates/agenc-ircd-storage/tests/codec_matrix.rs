@@ -59,6 +59,12 @@ fn domain_body(table: TableId, kind: u16, byte: u8) -> Result<Vec<u8>, StorageEr
     if table == TableId::ChannelName && kind == 1 {
         return Ok(b"#channel".to_vec());
     }
+    if table == TableId::E2eeObject {
+        return agenc_ircd_storage::e2ee_records::fixtures::object_body(byte);
+    }
+    if table == TableId::E2eeState && kind != 1 {
+        return agenc_ircd_storage::e2ee_records::fixtures::state_body(kind, byte);
+    }
     if matches!(
         table,
         TableId::FederationPeer
@@ -66,8 +72,6 @@ fn domain_body(table: TableId, kind: u16, byte: u8) -> Result<Vec<u8>, StorageEr
             | TableId::RequestResult
             | TableId::EdgeOutbox
             | TableId::EdgeProjection
-            | TableId::E2eeObject
-            | TableId::E2eeState
     ) {
         ProtocolRecordBody::new(table, kind, 1, vec![byte])?.encode()
     } else {

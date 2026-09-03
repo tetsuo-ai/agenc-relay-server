@@ -39,6 +39,8 @@
 //! - [`envelope`]: application and Commit outer objects and the padding
 //!   arithmetic.
 //! - [`welcome`]: Welcome and staged ReInit wrappers and proof bundles.
+//! - [`wire`]: tokens, fragment tags, the carrier matrix, reassembly,
+//!   command and response productions, and reply codes.
 //! - [`profile`]: the exact capability value and ECAP tuple.
 //! - [`limits`]: the Section 16 constants.
 //!
@@ -81,6 +83,7 @@ pub mod sequencer;
 pub mod signature;
 pub mod tls;
 pub mod welcome;
+pub mod wire;
 
 pub use error::E2eeError;
 pub use object::{IrcWireObject, IrcWireObjectKind, ObjectId};

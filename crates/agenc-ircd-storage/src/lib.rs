@@ -9,6 +9,7 @@ mod construction_directory;
 mod construction_runtime;
 mod control;
 mod domain_records;
+pub mod e2ee_records;
 mod engine;
 mod error;
 mod fault;
