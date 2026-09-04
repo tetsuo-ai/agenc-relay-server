@@ -43,6 +43,9 @@ pub(super) struct BarrierState {
     pub(super) companion_generation: u64,
     /// The last companion position acknowledged.
     pub(super) companion_cursor: Option<(u64, [u8; 16])>,
+    /// A complete assembly whose parts are all durable, awaiting the apply
+    /// transaction the E2EE router joins with its companion writes.
+    pub(super) ready: bool,
 }
 
 impl BarrierState {
@@ -295,25 +298,40 @@ pub(super) fn send_companion_ack(
     }
 }
 
-/// A staged part committed: a complete set applies now.
-pub(super) fn part_committed(edge: &mut EdgeFederation, context: &mut StateCoreContext) {
+/// A staged part committed: a complete set is ready to apply once the E2EE
+/// router has produced the writes of its companion parts.
+pub(super) fn part_committed(edge: &mut EdgeFederation, _context: &mut StateCoreContext) {
     let complete = edge
         .barrier
         .open
         .as_ref()
         .is_some_and(|open| open.assembly.is_complete());
-    if !complete {
-        return;
-    }
-    if let Err(violation) = apply(edge, context) {
-        edge.fail_link(context, violation);
+    if complete {
+        edge.barrier.ready = true;
     }
 }
 
+/// The mutation identity of a complete barrier awaiting its apply, when
+/// the batch slot is free to take it.
+pub(super) fn ready_mutation(edge: &EdgeFederation) -> Option<[u8; 16]> {
+    if !edge.barrier.ready || edge.commit.is_some() {
+        return None;
+    }
+    edge.barrier
+        .open
+        .as_ref()
+        .map(|open| open.assembly.identity().mutation_id)
+}
+
 /// Applies the complete barrier in one transaction: every base event to
-/// the replica in index order, every companion part through the E2EE
-/// router, the receipt, both cursors, and the removal of the staged rows.
-fn apply(edge: &mut EdgeFederation, context: &mut StateCoreContext) -> Result<(), Violation> {
+/// the replica in index order, the E2EE router's rows for the companion
+/// parts, the receipt, both cursors, and the removal of the staged rows.
+pub(super) fn apply(
+    edge: &mut EdgeFederation,
+    context: &mut StateCoreContext,
+    companion_writes: Vec<AccountServiceDurableWrite>,
+) -> Result<(), Violation> {
+    edge.barrier.ready = false;
     let open = edge.barrier.open.take().ok_or(Violation::Consistency)?;
     let base_cursor = StreamCursor {
         generation: edge.replica.projection_generation(),
@@ -347,7 +365,9 @@ fn apply(edge: &mut EdgeFederation, context: &mut StateCoreContext) -> Result<()
         now.saturating_add(BARRIER_RETENTION_SECONDS),
     );
     let identity = *open.assembly.identity();
-    let (base_sequence, _, base_event) = partition.base_last;
+    // A stream position is (generation, sequence, event); the base cursor
+    // keeps the sequence and the event.
+    let (_, base_sequence, base_event) = partition.base_last;
     let cursor = Some((base_sequence, EventId::from_bytes(base_event)));
     let pending = PendingCommit::BarrierApplied {
         receipt: Box::new(receipt.clone()),
@@ -355,9 +375,15 @@ fn apply(edge: &mut EdgeFederation, context: &mut StateCoreContext) -> Result<()
         companion_last: partition.companion_last,
     };
     super::events::stage_rows(edge, context, cursor, pending, |edge, context, revision| {
-        apply_rows(
+        let mut writes = apply_rows(
             edge, context, revision, &identity, &receipt, &upserted, &removed,
-        )
+        );
+        writes.extend(
+            companion_writes
+                .into_iter()
+                .filter_map(|write| write.at_revision(revision).ok()),
+        );
+        writes
     })
 }
 

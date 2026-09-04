@@ -155,6 +155,15 @@ pub(crate) enum CarrierRoute {
     Close,
 }
 
+/// Where the session a committed registration grant opened is homed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SessionHome {
+    /// A connection of this node.
+    Local,
+    /// A virtual connection serving an edge client (spec 22.2).
+    RemoteEdge,
+}
+
 /// A delayed carrier line whose frames are now visible or whose failure is
 /// terminal for the transport.
 #[derive(Clone, Copy)]
@@ -1721,6 +1730,7 @@ impl AccountServiceCoordinator {
         context: &mut StateCoreContext,
         generation: ConnectionGeneration,
         user_id: agenc_ircd_types::UserId,
+        home: SessionHome,
     ) -> Result<(), RuntimeError> {
         let transaction_id = self
             .grant_consumptions
@@ -1745,19 +1755,26 @@ impl AccountServiceCoordinator {
         {
             return Err(RuntimeError::InvalidValue);
         }
-        let plan = context
-            .domain()
-            .plan_session_fresh_authentication(
-                user_id,
-                binding.account_id(),
-                session.generation(),
-                binding.authenticated_at,
-            )
-            .map_err(|_| RuntimeError::InvalidValue)?;
-        let fanout = FanoutRequest::new(Vec::new(), Vec::new())?;
-        context
-            .apply_ephemeral(plan, fanout)
-            .map_err(|_| RuntimeError::InvalidValue)?;
+        // The fresh-authentication window is an ephemeral session attribute
+        // that rewrites the session revision. A session homed on an edge
+        // learns its revision only from durable events, so the window is
+        // recorded for local connections alone; the remote grant keeps its
+        // proof on the virtual connection.
+        if home == SessionHome::Local {
+            let plan = context
+                .domain()
+                .plan_session_fresh_authentication(
+                    user_id,
+                    binding.account_id(),
+                    session.generation(),
+                    binding.authenticated_at,
+                )
+                .map_err(|_| RuntimeError::InvalidValue)?;
+            let fanout = FanoutRequest::new(Vec::new(), Vec::new())?;
+            context
+                .apply_ephemeral(plan, fanout)
+                .map_err(|_| RuntimeError::InvalidValue)?;
+        }
         let proof = binding.grant.into_fresh_authentication_after_commit();
         let credential_id = duplicate_credential_id(proof.credential_id_for_replacement());
         let connection = self

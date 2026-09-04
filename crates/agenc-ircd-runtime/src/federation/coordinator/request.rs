@@ -514,9 +514,15 @@ pub(super) fn open_session_with_writes(
     seed: SessionSeed,
     writes: Vec<AccountServiceDurableWrite>,
 ) -> Result<(), Violation> {
-    let account = seed
-        .account_id
-        .map(|account| (account, seed.account_session_generation.get(), 0));
+    // The result names the account's current revision; the edge's decoder
+    // requires it alongside the session generation (result.session_registered).
+    let account = seed.account_id.map(|account| {
+        let revision = context
+            .domain()
+            .account(account)
+            .map_or(0, |state| state.revision().get());
+        (account, seed.account_session_generation.get(), revision)
+    });
     let registered = SessionRegistered {
         session_id: seed.session_id,
         user_id: seed.user_id,

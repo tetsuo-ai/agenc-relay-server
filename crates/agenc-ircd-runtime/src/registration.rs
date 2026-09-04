@@ -424,6 +424,8 @@ impl RegistrationRouter {
         let mut outputs = e2ee.handle_frames(context, edge, frames);
         e2ee.apply_attachments(context, edge);
         e2ee.declare_origins(context, edge);
+        apply_ready_barrier(context, e2ee, edge);
+        outputs.extend(e2ee.barrier_outputs(edge));
         outputs.extend(e2ee.batch_applied_outputs());
         for output in outputs {
             let _sent = context.send_to(output.generation, output.frames);
@@ -1622,18 +1624,63 @@ impl RegistrationRouter {
         generation: ConnectionGeneration,
         message: &agenc_ircd_client_wire::ParsedMessage,
     ) {
-        if message.command() != "JOIN" {
-            return;
+        match message.command() {
+            "JOIN" => {
+                let Some(edge) = self.edge.as_mut() else {
+                    return;
+                };
+                let Some(channels) = message.middle().first() else {
+                    return;
+                };
+                for name in channels.split(',') {
+                    edge.request_names(context, generation, name);
+                }
+            }
+            "CHANCTL" => self.note_channel_setting_updated(context, generation, message),
+            _ => {}
         }
-        let Some(edge) = self.edge.as_mut() else {
+    }
+
+    /// The `NOTE CHANCTL UPDATED` a committed channel setting earns on its
+    /// requesting connection; the coordinator renders it only for local
+    /// origins.
+    fn note_channel_setting_updated(
+        &self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+        message: &agenc_ircd_client_wire::ParsedMessage,
+    ) {
+        let Some(state) = self.connections.get(&generation) else {
             return;
         };
-        let Some(channels) = message.middle().first() else {
+        let capabilities = state.registration.capability_state();
+        if !capabilities.enabled("standard-replies") {
+            return;
+        }
+        let Some(name) = message
+            .middle()
+            .get(1)
+            .and_then(|channel| agenc_ircd_types::ChannelName::parse(channel).ok())
+        else {
             return;
         };
-        for name in channels.split(',') {
-            edge.request_names(context, generation, name);
-        }
+        let Ok(description) =
+            agenc_ircd_client_wire::SafeReplyDescription::new("Channel setting updated")
+        else {
+            return;
+        };
+        let Ok(frame) = agenc_ircd_client_wire::standard_reply(
+            capabilities,
+            &self.config.server_prefix,
+            agenc_ircd_client_wire::ReplyKind::Note,
+            "CHANCTL",
+            agenc_ircd_types::PublicErrorCode::UPDATED,
+            &[agenc_ircd_client_wire::SafeReplyContext::Channel(&name)],
+            description,
+        ) else {
+            return;
+        };
+        let _sent = self.send_one(context, generation, frame);
     }
 
     fn reserve_nickname(
@@ -2347,7 +2394,12 @@ impl RegistrationRouter {
             let account_committed = !authenticated
                 || self.accounts.as_mut().is_some_and(|accounts| {
                     accounts
-                        .registration_committed(context, generation, bound.user_id)
+                        .registration_committed(
+                            context,
+                            generation,
+                            bound.user_id,
+                            crate::account_service::SessionHome::Local,
+                        )
                         .is_ok()
                 });
             let Some(mut state) = self.connections.remove(&generation) else {
@@ -2765,6 +2817,8 @@ impl CommandRouter for RegistrationRouter {
                 let _sent = context.send_to(output.generation, output.frames);
             }
         }
+        // A committed barrier part may have completed the set.
+        self.drive_e2ee(context);
     }
 
     fn crypto_completed(
@@ -3223,6 +3277,26 @@ fn edge_account_answer(
         frames.push(crate::account_service::account_created_note(prefix, account_id).ok()?);
     }
     Some((frames, ResultClass::Ok))
+}
+
+/// Applies a complete cross-profile barrier: both halves commit in one
+/// transaction, the router's companion rows joining the base apply.
+fn apply_ready_barrier(
+    context: &mut StateCoreContext,
+    e2ee: &mut crate::e2ee::edge::E2eeEdge,
+    edge: &mut crate::federation::edge::EdgeFederation,
+) {
+    let Some(mutation_id) = edge.barrier_ready() else {
+        return;
+    };
+    match e2ee.prepare_barrier(context, edge, mutation_id) {
+        Ok((writes, rendered)) => {
+            if edge.apply_barrier(context, writes) {
+                e2ee.barrier_staged(mutation_id, rendered);
+            }
+        }
+        Err(_) => edge.fail_companion_link(context),
+    }
 }
 
 #[cfg(test)]

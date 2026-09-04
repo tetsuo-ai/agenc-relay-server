@@ -294,6 +294,17 @@ const fn history_value(history: HistoryPolicy) -> u64 {
     }
 }
 
+/// The `channel_settings` setting kind of a history policy: the registered
+/// history value plus one, the inverse of `history_of_value(kind - 1)`.
+pub(crate) const fn history_setting_kind(history: HistoryPolicy) -> u16 {
+    match history {
+        HistoryPolicy::Off => 1,
+        HistoryPolicy::OneHour => 2,
+        HistoryPolicy::TwentyFourHours => 3,
+        HistoryPolicy::SevenDays => 4,
+    }
+}
+
 pub(crate) const fn history_of_value(value: u64) -> Option<HistoryPolicy> {
     match value {
         0 => Some(HistoryPolicy::Off),
@@ -301,6 +312,46 @@ pub(crate) const fn history_of_value(value: u64) -> Option<HistoryPolicy> {
         2 => Some(HistoryPolicy::TwentyFourHours),
         3 => Some(HistoryPolicy::SevenDays),
         _ => None,
+    }
+}
+
+/// Fills the route binding of a bound channel detail: the domain records
+/// only the content policy, and the binding is the channel route
+/// identifier over the network and the channel instance (companion 9.2),
+/// which the edge decoder requires beside `e2ee_bound`.
+pub(crate) fn fill_route_binding(
+    network_id: &agenc_ircd_types::NetworkId,
+    detail: &mut ChannelDetailRecord,
+) {
+    if detail.content_policy != ContentPolicy::E2eeBound || detail.e2ee_route_binding.is_some() {
+        return;
+    }
+    detail.e2ee_route_binding = agenc_ircd_e2ee::route::channel_route_binding(
+        network_id.as_bytes(),
+        detail.channel_id.as_bytes(),
+    )
+    .ok();
+}
+
+/// Fills the route binding of every bound channel detail a projection
+/// delta carries, events and standing entries alike.
+pub(crate) fn fill_projection_bindings(
+    network_id: &agenc_ircd_types::NetworkId,
+    edges: &mut [agenc_ircd_domain::federation::EdgeDelta],
+) {
+    for delta in edges.iter_mut() {
+        for event in &mut delta.events {
+            if let agenc_ircd_domain::federation::ProjectedEvent::ChannelVisible(detail)
+            | agenc_ircd_domain::federation::ProjectedEvent::ChannelPolicyChanged(detail) = event
+            {
+                fill_route_binding(network_id, detail);
+            }
+        }
+        for record in &mut delta.upserts {
+            if let agenc_ircd_domain::federation::ProjectionRecord::ChannelDetail(detail) = record {
+                fill_route_binding(network_id, detail);
+            }
+        }
     }
 }
 

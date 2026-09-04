@@ -26,7 +26,7 @@ use agenc_ircd_federation_wire::{
     split_fragments,
 };
 use agenc_ircd_types::{
-    ConnectionId, EventId, NetworkId, OriginId, RecoveryEpoch, RequestId, ServerId,
+    AccountId, ConnectionId, EventId, NetworkId, OriginId, RecoveryEpoch, RequestId, ServerId,
     ServerIncarnation, SessionId, UserId,
 };
 
@@ -119,6 +119,8 @@ struct ConnectionOrigin {
     object_id: [u8; 32],
     previous_object_id: [u8; 32],
     session: Option<(SessionId, UserId)>,
+    /// The account and its session generation the coordinator registered.
+    account: Option<(AccountId, u64)>,
     acked_generation: Option<u64>,
     deleted: bool,
 }
@@ -356,7 +358,10 @@ impl EdgeFederation {
             session: origin
                 .session
                 .map(|(session, user)| (*session.as_bytes(), *user.as_bytes())),
-            account: None,
+            account: origin.account.and_then(|(account, generation)| {
+                let text: [u8; 24] = account.to_text().as_bytes().try_into().ok()?;
+                Some((text, generation))
+            }),
         })
     }
 
@@ -425,6 +430,43 @@ impl EdgeFederation {
                 false
             }
         }
+    }
+
+    /// The complete barrier awaiting its apply transaction, when the batch
+    /// slot can take it; the E2EE router answers with its companion writes.
+    #[must_use]
+    pub fn barrier_ready(&self) -> Option<[u8; 16]> {
+        barrier::ready_mutation(self)
+    }
+
+    /// Applies the complete barrier with the E2EE router's rows in the same
+    /// transaction; a violation closes the link and returns `false`.
+    pub(crate) fn apply_barrier(
+        &mut self,
+        context: &mut StateCoreContext,
+        companion_writes: Vec<crate::state_core::durable::AccountServiceDurableWrite>,
+    ) -> bool {
+        match barrier::apply(self, context, companion_writes) {
+            Ok(()) => true,
+            Err(violation) => {
+                self.fail_link(context, violation);
+                false
+            }
+        }
+    }
+
+    /// Whether the barrier of `mutation_id` applied and its receipt stands.
+    #[must_use]
+    pub fn barrier_applied(&self, mutation_id: &[u8; 16]) -> bool {
+        self.barrier.applied.contains_key(mutation_id)
+    }
+
+    /// Records the companion delivery position the E2EE router has applied
+    /// and acknowledged, so a barrier's companion parts verify against the
+    /// live stream rather than a cursor of their own.
+    pub fn note_companion_delivery(&mut self, generation: u64, cursor: Option<(u64, [u8; 16])>) {
+        self.barrier.companion_generation = generation;
+        self.barrier.companion_cursor = cursor;
     }
 
     /// The companion delivery generation and last acknowledged position the
@@ -817,6 +859,7 @@ impl EdgeFederation {
                 object_id: [0; 32],
                 previous_object_id: [0; 32],
                 session: None,
+                account: None,
                 acked_generation: None,
                 deleted: false,
             },

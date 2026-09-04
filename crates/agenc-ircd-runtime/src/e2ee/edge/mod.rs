@@ -134,6 +134,10 @@ pub(crate) enum PendingCommit {
     Ready,
 }
 
+/// The companion parts of one open barrier by part index, each with its
+/// payload when the event named one.
+type BarrierParts = BTreeMap<u16, (events::OpenEvent, Option<Vec<u8>>)>;
+
 /// The edge E2EE router.
 pub struct E2eeEdge {
     config: E2eeEdgeConfig,
@@ -154,6 +158,11 @@ pub struct E2eeEdge {
     events_in: BTreeMap<[u8; 16], events::OpenEvent>,
     channel_names: BTreeMap<ChannelInstanceId, String>,
     attachments: Vec<(ConnectionGeneration, [u8; 16], u64)>,
+    /// Companion parts of open cross-profile barriers by mutation and part
+    /// index, applied when the base edge's barrier transaction stages.
+    barrier_parts: BTreeMap<[u8; 16], BarrierParts>,
+    /// Rendered lines of a staged barrier, released once its receipt stands.
+    barrier_pending: Option<([u8; 16], Vec<ClientOutput>)>,
     counters: E2eeEdgeCounters,
 }
 
@@ -195,6 +204,8 @@ impl E2eeEdge {
             events_in: BTreeMap::new(),
             channel_names: BTreeMap::new(),
             attachments: Vec::new(),
+            barrier_parts: BTreeMap::new(),
+            barrier_pending: None,
             counters: E2eeEdgeCounters::default(),
         }
     }
@@ -230,6 +241,8 @@ impl E2eeEdge {
         self.snapshot = None;
         self.queued.clear();
         self.events_in.clear();
+        self.barrier_parts.clear();
+        self.barrier_pending = None;
         for origin in self.origins.values_mut() {
             origin.declared = None;
             origin.acked = None;

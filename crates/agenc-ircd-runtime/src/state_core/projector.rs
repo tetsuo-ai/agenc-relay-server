@@ -170,6 +170,7 @@ impl FederationProjector {
             .index
             .derive(domain, plan, mutation)
             .map_err(|_| RuntimeError::InvalidValue)?;
+        crate::federation::codec::fill_projection_bindings(&self.network_id, &mut projection.edges);
         if let Some(binding) = binding {
             append_completion(
                 &mut projection,
@@ -212,10 +213,11 @@ impl FederationProjector {
         plan: &MutationPlan,
         mutation: &MutationContext,
     ) -> Result<BTreeMap<ServerId, (usize, u64)>, RuntimeError> {
-        let projection = self
+        let mut projection = self
             .index
             .derive(domain, plan, mutation)
             .map_err(|_| RuntimeError::InvalidValue)?;
+        crate::federation::codec::fill_projection_bindings(&self.network_id, &mut projection.edges);
         let mut counts = BTreeMap::new();
         let placeholder = CrossProfilePart {
             mutation_id: [0; 16],

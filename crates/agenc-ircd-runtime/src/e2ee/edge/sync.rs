@@ -397,6 +397,7 @@ impl E2eeEdge {
         frames: Vec<CompanionFrame>,
     ) -> Vec<ClientOutput> {
         let mut outputs = Vec::new();
+        self.adopt_barrier_cursor(edge);
         for frame in frames {
             match self.handle_frame(context, edge, frame) {
                 Ok(more) => outputs.extend(more),

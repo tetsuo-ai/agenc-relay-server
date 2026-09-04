@@ -119,7 +119,12 @@ pub(crate) fn batch_settled(
     federation: &mut FederationCoordinator,
 ) {
     if let Some((generation, user_id)) = federation.take_committed_grant() {
-        let _committed = accounts.registration_committed(context, generation, user_id);
+        let _committed = accounts.registration_committed(
+            context,
+            generation,
+            user_id,
+            crate::account_service::SessionHome::RemoteEdge,
+        );
     }
     if let Some(generation) = federation.take_rejected_grant() {
         let _rejected = accounts.registration_rejected(context, generation);

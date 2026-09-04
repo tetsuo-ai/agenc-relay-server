@@ -527,7 +527,7 @@ fn convert_registered_command(
     kind: RegisteredCommandKind,
     message: &ParsedMessage,
 ) -> Result<ConvertedCommand, RuntimeError> {
-    match crate::command_convert::convert(context.domain(), kind, message) {
+    match crate::command_convert::convert(context.domain(), context.domain(), kind, message) {
         Ok(command) => Ok(ConvertedCommand::Ready(command)),
         Err(RuntimeError::InvalidValue | RuntimeError::LimitExceeded) => {
             let (error, silent, result) =
@@ -904,6 +904,7 @@ fn execute_session_command(
     };
     let render_command = match reply {
         Some(reply) => crate::command_convert::convert(
+            context.domain(),
             context.domain(),
             reply.request.kind,
             reply.request.message,
@@ -1375,7 +1376,12 @@ fn complete_external_plan(
     requests: &[ExternalInputRequest],
 ) -> Result<PlannedCommand, SessionCommandError> {
     let retry = retry.ok_or(RuntimeError::InvalidValue)?;
-    let command = crate::command_convert::convert(context.domain(), retry.kind, retry.message)?;
+    let command = crate::command_convert::convert(
+        context.domain(),
+        context.domain(),
+        retry.kind,
+        retry.message,
+    )?;
     let authorized = match authorize_command(context, bound, command, admission) {
         Ok(authorized) => authorized,
         Err(AuthorizationError::Rejected(failure)) => {
@@ -1395,8 +1401,12 @@ fn complete_external_plan(
             .map(PlannedCommand::Ready)
             .map_err(domain_plan_error);
     }
-    let render_command =
-        crate::command_convert::convert(context.domain(), retry.kind, retry.message)?;
+    let render_command = crate::command_convert::convert(
+        context.domain(),
+        context.domain(),
+        retry.kind,
+        retry.message,
+    )?;
     Ok(PlannedCommand::Crypto(Box::new(DeferredPlan {
         authorized,
         external,

@@ -167,6 +167,7 @@ impl E2eeEdge {
         if let Some(mutation_id) = optional::<16>(event.cross_profile_mutation_id.as_slice()) {
             return self.barrier_part(context, edge, open, payload, mutation_id);
         }
+        self.adopt_barrier_cursor(edge);
         if self.delivery.generation != open.position.delivery_generation
             || open.position.delivery_sequence != self.delivery.next_sequence()
         {
@@ -227,10 +228,113 @@ impl E2eeEdge {
                 .as_ref()
                 .map_or(0, |bytes| u32::try_from(bytes.len()).unwrap_or(u32::MAX)),
         };
+        edge.note_companion_delivery(self.delivery.generation, self.delivery.cursor);
+        let part_index = part.part_index;
         if !edge.companion_barrier_part(context, part) {
             return Err(E2eeReplyCode::Syncing.into());
         }
+        self.barrier_parts
+            .entry(mutation_id)
+            .or_default()
+            .insert(part_index, (open, payload));
         Ok(Vec::new())
+    }
+
+    /// The rows and rendered lines of the companion parts of a complete
+    /// barrier, applied to the route table now so the base edge can write
+    /// them in the barrier's apply transaction (spec 20.8).
+    pub(crate) fn prepare_barrier(
+        &mut self,
+        context: &mut StateCoreContext,
+        edge: &EdgeFederation,
+        mutation_id: [u8; 16],
+    ) -> Result<
+        (
+            Vec<crate::state_core::durable::AccountServiceDurableWrite>,
+            Vec<ClientOutput>,
+        ),
+        E2eeReplyCode,
+    > {
+        self.prepare_barrier_parts(context, edge, mutation_id)
+            .map_err(|refusal| refusal.code)
+    }
+
+    fn prepare_barrier_parts(
+        &mut self,
+        context: &mut StateCoreContext,
+        edge: &EdgeFederation,
+        mutation_id: [u8; 16],
+    ) -> Result<
+        (
+            Vec<crate::state_core::durable::AccountServiceDurableWrite>,
+            Vec<ClientOutput>,
+        ),
+        Refusal,
+    > {
+        let parts = self.barrier_parts.remove(&mutation_id).unwrap_or_default();
+        let mut writes = Vec::new();
+        let mut outputs = Vec::new();
+        for (_, (open, payload)) in parts {
+            let event = &open.event;
+            match event.event_kind {
+                IrcFederationEventKind::RouteStateChanged => {
+                    let bytes = payload.as_deref().ok_or(E2eeReplyCode::InvalidFragment)?;
+                    writes.push(self.route_changed(bytes)?);
+                }
+                IrcFederationEventKind::RouteStateHidden => {
+                    let conversation = optional::<32>(event.conversation_id.as_slice())
+                        .ok_or(E2eeReplyCode::InvalidFragment)?;
+                    if let Some(write) = self.route_hidden(context, conversation) {
+                        writes.push(write);
+                    }
+                }
+                IrcFederationEventKind::RequestCompleted => {}
+                _ => outputs.extend(self.fanout(context, edge, &open, payload.as_deref())?),
+            }
+            if let Some(request_id) = self.completion_arrived(event.event_id) {
+                outputs.extend(self.render_ready(context, request_id)?);
+            }
+        }
+        Ok((writes, outputs))
+    }
+
+    /// Holds the rendered lines of a barrier the base edge staged.
+    pub fn barrier_staged(&mut self, mutation_id: [u8; 16], outputs: Vec<ClientOutput>) {
+        self.barrier_pending = Some((mutation_id, outputs));
+    }
+
+    /// Releases the lines of a barrier whose receipt now stands, and adopts
+    /// the companion position it advanced.
+    pub fn barrier_outputs(&mut self, edge: &EdgeFederation) -> Vec<ClientOutput> {
+        self.adopt_barrier_cursor(edge);
+        let applied = self
+            .barrier_pending
+            .as_ref()
+            .is_some_and(|(mutation_id, _)| edge.barrier_applied(mutation_id));
+        if !applied {
+            return Vec::new();
+        }
+        self.counters.events_applied = self.counters.events_applied.saturating_add(1);
+        self.barrier_pending
+            .take()
+            .map_or_else(Vec::new, |(_, outputs)| outputs)
+    }
+
+    /// Adopts the companion position a committed cross-profile barrier
+    /// advanced on the base edge, which applied those parts itself.
+    pub(super) fn adopt_barrier_cursor(&mut self, edge: &EdgeFederation) {
+        let (generation, cursor) = edge.companion_cursor();
+        if generation != self.delivery.generation {
+            return;
+        }
+        if let Some((sequence, event_id)) = cursor
+            && self
+                .delivery
+                .cursor
+                .is_none_or(|(applied, _)| sequence > applied)
+        {
+            self.delivery.cursor = Some((sequence, event_id));
+        }
     }
 
     /// Applies one ordinary event: route projection, fanout, coverage, and
@@ -258,12 +362,13 @@ impl E2eeEdge {
                     writes.push(write);
                 }
             }
-            IrcFederationEventKind::RequestCompleted => {
-                if let Some(request_id) = self.completion_arrived(event.event_id) {
-                    outputs.extend(self.render_ready(context, request_id)?);
-                }
-            }
+            IrcFederationEventKind::RequestCompleted => {}
             _ => outputs.extend(self.fanout(context, edge, &open, payload.as_deref())?),
+        }
+        // The home copy of a semantic event is its request's completion; a
+        // generic completion is a `request_completed` of its own (12.5).
+        if let Some(request_id) = self.completion_arrived(event.event_id) {
+            outputs.extend(self.render_ready(context, request_id)?);
         }
         let position = open.position;
         self.delivery.advance(position);

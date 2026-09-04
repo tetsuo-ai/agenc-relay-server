@@ -571,7 +571,14 @@ fn assemble(
         retain_until,
     )?;
     writes.push(replay_write);
-    writes.append(&mut outcome.writes);
+    // An operation may retain the same object it also returns as a
+    // response (an attach challenge, a delivered mailbox item); one batch
+    // puts each object row once.
+    for write in outcome.writes.drain(..) {
+        if !writes.iter().any(|existing| existing.same_put(&write)) {
+            writes.push(write);
+        }
+    }
     let mut effects = outcome.effects;
     let request_object_id = decoded.request_object_id;
     let stored = StoredResult {

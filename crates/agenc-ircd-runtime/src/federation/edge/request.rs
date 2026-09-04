@@ -157,7 +157,12 @@ pub(super) fn declare_origin(
             session_id,
             user_id,
         }),
-        account: None::<OriginAccount>,
+        account: origin
+            .account
+            .map(|(account_id, account_session_generation)| OriginAccount {
+                account_id,
+                account_session_generation,
+            }),
         connection_nonce: origin.connection_nonce,
     };
     let Ok(encoded) = record
@@ -450,7 +455,9 @@ pub(super) fn send_command(
         queue.push_back(DeferredCommand { kind, message });
         return Ok(());
     }
-    let Ok(command) = crate::command_convert::convert(context.domain(), kind, &message) else {
+    let Ok(command) =
+        crate::command_convert::convert(context.domain(), &edge.replica, kind, &message)
+    else {
         return Err((message, DomainError::InvalidArgument));
     };
     let operation = match operation_of(edge, session_id, user_id, &message, &command) {
@@ -475,6 +482,53 @@ fn session_revision(edge: &EdgeFederation, user_id: UserId) -> Result<u64, Domai
         .session(user_id)
         .map(|session| session.session_revision.get())
         .ok_or(DomainError::RegistrationRequired)
+}
+
+/// Owner-controlled channel state changes: registration, unregistration,
+/// and the history policy, each pinned to the replica's channel revision.
+fn channel_control_operation(
+    edge: &EdgeFederation,
+    session_id: SessionId,
+    command: agenc_ircd_domain::ChannelCommand,
+) -> Result<FederatedOperation, DomainError> {
+    use agenc_ircd_domain::ChannelCommand;
+    let channel_id = match command {
+        ChannelCommand::Register(channel_id)
+        | ChannelCommand::Unregister(channel_id)
+        | ChannelCommand::History(channel_id, _) => channel_id,
+    };
+    let expected_channel_revision = edge
+        .replica
+        .channel(channel_id)
+        .map(|channel| channel.channel_revision.get())
+        .ok_or(DomainError::NotFound)?;
+    Ok(match command {
+        ChannelCommand::Register(_) => FederatedOperation::ChannelRegister {
+            session_id,
+            channel_id,
+            expected_channel_revision,
+        },
+        ChannelCommand::Unregister(_) => FederatedOperation::ChannelUnregister {
+            session_id,
+            channel_id,
+            expected_channel_revision,
+        },
+        ChannelCommand::History(_, policy) => FederatedOperation::ChannelSettings {
+            session_id,
+            channel_id,
+            expected_channel_revision,
+            setting_kind: crate::federation::codec::history_setting_kind(policy),
+        },
+    })
+}
+
+impl crate::command_convert::ChannelResolver for agenc_ircd_domain::federation::EdgeReplica {
+    fn channel_id_of(
+        &self,
+        name: &agenc_ircd_domain::ChannelNameValue,
+    ) -> Option<agenc_ircd_types::ChannelInstanceId> {
+        self.channel_by_name(name).map(|channel| channel.channel_id)
+    }
 }
 
 fn channel_of(
@@ -523,6 +577,9 @@ fn operation_of(
                 expected_session_revision: session_revision(edge, user_id)?,
                 targets: joins,
             })
+        }
+        CanonicalCommandView::Channel(command) => {
+            channel_control_operation(edge, session_id, command)
         }
         CanonicalCommandView::Part(channels, reason) => {
             let mut ids = Vec::new();
@@ -954,6 +1011,9 @@ fn completed_request(edge: &mut EdgeFederation, request_id: RequestId) -> Vec<Ed
         ) => {
             if let Some(origin) = edge.origins.get_mut(&generation) {
                 origin.session = Some((registered.session_id, registered.user_id));
+                origin.account = registered
+                    .account
+                    .map(|(account, generation, _)| (account, generation));
             }
             let presentation = nickname.presentation().to_owned();
             edge.nicknames.insert(registered.user_id, nickname);

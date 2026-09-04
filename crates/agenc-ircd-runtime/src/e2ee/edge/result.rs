@@ -19,7 +19,7 @@ use agenc_ircd_e2ee::wire::fragment::{FragmentTag, fragment_object};
 use agenc_ircd_e2ee::wire::reply::E2eeReplyCode;
 use agenc_ircd_e2ee::wire::response::{
     BatchChild, BatchOpener, EmptyGroupKind, PendingKind, StoreKind, SuccessLine, render_broadcast,
-    render_eobject, render_fail, render_labeled,
+    render_eobject, render_fail, render_labeled, render_labeled_fail,
 };
 
 use super::router::{Refusal, Resolved};
@@ -374,9 +374,12 @@ impl E2eeEdge {
                     .then(|| agenc_ircd_e2ee::wire::tokens::base64url_encode(copied));
                 let body =
                     code.render_fail(command_name(&pending.command), context_token.as_deref());
-                Ok(vec![
-                    render_fail(&server, &body).map_err(|_| E2eeReplyCode::InvalidFragment)?,
-                ])
+                let rendered = match label {
+                    Some(label) => render_labeled_fail(label, &server, &body),
+                    None => render_fail(&server, &body),
+                }
+                .map_err(|_| E2eeReplyCode::InvalidFragment)?;
+                Ok(vec![rendered])
             }
             ResultValue::Empty if result.kind == IrcFederationResultKind::AcceptedEvent => {
                 Ok(Vec::new())
@@ -410,10 +413,7 @@ impl E2eeEdge {
             .fill_exact(&mut scope)
             .map_err(|_| E2eeReplyCode::RateLimited)?;
         self.counters.results_rendered = self.counters.results_rendered.saturating_add(0);
-        let batch_id = format!(
-            "e2ee-{}",
-            agenc_ircd_e2ee::wire::tokens::base64url_encode(&scope)
-        );
+        let batch_id = batch_id_for(&scope);
         let first = result
             .descriptors
             .first()
@@ -577,4 +577,15 @@ fn metadata_child(value: &ResultValue) -> Option<BatchChild> {
         ResultValue::Quad(a, b, c, d) => BatchChild::Aborted(*a, *b, *c, *d),
         _ => return None,
     })
+}
+
+/// The batch identifier of one response scope: `batch-id` admits letters,
+/// digits, and `-` only (11.7), so the scope bytes render as hex.
+fn batch_id_for(scope: &[u8; 16]) -> String {
+    let mut id = String::with_capacity(37);
+    id.push_str("e2ee-");
+    for byte in scope {
+        id.push_str(&format!("{byte:02x}"));
+    }
+    id
 }

@@ -955,9 +955,20 @@ fn registration_config(
             seed,
             reconstruction,
         )?)),
+        // An edge advertises the coordinator's recovery epoch: the sealed
+        // account envelopes its clients build bind to the account service
+        // that opens them (spec 22.2).
         NodeRole::Edge => AccountServiceRole::Advertised {
             creation_policy: creation_policy(config, secrets)?,
-            recovery_epoch: seed.storage().recovery_epoch(),
+            recovery_epoch: config
+                .federation
+                .peers
+                .iter()
+                .find(|peer| peer.enabled && peer.role == NodeRole::Coordinator)
+                .map_or_else(
+                    || seed.storage().recovery_epoch(),
+                    |peer| peer.recovery_epoch,
+                ),
         },
     };
     let access_token = secrets

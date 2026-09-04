@@ -159,6 +159,16 @@ fn principal_of(
         })
         .transpose()
         .map_err(|_| Violation::Codec)?;
+    // A declared account must be the one the live session authenticated;
+    // an unauthenticated declaration may omit it.
+    if let Some((account_id, _)) = account {
+        let live_account = session
+            .and_then(|(_, user_id)| context.domain().session(user_id))
+            .and_then(|live| live.account_id());
+        if live_account != Some(account_id) {
+            return Err(Violation::Origin);
+        }
+    }
     Ok(OriginPrincipal { session, account })
 }
 

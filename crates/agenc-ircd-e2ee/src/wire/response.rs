@@ -299,6 +299,19 @@ pub fn render_fail(server: &str, fail_body: &str) -> Result<String, E2eeError> {
     finish_line(None, server, fail_body)
 }
 
+/// Renders the labeled `FAIL` line a failed result earns on the requesting
+/// connection (11.7: failure gets one labeled `FAIL`).
+pub fn render_labeled_fail(
+    label: &str,
+    server: &str,
+    fail_body: &str,
+) -> Result<String, E2eeError> {
+    if !is_safe_label(label) {
+        return Err(E2eeError::InvalidValue);
+    }
+    finish_line(Some(&format!("label={label}")), server, fail_body)
+}
+
 /// The object batch opener.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BatchOpener {

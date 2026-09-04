@@ -495,6 +495,16 @@ fn encode_entry(
     generation: u64,
     record: &ProjectionRecord,
 ) -> Result<Vec<u8>, Violation> {
+    let filled;
+    let record = match record {
+        ProjectionRecord::ChannelDetail(detail) => {
+            let mut detail = detail.clone();
+            crate::federation::codec::fill_route_binding(&network_id, &mut detail);
+            filled = ProjectionRecord::ChannelDetail(detail);
+            &filled
+        }
+        other => other,
+    };
     let arm = projection_arm_object(record).map_err(|_| Violation::Codec)?;
     let entry = ProjectionEntryHeader {
         network_id,
