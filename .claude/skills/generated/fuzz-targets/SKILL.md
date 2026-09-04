@@ -1,11 +1,11 @@
 ---
 name: fuzz-targets
-description: "Skill for the Fuzz_targets area of agenc-ircd. 65 symbols across 8 files."
+description: "Skill for the Fuzz_targets area of agenc-ircd. 68 symbols across 10 files."
 ---
 
 # Fuzz_targets
 
-65 symbols | 8 files | Cohesion: 66%
+68 symbols | 10 files | Cohesion: 66%
 
 ## When to Use
 
@@ -23,8 +23,10 @@ description: "Skill for the Fuzz_targets area of agenc-ircd. 65 symbols across 8
 | `crates/agenc-ircd-runtime/src/command_convert.rs` | convert, every_state_independent_public_family_converts_to_its_domain_kind, channel_mode_list_and_multi_change_remain_distinct, channel_key_modes_enforce_secret_bounds_and_track_each_parameter, converted (+2) |
 | `crates/agenc-ircd-client-wire/src/text.rs` | parse_u16_decimal, parse_u32_decimal, parse_u64_decimal, parse_decimal, parse_fragment_decimal (+1) |
 | `fuzz/fuzz_targets/websocket.rs` | exercise_fragmented_sequence, assert_control_event, exercise_arbitrary_frame, exercise_oversized_message, data_opcode (+1) |
-| `crates/agenc-ircd-client-wire/src/registration_command.rs` | validate_post_registration_command, validate_local_information |
+| `crates/agenc-ircd-client-wire/src/registration_command.rs` | validate_post_registration_command, validate_local_information, validate_account_length |
 | `crates/agenc-ircd-client-wire/src/render.rs` | measure |
+| `crates/agenc-ircd-runtime/src/federation/codec/results.rs` | reply_object |
+| `crates/agenc-ircd-runtime/src/federation/coordinator/query.rs` | measure |
 
 ## Entry Points
 
@@ -33,8 +35,8 @@ Start here when exploring this area:
 - **`new`** (Function) — `crates/agenc-ircd-client-wire/src/capability.rs:35`
 - **`try_clone`** (Function) — `crates/agenc-ircd-client-wire/src/capability.rs:78`
 - **`apply_profile`** (Function) — `crates/agenc-ircd-client-wire/src/capability.rs:369`
-- **`measure`** (Function) — `crates/agenc-ircd-client-wire/src/render.rs:374`
-- **`validate_post_registration_command`** (Function) — `crates/agenc-ircd-client-wire/src/registration_command.rs:406`
+- **`measure`** (Function) — `crates/agenc-ircd-client-wire/src/render.rs:383`
+- **`reply_object`** (Function) — `crates/agenc-ircd-runtime/src/federation/codec/results.rs:266`
 
 ## Key Symbols
 
@@ -43,7 +45,8 @@ Start here when exploring this area:
 | `new` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 35 |
 | `try_clone` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 78 |
 | `apply_profile` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 369 |
-| `measure` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 374 |
+| `measure` | Function | `crates/agenc-ircd-client-wire/src/render.rs` | 383 |
+| `reply_object` | Function | `crates/agenc-ircd-runtime/src/federation/codec/results.rs` | 266 |
 | `validate_post_registration_command` | Function | `crates/agenc-ircd-client-wire/src/registration_command.rs` | 406 |
 | `convert` | Function | `crates/agenc-ircd-runtime/src/command_convert.rs` | 19 |
 | `parse_u16_decimal` | Function | `crates/agenc-ircd-client-wire/src/text.rs` | 230 |
@@ -59,7 +62,6 @@ Start here when exploring this area:
 | `copy_strings` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 674 |
 | `copy_specs` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 685 |
 | `profile_does_not_retain_caller_vector_headroom` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 709 |
-| `capability_state_covers_atomic_negotiation_and_profile_changes` | Function | `crates/agenc-ircd-client-wire/src/capability.rs` | 758 |
 
 ## Execution Flows
 
@@ -71,14 +73,14 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Validate_ | 14 calls |
-| Tests | 13 calls |
+| Validate_ | 15 calls |
+| Tests | 14 calls |
 | State_core | 4 calls |
-| Coordinator | 3 calls |
-| Cluster_77 | 2 calls |
-| Cluster_250 | 2 calls |
-| Cluster_79 | 2 calls |
-| Cluster_128 | 1 calls |
+| Cluster_83 | 2 calls |
+| Cluster_90 | 2 calls |
+| Coordinator | 2 calls |
+| Cluster_85 | 2 calls |
+| Cluster_130 | 1 calls |
 
 ## How to Explore
 

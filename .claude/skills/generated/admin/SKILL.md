@@ -48,7 +48,7 @@ Start here when exploring this area:
 | `prepare_event` | Function | `crates/agenc-ircd-runtime/src/admin/audit.rs` | 367 |
 | `verify` | Function | `crates/agenc-ircd-admin/src/audit.rs` | 238 |
 | `commit_event` | Function | `crates/agenc-ircd-runtime/src/admin/audit.rs` | 401 |
-| `target_revision` | Function | `crates/agenc-ircd-runtime/src/state_core/admin.rs` | 200 |
+| `target_revision` | Function | `crates/agenc-ircd-runtime/src/state_core/admin.rs` | 205 |
 | `take_pending_startup_action` | Function | `crates/agenc-ircd-runtime/src/admin/audit.rs` | 208 |
 | `prepare_startup_outcome` | Function | `crates/agenc-ircd-runtime/src/admin/audit.rs` | 217 |
 | `resolve_committed_startup_action` | Function | `crates/agenc-ircd-runtime/src/admin/audit.rs` | 262 |
@@ -76,14 +76,14 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Tests | 14 calls |
-| Cluster_473 | 11 calls |
-| State_core | 8 calls |
-| Cluster_472 | 5 calls |
+| Tests | 12 calls |
+| Cluster_489 | 11 calls |
+| Cluster_488 | 5 calls |
+| Coordinator | 5 calls |
+| State_core | 4 calls |
 | Examples | 4 calls |
 | Cluster_3 | 2 calls |
 | Cluster_4 | 2 calls |
-| Coordinator | 2 calls |
 
 ## How to Explore
 

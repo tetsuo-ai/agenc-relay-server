@@ -1,11 +1,11 @@
 ---
 name: connection
-description: "Skill for the Connection area of agenc-ircd. 85 symbols across 13 files."
+description: "Skill for the Connection area of agenc-ircd. 84 symbols across 15 files."
 ---
 
 # Connection
 
-85 symbols | 13 files | Cohesion: 70%
+84 symbols | 15 files | Cohesion: 71%
 
 ## When to Use
 
@@ -21,12 +21,12 @@ description: "Skill for the Connection area of agenc-ircd. 85 symbols across 13 
 | `crates/agenc-ircd-runtime/src/connection/sink.rs` | for_reservation, len, frame_count, into_transfer, discard (+15) |
 | `crates/agenc-ircd-runtime/src/connection/supervisor.rs` | new, assign_generation, assign_state_permit, arm, finish (+7) |
 | `crates/agenc-ircd-runtime/src/connection/writer.rs` | handle_pop, write_frame, finish, run_writer, orderly_shutdown_acknowledges_only_after_the_writer_finishes (+1) |
-| `crates/agenc-ircd-runtime/src/account_service.rs` | structural_envelope, request_context, request_context_and_pending_crypto_cover_every_closed_variant, crypto_apply_error_completes_the_exact_pending_carrier_as_error |
 | `crates/agenc-ircd-runtime/src/connection/reader.rs` | new, run_reader, run_reader_sequenced |
 | `crates/agenc-ircd-runtime/src/daemon.rs` | flush_reacquires_admin_acknowledgements_after_a_dropped_drain, flush_admin_and_state |
 | `crates/agenc-ircd-runtime/src/admin.rs` | export_memory |
 | `crates/agenc-ircd-runtime/src/budget/mod.rs` | try_acquire_batch |
 | `crates/agenc-ircd-runtime/src/budget/permit.rs` | splits_are_exact_and_every_byte_returns_exactly_once |
+| `crates/agenc-ircd-runtime/tests/listener_accept.rs` | enqueue |
 
 ## Entry Points
 
@@ -55,19 +55,21 @@ Start here when exploring this area:
 | `commit` | Function | `crates/agenc-ircd-runtime/src/state_core/fanout.rs` | 233 |
 | `new` | Function | `crates/agenc-ircd-runtime/src/connection/sink.rs` | 56 |
 | `prepare` | Function | `crates/agenc-ircd-runtime/src/connection/sink.rs` | 413 |
-| `get` | Function | `crates/agenc-ircd-runtime/src/connection/sink.rs` | 214 |
 | `close` | Function | `crates/agenc-ircd-runtime/src/connection/queue.rs` | 386 |
 | `acknowledge_flush` | Function | `crates/agenc-ircd-runtime/src/connection/queue.rs` | 409 |
 | `new` | Function | `crates/agenc-ircd-runtime/src/connection/reader.rs` | 55 |
 | `run_reader` | Function | `crates/agenc-ircd-runtime/src/connection/reader.rs` | 104 |
 | `run_reader_sequenced` | Function | `crates/agenc-ircd-runtime/src/connection/reader.rs` | 123 |
 | `pending` | Function | `crates/agenc-ircd-runtime/src/connection/sink.rs` | 155 |
+| `complete` | Function | `crates/agenc-ircd-runtime/src/connection/sink.rs` | 166 |
 
 ## Execution Flows
 
 | Flow | Type | Steps |
 |------|------|-------|
+| `Run → With_query_usage` | cross_community | 5 |
 | `Run_connection → PhysicalCloseNotice` | intra_community | 4 |
+| `Step_admin_request → With_query_usage` | cross_community | 4 |
 | `Run_connection → MemoryPermit` | cross_community | 3 |
 | `Run_connection → New` | intra_community | 3 |
 
@@ -76,13 +78,13 @@ Start here when exploring this area:
 | Area | Connections |
 |------|-------------|
 | Observe | 8 calls |
-| Coordinator | 7 calls |
-| State_core | 7 calls |
+| Coordinator | 5 calls |
 | Budget | 5 calls |
 | Tests | 5 calls |
 | Supervisor | 4 calls |
-| Cluster_517 | 2 calls |
-| Cluster_210 | 1 calls |
+| State_core | 4 calls |
+| Cluster_531 | 2 calls |
+| Listener | 1 calls |
 
 ## How to Explore
 

@@ -5,7 +5,7 @@ description: "Skill for the Validate_ area of agenc-ircd. 79 symbols across 5 fi
 
 # Validate_
 
-79 symbols | 5 files | Cohesion: 48%
+79 symbols | 5 files | Cohesion: 47%
 
 ## When to Use
 
@@ -18,8 +18,8 @@ description: "Skill for the Validate_ area of agenc-ircd. 79 symbols across 5 fi
 | File | Symbols |
 |------|---------|
 | `crates/agenc-ircd-federation-wire/src/semantics.rs` | validate_operation_schema, validate_invite_projection, validate_membership, validate_query_limit, validate_away_operation (+30) |
-| `crates/agenc-ircd-client-wire/src/registration_command.rs` | validate_account_delete, validate_chat_history, validate_single_history_reference, validate_between_history_references, validate_history_reference (+20) |
-| `crates/agenc-ircd-runtime/src/offline.rs` | validate_init_paths, validate_lexical_root_separation, validate_edge_descriptor_path, validate_physical_root_separation, validate_existing_file_path (+4) |
+| `crates/agenc-ircd-client-wire/src/registration_command.rs` | validate_account_delete, validate_chat_history, validate_single_history_reference, validate_between_history_references, validate_history_reference (+22) |
+| `crates/agenc-ircd-runtime/src/offline.rs` | validate_init_path_controls, validate_creation_parent, validate_data_path, validate_data_path_for_privilege, validate_init_paths (+2) |
 | `crates/agenc-ircd-federation-wire/src/codec.rs` | validate_decoded_value, validate_value, validate_bounds, validate_enum, validate_nested_schema (+1) |
 | `crates/agenc-ircd-storage/src/construction_runtime.rs` | validate_source_limits, validate_target_limits, validate_work_limits, validate_nonzero_limit |
 
@@ -63,14 +63,14 @@ description: "Skill for the Validate_ area of agenc-ircd. 79 symbols across 5 fi
 
 | Area | Connections |
 |------|-------------|
-| Cluster_422 | 30 calls |
+| Cluster_435 | 30 calls |
 | Federation | 21 calls |
-| Cluster_84 | 11 calls |
+| Cluster_90 | 11 calls |
 | Validate_channel | 4 calls |
-| Cluster_670 | 3 calls |
-| Cluster_100 | 3 calls |
-| Cluster_675 | 2 calls |
-| Cluster_677 | 1 calls |
+| Cluster_709 | 3 calls |
+| Cluster_106 | 3 calls |
+| Cluster_715 | 2 calls |
+| Admission | 1 calls |
 
 ## How to Explore
 

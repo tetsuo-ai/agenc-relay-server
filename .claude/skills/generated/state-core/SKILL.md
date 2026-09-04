@@ -1,11 +1,11 @@
 ---
 name: state-core
-description: "Skill for the State_core area of agenc-ircd. 756 symbols across 49 files."
+description: "Skill for the State_core area of agenc-ircd. 712 symbols across 51 files."
 ---
 
 # State_core
 
-756 symbols | 49 files | Cohesion: 71%
+712 symbols | 51 files | Cohesion: 72%
 
 ## When to Use
 
@@ -17,16 +17,16 @@ description: "Skill for the State_core area of agenc-ircd. 756 symbols across 49
 
 | File | Symbols |
 |------|---------|
-| `crates/agenc-ircd-runtime/src/account_service.rs` | closed, binding, encode, decode, new (+126) |
-| `crates/agenc-ircd-runtime/src/state_core/mod.rs` | timers_mut, submit_storage_read, utc_now, pending_len, fanout_request_to (+107) |
-| `crates/agenc-ircd-domain/src/decision.rs` | new, insert, user, message, collect (+106) |
+| `crates/agenc-ircd-runtime/src/account_service.rs` | binding, encode, decode, new, authentication (+119) |
+| `crates/agenc-ircd-runtime/src/state_core/mod.rs` | sessions_mut, timers_mut, submit_storage_read, now, utc_now (+104) |
+| `crates/agenc-ircd-domain/src/decision.rs` | new, insert, user, message, plan_account_service_checkpoint (+104) |
 | `crates/agenc-ircd-runtime/src/state_core/reconstruct.rs` | finish, reconstruct, session_id_from_key, admit, admit_channel_tombstone (+97) |
-| `crates/agenc-ircd-runtime/src/state_core/durable.rs` | account_key, put, delete, revalidate, account_service_table (+61) |
-| `crates/agenc-ircd-runtime/src/registration.rs` | stage_authenticated_session, commit_session, connection_opened, cancel_connection_timers, access_policy (+34) |
-| `crates/agenc-ircd-runtime/src/state_core/session.rs` | unbind_session, connection, generation_for_user, new, with_ceiling (+16) |
-| `crates/agenc-ircd-runtime/src/state_core/timers.rs` | schedule, cancel, wall_trusted, pop_due, next_deadline (+12) |
-| `crates/agenc-ircd-runtime/src/channels.rs` | guest_key_prefix_demand, admit_command, charge_command, charge_registered_command_only, defer (+11) |
+| `crates/agenc-ircd-runtime/src/state_core/durable.rs` | account_key, put, delete, revalidate, account_service_table (+60) |
+| `crates/agenc-ircd-runtime/src/registration.rs` | edge_sasl_line, stage_authenticated_session, commit_session, reject_pending_registration, connection_opened (+17) |
+| `crates/agenc-ircd-runtime/src/state_core/session.rs` | unbind_session, connection, new, with_ceiling, open (+15) |
+| `crates/agenc-ircd-runtime/src/state_core/timers.rs` | schedule, cancel, wall_trusted, observe, pop_due (+12) |
 | `crates/agenc-ircd-runtime/src/state_core/pending.rs` | silent, with_account_service_writes, start, try_stage, staged (+8) |
+| `crates/agenc-ircd-runtime/src/state_core/fanout.rs` | new, reserve_inner, measure_all, reserve_queues, demand_for (+7) |
 
 ## Entry Points
 
@@ -49,47 +49,47 @@ Start here when exploring this area:
 | `as_bytes` | Function | `crates/agenc-ircd-crypto/src/hash.rs` | 23 |
 | `new` | Function | `crates/agenc-ircd-domain/src/e2ee/route_table.rs` | 32 |
 | `account` | Function | `crates/agenc-ircd-domain/src/model.rs` | 1685 |
-| `connection_opened` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 1013 |
-| `connection_closed` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 1062 |
-| `timer_fired` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 1227 |
-| `startup` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 1574 |
-| `registration_grant_write` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 1602 |
-| `begin_registration_grant_consumption` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 1626 |
-| `registration_rejected` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 1736 |
-| `begin_account_deletion` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 1764 |
-| `route_sasl` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 1924 |
-| `crypto_completed` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 2303 |
-| `storage_read_completed` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 3201 |
-| `batch_rejected` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 5780 |
-| `submit_read` | Function | `crates/agenc-ircd-runtime/src/bridge/storage.rs` | 423 |
+| `connection_opened` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 1022 |
+| `timer_fired` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 1236 |
+| `startup` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 1583 |
+| `registration_grant_write` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 1648 |
+| `begin_registration_grant_consumption` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 1672 |
+| `registration_rejected` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 1790 |
+| `begin_account_deletion` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 1818 |
+| `route_sasl` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 1978 |
+| `crypto_completed` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 2357 |
+| `storage_read_completed` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 3255 |
+| `batch_rejected` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 5834 |
+| `account_created_note` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 6512 |
+| `render_sasl_actions` | Function | `crates/agenc-ircd-runtime/src/account_service.rs` | 6646 |
 
 ## Execution Flows
 
 | Flow | Type | Steps |
 |------|------|-------|
-| `Route_sasl → Into_parts` | intra_community | 7 |
-| `Route_sasl → CreationReservation` | intra_community | 7 |
-| `Route_sasl → AccountServiceConfig` | cross_community | 7 |
-| `Route_sasl → Try_from` | cross_community | 7 |
+| `Preview → Try_from` | cross_community | 7 |
+| `Preview → Validate_bounds` | cross_community | 7 |
+| `Preview → Validate_version_field` | cross_community | 7 |
+| `Preview → Validate_padding_field` | cross_community | 7 |
+| `Preview → Schema_by_name` | cross_community | 6 |
 | `Batch_applied → Into_parts` | cross_community | 5 |
 | `Batch_applied → Link_is_live` | cross_community | 5 |
 | `Batch_applied → Link_closed` | cross_community | 5 |
 | `Batch_applied → Timers_mut` | cross_community | 5 |
 | `Batch_applied → Cancel` | cross_community | 5 |
-| `Batch_applied → Len` | cross_community | 5 |
 
 ## Connected Areas
 
 | Area | Connections |
 |------|-------------|
-| Tests | 122 calls |
-| Coordinator | 61 calls |
-| Admission | 20 calls |
-| Cluster_688 | 10 calls |
-| Cluster_456 | 9 calls |
-| Cluster_90 | 8 calls |
-| Observe | 7 calls |
-| Supervisor | 7 calls |
+| Tests | 91 calls |
+| Coordinator | 66 calls |
+| Admission | 28 calls |
+| Edge | 12 calls |
+| Cluster_276 | 11 calls |
+| Bridge | 10 calls |
+| Cluster_50 | 8 calls |
+| Connection | 8 calls |
 
 ## How to Explore
 

@@ -1,11 +1,11 @@
 ---
 name: wire
-description: "Skill for the Wire area of agenc-ircd. 61 symbols across 10 files."
+description: "Skill for the Wire area of agenc-ircd. 68 symbols across 15 files."
 ---
 
 # Wire
 
-61 symbols | 10 files | Cohesion: 81%
+68 symbols | 15 files | Cohesion: 72%
 
 ## When to Use
 
@@ -19,14 +19,14 @@ description: "Skill for the Wire area of agenc-ircd. 61 symbols across 10 files.
 |------|---------|
 | `crates/agenc-ircd-e2ee/src/wire/tokens.rs` | parse_id16, parse_hash, parse_account, parse_cursor, parse_decimal (+8) |
 | `crates/agenc-ircd-e2ee/src/federation/frames.rs` | correlation, position, fragment, parse_companion_frame, parse_operation (+7) |
-| `crates/agenc-ircd-e2ee/src/wire/response.rs` | body, finish_line, render_labeled, render_broadcast, check (+4) |
+| `crates/agenc-ircd-e2ee/src/wire/response.rs` | finish_line, check, render, render_close, render_eobject (+4) |
 | `crates/agenc-ircd-e2ee/src/wire/assembly.rs` | release, finish, discard, discard_sender, expire (+3) |
 | `crates/agenc-ircd-e2ee/src/wire/command.rs` | channel, parse_egroup, parse_submit, parse_egroup_fetch, parse_ekey (+2) |
 | `crates/agenc-ircd-e2ee/src/wire/fragment.rs` | parse, decode_segment, fragment_count, segment_length, check_consistency |
+| `crates/agenc-ircd-runtime/src/e2ee/edge/result.rs` | render_batch, batch_id_for, render_answer, scalar_line |
 | `crates/agenc-ircd-e2ee/src/wire/carrier.rs` | accepted_kinds, is_live, limit |
-| `crates/agenc-ircd-e2ee/src/tests/response.rs` | batches_open_carry_children_and_objects_and_close, live_lines_order_server_tags_before_the_preserved_client_tag |
 | `crates/agenc-ircd-e2ee/src/route.rs` | canonical_channel_name |
-| `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/route.rs` | reservation_tbs |
+| `crates/agenc-ircd-e2ee/src/tests/response.rs` | batches_open_carry_children_and_objects_and_close |
 
 ## Entry Points
 
@@ -51,17 +51,17 @@ Start here when exploring this area:
 | `parse_u16` | Function | `crates/agenc-ircd-e2ee/src/wire/tokens.rs` | 165 |
 | `parse_u32` | Function | `crates/agenc-ircd-e2ee/src/wire/tokens.rs` | 170 |
 | `parse_u64` | Function | `crates/agenc-ircd-e2ee/src/wire/tokens.rs` | 175 |
+| `render` | Function | `crates/agenc-ircd-e2ee/src/wire/response.rs` | 343 |
+| `render_close` | Function | `crates/agenc-ircd-e2ee/src/wire/response.rs` | 358 |
+| `render_eobject` | Function | `crates/agenc-ircd-e2ee/src/wire/response.rs` | 435 |
+| `is_batch_id` | Function | `crates/agenc-ircd-e2ee/src/wire/tokens.rs` | 187 |
+| `discard` | Function | `crates/agenc-ircd-e2ee/src/wire/assembly.rs` | 520 |
+| `discard_sender` | Function | `crates/agenc-ircd-e2ee/src/wire/assembly.rs` | 527 |
+| `expire` | Function | `crates/agenc-ircd-e2ee/src/wire/assembly.rs` | 542 |
+| `connection_closed` | Function | `crates/agenc-ircd-runtime/src/e2ee/edge/mod.rs` | 264 |
 | `body` | Function | `crates/agenc-ircd-e2ee/src/wire/response.rs` | 168 |
 | `render_labeled` | Function | `crates/agenc-ircd-e2ee/src/wire/response.rs` | 281 |
 | `render_broadcast` | Function | `crates/agenc-ircd-e2ee/src/wire/response.rs` | 289 |
-| `render` | Function | `crates/agenc-ircd-e2ee/src/wire/response.rs` | 330 |
-| `render_close` | Function | `crates/agenc-ircd-e2ee/src/wire/response.rs` | 345 |
-| `render_eobject` | Function | `crates/agenc-ircd-e2ee/src/wire/response.rs` | 422 |
-| `render_live` | Function | `crates/agenc-ircd-e2ee/src/wire/response.rs` | 469 |
-| `is_safe_label` | Function | `crates/agenc-ircd-e2ee/src/wire/tokens.rs` | 181 |
-| `is_batch_id` | Function | `crates/agenc-ircd-e2ee/src/wire/tokens.rs` | 187 |
-| `discard` | Function | `crates/agenc-ircd-e2ee/src/wire/assembly.rs` | 504 |
-| `discard_sender` | Function | `crates/agenc-ircd-e2ee/src/wire/assembly.rs` | 511 |
 
 ## Execution Flows
 
@@ -77,9 +77,12 @@ Start here when exploring this area:
 | Area | Connections |
 |------|-------------|
 | Coordinator | 8 calls |
-| Tests | 2 calls |
+| Tests | 6 calls |
+| Cluster_817 | 2 calls |
 | Budget | 1 calls |
-| Cluster_774 | 1 calls |
+| State_core | 1 calls |
+| Admission | 1 calls |
+| Cluster_819 | 1 calls |
 | Ops | 1 calls |
 
 ## How to Explore

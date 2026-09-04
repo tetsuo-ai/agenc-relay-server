@@ -1,11 +1,11 @@
 ---
 name: supervisor
-description: "Skill for the Supervisor area of agenc-ircd. 85 symbols across 14 files."
+description: "Skill for the Supervisor area of agenc-ircd. 86 symbols across 14 files."
 ---
 
 # Supervisor
 
-85 symbols | 14 files | Cohesion: 79%
+86 symbols | 14 files | Cohesion: 80%
 
 ## When to Use
 
@@ -18,7 +18,7 @@ description: "Skill for the Supervisor area of agenc-ircd. 85 symbols across 14 
 | File | Symbols |
 |------|---------|
 | `crates/agenc-ircd-runtime/src/admin.rs` | acquire_audit_export_memory, admin_process_channel, new, start, admin_lifecycle_channel (+30) |
-| `crates/agenc-ircd-runtime/src/daemon.rs` | start_owners, unwind_started_owners, spawn_admin_owner, spawn_listener_owner, spawn_state_owner (+11) |
+| `crates/agenc-ircd-runtime/src/daemon.rs` | start_owners, unwind_started_owners, spawn_admin_owner, spawn_listener_owner, spawn_state_owner (+12) |
 | `crates/agenc-ircd-runtime/src/supervisor/mod.rs` | default, new, root_token, spawn, cancel (+6) |
 | `crates/agenc-ircd-runtime/src/supervisor/panic.rs` | new, install, server_id, the_crash_event_carries_only_closed_fields, an_unreadable_clock_blocks_installation_and_a_later_failure_uses_the_fallback (+1) |
 | `crates/agenc-ircd-runtime/src/supervisor/signal.rs` | the_signal_task_registers_handlers_and_stops_on_cancel, new, run_signal_task |
@@ -49,17 +49,17 @@ Start here when exploring this area:
 | `empty_for_test` | Function | `crates/agenc-ircd-runtime/src/admin/audit.rs` | 413 |
 | `cancel` | Function | `crates/agenc-ircd-runtime/src/cancel.rs` | 64 |
 | `join` | Function | `crates/agenc-ircd-runtime/src/listener/mod.rs` | 491 |
-| `complete_next_for_test` | Function | `crates/agenc-ircd-runtime/src/state_core/admin.rs` | 305 |
-| `admin_core_channel` | Function | `crates/agenc-ircd-runtime/src/state_core/admin.rs` | 455 |
+| `complete_next_for_test` | Function | `crates/agenc-ircd-runtime/src/state_core/admin.rs` | 310 |
+| `admin_core_channel` | Function | `crates/agenc-ircd-runtime/src/state_core/admin.rs` | 460 |
 | `new` | Function | `crates/agenc-ircd-runtime/src/supervisor/mod.rs` | 148 |
 | `root_token` | Function | `crates/agenc-ircd-runtime/src/supervisor/mod.rs` | 157 |
 | `spawn` | Function | `crates/agenc-ircd-runtime/src/supervisor/mod.rs` | 164 |
 | `cancel` | Function | `crates/agenc-ircd-runtime/src/supervisor/mod.rs` | 196 |
-| `abort_all` | Function | `crates/agenc-ircd-runtime/src/supervisor/mod.rs` | 201 |
 | `next_exit` | Function | `crates/agenc-ircd-runtime/src/supervisor/mod.rs` | 207 |
 | `join_all` | Function | `crates/agenc-ircd-runtime/src/supervisor/mod.rs` | 232 |
 | `try_backup` | Function | `crates/agenc-ircd-storage/src/owner.rs` | 158 |
 | `live_children` | Function | `crates/agenc-ircd-runtime/src/supervisor/mod.rs` | 191 |
+| `abort_all` | Function | `crates/agenc-ircd-runtime/src/supervisor/mod.rs` | 201 |
 | `new` | Function | `crates/agenc-ircd-runtime/src/supervisor/panic.rs` | 27 |
 | `install` | Function | `crates/agenc-ircd-runtime/src/supervisor/panic.rs` | 63 |
 
@@ -67,7 +67,6 @@ Start here when exploring this area:
 
 | Flow | Type | Steps |
 |------|------|-------|
-| `Serve → Try_from` | cross_community | 6 |
 | `Federation_commands_record_intent_and_outcome → Result_class_rank` | cross_community | 6 |
 | `Federation_commands_record_intent_and_outcome → Classify_admin_output` | cross_community | 6 |
 | `Serve → ConfigIssue` | cross_community | 5 |
@@ -77,18 +76,19 @@ Start here when exploring this area:
 | `Serve → ConfigReport` | cross_community | 4 |
 | `Serve → HardeningOutcome` | cross_community | 4 |
 | `Serve → New` | cross_community | 4 |
+| `Serve → Has_duplicates` | cross_community | 4 |
 
 ## Connected Areas
 
 | Area | Connections |
 |------|-------------|
-| Tests | 19 calls |
-| State_core | 10 calls |
+| Tests | 18 calls |
+| State_core | 9 calls |
 | Observe | 6 calls |
 | Listener | 5 calls |
-| Federation | 3 calls |
-| Cluster_23 | 3 calls |
-| Cluster_466 | 2 calls |
+| Federation | 4 calls |
+| Cluster_25 | 3 calls |
+| Cluster_482 | 2 calls |
 | Connection | 2 calls |
 
 ## How to Explore

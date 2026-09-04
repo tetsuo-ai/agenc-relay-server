@@ -1,11 +1,11 @@
 ---
 name: ops
-description: "Skill for the Ops area of agenc-ircd. 98 symbols across 16 files."
+description: "Skill for the Ops area of agenc-ircd. 98 symbols across 15 files."
 ---
 
 # Ops
 
-98 symbols | 16 files | Cohesion: 82%
+98 symbols | 15 files | Cohesion: 81%
 
 ## When to Use
 
@@ -19,9 +19,9 @@ description: "Skill for the Ops area of agenc-ircd. 98 symbols across 16 files."
 |------|---------|
 | `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/sequence.rs` | log, record_bytes, decode, sequencer_row, retain (+16) |
 | `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/directory.rs` | digest, decode, single, directory_write, fetch_identity (+15) |
-| `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/route.rs` | conversation_state, expectation_for, expectation, audience, sender_bound (+8) |
+| `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/route.rs` | conversation_state, expectation_for, expectation, audience, digest (+9) |
 | `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/mod.rs` | from, opcode, params, account_digest, account_id (+7) |
-| `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/mailbox.rs` | row_kind, target_device, deliver, deliver_binding, deliver_welcome (+3) |
+| `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/mailbox.rs` | row_kind, target_device, deliver, deliver_binding, deliver_welcome (+2) |
 | `crates/agenc-ircd-e2ee/src/envelope.rs` | private_message, verify_application_object, verify_commit_object |
 | `crates/agenc-ircd-runtime/src/e2ee/coordinator/events.rs` | sequence_copies, encode_event, outbox_write |
 | `crates/agenc-ircd-runtime/src/e2ee/coordinator/execute.rs` | assemble, mark_completion, generic_completion |
@@ -36,7 +36,7 @@ Start here when exploring this area:
 - **`verify_commit_object`** (Function) — `crates/agenc-ircd-e2ee/src/envelope.rs:120`
 - **`compute`** (Function) — `crates/agenc-ircd-e2ee/src/object.rs:26`
 - **`sequence_copies`** (Function) — `crates/agenc-ircd-runtime/src/e2ee/coordinator/events.rs:218`
-- **`retain_object`** (Function) — `crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs:696`
+- **`retain_object`** (Function) — `crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs:771`
 
 ## Key Symbols
 
@@ -46,9 +46,10 @@ Start here when exploring this area:
 | `verify_commit_object` | Function | `crates/agenc-ircd-e2ee/src/envelope.rs` | 120 |
 | `compute` | Function | `crates/agenc-ircd-e2ee/src/object.rs` | 26 |
 | `sequence_copies` | Function | `crates/agenc-ircd-runtime/src/e2ee/coordinator/events.rs` | 218 |
-| `retain_object` | Function | `crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs` | 696 |
-| `object_write` | Function | `crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs` | 717 |
-| `id_of` | Function | `crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs` | 731 |
+| `retain_object` | Function | `crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs` | 771 |
+| `object_write` | Function | `crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs` | 792 |
+| `id_of` | Function | `crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs` | 806 |
+| `directory_write` | Function | `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/directory.rs` | 62 |
 | `fetch_identity` | Function | `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/directory.rs` | 77 |
 | `fetch_root_chain` | Function | `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/directory.rs` | 94 |
 | `publish_identity` | Function | `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/directory.rs` | 147 |
@@ -57,11 +58,10 @@ Start here when exploring this area:
 | `fetch_capabilities` | Function | `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/directory.rs` | 306 |
 | `publish_capabilities` | Function | `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/directory.rs` | 351 |
 | `fetch_binding_locks` | Function | `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/directory.rs` | 417 |
-| `whoami` | Function | `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/directory.rs` | 458 |
-| `attach_begin` | Function | `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/directory.rs` | 467 |
-| `attach_finish` | Function | `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/directory.rs` | 552 |
-| `claim_package` | Function | `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/directory.rs` | 679 |
-| `claim_status` | Function | `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/directory.rs` | 759 |
+| `whoami` | Function | `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/directory.rs` | 464 |
+| `attach_begin` | Function | `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/directory.rs` | 473 |
+| `attach_finish` | Function | `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/directory.rs` | 558 |
+| `claim_package` | Function | `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/directory.rs` | 685 |
 
 ## Execution Flows
 
@@ -82,14 +82,14 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Coordinator | 32 calls |
-| Tests | 14 calls |
-| Federation | 8 calls |
+| Coordinator | 27 calls |
+| Tests | 21 calls |
 | E2ee | 7 calls |
+| Federation | 6 calls |
+| Cluster_817 | 6 calls |
 | State_core | 5 calls |
-| Cluster_363 | 2 calls |
 | Wire | 2 calls |
-| Cluster_393 | 2 calls |
+| Cluster_402 | 2 calls |
 
 ## How to Explore
 

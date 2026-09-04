@@ -1,99 +1,99 @@
 ---
 name: tests
-description: "Skill for the Tests area of agenc-ircd. 1910 symbols across 234 files."
+description: "Skill for the Tests area of agenc-ircd. 1988 symbols across 248 files."
 ---
 
 # Tests
 
-1910 symbols | 234 files | Cohesion: 70%
+1988 symbols | 248 files | Cohesion: 68%
 
 ## When to Use
 
 - Working with code in `crates/`
-- Understanding how derive_storage_index, validate, operation_id work
+- Understanding how as_slice, decode_exact, to_object work
 - Modifying tests-related functionality
 
 ## Key Files
 
 | File | Symbols |
 |------|---------|
-| `crates/agenc-ircd-storage/src/construction_runtime.rs` | validate, start, start_streaming, start_inner, push (+83) |
-| `crates/agenc-ircd-storage/tests/stage_five_completion.rs` | every_table_has_one_closed_schema_and_domain_codec_consumes_fully, read_source, storage_crypto_adapters_cover_every_public_boundary, signed_growth_report_is_exact_tuple_authority, qualification_rejects_every_report_and_measurement_boundary (+71) |
+| `crates/agenc-ircd-storage/tests/stage_five_completion.rs` | storage_crypto_adapters_cover_every_public_boundary, signed_growth_report_is_exact_tuple_authority, qualification_rejects_every_report_and_measurement_boundary, qualification_required_file_set_measures_every_named_durable_case, resign_qualification_frame (+67) |
+| `crates/agenc-ircd/tests/stage_eight_e2ee.rs` | new, send, read_until, try_register, assert_contains (+66) |
 | `crates/agenc-ircd/tests/stage_six_daemon.rs` | client_config, admin_tls_client_config, require_success, failure, opaque_identifiers (+62) |
-| `crates/agenc-ircd-runtime/src/federation/coordinator/tests/harness.rs` | entropy_script, peer_identity, new, send, establish (+56) |
+| `crates/agenc-ircd-runtime/src/federation/coordinator/tests/harness.rs` | entropy_script, peer_identity, new, send, establish (+57) |
 | `crates/agenc-ircd-federation-wire/src/tests/semantics.rs` | schema, fields, validate, opaque, unsigned (+52) |
+| `crates/agenc-ircd-runtime/src/federation/edge/tests/harness.rs` | start_node, entropy_script, coordinator_identity, new, send (+51) |
 | `crates/agenc-ircd-testkit/tests/domain_reference_model.rs` | apply_production, apply_production_command, apply_production_join, reference_model_executes_every_command_with_real_behavior, reference_command_fixture (+49) |
 | `crates/agenc-ircd-auth/tests/stage_four.rs` | new, credential, operation_context, operation_route, operation_context_for_network (+45) |
-| `crates/agenc-ircd-runtime/src/federation/edge/tests/harness.rs` | next_frame, pump, start_node, edge_and_coordinator_interoperate_over_a_bridged_link, drive_bridge (+32) |
-| `crates/agenc-ircd-domain/src/model.rs` | new, parse, with_policies, from_seed, test_public_cloak (+26) |
 | `crates/agenc-ircd-e2ee/src/tests/support.rs` | key, public, sign, account_field, root (+25) |
+| `crates/agenc-ircd-runtime/tests/listener_accept.rs` | default, fixture, server, client, start (+24) |
 
 ## Entry Points
 
 Start here when exploring this area:
 
-- **`derive_storage_index`** (Function) — `crates/agenc-ircd-crypto/src/storage.rs:283`
-- **`validate`** (Function) — `crates/agenc-ircd-storage/src/construction.rs:60`
-- **`operation_id`** (Function) — `crates/agenc-ircd-storage/src/construction.rs:611`
-- **`validate`** (Function) — `crates/agenc-ircd-storage/src/construction_runtime.rs:94`
-- **`start`** (Function) — `crates/agenc-ircd-storage/src/construction_runtime.rs:163`
+- **`as_slice`** (Function) — `crates/agenc-ircd-federation-wire/src/assembly.rs:111`
+- **`decode_exact`** (Function) — `crates/agenc-ircd-federation-wire/src/codec.rs:390`
+- **`to_object`** (Function) — `crates/agenc-ircd-federation-wire/src/objects.rs:149`
+- **`from_object`** (Function) — `crates/agenc-ircd-federation-wire/src/objects.rs:168`
+- **`decode`** (Function) — `crates/agenc-ircd-federation-wire/src/objects.rs:233`
 
 ## Key Symbols
 
 | Symbol | Type | File | Line |
 |--------|------|------|------|
-| `derive_storage_index` | Function | `crates/agenc-ircd-crypto/src/storage.rs` | 283 |
-| `validate` | Function | `crates/agenc-ircd-storage/src/construction.rs` | 60 |
-| `operation_id` | Function | `crates/agenc-ircd-storage/src/construction.rs` | 611 |
-| `validate` | Function | `crates/agenc-ircd-storage/src/construction_runtime.rs` | 94 |
-| `start` | Function | `crates/agenc-ircd-storage/src/construction_runtime.rs` | 163 |
-| `start_streaming` | Function | `crates/agenc-ircd-storage/src/construction_runtime.rs` | 173 |
-| `push` | Function | `crates/agenc-ircd-storage/src/construction_runtime.rs` | 251 |
-| `finish` | Function | `crates/agenc-ircd-storage/src/construction_runtime.rs` | 538 |
-| `new` | Function | `crates/agenc-ircd-storage/src/construction_runtime.rs` | 757 |
-| `rebuild_disk` | Function | `crates/agenc-ircd-storage/src/construction_runtime.rs` | 802 |
-| `validate_identity` | Function | `crates/agenc-ircd-storage/src/construction_runtime.rs` | 851 |
-| `preflight` | Function | `crates/agenc-ircd-storage/src/construction_runtime.rs` | 938 |
-| `open` | Function | `crates/agenc-ircd-storage/src/construction_runtime.rs` | 1455 |
-| `rebuild_restore_plan` | Function | `crates/agenc-ircd-storage/src/construction_runtime.rs` | 2027 |
-| `resume` | Function | `crates/agenc-ircd-storage/src/construction_runtime.rs` | 2819 |
-| `record_kind_for_key` | Function | `crates/agenc-ircd-storage/src/e2ee_records.rs` | 174 |
-| `matches_key` | Function | `crates/agenc-ircd-storage/src/e2ee_records.rs` | 642 |
-| `open_construction_source_record` | Function | `crates/agenc-ircd-storage/src/engine.rs` | 1340 |
-| `startup_scan` | Function | `crates/agenc-ircd-storage/src/engine.rs` | 2502 |
-| `construction_scan` | Function | `crates/agenc-ircd-storage/src/engine.rs` | 2726 |
+| `as_slice` | Function | `crates/agenc-ircd-federation-wire/src/assembly.rs` | 111 |
+| `decode_exact` | Function | `crates/agenc-ircd-federation-wire/src/codec.rs` | 390 |
+| `to_object` | Function | `crates/agenc-ircd-federation-wire/src/objects.rs` | 149 |
+| `from_object` | Function | `crates/agenc-ircd-federation-wire/src/objects.rs` | 168 |
+| `decode` | Function | `crates/agenc-ircd-federation-wire/src/objects.rs` | 233 |
+| `decode_request_operation` | Function | `crates/agenc-ircd-federation-wire/src/objects.rs` | 328 |
+| `decode_result_arm` | Function | `crates/agenc-ircd-federation-wire/src/objects.rs` | 408 |
+| `decode_event_arm` | Function | `crates/agenc-ircd-federation-wire/src/objects.rs` | 560 |
+| `decode_projection_arm` | Function | `crates/agenc-ircd-federation-wire/src/objects.rs` | 742 |
+| `inbound` | Function | `crates/agenc-ircd-runtime/src/federation/coordinator/mod.rs` | 416 |
+| `receive` | Function | `crates/agenc-ircd-runtime/src/federation/edge/events.rs` | 22 |
+| `receive_result` | Function | `crates/agenc-ircd-runtime/src/federation/edge/request.rs` | 852 |
+| `snapshot_entry` | Function | `crates/agenc-ircd-runtime/src/federation/edge/sync.rs` | 176 |
+| `link_queue` | Function | `crates/agenc-ircd-runtime/src/federation/link.rs` | 357 |
+| `connection_close_channel` | Function | `crates/agenc-ircd-runtime/src/state_core/inbox.rs` | 73 |
+| `lifecycle_channel` | Function | `crates/agenc-ircd-runtime/src/state_core/inbox.rs` | 308 |
+| `with_registration_router` | Function | `crates/agenc-ircd-runtime/src/test_support.rs` | 505 |
+| `with_federation_coordinator` | Function | `crates/agenc-ircd-runtime/src/test_support.rs` | 536 |
+| `take_run_parts` | Function | `crates/agenc-ircd-runtime/src/test_support.rs` | 696 |
+| `parse_projection_key` | Function | `crates/agenc-ircd-storage/src/federation_records.rs` | 914 |
 
 ## Execution Flows
 
 | Flow | Type | Steps |
 |------|------|-------|
-| `Audit_mutations_rebuild_policy_and_reject_invalid_phase_pairings → As_bytes` | cross_community | 7 |
 | `Preview → Try_from` | cross_community | 7 |
 | `Preview → Validate_bounds` | cross_community | 7 |
 | `Preview → Validate_version_field` | cross_community | 7 |
 | `Preview → Validate_padding_field` | cross_community | 7 |
+| `Audit_mutations_rebuild_policy_and_reject_invalid_phase_pairings → As_bytes` | cross_community | 7 |
 | `Rebuild_rekey_plan → As_bytes` | cross_community | 6 |
 | `Rebuild_rekey_plan → Validate` | cross_community | 6 |
-| `Serve → Try_from` | cross_community | 6 |
-| `Internal_restore_scans_reject_duplicate_and_cross_kind_inputs → Validate_nonzero_limit` | cross_community | 6 |
-| `Internal_restore_scans_reject_duplicate_and_cross_kind_inputs → Validate_nonzero_usize_limit` | cross_community | 6 |
+| `Binding_package → Label` | cross_community | 6 |
+| `Preview → Schema_by_name` | cross_community | 6 |
+| `Run → Try_from` | cross_community | 5 |
 
 ## Connected Areas
 
 | Area | Connections |
 |------|-------------|
-| Coordinator | 152 calls |
-| State_core | 104 calls |
-| Federation | 69 calls |
-| Supervisor | 39 calls |
-| Cluster_890 | 30 calls |
-| Codec | 29 calls |
-| Ops | 24 calls |
-| Cluster_60 | 21 calls |
+| Coordinator | 157 calls |
+| State_core | 100 calls |
+| Federation | 70 calls |
+| Supervisor | 38 calls |
+| Ops | 32 calls |
+| Cluster_936 | 30 calls |
+| Codec | 25 calls |
+| Examples | 23 calls |
 
 ## How to Explore
 
-1. `context({name: "derive_storage_index"})` — see callers and callees
+1. `context({name: "as_slice"})` — see callers and callees
 2. `query({search_query: "tests"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

@@ -78,14 +78,14 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Cluster_517 | 5 calls |
+| Cluster_531 | 5 calls |
 | Supervisor | 5 calls |
 | Admission | 5 calls |
-| Cluster_472 | 3 calls |
+| Cluster_488 | 3 calls |
 | Tests | 3 calls |
 | Admin | 2 calls |
 | Connection | 2 calls |
-| Coordinator | 2 calls |
+| Cluster_493 | 1 calls |
 
 ## How to Explore
 
