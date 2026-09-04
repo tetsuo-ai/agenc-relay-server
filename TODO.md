@@ -58,7 +58,7 @@ References: [Architecture §§1.2–4](docs/ircd-architecture-and-implementation
 | 05 | Durable and recoverable persistence | Complete | Pass, 2026-08-29 | [Current checkpoint](conformance/evidence/stage-05-4040796f2c21774d58ea7ce54e70a080678e83ac.json) |
 | 06 | Conforming single-node daemon | Complete | Pass, 2026-09-01 | [Current checkpoint](conformance/evidence/stage-06-65cce9d66f7bcfb0c0830a2ab1d42b52bff82942.json) |
 | 07 | Conforming base federation | Complete | Pass, 2026-09-03 | [Current checkpoint](conformance/evidence/stage-07-1093d88d0057c3461a423285e0f86ff3775c1140.json) |
-| 08 | Conforming E2EE server adapter | Complete (external review open) | Pass, 2026-09-04 | [Current checkpoint](conformance/evidence/stage-08-52c7ccb909ecd398853183ef3f11ffd2df251e08.json) |
+| 08 | Conforming E2EE server adapter | Complete (external review open) | Pass, 2026-09-04 | [Current checkpoint](conformance/evidence/stage-08-a6e3c54a6a4e4d95436cb43197e66a521ee21315.json) |
 | 09 | Optional WSS and history profiles | Not started | Not run | Absent |
 | 10 | Production qualification and release evidence | Not started | Not run | Absent |
 
@@ -2557,7 +2557,10 @@ recorded here so a later reviewer does not have to rediscover them.
   wait for the next coverage round.
 
 The design revision of 2026-09-04 (`S08-040` to `S08-044`) changed the
-profile after the first closure and moved the profile hash. Its
+profile after the first closure and moved the profile hash; the stage was
+re-closed the same day at exact source commit
+`a6e3c54a6a4e4d95436cb43197e66a521ee21315`, whose manifest supersedes the
+`52c7ccb` checkpoint (kept as history). Its
 interpretations: the server retains published policies per conversation
 under `policy/v1/` rows and keeps the current policy identifier as the
 policy the last finalization installed; the sequencer keeps a per-slot vote
