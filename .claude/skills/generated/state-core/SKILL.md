@@ -1,11 +1,11 @@
 ---
 name: state-core
-description: "Skill for the State_core area of agenc-ircd. 720 symbols across 52 files."
+description: "Skill for the State_core area of agenc-ircd. 717 symbols across 52 files."
 ---
 
 # State_core
 
-720 symbols | 52 files | Cohesion: 72%
+717 symbols | 52 files | Cohesion: 72%
 
 ## When to Use
 
@@ -19,7 +19,7 @@ description: "Skill for the State_core area of agenc-ircd. 720 symbols across 52
 |------|---------|
 | `crates/agenc-ircd-runtime/src/account_service.rs` | binding, encode, decode, new, authentication (+119) |
 | `crates/agenc-ircd-domain/src/decision.rs` | new, insert, user, message, collect (+106) |
-| `crates/agenc-ircd-runtime/src/state_core/mod.rs` | sessions_mut, timers_mut, submit_storage_read, now, utc_now (+105) |
+| `crates/agenc-ircd-runtime/src/state_core/mod.rs` | sessions_mut, timers_mut, submit_storage_read, now, utc_now (+103) |
 | `crates/agenc-ircd-runtime/src/state_core/reconstruct.rs` | finish, reconstruct, session_id_from_key, admit, admit_channel_tombstone (+98) |
 | `crates/agenc-ircd-runtime/src/state_core/durable.rs` | account_key, put, delete, revalidate, account_service_table (+60) |
 | `crates/agenc-ircd-runtime/src/registration.rs` | edge_sasl_line, stage_authenticated_session, commit_session, reject_pending_registration, connection_opened (+17) |
@@ -85,11 +85,11 @@ Start here when exploring this area:
 | Tests | 105 calls |
 | Coordinator | 69 calls |
 | Admission | 30 calls |
+| Edge | 10 calls |
 | Cluster_50 | 8 calls |
 | Bridge | 8 calls |
 | Connection | 8 calls |
-| Cluster_822 | 8 calls |
-| Cluster_733 | 8 calls |
+| Cluster_823 | 8 calls |
 
 ## How to Explore
 

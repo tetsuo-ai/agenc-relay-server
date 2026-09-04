@@ -89,7 +89,7 @@ Start here when exploring this area:
 | Cluster_25 | 3 calls |
 | Observe | 3 calls |
 | Connection | 2 calls |
-| Cluster_481 | 2 calls |
+| Cluster_482 | 2 calls |
 
 ## How to Explore
 

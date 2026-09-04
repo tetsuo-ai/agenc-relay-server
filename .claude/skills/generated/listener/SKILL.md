@@ -79,10 +79,10 @@ Start here when exploring this area:
 | Area | Connections |
 |------|-------------|
 | Supervisor | 10 calls |
-| Cluster_527 | 5 calls |
+| Cluster_528 | 5 calls |
 | Admission | 5 calls |
 | Tests | 4 calls |
-| Cluster_484 | 3 calls |
+| Cluster_485 | 3 calls |
 | Admin | 2 calls |
 | Connection | 2 calls |
 | State_core | 2 calls |

@@ -84,11 +84,11 @@ Start here when exploring this area:
 | State_core | 60 calls |
 | Tests | 9 calls |
 | Coordinator | 4 calls |
-| Cluster_733 | 4 calls |
+| Cluster_734 | 4 calls |
 | Cluster_161 | 3 calls |
 | Edge | 3 calls |
 | Observe | 3 calls |
-| Cluster_822 | 3 calls |
+| Cluster_823 | 3 calls |
 
 ## How to Explore
 

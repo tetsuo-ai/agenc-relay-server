@@ -1,11 +1,11 @@
 ---
 name: wire
-description: "Skill for the Wire area of agenc-ircd. 69 symbols across 16 files."
+description: "Skill for the Wire area of agenc-ircd. 68 symbols across 15 files."
 ---
 
 # Wire
 
-69 symbols | 16 files | Cohesion: 71%
+68 symbols | 15 files | Cohesion: 71%
 
 ## When to Use
 
@@ -55,13 +55,13 @@ Start here when exploring this area:
 | `render_close` | Function | `crates/agenc-ircd-e2ee/src/wire/response.rs` | 363 |
 | `render_eobject` | Function | `crates/agenc-ircd-e2ee/src/wire/response.rs` | 440 |
 | `is_batch_id` | Function | `crates/agenc-ircd-e2ee/src/wire/tokens.rs` | 187 |
-| `discard` | Function | `crates/agenc-ircd-e2ee/src/wire/assembly.rs` | 520 |
-| `discard_sender` | Function | `crates/agenc-ircd-e2ee/src/wire/assembly.rs` | 527 |
-| `expire` | Function | `crates/agenc-ircd-e2ee/src/wire/assembly.rs` | 542 |
-| `connection_closed` | Function | `crates/agenc-ircd-runtime/src/e2ee/edge/mod.rs` | 275 |
 | `accepted_kinds` | Function | `crates/agenc-ircd-e2ee/src/wire/carrier.rs` | 103 |
 | `is_live` | Function | `crates/agenc-ircd-e2ee/src/wire/carrier.rs` | 138 |
 | `limit` | Function | `crates/agenc-ircd-e2ee/src/wire/carrier.rs` | 145 |
+| `state_entry` | Function | `crates/agenc-ircd-runtime/src/e2ee/edge/sync.rs` | 160 |
+| `body` | Function | `crates/agenc-ircd-e2ee/src/wire/response.rs` | 170 |
+| `render_labeled` | Function | `crates/agenc-ircd-e2ee/src/wire/response.rs` | 286 |
+| `render_broadcast` | Function | `crates/agenc-ircd-e2ee/src/wire/response.rs` | 294 |
 
 ## Execution Flows
 
@@ -79,10 +79,10 @@ Start here when exploring this area:
 | Coordinator | 8 calls |
 | Tests | 6 calls |
 | State_core | 2 calls |
-| Cluster_822 | 2 calls |
+| Cluster_823 | 2 calls |
 | Budget | 1 calls |
 | Admission | 1 calls |
-| Cluster_824 | 1 calls |
+| Cluster_825 | 1 calls |
 | Ops | 1 calls |
 
 ## How to Explore

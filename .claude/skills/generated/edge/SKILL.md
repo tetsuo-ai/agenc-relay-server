@@ -10,7 +10,7 @@ description: "Skill for the Edge area of agenc-ircd. 193 symbols across 36 files
 ## When to Use
 
 - Working with code in `crates/`
-- Understanding how decode_kind, decode, on_event_frame work
+- Understanding how peek, decode_kind, decode work
 - Modifying edge-related functionality
 
 ## Key Files
@@ -18,34 +18,36 @@ description: "Skill for the Edge area of agenc-ircd. 193 symbols across 36 files
 | File | Symbols |
 |------|---------|
 | `crates/agenc-ircd-runtime/src/federation/edge/mod.rs` | send_frame, batch_applied, companion_active, note_phase, link_established (+28) |
-| `crates/agenc-ircd-runtime/src/e2ee/edge/events.rs` | on_event_frame, route_changed, route_entry, witness, record_witness (+18) |
+| `crates/agenc-ircd-runtime/src/e2ee/edge/events.rs` | on_event_frame, route_changed, route_entry, record_witness, apply_event (+19) |
 | `crates/agenc-ircd-runtime/src/federation/edge/request.rs` | delete_origin, prepare_request, register_request, send_session_open, send_account_carrier (+18) |
 | `crates/agenc-ircd-runtime/src/e2ee/edge/router.rs` | subject_of, line, account, cursor, encode_parameters (+8) |
 | `crates/agenc-ircd-runtime/src/federation/edge/barrier.rs` | acknowledge, applied, apply, apply_base_events, send_companion_ack (+7) |
 | `crates/agenc-ircd-runtime/src/e2ee/edge/sync.rs` | origins_ready, resend_pending, handle_frames, fail_frame, next_sequence (+7) |
 | `crates/agenc-ircd-runtime/src/federation/edge/sync.rs` | begin, resume, installed, resume_ok, resume_snapshot (+4) |
 | `crates/agenc-ircd-runtime/src/federation/edge/render.rs` | remember_nicknames, event_channel_label, render_event, prefix, channel_name (+2) |
-| `crates/agenc-ircd-runtime/src/e2ee/edge/result.rs` | decode_result, decode_value, on_result_frame, assemble_response, record_answer (+1) |
-| `crates/agenc-ircd-e2ee/src/mls_outer.rs` | from_value, parse_private_message, take, u8, u64 (+1) |
+| `crates/agenc-ircd-runtime/src/e2ee/edge/mod.rs` | new, batch_applied_outputs, plaintext_refusal, direct_pair_bound, connection_closed (+2) |
+| `crates/agenc-ircd-runtime/src/e2ee/edge/result.rs` | decode_value, decode_result, on_result_frame, assemble_response, record_answer (+1) |
 
 ## Entry Points
 
 Start here when exploring this area:
 
+- **`peek`** (Function) — `crates/agenc-ircd-e2ee/src/object.rs:266`
 - **`decode_kind`** (Function) — `crates/agenc-ircd-e2ee/src/object.rs:288`
 - **`decode`** (Function) — `crates/agenc-ircd-runtime/src/e2ee/coordinator/request.rs:379`
 - **`on_event_frame`** (Function) — `crates/agenc-ircd-runtime/src/e2ee/edge/events.rs:160`
 - **`route_changed`** (Function) — `crates/agenc-ircd-runtime/src/e2ee/edge/events.rs:558`
-- **`decode_result`** (Function) — `crates/agenc-ircd-runtime/src/e2ee/edge/result.rs:166`
 
 ## Key Symbols
 
 | Symbol | Type | File | Line |
 |--------|------|------|------|
+| `peek` | Function | `crates/agenc-ircd-e2ee/src/object.rs` | 266 |
 | `decode_kind` | Function | `crates/agenc-ircd-e2ee/src/object.rs` | 288 |
 | `decode` | Function | `crates/agenc-ircd-runtime/src/e2ee/coordinator/request.rs` | 379 |
 | `on_event_frame` | Function | `crates/agenc-ircd-runtime/src/e2ee/edge/events.rs` | 160 |
 | `route_changed` | Function | `crates/agenc-ircd-runtime/src/e2ee/edge/events.rs` | 558 |
+| `decode_value` | Function | `crates/agenc-ircd-runtime/src/e2ee/edge/result.rs` | 103 |
 | `decode_result` | Function | `crates/agenc-ircd-runtime/src/e2ee/edge/result.rs` | 166 |
 | `applied` | Function | `crates/agenc-ircd-runtime/src/federation/edge/barrier.rs` | 459 |
 | `batch_applied` | Function | `crates/agenc-ircd-runtime/src/federation/edge/mod.rs` | 1020 |
@@ -57,11 +59,9 @@ Start here when exploring this area:
 | `send_session_close` | Function | `crates/agenc-ircd-runtime/src/federation/edge/request.rs` | 409 |
 | `send_command` | Function | `crates/agenc-ircd-runtime/src/federation/edge/request.rs` | 428 |
 | `completed` | Function | `crates/agenc-ircd-runtime/src/federation/edge/request.rs` | 937 |
-| `u8` | Function | `crates/agenc-ircd-e2ee/src/mls_outer.rs` | 462 |
-| `u64` | Function | `crates/agenc-ircd-e2ee/src/mls_outer.rs` | 473 |
-| `varint` | Function | `crates/agenc-ircd-e2ee/src/mls_outer.rs` | 479 |
-| `decode_value` | Function | `crates/agenc-ircd-runtime/src/e2ee/edge/result.rs` | 103 |
-| `witness` | Function | `crates/agenc-ircd-runtime/src/e2ee/edge/events.rs` | 448 |
+| `apply` | Function | `crates/agenc-ircd-runtime/src/federation/edge/barrier.rs` | 328 |
+| `stage_rows` | Function | `crates/agenc-ircd-runtime/src/federation/edge/events.rs` | 269 |
+| `remember_nicknames` | Function | `crates/agenc-ircd-runtime/src/federation/edge/render.rs` | 19 |
 
 ## Execution Flows
 
@@ -82,10 +82,10 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Tests | 30 calls |
-| State_core | 27 calls |
+| Tests | 26 calls |
+| State_core | 24 calls |
 | Coordinator | 17 calls |
-| Federation | 13 calls |
+| Federation | 15 calls |
 | Wire | 7 calls |
 | Ops | 7 calls |
 | E2ee | 5 calls |
@@ -93,7 +93,7 @@ Start here when exploring this area:
 
 ## How to Explore
 
-1. `context({name: "decode_kind"})` — see callers and callees
+1. `context({name: "peek"})` — see callers and callees
 2. `query({search_query: "edge"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

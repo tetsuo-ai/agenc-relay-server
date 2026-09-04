@@ -1,11 +1,11 @@
 ---
 name: coordinator
-description: "Skill for the Coordinator area of agenc-ircd. 474 symbols across 69 files."
+description: "Skill for the Coordinator area of agenc-ircd. 473 symbols across 69 files."
 ---
 
 # Coordinator
 
-474 symbols | 69 files | Cohesion: 50%
+473 symbols | 69 files | Cohesion: 50%
 
 ## When to Use
 
@@ -18,7 +18,7 @@ description: "Skill for the Coordinator area of agenc-ircd. 474 symbols across 6
 | File | Symbols |
 |------|---------|
 | `crates/agenc-ircd-storage/src/construction_runtime.rs` | validate, start, start_streaming, start_inner, push (+85) |
-| `crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs` | decode_body, decode_object, route_target, direct_accounts, restore_log (+39) |
+| `crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs` | decode_body, decode_object, route_target, direct_accounts, restore_log (+38) |
 | `crates/agenc-ircd-storage/src/e2ee_records.rs` | record_kind_for_key, matches_key, object_body, state_body, structural_body (+37) |
 | `crates/agenc-ircd-runtime/src/federation/coordinator/request.rs` | run_operation, run_query, answer_page, finish_query_decision, close_session (+19) |
 | `crates/agenc-ircd-runtime/src/e2ee/coordinator/sync.rs` | begin_snapshot, entitled_entries, state_fetch, render_page, snapshot_write (+17) |
@@ -85,11 +85,11 @@ Start here when exploring this area:
 | Tests | 98 calls |
 | State_core | 38 calls |
 | E2ee_records | 18 calls |
-| Cluster_822 | 16 calls |
+| Cluster_823 | 16 calls |
 | Ops | 16 calls |
-| Federation | 14 calls |
-| Cluster_847 | 12 calls |
-| Cluster_853 | 10 calls |
+| Cluster_848 | 12 calls |
+| Federation | 11 calls |
+| Cluster_854 | 10 calls |
 
 ## How to Explore
 

@@ -55,7 +55,7 @@ Start here when exploring this area:
 | `decode_and_verify` | Function | `crates/agenc-ircd-storage/src/control.rs` | 298 |
 | `decode` | Function | `crates/agenc-ircd-storage/src/domain_records.rs` | 178 |
 | `decode` | Function | `crates/agenc-ircd-storage/src/e2ee_records.rs` | 298 |
-| `validate_state_body` | Function | `crates/agenc-ircd-storage/src/e2ee_records.rs` | 2581 |
+| `validate_state_body` | Function | `crates/agenc-ircd-storage/src/e2ee_records.rs` | 2583 |
 | `decode` | Function | `crates/agenc-ircd-storage/src/e2ee_records/barrier.rs` | 371 |
 | `validate_body` | Function | `crates/agenc-ircd-storage/src/e2ee_records/barrier.rs` | 577 |
 | `decode` | Function | `crates/agenc-ircd-storage/src/federation_records.rs` | 164 |
@@ -80,14 +80,14 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Cluster_822 | 31 calls |
+| Cluster_823 | 31 calls |
 | Coordinator | 30 calls |
 | Tests | 18 calls |
-| Cluster_844 | 4 calls |
-| Cluster_847 | 3 calls |
+| Cluster_845 | 4 calls |
+| Cluster_848 | 3 calls |
 | Cluster_226 | 3 calls |
-| Cluster_901 | 2 calls |
-| Cluster_846 | 2 calls |
+| Cluster_902 | 2 calls |
+| Cluster_847 | 2 calls |
 
 ## How to Explore
 

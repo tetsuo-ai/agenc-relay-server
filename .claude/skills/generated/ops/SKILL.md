@@ -1,11 +1,11 @@
 ---
 name: ops
-description: "Skill for the Ops area of agenc-ircd. 103 symbols across 12 files."
+description: "Skill for the Ops area of agenc-ircd. 104 symbols across 12 files."
 ---
 
 # Ops
 
-103 symbols | 12 files | Cohesion: 85%
+104 symbols | 12 files | Cohesion: 85%
 
 ## When to Use
 
@@ -17,7 +17,7 @@ description: "Skill for the Ops area of agenc-ircd. 103 symbols across 12 files.
 
 | File | Symbols |
 |------|---------|
-| `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/sequence.rs` | log, record_bytes, decode, sequencer_row, retain (+22) |
+| `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/sequence.rs` | log, record_bytes, decode, sequencer_row, retain (+23) |
 | `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/directory.rs` | digest, decode, single, directory_write, fetch_identity (+15) |
 | `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/route.rs` | conversation_state, expectation_for, expectation, audience, digest (+12) |
 | `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/mod.rs` | from, opcode, params, account_digest, account_id (+7) |
@@ -84,11 +84,11 @@ Start here when exploring this area:
 |------|-------------|
 | Coordinator | 25 calls |
 | Tests | 20 calls |
-| Edge | 9 calls |
-| Cluster_822 | 7 calls |
+| Edge | 10 calls |
+| Cluster_823 | 7 calls |
 | E2ee | 6 calls |
 | State_core | 5 calls |
-| Federation | 4 calls |
+| Federation | 3 calls |
 | Cluster_347 | 2 calls |
 
 ## How to Explore

@@ -1,11 +1,11 @@
 ---
 name: tests
-description: "Skill for the Tests area of agenc-ircd. 2087 symbols across 247 files."
+description: "Skill for the Tests area of agenc-ircd. 2088 symbols across 247 files."
 ---
 
 # Tests
 
-2087 symbols | 247 files | Cohesion: 69%
+2088 symbols | 247 files | Cohesion: 69%
 
 ## When to Use
 
@@ -25,7 +25,7 @@ description: "Skill for the Tests area of agenc-ircd. 2087 symbols across 247 fi
 | `crates/agenc-ircd-runtime/src/federation/edge/tests/harness.rs` | start_node, entropy_script, coordinator_identity, new, send (+51) |
 | `crates/agenc-ircd-testkit/tests/domain_reference_model.rs` | apply_production, apply_production_command, apply_production_join, reference_model_executes_every_command_with_real_behavior, reference_command_fixture (+49) |
 | `crates/agenc-ircd-auth/tests/stage_four.rs` | new, credential, operation_context, operation_route, operation_context_for_network (+45) |
-| `crates/agenc-ircd-testkit/src/e2ee_client.rs` | private_message_at_epoch, private_message_with_ciphertext, operational, key, public (+30) |
+| `crates/agenc-ircd-testkit/src/e2ee_client.rs` | private_message_at_epoch, private_message_with_ciphertext, operational, lock_ids, key (+30) |
 | `crates/agenc-ircd-domain/src/model.rs` | new, parse, with_policies, from_seed, test_public_cloak (+26) |
 
 ## Entry Points
@@ -83,11 +83,11 @@ Start here when exploring this area:
 | Area | Connections |
 |------|-------------|
 | Coordinator | 158 calls |
-| State_core | 112 calls |
+| State_core | 111 calls |
 | Federation | 75 calls |
-| Edge | 41 calls |
 | Supervisor | 37 calls |
-| Cluster_939 | 30 calls |
+| Edge | 35 calls |
+| Cluster_940 | 30 calls |
 | Codec | 25 calls |
 | Examples | 24 calls |
 

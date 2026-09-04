@@ -1,11 +1,11 @@
 ---
 name: federation
-description: "Skill for the Federation area of agenc-ircd. 344 symbols across 36 files."
+description: "Skill for the Federation area of agenc-ircd. 339 symbols across 36 files."
 ---
 
 # Federation
 
-344 symbols | 36 files | Cohesion: 80%
+339 symbols | 36 files | Cohesion: 81%
 
 ## When to Use
 
@@ -21,7 +21,7 @@ description: "Skill for the Federation area of agenc-ircd. 344 symbols across 36
 | `crates/agenc-ircd-domain/src/federation/projection.rs` | remove, remove_account, empty, new, derive (+78) |
 | `crates/agenc-ircd-domain/src/federation/replica.rs` | new, session, membership, account, local_members (+26) |
 | `crates/agenc-ircd-runtime/src/federation/link.rs` | write_line, release_queued, on_outbound, send_ping, parse_line (+17) |
-| `crates/agenc-ircd-e2ee/src/tls.rs` | new, for_maximum, remaining, finish, take (+13) |
+| `crates/agenc-ircd-e2ee/src/tls.rs` | new, for_maximum, remaining, finish, take (+11) |
 | `crates/agenc-ircd-runtime/src/federation/owner.rs` | squit, is_suspended, wait_until_wanted, register, unregister (+7) |
 | `crates/agenc-ircd-runtime/src/federation/certificate.rs` | server_id_from_certificate, tbs_extensions, subject_alt_name_value, parse_single_uri, read_tlv (+3) |
 | `crates/agenc-ircd-domain/src/federation/record.rs` | session, channel_detail, membership, invite, key (+1) |
@@ -52,8 +52,6 @@ Start here when exploring this area:
 | `derive` | Function | `crates/agenc-ircd-domain/src/federation/projection.rs` | 343 |
 | `encode` | Function | `crates/agenc-ircd-e2ee/src/federation/keyset_file.rs` | 34 |
 | `decode` | Function | `crates/agenc-ircd-e2ee/src/federation/keyset_file.rs` | 49 |
-| `new` | Function | `crates/agenc-ircd-e2ee/src/object.rs` | 226 |
-| `peek` | Function | `crates/agenc-ircd-e2ee/src/object.rs` | 266 |
 | `new` | Function | `crates/agenc-ircd-e2ee/src/tls.rs` | 27 |
 | `for_maximum` | Function | `crates/agenc-ircd-e2ee/src/tls.rs` | 89 |
 | `remaining` | Function | `crates/agenc-ircd-e2ee/src/tls.rs` | 121 |
@@ -62,6 +60,8 @@ Start here when exploring this area:
 | `u16` | Function | `crates/agenc-ircd-e2ee/src/tls.rs` | 154 |
 | `u32` | Function | `crates/agenc-ircd-e2ee/src/tls.rs` | 160 |
 | `u64` | Function | `crates/agenc-ircd-e2ee/src/tls.rs` | 166 |
+| `opaque` | Function | `crates/agenc-ircd-e2ee/src/tls.rs` | 194 |
+| `vector` | Function | `crates/agenc-ircd-e2ee/src/tls.rs` | 206 |
 
 ## Execution Flows
 
@@ -85,11 +85,11 @@ Start here when exploring this area:
 | Tests | 36 calls |
 | Coordinator | 16 calls |
 | Supervisor | 2 calls |
-| Cluster_424 | 2 calls |
-| Edge | 2 calls |
-| Cluster_967 | 2 calls |
+| Cluster_425 | 2 calls |
+| Cluster_968 | 2 calls |
 | State_core | 2 calls |
 | Cluster_86 | 1 calls |
+| Cluster_528 | 1 calls |
 
 ## How to Explore
 
