@@ -796,9 +796,11 @@ pub enum SequencerRow {
     Proof {
         /// Accumulator role.
         role: ProofRole,
-        /// The retained proof object identifier.
+        /// The retained proof object identifier; for a vote, the terminal
+        /// request that carried the principal's counted vote.
         object_id: [u8; HASH_BYTES],
-        /// The finality vote slot, zero for approvals and ACKs.
+        /// For a vote, the terminal it stands for (1 finalize or activate,
+        /// 2 abort); zero for approvals and ACKs.
         slot: u16,
     },
     /// One published policy of the conversation's chain (companion 9.3).

@@ -83,7 +83,7 @@ daemon, and a lifecycle driven by two independent MLS libraries; the
 external review task stays open. Stage 09 is the
 next implementation stage. The complete dependency-ordered roadmap lives in
 [TODO.md](TODO.md). See the
-[Stage 08 checkpoint](conformance/evidence/stage-08-e751e9e69d7a3a17532cf8d4b547bd25be2bf68e.json), the
+[Stage 08 checkpoint](conformance/evidence/stage-08-ae6457fb62fef8961d3caf904febed580e8b4a91.json), the
 [Stage 07 checkpoint](conformance/evidence/stage-07-1093d88d0057c3461a423285e0f86ff3775c1140.json), the
 [Stage 06 checkpoint](conformance/evidence/stage-06-65cce9d66f7bcfb0c0830a2ab1d42b52bff82942.json), the
 [Stage 05 storage profile](conformance/stage-five-storage-profile.toml), the

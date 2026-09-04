@@ -58,7 +58,7 @@ References: [Architecture §§1.2–4](docs/ircd-architecture-and-implementation
 | 05 | Durable and recoverable persistence | Complete | Pass, 2026-08-29 | [Current checkpoint](conformance/evidence/stage-05-4040796f2c21774d58ea7ce54e70a080678e83ac.json) |
 | 06 | Conforming single-node daemon | Complete | Pass, 2026-09-01 | [Current checkpoint](conformance/evidence/stage-06-65cce9d66f7bcfb0c0830a2ab1d42b52bff82942.json) |
 | 07 | Conforming base federation | Complete | Pass, 2026-09-03 | [Current checkpoint](conformance/evidence/stage-07-1093d88d0057c3461a423285e0f86ff3775c1140.json) |
-| 08 | Conforming E2EE server adapter | Complete (external review open) | Pass, 2026-09-04 | [Current checkpoint](conformance/evidence/stage-08-e751e9e69d7a3a17532cf8d4b547bd25be2bf68e.json) |
+| 08 | Conforming E2EE server adapter | Complete (external review open) | Pass, 2026-09-04 | [Current checkpoint](conformance/evidence/stage-08-ae6457fb62fef8961d3caf904febed580e8b4a91.json) |
 | 09 | Optional WSS and history profiles | Not started | Not run | Absent |
 | 10 | Production qualification and release evidence | Not started | Not run | Absent |
 
@@ -2556,33 +2556,34 @@ recorded here so a later reviewer does not have to rediscover them.
   classifier, quorum math, barrier verification, and padding arithmetic
   wait for the next coverage round.
 
-The design revision of 2026-09-04 (`S08-040` to `S08-044`) changed the
-profile after the first closure and moved the profile hash; the stage was
-re-closed the same day at exact source commit
-`e751e9e69d7a3a17532cf8d4b547bd25be2bf68e` (after the ledger replay and
-policy adjacency follow-up), whose manifest supersedes the `52c7ccb` and
-`a6e3c54` checkpoints (kept as history). Its
-interpretations: the server retains published policies per conversation
-under `policy/v1/` rows and keeps the current policy identifier as the
-policy the last finalization installed; the sequencer keeps a per-slot vote
-ledger in memory across requests, so a reload only forgets which principals
-already voted and never lowers the quorum; a vote whose signer is not a
-council principal or does not verify fails the request with
-`E2EE_BINDING_AUTH_INVALID`, while a sign-once conflict discards the vote;
-an abort request names no policy, so the current policy governs it; a
-ReInit terminal is governed by the old conversation's current policy over
-the attempt's slot; a policy change installs only the retained successor of
-the old policy; a reload replays the retained terminal requests of the open
-slot into its vote ledger; the ReInit successor's own route binding (an
-activation-anchored log meeting `EGROUP BIND`) stays deferred with the other
-in-progress ReInit phases; every sequencer record refreshes the durable route row and the
-retained route-state object, which the witness at the edge exposed as
-missing (a route-state cut after a finalization, and a reload, advertised
-the binding-time head, and an open candidate did not survive a reload); a close occupies the route sequence after the
-record that authorized it; the edge records a witness violation as a
-durable `witness/v1` row and closes the link, and logs never carry the
-identifiers; the `STORED POLICY` and `STORED AUTHORIZATION` lines name the
-request's conversation and subject, taken from the payload at ingress.
+The design revision of 2026-09-04 (`S08-040` to `S08-044`) changed the profile
+after the first closure and moved the profile hash; the stage was re-closed the
+same day at exact source commit `ae6457fb62fef8961d3caf904febed580e8b4a91`
+(after the ledger replay, policy adjacency, durable vote row, and queued witness follow-ups), whose manifest
+supersedes the `52c7ccb`, `a6e3c54`, and `e751e9e` checkpoints (kept as history). Its
+interpretations: the server retains published policies per conversation under
+`policy/v1/` rows and keeps the current policy identifier as the policy the last
+finalization installed; the sequencer keeps a per-slot vote ledger in memory
+across requests, so a reload only forgets which principals already voted and
+never lowers the quorum; a vote whose signer is not a council principal or does
+not verify fails the request with `E2EE_BINDING_AUTH_INVALID`, while a sign-once
+conflict discards the vote; an abort request names no policy, so the current
+policy governs it; a ReInit terminal is governed by the old conversation's
+current policy over the attempt's slot; a policy change installs only the
+retained successor of the old policy; each counted vote is a durable `vote/v1/`
+row naming its request and terminal, and a reload restores the open slot's
+ledger from those rows so no read-back order can flip a principal's decision; a
+witness violation found while draining queued events records its row like a live
+one; the ReInit successor's own route binding (an activation-anchored log
+meeting `EGROUP BIND`) stays deferred with the other in-progress ReInit phases;
+every sequencer record refreshes the durable route row and the retained
+route-state object, which the witness at the edge exposed as missing (a
+route-state cut after a finalization, and a reload, advertised the binding-time
+head, and an open candidate did not survive a reload); a close occupies the
+route sequence after the record that authorized it; the edge records a witness
+violation as a durable `witness/v1` row and closes the link, and logs never
+carry the identifiers; the `STORED POLICY` and `STORED AUTHORIZATION` lines name
+the request's conversation and subject, taken from the payload at ingress.
 
 ## Stage 09 — Optional WSS and pinned history profiles
 

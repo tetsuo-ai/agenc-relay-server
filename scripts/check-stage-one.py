@@ -13,10 +13,10 @@ from typing import NoReturn
 
 RAW_HASHES = {
     "docs/ircd-architecture-and-implementation-spec.md": (
-        "361d84acd8a0b772ce2e7978d2f80733595bd838c50cfc4ae2c57053ad1179ae"
+        "36f4191b8d891a3b7886df29c740c769edbce786f7a3460f92f243fce444a87a"
     ),
     "docs/irc-mls-e2ee-extension.md": (
-        "0d8a1ece85298f3758dcad06a1435950970ff934d260cba85077337aef1150df"
+        "398237eccca60c7056774b7565dbcac19c38417828191729f50d8fb86a33fdb1"
     ),
     "docs/federation-v1-profile.registry": (
         "30d4a9e9947691e2ca26e137e2762413a9b6a4fd308308bd5bfbd8cad20ac2e9"
@@ -30,7 +30,7 @@ PROFILE_HASHES = {
         "83702207e1e1153c8722d5cc668a7d1bab85ba518fcdde030a36811b41bdcc40"
     ),
     "e2ee-mls-v1": (
-        "45fcd3fd1dc5b17c0617eb84b09cc9b5e7197a59329fd5d526d5a882d6a80b5d"
+        "699c74adfe70c8cc336888e5191d1e09166c5de4406b9c7c8e9a58edadc48159"
     ),
 }
 PROFILE_LABELS = {

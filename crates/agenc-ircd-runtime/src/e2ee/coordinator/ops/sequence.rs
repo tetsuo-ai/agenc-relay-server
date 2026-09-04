@@ -132,10 +132,53 @@ fn council(
     Ok((retained.policy.clone(), rosters))
 }
 
-/// The votes counted for one subject so far, continued across requests.
+/// The votes counted for one subject so far, continued across requests,
+/// and the signers this request newly counted.
 struct Quorum {
     reached: bool,
     ledger: QuorumLedger,
+    accepted: Vec<([u8; 32], [u8; 16])>,
+}
+
+/// The terminal a durable vote row stands for (`slot` of a vote proof row).
+const VOTE_ROW_FINALIZE: u16 = 1;
+const VOTE_ROW_ABORT: u16 = 2;
+
+/// One durable `vote/v1/` row per newly counted principal, naming the
+/// request that carried the vote and the terminal it stands for, so a
+/// reload restores each principal's decision without depending on the
+/// order the requests are read back in.
+fn vote_rows(
+    conversation_id: &[u8; 32],
+    subject: &[u8; 32],
+    request_object_id: [u8; 32],
+    terminal: Terminal,
+    accepted: &[([u8; 32], [u8; 16])],
+) -> Result<Vec<crate::state_core::durable::AccountServiceDurableWrite>, Fail> {
+    let slot = match terminal.disposition {
+        agenc_ircd_e2ee::objects::sequencing::IrcDisposition::Finalize => VOTE_ROW_FINALIZE,
+        agenc_ircd_e2ee::objects::sequencing::IrcDisposition::Abort => VOTE_ROW_ABORT,
+    };
+    let row = SequencerRow::Proof {
+        role: ProofRole::Vote,
+        object_id: request_object_id,
+        slot,
+    }
+    .encode()
+    .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
+    accepted
+        .iter()
+        .map(|(root, device)| {
+            state_row(
+                TableId::E2eeState,
+                SEQUENCER_ROW_KIND,
+                SequencerRow::proof_key(ProofRole::Vote, conversation_id, subject, root, device)
+                    .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
+                row.clone(),
+            )
+            .map_err(Fail::from)
+        })
+        .collect()
 }
 
 /// Counts `votes` for `terminal` into the subject's ledger: a vote whose
@@ -160,8 +203,10 @@ fn count_votes(
         .get(subject)
         .cloned()
         .unwrap_or_default();
+    let mut accepted = Vec::new();
     for vote in votes {
         let signer = (vote.signer_root_fingerprint, vote.signer_device_id);
+        let known = ledger.votes().any(|(recorded, _)| *recorded == signer);
         let conflicting = ledger
             .votes()
             .any(|(recorded, stood)| *recorded == signer && *stood != terminal);
@@ -170,10 +215,14 @@ fn count_votes(
         }
         record(&mut ledger, vote)
             .map_err(|_| Fail::with(E2eeReplyCode::BindingAuthInvalid, conversation_id))?;
+        if !known {
+            accepted.push(signer);
+        }
     }
     Ok(Quorum {
         reached: ledger.quorum_reached(policy, &terminal),
         ledger,
+        accepted,
     })
 }
 
@@ -185,7 +234,8 @@ fn pending(
     request_object_id: [u8; 32],
     bytes: &[u8],
     subject: [u8; 32],
-    ledger: QuorumLedger,
+    terminal: Terminal,
+    quorum: Quorum,
 ) -> Result<Outcome, Fail> {
     let mut outcome = Outcome::scalar(ResultBody::Pending(
         conversation_id,
@@ -195,6 +245,14 @@ fn pending(
     outcome
         .writes
         .push(CompanionCoordinator::object_write(bytes)?);
+    outcome.writes.extend(vote_rows(
+        &conversation_id,
+        &subject,
+        request_object_id,
+        terminal,
+        &quorum.accepted,
+    )?);
+    let ledger = quorum.ledger;
     let retained = bytes.to_vec();
     outcome.effects.push(Box::new(move |companion| {
         retain(companion, retained);
@@ -616,9 +674,17 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             request_object_id,
             bytes,
             core.candidate_id,
-            quorum.ledger,
+            terminal,
+            quorum,
         );
     }
+    let finalize_rows = vote_rows(
+        &conversation_id,
+        &core.candidate_id,
+        request_object_id,
+        terminal,
+        &quorum.accepted,
+    )?;
     let position = log
         .terminal_position(&core.candidate_id)
         .map_err(|_| Fail::with(E2eeReplyCode::FinalityRequired, &conversation_id))?;
@@ -673,6 +739,7 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     ));
     outcome.security_mutation = true;
     outcome.writes.extend(refresh.writes);
+    outcome.writes.extend(finalize_rows);
     outcome
         .writes
         .push(CompanionCoordinator::object_write(bytes)?);
@@ -775,9 +842,17 @@ pub fn submit_abort(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             request_object_id,
             bytes,
             core.candidate_id,
-            quorum.ledger,
+            terminal,
+            quorum,
         );
     }
+    let abort_rows = vote_rows(
+        &conversation_id,
+        &core.candidate_id,
+        request_object_id,
+        terminal,
+        &quorum.accepted,
+    )?;
     let position = log
         .terminal_position(&core.candidate_id)
         .map_err(|_| Fail::with(E2eeReplyCode::FinalityRequired, &conversation_id))?;
@@ -822,6 +897,7 @@ pub fn submit_abort(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     ));
     outcome.security_mutation = true;
     outcome.writes.extend(refresh.writes);
+    outcome.writes.extend(abort_rows);
     outcome
         .writes
         .push(CompanionCoordinator::object_write(bytes)?);
@@ -1070,7 +1146,7 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
         .coordinator
         .signer()
         .ok_or_else(|| Fail::from(E2eeReplyCode::Syncing))?;
-    let (attempt_id, quorum, terminal_id, new_conversation, record) = if activate {
+    let (attempt_id, quorum, terminal, terminal_id, new_conversation, record) = if activate {
         let request: IrcReInitActivationRequest = decode(object.body(), MAX_REINIT_OBJECT)?;
         let core = request.core.clone();
         let core = &core;
@@ -1084,6 +1160,7 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
             CompanionCoordinator::id_of(SemanticHashDomain::ReinitActivationId, core)?;
         let attempt_id = core.reinit_attempt_id;
         let new_conversation = core.new_conversation_id;
+        let terminal = Terminal::finalize(terminal_id);
         let quorum = reinit_quorum(
             exec,
             log,
@@ -1091,7 +1168,7 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
             core.old_reinit_state_id,
             attempt_id,
             request.votes.as_slice(),
-            Terminal::finalize(terminal_id),
+            terminal,
         )?;
         let position = log
             .attempt_terminal_position(&attempt_id)
@@ -1115,6 +1192,7 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
         (
             attempt_id,
             quorum,
+            terminal,
             terminal_id,
             Some(new_conversation),
             IrcSequencerRecord::ReinitActivation(certificate),
@@ -1164,6 +1242,7 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
         (
             attempt_id,
             quorum,
+            terminal,
             terminal_id,
             None,
             IrcSequencerRecord::ReinitAbort(certificate),
@@ -1181,9 +1260,17 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
             request_object_id,
             bytes,
             attempt_id,
-            quorum.ledger,
+            terminal,
+            quorum,
         );
     }
+    let attempt_rows = vote_rows(
+        &old_conversation_id,
+        &attempt_id,
+        request_object_id,
+        terminal,
+        &quorum.accepted,
+    )?;
     let position = log
         .attempt_terminal_position(&attempt_id)
         .map_err(|_| Fail::with(E2eeReplyCode::FinalityRequired, &old_conversation_id))?;
@@ -1225,6 +1312,7 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
     )?;
     let mut outcome = Outcome::scalar(result);
     outcome.writes.extend(refresh.writes);
+    outcome.writes.extend(attempt_rows);
     outcome.security_mutation = true;
     outcome
         .writes

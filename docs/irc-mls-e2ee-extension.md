@@ -3420,9 +3420,10 @@ not verify fails the request with `E2EE_BINDING_AUTH_INVALID`; a vote from a
 principal the sequencer already counted for the other terminal of the same
 slot is discarded as a sign-once violation. It counts at most one vote per
 principal, keeps the count for the slot across requests so a later request
-need only add the missing votes (a reloaded coordinator rebuilds it from the
-retained terminal requests of the open slot), and signs the bounded proof
-snapshot with
+need only add the missing votes (each counted vote is recorded durably per
+principal, and a reloaded coordinator rebuilds the count from those records
+and the retained requests they name), and signs the bounded proof snapshot
+with
 label `IRC-MLS/1 commit finalization` only when at least `q` distinct valid
 FINALIZE votes stand. A request below `q` is retained and returns `PENDING`.
 Certification makes the authorization's resulting policy the current policy.

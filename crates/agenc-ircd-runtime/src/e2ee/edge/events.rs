@@ -918,8 +918,7 @@ impl E2eeEdge {
             match self.apply_event(context, edge, open, payload) {
                 Ok(more) => outputs.extend(more),
                 Err(_) => {
-                    self.counters.violations = self.counters.violations.saturating_add(1);
-                    self.link_down();
+                    self.fail_frame(context, edge);
                     break;
                 }
             }
