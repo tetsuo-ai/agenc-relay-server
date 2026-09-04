@@ -2570,10 +2570,14 @@ council principal or does not verify fails the request with
 `E2EE_BINDING_AUTH_INVALID`, while a sign-once conflict discards the vote;
 an abort request names no policy, so the current policy governs it; a
 ReInit terminal is governed by the old conversation's current policy over
-the attempt's slot; every terminal refreshes the durable route row and the
+the attempt's slot; a policy change installs only the retained successor of
+the old policy; a reload replays the retained terminal requests of the open
+slot into its vote ledger; the ReInit successor's own route binding (an
+activation-anchored log meeting `EGROUP BIND`) stays deferred with the other
+in-progress ReInit phases; every sequencer record refreshes the durable route row and the
 retained route-state object, which the witness at the edge exposed as
 missing (a route-state cut after a finalization, and a reload, advertised
-the binding-time head); a close occupies the route sequence after the
+the binding-time head, and an open candidate did not survive a reload); a close occupies the route sequence after the
 record that authorized it; the edge records a witness violation as a
 durable `witness/v1` row and closes the link, and logs never carry the
 identifiers; the `STORED POLICY` and `STORED AUTHORIZATION` lines name the

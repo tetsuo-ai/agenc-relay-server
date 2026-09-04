@@ -143,7 +143,34 @@ fn finalization_request(
     ack_bytes: &[u8],
     voters: &[u8],
 ) -> TestResult<Vec<u8>> {
-    let old_policy_id = harness.initial_policy_id()?;
+    let initial = harness.initial_policy_id()?;
+    finalization_request_under(
+        harness,
+        conversation,
+        receipt,
+        commit_object_id,
+        candidate_id,
+        ack_bytes,
+        voters,
+        (initial, initial),
+    )
+}
+
+/// A finalization request whose authorization names `policies` as the old
+/// and resulting policy, voted by `voters`.
+// agenc-review: allow owner=tests reviewed=2026-09-04 reason=one request names the harness the conversation the receipt the commit the candidate the ack the voters and both policies together
+#[allow(clippy::too_many_arguments)]
+fn finalization_request_under(
+    harness: &Harness,
+    conversation: [u8; 32],
+    receipt: &IrcCandidateReceipt,
+    commit_object_id: [u8; 32],
+    candidate_id: [u8; 32],
+    ack_bytes: &[u8],
+    voters: &[u8],
+    policies: ([u8; 32], [u8; 32]),
+) -> TestResult<Vec<u8>> {
+    let (old_policy_id, resulting_policy_id) = policies;
     let log = harness
         .coordinator
         .state
@@ -173,15 +200,14 @@ fn finalization_request(
         &mut budget,
     )?;
     let ack = IrcCommitAck::decode_exact(ack_object.body(), &mut budget)?;
-    let authorization = commit_authorization(
-        authorization_tbs(
-            conversation,
-            old_policy_id,
-            IrcCommitAuthorizationRule::RoutineSelfUpdate,
-            0,
-        ),
-        &[(&harness.principal, DEVICE)],
-    )?;
+    let mut tbs = authorization_tbs(
+        conversation,
+        old_policy_id,
+        IrcCommitAuthorizationRule::RoutineSelfUpdate,
+        0,
+    );
+    tbs.resulting_policy_id = resulting_policy_id;
+    let authorization = commit_authorization(tbs, &[(&harness.principal, DEVICE)])?;
     let finalization_id = semantic_id_of(SemanticHashDomain::FinalizationId, &core)?;
     let votes = voters
         .iter()
@@ -1057,6 +1083,7 @@ fn a_reloaded_coordinator_restores_the_policy_chain_and_the_current_policy() -> 
         .get(&conversation)
         .ok_or("state")?;
     let after = reloaded
+        .coordinator
         .state
         .conversations
         .get(&conversation)
@@ -1070,5 +1097,161 @@ fn a_reloaded_coordinator_restores_the_policy_chain_and_the_current_policy() -> 
         before.required_operational_policy_id
     );
     assert_eq!(after.principal_accounts, before.principal_accounts);
+    Ok(())
+}
+
+#[test]
+fn a_policy_change_installs_only_the_retained_successor_of_the_old_policy() -> TestResult {
+    let mut harness = Harness::new()?;
+    let conversation = harness.bind_channel()?;
+    let initial = harness.initial_policy_id()?;
+    let operational = policy_id_of(&harness.operational_policy)?;
+    let (receipt, commit_object_id, candidate_id) =
+        submit_candidate(&mut harness, conversation, 0, 10)?;
+    let ack_bytes = acknowledge(&mut harness, conversation, candidate_id, commit_object_id)?;
+    // An unretained resulting policy is required first.
+    let unretained = finalization_request_under(
+        &harness,
+        conversation,
+        &receipt,
+        commit_object_id,
+        candidate_id,
+        &ack_bytes,
+        &[DEVICE],
+        (initial, [90; 32]),
+    )?;
+    assert_eq!(
+        code(harness.run(Op::SubmitFinalization, &conversation, Some(&unretained))?),
+        Some(E2eeReplyCode::PolicyRequired)
+    );
+    // The retained successor installs and becomes current.
+    let change = finalization_request_under(
+        &harness,
+        conversation,
+        &receipt,
+        commit_object_id,
+        candidate_id,
+        &ack_bytes,
+        &[DEVICE],
+        (initial, operational),
+    )?;
+    let outcome = ok(harness.run(Op::SubmitFinalization, &conversation, Some(&change))?)?;
+    assert!(matches!(outcome.result, ResultBody::Finalized(..)));
+    let state = harness
+        .coordinator
+        .state
+        .conversations
+        .get(&conversation)
+        .ok_or("state")?;
+    assert_eq!(state.current_policy_id, operational);
+    // Under the new policy the old one is retained but neither current nor
+    // its successor: naming it as old is stale, naming it as resulting is
+    // a malformed transition.
+    let (receipt, commit_object_id, candidate_id) =
+        submit_candidate(&mut harness, conversation, 1, 11)?;
+    let ack_bytes = ack(conversation, 1, candidate_id, commit_object_id)?;
+    ok(harness.run(Op::SubmitCommitAck, &conversation, Some(&ack_bytes))?)?;
+    let stale = finalization_request_under(
+        &harness,
+        conversation,
+        &receipt,
+        commit_object_id,
+        candidate_id,
+        &ack_bytes,
+        &[DEVICE],
+        (initial, initial),
+    )?;
+    assert_eq!(
+        code(harness.run(Op::SubmitFinalization, &conversation, Some(&stale))?),
+        Some(E2eeReplyCode::EpochStale)
+    );
+    let regress = finalization_request_under(
+        &harness,
+        conversation,
+        &receipt,
+        commit_object_id,
+        candidate_id,
+        &ack_bytes,
+        &[DEVICE],
+        (operational, initial),
+    )?;
+    assert_eq!(
+        code(harness.run(Op::SubmitFinalization, &conversation, Some(&regress))?),
+        Some(E2eeReplyCode::BindingAuthInvalid)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_reloaded_coordinator_keeps_the_votes_a_slot_had_gathered() -> TestResult {
+    let mut harness = Harness::with_devices(&[DEVICE, SECOND_DEVICE])?;
+    let conversation = harness.bind_channel()?;
+    let (receipt, commit_object_id, candidate_id) =
+        submit_candidate(&mut harness, conversation, 0, 10)?;
+    let ack_bytes = acknowledge(&mut harness, conversation, candidate_id, commit_object_id)?;
+    let first = finalization_request(
+        &harness,
+        conversation,
+        &receipt,
+        commit_object_id,
+        candidate_id,
+        &ack_bytes,
+        &[DEVICE],
+    )?;
+    let outcome = ok(harness.run(Op::SubmitFinalization, &conversation, Some(&first))?)?;
+    assert!(matches!(outcome.result, ResultBody::Pending(..)));
+    let mut reloaded = harness.reloaded()?;
+    let ledger = reloaded
+        .coordinator
+        .state
+        .conversations
+        .get(&conversation)
+        .and_then(|state| state.vote_ledgers.get(&candidate_id))
+        .ok_or("the replayed ledger")?;
+    assert_eq!(ledger.votes().count(), 1);
+    // The first device's ABORT vote after the reload is still a sign-once
+    // conflict, and the second device's FINALIZE vote alone completes the
+    // quorum the first request began.
+    let core = IrcAbortCoreTbs {
+        profile_version: 1,
+        network_id: NETWORK,
+        conversation_id: conversation,
+        prior_state_id: receipt.tbs.prior_state_id,
+        candidate_id,
+        prior_epoch: 0,
+        reason: IrcCommitAbortReason::SenderWithdrawn,
+        evidence_digest: [0; 32],
+    };
+    let abort_id = semantic_id_of(SemanticHashDomain::AbortId, &core)?;
+    let abort = wire(
+        IrcWireObjectKind::AbortRequest,
+        &IrcAbortRequest {
+            core,
+            receipt: receipt.clone(),
+            votes: TlsVec::new(vec![vote(
+                &reloaded,
+                DEVICE,
+                &receipt,
+                candidate_id,
+                Terminal::abort(abort_id, 1)?,
+            )?])?,
+        },
+    )?;
+    let outcome = ok(reloaded.run(Op::SubmitAbort, &conversation, Some(&abort))?)?;
+    assert!(matches!(
+        outcome.result,
+        ResultBody::Pending(_, PendingKind::Abort, _)
+    ));
+    let second = finalization_request(
+        &reloaded,
+        conversation,
+        &receipt,
+        commit_object_id,
+        candidate_id,
+        &ack_bytes,
+        &[SECOND_DEVICE],
+    )?;
+    let outcome = ok(reloaded.run(Op::SubmitFinalization, &conversation, Some(&second))?)?;
+    assert!(matches!(outcome.result, ResultBody::Finalized(..)));
     Ok(())
 }

@@ -117,6 +117,8 @@ struct Harness {
     operational_policy: IrcPolicy,
     /// Every durable write the handlers staged, in order, for reloads.
     writes: Vec<crate::state_core::durable::AccountServiceDurableWrite>,
+    /// The principal's device seeds, so a reload rebuilds the same policies.
+    devices: Vec<u8>,
 }
 
 impl Harness {
@@ -172,14 +174,16 @@ impl Harness {
             initial_policy,
             operational_policy,
             writes: Vec::new(),
+            devices: devices.to_vec(),
         })
     }
 
-    /// A fresh coordinator rebuilt from every row this harness staged, as
-    /// the daemon rebuilds it at startup.
-    fn reloaded(&self) -> TestResult<CompanionCoordinator> {
+    /// A fresh harness whose coordinator is rebuilt from every row this
+    /// harness staged, as the daemon rebuilds it at startup; it continues
+    /// the request sequence.
+    fn reloaded(&self) -> TestResult<Harness> {
         use crate::state_core::durable::AccountServiceDurableWrite as Write;
-        let mut fresh = Harness::new()?;
+        let mut fresh = Harness::with_devices(&self.devices)?;
         for write in &self.writes {
             let Write::Put {
                 table,
@@ -193,7 +197,15 @@ impl Harness {
             fresh.coordinator.admit_restored(*table, key, &value);
         }
         fresh.coordinator.finish_restore();
-        Ok(fresh.coordinator)
+        fresh.sequence = self.sequence;
+        // Companion origins are not durable: the edge re-declares the
+        // attached device after a reload, which the harness copies over.
+        let device = self.device();
+        if let Some(origin) = fresh.coordinator.state.origins.get_mut(&origin_key()) {
+            origin.next_sequence = self.sequence;
+            origin.device = device;
+        }
+        Ok(fresh)
     }
 
     /// The binding's initial policy identifier.
