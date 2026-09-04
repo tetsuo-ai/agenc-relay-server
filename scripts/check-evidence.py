@@ -1378,10 +1378,39 @@ def validate(root: Path) -> tuple[int, int]:
     return len(bindings), entry_count
 
 
+# Tasks a stage may close around because their completion is outside the
+# implementing team's hands. Each entry names the committed record that must
+# carry the task with the state ``blocked-external``; the recorded gate and
+# the closure manifest then cover the exact source commit with that task
+# open, and nothing else may be open.
+EXTERNALLY_BLOCKED_TASKS: dict[int, tuple[str, str]] = {
+    8: ("S08-039", "conformance/stage-eight-e2ee-profile.toml"),
+}
+
+
+def externally_blocked_tasks(root: Path, stage: int, source_commit: str) -> set[str]:
+    """Return the tasks the committed stage record declares externally blocked."""
+    blocked = EXTERNALLY_BLOCKED_TASKS.get(stage)
+    if blocked is None:
+        return set()
+    task, relative = blocked
+    try:
+        record = tomllib.loads(commit_blob(root, source_commit, relative).decode("utf-8"))
+    except (UnicodeError, tomllib.TOMLDecodeError) as error:
+        raise EvidenceError(f"stage record {relative} is unreadable: {error}") from error
+    review = record.get("review")
+    if not isinstance(review, dict) or review.get("task") != task:
+        raise EvidenceError(f"stage record {relative} does not name blocked task {task}")
+    if review.get("state") != "blocked-external":
+        raise EvidenceError(f"stage record {relative} does not record {task} as blocked-external")
+    return {task}
+
+
 def required_stage_evidence_ids_from_data(
     stage: int,
     records: object,
     states: dict[str, bool],
+    blocked: frozenset[str] = frozenset(),
 ) -> set[str]:
     """Return the required IDs after validating one source requirement ledger."""
     prefix = f"S{stage:02d}-"
@@ -1410,7 +1439,7 @@ def required_stage_evidence_ids_from_data(
     incomplete_tasks = sorted(
         task
         for task in stage_tasks
-        if not task.endswith("-900") and not states[task]
+        if not task.endswith("-900") and not states[task] and task not in blocked
     )
     if incomplete_tasks:
         raise EvidenceError(
@@ -1484,6 +1513,7 @@ def required_stage_evidence_ids(
             stage,
             ledger.get("requirement"),
             states,
+            frozenset(externally_blocked_tasks(root, stage, source_commit)),
         )
 
 
@@ -2329,6 +2359,11 @@ kind = "normative-requirement"
             ) from error
     else:
         raise EvidenceError("self-test 'incomplete source task' was accepted")
+    cases += 1
+
+    required_stage_evidence_ids_from_data(
+        0, source_records, incomplete_states, frozenset({"S00-001"})
+    )
     cases += 1
 
     try:
