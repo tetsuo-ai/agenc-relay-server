@@ -1,0 +1,145 @@
+schema_version = 1
+stage = 8
+
+[[library]]
+name = "openmls"
+version = "0.9.0"
+role = "mls-client"
+
+[[library]]
+name = "mls-rs"
+version = "0.56.0"
+role = "mls-client"
+
+[[library]]
+name = "agenc-ircd-e2ee"
+version = "0.0.0"
+role = "delivery-service-view"
+
+[[result]]
+id = "kp-mls-rs-s1"
+suite = 1
+producer = "mls-rs"
+consumer = "daemon"
+outcome = "agree"
+test = "crates/agenc-ircd-testkit/tests/mls_interop.rs"
+
+[[result]]
+id = "welcome-openmls-to-mls-rs-s1"
+suite = 1
+producer = "openmls"
+consumer = "mls-rs"
+outcome = "agree"
+test = "crates/agenc-ircd-testkit/tests/mls_interop.rs"
+
+[[result]]
+id = "private-openmls-s1"
+suite = 1
+producer = "openmls"
+consumer = "daemon"
+outcome = "agree"
+test = "crates/agenc-ircd-testkit/tests/mls_interop.rs"
+
+[[result]]
+id = "private-mls-rs-in-openmls-group-s1"
+suite = 1
+producer = "mls-rs"
+consumer = "daemon"
+outcome = "agree"
+test = "crates/agenc-ircd-testkit/tests/mls_interop.rs"
+
+[[result]]
+id = "kp-openmls-s1"
+suite = 1
+producer = "openmls"
+consumer = "daemon"
+outcome = "agree"
+test = "crates/agenc-ircd-testkit/tests/mls_interop.rs"
+
+[[result]]
+id = "welcome-mls-rs-to-openmls-s1"
+suite = 1
+producer = "mls-rs"
+consumer = "openmls"
+outcome = "agree"
+test = "crates/agenc-ircd-testkit/tests/mls_interop.rs"
+
+[[result]]
+id = "private-mls-rs-s1"
+suite = 1
+producer = "mls-rs"
+consumer = "daemon"
+outcome = "agree"
+test = "crates/agenc-ircd-testkit/tests/mls_interop.rs"
+
+[[result]]
+id = "private-openmls-in-mls-rs-group-s1"
+suite = 1
+producer = "openmls"
+consumer = "daemon"
+outcome = "agree"
+test = "crates/agenc-ircd-testkit/tests/mls_interop.rs"
+
+[[result]]
+id = "kp-mls-rs-s3"
+suite = 3
+producer = "mls-rs"
+consumer = "daemon"
+outcome = "agree"
+test = "crates/agenc-ircd-testkit/tests/mls_interop.rs"
+
+[[result]]
+id = "welcome-openmls-to-mls-rs-s3"
+suite = 3
+producer = "openmls"
+consumer = "mls-rs"
+outcome = "agree"
+test = "crates/agenc-ircd-testkit/tests/mls_interop.rs"
+
+[[result]]
+id = "private-openmls-s3"
+suite = 3
+producer = "openmls"
+consumer = "daemon"
+outcome = "agree"
+test = "crates/agenc-ircd-testkit/tests/mls_interop.rs"
+
+[[result]]
+id = "private-mls-rs-in-openmls-group-s3"
+suite = 3
+producer = "mls-rs"
+consumer = "daemon"
+outcome = "agree"
+test = "crates/agenc-ircd-testkit/tests/mls_interop.rs"
+
+[[result]]
+id = "kp-openmls-s3"
+suite = 3
+producer = "openmls"
+consumer = "daemon"
+outcome = "agree"
+test = "crates/agenc-ircd-testkit/tests/mls_interop.rs"
+
+[[result]]
+id = "welcome-mls-rs-to-openmls-s3"
+suite = 3
+producer = "mls-rs"
+consumer = "openmls"
+outcome = "agree"
+test = "crates/agenc-ircd-testkit/tests/mls_interop.rs"
+
+[[result]]
+id = "private-mls-rs-s3"
+suite = 3
+producer = "mls-rs"
+consumer = "daemon"
+outcome = "agree"
+test = "crates/agenc-ircd-testkit/tests/mls_interop.rs"
+
+[[result]]
+id = "private-openmls-in-mls-rs-group-s3"
+suite = 3
+producer = "openmls"
+consumer = "daemon"
+outcome = "agree"
+test = "crates/agenc-ircd-testkit/tests/mls_interop.rs"

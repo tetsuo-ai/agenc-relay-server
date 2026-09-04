@@ -925,6 +925,206 @@ claim_ids = ["S07-900"]
 kind = "stage-gate"
 
 [[evidence]]
+id = "EVID-S08-001-PROFILE"
+claim_ids = ["S08-001"]
+kind = "exact-profile-negotiation"
+
+[[evidence]]
+id = "EVID-S08-002-SEPARATION"
+claim_ids = ["S08-002"]
+kind = "daemon-client-separation"
+
+[[evidence]]
+id = "EVID-S08-003-IDENTITY"
+claim_ids = ["S08-003"]
+kind = "public-identity-validation"
+
+[[evidence]]
+id = "EVID-S08-004-ROUTES"
+claim_ids = ["S08-004"]
+kind = "route-identity-binding-locks"
+
+[[evidence]]
+id = "EVID-S08-005-AUTHORITY"
+claim_ids = ["S08-005"]
+kind = "sequencer-policy-finality-authority"
+
+[[evidence]]
+id = "EVID-S08-006-CONTEXT"
+claim_ids = ["S08-006"]
+kind = "mls-context-envelopes"
+
+[[evidence]]
+id = "EVID-S08-007-CARRIERS"
+claim_ids = ["S08-007"]
+kind = "client-carriers-reassembly"
+
+[[evidence]]
+id = "EVID-S08-008-SEQUENCING"
+claim_ids = ["S08-008"]
+kind = "candidate-receipt-finality"
+
+[[evidence]]
+id = "EVID-S08-009-FEDERATION"
+claim_ids = ["S08-009"]
+kind = "companion-federation-exchange"
+
+[[evidence]]
+id = "EVID-S08-010-LIFECYCLE"
+claim_ids = ["S08-010"]
+kind = "server-visible-group-lifecycle"
+
+[[evidence]]
+id = "EVID-S08-011-REMOVAL"
+claim_ids = ["S08-011"]
+kind = "removal-revocation-recovery-gates"
+
+[[evidence]]
+id = "EVID-S08-012-REINIT"
+claim_ids = ["S08-012"]
+kind = "reinit-route-migration"
+
+[[evidence]]
+id = "EVID-S08-013-PERSISTENCE"
+claim_ids = ["S08-013"]
+kind = "replay-mailbox-persistence"
+
+[[evidence]]
+id = "EVID-S08-014-LIMITS"
+claim_ids = ["S08-014"]
+kind = "resource-timing-limits"
+
+[[evidence]]
+id = "EVID-S08-015-DOWNGRADE"
+claim_ids = ["S08-015"]
+kind = "downgrade-reset-failure"
+
+[[evidence]]
+id = "EVID-S08-016-BARRIER"
+claim_ids = ["S08-016"]
+kind = "cross-profile-durable-barrier"
+
+[[evidence]]
+id = "EVID-S08-017-INTEGRATION"
+claim_ids = ["S08-017"]
+kind = "encrypted-node-integration"
+
+[[evidence]]
+id = "EVID-S08-018-CORPUS"
+claim_ids = ["S08-018"]
+kind = "mls-corpus-pin"
+
+[[evidence]]
+id = "EVID-S08-019-VECTORS"
+claim_ids = ["S08-019"]
+kind = "independent-object-vectors"
+
+[[evidence]]
+id = "EVID-S08-020-INTEROP"
+claim_ids = ["S08-020"]
+kind = "cross-implementation-mls"
+
+[[evidence]]
+id = "EVID-S08-021-PLAINTEXT"
+claim_ids = ["S08-021"]
+kind = "plaintext-rejection-matrix"
+
+[[evidence]]
+id = "EVID-S08-022-BOUNDARIES"
+claim_ids = ["S08-022"]
+kind = "limit-padding-boundaries"
+
+[[evidence]]
+id = "EVID-S08-023-FUZZ"
+claim_ids = ["S08-023"]
+kind = "parser-fuzzing"
+
+[[evidence]]
+id = "EVID-S08-024-ADVERSARIAL"
+claim_ids = ["S08-024"]
+kind = "stateful-adversarial-properties"
+
+[[evidence]]
+id = "EVID-S08-025-CRASH"
+claim_ids = ["S08-025"]
+kind = "durable-boundary-crash-tests"
+
+[[evidence]]
+id = "EVID-S08-026-QUORUM"
+claim_ids = ["S08-026"]
+kind = "finality-quorum-exhaustion"
+
+[[evidence]]
+id = "EVID-S08-027-TRANSITIONS"
+claim_ids = ["S08-027"]
+kind = "identity-roster-transitions"
+
+[[evidence]]
+id = "EVID-S08-028-LOAD"
+claim_ids = ["S08-028"]
+kind = "maximum-shape-load"
+
+[[evidence]]
+id = "EVID-S08-029-CANARIES"
+claim_ids = ["S08-029"]
+kind = "log-telemetry-canaries"
+
+[[evidence]]
+id = "EVID-S08-030-REINIT-RACES"
+claim_ids = ["S08-030"]
+kind = "reinit-race-matrix"
+
+[[evidence]]
+id = "EVID-S08-031-ECAP"
+claim_ids = ["S08-031"]
+kind = "ecap-federation-transitions"
+
+[[evidence]]
+id = "EVID-S08-032-WIRE-BUDGET"
+claim_ids = ["S08-032"]
+kind = "mechanical-wire-budget"
+
+[[evidence]]
+id = "EVID-S08-033-SEMANTIC-IDS"
+claim_ids = ["S08-033"]
+kind = "semantic-id-malleability"
+
+[[evidence]]
+id = "EVID-S08-034-COUNCIL"
+claim_ids = ["S08-034"]
+kind = "finality-council-transitions"
+
+[[evidence]]
+id = "EVID-S08-035-OPERATIONS"
+claim_ids = ["S08-035"]
+kind = "federation-operation-semantics"
+
+[[evidence]]
+id = "EVID-S08-036-IDEMPOTENCY"
+claim_ids = ["S08-036"]
+kind = "idempotency-crash-tests"
+
+[[evidence]]
+id = "EVID-S08-037-CHAINS"
+claim_ids = ["S08-037"]
+kind = "root-binding-chains"
+
+[[evidence]]
+id = "EVID-S08-038-SCHEDULES"
+claim_ids = ["S08-038"]
+kind = "barrier-schedules"
+
+[[evidence]]
+id = "EVID-S08-039-REVIEW"
+claim_ids = ["S08-039"]
+kind = "external-review"
+
+[[evidence]]
+id = "EVID-S08-900-STAGE-GATE"
+claim_ids = ["S08-900"]
+kind = "stage-gate"
+
+[[evidence]]
 id = "EVID-ARCH-AUTH-03"
 claim_ids = ["ARCH-AUTH-03"]
 kind = "normative-requirement"
@@ -1042,4 +1242,574 @@ kind = "normative-requirement"
 [[evidence]]
 id = "EVID-ARCH-TRN-03"
 claim_ids = ["ARCH-TRN-03"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-CON-01"
+claim_ids = ["ARCH-CON-01"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-CON-02"
+claim_ids = ["ARCH-CON-02"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-CON-03"
+claim_ids = ["ARCH-CON-03"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-CON-04"
+claim_ids = ["ARCH-CON-04"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-CON-05"
+claim_ids = ["ARCH-CON-05"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-DUR-01"
+claim_ids = ["ARCH-DUR-01"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-DUR-02"
+claim_ids = ["ARCH-DUR-02"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-E2E-01"
+claim_ids = ["ARCH-E2E-01"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-E2E-02"
+claim_ids = ["ARCH-E2E-02"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-E2E-03"
+claim_ids = ["ARCH-E2E-03"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-E2E-04"
+claim_ids = ["ARCH-E2E-04"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-E2E-05"
+claim_ids = ["ARCH-E2E-05"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-E2E-06"
+claim_ids = ["ARCH-E2E-06"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-E2E-07"
+claim_ids = ["ARCH-E2E-07"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-FED-02"
+claim_ids = ["ARCH-FED-02"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-FED-03"
+claim_ids = ["ARCH-FED-03"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-FED-10"
+claim_ids = ["ARCH-FED-10"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-FED-11"
+claim_ids = ["ARCH-FED-11"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-FED-12"
+claim_ids = ["ARCH-FED-12"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-ID-01"
+claim_ids = ["ARCH-ID-01"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-ID-02"
+claim_ids = ["ARCH-ID-02"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-ID-06"
+claim_ids = ["ARCH-ID-06"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-00FBB19D3A47F35629EA"
+claim_ids = ["ARCH-REQ-00FBB19D3A47F35629EA"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-630535C69EC8B9414843"
+claim_ids = ["ARCH-REQ-630535C69EC8B9414843"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-705219A4555AC2842B77"
+claim_ids = ["ARCH-REQ-705219A4555AC2842B77"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-D74CDEA02D46EEA2E9AD"
+claim_ids = ["ARCH-REQ-D74CDEA02D46EEA2E9AD"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-D8DDA49F3C32422D93B3"
+claim_ids = ["ARCH-REQ-D8DDA49F3C32422D93B3"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-E592762A378E0D95835A"
+claim_ids = ["ARCH-REQ-E592762A378E0D95835A"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-F236FC1F5FD8129AB518"
+claim_ids = ["ARCH-REQ-F236FC1F5FD8129AB518"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-STA-02"
+claim_ids = ["ARCH-STA-02"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-STA-08"
+claim_ids = ["ARCH-STA-08"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-TRN-04"
+claim_ids = ["ARCH-TRN-04"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-TRN-05"
+claim_ids = ["ARCH-TRN-05"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-TRN-06"
+claim_ids = ["ARCH-TRN-06"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-03E795692C36DFAE083B"
+claim_ids = ["E2EE-REQ-03E795692C36DFAE083B"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-04B0129952BBBB1F3D22"
+claim_ids = ["E2EE-REQ-04B0129952BBBB1F3D22"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-0950B248DBB87C569FE7"
+claim_ids = ["E2EE-REQ-0950B248DBB87C569FE7"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-0DAEDE4522366E3A68A9"
+claim_ids = ["E2EE-REQ-0DAEDE4522366E3A68A9"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-0EE614CD32C84FA9F408"
+claim_ids = ["E2EE-REQ-0EE614CD32C84FA9F408"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-1AB78DA63741FF0B38CF"
+claim_ids = ["E2EE-REQ-1AB78DA63741FF0B38CF"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-1BFDC5AC26176497302E"
+claim_ids = ["E2EE-REQ-1BFDC5AC26176497302E"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-208C5CAB7399B4AC15B8"
+claim_ids = ["E2EE-REQ-208C5CAB7399B4AC15B8"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-21F466D08365E6787EFF"
+claim_ids = ["E2EE-REQ-21F466D08365E6787EFF"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-28CC5A2874FBFEDC8694"
+claim_ids = ["E2EE-REQ-28CC5A2874FBFEDC8694"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-2F0777EEA2E2B0559F6D"
+claim_ids = ["E2EE-REQ-2F0777EEA2E2B0559F6D"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-37736EFE55D201CBE671"
+claim_ids = ["E2EE-REQ-37736EFE55D201CBE671"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-37CAE24A086303163D86"
+claim_ids = ["E2EE-REQ-37CAE24A086303163D86"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-3AE1FE848688A346F9F1"
+claim_ids = ["E2EE-REQ-3AE1FE848688A346F9F1"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-3DDAFB884DFFB22C1F74"
+claim_ids = ["E2EE-REQ-3DDAFB884DFFB22C1F74"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-3DFFF778DA62F4CEEF8F"
+claim_ids = ["E2EE-REQ-3DFFF778DA62F4CEEF8F"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-3F31F96A8E03DA4C101C"
+claim_ids = ["E2EE-REQ-3F31F96A8E03DA4C101C"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-3F6EB7E7803E9A17D029"
+claim_ids = ["E2EE-REQ-3F6EB7E7803E9A17D029"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-47F62E0752E7757399CD"
+claim_ids = ["E2EE-REQ-47F62E0752E7757399CD"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-48C5B151716A5DA59976"
+claim_ids = ["E2EE-REQ-48C5B151716A5DA59976"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-4A2736C8DC8339780AA6"
+claim_ids = ["E2EE-REQ-4A2736C8DC8339780AA6"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-4A2B327FEB0ED0D66724"
+claim_ids = ["E2EE-REQ-4A2B327FEB0ED0D66724"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-4B9FA0731463AF395EEF"
+claim_ids = ["E2EE-REQ-4B9FA0731463AF395EEF"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-4E4E130CEAB680D99587"
+claim_ids = ["E2EE-REQ-4E4E130CEAB680D99587"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-4ECEEB84B918BCA2DBE3"
+claim_ids = ["E2EE-REQ-4ECEEB84B918BCA2DBE3"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-4EFBE464A39690115414"
+claim_ids = ["E2EE-REQ-4EFBE464A39690115414"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-532CF56360A03DCF3C39"
+claim_ids = ["E2EE-REQ-532CF56360A03DCF3C39"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-54D3BF177A5D79854AEC"
+claim_ids = ["E2EE-REQ-54D3BF177A5D79854AEC"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-58217F311021E979779A"
+claim_ids = ["E2EE-REQ-58217F311021E979779A"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-5B3475BE0506C311BEF2"
+claim_ids = ["E2EE-REQ-5B3475BE0506C311BEF2"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-5B7791BEAEA4EF6B0D60"
+claim_ids = ["E2EE-REQ-5B7791BEAEA4EF6B0D60"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-67059195AB3AA10AAD9B"
+claim_ids = ["E2EE-REQ-67059195AB3AA10AAD9B"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-6A1A40DF827404DFC2E0"
+claim_ids = ["E2EE-REQ-6A1A40DF827404DFC2E0"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-72ECA857E694D0439A70"
+claim_ids = ["E2EE-REQ-72ECA857E694D0439A70"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-73270B473C2AB773AF11"
+claim_ids = ["E2EE-REQ-73270B473C2AB773AF11"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-74E9B5BFDE9BE0345707"
+claim_ids = ["E2EE-REQ-74E9B5BFDE9BE0345707"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-75819BD50FB3E71F2B91"
+claim_ids = ["E2EE-REQ-75819BD50FB3E71F2B91"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-7FE02BCBD9EEB3934B70"
+claim_ids = ["E2EE-REQ-7FE02BCBD9EEB3934B70"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-845B04F1228AFD8867F1"
+claim_ids = ["E2EE-REQ-845B04F1228AFD8867F1"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-865E52D8D04B59FEEFBE"
+claim_ids = ["E2EE-REQ-865E52D8D04B59FEEFBE"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-87B4B4DBBAD9DB97F76A"
+claim_ids = ["E2EE-REQ-87B4B4DBBAD9DB97F76A"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-8AB2B222BF622D4C4BDF"
+claim_ids = ["E2EE-REQ-8AB2B222BF622D4C4BDF"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-8B777BE6D9A7ED988687"
+claim_ids = ["E2EE-REQ-8B777BE6D9A7ED988687"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-8C607B4410F376797BD2"
+claim_ids = ["E2EE-REQ-8C607B4410F376797BD2"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-9641FAA02EEEC75A2E7D"
+claim_ids = ["E2EE-REQ-9641FAA02EEEC75A2E7D"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-98421AA3C0425E259F8F"
+claim_ids = ["E2EE-REQ-98421AA3C0425E259F8F"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-986A7772723E16360520"
+claim_ids = ["E2EE-REQ-986A7772723E16360520"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-98C7F0834891533DE1BC"
+claim_ids = ["E2EE-REQ-98C7F0834891533DE1BC"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-9A4E05845BDB4B1C7D30"
+claim_ids = ["E2EE-REQ-9A4E05845BDB4B1C7D30"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-9EA1028E2CE3115F5EEB"
+claim_ids = ["E2EE-REQ-9EA1028E2CE3115F5EEB"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-A141AC00A13A398685DC"
+claim_ids = ["E2EE-REQ-A141AC00A13A398685DC"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-A5E4E2058896C2016403"
+claim_ids = ["E2EE-REQ-A5E4E2058896C2016403"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-A7C32D4A15F7F0AF4F82"
+claim_ids = ["E2EE-REQ-A7C32D4A15F7F0AF4F82"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-AC36B134578CBDB4F7A2"
+claim_ids = ["E2EE-REQ-AC36B134578CBDB4F7A2"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-B1A07872530E53E1C5E0"
+claim_ids = ["E2EE-REQ-B1A07872530E53E1C5E0"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-B341221DC3B1063B9F41"
+claim_ids = ["E2EE-REQ-B341221DC3B1063B9F41"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-B73C16A97C1278CDDE0B"
+claim_ids = ["E2EE-REQ-B73C16A97C1278CDDE0B"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-B8F44A765000AE5B6944"
+claim_ids = ["E2EE-REQ-B8F44A765000AE5B6944"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-B93A7B094027B1B00105"
+claim_ids = ["E2EE-REQ-B93A7B094027B1B00105"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-B99A6DD4949FED0CE02A"
+claim_ids = ["E2EE-REQ-B99A6DD4949FED0CE02A"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-BFA20A50D15399A2F088"
+claim_ids = ["E2EE-REQ-BFA20A50D15399A2F088"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-C345CFA457EB0B500D2A"
+claim_ids = ["E2EE-REQ-C345CFA457EB0B500D2A"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-C8997B4345158FD54D44"
+claim_ids = ["E2EE-REQ-C8997B4345158FD54D44"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-CA268835A931F5051D79"
+claim_ids = ["E2EE-REQ-CA268835A931F5051D79"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-CED437B1C62CF9CD0A79"
+claim_ids = ["E2EE-REQ-CED437B1C62CF9CD0A79"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-D07C2C1AA58D16CA582D"
+claim_ids = ["E2EE-REQ-D07C2C1AA58D16CA582D"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-D150C4C93D931F51EE12"
+claim_ids = ["E2EE-REQ-D150C4C93D931F51EE12"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-D2C711B6BB260BFB72FD"
+claim_ids = ["E2EE-REQ-D2C711B6BB260BFB72FD"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-D70B8B9850E29E082F85"
+claim_ids = ["E2EE-REQ-D70B8B9850E29E082F85"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-DB900449D8D52DA92117"
+claim_ids = ["E2EE-REQ-DB900449D8D52DA92117"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-DF1E11F99D8CA9C38917"
+claim_ids = ["E2EE-REQ-DF1E11F99D8CA9C38917"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-DFF4835BF134E29328E1"
+claim_ids = ["E2EE-REQ-DFF4835BF134E29328E1"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-E84E3DF2CF6A849CCBA8"
+claim_ids = ["E2EE-REQ-E84E3DF2CF6A849CCBA8"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-E9D6A931BDD262B08F93"
+claim_ids = ["E2EE-REQ-E9D6A931BDD262B08F93"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-EC03C8374D88E32F6776"
+claim_ids = ["E2EE-REQ-EC03C8374D88E32F6776"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-ED359F4450E30FD76278"
+claim_ids = ["E2EE-REQ-ED359F4450E30FD76278"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-EFECC9F9EB196FD2CF16"
+claim_ids = ["E2EE-REQ-EFECC9F9EB196FD2CF16"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-F14B7B01F4CFF98A804E"
+claim_ids = ["E2EE-REQ-F14B7B01F4CFF98A804E"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-F252168A3A468701F674"
+claim_ids = ["E2EE-REQ-F252168A3A468701F674"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-FDA89A1D5714375C1B4F"
+claim_ids = ["E2EE-REQ-FDA89A1D5714375C1B4F"]
 kind = "normative-requirement"

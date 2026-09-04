@@ -1302,6 +1302,7 @@ def main() -> None:
             "check-stage-five",
             "check-stage-six",
             "check-stage-seven",
+            "check-stage-eight",
             "self-test",
         ),
     )
@@ -1335,6 +1336,7 @@ def main() -> None:
                 "check-stage-five": 5,
                 "check-stage-six": 6,
                 "check-stage-seven": 7,
+                "check-stage-eight": 8,
             }[arguments.command]
             count = validate_stage(root, stage)
             print(f"requirement ownership for Stage {stage:02d}: ok ({count} closure records)")

@@ -63,7 +63,7 @@ through a disposable on-disk index before the storage port becomes available.
 Backup, stopped-daemon restore, rekey, login-index transitions, and bounded
 checkpoint work all use resumable authenticated construction records.
 
-Stages 05 through 07 are closed. Stage 06
+Stages 05 through 08 are closed. Stage 06
 composes the runtime: strict configuration, first-run initialization, TLS
 endpoints, transport-profile isolation, the single StateCore owner,
 registration and account sessions, channels and messaging, isolated
@@ -73,8 +73,14 @@ authenticated links with a signed hello, origin lifecycles, idempotent
 requests with durable results, least-information projections and events,
 acknowledged delivery, snapshots and resume, partition handling, paged
 directory queries, and the coordinator and edge roles of the daemon. Stage 08
-E2EE is the next implementation stage. The complete dependency-ordered roadmap
-lives in [TODO.md](TODO.md). See the
+adds the E2EE server adapter: exact profile negotiation, public object
+validation, the sequencer with one candidate per epoch, KeyPackage and
+mailbox delivery, route projection to edges, the cross-profile durable
+barrier, a coordinator reload from durable rows, and the encrypted profile
+composed in the daemon; the external review task stays open. Stage 09 is the
+next implementation stage. The complete dependency-ordered roadmap lives in
+[TODO.md](TODO.md). See the
+[Stage 08 checkpoint](conformance/evidence/stage-08-52c7ccb909ecd398853183ef3f11ffd2df251e08.json), the
 [Stage 07 checkpoint](conformance/evidence/stage-07-1093d88d0057c3461a423285e0f86ff3775c1140.json), the
 [Stage 06 checkpoint](conformance/evidence/stage-06-65cce9d66f7bcfb0c0830a2ab1d42b52bff82942.json), the
 [Stage 05 storage profile](conformance/stage-five-storage-profile.toml), the

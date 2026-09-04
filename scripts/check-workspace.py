@@ -122,6 +122,11 @@ EXTERNAL_DEPENDENCIES = {
         {"io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"},
     ),
     "toml": ("=1.1.4", {"parse", "serde", "std"}),
+    "mls-rs": ("=0.56.0", {"fast_serialize", "rayon", "rfc_compliant", "std", "tree_index"}),
+    "mls-rs-crypto-rustcrypto": ("=0.22.1", {"std"}),
+    "openmls": ("=0.9.0", set()),
+    "openmls_basic_credential": ("=0.6.0", set()),
+    "openmls_rust_crypto": ("=0.6.0", set()),
     "zeroize": ("=1.9.0", {"alloc"}),
 }
 DIRECT_CHECKSUMS = {
@@ -134,6 +139,11 @@ DIRECT_CHECKSUMS = {
     "hmac": "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f",
     "hpke": "dd5130e119706b4d8c2180da6126f7e60b6c38c2d340d539219f57051f0a7af7",
     "loom": "419e0dc8046cb947daa77eb95ae174acfbddb7673b4151f56d1eed8e93fbfaca",
+    "mls-rs": "4392c3b3ed7d835ca8f318f85ca65d3f0d3e879538d6e70679827a2f3af72029",
+    "mls-rs-crypto-rustcrypto": "eda8f08b88f84c46924dc0d1cf50c9d3ea2a6e2ac5192c38d8de465724032a2c",
+    "openmls": "b6b08d90fc020cb5354d5f08ca17711b84c82e2bcc7331753fd94f000d99a8c8",
+    "openmls_basic_credential": "dbd3f0c3422e7c7a8496f042b547b0c28d0793f8ba97feb401966e58196a1e40",
+    "openmls_rust_crypto": "36bf3fe824ead6e81d22f49a9cd7feffca3494979fac14c1248e19516e3625f1",
     "opaque-ke": "ded22991b43cd15561b62b2e1cf9ace1344a8534eebec96202d5c96a77a6616a",
     "opaque-sha2": "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283",
     "precis-profiles": "31e2768890a47af73a032af9f0cedbddce3c9d06cf8de201d5b8f2436ded7674",
@@ -148,6 +158,18 @@ DIRECT_CHECKSUMS = {
     "zeroize": "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e",
 }
 EXTERNAL_PACKAGE_ALIASES = {"opaque-sha2": "sha2"}
+# Dependencies reviewed after the initial ledger; each stage records its
+# additions in its own conformance manifest.
+LATER_STAGE_DEPENDENCIES = {
+    "loom",
+    "mls-rs",
+    "mls-rs-crypto-rustcrypto",
+    "openmls",
+    "openmls_basic_credential",
+    "openmls_rust_crypto",
+    "rustix",
+    "toml",
+}
 DEPENDENCY_TABLE_NAMES = {"dependencies", "dev-dependencies", "build-dependencies"}
 EXPECTED_EXTERNAL_EDGES = {
     "agenc-ircd-types": {"base64", "precis-profiles", "subtle", "zeroize"},
@@ -179,7 +201,16 @@ EXPECTED_EXTERNAL_EDGES = {
     "agenc-ircd-config": {"base64", "rustix", "toml", "zeroize"},
     "agenc-ircd-admin": {"base64", "subtle", "zeroize"},
     "agenc-ircd-runtime": {"loom", "rustix", "rustls", "subtle", "tokio", "zeroize"},
-    "agenc-ircd-testkit": {"ed25519-dalek", "sha2", "subtle"},
+    "agenc-ircd-testkit": {
+        "ed25519-dalek",
+        "mls-rs",
+        "mls-rs-crypto-rustcrypto",
+        "openmls",
+        "openmls_basic_credential",
+        "openmls_rust_crypto",
+        "sha2",
+        "subtle",
+    },
 }
 CRATES_IO_SOURCES = {
     "registry+https://github.com/rust-lang/crates.io-index",
@@ -514,7 +545,7 @@ def validate_direct_dependency_evidence(root: Path) -> None:
     expected_records = {
         name: (version.removeprefix("="), DIRECT_CHECKSUMS[name])
         for name, (version, _features) in EXTERNAL_DEPENDENCIES.items()
-        if name not in {"loom", "rustix", "toml"}
+        if name not in LATER_STAGE_DEPENDENCIES
     }
     if records != expected_records:
         raise WorkspaceError("root dependency pins and frozen crates.io checksum evidence disagree")
@@ -592,6 +623,64 @@ def validate_direct_dependency_evidence(root: Path) -> None:
     }
     if stage_six != expected_stage_six:
         raise WorkspaceError("Stage 06 dependency evidence differs from its reviewed closed form")
+    stage_eight = load_toml(root / "conformance/stage-eight-dependencies.toml")
+    expected_stage_eight = {
+        "schema_version": 1,
+        "dependency": [
+            {
+                "name": "mls-rs",
+                "version": "0.56.0",
+                "checksum": DIRECT_CHECKSUMS["mls-rs"],
+                "default_features": False,
+                "features": ['fast_serialize', 'rayon', 'rfc_compliant', 'std', 'tree_index'],
+                "scope": "dev",
+                "purpose": "second independent MLS client for the Stage 08 cross-implementation gate; testkit only, never a production dependency",
+                "reviewed_on": "2026-09-04",
+            },
+            {
+                "name": "mls-rs-crypto-rustcrypto",
+                "version": "0.22.1",
+                "checksum": DIRECT_CHECKSUMS["mls-rs-crypto-rustcrypto"],
+                "default_features": False,
+                "features": ['std'],
+                "scope": "dev",
+                "purpose": "RustCrypto cipher suite provider for the mls-rs test client",
+                "reviewed_on": "2026-09-04",
+            },
+            {
+                "name": "openmls",
+                "version": "0.9.0",
+                "checksum": DIRECT_CHECKSUMS["openmls"],
+                "default_features": False,
+                "features": [],
+                "scope": "dev",
+                "purpose": "first independent MLS client for the Stage 08 cross-implementation gate; testkit only, never a production dependency",
+                "reviewed_on": "2026-09-04",
+            },
+            {
+                "name": "openmls_basic_credential",
+                "version": "0.6.0",
+                "checksum": DIRECT_CHECKSUMS["openmls_basic_credential"],
+                "default_features": False,
+                "features": [],
+                "scope": "dev",
+                "purpose": "basic credential and Ed25519 signature keys for the openmls test client",
+                "reviewed_on": "2026-09-04",
+            },
+            {
+                "name": "openmls_rust_crypto",
+                "version": "0.6.0",
+                "checksum": DIRECT_CHECKSUMS["openmls_rust_crypto"],
+                "default_features": False,
+                "features": [],
+                "scope": "dev",
+                "purpose": "RustCrypto provider for the openmls test client",
+                "reviewed_on": "2026-09-04",
+            },
+        ],
+    }
+    if stage_eight != expected_stage_eight:
+        raise WorkspaceError("Stage 08 dependency evidence differs from its reviewed closed form")
 
 
 def cargo_metadata(root: Path) -> dict[str, object]:
@@ -893,11 +982,12 @@ def self_test(root: Path) -> int:
     )
     cases += 1
 
+    baseline_edges = validate_mls_client_separation(packages)
     testkit_metadata = copy.deepcopy(packages)
     testkit_metadata["agenc-ircd-testkit"]["dependencies"].append(  # type: ignore[index]
         {"name": "openmls", "kind": None}
     )
-    if validate_mls_client_separation(testkit_metadata) != 1:
+    if validate_mls_client_separation(testkit_metadata) != baseline_edges + 1:
         raise WorkspaceError("self-test: testkit MLS client edge was not counted")
     cases += 1
 

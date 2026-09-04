@@ -1,0 +1,10 @@
+# cargo-audit policy. The gate runs `cargo audit --deny warnings`, so every
+# entry here is a reviewed exception with its reason.
+[advisories]
+# RUSTSEC-2026-0173: proc-macro-error2 is unmaintained. It is a compile-time
+# proc macro reached only through hax-lib-macros under the hpke-rs
+# `experimental` feature that openmls_rust_crypto 0.6.0 enables, and
+# openmls_rust_crypto is a testkit dev-dependency for the Stage 08
+# cross-implementation gate. No production crate graph contains it
+# (scripts/check-workspace.py enforces that); it runs no code at runtime.
+ignore = ["RUSTSEC-2026-0173"]

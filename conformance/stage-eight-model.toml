@@ -1,0 +1,16 @@
+schema_version = 1
+stage = 8
+model = "explicit-state exploration of encrypted routes, sequencer logs, and lifecycles"
+source = "crates/agenc-ircd-testkit/src/e2ee_model.rs"
+test = "crates/agenc-ircd-testkit/tests/e2ee_model.rs"
+conversations = 2
+accounts = 2
+devices = 2
+depth = 6
+actions = 28
+states = 50
+transitions = 124
+paths = 22
+refusals = 660
+violations = 0
+invariants = ["E2E-02", "E2E-03", "E2E-05", "E2E-06"]

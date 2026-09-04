@@ -374,8 +374,9 @@ impl E2eeEdge {
         Ok(())
     }
 
-    /// Resends the unanswered requests of every acknowledged origin.
-    fn resend_pending(&mut self, context: &mut StateCoreContext, edge: &mut EdgeFederation) {
+    /// The unanswered requests of every acknowledged origin, in operation
+    /// sequence order: what a resume sends again.
+    pub(super) fn resend_order(&self) -> Vec<[u8; 16]> {
         let mut order: Vec<(u64, [u8; 16])> = self
             .pending
             .iter()
@@ -388,7 +389,15 @@ impl E2eeEdge {
             .map(|(request_id, pending)| (pending.sequence, *request_id))
             .collect();
         order.sort_unstable();
-        for (_, request_id) in order {
+        order
+            .into_iter()
+            .map(|(_, request_id)| request_id)
+            .collect()
+    }
+
+    /// Resends the unanswered requests of every acknowledged origin.
+    fn resend_pending(&mut self, context: &mut StateCoreContext, edge: &mut EdgeFederation) {
+        for request_id in self.resend_order() {
             let lines = self
                 .pending
                 .get(&request_id)

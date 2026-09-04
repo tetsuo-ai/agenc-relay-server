@@ -58,7 +58,7 @@ References: [Architecture §§1.2–4](docs/ircd-architecture-and-implementation
 | 05 | Durable and recoverable persistence | Complete | Pass, 2026-08-29 | [Current checkpoint](conformance/evidence/stage-05-4040796f2c21774d58ea7ce54e70a080678e83ac.json) |
 | 06 | Conforming single-node daemon | Complete | Pass, 2026-09-01 | [Current checkpoint](conformance/evidence/stage-06-65cce9d66f7bcfb0c0830a2ab1d42b52bff82942.json) |
 | 07 | Conforming base federation | Complete | Pass, 2026-09-03 | [Current checkpoint](conformance/evidence/stage-07-1093d88d0057c3461a423285e0f86ff3775c1140.json) |
-| 08 | Conforming E2EE server adapter | Not started | Not run | Absent |
+| 08 | Conforming E2EE server adapter | Complete (external review open) | Pass, 2026-09-04 | [Current checkpoint](conformance/evidence/stage-08-52c7ccb909ecd398853183ef3f11ffd2df251e08.json) |
 | 09 | Optional WSS and history profiles | Not started | Not run | Absent |
 | 10 | Production qualification and release evidence | Not started | Not run | Absent |
 
@@ -2033,7 +2033,7 @@ Outcome: the federated daemon negotiates the exact companion profile, validates
 and routes only its assigned public objects, and commits base/E2EE state
 atomically while remaining unable to decrypt content or operate an MLS client.
 
-- [ ] `S08-001` **Implement exact E2EE profile negotiation.** Require the
+- [x] `S08-001` **Implement exact E2EE profile negotiation.** Require the
   frozen `(version, profile-hash)` on client CAP and federation ECAP, enforce
   dependencies and timeout, and fail closed on absent, malformed, stale,
   mismatched, rolled-back, or exhausted transitions.
@@ -2043,7 +2043,7 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   - Invariants: `E2E-07`, `FED-02`, `FED-10`.
   - Evidence: exact match plus every tuple, ordering, timeout, reconnect, rollback, gap, and downgrade negative.
 
-- [ ] `S08-002` **Enforce the daemon/client separation mechanically.** Expose
+- [x] `S08-002` **Enforce the daemon/client separation mechanically.** Expose
   only public-object validation, routing, storage metadata, and transaction
   planning; forbid production dependency on an MLS client state machine or any
   API accepting epoch secrets, plaintext, root private keys, or device keys.
@@ -2053,7 +2053,7 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   - Invariants: `E2E-01`, `E2E-02`.
   - Evidence: dependency/API/source scans and compile-fail tests reject MLS-client or secret-bearing production surfaces.
 
-- [ ] `S08-003` **Validate public identity and device objects.** Check account
+- [x] `S08-003` **Validate public identity and device objects.** Check account
   roots, enrollment possession, device certificates, capability chains,
   complete rosters, revocation, leaf authorization, generations, signatures,
   semantic IDs, and canonical encodings without resolving private keys.
@@ -2063,7 +2063,7 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   - Invariants: `E2E-01`, `E2E-05`, `ID-01`, `ID-02`.
   - Evidence: independent vectors and missing/duplicate/stale/rollback/equivocation/signature/capability-chain negatives.
 
-- [ ] `S08-004` **Validate route identity and binding locks.** Enforce channel
+- [x] `S08-004` **Validate route identity and binding locks.** Enforce channel
   instance/direct-account-pair identity, route generations, semantic locks,
   root continuity, close/recreate isolation, encrypted/plaintext collision
   refusal, and tombstones.
@@ -2073,7 +2073,7 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   - Invariants: `E2E-02`, `E2E-06`, `STA-02`.
   - Evidence: bind/rebind/close/recreate/root rollback/collision/tombstone/restoration vectors.
 
-- [ ] `S08-005` **Validate sequencer, policy, roster, and finality authority.**
+- [x] `S08-005` **Validate sequencer, policy, roster, and finality authority.**
   Check sequencer credentials, controller authority, full policy replacement,
   roster heads, candidate authorization, quorum/fault math, council transition,
   revocation, and non-circular approval sets.
@@ -2083,7 +2083,7 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   - Invariants: `E2E-03` through `E2E-05`.
   - Evidence: exhaustive `(n,f,q)` cases, authority/approval substitution, council rotation, and conflicting-candidate tests.
 
-- [ ] `S08-006` **Validate MLS public context and application envelopes.**
+- [x] `S08-006` **Validate MLS public context and application envelopes.**
   Enforce the required context extension, suite-independent profile digests,
   group/route/policy/roster bindings, outer object types, deterministic padding,
   message IDs, durable sequences, and exact size arithmetic while treating
@@ -2094,7 +2094,7 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   - Invariants: `E2E-01`, `E2E-05`, `TRN-04`, `CON-05`.
   - Evidence: context, binding, envelope, padding, under/equal/over limit, nonzero-padding, overflow, and semantic-ID vectors.
 
-- [ ] `S08-007` **Implement E2EE client carriers and reassembly.** Handle the
+- [x] `S08-007` **Implement E2EE client carriers and reassembly.** Handle the
   fragment tag, channel/direct carriers, binding, identity, KeyPackage,
   Welcome, exact success/object responses, standard errors, tokens, arity,
   direction, timeout, and authenticated resource budgets.
@@ -2104,7 +2104,7 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   - Invariants: `TRN-04` through `TRN-06`, `E2E-05`, `CON-05`.
   - Evidence: every carrier/object/response arm, wire-budget table, fragment flood, duplicate/conflict, collision, expiry, and allocation tests.
 
-- [ ] `S08-008` **Implement candidate, receipt, ACK, finalization, and abort
+- [x] `S08-008` **Implement candidate, receipt, ACK, finalization, and abort
   validation.** Enforce one active candidate, no local skipping, exact
   signatures/TBS, recipient-dependent disposition, finality proofs, terminal
   IDs, deterministic coverage, and byte-identical replay.
@@ -2114,7 +2114,7 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   - Invariants: `E2E-03` through `E2E-06`.
   - Evidence: success and every lost/duplicate/reordered/conflicting/stale/malicious receipt, ACK, finalization, abort, and content-cycle test.
 
-- [ ] `S08-009` **Implement E2EE federation objects and state exchange.** Cover
+- [x] `S08-009` **Implement E2EE federation objects and state exchange.** Cover
   ECAP, operations, results, events, fragments, descriptors, route changes,
   ESTATE pages, ACTIVE, ERESUME, sequencer-set transitions, mailbox ownership,
   and exact replay under the base federation authority model.
@@ -2124,7 +2124,7 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   - Invariants: `FED-*`, `E2E-05`, `E2E-07`.
   - Evidence: every opcode/result/event/descriptor arm, snapshot page boundary, cursor form, retry, incarnation, collision, and synchronization test.
 
-- [ ] `S08-010` **Implement server-visible group lifecycle.** Validate device
+- [x] `S08-010` **Implement server-visible group lifecycle.** Validate device
   provisioning, channel/direct group creation, joins, device addition,
   KeyPackage claim/burn, Welcome delivery, committed roster and pending-join
   state, while keeping all client MLS processing outside production crates.
@@ -2134,7 +2134,7 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   - Invariants: `E2E-01`, `E2E-03`, `E2E-05`.
   - Evidence: provisioning/create/join/add-device, package replay/burn, Welcome, crash, retry, and full-roster tests using test-only clients.
 
-- [ ] `S08-011` **Implement removal, revocation, and recovery gates.** Keep
+- [x] `S08-011` **Implement removal, revocation, and recovery gates.** Keep
   sending paused where removal is uncertain, distinguish requested from
   cryptographically final removal, validate update/recovery state, and block
   restored routes until exact evidence establishes a new lineage or permanent
@@ -2145,7 +2145,7 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   - Invariants: `E2E-04`, `E2E-06`, `STA-09`.
   - Evidence: part/kick/revoke, delayed/failed finality, state loss, exact/conflicting recovery evidence, restore, and tombstone tests.
 
-- [ ] `S08-012` **Implement full ReInit and route migration.** Validate target
+- [x] `S08-012` **Implement full ReInit and route migration.** Validate target
   suite/key-package preflight, creator and Welcome ACKs, activation, old-group
   closure, PSK deletion, abort/retry, races, and non-reopening of the prior
   lineage.
@@ -2155,7 +2155,7 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   - Invariants: `E2E-03`, `E2E-05`, `E2E-06`.
   - Evidence: preflight, every ACK/activation boundary, abort, retry, crash, race, PSK-erasure, and old-lineage-refusal tests.
 
-- [ ] `S08-013` **Implement E2EE replay, mailbox, and persistence policy.**
+- [x] `S08-013` **Implement E2EE replay, mailbox, and persistence policy.**
   Enforce object/replay keys, durable sequence/order, idempotent outbox retries,
   offline delivery tokens, mailbox ownership/ACK, retention, deletion, and
   opaque-history rules.
@@ -2165,7 +2165,7 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   - Invariants: `E2E-01`, `E2E-05`, `DUR-01`, `DUR-02`, `FED-03`.
   - Evidence: duplicate/gap/conflict, disconnect, crash, restart, token ACK, cursor replay, retention, deletion, and byte-identical retry tests.
 
-- [ ] `S08-014` **Enforce E2EE resource and timing limits.** Admit before
+- [x] `S08-014` **Enforce E2EE resource and timing limits.** Admit before
   signature, hash, reassembly, storage, or fanout work; bound objects,
   fragments, candidates, rosters, groups, mailboxes, queues, timeouts, and
   amplification.
@@ -2175,7 +2175,7 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   - Invariants: `TRN-04`, `TRN-05`, `CON-02`, `CON-05`.
   - Evidence: every limit at below/equal/above, authenticated flood, fanout, slow consumer, queue, timeout, and recovery-after-quiescence tests.
 
-- [ ] `S08-015` **Implement downgrade, reset, and failure behavior.** Refuse
+- [x] `S08-015` **Implement downgrade, reset, and failure behavior.** Refuse
   plaintext on bound/tombstoned routes, unknown required capabilities,
   mismatched profiles, ambiguous resets, stale roots, partial finality, and any
   fallback that could hide an encrypted-state failure.
@@ -2185,7 +2185,7 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   - Invariants: `E2E-02`, `E2E-06`, `E2E-07`, `PRV-01`.
   - Evidence: plaintext injection, profile mismatch, reset/recreate/root rollback, partial-state, retry, and exact public-error tests.
 
-- [ ] `S08-016` **Implement the cross-profile durable barrier.** Stage one
+- [x] `S08-016` **Implement the cross-profile durable barrier.** Stage one
   target-edge combined base/E2EE change with exact part IDs/counts/bytes,
   receipts, cursor coverage, and one visibility point; neither profile may ACK,
   swap, render, or advance alone.
@@ -2195,7 +2195,7 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   - Invariants: `E2E-03`, `FED-11`, `FED-12`, `DUR-01`, `DUR-02`.
   - Evidence: every permitted interleaving and crash boundary, 2,047/2,048/2,049 parts, aggregate byte boundaries, wrong metadata, full outbox, and replay tests.
 
-- [ ] `S08-017` **Integrate the encrypted node end to end.** Compose client
+- [x] `S08-017` **Integrate the encrypted node end to end.** Compose client
   negotiation/carriers, public validation, domain plans, durable state,
   federation synchronization, opaque fanout, mailbox delivery, restoration,
   administration, metrics, and shutdown without widening any crate authority.
@@ -2212,7 +2212,7 @@ The following tasks correspond one-for-one with the numbered gates in
 Task IDs follow executable dependency order, so source gate 13 (external review)
 is `S08-039`, after technical source gates 14–22 are complete.
 
-- [ ] `S08-018` **Pin the MLS WG interoperability corpus.** Record immutable
+- [x] `S08-018` **Pin the MLS WG interoperability corpus.** Record immutable
   revision and content hashes for every enabled suite.
   - After: `S08-017`.
   - Targets: test-only MLS corpus and conformance evidence.
@@ -2220,7 +2220,7 @@ is `S08-039`, after technical source gates 14–22 are complete.
   - Invariants: `E2E-05`.
   - Evidence: corpus hash verification and suite coverage manifest.
 
-- [ ] `S08-019` **Supply independent E2EE object vectors.** Cover every root,
+- [x] `S08-019` **Supply independent E2EE object vectors.** Cover every root,
   device, roster, policy, binding, context, envelope, fragment, sequencer,
   receipt, ACK, finalization, abort, and ReInit public object.
   - After: `S08-003` through `S08-017`.
@@ -2229,7 +2229,7 @@ is `S08-039`, after technical source gates 14–22 are complete.
   - Invariants: `E2E-05`.
   - Evidence: independent generator provenance, hashes, and production/reference agreement.
 
-- [ ] `S08-020` **Run cross-implementation MLS tests.** Use at least two
+- [x] `S08-020` **Run cross-implementation MLS tests.** Use at least two
   independent libraries or clients in test-only tooling for each enabled suite.
   - After: `S08-018`, `S08-019`.
   - Targets: interoperability harness; never a production daemon dependency.
@@ -2237,7 +2237,7 @@ is `S08-039`, after technical source gates 14–22 are complete.
   - Invariants: `E2E-01`, `E2E-05`.
   - Evidence: versioned cross-implementation matrix and byte/state comparison results.
 
-- [ ] `S08-021` **Prove plaintext rejection on encrypted targets.**
+- [x] `S08-021` **Prove plaintext rejection on encrypted targets.**
   Characterize every client and federation plaintext entry point after route
   binding or tombstoning.
   - After: `S08-015`, `S08-017`.
@@ -2246,7 +2246,7 @@ is `S08-039`, after technical source gates 14–22 are complete.
   - Invariants: `E2E-02`, `STA-09`.
   - Evidence: complete command/target/history/topic/fallback rejection matrix.
 
-- [ ] `S08-022` **Test every E2EE limit and padding boundary.** Include one
+- [x] `S08-022` **Test every E2EE limit and padding boundary.** Include one
   below/equal/above, checked overflow, outer-object fit, nonzero padding,
   short/long padding, and zero-padding edge cases.
   - After: `S08-006`, `S08-014`.
@@ -2255,7 +2255,7 @@ is `S08-039`, after technical source gates 14–22 are complete.
   - Invariants: `TRN-04`, `CON-05`, `E2E-05`.
   - Evidence: mechanically generated boundary table with exact expected outcomes.
 
-- [ ] `S08-023` **Fuzz every E2EE parser boundary.** Cover IRC tags, decimals,
+- [x] `S08-023` **Fuzz every E2EE parser boundary.** Cover IRC tags, decimals,
   base64url, reassembly, TLS vectors, identity chains, and MLS outer messages
   under fixed time/memory/output bounds.
   - After: `S08-003`, `S08-006`, `S08-007`, `S08-014`.
@@ -2264,7 +2264,7 @@ is `S08-039`, after technical source gates 14–22 are complete.
   - Invariants: `TRN-04` through `TRN-06`, `CON-05`.
   - Evidence: reproducible fuzz manifests and minimized regression tests.
 
-- [ ] `S08-024` **Run stateful adversarial E2EE properties.** Generate
+- [x] `S08-024` **Run stateful adversarial E2EE properties.** Generate
   duplicate, lost, reordered, conflicting, stale, and malicious fragments and
   Commits, including recipient-dependent corrupt UpdatePaths.
   - After: `S08-008`, `S08-017`.
@@ -2273,7 +2273,7 @@ is `S08-039`, after technical source gates 14–22 are complete.
   - Invariants: `E2E-03` through `E2E-06`.
   - Evidence: no endpoint applies before finality and no failed endpoint skips candidates.
 
-- [ ] `S08-025` **Crash-test every E2EE durable boundary.** Cover restart,
+- [x] `S08-025` **Crash-test every E2EE durable boundary.** Cover restart,
   snapshot restore, and outbox retry without generation, counter, binding,
   ACK, or vote-lock rollback; exact retries remain byte-identical.
   - After: `S08-013`, `S08-016`, `S08-017`.
@@ -2282,7 +2282,7 @@ is `S08-039`, after technical source gates 14–22 are complete.
   - Invariants: `E2E-05`, `E2E-06`, `DUR-*`, `FED-03`.
   - Evidence: crash before/after every named durable and visibility boundary.
 
-- [ ] `S08-026` **Exhaust finality quorum cases.** Test every permitted
+- [x] `S08-026` **Exhaust finality quorum cases.** Test every permitted
   `(n,f)`, prove `2q-n > f`, exercise netsplits and malicious sequencers, and
   report fault-bound violations outside the claim.
   - After: `S08-005`, `S08-008`.
@@ -2291,7 +2291,7 @@ is `S08-039`, after technical source gates 14–22 are complete.
   - Invariants: `E2E-04`, `E2E-05`.
   - Evidence: exhaustive bounded-state result set and conflicting-finality refusal.
 
-- [ ] `S08-027` **Test identity, roster, KeyPackage, policy, and sequencer
+- [x] `S08-027` **Test identity, roster, KeyPackage, policy, and sequencer
   transitions exhaustively.** Include rotation, rollback, equivocation,
   add/remove, cross-group replay, last-resort refusal, join confirmation,
   pending state, full-tree Welcome, inline proposals, disabled updates,
@@ -2302,7 +2302,7 @@ is `S08-039`, after technical source gates 14–22 are complete.
   - Invariants: `E2E-03` through `E2E-06`.
   - Evidence: every listed transition has success, rejection, replay, rollback, and state-equality coverage.
 
-- [ ] `S08-028` **Load-test maximum E2EE shapes.** Cover maximum group size,
+- [x] `S08-028` **Load-test maximum E2EE shapes.** Cover maximum group size,
   fanout, Commit storms, slow consumers, offline queues, and authenticated
   fragment floods.
   - After: `S08-014`, `S08-017`.
@@ -2311,7 +2311,7 @@ is `S08-039`, after technical source gates 14–22 are complete.
   - Invariants: `CON-02`, `CON-05`, `STA-08`.
   - Evidence: latency, high-water memory/descriptor/queue, rejection, and post-quiescence reports.
 
-- [ ] `S08-029` **Audit E2EE logs and telemetry for forbidden material.** Test
+- [x] `S08-029` **Audit E2EE logs and telemetry for forbidden material.** Test
   every success/error/fault path with recognizable identity, key, object,
   content, address, and route canaries.
   - After: `S08-017`.
@@ -2320,7 +2320,7 @@ is `S08-039`, after technical source gates 14–22 are complete.
   - Invariants: `E2E-01`, `OPS-01`, `PRV-02`.
   - Evidence: automated canary scan plus closed-field review records no forbidden value.
 
-- [ ] `S08-030` **Test every ReInit race.** Cover target-suite KeyPackage
+- [x] `S08-030` **Test every ReInit race.** Cover target-suite KeyPackage
   preflight, creator-local ACK, all Welcome ACKs, abort/retry, PSK deletion,
   activation, crash, and permanent old-group closure.
   - After: `S08-012`, `S08-017`.
@@ -2329,7 +2329,7 @@ is `S08-039`, after technical source gates 14–22 are complete.
   - Invariants: `E2E-03`, `E2E-05`, `E2E-06`.
   - Evidence: deterministic interleaving matrix proves the old group never reopens.
 
-- [ ] `S08-031` **Exhaust ECAP and E2EE federation transitions.** Test exact
+- [x] `S08-031` **Exhaust ECAP and E2EE federation transitions.** Test exact
   profile hash, maximum lines, five-second boundary, simultaneous offers,
   legal flags, duplicate/early ACK rejection, tuple mismatches, key-set
   succession, ESTATE pages, route events, ERESUME, mailbox ownership, retries,
@@ -2340,7 +2340,7 @@ is `S08-039`, after technical source gates 14–22 are complete.
   - Invariants: `E2E-07`, `FED-02` through `FED-10`.
   - Evidence: complete transition and boundary matrix with canonical page/state comparisons.
 
-- [ ] `S08-032` **Verify every E2EE wire budget mechanically.** Enumerate every
+- [x] `S08-032` **Verify every E2EE wire budget mechanically.** Enumerate every
   command, tag combination, decimal width, base64url expansion, and escape case
   in client and server directions against 4,094/4,094/8,191-byte budgets.
   - After: `S08-007`, `S08-022`.
@@ -2349,7 +2349,7 @@ is `S08-039`, after technical source gates 14–22 are complete.
   - Invariants: `TRN-04`, `STA-08`, `CON-05`.
   - Evidence: generated maximum forms fit exactly and every plus-one form rejects before allocation.
 
-- [ ] `S08-033` **Test semantic-ID malleability and acyclicity.** Prove
+- [x] `S08-033` **Test semantic-ID malleability and acyclicity.** Prove
   alternative valid proof subsets retain one semantic ID, changed TBS fields
   change it, ACK vectors follow their exact rule, and no authorization,
   Welcome, GroupInfo, binding, or policy object contains a future/self ID.
@@ -2359,7 +2359,7 @@ is `S08-039`, after technical source gates 14–22 are complete.
   - Invariants: `E2E-05`.
   - Evidence: alternative-subset equality, changed-field inequality, cycle rejection, and immutable-MLS-bytes-first construction tests.
 
-- [ ] `S08-034` **Test finality-council removal transitions.** Prove only
+- [x] `S08-034` **Test finality-council removal transitions.** Prove only
   retained, fully staged old principals finalize removal, revoked/removed
   principals cannot, and an earlier epoch rotates a council that would fall
   below the old quorum.
@@ -2369,7 +2369,7 @@ is `S08-039`, after technical source gates 14–22 are complete.
   - Invariants: `E2E-04`, `E2E-05`.
   - Evidence: exhaustive retained/revoked/removed membership and quorum transition cases.
 
-- [ ] `S08-035` **Exhaust E2EE federation operation semantics.** Cover every
+- [x] `S08-035` **Exhaust E2EE federation operation semantics.** Cover every
   opcode/result/event selector, required/forbidden descriptor, snapshot token,
   index/kind/object/size/delivery mismatch, ReInit delivery, close broadcast,
   incarnation loss, replay collision/gap, quarantine, ACK barrier, first-login
@@ -2380,7 +2380,7 @@ is `S08-039`, after technical source gates 14–22 are complete.
   - Invariants: `E2E-*`, `FED-*`, `PRV-02`.
   - Evidence: exhaustive registry-arm matrix with mismatch, crash, replay, privacy, and recovery cases.
 
-- [ ] `S08-036` **Crash-test E2EE idempotency operations.** Cover KeyPackage
+- [x] `S08-036` **Crash-test E2EE idempotency operations.** Cover KeyPackage
   claim IDs and burns, mailbox delivery-token ACK transactions, cursors, and
   result recovery after disconnect.
   - After: `S08-010`, `S08-013`, `S08-025`.
@@ -2389,7 +2389,7 @@ is `S08-039`, after technical source gates 14–22 are complete.
   - Invariants: `E2E-05`, `DUR-01`, `DUR-02`, `FED-03`.
   - Evidence: crash at every transaction boundary yields exact replay, burn, or refusal—never duplicate use.
 
-- [ ] `S08-037` **Test root identity and binding chains.** Cover missing
+- [x] `S08-037` **Test root identity and binding chains.** Cover missing
   prefixes, alternate proof subsets, root rollback, semantic-route lock reuse,
   close/recreate continuity, and direct-account-pair downgrade blocking.
   - After: `S08-003`, `S08-004`, `S08-033`.
@@ -2398,7 +2398,7 @@ is `S08-039`, after technical source gates 14–22 are complete.
   - Invariants: `E2E-02`, `E2E-05`, `E2E-06`.
   - Evidence: positive continuity plus every rollback/reuse/substitution/recreation/downgrade negative.
 
-- [ ] `S08-038` **Exhaust cross-profile barrier schedules.** Cover every
+- [x] `S08-038` **Exhaust cross-profile barrier schedules.** Cover every
   base/E2EE part interleaving, result/completion order, lost FACK/EACK, replay,
   crash, wrong metadata, concurrent barrier, later-event injection, part/byte
   boundaries, either outbox full, and snapshot replacement.
@@ -2418,7 +2418,7 @@ is `S08-039`, after technical source gates 14–22 are complete.
   - Invariants: all `E2E-*` and coupled `AUTH-*`, `FED-*`, `DUR-*`.
   - Evidence: disposition for every finding and re-run evidence for each material remediation.
 
-- [ ] `S08-900` **Pass the Stage 08 encrypted-v1 gate.** Every companion
+- [x] `S08-900` **Pass the Stage 08 encrypted-v1 gate.** Every companion
   public-object rule, joint transaction, invariant, and numbered verification
   gate must pass for the exact profile and dependency set before encrypted-v1
   can be advertised.
@@ -2427,6 +2427,80 @@ is `S08-039`, after technical source gates 14–22 are complete.
   - References: [Architecture §§1.1 and 29 phase 8](docs/ircd-architecture-and-implementation-spec.md#11-conformance-targets), [E2EE §21](docs/irc-mls-e2ee-extension.md#21-verification-and-release-gates).
   - Invariants: `E2E-01` through `E2E-07` and all coupled invariant families.
   - Evidence: every companion gate, collision/reset/downgrade test, mandatory workspace check, and finding disposition passes.
+
+### Stage 08 completion notes
+
+The encrypted-v1 server adapter closed on branch `stage-08-e2ee-f` on
+2026-09-04 after six pull requests (#19 to #23). One task stays open by
+decision: `S08-039`, the external cryptographic and protocol review, is
+recorded as `blocked-external` in
+`conformance/stage-eight-e2ee-profile.toml`; the package a reviewer needs
+is under `conformance/review/`. No release may advertise encrypted-v1 as
+reviewed before that task closes. The following interpretations and
+deferrals were made while implementing the companion document and are
+recorded here so a later reviewer does not have to rediscover them.
+
+- `responses<0..32>` on a federation result is read as at most 32
+  descriptors behind a u16 length prefix.
+- The daemon parses MLS outer framing only: the `MLSMessage` version and
+  wire format, the `PrivateMessage` public header, the `Welcome` header,
+  and the public `KeyPackage`. Everything inside a ciphertext is opaque.
+- NFC normalization of the private topic literal is an endpoint matter;
+  the server compares the exact literal
+  `Encrypted channel - topic protected by IRC-MLS`.
+- The home copy of a semantic event is its request's completion (companion
+  12.5), so the edge matches completions by event identity for every kind.
+- A channel must be registered (`CHANCTL REGISTER`, history off, no topic)
+  before `EGROUP BIND`; the binding then flips its content policy through
+  the cross-profile barrier.
+- The sequencer signs whatever finality votes a request carries and never
+  evaluates the private quorum itself (companion 12.4); the public
+  authorization rule `BootstrapActivation` on the certificate is what
+  activates a fresh conversation, and application traffic before it
+  answers `E2EE_FINALITY_REQUIRED`.
+- Root binding lock chains are per (account digest, root fingerprint); a
+  direct reservation comes from the smaller account of the pair.
+- Companion origins are not durable. A coordinator that reloaded accepts
+  the replayed `EORIGIN UPDATE` of an origin it acknowledged before,
+  anchored on the matched base origin, and continues the operation
+  sequence after its retained replay rows; the edge keeps its sequence
+  across a replayed declaration of the same generation and restarts it
+  only for a new generation.
+- A retired delivery generation never restarts: a new `ESTATE` scope opens
+  the generation after the last durable cursor, and the edge resets the
+  barrier owner's companion position when it installs one.
+- After `EORIGIN READY` the edge resends every request still waiting for
+  its result; the coordinator answers an executed one from its replay
+  table and runs the rest.
+- Both edge profiles queue events while the other profile's batch is in
+  flight, since one state core commits both.
+- Route entitlements are refreshed at each `ESTATE` cut from the base
+  facts: channel routes follow the peer's channel standing, direct routes
+  go to every peer hosting one of the accounts.
+- The reload restores retained objects, the directory (root chains
+  re-verified, rosters and capabilities re-verified without their retired
+  predecessors), binding lock chains, attachments, the KeyPackage stock and
+  claims, mailboxes, replay rows and results, delivery cursors, routes,
+  logs, lifecycles, and per-conversation facts. Not reloaded, by design or
+  deferral: route reservations (short-lived), delivery stream rows (a
+  reconnecting edge opens a fresh scope), the `BIND` context digest, the
+  last accepted Commit validation time, in-progress ReInit phases, and
+  open barriers.
+- The cross-implementation gate runs openmls and mls-rs as testkit-only
+  dependencies; `.cargo/audit.toml` ignores RUSTSEC-2026-0173, an
+  unmaintained compile-time proc macro that openmls_rust_crypto reaches
+  through the experimental HPKE feature and that no production crate graph
+  contains; the daemon's own view of their framing is what is compared,
+  and any deviation between the libraries is recorded in
+  `conformance/e2ee-interop-matrix.toml` rather than hidden.
+- Deferred: origin operation sequences after the replay retention window
+  expires across a coordinator restart; a byte-identical retry of a local
+  submission the edge already answered gets no reply (the recent-object
+  cache is silent) and should re-render the prior outcome;
+  `reserve_direct` refusals for a bad route state map to
+  `E2EE_GROUP_CONFLICT`; new 100 percent branch regions for the replay
+  classifier, quorum math, barrier verification, and padding arithmetic
+  wait for the next coverage round.
 
 ## Stage 09 — Optional WSS and pinned history profiles
 

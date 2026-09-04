@@ -57,6 +57,8 @@ EXPECTED_LATER_FUZZ_TARGETS = (
     "e2ee_object",
     "e2ee_mls_outer",
     "e2ee_fragment",
+    "e2ee_identity_chain",
+    "e2ee_tags",
 )
 EXPECTED_FUZZ_POLICY = {
     "schema_version": 1,

@@ -15,6 +15,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 OBJECT_CORPUS = ROOT / "test-data/fuzz-corpus/e2ee-object"
 MLS_CORPUS = ROOT / "test-data/fuzz-corpus/e2ee-mls-outer"
+CHAIN_CORPUS = ROOT / "test-data/fuzz-corpus/e2ee-identity-chain"
+TAG_CORPUS = ROOT / "test-data/fuzz-corpus/e2ee-tags"
 
 
 def width_for(maximum: int) -> int:
@@ -200,12 +202,69 @@ def key_package() -> bytes:
     return u16(1) + u16(5) + tbs + opaque_v(bytes([15] * 64))
 
 
+def root_chain(count: int) -> bytes:
+    roots = []
+    for generation in range(count):
+        tbs = (
+            u16(1)
+            + bytes([1] * 32)
+            + opaque(ACCOUNT, 255)
+            + u64(generation)
+            + bytes([2 + generation] * 32)
+            + u64(10)
+            + u64(20)
+            + (bytes(32) if generation == 0 else bytes([2 + generation - 1] * 32))
+        )
+        roots.append(tbs + bytes([3] * 64) + opaque(b"" if generation == 0 else bytes([4] * 64), 64))
+    return opaque(ACCOUNT, 255) + vector(roots, 1_048_576)
+
+
+def b64(data: bytes) -> str:
+    import base64
+
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def tag_seeds() -> dict[str, bytes]:
+    object_id = b64(bytes([5] * 32))
+    segment = bytes(range(64))
+    fragment = f"v1.{object_id}.0.1.{len(segment)}.{b64(segment)}"
+    receipt = f"v1.{b64(bytes([6] * 32))}.{b64(bytes([7] * 80))}"
+    return {
+        "fragment-single": fragment.encode(),
+        "fragment-first-of-two": f"v1.{object_id}.0.2.3000.{b64(bytes([8] * 2940))}".encode(),
+        "receipt": receipt.encode(),
+        "client-tags": f"+agenc.ag/e2ee={fragment};label=abc12".encode(),
+        "client-tags-receipt": f"agenc.ag/e2ee-receipt={receipt};batch=b1".encode(),
+        "decimal": b"4294967295",
+        "base64url": b64(bytes([9] * 24)).encode(),
+        "cursor-star": b"*",
+    }
+
+
 def write(directory: Path, name: str, data: bytes) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     (directory / name).write_bytes(data)
 
 
+def check(directory: Path, name: str, data: bytes) -> bool:
+    path = directory / name
+    return path.is_file() and path.read_bytes() == data
+
+
 def main() -> None:
+    import sys
+
+    checking = "--check" in sys.argv[1:]
+    stale: list[str] = []
+
+    def emit(directory: Path, name: str, data: bytes) -> None:
+        if checking:
+            if not check(directory, name, data):
+                stale.append(f"{directory.name}/{name}")
+        else:
+            write(directory, name, data)
+
     seeds = {
         "root-identity": envelope(10, root_identity()),
         "sequencer-record-candidate": envelope(25, u8(1) + candidate_receipt()),
@@ -217,7 +276,7 @@ def main() -> None:
         "key-package-mls": envelope(14, key_package()),
     }
     for name, data in seeds.items():
-        write(OBJECT_CORPUS, name, data)
+        emit(OBJECT_CORPUS, name, data)
     mls = {
         "private-application": private_message(1),
         "private-commit": private_message(3),
@@ -225,9 +284,25 @@ def main() -> None:
         "key-package": key_package(),
     }
     for name, data in mls.items():
-        write(MLS_CORPUS, name, data)
-    digest = hashlib.sha256(b"".join(seeds.values()) + b"".join(mls.values())).hexdigest()
-    print(f"e2ee fuzz seeds: {len(seeds)} object, {len(mls)} mls-outer, sha256 {digest}")
+        emit(MLS_CORPUS, name, data)
+    chains = {
+        "root-chain-one": root_chain(1),
+        "root-chain-three": root_chain(3),
+    }
+    for name, data in chains.items():
+        emit(CHAIN_CORPUS, name, data)
+    tags = tag_seeds()
+    for name, data in tags.items():
+        emit(TAG_CORPUS, name, data)
+    if stale:
+        print("e2ee fuzz seeds are stale: " + ", ".join(stale), file=sys.stderr)
+        raise SystemExit(1)
+    every = list(seeds.values()) + list(mls.values()) + list(chains.values()) + list(tags.values())
+    digest = hashlib.sha256(b"".join(every)).hexdigest()
+    print(
+        f"e2ee fuzz seeds: {len(seeds)} object, {len(mls)} mls-outer, {len(chains)} identity-chain, "
+        f"{len(tags)} tags, sha256 {digest}"
+    )
 
 
 if __name__ == "__main__":

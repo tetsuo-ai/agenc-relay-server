@@ -141,6 +141,46 @@ STAGE_BINDINGS = {
     "EVID-S07-012-MODEL": (["S07-012"], "bounded-federation-model"),
     "EVID-S07-013-INTEROP": (["S07-013"], "multi-process-federation"),
     "EVID-S07-900-STAGE-GATE": (["S07-900"], "stage-gate"),
+    "EVID-S08-001-PROFILE": (["S08-001"], "exact-profile-negotiation"),
+    "EVID-S08-002-SEPARATION": (["S08-002"], "daemon-client-separation"),
+    "EVID-S08-003-IDENTITY": (["S08-003"], "public-identity-validation"),
+    "EVID-S08-004-ROUTES": (["S08-004"], "route-identity-binding-locks"),
+    "EVID-S08-005-AUTHORITY": (["S08-005"], "sequencer-policy-finality-authority"),
+    "EVID-S08-006-CONTEXT": (["S08-006"], "mls-context-envelopes"),
+    "EVID-S08-007-CARRIERS": (["S08-007"], "client-carriers-reassembly"),
+    "EVID-S08-008-SEQUENCING": (["S08-008"], "candidate-receipt-finality"),
+    "EVID-S08-009-FEDERATION": (["S08-009"], "companion-federation-exchange"),
+    "EVID-S08-010-LIFECYCLE": (["S08-010"], "server-visible-group-lifecycle"),
+    "EVID-S08-011-REMOVAL": (["S08-011"], "removal-revocation-recovery-gates"),
+    "EVID-S08-012-REINIT": (["S08-012"], "reinit-route-migration"),
+    "EVID-S08-013-PERSISTENCE": (["S08-013"], "replay-mailbox-persistence"),
+    "EVID-S08-014-LIMITS": (["S08-014"], "resource-timing-limits"),
+    "EVID-S08-015-DOWNGRADE": (["S08-015"], "downgrade-reset-failure"),
+    "EVID-S08-016-BARRIER": (["S08-016"], "cross-profile-durable-barrier"),
+    "EVID-S08-017-INTEGRATION": (["S08-017"], "encrypted-node-integration"),
+    "EVID-S08-018-CORPUS": (["S08-018"], "mls-corpus-pin"),
+    "EVID-S08-019-VECTORS": (["S08-019"], "independent-object-vectors"),
+    "EVID-S08-020-INTEROP": (["S08-020"], "cross-implementation-mls"),
+    "EVID-S08-021-PLAINTEXT": (["S08-021"], "plaintext-rejection-matrix"),
+    "EVID-S08-022-BOUNDARIES": (["S08-022"], "limit-padding-boundaries"),
+    "EVID-S08-023-FUZZ": (["S08-023"], "parser-fuzzing"),
+    "EVID-S08-024-ADVERSARIAL": (["S08-024"], "stateful-adversarial-properties"),
+    "EVID-S08-025-CRASH": (["S08-025"], "durable-boundary-crash-tests"),
+    "EVID-S08-026-QUORUM": (["S08-026"], "finality-quorum-exhaustion"),
+    "EVID-S08-027-TRANSITIONS": (["S08-027"], "identity-roster-transitions"),
+    "EVID-S08-028-LOAD": (["S08-028"], "maximum-shape-load"),
+    "EVID-S08-029-CANARIES": (["S08-029"], "log-telemetry-canaries"),
+    "EVID-S08-030-REINIT-RACES": (["S08-030"], "reinit-race-matrix"),
+    "EVID-S08-031-ECAP": (["S08-031"], "ecap-federation-transitions"),
+    "EVID-S08-032-WIRE-BUDGET": (["S08-032"], "mechanical-wire-budget"),
+    "EVID-S08-033-SEMANTIC-IDS": (["S08-033"], "semantic-id-malleability"),
+    "EVID-S08-034-COUNCIL": (["S08-034"], "finality-council-transitions"),
+    "EVID-S08-035-OPERATIONS": (["S08-035"], "federation-operation-semantics"),
+    "EVID-S08-036-IDEMPOTENCY": (["S08-036"], "idempotency-crash-tests"),
+    "EVID-S08-037-CHAINS": (["S08-037"], "root-binding-chains"),
+    "EVID-S08-038-SCHEDULES": (["S08-038"], "barrier-schedules"),
+    "EVID-S08-039-REVIEW": (["S08-039"], "external-review"),
+    "EVID-S08-900-STAGE-GATE": (["S08-900"], "stage-gate"),
 }
 
 NORMATIVE_BINDINGS = {
@@ -290,6 +330,120 @@ NORMATIVE_BINDINGS = {
     "EVID-ARCH-REQ-DE27E4D7727B11384C1F": (["ARCH-REQ-DE27E4D7727B11384C1F"], "normative-requirement"),
     "EVID-ARCH-STA-04": (["ARCH-STA-04"], "normative-requirement"),
     "EVID-ARCH-TRN-02": (["ARCH-TRN-02"], "normative-requirement"),
+    "EVID-ARCH-CON-01": (["ARCH-CON-01"], "normative-requirement"),
+    "EVID-ARCH-CON-02": (["ARCH-CON-02"], "normative-requirement"),
+    "EVID-ARCH-CON-03": (["ARCH-CON-03"], "normative-requirement"),
+    "EVID-ARCH-CON-04": (["ARCH-CON-04"], "normative-requirement"),
+    "EVID-ARCH-CON-05": (["ARCH-CON-05"], "normative-requirement"),
+    "EVID-ARCH-DUR-01": (["ARCH-DUR-01"], "normative-requirement"),
+    "EVID-ARCH-DUR-02": (["ARCH-DUR-02"], "normative-requirement"),
+    "EVID-ARCH-E2E-01": (["ARCH-E2E-01"], "normative-requirement"),
+    "EVID-ARCH-E2E-02": (["ARCH-E2E-02"], "normative-requirement"),
+    "EVID-ARCH-E2E-03": (["ARCH-E2E-03"], "normative-requirement"),
+    "EVID-ARCH-E2E-04": (["ARCH-E2E-04"], "normative-requirement"),
+    "EVID-ARCH-E2E-05": (["ARCH-E2E-05"], "normative-requirement"),
+    "EVID-ARCH-E2E-06": (["ARCH-E2E-06"], "normative-requirement"),
+    "EVID-ARCH-E2E-07": (["ARCH-E2E-07"], "normative-requirement"),
+    "EVID-ARCH-FED-02": (["ARCH-FED-02"], "normative-requirement"),
+    "EVID-ARCH-FED-03": (["ARCH-FED-03"], "normative-requirement"),
+    "EVID-ARCH-FED-10": (["ARCH-FED-10"], "normative-requirement"),
+    "EVID-ARCH-FED-11": (["ARCH-FED-11"], "normative-requirement"),
+    "EVID-ARCH-FED-12": (["ARCH-FED-12"], "normative-requirement"),
+    "EVID-ARCH-ID-01": (["ARCH-ID-01"], "normative-requirement"),
+    "EVID-ARCH-ID-02": (["ARCH-ID-02"], "normative-requirement"),
+    "EVID-ARCH-ID-06": (["ARCH-ID-06"], "normative-requirement"),
+    "EVID-ARCH-REQ-00FBB19D3A47F35629EA": (["ARCH-REQ-00FBB19D3A47F35629EA"], "normative-requirement"),
+    "EVID-ARCH-REQ-630535C69EC8B9414843": (["ARCH-REQ-630535C69EC8B9414843"], "normative-requirement"),
+    "EVID-ARCH-REQ-705219A4555AC2842B77": (["ARCH-REQ-705219A4555AC2842B77"], "normative-requirement"),
+    "EVID-ARCH-REQ-D74CDEA02D46EEA2E9AD": (["ARCH-REQ-D74CDEA02D46EEA2E9AD"], "normative-requirement"),
+    "EVID-ARCH-REQ-D8DDA49F3C32422D93B3": (["ARCH-REQ-D8DDA49F3C32422D93B3"], "normative-requirement"),
+    "EVID-ARCH-REQ-E592762A378E0D95835A": (["ARCH-REQ-E592762A378E0D95835A"], "normative-requirement"),
+    "EVID-ARCH-REQ-F236FC1F5FD8129AB518": (["ARCH-REQ-F236FC1F5FD8129AB518"], "normative-requirement"),
+    "EVID-ARCH-STA-02": (["ARCH-STA-02"], "normative-requirement"),
+    "EVID-ARCH-STA-08": (["ARCH-STA-08"], "normative-requirement"),
+    "EVID-ARCH-TRN-04": (["ARCH-TRN-04"], "normative-requirement"),
+    "EVID-ARCH-TRN-05": (["ARCH-TRN-05"], "normative-requirement"),
+    "EVID-ARCH-TRN-06": (["ARCH-TRN-06"], "normative-requirement"),
+    "EVID-E2EE-REQ-03E795692C36DFAE083B": (["E2EE-REQ-03E795692C36DFAE083B"], "normative-requirement"),
+    "EVID-E2EE-REQ-04B0129952BBBB1F3D22": (["E2EE-REQ-04B0129952BBBB1F3D22"], "normative-requirement"),
+    "EVID-E2EE-REQ-0950B248DBB87C569FE7": (["E2EE-REQ-0950B248DBB87C569FE7"], "normative-requirement"),
+    "EVID-E2EE-REQ-0DAEDE4522366E3A68A9": (["E2EE-REQ-0DAEDE4522366E3A68A9"], "normative-requirement"),
+    "EVID-E2EE-REQ-0EE614CD32C84FA9F408": (["E2EE-REQ-0EE614CD32C84FA9F408"], "normative-requirement"),
+    "EVID-E2EE-REQ-1AB78DA63741FF0B38CF": (["E2EE-REQ-1AB78DA63741FF0B38CF"], "normative-requirement"),
+    "EVID-E2EE-REQ-1BFDC5AC26176497302E": (["E2EE-REQ-1BFDC5AC26176497302E"], "normative-requirement"),
+    "EVID-E2EE-REQ-208C5CAB7399B4AC15B8": (["E2EE-REQ-208C5CAB7399B4AC15B8"], "normative-requirement"),
+    "EVID-E2EE-REQ-21F466D08365E6787EFF": (["E2EE-REQ-21F466D08365E6787EFF"], "normative-requirement"),
+    "EVID-E2EE-REQ-28CC5A2874FBFEDC8694": (["E2EE-REQ-28CC5A2874FBFEDC8694"], "normative-requirement"),
+    "EVID-E2EE-REQ-2F0777EEA2E2B0559F6D": (["E2EE-REQ-2F0777EEA2E2B0559F6D"], "normative-requirement"),
+    "EVID-E2EE-REQ-37736EFE55D201CBE671": (["E2EE-REQ-37736EFE55D201CBE671"], "normative-requirement"),
+    "EVID-E2EE-REQ-37CAE24A086303163D86": (["E2EE-REQ-37CAE24A086303163D86"], "normative-requirement"),
+    "EVID-E2EE-REQ-3AE1FE848688A346F9F1": (["E2EE-REQ-3AE1FE848688A346F9F1"], "normative-requirement"),
+    "EVID-E2EE-REQ-3DDAFB884DFFB22C1F74": (["E2EE-REQ-3DDAFB884DFFB22C1F74"], "normative-requirement"),
+    "EVID-E2EE-REQ-3DFFF778DA62F4CEEF8F": (["E2EE-REQ-3DFFF778DA62F4CEEF8F"], "normative-requirement"),
+    "EVID-E2EE-REQ-3F31F96A8E03DA4C101C": (["E2EE-REQ-3F31F96A8E03DA4C101C"], "normative-requirement"),
+    "EVID-E2EE-REQ-3F6EB7E7803E9A17D029": (["E2EE-REQ-3F6EB7E7803E9A17D029"], "normative-requirement"),
+    "EVID-E2EE-REQ-47F62E0752E7757399CD": (["E2EE-REQ-47F62E0752E7757399CD"], "normative-requirement"),
+    "EVID-E2EE-REQ-48C5B151716A5DA59976": (["E2EE-REQ-48C5B151716A5DA59976"], "normative-requirement"),
+    "EVID-E2EE-REQ-4A2736C8DC8339780AA6": (["E2EE-REQ-4A2736C8DC8339780AA6"], "normative-requirement"),
+    "EVID-E2EE-REQ-4A2B327FEB0ED0D66724": (["E2EE-REQ-4A2B327FEB0ED0D66724"], "normative-requirement"),
+    "EVID-E2EE-REQ-4B9FA0731463AF395EEF": (["E2EE-REQ-4B9FA0731463AF395EEF"], "normative-requirement"),
+    "EVID-E2EE-REQ-4E4E130CEAB680D99587": (["E2EE-REQ-4E4E130CEAB680D99587"], "normative-requirement"),
+    "EVID-E2EE-REQ-4ECEEB84B918BCA2DBE3": (["E2EE-REQ-4ECEEB84B918BCA2DBE3"], "normative-requirement"),
+    "EVID-E2EE-REQ-4EFBE464A39690115414": (["E2EE-REQ-4EFBE464A39690115414"], "normative-requirement"),
+    "EVID-E2EE-REQ-532CF56360A03DCF3C39": (["E2EE-REQ-532CF56360A03DCF3C39"], "normative-requirement"),
+    "EVID-E2EE-REQ-54D3BF177A5D79854AEC": (["E2EE-REQ-54D3BF177A5D79854AEC"], "normative-requirement"),
+    "EVID-E2EE-REQ-58217F311021E979779A": (["E2EE-REQ-58217F311021E979779A"], "normative-requirement"),
+    "EVID-E2EE-REQ-5B3475BE0506C311BEF2": (["E2EE-REQ-5B3475BE0506C311BEF2"], "normative-requirement"),
+    "EVID-E2EE-REQ-5B7791BEAEA4EF6B0D60": (["E2EE-REQ-5B7791BEAEA4EF6B0D60"], "normative-requirement"),
+    "EVID-E2EE-REQ-67059195AB3AA10AAD9B": (["E2EE-REQ-67059195AB3AA10AAD9B"], "normative-requirement"),
+    "EVID-E2EE-REQ-6A1A40DF827404DFC2E0": (["E2EE-REQ-6A1A40DF827404DFC2E0"], "normative-requirement"),
+    "EVID-E2EE-REQ-72ECA857E694D0439A70": (["E2EE-REQ-72ECA857E694D0439A70"], "normative-requirement"),
+    "EVID-E2EE-REQ-73270B473C2AB773AF11": (["E2EE-REQ-73270B473C2AB773AF11"], "normative-requirement"),
+    "EVID-E2EE-REQ-74E9B5BFDE9BE0345707": (["E2EE-REQ-74E9B5BFDE9BE0345707"], "normative-requirement"),
+    "EVID-E2EE-REQ-75819BD50FB3E71F2B91": (["E2EE-REQ-75819BD50FB3E71F2B91"], "normative-requirement"),
+    "EVID-E2EE-REQ-7FE02BCBD9EEB3934B70": (["E2EE-REQ-7FE02BCBD9EEB3934B70"], "normative-requirement"),
+    "EVID-E2EE-REQ-845B04F1228AFD8867F1": (["E2EE-REQ-845B04F1228AFD8867F1"], "normative-requirement"),
+    "EVID-E2EE-REQ-865E52D8D04B59FEEFBE": (["E2EE-REQ-865E52D8D04B59FEEFBE"], "normative-requirement"),
+    "EVID-E2EE-REQ-87B4B4DBBAD9DB97F76A": (["E2EE-REQ-87B4B4DBBAD9DB97F76A"], "normative-requirement"),
+    "EVID-E2EE-REQ-8AB2B222BF622D4C4BDF": (["E2EE-REQ-8AB2B222BF622D4C4BDF"], "normative-requirement"),
+    "EVID-E2EE-REQ-8B777BE6D9A7ED988687": (["E2EE-REQ-8B777BE6D9A7ED988687"], "normative-requirement"),
+    "EVID-E2EE-REQ-8C607B4410F376797BD2": (["E2EE-REQ-8C607B4410F376797BD2"], "normative-requirement"),
+    "EVID-E2EE-REQ-9641FAA02EEEC75A2E7D": (["E2EE-REQ-9641FAA02EEEC75A2E7D"], "normative-requirement"),
+    "EVID-E2EE-REQ-98421AA3C0425E259F8F": (["E2EE-REQ-98421AA3C0425E259F8F"], "normative-requirement"),
+    "EVID-E2EE-REQ-986A7772723E16360520": (["E2EE-REQ-986A7772723E16360520"], "normative-requirement"),
+    "EVID-E2EE-REQ-98C7F0834891533DE1BC": (["E2EE-REQ-98C7F0834891533DE1BC"], "normative-requirement"),
+    "EVID-E2EE-REQ-9A4E05845BDB4B1C7D30": (["E2EE-REQ-9A4E05845BDB4B1C7D30"], "normative-requirement"),
+    "EVID-E2EE-REQ-9EA1028E2CE3115F5EEB": (["E2EE-REQ-9EA1028E2CE3115F5EEB"], "normative-requirement"),
+    "EVID-E2EE-REQ-A141AC00A13A398685DC": (["E2EE-REQ-A141AC00A13A398685DC"], "normative-requirement"),
+    "EVID-E2EE-REQ-A5E4E2058896C2016403": (["E2EE-REQ-A5E4E2058896C2016403"], "normative-requirement"),
+    "EVID-E2EE-REQ-A7C32D4A15F7F0AF4F82": (["E2EE-REQ-A7C32D4A15F7F0AF4F82"], "normative-requirement"),
+    "EVID-E2EE-REQ-AC36B134578CBDB4F7A2": (["E2EE-REQ-AC36B134578CBDB4F7A2"], "normative-requirement"),
+    "EVID-E2EE-REQ-B1A07872530E53E1C5E0": (["E2EE-REQ-B1A07872530E53E1C5E0"], "normative-requirement"),
+    "EVID-E2EE-REQ-B341221DC3B1063B9F41": (["E2EE-REQ-B341221DC3B1063B9F41"], "normative-requirement"),
+    "EVID-E2EE-REQ-B73C16A97C1278CDDE0B": (["E2EE-REQ-B73C16A97C1278CDDE0B"], "normative-requirement"),
+    "EVID-E2EE-REQ-B8F44A765000AE5B6944": (["E2EE-REQ-B8F44A765000AE5B6944"], "normative-requirement"),
+    "EVID-E2EE-REQ-B93A7B094027B1B00105": (["E2EE-REQ-B93A7B094027B1B00105"], "normative-requirement"),
+    "EVID-E2EE-REQ-B99A6DD4949FED0CE02A": (["E2EE-REQ-B99A6DD4949FED0CE02A"], "normative-requirement"),
+    "EVID-E2EE-REQ-BFA20A50D15399A2F088": (["E2EE-REQ-BFA20A50D15399A2F088"], "normative-requirement"),
+    "EVID-E2EE-REQ-C345CFA457EB0B500D2A": (["E2EE-REQ-C345CFA457EB0B500D2A"], "normative-requirement"),
+    "EVID-E2EE-REQ-C8997B4345158FD54D44": (["E2EE-REQ-C8997B4345158FD54D44"], "normative-requirement"),
+    "EVID-E2EE-REQ-CA268835A931F5051D79": (["E2EE-REQ-CA268835A931F5051D79"], "normative-requirement"),
+    "EVID-E2EE-REQ-CED437B1C62CF9CD0A79": (["E2EE-REQ-CED437B1C62CF9CD0A79"], "normative-requirement"),
+    "EVID-E2EE-REQ-D07C2C1AA58D16CA582D": (["E2EE-REQ-D07C2C1AA58D16CA582D"], "normative-requirement"),
+    "EVID-E2EE-REQ-D150C4C93D931F51EE12": (["E2EE-REQ-D150C4C93D931F51EE12"], "normative-requirement"),
+    "EVID-E2EE-REQ-D2C711B6BB260BFB72FD": (["E2EE-REQ-D2C711B6BB260BFB72FD"], "normative-requirement"),
+    "EVID-E2EE-REQ-D70B8B9850E29E082F85": (["E2EE-REQ-D70B8B9850E29E082F85"], "normative-requirement"),
+    "EVID-E2EE-REQ-DB900449D8D52DA92117": (["E2EE-REQ-DB900449D8D52DA92117"], "normative-requirement"),
+    "EVID-E2EE-REQ-DF1E11F99D8CA9C38917": (["E2EE-REQ-DF1E11F99D8CA9C38917"], "normative-requirement"),
+    "EVID-E2EE-REQ-DFF4835BF134E29328E1": (["E2EE-REQ-DFF4835BF134E29328E1"], "normative-requirement"),
+    "EVID-E2EE-REQ-E84E3DF2CF6A849CCBA8": (["E2EE-REQ-E84E3DF2CF6A849CCBA8"], "normative-requirement"),
+    "EVID-E2EE-REQ-E9D6A931BDD262B08F93": (["E2EE-REQ-E9D6A931BDD262B08F93"], "normative-requirement"),
+    "EVID-E2EE-REQ-EC03C8374D88E32F6776": (["E2EE-REQ-EC03C8374D88E32F6776"], "normative-requirement"),
+    "EVID-E2EE-REQ-ED359F4450E30FD76278": (["E2EE-REQ-ED359F4450E30FD76278"], "normative-requirement"),
+    "EVID-E2EE-REQ-EFECC9F9EB196FD2CF16": (["E2EE-REQ-EFECC9F9EB196FD2CF16"], "normative-requirement"),
+    "EVID-E2EE-REQ-F14B7B01F4CFF98A804E": (["E2EE-REQ-F14B7B01F4CFF98A804E"], "normative-requirement"),
+    "EVID-E2EE-REQ-F252168A3A468701F674": (["E2EE-REQ-F252168A3A468701F674"], "normative-requirement"),
+    "EVID-E2EE-REQ-FDA89A1D5714375C1B4F": (["E2EE-REQ-FDA89A1D5714375C1B4F"], "normative-requirement"),
 }
 
 REVIEWED_BINDINGS = STAGE_BINDINGS | NORMATIVE_BINDINGS
@@ -349,7 +503,7 @@ TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z")
 ARTIFACT_PATH_RE = re.compile(
     r"conformance/evidence/artifacts/[A-Za-z0-9][A-Za-z0-9_./-]{0,511}"
 )
-CLOSABLE_STAGES = frozenset(range(8))
+CLOSABLE_STAGES = frozenset(range(9))
 REVIEWED_EVIDENCE_TARGETS = (
     "aarch64-unknown-linux-gnu",
     "x86_64-unknown-linux-gnu",
@@ -364,6 +518,7 @@ STAGE_NAMES = {
     5: "five",
     6: "six",
     7: "seven",
+    8: "eight",
 }
 RUN_ARTIFACT_FIELDS = {
     "schema_version",
@@ -841,7 +996,7 @@ def parse_toolchain_policy(
 ) -> tuple[str, list[dict[str, object]], list[str]]:
     """Parse one closed toolchain policy and select the requested stage profile."""
     if stage not in CLOSABLE_STAGES:
-        raise EvidenceError("toolchain profiles currently cover only Stages 00 through 07")
+        raise EvidenceError("toolchain profiles currently cover only Stages 00 through 08")
     policy_hash = hashlib.sha256(policy_bytes).hexdigest()
     try:
         policy = tomllib.loads(policy_bytes.decode("utf-8"))
@@ -917,7 +1072,7 @@ def parse_toolchain_policy(
             or first_stage < previous_first_stage
         ):
             raise EvidenceError(
-                f"{tool_label}.first_stage must be ordered within Stages 00 through 07"
+                f"{tool_label}.first_stage must be ordered within Stages 00 through 08"
             )
         previous_first_stage = first_stage
         normalized = validate_toolchain(
@@ -1223,10 +1378,39 @@ def validate(root: Path) -> tuple[int, int]:
     return len(bindings), entry_count
 
 
+# Tasks a stage may close around because their completion is outside the
+# implementing team's hands. Each entry names the committed record that must
+# carry the task with the state ``blocked-external``; the recorded gate and
+# the closure manifest then cover the exact source commit with that task
+# open, and nothing else may be open.
+EXTERNALLY_BLOCKED_TASKS: dict[int, tuple[str, str]] = {
+    8: ("S08-039", "conformance/stage-eight-e2ee-profile.toml"),
+}
+
+
+def externally_blocked_tasks(root: Path, stage: int, source_commit: str) -> set[str]:
+    """Return the tasks the committed stage record declares externally blocked."""
+    blocked = EXTERNALLY_BLOCKED_TASKS.get(stage)
+    if blocked is None:
+        return set()
+    task, relative = blocked
+    try:
+        record = tomllib.loads(commit_blob(root, source_commit, relative).decode("utf-8"))
+    except (UnicodeError, tomllib.TOMLDecodeError) as error:
+        raise EvidenceError(f"stage record {relative} is unreadable: {error}") from error
+    review = record.get("review")
+    if not isinstance(review, dict) or review.get("task") != task:
+        raise EvidenceError(f"stage record {relative} does not name blocked task {task}")
+    if review.get("state") != "blocked-external":
+        raise EvidenceError(f"stage record {relative} does not record {task} as blocked-external")
+    return {task}
+
+
 def required_stage_evidence_ids_from_data(
     stage: int,
     records: object,
     states: dict[str, bool],
+    blocked: frozenset[str] = frozenset(),
 ) -> set[str]:
     """Return the required IDs after validating one source requirement ledger."""
     prefix = f"S{stage:02d}-"
@@ -1255,7 +1439,7 @@ def required_stage_evidence_ids_from_data(
     incomplete_tasks = sorted(
         task
         for task in stage_tasks
-        if not task.endswith("-900") and not states[task]
+        if not task.endswith("-900") and not states[task] and task not in blocked
     )
     if incomplete_tasks:
         raise EvidenceError(
@@ -1329,6 +1513,7 @@ def required_stage_evidence_ids(
             stage,
             ledger.get("requirement"),
             states,
+            frozenset(externally_blocked_tasks(root, stage, source_commit)),
         )
 
 
@@ -1707,7 +1892,7 @@ def validate_closure_entries(
 def validate_closure(root: Path, stage: int, source_commit: str) -> tuple[int, int]:
     """Validate exact-revision evidence needed to close one stage."""
     if stage not in CLOSABLE_STAGES:
-        raise EvidenceError("closure evidence catalogs currently cover only Stages 00 through 07")
+        raise EvidenceError("closure evidence catalogs currently cover only Stages 00 through 08")
     if COMMIT_RE.fullmatch(source_commit) is None:
         raise EvidenceError("closure source commit must be an exact lowercase 40-character Git ID")
     validate(root)
@@ -1871,11 +2056,11 @@ kind = "normative-requirement"
         + """
 
 [[evidence]]
-id = "EVID-ARCH-CON-01"
-claim_ids = ["ARCH-CON-01"]
+id = "EVID-ARCH-STA-05"
+claim_ids = ["ARCH-STA-05"]
 kind = "normative-requirement"
 """,
-        "unimplemented requirement ARCH-CON-01 must not have closing catalog evidence",
+        "unimplemented requirement ARCH-STA-05 must not have closing catalog evidence",
     )
     reject_catalog(
         "unrelated catalog evidence",
@@ -1891,7 +2076,7 @@ kind = "normative-requirement"
     )
 
     try:
-        closure_evidence_inventory({"EVID-ARCH-CON-01"})
+        closure_evidence_inventory({"EVID-ARCH-STA-05"})
     except EvidenceError as error:
         if "lacks a reviewed catalog kind" not in str(error):
             raise EvidenceError(
@@ -2176,10 +2361,15 @@ kind = "normative-requirement"
         raise EvidenceError("self-test 'incomplete source task' was accepted")
     cases += 1
 
+    required_stage_evidence_ids_from_data(
+        0, source_records, incomplete_states, frozenset({"S00-001"})
+    )
+    cases += 1
+
     try:
-        validate_closure(root, 8, "2" * 40)
+        validate_closure(root, 9, "2" * 40)
     except EvidenceError as error:
-        if "only Stages 00 through 07" not in str(error):
+        if "only Stages 00 through 08" not in str(error):
             raise EvidenceError(
                 f"self-test 'unsupported closure stage' reached the wrong branch: {error}"
             ) from error

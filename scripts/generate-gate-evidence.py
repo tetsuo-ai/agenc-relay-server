@@ -24,6 +24,7 @@ GATE_STAGES = {
     "stage-five-implementation": 5,
     "stage-six-implementation": 6,
     "stage-seven-implementation": 7,
+    "stage-eight-implementation": 8,
 }
 
 

@@ -11,6 +11,8 @@ mod origins;
 mod result;
 mod router;
 mod sync;
+#[cfg(test)]
+mod tests;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 

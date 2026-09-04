@@ -1,0 +1,70 @@
+schema_version = 1
+stage = 8
+repository = "https://github.com/mlswg/mls-implementations"
+commit = "cfd450286d1bfd9cd2519b95c80f9771f94a5b1a"
+suites = [1, 3]
+note = "RFC 9420 has no official vector section; the MLS WG interoperability repository is the pinned corpus. The daemon parses only the outer framing, so the checked-in subset holds the wire shapes it reads: KeyPackage, Welcome, PrivateMessage, PublicMessage, GroupInfo, and the variable-length integer headers."
+
+[[upstream]]
+path = "test-vectors/messages.json"
+sha256 = "b194abe1561995223482dbad51c180146920dc2f637e74d01e07a388308791fb"
+bytes = 2685714
+
+[[upstream]]
+path = "test-vectors/deserialization.json"
+sha256 = "1e394706e79f77df71454e5970f2aa736d4ab8b6c7e3219dd5609992388a953e"
+bytes = 934
+
+[[upstream]]
+path = "test-vectors/welcome.json"
+sha256 = "06be9d5c99817ef2545e4b15b8e73fd9b604685a8e55b59ca168eda98e236502"
+bytes = 16815
+
+[[local]]
+path = "test-data/interoperability/mls/key-packages.hex"
+sha256 = "50ec1f1188eed6c9b377851a8bf03cd9b9714a21b26c2e0007d176b49b315473"
+bytes = 14184
+derived_from = "test-vectors/messages.json"
+selection = "entries 0..24 field mls_key_package"
+
+[[local]]
+path = "test-data/interoperability/mls/welcomes.hex"
+sha256 = "60e90d12a3923b5deb2503e6e5dd04546b46308f9a38af6562f770f7da00ada5"
+bytes = 20184
+derived_from = "test-vectors/messages.json"
+selection = "entries 0..24 field mls_welcome"
+
+[[local]]
+path = "test-data/interoperability/mls/private-messages.hex"
+sha256 = "509903bf095002a29dcc784f1d988f14c2e63568de40bea0cd71074c56345252"
+bytes = 17868
+derived_from = "test-vectors/messages.json"
+selection = "entries 0..24 field private_message"
+
+[[local]]
+path = "test-data/interoperability/mls/public-messages.hex"
+sha256 = "c87f1c7fa5ffa9c84e593e3218ffe50d99ca17bc59aaa1cb6c12aba7a48061b6"
+bytes = 6840
+derived_from = "test-vectors/messages.json"
+selection = "entries 0..24 field public_message_application"
+
+[[local]]
+path = "test-data/interoperability/mls/group-infos.hex"
+sha256 = "efd0ae018db0aabe3376d77769d796e8764de6197c7cf1aaa1b14de8b5c27c2b"
+bytes = 20376
+derived_from = "test-vectors/messages.json"
+selection = "entries 0..24 field mls_group_info"
+
+[[local]]
+path = "test-data/interoperability/mls/varint.hex"
+sha256 = "6fbd17e7b3603050cfdc857e695420a553549b6ec60bb7a0fadf31fc09c71c3c"
+bytes = 145
+derived_from = "test-vectors/deserialization.json"
+selection = "every entry as header length"
+
+[[local]]
+path = "test-data/interoperability/mls/welcome-joins.hex"
+sha256 = "13f3d1ad94759dd3c7f0096a7cbb65d41fb7330dfd82046034ce83250360ed5f"
+bytes = 14438
+derived_from = "test-vectors/welcome.json"
+selection = "every entry as suite key_package welcome"

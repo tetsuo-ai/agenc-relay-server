@@ -17,6 +17,7 @@ mod client_transcript;
 mod domain_fixture;
 mod domain_reference;
 pub mod e2ee_client;
+pub mod e2ee_model;
 /// The crypto crate, re-exported for the same reason.
 pub use agenc_ircd_crypto as crypto;
 /// The E2EE crate, re-exported so binary-crate tests reach the companion

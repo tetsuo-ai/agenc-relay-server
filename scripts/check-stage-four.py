@@ -177,6 +177,7 @@ EXPECTED_DEPENDENCIES = (
     ("zeroize", "zeroize", "1.9.0", "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e", ["alloc"]),
 )
 EXPECTED_DUPLICATE_GENERATIONS = {
+    "const-oid": {"0.9.6", "0.10.2"},
     "curve25519-dalek": {"4.1.3", "5.0.0"},
     "getrandom": {"0.2.17", "0.4.3"},
     "hkdf": {"0.12.4", "0.13.0"},
@@ -194,6 +195,8 @@ EXPECTED_DENY_SKIPS = {
     "rand_core@0.6.4": "opaque-ke 4.0.1 retains its audited internal RNG trait generation",
     "sha2@0.10.9": "opaque-ke 4.0.1 uses the reviewed SHA-512 generation through a scoped alias",
     "syn@2.0.119": "the reviewed crypto derive graph and current proc macros span syn 2 and 3",
+    "const-oid@0.10.2": "the test-only MLS clients (openmls, mls-rs) for the Stage 08 interoperability gate use the current RustCrypto generation",
+    "getrandom@0.4.3": "the test-only MLS clients (openmls, mls-rs) for the Stage 08 interoperability gate use the current getrandom generation",
 }
 REQUIRED_SURFACES = (
     "pub(crate) struct SecretBytes",
