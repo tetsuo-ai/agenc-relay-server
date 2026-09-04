@@ -332,8 +332,10 @@ pub fn submit_candidate(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     next_log
         .record_candidate(candidate_id, commit_object_id, position)
         .map_err(|_| Fail::with(E2eeReplyCode::CandidateActive, &conversation_id))?;
+    let refresh = super::route::refresh_head(exec, conversation_id, state, &next_log)?;
     let mut outcome = Outcome::scalar(ResultBody::AcceptedEvent);
     outcome.security_mutation = true;
+    outcome.writes.extend(refresh.writes);
     outcome
         .writes
         .push(CompanionCoordinator::object_write(bytes)?);
@@ -381,13 +383,16 @@ pub fn submit_candidate(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     }
     let commit = bytes.to_vec();
     let validation_time = envelope.aad.validation_time;
+    let (route_object, route_object_id) = (refresh.route_object, refresh.route_object_id);
     outcome.effects.push(Box::new(move |companion| {
         companion.logs.insert(conversation_id, next_log);
         retain(companion, commit);
         retain(companion, record);
+        retain(companion, route_object);
         if let Some(state) = companion.conversations.get_mut(&conversation_id) {
             state.records.insert(position.route_sequence, record_id);
             state.last_validation_time = validation_time;
+            state.route_object_id = route_object_id;
         }
     }));
     Ok(outcome)
@@ -572,12 +577,22 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     }
     let (policy, rosters) = council(exec, &conversation_id, &core.old_policy_id)?;
     let resulting_policy_id = authorization.resulting_policy_id;
-    if resulting_policy_id != core.old_policy_id
-        && !conversation(exec, &conversation_id)?
+    if resulting_policy_id != core.old_policy_id {
+        // A policy change installs exactly the retained successor of the
+        // old policy (companion 9.3 and 12.4): never an older generation,
+        // never a skipped one.
+        let successor = conversation(exec, &conversation_id)?
             .policies
-            .contains_key(&resulting_policy_id)
-    {
-        return Err(Fail::with(E2eeReplyCode::PolicyRequired, &conversation_id));
+            .get(&resulting_policy_id)
+            .ok_or_else(|| Fail::with(E2eeReplyCode::PolicyRequired, &conversation_id))?;
+        let adjacent = successor.policy.previous_policy_id == core.old_policy_id
+            && successor.policy.generation == policy.generation.saturating_add(1);
+        if !adjacent {
+            return Err(Fail::with(
+                E2eeReplyCode::BindingAuthInvalid,
+                &conversation_id,
+            ));
+        }
     }
     let terminal = Terminal::finalize(finalization_id);
     let tbs = vote_tbs(
@@ -915,12 +930,19 @@ pub fn submit_reinit_attempt(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     next_log
         .record_attempt(attempt_id)
         .map_err(|_| Fail::with(E2eeReplyCode::CandidateActive, &old_conversation_id))?;
+    let refresh = super::route::refresh_head(
+        exec,
+        old_conversation_id,
+        conversation(exec, &old_conversation_id)?,
+        &next_log,
+    )?;
     let mut outcome = Outcome::scalar(ResultBody::ReinitStaged(
         old_conversation_id,
         attempt_id,
         attempt_object_id,
     ));
     outcome.security_mutation = true;
+    outcome.writes.extend(refresh.writes);
     outcome
         .writes
         .push(CompanionCoordinator::object_write(bytes)?);
@@ -950,12 +972,15 @@ pub fn submit_reinit_attempt(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         ));
     }
     let retained = bytes.to_vec();
+    let (route_object, route_object_id) = (refresh.route_object, refresh.route_object_id);
     outcome.effects.push(Box::new(move |companion| {
         companion.logs.insert(old_conversation_id, next_log);
         retain(companion, retained);
         retain(companion, record);
+        retain(companion, route_object);
         if let Some(state) = companion.conversations.get_mut(&old_conversation_id) {
             state.records.insert(slot.route_sequence, record_id);
+            state.route_object_id = route_object_id;
         }
     }));
     Ok(outcome)

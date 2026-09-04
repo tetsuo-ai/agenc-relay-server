@@ -3407,7 +3407,10 @@ fails with `E2EE_POLICY_REQUIRED` and is not retained. `old_policy_id` must be
 the conversation's current policy, the one its last finalization installed
 and the binding's initial policy before the first; a retained policy that is
 not current fails with `E2EE_EPOCH_STALE`, and the authorization's
-`old_policy_id` must match. The sequencer reconstructs the exact
+`old_policy_id` must match. A resulting policy other than the old one must be
+the retained policy whose `previous_policy_id` is the old policy at the next
+generation; an older or skipped generation fails with
+`E2EE_BINDING_AUTH_INVALID`. The sequencer reconstructs the exact
 `IrcDispositionVoteTBS` for the slot from its own receipt and verifies each
 vote's device signature with the device-authorization key of the retained
 roster certificate named by `signer_device_certificate_id`. A vote vector that
@@ -3417,7 +3420,9 @@ not verify fails the request with `E2EE_BINDING_AUTH_INVALID`; a vote from a
 principal the sequencer already counted for the other terminal of the same
 slot is discarded as a sign-once violation. It counts at most one vote per
 principal, keeps the count for the slot across requests so a later request
-need only add the missing votes, and signs the bounded proof snapshot with
+need only add the missing votes (a reloaded coordinator rebuilds it from the
+retained terminal requests of the open slot), and signs the bounded proof
+snapshot with
 label `IRC-MLS/1 commit finalization` only when at least `q` distinct valid
 FINALIZE votes stand. A request below `q` is retained and returns `PENDING`.
 Certification makes the authorization's resulting policy the current policy.
@@ -4365,8 +4370,9 @@ After the first sequencer record,
 `route_sequence` and `sequencer_record_head_id` is its recomputed semantic ID;
 both belong to this conversation and are the coordinator's current head at the
 route-state cut. The coordinator refreshes the retained route-state object and
-its durable route row at every terminal and close, so a cut and a reloaded
-coordinator name the head the edges have witnessed. Before the first record,
+its durable route row at every sequencer record (candidate, ReInit attempt,
+terminal, and close), so a cut and a reloaded coordinator name the head the
+edges have witnessed. Before the first record,
 the sequence is zero and the ID is
 the exact external genesis or ReInit-activation anchor required by Section
 12.2. An ID/sequence mismatch, missing required security record, invalid

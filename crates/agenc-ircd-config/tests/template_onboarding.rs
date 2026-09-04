@@ -158,7 +158,7 @@ fn descriptor_lines_occur_in_order_and_omit_absent_endpoints_as_units() -> TestR
     );
     assert_eq!(
         E2EE_PROFILE_SHA256_TOKEN,
-        "cW7PBVTerkvboEAll8DopBlGohRZqrAYZGxjhwIpfbo"
+        "RfzT_R3FsXwGF-uEsJzJtecZelkyn9XVJtWogtaoC10"
     );
 
     let public = render_onboarding(&parse(PUBLIC)?, &facts())?;

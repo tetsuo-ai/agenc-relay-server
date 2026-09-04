@@ -12,7 +12,7 @@ task closes.
 
 Exact profile: `docs/irc-mls-e2ee-extension.md` at the document hash
 recorded in `conformance/spec-baseline.toml`, negotiated as profile version
-1 with token `cW7PBVTerkvboEAll8DopBlGohRZqrAYZGxjhwIpfbo`, suites 0x0001 and
+1 with token `RfzT_R3FsXwGF-uEsJzJtecZelkyn9XVJtWogtaoC10`, suites 0x0001 and
 0x0003, context extension 0xF1C1, roster update proposal 0xF1C2, and join
 authorization bundle extension 0xF1C3.
 

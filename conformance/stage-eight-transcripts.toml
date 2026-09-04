@@ -1022,3 +1022,17 @@ surface = "daemon"
 file = "crates/agenc-ircd/tests/stage_eight_e2ee.rs"
 test = "real_mls_clients_run_the_encrypted_lifecycle_through_the_daemon"
 gates = [3, 5, 9]
+
+[[transcript]]
+id = "coordinator-policy-adjacency"
+surface = "coordinator"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/sequence.rs"
+test = "a_policy_change_installs_only_the_retained_successor_of_the_old_policy"
+gates = [9, 10]
+
+[[transcript]]
+id = "coordinator-ledger-reload"
+surface = "coordinator"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/sequence.rs"
+test = "a_reloaded_coordinator_keeps_the_votes_a_slot_had_gathered"
+gates = [8, 9]

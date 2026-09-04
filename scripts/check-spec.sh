@@ -32,7 +32,7 @@ expected_files = {
     "rfcs/rfc9420-mls-protocol.txt": "251ab11076c43fd4b8dc080a068a8caaf55e2fc5e6aa61d4274961627f32624b",
     "rfcs/rfc9525-tls-service-identity.txt": "ed8116c2435376dffe37ec2ca688c3a8515e36820852b29e0b6cdfbe92abd2c5",
     "rfcs/rfc9750-mls-architecture.txt": "6aa156c5592f99802aae9c39510bf347cacee4abdb1c34baab4c933a6cd992dd",
-    "docs/irc-mls-e2ee-extension.md": "770068a21240e480abd1edce0ba2501491485fed92be5f76be00cc14236034b6",
+    "docs/irc-mls-e2ee-extension.md": "0d8a1ece85298f3758dcad06a1435950970ff934d260cba85077337aef1150df",
     "docs/federation-v1-profile.registry": "30d4a9e9947691e2ca26e137e2762413a9b6a4fd308308bd5bfbd8cad20ac2e9",
 }
 
@@ -443,7 +443,7 @@ e2ee_profile_token = base64.urlsafe_b64encode(
     e2ee_profile_digest
 ).rstrip(b"=").decode("ascii")
 expected_e2ee_profile_hash = (
-    "716ecf0554deae4bdba0402597c0e8a41946a21459aab018646c638702297dba"
+    "45fcd3fd1dc5b17c0617eb84b09cc9b5e7197a59329fd5d526d5a882d6a80b5d"
 )
 if e2ee_profile_hash != expected_e2ee_profile_hash:
     errors.append(
