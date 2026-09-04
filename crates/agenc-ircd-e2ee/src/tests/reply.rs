@@ -7,9 +7,9 @@ use std::collections::BTreeSet;
 use super::*;
 
 #[test]
-fn the_registry_holds_twenty_distinct_codes() {
+fn the_registry_holds_twenty_two_distinct_codes() {
     let tokens: BTreeSet<&str> = E2eeReplyCode::ALL.iter().map(|code| code.token()).collect();
-    assert_eq!(tokens.len(), 20);
+    assert_eq!(tokens.len(), 22);
     for code in E2eeReplyCode::ALL {
         assert!(code.token().starts_with("E2EE_"));
         assert_eq!(E2eeReplyCode::from_token(code.token()), Some(code));

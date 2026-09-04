@@ -58,7 +58,7 @@ References: [Architecture §§1.2–4](docs/ircd-architecture-and-implementation
 | 05 | Durable and recoverable persistence | Complete | Pass, 2026-08-29 | [Current checkpoint](conformance/evidence/stage-05-4040796f2c21774d58ea7ce54e70a080678e83ac.json) |
 | 06 | Conforming single-node daemon | Complete | Pass, 2026-09-01 | [Current checkpoint](conformance/evidence/stage-06-65cce9d66f7bcfb0c0830a2ab1d42b52bff82942.json) |
 | 07 | Conforming base federation | Complete | Pass, 2026-09-03 | [Current checkpoint](conformance/evidence/stage-07-1093d88d0057c3461a423285e0f86ff3775c1140.json) |
-| 08 | Conforming E2EE server adapter | Complete (external review open) | Pass, 2026-09-04 | [Current checkpoint](conformance/evidence/stage-08-52c7ccb909ecd398853183ef3f11ffd2df251e08.json) |
+| 08 | Conforming E2EE server adapter | Complete (external review open) | Pass, 2026-09-04 | [Current checkpoint](conformance/evidence/stage-08-a6e3c54a6a4e4d95436cb43197e66a521ee21315.json) |
 | 09 | Optional WSS and history profiles | Not started | Not run | Absent |
 | 10 | Production qualification and release evidence | Not started | Not run | Absent |
 
@@ -2408,6 +2408,59 @@ is `S08-039`, after technical source gates 14–22 are complete.
   - Invariants: `E2E-03`, `FED-11`, `FED-12`, `DUR-01`, `DUR-02`.
   - Evidence: one combined state cut, both cumulative ACKs or neither, no duplicate frame, and exact original-sink result convergence.
 
+- [x] `S08-040` **Publish conversation policies to the server.** Accept
+  `EGROUP SUBMIT POLICY` (object kind `policy`, opcode `submit_policy`),
+  verify each policy against the binding's chain and the retained rosters,
+  retain it by content identifier, answer identical resubmissions, and
+  restore the chain on reload.
+  - After: `S08-006`, `S08-017`.
+  - Targets: `agenc-ircd-e2ee`, `agenc-ircd-domain`, `agenc-ircd-storage`, coordinator policy handler and startup restore, edge router.
+  - References: [E2EE §§9.3, 11.5, 11.7](docs/irc-mls-e2ee-extension.md#93-canonical-policy-and-roster-transitions).
+  - Invariants: `E2E-02`, `E2E-04`.
+  - Evidence: chain-order, wrong-initial, idempotent, and reload tests; the three-process test publishes both bootstrap policies.
+
+- [x] `S08-041` **Enforce the finality quorum in the sequencer.** Resolve
+  `old_policy_id` to the current retained policy, verify every vote through
+  the retained roster certificate, count at most one per principal across
+  requests, discard sign-once conflicts, and certify a finalization, abort,
+  or ReInit terminal only at `q`; keep the route row and route-state object
+  at the current head after every terminal.
+  - After: `S08-040`.
+  - Targets: coordinator sequence handlers, `agenc-ircd-e2ee` finality ledger.
+  - References: [E2EE §§12.4 and 13.8](docs/irc-mls-e2ee-extension.md#124-finalization-and-abort-certificates).
+  - Invariants: `E2E-02`, `E2E-03`.
+  - Evidence: `PENDING` below `q`, certification at `q`, `E2EE_POLICY_REQUIRED` without a policy, discarded conflicting votes, refused forged votes.
+
+- [x] `S08-042` **Witness the sequencer record chain at every edge.** Keep a
+  per-conversation head from the route-state cut, require every candidate,
+  ReInit-staged, terminal, and close event to extend it, refuse and record a
+  fork or skipped position durably, and close the link.
+  - After: `S08-014`, `S08-041`.
+  - Targets: edge event router, `agenc-ircd-storage` witness row.
+  - References: [E2EE §12.5](docs/irc-mls-e2ee-extension.md#125-federation).
+  - Invariants: `E2E-03`, `FED-11`.
+  - Evidence: extension, fork, skip, already-installed, and cut-order tests; the three-process test runs under the witness.
+
+- [x] `S08-043` **Pad application content before encryption.** Define
+  `IrcEncryptedContent.zero_padding`, apply the Section 7.5 bucket table to
+  the content encoding, and reject a wrong length or nonzero octet.
+  - After: `S08-004`.
+  - Targets: `agenc-ircd-e2ee` content module and padding vectors.
+  - References: [E2EE §§7.5 and 10](docs/irc-mls-e2ee-extension.md#75-padding).
+  - Invariants: `E2E-05`.
+  - Evidence: every boundary vector over the content structure plus one-over, short, long, nonzero, and NUL refusals.
+
+- [x] `S08-044` **Drive the encrypted lifecycle with real MLS clients.** Run
+  openmls and mls-rs members through the daemon's client surface: KeyPackage
+  publication, binding, policy publication, a Commit candidate, ACK, vote and
+  finalization under the published quorum, padded application messages, a
+  delivered Welcome joined by the other library, and close.
+  - After: `S08-020`, `S08-040`, `S08-041`, `S08-043`.
+  - Targets: integration test with real MLS libraries as test-only dependencies.
+  - References: [E2EE §21 gate 3](docs/irc-mls-e2ee-extension.md#21-verification-and-release-gates).
+  - Invariants: `E2E-01`, `E2E-05`.
+  - Evidence: per-rule outcomes recorded in `conformance/e2ee-interop-matrix.toml`.
+
 - [ ] `S08-039` **Complete external cryptographic and protocol review.** Provide
   the exact profile, implementation, vectors, composition, threat boundaries,
   and evidence for review; remediate findings and re-review material changes.
@@ -2453,11 +2506,12 @@ recorded here so a later reviewer does not have to rediscover them.
 - A channel must be registered (`CHANCTL REGISTER`, history off, no topic)
   before `EGROUP BIND`; the binding then flips its content policy through
   the cross-profile barrier.
-- The sequencer signs whatever finality votes a request carries and never
-  evaluates the private quorum itself (companion 12.4); the public
-  authorization rule `BootstrapActivation` on the certificate is what
-  activates a fresh conversation, and application traffic before it
-  answers `E2EE_FINALITY_REQUIRED`.
+- The sequencer certifies a finalization, abort, or ReInit terminal only
+  after it has verified the current published policy's quorum `q` of
+  distinct council votes (companion 12.4 and 13.8, revised 2026-09-04);
+  the public authorization rule `BootstrapActivation` on the certificate
+  is what activates a fresh conversation, and application traffic before
+  it answers `E2EE_FINALITY_REQUIRED`.
 - Root binding lock chains are per (account digest, root fingerprint); a
   direct reservation comes from the smaller account of the pair.
 - Companion origins are not durable. A coordinator that reloaded accepts
@@ -2501,6 +2555,29 @@ recorded here so a later reviewer does not have to rediscover them.
   `E2EE_GROUP_CONFLICT`; new 100 percent branch regions for the replay
   classifier, quorum math, barrier verification, and padding arithmetic
   wait for the next coverage round.
+
+The design revision of 2026-09-04 (`S08-040` to `S08-044`) changed the
+profile after the first closure and moved the profile hash; the stage was
+re-closed the same day at exact source commit
+`a6e3c54a6a4e4d95436cb43197e66a521ee21315`, whose manifest supersedes the
+`52c7ccb` checkpoint (kept as history). Its
+interpretations: the server retains published policies per conversation
+under `policy/v1/` rows and keeps the current policy identifier as the
+policy the last finalization installed; the sequencer keeps a per-slot vote
+ledger in memory across requests, so a reload only forgets which principals
+already voted and never lowers the quorum; a vote whose signer is not a
+council principal or does not verify fails the request with
+`E2EE_BINDING_AUTH_INVALID`, while a sign-once conflict discards the vote;
+an abort request names no policy, so the current policy governs it; a
+ReInit terminal is governed by the old conversation's current policy over
+the attempt's slot; every terminal refreshes the durable route row and the
+retained route-state object, which the witness at the edge exposed as
+missing (a route-state cut after a finalization, and a reload, advertised
+the binding-time head); a close occupies the route sequence after the
+record that authorized it; the edge records a witness violation as a
+durable `witness/v1` row and closes the link, and logs never carry the
+identifiers; the `STORED POLICY` and `STORED AUTHORIZATION` lines name the
+request's conversation and subject, taken from the payload at ingress.
 
 ## Stage 09 — Optional WSS and pinned history profiles
 

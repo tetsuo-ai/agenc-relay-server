@@ -4,30 +4,34 @@
 //! authorization, acknowledgement, finalization, and abort, and the
 //! retained records page back out.
 
-use agenc_ircd_crypto::SemanticHashDomain;
+use agenc_ircd_crypto::{SemanticHashDomain, SignatureDomain};
 use agenc_ircd_domain::e2ee::projection::{EmptyKind, EventKind, PendingKind, StoreKind};
+use agenc_ircd_e2ee::finality::{ReinitVoteSlot, Terminal, VoteSlot, reinit_vote_tbs, vote_tbs};
 use agenc_ircd_e2ee::ids::semantic_id_of;
 use agenc_ircd_e2ee::object::IrcWireObjectKind;
 use agenc_ircd_e2ee::objects::aad::IrcCommitAad;
-use agenc_ircd_e2ee::objects::conversation::IrcCommitAuthorizationRule;
+use agenc_ircd_e2ee::objects::conversation::{IrcCommitAuthorizationRule, IrcConversationKind};
 use agenc_ircd_e2ee::objects::federation::IrcFederationOpcode as Op;
 use agenc_ircd_e2ee::objects::sequencing::{
     IrcAbortCoreTbs, IrcAbortRequest, IrcCandidateReceipt, IrcCommitAbortReason, IrcCommitAck,
-    IrcCommitAckTbs, IrcDisposition, IrcDispositionVoteTbs, IrcFinalizationCoreTbs,
-    IrcFinalizationProof, IrcFinalizationRequest,
+    IrcCommitAckTbs, IrcFinalityVote, IrcFinalizationCoreTbs, IrcFinalizationProof,
+    IrcFinalizationRequest,
 };
 use agenc_ircd_e2ee::route::channel_route_binding;
 use agenc_ircd_e2ee::tls::{DecodeBudget, Opaque, TlsDecode, TlsEncode, TlsVec};
 use agenc_ircd_e2ee::wire::reply::E2eeReplyCode;
 
 use super::support::{
-    approval_envelope, authorization_tbs, commit_authorization, finality_vote,
-    private_message_at_epoch,
+    PolicySpec, approval_envelope, authorization_tbs, certificate_id_of, commit_authorization,
+    finality_vote, key, policy, policy_id_of, private_message_at_epoch, root_fingerprint, sign,
 };
 use super::{
     DEVICE, GROUP, Harness, INSTANCE, NETWORK, ResultBody, TestResult, code, object_id, ok, wire,
     wire_raw,
 };
+
+/// A second council device of the harness principal.
+const SECOND_DEVICE: u8 = 8;
 
 const COMMIT_CONTENT_TYPE: u8 = 3;
 
@@ -105,28 +109,31 @@ fn ack(
     wire(IrcWireObjectKind::CommitAck, &ack)
 }
 
+/// One council vote of `device` over the exact slot the receipt names.
 fn vote(
     harness: &Harness,
-    conversation: [u8; 32],
+    device: u8,
+    receipt: &IrcCandidateReceipt,
     candidate_id: [u8; 32],
-    disposition: IrcDisposition,
-) -> TestResult<agenc_ircd_e2ee::objects::sequencing::IrcFinalityVote> {
-    let tbs = IrcDispositionVoteTbs {
-        profile_version: 1,
+    terminal: Terminal,
+) -> TestResult<IrcFinalityVote> {
+    let slot = VoteSlot {
         network_id: NETWORK,
-        conversation_id: conversation,
-        prior_epoch: 0,
-        prior_state_id: [0; 32],
-        candidate_sequence: 0,
-        slot_predecessor_record_id: [0; 32],
-        candidate_id,
-        disposition,
-        terminal_id: [0; 32],
-        reason_code: 0,
+        conversation_id: receipt.tbs.conversation_id,
+        prior_epoch: receipt.tbs.prior_epoch,
+        prior_state_id: receipt.tbs.prior_state_id,
+        candidate_sequence: receipt.tbs.candidate_sequence,
+        predecessor_record_id: receipt.tbs.predecessor_record_id,
     };
-    Ok(finality_vote(&harness.principal, DEVICE, &tbs)?)
+    Ok(finality_vote(
+        &harness.principal,
+        device,
+        &vote_tbs(&slot, candidate_id, terminal),
+    )?)
 }
 
+/// A finalization request under the binding's initial policy, voted by
+/// `voters`.
 fn finalization_request(
     harness: &Harness,
     conversation: [u8; 32],
@@ -134,8 +141,9 @@ fn finalization_request(
     commit_object_id: [u8; 32],
     candidate_id: [u8; 32],
     ack_bytes: &[u8],
-    with_vote: bool,
+    voters: &[u8],
 ) -> TestResult<Vec<u8>> {
+    let old_policy_id = harness.initial_policy_id()?;
     let log = harness
         .coordinator
         .state
@@ -151,7 +159,7 @@ fn finalization_request(
         candidate_id,
         commit_object_id,
         resulting_epoch: receipt.tbs.resulting_epoch,
-        old_policy_id: [0; 32],
+        old_policy_id,
         commit_authorization_id: [0; 32],
         acknowledgement_set_digest: [0; 32],
         resulting_group_context_digest: [2; 32],
@@ -168,22 +176,25 @@ fn finalization_request(
     let authorization = commit_authorization(
         authorization_tbs(
             conversation,
-            [0; 32],
+            old_policy_id,
             IrcCommitAuthorizationRule::RoutineSelfUpdate,
             0,
         ),
         &[(&harness.principal, DEVICE)],
     )?;
-    let votes = if with_vote {
-        vec![vote(
-            harness,
-            conversation,
-            candidate_id,
-            IrcDisposition::Finalize,
-        )?]
-    } else {
-        Vec::new()
-    };
+    let finalization_id = semantic_id_of(SemanticHashDomain::FinalizationId, &core)?;
+    let votes = voters
+        .iter()
+        .map(|device| {
+            vote(
+                harness,
+                *device,
+                receipt,
+                candidate_id,
+                Terminal::finalize(finalization_id),
+            )
+        })
+        .collect::<TestResult<Vec<_>>>()?;
     let request = IrcFinalizationRequest {
         proof: IrcFinalizationProof {
             core,
@@ -292,7 +303,7 @@ fn a_candidate_is_sequenced_authorized_acknowledged_and_finalized() -> TestResul
         commit_object_id,
         candidate_id,
         &ack_bytes,
-        false,
+        &[],
     )?;
     let outcome = ok(harness.run(Op::SubmitFinalization, &conversation, Some(&pending))?)?;
     assert_eq!(
@@ -306,7 +317,7 @@ fn a_candidate_is_sequenced_authorized_acknowledged_and_finalized() -> TestResul
         commit_object_id,
         candidate_id,
         &ack_bytes,
-        true,
+        &[DEVICE],
     )?;
     let outcome = ok(harness.run(Op::SubmitFinalization, &conversation, Some(&request))?)?;
     let ResultBody::Finalized(named, epoch, finalization_id, record_id) = outcome.result else {
@@ -375,27 +386,34 @@ fn a_candidate_is_sequenced_authorized_acknowledged_and_finalized() -> TestResul
         .get(&conversation)
         .ok_or("log")?
         .accepted_state_id();
-    let abort_vote = vote(&harness, conversation, candidate_id, IrcDisposition::Abort)?;
-    let abort =
-        |votes: Vec<agenc_ircd_e2ee::objects::sequencing::IrcFinalityVote>| -> TestResult<Vec<u8>> {
-            wire(
-                IrcWireObjectKind::AbortRequest,
-                &IrcAbortRequest {
-                    core: IrcAbortCoreTbs {
-                        profile_version: 1,
-                        network_id: NETWORK,
-                        conversation_id: conversation,
-                        prior_state_id,
-                        candidate_id,
-                        prior_epoch: 1,
-                        reason: IrcCommitAbortReason::SenderWithdrawn,
-                        evidence_digest: [0; 32],
-                    },
-                    receipt: receipt.clone(),
-                    votes: TlsVec::new(votes)?,
-                },
-            )
-        };
+    let core = IrcAbortCoreTbs {
+        profile_version: 1,
+        network_id: NETWORK,
+        conversation_id: conversation,
+        prior_state_id,
+        candidate_id,
+        prior_epoch: 1,
+        reason: IrcCommitAbortReason::SenderWithdrawn,
+        evidence_digest: [0; 32],
+    };
+    let abort_id = semantic_id_of(SemanticHashDomain::AbortId, &core)?;
+    let abort_vote = vote(
+        &harness,
+        DEVICE,
+        &receipt,
+        candidate_id,
+        Terminal::abort(abort_id, 1)?,
+    )?;
+    let abort = |votes: Vec<IrcFinalityVote>| -> TestResult<Vec<u8>> {
+        wire(
+            IrcWireObjectKind::AbortRequest,
+            &IrcAbortRequest {
+                core: core.clone(),
+                receipt: receipt.clone(),
+                votes: TlsVec::new(votes)?,
+            },
+        )
+    };
     let pending = abort(Vec::new())?;
     let outcome = ok(harness.run(Op::SubmitAbort, &conversation, Some(&pending))?)?;
     assert!(matches!(
@@ -441,7 +459,7 @@ mod reinit {
         IrcReInitAttemptAuthorization, IrcReInitAttemptAuthorizationTbs, IrcReInitAttemptReceipt,
         IrcReInitAttemptTbs,
     };
-    use agenc_ircd_e2ee::objects::sequencing::{IrcDisposition, IrcSequencerRecord};
+    use agenc_ircd_e2ee::objects::sequencing::IrcSequencerRecord;
     use agenc_ircd_e2ee::tls::{DecodeBudget, Opaque, TlsDecode, TlsVec};
     use agenc_ircd_e2ee::wire::reply::E2eeReplyCode;
 
@@ -449,7 +467,7 @@ mod reinit {
     use super::super::{
         DEVICE, DEVICE_ID, Harness, NETWORK, ResultBody, TestResult, code, ok, wire,
     };
-    use super::vote;
+    use super::{SemanticHashDomain, Terminal, reinit_vote, semantic_id_of};
 
     const NEW_CONVERSATION: [u8; 32] = [77; 32];
 
@@ -645,21 +663,23 @@ mod reinit {
         // Abort: a proof without votes is pending; a vote aborts the attempt.
         let receipt = staged_receipt(&harness, conversation)?;
         let (attempt_object, _) = attempt(&harness, conversation, old_state, 0)?;
+        let abort_core = IrcReInitAbortCoreTbs {
+            profile_version: 1,
+            network_id: NETWORK,
+            old_conversation_id: conversation,
+            old_reinit_state_id: old_state,
+            attempt_sequence: 0,
+            slot_predecessor_record_id: [0; 32],
+            reinit_attempt_id: attempt_id,
+            reason_code: 1,
+            evidence_digest: [0; 32],
+        };
+        let abort_id = semantic_id_of(SemanticHashDomain::ReinitAbortId, &abort_core)?;
         let abort = |votes| -> TestResult<Vec<u8>> {
             wire(
                 IrcWireObjectKind::ReinitAbortRequest,
                 &IrcReInitAbortRequest {
-                    core: IrcReInitAbortCoreTbs {
-                        profile_version: 1,
-                        network_id: NETWORK,
-                        old_conversation_id: conversation,
-                        old_reinit_state_id: old_state,
-                        attempt_sequence: 0,
-                        slot_predecessor_record_id: [0; 32],
-                        reinit_attempt_id: attempt_id,
-                        reason_code: 1,
-                        evidence_digest: [0; 32],
-                    },
+                    core: abort_core.clone(),
                     receipt: receipt.clone(),
                     attempt: attempt_object.clone(),
                     votes: TlsVec::new(votes)?,
@@ -675,7 +695,13 @@ mod reinit {
             outcome.result,
             ResultBody::Pending(_, PendingKind::ReinitAbort, _)
         ));
-        let abort_vote = vote(&harness, conversation, attempt_id, IrcDisposition::Abort)?;
+        let abort_vote = reinit_vote(
+            &harness,
+            &receipt,
+            old_state,
+            attempt_id,
+            Terminal::abort(abort_id, 1)?,
+        )?;
         let outcome = ok(harness.run(
             Op::SubmitReinitAbort,
             &conversation,
@@ -699,24 +725,27 @@ mod reinit {
         };
         let receipt = staged_receipt(&harness, conversation)?;
         let (ack_object_again, _) = ack(conversation, old_state, attempt_id)?;
+        let activation_core = IrcReInitActivationCoreTbs {
+            profile_version: 1,
+            network_id: NETWORK,
+            old_conversation_id: conversation,
+            new_conversation_id: NEW_CONVERSATION,
+            old_reinit_state_id: old_state,
+            attempt_sequence: 1,
+            reinit_attempt_id: attempt_id,
+            new_group_info_digest: [7; 32],
+            new_group_context_digest: [8; 32],
+            new_ratchet_tree_digest: [9; 32],
+            new_exporter_authenticator: [10; 32],
+            acknowledgement_set_digest: [0; 32],
+        };
+        let activation_id =
+            semantic_id_of(SemanticHashDomain::ReinitActivationId, &activation_core)?;
         let activate = |votes| -> TestResult<Vec<u8>> {
             wire(
                 IrcWireObjectKind::ReinitActivationRequest,
                 &IrcReInitActivationRequest {
-                    core: IrcReInitActivationCoreTbs {
-                        profile_version: 1,
-                        network_id: NETWORK,
-                        old_conversation_id: conversation,
-                        new_conversation_id: NEW_CONVERSATION,
-                        old_reinit_state_id: old_state,
-                        attempt_sequence: 1,
-                        reinit_attempt_id: attempt_id,
-                        new_group_info_digest: [7; 32],
-                        new_group_context_digest: [8; 32],
-                        new_ratchet_tree_digest: [9; 32],
-                        new_exporter_authenticator: [10; 32],
-                        acknowledgement_set_digest: [0; 32],
-                    },
+                    core: activation_core.clone(),
                     receipt: receipt.clone(),
                     attempt: attempt_object.clone(),
                     acknowledgements: TlsVec::new(vec![ack_object_again.clone()])?,
@@ -733,7 +762,13 @@ mod reinit {
             outcome.result,
             ResultBody::Pending(_, PendingKind::ReinitActivate, _)
         ));
-        let activate_vote = vote(&harness, conversation, attempt_id, IrcDisposition::Finalize)?;
+        let activate_vote = reinit_vote(
+            &harness,
+            &receipt,
+            old_state,
+            attempt_id,
+            Terminal::finalize(activation_id),
+        )?;
         let outcome = ok(harness.run(
             Op::SubmitReinitActivate,
             &conversation,
@@ -775,4 +810,265 @@ mod reinit {
         let _ = ack_object;
         Ok(())
     }
+}
+
+/// One council vote of the harness device over a ReInit attempt's slot.
+fn reinit_vote(
+    harness: &Harness,
+    receipt: &agenc_ircd_e2ee::objects::reinit::IrcReInitAttemptReceipt,
+    old_reinit_state_id: [u8; 32],
+    attempt_id: [u8; 32],
+    terminal: Terminal,
+) -> TestResult<IrcFinalityVote> {
+    let slot = ReinitVoteSlot {
+        network_id: NETWORK,
+        old_conversation_id: receipt.tbs.old_conversation_id,
+        old_reinit_state_id,
+        attempt_sequence: receipt.tbs.attempt_sequence,
+        predecessor_record_id: receipt.tbs.predecessor_record_id,
+    };
+    let tbs = reinit_vote_tbs(&slot, attempt_id, terminal);
+    Ok(IrcFinalityVote {
+        signer_root_fingerprint: root_fingerprint(&harness.principal.root)?,
+        signer_device_id: [DEVICE; 16],
+        signer_device_certificate_id: certificate_id_of(&harness.principal, DEVICE)?,
+        device_signature: sign(&key(DEVICE), SignatureDomain::DispositionVote, &tbs)?,
+    })
+}
+
+/// Acknowledges the candidate and returns the encoded ACK.
+fn acknowledge(
+    harness: &mut Harness,
+    conversation: [u8; 32],
+    candidate_id: [u8; 32],
+    commit_object_id: [u8; 32],
+) -> TestResult<Vec<u8>> {
+    let ack_bytes = ack(conversation, 0, candidate_id, commit_object_id)?;
+    ok(harness.run(Op::SubmitCommitAck, &conversation, Some(&ack_bytes))?)?;
+    Ok(ack_bytes)
+}
+
+#[test]
+fn a_terminal_without_a_published_policy_is_refused_until_it_is_published() -> TestResult {
+    let mut harness = Harness::new()?;
+    let conversation = harness.bind_channel_unpublished()?;
+    let (receipt, commit_object_id, candidate_id) =
+        submit_candidate(&mut harness, conversation, 0, 10)?;
+    let ack_bytes = acknowledge(&mut harness, conversation, candidate_id, commit_object_id)?;
+    let request = finalization_request(
+        &harness,
+        conversation,
+        &receipt,
+        commit_object_id,
+        candidate_id,
+        &ack_bytes,
+        &[DEVICE],
+    )?;
+    assert_eq!(
+        code(harness.run(Op::SubmitFinalization, &conversation, Some(&request))?),
+        Some(E2eeReplyCode::PolicyRequired)
+    );
+    let initial = harness.initial_policy.clone();
+    harness.publish_policy(conversation, &initial)?;
+    let outcome = ok(harness.run(Op::SubmitFinalization, &conversation, Some(&request))?)?;
+    assert!(matches!(outcome.result, ResultBody::Finalized(..)));
+    Ok(())
+}
+
+#[test]
+fn published_policies_follow_the_binding_chain() -> TestResult {
+    let mut harness = Harness::new()?;
+    let conversation = harness.bind_channel_unpublished()?;
+    let initial = harness.initial_policy.clone();
+    let operational = harness.operational_policy.clone();
+    // The successor cannot precede its predecessor.
+    let successor_bytes = wire(IrcWireObjectKind::Policy, &operational)?;
+    assert_eq!(
+        code(harness.run(Op::SubmitPolicy, &conversation, Some(&successor_bytes))?),
+        Some(E2eeReplyCode::PolicyInvalid)
+    );
+    // A generation-zero policy other than the binding's is refused.
+    let other = policy(&PolicySpec {
+        threshold: 1,
+        ..PolicySpec::bootstrap(
+            std::slice::from_ref(&harness.principal),
+            conversation,
+            IrcConversationKind::Direct,
+        )
+    })?;
+    let other_bytes = wire(IrcWireObjectKind::Policy, &other)?;
+    assert_eq!(
+        code(harness.run(Op::SubmitPolicy, &conversation, Some(&other_bytes))?),
+        Some(E2eeReplyCode::PolicyInvalid)
+    );
+    // The chain in order, and an identical resubmission answers the same.
+    let first = harness.publish_policy(conversation, &initial)?;
+    assert_eq!(harness.publish_policy(conversation, &initial)?, first);
+    harness.publish_policy(conversation, &operational)?;
+    let state = harness
+        .coordinator
+        .state
+        .conversations
+        .get(&conversation)
+        .ok_or("state")?;
+    assert_eq!(state.policies.len(), 2);
+    assert_eq!(state.current_policy_id, policy_id_of(&initial)?);
+    assert!(state.policies.contains_key(&policy_id_of(&operational)?));
+    Ok(())
+}
+
+#[test]
+fn a_finalization_waits_for_the_quorum_of_the_published_council() -> TestResult {
+    let mut harness = Harness::with_devices(&[DEVICE, SECOND_DEVICE])?;
+    let conversation = harness.bind_channel()?;
+    let (receipt, commit_object_id, candidate_id) =
+        submit_candidate(&mut harness, conversation, 0, 10)?;
+    let ack_bytes = acknowledge(&mut harness, conversation, candidate_id, commit_object_id)?;
+    // Two council devices with fault bound zero need both votes.
+    let one = finalization_request(
+        &harness,
+        conversation,
+        &receipt,
+        commit_object_id,
+        candidate_id,
+        &ack_bytes,
+        &[DEVICE],
+    )?;
+    let outcome = ok(harness.run(Op::SubmitFinalization, &conversation, Some(&one))?)?;
+    assert!(matches!(
+        outcome.result,
+        ResultBody::Pending(_, PendingKind::Finalization, _)
+    ));
+    // The second vote alone completes the quorum the first request began.
+    let second = finalization_request(
+        &harness,
+        conversation,
+        &receipt,
+        commit_object_id,
+        candidate_id,
+        &ack_bytes,
+        &[SECOND_DEVICE],
+    )?;
+    let outcome = ok(harness.run(Op::SubmitFinalization, &conversation, Some(&second))?)?;
+    assert!(matches!(outcome.result, ResultBody::Finalized(..)));
+    Ok(())
+}
+
+#[test]
+fn a_council_vote_for_the_other_terminal_is_discarded() -> TestResult {
+    let mut harness = Harness::with_devices(&[DEVICE, SECOND_DEVICE])?;
+    let conversation = harness.bind_channel()?;
+    let (receipt, commit_object_id, candidate_id) =
+        submit_candidate(&mut harness, conversation, 0, 10)?;
+    let ack_bytes = acknowledge(&mut harness, conversation, candidate_id, commit_object_id)?;
+    let finalize = finalization_request(
+        &harness,
+        conversation,
+        &receipt,
+        commit_object_id,
+        candidate_id,
+        &ack_bytes,
+        &[DEVICE],
+    )?;
+    let outcome = ok(harness.run(Op::SubmitFinalization, &conversation, Some(&finalize))?)?;
+    assert!(matches!(outcome.result, ResultBody::Pending(..)));
+    // The first device already stands for FINALIZE, so its ABORT vote is
+    // discarded and the abort stays one vote short.
+    let core = IrcAbortCoreTbs {
+        profile_version: 1,
+        network_id: NETWORK,
+        conversation_id: conversation,
+        prior_state_id: receipt.tbs.prior_state_id,
+        candidate_id,
+        prior_epoch: 0,
+        reason: IrcCommitAbortReason::SenderWithdrawn,
+        evidence_digest: [0; 32],
+    };
+    let abort_id = semantic_id_of(SemanticHashDomain::AbortId, &core)?;
+    let votes = [DEVICE, SECOND_DEVICE]
+        .iter()
+        .map(|device| {
+            vote(
+                &harness,
+                *device,
+                &receipt,
+                candidate_id,
+                Terminal::abort(abort_id, 1)?,
+            )
+        })
+        .collect::<TestResult<Vec<_>>>()?;
+    let abort = wire(
+        IrcWireObjectKind::AbortRequest,
+        &IrcAbortRequest {
+            core,
+            receipt: receipt.clone(),
+            votes: TlsVec::new(votes)?,
+        },
+    )?;
+    let outcome = ok(harness.run(Op::SubmitAbort, &conversation, Some(&abort))?)?;
+    assert!(matches!(
+        outcome.result,
+        ResultBody::Pending(_, PendingKind::Abort, _)
+    ));
+    // A vote that does not verify fails the whole request; the first device
+    // still stands for FINALIZE, so its forged vote is verified, not
+    // discarded.
+    let mut forged = finalization_request(
+        &harness,
+        conversation,
+        &receipt,
+        commit_object_id,
+        candidate_id,
+        &ack_bytes,
+        &[DEVICE],
+    )?;
+    if let Some(last) = forged.last_mut() {
+        *last ^= 1;
+    }
+    assert_eq!(
+        code(harness.run(Op::SubmitFinalization, &conversation, Some(&forged))?),
+        Some(E2eeReplyCode::BindingAuthInvalid)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_reloaded_coordinator_restores_the_policy_chain_and_the_current_policy() -> TestResult {
+    let mut harness = Harness::new()?;
+    let conversation = harness.bind_channel()?;
+    let (receipt, commit_object_id, candidate_id) =
+        submit_candidate(&mut harness, conversation, 0, 10)?;
+    let ack_bytes = acknowledge(&mut harness, conversation, candidate_id, commit_object_id)?;
+    let request = finalization_request(
+        &harness,
+        conversation,
+        &receipt,
+        commit_object_id,
+        candidate_id,
+        &ack_bytes,
+        &[DEVICE],
+    )?;
+    ok(harness.run(Op::SubmitFinalization, &conversation, Some(&request))?)?;
+    let reloaded = harness.reloaded()?;
+    let before = harness
+        .coordinator
+        .state
+        .conversations
+        .get(&conversation)
+        .ok_or("state")?;
+    let after = reloaded
+        .state
+        .conversations
+        .get(&conversation)
+        .ok_or("reloaded state")?;
+    assert_eq!(after.policies, before.policies);
+    assert_eq!(after.policies.len(), 2);
+    assert_eq!(after.current_policy_id, harness.initial_policy_id()?);
+    assert_eq!(after.initial_policy_id, before.initial_policy_id);
+    assert_eq!(
+        after.required_operational_policy_id,
+        before.required_operational_policy_id
+    );
+    assert_eq!(after.principal_accounts, before.principal_accounts);
+    Ok(())
 }

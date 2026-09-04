@@ -416,6 +416,12 @@ impl EdgeFederation {
         self.fail_link(context, Violation::Companion(CompanionViolation::Request));
     }
 
+    /// Closes the link after the E2EE edge witnessed a sequencer record
+    /// chain that did not extend (companion 12.5).
+    pub fn fail_companion_witness(&mut self, context: &mut StateCoreContext) {
+        self.fail_link(context, Violation::Companion(CompanionViolation::Witness));
+    }
+
     /// Stages one companion part of a cross-profile barrier handed over by
     /// the E2EE router; a violation closes the link and returns `false`.
     pub fn companion_barrier_part(

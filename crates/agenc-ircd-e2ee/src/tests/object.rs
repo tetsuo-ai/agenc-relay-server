@@ -69,11 +69,11 @@ fn envelope_bounds_are_checked_before_the_body_is_copied() -> TestResult {
 
 #[test]
 fn every_kind_has_a_token_a_limit_and_a_direction() -> TestResult {
-    assert_eq!(IrcWireObjectKind::ALL.len(), 33);
+    assert_eq!(IrcWireObjectKind::ALL.len(), 34);
     for kind in IrcWireObjectKind::ALL {
         assert_eq!(IrcWireObjectKind::from_token(kind.token())?, *kind);
         assert!(kind.maximum_object_bytes() >= 4_096);
-        assert_eq!(kind.is_server_only(), kind.value() >= 29);
+        assert_eq!(kind.is_server_only(), (29..=33).contains(&kind.value()));
     }
     assert_eq!(
         IrcWireObjectKind::from_token("PLAINTEXT"),

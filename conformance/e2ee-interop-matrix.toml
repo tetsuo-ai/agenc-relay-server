@@ -143,3 +143,75 @@ producer = "openmls"
 consumer = "daemon"
 outcome = "agree"
 test = "crates/agenc-ircd-testkit/tests/mls_interop.rs"
+
+[[lifecycle]]
+id = "lifecycle-openmls-commit-sequenced"
+creator = "openmls"
+joiner = "mls-rs"
+suite = 1
+outcome = "agree"
+claim = "the openmls bootstrap Commit is sequenced as the candidate at epoch zero"
+test = "crates/agenc-ircd/tests/stage_eight_e2ee.rs"
+
+[[lifecycle]]
+id = "lifecycle-openmls-finalized-under-published-quorum"
+creator = "openmls"
+joiner = "mls-rs"
+suite = 1
+outcome = "agree"
+claim = "the creator-only published policy finalizes the activation at quorum one"
+test = "crates/agenc-ircd/tests/stage_eight_e2ee.rs"
+
+[[lifecycle]]
+id = "lifecycle-mls-rs-package-published-and-claimed"
+creator = "openmls"
+joiner = "mls-rs"
+suite = 1
+outcome = "agree"
+claim = "the mls-rs KeyPackage is published, claimed, and imported by openmls"
+test = "crates/agenc-ircd/tests/stage_eight_e2ee.rs"
+
+[[lifecycle]]
+id = "lifecycle-openmls-add-finalized-by-two-councils"
+creator = "openmls"
+joiner = "mls-rs"
+suite = 1
+outcome = "agree"
+claim = "the Add Commit is finalized only with both operational council votes"
+test = "crates/agenc-ircd/tests/stage_eight_e2ee.rs"
+
+[[lifecycle]]
+id = "lifecycle-welcome-delivered-and-joined-by-mls-rs"
+creator = "openmls"
+joiner = "mls-rs"
+suite = 1
+outcome = "agree"
+claim = "the openmls Welcome reaches the mls-rs device mailbox and joins at epoch two"
+test = "crates/agenc-ircd/tests/stage_eight_e2ee.rs"
+
+[[lifecycle]]
+id = "lifecycle-padded-content-openmls-to-mls-rs"
+creator = "openmls"
+joiner = "mls-rs"
+suite = 1
+outcome = "agree"
+claim = "Section 7.5 padded content from openmls decrypts and checks in mls-rs"
+test = "crates/agenc-ircd/tests/stage_eight_e2ee.rs"
+
+[[lifecycle]]
+id = "lifecycle-padded-content-mls-rs-to-openmls"
+creator = "openmls"
+joiner = "mls-rs"
+suite = 1
+outcome = "agree"
+claim = "Section 7.5 padded content from mls-rs decrypts and checks in openmls"
+test = "crates/agenc-ircd/tests/stage_eight_e2ee.rs"
+
+[[lifecycle]]
+id = "lifecycle-closed-after-real-traffic"
+creator = "openmls"
+joiner = "mls-rs"
+suite = 1
+outcome = "agree"
+claim = "the conversation closes under the finalization that added the joiner"
+test = "crates/agenc-ircd/tests/stage_eight_e2ee.rs"

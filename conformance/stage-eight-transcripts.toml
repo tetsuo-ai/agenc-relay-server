@@ -945,3 +945,80 @@ surface = "daemon"
 file = "crates/agenc-ircd-runtime/tests/e2ee_load.rs"
 test = "maximum_encrypted_shapes_stay_within_their_ceilings"
 gates = [11]
+
+[[transcript]]
+id = "coordinator-policy-publication"
+surface = "coordinator"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/sequence.rs"
+test = "published_policies_follow_the_binding_chain"
+gates = [10]
+
+[[transcript]]
+id = "coordinator-policy-required"
+surface = "coordinator"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/sequence.rs"
+test = "a_terminal_without_a_published_policy_is_refused_until_it_is_published"
+gates = [9, 10]
+
+[[transcript]]
+id = "coordinator-quorum-waits"
+surface = "coordinator"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/sequence.rs"
+test = "a_finalization_waits_for_the_quorum_of_the_published_council"
+gates = [9]
+
+[[transcript]]
+id = "coordinator-sign-once"
+surface = "coordinator"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/sequence.rs"
+test = "a_council_vote_for_the_other_terminal_is_discarded"
+gates = [9, 10]
+
+[[transcript]]
+id = "coordinator-policy-reload"
+surface = "coordinator"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/sequence.rs"
+test = "a_reloaded_coordinator_restores_the_policy_chain_and_the_current_policy"
+gates = [8]
+
+[[transcript]]
+id = "edge-witness-extends"
+surface = "edge"
+file = "crates/agenc-ircd-runtime/src/e2ee/edge/tests/mod.rs"
+test = "a_chain_that_extends_advances_the_head_from_the_anchor"
+gates = [10]
+
+[[transcript]]
+id = "edge-witness-refuses"
+surface = "edge"
+file = "crates/agenc-ircd-runtime/src/e2ee/edge/tests/mod.rs"
+test = "a_fork_or_a_skipped_position_is_refused_and_recorded"
+gates = [10]
+
+[[transcript]]
+id = "edge-witness-cuts"
+surface = "edge"
+file = "crates/agenc-ircd-runtime/src/e2ee/edge/tests/mod.rs"
+test = "a_route_state_cut_may_only_move_the_head_forward"
+gates = [10]
+
+[[transcript]]
+id = "content-padding-vectors"
+surface = "domain"
+file = "crates/agenc-ircd-e2ee/src/tests/content.rs"
+test = "every_boundary_vector_pads_the_encoding_onto_its_bucket"
+gates = [5]
+
+[[transcript]]
+id = "content-padding-refusals"
+surface = "domain"
+file = "crates/agenc-ircd-e2ee/src/tests/content.rs"
+test = "a_wrong_length_or_a_nonzero_octet_is_rejected"
+gates = [5]
+
+[[transcript]]
+id = "daemon-real-client-lifecycle"
+surface = "daemon"
+file = "crates/agenc-ircd/tests/stage_eight_e2ee.rs"
+test = "real_mls_clients_run_the_encrypted_lifecycle_through_the_daemon"
+gates = [3, 5, 9]

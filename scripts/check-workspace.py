@@ -95,8 +95,21 @@ BINARY_TEST_WORKSPACE_DEPENDENCIES = frozenset(
 # on one; only the dev-only testkit may, for cross-implementation tests.
 MLS_CLIENT_ENGINE_PREFIXES = ("openmls", "mls-rs", "mls_rs")
 MLS_CLIENT_ALLOWED_PACKAGE = "agenc-ircd-testkit"
+# The daemon binary crate; its integration tests may link MLS client engines.
+BINARY_PACKAGE = "agenc-ircd"
 BINARY_TEST_EXTERNAL_DEPENDENCIES = frozenset(
-    {"argon2", "base64", "opaque-ke", "opaque-sha2", "rustls"}
+    {
+        "argon2",
+        "base64",
+        "mls-rs",
+        "mls-rs-crypto-rustcrypto",
+        "openmls",
+        "openmls_basic_credential",
+        "openmls_rust_crypto",
+        "opaque-ke",
+        "opaque-sha2",
+        "rustls",
+    }
 )
 EXTERNAL_DEPENDENCIES = {
     "argon2": ("=0.5.3", {"alloc"}),
@@ -405,8 +418,17 @@ def is_mls_client_engine(name: object) -> bool:
     return isinstance(name, str) and name.startswith(MLS_CLIENT_ENGINE_PREFIXES)
 
 
+def mls_client_edge_allowed(package_name: object, dev_only: bool) -> bool:
+    """Whether an MLS client engine edge is a test-only edge: the testkit
+    holds them, and the daemon binary crate may name them only from its
+    integration tests (companion Section 21 gate 3)."""
+    return package_name == MLS_CLIENT_ALLOWED_PACKAGE or (
+        package_name == BINARY_PACKAGE and dev_only
+    )
+
+
 def validate_mls_client_separation(packages: dict[str, dict[str, object]]) -> int:
-    """Reject any MLS client engine edge outside the dev-only testkit."""
+    """Reject any MLS client engine edge outside the test-only surfaces."""
     engine_edges = 0
     for name, package in packages.items():
         dependencies = package.get("dependencies")
@@ -418,7 +440,7 @@ def validate_mls_client_separation(packages: dict[str, dict[str, object]]) -> in
             dependency_name = dependency.get("name")
             if not is_mls_client_engine(dependency_name):
                 continue
-            if name != MLS_CLIENT_ALLOWED_PACKAGE:
+            if not mls_client_edge_allowed(name, dependency.get("kind") == "dev"):
                 raise WorkspaceError(
                     f"MLS client engine {dependency_name} reaches production crate {name}"
                 )
@@ -465,7 +487,9 @@ def validate_package_manifest(manifest_path: Path, manifest: dict[str, object]) 
                 raise WorkspaceError(
                     f"{manifest_path} {table_name}.{dependency_name} must inherit the root pin"
                 )
-            if is_mls_client_engine(dependency_name) and package_name != MLS_CLIENT_ALLOWED_PACKAGE:
+            if is_mls_client_engine(dependency_name) and not mls_client_edge_allowed(
+                package_name, table_name == "dev-dependencies"
+            ):
                 raise WorkspaceError(
                     f"MLS client engine {dependency_name} reaches production crate {package_name}"
                 )
@@ -634,7 +658,7 @@ def validate_direct_dependency_evidence(root: Path) -> None:
                 "default_features": False,
                 "features": ['fast_serialize', 'rayon', 'rfc_compliant', 'std', 'tree_index'],
                 "scope": "dev",
-                "purpose": "second independent MLS client for the Stage 08 cross-implementation gate; testkit only, never a production dependency",
+                "purpose": "second independent MLS client for the Stage 08 cross-implementation gate; test-only in the testkit and the daemon's integration tests, never a production dependency",
                 "reviewed_on": "2026-09-04",
             },
             {
@@ -654,7 +678,7 @@ def validate_direct_dependency_evidence(root: Path) -> None:
                 "default_features": False,
                 "features": [],
                 "scope": "dev",
-                "purpose": "first independent MLS client for the Stage 08 cross-implementation gate; testkit only, never a production dependency",
+                "purpose": "first independent MLS client for the Stage 08 cross-implementation gate; test-only in the testkit and the daemon's integration tests, never a production dependency",
                 "reviewed_on": "2026-09-04",
             },
             {

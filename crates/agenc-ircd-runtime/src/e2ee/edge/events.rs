@@ -28,6 +28,7 @@ use agenc_ircd_storage::TableId;
 use agenc_ircd_storage::e2ee_records::barrier::{BarrierIdentity, BarrierPart, CrossProfileStream};
 use agenc_ircd_storage::e2ee_records::{
     DELIVERY_ROW_KIND, DeliveryRow, ROUTE_ROW_KIND, RouteLifecycle as RowLifecycle, RouteRow,
+    WITNESS_ROW_KIND, WitnessRow,
 };
 use agenc_ircd_types::{AccountId, ChannelInstanceId, UserId};
 
@@ -45,6 +46,102 @@ pub(crate) struct Conversation {
     pub(crate) channel: Option<ChannelInstanceId>,
     /// The two accounts, for a direct route.
     pub(crate) direct: Option<([u8; 24], [u8; 24])>,
+    /// The sequencer record-chain head this edge has witnessed.
+    pub(crate) head: ChainHead,
+}
+
+/// The sequencer record-chain head an edge witnesses for one conversation
+/// (companion 12.5): installed from the route-state cut, advanced by every
+/// candidate, ReInit-staged, terminal, and close event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ChainHead {
+    /// Route sequence of the head record, or zero at the external anchor.
+    pub(crate) sequence: u64,
+    /// The head record's semantic identifier, or the anchor.
+    pub(crate) record_id: [u8; 32],
+    /// Whether a record occupies the head; false at the anchor, where the
+    /// first candidate takes sequence zero itself.
+    pub(crate) recorded: bool,
+}
+
+impl ChainHead {
+    /// The head a route-state cut names; the anchor is the cut whose head is
+    /// still its accepted state at sequence zero.
+    fn from_state(state: &IrcFederationRouteState) -> Self {
+        let sequence = state.sequencer_record_head_sequence;
+        let record_id = state.sequencer_record_head_id;
+        Self {
+            sequence,
+            record_id,
+            recorded: !(sequence == 0 && record_id == state.accepted_state_id),
+        }
+    }
+
+    /// The route sequence the next chain-extending event must carry.
+    pub(super) const fn next_sequence(self) -> u64 {
+        if self.recorded {
+            self.sequence.saturating_add(1)
+        } else {
+            self.sequence
+        }
+    }
+
+    /// Whether `cut` may replace this head: never an older or a forked one.
+    pub(super) fn accepts_cut(self, cut: Self) -> bool {
+        !self.recorded
+            || cut.sequence > self.sequence
+            || (cut.sequence == self.sequence && self.record_id == cut.record_id)
+    }
+
+    /// Whether an event at `sequence` naming `id` is this recorded head
+    /// again, as after a route-state cut that already carried it.
+    fn names(self, sequence: u64, id: [u8; 32]) -> bool {
+        self.recorded && sequence == self.sequence && self.record_id == id
+    }
+}
+
+/// What one chain-extending event contributes to the witness.
+struct ChainStep {
+    /// The identifier that becomes the head.
+    id: [u8; 32],
+    /// The predecessor the event asserts, when its receipt carries one.
+    predecessor: Option<[u8; 32]>,
+}
+
+/// The chain step of a semantic event, or `None` for an event that never
+/// moves the head.
+fn chain_step(event: &IrcFederationEvent) -> Option<ChainStep> {
+    use agenc_ircd_e2ee::objects::sequencing::IrcCandidateReceipt;
+    let encoded = event.encoded_event_result.as_slice();
+    let ids = encoded.as_chunks::<32>().0;
+    let step = match event.event_kind {
+        IrcFederationEventKind::CandidateEvent => {
+            let mut budget = DecodeBudget::new(1 << 16, 1_024);
+            let receipt = IrcCandidateReceipt::decode_exact(encoded, &mut budget).ok()?;
+            ChainStep {
+                id: candidate_id_of(encoded)?,
+                predecessor: Some(receipt.tbs.predecessor_record_id),
+            }
+        }
+        IrcFederationEventKind::ReinitStagedEvent | IrcFederationEventKind::ClosedEvent => {
+            ChainStep {
+                id: *ids.first()?,
+                predecessor: None,
+            }
+        }
+        IrcFederationEventKind::FinalizedEvent => ChainStep {
+            id: encoded.get(8..40)?.try_into().ok()?,
+            predecessor: None,
+        },
+        IrcFederationEventKind::AbortedEvent
+        | IrcFederationEventKind::ReinitActivatedEvent
+        | IrcFederationEventKind::ReinitAbortedEvent => ChainStep {
+            id: *ids.get(1)?,
+            predecessor: None,
+        },
+        _ => return None,
+    };
+    Some(step)
 }
 
 /// An event whose payload has not arrived.
@@ -343,6 +440,75 @@ impl E2eeEdge {
         }
     }
 
+    /// Witnesses the sequencer record chain (companion 12.5): a candidate,
+    /// ReInit-staged, terminal, or close event must extend the
+    /// conversation's head, and then becomes it; an event that names the
+    /// installed head again, as after a route-state cut that carried it,
+    /// leaves it. A non-extending event is remembered for
+    /// [`Self::record_witness`] and refused.
+    pub(super) fn witness(&mut self, event: &IrcFederationEvent) -> Result<(), Refusal> {
+        let Some(conversation) = optional::<32>(event.conversation_id.as_slice()) else {
+            return Ok(());
+        };
+        let Some(step) = chain_step(event) else {
+            return Ok(());
+        };
+        let Some(known) = self.conversations.get_mut(&conversation) else {
+            return Ok(());
+        };
+        let head = known.head;
+        if head.names(event.route_sequence, step.id) {
+            return Ok(());
+        }
+        let expected = head.next_sequence();
+        let extends = event.route_sequence == expected
+            && step
+                .predecessor
+                .is_none_or(|predecessor| predecessor == head.record_id);
+        if extends {
+            known.head = ChainHead {
+                sequence: event.route_sequence,
+                record_id: step.id,
+                recorded: true,
+            };
+            return Ok(());
+        }
+        self.witnessed = Some((
+            conversation,
+            WitnessRow {
+                event_kind: event.event_kind.value(),
+                expected_sequence: expected,
+                expected_head_id: head.record_id,
+                observed_sequence: event.route_sequence,
+                observed_id: step.id,
+                observed_predecessor_id: step.predecessor,
+            },
+        ));
+        Err(E2eeReplyCode::RouteInvalid.into())
+    }
+
+    /// Stages the witness violation row found in the failing frame, if any;
+    /// returns whether the failure was a witness violation. The row is
+    /// evidence, so a refused stage does not stop the link from closing.
+    pub(super) fn record_witness(&mut self, context: &mut StateCoreContext) -> bool {
+        let Some((conversation, row)) = self.witnessed.take() else {
+            return false;
+        };
+        self.counters.chain_violations = self.counters.chain_violations.saturating_add(1);
+        let staged = WitnessRow::key(&conversation)
+            .and_then(|key| Ok((key, row.encode()?)))
+            .map_err(|_| E2eeReplyCode::RateLimited)
+            .and_then(|(key, body)| {
+                state_row(key, WITNESS_ROW_KIND, body).map_err(|refusal| refusal.code)
+            });
+        if let Ok(write) = staged
+            && self.commit.is_none()
+        {
+            let _ = self.stage(context, vec![write], PendingCommit::Witness);
+        }
+        true
+    }
+
     /// Applies one ordinary event: route projection, fanout, coverage, and
     /// the durable cursor batch whose commit sends the EACK.
     // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one event applies its route change, renders its copies, records completion coverage, and stages its cursor batch as one atomic set
@@ -369,7 +535,10 @@ impl E2eeEdge {
                 }
             }
             IrcFederationEventKind::RequestCompleted => {}
-            _ => outputs.extend(self.fanout(context, edge, &open, payload.as_deref())?),
+            _ => {
+                self.witness(event)?;
+                outputs.extend(self.fanout(context, edge, &open, payload.as_deref())?);
+            }
         }
         // The home copy of a semantic event is its request's completion; a
         // generic completion is a `request_completed` of its own (12.5).
@@ -404,6 +573,22 @@ impl E2eeEdge {
             return Err(E2eeReplyCode::RouteInvalid.into());
         }
         let (entry, conversation) = route_entry(&state)?;
+        if let Some(known) = self.conversations.get(&state.conversation_id)
+            && !known.head.accepts_cut(conversation.head)
+        {
+            self.witnessed = Some((
+                state.conversation_id,
+                WitnessRow {
+                    event_kind: IrcFederationEventKind::RouteStateChanged.value(),
+                    expected_sequence: known.head.next_sequence(),
+                    expected_head_id: known.head.record_id,
+                    observed_sequence: conversation.head.sequence,
+                    observed_id: conversation.head.record_id,
+                    observed_predecessor_id: None,
+                },
+            ));
+            return Err(E2eeReplyCode::RouteInvalid.into());
+        }
         self.routes.restore_entry(entry);
         self.conversations
             .insert(state.conversation_id, conversation);
@@ -699,7 +884,7 @@ impl E2eeEdge {
                 outputs.extend(rendered);
             }
             Some(PendingCommit::Ready) => self.ready_recorded(context, edge),
-            None => {}
+            Some(PendingCommit::Witness) | None => {}
         }
         outputs.extend(self.drain_queued(context, edge));
         outputs
@@ -761,6 +946,7 @@ fn route_entry(state: &IrcFederationRouteState) -> Result<(RouteEntry, Conversat
                 Conversation {
                     channel: Some(channel),
                     direct: None,
+                    head: ChainHead::from_state(state),
                 },
             )
         }
@@ -778,6 +964,7 @@ fn route_entry(state: &IrcFederationRouteState) -> Result<(RouteEntry, Conversat
                 Conversation {
                     channel: None,
                     direct: Some((a, b)),
+                    head: ChainHead::from_state(state),
                 },
             )
         }

@@ -180,6 +180,11 @@ STAGE_BINDINGS = {
     "EVID-S08-037-CHAINS": (["S08-037"], "root-binding-chains"),
     "EVID-S08-038-SCHEDULES": (["S08-038"], "barrier-schedules"),
     "EVID-S08-039-REVIEW": (["S08-039"], "external-review"),
+    "EVID-S08-040-POLICY-PUBLICATION": (["S08-040"], "policy-publication"),
+    "EVID-S08-041-QUORUM-GUARD": (["S08-041"], "sequencer-quorum-guard"),
+    "EVID-S08-042-CHAIN-WITNESS": (["S08-042"], "edge-chain-witness"),
+    "EVID-S08-043-CONTENT-PADDING": (["S08-043"], "application-content-padding"),
+    "EVID-S08-044-REAL-CLIENTS": (["S08-044"], "real-client-lifecycle"),
     "EVID-S08-900-STAGE-GATE": (["S08-900"], "stage-gate"),
 }
 
@@ -392,7 +397,6 @@ NORMATIVE_BINDINGS = {
     "EVID-E2EE-REQ-4EFBE464A39690115414": (["E2EE-REQ-4EFBE464A39690115414"], "normative-requirement"),
     "EVID-E2EE-REQ-532CF56360A03DCF3C39": (["E2EE-REQ-532CF56360A03DCF3C39"], "normative-requirement"),
     "EVID-E2EE-REQ-54D3BF177A5D79854AEC": (["E2EE-REQ-54D3BF177A5D79854AEC"], "normative-requirement"),
-    "EVID-E2EE-REQ-58217F311021E979779A": (["E2EE-REQ-58217F311021E979779A"], "normative-requirement"),
     "EVID-E2EE-REQ-5B3475BE0506C311BEF2": (["E2EE-REQ-5B3475BE0506C311BEF2"], "normative-requirement"),
     "EVID-E2EE-REQ-5B7791BEAEA4EF6B0D60": (["E2EE-REQ-5B7791BEAEA4EF6B0D60"], "normative-requirement"),
     "EVID-E2EE-REQ-67059195AB3AA10AAD9B": (["E2EE-REQ-67059195AB3AA10AAD9B"], "normative-requirement"),
@@ -444,9 +448,20 @@ NORMATIVE_BINDINGS = {
     "EVID-E2EE-REQ-F14B7B01F4CFF98A804E": (["E2EE-REQ-F14B7B01F4CFF98A804E"], "normative-requirement"),
     "EVID-E2EE-REQ-F252168A3A468701F674": (["E2EE-REQ-F252168A3A468701F674"], "normative-requirement"),
     "EVID-E2EE-REQ-FDA89A1D5714375C1B4F": (["E2EE-REQ-FDA89A1D5714375C1B4F"], "normative-requirement"),
+    "EVID-E2EE-REQ-A119B1A71D9F208380BC": (["E2EE-REQ-A119B1A71D9F208380BC"], "normative-requirement"),
+    "EVID-E2EE-REQ-D8D8C1DBDAE5F09E95FD": (["E2EE-REQ-D8D8C1DBDAE5F09E95FD"], "normative-requirement"),
 }
 
-REVIEWED_BINDINGS = STAGE_BINDINGS | NORMATIVE_BINDINGS
+# Evidence bound to a normative sentence a later revision removed. The
+# binding stays so every checkpoint recorded under the earlier text keeps
+# validating; a retired entry never counts toward a closure and no new
+# manifest may cite it.
+RETIRED_BINDINGS = {
+    # Section 7.5 padding moved from the MLS padding field to the
+    # application content on 2026-09-04 (Stage 08 checkpoint 52c7ccb).
+    "EVID-E2EE-REQ-58217F311021E979779A": (["E2EE-REQ-58217F311021E979779A"], "normative-requirement"),
+}
+REVIEWED_BINDINGS = STAGE_BINDINGS | NORMATIVE_BINDINGS | RETIRED_BINDINGS
 TOP_FIELDS = {
     "schema_version",
     "manifest_id",
@@ -662,7 +677,7 @@ def validate_catalog(root: Path) -> dict[str, list[str]]:
             requirement_records[evidence_id] = (identifier, status)
 
     for evidence_id, (claims, kind) in catalog_records.items():
-        if evidence_id in STAGE_BINDINGS:
+        if evidence_id in STAGE_BINDINGS or evidence_id in RETIRED_BINDINGS:
             continue
         requirement = requirement_records.get(evidence_id)
         if requirement is None:
@@ -1815,6 +1830,8 @@ def validate_closure_entries(
     by_id: dict[str, list[dict[str, object]]] = {}
     for entry in entries:
         evidence_id = entry.get("evidence_id")
+        if isinstance(evidence_id, str) and evidence_id in RETIRED_BINDINGS:
+            raise EvidenceError(f"closure evidence cites retired binding {evidence_id}")
         if isinstance(evidence_id, str) and evidence_id in required_ids:
             by_id.setdefault(evidence_id, []).append(entry)
 

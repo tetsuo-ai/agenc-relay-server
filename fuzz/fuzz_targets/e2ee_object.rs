@@ -63,6 +63,7 @@ fuzz_target!(|data: &[u8]| {
         TypedBody::FederationRequest(value) => Some(value.encode()),
         TypedBody::FederationResult(value) => Some(value.encode()),
         TypedBody::FederationEvent(value) => Some(value.encode()),
+        TypedBody::Policy(value) => Some(value.encode()),
         TypedBody::ApplicationMls(_) | TypedBody::CommitMls(_) | TypedBody::KeyPackageMls(_) => {
             None
         }

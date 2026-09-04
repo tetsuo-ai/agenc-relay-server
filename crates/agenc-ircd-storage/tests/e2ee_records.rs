@@ -442,9 +442,27 @@ fn sequencer_rows_round_trip_and_keep_slot_invariants() -> TestResult {
         object_id: [7; 32],
         slot: 2,
     };
-    for row in [&record, &candidate, &proof] {
+    let policy = SequencerRow::Policy {
+        object_id: [8; 32],
+        generation: 1,
+        previous_policy_id: [9; 32],
+    };
+    for row in [&record, &candidate, &proof, &policy] {
         assert_eq!(&SequencerRow::decode(&row.encode()?)?, row);
     }
+    let policy_key = SequencerRow::policy_key(&CONVERSATION, &[10; 32])?;
+    assert!(policy.matches_key(&policy_key));
+    assert!(!proof.matches_key(&policy_key));
+    assert_eq!(
+        SequencerRow::parse_policy_key(&policy_key)?,
+        (CONVERSATION, [10; 32])
+    );
+    let unchained = SequencerRow::Policy {
+        object_id: [8; 32],
+        generation: 0,
+        previous_policy_id: [9; 32],
+    };
+    assert!(SequencerRow::decode(&unchained.encode()?).is_err());
     assert!(record.matches_key(&SequencerRow::record_key(&CONVERSATION, 1)?));
     assert!(candidate.matches_key(&SequencerRow::candidate_key(&CONVERSATION, 1)?));
     assert!(proof.matches_key(&SequencerRow::proof_key(

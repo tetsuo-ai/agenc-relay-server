@@ -25,7 +25,7 @@ fn the_completion_table_is_closed() -> Result<(), PlanError> {
         Err(PlanError::UnknownOpcode)
     );
     assert_eq!(
-        completion_for(Opcode(41), ResultKind::Bound),
+        completion_for(Opcode(42), ResultKind::Bound),
         Err(PlanError::UnknownOpcode)
     );
     let semantic = [
@@ -95,6 +95,7 @@ fn the_completion_table_is_closed() -> Result<(), PlanError> {
             Opcode::SUBMIT_AUTHORIZATION,
             ResultKind::Stored(StoreKind::Authorization),
         ),
+        (Opcode::SUBMIT_POLICY, ResultKind::Stored(StoreKind::Policy)),
         (
             Opcode::SUBMIT_FINALIZATION,
             ResultKind::Pending(PendingKind::Finalization),

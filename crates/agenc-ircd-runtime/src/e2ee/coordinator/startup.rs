@@ -33,15 +33,18 @@ use agenc_ircd_e2ee::identity::{
 };
 use agenc_ircd_e2ee::limits::{
     MAX_BINDING_OBJECT, MAX_CAPABILITY_OBJECT, MAX_FEDERATION_CONTROL_OBJECT,
-    MAX_FINALIZATION_OBJECT, MAX_IDENTITY_OBJECT, MAX_ROSTER_OBJECT, MAX_SEQUENCER_RECORD_OBJECT,
+    MAX_FINALIZATION_OBJECT, MAX_IDENTITY_OBJECT, MAX_POLICY_OBJECT, MAX_ROSTER_OBJECT,
+    MAX_SEQUENCER_RECORD_OBJECT,
 };
 use agenc_ircd_e2ee::object::{IrcWireObject, IrcWireObjectKind};
 use agenc_ircd_e2ee::objects::conversation::{
-    IrcCommitAuthorizationRule, IrcConversationBindingPackage, IrcConversationKind,
+    IrcCommitAuthorizationRule, IrcConversationBindingPackage, IrcConversationKind, IrcPolicy,
 };
 use agenc_ircd_e2ee::objects::federation::IrcFederationRouteState;
 use agenc_ircd_e2ee::objects::identity::{IrcDeviceCapabilities, IrcDeviceRoster, IrcRootIdentity};
 use agenc_ircd_e2ee::objects::sequencing::{IrcFinalizationRequest, IrcSequencerRecord};
+use agenc_ircd_e2ee::policy::verify_policy;
+use agenc_ircd_e2ee::route::PrincipalRosters;
 use agenc_ircd_e2ee::tls::{DecodeBudget, TlsDecode};
 use agenc_ircd_storage::e2ee_records::{
     ATTACH_ROW_KIND, AttachRow, DELIVERY_ROW_KIND, DIRECTORY_ROW_KIND, DeliveryRow, DirectoryRow,
@@ -54,7 +57,10 @@ use agenc_ircd_storage::{PersistentRecordValue, StoredKey, TableId};
 use agenc_ircd_types::{AccountId, ChannelInstanceId, ServerId};
 
 use super::events::DeliveryStream;
-use super::{CompanionCoordinator, CompanionState, ConversationState, LockEntry, StoredResult};
+use super::{
+    CompanionCoordinator, CompanionState, ConversationState, LockEntry, RetainedPolicy,
+    StoredResult,
+};
 
 const CANDIDATE_RECORD: u16 = 1;
 const FINALIZATION_RECORD: u16 = 2;
@@ -74,6 +80,12 @@ struct CandidateRow {
     candidate_sequence: u32,
 }
 
+/// One published policy row: the retained object and its chain facts.
+struct PolicyRow {
+    object_id: [u8; 32],
+    generation: u64,
+}
+
 /// The durable rows collected during the reload.
 #[derive(Default)]
 pub(super) struct Restore {
@@ -82,6 +94,7 @@ pub(super) struct Restore {
     records: BTreeMap<([u8; 32], u64), RecordRow>,
     candidates: BTreeMap<([u8; 32], u64), CandidateRow>,
     proofs: Vec<(ProofKeyParts, [u8; 32])>,
+    policies: BTreeMap<([u8; 32], [u8; 32]), PolicyRow>,
     directory: Vec<(StoredKey, DirectoryRow)>,
     packages: Vec<(StoredKey, PackageRow)>,
     attachments: Vec<(StoredKey, AttachRow)>,
@@ -159,7 +172,24 @@ impl Restore {
                 },
             ),
             Ok(SequencerRow::Proof { object_id, .. }) => self.admit_proof(key, object_id),
+            Ok(SequencerRow::Policy {
+                object_id,
+                generation,
+                ..
+            }) => self.admit_policy(
+                key,
+                PolicyRow {
+                    object_id,
+                    generation,
+                },
+            ),
             Err(_) => {}
+        }
+    }
+
+    fn admit_policy(&mut self, key: &StoredKey, row: PolicyRow) {
+        if let Ok(ids) = SequencerRow::parse_policy_key(key) {
+            self.policies.insert(ids, row);
         }
     }
 
@@ -215,6 +245,8 @@ fn decode_object<T: TlsDecode>(
 struct ObjectIndex {
     /// Binding packages by binding identifier, with the object identifier.
     bindings: BTreeMap<[u8; 32], ([u8; 32], IrcConversationBindingPackage)>,
+    /// Published policies by object identifier, with the object length.
+    policies: BTreeMap<[u8; 32], (IrcPolicy, usize)>,
     /// Finality request objects by conversation and finalization identifier.
     proofs: BTreeMap<[u8; 32], BTreeMap<[u8; 32], [u8; 32]>>,
 }
@@ -264,6 +296,11 @@ impl ObjectIndex {
                     .or_default()
                     .insert(finalization_id, object_id);
             }
+            IrcWireObjectKind::Policy => {
+                if let Some(policy) = decode_body::<IrcPolicy>(bytes, kind, MAX_POLICY_OBJECT) {
+                    self.policies.insert(object_id, (policy, bytes.len()));
+                }
+            }
             _ => {}
         }
     }
@@ -286,9 +323,10 @@ pub(super) fn rebuild(coordinator: &mut CompanionCoordinator, restore: Restore) 
         records: restore.records,
         candidates: restore.candidates,
         proofs: restore.proofs,
+        policies: restore.policies,
     };
     for (conversation_id, row) in restore.routes {
-        restore_route(state, &index, &rows, conversation_id, &row);
+        restore_route(state, &network_id, &index, &rows, conversation_id, &row);
     }
 }
 
@@ -790,6 +828,7 @@ struct SequencerRows {
     records: BTreeMap<([u8; 32], u64), RecordRow>,
     candidates: BTreeMap<([u8; 32], u64), CandidateRow>,
     proofs: Vec<(ProofKeyParts, [u8; 32])>,
+    policies: BTreeMap<([u8; 32], [u8; 32]), PolicyRow>,
 }
 
 impl SequencerRows {
@@ -895,6 +934,110 @@ fn restore_log(
 }
 
 /// Whether a retained finalization record activated the bootstrap.
+/// The principal accounts of a binding package, in package order.
+fn principal_accounts(package: &IrcConversationBindingPackage) -> Vec<[u8; 24]> {
+    package
+        .binding
+        .tbs
+        .principals
+        .as_slice()
+        .iter()
+        .filter_map(|principal| <[u8; 24]>::try_from(principal.account_id.as_slice()).ok())
+        .collect()
+}
+
+/// The policy the newest finalization record installed, or the binding's
+/// initial policy before any finalization.
+fn current_policy(
+    state: &CompanionState,
+    records: &BTreeMap<u64, &RecordRow>,
+    initial_policy_id: [u8; 32],
+) -> [u8; 32] {
+    records
+        .values()
+        .rev()
+        .filter(|record| record.record_kind == FINALIZATION_RECORD)
+        .find_map(|record| {
+            let decoded: Option<IrcSequencerRecord> = decode_object(
+                state,
+                &record.record_object_id,
+                IrcWireObjectKind::SequencerRecord,
+                MAX_SEQUENCER_RECORD_OBJECT,
+            );
+            match decoded {
+                Some(IrcSequencerRecord::Finalization(certificate)) => Some(
+                    certificate
+                        .tbs
+                        .request
+                        .proof
+                        .authorization
+                        .tbs
+                        .resulting_policy_id,
+                ),
+                _ => None,
+            }
+        })
+        .unwrap_or(initial_policy_id)
+}
+
+/// Re-verifies the conversation's published policy chain in generation
+/// order from the retained objects; a policy that no longer verifies, or
+/// whose predecessor is missing, is dropped with its successors.
+fn restore_policies(
+    state: &CompanionState,
+    network_id: &[u8; 32],
+    index: &ObjectIndex,
+    rows: &SequencerRows,
+    conversation: &mut ConversationState,
+    conversation_id: [u8; 32],
+) {
+    let mut rosters = PrincipalRosters::new();
+    for account in &conversation.principal_accounts {
+        let Ok(digest) = agenc_ircd_e2ee::ids::account_id_digest(network_id, account) else {
+            continue;
+        };
+        if let Some((root, roster)) = state.principals.get(&digest) {
+            rosters.insert(*account, (*root, roster.clone()));
+        }
+    }
+    let mut ordered: Vec<(&[u8; 32], &PolicyRow)> = rows
+        .policies
+        .range((conversation_id, [0; 32])..=(conversation_id, [u8::MAX; 32]))
+        .map(|((_, policy_id), row)| (policy_id, row))
+        .collect();
+    ordered.sort_by_key(|(_, row)| row.generation);
+    for (policy_id, row) in ordered {
+        let Some((policy, object_bytes)) = index.policies.get(&row.object_id) else {
+            continue;
+        };
+        let predecessor = conversation
+            .policies
+            .get(&policy.tbs.previous_policy_id)
+            .map(|retained| &retained.policy);
+        let chained = if policy.tbs.policy_generation == 0 {
+            *policy_id == conversation.initial_policy_id
+        } else {
+            predecessor.is_some()
+        };
+        if !chained {
+            continue;
+        }
+        let Ok(verified) =
+            verify_policy(network_id, &conversation_id, policy, &rosters, predecessor)
+        else {
+            continue;
+        };
+        conversation.policies.insert(
+            *policy_id,
+            RetainedPolicy {
+                object_id: row.object_id,
+                object_bytes: *object_bytes,
+                policy: verified,
+            },
+        );
+    }
+}
+
 fn activates_bootstrap(state: &CompanionState, record: &RecordRow) -> bool {
     if record.record_kind != FINALIZATION_RECORD {
         return false;
@@ -956,6 +1099,7 @@ fn fill_proofs(conversation: &mut ConversationState, proofs: &[(ProofKeyParts, [
 // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one route is rebuilt from its row, its state object, and its binding package in one pass so the entry, log, lifecycle, and conversation facts agree
 fn restore_route(
     state: &mut CompanionState,
+    network_id: &[u8; 32],
     index: &ObjectIndex,
     rows: &SequencerRows,
     conversation_id: [u8; 32],
@@ -1015,8 +1159,21 @@ fn restore_route(
             .unwrap_or_default(),
         route_object_id: *agenc_ircd_e2ee::ObjectId::compute(&row.route_state).as_bytes(),
         stored_bytes: row.stored_bytes,
+        principal_accounts: principal_accounts(package),
+        initial_policy_id: tbs.initial_policy_id,
+        required_operational_policy_id: tbs.required_operational_policy_id,
+        current_policy_id: current_policy(state, &records, tbs.initial_policy_id),
+        predecessor_close_id: row.predecessor_close_id,
         ..ConversationState::default()
     };
+    restore_policies(
+        state,
+        network_id,
+        index,
+        rows,
+        &mut conversation,
+        conversation_id,
+    );
     let proofs: Vec<(ProofKeyParts, [u8; 32])> = rows
         .proofs
         .iter()

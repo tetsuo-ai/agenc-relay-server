@@ -230,6 +230,43 @@ pub struct ConversationState {
     pub stored_bytes: u64,
     /// The last validation time accepted on a Commit AAD.
     pub last_validation_time: u64,
+    /// The binding's principal accounts, whose rosters resolve policy
+    /// approvals and finality votes.
+    pub principal_accounts: Vec<[u8; 24]>,
+    /// The binding's generation-zero policy identifier.
+    pub initial_policy_id: [u8; 32],
+    /// The binding's required operational policy identifier.
+    pub required_operational_policy_id: [u8; 32],
+    /// The policy the last finalization installed: the binding's initial
+    /// policy before the first, and the old policy of the next candidate.
+    pub current_policy_id: [u8; 32],
+    /// The close this incarnation succeeds, for the route row.
+    pub predecessor_close_id: Option<[u8; 32]>,
+    /// Published policies by policy identifier (companion 9.3).
+    pub policies: BTreeMap<[u8; 32], RetainedPolicy>,
+    /// Council votes counted so far per candidate or attempt (12.4).
+    pub vote_ledgers: BTreeMap<[u8; 32], agenc_ircd_e2ee::finality::QuorumLedger>,
+}
+
+/// One published policy the sequencer retains for its quorum check.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RetainedPolicy {
+    /// The retained `policy` object identifier.
+    pub object_id: [u8; 32],
+    /// The complete object length, counted against `MAX_POLICY_CHAIN_BYTES`.
+    pub object_bytes: usize,
+    /// The verified policy.
+    pub policy: agenc_ircd_e2ee::policy::VerifiedPolicy,
+}
+
+impl ConversationState {
+    /// Retained policy bytes of the conversation.
+    #[must_use]
+    pub fn policy_bytes(&self) -> usize {
+        self.policies.values().fold(0, |total, retained| {
+            total.saturating_add(retained.object_bytes)
+        })
+    }
 }
 
 /// An in-memory change applied when the batch commits.

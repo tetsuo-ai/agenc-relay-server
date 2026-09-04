@@ -96,6 +96,8 @@ tls_enum! {
         FetchMailbox = 39,
         /// Acknowledge a mailbox item.
         AcknowledgeMailbox = 40,
+        /// Publish a conversation policy.
+        SubmitPolicy = 41,
     }
 }
 
@@ -148,6 +150,8 @@ tls_enum! {
         StoreWelcome = 8,
         /// Staged ReInit stored.
         StoreStagedReinit = 9,
+        /// Policy stored.
+        StorePolicy = 10,
     }
 }
 

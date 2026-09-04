@@ -32,7 +32,7 @@ expected_files = {
     "rfcs/rfc9420-mls-protocol.txt": "251ab11076c43fd4b8dc080a068a8caaf55e2fc5e6aa61d4274961627f32624b",
     "rfcs/rfc9525-tls-service-identity.txt": "ed8116c2435376dffe37ec2ca688c3a8515e36820852b29e0b6cdfbe92abd2c5",
     "rfcs/rfc9750-mls-architecture.txt": "6aa156c5592f99802aae9c39510bf347cacee4abdb1c34baab4c933a6cd992dd",
-    "docs/irc-mls-e2ee-extension.md": "c925723cd14d9b989ed553a65b8344d48496a339a92bd63e575487a5ef88dc53",
+    "docs/irc-mls-e2ee-extension.md": "770068a21240e480abd1edce0ba2501491485fed92be5f76be00cc14236034b6",
     "docs/federation-v1-profile.registry": "30d4a9e9947691e2ca26e137e2762413a9b6a4fd308308bd5bfbd8cad20ac2e9",
 }
 
@@ -443,7 +443,7 @@ e2ee_profile_token = base64.urlsafe_b64encode(
     e2ee_profile_digest
 ).rstrip(b"=").decode("ascii")
 expected_e2ee_profile_hash = (
-    "964d29f7aa06d50884dedd96d1f5011cf015525b39894a45357fba93d5e8bb73"
+    "716ecf0554deae4bdba0402597c0e8a41946a21459aab018646c638702297dba"
 )
 if e2ee_profile_hash != expected_e2ee_profile_hash:
     errors.append(
@@ -990,6 +990,7 @@ expected_companion_enums = {
         "sequencer_record", "device_attach_challenge", "device_attach",
         "root_binding_lock", "federation_state", "federation_origin",
         "federation_request", "federation_result", "federation_event",
+        "policy",
     ]),
     "IrcFederationOpcode": numbered([
         "application_channel", "application_direct", "reserve_channel",
@@ -1005,11 +1006,13 @@ expected_companion_enums = {
         "attach_begin", "attach_finish", "claim_package", "claim_status",
         "publish_package", "revoke_package", "deliver_binding",
         "deliver_welcome", "fetch_mailbox", "acknowledge_mailbox",
+        "submit_policy",
     ]),
     "IrcFederationStoreKind": numbered([
         "store_authorization", "store_identity", "store_roster",
         "store_capabilities", "store_package", "store_application",
         "store_binding", "store_welcome", "store_staged_reinit",
+        "store_policy",
     ]),
     "IrcFederationPendingKind": numbered([
         "pending_finalization", "pending_abort", "pending_reinit_attempt",
@@ -1316,7 +1319,7 @@ expected_companion_reply_codes = {
     "E2EE_CANDIDATE_ACTIVE", "E2EE_FINALITY_REQUIRED", "E2EE_EPOCH_STALE",
     "E2EE_OBJECT_NOT_FOUND", "E2EE_RATE_LIMITED", "E2EE_KEY_UNAVAILABLE",
     "E2EE_OPERATION_CONFLICT", "E2EE_DELIVERY_UNCERTAIN", "E2EE_SYNCING",
-    "E2EE_REQUIRED",
+    "E2EE_REQUIRED", "E2EE_POLICY_INVALID", "E2EE_POLICY_REQUIRED",
 }
 reply_rows = markdown_table("| Code | Meaning |")
 companion_reply_codes = {

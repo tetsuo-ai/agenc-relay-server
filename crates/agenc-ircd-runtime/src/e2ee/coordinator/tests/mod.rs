@@ -14,6 +14,7 @@ use agenc_ircd_e2ee::ids::{account_id_digest, conversation_id, leaf_capabilities
 use agenc_ircd_e2ee::object::{IrcWireObject, IrcWireObjectKind};
 use agenc_ircd_e2ee::objects::aad::IrcApplicationAad;
 use agenc_ircd_e2ee::objects::attach::{IrcDeviceAttach, IrcDeviceAttachChallenge};
+use agenc_ircd_e2ee::objects::conversation::{IrcConversationKind, IrcPolicy};
 use agenc_ircd_e2ee::objects::federation::{IrcFederationOpcode as Op, IrcFederationRequest};
 use agenc_ircd_e2ee::objects::identity::IrcCredentialBundle;
 use agenc_ircd_e2ee::route::channel_route_binding;
@@ -25,10 +26,10 @@ use agenc_ircd_types::{
     AccountId, AccountRandomId, ChannelInstanceId, EntropyError, EntropySource, ServerId,
 };
 use support::{
-    BindingSpec, DeviceSpec, KeyPackageSpec, LeafSpec, NETWORK, Principal, binding_package,
-    capabilities, certificate, channel_route, default_capabilities, encoded_capabilities, key,
-    key_package, leaf_authorization, principal, private_message_bytes, root_fingerprint,
-    sequencer_credential, sign,
+    BindingSpec, DeviceSpec, KeyPackageSpec, LeafSpec, NETWORK, PolicySpec, Principal,
+    binding_package, capabilities, certificate, channel_route, default_capabilities,
+    encoded_capabilities, key, key_package, leaf_authorization, policy, policy_id_of, principal,
+    private_message_bytes, root_fingerprint, sequencer_credential, sign,
 };
 
 use super::ops::{self, Exec, Fail};
@@ -111,12 +112,30 @@ struct Harness {
     sequence: u64,
     account: [u8; 24],
     principal: Principal,
+    /// The generation-zero and generation-one policies of `#room`.
+    initial_policy: IrcPolicy,
+    operational_policy: IrcPolicy,
+    /// Every durable write the handlers staged, in order, for reloads.
+    writes: Vec<crate::state_core::durable::AccountServiceDurableWrite>,
 }
 
 impl Harness {
     fn new() -> TestResult<Self> {
+        Self::with_devices(&[DEVICE])
+    }
+
+    /// A harness whose principal holds `devices`, all on the council.
+    fn with_devices(devices: &[u8]) -> TestResult<Self> {
         let account = account_bytes(9)?;
-        let principal = principal(ROOT_SEED, &account, &[DEVICE])?;
+        let principal = principal(ROOT_SEED, &account, devices)?;
+        let conversation = conversation_id(&NETWORK, &GROUP)?;
+        let bootstrap = PolicySpec::bootstrap(
+            std::slice::from_ref(&principal),
+            conversation,
+            IrcConversationKind::Channel,
+        );
+        let initial_policy = policy(&bootstrap)?;
+        let operational_policy = policy(&bootstrap.successor(policy_id_of(&initial_policy)?))?;
         let mut coordinator = CompanionCoordinator::new(
             NETWORK,
             ServerId::from_bytes(COORDINATOR),
@@ -150,7 +169,51 @@ impl Harness {
             sequence: 0,
             account,
             principal,
+            initial_policy,
+            operational_policy,
+            writes: Vec::new(),
         })
+    }
+
+    /// A fresh coordinator rebuilt from every row this harness staged, as
+    /// the daemon rebuilds it at startup.
+    fn reloaded(&self) -> TestResult<CompanionCoordinator> {
+        use crate::state_core::durable::AccountServiceDurableWrite as Write;
+        let mut fresh = Harness::new()?;
+        for write in &self.writes {
+            let Write::Put {
+                table,
+                key,
+                plaintext,
+            } = write
+            else {
+                continue;
+            };
+            let value = agenc_ircd_storage::PersistentRecordValue::decode(*table, plaintext)?;
+            fresh.coordinator.admit_restored(*table, key, &value);
+        }
+        fresh.coordinator.finish_restore();
+        Ok(fresh.coordinator)
+    }
+
+    /// The binding's initial policy identifier.
+    fn initial_policy_id(&self) -> TestResult<[u8; 32]> {
+        Ok(policy_id_of(&self.initial_policy)?)
+    }
+
+    /// Publishes one policy and returns its retained object identifier.
+    fn publish_policy(
+        &mut self,
+        conversation: [u8; 32],
+        policy: &IrcPolicy,
+    ) -> TestResult<[u8; 32]> {
+        let bytes = wire(IrcWireObjectKind::Policy, policy)?;
+        let outcome = ok(self.run(Op::SubmitPolicy, &conversation, Some(&bytes))?)?;
+        assert_eq!(
+            outcome.result,
+            ResultBody::Stored(StoreKind::Policy, object_id(&bytes))
+        );
+        Ok(object_id(&bytes))
     }
 
     fn request_id(&self) -> TestResult<[u8; 16]> {
@@ -250,6 +313,19 @@ impl Harness {
             for effect in std::mem::take(&mut outcome.effects) {
                 effect(&mut self.coordinator.state);
             }
+            self.writes
+                .extend(outcome.writes.iter().filter_map(|write| {
+                    use crate::state_core::durable::AccountServiceDurableWrite as Write;
+                    let Write::Put {
+                        table,
+                        key,
+                        plaintext,
+                    } = write
+                    else {
+                        return None;
+                    };
+                    Write::put(*table, key.clone(), plaintext.to_vec()).ok()
+                }));
             outcome
         }))
     }
@@ -326,13 +402,27 @@ impl Harness {
             previous_binding_id: [0; 32],
             lock_sequence: 0,
             plan_devices: vec![(&self.account, fingerprint, DEVICE)],
+            initial_policy_id: policy_id_of(&self.initial_policy)?,
+            required_operational_policy_id: policy_id_of(&self.operational_policy)?,
         })?;
         wire(IrcWireObjectKind::ConversationBinding, &package)
     }
 
-    /// Publishes the principal, attaches its device, reserves the channel,
-    /// and binds it; returns the conversation identifier.
+    /// Binds the channel and publishes its two policies, as a client does
+    /// before its first Commit (companion 9.3).
     fn bind_channel(&mut self) -> TestResult<[u8; 32]> {
+        let conversation = self.bind_channel_unpublished()?;
+        let initial = self.initial_policy.clone();
+        let operational = self.operational_policy.clone();
+        self.publish_policy(conversation, &initial)?;
+        self.publish_policy(conversation, &operational)?;
+        Ok(conversation)
+    }
+
+    /// Publishes the principal, attaches its device, reserves the channel,
+    /// and binds it without publishing a policy; returns the conversation
+    /// identifier.
+    fn bind_channel_unpublished(&mut self) -> TestResult<[u8; 32]> {
         self.publish_identity_and_roster()?;
         self.attach()?;
         let mut reserve = INSTANCE.to_vec();

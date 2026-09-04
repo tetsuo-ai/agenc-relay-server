@@ -19,7 +19,7 @@ WIRE_BUDGET_PATH = "conformance/e2ee-wire-budget.toml"
 INTEROP_PATH = "conformance/e2ee-interop-matrix.toml"
 REVIEW_PACKAGE = "conformance/review"
 EXPECTED_TASKS = [f"S08-{number:03d}" for number in range(1, 40)]
-PROFILE_TOKEN = "lk0p96oG1QiE3t2W0fUBHPAVUls5iUpFNX-6k9Xou3M"
+PROFILE_TOKEN = "cW7PBVTerkvboEAll8DopBlGohRZqrAYZGxjhwIpfbo"
 EXPECTED_TARGET = {
     "name": "encrypted-v1",
     "profile_version": 1,
@@ -369,7 +369,25 @@ def validate_interop(data: dict[str, object]) -> int:
             raise StageEightError("interop result record is malformed")
         if result.get("outcome") not in {"agree", "deviation-recorded"}:
             raise StageEightError(f"interop result {result.get('id')} has an unknown outcome")
-    return len(results)
+    lifecycle = data.get("lifecycle")
+    if not isinstance(lifecycle, list) or len(lifecycle) < 8:
+        raise StageEightError("interop lifecycle rules are missing (gate 3 needs the full lifecycle)")
+    for rule in lifecycle:
+        if not isinstance(rule, dict) or set(rule) != {
+            "id",
+            "creator",
+            "joiner",
+            "suite",
+            "outcome",
+            "claim",
+            "test",
+        }:
+            raise StageEightError("interop lifecycle record is malformed")
+        if rule.get("creator") == rule.get("joiner"):
+            raise StageEightError("interop lifecycle rule must cross two libraries")
+        if rule.get("outcome") not in {"agree", "deviation-recorded"}:
+            raise StageEightError(f"interop lifecycle {rule.get('id')} has an unknown outcome")
+    return len(results) + len(lifecycle)
 
 
 def validate_wire_budget(data: dict[str, object]) -> None:
@@ -399,9 +417,17 @@ def validate_sources(root: Path) -> None:
         if not entries or any(not path.is_file() for path in entries):
             raise StageEightError(f"fuzz corpus is missing: {corpus}")
     for manifest in PRODUCTION_MANIFESTS:
-        text = (root / manifest).read_text(encoding="utf-8")
-        if any(name in text for name in FORBIDDEN_PRODUCTION_CRATES):
-            raise StageEightError(f"production manifest names an MLS client crate: {manifest}")
+        tables = tomllib.loads((root / manifest).read_text(encoding="utf-8"))
+        # The daemon binary crate may link MLS clients from its integration
+        # tests only (companion Section 21 gate 3); no production table may.
+        test_only = manifest == "crates/agenc-ircd/Cargo.toml"
+        for table_name in ("dependencies", "build-dependencies", "dev-dependencies"):
+            if test_only and table_name == "dev-dependencies":
+                continue
+            table = tables.get(table_name, {})
+            names = table.keys() if isinstance(table, dict) else ()
+            if any(name.startswith(FORBIDDEN_PRODUCTION_CRATES) for name in names):
+                raise StageEightError(f"production manifest names an MLS client crate: {manifest}")
     review = root / REVIEW_PACKAGE
     for name in ("README.md", "findings.md"):
         if not (review / name).is_file():

@@ -784,6 +784,7 @@ fn request_conversation(decoded: &Decoded) -> Option<[u8; 32]> {
             | Op::SubmitReinitAck
             | Op::SubmitReinitActivate
             | Op::SubmitReinitAbort
+            | Op::SubmitPolicy
             | Op::FetchObject
             | Op::FetchAuthorizations
             | Op::FetchAcks

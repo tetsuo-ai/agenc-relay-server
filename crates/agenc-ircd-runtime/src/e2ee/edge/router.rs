@@ -6,7 +6,7 @@ use agenc_ircd_client_wire::{ParsedMessage, WireMessage};
 use agenc_ircd_e2ee::federation::frames::{CompanionFrame, Correlation};
 use agenc_ircd_e2ee::object::{IrcWireObject, IrcWireObjectKind};
 use agenc_ircd_e2ee::objects::federation::{IrcFederationOpcode, IrcFederationRequest};
-use agenc_ircd_e2ee::tls::{Opaque, TlsEncode, Writer};
+use agenc_ircd_e2ee::tls::{DecodeBudget, Opaque, TlsDecode, TlsEncode, Writer};
 use agenc_ircd_e2ee::wire::assembly::{AssemblyKey, Direction, Ingest, QuotaScopes, Sender};
 use agenc_ircd_e2ee::wire::carrier::CarrierCommand;
 use agenc_ircd_e2ee::wire::command::{
@@ -410,6 +410,7 @@ impl E2eeEdge {
         };
         origin.next_sequence = origin.next_sequence.saturating_add(1);
         let request_object_id = *agenc_ircd_e2ee::ObjectId::compute(&bytes).as_bytes();
+        let subject = subject_of(&command, payload.as_deref());
         let mut frames = Vec::new();
         for fragment in fragment_object(&bytes).map_err(|_| E2eeReplyCode::ObjectTooLarge)? {
             frames.push(CompanionFrame::Request {
@@ -438,6 +439,7 @@ impl E2eeEdge {
                 generation,
                 label,
                 command,
+                subject,
                 request_object_id,
                 sequence: correlation.operation_sequence,
                 frames,
@@ -468,6 +470,47 @@ impl E2eeEdge {
 }
 
 /// Whether the command needs a connection-bound attached device (11.6).
+/// The identifier a `STORED` success line names besides the object: the
+/// candidate of a submitted approval, the policy identifier of a published
+/// policy (11.7).
+fn subject_of(command: &Resolved, payload: Option<&[u8]>) -> Option<[u8; 32]> {
+    use agenc_ircd_e2ee::objects::conversation::{IrcCommitApprovalEnvelope, IrcPolicy};
+    let Resolved::Command(ClientCommand::Egroup(EgroupCommand::Submit { kind, .. })) = command
+    else {
+        return None;
+    };
+    let bytes = payload?;
+    let (expected, limit) = match kind {
+        SubmitKind::Authorization => (
+            IrcWireObjectKind::CommitApproval,
+            agenc_ircd_e2ee::limits::MAX_COMMIT_APPROVAL_OBJECT,
+        ),
+        SubmitKind::Policy => (
+            IrcWireObjectKind::Policy,
+            agenc_ircd_e2ee::limits::MAX_POLICY_OBJECT,
+        ),
+        _ => return None,
+    };
+    let mut budget = DecodeBudget::new(limit, 1 << 16);
+    let object = IrcWireObject::decode_kind(bytes, Some(expected), &mut budget).ok()?;
+    match kind {
+        SubmitKind::Authorization => {
+            let envelope =
+                IrcCommitApprovalEnvelope::decode_exact(object.body(), &mut budget).ok()?;
+            Some(envelope.tbs.candidate_id)
+        }
+        SubmitKind::Policy => {
+            let policy = IrcPolicy::decode_exact(object.body(), &mut budget).ok()?;
+            agenc_ircd_e2ee::ids::semantic_id_of(
+                agenc_ircd_crypto::SemanticHashDomain::PolicyId,
+                &policy.tbs,
+            )
+            .ok()
+        }
+        _ => None,
+    }
+}
+
 fn requires_device(command: &Resolved) -> bool {
     let Resolved::Command(command) = command else {
         return matches!(command, Resolved::ChannelApplication { .. });
@@ -513,6 +556,7 @@ const fn submit_opcode(kind: SubmitKind) -> IrcFederationOpcode {
         SubmitKind::Authorization => Op::SubmitAuthorization,
         SubmitKind::Ack => Op::SubmitCommitAck,
         SubmitKind::Finalization => Op::SubmitFinalization,
+        SubmitKind::Policy => Op::SubmitPolicy,
         SubmitKind::Abort => Op::SubmitAbort,
         SubmitKind::ReinitAttempt => Op::SubmitReinitAttempt,
         SubmitKind::ReinitAck => Op::SubmitReinitAck,

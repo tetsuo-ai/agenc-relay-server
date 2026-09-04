@@ -449,6 +449,8 @@ fn recorded(root: &Path) -> TestResult<BTreeMap<String, String>> {
         };
         let value = value.trim().trim_matches('"').to_owned();
         match key.trim() {
+            // Lifecycle rules belong to the daemon's real-client test.
+            "id" if value.starts_with("lifecycle-") => id = None,
             "id" => id = Some(value),
             "outcome" => {
                 if let Some(id) = id.take() {

@@ -14,9 +14,9 @@ tasks = [
 [target]
 name = "encrypted-v1"
 profile_version = 1
-profile_token = "lk0p96oG1QiE3t2W0fUBHPAVUls5iUpFNX-6k9Xou3M"
+profile_token = "cW7PBVTerkvboEAll8DopBlGohRZqrAYZGxjhwIpfbo"
 capability = "agenc.ag/e2ee-mls"
-capability_value = "v1,profile=lk0p96oG1QiE3t2W0fUBHPAVUls5iUpFNX-6k9Xou3M,seg=2940,obj=262144,parts=90,welcome=4194304"
+capability_value = "v1,profile=cW7PBVTerkvboEAll8DopBlGohRZqrAYZGxjhwIpfbo,seg=2940,obj=262144,parts=90,welcome=4194304"
 mls_version = 1
 enabled_suites = [1, 3]
 signature_scheme = 2055

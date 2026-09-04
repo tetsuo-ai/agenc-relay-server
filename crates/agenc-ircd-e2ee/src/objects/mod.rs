@@ -7,11 +7,13 @@
 //! (an Account ID is exactly 24 bytes, an optional 16-byte ID is empty or 16
 //! bytes) are checked by the `shape` methods and by `decode_body`.
 //!
-//! `IrcEncryptedContent` (Section 10) is deliberately absent: it exists only
-//! inside MLS plaintext, which the daemon never receives.
+//! `IrcEncryptedContent` (Section 10) lives in [`content`] for clients and
+//! test harnesses only: it exists inside MLS application data, which no
+//! daemon code path receives or decodes.
 
 pub mod aad;
 pub mod attach;
+pub mod content;
 pub mod conversation;
 pub mod federation;
 pub mod identity;
@@ -134,6 +136,8 @@ pub enum TypedBody {
     FederationResult(Box<federation::IrcFederationResult>),
     /// `IrcFederationEvent`.
     FederationEvent(Box<federation::IrcFederationEvent>),
+    /// `IrcPolicy`.
+    Policy(Box<conversation::IrcPolicy>),
 }
 
 fn typed<T: TlsDecode>(body: &[u8], budget: &mut DecodeBudget) -> Result<Box<T>, E2eeError> {
@@ -219,6 +223,7 @@ pub fn decode_body(
         IrcWireObjectKind::FederationRequest => TypedBody::FederationRequest(typed(body, budget)?),
         IrcWireObjectKind::FederationResult => TypedBody::FederationResult(typed(body, budget)?),
         IrcWireObjectKind::FederationEvent => TypedBody::FederationEvent(typed(body, budget)?),
+        IrcWireObjectKind::Policy => TypedBody::Policy(typed(body, budget)?),
     })
 }
 
@@ -260,6 +265,7 @@ impl TypedBody {
             Self::FederationRequest(_) => IrcWireObjectKind::FederationRequest,
             Self::FederationResult(_) => IrcWireObjectKind::FederationResult,
             Self::FederationEvent(_) => IrcWireObjectKind::FederationEvent,
+            Self::Policy(_) => IrcWireObjectKind::Policy,
         }
     }
 }
