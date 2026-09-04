@@ -256,8 +256,8 @@ struct ObjectIndex {
     policies: BTreeMap<[u8; 32], (IrcPolicy, usize)>,
     /// Finality request objects by conversation and finalization identifier.
     proofs: BTreeMap<[u8; 32], BTreeMap<[u8; 32], [u8; 32]>>,
-    /// Retained terminal requests by the candidate or attempt they vote on.
-    terminal_requests: BTreeMap<[u8; 32], Vec<TerminalRequest>>,
+    /// Retained terminal requests by object identifier.
+    terminal_requests: BTreeMap<[u8; 32], TerminalRequest>,
 }
 
 /// The votes one retained terminal request carries for its subject.
@@ -316,17 +316,14 @@ impl ObjectIndex {
                     .entry(core.conversation_id)
                     .or_default()
                     .insert(finalization_id, object_id);
-                self.terminal_requests
-                    .entry(core.candidate_id)
-                    .or_default()
-                    .push(TerminalRequest::Finalize(
-                        finalization_id,
-                        request.votes.as_slice().to_vec(),
-                    ));
+                self.terminal_requests.insert(
+                    object_id,
+                    TerminalRequest::Finalize(finalization_id, request.votes.as_slice().to_vec()),
+                );
             }
-            IrcWireObjectKind::AbortRequest => self.index_abort(bytes),
-            IrcWireObjectKind::ReinitActivationRequest => self.index_activation(bytes),
-            IrcWireObjectKind::ReinitAbortRequest => self.index_attempt_abort(bytes),
+            IrcWireObjectKind::AbortRequest => self.index_abort(object_id, bytes),
+            IrcWireObjectKind::ReinitActivationRequest => self.index_activation(object_id, bytes),
+            IrcWireObjectKind::ReinitAbortRequest => self.index_attempt_abort(object_id, bytes),
             IrcWireObjectKind::Policy => {
                 if let Some(policy) = decode_body::<IrcPolicy>(bytes, kind, MAX_POLICY_OBJECT) {
                     self.policies.insert(object_id, (policy, bytes.len()));
@@ -338,7 +335,7 @@ impl ObjectIndex {
 }
 
 impl ObjectIndex {
-    fn index_abort(&mut self, bytes: &[u8]) {
+    fn index_abort(&mut self, object_id: [u8; 32], bytes: &[u8]) {
         let kind = IrcWireObjectKind::AbortRequest;
         let Some(request) = decode_body::<IrcAbortRequest>(bytes, kind, MAX_ABORT_OBJECT) else {
             return;
@@ -347,17 +344,17 @@ impl ObjectIndex {
         else {
             return;
         };
-        self.terminal_requests
-            .entry(request.core.candidate_id)
-            .or_default()
-            .push(TerminalRequest::Abort(
+        self.terminal_requests.insert(
+            object_id,
+            TerminalRequest::Abort(
                 abort_id,
                 u16::from(request.core.reason.value()),
                 request.votes.as_slice().to_vec(),
-            ));
+            ),
+        );
     }
 
-    fn index_activation(&mut self, bytes: &[u8]) {
+    fn index_activation(&mut self, object_id: [u8; 32], bytes: &[u8]) {
         let kind = IrcWireObjectKind::ReinitActivationRequest;
         let Some(request) =
             decode_body::<IrcReInitActivationRequest>(bytes, kind, MAX_REINIT_OBJECT)
@@ -369,16 +366,13 @@ impl ObjectIndex {
         else {
             return;
         };
-        self.terminal_requests
-            .entry(request.core.reinit_attempt_id)
-            .or_default()
-            .push(TerminalRequest::Activate(
-                activation_id,
-                request.votes.as_slice().to_vec(),
-            ));
+        self.terminal_requests.insert(
+            object_id,
+            TerminalRequest::Activate(activation_id, request.votes.as_slice().to_vec()),
+        );
     }
 
-    fn index_attempt_abort(&mut self, bytes: &[u8]) {
+    fn index_attempt_abort(&mut self, object_id: [u8; 32], bytes: &[u8]) {
         let kind = IrcWireObjectKind::ReinitAbortRequest;
         let Some(request) = decode_body::<IrcReInitAbortRequest>(bytes, kind, MAX_REINIT_OBJECT)
         else {
@@ -389,14 +383,14 @@ impl ObjectIndex {
         else {
             return;
         };
-        self.terminal_requests
-            .entry(request.core.reinit_attempt_id)
-            .or_default()
-            .push(TerminalRequest::AbortAttempt(
+        self.terminal_requests.insert(
+            object_id,
+            TerminalRequest::AbortAttempt(
                 abort_id,
                 request.core.reason_code,
                 request.votes.as_slice().to_vec(),
-            ));
+            ),
+        );
     }
 }
 
@@ -1164,14 +1158,16 @@ fn attempt_terminal(request: &TerminalRequest) -> Option<(Terminal, &[IrcFinalit
     }
 }
 
-/// Replays the votes of every retained terminal request of the open
-/// candidate or ReInit attempt into its ledger under the current policy, so
-/// a reload keeps the count and the sign-once memory the slot had gathered
+/// Restores the vote ledger of the open candidate or ReInit attempt from
+/// its durable per-principal vote rows: each row names the request that
+/// carried the principal's counted vote, so the decision each principal
+/// stands for comes back exactly once and in no particular order
 /// (companion 12.4).
 fn restore_ledgers(
     state: &CompanionState,
     network_id: &[u8; 32],
     index: &ObjectIndex,
+    rows: &SequencerRows,
     conversation: &mut ConversationState,
     log: &SequencerLog,
 ) {
@@ -1194,14 +1190,16 @@ fn restore_ledgers(
             predecessor_record_id: slot.position.predecessor_record_id,
         };
         let mut ledger = QuorumLedger::new();
-        let requests = index.terminal_requests.get(&slot.candidate_id);
-        for (terminal, votes) in requests
-            .into_iter()
-            .flatten()
-            .filter_map(candidate_terminal)
-        {
+        for (parts, object_id) in vote_rows_of(rows, conversation_id, slot.candidate_id) {
+            let Some((terminal, votes)) = index
+                .terminal_requests
+                .get(&object_id)
+                .and_then(candidate_terminal)
+            else {
+                continue;
+            };
             let tbs = vote_tbs(&vote_slot, slot.candidate_id, terminal);
-            replay_votes(&mut ledger, terminal, votes, |ledger, vote| {
+            replay_vote(&mut ledger, parts, votes, |ledger, vote| {
                 ledger.record(&policy, &rosters, &tbs, vote)
             });
         }
@@ -1224,33 +1222,50 @@ fn restore_ledgers(
         predecessor_record_id: attempt.predecessor_record_id,
     };
     let mut ledger = QuorumLedger::new();
-    let requests = index.terminal_requests.get(&attempt.attempt_id);
-    for (terminal, votes) in requests.into_iter().flatten().filter_map(attempt_terminal) {
+    for (parts, object_id) in vote_rows_of(rows, conversation_id, attempt.attempt_id) {
+        let Some((terminal, votes)) = index
+            .terminal_requests
+            .get(&object_id)
+            .and_then(attempt_terminal)
+        else {
+            continue;
+        };
         let tbs = reinit_vote_tbs(&reinit_slot, attempt.attempt_id, terminal);
-        replay_votes(&mut ledger, terminal, votes, |ledger, vote| {
+        replay_vote(&mut ledger, parts, votes, |ledger, vote| {
             ledger.record_reinit(&policy, &rosters, &tbs, vote)
         });
     }
     conversation.vote_ledgers.insert(attempt.attempt_id, ledger);
 }
 
-/// Replays one retained vote vector with the live counting rule: a vote
-/// standing for the other terminal is skipped, and a vote that no longer
-/// verifies (a roster moved on) is dropped rather than trusted.
-fn replay_votes(
+/// The durable vote rows of one subject: the request each principal's
+/// counted vote arrived in.
+fn vote_rows_of(
+    rows: &SequencerRows,
+    conversation_id: [u8; 32],
+    subject: [u8; 32],
+) -> impl Iterator<Item = (&ProofKeyParts, [u8; 32])> {
+    rows.proofs.iter().filter_map(move |(parts, object_id)| {
+        (parts.role == ProofRole::Vote
+            && parts.conversation_id == conversation_id
+            && parts.subject_id == subject)
+            .then_some((parts, *object_id))
+    })
+}
+
+/// Replays the one vote of the principal a vote row names; a vote that no
+/// longer verifies (a roster moved on) is dropped rather than trusted.
+fn replay_vote(
     ledger: &mut QuorumLedger,
-    terminal: Terminal,
+    parts: &ProofKeyParts,
     votes: &[IrcFinalityVote],
     mut record: impl FnMut(&mut QuorumLedger, &IrcFinalityVote) -> Result<(), E2eeError>,
 ) {
-    for vote in votes {
-        let signer = (vote.signer_root_fingerprint, vote.signer_device_id);
-        let conflicting = ledger
-            .votes()
-            .any(|(recorded, stood)| *recorded == signer && *stood != terminal);
-        if conflicting {
-            continue;
-        }
+    let vote = votes.iter().find(|vote| {
+        vote.signer_root_fingerprint == parts.root_fingerprint
+            && vote.signer_device_id == parts.device_id
+    });
+    if let Some(vote) = vote {
         let _ = record(ledger, vote);
     }
 }
@@ -1391,7 +1406,7 @@ fn restore_route(
         &mut conversation,
         conversation_id,
     );
-    restore_ledgers(state, network_id, index, &mut conversation, &log);
+    restore_ledgers(state, network_id, index, rows, &mut conversation, &log);
     let proofs: Vec<(ProofKeyParts, [u8; 32])> = rows
         .proofs
         .iter()

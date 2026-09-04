@@ -461,7 +461,7 @@ impl E2eeEdge {
     /// A frame violated the profile: the link closes, as a witness violation
     /// when the record chain did not extend (companion 12.5), and the router
     /// forgets the link.
-    fn fail_frame(&mut self, context: &mut StateCoreContext, edge: &mut EdgeFederation) {
+    pub(super) fn fail_frame(&mut self, context: &mut StateCoreContext, edge: &mut EdgeFederation) {
         self.counters.violations = self.counters.violations.saturating_add(1);
         if self.record_witness(context) {
             edge.fail_companion_witness(context);

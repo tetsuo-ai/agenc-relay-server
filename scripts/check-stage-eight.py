@@ -19,7 +19,7 @@ WIRE_BUDGET_PATH = "conformance/e2ee-wire-budget.toml"
 INTEROP_PATH = "conformance/e2ee-interop-matrix.toml"
 REVIEW_PACKAGE = "conformance/review"
 EXPECTED_TASKS = [f"S08-{number:03d}" for number in range(1, 40)]
-PROFILE_TOKEN = "RfzT_R3FsXwGF-uEsJzJtecZelkyn9XVJtWogtaoC10"
+PROFILE_TOKEN = "aZx0rf5wyMwzaIjlGR0eCRZsXeRAa5x8jppY7a3EgVk"
 EXPECTED_TARGET = {
     "name": "encrypted-v1",
     "profile_version": 1,

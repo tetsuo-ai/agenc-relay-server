@@ -1036,3 +1036,10 @@ surface = "coordinator"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/sequence.rs"
 test = "a_reloaded_coordinator_keeps_the_votes_a_slot_had_gathered"
 gates = [8, 9]
+
+[[transcript]]
+id = "coordinator-quorum-reload"
+surface = "coordinator"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/sequence.rs"
+test = "a_reloaded_coordinator_completes_a_quorum_it_had_begun"
+gates = [8, 9]

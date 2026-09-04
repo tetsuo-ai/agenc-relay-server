@@ -14,7 +14,7 @@ use agenc_ircd_e2ee::objects::conversation::{IrcCommitAuthorizationRule, IrcConv
 use agenc_ircd_e2ee::objects::federation::IrcFederationOpcode as Op;
 use agenc_ircd_e2ee::objects::sequencing::{
     IrcAbortCoreTbs, IrcAbortRequest, IrcCandidateReceipt, IrcCommitAbortReason, IrcCommitAck,
-    IrcCommitAckTbs, IrcFinalityVote, IrcFinalizationCoreTbs, IrcFinalizationProof,
+    IrcCommitAckTbs, IrcDisposition, IrcFinalityVote, IrcFinalizationCoreTbs, IrcFinalizationProof,
     IrcFinalizationRequest,
 };
 use agenc_ircd_e2ee::route::channel_route_binding;
@@ -1184,6 +1184,105 @@ fn a_policy_change_installs_only_the_retained_successor_of_the_old_policy() -> T
 
 #[test]
 fn a_reloaded_coordinator_keeps_the_votes_a_slot_had_gathered() -> TestResult {
+    let mut harness = Harness::with_devices(&[DEVICE, SECOND_DEVICE])?;
+    let conversation = harness.bind_channel()?;
+    let (receipt, commit_object_id, candidate_id) =
+        submit_candidate(&mut harness, conversation, 0, 10)?;
+    let ack_bytes = acknowledge(&mut harness, conversation, candidate_id, commit_object_id)?;
+    let first = finalization_request(
+        &harness,
+        conversation,
+        &receipt,
+        commit_object_id,
+        candidate_id,
+        &ack_bytes,
+        &[DEVICE],
+    )?;
+    let outcome = ok(harness.run(Op::SubmitFinalization, &conversation, Some(&first))?)?;
+    assert!(matches!(outcome.result, ResultBody::Pending(..)));
+    // A conflicting abort from the first device is discarded live while the
+    // second device's abort vote is counted; both requests are retained.
+    let core = IrcAbortCoreTbs {
+        profile_version: 1,
+        network_id: NETWORK,
+        conversation_id: conversation,
+        prior_state_id: receipt.tbs.prior_state_id,
+        candidate_id,
+        prior_epoch: 0,
+        reason: IrcCommitAbortReason::SenderWithdrawn,
+        evidence_digest: [0; 32],
+    };
+    let abort_id = semantic_id_of(SemanticHashDomain::AbortId, &core)?;
+    let mut abort_votes = [DEVICE, SECOND_DEVICE]
+        .iter()
+        .map(|device| {
+            vote(
+                &harness,
+                *device,
+                &receipt,
+                candidate_id,
+                Terminal::abort(abort_id, 1)?,
+            )
+        })
+        .collect::<TestResult<Vec<_>>>()?;
+    abort_votes.sort_by_key(|vote| (vote.signer_root_fingerprint, vote.signer_device_id));
+    let both = wire(
+        IrcWireObjectKind::AbortRequest,
+        &IrcAbortRequest {
+            core: core.clone(),
+            receipt: receipt.clone(),
+            votes: TlsVec::new(abort_votes)?,
+        },
+    )?;
+    let outcome = ok(harness.run(Op::SubmitAbort, &conversation, Some(&both))?)?;
+    assert!(matches!(
+        outcome.result,
+        ResultBody::Pending(_, PendingKind::Abort, _)
+    ));
+    let standing = |harness: &Harness| -> TestResult<Vec<(u8, IrcDisposition)>> {
+        let ledger = harness
+            .coordinator
+            .state
+            .conversations
+            .get(&conversation)
+            .and_then(|state| state.vote_ledgers.get(&candidate_id))
+            .ok_or("the ledger")?;
+        Ok(ledger
+            .votes()
+            .map(|((_, device), terminal)| (device[0], terminal.disposition))
+            .collect())
+    };
+    let expected = vec![
+        (DEVICE, IrcDisposition::Finalize),
+        (SECOND_DEVICE, IrcDisposition::Abort),
+    ];
+    assert_eq!(standing(&harness)?, expected);
+    // The reload restores each principal's decision from its durable vote
+    // row, whatever order the retained requests are read back in.
+    let mut reloaded = harness.reloaded()?;
+    assert_eq!(standing(&reloaded)?, expected);
+    // The second device's FINALIZE vote is now the conflicting one, so the
+    // finalization stays one short; its earlier abort vote still stands.
+    let crossed = finalization_request(
+        &reloaded,
+        conversation,
+        &receipt,
+        commit_object_id,
+        candidate_id,
+        &ack_bytes,
+        &[SECOND_DEVICE],
+    )?;
+    let outcome = ok(reloaded.run(Op::SubmitFinalization, &conversation, Some(&crossed))?)?;
+    assert!(matches!(
+        outcome.result,
+        ResultBody::Pending(_, PendingKind::Finalization, _)
+    ));
+    assert_eq!(standing(&reloaded)?, expected);
+    Ok(())
+}
+
+#[test]
+fn a_reloaded_coordinator_completes_a_quorum_it_had_begun() -> TestResult {
     let mut harness = Harness::with_devices(&[DEVICE, SECOND_DEVICE])?;
     let conversation = harness.bind_channel()?;
     let (receipt, commit_object_id, candidate_id) =
