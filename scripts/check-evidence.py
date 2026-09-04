@@ -452,7 +452,16 @@ NORMATIVE_BINDINGS = {
     "EVID-E2EE-REQ-D8D8C1DBDAE5F09E95FD": (["E2EE-REQ-D8D8C1DBDAE5F09E95FD"], "normative-requirement"),
 }
 
-REVIEWED_BINDINGS = STAGE_BINDINGS | NORMATIVE_BINDINGS
+# Evidence bound to a normative sentence a later revision removed. The
+# binding stays so every checkpoint recorded under the earlier text keeps
+# validating; a retired entry never counts toward a closure and no new
+# manifest may cite it.
+RETIRED_BINDINGS = {
+    # Section 7.5 padding moved from the MLS padding field to the
+    # application content on 2026-09-04 (Stage 08 checkpoint 52c7ccb).
+    "EVID-E2EE-REQ-58217F311021E979779A": (["E2EE-REQ-58217F311021E979779A"], "normative-requirement"),
+}
+REVIEWED_BINDINGS = STAGE_BINDINGS | NORMATIVE_BINDINGS | RETIRED_BINDINGS
 TOP_FIELDS = {
     "schema_version",
     "manifest_id",
@@ -668,7 +677,7 @@ def validate_catalog(root: Path) -> dict[str, list[str]]:
             requirement_records[evidence_id] = (identifier, status)
 
     for evidence_id, (claims, kind) in catalog_records.items():
-        if evidence_id in STAGE_BINDINGS:
+        if evidence_id in STAGE_BINDINGS or evidence_id in RETIRED_BINDINGS:
             continue
         requirement = requirement_records.get(evidence_id)
         if requirement is None:
@@ -1821,6 +1830,8 @@ def validate_closure_entries(
     by_id: dict[str, list[dict[str, object]]] = {}
     for entry in entries:
         evidence_id = entry.get("evidence_id")
+        if isinstance(evidence_id, str) and evidence_id in RETIRED_BINDINGS:
+            raise EvidenceError(f"closure evidence cites retired binding {evidence_id}")
         if isinstance(evidence_id, str) and evidence_id in required_ids:
             by_id.setdefault(evidence_id, []).append(entry)
 

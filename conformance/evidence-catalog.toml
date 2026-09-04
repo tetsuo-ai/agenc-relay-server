@@ -1834,6 +1834,13 @@ id = "EVID-E2EE-REQ-FDA89A1D5714375C1B4F"
 claim_ids = ["E2EE-REQ-FDA89A1D5714375C1B4F"]
 kind = "normative-requirement"
 
+# Retired on 2026-09-04: the Section 7.5 sentence it bound moved to the
+# application content; kept so the Stage 08 checkpoint 52c7ccb validates.
+[[evidence]]
+id = "EVID-E2EE-REQ-58217F311021E979779A"
+claim_ids = ["E2EE-REQ-58217F311021E979779A"]
+kind = "normative-requirement"
+
 [[evidence]]
 id = "EVID-E2EE-REQ-A119B1A71D9F208380BC"
 claim_ids = ["E2EE-REQ-A119B1A71D9F208380BC"]
