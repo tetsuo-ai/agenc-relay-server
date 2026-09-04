@@ -925,6 +925,206 @@ claim_ids = ["S07-900"]
 kind = "stage-gate"
 
 [[evidence]]
+id = "EVID-S08-001-PROFILE"
+claim_ids = ["S08-001"]
+kind = "exact-profile-negotiation"
+
+[[evidence]]
+id = "EVID-S08-002-SEPARATION"
+claim_ids = ["S08-002"]
+kind = "daemon-client-separation"
+
+[[evidence]]
+id = "EVID-S08-003-IDENTITY"
+claim_ids = ["S08-003"]
+kind = "public-identity-validation"
+
+[[evidence]]
+id = "EVID-S08-004-ROUTES"
+claim_ids = ["S08-004"]
+kind = "route-identity-binding-locks"
+
+[[evidence]]
+id = "EVID-S08-005-AUTHORITY"
+claim_ids = ["S08-005"]
+kind = "sequencer-policy-finality-authority"
+
+[[evidence]]
+id = "EVID-S08-006-CONTEXT"
+claim_ids = ["S08-006"]
+kind = "mls-context-envelopes"
+
+[[evidence]]
+id = "EVID-S08-007-CARRIERS"
+claim_ids = ["S08-007"]
+kind = "client-carriers-reassembly"
+
+[[evidence]]
+id = "EVID-S08-008-SEQUENCING"
+claim_ids = ["S08-008"]
+kind = "candidate-receipt-finality"
+
+[[evidence]]
+id = "EVID-S08-009-FEDERATION"
+claim_ids = ["S08-009"]
+kind = "companion-federation-exchange"
+
+[[evidence]]
+id = "EVID-S08-010-LIFECYCLE"
+claim_ids = ["S08-010"]
+kind = "server-visible-group-lifecycle"
+
+[[evidence]]
+id = "EVID-S08-011-REMOVAL"
+claim_ids = ["S08-011"]
+kind = "removal-revocation-recovery-gates"
+
+[[evidence]]
+id = "EVID-S08-012-REINIT"
+claim_ids = ["S08-012"]
+kind = "reinit-route-migration"
+
+[[evidence]]
+id = "EVID-S08-013-PERSISTENCE"
+claim_ids = ["S08-013"]
+kind = "replay-mailbox-persistence"
+
+[[evidence]]
+id = "EVID-S08-014-LIMITS"
+claim_ids = ["S08-014"]
+kind = "resource-timing-limits"
+
+[[evidence]]
+id = "EVID-S08-015-DOWNGRADE"
+claim_ids = ["S08-015"]
+kind = "downgrade-reset-failure"
+
+[[evidence]]
+id = "EVID-S08-016-BARRIER"
+claim_ids = ["S08-016"]
+kind = "cross-profile-durable-barrier"
+
+[[evidence]]
+id = "EVID-S08-017-INTEGRATION"
+claim_ids = ["S08-017"]
+kind = "encrypted-node-integration"
+
+[[evidence]]
+id = "EVID-S08-018-CORPUS"
+claim_ids = ["S08-018"]
+kind = "mls-corpus-pin"
+
+[[evidence]]
+id = "EVID-S08-019-VECTORS"
+claim_ids = ["S08-019"]
+kind = "independent-object-vectors"
+
+[[evidence]]
+id = "EVID-S08-020-INTEROP"
+claim_ids = ["S08-020"]
+kind = "cross-implementation-mls"
+
+[[evidence]]
+id = "EVID-S08-021-PLAINTEXT"
+claim_ids = ["S08-021"]
+kind = "plaintext-rejection-matrix"
+
+[[evidence]]
+id = "EVID-S08-022-BOUNDARIES"
+claim_ids = ["S08-022"]
+kind = "limit-padding-boundaries"
+
+[[evidence]]
+id = "EVID-S08-023-FUZZ"
+claim_ids = ["S08-023"]
+kind = "parser-fuzzing"
+
+[[evidence]]
+id = "EVID-S08-024-ADVERSARIAL"
+claim_ids = ["S08-024"]
+kind = "stateful-adversarial-properties"
+
+[[evidence]]
+id = "EVID-S08-025-CRASH"
+claim_ids = ["S08-025"]
+kind = "durable-boundary-crash-tests"
+
+[[evidence]]
+id = "EVID-S08-026-QUORUM"
+claim_ids = ["S08-026"]
+kind = "finality-quorum-exhaustion"
+
+[[evidence]]
+id = "EVID-S08-027-TRANSITIONS"
+claim_ids = ["S08-027"]
+kind = "identity-roster-transitions"
+
+[[evidence]]
+id = "EVID-S08-028-LOAD"
+claim_ids = ["S08-028"]
+kind = "maximum-shape-load"
+
+[[evidence]]
+id = "EVID-S08-029-CANARIES"
+claim_ids = ["S08-029"]
+kind = "log-telemetry-canaries"
+
+[[evidence]]
+id = "EVID-S08-030-REINIT-RACES"
+claim_ids = ["S08-030"]
+kind = "reinit-race-matrix"
+
+[[evidence]]
+id = "EVID-S08-031-ECAP"
+claim_ids = ["S08-031"]
+kind = "ecap-federation-transitions"
+
+[[evidence]]
+id = "EVID-S08-032-WIRE-BUDGET"
+claim_ids = ["S08-032"]
+kind = "mechanical-wire-budget"
+
+[[evidence]]
+id = "EVID-S08-033-SEMANTIC-IDS"
+claim_ids = ["S08-033"]
+kind = "semantic-id-malleability"
+
+[[evidence]]
+id = "EVID-S08-034-COUNCIL"
+claim_ids = ["S08-034"]
+kind = "finality-council-transitions"
+
+[[evidence]]
+id = "EVID-S08-035-OPERATIONS"
+claim_ids = ["S08-035"]
+kind = "federation-operation-semantics"
+
+[[evidence]]
+id = "EVID-S08-036-IDEMPOTENCY"
+claim_ids = ["S08-036"]
+kind = "idempotency-crash-tests"
+
+[[evidence]]
+id = "EVID-S08-037-CHAINS"
+claim_ids = ["S08-037"]
+kind = "root-binding-chains"
+
+[[evidence]]
+id = "EVID-S08-038-SCHEDULES"
+claim_ids = ["S08-038"]
+kind = "barrier-schedules"
+
+[[evidence]]
+id = "EVID-S08-039-REVIEW"
+claim_ids = ["S08-039"]
+kind = "external-review"
+
+[[evidence]]
+id = "EVID-S08-900-STAGE-GATE"
+claim_ids = ["S08-900"]
+kind = "stage-gate"
+
+[[evidence]]
 id = "EVID-ARCH-AUTH-03"
 claim_ids = ["ARCH-AUTH-03"]
 kind = "normative-requirement"

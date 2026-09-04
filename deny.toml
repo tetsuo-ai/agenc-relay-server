@@ -32,6 +32,8 @@ skip = [
     { crate = "rand_core@0.6.4", reason = "opaque-ke 4.0.1 retains its audited internal RNG trait generation" },
     { crate = "sha2@0.10.9", reason = "opaque-ke 4.0.1 uses the reviewed SHA-512 generation through a scoped alias" },
     { crate = "syn@2.0.119", reason = "the reviewed crypto derive graph and current proc macros span syn 2 and 3" },
+    { crate = "const-oid@0.10.2", reason = "the test-only MLS clients (openmls, mls-rs) for the Stage 08 interoperability gate use the current RustCrypto generation" },
+    { crate = "getrandom@0.4.3", reason = "the test-only MLS clients (openmls, mls-rs) for the Stage 08 interoperability gate use the current getrandom generation" },
 ]
 skip-tree = []
 
@@ -61,7 +63,11 @@ allow = [
     "Unicode-3.0",
     "Zlib",
 ]
-exceptions = []
+exceptions = [
+    { allow = ["MPL-2.0"], crate = "hpke-rs" },
+    { allow = ["MPL-2.0"], crate = "hpke-rs-crypto" },
+    { allow = ["MPL-2.0"], crate = "hpke-rs-rust-crypto" },
+]
 
 [licenses.private]
 ignore = true

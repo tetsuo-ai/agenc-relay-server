@@ -167,6 +167,13 @@ impl E2eeEdge {
         generation: u64,
         _state_object: bool,
     ) -> Result<(), Refusal> {
+        self.acknowledge_origin(origin_id, generation);
+        Ok(())
+    }
+
+    /// Applies one acknowledged declaration to every origin that declared
+    /// `generation`.
+    pub(super) fn acknowledge_origin(&mut self, origin_id: [u8; 16], generation: u64) {
         for origin in self.origins.values_mut() {
             if origin.origin_id == origin_id && origin.declared == Some(generation) {
                 origin.acked = Some(generation);
@@ -176,7 +183,6 @@ impl E2eeEdge {
                 }
             }
         }
-        Ok(())
     }
 
     /// A connection ended: its companion origin is deleted at the next

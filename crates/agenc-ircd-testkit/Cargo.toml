@@ -18,3 +18,10 @@ subtle.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+mls-rs.workspace = true
+mls-rs-crypto-rustcrypto.workspace = true
+openmls.workspace = true
+openmls_basic_credential.workspace = true
+openmls_rust_crypto.workspace = true

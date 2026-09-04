@@ -1,0 +1,947 @@
+schema_version = 1
+stage = 8
+
+[[transcript]]
+id = "wire-local-ingress"
+surface = "e2ee_wire"
+file = "crates/agenc-ircd-e2ee/src/tests/assembly.rs"
+test = "local_ingress_assembles_in_order_and_verifies_the_hash"
+gates = [6, 7]
+
+[[transcript]]
+id = "wire-local-order"
+surface = "e2ee_wire"
+file = "crates/agenc-ircd-e2ee/src/tests/assembly.rs"
+test = "local_ingress_refuses_out_of_order_and_inconsistent_fragments"
+gates = [7]
+
+[[transcript]]
+id = "wire-remote-order"
+surface = "e2ee_wire"
+file = "crates/agenc-ircd-e2ee/src/tests/assembly.rs"
+test = "remote_assembly_tolerates_any_order_and_expires_by_deadline"
+gates = [7]
+
+[[transcript]]
+id = "wire-recent-scope"
+surface = "e2ee_wire"
+file = "crates/agenc-ircd-e2ee/src/tests/assembly.rs"
+test = "a_recent_object_is_scoped_to_its_direction_and_sender"
+gates = [7, 20]
+
+[[transcript]]
+id = "wire-quotas"
+surface = "e2ee_wire"
+file = "crates/agenc-ircd-e2ee/src/tests/assembly.rs"
+test = "one_open_object_per_local_sender_and_quotas_per_scope"
+gates = [5, 11]
+
+[[transcript]]
+id = "wire-limits-first"
+surface = "e2ee_wire"
+file = "crates/agenc-ircd-e2ee/src/tests/assembly.rs"
+test = "limits_are_checked_before_any_reservation"
+gates = [5, 11]
+
+[[transcript]]
+id = "wire-fragments"
+surface = "e2ee_wire"
+file = "crates/agenc-ircd-e2ee/src/tests/fragment.rs"
+test = "objects_split_into_exact_segments_that_round_trip"
+gates = [5, 16]
+
+[[transcript]]
+id = "wire-fragment-grammar"
+surface = "e2ee_wire"
+file = "crates/agenc-ircd-e2ee/src/tests/fragment.rs"
+test = "every_fragment_grammar_rule_has_a_negative"
+gates = [6, 16]
+
+[[transcript]]
+id = "wire-egroup-arity"
+surface = "e2ee_wire"
+file = "crates/agenc-ircd-e2ee/src/tests/command.rs"
+test = "every_egroup_production_parses_with_its_exact_arity"
+gates = [16]
+
+[[transcript]]
+id = "wire-ekey-arity"
+surface = "e2ee_wire"
+file = "crates/agenc-ircd-e2ee/src/tests/command.rs"
+test = "every_ekey_production_parses_with_its_exact_arity"
+gates = [16]
+
+[[transcript]]
+id = "wire-carriers"
+surface = "e2ee_wire"
+file = "crates/agenc-ircd-e2ee/src/tests/carrier.rs"
+test = "every_client_carrier_accepts_exactly_its_matrix_kinds"
+gates = [4, 16]
+
+[[transcript]]
+id = "wire-responses"
+surface = "e2ee_wire"
+file = "crates/agenc-ircd-e2ee/src/tests/response.rs"
+test = "batches_open_carry_children_and_objects_and_close"
+gates = [16]
+
+[[transcript]]
+id = "wire-tag-order"
+surface = "e2ee_wire"
+file = "crates/agenc-ircd-e2ee/src/tests/response.rs"
+test = "live_lines_order_server_tags_before_the_preserved_client_tag"
+gates = [16]
+
+[[transcript]]
+id = "wire-budget-fit"
+surface = "e2ee_wire"
+file = "crates/agenc-ircd-e2ee/tests/wire_budget.rs"
+test = "the_longest_lines_fit_the_traditional_budget"
+gates = [16]
+
+[[transcript]]
+id = "wire-budget-plus-one"
+surface = "e2ee_wire"
+file = "crates/agenc-ircd-e2ee/tests/wire_budget.rs"
+test = "plus_one_forms_are_refused_before_allocation"
+gates = [5, 16]
+
+[[transcript]]
+id = "wire-tokens"
+surface = "e2ee_wire"
+file = "crates/agenc-ircd-e2ee/src/tests/tokens.rs"
+test = "base64url_decoding_is_canonical"
+gates = [6, 16]
+
+[[transcript]]
+id = "wire-decimals"
+surface = "e2ee_wire"
+file = "crates/agenc-ircd-e2ee/src/tests/tokens.rs"
+test = "decimals_have_no_leading_zero_and_are_range_checked"
+gates = [6, 16]
+
+[[transcript]]
+id = "object-envelope"
+surface = "e2ee_objects"
+file = "crates/agenc-ircd-e2ee/src/tests/object.rs"
+test = "the_envelope_round_trips_and_names_its_id"
+gates = [2]
+
+[[transcript]]
+id = "object-envelope-bounds"
+surface = "e2ee_objects"
+file = "crates/agenc-ircd-e2ee/src/tests/object.rs"
+test = "envelope_bounds_are_checked_before_the_body_is_copied"
+gates = [5]
+
+[[transcript]]
+id = "object-tls-round-trip"
+surface = "e2ee_objects"
+file = "crates/agenc-ircd-e2ee/src/tests/tls.rs"
+test = "a_structure_round_trips_byte_for_byte"
+gates = [2, 6]
+
+[[transcript]]
+id = "object-tls-bounds"
+surface = "e2ee_objects"
+file = "crates/agenc-ircd-e2ee/src/tests/tls.rs"
+test = "bounds_are_enforced_on_both_sides"
+gates = [5, 6]
+
+[[transcript]]
+id = "object-tls-canonical"
+surface = "e2ee_objects"
+file = "crates/agenc-ircd-e2ee/src/tests/tls.rs"
+test = "canonical_order_is_strictly_increasing"
+gates = [2]
+
+[[transcript]]
+id = "object-families"
+surface = "e2ee_objects"
+file = "crates/agenc-ircd-e2ee/src/tests/objects.rs"
+test = "sequencing_objects_and_the_record_union_round_trip"
+gates = [2]
+
+[[transcript]]
+id = "object-reinit"
+surface = "e2ee_objects"
+file = "crates/agenc-ircd-e2ee/src/tests/objects.rs"
+test = "reinit_objects_round_trip"
+gates = [2, 14]
+
+[[transcript]]
+id = "object-federation"
+surface = "e2ee_objects"
+file = "crates/agenc-ircd-e2ee/src/tests/objects.rs"
+test = "federation_objects_round_trip"
+gates = [2, 19]
+
+[[transcript]]
+id = "object-mls-private"
+surface = "e2ee_objects"
+file = "crates/agenc-ircd-e2ee/src/tests/mls_outer.rs"
+test = "a_private_message_header_is_read_and_the_rest_stays_opaque"
+gates = [6]
+
+[[transcript]]
+id = "object-mls-refused"
+surface = "e2ee_objects"
+file = "crates/agenc-ircd-e2ee/src/tests/mls_outer.rs"
+test = "public_messages_group_info_and_other_versions_are_refused"
+gates = [6, 10]
+
+[[transcript]]
+id = "object-key-package"
+surface = "e2ee_objects"
+file = "crates/agenc-ircd-e2ee/src/tests/mls_outer.rs"
+test = "a_key_package_exposes_its_public_fields_reference_and_signatures"
+gates = [2, 10]
+
+[[transcript]]
+id = "object-last-resort"
+surface = "e2ee_objects"
+file = "crates/agenc-ircd-e2ee/src/tests/mls_outer.rs"
+test = "last_resort_and_tampering_are_detected"
+gates = [10]
+
+[[transcript]]
+id = "object-padding"
+surface = "e2ee_objects"
+file = "crates/agenc-ircd-e2ee/src/tests/envelope.rs"
+test = "padding_follows_the_two_tier_table"
+gates = [5]
+
+[[transcript]]
+id = "object-application-route"
+surface = "e2ee_objects"
+file = "crates/agenc-ircd-e2ee/src/tests/envelope.rs"
+test = "application_objects_must_name_their_route"
+gates = [4]
+
+[[transcript]]
+id = "object-commit-chain"
+surface = "e2ee_objects"
+file = "crates/agenc-ircd-e2ee/src/tests/envelope.rs"
+test = "commit_objects_chain_from_the_accepted_state"
+gates = [7]
+
+[[transcript]]
+id = "object-ids"
+surface = "e2ee_objects"
+file = "crates/agenc-ircd-e2ee/src/tests/ids.rs"
+test = "identifiers_differ_by_domain_and_never_cover_signatures"
+gates = [17]
+
+[[transcript]]
+id = "object-id-inputs"
+surface = "e2ee_objects"
+file = "crates/agenc-ircd-e2ee/src/tests/ids.rs"
+test = "composite_inputs_are_encoded_as_specified"
+gates = [17]
+
+[[transcript]]
+id = "object-context"
+surface = "e2ee_objects"
+file = "crates/agenc-ircd-e2ee/src/tests/context.rs"
+test = "every_context_rule_has_a_negative"
+gates = [10]
+
+[[transcript]]
+id = "object-context-core"
+surface = "e2ee_objects"
+file = "crates/agenc-ircd-e2ee/src/tests/context.rs"
+test = "the_context_core_seals_the_binding"
+gates = [17, 21]
+
+[[transcript]]
+id = "object-welcome"
+surface = "e2ee_objects"
+file = "crates/agenc-ircd-e2ee/src/tests/welcome.rs"
+test = "a_delivered_welcome_must_address_its_target_and_reference"
+gates = [10]
+
+[[transcript]]
+id = "object-proof-bundles"
+surface = "e2ee_objects"
+file = "crates/agenc-ircd-e2ee/src/tests/welcome.rs"
+test = "proof_bundles_are_canonical_and_bounded"
+gates = [17]
+
+[[transcript]]
+id = "object-staged-reinit"
+surface = "e2ee_objects"
+file = "crates/agenc-ircd-e2ee/src/tests/welcome.rs"
+test = "a_staged_reinit_names_a_new_conversation"
+gates = [14]
+
+[[transcript]]
+id = "identity-root-chain"
+surface = "identity"
+file = "crates/agenc-ircd-e2ee/src/tests/identity.rs"
+test = "a_root_chain_verifies_and_every_lineage_rule_holds"
+gates = [10, 21]
+
+[[transcript]]
+id = "identity-certificate"
+surface = "identity"
+file = "crates/agenc-ircd-e2ee/src/tests/identity.rs"
+test = "a_device_certificate_binds_its_enrollment_exactly"
+gates = [10]
+
+[[transcript]]
+id = "identity-roster"
+surface = "identity"
+file = "crates/agenc-ircd-e2ee/src/tests/identity.rs"
+test = "a_roster_is_a_complete_canonical_active_set"
+gates = [10]
+
+[[transcript]]
+id = "identity-roster-chain"
+surface = "identity"
+file = "crates/agenc-ircd-e2ee/src/tests/identity.rs"
+test = "roster_generations_chain_and_revocations_are_append_only"
+gates = [10]
+
+[[transcript]]
+id = "identity-capabilities"
+surface = "identity"
+file = "crates/agenc-ircd-e2ee/src/tests/identity.rs"
+test = "capability_statements_are_device_signed_canonical_and_chained"
+gates = [10]
+
+[[transcript]]
+id = "identity-leaf"
+surface = "identity"
+file = "crates/agenc-ircd-e2ee/src/tests/identity.rs"
+test = "leaf_authorizations_are_bounded_and_covered"
+gates = [10]
+
+[[transcript]]
+id = "identity-credential"
+surface = "identity"
+file = "crates/agenc-ircd-e2ee/src/tests/identity.rs"
+test = "a_credential_bundle_names_one_client_and_agrees_with_its_key_package"
+gates = [10]
+
+[[transcript]]
+id = "identity-pinned-heads"
+surface = "identity"
+file = "crates/agenc-ircd-e2ee/src/tests/identity.rs"
+test = "pinned_heads_classify_every_observation"
+gates = [10]
+
+[[transcript]]
+id = "authority-policy"
+surface = "authority"
+file = "crates/agenc-ircd-e2ee/src/tests/policy.rs"
+test = "a_moderated_policy_verifies_and_reports_its_sets"
+gates = [10]
+
+[[transcript]]
+id = "authority-policy-negatives"
+surface = "authority"
+file = "crates/agenc-ircd-e2ee/src/tests/policy.rs"
+test = "every_policy_rule_has_a_negative"
+gates = [10]
+
+[[transcript]]
+id = "authority-old-policy"
+surface = "authority"
+file = "crates/agenc-ircd-e2ee/src/tests/policy.rs"
+test = "a_change_is_approved_under_the_old_policy"
+gates = [10, 18]
+
+[[transcript]]
+id = "authority-quorum"
+surface = "authority"
+file = "crates/agenc-ircd-e2ee/src/tests/policy.rs"
+test = "the_quorum_intersects_beyond_the_fault_bound_for_every_permitted_pair"
+gates = [9]
+
+[[transcript]]
+id = "authority-terminals"
+surface = "authority"
+file = "crates/agenc-ircd-e2ee/src/tests/finality.rs"
+test = "terminals_and_vote_tbs_are_reconstructed_exactly"
+gates = [9, 17]
+
+[[transcript]]
+id = "authority-council"
+surface = "authority"
+file = "crates/agenc-ircd-e2ee/src/tests/finality.rs"
+test = "a_ledger_counts_distinct_council_votes_and_signs_once"
+gates = [9, 18]
+
+[[transcript]]
+id = "authority-rules"
+surface = "authority"
+file = "crates/agenc-ircd-e2ee/src/tests/authorization.rs"
+test = "every_action_bit_combination_selects_at_most_one_rule"
+gates = [10]
+
+[[transcript]]
+id = "authority-controlled"
+surface = "authority"
+file = "crates/agenc-ircd-e2ee/src/tests/authorization.rs"
+test = "controlled_transitions_need_the_old_threshold"
+gates = [18]
+
+[[transcript]]
+id = "authority-approval-id"
+surface = "authority"
+file = "crates/agenc-ircd-e2ee/src/tests/authorization.rs"
+test = "approval_envelopes_share_one_authorization_id"
+gates = [17]
+
+[[transcript]]
+id = "authority-sequencer-chain"
+surface = "authority"
+file = "crates/agenc-ircd-e2ee/src/tests/sequencer.rs"
+test = "credentials_chain_by_continuity_signature"
+gates = [10]
+
+[[transcript]]
+id = "authority-key-sets"
+surface = "authority"
+file = "crates/agenc-ircd-e2ee/src/tests/sequencer.rs"
+test = "key_sets_hold_the_current_key_and_at_most_its_successor"
+gates = [15]
+
+[[transcript]]
+id = "authority-direct-binding"
+surface = "authority"
+file = "crates/agenc-ircd-e2ee/src/tests/route.rs"
+test = "a_direct_binding_needs_both_principals_unanimously_and_locked"
+gates = [21]
+
+[[transcript]]
+id = "authority-channel-binding"
+surface = "authority"
+file = "crates/agenc-ircd-e2ee/src/tests/route.rs"
+test = "channel_bindings_need_the_authority_root_and_replacements_carry_no_proofs"
+gates = [21]
+
+[[transcript]]
+id = "authority-close-id"
+surface = "authority"
+file = "crates/agenc-ircd-e2ee/src/tests/route.rs"
+test = "close_authorization_ids_bind_the_intent"
+gates = [17, 21]
+
+[[transcript]]
+id = "frames-round-trip"
+surface = "federation_frames"
+file = "crates/agenc-ircd-e2ee/src/tests/federation_frames.rs"
+test = "every_frame_renders_and_parses_back"
+gates = [15, 19]
+
+[[transcript]]
+id = "frames-classified"
+surface = "federation_frames"
+file = "crates/agenc-ircd-e2ee/src/tests/federation_frames.rs"
+test = "coordinator_and_home_frames_are_classified"
+gates = [19]
+
+[[transcript]]
+id = "frames-ecap-maxima"
+surface = "federation_frames"
+file = "crates/agenc-ircd-e2ee/src/tests/federation_frames.rs"
+test = "ecap_lines_fit_their_stated_maxima"
+gates = [15]
+
+[[transcript]]
+id = "frames-grammar"
+surface = "federation_frames"
+file = "crates/agenc-ircd-e2ee/src/tests/federation_frames.rs"
+test = "grammar_violations_are_refused"
+gates = [15, 19]
+
+[[transcript]]
+id = "frames-ecap-flags"
+surface = "federation_frames"
+file = "crates/agenc-ircd-e2ee/src/tests/ecap.rs"
+test = "the_four_flags_follow_the_only_legal_transitions"
+gates = [15]
+
+[[transcript]]
+id = "frames-ecap-simultaneous"
+surface = "federation_frames"
+file = "crates/agenc-ircd-e2ee/src/tests/ecap.rs"
+test = "simultaneous_offers_activate_both_sides"
+gates = [15]
+
+[[transcript]]
+id = "frames-ecap-key-set"
+surface = "federation_frames"
+file = "crates/agenc-ircd-e2ee/src/tests/ecap.rs"
+test = "the_key_set_record_rule_is_closed"
+gates = [15]
+
+[[transcript]]
+id = "frames-profile-tuple"
+surface = "federation_frames"
+file = "crates/agenc-ircd-e2ee/src/tests/profile.rs"
+test = "every_tuple_deviation_is_a_profile_mismatch"
+gates = [15]
+
+[[transcript]]
+id = "frames-capability"
+surface = "federation_frames"
+file = "crates/agenc-ircd-e2ee/src/tests/profile.rs"
+test = "the_capability_value_is_exact"
+gates = [4, 15]
+
+[[transcript]]
+id = "domain-channel-route"
+surface = "domain"
+file = "crates/agenc-ircd-domain/src/e2ee/tests/route_table.rs"
+test = "a_channel_binds_through_its_reservation_and_blocks_plaintext"
+gates = [4, 21]
+
+[[transcript]]
+id = "domain-direct-route"
+surface = "domain"
+file = "crates/agenc-ircd-domain/src/e2ee/tests/route_table.rs"
+test = "a_direct_pair_binds_once_and_only_the_smaller_account_creates"
+gates = [21]
+
+[[transcript]]
+id = "domain-lock-slots"
+surface = "domain"
+file = "crates/agenc-ircd-domain/src/e2ee/tests/route_table.rs"
+test = "lock_slots_refuse_forks_and_admit_only_the_next_incarnation"
+gates = [21]
+
+[[transcript]]
+id = "domain-tombstones"
+surface = "domain"
+file = "crates/agenc-ircd-domain/src/e2ee/tests/route_table.rs"
+test = "destroying_an_instance_removes_only_its_tombstone"
+gates = [4]
+
+[[transcript]]
+id = "domain-recovery-gate"
+surface = "domain"
+file = "crates/agenc-ircd-domain/src/e2ee/tests/route_table.rs"
+test = "the_recovery_gate_only_closes_or_conflicts"
+gates = [8]
+
+[[transcript]]
+id = "domain-reservations"
+surface = "domain"
+file = "crates/agenc-ircd-domain/src/e2ee/tests/route_table.rs"
+test = "reservations_expire_and_collisions_have_one_winner"
+gates = [19]
+
+[[transcript]]
+id = "domain-candidates"
+surface = "domain"
+file = "crates/agenc-ircd-domain/src/e2ee/tests/sequencer_log.rs"
+test = "candidates_finalize_and_abort_with_exact_positions"
+gates = [7]
+
+[[transcript]]
+id = "domain-attempts"
+surface = "domain"
+file = "crates/agenc-ircd-domain/src/e2ee/tests/sequencer_log.rs"
+test = "an_epoch_permits_a_bounded_number_of_attempts"
+gates = [5, 7]
+
+[[transcript]]
+id = "domain-reinit-log"
+surface = "domain"
+file = "crates/agenc-ircd-domain/src/e2ee/tests/sequencer_log.rs"
+test = "reinit_attempts_activate_or_abort_and_migrate_the_log"
+gates = [14]
+
+[[transcript]]
+id = "domain-close-restore"
+surface = "domain"
+file = "crates/agenc-ircd-domain/src/e2ee/tests/sequencer_log.rs"
+test = "close_is_the_last_record_and_restore_reproduces_the_head"
+gates = [8]
+
+[[transcript]]
+id = "domain-lifecycle"
+surface = "domain"
+file = "crates/agenc-ircd-domain/src/e2ee/tests/lifecycle.rs"
+test = "bootstrap_joins_and_removals_gate_application_traffic"
+gates = [10]
+
+[[transcript]]
+id = "domain-lifecycle-gate"
+surface = "domain"
+file = "crates/agenc-ircd-domain/src/e2ee/tests/lifecycle.rs"
+test = "the_recovery_gate_only_moves_forward"
+gates = [8]
+
+[[transcript]]
+id = "domain-directory-heads"
+surface = "domain"
+file = "crates/agenc-ircd-domain/src/e2ee/tests/directory.rs"
+test = "heads_advance_by_one_and_bind_to_each_other"
+gates = [10]
+
+[[transcript]]
+id = "domain-attachment"
+surface = "domain"
+file = "crates/agenc-ircd-domain/src/e2ee/tests/directory.rs"
+test = "attachment_is_a_compare_and_swap_on_the_session_generation"
+gates = [10]
+
+[[transcript]]
+id = "domain-packages"
+surface = "domain"
+file = "crates/agenc-ircd-domain/src/e2ee/tests/directory.rs"
+test = "packages_are_one_use_and_claims_are_idempotent"
+gates = [10, 20]
+
+[[transcript]]
+id = "domain-mailbox"
+surface = "domain"
+file = "crates/agenc-ircd-domain/src/e2ee/tests/mailbox.rs"
+test = "items_are_fetched_with_session_bound_tokens_and_acknowledged_once"
+gates = [20]
+
+[[transcript]]
+id = "domain-mailbox-pages"
+surface = "domain"
+file = "crates/agenc-ircd-domain/src/e2ee/tests/mailbox.rs"
+test = "pages_are_bounded_detach_invalidates_tokens_and_expiry_frees_items"
+gates = [5, 20]
+
+[[transcript]]
+id = "domain-completions"
+surface = "domain"
+file = "crates/agenc-ircd-domain/src/e2ee/tests/projection.rs"
+test = "the_completion_table_is_closed"
+gates = [19]
+
+[[transcript]]
+id = "domain-descriptors"
+surface = "domain"
+file = "crates/agenc-ircd-domain/src/e2ee/tests/projection.rs"
+test = "descriptor_rules_follow_the_registry"
+gates = [19]
+
+[[transcript]]
+id = "domain-event-phases"
+surface = "domain"
+file = "crates/agenc-ircd-domain/src/e2ee/tests/projection.rs"
+test = "event_kinds_have_consistent_phases_and_presence_rules"
+gates = [19]
+
+[[transcript]]
+id = "domain-entitlement"
+surface = "domain"
+file = "crates/agenc-ircd-domain/src/e2ee/tests/projection.rs"
+test = "direct_entitlement_is_reference_counted_and_channel_entitlement_follows_base"
+gates = [19]
+
+[[transcript]]
+id = "domain-plan-order"
+surface = "domain"
+file = "crates/agenc-ircd-domain/src/e2ee/tests/projection.rs"
+test = "plans_order_by_phase_conversation_kind_target_and_payload"
+gates = [19, 22]
+
+[[transcript]]
+id = "domain-barrier-bounds"
+surface = "domain"
+file = "crates/agenc-ircd-domain/src/e2ee/tests/projection.rs"
+test = "barriers_cover_only_two_profile_targets_within_bounds"
+gates = [22]
+
+[[transcript]]
+id = "domain-limits"
+surface = "domain"
+file = "crates/agenc-ircd-e2ee/tests/domain_limits.rs"
+test = "the_domain_limit_copies_match_the_companion_table"
+gates = [5]
+
+[[transcript]]
+id = "storage-keys"
+surface = "storage"
+file = "crates/agenc-ircd-storage/tests/e2ee_records.rs"
+test = "keys_classify_by_prefix_and_lay_out_exactly"
+gates = [8]
+
+[[transcript]]
+id = "storage-key-parsers"
+surface = "storage"
+file = "crates/agenc-ircd-storage/tests/e2ee_records.rs"
+test = "every_state_key_splits_back_into_its_parts"
+gates = [8]
+
+[[transcript]]
+id = "storage-objects"
+surface = "storage"
+file = "crates/agenc-ircd-storage/tests/e2ee_records.rs"
+test = "objects_store_exact_bytes_under_their_id"
+gates = [8]
+
+[[transcript]]
+id = "storage-routes"
+surface = "storage"
+file = "crates/agenc-ircd-storage/tests/e2ee_records.rs"
+test = "route_and_claim_rows_round_trip_and_check_their_rules"
+gates = [8, 21]
+
+[[transcript]]
+id = "storage-sequencer"
+surface = "storage"
+file = "crates/agenc-ircd-storage/tests/e2ee_records.rs"
+test = "sequencer_rows_round_trip_and_keep_slot_invariants"
+gates = [8]
+
+[[transcript]]
+id = "storage-directory"
+surface = "storage"
+file = "crates/agenc-ircd-storage/tests/e2ee_records.rs"
+test = "directory_rows_round_trip_and_check_chains"
+gates = [8, 21]
+
+[[transcript]]
+id = "storage-mailbox"
+surface = "storage"
+file = "crates/agenc-ircd-storage/tests/e2ee_records.rs"
+test = "package_attach_and_mailbox_rows_round_trip"
+gates = [8, 20]
+
+[[transcript]]
+id = "storage-replay"
+surface = "storage"
+file = "crates/agenc-ircd-storage/tests/e2ee_records.rs"
+test = "replay_delivery_and_keyset_rows_round_trip"
+gates = [8, 20]
+
+[[transcript]]
+id = "storage-barrier-rows"
+surface = "storage"
+file = "crates/agenc-ircd-storage/tests/e2ee_records.rs"
+test = "barrier_rows_follow_the_appendix_b_encoding"
+gates = [22]
+
+[[transcript]]
+id = "storage-atomic"
+surface = "storage"
+file = "crates/agenc-ircd-storage/tests/e2ee_records.rs"
+test = "an_e2ee_mutation_commits_object_state_replay_outbox_and_barrier_atomically"
+gates = [8, 20, 22]
+
+[[transcript]]
+id = "coordinator-whoami"
+surface = "coordinator"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/mod.rs"
+test = "whoami_reports_the_account_and_refuses_parameters"
+gates = [19]
+
+[[transcript]]
+id = "coordinator-attach"
+surface = "coordinator"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/mod.rs"
+test = "devices_attach_by_compare_and_swap"
+gates = [10]
+
+[[transcript]]
+id = "coordinator-packages"
+surface = "coordinator"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/mod.rs"
+test = "packages_publish_once_and_claim_once_per_operation"
+gates = [10, 20]
+
+[[transcript]]
+id = "coordinator-routes"
+surface = "coordinator"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/mod.rs"
+test = "channel_routes_reserve_bind_and_carry_application_traffic"
+gates = [4, 19, 21]
+
+[[transcript]]
+id = "coordinator-mailbox"
+surface = "coordinator"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/mod.rs"
+test = "mailbox_items_are_fetched_with_tokens_and_acknowledged_once"
+gates = [20]
+
+[[transcript]]
+id = "coordinator-replay"
+surface = "coordinator"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/mod.rs"
+test = "replay_rows_answer_exact_duplicates_and_refuse_conflicts"
+gates = [8, 19, 20]
+
+[[transcript]]
+id = "coordinator-candidate"
+surface = "coordinator"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/sequence.rs"
+test = "a_candidate_is_sequenced_authorized_acknowledged_and_finalized"
+gates = [7, 9]
+
+[[transcript]]
+id = "coordinator-reinit"
+surface = "coordinator"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/sequence.rs"
+test = "a_reinit_attempt_is_staged_acknowledged_aborted_and_finally_activated"
+gates = [14]
+
+[[transcript]]
+id = "coordinator-origins"
+surface = "coordinator"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/sync.rs"
+test = "origins_mirror_the_acked_base_declaration"
+gates = [15]
+
+[[transcript]]
+id = "coordinator-origin-ready"
+surface = "coordinator"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/sync.rs"
+test = "origin_ready_waits_for_the_base_set"
+gates = [15]
+
+[[transcript]]
+id = "coordinator-resume"
+surface = "coordinator"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/sync.rs"
+test = "resume_opens_a_transfer_for_a_new_scope_then_replays_the_exact_cursor"
+gates = [15]
+
+[[transcript]]
+id = "coordinator-generation"
+surface = "coordinator"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/sync.rs"
+test = "a_base_reset_opens_the_next_delivery_generation"
+gates = [15]
+
+[[transcript]]
+id = "coordinator-state-pages"
+surface = "coordinator"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/sync.rs"
+test = "state_pages_partition_entries_by_batch_size"
+gates = [15]
+
+[[transcript]]
+id = "coordinator-token-expiry"
+surface = "coordinator"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/sync.rs"
+test = "the_snapshot_token_expires_after_fifteen_minutes"
+gates = [15]
+
+[[transcript]]
+id = "coordinator-retransmit"
+surface = "coordinator"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/sync.rs"
+test = "a_retransmitted_request_replays_its_stored_result"
+gates = [8, 20]
+
+[[transcript]]
+id = "coordinator-ready-peer"
+surface = "coordinator"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/sync.rs"
+test = "requests_need_an_active_ready_peer"
+gates = [15, 19]
+
+[[transcript]]
+id = "coordinator-reload-origin"
+surface = "coordinator"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/sync.rs"
+test = "a_reloaded_coordinator_accepts_a_replayed_origin_update"
+gates = [8, 15]
+
+[[transcript]]
+id = "coordinator-barrier-tuple"
+surface = "coordinator"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/barrier.rs"
+test = "companion_copies_of_a_barrier_target_carry_the_tuple_after_the_base_parts"
+gates = [22]
+
+[[transcript]]
+id = "coordinator-barrier-window"
+surface = "coordinator"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/barrier.rs"
+test = "the_barrier_window_admits_one_cumulative_acknowledgement"
+gates = [22]
+
+[[transcript]]
+id = "edge-sequence-continuity"
+surface = "edge"
+file = "crates/agenc-ircd-runtime/src/e2ee/edge/tests/mod.rs"
+test = "a_replayed_declaration_keeps_the_operation_sequence"
+gates = [15, 20]
+
+[[transcript]]
+id = "edge-resend"
+surface = "edge"
+file = "crates/agenc-ircd-runtime/src/e2ee/edge/tests/mod.rs"
+test = "unanswered_requests_are_resent_after_origin_ready"
+gates = [8, 15]
+
+[[transcript]]
+id = "daemon-three-process"
+surface = "daemon"
+file = "crates/agenc-ircd/tests/stage_eight_e2ee.rs"
+test = "encrypted_clients_on_two_edges_bind_a_channel_through_the_coordinator"
+gates = [4, 8, 12, 15, 19, 21, 22]
+
+[[transcript]]
+id = "vectors-identity"
+surface = "vectors"
+file = "crates/agenc-ircd-e2ee/tests/identity_vectors.rs"
+test = "the_independent_identity_vectors_verify_and_recompute"
+gates = [2, 21]
+
+[[transcript]]
+id = "vectors-object-seeds"
+surface = "vectors"
+file = "crates/agenc-ircd-e2ee/tests/seed_corpus.rs"
+test = "every_object_seed_decodes_to_its_declared_kind"
+gates = [2, 6]
+
+[[transcript]]
+id = "vectors-mls-seeds"
+surface = "vectors"
+file = "crates/agenc-ircd-e2ee/tests/seed_corpus.rs"
+test = "every_mls_seed_parses"
+gates = [6]
+
+[[transcript]]
+id = "vectors-fragment-seeds"
+surface = "vectors"
+file = "crates/agenc-ircd-e2ee/tests/seed_corpus.rs"
+test = "every_fragment_seed_parses_as_its_kind"
+gates = [6]
+
+[[transcript]]
+id = "vectors-mls-corpus"
+surface = "vectors"
+file = "crates/agenc-ircd-e2ee/tests/mls_corpus.rs"
+test = "the_pinned_mls_corpus_messages_parse_under_the_outer_parser"
+gates = [1, 3]
+
+[[transcript]]
+id = "vectors-interop"
+surface = "vectors"
+file = "crates/agenc-ircd-testkit/tests/mls_interop.rs"
+test = "two_independent_mls_libraries_agree_with_the_daemon_view"
+gates = [3]
+
+[[transcript]]
+id = "model-exhaustive"
+surface = "model"
+file = "crates/agenc-ircd-testkit/tests/e2ee_model.rs"
+test = "the_bounded_e2ee_model_is_exhausted_within_its_recorded_bounds"
+gates = [7, 22]
+
+[[transcript]]
+id = "model-adversarial"
+surface = "model"
+file = "crates/agenc-ircd-testkit/tests/e2ee_model.rs"
+test = "duplicate_stale_reordered_and_conflicting_records_never_advance_the_log"
+gates = [7]
+
+[[transcript]]
+id = "load-shapes"
+surface = "daemon"
+file = "crates/agenc-ircd-runtime/tests/e2ee_load.rs"
+test = "maximum_encrypted_shapes_stay_within_their_ceilings"
+gates = [11]

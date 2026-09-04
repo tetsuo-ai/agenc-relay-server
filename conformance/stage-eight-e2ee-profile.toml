@@ -1,0 +1,120 @@
+schema_version = 1
+stage = 8
+tasks = [
+  "S08-001", "S08-002", "S08-003", "S08-004", "S08-005",
+  "S08-006", "S08-007", "S08-008", "S08-009", "S08-010",
+  "S08-011", "S08-012", "S08-013", "S08-014", "S08-015",
+  "S08-016", "S08-017", "S08-018", "S08-019", "S08-020",
+  "S08-021", "S08-022", "S08-023", "S08-024", "S08-025",
+  "S08-026", "S08-027", "S08-028", "S08-029", "S08-030",
+  "S08-031", "S08-032", "S08-033", "S08-034", "S08-035",
+  "S08-036", "S08-037", "S08-038", "S08-039",
+]
+
+[target]
+name = "encrypted-v1"
+profile_version = 1
+profile_token = "lk0p96oG1QiE3t2W0fUBHPAVUls5iUpFNX-6k9Xou3M"
+capability = "agenc.ag/e2ee-mls"
+capability_value = "v1,profile=lk0p96oG1QiE3t2W0fUBHPAVUls5iUpFNX-6k9Xou3M,seg=2940,obj=262144,parts=90,welcome=4194304"
+mls_version = 1
+enabled_suites = [1, 3]
+signature_scheme = 2055
+credential_type = 1
+context_extension = 61889
+roster_update_proposal = 61890
+join_auth_bundle_extension = 61891
+mls_client_in_production = false
+
+[objects]
+application_mls = 65536
+live = 262144
+key_package = 65536
+identity = 65536
+root_chain = 1048576
+roster = 65536
+capability = 65536
+binding = 262144
+finalization = 4190000
+abort = 1048576
+reinit = 4190000
+sequencer_record = 4194304
+close = 32768
+device_attach = 4096
+federation_control = 65536
+welcome_mailbox = 4194304
+
+[fragments]
+raw_bytes = 2940
+live_parts = 90
+mailbox_parts = 1427
+open_per_local_sender = 1
+open_per_remote_sender = 8
+open_per_connection = 32
+live_absolute_seconds = 120
+live_idle_seconds = 15
+mailbox_absolute_seconds = 600
+mailbox_idle_seconds = 30
+recent_object_seconds = 1800
+
+[wire]
+client_tag_budget = 4094
+server_tag_budget = 4094
+combined_tag_budget = 8191
+server_prefix_bytes = 127
+candidate_receipt_tag = 462
+batch_objects = 32
+batch_fragments = 1427
+
+[federation]
+line_parameters = 16
+state_entries_per_edge = 1000000
+state_snapshot_bytes_per_edge = 536870912
+state_snapshot_token_seconds = 900
+state_page_entries = 32
+unacked_events_per_edge = 262144
+unacked_event_bytes_per_edge = 1073741824
+cross_profile_parts_per_edge = 2048
+cross_profile_bytes_per_edge = 16777216
+acked_replay_rows_per_edge = 1000000
+replay_retention_seconds = 86400
+origins_durable = false
+delivery_generation_restarts = false
+
+[edge]
+plaintext_on_bound_route = "FAIL <command> E2EE_REQUIRED"
+partition = "FAIL <command> E2EE_SYNCING"
+queue_while_syncing = false
+private_topic = "Encrypted channel - topic protected by IRC-MLS"
+requests_resent_after_ready = true
+
+[coordinator]
+handlers = 40
+candidates_per_epoch = 1
+finality_quorum_checked_by = "endpoints"
+bootstrap_activation_rule = "BootstrapActivation"
+reload_tables = [22, 23]
+
+[admin]
+stats_fields = 9
+stats_selector = "E2EE"
+
+[review]
+task = "S08-039"
+state = "blocked-external"
+package = "conformance/review"
+reason = "external cryptographic and protocol review has not been performed; the review package is complete and the gate records the task as open"
+
+[fuzz]
+targets = ["e2ee_object", "e2ee_mls_outer", "e2ee_fragment", "e2ee_identity_chain", "e2ee_tags"]
+seed = 20260904
+runs = 10000
+max_len = 65536
+timeout_seconds = 2
+rss_limit_mb = 512
+
+[closure]
+implementation_gate = "stage-eight-implementation"
+exact_sha_checkpoint_required = true
+evidence_schema = 2
+stage_records = 39

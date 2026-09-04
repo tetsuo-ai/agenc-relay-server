@@ -125,5 +125,19 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "e2ee_identity_chain"
+path = "fuzz_targets/e2ee_identity_chain.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "e2ee_tags"
+path = "fuzz_targets/e2ee_tags.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

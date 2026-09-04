@@ -84,49 +84,49 @@ id = "ARCH-CON-01"
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S08-017"]
 evidence_ids = ["EVID-ARCH-CON-01"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-CON-02"
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S08-017"]
 evidence_ids = ["EVID-ARCH-CON-02"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-CON-03"
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S08-016"]
 evidence_ids = ["EVID-ARCH-CON-03"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-CON-04"
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S08-017"]
 evidence_ids = ["EVID-ARCH-CON-04"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-CON-05"
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S08-017"]
 evidence_ids = ["EVID-ARCH-CON-05"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-DUR-01"
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S08-016"]
 evidence_ids = ["EVID-ARCH-DUR-01"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-DUR-02"
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S08-016"]
 evidence_ids = ["EVID-ARCH-DUR-02"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-DUR-03"
@@ -203,49 +203,49 @@ id = "ARCH-E2E-01"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-002"]
 evidence_ids = ["EVID-ARCH-E2E-01"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-E2E-02"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-021"]
 evidence_ids = ["EVID-ARCH-E2E-02"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-E2E-03"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-016"]
 evidence_ids = ["EVID-ARCH-E2E-03"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-E2E-04"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-011"]
 evidence_ids = ["EVID-ARCH-E2E-04"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-E2E-05"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-900"]
 evidence_ids = ["EVID-ARCH-E2E-05"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-E2E-06"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-011"]
 evidence_ids = ["EVID-ARCH-E2E-06"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-E2E-07"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-015"]
 evidence_ids = ["EVID-ARCH-E2E-07"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-FED-01"
@@ -259,14 +259,14 @@ id = "ARCH-FED-02"
 target_crates = ["agenc-ircd-federation-wire"]
 task_ids = ["S08-009"]
 evidence_ids = ["EVID-ARCH-FED-02"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-FED-03"
 target_crates = ["agenc-ircd-federation-wire"]
 task_ids = ["S08-009"]
 evidence_ids = ["EVID-ARCH-FED-03"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-FED-04"
@@ -315,21 +315,21 @@ id = "ARCH-FED-10"
 target_crates = ["agenc-ircd-federation-wire"]
 task_ids = ["S08-009"]
 evidence_ids = ["EVID-ARCH-FED-10"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-FED-11"
 target_crates = ["agenc-ircd-federation-wire"]
 task_ids = ["S08-016"]
 evidence_ids = ["EVID-ARCH-FED-11"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-FED-12"
 target_crates = ["agenc-ircd-federation-wire"]
 task_ids = ["S08-016"]
 evidence_ids = ["EVID-ARCH-FED-12"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-FED-13"
@@ -343,14 +343,14 @@ id = "ARCH-ID-01"
 target_crates = ["agenc-ircd-types"]
 task_ids = ["S08-900"]
 evidence_ids = ["EVID-ARCH-ID-01"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-ID-02"
 target_crates = ["agenc-ircd-types"]
 task_ids = ["S08-900"]
 evidence_ids = ["EVID-ARCH-ID-02"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-ID-03"
@@ -378,7 +378,7 @@ id = "ARCH-ID-06"
 target_crates = ["agenc-ircd-types"]
 task_ids = ["S08-017"]
 evidence_ids = ["EVID-ARCH-ID-06"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-ID-07"
@@ -455,7 +455,7 @@ id = "ARCH-REQ-00FBB19D3A47F35629EA"
 target_crates = ["agenc-ircd-types"]
 task_ids = ["S08-015"]
 evidence_ids = ["EVID-ARCH-REQ-00FBB19D3A47F35629EA"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-REQ-081595C2CCFFAF608E38"
@@ -686,7 +686,7 @@ id = "ARCH-REQ-630535C69EC8B9414843"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-015"]
 evidence_ids = ["EVID-ARCH-REQ-630535C69EC8B9414843"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-REQ-6ED8CC0935B62D48C171"
@@ -700,7 +700,7 @@ id = "ARCH-REQ-705219A4555AC2842B77"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-002"]
 evidence_ids = ["EVID-ARCH-REQ-705219A4555AC2842B77"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-REQ-71EF3D90A56EB55DF930"
@@ -847,7 +847,7 @@ id = "ARCH-REQ-D74CDEA02D46EEA2E9AD"
 target_crates = ["agenc-ircd-domain"]
 task_ids = ["S08-002"]
 evidence_ids = ["EVID-ARCH-REQ-D74CDEA02D46EEA2E9AD"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-REQ-D8752DA6EC2A4D543D27"
@@ -861,7 +861,7 @@ id = "ARCH-REQ-D8DDA49F3C32422D93B3"
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S08-016"]
 evidence_ids = ["EVID-ARCH-REQ-D8DDA49F3C32422D93B3"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-REQ-D9709F92FF869A201DA0"
@@ -882,7 +882,7 @@ id = "ARCH-REQ-E592762A378E0D95835A"
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S08-016"]
 evidence_ids = ["EVID-ARCH-REQ-E592762A378E0D95835A"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-REQ-E86BF5CACDB29BBF69B3"
@@ -910,7 +910,7 @@ id = "ARCH-REQ-F236FC1F5FD8129AB518"
 target_crates = ["agenc-ircd-domain"]
 task_ids = ["S08-002"]
 evidence_ids = ["EVID-ARCH-REQ-F236FC1F5FD8129AB518"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-REQ-F3D92EF9C888E0675CB4"
@@ -931,7 +931,7 @@ id = "ARCH-STA-02"
 target_crates = ["agenc-ircd-domain"]
 task_ids = ["S08-004"]
 evidence_ids = ["EVID-ARCH-STA-02"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-STA-03"
@@ -973,7 +973,7 @@ id = "ARCH-STA-08"
 target_crates = ["agenc-ircd-domain"]
 task_ids = ["S08-014"]
 evidence_ids = ["EVID-ARCH-STA-08"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-STA-09"
@@ -1015,42 +1015,42 @@ id = "ARCH-TRN-04"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-900"]
 evidence_ids = ["EVID-ARCH-TRN-04"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-TRN-05"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-900"]
 evidence_ids = ["EVID-ARCH-TRN-05"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "ARCH-TRN-06"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-900"]
 evidence_ids = ["EVID-ARCH-TRN-06"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-03E795692C36DFAE083B"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-023"]
 evidence_ids = ["EVID-E2EE-REQ-03E795692C36DFAE083B"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-04B0129952BBBB1F3D22"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-001"]
 evidence_ids = ["EVID-E2EE-REQ-04B0129952BBBB1F3D22"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-0950B248DBB87C569FE7"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-021"]
 evidence_ids = ["EVID-E2EE-REQ-0950B248DBB87C569FE7"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-0A1FB6761AFBE1A76113"
@@ -1064,28 +1064,28 @@ id = "E2EE-REQ-0DAEDE4522366E3A68A9"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-021"]
 evidence_ids = ["EVID-E2EE-REQ-0DAEDE4522366E3A68A9"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-0EE614CD32C84FA9F408"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-003"]
 evidence_ids = ["EVID-E2EE-REQ-0EE614CD32C84FA9F408"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-1AB78DA63741FF0B38CF"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-021"]
 evidence_ids = ["EVID-E2EE-REQ-1AB78DA63741FF0B38CF"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-1BFDC5AC26176497302E"
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-020"]
 evidence_ids = ["EVID-E2EE-REQ-1BFDC5AC26176497302E"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-1CF30FAFE8FA36F5CF2E"
@@ -1099,14 +1099,14 @@ id = "E2EE-REQ-208C5CAB7399B4AC15B8"
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-017"]
 evidence_ids = ["EVID-E2EE-REQ-208C5CAB7399B4AC15B8"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-21F466D08365E6787EFF"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-023"]
 evidence_ids = ["EVID-E2EE-REQ-21F466D08365E6787EFF"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-226E2E46DD9A8986A73D"
@@ -1120,28 +1120,28 @@ id = "E2EE-REQ-28CC5A2874FBFEDC8694"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-025"]
 evidence_ids = ["EVID-E2EE-REQ-28CC5A2874FBFEDC8694"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-2F0777EEA2E2B0559F6D"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-027"]
 evidence_ids = ["EVID-E2EE-REQ-2F0777EEA2E2B0559F6D"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-37736EFE55D201CBE671"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-021"]
 evidence_ids = ["EVID-E2EE-REQ-37736EFE55D201CBE671"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-37CAE24A086303163D86"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-027"]
 evidence_ids = ["EVID-E2EE-REQ-37CAE24A086303163D86"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-3823DB12FF1BAAB21A9C"
@@ -1155,84 +1155,84 @@ id = "E2EE-REQ-3AE1FE848688A346F9F1"
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-005"]
 evidence_ids = ["EVID-E2EE-REQ-3AE1FE848688A346F9F1"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-3DDAFB884DFFB22C1F74"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-002"]
 evidence_ids = ["EVID-E2EE-REQ-3DDAFB884DFFB22C1F74"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-3DFFF778DA62F4CEEF8F"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-023"]
 evidence_ids = ["EVID-E2EE-REQ-3DFFF778DA62F4CEEF8F"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-3F31F96A8E03DA4C101C"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-037"]
 evidence_ids = ["EVID-E2EE-REQ-3F31F96A8E03DA4C101C"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-3F6EB7E7803E9A17D029"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-024"]
 evidence_ids = ["EVID-E2EE-REQ-3F6EB7E7803E9A17D029"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-47F62E0752E7757399CD"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-025"]
 evidence_ids = ["EVID-E2EE-REQ-47F62E0752E7757399CD"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-48C5B151716A5DA59976"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-022"]
 evidence_ids = ["EVID-E2EE-REQ-48C5B151716A5DA59976"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-4A2736C8DC8339780AA6"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-036"]
 evidence_ids = ["EVID-E2EE-REQ-4A2736C8DC8339780AA6"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-4A2B327FEB0ED0D66724"
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-020"]
 evidence_ids = ["EVID-E2EE-REQ-4A2B327FEB0ED0D66724"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-4B9FA0731463AF395EEF"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-037"]
 evidence_ids = ["EVID-E2EE-REQ-4B9FA0731463AF395EEF"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-4E4E130CEAB680D99587"
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-005"]
 evidence_ids = ["EVID-E2EE-REQ-4E4E130CEAB680D99587"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-4ECEEB84B918BCA2DBE3"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-024"]
 evidence_ids = ["EVID-E2EE-REQ-4ECEEB84B918BCA2DBE3"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-4EE6451842066B972713"
@@ -1246,21 +1246,21 @@ id = "E2EE-REQ-4EFBE464A39690115414"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-023"]
 evidence_ids = ["EVID-E2EE-REQ-4EFBE464A39690115414"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-532CF56360A03DCF3C39"
 target_crates = ["agenc-ircd-federation-wire"]
 task_ids = ["S08-034"]
 evidence_ids = ["EVID-E2EE-REQ-532CF56360A03DCF3C39"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-54D3BF177A5D79854AEC"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-027"]
 evidence_ids = ["EVID-E2EE-REQ-54D3BF177A5D79854AEC"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-5754ACC17005856FB5B2"
@@ -1274,21 +1274,21 @@ id = "E2EE-REQ-58217F311021E979779A"
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-022"]
 evidence_ids = ["EVID-E2EE-REQ-58217F311021E979779A"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-5B3475BE0506C311BEF2"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-027"]
 evidence_ids = ["EVID-E2EE-REQ-5B3475BE0506C311BEF2"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-5B7791BEAEA4EF6B0D60"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-027"]
 evidence_ids = ["EVID-E2EE-REQ-5B7791BEAEA4EF6B0D60"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-5E00851700473A8BFE36"
@@ -1302,49 +1302,49 @@ id = "E2EE-REQ-67059195AB3AA10AAD9B"
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-002"]
 evidence_ids = ["EVID-E2EE-REQ-67059195AB3AA10AAD9B"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-6A1A40DF827404DFC2E0"
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-024"]
 evidence_ids = ["EVID-E2EE-REQ-6A1A40DF827404DFC2E0"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-72ECA857E694D0439A70"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-003"]
 evidence_ids = ["EVID-E2EE-REQ-72ECA857E694D0439A70"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-73270B473C2AB773AF11"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-023"]
 evidence_ids = ["EVID-E2EE-REQ-73270B473C2AB773AF11"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-74E9B5BFDE9BE0345707"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-034"]
 evidence_ids = ["EVID-E2EE-REQ-74E9B5BFDE9BE0345707"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-75819BD50FB3E71F2B91"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-024"]
 evidence_ids = ["EVID-E2EE-REQ-75819BD50FB3E71F2B91"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-7FE02BCBD9EEB3934B70"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-027"]
 evidence_ids = ["EVID-E2EE-REQ-7FE02BCBD9EEB3934B70"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-805F50731EF74A9AA48F"
@@ -1358,84 +1358,84 @@ id = "E2EE-REQ-845B04F1228AFD8867F1"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-029"]
 evidence_ids = ["EVID-E2EE-REQ-845B04F1228AFD8867F1"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-865E52D8D04B59FEEFBE"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-023"]
 evidence_ids = ["EVID-E2EE-REQ-865E52D8D04B59FEEFBE"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-87B4B4DBBAD9DB97F76A"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-024"]
 evidence_ids = ["EVID-E2EE-REQ-87B4B4DBBAD9DB97F76A"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-8AB2B222BF622D4C4BDF"
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-005"]
 evidence_ids = ["EVID-E2EE-REQ-8AB2B222BF622D4C4BDF"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-8B777BE6D9A7ED988687"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-028"]
 evidence_ids = ["EVID-E2EE-REQ-8B777BE6D9A7ED988687"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-8C607B4410F376797BD2"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-025"]
 evidence_ids = ["EVID-E2EE-REQ-8C607B4410F376797BD2"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-9641FAA02EEEC75A2E7D"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-027"]
 evidence_ids = ["EVID-E2EE-REQ-9641FAA02EEEC75A2E7D"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-98421AA3C0425E259F8F"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-023"]
 evidence_ids = ["EVID-E2EE-REQ-98421AA3C0425E259F8F"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-986A7772723E16360520"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-028"]
 evidence_ids = ["EVID-E2EE-REQ-986A7772723E16360520"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-98C7F0834891533DE1BC"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-021"]
 evidence_ids = ["EVID-E2EE-REQ-98C7F0834891533DE1BC"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-9A4E05845BDB4B1C7D30"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-017"]
 evidence_ids = ["EVID-E2EE-REQ-9A4E05845BDB4B1C7D30"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-9EA1028E2CE3115F5EEB"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-027"]
 evidence_ids = ["EVID-E2EE-REQ-9EA1028E2CE3115F5EEB"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-A0EFEAB7474EA0A450F5"
@@ -1449,7 +1449,7 @@ id = "E2EE-REQ-A141AC00A13A398685DC"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-022"]
 evidence_ids = ["EVID-E2EE-REQ-A141AC00A13A398685DC"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-A1A7120BFAC343370E75"
@@ -1463,200 +1463,200 @@ id = "E2EE-REQ-A5E4E2058896C2016403"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-022"]
 evidence_ids = ["EVID-E2EE-REQ-A5E4E2058896C2016403"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-A7C32D4A15F7F0AF4F82"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-017"]
 evidence_ids = ["EVID-E2EE-REQ-A7C32D4A15F7F0AF4F82"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-AC36B134578CBDB4F7A2"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-024"]
 evidence_ids = ["EVID-E2EE-REQ-AC36B134578CBDB4F7A2"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-B1A07872530E53E1C5E0"
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-020"]
 evidence_ids = ["EVID-E2EE-REQ-B1A07872530E53E1C5E0"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-B341221DC3B1063B9F41"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-036"]
 evidence_ids = ["EVID-E2EE-REQ-B341221DC3B1063B9F41"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-B73C16A97C1278CDDE0B"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-023"]
 evidence_ids = ["EVID-E2EE-REQ-B73C16A97C1278CDDE0B"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-B8F44A765000AE5B6944"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-032"]
 evidence_ids = ["EVID-E2EE-REQ-B8F44A765000AE5B6944"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-B93A7B094027B1B00105"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-027"]
 evidence_ids = ["EVID-E2EE-REQ-B93A7B094027B1B00105"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-B99A6DD4949FED0CE02A"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-027"]
 evidence_ids = ["EVID-E2EE-REQ-B99A6DD4949FED0CE02A"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-BFA20A50D15399A2F088"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-024"]
 evidence_ids = ["EVID-E2EE-REQ-BFA20A50D15399A2F088"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-C345CFA457EB0B500D2A"
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-030"]
 evidence_ids = ["EVID-E2EE-REQ-C345CFA457EB0B500D2A"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-C8997B4345158FD54D44"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-017"]
 evidence_ids = ["EVID-E2EE-REQ-C8997B4345158FD54D44"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-CA268835A931F5051D79"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-025"]
 evidence_ids = ["EVID-E2EE-REQ-CA268835A931F5051D79"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-CED437B1C62CF9CD0A79"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-023"]
 evidence_ids = ["EVID-E2EE-REQ-CED437B1C62CF9CD0A79"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-D07C2C1AA58D16CA582D"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-037"]
 evidence_ids = ["EVID-E2EE-REQ-D07C2C1AA58D16CA582D"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-D150C4C93D931F51EE12"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-021"]
 evidence_ids = ["EVID-E2EE-REQ-D150C4C93D931F51EE12"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-D2C711B6BB260BFB72FD"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-024"]
 evidence_ids = ["EVID-E2EE-REQ-D2C711B6BB260BFB72FD"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-D70B8B9850E29E082F85"
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-027"]
 evidence_ids = ["EVID-E2EE-REQ-D70B8B9850E29E082F85"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-DB900449D8D52DA92117"
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-017"]
 evidence_ids = ["EVID-E2EE-REQ-DB900449D8D52DA92117"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-DF1E11F99D8CA9C38917"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-002"]
 evidence_ids = ["EVID-E2EE-REQ-DF1E11F99D8CA9C38917"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-DFF4835BF134E29328E1"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-021"]
 evidence_ids = ["EVID-E2EE-REQ-DFF4835BF134E29328E1"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-E84E3DF2CF6A849CCBA8"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-027"]
 evidence_ids = ["EVID-E2EE-REQ-E84E3DF2CF6A849CCBA8"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-E9D6A931BDD262B08F93"
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-024"]
 evidence_ids = ["EVID-E2EE-REQ-E9D6A931BDD262B08F93"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-EC03C8374D88E32F6776"
 target_crates = ["agenc-ircd-federation-wire"]
 task_ids = ["S08-031"]
 evidence_ids = ["EVID-E2EE-REQ-EC03C8374D88E32F6776"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-ED359F4450E30FD76278"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-023"]
 evidence_ids = ["EVID-E2EE-REQ-ED359F4450E30FD76278"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-EFECC9F9EB196FD2CF16"
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-020"]
 evidence_ids = ["EVID-E2EE-REQ-EFECC9F9EB196FD2CF16"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-F14B7B01F4CFF98A804E"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-023"]
 evidence_ids = ["EVID-E2EE-REQ-F14B7B01F4CFF98A804E"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-F252168A3A468701F674"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-023"]
 evidence_ids = ["EVID-E2EE-REQ-F252168A3A468701F674"]
-status = "unimplemented"
+status = "implemented"
 
 [[binding]]
 id = "E2EE-REQ-FDA89A1D5714375C1B4F"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-023"]
 evidence_ids = ["EVID-E2EE-REQ-FDA89A1D5714375C1B4F"]
-status = "unimplemented"
+status = "implemented"

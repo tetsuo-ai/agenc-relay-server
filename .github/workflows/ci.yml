@@ -1,4 +1,4 @@
-name: Stage 07 implementation checks
+name: Stage 08 implementation checks
 
 on:
   push:
@@ -12,12 +12,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: stage-seven-${{ github.workflow }}-${{ github.ref }}
+  group: stage-eight-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  stage-seven:
-    name: Stage 07 implementation checks
+  stage-eight:
+    name: Stage 08 implementation checks
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
@@ -46,7 +46,7 @@ jobs:
           cargo +1.98.0 install --locked cargo-llvm-cov --version 0.9.0
           cargo +1.98.0 install --locked cargo-fuzz --version 0.13.2
 
-      - name: Install Stage 06 and Stage 07 host qualification tools
+      - name: Install Stage 06 through Stage 08 host qualification tools
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross tor
@@ -58,5 +58,5 @@ jobs:
           sudo docker image prune --all --force
           df -h /
 
-      - name: Run Stage 07 implementation checks
-        run: bash scripts/check-stage-seven.sh
+      - name: Run Stage 08 implementation checks
+        run: bash scripts/check-stage-eight.sh

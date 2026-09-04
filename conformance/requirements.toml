@@ -178,7 +178,7 @@ text = "The daemon MUST provide MLS E2EE without allowing plaintext downgrade on
 target_crates = ["agenc-ircd-types"]
 task_ids = ["S08-015"]
 evidence_ids = ["EVID-ARCH-REQ-00FBB19D3A47F35629EA"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -578,7 +578,7 @@ text = "The base message pipeline may enforce membership, size, rate, mute, ban,
 target_crates = ["agenc-ircd-domain"]
 task_ids = ["S08-002"]
 evidence_ids = ["EVID-ARCH-REQ-D74CDEA02D46EEA2E9AD"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -610,7 +610,7 @@ text = "It MUST NOT claim to scan encrypted messages, add a hidden moderation re
 target_crates = ["agenc-ircd-domain"]
 task_ids = ["S08-002"]
 evidence_ids = ["EVID-ARCH-REQ-F236FC1F5FD8129AB518"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -626,7 +626,7 @@ text = "The base daemon MUST NOT expose an API returning MLS plaintext or MLS se
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-002"]
 evidence_ids = ["EVID-ARCH-REQ-705219A4555AC2842B77"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -642,7 +642,7 @@ text = "A client with a pinned encrypted direct route MUST NOT fall back to a pl
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-015"]
 evidence_ids = ["EVID-ARCH-REQ-630535C69EC8B9414843"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -866,7 +866,7 @@ text = "These sets MUST be one database transaction E2EE mutation: every base ch
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S08-016"]
 evidence_ids = ["EVID-ARCH-REQ-D8DDA49F3C32422D93B3"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -882,7 +882,7 @@ text = "These sets MUST be one database transaction projection apply: projection
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S08-016"]
 evidence_ids = ["EVID-ARCH-REQ-E592762A378E0D95835A"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1074,7 +1074,7 @@ text = "A physical line, WebSocket message, tag section, fragment, object, or qu
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-900"]
 evidence_ids = ["EVID-ARCH-TRN-04"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1090,7 +1090,7 @@ text = "Parsing is total: each finite byte input yields one bounded success/erro
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-900"]
 evidence_ids = ["EVID-ARCH-TRN-05"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1106,7 +1106,7 @@ text = "Invalid UTF-8, NUL, invalid CRLF, client prefixes, duplicate tags, nonca
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-900"]
 evidence_ids = ["EVID-ARCH-TRN-06"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1122,7 +1122,7 @@ text = "Authorization keys are immutable typed IDs and current generations; nick
 target_crates = ["agenc-ircd-types"]
 task_ids = ["S08-900"]
 evidence_ids = ["EVID-ARCH-ID-01"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1138,7 +1138,7 @@ text = "An Account ID, User ID, Session ID, ChannelInstanceId, Message ID, reque
 target_crates = ["agenc-ircd-types"]
 task_ids = ["S08-900"]
 evidence_ids = ["EVID-ARCH-ID-02"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1202,7 +1202,7 @@ text = "A native client performs no account or E2EE operation when the TLS-authe
 target_crates = ["agenc-ircd-types"]
 task_ids = ["S08-017"]
 evidence_ids = ["EVID-ARCH-ID-06"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1490,7 +1490,7 @@ text = "A global channel name maps to at most one active ChannelInstanceId; recr
 target_crates = ["agenc-ircd-domain"]
 task_ids = ["S08-004"]
 evidence_ids = ["EVID-ARCH-STA-02"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1586,7 +1586,7 @@ text = "Before an object is accepted, every remaining local sink has one complet
 target_crates = ["agenc-ircd-domain"]
 task_ids = ["S08-014"]
 evidence_ids = ["EVID-ARCH-STA-08"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1634,7 +1634,7 @@ text = "The daemon never obtains or requests MLS epoch secrets, plaintext, clien
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-002"]
 evidence_ids = ["EVID-ARCH-E2E-01"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1650,7 +1650,7 @@ text = "A route bound or tombstoned as encrypted rejects every plaintext send, h
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-021"]
 evidence_ids = ["EVID-ARCH-E2E-02"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1666,7 +1666,7 @@ text = "Base membership/policy and companion cryptographic transition commit ato
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-016"]
 evidence_ids = ["EVID-ARCH-E2E-03"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1682,7 +1682,7 @@ text = "A KICK/part/revocation is not represented as cryptographic removal until
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-011"]
 evidence_ids = ["EVID-ARCH-E2E-04"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1698,7 +1698,7 @@ text = "Every E2EE object, semantic ID, signature, generation, replay key, recei
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-900"]
 evidence_ids = ["EVID-ARCH-E2E-05"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1714,7 +1714,7 @@ text = "A restored E2EE route never resumes its old lineage: while pending it ac
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-011"]
 evidence_ids = ["EVID-ARCH-E2E-06"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1730,7 +1730,7 @@ text = "A client or federation link enables encrypted behavior only after the ex
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-015"]
 evidence_ids = ["EVID-ARCH-E2E-07"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1762,7 +1762,7 @@ text = "A base federation link is active only after exact FHELLO/READY identity 
 target_crates = ["agenc-ircd-federation-wire"]
 task_ids = ["S08-009"]
 evidence_ids = ["EVID-ARCH-FED-02"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1778,7 +1778,7 @@ text = "For each live origin, operation sequences are contiguous; exact retries 
 target_crates = ["agenc-ircd-federation-wire"]
 task_ids = ["S08-009"]
 evidence_ids = ["EVID-ARCH-FED-03"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1890,7 +1890,7 @@ text = "FHELLO recovery epoch equals the static peer pin; a changed epoch requir
 target_crates = ["agenc-ircd-federation-wire"]
 task_ids = ["S08-009"]
 evidence_ids = ["EVID-ARCH-FED-10"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1906,7 +1906,7 @@ text = "Every coordinator plan that targets one edge in both federation profiles
 target_crates = ["agenc-ircd-federation-wire"]
 task_ids = ["S08-016"]
 evidence_ids = ["EVID-ARCH-FED-11"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1922,7 +1922,7 @@ text = "Result-first and completion-first delivery converge on one exact replay 
 target_crates = ["agenc-ircd-federation-wire"]
 task_ids = ["S08-016"]
 evidence_ids = ["EVID-ARCH-FED-12"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1954,7 +1954,7 @@ text = "No success, event, federation result, ACK, or E2EE receipt that implies 
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S08-016"]
 evidence_ids = ["EVID-ARCH-DUR-01"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -1970,7 +1970,7 @@ text = "State, event, outbox, request result, audit record, E2EE companion recor
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S08-016"]
 evidence_ids = ["EVID-ARCH-DUR-02"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2146,7 +2146,7 @@ text = "Each mutable protocol datum has exactly one runtime owner; no shared mut
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S08-017"]
 evidence_ids = ["EVID-ARCH-CON-01"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2162,7 +2162,7 @@ text = "Every task, worker job, timer, channel, batch, snapshot, reassembly, and
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S08-017"]
 evidence_ids = ["EVID-ARCH-CON-02"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2178,7 +2178,7 @@ text = "A durable plan is constructed from one committed revision, reserved whil
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S08-016"]
 evidence_ids = ["EVID-ARCH-CON-03"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2194,7 +2194,7 @@ text = "Blocking storage/crypto/integrity work never executes on an async runtim
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S08-017"]
 evidence_ids = ["EVID-ARCH-CON-04"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2210,7 +2210,7 @@ text = "Every count-scaled or peer-influenced allocation acquires its exact glob
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S08-017"]
 evidence_ids = ["EVID-ARCH-CON-05"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2386,7 +2386,7 @@ text = "`object-id` remains the only transport identifier: it is SHA-256 over th
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-017"]
 evidence_ids = ["EVID-E2EE-REQ-C8997B4345158FD54D44"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2450,7 +2450,7 @@ text = "Every client-server and server-server hop carrying IRC-MLS MUST use TLS 
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-017"]
 evidence_ids = ["EVID-E2EE-REQ-208C5CAB7399B4AC15B8"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2466,7 +2466,7 @@ text = "TLS early data MUST NOT carry `CAP`, `EGROUP`, `EKEY`, encrypted `TAGMSG
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-017"]
 evidence_ids = ["EVID-E2EE-REQ-DB900449D8D52DA92117"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2482,7 +2482,7 @@ text = "Clients MUST implement MLS 1.0 exactly as specified by RFC 9420 and its 
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-020"]
 evidence_ids = ["EVID-E2EE-REQ-B1A07872530E53E1C5E0"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2498,7 +2498,7 @@ text = "Implementations MUST use a maintained MLS library with published interop
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-020"]
 evidence_ids = ["EVID-E2EE-REQ-4A2B327FEB0ED0D66724"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2514,7 +2514,7 @@ text = "Implementations MUST NOT implement the cryptographic primitives or MLS s
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-002"]
 evidence_ids = ["EVID-E2EE-REQ-67059195AB3AA10AAD9B"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2530,7 +2530,7 @@ text = "| `0x0001` | `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519` | MUST imple
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-020"]
 evidence_ids = ["EVID-E2EE-REQ-1BFDC5AC26176497302E"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2546,7 +2546,7 @@ text = "| `0x0003` | `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519` | MUS
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-020"]
 evidence_ids = ["EVID-E2EE-REQ-EFECC9F9EB196FD2CF16"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2562,7 +2562,7 @@ text = "| `0x0004` | `MLS_256_DHKEMX448_AES256GCM_SHA512_Ed448` | MUST NOT be en
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-005"]
 evidence_ids = ["EVID-E2EE-REQ-4E4E130CEAB680D99587"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2578,7 +2578,7 @@ text = "A signed conversation policy MUST contain that exact ordered `allowed_su
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-005"]
 evidence_ids = ["EVID-E2EE-REQ-8AB2B222BF622D4C4BDF"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2594,7 +2594,7 @@ text = "For every later Add, the KeyPackage's top-level MLS version and cipher s
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-027"]
 evidence_ids = ["EVID-E2EE-REQ-D70B8B9850E29E082F85"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2610,7 +2610,7 @@ text = "Suite `0x0004`, every other registered suite, and custom/private-use cip
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-005"]
 evidence_ids = ["EVID-E2EE-REQ-3AE1FE848688A346F9F1"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2626,7 +2626,7 @@ text = "After group creation, Proposals and Commits MUST be sent as MLS `Private
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-024"]
 evidence_ids = ["EVID-E2EE-REQ-6A1A40DF827404DFC2E0"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2642,7 +2642,7 @@ text = "Version 1 Commits MUST carry every Proposal inline."
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-024"]
 evidence_ids = ["EVID-E2EE-REQ-E9D6A931BDD262B08F93"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2658,7 +2658,7 @@ text = "Application and encrypted handshake `PrivateMessage`s MUST use determini
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-022"]
 evidence_ids = ["EVID-E2EE-REQ-58217F311021E979779A"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2690,7 +2690,7 @@ text = "Clients MUST preserve algorithm agility and `ReInit` support so groups c
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-030"]
 evidence_ids = ["EVID-E2EE-REQ-C345CFA457EB0B500D2A"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2722,7 +2722,7 @@ text = "The Account ID MUST be immutable, canonical, and visible during security
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-003"]
 evidence_ids = ["EVID-E2EE-REQ-72ECA857E694D0439A70"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2738,7 +2738,7 @@ text = "The server MUST return the same Account ID to all authenticated sessions
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-003"]
 evidence_ids = ["EVID-E2EE-REQ-0EE614CD32C84FA9F408"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2754,7 +2754,7 @@ text = "The private key MUST NOT be generated, received, escrowed, or recoverabl
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-002"]
 evidence_ids = ["EVID-E2EE-REQ-DF1E11F99D8CA9C38917"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2770,7 +2770,7 @@ text = "The private key MUST NOT be generated, received, escrowed, or recoverabl
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-002"]
 evidence_ids = ["EVID-E2EE-REQ-3DDAFB884DFFB22C1F74"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2786,7 +2786,7 @@ text = "Once a newer roster is known, it MUST be carried in the same Commit as a
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-027"]
 evidence_ids = ["EVID-E2EE-REQ-B93A7B094027B1B00105"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2802,7 +2802,7 @@ text = "Every KeyPackage and ReInit creator uses a fresh leaf signature key, and
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-027"]
 evidence_ids = ["EVID-E2EE-REQ-E84E3DF2CF6A849CCBA8"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2818,7 +2818,7 @@ text = "Profile version 1 deliberately forbids reusable MLS last-resort KeyPacka
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-027"]
 evidence_ids = ["EVID-E2EE-REQ-37CAE24A086303163D86"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2866,7 +2866,7 @@ text = "It MUST NOT be reused; the variable-length RFC 9420 encoding still carri
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-037"]
 evidence_ids = ["EVID-E2EE-REQ-4B9FA0731463AF395EEF"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2882,7 +2882,7 @@ text = "A GroupContextExtensions proposal MUST contain the complete replacement 
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-027"]
 evidence_ids = ["EVID-E2EE-REQ-9EA1028E2CE3115F5EEB"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2898,7 +2898,7 @@ text = "`canonical_validation_time` MUST equal `IrcCommitAad.validation_time`."
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-027"]
 evidence_ids = ["EVID-E2EE-REQ-B99A6DD4949FED0CE02A"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2914,7 +2914,7 @@ text = "It signs with label `IRC-MLS/1 root binding lock` and MUST NOT sign two 
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-037"]
 evidence_ids = ["EVID-E2EE-REQ-D07C2C1AA58D16CA582D"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2930,7 +2930,7 @@ text = "A Welcome MUST contain the full `ratchet_tree` GroupInfo extension and t
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-027"]
 evidence_ids = ["EVID-E2EE-REQ-5B3475BE0506C311BEF2"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2946,7 +2946,7 @@ text = "Receivers MUST verify profile, network, conversation, route, and Device 
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-024"]
 evidence_ids = ["EVID-E2EE-REQ-D2C711B6BB260BFB72FD"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2962,7 +2962,7 @@ text = "Receivers MUST reject a previously accepted message ID;"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-024"]
 evidence_ids = ["EVID-E2EE-REQ-87B4B4DBBAD9DB97F76A"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2978,7 +2978,7 @@ text = "Receivers MUST reject counter rollback, excess gaps, or a counter outsid
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-024"]
 evidence_ids = ["EVID-E2EE-REQ-4ECEEB84B918BCA2DBE3"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -2994,7 +2994,7 @@ text = "Receivers MUST compare the sequencer-record chain head with locally obse
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-024"]
 evidence_ids = ["EVID-E2EE-REQ-BFA20A50D15399A2F088"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3010,7 +3010,7 @@ text = "Receivers MUST validate the content type before interpreting the body; a
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-024"]
 evidence_ids = ["EVID-E2EE-REQ-75819BD50FB3E71F2B91"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3026,7 +3026,7 @@ text = "Receivers MUST treat the MLS credential, not an IRC prefix or nickname, 
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-024"]
 evidence_ids = ["EVID-E2EE-REQ-3F6EB7E7803E9A17D029"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3042,7 +3042,7 @@ text = "Text, notice, action, policy-notice, and security-event bodies MUST be w
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-023"]
 evidence_ids = ["EVID-E2EE-REQ-CED437B1C62CF9CD0A79"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3090,7 +3090,7 @@ text = "A server MUST NOT acknowledge the vendor capability if any required beha
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-001"]
 evidence_ids = ["EVID-E2EE-REQ-04B0129952BBBB1F3D22"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3106,7 +3106,7 @@ text = "A client with a pinned encrypted conversation MUST abort or enter a bloc
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-021"]
 evidence_ids = ["EVID-E2EE-REQ-0DAEDE4522366E3A68A9"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3122,7 +3122,7 @@ text = "The raw tag substring after `label=` MUST itself match `[A-Za-z0-9_-]{1,
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-023"]
 evidence_ids = ["EVID-E2EE-REQ-F252168A3A468701F674"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3138,7 +3138,7 @@ text = "Before IRCv3 unescaping, the raw substring after `+agenc.ag/e2ee=` or `a
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-023"]
 evidence_ids = ["EVID-E2EE-REQ-B73C16A97C1278CDDE0B"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3154,7 +3154,7 @@ text = "Servers MUST NOT truncate tags or ciphertext."
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-032"]
 evidence_ids = ["EVID-E2EE-REQ-B8F44A765000AE5B6944"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3170,7 +3170,7 @@ text = "The server MUST reject a sender whose authenticated Account ID and attac
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-017"]
 evidence_ids = ["EVID-E2EE-REQ-A7C32D4A15F7F0AF4F82"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3186,7 +3186,7 @@ text = "Clients with a pinned binding MUST NOT accept a replacement solely becau
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-037"]
 evidence_ids = ["EVID-E2EE-REQ-3F31F96A8E03DA4C101C"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3202,7 +3202,7 @@ text = "The server MUST allow publishing only for the authenticated Account ID;"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-027"]
 evidence_ids = ["EVID-E2EE-REQ-2F0777EEA2E2B0559F6D"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3218,7 +3218,7 @@ text = "The server MUST validate object type and declared bounds before storage;
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-023"]
 evidence_ids = ["EVID-E2EE-REQ-4EFBE464A39690115414"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3234,7 +3234,7 @@ text = "The server MUST atomically dispense a normal KeyPackage at most once;"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-036"]
 evidence_ids = ["EVID-E2EE-REQ-B341221DC3B1063B9F41"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3250,7 +3250,7 @@ text = "The server MUST claim only a package with at least `MIN_KEY_PACKAGE_CLAI
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-027"]
 evidence_ids = ["EVID-E2EE-REQ-7FE02BCBD9EEB3934B70"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3266,7 +3266,7 @@ text = "The server MUST rate-limit claims so an attacker cannot exhaust another 
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-028"]
 evidence_ids = ["EVID-E2EE-REQ-8B777BE6D9A7ED988687"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3282,7 +3282,7 @@ text = "The server MUST require the signed leaf authorization's `last_resort` bi
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-027"]
 evidence_ids = ["EVID-E2EE-REQ-9641FAA02EEEC75A2E7D"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3298,7 +3298,7 @@ text = "The server MUST deliver bindings and Welcomes only to the exact Account 
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-017"]
 evidence_ids = ["EVID-E2EE-REQ-9A4E05845BDB4B1C7D30"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3314,7 +3314,7 @@ text = "The server MUST delete or make unavailable an acknowledged Welcome accor
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-036"]
 evidence_ids = ["EVID-E2EE-REQ-4A2736C8DC8339780AA6"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3330,7 +3330,7 @@ text = "The server MUST avoid logging tag values or serialized key material at n
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-029"]
 evidence_ids = ["EVID-E2EE-REQ-845B04F1228AFD8867F1"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3346,7 +3346,7 @@ text = "It MUST reject before significant allocation when the version, field cou
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-023"]
 evidence_ids = ["EVID-E2EE-REQ-73270B473C2AB773AF11"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3362,7 +3362,7 @@ text = "It MUST reject before significant allocation when `count` is zero or exc
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-023"]
 evidence_ids = ["EVID-E2EE-REQ-21F466D08365E6787EFF"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3378,7 +3378,7 @@ text = "It MUST reject before significant allocation when `part >= count`;"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-023"]
 evidence_ids = ["EVID-E2EE-REQ-98421AA3C0425E259F8F"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3394,7 +3394,7 @@ text = "It MUST reject before significant allocation when `total` exceeds the co
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-022"]
 evidence_ids = ["EVID-E2EE-REQ-A141AC00A13A398685DC"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3410,7 +3410,7 @@ text = "It MUST reject before significant allocation when `total` is zero;"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-023"]
 evidence_ids = ["EVID-E2EE-REQ-F14B7B01F4CFF98A804E"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3426,7 +3426,7 @@ text = "It MUST reject before significant allocation when `count != ceil(total /
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-023"]
 evidence_ids = ["EVID-E2EE-REQ-ED359F4450E30FD76278"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3442,7 +3442,7 @@ text = "It MUST reject before significant allocation when a non-final decoded se
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-023"]
 evidence_ids = ["EVID-E2EE-REQ-865E52D8D04B59FEEFBE"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3458,7 +3458,7 @@ text = "It MUST reject before significant allocation when decoded segment length
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-023"]
 evidence_ids = ["EVID-E2EE-REQ-03E795692C36DFAE083B"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3474,7 +3474,7 @@ text = "It MUST reject before significant allocation when duplicate indexes carr
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-023"]
 evidence_ids = ["EVID-E2EE-REQ-FDA89A1D5714375C1B4F"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3490,7 +3490,7 @@ text = "It MUST reject before significant allocation when the reassembly timeout
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-022"]
 evidence_ids = ["EVID-E2EE-REQ-48C5B151716A5DA59976"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3506,7 +3506,7 @@ text = "It MUST reject before significant allocation when the final SHA-256 dige
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-023"]
 evidence_ids = ["EVID-E2EE-REQ-3DFFF778DA62F4CEEF8F"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3522,7 +3522,7 @@ text = "A removed or newly revoked principal may perform the public-only checks 
 target_crates = ["agenc-ircd-federation-wire"]
 task_ids = ["S08-034"]
 evidence_ids = ["EVID-E2EE-REQ-532CF56360A03DCF3C39"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3538,7 +3538,7 @@ text = "Every link carrying encrypted conversations MUST negotiate the exact IRC
 target_crates = ["agenc-ircd-federation-wire"]
 task_ids = ["S08-031"]
 evidence_ids = ["EVID-E2EE-REQ-EC03C8374D88E32F6776"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3554,7 +3554,7 @@ text = "KeyPackages MUST expire no later than `MAX_KEY_PACKAGE_LIFETIME` after c
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-027"]
 evidence_ids = ["EVID-E2EE-REQ-5B7791BEAEA4EF6B0D60"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3570,7 +3570,7 @@ text = "Clients MUST pause application sending while a required removal is pendi
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-034"]
 evidence_ids = ["EVID-E2EE-REQ-74E9B5BFDE9BE0345707"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3586,7 +3586,7 @@ text = "An active device SHOULD send and finalize its own Commit with a populate
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-024"]
 evidence_ids = ["EVID-E2EE-REQ-AC36B134578CBDB4F7A2"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3602,7 +3602,7 @@ text = "A client SHOULD warn its user when one of that account's devices has pro
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-027"]
 evidence_ids = ["EVID-E2EE-REQ-54D3BF177A5D79854AEC"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3618,7 +3618,7 @@ text = "A device that loses or rolls back live MLS state MUST NOT continue with 
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-025"]
 evidence_ids = ["EVID-E2EE-REQ-CA268835A931F5051D79"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3634,7 +3634,7 @@ text = "Live MLS ratchets, generation counters, and group secrets MUST NOT be cl
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-025"]
 evidence_ids = ["EVID-E2EE-REQ-8C607B4410F376797BD2"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3650,7 +3650,7 @@ text = "When no reliable OS or hardware anchor exists, the live MLS database MUS
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-025"]
 evidence_ids = ["EVID-E2EE-REQ-47F62E0752E7757399CD"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3666,7 +3666,7 @@ text = "Outbound state advancement, application counter advancement, exact ciphe
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-025"]
 evidence_ids = ["EVID-E2EE-REQ-28CC5A2874FBFEDC8694"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3682,7 +3682,7 @@ text = "Each server also MUST configure an explicit global E2EE disk ceiling and
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-028"]
 evidence_ids = ["EVID-E2EE-REQ-986A7772723E16360520"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3698,7 +3698,7 @@ text = "Traditional line-count flood penalties MUST NOT make an already admitted
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-022"]
 evidence_ids = ["EVID-E2EE-REQ-A5E4E2058896C2016403"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3714,7 +3714,7 @@ text = "Clients MUST NOT send plaintext automatically when the IRC capability is
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-021"]
 evidence_ids = ["EVID-E2EE-REQ-37736EFE55D201CBE671"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3730,7 +3730,7 @@ text = "Clients MUST NOT send plaintext automatically when decryption or group-s
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-021"]
 evidence_ids = ["EVID-E2EE-REQ-DFF4835BF134E29328E1"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3746,7 +3746,7 @@ text = "Clients MUST NOT send plaintext automatically when a group binding disap
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-021"]
 evidence_ids = ["EVID-E2EE-REQ-0950B248DBB87C569FE7"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3762,7 +3762,7 @@ text = "Clients MUST NOT send plaintext automatically when the server reports th
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-021"]
 evidence_ids = ["EVID-E2EE-REQ-D150C4C93D931F51EE12"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3778,7 +3778,7 @@ text = "Clients MUST NOT send plaintext automatically when some recipient lacks 
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-021"]
 evidence_ids = ["EVID-E2EE-REQ-1AB78DA63741FF0B38CF"]
-status = "unimplemented"
+status = "implemented"
 applicable = true
 
 [[requirement]]
@@ -3794,5 +3794,5 @@ text = "Clients MUST NOT send plaintext automatically when a suite, profile, pol
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-021"]
 evidence_ids = ["EVID-E2EE-REQ-98C7F0834891533DE1BC"]
-status = "unimplemented"
+status = "implemented"
 applicable = true

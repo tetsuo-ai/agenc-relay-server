@@ -278,3 +278,42 @@ argv = ["bash", "scripts/run-stage-seven-transcripts.sh"]
 
 [[gate.stage-seven-implementation.command]]
 argv = ["bash", "scripts/run-stage-seven-fuzz.sh"]
+
+[gate.stage-eight-implementation]
+includes = ["stage-seven-implementation"]
+
+[[gate.stage-eight-implementation.command]]
+argv = ["python3", "scripts/requirements.py", "check-stage-eight"]
+
+[[gate.stage-eight-implementation.command]]
+argv = ["python3", "scripts/check-stage-eight.py", "check"]
+
+[[gate.stage-eight-implementation.command]]
+argv = ["python3", "scripts/check-stage-eight.py", "self-test"]
+
+[[gate.stage-eight-implementation.command]]
+argv = ["python3", "scripts/generate-e2ee-wire-budget.py", "--check"]
+
+[[gate.stage-eight-implementation.command]]
+argv = ["python3", "scripts/generate-e2ee-vectors.py", "--check"]
+
+[[gate.stage-eight-implementation.command]]
+argv = ["python3", "scripts/generate-e2ee-fuzz-seeds.py", "--check"]
+
+[[gate.stage-eight-implementation.command]]
+argv = ["cargo", "test", "-p", "agenc-ircd-e2ee", "--all-features", "--locked"]
+
+[[gate.stage-eight-implementation.command]]
+argv = ["cargo", "test", "-p", "agenc-ircd-storage", "--test", "stage_five", "--locked", "e2ee_records"]
+
+[[gate.stage-eight-implementation.command]]
+argv = ["bash", "scripts/run-stage-eight-model.sh"]
+
+[[gate.stage-eight-implementation.command]]
+argv = ["bash", "scripts/run-stage-eight-transcripts.sh"]
+
+[[gate.stage-eight-implementation.command]]
+argv = ["bash", "scripts/run-stage-eight-fuzz.sh"]
+
+[[gate.stage-eight-implementation.command]]
+argv = ["bash", "scripts/run-stage-eight-load.sh"]

@@ -141,6 +141,46 @@ STAGE_BINDINGS = {
     "EVID-S07-012-MODEL": (["S07-012"], "bounded-federation-model"),
     "EVID-S07-013-INTEROP": (["S07-013"], "multi-process-federation"),
     "EVID-S07-900-STAGE-GATE": (["S07-900"], "stage-gate"),
+    "EVID-S08-001-PROFILE": (["S08-001"], "exact-profile-negotiation"),
+    "EVID-S08-002-SEPARATION": (["S08-002"], "daemon-client-separation"),
+    "EVID-S08-003-IDENTITY": (["S08-003"], "public-identity-validation"),
+    "EVID-S08-004-ROUTES": (["S08-004"], "route-identity-binding-locks"),
+    "EVID-S08-005-AUTHORITY": (["S08-005"], "sequencer-policy-finality-authority"),
+    "EVID-S08-006-CONTEXT": (["S08-006"], "mls-context-envelopes"),
+    "EVID-S08-007-CARRIERS": (["S08-007"], "client-carriers-reassembly"),
+    "EVID-S08-008-SEQUENCING": (["S08-008"], "candidate-receipt-finality"),
+    "EVID-S08-009-FEDERATION": (["S08-009"], "companion-federation-exchange"),
+    "EVID-S08-010-LIFECYCLE": (["S08-010"], "server-visible-group-lifecycle"),
+    "EVID-S08-011-REMOVAL": (["S08-011"], "removal-revocation-recovery-gates"),
+    "EVID-S08-012-REINIT": (["S08-012"], "reinit-route-migration"),
+    "EVID-S08-013-PERSISTENCE": (["S08-013"], "replay-mailbox-persistence"),
+    "EVID-S08-014-LIMITS": (["S08-014"], "resource-timing-limits"),
+    "EVID-S08-015-DOWNGRADE": (["S08-015"], "downgrade-reset-failure"),
+    "EVID-S08-016-BARRIER": (["S08-016"], "cross-profile-durable-barrier"),
+    "EVID-S08-017-INTEGRATION": (["S08-017"], "encrypted-node-integration"),
+    "EVID-S08-018-CORPUS": (["S08-018"], "mls-corpus-pin"),
+    "EVID-S08-019-VECTORS": (["S08-019"], "independent-object-vectors"),
+    "EVID-S08-020-INTEROP": (["S08-020"], "cross-implementation-mls"),
+    "EVID-S08-021-PLAINTEXT": (["S08-021"], "plaintext-rejection-matrix"),
+    "EVID-S08-022-BOUNDARIES": (["S08-022"], "limit-padding-boundaries"),
+    "EVID-S08-023-FUZZ": (["S08-023"], "parser-fuzzing"),
+    "EVID-S08-024-ADVERSARIAL": (["S08-024"], "stateful-adversarial-properties"),
+    "EVID-S08-025-CRASH": (["S08-025"], "durable-boundary-crash-tests"),
+    "EVID-S08-026-QUORUM": (["S08-026"], "finality-quorum-exhaustion"),
+    "EVID-S08-027-TRANSITIONS": (["S08-027"], "identity-roster-transitions"),
+    "EVID-S08-028-LOAD": (["S08-028"], "maximum-shape-load"),
+    "EVID-S08-029-CANARIES": (["S08-029"], "log-telemetry-canaries"),
+    "EVID-S08-030-REINIT-RACES": (["S08-030"], "reinit-race-matrix"),
+    "EVID-S08-031-ECAP": (["S08-031"], "ecap-federation-transitions"),
+    "EVID-S08-032-WIRE-BUDGET": (["S08-032"], "mechanical-wire-budget"),
+    "EVID-S08-033-SEMANTIC-IDS": (["S08-033"], "semantic-id-malleability"),
+    "EVID-S08-034-COUNCIL": (["S08-034"], "finality-council-transitions"),
+    "EVID-S08-035-OPERATIONS": (["S08-035"], "federation-operation-semantics"),
+    "EVID-S08-036-IDEMPOTENCY": (["S08-036"], "idempotency-crash-tests"),
+    "EVID-S08-037-CHAINS": (["S08-037"], "root-binding-chains"),
+    "EVID-S08-038-SCHEDULES": (["S08-038"], "barrier-schedules"),
+    "EVID-S08-039-REVIEW": (["S08-039"], "external-review"),
+    "EVID-S08-900-STAGE-GATE": (["S08-900"], "stage-gate"),
 }
 
 NORMATIVE_BINDINGS = {
@@ -349,7 +389,7 @@ TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z")
 ARTIFACT_PATH_RE = re.compile(
     r"conformance/evidence/artifacts/[A-Za-z0-9][A-Za-z0-9_./-]{0,511}"
 )
-CLOSABLE_STAGES = frozenset(range(8))
+CLOSABLE_STAGES = frozenset(range(9))
 REVIEWED_EVIDENCE_TARGETS = (
     "aarch64-unknown-linux-gnu",
     "x86_64-unknown-linux-gnu",
@@ -364,6 +404,7 @@ STAGE_NAMES = {
     5: "five",
     6: "six",
     7: "seven",
+    8: "eight",
 }
 RUN_ARTIFACT_FIELDS = {
     "schema_version",
@@ -841,7 +882,7 @@ def parse_toolchain_policy(
 ) -> tuple[str, list[dict[str, object]], list[str]]:
     """Parse one closed toolchain policy and select the requested stage profile."""
     if stage not in CLOSABLE_STAGES:
-        raise EvidenceError("toolchain profiles currently cover only Stages 00 through 07")
+        raise EvidenceError("toolchain profiles currently cover only Stages 00 through 08")
     policy_hash = hashlib.sha256(policy_bytes).hexdigest()
     try:
         policy = tomllib.loads(policy_bytes.decode("utf-8"))
@@ -917,7 +958,7 @@ def parse_toolchain_policy(
             or first_stage < previous_first_stage
         ):
             raise EvidenceError(
-                f"{tool_label}.first_stage must be ordered within Stages 00 through 07"
+                f"{tool_label}.first_stage must be ordered within Stages 00 through 08"
             )
         previous_first_stage = first_stage
         normalized = validate_toolchain(
@@ -1707,7 +1748,7 @@ def validate_closure_entries(
 def validate_closure(root: Path, stage: int, source_commit: str) -> tuple[int, int]:
     """Validate exact-revision evidence needed to close one stage."""
     if stage not in CLOSABLE_STAGES:
-        raise EvidenceError("closure evidence catalogs currently cover only Stages 00 through 07")
+        raise EvidenceError("closure evidence catalogs currently cover only Stages 00 through 08")
     if COMMIT_RE.fullmatch(source_commit) is None:
         raise EvidenceError("closure source commit must be an exact lowercase 40-character Git ID")
     validate(root)
@@ -2177,9 +2218,9 @@ kind = "normative-requirement"
     cases += 1
 
     try:
-        validate_closure(root, 8, "2" * 40)
+        validate_closure(root, 9, "2" * 40)
     except EvidenceError as error:
-        if "only Stages 00 through 07" not in str(error):
+        if "only Stages 00 through 08" not in str(error):
             raise EvidenceError(
                 f"self-test 'unsupported closure stage' reached the wrong branch: {error}"
             ) from error
