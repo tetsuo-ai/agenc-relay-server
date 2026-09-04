@@ -278,6 +278,12 @@ pub trait CommandRouter: Send {
         None
     }
 
+    /// The nine `STATS E2EE` values when an E2EE role is attached (spec
+    /// 22.3, companion 17); `None` keeps every field zero.
+    fn e2ee_stats(&self) -> Option<[u64; 9]> {
+        None
+    }
+
     /// `PEER QUARANTINE`: durably denies one configured peer and fences its
     /// incarnation. Only a coordinator can honour it.
     fn admin_peer_quarantine(
@@ -3122,8 +3128,17 @@ impl StateCore {
                 0,
             ],
         );
-        match self.router.federation_stats() {
+        self.with_role_stats(snapshot)
+    }
+
+    /// Adds the federation and E2EE `STATS` rows the router's roles report.
+    fn with_role_stats(&self, snapshot: AdminCoreSnapshot) -> AdminCoreSnapshot {
+        let snapshot = match self.router.federation_stats() {
             Some(values) => snapshot.with_federation(values),
+            None => snapshot,
+        };
+        match self.router.e2ee_stats() {
+            Some(values) => snapshot.with_e2ee(values),
             None => snapshot,
         }
     }

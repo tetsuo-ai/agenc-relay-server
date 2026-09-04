@@ -60,7 +60,7 @@ fn single(exec: &mut Exec<'_>, bytes: Option<Vec<u8>>, empty: EmptyKind) -> Resu
     Ok(outcome)
 }
 
-fn directory_write(
+pub(super) fn directory_write(
     key: agenc_ircd_storage::StoredKey,
     row: &DirectoryRow,
 ) -> Result<crate::state_core::durable::AccountServiceDurableWrite, Fail> {
@@ -435,7 +435,13 @@ pub fn fetch_binding_locks(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             locks
                 .range(first..)
                 .take(MAX_BATCH_OBJECTS)
-                .filter_map(|(_, id)| exec.coordinator.state.objects.get(id).cloned())
+                .filter_map(|(_, entry)| {
+                    exec.coordinator
+                        .state
+                        .objects
+                        .get(&entry.object_id)
+                        .cloned()
+                })
                 .collect()
         })
         .unwrap_or_default();

@@ -151,6 +151,29 @@ pub struct RegistrationRouter {
     pending_observations: BTreeMap<(ConnectionGeneration, u64), CommandObservation>,
     federation: Option<FederationCoordinator>,
     edge: Option<EdgeFederation>,
+    e2ee: Option<crate::e2ee::edge::E2eeEdge>,
+    edge_carriers: BTreeMap<ConnectionGeneration, EdgeCarrier>,
+}
+
+/// The carrier transports of one pre-registration client on an edge; the
+/// sealed envelopes they assemble cross the federation and the answers
+/// come back through them (spec 22.2).
+struct EdgeCarrier {
+    sasl: agenc_ircd_client_wire::SaslTransport,
+    creation: agenc_ircd_client_wire::AccountTransfer,
+    grant: Option<(agenc_ircd_types::AccountId, u64, [u8; 32])>,
+}
+
+impl EdgeCarrier {
+    fn new() -> Result<Self, RuntimeError> {
+        Ok(Self {
+            sasl: agenc_ircd_client_wire::SaslTransport::new()
+                .map_err(|_| RuntimeError::MemoryExhausted)?,
+            creation: agenc_ircd_client_wire::AccountTransfer::new(AccountCarrierKind::Create)
+                .map_err(|_| RuntimeError::MemoryExhausted)?,
+            grant: None,
+        })
+    }
 }
 
 struct ClientCapabilityProfiles {
@@ -174,6 +197,28 @@ impl ClientCapabilityProfiles {
                 recovery_epoch,
                 ListenerPurpose::ClientOnion,
             )?),
+        })
+    }
+
+    /// The same profiles with the E2EE capability and its fixed value added
+    /// (companion 11.1).
+    fn with_e2ee(&self) -> Result<Self, RuntimeError> {
+        let extend = |profile: &CapabilityProfile| -> Result<Arc<CapabilityProfile>, RuntimeError> {
+            let mut capabilities = profile.capabilities().to_vec();
+            capabilities.push(
+                CapabilitySpec::new(
+                    crate::e2ee::edge::E2EE_CAPABILITY,
+                    Some(agenc_ircd_e2ee::limits::CAPABILITY_VALUE),
+                )
+                .map_err(|_| RuntimeError::InvalidValue)?,
+            );
+            CapabilityProfile::new(capabilities)
+                .map(Arc::new)
+                .map_err(|_| RuntimeError::InvalidValue)
+        };
+        Ok(Self {
+            dns_tls: extend(&self.dns_tls)?,
+            onion: extend(&self.onion)?,
         })
     }
 
@@ -236,6 +281,8 @@ impl RegistrationRouter {
             pending_observations: BTreeMap::new(),
             federation: None,
             edge: None,
+            e2ee: None,
+            edge_carriers: BTreeMap::new(),
         })
     }
 
@@ -251,6 +298,138 @@ impl RegistrationRouter {
     #[must_use]
     pub fn edge(&self) -> Option<&EdgeFederation> {
         self.edge.as_ref()
+    }
+
+    /// Attaches the edge E2EE router beside the edge role and advertises the
+    /// E2EE capability with its fixed value.
+    pub fn with_e2ee_edge(
+        mut self,
+        e2ee: crate::e2ee::edge::E2eeEdge,
+    ) -> Result<Self, RuntimeError> {
+        self.advertised = self.advertised.with_e2ee()?;
+        self.e2ee = Some(e2ee);
+        Ok(self)
+    }
+
+    /// Borrows the edge E2EE router when attached.
+    #[must_use]
+    pub fn e2ee(&self) -> Option<&crate::e2ee::edge::E2eeEdge> {
+        self.e2ee.as_ref()
+    }
+
+    /// Routes one E2EE client line through the edge E2EE router.
+    fn route_e2ee_line(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+        state: &ConnectionState,
+        message: &agenc_ircd_client_wire::ParsedMessage,
+    ) -> ResultClass {
+        let (Some(e2ee), Some(edge), Some(bound)) =
+            (self.e2ee.as_mut(), self.edge.as_mut(), state.bound)
+        else {
+            return ResultClass::Rejected;
+        };
+        let account_id = edge
+            .replica()
+            .session(bound.user_id)
+            .and_then(|record| record.account)
+            .map(|(account, _)| account);
+        let account = account_id.and_then(|account| account.to_text().as_bytes().try_into().ok());
+        // Admission runs before parsing, crypto, and storage (companion
+        // 16): one E2EE command per session, and one signature-verification
+        // charge per account when the line carries object bytes.
+        let mut demands = Vec::new();
+        demands.push(BucketDemand::new(
+            BucketKind::E2eeCommand,
+            BucketKey::Session(bound.user_id),
+            1,
+        ));
+        let carries_object = message
+            .tags()
+            .iter()
+            .any(|tag| tag.key() == "+agenc.ag/e2ee");
+        if let (true, Some(account_id)) = (carries_object, account_id) {
+            demands.push(BucketDemand::new(
+                BucketKind::E2eeSignature,
+                BucketKey::Account(account_id),
+                1,
+            ));
+        }
+        let demands: Result<Vec<BucketDemand>, _> = demands.into_iter().collect();
+        let now = context.now();
+        let admitted = demands.is_ok_and(|demands| {
+            context
+                .buckets_mut()
+                .charge_all_or_nothing(now, &demands)
+                .is_ok()
+        });
+        if !admitted {
+            for output in e2ee.rate_limited(generation, message) {
+                let _sent = context.send_to(output.generation, output.frames);
+            }
+            return ResultClass::Rejected;
+        }
+        let nickname = state.nickname.as_deref().unwrap_or("*").to_owned();
+        let facts = crate::e2ee::edge::SessionFacts {
+            user_id: bound.user_id,
+            account,
+            capabilities: state.registration.capability_state(),
+            nickname: &nickname,
+        };
+        let outputs = e2ee.client_line(context, edge, generation, message, &facts);
+        let refused = !outputs.is_empty();
+        for output in outputs {
+            let _sent = context.send_to(output.generation, output.frames);
+        }
+        if refused {
+            ResultClass::Rejected
+        } else {
+            ResultClass::Ok
+        }
+    }
+
+    /// The `E2EE_REQUIRED` refusal for a plaintext line aimed at a bound
+    /// target, when the edge E2EE router is attached.
+    fn e2ee_downgrade_refusal(
+        &self,
+        state: &ConnectionState,
+        message: &agenc_ircd_client_wire::ParsedMessage,
+    ) -> Option<WireMessage> {
+        let (Some(e2ee), Some(edge), Some(bound)) =
+            (self.e2ee.as_ref(), self.edge.as_ref(), state.bound)
+        else {
+            return None;
+        };
+        let account = edge
+            .replica()
+            .session(bound.user_id)
+            .and_then(|record| record.account)
+            .and_then(|(account, _)| account.to_text().as_bytes().try_into().ok());
+        e2ee.plaintext_refusal(edge, message, account)
+    }
+
+    /// Drains the companion frames the edge admitted and applies what the
+    /// E2EE router produced.
+    fn drive_e2ee(&mut self, context: &mut StateCoreContext) {
+        let (Some(e2ee), Some(edge)) = (self.e2ee.as_mut(), self.edge.as_mut()) else {
+            return;
+        };
+        if edge.companion_active() {
+            e2ee.link_active(context, edge);
+        } else if e2ee.phase() != crate::e2ee::edge::Phase::Down {
+            e2ee.link_down();
+        }
+        let frames = edge.drain_companion();
+        let mut outputs = e2ee.handle_frames(context, edge, frames);
+        e2ee.apply_attachments(context, edge);
+        e2ee.declare_origins(context, edge);
+        apply_ready_barrier(context, e2ee, edge);
+        outputs.extend(e2ee.barrier_outputs(edge));
+        outputs.extend(e2ee.batch_applied_outputs());
+        for output in outputs {
+            let _sent = context.send_to(output.generation, output.frames);
+        }
     }
 
     /// Attaches the coordinator role so federated edges are served through
@@ -333,6 +512,15 @@ impl RegistrationRouter {
                     ResultClass::Error
                 },
             );
+            self.refresh_deadline(context, generation, &mut state, outcome);
+            self.connections.insert(generation, state);
+            return outcome;
+        }
+        if state.bound.is_some() && self.e2ee.is_some() && crate::e2ee::edge::is_e2ee_line(&message)
+        {
+            let class = self.route_e2ee_line(context, generation, &state, &message);
+            complete_observation(context, &mut observation, class);
+            let outcome = RouteOutcome::Continue;
             self.refresh_deadline(context, generation, &mut state, outcome);
             self.connections.insert(generation, state);
             return outcome;
@@ -667,9 +855,24 @@ impl RegistrationRouter {
                 carrier,
                 message,
             } => {
+                if self.edge.is_some() && carrier != RegistrationAuthCarrier::AccountCredentials {
+                    return self.route_edge_carrier(
+                        context,
+                        generation,
+                        state,
+                        carrier_generation,
+                        carrier,
+                        message,
+                        CarrierObservation {
+                            token: observation,
+                            result,
+                        },
+                    );
+                }
                 if self.edge.is_some() || self.accounts.is_none() {
-                    // Account service envelopes cross the federation in a
-                    // later stage; an edge answers them unavailable.
+                    // Credential changes need the registered session's
+                    // account authority, which stays with the coordinator; an
+                    // edge answers them unavailable.
                     record_result(result, ResultClass::Rejected);
                     let command = message.command().to_owned();
                     self.send_one(
@@ -839,6 +1042,11 @@ impl RegistrationRouter {
             realname,
         } = commit;
         let capability_hash = capability_hash(state.registration.enabled_capabilities())?;
+        let auth_grant_id = self
+            .edge_carriers
+            .get(&connection)
+            .and_then(|carrier| carrier.grant)
+            .map(|(_, _, grant_id)| grant_id);
         let sent = self.edge.as_mut().is_some_and(|edge| {
             edge.open_session(
                 context,
@@ -847,6 +1055,7 @@ impl RegistrationRouter {
                 nickname,
                 realname,
                 capability_hash,
+                auth_grant_id,
             )
         });
         if sent {
@@ -911,6 +1120,11 @@ impl RegistrationRouter {
             return Ok(ActionStep::Close(CloseReason::ProtocolError));
         }
         let command_name = message.command().to_owned();
+        if let Some(frame) = self.e2ee_downgrade_refusal(state, &message) {
+            context.complete_command_observation(observation, ResultClass::Rejected);
+            self.send_one(context, generation, frame)?;
+            return Ok(ActionStep::Continue);
+        }
         let Some(edge) = self.edge.as_mut() else {
             return Err(RuntimeError::InvalidValue);
         };
@@ -973,6 +1187,7 @@ impl RegistrationRouter {
         }
     }
 
+    // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one match dispatches every edge completion kind to its handler with the exact fields the result carried
     fn apply_edge_completion(
         &mut self,
         context: &mut StateCoreContext,
@@ -1040,7 +1255,275 @@ impl RegistrationRouter {
                 message,
             } => self.deliver_edge_replies(context, generation, frames, next_cursor, &message),
             EdgeCompletion::Resync { generation } => self.resync_edge_client(context, generation),
+            EdgeCompletion::AccountCarrier {
+                generation,
+                carrier_generation,
+                sasl,
+                finish,
+                outcome,
+            } => self.edge_carrier_answered(
+                context,
+                generation,
+                carrier_generation,
+                (sasl, finish),
+                outcome,
+            ),
         }
+    }
+
+    /// Drives one carrier line of a pre-registration client on an edge:
+    /// the transport assembles the sealed envelope, which crosses the
+    /// federation; every other action renders locally.
+    // agenc-review: allow owner=runtime reviewed=2026-09-03 reason=the carrier route keeps the connection state transfer generation carrier class message and observation of one client line together
+    #[allow(clippy::too_many_arguments)]
+    // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=each carrier class takes its parameters from the line in its own grammar before the shared completion path
+    fn route_edge_carrier(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+        state: &mut ConnectionState,
+        carrier_generation: u64,
+        carrier: RegistrationAuthCarrier,
+        mut message: agenc_ircd_client_wire::ParsedMessage,
+        observation: CarrierObservation<'_>,
+    ) -> Result<ActionStep, RuntimeError> {
+        let now = context.now().get();
+        let target = self.target(state).to_owned();
+        let prefix = self.config.server_prefix.clone();
+        if let std::collections::btree_map::Entry::Vacant(slot) =
+            self.edge_carriers.entry(generation)
+        {
+            slot.insert(EdgeCarrier::new()?);
+        }
+        let route = match carrier {
+            RegistrationAuthCarrier::Sasl => {
+                let parameter = (message.parameter_count() == 1)
+                    .then(|| message.take_parameter(0))
+                    .flatten();
+                match parameter {
+                    Some(parameter) => self.edge_sasl_line(
+                        context,
+                        generation,
+                        carrier_generation,
+                        (&prefix, &target),
+                        &parameter,
+                        now,
+                    ),
+                    None => CarrierRoute::Close,
+                }
+            }
+            RegistrationAuthCarrier::AccountCreate => {
+                let has_tags = !message.tags().is_empty();
+                match message.take_parameter(0) {
+                    Some(subcommand) => {
+                        let parameter = message.take_parameter(1);
+                        self.edge_account_line(
+                            context,
+                            generation,
+                            carrier_generation,
+                            &prefix,
+                            (&subcommand, parameter.as_deref(), has_tags),
+                            now,
+                        )
+                    }
+                    None => CarrierRoute::Close,
+                }
+            }
+            RegistrationAuthCarrier::AccountCredentials => CarrierRoute::Close,
+        };
+        self.complete_carrier_route(
+            context,
+            generation,
+            state,
+            carrier_generation,
+            route,
+            observation,
+        )
+    }
+
+    // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=the SASL line loop forwards the assembled envelope and renders every other transport action in the order the transport produced them
+    fn edge_sasl_line(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+        carrier_generation: u64,
+        names: (&str, &str),
+        parameter: &str,
+        now: u64,
+    ) -> CarrierRoute {
+        use agenc_ircd_client_wire::SaslAction;
+        let (prefix, target) = names;
+        let Some(carrier) = self.edge_carriers.get_mut(&generation) else {
+            return CarrierRoute::Close;
+        };
+        let Ok(actions) = carrier.sasl.client(parameter, now) else {
+            return CarrierRoute::Close;
+        };
+        let mut rendered = Vec::new();
+        let mut result = ResultClass::Ok;
+        for action in actions {
+            match action {
+                SaslAction::RequestEnvelope { finish, bytes } => {
+                    let opcode = if finish {
+                        agenc_ircd_types::FederationOpcode::OpaqueAuthFinish
+                    } else {
+                        agenc_ircd_types::FederationOpcode::OpaqueAuthStart
+                    };
+                    let sent = self.edge.as_mut().is_some_and(|edge| {
+                        edge.send_account_carrier(
+                            context,
+                            generation,
+                            opcode,
+                            bytes.expose(),
+                            finish,
+                            carrier_generation,
+                        )
+                    });
+                    if sent {
+                        return CarrierRoute::Pending;
+                    }
+                    let Ok(actions) = carrier.sasl.unavailable(now) else {
+                        return CarrierRoute::Close;
+                    };
+                    return match crate::account_service::render_sasl_actions(
+                        prefix, target, actions,
+                    ) {
+                        Ok(frames) => CarrierRoute::Finished {
+                            frames,
+                            result: ResultClass::Rejected,
+                        },
+                        Err(_) => CarrierRoute::Close,
+                    };
+                }
+                SaslAction::Logout => {
+                    let Ok(actions) = carrier.sasl.reject_logout() else {
+                        return CarrierRoute::Close;
+                    };
+                    rendered.extend(actions);
+                    result = ResultClass::Rejected;
+                }
+                action => {
+                    if crate::account_service::sasl_action_result(&action) == ResultClass::Rejected
+                    {
+                        result = ResultClass::Rejected;
+                    }
+                    rendered.push(action);
+                }
+            }
+        }
+        match crate::account_service::render_sasl_actions(prefix, target, rendered) {
+            Ok(frames) => CarrierRoute::Finished { frames, result },
+            Err(_) => CarrierRoute::Close,
+        }
+    }
+
+    // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=the account carrier loop forwards the assembled envelope and renders every other transport action in the order the transport produced them
+    fn edge_account_line(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+        carrier_generation: u64,
+        prefix: &str,
+        line: (&str, Option<&str>, bool),
+        now: u64,
+    ) -> CarrierRoute {
+        use agenc_ircd_client_wire::{AccountCarrierAction, AccountCarrierPhase};
+        let (subcommand, parameter, has_tags) = line;
+        let Some(carrier) = self.edge_carriers.get_mut(&generation) else {
+            return CarrierRoute::Close;
+        };
+        let Ok(actions) = carrier
+            .creation
+            .client(subcommand, parameter, has_tags, now)
+        else {
+            return account_unavailable(prefix);
+        };
+        let mut rendered = Vec::new();
+        for action in actions {
+            match action {
+                AccountCarrierAction::RequestEnvelope { phase, bytes } => {
+                    let finish = phase == AccountCarrierPhase::Finish;
+                    let opcode = if finish {
+                        agenc_ircd_types::FederationOpcode::AccountCreateFinish
+                    } else {
+                        agenc_ircd_types::FederationOpcode::AccountCreateStart
+                    };
+                    let sent = self.edge.as_mut().is_some_and(|edge| {
+                        edge.send_account_carrier(
+                            context,
+                            generation,
+                            opcode,
+                            bytes.expose(),
+                            finish,
+                            carrier_generation,
+                        )
+                    });
+                    if sent {
+                        return CarrierRoute::Pending;
+                    }
+                    carrier.creation.reject();
+                    return account_unavailable(prefix);
+                }
+                action => rendered.push(action),
+            }
+        }
+        match crate::account_service::render_account_actions(
+            prefix,
+            AccountCarrierKind::Create,
+            rendered,
+        ) {
+            Ok(frames) => CarrierRoute::Finished {
+                frames,
+                result: ResultClass::Ok,
+            },
+            Err(_) => CarrierRoute::Close,
+        }
+    }
+
+    /// The coordinator answered one forwarded carrier envelope: the edge
+    /// transport renders the sealed response and outcome for the client,
+    /// and a successful SASL finish keeps its grant for session open.
+    fn edge_carrier_answered(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+        carrier_generation: u64,
+        phase: (bool, bool),
+        outcome: crate::federation::edge::RemoteCarrierOutcome,
+    ) {
+        let (sasl, finish) = phase;
+        let now = context.now().get();
+        let prefix = self.config.server_prefix.clone();
+        let target = self
+            .connections
+            .get(&generation)
+            .map_or_else(|| "*".to_owned(), |state| self.target(state).to_owned());
+        let Some(carrier) = self.edge_carriers.get_mut(&generation) else {
+            return;
+        };
+        let answered = if sasl {
+            edge_sasl_answer(carrier, (&prefix, &target), finish, outcome, now)
+        } else {
+            edge_account_answer(carrier, &prefix, finish, outcome, now)
+        };
+        let completion = match answered {
+            Some((frames, result)) => {
+                let _sent = context.send_to(generation, frames);
+                CarrierCompletion {
+                    generation,
+                    carrier_generation,
+                    close: false,
+                    result,
+                }
+            }
+            None => CarrierCompletion {
+                generation,
+                carrier_generation,
+                close: true,
+                result: ResultClass::Error,
+            },
+        };
+        self.apply_account_completions(context, vec![completion]);
     }
 
     fn deliver_edge_replies(
@@ -1113,7 +1596,11 @@ impl RegistrationRouter {
             RegistrationEvent::RegistrationCommitted {
                 generation: event_generation,
                 accepted,
-                authenticated: false,
+                authenticated: accepted
+                    && self
+                        .edge_carriers
+                        .get(&generation)
+                        .is_some_and(|carrier| carrier.grant.is_some()),
             },
             context.now().get(),
         ) {
@@ -1137,18 +1624,63 @@ impl RegistrationRouter {
         generation: ConnectionGeneration,
         message: &agenc_ircd_client_wire::ParsedMessage,
     ) {
-        if message.command() != "JOIN" {
-            return;
+        match message.command() {
+            "JOIN" => {
+                let Some(edge) = self.edge.as_mut() else {
+                    return;
+                };
+                let Some(channels) = message.middle().first() else {
+                    return;
+                };
+                for name in channels.split(',') {
+                    edge.request_names(context, generation, name);
+                }
+            }
+            "CHANCTL" => self.note_channel_setting_updated(context, generation, message),
+            _ => {}
         }
-        let Some(edge) = self.edge.as_mut() else {
+    }
+
+    /// The `NOTE CHANCTL UPDATED` a committed channel setting earns on its
+    /// requesting connection; the coordinator renders it only for local
+    /// origins.
+    fn note_channel_setting_updated(
+        &self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+        message: &agenc_ircd_client_wire::ParsedMessage,
+    ) {
+        let Some(state) = self.connections.get(&generation) else {
             return;
         };
-        let Some(channels) = message.middle().first() else {
+        let capabilities = state.registration.capability_state();
+        if !capabilities.enabled("standard-replies") {
+            return;
+        }
+        let Some(name) = message
+            .middle()
+            .get(1)
+            .and_then(|channel| agenc_ircd_types::ChannelName::parse(channel).ok())
+        else {
             return;
         };
-        for name in channels.split(',') {
-            edge.request_names(context, generation, name);
-        }
+        let Ok(description) =
+            agenc_ircd_client_wire::SafeReplyDescription::new("Channel setting updated")
+        else {
+            return;
+        };
+        let Ok(frame) = agenc_ircd_client_wire::standard_reply(
+            capabilities,
+            &self.config.server_prefix,
+            agenc_ircd_client_wire::ReplyKind::Note,
+            "CHANCTL",
+            agenc_ircd_types::PublicErrorCode::UPDATED,
+            &[agenc_ircd_client_wire::SafeReplyContext::Channel(&name)],
+            description,
+        ) else {
+            return;
+        };
+        let _sent = self.send_one(context, generation, frame);
     }
 
     fn reserve_nickname(
@@ -1862,7 +2394,12 @@ impl RegistrationRouter {
             let account_committed = !authenticated
                 || self.accounts.as_mut().is_some_and(|accounts| {
                     accounts
-                        .registration_committed(context, generation, bound.user_id)
+                        .registration_committed(
+                            context,
+                            generation,
+                            bound.user_id,
+                            crate::account_service::SessionHome::Local,
+                        )
                         .is_ok()
                 });
             let Some(mut state) = self.connections.remove(&generation) else {
@@ -1930,12 +2467,27 @@ impl RegistrationRouter {
         true
     }
 
+    /// Runs the remote account carriers the coordinator queued.
+    fn drive_remote_accounts(&mut self, context: &mut StateCoreContext) {
+        if let (Some(accounts), Some(federation)) =
+            (self.accounts.as_mut(), self.federation.as_mut())
+        {
+            crate::remote_accounts::drive(context, accounts, federation);
+        }
+    }
+
     fn apply_account_completions(
         &mut self,
         context: &mut StateCoreContext,
         completions: Vec<CarrierCompletion>,
     ) {
         for completion in completions {
+            if let (Some(accounts), Some(federation)) =
+                (self.accounts.as_mut(), self.federation.as_mut())
+                && crate::remote_accounts::completion(context, accounts, federation, &completion)
+            {
+                continue;
+            }
             if completion.carrier_generation != 0
                 && let Some(observation) = self
                     .pending_observations
@@ -2043,6 +2595,16 @@ impl CommandRouter for RegistrationRouter {
         }
     }
 
+    fn e2ee_stats(&self) -> Option<[u64; 9]> {
+        if let Some(e2ee) = self.e2ee.as_ref() {
+            return Some(e2ee.stats());
+        }
+        self.federation
+            .as_ref()
+            .and_then(|federation| federation.companion_executor())
+            .map(crate::e2ee::coordinator::CompanionCoordinator::stats)
+    }
+
     fn federation_inbound(
         &mut self,
         context: &mut StateCoreContext,
@@ -2051,10 +2613,12 @@ impl CommandRouter for RegistrationRouter {
         if let Some(edge) = self.edge.as_mut() {
             let completions = edge.inbound(context, message);
             self.apply_edge_completions(context, completions);
+            self.drive_e2ee(context);
             return;
         }
         if let Some(federation) = self.federation.as_mut() {
             federation.inbound(context, message);
+            self.drive_remote_accounts(context);
         }
     }
 
@@ -2183,7 +2747,11 @@ impl CommandRouter for RegistrationRouter {
             .as_deref()
             .unwrap_or("connection closed")
             .to_owned();
+        self.edge_carriers.remove(&generation);
         if let Some(edge) = self.edge.as_mut() {
+            if let Some(e2ee) = self.e2ee.as_mut() {
+                e2ee.delete_origin(context, edge, generation);
+            }
             edge.connection_closed(context, generation, &reason);
             return;
         }
@@ -2233,10 +2801,24 @@ impl CommandRouter for RegistrationRouter {
         if let Some(federation) = self.federation.as_mut() {
             federation.batch_applied(context);
         }
+        if let (Some(accounts), Some(federation)) =
+            (self.accounts.as_mut(), self.federation.as_mut())
+        {
+            crate::remote_accounts::batch_settled(context, accounts, federation);
+        }
+        self.drive_remote_accounts(context);
         if let Some(edge) = self.edge.as_mut() {
             let completions = edge.batch_applied(context);
             self.apply_edge_completions(context, completions);
         }
+        if let (Some(e2ee), Some(edge)) = (self.e2ee.as_mut(), self.edge.as_mut()) {
+            let outputs = e2ee.batch_applied(context, edge);
+            for output in outputs {
+                let _sent = context.send_to(output.generation, output.frames);
+            }
+        }
+        // A committed barrier part may have completed the set.
+        self.drive_e2ee(context);
     }
 
     fn crypto_completed(
@@ -2259,6 +2841,7 @@ impl CommandRouter for RegistrationRouter {
             .filter(|federation| federation.owns_crypto_job(message.job_id))
         {
             federation.crypto_completed(context, message);
+            self.drive_remote_accounts(context);
             return;
         }
         if let Err((generation, _error)) = self.commands.crypto_completed(context, message) {
@@ -2277,6 +2860,7 @@ impl CommandRouter for RegistrationRouter {
             .filter(|federation| federation.owns_storage_read(message.read_id))
         {
             federation.storage_read_completed(context, message);
+            self.drive_remote_accounts(context);
             return;
         }
         if let Some(accounts) = self.accounts.as_mut() {
@@ -2285,6 +2869,7 @@ impl CommandRouter for RegistrationRouter {
         }
     }
 
+    // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=a rejected batch notifies every attached role in a fixed order so no role observes the others' rollback out of sequence
     fn batch_rejected(
         &mut self,
         context: &mut StateCoreContext,
@@ -2294,8 +2879,16 @@ impl CommandRouter for RegistrationRouter {
         if let Some(federation) = self.federation.as_mut() {
             federation.batch_rejected(context);
         }
+        if let (Some(accounts), Some(federation)) =
+            (self.accounts.as_mut(), self.federation.as_mut())
+        {
+            crate::remote_accounts::batch_settled(context, accounts, federation);
+        }
         if let Some(edge) = self.edge.as_mut() {
             edge.batch_rejected(context);
+        }
+        if let Some(e2ee) = self.e2ee.as_mut() {
+            e2ee.batch_rejected();
         }
         let generation = origin.as_ref().map(StagedOrigin::generation);
         if generation
@@ -2579,6 +3172,130 @@ fn reject_staged_origin(context: &mut StateCoreContext, origin: StagedOrigin) {
     let (generation, frames) = origin.into_rejection();
     if !frames.is_empty() && context.send_to(generation, frames).is_err() {
         close_transport(context, generation);
+    }
+}
+
+/// The `FAIL ACCTCREATE UNAVAILABLE` route of an edge carrier.
+fn account_unavailable(prefix: &str) -> CarrierRoute {
+    match crate::account_service::account_failure(prefix, AccountCarrierKind::Create) {
+        Ok(frame) => CarrierRoute::Finished {
+            frames: vec![frame],
+            result: ResultClass::Rejected,
+        },
+        Err(_) => CarrierRoute::Close,
+    }
+}
+
+/// Renders the coordinator's answer to a forwarded SASL envelope through
+/// the edge transport; `None` closes the transport.
+fn edge_sasl_answer(
+    carrier: &mut EdgeCarrier,
+    names: (&str, &str),
+    finish: bool,
+    outcome: crate::federation::edge::RemoteCarrierOutcome,
+    now: u64,
+) -> Option<(Vec<WireMessage>, ResultClass)> {
+    use crate::federation::edge::RemoteCarrierOutcome;
+    let (prefix, target) = names;
+    let (mut actions, accepted) = match outcome {
+        RemoteCarrierOutcome::Challenge(bytes) if !finish => {
+            (carrier.sasl.server_response(&bytes, now).ok()?, None)
+        }
+        RemoteCarrierOutcome::Authenticated {
+            account_id,
+            account_session_generation,
+            auth_grant_id,
+            chunks,
+        } if finish => {
+            let bytes = agenc_ircd_client_wire::decode_sasl_payload(&chunks.concat())?;
+            let actions = carrier.sasl.server_response(&bytes, now).ok()?;
+            carrier.grant = Some((account_id, account_session_generation, auth_grant_id));
+            (actions, Some(true))
+        }
+        RemoteCarrierOutcome::Failed { chunks } if finish && !chunks.is_empty() => {
+            let bytes = agenc_ircd_client_wire::decode_sasl_payload(&chunks.concat())?;
+            (carrier.sasl.server_response(&bytes, now).ok()?, Some(false))
+        }
+        _ => (carrier.sasl.unavailable(now).ok()?, None),
+    };
+    let result = match accepted {
+        Some(accepted) => {
+            actions.extend(carrier.sasl.complete(accepted, now).ok()?);
+            if accepted {
+                ResultClass::Ok
+            } else {
+                ResultClass::Rejected
+            }
+        }
+        None if actions.is_empty() => ResultClass::Rejected,
+        None => ResultClass::Ok,
+    };
+    let frames = crate::account_service::render_sasl_actions(prefix, target, actions).ok()?;
+    Some((frames, result))
+}
+
+/// Renders the coordinator's answer to a forwarded account-creation
+/// envelope through the edge transport; `None` closes the transport.
+fn edge_account_answer(
+    carrier: &mut EdgeCarrier,
+    prefix: &str,
+    finish: bool,
+    outcome: crate::federation::edge::RemoteCarrierOutcome,
+    now: u64,
+) -> Option<(Vec<WireMessage>, ResultClass)> {
+    use crate::federation::edge::RemoteCarrierOutcome;
+    use agenc_ircd_client_wire::AccountCarrierPhase;
+    let (actions, created) = match outcome {
+        RemoteCarrierOutcome::Challenge(bytes) if !finish => (
+            carrier
+                .creation
+                .server_response(AccountCarrierPhase::Start, &bytes, now)
+                .ok()?,
+            None,
+        ),
+        RemoteCarrierOutcome::Created { account_id, chunks } if finish => {
+            let bytes = agenc_ircd_client_wire::decode_account_payload(&chunks.concat())?;
+            (
+                carrier
+                    .creation
+                    .server_response(AccountCarrierPhase::Finish, &bytes, now)
+                    .ok()?,
+                Some(account_id),
+            )
+        }
+        _ => {
+            carrier.creation.reject();
+            let frame =
+                crate::account_service::account_failure(prefix, AccountCarrierKind::Create).ok()?;
+            return Some((vec![frame], ResultClass::Rejected));
+        }
+    };
+    let mut frames =
+        crate::account_service::render_account_actions(prefix, AccountCarrierKind::Create, actions)
+            .ok()?;
+    if let Some(account_id) = created {
+        frames.push(crate::account_service::account_created_note(prefix, account_id).ok()?);
+    }
+    Some((frames, ResultClass::Ok))
+}
+
+/// Applies a complete cross-profile barrier: both halves commit in one
+/// transaction, the router's companion rows joining the base apply.
+fn apply_ready_barrier(
+    context: &mut StateCoreContext,
+    e2ee: &mut crate::e2ee::edge::E2eeEdge,
+    edge: &mut crate::federation::edge::EdgeFederation,
+) {
+    let Some(mutation_id) = edge.barrier_ready() else {
+        return;
+    };
+    match e2ee.prepare_barrier(context, edge, mutation_id) {
+        Ok((writes, rendered)) => {
+            if edge.apply_barrier(context, writes) {
+                e2ee.barrier_staged(mutation_id, rendered);
+            }
+        }
+        Err(_) => edge.fail_companion_link(context),
     }
 }
 

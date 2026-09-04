@@ -166,7 +166,9 @@ name = "agenc-ircd-testkit"
 version = "0.0.0"
 dependencies = [
  "agenc-ircd-client-wire",
+ "agenc-ircd-crypto",
  "agenc-ircd-domain",
+ "agenc-ircd-e2ee",
  "agenc-ircd-federation-wire",
  "agenc-ircd-types",
  "ed25519-dalek",

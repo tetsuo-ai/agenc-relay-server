@@ -31,12 +31,14 @@ use agenc_ircd_e2ee::tls::{DecodeBudget, Opaque, TlsDecode, TlsEncode};
 use agenc_ircd_e2ee::wire::reply::E2eeReplyCode;
 use agenc_ircd_storage::TableId;
 use agenc_ircd_storage::e2ee_records::{
-    CLAIM_ROW_KIND, ClaimRow, ROUTE_ROW_KIND, RouteLifecycle as RowLifecycle, RouteRow,
+    CLAIM_ROW_KIND, ClaimRow, DirectoryRow, ROUTE_ROW_KIND, RouteLifecycle as RowLifecycle,
+    RouteRow,
 };
 use agenc_ircd_types::{AccountId, ChannelInstanceId, ServerId};
 
 use super::super::request::{Outcome, ResponseObject, ResultBody, state_row};
 use super::super::{CompanionCoordinator, ConversationState};
+use super::directory::directory_write;
 use super::{Exec, Fail, account};
 
 fn conversation_state<'a>(
@@ -154,9 +156,17 @@ pub fn application(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         .lifecycles
         .get(&conversation_id)
         .ok_or_else(|| Fail::with(E2eeReplyCode::RouteInvalid, &conversation_id))?;
-    lifecycle
-        .check_application(log)
-        .map_err(|_| Fail::with(E2eeReplyCode::RouteInvalid, &conversation_id))?;
+    // Application traffic waits for the bootstrap activation certificate
+    // (companion 7.4): that refusal names finality, every other one the route.
+    lifecycle.check_application(log).map_err(|error| {
+        let code = match error {
+            agenc_ircd_domain::e2ee::lifecycle::LifecycleError::BootstrapPending => {
+                E2eeReplyCode::FinalityRequired
+            }
+            _ => E2eeReplyCode::RouteInvalid,
+        };
+        Fail::with(code, &conversation_id)
+    })?;
     if let Some(instance) = instance {
         let matches = exec
             .coordinator
@@ -461,6 +471,7 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     }
     let owner = AccountId::parse_wire_bytes(&account)
         .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
+    let locks = chained_locks(exec, &package, &verified, &conversation_id)?;
     let summary = BindingSummary {
         conversation_id: ConversationId(conversation_id),
         lock: SemanticLockId(verified.route.lock_id),
@@ -505,7 +516,7 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         }
         agenc_ircd_e2ee::route::SemanticRouteKey::Direct { .. } => [0; 32],
     };
-    let state = ConversationState {
+    let mut state = ConversationState {
         binding_object_id: *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes(),
         context_core_id: verified.context_core_id,
         context_digest,
@@ -527,6 +538,7 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         IrcRouteStateKind::ActiveRoute,
         exec.state_generation,
     )?;
+    state.route_object_id = *agenc_ircd_e2ee::ObjectId::compute(&route_object).as_bytes();
     let mut outcome = Outcome::scalar(ResultBody::Bound {
         conversation_id,
         binding_id: verified.binding_id,
@@ -546,6 +558,20 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     outcome
         .writes
         .push(CompanionCoordinator::object_write(&route_object)?);
+    for lock in &locks {
+        outcome
+            .writes
+            .push(CompanionCoordinator::object_write(&lock.object)?);
+        outcome.writes.push(directory_write(
+            DirectoryRow::binding_lock_key(&lock.account_digest, &lock.root, lock.sequence)
+                .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
+            &DirectoryRow::BindingLock {
+                lock_id: lock.entry.lock_id,
+                binding_id: verified.binding_id,
+                object_id: lock.entry.object_id,
+            },
+        )?);
+    }
     let row = RouteRow {
         route_state: route_object.clone(),
         lifecycle: RowLifecycle::Active,
@@ -576,6 +602,7 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             .collect(),
         agenc_ircd_domain::e2ee::RouteTarget::Direct(_) => vec![exec.home],
     };
+    let hosts = targets.clone();
     for target in targets {
         outcome.events.push(exec.event(
             EventKind::RouteStateChanged,
@@ -597,6 +624,23 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         companion.conversations.insert(conversation_id, state);
         let _ = CompanionCoordinator::retain_object(companion, retained);
         let _ = CompanionCoordinator::retain_object(companion, route_object);
+        // Every edge hosting the channel holds the route from this copy on
+        // (companion 12.5 projection entitlement).
+        if direct_accounts.is_none() {
+            for host in hosts {
+                companion
+                    .entitlements
+                    .set_channel(host, conversation_id, true);
+            }
+        }
+        for lock in locks {
+            let _ = CompanionCoordinator::retain_object(companion, lock.object);
+            companion
+                .binding_locks
+                .entry((lock.account_digest, lock.root))
+                .or_default()
+                .insert(lock.sequence, lock.entry);
+        }
         if direct_accounts.is_some() {
             let _ = companion.entitlements.require_direct(
                 home,
@@ -794,4 +838,66 @@ impl ConversationState {
     pub const fn binding_id(&self) -> [u8; 32] {
         self.binding
     }
+}
+
+/// One root binding lock of a package, checked against the root's chain.
+struct ChainedLock {
+    account_digest: [u8; 32],
+    root: [u8; 32],
+    sequence: u64,
+    entry: super::super::LockEntry,
+    object: Vec<u8>,
+}
+
+/// Checks every root lock of a generation-zero package against the head of
+/// its (account, root) chain: the first lock of a chain has sequence zero
+/// and no predecessor, a later lock names the head's identifier and
+/// follows its sequence (companion 9.2). Returns the locks to retain.
+fn chained_locks(
+    exec: &Exec<'_>,
+    package: &IrcConversationBindingPackage,
+    verified: &agenc_ircd_e2ee::route::VerifiedBinding,
+    conversation_id: &[u8; 32],
+) -> Result<Vec<ChainedLock>, Fail> {
+    let invalid = || Fail::with(E2eeReplyCode::BindingAuthInvalid, conversation_id);
+    let mut chained = Vec::new();
+    for (lock, object) in verified
+        .locks
+        .iter()
+        .zip(package.root_binding_locks.as_slice())
+    {
+        let account_digest = digest(exec, &lock.account_id)?;
+        let head = exec
+            .coordinator
+            .state
+            .binding_locks
+            .get(&(account_digest, lock.root_fingerprint))
+            .and_then(|chain| chain.last_key_value());
+        let continues = match head {
+            None => lock.sequence == 0 && lock.previous_lock_id == [0; 32],
+            Some((sequence, entry)) => {
+                sequence.checked_add(1) == Some(lock.sequence)
+                    && lock.previous_lock_id == entry.lock_id
+            }
+        };
+        if !continues {
+            return Err(invalid());
+        }
+        let bytes = object
+            .encode()
+            .and_then(|body| IrcWireObject::new(IrcWireObjectKind::RootBindingLock, body))
+            .and_then(|object| object.encode())
+            .map_err(|_| invalid())?;
+        chained.push(ChainedLock {
+            account_digest,
+            root: lock.root_fingerprint,
+            sequence: lock.sequence,
+            entry: super::super::LockEntry {
+                lock_id: lock.lock_id,
+                object_id: *agenc_ircd_e2ee::ObjectId::compute(&bytes).as_bytes(),
+            },
+            object: bytes,
+        });
+    }
+    Ok(chained)
 }

@@ -332,7 +332,16 @@ impl Assembly {
 pub struct E2eeAssembler {
     open: BTreeMap<AssemblyKey, Assembly>,
     quotas: QuotaLedger,
-    recent: BTreeMap<ObjectId, u64>,
+    /// Completed submissions by direction, sender, command, and content
+    /// address: a byte-identical retry of one command by the same sender
+    /// returns the prior outcome (11.8), while the same object under another
+    /// command, such as a binding first bound and then delivered to a
+    /// mailbox, assembles again. Responses and deliveries are keyed by correlation or
+    /// delivery position, not by content, so the cache never applies to
+    /// [`Direction::Response`]: the same bytes may legitimately arrive
+    /// again there, for example when a coordinator delivers an object a
+    /// local client submitted.
+    recent: BTreeMap<(Direction, Sender, CarrierCommand, ObjectId), u64>,
 }
 
 impl E2eeAssembler {
@@ -371,7 +380,9 @@ impl E2eeAssembler {
             return Err(AssemblyError::InvalidFragment);
         }
         if !self.open.contains_key(&key) {
-            if self.recent.contains_key(&tag.object_id) {
+            if key.direction != Direction::Response
+                && self.is_recent(key.direction, key.sender, key.command, &tag.object_id)
+            {
                 return Ok(Ingest::Recent);
             }
             self.open_assembly(&key, scopes, limit, tag, now)?;
@@ -497,7 +508,12 @@ impl E2eeAssembler {
         let retained_until = assembly
             .last
             .saturating_add(RECENT_OBJECT_IDEMPOTENCY_RETENTION_SECONDS);
-        self.recent.insert(key.object_id, retained_until);
+        if key.direction != Direction::Response {
+            self.recent.insert(
+                (key.direction, key.sender, key.command, key.object_id),
+                retained_until,
+            );
+        }
         Ok(Ingest::Complete(assembly.buffer))
     }
 
@@ -540,8 +556,15 @@ impl E2eeAssembler {
 
     /// Whether `object_id` completed within the idempotency window.
     #[must_use]
-    pub fn is_recent(&self, object_id: &ObjectId) -> bool {
-        self.recent.contains_key(object_id)
+    pub fn is_recent(
+        &self,
+        direction: Direction,
+        sender: Sender,
+        command: CarrierCommand,
+        object_id: &ObjectId,
+    ) -> bool {
+        self.recent
+            .contains_key(&(direction, sender, command, *object_id))
     }
 }
 

@@ -58,7 +58,7 @@ fn numeric(
         .map_err(|_| RuntimeError::InvalidValue)
 }
 
-fn prefix(source: &SourceView) -> Result<String, RuntimeError> {
+pub(crate) fn prefix(source: &SourceView) -> Result<String, RuntimeError> {
     let user = std::str::from_utf8(source.public_cloak.user_component())
         .map_err(|_| RuntimeError::InvalidValue)?;
     let host = std::str::from_utf8(source.public_cloak.host_component())

@@ -5,4 +5,5 @@
 
 pub mod barrier;
 pub mod coordinator;
+pub mod edge;
 pub mod link;

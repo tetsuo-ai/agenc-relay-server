@@ -151,6 +151,12 @@ pub struct SequencerLog {
 }
 
 impl SequencerLog {
+    /// Whether one Commit candidate is open for the accepted epoch.
+    #[must_use]
+    pub fn has_candidate(&self) -> bool {
+        self.candidate.is_some()
+    }
+
     /// A log anchored at the genesis state of a new conversation.
     #[must_use]
     pub fn genesis(conversation_id: Id, genesis_state_id: Id) -> Self {
@@ -204,6 +210,24 @@ impl SequencerLog {
             reinit_attempt: None,
             next_attempt_sequence: 0,
             phase,
+        }
+    }
+
+    /// Restores the epoch position of a reloaded log: the active candidate,
+    /// if the head record is one, and the attempts the epoch consumed. With
+    /// no active candidate the next candidate follows the head record.
+    pub fn restore_epoch(&mut self, candidate: Option<CandidateSlot>, attempts: u32) {
+        self.attempts = attempts;
+        match candidate {
+            Some(slot) => {
+                self.next_candidate_sequence = slot.position.candidate_sequence;
+                self.candidate = Some(slot);
+            }
+            None if attempts > 0 => {
+                self.next_candidate_sequence = attempts;
+                self.next_predecessor = self.head.record_id;
+            }
+            None => {}
         }
     }
 

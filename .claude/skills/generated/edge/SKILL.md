@@ -1,90 +1,99 @@
 ---
 name: edge
-description: "Skill for the Edge area of agenc-ircd. 87 symbols across 10 files."
+description: "Skill for the Edge area of agenc-ircd. 89 symbols across 12 files."
 ---
 
 # Edge
 
-87 symbols | 10 files | Cohesion: 63%
+89 symbols | 12 files | Cohesion: 56%
 
 ## When to Use
 
 - Working with code in `crates/`
-- Understanding how iter, session, channel_by_name work
+- Understanding how session, channel_by_name, note_phase work
 - Modifying edge-related functionality
 
 ## Key Files
 
 | File | Symbols |
 |------|---------|
-| `crates/agenc-ircd-runtime/src/federation/edge/request.rs` | session_revision, channel_of, operation_of, user_by_nickname, mode_operation (+21) |
-| `crates/agenc-ircd-runtime/src/federation/edge/mod.rs` | connection_opened, session_bound, origin_descriptor, link_closed, fail_link (+20) |
-| `crates/agenc-ircd-runtime/src/federation/edge/render.rs` | line, prefix, actor_prefix, channel_name, event_channel_label (+6) |
-| `crates/agenc-ircd-runtime/src/federation/edge/sync.rs` | write_install_rows, install_rows, install_row, resume_ok, snapshot_active (+5) |
-| `crates/agenc-ircd-domain/src/federation/replica.rs` | session, channel_by_name, channels_of, channel, record (+1) |
-| `crates/agenc-ircd-runtime/src/federation/edge/events.rs` | apply, completion_of, entry_row, stage_rows, drain_queued |
+| `crates/agenc-ircd-runtime/src/federation/edge/request.rs` | session_revision, channel_of, operation_of, user_by_nickname, mode_operation (+17) |
+| `crates/agenc-ircd-runtime/src/federation/edge/mod.rs` | note_phase, link_established, handle_frame, require_self, companion_barrier_part (+17) |
+| `crates/agenc-ircd-runtime/src/federation/edge/barrier.rs` | apply, apply_base_events, identity, base_part, companion_part (+8) |
+| `crates/agenc-ircd-runtime/src/federation/edge/sync.rs` | resume_ok, resume_snapshot, snapshot_active, write_install_rows, install_rows (+5) |
+| `crates/agenc-ircd-runtime/src/federation/edge/render.rs` | remember_nicknames, event_channel_label, render_event, prefix, channel_name (+2) |
+| `crates/agenc-ircd-runtime/src/federation/edge/events.rs` | apply, stage_rows, apply_queued, drain_queued, check_header |
+| `crates/agenc-ircd-storage/src/e2ee_records/barrier.rs` | receipt_entry, head_key, part_key |
+| `crates/agenc-ircd-domain/src/federation/replica.rs` | session, channel_by_name |
+| `crates/agenc-ircd-client-wire/src/registration_command.rs` | validate_tagmsg, validate_message_target |
 | `crates/agenc-ircd-client-wire/src/tags.rs` | iter |
-| `crates/agenc-ircd-runtime/src/state_core/session.rs` | capabilities_for_user |
-| `crates/agenc-ircd-federation-wire/src/objects.rs` | to_object |
-| `crates/agenc-ircd-runtime/src/federation/codec/projection.rs` | projection_kind |
 
 ## Entry Points
 
 Start here when exploring this area:
 
-- **`iter`** (Function) — `crates/agenc-ircd-client-wire/src/tags.rs:201`
 - **`session`** (Function) — `crates/agenc-ircd-domain/src/federation/replica.rs:121`
 - **`channel_by_name`** (Function) — `crates/agenc-ircd-domain/src/federation/replica.rs:172`
-- **`channels_of`** (Function) — `crates/agenc-ircd-domain/src/federation/replica.rs:195`
-- **`channel`** (Function) — `crates/agenc-ircd-domain/src/federation/replica.rs:127`
+- **`note_phase`** (Function) — `crates/agenc-ircd-runtime/src/federation/edge/mod.rs:376`
+- **`resend_pending`** (Function) — `crates/agenc-ircd-runtime/src/federation/edge/request.rs:292`
+- **`resume_ok`** (Function) — `crates/agenc-ircd-runtime/src/federation/edge/sync.rs:97`
 
 ## Key Symbols
 
 | Symbol | Type | File | Line |
 |--------|------|------|------|
-| `iter` | Function | `crates/agenc-ircd-client-wire/src/tags.rs` | 201 |
 | `session` | Function | `crates/agenc-ircd-domain/src/federation/replica.rs` | 121 |
 | `channel_by_name` | Function | `crates/agenc-ircd-domain/src/federation/replica.rs` | 172 |
-| `channels_of` | Function | `crates/agenc-ircd-domain/src/federation/replica.rs` | 195 |
-| `channel` | Function | `crates/agenc-ircd-domain/src/federation/replica.rs` | 127 |
+| `note_phase` | Function | `crates/agenc-ircd-runtime/src/federation/edge/mod.rs` | 376 |
+| `resend_pending` | Function | `crates/agenc-ircd-runtime/src/federation/edge/request.rs` | 292 |
+| `resume_ok` | Function | `crates/agenc-ircd-runtime/src/federation/edge/sync.rs` | 97 |
+| `resume_snapshot` | Function | `crates/agenc-ircd-runtime/src/federation/edge/sync.rs` | 124 |
+| `snapshot_active` | Function | `crates/agenc-ircd-runtime/src/federation/edge/sync.rs` | 390 |
+| `stage_rows` | Function | `crates/agenc-ircd-runtime/src/federation/edge/events.rs` | 267 |
+| `remember_nicknames` | Function | `crates/agenc-ircd-runtime/src/federation/edge/render.rs` | 19 |
 | `event_channel_label` | Function | `crates/agenc-ircd-runtime/src/federation/edge/render.rs` | 84 |
 | `render_event` | Function | `crates/agenc-ircd-runtime/src/federation/edge/render.rs` | 98 |
-| `capabilities_for_user` | Function | `crates/agenc-ircd-runtime/src/state_core/session.rs` | 374 |
-| `record` | Function | `crates/agenc-ircd-domain/src/federation/replica.rs` | 180 |
-| `entries` | Function | `crates/agenc-ircd-domain/src/federation/replica.rs` | 203 |
-| `remember_nicknames` | Function | `crates/agenc-ircd-runtime/src/federation/edge/render.rs` | 19 |
-| `to_object` | Function | `crates/agenc-ircd-federation-wire/src/objects.rs` | 149 |
-| `connection_opened` | Function | `crates/agenc-ircd-runtime/src/federation/edge/mod.rs` | 543 |
-| `session_bound` | Function | `crates/agenc-ircd-runtime/src/federation/edge/mod.rs` | 659 |
-| `declare_origin` | Function | `crates/agenc-ircd-runtime/src/federation/edge/request.rs` | 116 |
-| `projection_kind` | Function | `crates/agenc-ircd-runtime/src/federation/codec/projection.rs` | 13 |
-| `stage_rows` | Function | `crates/agenc-ircd-runtime/src/federation/edge/events.rs` | 216 |
-| `drain_queued` | Function | `crates/agenc-ircd-runtime/src/federation/edge/events.rs` | 76 |
-| `batch_rejected` | Function | `crates/agenc-ircd-runtime/src/federation/edge/mod.rs` | 720 |
-| `new` | Function | `crates/agenc-ircd-runtime/src/federation/edge/mod.rs` | 181 |
+| `base_part` | Function | `crates/agenc-ircd-runtime/src/federation/edge/barrier.rs` | 76 |
+| `companion_part` | Function | `crates/agenc-ircd-runtime/src/federation/edge/barrier.rs` | 101 |
+| `drain_queued` | Function | `crates/agenc-ircd-runtime/src/federation/edge/events.rs` | 127 |
+| `companion_barrier_part` | Function | `crates/agenc-ircd-runtime/src/federation/edge/mod.rs` | 321 |
+| `iter` | Function | `crates/agenc-ircd-client-wire/src/tags.rs` | 201 |
+| `replay_matches` | Function | `crates/agenc-ircd-runtime/src/e2ee/barrier.rs` | 277 |
+| `applied` | Function | `crates/agenc-ircd-runtime/src/federation/edge/barrier.rs` | 433 |
+| `receipt_entry` | Function | `crates/agenc-ircd-storage/src/e2ee_records/barrier.rs` | 393 |
+| `head_key` | Function | `crates/agenc-ircd-storage/src/e2ee_records/barrier.rs` | 124 |
 
 ## Execution Flows
 
 | Flow | Type | Steps |
 |------|------|-------|
-| `Project → Projection_kind` | cross_community | 4 |
+| `Batch_applied → Link_is` | cross_community | 5 |
+| `Batch_applied → Link_closed` | cross_community | 5 |
+| `Batch_applied → Timers_mut` | cross_community | 5 |
+| `Batch_applied → Cancel` | cross_community | 5 |
+| `Batch_applied → Session` | cross_community | 5 |
+| `Batch_applied → Channel_detail` | cross_community | 5 |
+| `Batch_applied → Membership` | cross_community | 5 |
+| `Inbound → CompanionLinkState` | cross_community | 5 |
+| `Inbound → New` | cross_community | 5 |
+| `Inbound → Compact` | cross_community | 5 |
 
 ## Connected Areas
 
 | Area | Connections |
 |------|-------------|
-| Tests | 13 calls |
-| State_core | 8 calls |
-| Federation | 3 calls |
+| Coordinator | 12 calls |
+| State_core | 9 calls |
+| Tests | 7 calls |
+| Federation | 6 calls |
 | Codec | 3 calls |
-| Coordinator | 3 calls |
-| Cluster_329 | 1 calls |
-| Cluster_415 | 1 calls |
-| Fuzz_targets | 1 calls |
+| E2ee | 3 calls |
+| E2ee_records | 2 calls |
+| Cluster_426 | 1 calls |
 
 ## How to Explore
 
-1. `context({name: "iter"})` — see callers and callees
+1. `context({name: "session"})` — see callers and callees
 2. `query({search_query: "edge"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

@@ -78,6 +78,19 @@ pub enum EdgeCompletion {
         /// The client connection.
         generation: ConnectionGeneration,
     },
+    /// A forwarded account carrier envelope was answered (spec 22.2).
+    AccountCarrier {
+        /// The client connection.
+        generation: ConnectionGeneration,
+        /// The carrier transfer the router observes.
+        carrier_generation: u64,
+        /// Whether the carrier is SASL rather than account creation.
+        sasl: bool,
+        /// Whether this was the finish phase.
+        finish: bool,
+        /// What the coordinator answered.
+        outcome: RemoteCarrierOutcome,
+    },
 }
 
 /// Why a request was sent.
@@ -85,6 +98,12 @@ pub(crate) enum PendingKind {
     SessionOpen {
         event_generation: u64,
         nickname: agenc_ircd_domain::NicknameValue,
+    },
+    /// A forwarded account carrier envelope (spec 22.2).
+    AccountCarrier {
+        sasl: bool,
+        finish: bool,
+        carrier_generation: u64,
     },
     Command {
         message: Box<ParsedMessage>,
@@ -138,7 +157,12 @@ pub(super) fn declare_origin(
             session_id,
             user_id,
         }),
-        account: None::<OriginAccount>,
+        account: origin
+            .account
+            .map(|(account_id, account_session_generation)| OriginAccount {
+                account_id,
+                account_session_generation,
+            }),
         connection_nonce: origin.connection_nonce,
     };
     let Ok(encoded) = record
@@ -304,6 +328,8 @@ pub(super) fn resend_pending(edge: &mut EdgeFederation, context: &mut StateCoreC
 }
 
 /// Requests a session for a connection that completed local registration.
+// agenc-review: allow owner=runtime reviewed=2026-09-03 reason=a session open carries the connection its registration facts capability hash and optional grant in the exact field order of the operation
+#[allow(clippy::too_many_arguments)]
 pub(super) fn send_session_open(
     edge: &mut EdgeFederation,
     context: &mut StateCoreContext,
@@ -312,12 +338,13 @@ pub(super) fn send_session_open(
     nickname: &str,
     realname: &str,
     capability_hash: [u8; 32],
+    auth_grant_id: Option<[u8; 32]>,
 ) -> Result<(), Violation> {
     let origin = edge.origins.get(&generation).ok_or(Violation::Phase)?;
     let parsed = agenc_ircd_domain::NicknameValue::parse(nickname).map_err(|_| Violation::Codec)?;
     let operation = FederatedOperation::SessionOpen {
         connection_id: origin.connection_id,
-        auth_grant_id: None,
+        auth_grant_id,
         nickname: nickname.to_owned(),
         realname: realname.to_owned(),
         capability_hash,
@@ -332,6 +359,48 @@ pub(super) fn send_session_open(
         PendingKind::SessionOpen {
             event_generation,
             nickname: parsed,
+        },
+    );
+    Ok(())
+}
+
+/// Forwards one sealed account-service envelope of a pre-registration
+/// client to the coordinator's account service (spec 22.2).
+pub(super) fn send_account_carrier(
+    edge: &mut EdgeFederation,
+    context: &mut StateCoreContext,
+    generation: ConnectionGeneration,
+    opcode: agenc_ircd_types::FederationOpcode,
+    envelope: &[u8],
+    finish: bool,
+    carrier_generation: u64,
+) -> Result<(), Violation> {
+    if edge.phase != Phase::Active {
+        return Err(Violation::Phase);
+    }
+    let mut budget = DecodeBudget::new(8_192, 64);
+    let envelope = SchemaObject::decode_exact("AccountServiceEnvelope", envelope, &mut budget)
+        .map_err(|_| Violation::Codec)?;
+    let sasl = matches!(
+        opcode,
+        agenc_ircd_types::FederationOpcode::OpaqueAuthStart
+            | agenc_ircd_types::FederationOpcode::OpaqueAuthFinish
+    );
+    let operation = FederatedOperation::AccountService {
+        opcode,
+        session_id: None,
+        envelope,
+    };
+    let prepared = prepare_request(edge, context, generation, &operation)?;
+    register_request(
+        edge,
+        context,
+        generation,
+        prepared,
+        PendingKind::AccountCarrier {
+            sasl,
+            finish,
+            carrier_generation,
         },
     );
     Ok(())
@@ -386,7 +455,9 @@ pub(super) fn send_command(
         queue.push_back(DeferredCommand { kind, message });
         return Ok(());
     }
-    let Ok(command) = crate::command_convert::convert(context.domain(), kind, &message) else {
+    let Ok(command) =
+        crate::command_convert::convert(context.domain(), &edge.replica, kind, &message)
+    else {
         return Err((message, DomainError::InvalidArgument));
     };
     let operation = match operation_of(edge, session_id, user_id, &message, &command) {
@@ -411,6 +482,53 @@ fn session_revision(edge: &EdgeFederation, user_id: UserId) -> Result<u64, Domai
         .session(user_id)
         .map(|session| session.session_revision.get())
         .ok_or(DomainError::RegistrationRequired)
+}
+
+/// Owner-controlled channel state changes: registration, unregistration,
+/// and the history policy, each pinned to the replica's channel revision.
+fn channel_control_operation(
+    edge: &EdgeFederation,
+    session_id: SessionId,
+    command: agenc_ircd_domain::ChannelCommand,
+) -> Result<FederatedOperation, DomainError> {
+    use agenc_ircd_domain::ChannelCommand;
+    let channel_id = match command {
+        ChannelCommand::Register(channel_id)
+        | ChannelCommand::Unregister(channel_id)
+        | ChannelCommand::History(channel_id, _) => channel_id,
+    };
+    let expected_channel_revision = edge
+        .replica
+        .channel(channel_id)
+        .map(|channel| channel.channel_revision.get())
+        .ok_or(DomainError::NotFound)?;
+    Ok(match command {
+        ChannelCommand::Register(_) => FederatedOperation::ChannelRegister {
+            session_id,
+            channel_id,
+            expected_channel_revision,
+        },
+        ChannelCommand::Unregister(_) => FederatedOperation::ChannelUnregister {
+            session_id,
+            channel_id,
+            expected_channel_revision,
+        },
+        ChannelCommand::History(_, policy) => FederatedOperation::ChannelSettings {
+            session_id,
+            channel_id,
+            expected_channel_revision,
+            setting_kind: crate::federation::codec::history_setting_kind(policy),
+        },
+    })
+}
+
+impl crate::command_convert::ChannelResolver for agenc_ircd_domain::federation::EdgeReplica {
+    fn channel_id_of(
+        &self,
+        name: &agenc_ircd_domain::ChannelNameValue,
+    ) -> Option<agenc_ircd_types::ChannelInstanceId> {
+        self.channel_by_name(name).map(|channel| channel.channel_id)
+    }
 }
 
 fn channel_of(
@@ -459,6 +577,9 @@ fn operation_of(
                 expected_session_revision: session_revision(edge, user_id)?,
                 targets: joins,
             })
+        }
+        CanonicalCommandView::Channel(command) => {
+            channel_control_operation(edge, session_id, command)
         }
         CanonicalCommandView::Part(channels, reason) => {
             let mut ids = Vec::new();
@@ -868,6 +989,7 @@ fn dispatch_deferred(
 }
 
 /// Resolves one finished request into its client-facing completion.
+// agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one match pairs every pending request kind with the result kinds the profile permits for it so a forbidden pair is visible in place
 fn completed_request(edge: &mut EdgeFederation, request_id: RequestId) -> Vec<EdgeCompletion> {
     let Some(pending) = edge.pending.remove(&request_id) else {
         return Vec::new();
@@ -889,6 +1011,9 @@ fn completed_request(edge: &mut EdgeFederation, request_id: RequestId) -> Vec<Ed
         ) => {
             if let Some(origin) = edge.origins.get_mut(&generation) {
                 origin.session = Some((registered.session_id, registered.user_id));
+                origin.account = registered
+                    .account
+                    .map(|(account, generation, _)| (account, generation));
             }
             let presentation = nickname.presentation().to_owned();
             edge.nicknames.insert(registered.user_id, nickname);
@@ -908,6 +1033,20 @@ fn completed_request(edge: &mut EdgeFederation, request_id: RequestId) -> Vec<Ed
         ) => vec![EdgeCompletion::RegistrationRefused {
             generation,
             event_generation,
+        }],
+        (
+            PendingKind::AccountCarrier {
+                sasl,
+                finish,
+                carrier_generation,
+            },
+            result,
+        ) => vec![EdgeCompletion::AccountCarrier {
+            generation,
+            carrier_generation,
+            sasl,
+            finish,
+            outcome: carrier_outcome(result, &pending.replies, sasl),
         }],
         (PendingKind::Command { message }, ResultArm::Failed { code, .. }) => {
             vec![EdgeCompletion::CommandFailed {
@@ -1038,4 +1177,80 @@ pub(super) fn continue_query(
     };
     let channel = channel.clone();
     send_names(edge, context, generation, &channel, Some(cursor));
+}
+
+/// What the coordinator's account service answered for one forwarded
+/// carrier envelope.
+pub enum RemoteCarrierOutcome {
+    /// The sealed start challenge, for the edge transport to chunk.
+    Challenge(Vec<u8>),
+    /// The client authenticated; the reply block carried the sealed
+    /// completion chunks and the grant names the account at session open.
+    Authenticated {
+        /// The account.
+        account_id: agenc_ircd_types::AccountId,
+        /// The account session generation.
+        account_session_generation: u64,
+        /// The pre-registration grant to present in `session_open`.
+        auth_grant_id: [u8; 32],
+        /// The sealed completion, as the relayed payload chunks.
+        chunks: Vec<String>,
+    },
+    /// The account was created; the reply block carried the completion.
+    Created {
+        /// The account.
+        account_id: agenc_ircd_types::AccountId,
+        /// The sealed completion, as the relayed payload chunks.
+        chunks: Vec<String>,
+    },
+    /// The account service refused; a sealed rejection may accompany it.
+    Failed {
+        /// The sealed rejection, as the relayed payload chunks.
+        chunks: Vec<String>,
+    },
+}
+
+/// Maps one result and its relayed replies onto the carrier outcome.
+fn carrier_outcome(
+    result: ResultArm,
+    replies: &[agenc_ircd_client_wire::WireMessage],
+    sasl: bool,
+) -> RemoteCarrierOutcome {
+    let chunks: Vec<String> = replies
+        .iter()
+        .filter_map(|reply| reply_chunk(reply, sasl))
+        .collect();
+    match result {
+        ResultArm::AuthChallenge(response) => {
+            let encoded = agenc_ircd_federation_wire::CanonicalEncode::encode_canonical(&response);
+            encoded.map_or(RemoteCarrierOutcome::Failed { chunks }, |bytes| {
+                RemoteCarrierOutcome::Challenge(bytes.as_slice().to_vec())
+            })
+        }
+        ResultArm::Authenticated {
+            account_id,
+            account_session_generation,
+            auth_grant_id,
+        } => RemoteCarrierOutcome::Authenticated {
+            account_id,
+            account_session_generation,
+            auth_grant_id,
+            chunks,
+        },
+        ResultArm::AccountCreated { account_id, .. } => {
+            RemoteCarrierOutcome::Created { account_id, chunks }
+        }
+        _ => RemoteCarrierOutcome::Failed { chunks },
+    }
+}
+
+/// The payload chunk one relayed reply carries, for the carrier class.
+fn reply_chunk(reply: &agenc_ircd_client_wire::WireMessage, sasl: bool) -> Option<String> {
+    let middle = reply.middle();
+    if sasl {
+        return (reply.command() == "AUTHENTICATE").then(|| middle.first().cloned())?;
+    }
+    let data =
+        reply.command() == "ACCTCREATE" && middle.first().map(String::as_str) == Some("DATA");
+    data.then(|| middle.get(1).cloned())?
 }

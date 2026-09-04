@@ -317,6 +317,14 @@ impl RouteTable {
         Ok(())
     }
 
+    /// Restores one durable reservation at startup; a reservation whose
+    /// identifier is already held is left in place.
+    pub fn restore_reservation(&mut self, reservation: RouteReservation) {
+        self.reservations
+            .entry(reservation.reservation_id)
+            .or_insert(reservation);
+    }
+
     /// Drops every reservation whose expiry passed.
     pub fn expire_reservations(&mut self, now: u64) -> usize {
         let before = self.reservations.len();

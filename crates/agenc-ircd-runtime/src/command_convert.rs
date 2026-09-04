@@ -19,18 +19,37 @@ use crate::RuntimeError;
 
 pub(crate) fn convert(
     domain: &DomainState,
+    channels: &dyn ChannelResolver,
     kind: RegisteredCommandKind,
     message: &agenc_ircd_client_wire::ParsedMessage,
 ) -> Result<CanonicalCommand, RuntimeError> {
     match kind {
         RegisteredCommandKind::Nickname => nickname(message),
-        RegisteredCommandKind::Public(kind) => convert_public(domain, kind, message),
+        RegisteredCommandKind::Public(kind) => convert_public(domain, channels, kind, message),
+    }
+}
+
+/// Resolves a canonical channel name to its instance: the authoritative
+/// domain on a coordinator, the projected replica on an edge.
+pub(crate) trait ChannelResolver {
+    /// The instance identifier of `name`, when the channel exists.
+    fn channel_id_of(&self, name: &ChannelNameValue)
+    -> Option<agenc_ircd_types::ChannelInstanceId>;
+}
+
+impl ChannelResolver for DomainState {
+    fn channel_id_of(
+        &self,
+        name: &ChannelNameValue,
+    ) -> Option<agenc_ircd_types::ChannelInstanceId> {
+        self.resolve_channel(name)
     }
 }
 
 // agenc-review: focus owner=runtime reviewed=2026-08-29 reason=exhaustive closed wire-to-domain union with each family delegated to a bounded converter
 fn convert_public(
     domain: &DomainState,
+    channels: &dyn ChannelResolver,
     kind: PostRegistrationCommandKind,
     message: &agenc_ircd_client_wire::ParsedMessage,
 ) -> Result<CanonicalCommand, RuntimeError> {
@@ -69,9 +88,9 @@ fn convert_public(
         PostRegistrationCommandKind::Setname => setname(message),
         PostRegistrationCommandKind::Account(operation) => account(message, operation),
         PostRegistrationCommandKind::ChannelControl(operation) => {
-            channel_control(domain, message, operation)
+            channel_control(channels, message, operation)
         }
-        PostRegistrationCommandKind::ChatHistory(_) => chathistory(domain, message),
+        PostRegistrationCommandKind::ChatHistory(_) => chathistory(channels, message),
     }
 }
 
@@ -539,13 +558,13 @@ fn account(
 }
 
 fn channel_control(
-    domain: &DomainState,
+    channels: &dyn ChannelResolver,
     message: &agenc_ircd_client_wire::ParsedMessage,
     operation: ChannelControlCommand,
 ) -> Result<CanonicalCommand, RuntimeError> {
     let channel = parse_channel(parameter(message, 1)?)?;
-    let channel_id = domain
-        .resolve_channel(&channel)
+    let channel_id = channels
+        .channel_id_of(&channel)
         .ok_or(RuntimeError::InvalidValue)?;
     let command = match operation {
         ChannelControlCommand::Register => ChannelCommand::Register(channel_id),
@@ -565,12 +584,12 @@ fn channel_control(
 }
 
 fn chathistory(
-    domain: &DomainState,
+    channels: &dyn ChannelResolver,
     message: &agenc_ircd_client_wire::ParsedMessage,
 ) -> Result<CanonicalCommand, RuntimeError> {
     let channel = parse_channel(parameter(message, 1)?)?;
-    let channel_id = domain
-        .resolve_channel(&channel)
+    let channel_id = channels
+        .channel_id_of(&channel)
         .ok_or(RuntimeError::InvalidValue)?;
     let limit = message
         .middle()
@@ -769,6 +788,7 @@ mod tests {
                 .map_err(|error| io::Error::other(format!("{line}: grammar failed: {error}")))?;
             let command = convert(
                 &domain,
+                &domain,
                 RegisteredCommandKind::Public(proof.kind()),
                 &message,
             )
@@ -818,6 +838,7 @@ mod tests {
             assert_eq!(
                 convert(
                     &domain,
+                    &domain,
                     RegisteredCommandKind::Public(proof.kind()),
                     &message,
                 )
@@ -846,6 +867,7 @@ mod tests {
         let message = parsed(line)?;
         let proof = validate_post_registration_command(&message)?;
         Ok(convert(
+            domain,
             domain,
             RegisteredCommandKind::Public(proof.kind()),
             &message,

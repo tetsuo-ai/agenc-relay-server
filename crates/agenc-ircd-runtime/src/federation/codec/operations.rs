@@ -508,7 +508,12 @@ impl FederatedOperation {
                 envelope,
                 ..
             } => {
+                // The codec checks exact vector capacities, so the field
+                // vector is sized for the arm it encodes.
                 let mut fields = Vec::new();
+                fields
+                    .try_reserve_exact(1 + usize::from(session_id.is_some()))
+                    .map_err(|_| CodecError::AllocationFailed)?;
                 if let Some(session_id) = session_id {
                     fields.push(opaque(session_id.as_bytes())?);
                 }

@@ -50,6 +50,7 @@ pub use auth_transport::{
     AUTH_CHUNK_CHARACTERS, AccountCarrierAction, AccountCarrierKind, AccountCarrierPhase,
     AccountTransfer, AuthTransportError, SASL_REQUEST_CHARACTERS, SASL_RESPONSE_CHARACTERS,
     SASL_TIMEOUT_MILLIS, SaslAction, SaslNumeric, SaslTransport, SecretText,
+    decode_account_payload, decode_sasl_payload, encode_account_payload, encode_sasl_payload,
 };
 pub use capability::{
     CapError, CapLine, CapRequestReply, CapabilityChange, CapabilityProfile, CapabilitySpec,

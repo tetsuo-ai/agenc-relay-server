@@ -83,6 +83,9 @@ pub enum LogEventCode {
     FederationLinkEstablished,
     /// One federation link ended; a failure reason raises the severity.
     FederationLinkClosed,
+    /// The peer acknowledged the IRC-MLS companion profile on one link
+    /// (companion 12.5); only the count leaves the process.
+    E2eeProfileAcknowledged,
     /// A task panicked; the process terminates after this event.
     Crash,
     /// Events were dropped because the log queue was full; the count bucket
@@ -92,7 +95,7 @@ pub enum LogEventCode {
 
 impl LogEventCode {
     /// Every registered code.
-    pub const ALL: [Self; 32] = [
+    pub const ALL: [Self; 33] = [
         Self::ProcessStarted,
         Self::ConfigurationRejected,
         Self::StorageRecovered,
@@ -123,6 +126,7 @@ impl LogEventCode {
         Self::ClockTrusted,
         Self::FederationLinkEstablished,
         Self::FederationLinkClosed,
+        Self::E2eeProfileAcknowledged,
         Self::Crash,
         Self::LogDropped,
     ];
@@ -161,6 +165,7 @@ impl LogEventCode {
             Self::ClockTrusted => "clock_trusted",
             Self::FederationLinkEstablished => "federation_link_established",
             Self::FederationLinkClosed => "federation_link_closed",
+            Self::E2eeProfileAcknowledged => "e2ee_profile_acknowledged",
             Self::Crash => "crash",
             Self::LogDropped => "log_dropped",
         }

@@ -334,12 +334,39 @@ impl VerifiedRoster {
     }
 }
 
+/// How a statement's predecessor is treated during verification.
+#[derive(Clone, Copy, Debug)]
+pub enum Lineage<'a, T> {
+    /// The predecessor is known (or known absent) and the lineage rules apply.
+    Checked(Option<&'a T>),
+    /// The statement was accepted before and is being reloaded from durable
+    /// storage; its predecessor may no longer be retained, so the lineage
+    /// rules are skipped while every other rule still applies.
+    Restored,
+}
+
 /// Verifies one roster under its root and optional predecessor.
-// agenc-review: focus owner=e2ee reviewed=2026-09-03 reason=the roster rules of Section 8.4 are one closed checklist whose ordering the reviewer reads top to bottom
 pub fn verify_roster(
     root: &VerifiedRoot,
     roster: &IrcDeviceRoster,
     predecessor: Option<&VerifiedRoster>,
+) -> Result<VerifiedRoster, E2eeError> {
+    verify_roster_lineage(root, roster, Lineage::Checked(predecessor))
+}
+
+/// Re-verifies a roster this node accepted before, without its predecessor.
+pub fn restore_roster(
+    root: &VerifiedRoot,
+    roster: &IrcDeviceRoster,
+) -> Result<VerifiedRoster, E2eeError> {
+    verify_roster_lineage(root, roster, Lineage::Restored)
+}
+
+// agenc-review: focus owner=e2ee reviewed=2026-09-03 reason=the roster rules of Section 8.4 are one closed checklist whose ordering the reviewer reads top to bottom
+fn verify_roster_lineage(
+    root: &VerifiedRoot,
+    roster: &IrcDeviceRoster,
+    lineage: Lineage<'_, VerifiedRoster>,
 ) -> Result<VerifiedRoster, E2eeError> {
     let tbs = &roster.tbs;
     if tbs.profile_version != PROFILE_VERSION {
@@ -361,7 +388,9 @@ pub fn verify_roster(
         &tbs.encode()?,
         &roster.root_signature,
     )?;
-    check_roster_lineage(tbs.roster_generation, &tbs.previous_roster_id, predecessor)?;
+    if let Lineage::Checked(predecessor) = lineage {
+        check_roster_lineage(tbs.roster_generation, &tbs.previous_roster_id, predecessor)?;
+    }
     let active = tbs.active_devices.as_slice();
     if active.len() > usize::from(MAX_ACTIVE_DEVICES_PER_ACCOUNT) {
         return Err(E2eeError::LimitExceeded);
@@ -394,7 +423,7 @@ pub fn verify_roster(
         .iter()
         .map(|entry| (entry.device_id, entry.certificate_serial))
         .collect();
-    if let Some(previous) = predecessor
+    if let Lineage::Checked(Some(previous)) = lineage
         && !previous
             .revocations
             .iter()
@@ -470,6 +499,23 @@ pub fn verify_capabilities(
     capabilities: &IrcDeviceCapabilities,
     predecessor: Option<&VerifiedCapabilities>,
 ) -> Result<VerifiedCapabilities, E2eeError> {
+    verify_capabilities_lineage(roster, capabilities, Lineage::Checked(predecessor))
+}
+
+/// Re-verifies a capability statement this node accepted before, without
+/// its predecessor.
+pub fn restore_capabilities(
+    roster: &VerifiedRoster,
+    capabilities: &IrcDeviceCapabilities,
+) -> Result<VerifiedCapabilities, E2eeError> {
+    verify_capabilities_lineage(roster, capabilities, Lineage::Restored)
+}
+
+fn verify_capabilities_lineage(
+    roster: &VerifiedRoster,
+    capabilities: &IrcDeviceCapabilities,
+    lineage: Lineage<'_, VerifiedCapabilities>,
+) -> Result<VerifiedCapabilities, E2eeError> {
     let tbs = &capabilities.tbs;
     if tbs.profile_version != PROFILE_VERSION {
         return Err(E2eeError::ProfileMismatch);
@@ -499,12 +545,14 @@ pub fn verify_capabilities(
     ] {
         ensure_canonical(vector, |value| *value)?;
     }
-    check_capability_lineage(
-        tbs.device_id,
-        tbs.capability_generation,
-        &tbs.previous_capability_id,
-        predecessor,
-    )?;
+    if let Lineage::Checked(predecessor) = lineage {
+        check_capability_lineage(
+            tbs.device_id,
+            tbs.capability_generation,
+            &tbs.previous_capability_id,
+            predecessor,
+        )?;
+    }
     certificate.key.verify(
         SignatureDomain::DeviceCapabilities,
         &tbs.encode()?,

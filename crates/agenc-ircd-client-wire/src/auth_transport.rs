@@ -885,6 +885,32 @@ const fn is_base64url(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
 }
 
+/// Encodes one carrier payload the way the SASL carrier does: standard
+/// Base64 with padding.
+#[must_use]
+pub fn encode_sasl_payload(bytes: &[u8]) -> String {
+    STANDARD.encode(bytes)
+}
+
+/// Decodes the concatenated SASL carrier chunks back to bytes.
+#[must_use]
+pub fn decode_sasl_payload(text: &str) -> Option<Vec<u8>> {
+    STANDARD.decode(text).ok()
+}
+
+/// Encodes one carrier payload the way the account carriers do: unpadded
+/// Base64url.
+#[must_use]
+pub fn encode_account_payload(bytes: &[u8]) -> String {
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// Decodes the concatenated account carrier chunks back to bytes.
+#[must_use]
+pub fn decode_account_payload(text: &str) -> Option<Vec<u8>> {
+    URL_SAFE_NO_PAD.decode(text).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

@@ -73,7 +73,9 @@ EXPECTED_EDGES = {
     },
     "agenc-ircd-testkit": {
         "agenc-ircd-client-wire",
+        "agenc-ircd-crypto",
         "agenc-ircd-domain",
+        "agenc-ircd-e2ee",
         "agenc-ircd-federation-wire",
         "agenc-ircd-types",
     },

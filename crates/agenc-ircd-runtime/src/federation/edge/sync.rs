@@ -44,6 +44,11 @@ pub(super) fn begin(edge: &mut EdgeFederation, context: &mut StateCoreContext) {
     if !reset_sent {
         return;
     }
+    // Acknowledgements belong to the link that gave them: the companion
+    // mirror waits for this link's FORIGIN ACK before it declares.
+    for origin in edge.origins.values_mut() {
+        origin.acked_generation = None;
+    }
     let generations: Vec<_> = edge.origins.keys().copied().collect();
     for generation in generations {
         let update = edge

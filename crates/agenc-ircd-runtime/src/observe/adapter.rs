@@ -367,6 +367,18 @@ impl RuntimeObserver {
         self.monotonic.now().get() / 1_000
     }
 
+    /// The peer acknowledged the companion profile on one link. Nothing
+    /// about the tuple, the peer, or the key set leaves the process.
+    pub fn e2ee_profile_acknowledged(&self) {
+        self.emit(
+            LogEventCode::E2eeProfileAcknowledged,
+            Severity::Info,
+            Some(ListenerPurpose::Federation),
+            None,
+            None,
+        );
+    }
+
     fn emit(
         &self,
         code: LogEventCode,

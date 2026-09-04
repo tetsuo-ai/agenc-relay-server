@@ -9,6 +9,7 @@
 
 mod barrier;
 mod events;
+pub(crate) use render::prefix as source_prefix;
 mod render;
 mod request;
 mod sync;
@@ -25,7 +26,7 @@ use agenc_ircd_federation_wire::{
     split_fragments,
 };
 use agenc_ircd_types::{
-    ConnectionId, EventId, NetworkId, OriginId, RecoveryEpoch, RequestId, ServerId,
+    AccountId, ConnectionId, EventId, NetworkId, OriginId, RecoveryEpoch, RequestId, ServerId,
     ServerIncarnation, SessionId, UserId,
 };
 
@@ -47,7 +48,7 @@ use crate::observe::health::{ReadinessGate, ReadinessStage};
 use crate::state_core::StateCoreContext;
 use crate::sync::Arc;
 
-pub use request::EdgeCompletion;
+pub use request::{EdgeCompletion, RemoteCarrierOutcome};
 
 /// Events held while one durable batch is in flight.
 const MAX_QUEUED_EVENTS: usize = 256;
@@ -64,6 +65,25 @@ pub struct EdgeConfig {
     pub incarnation: ServerIncarnation,
     /// The configured coordinator.
     pub coordinator: PeerIdentity,
+}
+
+/// The base origin facts a companion declaration mirrors.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BaseOriginFacts {
+    /// The origin identity.
+    pub origin_id: [u8; 16],
+    /// The current base generation.
+    pub generation: u64,
+    /// The generation the coordinator acknowledged.
+    pub acked_generation: Option<u64>,
+    /// The connection identity.
+    pub connection_id: [u8; 16],
+    /// The connection nonce.
+    pub connection_nonce: [u8; 32],
+    /// The session and user, when registered.
+    pub session: Option<([u8; 16], [u8; 16])>,
+    /// The account and its session generation, when authenticated.
+    pub account: Option<([u8; 24], u64)>,
 }
 
 /// One authenticated live link to the coordinator.
@@ -99,6 +119,8 @@ struct ConnectionOrigin {
     object_id: [u8; 32],
     previous_object_id: [u8; 32],
     session: Option<(SessionId, UserId)>,
+    /// The account and its session generation the coordinator registered.
+    account: Option<(AccountId, u64)>,
     acked_generation: Option<u64>,
     deleted: bool,
 }
@@ -234,6 +256,12 @@ impl EdgeFederation {
         self.companion = CompanionLinks::new(profile, self.config.server_name.clone());
     }
 
+    /// Whether a companion profile is installed on this edge.
+    #[must_use]
+    pub fn has_companion_profile(&self) -> bool {
+        self.companion.has_profile()
+    }
+
     /// Whether the companion profile is active on the live link.
     #[must_use]
     pub fn companion_active(&self) -> bool {
@@ -317,6 +345,77 @@ impl EdgeFederation {
         true
     }
 
+    /// The base origin facts of one connection the companion origin mirrors.
+    #[must_use]
+    pub fn origin_facts(&self, generation: ConnectionGeneration) -> Option<BaseOriginFacts> {
+        let origin = self.origins.get(&generation)?;
+        Some(BaseOriginFacts {
+            origin_id: *origin.origin_id.as_bytes(),
+            generation: origin.generation,
+            acked_generation: origin.acked_generation,
+            connection_id: *origin.connection_id.as_bytes(),
+            connection_nonce: origin.connection_nonce,
+            session: origin
+                .session
+                .map(|(session, user)| (*session.as_bytes(), *user.as_bytes())),
+            account: origin.account.and_then(|(account, generation)| {
+                let text: [u8; 24] = account.to_text().as_bytes().try_into().ok()?;
+                Some((text, generation))
+            }),
+        })
+    }
+
+    /// Every connection with a base origin.
+    #[must_use]
+    pub fn connection_generations(&self) -> Vec<ConnectionGeneration> {
+        self.origins.keys().copied().collect()
+    }
+
+    /// Advances the connection's shared origin generation after a device
+    /// attachment and declares the update (E2EE 12.5).
+    pub fn advance_origin(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+    ) {
+        self.session_bound(context, generation);
+    }
+
+    /// The coordinator's recovery epoch and incarnation on the live link.
+    #[must_use]
+    pub fn coordinator_link_identity(&self) -> Option<([u8; 16], [u8; 16])> {
+        self.live.as_ref().map(|live| {
+            (
+                *live.coordinator_epoch.as_bytes(),
+                *live.coordinator_incarnation.as_bytes(),
+            )
+        })
+    }
+
+    /// Sends companion lines over the live link; returns whether every line
+    /// was queued.
+    pub fn send_companion_lines(
+        &mut self,
+        context: &mut StateCoreContext,
+        lines: Vec<agenc_ircd_federation_wire::FederationLineText>,
+    ) -> bool {
+        for line in lines {
+            let Some(live) = self.live.as_ref() else {
+                return false;
+            };
+            if let Err(refusal) = live.handle.try_send(line) {
+                self.send_failed(context, SendFailure::from(refusal));
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Closes the link after a companion violation.
+    pub fn fail_companion_link(&mut self, context: &mut StateCoreContext) {
+        self.fail_link(context, Violation::Companion(CompanionViolation::Request));
+    }
+
     /// Stages one companion part of a cross-profile barrier handed over by
     /// the E2EE router; a violation closes the link and returns `false`.
     pub fn companion_barrier_part(
@@ -331,6 +430,43 @@ impl EdgeFederation {
                 false
             }
         }
+    }
+
+    /// The complete barrier awaiting its apply transaction, when the batch
+    /// slot can take it; the E2EE router answers with its companion writes.
+    #[must_use]
+    pub fn barrier_ready(&self) -> Option<[u8; 16]> {
+        barrier::ready_mutation(self)
+    }
+
+    /// Applies the complete barrier with the E2EE router's rows in the same
+    /// transaction; a violation closes the link and returns `false`.
+    pub(crate) fn apply_barrier(
+        &mut self,
+        context: &mut StateCoreContext,
+        companion_writes: Vec<crate::state_core::durable::AccountServiceDurableWrite>,
+    ) -> bool {
+        match barrier::apply(self, context, companion_writes) {
+            Ok(()) => true,
+            Err(violation) => {
+                self.fail_link(context, violation);
+                false
+            }
+        }
+    }
+
+    /// Whether the barrier of `mutation_id` applied and its receipt stands.
+    #[must_use]
+    pub fn barrier_applied(&self, mutation_id: &[u8; 16]) -> bool {
+        self.barrier.applied.contains_key(mutation_id)
+    }
+
+    /// Records the companion delivery position the E2EE router has applied
+    /// and acknowledged, so a barrier's companion parts verify against the
+    /// live stream rather than a cursor of their own.
+    pub fn note_companion_delivery(&mut self, generation: u64, cursor: Option<(u64, [u8; 16])>) {
+        self.barrier.companion_generation = generation;
+        self.barrier.companion_cursor = cursor;
     }
 
     /// The companion delivery generation and last acknowledged position the
@@ -378,7 +514,10 @@ impl EdgeFederation {
         let Some(readiness) = &self.readiness else {
             return;
         };
-        if self.network_available() {
+        // An encrypted node is ready only once the companion profile is
+        // active on the same link (companion 12.5).
+        let companion_ready = !self.companion.has_profile() || self.companion_active();
+        if self.network_available() && companion_ready {
             readiness.mark(ReadinessStage::Federation);
         } else {
             readiness.clear(ReadinessStage::Federation);
@@ -437,6 +576,7 @@ impl EdgeFederation {
             }
             LinkEvent::Companion(frame) if self.link_is(link) => {
                 let outcome = self.handle_companion(frame);
+                self.note_phase();
                 self.settle(context, link, outcome)
             }
             LinkEvent::Frame(_) | LinkEvent::Object { .. } | LinkEvent::Companion(_) => Vec::new(),
@@ -719,6 +859,7 @@ impl EdgeFederation {
                 object_id: [0; 32],
                 previous_object_id: [0; 32],
                 session: None,
+                account: None,
                 acked_generation: None,
                 deleted: false,
             },
@@ -764,6 +905,8 @@ impl EdgeFederation {
 
     /// Requests a session for a connection that completed local
     /// registration; returns whether the request was accepted for sending.
+    // agenc-review: allow owner=runtime reviewed=2026-09-03 reason=a session open carries the connection its registration facts capability hash and optional grant in the exact field order of the operation
+    #[allow(clippy::too_many_arguments)]
     pub fn open_session(
         &mut self,
         context: &mut StateCoreContext,
@@ -772,6 +915,7 @@ impl EdgeFederation {
         nickname: &str,
         realname: &str,
         capability_hash: [u8; 32],
+        auth_grant_id: Option<[u8; 32]>,
     ) -> bool {
         self.network_available()
             && request::send_session_open(
@@ -782,6 +926,32 @@ impl EdgeFederation {
                 nickname,
                 realname,
                 capability_hash,
+                auth_grant_id,
+            )
+            .is_ok()
+    }
+
+    /// Forwards one sealed account carrier envelope of a pre-registration
+    /// client to the coordinator (spec 22.2); `false` when the link is not
+    /// active or the envelope does not decode.
+    pub fn send_account_carrier(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+        opcode: agenc_ircd_types::FederationOpcode,
+        envelope: &[u8],
+        finish: bool,
+        carrier_generation: u64,
+    ) -> bool {
+        self.network_available()
+            && request::send_account_carrier(
+                self,
+                context,
+                generation,
+                opcode,
+                envelope,
+                finish,
+                carrier_generation,
             )
             .is_ok()
     }

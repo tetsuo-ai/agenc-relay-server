@@ -17,6 +17,7 @@ use agenc_ircd_e2ee::wire::reply::E2eeReplyCode;
 use agenc_ircd_federation_wire::CanonicalEncode;
 use agenc_ircd_types::{ChannelInstanceId, OriginId, ServerId, ServerIncarnation, UserId};
 
+use super::ConversationState;
 use super::events::{self, BarrierAssignment, EventContent};
 use super::ops::{self, Exec, Fail};
 use super::request::{self, Classified, Decoded, Outcome, ResponseObject};
@@ -360,9 +361,95 @@ fn execute(
         source_view,
     };
     match ops::execute(&mut exec) {
-        Ok(outcome) => outcome,
+        Ok(mut outcome) => {
+            project_routes(&exec, &mut outcome);
+            outcome
+        }
         Err(Fail { code, context }) => Outcome::failed(code, context),
     }
+}
+
+/// Route projection entitlement (companion 12.5): every target of a
+/// route-state copy becomes entitled to that route when the batch commits,
+/// and a copy of any other event for a target not yet entitled is preceded
+/// by a route-state copy of the retained route object, so the edge holds
+/// the route before it renders the event. Channel hosts stay entitled;
+/// direct routes count the event as one reference.
+fn project_routes(exec: &Exec<'_>, outcome: &mut Outcome) {
+    use agenc_ircd_domain::e2ee::projection::EntitlementReason;
+    let state = &exec.coordinator.state;
+    let mut entitled: Vec<(ServerId, [u8; 32], bool)> = Vec::new();
+    let mut projected = Vec::new();
+    for content in &outcome.events {
+        let Some(conversation) = content.planned.conversation_id else {
+            continue;
+        };
+        let target = content.planned.target;
+        let Some(known) = state.conversations.get(&conversation) else {
+            continue;
+        };
+        let direct = known.direct_accounts.is_some();
+        let already = state.entitlements.entitled(target, &conversation)
+            || entitled
+                .iter()
+                .any(|(edge, id, _)| *edge == target && *id == conversation);
+        let kind = content.planned.kind;
+        if kind == EventKind::RouteStateChanged {
+            entitled.push((target, conversation, direct));
+            continue;
+        }
+        if kind == EventKind::RouteStateHidden || already {
+            continue;
+        }
+        let Some(copy) = route_copy(exec, target, conversation, known) else {
+            continue;
+        };
+        projected.push(copy);
+        entitled.push((target, conversation, direct));
+    }
+    outcome.events.extend(projected);
+    if entitled.is_empty() {
+        return;
+    }
+    outcome.effects.push(Box::new(move |companion| {
+        for (target, conversation, direct) in entitled {
+            if direct {
+                let _ = companion.entitlements.require_direct(
+                    target,
+                    conversation,
+                    EntitlementReason::Event,
+                );
+            } else {
+                companion
+                    .entitlements
+                    .set_channel(target, conversation, true);
+            }
+        }
+    }));
+}
+
+/// The route-state copy that projects `conversation`'s retained route
+/// object to `target`, at the sequencer head.
+fn route_copy(
+    exec: &Exec<'_>,
+    target: ServerId,
+    conversation: [u8; 32],
+    known: &ConversationState,
+) -> Option<EventContent> {
+    let state = &exec.coordinator.state;
+    let route_object = state.objects.get(&known.route_object_id).cloned()?;
+    let sequence = state
+        .logs
+        .get(&conversation)
+        .map_or(0, |log| log.head().sequence);
+    Some(exec.event(
+        EventKind::RouteStateChanged,
+        Some(conversation),
+        target,
+        sequence,
+        Vec::new(),
+        Some(route_object),
+    ))
 }
 
 /// The base binding plan of a channel whose member accounts are exactly
@@ -571,7 +658,14 @@ fn assemble(
         retain_until,
     )?;
     writes.push(replay_write);
-    writes.append(&mut outcome.writes);
+    // An operation may retain the same object it also returns as a
+    // response (an attach challenge, a delivered mailbox item); one batch
+    // puts each object row once.
+    for write in outcome.writes.drain(..) {
+        if !writes.iter().any(|existing| existing.same_put(&write)) {
+            writes.push(write);
+        }
+    }
     let mut effects = outcome.effects;
     let request_object_id = decoded.request_object_id;
     let stored = StoredResult {

@@ -444,6 +444,16 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         tbs,
     };
     let resulting_epoch = certificate.tbs.request.proof.core.resulting_epoch;
+    // The public authorization rule tells the route which lifecycle
+    // transition this certificate completes (companion 13.2 step 8).
+    let activates_bootstrap = certificate
+        .tbs
+        .request
+        .proof
+        .authorization
+        .tbs
+        .authorization_rule
+        == agenc_ircd_e2ee::objects::conversation::IrcCommitAuthorizationRule::BootstrapActivation;
     let record = record_bytes(&IrcSequencerRecord::Finalization(certificate))?;
     let record_id = *agenc_ircd_e2ee::ObjectId::compute(&record).as_bytes();
     let mut next_log = log.clone();
@@ -498,6 +508,11 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             state.records.insert(position.route_sequence, record_id);
             state.proofs.insert(finalization_id, request_object_id);
             state.acks.remove(&candidate_id);
+        }
+        if activates_bootstrap
+            && let Some(lifecycle) = companion.lifecycles.get_mut(&conversation_id)
+        {
+            let _activated = lifecycle.bootstrap_activated();
         }
     }));
     Ok(outcome)

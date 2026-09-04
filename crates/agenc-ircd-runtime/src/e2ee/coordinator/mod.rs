@@ -39,6 +39,7 @@ pub mod events;
 pub mod execute;
 pub mod ops;
 pub mod request;
+mod startup;
 pub mod sync;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -168,8 +169,18 @@ pub struct CompanionState {
     pub binding_locks: BTreeMap<([u8; 32], [u8; 32]), LockChain>,
 }
 
-/// Lock object IDs by sequence for one (account, root fingerprint).
-pub type LockChain = BTreeMap<u64, [u8; 32]>;
+/// The root binding locks of one (account, root fingerprint) by sequence.
+pub type LockChain = BTreeMap<u64, LockEntry>;
+
+/// One retained root binding lock: its semantic identifier, which the next
+/// lock of the chain names, and its retained object.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LockEntry {
+    /// The lock identifier.
+    pub lock_id: [u8; 32],
+    /// The retained lock object.
+    pub object_id: [u8; 32],
+}
 /// Approval object IDs by (root fingerprint, device) for one candidate.
 pub type ApprovalSlots = BTreeMap<([u8; 32], [u8; 16]), [u8; 32]>;
 
@@ -298,6 +309,7 @@ pub struct CompanionCoordinator {
     signer: Option<SequencerSigner>,
     key_set: Option<SequencerKeySet>,
     current_credential: Option<agenc_ircd_e2ee::objects::conversation::IrcSequencerCredential>,
+    global_disk_bytes: u64,
     assembler: E2eeAssembler,
     open: BTreeMap<(ServerId, [u8; 16]), OpenRequest>,
     queued: BTreeMap<ServerId, VecDeque<QueuedCompanion>>,
@@ -309,6 +321,8 @@ pub struct CompanionCoordinator {
     pub peers: BTreeMap<ServerId, sync::PeerSync>,
     /// Lines to send, drained by the owner.
     pub outbound: VecDeque<(ServerId, FederationLineText)>,
+    /// Durable rows collected during the startup reload.
+    restore: startup::Restore,
 }
 
 /// Why a companion frame failed the link.
@@ -349,6 +363,7 @@ impl CompanionCoordinator {
             server_name,
             signer: None,
             key_set: None,
+            global_disk_bytes: 0,
             current_credential: None,
             assembler: E2eeAssembler::default(),
             open: BTreeMap::new(),
@@ -357,7 +372,67 @@ impl CompanionCoordinator {
             pending: None,
             peers: BTreeMap::new(),
             outbound: VecDeque::new(),
+            restore: startup::Restore::default(),
         }
+    }
+
+    /// Collects one durable E2EE row during the coordinator's startup
+    /// reload; the state is rebuilt by [`Self::finish_restore`].
+    pub fn admit_restored(
+        &mut self,
+        table: agenc_ircd_storage::TableId,
+        key: &agenc_ircd_storage::StoredKey,
+        value: &agenc_ircd_storage::PersistentRecordValue,
+    ) {
+        self.restore.admit(table, key, value);
+    }
+
+    /// Rebuilds the companion state from the collected rows.
+    pub fn finish_restore(&mut self) {
+        let restore = std::mem::take(&mut self.restore);
+        startup::rebuild(self, restore);
+    }
+
+    /// Records the configured logical E2EE disk ceiling for `STATS E2EE`.
+    pub fn set_global_disk_bytes(&mut self, bytes: u64) {
+        self.global_disk_bytes = bytes;
+    }
+
+    /// The nine `STATS E2EE` values (spec 22.3, companion 17): counts and
+    /// bytes only.
+    #[must_use]
+    pub fn stats(&self) -> [u64; 9] {
+        use agenc_ircd_domain::e2ee::RecoveryState;
+        let count = |value: usize| u64::try_from(value).unwrap_or(u64::MAX);
+        let active = self
+            .state
+            .routes
+            .routes()
+            .filter(|route| route.accepts_traffic())
+            .count();
+        let recovery_pending = self
+            .state
+            .routes
+            .routes()
+            .filter(|route| route.recovery == RecoveryState::Pending)
+            .count();
+        let pending_candidates = self
+            .state
+            .logs
+            .values()
+            .filter(|log| log.has_candidate())
+            .count();
+        [
+            1,
+            count(active),
+            count(recovery_pending),
+            count(self.state.directory.entry_count()),
+            count(self.state.mailboxes.item_count()),
+            count(self.state.objects.len()),
+            count(self.state.object_bytes),
+            self.global_disk_bytes,
+            count(pending_candidates),
+        ]
     }
 
     /// Installs the sequencer key, the verified key set, and the raw current

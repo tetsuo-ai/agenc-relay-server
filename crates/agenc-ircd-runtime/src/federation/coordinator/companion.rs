@@ -3,7 +3,7 @@
 //! against the state core as one batch, snapshot READY records stage their
 //! own batch, and committed lines go out over the live links.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use agenc_ircd_domain::federation::{OriginKey, OriginStatus, OriginTable};
 use agenc_ircd_e2ee::federation::frames::CompanionFrame;
@@ -49,6 +49,10 @@ struct HostView<'a> {
     origins: &'a OriginTable,
     peers: &'a BTreeMap<ServerId, PeerState>,
     revision: u64,
+    /// The peer the frame came from.
+    peer: ServerId,
+    /// The channel instances of bound routes the frame's peer holds.
+    held_channels: BTreeSet<[u8; 16]>,
 }
 
 impl CompanionHost for HostView<'_> {
@@ -104,6 +108,54 @@ impl CompanionHost for HostView<'_> {
     fn state_generation(&self) -> u64 {
         self.revision
     }
+
+    fn holds_channel(&self, instance: [u8; 16]) -> bool {
+        self.held_channels.contains(&instance)
+    }
+
+    fn hosts_account(&self, account: &[u8; 24]) -> bool {
+        let Some(incarnation) = self
+            .peers
+            .get(&self.peer)
+            .and_then(|state| state.live.as_ref())
+            .map(|live| live.incarnation)
+        else {
+            return false;
+        };
+        self.origins
+            .origins_of(self.peer, incarnation)
+            .filter(|(_, entry)| entry.status == OriginStatus::Live)
+            .filter_map(|(_, entry)| entry.principal.account)
+            .any(|(held, _)| held.to_text().as_bytes() == account)
+    }
+}
+
+/// The channel instances of bound routes that `peer` holds in the base
+/// projection, computed before the executor is borrowed.
+fn held_channels(
+    coordinator: &FederationCoordinator,
+    context: &StateCoreContext,
+    peer: ServerId,
+) -> BTreeSet<[u8; 16]> {
+    let Some(standing) = context
+        .federation()
+        .and_then(|projector| projector.index().edge(peer))
+    else {
+        return BTreeSet::new();
+    };
+    coordinator
+        .companion_exec
+        .as_ref()
+        .map(|executor| executor.state.routes.routes())
+        .into_iter()
+        .flatten()
+        .filter_map(|route| match route.target {
+            agenc_ircd_domain::e2ee::RouteTarget::Channel(instance) => Some(instance),
+            agenc_ircd_domain::e2ee::RouteTarget::Direct(_) => None,
+        })
+        .filter(|instance| standing.holds_channel(*instance))
+        .map(|instance| *instance.as_bytes())
+        .collect()
 }
 
 /// Feeds one admitted frame to the executor and applies what it asks for.
@@ -120,6 +172,8 @@ pub(super) fn admitted(
         origins: &coordinator.origins,
         peers: &coordinator.peers,
         revision,
+        peer,
+        held_channels: held_channels(coordinator, context, peer),
     };
     let Some(executor) = coordinator.companion_exec.as_mut() else {
         return Err(Violation::Companion(CompanionViolation::Unsupported));

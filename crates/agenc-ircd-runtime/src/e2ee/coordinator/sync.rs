@@ -66,6 +66,12 @@ pub trait CompanionHost {
     fn base_resync_epoch(&self, peer: ServerId) -> u64;
     /// The committed coordinator state generation.
     fn state_generation(&self) -> u64;
+    /// Whether the peer the frame came from holds the channel instance in
+    /// the base projection (its route entitlement, companion 12.5).
+    fn holds_channel(&self, instance: [u8; 16]) -> bool;
+    /// Whether the peer the frame came from has a live base origin of
+    /// `account`.
+    fn hosts_account(&self, account: &[u8; 24]) -> bool;
 }
 
 /// What the owner does after one companion frame.
@@ -432,8 +438,36 @@ impl CompanionCoordinator {
                 self.state.origins.insert(key, mirrored);
                 Ok(())
             }
+            None if update && mirrored.generation != 0 => {
+                // A coordinator that reloaded without its companion origins
+                // (they are not durable) meets the replayed declaration of
+                // an origin it acknowledged before. The matched base origin
+                // anchors it; the operation sequence continues after the
+                // retained replay rows of that generation.
+                let mut mirrored = mirrored;
+                mirrored.next_sequence = self.replayed_next_sequence(&key, mirrored.generation);
+                self.state.origins.insert(key, mirrored);
+                Ok(())
+            }
             None => Err(CompanionFault::Protocol),
         }
+    }
+
+    /// The operation sequence after the highest retained replay row of
+    /// one origin generation, zero without any.
+    fn replayed_next_sequence(&self, key: &CompanionOriginKey, generation: u64) -> u64 {
+        self.state
+            .replays
+            .keys()
+            .filter(|replay| {
+                replay.home_server_id == key.home_server_id
+                    && replay.server_incarnation == key.server_incarnation
+                    && replay.origin_id == key.origin_id
+                    && replay.origin_generation == generation
+            })
+            .map(|replay| replay.operation_sequence.saturating_add(1))
+            .max()
+            .unwrap_or(0)
     }
 
     /// EORIGIN DEL: fences the origin at its next unused sequence.
@@ -451,17 +485,17 @@ impl CompanionCoordinator {
             server_incarnation: descriptor.server_incarnation,
             origin_id: descriptor.origin_id,
         };
-        let origin = self
-            .state
-            .origins
-            .get_mut(&key)
-            .ok_or(CompanionFault::Protocol)?;
-        if origin.generation != descriptor.origin_generation
-            || origin.next_sequence != next_operation_sequence
-        {
-            return Err(CompanionFault::Protocol);
+        // An origin this coordinator never learned (its connection ended
+        // while the coordinator was down) has nothing to fence: requests
+        // under it are refused already.
+        if let Some(origin) = self.state.origins.get_mut(&key) {
+            if origin.generation != descriptor.origin_generation
+                || origin.next_sequence != next_operation_sequence
+            {
+                return Err(CompanionFault::Protocol);
+            }
+            origin.fenced = true;
         }
-        origin.fenced = true;
         let ack = line(
             &self.server_name,
             &CompanionFrame::OriginAck {
@@ -500,14 +534,14 @@ impl CompanionCoordinator {
             sync.incarnation == Some(incarnation) && self.state.streams.contains_key(&peer);
         let reset = host.base_resync_epoch(peer) > sync.resync_epoch || sync.transfer_incomplete;
         if !same_scope || reset {
-            let generation = if same_scope {
-                self.state
-                    .streams
-                    .get(&peer)
-                    .map_or(0, |stream| stream.generation.saturating_add(1))
-            } else {
-                0
-            };
+            // A retired generation never restarts: the next one follows
+            // the last stream this coordinator knows for the peer, which a
+            // reload took from the durable cursor row.
+            let generation = self
+                .state
+                .streams
+                .get(&peer)
+                .map_or(0, |stream| stream.generation.saturating_add(1));
             return self.begin_snapshot(peer, incarnation, generation, now_millis, host, entropy);
         }
         let stream = self
@@ -547,6 +581,7 @@ impl CompanionCoordinator {
         host: &dyn CompanionHost,
         entropy: &mut dyn EntropySource,
     ) -> Result<Vec<Action>, CompanionFault> {
+        self.refresh_entitlements(peer, host);
         let entries = self.entitled_entries(peer)?;
         let ids: Vec<[u8; 32]> = entries
             .iter()
@@ -614,6 +649,76 @@ impl CompanionCoordinator {
     }
 
     /// The entitled route states of `peer` in canonical conversation order.
+    /// Brings the standing of `peer` in line with the base facts before a
+    /// cut: channel routes follow the channel-detail entitlement, and a
+    /// direct route is held by every edge with an attached device of one
+    /// of its accounts. A reloaded coordinator has no standing until here.
+    fn refresh_entitlements(&mut self, peer: ServerId, host: &dyn CompanionHost) {
+        use agenc_ircd_domain::e2ee::RouteTarget;
+        use agenc_ircd_domain::e2ee::projection::EntitlementReason;
+        let routes: Vec<([u8; 32], RouteTarget)> = self
+            .state
+            .routes
+            .routes()
+            .map(|route| (route.conversation_id.0, route.target))
+            .collect();
+        for (conversation, target) in routes {
+            let entitled = match target {
+                RouteTarget::Channel(instance) => {
+                    let holds = host.holds_channel(*instance.as_bytes());
+                    self.state
+                        .entitlements
+                        .set_channel(peer, conversation, holds);
+                    continue;
+                }
+                RouteTarget::Direct(_) => self.state.entitlements.entitled(peer, &conversation),
+            };
+            if entitled || !self.hosts_direct_account(peer, &conversation, host) {
+                continue;
+            }
+            let _ = self.state.entitlements.require_direct(
+                peer,
+                conversation,
+                EntitlementReason::Operation,
+            );
+        }
+    }
+
+    /// Whether `peer` hosts one account of the direct conversation: a live
+    /// base origin of the account, or an attached device declared to the
+    /// companion profile.
+    fn hosts_direct_account(
+        &self,
+        peer: ServerId,
+        conversation: &[u8; 32],
+        host: &dyn CompanionHost,
+    ) -> bool {
+        let Some((first, second)) = self
+            .state
+            .conversations
+            .get(conversation)
+            .and_then(|state| state.direct_accounts)
+        else {
+            return false;
+        };
+        if host.hosts_account(&first) || host.hosts_account(&second) {
+            return true;
+        }
+        let digests: Vec<[u8; 32]> = [first, second]
+            .iter()
+            .filter_map(|account| {
+                agenc_ircd_e2ee::ids::account_id_digest(&self.network_id, account).ok()
+            })
+            .collect();
+        self.state.origins.values().any(|origin| {
+            origin.home_server_id == *peer.as_bytes()
+                && origin.device.is_some()
+                && origin
+                    .account_digest
+                    .is_some_and(|digest| digests.contains(&digest))
+        })
+    }
+
     fn entitled_entries(&self, peer: ServerId) -> Result<Vec<Entry>, CompanionFault> {
         let mut entries = Vec::new();
         let mut bytes_total: u64 = 0;

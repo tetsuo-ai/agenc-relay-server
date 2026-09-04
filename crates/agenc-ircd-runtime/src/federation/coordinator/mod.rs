@@ -7,6 +7,7 @@
 //! peer rows commit with the domain mutation that caused them, and the
 //! coordinator only renders FRESULT and FEVENT lines after that commit.
 
+mod accounts;
 mod companion;
 mod convert;
 mod grace;
@@ -53,7 +54,8 @@ use crate::state_core::{PeerQuarantineRefusal, StateCoreContext};
 use crate::sync::Arc;
 use agenc_ircd_e2ee::federation::frames::CompanionFrame;
 
-pub(crate) use request::PendingCrypto;
+pub(crate) use accounts::{InFlightCarrier, RemoteAccountWork, challenge_object};
+pub(crate) use request::{FreshRequest, PendingCrypto};
 
 /// Requests queued behind one link's in-flight crypto continuation; the
 /// fragment assembler already bounds a link to this many objects.
@@ -230,6 +232,7 @@ pub struct FederationCoordinator {
     /// Open cross-profile barriers by target (spec 20.8): later events on
     /// either stream wait until both final acknowledgements arrive.
     barriers: BTreeMap<ServerId, OpenBarrier>,
+    remote_accounts: accounts::RemoteAccounts,
 }
 
 /// One cross-profile barrier awaiting both cumulative acknowledgements.
@@ -305,6 +308,7 @@ impl FederationCoordinator {
             counters: CoordinatorCounters::default(),
             companion_exec: None,
             barriers: BTreeMap::new(),
+            remote_accounts: accounts::RemoteAccounts::default(),
         }
     }
 
@@ -656,6 +660,7 @@ impl FederationCoordinator {
             return;
         }
         self.links.remove(&link);
+        self.remote_carriers_link_closed(peer);
         self.companion.link_closed(link);
         if let Some(executor) = self.companion_exec.as_mut() {
             executor.link_closed(peer);
@@ -1040,6 +1045,7 @@ impl FederationCoordinator {
                 self.counters.requests_committed =
                     self.counters.requests_committed.saturating_add(1);
                 self.send_result(context, link, peer, descriptor, &result);
+                self.remote_grant_committed();
             }
             Some(PendingCommit::OriginAck {
                 peer, link, frame, ..
@@ -1083,6 +1089,7 @@ impl FederationCoordinator {
 
     /// Drops the work behind a rejected batch; the edge retries it.
     pub fn batch_rejected(&mut self, context: &mut StateCoreContext) {
+        self.remote_grant_rejected();
         match self.pending.take() {
             Some(PendingCommit::Cleanup { peer }) => grace::continue_cleanup(self, context, peer),
             Some(PendingCommit::Companion { .. }) => {

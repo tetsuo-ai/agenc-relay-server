@@ -461,6 +461,39 @@ fn registration_router(
     )?)
 }
 
+/// The edge role over `router`, with the companion profile and the edge
+/// E2EE router attached when `edge_profile` is given.
+fn edge_router(
+    router: RegistrationRouter,
+    identity: &FixtureIdentity,
+    prefix: &str,
+    coordinator: crate::federation::PeerIdentity,
+    edge_profile: Option<crate::e2ee::link::CompanionProfile>,
+) -> TestResult<RegistrationRouter> {
+    let coordinator_server_id = coordinator.server_id();
+    let mut edge =
+        crate::federation::edge::EdgeFederation::new(crate::federation::edge::EdgeConfig {
+            network_id: identity.network_id,
+            server_id: identity.server_id,
+            server_name: prefix.to_owned(),
+            incarnation: identity.server_incarnation,
+            coordinator,
+        });
+    let Some(profile) = edge_profile else {
+        return Ok(router.with_edge(edge));
+    };
+    edge.set_companion_profile(Some(profile));
+    let e2ee = crate::e2ee::edge::E2eeEdge::new(crate::e2ee::edge::E2eeEdgeConfig {
+        network_id: *identity.network_id.as_bytes(),
+        server_id: identity.server_id,
+        server_name: prefix.to_owned(),
+        coordinator_server_id,
+        incarnation: *identity.server_incarnation.as_bytes(),
+        global_disk_bytes: 1 << 30,
+    });
+    Ok(router.with_edge(edge).with_e2ee_edge(e2ee)?)
+}
+
 impl StateCoreFixture {
     /// Builds the fixture with the pre-composition router that rejects every
     /// line; `entropy` scripts every entropy draw the test makes.
@@ -543,7 +576,24 @@ impl StateCoreFixture {
         role: Option<FederationRole>,
         records: Vec<InitialStorageRecord>,
     ) -> TestResult<Self> {
-        Self::build_with_companion(entropy, registration, role, records, None)
+        Self::build_with_companion(entropy, registration, role, records, None, None)
+    }
+
+    /// Builds an edge fixture whose edge role negotiates the companion
+    /// profile and routes E2EE client lines through the edge E2EE router.
+    pub(crate) fn with_e2ee_edge(
+        entropy: Vec<u8>,
+        coordinator: crate::federation::PeerIdentity,
+        profile: crate::e2ee::link::CompanionProfile,
+    ) -> TestResult<Self> {
+        Self::build_with_companion(
+            entropy,
+            true,
+            Some(FederationRole::Edge(coordinator)),
+            Vec::new(),
+            None,
+            Some(profile),
+        )
     }
 
     /// Builds a coordinator fixture whose federation coordinator carries the
@@ -559,6 +609,7 @@ impl StateCoreFixture {
             Some(FederationRole::Coordinator(peers)),
             Vec::new(),
             Some(companion),
+            None,
         )?;
         let network_id = fixture.identity.network_id;
         let server_id = fixture.identity.server_id;
@@ -574,6 +625,7 @@ impl StateCoreFixture {
         role: Option<FederationRole>,
         records: Vec<InitialStorageRecord>,
         companion: Option<CompanionSetup>,
+        edge_profile: Option<crate::e2ee::link::CompanionProfile>,
     ) -> TestResult<Self> {
         // An edge fixture carries its own server identity so it never shares
         // the coordinator fixture's Server ID inside one test.
@@ -613,19 +665,16 @@ impl StateCoreFixture {
                         .with_federation(coordinator),
                 )
             }
-            (true, Some(FederationRole::Edge(coordinator))) => Box::new(
-                registration_router(&identity, &opaque, key_state, prefix)?.with_edge(
-                    crate::federation::edge::EdgeFederation::new(
-                        crate::federation::edge::EdgeConfig {
-                            network_id: identity.network_id,
-                            server_id: identity.server_id,
-                            server_name: prefix.to_owned(),
-                            incarnation: identity.server_incarnation,
-                            coordinator,
-                        },
-                    ),
-                ),
-            ),
+            (true, Some(FederationRole::Edge(coordinator))) => {
+                let router = registration_router(&identity, &opaque, key_state, prefix)?;
+                Box::new(edge_router(
+                    router,
+                    &identity,
+                    prefix,
+                    coordinator,
+                    edge_profile,
+                )?)
+            }
             (true, None) => Box::new(registration_router(&identity, &opaque, key_state, prefix)?),
             (false, _) => Box::new(DefaultRouter),
         };
@@ -1152,4 +1201,80 @@ impl StateCoreFixture {
         self.state_mut()?.install_reload_inbox(inbox)?;
         Ok((port, admission))
     }
+}
+
+/// A sealed authentication-start envelope for the fixture's account service:
+/// the OPAQUE KE1 carries valid group elements so the server round runs.
+pub(crate) fn sealed_authentication_start(
+    network_id: agenc_ircd_types::NetworkId,
+    recovery_epoch: agenc_ircd_types::RecoveryEpoch,
+    login: &str,
+    request_seed: u8,
+) -> TestResult<Vec<u8>> {
+    use agenc_ircd_auth::{
+        AccountRequestPayload, AccountServiceEnvelope, AuthenticationStart, OpaqueKe1,
+        encode_request_plaintext,
+    };
+    use agenc_ircd_crypto::{AccountHpkePrivateKey, AccountRequestBinding, seal_account_request};
+    const BASEPOINT: [u8; 32] = [
+        0xe2, 0xf2, 0xae, 0x0a, 0x6a, 0xbc, 0x4e, 0x71, 0xa8, 0x84, 0xa9, 0x61, 0xc5, 0x00, 0x51,
+        0x5f, 0x58, 0xe3, 0x0b, 0x6a, 0xa5, 0x82, 0xdd, 0x8d, 0xb6, 0xa6, 0x59, 0x45, 0xe0, 0x8d,
+        0x2d, 0x76,
+    ];
+    let private_key = AccountHpkePrivateKey::from_bytes([40; 32])?;
+    let public_key = private_key.public_key()?;
+    let mut ke1 = [0_u8; 96];
+    ke1[..32].copy_from_slice(&BASEPOINT);
+    ke1[32..64].copy_from_slice(&[7; 32]);
+    ke1[64..].copy_from_slice(&BASEPOINT);
+    let payload = AccountRequestPayload::AuthenticationStart(AuthenticationStart {
+        network_id,
+        login: agenc_ircd_types::NormalizedLogin::prepare(login)?,
+        ke1: OpaqueKe1::from_bytes(ke1)?,
+    });
+    let binding = AccountRequestBinding::new(
+        network_id,
+        recovery_epoch,
+        public_key.key_id(),
+        agenc_ircd_types::RequestId::from_bytes([request_seed; 16]),
+        payload.message_kind(),
+    );
+    let plaintext = encode_request_plaintext(&payload)?;
+    let (sealed, _token) = seal_account_request(public_key, binding, plaintext.expose_for_hpke())?;
+    Ok(AccountServiceEnvelope::from_sealed(sealed)?
+        .as_bytes()
+        .to_vec())
+}
+
+/// A sealed authentication-finish envelope for the fixture's account
+/// service; the edge relays it without opening it.
+pub(crate) fn sealed_authentication_finish(
+    network_id: agenc_ircd_types::NetworkId,
+    recovery_epoch: agenc_ircd_types::RecoveryEpoch,
+    request_seed: u8,
+) -> TestResult<Vec<u8>> {
+    use agenc_ircd_auth::{
+        AccountRequestPayload, AccountServiceEnvelope, AuthenticationFinish, OpaqueKe3,
+        encode_request_plaintext,
+    };
+    use agenc_ircd_crypto::{AccountHpkePrivateKey, AccountRequestBinding, seal_account_request};
+    let private_key = AccountHpkePrivateKey::from_bytes([40; 32])?;
+    let public_key = private_key.public_key()?;
+    let payload = AccountRequestPayload::AuthenticationFinish(AuthenticationFinish {
+        network_id,
+        transaction_id: agenc_ircd_types::TransactionId::from_bytes([request_seed; 16]),
+        ke3: OpaqueKe3::from_bytes([3; 64])?,
+    });
+    let binding = AccountRequestBinding::new(
+        network_id,
+        recovery_epoch,
+        public_key.key_id(),
+        agenc_ircd_types::RequestId::from_bytes([request_seed; 16]),
+        payload.message_kind(),
+    );
+    let plaintext = encode_request_plaintext(&payload)?;
+    let (sealed, _token) = seal_account_request(public_key, binding, plaintext.expose_for_hpke())?;
+    Ok(AccountServiceEnvelope::from_sealed(sealed)?
+        .as_bytes()
+        .to_vec())
 }

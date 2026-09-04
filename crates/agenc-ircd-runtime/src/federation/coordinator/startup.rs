@@ -31,12 +31,16 @@ const PAGE_ROWS: u16 = 256;
 const ENTRY_DECODE_BYTES: usize = 16_384;
 const ENTRY_DECODE_VALUES: usize = 256;
 
-/// The tables reloaded, in order.
-const TABLES: [TableId; 4] = [
+/// The tables reloaded, in order. The E2EE object table precedes the
+/// state table so every retained object is present when a state row that
+/// names it is admitted.
+const TABLES: [TableId; 6] = [
     TableId::FederationPeer,
     TableId::FederationOrigin,
     TableId::RequestResult,
     TableId::EdgeProjection,
+    TableId::E2eeObject,
+    TableId::E2eeState,
 ];
 
 /// The reload state machine.
@@ -92,6 +96,9 @@ fn request_page(
 /// and an expiry interrupted by the restart resumes hiding its sessions.
 fn finish(coordinator: &mut FederationCoordinator, context: &mut StateCoreContext) {
     coordinator.loader.complete = true;
+    if let Some(executor) = coordinator.companion_exec.as_mut() {
+        executor.finish_restore();
+    }
     grace::restored(coordinator, context);
 }
 
@@ -155,6 +162,11 @@ fn admit(
         (TableId::RequestResult, COORDINATOR_RESULT_KIND) => admit_result(coordinator, key, value),
         (TableId::EdgeProjection, PROJECTION_ENTRY_KIND) => admit_entry(context, key, value),
         (TableId::EdgeProjection, PROJECTION_MARKER_KIND) => admit_marker(coordinator, key, value),
+        (TableId::E2eeObject | TableId::E2eeState, _) => {
+            if let Some(executor) = coordinator.companion_exec.as_mut() {
+                executor.admit_restored(table, key, value);
+            }
+        }
         _ => {}
     }
 }

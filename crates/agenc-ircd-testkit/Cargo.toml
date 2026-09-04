@@ -7,7 +7,9 @@ publish.workspace = true
 
 [dependencies]
 agenc-ircd-client-wire.workspace = true
+agenc-ircd-crypto.workspace = true
 agenc-ircd-domain.workspace = true
+agenc-ircd-e2ee.workspace = true
 agenc-ircd-federation-wire.workspace = true
 agenc-ircd-types.workspace = true
 ed25519-dalek.workspace = true

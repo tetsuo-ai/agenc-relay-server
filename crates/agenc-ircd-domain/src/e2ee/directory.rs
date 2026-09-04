@@ -211,6 +211,42 @@ impl Directory {
         Self::default()
     }
 
+    /// Restores one account entry at startup, replacing any prior entry.
+    pub fn restore_account(&mut self, account_digest: Id, entry: AccountEntry) {
+        self.accounts.insert(account_digest, entry);
+    }
+
+    /// Restores one published package at startup.
+    pub fn restore_package(&mut self, reference: Vec<u8>, package: Package) {
+        self.packages.insert(reference, package);
+    }
+
+    /// Restores one claim result at startup.
+    pub fn restore_claim(
+        &mut self,
+        claimant_digest: Id,
+        operation_id: Id16,
+        parameters: ClaimParameters,
+        outcome: ClaimOutcome,
+        retain_until: u64,
+    ) {
+        self.claims.insert(
+            (claimant_digest, operation_id),
+            ClaimRecord {
+                parameters,
+                outcome,
+                retain_until,
+            },
+        );
+    }
+
+    /// The number of stored directory entries: account heads and
+    /// published packages.
+    #[must_use]
+    pub fn entry_count(&self) -> usize {
+        self.accounts.len().saturating_add(self.packages.len())
+    }
+
     /// The state of one account.
     #[must_use]
     pub fn account(&self, account_digest: &Id) -> Option<&AccountEntry> {

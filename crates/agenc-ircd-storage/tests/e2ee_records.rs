@@ -1137,3 +1137,80 @@ fn an_e2ee_mutation_commits_object_state_replay_outbox_and_barrier_atomically() 
     );
     Ok(())
 }
+
+#[test]
+fn every_state_key_splits_back_into_its_parts() -> Result<(), Box<dyn Error>> {
+    let digest = [7; 32];
+    let device = [8; 16];
+    let other = [9; 32];
+    assert_eq!(
+        SequencerRow::parse_candidate_key(&SequencerRow::candidate_key(&digest, 5)?)?,
+        (digest, 5)
+    );
+    for role in [ProofRole::Approval, ProofRole::Ack, ProofRole::Vote] {
+        let parts = SequencerRow::parse_proof_key(&SequencerRow::proof_key(
+            role, &digest, &other, &digest, &device,
+        )?)?;
+        assert_eq!(parts.role, role);
+        assert_eq!(parts.conversation_id, digest);
+        assert_eq!(parts.subject_id, other);
+        assert_eq!(parts.root_fingerprint, digest);
+        assert_eq!(parts.device_id, device);
+    }
+    assert_eq!(
+        DirectoryRow::parse_identity_key(&DirectoryRow::identity_key(&digest)?)?,
+        digest
+    );
+    assert_eq!(
+        DirectoryRow::parse_roster_key(&DirectoryRow::roster_key(&digest)?)?,
+        digest
+    );
+    assert_eq!(
+        DirectoryRow::parse_capability_key(&DirectoryRow::capability_key(&digest, &device)?)?,
+        (digest, device)
+    );
+    assert_eq!(
+        DirectoryRow::parse_binding_lock_key(&DirectoryRow::binding_lock_key(&digest, &other, 3)?)?,
+        (digest, other, 3)
+    );
+    assert_eq!(
+        PackageRow::parse_package_key(&PackageRow::package_key(&[1, 2, 3])?)?,
+        vec![1, 2, 3]
+    );
+    assert_eq!(
+        PackageRow::parse_claim_key(&PackageRow::claim_key(&digest, &device)?)?,
+        (digest, device)
+    );
+    assert_eq!(
+        AttachRow::parse_key(&AttachRow::key(&digest, &device)?)?,
+        (digest, device)
+    );
+    assert_eq!(
+        MailboxRow::parse_token_key(&MailboxRow::token_key(&other)?)?,
+        other
+    );
+    assert_eq!(
+        MailboxRow::parse_ack_key(&MailboxRow::ack_key(&digest, &device, &other)?)?,
+        (digest, device, other)
+    );
+    assert_eq!(
+        DeliveryRow::parse_cursor_key(&DeliveryRow::cursor_key(&device)?)?,
+        device
+    );
+    assert_eq!(
+        DeliveryRow::parse_snapshot_key(&DeliveryRow::snapshot_key(&device)?)?,
+        device
+    );
+    assert_eq!(
+        ClaimRow::parse_lock_key(&ClaimRow::lock_key(&other)?)?,
+        other
+    );
+    assert_eq!(
+        ClaimRow::parse_reservation_key(&ClaimRow::reservation_key(&device)?)?,
+        device
+    );
+    // A key of another family never parses as this one.
+    assert!(DirectoryRow::parse_roster_key(&DirectoryRow::identity_key(&digest)?).is_err());
+    assert!(SequencerRow::parse_proof_key(&SequencerRow::candidate_key(&digest, 1)?).is_err());
+    Ok(())
+}

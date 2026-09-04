@@ -1,83 +1,96 @@
 ---
 name: observe
-description: "Skill for the Observe area of agenc-ircd. 154 symbols across 9 files."
+description: "Skill for the Observe area of agenc-ircd. 119 symbols across 11 files."
 ---
 
 # Observe
 
-154 symbols | 9 files | Cohesion: 75%
+119 symbols | 11 files | Cohesion: 62%
 
 ## When to Use
 
 - Working with code in `crates/`
-- Understanding how process_started, storage_recovered, state_core_ready work
+- Understanding how listener_lifecycle, command_classified, reload work
 - Modifying observe-related functionality
 
 ## Key Files
 
 | File | Symbols |
 |------|---------|
-| `crates/agenc-ircd-runtime/src/observe/adapter.rs` | process_started, storage_recovered, state_core_ready, listener_lifecycle, federation_link (+46) |
-| `crates/agenc-ircd-runtime/src/observe/log.rs` | depth, hours, get, new, set_retention (+45) |
-| `crates/agenc-ircd-runtime/src/observe/health.rs` | mark, clear, flag, readiness_is_the_conjunction_of_every_stage_and_can_be_cleared, ready (+10) |
-| `crates/agenc-ircd-runtime/src/daemon.rs` | stop_deadline_expired, wait_for_blocking_owners, fail_stop_shutdown, unwind_live_storage_and_log, shutdown_blocking_owners (+7) |
-| `crates/agenc-ircd-runtime/src/observe/events.rs` | with_count, with_purpose, with_error, new, from_os_entropy (+6) |
-| `crates/agenc-ircd-runtime/src/observe/metrics.rs` | record_rate, record, increment, new, key (+6) |
-| `crates/agenc-ircd-runtime/src/state_core/mod.rs` | into_bridges, begin_command_observation |
-| `crates/agenc-ircd-runtime/src/supervisor/panic.rs` | exit_process |
-| `crates/agenc-ircd-storage/src/owner.rs` | try_complete |
+| `crates/agenc-ircd-runtime/src/observe/log.rs` | admits, try_emit_outcome, try_complete, hours, writer (+35) |
+| `crates/agenc-ircd-runtime/src/observe/adapter.rs` | listener_lifecycle, command_classified, reload, admin_action, overload_transition (+21) |
+| `crates/agenc-ircd-runtime/src/observe/metrics.rs` | increment, default, new, observe_duration, observe_count (+8) |
+| `crates/agenc-ircd-runtime/src/observe/health.rs` | mark, clear, flag, readiness_is_the_conjunction_of_every_stage_and_can_be_cleared, new (+7) |
+| `crates/agenc-ircd-runtime/src/daemon.rs` | wait_for_prefix_erasure, stop, wait_for_blocking_owners, retain_stop_failure, fail_stop_shutdown (+6) |
+| `crates/agenc-ircd-runtime/src/observe/events.rs` | with_error, new, from_os_entropy, next, every_code_renders_only_the_allowed_fixed_vocabulary (+3) |
+| `crates/agenc-ircd-runtime/src/connection/queue.rs` | is_closed, pop, prepare |
+| `crates/agenc-ircd-storage/src/owner.rs` | try_complete, into_shutdown, shutdown |
+| `crates/agenc-ircd-runtime/src/admission/transport.rs` | prefix_erasure_delay |
+| `crates/agenc-ircd-runtime/src/sync.rs` | lock |
 
 ## Entry Points
 
 Start here when exploring this area:
 
-- **`process_started`** (Function) — `crates/agenc-ircd-runtime/src/observe/adapter.rs:54`
-- **`storage_recovered`** (Function) — `crates/agenc-ircd-runtime/src/observe/adapter.rs:65`
-- **`state_core_ready`** (Function) — `crates/agenc-ircd-runtime/src/observe/adapter.rs:87`
 - **`listener_lifecycle`** (Function) — `crates/agenc-ircd-runtime/src/observe/adapter.rs:98`
-- **`federation_link`** (Function) — `crates/agenc-ircd-runtime/src/observe/adapter.rs:115`
+- **`command_classified`** (Function) — `crates/agenc-ircd-runtime/src/observe/adapter.rs:220`
+- **`reload`** (Function) — `crates/agenc-ircd-runtime/src/observe/adapter.rs:281`
+- **`admin_action`** (Function) — `crates/agenc-ircd-runtime/src/observe/adapter.rs:303`
+- **`overload_transition`** (Function) — `crates/agenc-ircd-runtime/src/observe/adapter.rs:337`
 
 ## Key Symbols
 
 | Symbol | Type | File | Line |
 |--------|------|------|------|
-| `process_started` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 54 |
-| `storage_recovered` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 65 |
-| `state_core_ready` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 87 |
 | `listener_lifecycle` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 98 |
-| `federation_link` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 115 |
-| `clock_trust_changed` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 136 |
-| `hardening_warning` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 155 |
+| `command_classified` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 220 |
 | `reload` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 281 |
 | `admin_action` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 303 |
-| `admin_authentication` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 321 |
 | `overload_transition` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 337 |
-| `shutdown_phase` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 355 |
-| `with_count` | Function | `crates/agenc-ircd-runtime/src/observe/events.rs` | 457 |
-| `depth` | Function | `crates/agenc-ircd-runtime/src/observe/log.rs` | 148 |
-| `set_log_retention` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 296 |
-| `with_purpose` | Function | `crates/agenc-ircd-runtime/src/observe/events.rs` | 436 |
-| `with_error` | Function | `crates/agenc-ircd-runtime/src/observe/events.rs` | 443 |
-| `hours` | Function | `crates/agenc-ircd-runtime/src/observe/log.rs` | 59 |
-| `get` | Function | `crates/agenc-ircd-runtime/src/observe/log.rs` | 68 |
-| `new` | Function | `crates/agenc-ircd-runtime/src/observe/log.rs` | 82 |
+| `admits` | Function | `crates/agenc-ircd-runtime/src/observe/log.rs` | 91 |
+| `try_emit_outcome` | Function | `crates/agenc-ircd-runtime/src/observe/log.rs` | 126 |
+| `prefix_erasure_delay` | Function | `crates/agenc-ircd-runtime/src/admission/transport.rs` | 78 |
+| `is_closed` | Function | `crates/agenc-ircd-runtime/src/connection/queue.rs` | 419 |
+| `pop` | Function | `crates/agenc-ircd-runtime/src/connection/queue.rs` | 426 |
+| `new` | Function | `crates/agenc-ircd-runtime/src/observe/metrics.rs` | 250 |
+| `observe_duration` | Function | `crates/agenc-ircd-runtime/src/observe/metrics.rs` | 399 |
+| `observe_count` | Function | `crates/agenc-ircd-runtime/src/observe/metrics.rs` | 409 |
+| `lock` | Function | `crates/agenc-ircd-runtime/src/sync.rs` | 15 |
+| `try_complete` | Function | `crates/agenc-ircd-runtime/src/observe/log.rs` | 543 |
+| `try_complete` | Function | `crates/agenc-ircd-storage/src/owner.rs` | 281 |
+| `into_shutdown` | Function | `crates/agenc-ircd-storage/src/owner.rs` | 418 |
+| `shutdown` | Function | `crates/agenc-ircd-storage/src/owner.rs` | 432 |
+| `new` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 36 |
+| `record_rate` | Function | `crates/agenc-ircd-runtime/src/observe/metrics.rs` | 441 |
+
+## Execution Flows
+
+| Flow | Type | Steps |
+|------|------|-------|
+| `Run → Lock` | cross_community | 3 |
+| `Start → Lock` | cross_community | 3 |
+| `Terminal_delivery_failure_keeps_the_committed_intent_terminal → Lock` | cross_community | 3 |
+| `Authenticated_stats_read_the_process_metrics_registry → Lock` | cross_community | 3 |
+| `Account_mutation_waits_for_one_atomic_state_core_commit → Lock` | cross_community | 3 |
+| `Confirmed_die_commits_intent_before_requesting_stop → Lock` | cross_community | 3 |
+| `Observed_output_waits_for_the_durable_audit_reply → Lock` | cross_community | 3 |
 
 ## Connected Areas
 
 | Area | Connections |
 |------|-------------|
-| State_core | 7 calls |
-| Bridge | 7 calls |
+| State_core | 6 calls |
 | Tests | 6 calls |
-| Cluster_414 | 4 calls |
-| Cluster_435 | 2 calls |
-| Admission | 2 calls |
-| Cluster_620 | 1 calls |
-| Examples | 1 calls |
+| Cluster_530 | 4 calls |
+| Cluster_811 | 3 calls |
+| Supervisor | 3 calls |
+| Coordinator | 3 calls |
+| Bridge | 1 calls |
+| Cluster_548 | 1 calls |
 
 ## How to Explore
 
-1. `context({name: "process_started"})` — see callers and callees
+1. `context({name: "listener_lifecycle"})` — see callers and callees
 2. `query({search_query: "observe"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

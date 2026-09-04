@@ -1286,8 +1286,10 @@ fn render_channel_control(
         | ChannelCommand::History(channel_id, _) => channel_id,
     };
     require_event(plan, DomainEvent::ChannelPolicyChanged(channel_id))?;
+    // A federated origin has no reply connection here; its home edge
+    // renders the NOTE when the request completes.
     let Some(reply) = builder.reply else {
-        return Err(RuntimeError::InvalidValue);
+        return Ok(());
     };
     if !reply.capabilities.enabled("standard-replies") {
         return Ok(());

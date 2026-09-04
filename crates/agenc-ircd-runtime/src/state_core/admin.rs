@@ -140,6 +140,11 @@ impl AdminCoreSnapshot {
         self
     }
 
+    pub(crate) fn with_e2ee(mut self, e2ee: [u64; 9]) -> Self {
+        self.e2ee = e2ee;
+        self
+    }
+
     pub(crate) fn with_storage(mut self, storage: [u64; 14]) -> Self {
         self.storage = storage;
         self
@@ -484,6 +489,11 @@ mod tests {
                 .values(StatsSelector::E2ee)
                 .iter()
                 .all(|value| *value == 0)
+        );
+        let encrypted = snapshot.with_e2ee([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(
+            encrypted.values(StatsSelector::E2ee),
+            &[1, 2, 3, 4, 5, 6, 7, 8, 9]
         );
     }
 }

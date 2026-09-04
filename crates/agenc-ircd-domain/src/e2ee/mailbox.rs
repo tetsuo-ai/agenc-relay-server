@@ -142,10 +142,43 @@ pub struct Mailboxes {
 }
 
 impl Mailboxes {
+    /// The number of undelivered or unacknowledged items.
+    #[must_use]
+    pub fn item_count(&self) -> usize {
+        self.items.len()
+    }
+
     /// Empty mailboxes.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Restores one durable item at startup under its stored sequence; the
+    /// next sequence of that mailbox advances past it.
+    pub fn restore_item(&mut self, target: Target, kind: MailboxKind, sequence: u64, item: Item) {
+        let key = ItemKey {
+            target,
+            kind,
+            sequence,
+        };
+        let next = self.next_sequence.entry((target, kind)).or_insert(0);
+        *next = (*next).max(sequence.saturating_add(1));
+        if let Some(grant) = item.grant {
+            self.tokens.insert(grant.token, key);
+        }
+        self.items.insert(key, item);
+    }
+
+    /// Restores one acknowledgement result at startup.
+    pub fn restore_ack(&mut self, target: Target, token: Id, object_id: Id, retain_until: u64) {
+        self.acks.insert(
+            (target, token),
+            AckRecord {
+                object_id,
+                retain_until,
+            },
+        );
     }
 
     /// Queues an object for `target`; returns its sequence.

@@ -510,6 +510,26 @@ pub(crate) enum AccountServiceDurableWrite {
 }
 
 impl AccountServiceDurableWrite {
+    /// Whether both writes put the same plaintext under the same key, so
+    /// one batch can drop a repeated put of an identical row.
+    pub(crate) fn same_put(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Put {
+                    table,
+                    key,
+                    plaintext,
+                },
+                Self::Put {
+                    table: other_table,
+                    key: other_key,
+                    plaintext: other_plaintext,
+                },
+            ) => table == other_table && key == other_key && **plaintext == **other_plaintext,
+            _ => false,
+        }
+    }
+
     pub(crate) fn put(
         table: TableId,
         key: StoredKey,

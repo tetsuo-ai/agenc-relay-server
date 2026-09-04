@@ -44,8 +44,11 @@ const CREDENTIAL_CHANGE_TRANSACTION_KIND: u16 = 3;
 const AUTHENTICATION_GRANT_KIND: u16 = 4;
 const INVITATION_RESERVATION_KIND: u16 = 1;
 const INVITATION_TOMBSTONE_KIND: u16 = 2;
-/// The tables Stage 06 reconstructs, in scan order.
-pub const RECONSTRUCTED_TABLES: [TableId; 16] = [
+/// The tables reconstruction scans, in scan order. The Stage 06 tables are
+/// decoded into the account service; the federation and E2EE tables are
+/// indexed for identity and sizing so later writes carry the right
+/// before-image, and their contents reload through bounded reads.
+pub const RECONSTRUCTED_TABLES: [TableId; 18] = [
     TableId::Account,
     TableId::NicknameReservation,
     TableId::Channel,
@@ -62,6 +65,8 @@ pub const RECONSTRUCTED_TABLES: [TableId; 16] = [
     TableId::FederationOrigin,
     TableId::EdgeOutbox,
     TableId::EdgeProjection,
+    TableId::E2eeObject,
+    TableId::E2eeState,
 ];
 
 /// Account-service rows needed before the first live request is accepted.
@@ -568,14 +573,17 @@ impl Scan {
             (TableId::RegistrationInvite, record_kind) => {
                 self.admit_registration_invite(&key, &value, record_kind)
             }
-            // Federation rows are indexed for identity and sizing here; the
-            // federation router reloads their contents through bounded reads.
+            // Federation and E2EE rows are indexed for identity and sizing
+            // here; the federation router and the companion coordinator
+            // reload their contents through bounded reads.
             (
                 TableId::RequestResult
                 | TableId::FederationPeer
                 | TableId::FederationOrigin
                 | TableId::EdgeOutbox
-                | TableId::EdgeProjection,
+                | TableId::EdgeProjection
+                | TableId::E2eeObject
+                | TableId::E2eeState,
                 _,
             ) => Ok(()),
             _ => Err(RuntimeError::Storage(StorageError::InvalidEncoding)),
