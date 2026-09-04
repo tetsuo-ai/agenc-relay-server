@@ -2487,7 +2487,10 @@ recorded here so a later reviewer does not have to rediscover them.
   last accepted Commit validation time, in-progress ReInit phases, and
   open barriers.
 - The cross-implementation gate runs openmls and mls-rs as testkit-only
-  dependencies; the daemon's own view of their framing is what is compared,
+  dependencies; `.cargo/audit.toml` ignores RUSTSEC-2026-0173, an
+  unmaintained compile-time proc macro that openmls_rust_crypto reaches
+  through the experimental HPKE feature and that no production crate graph
+  contains; the daemon's own view of their framing is what is compared,
   and any deviation between the libraries is recorded in
   `conformance/e2ee-interop-matrix.toml` rather than hidden.
 - Deferred: origin operation sequences after the replay retention window
