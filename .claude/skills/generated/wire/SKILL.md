@@ -79,10 +79,10 @@ Start here when exploring this area:
 | Coordinator | 8 calls |
 | Tests | 6 calls |
 | State_core | 2 calls |
-| Cluster_825 | 2 calls |
+| Cluster_822 | 2 calls |
 | Budget | 1 calls |
 | Admission | 1 calls |
-| Cluster_827 | 1 calls |
+| Cluster_824 | 1 calls |
 | Ops | 1 calls |
 
 ## How to Explore

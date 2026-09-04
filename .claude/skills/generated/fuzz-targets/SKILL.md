@@ -80,7 +80,7 @@ Start here when exploring this area:
 | Cluster_90 | 2 calls |
 | Coordinator | 2 calls |
 | Cluster_85 | 2 calls |
-| Cluster_130 | 1 calls |
+| Cluster_131 | 1 calls |
 
 ## How to Explore
 

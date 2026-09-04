@@ -80,13 +80,13 @@ Start here when exploring this area:
 | Area | Connections |
 |------|-------------|
 | Tests | 5 calls |
-| Cluster_544 | 4 calls |
-| State_core | 3 calls |
+| State_core | 4 calls |
+| Cluster_542 | 4 calls |
 | Coordinator | 3 calls |
 | Bridge | 1 calls |
-| Cluster_565 | 1 calls |
-| Cluster_577 | 1 calls |
-| Cluster_254 | 1 calls |
+| Cluster_563 | 1 calls |
+| Cluster_575 | 1 calls |
+| Admission | 1 calls |
 
 ## How to Explore
 

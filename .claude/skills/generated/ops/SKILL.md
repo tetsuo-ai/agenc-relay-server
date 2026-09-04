@@ -82,14 +82,14 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Coordinator | 24 calls |
-| Tests | 21 calls |
+| Coordinator | 25 calls |
+| Tests | 20 calls |
 | Edge | 9 calls |
-| Cluster_825 | 7 calls |
+| Cluster_822 | 7 calls |
 | E2ee | 6 calls |
 | State_core | 5 calls |
 | Federation | 4 calls |
-| Cluster_348 | 2 calls |
+| Cluster_347 | 2 calls |
 
 ## How to Explore
 

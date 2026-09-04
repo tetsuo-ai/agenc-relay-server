@@ -82,14 +82,14 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Tests | 16 calls |
+| Tests | 17 calls |
 | Listener | 5 calls |
+| State_core | 4 calls |
 | Federation | 3 calls |
 | Cluster_25 | 3 calls |
 | Observe | 3 calls |
-| State_core | 3 calls |
 | Connection | 2 calls |
-| Cluster_484 | 2 calls |
+| Cluster_481 | 2 calls |
 
 ## How to Explore
 

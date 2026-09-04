@@ -1,11 +1,11 @@
 ---
 name: edge
-description: "Skill for the Edge area of agenc-ircd. 192 symbols across 36 files."
+description: "Skill for the Edge area of agenc-ircd. 193 symbols across 36 files."
 ---
 
 # Edge
 
-192 symbols | 36 files | Cohesion: 52%
+193 symbols | 36 files | Cohesion: 52%
 
 ## When to Use
 
@@ -18,7 +18,7 @@ description: "Skill for the Edge area of agenc-ircd. 192 symbols across 36 files
 | File | Symbols |
 |------|---------|
 | `crates/agenc-ircd-runtime/src/federation/edge/mod.rs` | send_frame, batch_applied, companion_active, note_phase, link_established (+28) |
-| `crates/agenc-ircd-runtime/src/e2ee/edge/events.rs` | on_event_frame, route_changed, route_entry, record_witness, apply_event (+18) |
+| `crates/agenc-ircd-runtime/src/e2ee/edge/events.rs` | on_event_frame, route_changed, route_entry, witness, record_witness (+18) |
 | `crates/agenc-ircd-runtime/src/federation/edge/request.rs` | delete_origin, prepare_request, register_request, send_session_open, send_account_carrier (+18) |
 | `crates/agenc-ircd-runtime/src/e2ee/edge/router.rs` | subject_of, line, account, cursor, encode_parameters (+8) |
 | `crates/agenc-ircd-runtime/src/federation/edge/barrier.rs` | acknowledge, applied, apply, apply_base_events, send_companion_ack (+7) |
@@ -61,7 +61,7 @@ Start here when exploring this area:
 | `u64` | Function | `crates/agenc-ircd-e2ee/src/mls_outer.rs` | 473 |
 | `varint` | Function | `crates/agenc-ircd-e2ee/src/mls_outer.rs` | 479 |
 | `decode_value` | Function | `crates/agenc-ircd-runtime/src/e2ee/edge/result.rs` | 103 |
-| `apply` | Function | `crates/agenc-ircd-runtime/src/federation/edge/barrier.rs` | 328 |
+| `witness` | Function | `crates/agenc-ircd-runtime/src/e2ee/edge/events.rs` | 448 |
 
 ## Execution Flows
 
@@ -83,13 +83,13 @@ Start here when exploring this area:
 | Area | Connections |
 |------|-------------|
 | Tests | 30 calls |
-| State_core | 24 calls |
+| State_core | 27 calls |
 | Coordinator | 17 calls |
-| Federation | 15 calls |
+| Federation | 13 calls |
 | Wire | 7 calls |
 | Ops | 7 calls |
 | E2ee | 5 calls |
-| Codec | 4 calls |
+| Codec | 3 calls |
 
 ## How to Explore
 

@@ -1,11 +1,11 @@
 ---
 name: connection
-description: "Skill for the Connection area of agenc-ircd. 84 symbols across 15 files."
+description: "Skill for the Connection area of agenc-ircd. 87 symbols across 16 files."
 ---
 
 # Connection
 
-84 symbols | 15 files | Cohesion: 71%
+87 symbols | 16 files | Cohesion: 70%
 
 ## When to Use
 
@@ -21,7 +21,7 @@ description: "Skill for the Connection area of agenc-ircd. 84 symbols across 15 
 | `crates/agenc-ircd-runtime/src/connection/sink.rs` | for_reservation, len, frame_count, into_transfer, discard (+15) |
 | `crates/agenc-ircd-runtime/src/connection/supervisor.rs` | new, assign_generation, assign_state_permit, arm, finish (+7) |
 | `crates/agenc-ircd-runtime/src/connection/writer.rs` | handle_pop, write_frame, finish, run_writer, orderly_shutdown_acknowledges_only_after_the_writer_finishes (+1) |
-| `crates/agenc-ircd-runtime/src/connection/reader.rs` | new, run_reader, run_reader_sequenced |
+| `crates/agenc-ircd-runtime/src/connection/reader.rs` | new, run_reader, run_reader_sequenced, accept, feed_and_forward |
 | `crates/agenc-ircd-runtime/src/daemon.rs` | flush_reacquires_admin_acknowledgements_after_a_dropped_drain, flush_admin_and_state |
 | `crates/agenc-ircd-runtime/src/admin.rs` | export_memory |
 | `crates/agenc-ircd-runtime/src/budget/mod.rs` | try_acquire_batch |
@@ -81,9 +81,9 @@ Start here when exploring this area:
 | Coordinator | 5 calls |
 | Budget | 5 calls |
 | Tests | 5 calls |
+| State_core | 5 calls |
 | Supervisor | 4 calls |
-| State_core | 3 calls |
-| Cluster_529 | 2 calls |
+| Cluster_527 | 2 calls |
 | Listener | 1 calls |
 
 ## How to Explore

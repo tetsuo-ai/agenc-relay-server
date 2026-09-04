@@ -80,14 +80,14 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Cluster_825 | 31 calls |
+| Cluster_822 | 31 calls |
 | Coordinator | 30 calls |
 | Tests | 18 calls |
-| Cluster_847 | 4 calls |
-| Cluster_850 | 3 calls |
-| Cluster_225 | 3 calls |
-| Cluster_904 | 2 calls |
-| Cluster_849 | 2 calls |
+| Cluster_844 | 4 calls |
+| Cluster_847 | 3 calls |
+| Cluster_226 | 3 calls |
+| Cluster_901 | 2 calls |
+| Cluster_846 | 2 calls |
 
 ## How to Explore
 

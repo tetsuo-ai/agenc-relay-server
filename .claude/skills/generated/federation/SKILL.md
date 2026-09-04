@@ -19,14 +19,14 @@ description: "Skill for the Federation area of agenc-ircd. 344 symbols across 36
 |------|---------|
 | `crates/agenc-ircd-federation-wire/src/semantics.rs` | validate_schema_semantics, validate_event_schema, validate_operation_schema, validate_result_schema, validate_embedded_semantics (+107) |
 | `crates/agenc-ircd-domain/src/federation/projection.rs` | remove, remove_account, empty, new, derive (+78) |
-| `crates/agenc-ircd-domain/src/federation/replica.rs` | new, session, membership, account, local_members (+28) |
+| `crates/agenc-ircd-domain/src/federation/replica.rs` | new, session, membership, account, local_members (+26) |
 | `crates/agenc-ircd-runtime/src/federation/link.rs` | write_line, release_queued, on_outbound, send_ping, parse_line (+17) |
-| `crates/agenc-ircd-e2ee/src/tls.rs` | new, for_maximum, remaining, finish, take (+14) |
+| `crates/agenc-ircd-e2ee/src/tls.rs` | new, for_maximum, remaining, finish, take (+13) |
 | `crates/agenc-ircd-runtime/src/federation/owner.rs` | squit, is_suspended, wait_until_wanted, register, unregister (+7) |
 | `crates/agenc-ircd-runtime/src/federation/certificate.rs` | server_id_from_certificate, tbs_extensions, subject_alt_name_value, parse_single_uri, read_tlv (+3) |
 | `crates/agenc-ircd-domain/src/federation/record.rs` | session, channel_detail, membership, invite, key (+1) |
 | `crates/agenc-ircd-e2ee/src/federation/frames.rs` | is_companion_command, id, parameters, resume_parameters, origin_parameters (+1) |
-| `crates/agenc-ircd-e2ee/src/object.rs` | new, peek, encode_into, decode_from |
+| `crates/agenc-ircd-domain/src/federation/origin.rs` | reset, expire, fence_incarnation, add, update (+1) |
 
 ## Entry Points
 
@@ -82,14 +82,14 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Tests | 35 calls |
-| Coordinator | 14 calls |
-| State_core | 3 calls |
-| Codec | 3 calls |
+| Tests | 36 calls |
+| Coordinator | 16 calls |
 | Supervisor | 2 calls |
-| Cluster_427 | 2 calls |
+| Cluster_424 | 2 calls |
 | Edge | 2 calls |
-| Cluster_970 | 2 calls |
+| Cluster_967 | 2 calls |
+| State_core | 2 calls |
+| Cluster_86 | 1 calls |
 
 ## How to Explore
 

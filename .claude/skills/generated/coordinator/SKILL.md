@@ -1,11 +1,11 @@
 ---
 name: coordinator
-description: "Skill for the Coordinator area of agenc-ircd. 470 symbols across 69 files."
+description: "Skill for the Coordinator area of agenc-ircd. 474 symbols across 69 files."
 ---
 
 # Coordinator
 
-470 symbols | 69 files | Cohesion: 50%
+474 symbols | 69 files | Cohesion: 50%
 
 ## When to Use
 
@@ -18,15 +18,15 @@ description: "Skill for the Coordinator area of agenc-ircd. 470 symbols across 6
 | File | Symbols |
 |------|---------|
 | `crates/agenc-ircd-storage/src/construction_runtime.rs` | validate, start, start_streaming, start_inner, push (+85) |
+| `crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs` | decode_body, decode_object, route_target, direct_accounts, restore_log (+39) |
 | `crates/agenc-ircd-storage/src/e2ee_records.rs` | record_kind_for_key, matches_key, object_body, state_body, structural_body (+37) |
-| `crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs` | decode_body, decode_object, route_target, direct_accounts, restore_log (+32) |
 | `crates/agenc-ircd-runtime/src/federation/coordinator/request.rs` | run_operation, run_query, answer_page, finish_query_decision, close_session (+19) |
 | `crates/agenc-ircd-runtime/src/e2ee/coordinator/sync.rs` | begin_snapshot, entitled_entries, state_fetch, render_page, snapshot_write (+17) |
 | `crates/agenc-ircd-runtime/src/federation/coordinator/convert.rs` | session_seed, directory_schema, rebuild_query, directory_query, nicknames_of (+17) |
 | `crates/agenc-ircd-runtime/src/federation/coordinator/mod.rs` | link_is_live, storage_read_completed, companion_timer_fired, fail_link, timer_fired (+16) |
 | `crates/agenc-ircd-storage/src/engine.rs` | open_construction_source_record, verify_snapshot_accounting, checkpoint_accounting, checkpoint_retired_charges, prepare_application (+11) |
 | `crates/agenc-ircd-runtime/src/federation/coordinator/snapshot.rs` | owns_read, timer_fired, expire, continue_resend, resend_completed (+11) |
-| `crates/agenc-ircd-runtime/src/federation/coordinator/companion.rs` | snapshot_timer_fired, open_barriers, committed, companion_acknowledged, try_close_barrier (+7) |
+| `crates/agenc-ircd-runtime/src/federation/coordinator/companion.rs` | snapshot_timer_fired, companion_acknowledged, try_close_barrier, send_lines, send_to_target (+7) |
 
 ## Entry Points
 
@@ -82,14 +82,14 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Tests | 93 calls |
-| State_core | 36 calls |
+| Tests | 98 calls |
+| State_core | 38 calls |
 | E2ee_records | 18 calls |
-| Cluster_825 | 16 calls |
-| Federation | 13 calls |
-| Ops | 13 calls |
-| Cluster_850 | 12 calls |
-| Codec | 11 calls |
+| Cluster_822 | 16 calls |
+| Ops | 16 calls |
+| Federation | 14 calls |
+| Cluster_847 | 12 calls |
+| Cluster_853 | 10 calls |
 
 ## How to Explore
 
