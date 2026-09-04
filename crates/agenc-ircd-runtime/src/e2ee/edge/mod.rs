@@ -308,7 +308,7 @@ impl E2eeEdge {
         self.counters.refusals = self.counters.refusals.saturating_add(1);
         self.refuse(
             generation,
-            message.command(),
+            message,
             &agenc_ircd_e2ee::wire::reply::E2eeReplyCode::RateLimited.into(),
         )
     }

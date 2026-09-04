@@ -14,7 +14,7 @@ use agenc_ircd_e2ee::wire::command::{
 };
 use agenc_ircd_e2ee::wire::fragment::{FragmentTag, fragment_object, fragment_tag_of};
 use agenc_ircd_e2ee::wire::reply::E2eeReplyCode;
-use agenc_ircd_e2ee::wire::response::render_fail;
+use agenc_ircd_e2ee::wire::response::{render_fail, render_labeled_fail};
 use agenc_ircd_types::ChannelInstanceId;
 
 use crate::connection::ConnectionGeneration;
@@ -120,24 +120,33 @@ impl E2eeEdge {
             Ok(()) => Vec::new(),
             Err(refusal) => {
                 self.counters.refusals = self.counters.refusals.saturating_add(1);
-                self.refuse(generation, message.command(), &refusal)
+                self.refuse(generation, message, &refusal)
             }
         }
     }
 
-    /// The `FAIL` line of one refusal.
+    /// The `FAIL` line of one refusal, labeled when the line was (11.7).
     pub(super) fn refuse(
         &self,
         generation: ConnectionGeneration,
-        command: &str,
+        message: &ParsedMessage,
         refusal: &Refusal,
     ) -> Vec<ClientOutput> {
         let body = refusal
             .code
-            .render_fail(command, refusal.context.as_deref());
-        let line = render_fail(&self.config.server_name, &body)
-            .ok()
-            .and_then(|line| WireMessage::extension_line(&line).ok());
+            .render_fail(message.command(), refusal.context.as_deref());
+        let label = message
+            .tags()
+            .iter()
+            .find(|tag| tag.key() == "label")
+            .and_then(|tag| tag.value())
+            .filter(|label| agenc_ircd_e2ee::wire::tokens::is_safe_label(label));
+        let line = match label {
+            Some(label) => render_labeled_fail(label, &self.config.server_name, &body),
+            None => render_fail(&self.config.server_name, &body),
+        }
+        .ok()
+        .and_then(|line| WireMessage::extension_line(&line).ok());
         match line {
             Some(frame) => vec![ClientOutput {
                 generation,

@@ -168,8 +168,18 @@ pub struct CompanionState {
     pub binding_locks: BTreeMap<([u8; 32], [u8; 32]), LockChain>,
 }
 
-/// Lock object IDs by sequence for one (account, root fingerprint).
-pub type LockChain = BTreeMap<u64, [u8; 32]>;
+/// The root binding locks of one (account, root fingerprint) by sequence.
+pub type LockChain = BTreeMap<u64, LockEntry>;
+
+/// One retained root binding lock: its semantic identifier, which the next
+/// lock of the chain names, and its retained object.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LockEntry {
+    /// The lock identifier.
+    pub lock_id: [u8; 32],
+    /// The retained lock object.
+    pub object_id: [u8; 32],
+}
 /// Approval object IDs by (root fingerprint, device) for one candidate.
 pub type ApprovalSlots = BTreeMap<([u8; 32], [u8; 16]), [u8; 32]>;
 

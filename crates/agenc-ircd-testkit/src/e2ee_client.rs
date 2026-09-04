@@ -85,6 +85,26 @@ pub fn root(
     })
 }
 
+/// Root binding lock identifiers by account.
+pub type LockIds = Vec<([u8; 24], [u8; 32])>;
+
+/// The lock identifier of each root binding lock of `package`, by account.
+pub fn lock_ids(
+    package: &agenc_ircd_e2ee::objects::conversation::IrcConversationBindingPackage,
+) -> Result<LockIds, E2eeError> {
+    package
+        .root_binding_locks
+        .as_slice()
+        .iter()
+        .map(|lock| {
+            Ok((
+                lock.tbs.account_id.exactly::<24>()?,
+                semantic_id_of(SemanticHashDomain::RootBindingLockId, &lock.tbs)?,
+            ))
+        })
+        .collect()
+}
+
 pub fn root_fingerprint(root: &IrcRootIdentity) -> Result<SemanticId, E2eeError> {
     semantic_id_of(SemanticHashDomain::RootFingerprint, &root.tbs)
 }
@@ -416,6 +436,9 @@ pub struct BindingSpec<'a> {
     pub generation: u64,
     pub previous_binding_id: [u8; 32],
     pub lock_sequence: u64,
+    /// The previous lock identifier per account when `lock_sequence` is
+    /// not zero.
+    pub previous_lock_ids: LockIds,
     pub plan_devices: Vec<(&'a [u8; 24], [u8; 32], u8)>,
 }
 
@@ -538,7 +561,12 @@ pub fn binding_package(
                 previous_root_binding_lock_id: if spec.lock_sequence == 0 {
                     [0; 32]
                 } else {
-                    [66; 32]
+                    let account = principal.root.tbs.account_id.exactly::<24>()?;
+                    spec.previous_lock_ids
+                        .iter()
+                        .find(|(previous, _)| *previous == account)
+                        .map(|(_, id)| *id)
+                        .ok_or(E2eeError::InvalidValue)?
                 },
                 semantic_route_lock_id: lock_id,
                 binding_id,

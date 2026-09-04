@@ -403,18 +403,21 @@ impl E2eeEdge {
             .insert(state.conversation_id, conversation);
         self.route_objects
             .insert(state.conversation_id, bytes.to_vec());
+        let tombstone = state.state == IrcRouteStateKind::EncryptedTombstone;
         let row = RouteRow {
             route_state: bytes.to_vec(),
-            lifecycle: match state.state {
-                IrcRouteStateKind::ActiveRoute => RowLifecycle::Active,
-                IrcRouteStateKind::EncryptedTombstone => RowLifecycle::Tombstone,
+            lifecycle: if tombstone {
+                RowLifecycle::Tombstone
+            } else {
+                RowLifecycle::Active
             },
             binding_id: state.binding_id,
             lock_id: state.semantic_route_lock_id,
             accepted_state_id: state.accepted_state_id,
             sequencer_head_id: state.sequencer_record_head_id,
             route_sequence: state.sequencer_record_head_sequence,
-            close_id: None,
+            // A tombstone's head record is its close (companion 12.5).
+            close_id: tombstone.then_some(state.sequencer_record_head_id),
             predecessor_close_id: None,
             recovery_gate: false,
             stored_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),

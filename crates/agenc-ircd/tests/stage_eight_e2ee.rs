@@ -43,7 +43,7 @@ use agenc_ircd_storage::{
     initialize_storage,
 };
 use agenc_ircd_testkit::TlsFixture;
-use agenc_ircd_testkit::crypto::SemanticHashDomain;
+use agenc_ircd_testkit::crypto::{SemanticHashDomain, SignatureDomain};
 use agenc_ircd_testkit::e2ee;
 use agenc_ircd_testkit::e2ee::finality::{Terminal, VoteSlot, vote_tbs};
 use agenc_ircd_testkit::e2ee::ids::semantic_id_of;
@@ -51,7 +51,9 @@ use agenc_ircd_testkit::e2ee::object::{IrcWireObject, IrcWireObjectKind};
 use agenc_ircd_testkit::e2ee::objects::aad::{IrcApplicationAad, IrcCommitAad};
 use agenc_ircd_testkit::e2ee::objects::attach::{IrcDeviceAttach, IrcDeviceAttachChallenge};
 use agenc_ircd_testkit::e2ee::objects::conversation::{
-    IrcCommitAuthorizationRule, IrcCommitAuthorizationTbs, IrcReservation, action_bits,
+    IrcCloseAuthorization, IrcCloseAuthorizationTbs, IrcCloseIntent, IrcCommitAuthorizationRule,
+    IrcCommitAuthorizationTbs, IrcConversationBindingPackage, IrcConversationKind, IrcReservation,
+    IrcSemanticRouteTbs, action_bits,
 };
 use agenc_ircd_testkit::e2ee::objects::sequencing::{
     IrcCandidateReceipt, IrcCommitAck, IrcCommitAckTbs, IrcFinalizationCoreTbs,
@@ -628,6 +630,17 @@ impl DaemonProcess {
         Ok(Self { child: Some(child) })
     }
 
+    /// Ends the process abruptly, as a crash would.
+    fn kill(&mut self) -> TestResult {
+        let mut child = self
+            .child
+            .take()
+            .ok_or_else(|| failure("daemon was already joined"))?;
+        child.kill()?;
+        let _status = child.wait()?;
+        Ok(())
+    }
+
     fn stop(&mut self) -> TestResult<ExitStatus> {
         let child = self
             .child
@@ -898,6 +911,7 @@ const ALICE_DEVICE: u8 = 62;
 const BOB_ROOT: u8 = 71;
 const BOB_DEVICE: u8 = 72;
 const GROUP: [u8; 32] = [77; 32];
+const DIRECT_GROUP: [u8; 32] = [78; 32];
 const E2EE_CAPS: &str = "sasl agenc.ag/account-create message-tags echo-message batch labeled-response standard-replies account-tag agenc.ag/e2ee-mls";
 
 /// Enables the encrypted profile: the coordinator names its sequencer key
@@ -1706,11 +1720,158 @@ fn publish_and_attach(client: &mut IrcClient, user: &mut Principal) -> TestResul
 }
 
 /// What the binder learns from a successful `EGROUP BIND`.
-struct BoundChannel {
+struct BoundConversation {
     conversation: [u8; 32],
     binding_id: [u8; 32],
-    instance: [u8; 16],
+    route_binding: [u8; 32],
+    group_id: [u8; 32],
+    /// The channel instance of a channel route.
+    instance: Option<[u8; 16]>,
     binding: Vec<u8>,
+    package: IrcConversationBindingPackage,
+}
+
+impl BoundConversation {
+    /// The application carrier command of this conversation.
+    fn application_command(&self) -> String {
+        match self.instance {
+            Some(_) => "TAGMSG #room".to_owned(),
+            None => format!("EDIRECT {}", base64url_encode(&self.conversation)),
+        }
+    }
+
+    /// The text every forwarded application line of this conversation carries.
+    fn application_marker(&self) -> String {
+        match self.instance {
+            Some(_) => " TAGMSG #room".to_owned(),
+            None => format!(" EDIRECT {}", base64url_encode(&self.conversation)),
+        }
+    }
+}
+
+/// Decodes the reservation object of a `RESERVED` batch.
+fn reservation_of(reply: &[String]) -> TestResult<IrcReservation> {
+    let bytes = batch_object(reply)?;
+    let mut budget = DecodeBudget::new(1 << 16, 1 << 10);
+    let object =
+        IrcWireObject::decode_kind(&bytes, Some(IrcWireObjectKind::Reservation), &mut budget)?;
+    Ok(IrcReservation::decode_exact(object.body(), &mut budget)?)
+}
+
+/// Sends the binding package of `reservation` and returns the bound facts.
+fn bind(
+    client: &mut IrcClient,
+    binder: &mut Principal,
+    reservation: &IrcReservation,
+    package: IrcConversationBindingPackage,
+    route_binding: [u8; 32],
+    group_id: [u8; 32],
+) -> TestResult<BoundConversation> {
+    let binding = wire_object(IrcWireObjectKind::ConversationBinding, &package)?;
+    let conversation = e2ee::ids::conversation_id(NETWORK_ID.as_bytes(), &group_id)?;
+    let label = binder.label();
+    send_object(
+        client,
+        &label,
+        &format!(
+            "EGROUP BIND {} {} {}",
+            base64url_encode(&reservation.tbs.reservation_id),
+            base64url_encode(&conversation),
+            base64url_encode(&[44; 32])
+        ),
+        &binding,
+    )?;
+    let reply = labeled_reply(client, &label)?;
+    assert_contains(&reply, " EGROUP BOUND ")?;
+    assert_eq!(hash_at(&reply, "BOUND", 3)?, conversation);
+    Ok(BoundConversation {
+        conversation,
+        binding_id: hash_at(&reply, "BOUND", 4)?,
+        route_binding,
+        group_id,
+        instance: reservation
+            .tbs
+            .channel_instance_id
+            .as_slice()
+            .try_into()
+            .ok(),
+        binding,
+        package,
+    })
+}
+
+/// Reserves and binds a direct conversation between the two principals
+/// from `client`; the roots chain their binding locks after `previous`.
+fn reserve_and_bind_direct(
+    client: &mut IrcClient,
+    binder: &mut Principal,
+    peer: &Principal,
+    previous: &BoundConversation,
+) -> TestResult<BoundConversation> {
+    let label = binder.label();
+    client.send(&format!(
+        "@label={label} EGROUP RESERVE DIRECT {}",
+        base64url_encode(&peer.account)
+    ))?;
+    let reply = labeled_reply(client, &label)?;
+    assert_contains(&reply, " EGROUP RESERVED ")?;
+    let reservation = reservation_of(&reply)?;
+    let nonce: [u8; 32] = reservation
+        .tbs
+        .conversation_nonce
+        .as_slice()
+        .try_into()
+        .map_err(|_| failure("the direct reservation names its nonce"))?;
+    let (first, second) = if binder.account <= peer.account {
+        (binder.account, peer.account)
+    } else {
+        (peer.account, binder.account)
+    };
+    let route = IrcSemanticRouteTbs {
+        profile_version: 1,
+        network_id: *NETWORK_ID.as_bytes(),
+        kind: IrcConversationKind::Direct,
+        direct_account_a: Opaque::from_slice(&first)?,
+        direct_account_b: Opaque::from_slice(&second)?,
+        canonical_channel_name: Opaque::new(Vec::new())?,
+        channel_authority_root_fingerprint: [0; 32],
+        semantic_incarnation: 0,
+        predecessor_close_id: [0; 32],
+    };
+    let principals = [&binder.keys, &peer.keys];
+    let package = builders::binding_package(&builders::BindingSpec {
+        principals: &principals,
+        route,
+        channel_instance_id: None,
+        conversation_nonce: Some(nonce),
+        group_id: DIRECT_GROUP,
+        generation: 0,
+        previous_binding_id: [0; 32],
+        lock_sequence: 1,
+        previous_lock_ids: builders::lock_ids(&previous.package)?,
+        plan_devices: vec![
+            (
+                &binder.account,
+                builders::root_fingerprint(&binder.keys.root)?,
+                binder.device,
+            ),
+            (
+                &peer.account,
+                builders::root_fingerprint(&peer.keys.root)?,
+                peer.device,
+            ),
+        ],
+    })?;
+    let route_binding =
+        e2ee::route::direct_route_binding(NETWORK_ID.as_bytes(), &nonce, &first, &second)?;
+    bind(
+        client,
+        binder,
+        &reservation,
+        package,
+        route_binding,
+        DIRECT_GROUP,
+    )
 }
 
 /// Reserves and binds `#room` for both principals from `client`.
@@ -1718,19 +1879,12 @@ fn reserve_and_bind(
     client: &mut IrcClient,
     binder: &mut Principal,
     peer: &Principal,
-) -> TestResult<BoundChannel> {
+) -> TestResult<BoundConversation> {
     let label = binder.label();
     client.send(&format!("@label={label} EGROUP RESERVE CHANNEL #room"))?;
     let reply = labeled_reply(client, &label)?;
     assert_contains(&reply, " EGROUP RESERVED ")?;
-    let reservation_bytes = batch_object(&reply)?;
-    let mut budget = DecodeBudget::new(1 << 16, 1 << 10);
-    let object = IrcWireObject::decode_kind(
-        &reservation_bytes,
-        Some(IrcWireObjectKind::Reservation),
-        &mut budget,
-    )?;
-    let reservation = IrcReservation::decode_exact(object.body(), &mut budget)?;
+    let reservation = reservation_of(&reply)?;
     let instance: [u8; 16] = reservation
         .tbs
         .channel_instance_id
@@ -1748,6 +1902,7 @@ fn reserve_and_bind(
         generation: 0,
         previous_binding_id: [0; 32],
         lock_sequence: 0,
+        previous_lock_ids: Vec::new(),
         plan_devices: vec![
             (&binder.account, fingerprint, binder.device),
             (
@@ -1757,29 +1912,8 @@ fn reserve_and_bind(
             ),
         ],
     })?;
-    let binding = wire_object(IrcWireObjectKind::ConversationBinding, &package)?;
-    let conversation = e2ee::ids::conversation_id(NETWORK_ID.as_bytes(), &GROUP)?;
-    let label = binder.label();
-    send_object(
-        client,
-        &label,
-        &format!(
-            "EGROUP BIND {} {} {}",
-            base64url_encode(&reservation.tbs.reservation_id),
-            base64url_encode(&conversation),
-            base64url_encode(&[44; 32])
-        ),
-        &binding,
-    )?;
-    let reply = labeled_reply(client, &label)?;
-    assert_contains(&reply, " EGROUP BOUND ")?;
-    assert_eq!(hash_at(&reply, "BOUND", 3)?, conversation);
-    Ok(BoundChannel {
-        conversation,
-        binding_id: hash_at(&reply, "BOUND", 4)?,
-        instance,
-        binding,
-    })
+    let route_binding = e2ee::route::channel_route_binding(NETWORK_ID.as_bytes(), &instance)?;
+    bind(client, binder, &reservation, package, route_binding, GROUP)
 }
 
 /// The context core identifier the test binding package carries.
@@ -1809,15 +1943,15 @@ fn fragments_object(lines: &[String]) -> TestResult<Vec<u8>> {
 fn activate_bootstrap(
     client: &mut IrcClient,
     binder: &mut Principal,
-    bound: &BoundChannel,
+    bound: &BoundConversation,
 ) -> TestResult<[u8; 32]> {
     let network = *NETWORK_ID.as_bytes();
     let conversation = bound.conversation;
-    let route_binding = e2ee::route::channel_route_binding(&network, &bound.instance)?;
+    let route_binding = bound.route_binding;
     let genesis = IrcGroupGenesisTbs {
         network_id: network,
         conversation_id: conversation,
-        group_id: Opaque::new(GROUP.to_vec())?,
+        group_id: Opaque::new(bound.group_id.to_vec())?,
         binding_id: bound.binding_id,
         context_core_id: CONTEXT_CORE_ID,
     };
@@ -1834,7 +1968,7 @@ fn activate_bootstrap(
     .encode()?;
     let commit = raw_object(
         IrcWireObjectKind::CommitMls,
-        builders::private_message_at_epoch(&GROUP, 0, MLS_COMMIT, &commit_aad)?,
+        builders::private_message_at_epoch(&bound.group_id, 0, MLS_COMMIT, &commit_aad)?,
     )?;
     let commit_object_id = *e2ee::ObjectId::compute(&commit).as_bytes();
     let conversation_token = base64url_encode(&conversation);
@@ -1961,7 +2095,7 @@ fn activate_bootstrap(
 fn send_application(
     sender: &mut IrcClient,
     principal: &mut Principal,
-    bound: &BoundChannel,
+    bound: &BoundConversation,
     latest_state_id: [u8; 32],
     epoch: u64,
 ) -> TestResult<Vec<u8>> {
@@ -1970,7 +2104,7 @@ fn send_application(
         profile_version: 1,
         network_id: network,
         conversation_id: bound.conversation,
-        route_binding: e2ee::route::channel_route_binding(&network, &bound.instance)?,
+        route_binding: bound.route_binding,
         latest_state_id,
     }
     .encode()?;
@@ -1984,7 +2118,7 @@ fn send_application(
     let message = raw_object(
         IrcWireObjectKind::ApplicationMls,
         builders::private_message_with_ciphertext(
-            &GROUP,
+            &bound.group_id,
             epoch,
             MLS_APPLICATION,
             &aad,
@@ -1992,21 +2126,156 @@ fn send_application(
         )?,
     )?;
     let label = principal.label();
-    send_object(sender, &label, "TAGMSG #room", &message)?;
+    send_object(sender, &label, &bound.application_command(), &message)?;
     let echo = labeled_reply(sender, &label)?;
-    assert_contains(&echo, " TAGMSG #room")?;
+    assert_contains(&echo, &bound.application_marker())?;
     assert_eq!(fragments_object(&echo)?, message);
     Ok(message)
 }
 
-/// Reads the next forwarded application message on `#room` from `client`.
-fn receive_application(client: &mut IrcClient) -> TestResult<Vec<u8>> {
-    let lines = client.read_until(|line| line.contains(" TAGMSG #room"))?;
+/// Reads the next forwarded application message of `bound` from `client`.
+fn receive_application(client: &mut IrcClient, bound: &BoundConversation) -> TestResult<Vec<u8>> {
+    let marker = bound.application_marker();
+    let lines = client.read_until(|line| line.contains(&marker))?;
     let forwarded: Vec<String> = lines
         .into_iter()
-        .filter(|line| line.contains(" TAGMSG #room"))
+        .filter(|line| line.contains(&marker))
         .collect();
     fragments_object(&forwarded)
+}
+
+/// Closes `bound` from `client` under the finalization `terminal` and
+/// returns the close identifier.
+fn close_conversation(
+    client: &mut IrcClient,
+    principal: &mut Principal,
+    bound: &BoundConversation,
+    terminal: [u8; 32],
+) -> TestResult<[u8; 32]> {
+    let intent = IrcCloseIntent {
+        reason_code: 1,
+        validation_time: VALIDATION_TIME + 1,
+    };
+    let tbs = IrcCloseAuthorizationTbs {
+        profile_version: 1,
+        network_id: *NETWORK_ID.as_bytes(),
+        conversation_id: bound.conversation,
+        binding_id: bound.binding_id,
+        authorizing_terminal_id: terminal,
+        close_intent_id: semantic_id_of(SemanticHashDomain::CloseIntentId, &intent)?,
+        close_intent: intent,
+    };
+    let approval = builders::commit_approval(
+        &principal.keys,
+        principal.device,
+        &tbs,
+        SignatureDomain::CloseAuthorization,
+    )?;
+    let close = IrcCloseAuthorization {
+        tbs,
+        approvals: TlsVec::new(vec![approval])?,
+    };
+    let close_id = e2ee::route::close_authorization_id(&close)?;
+    let object = wire_object(IrcWireObjectKind::CloseAuthorization, &close)?;
+    let conversation = base64url_encode(&bound.conversation);
+    let label = principal.label();
+    send_object(
+        client,
+        &label,
+        &format!("EGROUP CLOSE {conversation} 1"),
+        &object,
+    )?;
+    let reply = labeled_reply(client, &label)?;
+    assert_contains(&reply, &format!(" EGROUP CLOSED {conversation} "))?;
+    assert_eq!(hash_at(&reply, "CLOSED", 4)?, close_id);
+    Ok(close_id)
+}
+
+/// Sends application lines until the edge reports the coordinator link
+/// down with `E2EE_SYNCING`; the link loss takes a moment to surface.
+fn wait_for_e2ee_partition(
+    client: &mut IrcClient,
+    principal: &mut Principal,
+    bound: &BoundConversation,
+    message: &[u8],
+) -> TestResult {
+    let deadline = Instant::now() + NETWORK_WAIT;
+    loop {
+        let label = principal.label();
+        send_object(client, &label, &bound.application_command(), message)?;
+        let reply = labeled_reply(client, &label)?;
+        if reply
+            .iter()
+            .any(|line| line.contains("FAIL") && line.contains("E2EE_SYNCING"))
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(failure(format!(
+                "the edge never reported the partition; last reply {reply:?}"
+            )));
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Binds a direct conversation from the smaller account, activates it, and
+/// exchanges one message each way; returns the conversation and the first
+/// message.
+fn direct_round(
+    smaller: (&mut IrcClient, &mut Principal),
+    larger: (&mut IrcClient, &mut Principal),
+    previous: &BoundConversation,
+) -> TestResult<(BoundConversation, Vec<u8>)> {
+    let (first, first_keys) = smaller;
+    let (second, second_keys) = larger;
+    let direct = step(
+        "direct bind",
+        reserve_and_bind_direct(first, first_keys, second_keys, previous),
+    )?;
+    let terminal = step(
+        "direct activation",
+        activate_bootstrap(first, first_keys, &direct),
+    )?;
+    let note = step(
+        "direct note",
+        send_application(first, first_keys, &direct, terminal, 1),
+    )?;
+    assert_eq!(
+        step("direct note receipt", receive_application(second, &direct))?,
+        note
+    );
+    let reply = step(
+        "direct reply",
+        send_application(second, second_keys, &direct, terminal, 1),
+    )?;
+    assert_eq!(
+        step("direct reply receipt", receive_application(first, &direct))?,
+        reply
+    );
+    Ok((direct, note))
+}
+
+/// Names the scenario step a failure belongs to.
+fn step<T>(name: &str, result: TestResult<T>) -> TestResult<T> {
+    result.map_err(|error| failure(format!("{name}: {error}")))
+}
+
+/// Fails when a daemon log names anything a client sent or is.
+fn assert_private_logs(network: &Network, secrets: &[String]) -> TestResult {
+    for (name, fixture) in [
+        ("coordinator", &network.coordinator),
+        ("edge a", &network.edge_a),
+        ("edge b", &network.edge_b),
+    ] {
+        let text = fixture.log_text();
+        for secret in secrets {
+            if text.contains(secret.as_str()) {
+                return Err(failure(format!("{name} log leaks {secret}")));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Delivers the binding package to `target`'s device mailbox from
@@ -2089,7 +2358,7 @@ fn encrypted_clients_on_two_edges_bind_a_channel_through_the_coordinator() -> Te
     Ok(())
 }
 
-fn exercise_encrypted_network(network: &Network, _coordinator: &mut DaemonProcess) -> TestResult {
+fn exercise_encrypted_network(network: &Network, coordinator: &mut DaemonProcess) -> TestResult {
     wait_for_link(&network.edge_a, 0)?;
     wait_for_link(&network.edge_b, 0)?;
     let _probe = register_when_available(&network.edge_a, "probe")?;
@@ -2098,8 +2367,11 @@ fn exercise_encrypted_network(network: &Network, _coordinator: &mut DaemonProces
     let (mut bob, bob_account) = authenticated_client(&network.edge_b, "bob", "bob-account", 51)?;
     let mut alice_keys = Principal::new(ALICE_ROOT, ALICE_DEVICE, alice_account)?;
     let mut bob_keys = Principal::new(BOB_ROOT, BOB_DEVICE, bob_account)?;
-    publish_and_attach(&mut alice, &mut alice_keys)?;
-    publish_and_attach(&mut bob, &mut bob_keys)?;
+    step(
+        "alice attach",
+        publish_and_attach(&mut alice, &mut alice_keys),
+    )?;
+    step("bob attach", publish_and_attach(&mut bob, &mut bob_keys))?;
 
     alice.send("JOIN #room")?;
     alice.read_until(|line| line.contains(" 366 alice #room "))?;
@@ -2109,7 +2381,10 @@ fn exercise_encrypted_network(network: &Network, _coordinator: &mut DaemonProces
     bob.send("JOIN #room")?;
     bob.read_until(|line| line.contains(" 366 bob #room "))?;
     alice.read_until(|line| line.starts_with(":bob!") && line.contains(" JOIN #room"))?;
-    let bound = reserve_and_bind(&mut alice, &mut alice_keys, &bob_keys)?;
+    let bound = step(
+        "channel bind",
+        reserve_and_bind(&mut alice, &mut alice_keys, &bob_keys),
+    )?;
     assert_ne!(bound.conversation, [0; 32]);
 
     // A bound channel refuses plaintext on both edges.
@@ -2129,7 +2404,7 @@ fn exercise_encrypted_network(network: &Network, _coordinator: &mut DaemonProces
             profile_version: 1,
             network_id: network,
             conversation_id: bound.conversation,
-            route_binding: e2ee::route::channel_route_binding(&network, &bound.instance)?,
+            route_binding: bound.route_binding,
             latest_state_id: genesis_state,
         }
         .encode()?;
@@ -2142,7 +2417,10 @@ fn exercise_encrypted_network(network: &Network, _coordinator: &mut DaemonProces
     let refused = labeled_reply(&mut alice, &label)?;
     assert_contains(&refused, "FAIL TAGMSG E2EE_FINALITY_REQUIRED")?;
 
-    let finalization_id = activate_bootstrap(&mut alice, &mut alice_keys, &bound)?;
+    let finalization_id = step(
+        "channel activation",
+        activate_bootstrap(&mut alice, &mut alice_keys, &bound),
+    )?;
     let broadcast = bob.read_until(|line| line.contains(" EGROUP FINALIZED "))?;
     assert_contains(
         &broadcast,
@@ -2153,18 +2431,123 @@ fn exercise_encrypted_network(network: &Network, _coordinator: &mut DaemonProces
     )?;
 
     // Application messages fan out across the edges and echo to the sender.
-    let message = send_application(&mut alice, &mut alice_keys, &bound, finalization_id, 1)?;
-    assert_eq!(receive_application(&mut bob)?, message);
-    let answer = send_application(&mut bob, &mut bob_keys, &bound, finalization_id, 1)?;
-    assert_eq!(receive_application(&mut alice)?, answer);
+    let message = step(
+        "channel message",
+        send_application(&mut alice, &mut alice_keys, &bound, finalization_id, 1),
+    )?;
+    assert_eq!(
+        step(
+            "channel message receipt",
+            receive_application(&mut bob, &bound)
+        )?,
+        message
+    );
+    let answer = step(
+        "channel answer",
+        send_application(&mut bob, &mut bob_keys, &bound, finalization_id, 1),
+    )?;
+    assert_eq!(
+        step(
+            "channel answer receipt",
+            receive_application(&mut alice, &bound)
+        )?,
+        answer
+    );
 
     // The device mailbox carries the binding package to the peer device.
-    exchange_binding_mailbox(
-        &mut alice,
-        &mut alice_keys,
-        &mut bob,
-        &mut bob_keys,
-        &bound.binding,
+    step(
+        "binding mailbox",
+        exchange_binding_mailbox(
+            &mut alice,
+            &mut alice_keys,
+            &mut bob,
+            &mut bob_keys,
+            &bound.binding,
+        ),
+    )?;
+
+    // A direct conversation binds under the roots' next binding locks and
+    // carries traffic between the two edges without a channel. The smaller
+    // account of the pair reserves the route.
+    let (direct, note) = if alice_keys.account <= bob_keys.account {
+        direct_round(
+            (&mut alice, &mut alice_keys),
+            (&mut bob, &mut bob_keys),
+            &bound,
+        )?
+    } else {
+        direct_round(
+            (&mut bob, &mut bob_keys),
+            (&mut alice, &mut alice_keys),
+            &bound,
+        )?
+    };
+
+    // Closing the channel conversation tombstones the route: the peer sees
+    // the broadcast, encrypted traffic is refused, and plaintext stays refused.
+    let close_id = step(
+        "close",
+        close_conversation(&mut alice, &mut alice_keys, &bound, finalization_id),
+    )?;
+    let broadcast = step(
+        "close broadcast",
+        bob.read_until(|line| line.contains(" EGROUP CLOSED ")),
+    )?;
+    assert_eq!(hash_at(&broadcast, "CLOSED", 4)?, close_id);
+    let late = raw_object(
+        IrcWireObjectKind::ApplicationMls,
+        builders::private_message_with_ciphertext(
+            &bound.group_id,
+            1,
+            MLS_APPLICATION,
+            &[],
+            &[9; 300],
+        )?,
+    )?;
+    let label = alice_keys.label();
+    send_object(&mut alice, &label, &bound.application_command(), &late)?;
+    let refused = step("tombstone traffic", labeled_reply(&mut alice, &label))?;
+    assert_contains(&refused, "FAIL TAGMSG E2EE_ROUTE_INVALID")?;
+    bob.send("PRIVMSG #room :after the close")?;
+    let refused = step(
+        "tombstone plaintext",
+        bob.read_until(|line| line.contains("E2EE_REQUIRED")),
+    )?;
+    assert_contains(&refused, "FAIL PRIVMSG E2EE_REQUIRED")?;
+
+    // No log names a client, an account, a channel, or an object.
+    let secrets = vec![
+        "alice".to_owned(),
+        "bob".to_owned(),
+        "#room".to_owned(),
+        alice_account.to_text().to_owned(),
+        bob_account.to_text().to_owned(),
+        base64url_encode(&message),
+        base64url_encode(&bound.conversation),
+    ];
+    assert_private_logs(network, &secrets)?;
+
+    // A coordinator crash partitions the encrypted profile: the edge refuses
+    // encrypted traffic with E2EE_SYNCING and nothing is queued. The
+    // coordinator restarts from its durable state and both edges resume.
+    let links_a = links_established(&network.edge_a);
+    let links_b = links_established(&network.edge_b);
+    coordinator.kill()?;
+    step(
+        "partition",
+        wait_for_e2ee_partition(&mut bob, &mut bob_keys, &direct, &note),
+    )?;
+    *coordinator = DaemonProcess::start(&network.coordinator.config_path)?;
+    step("relink a", wait_for_link(&network.edge_a, links_a))?;
+    step("relink b", wait_for_link(&network.edge_b, links_b))?;
+    let mut carol = step(
+        "register after restart",
+        register_when_available(&network.edge_a, "carol"),
+    )?;
+    carol.send("JOIN #after")?;
+    step(
+        "join after restart",
+        carol.read_until(|line| line.contains(" 366 carol #after ")),
     )?;
     Ok(())
 }
