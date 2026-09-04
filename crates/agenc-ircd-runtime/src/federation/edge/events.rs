@@ -47,7 +47,9 @@ pub(super) fn receive(
     } else {
         QueuedEvent::Base { header, projected }
     };
-    if edge.commit.is_some() {
+    // The edge's own slot or a batch of the encrypted profile in flight
+    // holds the event; both profiles drain after every commit.
+    if edge.commit.is_some() || context.in_flight() {
         if edge.queued_events.len() >= MAX_QUEUED_EVENTS {
             return Err(Violation::Ceiling);
         }
@@ -130,7 +132,7 @@ pub(super) fn drain_queued(
     context: &mut StateCoreContext,
 ) -> Vec<EdgeCompletion> {
     let mut completions = Vec::new();
-    while edge.commit.is_none() {
+    while edge.commit.is_none() && !context.in_flight() {
         let Some(queued) = edge.queued_events.pop_front() else {
             break;
         };

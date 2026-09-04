@@ -573,6 +573,17 @@ impl ClaimRow {
     }
 
     /// The `reservation/v1/<reservation-id>` key.
+    /// The lock identifier of a lock key.
+    pub fn parse_lock_key(key: &StoredKey) -> Result<[u8; HASH_BYTES], StorageError> {
+        slice_array(suffix(key, prefix::LOCK, HASH_BYTES)?, 0)
+    }
+
+    /// The reservation identifier of a reservation key.
+    pub fn parse_reservation_key(key: &StoredKey) -> Result<[u8; ID_BYTES], StorageError> {
+        slice_array(suffix(key, prefix::RESERVATION, ID_BYTES)?, 0)
+    }
+
+    /// The `reservation/v1/<reservation-id>` key.
     pub fn reservation_key(reservation_id: &[u8; ID_BYTES]) -> Result<StoredKey, StorageError> {
         key_of(&[prefix::RESERVATION, reservation_id])
     }
@@ -721,7 +732,23 @@ impl ProofRole {
 }
 
 /// A sequencer log entry, a candidate slot, or a proof accumulator entry.
+/// The parts of one proof accumulator key.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProofKeyParts {
+    /// The accumulator role.
+    pub role: ProofRole,
+    /// The conversation.
+    pub conversation_id: [u8; HASH_BYTES],
+    /// The candidate or terminal the proof names.
+    pub subject_id: [u8; HASH_BYTES],
+    /// The signer's root fingerprint.
+    pub root_fingerprint: [u8; HASH_BYTES],
+    /// The signer's device.
+    pub device_id: [u8; ID_BYTES],
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
+/// Sequencer log, candidate slot, and proof accumulator rows (kind 4).
 pub enum SequencerRow {
     /// One position of the per-conversation sequencer log.
     Record {
@@ -802,6 +829,32 @@ impl SequencerRow {
             conversation_id,
             &prior_epoch.to_be_bytes(),
         ])
+    }
+
+    /// Splits a candidate slot key into the conversation and prior epoch.
+    pub fn parse_candidate_key(key: &StoredKey) -> Result<([u8; HASH_BYTES], u64), StorageError> {
+        let rest = suffix(key, prefix::CANDIDATE, HASH_BYTES + 8)?;
+        Ok((
+            slice_array(rest, 0)?,
+            u64::from_be_bytes(slice_array(rest, HASH_BYTES)?),
+        ))
+    }
+
+    /// Splits a proof accumulator key into its role, conversation, subject,
+    /// root fingerprint, and device.
+    pub fn parse_proof_key(key: &StoredKey) -> Result<ProofKeyParts, StorageError> {
+        let role = [ProofRole::Approval, ProofRole::Ack, ProofRole::Vote]
+            .into_iter()
+            .find(|role| key.as_bytes().starts_with(role.prefix()))
+            .ok_or(StorageError::InvalidEncoding)?;
+        let rest = suffix(key, role.prefix(), HASH_BYTES * 3 + ID_BYTES)?;
+        Ok(ProofKeyParts {
+            role,
+            conversation_id: slice_array(rest, 0)?,
+            subject_id: slice_array(rest, HASH_BYTES)?,
+            root_fingerprint: slice_array(rest, HASH_BYTES * 2)?,
+            device_id: slice_array(rest, HASH_BYTES * 3)?,
+        })
     }
 
     /// The proof accumulator key:
@@ -1024,6 +1077,38 @@ impl DirectoryRow {
     /// The `identity/v1/<account-digest>` key.
     pub fn identity_key(account_digest: &[u8; HASH_BYTES]) -> Result<StoredKey, StorageError> {
         key_of(&[prefix::IDENTITY, account_digest])
+    }
+
+    /// The `roster/v1/<account-digest>` key.
+    /// The account digest of an identity key.
+    pub fn parse_identity_key(key: &StoredKey) -> Result<[u8; HASH_BYTES], StorageError> {
+        slice_array(suffix(key, prefix::IDENTITY, HASH_BYTES)?, 0)
+    }
+
+    /// The account digest of a roster key.
+    pub fn parse_roster_key(key: &StoredKey) -> Result<[u8; HASH_BYTES], StorageError> {
+        slice_array(suffix(key, prefix::ROSTER, HASH_BYTES)?, 0)
+    }
+
+    /// The account digest and device of a capability key.
+    pub fn parse_capability_key(
+        key: &StoredKey,
+    ) -> Result<([u8; HASH_BYTES], [u8; ID_BYTES]), StorageError> {
+        let rest = suffix(key, prefix::CAPABILITY, HASH_BYTES + ID_BYTES)?;
+        Ok((slice_array(rest, 0)?, slice_array(rest, HASH_BYTES)?))
+    }
+
+    /// The account digest, root fingerprint, and sequence of a binding lock
+    /// key.
+    pub fn parse_binding_lock_key(
+        key: &StoredKey,
+    ) -> Result<([u8; HASH_BYTES], [u8; HASH_BYTES], u64), StorageError> {
+        let rest = suffix(key, prefix::BINDING_LOCK, HASH_BYTES * 2 + 8)?;
+        Ok((
+            slice_array(rest, 0)?,
+            slice_array(rest, HASH_BYTES)?,
+            u64::from_be_bytes(slice_array(rest, HASH_BYTES * 2)?),
+        ))
     }
 
     /// The `roster/v1/<account-digest>` key.
@@ -1346,6 +1431,27 @@ impl PackageRow {
     }
 
     /// The `claim/v1/<account-digest><operation-id>` key.
+    /// The KeyPackageRef of a package key.
+    pub fn parse_package_key(key: &StoredKey) -> Result<Vec<u8>, StorageError> {
+        let rest = key
+            .as_bytes()
+            .strip_prefix(prefix::PACKAGE)
+            .ok_or(StorageError::InvalidEncoding)?;
+        if rest.is_empty() || rest.len() > MAX_KEY_PACKAGE_REF_BYTES {
+            return Err(StorageError::InvalidEncoding);
+        }
+        Ok(rest.to_vec())
+    }
+
+    /// The claimant digest and operation of a claim key.
+    pub fn parse_claim_key(
+        key: &StoredKey,
+    ) -> Result<([u8; HASH_BYTES], [u8; ID_BYTES]), StorageError> {
+        let rest = suffix(key, prefix::CLAIM, HASH_BYTES + ID_BYTES)?;
+        Ok((slice_array(rest, 0)?, slice_array(rest, HASH_BYTES)?))
+    }
+
+    /// The `claim/v1/<account-digest><operation-id>` key.
     pub fn claim_key(
         account_digest: &[u8; HASH_BYTES],
         operation_id: &[u8; ID_BYTES],
@@ -1512,6 +1618,13 @@ pub struct AttachRow {
 }
 
 impl AttachRow {
+    /// The `attach/v1/<account-digest><device-id>` key.
+    /// The account digest and device of an attach key.
+    pub fn parse_key(key: &StoredKey) -> Result<([u8; HASH_BYTES], [u8; ID_BYTES]), StorageError> {
+        let rest = suffix(key, prefix::ATTACH, HASH_BYTES + ID_BYTES)?;
+        Ok((slice_array(rest, 0)?, slice_array(rest, HASH_BYTES)?))
+    }
+
     /// The `attach/v1/<account-digest><device-id>` key.
     pub fn key(
         account_digest: &[u8; HASH_BYTES],
@@ -1722,6 +1835,22 @@ impl MailboxRow {
     }
 
     /// The `token/v1/<delivery-token>` key.
+    /// The delivery token of a token key.
+    pub fn parse_token_key(key: &StoredKey) -> Result<[u8; HASH_BYTES], StorageError> {
+        slice_array(suffix(key, prefix::TOKEN, HASH_BYTES)?, 0)
+    }
+
+    /// The account digest, device, and token of a mailbox ACK key.
+    pub fn parse_ack_key(key: &StoredKey) -> Result<AckKeyParts, StorageError> {
+        let rest = suffix(key, prefix::ACK_MAILBOX, HASH_BYTES + ID_BYTES + HASH_BYTES)?;
+        Ok((
+            slice_array(rest, 0)?,
+            slice_array(rest, HASH_BYTES)?,
+            slice_array(rest, HASH_BYTES + ID_BYTES)?,
+        ))
+    }
+
+    /// The `token/v1/<delivery-token>` key.
     pub fn token_key(token: &[u8; HASH_BYTES]) -> Result<StoredKey, StorageError> {
         key_of(&[prefix::TOKEN, token])
     }
@@ -1828,6 +1957,9 @@ impl MailboxRow {
         }
     }
 }
+/// The parts of an acknowledgement key: target account digest, target
+/// device, and delivery token.
+pub type AckKeyParts = ([u8; HASH_BYTES], [u8; ID_BYTES], [u8; HASH_BYTES]);
 
 /// The parsed components of one mailbox item key.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2052,6 +2184,17 @@ const MAX_PART_COUNT: u16 = 2_048;
 
 impl DeliveryRow {
     /// The `delivery/v1/<target>` key.
+    /// The target of a cursor key.
+    pub fn parse_cursor_key(key: &StoredKey) -> Result<[u8; ID_BYTES], StorageError> {
+        slice_array(suffix(key, prefix::DELIVERY, ID_BYTES)?, 0)
+    }
+
+    /// The target of a snapshot key.
+    pub fn parse_snapshot_key(key: &StoredKey) -> Result<[u8; ID_BYTES], StorageError> {
+        slice_array(suffix(key, prefix::ESTATE, ID_BYTES)?, 0)
+    }
+
+    /// The `delivery/v1/<target-server>` key.
     pub fn cursor_key(target: &[u8; ID_BYTES]) -> Result<StoredKey, StorageError> {
         key_of(&[prefix::DELIVERY, target])
     }

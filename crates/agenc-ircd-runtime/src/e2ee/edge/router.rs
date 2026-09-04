@@ -410,24 +410,28 @@ impl E2eeEdge {
         };
         origin.next_sequence = origin.next_sequence.saturating_add(1);
         let request_object_id = *agenc_ircd_e2ee::ObjectId::compute(&bytes).as_bytes();
-        let mut lines = Vec::new();
+        let mut frames = Vec::new();
         for fragment in fragment_object(&bytes).map_err(|_| E2eeReplyCode::ObjectTooLarge)? {
-            lines.push(self.line(&CompanionFrame::Request {
+            frames.push(CompanionFrame::Request {
                 correlation,
                 object_id: request_object_id,
                 fragment,
-            })?);
+            });
         }
         if let Some(bytes) = &payload {
             let object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
             for fragment in fragment_object(bytes).map_err(|_| E2eeReplyCode::ObjectTooLarge)? {
-                lines.push(self.line(&CompanionFrame::Payload {
+                frames.push(CompanionFrame::Payload {
                     correlation,
                     object_id,
                     fragment,
-                })?);
+                });
             }
         }
+        let lines = frames
+            .iter()
+            .map(|frame| self.line(frame))
+            .collect::<Result<Vec<_>, _>>()?;
         self.pending.insert(
             request_id,
             PendingRequest {
@@ -435,6 +439,8 @@ impl E2eeEdge {
                 label,
                 command,
                 request_object_id,
+                sequence: correlation.operation_sequence,
+                frames,
                 result: None,
                 responses: std::collections::BTreeMap::new(),
                 completion_seen: false,

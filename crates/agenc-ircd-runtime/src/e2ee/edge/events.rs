@@ -173,7 +173,7 @@ impl E2eeEdge {
         {
             return Err(E2eeReplyCode::Syncing.into());
         }
-        if self.commit.is_some() {
+        if self.holds_events(context) {
             self.queued.push_back((
                 CompanionFrame::Ack(open.position),
                 payload.unwrap_or_default(),
@@ -182,6 +182,12 @@ impl E2eeEdge {
             return Ok(Vec::new());
         }
         self.apply_event(context, edge, open, payload)
+    }
+
+    /// Whether an event must wait: this profile's own slot is taken or a
+    /// base batch is in flight; both profiles drain after every commit.
+    fn holds_events(&self, context: &StateCoreContext) -> bool {
+        self.commit.is_some() || context.in_flight()
     }
 
     /// Hands a cross-profile part to the base edge's barrier owner.
@@ -713,7 +719,7 @@ impl E2eeEdge {
         edge: &mut EdgeFederation,
     ) -> Vec<ClientOutput> {
         let mut outputs = Vec::new();
-        while self.commit.is_none() {
+        while !self.holds_events(context) {
             let Some((frame, payload)) = self.queued.pop_front() else {
                 break;
             };

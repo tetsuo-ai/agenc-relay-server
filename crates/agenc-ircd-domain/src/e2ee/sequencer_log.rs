@@ -213,6 +213,24 @@ impl SequencerLog {
         }
     }
 
+    /// Restores the epoch position of a reloaded log: the active candidate,
+    /// if the head record is one, and the attempts the epoch consumed. With
+    /// no active candidate the next candidate follows the head record.
+    pub fn restore_epoch(&mut self, candidate: Option<CandidateSlot>, attempts: u32) {
+        self.attempts = attempts;
+        match candidate {
+            Some(slot) => {
+                self.next_candidate_sequence = slot.position.candidate_sequence;
+                self.candidate = Some(slot);
+            }
+            None if attempts > 0 => {
+                self.next_candidate_sequence = attempts;
+                self.next_predecessor = self.head.record_id;
+            }
+            None => {}
+        }
+    }
+
     /// Conversation identifier.
     #[must_use]
     pub const fn conversation_id(&self) -> &Id {

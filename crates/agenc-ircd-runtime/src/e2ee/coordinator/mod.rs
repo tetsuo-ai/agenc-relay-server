@@ -39,6 +39,7 @@ pub mod events;
 pub mod execute;
 pub mod ops;
 pub mod request;
+mod startup;
 pub mod sync;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -320,6 +321,8 @@ pub struct CompanionCoordinator {
     pub peers: BTreeMap<ServerId, sync::PeerSync>,
     /// Lines to send, drained by the owner.
     pub outbound: VecDeque<(ServerId, FederationLineText)>,
+    /// Durable rows collected during the startup reload.
+    restore: startup::Restore,
 }
 
 /// Why a companion frame failed the link.
@@ -369,7 +372,25 @@ impl CompanionCoordinator {
             pending: None,
             peers: BTreeMap::new(),
             outbound: VecDeque::new(),
+            restore: startup::Restore::default(),
         }
+    }
+
+    /// Collects one durable E2EE row during the coordinator's startup
+    /// reload; the state is rebuilt by [`Self::finish_restore`].
+    pub fn admit_restored(
+        &mut self,
+        table: agenc_ircd_storage::TableId,
+        key: &agenc_ircd_storage::StoredKey,
+        value: &agenc_ircd_storage::PersistentRecordValue,
+    ) {
+        self.restore.admit(table, key, value);
+    }
+
+    /// Rebuilds the companion state from the collected rows.
+    pub fn finish_restore(&mut self) {
+        let restore = std::mem::take(&mut self.restore);
+        startup::rebuild(self, restore);
     }
 
     /// Records the configured logical E2EE disk ceiling for `STATS E2EE`.

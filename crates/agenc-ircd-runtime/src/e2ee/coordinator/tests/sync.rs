@@ -13,6 +13,8 @@ use agenc_ircd_e2ee::wire::fragment::fragment_object;
 use agenc_ircd_federation_wire::FederationLineText;
 use agenc_ircd_types::ServerId;
 
+use agenc_ircd_storage::e2ee_records::{ReplayKey, ReplayRow};
+
 use super::super::sync::{Action, BaseOriginView, Committed, CompanionHost, Cut, PendingWork};
 use super::super::{CompanionFault, CompanionOriginKey, StoredResult};
 use super::{Counter, HOME, Harness, INCARNATION, NETWORK, ORIGIN, TestResult, object_id, wire};
@@ -71,6 +73,14 @@ impl CompanionHost for FakeHost {
 
     fn state_generation(&self) -> u64 {
         self.revision
+    }
+
+    fn holds_channel(&self, _instance: [u8; 16]) -> bool {
+        false
+    }
+
+    fn hosts_account(&self, _account: &[u8; 24]) -> bool {
+        false
     }
 }
 
@@ -795,5 +805,80 @@ fn requests_need_an_active_ready_peer() -> TestResult {
     assert!(!sync.harness.coordinator.accepting_requests(home()));
     sync.reset()?;
     assert!(sync.harness.coordinator.accepting_requests(home()));
+    Ok(())
+}
+
+/// A coordinator that reloaded without its companion origins meets the
+/// replayed UPDATE of an origin it acknowledged before its restart: the
+/// matched base origin anchors it and the operation sequence continues
+/// after the retained replay rows. A DEL for an origin it never learned is
+/// acknowledged with nothing to fence.
+#[test]
+fn a_reloaded_coordinator_accepts_a_replayed_origin_update() -> TestResult {
+    let mut sync = Sync::new()?;
+    sync.reset()?;
+    sync.host.origin = Some(BaseOriginView {
+        generation: 1,
+        account: Some((sync.harness.account, 3)),
+        ..FakeHost::default().origin.ok_or("origin")?
+    });
+    sync.harness.coordinator.state.replays.insert(
+        ReplayKey {
+            home_server_id: HOME,
+            server_incarnation: INCARNATION,
+            origin_id: ORIGIN,
+            origin_generation: 1,
+            operation_sequence: 4,
+        },
+        ReplayRow {
+            request_id: [1; 16],
+            request_object_id: [2; 32],
+            result_object_id: None,
+            response_object_ids: Vec::new(),
+            security_mutation: false,
+            retain_until: 0,
+        },
+    );
+    let (_, update) = origin_object(1, [9; 32], Some((sync.harness.account, 3)), None)?;
+    assert_eq!(frames(&sync.declare(true, 1, &update)?)?.len(), 1);
+    let key = CompanionOriginKey {
+        home_server_id: HOME,
+        server_incarnation: INCARNATION,
+        origin_id: ORIGIN,
+    };
+    let origin = sync
+        .harness
+        .coordinator
+        .state
+        .origins
+        .get(&key)
+        .cloned()
+        .ok_or("origin")?;
+    assert_eq!(origin.generation, 1);
+    assert_eq!(origin.next_sequence, 5);
+    assert_eq!(origin.account_id, Some(sync.harness.account));
+
+    // A replayed UPDATE at generation zero is still an ADD's job.
+    let (_, zero) = origin_object(0, [0; 32], None, None)?;
+    assert_eq!(
+        sync.declare(true, 0, &zero).err(),
+        Some(CompanionFault::Protocol)
+    );
+
+    let acks = frames(&sync.frame(CompanionFrame::OriginDel {
+        coordinator_server_id: COORDINATOR,
+        server_incarnation: INCARNATION,
+        origin_id: [8; 16],
+        origin_generation: 2,
+        next_operation_sequence: 7,
+    })?)?;
+    assert!(matches!(
+        acks.as_slice(),
+        [CompanionFrame::OriginAck {
+            origin_generation: 2,
+            object_id: None,
+            ..
+        }]
+    ));
     Ok(())
 }

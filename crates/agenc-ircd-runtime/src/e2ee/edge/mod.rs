@@ -95,6 +95,10 @@ pub(crate) struct LocalOrigin {
     pub(crate) acked: Option<u64>,
     /// The next companion operation sequence.
     pub(crate) next_sequence: u64,
+    /// The generation the operation sequence counts under; a fresh
+    /// generation restarts it, a replayed declaration of the same
+    /// generation continues it.
+    pub(crate) sequenced: Option<u64>,
     /// The semantic identifier of the accepted declaration.
     pub(crate) state_id: [u8; 32],
     /// The bound user.
@@ -111,6 +115,11 @@ pub(crate) struct PendingRequest {
     pub(crate) label: Option<String>,
     pub(crate) command: router::Resolved,
     pub(crate) request_object_id: [u8; 32],
+    /// The operation sequence, for resending in order.
+    pub(crate) sequence: u64,
+    /// The request and payload frames exactly as first sent, resent after
+    /// a resume while the result is outstanding.
+    pub(crate) frames: Vec<agenc_ircd_e2ee::federation::frames::CompanionFrame>,
     pub(crate) result: Option<DecodedResult>,
     pub(crate) responses: BTreeMap<u16, Vec<u8>>,
     pub(crate) completion_seen: bool,

@@ -2099,6 +2099,19 @@ fn send_application(
     latest_state_id: [u8; 32],
     epoch: u64,
 ) -> TestResult<Vec<u8>> {
+    send_application_variant(sender, principal, bound, latest_state_id, epoch, 0)
+}
+
+/// Sends one application message whose ciphertext ends in `variant`, so a
+/// retry is a fresh object rather than a repeat the edge already answered.
+fn send_application_variant(
+    sender: &mut IrcClient,
+    principal: &mut Principal,
+    bound: &BoundConversation,
+    latest_state_id: [u8; 32],
+    epoch: u64,
+    variant: u8,
+) -> TestResult<Vec<u8>> {
     let network = *NETWORK_ID.as_bytes();
     let aad = IrcApplicationAad {
         profile_version: 1,
@@ -2112,8 +2125,9 @@ fn send_application(
         .account
         .iter()
         .cycle()
-        .take(300)
+        .take(299)
         .copied()
+        .chain(std::iter::once(variant))
         .collect();
     let message = raw_object(
         IrcWireObjectKind::ApplicationMls,
@@ -2220,13 +2234,13 @@ fn wait_for_e2ee_partition(
 }
 
 /// Binds a direct conversation from the smaller account, activates it, and
-/// exchanges one message each way; returns the conversation and the first
-/// message.
+/// exchanges one message each way; returns the conversation, the first
+/// message, and the activation identifier later messages name.
 fn direct_round(
     smaller: (&mut IrcClient, &mut Principal),
     larger: (&mut IrcClient, &mut Principal),
     previous: &BoundConversation,
-) -> TestResult<(BoundConversation, Vec<u8>)> {
+) -> TestResult<(BoundConversation, Vec<u8>, [u8; 32])> {
     let (first, first_keys) = smaller;
     let (second, second_keys) = larger;
     let direct = step(
@@ -2253,7 +2267,7 @@ fn direct_round(
         step("direct reply receipt", receive_application(first, &direct))?,
         reply
     );
-    Ok((direct, note))
+    Ok((direct, note, terminal))
 }
 
 /// Names the scenario step a failure belongs to.
@@ -2469,7 +2483,7 @@ fn exercise_encrypted_network(network: &Network, coordinator: &mut DaemonProcess
     // A direct conversation binds under the roots' next binding locks and
     // carries traffic between the two edges without a channel. The smaller
     // account of the pair reserves the route.
-    let (direct, note) = if alice_keys.account <= bob_keys.account {
+    let (direct, note, direct_terminal) = if alice_keys.account <= bob_keys.account {
         direct_round(
             (&mut alice, &mut alice_keys),
             (&mut bob, &mut bob_keys),
@@ -2549,5 +2563,51 @@ fn exercise_encrypted_network(network: &Network, coordinator: &mut DaemonProcess
         "join after restart",
         carol.read_until(|line| line.contains(" 366 carol #after ")),
     )?;
+
+    // The restarted coordinator reloaded the direct route, the accounts'
+    // roots and rosters, and the device attachments from its durable rows:
+    // the direct conversation carries traffic again once the edges resync,
+    // and the closed channel stays a tombstone.
+    let resumed = step(
+        "direct after restart",
+        send_application_when_active(&mut bob, &mut bob_keys, &direct, direct_terminal),
+    )?;
+    assert_eq!(
+        step(
+            "direct receipt after restart",
+            receive_application(&mut alice, &direct)
+        )?,
+        resumed
+    );
+    bob.send("PRIVMSG #room :after the restart")?;
+    let refused = step(
+        "tombstone after restart",
+        bob.read_until(|line| line.contains("E2EE_REQUIRED")),
+    )?;
+    assert_contains(&refused, "FAIL PRIVMSG E2EE_REQUIRED")?;
     Ok(())
+}
+
+/// Sends one application message once the edge's encrypted profile is
+/// active again after a coordinator restart; `E2EE_SYNCING` is retried.
+fn send_application_when_active(
+    sender: &mut IrcClient,
+    principal: &mut Principal,
+    bound: &BoundConversation,
+    latest_state_id: [u8; 32],
+) -> TestResult<Vec<u8>> {
+    let deadline = Instant::now() + NETWORK_WAIT;
+    let mut attempt: u8 = 0;
+    loop {
+        attempt = attempt.wrapping_add(1);
+        match send_application_variant(sender, principal, bound, latest_state_id, 1, attempt) {
+            Ok(message) => return Ok(message),
+            Err(error) if error.to_string().contains("E2EE_SYNCING") => {}
+            Err(error) => return Err(error),
+        }
+        if Instant::now() >= deadline {
+            return Err(failure("the edge never left E2EE_SYNCING".to_owned()));
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
 }

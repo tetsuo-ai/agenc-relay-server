@@ -136,6 +136,7 @@ impl E2eeEdge {
             declared: None,
             acked: None,
             next_sequence: 0,
+            sequenced: None,
             state_id: [0; 32],
             user_id: None,
             account: None,
@@ -154,8 +155,10 @@ impl E2eeEdge {
         Ok(())
     }
 
-    /// `EORIGIN ACK`: the declared generation is in force and its operation
-    /// sequence restarts at zero.
+    /// `EORIGIN ACK`: the declared generation is in force. A new generation
+    /// starts its operation sequence at zero; the replayed declaration of
+    /// the generation already in force keeps counting, as the coordinator
+    /// does.
     pub(super) fn origin_acked(
         &mut self,
         _context: &mut StateCoreContext,
@@ -167,7 +170,10 @@ impl E2eeEdge {
         for origin in self.origins.values_mut() {
             if origin.origin_id == origin_id && origin.declared == Some(generation) {
                 origin.acked = Some(generation);
-                origin.next_sequence = 0;
+                if origin.sequenced != Some(generation) {
+                    origin.next_sequence = 0;
+                    origin.sequenced = Some(generation);
+                }
             }
         }
         Ok(())

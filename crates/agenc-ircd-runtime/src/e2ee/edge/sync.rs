@@ -284,7 +284,9 @@ impl E2eeEdge {
         writes.push(
             super::events::cursor_write(&self.config, &self.delivery).map_err(Refusal::from)?,
         );
-        let _ = edge;
+        // The barrier owner's companion position belongs to the retired
+        // scope; the new generation starts before any position.
+        edge.note_companion_delivery(delivery_generation, None);
         self.stage(context, writes, PendingCommit::Ready)
     }
 
@@ -356,13 +358,50 @@ impl E2eeEdge {
         Ok(())
     }
 
-    /// `EORIGIN READY`: requests flow.
-    pub(super) fn origins_ready(&mut self) -> Result<(), Refusal> {
+    /// `EORIGIN READY`: requests flow. Every request still waiting for its
+    /// result is resent in origin and sequence order; the coordinator
+    /// answers an executed one from its replay table and runs the rest.
+    pub(super) fn origins_ready(
+        &mut self,
+        context: &mut StateCoreContext,
+        edge: &mut EdgeFederation,
+    ) -> Result<(), Refusal> {
         if self.phase != Phase::Origins {
             return Err(E2eeReplyCode::Syncing.into());
         }
         self.phase = Phase::Active;
+        self.resend_pending(context, edge);
         Ok(())
+    }
+
+    /// Resends the unanswered requests of every acknowledged origin.
+    fn resend_pending(&mut self, context: &mut StateCoreContext, edge: &mut EdgeFederation) {
+        let mut order: Vec<(u64, [u8; 16])> = self
+            .pending
+            .iter()
+            .filter(|(_, pending)| pending.result.is_none())
+            .filter(|(_, pending)| {
+                self.origins
+                    .get(&pending.generation)
+                    .is_some_and(|origin| origin.acked.is_some() && origin.acked == origin.declared)
+            })
+            .map(|(request_id, pending)| (pending.sequence, *request_id))
+            .collect();
+        order.sort_unstable();
+        for (_, request_id) in order {
+            let lines = self
+                .pending
+                .get(&request_id)
+                .map(|pending| pending.frames.clone())
+                .unwrap_or_default()
+                .iter()
+                .map(|frame| self.line(frame))
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap_or_default();
+            if lines.is_empty() || !self.send(context, edge, lines) {
+                return;
+            }
+        }
     }
 
     /// The durable rows a restart reads back: the delivery cursor row of
@@ -489,7 +528,9 @@ impl E2eeEdge {
                     snapshot_digest,
                 )
                 .map(|()| Vec::new()),
-            CompanionFrame::OriginReady { .. } => self.origins_ready().map(|()| Vec::new()),
+            CompanionFrame::OriginReady { .. } => {
+                self.origins_ready(context, edge).map(|()| Vec::new())
+            }
             CompanionFrame::OriginAck {
                 origin_id,
                 origin_generation,
