@@ -606,12 +606,13 @@ fn channel_routes_reserve_bind_and_carry_application_traffic() -> TestResult {
     )?;
     let mut send = conversation.to_vec();
     send.extend_from_slice(&INSTANCE);
-    // A bootstrapping group carries no application traffic until its first
-    // finalization activates it (companion 13.1); the finalization path is
-    // covered by the sequencing tests, so activate the lifecycle directly.
+    // A bootstrapping group carries no application traffic until its
+    // bootstrap activation certificate (companion 7.4, 13.2); the
+    // finalization path is covered by the sequencing tests, so activate the
+    // lifecycle directly.
     assert_eq!(
         code(harness.run(Op::ApplicationChannel, &send, Some(&message))?),
-        Some(E2eeReplyCode::RouteInvalid)
+        Some(E2eeReplyCode::FinalityRequired)
     );
     harness
         .coordinator

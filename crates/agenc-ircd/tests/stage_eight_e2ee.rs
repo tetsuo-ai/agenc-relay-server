@@ -43,13 +43,23 @@ use agenc_ircd_storage::{
     initialize_storage,
 };
 use agenc_ircd_testkit::TlsFixture;
+use agenc_ircd_testkit::crypto::SemanticHashDomain;
 use agenc_ircd_testkit::e2ee;
+use agenc_ircd_testkit::e2ee::finality::{Terminal, VoteSlot, vote_tbs};
+use agenc_ircd_testkit::e2ee::ids::semantic_id_of;
 use agenc_ircd_testkit::e2ee::object::{IrcWireObject, IrcWireObjectKind};
+use agenc_ircd_testkit::e2ee::objects::aad::{IrcApplicationAad, IrcCommitAad};
 use agenc_ircd_testkit::e2ee::objects::attach::{IrcDeviceAttach, IrcDeviceAttachChallenge};
-use agenc_ircd_testkit::e2ee::objects::conversation::IrcReservation;
-use agenc_ircd_testkit::e2ee::tls::{DecodeBudget, TlsDecode, TlsEncode};
+use agenc_ircd_testkit::e2ee::objects::conversation::{
+    IrcCommitAuthorizationRule, IrcCommitAuthorizationTbs, IrcReservation, action_bits,
+};
+use agenc_ircd_testkit::e2ee::objects::sequencing::{
+    IrcCandidateReceipt, IrcCommitAck, IrcCommitAckTbs, IrcFinalizationCoreTbs,
+    IrcFinalizationProof, IrcFinalizationRequest, IrcGroupGenesisTbs,
+};
+use agenc_ircd_testkit::e2ee::tls::{DecodeBudget, Opaque, TlsDecode, TlsEncode, TlsVec};
 use agenc_ircd_testkit::e2ee::wire::fragment::{
-    CLIENT_FRAGMENT_TAG, FragmentTag, SERVER_FRAGMENT_TAG, fragment_object,
+    CLIENT_FRAGMENT_TAG, FragmentTag, RECEIPT_TAG, ReceiptTag, SERVER_FRAGMENT_TAG, fragment_object,
 };
 use agenc_ircd_testkit::e2ee::wire::tokens::{base64url_decode, base64url_encode};
 use agenc_ircd_testkit::e2ee_client as builders;
@@ -1561,11 +1571,14 @@ fn labeled_reply(client: &mut IrcClient, label: &str) -> TestResult<Vec<String>>
         .map_err(|error| failure(format!("waiting for label {label}: {error}")))
 }
 
-/// Reassembles the object a batch carried in its server fragment tags.
+/// Reassembles the object a reply carried in its fragment tags: the server
+/// tag on batch lines, the preserved client-only tag on live echoes.
 fn batch_object(lines: &[String]) -> TestResult<Vec<u8>> {
     let mut fragments: Vec<FragmentTag> = lines
         .iter()
-        .filter_map(|line| tag_value(line, SERVER_FRAGMENT_TAG))
+        .filter_map(|line| {
+            tag_value(line, SERVER_FRAGMENT_TAG).or_else(|| tag_value(line, CLIENT_FRAGMENT_TAG))
+        })
         .map(|value| FragmentTag::parse(&value))
         .collect::<Result<_, _>>()?;
     if fragments.is_empty() {
@@ -1692,13 +1705,20 @@ fn publish_and_attach(client: &mut IrcClient, user: &mut Principal) -> TestResul
     Ok(())
 }
 
-/// Reserves and binds `#room` for both principals from `client`; returns
-/// the conversation identifier.
+/// What the binder learns from a successful `EGROUP BIND`.
+struct BoundChannel {
+    conversation: [u8; 32],
+    binding_id: [u8; 32],
+    instance: [u8; 16],
+    binding: Vec<u8>,
+}
+
+/// Reserves and binds `#room` for both principals from `client`.
 fn reserve_and_bind(
     client: &mut IrcClient,
     binder: &mut Principal,
     peer: &Principal,
-) -> TestResult<[u8; 32]> {
+) -> TestResult<BoundChannel> {
     let label = binder.label();
     client.send(&format!("@label={label} EGROUP RESERVE CHANNEL #room"))?;
     let reply = labeled_reply(client, &label)?;
@@ -1754,7 +1774,288 @@ fn reserve_and_bind(
     let reply = labeled_reply(client, &label)?;
     assert_contains(&reply, " EGROUP BOUND ")?;
     assert_eq!(hash_at(&reply, "BOUND", 3)?, conversation);
-    Ok(conversation)
+    Ok(BoundChannel {
+        conversation,
+        binding_id: hash_at(&reply, "BOUND", 4)?,
+        instance,
+        binding,
+    })
+}
+
+/// The context core identifier the test binding package carries.
+const CONTEXT_CORE_ID: [u8; 32] = [30; 32];
+/// The initial and required operational policy identifiers of the package.
+const INITIAL_POLICY_ID: [u8; 32] = [27; 32];
+const OPERATIONAL_POLICY_ID: [u8; 32] = [28; 32];
+const VALIDATION_TIME: u64 = 1_700_000_000;
+/// MLS content types (RFC 9420 section 6).
+const MLS_APPLICATION: u8 = 1;
+const MLS_COMMIT: u8 = 3;
+
+/// Wraps raw MLS bytes as the wire object of `kind`.
+fn raw_object(kind: IrcWireObjectKind, bytes: Vec<u8>) -> TestResult<Vec<u8>> {
+    Ok(IrcWireObject::new(kind, bytes)?.encode()?)
+}
+
+/// Reassembles the object the server fragment tags of `lines` carry.
+fn fragments_object(lines: &[String]) -> TestResult<Vec<u8>> {
+    batch_object(lines)
+}
+
+/// Runs the bootstrap activation round on `bound` from the binder: one
+/// Commit candidate sequenced by the coordinator, then its finalization
+/// with the binder's council vote; returns the finalization identifier,
+/// which is the next accepted state.
+fn activate_bootstrap(
+    client: &mut IrcClient,
+    binder: &mut Principal,
+    bound: &BoundChannel,
+) -> TestResult<[u8; 32]> {
+    let network = *NETWORK_ID.as_bytes();
+    let conversation = bound.conversation;
+    let route_binding = e2ee::route::channel_route_binding(&network, &bound.instance)?;
+    let genesis = IrcGroupGenesisTbs {
+        network_id: network,
+        conversation_id: conversation,
+        group_id: Opaque::new(GROUP.to_vec())?,
+        binding_id: bound.binding_id,
+        context_core_id: CONTEXT_CORE_ID,
+    };
+    let accepted = semantic_id_of(SemanticHashDomain::GroupGenesisId, &genesis)?;
+
+    let commit_aad = IrcCommitAad {
+        profile_version: 1,
+        network_id: network,
+        conversation_id: conversation,
+        route_binding,
+        validation_time: VALIDATION_TIME,
+        prior_state_id: accepted,
+    }
+    .encode()?;
+    let commit = raw_object(
+        IrcWireObjectKind::CommitMls,
+        builders::private_message_at_epoch(&GROUP, 0, MLS_COMMIT, &commit_aad)?,
+    )?;
+    let commit_object_id = *e2ee::ObjectId::compute(&commit).as_bytes();
+    let conversation_token = base64url_encode(&conversation);
+    let label = binder.label();
+    send_object(
+        client,
+        &label,
+        &format!("EGROUP SUBMIT CANDIDATE {conversation_token}"),
+        &commit,
+    )?;
+    let echo = labeled_reply(client, &label)?;
+    assert_contains(&echo, " EGROUP CANDIDATE ")?;
+    assert_eq!(fragments_object(&echo)?, commit);
+    let receipt_tag = echo
+        .iter()
+        .find_map(|line| tag_value(line, RECEIPT_TAG))
+        .ok_or_else(|| failure("the candidate echo carries the receipt tag"))?;
+    let receipt_tag = ReceiptTag::parse(&receipt_tag)?;
+    let candidate_id = receipt_tag.candidate_id;
+    assert_eq!(hash_at(&echo, "CANDIDATE", 5)?, candidate_id);
+    let mut budget = DecodeBudget::new(1 << 16, 1 << 10);
+    let receipt = IrcCandidateReceipt::decode_exact(&receipt_tag.receipt, &mut budget)?;
+    assert_eq!(receipt.tbs.commit_object_id, commit_object_id);
+    assert_eq!(receipt.tbs.prior_state_id, accepted);
+
+    let authorization = builders::commit_authorization(
+        IrcCommitAuthorizationTbs {
+            profile_version: 1,
+            network_id: network,
+            conversation_id: conversation,
+            prior_epoch: 0,
+            prior_state_id: accepted,
+            candidate_id,
+            commit_object_id,
+            canonical_validation_time: VALIDATION_TIME,
+            old_policy_id: INITIAL_POLICY_ID,
+            authorization_rule: IrcCommitAuthorizationRule::BootstrapActivation,
+            action_bits: action_bits::POLICY | action_bits::BOOTSTRAP,
+            resulting_policy_id: OPERATIONAL_POLICY_ID,
+            resulting_group_context_digest: [1; 32],
+            resulting_ratchet_tree_digest: [2; 32],
+            transition_target_digest: [0; 32],
+        },
+        &[(&binder.keys, binder.device)],
+    )?;
+    let core = IrcFinalizationCoreTbs {
+        profile_version: 1,
+        network_id: network,
+        conversation_id: conversation,
+        prior_epoch: 0,
+        prior_state_id: accepted,
+        candidate_id,
+        commit_object_id,
+        resulting_epoch: 1,
+        old_policy_id: INITIAL_POLICY_ID,
+        commit_authorization_id: semantic_id_of(
+            SemanticHashDomain::CommitAuthorizationId,
+            &authorization.tbs,
+        )?,
+        acknowledgement_set_digest: [3; 32],
+        resulting_group_context_digest: [1; 32],
+        resulting_ratchet_tree_digest: [2; 32],
+        finalization_authenticator: [4; 32],
+    };
+    let finalization_id = semantic_id_of(SemanticHashDomain::FinalizationId, &core)?;
+    let ack = IrcCommitAck {
+        tbs: IrcCommitAckTbs {
+            profile_version: 1,
+            network_id: network,
+            conversation_id: conversation,
+            prior_epoch: 0,
+            candidate_id,
+            commit_object_id,
+            old_leaf_index: 0,
+            old_credential_hash: [5; 32],
+            resulting_epoch: 1,
+            resulting_group_context_digest: [1; 32],
+            resulting_ratchet_tree_digest: [2; 32],
+            finalization_authenticator: [4; 32],
+        },
+        old_leaf_signature: Opaque::new(vec![6; 64])?,
+    };
+    let slot = VoteSlot {
+        network_id: network,
+        conversation_id: conversation,
+        prior_epoch: 0,
+        prior_state_id: accepted,
+        candidate_sequence: receipt.tbs.candidate_sequence,
+        predecessor_record_id: receipt.tbs.predecessor_record_id,
+    };
+    let vote = builders::finality_vote(
+        &binder.keys,
+        binder.device,
+        &vote_tbs(&slot, candidate_id, Terminal::finalize(finalization_id)),
+    )?;
+    let request = IrcFinalizationRequest {
+        proof: IrcFinalizationProof {
+            core,
+            receipt,
+            authorization,
+            acknowledgements: TlsVec::new(vec![ack])?,
+        },
+        votes: TlsVec::new(vec![vote])?,
+    };
+    let request = wire_object(IrcWireObjectKind::FinalizationRequest, &request)?;
+    let label = binder.label();
+    send_object(
+        client,
+        &label,
+        &format!("EGROUP SUBMIT FINALIZATION {conversation_token}"),
+        &request,
+    )?;
+    let reply = labeled_reply(client, &label)?;
+    assert_contains(
+        &reply,
+        &format!(" EGROUP FINALIZED {conversation_token} 1 "),
+    )?;
+    assert_eq!(hash_at(&reply, "FINALIZED", 5)?, finalization_id);
+    Ok(finalization_id)
+}
+
+/// Sends one application message on the bound channel from `sender` and
+/// returns the object bytes, after checking the labeled echo.
+fn send_application(
+    sender: &mut IrcClient,
+    principal: &mut Principal,
+    bound: &BoundChannel,
+    latest_state_id: [u8; 32],
+    epoch: u64,
+) -> TestResult<Vec<u8>> {
+    let network = *NETWORK_ID.as_bytes();
+    let aad = IrcApplicationAad {
+        profile_version: 1,
+        network_id: network,
+        conversation_id: bound.conversation,
+        route_binding: e2ee::route::channel_route_binding(&network, &bound.instance)?,
+        latest_state_id,
+    }
+    .encode()?;
+    let ciphertext: Vec<u8> = principal
+        .account
+        .iter()
+        .cycle()
+        .take(300)
+        .copied()
+        .collect();
+    let message = raw_object(
+        IrcWireObjectKind::ApplicationMls,
+        builders::private_message_with_ciphertext(
+            &GROUP,
+            epoch,
+            MLS_APPLICATION,
+            &aad,
+            &ciphertext,
+        )?,
+    )?;
+    let label = principal.label();
+    send_object(sender, &label, "TAGMSG #room", &message)?;
+    let echo = labeled_reply(sender, &label)?;
+    assert_contains(&echo, " TAGMSG #room")?;
+    assert_eq!(fragments_object(&echo)?, message);
+    Ok(message)
+}
+
+/// Reads the next forwarded application message on `#room` from `client`.
+fn receive_application(client: &mut IrcClient) -> TestResult<Vec<u8>> {
+    let lines = client.read_until(|line| line.contains(" TAGMSG #room"))?;
+    let forwarded: Vec<String> = lines
+        .into_iter()
+        .filter(|line| line.contains(" TAGMSG #room"))
+        .collect();
+    fragments_object(&forwarded)
+}
+
+/// Delivers the binding package to `target`'s device mailbox from
+/// `sender`; `receiver` fetches the page and acknowledges the item.
+fn exchange_binding_mailbox(
+    sender: &mut IrcClient,
+    sender_keys: &mut Principal,
+    receiver: &mut IrcClient,
+    receiver_keys: &mut Principal,
+    binding: &[u8],
+) -> TestResult {
+    let label = sender_keys.label();
+    send_object(
+        sender,
+        &label,
+        &format!(
+            "EKEY DELIVER BINDING {} {}",
+            base64url_encode(&receiver_keys.account),
+            receiver_keys.device_token()
+        ),
+        binding,
+    )?;
+    let reply = labeled_reply(sender, &label)?;
+    assert_contains(&reply, " EKEY STORED BINDING ")?;
+    let object_id = *e2ee::ObjectId::compute(binding).as_bytes();
+    assert_eq!(hash_at(&reply, "BINDING", 4)?, object_id);
+
+    let label = receiver_keys.label();
+    receiver.send(&format!("@label={label} EKEY FETCH MAILBOX BINDING *"))?;
+    let page = labeled_reply(receiver, &label)?;
+    assert_contains(&page, " EKEY MAILBOX ")?;
+    let token = hash_at(&page, "MAILBOX", 3)?;
+    assert_eq!(hash_at(&page, "MAILBOX", 5)?, object_id);
+    assert_eq!(fragments_object(&page)?, binding);
+
+    let label = receiver_keys.label();
+    receiver.send(&format!(
+        "@label={label} EKEY ACK MAILBOX {} {}",
+        base64url_encode(&token),
+        base64url_encode(&object_id)
+    ))?;
+    let acked = labeled_reply(receiver, &label)?;
+    assert_contains(&acked, " EKEY ACKED ")?;
+
+    let label = receiver_keys.label();
+    receiver.send(&format!("@label={label} EKEY FETCH MAILBOX BINDING *"))?;
+    let empty = labeled_reply(receiver, &label)?;
+    assert_contains(&empty, " EKEY EMPTY ")?;
+    Ok(())
 }
 
 #[test]
@@ -1808,12 +2109,62 @@ fn exercise_encrypted_network(network: &Network, _coordinator: &mut DaemonProces
     bob.send("JOIN #room")?;
     bob.read_until(|line| line.contains(" 366 bob #room "))?;
     alice.read_until(|line| line.starts_with(":bob!") && line.contains(" JOIN #room"))?;
-    let conversation = reserve_and_bind(&mut alice, &mut alice_keys, &bob_keys)?;
-    assert_ne!(conversation, [0; 32]);
+    let bound = reserve_and_bind(&mut alice, &mut alice_keys, &bob_keys)?;
+    assert_ne!(bound.conversation, [0; 32]);
 
     // A bound channel refuses plaintext on both edges.
     alice.send("PRIVMSG #room :hello in the clear")?;
     let refused = alice.read_until(|line| line.contains("E2EE_REQUIRED"))?;
     assert_contains(&refused, "FAIL PRIVMSG E2EE_REQUIRED")?;
+    bob.send("NOTICE #room :also in the clear")?;
+    let refused = bob.read_until(|line| line.contains("E2EE_REQUIRED"))?;
+    assert_contains(&refused, "FAIL NOTICE E2EE_REQUIRED")?;
+
+    // Application traffic waits for the bootstrap activation certificate.
+    let genesis_state = [0; 32];
+    let label = alice_keys.label();
+    let early = {
+        let network = *NETWORK_ID.as_bytes();
+        let aad = IrcApplicationAad {
+            profile_version: 1,
+            network_id: network,
+            conversation_id: bound.conversation,
+            route_binding: e2ee::route::channel_route_binding(&network, &bound.instance)?,
+            latest_state_id: genesis_state,
+        }
+        .encode()?;
+        raw_object(
+            IrcWireObjectKind::ApplicationMls,
+            builders::private_message_at_epoch(&GROUP, 0, MLS_APPLICATION, &aad)?,
+        )?
+    };
+    send_object(&mut alice, &label, "TAGMSG #room", &early)?;
+    let refused = labeled_reply(&mut alice, &label)?;
+    assert_contains(&refused, "FAIL TAGMSG E2EE_FINALITY_REQUIRED")?;
+
+    let finalization_id = activate_bootstrap(&mut alice, &mut alice_keys, &bound)?;
+    let broadcast = bob.read_until(|line| line.contains(" EGROUP FINALIZED "))?;
+    assert_contains(
+        &broadcast,
+        &format!(
+            " EGROUP FINALIZED {} 1 ",
+            base64url_encode(&bound.conversation)
+        ),
+    )?;
+
+    // Application messages fan out across the edges and echo to the sender.
+    let message = send_application(&mut alice, &mut alice_keys, &bound, finalization_id, 1)?;
+    assert_eq!(receive_application(&mut bob)?, message);
+    let answer = send_application(&mut bob, &mut bob_keys, &bound, finalization_id, 1)?;
+    assert_eq!(receive_application(&mut alice)?, answer);
+
+    // The device mailbox carries the binding package to the peer device.
+    exchange_binding_mailbox(
+        &mut alice,
+        &mut alice_keys,
+        &mut bob,
+        &mut bob_keys,
+        &bound.binding,
+    )?;
     Ok(())
 }

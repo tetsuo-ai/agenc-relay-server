@@ -462,6 +462,22 @@ impl E2eeEdge {
         let source = self.source_prefix(event);
         let kind = event.event_kind;
         let requester = self.requester_of(event);
+        // A channel copy names the channel; the replica projects the name
+        // and the router remembers it for the conversation's later copies.
+        let channel = self
+            .conversations
+            .get(&conversation)
+            .and_then(|known| known.channel);
+        let channel_name = channel.and_then(|channel| {
+            self.channel_name(channel).or_else(|| {
+                let name = edge
+                    .replica()
+                    .channel(channel)
+                    .map(|record| record.name.presentation().to_owned())?;
+                self.remember_channel(channel, &name);
+                Some(name)
+            })
+        });
         let mut outputs = Vec::new();
         for (generation, _) in recipients {
             let label = requester
@@ -475,7 +491,7 @@ impl E2eeEdge {
                     &source,
                     label.as_deref(),
                     event,
-                    conversation,
+                    (conversation, channel_name.as_deref()),
                     payload.ok_or(E2eeReplyCode::InvalidFragment)?,
                 )?,
                 IrcFederationEventKind::CommitAckEvent | IrcFederationEventKind::ReinitAckEvent => {
@@ -577,19 +593,13 @@ impl E2eeEdge {
         source: &str,
         label: Option<&str>,
         event: &IrcFederationEvent,
-        conversation: [u8; 32],
+        (conversation, channel_name): ([u8; 32], Option<&str>),
         payload: &[u8],
     ) -> Result<Vec<String>, Refusal> {
-        let known = self.conversations.get(&conversation);
         let line = match event.event_kind {
             IrcFederationEventKind::ChannelApplication => {
-                let channel = known
-                    .and_then(|known| known.channel)
-                    .ok_or(E2eeReplyCode::RouteInvalid)?;
-                let name = self
-                    .channel_name(channel)
-                    .ok_or(E2eeReplyCode::RouteInvalid)?;
-                LiveLine::Tagmsg(name.into_bytes())
+                let name = channel_name.ok_or(E2eeReplyCode::RouteInvalid)?;
+                LiveLine::Tagmsg(name.as_bytes().to_vec())
             }
             IrcFederationEventKind::DirectApplication => LiveLine::Edirect(conversation),
             _ => {

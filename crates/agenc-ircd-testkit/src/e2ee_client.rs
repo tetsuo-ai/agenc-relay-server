@@ -645,13 +645,25 @@ pub fn private_message_at_epoch(
     content_type: u8,
     aad: &[u8],
 ) -> Result<Vec<u8>, E2eeError> {
+    private_message_with_ciphertext(group_id, epoch, content_type, aad, &[2; 300])
+}
+
+/// An MLS `PrivateMessage` at `epoch` whose opaque ciphertext is
+/// `ciphertext`, so two messages of one test differ as real ones would.
+pub fn private_message_with_ciphertext(
+    group_id: &[u8],
+    epoch: u64,
+    content_type: u8,
+    aad: &[u8],
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, E2eeError> {
     let mut out = vec![0, 1, 0, 2];
     opaque_v(&mut out, group_id)?;
     out.extend_from_slice(&epoch.to_be_bytes());
     out.push(content_type);
     opaque_v(&mut out, aad)?;
     opaque_v(&mut out, &[1; 40])?;
-    opaque_v(&mut out, &[2; 300])?;
+    opaque_v(&mut out, ciphertext)?;
     Ok(out)
 }
 

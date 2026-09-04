@@ -154,9 +154,17 @@ pub fn application(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         .lifecycles
         .get(&conversation_id)
         .ok_or_else(|| Fail::with(E2eeReplyCode::RouteInvalid, &conversation_id))?;
-    lifecycle
-        .check_application(log)
-        .map_err(|_| Fail::with(E2eeReplyCode::RouteInvalid, &conversation_id))?;
+    // Application traffic waits for the bootstrap activation certificate
+    // (companion 7.4): that refusal names finality, every other one the route.
+    lifecycle.check_application(log).map_err(|error| {
+        let code = match error {
+            agenc_ircd_domain::e2ee::lifecycle::LifecycleError::BootstrapPending => {
+                E2eeReplyCode::FinalityRequired
+            }
+            _ => E2eeReplyCode::RouteInvalid,
+        };
+        Fail::with(code, &conversation_id)
+    })?;
     if let Some(instance) = instance {
         let matches = exec
             .coordinator

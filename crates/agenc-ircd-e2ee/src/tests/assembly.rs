@@ -84,13 +84,68 @@ fn local_ingress_assembles_in_order_and_verifies_the_hash() -> TestResult {
     );
     assert_eq!(assembler.quotas().reserved_bytes(), 0);
     assert_eq!(assembler.open_count(), 0);
-    assert!(assembler.is_recent(&key.object_id));
+    assert!(assembler.is_recent(key.direction, key.sender, key.command, &key.object_id));
     assert_eq!(
         assembler.ingest(key.clone(), scopes(), LIVE, first, 14)?,
         Ingest::Recent
     );
     assembler.expire(13 + 30 * 60);
-    assert!(!assembler.is_recent(&key.object_id));
+    assert!(!assembler.is_recent(key.direction, key.sender, key.command, &key.object_id));
+    Ok(())
+}
+
+#[test]
+fn a_recent_object_is_scoped_to_its_direction_and_sender() -> TestResult {
+    let bytes = object(100);
+    let fragments = fragment_object(&bytes)?;
+    let first = fragments.first().ok_or("fragment")?;
+    let local = local_key(ObjectId::compute(&bytes));
+    let mut assembler = E2eeAssembler::default();
+    assert_eq!(
+        assembler.ingest(local.clone(), scopes(), LIVE, first, 10)?,
+        Ingest::Complete(bytes.clone())
+    );
+    assert_eq!(
+        assembler.ingest(local.clone(), scopes(), LIVE, first, 11)?,
+        Ingest::Recent
+    );
+    // The coordinator delivering the same bytes is a different flow.
+    let delivered = AssemblyKey {
+        direction: Direction::Response,
+        sender: Sender::Peer([9; 16]),
+        ..local.clone()
+    };
+    assert_eq!(
+        assembler.ingest(delivered.clone(), scopes(), LIVE, first, 12)?,
+        Ingest::Complete(bytes.clone())
+    );
+    // Deliveries are keyed by position, never by content: the same bytes
+    // delivered again assemble again.
+    assert!(!assembler.is_recent(
+        delivered.direction,
+        delivered.sender,
+        delivered.command,
+        &delivered.object_id
+    ));
+    assert_eq!(
+        assembler.ingest(delivered, scopes(), LIVE, first, 13)?,
+        Ingest::Complete(bytes)
+    );
+    assert!(assembler.is_recent(
+        local.direction,
+        local.sender,
+        local.command,
+        &local.object_id
+    ));
+    // The same bytes under another command are a new submission.
+    let other_command = AssemblyKey {
+        command: CarrierCommand::Federation(IrcWireObjectKind::FederationRequest),
+        ..local.clone()
+    };
+    assert_eq!(
+        assembler.ingest(other_command, scopes(), LIVE, first, 14)?,
+        Ingest::Complete(object(100))
+    );
     Ok(())
 }
 
@@ -159,7 +214,7 @@ fn a_hash_mismatch_discards_the_object_after_release() -> TestResult {
         Err(AssemblyError::HashMismatch)
     );
     assert_eq!(assembler.quotas().reserved_bytes(), 0);
-    assert!(!assembler.is_recent(&key.object_id));
+    assert!(!assembler.is_recent(key.direction, key.sender, key.command, &key.object_id));
     assert_eq!(
         AssemblyError::HashMismatch.reply_code(),
         E2eeReplyCode::HashMismatch
