@@ -1,11 +1,11 @@
 ---
 name: listener
-description: "Skill for the Listener area of agenc-ircd. 47 symbols across 10 files."
+description: "Skill for the Listener area of agenc-ircd. 51 symbols across 10 files."
 ---
 
 # Listener
 
-47 symbols | 10 files | Cohesion: 70%
+51 symbols | 10 files | Cohesion: 67%
 
 ## When to Use
 
@@ -17,10 +17,10 @@ description: "Skill for the Listener area of agenc-ircd. 47 symbols across 10 fi
 
 | File | Symbols |
 |------|---------|
-| `crates/agenc-ircd-runtime/src/listener/mod.rs` | new, start, validate_spec, purpose_ceiling, run_listener (+14) |
+| `crates/agenc-ircd-runtime/src/listener/mod.rs` | new, start, validate_spec, purpose_ceiling, run_listener (+15) |
 | `crates/agenc-ircd-runtime/src/listener/socket.rs` | new, drop, bind, adopt_unix, bind_unix (+5) |
 | `crates/agenc-ircd-runtime/src/admin.rs` | opened, line, closed, send, run_admin_connection (+1) |
-| `crates/agenc-ircd-runtime/src/daemon.rs` | insert_alias, insert_listener_identity, validate_onion_pin |
+| `crates/agenc-ircd-runtime/src/daemon.rs` | insert_alias, insert_listener_identity, validate_onion_pin, start_owners, spawn_listener_owner (+1) |
 | `crates/agenc-ircd-runtime/src/tls/config.rs` | requires_client_certificate, leaf |
 | `crates/agenc-ircd-runtime/src/listener/prefix.rs` | source_key, keys_follow_the_family_and_collapse_mapped_addresses |
 | `crates/agenc-ircd-runtime/src/state_core/inbox.rs` | ipv6, source_keys_mask_to_the_spec_prefixes_and_stay_distinct_per_family |
@@ -53,6 +53,7 @@ Start here when exploring this area:
 | `leaf` | Function | `crates/agenc-ircd-runtime/src/tls/config.rs` | 343 |
 | `source_key` | Function | `crates/agenc-ircd-runtime/src/listener/prefix.rs` | 21 |
 | `ipv6` | Function | `crates/agenc-ircd-runtime/src/state_core/inbox.rs` | 152 |
+| `join` | Function | `crates/agenc-ircd-runtime/src/listener/mod.rs` | 491 |
 | `validate_spec` | Function | `crates/agenc-ircd-runtime/src/listener/mod.rs` | 508 |
 | `purpose_ceiling` | Function | `crates/agenc-ircd-runtime/src/listener/mod.rs` | 536 |
 | `run_listener` | Function | `crates/agenc-ircd-runtime/src/listener/mod.rs` | 564 |
@@ -61,7 +62,6 @@ Start here when exploring this area:
 | `prepare_admission` | Function | `crates/agenc-ircd-runtime/src/listener/mod.rs` | 828 |
 | `acquire_charges` | Function | `crates/agenc-ircd-runtime/src/listener/mod.rs` | 921 |
 | `specs_pair_purposes_with_transports_and_ceilings` | Function | `crates/agenc-ircd-runtime/src/listener/mod.rs` | 1283 |
-| `new` | Function | `crates/agenc-ircd-runtime/src/listener/socket.rs` | 156 |
 
 ## Execution Flows
 
@@ -78,14 +78,14 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Cluster_531 | 5 calls |
-| Supervisor | 5 calls |
+| Supervisor | 10 calls |
+| Cluster_529 | 5 calls |
 | Admission | 5 calls |
-| Cluster_488 | 3 calls |
-| Tests | 3 calls |
+| Tests | 4 calls |
+| Cluster_487 | 3 calls |
 | Admin | 2 calls |
 | Connection | 2 calls |
-| Cluster_493 | 1 calls |
+| State_core | 2 calls |
 
 ## How to Explore
 

@@ -1,11 +1,11 @@
 ---
 name: admin
-description: "Skill for the Admin area of agenc-ircd. 79 symbols across 7 files."
+description: "Skill for the Admin area of agenc-ircd. 82 symbols across 7 files."
 ---
 
 # Admin
 
-79 symbols | 7 files | Cohesion: 62%
+82 symbols | 7 files | Cohesion: 62%
 
 ## When to Use
 
@@ -18,11 +18,11 @@ description: "Skill for the Admin area of agenc-ircd. 79 symbols across 7 files.
 | File | Symbols |
 |------|---------|
 | `crates/agenc-ircd-runtime/src/admin/audit.rs` | new, verify_checkpoints, verify_events, binding, registry (+54) |
-| `crates/agenc-ircd-runtime/src/admin.rs` | issue_confirmation, prepare_rehash_outcomes, prepare_observed_event, commit_observed, output_storage_unavailable (+6) |
+| `crates/agenc-ircd-runtime/src/admin.rs` | issue_confirmation, prepare_rehash_outcomes, prepare_observed_event, commit_observed, output_storage_unavailable (+7) |
 | `crates/agenc-ircd-admin/src/audit.rs` | genesis, advance, check_event_order, verify |
+| `crates/agenc-ircd-runtime/src/state_core/admin.rs` | kill, target_revision, commit_retention |
 | `crates/agenc-ircd-admin/src/command.rs` | contains, verb |
 | `crates/agenc-ircd-crypto/src/storage_integrity.rs` | audit_signing_key_id |
-| `crates/agenc-ircd-runtime/src/state_core/admin.rs` | target_revision |
 | `crates/agenc-ircd-runtime/src/cancel.rs` | is_cancelled |
 
 ## Entry Points
@@ -46,19 +46,19 @@ Start here when exploring this area:
 | `contains` | Function | `crates/agenc-ircd-admin/src/command.rs` | 91 |
 | `verb` | Function | `crates/agenc-ircd-admin/src/command.rs` | 244 |
 | `prepare_event` | Function | `crates/agenc-ircd-runtime/src/admin/audit.rs` | 367 |
-| `verify` | Function | `crates/agenc-ircd-admin/src/audit.rs` | 238 |
-| `commit_event` | Function | `crates/agenc-ircd-runtime/src/admin/audit.rs` | 401 |
-| `target_revision` | Function | `crates/agenc-ircd-runtime/src/state_core/admin.rs` | 205 |
 | `take_pending_startup_action` | Function | `crates/agenc-ircd-runtime/src/admin/audit.rs` | 208 |
 | `prepare_startup_outcome` | Function | `crates/agenc-ircd-runtime/src/admin/audit.rs` | 217 |
 | `resolve_committed_startup_action` | Function | `crates/agenc-ircd-runtime/src/admin/audit.rs` | 262 |
+| `kill` | Function | `crates/agenc-ircd-runtime/src/state_core/admin.rs` | 245 |
+| `verify` | Function | `crates/agenc-ircd-admin/src/audit.rs` | 238 |
+| `commit_event` | Function | `crates/agenc-ircd-runtime/src/admin/audit.rs` | 401 |
+| `target_revision` | Function | `crates/agenc-ircd-runtime/src/state_core/admin.rs` | 205 |
 | `prepare_retention` | Function | `crates/agenc-ircd-runtime/src/admin/audit.rs` | 304 |
 | `is_cancelled` | Function | `crates/agenc-ircd-runtime/src/cancel.rs` | 75 |
+| `commit_retention` | Function | `crates/agenc-ircd-runtime/src/state_core/admin.rs` | 273 |
 | `is_reconciled` | Function | `crates/agenc-ircd-runtime/src/admin/audit.rs` | 192 |
 | `prepare_export` | Function | `crates/agenc-ircd-runtime/src/admin/audit.rs` | 285 |
 | `commit_retention` | Function | `crates/agenc-ircd-runtime/src/admin/audit.rs` | 343 |
-| `finish_with_observed` | Function | `crates/agenc-ircd-runtime/src/admin/audit.rs` | 497 |
-| `new` | Function | `crates/agenc-ircd-runtime/src/admin/audit.rs` | 681 |
 
 ## Execution Flows
 
@@ -77,10 +77,10 @@ Start here when exploring this area:
 | Area | Connections |
 |------|-------------|
 | Tests | 12 calls |
-| Cluster_489 | 11 calls |
-| Cluster_488 | 5 calls |
+| Cluster_488 | 11 calls |
+| State_core | 7 calls |
+| Cluster_487 | 5 calls |
 | Coordinator | 5 calls |
-| State_core | 4 calls |
 | Examples | 4 calls |
 | Cluster_3 | 2 calls |
 | Cluster_4 | 2 calls |

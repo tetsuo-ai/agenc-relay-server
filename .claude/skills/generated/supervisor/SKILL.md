@@ -1,11 +1,11 @@
 ---
 name: supervisor
-description: "Skill for the Supervisor area of agenc-ircd. 86 symbols across 14 files."
+description: "Skill for the Supervisor area of agenc-ircd. 76 symbols across 13 files."
 ---
 
 # Supervisor
 
-86 symbols | 14 files | Cohesion: 80%
+76 symbols | 13 files | Cohesion: 75%
 
 ## When to Use
 
@@ -18,8 +18,8 @@ description: "Skill for the Supervisor area of agenc-ircd. 86 symbols across 14 
 | File | Symbols |
 |------|---------|
 | `crates/agenc-ircd-runtime/src/admin.rs` | acquire_audit_export_memory, admin_process_channel, new, start, admin_lifecycle_channel (+30) |
-| `crates/agenc-ircd-runtime/src/daemon.rs` | start_owners, unwind_started_owners, spawn_admin_owner, spawn_listener_owner, spawn_state_owner (+12) |
 | `crates/agenc-ircd-runtime/src/supervisor/mod.rs` | default, new, root_token, spawn, cancel (+6) |
+| `crates/agenc-ircd-runtime/src/daemon.rs` | maintenance_completion_triggers_shutdown_without_consuming_the_join_record, observe, observe_report, join_or_abort_supervised_remainder, forced_abort_waits_until_nested_owners_have_joined (+3) |
 | `crates/agenc-ircd-runtime/src/supervisor/panic.rs` | new, install, server_id, the_crash_event_carries_only_closed_fields, an_unreadable_clock_blocks_installation_and_a_later_failure_uses_the_fallback (+1) |
 | `crates/agenc-ircd-runtime/src/supervisor/signal.rs` | the_signal_task_registers_handlers_and_stops_on_cancel, new, run_signal_task |
 | `crates/agenc-ircd-runtime/tests/shutdown.rs` | a_panicking_child_is_contained_and_cancels_the_tree_when_critical, connection_children_churn_without_leaking_registrations, forced_abort_joins_every_non_cooperative_owner |
@@ -48,20 +48,20 @@ Start here when exploring this area:
 | `admin_transport_channel` | Function | `crates/agenc-ircd-runtime/src/admin.rs` | 605 |
 | `empty_for_test` | Function | `crates/agenc-ircd-runtime/src/admin/audit.rs` | 413 |
 | `cancel` | Function | `crates/agenc-ircd-runtime/src/cancel.rs` | 64 |
-| `join` | Function | `crates/agenc-ircd-runtime/src/listener/mod.rs` | 491 |
 | `complete_next_for_test` | Function | `crates/agenc-ircd-runtime/src/state_core/admin.rs` | 310 |
 | `admin_core_channel` | Function | `crates/agenc-ircd-runtime/src/state_core/admin.rs` | 460 |
 | `new` | Function | `crates/agenc-ircd-runtime/src/supervisor/mod.rs` | 148 |
 | `root_token` | Function | `crates/agenc-ircd-runtime/src/supervisor/mod.rs` | 157 |
 | `spawn` | Function | `crates/agenc-ircd-runtime/src/supervisor/mod.rs` | 164 |
 | `cancel` | Function | `crates/agenc-ircd-runtime/src/supervisor/mod.rs` | 196 |
+| `abort_all` | Function | `crates/agenc-ircd-runtime/src/supervisor/mod.rs` | 201 |
 | `next_exit` | Function | `crates/agenc-ircd-runtime/src/supervisor/mod.rs` | 207 |
 | `join_all` | Function | `crates/agenc-ircd-runtime/src/supervisor/mod.rs` | 232 |
 | `try_backup` | Function | `crates/agenc-ircd-storage/src/owner.rs` | 158 |
 | `live_children` | Function | `crates/agenc-ircd-runtime/src/supervisor/mod.rs` | 191 |
-| `abort_all` | Function | `crates/agenc-ircd-runtime/src/supervisor/mod.rs` | 201 |
 | `new` | Function | `crates/agenc-ircd-runtime/src/supervisor/panic.rs` | 27 |
 | `install` | Function | `crates/agenc-ircd-runtime/src/supervisor/panic.rs` | 63 |
+| `serve` | Function | `crates/agenc-ircd-runtime/src/daemon.rs` | 290 |
 
 ## Execution Flows
 
@@ -82,14 +82,14 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Tests | 18 calls |
-| State_core | 9 calls |
-| Observe | 6 calls |
+| Tests | 16 calls |
 | Listener | 5 calls |
-| Federation | 4 calls |
+| Federation | 3 calls |
 | Cluster_25 | 3 calls |
-| Cluster_482 | 2 calls |
+| Observe | 3 calls |
+| State_core | 3 calls |
 | Connection | 2 calls |
+| Cluster_484 | 2 calls |
 
 ## How to Explore
 

@@ -1,11 +1,11 @@
 ---
 name: tests
-description: "Skill for the Tests area of agenc-ircd. 1988 symbols across 248 files."
+description: "Skill for the Tests area of agenc-ircd. 2027 symbols across 247 files."
 ---
 
 # Tests
 
-1988 symbols | 248 files | Cohesion: 68%
+2027 symbols | 247 files | Cohesion: 68%
 
 ## When to Use
 
@@ -17,8 +17,8 @@ description: "Skill for the Tests area of agenc-ircd. 1988 symbols across 248 fi
 
 | File | Symbols |
 |------|---------|
+| `crates/agenc-ircd/tests/stage_eight_e2ee.rs` | failure, create, write_private, write_trust_manifest, reserve_loopback_address (+84) |
 | `crates/agenc-ircd-storage/tests/stage_five_completion.rs` | storage_crypto_adapters_cover_every_public_boundary, signed_growth_report_is_exact_tuple_authority, qualification_rejects_every_report_and_measurement_boundary, qualification_required_file_set_measures_every_named_durable_case, resign_qualification_frame (+67) |
-| `crates/agenc-ircd/tests/stage_eight_e2ee.rs` | new, send, read_until, try_register, assert_contains (+66) |
 | `crates/agenc-ircd/tests/stage_six_daemon.rs` | client_config, admin_tls_client_config, require_success, failure, opaque_identifiers (+62) |
 | `crates/agenc-ircd-runtime/src/federation/coordinator/tests/harness.rs` | entropy_script, peer_identity, new, send, establish (+57) |
 | `crates/agenc-ircd-federation-wire/src/tests/semantics.rs` | schema, fields, validate, opaque, unsigned (+52) |
@@ -72,22 +72,22 @@ Start here when exploring this area:
 | `Preview → Validate_version_field` | cross_community | 7 |
 | `Preview → Validate_padding_field` | cross_community | 7 |
 | `Audit_mutations_rebuild_policy_and_reject_invalid_phase_pairings → As_bytes` | cross_community | 7 |
+| `Policy → Label` | cross_community | 7 |
 | `Rebuild_rekey_plan → As_bytes` | cross_community | 6 |
 | `Rebuild_rekey_plan → Validate` | cross_community | 6 |
 | `Binding_package → Label` | cross_community | 6 |
 | `Preview → Schema_by_name` | cross_community | 6 |
-| `Run → Try_from` | cross_community | 5 |
 
 ## Connected Areas
 
 | Area | Connections |
 |------|-------------|
-| Coordinator | 157 calls |
-| State_core | 100 calls |
-| Federation | 70 calls |
-| Supervisor | 38 calls |
-| Ops | 32 calls |
-| Cluster_936 | 30 calls |
+| Coordinator | 156 calls |
+| State_core | 83 calls |
+| Federation | 73 calls |
+| Edge | 41 calls |
+| Supervisor | 37 calls |
+| Cluster_942 | 30 calls |
 | Codec | 25 calls |
 | Examples | 23 calls |
 

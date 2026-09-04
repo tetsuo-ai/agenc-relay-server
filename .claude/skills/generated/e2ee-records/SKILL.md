@@ -1,11 +1,11 @@
 ---
 name: e2ee-records
-description: "Skill for the E2ee_records area of agenc-ircd. 78 symbols across 14 files."
+description: "Skill for the E2ee_records area of agenc-ircd. 82 symbols across 14 files."
 ---
 
 # E2ee_records
 
-78 symbols | 14 files | Cohesion: 84%
+82 symbols | 14 files | Cohesion: 81%
 
 ## When to Use
 
@@ -18,8 +18,8 @@ description: "Skill for the E2ee_records area of agenc-ircd. 78 symbols across 1
 | File | Symbols |
 |------|---------|
 | `crates/agenc-ircd-storage/src/domain_records.rs` | decode, optional_account_id, decode_channel, expect_version, byte (+19) |
-| `crates/agenc-ircd-storage/src/e2ee_records.rs` | decode, unwrap, decoder, take_bool, take_optional_hash (+8) |
-| `crates/agenc-ircd-storage/src/e2ee_records/barrier.rs` | from_wire, take, check, decode, validate_body (+7) |
+| `crates/agenc-ircd-storage/src/e2ee_records.rs` | decode, unwrap, decoder, take_bool, take_optional_hash (+11) |
+| `crates/agenc-ircd-storage/src/e2ee_records/barrier.rs` | from_wire, take, check, decode, validate_body (+8) |
 | `crates/agenc-ircd-storage/src/codec.rs` | finish, take, array, u16, u32 (+2) |
 | `crates/agenc-ircd-storage/src/federation_records.rs` | decode, unwrap, expect_version, take_bool, take_optional_u64 (+1) |
 | `crates/agenc-ircd-storage/src/control.rs` | new, encode, decode, validate, decode_and_verify |
@@ -54,8 +54,8 @@ Start here when exploring this area:
 | `validate` | Function | `crates/agenc-ircd-storage/src/control.rs` | 217 |
 | `decode_and_verify` | Function | `crates/agenc-ircd-storage/src/control.rs` | 298 |
 | `decode` | Function | `crates/agenc-ircd-storage/src/domain_records.rs` | 178 |
-| `decode` | Function | `crates/agenc-ircd-storage/src/e2ee_records.rs` | 288 |
-| `validate_state_body` | Function | `crates/agenc-ircd-storage/src/e2ee_records.rs` | 2454 |
+| `decode` | Function | `crates/agenc-ircd-storage/src/e2ee_records.rs` | 298 |
+| `validate_state_body` | Function | `crates/agenc-ircd-storage/src/e2ee_records.rs` | 2581 |
 | `decode` | Function | `crates/agenc-ircd-storage/src/e2ee_records/barrier.rs` | 371 |
 | `validate_body` | Function | `crates/agenc-ircd-storage/src/e2ee_records/barrier.rs` | 577 |
 | `decode` | Function | `crates/agenc-ircd-storage/src/federation_records.rs` | 164 |
@@ -74,19 +74,20 @@ Start here when exploring this area:
 | `Write_record → As_bytes` | cross_community | 4 |
 | `Write_record → Validate` | cross_community | 4 |
 | `Decode → Take` | intra_community | 4 |
+| `Decode → Try_from` | cross_community | 3 |
 
 ## Connected Areas
 
 | Area | Connections |
 |------|-------------|
-| Cluster_817 | 31 calls |
-| Coordinator | 28 calls |
+| Cluster_825 | 31 calls |
+| Coordinator | 30 calls |
 | Tests | 18 calls |
-| Cluster_839 | 4 calls |
+| Cluster_847 | 4 calls |
+| Cluster_850 | 3 calls |
 | Cluster_225 | 3 calls |
-| Cluster_897 | 2 calls |
-| Cluster_841 | 2 calls |
-| Cluster_818 | 2 calls |
+| Cluster_904 | 2 calls |
+| Cluster_849 | 2 calls |
 
 ## How to Explore
 

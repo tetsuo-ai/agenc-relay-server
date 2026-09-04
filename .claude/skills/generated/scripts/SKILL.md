@@ -1,11 +1,11 @@
 ---
 name: scripts
-description: "Skill for the Scripts area of agenc-ircd. 307 symbols across 24 files."
+description: "Skill for the Scripts area of agenc-ircd. 308 symbols across 24 files."
 ---
 
 # Scripts
 
-307 symbols | 24 files | Cohesion: 76%
+308 symbols | 24 files | Cohesion: 76%
 
 ## When to Use
 
@@ -19,8 +19,8 @@ description: "Skill for the Scripts area of agenc-ircd. 307 symbols across 24 fi
 |------|---------|
 | `scripts/check-evidence.py` | externally_blocked_tasks, required_stage_evidence_ids_from_data, required_stage_evidence_ids, load_json, validate_catalog (+33) |
 | `scripts/requirements.py` | quote, task_states, binding_with_current_status, render_bindings, load_bindings (+26) |
+| `scripts/check-workspace.py` | load_toml, validate_vendored_patches, validate_toolchain_policy, validate_toolchain, validate_workspace_manifest (+17) |
 | `scripts/generate-e2ee-vectors.py` | opaque, vector, irc_signature_input, sign, roster (+17) |
-| `scripts/check-workspace.py` | load_toml, validate_vendored_patches, validate_toolchain_policy, validate_toolchain, validate_workspace_manifest (+16) |
 | `scripts/generate-e2ee-fuzz-seeds.py` | opaque, vector, u16, u32, u64 (+16) |
 | `scripts/generate-stage-one.py` | rust_string, parse_registry, render_registry_round_trip_tests, render_field_kind, render_schema_registry (+16) |
 | `scripts/check-stage-one.py` | digest, checked_sources, profile_digests, reject_single_byte_changes, validate_vectors (+9) |
@@ -32,36 +32,36 @@ description: "Skill for the Scripts area of agenc-ircd. 307 symbols across 24 fi
 
 Start here when exploring this area:
 
-- **`externally_blocked_tasks`** (Function) — `scripts/check-evidence.py:1390`
-- **`required_stage_evidence_ids_from_data`** (Function) — `scripts/check-evidence.py:1408`
-- **`required_stage_evidence_ids`** (Function) — `scripts/check-evidence.py:1482`
-- **`quote`** (Function) — `scripts/requirements.py:770`
-- **`task_states`** (Function) — `scripts/requirements.py:792`
+- **`externally_blocked_tasks`** (Function) — `scripts/check-evidence.py:1405`
+- **`required_stage_evidence_ids_from_data`** (Function) — `scripts/check-evidence.py:1423`
+- **`required_stage_evidence_ids`** (Function) — `scripts/check-evidence.py:1497`
+- **`quote`** (Function) — `scripts/requirements.py:771`
+- **`task_states`** (Function) — `scripts/requirements.py:793`
 
 ## Key Symbols
 
 | Symbol | Type | File | Line |
 |--------|------|------|------|
-| `externally_blocked_tasks` | Function | `scripts/check-evidence.py` | 1390 |
-| `required_stage_evidence_ids_from_data` | Function | `scripts/check-evidence.py` | 1408 |
-| `required_stage_evidence_ids` | Function | `scripts/check-evidence.py` | 1482 |
-| `quote` | Function | `scripts/requirements.py` | 770 |
-| `task_states` | Function | `scripts/requirements.py` | 792 |
-| `binding_with_current_status` | Function | `scripts/requirements.py` | 805 |
-| `render_bindings` | Function | `scripts/requirements.py` | 822 |
-| `load_bindings` | Function | `scripts/requirements.py` | 845 |
-| `validate_bindings` | Function | `scripts/requirements.py` | 853 |
-| `merge_bindings` | Function | `scripts/requirements.py` | 924 |
-| `render` | Function | `scripts/requirements.py` | 939 |
-| `load_ledger` | Function | `scripts/requirements.py` | 985 |
-| `validate_data` | Function | `scripts/requirements.py` | 993 |
-| `validate` | Function | `scripts/requirements.py` | 1094 |
-| `validate_stage_data` | Function | `scripts/requirements.py` | 1109 |
-| `validate_stage` | Function | `scripts/requirements.py` | 1135 |
-| `expect_rejection` | Function | `scripts/requirements.py` | 1149 |
-| `self_test` | Function | `scripts/requirements.py` | 1166 |
-| `main` | Function | `scripts/requirements.py` | 1287 |
-| `load_toml` | Function | `scripts/check-workspace.py` | 227 |
+| `externally_blocked_tasks` | Function | `scripts/check-evidence.py` | 1405 |
+| `required_stage_evidence_ids_from_data` | Function | `scripts/check-evidence.py` | 1423 |
+| `required_stage_evidence_ids` | Function | `scripts/check-evidence.py` | 1497 |
+| `quote` | Function | `scripts/requirements.py` | 771 |
+| `task_states` | Function | `scripts/requirements.py` | 793 |
+| `binding_with_current_status` | Function | `scripts/requirements.py` | 806 |
+| `render_bindings` | Function | `scripts/requirements.py` | 823 |
+| `load_bindings` | Function | `scripts/requirements.py` | 846 |
+| `validate_bindings` | Function | `scripts/requirements.py` | 854 |
+| `merge_bindings` | Function | `scripts/requirements.py` | 925 |
+| `render` | Function | `scripts/requirements.py` | 940 |
+| `load_ledger` | Function | `scripts/requirements.py` | 986 |
+| `validate_data` | Function | `scripts/requirements.py` | 994 |
+| `validate` | Function | `scripts/requirements.py` | 1095 |
+| `validate_stage_data` | Function | `scripts/requirements.py` | 1110 |
+| `validate_stage` | Function | `scripts/requirements.py` | 1136 |
+| `expect_rejection` | Function | `scripts/requirements.py` | 1150 |
+| `self_test` | Function | `scripts/requirements.py` | 1167 |
+| `main` | Function | `scripts/requirements.py` | 1288 |
+| `load_toml` | Function | `scripts/check-workspace.py` | 240 |
 
 ## Execution Flows
 

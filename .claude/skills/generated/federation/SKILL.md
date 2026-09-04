@@ -1,54 +1,59 @@
 ---
 name: federation
-description: "Skill for the Federation area of agenc-ircd. 264 symbols across 34 files."
+description: "Skill for the Federation area of agenc-ircd. 344 symbols across 36 files."
 ---
 
 # Federation
 
-264 symbols | 34 files | Cohesion: 69%
+344 symbols | 36 files | Cohesion: 80%
 
 ## When to Use
 
 - Working with code in `crates/`
-- Understanding how new, derive, validate_schema_semantics work
+- Understanding how decode_one_without_embedded, validate_schema_semantics, validate_embedded_semantics work
 - Modifying federation-related functionality
 
 ## Key Files
 
 | File | Symbols |
 |------|---------|
-| `crates/agenc-ircd-domain/src/federation/projection.rs` | empty, new, derive, home_of, hosts (+78) |
-| `crates/agenc-ircd-federation-wire/src/semantics.rs` | validate_schema_semantics, structure_field, semantic, validate_normalized_login, validate_creation_invite (+34) |
-| `crates/agenc-ircd-domain/src/federation/replica.rs` | new, membership, account, local_members, apply (+26) |
-| `crates/agenc-ircd-runtime/src/federation/link.rs` | new, parse_base_frame, handle_frame, admit_fragment, acquire (+17) |
-| `crates/agenc-ircd-e2ee/src/tls.rs` | new, for_maximum, remaining, finish, take (+11) |
+| `crates/agenc-ircd-federation-wire/src/semantics.rs` | validate_schema_semantics, validate_event_schema, validate_operation_schema, validate_result_schema, validate_embedded_semantics (+107) |
+| `crates/agenc-ircd-domain/src/federation/projection.rs` | remove, remove_account, empty, new, derive (+78) |
+| `crates/agenc-ircd-domain/src/federation/replica.rs` | new, session, membership, account, local_members (+28) |
+| `crates/agenc-ircd-runtime/src/federation/link.rs` | write_line, release_queued, on_outbound, send_ping, parse_line (+17) |
+| `crates/agenc-ircd-e2ee/src/tls.rs` | new, for_maximum, remaining, finish, take (+14) |
 | `crates/agenc-ircd-runtime/src/federation/owner.rs` | squit, is_suspended, wait_until_wanted, register, unregister (+7) |
 | `crates/agenc-ircd-runtime/src/federation/certificate.rs` | server_id_from_certificate, tbs_extensions, subject_alt_name_value, parse_single_uri, read_tlv (+3) |
 | `crates/agenc-ircd-domain/src/federation/record.rs` | session, channel_detail, membership, invite, key (+1) |
 | `crates/agenc-ircd-e2ee/src/federation/frames.rs` | is_companion_command, id, parameters, resume_parameters, origin_parameters (+1) |
-| `crates/agenc-ircd-domain/src/federation/origin.rs` | add, update, require_synchronizing, reset, expire (+1) |
+| `crates/agenc-ircd-e2ee/src/object.rs` | new, peek, encode_into, decode_from |
 
 ## Entry Points
 
 Start here when exploring this area:
 
-- **`new`** (Function) — `crates/agenc-ircd-domain/src/federation/projection.rs:285`
-- **`derive`** (Function) — `crates/agenc-ircd-domain/src/federation/projection.rs:343`
+- **`decode_one_without_embedded`** (Function) — `crates/agenc-ircd-federation-wire/src/codec.rs:1180`
 - **`validate_schema_semantics`** (Function) — `crates/agenc-ircd-federation-wire/src/semantics.rs:41`
+- **`validate_embedded_semantics`** (Function) — `crates/agenc-ircd-federation-wire/src/semantics.rs:185`
+- **`try_from_bytes`** (Function) — `crates/agenc-ircd-types/src/bounded.rs:95`
 - **`parse`** (Function) — `crates/agenc-ircd-types/src/identifiers.rs:253`
-- **`parse_wire_bytes`** (Function) — `crates/agenc-ircd-types/src/identifiers.rs:305`
 
 ## Key Symbols
 
 | Symbol | Type | File | Line |
 |--------|------|------|------|
-| `new` | Function | `crates/agenc-ircd-domain/src/federation/projection.rs` | 285 |
-| `derive` | Function | `crates/agenc-ircd-domain/src/federation/projection.rs` | 343 |
+| `decode_one_without_embedded` | Function | `crates/agenc-ircd-federation-wire/src/codec.rs` | 1180 |
 | `validate_schema_semantics` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 41 |
+| `validate_embedded_semantics` | Function | `crates/agenc-ircd-federation-wire/src/semantics.rs` | 185 |
+| `try_from_bytes` | Function | `crates/agenc-ircd-types/src/bounded.rs` | 95 |
 | `parse` | Function | `crates/agenc-ircd-types/src/identifiers.rs` | 253 |
 | `parse_wire_bytes` | Function | `crates/agenc-ircd-types/src/identifiers.rs` | 305 |
+| `new` | Function | `crates/agenc-ircd-domain/src/federation/projection.rs` | 285 |
+| `derive` | Function | `crates/agenc-ircd-domain/src/federation/projection.rs` | 343 |
 | `encode` | Function | `crates/agenc-ircd-e2ee/src/federation/keyset_file.rs` | 34 |
 | `decode` | Function | `crates/agenc-ircd-e2ee/src/federation/keyset_file.rs` | 49 |
+| `new` | Function | `crates/agenc-ircd-e2ee/src/object.rs` | 226 |
+| `peek` | Function | `crates/agenc-ircd-e2ee/src/object.rs` | 266 |
 | `new` | Function | `crates/agenc-ircd-e2ee/src/tls.rs` | 27 |
 | `for_maximum` | Function | `crates/agenc-ircd-e2ee/src/tls.rs` | 89 |
 | `remaining` | Function | `crates/agenc-ircd-e2ee/src/tls.rs` | 121 |
@@ -57,11 +62,6 @@ Start here when exploring this area:
 | `u16` | Function | `crates/agenc-ircd-e2ee/src/tls.rs` | 154 |
 | `u32` | Function | `crates/agenc-ircd-e2ee/src/tls.rs` | 160 |
 | `u64` | Function | `crates/agenc-ircd-e2ee/src/tls.rs` | 166 |
-| `opaque` | Function | `crates/agenc-ircd-e2ee/src/tls.rs` | 194 |
-| `vector` | Function | `crates/agenc-ircd-e2ee/src/tls.rs` | 206 |
-| `len` | Function | `crates/agenc-ircd-e2ee/src/tls.rs` | 254 |
-| `new` | Function | `crates/agenc-ircd-domain/src/federation/replica.rs` | 90 |
-| `membership` | Function | `crates/agenc-ircd-domain/src/federation/replica.rs` | 133 |
 
 ## Execution Flows
 
@@ -82,18 +82,18 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Cluster_435 | 49 calls |
-| Tests | 30 calls |
-| Coordinator | 16 calls |
-| Validate_ | 13 calls |
-| State_core | 2 calls |
-| Cluster_964 | 2 calls |
-| Cluster_276 | 2 calls |
+| Tests | 35 calls |
+| Coordinator | 14 calls |
+| State_core | 3 calls |
+| Codec | 3 calls |
+| Supervisor | 2 calls |
+| Cluster_427 | 2 calls |
 | Edge | 2 calls |
+| Cluster_970 | 2 calls |
 
 ## How to Explore
 
-1. `context({name: "new"})` — see callers and callees
+1. `context({name: "decode_one_without_embedded"})` — see callers and callees
 2. `query({search_query: "federation"})` — find related execution flows
 3. Read key files listed above for implementation details
 4. `explain({target: "<file or symbol>"})` — persisted taint findings (source→sink data flows), when indexed with `--pdg`

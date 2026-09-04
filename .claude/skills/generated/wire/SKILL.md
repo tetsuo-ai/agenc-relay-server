@@ -1,11 +1,11 @@
 ---
 name: wire
-description: "Skill for the Wire area of agenc-ircd. 68 symbols across 15 files."
+description: "Skill for the Wire area of agenc-ircd. 69 symbols across 16 files."
 ---
 
 # Wire
 
-68 symbols | 15 files | Cohesion: 72%
+69 symbols | 16 files | Cohesion: 71%
 
 ## When to Use
 
@@ -51,17 +51,17 @@ Start here when exploring this area:
 | `parse_u16` | Function | `crates/agenc-ircd-e2ee/src/wire/tokens.rs` | 165 |
 | `parse_u32` | Function | `crates/agenc-ircd-e2ee/src/wire/tokens.rs` | 170 |
 | `parse_u64` | Function | `crates/agenc-ircd-e2ee/src/wire/tokens.rs` | 175 |
-| `render` | Function | `crates/agenc-ircd-e2ee/src/wire/response.rs` | 343 |
-| `render_close` | Function | `crates/agenc-ircd-e2ee/src/wire/response.rs` | 358 |
-| `render_eobject` | Function | `crates/agenc-ircd-e2ee/src/wire/response.rs` | 435 |
+| `render` | Function | `crates/agenc-ircd-e2ee/src/wire/response.rs` | 348 |
+| `render_close` | Function | `crates/agenc-ircd-e2ee/src/wire/response.rs` | 363 |
+| `render_eobject` | Function | `crates/agenc-ircd-e2ee/src/wire/response.rs` | 440 |
 | `is_batch_id` | Function | `crates/agenc-ircd-e2ee/src/wire/tokens.rs` | 187 |
 | `discard` | Function | `crates/agenc-ircd-e2ee/src/wire/assembly.rs` | 520 |
 | `discard_sender` | Function | `crates/agenc-ircd-e2ee/src/wire/assembly.rs` | 527 |
 | `expire` | Function | `crates/agenc-ircd-e2ee/src/wire/assembly.rs` | 542 |
-| `connection_closed` | Function | `crates/agenc-ircd-runtime/src/e2ee/edge/mod.rs` | 264 |
-| `body` | Function | `crates/agenc-ircd-e2ee/src/wire/response.rs` | 168 |
-| `render_labeled` | Function | `crates/agenc-ircd-e2ee/src/wire/response.rs` | 281 |
-| `render_broadcast` | Function | `crates/agenc-ircd-e2ee/src/wire/response.rs` | 289 |
+| `connection_closed` | Function | `crates/agenc-ircd-runtime/src/e2ee/edge/mod.rs` | 275 |
+| `accepted_kinds` | Function | `crates/agenc-ircd-e2ee/src/wire/carrier.rs` | 103 |
+| `is_live` | Function | `crates/agenc-ircd-e2ee/src/wire/carrier.rs` | 138 |
+| `limit` | Function | `crates/agenc-ircd-e2ee/src/wire/carrier.rs` | 145 |
 
 ## Execution Flows
 
@@ -78,11 +78,11 @@ Start here when exploring this area:
 |------|-------------|
 | Coordinator | 8 calls |
 | Tests | 6 calls |
-| Cluster_817 | 2 calls |
+| State_core | 2 calls |
+| Cluster_825 | 2 calls |
 | Budget | 1 calls |
-| State_core | 1 calls |
 | Admission | 1 calls |
-| Cluster_819 | 1 calls |
+| Cluster_827 | 1 calls |
 | Ops | 1 calls |
 
 ## How to Explore

@@ -1,11 +1,11 @@
 ---
 name: admission
-description: "Skill for the Admission area of agenc-ircd. 139 symbols across 14 files."
+description: "Skill for the Admission area of agenc-ircd. 142 symbols across 14 files."
 ---
 
 # Admission
 
-139 symbols | 14 files | Cohesion: 61%
+142 symbols | 14 files | Cohesion: 60%
 
 ## When to Use
 
@@ -17,15 +17,15 @@ description: "Skill for the Admission area of agenc-ircd. 139 symbols across 14 
 
 | File | Symbols |
 |------|---------|
-| `crates/agenc-ircd-runtime/src/admission/buckets.rs` | charge_all_or_nothing, aggregate, new, defaults, with_ceiling (+46) |
-| `crates/agenc-ircd-runtime/src/registration.rs` | route_e2ee_line, access_policy, route_message, refresh_deadline, timer_actions (+21) |
+| `crates/agenc-ircd-runtime/src/admission/buckets.rs` | charge_all_or_nothing, aggregate, new, defaults, with_ceiling (+47) |
+| `crates/agenc-ircd-runtime/src/registration.rs` | route_e2ee_line, drive_e2ee, access_policy, route_message, refresh_deadline (+22) |
 | `crates/agenc-ircd-runtime/src/admission/transport.rs` | admission, direct_hosts_obey_the_live_ceiling_and_release_exactly_once, reload_changes_the_direct_host_ceiling_without_resetting_live_counts, prefix_ceiling_eviction_erases_the_coupled_rate_bucket, direct_prefixes_share_the_new_connection_bucket (+15) |
 | `crates/agenc-ircd-runtime/src/admission/prefix.rs` | new, with_ceiling, connection_opened, connection_closed, erase_idle (+13) |
 | `crates/agenc-ircd-runtime/src/admission/overload.rs` | new, default, usage_reaches, select_evictions, classes_switch_at_exact_thresholds_with_eviction_hysteresis |
 | `crates/agenc-ircd-runtime/src/account_service.rs` | registration_committed, charge_opaque_attempt, opaque_attempt_demand, opaque_attempts_stop_at_the_keyed_login_burst_before_lookup |
-| `crates/agenc-ircd-runtime/src/state_core/inbox.rs` | ipv4, prefix_key, onion_listener, host_key |
+| `crates/agenc-ircd-runtime/src/state_core/mod.rs` | buckets_mut, record_physical_close, release_connection, apply_runtime_snapshot |
+| `crates/agenc-ircd-runtime/src/state_core/inbox.rs` | ipv4, prefix_key, host_key, onion_listener |
 | `crates/agenc-ircd-runtime/src/channels.rs` | charge_command, charge_registered_command_only, guest_prefix_keys_follow_the_transport_profile |
-| `crates/agenc-ircd-runtime/src/state_core/mod.rs` | buckets_mut, record_physical_close, apply_runtime_snapshot |
 | `crates/agenc-ircd-client-wire/src/tags.rs` | iter |
 
 ## Entry Points
@@ -81,14 +81,14 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| State_core | 57 calls |
+| State_core | 53 calls |
 | Tests | 8 calls |
+| Cluster_254 | 7 calls |
 | Coordinator | 4 calls |
-| Cluster_729 | 4 calls |
+| Cluster_738 | 4 calls |
 | Cluster_160 | 3 calls |
-| Cluster_733 | 3 calls |
+| Edge | 3 calls |
 | Observe | 3 calls |
-| Cluster_817 | 3 calls |
 
 ## How to Explore
 

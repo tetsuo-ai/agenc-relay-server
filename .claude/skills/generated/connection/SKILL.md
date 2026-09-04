@@ -82,8 +82,8 @@ Start here when exploring this area:
 | Budget | 5 calls |
 | Tests | 5 calls |
 | Supervisor | 4 calls |
-| State_core | 4 calls |
-| Cluster_531 | 2 calls |
+| State_core | 3 calls |
+| Cluster_529 | 2 calls |
 | Listener | 1 calls |
 
 ## How to Explore

@@ -66,6 +66,7 @@ Start here when exploring this area:
 
 | Flow | Type | Steps |
 |------|------|-------|
+| `Policy → Label` | cross_community | 7 |
 | `Binding_package → Label` | cross_community | 6 |
 | `Serve → Protected_ancestors` | cross_community | 5 |
 
@@ -78,9 +79,9 @@ Start here when exploring this area:
 | Coordinator | 3 calls |
 | Cluster_215 | 1 calls |
 | Cluster_37 | 1 calls |
-| Cluster_573 | 1 calls |
-| Cluster_568 | 1 calls |
-| Cluster_577 | 1 calls |
+| Cluster_571 | 1 calls |
+| Cluster_566 | 1 calls |
+| Cluster_575 | 1 calls |
 
 ## How to Explore
 

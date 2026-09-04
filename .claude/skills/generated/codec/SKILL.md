@@ -1,11 +1,11 @@
 ---
 name: codec
-description: "Skill for the Codec area of agenc-ircd. 67 symbols across 10 files."
+description: "Skill for the Codec area of agenc-ircd. 73 symbols across 12 files."
 ---
 
 # Codec
 
-67 symbols | 10 files | Cohesion: 83%
+73 symbols | 12 files | Cohesion: 79%
 
 ## When to Use
 
@@ -17,16 +17,16 @@ description: "Skill for the Codec area of agenc-ircd. 67 symbols across 10 files
 
 | File | Symbols |
 |------|---------|
-| `crates/agenc-ircd-runtime/src/federation/codec/mod.rs` | presence_of, revision_of, generation_of, utc_of, owned_text (+25) |
+| `crates/agenc-ircd-runtime/src/federation/codec/mod.rs` | presence_of, revision_of, generation_of, utc_of, owned_text (+26) |
 | `crates/agenc-ircd-federation-wire/src/objects.rs` | replay_key, expect_schema, field, opaque_field, structure (+8) |
 | `crates/agenc-ircd-runtime/src/federation/codec/operations.rs` | from_object, session_of, mode_changes_of, join_targets_of, part_of (+3) |
 | `crates/agenc-ircd-runtime/src/federation/codec/events.rs` | channel_of, union_of, mode_changes_of, invited_of, topic_of (+2) |
 | `crates/agenc-ircd-runtime/src/federation/codec/results.rs` | from_object, reply_parts_of, kind, to_object |
-| `crates/agenc-ircd-runtime/src/federation/codec/projection.rs` | projection_record_of |
+| `crates/agenc-ircd-runtime/src/federation/codec/projection.rs` | projection_record_of, projection_arm_object, projection_kind |
+| `crates/agenc-ircd-runtime/src/federation/edge/sync.rs` | install_rows, install_row |
 | `crates/agenc-ircd-runtime/src/federation/coordinator/convert.rs` | nickname_field |
 | `crates/agenc-ircd-runtime/src/federation/coordinator/mod.rs` | encode_object |
 | `crates/agenc-ircd-runtime/src/federation/coordinator/request.rs` | encode_result |
-| `crates/agenc-ircd-runtime/src/federation/codec/tests/round_trip.rs` | every_simple_operation_arm_round_trips |
 
 ## Entry Points
 
@@ -68,8 +68,12 @@ Start here when exploring this area:
 | Flow | Type | Steps |
 |------|------|-------|
 | `Projected_event_of → Schema` | intra_community | 6 |
+| `Project → Channel_detail_object` | cross_community | 5 |
+| `Project → Membership_object` | cross_community | 5 |
+| `Project → Invite_projection_object` | cross_community | 5 |
 | `Projected_event_of → Field` | intra_community | 5 |
 | `From_object → Field` | intra_community | 4 |
+| `Project → Projection_kind` | cross_community | 4 |
 | `Projected_event_of → SourceView` | intra_community | 4 |
 | `From_object → Schema` | intra_community | 3 |
 | `From_object → Schema` | intra_community | 3 |
@@ -78,12 +82,12 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Tests | 11 calls |
+| Tests | 14 calls |
 | Coordinator | 4 calls |
-| Federation | 2 calls |
-| State_core | 1 calls |
-| Cluster_447 | 1 calls |
-| Cluster_951 | 1 calls |
+| Federation | 3 calls |
+| State_core | 2 calls |
+| Cluster_450 | 1 calls |
+| Cluster_957 | 1 calls |
 
 ## How to Explore
 

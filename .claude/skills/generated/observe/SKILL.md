@@ -1,11 +1,11 @@
 ---
 name: observe
-description: "Skill for the Observe area of agenc-ircd. 116 symbols across 11 files."
+description: "Skill for the Observe area of agenc-ircd. 113 symbols across 11 files."
 ---
 
 # Observe
 
-116 symbols | 11 files | Cohesion: 63%
+113 symbols | 11 files | Cohesion: 64%
 
 ## When to Use
 
@@ -17,12 +17,12 @@ description: "Skill for the Observe area of agenc-ircd. 116 symbols across 11 fi
 
 | File | Symbols |
 |------|---------|
-| `crates/agenc-ircd-runtime/src/observe/log.rs` | admits, try_emit_outcome, try_complete, hours, writer (+35) |
+| `crates/agenc-ircd-runtime/src/observe/log.rs` | admits, try_emit_outcome, hours, writer, target_failures_are_counted_and_never_block (+35) |
 | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | listener_lifecycle, command_classified, storage_batch, reload, admin_action (+21) |
-| `crates/agenc-ircd-runtime/src/observe/metrics.rs` | increment, default, new, observe_duration, observe_count (+7) |
+| `crates/agenc-ircd-runtime/src/observe/metrics.rs` | record, increment, default, new, observe_duration (+8) |
 | `crates/agenc-ircd-runtime/src/observe/health.rs` | mark, clear, flag, readiness_is_the_conjunction_of_every_stage_and_can_be_cleared, new (+7) |
-| `crates/agenc-ircd-runtime/src/daemon.rs` | wait_for_prefix_erasure, stop, wait_for_blocking_owners, retain_stop_failure, fail_stop_shutdown (+6) |
 | `crates/agenc-ircd-runtime/src/observe/events.rs` | from_count, with_error, new, from_os_entropy, next (+3) |
+| `crates/agenc-ircd-runtime/src/daemon.rs` | wait_for_prefix_erasure, run_state_owner, reload_preparation_future, wait_for_shutdown, state_completion_failure (+2) |
 | `crates/agenc-ircd-runtime/src/connection/queue.rs` | is_closed, pop, prepare |
 | `crates/agenc-ircd-runtime/src/admission/transport.rs` | prefix_erasure_delay |
 | `crates/agenc-ircd-runtime/src/sync.rs` | lock |
@@ -58,10 +58,10 @@ Start here when exploring this area:
 | `observe_duration` | Function | `crates/agenc-ircd-runtime/src/observe/metrics.rs` | 399 |
 | `observe_count` | Function | `crates/agenc-ircd-runtime/src/observe/metrics.rs` | 409 |
 | `lock` | Function | `crates/agenc-ircd-runtime/src/sync.rs` | 15 |
-| `try_complete` | Function | `crates/agenc-ircd-runtime/src/observe/log.rs` | 543 |
-| `try_complete` | Function | `crates/agenc-ircd-storage/src/owner.rs` | 281 |
 | `new` | Function | `crates/agenc-ircd-runtime/src/observe/adapter.rs` | 36 |
 | `record_rate` | Function | `crates/agenc-ircd-runtime/src/observe/metrics.rs` | 441 |
+| `with_error` | Function | `crates/agenc-ircd-runtime/src/observe/events.rs` | 448 |
+| `hours` | Function | `crates/agenc-ircd-runtime/src/observe/log.rs` | 59 |
 
 ## Execution Flows
 
@@ -79,14 +79,14 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| State_core | 6 calls |
 | Tests | 5 calls |
-| Cluster_546 | 4 calls |
-| Supervisor | 3 calls |
+| Cluster_544 | 4 calls |
+| State_core | 3 calls |
 | Coordinator | 3 calls |
-| Bridge | 2 calls |
-| Cluster_857 | 2 calls |
-| Cluster_567 | 1 calls |
+| Bridge | 1 calls |
+| Cluster_565 | 1 calls |
+| Cluster_577 | 1 calls |
+| Cluster_254 | 1 calls |
 
 ## How to Explore
 

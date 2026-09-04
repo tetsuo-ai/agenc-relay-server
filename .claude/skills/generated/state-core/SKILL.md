@@ -1,11 +1,11 @@
 ---
 name: state-core
-description: "Skill for the State_core area of agenc-ircd. 712 symbols across 51 files."
+description: "Skill for the State_core area of agenc-ircd. 597 symbols across 50 files."
 ---
 
 # State_core
 
-712 symbols | 51 files | Cohesion: 72%
+597 symbols | 50 files | Cohesion: 68%
 
 ## When to Use
 
@@ -18,15 +18,15 @@ description: "Skill for the State_core area of agenc-ircd. 712 symbols across 51
 | File | Symbols |
 |------|---------|
 | `crates/agenc-ircd-runtime/src/account_service.rs` | binding, encode, decode, new, authentication (+119) |
-| `crates/agenc-ircd-runtime/src/state_core/mod.rs` | sessions_mut, timers_mut, submit_storage_read, now, utc_now (+104) |
-| `crates/agenc-ircd-domain/src/decision.rs` | new, insert, user, message, plan_account_service_checkpoint (+104) |
-| `crates/agenc-ircd-runtime/src/state_core/reconstruct.rs` | finish, reconstruct, session_id_from_key, admit, admit_channel_tombstone (+97) |
+| `crates/agenc-ircd-runtime/src/state_core/mod.rs` | sessions_mut, timers_mut, submit_storage_read, now, utc_now (+105) |
+| `crates/agenc-ircd-runtime/src/state_core/reconstruct.rs` | finish, reconstruct, session_id_from_key, admit, admit_channel_tombstone (+98) |
 | `crates/agenc-ircd-runtime/src/state_core/durable.rs` | account_key, put, delete, revalidate, account_service_table (+60) |
 | `crates/agenc-ircd-runtime/src/registration.rs` | edge_sasl_line, stage_authenticated_session, commit_session, reject_pending_registration, connection_opened (+17) |
-| `crates/agenc-ircd-runtime/src/state_core/session.rs` | unbind_session, connection, new, with_ceiling, open (+15) |
+| `crates/agenc-ircd-runtime/src/state_core/session.rs` | unbind_session, connection, accept_line, mark_sink_gone, sink_for_user (+15) |
 | `crates/agenc-ircd-runtime/src/state_core/timers.rs` | schedule, cancel, wall_trusted, observe, pop_due (+12) |
 | `crates/agenc-ircd-runtime/src/state_core/pending.rs` | silent, with_account_service_writes, start, try_stage, staged (+8) |
 | `crates/agenc-ircd-runtime/src/state_core/fanout.rs` | new, reserve_inner, measure_all, reserve_queues, demand_for (+7) |
+| `crates/agenc-ircd-runtime/src/runtime_config.rs` | activate_signal, commit_outcome, finish, prepare, load (+4) |
 
 ## Entry Points
 
@@ -82,14 +82,14 @@ Start here when exploring this area:
 
 | Area | Connections |
 |------|-------------|
-| Tests | 91 calls |
-| Coordinator | 66 calls |
-| Admission | 28 calls |
-| Edge | 12 calls |
-| Cluster_276 | 11 calls |
-| Bridge | 10 calls |
+| Tests | 67 calls |
+| Coordinator | 59 calls |
+| Admission | 30 calls |
+| Cluster_254 | 16 calls |
 | Cluster_50 | 8 calls |
-| Connection | 8 calls |
+| Bridge | 8 calls |
+| Cluster_825 | 8 calls |
+| Cluster_738 | 8 calls |
 
 ## How to Explore
 
