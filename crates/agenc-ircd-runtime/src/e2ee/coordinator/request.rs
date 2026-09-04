@@ -242,6 +242,7 @@ const fn store_kind(kind: StoreKind) -> IrcFederationStoreKind {
         StoreKind::Binding => IrcFederationStoreKind::StoreBinding,
         StoreKind::Welcome => IrcFederationStoreKind::StoreWelcome,
         StoreKind::StagedReinit => IrcFederationStoreKind::StoreStagedReinit,
+        StoreKind::Policy => IrcFederationStoreKind::StorePolicy,
     }
 }
 

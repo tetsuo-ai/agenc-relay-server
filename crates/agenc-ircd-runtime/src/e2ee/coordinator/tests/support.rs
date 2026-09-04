@@ -14,8 +14,9 @@ use agenc_ircd_e2ee::mls_outer::mls_varint_encode;
 use agenc_ircd_e2ee::objects::AccountIdField;
 use agenc_ircd_e2ee::objects::conversation::{
     IrcCommitApproval, IrcCommitApprovalEnvelope, IrcCommitAuthorization,
-    IrcCommitAuthorizationRule, IrcCommitAuthorizationTbs, IrcSequencerCredential,
-    IrcSequencerCredentialTbs,
+    IrcCommitAuthorizationRule, IrcCommitAuthorizationTbs, IrcConversationKind,
+    IrcFinalityPrincipal, IrcMembershipPolicy, IrcPolicy, IrcPolicyApproval, IrcPolicyTbs,
+    IrcSequencerCredential, IrcSequencerCredentialTbs,
 };
 use agenc_ircd_e2ee::objects::identity::*;
 use agenc_ircd_e2ee::objects::sequencing::{IrcDispositionVoteTbs, IrcFinalityVote};
@@ -414,6 +415,8 @@ pub(crate) struct BindingSpec<'a> {
     pub(crate) previous_binding_id: [u8; 32],
     pub(crate) lock_sequence: u64,
     pub(crate) plan_devices: Vec<(&'a [u8; 24], [u8; 32], u8)>,
+    pub(crate) initial_policy_id: [u8; 32],
+    pub(crate) required_operational_policy_id: [u8; 32],
 }
 
 /// A complete binding package signed by every binding-authorized device of
@@ -492,8 +495,8 @@ pub(crate) fn binding_package(
         route_binding,
         mls_version: 1,
         cipher_suite: 1,
-        initial_policy_id: [27; 32],
-        required_operational_policy_id: [28; 32],
+        initial_policy_id: spec.initial_policy_id,
+        required_operational_policy_id: spec.required_operational_policy_id,
         initial_member_plan_id: semantic_id_of(SemanticHashDomain::InitialMemberPlanId, &plan)?,
         context_core_id: [30; 32],
         sequencer_credential_id: [31; 32],
@@ -738,6 +741,160 @@ pub(crate) fn approval_envelope(
         )?,
         tbs,
     })
+}
+
+/// One policy to sign: council, controllers, approvers, and lineage.
+pub(crate) struct PolicySpec<'a> {
+    pub(crate) principals: &'a [Principal],
+    pub(crate) conversation_id: [u8; 32],
+    pub(crate) generation: u64,
+    pub(crate) previous_policy_id: [u8; 32],
+    pub(crate) kind: IrcConversationKind,
+    pub(crate) membership: IrcMembershipPolicy,
+    /// Indices into `principals` whose roots are controllers.
+    pub(crate) controllers: Vec<usize>,
+    pub(crate) threshold: u16,
+    /// `(principal index, device seed)` council members.
+    pub(crate) council: Vec<(usize, u8)>,
+    pub(crate) fault_bound: u16,
+    /// `(principal index, device seed)` approvers.
+    pub(crate) approvers: Vec<(usize, u8)>,
+}
+
+impl<'a> PolicySpec<'a> {
+    /// The generation-zero policy of a bootstrap: every principal root is a
+    /// controller at threshold one, every active device sits on the council
+    /// with fault bound zero, and the first device of each root approves.
+    pub(crate) fn bootstrap(
+        principals: &'a [Principal],
+        conversation_id: [u8; 32],
+        kind: IrcConversationKind,
+    ) -> Self {
+        Self {
+            principals,
+            conversation_id,
+            generation: 0,
+            previous_policy_id: [0; 32],
+            kind,
+            membership: match kind {
+                IrcConversationKind::Channel => IrcMembershipPolicy::Moderated,
+                IrcConversationKind::Direct => IrcMembershipPolicy::FixedDirect,
+            },
+            controllers: (0..principals.len()).collect(),
+            threshold: 1,
+            council: principals
+                .iter()
+                .enumerate()
+                .flat_map(|(index, principal)| {
+                    principal.devices.iter().map(move |device| (index, *device))
+                })
+                .collect(),
+            fault_bound: 0,
+            approvers: principals
+                .iter()
+                .enumerate()
+                .filter_map(|(index, principal)| {
+                    principal.devices.first().map(|device| (index, *device))
+                })
+                .collect(),
+        }
+    }
+
+    /// The next generation of this policy, otherwise unchanged.
+    pub(crate) fn successor(&self, previous_policy_id: [u8; 32]) -> Self {
+        Self {
+            principals: self.principals,
+            conversation_id: self.conversation_id,
+            generation: self.generation.saturating_add(1),
+            previous_policy_id,
+            kind: self.kind,
+            membership: self.membership,
+            controllers: self.controllers.clone(),
+            threshold: self.threshold,
+            council: self.council.clone(),
+            fault_bound: self.fault_bound,
+            approvers: self.approvers.clone(),
+        }
+    }
+}
+
+fn principal_at(principals: &[Principal], index: usize) -> Result<&Principal, E2eeError> {
+    principals.get(index).ok_or(E2eeError::InvalidValue)
+}
+
+pub(crate) fn policy_tbs(spec: &PolicySpec<'_>) -> Result<IrcPolicyTbs, E2eeError> {
+    let mut controllers: Vec<[u8; 32]> = spec
+        .controllers
+        .iter()
+        .map(|index| root_fingerprint(&principal_at(spec.principals, *index)?.root))
+        .collect::<Result<_, _>>()?;
+    controllers.sort_unstable();
+    let mut council: Vec<IrcFinalityPrincipal> = spec
+        .council
+        .iter()
+        .map(|(index, device)| {
+            let principal = principal_at(spec.principals, *index)?;
+            Ok(IrcFinalityPrincipal {
+                root_fingerprint: root_fingerprint(&principal.root)?,
+                device_id: [*device; 16],
+                device_certificate_id: certificate_id_of(principal, *device)?,
+            })
+        })
+        .collect::<Result<_, E2eeError>>()?;
+    council.sort_by_key(|member| {
+        (
+            member.root_fingerprint,
+            member.device_id,
+            member.device_certificate_id,
+        )
+    });
+    Ok(IrcPolicyTbs {
+        profile_version: 1,
+        network_id: NETWORK,
+        conversation_id: spec.conversation_id,
+        policy_generation: spec.generation,
+        previous_policy_id: spec.previous_policy_id,
+        kind: spec.kind,
+        membership_policy: spec.membership,
+        mls_version: 1,
+        selected_suite: 1,
+        allowed_suites: TlsVec::new(vec![1, 3])?,
+        controller_root_fingerprints: Opaque::new(controllers.concat())?,
+        controller_threshold: spec.threshold,
+        finality_principals: TlsVec::new(council)?,
+        finality_fault_bound: spec.fault_bound,
+        require_oob_verified_roots: 0,
+        max_devices_per_account: 64,
+        max_group_leaves: 512,
+    })
+}
+
+/// A complete signed policy.
+pub(crate) fn policy(spec: &PolicySpec<'_>) -> Result<IrcPolicy, E2eeError> {
+    let tbs = policy_tbs(spec)?;
+    let mut approvals: Vec<IrcPolicyApproval> = spec
+        .approvers
+        .iter()
+        .map(|(index, device)| {
+            let principal = principal_at(spec.principals, *index)?;
+            Ok(IrcPolicyApproval {
+                signer_root_fingerprint: root_fingerprint(&principal.root)?,
+                signer_device_id: [*device; 16],
+                signer_device_certificate_id: certificate_id_of(principal, *device)?,
+                device_signature: sign(&key(*device), SignatureDomain::PolicyApproval, &tbs)?,
+            })
+        })
+        .collect::<Result<_, E2eeError>>()?;
+    approvals.sort_by_key(|approval| (approval.signer_root_fingerprint, approval.signer_device_id));
+    Ok(IrcPolicy {
+        tbs,
+        approvals: TlsVec::new(approvals)?,
+    })
+}
+
+/// The Section 2.2 identifier of a policy.
+pub(crate) fn policy_id_of(policy: &IrcPolicy) -> Result<SemanticId, E2eeError> {
+    semantic_id_of(SemanticHashDomain::PolicyId, &policy.tbs)
 }
 
 pub(crate) fn finality_vote(

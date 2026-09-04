@@ -450,14 +450,25 @@ impl E2eeEdge {
             match self.handle_frame(context, edge, frame) {
                 Ok(more) => outputs.extend(more),
                 Err(_) => {
-                    self.counters.violations = self.counters.violations.saturating_add(1);
-                    edge.fail_companion_link(context);
-                    self.link_down();
+                    self.fail_frame(context, edge);
                     break;
                 }
             }
         }
         outputs
+    }
+
+    /// A frame violated the profile: the link closes, as a witness violation
+    /// when the record chain did not extend (companion 12.5), and the router
+    /// forgets the link.
+    fn fail_frame(&mut self, context: &mut StateCoreContext, edge: &mut EdgeFederation) {
+        self.counters.violations = self.counters.violations.saturating_add(1);
+        if self.record_witness(context) {
+            edge.fail_companion_witness(context);
+        } else {
+            edge.fail_companion_link(context);
+        }
+        self.link_down();
     }
 
     // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one match routes every coordinator frame to its handler with the exact fields the line carried

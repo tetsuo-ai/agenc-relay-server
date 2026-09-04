@@ -7,7 +7,7 @@ checksum = "4392c3b3ed7d835ca8f318f85ca65d3f0d3e879538d6e70679827a2f3af72029"
 default_features = false
 features = ["fast_serialize", "rayon", "rfc_compliant", "std", "tree_index"]
 scope = "dev"
-purpose = "second independent MLS client for the Stage 08 cross-implementation gate; testkit only, never a production dependency"
+purpose = "second independent MLS client for the Stage 08 cross-implementation gate; test-only in the testkit and the daemon's integration tests, never a production dependency"
 reviewed_on = "2026-09-04"
 
 [[dependency]]
@@ -27,7 +27,7 @@ checksum = "b6b08d90fc020cb5354d5f08ca17711b84c82e2bcc7331753fd94f000d99a8c8"
 default_features = false
 features = []
 scope = "dev"
-purpose = "first independent MLS client for the Stage 08 cross-implementation gate; testkit only, never a production dependency"
+purpose = "first independent MLS client for the Stage 08 cross-implementation gate; test-only in the testkit and the daemon's integration tests, never a production dependency"
 reviewed_on = "2026-09-04"
 
 [[dependency]]

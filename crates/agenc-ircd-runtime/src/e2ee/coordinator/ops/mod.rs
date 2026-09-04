@@ -16,6 +16,7 @@ use super::{CompanionCoordinator, CompanionOrigin};
 
 pub mod directory;
 pub mod mailbox;
+pub mod policy;
 pub mod route;
 pub mod sequence;
 
@@ -282,5 +283,6 @@ pub fn execute(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         Op::DeliverWelcome => mailbox::deliver_welcome(exec),
         Op::FetchMailbox => mailbox::fetch_mailbox(exec),
         Op::AcknowledgeMailbox => mailbox::acknowledge_mailbox(exec),
+        Op::SubmitPolicy => policy::submit_policy(exec),
     }
 }

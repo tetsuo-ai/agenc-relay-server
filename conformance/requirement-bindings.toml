@@ -1,6 +1,6 @@
 # Reviewed implementation ownership; normative text remains generated separately.
 schema_version = 1
-binding_count = 237
+binding_count = 238
 
 [[binding]]
 id = "ARCH-AUTH-01"
@@ -1270,13 +1270,6 @@ evidence_ids = ["EVID-E2EE-REQ-5754ACC17005856FB5B2"]
 status = "unimplemented"
 
 [[binding]]
-id = "E2EE-REQ-58217F311021E979779A"
-target_crates = ["agenc-ircd-crypto"]
-task_ids = ["S08-022"]
-evidence_ids = ["EVID-E2EE-REQ-58217F311021E979779A"]
-status = "implemented"
-
-[[binding]]
 id = "E2EE-REQ-5B3475BE0506C311BEF2"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-027"]
@@ -1445,6 +1438,13 @@ evidence_ids = ["EVID-E2EE-REQ-A0EFEAB7474EA0A450F5"]
 status = "implemented"
 
 [[binding]]
+id = "E2EE-REQ-A119B1A71D9F208380BC"
+target_crates = ["agenc-ircd-e2ee"]
+task_ids = ["S08-040"]
+evidence_ids = ["EVID-E2EE-REQ-A119B1A71D9F208380BC"]
+status = "implemented"
+
+[[binding]]
 id = "E2EE-REQ-A141AC00A13A398685DC"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-022"]
@@ -1582,6 +1582,13 @@ id = "E2EE-REQ-D70B8B9850E29E082F85"
 target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-027"]
 evidence_ids = ["EVID-E2EE-REQ-D70B8B9850E29E082F85"]
+status = "implemented"
+
+[[binding]]
+id = "E2EE-REQ-D8D8C1DBDAE5F09E95FD"
+target_crates = ["agenc-ircd-e2ee"]
+task_ids = ["S08-043"]
+evidence_ids = ["EVID-E2EE-REQ-D8D8C1DBDAE5F09E95FD"]
 status = "implemented"
 
 [[binding]]

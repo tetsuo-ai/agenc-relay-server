@@ -138,6 +138,11 @@ fn every_egroup_production_parses_with_its_exact_arity() -> TestResult {
             SubmitKind::ReinitAbort,
             CarrierCommand::SubmitReinitAbort,
         ),
+        (
+            vec!["POLICY"],
+            SubmitKind::Policy,
+            CarrierCommand::SubmitPolicy,
+        ),
     ];
     for (words, kind, carrier) in submits {
         let mut params = vec!["SUBMIT"];

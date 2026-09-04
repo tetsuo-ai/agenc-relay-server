@@ -101,16 +101,18 @@ impl Opcode {
     pub const FETCH_MAILBOX: Self = Self(39);
     /// `acknowledge_mailbox`.
     pub const ACKNOWLEDGE_MAILBOX: Self = Self(40);
+    /// `submit_policy`.
+    pub const SUBMIT_POLICY: Self = Self(41);
 
     /// Every opcode.
     pub fn all() -> impl Iterator<Item = Self> {
-        (1..=40).map(Self)
+        (1..=41).map(Self)
     }
 
     /// Whether the value is a registered opcode.
     #[must_use]
     pub const fn is_valid(self) -> bool {
-        self.0 >= 1 && self.0 <= 40
+        self.0 >= 1 && self.0 <= 41
     }
 }
 
@@ -186,6 +188,8 @@ pub enum StoreKind {
     Welcome,
     /// `store_staged_reinit`.
     StagedReinit,
+    /// `store_policy`.
+    Policy,
 }
 
 /// `IrcFederationPendingKind`.
@@ -409,6 +413,7 @@ pub fn completion_for(opcode: Opcode, result: ResultKind) -> Result<Completion, 
         (Opcode::CLOSE_GROUP, R::Closed) => Semantic(EventKind::Closed),
         (Opcode::SUBMIT_CANDIDATE, R::AcceptedEvent) => Semantic(EventKind::Candidate),
         (Opcode::SUBMIT_AUTHORIZATION, R::Stored(StoreKind::Authorization)) => Generic,
+        (Opcode::SUBMIT_POLICY, R::Stored(StoreKind::Policy)) => Generic,
         (Opcode::SUBMIT_COMMIT_ACK, R::CommitAcked) => Semantic(EventKind::CommitAck),
         (Opcode::SUBMIT_FINALIZATION, R::Pending(PendingKind::Finalization)) => Generic,
         (Opcode::SUBMIT_FINALIZATION, R::Finalized) => Semantic(EventKind::Finalized),

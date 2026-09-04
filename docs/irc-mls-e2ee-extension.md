@@ -39,7 +39,10 @@ The design uses:
 - one active, signed Commit candidate per conversation epoch;
 - endpoint-signed Commit processing acknowledgements and Byzantine-quorum
   finality for group-state changes;
-- signed, hash-chained sequencing receipts for eventual equivocation evidence;
+- published conversation policies, so the sequencer certifies a terminal only
+  after the council quorum has voted for it;
+- signed, hash-chained sequencing receipts, witnessed by every edge server,
+  for equivocation evidence;
 - encrypted-only downgrade protection pinned in MLS group state; and
 - strict limits for messages, fragments, reassembly, ratchet advancement,
   skipped keys, KeyPackages, and group operations.
@@ -338,7 +341,12 @@ KeyPackage fields, device counts, directory queries, Welcome references,
 group and epoch activity, membership-change timing, ciphertext sizes,
 federation paths, and traffic volume. The application finality sidecars also
 reveal transition action classes, controller/finality/ACK signer identifiers,
-old leaf indices, and result digests. Private MLS handshake messages still
+old leaf indices, and result digests. The published policy reveals the
+membership policy kind, the suite choice, the controller roots, the finality
+council (root fingerprint, Device ID, and certificate ID of every principal),
+and the fault bound to every server that retains the conversation. The server
+already sees rosters and device attachments, so the added exposure is which
+devices hold council and controller roles. Private MLS handshake messages still
 hide Proposal bodies, target credentials, path secrets, and the resulting
 group secrets, but do not hide IRC channel membership from the IRC
 infrastructure. TLS is still required on every client-server and server-server
@@ -361,7 +369,11 @@ The attacker may:
 The attacker may also control the sequencer signing key. Sequencer signatures
 therefore provide ordering evidence and availability coordination, but global
 non-equivocation for group-state transitions comes from intersecting endpoint
-quorums, not from trusting that key to sign only once.
+quorums, not from trusting that key to sign only once. An honest sequencer
+additionally refuses to certify a terminal below the published quorum, and
+every edge server witnesses the record chain it projects, so a sequencer that
+signs below quorum or forks the chain produces public evidence at the first
+honest edge. Endpoints never rely on that refusal for safety.
 
 The attacker initially does not possess:
 
@@ -415,6 +427,11 @@ The server has four application roles:
 3. Route complete MLS objects to a channel, direct conversation, or device
    mailbox.
 4. Linearize Commit messages for each conversation and issue signed receipts.
+5. Retain each conversation's published policy chain and certify a
+   finalization, abort, or ReInit terminal only after the old policy's
+   finality quorum has voted for it.
+6. Witness, at every edge server, that the sequencer record chain of each
+   projected conversation extends without forks.
 
 The client has all cryptographic roles:
 
@@ -525,26 +542,29 @@ and a normal Add Commit.
 
 ### 7.5 Padding
 
-Application and encrypted handshake `PrivateMessage`s **MUST** use deterministic
-MLS padding. Let `L` be the complete TLS encoding length of the RFC 9420
-`PrivateMessageContent` selected content arm and `FramedContentAuthData` before
-any trailing padding bytes. If
+Padding is applied to the application content before MLS encryption, not to
+the MLS `PrivateMessageContent`, because no independent MLS implementation
+exposes exact control over the RFC 9420 padding field. Every
+`IrcEncryptedContent` (Section 10) ends in a `zero_padding` vector. Let `L` be
+the complete TLS encoding length of the `IrcEncryptedContent` with an empty
+`zero_padding` vector, including that vector's own two length bytes. If
 `L <= 4096`, the target is the least multiple of 256 no smaller than `L`;
 otherwise it is the least multiple of 1024 no smaller than `L`. The sender
-appends exactly `target - L` zero padding bytes. Checked arithmetic is
-used before allocation. If the resulting `PrivateMessage` or containing typed
-object would exceed its command-specific maximum, the plaintext/Commit is too
-large and is rejected before encryption; the sender never omits or shortens
-padding to make it fit.
+fills `zero_padding` with exactly `target - L` zero octets so that the complete
+encoding is exactly `target` bytes. Checked arithmetic is used before
+allocation. If the resulting `PrivateMessage` or containing typed object would
+exceed its command-specific maximum, the content is too large and is rejected
+before encryption; the sender never omits or shortens padding to make it fit.
 
-The receiver decodes the selected content arm and `FramedContentAuthData`,
-records their exact consumed length `L`, and treats every remaining plaintext
-octet as padding. It computes the same target with checked addition and
-division before comparing lengths. It rejects a remaining length other than
-`target - L`, any nonzero padding octet, arithmetic overflow, trailing bytes
-outside the padding field, or a complete outer object above its fixed limit.
-Zero padding bytes are required when `L` is already on a bucket boundary; an
-implementation must not add a second full bucket. These are the mandatory
+The receiver decodes the `IrcEncryptedContent`, computes `L` as the encoded
+length minus the padding octets, computes the same target with checked
+addition and division before comparing lengths, and rejects a padding length
+other than `target - L`, any nonzero padding octet, arithmetic overflow,
+trailing bytes after the structure, or a complete outer object above its fixed
+limit. Zero padding bytes are required when `L` is already on a bucket
+boundary; an implementation must not add a second full bucket. MLS-level
+padding inside `PrivateMessageContent` is left to the MLS library, is not
+constrained by this profile, and is never inspected. These are the mandatory
 boundary vectors:
 
 | `L` | target | zero padding bytes |
@@ -559,9 +579,10 @@ boundary vectors:
 | 5,119 | 5,120 | 1 |
 | 5,120 | 5,120 | 0 |
 
-Padding reduces exact-length leakage but does not hide timing, participant
-sets, traffic direction, or broad size classes. Implementations **MUST NOT**
-describe padding as anonymity.
+Handshake messages and Commits are not padded by this profile; their sizes
+are bounded public objects. Padding reduces exact-length leakage but does not
+hide timing, participant sets, traffic direction, or broad size classes.
+Implementations **MUST NOT** describe padding as anonymity.
 
 ### 7.6 Compression
 
@@ -1273,8 +1294,29 @@ the safe recovery is an explicitly closed, next semantic incarnation with new
 generation-zero root locks and renewed verification, not an unauthenticated
 checkpoint.
 
-Policy bytes are not sent as a separable application message. The complete
-new `IrcPolicy` is inside the replacement context extension described below.
+Policy bytes are never sent as an application message. The complete new
+`IrcPolicy` is inside the replacement context extension described below, and
+that Commit-bound copy is the one endpoints enforce. The identical canonical
+bytes are also published to the server as a public `policy` object with
+`EGROUP SUBMIT POLICY` (Section 11.5) so the sequencer can verify finality
+quorums (Section 12.4). A client **MUST** publish a policy before it submits
+any terminal request whose `old_policy_id` or resulting policy ID names it; the
+bootstrap creator publishes the generation-zero policy and the generation-one
+operational policy immediately after `EGROUP BIND`. The server accepts a
+published policy only when the conversation is bound, the network and
+conversation IDs match the route, the recomputed `policy_id` of a
+generation-zero policy equals the binding's `initial_policy_id` and its
+predecessor is all zero, every later generation names a retained predecessor
+and increments its generation by exactly one, and every approval verifies
+against the retained roster certificate it names with the threshold counted
+per controller root. It retains the object by content ID, answers an identical
+resubmission with the same success line, bounds retained policy bytes per
+conversation by `MAX_POLICY_CHAIN_BYTES`, and rejects anything else with
+`E2EE_POLICY_INVALID`. A published policy is bounded by `MAX_POLICY_OBJECT`;
+the reservation advertises no lower policy limit. The server-retained copy is a
+witness copy: the policy ID is content-derived, so a context extension and a
+published object with the same ID are the same bytes, and a client that finds
+a retained policy it did not expect treats it as a `Security changed` event.
 A GroupContextExtensions proposal **MUST** contain the complete replacement
 extension list, including every unchanged extension and
 `required_capabilities`; it is a wholesale replacement, not a merge. Clients
@@ -1976,6 +2018,7 @@ struct {
     opaque sequencer_record_chain_head[32];
     IrcEncryptedContentType content_type;
     opaque body<0..32768>;
+    opaque zero_padding<0..65535>;
 } IrcEncryptedContent;
 ```
 
@@ -1999,6 +2042,7 @@ Receivers **MUST**:
   application forward window;
 - compare the sequencer-record chain head with locally observed heads and request any
   missing receipts;
+- verify the Section 7.5 padding target and zero octets;
 - validate the content type before interpreting the body; and
 - treat the MLS credential, not an IRC prefix or nickname, as the sender
   identity.
@@ -2282,7 +2326,8 @@ enum {
     reinit_abort_request(23), reinit_abort_certificate(24),
     sequencer_record(25), device_attach_challenge(26), device_attach(27),
     root_binding_lock(28), federation_state(29), federation_origin(30),
-    federation_request(31), federation_result(32), federation_event(33)
+    federation_request(31), federation_result(32), federation_event(33),
+    policy(34)
 } IrcWireObjectKind;
 
 struct {
@@ -2305,12 +2350,13 @@ never reaches fanout or sequencing.
 | `EGROUP SUBMIT CANDIDATE` | `commit_mls`: one MLS `PrivateMessage` with `commit` content | `MAX_LIVE_OBJECT` | attached, roster-active bound device; endpoint leaf auth | candidate echo plus receipt |
 | `EGROUP SUBMIT AUTHORIZATION` | `commit_approval`: `IrcCommitApprovalEnvelope` | `MAX_COMMIT_APPROVAL_OBJECT` | attached device matching approval signer | `STORED` |
 | `EGROUP SUBMIT ACK` | `commit_ack`: `IrcCommitAck` | `MAX_COMMIT_ACK_OBJECT` | attached device matching signer | `ACKED` |
-| `EGROUP SUBMIT FINALIZATION` | `finalization_request`: `IrcFinalizationRequest` | `MAX_FINALIZATION_OBJECT` | attached roster-active device; endpoint quorum checks are authoritative | `FINALIZED` or `PENDING` |
-| `EGROUP SUBMIT ABORT` | `abort_request`: `IrcAbortRequest` | `MAX_ABORT_OBJECT` | attached roster-active device; endpoint quorum checks are authoritative | `ABORTED` or `PENDING` |
+| `EGROUP SUBMIT FINALIZATION` | `finalization_request`: `IrcFinalizationRequest` | `MAX_FINALIZATION_OBJECT` | attached roster-active device; the server certifies only at the retained old policy's quorum, and endpoint quorum checks remain authoritative | `FINALIZED` or `PENDING` |
+| `EGROUP SUBMIT ABORT` | `abort_request`: `IrcAbortRequest` | `MAX_ABORT_OBJECT` | attached roster-active device; the server certifies only at the retained old policy's quorum, and endpoint quorum checks remain authoritative | `ABORTED` or `PENDING` |
 | `EGROUP SUBMIT REINIT ATTEMPT` | `reinit_attempt`: `IrcReInitAttempt` | `MAX_REINIT_OBJECT` | attached old-group device | `REINIT-STAGED` or `PENDING` |
 | `EGROUP SUBMIT REINIT ACK` | `reinit_ack`: `IrcReInitAck` | `MAX_REINIT_ACK_OBJECT` | attached device matching signer | `REINIT-ACKED` |
 | `EGROUP SUBMIT REINIT ACTIVATE` | `reinit_activation_request`: `IrcReInitActivationRequest` | `MAX_REINIT_OBJECT` | attached continuing old-group device | `REINIT-ACTIVATED` or `PENDING` |
 | `EGROUP SUBMIT REINIT ABORT` | `reinit_abort_request`: `IrcReInitAbortRequest` | `MAX_REINIT_OBJECT` | attached old-group device | `REINIT-ABORTED` or `PENDING` |
+| `EGROUP SUBMIT POLICY` | `policy`: `IrcPolicy` | `MAX_POLICY_OBJECT` | attached, roster-active bound device; approvals verified against retained rosters and the binding's policy chain | `STORED POLICY` |
 | `EGROUP BIND` | `conversation_binding`: `IrcConversationBindingPackage` | `MAX_BINDING_OBJECT` | reservation owner and complete binding approvals | `BOUND` |
 | `EGROUP CLOSE` | `close_authorization`: `IrcCloseAuthorization` | `MAX_CLOSE_OBJECT` | old-policy authorization and finality reference | `CLOSED` |
 | `EKEY PUBLISH IDENTITY` | `root_identity`: `IrcRootIdentity` | `MAX_IDENTITY_OBJECT` | same authenticated Account ID | `STORED` |
@@ -2372,6 +2418,7 @@ EGROUP SUBMIT REINIT ATTEMPT <conversation-id>
 EGROUP SUBMIT REINIT ACK <conversation-id>
 EGROUP SUBMIT REINIT ACTIVATE <conversation-id>
 EGROUP SUBMIT REINIT ABORT <conversation-id>
+EGROUP SUBMIT POLICY <conversation-id>
 EGROUP FETCH OBJECT <conversation-id> <object-id>
 EGROUP FETCH AUTHORIZATIONS <conversation-id> <candidate-id> <cursor-or-star>
 EGROUP FETCH ACKS <conversation-id> <candidate-or-reinit-attempt-id> <cursor-or-star>
@@ -2643,6 +2690,7 @@ Extension success responses are server-prefixed and use these fixed forms:
 @label=<label> :server EGROUP BOUND <conversation-id> <binding-id>
 @label=<label> :server EGROUP CLOSED <conversation-id> <close-id>
 @label=<label> :server EGROUP STORED AUTHORIZATION <conversation-id> <candidate-id> <approval-object-id>
+@label=<label> :server EGROUP STORED POLICY <conversation-id> <policy-id> <policy-object-id>
 @label=<label> :server EGROUP ACKED <conversation-id> <candidate-id> <ack-object-id>
 @label=<label> :server EGROUP PENDING <conversation-id> <FINALIZATION|ABORT|REINIT-ATTEMPT|REINIT-ACTIVATE|REINIT-ABORT> <object-id>
 @label=<label> :server EGROUP FINALIZED <conversation-id> <resulting-epoch> <finalization-id> <certificate-object-id>
@@ -2875,6 +2923,8 @@ disclosed identity material.
 | `E2EE_BINDING_AUTH_INVALID` | Binding or transition authorization is missing or malformed |
 | `E2EE_CANDIDATE_ACTIVE` | The epoch already has an unfinalized candidate |
 | `E2EE_FINALITY_REQUIRED` | Operation named a candidate without a valid finalization |
+| `E2EE_POLICY_INVALID` | A published policy failed route, chain, or approval validation |
+| `E2EE_POLICY_REQUIRED` | A terminal request named a policy the server has not retained |
 | `E2EE_EPOCH_STALE` | A Commit references an epoch outside the bounded window |
 | `E2EE_OBJECT_NOT_FOUND` | Requested retained object or record is unavailable |
 | `E2EE_RATE_LIMITED` | Operation exceeded an authenticated quota |
@@ -2921,6 +2971,7 @@ object-id     = hash-token
 candidate-id  = hash-token
 terminal-id   = hash-token
 binding-id    = hash-token
+policy-id     = hash-token
 delivery-token = hash-token
 snapshot-token = hash-token
 account-token = 32b64char              ; exactly 24 decoded Account ID bytes
@@ -2972,8 +3023,8 @@ process and others cannot. This profile therefore separates *sequenced* from
 *finalized* and never asks clients to select their own first-valid candidate.
 
 For prior epoch `N`, an honest sequencer exposes exactly one active candidate.
-A malicious sequencer may expose forks, so endpoint finality—not that promise—
-supplies the security invariant:
+A malicious sequencer may expose forks, so endpoint finality, not that
+promise, supplies the security invariant:
 
 1. The server reassembles the typed `commit_mls` object and performs only
    visible, bounded checks: outer MLS group ID, epoch, content type, AAD route,
@@ -3344,14 +3395,35 @@ Controller devices submit individual `IrcCommitApprovalEnvelope` objects keyed
 by the identical authorization TBS ID. Endpoints fetch and verify them; the
 deterministic assembler takes at most one valid approval per root, ordered by
 root fingerprint and then Device ID, until the required threshold is met.
-The opaque server only bounds, stores, and groups identical TBS bytes. It does
-not infer the private old policy or declare controller validity.
+The server only bounds, stores, and groups identical TBS bytes. It does not
+assemble approvals or declare controller validity; controller authorization
+remains an endpoint check under the policy.
 
 The finality request may be submitted repeatedly with additional canonical
-votes over one fixed proof and core. The opaque server may merge syntactically
-distinct signer entries and sign bounded proof snapshots with label
-`IRC-MLS/1 commit finalization`; it does not know the private quorum, old tree,
-ACK coverage, or staged result. A partial request returns `PENDING`.
+votes over one fixed proof and core. The sequencer resolves `old_policy_id` to
+the retained published policy (Section 9.3); a request naming an unretained
+policy, or whose authorization names a resulting policy that is not retained,
+fails with `E2EE_POLICY_REQUIRED` and is not retained. `old_policy_id` must be
+the conversation's current policy, the one its last finalization installed
+and the binding's initial policy before the first; a retained policy that is
+not current fails with `E2EE_EPOCH_STALE`, and the authorization's
+`old_policy_id` must match. The sequencer reconstructs the exact
+`IrcDispositionVoteTBS` for the slot from its own receipt and verifies each
+vote's device signature with the device-authorization key of the retained
+roster certificate named by `signer_device_certificate_id`. A vote vector that
+is not canonical fails with `E2EE_INVALID_FRAGMENT`; a vote whose signer is
+not a finality principal of that policy, names another certificate, or does
+not verify fails the request with `E2EE_BINDING_AUTH_INVALID`; a vote from a
+principal the sequencer already counted for the other terminal of the same
+slot is discarded as a sign-once violation. It counts at most one vote per
+principal, keeps the count for the slot across requests so a later request
+need only add the missing votes, and signs the bounded proof snapshot with
+label `IRC-MLS/1 commit finalization` only when at least `q` distinct valid
+FINALIZE votes stand. A request below `q` is retained and returns `PENDING`.
+Certification makes the authorization's resulting policy the current policy.
+The sequencer does not know the old tree, ACK coverage, or staged result, so
+its certificate is public evidence that the quorum voted, never a substitute
+for the endpoint verification below.
 `route_sequence` is exactly the candidate receipt's sequence plus one,
 `predecessor_record_id` exactly equals `candidate_id`, and the asserted
 `finalization_id` is recomputed from the core. An invalid or under-quorum
@@ -3448,7 +3520,9 @@ Each council signer uses the same `IrcDispositionVoteTBS`, with disposition
 ABORT, that abort ID as `terminal_id`, and the matching non-zero reason. Votes are canonical
 by finality principal. Sender withdrawal is a request, not unilateral power;
 every abort requires the same derived old-policy quorum `q`. The sequencer
-signs the abort TBS with label `IRC-MLS/1 candidate abort`. No valid
+verifies ABORT votes exactly as it verifies FINALIZE votes and signs the abort
+TBS with label `IRC-MLS/1 candidate abort` only at `q` or more distinct valid
+votes; a request below `q` returns `PENDING`. No valid
 finalization and valid abort can coexist under the fault bound because their
 quorums intersect in an honest sign-once device. The wrapper's route sequence
 is the candidate receipt's `route_sequence` plus one, its predecessor exactly
@@ -3485,7 +3559,11 @@ delay, so clients fetch and compare missing signed records first. Two valid
 sequencer signatures for different records at the same chain position prove
 equivocation. These receipts do not detect selective omission or cross-sender
 reordering of application messages, and no receipt scheme defeats permanent
-censorship or partitioning.
+censorship or partitioning. Every edge server additionally witnesses the chain
+it projects (Section 12.5): a candidate or terminal event that does not extend
+the edge's last head is refused, recorded durably, and closes the federation
+link, so a fork is visible at the first honest edge without decrypting
+anything.
 
 ### 12.5 Federation
 
@@ -3628,7 +3706,8 @@ enum {
     fetch_binding_locks(29), whoami(30), attach_begin(31),
     attach_finish(32), claim_package(33), claim_status(34),
     publish_package(35), revoke_package(36), deliver_binding(37),
-    deliver_welcome(38), fetch_mailbox(39), acknowledge_mailbox(40)
+    deliver_welcome(38), fetch_mailbox(39), acknowledge_mailbox(40),
+    submit_policy(41)
 } IrcFederationOpcode;
 
 struct {
@@ -3672,6 +3751,7 @@ forbidden:
 | `submit_reinit_ack` | old conversation ID | `reinit_ack` |
 | `submit_reinit_activate` | old conversation ID | `reinit_activation_request` |
 | `submit_reinit_abort` | old conversation ID | `reinit_abort_request` |
+| `submit_policy` | conversation ID | `policy` |
 | `fetch_object` | conversation ID, object ID | none |
 | `fetch_authorizations` | conversation ID, candidate ID, cursor | none |
 | `fetch_acks` | conversation ID, candidate-or-ReInit-attempt ID, cursor | none |
@@ -3703,7 +3783,8 @@ and names the exact following `EPAYLOAD` object.
 enum {
     store_authorization(1), store_identity(2), store_roster(3),
     store_capabilities(4), store_package(5), store_application(6),
-    store_binding(7), store_welcome(8), store_staged_reinit(9)
+    store_binding(7), store_welcome(8), store_staged_reinit(9),
+    store_policy(10)
 } IrcFederationStoreKind;
 
 enum {
@@ -3819,6 +3900,7 @@ home copy is the completion event; `generic` means a separate home-only
 | `close_group` | `closed` | `semantic:closed_event` |
 | `submit_candidate` | `accepted_event` | `semantic:candidate_event` |
 | `submit_authorization` | `stored(store_authorization)` | generic |
+| `submit_policy` | `stored(store_policy)` | generic |
 | `submit_commit_ack` | `commit_acked` | `semantic:commit_ack_event` |
 | `submit_finalization` | `pending(pending_finalization)` or `finalized` | generic or `semantic:finalized_event`, matching the result |
 | `submit_abort` | `pending(pending_abort)` or `aborted` | generic or `semantic:aborted_event`, matching the result |
@@ -4012,7 +4094,8 @@ coordinator's current sequencer-record head and may repeat across messages. A
 candidate event uses its receipt sequence; a Commit ACK uses its candidate's receipt sequence; a
 finalization, abort, or ReInit terminal event uses its certificate sequence;
 a ReInit-staged event uses its attempt-receipt sequence, a ReInit ACK uses its
-attempt's receipt sequence, and a close event uses the authorizing close-intent finalization sequence.
+attempt's receipt sequence, and a close event uses the route sequence its close
+occupies, one after the record that authorized it.
 Route-state changes use the state object's
 `sequencer_record_head_sequence`; route-hidden uses that value from the last
 projected state and names that exact state object. A generic
@@ -4109,6 +4192,31 @@ when its Event ID matches that delivered row; outside a cross-profile barrier
 it advances by exactly one. An exact duplicate at the installed cursor is re-ACKed without
 reapplying state or rerendering; a gap, conflicting ID/object, decreased state
 generation, or other generation blocks E2EE processing and closes the link.
+
+The edge also witnesses the sequencer record chain of every conversation it
+projects. It keeps the head `(sequencer_record_head_sequence,
+sequencer_record_head_id)` installed from the route-state cut and advances it
+from semantic events. The head is the external anchor until a record occupies
+it, and the next position is the head sequence at the anchor and one greater
+afterwards. A `candidate_event` receipt must carry `route_sequence` equal to
+the next position and `predecessor_record_id` exactly equal to the head ID,
+and its candidate ID then becomes the head. A `reinit_staged_event`,
+`finalized_event`, `aborted_event`, `reinit_activated_event`,
+`reinit_aborted_event`, or `closed_event` must arrive at the next position,
+and its attempt, terminal, or close ID becomes the head. An event that names
+the installed head again, as after a route-state cut that already carried it,
+leaves the head. Application, ACK, and completion events never move the head.
+A route-state change installs the cut's head when it is the first state for
+the conversation or when it names the witnessed head or a later one; a cut
+whose head is older than, or forks from, the witnessed head is a violation. A
+semantic event that does not extend the head is a witness violation: the edge
+produces no client output and no EACK, records a durable `witness/v1` row
+naming the conversation ID, the expected next position and head ID, and the
+observed sequence, identifier, and asserted predecessor, and nothing else,
+then closes the link so the route reads `E2EE_SYNCING` until a snapshot that
+extends the witnessed head arrives. Logs carry only the closure, never an
+identifier. The witness cannot detect a record the coordinator never
+delivers; it detects every fork and every skipped position.
 Cross-profile parts instead stage and commit under the base Section-20.8
 combined transaction; no individual part advances this cursor or emits EACK.
 
@@ -4256,7 +4364,10 @@ After the first sequencer record,
 `sequencer_record_head_sequence` is that retained record's exact
 `route_sequence` and `sequencer_record_head_id` is its recomputed semantic ID;
 both belong to this conversation and are the coordinator's current head at the
-route-state cut. Before the first record, the sequence is zero and the ID is
+route-state cut. The coordinator refreshes the retained route-state object and
+its durable route row at every terminal and close, so a cut and a reloaded
+coordinator name the head the edges have witnessed. Before the first record,
+the sequence is zero and the ID is
 the exact external genesis or ReInit-activation anchor required by Section
 12.2. An ID/sequence mismatch, missing required security record, invalid
 external anchor, or head older than the accepted state's authorizing record is
@@ -4493,7 +4604,9 @@ server never dispenses the same KeyPackage twice or extends its lifetime.
    exact binding and member plan.
 5. It initializes the one-member MLS group with its own device as the initial
    leaf and atomically binds the exact context, plan, and signed binding to the
-   reservation. Every Add Proposal is inline.
+   reservation. Every Add Proposal is inline. It then publishes the
+   generation-zero and generation-one policies with `EGROUP SUBMIT POLICY`
+   before its first Commit.
 6. For the next planned device only, it claims and validates one fresh
    KeyPackage, submits one Add Commit, stages it, collects required ACKs,
    controller authorization and finality votes, and waits for an
@@ -4506,8 +4619,9 @@ server never dispenses the same KeyPackage twice or extends its lifetime.
 8. After the exact plan is active, it finalizes the dual-council
    `bootstrap_activation`, installs the binding-committed operational policy,
    and clears `bootstrap_pending`. Only then may a controlled transition set
-   the private topic. Policy, topic, and rosters are Commit-bound, not
-   separable application objects.
+   the private topic. Policy, topic, and rosters are Commit-bound; the policy
+   is additionally published to the server as a public object and is never an
+   application message.
 
 The channel becomes encrypted-only when the binding is active. The server
 rejects plaintext `PRIVMSG` and `NOTICE` to the bound channel. Clients without
@@ -4515,8 +4629,8 @@ the required capability cannot join the encrypted membership and receive a
 structured failure instead of a plaintext fallback.
 
 JOIN, PART, KICK, MODE, NAMES, and presence remain IRC metadata. The private
-topic and private policy live inside MLS; any ordinary server topic is a
-non-secret placeholder.
+topic lives inside MLS, the policy is Commit-bound and also published to the
+server, and any ordinary server topic is a non-secret placeholder.
 
 ### 13.3 Creating a direct group
 
@@ -5046,8 +5160,11 @@ one after the attempt receipt, `predecessor_record_id` exactly equal to
 terminal ID. Variable valid vote subsets are alternative evidence for that
 same ID. The sequencer signs activation with label
 `IRC-MLS/1 reinit activation` or abort with
-`IRC-MLS/1 reinit attempt abort`; endpoints, not the opaque sequencer, validate
-the private quorum and staged result. Activation makes
+`IRC-MLS/1 reinit attempt abort` only after it has verified at least `q`
+distinct valid votes under the old conversation's current policy over the
+attempt's slot, exactly as in Section 12.4; endpoints still validate the
+quorum and the staged result themselves.
+Activation makes
 `reinit_activation_id` the successor's initial accepted state and external
 record-head anchor. The activation and abort quorums cannot both exist within
 the fault bound.
@@ -5209,6 +5326,7 @@ The profile limits and operational defaults are:
 | `MAX_CAPABILITY_OBJECT` | 65,536 bytes |
 | `MAX_CREDENTIAL_BUNDLE` | 8,192 bytes |
 | `MAX_POLICY_BYTES` | 32,768 bytes |
+| `MAX_POLICY_OBJECT` | 32,774 bytes |
 | `MAX_BINDING_OBJECT` | 262,144 bytes |
 | `MAX_BINDING_CHAIN_BYTES` | 1,048,576 bytes |
 | `MAX_IRC_MLS_CONTEXT_EXTENSION` | 196,608 bytes |
@@ -5396,7 +5514,7 @@ invented fields in the signed reservation. Client-visible lower object and
 part limits are the exact reservation fields in Section 11.5. At the hard
 ceiling, new storage is refused fairly rather than evicting unexpired objects
 from a selected account. Candidate quotas are charged to the authenticated
-Account ID and attached Device ID; the opaque server does not pretend to know
+Account ID and attached Device ID; the server does not pretend to know
 the encrypted sender leaf. Version 1 uses the same candidate-rate buckets for
 policy-authorized recovery operations; there is no hidden recovery bucket,
 candidate slot, or bypass of object, memory, or global disk ceilings.
@@ -5532,7 +5650,9 @@ The IRCD implementation should keep these surfaces separate:
 - fragment validation and reassembly;
 - directory and opaque mailbox storage;
 - route authorization and fanout;
-- Commit sequencing and receipt signing; and
+- Commit sequencing and receipt signing;
+- published-policy retention and finality-vote verification;
+- sequencer record-chain witnessing at the edge; and
 - bounded MLS outer-header inspection, without MLS secret state.
 
 The client or client SDK owns:
@@ -5562,14 +5682,20 @@ Before production use, an implementation requires:
    locks, bindings, committed roster heads, contexts,
    application envelopes, object fragments, sequencer credentials, candidate
    receipts, ACKs, finalizations, aborts, and ReInit activation.
-3. Cross-implementation tests using at least two independent MLS libraries or
-   clients.
+3. Cross-implementation tests in which at least two independent MLS
+   libraries each, through the daemon's client surface and not only a framing
+   comparison, publish KeyPackages, bind a conversation, publish its policies,
+   submit a Commit candidate, acknowledge it, vote and receive a finalization
+   under the published quorum, send Section 7.5 padded application messages,
+   add a member of the other library through a delivered Welcome, and close;
+   every outcome is recorded per rule.
 4. Characterization tests proving plaintext IRC behavior is rejected for a
    bound encrypted target.
 5. Boundary tests at every named resource limit and one unit over it. The
-   deterministic-padding suite includes every Section-7.5 vector, checked-
-   arithmetic overflow, exact outer-object limit fit/overflow, nonzero padding,
-   one byte too little/much padding, and the zero-padding boundary case.
+   application-padding suite includes every Section-7.5 vector over
+   `IrcEncryptedContent`, checked-arithmetic overflow, exact outer-object limit
+   fit/overflow, nonzero padding, one byte too little/much padding, and the
+   zero-padding boundary case.
 6. Parser fuzzing for IRC tags, decimal fields, base64url, reassembly, TLS
    vectors, identity chains, and MLS outer messages.
 7. Stateful property tests for duplicate, lost, reordered, conflicting, stale,
@@ -5583,7 +5709,9 @@ Before production use, an implementation requires:
 9. Exhaustive quorum tests for every permitted `(n,f)`, proving
    `2q-n > f`, plus netsplit and malicious-sequencer tests proving two
    conflicting membership changes cannot both certify while at most `f`
-   finality principals are Byzantine. Fault-bound violations are tested and
+   finality principals are Byzantine. The sequencer refuses to certify a
+   finalization, abort, or ReInit terminal below `q` for every permitted
+   `(n,f)` and certifies at exactly `q`. Fault-bound violations are tested and
    reported as outside the claim rather than silently passing.
 10. Tests for root and sequencer rotation, roster rollback/equivocation,
     device addition/removal, KeyPackage cross-group replay, rejection of
@@ -5593,7 +5721,9 @@ Before production use, an implementation requires:
     inline-only proposals, disabled Update Proposals, controller-bound
     candidate authorization, policy wholesale replacement, removal-target
     processing, the idle-device reminder without timer-driven removal,
-    suite-independent profile digests, and server equivocation.
+    suite-independent profile digests, published-policy chain validation,
+    quorum refusal without a retained policy, edge witness refusal of a
+    non-extending candidate or terminal event, and server equivocation.
 11. Load tests for maximum group size, fanout, Commit storms, slow consumers,
     offline queues, and authenticated fragment floods.
 12. A review that server logs and telemetry contain no forbidden material.

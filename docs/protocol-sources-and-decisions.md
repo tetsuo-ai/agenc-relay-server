@@ -35,7 +35,7 @@ or security claims.
 | RFC 9106 | Informational IRTF/CFRG | Adopted for Argon2id, narrowed to the fixed OPAQUE KSF parameters. |
 | RFC 9180 | Proposed Standard | Adopted for the fixed Base-mode HPKE account-service suite and contexts. |
 | RFC 9325, updated by RFC 9852 | BCP 195 | Adopted for TLS deployment. Because this is a new TLS-based protocol, every endpoint requires TLS 1.3 and disables TLS 1.2 rather than using RFC 9852's optional compatibility allowance. |
-| RFC 9420 | Proposed Standard | Normative MLS protocol. The companion specification deliberately narrows suites, extensions, message forms, proposal handling, and delivery-service behavior. |
+| RFC 9420 | Proposed Standard | Normative MLS protocol. The companion specification deliberately narrows suites, extensions, message forms, proposal handling, and delivery-service behavior. Its length padding is applied to the application content rather than to the MLS padding field, and its policy publication, sequencer quorum check, and edge record-chain witness are application-layer decisions over an unmodified MLS. |
 | RFC 9525 | Proposed Standard | Adopted for DNS service-identity verification. Onion endpoints use the separately pinned SPKI rule. |
 | RFC 9750 | Informational | Adopted as MLS architecture and threat-model guidance. It does not replace the exact RFC 9420 or companion wire requirements. |
 | RFC 9807 | Informational IRTF/CFRG | Deliberately adopted as the OPAQUE protocol despite not being an IETF Standards Track RFC; the exact suite, identities, context, fake-record behavior, and KSF are fixed locally. |

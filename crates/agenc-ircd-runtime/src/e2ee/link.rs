@@ -52,6 +52,9 @@ pub enum CompanionViolation {
     Executor,
     /// The ESTATE token expired before READY.
     SnapshotExpired,
+    /// A candidate or terminal event did not extend the witnessed sequencer
+    /// record chain (companion 12.5).
+    Witness,
 }
 
 impl fmt::Display for CompanionViolation {
@@ -63,6 +66,7 @@ impl fmt::Display for CompanionViolation {
             Self::Request => formatter.write_str("companion request violated the profile"),
             Self::Executor => formatter.write_str("companion executor unavailable"),
             Self::SnapshotExpired => formatter.write_str("companion state transfer expired"),
+            Self::Witness => formatter.write_str("sequencer record chain did not extend"),
             Self::Render => formatter.write_str("companion line could not be rendered"),
         }
     }

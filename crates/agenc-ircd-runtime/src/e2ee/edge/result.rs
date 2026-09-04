@@ -385,7 +385,8 @@ impl E2eeEdge {
                 Ok(Vec::new())
             }
             _ if result.descriptors.is_empty() => {
-                let line = scalar_line(&result.value).ok_or(E2eeReplyCode::InvalidFragment)?;
+                let line =
+                    scalar_line(&result.value, pending).ok_or(E2eeReplyCode::InvalidFragment)?;
                 let rendered = match label {
                     Some(label) => render_labeled(label, &server, &line),
                     None => render_broadcast(&server, &line),
@@ -489,7 +490,9 @@ fn command_name(command: &Resolved) -> &'static str {
 
 fn store_kind(kind: IrcFederationStoreKind) -> Option<StoreKind> {
     Some(match kind {
-        IrcFederationStoreKind::StoreAuthorization => return None,
+        IrcFederationStoreKind::StoreAuthorization | IrcFederationStoreKind::StorePolicy => {
+            return None;
+        }
         IrcFederationStoreKind::StoreIdentity => StoreKind::Identity,
         IrcFederationStoreKind::StoreRoster => StoreKind::Roster,
         IrcFederationStoreKind::StoreCapabilities => StoreKind::Capabilities,
@@ -532,13 +535,19 @@ fn empty_line(kind: IrcFederationEmptyKind) -> SuccessLine {
 }
 
 // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one match maps every scalar result value to its 11.7 success line
-/// The labeled scalar success line of a result without responses.
-fn scalar_line(value: &ResultValue) -> Option<SuccessLine> {
+/// The labeled scalar success line of a result without responses; a
+/// `STORED` group line names the request's conversation and subject.
+fn scalar_line(value: &ResultValue, pending: &PendingRequest) -> Option<SuccessLine> {
+    let route = pending.command.route_key();
+    let subject = pending.subject.unwrap_or([0; 32]);
     Some(match value {
         ResultValue::Bound(conversation, binding, _) => SuccessLine::Bound(*conversation, *binding),
         ResultValue::Closed(conversation, close) => SuccessLine::Closed(*conversation, *close),
         ResultValue::Stored(IrcFederationStoreKind::StoreAuthorization, object) => {
-            SuccessLine::StoredAuthorization([0; 32], [0; 32], *object)
+            SuccessLine::StoredAuthorization(route, subject, *object)
+        }
+        ResultValue::Stored(IrcFederationStoreKind::StorePolicy, object) => {
+            SuccessLine::StoredPolicy(route, subject, *object)
         }
         ResultValue::Stored(kind, object) => SuccessLine::Stored(store_kind(*kind)?, *object),
         ResultValue::Triple(a, b, c) => SuccessLine::Acked(*a, *b, *c),

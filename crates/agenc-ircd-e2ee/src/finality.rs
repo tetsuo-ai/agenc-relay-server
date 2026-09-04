@@ -3,8 +3,9 @@
 //! The server reconstructs each vote's TBS from the receipt and the
 //! terminal identifier, verifies the council device's signature, enforces
 //! sign-once per slot, and counts distinct principals toward the derived
-//! quorum. Endpoint-only: the eligibility of a `FINALIZE` voter, which needs
-//! the resulting tree and the voter's own staged state.
+//! quorum; the sequencer signs a terminal certificate only once the quorum
+//! is reached. Endpoint-only: the eligibility of a `FINALIZE` voter, which
+//! needs the resulting tree and the voter's own staged state.
 
 use std::collections::BTreeMap;
 
@@ -13,6 +14,7 @@ use agenc_ircd_crypto::SignatureDomain;
 use crate::error::E2eeError;
 use crate::ids::SemanticId;
 use crate::limits::PROFILE_VERSION;
+use crate::objects::reinit::{IrcReInitDisposition, IrcReInitDispositionVoteTbs};
 use crate::objects::sequencing::{IrcDisposition, IrcDispositionVoteTbs, IrcFinalityVote};
 use crate::policy::{VerifiedPolicy, active_device};
 use crate::route::PrincipalRosters;
@@ -92,6 +94,47 @@ pub fn vote_tbs(
     }
 }
 
+/// The durable sign-once slot of one ReInit attempt (Section 13.8).
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ReinitVoteSlot {
+    /// Network identity.
+    pub network_id: [u8; 32],
+    /// Old conversation identifier.
+    pub old_conversation_id: SemanticId,
+    /// The finalization of the ReInit Commit.
+    pub old_reinit_state_id: SemanticId,
+    /// Attempt sequence.
+    pub attempt_sequence: u32,
+    /// The attempt receipt's predecessor record identifier.
+    pub predecessor_record_id: SemanticId,
+}
+
+/// Reconstructs the exact ReInit vote TBS a council device signed: an
+/// activation is the finalize disposition, an attempt abort the abort one.
+#[must_use]
+pub fn reinit_vote_tbs(
+    slot: &ReinitVoteSlot,
+    reinit_attempt_id: SemanticId,
+    terminal: Terminal,
+) -> IrcReInitDispositionVoteTbs {
+    let disposition = match terminal.disposition {
+        IrcDisposition::Finalize => IrcReInitDisposition::ActivateReinit,
+        IrcDisposition::Abort => IrcReInitDisposition::AbortReinitAttempt,
+    };
+    IrcReInitDispositionVoteTbs {
+        profile_version: PROFILE_VERSION,
+        network_id: slot.network_id,
+        old_conversation_id: slot.old_conversation_id,
+        old_reinit_state_id: slot.old_reinit_state_id,
+        attempt_sequence: slot.attempt_sequence,
+        slot_predecessor_record_id: slot.predecessor_record_id,
+        reinit_attempt_id,
+        disposition,
+        terminal_id: terminal.terminal_id,
+        reason_code: terminal.reason_code,
+    }
+}
+
 /// The votes the server has accepted for one slot.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct QuorumLedger {
@@ -116,6 +159,42 @@ impl QuorumLedger {
         tbs: &IrcDispositionVoteTbs,
         vote: &IrcFinalityVote,
     ) -> Result<(), E2eeError> {
+        let terminal = Terminal {
+            disposition: tbs.disposition,
+            terminal_id: tbs.terminal_id,
+            reason_code: tbs.reason_code,
+        };
+        self.record_encoded(policy, rosters, &tbs.encode()?, terminal, vote)
+    }
+
+    /// Records one ReInit council vote over `tbs` under the same rules.
+    pub fn record_reinit(
+        &mut self,
+        policy: &VerifiedPolicy,
+        rosters: &PrincipalRosters,
+        tbs: &IrcReInitDispositionVoteTbs,
+        vote: &IrcFinalityVote,
+    ) -> Result<(), E2eeError> {
+        let disposition = match tbs.disposition {
+            IrcReInitDisposition::ActivateReinit => IrcDisposition::Finalize,
+            IrcReInitDisposition::AbortReinitAttempt => IrcDisposition::Abort,
+        };
+        let terminal = Terminal {
+            disposition,
+            terminal_id: tbs.terminal_id,
+            reason_code: tbs.reason_code,
+        };
+        self.record_encoded(policy, rosters, &tbs.encode()?, terminal, vote)
+    }
+
+    fn record_encoded(
+        &mut self,
+        policy: &VerifiedPolicy,
+        rosters: &PrincipalRosters,
+        encoded_tbs: &[u8],
+        terminal: Terminal,
+        vote: &IrcFinalityVote,
+    ) -> Result<(), E2eeError> {
         let signer = (vote.signer_root_fingerprint, vote.signer_device_id);
         let member = policy
             .council_member(&signer.0, &signer.1)
@@ -128,14 +207,9 @@ impl QuorumLedger {
         }
         certificate.key.verify(
             SignatureDomain::DispositionVote,
-            &tbs.encode()?,
+            encoded_tbs,
             &vote.device_signature,
         )?;
-        let terminal = Terminal {
-            disposition: tbs.disposition,
-            terminal_id: tbs.terminal_id,
-            reason_code: tbs.reason_code,
-        };
         match self.votes.get(&signer) {
             Some(existing) if *existing != terminal => Err(E2eeError::InvalidValue),
             _ => {
@@ -177,6 +251,24 @@ pub fn record_vote_vector(
     })?;
     for vote in votes {
         ledger.record(policy, rosters, tbs, vote)?;
+    }
+    Ok(())
+}
+
+/// Records every ReInit vote of a submitted vector into `ledger` over one
+/// reconstructed TBS; the vector must be canonical by principal.
+pub fn record_reinit_vote_vector(
+    ledger: &mut QuorumLedger,
+    policy: &VerifiedPolicy,
+    rosters: &PrincipalRosters,
+    tbs: &IrcReInitDispositionVoteTbs,
+    votes: &[IrcFinalityVote],
+) -> Result<(), E2eeError> {
+    ensure_canonical(votes, |vote| {
+        (vote.signer_root_fingerprint, vote.signer_device_id)
+    })?;
+    for vote in votes {
+        ledger.record_reinit(policy, rosters, tbs, vote)?;
     }
     Ok(())
 }

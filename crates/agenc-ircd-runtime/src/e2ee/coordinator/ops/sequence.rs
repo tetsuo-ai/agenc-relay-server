@@ -2,17 +2,21 @@
 //! abort, ReInit attempts and terminals, and the retained-record fetches
 //! (companion Sections 12.1 to 12.4, 13.8).
 //!
-//! Interpretation recorded for the completion notes: the sequencer cannot
-//! evaluate the private finality quorum, so it wraps the first non-empty
-//! vote snapshot into the terminal certificate and later snapshots only grow
-//! the proof accumulator without a new record; a proof-only request returns
-//! `PENDING`. Endpoints, not the sequencer, decide finality.
+//! The sequencer certifies a finalization, abort, or ReInit terminal only
+//! after it has verified at least the old policy's quorum `q` of distinct
+//! council votes under the published policy (companion 12.4 and 13.8); a
+//! request below `q` is retained and answered `PENDING`. Endpoints still
+//! verify the quorum themselves before applying a state.
 
 use agenc_ircd_crypto::{SemanticHashDomain, SignatureDomain};
 use agenc_ircd_domain::e2ee::limits::MAX_BATCH_OBJECTS;
 use agenc_ircd_domain::e2ee::projection::{EmptyKind, EventKind, PendingKind, StoreKind};
-use agenc_ircd_domain::e2ee::sequencer_log::SequencerLog;
+use agenc_ircd_domain::e2ee::sequencer_log::{CandidateSlot, SequencerLog};
+use agenc_ircd_e2ee::E2eeError;
 use agenc_ircd_e2ee::envelope::verify_commit_object;
+use agenc_ircd_e2ee::finality::{
+    QuorumLedger, ReinitVoteSlot, Terminal, VoteSlot, reinit_vote_tbs, vote_tbs,
+};
 use agenc_ircd_e2ee::limits::{
     MAX_ABORT_OBJECT, MAX_COMMIT_ACK_OBJECT, MAX_COMMIT_APPROVAL_OBJECT, MAX_FINALIZATION_OBJECT,
     MAX_LIVE_OBJECT, MAX_REINIT_ACK_OBJECT, MAX_REINIT_OBJECT,
@@ -27,8 +31,10 @@ use agenc_ircd_e2ee::objects::reinit::{
 use agenc_ircd_e2ee::objects::sequencing::{
     IrcAbortRequest, IrcCandidateReceipt, IrcCandidateReceiptTbs, IrcCommitAbortCertificate,
     IrcCommitAbortTbs, IrcCommitAck, IrcCommitFinalizationCertificate, IrcCommitFinalizationTbs,
-    IrcFinalizationRequest, IrcSequencerRecord,
+    IrcFinalityVote, IrcFinalizationRequest, IrcSequencerRecord,
 };
+use agenc_ircd_e2ee::policy::VerifiedPolicy;
+use agenc_ircd_e2ee::route::PrincipalRosters;
 use agenc_ircd_e2ee::tls::{DecodeBudget, TlsDecode, TlsEncode};
 use agenc_ircd_e2ee::wire::reply::E2eeReplyCode;
 use agenc_ircd_storage::TableId;
@@ -37,7 +43,7 @@ use agenc_ircd_storage::e2ee_records::{
 };
 
 use super::super::request::{Outcome, ResponseObject, ResultBody, state_row};
-use super::super::{CompanionCoordinator, CompanionState};
+use super::super::{CompanionCoordinator, CompanionState, ConversationState};
 use super::route::audience;
 use super::{Exec, Fail, cursor};
 
@@ -92,6 +98,158 @@ fn ids(values: &[&[u8]]) -> Vec<u8> {
         .iter()
         .flat_map(|value| value.iter().copied())
         .collect()
+}
+
+fn conversation<'a>(
+    exec: &Exec<'a>,
+    conversation_id: &[u8; 32],
+) -> Result<&'a ConversationState, Fail> {
+    exec.coordinator
+        .state
+        .conversations
+        .get(conversation_id)
+        .ok_or_else(|| Fail::with(E2eeReplyCode::RouteInvalid, conversation_id))
+}
+
+/// The council of a terminal request: the retained policy `policy_id`,
+/// which must be the conversation's current policy, with the rosters of
+/// the binding's principals. An unretained policy is `E2EE_POLICY_REQUIRED`
+/// and a retained policy that is not current is `E2EE_EPOCH_STALE`.
+fn council(
+    exec: &Exec<'_>,
+    conversation_id: &[u8; 32],
+    policy_id: &[u8; 32],
+) -> Result<(VerifiedPolicy, PrincipalRosters), Fail> {
+    let state = conversation(exec, conversation_id)?;
+    let retained = state
+        .policies
+        .get(policy_id)
+        .ok_or_else(|| Fail::with(E2eeReplyCode::PolicyRequired, conversation_id))?;
+    if *policy_id != state.current_policy_id {
+        return Err(Fail::with(E2eeReplyCode::EpochStale, conversation_id));
+    }
+    let rosters = super::route::rosters_of(exec, &state.principal_accounts)?;
+    Ok((retained.policy.clone(), rosters))
+}
+
+/// The votes counted for one subject so far, continued across requests.
+struct Quorum {
+    reached: bool,
+    ledger: QuorumLedger,
+}
+
+/// Counts `votes` for `terminal` into the subject's ledger: a vote whose
+/// signer already stands for the other terminal of the slot is discarded
+/// as a sign-once violation, any other invalid vote fails the request, and
+/// the quorum is the policy's derived `q`.
+fn count_votes(
+    exec: &Exec<'_>,
+    conversation_id: &[u8; 32],
+    subject: &[u8; 32],
+    policy: &VerifiedPolicy,
+    votes: &[IrcFinalityVote],
+    terminal: Terminal,
+    mut record: impl FnMut(&mut QuorumLedger, &IrcFinalityVote) -> Result<(), E2eeError>,
+) -> Result<Quorum, Fail> {
+    agenc_ircd_e2ee::tls::ensure_canonical(votes, |vote| {
+        (vote.signer_root_fingerprint, vote.signer_device_id)
+    })
+    .map_err(|_| Fail::with(E2eeReplyCode::InvalidFragment, conversation_id))?;
+    let mut ledger = conversation(exec, conversation_id)?
+        .vote_ledgers
+        .get(subject)
+        .cloned()
+        .unwrap_or_default();
+    for vote in votes {
+        let signer = (vote.signer_root_fingerprint, vote.signer_device_id);
+        let conflicting = ledger
+            .votes()
+            .any(|(recorded, stood)| *recorded == signer && *stood != terminal);
+        if conflicting {
+            continue;
+        }
+        record(&mut ledger, vote)
+            .map_err(|_| Fail::with(E2eeReplyCode::BindingAuthInvalid, conversation_id))?;
+    }
+    Ok(Quorum {
+        reached: ledger.quorum_reached(policy, &terminal),
+        ledger,
+    })
+}
+
+/// The `PENDING` answer of a terminal request below quorum: the request is
+/// retained and the counted votes are kept for the subject.
+fn pending(
+    conversation_id: [u8; 32],
+    kind: PendingKind,
+    request_object_id: [u8; 32],
+    bytes: &[u8],
+    subject: [u8; 32],
+    ledger: QuorumLedger,
+) -> Result<Outcome, Fail> {
+    let mut outcome = Outcome::scalar(ResultBody::Pending(
+        conversation_id,
+        kind,
+        request_object_id,
+    ));
+    outcome
+        .writes
+        .push(CompanionCoordinator::object_write(bytes)?);
+    let retained = bytes.to_vec();
+    outcome.effects.push(Box::new(move |companion| {
+        retain(companion, retained);
+        if let Some(state) = companion.conversations.get_mut(&conversation_id) {
+            state.vote_ledgers.insert(subject, ledger);
+        }
+    }));
+    Ok(outcome)
+}
+
+fn vote_slot(exec: &Exec<'_>, conversation_id: [u8; 32], slot: &CandidateSlot) -> VoteSlot {
+    VoteSlot {
+        network_id: exec.coordinator.network_id,
+        conversation_id,
+        prior_epoch: slot.position.prior_epoch,
+        prior_state_id: slot.position.prior_state_id,
+        candidate_sequence: slot.position.candidate_sequence,
+        predecessor_record_id: slot.position.predecessor_record_id,
+    }
+}
+
+/// Counts a ReInit terminal request's votes under the old conversation's
+/// current policy over the attempt's sign-once slot (companion 13.8).
+fn reinit_quorum(
+    exec: &Exec<'_>,
+    log: &SequencerLog,
+    old_conversation_id: [u8; 32],
+    old_reinit_state_id: [u8; 32],
+    attempt_id: [u8; 32],
+    votes: &[IrcFinalityVote],
+    terminal: Terminal,
+) -> Result<Quorum, Fail> {
+    let attempt = log
+        .reinit_attempt()
+        .filter(|attempt| attempt.attempt_id == attempt_id)
+        .ok_or_else(|| Fail::with(E2eeReplyCode::FinalityRequired, &old_conversation_id))?;
+    let current_policy_id = conversation(exec, &old_conversation_id)?.current_policy_id;
+    let (policy, rosters) = council(exec, &old_conversation_id, &current_policy_id)?;
+    let slot = ReinitVoteSlot {
+        network_id: exec.coordinator.network_id,
+        old_conversation_id,
+        old_reinit_state_id,
+        attempt_sequence: attempt.attempt_sequence,
+        predecessor_record_id: attempt.predecessor_record_id,
+    };
+    let tbs = reinit_vote_tbs(&slot, attempt_id, terminal);
+    count_votes(
+        exec,
+        &old_conversation_id,
+        &attempt_id,
+        &policy,
+        votes,
+        terminal,
+        |ledger, vote| ledger.record_reinit(&policy, &rosters, &tbs, vote),
+    )
 }
 
 // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one handler verifies the Commit object, records the candidate, signs the receipt, and stages the rows and events as one atomic set
@@ -405,20 +563,46 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     }
     let finalization_id = CompanionCoordinator::id_of(SemanticHashDomain::FinalizationId, core)?;
     let request_object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
-    if request.votes.is_empty() {
-        let mut outcome = Outcome::scalar(ResultBody::Pending(
+    let authorization = &request.proof.authorization.tbs;
+    if authorization.old_policy_id != core.old_policy_id {
+        return Err(Fail::with(
+            E2eeReplyCode::BindingAuthInvalid,
+            &conversation_id,
+        ));
+    }
+    let (policy, rosters) = council(exec, &conversation_id, &core.old_policy_id)?;
+    let resulting_policy_id = authorization.resulting_policy_id;
+    if resulting_policy_id != core.old_policy_id
+        && !conversation(exec, &conversation_id)?
+            .policies
+            .contains_key(&resulting_policy_id)
+    {
+        return Err(Fail::with(E2eeReplyCode::PolicyRequired, &conversation_id));
+    }
+    let terminal = Terminal::finalize(finalization_id);
+    let tbs = vote_tbs(
+        &vote_slot(exec, conversation_id, slot),
+        core.candidate_id,
+        terminal,
+    );
+    let quorum = count_votes(
+        exec,
+        &conversation_id,
+        &core.candidate_id,
+        &policy,
+        request.votes.as_slice(),
+        terminal,
+        |ledger, vote| ledger.record(&policy, &rosters, &tbs, vote),
+    )?;
+    if !quorum.reached {
+        return pending(
             conversation_id,
             PendingKind::Finalization,
             request_object_id,
-        ));
-        outcome
-            .writes
-            .push(CompanionCoordinator::object_write(bytes)?);
-        let retained = bytes.to_vec();
-        outcome.effects.push(Box::new(move |companion| {
-            retain(companion, retained);
-        }));
-        return Ok(outcome);
+            bytes,
+            core.candidate_id,
+            quorum.ledger,
+        );
     }
     let position = log
         .terminal_position(&core.candidate_id)
@@ -460,6 +644,12 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     next_log
         .finalize(&core.candidate_id, finalization_id, resulting_epoch)
         .map_err(|_| Fail::with(E2eeReplyCode::EpochStale, &conversation_id))?;
+    let refresh = super::route::refresh_head(
+        exec,
+        conversation_id,
+        conversation(exec, &conversation_id)?,
+        &next_log,
+    )?;
     let mut outcome = Outcome::scalar(ResultBody::Finalized(
         conversation_id,
         resulting_epoch,
@@ -467,6 +657,7 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         record_id,
     ));
     outcome.security_mutation = true;
+    outcome.writes.extend(refresh.writes);
     outcome
         .writes
         .push(CompanionCoordinator::object_write(bytes)?);
@@ -500,14 +691,19 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     }
     let candidate_id = core.candidate_id;
     let retained = bytes.to_vec();
+    let (route_object, route_object_id) = (refresh.route_object, refresh.route_object_id);
     outcome.effects.push(Box::new(move |companion| {
         companion.logs.insert(conversation_id, next_log);
         retain(companion, retained);
         retain(companion, record);
+        retain(companion, route_object);
         if let Some(state) = companion.conversations.get_mut(&conversation_id) {
             state.records.insert(position.route_sequence, record_id);
             state.proofs.insert(finalization_id, request_object_id);
             state.acks.remove(&candidate_id);
+            state.vote_ledgers.remove(&candidate_id);
+            state.current_policy_id = resulting_policy_id;
+            state.route_object_id = route_object_id;
         }
         if activates_bootstrap
             && let Some(lifecycle) = companion.lifecycles.get_mut(&conversation_id)
@@ -539,20 +735,33 @@ pub fn submit_abort(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     }
     let abort_id = CompanionCoordinator::id_of(SemanticHashDomain::AbortId, core)?;
     let request_object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
-    if request.votes.is_empty() {
-        let mut outcome = Outcome::scalar(ResultBody::Pending(
+    let current_policy_id = conversation(exec, &conversation_id)?.current_policy_id;
+    let (policy, rosters) = council(exec, &conversation_id, &current_policy_id)?;
+    let terminal = Terminal::abort(abort_id, u16::from(core.reason.value()))
+        .map_err(|_| Fail::with(E2eeReplyCode::InvalidFragment, &conversation_id))?;
+    let tbs = vote_tbs(
+        &vote_slot(exec, conversation_id, slot),
+        core.candidate_id,
+        terminal,
+    );
+    let quorum = count_votes(
+        exec,
+        &conversation_id,
+        &core.candidate_id,
+        &policy,
+        request.votes.as_slice(),
+        terminal,
+        |ledger, vote| ledger.record(&policy, &rosters, &tbs, vote),
+    )?;
+    if !quorum.reached {
+        return pending(
             conversation_id,
             PendingKind::Abort,
             request_object_id,
-        ));
-        outcome
-            .writes
-            .push(CompanionCoordinator::object_write(bytes)?);
-        let retained = bytes.to_vec();
-        outcome.effects.push(Box::new(move |companion| {
-            retain(companion, retained);
-        }));
-        return Ok(outcome);
+            bytes,
+            core.candidate_id,
+            quorum.ledger,
+        );
     }
     let position = log
         .terminal_position(&core.candidate_id)
@@ -584,6 +793,12 @@ pub fn submit_abort(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     next_log
         .abort(&candidate_id, abort_id)
         .map_err(|_| Fail::with(E2eeReplyCode::EpochStale, &conversation_id))?;
+    let refresh = super::route::refresh_head(
+        exec,
+        conversation_id,
+        conversation(exec, &conversation_id)?,
+        &next_log,
+    )?;
     let mut outcome = Outcome::scalar(ResultBody::Aborted(
         conversation_id,
         candidate_id,
@@ -591,6 +806,7 @@ pub fn submit_abort(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         record_id,
     ));
     outcome.security_mutation = true;
+    outcome.writes.extend(refresh.writes);
     outcome
         .writes
         .push(CompanionCoordinator::object_write(bytes)?);
@@ -620,14 +836,18 @@ pub fn submit_abort(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         ));
     }
     let retained = bytes.to_vec();
+    let (route_object, route_object_id) = (refresh.route_object, refresh.route_object_id);
     outcome.effects.push(Box::new(move |companion| {
         companion.logs.insert(conversation_id, next_log);
         retain(companion, retained);
         retain(companion, record);
+        retain(companion, route_object);
         if let Some(state) = companion.conversations.get_mut(&conversation_id) {
             state.records.insert(position.route_sequence, record_id);
             state.proofs.insert(abort_id, request_object_id);
             state.acks.remove(&candidate_id);
+            state.vote_ledgers.remove(&candidate_id);
+            state.route_object_id = route_object_id;
         }
     }));
     Ok(outcome)
@@ -825,7 +1045,7 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
         .coordinator
         .signer()
         .ok_or_else(|| Fail::from(E2eeReplyCode::Syncing))?;
-    let (attempt_id, votes_empty, terminal_id, new_conversation, record) = if activate {
+    let (attempt_id, quorum, terminal_id, new_conversation, record) = if activate {
         let request: IrcReInitActivationRequest = decode(object.body(), MAX_REINIT_OBJECT)?;
         let core = request.core.clone();
         let core = &core;
@@ -839,7 +1059,15 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
             CompanionCoordinator::id_of(SemanticHashDomain::ReinitActivationId, core)?;
         let attempt_id = core.reinit_attempt_id;
         let new_conversation = core.new_conversation_id;
-        let empty = request.votes.is_empty();
+        let quorum = reinit_quorum(
+            exec,
+            log,
+            old_conversation_id,
+            core.old_reinit_state_id,
+            attempt_id,
+            request.votes.as_slice(),
+            Terminal::finalize(terminal_id),
+        )?;
         let position = log
             .attempt_terminal_position(&attempt_id)
             .map_err(|_| Fail::with(E2eeReplyCode::FinalityRequired, &old_conversation_id))?;
@@ -861,7 +1089,7 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
         };
         (
             attempt_id,
-            empty,
+            quorum,
             terminal_id,
             Some(new_conversation),
             IrcSequencerRecord::ReinitActivation(certificate),
@@ -878,7 +1106,17 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
         }
         let terminal_id = CompanionCoordinator::id_of(SemanticHashDomain::ReinitAbortId, core)?;
         let attempt_id = core.reinit_attempt_id;
-        let empty = request.votes.is_empty();
+        let terminal = Terminal::abort(terminal_id, core.reason_code)
+            .map_err(|_| Fail::with(E2eeReplyCode::InvalidFragment, &old_conversation_id))?;
+        let quorum = reinit_quorum(
+            exec,
+            log,
+            old_conversation_id,
+            core.old_reinit_state_id,
+            attempt_id,
+            request.votes.as_slice(),
+            terminal,
+        )?;
         let position = log
             .attempt_terminal_position(&attempt_id)
             .map_err(|_| Fail::with(E2eeReplyCode::FinalityRequired, &old_conversation_id))?;
@@ -900,31 +1138,26 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
         };
         (
             attempt_id,
-            empty,
+            quorum,
             terminal_id,
             None,
             IrcSequencerRecord::ReinitAbort(certificate),
         )
     };
-    if votes_empty {
+    if !quorum.reached {
         let kind = if activate {
             PendingKind::ReinitActivate
         } else {
             PendingKind::ReinitAbort
         };
-        let mut outcome = Outcome::scalar(ResultBody::Pending(
+        return pending(
             old_conversation_id,
             kind,
             request_object_id,
-        ));
-        outcome
-            .writes
-            .push(CompanionCoordinator::object_write(bytes)?);
-        let retained = bytes.to_vec();
-        outcome.effects.push(Box::new(move |companion| {
-            retain(companion, retained);
-        }));
-        return Ok(outcome);
+            bytes,
+            attempt_id,
+            quorum.ledger,
+        );
     }
     let position = log
         .attempt_terminal_position(&attempt_id)
@@ -959,7 +1192,14 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
             )
         }
     };
+    let refresh = super::route::refresh_head(
+        exec,
+        old_conversation_id,
+        conversation(exec, &old_conversation_id)?,
+        &next_log,
+    )?;
     let mut outcome = Outcome::scalar(result);
+    outcome.writes.extend(refresh.writes);
     outcome.security_mutation = true;
     outcome
         .writes
@@ -990,6 +1230,7 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
         ));
     }
     let retained = bytes.to_vec();
+    let (route_object, route_object_id) = (refresh.route_object, refresh.route_object_id);
     outcome.effects.push(Box::new(move |companion| {
         if let Some(new_conversation_id) = new_conversation {
             let successor = SequencerLog::from_activation(new_conversation_id, terminal_id);
@@ -1002,9 +1243,12 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
         companion.logs.insert(old_conversation_id, next_log);
         retain(companion, retained);
         retain(companion, record);
+        retain(companion, route_object);
         if let Some(state) = companion.conversations.get_mut(&old_conversation_id) {
             state.records.insert(position.route_sequence, record_id);
             state.proofs.insert(terminal_id, request_object_id);
+            state.vote_ledgers.remove(&attempt_id);
+            state.route_object_id = route_object_id;
         }
     }));
     Ok(outcome)

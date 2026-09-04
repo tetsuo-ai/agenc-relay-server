@@ -62,7 +62,12 @@ dependencies = [
  "agenc-ircd-types",
  "argon2",
  "base64",
+ "mls-rs",
+ "mls-rs-crypto-rustcrypto",
  "opaque-ke",
+ "openmls",
+ "openmls_basic_credential",
+ "openmls_rust_crypto",
  "rustls",
  "sha2 0.10.9",
 ]

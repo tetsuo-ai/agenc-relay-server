@@ -19,6 +19,7 @@
 //! | `record/v1/` | 4 | conversation ID, route sequence | [`SequencerRow::Record`] |
 //! | `candidate/v1/` | 4 | conversation ID, prior epoch | [`SequencerRow::Candidate`] |
 //! | `approval/v1/`, `ack/v1/`, `vote/v1/` | 4 | conversation ID, subject ID, root fingerprint, device ID | [`SequencerRow::Proof`] |
+//! | `policy/v1/` | 4 | conversation ID, policy ID | [`SequencerRow::Policy`] |
 //! | `identity/v1/`, `roster/v1/` | 5 | account digest | [`DirectoryRow`] |
 //! | `capability/v1/` | 5 | account digest, device ID | [`DirectoryRow::Capability`] |
 //! | `binding-lock/v1/` | 5 | account digest, root fingerprint, sequence | [`DirectoryRow::BindingLock`] |
@@ -34,6 +35,7 @@
 //! | `estate/v1/` | 10 | target server | [`DeliveryRow::Snapshot`] |
 //! | `keyset/v1` | 11 | none | [`KeySetRow`] |
 //! | `cross-profile/head/v1/`, `cross-profile/part/v1/` | 12 | Section 20.8 layouts | [`barrier`] |
+//! | `witness/v1/` | 13 | conversation ID | [`WitnessRow`] |
 
 use agenc_ircd_e2ee::limits::{MAX_FEDERATION_CONTROL_OBJECT, MAX_FINALITY_PRINCIPALS};
 use agenc_ircd_e2ee::object::{IrcWireObject, IrcWireObjectKind};
@@ -71,6 +73,8 @@ pub const DELIVERY_ROW_KIND: u16 = 10;
 pub const KEYSET_ROW_KIND: u16 = 11;
 /// Cross-profile barrier rows.
 pub const BARRIER_ROW_KIND: u16 = 12;
+/// Edge witness violations of the sequencer record chain (companion 12.5).
+pub const WITNESS_ROW_KIND: u16 = 13;
 
 /// Version prefix shared by every companion body codec.
 const BODY_VERSION: u16 = 1;
@@ -103,6 +107,8 @@ pub mod prefix {
     pub const ACK: &[u8] = b"ack/v1/";
     /// Finality vote accumulator rows.
     pub const VOTE: &[u8] = b"vote/v1/";
+    /// Published policies retained for the sequencer's quorum check.
+    pub const POLICY: &[u8] = b"policy/v1/";
     /// Identity head rows.
     pub const IDENTITY: &[u8] = b"identity/v1/";
     /// Roster head rows.
@@ -125,6 +131,8 @@ pub mod prefix {
     pub const ACK_MAILBOX: &[u8] = b"ack-mailbox/v1/";
     /// Companion replay rows.
     pub const REPLAY: &[u8] = b"replay/v1/irc-mls-v1/";
+    /// The last record-chain violation an edge witnessed per conversation.
+    pub const WITNESS: &[u8] = b"witness/v1/";
     /// Delivery cursor rows.
     pub const DELIVERY: &[u8] = b"delivery/v1/";
     /// Outbox rows.
@@ -140,7 +148,7 @@ pub mod prefix {
 }
 
 /// Every `(prefix, record kind)` pair, used by the key classifier.
-const PREFIX_KINDS: [(&[u8], u16); 26] = [
+const PREFIX_KINDS: [(&[u8], u16); 28] = [
     (prefix::RECOVERY, RECOVERY_GATE_KIND),
     (prefix::ROUTE, ROUTE_ROW_KIND),
     (prefix::LOCK, CLAIM_ROW_KIND),
@@ -150,6 +158,7 @@ const PREFIX_KINDS: [(&[u8], u16); 26] = [
     (prefix::APPROVAL, SEQUENCER_ROW_KIND),
     (prefix::ACK, SEQUENCER_ROW_KIND),
     (prefix::VOTE, SEQUENCER_ROW_KIND),
+    (prefix::POLICY, SEQUENCER_ROW_KIND),
     (prefix::IDENTITY, DIRECTORY_ROW_KIND),
     (prefix::ROSTER, DIRECTORY_ROW_KIND),
     (prefix::CAPABILITY, DIRECTORY_ROW_KIND),
@@ -167,6 +176,7 @@ const PREFIX_KINDS: [(&[u8], u16); 26] = [
     (prefix::KEYSET, KEYSET_ROW_KIND),
     (prefix::BARRIER_HEAD, BARRIER_ROW_KIND),
     (prefix::BARRIER_PART, BARRIER_ROW_KIND),
+    (prefix::WITNESS, WITNESS_ROW_KIND),
 ];
 
 /// The record kind a table-23 key must carry, from its prefix. `ack/v1/`
@@ -791,11 +801,21 @@ pub enum SequencerRow {
         /// The finality vote slot, zero for approvals and ACKs.
         slot: u16,
     },
+    /// One published policy of the conversation's chain (companion 9.3).
+    Policy {
+        /// The retained `policy` object identifier.
+        object_id: [u8; HASH_BYTES],
+        /// Policy generation.
+        generation: u64,
+        /// The predecessor policy identifier, all zero at generation zero.
+        previous_policy_id: [u8; HASH_BYTES],
+    },
 }
 
 const RECORD_ARM: u16 = 1;
 const CANDIDATE_ARM: u16 = 2;
 const PROOF_ARM: u16 = 3;
+const POLICY_ARM: u16 = 4;
 
 impl SequencerRow {
     /// The `record/v1/<conversation-id><route-sequence>` key.
@@ -875,6 +895,28 @@ impl SequencerRow {
         ])
     }
 
+    /// The `policy/v1/<conversation-id><policy-id>` key.
+    pub fn policy_key(
+        conversation_id: &[u8; HASH_BYTES],
+        policy_id: &[u8; HASH_BYTES],
+    ) -> Result<StoredKey, StorageError> {
+        key_of(&[prefix::POLICY, conversation_id, policy_id])
+    }
+
+    /// Splits a policy key into the conversation and policy identifiers.
+    pub fn parse_policy_key(
+        key: &StoredKey,
+    ) -> Result<([u8; HASH_BYTES], [u8; HASH_BYTES]), StorageError> {
+        let rest = suffix(key, prefix::POLICY, HASH_BYTES * 2)?;
+        Ok((slice_array(rest, 0)?, slice_array(rest, HASH_BYTES)?))
+    }
+
+    /// Every retained policy of one conversation.
+    pub fn policy_range(conversation_id: &[u8; HASH_BYTES]) -> Result<ReadPlan, StorageError> {
+        let start = key_of(&[prefix::POLICY, conversation_id])?;
+        prefix_range(start.as_bytes(), PAGE_LIMIT)
+    }
+
     /// Every proof of `role` for one subject, in canonical signer order.
     pub fn proof_range(
         role: ProofRole,
@@ -947,6 +989,16 @@ impl SequencerRow {
                 encoder.put_fixed(object_id)?;
                 encoder.put_u16(*slot)?;
             }
+            Self::Policy {
+                object_id,
+                generation,
+                previous_policy_id,
+            } => {
+                encoder.put_u16(POLICY_ARM)?;
+                encoder.put_fixed(object_id)?;
+                encoder.put_u64(*generation)?;
+                encoder.put_fixed(previous_policy_id)?;
+            }
         }
         wrap(SEQUENCER_ROW_KIND, encoder.finish())
     }
@@ -978,6 +1030,11 @@ impl SequencerRow {
                 object_id: decoder.array()?,
                 slot: decoder.u16()?,
             },
+            POLICY_ARM => Self::Policy {
+                object_id: decoder.array()?,
+                generation: decoder.u64()?,
+                previous_policy_id: decoder.array()?,
+            },
             _ => return Err(StorageError::InvalidEncoding),
         };
         decoder.finish()?;
@@ -991,6 +1048,11 @@ impl SequencerRow {
                 state, terminal_id, ..
             } => (*state == CandidateState::Active) == terminal_id.is_none(),
             Self::Proof { role, slot, .. } => *role == ProofRole::Vote || *slot == 0,
+            Self::Policy {
+                generation,
+                previous_policy_id,
+                ..
+            } => (*generation == 0) == (*previous_policy_id == [0; HASH_BYTES]),
             Self::Record { .. } => true,
         };
         if consistent {
@@ -1008,6 +1070,7 @@ impl SequencerRow {
             Self::Record { .. } => bytes.starts_with(prefix::RECORD),
             Self::Candidate { .. } => bytes.starts_with(prefix::CANDIDATE),
             Self::Proof { role, .. } => bytes.starts_with(role.prefix()),
+            Self::Policy { .. } => bytes.starts_with(prefix::POLICY),
         }
     }
 }
@@ -2448,6 +2511,70 @@ impl KeySetRow {
 }
 
 // ---------------------------------------------------------------------------
+// Kind 13: edge witness violations.
+
+/// The last sequencer record-chain violation an edge witnessed on one
+/// conversation (companion 12.5): the head it expected and the event it
+/// refused. The row names identifiers only, never content, and is the
+/// durable evidence behind the closed link.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WitnessRow {
+    /// The federation event kind that failed to extend the chain.
+    pub event_kind: u8,
+    /// The route sequence the edge expected next.
+    pub expected_sequence: u64,
+    /// The head identifier the edge held.
+    pub expected_head_id: [u8; HASH_BYTES],
+    /// The route sequence the event carried.
+    pub observed_sequence: u64,
+    /// The candidate, attempt, terminal, or close identifier the event named.
+    pub observed_id: [u8; HASH_BYTES],
+    /// The predecessor a candidate receipt named, when the event carried one.
+    pub observed_predecessor_id: Option<[u8; HASH_BYTES]>,
+}
+
+impl WitnessRow {
+    /// The `witness/v1/<conversation-id>` key.
+    pub fn key(conversation_id: &[u8; HASH_BYTES]) -> Result<StoredKey, StorageError> {
+        key_of(&[prefix::WITNESS, conversation_id])
+    }
+
+    /// Splits a witness key.
+    pub fn parse_key(key: &StoredKey) -> Result<[u8; HASH_BYTES], StorageError> {
+        slice_array(suffix(key, prefix::WITNESS, HASH_BYTES)?, 0)
+    }
+
+    /// Encodes the wrapped body.
+    pub fn encode(&self) -> Result<Vec<u8>, StorageError> {
+        let mut encoder = encoder()?;
+        encoder.put_u16(u16::from(self.event_kind))?;
+        encoder.put_u64(self.expected_sequence)?;
+        encoder.put_fixed(&self.expected_head_id)?;
+        encoder.put_u64(self.observed_sequence)?;
+        encoder.put_fixed(&self.observed_id)?;
+        put_optional_hash(&mut encoder, self.observed_predecessor_id.as_ref())?;
+        wrap(WITNESS_ROW_KIND, encoder.finish())
+    }
+
+    /// Decodes one wrapped body.
+    pub fn decode(body: &[u8]) -> Result<Self, StorageError> {
+        let inner = unwrap(WITNESS_ROW_KIND, body)?;
+        let mut decoder = decoder(&inner)?;
+        let event_kind = u8::try_from(decoder.u16()?).map_err(|_| StorageError::InvalidEncoding)?;
+        let row = Self {
+            event_kind,
+            expected_sequence: decoder.u64()?,
+            expected_head_id: decoder.array()?,
+            observed_sequence: decoder.u64()?,
+            observed_id: decoder.array()?,
+            observed_predecessor_id: take_optional_hash(&mut decoder)?,
+        };
+        decoder.finish()?;
+        Ok(row)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Validation entry point used by `records.rs`.
 
 /// Decodes any table-23 body of `record_kind` and discards it, so that the
@@ -2465,6 +2592,7 @@ pub fn validate_state_body(record_kind: u16, body: &[u8]) -> Result<(), StorageE
         DELIVERY_ROW_KIND => DeliveryRow::decode(body).map(|_| ()),
         KEYSET_ROW_KIND => KeySetRow::decode(body).map(|_| ()),
         BARRIER_ROW_KIND => barrier::validate_body(body),
+        WITNESS_ROW_KIND => WitnessRow::decode(body).map(|_| ()),
         _ => Err(StorageError::InvalidEncoding),
     }
 }
@@ -2493,7 +2621,7 @@ pub mod fixtures {
         ObjectRow::new(bytes)?.encode()
     }
 
-    /// A valid table-23 body of `kind` (2 to 12).
+    /// A valid table-23 body of `kind` (2 to 13).
     pub fn state_body(kind: u16, seed: u8) -> Result<Vec<u8>, StorageError> {
         if kind <= DIRECTORY_ROW_KIND {
             structural_body(kind, seed)
@@ -2541,6 +2669,19 @@ pub mod fixtures {
             .encode(),
             _ => Err(StorageError::InvalidEncoding),
         }
+    }
+
+    /// A witness row that refused a skipped position.
+    fn witness_body(seed: u8) -> Result<Vec<u8>, StorageError> {
+        WitnessRow {
+            event_kind: 3,
+            expected_sequence: u64::from(seed),
+            expected_head_id: [seed; HASH_BYTES],
+            observed_sequence: u64::from(seed).saturating_add(2),
+            observed_id: [seed; HASH_BYTES],
+            observed_predecessor_id: None,
+        }
+        .encode()
     }
 
     /// Package, attach, mailbox, replay, delivery, key set, and barrier bodies.
@@ -2604,6 +2745,7 @@ pub mod fixtures {
                 part_count: 2,
             }))
             .encode(),
+            WITNESS_ROW_KIND => witness_body(seed),
             _ => Err(StorageError::InvalidEncoding),
         }
     }

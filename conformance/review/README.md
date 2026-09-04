@@ -12,7 +12,7 @@ task closes.
 
 Exact profile: `docs/irc-mls-e2ee-extension.md` at the document hash
 recorded in `conformance/spec-baseline.toml`, negotiated as profile version
-1 with token `lk0p96oG1QiE3t2W0fUBHPAVUls5iUpFNX-6k9Xou3M`, suites 0x0001 and
+1 with token `cW7PBVTerkvboEAll8DopBlGohRZqrAYZGxjhwIpfbo`, suites 0x0001 and
 0x0003, context extension 0xF1C1, roster update proposal 0xF1C2, and join
 authorization bundle extension 0xF1C3.
 
@@ -30,9 +30,11 @@ Implementation surfaces, in dependency order:
 - `crates/agenc-ircd-storage/src/e2ee_records.rs`: the durable rows of
   tables 22 and 23.
 - `crates/agenc-ircd-runtime/src/e2ee`: the coordinator executor and its
-  forty handlers, peer synchronization, delivery streams, the edge router,
-  and the startup reload; `crates/agenc-ircd-runtime/src/federation` for
-  the cross-profile barrier on both roles.
+  forty-one handlers (policy publication and the finality quorum guard
+  among them), peer synchronization, delivery streams, the edge router with
+  its record-chain witness, and the startup reload;
+  `crates/agenc-ircd-runtime/src/federation` for the cross-profile barrier
+  on both roles.
 
 Composition: the daemon is the untrusted MLS Delivery Service of the
 companion document. It holds no MLS client, epoch secret, plaintext, root
@@ -43,11 +45,23 @@ private key, or device key; `scripts/check-workspace.py` and
 
 - A malicious or compromised coordinator: it can withhold or reorder
   candidates and events but cannot forge a receipt without the sequencer
-  key, cannot produce a finalization without the endpoints' votes, and
-  cannot decrypt content.
+  key and cannot decrypt content. An honest coordinator certifies a
+  finalization, abort, or ReInit terminal only after it has verified the
+  published policy's quorum of council votes (companion 12.4), so a
+  certificate is public evidence of the quorum; a coordinator that signs
+  below quorum, or forks its record chain, is caught by the endpoints'
+  own quorum check and by the record-chain witness at every edge
+  (companion 12.5), which refuses the event, records it durably, and
+  closes the link.
 - A malicious edge: it can only replay declared origins under the base
   origin the coordinator verified; requests are bound to the origin's
-  operation sequence and replay table.
+  operation sequence and replay table. An edge cannot hide a fork from its
+  clients without also failing its own witness.
+- The published policy: the server learns the controller roots and the
+  finality council of every conversation it retains (companion Sections 4
+  and 9.3); the reviewer should confirm that nothing beyond that is
+  disclosed and that the retained copy cannot substitute for the
+  Commit-bound copy the endpoints enforce.
 - A malicious client: every object it submits is validated against the
   published roots, rosters, capabilities, and policies before any
   signature, hash, or storage work beyond the admission limits.
@@ -60,7 +74,8 @@ private key, or device key; `scripts/check-workspace.py` and
   Section 21 gate except this one to named tests.
 - Model: `conformance/stage-eight-model.toml` records the bounded
   exploration of the route, sequencer, and lifecycle state machines.
-- Interoperability: `conformance/e2ee-interop-matrix.toml`.
+- Interoperability: `conformance/e2ee-interop-matrix.toml`, including the
+  lifecycle openmls and mls-rs drive through the daemon (gate 3).
 - Wire budgets: `conformance/e2ee-wire-budget.toml`.
 - Gate: `bash scripts/check-stage-eight.sh` and the exact-SHA checkpoint
   under `conformance/evidence/`.

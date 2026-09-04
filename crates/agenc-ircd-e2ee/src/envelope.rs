@@ -3,8 +3,10 @@
 //!
 //! The daemon reads the outer `PrivateMessage` and its authenticated data,
 //! compares them with the route it is about to fan out on, and enforces the
-//! outer object limit. Endpoint-only: padding contents, message IDs, sender
-//! sequences, and every decrypted field.
+//! outer object limit. Endpoint-only: the application-content padding of
+//! Section 7.5 (applied by [`crate::objects::content::IrcEncryptedContent`]
+//! before encryption), message IDs, sender sequences, and every decrypted
+//! field.
 
 use crate::error::E2eeError;
 use crate::ids::SemanticId;
@@ -14,9 +16,9 @@ use crate::object::{IrcWireObject, IrcWireObjectKind};
 use crate::objects::aad::{IrcApplicationAad, IrcCommitAad};
 use crate::tls::{DecodeBudget, TlsDecode};
 
-/// The padding bucket for a content length `L` (Section 7.5): the least
-/// multiple of 256 at or above `L` when `L <= 4096`, otherwise the least
-/// multiple of 1024.
+/// The padding bucket for an unpadded application content length `L`
+/// (Section 7.5): the least multiple of 256 at or above `L` when
+/// `L <= 4096`, otherwise the least multiple of 1024.
 pub fn padding_target(content_length: usize) -> Result<usize, E2eeError> {
     let bucket = if content_length <= 4_096 { 256 } else { 1_024 };
     let rounded = content_length
@@ -25,15 +27,17 @@ pub fn padding_target(content_length: usize) -> Result<usize, E2eeError> {
     Ok(rounded / bucket * bucket)
 }
 
-/// The exact number of zero padding bytes a sender appends.
+/// The exact number of zero padding octets a sender places in
+/// `zero_padding`.
 pub fn padding_bytes(content_length: usize) -> Result<usize, E2eeError> {
     padding_target(content_length)?
         .checked_sub(content_length)
         .ok_or(E2eeError::Overflow)
 }
 
-/// Checks a receiver's view: the remaining length after the content must
-/// be exactly the padding, and every padding octet zero.
+/// Checks a receiver's view: the padding vector of a content whose
+/// unpadded length is `content_length` must be exactly the bucket
+/// difference, and every padding octet zero.
 pub fn check_padding(content_length: usize, padding: &[u8]) -> Result<(), E2eeError> {
     if padding.len() != padding_bytes(content_length)? || padding.iter().any(|byte| *byte != 0) {
         return Err(E2eeError::InvalidValue);

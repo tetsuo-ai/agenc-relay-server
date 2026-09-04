@@ -128,6 +128,8 @@ pub enum SuccessLine {
     Closed([u8; 32], [u8; 32]),
     /// `EGROUP STORED AUTHORIZATION <conversation-id> <candidate-id> <approval-object-id>`.
     StoredAuthorization([u8; 32], [u8; 32], [u8; 32]),
+    /// `EGROUP STORED POLICY <conversation-id> <policy-id> <policy-object-id>`.
+    StoredPolicy([u8; 32], [u8; 32], [u8; 32]),
     /// `EGROUP ACKED <conversation-id> <candidate-id> <ack-object-id>`.
     Acked([u8; 32], [u8; 32], [u8; 32]),
     /// `EGROUP PENDING <conversation-id> <kind> <object-id>`.
@@ -178,6 +180,9 @@ impl SuccessLine {
                     hash(b),
                     hash(c)
                 )
+            }
+            Self::StoredPolicy(a, b, c) => {
+                format!("EGROUP STORED POLICY {} {} {}", hash(a), hash(b), hash(c))
             }
             Self::Acked(a, b, c) | Self::ReinitStaged(a, b, c) | Self::ReinitAcked(a, b, c) => {
                 format!("EGROUP {} {} {} {}", self.verb(), hash(a), hash(b), hash(c))

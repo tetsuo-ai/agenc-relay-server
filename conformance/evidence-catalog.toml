@@ -1120,6 +1120,31 @@ claim_ids = ["S08-039"]
 kind = "external-review"
 
 [[evidence]]
+id = "EVID-S08-040-POLICY-PUBLICATION"
+claim_ids = ["S08-040"]
+kind = "policy-publication"
+
+[[evidence]]
+id = "EVID-S08-041-QUORUM-GUARD"
+claim_ids = ["S08-041"]
+kind = "sequencer-quorum-guard"
+
+[[evidence]]
+id = "EVID-S08-042-CHAIN-WITNESS"
+claim_ids = ["S08-042"]
+kind = "edge-chain-witness"
+
+[[evidence]]
+id = "EVID-S08-043-CONTENT-PADDING"
+claim_ids = ["S08-043"]
+kind = "application-content-padding"
+
+[[evidence]]
+id = "EVID-S08-044-REAL-CLIENTS"
+claim_ids = ["S08-044"]
+kind = "real-client-lifecycle"
+
+[[evidence]]
 id = "EVID-S08-900-STAGE-GATE"
 claim_ids = ["S08-900"]
 kind = "stage-gate"
@@ -1555,11 +1580,6 @@ claim_ids = ["E2EE-REQ-54D3BF177A5D79854AEC"]
 kind = "normative-requirement"
 
 [[evidence]]
-id = "EVID-E2EE-REQ-58217F311021E979779A"
-claim_ids = ["E2EE-REQ-58217F311021E979779A"]
-kind = "normative-requirement"
-
-[[evidence]]
 id = "EVID-E2EE-REQ-5B3475BE0506C311BEF2"
 claim_ids = ["E2EE-REQ-5B3475BE0506C311BEF2"]
 kind = "normative-requirement"
@@ -1812,4 +1832,14 @@ kind = "normative-requirement"
 [[evidence]]
 id = "EVID-E2EE-REQ-FDA89A1D5714375C1B4F"
 claim_ids = ["E2EE-REQ-FDA89A1D5714375C1B4F"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-A119B1A71D9F208380BC"
+claim_ids = ["E2EE-REQ-A119B1A71D9F208380BC"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-E2EE-REQ-D8D8C1DBDAE5F09E95FD"
+claim_ids = ["E2EE-REQ-D8D8C1DBDAE5F09E95FD"]
 kind = "normative-requirement"

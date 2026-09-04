@@ -13,16 +13,16 @@ from typing import NoReturn
 
 RAW_HASHES = {
     "docs/ircd-architecture-and-implementation-spec.md": (
-        "5dddee2e4e7e5b795994844e0eb39c9d98f824b1e18f6d9f984724460e639e1a"
+        "10ecab286b19ca383a9a9c0e4efb592a585bb4c39244ecef9204b625635c3454"
     ),
     "docs/irc-mls-e2ee-extension.md": (
-        "c925723cd14d9b989ed553a65b8344d48496a339a92bd63e575487a5ef88dc53"
+        "770068a21240e480abd1edce0ba2501491485fed92be5f76be00cc14236034b6"
     ),
     "docs/federation-v1-profile.registry": (
         "30d4a9e9947691e2ca26e137e2762413a9b6a4fd308308bd5bfbd8cad20ac2e9"
     ),
     "docs/protocol-sources-and-decisions.md": (
-        "82e0be36bd660968e61d8ab1143ff016116dcec394b455a2510a50ad31a29fda"
+        "8de1c200aee7192405accd5b6f8100a90c27b02eea4503c20d9991a071a59e49"
     ),
 }
 PROFILE_HASHES = {
@@ -30,7 +30,7 @@ PROFILE_HASHES = {
         "83702207e1e1153c8722d5cc668a7d1bab85ba518fcdde030a36811b41bdcc40"
     ),
     "e2ee-mls-v1": (
-        "964d29f7aa06d50884dedd96d1f5011cf015525b39894a45357fba93d5e8bb73"
+        "716ecf0554deae4bdba0402597c0e8a41946a21459aab018646c638702297dba"
     ),
 }
 PROFILE_LABELS = {

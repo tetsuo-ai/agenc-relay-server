@@ -381,26 +381,124 @@ pub fn reserve(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     Ok(outcome)
 }
 
-fn principals(
-    exec: &Exec<'_>,
+/// The principal accounts a binding package names.
+pub(super) fn principal_accounts(
     package: &IrcConversationBindingPackage,
-) -> Result<PrincipalRosters, Fail> {
+) -> Result<Vec<[u8; 24]>, Fail> {
+    package
+        .binding
+        .tbs
+        .principals
+        .as_slice()
+        .iter()
+        .map(|principal| {
+            principal
+                .account_id
+                .as_slice()
+                .try_into()
+                .map_err(|_| Fail::from(E2eeReplyCode::BindingAuthInvalid))
+        })
+        .collect()
+}
+
+/// The current root and roster heads of `accounts`, keyed by Account ID,
+/// as policy and vote verification expect them.
+pub(super) fn rosters_of(exec: &Exec<'_>, accounts: &[[u8; 24]]) -> Result<PrincipalRosters, Fail> {
     let mut rosters = PrincipalRosters::new();
-    for principal in package.binding.tbs.principals.as_slice() {
-        let account: [u8; 24] = principal
-            .account_id
-            .as_slice()
-            .try_into()
-            .map_err(|_| Fail::from(E2eeReplyCode::BindingAuthInvalid))?;
+    for account in accounts {
         let (root, roster) = exec
             .coordinator
             .state
             .principals
-            .get(&digest(exec, &account)?)
-            .ok_or_else(|| Fail::with(E2eeReplyCode::BindingAuthInvalid, &account))?;
-        rosters.insert(account, (*root, roster.clone()));
+            .get(&digest(exec, account)?)
+            .ok_or_else(|| Fail::with(E2eeReplyCode::BindingAuthInvalid, account))?;
+        rosters.insert(*account, (*root, roster.clone()));
     }
     Ok(rosters)
+}
+
+fn principals(
+    exec: &Exec<'_>,
+    package: &IrcConversationBindingPackage,
+) -> Result<PrincipalRosters, Fail> {
+    rosters_of(exec, &principal_accounts(package)?)
+}
+
+/// The durable route row and retained route-state object that record the
+/// head `log` now has. Every terminal that moves the head stages one, so a
+/// route-state cut and a reload carry the coordinator's current head
+/// (companion 12.5) instead of the head at binding time.
+pub(super) struct HeadRefresh {
+    pub(super) route_object: Vec<u8>,
+    pub(super) route_object_id: [u8; 32],
+    pub(super) writes: Vec<crate::state_core::durable::AccountServiceDurableWrite>,
+}
+
+pub(super) fn refresh_head(
+    exec: &Exec<'_>,
+    conversation_id: [u8; 32],
+    state: &ConversationState,
+    log: &SequencerLog,
+) -> Result<HeadRefresh, Fail> {
+    use agenc_ircd_domain::e2ee::{RecoveryState, RouteLifecycle, RouteTarget};
+    let entry = exec
+        .coordinator
+        .state
+        .routes
+        .route(&ConversationId(conversation_id))
+        .ok_or_else(|| Fail::with(E2eeReplyCode::RouteInvalid, &conversation_id))?;
+    let (kind, instance) = match entry.target {
+        RouteTarget::Channel(channel) => (IrcConversationKind::Channel, Some(*channel.as_bytes())),
+        RouteTarget::Direct(_) => (IrcConversationKind::Direct, None),
+    };
+    let (lifecycle, route_kind, close_id) = match entry.lifecycle {
+        RouteLifecycle::Active => (RowLifecycle::Active, IrcRouteStateKind::ActiveRoute, None),
+        RouteLifecycle::Closing => (RowLifecycle::Closing, IrcRouteStateKind::ActiveRoute, None),
+        RouteLifecycle::Tombstone { close_id } => (
+            RowLifecycle::Tombstone,
+            IrcRouteStateKind::EncryptedTombstone,
+            Some(close_id),
+        ),
+    };
+    let route_object = route_state_object(
+        exec,
+        state,
+        log,
+        kind,
+        instance,
+        route_kind,
+        exec.state_generation,
+    )?;
+    let route_object_id = *agenc_ircd_e2ee::ObjectId::compute(&route_object).as_bytes();
+    let row = RouteRow {
+        route_state: route_object.clone(),
+        lifecycle,
+        binding_id: state.binding,
+        lock_id: state.lock_id,
+        accepted_state_id: *log.accepted_state_id(),
+        sequencer_head_id: log.head().record_id,
+        route_sequence: log.head().sequence,
+        close_id,
+        predecessor_close_id: state.predecessor_close_id,
+        recovery_gate: entry.recovery == RecoveryState::Pending,
+        stored_bytes: state.stored_bytes,
+    };
+    let writes = vec![
+        CompanionCoordinator::object_write(&route_object)?,
+        state_row(
+            TableId::E2eeState,
+            ROUTE_ROW_KIND,
+            RouteRow::key(&conversation_id)
+                .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
+            row.encode()
+                .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
+        )?,
+    ];
+    Ok(HeadRefresh {
+        route_object,
+        route_object_id,
+        writes,
+    })
 }
 
 fn route_state_object(
@@ -527,6 +625,12 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         channel_name_hash,
         direct_accounts,
         binding: verified.binding_id,
+        principal_accounts: principal_accounts(&package)?,
+        initial_policy_id: package.binding.tbs.initial_policy_id,
+        required_operational_policy_id: package.binding.tbs.required_operational_policy_id,
+        current_policy_id: package.binding.tbs.initial_policy_id,
+        predecessor_close_id: (verified.route.incarnation > 0)
+            .then_some(verified.route.predecessor_close_id),
         ..ConversationState::default()
     };
     let route_object = route_state_object(

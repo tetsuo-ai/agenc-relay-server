@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-/// One of the twenty extension reply codes.
+/// One of the twenty-two extension reply codes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum E2eeReplyCode {
     /// Required capability was not negotiated.
@@ -29,6 +29,10 @@ pub enum E2eeReplyCode {
     CandidateActive,
     /// Operation named a candidate without a valid finalization.
     FinalityRequired,
+    /// A published policy failed route, chain, or approval validation.
+    PolicyInvalid,
+    /// A terminal request named a policy the server has not retained.
+    PolicyRequired,
     /// A Commit references an epoch outside the bounded window.
     EpochStale,
     /// Requested retained object or record is unavailable.
@@ -49,7 +53,7 @@ pub enum E2eeReplyCode {
 
 impl E2eeReplyCode {
     /// Every code in registry order.
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 22] = [
         Self::CapRequired,
         Self::AccountRequired,
         Self::DeviceRequired,
@@ -62,6 +66,8 @@ impl E2eeReplyCode {
         Self::BindingAuthInvalid,
         Self::CandidateActive,
         Self::FinalityRequired,
+        Self::PolicyInvalid,
+        Self::PolicyRequired,
         Self::EpochStale,
         Self::ObjectNotFound,
         Self::RateLimited,
@@ -88,6 +94,8 @@ impl E2eeReplyCode {
             Self::BindingAuthInvalid => "E2EE_BINDING_AUTH_INVALID",
             Self::CandidateActive => "E2EE_CANDIDATE_ACTIVE",
             Self::FinalityRequired => "E2EE_FINALITY_REQUIRED",
+            Self::PolicyInvalid => "E2EE_POLICY_INVALID",
+            Self::PolicyRequired => "E2EE_POLICY_REQUIRED",
             Self::EpochStale => "E2EE_EPOCH_STALE",
             Self::ObjectNotFound => "E2EE_OBJECT_NOT_FOUND",
             Self::RateLimited => "E2EE_RATE_LIMITED",
@@ -115,6 +123,8 @@ impl E2eeReplyCode {
             Self::BindingAuthInvalid => "binding or transition authorization is invalid",
             Self::CandidateActive => "the epoch already has an unfinalized candidate",
             Self::FinalityRequired => "operation requires a valid finalization",
+            Self::PolicyInvalid => "published policy failed validation",
+            Self::PolicyRequired => "the named policy has not been published",
             Self::EpochStale => "commit references an epoch outside the window",
             Self::ObjectNotFound => "requested object is unavailable",
             Self::RateLimited => "operation exceeded a quota",

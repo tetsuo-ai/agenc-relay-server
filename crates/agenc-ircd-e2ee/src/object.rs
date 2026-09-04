@@ -104,6 +104,8 @@ tls_enum! {
         FederationResult = 32,
         /// `IrcFederationEvent`.
         FederationEvent = 33,
+        /// `IrcPolicy`, published to the server (9.3).
+        Policy = 34,
     }
 }
 
@@ -143,6 +145,7 @@ impl IrcWireObjectKind {
             | Self::FederationRequest
             | Self::FederationResult
             | Self::FederationEvent => limits::MAX_FEDERATION_CONTROL_OBJECT,
+            Self::Policy => limits::MAX_POLICY_OBJECT,
         }
     }
 
@@ -196,6 +199,7 @@ impl IrcWireObjectKind {
             Self::FederationRequest => "FEDERATION-REQUEST",
             Self::FederationResult => "FEDERATION-RESULT",
             Self::FederationEvent => "FEDERATION-EVENT",
+            Self::Policy => "POLICY",
         }
     }
 

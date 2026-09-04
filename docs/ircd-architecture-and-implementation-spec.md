@@ -14,8 +14,9 @@ release gate in this document and the referenced E2EE profile is satisfied.
 The companion [IRC-MLS E2EE specification](irc-mls-e2ee-extension.md) is
 normative for encrypted conversations. This document owns the surrounding
 daemon. The E2EE document owns cryptographic identity, MLS group state,
-encrypted object formats, the E2EE sequencer, and its exact client and
-federation commands.
+encrypted object formats, the published conversation policy, the E2EE
+sequencer and its finality quorum check, the edge record-chain witness, and
+its exact client and federation commands.
 
 This is a design document, not permission to deploy an unaudited
 implementation. The words "secure", "private", and "anonymous" in product
@@ -219,7 +220,8 @@ or stale and are validated before use.
 | Client TLS endpoint | Link confidentiality and server authentication | E2EE identity or peer honesty |
 | Edge server | Admission, parsed routing, local rate limits, and attribution/rendering of ordinary base-session commands | Private account-service login/invitation/credential-change plaintext, account success assertions, password recovery, E2EE plaintext, or valid client/root signatures |
 | Network coordinator | Ordered base state and delivery | E2EE plaintext, honest availability, or undetectable MLS forks |
-| E2EE sequencer | Companion-profile receipts and finality | Conversation content or unilateral membership |
+| E2EE sequencer | Companion-profile receipts and terminal certificates issued only at the published policy's finality quorum | Conversation content, unilateral membership, or finality that endpoints have not verified themselves |
+| E2EE edge witness | Refusal and audit evidence for a sequencer record chain that forks or skips a position | Detection of a record the coordinator never delivers |
 | Account service | Session authentication | Root identity ownership or silent E2EE device creation |
 | Tor | Network-path separation under Tor's threat model | Application-layer unlinkability or global traffic-analysis resistance |
 | Storage AEAD | Record confidentiality and authenticity under its exact table/key binding | Freshness, availability, access-pattern hiding, or a live-process compromise |
@@ -2475,8 +2477,11 @@ E2eeFanout        -> exact immutable fragments to an authorized recipient set
 
 The base daemon MUST NOT expose an API returning MLS plaintext or MLS secret
 state. The E2EE relay crate validates public framing, sizes, hashes, types,
-route bindings, origin state, and server authorization only. Client crypto is
-not linked into the daemon.
+route bindings, origin state, and server authorization only. The coordinator
+additionally retains each conversation's published policy chain and verifies
+finality votes against it before signing a terminal certificate, and every
+edge witnesses the sequencer record chain it projects; both use public objects
+only. Client crypto is not linked into the daemon.
 
 The companion `IrcFederationOrigin` is a subordinate mirror of the exact base
 Server Incarnation, Origin ID/generation, Connection/Session/User IDs, Account
@@ -2521,6 +2526,7 @@ For an E2EE route, companion rules override base behavior for:
 - fragment and object limits;
 - account/device requirements;
 - membership-change ordering;
+- policy publication, finality-vote verification, and record-chain witnessing;
 - replay, receipt, finality, abort, ReInit, and recovery;
 - history and offline delivery; and
 - federation synchronization and collision handling.
@@ -7464,14 +7470,14 @@ These SHA-256 values identify the exact files read for this draft:
 | `rfcs/rfc9420-mls-protocol.txt` | `251ab11076c43fd4b8dc080a068a8caaf55e2fc5e6aa61d4274961627f32624b` |
 | `rfcs/rfc9525-tls-service-identity.txt` | `ed8116c2435376dffe37ec2ca688c3a8515e36820852b29e0b6cdfbe92abd2c5` |
 | `rfcs/rfc9750-mls-architecture.txt` | `6aa156c5592f99802aae9c39510bf347cacee4abdb1c34baab4c933a6cd992dd` |
-| `docs/irc-mls-e2ee-extension.md` | `c925723cd14d9b989ed553a65b8344d48496a339a92bd63e575487a5ef88dc53` |
+| `docs/irc-mls-e2ee-extension.md` | `770068a21240e480abd1edce0ba2501491485fed92be5f76be00cc14236034b6` |
 
 Changing a file without updating its hash, source decision, and affected
 vectors is a conformance-ledger failure.
 The companion's domain-separated version-1 profile hash is
-`964d29f7aa06d50884dedd96d1f5011cf015525b39894a45357fba93d5e8bb73`
+`716ecf0554deae4bdba0402597c0e8a41946a21459aab018646c638702297dba`
 (unpadded base64url
-`lk0p96oG1QiE3t2W0fUBHPAVUls5iUpFNX-6k9Xou3M`).
+`cW7PBVTerkvboEAll8DopBlGohRZqrAYZGxjhwIpfbo`).
 
 ## Appendix A. Client wire registries
 
@@ -9306,7 +9312,7 @@ base-profile-sha256=g3AiB-HhFTyHItXMZop9G6uFulGPzd4DCjaBG0G9zEA
 account-service-hpke-key-id=<43-char-hash>
 account-service-hpke-public-key=<43-char-X25519-public-key>
 e2ee-profile=IRC-MLS/1
-e2ee-profile-sha256=lk0p96oG1QiE3t2W0fUBHPAVUls5iUpFNX-6k9Xou3M
+e2ee-profile-sha256=cW7PBVTerkvboEAll8DopBlGohRZqrAYZGxjhwIpfbo
 sequencer-key-set-generation=<uint64-decimal>
 sequencer-key-set-hash=<43-char-hash>
 ```

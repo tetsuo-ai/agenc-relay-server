@@ -7,7 +7,7 @@ use crate::limits::{
     MAX_APPLICATION_MLS_OBJECT, MAX_BINDING_OBJECT, MAX_LIVE_OBJECT, MAX_WELCOME_MAILBOX_OBJECT,
 };
 
-const CLIENT_CARRIERS: [CarrierCommand; 20] = [
+const CLIENT_CARRIERS: [CarrierCommand; 21] = [
     CarrierCommand::Tagmsg,
     CarrierCommand::Edirect,
     CarrierCommand::SubmitCandidate,
@@ -19,6 +19,7 @@ const CLIENT_CARRIERS: [CarrierCommand; 20] = [
     CarrierCommand::SubmitReinitAck,
     CarrierCommand::SubmitReinitActivate,
     CarrierCommand::SubmitReinitAbort,
+    CarrierCommand::SubmitPolicy,
     CarrierCommand::Bind,
     CarrierCommand::Close,
     CarrierCommand::PublishIdentity,

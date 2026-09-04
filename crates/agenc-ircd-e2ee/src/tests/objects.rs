@@ -988,7 +988,7 @@ fn federation_objects_round_trip() -> TestResult {
         sequencer_record_head_id: [58; 32],
         state: IrcRouteStateKind::ActiveRoute,
     })?;
-    assert_eq!(IrcFederationOpcode::ALL.len(), 40);
+    assert_eq!(IrcFederationOpcode::ALL.len(), 41);
     assert_eq!(IrcFederationResultKind::ALL.len(), 23);
     assert_eq!(IrcFederationEventKind::ALL.len(), 14);
     assert_eq!(IrcFederationEmptyKind::ALL.len(), 14);

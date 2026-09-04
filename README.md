@@ -74,10 +74,13 @@ requests with durable results, least-information projections and events,
 acknowledged delivery, snapshots and resume, partition handling, paged
 directory queries, and the coordinator and edge roles of the daemon. Stage 08
 adds the E2EE server adapter: exact profile negotiation, public object
-validation, the sequencer with one candidate per epoch, KeyPackage and
-mailbox delivery, route projection to edges, the cross-profile durable
-barrier, a coordinator reload from durable rows, and the encrypted profile
-composed in the daemon; the external review task stays open. Stage 09 is the
+validation, the sequencer with one candidate per epoch that certifies a
+terminal only at the published policy's finality quorum, policy publication,
+KeyPackage and mailbox delivery, route projection to edges with a
+record-chain witness at every edge, the cross-profile durable barrier, a
+coordinator reload from durable rows, the encrypted profile composed in the
+daemon, and a lifecycle driven by two independent MLS libraries; the
+external review task stays open. Stage 09 is the
 next implementation stage. The complete dependency-ordered roadmap lives in
 [TODO.md](TODO.md). See the
 [Stage 08 checkpoint](conformance/evidence/stage-08-52c7ccb909ecd398853183ef3f11ffd2df251e08.json), the

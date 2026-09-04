@@ -32,6 +32,8 @@ pub enum SubmitKind {
     ReinitActivate,
     /// `REINIT ABORT`.
     ReinitAbort,
+    /// `POLICY`.
+    Policy,
 }
 
 impl SubmitKind {
@@ -48,6 +50,7 @@ impl SubmitKind {
             Self::ReinitAck => CarrierCommand::SubmitReinitAck,
             Self::ReinitActivate => CarrierCommand::SubmitReinitActivate,
             Self::ReinitAbort => CarrierCommand::SubmitReinitAbort,
+            Self::Policy => CarrierCommand::SubmitPolicy,
         }
     }
 }
@@ -381,6 +384,7 @@ fn parse_submit(params: &[&str]) -> Result<EgroupCommand, E2eeError> {
         ["REINIT", "ACK", id] => (SubmitKind::ReinitAck, id),
         ["REINIT", "ACTIVATE", id] => (SubmitKind::ReinitActivate, id),
         ["REINIT", "ABORT", id] => (SubmitKind::ReinitAbort, id),
+        ["POLICY", id] => (SubmitKind::Policy, id),
         _ => return Err(E2eeError::InvalidValue),
     };
     Ok(EgroupCommand::Submit {

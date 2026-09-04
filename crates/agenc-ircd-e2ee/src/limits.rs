@@ -57,6 +57,8 @@ pub const MAX_CAPABILITY_OBJECT: usize = 65_536;
 pub const MAX_CREDENTIAL_BUNDLE: usize = 8_192;
 /// `MAX_POLICY_BYTES`.
 pub const MAX_POLICY_BYTES: usize = 32_768;
+/// `MAX_POLICY_OBJECT`: a published policy with its six-byte envelope.
+pub const MAX_POLICY_OBJECT: usize = 32_774;
 /// `MAX_BINDING_OBJECT`.
 pub const MAX_BINDING_OBJECT: usize = 262_144;
 /// `MAX_BINDING_CHAIN_BYTES`.
@@ -256,6 +258,6 @@ pub const WIRE_OBJECT_ENVELOPE_BYTES: usize = 6;
 /// The largest `IrcWireObject.body` the envelope can carry.
 pub const MAX_WIRE_OBJECT_BODY_BYTES: usize = 4_194_298;
 /// The Section 11.1 vendor capability value, exact.
-pub const CAPABILITY_VALUE: &str = "v1,profile=lk0p96oG1QiE3t2W0fUBHPAVUls5iUpFNX-6k9Xou3M,seg=2940,obj=262144,parts=90,welcome=4194304";
+pub const CAPABILITY_VALUE: &str = "v1,profile=cW7PBVTerkvboEAll8DopBlGohRZqrAYZGxjhwIpfbo,seg=2940,obj=262144,parts=90,welcome=4194304";
 /// The vendor capability name.
 pub const CAPABILITY_NAME: &str = "agenc.ag/e2ee-mls";

@@ -116,6 +116,9 @@ pub(crate) struct PendingRequest {
     pub(crate) generation: ConnectionGeneration,
     pub(crate) label: Option<String>,
     pub(crate) command: router::Resolved,
+    /// The candidate or policy identifier a `STORED` line names besides
+    /// the object, taken from the payload at ingress.
+    pub(crate) subject: Option<[u8; 32]>,
     pub(crate) request_object_id: [u8; 32],
     /// The operation sequence, for resending in order.
     pub(crate) sequence: u64,
@@ -143,6 +146,8 @@ pub(crate) enum PendingCommit {
     },
     /// The READY of a snapshot was recorded.
     Ready,
+    /// A witness violation row was recorded; the link is already closing.
+    Witness,
 }
 
 /// The companion parts of one open barrier by part index, each with its
@@ -165,6 +170,9 @@ pub struct E2eeEdge {
     route_objects: BTreeMap<[u8; 32], Vec<u8>>,
     conversations: BTreeMap<[u8; 32], events::Conversation>,
     commit: Option<PendingCommit>,
+    /// The record-chain violation the witness found in the current frame,
+    /// recorded durably before the link closes.
+    witnessed: Option<([u8; 32], agenc_ircd_storage::e2ee_records::WitnessRow)>,
     queued: VecDeque<(CompanionFrame, Vec<u8>)>,
     events_in: BTreeMap<[u8; 16], events::OpenEvent>,
     channel_names: BTreeMap<ChannelInstanceId, String>,
@@ -190,6 +198,8 @@ pub struct E2eeEdgeCounters {
     pub refusals: u64,
     /// Protocol violations that closed the companion link.
     pub violations: u64,
+    /// Sequencer record-chain violations the witness refused (12.5).
+    pub chain_violations: u64,
 }
 
 impl E2eeEdge {
@@ -211,6 +221,7 @@ impl E2eeEdge {
             route_objects: BTreeMap::new(),
             conversations: BTreeMap::new(),
             commit: None,
+            witnessed: None,
             queued: VecDeque::new(),
             events_in: BTreeMap::new(),
             channel_names: BTreeMap::new(),

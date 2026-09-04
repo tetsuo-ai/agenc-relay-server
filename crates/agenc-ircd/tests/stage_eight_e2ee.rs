@@ -52,8 +52,8 @@ use agenc_ircd_testkit::e2ee::objects::aad::{IrcApplicationAad, IrcCommitAad};
 use agenc_ircd_testkit::e2ee::objects::attach::{IrcDeviceAttach, IrcDeviceAttachChallenge};
 use agenc_ircd_testkit::e2ee::objects::conversation::{
     IrcCloseAuthorization, IrcCloseAuthorizationTbs, IrcCloseIntent, IrcCommitAuthorizationRule,
-    IrcCommitAuthorizationTbs, IrcConversationBindingPackage, IrcConversationKind, IrcReservation,
-    IrcSemanticRouteTbs, action_bits,
+    IrcCommitAuthorizationTbs, IrcConversationBindingPackage, IrcConversationKind, IrcPolicy,
+    IrcReservation, IrcSemanticRouteTbs, action_bits,
 };
 use agenc_ircd_testkit::e2ee::objects::sequencing::{
     IrcCandidateReceipt, IrcCommitAck, IrcCommitAckTbs, IrcFinalizationCoreTbs,
@@ -1528,6 +1528,22 @@ impl Principal {
         })
     }
 
+    /// A principal whose roster is valid around the wall-clock second `now`,
+    /// for MLS libraries that check leaf lifetimes against their clock.
+    fn new_valid_at(root: u8, device: u8, account_id: AccountId, now: u64) -> TestResult<Self> {
+        let text = account_id.to_text();
+        let account: [u8; 24] = text
+            .as_bytes()
+            .try_into()
+            .map_err(|_| failure("account text is 24 bytes"))?;
+        Ok(Self {
+            keys: builders::principal_valid_at(root, &account, &[device], now)?,
+            device,
+            account,
+            labels: 0,
+        })
+    }
+
     fn label(&mut self) -> String {
         self.labels += 1;
         format!("l{}", self.labels)
@@ -1729,6 +1745,9 @@ struct BoundConversation {
     instance: Option<[u8; 16]>,
     binding: Vec<u8>,
     package: IrcConversationBindingPackage,
+    /// The generation-zero bootstrap policy and the generation-one
+    /// operational policy the binding commits to (companion 9.3).
+    policies: [IrcPolicy; 2],
 }
 
 impl BoundConversation {
@@ -1759,6 +1778,61 @@ fn reservation_of(reply: &[String]) -> TestResult<IrcReservation> {
 }
 
 /// Sends the binding package of `reservation` and returns the bound facts.
+/// The bootstrap and operational policies of a conversation whose creator
+/// is the first principal.
+fn policies_for(
+    principals: &[&builders::Principal],
+    conversation: [u8; 32],
+    kind: IrcConversationKind,
+) -> TestResult<[IrcPolicy; 2]> {
+    let initial = builders::policy(&builders::PolicySpec::bootstrap(
+        principals,
+        conversation,
+        kind,
+    )?)?;
+    let operational = builders::policy(&builders::PolicySpec::operational(
+        principals,
+        conversation,
+        kind,
+        builders::policy_id_of(&initial)?,
+    )?)?;
+    Ok([initial, operational])
+}
+
+/// Publishes the bound conversation's two policies (companion 9.3) and
+/// checks that each `STORED POLICY` reply names the policy and its object.
+fn publish_policies(
+    client: &mut IrcClient,
+    binder: &mut Principal,
+    bound: &BoundConversation,
+) -> TestResult {
+    let conversation_token = base64url_encode(&bound.conversation);
+    for policy in &bound.policies {
+        let bytes = wire_object(IrcWireObjectKind::Policy, policy)?;
+        let label = binder.label();
+        send_object(
+            client,
+            &label,
+            &format!("EGROUP SUBMIT POLICY {conversation_token}"),
+            &bytes,
+        )?;
+        let reply = labeled_reply(client, &label)?;
+        assert_contains(
+            &reply,
+            &format!(" EGROUP STORED POLICY {conversation_token} "),
+        )?;
+        assert_eq!(
+            hash_at(&reply, "STORED", 5)?,
+            builders::policy_id_of(policy)?
+        );
+        assert_eq!(
+            hash_at(&reply, "STORED", 6)?,
+            *e2ee::ObjectId::compute(&bytes).as_bytes()
+        );
+    }
+    Ok(())
+}
+
 fn bind(
     client: &mut IrcClient,
     binder: &mut Principal,
@@ -1766,6 +1840,7 @@ fn bind(
     package: IrcConversationBindingPackage,
     route_binding: [u8; 32],
     group_id: [u8; 32],
+    policies: [IrcPolicy; 2],
 ) -> TestResult<BoundConversation> {
     let binding = wire_object(IrcWireObjectKind::ConversationBinding, &package)?;
     let conversation = e2ee::ids::conversation_id(NETWORK_ID.as_bytes(), &group_id)?;
@@ -1784,7 +1859,7 @@ fn bind(
     let reply = labeled_reply(client, &label)?;
     assert_contains(&reply, " EGROUP BOUND ")?;
     assert_eq!(hash_at(&reply, "BOUND", 3)?, conversation);
-    Ok(BoundConversation {
+    let bound = BoundConversation {
         conversation,
         binding_id: hash_at(&reply, "BOUND", 4)?,
         route_binding,
@@ -1797,7 +1872,10 @@ fn bind(
             .ok(),
         binding,
         package,
-    })
+        policies,
+    };
+    publish_policies(client, binder, &bound)?;
+    Ok(bound)
 }
 
 /// Reserves and binds a direct conversation between the two principals
@@ -1839,6 +1917,11 @@ fn reserve_and_bind_direct(
         predecessor_close_id: [0; 32],
     };
     let principals = [&binder.keys, &peer.keys];
+    let policies = policies_for(
+        &principals,
+        e2ee::ids::conversation_id(NETWORK_ID.as_bytes(), &DIRECT_GROUP)?,
+        IrcConversationKind::Direct,
+    )?;
     let package = builders::binding_package(&builders::BindingSpec {
         principals: &principals,
         route,
@@ -1849,6 +1932,8 @@ fn reserve_and_bind_direct(
         previous_binding_id: [0; 32],
         lock_sequence: 1,
         previous_lock_ids: builders::lock_ids(&previous.package)?,
+        initial_policy_id: builders::policy_id_of(&policies[0])?,
+        required_operational_policy_id: builders::policy_id_of(&policies[1])?,
         plan_devices: vec![
             (
                 &binder.account,
@@ -1871,6 +1956,7 @@ fn reserve_and_bind_direct(
         package,
         route_binding,
         DIRECT_GROUP,
+        policies,
     )
 }
 
@@ -1893,6 +1979,11 @@ fn reserve_and_bind(
         .map_err(|_| failure("the reservation names the channel instance"))?;
     let fingerprint = builders::root_fingerprint(&binder.keys.root)?;
     let principals = [&binder.keys, &peer.keys];
+    let policies = policies_for(
+        &principals,
+        e2ee::ids::conversation_id(NETWORK_ID.as_bytes(), &GROUP)?,
+        IrcConversationKind::Channel,
+    )?;
     let package = builders::binding_package(&builders::BindingSpec {
         principals: &principals,
         route: builders::channel_route(b"#room", fingerprint)?,
@@ -1903,6 +1994,8 @@ fn reserve_and_bind(
         previous_binding_id: [0; 32],
         lock_sequence: 0,
         previous_lock_ids: Vec::new(),
+        initial_policy_id: builders::policy_id_of(&policies[0])?,
+        required_operational_policy_id: builders::policy_id_of(&policies[1])?,
         plan_devices: vec![
             (&binder.account, fingerprint, binder.device),
             (
@@ -1913,14 +2006,19 @@ fn reserve_and_bind(
         ],
     })?;
     let route_binding = e2ee::route::channel_route_binding(NETWORK_ID.as_bytes(), &instance)?;
-    bind(client, binder, &reservation, package, route_binding, GROUP)
+    bind(
+        client,
+        binder,
+        &reservation,
+        package,
+        route_binding,
+        GROUP,
+        policies,
+    )
 }
 
 /// The context core identifier the test binding package carries.
 const CONTEXT_CORE_ID: [u8; 32] = [30; 32];
-/// The initial and required operational policy identifiers of the package.
-const INITIAL_POLICY_ID: [u8; 32] = [27; 32];
-const OPERATIONAL_POLICY_ID: [u8; 32] = [28; 32];
 const VALIDATION_TIME: u64 = 1_700_000_000;
 /// MLS content types (RFC 9420 section 6).
 const MLS_APPLICATION: u8 = 1;
@@ -1956,6 +2054,8 @@ fn activate_bootstrap(
         context_core_id: CONTEXT_CORE_ID,
     };
     let accepted = semantic_id_of(SemanticHashDomain::GroupGenesisId, &genesis)?;
+    let initial_policy_id = builders::policy_id_of(&bound.policies[0])?;
+    let operational_policy_id = builders::policy_id_of(&bound.policies[1])?;
 
     let commit_aad = IrcCommitAad {
         profile_version: 1,
@@ -2004,10 +2104,10 @@ fn activate_bootstrap(
             candidate_id,
             commit_object_id,
             canonical_validation_time: VALIDATION_TIME,
-            old_policy_id: INITIAL_POLICY_ID,
+            old_policy_id: initial_policy_id,
             authorization_rule: IrcCommitAuthorizationRule::BootstrapActivation,
             action_bits: action_bits::POLICY | action_bits::BOOTSTRAP,
-            resulting_policy_id: OPERATIONAL_POLICY_ID,
+            resulting_policy_id: operational_policy_id,
             resulting_group_context_digest: [1; 32],
             resulting_ratchet_tree_digest: [2; 32],
             transition_target_digest: [0; 32],
@@ -2023,7 +2123,7 @@ fn activate_bootstrap(
         candidate_id,
         commit_object_id,
         resulting_epoch: 1,
-        old_policy_id: INITIAL_POLICY_ID,
+        old_policy_id: initial_policy_id,
         commit_authorization_id: semantic_id_of(
             SemanticHashDomain::CommitAuthorizationId,
             &authorization.tbs,
@@ -2609,5 +2709,845 @@ fn send_application_when_active(
             return Err(failure("the edge never left E2EE_SYNCING".to_owned()));
         }
         thread::sleep(Duration::from_millis(200));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Companion Section 21 gate 3: two independent MLS libraries drive the
+// encrypted lifecycle through the daemon's client surface.
+
+mod real_clients {
+    //! openmls creates the channel group and commits through the coordinator;
+    //! mls-rs publishes a KeyPackage, is added through a claimed package and
+    //! a delivered Welcome, and both exchange Section 7.5 padded application
+    //! content that the other library decrypts and checks.
+
+    use std::collections::BTreeMap;
+    use std::path::Path;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    use agenc_ircd_testkit::e2ee::ids::{account_id_digest, leaf_capabilities_digest};
+    use agenc_ircd_testkit::e2ee::mls_outer::{MlsOuterMessage, parse_mls_message};
+    use agenc_ircd_testkit::e2ee::objects::content::{
+        IrcEncryptedContent, IrcEncryptedContentType,
+    };
+    use agenc_ircd_testkit::e2ee::objects::conversation::IrcJoinTransitionProofBundle;
+    use agenc_ircd_testkit::e2ee::objects::sequencing::{
+        IrcDeliveredWelcome, IrcNormalJoinAuthorizationProof,
+    };
+    use mls_rs::client_builder::MlsConfig;
+    use mls_rs::group::ReceivedMessage;
+    use mls_rs::identity::SigningIdentity;
+    use mls_rs::identity::basic::{BasicCredential as RsBasicCredential, BasicIdentityProvider};
+    use mls_rs::mls_rules::{CommitOptions, DefaultMlsRules, EncryptionOptions};
+    use mls_rs::time::MlsTime;
+    use mls_rs::{CipherSuite as RsSuite, CipherSuiteProvider, Client, CryptoProvider, MlsMessage};
+    use mls_rs_crypto_rustcrypto::RustCryptoProvider;
+    use openmls::group::PURE_CIPHERTEXT_WIRE_FORMAT_POLICY;
+    use openmls::key_packages::Lifetime as OpenMlsLifetime;
+    use openmls::prelude::tls_codec::Deserialize as _;
+    use openmls::prelude::{
+        BasicCredential, Capabilities, Ciphersuite, CredentialType, CredentialWithKey, GroupId,
+        KeyPackage as OpenMlsKeyPackage, LeafNodeParameters, MlsGroup, MlsMessageBodyIn,
+        MlsMessageIn, OpenMlsProvider, ProcessedMessageContent, ProtocolVersion,
+    };
+    use openmls_basic_credential::SignatureKeyPair;
+    use openmls_rust_crypto::OpenMlsRustCrypto;
+
+    use super::*;
+
+    /// The wire suite both libraries use here.
+    const SUITE: u16 = 1;
+    /// How long each leaf lives past `now`.
+    const LEAF_LIFETIME: u64 = 24 * 3_600;
+    /// The interop matrix rules this test records.
+    const RULES: [&str; 8] = [
+        "lifecycle-openmls-commit-sequenced",
+        "lifecycle-openmls-finalized-under-published-quorum",
+        "lifecycle-mls-rs-package-published-and-claimed",
+        "lifecycle-openmls-add-finalized-by-two-councils",
+        "lifecycle-welcome-delivered-and-joined-by-mls-rs",
+        "lifecycle-padded-content-openmls-to-mls-rs",
+        "lifecycle-padded-content-mls-rs-to-openmls",
+        "lifecycle-closed-after-real-traffic",
+    ];
+
+    fn wall_clock_seconds() -> TestResult<u64> {
+        Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
+    }
+
+    /// The leaf capabilities both libraries are configured to advertise,
+    /// hashed as the leaf authorization commits to them.
+    fn capabilities_hash() -> TestResult<[u8; 32]> {
+        Ok(leaf_capabilities_digest(&builders::encoded_capabilities(
+            &builders::default_capabilities(),
+        )?)?)
+    }
+
+    fn leaf_spec(device: u8, interval: (u64, u64)) -> TestResult<builders::LeafSpec> {
+        Ok(builders::LeafSpec {
+            device_seed: device,
+            leaf_seed: 0,
+            suite: SUITE,
+            interval,
+            capabilities_hash: capabilities_hash()?,
+            last_resort: 0,
+            credential_generation: 0,
+        })
+    }
+
+    /// The basic-credential identity of a leaf: the encoded credential bundle
+    /// whose leaf authorization names `leaf_public_key`.
+    fn credential_identity(
+        principal: &Principal,
+        interval: (u64, u64),
+        leaf_public_key: &[u8],
+    ) -> TestResult<Vec<u8>> {
+        let authorization = builders::leaf_authorization_for_key(
+            &principal.keys.roster,
+            &leaf_spec(principal.device, interval)?,
+            leaf_public_key,
+        )?;
+        Ok(
+            builders::credential_bundle(&principal.keys, principal.device, authorization)?
+                .encode()?,
+        )
+    }
+
+    fn commit_aad(
+        bound: &BoundConversation,
+        prior_state_id: [u8; 32],
+        time: u64,
+    ) -> TestResult<Vec<u8>> {
+        Ok(IrcCommitAad {
+            profile_version: 1,
+            network_id: *NETWORK_ID.as_bytes(),
+            conversation_id: bound.conversation,
+            route_binding: bound.route_binding,
+            validation_time: time,
+            prior_state_id,
+        }
+        .encode()?)
+    }
+
+    fn application_aad(
+        bound: &BoundConversation,
+        latest_state_id: [u8; 32],
+    ) -> TestResult<Vec<u8>> {
+        Ok(IrcApplicationAad {
+            profile_version: 1,
+            network_id: *NETWORK_ID.as_bytes(),
+            conversation_id: bound.conversation,
+            route_binding: bound.route_binding,
+            latest_state_id,
+        }
+        .encode()?)
+    }
+
+    /// Padded application content from `sender` (Sections 7.5 and 10).
+    fn padded_content(
+        bound: &BoundConversation,
+        sender: &Principal,
+        sequence: u64,
+        head: [u8; 32],
+        text: &str,
+    ) -> TestResult<Vec<u8>> {
+        let mut content = IrcEncryptedContent {
+            profile_version: 1,
+            network_id: *NETWORK_ID.as_bytes(),
+            conversation_id: bound.conversation,
+            route_binding: bound.route_binding,
+            sender_device_id: [sender.device; 16],
+            leaf_credential_generation: 0,
+            sender_sequence: sequence,
+            message_id: [u8::try_from(sequence)? ^ sender.device; 16],
+            sequencer_record_chain_head: head,
+            content_type: IrcEncryptedContentType::Text,
+            body: Opaque::new(text.as_bytes().to_vec())?,
+            zero_padding: Opaque::new(Vec::new())?,
+        };
+        content.pad()?;
+        Ok(content.encode()?)
+    }
+
+    /// Decodes received content, checking its padding and shape, and returns
+    /// the text.
+    fn content_text(bytes: &[u8]) -> TestResult<String> {
+        let mut budget = DecodeBudget::new(1 << 16, 64);
+        let content = IrcEncryptedContent::decode_checked(bytes, &mut budget)?;
+        assert_eq!(content.content_type, IrcEncryptedContentType::Text);
+        Ok(String::from_utf8(content.body.as_slice().to_vec())?)
+    }
+
+    /// The MLS bytes inside a forwarded application object.
+    fn mls_body(object: &[u8], kind: IrcWireObjectKind) -> TestResult<Vec<u8>> {
+        let mut budget = DecodeBudget::new(1 << 20, 1 << 10);
+        Ok(IrcWireObject::decode_kind(object, Some(kind), &mut budget)?
+            .body()
+            .to_vec())
+    }
+
+    /// What a certified Commit leaves behind.
+    struct Certified {
+        finalization_id: [u8; 32],
+        record_id: [u8; 32],
+    }
+
+    /// Sequences `commit` as the candidate of `bound`, acknowledges it, and
+    /// finalizes it with the votes of the binder and `co_voters` under
+    /// `old_policy_id` (companion 12.1 to 12.4).
+    // agenc-review: allow owner=tests reviewed=2026-09-04 reason=one certification names the client the binder its co-voters the conversation the commit the prior position both policies and the rule together
+    #[allow(clippy::too_many_arguments)]
+    fn certify_commit(
+        client: &mut IrcClient,
+        binder: &mut Principal,
+        co_voters: &[&Principal],
+        bound: &BoundConversation,
+        commit: &[u8],
+        prior: (u64, [u8; 32]),
+        policies: ([u8; 32], [u8; 32]),
+        rule: IrcCommitAuthorizationRule,
+    ) -> TestResult<Certified> {
+        let network = *NETWORK_ID.as_bytes();
+        let conversation = bound.conversation;
+        let (prior_epoch, prior_state_id) = prior;
+        let (old_policy_id, resulting_policy_id) = policies;
+        let commit = raw_object(IrcWireObjectKind::CommitMls, commit.to_vec())?;
+        let commit_object_id = *e2ee::ObjectId::compute(&commit).as_bytes();
+        let conversation_token = base64url_encode(&conversation);
+        let label = binder.label();
+        send_object(
+            client,
+            &label,
+            &format!("EGROUP SUBMIT CANDIDATE {conversation_token}"),
+            &commit,
+        )?;
+        let echo = labeled_reply(client, &label)?;
+        assert_contains(&echo, " EGROUP CANDIDATE ")?;
+        let receipt_tag = echo
+            .iter()
+            .find_map(|line| tag_value(line, RECEIPT_TAG))
+            .ok_or_else(|| failure("the candidate echo carries the receipt tag"))?;
+        let receipt_tag = ReceiptTag::parse(&receipt_tag)?;
+        let candidate_id = receipt_tag.candidate_id;
+        let mut budget = DecodeBudget::new(1 << 16, 1 << 10);
+        let receipt = IrcCandidateReceipt::decode_exact(&receipt_tag.receipt, &mut budget)?;
+        assert_eq!(receipt.tbs.commit_object_id, commit_object_id);
+        assert_eq!(receipt.tbs.prior_state_id, prior_state_id);
+        let resulting_epoch = prior_epoch + 1;
+
+        let authorization = builders::commit_authorization(
+            IrcCommitAuthorizationTbs {
+                profile_version: 1,
+                network_id: network,
+                conversation_id: conversation,
+                prior_epoch,
+                prior_state_id,
+                candidate_id,
+                commit_object_id,
+                canonical_validation_time: VALIDATION_TIME,
+                old_policy_id,
+                authorization_rule: rule,
+                action_bits: match rule {
+                    IrcCommitAuthorizationRule::BootstrapActivation => {
+                        action_bits::POLICY | action_bits::BOOTSTRAP
+                    }
+                    _ => action_bits::ADD_LEAF,
+                },
+                resulting_policy_id,
+                resulting_group_context_digest: [1; 32],
+                resulting_ratchet_tree_digest: [2; 32],
+                transition_target_digest: [0; 32],
+            },
+            &[(&binder.keys, binder.device)],
+        )?;
+        let core = IrcFinalizationCoreTbs {
+            profile_version: 1,
+            network_id: network,
+            conversation_id: conversation,
+            prior_epoch,
+            prior_state_id,
+            candidate_id,
+            commit_object_id,
+            resulting_epoch,
+            old_policy_id,
+            commit_authorization_id: semantic_id_of(
+                SemanticHashDomain::CommitAuthorizationId,
+                &authorization.tbs,
+            )?,
+            acknowledgement_set_digest: [3; 32],
+            resulting_group_context_digest: [1; 32],
+            resulting_ratchet_tree_digest: [2; 32],
+            finalization_authenticator: [4; 32],
+        };
+        let finalization_id = semantic_id_of(SemanticHashDomain::FinalizationId, &core)?;
+        let ack = IrcCommitAck {
+            tbs: IrcCommitAckTbs {
+                profile_version: 1,
+                network_id: network,
+                conversation_id: conversation,
+                prior_epoch,
+                candidate_id,
+                commit_object_id,
+                old_leaf_index: 0,
+                old_credential_hash: [5; 32],
+                resulting_epoch,
+                resulting_group_context_digest: [1; 32],
+                resulting_ratchet_tree_digest: [2; 32],
+                finalization_authenticator: [4; 32],
+            },
+            old_leaf_signature: Opaque::new(vec![6; 64])?,
+        };
+        let ack_object = wire_object(IrcWireObjectKind::CommitAck, &ack)?;
+        let label = binder.label();
+        send_object(
+            client,
+            &label,
+            &format!("EGROUP SUBMIT ACK {conversation_token}"),
+            &ack_object,
+        )?;
+        let acked = labeled_reply(client, &label)?;
+        assert_contains(&acked, " EGROUP ACKED ")?;
+
+        let slot = VoteSlot {
+            network_id: network,
+            conversation_id: conversation,
+            prior_epoch,
+            prior_state_id,
+            candidate_sequence: receipt.tbs.candidate_sequence,
+            predecessor_record_id: receipt.tbs.predecessor_record_id,
+        };
+        let tbs = vote_tbs(&slot, candidate_id, Terminal::finalize(finalization_id));
+        let mut votes = vec![builders::finality_vote(&binder.keys, binder.device, &tbs)?];
+        for voter in co_voters {
+            votes.push(builders::finality_vote(&voter.keys, voter.device, &tbs)?);
+        }
+        votes.sort_by_key(|vote| (vote.signer_root_fingerprint, vote.signer_device_id));
+        let request = IrcFinalizationRequest {
+            proof: IrcFinalizationProof {
+                core,
+                receipt,
+                authorization,
+                acknowledgements: TlsVec::new(vec![ack])?,
+            },
+            votes: TlsVec::new(votes)?,
+        };
+        let request = wire_object(IrcWireObjectKind::FinalizationRequest, &request)?;
+        let label = binder.label();
+        send_object(
+            client,
+            &label,
+            &format!("EGROUP SUBMIT FINALIZATION {conversation_token}"),
+            &request,
+        )?;
+        let reply = labeled_reply(client, &label)?;
+        assert_contains(
+            &reply,
+            &format!(" EGROUP FINALIZED {conversation_token} {resulting_epoch} "),
+        )?;
+        assert_eq!(hash_at(&reply, "FINALIZED", 5)?, finalization_id);
+        Ok(Certified {
+            finalization_id,
+            record_id: hash_at(&reply, "FINALIZED", 6)?,
+        })
+    }
+
+    /// The openmls member: alice, the channel creator.
+    struct OpenMlsMember {
+        provider: OpenMlsRustCrypto,
+        signer: SignatureKeyPair,
+        credential: CredentialWithKey,
+        capabilities: Capabilities,
+        lifetime: OpenMlsLifetime,
+    }
+
+    impl OpenMlsMember {
+        fn new(principal: &Principal, interval: (u64, u64)) -> TestResult<Self> {
+            let suite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
+            let provider = OpenMlsRustCrypto::default();
+            let signer = SignatureKeyPair::new(suite.signature_algorithm())?;
+            signer.store(provider.storage())?;
+            let identity = credential_identity(principal, interval, signer.public())?;
+            let credential = CredentialWithKey {
+                credential: BasicCredential::new(identity).into(),
+                signature_key: signer.to_public_vec().into(),
+            };
+            let capabilities = Capabilities::new(
+                Some(&[ProtocolVersion::Mls10]),
+                Some(&[
+                    Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519,
+                    Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519,
+                ]),
+                Some(&[]),
+                Some(&[]),
+                Some(&[CredentialType::Basic]),
+            );
+            Ok(Self {
+                provider,
+                signer,
+                credential,
+                capabilities,
+                lifetime: OpenMlsLifetime::init(interval.0, interval.1),
+            })
+        }
+
+        fn create_group(&self, group_id: &[u8; 32]) -> TestResult<MlsGroup> {
+            Ok(MlsGroup::builder()
+                .with_group_id(GroupId::from_slice(group_id))
+                .ciphersuite(Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519)
+                .use_ratchet_tree_extension(true)
+                .with_wire_format_policy(PURE_CIPHERTEXT_WIRE_FORMAT_POLICY)
+                .with_capabilities(self.capabilities.clone())
+                .lifetime(self.lifetime)
+                .build(&self.provider, &self.signer, self.credential.clone())?)
+        }
+
+        fn import_key_package(&self, bytes: &[u8]) -> TestResult<OpenMlsKeyPackage> {
+            let message = MlsMessageIn::tls_deserialize_exact(bytes)?;
+            let MlsMessageBodyIn::KeyPackage(package) = message.extract() else {
+                return Err(failure("the claimed object is not a key package"));
+            };
+            Ok(package.validate(self.provider.crypto(), ProtocolVersion::Mls10)?)
+        }
+
+        fn decrypt(&self, group: &mut MlsGroup, bytes: &[u8]) -> TestResult<(Vec<u8>, Vec<u8>)> {
+            let message = MlsMessageIn::tls_deserialize_exact(bytes)?;
+            let processed =
+                group.process_message(&self.provider, message.try_into_protocol_message()?)?;
+            let aad = processed.aad().to_vec();
+            match processed.into_content() {
+                ProcessedMessageContent::ApplicationMessage(application) => {
+                    Ok((application.into_bytes(), aad))
+                }
+                _ => Err(failure("openmls did not receive an application message")),
+            }
+        }
+    }
+
+    /// The mls-rs member: bob, added through a Welcome.
+    fn mls_rs_client(
+        principal: &Principal,
+        interval: (u64, u64),
+    ) -> TestResult<Client<impl MlsConfig + use<>>> {
+        let crypto = RustCryptoProvider::with_enabled_cipher_suites(vec![
+            RsSuite::CURVE25519_AES128,
+            RsSuite::CURVE25519_CHACHA,
+        ]);
+        let cipher_suite = crypto
+            .cipher_suite_provider(RsSuite::CURVE25519_AES128)
+            .ok_or_else(|| failure("mls-rs lacks the profile suite"))?;
+        let (secret, public) = cipher_suite.signature_key_generate()?;
+        let identity_bytes = credential_identity(principal, interval, public.as_ref())?;
+        let identity = SigningIdentity::new(
+            RsBasicCredential::new(identity_bytes).into_credential(),
+            public,
+        );
+        let rules = DefaultMlsRules::new()
+            .with_commit_options(CommitOptions::new().with_ratchet_tree_extension(true))
+            .with_encryption_options(EncryptionOptions::new(true, Default::default()));
+        Ok(Client::builder()
+            .identity_provider(BasicIdentityProvider)
+            .crypto_provider(crypto)
+            .mls_rules(rules)
+            .key_package_lifetime(Duration::from_secs(LEAF_LIFETIME))
+            .signing_identity(identity, secret, RsSuite::CURVE25519_AES128)
+            .build())
+    }
+
+    /// Publishes `package` for `owner` and returns the daemon's KeyPackageRef.
+    fn publish_package(
+        client: &mut IrcClient,
+        owner: &mut Principal,
+        package: &[u8],
+        expires_at: u64,
+    ) -> TestResult<Vec<u8>> {
+        let object = raw_object(IrcWireObjectKind::KeyPackageMls, package.to_vec())?;
+        let label = owner.label();
+        send_object(
+            client,
+            &label,
+            &format!(
+                "EKEY PUBLISH PACKAGE {} {SUITE} NORMAL {expires_at}",
+                owner.device_token()
+            ),
+            &object,
+        )?;
+        let reply = labeled_reply(client, &label)?;
+        assert_contains(&reply, " EKEY STORED PACKAGE ")?;
+        assert_eq!(
+            hash_at(&reply, "PACKAGE", 4)?,
+            *e2ee::ObjectId::compute(&object).as_bytes()
+        );
+        let mut budget = DecodeBudget::new(1 << 16, 1 << 14);
+        let MlsOuterMessage::KeyPackage(parsed) = parse_mls_message(package, &mut budget)? else {
+            return Err(failure("the published object is not a key package"));
+        };
+        Ok(parsed.key_package_ref.to_vec())
+    }
+
+    /// Claims one package of `target` for `claimant` and returns its MLS bytes.
+    fn claim_package(
+        client: &mut IrcClient,
+        claimant: &mut Principal,
+        target: &Principal,
+    ) -> TestResult<Vec<u8>> {
+        let label = claimant.label();
+        client.send(&format!(
+            "@label={label} EKEY CLAIM PACKAGE {} {} {SUITE} {}",
+            base64url_encode(&target.account),
+            target.device_token(),
+            base64url_encode(&[77; 16])
+        ))?;
+        let reply = labeled_reply(client, &label)?;
+        assert_contains(&reply, " EKEY CLAIMED ")?;
+        mls_body(&batch_object(&reply)?, IrcWireObjectKind::KeyPackageMls)
+    }
+
+    /// Delivers `welcome` to `target` under the finalization that added it,
+    /// fetches it from the target's mailbox, and returns the Welcome bytes.
+    // agenc-review: allow owner=tests reviewed=2026-09-04 reason=one delivery names both clients both principals the conversation the certification the package reference and the welcome together
+    #[allow(clippy::too_many_arguments)]
+    fn deliver_welcome(
+        sender: &mut IrcClient,
+        sender_keys: &mut Principal,
+        receiver: &mut IrcClient,
+        target: &mut Principal,
+        bound: &BoundConversation,
+        certified: &Certified,
+        key_package_ref: &[u8],
+        welcome: &[u8],
+    ) -> TestResult<Vec<u8>> {
+        let delivered = IrcDeliveredWelcome {
+            profile_version: 1,
+            network_id: *NETWORK_ID.as_bytes(),
+            conversation_id: bound.conversation,
+            target_account_id_digest: account_id_digest(NETWORK_ID.as_bytes(), &target.account)?,
+            target_device_id: [target.device; 16],
+            authorization: IrcNormalJoinAuthorizationProof {
+                finalization_id: certified.finalization_id,
+                finalization_object_id: certified.record_id,
+                added_key_package_ref: Opaque::new(key_package_ref.to_vec())?,
+                resulting_leaf_index: 1,
+                resulting_leaf_credential_hash: [0; 32],
+            },
+            transition_proofs: IrcJoinTransitionProofBundle {
+                references: TlsVec::new(Vec::new())?,
+            },
+            welcome_bytes: Opaque::new(welcome.to_vec())?,
+        };
+        let object = wire_object(IrcWireObjectKind::WelcomeMls, &delivered)?;
+        let label = sender_keys.label();
+        send_object(
+            sender,
+            &label,
+            &format!(
+                "EKEY DELIVER WELCOME {} {} {} {}",
+                base64url_encode(&target.account),
+                target.device_token(),
+                base64url_encode(&bound.conversation),
+                base64url_encode(&certified.finalization_id)
+            ),
+            &object,
+        )?;
+        let reply = labeled_reply(sender, &label)?;
+        assert_contains(&reply, " EKEY STORED WELCOME ")?;
+        let object_id = *e2ee::ObjectId::compute(&object).as_bytes();
+
+        let label = target.label();
+        receiver.send(&format!("@label={label} EKEY FETCH MAILBOX WELCOME *"))?;
+        let page = labeled_reply(receiver, &label)?;
+        assert_contains(&page, " EKEY MAILBOX ")?;
+        let token = hash_at(&page, "MAILBOX", 3)?;
+        assert_eq!(fragments_object(&page)?, object);
+        let label = target.label();
+        receiver.send(&format!(
+            "@label={label} EKEY ACK MAILBOX {} {}",
+            base64url_encode(&token),
+            base64url_encode(&object_id)
+        ))?;
+        let acked = labeled_reply(receiver, &label)?;
+        assert_contains(&acked, " EKEY ACKED ")?;
+        Ok(welcome.to_vec())
+    }
+
+    /// Sends real MLS application bytes on the bound channel and returns the
+    /// forwarded copy the other edge delivers.
+    fn relay_application(
+        sender: &mut IrcClient,
+        sender_keys: &mut Principal,
+        receiver: &mut IrcClient,
+        bound: &BoundConversation,
+        mls_bytes: &[u8],
+    ) -> TestResult<Vec<u8>> {
+        let object = raw_object(IrcWireObjectKind::ApplicationMls, mls_bytes.to_vec())?;
+        let label = sender_keys.label();
+        send_object(sender, &label, &bound.application_command(), &object)?;
+        let echo = labeled_reply(sender, &label)?;
+        assert_eq!(fragments_object(&echo)?, object);
+        let forwarded = receive_application(receiver, bound)?;
+        assert_eq!(forwarded, object);
+        mls_body(&forwarded, IrcWireObjectKind::ApplicationMls)
+    }
+
+    /// The recorded lifecycle outcomes of the interop matrix.
+    fn recorded_lifecycle() -> TestResult<BTreeMap<String, String>> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let text = std::fs::read_to_string(root.join("conformance/e2ee-interop-matrix.toml"))?;
+        let mut matrix = BTreeMap::new();
+        let mut id: Option<String> = None;
+        for line in text.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let value = value.trim().trim_matches('"').to_owned();
+            match key.trim() {
+                "id" if value.starts_with("lifecycle-") => id = Some(value),
+                "outcome" => {
+                    if let Some(id) = id.take() {
+                        matrix.insert(id, value);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(matrix)
+    }
+
+    #[test]
+    fn real_mls_clients_run_the_encrypted_lifecycle_through_the_daemon() -> TestResult {
+        let network = build_network()?;
+        let mut coordinator = DaemonProcess::start(&network.coordinator.config_path)?;
+        let mut edge_a = DaemonProcess::start(&network.edge_a.config_path)?;
+        let mut edge_b = DaemonProcess::start(&network.edge_b.config_path)?;
+        let outcome = exercise_real_clients(&network);
+        let stopped_a = edge_a.stop();
+        let stopped_b = edge_b.stop();
+        let stopped_core = coordinator.stop();
+        if let Err(error) = outcome {
+            return Err(failure(format!(
+                "{error}\n--- coordinator log ---\n{}\n--- edge a log ---\n{}\n--- edge b log ---\n{}",
+                network.coordinator.log_text(),
+                network.edge_a.log_text(),
+                network.edge_b.log_text()
+            )));
+        }
+        for (label, status) in [
+            ("edge a", stopped_a),
+            ("edge b", stopped_b),
+            ("coordinator", stopped_core),
+        ] {
+            let status = status.map_err(|error| failure(format!("{label}: {error}")))?;
+            if !status.success() {
+                return Err(failure(format!("{label} exited with {status}")));
+            }
+        }
+        Ok(())
+    }
+
+    fn exercise_real_clients(network: &Network) -> TestResult {
+        wait_for_link(&network.edge_a, 0)?;
+        wait_for_link(&network.edge_b, 0)?;
+        let _probe = register_when_available(&network.edge_a, "probe")?;
+        let now = wall_clock_seconds()?;
+        let (mut alice, alice_account) =
+            authenticated_client(&network.edge_a, "alice", "alice-account", 41)?;
+        let (mut bob, bob_account) =
+            authenticated_client(&network.edge_b, "bob", "bob-account", 51)?;
+        let mut alice_keys = Principal::new_valid_at(ALICE_ROOT, ALICE_DEVICE, alice_account, now)?;
+        let mut bob_keys = Principal::new_valid_at(BOB_ROOT, BOB_DEVICE, bob_account, now)?;
+        step(
+            "alice attach",
+            publish_and_attach(&mut alice, &mut alice_keys),
+        )?;
+        step("bob attach", publish_and_attach(&mut bob, &mut bob_keys))?;
+
+        // Both leaves live from one hour ago until tomorrow, inside the
+        // rosters that were issued around `now`.
+        let alice_interval = (now - 3_599, now + LEAF_LIFETIME);
+        // mls-rs opens a leaf at the timestamp it is given, with no margin.
+        let bob_timestamp = now - 60;
+        let bob_interval = (bob_timestamp, bob_timestamp + LEAF_LIFETIME);
+        let creator = OpenMlsMember::new(&alice_keys, alice_interval)?;
+        let joiner = mls_rs_client(&bob_keys, bob_interval)?;
+        let bob_package = joiner
+            .generate_key_package_message(
+                Default::default(),
+                Default::default(),
+                Some(MlsTime::from(bob_timestamp)),
+            )?
+            .to_bytes()?;
+
+        alice.send("JOIN #room")?;
+        alice.read_until(|line| line.contains(" 366 alice #room "))?;
+        alice.send("CHANCTL REGISTER #room")?;
+        alice.read_until(|line| line.contains(" NOTE CHANCTL UPDATED #room "))?;
+        bob.send("JOIN #room")?;
+        bob.read_until(|line| line.contains(" 366 bob #room "))?;
+        alice.read_until(|line| line.starts_with(":bob!") && line.contains(" JOIN #room"))?;
+        let bound = step(
+            "channel bind",
+            reserve_and_bind(&mut alice, &mut alice_keys, &bob_keys),
+        )?;
+        let initial_policy_id = builders::policy_id_of(&bound.policies[0])?;
+        let operational_policy_id = builders::policy_id_of(&bound.policies[1])?;
+        let genesis = semantic_id_of(
+            SemanticHashDomain::GroupGenesisId,
+            &IrcGroupGenesisTbs {
+                network_id: *NETWORK_ID.as_bytes(),
+                conversation_id: bound.conversation,
+                group_id: Opaque::new(bound.group_id.to_vec())?,
+                binding_id: bound.binding_id,
+                context_core_id: CONTEXT_CORE_ID,
+            },
+        )?;
+
+        // openmls creates the group and its first Commit activates the
+        // bootstrap under the creator-only policy.
+        let mut group = creator.create_group(&bound.group_id)?;
+        group.set_aad(commit_aad(&bound, genesis, VALIDATION_TIME)?);
+        let activation = group.self_update(
+            &creator.provider,
+            &creator.signer,
+            LeafNodeParameters::default(),
+        )?;
+        let activated = step(
+            "openmls activation commit",
+            certify_commit(
+                &mut alice,
+                &mut alice_keys,
+                &[],
+                &bound,
+                &activation.commit().to_bytes()?,
+                (0, genesis),
+                (initial_policy_id, operational_policy_id),
+                IrcCommitAuthorizationRule::BootstrapActivation,
+            ),
+        )?;
+        group.merge_pending_commit(&creator.provider)?;
+        assert_eq!(group.epoch().as_u64(), 1);
+        bob.read_until(|line| line.contains(" EGROUP FINALIZED "))?;
+
+        // A padded application message from the real group reaches the
+        // other edge as ciphertext.
+        let first = padded_content(
+            &bound,
+            &alice_keys,
+            0,
+            activated.finalization_id,
+            "before the add",
+        )?;
+        group.set_aad(application_aad(&bound, activated.finalization_id)?);
+        let encrypted = group
+            .create_message(&creator.provider, &creator.signer, &first)?
+            .to_bytes()?;
+        step(
+            "openmls application relay",
+            relay_application(&mut alice, &mut alice_keys, &mut bob, &bound, &encrypted),
+        )?;
+
+        // bob publishes his real package once his origin is settled; alice
+        // claims it and adds him, and the operational council of both
+        // devices finalizes the Add.
+        let bob_reference = step(
+            "bob publishes a real key package",
+            publish_package(&mut bob, &mut bob_keys, &bob_package, bob_interval.1),
+        )?;
+        let claimed = step(
+            "alice claims bob's package",
+            claim_package(&mut alice, &mut alice_keys, &bob_keys),
+        )?;
+        assert_eq!(claimed, bob_package);
+        let package = creator.import_key_package(&claimed)?;
+        group.set_aad(commit_aad(
+            &bound,
+            activated.finalization_id,
+            VALIDATION_TIME + 1,
+        )?);
+        let (commit, welcome, _info) =
+            group.add_members(&creator.provider, &creator.signer, &[package])?;
+        let added = step(
+            "openmls add commit",
+            certify_commit(
+                &mut alice,
+                &mut alice_keys,
+                &[&bob_keys],
+                &bound,
+                &commit.to_bytes()?,
+                (1, activated.finalization_id),
+                (operational_policy_id, operational_policy_id),
+                IrcCommitAuthorizationRule::ControlledTransition,
+            ),
+        )?;
+        group.merge_pending_commit(&creator.provider)?;
+        assert_eq!(group.epoch().as_u64(), 2);
+        bob.read_until(|line| line.contains(" EGROUP FINALIZED "))?;
+
+        // The Welcome travels through the device mailbox and mls-rs joins.
+        let welcome_bytes = step(
+            "welcome delivery",
+            deliver_welcome(
+                &mut alice,
+                &mut alice_keys,
+                &mut bob,
+                &mut bob_keys,
+                &bound,
+                &added,
+                &bob_reference,
+                &welcome.to_bytes()?,
+            ),
+        )?;
+        let (mut bob_group, _info) =
+            joiner.join_group(None, &MlsMessage::from_bytes(&welcome_bytes)?, None)?;
+        assert_eq!(bob_group.current_epoch(), 2);
+
+        // Padded content crosses the libraries in both directions.
+        let text = "hello from openmls";
+        let content = padded_content(&bound, &alice_keys, 1, added.finalization_id, text)?;
+        let aad = application_aad(&bound, added.finalization_id)?;
+        group.set_aad(aad.clone());
+        let encrypted = group
+            .create_message(&creator.provider, &creator.signer, &content)?
+            .to_bytes()?;
+        let received = step(
+            "openmls to mls-rs relay",
+            relay_application(&mut alice, &mut alice_keys, &mut bob, &bound, &encrypted),
+        )?;
+        let ReceivedMessage::ApplicationMessage(description) =
+            bob_group.process_incoming_message(MlsMessage::from_bytes(&received)?)?
+        else {
+            return Err(failure("mls-rs did not receive an application message"));
+        };
+        assert_eq!(description.authenticated_data, aad);
+        assert_eq!(content_text(description.data())?, text);
+
+        let reply_text = "hello from mls-rs";
+        let reply = padded_content(&bound, &bob_keys, 0, added.finalization_id, reply_text)?;
+        let encrypted = bob_group
+            .encrypt_application_message(&reply, aad.clone())?
+            .to_bytes()?;
+        let received = step(
+            "mls-rs to openmls relay",
+            relay_application(&mut bob, &mut bob_keys, &mut alice, &bound, &encrypted),
+        )?;
+        let (decrypted, received_aad) = creator.decrypt(&mut group, &received)?;
+        assert_eq!(received_aad, aad);
+        assert_eq!(content_text(&decrypted)?, reply_text);
+
+        // The channel closes under the finalization that added bob.
+        step(
+            "close after real traffic",
+            close_conversation(&mut alice, &mut alice_keys, &bound, added.finalization_id),
+        )?;
+
+        let recorded = recorded_lifecycle()?;
+        for rule in RULES {
+            assert_eq!(
+                recorded.get(rule).map(String::as_str),
+                Some("agree"),
+                "rule {rule} is recorded as agree in the interop matrix"
+            );
+        }
+        assert_eq!(recorded.len(), RULES.len());
+        Ok(())
     }
 }
