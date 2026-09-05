@@ -34,7 +34,8 @@ CRATE_NAMES = {
     "agenc-ircd-testkit",
     "agenc-ircd-types",
 }
-EXPECTED_FEATURES = {'agenc-ircd': {'default': [],
+EXPECTED_FEATURES = {'agenc-ircd-storage': {'legacy-fixtures': []},
+ 'agenc-ircd': {'default': [],
                 'wss': ['agenc-ircd-config/wss', 'agenc-ircd-runtime/wss'],
                 'history': ['agenc-ircd-config/history', 'agenc-ircd-runtime/history']},
  'agenc-ircd-client-wire': {'default': [], 'wss': [], 'history': []},
@@ -513,6 +514,12 @@ def validate_package_manifest(manifest_path: Path, manifest: dict[str, object]) 
                 "agenc-ircd-crypto", "dependencies", "aws-lc-rs"
             ):
                 expected_declaration["optional"] = True
+            if (package_name, table_name, dependency_name) == (
+                "agenc-ircd", "dev-dependencies", "agenc-ircd-storage"
+            ):
+                # The binary's integration tests build generation-1 fixtures
+                # for the migration drill; the feature never reaches a build.
+                expected_declaration["features"] = ["legacy-fixtures"]
             if declaration != expected_declaration:
                 raise WorkspaceError(
                     f"{manifest_path} {table_name}.{dependency_name} must inherit the root pin"
@@ -557,6 +564,10 @@ def validate_package_manifest(manifest_path: Path, manifest: dict[str, object]) 
             if table_name == "dependencies":
                 continue
             if table_name == "dev-dependencies" and dependency_name == "agenc-ircd-testkit":
+                continue
+            if (package_name, table_name, dependency_name) == (
+                "agenc-ircd", "dev-dependencies", "agenc-ircd-storage"
+            ):
                 continue
             raise WorkspaceError(
                 f"{manifest_path} has forbidden {table_name}.{dependency_name} edge"
@@ -811,6 +822,7 @@ def graph_from_packages(packages: dict[str, dict[str, object]]) -> dict[str, set
                 allowed = dependency_name == "agenc-ircd-testkit" or (
                     name == "agenc-ircd"
                     and dependency_name in BINARY_TEST_WORKSPACE_DEPENDENCIES
+                    | {"agenc-ircd-storage"}
                 )
                 if not allowed:
                     raise WorkspaceError(

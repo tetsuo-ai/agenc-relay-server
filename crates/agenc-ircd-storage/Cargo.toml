@@ -16,6 +16,12 @@ rustix.workspace = true
 subtle.workspace = true
 zeroize.workspace = true
 
+[features]
+# Test-only constructor for generation-1 databases; the migration drill and
+# the engine tests build legacy fixtures through it. Never enabled by the
+# release build.
+legacy-fixtures = []
+
 [lints]
 workspace = true
 

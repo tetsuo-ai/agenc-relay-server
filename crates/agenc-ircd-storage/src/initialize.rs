@@ -114,9 +114,12 @@ pub fn initialize_storage(
     initialize_storage_inner(config)
 }
 
-/// Creates source-generation fixtures through the unchanged authenticated seal path.
-#[cfg(test)]
-pub(crate) fn initialize_legacy_test_storage(
+/// Creates generation-1 fixtures through the unchanged authenticated seal
+/// path, for the engine tests and the migration drill. Available only to
+/// tests and behind the `legacy-fixtures` feature; a release build has no
+/// way to construct a legacy database.
+#[cfg(any(test, feature = "legacy-fixtures"))]
+pub fn initialize_legacy_storage(
     config: StorageInitializationConfig,
 ) -> Result<StorageInitializationOutcome, StorageError> {
     if config.header_tbs.schema_generation != 1 {

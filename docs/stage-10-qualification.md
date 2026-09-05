@@ -124,9 +124,9 @@ shut down cleanly. Packet capture reported zero DNS packets, zero plaintext
 canary matches, and zero kernel drops. This evidence covers the local x86_64
 development build.
 
-The capacity and sustained-operation driver is implemented (below). The
-deployment drill driver is still being implemented. `check` refuses a policy
-whose required driver is absent.
+The capacity and sustained-operation driver and the operational drill driver
+are implemented (below). `check` refuses a policy whose required driver is
+absent.
 Source-status decisions, the complete critical coverage inventory, native
 build reproduction, and the long campaigns have not been completed. The
 release builder and detached signing path still need their full integration
@@ -236,6 +236,66 @@ A development run of 150 seconds with eight connections completes every
 scenario on this host. The 300-second capacity job and the seven-day soak
 have not been run against a prepared candidate.
 
+## Operational drills
+
+`scripts/qualify-stage-ten-drills.py` runs sixteen ignored integration tests
+in `stage_ten_drills`, one per required drill, against the frozen daemon
+installed at the test executables' `CARGO_BIN_EXE` path. Every drill starts
+its own coordinator and two edges with the local admin listener enabled,
+performs the operation the way the operator guide describes it, and writes
+`<name>.json` with its steps, per-step timings, facts, and verdict. The
+driver copies each record into the evidence directory, counts a drill only
+when its record is well formed and marked passed, and fails the job naming
+every drill that did not pass. Before the daemon drills it runs the shipped
+deployment checks: `check-deploy.py`, `systemd-analyze verify` of the
+service unit under each of the four profiles, `tor --verify-config` on the
+onion snippet, and the forbidden socket, proxy, and DNS path scan.
+
+Restore stops the coordinator, writes a signed backup through the production
+storage owner, restores it into a new directory with `storage restore`,
+re-pins the new recovery epoch on both edges, restarts everything, and
+authenticates the drill account and re-reads the drill channel's topic.
+Disaster restore removes the coordinator's state directory first and expects
+the receipt to report no current guard witness. Migration builds a
+generation-1 twin of an edge database through the storage crate's
+`legacy-fixtures` constructor, runs `storage migrate`, kills it part way,
+completes it with `--resume`, and serves the installed directory. Deletion
+creates and deletes an account through the client protocol, takes backups
+before creation, after creation, and after deletion, rekeys the coordinator
+from the last one, and checks the deleted login stays refused and the record
+and byte counts fell. Rekey restores an edge under a new master and guard key
+and authenticates an existing login through it. TLS rotation mints a new
+leaf under the same CA, reloads it with `REHASH`, and checks that a new
+connection sees the new leaf while an existing one continues. Federation
+rotation replaces an edge's signing key and its pinned public key on the
+coordinator. Sequencer rotation installs a new sequencer key and credentials
+document on every node and checks both edges acknowledge the E2EE profile
+again. Backup and audit rotation append a second key to the trust manifest,
+activate it, and verify artifacts under both keys: a backup written under
+each key restores, and every exported audit event verifies under one of the
+two. Compromise lowers the listener ceiling by reload, exports the audit
+range, restores the edge into a fenced incarnation, and sends the security
+notice. Rollback puts an older database file under the current guard and
+expects startup to refuse it. Resynchronization keeps a native client
+attached through an epoch change and re-onboards it. Host hardening checks
+listener exposure from the kernel socket table, private modes on state,
+keys, backups, and logs, the core limit where procfs is visible, injected
+privacy canaries in logs and captured stderr, crash containment under
+`SIGSEGV` and a repeated `SIGTERM`, and `require_locked_secrets = true`
+startup. Observability checks that every STATS selector answers with exactly
+its declared field set and that every log line names a registered event
+with a severity and timestamp.
+
+Development runs on this host pass twelve drills: migration (interrupted and
+resumed), rekey, TLS rotation (same-key renewal by reload, new key by
+restart, which `REHASH` refuses with `RESTART_REQUIRED`), federation
+rotation, sequencer rotation (a generation-1 set chaining from the previous
+credential), backup rotation, audit rotation, compromise (quiesced through
+the restart path, see CAP-8), rollback, resynchronization (see CAP-10), host
+hardening, and observability. Four do not pass and keep the drills job
+failing: restore and disaster restore (CAP-9), login-index transition
+(CAP-5), and deletion (CAP-11).
+
 ## Open findings
 
 ### STO-1: physical growth after a large-value leaf exceeds the qualification ceiling
@@ -334,6 +394,45 @@ authentication of an existing account at an edge was answered with `904 SASL
 authentication failed` in some runs and succeeded in others. The engine
 retries within a thirty-second grace after a restart and notes every such
 retry in the record.
+
+### CAP-8: a listener ceiling lowered by reload is not enforced
+
+Lowering the client listener's `max_connections` from 32 to 1 and reloading
+with `REHASH` returned `NOTE REHASH OK`, yet the next connection registered
+while one session was held and no `connection_refused` event was logged. The
+same configuration applied at a restart refuses the second connection.
+Section 22.6 lists a lowered listener ceiling as reloadable. The compromise
+drill records both outcomes and quiesces through the restart path.
+
+### CAP-9: the coordinator does not start on a directory restored from its own backup
+
+`storage restore` of a coordinator backup taken with the coordinator stopped
+completed and reported `state generation: source=30, current=30, target=0`,
+with and without a current guard witness. Starting the coordinator on the
+restored directory failed with "runtime startup failed: storage owner
+failed: storage state is stale or inconsistent". The same restore of an edge
+serves afterwards, and the rekey and resynchronization drills depend on it.
+The restore and disaster restore drills fail on this finding until the
+coordinator restore path preserves a startable state.
+
+### CAP-10: the admin DIE is refused while an account session is attached to the edge
+
+With an authenticated account session attached to an edge, every signed
+`DIE` from a fresh local admin session was rejected with
+`admin_rejected error=authentication_failed` and the admin transport closed,
+for sixty seconds of retries. After that client sent `QUIT`, the same
+command from the same operator identity was accepted at once. Guest
+sessions do not trigger it. The resynchronization drill records the refusal
+and stops the node after detaching the client.
+
+### CAP-11: account deletion has no reachable path in the federated profile
+
+`ACCT DELETE START` from an authenticated, freshly re-authenticated session
+at an edge is answered `FAIL ACCT BAD_STATE`: the edge forwards no account
+command to the coordinator. The coordinator's own client listener answers
+`CAP * NAK` for the sasl and account capabilities, so the account service
+cannot be reached there either. The deletion drill records both refusals and
+does not pass; the deletion and rekey evidence it would produce stays open.
 
 ## Release claims and limits
 

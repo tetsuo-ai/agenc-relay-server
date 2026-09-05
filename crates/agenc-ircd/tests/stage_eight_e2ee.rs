@@ -96,6 +96,8 @@ const START_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[path = "stage_eight_e2ee/stage_ten_capacity.rs"]
 mod stage_ten_capacity;
+#[path = "stage_eight_e2ee/stage_ten_drills.rs"]
+mod stage_ten_drills;
 const STOP_TIMEOUT: Duration = Duration::from_secs(20);
 /// The edge registers a client only once its coordinator link is ACTIVE;
 /// registration attempts before that fail closed and are retried.
@@ -261,6 +263,9 @@ struct NodeFixture {
     operator_id: OperatorId,
     /// The federation listener this node binds; only the coordinator has one.
     federation_listener: Option<SocketAddr>,
+    /// The OPAQUE fake registration record the database was initialized with,
+    /// so a drill can rebuild the same database at another schema generation.
+    opaque_fake_record: Vec<u8>,
 }
 
 struct NodePlan<'a> {
@@ -446,6 +451,7 @@ impl NodeFixture {
                 NodeRole::Coordinator => plan.federation_address,
                 _ => None,
             },
+            opaque_fake_record: opaque.expose_fake_record_for_persistence().to_vec(),
         })
     }
 
@@ -605,6 +611,37 @@ fn initialize_database(
     login_index: [u8; 32],
     opaque: &OpaqueProfile,
 ) -> TestResult {
+    let header = DatabaseHeaderTbs::new(
+        NETWORK_ID,
+        identity.server_id,
+        identity.incarnation,
+        database_id,
+        1,
+        SCHEMA_GENERATION,
+        identity.recovery_epoch,
+    )?;
+    initialize_database_with_header(
+        state_dir,
+        header,
+        storage_master,
+        rollback_guard,
+        login_index,
+        opaque.expose_fake_record_for_persistence(),
+    )
+}
+
+/// Initializes a fixture database under `header`; a generation-1 header goes
+/// through the storage crate's legacy fixture constructor so the migration
+/// drill can start from a real predecessor database.
+fn initialize_database_with_header(
+    state_dir: &Path,
+    header: DatabaseHeaderTbs,
+    storage_master: [u8; 32],
+    rollback_guard: [u8; 32],
+    login_index: [u8; 32],
+    fake_record: &[u8],
+) -> TestResult {
+    let schema_generation = header.schema_generation;
     let login_key = LoginIndexKey::from_bytes(login_index);
     let key_state = LoginIndexKeyState::stable(1, login_key.key_id(NETWORK_ID))?;
     let key_state_record = InitialStorageRecord::new(
@@ -620,7 +657,7 @@ fn initialize_database(
         0,
         None,
         Vec::new(),
-        opaque.expose_fake_record_for_persistence().to_vec(),
+        fake_record.to_vec(),
     )?;
     let fake_record = InitialStorageRecord::new(
         TableId::OpaqueRecord,
@@ -630,17 +667,9 @@ fn initialize_database(
     )?;
     let qualifications = embedded_storage_qualifications()?;
     let state_directory = StateDirectory::open(state_dir, &qualifications)?;
-    let outcome = initialize_storage(StorageInitializationConfig {
+    let config = StorageInitializationConfig {
         state_directory,
-        header_tbs: DatabaseHeaderTbs::new(
-            NETWORK_ID,
-            identity.server_id,
-            identity.incarnation,
-            database_id,
-            1,
-            SCHEMA_GENERATION,
-            identity.recovery_epoch,
-        )?,
+        header_tbs: header,
         storage_master_key: StorageMasterKey::from_bytes(storage_master),
         rollback_guard_root_key: RollbackGuardRootKey::from_bytes(rollback_guard),
         mode: StorageInitializationMode::Live,
@@ -656,7 +685,12 @@ fn initialize_database(
             backup_max_bytes: BACKUP_MAX_BYTES,
             integrity_checkpoint_manifests: 10_000,
         },
-    })?;
+    };
+    let outcome = if schema_generation == SCHEMA_GENERATION {
+        initialize_storage(config)?
+    } else {
+        agenc_ircd_storage::initialize_legacy_storage(config)?
+    };
     if !matches!(outcome, StorageInitializationOutcome::Complete { .. }) {
         return Err(failure("storage initialization became indeterminate"));
     }
@@ -737,7 +771,12 @@ impl DaemonProcess {
 
     /// Waits for a daemon that was asked to stop through its admin socket.
     fn wait(&mut self) -> TestResult<ExitStatus> {
-        let deadline = Instant::now() + STOP_TIMEOUT;
+        self.wait_within(STOP_TIMEOUT)
+    }
+
+    /// Like `wait`, with a caller-chosen budget.
+    fn wait_within(&mut self, budget: Duration) -> TestResult<ExitStatus> {
+        let deadline = Instant::now() + budget;
         loop {
             let child = self
                 .child

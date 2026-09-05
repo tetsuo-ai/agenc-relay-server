@@ -170,6 +170,17 @@ impl<'a> AdminSession<'a> {
             .ok_or_else(|| failure("VERSION reply lacks the 371 line"))
     }
 
+    /// Sends one command and returns every line up to and including the first
+    /// one `complete` accepts.
+    pub(crate) fn command_until(
+        &mut self,
+        command: &str,
+        complete: impl FnMut(&str) -> bool,
+    ) -> AdminResult<Vec<String>> {
+        self.send(command, None)?;
+        read_until(&mut self.reader, complete)
+    }
+
     /// Sends one command and returns every line through the batch end.
     pub(crate) fn command_batch(&mut self, command: &str) -> AdminResult<Vec<String>> {
         self.send(command, None)?;
@@ -194,7 +205,10 @@ impl<'a> AdminSession<'a> {
             ) else {
                 continue;
             };
-            if name.chars().all(|ch| ch.is_ascii_lowercase() || ch == '_') {
+            if name
+                .chars()
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+            {
                 values.push(((*name).to_owned(), value));
             }
         }
@@ -209,13 +223,37 @@ impl<'a> AdminSession<'a> {
     /// Runs a confirmation-gated command such as DIE.
     pub(crate) fn confirm_process(&mut self, command: &str) -> AdminResult {
         self.send(command, None)?;
-        let line = read_line(&mut self.reader)?;
-        let token_text = line
+        let challenge = read_line(&mut self.reader)?;
+        let verb = command.split_ascii_whitespace().next().unwrap_or_default();
+        if !challenge.starts_with(&format!("NOTE {verb} CONFIRM ")) {
+            return Err(failure(format!(
+                "{verb} was not offered for confirmation: {challenge}"
+            )));
+        }
+        let token_text = challenge
             .split_ascii_whitespace()
             .nth(3)
-            .ok_or_else(|| failure(format!("confirmation token missing: {line}")))?;
+            .ok_or_else(|| failure(format!("confirmation token missing: {challenge}")))?;
         let token = ConfirmationToken::parse(token_text.as_bytes())?;
-        self.send(command, Some(&token))
+        self.send(command, Some(&token))?;
+        // A committed process action closes the transport; a refusal answers.
+        let mut line = String::new();
+        match self.reader.read_line(&mut line) {
+            Ok(0) => Ok(()),
+            Ok(_) if line.starts_with("FAIL") => Err(failure(line.trim_end().to_owned())),
+            Ok(_) => Ok(()),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::BrokenPipe
+                        | io::ErrorKind::UnexpectedEof
+                ) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     pub(crate) fn quit(mut self) -> AdminResult {

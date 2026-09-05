@@ -19,6 +19,7 @@ agenc-ircd-storage.workspace = true
 agenc-ircd-admin.workspace = true
 agenc-ircd-auth.workspace = true
 agenc-ircd-crypto.workspace = true
+agenc-ircd-storage = { workspace = true, features = ["legacy-fixtures"] }
 agenc-ircd-testkit.workspace = true
 agenc-ircd-types.workspace = true
 argon2.workspace = true

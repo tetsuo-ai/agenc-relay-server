@@ -92,6 +92,8 @@ pub use federation_records::{
     outbox_range, parse_origin_key, parse_outbox_key, parse_projection_key, peer_key,
     projection_entry_key, projection_marker_key, projection_range, request_result_key,
 };
+#[cfg(any(test, feature = "legacy-fixtures"))]
+pub use initialize::initialize_legacy_storage;
 pub use initialize::{
     InitialStorageRecord, StorageInitializationConfig, StorageInitializationMode,
     StorageInitializationOutcome, initialize_storage,

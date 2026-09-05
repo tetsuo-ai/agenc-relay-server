@@ -680,5 +680,46 @@ class CapacityDriverTests(unittest.TestCase):
             driver.validate_campaign(self.record(driver), 300, 65)
 
 
+class DrillsDriverTests(unittest.TestCase):
+    """The drills driver only counts a drill that wrote a well-formed passing record."""
+
+    @staticmethod
+    def driver():
+        import importlib.util
+
+        path = Path(__file__).resolve().parent / "qualify-stage-ten-drills.py"
+        specification = importlib.util.spec_from_file_location("qualify_stage_ten_drills", path)
+        module = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(module)
+        return module
+
+    @staticmethod
+    def record(name: str = "restore", passed: bool = True) -> dict:
+        return {"schema_version": 1, "drill": name, "passed": passed, "elapsed_ns": 12_000,
+                "steps": [{"name": "backup", "elapsed_ns": 5_000, "detail": "40 rows"}],
+                "facts": {"recovery_epoch": "abc", "daemons_stopped_cleanly": "[true, true, true]"}}
+
+    def test_record_shape_and_verdict_are_enforced(self) -> None:
+        driver = self.driver()
+        self.assertEqual(driver.DRILLS, sorted(driver.DRILLS, key=driver.DRILLS.index))
+        self.assertEqual(len(driver.DRILLS), 16)
+        self.assertTrue(driver.validate_record(self.record(), "restore"))
+        self.assertFalse(driver.validate_record(self.record(passed=False), "restore"))
+        for mutate in (
+            lambda record: record.__setitem__("drill", "rekey"),
+            lambda record: record.__setitem__("schema_version", 2),
+            lambda record: record.__setitem__("steps", []),
+            lambda record: record["steps"].__setitem__(0, {"name": "x"}),
+            lambda record: record.__setitem__("facts", {"n": 1}),
+            lambda record: record.__setitem__("passed", "yes"),
+            lambda record: record["facts"].__setitem__("error", "boom"),
+            lambda record: record.__setitem__("elapsed_ns", -1),
+        ):
+            changed = self.record()
+            mutate(changed)
+            with self.subTest(record=changed), self.assertRaises(QualificationError):
+                driver.validate_record(changed, "restore")
+
+
 if __name__ == "__main__":
     unittest.main()

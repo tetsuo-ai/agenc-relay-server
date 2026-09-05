@@ -97,22 +97,18 @@ impl Fixture {
         if history {
             self.add_channel(&mut records)?;
         }
-        let result =
-            crate::initialize::initialize_legacy_test_storage(StorageInitializationConfig {
-                state_directory: StateDirectory::open(
-                    &self.path.join("source"),
-                    &self.qualifications,
-                )?,
-                header_tbs: self.header(),
-                storage_master_key: StorageMasterKey::from_bytes([27; 32]),
-                rollback_guard_root_key: RollbackGuardRootKey::from_bytes([28; 32]),
-                mode: StorageInitializationMode::Live,
-                initial_records: records,
-                account_service_response_count: 11,
-                state_generation: 7,
-                predecessor_guard_hash: ZERO,
-                limits: engine_limits(),
-            })?;
+        let result = crate::initialize::initialize_legacy_storage(StorageInitializationConfig {
+            state_directory: StateDirectory::open(&self.path.join("source"), &self.qualifications)?,
+            header_tbs: self.header(),
+            storage_master_key: StorageMasterKey::from_bytes([27; 32]),
+            rollback_guard_root_key: RollbackGuardRootKey::from_bytes([28; 32]),
+            mode: StorageInitializationMode::Live,
+            initial_records: records,
+            account_service_response_count: 11,
+            state_generation: 7,
+            predecessor_guard_hash: ZERO,
+            limits: engine_limits(),
+        })?;
         assert!(matches!(
             result,
             StorageInitializationOutcome::Complete { .. }

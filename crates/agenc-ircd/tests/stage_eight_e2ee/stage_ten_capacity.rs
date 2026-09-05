@@ -33,7 +33,7 @@ use rustix::fs::{FallocateFlags, fallocate};
 use super::*;
 
 #[path = "../support/admin_client.rs"]
-mod admin_client;
+pub(super) mod admin_client;
 
 use admin_client::{AdminIdentity, AdminSession};
 
@@ -807,7 +807,7 @@ fn pid(daemon: &DaemonProcess) -> TestResult<u32> {
         .ok_or_else(|| failure("daemon is not running"))
 }
 
-fn admin_identity(fixture: &NodeFixture) -> AdminIdentity {
+pub(super) fn admin_identity(fixture: &NodeFixture) -> AdminIdentity {
     AdminIdentity {
         socket: fixture.admin_socket.clone(),
         network_id: NETWORK_ID,
@@ -1578,15 +1578,15 @@ the post-restart grace (CAP-7)"
     }
 }
 
-fn current_state_dir(fixture: &NodeFixture) -> TestResult<PathBuf> {
+pub(super) fn current_state_dir(fixture: &NodeFixture) -> TestResult<PathBuf> {
     Ok(PathBuf::from(current_config_value(fixture, "state_dir")?))
 }
 
-fn current_key_file(fixture: &NodeFixture, key: &str) -> TestResult<PathBuf> {
+pub(super) fn current_key_file(fixture: &NodeFixture, key: &str) -> TestResult<PathBuf> {
     Ok(PathBuf::from(current_config_value(fixture, key)?))
 }
 
-fn current_config_value(fixture: &NodeFixture, key: &str) -> TestResult<String> {
+pub(super) fn current_config_value(fixture: &NodeFixture, key: &str) -> TestResult<String> {
     let config = fs::read_to_string(&fixture.config_path)?;
     config
         .lines()
@@ -1597,7 +1597,11 @@ fn current_config_value(fixture: &NodeFixture, key: &str) -> TestResult<String> 
 }
 
 /// Replaces the pinned recovery epoch of one peer entry in the coordinator config.
-fn repin_peer_epoch(coordinator: &NodeFixture, peer: ServerId, epoch: &str) -> TestResult {
+pub(super) fn repin_peer_epoch(
+    coordinator: &NodeFixture,
+    peer: ServerId,
+    epoch: &str,
+) -> TestResult {
     let config = fs::read_to_string(&coordinator.config_path)?;
     let marker = format!("server_id = \"{}\"\n", peer.to_base64url());
     let start = config
@@ -1619,7 +1623,7 @@ fn repin_peer_epoch(coordinator: &NodeFixture, peer: ServerId, epoch: &str) -> T
     Ok(())
 }
 
-fn hardware() -> TestResult<String> {
+pub(super) fn hardware() -> TestResult<String> {
     let cpuinfo = fs::read_to_string("/proc/cpuinfo")?;
     let model = cpuinfo
         .lines()
