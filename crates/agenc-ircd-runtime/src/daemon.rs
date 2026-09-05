@@ -164,6 +164,8 @@ pub enum DaemonError {
     RuntimeStart,
     /// A supervised owner ended unexpectedly.
     TaskFailed,
+    /// The state owner stopped on its own; the exit names why.
+    StateCore(StateCoreExit),
     /// One or more owners did not join within the configured shutdown budget.
     ShutdownTimeout,
     /// A shutdown phase returned a closed owner failure.
@@ -190,6 +192,7 @@ impl fmt::Display for DaemonError {
             Self::Runtime(error) => write!(formatter, "runtime startup failed: {error}"),
             Self::RuntimeStart => formatter.write_str("Tokio runtime startup failed"),
             Self::TaskFailed => formatter.write_str("a supervised daemon owner failed"),
+            Self::StateCore(exit) => write!(formatter, "the state owner stopped: {exit}"),
             Self::ShutdownTimeout => formatter.write_str("daemon shutdown exceeded its deadline"),
             Self::ShutdownFailed(phase, failure) => write!(
                 formatter,
@@ -3356,7 +3359,10 @@ fn state_completion_failure(
     if matches!(completion, Ok(StateCoreExit::Indeterminate(_))) {
         observer.storage_indeterminate();
     }
-    DaemonError::TaskFailed
+    match completion {
+        Ok(exit) => DaemonError::StateCore(exit),
+        Err(_) => DaemonError::TaskFailed,
+    }
 }
 
 enum ShutdownTrigger {
@@ -4204,6 +4210,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_state_owner_exit_names_its_cause_in_the_daemon_failure() {
+        use crate::state_core::{CorruptionCause, IndeterminateCause};
+        let (observer, _log) = test_observer();
+        let corrupt = state_completion_failure(
+            Ok(StateCoreExit::Corrupt(CorruptionCause::ProjectionFailed)),
+            &observer,
+        );
+        assert_eq!(
+            corrupt.to_string(),
+            "the state owner stopped: state core committed state unusable: a plan projection failed"
+        );
+        let indeterminate = state_completion_failure(
+            Ok(StateCoreExit::Indeterminate(
+                IndeterminateCause::StorageIndeterminate,
+            )),
+            &observer,
+        );
+        assert_eq!(
+            indeterminate.to_string(),
+            "the state owner stopped: state core durable outcome indeterminate: storage reported an indeterminate commit"
+        );
+        let (sender, receiver) = oneshot::channel::<StateCoreExit>();
+        drop(sender);
+        let lost = receiver.await;
+        assert!(matches!(
+            state_completion_failure(lost, &observer),
+            DaemonError::TaskFailed
+        ));
+    }
+
+    #[tokio::test]
     async fn maintenance_completion_triggers_shutdown_without_consuming_the_join_record()
     -> Result<(), RuntimeError> {
         let mut supervisor = Supervisor::new();
@@ -4248,7 +4285,9 @@ mod tests {
                 )),
                 observer.as_ref(),
             ),
-            DaemonError::TaskFailed
+            DaemonError::StateCore(StateCoreExit::Indeterminate(
+                IndeterminateCause::StorageIndeterminate
+            ))
         ));
         let snapshot = observer.metrics().snapshot(MetricsView::Operator);
         assert!(snapshot.counts.iter().any(|(key, histogram)| {

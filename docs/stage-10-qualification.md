@@ -739,6 +739,25 @@ outbox object remains, which is how an operator stops a coordinator after
 its links go quiet. Bounding the stop phase against an outstanding
 acknowledgement backlog in the daemon itself stays open.
 
+### CAP-15: a batch gathered during the index read-back stopped the coordinator as corrupt
+
+Fixed. After a commit, the state core reads the committed rows back into
+its durable index, and until that read completes those rows are pending.
+A plan staged in the same turn, most often by the federation coordinator
+draining its queue right after the commit, gathered for its one-millisecond
+window and was then submitted by the wake timer while the read-back was
+still in flight; its projection met a pending row, reported a stale state,
+and the state core stopped as corrupt. The daemon then shut down with only
+`a supervised daemon owner failed` on stderr. Under disk pressure the
+read-back takes longer and the window widens: the third candidate's
+capacity job lost its coordinator this way in the first cycle, and one in
+four release-profile development runs reproduced it. The state core now
+holds a gathered batch while a read-back is in flight and submits it when
+the index is current, with a unit test that stages a plan, marks a read-back
+in flight, and requires the batch to wait. The daemon also names the state
+owner's exit cause on stderr, from a closed label set, so the next such
+stop is attributable without a rebuild.
+
 ## Release claims and limits
 
 The signing command requires an explicit Ed25519 signing key and matching

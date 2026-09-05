@@ -405,6 +405,33 @@ pub enum CorruptionCause {
     ConnectionStateFailed,
 }
 
+impl IndeterminateCause {
+    /// The closed label an operator sees for this cause.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::StorageIndeterminate => "storage reported an indeterminate commit",
+            Self::TransactionMismatch => "a receipt named another transaction",
+            Self::UnexpectedCompletion => "a receipt arrived with nothing in flight",
+            Self::CompletionChannelClosed => "the completion channel closed with a batch pending",
+            Self::Bridge(_) => "the storage bridge refused or failed",
+        }
+    }
+}
+
+impl CorruptionCause {
+    /// The closed label an operator sees for this cause.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ApplyFailed => "committed rows could not be applied",
+            Self::IndexRefreshFailed => "committed rows could not be read back",
+            Self::ProjectionFailed => "a plan projection failed",
+            Self::ConnectionStateFailed => "a physical close named an unknown connection",
+        }
+    }
+}
+
 impl fmt::Display for StateCoreExit {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -413,10 +440,16 @@ impl fmt::Display for StateCoreExit {
             Self::Quiesced => formatter.write_str("state core quiesced"),
             Self::Interrupted => formatter.write_str("state core interrupted"),
             Self::Stopped => formatter.write_str("state core stopped"),
-            Self::Indeterminate(_) => {
-                formatter.write_str("state core durable outcome indeterminate")
-            }
-            Self::Corrupt(_) => formatter.write_str("state core committed state unusable"),
+            Self::Indeterminate(cause) => write!(
+                formatter,
+                "state core durable outcome indeterminate: {}",
+                cause.label()
+            ),
+            Self::Corrupt(cause) => write!(
+                formatter,
+                "state core committed state unusable: {}",
+                cause.label()
+            ),
         }
     }
 }
@@ -1739,6 +1772,9 @@ pub struct StateCore {
     reload_provisional: Option<ProvisionalReload>,
     checkpoint_pending: Option<PendingIntegrityCheckpoint>,
     checkpoint_retry_suppressed: bool,
+    /// Whether the rows of the last commit are still being read back into
+    /// the index; no batch projects until they are.
+    index_refresh_in_flight: bool,
     storage_limit_writer: StorageLimitWriter,
     liveness: Arc<Liveness>,
 }
@@ -2086,6 +2122,7 @@ impl StateCore {
             reload_provisional: None,
             checkpoint_pending: None,
             checkpoint_retry_suppressed: false,
+            index_refresh_in_flight: false,
             storage_limit_writer: inputs.storage_limit_writer,
             liveness: inputs.liveness,
         };
@@ -3505,9 +3542,15 @@ impl StateCore {
 
     /// Drives the pending batch and routes any rejections.
     fn step_batch(&mut self) -> Option<StateCoreExit> {
+        // A projection reads the sealed identity of every row it touches;
+        // rows the last commit wrote are known only once the index read them
+        // back, so a batch gathered meanwhile waits for that refresh instead
+        // of projecting against pending rows and stopping the core as
+        // corrupt.
         if self.admin_pending.is_some()
             || self.reload_provisional.is_some()
             || self.checkpoint_pending.is_some()
+            || self.index_refresh_in_flight
         {
             return None;
         }
@@ -3701,6 +3744,7 @@ impl StateCore {
         progress.tick().await;
         loop {
             let refresh_in_flight = index_refresh.is_some();
+            self.index_refresh_in_flight = refresh_in_flight;
             let refresh_blocked = index_refresh
                 .as_ref()
                 .is_some_and(|pending: &PendingIndexRefresh| pending.waiting.is_none());
@@ -3917,6 +3961,7 @@ impl StateCore {
                                 Ok(pending) => {
                                     let complete = pending.is_none();
                                     index_refresh = pending;
+                                    self.index_refresh_in_flight = index_refresh.is_some();
                                     if complete {
                                         self.step_batch()
                                     } else {
@@ -3944,6 +3989,8 @@ impl StateCore {
                                             Ok(next) => {
                                                 let complete = next.is_none();
                                                 index_refresh = next;
+                                self.index_refresh_in_flight = index_refresh.is_some();
+                                                self.index_refresh_in_flight = index_refresh.is_some();
                                                 if complete {
                                                     self.step_batch()
                                                 } else {
@@ -3968,6 +4015,9 @@ impl StateCore {
                                                 Ok(next) => {
                                                     let complete = next.is_none();
                                                     index_refresh = next;
+                                self.index_refresh_in_flight = index_refresh.is_some();
+                                                    self.index_refresh_in_flight = index_refresh.is_some();
+                                                self.index_refresh_in_flight = index_refresh.is_some();
                                                     Ok(complete)
                                                 }
                                                 Err(exit) => Err(exit),
@@ -4010,6 +4060,7 @@ impl StateCore {
                             Ok(next) => {
                                 let complete = next.is_none();
                                 index_refresh = next;
+                                self.index_refresh_in_flight = index_refresh.is_some();
                                 if complete {
                                     self.step_batch()
                                 } else {
@@ -4088,6 +4139,49 @@ mod lifecycle_tests {
             invites_global: 4,
             contacts_per_account: 1_000,
         })
+    }
+
+    #[test]
+    fn a_gathered_batch_waits_while_the_index_reads_the_last_commit_back()
+    -> crate::test_support::TestResult {
+        let mut fixture = crate::test_support::StateCoreFixture::with_registration_router(
+            (0_u32..65_536)
+                .map(|index| u8::try_from((index * 7 + 3) % 256).unwrap_or_default())
+                .collect(),
+        )?;
+        let mut parts = fixture.take_run_parts()?;
+        let core = &mut parts.state;
+        let generation = agenc_ircd_types::Generation::new(1)?;
+        let revision = core.context.domain().revision();
+        let account = agenc_ircd_domain::AccountState::new(
+            agenc_ircd_testkit::account_id(7),
+            generation,
+            revision,
+        );
+        let plan = core.context.domain().plan_account_created(account)?;
+        let request = crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())?;
+        core.context
+            .stage_durable(plan, request, None, 0)
+            .map_err(|_| "staging was refused")?;
+        assert_eq!(core.context.pending_len(), 1);
+        // The gather window closes; the rows of the previous commit are
+        // still being read back, so the batch must not project yet.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        core.index_refresh_in_flight = true;
+        assert!(core.step_batch().is_none());
+        assert!(
+            !core.context.in_flight(),
+            "the batch waits for the index read-back"
+        );
+        assert_eq!(core.context.pending_len(), 1);
+        // Once the index is current the same batch goes to storage.
+        core.index_refresh_in_flight = false;
+        assert!(core.step_batch().is_none());
+        assert!(
+            core.context.in_flight(),
+            "the batch is with storage once the index is current"
+        );
+        Ok(())
     }
 
     #[test]
