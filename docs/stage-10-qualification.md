@@ -630,6 +630,27 @@ command to the coordinator. The coordinator's own client listener answers
 cannot be reached there either. The deletion drill records both refusals and
 does not pass; the deletion and rekey evidence it would produce stays open.
 
+### CAP-12: a snapshot marker refused under disk pressure left the edge waiting on the coordinator
+
+Found by the third 64-client development run of the capacity engine and
+fixed in the same commit. The disk pressure scenario fills the filesystem
+under all three nodes. When the coordinator's link to an edge dropped and
+came back while the reserve was still breached, the edge's cursor no longer
+matched the coordinator's and the coordinator opened a new projection
+generation. The announcement, the cut, and END left on the wire at once; the
+generation marker row behind them was a durable batch, and storage refused
+it. Nothing re-staged the marker afterwards: the edge answered READY, the
+READY marker was refused too, and the coordinator's own expiry skips a
+snapshot that reached READY, so the edge stayed in the snapshot phase and
+answered every registration with `NETWORK_UNAVAILABLE` after the pressure
+cleared. The first cycle of the same run passed because its cursor was
+retained and the resume needed no durable write. The coordinator now drops
+the unfinished generation and retires the link when either marker batch is
+refused; the edge reconnects and resumes from its committed projection once
+storage accepts writes again. A coordinator unit test stages the marker,
+refuses the batch, and requires the retired link, the dropped generation,
+and the cancelled expiry timer.
+
 ## Release claims and limits
 
 The signing command requires an explicit Ed25519 signing key and matching

@@ -1107,7 +1107,10 @@ impl FederationCoordinator {
         }
     }
 
-    /// Drops the work behind a rejected batch; the edge retries it.
+    /// Drops the work behind a rejected batch; the edge retries it. A
+    /// snapshot whose marker row did not persist loses its link, so the edge
+    /// resumes from its committed projection instead of waiting out the
+    /// token lifetime for entries the coordinator will never send.
     pub fn batch_rejected(&mut self, context: &mut StateCoreContext) {
         self.remote_grant_rejected();
         match self.pending.take() {
@@ -1117,6 +1120,9 @@ impl FederationCoordinator {
                 if let Some(executor) = self.companion_exec.as_mut() {
                     executor.batch_rejected();
                 }
+            }
+            Some(PendingCommit::SnapshotRows { peer } | PendingCommit::SnapshotReady { peer }) => {
+                snapshot::rejected(self, context, peer);
             }
             _ => {}
         }

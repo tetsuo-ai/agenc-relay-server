@@ -1347,6 +1347,100 @@ async fn a_closed_queue_under_a_snapshot_announcement_is_not_a_violation() -> Te
 }
 
 #[tokio::test]
+async fn a_rejected_snapshot_marker_retires_the_link_instead_of_waiting_for_expiry() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let context = fixture.context_mut()?;
+    let mut coordinator = standalone_coordinator(peer);
+    let incarnation = ServerIncarnation::from_bytes([51; 16]);
+    let (handle, mut queue) = link_queue(1 << 20);
+    coordinator.inbound(context, established(1, peer, incarnation, handle));
+    coordinator.inbound(context, reset_frame(1, peer, incarnation));
+    // A generation the coordinator does not retain forces the snapshot route;
+    // the announcement and the empty cut leave before the marker row is
+    // durable.
+    coordinator.inbound(
+        context,
+        FederationInbound {
+            link: LinkId::new(1),
+            peer,
+            event: LinkEvent::Frame(FederationFrame::Resume {
+                coordinator_server_id: COORDINATOR,
+                projection_generation: 0,
+                cursor: agenc_ircd_federation_wire::DeliveryCursor::Empty,
+            }),
+            charge: None,
+        },
+    );
+    assert_eq!(coordinator.counters().violations, 0);
+    assert_eq!(context.pending_len(), 1, "the marker row is staged");
+    let mut identity = None;
+    for expected in ["FRESUME SNAPSHOT", "FSNAPSHOT BEGIN", "FSNAPSHOT END"] {
+        let line = queue
+            .recv()
+            .await
+            .ok_or("the announcement was not queued")?;
+        let text = line.as_str().trim_end_matches("\r\n").to_owned();
+        let frame =
+            parse_frame(&text, COORDINATOR_NAME).map_err(|error| format!("{error:?}: {text}"))?;
+        let announced = match frame {
+            FederationFrame::ResumeSnapshot { .. } => "FRESUME SNAPSHOT",
+            FederationFrame::SnapshotBegin {
+                identity: begun, ..
+            } => {
+                identity = Some(begun);
+                "FSNAPSHOT BEGIN"
+            }
+            FederationFrame::SnapshotEnd { .. } => "FSNAPSHOT END",
+            _ => "another frame",
+        };
+        assert_eq!(announced, expected, "{text}");
+    }
+    let identity = identity.ok_or("FSNAPSHOT BEGIN carried no identity")?;
+    // The edge answers READY while the marker batch is still in flight; the
+    // frame waits in the backlog behind that batch.
+    coordinator.inbound(
+        context,
+        FederationInbound {
+            link: LinkId::new(1),
+            peer,
+            event: LinkEvent::Frame(FederationFrame::SnapshotReady {
+                coordinator_server_id: COORDINATOR,
+                identity,
+            }),
+            charge: None,
+        },
+    );
+    // Storage refuses the marker batch, as it does under disk pressure. No
+    // later event re-stages the marker, so the coordinator must retire the
+    // link instead of leaving the edge in the snapshot phase for the whole
+    // token lifetime, and the replayed READY finds no live link.
+    coordinator.batch_rejected(context);
+    assert_eq!(coordinator.counters().violations, 1);
+    let state = coordinator.peers.get(&peer).ok_or("peer state missing")?;
+    assert!(
+        state.snapshot.is_none(),
+        "the unfinished generation is dropped"
+    );
+    assert!(state.live.is_none(), "the link is retired");
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(5), queue.recv())
+        .await
+        .map_err(|_| "the link writer received no close request")?;
+    assert!(closed.is_none(), "the close request ends the queue");
+    // Grace runs for the peer and the snapshot expiry no longer waits.
+    let deadline = grace_deadline(context)?;
+    let _entry = pop_grace_timer(context, peer, deadline)?;
+    assert!(
+        context
+            .timers_mut()
+            .pop_due(agenc_ircd_types::MonotonicTick::from_ticks(u64::MAX / 2))
+            .is_none(),
+        "the snapshot expiry timer is cancelled with its generation"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_new_incarnation_hides_the_sessions_of_the_previous_one() -> TestResult {
     let peer = ServerId::from_bytes([50; 16]);
     let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;

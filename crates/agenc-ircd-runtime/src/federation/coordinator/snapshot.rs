@@ -897,6 +897,32 @@ pub(super) fn ready_committed(
     }
 }
 
+/// Drops a generation whose marker or READY row did not persist and retires
+/// its link. Storage refused the batch (disk pressure, most often), and no
+/// later event re-stages the marker, so the edge would otherwise sit in the
+/// snapshot phase until the token expired. Reconnecting resumes from the
+/// edge's committed projection once storage accepts writes again.
+pub(super) fn rejected(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    peer: ServerId,
+) {
+    let Some(state) = coordinator.peers.get_mut(&peer) else {
+        return;
+    };
+    let Some(snapshot) = state.snapshot.take() else {
+        return;
+    };
+    let _cancelled = context
+        .timers_mut()
+        .cancel(TimerKind::FederationSnapshotExpiry, TimedId::Peer(peer));
+    let link = snapshot.link;
+    let live = state.live.as_ref().is_some_and(|live| live.link == link);
+    if live {
+        coordinator.fail_link(context, link, peer, Violation::Ceiling);
+    }
+}
+
 /// Handles the pacing and expiry timers; returns whether one was federation's.
 pub(super) fn timer_fired(
     coordinator: &mut FederationCoordinator,

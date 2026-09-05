@@ -2803,7 +2803,7 @@ alone.
   - References: [Architecture §28.7](docs/ircd-architecture-and-implementation-spec.md#287-abuse-and-capacity-tests).
   - Invariants: `CON-02`, `CON-05`, `FED-09`, `DUR-11`.
   - Evidence: p50/p95/p99 latency, memory/task/descriptor/queue high-water reports, missed-event checks, and return-to-envelope evidence.
-  - Progress: the capacity engine and `scripts/qualify-stage-ten-capacity.py` pass the 300-second capacity demonstration; the seven-day soak has not run; findings CAP-1 through CAP-8 are recorded.
+  - Progress: the capacity engine and `scripts/qualify-stage-ten-capacity.py` run the 300-second capacity demonstration; the 64-client development runs found the per-address admission ceilings and the refused snapshot marker (CAP-12, fixed in the coordinator); the seven-day soak has not run; findings CAP-1 through CAP-8 and CAP-12 are recorded.
 
 - [ ] `S10-008` **Run restore, migration, deletion, and key-lifecycle drills.**
   Exercise ordinary and disaster restore, schema migration, storage rekey,
