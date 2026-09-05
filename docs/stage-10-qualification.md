@@ -594,6 +594,17 @@ since no committed event could have produced it. Compare-and-set operations
 coordinator unit test commits a message one revision behind and refuses one
 ahead.
 
+The refusal breakdown the engine now records showed a second `SERVER_BUSY`
+source once the revision check was gone: the coordinator planned a request
+while another router's plan was still open in the state core (a session
+close retried after a batch applied, most often), the staging was refused as
+busy, and the request was answered `SERVER_BUSY` for a slot that freed a few
+milliseconds later. About a quarter of the channel messages in a cycle were
+refused that way. A request now waits in its peer's queue while any batch is
+staged or in flight, exactly as it already waited for the coordinator's own
+batch, and a coordinator unit test holds a batch open and requires the
+request to queue rather than answer.
+
 ### CAP-7: the first OPAQUE login after a coordinator restart can fail with 904
 
 After a coordinator restart, with both edge links re-established, the first

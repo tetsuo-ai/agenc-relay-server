@@ -48,6 +48,8 @@ const SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
 const QUIESCE_WINDOW: Duration = Duration::from_secs(8);
 const SCENARIO_SETTLE: Duration = Duration::from_secs(12);
 const FINAL_RESERVE: Duration = Duration::from_secs(45);
+/// Steady-state rest between two cycles when the budget holds another.
+const INTER_CYCLE_REST: Duration = Duration::from_secs(60);
 const LOAD_CHANNEL: &str = "#load";
 const CHANNEL_MESSAGE_PERIOD: Duration = Duration::from_secs(1);
 const DIRECT_MESSAGE_PERIOD: Duration = Duration::from_secs(2);
@@ -149,6 +151,8 @@ struct Shared {
     refused: AtomicU64,
     /// Refusals by their FAIL code, bounded to a small closed set.
     refused_codes: Mutex<BTreeMap<String, u64>>,
+    /// Refusals per ten-second bucket of campaign time.
+    refused_buckets: Mutex<BTreeMap<u64, u64>>,
     received: AtomicU64,
     worker_errors: Mutex<Vec<String>>,
 }
@@ -170,6 +174,7 @@ impl Shared {
             sent: AtomicU64::new(0),
             refused: AtomicU64::new(0),
             refused_codes: Mutex::new(BTreeMap::new()),
+            refused_buckets: Mutex::new(BTreeMap::new()),
             received: AtomicU64::new(0),
             worker_errors: Mutex::new(Vec::new()),
         }
@@ -365,6 +370,10 @@ impl Session {
                 && (codes.contains_key(code) || codes.len() < 16)
             {
                 *codes.entry(code.to_owned()).or_insert(0) += 1;
+            }
+            if let Ok(mut buckets) = shared.refused_buckets.lock() {
+                let bucket = shared.epoch.elapsed().as_secs() / 10 * 10;
+                *buckets.entry(bucket).or_insert(0) += 1;
             }
             self.resend = true;
             if shared.refused.load(Ordering::Relaxed) <= 8 {
@@ -1878,7 +1887,7 @@ fn write_report(
         scenarios.snapshot, scenarios.backup, scenarios.disk_pressure, scenarios.peer_loss
     ));
     json.push_str(&format!(
-        "\"missed_events\":{},\"envelope_violations\":{},\"sample_failures\":{},\"returned_to_envelope\":{returned},\"worker_reconnects\":{},\"worker_churns\":{},\"messages_sent\":{},\"messages_received\":{},\"messages_refused\":{},\"refused_by_code\":{{{}}},\"daemons_stopped_cleanly\":[{},{},{}],\"reserve_bytes\":{},\"hardware\":\"{}\",\"worker_errors\":{},\"log\":[",
+        "\"missed_events\":{},\"envelope_violations\":{},\"sample_failures\":{},\"returned_to_envelope\":{returned},\"worker_reconnects\":{},\"worker_churns\":{},\"messages_sent\":{},\"messages_received\":{},\"messages_refused\":{},\"refused_by_code\":{{{}}},\"refused_by_time\":{{{}}},\"daemons_stopped_cleanly\":[{},{},{}],\"reserve_bytes\":{},\"hardware\":\"{}\",\"worker_errors\":{},\"log\":[",
         shared.missed_events.load(Ordering::Relaxed),
         campaign.envelope_violations,
         campaign.sample_failures,
@@ -1893,6 +1902,16 @@ fn write_report(
                 codes
                     .iter()
                     .map(|(code, count)| format!("\"{code}\":{count}"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            }
+        ),
+        shared.refused_buckets.lock().map_or_else(
+            |_| String::new(),
+            |buckets| {
+                buckets
+                    .iter()
+                    .map(|(bucket, count)| format!("\"{bucket}\":{count}"))
                     .collect::<Vec<_>>()
                     .join(",")
             }
@@ -1993,12 +2012,15 @@ fn control<'a>(
         campaign.cycle(number)?;
         last_cycle = started.elapsed();
         let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining > FINAL_RESERVE + SAMPLE_INTERVAL {
-            campaign.settle(
-                (remaining - FINAL_RESERVE)
-                    .min(Duration::from_secs(600))
-                    .as_secs(),
-            )?;
+        // Rest between cycles when another fits; otherwise settle through
+        // the rest of the budget up to the final reserve.
+        let rest = if remaining > FINAL_RESERVE + last_cycle + INTER_CYCLE_REST {
+            INTER_CYCLE_REST
+        } else {
+            remaining.saturating_sub(FINAL_RESERVE)
+        };
+        if rest > SAMPLE_INTERVAL {
+            campaign.settle(rest.min(Duration::from_secs(600)).as_secs())?;
         }
     }
     *returned = campaign.quiesce()?;

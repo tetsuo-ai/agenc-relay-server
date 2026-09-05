@@ -64,12 +64,19 @@ pub(super) fn receive(
     object: AssembledObject,
     charge: Option<IngressCharge>,
 ) -> Result<(), Violation> {
+    // A request plans against the current state and stages its own batch.
+    // It waits while this link's crypto job, the coordinator's own batch, a
+    // history read, or a batch any other router staged is still open, so
+    // the plan is never refused as busy and answered with SERVER_BUSY for
+    // a slot that frees a few milliseconds later.
     let busy = coordinator
         .crypto
         .as_ref()
         .is_some_and(|pending| pending.link == link)
         || coordinator.pending.is_some()
-        || coordinator.history.busy();
+        || coordinator.history.busy()
+        || context.in_flight()
+        || context.pending_len() != 0;
     if busy {
         let state = coordinator
             .peers
@@ -94,7 +101,11 @@ pub(super) fn drain_queued(
     coordinator: &mut FederationCoordinator,
     context: &mut StateCoreContext,
 ) {
-    if coordinator.pending.is_some() || coordinator.history.busy() {
+    if coordinator.pending.is_some()
+        || coordinator.history.busy()
+        || context.in_flight()
+        || context.pending_len() != 0
+    {
         return;
     }
     let next = coordinator.peers.iter_mut().find_map(|(peer, state)| {

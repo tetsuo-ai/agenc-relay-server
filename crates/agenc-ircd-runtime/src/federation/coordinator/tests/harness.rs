@@ -174,6 +174,17 @@ impl Edge {
         encoded: &[u8],
         frame: impl Fn(agenc_ircd_federation_wire::FederationFragment) -> FederationFrame,
     ) -> TestResult {
+        let (carrier, object) = self.assemble(encoded, frame)?;
+        self.send(LinkEvent::Object { carrier, object }).await
+    }
+
+    /// Splits and locally reassembles an object exactly as the link would,
+    /// returning what the coordinator would receive.
+    fn assemble(
+        &mut self,
+        encoded: &[u8],
+        frame: impl Fn(agenc_ircd_federation_wire::FederationFragment) -> FederationFrame,
+    ) -> TestResult<(ObjectCarrier, AssembledObject)> {
         let object_id = federation_object_id(encoded);
         let mut assembled = None;
         let mut carrier = None;
@@ -186,10 +197,10 @@ impl Edge {
                 assembled = Some(object);
             }
         }
-        let (Some(object), Some(carrier)) = (assembled, carrier) else {
-            return Err("scripted object did not assemble".into());
-        };
-        self.send(LinkEvent::Object { carrier, object }).await
+        match (assembled, carrier) {
+            (Some(object), Some(carrier)) => Ok((carrier, object)),
+            _ => Err("scripted object did not assemble".into()),
+        }
     }
 
     async fn close(&self) -> TestResult {
@@ -1678,6 +1689,120 @@ async fn an_origin_acknowledgement_whose_batch_storage_refused_retires_the_link(
         .await
         .map_err(|_| "the link writer received no close request")?;
     assert!(closed.is_none(), "the close request ends the queue");
+    Ok(())
+}
+
+/// Hands the coordinator one object as if the link had assembled it.
+fn inbound_object(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    edge: &mut Edge,
+    encoded: &[u8],
+    frame: impl Fn(agenc_ircd_federation_wire::FederationFragment) -> FederationFrame,
+) -> TestResult {
+    let (carrier, object) = edge.assemble(encoded, frame)?;
+    coordinator.inbound(
+        context,
+        FederationInbound {
+            link: edge.link,
+            peer: edge.server_id,
+            event: LinkEvent::Object { carrier, object },
+            charge: None,
+        },
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_request_waits_while_another_router_has_a_batch_open() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let context = fixture.context_mut()?;
+    let mut coordinator = standalone_coordinator(peer);
+    let (unused_inbox, _unused_receiver) = mpsc::channel(1);
+    let mut edge = Edge::new(unused_inbox, 50);
+    let origin = Origin::new(70);
+    coordinator.inbound(
+        context,
+        established(50, peer, edge.incarnation, edge.handle.clone()),
+    );
+    coordinator.inbound(context, reset_frame(50, peer, edge.incarnation));
+    // The origin declaration stages its acknowledgement row; the
+    // coordinator's own slot frees when that batch applies, but the plan
+    // stays open in the state core, as another router's plan would.
+    let encoded = origin.record(&edge).to_object()?.encode_canonical()?;
+    let bytes = encoded.as_slice().to_vec();
+    let descriptor = OriginDescriptor {
+        coordinator_server_id: COORDINATOR,
+        server_incarnation: edge.incarnation,
+        origin_id: origin.id,
+        generation: origin.generation,
+        object_id: federation_object_id(&bytes),
+    };
+    inbound_object(&mut coordinator, context, &mut edge, &bytes, |fragment| {
+        FederationFrame::OriginAdd {
+            descriptor,
+            fragment,
+        }
+    })?;
+    coordinator.batch_applied(context);
+    assert!(coordinator.pending.is_none());
+    assert_eq!(
+        context.pending_len(),
+        1,
+        "the acknowledgement row stays staged"
+    );
+    let acked = edge.next_frame().await?;
+    assert!(matches!(acked, FederationFrame::OriginAck { .. }));
+    coordinator.inbound(
+        context,
+        FederationInbound {
+            link: edge.link,
+            peer,
+            event: LinkEvent::Frame(FederationFrame::OriginReady {
+                edge_server_id: peer,
+                server_incarnation: edge.incarnation,
+            }),
+            charge: None,
+        },
+    );
+    let operation = session_open(70, "olga");
+    let request_id = RequestId::from_bytes([71; 16]);
+    let header = RequestHeader {
+        network_id: NETWORK,
+        replay_key: origin.replay_key(&edge),
+        request_id,
+        opcode: operation.opcode(),
+    };
+    let object = header.build(&operation.to_object()?)?;
+    let bytes = object.encode_canonical()?.as_slice().to_vec();
+    let descriptor = OperationDescriptor {
+        addressed_server_id: COORDINATOR,
+        server_incarnation: edge.incarnation,
+        origin_id: origin.id,
+        origin_generation: origin.generation,
+        operation_sequence: origin.sequence,
+        request_id,
+        object_id: federation_object_id(&bytes),
+    };
+    inbound_object(&mut coordinator, context, &mut edge, &bytes, |fragment| {
+        FederationFrame::Request {
+            descriptor,
+            fragment,
+        }
+    })?;
+    // The request waits for the open batch instead of planning against a
+    // state that is about to change and being refused as busy.
+    let state = coordinator.peers.get(&peer).ok_or("peer state missing")?;
+    assert_eq!(state.queued.len(), 1, "the request is queued");
+    assert!(state.live.is_some(), "the link stays live");
+    assert_eq!(coordinator.counters().violations, 0);
+    let answered =
+        tokio::time::timeout(std::time::Duration::from_millis(500), edge.next_frame()).await;
+    assert!(
+        answered.is_err(),
+        "nothing is answered while the batch is open"
+    );
     Ok(())
 }
 
