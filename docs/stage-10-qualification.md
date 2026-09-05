@@ -239,10 +239,19 @@ The engine starts one coordinator and two edges at the campaign capacity and
 drives N TLS clients split across the edges. Every client arrives from the
 loopback address, so the nodes raise `direct_connections_per_address` to the
 per-edge share plus headroom (48 for the capacity job, 144 for the soak,
-under the 256 ceiling of that key); the first candidate run with the default
-of 16 admitted only 32 of 64 clients and the campaign failed on a closed
-transport. The listener ceiling and the memory budget stay at the template
-values. Every client joins `#load` and
+under the 256 ceiling of that key) and set the `new_direct` and
+`tls_handshake` buckets, keyed by the source /24, to their configuration
+maxima. The per-address pre-authentication bucket is already at its maximum
+of 10 commands per second, about 1.25 registrations per second per edge, so
+the population connects and resumes after every maintenance window at 400 ms
+per client index (consecutive indices alternate edges), the warm-up covers
+that pacing, and the post-restart login runs before the workers return. The
+first candidate run with the template defaults admitted only 32 of 64
+clients; the second admitted 53 and starved the post-restart login behind
+the reconnect herd. Real deployments spread clients across addresses, so
+these settings model the aggregate capacity, not the per-address abuse
+limits, which keep their own tests. The listener ceiling and the memory
+budget stay at the template values. Every client joins `#load` and
 its own channel, sends a sequenced timestamped channel message each second,
 a direct message every two seconds, and a topic change every five seconds,
 and records the six latency classes: admission (connect to 001), message

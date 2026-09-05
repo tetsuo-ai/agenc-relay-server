@@ -559,6 +559,16 @@ fn apply_capacity_overrides(config: &mut String, capacity: CapacityPlan) -> Test
             "direct_connections_per_address = {}\n",
             capacity.connections_per_address
         ),
+    )?;
+    // New-connection and handshake buckets are keyed by the source /24, which
+    // every campaign client shares; both sit at their configuration maxima.
+    // The pre-authentication bucket is already at its maximum, so the
+    // campaign paces registrations under it instead.
+    replace_once(
+        config,
+        "\n[privacy]",
+        "\n[limits.rate.new_direct]\nrefill_tokens = 16\nrefill_seconds = 1\nburst = 64\n\n\
+[limits.rate.tls_handshake]\nrefill_tokens = 32\nrefill_seconds = 1\nburst = 128\n\n[privacy]",
     )
 }
 

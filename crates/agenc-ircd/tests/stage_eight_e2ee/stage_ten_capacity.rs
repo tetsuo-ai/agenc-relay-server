@@ -70,8 +70,16 @@ const PHYSICAL_GROWTH_BYTES: u64 = 268_435_456;
 const RESERVE_CLEARANCE_BYTES: u64 = 8 * 1_024 * 1_024 * 1_024;
 const PRESSURE_MARGIN_BYTES: u64 = 64 * 1_024 * 1_024;
 const REGISTRATION_PROBE_WAIT: Duration = Duration::from_secs(10);
-/// Spacing between two workers resuming after a maintenance window.
-const RESUME_SLOT: Duration = Duration::from_millis(150);
+/// Spacing between two workers connecting or resuming after a maintenance
+/// window. Every campaign client shares one loopback address, and the
+/// per-address pre-authentication bucket admits at most 10 commands per
+/// second (its configuration ceiling), which is about 1.25 registrations per
+/// second per edge. Consecutive indices land on alternate edges, so 400 ms
+/// per index keeps each edge at that rate instead of a herd that the bucket
+/// closes and that then retries from scratch.
+const RESUME_SLOT: Duration = Duration::from_millis(400);
+/// The shortest warm-up before the baseline sample.
+const MINIMUM_WARM_UP: Duration = Duration::from_secs(20);
 const PRESSURE_RECOVERY_WAIT: Duration = Duration::from_secs(45);
 /// How long after a coordinator restart an explicit SASL failure is retried.
 const POST_RESTART_AUTH_GRACE: Duration = Duration::from_secs(30);
@@ -410,6 +418,10 @@ fn worker(shared: &Shared, fixtures: [&NodeFixture; 2], plan: &WorkerPlan) {
     let Some(fixture) = fixtures.get(plan.edge % 2).copied() else {
         return;
     };
+    let slot = RESUME_SLOT * u32::try_from(plan.index).unwrap_or(0);
+    // The population connects in index order at the paced rate, as it does
+    // after every maintenance window.
+    thread::sleep(slot);
     while !shared.stop.load(Ordering::Relaxed) {
         // Idle through an operator maintenance window so a node restart is not
         // buried under a client reconnection storm, the way a real client
@@ -418,7 +430,7 @@ fn worker(shared: &Shared, fixtures: [&NodeFixture; 2], plan: &WorkerPlan) {
             thread::sleep(Duration::from_millis(250));
             // Resume in index order rather than all at once, as a client
             // population returning from announced maintenance does.
-            thread::sleep(RESUME_SLOT * u32::try_from(plan.index % 64).unwrap_or(0));
+            thread::sleep(slot);
             continue;
         }
         let mut session = match Session::open(fixture, plan, shared) {
@@ -1322,13 +1334,22 @@ the post-restart grace (CAP-7)"
         Ok(())
     }
 
-    fn edge_b_keys(&self) -> ([u8; 32], [u8; 32], [u8; 32]) {
-        let seed = self.network.edge_b.seed;
-        (
-            [seed.wrapping_add(7); 32],
-            [seed.wrapping_add(8); 32],
-            [seed.wrapping_add(9); 32],
-        )
+    /// Edge b's current storage keys. The rekey scenario rotates the master
+    /// and rollback-guard keys and points the config at the new files, so a
+    /// later backup must read them from the config; the login-index key is
+    /// never rotated by the campaign and stays the fixture's seed-derived key.
+    fn edge_b_keys(&self) -> TestResult<([u8; 32], [u8; 32], [u8; 32])> {
+        let fixture = &self.network.edge_b;
+        let read = |key: &str| -> TestResult<[u8; 32]> {
+            let bytes = fs::read(current_key_file(fixture, key)?)?;
+            <[u8; 32]>::try_from(bytes.as_slice())
+                .map_err(|_| failure(format!("{key} is not a 32-byte key file")))
+        };
+        Ok((
+            read("master_key_file")?,
+            read("rollback_guard_key_file")?,
+            [fixture.seed.wrapping_add(9); 32],
+        ))
     }
 
     /// Writes a signed backup of the stopped edge b through the production
@@ -1344,7 +1365,7 @@ the post-restart grace (CAP-7)"
         {
             *slot = byte;
         }
-        let (master, guard, login) = self.edge_b_keys();
+        let (master, guard, login) = self.edge_b_keys()?;
         let state = current_state_dir(fixture)?;
         let backups = fixture.data_dir.join("backups");
         let limits = StorageEngineLimits {
@@ -1515,9 +1536,12 @@ the post-restart grace (CAP-7)"
         self.nodes
             .restart_coordinator(&self.network.coordinator.config_path)?;
         self.wait_relinks(before_a, before_b)?;
-        self.shared.maintenance.store(false, Ordering::Relaxed);
+        // The reconstructed index must serve a live login before the client
+        // population returns, so the login does not queue behind the
+        // per-address registration rate of the resume wave.
         let mut client = self.opaque_login_with_grace(1, Some(POST_RESTART_AUTH_GRACE))?;
         client.send("QUIT :login-index reconstruction complete")?;
+        self.shared.maintenance.store(false, Ordering::Relaxed);
         self.note("login-index reconstruction across a coordinator restart");
         self.scenarios.index_transition += 1;
         Ok(())
@@ -1778,8 +1802,12 @@ fn control<'a>(
     deadline: Instant,
     returned: &mut bool,
 ) -> TestResult<Campaign<'a>> {
-    println!("[controller] warming up for 20 seconds");
-    thread::sleep(Duration::from_secs(20));
+    // The warm-up covers the paced connection of every worker plus settling.
+    let warm_up = MINIMUM_WARM_UP.max(
+        RESUME_SLOT * u32::try_from(settings.connections).unwrap_or(0) + Duration::from_secs(5),
+    );
+    println!("[controller] warming up for {} seconds", warm_up.as_secs());
+    thread::sleep(warm_up);
     let baseline = take_sample(shared, &nodes, &admins)?;
     let mut campaign = Campaign {
         settings,
