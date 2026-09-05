@@ -523,5 +523,69 @@ class ProbeAndCorpusTests(unittest.TestCase):
             seed_directory(root, "absent_target")
 
 
+
+class StorageDriverTests(unittest.TestCase):
+    """The storage driver's summary validation is the release contract for S10-006."""
+
+    @staticmethod
+    def driver():
+        import importlib.util
+
+        path = Path(__file__).resolve().parent / "qualify-stage-ten-storage.py"
+        specification = importlib.util.spec_from_file_location("qualify_stage_ten_storage", path)
+        module = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(module)
+        return module
+
+    @classmethod
+    def summary(cls, driver, maximum: int = 4096) -> dict:
+        names = driver.REQUIRED_CASES + driver.BACKUP_CASES + driver.PHASE_CASES
+        cases = []
+        for name in names:
+            delta = 0 if name.endswith("plus-one") else maximum
+            cases.append({"name": name, "allocated_before": 1000, "allocated_after": 1000 + delta, "positive_delta": delta})
+        return {"schema_version": 1, "target": "x86_64-unknown-linux-gnu", "filesystem_type": driver.EXT4_SUPER_MAGIC,
+                "block_size": 4096, "mount_flags": 4128, "kernel_release": "test", "maximum_observed_growth": maximum,
+                "qualified_growth_ceiling": driver.QUALIFIED_GROWTH_CEILING, "physical_growth_reserve": driver.PHYSICAL_GROWTH_RESERVE,
+                "sample_count": 10, "ballast_bytes": 0, "cases": cases}
+
+    def test_valid_summary_passes_and_each_weakening_is_refused(self) -> None:
+        driver = self.driver()
+        good = self.summary(driver)
+        cases = driver.validate_summary(good, "x86_64-unknown-linux-gnu")
+        self.assertEqual(len(cases), len(good["cases"]))
+        over = self.summary(driver, driver.QUALIFIED_GROWTH_CEILING + 1)
+        with self.assertRaises(QualificationError):
+            driver.validate_summary(over, "x86_64-unknown-linux-gnu")
+        with self.assertRaises(QualificationError):
+            driver.validate_summary(good, "aarch64-unknown-linux-gnu")
+        for field, value in (("filesystem_type", 0x9123683E), ("block_size", 3000), ("qualified_growth_ceiling", 1), ("maximum_observed_growth", 1)):
+            changed = self.summary(driver)
+            changed[field] = value
+            with self.subTest(field=field), self.assertRaises(QualificationError):
+                driver.validate_summary(changed, "x86_64-unknown-linux-gnu")
+        missing = self.summary(driver)
+        missing["cases"] = [case for case in missing["cases"] if case["name"] != "guard-rename"]
+        with self.assertRaises(QualificationError):
+            driver.validate_summary(missing, "x86_64-unknown-linux-gnu")
+        refused = self.summary(driver)
+        for case in refused["cases"]:
+            if case["name"] == "reserve-plus-one":
+                case["allocated_after"] = case["allocated_before"] + 8
+                case["positive_delta"] = 8
+        with self.assertRaises(QualificationError):
+            driver.validate_summary(refused, "x86_64-unknown-linux-gnu")
+
+    def test_embedded_tuple_must_be_this_targets_ext4_report(self) -> None:
+        driver = self.driver()
+        metadata = {"storage_qualification": {"tuples": [{"target": "x86_64-unknown-linux-gnu", "filesystem_type": driver.EXT4_SUPER_MAGIC,
+                                                            "block_size": 4096, "mount_flags": 4128, "maximum_observed_growth": 33570816}]}}
+        self.assertEqual(driver.embedded_tuple(metadata, "x86_64-unknown-linux-gnu")["block_size"], 4096)
+        with self.assertRaises(QualificationError):
+            driver.embedded_tuple(metadata, "aarch64-unknown-linux-gnu")
+        with self.assertRaises(QualificationError):
+            driver.embedded_tuple({"storage_qualification": {"tuples": []}}, "x86_64-unknown-linux-gnu")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1140,6 +1140,13 @@ fn trust_manifest(kind: &str, id: StorageDigest, public_key: [u8; 32]) -> String
     )
 }
 
+/// Engine limits a freshly initialized node uses; stopped-daemon maintenance
+/// commands that create their own scratch database share them.
+#[must_use]
+pub fn default_storage_limits() -> StorageEngineLimits {
+    storage_limits()
+}
+
 fn storage_limits() -> StorageEngineLimits {
     StorageEngineLimits {
         redb_cache_bytes: DEFAULT_REDB_CACHE_BYTES,

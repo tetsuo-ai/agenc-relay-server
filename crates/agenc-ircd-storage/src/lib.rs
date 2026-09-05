@@ -28,6 +28,7 @@ mod mutation;
 mod owner;
 mod platform;
 mod qualification;
+mod qualification_workload;
 mod records;
 mod recovery;
 mod redb_store;
@@ -121,9 +122,15 @@ pub use platform::{
     InspectionStateDirectory, StateDirectory, StorageQualification, rename_path_no_replace,
 };
 pub use qualification::{
-    MAX_QUALIFICATION_CASES, MAX_QUALIFICATION_REPORT_BYTES, MAX_QUALIFIED_OBSERVED_GROWTH,
-    QualificationTarget, REQUIRED_QUALIFICATION_CASES, StorageGrowthCase, StorageGrowthRecorder,
-    StorageQualificationReport, StorageQualificationReportTbs, embedded_storage_qualifications,
+    MAX_GROWTH_SAMPLES, MAX_QUALIFICATION_CASES, MAX_QUALIFICATION_REPORT_BYTES,
+    MAX_QUALIFIED_OBSERVED_GROWTH, PhaseGrowth, QualificationTarget, REQUIRED_QUALIFICATION_CASES,
+    StorageGrowthCase, StorageGrowthProbe, StorageGrowthRecorder, StorageGrowthSample,
+    StorageQualificationReport, StorageQualificationReportTbs, allocated_directory_bytes,
+    embedded_storage_qualifications, phase_growth,
+};
+pub use qualification_workload::{
+    QualificationFailure, QualificationOutcome, QualificationRequest, WORKLOAD_DESCRIPTION,
+    qualify_production_storage, required_case_names,
 };
 pub use records::{
     E2eeRecoveryGate, E2eeRecoveryKind, KEY_CHECK_STORED_KEY, MAX_DOMAIN_RECORD_BODY_BYTES,

@@ -1091,15 +1091,10 @@ impl RedbStore {
                     .map_err(rejected_table)?;
             }
         }
-        for write in writes {
-            let Some(value) = write.value else {
-                return Err(RedbCommitFailure::Rejected(StorageError::InvalidEncoding));
-            };
-            let mut table = transaction
-                .open_table(table_definition(write.table))
-                .map_err(rejected_table)?;
-            table.insert(write.key, value).map_err(rejected_storage)?;
+        if writes.iter().any(|write| write.value.is_none()) {
+            return Err(RedbCommitFailure::Rejected(StorageError::InvalidEncoding));
         }
+        apply_writes(&transaction, writes)?;
         self.finish_transaction(transaction)
     }
 
@@ -1109,16 +1104,7 @@ impl RedbStore {
         reservation: &[u8],
     ) -> Result<(), RedbCommitFailure> {
         let transaction = self.begin_durable_write()?;
-        for write in writes {
-            let mut table = transaction
-                .open_table(table_definition(write.table))
-                .map_err(rejected_table)?;
-            if let Some(value) = write.value {
-                table.insert(write.key, value).map_err(rejected_storage)?;
-            } else {
-                table.remove(write.key).map_err(rejected_storage)?;
-            }
-        }
+        apply_writes(&transaction, writes)?;
         {
             let mut meta = transaction.open_table(META_TABLE).map_err(rejected_table)?;
             meta.insert(RESERVATION_META_KEY, reservation)
@@ -1200,6 +1186,41 @@ impl RedbStore {
 
 fn table_definition(table: TableId) -> TableDefinition<'static, &'static [u8], &'static [u8]> {
     TableDefinition::new(table.name())
+}
+
+/// Applies writes with one open table handle per run of same-table writes.
+///
+/// Reopening a redb table for every row copies the table tree and the row's
+/// leaf path again on each open, which multiplied the physical growth of a
+/// maximum-count transaction by more than ten times the row bytes. Batches
+/// arrive sorted by table and key, so one handle usually covers a whole table.
+type OpenTable<'txn> = (TableId, redb::Table<'txn, &'static [u8], &'static [u8]>);
+
+fn apply_writes(
+    transaction: &WriteTransaction,
+    writes: &[RedbWrite<'_>],
+) -> Result<(), RedbCommitFailure> {
+    let mut open: Option<OpenTable<'_>> = None;
+    for write in writes {
+        let reopen = open.as_ref().is_none_or(|(table, _)| *table != write.table);
+        if reopen {
+            open = Some((
+                write.table,
+                transaction
+                    .open_table(table_definition(write.table))
+                    .map_err(rejected_table)?,
+            ));
+        }
+        let Some((_, table)) = open.as_mut() else {
+            return Err(RedbCommitFailure::Rejected(StorageError::DatabaseRejected));
+        };
+        if let Some(value) = write.value {
+            table.insert(write.key, value).map_err(rejected_storage)?;
+        } else {
+            table.remove(write.key).map_err(rejected_storage)?;
+        }
+    }
+    Ok(())
 }
 
 fn rejected_table(_error: redb::TableError) -> RedbCommitFailure {

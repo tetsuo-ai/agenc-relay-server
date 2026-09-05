@@ -17,7 +17,8 @@ EXPECTED_MODULES = {
     "fault.rs", "e2ee_records.rs",
     "migration.rs", "migration_command.rs",
     "federation_records.rs", "initialize.rs", "integrity.rs", "lib.rs", "login_index.rs",
-    "mutation.rs", "owner.rs", "platform.rs", "qualification.rs", "records.rs",
+    "mutation.rs", "owner.rs", "platform.rs", "qualification.rs", "qualification_workload.rs",
+    "records.rs",
     "recovery.rs", "redb_store.rs", "restore_command.rs", "schema.rs", "sealed.rs",
 }
 EXPECTED_TASKS = [f"S05-{number:03d}" for number in range(1, 16)]
@@ -169,7 +170,7 @@ def main() -> None:
         if command == "check":
             validate_profile(load_profile(root / PROFILE_PATH))
             validate_sources(root)
-            print("Stage-05 storage profile: ok (25 modules, 2 fuzz targets)")
+            print("Stage-05 storage profile: ok (26 modules, 2 fuzz targets)")
         else:
             print(f"Stage-05 storage profile self-test: ok ({self_test(root)} rejection cases)")
     except (OSError, StageFiveError, tomllib.TOMLDecodeError) as error:

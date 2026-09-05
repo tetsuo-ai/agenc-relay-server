@@ -4,6 +4,7 @@
 
 mod migration;
 mod options;
+mod storage_qualify;
 mod version;
 
 use std::ffi::OsString;
@@ -40,7 +41,8 @@ const USAGE: &str = concat!(
     "  print-onboarding --config <file>\n",
     "  account-invite create --descriptor <file> --signing-key-file <file> --expires-in <seconds>\n",
     "  storage restore --config <file> --backup <file> [restore options]\n",
-    "  storage migrate --config <file> --target-schema-generation 2 --output-state-directory <new-directory> [--resume]",
+    "  storage migrate --config <file> --target-schema-generation 2 --output-state-directory <new-directory> [--resume]\n",
+    "  storage qualify --state-dir <new-directory> --scratch-dir <new-directory> --unsigned-report <file> --raw-log <file> [--json <file>]",
 );
 const RESTORE_USAGE: &str = "usage: agenc-ircd storage restore --config <file> --backup <file> \
 --source-master-key-file <file> --source-rollback-guard-key-file <file> \
@@ -317,6 +319,13 @@ fn storage(arguments: &[OsString]) -> Result<(), CliFailure> {
             arguments
                 .get(1..)
                 .ok_or_else(|| CliFailure::usage(migration::USAGE))?,
+        );
+    }
+    if arguments.first().and_then(|value| value.to_str()) == Some("qualify") {
+        return storage_qualify::run(
+            arguments
+                .get(1..)
+                .ok_or_else(|| CliFailure::usage(storage_qualify::USAGE))?,
         );
     }
     if arguments.first().and_then(|value| value.to_str()) != Some("restore") {

@@ -124,26 +124,89 @@ shut down cleanly. Packet capture reported zero DNS packets, zero plaintext
 canary matches, and zero kernel drops. This evidence covers the local x86_64
 development build.
 
-The production-storage, capacity, sustained-operation, and deployment
-drill drivers are still being implemented. `check` refuses a policy whose
-required driver is absent. Source-status decisions, the complete critical
-coverage inventory, native build reproduction, and the long campaigns have
-not been completed. The release builder and detached signing path still need
-their full integration qualification.
+The capacity, sustained-operation, and deployment drill drivers are still
+being implemented. `check` refuses a policy whose required driver is absent.
+Source-status decisions, the complete critical coverage inventory, native
+build reproduction, and the long campaigns have not been completed. The
+release builder and detached signing path still need their full integration
+qualification.
 
 Network evidence must include real WeeChat and Irssi sessions, the native
 account protocol, OpenMLS and mls-rs, an isolated Tor v3 network, SOCKS
 isolation, packet and DNS-leak capture, privacy canaries, and the client-policy
 tests. Configuration parsing alone cannot close the Tor requirement.
 
-Storage evidence must exercise the production storage path on the final
-binary, including the required filesystem tuples, growth cases, sync and
-rename phases, and reserve boundaries. Earlier redb component measurements
-cannot substitute for final release measurements.
+Storage evidence comes from the final binary's own `storage qualify` command
+(below). Earlier redb component measurements cannot substitute for it.
 
 Operational evidence must cover restore, migration, deletion, rekey,
 login-index transition, each signing and transport key rotation, compromise
 response, resynchronization, host hardening, and observability.
+
+## Storage qualification on the final binary
+
+`agenc-ircd storage qualify` is a stopped-daemon command. It creates a fresh
+database in a new state directory, opens the production storage owner with a
+measurement-only boundary probe attached, and commits every Section 28.7
+mutation shape through the production engine: empty, single, replaced, and
+deleted rows; the largest value; the largest legal replacement, which the
+tracked-byte ceiling limits to about 8 MB because the replaced and replacing
+sealed rows are charged together; the largest key; 65,535-row inserts,
+deletes, and a mixed batch; B-tree split, merge, and fragmented layouts; and a
+checkpoint. Allocated blocks of the whole state directory are measured around
+each case and at every guard, manifest, checkpoint, backup, and transaction
+boundary the engine passes, so the guard temporary sync, rename, and directory
+sync cases come from the production guard replacement itself. Reserve
+boundaries use the real `R(F) + G` and `R(F) + O` admission checks on a second
+minimal database: the fixed reserve is set one byte below, at, and one byte
+above the free space the engine samples in a steady session, and the command
+records admission, admission, and a side-effect-free refusal. When the
+filesystem has more free space than the largest configurable reserve, the
+command fallocates a ballast file in the scratch directory for the duration of
+the boundary cases and removes it afterwards.
+
+```sh
+agenc-ircd storage qualify --state-dir /var/lib/agenc-ircd/qualify/state \
+  --scratch-dir /var/lib/agenc-ircd/qualify/scratch \
+  --unsigned-report storage.unsigned --raw-log storage.log --json storage.json
+```
+
+The command writes the raw log and the JSON summary in every case and the
+unsigned report only when the largest observed growth is at or below the
+134,217,728-byte qualification ceiling. `conformance --json` lists the signed
+tuple the binary embeds and its maximum growth. Startup reproduces that tuple
+lookup: the driver runs the command on the native ext4 tuple, which the
+binary admits, and on tmpfs, which it refuses.
+
+The embedded signed report and the fresh measurement are distinct evidence.
+Startup admits a tuple from the report compiled into the binary; the fresh
+measurement comes from the final binary and is bound into the attempt
+evidence and the signed release decision. Re-signing the embedded report from
+a fresh measurement changes the source and therefore starts a new candidate.
+
+## Open findings
+
+### STO-1: physical growth after a large-value leaf exceeds the qualification ceiling
+
+On the x86_64 ext4 tuple, a legal 65,535-mutation transaction of 40-byte rows
+grew the state directory by 258,048,000 bytes when the inserted keys sorted
+before an existing row whose value was about 100 KB or larger. The same
+transaction on a database holding only small rows grew by 19,394,560 bytes.
+Raw redb 4.2.0 reproduces the behaviour without the engine: with an existing
+larger row after the inserted keys, the file grew by about 4 KiB per inserted
+row and the file length jumped from 69 MB to 553 MB; with an open read
+transaction it reached 266,510,336 bytes. A later transaction of the same
+shape reused that space and cost 10,571,776 bytes, so the growth is a one-time
+allocation, but it is charged to one transaction.
+
+The observed maximum exceeds the 134,217,728-byte ceiling that gives the
+256 MiB reserve its twofold margin, and one variant came within 1.9 MB of the
+reserve itself. Section 28.9 does not allow a durability finding to be waived.
+Until the engine or the pinned redb version avoids the allocation, the storage
+job fails on this tuple and no release may claim `S10-006`. The Stage 05
+report measured a bare redb table with a different row order and does not
+show the behaviour; its embedded tuple remains what startup admits. A fix must
+be followed by a new candidate and a rerun of every storage measurement.
 
 ## Release claims and limits
 

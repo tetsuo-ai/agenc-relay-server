@@ -132,6 +132,18 @@ Use the local Unix admin socket for routine operation. Each operator still prove
 
 `REHASH` validates a complete replacement configuration before activation. Identity, storage-key, listener-purpose, wire-limit, OPAQUE, E2EE, HPKE, and onion-identity changes require a stopped restart or their named transition procedure. A rejected reload leaves the active configuration unchanged.
 
+## Qualify storage growth on a host
+
+`agenc-ircd storage qualify` measures the production storage engine on the
+filesystem that will hold the state directory. Give it two new directories on
+that filesystem and paths for the unsigned report, the raw log, and a JSON
+summary. It writes the report only when the largest observed growth stays at
+or below the qualification ceiling; the raw log and summary are kept in every
+case. The command may fallocate a temporary ballast file in the scratch
+directory to reach the reserve boundary and removes it before exiting. Run it
+before a release on each target and filesystem tuple you intend to claim, not
+on a live node.
+
 ## Rotate and recover keys
 
 Assign one purpose to each key. Record its generation, creation time, activation time, retirement time, and recovery procedure.

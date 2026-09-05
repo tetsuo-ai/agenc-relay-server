@@ -52,8 +52,32 @@ fn metadata(conformance: bool) -> String {
             agenc_ircd_config::E2EE_PROFILE_SHA256_TOKEN,
             cfg!(feature = "history"), cfg!(feature = "wss"),
         ));
+        output.push_str(&storage_qualification_json());
     }
     output.push('}');
+    output
+}
+
+/// The signed storage tuples compiled into this binary, as startup admits them.
+/// A verification failure is reported as an empty list rather than a claim.
+fn storage_qualification_json() -> String {
+    let tuples = agenc_ircd_storage::embedded_storage_qualifications().unwrap_or_default();
+    let mut output = String::from(",\"storage_qualification\":{\"tuples\":[");
+    for (index, qualification) in tuples.iter().enumerate() {
+        if index > 0 {
+            output.push(',');
+        }
+        let tuple = qualification.tuple();
+        output.push_str(&format!(
+            "{{\"target\":\"{}\",\"filesystem_type\":{},\"block_size\":{},\"mount_flags\":{},\"maximum_observed_growth\":{}}}",
+            tuple.target,
+            tuple.filesystem_type,
+            tuple.block_size,
+            tuple.mount_flags,
+            qualification.maximum_observed_growth(),
+        ));
+    }
+    output.push_str("]}");
     output
 }
 

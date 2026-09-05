@@ -21,6 +21,8 @@ fn local_metadata_requires_exact_options_and_reports_optional_features() -> Test
         assert!(text.contains(&format!("\"wss\":{}", cfg!(feature = "wss"))));
         if command == "conformance" {
             assert!(text.contains("\"qualified_claims\":[]"));
+            assert!(text.contains("\"storage_qualification\":{\"tuples\":[{\"target\":\""));
+            assert!(text.contains("\"filesystem_type\":61267,\"block_size\":4096,"));
         }
     }
     for args in [
