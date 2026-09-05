@@ -136,6 +136,30 @@ class RecordTests(unittest.TestCase):
         with self.assertRaises(QualificationError):
             verify_report(self.root, report, job, "a" * 64, report["target"])
 
+    def test_capacity_report_requires_resource_source_and_refusal_count(self) -> None:
+        path = self.root / "campaign.json"
+        path.write_bytes(b"{}\n")
+        job = {"id": "capacity"}
+        facts = {"elapsed_ns": 300 * 10**9, "samples": 2, "missed_events": 0, "envelope_violations": 0,
+                 "returned_to_envelope": True, "capacity_demonstrated": True, "hardware": "test host",
+                 "scenario_counts": {name: 1 for name in ("reconnect", "churn", "rekey", "index_transition", "snapshot", "backup", "disk_pressure", "peer_loss")},
+                 "latency_classes": ["admission", "durable_mutation", "fanout", "message", "opaque", "snapshot"],
+                 "resource_source": "cgroup", "messages_refused": 0}
+        report = {"schema_version": 1, "job_id": "capacity", "candidate_sha256": "a" * 64, "target": "x86_64-unknown-linux-gnu",
+                  "artifacts": {path.name: file_digest(path)}, "facts": facts}
+        verify_report(self.root, report, job, "a" * 64, report["target"])
+        for mutate in (
+            lambda facts: facts.pop("resource_source"),
+            lambda facts: facts.__setitem__("resource_source", "guess"),
+            lambda facts: facts.pop("messages_refused"),
+            lambda facts: facts.__setitem__("messages_refused", -1),
+            lambda facts: facts.__setitem__("missed_events", 1),
+        ):
+            changed = copy.deepcopy(report)
+            mutate(changed["facts"])
+            with self.subTest(facts=changed["facts"]), self.assertRaises(QualificationError):
+                verify_report(self.root, changed, job, "a" * 64, report["target"])
+
     def test_job_inventory_includes_every_committed_parser(self) -> None:
         root = Path(__file__).resolve().parent.parent
         policy = load_policy(root, require_drivers=False)
@@ -242,7 +266,7 @@ class SyntheticCandidate:
             return {"elapsed_ns": (604800 if name == "soak" else 300) * 10**9, "samples": 2, "missed_events": 0,
                     "envelope_violations": 0, "returned_to_envelope": True, "capacity_demonstrated": True,
                     "scenario_counts": {scenario: 1 for scenario in ("reconnect", "churn", "rekey", "index_transition", "snapshot", "backup", "disk_pressure", "peer_loss")},
-                    "latency_classes": ["admission", "durable_mutation", "fanout", "message", "opaque", "snapshot"], "hardware": "synthetic"}
+                    "latency_classes": ["admission", "durable_mutation", "fanout", "message", "opaque", "snapshot"], "hardware": "synthetic", "resource_source": "cgroup", "messages_refused": 0}
         if name == "reproducibility":
             return {"independent_builds": 2, "native_target": None, "binary_sha256": None}
         from release_qualification.verify import REQUIRED_FACTS
@@ -585,6 +609,75 @@ class StorageDriverTests(unittest.TestCase):
             driver.embedded_tuple(metadata, "aarch64-unknown-linux-gnu")
         with self.assertRaises(QualificationError):
             driver.embedded_tuple({"storage_qualification": {"tuples": []}}, "x86_64-unknown-linux-gnu")
+
+
+
+class CapacityDriverTests(unittest.TestCase):
+    """The capacity driver's record validation is the release contract for S10-007."""
+
+    @staticmethod
+    def driver():
+        import importlib.util
+
+        path = Path(__file__).resolve().parent / "qualify-stage-ten-capacity.py"
+        specification = importlib.util.spec_from_file_location("qualify_stage_ten_capacity", path)
+        module = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(module)
+        return module
+
+    @staticmethod
+    def sample(live: int) -> dict:
+        return {"at_ns": 10, "anonymous_bytes": [3_000_000, 2_000_000, 2_000_000], "sockets": [2, 40, 40], "close_wait": [0, 0, 0],
+                "tasks": [12, 12, 12], "federation_links": 2, "live_client_connections": live}
+
+    @classmethod
+    def record(cls, driver, seconds: int = 300, connections: int = 64) -> dict:
+        return {"schema_version": 1, "elapsed_ns": seconds * 10**9, "connections": connections, "resource_source": "cgroup",
+                "samples": [cls.sample(connections), cls.sample(connections - 1)],
+                "latency_classes": {name: {"count": 5, "p50_ns": 1, "p95_ns": 2, "p99_ns": 3} for name in driver.LATENCY_CLASSES},
+                "scenario_counts": {name: 1 for name in driver.SCENARIOS}, "missed_events": 0, "envelope_violations": 0,
+                "messages_sent": 100, "messages_received": 700, "messages_refused": 0,
+                "returned_to_envelope": True, "daemons_stopped_cleanly": [True, True, True], "hardware": "test host"}
+
+    def test_complete_record_passes_and_each_shortfall_is_refused(self) -> None:
+        driver = self.driver()
+        facts = driver.validate_campaign(self.record(driver), 300, 64)
+        self.assertEqual(facts["scenario_counts"]["rekey"], 1)
+        self.assertEqual(facts["latency_classes"], driver.LATENCY_CLASSES)
+        self.assertEqual(facts["resource_source"], "cgroup")
+        procfs = self.record(driver)
+        procfs["resource_source"] = "procfs"
+        self.assertEqual(driver.validate_campaign(procfs, 300, 64)["resource_source"], "procfs")
+        short = self.record(driver, seconds=299)
+        with self.assertRaises(QualificationError):
+            driver.validate_campaign(short, 300, 64)
+        for mutate in (
+            lambda record: record["scenario_counts"].__setitem__("disk_pressure", 0),
+            lambda record: record.__setitem__("missed_events", 1),
+            lambda record: record.__setitem__("envelope_violations", 2),
+            lambda record: record.__setitem__("returned_to_envelope", False),
+            lambda record: record.__setitem__("daemons_stopped_cleanly", [True, False, True]),
+            lambda record: record["latency_classes"].pop("opaque"),
+            lambda record: record["latency_classes"]["fanout"].__setitem__("count", 0),
+            lambda record: record.__setitem__("samples", record["samples"][:1]),
+            lambda record: record.__setitem__("samples", [self.sample(10), self.sample(10)]),
+            lambda record: record["samples"][0].__setitem__("anonymous_bytes", [0, 2_000_000, 2_000_000]),
+            lambda record: record["samples"][1].__setitem__("tasks", [12, 0, 12]),
+            lambda record: record["samples"][1].pop("sockets"),
+            lambda record: record["samples"][1].__setitem__("close_wait", [0, -1, 0]),
+            lambda record: record.__setitem__("resource_source", "guess"),
+            lambda record: record.__setitem__("messages_received", 0),
+            lambda record: record.pop("messages_refused"),
+            lambda record: record.__setitem__("messages_refused", -1),
+            lambda record: record.pop("resource_source"),
+            lambda record: record.__setitem__("hardware", " "),
+        ):
+            changed = self.record(driver)
+            mutate(changed)
+            with self.subTest(record=changed), self.assertRaises(QualificationError):
+                driver.validate_campaign(changed, 300, 64)
+        with self.assertRaises(QualificationError):
+            driver.validate_campaign(self.record(driver), 300, 65)
 
 
 if __name__ == "__main__":

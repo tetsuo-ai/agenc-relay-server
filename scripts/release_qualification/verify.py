@@ -55,8 +55,11 @@ def verify_report(attempt: Path, report: dict[str, Any], job: dict[str, Any], ca
         require_hash(facts["corpus_before"], "initial corpus")
         require_hash(facts["corpus_after"], "final corpus")
     elif name in ("capacity", "soak"):
-        require_fields(facts, {"elapsed_ns", "samples", "missed_events", "envelope_violations", "returned_to_envelope", "scenario_counts", "latency_classes", "capacity_demonstrated", "hardware"}, "capacity facts")
+        require_fields(facts, {"elapsed_ns", "samples", "missed_events", "envelope_violations", "returned_to_envelope", "scenario_counts", "latency_classes", "capacity_demonstrated", "hardware", "resource_source", "messages_refused"}, "capacity facts")
         require_integer(facts["elapsed_ns"], (604800 if name == "soak" else 300) * 10**9, 10**18, "campaign duration")
+        if facts["resource_source"] not in ("cgroup", "procfs"):
+            raise QualificationError("capacity evidence does not name how daemon resources were measured")
+        require_integer(facts["messages_refused"], 0, 10**12, "refused messages")
         require_integer(facts["samples"], 2, 10**9, "campaign samples")
         require_integer(facts["missed_events"], 0, 0, "missed events")
         require_integer(facts["envelope_violations"], 0, 0, "envelope violations")

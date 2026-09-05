@@ -93,10 +93,15 @@ const BACKUP_MAX_BYTES: u64 = 2_147_483_648;
 const DISK_RESERVE_BYTES: u64 = 67_108_864;
 const IO_TIMEOUT: Duration = Duration::from_secs(20);
 const START_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[path = "stage_eight_e2ee/stage_ten_capacity.rs"]
+mod stage_ten_capacity;
 const STOP_TIMEOUT: Duration = Duration::from_secs(20);
 /// The edge registers a client only once its coordinator link is ACTIVE;
 /// registration attempts before that fail closed and are retried.
 const NETWORK_WAIT: Duration = Duration::from_secs(60);
+const TRANSCRIPT_LINES: usize = 256;
+const REPLY_DEADLINE: Duration = Duration::from_secs(60);
 const NETWORK_ID: NetworkId = NetworkId::from_bytes([1; 32]);
 
 static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -247,6 +252,15 @@ struct NodeFixture {
     public_address: SocketAddr,
     dns_name: String,
     client_tls: TlsFixture,
+    /// The identity seed, admin socket, key material, and directories the
+    /// Stage 10 campaign and drills need to operate the node like an operator.
+    seed: u8,
+    server_id: ServerId,
+    admin_socket: PathBuf,
+    data_dir: PathBuf,
+    operator_id: OperatorId,
+    /// The federation listener this node binds; only the coordinator has one.
+    federation_listener: Option<SocketAddr>,
 }
 
 struct NodePlan<'a> {
@@ -254,6 +268,15 @@ struct NodePlan<'a> {
     coordinator: &'a NodeIdentity,
     federation_address: Option<SocketAddr>,
     peers: &'a [&'a NodeIdentity],
+    /// Stage 10 campaign settings; `None` keeps the Stage 08 configuration.
+    capacity: Option<CapacityPlan>,
+}
+
+/// Overrides the campaign applies on top of the Stage 08 configuration.
+#[derive(Clone, Copy)]
+struct CapacityPlan {
+    /// Client listener ceiling.
+    max_connections: u64,
 }
 
 impl NodeFixture {
@@ -392,6 +415,9 @@ impl NodeFixture {
         };
         let mut config = render_template(&values)?;
         apply_common_overrides(&mut config, public_address, uid)?;
+        if let Some(capacity) = plan.capacity {
+            apply_capacity_overrides(&mut config, capacity)?;
+        }
         apply_federation_overrides(&mut config, plan, &tls_dir, &ca_path)?;
         let sequencer = Ed25519SecretKey::from_bytes([plan.coordinator.seed.wrapping_add(15); 32]);
         let credentials = builders::sequencer_credentials_document(
@@ -411,6 +437,15 @@ impl NodeFixture {
             public_address,
             dns_name,
             client_tls,
+            seed,
+            server_id: identity.server_id,
+            admin_socket: runtime_dir.join("admin.sock"),
+            data_dir,
+            operator_id,
+            federation_listener: match plan.identity.role {
+                NodeRole::Coordinator => plan.federation_address,
+                _ => None,
+            },
         })
     }
 
@@ -491,6 +526,21 @@ fn apply_common_overrides(config: &mut String, public: SocketAddr, uid: u32) -> 
         config,
         "\n[privacy]",
         "\n[limits.rate.preauth_command]\nrefill_tokens = 10\nrefill_seconds = 1\nburst = 50\n\n[limits.rate.registered_command]\nrefill_tokens = 40\nrefill_seconds = 1\nburst = 200\n\n[limits.rate.expensive_query]\nrefill_tokens = 2\nrefill_seconds = 1\nburst = 10\n\n[privacy]",
+    )
+}
+
+/// Enables the local admin socket and raises the client ceiling for the
+/// Stage 10 campaign; nothing else differs from the Stage 08 node.
+fn apply_capacity_overrides(config: &mut String, capacity: CapacityPlan) -> TestResult {
+    replace_once(
+        config,
+        "enabled = false\npurpose = \"admin_local\"",
+        "enabled = true\npurpose = \"admin_local\"",
+    )?;
+    replace_once(
+        config,
+        "max_connections = 32\n",
+        &format!("max_connections = {}\n", capacity.max_connections),
     )
 }
 
@@ -619,13 +669,57 @@ struct DaemonProcess {
 
 impl DaemonProcess {
     fn start(config_path: &Path) -> TestResult<Self> {
-        let child = Command::new(env!("CARGO_BIN_EXE_agenc-ircd"))
-            .arg("serve")
-            .arg("--config")
-            .arg(config_path)
+        Self::start_in(config_path, None)
+    }
+
+    /// Starts the daemon, optionally inside a cgroup v2 leaf. The shell moves
+    /// itself into the leaf and then replaces itself with the daemon, so the
+    /// daemon keeps the pid the test signals and every page it charges lands
+    /// in the leaf.
+    fn start_in(config_path: &Path, cgroup_leaf: Option<&Path>) -> TestResult<Self> {
+        Self::start_logged(config_path, cgroup_leaf, None)
+    }
+
+    /// Like `start_in`, appending the daemon's stderr to `stderr_log` when one
+    /// is given, so a fail-closed exit keeps its reason with the campaign.
+    fn start_logged(
+        config_path: &Path,
+        cgroup_leaf: Option<&Path>,
+        stderr_log: Option<&Path>,
+    ) -> TestResult<Self> {
+        let daemon = env!("CARGO_BIN_EXE_agenc-ircd");
+        let mut command = match cgroup_leaf {
+            Some(leaf) => {
+                let mut command = Command::new("/bin/sh");
+                command
+                    .arg("-c")
+                    .arg("printf '%d\\n' \"$$\" > \"$1/cgroup.procs\" && exec \"$2\" serve --config \"$3\"")
+                    .arg("agenc-campaign-node")
+                    .arg(leaf)
+                    .arg(daemon)
+                    .arg(config_path);
+                command
+            }
+            None => {
+                let mut command = Command::new(daemon);
+                command.arg("serve").arg("--config").arg(config_path);
+                command
+            }
+        };
+        let stderr = match stderr_log {
+            Some(path) => Stdio::from(
+                fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .mode(0o600)
+                    .open(path)?,
+            ),
+            None => Stdio::inherit(),
+        };
+        let child = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
+            .stderr(stderr)
             .spawn()?;
         Ok(Self { child: Some(child) })
     }
@@ -639,6 +733,28 @@ impl DaemonProcess {
         child.kill()?;
         let _status = child.wait()?;
         Ok(())
+    }
+
+    /// Waits for a daemon that was asked to stop through its admin socket.
+    fn wait(&mut self) -> TestResult<ExitStatus> {
+        let deadline = Instant::now() + STOP_TIMEOUT;
+        loop {
+            let child = self
+                .child
+                .as_mut()
+                .ok_or_else(|| failure("daemon was already joined"))?;
+            if let Some(status) = child.try_wait()? {
+                self.child = None;
+                return Ok(status);
+            }
+            if Instant::now() >= deadline {
+                let _terminated = child.kill();
+                let _status = child.wait();
+                self.child = None;
+                return Err(failure("daemon did not stop within its total budget"));
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
     }
 
     fn stop(&mut self) -> TestResult<ExitStatus> {
@@ -719,9 +835,29 @@ impl IrcClient {
         Ok(())
     }
 
-    fn read_until(&mut self, mut complete: impl FnMut(&str) -> bool) -> TestResult<Vec<String>> {
+    fn read_until(&mut self, complete: impl FnMut(&str) -> bool) -> TestResult<Vec<String>> {
+        self.read_until_within(TRANSCRIPT_LINES, complete)
+    }
+
+    /// Reads until `complete` accepts a line, `limit` lines have arrived, or
+    /// `REPLY_DEADLINE` passes; probes inside a busy channel pass a limit that
+    /// covers the traffic interleaved before a reply, and the deadline keeps
+    /// a never-matching predicate from reading traffic forever.
+    fn read_until_within(
+        &mut self,
+        limit: usize,
+        mut complete: impl FnMut(&str) -> bool,
+    ) -> TestResult<Vec<String>> {
+        let deadline = Instant::now() + REPLY_DEADLINE;
         let mut lines = Vec::new();
-        for _ in 0..256 {
+        for _ in 0..limit {
+            if Instant::now() > deadline {
+                return Err(failure(format!(
+                    "reply did not arrive within {REPLY_DEADLINE:?}; first lines {:?}; last lines {:?}",
+                    lines.iter().take(5).collect::<Vec<_>>(),
+                    lines.iter().rev().take(3).collect::<Vec<_>>()
+                )));
+            }
             let mut line = String::new();
             let read = self.reader.read_line(&mut line).map_err(|error| {
                 failure(format!(
@@ -740,7 +876,11 @@ impl IrcClient {
                 return Ok(lines);
             }
         }
-        Err(failure("reply exceeded the 256-line transcript bound"))
+        Err(failure(format!(
+            "reply exceeded the {limit}-line transcript bound; first lines {:?}; last lines {:?}",
+            lines.iter().take(5).collect::<Vec<_>>(),
+            lines.iter().rev().take(3).collect::<Vec<_>>()
+        )))
     }
 
     /// Registers `nickname`; a `NETWORK_UNAVAILABLE` refusal means the edge
@@ -868,6 +1008,11 @@ struct Network {
 }
 
 fn build_network() -> TestResult<Network> {
+    build_network_with(None)
+}
+
+/// One coordinator and two edges, optionally configured for the campaign.
+fn build_network_with(capacity: Option<CapacityPlan>) -> TestResult<Network> {
     let coordinator = NodeIdentity::new(20, NodeRole::Coordinator, "core.test")?;
     let edge_a = NodeIdentity::new(40, NodeRole::Edge, "edge-a.test")?;
     let edge_b = NodeIdentity::new(60, NodeRole::Edge, "edge-b.test")?;
@@ -878,18 +1023,21 @@ fn build_network() -> TestResult<Network> {
             coordinator: &coordinator,
             federation_address: Some(federation_address),
             peers: &[&edge_a, &edge_b],
+            capacity,
         })?,
         edge_a: NodeFixture::create(&NodePlan {
             identity: &edge_a,
             coordinator: &coordinator,
             federation_address: Some(federation_address),
             peers: &[&coordinator],
+            capacity,
         })?,
         edge_b: NodeFixture::create(&NodePlan {
             identity: &edge_b,
             coordinator: &coordinator,
             federation_address: Some(federation_address),
             peers: &[&coordinator],
+            capacity,
         })?,
     })
 }
@@ -1047,9 +1195,22 @@ fn opaque_identifiers<'a>(
     }
 }
 
+/// The start and finish request identities one account exchange consumes.
+/// Stage 08 tests derive them from one byte; the Stage 10 campaign supplies
+/// fresh identities so thousands of exchanges never replay a request.
+fn account_requests(request_seed: u8) -> TestResult<[RequestId; 2]> {
+    let finish_seed = request_seed
+        .checked_add(1)
+        .ok_or_else(|| failure("account request seed overflow"))?;
+    Ok([
+        RequestId::from_bytes([request_seed; 16]),
+        RequestId::from_bytes([finish_seed; 16]),
+    ])
+}
+
 fn seal_account_payload(
     network_id: NetworkId,
-    request_seed: u8,
+    request: RequestId,
     payload: AccountRequestPayload,
 ) -> TestResult<(
     [u8; ACCOUNT_SERVICE_ENVELOPE_BYTES],
@@ -1061,7 +1222,7 @@ fn seal_account_payload(
         network_id,
         COORDINATOR_RECOVERY_EPOCH,
         public_key.key_id(),
-        RequestId::from_bytes([request_seed; 16]),
+        request,
         payload.message_kind(),
     );
     let plaintext = encode_request_plaintext(&payload)?;
@@ -1353,10 +1514,20 @@ fn committed_account(completion: Completion, expected: Option<AccountId>) -> Tes
 
 fn create_live_account(
     client: &mut IrcClient,
-    _fixture: &NodeFixture,
+    fixture: &NodeFixture,
     login_name: &str,
     request_seed: u8,
 ) -> TestResult<AccountId> {
+    create_live_account_with(client, fixture, login_name, account_requests(request_seed)?)
+}
+
+fn create_live_account_with(
+    client: &mut IrcClient,
+    _fixture: &NodeFixture,
+    login_name: &str,
+    requests: [RequestId; 2],
+) -> TestResult<AccountId> {
+    let [start_request, finish_request] = requests;
     let mut rng = TestOpaqueRng::new();
     let registration = ClientRegistration::<TestOpaqueSuite>::start(&mut rng, ACCOUNT_PASSWORD)?;
     let registration_request = OpaqueRegistrationRequest::from_bytes(
@@ -1364,7 +1535,7 @@ fn create_live_account(
     )?;
     let (start_envelope, start_token) = seal_account_payload(
         NETWORK_ID,
-        request_seed,
+        start_request,
         AccountRequestPayload::CreationStart(CreationStart {
             network_id: NETWORK_ID,
             login: NormalizedLogin::prepare(login_name)?,
@@ -1406,12 +1577,9 @@ fn create_live_account(
     )?;
     rng.require_success()?;
 
-    let finish_seed = request_seed
-        .checked_add(1)
-        .ok_or_else(|| failure("creation request seed overflow"))?;
     let (finish_envelope, finish_token) = seal_account_payload(
         NETWORK_ID,
-        finish_seed,
+        finish_request,
         AccountRequestPayload::CreationFinish(CreationFinish {
             network_id: NETWORK_ID,
             transaction_id,
@@ -1440,18 +1608,37 @@ fn create_live_account(
 
 fn authenticate_live_account(
     client: &mut IrcClient,
-    _fixture: &NodeFixture,
+    fixture: &NodeFixture,
     login_name: &str,
     password: &[u8],
     request_seed: u8,
     expected_account: AccountId,
 ) -> TestResult {
+    authenticate_live_account_with(
+        client,
+        fixture,
+        login_name,
+        password,
+        account_requests(request_seed)?,
+        expected_account,
+    )
+}
+
+fn authenticate_live_account_with(
+    client: &mut IrcClient,
+    _fixture: &NodeFixture,
+    login_name: &str,
+    password: &[u8],
+    requests: [RequestId; 2],
+    expected_account: AccountId,
+) -> TestResult {
+    let [start_request, finish_request] = requests;
     let mut rng = TestOpaqueRng::new();
     let login = ClientLogin::<TestOpaqueSuite>::start(&mut rng, password)?;
     let ke1 = OpaqueKe1::from_bytes(login.message.serialize().as_slice().try_into()?)?;
     let (start_envelope, start_token) = seal_account_payload(
         NETWORK_ID,
-        request_seed,
+        start_request,
         AccountRequestPayload::AuthenticationStart(AuthenticationStart {
             network_id: NETWORK_ID,
             login: NormalizedLogin::prepare(login_name)?,
@@ -1481,12 +1668,9 @@ fn authenticate_live_account(
     )?;
     let ke3 = OpaqueKe3::from_bytes(login_finish.message.serialize().as_slice().try_into()?)?;
     rng.require_success()?;
-    let finish_seed = request_seed
-        .checked_add(1)
-        .ok_or_else(|| failure("authentication request seed overflow"))?;
     let (finish_envelope, finish_token) = seal_account_payload(
         NETWORK_ID,
-        finish_seed,
+        finish_request,
         AccountRequestPayload::AuthenticationFinish(AuthenticationFinish {
             network_id: NETWORK_ID,
             transaction_id,

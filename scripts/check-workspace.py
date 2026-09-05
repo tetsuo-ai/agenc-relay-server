@@ -125,6 +125,7 @@ BINARY_TEST_EXTERNAL_DEPENDENCIES = frozenset(
         "openmls_rust_crypto",
         "opaque-ke",
         "opaque-sha2",
+        "rustix",
         "rustls",
         "tokio",
     }

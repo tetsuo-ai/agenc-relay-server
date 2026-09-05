@@ -64,10 +64,11 @@ class DaemonTests:
             raise QualificationError("integration test did not retain the frozen daemon binary")
 
     def run(self, name: str, suite: str, test: str, *, ignored: bool = False,
-            environment: dict[str, str] | None = None, timeout: int = 600) -> None:
+            environment: dict[str, str] | None = None, timeout: int = 600, wrapper: list[str] | None = None) -> None:
+        """Run one test; `wrapper` is an argv prefix such as a delegated-cgroup launcher."""
         self.verify_binary()
         executable = self.executables[suite]
-        argv = [str(executable), test, "--exact", "--nocapture"]
+        argv = [*(wrapper or []), str(executable), test, "--exact", "--nocapture"]
         if ignored:
             argv.append("--ignored")
         command(self.root, self.attempt, name, argv, timeout, {**self.environment, **(environment or {})})

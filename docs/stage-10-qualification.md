@@ -124,8 +124,9 @@ shut down cleanly. Packet capture reported zero DNS packets, zero plaintext
 canary matches, and zero kernel drops. This evidence covers the local x86_64
 development build.
 
-The capacity, sustained-operation, and deployment drill drivers are still
-being implemented. `check` refuses a policy whose required driver is absent.
+The capacity and sustained-operation driver is implemented (below). The
+deployment drill driver is still being implemented. `check` refuses a policy
+whose required driver is absent.
 Source-status decisions, the complete critical coverage inventory, native
 build reproduction, and the long campaigns have not been completed. The
 release builder and detached signing path still need their full integration
@@ -184,6 +185,57 @@ measurement comes from the final binary and is bound into the attempt
 evidence and the signed release decision. Re-signing the embedded report from
 a fresh measurement changes the source and therefore starts a new candidate.
 
+## Capacity and sustained operation
+
+`scripts/qualify-stage-ten-capacity.py capacity|soak` runs the campaign engine
+`stage_ten_capacity::sustained_operation_campaign`, an ignored integration
+test compiled from the frozen source with the frozen daemon installed at its
+`CARGO_BIN_EXE` path. The capacity job runs 300 seconds with 64 connections;
+the soak job runs 604,800 seconds with 256 connections. The driver measures
+the elapsed time itself and refuses a record that claims more.
+
+The engine starts one coordinator and two edges at the campaign capacity and
+drives N TLS clients split across the edges. Every client joins `#load` and
+its own channel, sends a sequenced timestamped channel message each second,
+a direct message every two seconds, and a topic change every five seconds,
+and records the six latency classes: admission (connect to 001), message
+(direct), durable mutation (own topic), fanout (channel message), OPAQUE
+(account login), and snapshot (the paged NAMES the coordinator serves through
+the edge after a JOIN). Every cycle runs reconnect, churn, snapshot, OPAQUE
+login, disk pressure, backup, peer loss, login-index reconstruction, and rekey,
+samples resources every ten seconds, and ends with a quiescence check
+against the warm baseline. The campaign record lists every sample, the
+percentiles per class, the scenario counts, missed events, refused messages,
+envelope violations, whether resources returned to the envelope, whether each
+daemon stopped cleanly, and the hardware string.
+
+Disk pressure sets every node's fixed reserve close to the free space and
+fallocates a ballast in the campaign directory to cross `R(F) + G`; the
+probe expects a durable JOIN to be refused and a registration to be refused,
+drops the ballast, and polls fresh sessions until a durable JOIN is admitted
+again. Backup writes a signed backup of the stopped edge through the
+production storage owner. Rekey restores that edge through the frozen
+binary's `storage restore` with a new master and guard key, re-pins the new
+recovery epoch on the coordinator, and restarts both. Peer loss kills an edge
+and restarts it. Scenarios that stop a node open a maintenance window in
+which the clients idle instead of reconnecting, as clients do during an
+announced maintenance; sequence gaps are counted only outside those windows
+and each settle period resets every observer's expectations first.
+
+The daemon is non-dumpable and this host mounts `/proc` with
+`hidepid=invisible`, so no unprivileged observer can read a daemon's `/proc`
+entry. The engine therefore takes memory (`memory.stat anon`) and task counts
+(`pids.current`) from a cgroup v2 leaf per daemon when it runs alone inside a
+delegated cgroup, which the driver arranges with `systemd-run --user --scope
+-p Delegate=yes`, and falls back to `/proc/<pid>/status` where that is
+visible. The descriptor class is measured from the kernel socket table: the
+established and close-wait sockets under each node's listener ports. The
+record names its resource source.
+
+A development run of 150 seconds with eight connections completes every
+scenario on this host. The 300-second capacity job and the seven-day soak
+have not been run against a prepared candidate.
+
 ## Open findings
 
 ### STO-1: physical growth after a large-value leaf exceeds the qualification ceiling
@@ -207,6 +259,81 @@ job fails on this tuple and no release may claim `S10-006`. The Stage 05
 report measured a bare redb table with a different row order and does not
 show the behaviour; its embedded tuple remains what startup admits. A fix must
 be followed by a new candidate and a rerun of every storage measurement.
+
+### CAP-1: edges refuse explicit directory queries
+
+A registered client at an edge that sends `NAMES #load`, `WHO #load`,
+`WHOIS`, or a TOPIC query receives `482` (channel targets) or `481`. The edge
+converts client commands into federated operations and forwards only
+mutations and the NAMES page it requests itself after a JOIN; every other
+query falls through to `BadState`. The appendix command table lists WHO and
+NAMES as supported. The campaign measures the snapshot class on the paged
+NAMES that the JOIN triggers and records the numeric each explicit query
+receives.
+
+### CAP-2: registration under disk pressure is not always a bounded refusal
+
+With the coordinator's storage under the reserve, a new registration at an
+edge received `FAIL USER NETWORK_UNAVAILABLE` in some runs, a close before any
+reply in others, and in one run no reply within twenty seconds. The campaign
+records the outcome it observed each cycle.
+
+### CAP-3: a refused durable mutation under pressure closes the session
+
+A registered session whose JOIN was refused with `FAIL JOIN
+NETWORK_UNAVAILABLE` during disk pressure lost its transport within two
+seconds. Section 28.7 asks for a side-effect-free `SERVER_BUSY`; the edge
+instead reports the coordinator refusal as network loss and drops the client.
+The campaign re-registers for its recovery check and notes the close.
+
+### CAP-4: a coordinator restart under a client reconnection storm fails closed
+
+Restarting the coordinator while eight clients reconnected through the edges
+ended one second after `state_core_ready` with "a supervised daemon owner
+failed" in every run that tried it; one run saw the same exit on the
+coordinator a second after an edge restart re-linked and the clients resumed.
+With the clients idling through the maintenance window and resuming in
+staggered order the restarts complete. The supervisor reports only the
+fail-closed exit, not the owner; the coordinator log shows a warning-level
+`federation_link_closed` immediately before `shutdown_quiesce`, which points
+at the listener owner ending after a failed inbound handshake, but that is a
+hypothesis. The daemon's behaviour under an unthrottled reconnection storm
+remains open.
+
+### CAP-5: the login-index key transition has no stopped-daemon driver
+
+Swapping `login_index_key_file` to a new key with the previous key configured
+fails at storage open with "storage authentication failed", because the
+stored login-index key state still names the old generation. `storage
+restore` keeps one login key for source, current, and target, so it cannot
+rotate the key either. The transition is the runtime start/finalize
+construction of Section 23.9, which no command exposes. The campaign's
+`index_transition` scenario exercises login-index reconstruction and
+generation validation across a coordinator restart and re-authenticates the
+campaign account; a genuine key rotation stays an external drill item.
+
+### CAP-6: every sender on an edge silently loses one channel message during an OPAQUE login
+
+While the campaign account authenticates and registers at edge A, every
+other client on edge A loses exactly one channel message to every observer on
+both edges, at the same instant, with no `FAIL PRIVMSG` reply to the senders
+and no link or storage event in any daemon log. Three of four development
+runs reproduced it at the same point (the forty-third message of each sender,
+about fifty-five seconds into the cycle). Section 19 requires all-or-none
+fanout and a side-effect-free `SERVER_BUSY`; a silently dropped committed
+message violates it. The engine records every `FAIL PRIVMSG` reply and
+re-sends the refused sequence, so a refusal and a silent loss stay
+distinguishable, and it carries the refused count in the record. Missed
+events stay the gate: the capacity job fails on this finding until the loss
+is fixed and the campaign reruns with zero missed events.
+
+### CAP-7: the first OPAQUE login after a coordinator restart can fail with 904
+
+After a coordinator restart, with both edge links re-established, the first
+authentication of an existing account at an edge was answered with `904 SASL
+authentication failed` in some runs and succeeded in others. The engine
+retries within a thirty-second grace after a restart and notes every such
+retry in the record.
 
 ## Release claims and limits
 
