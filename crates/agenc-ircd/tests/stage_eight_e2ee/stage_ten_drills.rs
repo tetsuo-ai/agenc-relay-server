@@ -341,6 +341,7 @@ impl DrillNodes {
 fn drill_network() -> TestResult<Network> {
     build_network_with(Some(CapacityPlan {
         max_connections: 32,
+        connections_per_address: 32,
     }))
 }
 

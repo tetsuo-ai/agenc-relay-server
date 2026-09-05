@@ -1858,8 +1858,13 @@ fn preserve_logs(network: &Network, directory: &Path) -> TestResult {
 fn sustained_operation_campaign() -> TestResult {
     let settings = Settings::from_environment()?;
     fs::create_dir_all(&settings.directory)?;
+    let connections = u64::try_from(settings.connections)?;
     let network = build_network_with(Some(CapacityPlan {
-        max_connections: u64::try_from(settings.connections)? + 16,
+        max_connections: connections + 16,
+        // Half the clients land on each edge; reconnect and churn rounds and
+        // the controller's probes need headroom above that share. The config
+        // ceiling for this key is 256, which the 256-client soak fits under.
+        connections_per_address: (connections.div_ceil(2) + 16).min(256),
     }))?;
     let outcome = run_campaign(&settings, &network);
     preserve_logs(&network, &settings.directory)?;

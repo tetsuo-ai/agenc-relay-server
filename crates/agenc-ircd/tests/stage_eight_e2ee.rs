@@ -282,6 +282,10 @@ struct NodePlan<'a> {
 struct CapacityPlan {
     /// Client listener ceiling.
     max_connections: u64,
+    /// Direct connections admitted from one address. Every campaign client
+    /// arrives from loopback, so the per-address abuse ceiling must clear the
+    /// per-edge share of the campaign or half the clients are refused.
+    connections_per_address: u64,
 }
 
 impl NodeFixture {
@@ -547,6 +551,14 @@ fn apply_capacity_overrides(config: &mut String, capacity: CapacityPlan) -> Test
         config,
         "max_connections = 32\n",
         &format!("max_connections = {}\n", capacity.max_connections),
+    )?;
+    replace_once(
+        config,
+        "# direct_connections_per_address = 16 (1..256)\n",
+        &format!(
+            "direct_connections_per_address = {}\n",
+            capacity.connections_per_address
+        ),
     )
 }
 

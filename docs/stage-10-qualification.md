@@ -236,7 +236,13 @@ the soak job runs 604,800 seconds with 256 connections. The driver measures
 the elapsed time itself and refuses a record that claims more.
 
 The engine starts one coordinator and two edges at the campaign capacity and
-drives N TLS clients split across the edges. Every client joins `#load` and
+drives N TLS clients split across the edges. Every client arrives from the
+loopback address, so the nodes raise `direct_connections_per_address` to the
+per-edge share plus headroom (48 for the capacity job, 144 for the soak,
+under the 256 ceiling of that key); the first candidate run with the default
+of 16 admitted only 32 of 64 clients and the campaign failed on a closed
+transport. The listener ceiling and the memory budget stay at the template
+values. Every client joins `#load` and
 its own channel, sends a sequenced timestamped channel message each second,
 a direct message every two seconds, and a topic change every five seconds,
 and records the six latency classes: admission (connect to 001), message
