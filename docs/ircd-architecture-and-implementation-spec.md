@@ -5835,7 +5835,7 @@ blank line, and sort bytewise. Each line is
 `rule|<uint16-decimal-rule-id>|<source-table-id>|<source-record-schema>|`
 `<target-table-id-or-absent>|<target-record-schema-or-zero>|<normative-name>`.
 Rule IDs are unique 1..65,535; numeric fields are canonical unsigned decimal;
-the source tuple is unique; `absent` requires target schema zero; a present
+the source/target table-and-schema tuple is unique; `absent` requires target schema zero; a present
 target uses an integrity-tracked table and nonzero schema; and the normative
 name is 1..64 lowercase ASCII `[a-z0-9-]`. The separately cited normative
 rule text defines every field conversion, validation, split/merge, target-key
@@ -5901,10 +5901,21 @@ is required and does not modify the source.
 For each source table 1..13, 17, 18, 20..24, and 26 at record schema 1, rule ID
 is the table ID and the rule name is `preserve-validated-record`. Decode the
 source with its closed generation-1 key/kind/body/reference codecs, validate
-its semantic invariants, preserve the exact logical plaintext and stored key,
-and emit one freshly sealed target record under the target binding. The
+its semantic invariants, preserve its logical value, derive the target stored
+key through the same binding-aware rules as rekey construction, and emit one
+freshly sealed target record under the target binding. In particular, keyed
+NicknameReservation and ChannelName keys change with the target binding.
+The
 source RequestResult kind set remains 1..4. Target kinds 5/6 and typed History
 kinds 1/2 are admitted only under generation 2.
+
+Rule 27, `initialize-legacy-history-control`, additionally maps each source
+Channel record (table 8, schema 1) whose history policy is non-Off to one empty
+History control record (table 19, schema 1). It preserves the channel policy,
+uses the source's positive global state generation as both the control record
+revision and history authorization generation, and creates no message rows.
+Multiple rules with the same source tuple apply only through their explicitly
+distinct target tuples; both rules 8 and 27 apply to such a channel.
 
 Rule 19 is `reject-legacy-history`; any source History row aborts migration.
 Rule 25 is `reject-live-construction`; any source live construction marker
