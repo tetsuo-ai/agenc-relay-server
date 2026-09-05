@@ -1,0 +1,65 @@
+# The claims a signed release decision may grant, the evidence each one
+# needs, and the limit statements the documentation must keep. Checked by
+# scripts/check-release-claims.py on the candidate binary.
+schema_version = 1
+
+# Ledgers that may not assert a signed decision or a completed campaign while
+# the candidate has no decision directory.
+documents = ["README.md", "TODO.md", "docs/stage-10-qualification.md", "conformance/README.md"]
+
+# Phrases no sentence of the documents above may assert before a decision
+# exists. Matching is per sentence and case-insensitive after whitespace
+# normalization. A sentence that carries one of the negation words below is a
+# statement of what has not happened and is allowed.
+negations = [" no ", " not ", " never ", " cannot ", " until ", " before ", " without ", " remains open", " has not ", " have not "]
+completion_phrases = [
+  "Stage 10 is complete",
+  "Stage 10 complete",
+  "Stage 10 closed",
+  "release decision has been signed",
+  "release decision was signed",
+  "qualified for production",
+  "production qualification is complete",
+  "fuzz campaigns are complete",
+  "soak is complete",
+  "soak has completed",
+]
+
+# Sentences that must appear verbatim in docs/stage-10-qualification.md.
+[limits]
+metadata = "The server observes routing, membership, timing, sizes, and other metadata described in the specifications."
+first_contact = "First-contact encryption does not authenticate an identity out of band."
+transparency = "Transparency observation does not grant Verified status."
+endpoint = "A compromised client can read its plaintext, and authorized recipients can disclose messages."
+tor = "Tor testing cannot establish protection against every traffic-analysis adversary."
+review = "That review remains open."
+
+# Every claim requires every job of the policy on every target the decision
+# names, plus every fuzz campaign; close enforces that. The lists are written
+# out so the requirement is reviewable, and the checker rejects a claim that
+# lists fewer jobs than the policy defines.
+[[claim]]
+id = "core-v1"
+jobs = ["workspace", "models", "interoperability", "storage", "capacity", "soak", "drills", "reproducibility", "sources", "claims", "fuzz.*"]
+limits = ["metadata", "tor"]
+
+[[claim]]
+id = "federated-v1"
+jobs = ["workspace", "models", "interoperability", "storage", "capacity", "soak", "drills", "reproducibility", "sources", "claims", "fuzz.*"]
+limits = ["metadata", "tor"]
+
+[[claim]]
+id = "encrypted-v1"
+jobs = ["workspace", "models", "interoperability", "storage", "capacity", "soak", "drills", "reproducibility", "sources", "claims", "fuzz.*"]
+external_review = "S08-039"
+limits = ["metadata", "first_contact", "transparency", "endpoint", "tor", "review"]
+
+[[claim]]
+id = "wss"
+jobs = ["workspace", "models", "interoperability", "storage", "capacity", "soak", "drills", "reproducibility", "sources", "claims", "fuzz.*"]
+limits = ["metadata", "tor"]
+
+[[claim]]
+id = "history"
+jobs = ["workspace", "models", "interoperability", "storage", "capacity", "soak", "drills", "reproducibility", "sources", "claims", "fuzz.*"]
+limits = ["metadata", "tor"]

@@ -25,11 +25,35 @@ fn local_metadata_requires_exact_options_and_reports_optional_features() -> Test
             assert!(text.contains("\"filesystem_type\":61267,\"block_size\":4096,"));
         }
     }
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../test-data/release-decision"
+    );
+    let trusted = format!("{fixture}/release-public.pem");
+    let untrusted = format!("{fixture}/untrusted-public.pem");
     for args in [
         vec!["--version", "extra"],
         vec!["version", "--json", "extra"],
         vec!["conformance"],
         vec!["conformance", "--json", "--json"],
+        vec!["conformance", "--json", "--release-decision", fixture],
+        vec!["conformance", "--json", "--trusted-public-key", &trusted],
+        vec![
+            "conformance",
+            "--json",
+            "--release-decision",
+            fixture,
+            "--trusted-public-key",
+            &untrusted,
+        ],
+        vec![
+            "conformance",
+            "--json",
+            "--release-decision",
+            "/nonexistent-agenc-decision",
+            "--trusted-public-key",
+            &trusted,
+        ],
     ] {
         assert!(
             !Command::new(env!("CARGO_BIN_EXE_agenc-ircd"))
@@ -39,6 +63,24 @@ fn local_metadata_requires_exact_options_and_reports_optional_features() -> Test
                 .success()
         );
     }
+    // A verified decision for another source commit grants this binary nothing.
+    let output = Command::new(env!("CARGO_BIN_EXE_agenc-ircd"))
+        .args([
+            "conformance",
+            "--json",
+            "--release-decision",
+            fixture,
+            "--trusted-public-key",
+            &trusted,
+        ])
+        .output()?;
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout)?;
+    assert!(text.contains("\"qualified_claims\":[]"));
+    assert!(
+        text.contains("\"qualification\":\"signed release decision names another source commit\"")
+    );
+    assert!(!text.contains("\"release_decision\":"));
     let output = Command::new(env!("CARGO_BIN_EXE_agenc-ircd"))
         .arg("--version")
         .output()?;

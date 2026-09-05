@@ -154,6 +154,22 @@ def require_integer(value: Any, minimum: int, maximum: int, label: str) -> int:
     return value
 
 
+def require_targets(value: Any) -> list[str]:
+    """A nonempty, ordered, repetition-free subset of the native targets."""
+    if (not isinstance(value, list) or not value or any(not isinstance(target, str) or target not in TARGETS for target in value)
+            or value != sorted(set(value))):
+        raise QualificationError("targets must name distinct native targets in order")
+    return list(value)
+
+
+def target_scope(candidate_targets: list[str], requested: list[str] | None) -> list[str]:
+    """Resolve an optional target selection against the candidate's own targets."""
+    scope = candidate_targets if requested is None else require_targets(sorted(set(requested)))
+    if any(target not in candidate_targets for target in scope):
+        raise QualificationError("target selection names a target outside this candidate")
+    return list(scope)
+
+
 def sync_directory(directory: Path) -> None:
     descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:

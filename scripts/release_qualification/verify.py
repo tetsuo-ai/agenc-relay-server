@@ -7,7 +7,7 @@ from typing import Any
 
 from .locks import attempt_entries, job_running
 from .records import (MAX_LOG_BYTES, QualificationError, canonical, digest, file_digest,
-                      read_record, require_fields, require_hash, require_integer, safe_path, timestamp)
+                      read_record, require_fields, require_hash, require_integer, safe_path, target_scope, timestamp)
 
 RESULT_FIELDS = {"schema_version", "candidate_sha256", "start_sha256", "finished_at", "job_id", "target", "outcome", "measurement", "report_sha256"}
 MEASUREMENT_FIELDS = {"exit_code", "failure", "elapsed_ns", "cpu_user_ns", "cpu_system_ns", "maximum_rss_kib", "log_sha256", "log_bytes"}
@@ -19,7 +19,7 @@ REQUIRED_FACTS = {
     "storage": {"native_tuple", "production_storage_path", "all_growth_cases", "sync_rename_phases", "reserve_boundaries", "backup_boundaries", "construction_boundaries", "signed_measurements"},
     "drills": {"restore", "disaster_restore", "migration", "deletion", "rekey", "index_transition", "tls_rotation", "federation_rotation", "sequencer_rotation", "backup_rotation", "audit_rotation", "compromise", "rollback", "resynchronization", "host_hardening", "observability"},
     "sources": {"primary_sources", "advisories", "dependency_policy", "decisions_current"},
-    "claims": {"binary_identity", "separate_claims", "privacy_limits", "documentation_current"},
+    "claims": {"binary_identity", "separate_claims", "privacy_limits", "documentation_current", "decision_inspection"},
 }
 
 
@@ -125,11 +125,19 @@ def verify_attempt(directory: Path, candidate: dict[str, Any], attempt: Path) ->
     return result
 
 
-def status(directory: Path, candidate: dict[str, Any]) -> dict[str, Any]:
-    """Summarize every target/job pair; a running job is neither passed nor interrupted."""
-    output = {"candidate_sha256": digest(canonical(candidate)), "passed": [], "failed": [], "interrupted": [],
-              "running": [], "pending": [], "attempts": {}}
+def status(directory: Path, candidate: dict[str, Any], targets: list[str] | None = None) -> dict[str, Any]:
+    """Summarize every target/job pair in scope; a running job is neither passed nor interrupted.
+
+    The scope defaults to every candidate target. A decision for fewer targets
+    summarizes only those, so evidence missing for one target blocks only the
+    claims that target would carry.
+    """
+    scope = target_scope(candidate["targets"], targets)
+    output = {"candidate_sha256": digest(canonical(candidate)), "targets": scope, "passed": [], "failed": [],
+              "interrupted": [], "running": [], "pending": [], "attempts": {}}
     for artifact in candidate["artifacts"]:
+        if artifact["target"] not in scope:
+            continue
         for job in candidate["jobs"]:
             name = f"{artifact['target']}/{job['id']}"
             attempts = safe_path(directory, f"runs/{name}")

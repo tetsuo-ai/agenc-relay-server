@@ -34,7 +34,7 @@ const USAGE: &str = concat!(
     "usage: agenc-ircd <command> [options]\n",
     "commands:\n",
     "  version [--json]\n",
-    "  conformance --json\n",
+    "  conformance --json [--release-decision <directory> --trusted-public-key <pem>]\n",
     "  serve --config <file>\n",
     "  check-config --config <file>\n",
     "  init --config <file> --profile <public|onion|dual> [options]\n",

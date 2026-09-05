@@ -12,16 +12,23 @@ from .locks import attempt_entries, job_lock, shared
 from .policy import checked_run, fuzz_jobs, host_target, load_policy, policy_identity, source_identity
 from .process import execute
 from .records import (
-    CLAIMS, COMMIT, TARGETS, QualificationError, canonical, digest, file_digest,
-    read_bytes, read_record, require_fields, require_hash, safe_path, timestamp,
+    CLAIMS, COMMIT, QualificationError, canonical, digest, file_digest,
+    read_bytes, read_record, require_fields, require_hash, require_targets, safe_path, timestamp,
     utc_now, write_once,
 )
 
-CANDIDATE_FIELDS = {"schema_version", "created_at", "source", "policy", "jobs", "artifacts", "claims"}
+CANDIDATE_FIELDS = {"schema_version", "created_at", "source", "policy", "jobs", "artifacts", "claims", "targets"}
 ARTIFACT_FIELDS = {"target", "path", "sha256", "build_record", "build_record_sha256"}
 
 
-def prepare(root: Path, destination: Path, builds: list[Path]) -> str:
+def prepare(root: Path, destination: Path, builds: list[Path], targets: list[str]) -> str:
+    """Create a candidate for the named native targets from one build record each.
+
+    A candidate may cover a subset of the native targets. Jobs run only for
+    the recorded targets, and a decision can claim only those targets, so an
+    x86_64 candidate can exist while aarch64 evidence is produced elsewhere.
+    """
+    scope = require_targets(sorted(set(targets)))
     policy = load_policy(root)
     source = source_identity(root)
     if destination.exists():
@@ -36,11 +43,12 @@ def prepare(root: Path, destination: Path, builds: list[Path]) -> str:
         artifacts.append({"target": target, "path": f"artifacts/{target}/agenc-ircd",
                           "sha256": file_digest(binary), "build_record": f"artifacts/{target}/build.json",
                           "build_record_sha256": digest(canonical(record))})
-    if sorted(item["target"] for item in artifacts) != list(TARGETS):
-        raise QualificationError("prepare requires one reproducible build from each native target")
+    if sorted(item["target"] for item in artifacts) != scope:
+        raise QualificationError("prepare requires exactly one reproducible build for each named target")
     record = {"schema_version": 1, "created_at": utc_now(), "source": source,
               "policy": policy_identity(root), "jobs": policy["job"] + fuzz_jobs(root),
-              "artifacts": sorted(artifacts, key=lambda item: item["target"]), "claims": list(CLAIMS)}
+              "artifacts": sorted(artifacts, key=lambda item: item["target"]), "claims": list(CLAIMS),
+              "targets": scope}
     destination.mkdir(mode=0o700, parents=True)
     for record_path in builds:
         build = read_record(record_path)
@@ -79,14 +87,15 @@ def validate_candidate(root: Path, directory: Path, *, check_source: bool = True
         raise QualificationError("candidate policy or commands differ from this source")
     if check_source and record["source"] != source_identity(root):
         raise QualificationError("candidate cannot resume on a different or modified source")
+    targets = require_targets(record["targets"])
     artifacts = record["artifacts"]
-    if not isinstance(artifacts, list) or len(artifacts) != len(TARGETS):
+    if not isinstance(artifacts, list) or len(artifacts) != len(targets):
         raise QualificationError("incomplete candidate artifacts")
     seen = []
     for artifact in artifacts:
         require_fields(artifact, ARTIFACT_FIELDS, "candidate artifact")
         target = artifact["target"]
-        if target not in TARGETS or target in seen:
+        if target not in targets or target in seen:
             raise QualificationError("unknown or repeated artifact target")
         seen.append(target)
         if artifact["path"] != f"artifacts/{target}/agenc-ircd" or artifact["build_record"] != f"artifacts/{target}/build.json":

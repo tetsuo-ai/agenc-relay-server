@@ -208,8 +208,9 @@ class SyntheticCandidate:
     """A throwaway candidate under disposable keys; it can never become release evidence."""
 
     SOURCE = {"commit": "f" * 40, "source_sha256": "1" * 64, "lock_sha256": "2" * 64}
+    TARGETS = ("aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu")
 
-    def __init__(self, root: Path, directory: Path) -> None:
+    def __init__(self, root: Path, directory: Path, targets: tuple[str, ...] = TARGETS) -> None:
         from release_qualification.policy import fuzz_jobs as jobs_of, load_policy as policy_of, policy_identity
 
         self.root = root
@@ -217,14 +218,14 @@ class SyntheticCandidate:
         policy = policy_of(root, require_drivers=False)
         self.jobs = policy["job"] + jobs_of(root)
         artifacts = []
-        for target in ("aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"):
+        for target in sorted(targets):
             build = self.synthetic_build(target)
             artifacts.append({"target": target, "path": f"artifacts/{target}/agenc-ircd",
                               "sha256": build["binary_sha256"], "build_record": f"artifacts/{target}/build.json",
                               "build_record_sha256": digest(canonical(build))})
         self.record = {"schema_version": 1, "created_at": timestamp_now(), "source": self.SOURCE,
                        "policy": policy_identity(root), "jobs": self.jobs, "artifacts": artifacts,
-                       "claims": ["core-v1", "federated-v1", "encrypted-v1", "wss", "history"]}
+                       "claims": ["core-v1", "federated-v1", "encrypted-v1", "wss", "history"], "targets": sorted(targets)}
         write_once(directory / "candidate.json", canonical(self.record))
         self.hash = digest(canonical(self.record))
 
@@ -331,20 +332,116 @@ class RunnerTests(unittest.TestCase):
         self.stack.close()
         self.temporary.cleanup()
 
-    def run_job(self, job_id: str, *, resume: bool = False, exit_code: int = 0, interrupt: bool = False):
+    def run_job(self, job_id: str, *, resume: bool = False, exit_code: int = 0, interrupt: bool = False,
+                candidate: SyntheticCandidate | None = None):
         from unittest import mock
 
         from release_qualification import candidate as candidate_module
         from release_qualification.candidate import run_job
 
-        with mock.patch.object(candidate_module, "execute", self.candidate.fake_execute(exit_code=exit_code, interrupt=interrupt)):
-            return run_job(self.root, self.directory, job_id, resume=resume)
+        candidate = candidate or self.candidate
+        with mock.patch.object(candidate_module, "execute", candidate.fake_execute(exit_code=exit_code, interrupt=interrupt)):
+            return run_job(self.root, candidate.directory, job_id, resume=resume)
 
-    def status(self):
+    def status(self, candidate: SyntheticCandidate | None = None, targets: list[str] | None = None):
         from release_qualification.candidate import validate_candidate
         from release_qualification.verify import status
 
-        return status(self.directory, validate_candidate(self.root, self.directory, check_source=False))
+        directory = (candidate or self.candidate).directory
+        return status(directory, validate_candidate(self.root, directory, check_source=False), targets)
+
+    def single_target_candidate(self) -> SyntheticCandidate:
+        directory = Path(self.temporary.name) / "single"
+        directory.mkdir(mode=0o700)
+        return SyntheticCandidate(self.root, directory, ("x86_64-unknown-linux-gnu",))
+
+    def test_prepare_records_only_the_named_targets(self) -> None:
+        from unittest import mock
+
+        from release_qualification import candidate as candidate_module
+        from release_qualification.candidate import prepare, validate_candidate
+
+        builds = {target: self.directory / "artifacts" / target / "build.json" for target in SyntheticCandidate.TARGETS}
+        output = Path(self.temporary.name) / "prepared"
+        with mock.patch.object(candidate_module, "source_identity", return_value=dict(SyntheticCandidate.SOURCE)):
+            with self.assertRaises(QualificationError):
+                prepare(self.root, output, list(builds.values()), ["x86_64-unknown-linux-gnu"])
+            with self.assertRaises(QualificationError):
+                prepare(self.root, output, [builds["x86_64-unknown-linux-gnu"]], [])
+            with self.assertRaises(QualificationError):
+                prepare(self.root, output, [builds["x86_64-unknown-linux-gnu"]], ["riscv64gc-unknown-linux-gnu"])
+            prepare(self.root, output, [builds["x86_64-unknown-linux-gnu"]], ["x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"])
+        record = validate_candidate(self.root, output, check_source=False)
+        self.assertEqual(record["targets"], ["x86_64-unknown-linux-gnu"])
+        self.assertEqual([artifact["target"] for artifact in record["artifacts"]], ["x86_64-unknown-linux-gnu"])
+        candidate_path = output / "candidate.json"
+        original = candidate_path.read_bytes()
+        candidate_path.write_bytes(original.replace(b'"targets":["x86_64-unknown-linux-gnu"]', b'"targets":["aarch64-unknown-linux-gnu","x86_64-unknown-linux-gnu"]'))
+        with self.assertRaises(QualificationError):
+            validate_candidate(self.root, output, check_source=False)
+
+    def test_single_target_candidate_runs_and_closes_only_its_target(self) -> None:
+        from unittest import mock
+
+        from release_qualification import candidate as candidate_module
+        from release_qualification.decision import verify_decision
+        from release_qualification.signing import close
+
+        single = self.single_target_candidate()
+        self.host_target = "aarch64-unknown-linux-gnu"
+        with self.assertRaises(QualificationError):
+            self.run_job("claims", candidate=single)
+        self.host_target = "x86_64-unknown-linux-gnu"
+        for job in single.jobs:
+            self.assertEqual(self.run_job(job["id"], candidate=single)["outcome"], "passed", job["id"])
+        summary = self.status(single)
+        self.assertTrue(summary["ready"])
+        self.assertEqual(summary["targets"], ["x86_64-unknown-linux-gnu"])
+        with self.assertRaises(QualificationError):
+            self.status(single, ["aarch64-unknown-linux-gnu"])
+        private, public = self.keys("single")
+        with mock.patch.object(candidate_module, "source_identity", return_value=dict(SyntheticCandidate.SOURCE)):
+            decision = close(self.root, single.directory, private, public, ["core-v1"], None)
+        self.assertEqual(decision["targets"], ["x86_64-unknown-linux-gnu"])
+        self.assertEqual([artifact["target"] for artifact in decision["artifacts"]], ["x86_64-unknown-linux-gnu"])
+        self.assertEqual(verify_decision(self.root, single.directory, public)["targets"], ["x86_64-unknown-linux-gnu"])
+
+    def test_two_target_candidate_can_close_the_finished_target_alone(self) -> None:
+        from unittest import mock
+
+        from release_qualification import candidate as candidate_module
+        from release_qualification.decision import verify_decision
+        from release_qualification.signing import close
+
+        self.host_target = "x86_64-unknown-linux-gnu"
+        for job in self.candidate.jobs:
+            self.assertEqual(self.run_job(job["id"])["outcome"], "passed", job["id"])
+        self.assertFalse(self.status()["ready"])
+        self.assertTrue(self.status(targets=["x86_64-unknown-linux-gnu"])["ready"])
+        private, public = self.keys("scoped")
+        with mock.patch.object(candidate_module, "source_identity", return_value=dict(SyntheticCandidate.SOURCE)):
+            with self.assertRaises(QualificationError):
+                close(self.root, self.directory, private, public, ["core-v1"], None)
+            with self.assertRaises(QualificationError):
+                close(self.root, self.directory, private, public, ["core-v1"], None, ["aarch64-unknown-linux-gnu"])
+            with self.assertRaises(QualificationError):
+                close(self.root, self.directory, private, public, ["core-v1"], None, ["riscv64gc-unknown-linux-gnu"])
+            decision = close(self.root, self.directory, private, public, ["core-v1", "wss"], None, ["x86_64-unknown-linux-gnu"])
+        self.assertEqual(decision["targets"], ["x86_64-unknown-linux-gnu"])
+        self.assertEqual(len(decision["artifacts"]), 1)
+        verified = verify_decision(self.root, self.directory, public)
+        self.assertEqual(verified["targets"], ["x86_64-unknown-linux-gnu"])
+        qualification = read_record(self.directory / "decision/qualification.json")
+        self.assertEqual(qualification["targets"], ["x86_64-unknown-linux-gnu"])
+        self.assertTrue(all(name.startswith("x86_64-unknown-linux-gnu/") for name in qualification["passed"]))
+        # Widening the signed scope after the fact breaks the signature.
+        release = self.directory / "decision/release.json"
+        original = release.read_bytes()
+        release.write_bytes(original.replace(b'"targets":["x86_64-unknown-linux-gnu"]', b'"targets":["aarch64-unknown-linux-gnu","x86_64-unknown-linux-gnu"]'))
+        with self.assertRaises(QualificationError):
+            verify_decision(self.root, self.directory, public)
+        release.write_bytes(original)
+        verify_decision(self.root, self.directory, public)
 
     def test_pass_fail_interrupt_and_resume_retain_every_attempt(self) -> None:
         result = self.run_job("claims")
@@ -719,6 +816,213 @@ class DrillsDriverTests(unittest.TestCase):
             mutate(changed)
             with self.subTest(record=changed), self.assertRaises(QualificationError):
                 driver.validate_record(changed, "restore")
+
+
+class DecisionFixtureTests(unittest.TestCase):
+    """The committed fixture binds the Python signer and the daemon's verifier to one domain."""
+
+    ROOT = Path(__file__).resolve().parent.parent
+    FIXTURE = ROOT / "test-data/release-decision"
+    SEED = b"agenc-ircd release decision seed"
+    PKCS8_PREFIX = bytes.fromhex("302e020100300506032b657004220420")
+
+    def test_fixture_signature_is_reproduced_from_the_seed_under_the_shared_domain(self) -> None:
+        from release_qualification.signing import sign_payload
+
+        self.assertEqual(DOMAIN, b"agenc-chat release decision v1")
+        payload = (self.FIXTURE / "release.json").read_bytes()
+        committed = (self.FIXTURE / "release.sig").read_bytes()
+        public = self.FIXTURE / "release-public.pem"
+        with tempfile.TemporaryDirectory(prefix="agenc-fixture-key-") as temporary:
+            der = Path(temporary) / "seed.der"
+            der.write_bytes(self.PKCS8_PREFIX + self.SEED)
+            private = Path(temporary) / "seed.pem"
+            derived_public = Path(temporary) / "seed-public.pem"
+            subprocess.run(["openssl", "pkey", "-inform", "DER", "-in", str(der), "-out", str(private)], check=True, capture_output=True)
+            subprocess.run(["openssl", "pkey", "-in", str(private), "-pubout", "-out", str(derived_public)], check=True, capture_output=True)
+            self.assertEqual(derived_public.read_bytes(), public.read_bytes())
+            self.assertEqual(sign_payload(DOMAIN + payload, private, public), committed)
+        verify_signature(DOMAIN + payload, committed, public)
+        with self.assertRaises(QualificationError):
+            verify_signature(DOMAIN + payload, committed, self.FIXTURE / "untrusted-public.pem")
+        with self.assertRaises(QualificationError):
+            verify_signature(b"agenc-ircd release decision v1\x00" + payload, committed, public)
+        decision = read_record(self.FIXTURE / "release.json")
+        self.assertEqual(decision["public_key_sha256"], file_digest(public))
+        self.assertEqual(decision["targets"], ["x86_64-unknown-linux-gnu"])
+        self.assertEqual(decision["artifacts"][0]["sha256"], digest(b"agenc-ircd release decision fixture executable\n"))
+        seed = self.ROOT / "test-data/fuzz-corpus/release-decision/canonical"
+        self.assertEqual(seed.read_bytes(), payload)
+
+
+class SourcesDriverTests(unittest.TestCase):
+    """Every cited source has a recorded decision, and any status drift is a named failure."""
+
+    ROOT = Path(__file__).resolve().parent.parent
+
+    @staticmethod
+    def driver():
+        import importlib.util
+
+        path = Path(__file__).resolve().parent / "check-release-sources.py"
+        specification = importlib.util.spec_from_file_location("check_release_sources", path)
+        module = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(module)
+        return module
+
+    def test_ledger_inventory_matches_the_recorded_decisions(self) -> None:
+        driver = self.driver()
+        ledger = read_bytes(self.ROOT / driver.LEDGER_PATH)
+        decisions = driver.load_decisions(self.ROOT)
+        self.assertEqual(decisions["ledger_sha256"], digest(ledger))
+        numbers = driver.ledger_rfc_numbers(ledger.decode())
+        self.assertEqual({entry["number"] for entry in decisions["rfc"]}, numbers)
+        self.assertIn(8446, numbers)
+        self.assertEqual(next(entry for entry in decisions["rfc"] if entry["number"] == 8446)["decision"], "supersede")
+        self.assertEqual([entry["name"] for entry in decisions["draft"]], ["draft-ietf-mls-pq-ciphersuites"])
+        self.assertEqual(len(decisions["repository"]), 3)
+        self.assertEqual(driver.ledger_rfc_numbers("\n## 2. x\nRFC 2119 and RFCs 2810-2813 plus RFC-9180-exporter\n## 3. y\nRFC 9999\n"), {2119, 2810, 2811, 2812, 2813})
+        with self.assertRaises(QualificationError):
+            driver.ledger_rfc_numbers("\n## 2. x\nRFCs 100-900\n## 3. y\n")
+
+    def test_status_drift_is_a_failure_that_names_the_source(self) -> None:
+        driver = self.driver()
+        entry = {"number": 9846, "status": "PROPOSED STANDARD", "obsoleted_by": [], "updated_by": [], "decision": "adopt", "note": "n"}
+        record = {"doc_id": "RFC9846", "status": "PROPOSED STANDARD", "obsoleted_by": [], "updated_by": [], "pub_date": "July 2026", "errata_url": "https://www.rfc-editor.org/errata/rfc9846"}
+        self.assertEqual(driver.check_rfc(entry, record)["status"], "PROPOSED STANDARD")
+        for change in ({"status": "HISTORIC"}, {"obsoleted_by": ["RFC9999"]}, {"updated_by": ["RFC9999"]}, {"doc_id": "RFC9847"}):
+            with self.subTest(change=change), self.assertRaisesRegex(QualificationError, "RFC 984"):
+                driver.check_rfc(entry, {**record, **change})
+        draft = {"name": "draft-ietf-mls-pq-ciphersuites", "revision": "06", "updated": "2026-07-21T09:18:03Z", "states": ["active", "chair-w", "idexists"], "decision": "reject", "note": "n"}
+        document = {"name": draft["name"], "rev": "06", "time": "2026-07-21T09:18:03Z", "expires": "2027-01-22T09:18:03Z"}
+        states = [{"slug": "idexists"}, {"slug": "active"}, {"slug": "chair-w"}]
+        self.assertEqual(driver.check_draft(draft, document, states)["revision"], "06")
+        for changed_document, changed_states in (({**document, "rev": "07"}, states), ({**document, "time": "2026-09-01T00:00:00Z"}, states), (document, states[:2])):
+            with self.subTest(document=changed_document), self.assertRaisesRegex(QualificationError, "draft-ietf-mls-pq-ciphersuites"):
+                driver.check_draft(draft, changed_document, changed_states)
+        listing = "ref: refs/heads/main\tHEAD\n" + "a" * 40 + "\tHEAD\n"
+        self.assertEqual(driver.parse_ls_remote(listing), ("refs/heads/main", "a" * 40))
+        repository = {"name": "Tor specifications", "url": "https://example.test/torspec", "pinned_commit": "b" * 40, "default_branch": "refs/heads/main", "head_commit": "a" * 40, "decision": "adopt", "note": "n"}
+        self.assertEqual(driver.check_repository(repository, listing)["head_commit"], "a" * 40)
+        with self.assertRaisesRegex(QualificationError, "Tor specifications"):
+            driver.check_repository(repository, "ref: refs/heads/main\tHEAD\n" + "c" * 40 + "\tHEAD\n")
+        with self.assertRaisesRegex(QualificationError, "Tor specifications"):
+            driver.check_repository(repository, "ref: refs/heads/master\tHEAD\n" + "a" * 40 + "\tHEAD\n")
+        with self.assertRaises(QualificationError):
+            driver.parse_ls_remote("garbage\n")
+
+    def test_decisions_need_explicit_words_and_notes(self) -> None:
+        driver = self.driver()
+        original = (self.ROOT / driver.DECISIONS_PATH).read_text()
+        with tempfile.TemporaryDirectory(prefix="agenc-sources-test-") as temporary:
+            root = Path(temporary)
+            (root / "conformance").mkdir()
+            for text in (original.replace('decision = "supersede"', 'decision = "maybe"'), original.replace('note = "Requirement words."', 'note = " "'),
+                         original.replace("[[draft]]", "[[drafts]]"), original.replace('schema_version = 1', 'schema_version = 2')):
+                (root / driver.DECISIONS_PATH).write_text(text)
+                with self.subTest(text=text[:60]), self.assertRaises(QualificationError):
+                    driver.load_decisions(root)
+            (root / driver.DECISIONS_PATH).write_text(original)
+            self.assertEqual(driver.load_decisions(root)["schema_version"], 1)
+
+
+class ClaimsDriverTests(unittest.TestCase):
+    """The claims driver compares the binary, the baseline, and the ledgers field by field."""
+
+    ROOT = Path(__file__).resolve().parent.parent
+
+    @staticmethod
+    def driver():
+        import importlib.util
+
+        path = Path(__file__).resolve().parent / "check-release-claims.py"
+        specification = importlib.util.spec_from_file_location("check_release_claims", path)
+        module = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(module)
+        return module
+
+    def policy(self):
+        return load_policy(self.ROOT, require_drivers=False)
+
+    def test_claims_policy_requires_every_job_and_every_limit(self) -> None:
+        driver = self.driver()
+        claims = driver.load_claims_policy(self.ROOT, self.policy())
+        self.assertEqual(sorted(claim["id"] for claim in claims["claim"]), sorted(["core-v1", "federated-v1", "encrypted-v1", "wss", "history"]))
+        original = (self.ROOT / driver.CLAIMS_PATH).read_text()
+        with tempfile.TemporaryDirectory(prefix="agenc-claims-test-") as temporary:
+            root = Path(temporary)
+            (root / "conformance").mkdir()
+            (root / "docs").mkdir()
+            for name in claims["documents"]:
+                (root / name).write_text("placeholder\n")
+            for text in (original.replace('"soak", ', "", 1), original.replace('limits = ["metadata", "tor"]', 'limits = ["metadata", "absent"]', 1),
+                         original.replace('id = "history"', 'id = "core-v1"'), original.replace('external_review = "S08-039"', 'external_review = "S08-001"'),
+                         original.replace("[[claim]]\nid = \"wss\"", "[[claim]]\nid = \"wss2\"")):
+                (root / driver.CLAIMS_PATH).write_text(text)
+                with self.subTest(text=text[:40]), self.assertRaises(QualificationError):
+                    driver.load_claims_policy(root, self.policy())
+            (root / driver.CLAIMS_PATH).write_text(original)
+            driver.load_claims_policy(root, self.policy())
+
+    def test_metadata_is_compared_field_by_field(self) -> None:
+        driver = self.driver()
+        candidate = {"source": dict(SyntheticCandidate.SOURCE)}
+        build = {"features": ["history", "wss"], "tools": {"rustc": "rustc 1.98.0 (abc 2026-01-01)\nbinary: rustc\nhost: x86_64-unknown-linux-gnu"}}
+        expected = driver.expected_metadata(candidate, build, "x86_64-unknown-linux-gnu")
+        self.assertEqual(expected["compiler"], "rustc 1.98.0 (abc 2026-01-01)")
+        metadata = dict(expected)
+        driver.check_metadata(metadata, expected, "version")
+        for field, value in (("compiler", "rustc 1.97.0"), ("target", "aarch64-unknown-linux-gnu"), ("features", {"history": True, "wss": False}), ("storage_schema_generation", 1)):
+            with self.subTest(field=field), self.assertRaisesRegex(QualificationError, field):
+                driver.check_metadata({**metadata, field: value}, expected, "version")
+        baseline = driver.load_baseline(self.ROOT)
+        conformance = driver.expected_conformance(baseline)
+        self.assertEqual(conformance["qualified_claims"], [])
+        self.assertEqual(len(conformance["base_profile_sha256"]), 64)
+        with self.assertRaisesRegex(QualificationError, "qualified_claims"):
+            driver.check_metadata({**conformance, "qualified_claims": ["core-v1"]}, conformance, "conformance")
+
+    def test_ledgers_keep_their_limits_and_claim_nothing_early(self) -> None:
+        driver = self.driver()
+        claims = driver.load_claims_policy(self.ROOT, self.policy())
+        lint = driver.lint_documents(self.ROOT, claims, False)
+        self.assertEqual(lint["documents"], claims["documents"])
+        with tempfile.TemporaryDirectory(prefix="agenc-lint-test-") as temporary:
+            root = Path(temporary)
+            (root / "docs").mkdir()
+            (root / "conformance").mkdir()
+            for name in claims["documents"]:
+                (root / name).write_text("quiet\n")
+            (root / driver.LIMITS_DOCUMENT).write_text(" ".join(claims["limits"].values()).replace(". ", ".\n") + "\n")
+            driver.lint_documents(root, claims, False)
+            (root / driver.LIMITS_DOCUMENT).write_text(" ".join(list(claims["limits"].values())[1:]) + "\n")
+            with self.assertRaises(QualificationError):
+                driver.lint_documents(root, claims, False)
+            (root / driver.LIMITS_DOCUMENT).write_text(" ".join(claims["limits"].values()) + "\n")
+            (root / "README.md").write_text("No Stage 10 release decision has been signed. Nothing is complete\nuntil the release decision has been signed.\n")
+            driver.lint_documents(root, claims, False)
+            (root / "README.md").write_text("The Stage 10 release decision\nHAS been signed.\n")
+            with self.assertRaisesRegex(QualificationError, "README.md"):
+                driver.lint_documents(root, claims, False)
+            driver.lint_documents(root, claims, True)
+            self.assertIsNone(driver.asserted_completion("Stage 10 is not complete. The soak has not completed.", claims))
+            self.assertEqual(driver.asserted_completion("Done: Stage 10 is complete.", claims), "stage 10 is complete")
+
+    def test_foreign_decision_never_names_the_candidate(self) -> None:
+        driver = self.driver()
+        with tempfile.TemporaryDirectory(prefix="agenc-foreign-test-") as temporary:
+            directory = Path(temporary) / "candidate"
+            directory.mkdir()
+            candidate = SyntheticCandidate(self.ROOT, directory)
+            public = Path(temporary) / "public.pem"
+            public.write_bytes(b"-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAGb9ECWmEzf6FQbrBZ9w7lshQhqowtrbLDFw4rXAxZuE=\n-----END PUBLIC KEY-----\n")
+            decision = driver.foreign_decision(candidate.record, "x86_64-unknown-linux-gnu", public)
+            self.assertEqual(decision["source"]["commit"], "0" * 40)
+            self.assertNotEqual(decision["candidate_sha256"], candidate.hash)
+            self.assertNotEqual(decision["source"], candidate.record["source"])
+            self.assertEqual(decision["targets"], ["x86_64-unknown-linux-gnu"])
+            self.assertEqual(decision["artifacts"][0]["sha256"], candidate.record["artifacts"][1]["sha256"])
+            self.assertEqual(decision["public_key_sha256"], file_digest(public))
 
 
 if __name__ == "__main__":

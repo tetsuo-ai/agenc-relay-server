@@ -29,7 +29,8 @@ pub use entropy::OsEntropy;
 pub use error::{CryptoError, CryptoWorkerError};
 pub use hash::{
     Digest32, LoginIndexDigest, LoginIndexKey, LoginIndexKeyId, OpaqueFakeCredentialKey,
-    SemanticHashDomain, derive_fake_credential_id, derive_login_index, semantic_digest,
+    SemanticHashDomain, Sha256Stream, derive_fake_credential_id, derive_login_index,
+    semantic_digest,
 };
 pub use signature::{
     Ed25519PublicKey, Ed25519SecretKey, Ed25519Signature, SignatureDomain, sign_canonical,

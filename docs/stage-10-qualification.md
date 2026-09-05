@@ -40,10 +40,10 @@ do not certify the presentation behavior of third-party clients.
 
 `scripts/qualify-release.py` defines `check`, `prepare`, `run`, `resume`,
 `status`, `close`, and `verify`. Candidate preparation requires a clean detached source
-checkout and independently reproduced build records for both native targets.
-It copies the binaries and build evidence into a new candidate directory.
-Source, lockfile, policy, command, binary, and build-record hashes bind each
-attempt to that candidate.
+checkout and one independently reproduced build record for each native target
+named with `--target`. It copies the binaries and build evidence into a new
+candidate directory. Source, lockfile, policy, command, binary, and
+build-record hashes bind each attempt to that candidate.
 
 Every attempt has an immutable start record, a bounded combined output log,
 measured elapsed and child CPU time, a driver report, and a result record.
@@ -124,13 +124,12 @@ shut down cleanly. Packet capture reported zero DNS packets, zero plaintext
 canary matches, and zero kernel drops. This evidence covers the local x86_64
 development build.
 
-The capacity and sustained-operation driver and the operational drill driver
-are implemented (below). `check` refuses a policy whose required driver is
-absent.
-Source-status decisions, the complete critical coverage inventory, native
-build reproduction, and the long campaigns have not been completed. The
-release builder and detached signing path still need their full integration
-qualification.
+The capacity and sustained-operation driver, the operational drill driver,
+the source-status checker, and the claims checker are implemented (below).
+`check` refuses a policy whose required driver is absent. The complete
+critical coverage inventory, native build reproduction, and the long
+campaigns have not been completed. The release builder and detached signing
+path still need their full integration qualification.
 
 Network evidence must include real WeeChat and Irssi sessions, the native
 account protocol, OpenMLS and mls-rs, an isolated Tor v3 network, SOCKS
@@ -296,7 +295,108 @@ hardening, and observability. Four do not pass and keep the drills job
 failing: restore and disaster restore (CAP-9), login-index transition
 (CAP-5), and deletion (CAP-11).
 
+## Native targets and scoped decisions
+
+A candidate records the native targets it covers. `prepare --target` is
+repeated once per build record, jobs run only for recorded targets, and
+`status` summarizes only those targets. A host whose target the candidate
+does not cover cannot attempt a job.
+
+```sh
+python3 scripts/qualify-release.py prepare --output /path/to/candidate \
+  --target x86_64-unknown-linux-gnu --build /path/to/x86_64/build.json
+```
+
+`close --target` restricts a decision to a subset of the candidate's targets.
+The decision lists those targets and only their artifacts, the qualification
+summary it binds covers only their jobs, and `verify` checks the same scope.
+Unresolved evidence for one target therefore blocks only the claims that
+target would carry. A two-target candidate can be closed for x86_64 while the
+aarch64 jobs are still running on another host, and closed again for aarch64
+only through a second candidate directory, because one candidate holds one
+decision. The aarch64 jobs must run on an aarch64 host; the workflow that
+produces the aarch64 build record is described with the release builds.
+
+## Source status decisions
+
+`scripts/check-release-sources.py` no longer hashes web pages. It reads the
+RFC Editor status record for every RFC the source ledger's published-standards
+section names, the Datatracker document record and state names for the pinned
+MLS post-quantum draft, and `git ls-remote` output for the three living
+specification repositories, then fetches each pinned commit into a bare
+repository to prove the remote still serves it. Every response body is
+retained under the attempt's evidence directory.
+
+`conformance/release-source-decisions.toml` records one entry per source with
+the status fields that were observed, the pinned identity, an explicit
+`adopt`, `narrow`, `supersede`, or `reject` decision, a note, and the ledger's
+SHA-256 at the time of the decision. A status, obsoletion, update, revision,
+state, default branch, or head that differs from the entry fails the job and
+names the source. An RFC the ledger names without a recorded decision, or a
+recorded decision the ledger no longer names, also fails. The job then runs
+`cargo audit --deny warnings` and `cargo deny check`.
+
+The 2026-09-05 check found the Tor specification repository's default branch
+twelve commits past the pinned commit. The diff was reviewed and recorded in
+the decision note: typo fixes in the rendezvous specification, a shared random
+value tie-breaker for directory authorities, ntor handshake wording, and a
+pluggable-transport variable. The pin stays authoritative. RFC 9325 is now
+also updated by RFC 10015, which the ledger already reviews as not applicable.
+Errata are not compared structurally; each retained RFC record carries its
+errata URL for review.
+
+## Claims and decision inspection
+
+`scripts/check-release-claims.py` runs the candidate binary's `version --json`
+and `conformance --json` and compares every field with the candidate build
+record (source identities, compiler line, target, features, storage schema)
+and with `conformance/spec-baseline.toml` (document and profile digests and
+their base64url tokens). `qualified_claims` must be empty and the compiled
+profile map must be complete. `conformance/release-claims.toml` lists each
+claim, the jobs it requires, the external review the encrypted profile
+requires, and the limit statements that must remain in this document. The
+checker also lints `README.md`, `TODO.md`, this document, and
+`conformance/README.md` for completion phrases, which are refused while the
+candidate has no decision directory.
+
+The binary can inspect a signed decision without any bundled key:
+
+```sh
+agenc-ircd conformance --json --release-decision /path/to/candidate/decision \
+  --trusted-public-key /path/to/trusted-release-public.pem
+```
+
+It reads `release.json` under a 64 KiB bound with a reader that accepts only
+the runner's canonical form (sorted keys, no whitespace, ASCII, one trailing
+line feed), verifies `release.sig` under the `ReleaseDecision` signature
+domain with the supplied key, and requires the decision's public key digest
+to match that key file. It reports `qualified_claims` only when the decision's
+source commit equals the compiled commit, its target list contains the
+compiled target, and its artifact digest for that target equals the SHA-256 of
+the running executable. A verified decision that describes another source,
+target, or binary leaves `qualified_claims` empty with a fixed reason. A bad
+key, missing file, failed signature, or malformed document is a command error.
+The claims job exercises this path with disposable keys generated inside the
+attempt: the binary must refuse the decision under an untrusted key and must
+grant nothing from a well-signed decision for another source. No disposable
+decision names the candidate. The Python signer and the daemon share a
+committed fixture under `test-data/release-decision` that both verify, and
+the reader has its own fuzz target and seed corpus.
+
 ## Open findings
+
+### CLM-1: the onboarding descriptor carried the Stage 06 base profile token
+
+Found by the claims checker on 2026-09-05 and fixed in the same change. The
+config crate's `BASE_PROFILE_SHA256_TOKEN`, which `print-onboarding` writes
+into every descriptor and which descriptor import compares against, still
+held the Stage 06 base federation profile hash. Stage 09 changed the base
+profile hash for the history selectors and updated the specification, the
+baseline, and the generated wire constants, but not this literal, so the
+descriptor advertised a profile no peer negotiates. The token now equals the
+compiled registry hash, and a runtime test binds both descriptor tokens to
+the compiled profile hashes so the next revision cannot skip them. Existing
+descriptors printed by Stage 09 builds are stale and must be reprinted.
 
 ### STO-1: physical growth after a large-value leaf exceeds the qualification ceiling
 
@@ -449,9 +549,11 @@ python3 scripts/qualify-release.py verify --candidate /path/to/candidate \
   --public-key /path/to/trusted-release-public.pem
 ```
 
-The verifier checks the signature, candidate artifacts, native attempt records,
-decision chronology, and the external review when the decision claims the
-encrypted profile. It does not trust the public key bundled beside a signature.
+The verifier checks the signature, candidate artifacts, the decision's target
+scope, native attempt records, decision chronology, and the external review
+when the decision claims the encrypted profile. It does not trust the public
+key bundled beside a signature. The daemon's own `conformance --json
+--release-decision` inspection applies the same key rule to a deployed binary.
 
 An `encrypted-v1` decision also requires the completed external cryptographic
 and protocol review recorded by `S08-039`, including remediation verification.

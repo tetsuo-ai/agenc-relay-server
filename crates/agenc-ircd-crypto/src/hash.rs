@@ -26,6 +26,39 @@ impl Digest32 {
     }
 }
 
+/// An unkeyed streaming SHA-256 over bytes the caller bounds, used for
+/// artifact identities such as the running executable.
+pub struct Sha256Stream {
+    hasher: Sha256,
+}
+
+impl Sha256Stream {
+    /// Starts an empty digest.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            hasher: Sha256::new(),
+        }
+    }
+
+    /// Absorbs the next chunk.
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.hasher.update(bytes);
+    }
+
+    /// Finishes the digest.
+    #[must_use]
+    pub fn finish(self) -> Digest32 {
+        Digest32(self.hasher.finalize().into())
+    }
+}
+
+impl Default for Sha256Stream {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// An independent keyed-login lookup secret.
 pub struct LoginIndexKey(SecretBytes<32>);
 

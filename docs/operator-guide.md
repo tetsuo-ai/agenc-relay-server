@@ -144,6 +144,27 @@ directory to reach the reserve boundary and removes it before exiting. Run it
 before a release on each target and filesystem tuple you intend to claim, not
 on a live node.
 
+## Inspect a signed release decision
+
+A binary reports its compiled profiles with `agenc-ircd conformance --json`
+and leaves `qualified_claims` empty. Completed qualification is a detached
+directory signed by the release key, and the binary never bundles that key.
+To see which claims a decision grants the binary you deployed, pass the
+decision directory and the public key you obtained through a trusted channel:
+
+```sh
+agenc-ircd conformance --json \
+  --release-decision /path/to/decision \
+  --trusted-public-key /etc/agenc-ircd/trusted-release-public.pem
+```
+
+The command verifies the signature with that key only, then compares the
+decision's source commit, target, and artifact digest with the running
+executable. Claims appear only when all three match. A verified decision for
+another build leaves the claims empty and names the reason. A failed
+signature, an unreadable file, or a malformed decision is an error, and the
+binary treats a key found beside the decision as untrusted.
+
 ## Rotate and recover keys
 
 Assign one purpose to each key. Record its generation, creation time, activation time, retirement time, and recovery procedure.

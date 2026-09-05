@@ -1,0 +1,250 @@
+# Recorded decisions for every primary source the ledger cites, checked by
+# scripts/check-release-sources.py against live status records. A changed
+# status, revision, or repository head fails the sources job until the
+# ledger is reviewed and this file records a new decision.
+schema_version = 1
+ledger_sha256 = "95796ddf454e4f12a9cd4aa4213f9935c5e75720bf4820f25c4673f232c7d8fb"
+decided_on = "2026-09-05"
+
+[[rfc]]
+number = 1459
+status = "EXPERIMENTAL"
+obsoleted_by = []
+updated_by = ["RFC2810", "RFC2811", "RFC2812", "RFC2813", "RFC7194"]
+decision = "narrow"
+note = "Legacy base document with Experimental status; familiar client behavior is adopted only where the architecture does not narrow or replace it."
+
+[[rfc]]
+number = 2119
+status = "BEST CURRENT PRACTICE"
+obsoleted_by = []
+updated_by = ["RFC8174"]
+decision = "adopt"
+note = "Requirement words."
+
+[[rfc]]
+number = 2810
+status = "INFORMATIONAL"
+obsoleted_by = []
+updated_by = []
+decision = "narrow"
+note = "Legacy architecture document; server links and address disclosure are not adopted."
+
+[[rfc]]
+number = 2811
+status = "INFORMATIONAL"
+obsoleted_by = []
+updated_by = []
+decision = "narrow"
+note = "Legacy channel management; adopted only where the architecture does not replace it."
+
+[[rfc]]
+number = 2812
+status = "INFORMATIONAL"
+obsoleted_by = []
+updated_by = []
+decision = "narrow"
+note = "Legacy client protocol; collision handling and insecure authentication are not adopted."
+
+[[rfc]]
+number = 2813
+status = "INFORMATIONAL"
+obsoleted_by = []
+updated_by = []
+decision = "reject"
+note = "Legacy server protocol; version-1 federation replaces server links entirely."
+
+[[rfc]]
+number = 6455
+status = "PROPOSED STANDARD"
+obsoleted_by = []
+updated_by = ["RFC7936", "RFC8307", "RFC8441"]
+decision = "narrow"
+note = "Optional WebSocket transport with compression and plaintext upgrades forbidden. Its updates RFC 7936 (subprotocol registry procedure), RFC 8307 (well-known URIs), and RFC 8441 (HTTP/2 bootstrapping) do not touch the pinned handshake or the two fixed subprotocol names."
+
+[[rfc]]
+number = 6973
+status = "INFORMATIONAL"
+obsoleted_by = []
+updated_by = []
+decision = "adopt"
+note = "Privacy threat-analysis and data-minimization guidance."
+
+[[rfc]]
+number = 7194
+status = "INFORMATIONAL"
+obsoleted_by = []
+updated_by = []
+decision = "narrow"
+note = "Historical client TLS port guidance; the version-1 TLS profile is stricter."
+
+[[rfc]]
+number = 8174
+status = "BEST CURRENT PRACTICE"
+obsoleted_by = []
+updated_by = []
+decision = "adopt"
+note = "Requirement words, uppercase clarification."
+
+[[rfc]]
+number = 8265
+status = "PROPOSED STANDARD"
+obsoleted_by = []
+updated_by = []
+decision = "adopt"
+note = "Username preparation profile named by the architecture."
+
+[[rfc]]
+number = 8266
+status = "PROPOSED STANDARD"
+obsoleted_by = []
+updated_by = []
+decision = "adopt"
+note = "Nickname preparation profile named by the architecture."
+
+[[rfc]]
+number = 8439
+status = "INFORMATIONAL"
+obsoleted_by = []
+updated_by = []
+decision = "narrow"
+note = "ChaCha20-Poly1305 primitives and vectors; XChaCha comes from the separately pinned draft."
+
+[[rfc]]
+number = 8446
+status = "PROPOSED STANDARD"
+obsoleted_by = ["RFC9846"]
+updated_by = []
+decision = "supersede"
+note = "Obsoleted by RFC 9846; the local text file is historical input only."
+
+[[rfc]]
+number = 9106
+status = "INFORMATIONAL"
+obsoleted_by = []
+updated_by = []
+decision = "narrow"
+note = "Argon2id narrowed to the fixed OPAQUE KSF parameters."
+
+[[rfc]]
+number = 9180
+status = "INFORMATIONAL"
+obsoleted_by = []
+updated_by = []
+decision = "adopt"
+note = "Fixed Base-mode HPKE account-service suite and contexts."
+
+[[rfc]]
+number = 9325
+status = "BEST CURRENT PRACTICE"
+obsoleted_by = []
+updated_by = ["RFC10015", "RFC9852"]
+decision = "adopt"
+note = "TLS deployment guidance updated by RFC 9852 and RFC 10015; TLS 1.2 is disabled rather than allowed, so neither update changes the profile."
+
+[[rfc]]
+number = 9420
+status = "PROPOSED STANDARD"
+obsoleted_by = []
+updated_by = []
+decision = "narrow"
+note = "Normative MLS with suites, extensions, and delivery behavior narrowed by the companion."
+
+[[rfc]]
+number = 9525
+status = "PROPOSED STANDARD"
+obsoleted_by = []
+updated_by = []
+decision = "adopt"
+note = "DNS service-identity verification; onion endpoints use the SPKI pin rule."
+
+[[rfc]]
+number = 9750
+status = "INFORMATIONAL"
+obsoleted_by = []
+updated_by = []
+decision = "adopt"
+note = "MLS architecture and threat-model guidance."
+
+[[rfc]]
+number = 9807
+status = "INFORMATIONAL"
+obsoleted_by = []
+updated_by = []
+decision = "adopt"
+note = "OPAQUE, adopted despite Informational status with the suite and KSF fixed locally."
+
+[[rfc]]
+number = 9846
+status = "PROPOSED STANDARD"
+obsoleted_by = []
+updated_by = []
+decision = "adopt"
+note = "Normative TLS 1.3 authority."
+
+[[rfc]]
+number = 9852
+status = "BEST CURRENT PRACTICE"
+obsoleted_by = []
+updated_by = []
+decision = "adopt"
+note = "BCP 195 update; its TLS 1.2 compatibility allowance is not used."
+
+[[rfc]]
+number = 9954
+status = "INFORMATIONAL"
+obsoleted_by = []
+updated_by = []
+decision = "narrow"
+note = "Hybrid key-exchange construction only, as referenced by RFC 10024."
+
+[[rfc]]
+number = 10015
+status = "PROPOSED STANDARD"
+obsoleted_by = []
+updated_by = []
+decision = "reject"
+note = "Deprecates TLS 1.2 key exchanges only; version 1 forbids TLS 1.2 entirely."
+
+[[rfc]]
+number = 10024
+status = "PROPOSED STANDARD"
+obsoleted_by = []
+updated_by = []
+decision = "adopt"
+note = "X25519MLKEM768 assignment; strict native clients require it."
+
+[[draft]]
+name = "draft-ietf-mls-pq-ciphersuites"
+revision = "06"
+updated = "2026-07-21T09:18:03Z"
+states = ["active", "chair-w", "idexists"]
+decision = "reject"
+note = "No post-quantum MLS suite is advertised; the draft still carries unassigned placeholder values."
+
+[[repository]]
+name = "IRCv3 specifications"
+url = "https://github.com/ircv3/ircv3-specifications"
+pinned_commit = "9ff58d1342af67aff88753388f568542820c4bfe"
+default_branch = "refs/heads/master"
+head_commit = "9ff58d1342af67aff88753388f568542820c4bfe"
+decision = "adopt"
+note = "Pinned IRCv3 capabilities, SASL, message tags, batches, and the optional history draft."
+
+[[repository]]
+name = "Modern IRC"
+url = "https://github.com/ircdocs/modern-irc"
+pinned_commit = "8f4c3cc51f0036597f5c95e595fb6ec3177ba4c9"
+default_branch = "refs/heads/master"
+head_commit = "8f4c3cc51f0036597f5c95e595fb6ec3177ba4c9"
+decision = "narrow"
+note = "Base behavior only where the architecture profile does not narrow it."
+
+[[repository]]
+name = "Tor specifications"
+url = "https://gitlab.torproject.org/tpo/core/torspec"
+pinned_commit = "bc5ebcad4d5545efc9a527ee33ec039c66d7cdf3"
+default_branch = "refs/heads/main"
+head_commit = "9e7689bf8e08dd0c7ecff89ae2ed71e68b5aa3c7"
+decision = "adopt"
+note = "Version-3 onion service and SOCKS extension behavior. The default branch moved past the pin on 2026-09-05; the twelve commits between them fix typos in rend-spec, add a shared-random-value tie-breaker for directory authorities, reword the ntor keypair lookup in tor-spec, and drop a pluggable-transport variable. None changes the onion-service or SOCKS behavior the architecture pins, so the pinned commit stays authoritative."

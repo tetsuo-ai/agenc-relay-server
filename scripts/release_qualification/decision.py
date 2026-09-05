@@ -9,11 +9,11 @@ from typing import Any
 
 from .candidate import validate_candidate
 from .records import (QualificationError, canonical, digest, file_digest, read_bytes,
-                      read_record, require_fields, safe_path, timestamp)
+                      read_record, require_fields, safe_path, target_scope, timestamp)
 from .signing import DOMAIN
 from .verify import status
 
-DECISION_FIELDS = {"schema_version", "candidate_sha256", "source", "claims", "decided_at",
+DECISION_FIELDS = {"schema_version", "candidate_sha256", "source", "claims", "decided_at", "targets",
                    "artifacts", "qualification_sha256", "external_review_sha256", "public_key_sha256"}
 
 
@@ -52,12 +52,16 @@ def verify_decision(root: Path, directory: Path, public_key: Path) -> dict[str, 
         raise QualificationError("release decision was not signed by the supplied trust anchor")
     verify_signature(DOMAIN + canonical(decision), read_bytes(decision_directory / "release.sig", 64), public_key)
     candidate = validate_candidate(root, directory, check_source=False)
-    if decision["candidate_sha256"] != digest(canonical(candidate)) or decision["source"] != candidate["source"] or decision["artifacts"] != candidate["artifacts"]:
+    scope = target_scope(candidate["targets"], decision["targets"])
+    if decision["targets"] != scope:
+        raise QualificationError("release decision targets are not in canonical order")
+    covered = [artifact for artifact in candidate["artifacts"] if artifact["target"] in scope]
+    if decision["candidate_sha256"] != digest(canonical(candidate)) or decision["source"] != candidate["source"] or decision["artifacts"] != covered:
         raise QualificationError("release decision belongs to another candidate")
     claims = decision["claims"]
     if not isinstance(claims, list) or not claims or any(not isinstance(claim, str) for claim in claims) or claims != sorted(set(claims)) or any(claim not in candidate["claims"] for claim in claims):
         raise QualificationError("invalid qualified release claims")
-    summary = status(directory, candidate)
+    summary = status(directory, candidate, scope)
     if not summary["ready"] or decision["qualification_sha256"] != digest(canonical(summary)) or read_record(decision_directory / "qualification.json") != summary:
         raise QualificationError("release qualification is incomplete or differs from the signed decision")
     decided_at = timestamp(decision["decided_at"])

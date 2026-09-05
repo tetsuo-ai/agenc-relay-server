@@ -12,7 +12,7 @@ from release_qualification.candidate import prepare, run_job, validate_candidate
 from release_qualification.decision import verify_decision
 from release_qualification.locks import exclusive, shared
 from release_qualification.policy import fuzz_jobs, load_policy
-from release_qualification.records import CLAIMS, QualificationError
+from release_qualification.records import CLAIMS, TARGETS, QualificationError
 from release_qualification.signing import close
 from release_qualification.verify import status
 
@@ -24,6 +24,8 @@ def main() -> int:
     create = sub.add_parser("prepare")
     create.add_argument("--output", type=Path, required=True)
     create.add_argument("--build", type=Path, action="append", required=True)
+    create.add_argument("--target", choices=TARGETS, action="append", required=True,
+                        help="a native target this candidate covers; repeat for each build record")
     for name in ("run", "resume", "status", "close", "verify"):
         command = sub.add_parser(name)
         command.add_argument("--candidate", type=Path, required=True)
@@ -31,6 +33,9 @@ def main() -> int:
             command.add_argument("--job", required=True)
         if name == "verify":
             command.add_argument("--public-key", type=Path, required=True)
+        if name in ("status", "close"):
+            command.add_argument("--target", choices=TARGETS, action="append",
+                                 help="restrict to these candidate targets; default is every candidate target")
         if name == "close":
             command.add_argument("--signing-key", type=Path, required=True)
             command.add_argument("--public-key", type=Path, required=True)
@@ -44,7 +49,7 @@ def main() -> int:
         print(json.dumps({"jobs": [job["id"] for job in jobs], "native_targets": policy["targets"], "release_branch_floor": 90}, indent=2))
         return 0
     if args.command == "prepare":
-        print(prepare(root, args.output.resolve(), [path.resolve() for path in args.build]))
+        print(prepare(root, args.output.resolve(), [path.resolve() for path in args.build], args.target))
         return 0
     directory = args.candidate.resolve()
     if args.command == "verify":
@@ -58,11 +63,11 @@ def main() -> int:
     if args.command == "status":
         with shared(directory):
             candidate = validate_candidate(root, directory, check_source=False)
-            report = status(directory, candidate)
+            report = status(directory, candidate, args.target)
         print(json.dumps(report, indent=2))
         return 0
     with exclusive(directory):
-        decision = close(root, directory, args.signing_key, args.public_key, args.claim, args.external_review)
+        decision = close(root, directory, args.signing_key, args.public_key, args.claim, args.external_review, args.target)
     print(json.dumps(decision, indent=2))
     return 0
 
