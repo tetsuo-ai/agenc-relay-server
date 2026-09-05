@@ -59,7 +59,7 @@ References: [Architecture §§1.2–4](docs/ircd-architecture-and-implementation
 | 06 | Conforming single-node daemon | Complete | Pass, 2026-09-01 | [Current checkpoint](conformance/evidence/stage-06-65cce9d66f7bcfb0c0830a2ab1d42b52bff82942.json) |
 | 07 | Conforming base federation | Complete | Pass, 2026-09-03 | [Current checkpoint](conformance/evidence/stage-07-1093d88d0057c3461a423285e0f86ff3775c1140.json) |
 | 08 | Conforming E2EE server adapter | Complete (external review open) | Pass, 2026-09-04 | [Current checkpoint](conformance/evidence/stage-08-ae6457fb62fef8961d3caf904febed580e8b4a91.json) |
-| 09 | Optional WSS and history profiles | Not started | Not run | Absent |
+| 09 | Optional WSS and history profiles | Complete | Pass, 2026-09-05, exact checkpoint source | [Current checkpoint](conformance/evidence/stage-09-a93e53e71d22a6d5ec46bd749ec18068a9fa572b.json) |
 | 10 | Production qualification and release evidence | Not started | Not run | Absent |
 
 ## Coverage and ownership maps
@@ -2700,11 +2700,30 @@ See [Stage 09 operations](docs/stage-09-operations.md), the
 Outcome: the exact release source, lockfile, targets, configurations, service
 profile, and artifacts have complete conformance evidence for every claim made.
 
+Implementation, qualification execution, and release closure are distinct.
+Create the complete requirement-to-test inventory before implementing the
+runner, and track missing evidence throughout the work. `S10-001` closes that
+inventory only after all applicable candidate results exist. Task dependencies
+below describe evidence closure, not a prohibition on implementing a later
+test driver before its prerequisites have finished running.
+
+Freeze source and build inputs, produce the candidate binaries and SBOM, then
+test those immutable binaries. Attach the final evidence index and signatures
+without rebuilding them. A new source, lockfile, binary, configuration, or
+qualification policy creates a new candidate. Archived checkpoints do not
+qualify it. The source/dependency check runs before candidate construction and
+again before release signing.
+
+The latest Stage 09 CI run for source `75e0667` failed during shutdown in
+`disabled_history_startup_preserves_original_rows`. The prior checkpoint
+remains valid for its named source. Stage 10 must reproduce and fix the owner
+failure before qualifying a release; a successful retry is not a disposition.
+
 - [ ] `S10-001` **Close the complete requirement ledger.** Every normative
   requirement must map to implemented code, a target crate, successful evidence
   IDs, the current source hash, and a non-waived status; no MUST/MUST NOT may be
   waived.
-  - After: `S09-900`.
+  - After: `S10-002` through `S10-012`.
   - Targets: `conformance/requirements.toml` and evidence validator.
   - References: [Architecture §§28.1 and Appendix D](docs/ircd-architecture-and-implementation-spec.md#281-requirement-ledger-and-evidence).
   - Invariants: all invariant families.
@@ -2713,7 +2732,7 @@ profile, and artifacts have complete conformance evidence for every claim made.
 - [ ] `S10-002` **Run the mandatory build and analysis matrix.** Execute exact
   formatting, check, Clippy, workspace tests, doctests, deny, audit, and branch-
   coverage commands under the pinned release toolchain and lockfile.
-  - After: `S10-001`.
+  - After: `S10-010`.
   - Targets: entire workspace and CI evidence.
   - References: [Architecture §28.8](docs/ircd-architecture-and-implementation-spec.md#288-mandatory-build-and-analysis-gates).
   - Invariants: all source- and build-enforced invariants.
@@ -2796,7 +2815,7 @@ profile, and artifacts have complete conformance evidence for every claim made.
   after verified dependency fetch with network disabled, record compiler,
   target, features, source/lock hashes, compare independent artifacts, emit
   SPDX or CycloneDX, and sign artifacts from an isolated release identity.
-  - After: `S10-002`, `S10-009`.
+  - After: `S09-900`, `S10-011`.
   - Targets: release pipeline, binaries, packages, SBOM, signatures.
   - References: [Architecture §24.5](docs/ircd-architecture-and-implementation-spec.md#245-dependency-and-build-integrity).
   - Invariants: `OPS-02`.
@@ -2806,7 +2825,7 @@ profile, and artifacts have complete conformance evidence for every claim made.
   publication status, obsoletes/updates/errata, living-source commits, crate
   checksums/MSRV/features/yanks/advisories, and explicitly adopt, narrow,
   supersede, or reject every detected change.
-  - After: `S10-010`.
+  - After: `S09-900`; repeat before `S10-013`.
   - Targets: source-decision ledger, lockfile review, affected vectors/requirements.
   - References: [source ledger §6](docs/protocol-sources-and-decisions.md#6-update-and-review-procedure), [Architecture §30](docs/ircd-architecture-and-implementation-spec.md#30-sources-and-pinned-research-baseline).
   - Invariants: all affected invariants.
@@ -2816,7 +2835,7 @@ profile, and artifacts have complete conformance evidence for every claim made.
   `core-v1`, `federated-v1`, `encrypted-v1`, WSS, and history independently;
   bind claims to source/profile/compiler/target/test-manifest hashes and state
   privacy/security limits without exaggeration.
-  - After: `S10-001` through `S10-011`.
+  - After: `S10-002` through `S10-011`.
   - Targets: binary version/conformance output, release notes, operator documentation.
   - References: [Architecture §26.4](docs/ircd-architecture-and-implementation-spec.md#264-conformance-claims), [E2EE Appendix B](docs/irc-mls-e2ee-extension.md#appendix-b-security-claim-template).
   - Invariants: `PRV-04`, all claimed invariant families.

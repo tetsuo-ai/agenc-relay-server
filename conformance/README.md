@@ -45,10 +45,10 @@ source coordinates are combined before the two semantic outcomes are scored.
 Run the current implementation checks:
 
 ```sh
-bash scripts/check-stage-eight.sh
+bash scripts/check-stage-nine.sh
 ```
 
-Stage 08 includes every Stage 00 through 07 command. The stage-specific commands
+Stage 09 includes every Stage 00 through 08 command. The stage-specific commands
 below remain available for narrower development checks. Each checkpoint records
 only its named source revision; passing checks on later changes does not update
 that checkpoint.
@@ -137,6 +137,13 @@ the explicit `blocked-external` state in `stage-eight-e2ee-profile.toml`. The
 [review package](review/README.md) identifies the remaining review scope. No
 checkpoint claims that external review or Stage 10 production qualification
 has passed.
+
+Stage 09 adds WSS, plaintext channel history, retained-row maintenance in
+disabled builds, metadata-only history replay, and the schema-generation 1-to-2
+migration. Its [manifest](evidence/stage-09-a93e53e71d22a6d5ec46bd749ec18068a9fa572b.json)
+records 103 commands and 10 passed evidence records for exact source commit
+`a93e53e71d22a6d5ec46bd749ec18068a9fa572b`. The reported branch and line
+coverage are 75.38% and 90.69%, with nine critical regions at 100%.
 
 For an evidence-only check:
 
