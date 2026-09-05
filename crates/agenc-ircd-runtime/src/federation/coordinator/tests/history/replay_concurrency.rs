@@ -33,6 +33,7 @@ fn retain_request(coordinator: &mut FederationCoordinator, header: RequestHeader
             },
             principal: OriginPrincipal::UNREGISTERED,
             status: OriginStatus::Live,
+            deleted_after: None,
         },
     );
     coordinator.retained.insert(

@@ -295,6 +295,33 @@ fn delete_is_durable_idempotent_and_final() -> Result<(), OriginError> {
 }
 
 #[test]
+fn operations_issued_before_a_deletion_still_execute_in_order() -> Result<(), OriginError> {
+    let mut table = ready_table()?;
+    // The edge sent sequences 0 and 1, then deleted the origin at 2: both
+    // may still be queued behind the deletion and execute in order.
+    table.delete(key(1), 0, 2)?;
+    assert_eq!(
+        table.classify_request(operation(1, 0, 0), request(1), [1; 32], None),
+        Ok(ReplayDecision::Fresh)
+    );
+    table.commit_request(operation(1, 0, 0), request(1))?;
+    assert_eq!(
+        table.classify_request(operation(1, 0, 1), request(2), [2; 32], None),
+        Ok(ReplayDecision::Fresh)
+    );
+    table.commit_request(operation(1, 0, 1), request(2))?;
+    // Nothing at or beyond the deleted sequence executes.
+    assert_eq!(
+        table.classify_request(operation(1, 0, 2), request(3), [3; 32], None),
+        Err(OriginError::Fenced)
+    );
+    // The deletion is idempotent at its sequence and conflicts elsewhere.
+    table.delete(key(1), 0, 2)?;
+    assert_eq!(table.delete(key(1), 0, 3), Err(OriginError::Conflict));
+    Ok(())
+}
+
+#[test]
 fn link_loss_suspends_grace_expiry_fences_and_reset_resumes() -> Result<(), OriginError> {
     let mut table = ready_table()?;
     table.update(update(1, 1, [1; 32], registered(1)))?;
@@ -378,6 +405,7 @@ fn restore_rebuilds_durable_rows_without_protocol_checks() -> Result<(), OriginE
             binding: binding(),
             principal: registered(1),
             status: OriginStatus::Live,
+            deleted_after: None,
         },
     );
     table.restore_request_id(request(5), operation(1, 2, 6));

@@ -295,7 +295,9 @@ pub(super) fn origin_row(
     let body = FederationOriginRecord {
         origin_object: object.clone(),
         origin_object_id: entry.object_id,
-        next_sequence,
+        // A deleted origin is recorded at the sequence its edge deleted it,
+        // so a restart fences everything that would follow.
+        next_sequence: entry.deleted_after.unwrap_or(next_sequence),
         status,
         flags: 0,
     }

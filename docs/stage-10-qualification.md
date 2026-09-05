@@ -619,6 +619,17 @@ request now queues behind its peer's queued requests, the drain continues
 until a request stages a batch or starts a crypto job, and peers take turns
 from the one drained last. Unit tests cover the ordering and the rotation.
 
+With the queue holding requests longer, a fourth fault surfaced in the
+thousands: a client's QUIT sends its session close as a request and then
+the origin deletion as a frame. The deletion is not queued, so it overtook
+the close, the close later classified as fenced and retired the link, and
+the session lingered and held its nickname, so every reconnect of that
+client was refused until the grace interval hid it. The origin table now
+records the sequence at which an origin was deleted and keeps executing the
+operations the edge issued below it, in order, fencing only what would
+follow; a domain unit test covers the rule and the durable row keeps the
+deleted sequence for a restart.
+
 ### CAP-7: the first OPAQUE login after a coordinator restart can fail with 904
 
 After a coordinator restart, with both edge links re-established, the first

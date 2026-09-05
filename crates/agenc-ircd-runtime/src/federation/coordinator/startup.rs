@@ -269,9 +269,12 @@ fn admit_origin(
             .ok()
             .map(|generation| (account.account_id, generation))
     });
+    let deleted_after =
+        matches!(record.status, OriginRowStatus::Deleted).then_some(record.next_sequence);
     let entry = OriginEntry {
         generation: parts.generation,
         next_sequence: record.next_sequence,
+        deleted_after,
         object_id: record.origin_object_id,
         binding: OriginBinding {
             connection_id: object.connection_id,

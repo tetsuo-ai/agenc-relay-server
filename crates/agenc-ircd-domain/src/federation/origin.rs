@@ -110,6 +110,10 @@ pub struct OriginEntry {
     pub principal: OriginPrincipal,
     /// The lifecycle status.
     pub status: OriginStatus,
+    /// The edge's next sequence when it deleted the origin. Operations
+    /// below it were issued before the deletion and still execute in order;
+    /// the deletion fences only what would follow.
+    pub deleted_after: Option<u64>,
 }
 
 /// The synchronization phase of one edge link.
@@ -337,6 +341,7 @@ impl OriginTable {
                         binding: declaration.binding,
                         principal: OriginPrincipal::UNREGISTERED,
                         status: OriginStatus::Live,
+                        deleted_after: None,
                     },
                 );
                 Ok(())
@@ -407,7 +412,7 @@ impl OriginTable {
             .get_mut(&origin)
             .ok_or(OriginError::UnknownOrigin)?;
         if entry.status == OriginStatus::Deleted {
-            return if entry.generation == generation && entry.next_sequence == next_sequence {
+            return if entry.generation == generation && entry.deleted_after == Some(next_sequence) {
                 Ok(())
             } else {
                 Err(OriginError::Conflict)
@@ -419,7 +424,9 @@ impl OriginTable {
         if entry.generation != generation || next_sequence < entry.next_sequence {
             return Err(OriginError::WrongGeneration);
         }
-        entry.next_sequence = next_sequence;
+        // Requests the edge sent before the deletion may still be in flight
+        // or queued; they keep executing up to the deleted sequence.
+        entry.deleted_after = Some(next_sequence);
         entry.status = OriginStatus::Deleted;
         Ok(())
     }
@@ -444,6 +451,10 @@ impl OriginTable {
             OriginStatus::Suspended | OriginStatus::Blocked => {
                 return Err(OriginError::WrongPhase);
             }
+            OriginStatus::Deleted
+                if entry
+                    .deleted_after
+                    .is_some_and(|deleted_after| key.sequence < deleted_after) => {}
             OriginStatus::Deleted | OriginStatus::Fenced => return Err(OriginError::Fenced),
         }
         if key.generation != entry.generation {
