@@ -229,6 +229,8 @@ pub struct FederationCoordinator {
     /// their synchronization frames, so refusing them would close every
     /// reconnecting link.
     backlog: VecDeque<FederationInbound>,
+    /// The peer whose queue drained last; the next drain starts after it.
+    drain_cursor: Option<ServerId>,
     queries: query::Queries,
     history: history::HistoryQueries,
     counters: CoordinatorCounters,
@@ -312,6 +314,7 @@ impl FederationCoordinator {
             history,
             loader: startup::Loader::default(),
             backlog: VecDeque::new(),
+            drain_cursor: None,
             queries,
             counters: CoordinatorCounters::default(),
             companion_exec: None,

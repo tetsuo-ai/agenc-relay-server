@@ -69,10 +69,20 @@ pub(super) fn receive(
     // history read, or a batch any other router staged is still open, so
     // the plan is never refused as busy and answered with SERVER_BUSY for
     // a slot that frees a few milliseconds later.
-    let busy = coordinator
-        .crypto
-        .as_ref()
-        .is_some_and(|pending| pending.link == link)
+    // It also waits behind requests already queued for its peer, so one
+    // origin's operations keep their sequence order.
+    let queued_ahead = coordinator
+        .peers
+        .get(&peer)
+        .ok_or(Violation::Misaddressed)?
+        .queued
+        .iter()
+        .any(|queued| queued.link == link);
+    let busy = queued_ahead
+        || coordinator
+            .crypto
+            .as_ref()
+            .is_some_and(|pending| pending.link == link)
         || coordinator.pending.is_some()
         || coordinator.history.busy()
         || context.in_flight()
@@ -96,55 +106,76 @@ pub(super) fn receive(
     execute(coordinator, context, link, peer, descriptor, object, charge)
 }
 
-/// Executes queued requests once the link is idle again.
+/// Executes queued requests while the coordinator can take one: until a
+/// request stages a batch, starts a crypto job, or the queues are empty.
+/// Peers take turns, starting after the peer drained last, so one busy
+/// edge cannot starve another.
 pub(super) fn drain_queued(
     coordinator: &mut FederationCoordinator,
     context: &mut StateCoreContext,
 ) {
-    if coordinator.pending.is_some()
-        || coordinator.history.busy()
-        || context.in_flight()
-        || context.pending_len() != 0
-    {
-        return;
+    loop {
+        if coordinator.pending.is_some()
+            || coordinator.history.busy()
+            || context.in_flight()
+            || context.pending_len() != 0
+        {
+            return;
+        }
+        let Some((peer, queued)) = next_queued(coordinator) else {
+            return;
+        };
+        coordinator.drain_cursor = Some(peer);
+        if let Err(violation) = execute(
+            coordinator,
+            context,
+            queued.link,
+            peer,
+            queued.descriptor,
+            queued.object,
+            queued.charge,
+        ) {
+            coordinator.fail_link(context, queued.link, peer, violation);
+        }
     }
-    let next = coordinator.peers.iter_mut().find_map(|(peer, state)| {
-        let idle = coordinator
+}
+
+/// Takes the next drainable queued request, visiting peers in key order
+/// from the one after the last drained. A queue whose front belongs to a
+/// link that is gone, or whose link waits on crypto, is pruned or skipped.
+pub(super) fn next_queued(
+    coordinator: &mut FederationCoordinator,
+) -> Option<(ServerId, QueuedRequest)> {
+    let peers: Vec<ServerId> = match coordinator.drain_cursor {
+        Some(cursor) => coordinator
+            .peers
+            .range((
+                std::ops::Bound::Excluded(cursor),
+                std::ops::Bound::Unbounded,
+            ))
+            .map(|(peer, _)| *peer)
+            .chain(coordinator.peers.range(..=cursor).map(|(peer, _)| *peer))
+            .collect(),
+        None => coordinator.peers.keys().copied().collect(),
+    };
+    for peer in peers {
+        let crypto_here = coordinator
             .crypto
             .as_ref()
-            .is_none_or(|pending| pending.peer != *peer);
-        if !idle
-            || !state.live.as_ref().is_some_and(|live| {
-                state
-                    .queued
-                    .front()
-                    .is_some_and(|queued| queued.link == live.link)
-            })
-        {
-            state.queued.retain(|queued| {
-                state
-                    .live
-                    .as_ref()
-                    .is_some_and(|live| live.link == queued.link)
-            });
-            return None;
+            .is_some_and(|pending| pending.peer == peer);
+        let Some(state) = coordinator.peers.get_mut(&peer) else {
+            continue;
+        };
+        let live = state.live.as_ref().map(|live| live.link);
+        state.queued.retain(|queued| Some(queued.link) == live);
+        if crypto_here {
+            continue;
         }
-        state.queued.pop_front().map(|queued| (*peer, queued))
-    });
-    let Some((peer, queued)) = next else {
-        return;
-    };
-    if let Err(violation) = execute(
-        coordinator,
-        context,
-        queued.link,
-        peer,
-        queued.descriptor,
-        queued.object,
-        queued.charge,
-    ) {
-        coordinator.fail_link(context, queued.link, peer, violation);
+        if let Some(queued) = state.queued.pop_front() {
+            return Some((peer, queued));
+        }
     }
+    None
 }
 
 fn execute(

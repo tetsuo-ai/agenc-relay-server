@@ -2037,16 +2037,31 @@ fn preserve_logs(network: &Network, directory: &Path) -> TestResult {
     ] {
         let target = directory.join("logs").join(name);
         fs::create_dir_all(&target)?;
-        let Ok(entries) = fs::read_dir(&fixture.log_dir) else {
-            println!("[controller] no log directory for {name}");
-            continue;
-        };
+        // A node restarted on a transitioned or rekeyed directory logs under
+        // that directory, so every segment below the node's data directory
+        // is kept, named by its path relative to it.
         let mut copied = 0_u32;
-        for entry in entries {
-            let entry = entry?;
-            if entry.file_type()?.is_file() {
-                fs::copy(entry.path(), target.join(entry.file_name()))?;
-                copied += 1;
+        let mut pending = vec![fixture.data_dir.clone()];
+        while let Some(dir) = pending.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries {
+                let entry = entry?;
+                let path = entry.path();
+                let file_type = entry.file_type()?;
+                if file_type.is_dir() {
+                    pending.push(path);
+                } else if file_type.is_file()
+                    && path.extension().is_some_and(|extension| extension == "log")
+                {
+                    let relative = path
+                        .strip_prefix(&fixture.data_dir)
+                        .map(|relative| relative.to_string_lossy().replace('/', "__"))
+                        .unwrap_or_else(|_| entry.file_name().to_string_lossy().into_owned());
+                    fs::copy(&path, target.join(relative))?;
+                    copied += 1;
+                }
             }
         }
         println!("[controller] preserved {copied} log segments for {name}");

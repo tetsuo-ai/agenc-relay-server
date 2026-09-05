@@ -605,6 +605,20 @@ staged or in flight, exactly as it already waited for the coordinator's own
 batch, and a coordinator unit test holds a batch open and requires the
 request to queue rather than answer.
 
+The queue itself had three faults the same runs exposed. A request arriving
+while its peer already had requests queued executed at once, so one origin's
+operations could reach the coordinator out of sequence, and the gap was
+treated as an origin violation that retired the link; the four origin
+violations of one two-cycle run were exactly that. The queue drained one
+request per applied batch, so a request answered without a batch (a query
+page, a replay) left the rest waiting for the next unrelated commit, and at
+rest the edges held twenty to thirty requests without results while their
+clients' later commands piled up behind them until the edge refused them
+busy. And peers drained in key order, so a busy edge starved the other. A
+request now queues behind its peer's queued requests, the drain continues
+until a request stages a batch or starts a crypto job, and peers take turns
+from the one drained last. Unit tests cover the ordering and the rotation.
+
 ### CAP-7: the first OPAQUE login after a coordinator restart can fail with 904
 
 After a coordinator restart, with both edge links re-established, the first

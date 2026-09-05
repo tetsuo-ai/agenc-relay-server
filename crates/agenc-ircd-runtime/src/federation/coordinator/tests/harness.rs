@@ -1806,6 +1806,194 @@ async fn a_request_waits_while_another_router_has_a_batch_open() -> TestResult {
     Ok(())
 }
 
+/// A coordinator with two configured edges and no running loop.
+fn standalone_coordinator_pair(first: ServerId, second: ServerId) -> FederationCoordinator {
+    FederationCoordinator::new(
+        CoordinatorConfig {
+            network_id: NETWORK,
+            server_id: COORDINATOR,
+            server_name: COORDINATOR_NAME.to_owned(),
+            recovery_epoch: RecoveryEpoch::from_bytes([34; 16]),
+            query_cursor_key: [21; 32],
+            process_nonce: [22; 16],
+            outbox_bytes_per_edge: 1 << 20,
+            outbox_objects_per_edge: 64,
+        },
+        vec![
+            peer_identity(first, "edge-a.example"),
+            peer_identity(second, "edge-b.example"),
+        ],
+        std::sync::Arc::new(crate::test_support::TestChannelKeyVerifier),
+        ChannelKeyVerifierRecord::new([7; 16], [1; 32]),
+    )
+}
+
+/// An encoded session-open request from `origin` at its current sequence,
+/// with the descriptor its link would carry.
+fn encoded_request(
+    edge: &Edge,
+    origin: &Origin,
+    seed: u8,
+) -> TestResult<(OperationDescriptor, Vec<u8>)> {
+    let operation = session_open(seed, "queued");
+    let request_id = RequestId::from_bytes([seed; 16]);
+    let header = RequestHeader {
+        network_id: NETWORK,
+        replay_key: origin.replay_key(edge),
+        request_id,
+        opcode: operation.opcode(),
+    };
+    let object = header.build(&operation.to_object()?)?;
+    let bytes = object.encode_canonical()?.as_slice().to_vec();
+    let descriptor = OperationDescriptor {
+        addressed_server_id: COORDINATOR,
+        server_incarnation: edge.incarnation,
+        origin_id: origin.id,
+        origin_generation: origin.generation,
+        operation_sequence: origin.sequence,
+        request_id,
+        object_id: federation_object_id(&bytes),
+    };
+    Ok((descriptor, bytes))
+}
+
+/// Places one already-assembled request in `peer`'s queue on `link`.
+fn enqueue(
+    coordinator: &mut FederationCoordinator,
+    edge: &mut Edge,
+    origin: &Origin,
+    link: LinkId,
+    seed: u8,
+) -> TestResult {
+    let (descriptor, bytes) = encoded_request(edge, origin, seed)?;
+    let (_, object) = edge.assemble(&bytes, |fragment| FederationFrame::Request {
+        descriptor,
+        fragment,
+    })?;
+    coordinator
+        .peers
+        .get_mut(&edge.server_id)
+        .ok_or("peer state missing")?
+        .queued
+        .push_back(QueuedRequest {
+            link,
+            descriptor,
+            object,
+            charge: None,
+        });
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_request_queues_behind_its_peers_queued_requests_even_when_idle() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let context = fixture.context_mut()?;
+    let mut coordinator = standalone_coordinator(peer);
+    let (unused_inbox, _unused_receiver) = mpsc::channel(1);
+    let mut edge = Edge::new(unused_inbox, 50);
+    let origin = Origin::new(72);
+    coordinator.inbound(
+        context,
+        established(50, peer, edge.incarnation, edge.handle.clone()),
+    );
+    coordinator.inbound(context, reset_frame(50, peer, edge.incarnation));
+    assert_eq!(
+        context.pending_len(),
+        0,
+        "nothing is staged: the coordinator is idle"
+    );
+    // An earlier request of this link still waits in the queue.
+    let link = edge.link;
+    enqueue(&mut coordinator, &mut edge, &origin, link, 73)?;
+    // The next one must wait behind it rather than execute first, or the
+    // origin's operation sequence would arrive out of order.
+    let (descriptor, bytes) = encoded_request(&edge, &origin, 74)?;
+    inbound_object(&mut coordinator, context, &mut edge, &bytes, |fragment| {
+        FederationFrame::Request {
+            descriptor,
+            fragment,
+        }
+    })?;
+    let state = coordinator.peers.get(&peer).ok_or("peer state missing")?;
+    assert_eq!(
+        state.queued.len(),
+        2,
+        "the request queued behind the earlier one"
+    );
+    assert!(state.live.is_some(), "the link stays live");
+    assert_eq!(coordinator.counters().violations, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn queued_requests_drain_peer_by_peer_and_drop_a_dead_link() -> TestResult {
+    let (a, b) = (
+        ServerId::from_bytes([50; 16]),
+        ServerId::from_bytes([60; 16]),
+    );
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let context = fixture.context_mut()?;
+    let mut coordinator = standalone_coordinator_pair(a, b);
+    let (unused_inbox, _unused_receiver) = mpsc::channel(1);
+    let mut edge_a = Edge::new(unused_inbox.clone(), 50);
+    let mut edge_b = Edge::new(unused_inbox, 60);
+    let origin_a = Origin::new(75);
+    let origin_b = Origin::new(76);
+    for edge in [&edge_a, &edge_b] {
+        coordinator.inbound(
+            context,
+            established(
+                u64::from(edge.server_id.as_bytes()[0]),
+                edge.server_id,
+                edge.incarnation,
+                edge.handle.clone(),
+            ),
+        );
+        coordinator.inbound(
+            context,
+            reset_frame(
+                u64::from(edge.server_id.as_bytes()[0]),
+                edge.server_id,
+                edge.incarnation,
+            ),
+        );
+    }
+    // Two requests wait for edge a, one for edge b, and one for edge b from
+    // a link that is gone.
+    let link = edge_a.link;
+    enqueue(&mut coordinator, &mut edge_a, &origin_a, link, 77)?;
+    let link = edge_a.link;
+    enqueue(&mut coordinator, &mut edge_a, &origin_a, link, 78)?;
+    enqueue(
+        &mut coordinator,
+        &mut edge_b,
+        &origin_b,
+        LinkId::new(999),
+        79,
+    )?;
+    let link = edge_b.link;
+    enqueue(&mut coordinator, &mut edge_b, &origin_b, link, 80)?;
+    let first = request::next_queued(&mut coordinator).ok_or("no first request")?;
+    assert_eq!(first.0, a, "the first turn goes to the first peer");
+    coordinator.drain_cursor = Some(first.0);
+    let second = request::next_queued(&mut coordinator).ok_or("no second request")?;
+    assert_eq!(second.0, b, "the next turn goes to the other peer");
+    assert_eq!(
+        second.1.descriptor.request_id,
+        RequestId::from_bytes([80; 16]),
+        "the entry from the dead link was dropped first"
+    );
+    coordinator.drain_cursor = Some(second.0);
+    let third = request::next_queued(&mut coordinator).ok_or("no third request")?;
+    assert_eq!(third.0, a, "the turn comes back to the first peer");
+    assert!(
+        request::next_queued(&mut coordinator).is_none(),
+        "every queue is empty"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_new_incarnation_hides_the_sessions_of_the_previous_one() -> TestResult {
     let peer = ServerId::from_bytes([50; 16]);
