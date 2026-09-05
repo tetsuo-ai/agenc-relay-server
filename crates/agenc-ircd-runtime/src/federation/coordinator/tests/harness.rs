@@ -1545,6 +1545,142 @@ async fn a_rejected_snapshot_marker_retires_the_link_instead_of_waiting_for_expi
     Ok(())
 }
 
+/// A request batch the coordinator staged for `peer` on link 1 at origin
+/// sequence 3, as it waits for the storage receipt.
+fn staged_request(peer: ServerId, incarnation: ServerIncarnation) -> PendingCommit {
+    let origin_id = OriginId::from_bytes([77; 16]);
+    let request_id = RequestId::from_bytes([78; 16]);
+    PendingCommit::Request {
+        peer,
+        link: LinkId::new(1),
+        key: OperationKey {
+            origin: OriginKey {
+                home_server_id: peer,
+                server_incarnation: incarnation,
+                origin_id,
+            },
+            generation: 1,
+            sequence: 3,
+        },
+        request_id,
+        request_object_id: FederationHash32::from_bytes([79; 32]),
+        result: Vec::new(),
+        descriptor: OperationDescriptor {
+            addressed_server_id: COORDINATOR,
+            server_incarnation: incarnation,
+            origin_id,
+            origin_generation: 1,
+            operation_sequence: 3,
+            request_id,
+            object_id: FederationHash32::from_bytes([79; 32]),
+        },
+        header: RequestHeader {
+            network_id: NETWORK,
+            replay_key: ReplayKey {
+                home_server_id: peer,
+                server_incarnation: incarnation,
+                origin_id,
+                origin_generation: 1,
+                operation_sequence: 3,
+            },
+            request_id,
+            opcode: agenc_ircd_types::FederationOpcode::Message,
+        },
+        _charge: None,
+    }
+}
+
+#[tokio::test]
+async fn a_request_whose_batch_storage_refused_is_answered_busy_without_a_row() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let context = fixture.context_mut()?;
+    let mut coordinator = standalone_coordinator(peer);
+    let incarnation = ServerIncarnation::from_bytes([51; 16]);
+    let (unused_inbox, _unused_receiver) = mpsc::channel(1);
+    let mut edge = Edge::new(unused_inbox, 50);
+    coordinator.inbound(
+        context,
+        established(1, peer, incarnation, edge.handle.clone()),
+    );
+    coordinator.inbound(context, reset_frame(1, peer, incarnation));
+    coordinator.pending = Some(staged_request(peer, incarnation));
+    // Storage refuses the batch, as it does under disk pressure.
+    coordinator.batch_rejected(context);
+    let (carrier, object) =
+        tokio::time::timeout(std::time::Duration::from_secs(5), edge.next_object())
+            .await
+            .map_err(|_| "no answer for the refused request")??;
+    let ObjectCarrier::Result(descriptor) = carrier else {
+        return Err("expected a result object".into());
+    };
+    assert_eq!(descriptor.operation_sequence, 3);
+    let mut budget = DecodeBudget::new(1 << 20, 4_096);
+    let result = SchemaObject::decode_exact("FederationResult", object.as_slice(), &mut budget)?;
+    let header = ResultHeader::from_object(&result)?;
+    assert_eq!(header.result_kind, FederationResultKind::Failed);
+    assert!(header.completion_event_id.is_none());
+    let ResultArm::Failed { code, .. } = ResultArm::from_object(
+        header.result_kind,
+        &decode_result_arm(&result, &mut budget)?,
+    )?
+    else {
+        return Err("expected a failed arm".into());
+    };
+    assert_eq!(code, "SERVER_BUSY");
+    // Nothing durable or retained came of it: no violation, the link stays
+    // live, and the origin sequence is where the edge left it.
+    assert_eq!(coordinator.counters().violations, 0);
+    assert_eq!(context.pending_len(), 0);
+    assert!(
+        coordinator
+            .peers
+            .get(&peer)
+            .is_some_and(|state| state.live.is_some())
+    );
+    assert!(coordinator.retained.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_origin_acknowledgement_whose_batch_storage_refused_retires_the_link() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let context = fixture.context_mut()?;
+    let mut coordinator = standalone_coordinator(peer);
+    let incarnation = ServerIncarnation::from_bytes([51; 16]);
+    let (handle, mut queue) = link_queue(1 << 20);
+    coordinator.inbound(context, established(1, peer, incarnation, handle));
+    coordinator.inbound(context, reset_frame(1, peer, incarnation));
+    coordinator.pending = Some(PendingCommit::OriginAck {
+        peer,
+        link: LinkId::new(1),
+        frame: FederationFrame::OriginAck {
+            edge_server_id: peer,
+            server_incarnation: incarnation,
+            origin_id: OriginId::from_bytes([77; 16]),
+            generation: 1,
+            object_id: None,
+        },
+        _charge: None,
+    });
+    coordinator.batch_rejected(context);
+    // The declaration was never acknowledged durably; the edge declares
+    // again on its next link instead of waiting for an answer.
+    assert_eq!(coordinator.counters().violations, 1);
+    assert!(
+        coordinator
+            .peers
+            .get(&peer)
+            .is_some_and(|state| state.live.is_none())
+    );
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(5), queue.recv())
+        .await
+        .map_err(|_| "the link writer received no close request")?;
+    assert!(closed.is_none(), "the close request ends the queue");
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_new_incarnation_hides_the_sessions_of_the_previous_one() -> TestResult {
     let peer = ServerId::from_bytes([50; 16]);

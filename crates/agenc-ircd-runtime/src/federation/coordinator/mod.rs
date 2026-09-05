@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, VecDeque};
 use agenc_ircd_domain::federation::{OperationKey, OriginKey, OriginTable, RetainedRequest};
 use agenc_ircd_federation_wire::{
     CanonicalEncode, EventDescriptor, FederationFrame, FederationHash32, FederationLineText,
-    OperationDescriptor, SchemaObject, federation_object_id, split_fragments,
+    OperationDescriptor, RequestHeader, SchemaObject, federation_object_id, split_fragments,
 };
 use agenc_ircd_storage::federation_records::{
     DeliveryCursorRecord, FederationPeerRecord, PEER_RECORD_KIND, PeerPhase, peer_key,
@@ -161,6 +161,8 @@ enum PendingCommit {
         request_object_id: FederationHash32,
         result: Vec<u8>,
         descriptor: OperationDescriptor,
+        /// The request header, kept so a refused batch can still answer.
+        header: RequestHeader,
         _charge: Option<IngressCharge>,
     },
     OriginAck {
@@ -1107,15 +1109,48 @@ impl FederationCoordinator {
         }
     }
 
-    /// Drops the work behind a rejected batch; the edge retries it. A
-    /// snapshot whose marker row did not persist loses its link, so the edge
-    /// resumes from its committed projection instead of waiting out the
-    /// token lifetime for entries the coordinator will never send.
+    /// Drops the work behind a rejected batch. A request answers busy without
+    /// a durable row, so its client retries and the origin sequence stays
+    /// where the edge left it. An origin acknowledgement that did not
+    /// persist and a snapshot whose marker row did not persist lose their
+    /// link, so the edge declares or resumes again from its committed state
+    /// instead of waiting for an answer the coordinator will never send.
     pub fn batch_rejected(&mut self, context: &mut StateCoreContext) {
         self.remote_grant_rejected();
         match self.pending.take() {
             Some(PendingCommit::History(prepared)) => history::rejected(self, *prepared),
             Some(PendingCommit::Cleanup { peer }) => grace::continue_cleanup(self, context, peer),
+            Some(PendingCommit::Request {
+                peer,
+                link,
+                key,
+                request_object_id,
+                descriptor,
+                header,
+                ..
+            }) => {
+                request::rejected(
+                    self,
+                    context,
+                    link,
+                    peer,
+                    FreshRequest {
+                        key,
+                        header,
+                        descriptor,
+                        request_object_id,
+                        bound: None,
+                        command: None,
+                        mutation: agenc_ircd_domain::federation::MutationContext::default(),
+                        charge: None,
+                    },
+                );
+            }
+            Some(PendingCommit::OriginAck { peer, link, .. }) => {
+                if self.link_is_live(link, peer) {
+                    self.fail_link(context, link, peer, Violation::Ceiling);
+                }
+            }
             Some(PendingCommit::Companion { .. }) => {
                 if let Some(executor) = self.companion_exec.as_mut() {
                     executor.batch_rejected();

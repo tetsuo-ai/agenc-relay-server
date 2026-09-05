@@ -147,6 +147,8 @@ struct Shared {
     /// Channel messages the server refused with an explicit FAIL; each is
     /// re-sent under the same sequence so a refusal is never a silent gap.
     refused: AtomicU64,
+    /// Refusals by their FAIL code, bounded to a small closed set.
+    refused_codes: Mutex<BTreeMap<String, u64>>,
     received: AtomicU64,
     worker_errors: Mutex<Vec<String>>,
 }
@@ -167,6 +169,7 @@ impl Shared {
             churns: AtomicU64::new(0),
             sent: AtomicU64::new(0),
             refused: AtomicU64::new(0),
+            refused_codes: Mutex::new(BTreeMap::new()),
             received: AtomicU64::new(0),
             worker_errors: Mutex::new(Vec::new()),
         }
@@ -321,6 +324,9 @@ impl Session {
                     |latencies| &mut latencies.snapshot,
                     now.saturating_sub(sent),
                 );
+                // Messages committed between the PART and this JOIN were
+                // never owed to the session; expectations restart here.
+                self.expected.clear();
             }
             return Ok(());
         }
@@ -351,9 +357,15 @@ impl Session {
                 |latencies| &mut latencies.durable_mutation,
                 now.saturating_sub(stamp),
             );
-        } else if rest.starts_with("FAIL PRIVMSG ") {
+        } else if let Some(code) = rest.strip_prefix("FAIL PRIVMSG ") {
             // A side-effect-free refusal (spec 28.7): retry the same sequence.
             shared.refused.fetch_add(1, Ordering::Relaxed);
+            let code = code.split(' ').next().unwrap_or_default();
+            if let Ok(mut codes) = shared.refused_codes.lock()
+                && (codes.contains_key(code) || codes.len() < 16)
+            {
+                *codes.entry(code.to_owned()).or_insert(0) += 1;
+            }
             self.resend = true;
             if shared.refused.load(Ordering::Relaxed) <= 8 {
                 shared.note_error(format!(
@@ -372,7 +384,8 @@ impl Session {
     /// A sequence that restarts means the sender reconnected.
     fn check_sequence(&mut self, plan: &WorkerPlan, sender: &str, sequence: u64, shared: &Shared) {
         let expected = self.expected.entry(sender.to_owned()).or_insert(sequence);
-        if sequence > *expected && !shared.maintenance.load(Ordering::Relaxed) {
+        let rejoining = self.join_sent.is_some();
+        if sequence > *expected && !rejoining && !shared.maintenance.load(Ordering::Relaxed) {
             let gap = sequence - *expected;
             shared.missed_events.fetch_add(gap, Ordering::Relaxed);
             shared.note_error(format!(
@@ -383,6 +396,30 @@ impl Session {
             ));
         }
         *expected = sequence.wrapping_add(1);
+    }
+}
+
+/// One registration attempt with a bounded read: an unavailable network or
+/// a closed transport is an error the caller retries on its own schedule.
+fn register_once(fixture: &NodeFixture, nickname: &str) -> TestResult<IrcClient> {
+    let mut client = IrcClient::connect(fixture)?;
+    client
+        .reader
+        .get_ref()
+        .sock
+        .set_read_timeout(Some(REGISTRATION_PROBE_WAIT))?;
+    match client.try_register(nickname)? {
+        Registration::Welcome(lines) => {
+            if lines
+                .iter()
+                .any(|line| line.contains(&format!(" 001 {nickname} ")))
+            {
+                Ok(client)
+            } else {
+                Err(failure(format!("registration lacked 001: {lines:?}")))
+            }
+        }
+        Registration::Unavailable(_) => Err(failure("registration unavailable")),
     }
 }
 
@@ -541,7 +578,6 @@ fn run_session(
                     .send(&format!("PART {LOAD_CHANNEL} :churn"))?;
                 session.join_sent = Some(shared.nanos());
                 session.client.send(&format!("JOIN {LOAD_CHANNEL}"))?;
-                session.expected.clear();
                 shared.churns.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -1015,6 +1051,8 @@ struct Campaign<'a> {
     scenarios: Scenarios,
     samples: Vec<Sample>,
     envelope_violations: u64,
+    /// Samples skipped after a retried STATS failure.
+    sample_failures: u64,
     baseline: [Resources; 3],
     backup_path: Option<PathBuf>,
     /// Backups written so far; each gets a distinct creation time and id.
@@ -1041,7 +1079,23 @@ impl Campaign<'_> {
     }
 
     fn sample(&mut self) -> TestResult {
-        let sample = take_sample(self.shared, &self.nodes, &self.admins)?;
+        // A node that is busy recovering may answer STATS late; one sample
+        // is retried, then skipped and counted rather than ending the
+        // campaign, which keeps the evidence of the scenario that caused it.
+        let sample = match take_sample(self.shared, &self.nodes, &self.admins) {
+            Ok(sample) => sample,
+            Err(first) => {
+                thread::sleep(Duration::from_secs(1));
+                match take_sample(self.shared, &self.nodes, &self.admins) {
+                    Ok(sample) => sample,
+                    Err(second) => {
+                        self.sample_failures += 1;
+                        self.note(format!("sample skipped: {first}; retry: {second}"));
+                        return Ok(());
+                    }
+                }
+            }
+        };
         let mut violations = Vec::new();
         for (index, (resources, base)) in sample.resources.iter().zip(self.baseline).enumerate() {
             if resources.anonymous_bytes
@@ -1293,7 +1347,9 @@ the post-restart grace (CAP-7)"
         while Instant::now() < deadline {
             attempt += 1;
             let nick = format!("recover{attempt:03}");
-            let Ok(mut client) = register_when_available(&self.network.edge_a, &nick) else {
+            // One bounded registration attempt per loop turn, so the wait
+            // stays inside the recovery window instead of the network wait.
+            let Ok(mut client) = register_once(&self.network.edge_a, &nick) else {
                 thread::sleep(Duration::from_secs(1));
                 continue;
             };
@@ -1822,14 +1878,25 @@ fn write_report(
         scenarios.snapshot, scenarios.backup, scenarios.disk_pressure, scenarios.peer_loss
     ));
     json.push_str(&format!(
-        "\"missed_events\":{},\"envelope_violations\":{},\"returned_to_envelope\":{returned},\"worker_reconnects\":{},\"worker_churns\":{},\"messages_sent\":{},\"messages_received\":{},\"messages_refused\":{},\"daemons_stopped_cleanly\":[{},{},{}],\"reserve_bytes\":{},\"hardware\":\"{}\",\"worker_errors\":{},\"log\":[",
+        "\"missed_events\":{},\"envelope_violations\":{},\"sample_failures\":{},\"returned_to_envelope\":{returned},\"worker_reconnects\":{},\"worker_churns\":{},\"messages_sent\":{},\"messages_received\":{},\"messages_refused\":{},\"refused_by_code\":{{{}}},\"daemons_stopped_cleanly\":[{},{},{}],\"reserve_bytes\":{},\"hardware\":\"{}\",\"worker_errors\":{},\"log\":[",
         shared.missed_events.load(Ordering::Relaxed),
         campaign.envelope_violations,
+        campaign.sample_failures,
         shared.reconnects.load(Ordering::Relaxed),
         shared.churns.load(Ordering::Relaxed),
         shared.sent.load(Ordering::Relaxed),
         shared.received.load(Ordering::Relaxed),
         shared.refused.load(Ordering::Relaxed),
+        shared.refused_codes.lock().map_or_else(
+            |_| String::new(),
+            |codes| {
+                codes
+                    .iter()
+                    .map(|(code, count)| format!("\"{code}\":{count}"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            }
+        ),
         stop_statuses[0], stop_statuses[1], stop_statuses[2],
         campaign.reserve,
         hardware()?.replace('"', "'"),
@@ -1896,6 +1963,7 @@ fn control<'a>(
         scenarios: Scenarios::default(),
         samples: Vec::new(),
         envelope_violations: 0,
+        sample_failures: 0,
         baseline: baseline.resources,
         backup_path: None,
         backup_sequence: 0,
@@ -1914,9 +1982,16 @@ fn control<'a>(
         campaign.baseline.map(|r| r.tasks),
     ));
     let mut number = 0;
-    while Instant::now() + FINAL_RESERVE < deadline {
+    // A cycle starts only when the budget can hold it: the first always, a
+    // later one when at least the previous cycle's duration remains beyond
+    // the final reserve, so the campaign ends near its deadline instead of
+    // running a whole extra cycle past it.
+    let mut last_cycle = Duration::ZERO;
+    while Instant::now() + FINAL_RESERVE + last_cycle < deadline {
         number += 1;
+        let started = Instant::now();
         campaign.cycle(number)?;
+        last_cycle = started.elapsed();
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining > FINAL_RESERVE + SAMPLE_INTERVAL {
             campaign.settle(

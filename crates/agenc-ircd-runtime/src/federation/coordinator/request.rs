@@ -901,6 +901,7 @@ fn stage_with_plan_and_writes(
                 request_object_id: fresh.request_object_id,
                 result: encoded,
                 descriptor: fresh.descriptor,
+                header: fresh.header,
                 _charge: fresh.charge,
             });
             Ok(())
@@ -1028,9 +1029,37 @@ fn fail_without_plan(
         request_object_id: fresh.request_object_id,
         result: encoded,
         descriptor: fresh.descriptor,
+        header: fresh.header,
         _charge: fresh.charge,
     });
     Ok(())
+}
+
+/// Answers a request whose durable batch storage refused. The answer is a
+/// side-effect-free `SERVER_BUSY` (spec 28.7) sent without a result row: no
+/// origin sequence advanced and nothing is retained, so a byte-identical
+/// resend after a link loss classifies as fresh and runs again. The client
+/// retries on its own; the edge neither waits for a result that will never
+/// come nor trips a sequence gap with its next request.
+pub(super) fn rejected(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    link: LinkId,
+    peer: ServerId,
+    fresh: FreshRequest,
+) {
+    let arm = ResultArm::Failed {
+        code: failure_code(DomainError::ServerBusy).to_owned(),
+        context: String::new(),
+    };
+    match encode_result(coordinator, &fresh, &arm, None, Vec::new()) {
+        Ok(encoded) => coordinator.send_result(context, link, peer, fresh.descriptor, &encoded),
+        Err(violation) => {
+            if coordinator.link_is_live(link, peer) {
+                coordinator.fail_link(context, link, peer, violation);
+            }
+        }
+    }
 }
 
 fn fresh_event_id(context: &mut StateCoreContext) -> Result<EventId, Violation> {

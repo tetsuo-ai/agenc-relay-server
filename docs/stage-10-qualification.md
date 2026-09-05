@@ -257,7 +257,11 @@ a direct message every two seconds, and a topic change every five seconds,
 and records the six latency classes: admission (connect to 001), message
 (direct), durable mutation (own topic), fanout (channel message), OPAQUE
 (account login), and snapshot (the paged NAMES the coordinator serves through
-the edge after a JOIN). Every cycle runs reconnect, churn, snapshot, OPAQUE
+the edge after a JOIN). Workers negotiate `standard-replies`, so a refused
+channel message reaches them as `FAIL PRIVMSG`, is counted as refused, and
+is re-sent under the same sequence; a gap in a sender's sequence at any
+observer is a missed event, and the record names the observing worker and
+its edge for the first 256. Every cycle runs reconnect, churn, snapshot, OPAQUE
 login, disk pressure, backup, peer loss, login-index reconstruction, and rekey,
 samples resources every ten seconds, and ends with a quiescence check
 against the warm baseline. The campaign record lists every sample, the
@@ -657,6 +661,18 @@ refused; the edge reconnects and resumes from its committed projection once
 storage accepts writes again. A coordinator unit test stages the marker,
 refuses the batch, and requires the retired link, the dropped generation,
 and the cancelled expiry timer.
+
+The same runs showed the other two batches the coordinator dropped on a
+refusal. A federated request whose batch storage refused was never answered:
+the edge kept it pending, its client's next request from the same origin
+arrived one sequence ahead, and the coordinator treated the gap as an origin
+violation, blocked the origin, and retired the link, which every client on
+that edge saw as a second of `NETWORK_UNAVAILABLE` until the resume healed
+it. The coordinator now answers such a request with a side-effect-free
+`SERVER_BUSY` without a result row, so the client retries and a byte-identical
+resend after a link loss still classifies as fresh. An origin acknowledgement
+whose batch storage refused now retires the link, so the edge declares again
+on its next link. Both have coordinator unit tests.
 
 ## Release claims and limits
 
