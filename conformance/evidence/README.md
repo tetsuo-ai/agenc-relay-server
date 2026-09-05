@@ -26,6 +26,10 @@ version or probe command, policy drift, empty or changed limitations, extra
 fields, missing gate commands, a different runner, stale source or lock hashes,
 failed results, arbitrary files, and artifacts that do not match the Git index.
 
+Run the unrecorded gate first. After it passes, mark its roadmap gate complete
+and commit the source. The recorded gate validates that checked source state;
+the resulting manifest closes the stage for that exact commit.
+
 Record a gate only from a clean detached worktree at the exact commit named by
 the evidence. Set the output path through the runner's control environment so
 the reviewed gate invocation keeps its exact argument vector:
@@ -34,10 +38,10 @@ the reviewed gate invocation keeps its exact argument vector:
 source_commit="$(git rev-parse HEAD)"
 env -u GIT_PAGER -u LD_LIBRARY_PATH -u PYTHONPATH \
   AGENC_IRCD_RECORD_GATE=1 \
-  bash scripts/check-stage-four.sh
+  bash scripts/check-stage-nine.sh
 
 python3 scripts/generate-gate-evidence.py \
-  --artifact "conformance/evidence/artifacts/stage-four-implementation-${source_commit}.json"
+  --artifact "conformance/evidence/artifacts/stage-nine-implementation-${source_commit}.json"
 ```
 
 The `env -u` entries remove the three injection variables commonly present in

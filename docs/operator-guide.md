@@ -56,6 +56,15 @@ The packaged tmpfiles and service records keep `/run/agenc-ircd` at mode 0750 wh
 
 The process cannot observe every service-manager restriction from inside its own namespace. Check the installed unit separately with `systemd-analyze security` and the deployment checker. `check-config` does not prove swap encryption, backup handling, certificate issuance, firewall rules, or Tor routing.
 
+## Upgrade to schema generation 2
+
+Stage 09 requires schema generation 2 in every feature combination. Stop the
+daemon and migrate existing generation-1 state before starting the new binary.
+The base federation profile also changes, so coordinate the upgrade across
+coordinator and edge nodes. Follow the migration, backup, resume, and rollback
+steps in [Stage 09 operations](stage-09-operations.md). That guide also covers
+the independently optional WSS listener and plaintext history service.
+
 ## Upgrade encrypted federation state
 
 The review changes add a durable operation-sequence floor for each companion

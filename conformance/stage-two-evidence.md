@@ -20,8 +20,9 @@ physical limit is exceeded, before a larger stream allocation.
 ## S02-002
 
 `EVID-S02-002-WEBSOCKET` covers masked text fragmentation, control frames,
-close payloads, invalid UTF-8, and shared IRC message limits. The HTTP/WSS
-listener remains Stage 09 work.
+close payloads, invalid UTF-8, and shared IRC message limits. This checkpoint
+covers framing. The HTTP/WSS listener is implemented in
+[Stage 09](../docs/stage-09-operations.md).
 
 ## S02-003
 

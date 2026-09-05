@@ -2679,10 +2679,11 @@ Stage 09 implementation includes strict WSS framing and Origin/ALPN policy,
 authorization-fenced history paging, metadata-only replay, immutable message
 identities and retention, signed resumable purge, and the stopped-daemon
 schema-generation 1-to-2 migration. The independent build/runtime matrix and
-live capture, disabled restart, and purge lifecycles pass. The complete
-aggregate gate passes. `S09-900` records that result in the source commit used
-for recording. Stage closure requires a successful recorded gate and validated
-evidence for that exact commit.
+live capture, disabled restart, and purge lifecycles pass. The
+[Stage 09 manifest](conformance/evidence/stage-09-a93e53e71d22a6d5ec46bd749ec18068a9fa572b.json)
+closes exact source commit `a93e53e71d22a6d5ec46bd749ec18068a9fa572b` with 10
+passed records from the recorded 103-command gate. Stage 10 production
+qualification is next; the external Stage 08 review remains open.
 
 The implementation uses durable state generations for history row sequence,
 policy authority, and query snapshot cuts. Domain record revisions retain

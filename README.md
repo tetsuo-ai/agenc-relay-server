@@ -16,9 +16,9 @@
 
 > [!IMPORTANT]
 > **This is pre-alpha infrastructure. Production qualification is incomplete.**
-> Stages 00 through 08 have revision-bound implementation checkpoints. The
-> [Stage 08 checkpoint](conformance/evidence/stage-08-ae6457fb62fef8961d3caf904febed580e8b4a91.json)
-> closes exact source commit `ae6457fb62fef8961d3caf904febed580e8b4a91`.
+> Stages 00 through 09 have revision-bound implementation checkpoints. The
+> [Stage 09 checkpoint](conformance/evidence/stage-09-a93e53e71d22a6d5ec46bd749ec18068a9fa572b.json)
+> closes exact source commit `a93e53e71d22a6d5ec46bd749ec18068a9fa572b`.
 > The daemon implements TLS-only direct, Tor-exit, and onion profiles,
 > coordinator/edge federation, and the E2EE server adapter. The external
 > cryptographic and protocol review remains open. Stage 09 adds optional WebSocket transport and
@@ -57,7 +57,7 @@ Ed25519, and authenticated storage.
 | 06 | complete; checkpoint closed | Runtime composition, TLS endpoints, account sessions, administration, reload, and shutdown |
 | 07 | complete; checkpoint closed | Authenticated federation, projections, replay, snapshots, partitions, and paged queries |
 | 08 | implementation checkpoint closed; external review open | E2EE routing, policy quorum, edge witnesses, durable barriers, and two-library MLS interoperability |
-| 09 | implementation under validation | Independent WSS and plaintext history profiles, replay-safe paging, purge, and schema migration |
+| 09 | complete; checkpoint closed | Independent WSS and plaintext history profiles, replay-safe paging, purge, and schema migration |
 | 10 | planned | Production qualification and release evidence |
 
 `agenc-ircd-storage` keeps redb on one blocking owner thread, accepts only
@@ -68,7 +68,7 @@ through a disposable on-disk index before the storage port becomes available.
 Backup, stopped-daemon restore, rekey, login-index transitions, and bounded
 checkpoint work all use resumable authenticated construction records.
 
-Stages 05 through 08 are closed. Stage 06
+Stages 05 through 09 are closed. Stage 06
 composes the runtime: strict configuration, first-run initialization, TLS
 endpoints, transport-profile isolation, the single StateCore owner,
 registration and account sessions, channels and messaging, isolated
@@ -90,6 +90,7 @@ plaintext history, bounded purge and expiry, authenticated history replay,
 and stopped-daemon schema migration. See the
 [Stage 09 operating instructions](docs/stage-09-operations.md). The complete dependency-ordered roadmap lives in
 [TODO.md](TODO.md). See the
+[Stage 09 checkpoint](conformance/evidence/stage-09-a93e53e71d22a6d5ec46bd749ec18068a9fa572b.json), the
 [Stage 08 checkpoint](conformance/evidence/stage-08-ae6457fb62fef8961d3caf904febed580e8b4a91.json), the
 [Stage 07 checkpoint](conformance/evidence/stage-07-1093d88d0057c3461a423285e0f86ff3775c1140.json), the
 [Stage 06 checkpoint](conformance/evidence/stage-06-65cce9d66f7bcfb0c0830a2ab1d42b52bff82942.json), the
@@ -187,6 +188,16 @@ contains 160 passed records and closes exact source commit
 The external cryptographic and protocol review (`S08-039`) remains open in the
 [review package](conformance/review/README.md). This checkpoint does not claim
 that review or Stage 10 production qualification has been completed.
+
+The [Stage 09 manifest](conformance/evidence/stage-09-a93e53e71d22a6d5ec46bd749ec18068a9fa572b.json)
+contains 10 passed records and closes exact source commit
+`a93e53e71d22a6d5ec46bd749ec18068a9fa572b`. Its recorded gate ran 103 commands.
+Coverage reached 75.38% of branches and 90.69% of lines, with all nine critical
+regions at 100%. The gate adds TCP/WSS transcript and stored-state equivalence,
+history lifecycle and encrypted-route refusals, all 16 build/configuration
+combinations, migration recovery, and WSS/history fuzz campaigns. Existing
+nodes need a stopped-daemon schema migration and a coordinated federation
+upgrade; follow the [Stage 09 operating instructions](docs/stage-09-operations.md).
 
 The binary starts the node with `agenc-ircd serve --config <file>` after
 `agenc-ircd init` created the layout and `agenc-ircd check-config` verified the

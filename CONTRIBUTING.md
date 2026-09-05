@@ -19,19 +19,19 @@ review and evidence required by the specifications.
 
 ## Validation
 
-Run the current Stage 08 implementation checks from the repository root:
+Run the current Stage 09 implementation checks from the repository root:
 
 ```sh
-bash scripts/check-stage-eight.sh
+bash scripts/check-stage-nine.sh
 ```
 
 For a narrower development loop, use `cargo fmt --all --check`,
 `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`,
 and `cargo test --workspace --all-features --locked`. The full implementation
 check must still pass before merge. A check does not close a stage by itself.
-The [Stage 08 manifest](conformance/evidence/stage-08-ae6457fb62fef8961d3caf904febed580e8b4a91.json)
+The [Stage 09 manifest](conformance/evidence/stage-09-a93e53e71d22a6d5ec46bd749ec18068a9fa572b.json)
 records the closure for exact source commit
-`ae6457fb62fef8961d3caf904febed580e8b4a91`. The external cryptographic and
+`a93e53e71d22a6d5ec46bd749ec18068a9fa572b`. The external cryptographic and
 protocol review (`S08-039`) remains open. Checkpoints apply to their named
 source revisions; later changes require new artifact-backed evidence to close
 a stage at a new revision. See [TODO.md](TODO.md) for every stage's checkpoint
