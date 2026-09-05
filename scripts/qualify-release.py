@@ -26,6 +26,8 @@ def main() -> int:
     create.add_argument("--build", type=Path, action="append", required=True)
     create.add_argument("--target", choices=TARGETS, action="append", required=True,
                         help="a native target this candidate covers; repeat for each build record")
+    create.add_argument("--tools", type=Path, action="append", required=True,
+                        help="the client tools image record of build-qualification-tools.py; one per target")
     for name in ("run", "resume", "status", "close", "verify"):
         command = sub.add_parser(name)
         command.add_argument("--candidate", type=Path, required=True)
@@ -49,7 +51,8 @@ def main() -> int:
         print(json.dumps({"jobs": [job["id"] for job in jobs], "native_targets": policy["targets"], "release_branch_floor": 90}, indent=2))
         return 0
     if args.command == "prepare":
-        print(prepare(root, args.output.resolve(), [path.resolve() for path in args.build], args.target))
+        print(prepare(root, args.output.resolve(), [path.resolve() for path in args.build], args.target,
+                      [path.resolve() for path in args.tools]))
         return 0
     directory = args.candidate.resolve()
     if args.command == "verify":

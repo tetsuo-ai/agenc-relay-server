@@ -48,14 +48,17 @@ def tor_network(root: Path, attempt: Path, tests: DaemonTests, image: str) -> No
 def main() -> None:
     root = Path(__file__).resolve().parent.parent
     candidate, directory, attempt, target = context(root)
-    artifact = next(item for item in candidate["artifacts"] if item["target"] == target)
-    build = read_record(safe_path(directory, artifact["build_record"]))
-    image = checked_run(root, ["docker", "image", "inspect", "--format={{.Id}}", build["image"]])
+    # The client tools image is bound into the candidate by its own record;
+    # it is not the release build image.
+    tools = next(item for item in candidate["tools"] if item["target"] == target)
+    tools_record = read_record(safe_path(directory, tools["record"]))
+    image = checked_run(root, ["docker", "image", "inspect", "--format={{.Id}}", tools_record["image"]])
     from release_qualification.build import immutable_image
     immutable_image(image)
     command(root, attempt, "client-tool-versions", ["docker", "run", "--rm", "--pull=never", "--network=none",
             image, "python3", "-c", "import subprocess; [subprocess.run(a,check=True) for a in [['weechat-headless','--version'],['irssi','--version'],['tor','--version'],['tcpdump','--version']]]"])
-    write_once(attempt / "evidence/tool-image.json", canonical({"build_image": build["image"], "image_id": image}))
+    write_once(attempt / "evidence/tool-image.json", canonical({"tools_image": tools_record["image"], "image_id": image,
+                                                                "tools_record_sha256": tools["record_sha256"]}))
     tests = DaemonTests(root, directory, attempt, candidate, target)
     tests.compile(["stage_six_daemon", "stage_seven_federation", "stage_eight_e2ee"])
     tests.run("conventional-clients", "stage_six_daemon",

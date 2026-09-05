@@ -218,14 +218,19 @@ class SyntheticCandidate:
         policy = policy_of(root, require_drivers=False)
         self.jobs = policy["job"] + jobs_of(root)
         artifacts = []
+        tools = []
         for target in sorted(targets):
             build = self.synthetic_build(target)
             artifacts.append({"target": target, "path": f"artifacts/{target}/agenc-ircd",
                               "sha256": build["binary_sha256"], "build_record": f"artifacts/{target}/build.json",
                               "build_record_sha256": digest(canonical(build))})
+            tools_record = self.synthetic_tools(target)
+            tools.append({"target": target, "record": f"tools/{target}/tools.json",
+                          "record_sha256": digest(canonical(tools_record))})
         self.record = {"schema_version": 1, "created_at": timestamp_now(), "source": self.SOURCE,
                        "policy": policy_identity(root), "jobs": self.jobs, "artifacts": artifacts,
-                       "claims": ["core-v1", "federated-v1", "encrypted-v1", "wss", "history"], "targets": sorted(targets)}
+                       "claims": ["core-v1", "federated-v1", "encrypted-v1", "wss", "history"], "targets": sorted(targets),
+                       "tools": tools}
         write_once(directory / "candidate.json", canonical(self.record))
         self.hash = digest(canonical(self.record))
 
@@ -247,6 +252,20 @@ class SyntheticCandidate:
                   "tools": {"rustc": "rustc 1.98.0", "cargo": "cargo 1.98.0", "cc": "cc", "ld": "ld", "native_libraries": []},
                   "logs": [{"path": "build-a.log", "sha256": digest(b"a\n")}, {"path": "build-b.log", "sha256": digest(b"b\n")}]}
         write_once(directory / "build.json", canonical(record))
+        return record
+
+    def synthetic_tools(self, target: str) -> dict:
+        """A client tools record that names the committed pins and a synthetic image."""
+        import tomllib
+
+        directory = self.directory / "tools" / target
+        directory.mkdir(parents=True)
+        versions = tomllib.loads((self.root / "conformance/clients/versions.toml").read_text())
+        tor_tools = tomllib.loads((self.root / "conformance/clients/tor-tools.toml").read_text())
+        record = {"schema_version": 1, "target": target, "image": "sha256:" + "8" * 64, "clients": versions["client"],
+                  "tor_tools": tor_tools, "dockerfile_sha256": file_digest(self.root / "conformance/clients/Dockerfile"),
+                  "build_log_sha256": "9" * 64}
+        write_once(directory / "tools.json", canonical(record))
         return record
 
     def host(self, target: str) -> dict:
@@ -362,18 +381,32 @@ class RunnerTests(unittest.TestCase):
         from release_qualification.candidate import prepare, validate_candidate
 
         builds = {target: self.directory / "artifacts" / target / "build.json" for target in SyntheticCandidate.TARGETS}
+        tools = {target: self.directory / "tools" / target / "tools.json" for target in SyntheticCandidate.TARGETS}
+        x86 = "x86_64-unknown-linux-gnu"
         output = Path(self.temporary.name) / "prepared"
         with mock.patch.object(candidate_module, "source_identity", return_value=dict(SyntheticCandidate.SOURCE)):
             with self.assertRaises(QualificationError):
-                prepare(self.root, output, list(builds.values()), ["x86_64-unknown-linux-gnu"])
+                prepare(self.root, output, list(builds.values()), [x86], [tools[x86]])
             with self.assertRaises(QualificationError):
-                prepare(self.root, output, [builds["x86_64-unknown-linux-gnu"]], [])
+                prepare(self.root, output, [builds[x86]], [], [tools[x86]])
             with self.assertRaises(QualificationError):
-                prepare(self.root, output, [builds["x86_64-unknown-linux-gnu"]], ["riscv64gc-unknown-linux-gnu"])
-            prepare(self.root, output, [builds["x86_64-unknown-linux-gnu"]], ["x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"])
+                prepare(self.root, output, [builds[x86]], ["riscv64gc-unknown-linux-gnu"], [tools[x86]])
+            with self.assertRaises(QualificationError):
+                prepare(self.root, output, [builds[x86]], [x86], [])
+            with self.assertRaises(QualificationError):
+                prepare(self.root, output, [builds[x86]], [x86], [tools["aarch64-unknown-linux-gnu"]])
+            stale = Path(self.temporary.name) / "stale-tools.json"
+            stale_record = read_record(tools[x86])
+            stale_record["dockerfile_sha256"] = "0" * 64
+            stale.write_bytes(canonical(stale_record))
+            with self.assertRaises(QualificationError):
+                prepare(self.root, output, [builds[x86]], [x86], [stale])
+            prepare(self.root, output, [builds[x86]], [x86, x86], [tools[x86]])
         record = validate_candidate(self.root, output, check_source=False)
-        self.assertEqual(record["targets"], ["x86_64-unknown-linux-gnu"])
-        self.assertEqual([artifact["target"] for artifact in record["artifacts"]], ["x86_64-unknown-linux-gnu"])
+        self.assertEqual(record["targets"], [x86])
+        self.assertEqual([artifact["target"] for artifact in record["artifacts"]], [x86])
+        self.assertEqual([entry["target"] for entry in record["tools"]], [x86])
+        self.assertTrue((output / "tools" / x86 / "tools.json").is_file())
         candidate_path = output / "candidate.json"
         original = candidate_path.read_bytes()
         candidate_path.write_bytes(original.replace(b'"targets":["x86_64-unknown-linux-gnu"]', b'"targets":["aarch64-unknown-linux-gnu","x86_64-unknown-linux-gnu"]'))

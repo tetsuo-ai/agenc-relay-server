@@ -40,10 +40,15 @@ do not certify the presentation behavior of third-party clients.
 
 `scripts/qualify-release.py` defines `check`, `prepare`, `run`, `resume`,
 `status`, `close`, and `verify`. Candidate preparation requires a clean detached source
-checkout and one independently reproduced build record for each native target
-named with `--target`. It copies the binaries and build evidence into a new
-candidate directory. Source, lockfile, policy, command, binary, and
-build-record hashes bind each attempt to that candidate.
+checkout, one independently reproduced build record for each native target
+named with `--target`, and one client tools record per target from
+`scripts/build-qualification-tools.py` named with `--tools`. The tools image
+carries the pinned WeeChat, Irssi, Tor, and packet capture tools for the
+interoperability job; it is distinct from the release build image, and its
+record must name the committed client pins and Dockerfile digest. `prepare`
+copies the binaries, build evidence, and tools records into a new candidate
+directory. Source, lockfile, policy, command, binary, build-record, and
+tools-record hashes bind each attempt to that candidate.
 
 Every attempt has an immutable start record, a bounded combined output log,
 measured elapsed and child CPU time, a driver report, and a result record.
@@ -377,8 +382,10 @@ repeated once per build record, jobs run only for recorded targets, and
 does not cover cannot attempt a job.
 
 ```sh
+python3 scripts/build-qualification-tools.py --output /path/to/tools
 python3 scripts/qualify-release.py prepare --output /path/to/candidate \
-  --target x86_64-unknown-linux-gnu --build /path/to/x86_64/build.json
+  --target x86_64-unknown-linux-gnu --build /path/to/x86_64/build.json \
+  --tools /path/to/tools/tools.json
 ```
 
 `close --target` restricts a decision to a subset of the candidate's targets.
