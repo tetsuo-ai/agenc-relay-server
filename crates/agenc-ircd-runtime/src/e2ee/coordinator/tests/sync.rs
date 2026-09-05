@@ -811,7 +811,7 @@ fn requests_need_an_active_ready_peer() -> TestResult {
 /// A coordinator that reloaded without its companion origins meets the
 /// replayed UPDATE of an origin it acknowledged before its restart: the
 /// matched base origin anchors it and the operation sequence continues
-/// after the retained replay rows. A DEL for an origin it never learned is
+/// from the durable origin floor. A DEL for an origin it never learned is
 /// acknowledged with nothing to fence.
 #[test]
 fn a_reloaded_coordinator_accepts_a_replayed_origin_update() -> TestResult {
@@ -837,6 +837,17 @@ fn a_reloaded_coordinator_accepts_a_replayed_origin_update() -> TestResult {
             response_object_ids: Vec::new(),
             security_mutation: false,
             retain_until: 0,
+        },
+    );
+    sync.harness.coordinator.state.origin_sequences.insert(
+        CompanionOriginKey {
+            home_server_id: HOME,
+            server_incarnation: INCARNATION,
+            origin_id: ORIGIN,
+        },
+        agenc_ircd_storage::e2ee_records::origin::OriginSequenceRow {
+            origin_generation: 1,
+            next_sequence: 5,
         },
     );
     let (_, update) = origin_object(1, [9; 32], Some((sync.harness.account, 3)), None)?;

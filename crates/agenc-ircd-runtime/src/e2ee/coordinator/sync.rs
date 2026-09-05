@@ -435,6 +435,8 @@ impl CompanionCoordinator {
                 && mirrored.generation == 0
                 && mirrored.previous_state_id == [0; 32] =>
             {
+                let mut mirrored = mirrored;
+                mirrored.next_sequence = self.replayed_next_sequence(&key, mirrored.generation)?;
                 self.state.origins.insert(key, mirrored);
                 Ok(())
             }
@@ -442,10 +444,10 @@ impl CompanionCoordinator {
                 // A coordinator that reloaded without its companion origins
                 // (they are not durable) meets the replayed declaration of
                 // an origin it acknowledged before. The matched base origin
-                // anchors it; the operation sequence continues after the
-                // retained replay rows of that generation.
+                // anchors it; the operation sequence continues from its
+                // durable floor even after replay results have expired.
                 let mut mirrored = mirrored;
-                mirrored.next_sequence = self.replayed_next_sequence(&key, mirrored.generation);
+                mirrored.next_sequence = self.replayed_next_sequence(&key, mirrored.generation)?;
                 self.state.origins.insert(key, mirrored);
                 Ok(())
             }
@@ -453,21 +455,40 @@ impl CompanionCoordinator {
         }
     }
 
-    /// The operation sequence after the highest retained replay row of
-    /// one origin generation, zero without any.
-    fn replayed_next_sequence(&self, key: &CompanionOriginKey, generation: u64) -> u64 {
-        self.state
-            .replays
-            .keys()
-            .filter(|replay| {
-                replay.home_server_id == key.home_server_id
-                    && replay.server_incarnation == key.server_incarnation
-                    && replay.origin_id == key.origin_id
-                    && replay.origin_generation == generation
-            })
-            .map(|replay| replay.operation_sequence.saturating_add(1))
-            .max()
-            .unwrap_or(0)
+    /// Restores the durable sequence floor. Legacy replay rows cannot prove
+    /// the latest sequence because their retention periods differ. A used
+    /// generation with no matching floor must be replaced. Without any
+    /// retained history, a never-used generation starts at zero.
+    fn replayed_next_sequence(
+        &self,
+        key: &CompanionOriginKey,
+        generation: u64,
+    ) -> Result<u64, CompanionFault> {
+        let floor = self.state.origin_sequences.get(key);
+        let mut next_sequence = match floor {
+            Some(row) if row.origin_generation > generation => {
+                return Err(CompanionFault::Protocol);
+            }
+            Some(row) if row.origin_generation == generation => row.next_sequence,
+            _ => 0,
+        };
+        for replay in self.state.replays.keys().filter(|replay| {
+            replay.home_server_id == key.home_server_id
+                && replay.server_incarnation == key.server_incarnation
+                && replay.origin_id == key.origin_id
+                && replay.origin_generation == generation
+        }) {
+            if !floor.is_some_and(|row| row.origin_generation == generation) {
+                return Err(CompanionFault::Protocol);
+            }
+            next_sequence = next_sequence.max(
+                replay
+                    .operation_sequence
+                    .checked_add(1)
+                    .ok_or(CompanionFault::Protocol)?,
+            );
+        }
+        Ok(next_sequence)
     }
 
     /// EORIGIN DEL: fences the origin at its next unused sequence.
@@ -660,6 +681,7 @@ impl CompanionCoordinator {
             .state
             .routes
             .routes()
+            .filter(|route| self.state.routes.is_current(&route.conversation_id))
             .map(|route| (route.conversation_id.0, route.target))
             .collect();
         for (conversation, target) in routes {

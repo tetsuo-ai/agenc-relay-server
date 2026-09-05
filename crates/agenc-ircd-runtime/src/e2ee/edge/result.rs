@@ -277,6 +277,11 @@ impl E2eeEdge {
             if decoded.request_object_id != pending.request_object_id {
                 return Err(E2eeReplyCode::InvalidFragment.into());
             }
+            let object_id = *agenc_ircd_e2ee::ObjectId::compute(&bytes).as_bytes();
+            super::response_validation::result(pending, &decoded, object_id)?;
+            if pending.result_object_id.is_some() {
+                return Ok(());
+            }
             if let Some(completion) = decoded.completion_event_id {
                 if self.covered.remove(&completion) {
                     pending.completion_seen = true;
@@ -286,9 +291,12 @@ impl E2eeEdge {
                 }
             }
             pending.result = Some(decoded);
+            pending.result_object_id = Some(object_id);
             return Ok(());
         };
-        pending.responses.insert(index, bytes);
+        if super::response_validation::response(pending, index, &bytes)? {
+            pending.responses.insert(index, bytes);
+        }
         Ok(())
     }
 
@@ -329,34 +337,27 @@ impl E2eeEdge {
         if !ready {
             return Ok(Vec::new());
         }
-        let Some(mut pending) = self.pending.remove(&request_id) else {
+        let Some(pending) = self.pending.remove(&request_id) else {
             return Ok(Vec::new());
         };
         let Some(result) = pending.result.clone() else {
             return Ok(Vec::new());
         };
         let generation = pending.generation;
-        if let ResultValue::Attached(device, session_generation) = result.value {
-            self.attachments
-                .push((generation, device, session_generation));
-        }
         let lines = self.render_answer(context, &pending, &result)?;
-        pending.rendered = true;
-        if result.kind == IrcFederationResultKind::AcceptedEvent {
-            self.pending.insert(request_id, pending);
-        }
-        self.counters.results_rendered = self.counters.results_rendered.saturating_add(1);
+        let mut retry_outputs = self.publish_reply(context, &pending, &lines)?;
         let frames = lines
             .iter()
             .map(|line| WireMessage::extension_line(line))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| E2eeReplyCode::InvalidFragment)?;
-        Ok(vec![ClientOutput { generation, frames }])
+        retry_outputs.insert(0, ClientOutput { generation, frames });
+        Ok(retry_outputs)
     }
 
     /// The lines of one answer: a failure, a scalar success, or an object
     /// batch; an accepted event renders through its echo instead.
-    fn render_answer(
+    pub(super) fn render_answer(
         &mut self,
         context: &mut StateCoreContext,
         pending: &PendingRequest,

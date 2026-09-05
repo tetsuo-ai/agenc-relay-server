@@ -195,6 +195,9 @@ impl Harness {
             };
             let value = agenc_ircd_storage::PersistentRecordValue::decode(*table, plaintext)?;
             fresh.coordinator.admit_restored(*table, key, &value);
+            fresh
+                .writes
+                .push(Write::put(*table, key.clone(), plaintext.to_vec())?);
         }
         fresh.coordinator.finish_restore();
         fresh.sequence = self.sequence;
@@ -467,6 +470,150 @@ fn account_param(account: &[u8; 24]) -> Vec<u8> {
     let mut bytes = vec![24];
     bytes.extend_from_slice(account);
     bytes
+}
+
+#[test]
+fn reload_preserves_published_policies_after_a_council_device_retires() -> TestResult {
+    let mut harness = Harness::with_devices(&[DEVICE, DEVICE + 1])?;
+    let conversation = harness.bind_channel()?;
+    let retained_certificate = harness
+        .principal
+        .roster
+        .tbs
+        .active_devices
+        .as_slice()
+        .iter()
+        .find(|entry| entry.device_id == DEVICE_ID)
+        .ok_or("retained certificate")?
+        .certificate
+        .clone();
+    let successor = support::roster(
+        &harness.principal.root_secret,
+        &harness.principal.root,
+        1,
+        support::roster_id(&harness.principal.roster)?,
+        (100, 100 + 6 * 24 * 3600),
+        vec![retained_certificate],
+        Vec::new(),
+    )?;
+    let bytes = wire(IrcWireObjectKind::DeviceRoster, &successor)?;
+    ok(harness.run(Op::PublishRoster, &[], Some(&bytes))?)?;
+    let reloaded = harness.reloaded()?;
+    let before = harness
+        .coordinator
+        .state
+        .conversations
+        .get(&conversation)
+        .ok_or("conversation")?;
+    let after = reloaded
+        .coordinator
+        .state
+        .conversations
+        .get(&conversation)
+        .ok_or("reloaded conversation")?;
+    assert_eq!(after.policies, before.policies);
+    Ok(())
+}
+
+fn retire_council_device(harness: &mut Harness, retired: [u8; 16]) -> TestResult {
+    let certificates = harness
+        .principal
+        .roster
+        .tbs
+        .active_devices
+        .as_slice()
+        .iter()
+        .filter(|entry| entry.device_id != retired)
+        .map(|entry| entry.certificate.clone())
+        .collect();
+    let successor = support::roster(
+        &harness.principal.root_secret,
+        &harness.principal.root,
+        1,
+        support::roster_id(&harness.principal.roster)?,
+        (100, 100 + 6 * 24 * 3600),
+        certificates,
+        Vec::new(),
+    )?;
+    let bytes = wire(IrcWireObjectKind::DeviceRoster, &successor)?;
+    ok(harness.run(Op::PublishRoster, &[], Some(&bytes))?)?;
+    Ok(())
+}
+
+#[test]
+fn reload_preserves_published_policies_after_root_rotation() -> TestResult {
+    let mut harness = Harness::new()?;
+    let conversation = harness.bind_channel()?;
+    let secret = key(ROOT_SEED + 1);
+    let root = support::root(
+        &secret,
+        &harness.account,
+        1,
+        (0, 2_000_000),
+        Some((&harness.principal.root_secret, &harness.principal.root)),
+    )?;
+    let bytes = wire(IrcWireObjectKind::RootIdentity, &root)?;
+    ok(harness.run(Op::PublishIdentity, &[], Some(&bytes))?)?;
+    let mut device = DeviceSpec::new(DEVICE);
+    device.target_roster_generation = 1;
+    let roster = support::roster(
+        &secret,
+        &root,
+        1,
+        support::roster_id(&harness.principal.roster)?,
+        (100, 100 + 6 * 24 * 3600),
+        vec![certificate(&secret, &root, &device)?],
+        Vec::new(),
+    )?;
+    let bytes = wire(IrcWireObjectKind::DeviceRoster, &roster)?;
+    ok(harness.run(Op::PublishRoster, &[], Some(&bytes))?)?;
+    let reloaded = harness.reloaded()?;
+    let before = harness
+        .coordinator
+        .state
+        .conversations
+        .get(&conversation)
+        .ok_or("conversation")?;
+    let after = reloaded
+        .coordinator
+        .state
+        .conversations
+        .get(&conversation)
+        .ok_or("reloaded conversation")?;
+    assert_eq!(after.policies, before.policies);
+    assert_eq!(after.current_policy_id, before.current_policy_id);
+    Ok(())
+}
+
+#[test]
+fn reload_rejects_a_forged_historical_roster() -> TestResult {
+    use crate::state_core::durable::AccountServiceDurableWrite as Write;
+    let mut harness = Harness::with_devices(&[DEVICE, DEVICE + 1])?;
+    let conversation = harness.bind_channel()?;
+    let original = wire(IrcWireObjectKind::DeviceRoster, &harness.principal.roster)?;
+    let original_key = agenc_ircd_storage::e2ee_records::object_key(&object_id(&original))?;
+    retire_council_device(&mut harness, [DEVICE + 1; 16])?;
+    harness.writes.retain(|write| {
+        !matches!(write, Write::Put { table: agenc_ircd_storage::TableId::E2eeObject, key, .. } if *key == original_key)
+    });
+    let mut forged = harness.principal.roster.clone();
+    if let Some(byte) = forged.root_signature.first_mut() {
+        *byte ^= 1;
+    }
+    let forged = wire(IrcWireObjectKind::DeviceRoster, &forged)?;
+    harness.writes.push(
+        CompanionCoordinator::object_write(&forged)
+            .map_err(|code| format!("object write: {code:?}"))?,
+    );
+    let reloaded = harness.reloaded()?;
+    let restored = reloaded
+        .coordinator
+        .state
+        .conversations
+        .get(&conversation)
+        .ok_or("conversation")?;
+    assert!(restored.policies.is_empty());
+    Ok(())
 }
 
 #[test]

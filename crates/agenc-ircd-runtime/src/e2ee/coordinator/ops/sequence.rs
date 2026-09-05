@@ -35,7 +35,7 @@ use agenc_ircd_e2ee::objects::sequencing::{
 };
 use agenc_ircd_e2ee::policy::VerifiedPolicy;
 use agenc_ircd_e2ee::route::PrincipalRosters;
-use agenc_ircd_e2ee::tls::{DecodeBudget, TlsDecode, TlsEncode};
+use agenc_ircd_e2ee::tls::{DecodeBudget, TlsDecode, TlsEncode, TlsVec};
 use agenc_ircd_e2ee::wire::reply::E2eeReplyCode;
 use agenc_ircd_storage::TableId;
 use agenc_ircd_storage::e2ee_records::{
@@ -61,7 +61,7 @@ fn wire(kind: IrcWireObjectKind, body: Vec<u8>) -> Result<Vec<u8>, Fail> {
         .map_err(|_| Fail::from(E2eeReplyCode::ObjectTooLarge))
 }
 
-fn record_bytes(record: &IrcSequencerRecord) -> Result<Vec<u8>, Fail> {
+pub(super) fn record_bytes(record: &IrcSequencerRecord) -> Result<Vec<u8>, Fail> {
     let body = record
         .encode()
         .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
@@ -610,7 +610,7 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     exec.attached_device()?;
     let (object, bytes) = exec.payload()?;
     let log = log(exec, &conversation_id)?;
-    let request: IrcFinalizationRequest = decode(object.body(), MAX_FINALIZATION_OBJECT)?;
+    let mut request: IrcFinalizationRequest = decode(object.body(), MAX_FINALIZATION_OBJECT)?;
     let core = request.proof.core.clone();
     let core = &core;
     let slot = log
@@ -623,6 +623,23 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         || core.prior_state_id != slot.position.prior_state_id
     {
         return Err(Fail::with(E2eeReplyCode::EpochStale, &conversation_id));
+    }
+    super::terminal_proof::receipt(
+        exec,
+        &conversation_id,
+        slot.position.route_sequence,
+        &IrcSequencerRecord::Candidate(request.proof.receipt.clone()),
+    )?;
+    super::terminal_proof::finalization(&request.proof)?;
+    if core.profile_version != 1
+        || core.network_id != exec.coordinator.network_id
+        || core.prior_epoch != slot.position.prior_epoch
+        || Some(core.resulting_epoch) != core.prior_epoch.checked_add(1)
+    {
+        return Err(Fail::with(
+            E2eeReplyCode::BindingAuthInvalid,
+            &conversation_id,
+        ));
     }
     let finalization_id = CompanionCoordinator::id_of(SemanticHashDomain::FinalizationId, core)?;
     let request_object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
@@ -685,6 +702,8 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         terminal,
         &quorum.accepted,
     )?;
+    request.votes = TlsVec::new(quorum.ledger.signed_votes(&terminal))
+        .map_err(|_| Fail::from(E2eeReplyCode::ObjectTooLarge))?;
     let position = log
         .terminal_position(&core.candidate_id)
         .map_err(|_| Fail::with(E2eeReplyCode::FinalityRequired, &conversation_id))?;
@@ -803,7 +822,7 @@ pub fn submit_abort(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     exec.attached_device()?;
     let (object, bytes) = exec.payload()?;
     let log = log(exec, &conversation_id)?;
-    let request: IrcAbortRequest = decode(object.body(), MAX_ABORT_OBJECT)?;
+    let mut request: IrcAbortRequest = decode(object.body(), MAX_ABORT_OBJECT)?;
     let core = request.core.clone();
     let core = &core;
     let slot = log
@@ -814,6 +833,21 @@ pub fn submit_abort(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         || core.prior_state_id != slot.position.prior_state_id
     {
         return Err(Fail::with(E2eeReplyCode::EpochStale, &conversation_id));
+    }
+    super::terminal_proof::receipt(
+        exec,
+        &conversation_id,
+        slot.position.route_sequence,
+        &IrcSequencerRecord::Candidate(request.receipt.clone()),
+    )?;
+    if core.profile_version != 1
+        || core.network_id != exec.coordinator.network_id
+        || core.prior_epoch != slot.position.prior_epoch
+    {
+        return Err(Fail::with(
+            E2eeReplyCode::BindingAuthInvalid,
+            &conversation_id,
+        ));
     }
     let abort_id = CompanionCoordinator::id_of(SemanticHashDomain::AbortId, core)?;
     let request_object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
@@ -853,6 +887,8 @@ pub fn submit_abort(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         terminal,
         &quorum.accepted,
     )?;
+    request.votes = TlsVec::new(quorum.ledger.signed_votes(&terminal))
+        .map_err(|_| Fail::from(E2eeReplyCode::ObjectTooLarge))?;
     let position = log
         .terminal_position(&core.candidate_id)
         .map_err(|_| Fail::with(E2eeReplyCode::FinalityRequired, &conversation_id))?;
@@ -1147,7 +1183,14 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
         .signer()
         .ok_or_else(|| Fail::from(E2eeReplyCode::Syncing))?;
     let (attempt_id, quorum, terminal, terminal_id, new_conversation, record) = if activate {
-        let request: IrcReInitActivationRequest = decode(object.body(), MAX_REINIT_OBJECT)?;
+        let mut request: IrcReInitActivationRequest = decode(object.body(), MAX_REINIT_OBJECT)?;
+        super::terminal_proof::reinit_attempt(
+            exec,
+            &old_conversation_id,
+            &request.receipt,
+            &request.attempt,
+        )?;
+        super::terminal_proof::reinit_activation(&request)?;
         let core = request.core.clone();
         let core = &core;
         if core.old_conversation_id != old_conversation_id {
@@ -1170,6 +1213,8 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
             request.votes.as_slice(),
             terminal,
         )?;
+        request.votes = TlsVec::new(quorum.ledger.signed_votes(&terminal))
+            .map_err(|_| Fail::from(E2eeReplyCode::ObjectTooLarge))?;
         let position = log
             .attempt_terminal_position(&attempt_id)
             .map_err(|_| Fail::with(E2eeReplyCode::FinalityRequired, &old_conversation_id))?;
@@ -1198,9 +1243,25 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
             IrcSequencerRecord::ReinitActivation(certificate),
         )
     } else {
-        let request: IrcReInitAbortRequest = decode(object.body(), MAX_REINIT_OBJECT)?;
+        let mut request: IrcReInitAbortRequest = decode(object.body(), MAX_REINIT_OBJECT)?;
+        super::terminal_proof::reinit_attempt(
+            exec,
+            &old_conversation_id,
+            &request.receipt,
+            &request.attempt,
+        )?;
         let core = request.core.clone();
         let core = &core;
+        if core.profile_version != 1
+            || core.network_id != exec.coordinator.network_id
+            || core.attempt_sequence != request.receipt.tbs.attempt_sequence
+            || core.slot_predecessor_record_id != request.receipt.tbs.predecessor_record_id
+        {
+            return Err(Fail::with(
+                E2eeReplyCode::BindingAuthInvalid,
+                &old_conversation_id,
+            ));
+        }
         if core.old_conversation_id != old_conversation_id {
             return Err(Fail::with(
                 E2eeReplyCode::RouteInvalid,
@@ -1220,6 +1281,8 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
             request.votes.as_slice(),
             terminal,
         )?;
+        request.votes = TlsVec::new(quorum.ledger.signed_votes(&terminal))
+            .map_err(|_| Fail::from(E2eeReplyCode::ObjectTooLarge))?;
         let position = log
             .attempt_terminal_position(&attempt_id)
             .map_err(|_| Fail::with(E2eeReplyCode::FinalityRequired, &old_conversation_id))?;

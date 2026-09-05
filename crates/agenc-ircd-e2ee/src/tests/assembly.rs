@@ -84,13 +84,13 @@ fn local_ingress_assembles_in_order_and_verifies_the_hash() -> TestResult {
     );
     assert_eq!(assembler.quotas().reserved_bytes(), 0);
     assert_eq!(assembler.open_count(), 0);
-    assert!(assembler.is_recent(key.direction, key.sender, key.command, &key.object_id));
+    assert!(assembler.is_recent(&key));
     assert_eq!(
         assembler.ingest(key.clone(), scopes(), LIVE, first, 14)?,
         Ingest::Recent
     );
     assembler.expire(13 + 30 * 60);
-    assert!(!assembler.is_recent(key.direction, key.sender, key.command, &key.object_id));
+    assert!(!assembler.is_recent(&key));
     Ok(())
 }
 
@@ -121,22 +121,12 @@ fn a_recent_object_is_scoped_to_its_direction_and_sender() -> TestResult {
     );
     // Deliveries are keyed by position, never by content: the same bytes
     // delivered again assemble again.
-    assert!(!assembler.is_recent(
-        delivered.direction,
-        delivered.sender,
-        delivered.command,
-        &delivered.object_id
-    ));
+    assert!(!assembler.is_recent(&delivered));
     assert_eq!(
         assembler.ingest(delivered, scopes(), LIVE, first, 13)?,
         Ingest::Complete(bytes)
     );
-    assert!(assembler.is_recent(
-        local.direction,
-        local.sender,
-        local.command,
-        &local.object_id
-    ));
+    assert!(assembler.is_recent(&local));
     // The same bytes under another command are a new submission.
     let other_command = AssemblyKey {
         command: CarrierCommand::Federation(IrcWireObjectKind::FederationRequest),
@@ -145,6 +135,144 @@ fn a_recent_object_is_scoped_to_its_direction_and_sender() -> TestResult {
     assert_eq!(
         assembler.ingest(other_command, scopes(), LIVE, first, 14)?,
         Ingest::Complete(object(100))
+    );
+    Ok(())
+}
+
+#[test]
+fn the_same_object_on_another_route_assembles_as_a_new_submission() -> TestResult {
+    let bytes = object(100);
+    let fragments = fragment_object(&bytes)?;
+    let fragment = fragments.first().ok_or("fragment")?;
+    for direction in [Direction::LocalIngress, Direction::Remote] {
+        let first = AssemblyKey {
+            direction,
+            ..local_key(ObjectId::compute(&bytes))
+        };
+        let second = AssemblyKey {
+            route: [99; 32],
+            ..first.clone()
+        };
+        let mut assembler = E2eeAssembler::default();
+        assert_eq!(
+            assembler.ingest(first.clone(), scopes(), LIVE, fragment, 1)?,
+            Ingest::Complete(bytes.clone())
+        );
+        assert!(!assembler.is_recent(&second));
+        assert_eq!(
+            assembler.ingest(second.clone(), scopes(), LIVE, fragment, 2)?,
+            Ingest::Complete(bytes.clone())
+        );
+        assert_eq!(
+            assembler.ingest(first.clone(), scopes(), LIVE, fragment, 3)?,
+            Ingest::Recent
+        );
+        assert_eq!(
+            assembler.ingest(second.clone(), scopes(), LIVE, fragment, 3)?,
+            Ingest::Recent
+        );
+        assembler.expire(1 + 30 * 60);
+        assert!(!assembler.is_recent(&first));
+        assert!(assembler.is_recent(&second));
+    }
+    Ok(())
+}
+
+#[test]
+fn completed_submissions_are_bounded_without_evicting_live_retries() -> TestResult {
+    let mut assembler = E2eeAssembler::default();
+    let mut first = None;
+    for index in 0..MAX_RECENT_OBJECTS {
+        let bytes = u64::try_from(index)?.to_be_bytes().to_vec();
+        let fragment = fragment_object(&bytes)?
+            .into_iter()
+            .next()
+            .ok_or("fragment")?;
+        let key = local_key(ObjectId::compute(&bytes));
+        assert_eq!(
+            assembler.ingest(key.clone(), scopes(), LIVE, &fragment, 10)?,
+            Ingest::Complete(bytes)
+        );
+        if first.is_none() {
+            first = Some((key, fragment));
+        }
+    }
+    let (first_key, first_fragment) = first.ok_or("first completed object")?;
+    let extra = fragment_object(b"one more object")?
+        .into_iter()
+        .next()
+        .ok_or("fragment")?;
+    let extra_key = local_key(extra.object_id);
+    assert_eq!(
+        assembler.ingest(extra_key.clone(), scopes(), LIVE, &extra, 11),
+        Err(AssemblyError::ReassemblyLimit)
+    );
+    assert_eq!(assembler.quotas().reserved_bytes(), 0);
+    assert_eq!(assembler.open_count(), 0);
+    assert_eq!(
+        assembler.ingest(first_key.clone(), scopes(), LIVE, &first_fragment, 11)?,
+        Ingest::Recent
+    );
+    // Responses never use the recent cache and still flow at its ceiling.
+    let response = AssemblyKey {
+        direction: Direction::Response,
+        ..extra_key.clone()
+    };
+    assert_eq!(
+        assembler.ingest(response, scopes(), LIVE, &extra, 12)?,
+        Ingest::Complete(b"one more object".to_vec())
+    );
+    assembler.expire(10 + RECENT_OBJECT_IDEMPOTENCY_RETENTION_SECONDS);
+    assert!(!assembler.is_recent(&first_key));
+    assert_eq!(
+        assembler.ingest(
+            extra_key,
+            scopes(),
+            LIVE,
+            &extra,
+            11 + RECENT_OBJECT_IDEMPOTENCY_RETENTION_SECONDS
+        )?,
+        Ingest::Complete(b"one more object".to_vec())
+    );
+    Ok(())
+}
+
+#[test]
+fn open_submissions_reserve_recent_slots_before_payload_allocation() -> TestResult {
+    let mut assembler = E2eeAssembler::default();
+    let cached = local_key(ObjectId::compute(b"cached"));
+    for index in 0..MAX_RECENT_OBJECTS - 1 {
+        let mut key = cached.clone();
+        key.sender = Sender::Connection {
+            connection: u64::try_from(index)?,
+            session_generation: 1,
+        };
+        assembler.recent.insert(key, 1_000);
+    }
+    let bytes = object(7_000);
+    let fragments = fragment_object(&bytes)?;
+    let first = fragments.first().ok_or("fragment")?;
+    let key = local_key(ObjectId::compute(&bytes));
+    let second = AssemblyKey {
+        sender: Sender::Connection {
+            connection: 99_999,
+            session_generation: 1,
+        },
+        ..key.clone()
+    };
+    assert_eq!(
+        assembler.ingest(key.clone(), scopes(), LIVE, first, 1)?,
+        Ingest::Incomplete
+    );
+    assert_eq!(
+        assembler.ingest(second.clone(), QuotaScopes::default(), LIVE, first, 1),
+        Err(AssemblyError::ReassemblyLimit)
+    );
+    assert_eq!(assembler.quotas().reserved_bytes(), bytes.len());
+    assembler.discard(&key);
+    assert_eq!(
+        assembler.ingest(second, QuotaScopes::default(), LIVE, first, 2)?,
+        Ingest::Incomplete
     );
     Ok(())
 }
@@ -214,7 +342,7 @@ fn a_hash_mismatch_discards_the_object_after_release() -> TestResult {
         Err(AssemblyError::HashMismatch)
     );
     assert_eq!(assembler.quotas().reserved_bytes(), 0);
-    assert!(!assembler.is_recent(key.direction, key.sender, key.command, &key.object_id));
+    assert!(!assembler.is_recent(&key));
     assert_eq!(
         AssemblyError::HashMismatch.reply_code(),
         E2eeReplyCode::HashMismatch

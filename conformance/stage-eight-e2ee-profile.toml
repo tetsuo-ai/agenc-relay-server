@@ -8,7 +8,8 @@ tasks = [
   "S08-021", "S08-022", "S08-023", "S08-024", "S08-025",
   "S08-026", "S08-027", "S08-028", "S08-029", "S08-030",
   "S08-031", "S08-032", "S08-033", "S08-034", "S08-035",
-  "S08-036", "S08-037", "S08-038", "S08-039",
+  "S08-036", "S08-037", "S08-038", "S08-039", "S08-040",
+  "S08-041", "S08-042", "S08-043", "S08-044",
 ]
 
 [target]
@@ -89,9 +90,9 @@ private_topic = "Encrypted channel - topic protected by IRC-MLS"
 requests_resent_after_ready = true
 
 [coordinator]
-handlers = 40
+handlers = 41
 candidates_per_epoch = 1
-finality_quorum_checked_by = "endpoints"
+finality_quorum_checked_by = "coordinator-and-endpoints"
 bootstrap_activation_rule = "BootstrapActivation"
 reload_tables = [22, 23]
 
@@ -117,4 +118,4 @@ rss_limit_mb = 512
 implementation_gate = "stage-eight-implementation"
 exact_sha_checkpoint_required = true
 evidence_schema = 2
-stage_records = 39
+stage_records = 160

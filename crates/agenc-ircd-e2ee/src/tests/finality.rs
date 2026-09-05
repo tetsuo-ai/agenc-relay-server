@@ -137,3 +137,58 @@ fn a_ledger_counts_distinct_council_votes_and_signs_once() -> TestResult {
     assert!(fresh.quorum_reached(&policy, &abort));
     Ok(())
 }
+
+#[test]
+fn accumulated_signatures_form_a_verifiable_quorum_for_only_their_terminal() -> TestResult {
+    let principals = vec![
+        principal(40, &ACCOUNT, &[7, 8])?,
+        principal(41, &OTHER_ACCOUNT, &[9])?,
+    ];
+    let rosters = principal_rosters(&principals)?;
+    let policy = verify_policy(
+        &NETWORK,
+        &CONVERSATION,
+        &policy(&PolicySpec::moderated(&principals, CONVERSATION))?,
+        &rosters,
+        None,
+    )?;
+    let first = principals.first().ok_or("principal")?;
+    let second = principals.get(1).ok_or("principal")?;
+    let finalize = Terminal::finalize([58; 32]);
+    let abort = Terminal::abort([64; 32], 1)?;
+    let finalize_tbs = vote_tbs(&slot(), [52; 32], finalize);
+    let abort_tbs = vote_tbs(&slot(), [52; 32], abort);
+    let mut ledger = QuorumLedger::new();
+    ledger.record(
+        &policy,
+        &rosters,
+        &finalize_tbs,
+        &finality_vote(second, 9, &finalize_tbs)?,
+    )?;
+    ledger.record(
+        &policy,
+        &rosters,
+        &abort_tbs,
+        &finality_vote(first, 8, &abort_tbs)?,
+    )?;
+    ledger.record(
+        &policy,
+        &rosters,
+        &finalize_tbs,
+        &finality_vote(first, 7, &finalize_tbs)?,
+    )?;
+    let certificate_votes = ledger.signed_votes(&finalize);
+    assert_eq!(certificate_votes.len(), 2);
+    assert_eq!(ledger.signed_votes(&abort).len(), 1);
+    let mut endpoint = QuorumLedger::new();
+    record_vote_vector(
+        &mut endpoint,
+        &policy,
+        &rosters,
+        &finalize_tbs,
+        &certificate_votes,
+    )?;
+    assert!(endpoint.quorum_reached(&policy, &finalize));
+    assert_eq!(endpoint.count(&abort), 0);
+    Ok(())
+}

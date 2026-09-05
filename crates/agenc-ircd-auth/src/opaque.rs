@@ -47,11 +47,14 @@ pub const OPAQUE_SERVER_LOGIN_STATE_BYTES: usize = 128;
 pub fn opaque_server_public_key(
     setup_bytes: &[u8; OPAQUE_SERVER_SETUP_BYTES],
 ) -> Result<[u8; 32], AuthError> {
-    let _setup = deserialize_setup(setup_bytes)?;
-    setup_bytes
-        .get(96..128)
-        .and_then(|bytes| bytes.try_into().ok())
-        .ok_or(AuthError::InvalidEncoding)
+    let setup = deserialize_setup(setup_bytes)?;
+    setup
+        .keypair()
+        .public()
+        .serialize()
+        .as_slice()
+        .try_into()
+        .map_err(|_| AuthError::InvalidEncoding)
 }
 
 struct AgencOpaqueSuite;

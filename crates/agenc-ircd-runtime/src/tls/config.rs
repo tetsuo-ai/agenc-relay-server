@@ -845,7 +845,24 @@ pub fn build_federation_client_config(
     expected_spki_sha256: [u8; 32],
     expected_server_id: ServerId,
 ) -> Result<Arc<ClientConfig>, TlsConfigError> {
-    let provider = provider();
+    build_federation_client_config_with_group_policy(
+        roots,
+        client_certificate,
+        expected_spki_sha256,
+        expected_server_id,
+        GroupPolicy::HybridPreferred,
+    )
+}
+
+/// Builds an authenticated federation client with the configured key-exchange policy.
+pub fn build_federation_client_config_with_group_policy(
+    roots: TrustStore,
+    client_certificate: (CertChain, PrivateKey),
+    expected_spki_sha256: [u8; 32],
+    expected_server_id: ServerId,
+    group_policy: GroupPolicy,
+) -> Result<Arc<ClientConfig>, TlsConfigError> {
+    let provider = provider_for_group_policy(group_policy);
     let algorithms = provider.signature_verification_algorithms;
     let verifier = FederationServerVerifier {
         roots: Arc::clone(&roots.roots),

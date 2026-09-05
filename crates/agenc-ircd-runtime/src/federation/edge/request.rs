@@ -121,6 +121,8 @@ pub(super) struct PendingRequest {
     pub(super) result: Option<ResultArm>,
     pub(super) replies: Vec<agenc_ircd_client_wire::WireMessage>,
     pub(super) completion: Option<agenc_ircd_types::EventId>,
+    /// Generation of the completion event that durably covered this request.
+    pub(super) completion_generation: Option<u64>,
 }
 
 impl PendingRequest {
@@ -128,6 +130,7 @@ impl PendingRequest {
     pub(super) fn sink_gone(self, edge: &mut EdgeFederation) {
         if let Some(completion) = self.completion {
             edge.by_completion.remove(&completion);
+            edge.applied_completions.remove(&completion);
         }
     }
 }
@@ -270,6 +273,7 @@ fn register_request(
             result: None,
             replies: Vec::new(),
             completion: None,
+            completion_generation: None,
         },
     );
     edge.counters.requests_sent = edge.counters.requests_sent.saturating_add(1);
@@ -863,7 +867,8 @@ pub(super) fn receive_result(
     if descriptor.request_id != header.request_id || descriptor.object_id != object.object_id() {
         return Err(Violation::Consistency);
     }
-    let Some(pending) = edge.pending.get_mut(&header.request_id) else {
+    validate_result_completion(edge, &header)?;
+    let Some(pending) = edge.pending.get(&header.request_id) else {
         return Ok(Vec::new());
     };
     if pending.header.replay_key != header.replay_key
@@ -877,12 +882,17 @@ pub(super) fn receive_result(
         &decode_result_arm(&result, &mut budget).map_err(|_| Violation::Codec)?,
     )
     .map_err(|_| Violation::Codec)?;
+    validate_result_generation(edge, header.request_id, &arm)?;
     let mut replies = Vec::new();
     for reply in agenc_ircd_federation_wire::access::vector(&result, "replies")
         .map_err(|_| Violation::Codec)?
     {
         replies.push(reply_frame(&edge.config.server_name, reply)?);
     }
+    let pending = edge
+        .pending
+        .get_mut(&header.request_id)
+        .ok_or(Violation::Consistency)?;
     pending.replies = replies;
     pending.completion = header.completion_event_id;
     edge.counters.results_applied = edge.counters.results_applied.saturating_add(1);
@@ -907,6 +917,57 @@ pub(super) fn receive_result(
             Ok(completed(edge, context, header.request_id))
         }
     }
+}
+
+/// A result cannot substitute another request's pending or durable completion.
+fn validate_result_completion(
+    edge: &EdgeFederation,
+    header: &ResultHeader,
+) -> Result<(), Violation> {
+    let Some(pending) = edge.pending.get(&header.request_id) else {
+        return Ok(());
+    };
+    let changed = pending
+        .completion
+        .is_some_and(|id| Some(id) != header.completion_event_id);
+    let wrong_owner = header.completion_event_id.is_some_and(|id| {
+        (edge.applied_completions.contains(&id) && pending.completion != Some(id))
+            || edge
+                .by_completion
+                .get(&id)
+                .is_some_and(|owner| *owner != header.request_id)
+    });
+    if changed || wrong_owner {
+        return Err(Violation::Consistency);
+    }
+    Ok(())
+}
+
+/// The generation repeated only by results that require a completion event.
+pub(super) fn result_generation(result: &ResultArm) -> Option<u64> {
+    match result {
+        ResultArm::Committed {
+            resulting_state_generation,
+        } => Some(*resulting_state_generation),
+        ResultArm::SessionRegistered(registered) => Some(registered.resulting_state_generation),
+        _ => None,
+    }
+}
+
+fn validate_result_generation(
+    edge: &EdgeFederation,
+    request_id: RequestId,
+    result: &ResultArm,
+) -> Result<(), Violation> {
+    let expected = edge
+        .pending
+        .get(&request_id)
+        .and_then(|pending| pending.completion_generation)
+        .or_else(|| super::events::staged_completion_generation(edge, request_id));
+    if expected.is_some_and(|generation| result_generation(result) != Some(generation)) {
+        return Err(Violation::Consistency);
+    }
+    Ok(())
 }
 
 /// Rebuilds one relayed reply under this edge's prefix; numerics go through

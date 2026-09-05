@@ -1,9 +1,9 @@
 schema_version = 1
 evidence_id = "EVID-S04-014-CONSTANT-TIME"
-reviewed_revision = "3c17fc7ec5e5931e33048e0b2e067627e623788c"
+reviewed_revision = "a2b27a30f3b3908e757c45163cbacc68ea5da4c6"
 worktree_state = "dirty-source-hash-bound"
 conclusion = "Known and unknown account inputs converge on one OPAQUE server-start implementation with equal-size credential IDs and records. Secret digest and OPAQUE MAC comparisons use constant-time library operations."
-limit = "This review does not claim resistance to global timing analysis. Stage 05 must add the fixed storage lookup schedule before the full account lookup path can close AUTH-01."
+limit = "This review does not claim resistance to global timing analysis. The full account lookup path requires separate Stage 05 evidence for the fixed storage lookup schedule before AUTH-01 can close."
 
 [measurement]
 test = "crates/agenc-ircd-auth/tests/stage_four_security.rs::shuffled_known_and_unknown_opaque_starts_share_one_timing_class"
@@ -19,9 +19,9 @@ review = "Both lookup arms derive the same fixed-key fake credential HMAC, selec
 
 [[surface]]
 path = "crates/agenc-ircd-auth/src/opaque.rs"
-sha256 = "9bec1bc85cf63c29734d2c9bd0034cb01b325864a8308f9c74a9ea133afd23bc"
-symbols = ["OpaqueProfile::authentication_start", "finish_authentication"]
-review = "Real and fake selections deserialize one exact-size record and execute the same ServerLogin::start call. Finish consumes one exact-size state and one KE3 on every result."
+sha256 = "8f05c544a943c245f4bb2f4fc27c6e4fcfefc73edfa075ce2ad0cc40600aba5e"
+symbols = ["OpaqueProfile::authentication_start", "finish_authentication", "opaque_server_public_key"]
+review = "Real and fake selections deserialize one exact-size record and execute the same ServerLogin::start call. Finish consumes one exact-size state and one KE3 on every result. The 2026-09-04 re-review confirmed that the only source change replaces a setup-byte slice in opaque_server_public_key with ServerSetup::keypair().public().serialize(), returning the AKE public key used by the library's registration response. The pinned keypair accessors return references, and serialization compresses that public Ristretto point. The helper's only production caller checks daemon key identities. Login worker callers, start and finish work, and secret comparisons are unchanged. The other five reviewed source hashes remain unchanged. The registration-response identity regression covers the corrected output."
 
 [[surface]]
 path = "crates/agenc-ircd-crypto/src/hash.rs"
@@ -49,4 +49,4 @@ review = "TripleDH compares the expected and supplied KE3 MAC with ConstantTimeE
 
 [gate]
 status = "evidence-only"
-reason = "The repository has uncommitted Stage 04 changes, so this artifact does not claim gate closure."
+reason = "The 2026-09-04 implementation review includes uncommitted changes bound by the source hashes above. This artifact does not claim gate closure or replace any qualification for an exact source revision."

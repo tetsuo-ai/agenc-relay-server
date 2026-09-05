@@ -12,6 +12,53 @@ use super::*;
 
 type TestResult = Result<(), Box<dyn Error>>;
 
+#[test]
+fn removing_a_projection_releases_only_its_own_target_and_lock_indexes() -> TestResult {
+    let pair = DirectPair::new(account(1), account(2))?;
+    for target in [RouteTarget::Channel(instance(1)), RouteTarget::Direct(pair)] {
+        let mut table = RouteTable::new();
+        let first = RouteEntry {
+            conversation_id: ConversationId([1; 32]),
+            target,
+            lock: SemanticLockId([3; 32]),
+            incarnation: 0,
+            binding_id: [4; 32],
+            binding_generation: 0,
+            lifecycle: RouteLifecycle::Active,
+            recovery: RecoveryState::Normal,
+        };
+        table.restore_entry(first);
+        table.remove_projection(&first.conversation_id);
+        assert!(table.routes.is_empty());
+        assert!(table.by_channel.is_empty());
+        assert!(table.by_pair.is_empty());
+        assert!(table.locks.is_empty());
+        // An old lineage can remain beside a successor occupying its
+        // target and lock. Removing the old entry must retain that mapping.
+        let successor = RouteEntry {
+            conversation_id: ConversationId([2; 32]),
+            incarnation: 1,
+            ..first
+        };
+        table.restore_entry(first);
+        table.restore_entry(successor);
+        table.remove_projection(&first.conversation_id);
+        table.remove_projection(&first.conversation_id);
+        assert_eq!(table.route(&successor.conversation_id), Some(&successor));
+        assert_eq!(
+            table.locks.get(&first.lock),
+            Some(&successor.conversation_id)
+        );
+        match target {
+            RouteTarget::Channel(channel) => {
+                assert_eq!(table.channel_route(&channel), Some(&successor))
+            }
+            RouteTarget::Direct(pair) => assert_eq!(table.direct_route(&pair), Some(&successor)),
+        }
+    }
+    Ok(())
+}
+
 fn account(seed: u8) -> AccountId {
     AccountId::from_random(AccountRandomId::from_bytes([seed; 16]))
 }

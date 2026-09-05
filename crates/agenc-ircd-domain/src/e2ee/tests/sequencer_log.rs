@@ -178,3 +178,67 @@ fn close_is_the_last_record_and_restore_reproduces_the_head() -> Result<(), LogE
     assert!(!LogError::Overflow.to_string().is_empty());
     Ok(())
 }
+
+#[test]
+fn reinit_restore_preserves_active_and_exhausted_attempt_slots() -> Result<(), LogError> {
+    let mut original = SequencerLog::genesis(CONVERSATION, GENESIS);
+    original.enter_reinit(GENESIS)?;
+    let slot = original.record_attempt([10; 32])?;
+    let mut restored =
+        SequencerLog::restore(CONVERSATION, original.head(), GENESIS, 0, original.phase());
+    restored.restore_reinit(Some(slot), 0)?;
+    assert_eq!(restored, original);
+    restored.abort_attempt(&slot.attempt_id, [11; 32])?;
+    let mut after_abort =
+        SequencerLog::restore(CONVERSATION, restored.head(), GENESIS, 0, restored.phase());
+    after_abort.restore_reinit(None, 1)?;
+    assert_eq!(after_abort, restored);
+    assert_eq!(
+        after_abort.attempt_position()?.predecessor_record_id,
+        [11; 32]
+    );
+    after_abort.restore_reinit(None, MAX_CANDIDATE_ATTEMPTS_PER_EPOCH)?;
+    assert_eq!(
+        after_abort.attempt_position(),
+        Err(LogError::AttemptsExhausted)
+    );
+    let before = after_abort.clone();
+    assert_eq!(
+        after_abort.restore_reinit(None, MAX_CANDIDATE_ATTEMPTS_PER_EPOCH + 1),
+        Err(LogError::AttemptsExhausted)
+    );
+    assert_eq!(after_abort, before);
+    Ok(())
+}
+
+#[test]
+fn reinit_restore_rejects_a_slot_that_does_not_match_its_head() -> Result<(), LogError> {
+    let mut original = SequencerLog::genesis(CONVERSATION, GENESIS);
+    assert_eq!(original.restore_reinit(None, 0), Err(LogError::NotReinit));
+    original.enter_reinit(GENESIS)?;
+    let slot = original.record_attempt([10; 32])?;
+    let mut restored =
+        SequencerLog::restore(CONVERSATION, original.head(), GENESIS, 0, original.phase());
+    let before = restored.clone();
+    for invalid in [
+        AttemptSlot {
+            attempt_id: [11; 32],
+            ..slot
+        },
+        AttemptSlot {
+            route_sequence: 1,
+            ..slot
+        },
+        AttemptSlot {
+            attempt_sequence: 1,
+            ..slot
+        },
+    ] {
+        assert_eq!(
+            restored.restore_reinit(Some(invalid), 0),
+            Err(LogError::EpochStale)
+        );
+        assert_eq!(restored, before);
+    }
+    Ok(())
+}

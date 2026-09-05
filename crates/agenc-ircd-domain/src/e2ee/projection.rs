@@ -612,6 +612,13 @@ pub struct RouteEntitlements {
 }
 
 impl RouteEntitlements {
+    /// Retires standing route views when a verified successor takes the route.
+    /// Historical proof objects remain available through their old log.
+    pub fn retire_conversation(&mut self, conversation: Id) {
+        self.channel.retain(|(_, id), _| *id != conversation);
+        self.direct.retain(|(_, id), _| *id != conversation);
+    }
+
     /// Empty entitlements.
     #[must_use]
     pub fn new() -> Self {

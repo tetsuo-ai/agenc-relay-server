@@ -138,7 +138,7 @@ pub fn reinit_vote_tbs(
 /// The votes the server has accepted for one slot.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct QuorumLedger {
-    votes: BTreeMap<(SemanticId, [u8; 16]), Terminal>,
+    votes: BTreeMap<(SemanticId, [u8; 16]), (Terminal, IrcFinalityVote)>,
 }
 
 impl QuorumLedger {
@@ -211,9 +211,9 @@ impl QuorumLedger {
             &vote.device_signature,
         )?;
         match self.votes.get(&signer) {
-            Some(existing) if *existing != terminal => Err(E2eeError::InvalidValue),
+            Some((existing, _)) if *existing != terminal => Err(E2eeError::InvalidValue),
             _ => {
-                self.votes.insert(signer, terminal);
+                self.votes.insert(signer, (terminal, vote.clone()));
                 Ok(())
             }
         }
@@ -222,7 +222,10 @@ impl QuorumLedger {
     /// Distinct principals that voted for `terminal`.
     #[must_use]
     pub fn count(&self, terminal: &Terminal) -> usize {
-        self.votes.values().filter(|vote| *vote == terminal).count()
+        self.votes
+            .values()
+            .filter(|(recorded, _)| recorded == terminal)
+            .count()
     }
 
     /// Whether `terminal` reached the policy's quorum.
@@ -233,7 +236,21 @@ impl QuorumLedger {
 
     /// Every recorded vote in canonical signer order.
     pub fn votes(&self) -> impl Iterator<Item = (&(SemanticId, [u8; 16]), &Terminal)> {
-        self.votes.iter()
+        self.votes
+            .iter()
+            .map(|(signer, (terminal, _))| (signer, terminal))
+    }
+
+    /// The verified signatures counted for `terminal`, in canonical signer
+    /// order. A certificate includes these votes so endpoints can verify
+    /// the same quorum even when the votes arrived in separate requests.
+    #[must_use]
+    pub fn signed_votes(&self, terminal: &Terminal) -> Vec<IrcFinalityVote> {
+        self.votes
+            .values()
+            .filter(|(recorded, _)| recorded == terminal)
+            .map(|(_, vote)| vote.clone())
+            .collect()
     }
 }
 

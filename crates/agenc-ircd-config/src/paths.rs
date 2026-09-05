@@ -88,7 +88,7 @@ pub fn read_protected_bytes(path: &Path, maximum: u64) -> Result<Vec<u8>, Config
     let fd = openat(
         CWD,
         path,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
         Mode::empty(),
     )
     .map_err(|_| ConfigError::FileRejected)?;

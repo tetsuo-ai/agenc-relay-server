@@ -19,22 +19,24 @@ review and evidence required by the specifications.
 
 ## Validation
 
-Run the current Stage 04 implementation checks from the repository root:
+Run the current Stage 08 implementation checks from the repository root:
 
 ```sh
-bash scripts/check-stage-four.sh
+bash scripts/check-stage-eight.sh
 ```
 
 For a narrower development loop, use `cargo fmt --all --check`,
 `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`,
 and `cargo test --workspace --all-features --locked`. The full implementation
 check must still pass before merge. A check does not close a stage by itself.
-The checked [current Stage 04 manifest](conformance/evidence/stage-04-1e5b738468f88b238061cc6e84b732176f5cae65.json)
+The [Stage 08 manifest](conformance/evidence/stage-08-ae6457fb62fef8961d3caf904febed580e8b4a91.json)
 records the closure for exact source commit
-`1e5b738468f88b238061cc6e84b732176f5cae65`. The [schema version 1
-manifest](conformance/evidence/stage-04-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json)
-remains archive-only. Any later source change requires new artifact-backed
-evidence.
+`ae6457fb62fef8961d3caf904febed580e8b4a91`. The external cryptographic and
+protocol review (`S08-039`) remains open. Checkpoints apply to their named
+source revisions; later changes require new artifact-backed evidence to close
+a stage at a new revision. See [TODO.md](TODO.md) for every stage's checkpoint
+and [conformance/evidence/README.md](conformance/evidence/README.md) for the
+recording procedure.
 
 ## Pull requests
 

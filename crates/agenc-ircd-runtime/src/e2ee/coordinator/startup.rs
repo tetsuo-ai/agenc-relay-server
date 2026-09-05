@@ -9,8 +9,7 @@
 //! Not restored, by design or deferral: route reservations (short-lived and
 //! not reconstructible without the owner's Account ID), delivery streams
 //! (a reconnecting edge opens a fresh `ESTATE` scope), companion origins
-//! (edges re-declare them), the context digest carried on `BIND`, and the
-//! last accepted Commit validation time.
+//! (edges re-declare them), and the context digest carried on `BIND`.
 
 use std::collections::BTreeMap;
 
@@ -22,23 +21,24 @@ use agenc_ircd_domain::e2ee::directory::{
 use agenc_ircd_domain::e2ee::lifecycle::{Lifecycle, RecoveryGate};
 use agenc_ircd_domain::e2ee::mailbox::{Grant, Item, MailboxKind, Target};
 use agenc_ircd_domain::e2ee::sequencer_log::{
-    CandidatePosition, CandidateSlot, Head, Phase, SequencerLog,
+    AttemptSlot, CandidatePosition, CandidateSlot, Head, Phase, SequencerLog,
 };
 use agenc_ircd_domain::e2ee::{
     ConversationId, DirectPair, RecoveryState, RouteEntry, RouteLifecycle, RouteTarget,
     SemanticLockId,
 };
 use agenc_ircd_e2ee::E2eeError;
+use agenc_ircd_e2ee::envelope::{RouteExpectation, verify_commit_object};
 use agenc_ircd_e2ee::finality::{
     QuorumLedger, ReinitVoteSlot, Terminal, VoteSlot, reinit_vote_tbs, vote_tbs,
 };
 use agenc_ircd_e2ee::identity::{
-    VerifiedRoot, restore_capabilities, restore_roster, verify_root_identity,
+    VerifiedRoot, VerifiedRoster, restore_capabilities, restore_roster, verify_root_identity,
 };
 use agenc_ircd_e2ee::limits::{
     MAX_ABORT_OBJECT, MAX_BINDING_OBJECT, MAX_CAPABILITY_OBJECT, MAX_FEDERATION_CONTROL_OBJECT,
-    MAX_FINALIZATION_OBJECT, MAX_IDENTITY_OBJECT, MAX_POLICY_OBJECT, MAX_REINIT_OBJECT,
-    MAX_ROSTER_OBJECT, MAX_SEQUENCER_RECORD_OBJECT,
+    MAX_FINALIZATION_OBJECT, MAX_IDENTITY_OBJECT, MAX_LIVE_OBJECT, MAX_POLICY_OBJECT,
+    MAX_REINIT_OBJECT, MAX_ROSTER_OBJECT, MAX_SEQUENCER_RECORD_OBJECT,
 };
 use agenc_ircd_e2ee::object::{IrcWireObject, IrcWireObjectKind};
 use agenc_ircd_e2ee::objects::conversation::{
@@ -53,6 +53,7 @@ use agenc_ircd_e2ee::objects::sequencing::{
 use agenc_ircd_e2ee::policy::verify_policy;
 use agenc_ircd_e2ee::route::PrincipalRosters;
 use agenc_ircd_e2ee::tls::{DecodeBudget, TlsDecode};
+use agenc_ircd_storage::e2ee_records::origin::OriginSequenceRow;
 use agenc_ircd_storage::e2ee_records::{
     ATTACH_ROW_KIND, AttachRow, DELIVERY_ROW_KIND, DIRECTORY_ROW_KIND, DeliveryRow, DirectoryRow,
     MAILBOX_ROW_KIND, MailboxKind as RowMailboxKind, MailboxRow, OBJECT_RECORD_KIND, ObjectRow,
@@ -65,12 +66,15 @@ use agenc_ircd_types::{AccountId, ChannelInstanceId, ServerId};
 
 use super::events::DeliveryStream;
 use super::{
-    CompanionCoordinator, CompanionState, ConversationState, LockEntry, RetainedPolicy,
-    StoredResult,
+    CompanionCoordinator, CompanionOriginKey, CompanionState, ConversationState, LockEntry,
+    RetainedPolicy, StoredResult,
 };
 
 const CANDIDATE_RECORD: u16 = 1;
 const FINALIZATION_RECORD: u16 = 2;
+const REINIT_ATTEMPT_RECORD: u16 = 4;
+const REINIT_ACTIVATION_RECORD: u16 = 5;
+const REINIT_ABORT_RECORD: u16 = 6;
 
 /// One sequencer record position.
 struct RecordRow {
@@ -107,6 +111,7 @@ pub(super) struct Restore {
     attachments: Vec<(StoredKey, AttachRow)>,
     mailbox: Vec<(StoredKey, MailboxRow)>,
     replays: Vec<(StoredKey, ReplayRow)>,
+    origin_sequences: Vec<(StoredKey, OriginSequenceRow)>,
     cursors: Vec<(StoredKey, DeliveryRow)>,
 }
 
@@ -142,7 +147,20 @@ impl Restore {
             PACKAGE_ROW_KIND => push(&mut self.packages, key, PackageRow::decode(body)),
             ATTACH_ROW_KIND => push(&mut self.attachments, key, AttachRow::decode(body)),
             MAILBOX_ROW_KIND => push(&mut self.mailbox, key, MailboxRow::decode(body)),
-            REPLAY_ROW_KIND => push(&mut self.replays, key, ReplayRow::decode(body)),
+            REPLAY_ROW_KIND => {
+                if key
+                    .as_bytes()
+                    .starts_with(agenc_ircd_storage::e2ee_records::prefix::ORIGIN_SEQUENCE)
+                {
+                    push(
+                        &mut self.origin_sequences,
+                        key,
+                        OriginSequenceRow::decode(body),
+                    );
+                } else {
+                    push(&mut self.replays, key, ReplayRow::decode(body));
+                }
+            }
             DELIVERY_ROW_KIND => push(&mut self.cursors, key, DeliveryRow::decode(body)),
             _ => {}
         }
@@ -254,6 +272,8 @@ struct ObjectIndex {
     bindings: BTreeMap<[u8; 32], ([u8; 32], IrcConversationBindingPackage)>,
     /// Published policies by object identifier, with the object length.
     policies: BTreeMap<[u8; 32], (IrcPolicy, usize)>,
+    /// Retained roster snapshots by signing root fingerprint.
+    rosters: BTreeMap<[u8; 32], Vec<IrcDeviceRoster>>,
     /// Finality request objects by conversation and finalization identifier.
     proofs: BTreeMap<[u8; 32], BTreeMap<[u8; 32], [u8; 32]>>,
     /// Retained terminal requests by object identifier.
@@ -327,6 +347,15 @@ impl ObjectIndex {
             IrcWireObjectKind::Policy => {
                 if let Some(policy) = decode_body::<IrcPolicy>(bytes, kind, MAX_POLICY_OBJECT) {
                     self.policies.insert(object_id, (policy, bytes.len()));
+                }
+            }
+            IrcWireObjectKind::DeviceRoster => {
+                if let Some(roster) = decode_body::<IrcDeviceRoster>(bytes, kind, MAX_ROSTER_OBJECT)
+                {
+                    self.rosters
+                        .entry(roster.tbs.root_fingerprint)
+                        .or_default()
+                        .push(roster);
                 }
             }
             _ => {}
@@ -405,6 +434,7 @@ pub(super) fn rebuild(coordinator: &mut CompanionCoordinator, restore: Restore) 
     restore_packages(state, restore.packages);
     restore_mailboxes(state, restore.mailbox);
     restore_replays(state, restore.replays);
+    restore_origin_sequences(state, restore.origin_sequences);
     restore_cursors(state, restore.cursors);
     let index = ObjectIndex::build(state);
     let rows = SequencerRows {
@@ -416,6 +446,127 @@ pub(super) fn rebuild(coordinator: &mut CompanionCoordinator, restore: Restore) 
     for (conversation_id, row) in restore.routes {
         restore_route(state, &network_id, &index, &rows, conversation_id, &row);
     }
+    restore_successors(state, &index);
+}
+
+/// Activation creates a successor anchor before that conversation has its
+/// own route. Restore these anchors after every existing route has loaded.
+fn restore_successors(state: &mut CompanionState, index: &ObjectIndex) {
+    let mut verified = std::collections::BTreeSet::new();
+    let successors: Vec<_> = state
+        .logs
+        .iter()
+        .filter_map(|(old, log)| match log.phase() {
+            Phase::Migrated {
+                activation_id,
+                new_conversation_id,
+            } => Some((*old, new_conversation_id, activation_id)),
+            _ => None,
+        })
+        .collect();
+    for (old, conversation_id, activation_id) in successors {
+        state
+            .logs
+            .entry(conversation_id)
+            .or_insert_with(|| SequencerLog::from_activation(conversation_id, activation_id));
+        state
+            .lifecycles
+            .entry(conversation_id)
+            .or_insert_with(Lifecycle::successor);
+        if state.conversations.contains_key(&conversation_id) {
+            if restore_successor_binding(state, old, conversation_id).is_some() {
+                verified.insert(conversation_id);
+            } else {
+                discard_route(state, conversation_id);
+            }
+        }
+    }
+    discard_unanchored_successors(state, index, &verified);
+}
+
+/// A missing predecessor or activation invalidates every dependent successor.
+fn discard_unanchored_successors(
+    state: &mut CompanionState,
+    index: &ObjectIndex,
+    verified: &std::collections::BTreeSet<[u8; 32]>,
+) {
+    let mut successors: Vec<_> = state
+        .conversations
+        .iter()
+        .filter_map(|(id, value)| {
+            let (_, package) = index.bindings.get(&value.binding)?;
+            let tbs = &package.binding.tbs;
+            if tbs.binding_generation == 0 {
+                return None;
+            }
+            let predecessor = index
+                .bindings
+                .get(&tbs.previous_binding_id)
+                .map(|(_, package)| package.binding.tbs.conversation_id);
+            Some((tbs.binding_generation, *id, predecessor))
+        })
+        .collect();
+    successors.sort_by_key(|(generation, _, _)| *generation);
+    for (_, id, predecessor) in successors {
+        if predecessor == Some(id) {
+            continue;
+        }
+        if !verified.contains(&id)
+            || predecessor.is_none_or(|old| !state.conversations.contains_key(&old))
+        {
+            discard_route(state, id);
+        }
+    }
+}
+
+fn discard_route(state: &mut CompanionState, conversation: [u8; 32]) {
+    state
+        .routes
+        .remove_projection(&ConversationId(conversation));
+    state.conversations.remove(&conversation);
+    state.logs.remove(&conversation);
+    state.lifecycles.remove(&conversation);
+}
+
+/// Rechecks activation-bound metadata and selects the successor's route indexes
+/// after all route rows have loaded, independent of conversation-ID ordering.
+fn restore_successor_binding(
+    state: &mut CompanionState,
+    old: [u8; 32],
+    new: [u8; 32],
+) -> Option<()> {
+    use super::ops::route_successor;
+    let certificate = route_successor::activation(state, &old).ok()?;
+    let context_digest = certificate.tbs.request.attempt.tbs.target_context_digest;
+    let package = route_successor::binding(state, &new).ok()?;
+    let activation_id = route_successor::verify(
+        state,
+        &certificate.tbs.network_id,
+        &old,
+        &package,
+        &context_digest,
+    )
+    .ok()?;
+    let log = state.logs.get(&new)?;
+    if log.accepted_epoch() < 1
+        || (!log.head().recorded
+            && (log.accepted_state_id() != &activation_id
+                || log.head().record_id != activation_id
+                || log.accepted_epoch() != 1))
+    {
+        return None;
+    }
+    state
+        .routes
+        .select_restored_successor(ConversationId(old), ConversationId(new))
+        .ok()?;
+    let lifecycle = state.lifecycles.get(&new)?;
+    state.lifecycles.insert(
+        new,
+        Lifecycle::restore(lifecycle.gate(), false, lifecycle.removal_pending()),
+    );
+    state.conversations.get_mut(&new)?.context_digest = context_digest;
+    Some(())
 }
 
 // ---------------------------------------------------------------------------
@@ -857,6 +1008,22 @@ fn restore_mailboxes(state: &mut CompanionState, rows: Vec<(StoredKey, MailboxRo
     }
 }
 
+fn restore_origin_sequences(state: &mut CompanionState, rows: Vec<(StoredKey, OriginSequenceRow)>) {
+    for (key, row) in rows {
+        let Ok(key) = OriginSequenceRow::parse_key(&key) else {
+            continue;
+        };
+        state.origin_sequences.insert(
+            CompanionOriginKey {
+                home_server_id: key.home_server_id,
+                server_incarnation: key.server_incarnation,
+                origin_id: key.origin_id,
+            },
+            row,
+        );
+    }
+}
+
 fn restore_replays(state: &mut CompanionState, rows: Vec<(StoredKey, ReplayRow)>) {
     for (key, row) in rows {
         let Ok(parts) = ReplayRow::parse_key(&key) else {
@@ -964,30 +1131,124 @@ fn route_lifecycle(row: &RouteRow) -> RouteLifecycle {
     }
 }
 
-/// Restores the log of one route: the head from the route row, the epoch
-/// from the route state object, and the epoch position from the record
-/// rows since the last finalization.
+/// The phase and attempt position recovered from the durable head record.
+struct RestoredLogPhase {
+    phase: Phase,
+    attempt: Option<AttemptSlot>,
+    next_attempt_sequence: u32,
+}
+
+/// A ReInit receipt or terminal at the durable head determines whether an
+/// attempt is still open, another attempt may follow, or the group migrated.
+// agenc-review: focus owner=runtime reviewed=2026-09-04 reason=the head receipt and terminal alternatives restore the phase together with exact durable row identity checks
+fn restore_log_phase(
+    state: &CompanionState,
+    conversation_id: [u8; 32],
+    row: &RouteRow,
+    records: &BTreeMap<u64, &RecordRow>,
+) -> Option<RestoredLogPhase> {
+    let mut restored = RestoredLogPhase {
+        phase: row
+            .close_id
+            .map_or(Phase::Open, |close_id| Phase::Closed { close_id }),
+        attempt: None,
+        next_attempt_sequence: 0,
+    };
+    let Some(record) = records.get(&row.route_sequence).filter(|record| {
+        matches!(
+            record.record_kind,
+            REINIT_ATTEMPT_RECORD | REINIT_ACTIVATION_RECORD | REINIT_ABORT_RECORD
+        )
+    }) else {
+        return Some(restored);
+    };
+    let decoded: IrcSequencerRecord = decode_object(
+        state,
+        &record.record_object_id,
+        IrcWireObjectKind::SequencerRecord,
+        MAX_SEQUENCER_RECORD_OBJECT,
+    )?;
+    match decoded {
+        IrcSequencerRecord::ReinitAttempt(receipt) => {
+            let tbs = receipt.tbs;
+            if record.record_kind != REINIT_ATTEMPT_RECORD
+                || tbs.old_conversation_id != conversation_id
+                || tbs.predecessor_record_id != record.predecessor_record_id
+                || tbs.old_reinit_state_id != row.accepted_state_id
+                || tbs.reinit_attempt_id != row.sequencer_head_id
+                || tbs.route_sequence != row.route_sequence
+            {
+                return None;
+            }
+            restored.phase = Phase::Reinit {
+                old_reinit_state_id: tbs.old_reinit_state_id,
+            };
+            restored.attempt = Some(AttemptSlot {
+                attempt_id: tbs.reinit_attempt_id,
+                route_sequence: tbs.route_sequence,
+                attempt_sequence: tbs.attempt_sequence,
+                predecessor_record_id: tbs.predecessor_record_id,
+            });
+            restored.next_attempt_sequence = tbs.attempt_sequence;
+        }
+        IrcSequencerRecord::ReinitAbort(certificate) => {
+            let tbs = certificate.tbs;
+            if record.record_kind != REINIT_ABORT_RECORD
+                || tbs.old_conversation_id != conversation_id
+                || tbs.predecessor_record_id != record.predecessor_record_id
+                || tbs.request.core.old_reinit_state_id != row.accepted_state_id
+                || tbs.reinit_abort_id != row.sequencer_head_id
+                || tbs.route_sequence != row.route_sequence
+            {
+                return None;
+            }
+            restored.phase = Phase::Reinit {
+                old_reinit_state_id: tbs.request.core.old_reinit_state_id,
+            };
+            restored.next_attempt_sequence = tbs.request.core.attempt_sequence.checked_add(1)?;
+        }
+        IrcSequencerRecord::ReinitActivation(certificate) => {
+            let tbs = certificate.tbs;
+            if record.record_kind != REINIT_ACTIVATION_RECORD
+                || tbs.old_conversation_id != conversation_id
+                || tbs.predecessor_record_id != record.predecessor_record_id
+                || tbs.request.core.old_reinit_state_id != row.accepted_state_id
+                || tbs.reinit_activation_id != row.sequencer_head_id
+                || tbs.route_sequence != row.route_sequence
+            {
+                return None;
+            }
+            restored.phase = Phase::Migrated {
+                activation_id: tbs.reinit_activation_id,
+                new_conversation_id: tbs.request.core.new_conversation_id,
+            };
+        }
+        _ => return None,
+    }
+    Some(restored)
+}
+
+/// Restores the log head, epoch position, and ReInit phase from retained rows.
 fn restore_log(
+    state: &CompanionState,
     conversation_id: [u8; 32],
     row: &RouteRow,
     route: &IrcFederationRouteState,
     records: &BTreeMap<u64, &RecordRow>,
     candidate: Option<&CandidateRow>,
-) -> SequencerLog {
+) -> Option<SequencerLog> {
     let head = Head {
         sequence: row.route_sequence,
         record_id: row.sequencer_head_id,
         recorded: !records.is_empty() || row.close_id.is_some(),
     };
-    let phase = row
-        .close_id
-        .map_or(Phase::Open, |close_id| Phase::Closed { close_id });
+    let restored = restore_log_phase(state, conversation_id, row, records)?;
     let mut log = SequencerLog::restore(
         conversation_id,
         head,
         row.accepted_state_id,
         route.finalized_epoch,
-        phase,
+        restored.phase,
     );
     let last_finalization = records
         .iter()
@@ -1018,7 +1279,11 @@ fn restore_log(
             },
         });
     log.restore_epoch(active, u32::try_from(attempts).unwrap_or(u32::MAX));
-    log
+    if matches!(restored.phase, Phase::Reinit { .. }) {
+        log.restore_reinit(restored.attempt, restored.next_attempt_sequence)
+            .ok()?;
+    }
+    Some(log)
 }
 
 /// Whether a retained finalization record activated the bootstrap.
@@ -1068,18 +1333,66 @@ fn current_policy(
         .unwrap_or(initial_policy_id)
 }
 
-/// Re-verifies the conversation's published policy chain in generation
-/// order from the retained objects; a policy that no longer verifies, or
-/// whose predecessor is missing, is dropped with its successors.
-fn restore_policies(
+/// Recovers the validation-time floor from every accepted candidate,
+/// including candidates that were later aborted or finalized.
+fn restore_validation_time(
     state: &CompanionState,
+    expected: RouteExpectation,
+    records: &BTreeMap<u64, &RecordRow>,
+) -> Option<u64> {
+    let mut validation_time = 0;
+    for (sequence, record) in records {
+        if record.record_kind != CANDIDATE_RECORD {
+            continue;
+        }
+        let decoded = decode_object::<IrcSequencerRecord>(
+            state,
+            &record.record_object_id,
+            IrcWireObjectKind::SequencerRecord,
+            MAX_SEQUENCER_RECORD_OBJECT,
+        )?;
+        let IrcSequencerRecord::Candidate(receipt) = decoded else {
+            return None;
+        };
+        if receipt.tbs.network_id != expected.network_id
+            || receipt.tbs.conversation_id != expected.conversation_id
+            || receipt.tbs.route_sequence != *sequence
+        {
+            return None;
+        }
+        let bytes = state.objects.get(&receipt.tbs.commit_object_id)?;
+        let mut budget = DecodeBudget::new(MAX_LIVE_OBJECT, 1 << 16);
+        let object =
+            IrcWireObject::decode_kind(bytes, Some(IrcWireObjectKind::CommitMls), &mut budget)
+                .ok()?;
+        let mut budget = DecodeBudget::new(MAX_LIVE_OBJECT, 1 << 16);
+        let envelope = verify_commit_object(
+            &object,
+            &expected,
+            &receipt.tbs.prior_state_id,
+            validation_time,
+            &mut budget,
+        )
+        .ok()?;
+        if envelope.header.epoch != receipt.tbs.prior_epoch {
+            return None;
+        }
+        validation_time = envelope.aad.validation_time;
+    }
+    Some(validation_time)
+}
+
+/// Re-verifies published policies against retained roster snapshots and
+/// their original certificate references. A later roster or root rotation
+/// must not erase a policy that was valid when the server accepted it.
+fn restore_policies(
+    historical: &[(VerifiedRoot, VerifiedRoster)],
     network_id: &[u8; 32],
     index: &ObjectIndex,
     rows: &SequencerRows,
     conversation: &mut ConversationState,
     conversation_id: [u8; 32],
 ) {
-    let rosters = principal_rosters(state, network_id, conversation);
     let mut ordered: Vec<(&[u8; 32], &PolicyRow)> = rows
         .policies
         .range((conversation_id, [0; 32])..=(conversation_id, [u8::MAX; 32]))
@@ -1102,6 +1415,9 @@ fn restore_policies(
         if !chained {
             continue;
         }
+        let Some(rosters) = policy_rosters(historical, policy) else {
+            continue;
+        };
         let Ok(verified) =
             verify_policy(network_id, &conversation_id, policy, &rosters, predecessor)
         else {
@@ -1118,22 +1434,101 @@ fn restore_policies(
     }
 }
 
-/// The rosters of the conversation's principals, keyed by Account ID.
+/// Re-verifies each principal's retained root chain and roster snapshots.
+/// These snapshots are used only to restore previously admitted facts.
 fn principal_rosters(
     state: &CompanionState,
     network_id: &[u8; 32],
     conversation: &ConversationState,
-) -> PrincipalRosters {
-    let mut rosters = PrincipalRosters::new();
+    index: &ObjectIndex,
+) -> Vec<(VerifiedRoot, VerifiedRoster)> {
+    let mut rosters = Vec::new();
     for account in &conversation.principal_accounts {
-        let Ok(digest) = agenc_ircd_e2ee::ids::account_id_digest(network_id, account) else {
+        let Some(roots) = principal_roots(state, network_id, account) else {
             continue;
         };
-        if let Some((root, roster)) = state.principals.get(&digest) {
-            rosters.insert(*account, (*root, roster.clone()));
+        for root in roots {
+            let Some(snapshots) = index.rosters.get(&root.fingerprint) else {
+                continue;
+            };
+            for snapshot in snapshots {
+                if let Ok(roster) = restore_roster(&root, snapshot) {
+                    rosters.push((root, roster));
+                }
+            }
         }
     }
     rosters
+}
+
+fn principal_roots(
+    state: &CompanionState,
+    network_id: &[u8; 32],
+    account: &[u8; 24],
+) -> Option<Vec<VerifiedRoot>> {
+    let digest = agenc_ircd_e2ee::ids::account_id_digest(network_id, account).ok()?;
+    let head = state.directory.account(&digest)?.root.as_ref()?;
+    let mut roots = Vec::new();
+    for object_id in &head.chain {
+        let identity: IrcRootIdentity = decode_object(
+            state,
+            object_id,
+            IrcWireObjectKind::RootIdentity,
+            MAX_IDENTITY_OBJECT,
+        )?;
+        let root = verify_root_identity(network_id, &identity, roots.last()).ok()?;
+        if root.account_id != *account {
+            return None;
+        }
+        roots.push(root);
+    }
+    let last = roots.last()?;
+    (last.fingerprint == head.fingerprint && last.generation == head.generation).then_some(roots)
+}
+
+type CertificateReferences = BTreeMap<[u8; 32], Vec<([u8; 16], [u8; 32])>>;
+
+/// Selects complete snapshots that contain every certificate a policy
+/// names for a root. The ordinary verifier still checks all signatures,
+/// council rules, and the predecessor's approval threshold.
+fn policy_rosters(
+    historical: &[(VerifiedRoot, VerifiedRoster)],
+    policy: &IrcPolicy,
+) -> Option<PrincipalRosters> {
+    let mut required = CertificateReferences::new();
+    for principal in policy.tbs.finality_principals.as_slice() {
+        required
+            .entry(principal.root_fingerprint)
+            .or_default()
+            .push((principal.device_id, principal.device_certificate_id));
+    }
+    for approval in policy.approvals.as_slice() {
+        required
+            .entry(approval.signer_root_fingerprint)
+            .or_default()
+            .push((
+                approval.signer_device_id,
+                approval.signer_device_certificate_id,
+            ));
+    }
+    let mut rosters = PrincipalRosters::new();
+    for (fingerprint, certificates) in required {
+        let (root, roster) = historical.iter().find(|(root, roster)| {
+            root.fingerprint == fingerprint
+                && certificates.iter().all(|(device, id)| {
+                    roster
+                        .device(device)
+                        .is_some_and(|certificate| certificate.certificate_id == *id)
+                })
+        })?;
+        if rosters
+            .insert(root.account_id, (*root, roster.clone()))
+            .is_some()
+        {
+            return None;
+        }
+    }
+    Some(rosters)
 }
 
 /// The terminal and votes of one retained request for a candidate slot.
@@ -1164,7 +1559,7 @@ fn attempt_terminal(request: &TerminalRequest) -> Option<(Terminal, &[IrcFinalit
 /// stands for comes back exactly once and in no particular order
 /// (companion 12.4).
 fn restore_ledgers(
-    state: &CompanionState,
+    historical: &[(VerifiedRoot, VerifiedRoster)],
     network_id: &[u8; 32],
     index: &ObjectIndex,
     rows: &SequencerRows,
@@ -1178,7 +1573,6 @@ fn restore_ledgers(
     else {
         return;
     };
-    let rosters = principal_rosters(state, network_id, conversation);
     let conversation_id = *log.conversation_id();
     if let Some(slot) = log.candidate() {
         let vote_slot = VoteSlot {
@@ -1199,9 +1593,13 @@ fn restore_ledgers(
                 continue;
             };
             let tbs = vote_tbs(&vote_slot, slot.candidate_id, terminal);
-            replay_vote(&mut ledger, parts, votes, |ledger, vote| {
-                ledger.record(&policy, &rosters, &tbs, vote)
-            });
+            replay_vote(
+                &mut ledger,
+                historical,
+                parts,
+                votes,
+                |ledger, rosters, vote| ledger.record(&policy, rosters, &tbs, vote),
+            );
         }
         conversation.vote_ledgers.insert(slot.candidate_id, ledger);
     }
@@ -1231,9 +1629,13 @@ fn restore_ledgers(
             continue;
         };
         let tbs = reinit_vote_tbs(&reinit_slot, attempt.attempt_id, terminal);
-        replay_vote(&mut ledger, parts, votes, |ledger, vote| {
-            ledger.record_reinit(&policy, &rosters, &tbs, vote)
-        });
+        replay_vote(
+            &mut ledger,
+            historical,
+            parts,
+            votes,
+            |ledger, rosters, vote| ledger.record_reinit(&policy, rosters, &tbs, vote),
+        );
     }
     conversation.vote_ledgers.insert(attempt.attempt_id, ledger);
 }
@@ -1253,20 +1655,36 @@ fn vote_rows_of(
     })
 }
 
-/// Replays the one vote of the principal a vote row names; a vote that no
-/// longer verifies (a roster moved on) is dropped rather than trusted.
+/// Replays a counted vote using its exact retained certificate, including
+/// when the device was retired after the vote was committed.
 fn replay_vote(
     ledger: &mut QuorumLedger,
+    historical: &[(VerifiedRoot, VerifiedRoster)],
     parts: &ProofKeyParts,
     votes: &[IrcFinalityVote],
-    mut record: impl FnMut(&mut QuorumLedger, &IrcFinalityVote) -> Result<(), E2eeError>,
+    mut record: impl FnMut(
+        &mut QuorumLedger,
+        &PrincipalRosters,
+        &IrcFinalityVote,
+    ) -> Result<(), E2eeError>,
 ) {
     let vote = votes.iter().find(|vote| {
         vote.signer_root_fingerprint == parts.root_fingerprint
             && vote.signer_device_id == parts.device_id
     });
     if let Some(vote) = vote {
-        let _ = record(ledger, vote);
+        let Some((root, roster)) = historical.iter().find(|(root, roster)| {
+            root.fingerprint == vote.signer_root_fingerprint
+                && roster
+                    .device(&vote.signer_device_id)
+                    .is_some_and(|certificate| {
+                        certificate.certificate_id == vote.signer_device_certificate_id
+                    })
+        }) else {
+            return;
+        };
+        let rosters = PrincipalRosters::from([(root.account_id, (*root, roster.clone()))]);
+        let _ = record(ledger, &rosters, vote);
     }
 }
 
@@ -1364,12 +1782,22 @@ fn restore_route(
     let candidate = rows
         .candidates
         .get(&(conversation_id, route.finalized_epoch));
-    let log = restore_log(conversation_id, row, &route, &records, candidate);
+    let log = restore_log(state, conversation_id, row, &route, &records, candidate)?;
     let activated = records
         .values()
         .any(|record| activates_bootstrap(state, record));
     let lifecycle = Lifecycle::restore(recovery.1, !activated, false);
     let direct = matches!(target, RouteTarget::Direct(_));
+    let last_validation_time = restore_validation_time(
+        state,
+        RouteExpectation {
+            network_id: *network_id,
+            conversation_id,
+            route_binding: route.route_binding,
+            group_id: tbs.group_id.as_slice().try_into().ok()?,
+        },
+        &records,
+    )?;
     let mut conversation = ConversationState {
         binding_object_id: *binding_object_id,
         binding: row.binding_id,
@@ -1396,17 +1824,26 @@ fn restore_route(
         required_operational_policy_id: tbs.required_operational_policy_id,
         current_policy_id: current_policy(state, &records, tbs.initial_policy_id),
         predecessor_close_id: row.predecessor_close_id,
+        last_validation_time,
         ..ConversationState::default()
     };
+    let historical = principal_rosters(state, network_id, &conversation, index);
     restore_policies(
-        state,
+        &historical,
         network_id,
         index,
         rows,
         &mut conversation,
         conversation_id,
     );
-    restore_ledgers(state, network_id, index, rows, &mut conversation, &log);
+    restore_ledgers(
+        &historical,
+        network_id,
+        index,
+        rows,
+        &mut conversation,
+        &log,
+    );
     let proofs: Vec<(ProofKeyParts, [u8; 32])> = rows
         .proofs
         .iter()

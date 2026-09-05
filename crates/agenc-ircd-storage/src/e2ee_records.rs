@@ -30,6 +30,7 @@
 //! | `token/v1/` | 8 | delivery token | [`MailboxRow::Token`] |
 //! | `ack-mailbox/v1/` | 8 | account digest, device ID, delivery token | [`MailboxRow::Ack`] |
 //! | `replay/v1/irc-mls-v1/` | 9 | home server, incarnation, origin, generation, sequence | [`ReplayRow`] |
+//! | `origin-sequence/v1/irc-mls-v1/` | 9 | home server, incarnation, origin | [`origin::OriginSequenceRow`] |
 //! | `delivery/v1/` | 10 | target server | [`DeliveryRow::Cursor`] |
 //! | `outbox/v1/` | 10 | target server, generation, sequence | [`DeliveryRow::Outbox`] |
 //! | `estate/v1/` | 10 | target server | [`DeliveryRow::Snapshot`] |
@@ -46,6 +47,7 @@ use crate::schema::{MAX_STORED_KEY_BYTES, StoredKey, TableId};
 use crate::{MAX_PROTOCOL_BODY_BYTES, ReadPlan, StorageError};
 
 pub mod barrier;
+pub mod origin;
 
 /// The one live `e2ee_object` arm.
 pub const OBJECT_RECORD_KIND: u16 = 1;
@@ -65,7 +67,7 @@ pub const PACKAGE_ROW_KIND: u16 = 6;
 pub const ATTACH_ROW_KIND: u16 = 7;
 /// Mailbox item, token, and acknowledgement rows.
 pub const MAILBOX_ROW_KIND: u16 = 8;
-/// Companion request replay rows.
+/// Companion request replay rows and durable operation sequence floors.
 pub const REPLAY_ROW_KIND: u16 = 9;
 /// Companion delivery cursor, outbox, and ESTATE rows.
 pub const DELIVERY_ROW_KIND: u16 = 10;
@@ -76,7 +78,7 @@ pub const BARRIER_ROW_KIND: u16 = 12;
 /// Edge witness violations of the sequencer record chain (companion 12.5).
 pub const WITNESS_ROW_KIND: u16 = 13;
 
-/// Version prefix shared by every companion body codec.
+/// Version prefix of the original companion body codecs.
 const BODY_VERSION: u16 = 1;
 const ID_BYTES: usize = 16;
 const HASH_BYTES: usize = 32;
@@ -131,6 +133,8 @@ pub mod prefix {
     pub const ACK_MAILBOX: &[u8] = b"ack-mailbox/v1/";
     /// Companion replay rows.
     pub const REPLAY: &[u8] = b"replay/v1/irc-mls-v1/";
+    /// Companion sequence floors, retained after replay results expire.
+    pub const ORIGIN_SEQUENCE: &[u8] = b"origin-sequence/v1/irc-mls-v1/";
     /// The last record-chain violation an edge witnessed per conversation.
     pub const WITNESS: &[u8] = b"witness/v1/";
     /// Delivery cursor rows.
@@ -148,7 +152,7 @@ pub mod prefix {
 }
 
 /// Every `(prefix, record kind)` pair, used by the key classifier.
-const PREFIX_KINDS: [(&[u8], u16); 28] = [
+const PREFIX_KINDS: [(&[u8], u16); 29] = [
     (prefix::RECOVERY, RECOVERY_GATE_KIND),
     (prefix::ROUTE, ROUTE_ROW_KIND),
     (prefix::LOCK, CLAIM_ROW_KIND),
@@ -170,6 +174,7 @@ const PREFIX_KINDS: [(&[u8], u16); 28] = [
     (prefix::TOKEN, MAILBOX_ROW_KIND),
     (prefix::ACK_MAILBOX, MAILBOX_ROW_KIND),
     (prefix::REPLAY, REPLAY_ROW_KIND),
+    (prefix::ORIGIN_SEQUENCE, REPLAY_ROW_KIND),
     (prefix::DELIVERY, DELIVERY_ROW_KIND),
     (prefix::OUTBOX, DELIVERY_ROW_KIND),
     (prefix::ESTATE, DELIVERY_ROW_KIND),
@@ -1049,7 +1054,10 @@ impl SequencerRow {
             Self::Candidate {
                 state, terminal_id, ..
             } => (*state == CandidateState::Active) == terminal_id.is_none(),
-            Self::Proof { role, slot, .. } => *role == ProofRole::Vote || *slot == 0,
+            Self::Proof { role, slot, .. } => match role {
+                ProofRole::Vote => matches!(slot, 1 | 2),
+                ProofRole::Approval | ProofRole::Ack => *slot == 0,
+            },
             Self::Policy {
                 generation,
                 previous_policy_id,
@@ -2209,6 +2217,20 @@ pub enum DeliveryRow {
         /// Whether later events are held behind an open barrier.
         barrier_open: bool,
     },
+    /// An edge cursor atomically checkpointed with every touched route witness.
+    /// This local arm distinguishes safe restart checkpoints from legacy cursors.
+    WitnessedCursor {
+        /// Delivery generation.
+        generation: u64,
+        /// The next sequence the edge expects.
+        next_sequence: u64,
+        /// The highest acknowledged sequence.
+        acked_sequence: u64,
+        /// The event identity at the acknowledged sequence.
+        acked_event_id: [u8; ID_BYTES],
+        /// Whether later events are held behind an open barrier.
+        barrier_open: bool,
+    },
     /// One queued event for a target.
     Outbox {
         /// Event identity.
@@ -2244,6 +2266,7 @@ pub enum DeliveryRow {
 const CURSOR_ARM: u16 = 1;
 const OUTBOX_ARM: u16 = 2;
 const SNAPSHOT_ARM: u16 = 3;
+const WITNESSED_CURSOR_ARM: u16 = 4;
 const MIN_PART_COUNT: u16 = 2;
 const MAX_PART_COUNT: u16 = 2_048;
 
@@ -2318,8 +2341,20 @@ impl DeliveryRow {
                 acked_sequence,
                 acked_event_id,
                 barrier_open,
+            }
+            | Self::WitnessedCursor {
+                generation,
+                next_sequence,
+                acked_sequence,
+                acked_event_id,
+                barrier_open,
             } => {
-                encoder.put_u16(CURSOR_ARM)?;
+                let arm = if matches!(self, Self::WitnessedCursor { .. }) {
+                    WITNESSED_CURSOR_ARM
+                } else {
+                    CURSOR_ARM
+                };
+                encoder.put_u16(arm)?;
                 encoder.put_u64(*generation)?;
                 encoder.put_u64(*next_sequence)?;
                 encoder.put_u64(*acked_sequence)?;
@@ -2374,6 +2409,13 @@ impl DeliveryRow {
                 acked_event_id: decoder.array()?,
                 barrier_open: take_bool(&mut decoder)?,
             },
+            WITNESSED_CURSOR_ARM => Self::WitnessedCursor {
+                generation: decoder.u64()?,
+                next_sequence: decoder.u64()?,
+                acked_sequence: decoder.u64()?,
+                acked_event_id: decoder.array()?,
+                barrier_open: take_bool(&mut decoder)?,
+            },
             OUTBOX_ARM => Self::Outbox {
                 event_id: decoder.array()?,
                 event_object_id: decoder.array()?,
@@ -2403,6 +2445,11 @@ impl DeliveryRow {
                 next_sequence,
                 acked_sequence,
                 ..
+            }
+            | Self::WitnessedCursor {
+                next_sequence,
+                acked_sequence,
+                ..
             } => acked_sequence <= next_sequence,
             Self::Outbox {
                 payload_object_id,
@@ -2423,7 +2470,9 @@ impl DeliveryRow {
     pub fn matches_key(&self, key: &StoredKey) -> bool {
         let bytes = key.as_bytes();
         match self {
-            Self::Cursor { .. } => bytes.starts_with(prefix::DELIVERY),
+            Self::Cursor { .. } | Self::WitnessedCursor { .. } => {
+                bytes.starts_with(prefix::DELIVERY)
+            }
             Self::Outbox { .. } => bytes.starts_with(prefix::OUTBOX),
             Self::Snapshot { .. } => bytes.starts_with(prefix::ESTATE),
         }
@@ -2590,7 +2639,9 @@ pub fn validate_state_body(record_kind: u16, body: &[u8]) -> Result<(), StorageE
         PACKAGE_ROW_KIND => PackageRow::decode(body).map(|_| ()),
         ATTACH_ROW_KIND => AttachRow::decode(body).map(|_| ()),
         MAILBOX_ROW_KIND => MailboxRow::decode(body).map(|_| ()),
-        REPLAY_ROW_KIND => ReplayRow::decode(body).map(|_| ()),
+        REPLAY_ROW_KIND => ReplayRow::decode(body)
+            .map(|_| ())
+            .or_else(|_| origin::OriginSequenceRow::decode(body).map(|_| ())),
         DELIVERY_ROW_KIND => DeliveryRow::decode(body).map(|_| ()),
         KEYSET_ROW_KIND => KeySetRow::decode(body).map(|_| ()),
         BARRIER_ROW_KIND => barrier::validate_body(body),

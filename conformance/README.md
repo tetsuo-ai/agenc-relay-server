@@ -42,6 +42,17 @@ invalidates the inventory and forces a review for new critical ranges before
 the coverage check can pass. Duplicate llvm-cov branch records at the same
 source coordinates are combined before the two semantic outcomes are scored.
 
+Run the current implementation checks:
+
+```sh
+bash scripts/check-stage-eight.sh
+```
+
+Stage 08 includes every Stage 00 through 07 command. The stage-specific commands
+below remain available for narrower development checks. Each checkpoint records
+only its named source revision; passing checks on later changes does not update
+that checkpoint.
+
 Run the Stage 04 implementation checks:
 
 ```sh
@@ -101,6 +112,31 @@ contains 55 passed records and closes exact source commit
 `65cce9d66f7bcfb0c0830a2ab1d42b52bff82942`. The recorded run of 75 commands reached
 79.79% branch coverage, 91.79% line coverage, and 100% coverage in all six
 critical regions against the interim 75% branch floor.
+
+Run the Stage 07 implementation checks:
+
+```sh
+bash scripts/check-stage-seven.sh
+```
+
+This command inherits Stage 06 and adds the federation profile, requirement
+set, transcript catalog, bounded federation model, three-process daemon test,
+and federation fuzz targets. The
+[Stage 07 manifest](evidence/stage-07-1093d88d0057c3461a423285e0f86ff3775c1140.json)
+contains 38 passed records for exact source commit
+`1093d88d0057c3461a423285e0f86ff3775c1140`; its recorded gate ran 85 commands.
+
+Stage 08 adds the encrypted profile, object and wire vectors, durable E2EE
+records, bounded route model, transcripts, two-library MLS interoperability,
+load checks, and E2EE fuzz targets. The
+[Stage 08 manifest](evidence/stage-08-ae6457fb62fef8961d3caf904febed580e8b4a91.json)
+contains 160 passed records for exact source commit
+`ae6457fb62fef8961d3caf904febed580e8b4a91`; its recorded gate ran 97 commands.
+The external cryptographic and protocol review (`S08-039`) remains open under
+the explicit `blocked-external` state in `stage-eight-e2ee-profile.toml`. The
+[review package](review/README.md) identifies the remaining review scope. No
+checkpoint claims that external review or Stage 10 production qualification
+has passed.
 
 For an evidence-only check:
 

@@ -6,7 +6,8 @@ use agenc_ircd_domain::e2ee::lifecycle::Lifecycle;
 use agenc_ircd_domain::e2ee::projection::{EntitlementReason, EventKind};
 use agenc_ircd_domain::e2ee::sequencer_log::SequencerLog;
 use agenc_ircd_domain::e2ee::{
-    BindingSummary, ConversationId, DirectPair, ReservationId, SemanticLockId,
+    BindingSummary, ConversationId, DirectPair, ReservationId, RouteReservation, RouteTarget,
+    SemanticLockId,
 };
 use agenc_ircd_e2ee::envelope::{RouteExpectation, verify_application_object};
 use agenc_ircd_e2ee::limits::{
@@ -286,13 +287,16 @@ pub fn reserve(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         )
     } else {
         let peer = exec.params().read(account)?;
-        let nonce: [u8; 32] = exec.random()?;
         let first = AccountId::parse_wire_bytes(&requester)
             .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
         let second = AccountId::parse_wire_bytes(&peer)
             .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
         let pair =
             DirectPair::new(first, second).map_err(|_| Fail::from(E2eeReplyCode::RouteInvalid))?;
+        let nonce = match super::route_successor::direct_nonce(exec, &pair)? {
+            Some(nonce) => nonce,
+            None => exec.random()?,
+        };
         let (a, b) = if requester <= peer {
             (requester, peer)
         } else {
@@ -330,14 +334,31 @@ pub fn reserve(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     let owner = AccountId::parse_wire_bytes(&requester)
         .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
     let mut probe = exec.coordinator.state.routes.clone();
-    let claim = match (instance, pair) {
-        (Some(instance), None) => probe.reserve_channel(
+    let target = match (instance, pair) {
+        (Some(instance), None) => RouteTarget::Channel(ChannelInstanceId::from_bytes(instance)),
+        (None, Some(pair)) => RouteTarget::Direct(pair),
+        _ => return Err(E2eeReplyCode::InvalidFragment.into()),
+    };
+    let successor = super::route_successor::reserve(
+        exec,
+        &mut probe,
+        RouteReservation {
+            reservation_id: ReservationId(reservation_id),
+            target,
+            conversation_nonce: nonce,
+            owner,
+            expires_at,
+        },
+    )?;
+    let claim = match (successor, instance, pair) {
+        (true, _, _) => Ok(()),
+        (false, Some(instance), None) => probe.reserve_channel(
             ReservationId(reservation_id),
             ChannelInstanceId::from_bytes(instance),
             owner,
             expires_at,
         ),
-        (None, Some(pair)) => probe.reserve_direct(
+        (false, None, Some(pair)) => probe.reserve_direct(
             ReservationId(reservation_id),
             pair,
             nonce.unwrap_or([0; 32]),
@@ -584,15 +605,40 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         conversation_nonce: verified.conversation_nonce,
     };
     let mut routes = exec.coordinator.state.routes.clone();
-    let entry = routes
-        .bind(ReservationId(reservation_id), owner, summary, exec.now)
-        .map_err(|conflict| match conflict {
-            agenc_ircd_domain::e2ee::RouteConflict::GroupConflict
-            | agenc_ircd_domain::e2ee::RouteConflict::ForkedLineage => {
-                Fail::with(E2eeReplyCode::GroupConflict, &conversation_id)
-            }
-            _ => Fail::with(E2eeReplyCode::BindingAuthInvalid, &conversation_id),
-        })?;
+    let predecessor = routes.reservation_predecessor(&ReservationId(reservation_id));
+    let activation_id = if let Some(predecessor) = predecessor {
+        super::route_successor::owner(exec, &predecessor.0)?;
+        if !verified.principals.contains(&account) {
+            return Err(Fail::with(
+                E2eeReplyCode::BindingAuthInvalid,
+                &conversation_id,
+            ));
+        }
+        Some(
+            super::route_successor::verify(
+                &exec.coordinator.state,
+                &exec.coordinator.network_id,
+                &predecessor.0,
+                &package,
+                &context_digest,
+            )
+            .map_err(|_| Fail::with(E2eeReplyCode::BindingAuthInvalid, &conversation_id))?,
+        )
+    } else {
+        None
+    };
+    let entry = if activation_id.is_some() {
+        routes.bind_successor(ReservationId(reservation_id), owner, summary, exec.now)
+    } else {
+        routes.bind(ReservationId(reservation_id), owner, summary, exec.now)
+    }
+    .map_err(|conflict| match conflict {
+        agenc_ircd_domain::e2ee::RouteConflict::GroupConflict
+        | agenc_ircd_domain::e2ee::RouteConflict::ForkedLineage => {
+            Fail::with(E2eeReplyCode::GroupConflict, &conversation_id)
+        }
+        _ => Fail::with(E2eeReplyCode::BindingAuthInvalid, &conversation_id),
+    })?;
     let genesis = IrcGroupGenesisTbs {
         network_id: exec.coordinator.network_id,
         conversation_id,
@@ -601,7 +647,22 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         context_core_id: verified.context_core_id,
     };
     let genesis_id = CompanionCoordinator::id_of(SemanticHashDomain::GroupGenesisId, &genesis)?;
-    let log = SequencerLog::genesis(conversation_id, genesis_id);
+    let (log, lifecycle) = match activation_id {
+        Some(activation_id) => {
+            let expected = SequencerLog::from_activation(conversation_id, activation_id);
+            if exec.coordinator.state.logs.get(&conversation_id) != Some(&expected) {
+                return Err(Fail::with(
+                    E2eeReplyCode::BindingAuthInvalid,
+                    &conversation_id,
+                ));
+            }
+            (expected, Lifecycle::successor())
+        }
+        None => (
+            SequencerLog::genesis(conversation_id, genesis_id),
+            Lifecycle::bootstrap(),
+        ),
+    };
     let kind = verified.route.kind;
     let direct_accounts = match verified.principals.as_slice() {
         [a, b] if kind == IrcConversationKind::Direct => Some((*a, *b)),
@@ -681,8 +742,8 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         lifecycle: RowLifecycle::Active,
         binding_id: verified.binding_id,
         lock_id: verified.route.lock_id,
-        accepted_state_id: genesis_id,
-        sequencer_head_id: genesis_id,
+        accepted_state_id: *log.accepted_state_id(),
+        sequencer_head_id: log.head().record_id,
         route_sequence: 0,
         close_id: None,
         predecessor_close_id: (verified.route.incarnation > 0)
@@ -707,6 +768,23 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         agenc_ircd_domain::e2ee::RouteTarget::Direct(_) => vec![exec.home],
     };
     let hosts = targets.clone();
+    if let Some(old) = predecessor {
+        for target in exec
+            .peers
+            .iter()
+            .copied()
+            .filter(|peer| exec.coordinator.state.entitlements.entitled(*peer, &old.0))
+        {
+            outcome.events.push(exec.event(
+                EventKind::RouteStateHidden,
+                Some(old.0),
+                target,
+                0,
+                Vec::new(),
+                None,
+            ));
+        }
+    }
     for target in targets {
         outcome.events.push(exec.event(
             EventKind::RouteStateChanged,
@@ -721,10 +799,11 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     let retained = bytes.to_vec();
     outcome.effects.push(Box::new(move |companion| {
         companion.routes = routes;
+        if let Some(old) = predecessor {
+            companion.entitlements.retire_conversation(old.0);
+        }
         companion.logs.insert(conversation_id, log);
-        companion
-            .lifecycles
-            .insert(conversation_id, Lifecycle::bootstrap());
+        companion.lifecycles.insert(conversation_id, lifecycle);
         companion.conversations.insert(conversation_id, state);
         let _ = CompanionCoordinator::retain_object(companion, retained);
         let _ = CompanionCoordinator::retain_object(companion, route_object);

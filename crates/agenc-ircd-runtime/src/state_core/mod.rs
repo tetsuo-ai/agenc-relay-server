@@ -4707,3 +4707,37 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+impl StateCoreContext {
+    /// Copies the actual staged row transaction for crash-image storage tests.
+    pub(crate) fn staged_rows_for_test(
+        &self,
+    ) -> Result<Vec<AccountServiceDurableWrite>, RuntimeError> {
+        self.pending
+            .as_ref()
+            .into_iter()
+            .flat_map(|batch| batch.plans())
+            .flat_map(|plan| plan.account_service_writes())
+            .map(|write| match write {
+                AccountServiceDurableWrite::Put {
+                    table,
+                    key,
+                    plaintext,
+                } => AccountServiceDurableWrite::put(*table, key.clone(), plaintext.to_vec()),
+                AccountServiceDurableWrite::Delete { table, key } => {
+                    AccountServiceDurableWrite::delete(*table, key.clone())
+                }
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
+impl StateCoreContext {
+    /// Installs a trusted deterministic wall clock for retention boundary tests.
+    pub(crate) fn set_wall_for_test(&mut self, seconds: u64) {
+        self.wall = Box::new(agenc_ircd_testkit::DeterministicWallClock::at(seconds));
+        self.drift = DriftMonitor::new(self.now(), UtcSecond::from_unix_seconds(seconds));
+    }
+}

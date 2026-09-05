@@ -25,7 +25,7 @@ use agenc_ircd_auth::{
     AuthenticationFinish, AuthenticationStart, Completion, CreationFinish, CreationStart,
     CredentialChangeFinish, CredentialChangeStart, OpaqueKe1, OpaqueKe3, OpaqueProfile,
     OpaqueRegistrationRequest, encode_request_plaintext, finish_registration,
-    opaque_server_public_key, open_and_parse_response,
+    open_and_parse_response,
 };
 use agenc_ircd_config::{
     DEFAULT_REDB_CACHE_BYTES, DisplayLabel, DnsName, InitProfile, InitValues, NodeRole,
@@ -2020,13 +2020,19 @@ fn stopped_runtime_check_rejects_cross_purpose_public_identity_reuse() -> TestRe
     fs::write(&fixture.config_path, &original)?;
     let config = load_config(&fixture.config_path, ValidationDepth::Host)?;
     let secrets = SecretSet::load(&config)?;
-    let setup = secrets
+    let setup: &[u8; agenc_ircd_auth::OPAQUE_SERVER_SETUP_BYTES] = secrets
         .opaque_server_setup()
         .ok_or_else(|| failure("fixture has no OPAQUE setup"))?
         .expose()
         .try_into()
         .map_err(|_| failure("fixture OPAQUE setup has the wrong length"))?;
-    let opaque_public = opaque_server_public_key(setup)?;
+    let parsed_setup = opaque_ke::ServerSetup::<TestOpaqueSuite>::deserialize(setup)?;
+    let opaque_public: [u8; 32] = parsed_setup
+        .keypair()
+        .public()
+        .serialize()
+        .as_slice()
+        .try_into()?;
     let mut document = original;
     replace_once(
         &mut document,

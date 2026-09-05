@@ -42,6 +42,9 @@ use crate::test_support::{FrameSink, StateCoreFixture};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
+mod durability;
+mod restart;
+
 const NETWORK: NetworkId = NetworkId::from_bytes([31; 32]);
 const EDGE: ServerId = ServerId::from_bytes([36; 16]);
 const EDGE_NAME: &str = "edge.example";

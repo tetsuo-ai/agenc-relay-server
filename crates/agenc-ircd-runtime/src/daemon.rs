@@ -122,7 +122,7 @@ use crate::supervisor::{
 use crate::sync::Arc;
 use crate::tls::{
     ClientAuth, HandshakeLimiter, MAX_HANDSHAKES_IN_PROGRESS, PrivateKey, TlsConfigError,
-    TlsEndpointProfile, TlsServerPolicy, build_federation_client_config,
+    TlsEndpointProfile, TlsServerPolicy, build_federation_client_config_with_group_policy,
     build_server_config_with_policy, load_certificate_chain_material, load_ocsp_staple_material,
     load_trust_store_material,
 };
@@ -605,7 +605,12 @@ fn build_live_state(
             config,
             secrets.sequencer_private().map(SecretBytes32::expose),
         )?;
-        let router = attach_federation_role(config, federation, e2ee, router)?;
+        let mut router = attach_federation_role(config, federation, e2ee, router)?;
+        router.restore_edge(
+            &storage.owner.port(),
+            &storage.keys,
+            storage.reconstruction.head,
+        )?;
         let limits = operational_limits(config)?;
         Ok((crypto_config, router, limits))
     })();
@@ -1236,11 +1241,12 @@ async fn edge_dial_plan(
         .clone()
         .ok_or(DaemonError::UnsupportedProfile)?;
     let (roots, _fingerprint) = load_trust_store_material(ca).await?;
-    let tls = build_federation_client_config(
+    let tls = build_federation_client_config_with_group_policy(
         roots,
         (chain, key),
         *peer.certificate_spki_sha256(),
         peer.server_id(),
+        config.tls.group_policy,
     )?;
     Ok(DialOwnerPlan {
         peer,

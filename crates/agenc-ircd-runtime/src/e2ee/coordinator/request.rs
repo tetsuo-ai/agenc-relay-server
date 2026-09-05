@@ -15,6 +15,7 @@ use agenc_ircd_e2ee::objects::federation::{
 };
 use agenc_ircd_e2ee::tls::{Opaque, TlsDecode, TlsEncode, TlsVec, Writer};
 use agenc_ircd_e2ee::wire::reply::E2eeReplyCode;
+use agenc_ircd_storage::e2ee_records::origin::{OriginSequenceKey, OriginSequenceRow};
 use agenc_ircd_storage::e2ee_records::{REPLAY_ROW_KIND, ReplayKey, ReplayRow};
 use agenc_ircd_storage::{PersistentRecordValue, StoredKey, TableId};
 
@@ -487,10 +488,26 @@ pub fn classify(state: &CompanionState, home: [u8; 16], decoded: &Decoded) -> Cl
         || origin.suspended
         || origin.generation != decoded.request.origin_generation
         || origin.next_sequence != decoded.request.operation_sequence
+        || decoded.request.operation_sequence == u64::MAX
     {
         return Classified::Violation;
     }
     Classified::Fresh
+}
+
+/// Retains the next unused sequence in the same durable batch as its result.
+pub(crate) fn origin_sequence_write(
+    key: &CompanionOriginKey,
+    row: OriginSequenceRow,
+) -> Result<AccountServiceDurableWrite, E2eeReplyCode> {
+    let key = OriginSequenceRow::key(&OriginSequenceKey {
+        home_server_id: key.home_server_id,
+        server_incarnation: key.server_incarnation,
+        origin_id: key.origin_id,
+    })
+    .map_err(|_| E2eeReplyCode::InvalidFragment)?;
+    let body = row.encode().map_err(|_| E2eeReplyCode::InvalidFragment)?;
+    state_row(TableId::E2eeState, REPLAY_ROW_KIND, key, body)
 }
 
 /// A durable row of table 23 (or 22).

@@ -11,9 +11,10 @@ pub use config::{
     MAX_TLS_DOCUMENT_BYTES, OcspStaple, PrivateKey, TLS_PLAINTEXT_BUFFER_LIMIT_BYTES,
     TLS_TICKET_LIFETIME_SECONDS, TLS_TICKET_ROTATION_SECONDS, TlsConfigError, TlsEndpointProfile,
     TlsServerPolicy, TrustStore, build_client_config, build_federation_client_config,
-    build_pinned_client_config, build_server_config, build_server_config_blocking,
-    build_server_config_with_policy, build_server_config_with_policy_blocking,
-    load_certificate_chain, load_ocsp_staple, load_trust_store, provider,
+    build_federation_client_config_with_group_policy, build_pinned_client_config,
+    build_server_config, build_server_config_blocking, build_server_config_with_policy,
+    build_server_config_with_policy_blocking, load_certificate_chain, load_ocsp_staple,
+    load_trust_store, provider,
 };
 pub use stream::{
     ACCEPT_TO_TLS_DEADLINE, CLOSE_NOTIFY_GRACE, DEFAULT_HANDSHAKES_IN_PROGRESS, HandshakeLimiter,

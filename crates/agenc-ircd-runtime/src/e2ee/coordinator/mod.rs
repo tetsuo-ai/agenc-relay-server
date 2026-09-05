@@ -151,6 +151,9 @@ pub struct CompanionState {
     pub object_bytes: usize,
     /// Replay rows by key.
     pub replays: BTreeMap<agenc_ircd_storage::e2ee_records::ReplayKey, ReplayRow>,
+    /// Durable next-sequence floors, independent of replay result retention.
+    pub origin_sequences:
+        BTreeMap<CompanionOriginKey, agenc_ircd_storage::e2ee_records::origin::OriginSequenceRow>,
     /// Retained results and responses by request object identifier.
     pub results: BTreeMap<[u8; 32], StoredResult>,
     /// Per-conversation retained state the sequencer needs between records.

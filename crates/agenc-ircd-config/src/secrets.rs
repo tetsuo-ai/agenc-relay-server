@@ -98,7 +98,7 @@ pub fn open_secret_file_with_hook(
     let fd = openat(
         CWD,
         path,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
         Mode::empty(),
     )
     .map_err(|_| ConfigError::FileRejected)?;
@@ -198,7 +198,7 @@ fn open_same_trusted_file(
     let fd = openat(
         CWD,
         path,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
         Mode::empty(),
     )
     .map_err(|_| ConfigError::FileRejected)?;

@@ -1,7 +1,7 @@
 //! FEVENT application on the edge: replica apply, client rendering, the
 //! durable projection rows, and the cumulative ACK (spec 20.6, B.5, B.7).
 
-use agenc_ircd_domain::federation::{ProjectedEvent, ProjectionKey};
+use agenc_ircd_domain::federation::{EdgeReplica, ProjectedEvent, ProjectionKey};
 use agenc_ircd_federation_wire::{
     AssembledObject, DecodeBudget, EventDescriptor, EventHeader, SchemaObject, decode_event_arm,
 };
@@ -18,6 +18,20 @@ use crate::federation::codec::events::projected_event_of;
 use crate::federation::codec::projection::{projection_arm_object, projection_kind};
 use crate::state_core::StateCoreContext;
 use crate::state_core::durable::AccountServiceDurableWrite;
+
+/// Projection state retained until an ordinary event's storage batch commits.
+pub(super) struct ProjectionBefore {
+    replica: EdgeReplica,
+    nicknames:
+        std::collections::BTreeMap<agenc_ircd_types::UserId, agenc_ircd_domain::NicknameValue>,
+}
+
+pub(super) fn restore_projection(edge: &mut EdgeFederation) {
+    if let Some(previous) = edge.event_before.take() {
+        edge.replica = previous.replica;
+        edge.nicknames = previous.nicknames;
+    }
+}
 
 /// Receives one event object.
 pub(super) fn receive(
@@ -154,16 +168,45 @@ fn apply(
     header: EventHeader,
     projected: ProjectedEvent,
 ) -> Result<Vec<EdgeCompletion>, Violation> {
+    if edge.event_before.is_some() || edge.commit.is_some() {
+        return Err(Violation::Phase);
+    }
+    edge.event_before = Some(ProjectionBefore {
+        replica: edge.replica.clone(),
+        nicknames: edge.nicknames.clone(),
+    });
+    let result = apply_projection(edge, context, header, projected);
+    if result.is_err() {
+        restore_projection(edge);
+    }
+    result
+}
+
+fn apply_projection(
+    edge: &mut EdgeFederation,
+    context: &mut StateCoreContext,
+    header: EventHeader,
+    projected: ProjectedEvent,
+) -> Result<Vec<EdgeCompletion>, Violation> {
     let label = super::render::event_channel_label(edge, &projected);
     let outcome = edge
         .replica
         .apply(&projected, header.coordinator_state_generation)
         .map_err(|_| Violation::Consistency)?;
-    edge.counters.events_applied = edge.counters.events_applied.saturating_add(1);
     super::render::remember_nicknames(edge, &projected);
-    super::render::render_event(edge, context, &projected, &outcome, label.as_deref());
+    let mut fanout = super::render::EventFanout::default();
+    super::render::render_event(
+        edge,
+        context,
+        &projected,
+        &outcome,
+        label.as_deref(),
+        &mut fanout,
+    )?;
     let completion = match &projected {
-        ProjectedEvent::RequestCompleted { .. } => completion_of(edge, &header)?,
+        ProjectedEvent::RequestCompleted {
+            resulting_state_generation,
+        } => completion_of(edge, &header, *resulting_state_generation)?,
         _ => None,
     };
     let upserted = outcome.upserted.clone();
@@ -173,37 +216,126 @@ fn apply(
         header: Box::new(header),
         completion,
     };
-    stage_rows(edge, context, cursor, pending, |edge, context, revision| {
-        let mut writes = Vec::new();
-        for key in &upserted {
-            if let Some(write) = entry_row(edge, key, revision) {
-                writes.push(write);
+    stage_rows(
+        edge,
+        context,
+        cursor,
+        pending,
+        fanout.finish()?,
+        |edge, context, revision| {
+            let mut writes = Vec::new();
+            for key in &upserted {
+                if let Some(write) = entry_row(edge, key, revision) {
+                    writes.push(write);
+                }
             }
-        }
-        for key in &removed {
-            if let Some(write) = removal_write(edge, context, key) {
-                writes.push(write);
+            for key in &removed {
+                if let Some(write) = removal_write(edge, context, key) {
+                    writes.push(write);
+                }
             }
-        }
-        writes
-    })?;
+            writes
+        },
+    )?;
     Ok(Vec::new())
 }
 
-/// Matches a `request_completed` event to its pending request, or records
-/// it for a result that has not arrived yet.
-fn completion_of(
-    edge: &mut EdgeFederation,
+/// Validates a completion's correlation without publishing its application.
+pub(super) fn completion_of(
+    edge: &EdgeFederation,
     header: &EventHeader,
+    arm_generation: u64,
 ) -> Result<Option<RequestId>, Violation> {
+    if arm_generation != header.coordinator_state_generation {
+        return Err(Violation::Consistency);
+    }
     let correlation = header.correlation.ok_or(Violation::Consistency)?;
-    match edge.by_completion.get(&header.event_id).copied() {
-        Some(request_id) if request_id == correlation.request_id => Ok(Some(request_id)),
-        Some(_) => Err(Violation::Consistency),
-        None => {
-            edge.applied_completions.insert(header.event_id);
-            Ok(None)
-        }
+    if edge
+        .by_completion
+        .get(&header.event_id)
+        .is_some_and(|request_id| *request_id != correlation.request_id)
+        || edge
+            .pending
+            .get(&correlation.request_id)
+            .is_some_and(|pending| {
+                pending.header.replay_key != correlation.replay_key
+                    || pending
+                        .result
+                        .as_ref()
+                        .and_then(super::request::result_generation)
+                        .is_some_and(|generation| generation != arm_generation)
+                    || pending
+                        .completion
+                        .is_some_and(|event_id| event_id != header.event_id)
+            })
+    {
+        return Err(Violation::Consistency);
+    }
+    Ok(Some(correlation.request_id))
+}
+
+/// Meets a durable completion with a result, including one received during
+/// the storage batch. An absent result keeps a marker only for a live request.
+pub(super) fn committed_completion(
+    edge: &mut EdgeFederation,
+    context: &mut StateCoreContext,
+    event_id: EventId,
+    request_id: RequestId,
+    state_generation: u64,
+) -> Vec<EdgeCompletion> {
+    let Some(pending) = edge.pending.get_mut(&request_id) else {
+        return Vec::new();
+    };
+    if pending
+        .completion
+        .is_some_and(|completion| completion != event_id)
+        || edge
+            .by_completion
+            .get(&event_id)
+            .is_some_and(|owner| *owner != request_id)
+        || pending
+            .result
+            .as_ref()
+            .and_then(super::request::result_generation)
+            .is_some_and(|generation| generation != state_generation)
+    {
+        edge.fail_link(context, Violation::Consistency);
+        return Vec::new();
+    }
+    pending.completion = Some(event_id);
+    pending.completion_generation = Some(state_generation);
+    if pending.result.is_some() {
+        super::request::completed(edge, context, request_id)
+    } else {
+        edge.applied_completions.insert(event_id);
+        Vec::new()
+    }
+}
+
+/// A result arriving during storage must match the already staged event.
+pub(super) fn staged_completion_generation(
+    edge: &EdgeFederation,
+    request_id: RequestId,
+) -> Option<u64> {
+    match edge.commit.as_ref()? {
+        PendingCommit::Event {
+            header,
+            completion: Some(owner),
+        } if *owner == request_id => Some(header.coordinator_state_generation),
+        PendingCommit::BarrierApplied { .. } => edge
+            .barrier
+            .open
+            .as_ref()?
+            .base_events
+            .values()
+            .find_map(|(header, projected)| {
+                (matches!(projected, ProjectedEvent::RequestCompleted { .. })
+                    && header
+                        .correlation
+                        .is_some_and(|correlation| correlation.request_id == request_id))
+                .then_some(header.coordinator_state_generation)
+            }),
+        _ => None,
     }
 }
 
@@ -272,6 +404,7 @@ pub(super) fn stage_rows(
     context: &mut StateCoreContext,
     cursor: Option<(u64, EventId)>,
     pending: PendingCommit,
+    fanout: crate::state_core::fanout::FanoutRequest,
     build: impl FnOnce(&EdgeFederation, &StateCoreContext, u64) -> Vec<AccountServiceDurableWrite>,
 ) -> Result<(), Violation> {
     if edge.commit.is_some() {
@@ -284,8 +417,6 @@ pub(super) fn stage_rows(
     let revision = plan.resulting_revision().get();
     let mut writes = build(edge, context, revision);
     writes.push(edge.peer_row(cursor.or(edge.cursor), revision)?);
-    let fanout = crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())
-        .map_err(|_| Violation::Ceiling)?;
     context
         .stage_durable_with_account_service(plan, fanout, None, 0, writes)
         .map_err(|_| Violation::Ceiling)?;
@@ -318,9 +449,18 @@ impl EdgeFederation {
         revision: u64,
     ) -> Result<AccountServiceDurableWrite, Violation> {
         let record = FederationPeerRecord {
-            server_incarnation: [0; 16],
+            server_incarnation: self
+                .live
+                .as_ref()
+                .map(|live| live.coordinator_incarnation)
+                .or(self.installed_incarnation)
+                .map_or([0; 16], |id| *id.as_bytes()),
             recovery_epoch: self
-                .installed_epoch
+                .live
+                .as_ref()
+                .map(|live| live.coordinator_epoch)
+                .or(self.accepted_epoch)
+                .or(self.installed_epoch)
                 .map_or([0; 16], |epoch| *epoch.as_bytes()),
             accepted_epochs: Vec::new(),
             phase: if self.phase == Phase::Active {
@@ -339,7 +479,16 @@ impl EdgeFederation {
             active_entry_count: u64::try_from(self.replica.entry_count()).unwrap_or(u64::MAX),
             active_entry_bytes: 0,
             pending_generation: None,
-            snapshot_required: false,
+            snapshot_required: self
+                .live
+                .as_ref()
+                .map(|live| live.coordinator_epoch)
+                .or(self.accepted_epoch)
+                .is_some_and(|accepted| self.installed_epoch != Some(accepted))
+                || self.live.as_ref().is_some_and(|live| {
+                    self.installed_incarnation != Some(live.coordinator_incarnation)
+                })
+                || self.snapshot.is_some(),
             cleanup_cursor: None,
             quarantined: false,
             client_resync_epoch: self.client_resync_epoch,

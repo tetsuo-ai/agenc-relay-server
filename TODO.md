@@ -1994,10 +1994,11 @@ rediscover them.
 
 - Coordinator admission does not meter federated commands; the edge meters
   its own clients and the coordinator trusts the peer link.
-- An edge holds no account-service keys (spec 22.2). Account creation,
-  credential change, and SASL carriers on an edge answer
-  `FAIL <command> UNAVAILABLE`; forwarding sealed envelopes across the
-  federation is deferred with the cross-profile work.
+- An edge holds no account-service keys (spec 22.2). At Stage 07 closure,
+  account creation, credential change, and SASL carriers on an edge answered
+  `FAIL <command> UNAVAILABLE`. Sealed account-creation and login forwarding
+  are now implemented; registered credential replacement still answers
+  `UNAVAILABLE`.
 - An edge presents the certificate and key of its `federation` listener
   entry, which stays disabled because an edge never accepts. The
   configuration schema has no separate edge certificate field.
@@ -2021,11 +2022,13 @@ rediscover them.
 - A write that finds a link task already gone retires the link at once
   without counting a protocol violation; the owner's `Closed` event then
   finds nothing live.
-- Deferred: durable edge pending-request rows and edge startup reload (an
-  edge resynchronizes through a snapshot when its cursor is unknown), old
-  projection generation cleanup on the coordinator, a Loom model of link
+- Deferred: durable edge pending-request rows, old projection generation
+  cleanup on the coordinator, a Loom model of link
   replacement, pinned byte transcripts for the federation exchanges, and
   history queries, which answer `UNAVAILABLE`.
+- The subsequent review implemented edge startup reconstruction of durable
+  barriers, receipts, projections, and cursors. An edge resynchronizes through
+  a snapshot when its cursor is unknown.
 
 ## Stage 08 — E2EE server adapter and joint transactions
 
@@ -2514,12 +2517,12 @@ recorded here so a later reviewer does not have to rediscover them.
   it answers `E2EE_FINALITY_REQUIRED`.
 - Root binding lock chains are per (account digest, root fingerprint); a
   direct reservation comes from the smaller account of the pair.
-- Companion origins are not durable. A coordinator that reloaded accepts
-  the replayed `EORIGIN UPDATE` of an origin it acknowledged before,
-  anchored on the matched base origin, and continues the operation
-  sequence after its retained replay rows; the edge keeps its sequence
-  across a replayed declaration of the same generation and restarts it
-  only for a new generation.
+- Companion origin declarations are not durable. After reload, `EORIGIN ADD`
+  and `UPDATE` are anchored on the matched base origin and continue from the
+  durable origin floor. A generation with retained legacy replay history but
+  no matching floor is refused because partial history cannot prove its next
+  sequence. The edge keeps its sequence across a replayed declaration of the
+  same generation and restarts it only for a new generation.
 - A retired delivery generation never restarts: a new `ESTATE` scope opens
   the generation after the last durable cursor, and the edge resets the
   barrier owner's companion position when it installs one.
@@ -2535,11 +2538,13 @@ recorded here so a later reviewer does not have to rediscover them.
   re-verified, rosters and capabilities re-verified without their retired
   predecessors), binding lock chains, attachments, the KeyPackage stock and
   claims, mailboxes, replay rows and results, delivery cursors, routes,
-  logs, lifecycles, and per-conversation facts. Not reloaded, by design or
+  logs, lifecycles, ReInit attempts and terminal phases, and per-conversation
+  facts, accepted Commit validation times, durable origin sequence floors, and
+  successor BIND context digests. Edge startup reconstructs durable barrier
+  heads, immutable parts and payloads, receipts, projections, and cursors.
+  Not reloaded, by design or
   deferral: route reservations (short-lived), delivery stream rows (a
-  reconnecting edge opens a fresh scope), the `BIND` context digest, the
-  last accepted Commit validation time, in-progress ReInit phases, and
-  open barriers.
+  reconnecting edge opens a fresh scope), and the genesis `BIND` context digest.
 - The cross-implementation gate runs openmls and mls-rs as testkit-only
   dependencies; `.cargo/audit.toml` ignores RUSTSEC-2026-0173, an
   unmaintained compile-time proc macro that openmls_rust_crypto reaches
@@ -2547,11 +2552,17 @@ recorded here so a later reviewer does not have to rediscover them.
   contains; the daemon's own view of their framing is what is compared,
   and any deviation between the libraries is recorded in
   `conformance/e2ee-interop-matrix.toml` rather than hidden.
-- Deferred: origin operation sequences after the replay retention window
-  expires across a coordinator restart; a byte-identical retry of a local
-  submission the edge already answered gets no reply (the recent-object
-  cache is silent) and should re-render the prior outcome;
-  `reserve_direct` refusals for a bad route state map to
+- Completed local submissions retain a bounded reply for 30 minutes, scoped
+  to the connection, attached session, object, and full command parameters.
+  An identical retry receives the earlier outcome under its new label.
+  Durable origin floors survive replay expiry for requests committed by this
+  build. Legacy generations with retained replay history but no matching floor
+  are refused after restart. If all legacy history has expired, the daemon
+  cannot distinguish a used generation from one that never committed a request.
+  Replace uncertain legacy origins with a new authenticated generation or a
+  client reconnect; see the
+  [upgrade procedure](docs/operator-guide.md#upgrade-encrypted-federation-state).
+- Deferred: `reserve_direct` refusals for a bad route state map to
   `E2EE_GROUP_CONFLICT`; new 100 percent branch regions for the replay
   classifier, quorum math, barrier verification, and padding arithmetic
   wait for the next coverage round.
@@ -2563,9 +2574,9 @@ same day at exact source commit `ae6457fb62fef8961d3caf904febed580e8b4a91`
 supersedes the `52c7ccb`, `a6e3c54`, and `e751e9e` checkpoints (kept as history). Its
 interpretations: the server retains published policies per conversation under
 `policy/v1/` rows and keeps the current policy identifier as the policy the last
-finalization installed; the sequencer keeps a per-slot vote ledger in memory
-across requests, so a reload only forgets which principals already voted and
-never lowers the quorum; a vote whose signer is not a council principal or does
+finalization installed; the sequencer keeps a per-slot vote ledger across
+requests and restores counted votes from durable rows after a reload;
+a vote whose signer is not a council principal or does
 not verify fails the request with `E2EE_BINDING_AUTH_INVALID`, while a sign-once
 conflict discards the vote; an abort request names no policy, so the current
 policy governs it; a ReInit terminal is governed by the old conversation's
@@ -2574,8 +2585,7 @@ retained successor of the old policy; each counted vote is a durable `vote/v1/`
 row naming its request and terminal, and a reload restores the open slot's
 ledger from those rows so no read-back order can flip a principal's decision; a
 witness violation found while draining queued events records its row like a live
-one; the ReInit successor's own route binding (an activation-anchored log
-meeting `EGROUP BIND`) stays deferred with the other in-progress ReInit phases;
+one; the follow-up below completes ReInit successor route binding;
 every sequencer record refreshes the durable route row and the retained
 route-state object, which the witness at the edge exposed as missing (a
 route-state cut after a finalization, and a reload, advertised the binding-time
@@ -2584,6 +2594,23 @@ route sequence after the record that authorized it; the edge records a witness
 violation as a durable `witness/v1` row and closes the link, and logs never
 carry the identifiers; the `STORED POLICY` and `STORED AUTHORIZATION` lines name
 the request's conversation and subject, taken from the payload at ingress.
+
+The implementation review after that checkpoint corrected certificate vote
+assembly and startup restoration. Certificates now include all matching votes
+accepted across requests, including votes restored after a restart. Historical
+root and roster verification preserves accepted policies and votes after device
+retirement or root rotation. Reload restores active ReInit attempts, the next
+attempt sequence after an abort, the old conversation's migrated state, and the
+successor's log and lifecycle anchor. Successor BIND now consumes a dedicated
+reservation only for the retained activation's exact target binding, context,
+group, and member plan. It preserves the concrete route and semantic lock,
+checks the next binding generation and requesting principal, and retains the
+epoch-one activation anchor. Reload rechecks the activation, selects the current
+successor independently of row order, and rejects missing predecessor evidence.
+The coordinator retires the predecessor's live projection and entitlements.
+These changes do not update the recorded checkpoint. See the
+[implementation review follow-up](conformance/review/README.md#implementation-review-follow-up)
+for regression coverage; the external review task `S08-039` remains open.
 
 ## Stage 09 — Optional WSS and pinned history profiles
 

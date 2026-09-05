@@ -119,6 +119,8 @@ pub(super) fn resume_ok(
     }
     if let Some(live) = edge.live.as_ref() {
         edge.installed_epoch = Some(live.coordinator_epoch);
+        edge.accepted_epoch = Some(live.coordinator_epoch);
+        edge.installed_incarnation = Some(live.coordinator_incarnation);
     }
     edge.phase = Phase::Active;
     edge.note_phase();
@@ -300,6 +302,7 @@ fn write_install_rows(
         context,
         cursor,
         PendingCommit::SnapshotInstalled,
+        super::render::EventFanout::default().finish()?,
         |edge, _, revision| install_rows(edge, start, end, revision),
     )
 }
@@ -404,6 +407,8 @@ pub(super) fn snapshot_active(
     }
     edge.snapshot = None;
     edge.installed_epoch = Some(identity.recovery_epoch);
+    edge.accepted_epoch = Some(identity.recovery_epoch);
+    edge.installed_incarnation = edge.live.as_ref().map(|live| live.coordinator_incarnation);
     edge.phase = Phase::Active;
     edge.note_phase();
     request::resend_pending(edge, context);

@@ -2114,7 +2114,7 @@ fn activate_bootstrap(
         },
         &[(&binder.keys, binder.device)],
     )?;
-    let core = IrcFinalizationCoreTbs {
+    let mut core = IrcFinalizationCoreTbs {
         profile_version: 1,
         network_id: network,
         conversation_id: conversation,
@@ -2133,7 +2133,6 @@ fn activate_bootstrap(
         resulting_ratchet_tree_digest: [2; 32],
         finalization_authenticator: [4; 32],
     };
-    let finalization_id = semantic_id_of(SemanticHashDomain::FinalizationId, &core)?;
     let ack = IrcCommitAck {
         tbs: IrcCommitAckTbs {
             profile_version: 1,
@@ -2151,6 +2150,11 @@ fn activate_bootstrap(
         },
         old_leaf_signature: Opaque::new(vec![6; 64])?,
     };
+    core.acknowledgement_set_digest = e2ee::ids::proof_set_digest(
+        SemanticHashDomain::AcknowledgementSet,
+        std::slice::from_ref(&ack.tbs),
+    )?;
+    let finalization_id = semantic_id_of(SemanticHashDomain::FinalizationId, &core)?;
     let slot = VoteSlot {
         network_id: network,
         conversation_id: conversation,
@@ -2187,6 +2191,20 @@ fn activate_bootstrap(
         &format!(" EGROUP FINALIZED {conversation_token} 1 "),
     )?;
     assert_eq!(hash_at(&reply, "FINALIZED", 5)?, finalization_id);
+    // An identical retry returns the committed result under the new label.
+    let retry_label = binder.label();
+    send_object(
+        client,
+        &retry_label,
+        &format!("EGROUP SUBMIT FINALIZATION {conversation_token}"),
+        &request,
+    )?;
+    let replay = labeled_reply(client, &retry_label)?;
+    assert_contains(
+        &replay,
+        &format!(" EGROUP FINALIZED {conversation_token} 1 "),
+    )?;
+    assert_eq!(hash_at(&replay, "FINALIZED", 5)?, finalization_id);
     Ok(finalization_id)
 }
 
@@ -2199,11 +2217,17 @@ fn send_application(
     latest_state_id: [u8; 32],
     epoch: u64,
 ) -> TestResult<Vec<u8>> {
-    send_application_variant(sender, principal, bound, latest_state_id, epoch, 0)
+    let message = send_application_variant(sender, principal, bound, latest_state_id, epoch, 0)?;
+    let retry_label = principal.label();
+    send_object(sender, &retry_label, &bound.application_command(), &message)?;
+    let echo = labeled_reply(sender, &retry_label)?;
+    assert_contains(&echo, &bound.application_marker())?;
+    assert_eq!(fragments_object(&echo)?, message);
+    Ok(message)
 }
 
 /// Sends one application message whose ciphertext ends in `variant`, so a
-/// retry is a fresh object rather than a repeat the edge already answered.
+/// load round submits a distinct object.
 fn send_application_variant(
     sender: &mut IrcClient,
     principal: &mut Principal,
@@ -2961,7 +2985,7 @@ mod real_clients {
             },
             &[(&binder.keys, binder.device)],
         )?;
-        let core = IrcFinalizationCoreTbs {
+        let mut core = IrcFinalizationCoreTbs {
             profile_version: 1,
             network_id: network,
             conversation_id: conversation,
@@ -2980,7 +3004,6 @@ mod real_clients {
             resulting_ratchet_tree_digest: [2; 32],
             finalization_authenticator: [4; 32],
         };
-        let finalization_id = semantic_id_of(SemanticHashDomain::FinalizationId, &core)?;
         let ack = IrcCommitAck {
             tbs: IrcCommitAckTbs {
                 profile_version: 1,
@@ -2998,6 +3021,11 @@ mod real_clients {
             },
             old_leaf_signature: Opaque::new(vec![6; 64])?,
         };
+        core.acknowledgement_set_digest = e2ee::ids::proof_set_digest(
+            SemanticHashDomain::AcknowledgementSet,
+            std::slice::from_ref(&ack.tbs),
+        )?;
+        let finalization_id = semantic_id_of(SemanticHashDomain::FinalizationId, &core)?;
         let ack_object = wire_object(IrcWireObjectKind::CommitAck, &ack)?;
         let label = binder.label();
         send_object(

@@ -38,6 +38,14 @@ pub const SECURITY_MUTATION_REPLAY_SECONDS: u64 = 7 * 24 * 60 * 60;
 /// state core while the base view is borrowed.
 const ENTROPY_POOL_BLOCKS: usize = 64;
 
+#[cfg(test)]
+#[path = "tests/origin_replay.rs"]
+mod origin_replay;
+
+#[cfg(test)]
+#[path = "tests/successor_authority.rs"]
+mod successor_authority;
+
 /// A bounded pool of random bytes drawn from the state core up front.
 struct EntropyPool {
     blocks: Vec<[u8; 32]>,
@@ -342,7 +350,7 @@ fn execute(
         })
     };
     let plan_binding = |channel: ChannelInstanceId, principals: &[[u8; 24]]| {
-        binding_plan(domain, user_id, channel, principals).map(Some)
+        binding_plan(domain, user_id, channel, principals)
     };
     let mut exec = Exec {
         coordinator,
@@ -381,7 +389,11 @@ fn project_routes(exec: &Exec<'_>, outcome: &mut Outcome) {
     let mut entitled: Vec<(ServerId, [u8; 32], bool)> = Vec::new();
     let mut projected = Vec::new();
     for content in &outcome.events {
-        let Some(conversation) = content.planned.conversation_id else {
+        let Some(conversation) = content.planned.conversation_id.filter(|id| {
+            state
+                .routes
+                .is_current(&agenc_ircd_domain::e2ee::ConversationId(*id))
+        }) else {
             continue;
         };
         let target = content.planned.target;
@@ -459,9 +471,12 @@ fn binding_plan(
     user_id: Option<UserId>,
     channel: ChannelInstanceId,
     principals: &[[u8; 24]],
-) -> Result<agenc_ircd_domain::MutationPlan, E2eeReplyCode> {
+) -> Result<Option<agenc_ircd_domain::MutationPlan>, E2eeReplyCode> {
     let actor = user_id.ok_or(E2eeReplyCode::AccountRequired)?;
     let state = domain.channel(channel).ok_or(E2eeReplyCode::RouteInvalid)?;
+    if state.role_of(actor) != Some(agenc_ircd_domain::Role::Owner) {
+        return Err(E2eeReplyCode::BindingAuthInvalid);
+    }
     let mut roster = Vec::new();
     let mut accounts: Vec<[u8; 24]> = Vec::new();
     for member in state.members() {
@@ -484,10 +499,14 @@ fn binding_plan(
     if accounts != expected {
         return Err(E2eeReplyCode::BindingAuthInvalid);
     }
+    if state.content_policy() == agenc_ircd_domain::ContentPolicy::E2eeBound {
+        return Ok(None);
+    }
     let proof = agenc_ircd_domain::E2eeBindingProof::new(channel, state.revision(), roster)
         .map_err(|_| E2eeReplyCode::BindingAuthInvalid)?;
     domain
         .plan_e2ee_binding(actor, proof)
+        .map(Some)
         .map_err(|_| E2eeReplyCode::BindingAuthInvalid)
 }
 
@@ -658,6 +677,20 @@ fn assemble(
         retain_until,
     )?;
     writes.push(replay_write);
+    let origin_key = CompanionOriginKey {
+        home_server_id: home,
+        server_incarnation: decoded.request.server_incarnation,
+        origin_id: decoded.request.origin_id,
+    };
+    let sequence = agenc_ircd_storage::e2ee_records::origin::OriginSequenceRow {
+        origin_generation: decoded.request.origin_generation,
+        next_sequence: decoded
+            .request
+            .operation_sequence
+            .checked_add(1)
+            .ok_or(E2eeReplyCode::InvalidFragment)?,
+    };
+    writes.push(request::origin_sequence_write(&origin_key, sequence)?);
     // An operation may retain the same object it also returns as a
     // response (an attach challenge, a delivered mailbox item); one batch
     // puts each object row once.
@@ -680,20 +713,16 @@ fn assemble(
     };
     let response_bytes = responses.clone();
     let result_bytes = result.clone();
-    let origin_key = CompanionOriginKey {
-        home_server_id: home,
-        server_incarnation: decoded.request.server_incarnation,
-        origin_id: decoded.request.origin_id,
-    };
     effects.push(Box::new(move |state| {
         state.replays.insert(key, row);
+        state.origin_sequences.insert(origin_key, sequence);
         state.results.insert(request_object_id, stored);
         for bytes in response_bytes {
             let _ = CompanionCoordinator::retain_object(state, bytes);
         }
         let _ = CompanionCoordinator::retain_object(state, result_bytes);
         if let Some(origin) = state.origins.get_mut(&origin_key) {
-            origin.next_sequence = origin.next_sequence.saturating_add(1);
+            origin.next_sequence = sequence.next_sequence;
         }
         for (target, stream) in streams {
             state.streams.insert(target, stream);

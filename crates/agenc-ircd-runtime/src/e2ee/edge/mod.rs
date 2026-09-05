@@ -6,13 +6,19 @@
 //! apply; and until the companion link reaches `STATE_ACTIVE` every E2EE
 //! command fails with `E2EE_SYNCING`.
 
+mod completion;
 mod events;
 mod origins;
+mod projection;
+mod response_validation;
 mod result;
+mod retry;
 mod router;
+mod startup;
 mod sync;
 #[cfg(test)]
 mod tests;
+mod witness_checkpoint;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -113,6 +119,9 @@ pub(crate) struct LocalOrigin {
 
 /// One request awaiting its result, its responses, and its completion.
 pub(crate) struct PendingRequest {
+    pub(super) reply_key: Option<retry::ReplyKey>,
+    pub(super) echo_lines: Vec<String>,
+    pub(super) retry_label: Option<Option<String>>,
     pub(crate) generation: ConnectionGeneration,
     pub(crate) label: Option<String>,
     pub(crate) command: router::Resolved,
@@ -126,6 +135,8 @@ pub(crate) struct PendingRequest {
     /// a resume while the result is outstanding.
     pub(crate) frames: Vec<agenc_ircd_e2ee::federation::frames::CompanionFrame>,
     pub(crate) result: Option<DecodedResult>,
+    /// Exact result envelope identity, retained to reject conflicting duplicates.
+    pub(super) result_object_id: Option<[u8; 32]>,
     pub(crate) responses: BTreeMap<u16, Vec<u8>>,
     pub(crate) completion_seen: bool,
     pub(crate) rendered: bool,
@@ -141,11 +152,12 @@ pub(crate) struct Ingress {
 pub(crate) enum PendingCommit {
     /// An event applied; its EACK goes out on commit.
     Event {
+        completion: completion::PreparedCompletion,
         position: agenc_ircd_e2ee::federation::frames::DeliveryPosition,
         outputs: Vec<ClientOutput>,
     },
     /// The READY of a snapshot was recorded.
-    Ready,
+    Ready { delivery_generation: u64 },
     /// A witness violation row was recorded; the link is already closing.
     Witness,
 }
@@ -156,9 +168,13 @@ type BarrierParts = BTreeMap<u16, (events::OpenEvent, Option<Vec<u8>>)>;
 
 /// The edge E2EE router.
 pub struct E2eeEdge {
+    projection_before: Option<projection::ProjectionBefore>,
+    barrier_completions: Vec<completion::PreparedCompletion>,
+    replies: retry::Replies,
     config: E2eeEdgeConfig,
     phase: Phase,
     delivery: sync::DeliveryState,
+    legacy_cursor: bool,
     snapshot: Option<sync::SnapshotInstall>,
     origins: BTreeMap<ConnectionGeneration, LocalOrigin>,
     pending: BTreeMap<[u8; 16], PendingRequest>,
@@ -207,9 +223,13 @@ impl E2eeEdge {
     #[must_use]
     pub fn new(config: E2eeEdgeConfig) -> Self {
         Self {
+            projection_before: None,
+            barrier_completions: Vec::new(),
+            replies: retry::Replies::default(),
             config,
             phase: Phase::Down,
             delivery: sync::DeliveryState::default(),
+            legacy_cursor: true,
             snapshot: None,
             origins: BTreeMap::new(),
             pending: BTreeMap::new(),
@@ -259,11 +279,11 @@ impl E2eeEdge {
     /// Whether the companion link and every retained assembly of a closed
     /// link are gone.
     pub fn link_down(&mut self) {
+        self.barrier_completions.clear();
         self.phase = Phase::Down;
         self.snapshot = None;
         self.queued.clear();
         self.events_in.clear();
-        self.barrier_parts.clear();
         self.barrier_pending = None;
         for origin in self.origins.values_mut() {
             origin.declared = None;
@@ -274,6 +294,7 @@ impl E2eeEdge {
     /// A client connection ended: its origin, ingress, and pending
     /// requests are gone; a result that still arrives is dropped.
     pub fn connection_closed(&mut self, generation: ConnectionGeneration) {
+        self.replies.disconnect(generation);
         self.origins.remove(&generation);
         if let Some(ingress) = self.ingress.remove(&generation) {
             self.assembler.discard(&ingress.key);

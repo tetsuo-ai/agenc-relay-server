@@ -40,6 +40,65 @@ const CONVERSATION: [u8; 32] = [20; 32];
 const ACCOUNT: [u8; 32] = [21; 32];
 const DEVICE: [u8; 16] = [7; 16];
 
+#[test]
+fn origin_sequence_floors_bind_exact_keys_and_reject_replay_bodies() -> TestResult {
+    use agenc_ircd_storage::e2ee_records::origin::{OriginSequenceKey, OriginSequenceRow};
+
+    let parts = OriginSequenceKey {
+        home_server_id: [1; 16],
+        server_incarnation: [2; 16],
+        origin_id: [3; 16],
+    };
+    let key = OriginSequenceRow::key(&parts)?;
+    assert_eq!(OriginSequenceRow::parse_key(&key)?, parts);
+    assert_eq!(key.as_bytes().len(), prefix::ORIGIN_SEQUENCE.len() + 48);
+    assert_eq!(record_kind_for_key(&key)?, REPLAY_ROW_KIND);
+    assert!(ReplayRow::parse_key(&key).is_err());
+    let mut shortened = key.as_bytes().to_vec();
+    shortened.pop();
+    assert!(OriginSequenceRow::parse_key(&StoredKey::new(shortened)?).is_err());
+    let mut extended = key.as_bytes().to_vec();
+    extended.push(0);
+    assert!(OriginSequenceRow::parse_key(&StoredKey::new(extended)?).is_err());
+
+    assert!(
+        OriginSequenceRow {
+            origin_generation: 0,
+            next_sequence: 0
+        }
+        .encode()
+        .is_err()
+    );
+    for next_sequence in [1, u64::MAX] {
+        let row = OriginSequenceRow {
+            origin_generation: 7,
+            next_sequence,
+        };
+        let body = row.encode()?;
+        assert_eq!(OriginSequenceRow::decode(&body)?, row);
+        assert!(ReplayRow::decode(&body).is_err());
+        validate_state_body(REPLAY_ROW_KIND, &body)?;
+        for length in 0..body.len() {
+            assert!(
+                OriginSequenceRow::decode(body.get(..length).ok_or("invalid test slice")?).is_err()
+            );
+        }
+        PersistentRecordValue::new(
+            TableId::E2eeState,
+            REPLAY_ROW_KIND,
+            1,
+            1,
+            None,
+            Vec::new(),
+            body,
+        )?;
+    }
+    let replay = agenc_ircd_storage::e2ee_records::fixtures::state_body(REPLAY_ROW_KIND, 1)?;
+    assert!(OriginSequenceRow::decode(&replay).is_err());
+    assert!(OriginSequenceRow::decode(&route_row().encode()?).is_err());
+    Ok(())
+}
+
 fn object_bytes(kind: IrcWireObjectKind, body_len: usize) -> Result<Vec<u8>, Box<dyn Error>> {
     Ok(IrcWireObject::new(kind, vec![9; body_len])?.encode()?)
 }
@@ -493,6 +552,43 @@ fn sequencer_rows_round_trip_and_keep_slot_invariants() -> TestResult {
     };
     assert!(SequencerRow::decode(&ack_with_slot.encode()?).is_err());
     assert!(SequencerRow::decode(&route_row().encode()?).is_err());
+    Ok(())
+}
+
+#[test]
+fn vote_rows_reject_unknown_terminal_slots_before_storage() -> TestResult {
+    for slot in [0, 3, u16::MAX] {
+        let body = SequencerRow::Proof {
+            role: ProofRole::Vote,
+            object_id: [7; 32],
+            slot,
+        }
+        .encode()?;
+        assert_eq!(
+            SequencerRow::decode(&body),
+            Err(StorageError::InvalidEncoding)
+        );
+        assert!(
+            PersistentRecordValue::new(
+                TableId::E2eeState,
+                SEQUENCER_ROW_KIND,
+                1,
+                0,
+                None,
+                Vec::new(),
+                body,
+            )
+            .is_err()
+        );
+    }
+    for slot in [1, 2] {
+        let row = SequencerRow::Proof {
+            role: ProofRole::Vote,
+            object_id: [7; 32],
+            slot,
+        };
+        assert_eq!(SequencerRow::decode(&row.encode()?)?, row);
+    }
     Ok(())
 }
 

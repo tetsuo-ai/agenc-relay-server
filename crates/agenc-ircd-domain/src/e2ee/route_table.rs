@@ -9,6 +9,8 @@ use agenc_ircd_types::{AccountId, ChannelInstanceId};
 
 use crate::error::DomainError;
 
+mod successor;
+
 /// A 32-byte conversation identifier.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ConversationId(pub [u8; 32]);
@@ -204,6 +206,7 @@ pub struct RouteTable {
     by_pair: BTreeMap<DirectPair, ConversationId>,
     locks: BTreeMap<SemanticLockId, ConversationId>,
     reservations: BTreeMap<ReservationId, RouteReservation>,
+    successor_reservations: BTreeMap<ReservationId, ConversationId>,
 }
 
 impl RouteTable {
@@ -330,6 +333,8 @@ impl RouteTable {
         let before = self.reservations.len();
         self.reservations
             .retain(|_, reservation| reservation.expires_at > now);
+        self.successor_reservations
+            .retain(|id, _| self.reservations.contains_key(id));
         before.saturating_sub(self.reservations.len())
     }
 
@@ -344,6 +349,9 @@ impl RouteTable {
         summary: BindingSummary,
         now: u64,
     ) -> Result<RouteEntry, RouteConflict> {
+        if self.successor_reservations.contains_key(&reservation_id) {
+            return Err(RouteConflict::BadState);
+        }
         let reservation = self
             .reservations
             .get(&reservation_id)
@@ -573,7 +581,42 @@ impl RouteTable {
 
     /// Restores one entry from durable state without lineage checks.
     pub fn restore_entry(&mut self, entry: RouteEntry) {
+        let current = match entry.target {
+            RouteTarget::Channel(channel) => self.channel_route(&channel),
+            RouteTarget::Direct(pair) => self.direct_route(&pair),
+        };
+        if current.is_some_and(|known| {
+            known.lock == entry.lock
+                && known.incarnation == entry.incarnation
+                && known.binding_generation > entry.binding_generation
+        }) {
+            self.routes.entry(entry.conversation_id).or_insert(entry);
+            return;
+        }
         self.insert_route(entry);
+    }
+
+    /// Forgets an edge projection whose entitlement ended, including its
+    /// target and lock indexes. This does not authorize removal of an
+    /// authoritative coordinator binding or tombstone.
+    pub fn remove_projection(&mut self, conversation_id: &ConversationId) {
+        let Some(entry) = self.routes.remove(conversation_id) else {
+            return;
+        };
+        match entry.target {
+            RouteTarget::Channel(channel)
+                if self.by_channel.get(&channel) == Some(conversation_id) =>
+            {
+                self.by_channel.remove(&channel);
+            }
+            RouteTarget::Direct(pair) if self.by_pair.get(&pair) == Some(conversation_id) => {
+                self.by_pair.remove(&pair);
+            }
+            RouteTarget::Channel(_) | RouteTarget::Direct(_) => {}
+        }
+        if self.locks.get(&entry.lock) == Some(conversation_id) {
+            self.locks.remove(&entry.lock);
+        }
     }
 }
 

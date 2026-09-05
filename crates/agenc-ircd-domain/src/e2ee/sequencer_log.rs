@@ -231,6 +231,45 @@ impl SequencerLog {
         }
     }
 
+    /// Restores the attempt position of a log whose durable phase is
+    /// [`Phase::Reinit`]. An active receipt keeps its original predecessor;
+    /// after an abort the next attempt follows the terminal head.
+    pub fn restore_reinit(
+        &mut self,
+        attempt: Option<AttemptSlot>,
+        next_attempt_sequence: u32,
+    ) -> Result<(), LogError> {
+        let Phase::Reinit {
+            old_reinit_state_id,
+        } = self.phase
+        else {
+            return Err(LogError::NotReinit);
+        };
+        if self.candidate.is_some() || old_reinit_state_id != self.accepted_state_id {
+            return Err(LogError::EpochStale);
+        }
+        if next_attempt_sequence > MAX_CANDIDATE_ATTEMPTS_PER_EPOCH {
+            return Err(LogError::AttemptsExhausted);
+        }
+        if let Some(slot) = attempt {
+            if !self.head.recorded
+                || slot.attempt_id != self.head.record_id
+                || slot.route_sequence != self.head.sequence
+                || slot.attempt_sequence != next_attempt_sequence
+            {
+                return Err(LogError::EpochStale);
+            }
+            if next_attempt_sequence == MAX_CANDIDATE_ATTEMPTS_PER_EPOCH {
+                return Err(LogError::AttemptsExhausted);
+            }
+        }
+        self.reinit_attempt = attempt;
+        self.next_attempt_sequence = next_attempt_sequence;
+        self.next_predecessor =
+            attempt.map_or(self.head.record_id, |slot| slot.predecessor_record_id);
+        Ok(())
+    }
+
     /// Conversation identifier.
     #[must_use]
     pub const fn conversation_id(&self) -> &Id {

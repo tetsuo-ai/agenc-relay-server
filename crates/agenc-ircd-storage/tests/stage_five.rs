@@ -6,6 +6,7 @@ mod domain_records;
 mod e2ee_records;
 mod federation_records;
 mod recovery_matrix;
+mod witness_cursor;
 
 use std::error::Error;
 use std::fs;

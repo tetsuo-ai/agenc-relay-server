@@ -25,9 +25,10 @@ use crate::state_core::StateCoreContext;
 use crate::state_core::durable::AccountServiceDurableWrite;
 
 /// The open barrier with the decoded base events it will apply.
+#[derive(Clone)]
 pub(super) struct OpenBarrier {
-    assembly: BarrierAssembly,
-    base_events: BTreeMap<u16, (EventHeader, ProjectedEvent)>,
+    pub(super) assembly: BarrierAssembly,
+    pub(super) base_events: BTreeMap<u16, (EventHeader, ProjectedEvent)>,
 }
 
 /// The barrier state the edge keeps beside its replica.
@@ -38,7 +39,7 @@ pub(super) struct BarrierState {
     /// Receipts of applied barriers by mutation identity.
     pub(super) applied: BTreeMap<[u8; 16], BarrierReceipt>,
     /// Parts of an applied barrier seen again since its receipt.
-    replayed: BTreeMap<[u8; 16], BTreeSet<u16>>,
+    pub(super) replayed: BTreeMap<[u8; 16], BTreeSet<u16>>,
     /// The companion delivery generation in use.
     pub(super) companion_generation: u64,
     /// The last companion position acknowledged.
@@ -46,6 +47,14 @@ pub(super) struct BarrierState {
     /// A complete assembly whose parts are all durable, awaiting the apply
     /// transaction the E2EE router joins with its companion writes.
     pub(super) ready: bool,
+    rollback: Option<ProjectionBackup>,
+    /// Collecting heads superseded by a durably accepted coordinator identity.
+    pub(super) fenced: BTreeMap<[u8; 16], super::fence::FencedBarrier>,
+}
+
+struct ProjectionBackup {
+    replica: agenc_ircd_domain::federation::EdgeReplica,
+    nicknames: BTreeMap<agenc_ircd_types::UserId, agenc_ircd_domain::NicknameValue>,
 }
 
 impl BarrierState {
@@ -98,7 +107,7 @@ pub(super) fn base_part(
         payload_object_id: None,
         payload_object_bytes: 0,
     };
-    stage_part(edge, context, part, Some((header, projected)))
+    stage_part(edge, context, part, Some((header, projected)), None)
 }
 
 /// A companion EEVENT part handed over by the E2EE router.
@@ -106,6 +115,7 @@ pub(super) fn companion_part(
     edge: &mut EdgeFederation,
     context: &mut StateCoreContext,
     part: BarrierPart,
+    payload: Option<Vec<u8>>,
 ) -> Result<(), Violation> {
     let expected = identity(
         edge,
@@ -119,7 +129,7 @@ pub(super) fn companion_part(
     if part.identity != expected || part.stream != CrossProfileStream::Companion {
         return Err(Violation::Consistency);
     }
-    stage_part(edge, context, part, None)
+    stage_part(edge, context, part, None, payload)
 }
 
 /// Stages one part: a replay of an applied barrier is answered from its
@@ -130,18 +140,19 @@ fn stage_part(
     context: &mut StateCoreContext,
     part: BarrierPart,
     base_event: Option<(EventHeader, ProjectedEvent)>,
+    payload: Option<Vec<u8>>,
 ) -> Result<(), Violation> {
     let mutation_id = part.identity.mutation_id;
     if edge.barrier.applied.contains_key(&mutation_id) {
         return replayed_part(edge, context, &part);
     }
-    let open = match edge.barrier.open.as_mut() {
-        Some(open) if open.assembly.identity().mutation_id == mutation_id => open,
+    let mut open = match edge.barrier.open.as_ref() {
+        Some(open) if open.assembly.identity().mutation_id == mutation_id => open.clone(),
         Some(_) => return Err(Violation::Consistency),
-        None => edge.barrier.open.insert(OpenBarrier {
+        None => OpenBarrier {
             assembly: BarrierAssembly::open(part.identity).map_err(|_| Violation::Consistency)?,
             base_events: BTreeMap::new(),
-        }),
+        },
     };
     match open.assembly.stage(part.clone()) {
         Ok(Staged::Duplicate) => return Ok(()),
@@ -152,28 +163,74 @@ fn stage_part(
         open.base_events.insert(part.part_index, event);
     }
     let head = BarrierHead::Stage(open.assembly.head().clone());
-    let identity = part.identity;
+    let revision = context
+        .domain()
+        .plan_account_service_checkpoint()
+        .map_err(|_| Violation::Ceiling)?
+        .resulting_revision()
+        .get();
+    let mut writes = vec![
+        barrier_row(edge, revision, part.identity.head_key(), head.encode())?,
+        barrier_row(
+            edge,
+            revision,
+            part.identity.part_key(part.part_index),
+            part.encode(),
+        )?,
+    ];
+    if let Some(write) = payload_row(edge, context, &part, payload, revision)? {
+        writes.push(write);
+    }
     super::events::stage_rows(
         edge,
         context,
         None,
-        PendingCommit::BarrierPart,
-        |edge, _, revision| {
-            let mut writes = Vec::new();
-            if let Some(write) = barrier_row(edge, revision, identity.head_key(), head.encode()) {
-                writes.push(write);
-            }
-            if let Some(write) = barrier_row(
-                edge,
-                revision,
-                identity.part_key(part.part_index),
-                part.encode(),
-            ) {
-                writes.push(write);
-            }
-            writes
-        },
+        PendingCommit::BarrierPart(Box::new(open)),
+        super::render::EventFanout::default().finish()?,
+        |_, _, _| writes,
     )
+}
+
+fn payload_row(
+    edge: &EdgeFederation,
+    context: &StateCoreContext,
+    part: &BarrierPart,
+    payload: Option<Vec<u8>>,
+    revision: u64,
+) -> Result<Option<AccountServiceDurableWrite>, Violation> {
+    use agenc_ircd_storage::e2ee_records::{OBJECT_RECORD_KIND, ObjectRow};
+    let Some(bytes) = payload else {
+        return if part.payload_object_id.is_none() {
+            Ok(None)
+        } else {
+            Err(Violation::Consistency)
+        };
+    };
+    if part.payload_object_id != Some(*agenc_ircd_e2ee::ObjectId::compute(&bytes).as_bytes())
+        || usize::try_from(part.payload_object_bytes).ok() != Some(bytes.len())
+    {
+        return Err(Violation::Consistency);
+    }
+    let row = ObjectRow::new(bytes).map_err(|_| Violation::Codec)?;
+    let key = row.key().map_err(|_| Violation::Codec)?;
+    if context
+        .index()
+        .existing(TableId::E2eeObject, &key)
+        .map_err(|_| Violation::Ceiling)?
+        .is_some()
+    {
+        return Ok(None);
+    }
+    edge.row_write(
+        TableId::E2eeObject,
+        OBJECT_RECORD_KIND,
+        key,
+        revision,
+        0,
+        row.encode().map_err(|_| Violation::Codec)?,
+    )
+    .map(Some)
+    .map_err(|_| Violation::Codec)
 }
 
 fn barrier_row(
@@ -181,16 +238,16 @@ fn barrier_row(
     revision: u64,
     key: Result<agenc_ircd_storage::StoredKey, agenc_ircd_storage::StorageError>,
     body: Result<Vec<u8>, agenc_ircd_storage::StorageError>,
-) -> Option<AccountServiceDurableWrite> {
+) -> Result<AccountServiceDurableWrite, Violation> {
     edge.row_write(
         TableId::E2eeState,
         BARRIER_ROW_KIND,
-        key.ok()?,
+        key.map_err(|_| Violation::Codec)?,
         revision,
         0,
-        body.ok()?,
+        body.map_err(|_| Violation::Codec)?,
     )
-    .ok()
+    .map_err(|_| Violation::Codec)
 }
 
 /// A part of an already applied barrier: it must match the receipt, and
@@ -224,7 +281,7 @@ fn replayed_part(
 type LastEntries = ((u64, [u8; 16]), (u64, u64, [u8; 16]));
 
 /// The last base and companion entries of a receipt.
-fn last_entries(receipt: &BarrierReceipt) -> Option<LastEntries> {
+pub(super) fn last_entries(receipt: &BarrierReceipt) -> Option<LastEntries> {
     let base = receipt
         .entries
         .iter()
@@ -300,7 +357,8 @@ pub(super) fn send_companion_ack(
 
 /// A staged part committed: a complete set is ready to apply once the E2EE
 /// router has produced the writes of its companion parts.
-pub(super) fn part_committed(edge: &mut EdgeFederation, _context: &mut StateCoreContext) {
+pub(super) fn part_committed(edge: &mut EdgeFederation, open: OpenBarrier) {
+    edge.barrier.open = Some(open);
     let complete = edge
         .barrier
         .open
@@ -314,7 +372,7 @@ pub(super) fn part_committed(edge: &mut EdgeFederation, _context: &mut StateCore
 /// The mutation identity of a complete barrier awaiting its apply, when
 /// the batch slot is free to take it.
 pub(super) fn ready_mutation(edge: &EdgeFederation) -> Option<[u8; 16]> {
-    if !edge.barrier.ready || edge.commit.is_some() {
+    if !edge.barrier.ready || edge.commit.is_some() || edge.phase != super::Phase::Active {
         return None;
     }
     edge.barrier
@@ -323,16 +381,10 @@ pub(super) fn ready_mutation(edge: &EdgeFederation) -> Option<[u8; 16]> {
         .map(|open| open.assembly.identity().mutation_id)
 }
 
-/// Applies the complete barrier in one transaction: every base event to
-/// the replica in index order, the E2EE router's rows for the companion
-/// parts, the receipt, both cursors, and the removal of the staged rows.
-pub(super) fn apply(
-    edge: &mut EdgeFederation,
-    context: &mut StateCoreContext,
-    companion_writes: Vec<AccountServiceDurableWrite>,
-) -> Result<(), Violation> {
-    edge.barrier.ready = false;
-    let open = edge.barrier.open.take().ok_or(Violation::Consistency)?;
+fn verified_partition(
+    edge: &EdgeFederation,
+    open: &OpenBarrier,
+) -> Result<crate::e2ee::barrier::Partition, Violation> {
     let base_cursor = StreamCursor {
         generation: edge.replica.projection_generation(),
         next_sequence: edge
@@ -353,82 +405,130 @@ pub(super) fn apply(
     if open.base_events.len() != usize::from(partition.base_parts) {
         return Err(Violation::Consistency);
     }
-    let (upserted, removed) = apply_base_events(edge, context, &open)?;
-    let now = context
-        .utc_now()
-        .map(|second| second.get())
-        .map_err(|_| Violation::Ceiling)?;
-    let receipt = open.assembly.receipt(
-        0,
-        edge.replica.projection_generation(),
-        now,
-        now.saturating_add(BARRIER_RETENTION_SECONDS),
-    );
+    Ok(partition)
+}
+
+/// Applies the complete barrier in one transaction: every base event to
+/// the replica in index order, the E2EE router's rows for the companion
+/// parts, the receipt, both cursors, retaining the immutable parts for replay.
+pub(super) fn apply(
+    edge: &mut EdgeFederation,
+    context: &mut StateCoreContext,
+    companion_writes: Vec<AccountServiceDurableWrite>,
+    companion_outputs: Vec<crate::e2ee::edge::ClientOutput>,
+) -> Result<(), Violation> {
+    if context.pending_len() != 0 || context.in_flight() || edge.commit.is_some() {
+        return Err(Violation::Ceiling);
+    }
+    edge.barrier.rollback = Some(ProjectionBackup {
+        replica: edge.replica.clone(),
+        nicknames: edge.nicknames.clone(),
+    });
+    let outcome = apply_complete(edge, context, companion_writes, companion_outputs);
+    if outcome.is_err() {
+        rejected(edge);
+    }
+    outcome
+}
+
+fn apply_complete(
+    edge: &mut EdgeFederation,
+    context: &mut StateCoreContext,
+    companion_writes: Vec<AccountServiceDurableWrite>,
+    companion_outputs: Vec<crate::e2ee::edge::ClientOutput>,
+) -> Result<(), Violation> {
+    let open = edge
+        .barrier
+        .open
+        .as_ref()
+        .cloned()
+        .ok_or(Violation::Consistency)?;
+    let partition = verified_partition(edge, &open)?;
+    let mut fanout = super::render::EventFanout::default();
+    let (upserted, removed) = apply_base_events(edge, context, &open, &mut fanout)?;
+    for output in companion_outputs {
+        fanout.append(context, output.generation, output.frames)?;
+    }
+    let receipt = applied_receipt(context, &open)?;
     let identity = *open.assembly.identity();
     // A stream position is (generation, sequence, event); the base cursor
     // keeps the sequence and the event.
     let (_, base_sequence, base_event) = partition.base_last;
     let cursor = Some((base_sequence, EventId::from_bytes(base_event)));
+    let receipt_write = barrier_row(
+        edge,
+        receipt.applied_local_state_generation,
+        identity.head_key(),
+        BarrierHead::Receipt(receipt.clone()).encode(),
+    )?;
     let pending = PendingCommit::BarrierApplied {
         receipt: Box::new(receipt.clone()),
         base_last: (base_sequence, EventId::from_bytes(base_event)),
         companion_last: partition.companion_last,
     };
-    super::events::stage_rows(edge, context, cursor, pending, |edge, context, revision| {
-        let mut writes = apply_rows(
-            edge, context, revision, &identity, &receipt, &upserted, &removed,
-        );
-        writes.extend(
-            companion_writes
-                .into_iter()
-                .filter_map(|write| write.at_revision(revision).ok()),
-        );
-        writes
-    })
+    let revision = receipt.applied_local_state_generation;
+    let mut writes = apply_rows(edge, context, revision, &upserted, &removed)?;
+    writes.push(receipt_write);
+    for write in companion_writes {
+        writes.push(write.at_revision(revision).map_err(|_| Violation::Codec)?);
+    }
+    super::events::stage_rows(
+        edge,
+        context,
+        cursor,
+        pending,
+        fanout.finish()?,
+        |_, _, _| writes,
+    )
+}
+
+fn applied_receipt(
+    context: &StateCoreContext,
+    open: &OpenBarrier,
+) -> Result<BarrierReceipt, Violation> {
+    let now = context
+        .utc_now()
+        .map(|second| second.get())
+        .map_err(|_| Violation::Ceiling)?;
+    Ok(open.assembly.receipt(
+        context
+            .head()
+            .storage_commit_sequence
+            .checked_add(1)
+            .ok_or(Violation::Ceiling)?,
+        context
+            .domain()
+            .plan_account_service_checkpoint()
+            .map_err(|_| Violation::Ceiling)?
+            .resulting_revision()
+            .get(),
+        now,
+        now.checked_add(BARRIER_RETENTION_SECONDS)
+            .ok_or(Violation::Ceiling)?,
+    ))
 }
 
 /// The rows of the apply transaction: standing entries, the receipt in
-/// place of the stage head, and the removal of every part row.
+/// place of the stage head. Immutable parts remain until bounded retention.
 // agenc-review: allow owner=runtime reviewed=2026-09-03 reason=the apply rows need the edge the context the revision the identity the receipt and both entry lists together
 #[allow(clippy::too_many_arguments)]
 fn apply_rows(
     edge: &EdgeFederation,
     context: &StateCoreContext,
     revision: u64,
-    identity: &BarrierIdentity,
-    receipt: &BarrierReceipt,
     upserted: &[ProjectionKey],
     removed: &[ProjectionKey],
-) -> Vec<AccountServiceDurableWrite> {
+) -> Result<Vec<AccountServiceDurableWrite>, Violation> {
     let mut writes = Vec::new();
     for key in upserted {
-        if let Some(write) = super::events::entry_row(edge, key, revision) {
-            writes.push(write);
-        }
+        writes.push(super::events::entry_row(edge, key, revision).ok_or(Violation::Codec)?);
     }
     for key in removed {
         if let Some(write) = super::events::removal_write(edge, context, key) {
             writes.push(write);
         }
     }
-    if let Some(write) = barrier_row(
-        edge,
-        revision,
-        identity.head_key(),
-        BarrierHead::Receipt(receipt.clone()).encode(),
-    ) {
-        writes.push(write);
-    }
-    for index in 0..identity.part_count {
-        if let Some(write) = identity
-            .part_key(index)
-            .ok()
-            .and_then(|key| AccountServiceDurableWrite::delete(TableId::E2eeState, key).ok())
-        {
-            writes.push(write);
-        }
-    }
-    writes
+    Ok(writes)
 }
 
 /// Applies every base part to the replica in index order and renders it;
@@ -437,18 +537,24 @@ fn apply_base_events(
     edge: &mut EdgeFederation,
     context: &mut StateCoreContext,
     open: &OpenBarrier,
+    fanout: &mut super::render::EventFanout,
 ) -> Result<(Vec<ProjectionKey>, Vec<ProjectionKey>), Violation> {
     let mut upserted = Vec::new();
     let mut removed = Vec::new();
     for (header, projected) in open.base_events.values() {
+        if let ProjectedEvent::RequestCompleted {
+            resulting_state_generation,
+        } = projected
+        {
+            super::events::completion_of(edge, header, *resulting_state_generation)?;
+        }
         let label = super::render::event_channel_label(edge, projected);
         let outcome = edge
             .replica
             .apply(projected, header.coordinator_state_generation)
             .map_err(|_| Violation::Consistency)?;
-        edge.counters.events_applied = edge.counters.events_applied.saturating_add(1);
         super::render::remember_nicknames(edge, projected);
-        super::render::render_event(edge, context, projected, &outcome, label.as_deref());
+        super::render::render_event(edge, context, projected, &outcome, label.as_deref(), fanout)?;
         upserted.extend(outcome.upserted);
         removed.extend(outcome.removed);
     }
@@ -463,7 +569,10 @@ pub(super) fn applied(
     receipt: BarrierReceipt,
     base_last: (u64, EventId),
     companion_last: (u64, u64, [u8; 16]),
-) {
+) -> Vec<super::EdgeCompletion> {
+    let open = edge.barrier.open.take();
+    edge.barrier.ready = false;
+    edge.barrier.rollback = None;
     edge.cursor = Some(base_last);
     edge.barrier.companion_cursor = Some((companion_last.1, companion_last.2));
     edge.counters.barriers_applied = edge.counters.barriers_applied.saturating_add(1);
@@ -471,4 +580,30 @@ pub(super) fn applied(
         .applied
         .insert(receipt.identity.mutation_id, receipt.clone());
     acknowledge(edge, context, &receipt);
+    let mut completions = Vec::new();
+    if let Some(open) = open {
+        for (header, projected) in open.base_events.values() {
+            edge.counters.events_applied = edge.counters.events_applied.saturating_add(1);
+            if matches!(projected, ProjectedEvent::RequestCompleted { .. })
+                && let Some(correlation) = header.correlation
+            {
+                completions.extend(super::events::committed_completion(
+                    edge,
+                    context,
+                    header.event_id,
+                    correlation.request_id,
+                    header.coordinator_state_generation,
+                ));
+            }
+        }
+    }
+    completions
+}
+
+/// Restores the committed projection when durable apply admission is cancelled.
+pub(super) fn rejected(edge: &mut EdgeFederation) {
+    if let Some(previous) = edge.barrier.rollback.take() {
+        edge.replica = previous.replica;
+        edge.nicknames = previous.nicknames;
+    }
 }

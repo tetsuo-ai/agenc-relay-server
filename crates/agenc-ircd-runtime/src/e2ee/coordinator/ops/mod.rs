@@ -18,7 +18,9 @@ pub mod directory;
 pub mod mailbox;
 pub mod policy;
 pub mod route;
+pub(super) mod route_successor;
 pub mod sequence;
+mod terminal_proof;
 
 /// A handler failure: the reply code and the copied request context.
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -495,6 +495,83 @@ fn edge_router(
 }
 
 impl StateCoreFixture {
+    /// Exercises the daemon's authenticated edge reload against this fixture's storage.
+    pub(crate) fn restore_edge_state(
+        &self,
+        edge: &mut crate::federation::edge::EdgeFederation,
+        companion: Option<&mut crate::e2ee::edge::E2eeEdge>,
+    ) -> TestResult {
+        let owner = self.owner.as_ref().ok_or("storage owner")?;
+        let recovered = owner.recovered_state();
+        let keys = KeyDeriver::new(
+            StorageMasterKey::from_bytes(STORAGE_MASTER),
+            recovered.database_binding(),
+            recovered.storage_key_generation(),
+        )?;
+        edge.restore(
+            &owner.port(),
+            &keys,
+            companion,
+            crate::state_core::durable::HeadCounters::from_recovered(recovered),
+        )?;
+        Ok(())
+    }
+
+    /// Commits a crash image through real storage, then reloads a fresh edge owner.
+    pub(crate) fn commit_and_restore_edge(
+        &mut self,
+        writes: Vec<crate::state_core::durable::AccountServiceDurableWrite>,
+        edge: &mut crate::federation::edge::EdgeFederation,
+        companion: Option<&mut crate::e2ee::edge::E2eeEdge>,
+    ) -> TestResult {
+        use crate::state_core::durable::{PlanProjection, project_batch};
+        let owner = self.owner.as_ref().ok_or("storage owner")?;
+        let recovered = owner.recovered_state();
+        let keys = KeyDeriver::new(
+            StorageMasterKey::from_bytes(STORAGE_MASTER),
+            recovered.database_binding(),
+            recovered.storage_key_generation(),
+        )?;
+        let context = self.state.as_mut().ok_or("state")?.context_mut();
+        let plan = context.domain().plan_account_service_checkpoint()?;
+        let plans = [PlanProjection {
+            plan: &plan,
+            response_count_increment: 0,
+            account_service_writes: &writes,
+        }];
+        let mut entropy = ScriptedEntropy::new(vec![44; 4096])?;
+        let projected = project_batch(
+            agenc_ircd_types::TransactionId::from_bytes([54; 16]),
+            &plans,
+            context.index(),
+            &keys,
+            context.head(),
+            AccountingCeilings {
+                database_max_bytes: TEST_STORAGE_LIMITS.database_max_bytes,
+                backup_max_bytes: TEST_STORAGE_LIMITS.backup_max_bytes,
+            },
+            &mut entropy,
+        )?
+        .ok_or("empty image")?;
+        let (batch, retained) = projected.into_parts();
+        let agenc_ircd_storage::CommitOutcome::Committed(receipt) =
+            owner.port().try_commit(batch)?.wait()?
+        else {
+            return Err("image commit refused".into());
+        };
+        edge.restore(&owner.port(), &keys, companion, retained.advance(&receipt))?;
+        Ok(())
+    }
+
+    pub(crate) fn stored_row_exists(&self, table: TableId, key: StoredKey) -> TestResult<bool> {
+        let owner = self.owner.as_ref().ok_or("storage owner")?;
+        let result = crate::bridge::storage::read_blocking(
+            &owner.port(),
+            agenc_ircd_storage::ReadPlan::exact(table, key),
+        )?;
+        Ok(!result.records.is_empty())
+    }
+
     /// Builds the fixture with the pre-composition router that rejects every
     /// line; `entropy` scripts every entropy draw the test makes.
     pub(crate) fn new(entropy: Vec<u8>) -> TestResult<Self> {

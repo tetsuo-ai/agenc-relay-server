@@ -18,7 +18,7 @@ CORPUS_PATH = "conformance/e2ee-mls-corpus.toml"
 WIRE_BUDGET_PATH = "conformance/e2ee-wire-budget.toml"
 INTEROP_PATH = "conformance/e2ee-interop-matrix.toml"
 REVIEW_PACKAGE = "conformance/review"
-EXPECTED_TASKS = [f"S08-{number:03d}" for number in range(1, 40)]
+EXPECTED_TASKS = [f"S08-{number:03d}" for number in range(1, 45)]
 PROFILE_TOKEN = "aZx0rf5wyMwzaIjlGR0eCRZsXeRAa5x8jppY7a3EgVk"
 EXPECTED_TARGET = {
     "name": "encrypted-v1",
@@ -100,9 +100,9 @@ EXPECTED_EDGE = {
     "requests_resent_after_ready": True,
 }
 EXPECTED_COORDINATOR = {
-    "handlers": 40,
+    "handlers": 41,
     "candidates_per_epoch": 1,
-    "finality_quorum_checked_by": "endpoints",
+    "finality_quorum_checked_by": "coordinator-and-endpoints",
     "bootstrap_activation_rule": "BootstrapActivation",
     "reload_tables": [22, 23],
 }
@@ -224,7 +224,7 @@ def validate_profile(profile: dict[str, object]) -> None:
         "implementation_gate": "stage-eight-implementation",
         "exact_sha_checkpoint_required": True,
         "evidence_schema": 2,
-        "stage_records": 39,
+        "stage_records": 160,
     }:
         raise StageEightError("Stage 08 closure requirements are stale")
 

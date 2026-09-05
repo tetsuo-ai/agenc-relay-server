@@ -117,7 +117,7 @@ impl E2eeEdge {
         facts: &SessionFacts<'_>,
     ) -> Vec<ClientOutput> {
         match self.accept_line(context, edge, generation, message, facts) {
-            Ok(()) => Vec::new(),
+            Ok(outputs) => outputs,
             Err(refusal) => {
                 self.counters.refusals = self.counters.refusals.saturating_add(1);
                 self.refuse(generation, message, &refusal)
@@ -164,7 +164,11 @@ impl E2eeEdge {
         generation: ConnectionGeneration,
         message: &ParsedMessage,
         facts: &SessionFacts<'_>,
-    ) -> Result<(), Refusal> {
+    ) -> Result<Vec<ClientOutput>, Refusal> {
+        let now = context.now().get() / 1_000;
+        self.replies.expire(now);
+        let expired = self.assembler.expire(now);
+        self.ingress.retain(|_, open| !expired.contains(&open.key));
         if !facts.capabilities.enabled(E2EE_CAPABILITY) {
             return Err(E2eeReplyCode::CapRequired.into());
         }
@@ -180,6 +184,13 @@ impl E2eeEdge {
             .and_then(|origin| origin.device);
         if requires_device(&command) && device.is_none() {
             return Err(E2eeReplyCode::DeviceRequired.into());
+        }
+        if !self
+            .origins
+            .get(&generation)
+            .is_some_and(|origin| origin.acked.is_some() && origin.acked == origin.declared)
+        {
+            return Err(E2eeReplyCode::Syncing.into());
         }
         let label = message
             .tags()
@@ -200,24 +211,56 @@ impl E2eeEdge {
             .map_err(|_| E2eeReplyCode::InvalidFragment)?;
         match (command.carrier(), fragment) {
             (Some(carrier), Some(tag)) => {
+                let session = device.map_or(0, |(_, session)| session);
+                let key = (
+                    generation.get(),
+                    session,
+                    *tag.object_id.as_bytes(),
+                    request_scope(&command)?,
+                );
+                if tag.part == 0
+                    && let Some(output) = self.replies.replay(key, &command, label.as_deref())?
+                {
+                    return Ok(vec![output]);
+                }
+                if tag.part == 0
+                    && let Some(pending) = self
+                        .pending
+                        .values_mut()
+                        .find(|pending| pending.reply_key == Some(key))
+                {
+                    pending.retry_label = Some(label.clone());
+                }
+                if tag.part == 0
+                    && !self.ingress.contains_key(&generation)
+                    && !self
+                        .pending
+                        .values()
+                        .any(|pending| pending.reply_key == Some(key))
+                    && !self.replies.admits(self.pending.len())
+                {
+                    return Err(E2eeReplyCode::RateLimited.into());
+                }
                 let payload = self.ingest(generation, facts, &command, carrier, &tag, context)?;
                 match payload {
-                    Some(bytes) => self.send_request(
-                        context,
-                        edge,
-                        generation,
-                        account,
-                        label,
-                        command,
-                        Some(bytes),
-                    ),
-                    None => Ok(()),
+                    Some(bytes) => self
+                        .send_request(
+                            context,
+                            edge,
+                            generation,
+                            account,
+                            label,
+                            command,
+                            Some(bytes),
+                        )
+                        .map(|()| Vec::new()),
+                    None => Ok(Vec::new()),
                 }
             }
             (Some(_), None) | (None, Some(_)) => Err(E2eeReplyCode::InvalidFragment.into()),
-            (None, None) => {
-                self.send_request(context, edge, generation, account, label, command, None)
-            }
+            (None, None) => self
+                .send_request(context, edge, generation, account, label, command, None)
+                .map(|()| Vec::new()),
         }
     }
 
@@ -306,7 +349,7 @@ impl E2eeEdge {
                 session_generation,
             },
             command: carrier,
-            route: command.route_key(),
+            route: request_scope(command)?,
             scope: None,
             object_id: tag.object_id,
         };
@@ -339,7 +382,25 @@ impl E2eeEdge {
                 });
                 Ok(None)
             }
-            Ok(Ingest::Duplicate | Ingest::Recent) => Ok(None),
+            Ok(Ingest::Duplicate) => Ok(None),
+            Ok(Ingest::Recent) => {
+                let scope = request_scope(command)?;
+                let pending = self.pending.values().any(|request| {
+                    request.reply_key
+                        == Some((
+                            generation.get(),
+                            session_generation,
+                            *tag.object_id.as_bytes(),
+                            scope,
+                        ))
+                        && request.command == *command
+                });
+                if pending || tag.part != 0 {
+                    Ok(None)
+                } else {
+                    Err(E2eeReplyCode::RateLimited.into())
+                }
+            }
             Err(error) => {
                 self.ingress.remove(&generation);
                 Err(error.reply_code().into())
@@ -360,6 +421,9 @@ impl E2eeEdge {
         command: Resolved,
         payload: Option<Vec<u8>>,
     ) -> Result<(), Refusal> {
+        if !self.replies.admits(self.pending.len()) {
+            return Err(E2eeReplyCode::RateLimited.into());
+        }
         let origin = self
             .origins
             .get_mut(&generation)
@@ -411,6 +475,15 @@ impl E2eeEdge {
         origin.next_sequence = origin.next_sequence.saturating_add(1);
         let request_object_id = *agenc_ircd_e2ee::ObjectId::compute(&bytes).as_bytes();
         let subject = subject_of(&command, payload.as_deref());
+        let reply_scope = request_scope(&command)?;
+        let reply_key = payload.as_ref().map(|bytes| {
+            (
+                generation.get(),
+                origin.device.map_or(0, |(_, session)| session),
+                *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes(),
+                reply_scope,
+            )
+        });
         let mut frames = Vec::new();
         for fragment in fragment_object(&bytes).map_err(|_| E2eeReplyCode::ObjectTooLarge)? {
             frames.push(CompanionFrame::Request {
@@ -436,6 +509,9 @@ impl E2eeEdge {
         self.pending.insert(
             request_id,
             PendingRequest {
+                reply_key,
+                echo_lines: Vec::new(),
+                retry_label: None,
                 generation,
                 label,
                 command,
@@ -444,6 +520,7 @@ impl E2eeEdge {
                 sequence: correlation.operation_sequence,
                 frames,
                 result: None,
+                result_object_id: None,
                 responses: std::collections::BTreeMap::new(),
                 completion_seen: false,
                 rendered: false,
@@ -563,6 +640,17 @@ const fn submit_opcode(kind: SubmitKind) -> IrcFederationOpcode {
         SubmitKind::ReinitActivate => Op::SubmitReinitActivate,
         SubmitKind::ReinitAbort => Op::SubmitReinitAbort,
     }
+}
+
+/// Separates local retries by opcode and the complete canonical parameter
+/// tuple, including mailbox recipient and device, without changing route quotas.
+pub(super) fn request_scope(command: &Resolved) -> Result<[u8; 32], Refusal> {
+    let (opcode, parameters) =
+        encode_parameters(command).map_err(|_| E2eeReplyCode::InvalidFragment)?;
+    let mut bytes = b"irc-mls-v1/local-command/v1\0".to_vec();
+    bytes.extend_from_slice(&opcode.value().to_be_bytes());
+    bytes.extend_from_slice(&parameters);
+    Ok(*agenc_ircd_e2ee::ObjectId::compute(&bytes).as_bytes())
 }
 
 // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one match writes every 12.5 parameter tuple beside the opcode it belongs to; splitting it would separate the encodings from the opcode table

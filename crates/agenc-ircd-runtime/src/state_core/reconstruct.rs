@@ -444,7 +444,7 @@ pub fn reconstruct(
 }
 
 /// Visits every row of one table in key order through bounded pages.
-fn scan_table(
+pub(crate) fn scan_table(
     port: &StoragePort,
     table: TableId,
     mut visit: impl FnMut(StoredKey, Vec<u8>) -> Result<(), RuntimeError>,

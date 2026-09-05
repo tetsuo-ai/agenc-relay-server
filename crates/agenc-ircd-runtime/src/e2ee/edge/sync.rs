@@ -66,11 +66,12 @@ impl E2eeEdge {
         if self.phase != Phase::Down {
             return true;
         }
+        let delivery = self.resume_delivery();
         let frame = CompanionFrame::Resume {
             coordinator_server_id: *self.config.coordinator_server_id.as_bytes(),
             server_incarnation: self.config.incarnation,
-            delivery_generation: self.delivery.generation,
-            last: self.delivery.cursor,
+            delivery_generation: delivery.generation,
+            last: delivery.cursor,
         };
         let Ok(line) = self.line(&frame) else {
             return false;
@@ -250,6 +251,19 @@ impl E2eeEdge {
         context: &mut StateCoreContext,
         edge: &mut EdgeFederation,
     ) -> Result<(), Refusal> {
+        self.begin_projection(None)?;
+        let result = self.install_snapshot_projection(context, edge);
+        if result.is_err() {
+            self.rollback_projection();
+        }
+        result
+    }
+
+    fn install_snapshot_projection(
+        &mut self,
+        context: &mut StateCoreContext,
+        _edge: &mut EdgeFederation,
+    ) -> Result<(), Refusal> {
         let snapshot = self.snapshot.as_mut().ok_or(E2eeReplyCode::Syncing)?;
         if usize::try_from(snapshot.total).map_err(|_| E2eeReplyCode::Syncing)?
             != snapshot.entries.len()
@@ -277,17 +291,33 @@ impl E2eeEdge {
         for (_, bytes) in &entries {
             writes.push(self.route_changed(bytes)?);
         }
-        self.delivery = DeliveryState {
+        let retained: std::collections::BTreeSet<_> = entries
+            .iter()
+            .map(|(conversation, _)| *conversation)
+            .collect();
+        let removed: Vec<_> = self
+            .route_objects
+            .keys()
+            .filter(|conversation| !retained.contains(*conversation))
+            .copied()
+            .collect();
+        for conversation in removed {
+            if let Some(write) = self.route_hidden(context, conversation) {
+                writes.push(write);
+            }
+        }
+        let delivery = DeliveryState {
             generation: delivery_generation,
             cursor: None,
         };
-        writes.push(
-            super::events::cursor_write(&self.config, &self.delivery).map_err(Refusal::from)?,
-        );
-        // The barrier owner's companion position belongs to the retired
-        // scope; the new generation starts before any position.
-        edge.note_companion_delivery(delivery_generation, None);
-        self.stage(context, writes, PendingCommit::Ready)
+        writes.push(super::events::cursor_write(&self.config, &delivery).map_err(Refusal::from)?);
+        self.stage(
+            context,
+            writes,
+            PendingCommit::Ready {
+                delivery_generation,
+            },
+        )
     }
 
     /// The READY record committed: READY goes out.
@@ -295,7 +325,14 @@ impl E2eeEdge {
         &mut self,
         context: &mut StateCoreContext,
         edge: &mut EdgeFederation,
+        delivery_generation: u64,
     ) {
+        self.delivery = DeliveryState {
+            generation: delivery_generation,
+            cursor: None,
+        };
+        // Retire the previous scope only after the new cursor is durable.
+        edge.note_companion_delivery(self.delivery.generation, None);
         let Some(snapshot) = self.snapshot.as_ref() else {
             return;
         };
@@ -428,6 +465,13 @@ impl E2eeEdge {
             acked_event_id,
             next_sequence,
             ..
+        }
+        | DeliveryRow::WitnessedCursor {
+            generation,
+            acked_sequence,
+            acked_event_id,
+            next_sequence,
+            ..
         } = row
         {
             self.delivery = DeliveryState {
@@ -446,6 +490,9 @@ impl E2eeEdge {
     ) -> Vec<ClientOutput> {
         let mut outputs = Vec::new();
         self.adopt_barrier_cursor(edge);
+        self.barrier_parts.retain(|mutation, _| {
+            edge.collecting_barrier() == Some(*mutation) || edge.barrier_applied(mutation)
+        });
         for frame in frames {
             match self.handle_frame(context, edge, frame) {
                 Ok(more) => outputs.extend(more),
@@ -461,7 +508,7 @@ impl E2eeEdge {
     /// A frame violated the profile: the link closes, as a witness violation
     /// when the record chain did not extend (companion 12.5), and the router
     /// forgets the link.
-    pub(super) fn fail_frame(&mut self, context: &mut StateCoreContext, edge: &mut EdgeFederation) {
+    pub(crate) fn fail_frame(&mut self, context: &mut StateCoreContext, edge: &mut EdgeFederation) {
         self.counters.violations = self.counters.violations.saturating_add(1);
         if self.record_witness(context) {
             edge.fail_companion_witness(context);
@@ -479,6 +526,10 @@ impl E2eeEdge {
         frame: CompanionFrame,
     ) -> Result<Vec<ClientOutput>, Refusal> {
         match frame {
+            CompanionFrame::StateBegin { .. } if edge.collecting_barrier().is_some() => {
+                Err(E2eeReplyCode::Syncing.into())
+            }
+
             CompanionFrame::ResumeOk {
                 delivery_generation,
                 next_delivery_sequence,

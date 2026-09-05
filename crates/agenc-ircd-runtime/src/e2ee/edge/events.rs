@@ -145,6 +145,7 @@ fn chain_step(event: &IrcFederationEvent) -> Option<ChainStep> {
 }
 
 /// An event whose payload has not arrived.
+#[derive(Clone)]
 pub(crate) struct OpenEvent {
     pub(crate) position: DeliveryPosition,
     pub(crate) event: IrcFederationEvent,
@@ -333,7 +334,7 @@ impl E2eeEdge {
         };
         edge.note_companion_delivery(self.delivery.generation, self.delivery.cursor);
         let part_index = part.part_index;
-        if !edge.companion_barrier_part(context, part) {
+        if !edge.companion_barrier_part(context, part, payload.clone()) {
             return Err(E2eeReplyCode::Syncing.into());
         }
         self.barrier_parts
@@ -358,8 +359,13 @@ impl E2eeEdge {
         ),
         E2eeReplyCode,
     > {
-        self.prepare_barrier_parts(context, edge, mutation_id)
-            .map_err(|refusal| refusal.code)
+        self.begin_projection(Some(mutation_id))
+            .map_err(|refusal| refusal.code)?;
+        let prepared = self.prepare_barrier_parts(context, edge, mutation_id);
+        if prepared.is_err() {
+            self.rollback_projection();
+        }
+        prepared.map_err(|refusal| refusal.code)
     }
 
     fn prepare_barrier_parts(
@@ -374,7 +380,21 @@ impl E2eeEdge {
         ),
         Refusal,
     > {
-        let parts = self.barrier_parts.remove(&mutation_id).unwrap_or_default();
+        self.barrier_completions.clear();
+        let parts = self
+            .barrier_parts
+            .get(&mutation_id)
+            .cloned()
+            .unwrap_or_default();
+        let position = parts
+            .values()
+            .map(|(open, _)| open.position)
+            .max_by_key(|position| position.delivery_sequence)
+            .ok_or(E2eeReplyCode::InvalidFragment)?;
+        let touched: std::collections::BTreeSet<_> = parts
+            .values()
+            .filter_map(|(open, _)| optional::<32>(open.event.conversation_id.as_slice()))
+            .collect();
         let mut writes = Vec::new();
         let mut outputs = Vec::new();
         for (_, (open, payload)) in parts {
@@ -392,12 +412,19 @@ impl E2eeEdge {
                     }
                 }
                 IrcFederationEventKind::RequestCompleted => {}
-                _ => outputs.extend(self.fanout(context, edge, &open, payload.as_deref())?),
+                _ => {
+                    self.witness(event)?;
+                    outputs.extend(self.fanout(context, edge, &open, payload.as_deref())?);
+                }
             }
-            if let Some(request_id) = self.completion_arrived(event.event_id) {
-                outputs.extend(self.render_ready(context, request_id)?);
-            }
+            let (completion, rendered) = self.prepare_completion(context, event)?;
+            outputs.extend(rendered);
+            self.barrier_completions.push(completion);
         }
+        self.checkpoint_witnesses(touched, &mut writes)?;
+        let mut delivery = self.delivery;
+        delivery.advance(position);
+        writes.push(cursor_write(&self.config, &delivery)?);
         Ok((writes, outputs))
     }
 
@@ -408,7 +435,12 @@ impl E2eeEdge {
 
     /// Releases the lines of a barrier whose receipt now stands, and adopts
     /// the companion position it advanced.
-    pub fn barrier_outputs(&mut self, edge: &EdgeFederation) -> Vec<ClientOutput> {
+    pub fn barrier_outputs(
+        &mut self,
+        context: &mut StateCoreContext,
+        edge: &EdgeFederation,
+    ) -> Vec<ClientOutput> {
+        self.commit_barrier_projection(edge);
         self.adopt_barrier_cursor(edge);
         let applied = self
             .barrier_pending
@@ -417,10 +449,20 @@ impl E2eeEdge {
         if !applied {
             return Vec::new();
         }
+        let mut late_outputs = Vec::new();
+        for completion in std::mem::take(&mut self.barrier_completions) {
+            late_outputs.extend(self.commit_completion(context, completion));
+        }
+        if let Some((mutation_id, _)) = &self.barrier_pending {
+            self.barrier_parts.remove(mutation_id);
+        }
         self.counters.events_applied = self.counters.events_applied.saturating_add(1);
-        self.barrier_pending
-            .take()
-            .map_or_else(Vec::new, |(_, outputs)| outputs)
+        late_outputs.extend(
+            self.barrier_pending
+                .take()
+                .map_or_else(Vec::new, |(_, outputs)| outputs),
+        );
+        late_outputs
     }
 
     /// Adopts the companion position a committed cross-profile barrier
@@ -519,6 +561,21 @@ impl E2eeEdge {
         open: OpenEvent,
         payload: Option<Vec<u8>>,
     ) -> Result<Vec<ClientOutput>, Refusal> {
+        self.begin_projection(None)?;
+        let result = self.apply_event_projection(context, edge, open, payload);
+        if result.is_err() {
+            self.rollback_projection();
+        }
+        result
+    }
+
+    fn apply_event_projection(
+        &mut self,
+        context: &mut StateCoreContext,
+        edge: &mut EdgeFederation,
+        open: OpenEvent,
+        payload: Option<Vec<u8>>,
+    ) -> Result<Vec<ClientOutput>, Refusal> {
         let event = &open.event;
         let conversation = optional::<32>(event.conversation_id.as_slice());
         let mut writes = Vec::new();
@@ -542,15 +599,22 @@ impl E2eeEdge {
         }
         // The home copy of a semantic event is its request's completion; a
         // generic completion is a `request_completed` of its own (12.5).
-        if let Some(request_id) = self.completion_arrived(event.event_id) {
-            outputs.extend(self.render_ready(context, request_id)?);
-        }
+        let (completion, rendered) = self.prepare_completion(context, event)?;
+        outputs.extend(rendered);
+        self.checkpoint_witnesses(conversation, &mut writes)?;
         let position = open.position;
-        self.delivery.advance(position);
-        writes.push(
-            cursor_write(&self.config, &self.delivery).map_err(|_| E2eeReplyCode::RateLimited)?,
-        );
-        self.stage(context, writes, PendingCommit::Event { position, outputs })?;
+        let mut delivery = self.delivery;
+        delivery.advance(position);
+        writes.push(cursor_write(&self.config, &delivery).map_err(|_| E2eeReplyCode::RateLimited)?);
+        self.stage(
+            context,
+            writes,
+            PendingCommit::Event {
+                position,
+                outputs,
+                completion,
+            },
+        )?;
         Ok(Vec::new())
     }
 
@@ -621,11 +685,12 @@ impl E2eeEdge {
     }
 
     /// Drops one projected route and its row.
-    fn route_hidden(
+    pub(super) fn route_hidden(
         &mut self,
         context: &StateCoreContext,
         conversation: [u8; 32],
     ) -> Option<crate::state_core::durable::AccountServiceDurableWrite> {
+        self.routes.remove_projection(&ConversationId(conversation));
         self.route_objects.remove(&conversation);
         self.conversations.remove(&conversation);
         let key = RouteRow::key(&conversation).ok()?;
@@ -701,6 +766,14 @@ impl E2eeEdge {
                 }
                 _ => terminal_lines(&self.config.server_name, conversation, event)?,
             };
+            if requester
+                .as_ref()
+                .is_some_and(|(request_generation, _)| *request_generation == generation)
+                && let Some(request_id) = optional::<16>(event.request_id.as_slice())
+                && let Some(pending) = self.pending.get_mut(&request_id)
+            {
+                pending.echo_lines = lines.clone();
+            }
             let frames = lines
                 .iter()
                 .map(|line| WireMessage::extension_line(line))
@@ -873,7 +946,11 @@ impl E2eeEdge {
             Some(PendingCommit::Event {
                 position,
                 outputs: rendered,
+                completion,
             }) => {
+                self.commit_projection();
+                self.delivery.advance(position);
+                outputs.extend(self.commit_completion(context, completion));
                 self.counters.events_applied = self.counters.events_applied.saturating_add(1);
                 if let Ok(line) = self.line(&CompanionFrame::Ack(DeliveryPosition {
                     server_id: *self.config.coordinator_server_id.as_bytes(),
@@ -883,16 +960,24 @@ impl E2eeEdge {
                 }
                 outputs.extend(rendered);
             }
-            Some(PendingCommit::Ready) => self.ready_recorded(context, edge),
+            Some(PendingCommit::Ready {
+                delivery_generation,
+            }) => {
+                self.commit_projection();
+                self.legacy_cursor = false;
+                self.ready_recorded(context, edge, delivery_generation);
+            }
             Some(PendingCommit::Witness) | None => {}
         }
+        self.commit_barrier_projection(edge);
         outputs.extend(self.drain_queued(context, edge));
         outputs
     }
 
     /// The batch was rejected: the event must be resynchronized.
     pub fn batch_rejected(&mut self) {
-        if self.commit.take().is_some() {
+        let projected = self.rollback_projection();
+        if self.commit.take().is_some() || projected {
             self.counters.violations = self.counters.violations.saturating_add(1);
             self.link_down();
         }
@@ -1066,7 +1151,7 @@ pub(super) fn cursor_write(
     config: &super::E2eeEdgeConfig,
     delivery: &super::sync::DeliveryState,
 ) -> Result<crate::state_core::durable::AccountServiceDurableWrite, E2eeReplyCode> {
-    let row = DeliveryRow::Cursor {
+    let row = DeliveryRow::WitnessedCursor {
         generation: delivery.generation,
         next_sequence: delivery.next_sequence(),
         acked_sequence: delivery.cursor.map_or(0, |(sequence, _)| sequence),

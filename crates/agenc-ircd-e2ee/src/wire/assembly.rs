@@ -24,6 +24,10 @@ use crate::wire::carrier::{CarrierCommand, ObjectLimit};
 use crate::wire::fragment::FragmentTag;
 use crate::wire::reply::E2eeReplyCode;
 
+/// Maximum completed submission tuples retained by one assembler. New
+/// submissions reserve a slot before allocation; live entries are not evicted.
+pub const MAX_RECENT_OBJECTS: usize = 4_096;
+
 /// Where a fragment came from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum Direction {
@@ -69,7 +73,8 @@ pub struct AssemblyKey {
     pub sender: Sender,
     /// Command and subcommand.
     pub command: CarrierCommand,
-    /// Normalized route: conversation identifier or channel-name hash.
+    /// Normalized route or caller-defined command parameter scope. Quota
+    /// charging uses the separate [`QuotaScopes::route`] value.
     pub route: [u8; 32],
     /// Response scope and batch, for response fragments.
     pub scope: Option<ResponseScope>,
@@ -332,8 +337,8 @@ impl Assembly {
 pub struct E2eeAssembler {
     open: BTreeMap<AssemblyKey, Assembly>,
     quotas: QuotaLedger,
-    /// Completed submissions by direction, sender, command, and content
-    /// address: a byte-identical retry of one command by the same sender
+    /// Completed submissions by their complete assembly tuple:
+    /// a byte-identical retry of one command by the same sender and route
     /// returns the prior outcome (11.8), while the same object under another
     /// command, such as a binding first bound and then delivered to a
     /// mailbox, assembles again. Responses and deliveries are keyed by correlation or
@@ -341,7 +346,7 @@ pub struct E2eeAssembler {
     /// [`Direction::Response`]: the same bytes may legitimately arrive
     /// again there, for example when a coordinator delivers an object a
     /// local client submitted.
-    recent: BTreeMap<(Direction, Sender, CarrierCommand, ObjectId), u64>,
+    recent: BTreeMap<AssemblyKey, u64>,
 }
 
 impl E2eeAssembler {
@@ -380,10 +385,11 @@ impl E2eeAssembler {
             return Err(AssemblyError::InvalidFragment);
         }
         if !self.open.contains_key(&key) {
-            if key.direction != Direction::Response
-                && self.is_recent(key.direction, key.sender, key.command, &tag.object_id)
-            {
+            if key.direction != Direction::Response && self.is_recent(&key) {
                 return Ok(Ingest::Recent);
+            }
+            if key.direction != Direction::Response && !self.has_recent_capacity() {
+                return Err(AssemblyError::ReassemblyLimit);
             }
             self.open_assembly(&key, scopes, limit, tag, now)?;
         }
@@ -497,6 +503,17 @@ impl E2eeAssembler {
             .is_some_and(|assembly| assembly.received_count == assembly.count)
     }
 
+    /// Every open submission reserves its eventual recent tuple, so
+    /// finishing several outstanding assemblies cannot exceed the cap.
+    fn has_recent_capacity(&self) -> bool {
+        let reserved = self
+            .open
+            .keys()
+            .filter(|key| key.direction != Direction::Response)
+            .count();
+        self.recent.len().saturating_add(reserved) < MAX_RECENT_OBJECTS
+    }
+
     fn finish(&mut self, key: &AssemblyKey) -> Result<Ingest, AssemblyError> {
         let Some(assembly) = self.open.remove(key) else {
             return Err(AssemblyError::InvalidFragment);
@@ -509,10 +526,7 @@ impl E2eeAssembler {
             .last
             .saturating_add(RECENT_OBJECT_IDEMPOTENCY_RETENTION_SECONDS);
         if key.direction != Direction::Response {
-            self.recent.insert(
-                (key.direction, key.sender, key.command, key.object_id),
-                retained_until,
-            );
+            self.recent.insert(key.clone(), retained_until);
         }
         Ok(Ingest::Complete(assembly.buffer))
     }
@@ -554,17 +568,10 @@ impl E2eeAssembler {
         expired
     }
 
-    /// Whether `object_id` completed within the idempotency window.
+    /// Whether this exact assembly tuple completed within the idempotency window.
     #[must_use]
-    pub fn is_recent(
-        &self,
-        direction: Direction,
-        sender: Sender,
-        command: CarrierCommand,
-        object_id: &ObjectId,
-    ) -> bool {
-        self.recent
-            .contains_key(&(direction, sender, command, *object_id))
+    pub fn is_recent(&self, key: &AssemblyKey) -> bool {
+        self.recent.contains_key(key)
     }
 }
 

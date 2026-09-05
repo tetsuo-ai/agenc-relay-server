@@ -46,6 +46,32 @@ const TEST_NETWORK: NetworkId = NetworkId::from_bytes([21_u8; 32]);
 const TEST_RECOVERY_EPOCH: RecoveryEpoch = RecoveryEpoch::from_bytes([25_u8; 16]);
 const TEST_ARGON2_SALT: [u8; 16] = [0_u8; 16];
 
+#[test]
+fn reported_opaque_server_identity_matches_registration_response()
+-> Result<(), Box<dyn core::error::Error>> {
+    let profile = OpaqueProfile::generate(TEST_NETWORK)?;
+    let mut rng = TestRng::new();
+    let registration = ClientRegistration::<TestOpaqueSuite>::start(&mut rng, b"test password")?;
+    let request = OpaqueRegistrationRequest::from_bytes(
+        registration.message.serialize().as_slice().try_into()?,
+    )?;
+    let credential = OpaqueCredentialId::from_bytes([7; 32]);
+    let response = profile.registration_start(&credential, &request)?;
+    let encoded = response.expose_for_account_response();
+    let registered_key = encoded.get(32..).ok_or("missing server public key")?;
+    let actual = agenc_ircd_auth::opaque_server_public_key(profile.expose_setup_for_persistence())?;
+    assert_eq!(actual.as_slice(), registered_key);
+    assert_ne!(
+        actual.as_slice(),
+        profile
+            .expose_setup_for_persistence()
+            .get(96..)
+            .ok_or("missing dummy public key")?,
+    );
+    assert!(rng.succeeded());
+    Ok(())
+}
+
 struct TestOpaqueSuite;
 
 impl CipherSuite for TestOpaqueSuite {

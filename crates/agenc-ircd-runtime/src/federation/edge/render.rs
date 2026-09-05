@@ -14,7 +14,60 @@ use agenc_ircd_types::{ChannelInstanceId, UserId};
 
 use super::EdgeFederation;
 use crate::RuntimeError;
+use crate::connection::ConnectionGeneration;
 use crate::state_core::StateCoreContext;
+use crate::state_core::fanout::{
+    FanoutFrame, FanoutRequest, FanoutTarget, MAX_FANOUT_FRAMES, MAX_FANOUT_TARGETS,
+};
+
+/// One bounded fanout shared by every event in a durable apply.
+#[derive(Default)]
+pub(super) struct EventFanout {
+    targets: Vec<FanoutTarget>,
+    frames: Vec<FanoutFrame>,
+    indices: std::collections::BTreeMap<ConnectionGeneration, usize>,
+}
+
+impl EventFanout {
+    pub(super) fn append(
+        &mut self,
+        context: &StateCoreContext,
+        generation: ConnectionGeneration,
+        frames: Vec<WireMessage>,
+    ) -> Result<(), RuntimeError> {
+        if frames.is_empty() {
+            return Ok(());
+        }
+        if frames.len() > MAX_FANOUT_FRAMES.saturating_sub(self.frames.len()) {
+            return Err(RuntimeError::LimitExceeded);
+        }
+        let index = if let Some(index) = self.indices.get(&generation) {
+            *index
+        } else {
+            let Some(sink) = context.sessions().sink_for_generation(generation) else {
+                return Ok(());
+            };
+            if self.targets.len() >= MAX_FANOUT_TARGETS {
+                return Err(RuntimeError::LimitExceeded);
+            }
+            let index = self.targets.len();
+            self.targets.push(FanoutTarget { generation, sink });
+            self.indices.insert(generation, index);
+            index
+        };
+        self.frames
+            .try_reserve_exact(frames.len())
+            .map_err(|_| RuntimeError::MemoryExhausted)?;
+        for frame in frames {
+            self.frames.push(FanoutFrame::new(frame, vec![index])?);
+        }
+        Ok(())
+    }
+
+    pub(super) fn finish(self) -> Result<FanoutRequest, RuntimeError> {
+        FanoutRequest::new(self.targets, self.frames)
+    }
+}
 
 /// Keeps the nickname directory of remote users current from events.
 pub(super) fn remember_nicknames(edge: &mut EdgeFederation, event: &ProjectedEvent) {
@@ -95,14 +148,15 @@ pub(super) fn event_channel_label(edge: &EdgeFederation, event: &ProjectedEvent)
     }
 }
 
-/// Renders one applied event to every local recipient.
+/// Collects one event's local frames for the durable apply reservation.
 pub(super) fn render_event(
     edge: &mut EdgeFederation,
     context: &mut StateCoreContext,
     event: &ProjectedEvent,
     outcome: &ApplyOutcome,
     label: Option<&str>,
-) {
+    fanout: &mut EventFanout,
+) -> Result<(), RuntimeError> {
     for user_id in &outcome.local_recipients {
         let Some(generation) = context.sessions().generation_for_user(*user_id) else {
             continue;
@@ -111,13 +165,10 @@ pub(super) fn render_event(
             .sessions()
             .capabilities_for_user(*user_id)
             .cloned_state();
-        let Ok(frames) = frames_for(edge, event, *user_id, capabilities.as_ref(), label) else {
-            continue;
-        };
-        if !frames.is_empty() {
-            let _sent = context.send_to(generation, frames);
-        }
+        let frames = frames_for(edge, event, *user_id, capabilities.as_ref(), label)?;
+        fanout.append(context, generation, frames)?;
     }
+    Ok(())
 }
 
 trait ClonedState {

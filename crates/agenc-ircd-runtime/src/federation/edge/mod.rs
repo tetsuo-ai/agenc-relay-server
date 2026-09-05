@@ -9,9 +9,12 @@
 
 mod barrier;
 mod events;
+mod fence;
 pub(crate) use render::prefix as source_prefix;
 mod render;
 mod request;
+mod retention;
+mod startup;
 mod sync;
 #[cfg(test)]
 #[path = "tests/harness.rs"]
@@ -128,7 +131,14 @@ struct ConnectionOrigin {
 /// The durable batch the edge is waiting on.
 enum PendingCommit {
     /// One cross-profile part was staged.
-    BarrierPart,
+    BarrierPart(Box<barrier::OpenBarrier>),
+    /// The authenticated replacement coordinator durably fenced the old stage.
+    BarrierFence,
+    /// A bounded expired barrier cleanup batch.
+    BarrierCleanup {
+        mutation_id: [u8; 16],
+        finished: bool,
+    },
     /// The complete barrier applied.
     BarrierApplied {
         receipt: Box<agenc_ircd_storage::e2ee_records::barrier::BarrierReceipt>,
@@ -169,11 +179,14 @@ pub struct EdgeFederation {
     replica: EdgeReplica,
     cursor: Option<(u64, EventId)>,
     installed_epoch: Option<RecoveryEpoch>,
+    installed_incarnation: Option<ServerIncarnation>,
+    accepted_epoch: Option<RecoveryEpoch>,
     origins: BTreeMap<ConnectionGeneration, ConnectionOrigin>,
     pending: BTreeMap<RequestId, request::PendingRequest>,
     by_completion: BTreeMap<EventId, RequestId>,
     applied_completions: std::collections::BTreeSet<EventId>,
     nicknames: BTreeMap<UserId, NicknameValue>,
+    event_before: Option<events::ProjectionBefore>,
     commit: Option<PendingCommit>,
     queued_events: VecDeque<events::QueuedEvent>,
     snapshot: Option<sync::SnapshotInstall>,
@@ -233,11 +246,14 @@ impl EdgeFederation {
             replica,
             cursor: None,
             installed_epoch: None,
+            installed_incarnation: None,
+            accepted_epoch: None,
             origins: BTreeMap::new(),
             pending: BTreeMap::new(),
             by_completion: BTreeMap::new(),
             applied_completions: std::collections::BTreeSet::new(),
             nicknames: BTreeMap::new(),
+            event_before: None,
             commit: None,
             queued_events: VecDeque::new(),
             snapshot: None,
@@ -428,8 +444,9 @@ impl EdgeFederation {
         &mut self,
         context: &mut StateCoreContext,
         part: agenc_ircd_storage::e2ee_records::barrier::BarrierPart,
+        payload: Option<Vec<u8>>,
     ) -> bool {
-        match barrier::companion_part(self, context, part) {
+        match barrier::companion_part(self, context, part, payload) {
             Ok(()) => true,
             Err(violation) => {
                 self.fail_link(context, violation);
@@ -451,8 +468,9 @@ impl EdgeFederation {
         &mut self,
         context: &mut StateCoreContext,
         companion_writes: Vec<crate::state_core::durable::AccountServiceDurableWrite>,
+        companion_outputs: Vec<crate::e2ee::edge::ClientOutput>,
     ) -> bool {
-        match barrier::apply(self, context, companion_writes) {
+        match barrier::apply(self, context, companion_writes, companion_outputs) {
             Ok(()) => true,
             Err(violation) => {
                 self.fail_link(context, violation);
@@ -628,6 +646,12 @@ impl EdgeFederation {
         });
         self.phase = Phase::Origins;
         self.note_phase();
+        if fence::needed(self) {
+            if let Err(violation) = fence::stage(self, context) {
+                self.fail_link(context, violation);
+            }
+            return;
+        }
         self.start_companion(context);
         sync::begin(self, context);
     }
@@ -1022,6 +1046,8 @@ impl EdgeFederation {
         let mut completions = Vec::new();
         match self.commit.take() {
             Some(PendingCommit::Event { header, completion }) => {
+                self.event_before = None;
+                self.counters.events_applied = self.counters.events_applied.saturating_add(1);
                 self.cursor = Some((header.delivery_sequence, header.event_id));
                 self.send_frame(
                     context,
@@ -1032,16 +1058,35 @@ impl EdgeFederation {
                     },
                 );
                 if let Some(request_id) = completion {
-                    completions.extend(request::completed(self, context, request_id));
+                    completions.extend(events::committed_completion(
+                        self,
+                        context,
+                        header.event_id,
+                        request_id,
+                        header.coordinator_state_generation,
+                    ));
                 }
             }
             Some(PendingCommit::SnapshotInstalled) => sync::installed(self, context),
-            Some(PendingCommit::BarrierPart) => barrier::part_committed(self, context),
+            Some(PendingCommit::BarrierPart(open)) => barrier::part_committed(self, *open),
+            Some(PendingCommit::BarrierFence) => fence::committed(self, context),
+            Some(PendingCommit::BarrierCleanup {
+                mutation_id,
+                finished,
+            }) => {
+                retention::committed(self, mutation_id, finished);
+            }
             Some(PendingCommit::BarrierApplied {
                 receipt,
                 base_last,
                 companion_last,
-            }) => barrier::applied(self, context, *receipt, base_last, companion_last),
+            }) => completions.extend(barrier::applied(
+                self,
+                context,
+                *receipt,
+                base_last,
+                companion_last,
+            )),
             None => {}
         }
         completions.extend(events::drain_queued(self, context));
@@ -1052,12 +1097,14 @@ impl EdgeFederation {
     pub fn batch_rejected(&mut self, context: &mut StateCoreContext) {
         if let Some(
             PendingCommit::Event { .. }
-            | PendingCommit::BarrierPart
+            | PendingCommit::BarrierPart(_)
+            | PendingCommit::BarrierFence
             | PendingCommit::BarrierApplied { .. },
         ) = self.commit.take()
         {
-            // The replica already applied the event; without the durable
-            // row the only safe course is a fresh synchronization.
+            events::restore_projection(self);
+            barrier::rejected(self);
+            // Resume starts at the previous committed projection and cursor.
             self.fail_link(context, Violation::Ceiling);
         }
     }

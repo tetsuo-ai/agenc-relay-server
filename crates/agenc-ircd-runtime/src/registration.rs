@@ -286,6 +286,19 @@ impl RegistrationRouter {
         })
     }
 
+    /// Restores the edge before a link or client can consume projection authority.
+    pub(crate) fn restore_edge(
+        &mut self,
+        port: &agenc_ircd_storage::StoragePort,
+        keys: &crate::state_core::durable::KeyDeriver,
+        head: crate::state_core::durable::HeadCounters,
+    ) -> Result<(), crate::RuntimeError> {
+        if let Some(edge) = self.edge.as_mut() {
+            edge.restore(port, keys, self.e2ee.as_mut(), head)?;
+        }
+        Ok(())
+    }
+
     /// Attaches the edge role: sessions, global commands, and queries go
     /// through the coordinator and this router renders the projection.
     #[must_use]
@@ -425,7 +438,7 @@ impl RegistrationRouter {
         e2ee.apply_attachments(context, edge);
         e2ee.declare_origins(context, edge);
         apply_ready_barrier(context, e2ee, edge);
-        outputs.extend(e2ee.barrier_outputs(edge));
+        outputs.extend(e2ee.barrier_outputs(context, edge));
         outputs.extend(e2ee.batch_applied_outputs());
         for output in outputs {
             let _sent = context.send_to(output.generation, output.frames);
@@ -2586,6 +2599,22 @@ fn registered_command_demand(user_id: UserId) -> Result<BucketDemand, RuntimeErr
 }
 
 impl CommandRouter for RegistrationRouter {
+    fn maintenance(
+        &mut self,
+        context: &mut StateCoreContext,
+        event: crate::state_core::inbox::MaintenanceEvent,
+    ) {
+        if event == crate::state_core::inbox::MaintenanceEvent::RetentionSweep {
+            let pending = self
+                .e2ee
+                .as_ref()
+                .is_some_and(|edge| edge.retention_blocked());
+            if let Some(edge) = self.edge.as_mut() {
+                edge.retain_barriers(context, pending);
+            }
+        }
+    }
+
     fn startup(&mut self, context: &mut StateCoreContext) {
         if let Some(accounts) = self.accounts.as_mut() {
             accounts.startup(context);
@@ -3281,21 +3310,26 @@ fn edge_account_answer(
 
 /// Applies a complete cross-profile barrier: both halves commit in one
 /// transaction, the router's companion rows joining the base apply.
-fn apply_ready_barrier(
+pub(crate) fn apply_ready_barrier(
     context: &mut StateCoreContext,
     e2ee: &mut crate::e2ee::edge::E2eeEdge,
     edge: &mut crate::federation::edge::EdgeFederation,
 ) {
+    if !e2ee.is_active() {
+        return;
+    }
     let Some(mutation_id) = edge.barrier_ready() else {
         return;
     };
     match e2ee.prepare_barrier(context, edge, mutation_id) {
         Ok((writes, rendered)) => {
-            if edge.apply_barrier(context, writes) {
-                e2ee.barrier_staged(mutation_id, rendered);
+            if edge.apply_barrier(context, writes, rendered) {
+                e2ee.barrier_staged(mutation_id, Vec::new());
+            } else {
+                e2ee.rollback_projection();
             }
         }
-        Err(_) => edge.fail_companion_link(context),
+        Err(_) => e2ee.fail_frame(context, edge),
     }
 }
 

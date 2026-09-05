@@ -13,6 +13,11 @@ use super::router::Resolved;
 use super::{E2eeEdge, E2eeEdgeConfig, LocalOrigin, PendingRequest};
 use crate::connection::ConnectionGeneration;
 
+mod projection;
+mod responses;
+mod retry;
+mod scope;
+
 fn edge() -> E2eeEdge {
     E2eeEdge::new(E2eeEdgeConfig {
         network_id: [1; 32],
@@ -40,6 +45,9 @@ fn origin(origin_id: [u8; 16], declared: u64, sequence: u64) -> LocalOrigin {
 
 fn pending(generation: u64, sequence: u64, answered: bool) -> PendingRequest {
     PendingRequest {
+        reply_key: None,
+        echo_lines: Vec::new(),
+        retry_label: None,
         generation: ConnectionGeneration::new(generation),
         label: None,
         command: Resolved::Command(ClientCommand::Edirect([9; 32])),
@@ -47,6 +55,7 @@ fn pending(generation: u64, sequence: u64, answered: bool) -> PendingRequest {
         request_object_id: [7; 32],
         sequence,
         frames: Vec::new(),
+        result_object_id: None,
         result: answered.then(|| super::result::DecodedResult {
             request_object_id: [7; 32],
             kind: agenc_ircd_e2ee::objects::federation::IrcFederationResultKind::Failed,

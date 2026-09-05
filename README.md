@@ -15,14 +15,15 @@
 </p>
 
 > [!IMPORTANT]
-> **This is pre-alpha infrastructure, not a deployable server.** Stages 00
-> through 07 are complete. The Stage 04 and Stage 05 checkpoints close exact
-> source commit `4040796f2c21774d58ea7ce54e70a080678e83ac`, the Stage 06
-> checkpoint closes `65cce9d66f7bcfb0c0830a2ab1d42b52bff82942`, and the Stage
-> 07 checkpoint closes `1093d88d0057c3461a423285e0f86ff3775c1140`. The daemon serves
-> TLS-only direct, Tor-exit, and onion profiles on one coordinator, and one
-> coordinator with authenticated edges over base federation. E2EE and
-> WebSocket transports belong to later stages and are not advertised.
+> **This is pre-alpha infrastructure. Production qualification is incomplete.**
+> Stages 00 through 08 have revision-bound implementation checkpoints. The
+> [Stage 08 checkpoint](conformance/evidence/stage-08-ae6457fb62fef8961d3caf904febed580e8b4a91.json)
+> closes exact source commit `ae6457fb62fef8961d3caf904febed580e8b4a91`.
+> The daemon implements TLS-only direct, Tor-exit, and onion profiles,
+> coordinator/edge federation, and the E2EE server adapter. The external
+> cryptographic and protocol review remains open. WebSocket transport and
+> optional history are planned for Stage 09; production qualification is
+> planned for Stage 10. Checkpoints do not qualify later source changes.
 
 ## What is being built
 
@@ -53,7 +54,11 @@ Ed25519, and authenticated storage.
 | 03 | complete; checkpoint closed | Pure accounts, sessions, channels, authorization, privacy projections, plans, explicit external inputs, and an independent reference model |
 | 04 | complete; checkpoint closed | Secret-safe crypto adapters, fixed HPKE and OPAQUE profiles, account authentication, destructive-account proofs, bounded workers, and fuzz coverage |
 | 05 | complete; checkpoint closed | Sealed redb records, exact accounting, rollback recovery, bounded checkpoints, full startup reconstruction, signed backup/restore, rekey construction, login-index transition, and native filesystem qualification |
-| 06-10 | planned | Runtime composition, federation, E2EE routing, optional profiles, and production qualification |
+| 06 | complete; checkpoint closed | Runtime composition, TLS endpoints, account sessions, administration, reload, and shutdown |
+| 07 | complete; checkpoint closed | Authenticated federation, projections, replay, snapshots, partitions, and paged queries |
+| 08 | implementation checkpoint closed; external review open | E2EE routing, policy quorum, edge witnesses, durable barriers, and two-library MLS interoperability |
+| 09 | planned | Optional WebSocket transport and history profiles |
+| 10 | planned | Production qualification and release evidence |
 
 `agenc-ircd-storage` keeps redb on one blocking owner thread, accepts only
 validated owned batches, seals every numbered-table value, and authenticates
@@ -122,13 +127,13 @@ from a clean checkout:
 ```sh
 git clone https://github.com/tetsuo-ai/agenc-ircd.git
 cd agenc-ircd
-bash scripts/check-stage-seven.sh
+bash scripts/check-stage-eight.sh
 ```
 
-The Stage 05 implementation checks inherit every Stage 00 through 04 command.
-They add the closed storage profile, storage integration tests, dependency
-evidence for the safe filesystem adapter, and fuzzing for persistent codecs and
-authenticated backup streams. The reviewed command list is in
+The Stage 08 implementation checks inherit every Stage 00 through 07 command.
+They add the encrypted profile, object and wire vectors, storage records,
+bounded route model, transcripts, MLS interoperability, load checks, and E2EE
+fuzz targets. The reviewed command list is in
 [conformance/gates.toml](conformance/gates.toml).
 
 The reviewed `opaque-ke` patch is vendored, hashed, and checked by workspace
@@ -173,6 +178,13 @@ set, the federated-v1 profile, the transcript catalog over every federation
 layer, the bounded federation model, the three-process daemon test, and
 10,000 deterministic runs of each federation fuzz target to the inherited
 Stage 06 checks.
+
+The [Stage 08 manifest](conformance/evidence/stage-08-ae6457fb62fef8961d3caf904febed580e8b4a91.json)
+contains 160 passed records and closes exact source commit
+`ae6457fb62fef8961d3caf904febed580e8b4a91`. Its recorded gate ran 97 commands.
+The external cryptographic and protocol review (`S08-039`) remains open in the
+[review package](conformance/review/README.md). This checkpoint does not claim
+that review or Stage 10 production qualification has been completed.
 
 The binary starts the node with `agenc-ircd serve --config <file>` after
 `agenc-ircd init` created the layout and `agenc-ircd check-config` verified the
