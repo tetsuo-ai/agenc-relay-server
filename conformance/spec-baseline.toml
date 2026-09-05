@@ -32,7 +32,7 @@ sha256 = "ac83ec05126c45b3e125ec96a3f373d5f0202e09cd133937791854ab07e2f4b4"
 [[artifacts]]
 path = "docs/specification-manifest.txt"
 role = "specification-manifest"
-sha256 = "9c1fa8277f0bc884d1ca1a001e355f66dbaf92c0a1c952bbca7b210c713f691e"
+sha256 = "b24163cae1306507fa4c2fb6484b5140063f34c5198661a667dedb31346482b8"
 
 [[artifacts]]
 path = "scripts/check-spec.sh"
