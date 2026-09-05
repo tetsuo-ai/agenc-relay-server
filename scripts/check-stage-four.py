@@ -124,9 +124,9 @@ EXPECTED_SOURCE_PATCH = {
     "path": "vendor/opaque-ke-4.0.1",
     "upstream_registry": "https://github.com/rust-lang/crates.io-index",
     "upstream_checksum": "ded22991b43cd15561b62b2e1cf9ace1344a8534eebec96202d5c96a77a6616a",
-    "tree_sha256": "8f745b2d6dd9918602ef67313be5cfd7b0185fa1314ea38530560403cd57d96e",
-    "modified_files": ["src/opaque.rs"],
-    "reason": "zeroize password-derived intermediates and the server-finish session key",
+    "tree_sha256": "3365ac7382b2ed771d71c933c7bd1cf772e024042ed8db0899045ea1497a9678",
+    "modified_files": ["src/key_exchange/sigma_i/mod.rs", "src/opaque.rs"],
+    "reason": "zeroize password-derived intermediates and the server-finish session key; gate the shared pre-hash helper on its consuming features",
 }
 EXPECTED_VECTOR_FILES = {
     "test-data/vectors/stage-four-crypto-v1.vectors": {

@@ -231,7 +231,7 @@ CRATES_IO_SOURCES = {
 }
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 VENDORED_PATCH_PATH = "vendor/opaque-ke-4.0.1"
-VENDORED_PATCH_TREE_SHA256 = "8f745b2d6dd9918602ef67313be5cfd7b0185fa1314ea38530560403cd57d96e"
+VENDORED_PATCH_TREE_SHA256 = "3365ac7382b2ed771d71c933c7bd1cf772e024042ed8db0899045ea1497a9678"
 
 
 class WorkspaceError(ValueError):
@@ -286,8 +286,8 @@ def validate_vendored_patches(
                 "upstream_registry": "https://github.com/rust-lang/crates.io-index",
                 "upstream_checksum": DIRECT_CHECKSUMS["opaque-ke"],
                 "tree_sha256": VENDORED_PATCH_TREE_SHA256,
-                "modified_files": ["src/opaque.rs"],
-                "reason": "zeroize password-derived intermediates and the server-finish session key",
+                "modified_files": ["src/key_exchange/sigma_i/mod.rs", "src/opaque.rs"],
+                "reason": "zeroize password-derived intermediates and the server-finish session key; gate the shared pre-hash helper on its consuming features",
             }
         ],
     }

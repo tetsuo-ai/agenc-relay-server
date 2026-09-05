@@ -16,6 +16,7 @@ pub mod ecdsa;
 pub mod hash_eddsa;
 mod message;
 pub mod pure_eddsa;
+#[cfg(any(feature = "ed25519", feature = "ecdsa"))]
 pub(super) mod shared;
 
 use core::iter;
