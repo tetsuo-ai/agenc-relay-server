@@ -9,6 +9,9 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     build-essential python3 && rm -rf /var/lib/apt/lists/*
 
 COPY rust-toolchain /opt/rust
+# The host copy may carry group-only modes; the build runs as an unprivileged
+# user, so every toolchain file must be world-readable and executable.
+RUN chmod -R a+rX /opt/rust
 ENV PATH="/opt/rust/bin:${PATH}"
 RUN rustc --version && cargo --version && cc --version && ld --version && ldd --version \
     && python3 --version && dpkg-query -W > /opt/release-packages.txt
