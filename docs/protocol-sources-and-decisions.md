@@ -147,7 +147,7 @@ the complete graph actually shipped.
 | `precis-profiles` | 0.1.13 | `31e2768890a47af73a032af9f0cedbddce3c9d06cf8de201d5b8f2436ded7674` | no defaults; private bounded adapter; networking feature disabled |
 | `hpke` | 0.14.0 | `dd5130e119706b4d8c2180da6126f7e60b6c38c2d340d539219f57051f0a7af7` | no defaults; `alloc,chacha,x25519,hkdfsha2` |
 | `tls_codec` | 0.5.0 | `18cc98286004cea38f717e2b03d990fc774fbfd38a82720de40e5c94365067c8` | no defaults; `std,mls`; no production derive/Serde |
-| `base64` | 0.23.1 | `ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5` | no defaults; `alloc`; canonical unpadded URL-safe adapter only |
+| `base64` | 0.23.1 | `ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5` | no defaults; `alloc`; canonical unpadded URL-safe protocol adapter and the explicitly specified padded SASL/WebSocket encodings |
 | `chacha20poly1305` | 0.11.0 | `9b89e1c441e926b9c82a8d023f6e1b7ae0adcfaa7d621814e4d60789bac751cb` | no defaults; `alloc,zeroize`; XChaCha type only |
 | `ed25519-dalek` | 3.0.0 | `6ebaa1a2bf1290ab3bfe5a7b771d050ebffab2711c19a81691c683a5144a25de` | no defaults; `fast,zeroize`; strict verification only |
 | `sha2` | 0.11.0 | `446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4` | no defaults; `zeroize` |
@@ -198,3 +198,47 @@ For every source or dependency update:
 
 No entry in this ledger replaces implementation tests or the release evidence
 required by the architecture specification.
+
+## 7. Stage 09 optional profiles and database upgrade
+
+The 2026-09-04 Stage 09 decision retains the IRCv3 commit pinned in Section 4.
+History adopts anchored LATEST and mixed, directed BETWEEN selectors from that
+snapshot. It remains an explicitly enabled, current-member-only plaintext
+channel service. The architecture defines bounded retention, deletion,
+selection, authorization, and expiry rather than delegating those decisions
+to an upstream draft.
+
+WSS accepts either pinned subprotocol in client preference order. It ignores
+extension offers while negotiating none, so browser compression offers do not
+force compression or prevent connection. The private WebSocket accept adapter
+uses already-locked `aws-lc-rs` 1.18.0, crates.io checksum
+`ce2b2dcc879c3bae0d371e77c99f2238400ef24ec001394befa67b6e543add9e`,
+with defaults disabled and exactly `non-fips`. Only this optional public
+handshake adapter may use `SHA1_FOR_LEGACY_USE_ONLY`; it exposes no general
+SHA-1 API and does not change account, storage, federation, or E2EE hashing.
+The handshake's standard padded base64 is another narrow encoding exception.
+The existing TLS provider remains unchanged.
+
+Typed history pages preserve original sender and message metadata. Durable
+result records retain replay identities and immutable row references without
+additional message-body copies. A lost authorization or expired/purged row
+causes the specified terminal history-expired result, never a rerun of LATEST
+under the same request identity. These canonical changes require a new base
+federation profile hash and coordinated peer upgrades. The E2EE companion
+bytes and profile remain unchanged.
+
+Typed History records and history replay kinds change the closed persistent
+schema. Stage 09 therefore ships database generation 2 and the exact offline
+copy-on-write 1-to-2 migration in Architecture Section 23.6. The source History
+table must be empty, as in production Stage 08. All optional-feature builds
+share that database format and the maintenance readers; turning history off
+never bypasses authentication, deletion, or encrypted-binding exclusion.
+
+Build-time exclusion removes optional service dependency edges. Runtime
+disablement suppresses the service, listeners, capabilities, and new service
+writes; it cannot remove dependencies already compiled into the binary.
+Disabled-mode equivalence compares the same corrected source/profile and
+logical storage effects rather than nonce-dependent ciphertext bytes. Existing
+history databases retain their documented validation and cleanup behavior.
+Historical conformance manifests continue to describe only their recorded
+source commits. Stage 09 completion requires a new exact-source checkpoint.

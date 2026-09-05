@@ -34,7 +34,16 @@ constant|federation_keepalive_timeout_seconds|10
 constant|fhello_bytes|260
 constant|fhello_timeout_seconds|5
 constant|fready_timeout_seconds|5
+constant|history_channel_bytes_max|67108864
+constant|history_channels_max|4096
+constant|history_deletion_batch_max|1000
+constant|history_index_bytes_max|268435456
+constant|history_messages_max|262144
+constant|history_messages_per_channel_max|65536
+constant|history_page_bytes_max|65536
+constant|history_queries_max|256
 constant|history_query_limit|100
+constant|history_total_bytes_max|1073741824
 constant|origin_default_retention_seconds|86400
 constant|origin_disconnect_grace_seconds|120
 constant|origin_security_retention_seconds|604800
@@ -60,7 +69,7 @@ enum|AccountServiceMessageKind|account_create_start=1,account_create_finish=2,op
 enum|AccountServiceResponseKind|account_create_challenge=1,opaque_auth_challenge=2,account_create_complete=3,opaque_auth_complete=4,credential_change_challenge=5,credential_change_complete=6
 enum|FederationAccountSettingKind|set_label=1,clear_label=2,public_presence=3,private_presence=4,allow_guest_dm=5,deny_guest_dm=6,add_contact=7,remove_contact=8,reserve_nickname=9,release_nickname=10,delete_start=11,delete_confirm=12,direct_messages_allow=13,direct_messages_contacts=14,direct_messages_deny=15
 enum|FederationAwayKind|not_away=0,away=1
-enum|FederationChannelSettingKind|history_off=1,history_one_hour=2,history_twenty_four_hours=3,history_seven_days=4
+enum|FederationChannelSettingKind|history_off=1,history_one_hour=2,history_twenty_four_hours=3,history_seven_days=4,history_default=5
 enum|FederationContentPolicy|plaintext=1,e2ee_bound=2
 enum|FederationDirectoryQueryKind|list=1,names=2,who=3,whois=4,whowas=5,ison=6,userhost=7,links=8,monitor_add=9,monitor_remove=10,monitor_clear=11,monitor_list=12,monitor_status=13,channel_topic=14,channel_modes=15,channel_mode_list=16
 enum|FederationEventKind|session_visible=1,session_hidden=2,nickname_changed=3,channel_visible=4,channel_hidden=5,member_joined=6,member_parted=7,channel_modes_changed=8,topic_changed=9,invited=10,kicked=11,away_changed=12,display_name_changed=13,message_delivered=14,channel_destroyed=15,account_label_changed=16,network_notice=17,user_modes_changed=18,channel_policy_changed=19,channel_memberships_recomputed=20,account_state_changed=21,request_completed=22,invite_removed=23
@@ -75,7 +84,7 @@ enum|FederationOpcode|session_open=1,session_close=2,nick_change=3,join=4,part=5
 enum|FederationPersistence|ephemeral=1,registered=2
 enum|FederationProjectionKind|session=1,channel_detail=3,membership=4,invite=6,account=7
 enum|FederationQueryTargetKind|no_target=0,nickname_target=1,channel_name_target=2
-enum|FederationResultKind|failed=1,committed=2,session_registered=3,auth_challenge=4,authenticated=5,account_created=6,reply_page=7,no_content=8
+enum|FederationResultKind|failed=1,committed=2,session_registered=3,auth_challenge=4,authenticated=5,account_created=6,reply_page=7,no_content=8,history_page=9,history_expired=10
 enum|FederationRoleLevel|member=0,voice=1,halfop=2,operator=3,admin=4,owner=5
 enum|FederationRole|coordinator=1,edge=2
 enum|FederationSessionHideKind|client_quit=1,transport_lost=2,origin_expired=3,account_deleted=4,operator_removed=5,security_fenced=6
@@ -92,9 +101,11 @@ hash|profile|SHA256(concat("agenc-chat base federation profile registry v1",NUL,
 hash|tls_exporter|EXPORTER-agenc-chat-federation-v1,32,concat(network_id,min(ServerId),max(ServerId))
 mapping|account-service-padding|request=4592:padding=4586-inner:zero,response=4208:padding=4202-payload:zero
 mapping|account-service-response-by-request-kind|account_create_start=account_create_challenge,account_create_finish=account_create_complete,opaque_auth_start=opaque_auth_challenge,opaque_auth_finish=opaque_auth_complete,credential_change_start=credential_change_challenge,credential_change_finish=credential_change_complete
-mapping|completion-event-by-result-kind|failed=absent,committed=present,session_registered=present,auth_challenge=absent,authenticated=absent,account_created=absent,reply_page=absent,no_content=absent
+mapping|completion-event-by-result-kind|failed=absent,committed=present,session_registered=present,auth_challenge=absent,authenticated=absent,account_created=absent,reply_page=absent,no_content=absent,history_page=absent,history_expired=absent
 mapping|event-subject-key|session-events=user-id,channel-events=channel-id,join-part=channel-id+user-id,invite-and-removal=channel-id+invite-id,kick=channel-id+target-user-id,message=target-kind+target-id+message-id,account-state=account-id,network-notice=code,request-completed=replay-key
 mapping|federation-failed-reply-codes|ALREADY_AUTHENTICATED,AUTH_REQUIRED,BAD_SEQUENCE,BAD_STATE,CHANNEL_FULL,E2EE_REQUIRED,E2EE_SYNCING,INVALID_ARGUMENT,NOT_ALLOWED,ORIGIN_EXPIRED,ORIGIN_GAP,QUERY_EXPIRED,RATE_LIMITED,REGISTRATION_REQUIRED,SECRET_UNAVAILABLE,SERVER_BUSY,STALE_STATE,STORAGE_UNAVAILABLE,TOO_LARGE,UNAVAILABLE
+mapping|history-replay|original-selection-digest-or-terminal-expiry;no-durable-result-bodies
+mapping|history-selectors|latest-optional-anchor;exclusive-before-after-between;mixed-directed-between;around-balanced-pivot
 mapping|result.account_create_finish|failed,account_created
 mapping|result.account_create_start|failed,auth_challenge
 mapping|result.account_settings|failed,committed,no_content
@@ -106,7 +117,7 @@ mapping|result.channel_unregister|failed,committed
 mapping|result.credential_change_finish|failed,committed
 mapping|result.credential_change_start|failed,auth_challenge
 mapping|result.directory_query|failed,reply_page,no_content
-mapping|result.history_query|failed,reply_page
+mapping|result.history_query|failed,history_page,history_expired
 mapping|result.invite|failed,committed
 mapping|result.join|failed,committed
 mapping|result.kick|failed,committed
@@ -184,6 +195,8 @@ schema|FederationDepartedChannel|channel_instance_id:opaque[16],resulting_revisi
 schema|FederationEvent|profile_version:uint16,network_id:opaque[32],target_server_id:opaque[16],projection_generation:uint64,coordinator_state_generation:uint64,delivery_sequence:uint64,event_id:opaque[16],event_kind:enum(FederationEventKind),event:opaque<1..262144>,cross_profile_mutation_id:opaque<0..16>,cross_profile_part_index:uint16,cross_profile_part_count:uint16,request_home_server_id:opaque<0..16>,request_server_incarnation:opaque<0..16>,request_origin_id:opaque<0..16>,request_origin_generation:uint64,request_operation_sequence:uint64,request_id:opaque<0..16>
 schema|FederationHelloTBS|profile_version:uint16,network_id:opaque[32],sender_server_id:opaque[16],expected_peer_server_id:opaque[16],server_incarnation:opaque[16],recovery_epoch:opaque[16],role:enum(FederationRole),hello_nonce:opaque[32],profile_hash:opaque[32],tls_exporter:opaque[32]
 schema|FederationHello|tbs:struct(FederationHelloTBS),signature:opaque[64]
+schema|FederationHistoryAuthorization|session_id:opaque[16],user_id:opaque[16],session_generation:uint64,account_id:opaque<0..24>,account_session_generation:uint64,membership_revision:uint64,history_authorization_generation:uint64
+schema|FederationHistoryMessage|message_id:opaque[16],channel_event_sequence:uint64,received_unix_milliseconds:uint64,expires_unix_milliseconds:uint64,message_kind:enum(FederationMessageKind),sender:struct(FederationSourceView),tags:vector(FederationClientTag)<0..16>,body:opaque<0..512>
 schema|FederationHistoryReference|reference_kind:enum(FederationHistoryReferenceKind),message_id:opaque<0..16>,unix_milliseconds:uint64
 schema|FederationInviteEventView|channel_instance_id:opaque[16],invite_id:opaque[16],resulting_revision:uint64,local_invite_projection:opaque<0..91>,inviter:struct(FederationSourceView),named_target:struct(FederationSourceView)
 schema|FederationInviteProjection|channel_instance_id:opaque[16],invite_id:opaque[16],target_principal:struct(PrincipalRef),inviter_user_id:opaque[16],creation_revision:uint64,expires_at:uint64
@@ -260,7 +273,7 @@ schema|operation.channel_unregister|session_id:opaque[16],channel_instance_id:op
 schema|operation.credential_change_finish|session_id:opaque[16],account_service_envelope:struct(AccountServiceEnvelope)
 schema|operation.credential_change_start|session_id:opaque[16],account_service_envelope:struct(AccountServiceEnvelope)
 schema|operation.directory_query|session_id:opaque[16],query:struct(DirectoryQuery)
-schema|operation.history_query|session_id:opaque[16],channel_instance_id:opaque[16],selector:struct(HistorySelector),limit:uint16
+schema|operation.history_query|session_id:opaque[16],channel_instance_id:opaque[16],selector:struct(HistorySelector),limit:uint16,cursor:opaque<0..32>
 schema|operation.invite|session_id:opaque[16],channel_instance_id:opaque[16],target_nickname:struct(FederationNickname),expected_channel_revision:uint64
 schema|operation.join|session_id:opaque[16],expected_session_revision:uint64,targets:vector(FederationJoinTarget)<1..20>
 schema|operation.kick|session_id:opaque[16],channel_instance_id:opaque[16],target_user_ids:opaque<16..64>,expected_channel_revision:uint64,reason:opaque<0..256>
@@ -279,6 +292,8 @@ schema|result.auth_challenge|account_service_response:struct(AccountServiceRespo
 schema|result.authenticated|account_id:opaque<24..24>,account_session_generation:uint64,auth_grant_id:opaque[32]
 schema|result.committed|resulting_state_generation:uint64
 schema|result.failed|reply_code:opaque<1..64>,safe_context:opaque<0..255>
+schema|result.history_expired|original_result_object_id:opaque[32]
+schema|result.history_page|session_id:opaque[16],channel_instance_id:opaque[16],channel_name:struct(FederationChannelName),authorization:struct(FederationHistoryAuthorization),snapshot_token:opaque[32],snapshot_state_generation:uint64,page_sequence:uint32,next_cursor:opaque<0..32>,messages:vector(FederationHistoryMessage)<0..100>
 schema|result.no_content|empty
 schema|result.reply_page|snapshot_token:opaque[32],page_sequence:uint32,next_cursor:opaque<0..32>
 schema|result.session_registered|session_id:opaque[16],user_id:opaque[16],session_revision:uint64,account_id:opaque<0..24>,account_session_generation:uint64,account_revision:uint64,resulting_state_generation:uint64

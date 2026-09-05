@@ -20,6 +20,7 @@ sources = root / "docs/protocol-sources-and-decisions.md"
 manifest = root / "docs/specification-manifest.txt"
 
 expected_files = {
+    "docs/storage-migration-1-to-2.registry": "de534ffc9e64c29e8a2a6c555f44df9b1bac949cb3479240fe0a38b5eeae165b",
     "rfcs/rfc1459-irc-protocol.txt": "d1fdc86169252b234b17c2f501c0ba7f512ba697ddf8a13b3da7ee4491a76799",
     "rfcs/rfc2810-irc-architecture.txt": "b00c6ae92ef66b1b2c3a15df86e6e1ab8268bcb40ebbadd388d75531bf6e62f6",
     "rfcs/rfc2811-irc-channel-management.txt": "41e2b24141669f0094e78896f5d2c54d26db2cbed8a299cf9b0bb1aca42d3a96",
@@ -33,7 +34,7 @@ expected_files = {
     "rfcs/rfc9525-tls-service-identity.txt": "ed8116c2435376dffe37ec2ca688c3a8515e36820852b29e0b6cdfbe92abd2c5",
     "rfcs/rfc9750-mls-architecture.txt": "6aa156c5592f99802aae9c39510bf347cacee4abdb1c34baab4c933a6cd992dd",
     "docs/irc-mls-e2ee-extension.md": "398237eccca60c7056774b7565dbcac19c38417828191729f50d8fb86a33fdb1",
-    "docs/federation-v1-profile.registry": "30d4a9e9947691e2ca26e137e2762413a9b6a4fd308308bd5bfbd8cad20ac2e9",
+    "docs/federation-v1-profile.registry": "1b94cb7b43dc458ff683ddcfd86eed1939128a7a6d0229b89342bd6816eb5411",
 }
 
 errors: list[str] = []
@@ -430,7 +431,7 @@ if wire_keys != expected_wire_keys:
 profile_hash = hashlib.sha256(
     b"agenc-chat base federation profile registry v1\0" + registry_bytes
 ).hexdigest()
-expected_profile_hash = "83702207e1e1153c8722d5cc668a7d1bab85ba518fcdde030a36811b41bdcc40"
+expected_profile_hash = "7b00e0d0844270626411d398f15f7520224ea906117738e3da9741a611dc67b3"
 if profile_hash != expected_profile_hash:
     errors.append(f"profile hash mismatch: {profile_hash} != {expected_profile_hash}")
 
@@ -456,6 +457,7 @@ if len(e2ee_profile_token) != 43 or "=" in e2ee_profile_token:
 profile_digest = bytes.fromhex(profile_hash)
 profile_token = base64.urlsafe_b64encode(profile_digest).rstrip(b"=").decode("ascii")
 manifest_raw_targets = (
+    "docs/storage-migration-1-to-2.registry",
     "docs/federation-v1-profile.registry",
     "docs/irc-mls-e2ee-extension.md",
     "docs/ircd-architecture-and-implementation-spec.md",
@@ -910,7 +912,7 @@ e2ee_text = validate_markdown(
     e2ee, "companion E2EE spec", list(range(1, 25)), list("AB")
 )
 sources_text = validate_markdown(
-    sources, "protocol source ledger", list(range(1, 7)), []
+    sources, "protocol source ledger", list(range(1, 8)), []
 )
 for match in re.finditer(r"\bSection (\d+)(?:\.\d+)*", e2ee_text):
     number = int(match.group(1))

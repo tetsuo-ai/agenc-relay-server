@@ -535,6 +535,16 @@ is accepted only from a separately configured non-browser listener. Cookies,
 HTTP authentication, redirects, per-message compression, and unnegotiated
 extensions are forbidden.
 
+The request is exactly HTTP/1.1 and carries one valid `Host`, version 13,
+and a canonical standard-base64 WebSocket key decoding to 16 bytes. The
+server selects the first supported subprotocol in the client's offered order.
+Extension offers are parsed but none are negotiated: the response omits
+`Sec-WebSocket-Extensions`, and subsequent nonzero RSV bits are rejected.
+This permits ordinary browser extension offers without enabling compression.
+Present Origin values match the validated allowlist byte-for-byte, without
+normalization. Missing Origin requires `allow_missing_origin=true` on an
+explicitly configured non-browser listener.
+
 The server supports `text.ircv3.net` and `binary.ircv3.net`, requires one of
 them, and follows the IRCv3 WebSocket specification: one WebSocket message is
 one protocol line without CR or LF. Because the network is UTF-8-only, binary
@@ -546,6 +556,27 @@ upgrade must complete within five seconds. A body, second request, obsolete
 folded header, duplicate singleton header, or transfer coding is rejected.
 Client masking, control frames, and close behavior follow RFC 6455; invalid
 masking or framing closes with WebSocket code 1002.
+
+The request-line and field-line limits exclude their terminating CRLF. The
+aggregate header limit includes each field's CRLF but excludes the final
+empty line. A fixed 18,436-byte upgrade buffer therefore covers all permitted
+request bytes and delimiters. `Content-Length: 0` declares no body; any
+nonzero content length, buffered trailing bytes, or transfer coding is refused.
+HTTP failures have fixed bodyless responses and close the connection: 400 for
+malformed or forbidden requests, 403 for Origin refusal, 404 for the wrong
+endpoint, 405 for the wrong method, 426 for the wrong version, 431 for header
+limits, 414 for the request-line limit, and 408 for the upgrade deadline.
+Rejected values are never reflected.
+
+The upgrade deadline begins at TLS completion. Registration still expires
+30 seconds after that same instant, including upgrade and queue admission.
+The active Origin policy is checked immediately before deciding to send 101;
+a reload completed before that decision applies to the pending upgrade.
+Established WebSocket connections retain their admission decision.
+WebSocket Ping/Pong does not satisfy the IRC keepalive exchange. The existing
+bounded writer and shutdown protocol applies to both transports. Every
+additional reassembly, output, and control allocation is charged to the global
+budget, including temporary overlapping message buffers.
 
 ### 8.5 Tor deployment
 
@@ -2091,7 +2122,7 @@ ACCT DELETE START
 ACCT DELETE CONFIRM <22-character-confirmation-token>
 CHANCTL REGISTER <channel>
 CHANCTL UNREGISTER <channel>
-CHANCTL HISTORY <channel> OFF|1H|24H|7D
+CHANCTL HISTORY <channel> OFF|ON|1H|24H|7D
 ```
 
 Every command requires a registered, authenticated session. `*` clears the
@@ -2455,6 +2486,105 @@ authoritative receive time, and runs deletion in bounded batches of 1,000.
 Redaction is not promised: an owner may stop future server retrieval, but
 clients and recipients may retain copies. Changing retention affects only new
 messages unless an explicit purge is confirmed through the admin plane.
+
+### 17.2.1 History admission and selection
+
+The `history` build feature and `privacy.history_enabled` are independently
+required to advertise or serve history. The capability also requires `batch`,
+`server-time`, and `message-ids`. Runtime history settings remain restart-only.
+An authenticated owner issuing `CHANCTL HISTORY <channel> ON|1H|24H|7D`
+explicitly confirms retention. `ON` selects the coordinator's configured
+`privacy.history_default`; an edge never resolves this default locally.
+
+Only ordinary channel-wide `PRIVMSG` and `NOTICE` messages are retained.
+`TAGMSG`, status-restricted delivery, events, direct messages, local channels,
+unregistered or unlisted channels, and encrypted routes are excluded. The
+stored sender view, Message ID, authoritative receive timestamp, message kind,
+body, and permitted client tags are immutable. Connection labels, batch IDs,
+and authentication or connection-private tags are not retained. Rendering
+filters the permitted tags through the requesting client's capabilities.
+
+Retention admission and the corresponding message operation commit in one
+durable transaction before fanout. Capacity refusal, storage failure, or an
+untrusted clock refuses the history-requiring message before acceptance; the
+server never silently omits required retention or evicts unexpired messages.
+History writes and delivery pause while the authoritative clock is untrusted.
+Destructive expiry also pauses until the Section-21.6 clock recovery condition.
+
+Selectors preserve the pinned draft's exclusive reference boundaries.
+`LATEST` accepts either `*` or one exclusive reference. `BEFORE` and `AFTER`
+require one reference. `BETWEEN` permits message-ID and timestamp references
+in either combination and selects in the direction from the first reference
+toward the second, excluding both boundaries. Returned rows always sort by
+`(channel_event_sequence, MessageId)`. A Message ID resolves to an event
+position, never to the lexical order of its bytes. Limits are 1..100.
+`AROUND` includes its resolved pivot, allocates floor((limit - 1) / 2) rows
+before it and the remaining rows after it, then backfills an unavailable side
+from the other side. A timestamp pivot is the first row at or after that time,
+or the latest row if none follows. Unknown message references return an empty
+batch. Empty successful selections still produce one `chathistory` batch.
+
+Authorization is checked at request admission, after asynchronous storage
+reads, and before delivery or replay. It requires the original live session,
+current membership, exact channel instance, registered/listed plaintext policy,
+global and channel enablement, and absence of quarantine or a hiding purge.
+Membership and policy transitions invalidate pending authorization without
+ordinary new messages changing an already frozen selection. The history
+authorization generation advances on history-policy, visibility, quarantine,
+purge, and binding transitions and never on ordinary message retention. Each query freezes
+at most 100 immutable message identities. One query per origin and at most 256
+queries network-wide are admitted. Each query retains at most one encoded and
+rendered page of 65,536 bytes each, charged to the existing protocol pool.
+
+### 17.2.2 Durable history and deletion
+
+Database format 1, schema generation 2 defines History table 19 with the
+existing 24-byte key `ChannelInstanceId || uint64(sequence)`. Kind 1 is a
+version-1 typed HistoryMessage at a positive accepting state generation.
+Kind 2 is a version-1 HistoryControl at sequence zero. The sealed-record schema
+and domain envelope remain 1. Decoders validate the key, kind, body version,
+channel binding, sequence, expiry, and envelope together.
+
+HistoryControl records retain the channel identity, a nonzero history
+authorization generation, sequence high-water mark,
+message count, logical message bytes, monotonic purged-through watermark,
+idle/active purge state, frozen cutoff, scan cursor, and durable audit-operation
+identity. Counters include physically retained rows hidden by an active purge.
+Message writes, control counters, deletion progress, and audit progress change
+atomically. Startup authenticates all rows, recomputes the counters, and
+reconstructs only bounded metadata indexes. Message bodies are loaded through
+bounded exact reads when a query needs them. Missing controls, conflicting
+keys, unknown versions, impossible counters, or insufficient reconstruction
+memory fail closed; startup does not discard history to fit a smaller budget.
+
+Hard admission limits are 4,096 history channels including retained controls,
+262,144 messages network-wide, 65,536 messages and 67,108,864 logical message
+bytes per channel. Total logical history bytes are at most
+`min(1073741824, storage.database_max_bytes / 4)`. The history index is charged
+from the existing protocol pool P and capped at `min(268435456, P / 8)`;
+this is a ceiling within P, not another allowance. Every backing allocation,
+including durable-index and control entries, is charged. Empty controls can
+be reclaimed only after history is off, no purge or snapshot depends on them,
+and affected replay entries are terminal. Limits are admission ceilings, not
+preallocations or guarantees of message capacity under a smaller memory budget.
+
+Each message's receive time, chosen retention, and expiry are immutable.
+`OFF` stops writes and retrieval immediately; old rows remain subject to their
+original expiry. History-disabled builds and configurations still authenticate
+retained rows, enforce encrypted-binding exclusion, and support expiry/purge.
+They advertise no history capability and admit no history service requests.
+
+The coordinator admin command
+`CHANNEL HISTORY PURGE <ChannelInstanceId> :reason` requires the existing
+channel permission and a Section-22.5 signed confirmation bound to the exact
+command and channel revision. Its durable cutoff hides all rows at or below
+that sequence before deletion begins. Deletion uses at most 1,000 rows per
+transaction and resumes from authenticated progress after interruption. New
+messages above the cutoff may be retained while policy remains on. Successful
+completion is reported only after physical deletion commits. Binding E2EE
+requires history off, no remaining message rows, and no pending purge, checked
+against the exact channel instance and revision in the binding transaction;
+an empty control row is not a retained plaintext message.
 
 ### 17.3 Offline account state
 
@@ -3239,7 +3369,7 @@ unlisted, missing, extra, or trailing field is invalid.
 | `channel_register` | session ID `[16]`, channel-instance ID `[16]`, expected channel revision `uint64` |
 | `channel_unregister` | session ID `[16]`, channel-instance ID `[16]`, expected channel revision `uint64` |
 | `account_settings` | session ID `[16]`, expected account revision `uint64`, canonical `AccountSettingsChange` from Appendix B |
-| `history_query` | session ID `[16]`, channel-instance ID `[16]`, canonical `HistorySelector`, limit `uint16` |
+| `history_query` | session ID `[16]`, channel-instance ID `[16]`, canonical `HistorySelector`, limit `uint16`, continuation cursor `<0..32>` |
 | `directory_query` | session ID `[16]`, canonical `DirectoryQuery` |
 | `account_create_start` | canonical `AccountServiceEnvelope` whose header kind is `account_create_start` |
 | `account_create_finish` | canonical `AccountServiceEnvelope` whose header kind is `account_create_finish` |
@@ -3286,7 +3416,8 @@ The coordinator answers every request exactly once logically:
 ```text
 enum {
     failed(1), committed(2), session_registered(3), auth_challenge(4),
-    authenticated(5), account_created(6), reply_page(7), no_content(8)
+    authenticated(5), account_created(6), reply_page(7), no_content(8),
+    history_page(9), history_expired(10)
 } FederationResultKind;
 
 struct {
@@ -3336,12 +3467,15 @@ The closed `result` arms are:
 | `account_created` | Account ID `<24..24>`, account revision `uint64` |
 | `reply_page` | snapshot token `[32]`, page sequence `uint32`, next cursor `<0..32>` |
 | `no_content` | empty tuple |
+| `history_page` | Session ID `[16]`, ChannelInstanceId `[16]`, FederationChannelName, FederationHistoryAuthorization, snapshot token `[32]`, snapshot state generation `uint64`, page sequence `uint32`, next cursor `<0..32>`, FederationHistoryMessage vector `<0..100>` |
+| `history_expired` | original result object ID `[32]` |
 
 Only `reply_page` may contain more than the ordinary command's bounded reply
 set; it has 1 through 512 replies and a non-empty snapshot token. Other kinds
 contain only the numerics/standard replies required for that operation. A
 failed result has no state event. The coordinator stores and replays the exact
-result object, not a reconstructed approximation.
+result object, not a reconstructed approximation. History pages use the
+exact reconstruction and terminal-expiry exception in Section 20.6.1.
 
 For a finish request that was successfully HPKE-opened and parsed, the reply
 vector also carries the exact exporter-authenticated completion before its
@@ -3391,6 +3525,64 @@ rendering. The request result, semantic events, completion event, and all
 outbox entries commit atomically at the coordinator. An exact retry
 replays that same boundary; it never allocates new event IDs or renders a
 partial target subset.
+
+#### 20.6.1 History results and replay expiry
+
+`history_query` returns `failed`, `history_page`, or `history_expired`.
+A history page carries the original session and channel instance, display
+channel name, frozen authorization tuple, snapshot token and state generation,
+page sequence, next cursor,
+and at most 100 `FederationHistoryMessage` rows. The exact fields are in the
+canonical registry. The authorization tuple contains Session ID, User ID,
+session generation, optional 24-byte Account ID, account-session generation,
+membership revision, and history authorization generation. Its Session ID must
+equal the page Session ID; account absence requires generation zero, and all
+other generations/revisions are positive. The edge compares current local
+session/account/membership facts and retains the coordinator token unchanged;
+only the coordinator authorizes that token. Rows contain the original Message ID, positive event
+sequence, receive and expiry milliseconds, PRIVMSG/NOTICE kind, public sender
+view, permitted client tags, and message body. The entire encoded result and
+its rendered IRC page are each at most 65,536 bytes. History results have no
+completion event and no outer semantic replies; ordinary `FederationReply`
+objects cannot substitute for original message prefixes and tags.
+
+The first request has an empty cursor. Continuations use a new operation
+sequence and one single-use cursor bound to the original origin, session,
+channel instance, selector, limit, snapshot, and authorization generation.
+They use the existing 60-second idle and ten-minute absolute snapshot limits.
+A client command selects at most 100 rows across all pages. The edge starts
+one connection-local `chathistory` batch, carries its original label, and
+fetches each continuation only after bounded queue admission. Empty selections
+still open and close a batch. Cancellation or expiry closes that batch and
+returns the command's explicit failure without disconnecting unrelated clients.
+
+RequestResult kind 5 stores coordinator history replay metadata; kind 6 stores
+edge history request metadata. Both use closed version-1 bodies in database
+schema generation 2. They contain the exact request/replay binding, immutable
+selection and page metadata where applicable, original result digest,
+expiry/authorization binding, and terminal state. They never contain retained
+history message bodies. Row references in replay metadata are not storage
+retention roots. They cannot carry mutation-completion or snapshot-coverage
+states because history queries have no RequestCompleted event.
+
+A successful duplicate reconstructs only the original selected rows, checks
+current authorization and expiry, and verifies the original result digest.
+It never reruns LATEST or substitutes another selection. If the original
+selection can no longer be served, the coordinator first durably records a
+terminal `history_expired` result whose body contains exactly the original
+result object ID. Later retries return that same terminal result, including
+after rejoin or re-enablement. This is the sole history-specific exception to
+the ordinary byte-identical successful-result replay requirement. The edge
+accepts only an authenticated transition bound to the exact original request
+and result digest; unrelated or conflicting results remain fatal.
+
+Edges keep page bodies only in bounded transient memory and publish them
+only after durable metadata admission, current authorization checks, and
+writer queue reservation. An unresolved request may be resent after link
+reconnect for the same surviving client sink. A daemon restart has no surviving
+client sockets, so reconstructed entries are sink-gone and never render to a
+new connection. Rendered entries are terminal. A lost authority or partition
+fence prevents serving queued history pages from a local cache.
 
 ### 20.7 Origin lifecycle
 
@@ -4454,6 +4646,7 @@ registration. In addition to signed `PING`, `PONG`, `QUIT`, `MOTD`, `VERSION`,
 | `ACCOUNT SUSPEND <AccountId> <seconds> :reason` | accounts | durable bounded suspension |
 | `ACCOUNT RESTORE <AccountId> :reason` | accounts | remove suspension, not cryptographic revocation |
 | `CHANNEL QUARANTINE <ChannelInstanceId> :reason` | channels | block new delivery, preserve evidence/state |
+| `CHANNEL HISTORY PURGE <ChannelInstanceId> :reason` | channels | coordinator-only confirmed bounded plaintext history deletion |
 | `CONNECT <ServerId> :reason` | federation | on an edge, start its configured coordinator link; invalid on a coordinator |
 | `SQUIT <ServerId> :reason` | federation | quiesce one link without deleting peer identity |
 | `PEER QUARANTINE <ServerId> :reason` | federation | durable deny and incarnation fence |
@@ -5648,7 +5841,9 @@ name is 1..64 lowercase ASCII `[a-z0-9-]`. The separately cited normative
 rule text defines every field conversion, validation, split/merge, target-key
 derivation, and failure condition. A registry line without that text and
 vectors is not implementable and blocks release. Database format 1 initially
-has schema generation 1 and no migration is implied by this document.
+began at schema generation 1. Stage 09 ships exactly one migration from
+generation 1 to 2, defined below. Fresh databases use generation 2, including
+builds with both optional service features disabled.
 
 The stopped-daemon command is:
 
@@ -5692,6 +5887,42 @@ rollback because no logical mutation occurred. Once the migrated instance has
 accepted a mutation, downgrade requires restoring the verified pre-migration
 backup into a new recovery epoch under Section 23.7; it never reopens the old
 continuity as though later state had not existed.
+
+#### 23.6.1 The generation-1 to generation-2 migration
+
+The canonical rules are pinned in `docs/storage-migration-1-to-2.registry`.
+Command version is 1. Source generation is exactly 1 and target generation is
+exactly 2. The database format, table IDs, stored-key shapes, sealed-record
+schema, and domain envelope remain 1. Ordinary service requires generation 2;
+source-generation decoding is available only to authenticated maintenance and
+backup readers. A generation-1 service startup reports that offline migration
+is required and does not modify the source.
+
+For each source table 1..13, 17, 18, 20..24, and 26 at record schema 1, rule ID
+is the table ID and the rule name is `preserve-validated-record`. Decode the
+source with its closed generation-1 key/kind/body/reference codecs, validate
+its semantic invariants, preserve the exact logical plaintext and stored key,
+and emit one freshly sealed target record under the target binding. The
+source RequestResult kind set remains 1..4. Target kinds 5/6 and typed History
+kinds 1/2 are admitted only under generation 2.
+
+Rule 19 is `reject-legacy-history`; any source History row aborts migration.
+Rule 25 is `reject-live-construction`; any source live construction marker
+also aborts migration. Their absent-target registry arms authorize no data
+deletion or guessed transformation. Production Stage 08 databases contain no
+History rows. Source key-check table 0, StateMeta table 14, and integrity tables
+15/16 are verified by source admission and regenerated through the construction
+protocol rather than copied as application records. The target key check
+binds the generation-2 header. Existing logical state, revisions, counters,
+login-index state, E2EE state, and request/outbox continuity are preserved.
+
+The checked-in rule registry, per-rule semantics, migration profile hash, and
+before/after/corruption vectors are one protocol artifact. A missing rule,
+unknown profile, nonempty source History table, changed rebuilt plan, or
+source/target invariant mismatch fails closed. Every publication boundary is
+covered by interruption/resume tests. The source configuration and directory
+remain untouched; selecting the installed target is an explicit stopped-daemon
+operator step under the upgrade and rollback rules above.
 
 ### 23.7 Backup format and restore
 
@@ -6613,7 +6844,7 @@ not protocol revisions, when all canonical vectors remain byte-identical.
 | binary/presentation encoding | `tls_codec` 0.5.0 with `default-features = false` and exactly `std,mls`, plus `base64` 0.23.1 with `default-features = false` and exactly `alloc`; production protocol codecs use no derive or Serde |
 | at-rest AEAD | RustCrypto `chacha20poly1305` 0.11.0, no defaults, `alloc,zeroize`; `XChaCha20Poly1305` only, no reduced rounds or crate RNG |
 | signatures | `ed25519-dalek` 3.0.0 with `default-features = false` and exactly `fast,zeroize`, using `verify_strict`; no batch/hazmat/legacy/Serde |
-| hashes/MAC/KDF | RustCrypto `sha2` 0.11.0 with no defaults and `zeroize`, `hmac` 0.13.0 with no defaults and `zeroize`, and `hkdf` 0.13.0 with no defaults; SHA-256/SHA-512 only as registered |
+| hashes/MAC/KDF | RustCrypto `sha2` 0.11.0 with no defaults and `zeroize`, `hmac` 0.13.0 with no defaults and `zeroize`, and `hkdf` 0.13.0 with no defaults; SHA-256/SHA-512 only as registered; optional WSS uses the private RFC-6455 SHA-1 handshake adapter below |
 | password hashing | RustCrypto `argon2` 0.5.3 with `default-features = false` and exactly `alloc`; Argon2id v1.3 through the `opaque-ke` adapter |
 | secret erasure/comparison | `zeroize` 1.9.0 with `default-features = false` and `alloc`, and `subtle` 2.6.1 with `default-features = false` |
 
@@ -6637,6 +6868,18 @@ direct primitive adapters, the lockfile records both graphs, vectors exercise
 both, and dependency consolidation requires an `opaque-ke` release with
 byte-identical RFC-9807 behavior. No other duplicate cryptographic primitive
 crate is accepted without the Section-24.5 exception record.
+
+The optional WSS accept adapter uses `aws-lc-rs` 1.18.0 with defaults
+disabled and exactly `non-fips`, matching the existing locked TLS provider.
+It exposes only RFC-6455 `Sec-WebSocket-Accept` computation with
+`SHA1_FOR_LEGACY_USE_ONLY` and standard padded base64. This exception applies
+only to public HTTP handshake bytes; no general SHA-1 API is exposed and all
+other registered hashes retain their existing algorithms. Cargo features
+`wss` and `history` default off and are independently additive. Durable schema
+validation and stopped-daemon maintenance remain available in every build.
+Enabling an uncompiled optional service fails configuration validation before
+listener admission or storage writes. Runtime disablement does not claim to
+remove dependencies already compiled into a feature-enabled binary.
 
 ### 24.5 Dependency and build integrity
 
@@ -7719,7 +7962,7 @@ FederationAccountSettingKind: set_label=1, clear_label=2,
   delete_confirm=12, direct_messages_allow=13,
   direct_messages_contacts=14, direct_messages_deny=15
 FederationChannelSettingKind: history_off=1, history_one_hour=2,
-  history_twenty_four_hours=3, history_seven_days=4
+  history_twenty_four_hours=3, history_seven_days=4, history_default=5
 FederationHistorySelectorKind: latest=1, before=2, after=3, around=4,
   between=5
 FederationHistoryReferenceKind: no_reference=0, message_id_reference=1,
@@ -7752,7 +7995,8 @@ The already declared opcode registry is exactly `session_open=1` through
 `credential_change_finish=26`, in the order in Section 20.5. The result registry is
 exactly `failed=1`, `committed=2`,
 `session_registered=3`, `auth_challenge=4`, `authenticated=5`,
-`account_created=6`, `reply_page=7`, and `no_content=8`.
+`account_created=6`, `reply_page=7`, `no_content=8`, `history_page=9`,
+and `history_expired=10`.
 
 The event registry is extended and fixed as:
 
@@ -8003,7 +8247,8 @@ selectors, and `delete_start` carry empty value.
 `reserve_nickname`/`release_nickname` carry one valid nickname.
 `delete_confirm` carries exactly the decoded 16-byte Section-14.6 token.
 Every channel setting consists only of its discriminant, which selects the
-complete history policy. These operations carry an expected revision in the enclosing
+complete history policy; `history_default` resolves the coordinator
+configuration before mutation. These operations carry an expected revision in the enclosing
 request and cannot contain multiple changes.
 
 History selectors use:
@@ -8025,9 +8270,11 @@ struct {
 `no_reference` has an empty message ID and zero time;
 `message_id_reference` has exactly 16 message-ID bytes and zero time; and
 `timestamp_reference` has an empty message ID and a nonzero UTC Unix
-millisecond value. `latest` uses two no-reference values. `before`, `after`,
-and `around` use a nonempty `first` and no-reference `second`. `between` uses
-two references of the same kind in increasing order. Client timestamps with
+millisecond value. `latest` permits a reference or no-reference `first` and
+requires no-reference `second`. `before`, `after`, and `around` require a
+nonempty `first` and no-reference `second`. `between` requires two nonempty
+references, permits different kinds and either direction, and uses the
+exclusive selection rules in Section 17.2.1. Client timestamps with
 nonzero precision below one millisecond are rejected rather than rounded.
 
 Join targets are unique and sorted by `channel_name.value`; each join key is
@@ -8647,6 +8894,8 @@ The `result` union in `FederationResult` is exactly:
 | `account_created` | Account ID `<24..24>`, account revision `uint64` |
 | `reply_page` | snapshot token `[32]`, page sequence `uint32`, next cursor `<0..32>` |
 | `no_content` | empty tuple |
+| `history_page` | Session ID `[16]`, ChannelInstanceId `[16]`, FederationChannelName, FederationHistoryAuthorization, snapshot token `[32]`, snapshot state generation `uint64`, page sequence `uint32`, next cursor `<0..32>`, FederationHistoryMessage vector `<0..100>` |
+| `history_expired` | original result object ID `[32]` |
 
 Every opcode permits `failed`. Its only successful result kinds are:
 
@@ -8656,7 +8905,7 @@ Every opcode permits `failed`. Its only successful result kinds are:
 | `session_close`, `nick_change`, `join`, `part`, `channel_mode`, `user_mode`, `topic`, `invite`, `kick`, `away`, `setname`, `channel_register`, `channel_unregister`, `channel_settings` | `committed` |
 | `message` | `committed`, or `no_content` only for a NOTICE with zero accepted targets |
 | `account_settings` | `committed`, or `no_content` only for `delete_start` |
-| `history_query` | `reply_page` |
+| `history_query` | `history_page`, or terminal `history_expired` under Section 20.6.1 |
 | `directory_query` | `reply_page`, or `no_content` only when the selected MONITOR operation has no protocol reply |
 | `account_create_start`, `opaque_auth_start` | `auth_challenge` |
 | `account_create_finish` | `account_created` |
@@ -8679,7 +8928,8 @@ ordered failed-target replies, and never contain 353/366 NAMES numerics. With
 at most 20 targets this is at most 40 replies. The home edge derives the exact
 accepted name set from its request plus this complete failure set and runs the
 Section-14.2 `JoinNamesContinuation`; any missing, duplicate, or non-requested
-failure context is a fatal result inconsistency. No other operation implicitly
+failure context is a fatal result inconsistency. History pages may continue
+under the bounded Section-20.6.1 history cursor protocol. No other operation implicitly
 starts a follow-up federation request.
 
 `FederationResult.completion_event_id` is exactly 16 bytes for `committed` and
@@ -8862,10 +9112,10 @@ profile_hash = SHA256(
 ```
 
 The exact registry file SHA-256 is
-`30d4a9e9947691e2ca26e137e2762413a9b6a4fd308308bd5bfbd8cad20ac2e9`.
+`1b94cb7b43dc458ff683ddcfd86eed1939128a7a6d0229b89342bd6816eb5411`.
 The resulting version-1 `profile_hash` is
-`83702207e1e1153c8722d5cc668a7d1bab85ba518fcdde030a36811b41bdcc40`
-(unpadded base64url `g3AiB-HhFTyHItXMZop9G6uFulGPzd4DCjaBG0G9zEA`). A placeholder
+`7b00e0d0844270626411d398f15f7520224ea906117738e3da9741a611dc67b3`
+(unpadded base64url `ewDg0IRCcGJkEdOY8V91ICJOqQYRdzjj2pdBphHcZ7M`). A placeholder
 or hash of a locally regenerated alternative is invalid. The registry
 enumerates every enum, top-level/arm/helper structure, field, mode code, bound,
 carrier command, cryptographic suite/domain label, hash label, and ordering
@@ -9308,7 +9558,7 @@ dns-endpoint=<lowercase DNS name>:<port>
 onion-endpoint=<56-char-v3-name>.onion:<port>
 onion-tls-spki-sha256=<43-char-hash>
 recovery-epoch=<22-char-random-recovery-epoch>
-base-profile-sha256=g3AiB-HhFTyHItXMZop9G6uFulGPzd4DCjaBG0G9zEA
+base-profile-sha256=ewDg0IRCcGJkEdOY8V91ICJOqQYRdzjj2pdBphHcZ7M
 account-service-hpke-key-id=<43-char-hash>
 account-service-hpke-public-key=<43-char-X25519-public-key>
 e2ee-profile=IRC-MLS/1
