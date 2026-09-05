@@ -710,6 +710,35 @@ resend after a link loss still classifies as fresh. An origin acknowledgement
 whose batch storage refused now retires the link, so the edge declares again
 on its next link. Both have coordinator unit tests.
 
+### CAP-13: bursts overflow a connection's deferred commands at the edge
+
+Open. With the refusals above gone, the two-cycle 64-client development runs
+still refuse about a third of the channel messages sent during the reconnect
+and churn rounds, all with `SERVER_BUSY` from the edge: a connection may
+have one request in flight until its completion event is applied, later
+commands wait in a per-connection queue of 32, and the queue overflows.
+The edge applies every event and stages every request as its own durable
+batch, so under a burst of joins, parts, and registrations its commit rate
+bounds how fast completions come back, and 64 clients on one host sit at
+that bound. The refusal is side-effect-free and the clients re-send, so the
+campaign records it (`messages_refused`, `refused_by_code`,
+`refused_by_time`) without losing a message; the steady-state windows refuse
+nothing. Batching several events into one durable commit at the edge is the
+remedy and stays open.
+
+### CAP-14: a coordinator stopped with an acknowledgement backlog exceeds its shutdown budget
+
+Open. When the campaign stopped the coordinator while it still held sixty to
+eighty unacknowledged events for an edge that was catching up, the process
+reported `daemon shutdown exceeded its deadline` and exited unclean; the
+flush phase ended within its budget and the stop phase, which waits for the
+storage owner's final checkpoint, did not. Stopped after the federation
+drained, it exits cleanly every time. The campaign now polls every node's
+`STATS FEDERATION` for up to sixty seconds and stops only when no base
+outbox object remains, which is how an operator stops a coordinator after
+its links go quiet. Bounding the stop phase against an outstanding
+acknowledgement backlog in the daemon itself stays open.
+
 ## Release claims and limits
 
 The signing command requires an explicit Ed25519 signing key and matching

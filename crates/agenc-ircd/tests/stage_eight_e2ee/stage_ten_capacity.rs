@@ -50,6 +50,8 @@ const SCENARIO_SETTLE: Duration = Duration::from_secs(12);
 const FINAL_RESERVE: Duration = Duration::from_secs(45);
 /// Steady-state rest between two cycles when the budget holds another.
 const INTER_CYCLE_REST: Duration = Duration::from_secs(60);
+/// The most the campaign waits for the federation to drain before stopping.
+const FEDERATION_DRAIN_WAIT: Duration = Duration::from_secs(60);
 const LOAD_CHANNEL: &str = "#load";
 const CHANNEL_MESSAGE_PERIOD: Duration = Duration::from_secs(1);
 const DIRECT_MESSAGE_PERIOD: Duration = Duration::from_secs(2);
@@ -2027,6 +2029,40 @@ fn control<'a>(
     Ok(campaign)
 }
 
+/// Polls every node's `STATS FEDERATION` until no base outbox object or
+/// pending request remains, or the drain wait elapses; returns what it saw.
+fn wait_for_federation_drain(admins: &[AdminIdentity; 3]) -> TestResult<String> {
+    let deadline = Instant::now() + FEDERATION_DRAIN_WAIT;
+    let started = Instant::now();
+    let mut last = String::new();
+    while Instant::now() < deadline {
+        let mut outstanding = 0_u64;
+        let mut parts = Vec::new();
+        for (index, identity) in admins.iter().enumerate() {
+            let mut admin = AdminSession::connect(identity)?;
+            let objects = admin
+                .stats("FEDERATION")?
+                .into_iter()
+                .find(|(name, _)| name == "base_outbox_objects")
+                .map_or(0, |(_, value)| value);
+            outstanding = outstanding.saturating_add(objects);
+            parts.push(format!("node {index}={objects}"));
+        }
+        last = parts.join(" ");
+        if outstanding == 0 {
+            return Ok(format!(
+                "drained in {:.1}s ({last})",
+                started.elapsed().as_secs_f64()
+            ));
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+    Ok(format!(
+        "still outstanding after {}s ({last})",
+        FEDERATION_DRAIN_WAIT.as_secs()
+    ))
+}
+
 /// Copies each node's log segments into `<campaign>/logs/<node>` so the
 /// daemon's own record of every scenario survives fixture cleanup.
 fn preserve_logs(network: &Network, directory: &Path) -> TestResult {
@@ -2153,6 +2189,11 @@ fn run_campaign(settings: &Settings, network: &Network) -> TestResult {
         }
     };
     let elapsed_ns = shared.nanos();
+    // The workers have quit; let the federation settle before the stop so a
+    // daemon is not shut down while it still acknowledges and answers, the
+    // way an operator stops a node after its links go quiet.
+    let drained = wait_for_federation_drain(&campaign.admins)?;
+    campaign.note(format!("federation drain before stop: {drained}"));
     nodes = campaign.nodes;
     for (status, daemon) in
         stop_statuses
