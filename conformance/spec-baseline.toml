@@ -1,5 +1,5 @@
 schema_version = 1
-frozen_at_commit = "5f77c2e0c5f7fdde75a893c1a695f418c2dbee8e"
+frozen_at_commit = "75d7cf90016c4126950d8578e1f9128e4c1ee8e4"
 
 [profiles.base_federation_v1]
 sha256 = "7b00e0d0844270626411d398f15f7520224ea906117738e3da9741a611dc67b3"
