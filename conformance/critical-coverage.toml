@@ -4,7 +4,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 446
-reviewed_source_sha256 = "dcecc5284b0865f98c127c2fe2ed81e8ef00a0ddae1c7a2ee1688b1c6d3e8ec7"
+reviewed_source_sha256 = "272682ff987ce9db9160d97b230a0d1e8412eb03fb7353c6f8b23f57528489c1"
 deferred = []
 
 [[region]]
@@ -81,7 +81,7 @@ reason = "History requests require current membership, plaintext content, enable
 id = "wss-upgrade-error-responses"
 category = "parser-error-discriminants"
 file = "crates/agenc-ircd-client-wire/src/websocket_transport/upgrade.rs"
-source_sha256 = "d598a0585f51a34bfa6cb50d78f2503ce40a08035dea6d7e819dbd46b7a9da1e"
+source_sha256 = "ac48a85d41e9aabc5eea363ab3bd47f734b0f06d3cbb2312e7610cfd489b0fa1"
 start_line = 37
 end_line = 48
 metric = "regions"

@@ -153,10 +153,17 @@ def validate_policy_data(
     schema_version = policy.get("schema_version")
     if type(schema_version) is not int or schema_version != 1:
         raise CoverageError("coverage policy schema_version must be 1")
-    if policy.get("minimum_overall_branch_percent") != MINIMUM_BRANCH_PERCENT:
-        raise CoverageError("coverage policy branch threshold is stale")
-    if policy.get("minimum_overall_line_percent") != MINIMUM_LINE_PERCENT:
-        raise CoverageError("coverage policy line threshold is stale")
+    # A policy may raise a floor above the inherited interim value (the
+    # release policy requires 90 percent branches) but never weaken it.
+    for field, floor in (
+        ("minimum_overall_branch_percent", MINIMUM_BRANCH_PERCENT),
+        ("minimum_overall_line_percent", MINIMUM_LINE_PERCENT),
+    ):
+        value = policy.get(field)
+        if type(value) not in {int, float} or isinstance(value, bool):
+            raise CoverageError(f"coverage policy {field} must be a number")
+        if float(value) < floor or float(value) > 100.0:
+            raise CoverageError(f"coverage policy {field} is weaker than {floor:.2f} or above 100")
     if policy.get("critical_region_percent") != CRITICAL_PERCENT:
         raise CoverageError("coverage policy critical threshold must be 100")
     categories = policy.get("required_categories")
@@ -442,8 +449,10 @@ def region_counts(
 def validate_report(
     report: dict[str, object],
     regions: list[dict[str, object]],
+    branch_floor: float = MINIMUM_BRANCH_PERCENT,
+    line_floor: float = MINIMUM_LINE_PERCENT,
 ) -> tuple[float, float, int]:
-    """Validate one detailed report against all reviewed regions."""
+    """Validate one detailed report against all reviewed regions and the policy floors."""
     if set(report) != {"cargo_llvm_cov", "data", "type", "version"}:
         raise CoverageError("coverage report has an invalid top-level schema")
     if report.get("type") != LLVM_COVERAGE_EXPORT_TYPE:
@@ -481,13 +490,13 @@ def validate_report(
     branch_percent = percentage(totals, "branches")
     line_percent = percentage(totals, "lines")
     failures: list[str] = []
-    if branch_percent < MINIMUM_BRANCH_PERCENT:
+    if branch_percent < branch_floor:
         failures.append(
-            f"branch coverage {branch_percent:.2f}% is below {MINIMUM_BRANCH_PERCENT:.2f}%"
+            f"branch coverage {branch_percent:.2f}% is below {branch_floor:.2f}%"
         )
-    if line_percent < MINIMUM_LINE_PERCENT:
+    if line_percent < line_floor:
         failures.append(
-            f"line coverage {line_percent:.2f}% is below {MINIMUM_LINE_PERCENT:.2f}%"
+            f"line coverage {line_percent:.2f}% is below {line_floor:.2f}%"
         )
 
     for region in regions:
@@ -539,8 +548,14 @@ def load_report(path: Path) -> dict[str, object]:
 
 def validate(root: Path, report_path: Path, policy_path: Path) -> tuple[float, float, int]:
     """Validate the reviewed policy and one detailed llvm-cov report."""
-    regions = validate_policy_data(root, load_policy(policy_path))
-    return validate_report(load_report(report_path), regions)
+    policy = load_policy(policy_path)
+    regions = validate_policy_data(root, policy)
+    return validate_report(
+        load_report(report_path),
+        regions,
+        float(policy["minimum_overall_branch_percent"]),  # type: ignore[arg-type]
+        float(policy["minimum_overall_line_percent"]),  # type: ignore[arg-type]
+    )
 
 
 def expect_rejection(label: str, action: object, fragment: str) -> None:
@@ -661,6 +676,34 @@ def self_test(root: Path, policy_path: Path) -> int:
         "required categories are stale",
     )
     cases += 1
+    weakened_floor = copy.deepcopy(policy)
+    weakened_floor["minimum_overall_branch_percent"] = MINIMUM_BRANCH_PERCENT - 0.01
+    expect_rejection(
+        "weakened branch floor",
+        lambda: validate_policy_data(root, weakened_floor),
+        "weaker than",
+    )
+    cases += 1
+    impossible_floor = copy.deepcopy(policy)
+    impossible_floor["minimum_overall_line_percent"] = 100.01
+    expect_rejection(
+        "impossible line floor",
+        lambda: validate_policy_data(root, impossible_floor),
+        "above 100",
+    )
+    cases += 1
+    boolean_floor = copy.deepcopy(policy)
+    boolean_floor["minimum_overall_branch_percent"] = True
+    expect_rejection(
+        "boolean branch floor",
+        lambda: validate_policy_data(root, boolean_floor),
+        "must be a number",
+    )
+    cases += 1
+    raised_floor = copy.deepcopy(policy)
+    raised_floor["minimum_overall_branch_percent"] = 90.0
+    if len(validate_policy_data(root, raised_floor)) != len(regions):
+        raise CoverageError("self-test 'raised branch floor' changed the reviewed regions")
 
     region = regions[0]
     source_path = str(region["file"])

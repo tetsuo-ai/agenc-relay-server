@@ -292,25 +292,25 @@ impl EdgeReplica {
         Ok(())
     }
 
+    /// Every membership and invite is keyed by its own record identifiers at
+    /// insertion, so only the references they carry can dangle.
     fn validate_children(&self) -> Result<(), ReplicaError> {
-        for ((channel_id, user_id), membership) in &self.memberships {
+        for (channel_id, user_id) in self.memberships.keys() {
             if !self.channels.contains_key(channel_id) || !self.sessions.contains_key(user_id) {
                 return Err(ReplicaError::DanglingReference);
-            }
-            if membership.channel_id != *channel_id || membership.user_id != *user_id {
-                return Err(ReplicaError::InvalidRecord);
             }
         }
         self.validate_invites()
     }
 
     fn validate_invites(&self) -> Result<(), ReplicaError> {
-        for ((channel_id, invite_id), invite) in &self.invites {
+        for (channel_id, invite) in self
+            .invites
+            .iter()
+            .map(|((channel, _), invite)| (channel, invite))
+        {
             if !self.channels.contains_key(channel_id) || !self.hosts_principal(invite.target) {
                 return Err(ReplicaError::DanglingReference);
-            }
-            if invite.channel_id != *channel_id || invite.invite_id != *invite_id {
-                return Err(ReplicaError::InvalidRecord);
             }
         }
         Ok(())

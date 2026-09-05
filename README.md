@@ -59,7 +59,7 @@ Ed25519, and authenticated storage.
 | 07 | complete; checkpoint closed | Authenticated federation, projections, replay, snapshots, partitions, and paged queries |
 | 08 | implementation checkpoint closed; external review open | E2EE routing, policy quorum, edge witnesses, durable barriers, and two-library MLS interoperability |
 | 09 | complete; checkpoint closed | Independent WSS and plaintext history profiles, replay-safe paging, purge, and schema migration |
-| 10 | planned | Production qualification and release evidence |
+| 10 | in progress; no release decision | Production qualification and release evidence |
 
 `agenc-ircd-storage` keeps redb on one blocking owner thread, accepts only
 validated owned batches, seals every numbered-table value, and authenticates
@@ -199,6 +199,15 @@ history lifecycle and encrypted-route refusals, all 16 build/configuration
 combinations, migration recovery, and WSS/history fuzz campaigns. Existing
 nodes need a stopped-daemon schema migration and a coordinated federation
 upgrade; follow the [Stage 09 operating instructions](docs/stage-09-operations.md).
+
+Stage 10 is in progress and has no checkpoint. The release qualification
+runner, the release image and reproducible container build, the storage,
+capacity, drill, source, and claims drivers, the decision inspection in the
+binary, and the release coverage inventory are implemented and described in
+the [Stage 10 qualification notes](docs/stage-10-qualification.md). The
+notes also record the findings the drivers have surfaced so far, the campaigns
+that still have to run, and the external inputs that remain open. No release
+decision has been signed, and no Stage 10 claim applies to any build.
 
 The binary starts the node with `agenc-ircd serve --config <file>` after
 `agenc-ircd init` created the layout and `agenc-ircd check-config` verified the

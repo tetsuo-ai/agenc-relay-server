@@ -145,7 +145,7 @@ that evidence.
 Release coverage requires at least 90 percent branches, 90 percent lines,
 and 100 percent of all designated critical branches. The inherited coverage
 policy retains its 75 percent interim branch floor for development. The
-complete Stage 10 critical-branch inventory and its coverage remain open.
+release policy and the current measurement are described under Coverage.
 
 ## Remaining work
 
@@ -161,11 +161,12 @@ canary matches, and zero kernel drops. This evidence covers the local x86_64
 development build.
 
 The capacity and sustained-operation driver, the operational drill driver,
-the source-status checker, and the claims checker are implemented (below).
-`check` refuses a policy whose required driver is absent. The complete
-critical coverage inventory, native build reproduction, and the long
-campaigns have not been completed. The release builder and detached signing
-path still need their full integration qualification.
+the source-status checker, the claims checker, the release image builder,
+and the release coverage inventory are implemented (below). `check` refuses a
+policy whose required driver is absent. The x86_64 release build reproduced
+bit for bit in two independent containers; the aarch64 build record, the
+branch coverage floor, and the long campaigns have not been completed. The
+detached signing path is exercised only with disposable keys.
 
 Network evidence must include real WeeChat and Irssi sessions, the native
 account protocol, OpenMLS and mls-rs, an isolated Tor v3 network, SOCKS
@@ -330,6 +331,43 @@ the restart path, see CAP-8), rollback, resynchronization (see CAP-10), host
 hardening, and observability. Four do not pass and keep the drills job
 failing: restore and disaster restore (CAP-9), login-index transition
 (CAP-5), and deletion (CAP-11).
+
+## Coverage
+
+`conformance/release-critical-coverage.toml` is the Stage 10 coverage policy.
+It uses the same schema as the interim `critical-coverage.toml`, carries the
+90 percent branch and line floors, and lists the complete critical inventory:
+96 regions across the five categories the architecture names. Each region is
+anchored to a declaration and bound to its file digest and line range: the
+Display match of every parser error enum in the client, federation, E2EE,
+admin, config, and storage crates and the client message parser; every
+authorization function of the domain decision model, the E2EE policy,
+quorum, and commit authorization checks, the edge history authorization, and
+the admin confirmation and replay checks; every closed registry decoder in
+the generated type registry and the storage table decoder; the storage
+recovery classification, migration source validation, restore and migration
+commands, and the signed audit scan; and the Section 27 checkers of the
+domain state, the edge replica, and the E2EE route bindings. Branch-free
+decision functions use the region metric so an unexecuted body is still a
+failure. `check-coverage.py` accepts a policy that raises a floor above the
+inherited value and refuses one that weakens it, so both policies are
+validated by the same code; the Stage 10 workspace job validates the interim
+policy first and the release policy second, and it also runs the doc tests,
+`cargo audit`, and `cargo deny` before the feature matrix.
+
+The 2026-09-05 workspace measurement on this branch reports 75.62 percent
+branches (14,310 of 18,924) and 90.66 percent lines, with all nine interim
+regions at 100 percent. Reaching the release floor needs 2,722 more covered
+branch outcomes. The interim policy passes; the release policy fails on the
+floor and on 21 of its 96 regions, which are listed with their counts in the
+workspace job's coverage log. The largest gaps are the runtime account
+service, state core, registration, daemon, admin, edge history, and E2EE
+coordinator startup modules, and the domain federation projection. This
+change added replica validation, projection event, and error rendering tests
+and removed two replica validation arms that no public operation could
+reach, since every membership and invite is keyed by its own record. The
+workspace job therefore stays failing until the coverage push completes, in
+the same way the drills job fails on its open findings.
 
 ## Native targets and scoped decisions
 

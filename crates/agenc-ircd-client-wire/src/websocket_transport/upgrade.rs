@@ -415,3 +415,31 @@ impl std::fmt::Display for UpgradeError {
     }
 }
 impl std::error::Error for UpgradeError {}
+
+#[cfg(test)]
+mod display_tests {
+    use super::UpgradeError;
+
+    #[test]
+    fn every_discriminant_renders_the_uniform_message() {
+        let variants = [
+            UpgradeError::Malformed,
+            UpgradeError::Origin,
+            UpgradeError::Endpoint,
+            UpgradeError::Method,
+            UpgradeError::Version,
+            UpgradeError::Headers,
+            UpgradeError::RequestLine,
+            UpgradeError::Timeout,
+        ];
+        // The upgrade failure message is deliberately uniform: a client that
+        // failed the handshake learns nothing about which check refused it.
+        let rendered: Vec<String> = variants.iter().map(ToString::to_string).collect();
+        assert!(rendered.iter().all(|text| !text.is_empty()));
+        let first = rendered.first();
+        assert!(
+            rendered.iter().all(|text| Some(text) == first),
+            "{rendered:?}"
+        );
+    }
+}

@@ -1,0 +1,975 @@
+# The complete Stage 10 release inventory of critical regions: every parser
+# error discriminant, authorization decision, closed protocol enum decoder,
+# persistence recovery path, and Section 27 invariant checker. Regions are
+# anchored to the declaration text and bound to the file digest, so a moved
+# or edited region must be re-reviewed. The release floors are 90 percent
+# branches and lines and 100 percent of every region below; the interim
+# development policy in critical-coverage.toml keeps its 75 percent floor.
+schema_version = 1
+minimum_overall_branch_percent = 90.0
+minimum_overall_line_percent = 90.0
+critical_region_percent = 100.0
+required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
+reviewed_source_files = 446
+reviewed_source_sha256 = "272682ff987ce9db9160d97b230a0d1e8412eb03fb7353c6f8b23f57528489c1"
+deferred = []
+
+[[region]]
+id = "client-message-error-enum-arms"
+category = "parser-error-discriminants"
+file = "crates/agenc-ircd-client-wire/src/message.rs"
+source_sha256 = "98aaba77f541e697884670b2c6cd7fcbfbdc6711e6bc28ecf69bcc6832b4a0c0"
+start_line = 134
+end_line = 147
+metric = "regions"
+reason = "Every closed MessageParseError discriminant must be observed by an error reporting test."
+
+[[region]]
+id = "client-tag-error-arms"
+category = "parser-error-discriminants"
+file = "crates/agenc-ircd-client-wire/src/tags.rs"
+source_sha256 = "71fdcd19cb70fcb24a9cdfb03ab0090de2fc0966167f00a8c8cc73803909ca7b"
+start_line = 366
+end_line = 382
+metric = "regions"
+reason = "Every closed TagError discriminant must be observed by an error reporting test."
+
+[[region]]
+id = "client-framing-error-arms"
+category = "parser-error-discriminants"
+file = "crates/agenc-ircd-client-wire/src/framing.rs"
+source_sha256 = "cf8a5e12020f83c1760329b718da14ccf6cd0067fa814cc0078dc4092d4f6ee1"
+start_line = 40
+end_line = 55
+metric = "regions"
+reason = "Every closed FramingError discriminant must be observed by an error reporting test."
+
+[[region]]
+id = "client-cap-error-arms"
+category = "parser-error-discriminants"
+file = "crates/agenc-ircd-client-wire/src/capability.rs"
+source_sha256 = "5a5590f8c10ceef252647032434c4c038f9763e370f97cd973f6ebd3a85e8181"
+start_line = 197
+end_line = 212
+metric = "regions"
+reason = "Every closed CapError discriminant must be observed by an error reporting test."
+
+[[region]]
+id = "client-text-carrier-error-arms"
+category = "parser-error-discriminants"
+file = "crates/agenc-ircd-client-wire/src/text.rs"
+source_sha256 = "a707d3c8a0479dcfda5bbf63d43c37d54cde2c9805b3d2e2352818b38532c1fd"
+start_line = 46
+end_line = 64
+metric = "regions"
+reason = "Every closed TextCarrierError discriminant must be observed by an error reporting test."
+
+[[region]]
+id = "client-registration-error-arms"
+category = "parser-error-discriminants"
+file = "crates/agenc-ircd-client-wire/src/registration.rs"
+source_sha256 = "563ee478ced475e020292674e2d3deffcd383a363b3ea81f49969ae0f33afe3a"
+start_line = 357
+end_line = 374
+metric = "regions"
+reason = "Every closed RegistrationError discriminant must be observed by an error reporting test."
+
+[[region]]
+id = "client-registration-grammar-error-arms"
+category = "parser-error-discriminants"
+file = "crates/agenc-ircd-client-wire/src/registration_command.rs"
+source_sha256 = "47ace2c58674d5344847d52f8e09b31ba47aa134c8bb87b5a54be2194df0badf"
+start_line = 337
+end_line = 349
+metric = "regions"
+reason = "Every closed RegistrationGrammarError discriminant must be observed by an error reporting test."
+
+[[region]]
+id = "client-auth-transport-error-arms"
+category = "parser-error-discriminants"
+file = "crates/agenc-ircd-client-wire/src/auth_transport.rs"
+source_sha256 = "8441afdafb047f7764c408f13f451da7eca11b6b1ecc245aa5722de91f0f0250"
+start_line = 177
+end_line = 192
+metric = "regions"
+reason = "Every closed AuthTransportError discriminant must be observed by an error reporting test."
+
+[[region]]
+id = "client-render-error-arms"
+category = "parser-error-discriminants"
+file = "crates/agenc-ircd-client-wire/src/render.rs"
+source_sha256 = "f76ca294d1fe7698bd859d046e71b99d026af9474edc586f04ac5900005299dc"
+start_line = 79
+end_line = 96
+metric = "regions"
+reason = "Every closed RenderError discriminant must be observed by an error reporting test."
+
+[[region]]
+id = "wss-upgrade-error-arms"
+category = "parser-error-discriminants"
+file = "crates/agenc-ircd-client-wire/src/websocket_transport/upgrade.rs"
+source_sha256 = "ac48a85d41e9aabc5eea363ab3bd47f734b0f06d3cbb2312e7610cfd489b0fa1"
+start_line = 412
+end_line = 416
+metric = "regions"
+reason = "Every closed UpgradeError discriminant must be observed by an error reporting test."
+
+[[region]]
+id = "wss-frame-header-error-arms"
+category = "parser-error-discriminants"
+file = "crates/agenc-ircd-client-wire/src/websocket_transport/frame.rs"
+source_sha256 = "2cacafe2ef4fa3d1adbddfcf21e0d6407a58d14fc290ebfae3decfae9a06657d"
+start_line = 164
+end_line = 171
+metric = "regions"
+reason = "Every closed FrameHeaderError discriminant must be observed by an error reporting test."
+
+[[region]]
+id = "federation-codec-error-arms"
+category = "parser-error-discriminants"
+file = "crates/agenc-ircd-federation-wire/src/codec.rs"
+source_sha256 = "d8a551cff63ee4a0cf0a4f29a7170ab7585b591ae0fc2f2a77c60c2a3580879b"
+start_line = 56
+end_line = 80
+metric = "regions"
+reason = "Every closed CodecError discriminant must be observed by an error reporting test."
+
+[[region]]
+id = "federation-frame-error-arms"
+category = "parser-error-discriminants"
+file = "crates/agenc-ircd-federation-wire/src/frames.rs"
+source_sha256 = "c892ddb2b81547c2d29f67b7b83b5485dc307552eac3e40c69b2d100adcba3d9"
+start_line = 60
+end_line = 76
+metric = "regions"
+reason = "Every closed FrameError discriminant must be observed by an error reporting test."
+
+[[region]]
+id = "federation-assembly-error-arms"
+category = "parser-error-discriminants"
+file = "crates/agenc-ircd-federation-wire/src/assembly.rs"
+source_sha256 = "98de37a8a82c3801697f26d6731a2e462ba187113ffbd7a81461836abb683274"
+start_line = 51
+end_line = 66
+metric = "regions"
+reason = "Every closed AssemblyError discriminant must be observed by an error reporting test."
+
+[[region]]
+id = "federation-text-error-arms"
+category = "parser-error-discriminants"
+file = "crates/agenc-ircd-federation-wire/src/text.rs"
+source_sha256 = "8f81182614a15b3ca3adc0a68e3e9d95b3bc11103b51597ea6fe3031ad7a706b"
+start_line = 47
+end_line = 66
+metric = "regions"
+reason = "Every closed FederationTextError discriminant must be observed by an error reporting test."
+
+[[region]]
+id = "e2ee-assembly-error-arms"
+category = "parser-error-discriminants"
+file = "crates/agenc-ircd-e2ee/src/wire/assembly.rs"
+source_sha256 = "23fba1e1dd297a988f2cffc6c4190cdf4cbf7a6ea801568298f64dbfe5a94a7f"
+start_line = 289
+end_line = 293
+metric = "regions"
+reason = "Every closed AssemblyError discriminant must be observed by an error reporting test."
+
+[[region]]
+id = "e2ee-key-set-error-arms"
+category = "parser-error-discriminants"
+file = "crates/agenc-ircd-e2ee/src/federation/ecap.rs"
+source_sha256 = "079df886e48f0975d4ecd82b02c8e6e69cfbc11c923cae2816c439880d443a12"
+start_line = 210
+end_line = 221
+metric = "regions"
+reason = "Every closed KeySetError discriminant must be observed by an error reporting test."
+
+[[region]]
+id = "admin-error-arms"
+category = "parser-error-discriminants"
+file = "crates/agenc-ircd-admin/src/error.rs"
+source_sha256 = "bad9d404a46f9ab88273ce2953b16d1462b9869db785b0c8bfea5eb50fa18b85"
+start_line = 40
+end_line = 59
+metric = "regions"
+reason = "Every closed AdminError discriminant must be observed by an error reporting test."
+
+[[region]]
+id = "config-error-arms"
+category = "parser-error-discriminants"
+file = "crates/agenc-ircd-config/src/error.rs"
+source_sha256 = "671093e6e2a5ad9390c6fd9d76e3697800f4d9a74ec508f562befee4edb4c61e"
+start_line = 28
+end_line = 42
+metric = "regions"
+reason = "Every closed ConfigError discriminant must be observed by an error reporting test."
+
+[[region]]
+id = "release-decision-error-arms"
+category = "parser-error-discriminants"
+file = "crates/agenc-ircd-config/src/release_decision.rs"
+source_sha256 = "0b362d539876fe34b67cb92321257fc8616cb6ae04c9786df187e40a73aecf9c"
+start_line = 73
+end_line = 82
+metric = "regions"
+reason = "Every closed ReleaseDecisionError discriminant must be observed by an error reporting test."
+
+[[region]]
+id = "storage-error-arms"
+category = "parser-error-discriminants"
+file = "crates/agenc-ircd-storage/src/error.rs"
+source_sha256 = "ba9553c08779741a5e9e6d4068a34df34d6c9db37ac36b643528b91778576f4a"
+start_line = 40
+end_line = 59
+metric = "regions"
+reason = "Every closed StorageError discriminant must be observed by an error reporting test."
+
+[[region]]
+id = "client-message-parser-errors"
+category = "parser-error-discriminants"
+file = "crates/agenc-ircd-client-wire/src/message.rs"
+source_sha256 = "98aaba77f541e697884670b2c6cd7fcbfbdc6711e6bc28ecf69bcc6832b4a0c0"
+start_line = 165
+end_line = 208
+metric = "branches"
+reason = "Every accepted and rejected syntax path must be exercised at the client parser boundary."
+
+[[region]]
+id = "domain-authorize"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-domain/src/decision.rs"
+source_sha256 = "433ae9b679580c5c369b56d44dbb59101e7f2ebc1383e1aa470d0db6bb684186"
+start_line = 1974
+end_line = 1996
+metric = "regions"
+reason = "Session fences, admission, and command authority are security decisions."
+
+[[region]]
+id = "domain-authorize-inner"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-domain/src/decision.rs"
+source_sha256 = "433ae9b679580c5c369b56d44dbb59101e7f2ebc1383e1aa470d0db6bb684186"
+start_line = 2156
+end_line = 2178
+metric = "branches"
+reason = "Session fences, admission, and command authority are security decisions."
+
+[[region]]
+id = "domain-authorize-command"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-domain/src/decision.rs"
+source_sha256 = "433ae9b679580c5c369b56d44dbb59101e7f2ebc1383e1aa470d0db6bb684186"
+start_line = 2180
+end_line = 2223
+metric = "branches"
+reason = "Session fences, admission, and command authority are security decisions."
+
+[[region]]
+id = "domain-authorize-topic-change"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-domain/src/decision.rs"
+source_sha256 = "433ae9b679580c5c369b56d44dbb59101e7f2ebc1383e1aa470d0db6bb684186"
+start_line = 2260
+end_line = 2279
+metric = "branches"
+reason = "Session fences, admission, and command authority are security decisions."
+
+[[region]]
+id = "domain-authorize-kick"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-domain/src/decision.rs"
+source_sha256 = "433ae9b679580c5c369b56d44dbb59101e7f2ebc1383e1aa470d0db6bb684186"
+start_line = 2281
+end_line = 2294
+metric = "branches"
+reason = "Session fences, admission, and command authority are security decisions."
+
+[[region]]
+id = "domain-authorize-channel-message"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-domain/src/decision.rs"
+source_sha256 = "433ae9b679580c5c369b56d44dbb59101e7f2ebc1383e1aa470d0db6bb684186"
+start_line = 2296
+end_line = 2316
+metric = "branches"
+reason = "Session fences, admission, and command authority are security decisions."
+
+[[region]]
+id = "domain-authorize-e2ee-channel-message"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-domain/src/decision.rs"
+source_sha256 = "433ae9b679580c5c369b56d44dbb59101e7f2ebc1383e1aa470d0db6bb684186"
+start_line = 2318
+end_line = 2347
+metric = "branches"
+reason = "Session fences, admission, and command authority are security decisions."
+
+[[region]]
+id = "domain-authorize-direct-message"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-domain/src/decision.rs"
+source_sha256 = "433ae9b679580c5c369b56d44dbb59101e7f2ebc1383e1aa470d0db6bb684186"
+start_line = 2349
+end_line = 2367
+metric = "branches"
+reason = "Session fences, admission, and command authority are security decisions."
+
+[[region]]
+id = "domain-authorize-history"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-domain/src/decision.rs"
+source_sha256 = "433ae9b679580c5c369b56d44dbb59101e7f2ebc1383e1aa470d0db6bb684186"
+start_line = 2369
+end_line = 2390
+metric = "branches"
+reason = "Session fences, admission, and command authority are security decisions."
+
+[[region]]
+id = "domain-authorize-message-target"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-domain/src/decision.rs"
+source_sha256 = "433ae9b679580c5c369b56d44dbb59101e7f2ebc1383e1aa470d0db6bb684186"
+start_line = 2508
+end_line = 2534
+metric = "branches"
+reason = "Session fences, admission, and command authority are security decisions."
+
+[[region]]
+id = "domain-authorize-direct-policy"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-domain/src/decision.rs"
+source_sha256 = "433ae9b679580c5c369b56d44dbb59101e7f2ebc1383e1aa470d0db6bb684186"
+start_line = 4366
+end_line = 4385
+metric = "branches"
+reason = "Session fences, admission, and command authority are security decisions."
+
+[[region]]
+id = "domain-authorize-sanction"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-domain/src/decision.rs"
+source_sha256 = "433ae9b679580c5c369b56d44dbb59101e7f2ebc1383e1aa470d0db6bb684186"
+start_line = 5517
+end_line = 5565
+metric = "branches"
+reason = "Session fences, admission, and command authority are security decisions."
+
+[[region]]
+id = "e2ee-verify-policy"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/policy.rs"
+source_sha256 = "8cf67c0bc647bf432636acf69f8e2c0585dc062582f0d2dabc92e62880bfddc9"
+start_line = 129
+end_line = 170
+metric = "branches"
+reason = "Published E2EE policy verification decides which controllers may act."
+
+[[region]]
+id = "e2ee-check-policy-profile"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/policy.rs"
+source_sha256 = "8cf67c0bc647bf432636acf69f8e2c0585dc062582f0d2dabc92e62880bfddc9"
+start_line = 172
+end_line = 195
+metric = "branches"
+reason = "Published E2EE policy verification decides which controllers may act."
+
+[[region]]
+id = "e2ee-check-policy-lineage"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/policy.rs"
+source_sha256 = "8cf67c0bc647bf432636acf69f8e2c0585dc062582f0d2dabc92e62880bfddc9"
+start_line = 197
+end_line = 212
+metric = "branches"
+reason = "Published E2EE policy verification decides which controllers may act."
+
+[[region]]
+id = "e2ee-check-policy-bounds"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/policy.rs"
+source_sha256 = "8cf67c0bc647bf432636acf69f8e2c0585dc062582f0d2dabc92e62880bfddc9"
+start_line = 284
+end_line = 299
+metric = "branches"
+reason = "Published E2EE policy verification decides which controllers may act."
+
+[[region]]
+id = "e2ee-quorum-reached"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/finality.rs"
+source_sha256 = "34041488515a2efa49611bb846318c59078b1db21d787a81a37dd4328f0babbe"
+start_line = 233
+end_line = 235
+metric = "regions"
+reason = "The sequencer quorum check decides terminal finality."
+
+[[region]]
+id = "e2ee-needs-controller-approval"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/authorization.rs"
+source_sha256 = "3b11d20ff81aceec8395508d2a3653cf465a8ea1b81853d5ea38c11b16cbc821"
+start_line = 109
+end_line = 123
+metric = "regions"
+reason = "Commit authorization rules decide which MLS commits the sequencer accepts."
+
+[[region]]
+id = "e2ee-verify-commit-authorization"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/authorization.rs"
+source_sha256 = "3b11d20ff81aceec8395508d2a3653cf465a8ea1b81853d5ea38c11b16cbc821"
+start_line = 146
+end_line = 184
+metric = "branches"
+reason = "Commit authorization rules decide which MLS commits the sequencer accepts."
+
+[[region]]
+id = "e2ee-verify-approval-envelope"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/authorization.rs"
+source_sha256 = "3b11d20ff81aceec8395508d2a3653cf465a8ea1b81853d5ea38c11b16cbc821"
+start_line = 264
+end_line = 278
+metric = "regions"
+reason = "Commit authorization rules decide which MLS commits the sequencer accepts."
+
+[[region]]
+id = "edge-history-authorize"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/federation/edge/history.rs"
+source_sha256 = "816e21722d07df36238fc957ef1ea383cd1d8d1da3c54d58cce2b0fabe6e8745"
+start_line = 381
+end_line = 413
+metric = "branches"
+reason = "History reads are authorized against current membership before any page is served."
+
+[[region]]
+id = "edge-history-authorize-account"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/federation/edge/history.rs"
+source_sha256 = "816e21722d07df36238fc957ef1ea383cd1d8d1da3c54d58cce2b0fabe6e8745"
+start_line = 415
+end_line = 436
+metric = "branches"
+reason = "History reads are authorized against current membership before any page is served."
+
+[[region]]
+id = "edge-history-authorize-membership"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/federation/edge/history.rs"
+source_sha256 = "816e21722d07df36238fc957ef1ea383cd1d8d1da3c54d58cce2b0fabe6e8745"
+start_line = 438
+end_line = 459
+metric = "branches"
+reason = "History reads are authorized against current membership before any page is served."
+
+[[region]]
+id = "admin-session-confirmation-state"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-admin/src/session.rs"
+source_sha256 = "80ae7ec6b9de6caa19b75290a27821216ea68af339994363a9bdce484687674a"
+start_line = 407
+end_line = 424
+metric = "regions"
+reason = "Administrative confirmation and replay checks gate dangerous commands."
+
+[[region]]
+id = "admin-session-check-repeat"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-admin/src/session.rs"
+source_sha256 = "80ae7ec6b9de6caa19b75290a27821216ea68af339994363a9bdce484687674a"
+start_line = 428
+end_line = 449
+metric = "regions"
+reason = "Administrative confirmation and replay checks gate dangerous commands."
+
+[[region]]
+id = "registry-account-service-completion-status-from-wire"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-types/src/generated_registry.rs"
+source_sha256 = "d34d6180108d4ca059b0a91c1304827c1e2a1a8806ee30fb958c29d2a0534f8d"
+start_line = 401
+end_line = 407
+metric = "regions"
+reason = "Every AccountServiceCompletionStatus wire value and the rejection arm must be decoded by a registry test."
+
+[[region]]
+id = "registry-account-service-message-kind-from-wire"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-types/src/generated_registry.rs"
+source_sha256 = "d34d6180108d4ca059b0a91c1304827c1e2a1a8806ee30fb958c29d2a0534f8d"
+start_line = 443
+end_line = 453
+metric = "regions"
+reason = "Every AccountServiceMessageKind wire value and the rejection arm must be decoded by a registry test."
+
+[[region]]
+id = "registry-account-service-response-kind-from-wire"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-types/src/generated_registry.rs"
+source_sha256 = "d34d6180108d4ca059b0a91c1304827c1e2a1a8806ee30fb958c29d2a0534f8d"
+start_line = 489
+end_line = 499
+metric = "regions"
+reason = "Every AccountServiceResponseKind wire value and the rejection arm must be decoded by a registry test."
+
+[[region]]
+id = "registry-federation-account-setting-kind-from-wire"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-types/src/generated_registry.rs"
+source_sha256 = "d34d6180108d4ca059b0a91c1304827c1e2a1a8806ee30fb958c29d2a0534f8d"
+start_line = 562
+end_line = 581
+metric = "regions"
+reason = "Every FederationAccountSettingKind wire value and the rejection arm must be decoded by a registry test."
+
+[[region]]
+id = "registry-federation-away-kind-from-wire"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-types/src/generated_registry.rs"
+source_sha256 = "d34d6180108d4ca059b0a91c1304827c1e2a1a8806ee30fb958c29d2a0534f8d"
+start_line = 605
+end_line = 611
+metric = "regions"
+reason = "Every FederationAwayKind wire value and the rejection arm must be decoded by a registry test."
+
+[[region]]
+id = "registry-federation-channel-setting-kind-from-wire"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-types/src/generated_registry.rs"
+source_sha256 = "d34d6180108d4ca059b0a91c1304827c1e2a1a8806ee30fb958c29d2a0534f8d"
+start_line = 644
+end_line = 653
+metric = "regions"
+reason = "Every FederationChannelSettingKind wire value and the rejection arm must be decoded by a registry test."
+
+[[region]]
+id = "registry-federation-content-policy-from-wire"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-types/src/generated_registry.rs"
+source_sha256 = "d34d6180108d4ca059b0a91c1304827c1e2a1a8806ee30fb958c29d2a0534f8d"
+start_line = 677
+end_line = 683
+metric = "regions"
+reason = "Every FederationContentPolicy wire value and the rejection arm must be decoded by a registry test."
+
+[[region]]
+id = "registry-federation-directory-query-kind-from-wire"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-types/src/generated_registry.rs"
+source_sha256 = "d34d6180108d4ca059b0a91c1304827c1e2a1a8806ee30fb958c29d2a0534f8d"
+start_line = 749
+end_line = 769
+metric = "regions"
+reason = "Every FederationDirectoryQueryKind wire value and the rejection arm must be decoded by a registry test."
+
+[[region]]
+id = "registry-federation-event-kind-from-wire"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-types/src/generated_registry.rs"
+source_sha256 = "d34d6180108d4ca059b0a91c1304827c1e2a1a8806ee30fb958c29d2a0534f8d"
+start_line = 856
+end_line = 883
+metric = "regions"
+reason = "Every FederationEventKind wire value and the rejection arm must be decoded by a registry test."
+
+[[region]]
+id = "registry-federation-history-policy-from-wire"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-types/src/generated_registry.rs"
+source_sha256 = "d34d6180108d4ca059b0a91c1304827c1e2a1a8806ee30fb958c29d2a0534f8d"
+start_line = 913
+end_line = 921
+metric = "regions"
+reason = "Every FederationHistoryPolicy wire value and the rejection arm must be decoded by a registry test."
+
+[[region]]
+id = "registry-federation-history-reference-kind-from-wire"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-types/src/generated_registry.rs"
+source_sha256 = "d34d6180108d4ca059b0a91c1304827c1e2a1a8806ee30fb958c29d2a0534f8d"
+start_line = 948
+end_line = 955
+metric = "regions"
+reason = "Every FederationHistoryReferenceKind wire value and the rejection arm must be decoded by a registry test."
+
+[[region]]
+id = "registry-federation-history-selector-kind-from-wire"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-types/src/generated_registry.rs"
+source_sha256 = "d34d6180108d4ca059b0a91c1304827c1e2a1a8806ee30fb958c29d2a0534f8d"
+start_line = 988
+end_line = 997
+metric = "regions"
+reason = "Every FederationHistorySelectorKind wire value and the rejection arm must be decoded by a registry test."
+
+[[region]]
+id = "registry-federation-invite-removal-kind-from-wire"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-types/src/generated_registry.rs"
+source_sha256 = "d34d6180108d4ca059b0a91c1304827c1e2a1a8806ee30fb958c29d2a0534f8d"
+start_line = 1027
+end_line = 1035
+metric = "regions"
+reason = "Every FederationInviteRemovalKind wire value and the rejection arm must be decoded by a registry test."
+
+[[region]]
+id = "registry-federation-mask-kind-from-wire"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-types/src/generated_registry.rs"
+source_sha256 = "d34d6180108d4ca059b0a91c1304827c1e2a1a8806ee30fb958c29d2a0534f8d"
+start_line = 1065
+end_line = 1073
+metric = "regions"
+reason = "Every FederationMaskKind wire value and the rejection arm must be decoded by a registry test."
+
+[[region]]
+id = "registry-federation-member-bucket-from-wire"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-types/src/generated_registry.rs"
+source_sha256 = "d34d6180108d4ca059b0a91c1304827c1e2a1a8806ee30fb958c29d2a0534f8d"
+start_line = 1112
+end_line = 1123
+metric = "regions"
+reason = "Every FederationMemberBucket wire value and the rejection arm must be decoded by a registry test."
+
+[[region]]
+id = "registry-federation-message-kind-from-wire"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-types/src/generated_registry.rs"
+source_sha256 = "d34d6180108d4ca059b0a91c1304827c1e2a1a8806ee30fb958c29d2a0534f8d"
+start_line = 1150
+end_line = 1157
+metric = "regions"
+reason = "Every FederationMessageKind wire value and the rejection arm must be decoded by a registry test."
+
+[[region]]
+id = "registry-federation-opcode-from-wire"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-types/src/generated_registry.rs"
+source_sha256 = "d34d6180108d4ca059b0a91c1304827c1e2a1a8806ee30fb958c29d2a0534f8d"
+start_line = 1250
+end_line = 1279
+metric = "regions"
+reason = "Every FederationOpcode wire value and the rejection arm must be decoded by a registry test."
+
+[[region]]
+id = "registry-federation-persistence-from-wire"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-types/src/generated_registry.rs"
+source_sha256 = "d34d6180108d4ca059b0a91c1304827c1e2a1a8806ee30fb958c29d2a0534f8d"
+start_line = 1303
+end_line = 1309
+metric = "regions"
+reason = "Every FederationPersistence wire value and the rejection arm must be decoded by a registry test."
+
+[[region]]
+id = "registry-federation-projection-kind-from-wire"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-types/src/generated_registry.rs"
+source_sha256 = "d34d6180108d4ca059b0a91c1304827c1e2a1a8806ee30fb958c29d2a0534f8d"
+start_line = 1342
+end_line = 1351
+metric = "regions"
+reason = "Every FederationProjectionKind wire value and the rejection arm must be decoded by a registry test."
+
+[[region]]
+id = "registry-federation-query-target-kind-from-wire"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-types/src/generated_registry.rs"
+source_sha256 = "d34d6180108d4ca059b0a91c1304827c1e2a1a8806ee30fb958c29d2a0534f8d"
+start_line = 1378
+end_line = 1385
+metric = "regions"
+reason = "Every FederationQueryTargetKind wire value and the rejection arm must be decoded by a registry test."
+
+[[region]]
+id = "registry-federation-result-kind-from-wire"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-types/src/generated_registry.rs"
+source_sha256 = "d34d6180108d4ca059b0a91c1304827c1e2a1a8806ee30fb958c29d2a0534f8d"
+start_line = 1433
+end_line = 1447
+metric = "regions"
+reason = "Every FederationResultKind wire value and the rejection arm must be decoded by a registry test."
+
+[[region]]
+id = "registry-federation-role-level-from-wire"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-types/src/generated_registry.rs"
+source_sha256 = "d34d6180108d4ca059b0a91c1304827c1e2a1a8806ee30fb958c29d2a0534f8d"
+start_line = 1483
+end_line = 1493
+metric = "regions"
+reason = "Every FederationRoleLevel wire value and the rejection arm must be decoded by a registry test."
+
+[[region]]
+id = "registry-federation-role-from-wire"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-types/src/generated_registry.rs"
+source_sha256 = "d34d6180108d4ca059b0a91c1304827c1e2a1a8806ee30fb958c29d2a0534f8d"
+start_line = 1517
+end_line = 1523
+metric = "regions"
+reason = "Every FederationRole wire value and the rejection arm must be decoded by a registry test."
+
+[[region]]
+id = "registry-federation-session-hide-kind-from-wire"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-types/src/generated_registry.rs"
+source_sha256 = "d34d6180108d4ca059b0a91c1304827c1e2a1a8806ee30fb958c29d2a0534f8d"
+start_line = 1559
+end_line = 1569
+metric = "regions"
+reason = "Every FederationSessionHideKind wire value and the rejection arm must be decoded by a registry test."
+
+[[region]]
+id = "registry-federation-visibility-from-wire"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-types/src/generated_registry.rs"
+source_sha256 = "d34d6180108d4ca059b0a91c1304827c1e2a1a8806ee30fb958c29d2a0534f8d"
+start_line = 1596
+end_line = 1603
+metric = "regions"
+reason = "Every FederationVisibility wire value and the rejection arm must be decoded by a registry test."
+
+[[region]]
+id = "registry-mode-direction-from-wire"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-types/src/generated_registry.rs"
+source_sha256 = "d34d6180108d4ca059b0a91c1304827c1e2a1a8806ee30fb958c29d2a0534f8d"
+start_line = 1627
+end_line = 1633
+metric = "regions"
+reason = "Every ModeDirection wire value and the rejection arm must be decoded by a registry test."
+
+[[region]]
+id = "registry-presence-from-wire"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-types/src/generated_registry.rs"
+source_sha256 = "d34d6180108d4ca059b0a91c1304827c1e2a1a8806ee30fb958c29d2a0534f8d"
+start_line = 1657
+end_line = 1663
+metric = "regions"
+reason = "Every Presence wire value and the rejection arm must be decoded by a registry test."
+
+[[region]]
+id = "registry-principal-kind-from-wire"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-types/src/generated_registry.rs"
+source_sha256 = "d34d6180108d4ca059b0a91c1304827c1e2a1a8806ee30fb958c29d2a0534f8d"
+start_line = 1687
+end_line = 1693
+metric = "regions"
+reason = "Every PrincipalKind wire value and the rejection arm must be decoded by a registry test."
+
+[[region]]
+id = "registry-target-kind-from-wire"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-types/src/generated_registry.rs"
+source_sha256 = "d34d6180108d4ca059b0a91c1304827c1e2a1a8806ee30fb958c29d2a0534f8d"
+start_line = 1717
+end_line = 1723
+metric = "regions"
+reason = "Every TargetKind wire value and the rejection arm must be decoded by a registry test."
+
+[[region]]
+id = "storage-schema-from-u16"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-storage/src/schema.rs"
+source_sha256 = "5d3ebd2369537911335eac8cc197ca0e3dc6aaedeef788e9a663ad6e7f31bcd0"
+start_line = 84
+end_line = 115
+metric = "regions"
+reason = "Every persistent table identifier and the rejection arm must be decoded."
+
+[[region]]
+id = "storage-classify-recovery-state"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/recovery.rs"
+source_sha256 = "0ad662a9cfe3699b5b28ab7de8e1c9c8fae16696aabc02140c559f9cb75baa41"
+start_line = 24
+end_line = 93
+metric = "branches"
+reason = "Startup recovery classification decides whether persisted state is trusted."
+
+[[region]]
+id = "storage-verify-state-against-reservation"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/recovery.rs"
+source_sha256 = "0ad662a9cfe3699b5b28ab7de8e1c9c8fae16696aabc02140c559f9cb75baa41"
+start_line = 95
+end_line = 114
+metric = "branches"
+reason = "Startup recovery classification decides whether persisted state is trusted."
+
+[[region]]
+id = "storage-verify-state-against-guard"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/recovery.rs"
+source_sha256 = "0ad662a9cfe3699b5b28ab7de8e1c9c8fae16696aabc02140c559f9cb75baa41"
+start_line = 116
+end_line = 135
+metric = "branches"
+reason = "Startup recovery classification decides whether persisted state is trusted."
+
+[[region]]
+id = "storage-migration-validate-source-record"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/migration.rs"
+source_sha256 = "090df2d7958ed33eadc0080657f7cd0f5a367a277348b9873a9c699583b82aa3"
+start_line = 25
+end_line = 46
+metric = "branches"
+reason = "Schema migration admits only validated source rows."
+
+[[region]]
+id = "storage-migration-valid-rule-sources"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/migration.rs"
+source_sha256 = "090df2d7958ed33eadc0080657f7cd0f5a367a277348b9873a9c699583b82aa3"
+start_line = 48
+end_line = 62
+metric = "branches"
+reason = "Schema migration admits only validated source rows."
+
+[[region]]
+id = "storage-execute-restore-command"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/restore_command.rs"
+source_sha256 = "93f584ed47f904f30f5fba144e76d0bdd2cc9426d7236c397432b14850f7516b"
+start_line = 129
+end_line = 183
+metric = "branches"
+reason = "Restore composes trust keys, fencing, and the construction ledger."
+
+[[region]]
+id = "storage-execute-migration-command"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/migration_command.rs"
+source_sha256 = "aad6f0d6680a43f52e416f5f54080771c839ccefd562965c249dca4c9257fd5a"
+start_line = 70
+end_line = 79
+metric = "regions"
+reason = "Migration composes the construction ledger and the resume rules."
+
+[[region]]
+id = "audit-scan-table-pages"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
+source_sha256 = "54f7c4fa38bdbd827cac0e016106b6f8c395dabcd4017e8d55ece7b334ede32f"
+start_line = 982
+end_line = 1055
+metric = "branches"
+reason = "The signed audit scan must refuse every gap, order, and signature failure."
+
+[[region]]
+id = "audit-verify-checkpoints"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
+source_sha256 = "54f7c4fa38bdbd827cac0e016106b6f8c395dabcd4017e8d55ece7b334ede32f"
+start_line = 1066
+end_line = 1081
+metric = "regions"
+reason = "The signed audit scan must refuse every gap, order, and signature failure."
+
+[[region]]
+id = "audit-verify-events"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
+source_sha256 = "54f7c4fa38bdbd827cac0e016106b6f8c395dabcd4017e8d55ece7b334ede32f"
+start_line = 1152
+end_line = 1165
+metric = "regions"
+reason = "The signed audit scan must refuse every gap, order, and signature failure."
+
+[[region]]
+id = "audit-verify-export-coverage"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
+source_sha256 = "54f7c4fa38bdbd827cac0e016106b6f8c395dabcd4017e8d55ece7b334ede32f"
+start_line = 836
+end_line = 875
+metric = "branches"
+reason = "The signed audit scan must refuse every gap, order, and signature failure."
+
+[[region]]
+id = "domain-channel-validate"
+category = "section-27-invariant-checkers"
+file = "crates/agenc-ircd-domain/src/model.rs"
+source_sha256 = "17b848730f9e3ccac7f0d2771db78f233c952745c71ca62db4cc7645eee6aa63"
+start_line = 1327
+end_line = 1350
+metric = "branches"
+reason = "Channel invariants from Section 27 are checked on every durable load."
+
+[[region]]
+id = "domain-state-validate"
+category = "section-27-invariant-checkers"
+file = "crates/agenc-ircd-domain/src/model.rs"
+source_sha256 = "17b848730f9e3ccac7f0d2771db78f233c952745c71ca62db4cc7645eee6aa63"
+start_line = 1899
+end_line = 1904
+metric = "regions"
+reason = "Domain state invariants from Section 27 are checked on every durable load."
+
+[[region]]
+id = "replica-validate"
+category = "section-27-invariant-checkers"
+file = "crates/agenc-ircd-domain/src/federation/replica.rs"
+source_sha256 = "7d143b7e280f7f813b8198c1ac5a6bc4ccb7030f2eb2f8ba114a5eb6c1bcdcae"
+start_line = 260
+end_line = 274
+metric = "branches"
+reason = "Edge replica invariants are checked after every applied event and snapshot."
+
+[[region]]
+id = "replica-validate-children"
+category = "section-27-invariant-checkers"
+file = "crates/agenc-ircd-domain/src/federation/replica.rs"
+source_sha256 = "7d143b7e280f7f813b8198c1ac5a6bc4ccb7030f2eb2f8ba114a5eb6c1bcdcae"
+start_line = 297
+end_line = 304
+metric = "branches"
+reason = "Edge replica invariants are checked after every applied event and snapshot."
+
+[[region]]
+id = "replica-validate-invites"
+category = "section-27-invariant-checkers"
+file = "crates/agenc-ircd-domain/src/federation/replica.rs"
+source_sha256 = "7d143b7e280f7f813b8198c1ac5a6bc4ccb7030f2eb2f8ba114a5eb6c1bcdcae"
+start_line = 306
+end_line = 317
+metric = "branches"
+reason = "Edge replica invariants are checked after every applied event and snapshot."
+
+[[region]]
+id = "e2ee-route-verify-semantic-route"
+category = "section-27-invariant-checkers"
+file = "crates/agenc-ircd-e2ee/src/route.rs"
+source_sha256 = "8c832017a203bae7015f5a273cad1ad56b434278594a84cc0fb6d13157231237"
+start_line = 125
+end_line = 176
+metric = "branches"
+reason = "E2EE route binding invariants decide which conversations a channel may carry."
+
+[[region]]
+id = "e2ee-route-verify-binding-package"
+category = "section-27-invariant-checkers"
+file = "crates/agenc-ircd-e2ee/src/route.rs"
+source_sha256 = "8c832017a203bae7015f5a273cad1ad56b434278594a84cc0fb6d13157231237"
+start_line = 238
+end_line = 284
+metric = "branches"
+reason = "E2EE route binding invariants decide which conversations a channel may carry."
+
+[[region]]
+id = "e2ee-route-verify-initial-member-plan"
+category = "section-27-invariant-checkers"
+file = "crates/agenc-ircd-e2ee/src/route.rs"
+source_sha256 = "8c832017a203bae7015f5a273cad1ad56b434278594a84cc0fb6d13157231237"
+start_line = 390
+end_line = 408
+metric = "branches"
+reason = "E2EE route binding invariants decide which conversations a channel may carry."

@@ -1513,3 +1513,31 @@ mod tests {
             .ok_or_else(|| io::Error::other("missing parsed message").into())
     }
 }
+
+#[cfg(test)]
+mod display_tests {
+    use super::RegistrationError;
+
+    #[test]
+    fn every_discriminant_renders_a_distinct_message() {
+        let variants = [
+            RegistrationError::InvalidCommand,
+            RegistrationError::InvalidNickname,
+            RegistrationError::InvalidRegistrationField,
+            RegistrationError::InvalidAccessToken,
+            RegistrationError::Capability(super::CapError::InvalidState),
+            RegistrationError::Grammar(super::RegistrationGrammarError::UnknownCommand),
+            RegistrationError::AuthenticationInProgress,
+            RegistrationError::AuthenticationUnavailable,
+            RegistrationError::Overflow,
+            RegistrationError::AllocationFailed,
+            RegistrationError::PendingInputExceeded,
+        ];
+        let rendered: Vec<String> = variants.iter().map(ToString::to_string).collect();
+        assert!(rendered.iter().all(|text| !text.is_empty()));
+        let mut unique = rendered.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), rendered.len(), "{rendered:?}");
+    }
+}

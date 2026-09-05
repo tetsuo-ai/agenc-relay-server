@@ -21,6 +21,11 @@ def main() -> None:
         ("requirements", ["python3", "scripts/requirements.py", "check"]),
         ("inherited", ["bash", "scripts/check-stage-nine.sh"]),
         ("runner-tests", ["python3", "scripts/test-release-qualification.py"]),
+        # Section 28.8: documentation tests and the advisory and license
+        # policies belong to the release matrix, not only to the sources job.
+        ("doc-tests", ["cargo", "test", "--workspace", "--doc", "--all-features", "--locked"]),
+        ("audit", ["cargo", "audit", "--deny", "warnings"]),
+        ("deny", ["cargo", "deny", "check"]),
     ):
         command(root, attempt, name, argv, 14400)
     combinations = [[], ["history"], ["wss"], ["history", "wss"]]

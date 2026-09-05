@@ -933,3 +933,29 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod display_tests {
+    use super::CapError;
+
+    #[test]
+    fn every_discriminant_renders_a_distinct_message() {
+        let variants = [
+            CapError::UnsupportedVersion,
+            CapError::UnknownCapability,
+            CapError::InvalidValue,
+            CapError::InvalidAdvertisement,
+            CapError::MissingDependency,
+            CapError::InvalidState,
+            CapError::LineBudget,
+            CapError::Overflow,
+            CapError::AllocationFailed,
+        ];
+        let rendered: Vec<String> = variants.iter().map(ToString::to_string).collect();
+        assert!(rendered.iter().all(|text| !text.is_empty()));
+        let mut unique = rendered.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), rendered.len(), "{rendered:?}");
+    }
+}

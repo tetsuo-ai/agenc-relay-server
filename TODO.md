@@ -60,7 +60,7 @@ References: [Architecture §§1.2–4](docs/ircd-architecture-and-implementation
 | 07 | Conforming base federation | Complete | Pass, 2026-09-03 | [Current checkpoint](conformance/evidence/stage-07-1093d88d0057c3461a423285e0f86ff3775c1140.json) |
 | 08 | Conforming E2EE server adapter | Complete (external review open) | Pass, 2026-09-04 | [Current checkpoint](conformance/evidence/stage-08-ae6457fb62fef8961d3caf904febed580e8b4a91.json) |
 | 09 | Optional WSS and history profiles | Complete | Pass, 2026-09-05, exact checkpoint source | [Current checkpoint](conformance/evidence/stage-09-a93e53e71d22a6d5ec46bd749ec18068a9fa572b.json) |
-| 10 | Production qualification and release evidence | In progress | Development checks running | Absent |
+| 10 | Production qualification and release evidence | In progress | Runner, drivers, release image, and x86_64 reproduction done; jobs running | Absent |
 
 ## Coverage and ownership maps
 
@@ -2735,6 +2735,7 @@ alone.
   - References: [Architecture §§28.1 and Appendix D](docs/ircd-architecture-and-implementation-spec.md#281-requirement-ledger-and-evidence).
   - Invariants: all invariant families.
   - Evidence: completeness validator reports zero missing/stale/failed/waived mandatory requirements.
+  - Progress: the requirement ledger validator is unchanged; closure waits for every candidate result below.
 
 - [ ] `S10-002` **Run the mandatory build and analysis matrix.** Execute exact
   formatting, check, Clippy, workspace tests, doctests, deny, audit, and branch-
@@ -2744,6 +2745,7 @@ alone.
   - References: [Architecture §28.8](docs/ircd-architecture-and-implementation-spec.md#288-mandatory-build-and-analysis-gates).
   - Invariants: all source- and build-enforced invariants.
   - Evidence: command manifests and artifacts for both initial targets; zero warnings, unsafe source, or unbounded Tokio channel findings.
+  - Progress: `scripts/run-stage-ten-workspace.py` runs the format, source, workspace, requirement, inherited Stage 09, runner, doc-test, audit, and deny checks, the four-combination check, clippy, and test matrix, and the branch coverage report; it cannot pass until the coverage floor is met.
 
 - [ ] `S10-003` **Meet exact coverage requirements.** Reach at least 90%
   branch coverage overall and 100% for parser error discriminants,
@@ -2754,6 +2756,7 @@ alone.
   - References: [Architecture §28.8](docs/ircd-architecture-and-implementation-spec.md#288-mandatory-build-and-analysis-gates).
   - Invariants: all invariant families.
   - Evidence: source/lock-bound branch report with justified unreachable-code handling.
+  - Progress: `conformance/release-critical-coverage.toml` records the complete critical inventory with the 90 percent floor; branch coverage is below that floor, and the per-file gap is listed in the qualification notes.
 
 - [ ] `S10-004` **Complete parser, state-machine, and concurrency qualification.**
   Run reproducible long-duration fuzzing, deterministic reference/model tests,
@@ -2764,6 +2767,7 @@ alone.
   - References: [Architecture §§28.3–28.4](docs/ircd-architecture-and-implementation-spec.md#283-state-machine-and-model-tests), [§21](docs/ircd-architecture-and-implementation-spec.md#21-state-ownership-and-concurrency).
   - Invariants: `TRN-*`, `STA-*`, `FED-*`, `CON-*`, `OPS-04`.
   - Evidence: tool/version/duration/corpus/schedule manifests and zero unresolved failures.
+  - Progress: `scripts/run-stage-ten-fuzz.py` runs bounded parallel segments per target until 86,400 CPU seconds with retained corpora, and `scripts/run-stage-ten-models.sh` runs the Loom, cancellation, overload, panic, and shutdown suites; no campaign has reached its budget yet.
 
 - [ ] `S10-005` **Complete network interoperability and privacy qualification.**
   Test pinned legacy, modern, and encrypted clients, two-node and multi-edge
@@ -2777,6 +2781,7 @@ alone.
   - References: [Architecture §28.6](docs/ircd-architecture-and-implementation-spec.md#286-network-interoperability-and-privacy-tests).
   - Invariants: `TRN-*`, `PRV-*`, `FED-*`, `E2E-07`, `OPS-01`.
   - Evidence: versioned client/server/topology and client-policy matrices, safe-rendering outputs, scanner reports, captures, canary scans, and documented privacy limits.
+  - Progress: `scripts/qualify-stage-ten-network.py` drives WeeChat, Irssi, OpenMLS, mls-rs, federation, TLS, WSS, an isolated Tor network, packet capture, and the client-policy tests; development runs passed on x86_64.
 
 - [ ] `S10-006` **Complete storage platform qualification.** Run the release
   binary on every declared target/filesystem/block-size/mount tuple, measure
@@ -2787,6 +2792,7 @@ alone.
   - References: [Architecture §§28.5 and 28.7](docs/ircd-architecture-and-implementation-spec.md#285-crash-storage-and-fault-injection).
   - Invariants: `DUR-*`, `OPS-04`.
   - Evidence: per-tuple release/profile/corpus/raw-log hashes, maximum deltas, and all boundary/failure outcomes.
+  - Progress: `agenc-ircd storage qualify` and `scripts/qualify-stage-ten-storage.py` measure the production engine on the final binary; finding STO-1 is open.
 
 - [ ] `S10-007` **Qualify capacity and sustained operation.** Demonstrate the
   advertised connection/member/channel limits on named hardware and run the
@@ -2797,6 +2803,7 @@ alone.
   - References: [Architecture §28.7](docs/ircd-architecture-and-implementation-spec.md#287-abuse-and-capacity-tests).
   - Invariants: `CON-02`, `CON-05`, `FED-09`, `DUR-11`.
   - Evidence: p50/p95/p99 latency, memory/task/descriptor/queue high-water reports, missed-event checks, and return-to-envelope evidence.
+  - Progress: the capacity engine and `scripts/qualify-stage-ten-capacity.py` pass the 300-second capacity demonstration; the seven-day soak has not run; findings CAP-1 through CAP-8 are recorded.
 
 - [ ] `S10-008` **Run restore, migration, deletion, and key-lifecycle drills.**
   Exercise ordinary and disaster restore, schema migration, storage rekey,
@@ -2807,6 +2814,7 @@ alone.
   - References: [Architecture §§23.6–23.9 and 25.4–25.5](docs/ircd-architecture-and-implementation-spec.md#236-migrations).
   - Invariants: `DUR-04` through `DUR-12`, `FED-10`, `OPS-04`.
   - Evidence: timed drills, artifact/state hashes, failure injection, operator steps, and verified post-drill conformance.
+  - Progress: sixteen drills run through `scripts/qualify-stage-ten-drills.py`; twelve pass and four fail on findings CAP-5, CAP-9, and CAP-11.
 
 - [ ] `S10-009` **Verify deployment hardening and observability in production
   configuration.** Check privileges, service sandbox, filesystem permissions,
@@ -2817,6 +2825,7 @@ alone.
   - References: [Architecture §25](docs/ircd-architecture-and-implementation-spec.md#25-operations-observability-and-host-security).
   - Invariants: `OPS-01` through `OPS-04`, `ID-04`, `ID-05`, `PRV-02`.
   - Evidence: host-policy tests, port/filesystem scans, secret canaries, retention checks, and incident simulation.
+  - Progress: the host hardening and observability drills run in the same driver together with the deployment checker, systemd-analyze, and Tor configuration verification.
 
 - [ ] `S10-010` **Produce reproducible release artifacts and an SBOM.** Build
   after verified dependency fetch with network disabled, record compiler,
@@ -2827,6 +2836,7 @@ alone.
   - References: [Architecture §24.5](docs/ircd-architecture-and-implementation-spec.md#245-dependency-and-build-integrity).
   - Invariants: `OPS-02`.
   - Evidence: independently reproduced hashes or documented deterministic differences, SBOM validation, and signature verification.
+  - Progress: the release image, the two-container reproduction, the SBOM with reviewed native package licenses, and the aarch64 build workflow exist; x86_64 reproduced bit for bit; the aarch64 build record still has to be produced on a hosted ARM runner.
 
 - [ ] `S10-011` **Recheck sources and dependencies before release.** Verify
   publication status, obsoletes/updates/errata, living-source commits, crate
@@ -2837,6 +2847,7 @@ alone.
   - References: [source ledger §6](docs/protocol-sources-and-decisions.md#6-update-and-review-procedure), [Architecture §30](docs/ircd-architecture-and-implementation-spec.md#30-sources-and-pinned-research-baseline).
   - Invariants: all affected invariants.
   - Evidence: primary-source checks, exact diffs, decision records, updated hashes/vectors when adopted, and rerun gates.
+  - Progress: `scripts/check-release-sources.py` compares structured status records with `conformance/release-source-decisions.toml`; the 2026-09-05 decisions are recorded in the source ledger.
 
 - [ ] `S10-012` **Generate exact conformance metadata and user claims.** Report
   `core-v1`, `federated-v1`, `encrypted-v1`, WSS, and history independently;
@@ -2847,6 +2858,7 @@ alone.
   - References: [Architecture §26.4](docs/ircd-architecture-and-implementation-spec.md#264-conformance-claims), [E2EE Appendix B](docs/irc-mls-e2ee-extension.md#appendix-b-security-claim-template).
   - Invariants: `PRV-04`, all claimed invariant families.
   - Evidence: claim/document review and automated comparison with completed evidence manifests.
+  - Progress: `scripts/check-release-claims.py` compares the binary metadata with the candidate and baseline, lints the ledgers, and exercises decision inspection with disposable keys; finding CLM-1 was fixed.
 
 - [ ] `S10-013` **Make the release decision.** Confirm every applicable gate,
   finding disposition, drill, artifact, source, dependency, documentation, and
@@ -2857,6 +2869,7 @@ alone.
   - References: [Architecture §§28.9 and 29 phase 10](docs/ircd-architecture-and-implementation-spec.md#289-release-decision), [E2EE §21](docs/irc-mls-e2ee-extension.md#21-verification-and-release-gates).
   - Invariants: all invariant families.
   - Evidence: signed decision enumerates passed, failed, nonapplicable, and limited evidence for the exact build.
+  - Progress: `qualify-release.py close` and `verify` and the binary's decision inspection exist; there is no signing key and no complete evidence set, so no decision has been made.
 
 - [ ] `S10-900` **Pass the final production gate.** The released artifact is
   the exact implementation qualified by the complete evidence set; no local
@@ -2867,6 +2880,7 @@ alone.
   - References: [Architecture §§26.4, 28.9, and 29](docs/ircd-architecture-and-implementation-spec.md#264-conformance-claims).
   - Invariants: all invariant families.
   - Evidence: independent artifact/signature/hash verification and zero incomplete applicable roadmap or conformance-ledger task.
+  - Progress: not started; it depends on every task above.
 
 ## Deferred and explicitly out of scope for version 1
 

@@ -752,6 +752,22 @@ mod tests {
     }
 
     #[test]
+    fn every_error_discriminant_renders_a_distinct_message() {
+        let variants = [
+            ReleaseDecisionError::TooLarge,
+            ReleaseDecisionError::InvalidJson,
+            ReleaseDecisionError::InvalidSchema,
+            ReleaseDecisionError::InvalidPublicKey,
+        ];
+        let rendered: Vec<String> = variants.iter().map(ToString::to_string).collect();
+        assert!(rendered.iter().all(|text| !text.is_empty()));
+        let mut unique = rendered.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), rendered.len(), "{rendered:?}");
+    }
+
+    #[test]
     fn pem_reader_accepts_only_one_ed25519_public_key() -> Result<(), ReleaseDecisionError> {
         let body = "MCowBQYDK2VwAyEAGb9ECWmEzf6FQbrBZ9w7lshQhqowtrbLDFw4rXAxZuE=";
         let pem = format!("-----BEGIN PUBLIC KEY-----\n{body}\n-----END PUBLIC KEY-----\n");

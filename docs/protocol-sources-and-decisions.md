@@ -4,7 +4,7 @@ Status: research and review evidence for the version-1 specifications. This
 file is not a third normative protocol document. The precedence rules in
 `ircd-architecture-and-implementation-spec.md` remain authoritative.
 
-Last source-status check: 2026-08-24.
+Last source-status check: 2026-09-05.
 
 ## 1. Purpose
 
@@ -198,6 +198,25 @@ For every source or dependency update:
 
 No entry in this ledger replaces implementation tests or the release evidence
 required by the architecture specification.
+
+Since Stage 10 the status part of step 1 is automated for every source this
+ledger names. `scripts/check-release-sources.py` reads the RFC Editor status
+record of each RFC in Section 2, the Datatracker document and state records
+of the draft in Section 3, and the default-branch head of each repository in
+Section 4, then fetches each pinned commit to prove the remote still serves
+it. `conformance/release-source-decisions.toml` holds one entry per source
+with the observed status fields, the pin, the decision word, a note, and the
+SHA-256 of this ledger at the time of the decision. Any change in those
+fields, or an edit to this ledger, fails the release sources job until the
+change is reviewed and a new decision is recorded there.
+
+The 2026-09-05 check found two changes since 2026-08-24. RFC 9325 is now also
+updated by RFC 10015, which Section 2 already reviews as not applicable. The
+Tor specification default branch moved twelve commits past the pinned commit;
+the changes are typo fixes in the rendezvous specification, a shared random
+value tie-breaker for directory authorities, ntor handshake wording, and a
+pluggable-transport variable, none of which touches the onion-service or
+SOCKS behavior the architecture pins, so the pin in Section 4 is retained.
 
 ## 7. Stage 09 optional profiles and database upgrade
 

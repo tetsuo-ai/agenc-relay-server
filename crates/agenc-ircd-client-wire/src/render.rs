@@ -1558,3 +1558,31 @@ fn prefixed_value(prefix: &str, value: &str) -> Result<String, RenderError> {
     output.push_str(value);
     Ok(output)
 }
+
+#[cfg(test)]
+mod display_tests {
+    use super::RenderError;
+
+    #[test]
+    fn every_discriminant_renders_a_distinct_message() {
+        let variants = [
+            RenderError::InvalidSyntax,
+            RenderError::UnknownRegistryValue,
+            RenderError::CapabilityRequired,
+            RenderError::InapplicableReply,
+            RenderError::LineBudget,
+            RenderError::ReservationFailed,
+            RenderError::Overflow,
+            RenderError::AllocationFailed,
+            RenderError::TooManyReplies,
+            RenderError::InvalidBatch,
+            RenderError::InvalidCorrelation,
+        ];
+        let rendered: Vec<String> = variants.iter().map(ToString::to_string).collect();
+        assert!(rendered.iter().all(|text| !text.is_empty()));
+        let mut unique = rendered.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), rendered.len(), "{rendered:?}");
+    }
+}

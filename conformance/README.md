@@ -36,7 +36,12 @@ Rust compiler; CI policy rejects the variable anywhere else. The detailed
 report must meet the overall thresholds in `critical-coverage.toml` (90 percent
 line coverage, and an interim 75 percent branch floor adopted at Stage 06
 closure; the 90 percent branch target returns with Stage 10 release
-qualification) and 100 percent for every active range in that file. The policy also hashes the full set of
+qualification) and 100 percent for every active range in that file.
+`release-critical-coverage.toml` is the Stage 10 policy: the same schema with
+the 90 percent branch floor and the complete inventory of parser error
+discriminants, authorization decisions, closed protocol enum decoders,
+persistence recovery paths, and Section 27 invariant checkers, which the
+Stage 10 workspace job validates after the interim policy. The policy also hashes the full set of
 production Rust sources. Adding, removing, or changing a production source
 invalidates the inventory and forces a review for new critical ranges before
 the coverage check can pass. Duplicate llvm-cov branch records at the same
@@ -144,6 +149,17 @@ migration. Its [manifest](evidence/stage-09-a93e53e71d22a6d5ec46bd749ec18068a9fa
 records 103 commands and 10 passed evidence records for exact source commit
 `a93e53e71d22a6d5ec46bd749ec18068a9fa572b`. The reported branch and line
 coverage are 75.38% and 90.69%, with nine critical regions at 100%.
+
+Stage 10 has no manifest and no checkpoint. Its evidence is produced by
+`scripts/qualify-release.py` against an immutable candidate rather than by
+a recorded gate: `stage-ten-qualification.toml` pins the job set,
+`release-source-decisions.toml` records the reviewed status of every primary
+source, `release-dependency-decisions.toml` records every NOASSERTION the
+release SBOM may carry, `release-claims.toml` binds each claim to its jobs and
+limit statements, and `release/Dockerfile` defines the build image. The
+[Stage 10 qualification notes](../docs/stage-10-qualification.md) describe
+each job, the findings the drivers have surfaced, and what remains external.
+No release decision has been signed.
 
 For an evidence-only check:
 
