@@ -82,6 +82,42 @@ toolchain, Cargo, a native C compiler and linker, and `ldd`. The image must
 already be present locally. Cross-compilation or emulation does not count as
 the other target's native qualification.
 
+`scripts/build-release-image.py` builds that image from
+`conformance/release/Dockerfile`: Ubuntu 24.04 pinned by digest with
+build-essential and Python, plus the host's pinned Rust 1.98.0 sysroot copied
+into the build context, so no network is needed for the toolchain. The record
+it writes names the image ID, the base image, the Dockerfile digest, the
+compiler the image reports, and the digest of the installed package list,
+which it retains. Pass the printed image ID to `build-release.py build`.
+
+```sh
+python3 scripts/build-release-image.py --output /path/to/release-image
+python3 scripts/build-release.py build \
+  --image "$(cat /path/to/release-image/image-id.txt)" --output /path/to/build
+```
+
+The SBOM resolves each native library the binary links to its Ubuntu
+package, version, and architecture with dpkg and records a `pkg:deb/ubuntu`
+package URL and the digest of the package's copyright file. The glibc and
+libgcc copyright files are free-form rather than machine-readable, so the
+SPDX license expression for a native package comes only from
+`conformance/release-dependency-decisions.toml`, which names the reviewed
+expression for an exact package, version, architecture, and copyright
+digest. The same file records an explicit decision for each workspace crate,
+which has no download location and no license file, and for the patched
+`opaque-ke` tree. `build-release.py verify`, the reproducibility job, refuses
+a build whose SBOM still carries a `NOASSERTION` without a matching decision.
+A rebuilt image with a newer libc therefore fails until the new version is
+reviewed and recorded.
+
+`.github/workflows/stage-10-aarch64.yml` runs the same two steps on a hosted
+`ubuntu-24.04-arm` runner and uploads the image record and the build
+directory. `prepare` on a machine holding both build records creates a
+two-target candidate; the aarch64 qualification jobs must then run on an
+aarch64 host against that candidate, which the hosted six-hour job limit does
+not allow for the fuzz and soak campaigns. Until that evidence exists, an
+x86_64-only candidate is prepared with `--target x86_64-unknown-linux-gnu`.
+
 Build output includes a deterministic archive, an SPDX 2.3 dependency report,
 available dependency license and notice text, compiler metadata, and both raw
 build logs. The dependency report includes build and test dependencies as well

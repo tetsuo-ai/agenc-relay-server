@@ -818,6 +818,126 @@ class DrillsDriverTests(unittest.TestCase):
                 driver.validate_record(changed, "restore")
 
 
+class DependencyDecisionTests(unittest.TestCase):
+    """Every NOASSERTION left in a release SBOM must be a reviewed, exact decision."""
+
+    ROOT = Path(__file__).resolve().parent.parent
+    LIBC = {"path": "/lib/x86_64-linux-gnu/libc.so.6", "sha256": "a" * 64}
+    LIBGCC = {"path": "/lib/x86_64-linux-gnu/libgcc_s.so.1", "sha256": "b" * 64}
+
+    @staticmethod
+    def container():
+        import importlib.util
+
+        path = Path(__file__).resolve().parent / "release-build-container.py"
+        specification = importlib.util.spec_from_file_location("release_build_container", path)
+        module = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(module)
+        return module
+
+    def decisions(self) -> dict:
+        from release_qualification.build import load_dependency_decisions
+
+        return load_dependency_decisions(self.ROOT)
+
+    def native(self, spdxid: str, library: dict, package: str, version: str, license_: str, copyright_sha256: str) -> dict:
+        return {"SPDXID": spdxid, "name": Path(library["path"]).name, "versionInfo": version, "downloadLocation": "NOASSERTION",
+                "filesAnalyzed": False, "licenseConcluded": "NOASSERTION", "licenseDeclared": license_, "copyrightText": "NOASSERTION",
+                "checksums": [{"algorithm": "SHA256", "checksumValue": library["sha256"]}],
+                "externalRefs": [{"referenceCategory": "PACKAGE-MANAGER", "referenceType": "purl", "referenceLocator": f"pkg:deb/ubuntu/{package}@{version}?arch=amd64"},
+                                 {"referenceCategory": "OTHER", "referenceType": "copyright-file-sha256", "referenceLocator": copyright_sha256}]}
+
+    def sbom(self, decisions: dict) -> dict:
+        packages = [{"SPDXID": f"SPDXRef-Package-{index}", "name": entry["name"], "versionInfo": "0.0.0", "downloadLocation": "NOASSERTION",
+                     "filesAnalyzed": False, "licenseConcluded": "NOASSERTION", "licenseDeclared": "NOASSERTION", "copyrightText": "NOASSERTION"}
+                    for index, entry in enumerate(decisions["workspace"])]
+        packages.append({"SPDXID": "SPDXRef-Package-90", "name": "opaque-ke", "versionInfo": "4.0.1", "downloadLocation": "NOASSERTION",
+                         "filesAnalyzed": False, "licenseConcluded": "NOASSERTION", "licenseDeclared": "MIT OR Apache-2.0", "copyrightText": "NOASSERTION"})
+        packages.append({"SPDXID": "SPDXRef-Package-91", "name": "tokio", "versionInfo": "1.53.1", "downloadLocation": "registry+https://github.com/rust-lang/crates.io-index",
+                         "filesAnalyzed": False, "licenseConcluded": "NOASSERTION", "licenseDeclared": "MIT", "copyrightText": "NOASSERTION"})
+        by_package = {entry["package"]: entry for entry in decisions["native"] if entry["architecture"] == "amd64"}
+        libc, libgcc = by_package["libc6"], by_package["libgcc-s1"]
+        packages.append(self.native("SPDXRef-Native-0", self.LIBC, "libc6", libc["version"], libc["license"], libc["copyright_sha256"]))
+        packages.append(self.native("SPDXRef-Native-1", self.LIBGCC, "libgcc-s1", libgcc["version"], libgcc["license"], libgcc["copyright_sha256"]))
+        return {"spdxVersion": "SPDX-2.3", "packages": packages}
+
+    def test_recorded_decisions_cover_every_workspace_member_and_the_patch(self) -> None:
+        import tomllib
+
+        decisions = self.decisions()
+        members = tomllib.loads((self.ROOT / "Cargo.toml").read_text())["workspace"]["members"]
+        self.assertEqual(sorted(entry["name"] for entry in decisions["workspace"]), sorted(Path(member).name for member in members))
+        self.assertEqual([(entry["name"], entry["version"]) for entry in decisions["patched"]], [("opaque-ke", "4.0.1")])
+        self.assertEqual(sorted(entry["package"] for entry in decisions["native"] if entry["architecture"] == "amd64"), ["libc6", "libgcc-s1"])
+
+    def test_sbom_check_accepts_decided_entries_and_names_undecided_ones(self) -> None:
+        from release_qualification.build import check_dependency_decisions
+
+        decisions = self.decisions()
+        libraries = [self.LIBC, self.LIBGCC]
+        summary = check_dependency_decisions(self.sbom(decisions), decisions, libraries)
+        self.assertEqual(len(summary["workspace"]), 13)
+        self.assertEqual(summary["patched"], ["opaque-ke 4.0.1"])
+        self.assertEqual(len(summary["native"]), 2)
+        cases = [
+            ("libc6", lambda sbom: sbom["packages"][-2].__setitem__("licenseDeclared", "NOASSERTION")),
+            ("libc6", lambda sbom: sbom["packages"][-2]["externalRefs"].__setitem__(0, {"referenceCategory": "PACKAGE-MANAGER", "referenceType": "purl", "referenceLocator": "pkg:deb/ubuntu/libc6@9.9-0ubuntu1?arch=amd64"})),
+            ("libgcc", lambda sbom: sbom["packages"][-1]["externalRefs"].pop(1)),
+            ("libgcc", lambda sbom: sbom["packages"][-1].pop("externalRefs")),
+            ("tokio", lambda sbom: sbom["packages"][-3].__setitem__("licenseDeclared", "NOASSERTION")),
+            ("opaque-ke", lambda sbom: sbom["packages"][-4].__setitem__("licenseDeclared", "NOASSERTION")),
+            ("workspace", lambda sbom: sbom["packages"].pop(0)),
+            ("download", lambda sbom: sbom["packages"].append({"SPDXID": "SPDXRef-Package-99", "name": "mystery", "versionInfo": "1", "downloadLocation": "NOASSERTION", "licenseDeclared": "MIT"})),
+            ("SPDX", lambda sbom: sbom.__setitem__("spdxVersion", "SPDX-2.2")),
+        ]
+        for label, mutate in cases:
+            changed = self.sbom(decisions)
+            mutate(changed)
+            with self.subTest(label=label), self.assertRaisesRegex(QualificationError, label if label in ("libc6", "tokio", "opaque-ke", "mystery") else "."):
+                check_dependency_decisions(changed, decisions, libraries)
+        with self.assertRaisesRegex(QualificationError, "native libraries differ"):
+            check_dependency_decisions(self.sbom(decisions), decisions, [self.LIBC])
+
+    def test_decision_file_rejects_weak_entries(self) -> None:
+        from release_qualification.build import DECISIONS_PATH, load_dependency_decisions
+
+        original = (self.ROOT / DECISIONS_PATH).read_text()
+        with tempfile.TemporaryDirectory(prefix="agenc-decisions-test-") as temporary:
+            root = Path(temporary)
+            (root / "conformance").mkdir()
+            for text in (original.replace('decision = "accept"', 'decision = "later"', 1),
+                         original.replace('license = "GPL-3.0-or-later WITH GCC-exception-3.1"', 'license = "NOASSERTION"'),
+                         original.replace('license = "GPL-3.0-or-later WITH GCC-exception-3.1"', 'license = "GPL 3"'),
+                         original.replace("[[native]]", "[[natives]]", 1),
+                         original.replace('copyright_sha256 = "', 'copyright_sha256 = "zz', 1)):
+                (root / DECISIONS_PATH).write_text(text)
+                with self.subTest(text=text[:50]), self.assertRaises(QualificationError):
+                    load_dependency_decisions(root)
+            (root / DECISIONS_PATH).write_text(original)
+            self.assertEqual(load_dependency_decisions(root)["schema_version"], 1)
+
+    def test_container_helpers_resolve_packages_from_dpkg_output(self) -> None:
+        container = self.container()
+        listing = "diversion by libc6 from: /lib64/ld-linux-x86-64.so.2\ndiversion by libc6 to: /lib64/ld-linux-x86-64.so.2.usr-is-merged\nlibc6:amd64: /usr/lib/x86_64-linux-gnu/libc.so.6\n"
+        self.assertEqual(container.parse_dpkg_search(listing, "/usr/lib/x86_64-linux-gnu/libc.so.6"), ("libc6", "amd64"))
+        self.assertIsNone(container.parse_dpkg_search(listing, "/usr/lib/x86_64-linux-gnu/libm.so.6"))
+        self.assertEqual(container.parse_dpkg_search("tzdata: /usr/share/zoneinfo/UTC\n", "/usr/share/zoneinfo/UTC"), ("tzdata", "all"))
+        decisions = self.decisions()
+        libc = next(entry for entry in decisions["native"] if entry["package"] == "libc6" and entry["architecture"] == "amd64")
+        self.assertEqual(container.native_decision(decisions, "libc6", libc["version"], "amd64", libc["copyright_sha256"]), libc["license"])
+        self.assertIsNone(container.native_decision(decisions, "libc6", libc["version"], "amd64", "0" * 64))
+        self.assertIsNone(container.native_decision(decisions, "libc6", "0.0", "amd64", libc["copyright_sha256"]))
+        resolved = {"path": "/lib/x86_64-linux-gnu/libc.so.6", "resolved_path": "/usr/lib/x86_64-linux-gnu/libc.so.6", "sha256": "a" * 64,
+                    "package": "libc6", "version": libc["version"], "architecture": "amd64",
+                    "purl": f"pkg:deb/ubuntu/libc6@{libc['version']}?arch=amd64", "copyright_sha256": libc["copyright_sha256"], "license": libc["license"]}
+        item = container.native_spdx_package(0, resolved)
+        self.assertEqual(item["licenseDeclared"], libc["license"])
+        self.assertEqual([reference["referenceType"] for reference in item["externalRefs"]], ["purl", "copyright-file-sha256"])
+        unresolved = container.native_spdx_package(1, {"path": "/opt/x/libfoo.so", "resolved_path": "/opt/x/libfoo.so", "sha256": "c" * 64, "license": "NOASSERTION"})
+        self.assertNotIn("externalRefs", unresolved)
+        self.assertEqual(unresolved["licenseDeclared"], "NOASSERTION")
+
+
 class DecisionFixtureTests(unittest.TestCase):
     """The committed fixture binds the Python signer and the daemon's verifier to one domain."""
 

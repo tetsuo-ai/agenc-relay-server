@@ -23,6 +23,76 @@ from .records import (TARGETS, QualificationError, canonical, digest, file_diges
 BUILD_FIELDS = {"schema_version", "source", "target", "features", "image", "source_date_epoch",
                 "binary", "binary_sha256", "replica_sha256", "sbom", "sbom_sha256", "notices",
                 "notices_sha256", "archive", "archive_sha256", "tools", "logs"}
+DECISIONS_PATH = "conformance/release-dependency-decisions.toml"
+PURL = re.compile(r"pkg:deb/ubuntu/([a-z0-9][a-z0-9+.-]*)@([A-Za-z0-9:.+~-]+)\?arch=([a-z0-9-]+)\Z")
+SPDX_EXPRESSION = re.compile(r"[A-Za-z0-9.+-]+(?: WITH [A-Za-z0-9.+-]+)?(?: (?:AND|OR) [A-Za-z0-9.+-]+(?: WITH [A-Za-z0-9.+-]+)?)*\Z")
+MAX_SBOM_PACKAGES = 4096
+
+
+def load_dependency_decisions(root: Path) -> dict[str, Any]:
+    """The reviewed decisions for every NOASSERTION the SBOM may still carry."""
+    try:
+        decisions = tomllib.loads(read_bytes(root / DECISIONS_PATH).decode("utf-8"))
+    except (UnicodeError, tomllib.TOMLDecodeError) as error:
+        raise QualificationError("release dependency decisions are not valid TOML") from error
+    if set(decisions) != {"schema_version", "workspace", "patched", "native"} or decisions["schema_version"] != 1:
+        raise QualificationError("release dependency decisions have an unknown shape")
+    shapes = {"workspace": {"name", "decision", "note"}, "patched": {"name", "version", "decision", "note"},
+              "native": {"package", "version", "architecture", "license", "copyright_sha256", "decision", "note"}}
+    for kind, fields in shapes.items():
+        entries = decisions[kind]
+        if not isinstance(entries, list):
+            raise QualificationError(f"release dependency decisions: {kind} must be a list")
+        for entry in entries:
+            if not isinstance(entry, dict) or set(entry) != fields or entry["decision"] != "accept" or not str(entry["note"]).strip():
+                raise QualificationError(f"release dependency decisions: every {kind} entry needs its fields, an accept decision, and a note")
+            if kind == "native":
+                require_hash(entry["copyright_sha256"], "copyright file digest")
+                if not SPDX_EXPRESSION.fullmatch(str(entry["license"])) or "NOASSERTION" in str(entry["license"]):
+                    raise QualificationError(f"release dependency decisions: {entry['package']} needs an SPDX license expression")
+    return decisions
+
+
+def check_dependency_decisions(sbom: dict[str, Any], decisions: dict[str, Any], native_libraries: list[dict[str, Any]]) -> dict[str, Any]:
+    """Every remaining NOASSERTION in the SBOM must be a recorded, reviewed decision."""
+    packages = sbom.get("packages")
+    if sbom.get("spdxVersion") != "SPDX-2.3" or not isinstance(packages, list) or not packages or len(packages) > MAX_SBOM_PACKAGES:
+        raise QualificationError("release SBOM is not a bounded SPDX 2.3 document")
+    workspace = {entry["name"] for entry in decisions["workspace"]}
+    patched = {(entry["name"], entry["version"]) for entry in decisions["patched"]}
+    native = {(entry["package"], entry["version"], entry["architecture"], entry["copyright_sha256"]): entry["license"] for entry in decisions["native"]}
+    summary: dict[str, Any] = {"workspace": [], "patched": [], "native": []}
+    native_digests = []
+    for package in packages:
+        if not isinstance(package, dict) or not isinstance(package.get("SPDXID"), str):
+            raise QualificationError("release SBOM package has an unknown shape")
+        name = package.get("name")
+        if package["SPDXID"].startswith("SPDXRef-Native-"):
+            references = {reference.get("referenceType"): reference.get("referenceLocator") for reference in package.get("externalRefs", []) if isinstance(reference, dict)}
+            purl = PURL.fullmatch(str(references.get("purl", "")))
+            if purl is None:
+                raise QualificationError(f"native library {name} is not resolved to an Ubuntu package")
+            key = (purl.group(1), purl.group(2), purl.group(3), references.get("copyright-file-sha256"))
+            if native.get(key) != package.get("licenseDeclared") or package.get("licenseDeclared") == "NOASSERTION":
+                raise QualificationError(f"native package {purl.group(1)} {purl.group(2)} {purl.group(3)} has no matching reviewed license decision")
+            checksums = package.get("checksums") or []
+            native_digests.append(checksums[0].get("checksumValue") if checksums else None)
+            summary["native"].append(references["purl"])
+            continue
+        if package.get("downloadLocation") == "NOASSERTION":
+            if name in workspace:
+                summary["workspace"].append(name)
+            elif (name, package.get("versionInfo")) in patched and package.get("licenseDeclared") != "NOASSERTION":
+                summary["patched"].append(f"{name} {package.get('versionInfo')}")
+            else:
+                raise QualificationError(f"package {name} has no download location and no recorded decision")
+        elif package.get("licenseDeclared") == "NOASSERTION":
+            raise QualificationError(f"package {name} declares no license and has no recorded decision")
+    if sorted(summary["workspace"]) != sorted(workspace):
+        raise QualificationError("release SBOM workspace packages differ from the recorded decisions")
+    if sorted(native_digests) != sorted(library["sha256"] for library in native_libraries):
+        raise QualificationError("release SBOM native libraries differ from the build record")
+    return summary
 
 
 def immutable_image(value: object) -> str:
