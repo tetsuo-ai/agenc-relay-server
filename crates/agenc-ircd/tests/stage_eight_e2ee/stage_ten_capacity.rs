@@ -219,7 +219,7 @@ struct Session {
 impl Session {
     fn open(fixture: &NodeFixture, plan: &WorkerPlan, shared: &Shared) -> TestResult<Self> {
         let started = Instant::now();
-        let mut client = register_when_available(fixture, &plan.nick)?;
+        let mut client = register_worker(fixture, &plan.nick)?;
         shared.record(
             |latencies| &mut latencies.admission,
             u64::try_from(started.elapsed().as_nanos())?,
@@ -335,7 +335,7 @@ impl Session {
             let stamp: u64 = stamp.parse()?;
             shared.received.fetch_add(1, Ordering::Relaxed);
             shared.record(|latencies| &mut latencies.fanout, now.saturating_sub(stamp));
-            self.check_sequence(&sender, sequence, shared);
+            self.check_sequence(plan, &sender, sequence, shared);
         } else if let Some(stamp) = rest.strip_prefix(&format!("PRIVMSG {} :dm t=", plan.nick)) {
             let stamp: u64 = stamp.parse()?;
             shared.record(
@@ -370,17 +370,59 @@ impl Session {
 
     /// A gap in a sender's sequence outside maintenance is a missed event.
     /// A sequence that restarts means the sender reconnected.
-    fn check_sequence(&mut self, sender: &str, sequence: u64, shared: &Shared) {
+    fn check_sequence(&mut self, plan: &WorkerPlan, sender: &str, sequence: u64, shared: &Shared) {
         let expected = self.expected.entry(sender.to_owned()).or_insert(sequence);
         if sequence > *expected && !shared.maintenance.load(Ordering::Relaxed) {
             let gap = sequence - *expected;
             shared.missed_events.fetch_add(gap, Ordering::Relaxed);
             shared.note_error(format!(
-                "missed at {:.1}s: sender={sender} expected={expected} got={sequence} gap={gap}",
-                shared.epoch.elapsed().as_secs_f64()
+                "missed at {:.1}s: observer={} edge={} sender={sender} expected={expected} got={sequence} gap={gap}",
+                shared.epoch.elapsed().as_secs_f64(),
+                plan.nick,
+                plan.edge
             ));
         }
         *expected = sequence.wrapping_add(1);
+    }
+}
+
+/// Registers a load worker with `standard-replies` enabled, so a refused
+/// channel message reaches the worker as `FAIL PRIVMSG` instead of a legacy
+/// numeric it would not recognize, retrying transient failures like
+/// `register_when_available`.
+fn register_worker(fixture: &NodeFixture, nickname: &str) -> TestResult<IrcClient> {
+    let deadline = Instant::now() + NETWORK_WAIT;
+    loop {
+        let attempt = (|| -> TestResult<Option<IrcClient>> {
+            let mut client = IrcClient::connect(fixture)?;
+            client.send("CAP LS 302")?;
+            client.read_until(|line| {
+                line.contains(" CAP * LS ") && !line.contains(" CAP * LS * :")
+            })?;
+            client.send("CAP REQ :standard-replies")?;
+            client.read_until(|line| line.contains(" CAP * ACK "))?;
+            client.send("CAP END")?;
+            match client.try_register(nickname)? {
+                Registration::Welcome(lines) => {
+                    if !lines
+                        .iter()
+                        .any(|line| line.contains(&format!(" 001 {nickname} ")))
+                    {
+                        return Err(failure(format!("registration lacked 001: {lines:?}")));
+                    }
+                    Ok(Some(client))
+                }
+                Registration::Unavailable(_) => Ok(None),
+            }
+        })();
+        match attempt {
+            Ok(Some(client)) => return Ok(client),
+            Ok(None) | Err(_) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_secs(1));
+            }
+            Ok(None) => return Err(failure("registration stayed unavailable")),
+            Err(error) => return Err(error),
+        }
     }
 }
 
@@ -1573,6 +1615,40 @@ the post-restart grace (CAP-7)"
             sample.federation_links
         ));
         self.samples.push(sample);
+        let mut counters = Vec::new();
+        for (index, identity) in self.admins.iter().enumerate() {
+            let mut admin = AdminSession::connect(identity)?;
+            for selector in ["FEDERATION", "STORAGE"] {
+                let fields: Vec<String> = admin
+                    .stats(selector)?
+                    .into_iter()
+                    .map(|(name, value)| format!("{name}={value}"))
+                    .collect();
+                counters.push(format!("node {index} {selector}: {}", fields.join(" ")));
+            }
+        }
+        for line in counters {
+            self.note(line);
+        }
+        // A second federation sample after a short rest separates a slow
+        // drain from a stalled one.
+        thread::sleep(Duration::from_secs(3));
+        let mut later = Vec::new();
+        for (index, identity) in self.admins.iter().enumerate() {
+            let mut admin = AdminSession::connect(identity)?;
+            let fields: Vec<String> = admin
+                .stats("FEDERATION")?
+                .into_iter()
+                .map(|(name, value)| format!("{name}={value}"))
+                .collect();
+            later.push(format!(
+                "node {index} FEDERATION after 3 s: {}",
+                fields.join(" ")
+            ));
+        }
+        for line in later {
+            self.note(line);
+        }
         self.shared.pause.store(false, Ordering::Relaxed);
         if !inside {
             self.envelope_violations += 1;

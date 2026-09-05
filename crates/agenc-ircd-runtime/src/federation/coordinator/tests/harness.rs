@@ -986,6 +986,111 @@ async fn joins_and_messages_project_across_two_edges() -> TestResult {
     .await
 }
 
+#[tokio::test]
+async fn a_channel_message_with_an_older_expected_revision_still_commits() -> TestResult {
+    let a = peer_identity(ServerId::from_bytes([46; 16]), "edge-a.example");
+    let b = peer_identity(ServerId::from_bytes([47; 16]), "edge-b.example");
+    run_coordinator(&[a, b], |inbox| async move {
+        let mut edge_a = Edge::new(inbox.clone(), 46);
+        let mut edge_b = Edge::new(inbox, 47);
+        let mut origin_a = Origin::new(66);
+        let mut origin_b = Origin::new(67);
+        edge_a.establish().await?;
+        edge_b.establish().await?;
+        synchronize_ok(&mut edge_a, &mut [&mut origin_a]).await?;
+        synchronize_ok(&mut edge_b, &mut [&mut origin_b]).await?;
+        let mut events_a = Vec::new();
+        let mut events_b = Vec::new();
+        let (session_a, _, revision_a) =
+            open_session(&mut edge_a, &mut origin_a, "gina", &mut events_a).await?;
+        let (session_b, _, revision_b) =
+            open_session(&mut edge_b, &mut origin_b, "hugo", &mut events_b).await?;
+        events_a.clear();
+        events_b.clear();
+        let channel_id =
+            join_channel(&mut edge_a, &mut origin_a, session_a, revision_a, "#lag").await?;
+        join_channel(&mut edge_b, &mut origin_b, session_b, revision_b, "#lag").await?;
+        let (_, joined) = next_event(&mut edge_a).await?;
+        assert!(matches!(joined, ProjectedEvent::MemberJoined { .. }));
+        // Gina changes the topic at the exact revision; the channel revision
+        // moves on, and Hugo's edge has not applied that event yet.
+        let before_topic = events_b_channel_revision(&mut edge_b, channel_id).await?;
+        request(
+            &mut edge_a,
+            &mut origin_a,
+            &FederatedOperation::Topic {
+                session_id: session_a,
+                channel_id,
+                expected_channel_revision: before_topic,
+                topic: "moved on".to_owned(),
+            },
+        )
+        .await?;
+        let topic = answer(&mut edge_a, &mut events_a).await?;
+        assert_eq!(topic.header.result_kind, FederationResultKind::Committed);
+        // Hugo speaks naming the revision his edge last applied, one behind
+        // the coordinator. Authorization and the recipient set come from the
+        // coordinator's current revision, so the message commits.
+        request(
+            &mut edge_b,
+            &mut origin_b,
+            &FederatedOperation::Message {
+                session_id: session_b,
+                kind: agenc_ircd_domain::MessageKind::Privmsg,
+                targets: vec![MessageTargetArg::Channel {
+                    channel_id,
+                    expected_revision: before_topic,
+                }],
+                tags: Vec::new(),
+                body: "still here".to_owned(),
+            },
+        )
+        .await?;
+        let mut spoke_events = Vec::new();
+        let spoke = answer(&mut edge_b, &mut spoke_events).await?;
+        if let ResultArm::Failed { code, .. } = &spoke.arm {
+            return Err(format!("message with an older revision failed with {code}").into());
+        }
+        assert_eq!(spoke.header.result_kind, FederationResultKind::Committed);
+        origin_b.sequence += 1;
+        // A revision the coordinator has not reached is still refused.
+        request(
+            &mut edge_b,
+            &mut origin_b,
+            &FederatedOperation::Message {
+                session_id: session_b,
+                kind: agenc_ircd_domain::MessageKind::Privmsg,
+                targets: vec![MessageTargetArg::Channel {
+                    channel_id,
+                    expected_revision: before_topic + 1_000,
+                }],
+                tags: Vec::new(),
+                body: "from the future".to_owned(),
+            },
+        )
+        .await?;
+        let ahead = answer(&mut edge_b, &mut spoke_events).await?;
+        let ResultArm::Failed { code, .. } = ahead.arm else {
+            return Err("expected the message ahead of the coordinator to fail".into());
+        };
+        assert_eq!(code, "STALE_STATE");
+        Ok(())
+    })
+    .await
+}
+
+/// The channel revision one edge last applied for `channel_id`, taken from
+/// the channel_visible or state-changing events it received so far.
+async fn events_b_channel_revision(
+    edge: &mut Edge,
+    channel_id: agenc_ircd_types::ChannelInstanceId,
+) -> TestResult<u64> {
+    edge.channel_revisions
+        .get(&channel_id)
+        .copied()
+        .ok_or_else(|| "the edge learned no channel revision".into())
+}
+
 /// The channel revision the joining edge observed in its own join events.
 fn joined_b_channel_revision(events: &[(EventHeader, ProjectedEvent)]) -> TestResult<u64> {
     events

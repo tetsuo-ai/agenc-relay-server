@@ -282,6 +282,14 @@ fn check_revisions(
     }
 }
 
+/// A message names the channel revision its edge last applied. The edge's
+/// replica trails the coordinator by the event delivery latency, so under
+/// concurrent joins, parts, and mode or topic changes an exact match would
+/// refuse a large share of ordinary traffic with `SERVER_BUSY`, and clients
+/// do not retry. The message is authorized and its recipients derived at the
+/// coordinator's current revision (STA-05, STA-07), so an older revision is
+/// accepted; a revision the coordinator has not reached is refused, since it
+/// cannot come from an event the coordinator committed.
 fn check_message_target(
     domain: &DomainState,
     target: &MessageTargetArg,
@@ -290,7 +298,13 @@ fn check_message_target(
         MessageTargetArg::Channel {
             channel_id,
             expected_revision,
-        } => check_channel_revision(domain, *channel_id, *expected_revision),
+        } => {
+            let channel = domain.channel(*channel_id).ok_or(DomainError::NotFound)?;
+            if *expected_revision > channel.revision().get() {
+                return Err(DomainError::StaleRevision);
+            }
+            Ok(())
+        }
         MessageTargetArg::User { .. } => Ok(()),
     }
 }

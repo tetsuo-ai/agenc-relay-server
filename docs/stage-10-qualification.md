@@ -568,20 +568,27 @@ construction of Section 23.9, which no command exposes. The campaign's
 generation validation across a coordinator restart and re-authenticates the
 campaign account; a genuine key rotation stays an external drill item.
 
-### CAP-6: every sender on an edge silently loses one channel message during an OPAQUE login
+### CAP-6: the coordinator refused channel messages whose edge named a trailing channel revision
 
-While the campaign account authenticates and registers at edge A, every
-other client on edge A loses exactly one channel message to every observer on
-both edges, at the same instant, with no `FAIL PRIVMSG` reply to the senders
-and no link or storage event in any daemon log. Three of four development
-runs reproduced it at the same point (the forty-third message of each sender,
-about fifty-five seconds into the cycle). Section 19 requires all-or-none
-fanout and a side-effect-free `SERVER_BUSY`; a silently dropped committed
-message violates it. The engine records every `FAIL PRIVMSG` reply and
-re-sends the refused sequence, so a refusal and a silent loss stay
-distinguishable, and it carries the refused count in the record. Missed
-events stay the gate: the capacity job fails on this finding until the loss
-is fixed and the campaign reruns with zero missed events.
+Fixed. Every channel message carries the channel revision the sending edge
+last applied, and the coordinator refused the message with `SERVER_BUSY`
+whenever that revision trailed its own. An edge replica trails the
+coordinator by the event delivery latency, so under concurrent joins,
+parts, topic and mode changes the refusals scaled with channel activity:
+the 64-client development runs refused about half of all channel messages
+during the join storm. The earlier description of a silent loss was the
+engine's accounting. Load workers registered without `standard-replies`, so
+the refusal reached them as a legacy numeric the engine did not recognize,
+and every observer counted a gap. Workers now negotiate `standard-replies`,
+count each `FAIL PRIVMSG` and re-send the refused sequence, and the
+coordinator accepts a message whose expected channel revision is older than
+its own: the message is authorized and its recipients derived at the
+coordinator's current revision (STA-05, STA-07), so the older revision
+changes nothing. A revision the coordinator has not reached is still refused,
+since no committed event could have produced it. Compare-and-set operations
+(topic, mode, invite, kick, registration, settings) keep the exact check. A
+coordinator unit test commits a message one revision behind and refuses one
+ahead.
 
 ### CAP-7: the first OPAQUE login after a coordinator restart can fail with 904
 
