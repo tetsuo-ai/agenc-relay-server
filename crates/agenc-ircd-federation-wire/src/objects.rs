@@ -876,6 +876,8 @@ pub const fn result_schema_name(kind: FederationResultKind) -> &'static str {
         FederationResultKind::AccountCreated => "result.account_created",
         FederationResultKind::ReplyPage => "result.reply_page",
         FederationResultKind::NoContent => "result.no_content",
+        FederationResultKind::HistoryPage => "result.history_page",
+        FederationResultKind::HistoryExpired => "result.history_expired",
     }
 }
 
@@ -929,8 +931,8 @@ pub const fn permitted_success_results(
     opcode: FederationOpcode,
 ) -> &'static [FederationResultKind] {
     use FederationResultKind::{
-        AccountCreated, AuthChallenge, Authenticated, Committed, NoContent, ReplyPage,
-        SessionRegistered,
+        AccountCreated, AuthChallenge, Authenticated, Committed, HistoryExpired, HistoryPage,
+        NoContent, ReplyPage, SessionRegistered,
     };
     match opcode {
         FederationOpcode::SessionOpen => &[SessionRegistered],
@@ -950,7 +952,7 @@ pub const fn permitted_success_results(
         | FederationOpcode::ChannelSettings
         | FederationOpcode::CredentialChangeFinish => &[Committed],
         FederationOpcode::Message | FederationOpcode::AccountSettings => &[Committed, NoContent],
-        FederationOpcode::HistoryQuery => &[ReplyPage],
+        FederationOpcode::HistoryQuery => &[HistoryPage, HistoryExpired],
         FederationOpcode::DirectoryQuery => &[ReplyPage, NoContent],
         FederationOpcode::AccountCreateStart
         | FederationOpcode::OpaqueAuthStart

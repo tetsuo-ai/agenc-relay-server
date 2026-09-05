@@ -26,6 +26,10 @@ pub struct MaintenanceStorageConfig {
     pub login_index_previous_key_file: Option<PathBuf>,
     /// Offline-authorized backup verification keys.
     pub backup_trust_manifest_file: PathBuf,
+    /// Private directory for the mandatory migration source backup.
+    pub backup_directory: PathBuf,
+    /// Configured source-backup signing key.
+    pub backup_signing_private_key_file: PathBuf,
     /// Cache bytes used by the offline redb owner.
     pub redb_cache_bytes: usize,
     /// Fixed free-space reserve.
@@ -52,6 +56,8 @@ impl From<&Config> for MaintenanceStorageConfig {
             login_index_key_file: storage.login_index_key_file.clone(),
             login_index_previous_key_file: storage.login_index_previous_key_file.clone(),
             backup_trust_manifest_file: storage.backup_trust_manifest_file.clone(),
+            backup_directory: storage.backup_dir.clone(),
+            backup_signing_private_key_file: storage.backup_signing_private_key_file.clone(),
             redb_cache_bytes: DEFAULT_REDB_CACHE_BYTES,
             fixed_reserve_bytes: storage.disk_reserve_bytes,
             reserve_percent: storage.disk_reserve_percent,

@@ -40,6 +40,7 @@ agenc-ircd-types = { version = "=0.0.0", path = "crates/agenc-ircd-types" }
 # for completed stages reference only the profiles they use. Profiles for later
 # stages remain declarations and do not enter the package graph.
 argon2 = { version = "=0.5.3", default-features = false, features = ["alloc"] }
+aws-lc-rs = { version = "=1.18.0", default-features = false, features = ["non-fips"] }
 base64 = { version = "=0.23.1", default-features = false, features = ["alloc"] }
 chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["alloc", "zeroize"] }
 ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["fast", "zeroize"] }

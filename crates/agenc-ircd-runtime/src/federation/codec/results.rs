@@ -6,7 +6,9 @@ use agenc_ircd_federation_wire::access::{
     expect_schema, fixed, opaque, opaque_field, optional_fixed, text, unsigned, unsigned_u32,
     vector,
 };
-use agenc_ircd_federation_wire::{CodecError, SchemaObject, WireValue, result_schema_name};
+use agenc_ircd_federation_wire::{
+    CodecError, HistoryPage, SchemaObject, WireValue, result_schema_name,
+};
 use agenc_ircd_types::{AccountId, FederationResultKind, SessionId, UserId};
 
 use super::{account_text, optional_account_id, presence, presence_of, unsigned_value};
@@ -41,6 +43,10 @@ pub(crate) enum ResultArm {
     },
     /// `no_content`.
     NoContent,
+    /// An immutable bounded history page, with no outer replies or completion event.
+    HistoryPage(HistoryPage),
+    /// Terminal invalidation of one exact original successful history result.
+    HistoryExpired { original_result_object_id: [u8; 32] },
 }
 
 /// The `session_registered` arm fields.
@@ -65,6 +71,8 @@ impl ResultArm {
             Self::AccountCreated { .. } => FederationResultKind::AccountCreated,
             Self::ReplyPage { .. } => FederationResultKind::ReplyPage,
             Self::NoContent => FederationResultKind::NoContent,
+            Self::HistoryPage(_) => FederationResultKind::HistoryPage,
+            Self::HistoryExpired { .. } => FederationResultKind::HistoryExpired,
         }
     }
 
@@ -141,6 +149,10 @@ impl ResultArm {
                 )
             }
             Self::NoContent => SchemaObject::new(name, Vec::new()),
+            Self::HistoryPage(page) => page.to_object(),
+            Self::HistoryExpired {
+                original_result_object_id,
+            } => SchemaObject::new(name, vec![opaque(original_result_object_id)?]),
         }
     }
 
@@ -192,6 +204,12 @@ impl ResultArm {
                 next_cursor: optional_fixed(object, "next_cursor")?,
             },
             FederationResultKind::NoContent => Self::NoContent,
+            FederationResultKind::HistoryPage => {
+                Self::HistoryPage(HistoryPage::new(object.try_clone()?)?)
+            }
+            FederationResultKind::HistoryExpired => Self::HistoryExpired {
+                original_result_object_id: fixed(object, "original_result_object_id")?,
+            },
         })
     }
 }

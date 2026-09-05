@@ -84,6 +84,9 @@ impl EdgeFederation {
             restored.projection(self, key, value)
         })?;
         restored.install_projection(self)?;
+        scan_values(port, keys, TableId::RequestResult, |key, value| {
+            super::history::validate_restored(self, &key, &value)
+        })?;
         scan_values(port, keys, TableId::E2eeState, |key, value| {
             restored.admit_state(self, companion.as_deref_mut(), key, value)
         })?;

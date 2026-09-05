@@ -90,9 +90,19 @@ pub(super) struct StagedPlan {
     response_count_increment: u64,
     account_service_writes: Vec<AccountServiceDurableWrite>,
     projection: Option<PendingProjection>,
+    history: Option<super::history::HistoryMutation>,
 }
 
 impl StagedPlan {
+    pub(super) fn with_history(mut self, history: Option<super::history::HistoryMutation>) -> Self {
+        self.history = history;
+        self
+    }
+
+    pub(super) fn take_history(&mut self) -> Option<super::history::HistoryMutation> {
+        self.history.take()
+    }
+
     /// Binds one account-service record set to the plan that authorizes it.
     #[must_use]
     pub(super) fn with_account_service_writes(
@@ -109,6 +119,7 @@ impl StagedPlan {
             response_count_increment,
             account_service_writes,
             projection: None,
+            history: None,
         }
     }
 

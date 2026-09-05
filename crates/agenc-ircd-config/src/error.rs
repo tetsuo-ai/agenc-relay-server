@@ -21,7 +21,7 @@ pub enum ConfigError {
     Topology,
     /// A host control, permission, or process hardening step failed.
     HostControl,
-    /// A configured transport is not implemented until Stage 09.
+    /// A configured transport requires an optional Cargo feature.
     DeferredTransport,
 }
 
@@ -36,7 +36,7 @@ impl fmt::Display for ConfigError {
             Self::Overflow => "configuration arithmetic overflowed",
             Self::Topology => "configuration topology is inconsistent",
             Self::HostControl => "host control unavailable",
-            Self::DeferredTransport => "listener transport is not implemented until Stage 09",
+            Self::DeferredTransport => "listener transport is not compiled into this binary",
         })
     }
 }

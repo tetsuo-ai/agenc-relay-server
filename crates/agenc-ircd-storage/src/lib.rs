@@ -14,6 +14,13 @@ mod engine;
 mod error;
 mod fault;
 pub mod federation_records;
+pub mod history_records;
+mod migration;
+pub use migration::MigrationTransformV1;
+mod migration_command;
+pub use migration_command::{
+    MigrationCommandReceipt, MigrationCommandRequest, execute_migration_command,
+};
 mod initialize;
 mod integrity;
 mod login_index;

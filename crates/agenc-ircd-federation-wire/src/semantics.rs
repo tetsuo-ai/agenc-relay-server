@@ -77,6 +77,8 @@ pub(crate) fn validate_schema_semantics(
         "FederationDepartedChannel" => validate_nonzero_field(schema, fields, "resulting_revision"),
         "FederationEvent" => validate_event_tuples(schema, fields),
         "FederationHistoryReference" => validate_history_reference(schema, fields),
+        "FederationHistoryMessage" => validate_history_message(schema, fields),
+        "FederationHistoryAuthorization" => validate_history_authorization(schema, fields),
         "FederationInviteProjection" => validate_invite_projection(schema, fields),
         "FederationJoinTarget" => validate_join_target(schema, fields),
         "FederationMessageTarget" => validate_message_target(schema, fields),
@@ -178,6 +180,7 @@ fn validate_result_schema(
         "result.committed" => validate_nonzero_field(schema, fields, "resulting_state_generation"),
         "result.failed" => validate_failed_result(schema, fields),
         "result.reply_page" => validate_reply_page(schema, fields),
+        "result.history_page" => validate_history_page(schema, fields),
         "result.session_registered" => validate_registered_result(schema, fields),
         _ => Ok(()),
     }
@@ -758,6 +761,68 @@ fn validate_delivered_message(
     semantic(matches!(target_kind, 1) == (channel_sequence != 0))
 }
 
+fn validate_history_message(
+    schema: &SchemaDescriptor,
+    fields: &[WireValue],
+) -> Result<(), CodecError> {
+    let kind = unsigned_field(schema, fields, "message_kind")?;
+    let received = unsigned_field(schema, fields, "received_unix_milliseconds")?;
+    let expires = unsigned_field(schema, fields, "expires_unix_milliseconds")?;
+    let tags = vector_field(schema, fields, "tags")?;
+    let body = opaque_field(schema, fields, "body")?;
+    semantic(matches!(kind, 1 | 2) && received != 0 && expires > received)?;
+    validate_nonzero_field(schema, fields, "channel_event_sequence")?;
+    validate_message_shape(kind, tags.len(), body)?;
+    validate_utf8_text(body)?;
+    let mut previous: Option<&[u8]> = None;
+    for tag in tags {
+        let key = opaque_field(tag.schema, &tag.fields, "key")?;
+        semantic(previous.is_none_or(|previous| previous < key))?;
+        previous = Some(key);
+    }
+    Ok(())
+}
+
+fn validate_history_authorization(
+    schema: &SchemaDescriptor,
+    fields: &[WireValue],
+) -> Result<(), CodecError> {
+    validate_nonzero_field(schema, fields, "session_generation")?;
+    validate_nonzero_field(schema, fields, "membership_revision")?;
+    validate_nonzero_field(schema, fields, "history_authorization_generation")?;
+    validate_optional_account(
+        opaque_field(schema, fields, "account_id")?,
+        unsigned_field(schema, fields, "account_session_generation")?,
+    )
+}
+
+fn validate_history_page(
+    schema: &SchemaDescriptor,
+    fields: &[WireValue],
+) -> Result<(), CodecError> {
+    validate_reply_page(schema, fields)?;
+    let authorization = structure_field(schema, fields, "authorization")?;
+    semantic(
+        opaque_field(schema, fields, "session_id")?
+            == opaque_field(authorization.schema, &authorization.fields, "session_id")?,
+    )?;
+    let rows = vector_field(schema, fields, "messages")?;
+    let cursor = opaque_field(schema, fields, "next_cursor")?;
+    let cut = unsigned_field(schema, fields, "snapshot_state_generation")?;
+    semantic(cut != 0)?;
+    semantic(cursor.is_empty() || !rows.is_empty())?;
+    let mut previous: Option<(u64, &[u8])> = None;
+    for row in rows {
+        let sequence = unsigned_field(row.schema, &row.fields, "channel_event_sequence")?;
+        semantic(sequence <= cut)?;
+        let message_id = opaque_field(row.schema, &row.fields, "message_id")?;
+        let position = (sequence, message_id);
+        semantic(previous.is_none_or(|previous| previous < position))?;
+        previous = Some(position);
+    }
+    Ok(())
+}
+
 fn validate_event_tuples(
     schema: &SchemaDescriptor,
     fields: &[WireValue],
@@ -1024,13 +1089,14 @@ fn validate_result_envelope(
     let kind = unsigned_field(schema, fields, "result_kind")?;
     let completion = opaque_field(schema, fields, "completion_event_id")?;
     let replies = vector_field(schema, fields, "replies")?;
-    let completion_valid = matches!((kind, completion.len()), (2 | 3, 16) | (1 | 4..=8, 0));
-    let replies_valid = if kind == 7 {
-        !replies.is_empty()
-    } else {
-        replies.len() <= 64
+    let completion_valid = matches!((kind, completion.len()), (2 | 3, 16) | (1 | 4..=10, 0));
+    let replies_valid = match kind {
+        7 => !replies.is_empty(),
+        9 | 10 => replies.is_empty(),
+        _ => replies.len() <= 64,
     };
-    let page_size_valid = kind != 7 || measured_fields_len(schema, fields)? <= 65_536;
+    let page_size_valid =
+        !matches!(kind, 7 | 9 | 10) || measured_fields_len(schema, fields)? <= 65_536;
     semantic(completion_valid && replies_valid && page_size_valid)
 }
 
@@ -1131,25 +1197,11 @@ fn validate_history_selector(
     let first_kind = unsigned_field(first.schema, &first.fields, "reference_kind")?;
     let second_kind = unsigned_field(second.schema, &second.fields, "reference_kind")?;
     match kind {
-        1 => semantic(first_kind == 0 && second_kind == 0),
+        1 => semantic(second_kind == 0),
         2..=4 => semantic(first_kind != 0 && second_kind == 0),
-        5 => {
-            semantic(first_kind != 0 && first_kind == second_kind && reference_less(first, second)?)
-        }
+        5 => semantic(first_kind != 0 && second_kind != 0),
         _ => Err(CodecError::UnknownDiscriminant),
     }
-}
-
-fn reference_less(first: &SchemaObject, second: &SchemaObject) -> Result<bool, CodecError> {
-    let kind = unsigned_field(first.schema, &first.fields, "reference_kind")?;
-    if kind == 1 {
-        let first_id = opaque_field(first.schema, &first.fields, "message_id")?;
-        let second_id = opaque_field(second.schema, &second.fields, "message_id")?;
-        return Ok(first_id < second_id);
-    }
-    let first_time = unsigned_field(first.schema, &first.fields, "unix_milliseconds")?;
-    let second_time = unsigned_field(second.schema, &second.fields, "unix_milliseconds")?;
-    Ok(first_time < second_time)
 }
 
 fn validate_principal(schema: &SchemaDescriptor, fields: &[WireValue]) -> Result<(), CodecError> {
@@ -1766,6 +1818,8 @@ fn result_arm(kind: u64) -> Result<&'static str, CodecError> {
         6 => Ok("result.account_created"),
         7 => Ok("result.reply_page"),
         8 => Ok("result.no_content"),
+        9 => Ok("result.history_page"),
+        10 => Ok("result.history_expired"),
         _ => Err(CodecError::UnknownDiscriminant),
     }
 }

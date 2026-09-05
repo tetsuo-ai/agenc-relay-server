@@ -5,6 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+history = []
+
 [dependencies]
 agenc-ircd-types.workspace = true
 

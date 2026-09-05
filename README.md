@@ -21,9 +21,9 @@
 > closes exact source commit `ae6457fb62fef8961d3caf904febed580e8b4a91`.
 > The daemon implements TLS-only direct, Tor-exit, and onion profiles,
 > coordinator/edge federation, and the E2EE server adapter. The external
-> cryptographic and protocol review remains open. WebSocket transport and
-> optional history are planned for Stage 09; production qualification is
-> planned for Stage 10. Checkpoints do not qualify later source changes.
+> cryptographic and protocol review remains open. Stage 09 adds optional WebSocket transport and
+> plaintext channel history with an explicit schema migration. Production
+> qualification is planned for Stage 10. Checkpoints do not qualify later source changes.
 
 ## What is being built
 
@@ -49,7 +49,7 @@ Ed25519, and authenticated storage.
 | Stage | State | Outcome |
 | --- | --- | --- |
 | 00 | complete; checkpoint closed | Reproducible workspace, source baseline, policy, and traceability |
-| 01 | complete; checkpoint closed | 53 registry constants, validated types, 128 canonical object codecs, and independent vectors |
+| 01 | complete; checkpoint closed | 62 registry constants, validated types, 132 canonical object codecs, and independent vectors |
 | 02 | complete; checkpoint closed | Incremental framing, client parsing, capability and registration state, bounded rendering, transcripts, and fuzz targets |
 | 03 | complete; checkpoint closed | Pure accounts, sessions, channels, authorization, privacy projections, plans, explicit external inputs, and an independent reference model |
 | 04 | complete; checkpoint closed | Secret-safe crypto adapters, fixed HPKE and OPAQUE profiles, account authentication, destructive-account proofs, bounded workers, and fuzz coverage |
@@ -57,7 +57,7 @@ Ed25519, and authenticated storage.
 | 06 | complete; checkpoint closed | Runtime composition, TLS endpoints, account sessions, administration, reload, and shutdown |
 | 07 | complete; checkpoint closed | Authenticated federation, projections, replay, snapshots, partitions, and paged queries |
 | 08 | implementation checkpoint closed; external review open | E2EE routing, policy quorum, edge witnesses, durable barriers, and two-library MLS interoperability |
-| 09 | planned | Optional WebSocket transport and history profiles |
+| 09 | implementation under validation | Independent WSS and plaintext history profiles, replay-safe paging, purge, and schema migration |
 | 10 | planned | Production qualification and release evidence |
 
 `agenc-ircd-storage` keeps redb on one blocking owner thread, accepts only
@@ -85,8 +85,10 @@ KeyPackage and mailbox delivery, route projection to edges with a
 record-chain witness at every edge, the cross-profile durable barrier, a
 coordinator reload from durable rows, the encrypted profile composed in the
 daemon, and a lifecycle driven by two independent MLS libraries; the
-external review task stays open. Stage 09 is the
-next implementation stage. The complete dependency-ordered roadmap lives in
+external review task stays open. Stage 09 adds optional WSS transport,
+plaintext history, bounded purge and expiry, authenticated history replay,
+and stopped-daemon schema migration. See the
+[Stage 09 operating instructions](docs/stage-09-operations.md). The complete dependency-ordered roadmap lives in
 [TODO.md](TODO.md). See the
 [Stage 08 checkpoint](conformance/evidence/stage-08-ae6457fb62fef8961d3caf904febed580e8b4a91.json), the
 [Stage 07 checkpoint](conformance/evidence/stage-07-1093d88d0057c3461a423285e0f86ff3775c1140.json), the
@@ -127,7 +129,7 @@ from a clean checkout:
 ```sh
 git clone https://github.com/tetsuo-ai/agenc-ircd.git
 cd agenc-ircd
-bash scripts/check-stage-eight.sh
+bash scripts/check-stage-nine.sh
 ```
 
 The Stage 08 implementation checks inherit every Stage 00 through 07 command.

@@ -41,6 +41,7 @@ pub(crate) enum AdminMutation {
     },
     RestoreAccount(AccountId),
     QuarantineChannel(ChannelInstanceId),
+    PurgeChannelHistory(ChannelInstanceId),
 }
 
 impl AdminMutation {
@@ -75,6 +76,10 @@ impl AdminMutation {
             (
                 Self::QuarantineChannel(channel_id),
                 AdminCommand::ChannelQuarantine { channel, .. },
+            ) => channel_id == channel,
+            (
+                Self::PurgeChannelHistory(channel_id),
+                AdminCommand::ChannelHistoryPurge { channel, .. },
             ) => channel_id == channel,
             _ => false,
         }

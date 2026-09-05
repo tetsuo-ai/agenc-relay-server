@@ -216,6 +216,18 @@ struct RestoreSecrets {
     target_guard: Zeroizing<[u8; 32]>,
 }
 
+pub(crate) fn maintenance_backup_trust_keys(
+    rows: &[RestoreTrustKey],
+) -> Result<Vec<BackupTrustKey>, StorageError> {
+    if rows.is_empty() || rows.len() > crate::MAX_BACKUP_TRUST_KEYS {
+        return Err(StorageError::LimitExceeded);
+    }
+    rows.iter()
+        .copied()
+        .map(RestoreTrustKey::validate)
+        .collect()
+}
+
 impl RestoreSecrets {
     fn load(request: &RestoreCommandRequest) -> Result<Self, StorageError> {
         let source_master = read_secret_key(&request.source_master_key_file)?;
@@ -825,7 +837,7 @@ fn secret_bytes_match(left: &[u8; 32], right: &[u8; 32]) -> bool {
     bool::from(left.ct_eq(right))
 }
 
-fn read_secret_key(path: &Path) -> Result<Zeroizing<[u8; 32]>, StorageError> {
+pub(crate) fn read_secret_key(path: &Path) -> Result<Zeroizing<[u8; 32]>, StorageError> {
     let file = open_private_regular(path, Mode::RUSR | Mode::WUSR)?;
     let metadata = file
         .metadata()

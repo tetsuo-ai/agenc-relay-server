@@ -5,6 +5,8 @@
 //! authorization, external inputs, bounded channel-key crypto continuations,
 //! commit-coupled rendering, and transport-safe session removal.
 
+mod history;
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use agenc_ircd_client_wire::{
@@ -174,6 +176,7 @@ pub struct RegisteredCommandExecutor {
     by_connection: BTreeMap<ConnectionGeneration, CryptoJobId>,
     by_sequence: BTreeMap<u64, CryptoJobId>,
     next_sequence: u64,
+    history: BTreeMap<crate::bridge::StorageReadId, history::PendingHistory>,
 }
 
 impl RegisteredCommandExecutor {
@@ -188,12 +191,16 @@ impl RegisteredCommandExecutor {
             by_connection: BTreeMap::new(),
             by_sequence: BTreeMap::new(),
             next_sequence: 1,
+            history: BTreeMap::new(),
         }
     }
 
     /// Returns whether no deferred registered command spans a reload.
     pub(crate) fn reload_ready(&self) -> bool {
-        self.pending.is_empty() && self.by_connection.is_empty() && self.by_sequence.is_empty()
+        self.pending.is_empty()
+            && self.by_connection.is_empty()
+            && self.by_sequence.is_empty()
+            && self.history.is_empty()
     }
 }
 
@@ -372,6 +379,7 @@ impl RegisteredCommandExecutor {
         context: &mut StateCoreContext,
         generation: ConnectionGeneration,
     ) {
+        self.close_history(context, generation);
         let Some(job_id) = self.by_connection.get(&generation).copied() else {
             return;
         };
@@ -393,6 +401,9 @@ impl RegisteredCommandExecutor {
         };
         if entry.kind != TimerKind::CommandDeadline {
             return Ok(false);
+        }
+        if self.expire_history_timer(context, sequence)? {
+            return Ok(true);
         }
         let Some(job_id) = self.by_sequence.get(&sequence).copied() else {
             return Ok(true);
@@ -470,6 +481,24 @@ impl RegisteredCommandExecutor {
                 return Err(error);
             }
         };
+        if matches!(command.view(), CanonicalCommandView::Chathistory(_, _)) {
+            let result = self.start_history(
+                context,
+                DeferredOrigin {
+                    generation,
+                    bound,
+                    kind,
+                    capabilities,
+                },
+                message,
+                command,
+                &mut observation,
+            );
+            if result.is_err() {
+                complete_observation(context, &mut observation, ResultClass::Error);
+            }
+            return result;
+        }
         let next_nickname = match command.view() {
             CanonicalCommandView::Nick(nickname) => Some(nickname.presentation().to_owned()),
             _ => None,
@@ -528,7 +557,11 @@ fn convert_registered_command(
     message: &ParsedMessage,
 ) -> Result<ConvertedCommand, RuntimeError> {
     match crate::command_convert::convert(context.domain(), context.domain(), kind, message) {
-        Ok(command) => Ok(ConvertedCommand::Ready(command)),
+        Ok(command) => Ok(ConvertedCommand::Ready(
+            command
+                .resolve_history_default(context.history_default())
+                .map_err(|_| RuntimeError::InvalidValue)?,
+        )),
         Err(RuntimeError::InvalidValue | RuntimeError::LimitExceeded) => {
             let (error, silent, result) =
                 if charge_registered_command_only(context, bound.user_id).is_ok() {
@@ -908,7 +941,9 @@ fn execute_session_command(
             context.domain(),
             reply.request.kind,
             reply.request.message,
-        )?,
+        )?
+        .resolve_history_default(context.history_default())
+        .map_err(|_| RuntimeError::InvalidValue)?,
         None => {
             let reason = close_reason.and_then(|reason| {
                 BoundedUtf8::try_from_str(reason, ControlPolicy::RejectAll).ok()
@@ -940,6 +975,26 @@ fn execute_planned_command(
     let PlanDecision::Mutation(plan) = decision else {
         return complete_nonmutation(context, bound, reply, decision);
     };
+    if let (Some(batch), Some(reply)) = (plan.message_batch(), reply) {
+        let mut tags: Vec<_> = reply
+            .request
+            .message
+            .tags()
+            .iter()
+            .filter(|tag| tag.is_client_only())
+            .map(|tag| (tag.key().to_owned(), tag.value().unwrap_or("").to_owned()))
+            .collect();
+        tags.sort_unstable();
+        context.set_mutation_context(agenc_ircd_domain::federation::MutationContext {
+            received_unix_milliseconds: batch
+                .accepted_at()
+                .get()
+                .checked_mul(1_000)
+                .ok_or(RuntimeError::Overflow)?,
+            client_tags: tags,
+            ..agenc_ircd_domain::federation::MutationContext::default()
+        });
+    }
     let fanout = crate::mutation_render::render_mutation(
         context,
         bound,

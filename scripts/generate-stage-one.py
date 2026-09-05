@@ -448,6 +448,12 @@ def minimal_schema_vectors(registry: str) -> list[tuple[str, bytes]]:
         ("FederationDeliveredMessage", "channel_event_sequence"): 1,
         ("FederationDeliveredMessage", "target_revision"): 1,
         ("FederationEvent", "coordinator_state_generation"): 1,
+        ("FederationHistoryAuthorization", "session_generation"): 1,
+        ("FederationHistoryAuthorization", "membership_revision"): 1,
+        ("FederationHistoryAuthorization", "history_authorization_generation"): 1,
+        ("FederationHistoryMessage", "channel_event_sequence"): 1,
+        ("FederationHistoryMessage", "received_unix_milliseconds"): 1,
+        ("FederationHistoryMessage", "expires_unix_milliseconds"): 3_600_001,
         ("FederationInviteProjection", "creation_revision"): 1,
         ("FederationInviteProjection", "expires_at"): 1,
         ("FederationMessageTarget", "expected_target_revision"): 1,
@@ -487,6 +493,7 @@ def minimal_schema_vectors(registry: str) -> list[tuple[str, bytes]]:
         ("result.account_created", "account_revision"): 1,
         ("result.authenticated", "account_session_generation"): 1,
         ("result.committed", "resulting_state_generation"): 1,
+        ("result.history_page", "snapshot_state_generation"): 1,
         ("result.session_registered", "session_revision"): 1,
         ("result.session_registered", "resulting_state_generation"): 1,
     }
@@ -547,6 +554,7 @@ def minimal_schema_vectors(registry: str) -> list[tuple[str, bytes]]:
             ("FederationClientTag", "key"): b"+a",
             ("FederationMessageTarget", "value"): bytes(16),
             ("FederationDeliveredMessage", "body"): b"x",
+            ("FederationHistoryMessage", "body"): b"x",
             ("FederationNickname", "value"): b"a",
             ("FederationParameter", "value"): b"a",
             ("FederationReply", "command"): b"FAIL",
@@ -620,7 +628,9 @@ def minimal_schema_vectors(registry: str) -> list[tuple[str, bytes]]:
                 "FederationAccountProjection",
             }:
                 return account_id
-            if (schema_name, field_name) == ("result.reply_page", "snapshot_token"):
+            if field_name == "snapshot_token" and schema_name in {
+                "result.reply_page", "result.history_page"
+            }:
                 return bytes([1]) + bytes(length - 1)
             return bytes(length)
         opaque = re.fullmatch(r"opaque<(\d+)\.\.(\d+)>", specification)

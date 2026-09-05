@@ -55,6 +55,8 @@ pub(super) enum ConvertedRequest {
     Command(Box<CommandRequest>),
     /// A directory query, fresh or continued.
     Query(Box<QueryRequest>),
+    /// A history query, whose selection and storage read the history owner controls.
+    History(Box<HistoryRequest>),
     /// An operation this coordinator cannot answer (history has no store).
     Unavailable,
 }
@@ -64,6 +66,13 @@ pub(super) struct QueryRequest {
     pub(super) bound: BoundSession,
     pub(super) command: CanonicalCommand,
     pub(super) identity: super::query::QueryIdentity,
+    pub(super) cursor: Option<[u8; 32]>,
+}
+
+pub(super) struct HistoryRequest {
+    pub(super) bound: BoundSession,
+    pub(super) channel_id: ChannelInstanceId,
+    pub(super) query: agenc_ircd_domain::HistoryQuery,
     pub(super) cursor: Option<[u8; 32]>,
 }
 
@@ -81,28 +90,7 @@ pub(super) fn convert_operation(
     operation: &FederatedOperation,
 ) -> Result<ConvertedRequest, DomainError> {
     match operation {
-        FederatedOperation::SessionOpen {
-            auth_grant_id,
-            nickname,
-            realname,
-            capability_hash,
-            connection_nonce,
-            ..
-        } => {
-            let seed = session_seed(
-                context,
-                peer,
-                nickname,
-                realname,
-                *capability_hash,
-                *connection_nonce,
-            )
-            .map(Box::new)?;
-            Ok(match auth_grant_id {
-                Some(grant_id) => ConvertedRequest::SessionOpenWithGrant(seed, *grant_id),
-                None => ConvertedRequest::SessionOpen(seed),
-            })
-        }
+        FederatedOperation::SessionOpen { .. } => convert_open(context, peer, operation),
         FederatedOperation::SessionClose {
             session_id,
             reason_code,
@@ -129,15 +117,34 @@ pub(super) fn convert_operation(
                 envelope: bytes.as_slice().to_vec(),
             })
         }
-        FederatedOperation::HistoryQuery { .. } | FederatedOperation::AccountService { .. } => {
-            Ok(ConvertedRequest::Unavailable)
+        FederatedOperation::HistoryQuery {
+            session_id,
+            channel_id,
+            selector,
+            limit,
+            cursor,
+        } => {
+            if !context.history_enabled() {
+                return Ok(ConvertedRequest::Unavailable);
+            }
+            let (_, bound) = hosted_session(context.domain(), peer, *session_id)?;
+            let query = crate::federation::codec::history::query_of(selector, *limit)
+                .map_err(|_| DomainError::InvalidArgument)?;
+            Ok(ConvertedRequest::History(Box::new(HistoryRequest {
+                bound,
+                channel_id: *channel_id,
+                query,
+                cursor: *cursor,
+            })))
         }
+        FederatedOperation::AccountService { .. } => Ok(ConvertedRequest::Unavailable),
         _ => {
             let session_id = operation.session_id().ok_or(DomainError::InvalidArgument)?;
             let (user_id, bound) = hosted_session(context.domain(), peer, session_id)?;
             check_revisions(context.domain(), user_id, operation)?;
             let command = rebuild_command(context.domain(), operation)
-                .map_err(|_| DomainError::InvalidArgument)?;
+                .map_err(|_| DomainError::InvalidArgument)?
+                .resolve_history_default(context.history_default())?;
             let mutation = mutation_context(context, user_id, operation);
             Ok(ConvertedRequest::Command(Box::new(CommandRequest {
                 bound,
@@ -146,6 +153,36 @@ pub(super) fn convert_operation(
             })))
         }
     }
+}
+
+fn convert_open(
+    context: &mut StateCoreContext,
+    peer: ServerId,
+    operation: &FederatedOperation,
+) -> Result<ConvertedRequest, DomainError> {
+    let FederatedOperation::SessionOpen {
+        auth_grant_id,
+        nickname,
+        realname,
+        capability_hash,
+        connection_nonce,
+        ..
+    } = operation
+    else {
+        return Err(DomainError::InvalidArgument);
+    };
+    let seed = Box::new(session_seed(
+        context,
+        peer,
+        nickname,
+        realname,
+        *capability_hash,
+        *connection_nonce,
+    )?);
+    Ok(match auth_grant_id {
+        Some(grant_id) => ConvertedRequest::SessionOpenWithGrant(seed, *grant_id),
+        None => ConvertedRequest::SessionOpen(seed),
+    })
 }
 
 fn session_seed(
@@ -477,6 +514,11 @@ pub(super) fn rebuild_command(
             setting_kind,
             ..
         } => {
+            if *setting_kind == 5 {
+                return Ok(CanonicalCommand::channel(ChannelCommand::HistoryDefault(
+                    *channel_id,
+                )));
+            }
             let policy = history_of_value(u64::from(
                 setting_kind
                     .checked_sub(1)

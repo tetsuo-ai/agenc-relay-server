@@ -2377,7 +2377,13 @@ impl DomainState {
         if !channel.memberships.contains_key(&session.user_id) {
             return Err(DomainError::Forbidden);
         }
+        if channel.content_policy != ContentPolicy::Plaintext {
+            return Err(DomainError::EncryptedRoute);
+        }
         if channel.history == HistoryPolicy::Off {
+            return Err(DomainError::BadState);
+        }
+        if !history_setting_is_allowed(channel, channel.history) {
             return Err(DomainError::BadState);
         }
         Ok(())
@@ -4285,6 +4291,7 @@ impl DomainState {
             ChannelCommand::Register(_) => register_channel_roles(channel),
             ChannelCommand::Unregister(_) => unregister_channel_roles(channel),
             ChannelCommand::History(_, history) => channel.history = history,
+            ChannelCommand::HistoryDefault(_) => return,
         }
         channel.revision = revision;
         if session_projection_changes {
@@ -5431,7 +5438,8 @@ fn channel_command_id(command: ChannelCommand) -> ChannelInstanceId {
     match command {
         ChannelCommand::Register(channel_id)
         | ChannelCommand::Unregister(channel_id)
-        | ChannelCommand::History(channel_id, _) => channel_id,
+        | ChannelCommand::History(channel_id, _)
+        | ChannelCommand::HistoryDefault(channel_id) => channel_id,
     }
 }
 
@@ -5469,6 +5477,7 @@ fn validate_channel_setting(
                 return Err(DomainError::BadState);
             }
         }
+        ChannelCommand::HistoryDefault(_) => return Err(DomainError::BadState),
     }
     Ok(())
 }
@@ -7700,12 +7709,13 @@ mod tests {
             Err(DomainError::InvariantViolation)
         );
 
-        fixture
+        let channel = fixture
             .state
             .channels
             .get_mut(&fixture.channel_id)
-            .ok_or(DomainError::InvariantViolation)?
-            .history = HistoryPolicy::OneHour;
+            .ok_or(DomainError::InvariantViolation)?;
+        channel.history = HistoryPolicy::OneHour;
+        channel.persistence = PersistencePolicy::Registered;
         assert_eq!(
             fixture
                 .state
@@ -10319,6 +10329,64 @@ mod tests {
         assert_eq!(entry.setter(), Principal::Account(fixture.member_account));
         assert_ne!(entry.setter(), Principal::Account(fixture.owner_account));
         assert_eq!(entry.created_at(), UtcSecond::from_unix_seconds(20));
+        Ok(())
+    }
+    #[test]
+    fn history_authorization_rechecks_membership_and_every_channel_guard() -> Result<(), DomainError>
+    {
+        let mut fixture = fixture()?;
+        let id = fixture.channel_id;
+        assert_eq!(
+            fixture
+                .state
+                .authorize_history(&fixture.member, ChannelInstanceId::from_bytes([255; 16])),
+            Err(DomainError::NotFound)
+        );
+        assert_eq!(
+            fixture.state.authorize_history(&fixture.outsider, id),
+            Err(DomainError::Forbidden)
+        );
+        assert_eq!(
+            fixture.state.authorize_history(&fixture.member, id),
+            Err(DomainError::BadState)
+        );
+        for variant in 0..5 {
+            let channel = fixture
+                .state
+                .channels
+                .get_mut(&id)
+                .ok_or(DomainError::NotFound)?;
+            channel.history = HistoryPolicy::OneHour;
+            channel.content_policy = if variant == 0 {
+                ContentPolicy::E2eeBound
+            } else {
+                ContentPolicy::Plaintext
+            };
+            channel.visibility = if variant == 1 {
+                Visibility::Secret
+            } else {
+                Visibility::Listed
+            };
+            channel.persistence = if variant == 2 {
+                PersistencePolicy::Ephemeral
+            } else {
+                PersistencePolicy::Registered
+            };
+            channel.scope = if variant == 3 {
+                crate::ChannelScope::Local
+            } else {
+                crate::ChannelScope::Global
+            };
+            let expected = match variant {
+                0 => Err(DomainError::EncryptedRoute),
+                1..=3 => Err(DomainError::BadState),
+                _ => Ok(()),
+            };
+            assert_eq!(
+                fixture.state.authorize_history(&fixture.member, id),
+                expected
+            );
+        }
         Ok(())
     }
 }

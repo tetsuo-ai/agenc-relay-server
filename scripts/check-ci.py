@@ -28,6 +28,7 @@ GATE_PATHS = (
     "scripts/check-stage-six.sh",
     "scripts/check-stage-seven.sh",
     "scripts/check-stage-eight.sh",
+    "scripts/check-stage-nine.sh",
 )
 MANIFEST_PATH = "conformance/gates.toml"
 REQUIRED_WORKFLOW_SNIPPETS = (
@@ -46,8 +47,8 @@ REQUIRED_WORKFLOW_SNIPPETS = (
     "sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL",
 )
 REQUIRED_GATE_STEP = (
-    "      - name: Run Stage 08 implementation checks\n"
-    "        run: bash scripts/check-stage-eight.sh"
+    "      - name: Run Stage 09 implementation checks\n"
+    "        run: bash scripts/check-stage-nine.sh"
 )
 REQUIRED_CHECKOUT_STEP = (
     "      - name: Check out the exact source revision\n"
@@ -287,9 +288,10 @@ def validate_manifest(manifest: dict[str, object]) -> None:
         "stage-six-implementation",
         "stage-seven-implementation",
         "stage-eight-implementation",
+        "stage-nine-implementation",
     }:
         raise CiError(
-            "gate manifest must define Stage 00 through Stage 08 implementation checks"
+            "gate manifest must define Stage 00 through Stage 09 implementation checks"
         )
     stage_zero = gates.get("stage-zero-implementation")
     stage_one = gates.get("stage-one-implementation")
@@ -300,6 +302,7 @@ def validate_manifest(manifest: dict[str, object]) -> None:
     stage_six = gates.get("stage-six-implementation")
     stage_seven = gates.get("stage-seven-implementation")
     stage_eight = gates.get("stage-eight-implementation")
+    stage_nine = gates.get("stage-nine-implementation")
     if not isinstance(stage_zero, dict) or set(stage_zero) != {"command"}:
         raise CiError("stage-zero implementation checks have invalid fields")
     if not isinstance(stage_one, dict) or set(stage_one) != {"includes", "command"}:
@@ -334,6 +337,7 @@ def validate_manifest(manifest: dict[str, object]) -> None:
         raise CiError("stage-eight implementation checks have invalid fields")
     if stage_eight.get("includes") != ["stage-seven-implementation"]:
         raise CiError("stage-eight implementation checks must include stage-seven checks")
+    validate_stage_nine(stage_nine)
     commands = stage_zero.get("command")
     if not isinstance(commands, list):
         raise CiError("stage-zero commands must be an array")
@@ -461,6 +465,28 @@ def validate_manifest(manifest: dict[str, object]) -> None:
         raise CiError("stage-eight implementation command sequence differs from the reviewed checks")
 
 
+REQUIRED_STAGE_NINE = (
+    ("python3", "scripts/requirements.py", "check-stage-nine"),
+    ("python3", "scripts/check-stage-nine.py", "check"),
+    ("python3", "scripts/check-stage-nine.py", "self-test"),
+    ("bash", "scripts/check-stage-nine-matrix.sh"),
+    ("bash", "scripts/run-stage-nine-fuzz.sh"),
+    ("bash", "scripts/run-stage-nine-history-fuzz.sh"),
+)
+
+
+def validate_stage_nine(stage: object) -> None:
+    if not isinstance(stage, dict) or set(stage) != {"includes", "command"}:
+        raise CiError("stage-nine implementation checks have invalid fields")
+    if stage["includes"] != ["stage-eight-implementation"]:
+        raise CiError("stage-nine must include every inherited stage-eight check")
+    commands = stage["command"]
+    if not isinstance(commands, list) or any(not isinstance(item, dict) or set(item) != {"argv"} for item in commands):
+        raise CiError("stage-nine commands must contain only argv")
+    if [item["argv"] for item in commands] != [list(argv) for argv in REQUIRED_STAGE_NINE]:
+        raise CiError("stage-nine command sequence differs from the reviewed checks")
+
+
 def load_manifest_text(text: str) -> dict[str, object]:
     """Parse one TOML fixture with a stable error."""
     try:
@@ -531,12 +557,12 @@ def self_test(root: Path) -> int:
     writable = workflow.replace("contents: read", "contents: write", 1)
     expect_rejection("write permission", lambda: validate_workflow(writable), "missing required")
     cases += 1
-    weakened = workflow.replace("run: bash scripts/check-stage-eight.sh", "continue-on-error: true\n        run: bash scripts/check-stage-eight.sh", 1)
+    weakened = workflow.replace("run: bash scripts/check-stage-nine.sh", "continue-on-error: true\n        run: bash scripts/check-stage-nine.sh", 1)
     expect_rejection("continue on error", lambda: validate_workflow(weakened), "continue-on-error")
     cases += 1
     commented = workflow.replace(
-        "        run: bash scripts/check-stage-eight.sh",
-        "        # run: bash scripts/check-stage-eight.sh",
+        "        run: bash scripts/check-stage-nine.sh",
+        "        # run: bash scripts/check-stage-nine.sh",
         1,
     )
     expect_rejection(
@@ -557,8 +583,8 @@ def self_test(root: Path) -> int:
     )
     cases += 1
     conditional = workflow.replace(
-        "        run: bash scripts/check-stage-eight.sh",
-        "        if: false\n        run: bash scripts/check-stage-eight.sh",
+        "        run: bash scripts/check-stage-nine.sh",
+        "        if: false\n        run: bash scripts/check-stage-nine.sh",
         1,
     )
     expect_rejection(

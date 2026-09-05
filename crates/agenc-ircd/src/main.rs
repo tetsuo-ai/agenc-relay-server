@@ -2,6 +2,7 @@
 
 //! AgenC daemon and stopped-daemon command entry point.
 
+mod migration;
 mod options;
 
 use std::ffi::OsString;
@@ -35,7 +36,8 @@ const USAGE: &str = concat!(
     "  init --config <file> --profile <public|onion|dual> [options]\n",
     "  print-onboarding --config <file>\n",
     "  account-invite create --descriptor <file> --signing-key-file <file> --expires-in <seconds>\n",
-    "  storage restore --config <file> --backup <file> [restore options]",
+    "  storage restore --config <file> --backup <file> [restore options]\n",
+    "  storage migrate --config <file> --target-schema-generation 2 --output-state-directory <new-directory> [--resume]",
 );
 const RESTORE_USAGE: &str = "usage: agenc-ircd storage restore --config <file> --backup <file> \
 --source-master-key-file <file> --source-rollback-guard-key-file <file> \
@@ -304,6 +306,13 @@ fn account_invite(arguments: &[OsString]) -> Result<(), CliFailure> {
 }
 
 fn storage(arguments: &[OsString]) -> Result<(), CliFailure> {
+    if arguments.first().and_then(|value| value.to_str()) == Some("migrate") {
+        return migration::run(
+            arguments
+                .get(1..)
+                .ok_or_else(|| CliFailure::usage(migration::USAGE))?,
+        );
+    }
     if arguments.first().and_then(|value| value.to_str()) != Some("restore") {
         return Err(CliFailure::usage(RESTORE_USAGE));
     }

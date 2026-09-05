@@ -1,0 +1,9 @@
+GET /irc HTTP/1.1
+Host: chat.example
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+Sec-WebSocket-Version: 13
+Sec-WebSocket-Protocol: text.ircv3.net
+Origin: https://chat.example
+

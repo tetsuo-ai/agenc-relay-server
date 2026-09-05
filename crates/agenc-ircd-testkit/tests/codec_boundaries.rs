@@ -20,6 +20,9 @@ fn decode(schema: &str, bytes: &[u8]) -> Result<SchemaObject, CodecError> {
 #[test]
 fn every_vector_rejects_every_truncation_and_trailing_byte() -> Result<(), Box<dyn Error>> {
     for vector in parse_reference_vectors(VECTORS)? {
+        decode(vector.schema(), vector.bytes()).map_err(|error| {
+            format!("{} has an invalid golden vector: {error}", vector.schema())
+        })?;
         for length in 0..vector.bytes().len() {
             let truncated = vector
                 .bytes()

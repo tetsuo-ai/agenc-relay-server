@@ -193,19 +193,26 @@ fn listener_union(config: &Config, sink: &mut IssueSink) {
         if let Err(error) = max_connections_bound(config, listener) {
             sink.push(stage, key("max_connections"), error);
         }
-        if listener.enabled && listener.purpose == ListenerPurpose::ClientWss {
-            sink.push(stage, key("enabled"), ConfigError::DeferredTransport);
-        }
-        if let Some(wss) = &listener.wss
-            && wss.allowed_origins.is_empty()
-            && !wss.allow_missing_origin
-        {
-            sink.push(stage, key("allowed_origins"), ConfigError::InvalidValue);
-        }
+        websocket_listener_policy(listener, index_u16(index), sink);
     }
     ocsp_staple_policy(config, sink);
     listener_key_reuse(config, sink);
     listener_counts(config, sink);
+}
+
+fn websocket_listener_policy(listener: &ListenerConfig, index: u16, sink: &mut IssueSink) {
+    let stage = ValidationStage::ListenerUnion;
+    let key = |field| SchemaKey::indexed("listeners.endpoint", index, field);
+    if listener.enabled && listener.purpose == ListenerPurpose::ClientWss && !cfg!(feature = "wss")
+    {
+        sink.push(stage, key("enabled"), ConfigError::DeferredTransport);
+    }
+    if let Some(wss) = &listener.wss
+        && wss.allowed_origins.is_empty()
+        && !wss.allow_missing_origin
+    {
+        sink.push(stage, key("allowed_origins"), ConfigError::InvalidValue);
+    }
 }
 
 /// Required public-DNS stapling is backed by one prepared response per
@@ -215,11 +222,13 @@ fn ocsp_staple_policy(config: &Config, sink: &mut IssueSink) {
         return;
     }
     for (index, listener) in config.listeners.iter().enumerate() {
-        if listener.purpose == ListenerPurpose::ClientTls
-            && listener
-                .tls
-                .as_ref()
-                .is_none_or(|tls| tls.ocsp_staple_file.is_none())
+        if matches!(
+            listener.purpose,
+            ListenerPurpose::ClientTls | ListenerPurpose::ClientWss
+        ) && listener
+            .tls
+            .as_ref()
+            .is_none_or(|tls| tls.ocsp_staple_file.is_none())
         {
             sink.push(
                 ValidationStage::ListenerUnion,

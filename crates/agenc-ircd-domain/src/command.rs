@@ -563,6 +563,8 @@ pub enum ChannelCommand {
     Unregister(ChannelInstanceId),
     /// Set the closed optional plaintext-history policy.
     History(ChannelInstanceId, HistoryPolicy),
+    /// Resolve `ON` against the authoritative coordinator configuration before planning.
+    HistoryDefault(ChannelInstanceId),
 }
 
 /// Presence and monitor command families.
@@ -669,7 +671,7 @@ pub(crate) enum CanonicalCommandData {
     /// Change owner-controlled channel policy.
     Channel(ChannelCommand),
     /// Query optional channel history at a previously validated selector.
-    Chathistory(ChannelInstanceId, u8),
+    Chathistory(ChannelInstanceId, crate::HistoryQuery),
 }
 
 /// A borrowed, read-only view of one validated canonical command.
@@ -717,7 +719,7 @@ pub enum CanonicalCommandView<'a> {
     /// Change owner-controlled channel state.
     Channel(ChannelCommand),
     /// Read bounded channel history.
-    Chathistory(ChannelInstanceId, u8),
+    Chathistory(ChannelInstanceId, crate::HistoryQuery),
 }
 
 impl CanonicalCommand {
@@ -924,7 +926,29 @@ impl CanonicalCommand {
         if count == 0 || count > MAX_CHATHISTORY_RESULTS {
             return Err(DomainError::LimitExceeded);
         }
-        Ok(Self(CanonicalCommandData::Chathistory(channel_id, count)))
+        match crate::HistoryQuery::new(crate::HistorySelector::Latest(None), count as u16) {
+            Ok(query) => Ok(Self::history_query(channel_id, query)),
+            Err(_) => Err(DomainError::LimitExceeded),
+        }
+    }
+
+    /// Creates a history command without discarding its validated selector.
+    #[must_use]
+    pub const fn history_query(channel_id: ChannelInstanceId, query: crate::HistoryQuery) -> Self {
+        Self(CanonicalCommandData::Chathistory(channel_id, query))
+    }
+
+    /// Resolves `CHANCTL HISTORY ON` using the authoritative configured policy.
+    pub fn resolve_history_default(self, default: HistoryPolicy) -> Result<Self, DomainError> {
+        match self.0 {
+            CanonicalCommandData::Channel(ChannelCommand::HistoryDefault(channel_id)) => {
+                if default == HistoryPolicy::Off {
+                    return Err(DomainError::BadState);
+                }
+                Ok(Self::channel(ChannelCommand::History(channel_id, default)))
+            }
+            command => Ok(Self(command)),
+        }
     }
 
     /// Returns the closed command family used for rate and policy decisions.

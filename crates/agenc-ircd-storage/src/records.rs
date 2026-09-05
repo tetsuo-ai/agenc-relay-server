@@ -718,6 +718,17 @@ pub fn validate_record_plaintext(
                 Err(StorageError::StaleState)
             }
         }
+        TableId::RequestResult => {
+            let value = PersistentRecordValue::decode(table, plaintext)?;
+            if matches!(value.record_kind(), 5 | 6) {
+                crate::history_records::validate_result_binding(stored_key, &value)?;
+            }
+            Ok(())
+        }
+        TableId::History => {
+            let value = PersistentRecordValue::decode(table, plaintext)?;
+            crate::history_records::validate_binding(stored_key, &value)
+        }
         _ => PersistentRecordValue::decode(table, plaintext).map(|_| ()),
     }
 }
@@ -798,6 +809,13 @@ fn validate_record_counters(
 
 fn validate_domain_body(table: TableId, record_kind: u16, body: &[u8]) -> Result<(), StorageError> {
     match (table, record_kind) {
+        (TableId::History, kind) => crate::history_records::validate_body(kind, body),
+        (TableId::RequestResult, 5) => {
+            crate::history_records::HistoryCoordinatorResultRecord::decode(body).map(|_| ())
+        }
+        (TableId::RequestResult, 6) => {
+            crate::history_records::HistoryEdgeRequestRecord::decode(body).map(|_| ())
+        }
         (TableId::NicknameReservation, 1) => std::str::from_utf8(body)
             .map_err(|_| StorageError::InvalidEncoding)
             .and_then(|name| Nickname::parse(name).map_err(|_| StorageError::InvalidEncoding))
@@ -852,10 +870,10 @@ const fn record_kind_is_valid(table: TableId, kind: u16) -> bool {
         TableId::Sanction => 4,
         TableId::FederationPeer => 2,
         TableId::FederationOrigin => 2,
-        TableId::RequestResult => 4,
+        TableId::RequestResult => 6,
         TableId::EdgeOutbox => 3,
         TableId::EdgeProjection => 3,
-        TableId::History => 1,
+        TableId::History => 2,
         TableId::Audit => 1,
         TableId::AuditCheckpoint => 1,
         TableId::E2eeObject => 1,
@@ -906,7 +924,7 @@ mod tests {
         };
 
         let exact = PersistentRecordValue::new(
-            TableId::History,
+            TableId::AuthTransaction,
             1,
             1,
             0,
@@ -922,7 +940,7 @@ mod tests {
         );
         assert_eq!(
             PersistentRecordValue::new(
-                TableId::History,
+                TableId::AuthTransaction,
                 1,
                 1,
                 0,

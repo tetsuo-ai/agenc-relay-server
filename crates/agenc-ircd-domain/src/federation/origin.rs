@@ -266,6 +266,16 @@ impl OriginTable {
         self.request_ids.insert(request_id, key);
     }
 
+    /// Releases the identity of an exact replay row after its durable retention deletion.
+    /// Origin generations and sequence floors remain unchanged.
+    pub fn retire_request_id(&mut self, request_id: RequestId, key: OperationKey) -> bool {
+        if self.request_ids.get(&request_id) != Some(&key) {
+            return false;
+        }
+        self.request_ids.remove(&request_id);
+        true
+    }
+
     /// Accepts FORIGIN RESET, fencing execution until READY.
     ///
     /// A new incarnation permanently fences every origin of the previous one.

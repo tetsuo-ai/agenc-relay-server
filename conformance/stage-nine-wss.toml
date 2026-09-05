@@ -1,0 +1,112 @@
+schema_version = 1
+stage = 9
+tasks = ["S09-001", "S09-002"]
+feature = "wss"
+default_enabled = false
+crypto_provider = "aws-lc-rs=1.18.0"
+crypto_scope = "RFC6455 public nonce accept digest only"
+http_stack_dependency = false
+
+[upgrade]
+tls = "1.3"
+alpn = "http/1.1"
+method = "GET"
+path = "/irc"
+http_version = "1.1"
+websocket_version = 13
+subprotocols = ["text.ircv3.net", "binary.ircv3.net"]
+selection = "first supported in client order"
+origin = "exact validated allowlist; explicit non-browser exception for missing Origin"
+extensions = "offers ignored; none negotiated"
+request_line_bytes = 2048
+header_line_bytes = 4096
+header_fields = 64
+header_bytes = 16384
+upgrade_seconds = 5
+registration_seconds_from_tls_completion = 30
+
+[framing]
+message_bytes = 8701
+utf8_for_both_subprotocols = true
+client_mask_required = true
+control_bytes = 125
+protocol_close = 1002
+utf8_close = 1007
+size_close = 1009
+write_stall_seconds = 30
+
+[memory]
+client_base_bytes = 65536
+tls_setup_increment_bytes = 262144
+websocket_setup_increment_bytes = 65536
+steady_websocket_bytes = 61440
+writer_queue = "additional measured existing queue allocation"
+release = "setup allocations drop before setup permits; steady permits outlive buffers"
+
+[fixture]
+path = "test-data/vectors/stage-nine-wss.vectors"
+test_file = "crates/agenc-ircd-client-wire/tests/stage_nine_wss.rs"
+test = "public_upgrade_fixture_round_trips_exact_bytes"
+
+[matrix]
+driver = "scripts/check-stage-nine-matrix.sh"
+builds = ["none", "wss", "history", "wss,history"]
+runtime_configurations_per_build = 4
+admitted = 9
+refused_before_storage_writes = 7
+test_file = "crates/agenc-ircd/tests/stage_six_daemon/profile_matrix.rs"
+test = "optional_profile_configuration_matrix_resolves_before_storage_writes"
+
+[fuzz]
+driver = "scripts/run-stage-nine-fuzz.sh"
+targets = ["wss_upgrade", "wss_frame"]
+seed = 20260904
+runs_per_target = 10000
+max_len = 18436
+timeout_seconds = 2
+rss_limit_mb = 512
+release_campaign = "S10-004"
+
+[equivalence]
+transports = ["TLS IRC", "text.ircv3.net", "binary.ircv3.net"]
+fixture = "crates/agenc-ircd/tests/stage_six_daemon/wss/equivalence/mod.rs"
+comparison = "same ordered application scenario; normalized byte transcripts and authenticated stored state"
+authentication = "real account creation and OPAQUE login; exact carrier bounds and authenticated decoded account binding"
+privacy = "listed and secret channels, absent-target equivalence, hidden WHOIS membership and address, denied topic mutation"
+overload = "one-token expensive-query quota, first admission, exact refusal, unchanged channel state"
+close = "QUIT and forged client prefix; EOF, peer notification, membership cleanup, no forged message delivery"
+normalization = "validated fresh account, message, channel, user and cloak identities; authoritative/elapsed times; fresh-ID traversal order in 353/319 membership lists"
+state = "canonical complete account and channel bodies retain policy, revisions, session generation, modes, roles, topic, lists and invites; no live sessions"
+scope = "bounded live-daemon interoperability acceptance; inherited resource tests cover memory and writer pressure separately"
+
+[[test]]
+file = "crates/agenc-ircd-runtime/src/wss/stream/tests/mod.rs"
+names = ["both_subprotocols_preserve_irc_line_boundaries_and_release_buffers", "fragmented_utf8_and_interleaved_ping_use_one_ordered_writer", "malformed_utf8_masking_and_size_send_exact_close_codes", "peer_close_finishes_the_control_exchange_before_eof", "framing_refusal_and_cancellation_return_every_permit", "a_control_flush_stall_obeys_its_deadline_after_bytes_are_written"]
+
+[[test]]
+file = "crates/agenc-ircd-runtime/src/wss/upgrade/tests/mod.rs"
+names = ["origin_is_checked_at_completed_upgrade_and_cannot_escape_exact_matching", "changed_origin_policy_applies_before_the_last_header_arrives", "upgrade_budget_starts_at_tls_completion_and_cancellation_releases_memory", "steady_memory_refusal_never_acknowledges_the_upgrade"]
+
+[[test]]
+file = "crates/agenc-ircd-runtime/src/registration.rs"
+names = ["registration_budget_includes_upgrade_and_admission_delay"]
+
+[[test]]
+file = "crates/agenc-ircd-runtime/src/connection/queue.rs"
+names = ["tls_registration_start_is_immutable_and_tcp_elapsed_stays_zero"]
+
+[[test]]
+file = "crates/agenc-ircd-runtime/src/listener/mod.rs"
+names = ["websocket_setup_is_reserved_before_spawn_and_released_after_upgrade"]
+
+[[test]]
+file = "crates/agenc-ircd/tests/stage_six_daemon/wss.rs"
+names = ["wss_origin_reload_and_alpn_are_enforced_by_the_live_listener"]
+
+[[test]]
+file = "crates/agenc-ircd/tests/stage_six_daemon/wss/equivalence/mod.rs"
+names = ["tcp_text_and_binary_wss_have_identical_transcripts_and_durable_state"]
+
+[[test]]
+file = "crates/agenc-ircd/tests/stage_six_daemon/wss/equivalence/transcript.rs"
+names = ["membership_normalization_retains_roles_duplicates_and_nonmembership_bytes"]

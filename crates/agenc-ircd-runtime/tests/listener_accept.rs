@@ -1022,8 +1022,12 @@ async fn start_rejects_unsupported_and_mismatched_specs() -> TestResult {
         (
             ListenerPurpose::ClientWss,
             ListenerSource::Tcp(SocketAddr::from(([127, 0, 0, 1], 0))),
-            Some(Arc::clone(&tls)),
-            ListenerError::UnsupportedPurpose,
+            None,
+            if cfg!(feature = "wss") {
+                ListenerError::MissingTls
+            } else {
+                ListenerError::UnsupportedPurpose
+            },
         ),
         (
             ListenerPurpose::ClientTls,
@@ -1100,12 +1104,16 @@ async fn listener_set_cleans_only_unix_paths_it_still_owns() -> TestResult {
         purpose: ListenerPurpose::ClientWss,
         source: ListenerSource::Tcp(SocketAddr::from(([127, 0, 0, 1], 0))),
         max_connections: 1,
-        tls: Some(Arc::clone(&tls)),
+        tls: None,
         local_admin: None,
     };
     assert_eq!(
         start(vec![first, unsupported], HarnessOptions::default()).err(),
-        Some(ListenerError::UnsupportedPurpose)
+        Some(if cfg!(feature = "wss") {
+            ListenerError::MissingTls
+        } else {
+            ListenerError::UnsupportedPurpose
+        })
     );
     assert!(
         std::fs::symlink_metadata(&failed_path).is_err(),

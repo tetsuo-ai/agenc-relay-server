@@ -68,7 +68,8 @@ pub(super) fn receive(
         .crypto
         .as_ref()
         .is_some_and(|pending| pending.link == link)
-        || coordinator.pending.is_some();
+        || coordinator.pending.is_some()
+        || coordinator.history.busy();
     if busy {
         let state = coordinator
             .peers
@@ -93,7 +94,7 @@ pub(super) fn drain_queued(
     coordinator: &mut FederationCoordinator,
     context: &mut StateCoreContext,
 ) {
-    if coordinator.pending.is_some() {
+    if coordinator.pending.is_some() || coordinator.history.busy() {
         return;
     }
     let next = coordinator.peers.iter_mut().find_map(|(peer, state)| {
@@ -229,7 +230,7 @@ fn classify(
     }
 }
 
-fn check_descriptor(
+pub(super) fn check_descriptor(
     coordinator: &FederationCoordinator,
     peer: ServerId,
     descriptor: &OperationDescriptor,
@@ -267,6 +268,9 @@ fn replay(
     let read_id = context
         .submit_storage_read(ReadPlan::exact(TableId::RequestResult, key))
         .map_err(|_| Violation::Ceiling)?;
+    if header.opcode == agenc_ircd_types::FederationOpcode::HistoryQuery {
+        coordinator.history.metadata_read = Some(read_id);
+    }
     coordinator
         .replays
         .insert(read_id, (link, peer, descriptor));
@@ -284,6 +288,9 @@ pub(super) fn replay_completed(
     let Some((link, peer, descriptor)) = coordinator.replays.remove(&message.read_id) else {
         return false;
     };
+    if coordinator.history.metadata_read == Some(message.read_id) {
+        coordinator.history.metadata_read = None;
+    }
     let result = message.result.ok().and_then(|result| {
         let record = result.records.into_iter().next()?;
         let opened = context
@@ -294,12 +301,31 @@ pub(super) fn replay_completed(
             opened.expose_for_storage_codec(),
         )
         .ok()?;
-        CoordinatorResultRecord::decode(value.body()).ok()
+        Some(value)
     });
     match result {
-        Some(record) => {
-            coordinator.send_result(context, link, peer, descriptor, &record.result_object)
+        Some(value)
+            if value.record_kind()
+                == agenc_ircd_storage::history_records::HISTORY_COORDINATOR_RESULT_KIND =>
+        {
+            let replay =
+                agenc_ircd_storage::history_records::HistoryCoordinatorResultRecord::decode(
+                    value.body(),
+                )
+                .map_err(|_| Violation::Codec)
+                .and_then(|record| {
+                    super::history::restore(coordinator, context, link, peer, descriptor, record)
+                });
+            if let Err(error) = replay {
+                coordinator.fail_link(context, link, peer, error);
+            }
         }
+        Some(value) => match CoordinatorResultRecord::decode(value.body()) {
+            Ok(record) => {
+                coordinator.send_result(context, link, peer, descriptor, &record.result_object)
+            }
+            Err(_) => coordinator.fail_link(context, link, peer, Violation::Origin),
+        },
         None => coordinator.fail_link(context, link, peer, Violation::Origin),
     }
     true
@@ -347,6 +373,10 @@ fn run_operation(
         ConvertedRequest::Query(query) => {
             fresh.bound = Some(query.bound);
             run_query(coordinator, context, link, peer, fresh, *query)
+        }
+        ConvertedRequest::History(query) => {
+            fresh.bound = Some(query.bound);
+            super::history::begin(coordinator, context, link, peer, fresh, *query, operation)
         }
         ConvertedRequest::Unavailable => {
             let arm = ResultArm::Failed {
@@ -1013,7 +1043,7 @@ fn fresh_event_id(context: &mut StateCoreContext) -> Result<EventId, Violation> 
 }
 
 /// Builds the complete `FederationResult` bytes for one request.
-fn encode_result(
+pub(super) fn encode_result(
     coordinator: &FederationCoordinator,
     fresh: &FreshRequest,
     arm: &ResultArm,

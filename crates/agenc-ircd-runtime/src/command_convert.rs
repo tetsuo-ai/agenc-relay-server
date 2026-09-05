@@ -1,6 +1,8 @@
 //! Conversion from the state-independent client-wire proof to the pure
 //! domain command union.
 
+mod history;
+
 use agenc_ircd_admin::decode_fixed_base64url;
 use agenc_ircd_client_wire::{
     AccountControlCommand, ChannelControlCommand, LocalInformationCommand, MonitorCommand,
@@ -569,6 +571,9 @@ fn channel_control(
     let command = match operation {
         ChannelControlCommand::Register => ChannelCommand::Register(channel_id),
         ChannelControlCommand::Unregister => ChannelCommand::Unregister(channel_id),
+        ChannelControlCommand::History if parameter(message, 2)? == "ON" => {
+            ChannelCommand::HistoryDefault(channel_id)
+        }
         ChannelControlCommand::History => ChannelCommand::History(
             channel_id,
             match parameter(message, 2)? {
@@ -591,13 +596,10 @@ fn chathistory(
     let channel_id = channels
         .channel_id_of(&channel)
         .ok_or(RuntimeError::InvalidValue)?;
-    let limit = message
-        .middle()
-        .last()
-        .ok_or(RuntimeError::InvalidValue)?
-        .parse()
-        .map_err(|_| RuntimeError::InvalidValue)?;
-    CanonicalCommand::chathistory(channel_id, limit).map_err(closed)
+    Ok(CanonicalCommand::history_query(
+        channel_id,
+        history::query(message)?,
+    ))
 }
 
 fn information_query(query: LocalInformationCommand) -> InformationQuery {

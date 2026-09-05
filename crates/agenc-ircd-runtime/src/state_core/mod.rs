@@ -10,8 +10,10 @@
 //! composition plug in without touching the loop or the durable path.
 
 pub(crate) mod admin;
+mod admin_history;
 pub mod durable;
 pub mod fanout;
+pub(crate) mod history;
 pub mod inbox;
 mod pending;
 pub mod projector;
@@ -455,6 +457,7 @@ struct Staging {
     account_service_writes: Vec<AccountServiceDurableWrite>,
     admission: DurableAdmission,
     projection: Option<PendingProjection>,
+    history: Option<history::HistoryMutation>,
 }
 
 /// Why a durable plan could not be staged; nothing changed.
@@ -517,6 +520,7 @@ pub enum BatchStep {
 /// Everything the loop and the router share.
 pub struct StateCoreContext {
     domain: DomainState,
+    history: Option<history::HistoryState>,
     sessions: SessionTable,
     buckets: BucketTable,
     prefixes: PrefixRegistry,
@@ -871,6 +875,12 @@ impl StateCoreContext {
         std::mem::take(&mut self.outbound_events)
     }
 
+    fn clear_projection_intent(&mut self) {
+        self.next_mutation = MutationContext::default();
+        self.next_correlation = None;
+        self.next_cross_profile.clear();
+    }
+
     fn project_next(
         &mut self,
         plan: &MutationPlan,
@@ -971,6 +981,7 @@ impl StateCoreContext {
                     account_service_writes: writes,
                     admission: DurableAdmission::Ordinary,
                     projection: Some(projection),
+                    history: None,
                 })
             });
         if !matches!(staged, Some(Ok(_))) {
@@ -1054,13 +1065,47 @@ impl StateCoreContext {
         account_service_writes: Vec<AccountServiceDurableWrite>,
         admission: DurableAdmission,
     ) -> Result<StageAccepted, StageRefused> {
-        let Ok(account_service_writes) = account_service_writes
+        let Ok(mut account_service_writes) = account_service_writes
             .into_iter()
             .map(AccountServiceDurableWrite::revalidate)
             .collect::<Result<Vec<_>, _>>()
         else {
+            self.clear_projection_intent();
             self.complete_staged_origin(&mut origin, ResultClass::Error);
             return Err(StageRefused::Domain(DomainError::InvariantViolation));
+        };
+        let history = match self
+            .history
+            .as_ref()
+            .map(|history| {
+                history.prepare(
+                    &self.domain,
+                    &plan,
+                    &self.next_mutation,
+                    self.history_clock_safe(),
+                    self.head
+                        .state_generation
+                        .checked_add(1)
+                        .ok_or(RuntimeError::Overflow)?,
+                )
+            })
+            .transpose()
+        {
+            Ok(Some((writes, mutation))) => {
+                if mutation.is_some() && self.pending.is_some() {
+                    self.clear_projection_intent();
+                    self.complete_staged_origin(&mut origin, ResultClass::Busy);
+                    return Err(StageRefused::Busy);
+                }
+                account_service_writes.extend(writes);
+                mutation
+            }
+            Ok(None) => None,
+            Err(_) => {
+                self.clear_projection_intent();
+                self.complete_staged_origin(&mut origin, ResultClass::Rejected);
+                return Err(StageRefused::Domain(DomainError::ServerBusy));
+            }
         };
         let Ok(projected) = self.project_next(&plan, plan.resulting_revision().get()) else {
             self.complete_staged_origin(&mut origin, ResultClass::Error);
@@ -1082,6 +1127,7 @@ impl StateCoreContext {
             account_service_writes,
             admission,
             projection,
+            history,
         })
     }
 
@@ -1095,6 +1141,7 @@ impl StateCoreContext {
             account_service_writes,
             admission,
             projection,
+            history,
         } = staging;
         if self.quiescing && admission == DurableAdmission::Ordinary {
             self.complete_staged_origin(&mut origin, ResultClass::Busy);
@@ -1140,7 +1187,8 @@ impl StateCoreContext {
             response_count_increment,
             account_service_writes,
         )
-        .with_projection(projection);
+        .with_projection(projection)
+        .with_history(history);
         let now = self.now();
         match self.pending.take() {
             None => {
@@ -1206,7 +1254,7 @@ impl StateCoreContext {
         }
     }
 
-    fn reserve_query_fanout(
+    pub(crate) fn reserve_query_fanout(
         &mut self,
         request: &FanoutRequest,
         snapshot: QuerySnapshotPermit,
@@ -1225,7 +1273,7 @@ impl StateCoreContext {
         }
     }
 
-    fn commit_fanout(&mut self, reservation: FanoutReservation) -> FanoutCommitReport {
+    pub(crate) fn commit_fanout(&mut self, reservation: FanoutReservation) -> FanoutCommitReport {
         let report = reservation.commit();
         for generation in report.slow_consumer_generations() {
             self.sessions.mark_sink_gone(generation);
@@ -1345,6 +1393,9 @@ impl StateCoreContext {
         while let Some(mut staged) = plans.next() {
             let observation = staged.take_observation();
             let projection = staged.take_projection();
+            if staged.take_history().is_some() {
+                return Err(StateCoreExit::Corrupt(CorruptionCause::ApplyFailed));
+            }
             let (plan, fanout, _origin) = staged.into_parts();
             if self.apply_plan(plan).is_err() {
                 if let Some(observation) = observation {
@@ -1438,6 +1489,7 @@ impl StateCoreContext {
         while let Some(mut staged) = plans.next() {
             let observation = staged.take_observation();
             let projection = staged.take_projection();
+            let history = staged.take_history();
             let (plan, fanout, _origin) = staged.into_parts();
             if self.apply_plan(plan).is_err() {
                 if let Some(observation) = observation {
@@ -1445,6 +1497,13 @@ impl StateCoreContext {
                 }
                 self.complete_plan_observations(plans, ResultClass::Error);
                 return Err(StateCoreExit::Corrupt(CorruptionCause::ApplyFailed));
+            }
+            if let Some(mutation) = history {
+                self.history
+                    .as_mut()
+                    .ok_or(StateCoreExit::Corrupt(CorruptionCause::ApplyFailed))?
+                    .committed(mutation)
+                    .map_err(|_| StateCoreExit::Corrupt(CorruptionCause::ApplyFailed))?;
             }
             self.commit_fanout(fanout);
             self.commit_projection(projection);
@@ -1666,6 +1725,10 @@ pub struct StateCore {
     admin_receiver: mpsc::Receiver<AdminCoreRequest>,
     admin_open: bool,
     admin_pending: Option<PendingAdminCommit>,
+    history_purge_reply: Option<(
+        agenc_ircd_types::ChannelInstanceId,
+        tokio::sync::oneshot::Sender<AdminCoreResult>,
+    )>,
     federation_receiver: mpsc::Receiver<FederationInbound>,
     federation_open: bool,
     reload_receiver: mpsc::Receiver<ReloadCoreRequest>,
@@ -1689,12 +1752,14 @@ struct PendingAdminCommit {
     transaction_id: TransactionId,
     retained: RetainedProjection,
     mutation: Option<AdminMutation>,
+    history: Option<history::HistoryMutation>,
     reload_activation: Option<ReloadActivation>,
     reply: PendingAdminReply,
 }
 
 enum PendingAdminReply {
     Admin(tokio::sync::oneshot::Sender<AdminCoreResult>),
+    DeferredHistoryPurge,
     Reload {
         activation: ReloadActivation,
         result: AuditedReloadResult,
@@ -1708,6 +1773,7 @@ impl PendingAdminReply {
             Self::Admin(reply) => {
                 let _sent = reply.send(Ok(()));
             }
+            Self::DeferredHistoryPurge => {}
             Self::Reload { result, reply, .. } => {
                 let _sent = reply.send(Ok(result));
             }
@@ -1716,14 +1782,14 @@ impl PendingAdminReply {
 
     const fn reload_activation(&self) -> Option<ReloadActivation> {
         match self {
-            Self::Admin(_) => None,
+            Self::Admin(_) | Self::DeferredHistoryPurge => None,
             Self::Reload { activation, .. } => Some(*activation),
         }
     }
 
     const fn reload_result(&self) -> Option<AuditedReloadResult> {
         match self {
-            Self::Admin(_) => None,
+            Self::Admin(_) | Self::DeferredHistoryPurge => None,
             Self::Reload { result, .. } => Some(*result),
         }
     }
@@ -1974,6 +2040,7 @@ impl StateCore {
         let mut state = Self {
             context: StateCoreContext {
                 domain: inputs.reconstruction.domain,
+                history: None,
                 sessions: SessionTable::new(),
                 buckets: BucketTable::new(inputs.config.rate_limits, bucket_budget),
                 prefixes: PrefixRegistry::new(prefix_budget),
@@ -2008,6 +2075,7 @@ impl StateCore {
             admin_receiver,
             admin_open: false,
             admin_pending: None,
+            history_purge_reply: None,
             federation_receiver,
             federation_open: false,
             reload_receiver,
@@ -2574,6 +2642,7 @@ impl StateCore {
                     retained,
                     mutation: None,
                     reload_activation: Some(activation),
+                    history: None,
                     reply: PendingAdminReply::Reload {
                         activation,
                         result,
@@ -2807,11 +2876,18 @@ impl StateCore {
         let Ok(transaction_id) = next_transaction_id(self.context.entropy.as_mut()) else {
             return Some(StateCoreExit::Corrupt(CorruptionCause::ProjectionFailed));
         };
+        let (history_writes, history) = match self.prepare_admin_history(mutation, &event) {
+            Ok(prepared) => prepared,
+            Err(failure) => {
+                let _sent = reply.send(Err(failure));
+                return None;
+            }
+        };
         let projected = match &after_image {
             Some(after_image) => project_admin_mutation_event(
                 transaction_id,
                 &event,
-                after_image,
+                (after_image, &history_writes),
                 &self.context.index,
                 &self.context.keys,
                 self.context.head,
@@ -2841,6 +2917,7 @@ impl StateCore {
                     transaction_id,
                     retained,
                     mutation,
+                    history,
                     reload_activation: None,
                     reply: PendingAdminReply::Admin(reply),
                 });
@@ -2898,6 +2975,7 @@ impl StateCore {
                     retained,
                     mutation: None,
                     reload_activation: None,
+                    history: None,
                     reply: PendingAdminReply::Admin(reply),
                 });
                 None
@@ -2949,7 +3027,8 @@ impl StateCore {
         let target = match mutation {
             AdminMutation::SuspendAccount { account_id, .. }
             | AdminMutation::RestoreAccount(account_id) => AdminTarget::Account(account_id),
-            AdminMutation::QuarantineChannel(channel_id) => AdminTarget::Channel(channel_id),
+            AdminMutation::QuarantineChannel(channel_id)
+            | AdminMutation::PurgeChannelHistory(channel_id) => AdminTarget::Channel(channel_id),
         };
         if self.admin_target_revision(target)? != expected_revision {
             return Err(AdminCoreFailure::StaleRevision);
@@ -2973,6 +3052,9 @@ impl StateCore {
                 if self.context.domain.channel_is_quarantined(channel_id) {
                     return Err(AdminCoreFailure::InvalidTarget);
                 }
+            }
+            AdminMutation::PurgeChannelHistory(channel_id) => {
+                self.validate_history_purge(channel_id)?
             }
         }
         Ok(())
@@ -3010,13 +3092,16 @@ impl StateCore {
                 account.admin_suspension_expires_at = None;
                 Ok(AdminMutationAfterImage::Account(account))
             }
-            AdminMutation::QuarantineChannel(channel_id) => {
+            AdminMutation::QuarantineChannel(channel_id)
+            | AdminMutation::PurgeChannelHistory(channel_id) => {
                 let mut channel = self
                     .context
                     .domain
                     .durable_channel(channel_id)
                     .ok_or(AdminCoreFailure::InvalidTarget)?;
-                channel.admin_quarantined = true;
+                if matches!(mutation, AdminMutation::QuarantineChannel(_)) {
+                    channel.admin_quarantined = true;
+                }
                 channel.revision = revision;
                 Ok(AdminMutationAfterImage::Channel(channel))
             }
@@ -3066,6 +3151,9 @@ impl StateCore {
             }
             AdminMutation::QuarantineChannel(channel_id) => {
                 self.context.domain.admin_quarantine_channel(channel_id)?;
+            }
+            AdminMutation::PurgeChannelHistory(channel_id) => {
+                self.context.domain.admin_purge_history(channel_id)?;
             }
         }
         Ok(())
@@ -3195,9 +3283,11 @@ impl StateCore {
                             reply,
                         ))
                     }
-                    PendingAdminReply::Reload { .. } => CompletionStep::Ready(Some(
-                        StateCoreExit::Indeterminate(IndeterminateCause::StorageIndeterminate),
-                    )),
+                    PendingAdminReply::Reload { .. } | PendingAdminReply::DeferredHistoryPurge => {
+                        CompletionStep::Ready(Some(StateCoreExit::Indeterminate(
+                            IndeterminateCause::StorageIndeterminate,
+                        )))
+                    }
                 }
             }
             CommitOutcome::Indeterminate => CompletionStep::Ready(Some(
@@ -3225,6 +3315,14 @@ impl StateCore {
             self.apply_admin_mutation(mutation)
                 .map_err(|_| StateCoreExit::Corrupt(CorruptionCause::ApplyFailed))?;
         }
+        if let Some(history) = pending.history {
+            self.context
+                .history
+                .as_mut()
+                .ok_or(StateCoreExit::Corrupt(CorruptionCause::ApplyFailed))?
+                .committed(history)
+                .map_err(|_| StateCoreExit::Corrupt(CorruptionCause::ApplyFailed))?;
+        }
         if let Some(activation) = pending.reload_activation {
             let result = pending
                 .reply
@@ -3232,7 +3330,7 @@ impl StateCore {
                 .ok_or(StateCoreExit::Corrupt(CorruptionCause::ApplyFailed))?;
             self.mark_reload_outcome_committed(activation, result)?;
         }
-        Ok(pending.reply)
+        self.defer_history_purge_reply(pending.mutation, pending.reply)
     }
 
     fn mark_reload_outcome_committed(
@@ -3557,6 +3655,7 @@ impl StateCore {
             };
         }
         continuation.complete();
+        self.maintain_history();
         Ok(())
     }
 
@@ -3724,6 +3823,7 @@ impl StateCore {
                     }
                 },
                 _ = progress.tick() => {
+                    if !refresh_in_flight { self.maintain_history(); }
                     self.liveness.record_state_core(self.context.now());
                     if let Some(observer) = &self.context.observer {
                         let client_queues = self.context.sessions.queue_snapshot();

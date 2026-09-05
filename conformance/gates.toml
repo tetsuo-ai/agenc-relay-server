@@ -317,3 +317,24 @@ argv = ["bash", "scripts/run-stage-eight-fuzz.sh"]
 
 [[gate.stage-eight-implementation.command]]
 argv = ["bash", "scripts/run-stage-eight-load.sh"]
+
+[gate.stage-nine-implementation]
+includes = ["stage-eight-implementation"]
+
+[[gate.stage-nine-implementation.command]]
+argv = ["python3", "scripts/requirements.py", "check-stage-nine"]
+
+[[gate.stage-nine-implementation.command]]
+argv = ["python3", "scripts/check-stage-nine.py", "check"]
+
+[[gate.stage-nine-implementation.command]]
+argv = ["python3", "scripts/check-stage-nine.py", "self-test"]
+
+[[gate.stage-nine-implementation.command]]
+argv = ["bash", "scripts/check-stage-nine-matrix.sh"]
+
+[[gate.stage-nine-implementation.command]]
+argv = ["bash", "scripts/run-stage-nine-fuzz.sh"]
+
+[[gate.stage-nine-implementation.command]]
+argv = ["bash", "scripts/run-stage-nine-history-fuzz.sh"]

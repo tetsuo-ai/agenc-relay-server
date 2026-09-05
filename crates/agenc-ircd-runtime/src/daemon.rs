@@ -367,7 +367,7 @@ fn validate_profile(config: &Config) -> Result<(), DaemonError> {
             | ConfigListenerPurpose::AdminLocal
             | ConfigListenerPurpose::AdminTls => true,
             ConfigListenerPurpose::Federation => federated_coordinator,
-            ConfigListenerPurpose::ClientWss => false,
+            ConfigListenerPurpose::ClientWss => cfg!(feature = "wss"),
         };
         if !supported {
             return Err(DaemonError::UnsupportedProfile);
@@ -601,6 +601,12 @@ fn build_live_state(
             )?,
             commands,
         )?;
+        #[cfg(feature = "history")]
+        let router = if config.privacy.history_enabled {
+            router.with_history()?
+        } else {
+            router
+        };
         let e2ee = e2ee_setup(
             config,
             secrets.sequencer_private().map(SecretBytes32::expose),
@@ -612,9 +618,17 @@ fn build_live_state(
             storage.reconstruction.head,
         )?;
         let limits = operational_limits(config)?;
-        Ok((crypto_config, router, limits))
+        let history = crate::state_core::history::HistoryState::load(
+            config,
+            &storage.owner.port(),
+            &storage.keys,
+            &storage.reconstruction.domain,
+            &mut storage.reconstruction.index,
+            Arc::clone(&budget),
+        )?;
+        Ok((crypto_config, router, limits, history))
     })();
-    let (crypto_config, router, limits) = match prepared {
+    let (crypto_config, router, limits, history) = match prepared {
         Ok(prepared) => prepared,
         Err(error) => return Err(Box::new(BuildLiveStateFailure { error, storage })),
     };
@@ -683,6 +697,7 @@ fn build_live_state(
         storage_limit_writer: limit_writer,
     });
     let mut state = state;
+    state.install_history(history);
     if federation.is_some() && config.network.role == NodeRole::Coordinator {
         // The coordinator derives edge projections from every committed
         // plan; without the projector no FEVENT would ever be produced.
@@ -1455,6 +1470,7 @@ fn runtime_purpose(purpose: ConfigListenerPurpose) -> Result<ListenerPurpose, Da
         ConfigListenerPurpose::AdminLocal => Ok(ListenerPurpose::AdminLocal),
         ConfigListenerPurpose::AdminTls => Ok(ListenerPurpose::AdminTls),
         ConfigListenerPurpose::Federation => Ok(ListenerPurpose::Federation),
+        ConfigListenerPurpose::ClientWss if cfg!(feature = "wss") => Ok(ListenerPurpose::ClientWss),
         ConfigListenerPurpose::ClientWss => Err(DaemonError::UnsupportedProfile),
     }
 }
@@ -1755,7 +1771,11 @@ async fn build_listener_specs(
             let policy = TlsServerPolicy::new(
                 config.tls.group_policy,
                 config.tls.session_tickets,
-                config.tls.require_ocsp_staple && purpose == ListenerPurpose::ClientTls,
+                config.tls.require_ocsp_staple
+                    && matches!(
+                        purpose,
+                        ListenerPurpose::ClientTls | ListenerPurpose::ClientWss
+                    ),
             );
             let ocsp_staple = match files.ocsp_staple_file.clone() {
                 Some(path) => {
@@ -4263,7 +4283,10 @@ mod tests {
             runtime_purpose(ConfigListenerPurpose::Federation).ok(),
             Some(ListenerPurpose::Federation)
         );
-        assert!(runtime_purpose(ConfigListenerPurpose::ClientWss).is_err());
+        assert_eq!(
+            runtime_purpose(ConfigListenerPurpose::ClientWss).is_ok(),
+            cfg!(feature = "wss")
+        );
     }
 
     #[test]
@@ -4344,10 +4367,10 @@ mod tests {
                 .first_mut()
                 .ok_or(RuntimeError::InvalidValue)?
                 .purpose = purpose;
-            assert!(matches!(
-                validate_profile(&enabled),
-                Err(DaemonError::UnsupportedProfile)
-            ));
+            assert_eq!(
+                validate_profile(&enabled).is_ok(),
+                purpose == ConfigListenerPurpose::ClientWss && cfg!(feature = "wss")
+            );
 
             enabled
                 .listeners

@@ -724,6 +724,9 @@ fn is_optional_fixed(schema: &str, field: &str, maximum: usize) -> bool {
             | ("result.session_registered", "account_id", 24)
             | ("event.topic_changed", "message_id", 16)
             | ("result.reply_page", "next_cursor", 32)
+            | ("result.history_page", "next_cursor", 32)
+            | ("operation.history_query", "cursor", 32)
+            | ("FederationHistoryAuthorization", "account_id", 24)
     )
 }
 

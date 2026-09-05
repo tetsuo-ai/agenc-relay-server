@@ -72,8 +72,26 @@ pub const FHELLO_BYTES: u64 = 260;
 pub const FHELLO_TIMEOUT_SECONDS: u64 = 5;
 /// Frozen federation constant `fready_timeout_seconds`.
 pub const FREADY_TIMEOUT_SECONDS: u64 = 5;
+/// Frozen federation constant `history_channel_bytes_max`.
+pub const HISTORY_CHANNEL_BYTES_MAX: u64 = 67108864;
+/// Frozen federation constant `history_channels_max`.
+pub const HISTORY_CHANNELS_MAX: u64 = 4096;
+/// Frozen federation constant `history_deletion_batch_max`.
+pub const HISTORY_DELETION_BATCH_MAX: u64 = 1000;
+/// Frozen federation constant `history_index_bytes_max`.
+pub const HISTORY_INDEX_BYTES_MAX: u64 = 268435456;
+/// Frozen federation constant `history_messages_max`.
+pub const HISTORY_MESSAGES_MAX: u64 = 262144;
+/// Frozen federation constant `history_messages_per_channel_max`.
+pub const HISTORY_MESSAGES_PER_CHANNEL_MAX: u64 = 65536;
+/// Frozen federation constant `history_page_bytes_max`.
+pub const HISTORY_PAGE_BYTES_MAX: u64 = 65536;
+/// Frozen federation constant `history_queries_max`.
+pub const HISTORY_QUERIES_MAX: u64 = 256;
 /// Frozen federation constant `history_query_limit`.
 pub const HISTORY_QUERY_LIMIT: u64 = 100;
+/// Frozen federation constant `history_total_bytes_max`.
+pub const HISTORY_TOTAL_BYTES_MAX: u64 = 1073741824;
 /// Frozen federation constant `origin_default_retention_seconds`.
 pub const ORIGIN_DEFAULT_RETENTION_SECONDS: u64 = 86400;
 /// Frozen federation constant `origin_disconnect_grace_seconds`.
@@ -254,8 +272,44 @@ pub const CONSTANT_REGISTRY: &[ConstantDescriptor] = &[
         value: 5,
     },
     ConstantDescriptor {
+        name: "history_channel_bytes_max",
+        value: 67108864,
+    },
+    ConstantDescriptor {
+        name: "history_channels_max",
+        value: 4096,
+    },
+    ConstantDescriptor {
+        name: "history_deletion_batch_max",
+        value: 1000,
+    },
+    ConstantDescriptor {
+        name: "history_index_bytes_max",
+        value: 268435456,
+    },
+    ConstantDescriptor {
+        name: "history_messages_max",
+        value: 262144,
+    },
+    ConstantDescriptor {
+        name: "history_messages_per_channel_max",
+        value: 65536,
+    },
+    ConstantDescriptor {
+        name: "history_page_bytes_max",
+        value: 65536,
+    },
+    ConstantDescriptor {
+        name: "history_queries_max",
+        value: 256,
+    },
+    ConstantDescriptor {
         name: "history_query_limit",
         value: 100,
+    },
+    ConstantDescriptor {
+        name: "history_total_bytes_max",
+        value: 1073741824,
     },
     ConstantDescriptor {
         name: "origin_default_retention_seconds",
@@ -569,6 +623,8 @@ pub enum FederationChannelSettingKind {
     HistoryTwentyFourHours = 3,
     /// Registry value `history_seven_days` (4).
     HistorySevenDays = 4,
+    /// Registry value `history_default` (5).
+    HistoryDefault = 5,
 }
 
 impl FederationChannelSettingKind {
@@ -580,6 +636,7 @@ impl FederationChannelSettingKind {
             Self::HistoryOneHour => 2,
             Self::HistoryTwentyFourHours => 3,
             Self::HistorySevenDays => 4,
+            Self::HistoryDefault => 5,
         }
     }
 
@@ -590,6 +647,7 @@ impl FederationChannelSettingKind {
             2 => Ok(Self::HistoryOneHour),
             3 => Ok(Self::HistoryTwentyFourHours),
             4 => Ok(Self::HistorySevenDays),
+            5 => Ok(Self::HistoryDefault),
             _ => Err(RegistryValueError::UnknownDiscriminant),
         }
     }
@@ -1347,6 +1405,10 @@ pub enum FederationResultKind {
     ReplyPage = 7,
     /// Registry value `no_content` (8).
     NoContent = 8,
+    /// Registry value `history_page` (9).
+    HistoryPage = 9,
+    /// Registry value `history_expired` (10).
+    HistoryExpired = 10,
 }
 
 impl FederationResultKind {
@@ -1362,6 +1424,8 @@ impl FederationResultKind {
             Self::AccountCreated => 6,
             Self::ReplyPage => 7,
             Self::NoContent => 8,
+            Self::HistoryPage => 9,
+            Self::HistoryExpired => 10,
         }
     }
 
@@ -1376,6 +1440,8 @@ impl FederationResultKind {
             6 => Ok(Self::AccountCreated),
             7 => Ok(Self::ReplyPage),
             8 => Ok(Self::NoContent),
+            9 => Ok(Self::HistoryPage),
+            10 => Ok(Self::HistoryExpired),
             _ => Err(RegistryValueError::UnknownDiscriminant),
         }
     }
@@ -2048,7 +2114,7 @@ pub const MAPPING_DESCRIPTORS: &[TextDescriptor] = &[
     },
     TextDescriptor {
         name: "completion-event-by-result-kind",
-        value: "failed=absent,committed=present,session_registered=present,auth_challenge=absent,authenticated=absent,account_created=absent,reply_page=absent,no_content=absent",
+        value: "failed=absent,committed=present,session_registered=present,auth_challenge=absent,authenticated=absent,account_created=absent,reply_page=absent,no_content=absent,history_page=absent,history_expired=absent",
     },
     TextDescriptor {
         name: "event-subject-key",
@@ -2057,6 +2123,14 @@ pub const MAPPING_DESCRIPTORS: &[TextDescriptor] = &[
     TextDescriptor {
         name: "federation-failed-reply-codes",
         value: "ALREADY_AUTHENTICATED,AUTH_REQUIRED,BAD_SEQUENCE,BAD_STATE,CHANNEL_FULL,E2EE_REQUIRED,E2EE_SYNCING,INVALID_ARGUMENT,NOT_ALLOWED,ORIGIN_EXPIRED,ORIGIN_GAP,QUERY_EXPIRED,RATE_LIMITED,REGISTRATION_REQUIRED,SECRET_UNAVAILABLE,SERVER_BUSY,STALE_STATE,STORAGE_UNAVAILABLE,TOO_LARGE,UNAVAILABLE",
+    },
+    TextDescriptor {
+        name: "history-replay",
+        value: "original-selection-digest-or-terminal-expiry;no-durable-result-bodies",
+    },
+    TextDescriptor {
+        name: "history-selectors",
+        value: "latest-optional-anchor;exclusive-before-after-between;mixed-directed-between;around-balanced-pivot",
     },
     TextDescriptor {
         name: "result.account_create_finish",
@@ -2104,7 +2178,7 @@ pub const MAPPING_DESCRIPTORS: &[TextDescriptor] = &[
     },
     TextDescriptor {
         name: "result.history_query",
-        value: "failed,reply_page",
+        value: "failed,history_page,history_expired",
     },
     TextDescriptor {
         name: "result.invite",
@@ -2605,6 +2679,10 @@ pub const ENUM_REGISTRY: &[EnumDescriptor] = &[
             EnumEntry {
                 name: "history_seven_days",
                 value: 4,
+            },
+            EnumEntry {
+                name: "history_default",
+                value: 5,
             },
         ],
     },
@@ -3136,6 +3214,14 @@ pub const ENUM_REGISTRY: &[EnumDescriptor] = &[
             EnumEntry {
                 name: "no_content",
                 value: 8,
+            },
+            EnumEntry {
+                name: "history_page",
+                value: 9,
+            },
+            EnumEntry {
+                name: "history_expired",
+                value: 10,
             },
         ],
     },

@@ -14,6 +14,7 @@ from typing import NoReturn
 
 PROFILE_PATH = "conformance/stage-four-crypto-profile.toml"
 EXPECTED_TASKS = tuple(f"S04-{number:03d}" for number in range(1, 15))
+WSS_ADAPTER_SHA256 = "f951242896dfccf9ee774da4b32bb5f5325da6328936ca23307e629ba6c77fc2"
 EXPECTED_CRYPTO_MODULES = {
     "account_hpke.rs",
     "entropy.rs",
@@ -25,6 +26,7 @@ EXPECTED_CRYPTO_MODULES = {
     "storage_integrity.rs",
     "tls_ticket.rs",
     "worker.rs",
+    "websocket.rs",
 }
 EXPECTED_AUTH_MODULES = {
     "channel_key.rs",
@@ -36,6 +38,7 @@ EXPECTED_AUTH_MODULES = {
     "wire.rs",
 }
 EXPECTED_CRYPTO_DEPENDENCIES = {
+    "aws-lc-rs",
     "agenc-ircd-types",
     "chacha20poly1305",
     "ed25519-dalek",
@@ -392,6 +395,11 @@ def validate_modules(root: Path) -> None:
             source = path.read_text(encoding="utf-8")
             if "#![forbid(unsafe_code)]" not in source and path.name == "lib.rs":
                 raise StageFourError(f"safe-Rust policy is absent from {path}")
+            if path.name == "websocket.rs":
+                if hashlib.sha256(path.read_bytes()).hexdigest() != WSS_ADAPTER_SHA256:
+                    raise StageFourError("WebSocket public-nonce digest adapter differs from its reviewed source")
+            elif "aws_lc_rs" in source or "SHA1_FOR_LEGACY_USE_ONLY" in source:
+                raise StageFourError("legacy handshake provider escapes its private adapter")
             sources.append(source)
     combined = "\n".join(sources)
     if any(surface not in combined for surface in REQUIRED_SURFACES):
@@ -412,6 +420,10 @@ def validate_manifests(root: Path, profile: dict[str, object]) -> None:
     """Check exact direct dependency sets, features, sources, and checksums."""
     crypto = load_toml(root / "crates/agenc-ircd-crypto/Cargo.toml")
     auth = load_toml(root / "crates/agenc-ircd-auth/Cargo.toml")
+    if crypto.get("features") != {"default": [], "wss": ["dep:aws-lc-rs"]}:
+        raise StageFourError("handshake digest adapter must remain optional and default off")
+    if crypto.get("dependencies", {}).get("aws-lc-rs") != {"workspace": True, "optional": True}:
+        raise StageFourError("handshake provider must remain an optional inherited dependency")
     if set(crypto.get("dependencies", {})) != EXPECTED_CRYPTO_DEPENDENCIES:
         raise StageFourError("crypto crate dependency surface is missing or unexpected")
     if set(auth.get("dependencies", {})) != EXPECTED_AUTH_DEPENDENCIES:
@@ -421,6 +433,10 @@ def validate_manifests(root: Path, profile: dict[str, object]) -> None:
     workspace_dependencies = workspace.get("workspace", {}).get("dependencies", {})
     if not isinstance(workspace_dependencies, dict):
         raise StageFourError("workspace dependency table is absent")
+    if workspace_dependencies.get("aws-lc-rs") != {
+        "version": "=1.18.0", "default-features": False, "features": ["non-fips"]
+    }:
+        raise StageFourError("WebSocket handshake provider differs from the reviewed pin")
     expected_patch = {"crates-io": {"opaque-ke": {"path": EXPECTED_SOURCE_PATCH["path"]}}}
     if workspace.get("patch") != expected_patch:
         raise StageFourError("root source patch differs from the reviewed OPAQUE override")

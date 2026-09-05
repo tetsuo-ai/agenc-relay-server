@@ -84,7 +84,13 @@ pub(crate) fn parse(
     );
     let history_enabled = sink.field(
         key("history_enabled"),
-        optional_boolean(table, "history_enabled").map(|value| value.unwrap_or(false)),
+        optional_boolean(table, "history_enabled").and_then(|value| {
+            let enabled = value.unwrap_or(false);
+            if enabled && !cfg!(feature = "history") {
+                return Err(ConfigError::InvalidValue);
+            }
+            Ok(enabled)
+        }),
     );
     let history_default = sink.field(key("history_default"), parse_history_default(table));
     let secret_lookup_floor_milliseconds = sink.field(

@@ -50,16 +50,26 @@ impl ConnectionLimits {
 
 #[derive(Clone)]
 pub(crate) struct ConnectionPolicy {
+    #[cfg(feature = "wss")]
+    registration_started: Option<std::time::Instant>,
     limits: ConnectionLimits,
     runtime_config: Option<RuntimeConfigHandle>,
 }
 
 impl ConnectionPolicy {
+    #[cfg(feature = "wss")]
+    pub(crate) fn with_registration_started(mut self, started: std::time::Instant) -> Self {
+        self.registration_started = Some(started);
+        self
+    }
+
     pub(crate) const fn new(
         limits: ConnectionLimits,
         runtime_config: Option<RuntimeConfigHandle>,
     ) -> Self {
         Self {
+            #[cfg(feature = "wss")]
+            registration_started: None,
             limits,
             runtime_config,
         }
@@ -248,6 +258,10 @@ where
         let _closed_at = lease.release(CloseReason::Overload);
         return connection_exit(&admitted, CloseReason::Overload);
     };
+    #[cfg(feature = "wss")]
+    if let Some(started) = policy.registration_started {
+        queue.set_registration_started(started);
+    }
     let sink: Arc<dyn ClientSink> = queue.clone();
     let (acknowledgement, open_outcome) = oneshot::channel();
     let opened = StateCoreMessage::Opened {

@@ -10,6 +10,7 @@
 mod barrier;
 mod events;
 mod fence;
+mod history;
 pub(crate) use render::prefix as source_prefix;
 mod render;
 mod request;
@@ -130,6 +131,8 @@ struct ConnectionOrigin {
 
 /// The durable batch the edge is waiting on.
 enum PendingCommit {
+    History(Box<history::Prepared>),
+    HistoryCleanup(crate::federation::history_retention::Cleanup),
     /// One cross-profile part was staged.
     BarrierPart(Box<barrier::OpenBarrier>),
     /// The authenticated replacement coordinator durably fenced the old stage.
@@ -183,6 +186,7 @@ pub struct EdgeFederation {
     accepted_epoch: Option<RecoveryEpoch>,
     origins: BTreeMap<ConnectionGeneration, ConnectionOrigin>,
     pending: BTreeMap<RequestId, request::PendingRequest>,
+    history: history::HistoryRequests,
     by_completion: BTreeMap<EventId, RequestId>,
     applied_completions: std::collections::BTreeSet<EventId>,
     nicknames: BTreeMap<UserId, NicknameValue>,
@@ -250,6 +254,7 @@ impl EdgeFederation {
             accepted_epoch: None,
             origins: BTreeMap::new(),
             pending: BTreeMap::new(),
+            history: history::HistoryRequests::default(),
             by_completion: BTreeMap::new(),
             applied_completions: std::collections::BTreeSet::new(),
             nicknames: BTreeMap::new(),
@@ -911,6 +916,7 @@ impl EdgeFederation {
         generation: ConnectionGeneration,
         reason: &str,
     ) {
+        history::connection_closed(self, generation);
         let session = self
             .origins
             .get(&generation)
@@ -1045,6 +1051,12 @@ impl EdgeFederation {
     pub fn batch_applied(&mut self, context: &mut StateCoreContext) -> Vec<EdgeCompletion> {
         let mut completions = Vec::new();
         match self.commit.take() {
+            Some(PendingCommit::History(prepared)) => {
+                completions.extend(history::committed(self, context, *prepared))
+            }
+            Some(PendingCommit::HistoryCleanup(cleanup)) => {
+                history::cleanup_committed(self, cleanup)
+            }
             Some(PendingCommit::Event { header, completion }) => {
                 self.event_before = None;
                 self.counters.events_applied = self.counters.events_applied.saturating_add(1);
@@ -1095,6 +1107,12 @@ impl EdgeFederation {
 
     /// Drops the work behind a rejected batch; the coordinator re-delivers.
     pub fn batch_rejected(&mut self, context: &mut StateCoreContext) {
+        if matches!(self.commit, Some(PendingCommit::History(_))) {
+            if let Some(PendingCommit::History(prepared)) = self.commit.take() {
+                history::rejected(self, context, *prepared);
+            }
+            return;
+        }
         if let Some(
             PendingCommit::Event { .. }
             | PendingCommit::BarrierPart(_)

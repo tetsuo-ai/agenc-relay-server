@@ -45,6 +45,9 @@ fn account_key(seed: u8) -> Vec<u8> {
 }
 
 fn domain_body(table: TableId, kind: u16, byte: u8) -> Result<Vec<u8>, StorageError> {
+    if table == TableId::History {
+        return crate::history_records::body(kind);
+    }
     if kind == 1
         && matches!(
             table,
@@ -870,10 +873,15 @@ fn construction_codecs_cover_every_closed_action_and_cursor() -> Result<(), Box<
     )?;
     let migrate = StorageConstructionPlanEntry::new(
         StorageConstructionKind::Migrate,
-        Vec::new(),
+        vec![source(
+            StorageConstructionSourceKind::DatabaseRecord,
+            TableId::Account,
+            b"m",
+            7,
+        )?],
         TableId::Account,
         stored_key(b"m")?,
-        2,
+        1,
         StorageConstructionAction::MigrateTransform,
         1,
     )?;
@@ -2225,7 +2233,7 @@ fn domain_record_envelope_covers_every_union_and_length_boundary() -> Result<(),
         (TableId::RequestResult, 4),
         (TableId::EdgeOutbox, 3),
         (TableId::EdgeProjection, 3),
-        (TableId::History, 1),
+        (TableId::History, 2),
         (TableId::Audit, 1),
         (TableId::AuditCheckpoint, 1),
         (TableId::E2eeObject, 1),

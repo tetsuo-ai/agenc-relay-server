@@ -920,6 +920,43 @@ impl RedbStore {
             .transpose()
     }
 
+    /// Copies only named rows from one consistent transaction, without scanning gaps.
+    pub(crate) fn read_exact_keys(
+        &self,
+        table: TableId,
+        keys: &[StoredKey],
+    ) -> Result<Vec<OwnedRow>, StorageError> {
+        let transaction = self
+            .database
+            .begin_read()
+            .map_err(|_| StorageError::DatabaseRejected)?;
+        let table = transaction
+            .open_table(table_definition(table))
+            .map_err(|_| StorageError::DatabaseRejected)?;
+        let mut rows = Vec::new();
+        rows.try_reserve_exact(keys.len())
+            .map_err(|_| StorageError::AllocationFailed)?;
+        let mut copied = 0_usize;
+        for key in keys {
+            let Some(value) = table
+                .get(key.as_bytes())
+                .map_err(|_| StorageError::DatabaseRejected)?
+            else {
+                continue;
+            };
+            validate_row_shape(key.as_bytes(), value.value())?;
+            copied = copied
+                .checked_add(key.as_bytes().len())
+                .and_then(|total| total.checked_add(value.value().len()))
+                .ok_or(StorageError::Overflow)?;
+            if copied > crate::mutation::MAX_RANGE_READ_BYTES {
+                return Err(StorageError::LimitExceeded);
+            }
+            rows.push((key.as_bytes().to_vec(), value.value().to_vec()));
+        }
+        Ok(rows)
+    }
+
     /// Reads up to `limit` rows in `start..end` within the byte budget and
     /// reports whether any row remains in the range after the last one copied.
     pub(crate) fn read_range(

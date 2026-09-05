@@ -78,6 +78,9 @@ const DOMAIN_TABLES: [TableId; 19] = [
 ];
 
 fn domain_body(table: TableId, kind: u16, bytes: Vec<u8>) -> Result<Vec<u8>, StorageError> {
+    if table == TableId::History {
+        return crate::history_records::body(kind);
+    }
     if kind == 1
         && matches!(
             table,
@@ -318,6 +321,7 @@ fn every_table_has_one_closed_schema_and_domain_codec_consumes_fully() -> Result
         let key = key_for(table)?;
         let reference =
             RecordReference::new(TableId::Account, StoredKey::new(account_key_bytes(1))?)?;
+        let kind = if table == TableId::History { 2 } else { 1 };
         let body = if table == TableId::E2eeState {
             E2eeRecoveryGate::new(
                 digest(40),
@@ -330,9 +334,9 @@ fn every_table_has_one_closed_schema_and_domain_codec_consumes_fully() -> Result
             )
             .encode()?
         } else {
-            domain_body(table, 1, vec![7, 8, 9])?
+            domain_body(table, kind, vec![7, 8, 9])?
         };
-        let value = PersistentRecordValue::new(table, 1, 1, 1, None, vec![reference], body)?;
+        let value = PersistentRecordValue::new(table, kind, 1, 1, None, vec![reference], body)?;
         let encoded = value.encode()?;
         validate_record_plaintext(table, &key, 1, &encoded)?;
         let mut trailing = encoded.clone();
@@ -1650,10 +1654,9 @@ fn first_account_batch(
     fixture: &InitializedLiveFixture,
     force_allocation: bool,
 ) -> Result<agenc_ircd_storage::StorageMutationBatch, StorageError> {
-    // A live account body is bounded, so the allocation probe uses the opaque history
-    // table, whose stored key has the same 24-byte shape as an account key.
+    // A live account body is bounded; the allocation probe uses an opaque authentication transaction.
     let (table, body) = if force_allocation {
-        (TableId::History, vec![0; 8 * 1_024 * 1_024])
+        (TableId::AuthTransaction, vec![0; 8 * 1_024 * 1_024])
     } else {
         (
             TableId::Account,
@@ -1674,7 +1677,11 @@ fn first_account_batch(
         fixture.accounting(),
         vec![RecordMutation::put(
             table,
-            StoredKey::new(account_key_bytes(2))?,
+            StoredKey::new(if force_allocation {
+                vec![2; 16]
+            } else {
+                account_key_bytes(2)
+            })?,
             1,
             None,
             PersistentRecordValue::new(table, 1, 1, 1, None, Vec::new(), body)?.encode()?,
@@ -3041,8 +3048,8 @@ fn rekey_construction_commits_finalizes_installs_and_reopens() -> Result<(), Box
         target_database_header_hash: digest(0),
         source_rollback_guard_hash: digest(33),
         source_stream_digest: None,
-        source_schema_generation: 1,
-        target_schema_generation: 1,
+        source_schema_generation: SCHEMA_GENERATION,
+        target_schema_generation: SCHEMA_GENERATION,
         transform_profile_hash: rekey_transform_profile_hash()?,
         target_database_instance_id: target_database,
         source_master_key_id: StorageMasterKey::from_bytes(source_master_bytes)
@@ -3586,8 +3593,8 @@ impl RekeyConstructionFixture {
             target_database_header_hash: digest(0),
             source_rollback_guard_hash: digest(135),
             source_stream_digest: None,
-            source_schema_generation: 1,
-            target_schema_generation: 1,
+            source_schema_generation: SCHEMA_GENERATION,
+            target_schema_generation: SCHEMA_GENERATION,
             transform_profile_hash: rekey_transform_profile_hash()?,
             target_database_instance_id: target_database,
             source_master_key_id: StorageMasterKey::from_bytes(source_master_bytes)
@@ -4754,6 +4761,7 @@ fn comprehensive_initial_state() -> Result<ComprehensiveInitialState, Box<dyn Er
     for table in DOMAIN_TABLES {
         let key = cloned_domain_key(&keys, table)?;
         let references = comprehensive_references(&keys, table)?;
+        let kind = if table == TableId::History { 2 } else { 1 };
         let body = if table == TableId::E2eeState {
             E2eeRecoveryGate::new(
                 digest(215),
@@ -4766,14 +4774,18 @@ fn comprehensive_initial_state() -> Result<ComprehensiveInitialState, Box<dyn Er
             )
             .encode()?
         } else {
-            domain_body(table, 1, vec![table.as_u16() as u8, 1])?
+            domain_body(table, kind, vec![table.as_u16() as u8, 1])?
         };
         let plaintext = PersistentRecordValue::new(
             table,
-            1,
+            kind,
             u64::from(table.as_u16()),
             1,
-            Some(4_000_000_000),
+            if table == TableId::History {
+                None
+            } else {
+                Some(4_000_000_000)
+            },
             references,
             body,
         )?
@@ -5135,7 +5147,11 @@ fn key_for(table: TableId) -> Result<StoredKey, Box<dyn Error>> {
         TableId::FederationOrigin => vec![5; 56],
         TableId::RequestResult => vec![6; 16],
         TableId::EdgeOutbox | TableId::EdgeProjection => vec![7; 10],
-        TableId::History => vec![8; 24],
+        TableId::History => agenc_ircd_storage::history_records::history_control_key(
+            agenc_ircd_types::ChannelInstanceId::from_bytes([1; 16]),
+        )?
+        .as_bytes()
+        .to_vec(),
         TableId::Audit | TableId::AuditCheckpoint => vec![9; 8],
         TableId::E2eeState => vec![10; 3],
         _ => return Err("not a domain table".into()),

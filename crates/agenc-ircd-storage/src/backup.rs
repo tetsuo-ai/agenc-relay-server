@@ -15,7 +15,7 @@ use crate::{
     LoginIndexKeyState, LoginIndexStoredKey, NONCE_RESERVATION_BYTES, NonceReservationState,
     ROLLBACK_GUARD_BYTES, RollbackGuard, SealedRecord, StateMeta, StorageConstruction,
     StorageError, StorageOperationCompletion, StoredKey, TableId, logical_record_charge,
-    validate_record_plaintext, verify_guard_pair,
+    verify_guard_pair,
 };
 
 const BACKUP_MAGIC: &[u8; 21] = b"AGENC-IRCD-BACKUP-V1\0";
@@ -825,6 +825,7 @@ fn trusted_backup_key(
 }
 
 struct BackupRecordVerification<'a> {
+    history_inventory: crate::history_records::HistoryInventory,
     header: &'a BackupHeader,
     source_master_key: &'a StorageMasterKey,
     binding: DatabaseBinding,
@@ -854,6 +855,7 @@ impl<'a> BackupRecordVerification<'a> {
         )?;
         Ok(Self {
             header,
+            history_inventory: crate::history_records::HistoryInventory::new(1_073_741_824),
             source_master_key,
             binding: database_binding(source_header),
             integrity_keys,
@@ -889,7 +891,8 @@ impl<'a> BackupRecordVerification<'a> {
             record.stored_key(),
         )?;
         let plaintext = plaintext.expose_for_storage_codec();
-        validate_record_plaintext(
+        crate::migration::validate_source_record(
+            self.header.source_header().tbs().schema_generation,
             record.table(),
             record.stored_key(),
             record.record_schema(),
@@ -899,6 +902,12 @@ impl<'a> BackupRecordVerification<'a> {
             record,
             plaintext,
             self.header.source_header().tbs().database_instance_id,
+        )?;
+        self.history_inventory.observe(
+            record.table(),
+            record.stored_key(),
+            record.sealed_record().len(),
+            plaintext,
         )?;
         self.observe_key_check(record, &sealed, plaintext)?;
         self.observe_state_meta(record, &sealed, plaintext)?;
@@ -984,6 +993,7 @@ impl<'a> BackupRecordVerification<'a> {
         {
             return Err(StorageError::StaleState);
         }
+        self.history_inventory.finish()?;
         self.reconstruction.finish(&state_meta)?;
         Ok((self.logical_database_bytes, state_meta))
     }

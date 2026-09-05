@@ -1,9 +1,9 @@
 schema_version = 1
-frozen_at_commit = "002ce8fafb1ed61f59b7fce0f9dd96990ff27987"
+frozen_at_commit = "6326dffd82d8c41f0bbcdb948ed035160f521f2b"
 
 [profiles.base_federation_v1]
-sha256 = "83702207e1e1153c8722d5cc668a7d1bab85ba518fcdde030a36811b41bdcc40"
-base64url = "g3AiB-HhFTyHItXMZop9G6uFulGPzd4DCjaBG0G9zEA"
+sha256 = "7b00e0d0844270626411d398f15f7520224ea906117738e3da9741a611dc67b3"
+base64url = "ewDg0IRCcGJkEdOY8V91ICJOqQYRdzjj2pdBphHcZ7M"
 
 [profiles.e2ee_mls_v1]
 sha256 = "699c74adfe70c8cc336888e5191d1e09166c5de4406b9c7c8e9a58edadc48159"
@@ -12,7 +12,7 @@ base64url = "aZx0rf5wyMwzaIjlGR0eCRZsXeRAa5x8jppY7a3EgVk"
 [[artifacts]]
 path = "docs/ircd-architecture-and-implementation-spec.md"
 role = "architecture"
-sha256 = "36f4191b8d891a3b7886df29c740c769edbce786f7a3460f92f243fce444a87a"
+sha256 = "3b7ceedaa85c17c99ee033026e9fbc293966f1c81475515a35a70e299161d0d5"
 
 [[artifacts]]
 path = "docs/irc-mls-e2ee-extension.md"
@@ -22,19 +22,19 @@ sha256 = "398237eccca60c7056774b7565dbcac19c38417828191729f50d8fb86a33fdb1"
 [[artifacts]]
 path = "docs/federation-v1-profile.registry"
 role = "federation-registry"
-sha256 = "30d4a9e9947691e2ca26e137e2762413a9b6a4fd308308bd5bfbd8cad20ac2e9"
+sha256 = "1b94cb7b43dc458ff683ddcfd86eed1939128a7a6d0229b89342bd6816eb5411"
 
 [[artifacts]]
 path = "docs/protocol-sources-and-decisions.md"
 role = "source-ledger"
-sha256 = "8de1c200aee7192405accd5b6f8100a90c27b02eea4503c20d9991a071a59e49"
+sha256 = "95796ddf454e4f12a9cd4aa4213f9935c5e75720bf4820f25c4673f232c7d8fb"
 
 [[artifacts]]
 path = "docs/specification-manifest.txt"
 role = "specification-manifest"
-sha256 = "9a355065eabaf12e14a01ba845892907d4bb5212b9f552bca7e108fe56a0ccae"
+sha256 = "220a107271d6fcdb4d373689e6032452455a41301aa5b1184009bf27093c79de"
 
 [[artifacts]]
 path = "scripts/check-spec.sh"
 role = "specification-validator"
-sha256 = "a577547e7459a33e137cd1b9704bd23071588ec15eed15040d95ce65db140305"
+sha256 = "44a50c347085e8c2bfc50fb33e4b4c2896282e5067a4aab044fc78faba21e285"

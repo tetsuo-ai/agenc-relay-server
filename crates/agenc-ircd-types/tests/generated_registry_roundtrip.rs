@@ -316,6 +316,14 @@ fn federation_channel_setting_kind_round_trips_every_explicit_value() -> Result<
         agenc_ircd_types::FederationChannelSettingKind::from_wire(4)?,
         agenc_ircd_types::FederationChannelSettingKind::HistorySevenDays
     );
+    assert_eq!(
+        agenc_ircd_types::FederationChannelSettingKind::HistoryDefault.wire_value(),
+        5
+    );
+    assert_eq!(
+        agenc_ircd_types::FederationChannelSettingKind::from_wire(5)?,
+        agenc_ircd_types::FederationChannelSettingKind::HistoryDefault
+    );
     assert!(agenc_ircd_types::FederationChannelSettingKind::from_wire(u16::MAX).is_err());
     Ok(())
 }
@@ -1293,6 +1301,22 @@ fn federation_result_kind_round_trips_every_explicit_value() -> Result<(), Box<d
     assert_eq!(
         agenc_ircd_types::FederationResultKind::from_wire(8)?,
         agenc_ircd_types::FederationResultKind::NoContent
+    );
+    assert_eq!(
+        agenc_ircd_types::FederationResultKind::HistoryPage.wire_value(),
+        9
+    );
+    assert_eq!(
+        agenc_ircd_types::FederationResultKind::from_wire(9)?,
+        agenc_ircd_types::FederationResultKind::HistoryPage
+    );
+    assert_eq!(
+        agenc_ircd_types::FederationResultKind::HistoryExpired.wire_value(),
+        10
+    );
+    assert_eq!(
+        agenc_ircd_types::FederationResultKind::from_wire(10)?,
+        agenc_ircd_types::FederationResultKind::HistoryExpired
     );
     assert!(agenc_ircd_types::FederationResultKind::from_wire(u16::MAX).is_err());
     Ok(())

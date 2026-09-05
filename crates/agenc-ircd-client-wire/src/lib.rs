@@ -66,3 +66,6 @@ pub use websocket::{
     ClientWebSocketFrame, WebSocketClose, WebSocketEvent, WebSocketMessage, WebSocketOpcode,
     WebSocketSubprotocol, WebSocketWire,
 };
+
+#[cfg(feature = "wss")]
+pub mod websocket_transport;

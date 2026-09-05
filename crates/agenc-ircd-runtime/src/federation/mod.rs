@@ -15,6 +15,7 @@ pub mod coordinator;
 pub mod dial;
 pub mod edge;
 pub mod hello;
+mod history_retention;
 pub mod line;
 pub mod link;
 pub mod owner;

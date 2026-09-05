@@ -11,6 +11,7 @@ mod decision;
 pub mod e2ee;
 mod error;
 pub mod federation;
+mod history;
 mod model;
 mod persist;
 mod projection;
@@ -29,6 +30,10 @@ pub use decision::{
     ResolvedMessageTarget, SanctionRequest, StorageClass, TargetFailure,
 };
 pub use error::DomainError;
+pub use history::{
+    HistoryError, HistoryPosition, HistoryQuery, HistoryReference, HistorySelection,
+    HistorySelector, HistoryTimestamp, MAX_HISTORY_RESULTS, select_history, select_history_iter,
+};
 pub use model::{
     AccountLabelValue, AccountState, AwayText, ChannelKeyVerifier, ChannelModes, ChannelNameValue,
     ChannelScope, ChannelState, ContentPolicy, DirectMessagePolicy, DisplayNameValue, DomainState,

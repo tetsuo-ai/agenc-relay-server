@@ -894,7 +894,7 @@ fn validate_channel_history_control(
         return Err(RegistrationGrammarError::InvalidArgument);
     };
     validate_channel(channel)?;
-    if !matches!(retention.as_str(), "OFF" | "1H" | "24H" | "7D") {
+    if !matches!(retention.as_str(), "OFF" | "ON" | "1H" | "24H" | "7D") {
         return Err(RegistrationGrammarError::InvalidArgument);
     }
     Ok(ChannelControlCommand::History)

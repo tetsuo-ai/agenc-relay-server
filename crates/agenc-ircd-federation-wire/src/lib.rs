@@ -12,6 +12,7 @@ mod codec;
 mod frames;
 mod hashes;
 mod hello;
+mod history;
 mod objects;
 mod schema;
 mod semantics;
@@ -38,6 +39,9 @@ pub use hashes::{
 pub use hello::{
     EpochRejection, EpochTransition, HelloExpectation, HelloRejection, PeerContinuity,
     classify_epoch_transition, verify_hello_tuple,
+};
+pub use history::{
+    HistoryAuthorizationObject, HistoryMessageObject, HistoryPage, HistorySelectorObject,
 };
 pub use objects::{
     CrossProfilePart, EventHeader, FEDERATION_EXPORTER_CONTEXT_BYTES, FEDERATION_EXPORTER_LABEL,

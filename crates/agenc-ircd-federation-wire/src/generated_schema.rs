@@ -844,6 +844,93 @@ pub const SCHEMA_REGISTRY: &[SchemaDescriptor] = &[
         ],
     },
     SchemaDescriptor {
+        name: "FederationHistoryAuthorization",
+        fields: &[
+            FieldDescriptor {
+                name: "session_id",
+                kind: FieldKind::FixedOpaque { length: 16 },
+            },
+            FieldDescriptor {
+                name: "user_id",
+                kind: FieldKind::FixedOpaque { length: 16 },
+            },
+            FieldDescriptor {
+                name: "session_generation",
+                kind: FieldKind::Uint64,
+            },
+            FieldDescriptor {
+                name: "account_id",
+                kind: FieldKind::VariableOpaque {
+                    minimum: 0,
+                    maximum: 24,
+                    width: LengthWidth::U8,
+                },
+            },
+            FieldDescriptor {
+                name: "account_session_generation",
+                kind: FieldKind::Uint64,
+            },
+            FieldDescriptor {
+                name: "membership_revision",
+                kind: FieldKind::Uint64,
+            },
+            FieldDescriptor {
+                name: "history_authorization_generation",
+                kind: FieldKind::Uint64,
+            },
+        ],
+    },
+    SchemaDescriptor {
+        name: "FederationHistoryMessage",
+        fields: &[
+            FieldDescriptor {
+                name: "message_id",
+                kind: FieldKind::FixedOpaque { length: 16 },
+            },
+            FieldDescriptor {
+                name: "channel_event_sequence",
+                kind: FieldKind::Uint64,
+            },
+            FieldDescriptor {
+                name: "received_unix_milliseconds",
+                kind: FieldKind::Uint64,
+            },
+            FieldDescriptor {
+                name: "expires_unix_milliseconds",
+                kind: FieldKind::Uint64,
+            },
+            FieldDescriptor {
+                name: "message_kind",
+                kind: FieldKind::Enumeration {
+                    registry: "FederationMessageKind",
+                },
+            },
+            FieldDescriptor {
+                name: "sender",
+                kind: FieldKind::Structure {
+                    schema: "FederationSourceView",
+                },
+            },
+            FieldDescriptor {
+                name: "tags",
+                kind: FieldKind::Vector {
+                    schema: "FederationClientTag",
+                    minimum: 0,
+                    maximum: 16,
+                    width: LengthWidth::U8,
+                },
+            },
+            FieldDescriptor {
+                name: "body",
+                kind: FieldKind::VariableOpaque {
+                    minimum: 0,
+                    maximum: 512,
+                    width: LengthWidth::U16,
+                },
+            },
+        ],
+    },
+    SchemaDescriptor {
         name: "FederationHistoryReference",
         fields: &[
             FieldDescriptor {
@@ -2430,6 +2517,14 @@ pub const SCHEMA_REGISTRY: &[SchemaDescriptor] = &[
                 name: "limit",
                 kind: FieldKind::Uint16,
             },
+            FieldDescriptor {
+                name: "cursor",
+                kind: FieldKind::VariableOpaque {
+                    minimum: 0,
+                    maximum: 32,
+                    width: LengthWidth::U8,
+                },
+            },
         ],
     },
     SchemaDescriptor {
@@ -2818,6 +2913,67 @@ pub const SCHEMA_REGISTRY: &[SchemaDescriptor] = &[
                 kind: FieldKind::VariableOpaque {
                     minimum: 0,
                     maximum: 255,
+                    width: LengthWidth::U8,
+                },
+            },
+        ],
+    },
+    SchemaDescriptor {
+        name: "result.history_expired",
+        fields: &[FieldDescriptor {
+            name: "original_result_object_id",
+            kind: FieldKind::FixedOpaque { length: 32 },
+        }],
+    },
+    SchemaDescriptor {
+        name: "result.history_page",
+        fields: &[
+            FieldDescriptor {
+                name: "session_id",
+                kind: FieldKind::FixedOpaque { length: 16 },
+            },
+            FieldDescriptor {
+                name: "channel_instance_id",
+                kind: FieldKind::FixedOpaque { length: 16 },
+            },
+            FieldDescriptor {
+                name: "channel_name",
+                kind: FieldKind::Structure {
+                    schema: "FederationChannelName",
+                },
+            },
+            FieldDescriptor {
+                name: "authorization",
+                kind: FieldKind::Structure {
+                    schema: "FederationHistoryAuthorization",
+                },
+            },
+            FieldDescriptor {
+                name: "snapshot_token",
+                kind: FieldKind::FixedOpaque { length: 32 },
+            },
+            FieldDescriptor {
+                name: "snapshot_state_generation",
+                kind: FieldKind::Uint64,
+            },
+            FieldDescriptor {
+                name: "page_sequence",
+                kind: FieldKind::Uint32,
+            },
+            FieldDescriptor {
+                name: "next_cursor",
+                kind: FieldKind::VariableOpaque {
+                    minimum: 0,
+                    maximum: 32,
+                    width: LengthWidth::U8,
+                },
+            },
+            FieldDescriptor {
+                name: "messages",
+                kind: FieldKind::Vector {
+                    schema: "FederationHistoryMessage",
+                    minimum: 0,
+                    maximum: 100,
                     width: LengthWidth::U8,
                 },
             },

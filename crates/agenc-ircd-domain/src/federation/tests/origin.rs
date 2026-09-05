@@ -87,6 +87,45 @@ fn ready_table() -> Result<OriginTable, OriginError> {
 }
 
 #[test]
+fn retiring_an_exact_replay_identity_preserves_floors_and_matches_restart()
+-> Result<(), OriginError> {
+    let mut table = ready_table()?;
+    let first = operation(1, 0, 0);
+    let next = operation(1, 0, 1);
+    let id = request(10);
+    table.commit_request(first, id)?;
+    let entry = table
+        .origin(&first.origin)
+        .ok_or(OriginError::UnknownOrigin)?;
+    assert!(!table.retire_request_id(id, next));
+    assert_eq!(
+        table.classify_request(next, id, [11; 32], None)?,
+        ReplayDecision::RequestIdReuse
+    );
+    assert!(table.retire_request_id(id, first));
+    assert!(!table.retire_request_id(id, first));
+    assert_eq!(table.origin(&first.origin), Some(entry));
+    assert!(table.request_ids.is_empty());
+    let mut restarted = OriginTable::new();
+    restarted.restore_edge(
+        EDGE,
+        table.edge(EDGE).ok_or(OriginError::UnknownIncarnation)?,
+    );
+    restarted.restore_origin(first.origin, entry);
+    for key in [first, next] {
+        assert_eq!(
+            table.classify_request(key, id, [11; 32], None),
+            restarted.classify_request(key, id, [11; 32], None)
+        );
+    }
+    assert_eq!(
+        table.classify_request(first, id, [10; 32], None)?,
+        ReplayDecision::Expired
+    );
+    Ok(())
+}
+
+#[test]
 fn reset_add_ready_and_update_follow_the_declared_lifecycle() -> Result<(), OriginError> {
     let mut table = OriginTable::new();
     assert_eq!(table.add(add(1)), Err(OriginError::UnknownIncarnation));

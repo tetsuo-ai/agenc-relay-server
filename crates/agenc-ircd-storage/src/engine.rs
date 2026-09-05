@@ -668,6 +668,7 @@ pub struct StorageInspectionConfig {
 }
 
 struct EngineOpenConfig {
+    expected_schema_generation: u64,
     expected_network_id: NetworkId,
     expected_server_id: ServerId,
     state_directory: EngineStateDirectory,
@@ -833,6 +834,9 @@ fn authenticate_open_state(
     limits: StorageEngineLimits,
 ) -> Result<AuthenticatedOpenState, StorageError> {
     let header = DatabaseHeader::decode(&require_meta(store, HEADER_META_KEY)?)?;
+    if header.tbs().schema_generation != config.expected_schema_generation {
+        return Err(StorageError::UnsupportedVersion);
+    }
     if header.tbs().network_id != config.expected_network_id
         || header.tbs().server_id != config.expected_server_id
     {
@@ -883,6 +887,22 @@ fn authenticate_open_state(
         retained_manifest_count,
         retained_manifest_bytes,
     })
+}
+
+fn validate_open_schema(config: &EngineOpenConfig) -> Result<(), StorageError> {
+    let guard = RollbackGuard::decode_with_root(
+        &config.state_directory.read_guard(ROLLBACK_GUARD_BYTES)?,
+        &config.rollback_guard_root_key,
+    )?;
+    if guard.tbs().network_id != config.expected_network_id
+        || guard.tbs().server_id != config.expected_server_id
+    {
+        return Err(StorageError::AuthenticationFailed);
+    }
+    if guard.tbs().schema_generation != config.expected_schema_generation {
+        return Err(StorageError::UnsupportedVersion);
+    }
+    Ok(())
 }
 
 fn reconcile_open_guard(
@@ -948,6 +968,7 @@ impl StorageEngine {
     ) -> Result<Self, StorageError> {
         Self::open_authenticated(
             EngineOpenConfig {
+                expected_schema_generation: crate::SCHEMA_GENERATION,
                 expected_network_id: config.expected_network_id,
                 expected_server_id: config.expected_server_id,
                 state_directory: EngineStateDirectory::Writable(config.state_directory),
@@ -966,6 +987,7 @@ impl StorageEngine {
         let (_writer, reader) = storage_limit_pair(initial);
         Self::open_authenticated(
             EngineOpenConfig {
+                expected_schema_generation: crate::SCHEMA_GENERATION,
                 expected_network_id: config.expected_network_id,
                 expected_server_id: config.expected_server_id,
                 state_directory: EngineStateDirectory::Inspection(config.state_directory),
@@ -984,6 +1006,7 @@ impl StorageEngine {
         runtime_limits: StorageLimitReader,
     ) -> Result<Self, StorageError> {
         let limits = config.limits.validate()?;
+        validate_open_schema(&config)?;
         let store = config.state_directory.open_store(limits.redb_cache_bytes)?;
         let authenticated = authenticate_open_state(&config, &store, limits)?;
         let engine = Self {
@@ -1009,6 +1032,26 @@ impl StorageEngine {
         };
         engine.publish_runtime_facts();
         Ok(engine)
+    }
+
+    /// Opens only the frozen immediate-predecessor source for stopped migration.
+    pub(crate) fn open_migration_source(config: StorageOpenConfig) -> Result<Self, StorageError> {
+        let initial = StorageRuntimeLimits::from_engine(config.limits)?;
+        let (_writer, reader) = storage_limit_pair(initial);
+        Self::open_authenticated(
+            EngineOpenConfig {
+                expected_schema_generation: 1,
+                expected_network_id: config.expected_network_id,
+                expected_server_id: config.expected_server_id,
+                state_directory: EngineStateDirectory::Writable(config.state_directory),
+                storage_master_key: config.storage_master_key,
+                rollback_guard_root_key: config.rollback_guard_root_key,
+                login_index_key: config.login_index_key,
+                previous_login_index_key: config.previous_login_index_key,
+                limits: config.limits,
+            },
+            reader,
+        )
     }
 
     pub(crate) fn refresh_runtime_limits(&mut self) {
@@ -1052,7 +1095,7 @@ impl StorageEngine {
         })
     }
 
-    // agenc-review: focus owner=storage reviewed=2026-08-27 reason=closed exact-or-range dispatch preserves one immutable read result contract
+    // agenc-review: focus owner=storage reviewed=2026-09-04 reason=closed exact indexed-or-range dispatch preserves one immutable read transaction contract
     pub(crate) fn read(&self, plan: &ReadPlan) -> Result<ReadResult, StorageError> {
         let (records, truncated) = match plan.kind() {
             ReadPlanKind::Exact { table, key } => {
@@ -1064,6 +1107,21 @@ impl StorageEngine {
                     }],
                     None => Vec::new(),
                 };
+                (records, false)
+            }
+            ReadPlanKind::ExactKeys { table, keys } => {
+                let records = self
+                    .store
+                    .read_exact_keys(*table, keys)?
+                    .into_iter()
+                    .map(|(key, sealed_record)| {
+                        Ok(ReadRecord {
+                            table: *table,
+                            key: StoredKey::new(key)?,
+                            sealed_record,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, StorageError>>()?;
                 (records, false)
             }
             ReadPlanKind::Range {
@@ -2529,6 +2587,8 @@ impl StorageEngine {
         let mut previous_login_entries = 0_u64;
         let mut table_record_counts = [0_u64; 27];
         let mut maximum_record_revision = 0_u64;
+        let mut history_inventory =
+            crate::history_records::HistoryInventory::new(self.limits.database_max_bytes / 4);
         for number in 0_u16..=26 {
             let table = TableId::from_u16(number)?;
             self.store
@@ -2543,10 +2603,17 @@ impl StorageEngine {
                         self.header.tbs().storage_key_generation,
                         &stored_key,
                     )?;
-                    crate::validate_record_plaintext(
+                    crate::migration::validate_source_record(
+                        self.header.tbs().schema_generation,
                         table,
                         &stored_key,
                         sealed.record_schema(),
+                        plaintext.expose_for_storage_codec(),
+                    )?;
+                    history_inventory.observe(
+                        table,
+                        &stored_key,
+                        encoded.len(),
                         plaintext.expose_for_storage_codec(),
                     )?;
                     let count = table_record_counts
@@ -2641,6 +2708,7 @@ impl StorageEngine {
                     Ok(())
                 })?;
         }
+        history_inventory.finish()?;
         reference_writer.commit()?;
         reference_scratch.validate()?;
         let expected_previous_login_entries =
@@ -3782,6 +3850,8 @@ pub(crate) fn draw_nonces_with_faults(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    mod history_reads;
+    mod migration;
     use std::fs::OpenOptions;
     use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
     use std::path::{Path, PathBuf};

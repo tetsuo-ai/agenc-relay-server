@@ -1,0 +1,2 @@
+# Preserve HTTP fuzz inputs, including their required CRLF delimiters.
+test-data/fuzz-corpus/wss_upgrade/* binary

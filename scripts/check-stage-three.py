@@ -16,6 +16,7 @@ EXPECTED_MODULES = {
     "command.rs",
     "decision.rs",
     "error.rs",
+    "history.rs",
     "model.rs",
     "persist.rs",
     "projection.rs",

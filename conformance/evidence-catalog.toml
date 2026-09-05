@@ -1850,3 +1850,53 @@ kind = "normative-requirement"
 id = "EVID-E2EE-REQ-D8D8C1DBDAE5F09E95FD"
 claim_ids = ["E2EE-REQ-D8D8C1DBDAE5F09E95FD"]
 kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-S09-001-WSS"
+claim_ids = ["S09-001"]
+kind = "wss-profile"
+
+[[evidence]]
+id = "EVID-S09-002-EQUIVALENCE"
+claim_ids = ["S09-002"]
+kind = "transport-equivalence"
+
+[[evidence]]
+id = "EVID-S09-003-HISTORY"
+claim_ids = ["S09-003"]
+kind = "plaintext-history"
+
+[[evidence]]
+id = "EVID-S09-004-ENCRYPTED-EXCLUSION"
+claim_ids = ["S09-004"]
+kind = "encrypted-history-exclusion"
+
+[[evidence]]
+id = "EVID-S09-005-PROFILE-MATRIX"
+claim_ids = ["S09-005"]
+kind = "optional-profile-matrix"
+
+[[evidence]]
+id = "EVID-S09-900-STAGE-GATE"
+claim_ids = ["S09-900"]
+kind = "stage-gate"
+
+[[evidence]]
+id = "EVID-ARCH-PRV-03"
+claim_ids = ["ARCH-PRV-03"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-09CFFBA54F24F91ED37D"
+claim_ids = ["ARCH-REQ-09CFFBA54F24F91ED37D"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-STA-05"
+claim_ids = ["ARCH-STA-05"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-STA-09"
+claim_ids = ["ARCH-STA-09"]
+kind = "normative-requirement"

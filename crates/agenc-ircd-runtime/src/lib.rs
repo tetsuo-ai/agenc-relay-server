@@ -23,6 +23,7 @@ pub mod daemon;
 pub mod e2ee;
 mod error;
 pub mod federation;
+mod history_render;
 pub mod listener;
 mod mutation_render;
 pub mod observe;
@@ -82,3 +83,6 @@ impl StateCoreSeed {
         &self.storage
     }
 }
+
+#[cfg(feature = "wss")]
+mod wss;

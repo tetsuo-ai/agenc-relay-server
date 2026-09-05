@@ -1176,7 +1176,7 @@ fn masks_history_selectors_topics_parts_and_results_cover_alternatives() {
     );
     assert_eq!(
         selector(1, history_reference(1, 1), history_reference(0, 0)),
-        Err(CodecError::CrossReference)
+        Ok(())
     );
     assert_eq!(
         selector(1, history_reference(0, 0), history_reference(1, 1)),
@@ -1200,7 +1200,7 @@ fn masks_history_selectors_topics_parts_and_results_cover_alternatives() {
     );
     assert_eq!(
         selector(5, history_reference(1, 2), history_reference(1, 1)),
-        Err(CodecError::CrossReference)
+        Ok(())
     );
     assert_eq!(
         selector(6, history_reference(0, 0), history_reference(0, 0)),
@@ -1375,6 +1375,8 @@ fn all_closed_embedded_arm_mappings_are_explicit() {
         "result.account_created",
         "result.reply_page",
         "result.no_content",
+        "result.history_page",
+        "result.history_expired",
     ];
     for (offset, expected) in results.iter().enumerate() {
         assert_eq!(
@@ -1382,7 +1384,7 @@ fn all_closed_embedded_arm_mappings_are_explicit() {
             Ok(*expected)
         );
     }
-    assert_eq!(result_arm(9), Err(CodecError::UnknownDiscriminant));
+    assert_eq!(result_arm(11), Err(CodecError::UnknownDiscriminant));
 
     let events = [
         "event.session_visible",
@@ -2158,7 +2160,7 @@ fn semantic_short_circuits_reject_each_reachable_conflict() {
     );
     assert_eq!(
         selector(history_reference(1, 1), history_reference(2, 2)),
-        Err(CodecError::CrossReference)
+        Ok(())
     );
 
     let message_target = || {

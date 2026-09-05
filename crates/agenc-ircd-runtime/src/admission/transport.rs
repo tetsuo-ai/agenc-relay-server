@@ -113,9 +113,12 @@ impl AcceptAdmission for TransportAdmission {
             let now = state.clock.now();
             let admitted = match purpose {
                 ListenerPurpose::ClientTls => state.admit_direct(source, now),
+                #[cfg(feature = "wss")]
+                ListenerPurpose::ClientWss => state.admit_direct(source, now),
                 ListenerPurpose::ClientOnion => state.admit_onion(now),
-                ListenerPurpose::ClientWss
-                | ListenerPurpose::Federation
+                #[cfg(not(feature = "wss"))]
+                ListenerPurpose::ClientWss => false,
+                ListenerPurpose::Federation
                 | ListenerPurpose::AdminLocal
                 | ListenerPurpose::AdminTls => false,
             };
@@ -143,9 +146,12 @@ impl AcceptAdmission for TransportAdmission {
         let now = state.clock.now();
         let became_idle = match purpose {
             ListenerPurpose::ClientTls => state.release_direct(source, now),
+            #[cfg(feature = "wss")]
+            ListenerPurpose::ClientWss => state.release_direct(source, now),
             ListenerPurpose::ClientOnion => state.release_onion(now),
-            ListenerPurpose::ClientWss
-            | ListenerPurpose::Federation
+            #[cfg(not(feature = "wss"))]
+            ListenerPurpose::ClientWss => false,
+            ListenerPurpose::Federation
             | ListenerPurpose::AdminLocal
             | ListenerPurpose::AdminTls => false,
         };

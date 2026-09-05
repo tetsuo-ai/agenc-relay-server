@@ -63,7 +63,7 @@ macro_rules! round_trip_identifier {
 #[test]
 fn generated_registries_cover_the_frozen_source() -> Result<(), Box<dyn Error>> {
     let registry = include_str!("../../../docs/federation-v1-profile.registry");
-    assert_eq!(CONSTANT_REGISTRY.len(), 53);
+    assert_eq!(CONSTANT_REGISTRY.len(), 62);
     assert_eq!(ENUM_REGISTRY.len(), 29);
     assert_eq!(FEDERATION_WIRE_FORMS.len(), 23);
     for constant in CONSTANT_REGISTRY {

@@ -1219,20 +1219,17 @@ impl AdminOwner {
         }
     }
 
-    async fn command(
+    fn complete_immediate_command(
         &mut self,
         generation: ConnectionGeneration,
-        event: AdminCommandEvent,
-        token: &CancellationToken,
-    ) {
-        match &event.command {
+        command: &AdminCommand,
+    ) -> bool {
+        match command {
             AdminCommand::Ping(ping) => {
                 self.output_line(generation, format!("PONG :{}", ping.as_str()));
-                return;
             }
             AdminCommand::Pong(_) => {
                 self.record_command_result(ResultClass::Ok);
-                return;
             }
             AdminCommand::Connect { .. }
             | AdminCommand::Squit { .. }
@@ -1241,14 +1238,22 @@ impl AdminOwner {
             {
                 self.output_line(
                     generation,
-                    format!(
-                        "FAIL {} UNAVAILABLE :Command unavailable",
-                        event.command.verb()
-                    ),
+                    format!("FAIL {} UNAVAILABLE :Command unavailable", command.verb()),
                 );
-                return;
             }
-            _ => {}
+            _ => return false,
+        }
+        true
+    }
+
+    async fn command(
+        &mut self,
+        generation: ConnectionGeneration,
+        event: AdminCommandEvent,
+        token: &CancellationToken,
+    ) {
+        if self.complete_immediate_command(generation, &event.command) {
+            return;
         }
         if event.confirmation == ConfirmationState::Required {
             self.issue_confirmation(generation, &event, token).await;
@@ -1269,7 +1274,8 @@ impl AdminOwner {
                 self.mutate_account(generation, &event, *account, token)
                     .await;
             }
-            AdminCommand::ChannelQuarantine { channel, .. } => {
+            AdminCommand::ChannelQuarantine { channel, .. }
+            | AdminCommand::ChannelHistoryPurge { channel, .. } => {
                 self.mutate_channel(generation, &event, *channel, token)
                     .await;
             }
@@ -1657,6 +1663,20 @@ impl AdminOwner {
         channel_id: agenc_ircd_types::ChannelInstanceId,
         token: &CancellationToken,
     ) {
+        let (mutation, success) = match event.command {
+            AdminCommand::ChannelQuarantine { .. } => (
+                AdminMutation::QuarantineChannel(channel_id),
+                "Channel quarantined",
+            ),
+            AdminCommand::ChannelHistoryPurge { .. } => (
+                AdminMutation::PurgeChannelHistory(channel_id),
+                "Channel history purged",
+            ),
+            _ => {
+                self.fail_closed(generation);
+                return;
+            }
+        };
         let Some(revision) = self
             .mutation_revision(generation, event, AdminTarget::Channel(channel_id), token)
             .await
@@ -1672,7 +1692,7 @@ impl AdminOwner {
             .commit_mutation_with_stale_retry(
                 event,
                 &audit,
-                AdminMutation::QuarantineChannel(channel_id),
+                mutation,
                 AdminTarget::Channel(channel_id),
                 revision,
                 token,
@@ -1684,10 +1704,7 @@ impl AdminOwner {
                     self.fail_closed(generation);
                     return;
                 }
-                self.output_line(
-                    generation,
-                    "NOTE CHANNEL OK :Channel quarantined".to_owned(),
-                );
+                self.output_line(generation, format!("NOTE CHANNEL OK :{success}"));
             }
             Err(failure) => self.output_admin_failure(generation, "CHANNEL", failure),
         }
@@ -2305,6 +2322,7 @@ impl AdminOwner {
             | AdminCommand::AccountSuspend { .. }
             | AdminCommand::AccountRestore { .. }
             | AdminCommand::ChannelQuarantine { .. }
+            | AdminCommand::ChannelHistoryPurge { .. }
             | AdminCommand::Connect { .. }
             | AdminCommand::Squit { .. }
             | AdminCommand::PeerQuarantine { .. }
@@ -2482,7 +2500,8 @@ const fn audit_phase_is_valid(command: &AdminCommand, phase: AdminAuditPhase) ->
         }
         AdminCommand::AccountSuspend { .. }
         | AdminCommand::AccountRestore { .. }
-        | AdminCommand::ChannelQuarantine { .. } => {
+        | AdminCommand::ChannelQuarantine { .. }
+        | AdminCommand::ChannelHistoryPurge { .. } => {
             matches!(phase, AdminAuditPhase::CommittedMutation)
         }
         AdminCommand::Restart(_) | AdminCommand::Die(_) => {
@@ -2495,6 +2514,7 @@ const fn audit_phase_is_valid(command: &AdminCommand, phase: AdminAuditPhase) ->
 fn confirmation_target(command: &AdminCommand) -> Option<AdminTarget> {
     match command {
         AdminCommand::AccountSuspend { account, .. } => Some(AdminTarget::Account(*account)),
+        AdminCommand::ChannelHistoryPurge { channel, .. } => Some(AdminTarget::Channel(*channel)),
         // A peer has no domain revision; the durable deny confirms against
         // the state generation like the process actions do.
         AdminCommand::Restart(_) | AdminCommand::Die(_) | AdminCommand::PeerQuarantine { .. } => {

@@ -5,6 +5,7 @@
 mod domain_records;
 mod e2ee_records;
 mod federation_records;
+mod history_records;
 mod recovery_matrix;
 mod witness_cursor;
 

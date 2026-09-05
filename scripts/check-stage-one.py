@@ -13,21 +13,21 @@ from typing import NoReturn
 
 RAW_HASHES = {
     "docs/ircd-architecture-and-implementation-spec.md": (
-        "36f4191b8d891a3b7886df29c740c769edbce786f7a3460f92f243fce444a87a"
+        "3b7ceedaa85c17c99ee033026e9fbc293966f1c81475515a35a70e299161d0d5"
     ),
     "docs/irc-mls-e2ee-extension.md": (
         "398237eccca60c7056774b7565dbcac19c38417828191729f50d8fb86a33fdb1"
     ),
     "docs/federation-v1-profile.registry": (
-        "30d4a9e9947691e2ca26e137e2762413a9b6a4fd308308bd5bfbd8cad20ac2e9"
+        "1b94cb7b43dc458ff683ddcfd86eed1939128a7a6d0229b89342bd6816eb5411"
     ),
     "docs/protocol-sources-and-decisions.md": (
-        "8de1c200aee7192405accd5b6f8100a90c27b02eea4503c20d9991a071a59e49"
+        "95796ddf454e4f12a9cd4aa4213f9935c5e75720bf4820f25c4673f232c7d8fb"
     ),
 }
 PROFILE_HASHES = {
     "base-federation-v1": (
-        "83702207e1e1153c8722d5cc668a7d1bab85ba518fcdde030a36811b41bdcc40"
+        "7b00e0d0844270626411d398f15f7520224ea906117738e3da9741a611dc67b3"
     ),
     "e2ee-mls-v1": (
         "699c74adfe70c8cc336888e5191d1e09166c5de4406b9c7c8e9a58edadc48159"
@@ -38,14 +38,14 @@ PROFILE_LABELS = {
     "e2ee-mls-v1": b"agenc-chat IRC-MLS specification profile v1\0",
 }
 CATEGORY_COUNTS = {
-    "constant": 53,
+    "constant": 62,
     "crypto": 4,
     "enum": 29,
     "hash": 6,
-    "mapping": 31,
+    "mapping": 33,
     "mode": 18,
     "order": 15,
-    "schema": 128,
+    "schema": 132,
     "wire": 23,
 }
 UNION_ARMS = {
@@ -206,6 +206,12 @@ def minimum_vectors(records: dict[str, list[tuple[str, str]]]) -> dict[str, byte
         ("FederationDeliveredMessage", "channel_event_sequence"): 1,
         ("FederationDeliveredMessage", "target_revision"): 1,
         ("FederationEvent", "coordinator_state_generation"): 1,
+        ("FederationHistoryAuthorization", "session_generation"): 1,
+        ("FederationHistoryAuthorization", "membership_revision"): 1,
+        ("FederationHistoryAuthorization", "history_authorization_generation"): 1,
+        ("FederationHistoryMessage", "channel_event_sequence"): 1,
+        ("FederationHistoryMessage", "received_unix_milliseconds"): 1,
+        ("FederationHistoryMessage", "expires_unix_milliseconds"): 3_600_001,
         ("FederationInviteProjection", "creation_revision"): 1,
         ("FederationInviteProjection", "expires_at"): 1,
         ("FederationMessageTarget", "expected_target_revision"): 1,
@@ -245,6 +251,7 @@ def minimum_vectors(records: dict[str, list[tuple[str, str]]]) -> dict[str, byte
         ("result.account_created", "account_revision"): 1,
         ("result.authenticated", "account_session_generation"): 1,
         ("result.committed", "resulting_state_generation"): 1,
+        ("result.history_page", "snapshot_state_generation"): 1,
         ("result.session_registered", "session_revision"): 1,
         ("result.session_registered", "resulting_state_generation"): 1,
     }
@@ -309,6 +316,7 @@ def minimum_vectors(records: dict[str, list[tuple[str, str]]]) -> dict[str, byte
             ("FederationClientTag", "key"): b"+a",
             ("FederationMessageTarget", "value"): bytes(16),
             ("FederationDeliveredMessage", "body"): b"x",
+            ("FederationHistoryMessage", "body"): b"x",
             ("FederationNickname", "value"): b"a",
             ("FederationParameter", "value"): b"a",
             ("FederationReply", "command"): b"FAIL",
@@ -382,7 +390,9 @@ def minimum_vectors(records: dict[str, list[tuple[str, str]]]) -> dict[str, byte
                 "FederationAccountProjection",
             }:
                 return account_id
-            if (schema_name, field_name) == ("result.reply_page", "snapshot_token"):
+            if field_name == "snapshot_token" and schema_name in {
+                "result.reply_page", "result.history_page"
+            }:
                 return bytes([1]) + bytes(length - 1)
             return bytes(length)
         opaque = re.fullmatch(r"opaque<(\d+)\.\.(\d+)>", grammar)

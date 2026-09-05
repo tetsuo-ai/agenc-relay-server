@@ -16,3 +16,9 @@ Checked-in test material is public, synthetic, bounded, and reproducible.
 Unit tests live beside their owning modules. Black-box and cross-crate tests
 live in each crate's `tests/` directory. Fixtures must state their governing
 requirement or evidence ID before they can support a conformance claim.
+
+Stage 09 seeds in `fuzz-corpus/wss_upgrade`, `fuzz-corpus/wss_frame`, and
+`fuzz-corpus/history_records` support `S09-001`, `S09-003`, and `S09-004`.
+They contain public synthetic upgrade requests, frames, history control and
+message bodies, and coordinator/edge reconstruction metadata. The history
+seeds use the same typed constructors as the storage record tests.

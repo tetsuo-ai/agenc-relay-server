@@ -40,7 +40,7 @@ pub(crate) const LISTENER_KEYS: &[&str] = &[
 pub enum ListenerPurpose {
     /// Direct TLS client listener.
     ClientTls,
-    /// WebSocket-over-TLS client listener (transport deferred to Stage 09).
+    /// WebSocket-over-TLS client listener, enabled by the optional `wss` feature.
     ClientWss,
     /// Onion client listener behind a Unix socket.
     ClientOnion,

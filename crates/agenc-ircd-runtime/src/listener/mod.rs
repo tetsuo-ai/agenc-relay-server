@@ -45,6 +45,7 @@ use crate::admin::{
 use crate::budget::{
     ADMIN_CONNECTION_BASE_BYTES, BoundedMemoryCharges, CLIENT_CONNECTION_BASE_BYTES, MemoryBudget,
     MemoryBudgetPort as _, MemoryCharge, MemoryPermitBatch, TLS_SETUP_INCREMENT_BYTES,
+    WEBSOCKET_SETUP_INCREMENT_BYTES,
 };
 use crate::cancel::CancellationToken;
 use crate::connection::supervisor::AdmissionLease;
@@ -539,6 +540,7 @@ fn purpose_ceiling(purpose: ListenerPurpose) -> Result<usize, ListenerError> {
         ListenerPurpose::ClientTls | ListenerPurpose::ClientOnion => Ok(MAX_CLIENT_CONNECTIONS),
         ListenerPurpose::AdminLocal | ListenerPurpose::AdminTls => Ok(MAX_ADMIN_CONNECTIONS),
         ListenerPurpose::Federation => Ok(MAX_FEDERATION_PEERS),
+        ListenerPurpose::ClientWss if cfg!(feature = "wss") => Ok(MAX_CLIENT_CONNECTIONS),
         ListenerPurpose::ClientWss => Err(ListenerError::UnsupportedPurpose),
     }
 }
@@ -755,6 +757,8 @@ fn admit(
         peer: PeerIdentity::Anonymous,
     };
     let endpoint = Endpoint {
+        #[cfg(feature = "wss")]
+        name: spec.name.clone(),
         tls,
         profile: spec.profile,
         shared: Arc::clone(shared),
@@ -897,7 +901,7 @@ fn global_slot(
 ) -> Result<Option<OwnedSemaphorePermit>, RefusalReason> {
     if !matches!(
         purpose,
-        ListenerPurpose::ClientTls | ListenerPurpose::ClientOnion
+        ListenerPurpose::ClientTls | ListenerPurpose::ClientOnion | ListenerPurpose::ClientWss
     ) {
         return Ok(None);
     }
@@ -925,18 +929,36 @@ fn acquire_charges(
     limits: ConnectionLimits,
     tls: bool,
 ) -> Result<MemoryPermitBatch, RuntimeError> {
+    shared
+        .budget
+        .try_acquire_batch(connection_charges(purpose, limits, tls)?)
+        .map_err(Into::into)
+}
+
+fn connection_charges(
+    purpose: ListenerPurpose,
+    limits: ConnectionLimits,
+    tls: bool,
+) -> Result<BoundedMemoryCharges, RuntimeError> {
     let base = match purpose {
         ListenerPurpose::AdminLocal | ListenerPurpose::AdminTls => ADMIN_CONNECTION_BASE_BYTES,
         _ => CLIENT_CONNECTION_BASE_BYTES,
     };
     let base = MemoryCharge::fixed(base);
     let queue = limits.queue.backing_charge()?;
-    let charges = if tls {
+    let charges = if purpose == ListenerPurpose::ClientWss {
+        BoundedMemoryCharges::new(&[
+            base,
+            queue,
+            MemoryCharge::fixed(TLS_SETUP_INCREMENT_BYTES),
+            MemoryCharge::fixed(WEBSOCKET_SETUP_INCREMENT_BYTES),
+        ])?
+    } else if tls {
         BoundedMemoryCharges::new(&[base, queue, MemoryCharge::fixed(TLS_SETUP_INCREMENT_BYTES)])?
     } else {
         BoundedMemoryCharges::new(&[base, queue])?
     };
-    Ok(shared.budget.try_acquire_batch(charges)?)
+    Ok(charges)
 }
 
 enum ConnectionOutcome {
@@ -946,6 +968,8 @@ enum ConnectionOutcome {
 
 /// The listener facts one connection task carries.
 struct Endpoint {
+    #[cfg(feature = "wss")]
+    name: ListenerName,
     tls: Option<Arc<ServerConfig>>,
     profile: Option<TlsEndpointProfile>,
     shared: Arc<ListenerShared>,
@@ -1011,7 +1035,59 @@ async fn serve_inner(
                 },
             );
             let stream = negotiated?;
+            #[cfg(feature = "wss")]
+            let tls_completed = Instant::now();
             admitted.peer = tls_peer_identity(&stream, profile)?;
+            #[cfg(feature = "wss")]
+            if admitted.purpose == ListenerPurpose::ClientWss {
+                let origin_allowed = |origin: Option<&str>| {
+                    let Some(runtime) = endpoint.shared.runtime_config.as_ref() else {
+                        return false;
+                    };
+                    let snapshot = runtime.load();
+                    let Some(policy) = snapshot
+                        .config()
+                        .listeners
+                        .iter()
+                        .find(|listener| listener.name == endpoint.name)
+                        .and_then(|listener| listener.wss.as_ref())
+                    else {
+                        return false;
+                    };
+                    match origin {
+                        Some(origin) => policy
+                            .allowed_origins
+                            .iter()
+                            .any(|allowed| allowed.as_str() == origin),
+                        None => policy.allow_missing_origin,
+                    }
+                };
+                let stream = crate::wss::upgrade(
+                    stream,
+                    tls_completed,
+                    &endpoint.shared.budget,
+                    origin_allowed,
+                    &token,
+                )
+                .await?;
+                // The upgrade future and its header buffer are gone now.
+                drop(permits.split_exact(WEBSOCKET_SETUP_INCREMENT_BYTES));
+                let lease = lease.take().ok_or(RefusalReason::Admission)?;
+                endpoint.shared.observer.admitted(&admitted);
+                let policy =
+                    ConnectionPolicy::new(endpoint.limits, endpoint.shared.runtime_config.clone())
+                        .with_registration_started(tls_completed);
+                return Ok(run_connection(
+                    stream,
+                    admitted,
+                    resources(permits),
+                    policy,
+                    endpoint.shared.inbox.clone(),
+                    token,
+                    lease,
+                )
+                .await);
+            }
             if admitted.purpose == ListenerPurpose::AdminTls {
                 let port = endpoint
                     .shared
@@ -1281,6 +1357,43 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(feature = "wss")]
+    fn websocket_setup_is_reserved_before_spawn_and_released_after_upgrade()
+    -> Result<(), RuntimeError> {
+        let limits = ConnectionLimits::DEFAULT;
+        let queue = limits.queue.backing_charge()?.bytes();
+        let budget = MemoryBudget::new(16 * 1_048_576);
+        let charges = connection_charges(ListenerPurpose::ClientWss, limits, true)?;
+        assert_eq!(
+            charges.total(),
+            CLIENT_CONNECTION_BASE_BYTES
+                + queue
+                + TLS_SETUP_INCREMENT_BYTES
+                + WEBSOCKET_SETUP_INCREMENT_BYTES
+        );
+        let mut held = budget.try_acquire_batch(charges)?;
+        let tls = held
+            .split_exact(TLS_SETUP_INCREMENT_BYTES)
+            .ok_or(RuntimeError::InvalidValue)?;
+        drop(tls);
+        let upgrade = held
+            .split_exact(WEBSOCKET_SETUP_INCREMENT_BYTES)
+            .ok_or(RuntimeError::InvalidValue)?;
+        assert_eq!(
+            budget.charged(),
+            CLIENT_CONNECTION_BASE_BYTES + queue + WEBSOCKET_SETUP_INCREMENT_BYTES
+        );
+        drop(upgrade);
+        assert_eq!(budget.charged(), CLIENT_CONNECTION_BASE_BYTES + queue);
+        drop(held);
+        assert_eq!(budget.charged(), 0);
+        let insufficient = MemoryBudget::new(charges.total() - 1);
+        assert!(insufficient.try_acquire_batch(charges).is_err());
+        assert_eq!(insufficient.charged(), 0);
+        Ok(())
+    }
+
+    #[test]
     fn specs_pair_purposes_with_transports_and_ceilings() -> Result<(), Box<dyn std::error::Error>>
     {
         let tcp = || ListenerSource::Tcp(std::net::SocketAddr::from(([127, 0, 0, 1], 0)));
@@ -1307,7 +1420,11 @@ mod tests {
         };
         assert_eq!(
             validate_spec(&wss).err(),
-            Some(ListenerError::UnsupportedPurpose)
+            Some(if cfg!(feature = "wss") {
+                ListenerError::MissingTls
+            } else {
+                ListenerError::UnsupportedPurpose
+            })
         );
         let federation = ListenerSpec {
             name: ListenerName::parse("test")?,

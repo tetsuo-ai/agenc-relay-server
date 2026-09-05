@@ -961,6 +961,12 @@ impl Membership {
     pub const fn role(self) -> Role {
         self.effective_role
     }
+
+    /// Returns the immutable accepted membership revision used to fence history reads.
+    #[must_use]
+    pub const fn revision(self) -> Revision {
+        self.membership_revision
+    }
 }
 
 /// One plaintext topic and its immutable assignment identity.
@@ -1230,6 +1236,12 @@ impl ChannelState {
     #[must_use]
     pub const fn history_policy(&self) -> HistoryPolicy {
         self.history
+    }
+
+    /// Returns the exact live membership, including its accepted authorization revision.
+    #[must_use]
+    pub fn membership(&self, user_id: UserId) -> Option<Membership> {
+        self.memberships.get(&user_id).copied()
     }
 
     /// Returns the simple channel-mode vector. Mandatory `+n` is structural.
@@ -1762,6 +1774,21 @@ impl DomainState {
             return Err(DomainError::NotFound);
         }
         channel.admin_quarantined = true;
+        channel.revision = revision;
+        self.revision = revision;
+        Ok(())
+    }
+
+    /// Applies the channel revision of an already committed plaintext-history purge.
+    pub fn admin_purge_history(
+        &mut self,
+        channel_id: ChannelInstanceId,
+    ) -> Result<(), DomainError> {
+        let revision = next_revision(self.revision)?;
+        let channel = self
+            .channels
+            .get_mut(&channel_id)
+            .ok_or(DomainError::NotFound)?;
         channel.revision = revision;
         self.revision = revision;
         Ok(())

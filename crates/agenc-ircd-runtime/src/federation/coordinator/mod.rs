@@ -11,6 +11,7 @@ mod accounts;
 mod companion;
 mod convert;
 mod grace;
+mod history;
 mod origin;
 mod query;
 mod request;
@@ -150,6 +151,8 @@ pub enum Violation {
 
 /// What one staged batch must finish once it commits.
 enum PendingCommit {
+    History(Box<history::Prepared>),
+    HistoryCleanup(crate::federation::history_retention::Cleanup),
     Request {
         peer: ServerId,
         link: LinkId,
@@ -225,6 +228,7 @@ pub struct FederationCoordinator {
     /// reconnecting link.
     backlog: VecDeque<FederationInbound>,
     queries: query::Queries,
+    history: history::HistoryQueries,
     counters: CoordinatorCounters,
     companion: CompanionLinks,
     /// The E2EE executor; `None` on a node without a sequencer.
@@ -288,6 +292,7 @@ impl FederationCoordinator {
             })
             .collect();
         let queries = query::Queries::new(config.query_cursor_key, config.process_nonce);
+        let history = history::HistoryQueries::new(config.query_cursor_key, config.process_nonce);
         let companion = CompanionLinks::new(None, config.server_name.clone());
         Self {
             companion,
@@ -302,6 +307,7 @@ impl FederationCoordinator {
             pending: None,
             crypto: None,
             replays: BTreeMap::new(),
+            history,
             loader: startup::Loader::default(),
             backlog: VecDeque::new(),
             queries,
@@ -410,7 +416,10 @@ impl FederationCoordinator {
     /// Reports whether no federated operation straddles a reload.
     #[must_use]
     pub fn reload_ready(&self) -> bool {
-        self.pending.is_none() && self.crypto.is_none() && self.replays.is_empty()
+        self.pending.is_none()
+            && self.crypto.is_none()
+            && self.replays.is_empty()
+            && !self.history.busy()
     }
 
     /// Dispatches one link message at a safe point.
@@ -981,6 +990,7 @@ impl FederationCoordinator {
         self.loader.owns(read_id)
             || self.replays.contains_key(&read_id)
             || snapshot::owns_read(self, read_id)
+            || self.history.owns(read_id)
     }
 
     /// Consumes a completed storage read that belongs to the coordinator.
@@ -996,7 +1006,13 @@ impl FederationCoordinator {
             snapshot::resend_completed(self, context, message);
             return;
         }
+        if self.history.owns(message.read_id) {
+            history::read_completed(self, context, message);
+            request::drain_queued(self, context);
+            return;
+        }
         request::replay_completed(self, context, message);
+        request::drain_queued(self, context);
     }
 
     /// Resumes the federated request whose crypto job completed.
@@ -1024,6 +1040,10 @@ impl FederationCoordinator {
     pub fn batch_applied(&mut self, context: &mut StateCoreContext) {
         let events = context.take_outbound_events();
         match self.pending.take() {
+            Some(PendingCommit::History(prepared)) => history::committed(self, context, *prepared),
+            Some(PendingCommit::HistoryCleanup(cleanup)) => {
+                history::cleanup_committed(self, context, cleanup)
+            }
             Some(PendingCommit::Request {
                 peer,
                 link,
@@ -1091,6 +1111,7 @@ impl FederationCoordinator {
     pub fn batch_rejected(&mut self, context: &mut StateCoreContext) {
         self.remote_grant_rejected();
         match self.pending.take() {
+            Some(PendingCommit::History(prepared)) => history::rejected(self, *prepared),
             Some(PendingCommit::Cleanup { peer }) => grace::continue_cleanup(self, context, peer),
             Some(PendingCommit::Companion { .. }) => {
                 if let Some(executor) = self.companion_exec.as_mut() {

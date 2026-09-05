@@ -225,9 +225,12 @@ impl ClientCapabilityProfiles {
     fn for_purpose(&self, purpose: ListenerPurpose) -> Option<Arc<CapabilityProfile>> {
         match purpose {
             ListenerPurpose::ClientTls => Some(Arc::clone(&self.dns_tls)),
+            #[cfg(feature = "wss")]
+            ListenerPurpose::ClientWss => Some(Arc::clone(&self.dns_tls)),
             ListenerPurpose::ClientOnion => Some(Arc::clone(&self.onion)),
-            ListenerPurpose::ClientWss
-            | ListenerPurpose::Federation
+            #[cfg(not(feature = "wss"))]
+            ListenerPurpose::ClientWss => None,
+            ListenerPurpose::Federation
             | ListenerPurpose::AdminLocal
             | ListenerPurpose::AdminTls => None,
         }
@@ -284,6 +287,27 @@ impl RegistrationRouter {
             e2ee: None,
             edge_carriers: BTreeMap::new(),
         })
+    }
+
+    /// Advertises the configured history profile; service admission remains
+    /// owned by StateCore and the coordinator.
+    #[cfg(feature = "history")]
+    pub fn with_history(mut self) -> Result<Self, RuntimeError> {
+        let extend = |profile: &CapabilityProfile| -> Result<Arc<CapabilityProfile>, RuntimeError> {
+            let mut capabilities = profile.capabilities().to_vec();
+            capabilities.push(
+                CapabilitySpec::new("draft/chathistory", None)
+                    .map_err(|_| RuntimeError::InvalidValue)?,
+            );
+            CapabilityProfile::new(capabilities)
+                .map(Arc::new)
+                .map_err(|_| RuntimeError::InvalidValue)
+        };
+        self.advertised = ClientCapabilityProfiles {
+            dns_tls: extend(&self.advertised.dns_tls)?,
+            onion: extend(&self.advertised.onion)?,
+        };
+        Ok(self)
     }
 
     /// Restores the edge before a link or client can consume projection authority.
@@ -2071,15 +2095,19 @@ impl RegistrationRouter {
         for step in steps {
             match step {
                 WelcomeStep::WelcomeThroughMyInfo => frames.extend(self.welcome_numerics(target)?),
-                WelcomeStep::Isupport => frames.extend(
-                    isupport_messages(
-                        &self.config.server_prefix,
-                        target,
-                        &self.config.display_name,
-                        &self.config.network_id,
-                    )
-                    .map_err(|_| RuntimeError::InvalidValue)?,
-                ),
+                WelcomeStep::Isupport => {
+                    frames.extend(
+                        isupport_messages(
+                            &self.config.server_prefix,
+                            target,
+                            &self.config.display_name,
+                            &self.config.network_id,
+                        )
+                        .map_err(|_| RuntimeError::InvalidValue)?,
+                    );
+                    #[cfg(feature = "history")]
+                    self.history_isupport(target, &mut frames)?;
+                }
                 WelcomeStep::LuserCounters => frames.push(
                     numeric_reply(
                         &self.config.server_prefix,
@@ -2100,6 +2128,33 @@ impl RegistrationRouter {
             }
         }
         Ok(frames)
+    }
+
+    #[cfg(feature = "history")]
+    fn history_isupport(
+        &self,
+        target: &str,
+        frames: &mut Vec<WireMessage>,
+    ) -> Result<(), RuntimeError> {
+        if self
+            .advertised
+            .dns_tls
+            .capabilities()
+            .iter()
+            .any(|capability| capability.name() == "draft/chathistory")
+        {
+            frames.push(
+                numeric_reply(
+                    &self.config.server_prefix,
+                    5,
+                    target,
+                    &["CHATHISTORY=100", "MSGREFTYPES=msgid,timestamp"],
+                    Some("are supported by this server"),
+                )
+                .map_err(|_| RuntimeError::InvalidValue)?,
+            );
+        }
+        Ok(())
     }
 
     fn append_motd(
@@ -2611,6 +2666,10 @@ impl CommandRouter for RegistrationRouter {
                 .is_some_and(|edge| edge.retention_blocked());
             if let Some(edge) = self.edge.as_mut() {
                 edge.retain_barriers(context, pending);
+                edge.retain_history(context);
+            }
+            if let Some(federation) = self.federation.as_mut() {
+                federation.retain_history(context);
             }
         }
     }
@@ -2695,11 +2754,15 @@ impl CommandRouter for RegistrationRouter {
             return;
         };
         let now = context.now();
-        let deadline = now.checked_add(REGISTRATION_TIMEOUT_MILLIS);
-        if let (Ok(registration), Ok(deadline)) = (
-            RegistrationState::new(now.get(), self.access_policy()),
-            deadline,
-        ) {
+        let elapsed = context
+            .sessions()
+            .connection(generation)
+            .map_or(0, |entry| entry.sink().registration_elapsed_millis());
+        let Some((started, deadline)) = registration_window(now, elapsed) else {
+            close_transport(context, generation);
+            return;
+        };
+        if let Ok(registration) = RegistrationState::new(started, self.access_policy()) {
             let scheduled = context.timers_mut().schedule(
                 deadline,
                 TimerKind::RegistrationDeadline,
@@ -2883,6 +2946,14 @@ impl CommandRouter for RegistrationRouter {
         context: &mut StateCoreContext,
         message: crate::bridge::StorageReadCompletionMessage,
     ) {
+        if let Some(edge) = self
+            .edge
+            .as_mut()
+            .filter(|edge| edge.owns_history_read(message.read_id))
+        {
+            edge.history_read_completed(context, message);
+            return;
+        }
         if let Some(federation) = self
             .federation
             .as_mut()
@@ -2890,6 +2961,12 @@ impl CommandRouter for RegistrationRouter {
         {
             federation.storage_read_completed(context, message);
             self.drive_remote_accounts(context);
+            return;
+        }
+        if self.commands.owns_history_read(message.read_id) {
+            if let Err((generation, _)) = self.commands.history_read_completed(context, message) {
+                close_transport(context, generation);
+            }
             return;
         }
         if let Some(accounts) = self.accounts.as_mut() {
@@ -3003,6 +3080,20 @@ impl From<RouteOutcome> for ActionStep {
     }
 }
 
+fn registration_window(
+    now: agenc_ircd_types::MonotonicTick,
+    elapsed: u64,
+) -> Option<(u64, agenc_ircd_types::MonotonicTick)> {
+    let remaining = REGISTRATION_TIMEOUT_MILLIS.checked_sub(elapsed)?;
+    if remaining == 0 {
+        return None;
+    }
+    Some((
+        now.get().checked_sub(elapsed)?,
+        now.checked_add(remaining).ok()?,
+    ))
+}
+
 pub(crate) fn core_capabilities(
     creation_policy: AccountCreationPolicy,
     recovery_epoch: RecoveryEpoch,
@@ -3010,11 +3101,14 @@ pub(crate) fn core_capabilities(
 ) -> Result<CapabilityProfile, RuntimeError> {
     let advertise_sts = match purpose {
         ListenerPurpose::ClientTls => true,
+        #[cfg(feature = "wss")]
+        ListenerPurpose::ClientWss => true,
         ListenerPurpose::ClientOnion => false,
-        ListenerPurpose::ClientWss
-        | ListenerPurpose::Federation
-        | ListenerPurpose::AdminLocal
-        | ListenerPurpose::AdminTls => return Err(RuntimeError::InvalidValue),
+        #[cfg(not(feature = "wss"))]
+        ListenerPurpose::ClientWss => return Err(RuntimeError::InvalidValue),
+        ListenerPurpose::Federation | ListenerPurpose::AdminLocal | ListenerPurpose::AdminTls => {
+            return Err(RuntimeError::InvalidValue);
+        }
     };
     let recovery_value = format!("v1.{}", recovery_epoch.to_base64url());
     let mut capabilities = Vec::new();
@@ -3340,6 +3434,28 @@ mod tests {
 
     use super::*;
     use crate::admission::{BucketTable, RateLimits};
+
+    #[test]
+    fn registration_budget_includes_upgrade_and_admission_delay() -> Result<(), RuntimeError> {
+        let now = MonotonicTick::from_ticks(50_000);
+        assert_eq!(
+            registration_window(now, 0),
+            Some((50_000, MonotonicTick::from_ticks(80_000)))
+        );
+        assert_eq!(
+            registration_window(now, 4_999),
+            Some((45_001, MonotonicTick::from_ticks(75_001)))
+        );
+        assert_eq!(
+            registration_window(now, 29_999),
+            Some((20_001, MonotonicTick::from_ticks(50_001)))
+        );
+        assert!(registration_window(now, 30_000).is_none());
+        assert!(registration_window(now, u64::MAX).is_none());
+        assert!(registration_window(MonotonicTick::from_ticks(1), 2).is_none());
+        assert!(registration_window(MonotonicTick::from_ticks(u64::MAX), 0).is_none());
+        Ok(())
+    }
 
     #[test]
     fn core_capabilities_and_cloaks_are_closed() -> Result<(), RuntimeError> {

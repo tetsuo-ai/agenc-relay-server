@@ -231,6 +231,9 @@ impl ProducesTickets for TlsTicketKeyRing {
 pub enum TlsEndpointProfile {
     /// Direct and onion client endpoints; server authentication only.
     Client,
+    /// WebSocket clients using HTTP/1.1 before the exact IRC subprotocol.
+    #[cfg(feature = "wss")]
+    WebSocket,
     /// Federation links; mutual TLS against the federation trust store.
     Federation,
     /// Remote administration; mutual TLS against the admin trust store.
@@ -246,7 +249,11 @@ impl TlsEndpointProfile {
             ListenerPurpose::ClientTls | ListenerPurpose::ClientOnion => Some(Self::Client),
             ListenerPurpose::Federation => Some(Self::Federation),
             ListenerPurpose::AdminTls => Some(Self::Admin),
-            ListenerPurpose::ClientWss | ListenerPurpose::AdminLocal => None,
+            #[cfg(feature = "wss")]
+            ListenerPurpose::ClientWss => Some(Self::WebSocket),
+            #[cfg(not(feature = "wss"))]
+            ListenerPurpose::ClientWss => None,
+            ListenerPurpose::AdminLocal => None,
         }
     }
 
@@ -255,6 +262,8 @@ impl TlsEndpointProfile {
     pub const fn alpn(self) -> &'static [u8] {
         match self {
             Self::Client => CLIENT_ALPN,
+            #[cfg(feature = "wss")]
+            Self::WebSocket => b"http/1.1",
             Self::Federation => FEDERATION_ALPN,
             Self::Admin => ADMIN_ALPN,
         }
@@ -1033,10 +1042,20 @@ mod tests {
             TlsEndpointProfile::for_purpose(ListenerPurpose::AdminLocal),
             None
         );
+        #[cfg(not(feature = "wss"))]
         assert_eq!(
             TlsEndpointProfile::for_purpose(ListenerPurpose::ClientWss),
             None
         );
+        #[cfg(feature = "wss")]
+        {
+            assert_eq!(
+                TlsEndpointProfile::for_purpose(ListenerPurpose::ClientWss),
+                Some(TlsEndpointProfile::WebSocket)
+            );
+            assert_eq!(TlsEndpointProfile::WebSocket.alpn(), b"http/1.1");
+            assert!(!TlsEndpointProfile::WebSocket.requires_client_certificate());
+        }
         assert_eq!(TlsEndpointProfile::Client.alpn(), b"agenc-chat/1");
         assert_eq!(TlsEndpointProfile::Federation.alpn(), b"agenc-chat-fed/1");
         assert_eq!(TlsEndpointProfile::Admin.alpn(), b"agenc-chat-admin/1");

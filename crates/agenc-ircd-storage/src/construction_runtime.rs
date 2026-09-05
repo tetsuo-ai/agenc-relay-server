@@ -1533,7 +1533,7 @@ pub struct ConstructionSourceFacts {
 
 /// Continuously locked source database used by offline construction commands.
 pub struct ConstructionSourceDatabase {
-    engine: StorageEngine,
+    pub(crate) engine: StorageEngine,
 }
 
 impl ConstructionSourceDatabase {
@@ -1667,7 +1667,7 @@ fn validate_rekey_generation(
     clippy::too_many_arguments,
     reason = "the key transform binds both complete source and target encryption contexts"
 )]
-fn rekey_target_stored_key(
+pub(crate) fn rekey_target_stored_key(
     source: &StorageConstructionSource,
     record: &ConstructionSourceRecord,
     source_master_key: &StorageMasterKey,

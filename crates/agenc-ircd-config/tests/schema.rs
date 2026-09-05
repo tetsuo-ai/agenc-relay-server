@@ -301,12 +301,25 @@ fn client_wss_parses_fully_but_enabling_it_is_deferred_to_stage_nine() -> TestRe
         "purpose = \"client_tls\"\nbind = \"203.0.113.1:6697\"",
         "purpose = \"client_wss\"\nbind = \"203.0.113.1:6697\"\nallowed_origins = [\"https://chat.example\"]",
     );
-    let report = parse(&enabled).err();
+    let result = parse(&enabled);
+    if cfg!(feature = "wss") {
+        assert!(result.is_ok());
+        return Ok(());
+    }
+    let report = result.err();
     assert!(report.as_ref().is_some_and(|report| {
         report.issues().iter().any(|issue| {
             issue.error == ConfigError::DeferredTransport
                 && issue.stage == ValidationStage::ListenerUnion
         })
     }));
+    Ok(())
+}
+
+#[test]
+fn enabled_history_requires_the_compiled_profile() -> TestResult {
+    let configured = mutate(PUBLIC, "history_enabled = false", "history_enabled = true");
+    assert_eq!(parse(&configured).is_ok(), cfg!(feature = "history"));
+    assert!(parse(PUBLIC).is_ok());
     Ok(())
 }

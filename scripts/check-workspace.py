@@ -34,6 +34,23 @@ CRATE_NAMES = {
     "agenc-ircd-testkit",
     "agenc-ircd-types",
 }
+EXPECTED_FEATURES = {'agenc-ircd': {'default': [],
+                'wss': ['agenc-ircd-config/wss', 'agenc-ircd-runtime/wss'],
+                'history': ['agenc-ircd-config/history', 'agenc-ircd-runtime/history']},
+ 'agenc-ircd-client-wire': {'default': [], 'wss': [], 'history': []},
+ 'agenc-ircd-config': {'default': [], 'wss': [], 'history': []},
+ 'agenc-ircd-crypto': {'default': [], 'wss': ['dep:aws-lc-rs']},
+ 'agenc-ircd-domain': {'default': [], 'history': []},
+ 'agenc-ircd-federation-wire': {'default': [], 'history': []},
+ 'agenc-ircd-runtime': {'default': [],
+                        'wss': ['agenc-ircd-client-wire/wss',
+                                'agenc-ircd-config/wss',
+                                'agenc-ircd-crypto/wss'],
+                        'history': ['agenc-ircd-domain/history',
+                                    'agenc-ircd-federation-wire/history',
+                                    'agenc-ircd-config/history',
+                                    'agenc-ircd-client-wire/history']}}
+
 EXPECTED_EDGES = {
     "agenc-ircd-types": set(),
     "agenc-ircd-client-wire": {"agenc-ircd-types"},
@@ -113,6 +130,7 @@ BINARY_TEST_EXTERNAL_DEPENDENCIES = frozenset(
 )
 EXTERNAL_DEPENDENCIES = {
     "argon2": ("=0.5.3", {"alloc"}),
+    "aws-lc-rs": ("=1.18.0", {"non-fips"}),
     "base64": ("=0.23.1", {"alloc"}),
     "chacha20poly1305": ("=0.11.0", {"alloc", "zeroize"}),
     "ed25519-dalek": ("=3.0.0", {"fast", "zeroize"}),
@@ -143,6 +161,7 @@ EXTERNAL_DEPENDENCIES = {
     "zeroize": ("=1.9.0", {"alloc"}),
 }
 DIRECT_CHECKSUMS = {
+    "aws-lc-rs": "ce2b2dcc879c3bae0d371e77c99f2238400ef24ec001394befa67b6e543add9e",
     "argon2": "3c3610892ee6e0cbce8ae2700349fcf8f98adb0dbfbee85aec3c9179d29cc072",
     "base64": "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5",
     "chacha20poly1305": "9b89e1c441e926b9c82a8d023f6e1b7ae0adcfaa7d621814e4d60789bac751cb",
@@ -174,6 +193,7 @@ EXTERNAL_PACKAGE_ALIASES = {"opaque-sha2": "sha2"}
 # Dependencies reviewed after the initial ledger; each stage records its
 # additions in its own conformance manifest.
 LATER_STAGE_DEPENDENCIES = {
+    "aws-lc-rs",
     "loom",
     "mls-rs",
     "mls-rs-crypto-rustcrypto",
@@ -190,6 +210,7 @@ EXPECTED_EXTERNAL_EDGES = {
     "agenc-ircd-federation-wire": {"base64", "sha2", "tls_codec", "zeroize"},
     "agenc-ircd-e2ee": {"sha2"},
     "agenc-ircd-crypto": {
+        "aws-lc-rs",
         "chacha20poly1305",
         "ed25519-dalek",
         "getrandom",
@@ -480,10 +501,17 @@ def validate_package_manifest(manifest_path: Path, manifest: dict[str, object]) 
     if manifest.get("lints") != {"workspace": True}:
         raise WorkspaceError(f"{manifest_path} does not inherit workspace lints")
     package_name = str(package["name"])
+    if manifest.get("features", {}) != EXPECTED_FEATURES.get(package_name, {}):
+        raise WorkspaceError(f"package {package_name} exposes an unexpected production feature")
     actual_external: set[str] = set()
     for table_name, table in dependency_tables(manifest):
         for dependency_name, declaration in table.items():
-            if declaration != {"workspace": True}:
+            expected_declaration = {"workspace": True}
+            if (package_name, table_name, dependency_name) == (
+                "agenc-ircd-crypto", "dependencies", "aws-lc-rs"
+            ):
+                expected_declaration["optional"] = True
+            if declaration != expected_declaration:
                 raise WorkspaceError(
                     f"{manifest_path} {table_name}.{dependency_name} must inherit the root pin"
                 )
@@ -705,6 +733,22 @@ def validate_direct_dependency_evidence(root: Path) -> None:
     }
     if stage_eight != expected_stage_eight:
         raise WorkspaceError("Stage 08 dependency evidence differs from its reviewed closed form")
+    stage_nine = load_toml(root / "conformance/stage-nine-dependencies.toml")
+    expected_stage_nine = {
+        "schema_version": 1,
+        "dependency": [{
+            "name": "aws-lc-rs",
+            "version": "1.18.0",
+            "checksum": DIRECT_CHECKSUMS["aws-lc-rs"],
+            "default_features": False,
+            "features": ["non-fips"],
+            "scope": "optional-wss",
+            "purpose": "RFC 6455 accept digest over the public handshake nonce through the private crypto adapter; reuses the locked TLS provider",
+            "reviewed_on": "2026-09-04",
+        }],
+    }
+    if stage_nine != expected_stage_nine:
+        raise WorkspaceError("Stage 09 dependency evidence differs from its reviewed closed form")
 
 
 def cargo_metadata(root: Path) -> dict[str, object]:
@@ -792,7 +836,7 @@ def validate_graph(packages: dict[str, dict[str, object]]) -> dict[str, set[str]
         if package.get("version") != "0.0.0":
             raise WorkspaceError(f"package {name} version differs from required 0.0.0")
         features = package.get("features")
-        if features != {}:
+        if features != EXPECTED_FEATURES.get(name, {}):
             raise WorkspaceError(f"package {name} exposes an unexpected production feature")
 
         targets = package.get("targets")
@@ -1083,6 +1127,25 @@ def self_test(root: Path) -> int:
     feature = copy.deepcopy(packages)
     feature["agenc-ircd-runtime"]["features"] = {"deterministic-entropy": []}
     expect_rejection("production feature", lambda: validate_graph(feature), "unexpected production feature")
+    cases += 1
+
+    for feature_name in ("wss", "history"):
+        enabled = copy.deepcopy(packages)
+        enabled["agenc-ircd"]["features"]["default"] = [feature_name]
+        expect_rejection("default optional profile", lambda: validate_graph(enabled),
+                         "unexpected production feature")
+        cases += 1
+    coupled = copy.deepcopy(packages)
+    coupled["agenc-ircd"]["features"]["wss"].append("history")
+    expect_rejection("coupled profiles", lambda: validate_graph(coupled),
+                     "unexpected production feature")
+    cases += 1
+    crypto_path = root / "crates/agenc-ircd-crypto/Cargo.toml"
+    unconditional = copy.deepcopy(load_toml(crypto_path))
+    unconditional["dependencies"]["aws-lc-rs"].pop("optional")
+    expect_rejection("unconditional handshake provider",
+                     lambda: validate_package_manifest(crypto_path, unconditional),
+                     "must inherit the root pin")
     cases += 1
 
     workspace = manifest["workspace"]

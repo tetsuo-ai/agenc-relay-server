@@ -186,6 +186,12 @@ STAGE_BINDINGS = {
     "EVID-S08-043-CONTENT-PADDING": (["S08-043"], "application-content-padding"),
     "EVID-S08-044-REAL-CLIENTS": (["S08-044"], "real-client-lifecycle"),
     "EVID-S08-900-STAGE-GATE": (["S08-900"], "stage-gate"),
+    "EVID-S09-001-WSS": (["S09-001"], "wss-profile"),
+    "EVID-S09-002-EQUIVALENCE": (["S09-002"], "transport-equivalence"),
+    "EVID-S09-003-HISTORY": (["S09-003"], "plaintext-history"),
+    "EVID-S09-004-ENCRYPTED-EXCLUSION": (["S09-004"], "encrypted-history-exclusion"),
+    "EVID-S09-005-PROFILE-MATRIX": (["S09-005"], "optional-profile-matrix"),
+    "EVID-S09-900-STAGE-GATE": (["S09-900"], "stage-gate"),
 }
 
 NORMATIVE_BINDINGS = {
@@ -450,6 +456,10 @@ NORMATIVE_BINDINGS = {
     "EVID-E2EE-REQ-FDA89A1D5714375C1B4F": (["E2EE-REQ-FDA89A1D5714375C1B4F"], "normative-requirement"),
     "EVID-E2EE-REQ-A119B1A71D9F208380BC": (["E2EE-REQ-A119B1A71D9F208380BC"], "normative-requirement"),
     "EVID-E2EE-REQ-D8D8C1DBDAE5F09E95FD": (["E2EE-REQ-D8D8C1DBDAE5F09E95FD"], "normative-requirement"),
+    "EVID-ARCH-PRV-03": (["ARCH-PRV-03"], "normative-requirement"),
+    "EVID-ARCH-REQ-09CFFBA54F24F91ED37D": (["ARCH-REQ-09CFFBA54F24F91ED37D"], "normative-requirement"),
+    "EVID-ARCH-STA-05": (["ARCH-STA-05"], "normative-requirement"),
+    "EVID-ARCH-STA-09": (["ARCH-STA-09"], "normative-requirement"),
 }
 
 # Evidence bound to a normative sentence a later revision removed. The
@@ -518,7 +528,7 @@ TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z")
 ARTIFACT_PATH_RE = re.compile(
     r"conformance/evidence/artifacts/[A-Za-z0-9][A-Za-z0-9_./-]{0,511}"
 )
-CLOSABLE_STAGES = frozenset(range(9))
+CLOSABLE_STAGES = frozenset(range(10))
 REVIEWED_EVIDENCE_TARGETS = (
     "aarch64-unknown-linux-gnu",
     "x86_64-unknown-linux-gnu",
@@ -534,6 +544,7 @@ STAGE_NAMES = {
     6: "six",
     7: "seven",
     8: "eight",
+    9: "nine",
 }
 RUN_ARTIFACT_FIELDS = {
     "schema_version",
@@ -1011,7 +1022,7 @@ def parse_toolchain_policy(
 ) -> tuple[str, list[dict[str, object]], list[str]]:
     """Parse one closed toolchain policy and select the requested stage profile."""
     if stage not in CLOSABLE_STAGES:
-        raise EvidenceError("toolchain profiles currently cover only Stages 00 through 08")
+        raise EvidenceError("toolchain profiles currently cover only Stages 00 through 09")
     policy_hash = hashlib.sha256(policy_bytes).hexdigest()
     try:
         policy = tomllib.loads(policy_bytes.decode("utf-8"))
@@ -1087,7 +1098,7 @@ def parse_toolchain_policy(
             or first_stage < previous_first_stage
         ):
             raise EvidenceError(
-                f"{tool_label}.first_stage must be ordered within Stages 00 through 08"
+                f"{tool_label}.first_stage must be ordered within Stages 00 through 09"
             )
         previous_first_stage = first_stage
         normalized = validate_toolchain(
@@ -1909,7 +1920,7 @@ def validate_closure_entries(
 def validate_closure(root: Path, stage: int, source_commit: str) -> tuple[int, int]:
     """Validate exact-revision evidence needed to close one stage."""
     if stage not in CLOSABLE_STAGES:
-        raise EvidenceError("closure evidence catalogs currently cover only Stages 00 through 08")
+        raise EvidenceError("closure evidence catalogs currently cover only Stages 00 through 09")
     if COMMIT_RE.fullmatch(source_commit) is None:
         raise EvidenceError("closure source commit must be an exact lowercase 40-character Git ID")
     validate(root)
@@ -2073,11 +2084,11 @@ kind = "normative-requirement"
         + """
 
 [[evidence]]
-id = "EVID-ARCH-STA-05"
-claim_ids = ["ARCH-STA-05"]
+id = "EVID-ARCH-OPS-01"
+claim_ids = ["ARCH-OPS-01"]
 kind = "normative-requirement"
 """,
-        "unimplemented requirement ARCH-STA-05 must not have closing catalog evidence",
+        "unimplemented requirement ARCH-OPS-01 must not have closing catalog evidence",
     )
     reject_catalog(
         "unrelated catalog evidence",
@@ -2093,7 +2104,7 @@ kind = "normative-requirement"
     )
 
     try:
-        closure_evidence_inventory({"EVID-ARCH-STA-05"})
+        closure_evidence_inventory({"EVID-ARCH-OPS-01"})
     except EvidenceError as error:
         if "lacks a reviewed catalog kind" not in str(error):
             raise EvidenceError(
@@ -2384,9 +2395,9 @@ kind = "normative-requirement"
     cases += 1
 
     try:
-        validate_closure(root, 9, "2" * 40)
+        validate_closure(root, 10, "2" * 40)
     except EvidenceError as error:
-        if "only Stages 00 through 08" not in str(error):
+        if "only Stages 00 through 09" not in str(error):
             raise EvidenceError(
                 f"self-test 'unsupported closure stage' reached the wrong branch: {error}"
             ) from error

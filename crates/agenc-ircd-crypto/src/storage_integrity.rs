@@ -531,6 +531,21 @@ pub fn rekey_transform_profile_hash() -> Result<StorageDigest, CryptoError> {
     labeled_digest(REKEY_PROFILE_LABEL, &[])
 }
 
+/// Hashes one bounded immediate-successor migration registry with its schema axis.
+pub fn storage_migration_profile_hash(
+    source: u64,
+    target: u64,
+    registry: &[u8],
+) -> Result<StorageDigest, CryptoError> {
+    if source == 0 || source.checked_add(1) != Some(target) || registry.len() > 65_536 {
+        return Err(CryptoError::InvalidEncoding);
+    }
+    labeled_digest(
+        b"agenc-chat storage migration profile v1",
+        &[&source.to_be_bytes(), &target.to_be_bytes(), registry],
+    )
+}
+
 /// Incremental SHA-256 state for an explicitly bounded backup stream.
 pub struct BackupStreamHasher {
     hasher: Sha256,

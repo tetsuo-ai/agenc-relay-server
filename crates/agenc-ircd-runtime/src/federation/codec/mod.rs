@@ -7,6 +7,7 @@
 //! already enforced lengths, so the checks here are semantic only.
 
 pub(crate) mod events;
+pub(crate) mod history;
 pub(crate) mod operations;
 pub(crate) mod projection;
 pub(crate) mod results;

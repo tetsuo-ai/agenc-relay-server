@@ -159,7 +159,13 @@ fn admit(
     match (table, value.record_kind()) {
         (TableId::FederationPeer, PEER_RECORD_KIND) => admit_peer(coordinator, context, key, value),
         (TableId::FederationOrigin, ORIGIN_RECORD_KIND) => admit_origin(coordinator, key, value),
-        (TableId::RequestResult, COORDINATOR_RESULT_KIND) => admit_result(coordinator, key, value),
+        (TableId::RequestResult, COORDINATOR_RESULT_KIND) => {
+            admit_result(coordinator, context, key, value)
+        }
+        (
+            TableId::RequestResult,
+            agenc_ircd_storage::history_records::HISTORY_COORDINATOR_RESULT_KIND,
+        ) => admit_result(coordinator, context, key, value),
         (TableId::EdgeProjection, PROJECTION_ENTRY_KIND) => admit_entry(context, key, value),
         (TableId::EdgeProjection, PROJECTION_MARKER_KIND) => admit_marker(coordinator, key, value),
         (TableId::E2eeObject | TableId::E2eeState, _) => {
@@ -292,12 +298,16 @@ fn admit_origin(
 
 fn admit_result(
     coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
     key: &StoredKey,
     value: &PersistentRecordValue,
 ) {
-    let Ok(record) = CoordinatorResultRecord::decode(value.body()) else {
+    let Some((request_id, request_object_id)) = result_identity(key, value) else {
         return;
     };
+    if !retain_history_result(context, value) {
+        return;
+    }
     let bytes = key.as_bytes();
     let (Some(home), Some(incarnation), Some(origin)) = (
         bytes
@@ -334,14 +344,13 @@ fn admit_result(
     coordinator.retained.insert(
         key,
         RetainedRequest {
-            request_id: agenc_ircd_types::RequestId::from_bytes(record.request_id),
-            request_object_id: record.request_object_id,
+            request_id: agenc_ircd_types::RequestId::from_bytes(request_id),
+            request_object_id,
         },
     );
-    coordinator.origins.restore_request_id(
-        agenc_ircd_types::RequestId::from_bytes(record.request_id),
-        key,
-    );
+    coordinator
+        .origins
+        .restore_request_id(agenc_ircd_types::RequestId::from_bytes(request_id), key);
 }
 
 /// Restores the durable READY identity of the peer's current generation so
@@ -404,4 +413,47 @@ fn admit_entry(context: &mut StateCoreContext, key: &StoredKey, value: &Persiste
     if let Some(projector) = context.federation_mut() {
         projector.restore_key(parts.target, &projection);
     }
+}
+
+fn result_identity(key: &StoredKey, value: &PersistentRecordValue) -> Option<([u8; 16], [u8; 32])> {
+    Some(match value.record_kind() {
+        agenc_ircd_storage::history_records::HISTORY_COORDINATOR_RESULT_KIND => {
+            let Ok(record) =
+                agenc_ircd_storage::history_records::HistoryCoordinatorResultRecord::decode(
+                    value.body(),
+                )
+            else {
+                return None;
+            };
+            if key.as_bytes() != record.request.replay_key {
+                return None;
+            }
+            (record.request.request_id, record.request.request_object_id)
+        }
+        _ => {
+            let Ok(record) = CoordinatorResultRecord::decode(value.body()) else {
+                return None;
+            };
+            (record.request_id, record.request_object_id)
+        }
+    })
+}
+
+fn retain_history_result(context: &mut StateCoreContext, value: &PersistentRecordValue) -> bool {
+    use agenc_ircd_storage::history_records::{
+        HISTORY_COORDINATOR_RESULT_KIND, HistoryCoordinatorResultRecord, HistoryResultStatus,
+    };
+    if value.record_kind() != HISTORY_COORDINATOR_RESULT_KIND {
+        return true;
+    }
+    let Ok(record) = HistoryCoordinatorResultRecord::decode(value.body()) else {
+        return false;
+    };
+    record.status != HistoryResultStatus::Available
+        || context
+            .history_result_retained(
+                agenc_ircd_types::ChannelInstanceId::from_bytes(record.page.channel_id),
+                true,
+            )
+            .is_ok()
 }

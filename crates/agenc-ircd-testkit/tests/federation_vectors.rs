@@ -13,7 +13,7 @@ const VECTORS: &str = include_str!("../../../test-data/vectors/base-federation-v
 #[test]
 fn every_schema_decodes_and_reencodes_its_independent_vector() -> Result<(), Box<dyn Error>> {
     let vectors = parse_reference_vectors(VECTORS)?;
-    assert_eq!(vectors.len(), 128);
+    assert_eq!(vectors.len(), 132);
     assert_eq!(vectors.len(), SCHEMA_REGISTRY.len());
     let mut identifiers = BTreeSet::new();
     let mut schemas = BTreeSet::new();

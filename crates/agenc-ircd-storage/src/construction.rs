@@ -286,7 +286,11 @@ impl StorageConstructionPlanEntry {
         action: StorageConstructionAction,
         transform_rule_id: u16,
     ) -> Result<Self, StorageError> {
-        if sources.len() > 2 || target_record_schema == 0 || !is_construction_target(target_table) {
+        if sources.len() > 2
+            || target_record_schema == 0
+            || !is_construction_target(target_table)
+            || (kind == StorageConstructionKind::Migrate && target_record_schema != 1)
+        {
             return Err(StorageError::InvalidEncoding);
         }
         sources.sort_by(|left, right| left.identity().cmp(&right.identity()));
@@ -483,6 +487,14 @@ impl StorageOperationIdentity {
                 if self.source_stream_digest.is_none()
                     && self.target_schema_generation == self.source_schema_generation
                     && self.transform_profile_hash == rekey_transform_profile_hash()? =>
+            {
+                Ok(())
+            }
+            StorageConstructionKind::Migrate
+                if self.source_stream_digest.is_none()
+                    && self.source_schema_generation == 1
+                    && self.target_schema_generation == 2
+                    && self.transform_profile_hash == crate::migration::profile_hash()? =>
             {
                 Ok(())
             }
@@ -796,7 +808,7 @@ fn validate_action(
             Ok(())
         }
         (StorageConstructionKind::Migrate, StorageConstructionAction::MigrateTransform)
-            if rule_id != 0 =>
+            if crate::migration::valid_rule_sources(sources, target, rule_id) =>
         {
             Ok(())
         }

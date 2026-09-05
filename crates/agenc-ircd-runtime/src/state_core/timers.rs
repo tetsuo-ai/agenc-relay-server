@@ -285,7 +285,8 @@ pub enum DriftTransition {
 /// Compares wall elapsed time with monotonic elapsed time.
 ///
 /// While trusted, the monitor measures the wall clock against the anchor
-/// taken when trust was last established. Disagreement above one second
+/// taken when trust was last established. A disagreement above five minutes
+/// withdraws trust immediately. Smaller disagreement above one second
 /// that persists for five minutes withdraws trust. While untrusted, the
 /// first agreeing observation re-anchors, and ten continuous minutes of
 /// agreement with a wall value no lower than the last accepted one restore
@@ -353,6 +354,22 @@ impl DriftMonitor {
         self.observe_untrusted(monotonic, wall, agrees)
     }
 
+    /// Rejects a large new jump at a retention boundary between periodic observations.
+    #[must_use]
+    pub fn accepts_wall(self, monotonic: MonotonicTick, wall: UtcSecond) -> bool {
+        self.trusted
+            && wall >= self.last_accepted_wall
+            && self.disagreement_seconds(monotonic, wall) <= 300
+    }
+
+    fn disagreement_seconds(self, monotonic: MonotonicTick, wall: UtcSecond) -> u64 {
+        let elapsed = monotonic.get().saturating_sub(self.anchor_monotonic.get()) / 1_000;
+        self.anchor_wall
+            .get()
+            .saturating_add(elapsed)
+            .abs_diff(wall.get())
+    }
+
     fn agrees(self, monotonic: MonotonicTick, wall: UtcSecond) -> bool {
         let monotonic_elapsed = monotonic.get().saturating_sub(self.anchor_monotonic.get()) / 1_000;
         let expected = self.anchor_wall.get().saturating_add(monotonic_elapsed);
@@ -371,6 +388,13 @@ impl DriftMonitor {
                 self.last_accepted_wall = wall;
             }
             return DriftTransition::Unchanged;
+        }
+        let severe = wall.is_some_and(|wall| self.disagreement_seconds(monotonic, wall) > 300);
+        if severe {
+            self.trusted = false;
+            self.disagreement_since = None;
+            self.agreement_since = None;
+            return DriftTransition::Distrusted;
         }
         let since = *self.disagreement_since.get_or_insert(monotonic);
         if monotonic.get().saturating_sub(since.get()) >= DRIFT_DISTRUST_MILLIS {
@@ -520,18 +544,9 @@ mod tests {
             DriftTransition::Unchanged
         );
         assert_eq!(monitor.last_accepted_wall(), wall(1_121));
-        // A ten-minute forward jump disagrees; it must persist five minutes.
+        // A ten-minute forward jump withdraws trust at the first observation.
         assert_eq!(
             monitor.observe(tick(180_000), Some(wall(1_780))),
-            DriftTransition::Unchanged
-        );
-        assert_eq!(
-            monitor.observe(tick(479_999), Some(wall(2_080))),
-            DriftTransition::Unchanged
-        );
-        assert!(monitor.wall_trusted());
-        assert_eq!(
-            monitor.observe(tick(480_000), Some(wall(2_080))),
             DriftTransition::Distrusted
         );
         assert!(!monitor.wall_trusted());
@@ -557,11 +572,6 @@ mod tests {
     #[test]
     fn recovery_restarts_on_disagreement_unreadable_clock_or_backward_wall() {
         let mut monitor = DriftMonitor::new(tick(0), wall(5_000));
-        // Disagreement begins at 60 s and reaches five minutes at 360 s.
-        for step in 1..=5 {
-            monitor.observe(tick(step * 60_000), Some(wall(9_000 + step * 60)));
-            assert!(monitor.wall_trusted(), "{step}");
-        }
         assert_eq!(
             monitor.observe(tick(360_000), Some(wall(9_360))),
             DriftTransition::Distrusted

@@ -593,6 +593,10 @@ pub(crate) enum ReadPlanKind {
         table: TableId,
         key: StoredKey,
     },
+    ExactKeys {
+        table: TableId,
+        keys: Vec<StoredKey>,
+    },
     Range {
         table: TableId,
         start: StoredKey,
@@ -602,6 +606,25 @@ pub(crate) enum ReadPlanKind {
 }
 
 impl ReadPlan {
+    /// Reads 1..100 unique keys in one consistent transaction, preserving input order.
+    /// Missing rows are omitted. The caller must verify its expected identities before use.
+    /// Unlike range reads, exceeding the aggregate byte ceiling fails the whole read.
+    pub fn exact_keys(table: TableId, keys: Vec<StoredKey>) -> Result<Self, StorageError> {
+        if keys.is_empty() || keys.len() > crate::history_records::MAX_HISTORY_QUERY_MESSAGES {
+            return Err(StorageError::LimitExceeded);
+        }
+        let mut unique = BTreeSet::new();
+        for key in &keys {
+            crate::table_schema(table).validate_key(key.as_bytes())?;
+            if !unique.insert(key) {
+                return Err(StorageError::InvalidEncoding);
+            }
+        }
+        Ok(Self {
+            kind: ReadPlanKind::ExactKeys { table, keys },
+        })
+    }
+
     /// Creates one exact read request.
     #[must_use]
     pub fn exact(table: TableId, key: StoredKey) -> Self {

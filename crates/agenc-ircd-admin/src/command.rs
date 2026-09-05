@@ -150,6 +150,13 @@ pub enum AdminCommand {
         /// Operator reason.
         reason: Reason,
     },
+    /// `CHANNEL HISTORY PURGE <ChannelInstanceId> :reason` (channels, confirmed).
+    ChannelHistoryPurge {
+        /// The exact channel instance whose retained plaintext is deleted.
+        channel: ChannelInstanceId,
+        /// Operator reason.
+        reason: Reason,
+    },
     /// `CONNECT <ServerId> :reason` (federation).
     Connect {
         /// The configured peer.
@@ -205,6 +212,10 @@ impl AdminCommand {
                 channel: ChannelInstanceId::parse(channel).map_err(map_validation)?,
                 reason: reason_text(reason)?,
             }),
+            ("CHANNEL", ["HISTORY", "PURGE", channel, reason]) => Ok(Self::ChannelHistoryPurge {
+                channel: ChannelInstanceId::parse(channel).map_err(map_validation)?,
+                reason: reason_text(reason)?,
+            }),
             ("CONNECT", [server, reason]) => Ok(Self::Connect {
                 server: ServerId::parse(server).map_err(map_validation)?,
                 reason: reason_text(reason)?,
@@ -256,7 +267,7 @@ impl AdminCommand {
             Self::Rehash(_) => "REHASH",
             Self::Kill { .. } => "KILL",
             Self::AccountSuspend { .. } | Self::AccountRestore { .. } => "ACCOUNT",
-            Self::ChannelQuarantine { .. } => "CHANNEL",
+            Self::ChannelQuarantine { .. } | Self::ChannelHistoryPurge { .. } => "CHANNEL",
             Self::Connect { .. } => "CONNECT",
             Self::Squit { .. } => "SQUIT",
             Self::PeerQuarantine { .. } => "PEER",
@@ -286,7 +297,9 @@ impl AdminCommand {
             Self::AccountSuspend { .. } | Self::AccountRestore { .. } => {
                 Some(AdminPermission::Accounts)
             }
-            Self::ChannelQuarantine { .. } => Some(AdminPermission::Channels),
+            Self::ChannelQuarantine { .. } | Self::ChannelHistoryPurge { .. } => {
+                Some(AdminPermission::Channels)
+            }
             Self::Connect { .. } | Self::Squit { .. } | Self::PeerQuarantine { .. } => {
                 Some(AdminPermission::Federation)
             }
@@ -300,7 +313,10 @@ impl AdminCommand {
     #[must_use]
     pub const fn needs_confirmation(&self) -> bool {
         match self {
-            Self::Die(_) | Self::Restart(_) | Self::PeerQuarantine { .. } => true,
+            Self::Die(_)
+            | Self::Restart(_)
+            | Self::PeerQuarantine { .. }
+            | Self::ChannelHistoryPurge { .. } => true,
             Self::AccountSuspend { seconds, .. } => seconds.needs_confirmation(),
             _ => false,
         }
@@ -351,6 +367,30 @@ mod tests {
 
     fn parse(text: &str) -> Result<AdminCommand, AdminError> {
         AdminCommand::parse(CanonicalCommand::check(text.as_bytes())?)
+    }
+
+    #[test]
+    fn history_purge_requires_exact_channel_permission_and_confirmation() -> Result<(), AdminError>
+    {
+        let command = parse("CHANNEL HISTORY PURGE AQEBAQEBAQEBAQEBAQEBAQ :retention request")?;
+        assert!(matches!(command, AdminCommand::ChannelHistoryPurge { .. }));
+        assert_eq!(
+            command.required_permission(),
+            Some(AdminPermission::Channels)
+        );
+        assert!(command.needs_confirmation());
+        assert!(!command.is_read_only());
+        assert_eq!(command.verb(), "CHANNEL");
+        for invalid in [
+            "CHANNEL HISTORY PURGE #channel :reason",
+            "CHANNEL HISTORY PURGE AQEBAQEBAQEBAQEBAQEBAQ",
+            "CHANNEL HISTORY PURGE AQEBAQEBAQEBAQEBAQEBAQ :",
+            "CHANNEL HISTORY PURGE AQEBAQEBAQEBAQEBAQEBAQ extra :reason",
+            "CHANNEL HISTORY DELETE AQEBAQEBAQEBAQEBAQEBAQ :reason",
+        ] {
+            assert!(parse(invalid).is_err(), "{invalid}");
+        }
+        Ok(())
     }
 
     const USER: &str = "AAAAAAAAAAAAAAAAAAAAAA";

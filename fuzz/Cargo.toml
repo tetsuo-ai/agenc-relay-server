@@ -8,6 +8,10 @@ publish = false
 [package.metadata]
 cargo-fuzz = true
 
+[features]
+default = []
+wss = ["agenc-ircd-client-wire/wss"]
+
 [dependencies]
 agenc-ircd-client-wire = { version = "=0.0.0", path = "../crates/agenc-ircd-client-wire" }
 agenc-ircd-admin = { version = "=0.0.0", path = "../crates/agenc-ircd-admin" }
@@ -135,6 +139,29 @@ bench = false
 [[bin]]
 name = "e2ee_tags"
 path = "fuzz_targets/e2ee_tags.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wss_upgrade"
+path = "fuzz_targets/wss_upgrade.rs"
+required-features = ["wss"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wss_frame"
+path = "fuzz_targets/wss_frame.rs"
+required-features = ["wss"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "history_records"
+path = "fuzz_targets/history_records.rs"
 test = false
 doc = false
 bench = false

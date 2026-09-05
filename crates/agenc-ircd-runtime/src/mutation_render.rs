@@ -1284,6 +1284,7 @@ fn render_channel_control(
         ChannelCommand::Register(channel_id)
         | ChannelCommand::Unregister(channel_id)
         | ChannelCommand::History(channel_id, _) => channel_id,
+        ChannelCommand::HistoryDefault(_) => return Err(RuntimeError::InvalidValue),
     };
     require_event(plan, DomainEvent::ChannelPolicyChanged(channel_id))?;
     // A federated origin has no reply connection here; its home edge
@@ -1370,7 +1371,7 @@ fn session_prefix(session: &agenc_ircd_domain::SessionState) -> Result<String, R
     ))
 }
 
-fn server_time(timestamp: UtcSecond) -> Result<String, RuntimeError> {
+pub(crate) fn server_time(timestamp: UtcSecond) -> Result<String, RuntimeError> {
     let seconds = timestamp.get();
     let days = seconds / 86_400;
     let day_seconds = seconds % 86_400;

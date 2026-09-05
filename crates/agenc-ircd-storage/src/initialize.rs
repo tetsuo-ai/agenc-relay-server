@@ -105,8 +105,28 @@ pub enum StorageInitializationOutcome {
 }
 
 /// Initializes one empty database transaction and then installs its first guard.
-// agenc-review: focus owner=storage reviewed=2026-08-27 reason=sequence-zero construction must retain one linear nonce-charge-commit transcript
 pub fn initialize_storage(
+    config: StorageInitializationConfig,
+) -> Result<StorageInitializationOutcome, StorageError> {
+    if config.header_tbs.schema_generation != crate::SCHEMA_GENERATION {
+        return Err(StorageError::UnsupportedVersion);
+    }
+    initialize_storage_inner(config)
+}
+
+/// Creates source-generation fixtures through the unchanged authenticated seal path.
+#[cfg(test)]
+pub(crate) fn initialize_legacy_test_storage(
+    config: StorageInitializationConfig,
+) -> Result<StorageInitializationOutcome, StorageError> {
+    if config.header_tbs.schema_generation != 1 {
+        return Err(StorageError::UnsupportedVersion);
+    }
+    initialize_storage_inner(config)
+}
+
+// agenc-review: focus owner=storage reviewed=2026-09-04 reason=sequence-zero construction retains the existing linear nonce-charge-commit transcript after explicit schema admission
+fn initialize_storage_inner(
     mut config: StorageInitializationConfig,
 ) -> Result<StorageInitializationOutcome, StorageError> {
     let limits = config.limits.validate()?;
@@ -519,7 +539,7 @@ mod tests {
             ServerIncarnation::from_bytes([3; 16]),
             database,
             1,
-            1,
+            crate::SCHEMA_GENERATION,
             RecoveryEpoch::from_bytes([4; 16]),
         )?;
         Ok(DatabaseHeader::new(tbs, StorageDigest::from_bytes([5; 32])))
@@ -533,8 +553,8 @@ mod tests {
             target_database_header_hash: ZERO,
             source_rollback_guard_hash: ZERO,
             source_stream_digest: None,
-            source_schema_generation: 1,
-            target_schema_generation: 1,
+            source_schema_generation: crate::SCHEMA_GENERATION,
+            target_schema_generation: crate::SCHEMA_GENERATION,
             transform_profile_hash: rekey_transform_profile_hash()?,
             target_database_instance_id: database,
             source_master_key_id: ZERO,

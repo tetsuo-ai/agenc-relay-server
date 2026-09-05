@@ -251,6 +251,8 @@ impl QueueReservationLedger for QueueShared {
 
 /// The writer queue of one admitted connection.
 pub struct WriterQueue {
+    #[cfg(feature = "wss")]
+    registration_started: std::sync::OnceLock<std::time::Instant>,
     generation: ConnectionGeneration,
     limits: QueueLimits,
     runtime_config: Option<RuntimeConfigHandle>,
@@ -259,6 +261,11 @@ pub struct WriterQueue {
 }
 
 impl WriterQueue {
+    #[cfg(feature = "wss")]
+    pub(crate) fn set_registration_started(&self, started: std::time::Instant) {
+        let _ = self.registration_started.set(started);
+    }
+
     /// Creates a queue whose slots are backed by exactly `backing`, the
     /// permit for [`QueueLimits::backing_charge`].
     pub fn new(
@@ -292,6 +299,8 @@ impl WriterQueue {
             .try_reserve_exact(limits.items())
             .map_err(|_| RuntimeError::MemoryExhausted)?;
         Ok(Arc::new(Self {
+            #[cfg(feature = "wss")]
+            registration_started: std::sync::OnceLock::new(),
             generation,
             limits,
             runtime_config,
@@ -503,6 +512,13 @@ impl WriterQueue {
 }
 
 impl ClientSink for WriterQueue {
+    #[cfg(feature = "wss")]
+    fn registration_elapsed_millis(&self) -> u64 {
+        self.registration_started.get().map_or(0, |started| {
+            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+        })
+    }
+
     fn generation(&self) -> ConnectionGeneration {
         self.generation
     }
@@ -657,6 +673,24 @@ mod tests {
             .map_err(|_| RuntimeError::InvalidValue)?;
         let bound = BoundedSharedClientFrames::for_reservation(&prepared, frames)?;
         queue.commit(prepared, bound);
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "wss")]
+    fn tls_registration_start_is_immutable_and_tcp_elapsed_stays_zero() -> Result<(), RuntimeError>
+    {
+        let budget = budget();
+        let queue = queue(&budget, 1, QueueLimits::DEFAULT)?;
+        assert_eq!(queue.registration_elapsed_millis(), 0);
+        let now = std::time::Instant::now();
+        queue.set_registration_started(
+            now.checked_sub(std::time::Duration::from_secs(31))
+                .ok_or(RuntimeError::InvalidValue)?,
+        );
+        assert!(queue.registration_elapsed_millis() >= 31_000);
+        queue.set_registration_started(now);
+        assert!(queue.registration_elapsed_millis() >= 31_000);
         Ok(())
     }
 

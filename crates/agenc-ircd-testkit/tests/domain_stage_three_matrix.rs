@@ -986,7 +986,7 @@ fn topic_history_queries_sanctions_and_part_all_cover_closed_policies() -> Resul
     assert_eq!(query.charges().len(), 2);
     assert!(matches!(
         query.command().view(),
-        CanonicalCommandView::Chathistory(current, 100) if current == channel
+        CanonicalCommandView::Chathistory(current, query) if current == channel && query.limit() == 100
     ));
     assert_eq!(
         plan(

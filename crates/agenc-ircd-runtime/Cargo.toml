@@ -5,6 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+history = ["agenc-ircd-domain/history", "agenc-ircd-federation-wire/history", "agenc-ircd-config/history", "agenc-ircd-client-wire/history"]
+wss = ["agenc-ircd-client-wire/wss", "agenc-ircd-config/wss", "agenc-ircd-crypto/wss"]
+
 [dependencies]
 agenc-ircd-admin.workspace = true
 agenc-ircd-auth.workspace = true

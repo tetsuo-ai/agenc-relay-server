@@ -2,6 +2,13 @@
 //! and TLS transports, and an authenticated on-disk database.
 #![forbid(unsafe_code)]
 
+#[path = "stage_six_daemon/address_pool.rs"]
+mod address_pool;
+
+#[cfg(feature = "history")]
+#[path = "stage_six_daemon/history.rs"]
+mod history;
+
 use std::error::Error;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read as _, Write as _};
@@ -829,10 +836,7 @@ fn initialize_database(
 }
 
 fn reserve_loopback_address() -> TestResult<SocketAddr> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    let address = listener.local_addr()?;
-    drop(listener);
-    Ok(address)
+    address_pool::reserve()
 }
 
 fn replace_once(document: &mut String, old: &str, new: &str) -> TestResult {
@@ -1041,8 +1045,24 @@ fn connect_admin(path: &Path) -> TestResult<UnixStream> {
     }
 }
 
+#[cfg(feature = "wss")]
+#[path = "stage_six_daemon/wss.rs"]
+mod wss;
+
+#[derive(Clone, Copy)]
+enum ClientTransport {
+    Tcp,
+    #[cfg(feature = "wss")]
+    TextWebSocket,
+    #[cfg(feature = "wss")]
+    BinaryWebSocket,
+}
+
+trait ClientIo: io::Read + io::Write {}
+impl<T: io::Read + io::Write> ClientIo for T {}
+
 struct IrcClient {
-    reader: BufReader<TlsClient>,
+    reader: BufReader<Box<dyn ClientIo>>,
 }
 
 #[derive(Clone, Copy)]
@@ -1084,6 +1104,10 @@ impl AccountPhase {
 
 impl IrcClient {
     fn connect(fixture: &LiveFixture) -> TestResult<Self> {
+        Self::connect_transport(fixture, ClientTransport::Tcp)
+    }
+
+    fn connect_transport(fixture: &LiveFixture, transport: ClientTransport) -> TestResult<Self> {
         let deadline = Instant::now() + START_TIMEOUT;
         let socket = loop {
             match TcpStream::connect(fixture.public_address) {
@@ -1100,11 +1124,30 @@ impl IrcClient {
         socket.set_read_timeout(Some(IO_TIMEOUT))?;
         socket.set_write_timeout(Some(IO_TIMEOUT))?;
         let name = ServerName::try_from(DNS_NAME.to_owned())?;
-        let connection = ClientConnection::new(fixture.client_config()?, name)?;
+        let client_config = fixture.client_config()?;
+        #[cfg(feature = "wss")]
+        let client_config = if matches!(
+            transport,
+            ClientTransport::TextWebSocket | ClientTransport::BinaryWebSocket
+        ) {
+            let mut config = (*client_config).clone();
+            config.alpn_protocols = vec![b"http/1.1".to_vec()];
+            Arc::new(config)
+        } else {
+            client_config
+        };
+        let connection = ClientConnection::new(client_config, name)?;
         let mut stream = StreamOwned::new(connection, socket);
         while stream.conn.is_handshaking() {
             stream.conn.complete_io(&mut stream.sock)?;
         }
+        let stream: Box<dyn ClientIo> = match transport {
+            ClientTransport::Tcp => Box::new(stream),
+            #[cfg(feature = "wss")]
+            ClientTransport::TextWebSocket | ClientTransport::BinaryWebSocket => {
+                Box::new(wss::WebSocketClient::upgrade(stream, transport)?)
+            }
+        };
         Ok(Self {
             reader: BufReader::new(stream),
         })
@@ -2660,3 +2703,6 @@ fn production_daemon_credential_and_lookup_edges_fail_closed() -> TestResult {
     assert!(daemon.wait()?.success());
     Ok(())
 }
+
+#[path = "stage_six_daemon/profile_matrix.rs"]
+mod profile_matrix;

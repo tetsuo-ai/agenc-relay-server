@@ -1,0 +1,11 @@
+schema_version = 1
+
+[[dependency]]
+name = "aws-lc-rs"
+version = "1.18.0"
+checksum = "ce2b2dcc879c3bae0d371e77c99f2238400ef24ec001394befa67b6e543add9e"
+default_features = false
+features = ["non-fips"]
+scope = "optional-wss"
+purpose = "RFC 6455 accept digest over the public handshake nonce through the private crypto adapter; reuses the locked TLS provider"
+reviewed_on = "2026-09-04"

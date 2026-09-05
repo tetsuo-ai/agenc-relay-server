@@ -156,8 +156,9 @@ pub(crate) enum FederatedOperation {
     HistoryQuery {
         session_id: SessionId,
         channel_id: ChannelInstanceId,
-        selector: SchemaObject,
+        selector: agenc_ircd_federation_wire::HistorySelectorObject,
         limit: u16,
+        cursor: Option<[u8; 32]>,
     },
     DirectoryQuery {
         session_id: SessionId,
@@ -493,11 +494,13 @@ impl FederatedOperation {
                 channel_id,
                 selector,
                 limit,
+                cursor,
             } => vec![
                 opaque(session_id.as_bytes())?,
                 opaque(channel_id.as_bytes())?,
-                WireValue::Structure(selector.try_clone()?),
+                WireValue::Structure(selector.as_object().try_clone()?),
                 unsigned_value(u64::from(*limit)),
+                opaque(cursor.as_ref().map_or(&[], |cursor| cursor.as_slice()))?,
             ],
             Self::DirectoryQuery { session_id, query } => vec![
                 opaque(session_id.as_bytes())?,
@@ -640,8 +643,11 @@ impl FederatedOperation {
             FederationOpcode::HistoryQuery => Self::HistoryQuery {
                 session_id: session_of(object)?,
                 channel_id: channel_of(object)?,
-                selector: structure(object, "selector")?.try_clone()?,
+                selector: agenc_ircd_federation_wire::HistorySelectorObject::new(
+                    structure(object, "selector")?.try_clone()?,
+                )?,
                 limit: unsigned_u16(object, "limit")?,
+                cursor: agenc_ircd_federation_wire::access::optional_fixed(object, "cursor")?,
             },
             FederationOpcode::DirectoryQuery => Self::DirectoryQuery {
                 session_id: session_of(object)?,

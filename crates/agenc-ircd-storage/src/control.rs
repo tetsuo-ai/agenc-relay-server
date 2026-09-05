@@ -99,15 +99,21 @@ impl DatabaseHeaderTbs {
         {
             return Err(StorageError::UnsupportedVersion);
         }
-        Self::new(
-            NetworkId::from_bytes(decoder.array()?),
-            ServerId::from_bytes(decoder.array()?),
-            ServerIncarnation::from_bytes(decoder.array()?),
-            DatabaseId::from_bytes(decoder.array()?),
-            decoder.u32()?,
-            decoder.u64()?,
-            RecoveryEpoch::from_bytes(decoder.array()?),
-        )
+        let value = Self {
+            network_id: NetworkId::from_bytes(decoder.array()?),
+            server_id: ServerId::from_bytes(decoder.array()?),
+            server_incarnation: ServerIncarnation::from_bytes(decoder.array()?),
+            database_instance_id: DatabaseId::from_bytes(decoder.array()?),
+            storage_key_generation: decoder.u32()?,
+            schema_generation: decoder.u64()?,
+            recovery_epoch: RecoveryEpoch::from_bytes(decoder.array()?),
+        };
+        // Neutral control decoding serves authenticated backup and migration readers.
+        // The engine separately requires the exact generation for its open mode.
+        if value.storage_key_generation == 0 || !matches!(value.schema_generation, 1 | 2) {
+            return Err(StorageError::UnsupportedVersion);
+        }
+        Ok(value)
     }
 }
 
@@ -379,7 +385,7 @@ pub struct RollbackGuardTbs {
 impl RollbackGuardTbs {
     fn encode(&self) -> Result<Vec<u8>, StorageError> {
         if self.storage_key_generation == 0
-            || self.schema_generation != SCHEMA_GENERATION
+            || !matches!(self.schema_generation, 1 | 2)
             || self.nonce_draw_high_water > MAX_NONCE_DRAWS
             || self.nonce_reservation_start > self.nonce_draw_high_water
         {
@@ -444,6 +450,24 @@ pub struct RollbackGuard {
 }
 
 impl RollbackGuard {
+    /// Authenticates the guard's immutable identity before a database is opened writable.
+    pub(crate) fn decode_with_root(
+        encoded: &[u8],
+        root: &agenc_ircd_crypto::RollbackGuardRootKey,
+    ) -> Result<Self, StorageError> {
+        if encoded.len() != ROLLBACK_GUARD_BYTES {
+            return Err(StorageError::InvalidEncoding);
+        }
+        let tbs = RollbackGuardTbs::decode(&mut Decoder::new(encoded))?;
+        let context = agenc_ircd_crypto::StorageIntegrityContext::new(
+            tbs.network_id,
+            tbs.server_id,
+            tbs.database_instance_id,
+        );
+        let keys = agenc_ircd_crypto::derive_storage_integrity_keys(root, context)?;
+        Self::decode_and_verify(encoded, &keys)
+    }
+
     /// Authenticates one complete guard state.
     pub fn authenticate(
         tbs: RollbackGuardTbs,

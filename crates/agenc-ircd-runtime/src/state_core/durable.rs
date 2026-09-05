@@ -614,6 +614,7 @@ const fn account_service_table(table: TableId) -> bool {
             | TableId::EdgeProjection
             | TableId::E2eeObject
             | TableId::E2eeState
+            | TableId::History
     )
 }
 
@@ -845,7 +846,7 @@ pub(crate) fn project_admin_audit_event(
 pub(crate) fn project_admin_mutation_event(
     transaction_id: TransactionId,
     event: &AdminAuditEvent,
-    after_image: &AdminMutationAfterImage,
+    after_image: (&AdminMutationAfterImage, &[AccountServiceDurableWrite]),
     index: &DurableIndex,
     keys: &KeyDeriver,
     head: HeadCounters,
@@ -920,7 +921,7 @@ pub(crate) fn project_admin_policy_backfill(
 fn project_admin_event(
     transaction_id: TransactionId,
     event: &AdminAuditEvent,
-    after_image: Option<&AdminMutationAfterImage>,
+    after_image: Option<(&AdminMutationAfterImage, &[AccountServiceDurableWrite])>,
     index: &DurableIndex,
     keys: &KeyDeriver,
     head: HeadCounters,
@@ -945,17 +946,7 @@ fn project_admin_event(
         updates: Vec::new(),
         touched: BTreeSet::new(),
     };
-    let advancing_plans = match after_image {
-        Some(AdminMutationAfterImage::Account(account)) => {
-            projection.put_account(account, account.revision.get())?;
-            1
-        }
-        Some(AdminMutationAfterImage::Channel(channel)) => {
-            projection.put_channel(channel, channel.revision.get())?;
-            1
-        }
-        None => 0,
-    };
+    let advancing_plans = project_admin_after_image(&mut projection, after_image)?;
     projection.put(TableId::Audit, key, value)?;
     let batch = StorageMutationBatch::new(
         StorageMutationHead {
@@ -987,6 +978,29 @@ fn project_admin_event(
         updates: projection.updates,
         advancing_plans,
     })
+}
+
+fn project_admin_after_image(
+    projection: &mut Projection<'_>,
+    mutation: Option<(&AdminMutationAfterImage, &[AccountServiceDurableWrite])>,
+) -> Result<u16, RuntimeError> {
+    let Some((after_image, writes)) = mutation else {
+        return Ok(0);
+    };
+    let revision = match after_image {
+        AdminMutationAfterImage::Account(account) => {
+            projection.put_account(account, account.revision.get())?;
+            account.revision.get()
+        }
+        AdminMutationAfterImage::Channel(channel) => {
+            projection.put_channel(channel, channel.revision.get())?;
+            channel.revision.get()
+        }
+    };
+    for write in writes {
+        projection.project_account_service_write(write, revision)?;
+    }
+    Ok(1)
 }
 
 /// Replaces one verified, nonempty retained audit prefix with one signed
@@ -1576,7 +1590,7 @@ mod tests {
         let projected = project_admin_mutation_event(
             TransactionId::from_bytes([26; 16]),
             &audit_event()?,
-            &AdminMutationAfterImage::Account(account),
+            (&AdminMutationAfterImage::Account(account), &[]),
             &DurableIndex::new(),
             &keys()?,
             head(0, 0),

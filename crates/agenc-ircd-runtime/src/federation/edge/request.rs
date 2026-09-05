@@ -218,7 +218,7 @@ pub(super) fn delete_origin(
 
 /// Encodes one request for the connection's origin, consuming the next
 /// operation sequence.
-fn prepare_request(
+pub(super) fn prepare_request(
     edge: &mut EdgeFederation,
     context: &mut StateCoreContext,
     generation: ConnectionGeneration,
@@ -254,7 +254,7 @@ fn prepare_request(
 }
 
 /// Registers a prepared request as pending and transmits it.
-fn register_request(
+pub(super) fn register_request(
     edge: &mut EdgeFederation,
     context: &mut StateCoreContext,
     generation: ConnectionGeneration,
@@ -468,6 +468,9 @@ pub(super) fn send_command(
         Ok(operation) => operation,
         Err(error) => return Err((message, error)),
     };
+    if matches!(operation, FederatedOperation::HistoryQuery { .. }) {
+        return super::history::begin(edge, context, generation, message, operation);
+    }
     let Ok(prepared) = prepare_request(edge, context, generation, &operation) else {
         return Err((message, DomainError::ServerBusy));
     };
@@ -499,7 +502,8 @@ fn channel_control_operation(
     let channel_id = match command {
         ChannelCommand::Register(channel_id)
         | ChannelCommand::Unregister(channel_id)
-        | ChannelCommand::History(channel_id, _) => channel_id,
+        | ChannelCommand::History(channel_id, _)
+        | ChannelCommand::HistoryDefault(channel_id) => channel_id,
     };
     let expected_channel_revision = edge
         .replica
@@ -522,6 +526,12 @@ fn channel_control_operation(
             channel_id,
             expected_channel_revision,
             setting_kind: crate::federation::codec::history_setting_kind(policy),
+        },
+        ChannelCommand::HistoryDefault(_) => FederatedOperation::ChannelSettings {
+            session_id,
+            channel_id,
+            expected_channel_revision,
+            setting_kind: 5,
         },
     })
 }
@@ -662,6 +672,16 @@ fn operation_of(
             expected_session_revision: session_revision(edge, user_id)?,
             display_name: display_name.as_str().to_owned(),
         }),
+        CanonicalCommandView::Chathistory(channel_id, query) => {
+            Ok(FederatedOperation::HistoryQuery {
+                session_id,
+                channel_id,
+                selector: crate::federation::codec::history::selector_object(query.selector())
+                    .map_err(|_| DomainError::InvalidArgument)?,
+                limit: query.limit(),
+                cursor: None,
+            })
+        }
         _ => Err(DomainError::BadState),
     }
 }
@@ -883,6 +903,9 @@ pub(super) fn receive_result(
     )
     .map_err(|_| Violation::Codec)?;
     validate_result_generation(edge, header.request_id, &arm)?;
+    if pending.header.opcode == agenc_ircd_types::FederationOpcode::HistoryQuery {
+        return super::history::receive(edge, context, header, object.object_id(), arm);
+    }
     let mut replies = Vec::new();
     for reply in agenc_ircd_federation_wire::access::vector(&result, "replies")
         .map_err(|_| Violation::Codec)?
@@ -1014,7 +1037,7 @@ pub(super) fn completed(
 
 /// Sends the connection's next deferred commands once nothing of its is
 /// in flight; a command that cannot be sent fails to the client in order.
-fn dispatch_deferred(
+pub(super) fn dispatch_deferred(
     edge: &mut EdgeFederation,
     context: &mut StateCoreContext,
     generation: ConnectionGeneration,

@@ -58,5 +58,5 @@ jobs:
           sudo docker image prune --all --force
           df -h /
 
-      - name: Run Stage 08 implementation checks
-        run: bash scripts/check-stage-eight.sh
+      - name: Run Stage 09 implementation checks
+        run: bash scripts/check-stage-nine.sh

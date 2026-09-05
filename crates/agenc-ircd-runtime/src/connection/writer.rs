@@ -68,7 +68,11 @@ async fn write_frame<W: AsyncWrite + Unpin>(
     transport: &mut W,
     bytes: &[u8],
 ) -> Result<(), CloseReason> {
-    match tokio::time::timeout(WRITE_STALL_BUDGET, transport.write_all(bytes)).await {
+    let write = async {
+        transport.write_all(bytes).await?;
+        transport.flush().await
+    };
+    match tokio::time::timeout(WRITE_STALL_BUDGET, write).await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(_)) => Err(CloseReason::TransportLoss),
         Err(_) => Err(CloseReason::WriteStall),

@@ -124,6 +124,7 @@ impl AdminPolicySeed {
             AdminCommand::ChannelQuarantine { channel, .. } => {
                 self.quarantined_channels.insert(channel);
             }
+            AdminCommand::ChannelHistoryPurge { .. } => {}
             _ => return Err(RuntimeError::InvalidValue),
         }
         Ok(())

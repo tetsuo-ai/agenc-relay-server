@@ -50,8 +50,9 @@ pub use storage_integrity::{
     backup_signing_key_id, database_header_hash, database_key_check, derive_storage_integrity_keys,
     integrity_checkpoint_hash, integrity_manifest_hash, nonce_reservation_hash,
     rekey_transform_profile_hash, restore_transform_profile_hash, rollback_guard_hash,
-    sealed_record_id, storage_operation_id, storage_operation_key_id, storage_output_path_hash,
-    storage_qualification_component_hash, tracked_record_commitment, tracked_state_digest,
+    sealed_record_id, storage_migration_profile_hash, storage_operation_id,
+    storage_operation_key_id, storage_output_path_hash, storage_qualification_component_hash,
+    tracked_record_commitment, tracked_state_digest,
 };
 pub use tls_ticket::{
     MAX_TLS_TICKET_BYTES, MAX_TLS_TICKET_PLAINTEXT_BYTES, OpenedTlsTicket, TlsTicketKey,
@@ -62,3 +63,8 @@ pub use worker::{
     CryptoPoolShutdown, CryptoPort, CryptoSubmissionError, CryptoWorkerConfig,
     JobCancellationToken, JobClass, JobHandle,
 };
+
+#[cfg(feature = "wss")]
+mod websocket;
+#[cfg(feature = "wss")]
+pub use websocket::websocket_accept_digest;

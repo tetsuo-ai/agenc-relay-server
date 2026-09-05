@@ -2170,3 +2170,7 @@ async fn a_forwarded_authentication_start_is_answered_through_a_virtual_connecti
     })
     .await
 }
+
+#[cfg(feature = "history")]
+#[path = "history.rs"]
+mod history_tests;

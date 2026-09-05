@@ -585,6 +585,12 @@ impl BoundedSharedClientFrames {
 
 /// The output owner one connection exposes to StateCore.
 pub trait ClientSink: Send + Sync {
+    /// Time already spent upgrading and admitting this connection after TLS.
+    /// Ordinary stream and embedding sinks retain the existing zero offset.
+    fn registration_elapsed_millis(&self) -> u64 {
+        0
+    }
+
     /// Returns the live queue generation.
     fn generation(&self) -> ConnectionGeneration;
 

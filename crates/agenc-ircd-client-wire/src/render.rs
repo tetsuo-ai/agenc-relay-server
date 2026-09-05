@@ -1118,6 +1118,39 @@ pub struct BatchStack {
 }
 
 impl BatchStack {
+    /// Opens a pinned plaintext history batch under the same correlation ownership.
+    pub fn open_history(
+        &mut self,
+        capabilities: &CapabilityState,
+        prefix: &str,
+        id: &str,
+        channel: &str,
+    ) -> Result<WireMessage, RenderError> {
+        if !capabilities.enabled("batch") || !capabilities.enabled("draft/chathistory") {
+            return Err(RenderError::CapabilityRequired);
+        }
+        validate_batch_reference(id)?;
+        if self.ids.len() >= MAX_BATCH_NESTING || self.ids.iter().any(|open| open == id) {
+            return Err(RenderError::InvalidBatch);
+        }
+        let open_parameter = prefixed_value("+", id)?;
+        let mut message = WireMessage::new_registered(
+            prefix,
+            "BATCH",
+            &[&open_parameter, "chathistory", channel],
+            None,
+        )?;
+        if let Some(parent) = self.ids.last() {
+            message.add_correlation_tag(BATCH_TAG, parent)?;
+        }
+        let id = copy_string(id)?;
+        self.ids
+            .try_reserve(1)
+            .map_err(|_| RenderError::AllocationFailed)?;
+        self.ids.push(id);
+        Ok(message)
+    }
+
     /// Opens one unique labeled-response batch and returns its opening frame.
     pub fn open(
         &mut self,

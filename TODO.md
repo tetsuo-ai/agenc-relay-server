@@ -2617,8 +2617,8 @@ for regression coverage; the external review task `S08-039` remains open.
 Outcome: WebSocket transport and plaintext channel history can be enabled
 independently without changing the disabled core, federation, or E2EE behavior.
 
-- [ ] `S09-001` **Implement the optional WSS listener.** Perform a bounded
-  authenticated HTTP upgrade to the exact subprotocol over TLS 1.3, forbid
+- [x] `S09-001` **Implement the optional WSS listener.** Perform a bounded
+  HTTP upgrade to the negotiated pinned subprotocol over TLS 1.3, forbid
   plaintext upgrades and compression, and hand accepted messages to the
   Stage-02 WebSocket framing semantics.
   - After: `S08-900`, `S02-002`.
@@ -2627,7 +2627,7 @@ independently without changing the disabled core, federation, or E2EE behavior.
   - Invariants: `TRN-01`, `TRN-02`, `TRN-04`, `TRN-05`.
   - Evidence: upgrade/header/subprotocol/origin/extension/size/timeout/TLS matrix and resource tests.
 
-- [ ] `S09-002` **Prove TCP/WSS protocol equivalence.** Run the same client
+- [x] `S09-002` **Prove TCP/WSS protocol equivalence.** Run the same client
   registration, command, auth, privacy, overload, and close transcripts over
   both transports with transport-only differences excluded from protocol state.
   - After: `S09-001`.
@@ -2636,7 +2636,7 @@ independently without changing the disabled core, federation, or E2EE behavior.
   - Invariants: all applicable core invariants.
   - Evidence: byte/semantic transcript comparison and identical state snapshots.
 
-- [ ] `S09-003` **Implement the pinned plaintext channel-history profile.**
+- [x] `S09-003` **Implement the pinned plaintext channel-history profile.**
   Require explicit policy, bound retention/count/bytes, authorization at write
   and read, durable deletion, ordered queries, and the exact pinned capability
   behavior.
@@ -2646,7 +2646,7 @@ independently without changing the disabled core, federation, or E2EE behavior.
   - Invariants: `STA-05`, `STA-09`, `PRV-02`, `FED-07`.
   - Evidence: retention/authorization/order/deletion/recreation/federation/privacy and boundary tests against the pinned draft.
 
-- [ ] `S09-004` **Prove history cannot touch encrypted routes.** Reject every
+- [x] `S09-004` **Prove history cannot touch encrypted routes.** Reject every
   encrypted-target write, query, replay, topic/history compatibility fallback,
   configuration combination, and post-restore ambiguity.
   - After: `S09-003`.
@@ -2655,17 +2655,18 @@ independently without changing the disabled core, federation, or E2EE behavior.
   - Invariants: `E2E-02`, `STA-09`.
   - Evidence: complete target/state/config/restore downgrade-refusal matrix.
 
-- [ ] `S09-005` **Prove disabled-state equivalence and independent enablement.**
-  WSS and history must each be independently optional, separately reported,
-  and unable to alter behavior, dependencies, listeners, storage, or advertised
-  capabilities when disabled.
+- [x] `S09-005` **Prove disabled-state equivalence and independent enablement.**
+  WSS and history must each be independently optional and separately
+  reported. Disabled services must not activate listeners, capture, queries,
+  or capabilities. Schema-2 validation, E2EE exclusion, expiry, and purge
+  maintenance remain common to every build.
   - After: `S09-001` through `S09-004`.
   - Targets: configuration, release metadata, integration matrices.
   - References: [Architecture §§26.4 and 29 phase 9](docs/ircd-architecture-and-implementation-spec.md#264-conformance-claims).
   - Invariants: `OPS-02`, `E2E-02`, `PRV-03`.
   - Evidence: four-mode matrix (neither/WSS/history/both), dependency graph, listener scan, database diff, and capability diff.
 
-- [ ] `S09-900` **Pass the Stage 09 optional-profile gate.** Each optional
+- [x] `S09-900` **Pass the Stage 09 optional-profile gate.** Each optional
   feature must satisfy its full negative, interoperability, privacy, and
   disabled-equivalence suite without weakening any prior conformance target.
   - After: `S09-001` through `S09-005`.
@@ -2673,6 +2674,25 @@ independently without changing the disabled core, federation, or E2EE behavior.
   - References: [Architecture §29 phase 9](docs/ircd-architecture-and-implementation-spec.md#29-implementation-sequence-and-acceptance-gates).
   - Invariants: all affected prior invariants.
   - Evidence: complete optional-mode matrix and mandatory workspace gates pass.
+
+Stage 09 implementation includes strict WSS framing and Origin/ALPN policy,
+authorization-fenced history paging, metadata-only replay, immutable message
+identities and retention, signed resumable purge, and the stopped-daemon
+schema-generation 1-to-2 migration. The independent build/runtime matrix and
+live capture, disabled restart, and purge lifecycles pass. The complete
+aggregate gate passes. `S09-900` records that result in the source commit used
+for recording. Stage closure requires a successful recorded gate and validated
+evidence for that exact commit.
+
+The implementation uses durable state generations for history row sequence,
+policy authority, and query snapshot cuts. Domain record revisions retain
+their existing compare-and-swap meaning; process-local revision changes do
+not become persisted history sequence numbers. Restart tests stop directly
+after capture to exercise this distinction.
+
+See [Stage 09 operations](docs/stage-09-operations.md), the
+[history profile](conformance/stage-nine-history.toml), and the
+[WSS profile](conformance/stage-nine-wss.toml) for configuration and evidence.
 
 ## Stage 10 — Production qualification and release
 

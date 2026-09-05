@@ -59,6 +59,9 @@ EXPECTED_LATER_FUZZ_TARGETS = (
     "e2ee_fragment",
     "e2ee_identity_chain",
     "e2ee_tags",
+    "wss_upgrade",
+    "wss_frame",
+    "history_records",
 )
 EXPECTED_FUZZ_POLICY = {
     "schema_version": 1,

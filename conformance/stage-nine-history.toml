@@ -1,0 +1,119 @@
+schema_version = 1
+stage = 9
+tasks = ["S09-003", "S09-004", "S09-005"]
+
+[history]
+feature = "history"
+default_enabled = false
+capability = "draft/chathistory"
+policies_seconds = [3600, 86400, 604800]
+table = 19
+key_bytes = 24
+message_kind = 1
+control_kind = 2
+control_sequence = 0
+channels = 4096
+messages = 262144
+channel_messages = 65536
+channel_bytes = 67108864
+total_bytes = 1073741824
+database_fraction_denominator = 4
+index_bytes = 268435456
+pool_fraction_denominator = 8
+delete_batch = 1000
+query_messages = 100
+page_messages = 7
+page_bytes = 65536
+active_queries = 256
+queries_per_origin = 1
+cursor_idle_seconds = 60
+query_absolute_seconds = 600
+history_page_result = 9
+history_expired_result = 10
+coordinator_metadata_kind = 5
+edge_metadata_kind = 6
+encrypted_history = false
+durable_result_bodies = false
+targets_query = false
+
+[migration]
+registry = "docs/storage-migration-1-to-2.registry"
+source_generation = 1
+target_generation = 2
+database_format = 1
+sealed_record_schema = 1
+registry_rules = 24
+source_modified = false
+live_migration = false
+required_backup = true
+legacy_history_rows = "reject"
+legacy_non_off_channel = "preserve policy and initialize empty control"
+
+
+[[test]]
+file = "crates/agenc-ircd-domain/tests/history.rs"
+names = ["exclusive_selectors_resolve_message_ids_by_event_position", "mixed_between_keeps_direction_but_renders_chronologically", "around_includes_the_pivot_and_backfills_at_either_boundary", "timestamp_exclusion_removes_all_rows_at_the_boundary_time", "empty_and_unknown_references_are_distinct_for_the_replay_owner", "constructors_and_selection_reject_invalid_metadata", "command_retains_selector_and_on_requires_an_authoritative_default"]
+
+[[test]]
+file = "crates/agenc-ircd-client-wire/tests/stage_nine_history.rs"
+names = ["history_batches_require_capability_unique_ids_and_owned_correlation", "upgrade_errors_map_to_fixed_nonreflective_http_responses"]
+
+[[test]]
+file = "crates/agenc-ircd-storage/tests/history_records.rs"
+names = ["history_rows_bind_their_channel_sequence_expiry_and_complete_body", "history_control_rejects_inconsistent_counts_and_purge_cursors", "exact_key_reads_reject_empty_duplicate_and_excessive_selection", "history_result_records_retain_only_bounded_reconstruction_metadata", "history_edge_records_reject_impossible_render_and_expiry_states"]
+
+[[test]]
+file = "crates/agenc-ircd-runtime/src/state_core/history/capture/tests/mod.rs"
+names = ["retained_plaintext_and_pending_purge_each_refuse_encrypted_binding", "empty_control_does_not_block_binding_and_bound_channel_rejects_plaintext_capture"]
+
+[[test]]
+file = "crates/agenc-ircd-runtime/src/state_core/history/index/tests/mod.rs"
+names = ["storage_valid_zero_timestamp_is_refused_before_index_insertion", "startup_control_cannot_name_a_future_authority_or_message_cut", "coordinator_requires_live_history_controls_while_edges_keep_only_projection"]
+
+[[test]]
+file = "crates/agenc-ircd-runtime/src/state_core/history/index/tests/encrypted.rs"
+names = ["startup_rejects_encrypted_rows_and_pending_purges_with_history_enabled_or_disabled"]
+
+[[test]]
+file = "crates/agenc-ircd-runtime/src/state_core/history/maintenance/tests/mod.rs"
+names = ["purge_deletes_at_most_one_thousand_rows_and_preserves_newer_messages", "expiry_is_inclusive_and_maintenance_continues_with_service_disabled", "empty_control_waits_for_live_queries_and_nonterminal_results"]
+
+[[test]]
+file = "crates/agenc-ircd-runtime/src/state_core/history/query/tests/mod.rs"
+names = ["query_leases_are_bounded_and_never_wrap_when_released", "suspended_account_loses_history_authority_before_its_session_is_removed"]
+
+[[test]]
+file = "crates/agenc-ircd-runtime/src/state_core/history/query/tests/snapshot.rs"
+names = ["history_snapshot_cut_never_uses_an_ephemeral_domain_revision"]
+
+[[test]]
+file = "crates/agenc-ircd-runtime/src/federation/coordinator/tests/history.rs"
+names = ["history_pages_replay_the_original_selection_and_persist_terminal_authority_loss"]
+
+[[test]]
+file = "crates/agenc-ircd-runtime/src/federation/coordinator/tests/history/replay_concurrency.rs"
+names = ["history_duplicate_waits_while_the_original_metadata_read_is_pending", "concurrent_history_retries_each_receive_the_original_page", "committed_history_retirement_releases_the_exact_request_identity"]
+
+[[test]]
+file = "crates/agenc-ircd-domain/src/federation/tests/origin.rs"
+names = ["retiring_an_exact_replay_identity_preserves_floors_and_matches_restart"]
+
+[[test]]
+file = "crates/agenc-ircd-runtime/src/federation/edge/history/tests/encrypted.rs"
+names = ["encrypted_projection_revokes_saved_history_before_preparation_and_delivery"]
+
+[[test]]
+file = "crates/agenc-ircd-runtime/src/federation/edge/history/tests/history.rs"
+names = ["reserved_history_is_discarded_when_its_metadata_admission_fails", "rendering_callback_rechecks_link_state_and_preserves_original_tags", "persisted_edge_receipt_restores_no_socket_or_history_body", "a_revoked_history_page_cancels_only_its_query_after_metadata_commit", "disabled_or_unnegotiated_history_never_allocates_a_federation_request"]
+
+[[test]]
+file = "crates/agenc-ircd/tests/stage_six_daemon/history.rs"
+names = ["plaintext_history_preserves_identity_pages_and_policy_across_restart"]
+
+[[test]]
+file = "crates/agenc-ircd/tests/stage_six_daemon/history/disabled.rs"
+names = ["disabled_history_startup_preserves_original_rows"]
+
+[[test]]
+file = "crates/agenc-ircd/tests/stage_six_daemon/history/purge.rs"
+names = ["confirmed_history_purge_deletes_rows_before_success_and_preserves_new_messages"]
