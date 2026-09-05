@@ -265,7 +265,7 @@ def validate_workflow(workflow: str) -> None:
     if live_workflow.count(REQUIRED_CHECKOUT_STEP) != 1:
         raise CiError("workflow must contain one exact live checkout step")
     if live_workflow.count(REQUIRED_GATE_STEP) != 1:
-        raise CiError("workflow must contain one live Stage 08 implementation-check step")
+        raise CiError("workflow must contain one live Stage 09 implementation-check step")
 
 
 def validate_manifest(manifest: dict[str, object]) -> None:
@@ -568,7 +568,7 @@ def self_test(root: Path) -> int:
     expect_rejection(
         "commented gate",
         lambda: validate_workflow(commented),
-        "one live Stage 08 implementation-check step",
+        "one live Stage 09 implementation-check step",
     )
     cases += 1
     commented_checkout = workflow.replace(
