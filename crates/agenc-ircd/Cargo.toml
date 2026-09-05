@@ -31,6 +31,7 @@ openmls.workspace = true
 openmls_basic_credential.workspace = true
 openmls_rust_crypto.workspace = true
 rustls.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true

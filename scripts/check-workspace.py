@@ -126,6 +126,7 @@ BINARY_TEST_EXTERNAL_DEPENDENCIES = frozenset(
         "opaque-ke",
         "opaque-sha2",
         "rustls",
+        "tokio",
     }
 )
 EXTERNAL_DEPENDENCIES = {

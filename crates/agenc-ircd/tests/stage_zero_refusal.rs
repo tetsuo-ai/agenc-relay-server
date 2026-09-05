@@ -5,7 +5,7 @@
 use std::error::Error;
 use std::process::Command;
 
-const EXPECTED_MESSAGE: &str = "agenc-ircd: usage: agenc-ircd <command> [options]\ncommands:\n  serve --config <file>\n  check-config --config <file>\n  init --config <file> --profile <public|onion|dual> [options]\n  print-onboarding --config <file>\n  account-invite create --descriptor <file> --signing-key-file <file> --expires-in <seconds>\n  storage restore --config <file> --backup <file> [restore options]\n  storage migrate --config <file> --target-schema-generation 2 --output-state-directory <new-directory> [--resume]\n";
+const EXPECTED_MESSAGE: &str = "agenc-ircd: usage: agenc-ircd <command> [options]\ncommands:\n  version [--json]\n  conformance --json\n  serve --config <file>\n  check-config --config <file>\n  init --config <file> --profile <public|onion|dual> [options]\n  print-onboarding --config <file>\n  account-invite create --descriptor <file> --signing-key-file <file> --expires-in <seconds>\n  storage restore --config <file> --backup <file> [restore options]\n  storage migrate --config <file> --target-schema-generation 2 --output-state-directory <new-directory> [--resume]\n";
 
 #[test]
 fn binary_refuses_to_impersonate_an_implemented_daemon() -> Result<(), Box<dyn Error>> {

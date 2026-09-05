@@ -1,0 +1,39 @@
+--- a/src/core/network-openssl.c
++++ b/src/core/network-openssl.c
+@@ -555,6 +555,18 @@
+ 		g_warning("Failed to allocate SSL structure");
+ 		SSL_CTX_free(ctx);
+ 		return NULL;
++	}
++
++	/* AgenC qualification build: no alternate ALPN or TLS version. */
++	{
++		static const unsigned char protocols[] = "\x0c" "agenc-chat/1";
++		if (SSL_set_alpn_protos(ssl, protocols, sizeof protocols - 1) != 0 ||
++		    SSL_set_min_proto_version(ssl, TLS1_3_VERSION) != 1) {
++			g_warning("AgenC TLS profile setup failed");
++			SSL_free(ssl);
++			SSL_CTX_free(ctx);
++			return NULL;
++		}
+ 	}
+ 
+ 	if(!SSL_set_fd(ssl, fd))
+@@ -867,6 +879,17 @@
+ 		}
+ 	}
+ 
++	{
++		const unsigned char *selected = NULL;
++		unsigned int selected_length = 0;
++		SSL_get0_alpn_selected(chan->ssl, &selected, &selected_length);
++		if (selected_length != sizeof "agenc-chat/1" - 1 ||
++		    memcmp(selected, "agenc-chat/1", sizeof "agenc-chat/1" - 1) != 0) {
++			g_warning("AgenC TLS peer did not select the required ALPN");
++			return -1;
++		}
++	}
++
+ 	cert = SSL_get_peer_certificate(chan->ssl);
+ 	if (cert == NULL) {
+ 		g_warning("TLS server supplied no certificate");

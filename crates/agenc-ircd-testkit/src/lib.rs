@@ -13,6 +13,7 @@ use agenc_ircd_types::{
     ClockError, EntropyError, EntropySource, MonotonicClock, MonotonicTick, UtcSecond, WallClock,
 };
 
+pub mod client_policy;
 mod client_transcript;
 mod domain_fixture;
 mod domain_reference;

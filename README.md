@@ -23,7 +23,8 @@
 > coordinator/edge federation, and the E2EE server adapter. The external
 > cryptographic and protocol review remains open. Stage 09 adds optional WebSocket transport and
 > plaintext channel history with an explicit schema migration. Production
-> qualification is planned for Stage 10. Checkpoints do not qualify later source changes.
+> qualification is in progress for [Stage 10](docs/stage-10-qualification.md).
+> Checkpoints do not qualify later source changes.
 
 ## What is being built
 

@@ -34,8 +34,8 @@ fuzz_target!(|data: &[u8]| {
     ) else {
         return;
     };
-    // Arms 1 through 3 are MAC-authenticated under keys derived from the fixed
-    // guard root above; fuzz bytes cannot carry a valid tag, so they must fail.
+    // Fixed public test keys allow valid authenticated seeds. Acceptance must
+    // preserve canonical bytes just as it does for unauthenticated frames.
     match selector % 13 {
         0 => {
             if let Ok(header) = DatabaseHeader::decode(encoded) {
@@ -43,27 +43,23 @@ fuzz_target!(|data: &[u8]| {
             }
         }
         1 => {
-            assert!(
-                NonceReservationState::decode_and_verify(encoded, &integrity_keys).is_err(),
-                "nonce reservation verified without the integrity key"
-            );
+            if let Ok(state) = NonceReservationState::decode_and_verify(encoded, &integrity_keys) {
+                assert_canonical(state.encode(), encoded);
+            }
         }
         2 => {
-            assert!(
-                RollbackGuard::decode_and_verify(encoded, &integrity_keys).is_err(),
-                "rollback guard verified without the integrity key"
-            );
+            if let Ok(guard) = RollbackGuard::decode_and_verify(encoded, &integrity_keys) {
+                assert_canonical(guard.encode(), encoded);
+            }
         }
         3 => {
-            assert!(
-                StateMeta::decode_and_verify(
-                    encoded,
-                    agenc_ircd_crypto::StorageDigest::from_bytes([0x52; 32]),
-                    &integrity_keys,
-                )
-                .is_err(),
-                "state meta verified without the integrity key"
-            );
+            if let Ok(meta) = StateMeta::decode_and_verify(
+                encoded,
+                agenc_ircd_crypto::StorageDigest::from_bytes([0x52; 32]),
+                &integrity_keys,
+            ) {
+                assert_canonical(meta.encode(), encoded);
+            }
         }
         4 => {
             if let Ok(manifest) = IntegrityManifest::decode(encoded) {

@@ -5,6 +5,12 @@
 #[path = "stage_six_daemon/address_pool.rs"]
 mod address_pool;
 
+#[path = "stage_six_daemon/stage_ten.rs"]
+mod stage_ten;
+
+#[path = "stage_six_daemon/stage_ten_tor.rs"]
+mod stage_ten_tor;
+
 #[cfg(feature = "history")]
 #[path = "stage_six_daemon/history.rs"]
 mod history;

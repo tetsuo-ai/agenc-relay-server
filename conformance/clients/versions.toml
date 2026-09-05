@@ -1,0 +1,21 @@
+schema_version = 1
+
+[[client]]
+name = "weechat"
+version = "4.10.1"
+repository = "https://github.com/weechat/weechat.git"
+commit = "f5601e953720be1ec381a2490c8d3a09b5aab602"
+patched_file = "src/core/core-network.c"
+source_sha256 = "82b3a45c93cfbace2d7a01998392bbb27a45594a54a1bbbda24104c05ec855da"
+patch = "conformance/clients/weechat-alpn.patch"
+patch_sha256 = "674490c7f5e72435ac22f8207416b0a2208f7084d24c0146221192f6c53670e8"
+
+[[client]]
+name = "irssi"
+version = "1.4.5"
+repository = "https://github.com/irssi/irssi.git"
+commit = "bcf07a2546b5adfecf0df56553f2e8be0920c6c5"
+patched_file = "src/core/network-openssl.c"
+source_sha256 = "97521133de16e320a9811220d1c5c22a1af895be920a6d645e71290235890b77"
+patch = "conformance/clients/irssi-alpn.patch"
+patch_sha256 = "c70442eaa67f73238aee16fa2f3ea104e36406f72b27986bc54796627b1a1644"

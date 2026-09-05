@@ -31,6 +31,7 @@ pub mod offline;
 pub mod purpose;
 mod query_render;
 pub mod registration;
+pub mod release;
 mod remote_accounts;
 pub mod runtime_config;
 pub mod state_core;

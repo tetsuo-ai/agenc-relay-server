@@ -166,6 +166,8 @@ pub enum DaemonError {
     TaskFailed,
     /// One or more owners did not join within the configured shutdown budget.
     ShutdownTimeout,
+    /// A shutdown phase returned a closed owner failure.
+    ShutdownFailed(ShutdownPhase, ShutdownFailure),
     /// The sequencer credentials file did not parse, did not verify for
     /// this network, or names no key the coordinator holds.
     E2eeCredentials,
@@ -189,6 +191,12 @@ impl fmt::Display for DaemonError {
             Self::RuntimeStart => formatter.write_str("Tokio runtime startup failed"),
             Self::TaskFailed => formatter.write_str("a supervised daemon owner failed"),
             Self::ShutdownTimeout => formatter.write_str("daemon shutdown exceeded its deadline"),
+            Self::ShutdownFailed(phase, failure) => write!(
+                formatter,
+                "daemon shutdown failed: phase={} owner={}",
+                phase.label(),
+                shutdown_failure_label(*failure),
+            ),
             Self::E2eeCredentials => formatter.write_str(
                 "E2EE sequencer credentials file is invalid or does not match the sequencer key",
             ),
@@ -3682,10 +3690,25 @@ async fn request_lifecycle(
 }
 
 fn validate_shutdown_report(report: ShutdownReport) -> Result<(), DaemonError> {
-    match report.first_problem().map(|problem| problem.kind) {
+    match report.first_problem() {
         None => Ok(()),
-        Some(ShutdownProblemKind::TimedOut) => Err(DaemonError::ShutdownTimeout),
-        Some(ShutdownProblemKind::Failed(_)) => Err(DaemonError::TaskFailed),
+        Some(problem) => match problem.kind {
+            ShutdownProblemKind::TimedOut => Err(DaemonError::ShutdownTimeout),
+            ShutdownProblemKind::Failed(failure) => {
+                Err(DaemonError::ShutdownFailed(problem.phase, failure))
+            }
+        },
+    }
+}
+
+fn shutdown_failure_label(failure: ShutdownFailure) -> &'static str {
+    match failure {
+        ShutdownFailure::Listener => "listener",
+        ShutdownFailure::StateCore => "state_core",
+        ShutdownFailure::Writer => "writer",
+        ShutdownFailure::Audit => "audit",
+        ShutdownFailure::Storage => "storage",
+        ShutdownFailure::Join => "join",
     }
 }
 
@@ -4009,6 +4032,56 @@ mod tests {
     use crate::state_core::IndeterminateCause;
 
     use super::*;
+
+    struct FailingShutdown {
+        phase: ShutdownPhase,
+        failure: ShutdownFailure,
+    }
+
+    impl ShutdownHooks for FailingShutdown {
+        async fn run(
+            &mut self,
+            phase: ShutdownPhase,
+            _budget: Duration,
+        ) -> Result<(), ShutdownFailure> {
+            if phase == self.phase {
+                Err(self.failure)
+            } else {
+                Ok(())
+            }
+        }
+
+        fn stop_deadline_expired(&mut self) {}
+    }
+
+    #[tokio::test]
+    async fn shutdown_errors_retain_the_first_phase_and_closed_owner_label() {
+        for (failure, label) in [
+            (ShutdownFailure::Listener, "listener"),
+            (ShutdownFailure::StateCore, "state_core"),
+            (ShutdownFailure::Writer, "writer"),
+            (ShutdownFailure::Audit, "audit"),
+            (ShutdownFailure::Storage, "storage"),
+            (ShutdownFailure::Join, "join"),
+        ] {
+            let (_signals, mut inbox) = tokio::sync::mpsc::channel(1);
+            let mut hooks = FailingShutdown {
+                phase: ShutdownPhase::Flush,
+                failure,
+            };
+            let report = run_shutdown(ShutdownPlan::DEFAULT, &mut hooks, &mut inbox).await;
+            let result = validate_shutdown_report(report);
+            assert!(
+                matches!(result, Err(DaemonError::ShutdownFailed(ShutdownPhase::Flush, actual)) if actual == failure)
+            );
+            if let Err(error) = result {
+                assert_eq!(
+                    error.to_string(),
+                    format!("daemon shutdown failed: phase=flush owner={label}")
+                );
+            }
+        }
+    }
 
     struct MemoryLogTarget(Vec<String>);
 

@@ -552,11 +552,10 @@ impl AuditExportSource {
     ) -> Result<PreparedAuditExport, RuntimeError> {
         let mut selection = ExportSelection::new(range);
         let mut checkpoint_verifier = CheckpointVerifier::new(self.binding, &self.trust);
-        let checkpoint_commit_sequence =
-            scan_checkpoints(&self.storage, &self.keys, |checkpoint| {
-                checkpoint_verifier.observe(&checkpoint)?;
-                selection.consider_checkpoint(checkpoint)
-            })?;
+        scan_checkpoints(&self.storage, &self.keys, |checkpoint| {
+            checkpoint_verifier.observe(&checkpoint)?;
+            selection.consider_checkpoint(checkpoint)
+        })?;
         let checkpoints = checkpoint_verifier.finish();
         if checkpoints.next_sequence != expected_checkpoint_sequence
             || checkpoints.previous_hash != expected_checkpoint_hash
@@ -569,13 +568,10 @@ impl AuditExportSource {
             &self.operators,
             checkpoints.cursor,
         );
-        let event_commit_sequence = scan_events(&self.storage, &self.keys, |event| {
+        scan_events(&self.storage, &self.keys, |event| {
             event_verifier.observe(&event)?;
             selection.consider_event(event)
         })?;
-        if checkpoint_commit_sequence != event_commit_sequence {
-            return Err(RuntimeError::InvalidValue);
-        }
         let events = event_verifier.finish_reconciled()?;
         if events.cursor != expected_cursor {
             return Err(RuntimeError::InvalidValue);
@@ -608,10 +604,9 @@ impl AuditExportSource {
         let cutoff = now.checked_sub(retention_seconds);
         let mut selector = cutoff.map(RetentionSelector::new);
         let mut checkpoint_verifier = CheckpointVerifier::new(self.binding, &self.trust);
-        let checkpoint_commit_sequence =
-            scan_checkpoints(&self.storage, &self.keys, |checkpoint| {
-                checkpoint_verifier.observe(&checkpoint)
-            })?;
+        scan_checkpoints(&self.storage, &self.keys, |checkpoint| {
+            checkpoint_verifier.observe(&checkpoint)
+        })?;
         let checkpoints = checkpoint_verifier.finish();
         if checkpoints.cursor.next_sequence != expected_retained_first_sequence
             || checkpoints.next_sequence != expected_checkpoint_sequence
@@ -625,16 +620,13 @@ impl AuditExportSource {
             &self.operators,
             checkpoints.cursor,
         );
-        let event_commit_sequence = scan_events(&self.storage, &self.keys, |event| {
+        scan_events(&self.storage, &self.keys, |event| {
             event_verifier.observe(&event)?;
             if let Some(selector) = &mut selector {
                 selector.observe(&event)?;
             }
             Ok(())
         })?;
-        if checkpoint_commit_sequence != event_commit_sequence {
-            return Err(RuntimeError::InvalidValue);
-        }
         let events = event_verifier.finish_reconciled()?;
         if events.cursor != expected_cursor {
             return Err(RuntimeError::InvalidValue);
@@ -967,11 +959,30 @@ fn scan_events(
     })
 }
 
-// agenc-review: focus owner=runtime reviewed=2026-08-30 reason=bounded paged audit reconstruction validates one consistent encrypted table view and exact sequence keys
+// AdminOwner serializes audit mutations while a live scan runs. Its captured
+// event and checkpoint hashes fence the complete signed chains. Unrelated
+// storage commits may advance between pages without changing those chains.
+// Startup additionally compares the two scans' commit positions while it has
+// exclusive authority over the unopened runtime.
 fn scan_table(
     storage: &StoragePort,
     keys: &KeyDeriver,
     table: TableId,
+    visit: impl FnMut(u64, &[u8]) -> Result<(), RuntimeError>,
+) -> Result<u64, RuntimeError> {
+    scan_table_pages(
+        keys,
+        table,
+        |plan| Ok(storage.try_read(plan)?.wait()?),
+        visit,
+    )
+}
+
+// agenc-review: focus owner=runtime reviewed=2026-09-05 reason=bounded authenticated audit pages preserve sequence ordering and reject regressing storage positions while the caller verifies both captured signed chain heads
+fn scan_table_pages(
+    keys: &KeyDeriver,
+    table: TableId,
+    mut read: impl FnMut(ReadPlan) -> Result<agenc_ircd_storage::ReadResult, RuntimeError>,
     mut visit: impl FnMut(u64, &[u8]) -> Result<(), RuntimeError>,
 ) -> Result<u64, RuntimeError> {
     let mut start = 0_u64;
@@ -984,10 +995,12 @@ fn scan_table(
             StoredKey::new(end.as_bytes().to_vec())?,
             RANGE_READ_LIMIT,
         )?;
-        let result = storage.try_read(plan)?.wait()?;
+        let result = read(plan)?;
         match expected_commit {
             None => expected_commit = Some(result.storage_commit_sequence),
-            Some(expected) if expected == result.storage_commit_sequence => {}
+            Some(expected) if expected <= result.storage_commit_sequence => {
+                expected_commit = Some(result.storage_commit_sequence);
+            }
             Some(_) => return Err(RuntimeError::InvalidValue),
         }
         let count = result.records.len();
@@ -997,6 +1010,9 @@ fn scan_table(
         let truncated = result.truncated;
         let mut last = None;
         for record in result.records {
+            if record.table != table {
+                return Err(RuntimeError::InvalidValue);
+            }
             let sequence = sequence_key(&record.key)?;
             if sequence < start || last.is_some_and(|previous| sequence <= previous) {
                 return Err(RuntimeError::InvalidValue);
@@ -1025,6 +1041,9 @@ fn scan_table(
         // A page may stop short of the row limit at the storage byte budget,
         // so the store's own truncation flag decides whether rows remain.
         let Some(last) = last else {
+            if truncated {
+                return Err(RuntimeError::InvalidValue);
+            }
             break;
         };
         if !truncated || last == u64::MAX {
@@ -1333,6 +1352,147 @@ mod tests {
     use super::*;
 
     const CREATED_AT: u64 = 50;
+
+    #[test]
+    fn signed_audit_pages_allow_unrelated_commits_and_reject_changed_rows()
+    -> crate::test_support::TestResult {
+        use agenc_ircd_crypto::{DatabaseBinding, StorageMasterKey};
+        use agenc_ircd_storage::{ReadRecord, ReadResult, StorageSealContext};
+        use agenc_ircd_types::{DatabaseId, ServerIncarnation};
+
+        let binding = binding();
+        let database = DatabaseBinding::new(
+            binding.network_id,
+            binding.server_id,
+            ServerIncarnation::from_bytes([3; 16]),
+            DatabaseId::from_bytes([4; 16]),
+        );
+        let master = StorageMasterKey::from_bytes([7; 32]);
+        let keys = KeyDeriver::new(StorageMasterKey::from_bytes([7; 32]), database, 1)?;
+        let seal = StorageSealContext::new(&master, database, 1)?;
+        let audit_key = Ed25519SecretKey::from_bytes([4; 32]);
+        let operator_key = Ed25519SecretKey::from_bytes([5; 32]);
+        let operator_id = OperatorId::from_bytes([6; 16]);
+        let fixture = EventFixture {
+            binding,
+            audit_key: &audit_key,
+            operator_key: &operator_key,
+            operator_id,
+        };
+        let trust = AuditTrust::new(&[trust_entry(&audit_key)?])?;
+        let operators = registry(operator_id, &operator_key)?;
+        let first = fixture.event(
+            AuditChainCursor::genesis(),
+            0,
+            AdminAuditPhase::Observed,
+            b"MOTD",
+        )?;
+        let second = fixture.event(
+            AuditChainCursor::genesis().advance(&first)?,
+            1,
+            AdminAuditPhase::Observed,
+            b"MOTD",
+        )?;
+        let expected = AuditChainCursor::genesis()
+            .advance(&first)?
+            .advance(&second)?;
+
+        for (commits, corrupt, succeeds) in [
+            ([10, 11], false, true),
+            ([11, 10], false, false),
+            ([10, 11], true, false),
+        ] {
+            let mut pages = Vec::new();
+            for (index, event) in [first.clone(), second.clone()].into_iter().enumerate() {
+                let key = StoredKey::new(event.tbs().audit_sequence.to_be_bytes().to_vec())?;
+                let value = PersistentRecordValue::new(
+                    TableId::Audit,
+                    1,
+                    event.tbs().audit_sequence + 1,
+                    0,
+                    None,
+                    Vec::new(),
+                    event.encode()?,
+                )?;
+                let mut encoded = seal
+                    .seal(
+                        TableId::Audit,
+                        DOMAIN_RECORD_SCHEMA,
+                        [u8::try_from(index)?; 24],
+                        &key,
+                        &value.encode()?,
+                    )?
+                    .encode()?;
+                if corrupt && index == 1 {
+                    let last = encoded.last_mut().ok_or(RuntimeError::InvalidValue)?;
+                    *last ^= 1;
+                }
+                pages.push(ReadResult {
+                    storage_commit_sequence: *commits
+                        .get(index)
+                        .ok_or(RuntimeError::InvalidValue)?,
+                    records: vec![ReadRecord {
+                        table: TableId::Audit,
+                        key,
+                        sealed_record: encoded,
+                    }],
+                    truncated: index == 0,
+                });
+            }
+            let mut pages = pages.into_iter();
+            let mut verifier =
+                EventVerifier::new(binding, &trust, &operators, AuditChainCursor::genesis());
+            let outcome = scan_table_pages(
+                &keys,
+                TableId::Audit,
+                |_| pages.next().ok_or(RuntimeError::InvalidValue),
+                |_, body| {
+                    verifier.observe(
+                        &AdminAuditEvent::decode_exact(body)
+                            .map_err(|_| RuntimeError::InvalidValue)?,
+                    )
+                },
+            );
+            assert_eq!(outcome.is_ok(), succeeds);
+            if succeeds {
+                assert_eq!(outcome?, 11);
+                assert_eq!(verifier.finish_reconciled()?.cursor, expected);
+                assert!(pages.next().is_none());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn audit_scan_rejects_a_truncated_page_without_progress() -> Result<(), RuntimeError> {
+        use agenc_ircd_crypto::{DatabaseBinding, StorageMasterKey};
+        use agenc_ircd_types::{DatabaseId, ServerIncarnation};
+        let binding = binding();
+        let keys = KeyDeriver::new(
+            StorageMasterKey::from_bytes([7; 32]),
+            DatabaseBinding::new(
+                binding.network_id,
+                binding.server_id,
+                ServerIncarnation::from_bytes([3; 16]),
+                DatabaseId::from_bytes([4; 16]),
+            ),
+            1,
+        )?;
+        assert!(
+            scan_table_pages(
+                &keys,
+                TableId::Audit,
+                |_| Ok(agenc_ircd_storage::ReadResult {
+                    storage_commit_sequence: 10,
+                    records: Vec::new(),
+                    truncated: true
+                }),
+                |_, _| Ok(())
+            )
+            .is_err()
+        );
+        Ok(())
+    }
 
     fn binding() -> AdminSessionBinding {
         AdminSessionBinding {

@@ -4,6 +4,7 @@
 
 mod migration;
 mod options;
+mod version;
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -31,6 +32,8 @@ const EXIT_PARTIAL_INIT: u8 = 3;
 const USAGE: &str = concat!(
     "usage: agenc-ircd <command> [options]\n",
     "commands:\n",
+    "  version [--json]\n",
+    "  conformance --json\n",
     "  serve --config <file>\n",
     "  check-config --config <file>\n",
     "  init --config <file> --profile <public|onion|dual> [options]\n",
@@ -85,6 +88,9 @@ fn run(arguments: Vec<OsString>) -> Result<(), CliFailure> {
     }
     let rest = arguments.get(1..).ok_or_else(|| CliFailure::usage(USAGE))?;
     match command {
+        "--version" if rest.is_empty() => version::version(rest),
+        "version" => version::version(rest),
+        "conformance" => version::conformance(rest),
         "serve" => serve(rest),
         "check-config" => check_config(rest),
         "init" => init(rest),

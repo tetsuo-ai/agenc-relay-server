@@ -60,7 +60,7 @@ References: [Architecture §§1.2–4](docs/ircd-architecture-and-implementation
 | 07 | Conforming base federation | Complete | Pass, 2026-09-03 | [Current checkpoint](conformance/evidence/stage-07-1093d88d0057c3461a423285e0f86ff3775c1140.json) |
 | 08 | Conforming E2EE server adapter | Complete (external review open) | Pass, 2026-09-04 | [Current checkpoint](conformance/evidence/stage-08-ae6457fb62fef8961d3caf904febed580e8b4a91.json) |
 | 09 | Optional WSS and history profiles | Complete | Pass, 2026-09-05, exact checkpoint source | [Current checkpoint](conformance/evidence/stage-09-a93e53e71d22a6d5ec46bd749ec18068a9fa572b.json) |
-| 10 | Production qualification and release evidence | Not started | Not run | Absent |
+| 10 | Production qualification and release evidence | In progress | Development checks running | Absent |
 
 ## Coverage and ownership maps
 
@@ -2714,10 +2714,17 @@ qualification policy creates a new candidate. Archived checkpoints do not
 qualify it. The source/dependency check runs before candidate construction and
 again before release signing.
 
-The latest Stage 09 CI run for source `75e0667` failed during shutdown in
-`disabled_history_startup_preserves_original_rows`. The prior checkpoint
-remains valid for its named source. Stage 10 must reproduce and fix the owner
-failure before qualifying a release; a successful retry is not a disposition.
+The Stage 09 CI failure for source `75e0667` was reproduced during audit
+retention in `disabled_history_startup_preserves_original_rows`. The Stage 10
+fix preserves the captured signed audit-chain heads while allowing unrelated
+database commits between scan pages. The deterministic regression tests and
+the 18-test daemon suite pass, including a run restricted to two CPUs. The
+prior checkpoint remains valid for its named source.
+
+[Stage 10 qualification notes](docs/stage-10-qualification.md) track the
+implemented runner, local metadata, test-client policy, and remaining native
+drivers and release evidence. No Stage 10 task is closed by development tests
+alone.
 
 - [ ] `S10-001` **Close the complete requirement ledger.** Every normative
   requirement must map to implemented code, a target crate, successful evidence
