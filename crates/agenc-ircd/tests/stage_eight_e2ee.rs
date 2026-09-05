@@ -2750,6 +2750,9 @@ mod real_clients {
     use std::path::Path;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    use agenc_ircd_testkit::client_policy::{
+        ClientTrust, DisplayError, TrustState, render_decrypted_text,
+    };
     use agenc_ircd_testkit::e2ee::ids::{account_id_digest, leaf_capabilities_digest};
     use agenc_ircd_testkit::e2ee::mls_outer::{MlsOuterMessage, parse_mls_message};
     use agenc_ircd_testkit::e2ee::objects::content::{
@@ -2876,11 +2879,24 @@ mod real_clients {
         head: [u8; 32],
         text: &str,
     ) -> TestResult<Vec<u8>> {
+        padded_content_bound(bound, bound.route_binding, sender, sequence, head, text)
+    }
+
+    /// Like `padded_content`, but under a caller-chosen route binding so a
+    /// receiver can observe a binding it never accepted.
+    fn padded_content_bound(
+        bound: &BoundConversation,
+        route_binding: [u8; 32],
+        sender: &Principal,
+        sequence: u64,
+        head: [u8; 32],
+        text: &str,
+    ) -> TestResult<Vec<u8>> {
         let mut content = IrcEncryptedContent {
             profile_version: 1,
             network_id: *NETWORK_ID.as_bytes(),
             conversation_id: bound.conversation,
-            route_binding: bound.route_binding,
+            route_binding,
             sender_device_id: [sender.device; 16],
             leaf_credential_generation: 0,
             sender_sequence: sequence,
@@ -3560,6 +3576,69 @@ mod real_clients {
         let (decrypted, received_aad) = creator.decrypt(&mut group, &received)?;
         assert_eq!(received_aad, aad);
         assert_eq!(content_text(&decrypted)?, reply_text);
+
+        // Decrypted text is data: CTCP markers, terminal controls, HTML, bidi
+        // controls, and a leading command prefix render inert through the
+        // test client's display policy after a real cross-library decrypt.
+        let mut trust = ClientTrust::first_contact();
+        assert_eq!(trust.state(), TrustState::UnverifiedEncrypted);
+        trust.observe_transparency();
+        assert_eq!(trust.state(), TrustState::TransparencyObserved);
+        let hostile =
+            "/quit \u{1}ACTION dance\u{1} <script>alert(1)</script> \u{1b}[31mred \u{202e}rtl";
+        let reply = padded_content(&bound, &bob_keys, 1, added.finalization_id, hostile)?;
+        let encrypted = bob_group
+            .encrypt_application_message(&reply, aad.clone())?
+            .to_bytes()?;
+        let received = step(
+            "hostile text relay",
+            relay_application(&mut bob, &mut bob_keys, &mut alice, &bound, &encrypted),
+        )?;
+        let (decrypted, _) = creator.decrypt(&mut group, &received)?;
+        let rendered = render_decrypted_text(content_text(&decrypted)?.as_bytes())?;
+        assert!(
+            !rendered
+                .as_str()
+                .contains(['\u{1}', '\u{1b}', '<', '>', '\u{202e}'])
+        );
+        assert!(rendered.as_str().starts_with(
+            "/quit \\u{0001}ACTION dance\\u{0001} &lt;script&gt;alert(1)&lt;/script&gt; \\u{001b}[31mred \\u{202e}rtl"
+        ));
+
+        // A decrypted message under a route binding this client never accepted
+        // is an unexpected security change: sending stays blocked until the new
+        // bindings are authenticated out of band and the change is reviewed.
+        let foreign = padded_content_bound(
+            &bound,
+            [0xff; 32],
+            &bob_keys,
+            2,
+            added.finalization_id,
+            "binding changed",
+        )?;
+        let encrypted = bob_group
+            .encrypt_application_message(&foreign, aad.clone())?
+            .to_bytes()?;
+        let received = step(
+            "foreign binding relay",
+            relay_application(&mut bob, &mut bob_keys, &mut alice, &bound, &encrypted),
+        )?;
+        let (decrypted, _) = creator.decrypt(&mut group, &received)?;
+        let mut budget = DecodeBudget::new(1 << 16, 64);
+        let observed = IrcEncryptedContent::decode_checked(&decrypted, &mut budget)?;
+        assert_ne!(observed.route_binding, bound.route_binding);
+        trust.unexpected_security_change();
+        assert_eq!(trust.state(), TrustState::SecurityChanged);
+        assert!(!trust.state().permits_sending());
+        assert_eq!(
+            trust.accept_reviewed_change(),
+            Err(DisplayError::ReviewRequired)
+        );
+        trust.authenticate_out_of_band();
+        assert_eq!(trust.state(), TrustState::SecurityChanged);
+        trust.accept_reviewed_change()?;
+        assert_eq!(trust.state(), TrustState::VerifiedEncrypted);
+        assert!(trust.state().permits_sending());
 
         // The channel closes under the finalization that added bob.
         step(
