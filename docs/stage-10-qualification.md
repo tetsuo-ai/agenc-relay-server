@@ -781,6 +781,23 @@ test installs a standing under a fresh generation with no rows,
 disconnects the session, and requires the batch to project and reach
 storage.
 
+### CAP-17: a refused snapshot cut page was skipped
+
+Fixed. The coordinator writes the rows of a snapshot generation in pages
+after its own batches commit, and it advanced the page cursor before the
+page was staged. Staging a page is refused whenever another role staged a
+plan first in the same completion turn, because the page's checkpoint
+plan no longer chains on the open batch, and during quiescence. The
+refused page was then never written: the edge received its entries over
+the link, but the rows behind them were missing, so a coordinator restart
+restored an incomplete standing for that edge and later removals of the
+missing keys were never projected. Found by reading the snapshot write
+path while fixing CAP-16, not by a campaign. The cursor now advances only
+when a page is staged or holds nothing to write, and the background
+continuation retries the same page once the batch slot is free. A unit
+test stages a page while another batch is with storage and requires the
+cursor to stay at the page.
+
 ## Release claims and limits
 
 The signing command requires an explicit Ed25519 signing key and matching

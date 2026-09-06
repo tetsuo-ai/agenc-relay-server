@@ -2216,6 +2216,93 @@ async fn resume_with_the_retained_cursor_replays_events_reserved_while_away() ->
     .await
 }
 
+#[test]
+fn a_refused_cut_page_stays_queued_at_its_position() -> TestResult {
+    let a = ServerId::from_bytes([57; 16]);
+    let b = ServerId::from_bytes([58; 16]);
+    let mut fixture = StateCoreFixture::with_federation_coordinator(
+        entropy_script(),
+        vec![
+            peer_identity(a, "edge-a.example"),
+            peer_identity(b, "edge-b.example"),
+        ],
+    )?;
+    let mut parts = fixture.take_run_parts()?;
+    let context = parts.state.context_mut();
+    let mut coordinator = standalone_coordinator_pair(a, b);
+    // One session homed at edge a stands in its cut.
+    let seed = crate::test_support::remote_session_seed(context, a, "rae")?;
+    let plan = context.domain().plan_session_opened(seed)?;
+    crate::test_support::apply_live_plan(context, plan)?;
+    let records =
+        agenc_ircd_domain::federation::CoordinatorProjection::standing_of(context.domain(), a);
+    assert!(!records.is_empty(), "the session stands for edge a");
+    let projector = context.federation_mut().ok_or("no projector")?;
+    projector.set_edge(
+        a,
+        crate::state_core::projector::EdgeDelivery {
+            projection_generation: 2,
+            next_delivery_sequence: 0,
+        },
+    );
+    projector.install_edge(a, &records);
+    let state = coordinator
+        .peers
+        .get_mut(&a)
+        .ok_or("peer a is configured")?;
+    state.projection_generation = 2;
+    let page_rows = records.len();
+    state.snapshot = Some(snapshot::Snapshot {
+        identity: agenc_ircd_federation_wire::SnapshotIdentity {
+            snapshot_token: FederationHash32::from_bytes([61; 32]),
+            recovery_epoch: RecoveryEpoch::from_bytes([34; 16]),
+            projection_generation: 2,
+            state_generation: context.domain().revision().get(),
+            snapshot_digest: FederationHash32::from_bytes([62; 32]),
+        },
+        entries: Vec::new(),
+        records,
+        next_send: 0,
+        next_write: 0,
+        end_sent: false,
+        ready: false,
+        link: crate::federation::LinkId::new(1),
+    });
+    // Another batch is with storage, so staging the page is refused.
+    let account = agenc_ircd_domain::AccountState::new(
+        agenc_ircd_testkit::account_id(9),
+        agenc_ircd_testkit::generation(1)?,
+        context.domain().revision(),
+    );
+    let plan = context.domain().plan_account_created(account)?;
+    let request = crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())?;
+    context
+        .stage_durable(plan, request, None, 0)
+        .map_err(|_| "staging was refused")?;
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    context
+        .drive_batch()
+        .map_err(|_| "the batch did not submit")?;
+    assert!(context.in_flight());
+    let step = snapshot::write_batch(&mut coordinator, context, a);
+    assert!(
+        matches!(step, snapshot::WriteStep::Done),
+        "a refused page ends this write pass"
+    );
+    assert!(coordinator.pending.is_none());
+    let next_write = coordinator
+        .peers
+        .get(&a)
+        .and_then(|state| state.snapshot.as_ref())
+        .map(|snapshot| snapshot.next_write);
+    assert_eq!(
+        next_write,
+        Some(0),
+        "the refused page of {page_rows} rows is written again later"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn unknown_cursor_triggers_a_verified_snapshot_and_active_swap() -> TestResult {
     let a = peer_identity(ServerId::from_bytes([54; 16]), "edge-a.example");

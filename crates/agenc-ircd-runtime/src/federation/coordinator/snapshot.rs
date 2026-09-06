@@ -48,13 +48,13 @@ const MAX_SNAPSHOT_BYTES: u64 = 536_870_912;
 /// One snapshot in progress or awaiting READY.
 pub(super) struct Snapshot {
     pub(super) identity: SnapshotIdentity,
-    entries: Vec<Vec<u8>>,
-    records: Vec<ProjectionRecord>,
-    next_send: usize,
-    next_write: usize,
-    end_sent: bool,
+    pub(super) entries: Vec<Vec<u8>>,
+    pub(super) records: Vec<ProjectionRecord>,
+    pub(super) next_send: usize,
+    pub(super) next_write: usize,
+    pub(super) end_sent: bool,
     pub(super) ready: bool,
-    link: LinkId,
+    pub(super) link: LinkId,
 }
 
 /// Replay of the durable outbox after FRESUME OK or ACTIVE.
@@ -609,13 +609,16 @@ pub(super) fn continue_write(
     }
 }
 
-enum WriteStep {
+pub(super) enum WriteStep {
     Staged,
     Skipped,
     Done,
 }
 
-fn write_batch(
+/// Stages the next page of cut rows. A page whose staging is refused stays
+/// queued at the same position: `continue_background` writes it once the
+/// batch slot is free, so no row of the generation is skipped.
+pub(super) fn write_batch(
     coordinator: &mut FederationCoordinator,
     context: &mut StateCoreContext,
     peer: ServerId,
@@ -658,14 +661,8 @@ fn write_batch(
             writes.push(write);
         }
     }
-    if let Some(snapshot) = coordinator
-        .peers
-        .get_mut(&peer)
-        .and_then(|state| state.snapshot.as_mut())
-    {
-        snapshot.next_write = end;
-    }
     if writes.is_empty() {
+        advance_write(coordinator, peer, end);
         return WriteStep::Skipped;
     }
     let Ok(fanout) = crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new()) else {
@@ -677,8 +674,19 @@ fn write_batch(
     {
         return WriteStep::Done;
     }
+    advance_write(coordinator, peer, end);
     coordinator.pending = Some(PendingCommit::SnapshotRows { peer });
     WriteStep::Staged
+}
+
+fn advance_write(coordinator: &mut FederationCoordinator, peer: ServerId, end: usize) {
+    if let Some(snapshot) = coordinator
+        .peers
+        .get_mut(&peer)
+        .and_then(|state| state.snapshot.as_mut())
+    {
+        snapshot.next_write = end;
+    }
 }
 
 /// The row for one cut record, or `None` when a later mutation already
