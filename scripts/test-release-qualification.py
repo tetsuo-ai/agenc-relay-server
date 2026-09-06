@@ -766,6 +766,7 @@ class CapacityDriverTests(unittest.TestCase):
                 "samples": [cls.sample(connections), cls.sample(connections - 1)],
                 "latency_classes": {name: {"count": 5, "p50_ns": 1, "p95_ns": 2, "p99_ns": 3} for name in driver.LATENCY_CLASSES},
                 "scenario_counts": {name: 1 for name in driver.SCENARIOS}, "missed_events": 0, "envelope_violations": 0,
+                "population_shortfalls": 0,
                 "messages_sent": 100, "messages_received": 700, "messages_refused": 0,
                 "returned_to_envelope": True, "daemons_stopped_cleanly": [True, True, True], "hardware": "test host"}
 
@@ -785,6 +786,8 @@ class CapacityDriverTests(unittest.TestCase):
             lambda record: record["scenario_counts"].__setitem__("disk_pressure", 0),
             lambda record: record.__setitem__("missed_events", 1),
             lambda record: record.__setitem__("envelope_violations", 2),
+            lambda record: record.__setitem__("population_shortfalls", 1),
+            lambda record: record.pop("population_shortfalls"),
             lambda record: record.__setitem__("returned_to_envelope", False),
             lambda record: record.__setitem__("daemons_stopped_cleanly", [True, False, True]),
             lambda record: record["latency_classes"].pop("opaque"),

@@ -798,6 +798,61 @@ continuation retries the same page once the batch slot is free. A unit
 test stages a page while another batch is with storage and requires the
 cursor to stay at the page.
 
+### CAP-18: a client that left while the link was down kept its nickname at the coordinator
+
+Fixed. A registered client that closed its connection while the edge's
+coordinator link was down could not be reported: the edge queued the
+session close on a link that was gone and dropped the origin after a
+FORIGIN DEL the link never carried. After the next reset the edge replayed
+only the origins it still held, and at READY the coordinator revived every
+origin of the incarnation it had suspended at link loss, so the orphan
+scan found nothing and the stale session kept its nickname. Every later
+registration under that nickname was refused as a bad state, rendered to
+the client as a rejected registration, and the client retried. In every
+64-client run the disk-pressure scenario retired edge-a's link while the
+workers dropped their sessions for the maintenance window; from then on
+edge-a admitted and closed about sixteen connections per second, none of
+its thirty-two workers registered again for the rest of the run, and a
+300-second diagnostic run counted 2,610 session opens from that edge
+refused by the coordinator against 38 accepted. Edge-b recovered only
+because the peer-loss and rekey scenarios restarted it and the new
+incarnation fenced its sessions. The campaign counted no missed events
+because the missing observers were not there to miss anything, and the
+capacity job of the fourth candidate passed with 46 to 53 of 64 clients
+connected after its first cycle. A second path left the same residue
+with the link up: a session close refused as busy, because storage
+refused its batch under disk pressure, was dropped, while the DEL that
+followed it went through, so the session outlived its origin.
+
+The edge now retains a closed connection's origin, marked deleted, until
+the coordinator acknowledges the DEL, and after FORIGIN RESET it replays
+the DEL of every retained origin, which is the replay the specification
+assigns to the edge; the companion origin mirror and the snapshot resync
+skip retained origins. The coordinator accepts a replayed DEL during the
+reset whatever generation it names, acknowledges one for an origin it
+never committed without a row, and hides a deleted origin's session with
+the deletion, since nobody can close it any more. Unit tests close a
+registered client while the link is down and require the next reset to
+replay the DEL and a later reset to replay nothing, delete an origin
+whose close never arrived and require its session hidden, and replay a
+deletion at a stale generation against the origin table. The campaign's
+quiescence check now also requires the whole population back and records
+population shortfalls, which the driver refuses; a 300-second development
+run with the change holds all 64 clients at both quiescence checks.
+
+### CAP-19: a process action's confirmation is refused by any commit in between
+
+Open. The confirmation of DIE and the other process actions binds to the
+process target revision, which the state core derives from the state
+generation, so a durable commit landing between the challenge and the
+confirmation refuses the confirmation with INVALID_TARGET. On an edge
+carrying traffic the two-step action succeeds only when the operator
+re-issues it in a quiet moment. The campaign's maintenance stop of edge b
+met the refusal once the coordinator began hiding the sessions of deleted
+origins during the window, and now re-issues the command up to five
+times. A process action should bind to a revision that ordinary traffic
+does not advance.
+
 ## Release claims and limits
 
 The signing command requires an explicit Ed25519 signing key and matching

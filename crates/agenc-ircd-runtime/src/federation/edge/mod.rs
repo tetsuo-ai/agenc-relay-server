@@ -386,10 +386,15 @@ impl EdgeFederation {
         })
     }
 
-    /// Every connection with a base origin.
+    /// Every open connection with a base origin; an origin retained only
+    /// until its deletion is acknowledged has no connection behind it.
     #[must_use]
     pub fn connection_generations(&self) -> Vec<ConnectionGeneration> {
-        self.origins.keys().copied().collect()
+        self.origins
+            .iter()
+            .filter(|(_, origin)| !origin.deleted)
+            .map(|(generation, _)| *generation)
+            .collect()
     }
 
     /// Advances the connection's shared origin generation after a device
@@ -700,10 +705,11 @@ impl EdgeFederation {
                 edge_server_id,
                 origin_id,
                 generation,
+                object_id,
                 ..
             } => {
                 self.require_self(edge_server_id)?;
-                self.origin_acked(origin_id, generation);
+                self.origin_acked(origin_id, generation, object_id.is_none());
                 Ok(Vec::new())
             }
             FederationFrame::ResumeOk {
@@ -786,7 +792,17 @@ impl EdgeFederation {
         }
     }
 
-    fn origin_acked(&mut self, origin_id: OriginId, generation: u64) {
+    /// Records the coordinator's acknowledgement of one origin declaration,
+    /// or drops the retained origin once its deletion is acknowledged.
+    fn origin_acked(&mut self, origin_id: OriginId, generation: u64, deletion: bool) {
+        if deletion {
+            self.origins.retain(|_, origin| {
+                !(origin.deleted
+                    && origin.origin_id == origin_id
+                    && origin.generation == generation)
+            });
+            return;
+        }
         for origin in self.origins.values_mut() {
             if origin.origin_id == origin_id && origin.generation == generation {
                 origin.acked_generation = Some(generation);

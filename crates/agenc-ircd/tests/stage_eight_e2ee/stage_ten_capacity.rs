@@ -74,6 +74,8 @@ const PHYSICAL_GROWTH_BYTES: u64 = 268_435_456;
 const RESERVE_CLEARANCE_BYTES: u64 = 8 * 1_024 * 1_024 * 1_024;
 const PRESSURE_MARGIN_BYTES: u64 = 64 * 1_024 * 1_024;
 const REGISTRATION_PROBE_WAIT: Duration = Duration::from_secs(10);
+/// Re-issues of a refused DIE confirmation (finding CAP-19).
+const DIE_ATTEMPTS: u32 = 5;
 /// Spacing between two workers connecting or resuming after a maintenance
 /// window. Every campaign client shares one loopback address, and the
 /// per-address pre-authentication bucket admits at most 10 commands per
@@ -1062,6 +1064,9 @@ struct Campaign<'a> {
     scenarios: Scenarios,
     samples: Vec<Sample>,
     envelope_violations: u64,
+    /// Quiescence checks at which fewer clients were connected than the
+    /// campaign configured: a population that did not return.
+    population_shortfalls: u64,
     /// Samples skipped after a retried STATS failure.
     sample_failures: u64,
     baseline: [Resources; 3],
@@ -1425,8 +1430,29 @@ the post-restart grace (CAP-7)"
 
     fn stop_edge_b(&mut self) -> TestResult {
         self.shared.maintenance.store(true, Ordering::Relaxed);
-        let identity = &self.admins[2];
-        AdminSession::connect(identity)?.confirm_process("DIE :campaign maintenance")?;
+        // The confirmation binds to the state generation (finding CAP-19),
+        // so a commit landing between the challenge and the confirmation
+        // refuses it; an operator re-issues the command, and so does the
+        // campaign, a bounded number of times.
+        let mut attempt = 0_u32;
+        loop {
+            attempt += 1;
+            let outcome = AdminSession::connect(&self.admins[2])?
+                .confirm_process("DIE :campaign maintenance");
+            match outcome {
+                Ok(()) => break,
+                Err(error)
+                    if attempt < DIE_ATTEMPTS
+                        && format!("{error:?}").contains("INVALID_TARGET") =>
+                {
+                    self.note(format!(
+                        "DIE refused at attempt {attempt}: {error} (CAP-19)"
+                    ));
+                    thread::sleep(Duration::from_millis(500));
+                }
+                Err(error) => return Err(error),
+            }
+        }
         let status = self.nodes.edge_b.wait()?;
         if !status.success() {
             return Err(failure(format!("edge b exited with {status}")));
@@ -1674,8 +1700,13 @@ the post-restart grace (CAP-7)"
         thread::sleep(QUIESCE_WINDOW);
         let sample = take_sample(self.shared, &self.nodes, &self.admins)?;
         let inside = within_envelope(&self.baseline, &sample.resources);
+        // The whole population must be back: a client that cannot register
+        // again after a scenario is a loss the resource envelope cannot see.
+        let expected = u64::try_from(self.settings.connections).unwrap_or(u64::MAX);
+        let live = sample.live_client_connections;
+        let population = live == expected;
         self.note(format!(
-            "quiescence: inside={inside} memory={:?} sockets={:?} tasks={:?} links={}",
+            "quiescence: inside={inside} population={population} live={live}/{expected} memory={:?} sockets={:?} tasks={:?} links={}",
             sample.resources.map(|r| r.anonymous_bytes),
             sample.resources.map(|r| r.sockets),
             sample.resources.map(|r| r.tasks),
@@ -1720,7 +1751,10 @@ the post-restart grace (CAP-7)"
         if !inside {
             self.envelope_violations += 1;
         }
-        Ok(inside)
+        if !population {
+            self.population_shortfalls += 1;
+        }
+        Ok(inside && population)
     }
 
     fn cycle(&mut self, number: u64) -> TestResult {
@@ -1889,9 +1923,10 @@ fn write_report(
         scenarios.snapshot, scenarios.backup, scenarios.disk_pressure, scenarios.peer_loss
     ));
     json.push_str(&format!(
-        "\"missed_events\":{},\"envelope_violations\":{},\"sample_failures\":{},\"returned_to_envelope\":{returned},\"worker_reconnects\":{},\"worker_churns\":{},\"messages_sent\":{},\"messages_received\":{},\"messages_refused\":{},\"refused_by_code\":{{{}}},\"refused_by_time\":{{{}}},\"daemons_stopped_cleanly\":[{},{},{}],\"reserve_bytes\":{},\"hardware\":\"{}\",\"worker_errors\":{},\"log\":[",
+        "\"missed_events\":{},\"envelope_violations\":{},\"population_shortfalls\":{},\"sample_failures\":{},\"returned_to_envelope\":{returned},\"worker_reconnects\":{},\"worker_churns\":{},\"messages_sent\":{},\"messages_received\":{},\"messages_refused\":{},\"refused_by_code\":{{{}}},\"refused_by_time\":{{{}}},\"daemons_stopped_cleanly\":[{},{},{}],\"reserve_bytes\":{},\"hardware\":\"{}\",\"worker_errors\":{},\"log\":[",
         shared.missed_events.load(Ordering::Relaxed),
         campaign.envelope_violations,
+        campaign.population_shortfalls,
         campaign.sample_failures,
         shared.reconnects.load(Ordering::Relaxed),
         shared.churns.load(Ordering::Relaxed),
@@ -1984,6 +2019,7 @@ fn control<'a>(
         scenarios: Scenarios::default(),
         samples: Vec::new(),
         envelope_violations: 0,
+        population_shortfalls: 0,
         sample_failures: 0,
         baseline: baseline.resources,
         backup_path: None,

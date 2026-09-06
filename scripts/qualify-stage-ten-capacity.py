@@ -87,7 +87,7 @@ def validate_campaign(report: dict[str, Any], minimum_seconds: int, connections:
     for scenario in SCENARIOS:
         if type(counts[scenario]) is not int or counts[scenario] < 1:
             raise QualificationError(f"scenario {scenario} did not run")
-    for field in ("missed_events", "envelope_violations"):
+    for field in ("missed_events", "envelope_violations", "population_shortfalls"):
         if report.get(field) != 0:
             raise QualificationError(f"campaign reported nonzero {field}")
     for field in ("messages_sent", "messages_received", "messages_refused"):

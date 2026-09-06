@@ -1,7 +1,7 @@
 //! FORIGIN RESET, ADD, UPDATE, DEL, and READY on the coordinator (spec 20.5).
 
 use agenc_ircd_domain::federation::{
-    OriginBinding, OriginDeclaration, OriginKey, OriginPrincipal, OriginStatus,
+    OriginBinding, OriginDeclaration, OriginError, OriginKey, OriginPrincipal, OriginStatus,
 };
 use agenc_ircd_federation_wire::{
     AssembledObject, DecodeBudget, FederationFrame, OriginDescriptor, OriginRecord, SchemaObject,
@@ -187,10 +187,6 @@ pub(super) fn delete(
     if coordinator.pending.is_some() {
         return Err(Violation::Ceiling);
     }
-    coordinator
-        .origins
-        .delete(key, generation, next_sequence)
-        .map_err(|_| Violation::Origin)?;
     let frame = FederationFrame::OriginAck {
         edge_server_id: peer,
         server_incarnation: key.server_incarnation,
@@ -198,6 +194,42 @@ pub(super) fn delete(
         generation,
         object_id: None,
     };
+    match coordinator.origins.delete(key, generation, next_sequence) {
+        Ok(()) => {
+            // The connection behind the origin is gone, so nobody can close
+            // its session any more. The edge's session close normally
+            // precedes the DEL; when it never arrived, or storage refused
+            // it, the session would keep its nickname until the next reset.
+            let session = coordinator
+                .origins
+                .origin(&key)
+                .and_then(|entry| entry.principal.session)
+                .map(|(_, user_id)| user_id)
+                .filter(|user_id| {
+                    context
+                        .domain()
+                        .session(*user_id)
+                        .is_some_and(|session| session.home_server_id() == peer)
+                });
+            if let Some(user_id) = session
+                && let Some(state) = coordinator.peers.get_mut(&peer)
+            {
+                state.cleanup.push_back(user_id);
+            }
+        }
+        Err(OriginError::UnknownOrigin)
+            if coordinator
+                .origins
+                .is_resetting(peer, key.server_incarnation) =>
+        {
+            // A DEL replayed after a reset for an origin whose declaration
+            // this coordinator never committed: there is nothing to delete
+            // or record, and the acknowledgement lets the edge drop it.
+            let _sent = coordinator.send_frame(context, link, peer, &frame);
+            return Ok(());
+        }
+        Err(_) => return Err(Violation::Origin),
+    }
     stage_origin(coordinator, context, link, peer, key, frame, None)
 }
 

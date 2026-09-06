@@ -142,12 +142,45 @@ pub(super) fn declare_origin(
     generation: ConnectionGeneration,
     update: bool,
 ) {
-    let Some(origin) = edge.origins.get_mut(&generation) else {
+    if edge
+        .origins
+        .get(&generation)
+        .is_some_and(|origin| origin.deleted)
+    {
+        return;
+    }
+    send_origin_declaration(edge, context, generation, update);
+}
+
+/// Replays one origin after FORIGIN RESET: the exact current declaration
+/// of an open connection, or the DEL of one that closed while the link was
+/// down, so the coordinator learns of every closure it missed before READY
+/// revives the origins it still holds.
+pub(super) fn replay_origin(
+    edge: &mut EdgeFederation,
+    context: &mut StateCoreContext,
+    generation: ConnectionGeneration,
+) {
+    let Some(origin) = edge.origins.get(&generation) else {
         return;
     };
     if origin.deleted {
+        send_origin_del(edge, context, generation);
         return;
     }
+    let update = origin.generation > 0;
+    send_origin_declaration(edge, context, generation, update);
+}
+
+fn send_origin_declaration(
+    edge: &mut EdgeFederation,
+    context: &mut StateCoreContext,
+    generation: ConnectionGeneration,
+    update: bool,
+) {
+    let Some(origin) = edge.origins.get_mut(&generation) else {
+        return;
+    };
     let record = OriginRecord {
         network_id: edge.config.network_id,
         home_server_id: edge.config.server_id,
@@ -195,7 +228,9 @@ pub(super) fn declare_origin(
     });
 }
 
-/// Sends FORIGIN DEL for a closed connection.
+/// Sends FORIGIN DEL for a closed connection. The origin stays retained,
+/// marked deleted, until the coordinator acknowledges the deletion: a DEL
+/// lost with the link is replayed after the next reset.
 pub(super) fn delete_origin(
     edge: &mut EdgeFederation,
     context: &mut StateCoreContext,
@@ -205,6 +240,17 @@ pub(super) fn delete_origin(
         return;
     };
     origin.deleted = true;
+    send_origin_del(edge, context, generation);
+}
+
+fn send_origin_del(
+    edge: &mut EdgeFederation,
+    context: &mut StateCoreContext,
+    generation: ConnectionGeneration,
+) {
+    let Some(origin) = edge.origins.get(&generation) else {
+        return;
+    };
     let frame = agenc_ircd_federation_wire::FederationFrame::OriginDel {
         coordinator_server_id: edge.config.coordinator.server_id(),
         server_incarnation: edge.config.incarnation,
@@ -213,7 +259,6 @@ pub(super) fn delete_origin(
         next_operation_sequence: origin.sequence,
     };
     edge.send_frame(context, &frame);
-    edge.origins.remove(&generation);
 }
 
 /// Encodes one request for the connection's origin, consuming the next

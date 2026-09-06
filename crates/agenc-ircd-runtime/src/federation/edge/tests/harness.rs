@@ -28,6 +28,7 @@ use agenc_ircd_types::{
 use tokio::sync::{mpsc, oneshot};
 
 use super::*;
+use crate::budget::{BoundedMemoryCharges, MemoryBudget, MemoryBudgetPort, MemoryCharge};
 use crate::connection::sink::ClientSink;
 use crate::federation::codec::events::event_arm_object;
 use crate::federation::codec::operations::FederatedOperation;
@@ -36,7 +37,8 @@ use crate::federation::link::{LinkQueue, carrier_of, link_queue, parse_frame};
 use crate::purpose::ListenerPurpose;
 use crate::state_core::StateCoreExit;
 use crate::state_core::inbox::{
-    LifecyclePhase, SourceAddressKey, StateCoreMessage, connection_close_channel, lifecycle_channel,
+    CloseReason, ConnectionClosePort, ConnectionStatePermit, LifecyclePhase, PhysicalCloseNotice,
+    SourceAddressKey, StateCoreMessage, connection_close_channel, lifecycle_channel,
 };
 use crate::test_support::{FrameSink, StateCoreFixture};
 
@@ -469,16 +471,31 @@ async fn run_edge<Driver, Output>(
 where
     Driver: Future<Output = TestResult<Output>>,
 {
+    run_edge_with_closes(|federation, inbox, _closes| driver(federation, inbox)).await
+}
+
+/// Runs the edge like `run_edge` and hands the driver the physical-close
+/// port, so a test can end a client connection the way the transport does.
+async fn run_edge_with_closes<Driver, Output>(
+    driver: impl FnOnce(
+        mpsc::Sender<FederationInbound>,
+        mpsc::Sender<StateCoreMessage>,
+        ConnectionClosePort,
+    ) -> Driver,
+) -> TestResult<Output>
+where
+    Driver: Future<Output = TestResult<Output>>,
+{
     let mut fixture = StateCoreFixture::with_edge(entropy_script(), coordinator_identity())?;
     let mut parts = fixture.take_run_parts()?;
     let (inbox, inbox_receiver) = mpsc::channel(8);
     let (federation, federation_receiver) = mpsc::channel(64);
     parts.state.install_federation_inbox(federation_receiver)?;
-    let (_close_port, close_inbox) = connection_close_channel();
+    let (close_port, close_inbox) = connection_close_channel();
     let (lifecycle, lifecycle_receiver) = lifecycle_channel();
     let token = crate::cancel::CancellationToken::root();
     let driven = async move {
-        let output = driver(federation, inbox).await;
+        let output = driver(federation, inbox, close_port).await;
         let _stopped = lifecycle.request(LifecyclePhase::Stop).await;
         output
     };
@@ -531,6 +548,25 @@ impl Client {
         })
     }
 
+    /// Reports the physical close of the connection after its last line.
+    fn close(&self, closes: &ConnectionClosePort) -> TestResult {
+        let budget = MemoryBudget::new(1);
+        let charges = BoundedMemoryCharges::new(&[MemoryCharge::fixed(1)])?;
+        let mut permits = budget.try_acquire_batch(charges)?;
+        let permit = permits.split_exact(1).ok_or("no state permit")?;
+        let (return_permit, _returned) = oneshot::channel();
+        closes
+            .try_reserve()
+            .map_err(|()| "no close slot")?
+            .send(PhysicalCloseNotice {
+                generation: self.generation,
+                reason: CloseReason::TransportLoss,
+                closed_at: Some(agenc_ircd_types::MonotonicTick::from_ticks(2)),
+                final_line_sequence: self.sequence,
+                state_permit: ConnectionStatePermit::new(permit, return_permit),
+            });
+        Ok(())
+    }
     async fn line(&mut self, line: &str) -> TestResult {
         self.sequence += 1;
         let message = parse_message(FramedLine::new(line)?)?.ok_or("empty line")?;
@@ -811,6 +847,134 @@ async fn global_commands_fail_closed_while_the_link_is_down() -> TestResult {
         );
         client.line("PING :still-here").await?;
         client.wait_for("PONG").await?;
+        Ok(())
+    })
+    .await
+}
+
+/// A registered client that leaves while the coordinator link is down has
+/// no way to tell the coordinator; the edge retains its origin and replays
+/// its DEL after the next FORIGIN RESET, so the coordinator can drop the
+/// session (and free the nickname) instead of reviving the origin at READY.
+/// Once the deletion is acknowledged the origin is gone and a later reset
+/// replays nothing (finding CAP-18).
+#[tokio::test]
+async fn an_origin_closed_while_the_link_is_down_is_replayed_and_deleted_after_the_reset()
+-> TestResult {
+    run_edge_with_closes(|federation, inbox, closes| async move {
+        let mut hub = Hub::new(federation);
+        hub.establish().await?;
+        hub.synchronize().await?;
+        let mut client = Client::open(inbox, 1).await?;
+        hub.ack_origin().await?;
+        client.line("NICK rosa").await?;
+        client.line("USER rosa 0 * :Rosa Real").await?;
+        let (header, _, bytes) = hub.next_request().await?;
+        let session_id = SessionId::from_bytes([73; 16]);
+        let user_id = UserId::from_bytes([74; 16]);
+        hub.state_generation += 1;
+        let generation = hub.state_generation;
+        hub.event(
+            &ProjectedEvent::SessionVisible(SessionEventView {
+                source: source(user_id, "rosa", 2)?,
+                home_projection: Some(session_record(session_id, user_id, "rosa", generation, 2)?),
+            }),
+            None,
+        )
+        .await?;
+        let completion = hub
+            .event(
+                &ProjectedEvent::RequestCompleted {
+                    resulting_state_generation: generation,
+                },
+                Some(RequestCorrelation {
+                    replay_key: header.replay_key,
+                    request_id: header.request_id,
+                }),
+            )
+            .await?;
+        hub.result(
+            &header,
+            &bytes,
+            &ResultArm::SessionRegistered(SessionRegistered {
+                session_id,
+                user_id,
+                session_revision: generation,
+                account: None,
+                resulting_state_generation: generation,
+            }),
+            Vec::new(),
+            Some(completion),
+        )
+        .await?;
+        client.wait_for(" 001 rosa ").await?;
+        hub.ack_origin().await?;
+        // The link drops and the client leaves while it is down.
+        hub.send(LinkEvent::Closed(
+            crate::federation::LinkCloseReason::PeerClosed,
+        ))
+        .await?;
+        client.close(&closes)?;
+        client.line("PING :gone").await.ok();
+        // The next link replays the closed origin's DEL before READY.
+        hub.establish().await?;
+        hub.expect_frame(|frame, _| matches!(frame, FederationFrame::OriginReset { .. }))
+            .await?;
+        let deletion = hub.next_frame().await?;
+        let FederationFrame::OriginDel {
+            server_incarnation,
+            origin_id,
+            generation: deleted_generation,
+            ..
+        } = deletion
+        else {
+            return Err(format!("expected the DEL, got {:?}", deletion.kind()).into());
+        };
+        assert_eq!(deleted_generation, 1);
+        let ready = hub.next_frame().await?;
+        assert!(
+            matches!(ready, FederationFrame::OriginReady { .. }),
+            "{:?}",
+            ready.kind()
+        );
+        let (resume, _) = hub
+            .expect_frame(|frame, _| matches!(frame, FederationFrame::Resume { .. }))
+            .await?;
+        let FederationFrame::Resume {
+            projection_generation,
+            ..
+        } = resume
+        else {
+            return Err("expected FRESUME".into());
+        };
+        hub.frame(FederationFrame::ResumeOk {
+            edge_server_id: EDGE,
+            projection_generation,
+            next_delivery_sequence: hub.next_sequence,
+        })
+        .await?;
+        hub.frame(FederationFrame::OriginAck {
+            edge_server_id: EDGE,
+            server_incarnation,
+            origin_id,
+            generation: 1,
+            object_id: None,
+        })
+        .await?;
+        // Acknowledged, the origin is gone: a further reset replays nothing.
+        hub.send(LinkEvent::Closed(
+            crate::federation::LinkCloseReason::PeerClosed,
+        ))
+        .await?;
+        hub.establish().await?;
+        hub.expect_frame(|frame, _| matches!(frame, FederationFrame::OriginReset { .. }))
+            .await?;
+        let next = hub.next_frame().await?;
+        assert!(
+            matches!(next, FederationFrame::OriginReady { .. }),
+            "{:?}",
+            next.kind()
+        );
         Ok(())
     })
     .await

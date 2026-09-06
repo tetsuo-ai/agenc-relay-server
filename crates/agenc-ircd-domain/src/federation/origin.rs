@@ -299,6 +299,15 @@ impl OriginTable {
         );
     }
 
+    /// Reports whether the edge's link is replaying its origins after a
+    /// reset, when a DEL may name an origin this coordinator never held.
+    #[must_use]
+    pub fn is_resetting(&self, edge: ServerId, incarnation: ServerIncarnation) -> bool {
+        self.edges.get(&edge).is_some_and(|link| {
+            link.server_incarnation == incarnation && link.phase == EdgePhase::Resetting
+        })
+    }
+
     /// Accepts FORIGIN READY after every origin was replayed.
     pub fn ready(
         &mut self,
@@ -406,13 +415,16 @@ impl OriginTable {
         generation: u64,
         next_sequence: u64,
     ) -> Result<(), OriginError> {
-        self.require_synchronizing(origin)?;
+        let phase = self.require_synchronizing(origin)?;
         let entry = self
             .origins
             .get_mut(&origin)
             .ok_or(OriginError::UnknownOrigin)?;
+        let replay = phase == EdgePhase::Resetting;
         if entry.status == OriginStatus::Deleted {
-            return if entry.generation == generation && entry.deleted_after == Some(next_sequence) {
+            return if replay
+                || (entry.generation == generation && entry.deleted_after == Some(next_sequence))
+            {
                 Ok(())
             } else {
                 Err(OriginError::Conflict)
@@ -420,6 +432,21 @@ impl OriginTable {
         }
         if entry.status == OriginStatus::Fenced {
             return Err(OriginError::Fenced);
+        }
+        if replay {
+            // A DEL replayed after a reset closes an origin whose connection
+            // is gone. The edge may name a generation this coordinator never
+            // committed, or an older one whose update commit lost its
+            // acknowledgement; the origin ends either way, after everything
+            // this coordinator executed under its own generation.
+            let after = if generation == entry.generation {
+                next_sequence.max(entry.next_sequence)
+            } else {
+                entry.next_sequence
+            };
+            entry.deleted_after = Some(after);
+            entry.status = OriginStatus::Deleted;
+            return Ok(());
         }
         if entry.generation != generation || next_sequence < entry.next_sequence {
             return Err(OriginError::WrongGeneration);

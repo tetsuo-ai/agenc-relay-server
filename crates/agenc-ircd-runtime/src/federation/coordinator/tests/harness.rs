@@ -1224,6 +1224,65 @@ async fn session_close_hides_the_session_on_every_sharing_edge() -> TestResult {
     .await
 }
 
+/// A deleted origin's session is hidden with the deletion. The edge's
+/// session close normally precedes the DEL; when the link lost it or
+/// storage refused it, the session would otherwise keep its nickname until
+/// the next reset (finding CAP-18).
+#[tokio::test]
+async fn deleting_an_origin_hides_the_session_its_close_never_reached() -> TestResult {
+    let a = peer_identity(ServerId::from_bytes([49; 16]), "edge-a.example");
+    let b = peer_identity(ServerId::from_bytes([50; 16]), "edge-b.example");
+    run_coordinator(&[a, b], |inbox| async move {
+        let mut edge_a = Edge::new(inbox.clone(), 49);
+        let mut edge_b = Edge::new(inbox, 50);
+        let mut origin_a = Origin::new(69);
+        let mut origin_b = Origin::new(70);
+        edge_a.establish().await?;
+        edge_b.establish().await?;
+        synchronize_ok(&mut edge_a, &mut [&mut origin_a]).await?;
+        synchronize_ok(&mut edge_b, &mut [&mut origin_b]).await?;
+        let mut events_a = Vec::new();
+        let mut events_b = Vec::new();
+        open_session(&mut edge_a, &mut origin_a, "kira", &mut events_a).await?;
+        open_session(&mut edge_b, &mut origin_b, "lior", &mut events_b).await?;
+        drop(events_b);
+        // Kira's connection ended and its close never arrived: only the DEL.
+        edge_a
+            .frame(FederationFrame::OriginDel {
+                coordinator_server_id: COORDINATOR,
+                server_incarnation: edge_a.incarnation,
+                origin_id: origin_a.id,
+                generation: origin_a.generation,
+                next_operation_sequence: origin_a.sequence,
+            })
+            .await?;
+        let ack = edge_a.next_frame().await?;
+        assert!(
+            matches!(
+                ack,
+                FederationFrame::OriginAck {
+                    object_id: None,
+                    ..
+                }
+            ),
+            "{:?}",
+            ack.kind()
+        );
+        // Kira's edge sees the session hidden as an expired origin.
+        let (_, hidden) = next_event(&mut edge_a).await?;
+        let ProjectedEvent::SessionHidden { source, kind, .. } = hidden else {
+            return Err("edge a expected session_hidden".into());
+        };
+        assert_eq!(source.nickname.presentation(), "kira");
+        assert_eq!(
+            kind,
+            agenc_ircd_domain::federation::SessionHideKind::OriginExpired
+        );
+        Ok(())
+    })
+    .await
+}
+
 #[tokio::test]
 async fn reconnect_replays_origins_and_continues_the_sequence() -> TestResult {
     let identity = peer_identity(ServerId::from_bytes([49; 16]), "edge.example");

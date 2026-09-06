@@ -51,11 +51,7 @@ pub(super) fn begin(edge: &mut EdgeFederation, context: &mut StateCoreContext) {
     }
     let generations: Vec<_> = edge.origins.keys().copied().collect();
     for generation in generations {
-        let update = edge
-            .origins
-            .get(&generation)
-            .is_some_and(|origin| origin.generation > 0);
-        request::declare_origin(edge, context, generation, update);
+        request::replay_origin(edge, context, generation);
     }
     let ready_sent = edge.send_frame(
         context,
@@ -269,7 +265,7 @@ pub(super) fn snapshot_end(
     let resync: Vec<EdgeCompletion> = edge
         .origins
         .iter()
-        .filter(|(_, origin)| origin.session.is_some())
+        .filter(|(_, origin)| origin.session.is_some() && !origin.deleted)
         .map(|(generation, _)| EdgeCompletion::Resync {
             generation: *generation,
         })
