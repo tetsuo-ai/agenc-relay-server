@@ -22,7 +22,7 @@ RAW_HASHES = {
         "1b94cb7b43dc458ff683ddcfd86eed1939128a7a6d0229b89342bd6816eb5411"
     ),
     "docs/protocol-sources-and-decisions.md": (
-        "95796ddf454e4f12a9cd4aa4213f9935c5e75720bf4820f25c4673f232c7d8fb"
+        "ac83ec05126c45b3e125ec96a3f373d5f0202e09cd133937791854ab07e2f4b4"
     ),
 }
 PROFILE_HASHES = {
