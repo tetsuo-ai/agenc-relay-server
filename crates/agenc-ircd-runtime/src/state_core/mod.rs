@@ -933,6 +933,7 @@ impl StateCoreContext {
             self.entropy.as_mut(),
             row_revision,
             &cross_profile,
+            &self.index,
         )
     }
 
@@ -3989,8 +3990,8 @@ impl StateCore {
                                             Ok(next) => {
                                                 let complete = next.is_none();
                                                 index_refresh = next;
-                                self.index_refresh_in_flight = index_refresh.is_some();
-                                                self.index_refresh_in_flight = index_refresh.is_some();
+                                                self.index_refresh_in_flight =
+                                                    index_refresh.is_some();
                                                 if complete {
                                                     self.step_batch()
                                                 } else {
@@ -4015,9 +4016,8 @@ impl StateCore {
                                                 Ok(next) => {
                                                     let complete = next.is_none();
                                                     index_refresh = next;
-                                self.index_refresh_in_flight = index_refresh.is_some();
-                                                    self.index_refresh_in_flight = index_refresh.is_some();
-                                                self.index_refresh_in_flight = index_refresh.is_some();
+                                                    self.index_refresh_in_flight =
+                                                        index_refresh.is_some();
                                                     Ok(complete)
                                                 }
                                                 Err(exit) => Err(exit),
@@ -4180,6 +4180,58 @@ mod lifecycle_tests {
         assert!(
             core.context.in_flight(),
             "the batch is with storage once the index is current"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_standing_key_removed_before_its_cut_row_lands_needs_no_delete()
+    -> crate::test_support::TestResult {
+        let mut fixture = crate::test_support::StateCoreFixture::with_federation_coordinator(
+            (0_u32..65_536)
+                .map(|index| u8::try_from((index * 7 + 3) % 256).unwrap_or_default())
+                .collect(),
+            Vec::new(),
+        )?;
+        let mut parts = fixture.take_run_parts()?;
+        let core = &mut parts.state;
+        let edge = agenc_ircd_types::ServerId::from_bytes(agenc_ircd_testkit::bytes(240));
+        let identity = crate::test_support::seed_session(&mut core.context, 5, "quill", None)?;
+        // A snapshot cut installs the edge's standing under a new generation
+        // before any row of that generation is written; a refused cut batch
+        // leaves it that way.
+        let records = agenc_ircd_domain::federation::CoordinatorProjection::standing_of(
+            core.context.domain(),
+            edge,
+        );
+        assert!(!records.is_empty(), "the session stands for its home edge");
+        let projector = core.context.federation_mut().ok_or("no projector")?;
+        projector.set_edge(
+            edge,
+            crate::state_core::projector::EdgeDelivery {
+                projection_generation: 2,
+                next_delivery_sequence: 0,
+            },
+        );
+        projector.install_edge(edge, &records);
+        let plan = core
+            .context
+            .domain()
+            .plan_session_disconnected(identity.user_id)?;
+        let request = crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())?;
+        core.context
+            .stage_durable(plan, request, None, 0)
+            .map_err(|_| "staging was refused")?;
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        // The removal must not delete the row the cut never wrote; the batch
+        // projects and goes to storage instead of stopping the core.
+        assert!(
+            core.step_batch().is_none(),
+            "the removal projects without the unwritten row"
+        );
+        assert!(
+            core.context.in_flight(),
+            "the batch is with storage after the removal projected"
         );
         Ok(())
     }

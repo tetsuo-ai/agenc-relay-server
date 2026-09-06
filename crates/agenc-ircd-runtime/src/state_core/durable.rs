@@ -319,6 +319,13 @@ impl DurableIndex {
         self.channel_names.insert(channel_id, key);
     }
 
+    /// Returns whether the index holds a row under the key, whether read
+    /// back already or still pending after the last commit.
+    #[must_use]
+    pub fn holds(&self, table: TableId, key: &StoredKey) -> bool {
+        self.rows.contains_key(&(table, key.clone()))
+    }
+
     /// Returns the before-image for a row, `None` when the row is absent.
     ///
     /// A pending row is a caller error: the index must be refreshed after

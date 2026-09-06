@@ -27,7 +27,7 @@ use agenc_ircd_types::{EntropySource, EventId, NetworkId, ServerId};
 use crate::RuntimeError;
 use crate::federation::codec::events::event_arm_object;
 use crate::federation::codec::projection::{projection_arm_object, projection_kind};
-use crate::state_core::durable::AccountServiceDurableWrite;
+use crate::state_core::durable::{AccountServiceDurableWrite, DurableIndex};
 
 /// One encoded event reserved in the outbox for a target edge.
 pub struct OutboundEvent {
@@ -165,6 +165,7 @@ impl FederationProjector {
         entropy: &mut dyn EntropySource,
         row_revision: u64,
         cross_profile: &BTreeMap<ServerId, CrossProfileAssignment>,
+        index: &DurableIndex,
     ) -> Result<Option<(Vec<AccountServiceDurableWrite>, PendingProjection)>, RuntimeError> {
         let mut projection = self
             .index
@@ -193,7 +194,15 @@ impl FederationProjector {
                 continue;
             };
             let assignment = cross_profile.get(&delta.target).copied();
-            self.project_edge(delta, *delivery, binding, entropy, &mut output, assignment)?;
+            self.project_edge(
+                delta,
+                *delivery,
+                binding,
+                entropy,
+                &mut output,
+                assignment,
+                index,
+            )?;
         }
         Ok(Some((
             output.writes,
@@ -264,6 +273,7 @@ impl FederationProjector {
         entropy: &mut dyn EntropySource,
         output: &mut ProjectedOutput,
         assignment: Option<CrossProfileAssignment>,
+        index: &DurableIndex,
     ) -> Result<(), RuntimeError> {
         let mut sequence = delivery.next_delivery_sequence;
         for (index, event) in delta.events.iter().enumerate() {
@@ -310,6 +320,14 @@ impl FederationProjector {
                 key.kind(),
                 key.primary(),
             )?;
+            // A snapshot cut installs the edge's standing under its new
+            // generation before the cut rows are written (spec 20.9), and a
+            // refused cut batch leaves keys standing with no row at all. A
+            // key removed while its row does not exist needs no delete: the
+            // standing drops it on commit and the cut skips it.
+            if !index.holds(TableId::EdgeProjection, &stored) {
+                continue;
+            }
             output.writes.push(AccountServiceDurableWrite::delete(
                 TableId::EdgeProjection,
                 stored,

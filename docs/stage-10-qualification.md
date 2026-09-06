@@ -758,6 +758,29 @@ in flight, and requires the batch to wait. The daemon also names the state
 owner's exit cause on stderr, from a closed label set, so the next such
 stop is attributable without a rebuild.
 
+### CAP-16: a standing key removed before its snapshot cut row landed stopped the coordinator as corrupt
+
+Fixed. When an edge resumes from a cursor the coordinator no longer
+holds, the coordinator cuts a snapshot: it installs the edge's complete
+standing projection under a new projection generation and then writes the
+rows of that generation in pages of 256 behind the generation marker. From
+the cut onward every mutation projects its standing deltas under the new
+generation. A mutation that removed a standing key before the page holding
+that key was written, or after a page batch had been refused, emitted a
+delete for a row that did not exist; the projection reported a stale state
+and the state core stopped as corrupt. Under disk pressure the marker and
+page batches are refused and each refusal fails the link, so the standing
+stays installed with no rows while the sessions of the closed transports
+are hidden. Release-profile runs after CAP-15 still lost the coordinator
+this way at the onset of the disk pressure scenario, about one run in
+three, and the failure is consistent with the coordinator loss seen once
+after a restart under churn. The projector now consults the durable index
+and omits the delete when no row exists under the current generation: the
+standing drops the key when the batch commits and the cut skips it. A unit
+test installs a standing under a fresh generation with no rows,
+disconnects the session, and requires the batch to project and reach
+storage.
+
 ## Release claims and limits
 
 The signing command requires an explicit Ed25519 signing key and matching
