@@ -854,6 +854,298 @@ origins during the window, and now re-issues the command up to five
 times. A process action should bind to a revision that ordinary traffic
 does not advance.
 
+### CAP-20: restart skipped committed outbox rows and reused delivery sequences
+
+Fixed in the worktree. Review R01. A coordinator restart restored its delivery head from
+a peer checkpoint that could lag committed outbox rows. Replay could skip those rows,
+and a later append could reuse their keys.
+
+Startup now reads and validates the durable outbox before admitting links, reconstructs
+each reserved head, and restores the unacknowledged window. Read failures retain a
+continuation; invalid rows quarantine admission. Unit regressions include
+`resync_restart_recovers_the_delivery_head_from_committed_outbox_rows`. The red and
+green evidence is recorded in [federation-resync-fixes.md](federation-resync-fixes.md).
+Qualification acceptance remains pending; no capacity campaign was run for this change.
+
+### CAP-21: a refused request consumed an edge sequence without a durable result
+
+Fixed in the worktree. Review R02. A refused request batch produced a non-durable
+SERVER_BUSY result. The edge consumed that answer and advanced while the coordinator
+still expected the original sequence.
+
+Rejection now retires the link without inventing a result. The edge keeps the exact
+request and replays it after reset; only a committed result consumes its sequence. Unit
+regressions include
+`resync_refused_request_retires_the_link_without_consuming_its_sequence`. The red and
+green evidence is recorded in [federation-resync-fixes.md](federation-resync-fixes.md).
+Qualification acceptance remains pending; no capacity campaign was run for this change.
+
+### CAP-22: an account callback settled a federation result before its own receipt
+
+Fixed in the worktree. Review R03. The account completion callback staged a federation
+checkpoint and the same callback consumed it as though the earlier account receipt
+covered it. A crash between the account transaction and that checkpoint could also lose
+the outer replay binding.
+
+Request callbacks now check the storage commit sequence that owns their batch. Remote
+account transactions include the exact federation response and origin successor in their
+own write set; closed carriers still settle committed replay state without a client
+sink. Unit regressions include
+`resync_callback_cannot_settle_a_request_staged_after_its_receipt` and
+`resync_account_transaction_contains_its_exact_federation_response`. The red and green
+evidence is recorded in [federation-resync-fixes.md](federation-resync-fixes.md).
+Qualification acceptance remains pending; no capacity campaign was run for this change.
+
+### CAP-23: client close discarded unresolved requests and an unbound session
+
+Fixed in the worktree. Review R04. Connection close swept pending work, including its
+newly prepared close. A committed registration whose principal UPDATE had not arrived
+also escaped DEL cleanup.
+
+Closing a connection marks its retained requests sink-gone. The coordinator tracks
+sessions created by each origin from committed registration results and reconstructs
+that ownership at startup, so DEL includes unbound sessions. Unit regressions include
+`resync_client_close_retains_the_close_until_its_answer` and
+`resync_del_hides_a_session_registered_before_origin_update`. The red and green evidence
+is recorded in [federation-resync-fixes.md](federation-resync-fixes.md). Qualification
+acceptance remains pending; no capacity campaign was run for this change.
+
+### CAP-24: cleanup forgot sessions before a hide committed
+
+Fixed in the worktree. Review R05. Cleanup removed its front entry before planning,
+rendering, or storage succeeded. A refusal could leave a physical session and nickname
+with no remaining cleanup owner.
+
+The front entry now survives planning, rendering, staging, and storage refusal. The
+hide, origin tombstones, and next Session-ID cursor commit together; only that receipt
+advances cleanup. Unit regressions include
+`resync_rejected_cleanup_keeps_its_session_until_commit` and
+`resync_cleanup_cursor_commits_with_the_hide_and_restarts_in_session_order`. The red and
+green evidence is recorded in [federation-resync-fixes.md](federation-resync-fixes.md).
+Qualification acceptance remains pending; no capacity campaign was run for this change.
+
+### CAP-25: outbox overflow left an active edge waiting forever
+
+Fixed in the worktree. Review R06. Outbox overflow only set a memory flag after append
+and suppressed later delivery while leaving the link active. Disconnected targets
+escaped the accounting.
+
+Projection admission now checks object and byte budgets and commits the
+snapshot-required peer fence with the mutation before an overflowing append. Receipt
+handling retires the link, further ephemeral reservations stop, and restart and resume
+preserve the retained budget. Unit regressions include
+`resync_outbox_limit_fences_in_the_mutation_batch_before_append` and
+`resync_resume_preserves_the_retained_outbox_budget`. The red and green evidence is
+recorded in [federation-resync-fixes.md](federation-resync-fixes.md). Qualification
+acceptance remains pending; no capacity campaign was run for this change.
+
+### CAP-26: failed outbox reads were treated as replay progress
+
+Fixed in the worktree. Review R07. A refused replay read or an unreadable row could
+clear the resend continuation or be skipped. An empty decoded page then counted as
+progress over unacknowledged work.
+
+Read submission and completion failures retire the link. Each page must contain the
+expected consecutive delivery positions with matching durable keys and event identities;
+missing work never advances the replay cursor. Unit regressions include
+`resync_failed_outbox_read_retires_the_link` and
+`resync_missing_outbox_sequence_never_counts_as_acknowledged`. The red and green
+evidence is recorded in [federation-resync-fixes.md](federation-resync-fixes.md).
+Qualification acceptance remains pending; no capacity campaign was run for this change.
+
+### CAP-27: snapshot recovery left a received registration result unresolved
+
+Fixed in the worktree. Review R08. A registration result could arrive before its
+completion event and remain pending after a snapshot replaced that event stream.
+
+The ACTIVE transaction now records exact snapshot coverage for eligible committed
+results, including session registration, when the cut covers their state generation.
+Sink-gone requests then resolve without rendering registration to a replacement
+connection. Unit regressions include
+`resync_snapshot_covers_registration_whose_completion_was_lost`. The red and green
+evidence is recorded in [federation-resync-fixes.md](federation-resync-fixes.md).
+Qualification acceptance remains pending; no capacity campaign was run for this change.
+
+### CAP-28: incarnation expiry lacked a durable authority fence
+
+Fixed in the worktree. Review R09. Expiry and incarnation replacement hid sessions
+individually without first committing the authority fence or successor projection
+generation. A restart could restore authority or lose cleanup progress.
+
+A constant-size peer fence now commits before physical cleanup, and authorization,
+direct-message targeting, nickname lookup, and projection queries honor it. Cleanup
+proceeds in Session-ID order with an atomic cursor and terminal Clean phase; permanent
+incarnation history survives later replacements and restarts. Unit regressions include
+`resync_expiry_stages_the_authority_fence_before_any_hide`,
+`resync_restart_keeps_the_replaced_incarnation_fenced`, `and
+resync_cleanup_cursor_commits_with_the_hide_and_restarts_in_session_order`. The red and
+green evidence is recorded in [federation-resync-fixes.md](federation-resync-fixes.md).
+Qualification acceptance remains pending; no capacity campaign was run for this change.
+
+### CAP-29: ordinary edge request and completion state disappeared on restart
+
+Fixed in the worktree. Review R10. Ordinary request bytes, origin lifecycle work,
+results, and completion correlation existed only in memory. A cursor receipt could
+outlive the evidence needed to resolve its request.
+
+A bounded journal now commits origins and exact outbound requests before transmission,
+commits results before terminal output, and joins completion evidence to the event or
+combined barrier transaction. Startup restores unresolved entries as sink-gone; terminal
+requests and acknowledged DELs have durable retirement states and do not reappear as
+pending work. Unit regressions include
+`resync_request_is_durable_before_its_first_send`,
+`resync_restart_retains_completion_received_before_result`, `and
+resync_a_completed_request_does_not_return_after_restart`. The red and green evidence is
+recorded in [federation-resync-fixes.md](federation-resync-fixes.md). Qualification
+acceptance remains pending; no capacity campaign was run for this change.
+
+### CAP-30: a rejected snapshot page left the edge without a continuation
+
+Fixed in the worktree. Review R11. Storage rejection of SnapshotInstalled left the edge
+waiting on an image that had not committed.
+
+Snapshot-page rejection now clears the uncommitted install continuation and retires the
+link while preserving the active generation. The next connection renegotiates from
+durable state. Unit regressions include
+`resync_rejected_snapshot_install_retires_the_edge_link`. The red and green evidence is
+recorded in [federation-resync-fixes.md](federation-resync-fixes.md). Qualification
+acceptance remains pending; no capacity campaign was run for this change.
+
+### CAP-31: snapshot READY and ACTIVE lacked durable recovery states
+
+Fixed in the worktree. Review R12. The edge changed active projection state during
+download and did not retain the pending READY identity needed after a crash or lost
+link.
+
+Verified pages now form a durable pending generation before READY. The exact identity is
+restored and replayed; ACTIVE atomically swaps the peer generation and eligible result
+coverage before origin admission. A snapshot cannot stand in for incomplete
+cross-profile completion evidence. Unit regressions include
+`resync_snapshot_keeps_the_active_generation_until_active_commits`,
+`resync_restart_resends_the_exact_durable_snapshot_ready`, `and
+resync_snapshot_cannot_replace_an_incomplete_cross_profile_completion`. The red and
+green evidence is recorded in [federation-resync-fixes.md](federation-resync-fixes.md).
+Qualification acceptance remains pending; no capacity campaign was run for this change.
+
+### CAP-32: a lost first origin ACK caused the edge to discard DEL
+
+Fixed in the worktree. Review R13. The edge treated the absence of an ACK as proof that
+an origin had never committed. Closing that connection could discard the only deletion
+obligation.
+
+An encoded declaration now retains DEL even if its first ACK was lost. Only a
+declaration that never acquired an object identity and owns no pending request can be
+forgotten immediately; an acknowledged DEL is checkpointed before retirement. Unit
+regressions include `resync_closed_origin_without_first_ack_is_retained_for_del` and
+`resync_an_acknowledged_del_does_not_return_after_restart`. The red and green evidence
+is recorded in [federation-resync-fixes.md](federation-resync-fixes.md). Qualification
+acceptance remains pending; no capacity campaign was run for this change.
+
+### CAP-33: delivery acknowledgements advanced before storage committed
+
+Fixed in the worktree. Review R14. ACK handling removed unacknowledged entries and moved
+the memory cursor before the deletion batch committed. Refusal left subsequent
+checkpoints free to claim coverage that storage had not accepted.
+
+The prospective cursor now stays in PendingCommit until the deletion and peer checkpoint
+commit. Rejection preserves the window and retires the link so resume reconciles the
+durable cursor. Unit regressions include
+`resync_acknowledgement_does_not_advance_before_its_commit`. The red and green evidence
+is recorded in [federation-resync-fixes.md](federation-resync-fixes.md). Qualification
+acceptance remains pending; no capacity campaign was run for this change.
+
+### CAP-34: partial origin resets cancelled or extended the grace deadline
+
+Fixed in the worktree. Review R15. Link establishment and incomplete RESET traffic could
+keep stale origins alive by cancelling or replacing their original disconnect deadline.
+
+The origin table retains the first deadline across partial resets, including Resetting
+state. Only the completed origin READY checkpoint resumes authority and cancels grace;
+expiry fences the incarnation. Unit regressions include
+`resync_partial_reset_does_not_extend_or_cancel_grace`. The red and green evidence is
+recorded in [federation-resync-fixes.md](federation-resync-fixes.md). Qualification
+acceptance remains pending; no capacity campaign was run for this change.
+
+### CAP-35: origin updates advanced before an exact acknowledgement
+
+Fixed in the worktree. Review R16. The edge advanced an origin generation and sequence
+before receiving the matching UPDATE acknowledgement, and the acknowledgement path did
+not require the exact incarnation and object hash.
+
+Updates now retain their predecessor chain and wait for an exact ACK before advancing
+committed generation and sequence. Requests wait while that chain is unresolved, and
+mismatched acknowledgements retire the link. Unit regressions include
+`resync_principal_update_waits_for_the_exact_origin_ack` and
+`resync_origin_ack_rejects_the_wrong_hash_or_incarnation`. The red and green evidence is
+recorded in [federation-resync-fixes.md](federation-resync-fixes.md). Qualification
+acceptance remains pending; no capacity campaign was run for this change.
+
+### CAP-36: optional row builders erased required persistence errors
+
+Fixed in the worktree. Review R17. Projection row conversion returned optional values,
+making an encoding or index error indistinguishable from a deletion that legitimately
+needed no write.
+
+Required row builders and staging closures now return Result, while optional deletion
+retains Result<Option<_>>. Conversion failure aborts the event or install batch before
+its cursor can commit. Unit regressions include
+`resync_unencodable_projection_cannot_commit_its_delivery_cursor`. The red and green
+evidence is recorded in [federation-resync-fixes.md](federation-resync-fixes.md).
+Qualification acceptance remains pending; no capacity campaign was run for this change.
+
+### CAP-37: successor event admission compared only the committed cursor
+
+Fixed in the worktree. Review R18. An event following an admitted but uncommitted
+predecessor was checked against the older committed cursor and could fail an otherwise
+ordered stream.
+
+Admission now checks the tail of received or staged work. Application still revalidates
+against the committed cursor after the predecessor receipt, preserving ordering across
+refusal and replay. Unit regressions include
+`resync_successor_event_waits_behind_the_uncommitted_predecessor`. The red and green
+evidence is recorded in [federation-resync-fixes.md](federation-resync-fixes.md).
+Qualification acceptance remains pending; no capacity campaign was run for this change.
+
+### CAP-38: expired replay wrote a fresh busy result and could rewind sequence
+
+Fixed in the worktree. Review R19. A request below the retained sequence with no exact
+result was treated as a fresh busy checkpoint. Its row could record a lower successor
+than the live origin table.
+
+Expired replay now persists an origin fence at the unchanged next sequence and answers
+ORIGIN_EXPIRED only after that checkpoint. Refusal retires the link and does not create
+a new request result. Unit regressions include
+`resync_expired_request_fences_without_rewinding_the_origin`. The red and green evidence
+is recorded in [federation-resync-fixes.md](federation-resync-fixes.md). Qualification
+acceptance remains pending; no capacity campaign was run for this change.
+
+### CAP-39: FORIGIN READY ran in the wrong direction
+
+Fixed in the worktree. Review R20. The edge sent FORIGIN READY, reversing the normative
+synchronization gate and allowing request admission to precede the required coordinator
+acknowledgement.
+
+Base resume or snapshot activation now precedes RESET and origin replay. The coordinator
+publishes READY after its checkpoint; the edge requires that frame, exact declaration
+ACKs, and reconciled DELs before activating requests. Unit regressions include
+`resync_coordinator_sends_ready_after_the_origin_reset_commits` and
+`resync_coordinator_ready_opens_the_origin_admission_gate`. The red and green evidence
+is recorded in [federation-resync-fixes.md](federation-resync-fixes.md). Qualification
+acceptance remains pending; no capacity campaign was run for this change.
+
+### CAP-40: storage rejection left queued requests without a wakeup
+
+Fixed in the worktree. Review R21. The rejected-batch callback drained the link backlog
+but did not resume the separate per-peer request queues. A request waiting behind
+another operation could remain indefinitely idle.
+
+Rejection now drains the request queues before continuing the backlog. The regression
+uses two peers so retiring the refused link cannot remove the request that must resume.
+Unit regressions include `resync_rejected_batch_drains_requests_waiting_behind_crypto`.
+The red and green evidence is recorded in
+[federation-resync-fixes.md](federation-resync-fixes.md). Qualification acceptance
+remains pending; no capacity campaign was run for this change.
+
 ## Release claims and limits
 
 The signing command requires an explicit Ed25519 signing key and matching

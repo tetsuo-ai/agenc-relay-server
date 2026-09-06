@@ -25,6 +25,7 @@ const INCARNATION: ServerIncarnation = ServerIncarnation::from_bytes([8; 16]);
 
 fn peer() -> FederationPeerRecord {
     FederationPeerRecord {
+        fenced_incarnations: Vec::new(),
         server_incarnation: [1; 16],
         recovery_epoch: [2; 16],
         accepted_epochs: vec![[2; 16], [3; 16]],
@@ -68,6 +69,7 @@ fn coordinator_result() -> CoordinatorResultRecord {
 
 fn edge_request() -> EdgeRequestRecord {
     EdgeRequestRecord {
+        completion_coverage: None,
         request_id: [1; 16],
         request_object_id: [2; 32],
         request_object: vec![3; 30],

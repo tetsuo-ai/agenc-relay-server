@@ -207,22 +207,17 @@ fn execute(
             return replay(coordinator, context, link, peer, descriptor, &header);
         }
         Classified::Expired => {
-            let arm = ResultArm::Failed {
-                code: failure_code(DomainError::ServerBusy).to_owned(),
-                context: String::new(),
-            };
-            return fail_without_plan(
-                coordinator,
-                context,
-                link,
-                peer,
+            let fresh = FreshRequest {
                 key,
-                &header,
+                header,
                 descriptor,
-                object.object_id(),
-                (arm, Vec::new()),
+                request_object_id: object.object_id(),
+                bound: None,
+                command: None,
+                mutation: MutationContext::default(),
                 charge,
-            );
+            };
+            return expire_request(coordinator, context, link, peer, fresh);
         }
     }
     let operation = decode_request_operation(&request, &mut budget)
@@ -239,6 +234,108 @@ fn execute(
         charge,
     };
     run_operation(coordinator, context, link, peer, fresh, operation)
+}
+
+/// An expired replay ends its origin without advancing or rewriting its
+/// committed sequence. The refusal follows the durable fence checkpoint.
+fn expire_request(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    link: LinkId,
+    peer: ServerId,
+    fresh: FreshRequest,
+) -> Result<(), Violation> {
+    coordinator
+        .origins
+        .fence(&fresh.key.origin)
+        .map_err(|_| Violation::Origin)?;
+    let entry = coordinator
+        .origins
+        .origin(&fresh.key.origin)
+        .ok_or(Violation::Origin)?;
+    let result = encode_result(
+        coordinator,
+        &fresh,
+        &ResultArm::Failed {
+            code: "ORIGIN_EXPIRED".to_owned(),
+            context: String::new(),
+        },
+        None,
+        Vec::new(),
+    )?;
+    let plan = context
+        .domain()
+        .plan_account_service_checkpoint()
+        .map_err(|_| Violation::Ceiling)?;
+    let write = super::origin::origin_row(
+        coordinator,
+        fresh.key.origin,
+        entry.next_sequence,
+        plan.resulting_revision().get(),
+    )?;
+    let fanout = crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())
+        .map_err(|_| Violation::Ceiling)?;
+    context
+        .stage_durable_with_account_service(plan, fanout, None, 0, vec![write])
+        .map_err(|_| Violation::Ceiling)?;
+    coordinator.pending = Some(PendingCommit::OriginExpired {
+        peer,
+        link,
+        descriptor: fresh.descriptor,
+        result,
+        _charge: fresh.charge,
+    });
+    Ok(())
+}
+
+/// The exact committed registration result owns its session even before
+/// FORIGIN UPDATE binds that session into the next declared principal.
+pub(super) fn remember_registration(
+    coordinator: &mut FederationCoordinator,
+    context: &StateCoreContext,
+    origin: OriginKey,
+    result: &[u8],
+) -> Result<(), Violation> {
+    let mut budget = DecodeBudget::new(1 << 20, 4_096);
+    let object = SchemaObject::decode_exact("FederationResult", result, &mut budget)
+        .map_err(|_| Violation::Codec)?;
+    let header = ResultHeader::from_object(&object).map_err(|_| Violation::Codec)?;
+    if header.result_kind != agenc_ircd_types::FederationResultKind::SessionRegistered {
+        return Ok(());
+    }
+    let arm = agenc_ircd_federation_wire::decode_result_arm(&object, &mut budget)
+        .map_err(|_| Violation::Codec)?;
+    let ResultArm::SessionRegistered(registered) =
+        ResultArm::from_object(header.result_kind, &arm).map_err(|_| Violation::Codec)?
+    else {
+        return Err(Violation::Codec);
+    };
+    if context
+        .domain()
+        .session(registered.user_id)
+        .is_none_or(|session| {
+            session.session_id() != registered.session_id
+                || session.home_server_id() != origin.home_server_id
+        })
+    {
+        return Ok(());
+    }
+    coordinator
+        .registered_sessions
+        .entry(origin)
+        .or_default()
+        .insert(registered.user_id);
+    if coordinator.origins.origin(&origin).is_some_and(|entry| {
+        matches!(
+            entry.status,
+            agenc_ircd_domain::federation::OriginStatus::Deleted
+                | agenc_ircd_domain::federation::OriginStatus::Fenced
+        )
+    }) && let Some(state) = coordinator.peers.get_mut(&origin.home_server_id)
+    {
+        state.cleanup.push_back(registered.user_id);
+    }
+    Ok(())
 }
 
 /// What the replay classifier decided for a request.
@@ -936,6 +1033,7 @@ fn stage_with_plan_and_writes(
     match context.stage_durable_with_account_service(plan, fanout, None, 0, writes) {
         Ok(crate::state_core::StageAccepted::Staged { .. }) => {
             coordinator.pending = Some(PendingCommit::Request {
+                staged_after: context.head().storage_commit_sequence,
                 peer,
                 link,
                 key: fresh.key,
@@ -1064,6 +1162,7 @@ fn fail_without_plan(
         .stage_durable_with_account_service(plan, fanout, None, 0, writes)
         .map_err(|_| Violation::Ceiling)?;
     coordinator.pending = Some(PendingCommit::Request {
+        staged_after: context.head().storage_commit_sequence,
         peer,
         link,
         key: fresh.key,
@@ -1077,12 +1176,10 @@ fn fail_without_plan(
     Ok(())
 }
 
-/// Answers a request whose durable batch storage refused. The answer is a
-/// side-effect-free `SERVER_BUSY` (spec 28.7) sent without a result row: no
-/// origin sequence advanced and nothing is retained, so a byte-identical
-/// resend after a link loss classifies as fresh and runs again. The client
-/// retries on its own; the edge neither waits for a result that will never
-/// come nor trips a sequence gap with its next request.
+/// Retires a link whose request batch was refused. No result or sequence was
+/// committed, so the edge must retain and resend the exact request after RESET.
+/// A non-durable busy result would be indistinguishable from a durable failure
+/// that consumed the sequence, and would make the next edge request a gap.
 pub(super) fn rejected(
     coordinator: &mut FederationCoordinator,
     context: &mut StateCoreContext,
@@ -1090,17 +1187,9 @@ pub(super) fn rejected(
     peer: ServerId,
     fresh: FreshRequest,
 ) {
-    let arm = ResultArm::Failed {
-        code: failure_code(DomainError::ServerBusy).to_owned(),
-        context: String::new(),
-    };
-    match encode_result(coordinator, &fresh, &arm, None, Vec::new()) {
-        Ok(encoded) => coordinator.send_result(context, link, peer, fresh.descriptor, &encoded),
-        Err(violation) => {
-            if coordinator.link_is_live(link, peer) {
-                coordinator.fail_link(context, link, peer, violation);
-            }
-        }
+    drop(fresh);
+    if coordinator.link_is_live(link, peer) {
+        coordinator.fail_link(context, link, peer, Violation::Ceiling);
     }
 }
 

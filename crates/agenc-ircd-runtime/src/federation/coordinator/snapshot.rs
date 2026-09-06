@@ -95,10 +95,7 @@ pub(super) fn resume(
             delivery_sequence, ..
         } => delivery_sequence.checked_add(1).ok_or(Violation::Ceiling)?,
     };
-    // Every unacknowledged row from the last process is durable; the replay
-    // rebuilds the window from storage, so the in-memory view starts empty.
-    state.outbox.unacked.clear();
-    state.outbox.unacked_bytes = 0;
+    // The retained window also owns the append budget while replay runs.
     let frame = FederationFrame::ResumeOk {
         edge_server_id: peer,
         projection_generation: generation,
@@ -182,7 +179,7 @@ pub(super) fn continue_resend(
         });
     match plan.and_then(|plan| context.submit_storage_read(plan).ok()) {
         Some(read_id) => resend.read = Some(read_id),
-        None => state.resend = None,
+        None => fail_resend(coordinator, context, peer, Violation::Ceiling),
     }
 }
 
@@ -212,37 +209,68 @@ pub(super) fn resend_completed(
         return;
     };
     let Ok(result) = message.result else {
-        if let Some(state) = coordinator.peers.get_mut(&peer) {
-            state.resend = None;
-        }
+        fail_resend(coordinator, context, peer, Violation::Ceiling);
         return;
     };
+    let Some(state) = coordinator.peers.get(&peer) else {
+        return;
+    };
+    let Some(resend) = state.resend.as_ref() else {
+        return;
+    };
+    let mut expected = resend.next;
+    let generation = state.projection_generation;
     let mut rows = Vec::new();
     for record in result.records {
-        let opened =
-            context.open_storage_plaintext(TableId::EdgeOutbox, &record.key, &record.sealed_record);
-        let Ok(opened) = opened else {
-            continue;
+        let decoded = context
+            .open_storage_plaintext(TableId::EdgeOutbox, &record.key, &record.sealed_record)
+            .and_then(|opened| {
+                PersistentRecordValue::decode(
+                    TableId::EdgeOutbox,
+                    opened.expose_for_storage_codec(),
+                )
+                .map_err(crate::RuntimeError::from)
+            })
+            .map_err(|_| Violation::Codec)
+            .and_then(|value| decode_outbox_record(&record.key, &value));
+        let Ok((parts, event)) = decoded else {
+            fail_resend(coordinator, context, peer, Violation::Codec);
+            return;
         };
-        let Ok(value) =
-            PersistentRecordValue::decode(TableId::EdgeOutbox, opened.expose_for_storage_codec())
-        else {
-            continue;
-        };
-        if let (Ok(parts), Ok(event)) = (
-            parse_outbox_key(&record.key),
-            OutboxEventRecord::decode(value.body()),
-        ) {
-            rows.push((parts.delivery_sequence, event));
+        if parts.target != peer
+            || parts.projection_generation != generation
+            || parts.delivery_sequence != expected
+        {
+            fail_resend(coordinator, context, peer, Violation::Acknowledgement);
+            return;
         }
+        let Some(next) = expected.checked_add(1) else {
+            fail_resend(coordinator, context, peer, Violation::Ceiling);
+            return;
+        };
+        expected = next;
+        rows.push((parts.delivery_sequence, event));
     }
-    let mut next = None;
+    if rows.is_empty() {
+        // A read is issued only below the committed delivery head. The edge
+        // has not acknowledged this position, so its absence is not coverage.
+        fail_resend(coordinator, context, peer, Violation::Acknowledgement);
+        return;
+    }
     for (sequence, event) in rows {
         if !replay_row(coordinator, context, peer, sequence, &event) {
             return;
         }
-        next = Some(sequence.saturating_add(1));
     }
+    advance_resend(coordinator, context, peer, expected);
+}
+
+fn advance_resend(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    peer: ServerId,
+    expected: u64,
+) {
     let Some(state) = coordinator.peers.get_mut(&peer) else {
         return;
     };
@@ -250,18 +278,62 @@ pub(super) fn resend_completed(
         return;
     };
     resend.read = None;
-    if let Some(next) = next {
-        resend.next = resend.next.max(next);
-    } else {
-        // An empty page means the reserved sequences beyond the cursor were
-        // acknowledged and deleted; skip to the reserved head.
-        let reserved = context
-            .federation()
-            .and_then(|projector| projector.edge(peer))
-            .map_or(resend.next, |delivery| delivery.next_delivery_sequence);
-        resend.next = reserved;
-    }
+    resend.next = expected;
     continue_resend(coordinator, context, peer);
+}
+
+/// Checks the immutable event against its durable key and envelope.
+pub(super) fn decode_outbox_record(
+    key: &agenc_ircd_storage::StoredKey,
+    value: &PersistentRecordValue,
+) -> Result<
+    (
+        agenc_ircd_storage::federation_records::OutboxKeyParts,
+        OutboxEventRecord,
+    ),
+    Violation,
+> {
+    let parts = parse_outbox_key(key).map_err(|_| Violation::Codec)?;
+    let event = OutboxEventRecord::decode(value.body()).map_err(|_| Violation::Codec)?;
+    let mut budget = agenc_ircd_federation_wire::DecodeBudget::new(1 << 20, 4_096);
+    let object = agenc_ircd_federation_wire::SchemaObject::decode_exact(
+        "FederationEvent",
+        &event.event_object,
+        &mut budget,
+    )
+    .map_err(|_| Violation::Codec)?;
+    let header = agenc_ircd_federation_wire::EventHeader::from_object(&object)
+        .map_err(|_| Violation::Codec)?;
+    if header.target_server_id != parts.target
+        || header.projection_generation != parts.projection_generation
+        || header.delivery_sequence != parts.delivery_sequence
+        || header.event_id.as_bytes() != &event.event_id
+        || header.coordinator_state_generation != event.coordinator_state_generation
+        || federation_object_id(&event.event_object).as_bytes() != &event.event_object_id
+        || header
+            .correlation
+            .map(|correlation| correlation.replay_key.to_bytes())
+            != event.completion_replay_key
+    {
+        return Err(Violation::Codec);
+    }
+    Ok((parts, event))
+}
+
+fn fail_resend(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    peer: ServerId,
+    violation: Violation,
+) {
+    let link = coordinator
+        .peers
+        .get(&peer)
+        .and_then(|state| state.live.as_ref())
+        .map(|live| live.link);
+    if let Some(link) = link {
+        coordinator.fail_link(context, link, peer, violation);
+    }
 }
 
 fn replay_row(
@@ -280,8 +352,20 @@ fn replay_row(
     };
     let bytes = u64::try_from(event.event_object.len()).unwrap_or(u64::MAX);
     let event_id = EventId::from_bytes(event.event_id);
-    state.outbox.unacked.push_back((sequence, event_id, bytes));
-    state.outbox.unacked_bytes = state.outbox.unacked_bytes.saturating_add(bytes);
+    if let Some((_, known_id, known_bytes)) = state
+        .outbox
+        .unacked
+        .iter()
+        .find(|(known, _, _)| *known == sequence)
+    {
+        if *known_id != event_id || *known_bytes != bytes {
+            fail_resend(coordinator, context, peer, Violation::Codec);
+            return false;
+        }
+    } else {
+        state.outbox.unacked.push_back((sequence, event_id, bytes));
+        state.outbox.unacked_bytes = state.outbox.unacked_bytes.saturating_add(bytes);
+    }
     let frame = |fragment| FederationFrame::Event {
         descriptor: EventDescriptor {
             target_server_id: peer,
@@ -466,6 +550,8 @@ fn open_generation(
     state.outbox.unacked_bytes = 0;
     state.outbox.cursor = None;
     state.outbox.snapshot_required = false;
+    state.outbox.dirty = false;
+    state.outbox.reserved_next = 0;
     state.ready_identity = None;
     if let Some(projector) = context.federation_mut() {
         projector.set_edge(
@@ -487,6 +573,7 @@ fn open_generation(
         ready: false,
         link,
     });
+    coordinator.sync_outbox_budget(context, peer);
 }
 
 fn encode_entry(

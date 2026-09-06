@@ -87,6 +87,39 @@ fn ready_table() -> Result<OriginTable, OriginError> {
 }
 
 #[test]
+fn resync_partial_reset_does_not_extend_or_cancel_grace() -> Result<(), OriginError> {
+    let mut table = ready_table()?;
+    let deadline = table.link_lost(EDGE, INCARNATION, MonotonicTick::from_ticks(1_000))?;
+    table.reset(EDGE, INCARNATION);
+    assert!(
+        table.expire(EDGE, deadline).is_some(),
+        "RESET is not completed synchronization"
+    );
+    assert_eq!(
+        table.origin(&key(1)).map(|entry| entry.status),
+        Some(OriginStatus::Fenced)
+    );
+    let mut table = ready_table()?;
+    let deadline = table.link_lost(EDGE, INCARNATION, MonotonicTick::from_ticks(1_000))?;
+    table.reset(EDGE, INCARNATION);
+    assert_eq!(
+        table.link_lost(EDGE, INCARNATION, MonotonicTick::from_ticks(2_000))?,
+        deadline
+    );
+    Ok(())
+}
+
+#[test]
+fn resync_expired_incarnation_cannot_reset_and_add_another_origin() -> Result<(), OriginError> {
+    let mut table = ready_table()?;
+    let deadline = table.link_lost(EDGE, INCARNATION, MonotonicTick::from_ticks(1_000))?;
+    assert!(table.expire(EDGE, deadline).is_some());
+    table.reset(EDGE, INCARNATION);
+    assert!(table.add(add(2)).is_err());
+    Ok(())
+}
+
+#[test]
 fn retiring_an_exact_replay_identity_preserves_floors_and_matches_restart()
 -> Result<(), OriginError> {
     let mut table = ready_table()?;
@@ -496,6 +529,19 @@ fn restore_rebuilds_durable_rows_without_protocol_checks() -> Result<(), OriginE
             None
         ),
         Err(OriginError::UnknownIncarnation)
+    );
+    Ok(())
+}
+
+#[test]
+fn resync_a_replaced_incarnation_cannot_return_after_another_reset() -> Result<(), OriginError> {
+    let mut table = ready_table()?;
+    table.reset(EDGE, NEXT_INCARNATION);
+    table.ready(EDGE, NEXT_INCARNATION)?;
+    table.reset(EDGE, INCARNATION);
+    assert!(
+        !table.is_resetting(EDGE, INCARNATION),
+        "an old incarnation remains fenced after its replacement is ready"
     );
     Ok(())
 }

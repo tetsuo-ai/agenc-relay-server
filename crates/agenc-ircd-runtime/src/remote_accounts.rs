@@ -168,6 +168,7 @@ fn close_virtual(
     federation: &mut FederationCoordinator,
     generation: ConnectionGeneration,
 ) {
+    context.forget_remote_account_result(generation);
     accounts.connection_closed(context, generation);
     let _closed = context.sessions_mut().close(generation);
     federation.remote_carrier_closed(generation);
@@ -184,7 +185,13 @@ fn carrier(
     in_flight: Box<InFlightCarrier>,
 ) {
     let carrier_generation = in_flight.carrier_generation;
-    federation.remote_carrier_started(generation, in_flight);
+    if federation
+        .remote_carrier_started(context, generation, in_flight)
+        .is_err()
+    {
+        close_virtual(context, accounts, federation, generation);
+        return;
+    }
     if context.sessions().connection(generation).is_none() {
         let opened = federation
             .remote_carrier_sink(generation)
@@ -452,4 +459,37 @@ fn not_allowed() -> ResultArm {
 fn parse_line(line: &str) -> Option<ParsedMessage> {
     let framed = FramedLine::new(line).ok()?;
     parse_message(framed).ok().flatten()
+}
+
+/// Builds the same exact arm and payload replies before the account transaction commits.
+pub(crate) fn sealed_result(
+    prefix: &str,
+    opcode: FederationOpcode,
+    response: &[u8],
+    semantic: Option<ResultArm>,
+) -> Result<(ResultArm, Vec<agenc_ircd_federation_wire::SchemaObject>), crate::RuntimeError> {
+    if matches!(
+        opcode,
+        FederationOpcode::OpaqueAuthStart | FederationOpcode::AccountCreateStart
+    ) {
+        let object = challenge_object(response).ok_or(crate::RuntimeError::InvalidValue)?;
+        return Ok((ResultArm::AuthChallenge(object), Vec::new()));
+    }
+    let sasl = opcode == FederationOpcode::OpaqueAuthFinish;
+    let encoded = if sasl {
+        encode_sasl_payload(response)
+    } else {
+        encode_account_payload(response)
+    };
+    let mut replies = Vec::new();
+    for chunk in encoded.as_bytes().chunks(CHUNK_CHARACTERS) {
+        let text = std::str::from_utf8(chunk).map_err(|_| crate::RuntimeError::InvalidValue)?;
+        let frame =
+            chunk_frame(prefix, sasl, text).map_err(|_| crate::RuntimeError::InvalidValue)?;
+        replies.push(
+            crate::federation::codec::results::reply_object(&frame)
+                .map_err(|_| crate::RuntimeError::InvalidValue)?,
+        );
+    }
+    Ok((semantic.unwrap_or_else(not_allowed), replies))
 }

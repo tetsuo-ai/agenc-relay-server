@@ -21,7 +21,7 @@ use agenc_ircd_storage::{
 };
 use agenc_ircd_types::{Generation, OriginId, RecoveryEpoch, ServerId, ServerIncarnation};
 
-use super::{FederationCoordinator, grace};
+use super::{FederationCoordinator, Violation, grace};
 use crate::bridge::{StorageReadCompletionMessage, StorageReadId};
 use crate::federation::codec::projection::projection_record_of;
 use crate::state_core::StateCoreContext;
@@ -34,11 +34,12 @@ const ENTRY_DECODE_VALUES: usize = 256;
 /// The tables reloaded, in order. The E2EE object table precedes the
 /// state table so every retained object is present when a state row that
 /// names it is admitted.
-const TABLES: [TableId; 6] = [
+const TABLES: [TableId; 7] = [
     TableId::FederationPeer,
     TableId::FederationOrigin,
     TableId::RequestResult,
     TableId::EdgeProjection,
+    TableId::EdgeOutbox,
     TableId::E2eeObject,
     TableId::E2eeState,
 ];
@@ -49,9 +50,15 @@ pub(super) struct Loader {
     position: usize,
     pending: Option<StorageReadId>,
     complete: bool,
+    started: bool,
+    failed: bool,
+    retry: Option<StoredKey>,
 }
 
 impl Loader {
+    pub(super) fn blocks_admission(&self) -> bool {
+        self.started && !self.complete
+    }
     /// Reports whether every table was reloaded.
     pub(super) const fn is_complete(&self) -> bool {
         self.complete
@@ -65,7 +72,10 @@ impl Loader {
 
 /// Starts the reload at the first table.
 pub(super) fn begin(coordinator: &mut FederationCoordinator, context: &mut StateCoreContext) {
-    coordinator.loader = Loader::default();
+    coordinator.loader = Loader {
+        started: true,
+        ..Loader::default()
+    };
     request_page(coordinator, context, first_key());
 }
 
@@ -82,12 +92,16 @@ fn request_page(
         finish(coordinator, context);
         return;
     };
+    coordinator.loader.retry = start.clone();
     let plan = start
         .zip(StoredKey::new(vec![0xff; MAX_STORED_KEY_BYTES]).ok())
         .and_then(|(start, end)| ReadPlan::range(table, start, end, PAGE_ROWS).ok());
-    match plan.and_then(|plan| context.submit_storage_read(plan).ok()) {
-        Some(read_id) => coordinator.loader.pending = Some(read_id),
-        None => finish(coordinator, context),
+    let Some(plan) = plan else {
+        fail_restore(coordinator);
+        return;
+    };
+    if let Ok(read_id) = context.submit_storage_read(plan) {
+        coordinator.loader.pending = Some(read_id);
     }
 }
 
@@ -99,7 +113,11 @@ fn finish(coordinator: &mut FederationCoordinator, context: &mut StateCoreContex
     if let Some(executor) = coordinator.companion_exec.as_mut() {
         executor.finish_restore();
     }
+    for peer in coordinator.peers.keys().copied() {
+        coordinator.sync_outbox_budget(context, peer);
+    }
     grace::restored(coordinator, context);
+    coordinator.drain_backlog(context);
 }
 
 /// Consumes one page; returns whether the message belonged to the loader.
@@ -116,37 +134,59 @@ pub(super) fn read_completed(
         return true;
     };
     let Ok(result) = &message.result else {
-        finish(coordinator, context);
+        request_page(coordinator, context, coordinator.loader.retry.clone());
         return true;
     };
     let mut last = None;
     for record in &result.records {
-        let opened = context.open_storage_plaintext(table, &record.key, &record.sealed_record);
-        if let Ok(opened) = opened
-            && let Ok(value) =
-                PersistentRecordValue::decode(table, opened.expose_for_storage_codec())
+        if last
+            .as_ref()
+            .is_some_and(|previous| previous >= &record.key)
         {
-            admit(coordinator, context, table, &record.key, &value);
+            fail_restore(coordinator);
+            return true;
+        }
+        let value = context
+            .open_storage_plaintext(table, &record.key, &record.sealed_record)
+            .and_then(|opened| {
+                PersistentRecordValue::decode(table, opened.expose_for_storage_codec())
+                    .map_err(crate::RuntimeError::from)
+            });
+        let accepted = value
+            .map_err(|_| Violation::Codec)
+            .and_then(|value| admit(coordinator, context, table, &record.key, &value));
+        if accepted.is_err() {
+            fail_restore(coordinator);
+            return true;
         }
         last = Some(record.key.clone());
     }
-    match (result.truncated, last.and_then(|key| successor(&key))) {
-        (true, Some(next)) => request_page(coordinator, context, Some(next)),
-        _ => {
-            coordinator.loader.position = coordinator.loader.position.saturating_add(1);
-            request_page(coordinator, context, first_key());
+    if result.truncated {
+        if let Some(next) = last.and_then(|key| successor(&key)) {
+            request_page(coordinator, context, Some(next));
+        } else {
+            fail_restore(coordinator);
         }
+    } else {
+        coordinator.loader.position = coordinator.loader.position.saturating_add(1);
+        request_page(coordinator, context, first_key());
     }
     true
 }
 
 fn successor(key: &StoredKey) -> Option<StoredKey> {
     let mut bytes = key.as_bytes().to_vec();
-    if bytes.len() >= MAX_STORED_KEY_BYTES {
-        return None;
+    if bytes.len() < MAX_STORED_KEY_BYTES {
+        bytes.push(0);
+        return StoredKey::new(bytes).ok();
     }
-    bytes.push(0);
-    StoredKey::new(bytes).ok()
+    while let Some(last) = bytes.pop() {
+        if let Some(next) = last.checked_add(1) {
+            bytes.push(next);
+            return StoredKey::new(bytes).ok();
+        }
+    }
+    None
 }
 
 fn admit(
@@ -155,7 +195,7 @@ fn admit(
     table: TableId,
     key: &StoredKey,
     value: &PersistentRecordValue,
-) {
+) -> Result<(), Violation> {
     match (table, value.record_kind()) {
         (TableId::FederationPeer, PEER_RECORD_KIND) => admit_peer(coordinator, context, key, value),
         (TableId::FederationOrigin, ORIGIN_RECORD_KIND) => admit_origin(coordinator, key, value),
@@ -166,15 +206,77 @@ fn admit(
             TableId::RequestResult,
             agenc_ircd_storage::history_records::HISTORY_COORDINATOR_RESULT_KIND,
         ) => admit_result(coordinator, context, key, value),
-        (TableId::EdgeProjection, PROJECTION_ENTRY_KIND) => admit_entry(context, key, value),
+        (TableId::EdgeProjection, PROJECTION_ENTRY_KIND) => {
+            admit_entry(coordinator, context, key, value)
+        }
         (TableId::EdgeProjection, PROJECTION_MARKER_KIND) => admit_marker(coordinator, key, value),
+        (TableId::EdgeOutbox, agenc_ircd_storage::federation_records::OUTBOX_EVENT_KIND) => {
+            admit_outbox(coordinator, context, key, value)
+        }
         (TableId::E2eeObject | TableId::E2eeState, _) => {
             if let Some(executor) = coordinator.companion_exec.as_mut() {
                 executor.admit_restored(table, key, value);
             }
+            Ok(())
         }
-        _ => {}
+        _ => Ok(()),
     }
+}
+
+/// Peer checkpoints can precede an event committed while the edge was away.
+/// Recover its reserved sequence from the authenticated immutable outbox.
+fn admit_outbox(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    key: &StoredKey,
+    value: &PersistentRecordValue,
+) -> Result<(), Violation> {
+    let (parts, event) = super::snapshot::decode_outbox_record(key, value)?;
+    let Some(state) = coordinator.peers.get_mut(&parts.target) else {
+        return Ok(());
+    };
+    if parts.projection_generation != state.projection_generation {
+        return Ok(());
+    }
+    let next = parts
+        .delivery_sequence
+        .checked_add(1)
+        .ok_or(Violation::Codec)?;
+    state.outbox.reserved_next = state.outbox.reserved_next.max(next);
+    if state
+        .outbox
+        .cursor
+        .is_none_or(|(sequence, _)| parts.delivery_sequence > sequence)
+        && !state.outbox.snapshot_required
+    {
+        let bytes = u64::try_from(event.event_object.len()).map_err(|_| Violation::Ceiling)?;
+        state.outbox.unacked.push_back((
+            parts.delivery_sequence,
+            agenc_ircd_types::EventId::from_bytes(event.event_id),
+            bytes,
+        ));
+        state.outbox.unacked_bytes = state.outbox.unacked_bytes.saturating_add(bytes);
+        if u64::try_from(state.outbox.unacked.len()).map_err(|_| Violation::Ceiling)?
+            > coordinator.config.outbox_objects_per_edge
+            || state.outbox.unacked_bytes > coordinator.config.outbox_bytes_per_edge
+        {
+            state.outbox.snapshot_required = true;
+            state.outbox.dirty = true;
+        }
+    }
+    if let Some(projector) = context.federation_mut() {
+        projector.set_edge(
+            parts.target,
+            EdgeDelivery {
+                projection_generation: state.projection_generation,
+                next_delivery_sequence: state.outbox.reserved_next,
+            },
+        );
+        if state.outbox.snapshot_required {
+            projector.require_snapshot(parts.target);
+        }
+    }
+    Ok(())
 }
 
 fn admit_peer(
@@ -182,16 +284,12 @@ fn admit_peer(
     context: &mut StateCoreContext,
     key: &StoredKey,
     value: &PersistentRecordValue,
-) {
-    let Ok(bytes) = <[u8; 16]>::try_from(key.as_bytes()) else {
-        return;
-    };
+) -> Result<(), Violation> {
+    let bytes = <[u8; 16]>::try_from(key.as_bytes()).map_err(|_| Violation::Codec)?;
     let peer = ServerId::from_bytes(bytes);
-    let Ok(record) = FederationPeerRecord::decode(value.body()) else {
-        return;
-    };
+    let record = FederationPeerRecord::decode(value.body()).map_err(|_| Violation::Codec)?;
     let Some(state) = coordinator.peers.get_mut(&peer) else {
-        return;
+        return Ok(());
     };
     if record.server_incarnation != [0; 16] {
         state.incarnation = Some(ServerIncarnation::from_bytes(record.server_incarnation));
@@ -204,7 +302,16 @@ fn admit_peer(
         .iter()
         .map(|epoch| RecoveryEpoch::from_bytes(*epoch))
         .collect();
+    for incarnation in &record.fenced_incarnations {
+        coordinator
+            .origins
+            .restore_fenced_incarnation(peer, ServerIncarnation::from_bytes(*incarnation));
+    }
     state.phase = record.phase;
+    state.cleanup_cursor = record.cleanup_cursor;
+    if matches!(record.phase, PeerPhase::Expired | PeerPhase::Clean) {
+        context.fence_federation_peer(peer);
+    }
     state.projection_generation = record.projection_generation;
     state.outbox.cursor = record.cursor.map(|cursor| {
         (
@@ -213,6 +320,7 @@ fn admit_peer(
         )
     });
     state.outbox.snapshot_required = record.snapshot_required;
+    state.outbox.reserved_next = record.next_delivery_sequence;
     state.quarantined = record.quarantined;
     state.client_resync_epoch = record.client_resync_epoch;
     if let Some(incarnation) = state.incarnation {
@@ -238,37 +346,47 @@ fn admit_peer(
                 next_delivery_sequence: record.next_delivery_sequence,
             },
         );
+        if record.snapshot_required {
+            projector.require_snapshot(peer);
+        }
     }
+    Ok(())
 }
 
 fn admit_origin(
     coordinator: &mut FederationCoordinator,
     key: &StoredKey,
     value: &PersistentRecordValue,
-) {
+) -> Result<(), Violation> {
     let (Ok(parts), Ok(record)) = (
         parse_origin_key(key),
         FederationOriginRecord::decode(value.body()),
     ) else {
-        return;
+        return Err(Violation::Codec);
     };
     let mut budget = DecodeBudget::new(4_096, 64);
     let Ok(object) =
         SchemaObject::decode_exact("FederationOrigin", &record.origin_object, &mut budget)
             .and_then(|object| OriginRecord::from_object(&object))
     else {
-        return;
+        return Err(Violation::Codec);
     };
     let origin = OriginKey {
         home_server_id: parts.peer,
         server_incarnation: parts.incarnation,
         origin_id: OriginId::from_bytes(parts.origin_id),
     };
-    let account = object.account.and_then(|account| {
-        Generation::new(account.account_session_generation)
-            .ok()
-            .map(|generation| (account.account_id, generation))
-    });
+    if object.network_id != coordinator.config.network_id
+        || object.home_server_id != parts.peer
+        || object.server_incarnation != parts.incarnation
+        || object.origin_id.as_bytes() != &parts.origin_id
+        || object.generation != parts.generation
+        || agenc_ircd_federation_wire::federation_object_id(&record.origin_object).as_bytes()
+            != &record.origin_object_id
+    {
+        return Err(Violation::Codec);
+    }
+    let account = restored_account(&object)?;
     let deleted_after =
         matches!(record.status, OriginRowStatus::Deleted).then_some(record.next_sequence);
     let entry = OriginEntry {
@@ -297,6 +415,20 @@ fn admit_origin(
     coordinator
         .origin_objects
         .insert(origin, record.origin_object);
+    Ok(())
+}
+
+fn restored_account(
+    object: &OriginRecord,
+) -> Result<Option<(agenc_ircd_types::AccountId, Generation)>, Violation> {
+    object
+        .account
+        .map(|account| {
+            Generation::new(account.account_session_generation)
+                .map(|generation| (account.account_id, generation))
+        })
+        .transpose()
+        .map_err(|_| Violation::Codec)
 }
 
 fn admit_result(
@@ -304,12 +436,12 @@ fn admit_result(
     context: &mut StateCoreContext,
     key: &StoredKey,
     value: &PersistentRecordValue,
-) {
+) -> Result<(), Violation> {
     let Some((request_id, request_object_id)) = result_identity(key, value) else {
-        return;
+        return Err(Violation::Codec);
     };
     if !retain_history_result(context, value) {
-        return;
+        return Err(Violation::Codec);
     }
     let bytes = key.as_bytes();
     let (Some(home), Some(incarnation), Some(origin)) = (
@@ -323,7 +455,7 @@ fn admit_result(
             .get(32..48)
             .and_then(|part| <[u8; 16]>::try_from(part).ok()),
     ) else {
-        return;
+        return Err(Violation::Codec);
     };
     let (Some(generation), Some(sequence)) = (
         bytes
@@ -333,7 +465,7 @@ fn admit_result(
             .get(56..64)
             .and_then(|part| <[u8; 8]>::try_from(part).ok()),
     ) else {
-        return;
+        return Err(Violation::Codec);
     };
     let key = OperationKey {
         origin: OriginKey {
@@ -354,31 +486,39 @@ fn admit_result(
     coordinator
         .origins
         .restore_request_id(agenc_ircd_types::RequestId::from_bytes(request_id), key);
+    if value.record_kind() == COORDINATOR_RESULT_KIND {
+        let record = CoordinatorResultRecord::decode(value.body()).map_err(|_| Violation::Codec)?;
+        super::request::remember_registration(
+            coordinator,
+            context,
+            key.origin,
+            &record.result_object,
+        )?;
+    }
+    Ok(())
 }
 
-/// Restores the durable READY identity of the peer's current generation so
-/// a re-sent READY after restart still gets the byte-identical ACTIVE.
 fn admit_marker(
     coordinator: &mut FederationCoordinator,
     key: &StoredKey,
     value: &PersistentRecordValue,
-) {
+) -> Result<(), Violation> {
     let (Ok(parts), Ok(record)) = (
         parse_projection_key(key),
         ProjectionMarkerRecord::decode(value.body()),
     ) else {
-        return;
+        return Err(Violation::Codec);
     };
     let Some(state) = coordinator.peers.get_mut(&parts.target) else {
-        return;
+        return Ok(());
     };
     if parts.projection_generation != state.projection_generation
         || record.state != ProjectionGenerationState::Active
     {
-        return;
+        return Ok(());
     }
     let Some(token) = record.snapshot_token else {
-        return;
+        return Ok(());
     };
     state.ready_identity = Some(agenc_ircd_federation_wire::SnapshotIdentity {
         snapshot_token: agenc_ircd_federation_wire::FederationHash32::from_bytes(token),
@@ -387,14 +527,20 @@ fn admit_marker(
         state_generation: record.state_generation,
         snapshot_digest: agenc_ircd_federation_wire::FederationHash32::from_bytes(record.digest),
     });
+    Ok(())
 }
 
-fn admit_entry(context: &mut StateCoreContext, key: &StoredKey, value: &PersistentRecordValue) {
+fn admit_entry(
+    coordinator: &FederationCoordinator,
+    context: &mut StateCoreContext,
+    key: &StoredKey,
+    value: &PersistentRecordValue,
+) -> Result<(), Violation> {
     let (Ok(parts), Ok(record)) = (
         parse_projection_key(key),
         ProjectionEntryRecord::decode(value.body()),
     ) else {
-        return;
+        return Err(Violation::Codec);
     };
     let mut budget = DecodeBudget::new(ENTRY_DECODE_BYTES, ENTRY_DECODE_VALUES);
     let Ok(entry) = SchemaObject::decode_exact(
@@ -402,20 +548,28 @@ fn admit_entry(context: &mut StateCoreContext, key: &StoredKey, value: &Persiste
         &record.entry_object,
         &mut budget,
     ) else {
-        return;
+        return Err(Violation::Codec);
     };
     let Ok((arm, primary)) = decode_projection_arm(&entry, &mut budget) else {
-        return;
+        return Err(Violation::Codec);
     };
     let Ok(kind) = agenc_ircd_types::FederationProjectionKind::from_wire(primary.kind()) else {
-        return;
+        return Err(Violation::Codec);
     };
     let Ok(projection) = projection_record_of(kind, &arm) else {
-        return;
+        return Err(Violation::Codec);
     };
+    if coordinator
+        .peers
+        .get(&parts.target)
+        .is_none_or(|state| state.projection_generation != parts.projection_generation)
+    {
+        return Ok(());
+    }
     if let Some(projector) = context.federation_mut() {
         projector.restore_key(parts.target, &projection);
     }
+    Ok(())
 }
 
 fn result_identity(key: &StoredKey, value: &PersistentRecordValue) -> Option<([u8; 16], [u8; 32])> {
@@ -459,4 +613,55 @@ fn retain_history_result(context: &mut StateCoreContext, value: &PersistentRecor
                 true,
             )
             .is_ok()
+}
+
+fn fail_restore(coordinator: &mut FederationCoordinator) {
+    coordinator.loader.failed = true;
+    coordinator.loader.pending = None;
+    coordinator.counters.violations = coordinator.counters.violations.saturating_add(1);
+    for state in coordinator.peers.values_mut() {
+        state.quarantined = true;
+        if let Some(live) = state.live.take() {
+            live.handle.close();
+        }
+    }
+    for message in coordinator.backlog.drain(..) {
+        if let crate::federation::LinkEvent::Established { handle, .. } = message.event {
+            handle.close();
+        }
+    }
+}
+
+impl FederationCoordinator {
+    pub(crate) fn continue_restore(&mut self, context: &mut StateCoreContext) {
+        if self.loader.blocks_admission() && !self.loader.failed && self.loader.pending.is_none() {
+            request_page(self, context, self.loader.retry.clone());
+        }
+        if !self.loader.blocks_admission() {
+            self.continue_background(context);
+        }
+    }
+}
+
+pub(super) fn hold_before_loaded(
+    coordinator: &mut FederationCoordinator,
+    message: crate::federation::FederationInbound,
+) {
+    if coordinator.loader.failed || coordinator.backlog.len() >= super::MAX_BACKLOG {
+        let link = message.link;
+        coordinator.backlog.retain(|queued| {
+            if queued.link != link {
+                return true;
+            }
+            if let crate::federation::LinkEvent::Established { handle, .. } = &queued.event {
+                handle.close();
+            }
+            false
+        });
+        if let crate::federation::LinkEvent::Established { handle, .. } = message.event {
+            handle.close();
+        }
+        return;
+    }
+    coordinator.backlog.push_back(message);
 }

@@ -740,3 +740,45 @@ fn kicks_and_mode_changes_project_to_member_edges() -> Result<(), DomainError> {
     );
     Ok(())
 }
+
+#[test]
+fn resync_expiry_hides_retained_sessions_from_presence_and_membership_queries()
+-> Result<(), DomainError> {
+    let mut harness = Harness::new()?;
+    let alice = harness.open(1, EDGE_A)?;
+    let bob = harness.open(2, EDGE_B)?;
+    let name = ChannelNameValue::parse("#room")?;
+    let join = || CanonicalCommand::join(vec![ChannelTarget::new(name.clone(), false)]);
+    harness.run(alice, join, &MutationContext::default())?;
+    harness.run(bob, join, &MutationContext::default())?;
+    let channel = harness
+        .state
+        .resolve_channel(&name)
+        .ok_or(DomainError::NotFound)?;
+    harness.state.fence_federation_peer(EDGE_A);
+    assert_eq!(
+        harness.state.project_presence(bob, alice),
+        crate::PresenceProjection::Absent
+    );
+    assert_eq!(
+        harness
+            .state
+            .resolve_nickname(&NicknameValue::parse("user1")?),
+        None
+    );
+    assert!(!harness.state.session_user_ids().any(|user| user == alice));
+    let crate::ProjectionDecision::Visible(view) = harness.state.project_channel(bob, channel)?
+    else {
+        return Err(DomainError::InvariantViolation);
+    };
+    assert_eq!(
+        view.members().len(),
+        1,
+        "the physical membership is absent behind the peer fence"
+    );
+    assert!(
+        harness.state.durable_session(alice).is_some(),
+        "cleanup still needs the retained row"
+    );
+    Ok(())
+}

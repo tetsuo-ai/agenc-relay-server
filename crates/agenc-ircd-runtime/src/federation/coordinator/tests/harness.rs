@@ -73,6 +73,7 @@ fn peer_identity(server_id: ServerId, name: &str) -> PeerIdentity {
 
 /// One scripted edge.
 struct Edge {
+    buffered_events: std::collections::VecDeque<FederationFrame>,
     server_id: ServerId,
     incarnation: ServerIncarnation,
     link: LinkId,
@@ -93,6 +94,7 @@ impl Edge {
     fn new(inbox: mpsc::Sender<FederationInbound>, seed: u8) -> Self {
         let (handle, queue) = link_queue(1 << 20);
         Self {
+            buffered_events: std::collections::VecDeque::new(),
             server_id: ServerId::from_bytes([seed; 16]),
             incarnation: ServerIncarnation::from_bytes([seed.wrapping_add(1); 16]),
             link: LinkId::new(u64::from(seed)),
@@ -209,6 +211,13 @@ impl Edge {
     }
 
     async fn next_frame(&mut self) -> TestResult<FederationFrame> {
+        if let Some(frame) = self.buffered_events.pop_front() {
+            return Ok(frame);
+        }
+        self.next_wire_frame().await
+    }
+
+    async fn next_wire_frame(&mut self) -> TestResult<FederationFrame> {
         let line = tokio::time::timeout(std::time::Duration::from_secs(20), self.queue.recv())
             .await
             .map_err(|_| "no line from the coordinator")?
@@ -303,7 +312,7 @@ impl Origin {
     }
 }
 
-async fn declare(edge: &mut Edge, origin: &mut Origin, update: bool) -> TestResult {
+async fn declare(edge: &mut Edge, origin: &mut Origin, update: bool) -> TestResult<bool> {
     let encoded = origin.record(edge).to_object()?.encode_canonical()?;
     let bytes = encoded.as_slice().to_vec();
     let object_id = federation_object_id(&bytes);
@@ -328,42 +337,42 @@ async fn declare(edge: &mut Edge, origin: &mut Origin, update: bool) -> TestResu
         }
     })
     .await?;
-    match edge.next_frame().await? {
-        FederationFrame::OriginAck {
-            origin_id,
-            generation,
-            object_id: acked,
-            ..
-        } if origin_id == origin.id && generation == origin.generation => {
-            if acked != Some(object_id) {
-                return Err("origin ack named another object".into());
+    let mut ready = false;
+    loop {
+        match edge.next_wire_frame().await? {
+            FederationFrame::OriginReady {
+                edge_server_id,
+                server_incarnation,
+            } if edge_server_id == edge.server_id && server_incarnation == edge.incarnation => {
+                ready = true
             }
+            FederationFrame::OriginAck {
+                origin_id,
+                generation,
+                object_id: acked,
+                ..
+            } if origin_id == origin.id && generation == origin.generation => {
+                if acked != Some(object_id) {
+                    return Err("origin ack named another object".into());
+                }
+                break;
+            }
+            frame @ FederationFrame::Event { .. } => {
+                if edge.buffered_events.len() >= 4096 {
+                    return Err("scripted replay ceiling".into());
+                }
+                edge.buffered_events.push_back(frame);
+            }
+            other => return Err(format!("expected origin ack, got {:?}", other.kind()).into()),
         }
-        other => return Err(format!("expected origin ack, got {:?}", other.kind()).into()),
     }
     origin.object_id = *object_id.as_bytes();
-    Ok(())
+    Ok(ready)
 }
 
 /// Replays the origins and resumes from the edge's last acknowledged
 /// cursor, returning the coordinator's FRESUME reply.
 async fn synchronize(edge: &mut Edge, origins: &mut [&mut Origin]) -> TestResult<FederationFrame> {
-    edge.frame(FederationFrame::OriginReset {
-        coordinator_server_id: COORDINATOR,
-        server_incarnation: edge.incarnation,
-    })
-    .await?;
-    for origin in origins.iter_mut() {
-        // A replayed declaration is the exact current object: ADD for a
-        // generation-zero origin, UPDATE for a later generation.
-        let update = origin.generation > 0;
-        declare(edge, origin, update).await?;
-    }
-    edge.frame(FederationFrame::OriginReady {
-        edge_server_id: edge.server_id,
-        server_incarnation: edge.incarnation,
-    })
-    .await?;
     let cursor = match edge.last_ack {
         Some((delivery_sequence, event_id)) => agenc_ircd_federation_wire::DeliveryCursor::At {
             delivery_sequence,
@@ -377,7 +386,35 @@ async fn synchronize(edge: &mut Edge, origins: &mut [&mut Origin]) -> TestResult
         cursor,
     })
     .await?;
-    edge.next_frame().await
+    let answer = edge.next_wire_frame().await?;
+    if matches!(answer, FederationFrame::ResumeOk { .. }) {
+        edge.frame(FederationFrame::OriginReset {
+            coordinator_server_id: COORDINATOR,
+            server_incarnation: edge.incarnation,
+        })
+        .await?;
+        let mut ready = false;
+        for origin in origins.iter_mut() {
+            ready |= declare(edge, origin, origin.generation > 0).await?;
+        }
+        while !ready {
+            let frame = edge.next_wire_frame().await?;
+            if matches!(frame, FederationFrame::Event { .. }) {
+                if edge.buffered_events.len() >= 4096 {
+                    return Err("scripted replay ceiling".into());
+                }
+                edge.buffered_events.push_back(frame);
+                continue;
+            }
+            if !matches!(frame, FederationFrame::OriginReady { edge_server_id, server_incarnation }
+                if edge_server_id == edge.server_id && server_incarnation == edge.incarnation)
+            {
+                return Err(format!("expected coordinator READY, got {:?}", frame.kind()).into());
+            }
+            ready = true;
+        }
+    }
+    Ok(answer)
 }
 
 /// Synchronizes and requires FRESUME OK.
@@ -669,6 +706,59 @@ fn session_open(seed: u8, nickname: &str) -> FederatedOperation {
     }
 }
 
+#[tokio::test]
+async fn resync_del_hides_a_session_registered_before_origin_update() -> TestResult {
+    let identity = peer_identity(ServerId::from_bytes([40; 16]), "edge.example");
+    run_coordinator(&[identity], |inbox| async move {
+        let mut edge = Edge::new(inbox, 40);
+        let mut origin = Origin::new(60);
+        edge.establish().await?;
+        synchronize_ok(&mut edge, &mut [&mut origin]).await?;
+        request(&mut edge, &mut origin, &session_open(60, "unbound")).await?;
+        let mut events = Vec::new();
+        let accepted = answer(&mut edge, &mut events).await?;
+        let ResultArm::SessionRegistered(registered) = accepted.arm else {
+            return Err("registration refused".into());
+        };
+        let completion = accepted.header.completion_event_id.ok_or("completion")?;
+        while !events
+            .iter()
+            .any(|(header, _)| header.event_id == completion)
+        {
+            events.push(next_event(&mut edge).await?);
+        }
+        edge.frame(FederationFrame::OriginDel {
+            coordinator_server_id: COORDINATOR,
+            server_incarnation: edge.incarnation,
+            origin_id: origin.id,
+            generation: 0,
+            next_operation_sequence: 1,
+        })
+        .await?;
+        assert!(matches!(
+            edge.next_frame().await?,
+            FederationFrame::OriginAck {
+                object_id: None,
+                ..
+            }
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let (_, event) = next_event(&mut edge).await?;
+                if let ProjectedEvent::SessionHidden { source, .. } = event
+                    && source.user_id == registered.user_id
+                {
+                    return Ok::<(), Box<dyn Error>>(());
+                }
+            }
+        })
+        .await
+        .map_err(|_| "DEL left the unbound registered session visible")??;
+        Ok(())
+    })
+    .await
+}
+
 /// Opens a session for the origin and binds it through FORIGIN UPDATE.
 async fn open_session(
     edge: &mut Edge,
@@ -762,6 +852,43 @@ async fn origin_exchange_and_session_open_commit_result_then_events() -> TestRes
             .ok_or("completion lacks correlation")?;
         assert_eq!(correlation.replay_key.operation_sequence, 0);
         assert_eq!(completion.delivery_sequence, 1);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn resync_coordinator_sends_ready_after_the_origin_reset_commits() -> TestResult {
+    let peer = ServerId::from_bytes([40; 16]);
+    run_coordinator(&[peer_identity(peer, "edge.example")], |inbox| async move {
+        let mut edge = Edge::new(inbox, 40);
+        edge.establish().await?;
+        edge.frame(FederationFrame::Resume {
+            coordinator_server_id: COORDINATOR,
+            projection_generation: edge.projection_generation,
+            cursor: agenc_ircd_federation_wire::DeliveryCursor::Empty,
+        })
+        .await?;
+        assert!(matches!(
+            edge.next_frame().await?,
+            FederationFrame::ResumeOk { .. }
+        ));
+        edge.frame(FederationFrame::OriginReset {
+            coordinator_server_id: COORDINATOR,
+            server_incarnation: edge.incarnation,
+        })
+        .await?;
+        let answer =
+            tokio::time::timeout(std::time::Duration::from_secs(2), edge.next_frame()).await;
+        assert!(
+            answer.is_ok(),
+            "the coordinator must acknowledge origin readiness"
+        );
+        let frame = answer??;
+        assert!(
+            matches!(frame, FederationFrame::OriginReady { edge_server_id, server_incarnation }
+            if edge_server_id == peer && server_incarnation == edge.incarnation)
+        );
         Ok(())
     })
     .await
@@ -1336,6 +1463,757 @@ fn standalone_coordinator(peer: ServerId) -> FederationCoordinator {
     )
 }
 
+#[tokio::test]
+async fn resync_outbox_overflow_retires_active_and_resuming_links() -> TestResult {
+    for active in [false, true] {
+        let peer = ServerId::from_bytes([50; 16]);
+        let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+        let context = fixture.context_mut()?;
+        let mut coordinator = standalone_coordinator(peer);
+        coordinator.config.outbox_objects_per_edge = 0;
+        let (handle, _queue) = link_queue(1 << 20);
+        coordinator.inbound(
+            context,
+            established(1, peer, ServerIncarnation::from_bytes([51; 16]), handle),
+        );
+        coordinator.peers.get_mut(&peer).ok_or("peer")?.active = active;
+        coordinator.deliver(
+            context,
+            vec![OutboundEvent {
+                target: peer,
+                projection_generation: 1,
+                delivery_sequence: 0,
+                event_id: agenc_ircd_types::EventId::from_bytes([61; 16]),
+                object_id: FederationHash32::from_bytes([62; 32]),
+                encoded: vec![1; 128],
+            }],
+        );
+        let state = coordinator.peers.get(&peer).ok_or("peer")?;
+        assert!(
+            state.live.is_none(),
+            "overflow must retire even a resuming link"
+        );
+        assert!(state.outbox.snapshot_required);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_overflow_stops_further_outbox_reservations() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let mut fixture = StateCoreFixture::with_federation_coordinator(
+        entropy_script(),
+        vec![peer_identity(peer, "edge.example")],
+    )?;
+    let context = fixture.context_mut()?;
+    let mut coordinator = standalone_coordinator(peer);
+    coordinator.config.outbox_objects_per_edge = 0;
+    let (handle, _queue) = link_queue(1 << 20);
+    coordinator.inbound(
+        context,
+        established(1, peer, ServerIncarnation::from_bytes([51; 16]), handle),
+    );
+    coordinator.deliver(
+        context,
+        vec![OutboundEvent {
+            target: peer,
+            projection_generation: 1,
+            delivery_sequence: 0,
+            event_id: agenc_ircd_types::EventId::from_bytes([61; 16]),
+            object_id: FederationHash32::from_bytes([62; 32]),
+            encoded: vec![1; 128],
+        }],
+    );
+    let domain = agenc_ircd_domain::DomainState::new()?;
+    let plan = domain.plan_account_service_checkpoint()?;
+    let binding = crate::state_core::projector::RequestBinding {
+        home: peer,
+        correlation: agenc_ircd_federation_wire::RequestCorrelation {
+            replay_key: agenc_ircd_federation_wire::ReplayKey {
+                home_server_id: peer,
+                server_incarnation: ServerIncarnation::from_bytes([51; 16]),
+                origin_id: agenc_ircd_types::OriginId::from_bytes([60; 16]),
+                origin_generation: 0,
+                operation_sequence: 0,
+            },
+            request_id: RequestId::from_bytes([63; 16]),
+        },
+        completion_event_id: agenc_ircd_types::EventId::from_bytes([64; 16]),
+    };
+    let output = context.federation().ok_or("projector")?.project(
+        &domain,
+        &plan,
+        &agenc_ircd_domain::federation::MutationContext::default(),
+        Some(&binding),
+        &mut agenc_ircd_testkit::ScriptedEntropy::new(entropy_script())?,
+        1,
+        &std::collections::BTreeMap::new(),
+        &crate::state_core::durable::DurableIndex::new(),
+    )?;
+    assert!(
+        output.is_none_or(|(_, pending)| pending.event_count() == 0),
+        "a snapshot-required edge must not keep growing its durable outbox"
+    );
+    coordinator.continue_background(context);
+    assert!(
+        coordinator.pending.is_some(),
+        "snapshot-required status needs a durable continuation"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_outbox_limit_fences_in_the_mutation_batch_before_append() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let mut fixture = StateCoreFixture::with_federation_coordinator(
+        entropy_script(),
+        vec![peer_identity(peer, "edge.example")],
+    )?;
+    let context = fixture.context_mut()?;
+    let mut coordinator = standalone_coordinator(peer);
+    coordinator.config.outbox_objects_per_edge = 0;
+    let (handle, _queue) = link_queue(1 << 20);
+    coordinator.inbound(
+        context,
+        established(1, peer, ServerIncarnation::from_bytes([51; 16]), handle),
+    );
+    let domain = agenc_ircd_domain::DomainState::new()?;
+    let plan = domain.plan_account_service_checkpoint()?;
+    let binding = crate::state_core::projector::RequestBinding {
+        home: peer,
+        correlation: agenc_ircd_federation_wire::RequestCorrelation {
+            replay_key: agenc_ircd_federation_wire::ReplayKey {
+                home_server_id: peer,
+                server_incarnation: ServerIncarnation::from_bytes([51; 16]),
+                origin_id: agenc_ircd_types::OriginId::from_bytes([60; 16]),
+                origin_generation: 0,
+                operation_sequence: 0,
+            },
+            request_id: RequestId::from_bytes([63; 16]),
+        },
+        completion_event_id: agenc_ircd_types::EventId::from_bytes([64; 16]),
+    };
+    let (writes, pending) = context
+        .federation()
+        .ok_or("projector")?
+        .project(
+            &domain,
+            &plan,
+            &agenc_ircd_domain::federation::MutationContext::default(),
+            Some(&binding),
+            &mut agenc_ircd_testkit::ScriptedEntropy::new(entropy_script())?,
+            1,
+            &std::collections::BTreeMap::new(),
+            &crate::state_core::durable::DurableIndex::new(),
+        )?
+        .ok_or("projection")?;
+    assert_eq!(
+        pending.event_count(),
+        0,
+        "the overflowing event must never be appended"
+    );
+    assert!(writes.iter().any(|write| matches!(write,
+        crate::state_core::durable::AccountServiceDurableWrite::Put { table: TableId::FederationPeer, plaintext, .. }
+        if agenc_ircd_storage::PersistentRecordValue::decode(TableId::FederationPeer, plaintext)
+            .ok().and_then(|value| FederationPeerRecord::decode(value.body()).ok())
+            .is_some_and(|record| record.snapshot_required))), "the mutation must durably fence its target generation");
+    let events = context
+        .federation_mut()
+        .ok_or("projector")?
+        .committed(pending);
+    coordinator.deliver(context, events);
+    assert!(
+        coordinator
+            .peers
+            .get(&peer)
+            .is_some_and(|state| state.live.is_none())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_startup_restores_the_outbox_ceiling() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let records = vec![
+        restored_peer_record(
+            peer,
+            ServerIncarnation::from_bytes([51; 16]),
+            PeerPhase::Ready,
+        )?,
+        resync_outbox_record(peer)?,
+    ];
+    let mut fixture =
+        StateCoreFixture::with_registration_router_and_records(entropy_script(), records)?;
+    let mut coordinator = standalone_coordinator(peer);
+    coordinator.config.outbox_objects_per_edge = 0;
+    coordinator.startup(fixture.context_mut()?);
+    while !coordinator.loaded() {
+        let message = fixture.next_storage_read().await?;
+        coordinator.storage_read_completed(fixture.context_mut()?, message);
+    }
+    assert!(
+        coordinator
+            .peers
+            .get(&peer)
+            .is_some_and(|state| state.outbox.snapshot_required),
+        "restart must not erase retained outbox pressure"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_expired_request_fences_without_rewinding_the_origin() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let context = fixture.context_mut()?;
+    let mut coordinator = standalone_coordinator(peer);
+    let (inbox, _receiver) = mpsc::channel(1);
+    let mut edge = Edge::new(inbox, 50);
+    let origin = Origin::new(72);
+    coordinator.inbound(
+        context,
+        established(50, peer, edge.incarnation, edge.handle.clone()),
+    );
+    coordinator.origins.reset(peer, edge.incarnation);
+    let record = origin.record(&edge);
+    let bytes = record.to_object()?.encode_canonical()?.as_slice().to_vec();
+    let key = OriginKey {
+        home_server_id: peer,
+        server_incarnation: edge.incarnation,
+        origin_id: origin.id,
+    };
+    coordinator
+        .origins
+        .add(agenc_ircd_domain::federation::OriginDeclaration {
+            origin: key,
+            generation: 0,
+            previous_object_id: [0; 32],
+            binding: agenc_ircd_domain::federation::OriginBinding {
+                connection_id: record.connection_id,
+                connection_nonce: record.connection_nonce,
+            },
+            principal: agenc_ircd_domain::federation::OriginPrincipal::UNREGISTERED,
+            object_id: *federation_object_id(&bytes).as_bytes(),
+        })?;
+    coordinator.origin_objects.insert(key, bytes);
+    coordinator.origins.ready(peer, edge.incarnation)?;
+    for sequence in 0..3 {
+        coordinator.origins.commit_request(
+            OperationKey {
+                origin: key,
+                generation: 0,
+                sequence,
+            },
+            RequestId::from_bytes([80 + u8::try_from(sequence)?; 16]),
+        )?;
+    }
+    let (descriptor, bytes) = encoded_request(&edge, &origin, 73)?;
+    inbound_object(&mut coordinator, context, &mut edge, &bytes, |fragment| {
+        FederationFrame::Request {
+            descriptor,
+            fragment,
+        }
+    })?;
+    let entry = coordinator.origins.origin(&key).ok_or("origin")?;
+    assert_eq!(
+        entry.status,
+        agenc_ircd_domain::federation::OriginStatus::Fenced
+    );
+    assert_eq!(entry.next_sequence, 3);
+    assert_eq!(
+        context.pending_len(),
+        1,
+        "the fence must be durable before its answer"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_rejected_batch_drains_requests_waiting_behind_crypto() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let refused_peer = ServerId::from_bytes([52; 16]);
+    let refused_incarnation = ServerIncarnation::from_bytes([53; 16]);
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let context = fixture.context_mut()?;
+    let mut coordinator = standalone_coordinator_pair(peer, refused_peer);
+    let (refused_handle, _refused_queue) = link_queue(1 << 20);
+    coordinator.inbound(
+        context,
+        established(1, refused_peer, refused_incarnation, refused_handle),
+    );
+    let (inbox, _receiver) = mpsc::channel(1);
+    let mut edge = Edge::new(inbox, 50);
+    let origin = Origin::new(72);
+    coordinator.inbound(
+        context,
+        established(50, peer, edge.incarnation, edge.handle.clone()),
+    );
+    coordinator.origins.reset(peer, edge.incarnation);
+    let record = origin.record(&edge);
+    let bytes = record.to_object()?.encode_canonical()?.as_slice().to_vec();
+    let key = OriginKey {
+        home_server_id: peer,
+        server_incarnation: edge.incarnation,
+        origin_id: origin.id,
+    };
+    coordinator
+        .origins
+        .add(agenc_ircd_domain::federation::OriginDeclaration {
+            origin: key,
+            generation: 0,
+            previous_object_id: [0; 32],
+            binding: agenc_ircd_domain::federation::OriginBinding {
+                connection_id: record.connection_id,
+                connection_nonce: record.connection_nonce,
+            },
+            principal: agenc_ircd_domain::federation::OriginPrincipal::UNREGISTERED,
+            object_id: *federation_object_id(&bytes).as_bytes(),
+        })?;
+    coordinator.origin_objects.insert(key, bytes);
+    coordinator.origins.ready(peer, edge.incarnation)?;
+    let link = edge.link;
+    enqueue(&mut coordinator, &mut edge, &origin, link, 73)?;
+    // The owner has settled the first request's rejected batch. Its protocol
+    // callback must now resume the different origin still waiting in RAM.
+    coordinator.pending = Some(staged_request(refused_peer, refused_incarnation));
+    coordinator.batch_rejected(context);
+    assert_eq!(
+        context.pending_len(),
+        1,
+        "the waiting request must be staged"
+    );
+    assert!(
+        coordinator
+            .peers
+            .get(&peer)
+            .is_some_and(|state| state.queued.is_empty())
+    );
+    assert!(
+        matches!(coordinator.pending, Some(PendingCommit::Request { request_id, .. })
+        if request_id == RequestId::from_bytes([73; 16]))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_rejected_cleanup_keeps_its_session_until_commit() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let context = fixture.context_mut()?;
+    let mut coordinator = standalone_coordinator(peer);
+    let user = host_session(context, peer, "retained")?;
+    grace::queue_hosted_cleanup(&mut coordinator, context, peer);
+    assert!(matches!(
+        coordinator.pending,
+        Some(PendingCommit::Cleanup { .. })
+    ));
+    coordinator.batch_rejected(context);
+    let state = coordinator.peers.get(&peer).ok_or("peer")?;
+    assert!(
+        state.cleanup.contains(&user),
+        "storage refusal must not forget this hide"
+    );
+    assert!(context.domain().session(user).is_some());
+    Ok(())
+}
+
+async fn replay_failure_retires_link(fail_read: bool) -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let mut fixture = StateCoreFixture::with_federation_coordinator(
+        entropy_script(),
+        vec![peer_identity(peer, "edge.example")],
+    )?;
+    let mut coordinator = standalone_coordinator(peer);
+    let (handle, _queue) = link_queue(1 << 20);
+    let context = fixture.context_mut()?;
+    coordinator.inbound(
+        context,
+        established(1, peer, ServerIncarnation::from_bytes([51; 16]), handle),
+    );
+    context.federation_mut().ok_or("projector")?.set_edge(
+        peer,
+        crate::state_core::projector::EdgeDelivery {
+            projection_generation: 0,
+            next_delivery_sequence: 1,
+        },
+    );
+    snapshot::start_resend(&mut coordinator, context, peer, 0);
+    let mut completion = loop {
+        let message = fixture.next_storage_read().await?;
+        if snapshot::owns_read(&coordinator, message.read_id) {
+            break message;
+        }
+    };
+    if fail_read {
+        completion.result = Err(agenc_ircd_storage::StorageError::QueueFull);
+    } else {
+        assert!(
+            completion
+                .result
+                .as_ref()
+                .is_ok_and(|page| page.records.is_empty())
+        );
+    }
+    coordinator.storage_read_completed(fixture.context_mut()?, completion);
+    let state = coordinator.peers.get(&peer).ok_or("peer")?;
+    assert!(
+        state.live.is_none(),
+        "failed or missing replay must retire the link"
+    );
+    assert!(
+        !state.active,
+        "a missing sequence must never activate delivery"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_failed_outbox_read_retires_the_link() -> TestResult {
+    replay_failure_retires_link(true).await
+}
+
+#[tokio::test]
+async fn resync_failed_startup_read_cannot_admit_a_partial_coordinator() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let mut coordinator = standalone_coordinator(peer);
+    coordinator.startup(fixture.context_mut()?);
+    let mut completion = loop {
+        let message = fixture.next_storage_read().await?;
+        if coordinator.loader.owns(message.read_id) {
+            break message;
+        }
+    };
+    completion.result = Err(agenc_ircd_storage::StorageError::QueueFull);
+    coordinator.storage_read_completed(fixture.context_mut()?, completion);
+    assert!(
+        !coordinator.loaded(),
+        "failed reads must not declare reconstruction complete"
+    );
+    for _ in 0..16 {
+        if coordinator.loaded() {
+            return Ok(());
+        }
+        let message = fixture.next_storage_read().await?;
+        coordinator.storage_read_completed(fixture.context_mut()?, message);
+    }
+    Err("startup did not retry the refused page".into())
+}
+
+#[tokio::test]
+async fn resync_link_admission_waits_for_complete_reconstruction() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let mut coordinator = standalone_coordinator(peer);
+    coordinator.startup(fixture.context_mut()?);
+    let (handle, _queue) = link_queue(1 << 20);
+    coordinator.inbound(
+        fixture.context_mut()?,
+        established(1, peer, ServerIncarnation::from_bytes([51; 16]), handle),
+    );
+    assert!(
+        coordinator
+            .peers
+            .get(&peer)
+            .is_some_and(|state| state.live.is_none()),
+        "an incomplete origin table must not admit link traffic"
+    );
+    while !coordinator.loaded() {
+        let message = fixture.next_storage_read().await?;
+        coordinator.storage_read_completed(fixture.context_mut()?, message);
+    }
+    assert!(
+        coordinator
+            .peers
+            .get(&peer)
+            .is_some_and(|state| state.live.is_some())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_invalid_outbox_row_fences_coordinator_startup() -> TestResult {
+    use agenc_ircd_storage::federation_records::{
+        OUTBOX_EVENT_KIND, OutboxEventRecord, outbox_key,
+    };
+    let peer = ServerId::from_bytes([50; 16]);
+    let body = OutboxEventRecord {
+        event_id: [61; 16],
+        event_object_id: [62; 32],
+        event_object: vec![1, 2, 3],
+        coordinator_state_generation: 1,
+        acknowledged: false,
+        completion_replay_key: None,
+    }
+    .encode()?;
+    let value = PersistentRecordValue::new(
+        TableId::EdgeOutbox,
+        OUTBOX_EVENT_KIND,
+        1,
+        0,
+        None,
+        Vec::new(),
+        body,
+    )?
+    .encode()?;
+    let record = InitialStorageRecord::new(TableId::EdgeOutbox, outbox_key(peer, 0, 0)?, 1, value)?;
+    let mut fixture =
+        StateCoreFixture::with_registration_router_and_records(entropy_script(), vec![record])?;
+    let mut coordinator = standalone_coordinator(peer);
+    coordinator.startup(fixture.context_mut()?);
+    for _ in 0..16 {
+        if coordinator.loaded()
+            || coordinator
+                .peers
+                .get(&peer)
+                .is_some_and(|state| state.quarantined)
+        {
+            break;
+        }
+        let message = fixture.next_storage_read().await?;
+        coordinator.storage_read_completed(fixture.context_mut()?, message);
+    }
+    assert!(
+        !coordinator.loaded(),
+        "invalid outbox bytes were silently skipped"
+    );
+    assert!(
+        coordinator
+            .peers
+            .get(&peer)
+            .is_some_and(|state| state.quarantined)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_missing_outbox_sequence_never_counts_as_acknowledged() -> TestResult {
+    replay_failure_retires_link(false).await
+}
+
+fn resync_outbox_record(peer: ServerId) -> TestResult<InitialStorageRecord> {
+    use agenc_ircd_storage::federation_records::{
+        OUTBOX_EVENT_KIND, OutboxEventRecord, outbox_key,
+    };
+    let event = ProjectedEvent::NetworkNotice {
+        code: "REPLAY".to_owned(),
+        text: "committed while disconnected".to_owned(),
+    };
+    let header = EventHeader {
+        network_id: NETWORK,
+        target_server_id: peer,
+        projection_generation: 0,
+        coordinator_state_generation: 1,
+        delivery_sequence: 0,
+        event_id: agenc_ircd_types::EventId::from_bytes([61; 16]),
+        event_kind: event.kind(),
+        correlation: None,
+        cross_profile: None,
+    };
+    let arm = crate::federation::codec::events::event_arm_object(&event)
+        .map_err(|error| format!("{error:?}"))?;
+    let bytes = header.build(&arm)?.encode_canonical()?.as_slice().to_vec();
+    let body = OutboxEventRecord {
+        event_id: *header.event_id.as_bytes(),
+        event_object_id: *federation_object_id(&bytes).as_bytes(),
+        event_object: bytes,
+        coordinator_state_generation: 1,
+        acknowledged: false,
+        completion_replay_key: None,
+    }
+    .encode()?;
+    let value = PersistentRecordValue::new(
+        TableId::EdgeOutbox,
+        OUTBOX_EVENT_KIND,
+        1,
+        0,
+        None,
+        Vec::new(),
+        body,
+    )?
+    .encode()?;
+    Ok(InitialStorageRecord::new(
+        TableId::EdgeOutbox,
+        outbox_key(peer, 0, 0)?,
+        1,
+        value,
+    )?)
+}
+
+#[tokio::test]
+async fn resync_restart_recovers_the_delivery_head_from_committed_outbox_rows() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let incarnation = ServerIncarnation::from_bytes([51; 16]);
+    let records = vec![
+        restored_peer_record(peer, incarnation, PeerPhase::Ready)?,
+        resync_outbox_record(peer)?,
+    ];
+    let mut fixture =
+        StateCoreFixture::with_registration_router_and_records(entropy_script(), records)?;
+    fixture.context_mut()?.install_federation_projector(
+        crate::state_core::projector::FederationProjector::new(NETWORK, COORDINATOR),
+    );
+    let mut coordinator = standalone_coordinator(peer);
+    coordinator.startup(fixture.context_mut()?);
+    while !coordinator.loaded() {
+        let message = fixture.next_storage_read().await?;
+        coordinator.storage_read_completed(fixture.context_mut()?, message);
+    }
+    let delivery = fixture
+        .context_mut()?
+        .federation()
+        .and_then(|projector| projector.edge(peer))
+        .ok_or("restored delivery")?;
+    assert_eq!(
+        delivery.next_delivery_sequence, 1,
+        "never reuse a committed outbox key"
+    );
+    let (handle, _queue) = link_queue(1 << 20);
+    coordinator.inbound(
+        fixture.context_mut()?,
+        established(1, peer, incarnation, handle),
+    );
+    snapshot::start_resend(&mut coordinator, fixture.context_mut()?, peer, 0);
+    assert!(
+        coordinator
+            .peers
+            .get(&peer)
+            .is_some_and(|state| state.resend.is_some() && !state.active),
+        "the missing peer-head checkpoint must not skip delivery"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_acknowledgement_does_not_advance_before_its_commit() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let incarnation = ServerIncarnation::from_bytes([51; 16]);
+    let records = vec![
+        restored_peer_record(peer, incarnation, PeerPhase::Ready)?,
+        resync_outbox_record(peer)?,
+    ];
+    let mut fixture =
+        StateCoreFixture::with_registration_router_and_records(entropy_script(), records)?;
+    let context = fixture.context_mut()?;
+    let mut coordinator = standalone_coordinator(peer);
+    let (handle, _queue) = link_queue(1 << 20);
+    coordinator.inbound(context, established(1, peer, incarnation, handle));
+    let state = coordinator.peers.get_mut(&peer).ok_or("peer")?;
+    state.projection_generation = 0;
+    let event_id = agenc_ircd_types::EventId::from_bytes([61; 16]);
+    state.outbox.unacked.push_back((0, event_id, 128));
+    state.outbox.unacked_bytes = 128;
+    coordinator
+        .acknowledge(context, peer, 0, event_id)
+        .map_err(|error| format!("{error:?}"))?;
+    assert_eq!(context.pending_len(), 1);
+    let state = coordinator.peers.get(&peer).ok_or("peer")?;
+    assert_eq!(
+        state.outbox.cursor, None,
+        "an admitted ACK is not committed coverage"
+    );
+    assert_eq!(state.outbox.unacked.len(), 1);
+    coordinator.batch_rejected(context);
+    let state = coordinator.peers.get(&peer).ok_or("peer")?;
+    assert_eq!(state.outbox.cursor, None);
+    assert_eq!(
+        state.outbox.unacked.len(),
+        1,
+        "refusal retains the deletion obligation"
+    );
+    assert!(
+        state.live.is_none(),
+        "resume must reconcile refused ACK coverage"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_refused_request_retires_the_link_without_consuming_its_sequence() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let incarnation = ServerIncarnation::from_bytes([51; 16]);
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let context = fixture.context_mut()?;
+    let mut coordinator = standalone_coordinator(peer);
+    let (handle, _queue) = link_queue(1 << 20);
+    coordinator.inbound(context, established(1, peer, incarnation, handle));
+    coordinator.pending = Some(staged_request(peer, incarnation));
+    coordinator.batch_rejected(context);
+    assert!(
+        coordinator
+            .peers
+            .get(&peer)
+            .is_some_and(|state| state.live.is_none()),
+        "the edge must retain and resend the exact refused request"
+    );
+    assert!(coordinator.retained.is_empty());
+    assert_eq!(context.pending_len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_callback_cannot_settle_a_request_staged_after_its_receipt() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let context = fixture.context_mut()?;
+    let mut coordinator = standalone_coordinator(peer);
+    let (inbox, _receiver) = mpsc::channel(1);
+    let mut edge = Edge::new(inbox, 50);
+    let origin = Origin::new(72);
+    coordinator.inbound(
+        context,
+        established(50, peer, edge.incarnation, edge.handle.clone()),
+    );
+    coordinator.origins.reset(peer, edge.incarnation);
+    let record = origin.record(&edge);
+    let bytes = record.to_object()?.encode_canonical()?.as_slice().to_vec();
+    let key = OriginKey {
+        home_server_id: peer,
+        server_incarnation: edge.incarnation,
+        origin_id: origin.id,
+    };
+    coordinator
+        .origins
+        .add(agenc_ircd_domain::federation::OriginDeclaration {
+            origin: key,
+            generation: 0,
+            previous_object_id: [0; 32],
+            binding: agenc_ircd_domain::federation::OriginBinding {
+                connection_id: record.connection_id,
+                connection_nonce: record.connection_nonce,
+            },
+            principal: agenc_ircd_domain::federation::OriginPrincipal::UNREGISTERED,
+            object_id: *federation_object_id(&bytes).as_bytes(),
+        })?;
+    coordinator.origin_objects.insert(key, bytes);
+    coordinator.origins.ready(peer, edge.incarnation)?;
+    let (descriptor, bytes) = encoded_request(&edge, &origin, 73)?;
+    inbound_object(&mut coordinator, context, &mut edge, &bytes, |fragment| {
+        FederationFrame::Request {
+            descriptor,
+            fragment,
+        }
+    })?;
+    assert_eq!(context.pending_len(), 1);
+    // An account callback can stage its outer federation checkpoint before
+    // the router forwards the earlier account receipt to this callback.
+    coordinator.batch_applied(context);
+    assert!(
+        matches!(coordinator.pending, Some(PendingCommit::Request { .. })),
+        "the earlier receipt cannot consume newly staged request ownership"
+    );
+    assert_eq!(
+        coordinator
+            .origins
+            .origin(&key)
+            .ok_or("origin")?
+            .next_sequence,
+        0
+    );
+    assert!(coordinator.retained.is_empty());
+    Ok(())
+}
+
 fn established(
     link: u64,
     peer: ServerId,
@@ -1428,7 +2306,7 @@ async fn synchronous_grace_expiry_hides_every_hosted_session() -> TestResult {
     let (handle, _queue) = link_queue(1 << 20);
     let incarnation = ServerIncarnation::from_bytes([51; 16]);
     coordinator.inbound(context, established(1, peer, incarnation, handle));
-    coordinator.inbound(context, reset_frame(1, peer, incarnation));
+    synchronized_peer_fixture(&mut coordinator, peer, incarnation)?;
     // A session hosted by the edge exists in the live domain.
     let user_id = host_session(context, peer, "kate")?;
     coordinator.inbound(context, closed(1, peer));
@@ -1436,11 +2314,11 @@ async fn synchronous_grace_expiry_hides_every_hosted_session() -> TestResult {
     let entry = pop_grace_timer(context, peer, deadline)?;
     let handled = coordinator.timer_fired(context, entry);
     assert!(handled);
-    assert_eq!(coordinator.counters().sessions_expired, 1);
+    assert_eq!(coordinator.counters().sessions_expired, 0);
     assert_eq!(
         context.pending_len(),
         1,
-        "the hide plan is staged for commit"
+        "the authority fence is staged before cleanup"
     );
     assert!(
         context.domain().session(user_id).is_some(),
@@ -1460,7 +2338,7 @@ async fn a_closed_queue_retires_the_link_without_a_violation() -> TestResult {
     let (handle, queue) = link_queue(1 << 20);
     drop(queue);
     coordinator.inbound(context, established(1, peer, incarnation, handle));
-    coordinator.inbound(context, reset_frame(1, peer, incarnation));
+    synchronized_peer_fixture(&mut coordinator, peer, incarnation)?;
     coordinator.inbound(
         context,
         FederationInbound {
@@ -1495,7 +2373,7 @@ async fn a_closed_queue_under_a_snapshot_announcement_is_not_a_violation() -> Te
     let (handle, queue) = link_queue(1 << 20);
     drop(queue);
     coordinator.inbound(context, established(1, peer, incarnation, handle));
-    coordinator.inbound(context, reset_frame(1, peer, incarnation));
+    synchronized_peer_fixture(&mut coordinator, peer, incarnation)?;
     // A generation the coordinator does not retain forces the snapshot route.
     coordinator.inbound(
         context,
@@ -1530,7 +2408,7 @@ async fn a_rejected_snapshot_marker_retires_the_link_instead_of_waiting_for_expi
     let incarnation = ServerIncarnation::from_bytes([51; 16]);
     let (handle, mut queue) = link_queue(1 << 20);
     coordinator.inbound(context, established(1, peer, incarnation, handle));
-    coordinator.inbound(context, reset_frame(1, peer, incarnation));
+    synchronized_peer_fixture(&mut coordinator, peer, incarnation)?;
     // A generation the coordinator does not retain forces the snapshot route;
     // the announcement and the empty cut leave before the marker row is
     // durable.
@@ -1621,6 +2499,7 @@ fn staged_request(peer: ServerId, incarnation: ServerIncarnation) -> PendingComm
     let origin_id = OriginId::from_bytes([77; 16]);
     let request_id = RequestId::from_bytes([78; 16]);
     PendingCommit::Request {
+        staged_after: 0,
         peer,
         link: LinkId::new(1),
         key: OperationKey {
@@ -1658,58 +2537,6 @@ fn staged_request(peer: ServerId, incarnation: ServerIncarnation) -> PendingComm
         },
         _charge: None,
     }
-}
-
-#[tokio::test]
-async fn a_request_whose_batch_storage_refused_is_answered_busy_without_a_row() -> TestResult {
-    let peer = ServerId::from_bytes([50; 16]);
-    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
-    let context = fixture.context_mut()?;
-    let mut coordinator = standalone_coordinator(peer);
-    let incarnation = ServerIncarnation::from_bytes([51; 16]);
-    let (unused_inbox, _unused_receiver) = mpsc::channel(1);
-    let mut edge = Edge::new(unused_inbox, 50);
-    coordinator.inbound(
-        context,
-        established(1, peer, incarnation, edge.handle.clone()),
-    );
-    coordinator.inbound(context, reset_frame(1, peer, incarnation));
-    coordinator.pending = Some(staged_request(peer, incarnation));
-    // Storage refuses the batch, as it does under disk pressure.
-    coordinator.batch_rejected(context);
-    let (carrier, object) =
-        tokio::time::timeout(std::time::Duration::from_secs(5), edge.next_object())
-            .await
-            .map_err(|_| "no answer for the refused request")??;
-    let ObjectCarrier::Result(descriptor) = carrier else {
-        return Err("expected a result object".into());
-    };
-    assert_eq!(descriptor.operation_sequence, 3);
-    let mut budget = DecodeBudget::new(1 << 20, 4_096);
-    let result = SchemaObject::decode_exact("FederationResult", object.as_slice(), &mut budget)?;
-    let header = ResultHeader::from_object(&result)?;
-    assert_eq!(header.result_kind, FederationResultKind::Failed);
-    assert!(header.completion_event_id.is_none());
-    let ResultArm::Failed { code, .. } = ResultArm::from_object(
-        header.result_kind,
-        &decode_result_arm(&result, &mut budget)?,
-    )?
-    else {
-        return Err("expected a failed arm".into());
-    };
-    assert_eq!(code, "SERVER_BUSY");
-    // Nothing durable or retained came of it: no violation, the link stays
-    // live, and the origin sequence is where the edge left it.
-    assert_eq!(coordinator.counters().violations, 0);
-    assert_eq!(context.pending_len(), 0);
-    assert!(
-        coordinator
-            .peers
-            .get(&peer)
-            .is_some_and(|state| state.live.is_some())
-    );
-    assert!(coordinator.retained.is_empty());
-    Ok(())
 }
 
 #[tokio::test]
@@ -1785,7 +2612,7 @@ async fn a_request_waits_while_another_router_has_a_batch_open() -> TestResult {
         context,
         established(50, peer, edge.incarnation, edge.handle.clone()),
     );
-    coordinator.inbound(context, reset_frame(50, peer, edge.incarnation));
+    coordinator.origins.reset(peer, edge.incarnation);
     // The origin declaration stages its acknowledgement row; the
     // coordinator's own slot frees when that batch applies, but the plan
     // stays open in the state core, as another router's plan would.
@@ -1813,18 +2640,7 @@ async fn a_request_waits_while_another_router_has_a_batch_open() -> TestResult {
     );
     let acked = edge.next_frame().await?;
     assert!(matches!(acked, FederationFrame::OriginAck { .. }));
-    coordinator.inbound(
-        context,
-        FederationInbound {
-            link: edge.link,
-            peer,
-            event: LinkEvent::Frame(FederationFrame::OriginReady {
-                edge_server_id: peer,
-                server_incarnation: edge.incarnation,
-            }),
-            charge: None,
-        },
-    );
+    coordinator.origins.ready(peer, edge.incarnation)?;
     let operation = session_open(70, "olga");
     let request_id = RequestId::from_bytes([71; 16]);
     let header = RequestHeader {
@@ -1956,7 +2772,7 @@ async fn a_request_queues_behind_its_peers_queued_requests_even_when_idle() -> T
         context,
         established(50, peer, edge.incarnation, edge.handle.clone()),
     );
-    coordinator.inbound(context, reset_frame(50, peer, edge.incarnation));
+    synchronized_peer_fixture(&mut coordinator, peer, edge.incarnation)?;
     assert_eq!(
         context.pending_len(),
         0,
@@ -2063,7 +2879,7 @@ async fn a_new_incarnation_hides_the_sessions_of_the_previous_one() -> TestResul
     let second = ServerIncarnation::from_bytes([52; 16]);
     let (handle, _queue) = link_queue(1 << 20);
     coordinator.inbound(context, established(1, peer, first, handle));
-    coordinator.inbound(context, reset_frame(1, peer, first));
+    synchronized_peer_fixture(&mut coordinator, peer, first)?;
     let user_id = host_session(context, peer, "kate")?;
     coordinator.inbound(context, closed(1, peer));
     let deadline = grace_deadline(context)?;
@@ -2072,8 +2888,12 @@ async fn a_new_incarnation_hides_the_sessions_of_the_previous_one() -> TestResul
     coordinator.inbound(context, established(2, peer, second, again));
     assert_eq!(coordinator.counters().sessions_expired, 0);
     coordinator.inbound(context, reset_frame(2, peer, second));
-    assert_eq!(coordinator.counters().sessions_expired, 1);
-    assert_eq!(context.pending_len(), 1, "the hide plan is staged");
+    assert_eq!(coordinator.counters().sessions_expired, 0);
+    assert_eq!(
+        context.pending_len(),
+        1,
+        "the authority fence is staged before cleanup"
+    );
     assert!(context.domain().session(user_id).is_some());
     assert!(
         context.timers_mut().pop_due(deadline).is_none(),
@@ -2089,6 +2909,7 @@ fn restored_peer_record(
     phase: PeerPhase,
 ) -> TestResult<InitialStorageRecord> {
     let body = FederationPeerRecord {
+        fenced_incarnations: Vec::new(),
         server_incarnation: *incarnation.as_bytes(),
         recovery_epoch: [0; 16],
         accepted_epochs: Vec::new(),
@@ -2152,8 +2973,12 @@ async fn a_restart_starts_a_fresh_grace_interval_for_a_restored_peer() -> TestRe
     let deadline = grace_deadline(context)?;
     let entry = pop_grace_timer(context, peer, deadline)?;
     assert!(coordinator.timer_fired(context, entry));
-    assert_eq!(coordinator.counters().sessions_expired, 1);
-    assert_eq!(context.pending_len(), 1, "the hide plan is staged");
+    assert_eq!(coordinator.counters().sessions_expired, 0);
+    assert_eq!(
+        context.pending_len(),
+        1,
+        "the authority fence is staged before cleanup"
+    );
     Ok(())
 }
 
@@ -2968,3 +3793,567 @@ async fn a_forwarded_authentication_start_is_answered_through_a_virtual_connecti
 #[cfg(feature = "history")]
 #[path = "history.rs"]
 mod history_tests;
+
+fn synchronized_peer_fixture(
+    coordinator: &mut FederationCoordinator,
+    peer: ServerId,
+    incarnation: ServerIncarnation,
+) -> TestResult {
+    coordinator.origins.reset(peer, incarnation);
+    coordinator.origins.ready(peer, incarnation)?;
+    let state = coordinator.peers.get_mut(&peer).ok_or("peer")?;
+    state.incarnation = Some(incarnation);
+    state.phase = PeerPhase::Ready;
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_resume_preserves_the_retained_outbox_budget() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let context = fixture.context_mut()?;
+    let mut coordinator = standalone_coordinator(peer);
+    let (handle, _queue) = link_queue(1 << 20);
+    coordinator.inbound(
+        context,
+        established(1, peer, ServerIncarnation::from_bytes([51; 16]), handle),
+    );
+    let state = coordinator.peers.get_mut(&peer).ok_or("peer")?;
+    state
+        .outbox
+        .unacked
+        .push_back((0, agenc_ircd_types::EventId::from_bytes([80; 16]), 128));
+    state.outbox.unacked_bytes = 128;
+    snapshot::resume(
+        &mut coordinator,
+        context,
+        LinkId::new(1),
+        peer,
+        1,
+        agenc_ircd_federation_wire::DeliveryCursor::Empty,
+    )
+    .map_err(|error| format!("resume {error:?}"))?;
+    assert_eq!(
+        coordinator
+            .peers
+            .get(&peer)
+            .ok_or("peer")?
+            .outbox
+            .unacked_bytes,
+        128,
+        "resume cannot erase already committed retention pressure"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_expiry_stages_the_authority_fence_before_any_hide() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let context = fixture.context_mut()?;
+    let mut coordinator = standalone_coordinator(peer);
+    let (handle, _queue) = link_queue(1 << 20);
+    let incarnation = ServerIncarnation::from_bytes([51; 16]);
+    coordinator.inbound(context, established(1, peer, incarnation, handle));
+    synchronized_peer_fixture(&mut coordinator, peer, incarnation)?;
+    let user = host_session(context, peer, "kate")?;
+    coordinator.inbound(context, closed(1, peer));
+    let deadline = grace_deadline(context)?;
+    let timer = pop_grace_timer(context, peer, deadline)?;
+    assert!(coordinator.timer_fired(context, timer));
+    assert_eq!(
+        coordinator.counters().sessions_expired,
+        0,
+        "the first transaction fences authority before staging individual hides"
+    );
+    assert!(
+        context.domain().session(user).is_some(),
+        "visibility changes when the fence commits"
+    );
+    assert_eq!(context.pending_len(), 1);
+    fixture.commit_staged_batch().await?;
+    let context = fixture.context_mut()?;
+    coordinator.batch_applied(context);
+    assert!(
+        context.domain().session(user).is_none(),
+        "the committed fence excludes the uncollected session"
+    );
+    assert!(
+        context.domain().durable_session(user).is_some(),
+        "cleanup still owns the physical session row"
+    );
+    assert_eq!(
+        coordinator.peers.get(&peer).ok_or("peer")?.cleanup.front(),
+        Some(&user),
+        "fenced rows remain owned until their hide commits"
+    );
+    assert!(
+        context
+            .index()
+            .holds(TableId::FederationPeer, &peer_key(peer)?)
+    );
+    assert_eq!(
+        coordinator
+            .peers
+            .get(&peer)
+            .ok_or("peer")?
+            .projection_generation,
+        2
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_a_new_incarnation_fences_before_cleaning_the_previous_one() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let context = fixture.context_mut()?;
+    let mut coordinator = standalone_coordinator(peer);
+    let first = ServerIncarnation::from_bytes([51; 16]);
+    let second = ServerIncarnation::from_bytes([52; 16]);
+    let (handle, _queue) = link_queue(1 << 20);
+    coordinator.inbound(context, established(1, peer, first, handle));
+    synchronized_peer_fixture(&mut coordinator, peer, first)?;
+    host_session(context, peer, "kate")?;
+    coordinator.inbound(context, closed(1, peer));
+    let (handle, _queue) = link_queue(1 << 20);
+    coordinator.inbound(context, established(2, peer, second, handle));
+    coordinator.inbound(context, reset_frame(2, peer, second));
+    assert_eq!(
+        coordinator.counters().sessions_expired,
+        0,
+        "replacement first stages a peer fence"
+    );
+    assert_eq!(
+        coordinator.peers.get(&peer).ok_or("peer")?.incarnation,
+        Some(first),
+        "new authority waits for the prior incarnation's cleanup"
+    );
+    assert_eq!(context.pending_len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_restart_keeps_the_replaced_incarnation_fenced() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let first = ServerIncarnation::from_bytes([51; 16]);
+    let second = ServerIncarnation::from_bytes([52; 16]);
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let mut coordinator = standalone_coordinator(peer);
+    synchronized_peer_fixture(&mut coordinator, peer, first)?;
+    synchronized_peer_fixture(&mut coordinator, peer, second)?;
+    coordinator.stage_rows(
+        fixture.context_mut()?,
+        Vec::new(),
+        PendingCommit::Acknowledged,
+        Some(peer),
+    )?;
+    fixture.commit_staged_batch().await?;
+    let mut restored = standalone_coordinator(peer);
+    restored.startup(fixture.context_mut()?);
+    while !restored.loaded() {
+        let message = fixture.next_storage_read().await?;
+        restored.storage_read_completed(fixture.context_mut()?, message);
+    }
+    restored.origins.reset(peer, first);
+    assert!(
+        !restored.origins.is_resetting(peer, first),
+        "a peer checkpoint retains earlier incarnation fences"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_an_empty_expiry_cleanup_commits_the_clean_phase() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let mut coordinator = standalone_coordinator(peer);
+    let (handle, _queue) = link_queue(1 << 20);
+    let incarnation = ServerIncarnation::from_bytes([51; 16]);
+    let context = fixture.context_mut()?;
+    coordinator.inbound(context, established(1, peer, incarnation, handle));
+    synchronized_peer_fixture(&mut coordinator, peer, incarnation)?;
+    coordinator.inbound(context, closed(1, peer));
+    let deadline = grace_deadline(context)?;
+    let timer = pop_grace_timer(context, peer, deadline)?;
+    coordinator.timer_fired(context, timer);
+    for _ in 0..4 {
+        if fixture.context_mut()?.pending_len() == 0 {
+            break;
+        }
+        fixture.commit_staged_batch().await?;
+        coordinator.batch_applied(fixture.context_mut()?);
+    }
+    assert_eq!(
+        coordinator.peers.get(&peer).ok_or("peer")?.phase,
+        PeerPhase::Clean,
+        "an empty cleanup still needs a durable terminal checkpoint"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_a_fenced_incarnation_cannot_open_a_base_link() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let incarnation = ServerIncarnation::from_bytes([51; 16]);
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let mut coordinator = standalone_coordinator(peer);
+    synchronized_peer_fixture(&mut coordinator, peer, incarnation)?;
+    coordinator.origins.fence_edge(peer);
+    coordinator.peers.get_mut(&peer).ok_or("peer")?.phase = PeerPhase::Clean;
+    let (handle, _queue) = link_queue(1 << 20);
+    coordinator.inbound(
+        fixture.context_mut()?,
+        established(1, peer, incarnation, handle),
+    );
+    assert!(
+        coordinator.peers.get(&peer).ok_or("peer")?.live.is_none(),
+        "base resume cannot bypass the permanent incarnation fence"
+    );
+    Ok(())
+}
+
+fn resync_message_authorization(
+    context: &StateCoreContext,
+    user: UserId,
+    target: &str,
+) -> Result<(), agenc_ircd_domain::DomainError> {
+    use agenc_ircd_domain::{
+        AdmissionSnapshot, CanonicalCommand, CommandEnvelope, MessageCommand, MessageKind,
+        MessageTarget, MessageText, NicknameValue,
+    };
+    let session = context
+        .domain()
+        .retained_session(user)
+        .ok_or(agenc_ircd_domain::DomainError::NotFound)?;
+    let command = CanonicalCommand::message(MessageCommand::new(
+        MessageKind::Privmsg,
+        vec![MessageTarget::User(NicknameValue::parse(target)?)],
+        Some(MessageText::parse("hello")?),
+    )?);
+    let mut charges: Vec<_> = context
+        .domain()
+        .command_charges(user, &command)
+        .iter()
+        .map(|charge| (charge.bucket(), 10_000))
+        .collect();
+    charges.sort_by_key(|(bucket, _)| format!("{bucket:?}"));
+    charges.dedup_by_key(|(bucket, _)| format!("{bucket:?}"));
+    let envelope = CommandEnvelope::new(
+        session.session_id(),
+        user,
+        session.generation(),
+        context.domain().revision(),
+        command,
+    );
+    let authorized = context
+        .domain()
+        .authorize(envelope, &AdmissionSnapshot::new(charges)?)
+        .map_err(|failure| failure.error())?;
+    match context.domain().plan_authorized(authorized, None)? {
+        agenc_ircd_domain::PlanDecision::Rejected(rejected) => {
+            Err(rejected.failures().first().map_or(
+                agenc_ircd_domain::DomainError::InvariantViolation,
+                |failure| failure.error(),
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+#[tokio::test]
+async fn resync_suspended_sessions_cannot_send_or_be_new_direct_message_targets() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let context = fixture.context_mut()?;
+    let mut coordinator = standalone_coordinator(peer);
+    let incarnation = ServerIncarnation::from_bytes([51; 16]);
+    let (handle, _queue) = link_queue(1 << 20);
+    coordinator.inbound(context, established(1, peer, incarnation, handle));
+    synchronized_peer_fixture(&mut coordinator, peer, incarnation)?;
+    let kate = host_session(context, peer, "kate")?;
+    let bob = host_session(context, ServerId::from_bytes([60; 16]), "bob")?;
+    assert!(resync_message_authorization(context, bob, "kate").is_ok());
+    coordinator.inbound(context, closed(1, peer));
+    assert!(
+        resync_message_authorization(context, bob, "kate").is_err(),
+        "suspended sessions cannot become new direct-message targets"
+    );
+    assert!(
+        resync_message_authorization(context, kate, "bob").is_err(),
+        "suspended sessions cannot execute mutations"
+    );
+    assert!(
+        context.domain().session(kate).is_some(),
+        "grace retains visible membership and session state"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_startup_backlog_overflow_closes_the_queued_link() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let incarnation = ServerIncarnation::from_bytes([51; 16]);
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let context = fixture.context_mut()?;
+    let mut coordinator = standalone_coordinator(peer);
+    coordinator.startup(context);
+    let (handle, mut queue) = link_queue(1 << 20);
+    coordinator.inbound(context, established(1, peer, incarnation, handle));
+    for _ in 0..MAX_BACKLOG {
+        coordinator.inbound(context, reset_frame(1, peer, incarnation));
+    }
+    assert!(
+        coordinator.backlog.is_empty(),
+        "the failed link's queued establishment and frames must retire together"
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), queue.recv())
+            .await?
+            .is_none()
+    );
+    Ok(())
+}
+
+async fn resync_persist_session(
+    fixture: &mut StateCoreFixture,
+    peer: ServerId,
+    session_byte: u8,
+    user_byte: u8,
+    name: &str,
+) -> TestResult<UserId> {
+    let context = fixture
+        .context_mut()
+        .map_err(|error| format!("context: {error}"))?;
+    let mut seed = crate::test_support::remote_session_seed(context, peer, name)?;
+    seed.session_id = SessionId::from_bytes([session_byte; 16]);
+    seed.user_id = UserId::from_bytes([user_byte; 16]);
+    seed.connection_nonce = [session_byte; 32];
+    seed.public_cloak = agenc_ircd_testkit::deterministic_cloak(user_byte)?;
+    let user = seed.user_id;
+    let plan = context
+        .domain()
+        .plan_session_opened(seed)
+        .map_err(|error| format!("open {name}: {error:?}"))?;
+    let fanout = crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())?;
+    context
+        .stage_durable(plan, fanout, None, 0)
+        .map_err(|error| format!("stage session: {error:?}"))?;
+    fixture
+        .commit_staged_batch()
+        .await
+        .map_err(|error| format!("persist {name}: {error}"))?;
+    Ok(user)
+}
+
+async fn resync_read_peer(
+    fixture: &mut StateCoreFixture,
+    peer: ServerId,
+) -> TestResult<FederationPeerRecord> {
+    let key = peer_key(peer)?;
+    let id = fixture
+        .context_mut()
+        .map_err(|error| format!("context: {error}"))?
+        .submit_storage_read(agenc_ircd_storage::ReadPlan::exact(
+            TableId::FederationPeer,
+            key.clone(),
+        ))?;
+    let message = fixture.next_storage_read().await?;
+    assert_eq!(message.read_id, id);
+    let result = message
+        .result
+        .map_err(|error| format!("peer read: {error:?}"))?;
+    let row = result.records.first().ok_or("peer row missing")?;
+    let opened = fixture
+        .context_mut()
+        .map_err(|error| format!("context: {error}"))?
+        .open_storage_plaintext(TableId::FederationPeer, &key, &row.sealed_record)
+        .map_err(|error| format!("open peer: {error:?}"))?;
+    let value = agenc_ircd_storage::PersistentRecordValue::decode(
+        TableId::FederationPeer,
+        opened.expose_for_storage_codec(),
+    )
+    .map_err(|error| format!("peer envelope: {error:?}"))?;
+    Ok(FederationPeerRecord::decode(value.body())
+        .map_err(|error| format!("peer body: {error:?}"))?)
+}
+
+#[tokio::test]
+async fn resync_cleanup_cursor_commits_with_the_hide_and_restarts_in_session_order() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let incarnation = ServerIncarnation::from_bytes([51; 16]);
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let later = resync_persist_session(&mut fixture, peer, 2, 8, "later").await?;
+    let first = resync_persist_session(&mut fixture, peer, 1, 9, "first").await?;
+    let context = fixture
+        .context_mut()
+        .map_err(|error| format!("context: {error}"))?;
+    let mut coordinator = standalone_coordinator(peer);
+    let (handle, _queue) = link_queue(1 << 20);
+    coordinator.inbound(context, established(1, peer, incarnation, handle));
+    synchronized_peer_fixture(&mut coordinator, peer, incarnation)?;
+    coordinator.inbound(context, closed(1, peer));
+    let deadline = grace_deadline(context)?;
+    let timer = pop_grace_timer(context, peer, deadline)?;
+    coordinator.timer_fired(context, timer);
+    fixture
+        .commit_staged_batch()
+        .await
+        .map_err(|error| format!("cleanup commit: {error}"))?;
+    coordinator.batch_applied(
+        fixture
+            .context_mut()
+            .map_err(|error| format!("context: {error}"))?,
+    );
+    assert_eq!(
+        coordinator.peers.get(&peer).ok_or("peer")?.cleanup.front(),
+        Some(&first)
+    );
+    fixture
+        .commit_staged_batch()
+        .await
+        .map_err(|error| format!("cleanup commit: {error}"))?;
+    assert!(
+        fixture
+            .context_mut()
+            .map_err(|error| format!("context: {error}"))?
+            .domain()
+            .durable_session(first)
+            .is_none()
+    );
+    let record = resync_read_peer(&mut fixture, peer).await?;
+    assert_eq!(
+        record.cleanup_cursor,
+        Some([2; 16]),
+        "the committed hide advances the persisted Session-ID cursor"
+    );
+    let mut restarted = standalone_coordinator(peer);
+    restarted.startup(
+        fixture
+            .context_mut()
+            .map_err(|error| format!("context: {error}"))?,
+    );
+    while !restarted.loaded() {
+        let message = fixture.next_storage_read().await?;
+        restarted.storage_read_completed(
+            fixture
+                .context_mut()
+                .map_err(|error| format!("context: {error}"))?,
+            message,
+        );
+    }
+    assert_eq!(
+        restarted.peers.get(&peer).ok_or("peer")?.cleanup.front(),
+        Some(&later)
+    );
+    fixture
+        .commit_staged_batch()
+        .await
+        .map_err(|error| format!("cleanup commit: {error}"))?;
+    restarted.batch_applied(
+        fixture
+            .context_mut()
+            .map_err(|error| format!("context: {error}"))?,
+    );
+    assert!(
+        fixture
+            .context_mut()
+            .map_err(|error| format!("context: {error}"))?
+            .domain()
+            .durable_session(later)
+            .is_none()
+    );
+    let record = resync_read_peer(&mut fixture, peer).await?;
+    assert_eq!(record.phase, PeerPhase::Clean);
+    assert_eq!(record.cleanup_cursor, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_account_transaction_contains_its_exact_federation_response() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let incarnation = ServerIncarnation::from_bytes([51; 16]);
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let PendingCommit::Request {
+        mut header,
+        request_object_id,
+        ..
+    } = staged_request(peer, incarnation)
+    else {
+        return Err("request".into());
+    };
+    header.opcode = agenc_ircd_types::FederationOpcode::OpaqueAuthFinish;
+    let generation = crate::connection::ConnectionGeneration::new(1 << 62);
+    let context = fixture.context_mut()?;
+    let plan = context.domain().plan_account_service_checkpoint()?;
+    let revision = plan.resulting_revision().get();
+    let origin = request::row(
+        TableId::FederationOrigin,
+        agenc_ircd_storage::federation_records::ORIGIN_RECORD_KIND,
+        agenc_ircd_storage::federation_records::origin_key(
+            peer,
+            incarnation,
+            *header.replay_key.origin_id.as_bytes(),
+            header.replay_key.origin_generation,
+        )?,
+        revision,
+        agenc_ircd_storage::federation_records::FederationOriginRecord {
+            origin_object: vec![1],
+            origin_object_id: [2; 32],
+            next_sequence: 4,
+            status: agenc_ircd_storage::federation_records::OriginRowStatus::Live,
+            flags: 0,
+        }
+        .encode()?,
+    )
+    .map_err(|error| format!("{error:?}"))?;
+    context.bind_remote_account_result(generation, header, request_object_id, origin);
+    let arm = ResultArm::Failed {
+        code: "NOT_ALLOWED".to_owned(),
+        context: String::new(),
+    };
+    let writes = context.remote_account_result_writes(generation, revision, &arm, Vec::new())?;
+    assert_eq!(
+        writes.len(),
+        2,
+        "the account transaction must include its exact result and origin successor"
+    );
+    let fanout = crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())?;
+    context
+        .stage_durable_with_account_service(plan, fanout, None, 0, writes)
+        .map_err(|error| format!("stage: {error:?}"))?;
+    fixture.commit_staged_batch().await?;
+    let key =
+        agenc_ircd_storage::federation_records::request_result_key(header.replay_key.to_bytes())?;
+    let context = fixture.context_mut()?;
+    assert!(
+        context.index().holds(TableId::RequestResult, &key),
+        "the account receipt must already cover the outer replay row"
+    );
+    let read = context.submit_storage_read(agenc_ircd_storage::ReadPlan::exact(
+        TableId::RequestResult,
+        key.clone(),
+    ))?;
+    let message = fixture.next_storage_read().await?;
+    assert_eq!(message.read_id, read);
+    let result = message.result?;
+    let row = result.records.first().ok_or("result missing")?;
+    let opened = fixture.context_mut()?.open_storage_plaintext(
+        TableId::RequestResult,
+        &key,
+        &row.sealed_record,
+    )?;
+    let value = agenc_ircd_storage::PersistentRecordValue::decode(
+        TableId::RequestResult,
+        opened.expose_for_storage_codec(),
+    )?;
+    let record =
+        agenc_ircd_storage::federation_records::CoordinatorResultRecord::decode(value.body())?;
+    assert_eq!(record.request_object_id, *request_object_id.as_bytes());
+    assert_eq!(record.resulting_state_generation, revision);
+    assert_eq!(
+        record.result_object_id,
+        *federation_object_id(&record.result_object).as_bytes()
+    );
+    Ok(())
+}

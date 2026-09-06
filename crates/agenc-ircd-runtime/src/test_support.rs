@@ -512,7 +512,10 @@ impl StateCoreFixture {
             &owner.port(),
             &keys,
             companion,
-            crate::state_core::durable::HeadCounters::from_recovered(recovered),
+            self.state.as_ref().map_or_else(
+                || crate::state_core::durable::HeadCounters::from_recovered(recovered),
+                |state| state.context().head(),
+            ),
         )?;
         Ok(())
     }
@@ -798,6 +801,15 @@ impl StateCoreFixture {
     /// The live context owned by the core.
     pub(crate) fn context_mut(&mut self) -> Result<&mut StateCoreContext, RuntimeError> {
         Ok(self.state_mut()?.context_mut())
+    }
+}
+
+impl StateCoreFixture {
+    /// Settles one staged component batch through storage and authenticated readback.
+    pub(crate) async fn commit_staged_batch(&mut self) -> TestResult {
+        let state = self.state.as_mut().ok_or("state")?;
+        let (storage, reads, _) = self.storage_receivers.as_mut().ok_or("storage receivers")?;
+        state.commit_fixture_batch(storage, reads).await
     }
 }
 

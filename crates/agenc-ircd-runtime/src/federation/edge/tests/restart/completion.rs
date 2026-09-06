@@ -91,6 +91,43 @@ fn completion_rows(request: &RequestHeader) -> TestResult<Vec<InitialStorageReco
         payload.key()?,
         payload.encode()?,
     )?);
+    let origin = agenc_ircd_federation_wire::OriginRecord {
+        network_id: NETWORK,
+        home_server_id: EDGE,
+        server_incarnation: EDGE_INCARNATION,
+        origin_id: request.replay_key.origin_id,
+        generation: 1,
+        previous_origin_object_id: [1; 32],
+        connection_id: agenc_ircd_types::ConnectionId::from_bytes([25; 16]),
+        session: Some(agenc_ircd_federation_wire::OriginSession {
+            session_id: SessionId::from_bytes([21; 16]),
+            user_id: UserId::from_bytes([26; 16]),
+        }),
+        account: None,
+        connection_nonce: [27; 32],
+    }
+    .to_object()?
+    .encode_canonical()?
+    .as_slice()
+    .to_vec();
+    rows.push(record(
+        TableId::FederationOrigin,
+        agenc_ircd_storage::federation_records::ORIGIN_RECORD_KIND,
+        agenc_ircd_storage::federation_records::origin_key(
+            EDGE,
+            EDGE_INCARNATION,
+            *request.replay_key.origin_id.as_bytes(),
+            1,
+        )?,
+        agenc_ircd_storage::federation_records::FederationOriginRecord {
+            origin_object_id: *federation_object_id(&origin).as_bytes(),
+            origin_object: origin,
+            next_sequence: 1,
+            status: agenc_ircd_storage::federation_records::OriginRowStatus::Live,
+            flags: 0,
+        }
+        .encode()?,
+    )?);
     Ok(rows)
 }
 
@@ -144,6 +181,8 @@ fn install_request(base: &mut EdgeFederation, header: RequestHeader, bytes: Vec<
     base.pending.insert(
         header.request_id,
         PendingRequest {
+            sink_gone: false,
+            result_bytes: Vec::new(),
             generation: ConnectionGeneration::new(1),
             kind: PendingKind::Command {
                 message: Box::new(message),
@@ -155,6 +194,7 @@ fn install_request(base: &mut EdgeFederation, header: RequestHeader, bytes: Vec<
             replies: Vec::new(),
             completion: None,
             completion_generation: None,
+            completion_coverage: None,
         },
     );
     Ok(())
@@ -177,6 +217,11 @@ async fn a_result_first_barrier_retires_its_request_only_after_the_durable_recei
             .is_ok_and(|outputs| outputs.is_empty())
     );
     assert!(base.pending.contains_key(&header.request_id));
+    assert!(
+        commit_edge_batches(&mut base, &mut fixture)
+            .await?
+            .is_empty()
+    );
     let (writes, outputs) = companion
         .prepare_barrier(fixture.context_mut()?, &base, MUTATION)
         .map_err(|e| e.to_string())?;
@@ -189,11 +234,10 @@ async fn a_result_first_barrier_retires_its_request_only_after_the_durable_recei
             .applied_completions
             .contains(&EventId::from_bytes([78; 16]))
     );
-    let writes = fixture.context_mut()?.staged_rows_for_test()?;
+    let outputs = commit_edge_batches(&mut base, &mut fixture).await?;
     let (mut reloaded, mut reloaded_companion) = edges();
-    fixture.commit_and_restore_edge(writes, &mut reloaded, Some(&mut reloaded_companion))?;
+    fixture.restore_edge_state(&mut reloaded, Some(&mut reloaded_companion))?;
     assert!(reloaded.barrier_applied(&MUTATION));
-    let outputs = base.batch_applied(fixture.context_mut()?);
     assert_eq!(outputs.len(), 1);
     assert!(
         matches!(outputs.first(), Some(EdgeCompletion::CommandCompleted { generation, message })

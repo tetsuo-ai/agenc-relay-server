@@ -47,6 +47,26 @@ pub(crate) fn render_mutation(
     builder.finish()
 }
 
+/// Renders a canonical expiry plan from its retained physical session row.
+pub(crate) fn render_federation_expiry(
+    context: &StateCoreContext,
+    user: UserId,
+    plan: &MutationPlan,
+) -> Result<FanoutRequest, RuntimeError> {
+    if plan.expected_revision() != context.domain().revision() {
+        return Err(RuntimeError::InvalidValue);
+    }
+    require_event(plan, DomainEvent::SessionHidden(user))?;
+    let session = context
+        .domain()
+        .retained_session(user)
+        .ok_or(RuntimeError::InvalidValue)?;
+    let source = session_prefix(session)?;
+    let mut builder = FanoutBuilder::new(context, plan, None)?;
+    render_quit(&mut builder, plan, user, &source, "origin expired")?;
+    builder.finish()
+}
+
 pub(crate) fn render_account_logout(
     context: &StateCoreContext,
     bound: BoundSession,

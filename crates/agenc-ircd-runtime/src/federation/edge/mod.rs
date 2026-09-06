@@ -11,6 +11,7 @@ mod barrier;
 mod events;
 mod fence;
 mod history;
+mod journal;
 pub(crate) use render::prefix as source_prefix;
 mod render;
 mod request;
@@ -26,8 +27,7 @@ use std::collections::{BTreeMap, VecDeque};
 use agenc_ircd_domain::NicknameValue;
 use agenc_ircd_domain::federation::EdgeReplica;
 use agenc_ircd_federation_wire::{
-    EventHeader, FederationFrame, FederationLineText, OriginDescriptor, federation_object_id,
-    split_fragments,
+    EventHeader, FederationFrame, FederationLineText, federation_object_id, split_fragments,
 };
 use agenc_ircd_types::{
     AccountId, ConnectionId, EventId, NetworkId, OriginId, RecoveryEpoch, RequestId, ServerId,
@@ -103,7 +103,7 @@ struct LiveLink {
 enum Phase {
     /// No authenticated link.
     Down,
-    /// Origins are being replayed; READY not yet sent.
+    /// Origins are being replayed; coordinator READY and exact ACKs gate admission.
     Origins,
     /// FRESUME sent, answer pending.
     Resuming,
@@ -115,6 +115,7 @@ enum Phase {
 
 /// The origin one client connection declares (spec 20.5).
 struct ConnectionOrigin {
+    pending_updates: VecDeque<agenc_ircd_federation_wire::OriginRecord>,
     origin_id: OriginId,
     connection_id: ConnectionId,
     connection_nonce: [u8; 32],
@@ -126,14 +127,18 @@ struct ConnectionOrigin {
     /// The account and its session generation the coordinator registered.
     account: Option<(AccountId, u64)>,
     acked_generation: Option<u64>,
-    /// Whether the coordinator ever acknowledged a declaration of this
-    /// origin; one it never did has nothing to delete there.
+    /// Whether an exact declaration acknowledgement has been received.
     ever_acked: bool,
     deleted: bool,
+    del_acked: bool,
 }
 
 /// The durable batch the edge is waiting on.
 enum PendingCommit {
+    Journal {
+        staged_after: u64,
+        versions: Vec<journal::Version>,
+    },
     History(Box<history::Prepared>),
     HistoryCleanup(crate::federation::history_retention::Cleanup),
     /// One cross-profile part was staged.
@@ -150,14 +155,20 @@ enum PendingCommit {
         receipt: Box<agenc_ircd_storage::e2ee_records::barrier::BarrierReceipt>,
         base_last: (u64, EventId),
         companion_last: (u64, u64, [u8; 16]),
+        coverage: Vec<journal::Version>,
     },
     /// An event was applied; ACK follows the commit.
     Event {
         header: Box<EventHeader>,
         completion: Option<RequestId>,
+        coverage: Option<journal::Version>,
     },
     /// The pending snapshot generation is durable; READY follows.
     SnapshotInstalled,
+    /// Matching ACTIVE is authorized only after the durable generation swap.
+    SnapshotActivated {
+        coverage: Vec<journal::Version>,
+    },
 }
 
 /// Counters exposed through STATS FEDERATION on an edge.
@@ -179,9 +190,11 @@ pub struct EdgeCounters {
 
 /// The edge's federation state machine.
 pub struct EdgeFederation {
+    journal: journal::Journal,
     config: EdgeConfig,
     live: Option<LiveLink>,
     phase: Phase,
+    origin_ready: bool,
     replica: EdgeReplica,
     cursor: Option<(u64, EventId)>,
     installed_epoch: Option<RecoveryEpoch>,
@@ -197,6 +210,7 @@ pub struct EdgeFederation {
     commit: Option<PendingCommit>,
     queued_events: VecDeque<events::QueuedEvent>,
     snapshot: Option<sync::SnapshotInstall>,
+    snapshot_cut: Option<(u64, u64)>,
     next_origin: u64,
     client_resync_epoch: u64,
     counters: EdgeCounters,
@@ -246,10 +260,12 @@ impl EdgeFederation {
         let _installed = replica.install(1, Vec::new());
         let companion = CompanionLinks::new(None, config.server_name.clone());
         Self {
+            journal: journal::Journal::default(),
             companion,
             config,
             live: None,
             phase: Phase::Down,
+            origin_ready: false,
             replica,
             cursor: None,
             installed_epoch: None,
@@ -265,6 +281,7 @@ impl EdgeFederation {
             commit: None,
             queued_events: VecDeque::new(),
             snapshot: None,
+            snapshot_cut: None,
             next_origin: 1,
             client_resync_epoch: 0,
             counters: EdgeCounters::default(),
@@ -680,8 +697,11 @@ impl EdgeFederation {
         );
         self.live = None;
         self.phase = Phase::Down;
+        self.origin_ready = false;
         self.note_phase();
-        self.snapshot = None;
+        if sync::pending_generation(self).is_none() {
+            self.snapshot = None;
+        }
         self.queued_events.clear();
         for pending in self.pending.values_mut() {
             pending.sent = false;
@@ -704,16 +724,29 @@ impl EdgeFederation {
         frame: FederationFrame,
     ) -> Result<Vec<EdgeCompletion>, Violation> {
         match frame {
+            FederationFrame::OriginReady {
+                edge_server_id,
+                server_incarnation,
+            } => {
+                self.require_self(edge_server_id)?;
+                sync::origin_ready(self, context, server_incarnation)?;
+                Ok(Vec::new())
+            }
             FederationFrame::OriginAck {
                 edge_server_id,
+                server_incarnation,
                 origin_id,
                 generation,
                 object_id,
-                ..
             } => {
                 self.require_self(edge_server_id)?;
-                self.origin_acked(origin_id, generation, object_id.is_none());
-                Ok(Vec::new())
+                self.origin_acked(
+                    context,
+                    server_incarnation,
+                    origin_id,
+                    generation,
+                    object_id,
+                )
             }
             FederationFrame::ResumeOk {
                 edge_server_id,
@@ -797,21 +830,61 @@ impl EdgeFederation {
 
     /// Records the coordinator's acknowledgement of one origin declaration,
     /// or drops the retained origin once its deletion is acknowledged.
-    fn origin_acked(&mut self, origin_id: OriginId, generation: u64, deletion: bool) {
-        if deletion {
-            self.origins.retain(|_, origin| {
-                !(origin.deleted
-                    && origin.origin_id == origin_id
-                    && origin.generation == generation)
-            });
-            return;
+    fn origin_acked(
+        &mut self,
+        context: &mut StateCoreContext,
+        incarnation: ServerIncarnation,
+        origin_id: OriginId,
+        generation: u64,
+        object_id: Option<agenc_ircd_federation_wire::FederationHash32>,
+    ) -> Result<Vec<EdgeCompletion>, Violation> {
+        if incarnation != self.config.incarnation {
+            return Err(Violation::Consistency);
         }
-        for origin in self.origins.values_mut() {
-            if origin.origin_id == origin_id && origin.generation == generation {
-                origin.acked_generation = Some(generation);
-                origin.ever_acked = true;
+        let Some(connection) = self
+            .origins
+            .iter()
+            .find(|(_, origin)| origin.origin_id == origin_id)
+            .map(|(connection, _)| *connection)
+        else {
+            return Ok(Vec::new());
+        };
+        let origin = self.origins.get_mut(&connection).ok_or(Violation::Phase)?;
+        let Some(object_id) = object_id else {
+            if !origin.deleted || origin.generation != generation {
+                return Err(Violation::Consistency);
             }
+            origin.del_acked = true;
+            journal::retain(self, context, journal::Identity::Origin(connection));
+            return Ok(Vec::new());
+        };
+        if let Some(update) = origin.pending_updates.front().copied()
+            && update.generation == generation
+        {
+            let encoded = agenc_ircd_federation_wire::CanonicalEncode::encode_canonical(
+                &update.to_object().map_err(|_| Violation::Codec)?,
+            )
+            .map_err(|_| Violation::Codec)?;
+            if federation_object_id(encoded.as_slice()) != object_id {
+                return Err(Violation::Consistency);
+            }
+            origin.pending_updates.pop_front();
+            origin.generation = generation;
+            origin.sequence = 0;
+            origin.previous_object_id = update.previous_origin_object_id;
+            origin.object_id = *object_id.as_bytes();
+        } else if origin.generation != generation || origin.object_id != *object_id.as_bytes() {
+            return Err(Violation::Consistency);
         }
+        origin.ever_acked = true;
+        if !origin.pending_updates.is_empty() {
+            request::declare_origin(self, context, connection, true);
+            return Ok(Vec::new());
+        }
+        origin.acked_generation = Some(generation);
+        sync::activate_origins(self, context);
+        request::resend_pending(self, context);
+        Ok(request::dispatch_deferred(self, context, connection))
     }
 
     /// Sends one rendered control frame over the live link.
@@ -906,6 +979,7 @@ impl EdgeFederation {
         self.origins.insert(
             generation,
             ConnectionOrigin {
+                pending_updates: VecDeque::new(),
                 origin_id: OriginId::from_bytes(origin_id),
                 connection_id: ConnectionId::from_bytes(connection_id),
                 connection_nonce: nonce,
@@ -917,6 +991,7 @@ impl EdgeFederation {
                 account: None,
                 acked_generation: None,
                 ever_acked: false,
+                del_acked: false,
                 deleted: false,
             },
         );
@@ -947,16 +1022,12 @@ impl EdgeFederation {
         }
         request::delete_origin(self, context, generation);
         self.deferred.remove(&generation);
-        let stale: Vec<RequestId> = self
+        for pending in self
             .pending
-            .iter()
-            .filter(|(_, pending)| pending.generation == generation)
-            .map(|(request_id, _)| *request_id)
-            .collect();
-        for request_id in stale {
-            if let Some(pending) = self.pending.remove(&request_id) {
-                pending.sink_gone(self);
-            }
+            .values_mut()
+            .filter(|pending| pending.generation == generation)
+        {
+            pending.sink_gone = true;
         }
     }
 
@@ -1038,12 +1109,10 @@ impl EdgeFederation {
         context: &mut StateCoreContext,
         generation: ConnectionGeneration,
     ) {
-        let Some(origin) = self.origins.get_mut(&generation) else {
+        if let Err(violation) = journal::queue_update(self, generation) {
+            self.fail_link(context, violation);
             return;
-        };
-        origin.previous_object_id = origin.object_id;
-        origin.generation = origin.generation.saturating_add(1);
-        origin.sequence = 0;
+        }
         request::declare_origin(self, context, generation, true);
     }
 
@@ -1070,37 +1139,35 @@ impl EdgeFederation {
 
     /// Finishes the batch that just committed.
     pub fn batch_applied(&mut self, context: &mut StateCoreContext) -> Vec<EdgeCompletion> {
+        if matches!(self.commit.as_ref(), Some(PendingCommit::Journal { staged_after, .. })
+            if context.head().storage_commit_sequence <= *staged_after)
+        {
+            return Vec::new();
+        }
         let mut completions = Vec::new();
         match self.commit.take() {
+            Some(PendingCommit::Journal { versions, .. }) => {
+                completions.extend(journal::committed(self, context, versions))
+            }
             Some(PendingCommit::History(prepared)) => {
                 completions.extend(history::committed(self, context, *prepared))
             }
             Some(PendingCommit::HistoryCleanup(cleanup)) => {
                 history::cleanup_committed(self, cleanup)
             }
-            Some(PendingCommit::Event { header, completion }) => {
-                self.event_before = None;
-                self.counters.events_applied = self.counters.events_applied.saturating_add(1);
-                self.cursor = Some((header.delivery_sequence, header.event_id));
-                self.send_frame(
-                    context,
-                    &FederationFrame::Ack {
-                        coordinator_server_id: self.config.coordinator.server_id(),
-                        delivery_sequence: header.delivery_sequence,
-                        event_id: header.event_id,
-                    },
-                );
-                if let Some(request_id) = completion {
-                    completions.extend(events::committed_completion(
-                        self,
-                        context,
-                        header.event_id,
-                        request_id,
-                        header.coordinator_state_generation,
-                    ));
-                }
+            Some(PendingCommit::Event {
+                header,
+                completion,
+                coverage,
+            }) => {
+                completions.extend(self.settle_event(context, *header, completion, coverage));
             }
-            Some(PendingCommit::SnapshotInstalled) => sync::installed(self, context),
+            Some(PendingCommit::SnapshotInstalled) => {
+                completions.extend(sync::installed(self, context));
+            }
+            Some(PendingCommit::SnapshotActivated { coverage }) => {
+                completions.extend(sync::activated(self, context, coverage));
+            }
             Some(PendingCommit::BarrierPart(open)) => barrier::part_committed(self, *open),
             Some(PendingCommit::BarrierFence) => fence::committed(self, context),
             Some(PendingCommit::BarrierCleanup {
@@ -1113,21 +1180,95 @@ impl EdgeFederation {
                 receipt,
                 base_last,
                 companion_last,
-            }) => completions.extend(barrier::applied(
-                self,
-                context,
-                *receipt,
-                base_last,
-                companion_last,
-            )),
+                coverage,
+            }) => {
+                if !self.commit_coverage(context, coverage) {
+                    return Vec::new();
+                }
+                completions.extend(barrier::applied(
+                    self,
+                    context,
+                    *receipt,
+                    base_last,
+                    companion_last,
+                ));
+            }
             None => {}
         }
         completions.extend(events::drain_queued(self, context));
+        journal::continue_write(self, context);
         completions
+    }
+
+    fn commit_coverage(
+        &mut self,
+        context: &mut StateCoreContext,
+        coverage: Vec<journal::Version>,
+    ) -> bool {
+        for version in coverage {
+            if let Err(violation) = journal::completion_committed(self, version) {
+                self.fail_link(context, violation);
+                return false;
+            }
+        }
+        true
+    }
+
+    fn settle_event(
+        &mut self,
+        context: &mut StateCoreContext,
+        header: EventHeader,
+        completion: Option<agenc_ircd_types::RequestId>,
+        coverage: Option<journal::Version>,
+    ) -> Vec<EdgeCompletion> {
+        if let Some(coverage) = coverage
+            && let Err(violation) = journal::completion_committed(self, coverage)
+        {
+            self.fail_link(context, violation);
+            return Vec::new();
+        }
+        self.event_before = None;
+        self.counters.events_applied = self.counters.events_applied.saturating_add(1);
+        self.cursor = Some((header.delivery_sequence, header.event_id));
+        self.send_frame(
+            context,
+            &FederationFrame::Ack {
+                coordinator_server_id: self.config.coordinator.server_id(),
+                delivery_sequence: header.delivery_sequence,
+                event_id: header.event_id,
+            },
+        );
+        if let Some(request_id) = completion {
+            return events::committed_completion(
+                self,
+                context,
+                header.event_id,
+                request_id,
+                header.coordinator_state_generation,
+            );
+        }
+        Vec::new()
     }
 
     /// Drops the work behind a rejected batch; the coordinator re-delivers.
     pub fn batch_rejected(&mut self, context: &mut StateCoreContext) {
+        if matches!(self.commit, Some(PendingCommit::Journal { .. })) {
+            self.commit = None;
+            self.fail_link(context, Violation::Ceiling);
+            return;
+        }
+        if matches!(
+            self.commit,
+            Some(PendingCommit::SnapshotInstalled | PendingCommit::SnapshotActivated { .. })
+        ) {
+            self.commit = None;
+            sync::rejected_install(self);
+            // No failed install may resume from its in-memory cut. A new
+            // authenticated link must negotiate another verified snapshot.
+            self.installed_epoch = None;
+            self.fail_link(context, Violation::Ceiling);
+            return;
+        }
         if matches!(self.commit, Some(PendingCommit::History(_))) {
             if let Some(PendingCommit::History(prepared)) = self.commit.take() {
                 history::rejected(self, context, *prepared);
@@ -1146,25 +1287,6 @@ impl EdgeFederation {
             // Resume starts at the previous committed projection and cursor.
             self.fail_link(context, Violation::Ceiling);
         }
-    }
-
-    fn origin_descriptor(
-        &self,
-        generation: ConnectionGeneration,
-    ) -> Option<(OriginDescriptor, &ConnectionOrigin)> {
-        let origin = self.origins.get(&generation)?;
-        Some((
-            OriginDescriptor {
-                coordinator_server_id: self.config.coordinator.server_id(),
-                server_incarnation: self.config.incarnation,
-                origin_id: origin.origin_id,
-                generation: origin.generation,
-                object_id: agenc_ircd_federation_wire::FederationHash32::from_bytes(
-                    origin.object_id,
-                ),
-            },
-            origin,
-        ))
     }
 }
 

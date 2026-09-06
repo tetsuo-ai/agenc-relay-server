@@ -2011,6 +2011,9 @@ impl DomainState {
         if authorized.expected_state_revision != self.revision {
             return Err(DomainError::StaleRevision);
         }
+        if !self.session_authority_available(authorized.user_id) {
+            return Err(DomainError::ServerBusy);
+        }
         let requests = self.external_requests(authorized.user_id, &authorized.command)?;
         let Some(inputs) = external else {
             if requests.is_empty() {
@@ -2165,6 +2168,9 @@ impl DomainState {
         let Some(session) = self.sessions.get(&envelope.user_id()) else {
             return Err(DomainError::NotFound);
         };
+        if !self.session_authority_available(envelope.user_id()) {
+            return Err(DomainError::ServerBusy);
+        }
         if session.session_id != envelope.session_id()
             || session.generation != envelope.session_generation()
         {
@@ -2357,6 +2363,9 @@ impl DomainState {
         let Some(target) = self.sessions.get(target_user) else {
             return Err(DomainError::InvariantViolation);
         };
+        if !self.session_authority_available(*target_user) {
+            return Err(DomainError::NotFound);
+        }
         let Some(target_account_id) = target.account_id else {
             return Ok(());
         };

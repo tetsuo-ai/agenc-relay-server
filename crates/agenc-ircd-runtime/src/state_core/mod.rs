@@ -18,6 +18,7 @@ pub mod inbox;
 mod pending;
 pub mod projector;
 pub mod reconstruct;
+pub(crate) mod remote_result;
 pub mod session;
 pub mod timers;
 
@@ -46,6 +47,8 @@ pub(crate) use admin::{
     AdminMutation, AdminTarget, admin_core_channel,
 };
 pub use pending::{GATHER_WINDOW_MILLIS, MAX_BATCH_PLANS, StagedOrigin};
+#[cfg(test)]
+mod fixture;
 
 use crate::RuntimeError;
 use crate::admission::{
@@ -580,6 +583,7 @@ pub struct StateCoreContext {
     observer: Option<Arc<RuntimeObserver>>,
     federation: Option<FederationProjector>,
     next_mutation: MutationContext,
+    remote_account_results: BTreeMap<ConnectionGeneration, remote_result::RemoteResultBinding>,
     next_correlation: Option<RequestBinding>,
     next_cross_profile: BTreeMap<ServerId, projector::CrossProfileAssignment>,
     outbound_events: Vec<OutboundEvent>,
@@ -649,6 +653,21 @@ impl StateCoreContext {
     #[must_use]
     pub const fn sessions(&self) -> &SessionTable {
         &self.sessions
+    }
+
+    /// Installs the committed peer authority fence before exposing later work.
+    pub(crate) fn fence_federation_peer(&mut self, peer: ServerId) {
+        self.domain.fence_federation_peer(peer);
+    }
+
+    /// Publishes a peer's committed READY after the previous incarnation was cleaned.
+    pub(crate) fn resume_federation_peer(&mut self, peer: ServerId) {
+        self.domain.resume_federation_peer(peer);
+    }
+
+    /// Applies immediate grace authority restrictions after link loss or RESET.
+    pub(crate) fn suspend_federation_peer(&mut self, peer: ServerId) {
+        self.domain.suspend_federation_peer(peer);
     }
 
     /// Mutably borrows the session table for registration composition.
@@ -2104,6 +2123,7 @@ impl StateCore {
                 observer: None,
                 federation: None,
                 next_mutation: MutationContext::default(),
+                remote_account_results: BTreeMap::new(),
                 next_correlation: None,
                 next_cross_profile: BTreeMap::new(),
                 outbound_events: Vec::new(),

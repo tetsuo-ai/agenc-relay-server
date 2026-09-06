@@ -2659,6 +2659,12 @@ impl CommandRouter for RegistrationRouter {
         context: &mut StateCoreContext,
         event: crate::state_core::inbox::MaintenanceEvent,
     ) {
+        if let Some(edge) = self.edge.as_mut() {
+            edge.continue_request_journal(context);
+        }
+        if let Some(coordinator) = self.federation.as_mut() {
+            coordinator.continue_restore(context);
+        }
         if event == crate::state_core::inbox::MaintenanceEvent::RetentionSweep {
             let pending = self
                 .e2ee

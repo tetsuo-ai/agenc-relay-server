@@ -8,6 +8,7 @@
 //! coordinator only renders FRESULT and FEVENT lines after that commit.
 
 mod accounts;
+mod authority;
 mod companion;
 mod convert;
 mod grace;
@@ -96,6 +97,8 @@ struct OutboxState {
     unacked_bytes: u64,
     cursor: Option<(u64, EventId)>,
     snapshot_required: bool,
+    dirty: bool,
+    reserved_next: u64,
 }
 
 /// Everything the coordinator knows about one configured edge.
@@ -110,6 +113,8 @@ struct PeerState {
     outbox: OutboxState,
     grace_deadline: Option<MonotonicTick>,
     cleanup: VecDeque<agenc_ircd_types::UserId>,
+    cleanup_cursor: Option<[u8; 16]>,
+    fence_pending: bool,
     quarantined: bool,
     client_resync_epoch: u64,
     queued: VecDeque<QueuedRequest>,
@@ -154,6 +159,8 @@ enum PendingCommit {
     History(Box<history::Prepared>),
     HistoryCleanup(crate::federation::history_retention::Cleanup),
     Request {
+        /// A result staged after this durable head requires a later receipt.
+        staged_after: u64,
         peer: ServerId,
         link: LinkId,
         key: OperationKey,
@@ -165,13 +172,32 @@ enum PendingCommit {
         header: RequestHeader,
         _charge: Option<IngressCharge>,
     },
+    OriginReady {
+        peer: ServerId,
+        link: LinkId,
+    },
     OriginAck {
         peer: ServerId,
         link: LinkId,
         frame: FederationFrame,
         _charge: Option<IngressCharge>,
     },
+    OriginExpired {
+        peer: ServerId,
+        link: LinkId,
+        descriptor: OperationDescriptor,
+        result: Vec<u8>,
+        _charge: Option<IngressCharge>,
+    },
     Cleanup {
+        peer: ServerId,
+    },
+    AuthorityFence {
+        peer: ServerId,
+        generation: u64,
+        cursor: Option<[u8; 16]>,
+    },
+    CleanupFinished {
         peer: ServerId,
     },
     /// A companion request batch; the executor holds its result.
@@ -183,6 +209,14 @@ enum PendingCommit {
         peer: ServerId,
     },
     SnapshotReady {
+        peer: ServerId,
+    },
+    DeliveryAcknowledged {
+        peer: ServerId,
+        delivery_sequence: u64,
+        event_id: EventId,
+    },
+    OutboxRequired {
         peer: ServerId,
     },
     Acknowledged,
@@ -217,6 +251,8 @@ pub struct FederationCoordinator {
     dummy: ChannelKeyVerifierRecord,
     origins: OriginTable,
     origin_objects: BTreeMap<OriginKey, Vec<u8>>,
+    /// Registration ownership before the edge acknowledges its principal UPDATE.
+    registered_sessions: BTreeMap<OriginKey, std::collections::BTreeSet<agenc_ircd_types::UserId>>,
     retained: BTreeMap<OperationKey, RetainedRequest>,
     peers: BTreeMap<ServerId, PeerState>,
     links: BTreeMap<LinkId, ServerId>,
@@ -284,6 +320,8 @@ impl FederationCoordinator {
                         outbox: OutboxState::default(),
                         grace_deadline: None,
                         cleanup: VecDeque::new(),
+                        cleanup_cursor: None,
+                        fence_pending: false,
                         quarantined: false,
                         client_resync_epoch: 0,
                         queued: VecDeque::new(),
@@ -305,6 +343,7 @@ impl FederationCoordinator {
             dummy,
             origins: OriginTable::new(),
             origin_objects: BTreeMap::new(),
+            registered_sessions: BTreeMap::new(),
             retained: BTreeMap::new(),
             peers,
             links: BTreeMap::new(),
@@ -429,6 +468,10 @@ impl FederationCoordinator {
 
     /// Dispatches one link message at a safe point.
     pub fn inbound(&mut self, context: &mut StateCoreContext, message: FederationInbound) {
+        if self.loader.blocks_admission() {
+            startup::hold_before_loaded(self, message);
+            return;
+        }
         let FederationInbound {
             link,
             peer,
@@ -623,7 +666,14 @@ impl FederationCoordinator {
         let Some(state) = self.peers.get_mut(&session.peer) else {
             return;
         };
-        if state.quarantined {
+        if state.quarantined
+            || state.fence_pending
+            || state.phase == PeerPhase::Expired
+            || self
+                .origins
+                .fenced_incarnations_of(session.peer)
+                .any(|incarnation| incarnation == session.peer_incarnation)
+        {
             // A quarantined peer never regains a link until an operator
             // re-enables it through configuration and a restart.
             handle.close();
@@ -641,9 +691,7 @@ impl FederationCoordinator {
         if !state.accepted_epochs.contains(&session.peer_recovery_epoch) {
             state.accepted_epochs.push(session.peer_recovery_epoch);
         }
-        state.grace_deadline = None;
         self.links.insert(session.link, session.peer);
-        grace::cancel_grace(context, session.peer);
         if context
             .federation()
             .and_then(|projector| projector.edge(session.peer))
@@ -660,6 +708,7 @@ impl FederationCoordinator {
                 );
             }
         }
+        self.sync_outbox_budget(context, session.peer);
         self.start_companion(context, session.link, session.peer);
     }
 
@@ -773,17 +822,6 @@ impl FederationCoordinator {
                     next_operation_sequence,
                 )
             }
-            FederationFrame::OriginReady {
-                edge_server_id,
-                server_incarnation,
-            } => {
-                if edge_server_id != peer {
-                    return Err(Violation::Misaddressed);
-                }
-                origin::ready(self, context, peer, server_incarnation)?;
-                companion::base_ready(self, context, peer, server_incarnation);
-                Ok(())
-            }
             FederationFrame::Resume {
                 coordinator_server_id,
                 projection_generation,
@@ -852,7 +890,7 @@ impl FederationCoordinator {
             .get(&peer)
             .filter(|barrier| !barrier.base_acked)
             .map(|barrier| barrier.base_last);
-        let state = self.peers.get_mut(&peer).ok_or(Violation::Misaddressed)?;
+        let state = self.peers.get(&peer).ok_or(Violation::Misaddressed)?;
         let Some((front, expected, _)) = state.outbox.unacked.front().copied() else {
             return Err(Violation::Acknowledgement);
         };
@@ -863,12 +901,10 @@ impl FederationCoordinator {
         let generation = state.projection_generation;
         let mut writes = Vec::new();
         let mut matched = false;
-        while let Some((sequence, id, bytes)) = state.outbox.unacked.front().copied() {
+        for (sequence, id, _) in state.outbox.unacked.iter().copied() {
             if sequence > delivery_sequence {
                 break;
             }
-            state.outbox.unacked.pop_front();
-            state.outbox.unacked_bytes = state.outbox.unacked_bytes.saturating_sub(bytes);
             matched |= sequence == delivery_sequence && id == event_id;
             let key =
                 agenc_ircd_storage::federation_records::outbox_key(peer, generation, sequence)
@@ -881,16 +917,57 @@ impl FederationCoordinator {
         if !matched {
             return Err(Violation::Acknowledgement);
         }
-        state.outbox.cursor = Some((delivery_sequence, event_id));
-        self.stage_rows(context, writes, PendingCommit::Acknowledged, Some(peer))
+        let plan = context
+            .domain()
+            .plan_account_service_checkpoint()
             .map_err(|_| Violation::Ceiling)?;
+        writes.push(
+            self.peer_row_at(
+                peer,
+                plan.resulting_revision().get(),
+                Some((delivery_sequence, event_id)),
+            )
+            .map_err(|_| Violation::Ceiling)?,
+        );
+        let fanout = crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())
+            .map_err(|_| Violation::Ceiling)?;
+        context
+            .stage_durable_with_account_service(plan, fanout, None, 0, writes)
+            .map_err(|_| Violation::Ceiling)?;
+        self.pending = Some(PendingCommit::DeliveryAcknowledged {
+            peer,
+            delivery_sequence,
+            event_id,
+        });
+        Ok(())
+    }
+
+    /// Publishes ACK coverage only after its deletion and peer row commit.
+    fn acknowledgement_committed(
+        &mut self,
+        context: &mut StateCoreContext,
+        peer: ServerId,
+        delivery_sequence: u64,
+        event_id: EventId,
+    ) {
+        let Some(state) = self.peers.get_mut(&peer) else {
+            return;
+        };
+        while let Some((sequence, _, bytes)) = state.outbox.unacked.front().copied() {
+            if sequence > delivery_sequence {
+                break;
+            }
+            state.outbox.unacked.pop_front();
+            state.outbox.unacked_bytes = state.outbox.unacked_bytes.saturating_sub(bytes);
+        }
+        state.outbox.cursor = Some((delivery_sequence, event_id));
+        let barrier_last = self.barriers.get(&peer).map(|barrier| barrier.base_last);
         if barrier_last == Some(delivery_sequence) {
             if let Some(barrier) = self.barriers.get_mut(&peer) {
                 barrier.base_acked = true;
             }
             companion::try_close_barrier(self, context, peer);
         }
-        Ok(())
     }
 
     /// Stages rows that carry no domain mutation behind a checkpoint plan,
@@ -926,15 +1003,36 @@ impl FederationCoordinator {
         peer: ServerId,
         revision: u64,
     ) -> Result<AccountServiceDurableWrite, RuntimeError> {
+        let cursor = self
+            .peers
+            .get(&peer)
+            .ok_or(RuntimeError::InvalidValue)?
+            .outbox
+            .cursor;
+        self.peer_row_at(peer, revision, cursor)
+    }
+
+    fn peer_record_at(
+        &self,
+        peer: ServerId,
+        cursor: Option<(u64, EventId)>,
+    ) -> Result<FederationPeerRecord, RuntimeError> {
         let state = self.peers.get(&peer).ok_or(RuntimeError::InvalidValue)?;
-        let next_delivery_sequence = state.outbox.unacked.back().map_or(
-            state
-                .outbox
-                .cursor
-                .map_or(0, |(sequence, _)| sequence.saturating_add(1)),
-            |(sequence, _, _)| sequence.saturating_add(1),
+        let next_delivery_sequence = state.outbox.reserved_next.max(
+            state.outbox.unacked.back().map_or(
+                state
+                    .outbox
+                    .cursor
+                    .map_or(0, |(sequence, _)| sequence.saturating_add(1)),
+                |(sequence, _, _)| sequence.saturating_add(1),
+            ),
         );
-        let record = FederationPeerRecord {
+        Ok(FederationPeerRecord {
+            fenced_incarnations: self
+                .origins
+                .fenced_incarnations_of(peer)
+                .map(|incarnation| *incarnation.as_bytes())
+                .collect(),
             server_incarnation: state
                 .incarnation
                 .map_or([0; 16], |incarnation| *incarnation.as_bytes()),
@@ -949,22 +1047,27 @@ impl FederationCoordinator {
             phase: state.phase,
             projection_generation: state.projection_generation,
             next_delivery_sequence,
-            cursor: state
-                .outbox
-                .cursor
-                .map(|(delivery_sequence, event_id)| DeliveryCursorRecord {
-                    delivery_sequence,
-                    event_id: *event_id.as_bytes(),
-                }),
+            cursor: cursor.map(|(delivery_sequence, event_id)| DeliveryCursorRecord {
+                delivery_sequence,
+                event_id: *event_id.as_bytes(),
+            }),
             active_entry_count: context_entry_count(state),
             active_entry_bytes: 0,
             pending_generation: None,
             snapshot_required: state.outbox.snapshot_required,
-            cleanup_cursor: state.cleanup.front().map(|user| *user.as_bytes()),
+            cleanup_cursor: state.cleanup_cursor,
             quarantined: state.quarantined,
             client_resync_epoch: state.client_resync_epoch,
-        }
-        .encode()?;
+        })
+    }
+
+    fn peer_row_at(
+        &self,
+        peer: ServerId,
+        revision: u64,
+        cursor: Option<(u64, EventId)>,
+    ) -> Result<AccountServiceDurableWrite, RuntimeError> {
+        let record = self.peer_record_at(peer, cursor)?.encode()?;
         let plaintext = PersistentRecordValue::new(
             TableId::FederationPeer,
             PEER_RECORD_KIND,
@@ -976,6 +1079,43 @@ impl FederationCoordinator {
         )?
         .encode()?;
         AccountServiceDurableWrite::put(TableId::FederationPeer, peer_key(peer)?, plaintext)
+    }
+
+    fn sync_outbox_budget(&self, context: &mut StateCoreContext, peer: ServerId) {
+        let Some(state) = self.peers.get(&peer) else {
+            return;
+        };
+        let Ok(record) = self.peer_record_at(peer, state.outbox.cursor) else {
+            return;
+        };
+        if let Some(projector) = context.federation_mut() {
+            projector.set_outbox_budget(
+                peer,
+                crate::state_core::projector::OutboxBudget {
+                    peer: record,
+                    objects: u64::try_from(state.outbox.unacked.len()).unwrap_or(u64::MAX),
+                    bytes: state.outbox.unacked_bytes,
+                    max_objects: self.config.outbox_objects_per_edge,
+                    max_bytes: self.config.outbox_bytes_per_edge,
+                },
+            );
+        }
+    }
+
+    fn apply_outbox_fences(&mut self, context: &mut StateCoreContext) {
+        let fences = context
+            .federation_mut()
+            .map_or_else(Vec::new, |projector| projector.take_outbox_fences());
+        for peer in fences {
+            let Some(state) = self.peers.get_mut(&peer) else {
+                continue;
+            };
+            state.outbox.snapshot_required = true;
+            state.outbox.dirty = false;
+            if let Some(link) = state.live.as_ref().map(|live| live.link) {
+                self.fail_link(context, link, peer, Violation::Ceiling);
+            }
+        }
     }
 
     /// Starts the durable reload before the first link is accepted.
@@ -1041,43 +1181,134 @@ impl FederationCoordinator {
             || companion::snapshot_timer_fired(self, context, entry)
     }
 
+    fn settle_request(&mut self, context: &mut StateCoreContext, pending: PendingCommit) -> bool {
+        let PendingCommit::Request {
+            peer,
+            link,
+            key,
+            request_id,
+            request_object_id,
+            result,
+            descriptor,
+            ..
+        } = pending
+        else {
+            return false;
+        };
+        if self.origins.commit_request(key, request_id).is_err() {
+            self.fail_link(context, link, peer, Violation::Origin);
+            return false;
+        }
+        self.retained.insert(
+            key,
+            RetainedRequest {
+                request_id,
+                request_object_id: *request_object_id.as_bytes(),
+            },
+        );
+        self.counters.requests_committed = self.counters.requests_committed.saturating_add(1);
+        if request::remember_registration(self, context, key.origin, &result).is_err() {
+            self.fail_link(context, link, peer, Violation::Codec);
+            return false;
+        }
+        self.send_result(context, link, peer, descriptor, &result);
+        self.remote_grant_committed();
+        true
+    }
+
+    fn publish_origin_ready(
+        &mut self,
+        context: &mut StateCoreContext,
+        peer: ServerId,
+        link: LinkId,
+    ) {
+        context.resume_federation_peer(peer);
+        if let Some(incarnation) = self.peers.get(&peer).and_then(|state| state.incarnation) {
+            self.send_frame(
+                context,
+                link,
+                peer,
+                &FederationFrame::OriginReady {
+                    edge_server_id: peer,
+                    server_incarnation: incarnation,
+                },
+            );
+            companion::base_ready(self, context, peer, incarnation);
+        }
+    }
+
+    fn settle_remote_results(&mut self, context: &mut StateCoreContext) {
+        for result in context.take_committed_remote_results() {
+            let peer = result.header.replay_key.home_server_id;
+            if self.record_remote_result(result).is_err()
+                && let Some(link) = self
+                    .peers
+                    .get(&peer)
+                    .and_then(|state| state.live.as_ref())
+                    .map(|live| live.link)
+            {
+                self.fail_link(context, link, peer, Violation::Origin);
+            }
+        }
+    }
+
     /// Finishes the batch that just committed and delivers its events.
     pub fn batch_applied(&mut self, context: &mut StateCoreContext) {
         let events = context.take_outbound_events();
-        match self.pending.take() {
+        self.settle_remote_results(context);
+        // Account completion runs earlier in the router's callback and can
+        // stage a new outer result. That result does not belong to this receipt.
+        let pending = if matches!(self.pending.as_ref(), Some(PendingCommit::Request { staged_after, .. })
+            if context.head().storage_commit_sequence <= *staged_after)
+        {
+            None
+        } else {
+            self.pending.take()
+        };
+        match pending {
             Some(PendingCommit::History(prepared)) => history::committed(self, context, *prepared),
             Some(PendingCommit::HistoryCleanup(cleanup)) => {
                 history::cleanup_committed(self, context, cleanup)
             }
-            Some(PendingCommit::Request {
-                peer,
-                link,
-                key,
-                request_id,
-                request_object_id,
-                result,
-                descriptor,
-                ..
-            }) => {
-                let _ = self.origins.commit_request(key, request_id);
-                self.retained.insert(
-                    key,
-                    RetainedRequest {
-                        request_id,
-                        request_object_id: *request_object_id.as_bytes(),
-                    },
-                );
-                self.counters.requests_committed =
-                    self.counters.requests_committed.saturating_add(1);
-                self.send_result(context, link, peer, descriptor, &result);
-                self.remote_grant_committed();
+            Some(pending @ PendingCommit::Request { .. }) => {
+                if !self.settle_request(context, pending) {
+                    return;
+                }
             }
             Some(PendingCommit::OriginAck {
                 peer, link, frame, ..
             }) => {
                 let _live = self.send_frame(context, link, peer, &frame);
+                origin::continue_ready(self, context, peer);
             }
-            Some(PendingCommit::Cleanup { peer }) => grace::continue_cleanup(self, context, peer),
+            Some(PendingCommit::OriginReady { peer, link }) => {
+                self.publish_origin_ready(context, peer, link)
+            }
+            Some(PendingCommit::OriginExpired {
+                peer,
+                link,
+                descriptor,
+                result,
+                ..
+            }) => {
+                self.send_result(context, link, peer, descriptor, &result);
+            }
+            Some(PendingCommit::AuthorityFence {
+                peer,
+                generation,
+                cursor,
+            }) => {
+                authority::committed(self, context, peer, generation, cursor);
+            }
+            Some(PendingCommit::CleanupFinished { peer }) => {
+                if let Some(state) = self.peers.get_mut(&peer) {
+                    state.phase = PeerPhase::Clean;
+                    state.cleanup_cursor = None;
+                }
+            }
+            Some(PendingCommit::Cleanup { peer }) => {
+                authority::cleanup_committed(self, context, peer);
+            }
             Some(PendingCommit::Companion { peer, link }) => {
                 companion::committed(self, context, link, peer, &events);
             }
@@ -1087,9 +1318,25 @@ impl FederationCoordinator {
             Some(PendingCommit::SnapshotReady { peer }) => {
                 snapshot::ready_committed(self, context, peer)
             }
+            Some(PendingCommit::DeliveryAcknowledged {
+                peer,
+                delivery_sequence,
+                event_id,
+            }) => {
+                self.acknowledgement_committed(context, peer, delivery_sequence, event_id);
+            }
+            Some(PendingCommit::OutboxRequired { peer }) => {
+                if let Some(state) = self.peers.get_mut(&peer) {
+                    state.outbox.dirty = false;
+                }
+            }
             Some(PendingCommit::Acknowledged) | None => {}
         }
         self.deliver(context, events);
+        self.continue_after_commit(context);
+    }
+
+    fn continue_after_commit(&mut self, context: &mut StateCoreContext) {
         self.continue_background(context);
         request::drain_queued(self, context);
         companion::drain_queued(self, context);
@@ -1099,17 +1346,49 @@ impl FederationCoordinator {
     /// Resumes bounded background work that waits for a free batch slot:
     /// pending snapshot rows and expiry cleanup.
     fn continue_background(&mut self, context: &mut StateCoreContext) {
+        if context.in_flight() || context.pending_len() != 0 || self.loader.blocks_admission() {
+            return;
+        }
         let peers: Vec<ServerId> = self.peers.keys().copied().collect();
         for peer in peers {
             if self.pending.is_some() {
                 return;
             }
-            snapshot::continue_write(self, context, peer);
+            authority::continue_fence(self, context, peer);
             if self.pending.is_some() {
                 return;
             }
-            grace::continue_cleanup(self, context, peer);
+            authority::continue_clean(self, context, peer);
+            if self.pending.is_some() {
+                return;
+            }
+            if self
+                .peers
+                .get(&peer)
+                .is_some_and(|state| state.outbox.dirty)
+            {
+                let _staged = self.stage_rows(
+                    context,
+                    Vec::new(),
+                    PendingCommit::OutboxRequired { peer },
+                    Some(peer),
+                );
+                return;
+            }
+            self.continue_delivery_work(context, peer);
         }
+    }
+
+    fn continue_delivery_work(&mut self, context: &mut StateCoreContext, peer: ServerId) {
+        origin::continue_ready(self, context, peer);
+        if self.pending.is_some() {
+            return;
+        }
+        snapshot::continue_write(self, context, peer);
+        if self.pending.is_some() {
+            return;
+        }
+        grace::continue_cleanup(self, context, peer);
     }
 
     /// Drops the work behind a rejected batch. A request answers busy without
@@ -1119,6 +1398,7 @@ impl FederationCoordinator {
     /// link, so the edge declares or resumes again from its committed state
     /// instead of waiting for an answer the coordinator will never send.
     pub fn batch_rejected(&mut self, context: &mut StateCoreContext) {
+        context.reject_remote_account_results();
         self.remote_grant_rejected();
         match self.pending.take() {
             Some(PendingCommit::History(prepared)) => history::rejected(self, *prepared),
@@ -1149,7 +1429,9 @@ impl FederationCoordinator {
                     },
                 );
             }
-            Some(PendingCommit::OriginAck { peer, link, .. }) => {
+            Some(PendingCommit::OriginAck { peer, link, .. })
+            | Some(PendingCommit::OriginReady { peer, link })
+            | Some(PendingCommit::OriginExpired { peer, link, .. }) => {
                 if self.link_is_live(link, peer) {
                     self.fail_link(context, link, peer, Violation::Ceiling);
                 }
@@ -1162,15 +1444,26 @@ impl FederationCoordinator {
             Some(PendingCommit::SnapshotRows { peer } | PendingCommit::SnapshotReady { peer }) => {
                 snapshot::rejected(self, context, peer);
             }
+            Some(PendingCommit::DeliveryAcknowledged { peer, .. }) => {
+                let link = self
+                    .peers
+                    .get(&peer)
+                    .and_then(|state| state.live.as_ref())
+                    .map(|live| live.link);
+                if let Some(link) = link {
+                    self.fail_link(context, link, peer, Violation::Ceiling);
+                }
+            }
             _ => {}
         }
+        request::drain_queued(self, context);
         self.drain_backlog(context);
     }
 
     /// Replays backlogged link traffic in arrival order until a replayed
     /// item stages the next batch.
     fn drain_backlog(&mut self, context: &mut StateCoreContext) {
-        while self.pending.is_none() {
+        while self.pending.is_none() && !self.loader.blocks_admission() {
             let Some(message) = self.backlog.pop_front() else {
                 break;
             };
@@ -1181,37 +1474,22 @@ impl FederationCoordinator {
     /// Sends committed events to their live links and tracks the
     /// unacknowledged window.
     fn deliver(&mut self, context: &mut StateCoreContext, events: Vec<OutboundEvent>) {
+        self.apply_outbox_fences(context);
         for event in events {
-            let Some(state) = self.peers.get_mut(&event.target) else {
+            if !self.retain_outbound(context, &event) {
+                continue;
+            }
+            let Some(state) = self.peers.get(&event.target) else {
                 continue;
             };
-            // A link that is not active yet replays the durable outbox when
-            // it resumes; only live delivery tracks the window here.
-            if !state.active || event.projection_generation != state.projection_generation {
-                continue;
-            }
-            // Later events wait behind an open barrier; the durable outbox
-            // replays them once both streams acknowledged (spec 20.8).
-            if self
-                .barriers
-                .get(&event.target)
-                .is_some_and(|barrier| event.delivery_sequence > barrier.base_last)
+            // Inactive links and events behind a barrier remain in the
+            // durable outbox, but still count against the retention budget.
+            if !state.active
+                || self
+                    .barriers
+                    .get(&event.target)
+                    .is_some_and(|barrier| event.delivery_sequence > barrier.base_last)
             {
-                continue;
-            }
-            let bytes = u64::try_from(event.encoded.len()).unwrap_or(u64::MAX);
-            state
-                .outbox
-                .unacked
-                .push_back((event.delivery_sequence, event.event_id, bytes));
-            state.outbox.unacked_bytes = state.outbox.unacked_bytes.saturating_add(bytes);
-            let over_ceiling = u64::try_from(state.outbox.unacked.len()).unwrap_or(u64::MAX)
-                > self.config.outbox_objects_per_edge
-                || state.outbox.unacked_bytes > self.config.outbox_bytes_per_edge;
-            if over_ceiling {
-                state.outbox.snapshot_required = true;
-            }
-            if state.outbox.snapshot_required {
                 continue;
             }
             let Some(live) = state.live.as_ref() else {
@@ -1240,6 +1518,47 @@ impl FederationCoordinator {
                 Err(failure) => self.send_failed(context, link, event.target, failure),
             }
         }
+        for peer in self.peers.keys().copied() {
+            self.sync_outbox_budget(context, peer);
+        }
+    }
+
+    fn retain_outbound(&mut self, context: &mut StateCoreContext, event: &OutboundEvent) -> bool {
+        let Some(state) = self.peers.get_mut(&event.target) else {
+            return false;
+        };
+        if event.projection_generation != state.projection_generation {
+            return false;
+        }
+        state.outbox.reserved_next = state
+            .outbox
+            .reserved_next
+            .max(event.delivery_sequence.saturating_add(1));
+        let bytes = u64::try_from(event.encoded.len()).unwrap_or(u64::MAX);
+        if !state.outbox.snapshot_required {
+            state
+                .outbox
+                .unacked
+                .push_back((event.delivery_sequence, event.event_id, bytes));
+            state.outbox.unacked_bytes = state.outbox.unacked_bytes.saturating_add(bytes);
+        }
+        let over_ceiling = u64::try_from(state.outbox.unacked.len()).unwrap_or(u64::MAX)
+            > self.config.outbox_objects_per_edge
+            || state.outbox.unacked_bytes > self.config.outbox_bytes_per_edge;
+        if over_ceiling && !state.outbox.snapshot_required {
+            state.outbox.snapshot_required = true;
+            state.outbox.dirty = true;
+        }
+        if state.outbox.snapshot_required {
+            if let Some(projector) = context.federation_mut() {
+                projector.require_snapshot(event.target);
+            }
+            if let Some(link) = state.live.as_ref().map(|live| live.link) {
+                self.fail_link(context, link, event.target, Violation::Ceiling);
+            }
+            return false;
+        }
+        true
     }
 
     fn send_result(

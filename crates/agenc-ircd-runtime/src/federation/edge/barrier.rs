@@ -187,7 +187,7 @@ fn stage_part(
         None,
         PendingCommit::BarrierPart(Box::new(open)),
         super::render::EventFanout::default().finish()?,
-        |_, _, _| writes,
+        |_, _, _| Ok(writes),
     )
 }
 
@@ -461,13 +461,23 @@ fn apply_complete(
         identity.head_key(),
         BarrierHead::Receipt(receipt.clone()).encode(),
     )?;
+    let revision = receipt.applied_local_state_generation;
+    let mut writes = apply_rows(edge, context, revision, &upserted, &removed)?;
+    let mut coverage = Vec::new();
+    for (header, projected) in open.base_events.values() {
+        if matches!(projected, ProjectedEvent::RequestCompleted { .. }) {
+            let (version, write) =
+                super::journal::completion_write(edge, header, projected, revision)?;
+            coverage.push(version);
+            writes.push(write);
+        }
+    }
     let pending = PendingCommit::BarrierApplied {
         receipt: Box::new(receipt.clone()),
         base_last: (base_sequence, EventId::from_bytes(base_event)),
         companion_last: partition.companion_last,
+        coverage,
     };
-    let revision = receipt.applied_local_state_generation;
-    let mut writes = apply_rows(edge, context, revision, &upserted, &removed)?;
     writes.push(receipt_write);
     for write in companion_writes {
         writes.push(write.at_revision(revision).map_err(|_| Violation::Codec)?);
@@ -478,7 +488,7 @@ fn apply_complete(
         cursor,
         pending,
         fanout.finish()?,
-        |_, _, _| writes,
+        |_, _, _| Ok(writes),
     )
 }
 
@@ -521,10 +531,10 @@ fn apply_rows(
 ) -> Result<Vec<AccountServiceDurableWrite>, Violation> {
     let mut writes = Vec::new();
     for key in upserted {
-        writes.push(super::events::entry_row(edge, key, revision).ok_or(Violation::Codec)?);
+        writes.push(super::events::entry_row(edge, key, revision)?);
     }
     for key in removed {
-        if let Some(write) = super::events::removal_write(edge, context, key) {
+        if let Some(write) = super::events::removal_write(edge, context, key)? {
             writes.push(write);
         }
     }

@@ -114,15 +114,19 @@ pub(crate) enum PendingKind {
 /// One request awaiting its result or completion.
 pub(super) struct PendingRequest {
     pub(super) generation: ConnectionGeneration,
+    pub(super) sink_gone: bool,
     pub(super) kind: PendingKind,
     pub(super) header: RequestHeader,
     pub(super) bytes: Vec<u8>,
     pub(super) sent: bool,
     pub(super) result: Option<ResultArm>,
+    pub(super) result_bytes: Vec<u8>,
     pub(super) replies: Vec<agenc_ircd_client_wire::WireMessage>,
     pub(super) completion: Option<agenc_ircd_types::EventId>,
     /// Generation of the completion event that durably covered this request.
     pub(super) completion_generation: Option<u64>,
+    pub(super) completion_coverage:
+        Option<agenc_ircd_storage::federation_records::CompletionCoverageRecord>,
 }
 
 impl PendingRequest {
@@ -155,9 +159,9 @@ pub(super) fn declare_origin(
 /// Replays one origin after FORIGIN RESET: the exact current declaration
 /// of an open connection, or the DEL of one that closed while the link was
 /// down, so the coordinator learns of every closure it missed before READY
-/// revives the origins it still holds. A closed origin the coordinator
-/// never acknowledged has nothing to delete there and is dropped, so the
-/// connections of an outage do not return as a flood of deletions.
+/// revives the origins it still holds. An absent ACK does not prove the
+/// declaration was refused: the coordinator may have committed it before
+/// the link failed. Even an unacknowledged origin therefore replays DEL.
 pub(super) fn replay_origin(
     edge: &mut EdgeFederation,
     context: &mut StateCoreContext,
@@ -166,12 +170,26 @@ pub(super) fn replay_origin(
     let Some(origin) = edge.origins.get(&generation) else {
         return;
     };
+    if origin.deleted
+        && origin.del_acked
+        && super::journal::is_durable(edge, super::journal::Identity::Origin(generation))
+    {
+        super::journal::retire_origin(edge, generation);
+        return;
+    }
     if origin.deleted {
-        if origin.ever_acked {
-            send_origin_del(edge, context, generation);
-        } else {
+        // An all-zero object identity means no declaration was even encoded.
+        // Such a connection has no remote work unless it owns a pending request.
+        if origin.object_id == [0; 32]
+            && !edge
+                .pending
+                .values()
+                .any(|pending| pending.generation == generation)
+        {
             edge.origins.remove(&generation);
+            return;
         }
+        send_origin_del(edge, context, generation);
         return;
     }
     let update = origin.generation > 0;
@@ -184,6 +202,13 @@ fn send_origin_declaration(
     generation: ConnectionGeneration,
     update: bool,
 ) {
+    if !super::journal::is_durable(edge, super::journal::Identity::Origin(generation)) {
+        super::journal::retain(edge, context, super::journal::Identity::Origin(generation));
+        return;
+    }
+    if edge.phase == Phase::Down {
+        return;
+    }
     let Some(origin) = edge.origins.get_mut(&generation) else {
         return;
     };
@@ -207,6 +232,8 @@ fn send_origin_declaration(
             }),
         connection_nonce: origin.connection_nonce,
     };
+    let record = origin.pending_updates.front().copied().unwrap_or(record);
+    let update = update || record.generation > 0;
     let Ok(encoded) = record
         .to_object()
         .and_then(|object| object.encode_canonical())
@@ -215,9 +242,15 @@ fn send_origin_declaration(
         return;
     };
     let object_id = federation_object_id(&encoded);
-    origin.object_id = *object_id.as_bytes();
-    let Some((descriptor, _)) = edge.origin_descriptor(generation) else {
-        return;
+    if origin.pending_updates.is_empty() {
+        origin.object_id = *object_id.as_bytes();
+    }
+    let descriptor = agenc_ircd_federation_wire::OriginDescriptor {
+        coordinator_server_id: edge.config.coordinator.server_id(),
+        server_incarnation: edge.config.incarnation,
+        origin_id: record.origin_id,
+        generation: record.generation,
+        object_id,
     };
     let _sent = edge.send_object(context, &encoded, |fragment| {
         if update {
@@ -254,6 +287,10 @@ fn send_origin_del(
     context: &mut StateCoreContext,
     generation: ConnectionGeneration,
 ) {
+    if !super::journal::is_durable(edge, super::journal::Identity::Origin(generation)) {
+        super::journal::retain(edge, context, super::journal::Identity::Origin(generation));
+        return;
+    }
     let Some(origin) = edge.origins.get(&generation) else {
         return;
     };
@@ -281,6 +318,9 @@ pub(super) fn prepare_request(
         .fill_exact(&mut random)
         .map_err(|_| Violation::Ceiling)?;
     let origin = edge.origins.get_mut(&generation).ok_or(Violation::Phase)?;
+    if !origin.pending_updates.is_empty() {
+        return Err(Violation::Phase);
+    }
     let request_id = RequestId::from_bytes(random);
     let header = RequestHeader {
         network_id: edge.config.network_id,
@@ -317,17 +357,23 @@ pub(super) fn register_request(
         request_id,
         PendingRequest {
             generation,
+            sink_gone: false,
             kind,
             header,
             bytes,
             sent: false,
             result: None,
+            result_bytes: Vec::new(),
             replies: Vec::new(),
             completion: None,
             completion_generation: None,
+            completion_coverage: None,
         },
     );
     edge.counters.requests_sent = edge.counters.requests_sent.saturating_add(1);
+    if header.opcode != agenc_ircd_types::FederationOpcode::HistoryQuery {
+        super::journal::retain_request(edge, context, request_id, generation);
+    }
     transmit(edge, context, request_id);
 }
 
@@ -345,6 +391,14 @@ pub(super) fn transmit(
         return;
     };
     if pending.sent || pending.result.is_some() {
+        return;
+    }
+    if origin_update_pending(edge, pending) {
+        return;
+    }
+    if pending.header.opcode != agenc_ircd_types::FederationOpcode::HistoryQuery
+        && !super::journal::is_durable(edge, super::journal::Identity::Request(request_id))
+    {
         return;
     }
     let descriptor = OperationDescriptor {
@@ -366,6 +420,14 @@ pub(super) fn transmit(
     if sent && let Some(pending) = edge.pending.get_mut(&request_id) {
         pending.sent = true;
     }
+}
+
+fn origin_update_pending(edge: &EdgeFederation, pending: &PendingRequest) -> bool {
+    edge.origins.get(&pending.generation).is_some_and(|origin| {
+        !origin.deleted
+            && (origin.acked_generation != Some(pending.header.replay_key.origin_generation)
+                || !origin.pending_updates.is_empty())
+    })
 }
 
 /// Re-sends every unanswered request in origin and sequence order.
@@ -502,6 +564,10 @@ pub(super) fn send_command(
         .pending
         .values()
         .any(|pending| pending.generation == generation)
+        || edge
+            .origins
+            .get(&generation)
+            .is_some_and(|origin| !origin.pending_updates.is_empty())
     {
         let queue = edge.deferred.entry(generation).or_default();
         if queue.len() >= MAX_DEFERRED_COMMANDS {
@@ -944,9 +1010,11 @@ pub(super) fn receive_result(
     };
     if pending.header.replay_key != header.replay_key
         || header.request_object_id != federation_object_id(&pending.bytes)
-        || pending.result.is_some()
     {
         return Err(Violation::Consistency);
+    }
+    if pending.result.is_some() {
+        return repeated_result(pending, object);
     }
     let arm = ResultArm::from_object(
         header.result_kind,
@@ -968,6 +1036,7 @@ pub(super) fn receive_result(
         .get_mut(&header.request_id)
         .ok_or(Violation::Consistency)?;
     pending.replies = replies;
+    pending.result_bytes = object.as_slice().to_vec();
     pending.completion = header.completion_event_id;
     edge.counters.results_applied = edge.counters.results_applied.saturating_add(1);
     match (header.result_kind, header.completion_event_id) {
@@ -981,6 +1050,11 @@ pub(super) fn receive_result(
                 return Ok(completed(edge, context, header.request_id));
             }
             edge.by_completion.insert(event_id, header.request_id);
+            super::journal::retain(
+                edge,
+                context,
+                super::journal::Identity::Request(header.request_id),
+            );
             Ok(Vec::new())
         }
         (FederationResultKind::Committed | FederationResultKind::SessionRegistered, None) => {
@@ -1044,6 +1118,17 @@ fn validate_result_generation(
     Ok(())
 }
 
+fn repeated_result(
+    pending: &PendingRequest,
+    object: &AssembledObject,
+) -> Result<Vec<EdgeCompletion>, Violation> {
+    if pending.result_bytes == object.as_slice() {
+        Ok(Vec::new())
+    } else {
+        Err(Violation::Consistency)
+    }
+}
+
 /// Rebuilds one relayed reply under this edge's prefix; numerics go through
 /// the registry-checked constructor.
 fn reply_frame(
@@ -1075,12 +1160,21 @@ pub(super) fn completed(
     context: &mut StateCoreContext,
     request_id: RequestId,
 ) -> Vec<EdgeCompletion> {
+    if edge.pending.get(&request_id).is_some_and(|pending| {
+        pending.header.opcode != agenc_ircd_types::FederationOpcode::HistoryQuery
+    }) && !super::journal::is_durable(edge, super::journal::Identity::Request(request_id))
+    {
+        super::journal::retain(edge, context, super::journal::Identity::Request(request_id));
+        return Vec::new();
+    }
+    super::journal::forget(edge, request_id);
     let generation = edge
         .pending
         .get(&request_id)
         .map(|pending| pending.generation);
     let mut completions = completed_request(edge, request_id);
     if let Some(generation) = generation {
+        super::journal::retire_origin(edge, generation);
         completions.extend(dispatch_deferred(edge, context, generation));
     }
     completions
@@ -1098,7 +1192,11 @@ pub(super) fn dispatch_deferred(
         let in_flight = edge
             .pending
             .values()
-            .any(|pending| pending.generation == generation);
+            .any(|pending| pending.generation == generation)
+            || edge
+                .origins
+                .get(&generation)
+                .is_some_and(|origin| !origin.pending_updates.is_empty());
         if in_flight {
             break;
         }
@@ -1129,6 +1227,10 @@ fn completed_request(edge: &mut EdgeFederation, request_id: RequestId) -> Vec<Ed
     let Some(pending) = edge.pending.remove(&request_id) else {
         return Vec::new();
     };
+    if pending.sink_gone {
+        pending.sink_gone(edge);
+        return Vec::new();
+    }
     if let Some(completion) = pending.completion {
         edge.by_completion.remove(&completion);
     }

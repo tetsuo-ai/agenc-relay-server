@@ -60,6 +60,783 @@ const COORDINATOR: ServerId = ServerId::from_bytes([90; 16]);
 const COORDINATOR_NAME: &str = "hub.example";
 const COORDINATOR_EPOCH: RecoveryEpoch = RecoveryEpoch::from_bytes([91; 16]);
 
+fn resync_edge() -> EdgeFederation {
+    EdgeFederation::new(EdgeConfig {
+        network_id: NETWORK,
+        server_id: EDGE,
+        server_name: EDGE_NAME.to_owned(),
+        incarnation: EDGE_INCARNATION,
+        coordinator: coordinator_identity(),
+    })
+}
+
+#[tokio::test]
+async fn resync_coordinator_ready_opens_the_origin_admission_gate() -> TestResult {
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let mut edge = resync_edge();
+    edge.phase = Phase::Origins;
+    let outcome = edge.handle_frame(
+        fixture.context_mut()?,
+        FederationFrame::OriginReady {
+            edge_server_id: EDGE,
+            server_incarnation: EDGE_INCARNATION,
+        },
+    );
+    assert!(
+        outcome.is_ok(),
+        "the normative coordinator READY must be accepted"
+    );
+    assert_eq!(edge.phase, Phase::Active);
+    Ok(())
+}
+
+fn resync_snapshot_link(edge: &mut EdgeFederation) -> LinkQueue {
+    let (handle, queue) = link_queue(1 << 20);
+    edge.live = Some(LiveLink {
+        link: LinkId::new(1),
+        handle,
+        coordinator_epoch: COORDINATOR_EPOCH,
+        coordinator_incarnation: HUB_INCARNATION,
+    });
+    edge.phase = Phase::Snapshot;
+    queue
+}
+
+#[tokio::test]
+async fn resync_snapshot_covers_registration_whose_completion_was_lost() -> TestResult {
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let mut edge = resync_edge();
+    let connection = ConnectionGeneration::new(1);
+    edge.connection_opened(fixture.context_mut()?, connection);
+    request::send_session_open(
+        &mut edge,
+        fixture.context_mut()?,
+        connection,
+        1,
+        "pending",
+        "Pending",
+        [1; 32],
+        None,
+    )
+    .map_err(|e| format!("{e:?}"))?;
+    commit_edge_batches(&mut edge, &mut fixture).await?;
+    let pending = edge.pending.values().next().ok_or("request")?;
+    let request_id = pending.header.request_id;
+    let header = ResultHeader {
+        network_id: NETWORK,
+        replay_key: pending.header.replay_key,
+        request_id,
+        request_object_id: federation_object_id(&pending.bytes),
+        completion_event_id: Some(EventId::from_bytes([76; 16])),
+        result_kind: agenc_ircd_types::FederationResultKind::SessionRegistered,
+    };
+    let bytes = header
+        .build(
+            &ResultArm::SessionRegistered(SessionRegistered {
+                session_id: SessionId::from_bytes([77; 16]),
+                user_id: UserId::from_bytes([78; 16]),
+                session_revision: 9,
+                account: None,
+                resulting_state_generation: 9,
+            })
+            .to_object()?,
+            Vec::new(),
+        )?
+        .encode_canonical()?
+        .as_slice()
+        .to_vec();
+    let descriptor = OperationDescriptor {
+        addressed_server_id: EDGE,
+        server_incarnation: EDGE_INCARNATION,
+        origin_id: header.replay_key.origin_id,
+        origin_generation: 0,
+        operation_sequence: 0,
+        request_id,
+        object_id: federation_object_id(&bytes),
+    };
+    let object = resync_assembled(&bytes, |fragment| FederationFrame::Result {
+        descriptor,
+        fragment,
+    })?;
+    request::receive_result(&mut edge, fixture.context_mut()?, descriptor, &object)
+        .map_err(|e| format!("result: {e:?}"))?;
+    commit_edge_batches(&mut edge, &mut fixture).await?;
+    let _queue = resync_snapshot_link(&mut edge);
+    let identity = resync_empty_snapshot(&mut edge, &mut fixture)?;
+    let completions = commit_edge_batches(&mut edge, &mut fixture).await?;
+    assert!(
+        completions.iter().any(|completion| matches!(completion,
+        EdgeCompletion::Resync { generation } if *generation == connection)),
+        "a committed registration without its completion is a global client too"
+    );
+    sync::snapshot_active(&mut edge, fixture.context_mut()?, identity)
+        .map_err(|e| format!("active: {e:?}"))?;
+    let completions = commit_edge_batches(&mut edge, &mut fixture).await?;
+    assert!(
+        completions.is_empty(),
+        "the gone registration sink must not be rebound"
+    );
+    assert!(
+        !edge.pending.contains_key(&request_id),
+        "snapshot coverage must resolve the result"
+    );
+    let mut restarted = resync_edge();
+    fixture.restore_edge_state(&mut restarted, None)?;
+    assert!(
+        !restarted.pending.contains_key(&request_id),
+        "covered gone-sink result resurrected"
+    );
+    Ok(())
+}
+
+fn resync_empty_snapshot(
+    edge: &mut EdgeFederation,
+    fixture: &mut StateCoreFixture,
+) -> TestResult<agenc_ircd_federation_wire::SnapshotIdentity> {
+    let identity = agenc_ircd_federation_wire::SnapshotIdentity {
+        snapshot_token: agenc_ircd_federation_wire::FederationHash32::from_bytes([86; 32]),
+        recovery_epoch: COORDINATOR_EPOCH,
+        projection_generation: 2,
+        state_generation: 10,
+        snapshot_digest: agenc_ircd_federation_wire::snapshot_digest(
+            &COORDINATOR_EPOCH,
+            2,
+            10,
+            &[],
+        )?,
+    };
+    sync::snapshot_begin(edge, identity, 0).map_err(|e| format!("begin: {e:?}"))?;
+    sync::snapshot_end(
+        edge,
+        fixture.context_mut()?,
+        identity.snapshot_token,
+        agenc_ircd_federation_wire::DeliveryCursor::Empty,
+    )
+    .map_err(|e| format!("end: {e:?}"))?;
+    Ok(identity)
+}
+
+#[tokio::test]
+async fn resync_snapshot_receipt_survives_link_loss_while_the_last_page_commits() -> TestResult {
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let mut edge = resync_edge();
+    let _queue = resync_snapshot_link(&mut edge);
+    let identity = resync_empty_snapshot(&mut edge, &mut fixture)?;
+    edge.link_closed(fixture.context_mut()?, LinkId::new(1));
+    commit_edge_batches(&mut edge, &mut fixture).await?;
+    assert!(
+        sync::has_durable_ready(&edge),
+        "the matching final receipt must retain READY work"
+    );
+    let mut queue = resync_snapshot_link(&mut edge);
+    sync::begin(&mut edge, fixture.context_mut()?);
+    let line = tokio::time::timeout(std::time::Duration::from_secs(2), queue.recv())
+        .await?
+        .ok_or("READY replay")?;
+    let frame = parse_frame(line.as_str().trim_end_matches("\r\n"), EDGE_NAME)
+        .map_err(|e| format!("{e:?}"))?;
+    assert!(
+        matches!(frame, FederationFrame::SnapshotReady { identity: replayed, .. } if replayed == identity)
+    );
+    Ok(())
+}
+
+#[test]
+fn resync_restored_pending_snapshot_rejects_a_wrong_digest() -> TestResult {
+    use agenc_ircd_storage::federation_records::{
+        ProjectionGenerationState, ProjectionMarkerRecord,
+    };
+    let mut edge = resync_edge();
+    let result = sync::restore_pending(
+        &mut edge,
+        2,
+        ProjectionMarkerRecord {
+            state: ProjectionGenerationState::Pending,
+            state_generation: 10,
+            entry_count: 0,
+            entry_bytes: 0,
+            digest: [0; 32],
+            snapshot_token: Some([86; 32]),
+            cut_cursor: None,
+            recovery_epoch: *COORDINATOR_EPOCH.as_bytes(),
+        },
+        Vec::new(),
+    );
+    assert!(
+        result.is_err(),
+        "authenticated marker bytes still need their snapshot digest checked"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_snapshot_keeps_the_active_generation_until_active_commits() -> TestResult {
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let mut edge = resync_edge();
+    let _queue = resync_snapshot_link(&mut edge);
+    let identity = resync_empty_snapshot(&mut edge, &mut fixture)?;
+    commit_edge_batches(&mut edge, &mut fixture).await?;
+    assert_eq!(
+        edge.replica.projection_generation(),
+        1,
+        "READY installs only a pending generation"
+    );
+    sync::snapshot_active(&mut edge, fixture.context_mut()?, identity)
+        .map_err(|e| format!("active: {e:?}"))?;
+    assert_eq!(edge.replica.projection_generation(), 1);
+    assert_ne!(edge.phase, Phase::Active);
+    commit_edge_batches(&mut edge, &mut fixture).await?;
+    assert_eq!(edge.replica.projection_generation(), 2);
+    assert_ne!(
+        edge.phase,
+        Phase::Active,
+        "origin replay still gates registrations"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_restart_resends_the_exact_durable_snapshot_ready() -> TestResult {
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let mut edge = resync_edge();
+    let _queue = resync_snapshot_link(&mut edge);
+    let identity = resync_empty_snapshot(&mut edge, &mut fixture)?;
+    commit_edge_batches(&mut edge, &mut fixture).await?;
+    let mut restarted = resync_edge();
+    fixture.restore_edge_state(&mut restarted, None)?;
+    assert!(
+        restarted.snapshot.is_some(),
+        "READY identity disappeared at restart"
+    );
+    let mut queue = resync_snapshot_link(&mut restarted);
+    sync::begin(&mut restarted, fixture.context_mut()?);
+    let message = tokio::time::timeout(std::time::Duration::from_secs(2), queue.recv())
+        .await?
+        .ok_or("no READY")?;
+    let line = message.as_str();
+    assert!(line.contains("FSNAPSHOT READY"), "{line}");
+    assert!(line.contains(&identity.snapshot_token.to_text()), "{line}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_unencodable_projection_cannot_commit_its_delivery_cursor() -> TestResult {
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let mut edge = resync_edge();
+    edge.phase = Phase::Active;
+    let mut record = session_record(
+        SessionId::from_bytes([41; 16]),
+        UserId::from_bytes([42; 16]),
+        "quinn",
+        1,
+        1,
+    )?;
+    // Inject a projection encoding failure after event decoding. No client
+    // sink exists, so rendering cannot reject the text before row staging.
+    record.away = Some("a".repeat(1 << 20));
+    let projected = ProjectedEvent::SessionVisible(SessionEventView {
+        source: record.source_view(),
+        home_projection: Some(record),
+    });
+    edge.queued_events.push_back(events::QueuedEvent::Base {
+        header: EventHeader {
+            network_id: NETWORK,
+            target_server_id: EDGE,
+            projection_generation: 1,
+            coordinator_state_generation: 1,
+            delivery_sequence: 0,
+            event_id: EventId::from_bytes([43; 16]),
+            event_kind: projected.kind(),
+            correlation: None,
+            cross_profile: None,
+        },
+        projected,
+    });
+    let outputs = events::drain_queued(&mut edge, fixture.context_mut()?);
+    assert!(outputs.is_empty());
+    assert_eq!(
+        fixture.context_mut()?.pending_len(),
+        0,
+        "a missing projection row must refuse the whole delivery batch"
+    );
+    assert_eq!(edge.replica.entry_count(), 0);
+    assert_eq!(edge.cursor, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_principal_update_waits_for_the_exact_origin_ack() -> TestResult {
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let context = fixture.context_mut()?;
+    let mut edge = resync_edge();
+    let connection = ConnectionGeneration::new(1);
+    edge.connection_opened(context, connection);
+    let origin = edge.origins.get_mut(&connection).ok_or("origin")?;
+    origin.acked_generation = Some(0);
+    origin.sequence = 5;
+    origin.object_id = [40; 32];
+    origin.session = Some((
+        SessionId::from_bytes([41; 16]),
+        UserId::from_bytes([42; 16]),
+    ));
+    edge.session_bound(context, connection);
+    let origin = edge.origins.get(&connection).ok_or("origin")?;
+    assert_eq!(
+        origin.generation, 0,
+        "generation changes only after the matching UPDATE acknowledgement"
+    );
+    assert_eq!(origin.sequence, 5);
+    assert!(origin.acked_generation.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_origin_ack_rejects_the_wrong_hash_or_incarnation() -> TestResult {
+    for wrong_incarnation in [false, true] {
+        let mut fixture = StateCoreFixture::new(entropy_script())?;
+        let context = fixture.context_mut()?;
+        let mut edge = resync_edge();
+        let connection = ConnectionGeneration::new(1);
+        edge.connection_opened(context, connection);
+        let origin = edge.origins.get_mut(&connection).ok_or("origin")?;
+        origin.object_id = [40; 32];
+        let origin_id = origin.origin_id;
+        let result = edge.handle_frame(
+            context,
+            FederationFrame::OriginAck {
+                edge_server_id: EDGE,
+                server_incarnation: if wrong_incarnation {
+                    HUB_INCARNATION
+                } else {
+                    EDGE_INCARNATION
+                },
+                origin_id,
+                generation: 0,
+                object_id: Some(agenc_ircd_federation_wire::FederationHash32::from_bytes(
+                    if wrong_incarnation {
+                        [40; 32]
+                    } else {
+                        [99; 32]
+                    },
+                )),
+            },
+        );
+        assert!(
+            result.is_err(),
+            "ACK must match the exact declaration on this incarnation"
+        );
+        assert_eq!(
+            edge.origins
+                .get(&connection)
+                .ok_or("origin")?
+                .acked_generation,
+            None
+        );
+    }
+    Ok(())
+}
+
+async fn commit_edge_batches(
+    edge: &mut EdgeFederation,
+    fixture: &mut StateCoreFixture,
+) -> TestResult<Vec<EdgeCompletion>> {
+    let mut outputs = Vec::new();
+    for _ in 0..16 {
+        if edge.commit.is_none() {
+            return Ok(outputs);
+        }
+        fixture.commit_staged_batch().await?;
+        outputs.extend(edge.batch_applied(fixture.context_mut()?));
+    }
+    Err("edge checkpoint continuation did not settle".into())
+}
+
+fn resync_assembled(
+    bytes: &[u8],
+    frame: impl Fn(agenc_ircd_federation_wire::FederationFragment) -> FederationFrame,
+) -> TestResult<AssembledObject> {
+    let mut assembler = FragmentAssembler::new();
+    for fragment in split_fragments(federation_object_id(bytes), bytes)? {
+        let frame = frame(fragment);
+        let (_, key) = carrier_of(&frame).map_err(|e| e.to_string())?;
+        if let AssemblyProgress::Complete(object) =
+            assembler.admit(key, frame.fragment().ok_or("fragment")?, 0)?
+        {
+            return Ok(object);
+        }
+    }
+    Err("object did not assemble".into())
+}
+
+#[tokio::test]
+async fn resync_restart_retains_completion_received_before_result() -> TestResult {
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let mut edge = resync_edge();
+    let generation = ConnectionGeneration::new(1);
+    edge.connection_opened(fixture.context_mut()?, generation);
+    request::send_session_open(
+        &mut edge,
+        fixture.context_mut()?,
+        generation,
+        1,
+        "covered",
+        "Covered",
+        [1; 32],
+        None,
+    )
+    .map_err(|e| format!("{e:?}"))?;
+    assert!(
+        commit_edge_batches(&mut edge, &mut fixture)
+            .await?
+            .is_empty()
+    );
+    let pending = edge.pending.values().next().ok_or("request")?;
+    let request_id = pending.header.request_id;
+    let correlation = RequestCorrelation {
+        replay_key: pending.header.replay_key,
+        request_id,
+    };
+    let projected = ProjectedEvent::RequestCompleted {
+        resulting_state_generation: 10,
+    };
+    let header = EventHeader {
+        network_id: NETWORK,
+        target_server_id: EDGE,
+        projection_generation: 1,
+        coordinator_state_generation: 10,
+        delivery_sequence: 0,
+        event_id: EventId::from_bytes([76; 16]),
+        event_kind: projected.kind(),
+        correlation: Some(correlation),
+        cross_profile: None,
+    };
+    let bytes = header
+        .build(&event_arm_object(&projected)?)?
+        .encode_canonical()?
+        .as_slice()
+        .to_vec();
+    let descriptor = agenc_ircd_federation_wire::EventDescriptor {
+        target_server_id: EDGE,
+        delivery_sequence: 0,
+        event_id: header.event_id,
+        object_id: federation_object_id(&bytes),
+    };
+    let object = resync_assembled(&bytes, |fragment| FederationFrame::Event {
+        descriptor,
+        fragment,
+    })?;
+    edge.phase = Phase::Active;
+    assert!(events::receive(&mut edge, fixture.context_mut()?, descriptor, &object).is_ok());
+    assert!(
+        commit_edge_batches(&mut edge, &mut fixture)
+            .await?
+            .is_empty()
+    );
+    let mut restarted = resync_edge();
+    fixture.restore_edge_state(&mut restarted, None)?;
+    let pending = restarted
+        .pending
+        .get(&request_id)
+        .ok_or("pending request lost")?;
+    assert_eq!(pending.completion, Some(header.event_id));
+    assert_eq!(pending.completion_generation, Some(10));
+    assert!(pending.result.is_none(), "coverage cannot invent a result");
+    assert!(pending.sink_gone);
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_terminal_result_waits_for_its_durable_row() -> TestResult {
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let context = fixture.context_mut()?;
+    let mut edge = resync_edge();
+    let generation = ConnectionGeneration::new(1);
+    edge.connection_opened(context, generation);
+    request::send_session_open(
+        &mut edge, context, generation, 1, "durable", "Durable", [1; 32], None,
+    )
+    .map_err(|e| format!("{e:?}"))?;
+    let pending = edge.pending.values().next().ok_or("pending")?;
+    let request_id = pending.header.request_id;
+    let header = ResultHeader {
+        network_id: NETWORK,
+        replay_key: pending.header.replay_key,
+        request_id,
+        request_object_id: federation_object_id(&pending.bytes),
+        completion_event_id: None,
+        result_kind: agenc_ircd_types::FederationResultKind::Failed,
+    };
+    let bytes = header
+        .build(
+            &ResultArm::Failed {
+                code: "SERVER_BUSY".to_owned(),
+                context: String::new(),
+            }
+            .to_object()?,
+            Vec::new(),
+        )?
+        .encode_canonical()?
+        .as_slice()
+        .to_vec();
+    let descriptor = OperationDescriptor {
+        addressed_server_id: EDGE,
+        server_incarnation: EDGE_INCARNATION,
+        origin_id: header.replay_key.origin_id,
+        origin_generation: 0,
+        operation_sequence: 0,
+        request_id,
+        object_id: federation_object_id(&bytes),
+    };
+    let object = resync_assembled(&bytes, |fragment| FederationFrame::Result {
+        descriptor,
+        fragment,
+    })?;
+    let completions = request::receive_result(&mut edge, context, descriptor, &object)
+        .map_err(|e| format!("{e:?}"))?;
+    assert!(
+        completions.is_empty(),
+        "client result escaped before durable receipt"
+    );
+    assert!(edge.pending.contains_key(&request_id));
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_request_is_durable_before_its_first_send() -> TestResult {
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let context = fixture.context_mut()?;
+    let mut edge = resync_edge();
+    let generation = ConnectionGeneration::new(1);
+    edge.connection_opened(context, generation);
+    let (handle, mut queue) = link_queue(1 << 20);
+    edge.live = Some(LiveLink {
+        link: LinkId::new(1),
+        handle,
+        coordinator_epoch: COORDINATOR_EPOCH,
+        coordinator_incarnation: HUB_INCARNATION,
+    });
+    edge.phase = Phase::Active;
+    request::send_session_open(
+        &mut edge, context, generation, 1, "durable", "Durable", [1; 32], None,
+    )
+    .map_err(|e| format!("{e:?}"))?;
+    assert_eq!(
+        context.pending_len(),
+        1,
+        "request admission must stage its durable replay identity"
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), queue.recv())
+            .await
+            .is_err(),
+        "request escaped before storage committed"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_restart_recovers_exact_ordinary_request_with_a_gone_sink() -> TestResult {
+    use agenc_ircd_storage::federation_records::{
+        EDGE_REQUEST_KIND, EdgeRequestPhase, EdgeRequestRecord, FederationOriginRecord,
+        ORIGIN_RECORD_KIND, OriginRowStatus, origin_key, request_result_key,
+    };
+    use agenc_ircd_storage::{InitialStorageRecord, PersistentRecordValue, TableId};
+    let origin_id = agenc_ircd_types::OriginId::from_bytes([71; 16]);
+    let connection_id = agenc_ircd_types::ConnectionId::from_bytes([72; 16]);
+    let request_id = agenc_ircd_types::RequestId::from_bytes([73; 16]);
+    let origin = agenc_ircd_federation_wire::OriginRecord {
+        network_id: NETWORK,
+        home_server_id: EDGE,
+        server_incarnation: EDGE_INCARNATION,
+        origin_id,
+        generation: 0,
+        previous_origin_object_id: [0; 32],
+        connection_id,
+        session: None,
+        account: None,
+        connection_nonce: [74; 32],
+    };
+    let origin_bytes = origin.to_object()?.encode_canonical()?.as_slice().to_vec();
+    let header = RequestHeader {
+        network_id: NETWORK,
+        replay_key: agenc_ircd_federation_wire::ReplayKey {
+            home_server_id: EDGE,
+            server_incarnation: EDGE_INCARNATION,
+            origin_id,
+            origin_generation: 0,
+            operation_sequence: 0,
+        },
+        request_id,
+        opcode: agenc_ircd_types::FederationOpcode::SessionOpen,
+    };
+    let operation = FederatedOperation::SessionOpen {
+        connection_id,
+        auth_grant_id: None,
+        nickname: "durable".to_owned(),
+        realname: "Durable".to_owned(),
+        capability_hash: [1; 32],
+        connection_nonce: [74; 32],
+    };
+    let bytes = header
+        .build(&operation.to_object()?)?
+        .encode_canonical()?
+        .as_slice()
+        .to_vec();
+    let request = EdgeRequestRecord {
+        completion_coverage: None,
+        request_id: *request_id.as_bytes(),
+        request_object_id: *federation_object_id(&bytes).as_bytes(),
+        request_object: bytes.clone(),
+        phase: EdgeRequestPhase::Sent,
+        sink_gone: false,
+        result_object_id: None,
+        result_object: Vec::new(),
+        completion_event_id: None,
+        resulting_state_generation: 0,
+    };
+    let origin = FederationOriginRecord {
+        origin_object_id: *federation_object_id(&origin_bytes).as_bytes(),
+        origin_object: origin_bytes,
+        next_sequence: 1,
+        status: OriginRowStatus::Live,
+        flags: 0,
+    };
+    let mut rows = Vec::new();
+    for (table, kind, key, body) in [
+        (
+            TableId::FederationOrigin,
+            ORIGIN_RECORD_KIND,
+            origin_key(EDGE, EDGE_INCARNATION, *origin_id.as_bytes(), 0)?,
+            origin.encode()?,
+        ),
+        (
+            TableId::RequestResult,
+            EDGE_REQUEST_KIND,
+            request_result_key(header.replay_key.to_bytes())?,
+            request.encode()?,
+        ),
+    ] {
+        rows.push(InitialStorageRecord::new(
+            table,
+            key,
+            1,
+            PersistentRecordValue::new(table, kind, 1, 0, None, Vec::new(), body)?.encode()?,
+        )?);
+    }
+    let fixture = StateCoreFixture::with_registration_router_and_records(entropy_script(), rows)?;
+    let mut restarted = resync_edge();
+    fixture.restore_edge_state(&mut restarted, None)?;
+    let retained = restarted
+        .pending
+        .get(&request_id)
+        .ok_or("restart lost the ordinary request")?;
+    assert_eq!(retained.bytes, bytes);
+    assert_eq!(retained.header, header);
+    assert!(
+        retained.sink_gone,
+        "a process restart cannot restore its client socket"
+    );
+    assert!(
+        restarted
+            .origins
+            .values()
+            .any(|origin| origin.origin_id == origin_id && origin.deleted && origin.sequence == 1)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_client_close_retains_the_close_until_its_answer() -> TestResult {
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let context = fixture.context_mut()?;
+    let mut edge = EdgeFederation::new(EdgeConfig {
+        network_id: NETWORK,
+        server_id: EDGE,
+        server_name: EDGE_NAME.to_owned(),
+        incarnation: EDGE_INCARNATION,
+        coordinator: coordinator_identity(),
+    });
+    let generation = ConnectionGeneration::new(1);
+    edge.connection_opened(context, generation);
+    edge.origins.get_mut(&generation).ok_or("origin")?.session = Some((
+        SessionId::from_bytes([61; 16]),
+        UserId::from_bytes([62; 16]),
+    ));
+    edge.connection_closed(context, generation, "closed");
+    assert!(
+        edge.pending
+            .values()
+            .any(|pending| matches!(pending.kind, request::PendingKind::Close)),
+        "the just-created session close must survive physical disconnect"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_successor_event_waits_behind_the_uncommitted_predecessor() -> TestResult {
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let mut edge = EdgeFederation::new(EdgeConfig {
+        network_id: NETWORK,
+        server_id: EDGE,
+        server_name: EDGE_NAME.to_owned(),
+        incarnation: EDGE_INCARNATION,
+        coordinator: coordinator_identity(),
+    });
+    edge.phase = Phase::Active;
+    let projected = ProjectedEvent::NetworkNotice {
+        code: "NOTICE".to_owned(),
+        text: "ordered delivery".to_owned(),
+    };
+    for sequence in 0..2 {
+        let event_id = EventId::from_bytes([u8::try_from(sequence)? + 40; 16]);
+        let header = EventHeader {
+            network_id: NETWORK,
+            target_server_id: EDGE,
+            projection_generation: 1,
+            coordinator_state_generation: 1,
+            delivery_sequence: sequence,
+            event_id,
+            event_kind: projected.kind(),
+            correlation: None,
+            cross_profile: None,
+        };
+        let bytes = header
+            .build(&event_arm_object(&projected)?)?
+            .encode_canonical()?;
+        let descriptor = agenc_ircd_federation_wire::EventDescriptor {
+            target_server_id: EDGE,
+            delivery_sequence: sequence,
+            event_id,
+            object_id: federation_object_id(bytes.as_slice()),
+        };
+        let mut assembler = FragmentAssembler::new();
+        let mut received = false;
+        for fragment in split_fragments(descriptor.object_id, bytes.as_slice())? {
+            let frame = FederationFrame::Event {
+                descriptor,
+                fragment,
+            };
+            let (_, key) = carrier_of(&frame).map_err(|error| error.to_string())?;
+            if let AssemblyProgress::Complete(object) =
+                assembler.admit(key, frame.fragment().ok_or("fragment")?, 0)?
+            {
+                assert!(
+                    events::receive(&mut edge, fixture.context_mut()?, descriptor, &object).is_ok(),
+                    "successor must queue behind staged predecessor"
+                );
+                received = true;
+            }
+        }
+        assert!(received);
+    }
+    assert_eq!(
+        edge.cursor, None,
+        "receipt must not advance the committed ACK cursor"
+    );
+    assert_eq!(edge.queued_events.len(), 1);
+    Ok(())
+}
+
 fn entropy_script() -> Vec<u8> {
     // A xorshift stream: one megabyte with no repeating sixteen-byte window
     // in practice, so request and origin identifiers never collide.
@@ -83,6 +860,61 @@ fn coordinator_identity() -> PeerIdentity {
         agenc_ircd_crypto::Ed25519SecretKey::from_bytes([12; 32]).public_key(),
         [13; 32],
     )
+}
+
+#[tokio::test]
+async fn resync_closed_origin_without_first_ack_is_retained_for_del() -> TestResult {
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let context = fixture.context_mut()?;
+    let mut edge = EdgeFederation::new(EdgeConfig {
+        network_id: NETWORK,
+        server_id: EDGE,
+        server_name: EDGE_NAME.to_owned(),
+        incarnation: EDGE_INCARNATION,
+        coordinator: coordinator_identity(),
+    });
+    let connection = ConnectionGeneration::new(1);
+    edge.connection_opened(context, connection);
+    // The declaration may have committed before its first ACK was lost.
+    edge.origins.get_mut(&connection).ok_or("origin")?.object_id = [42; 32];
+    edge.connection_closed(context, connection, "client left");
+    request::replay_origin(&mut edge, context, connection);
+    assert!(
+        edge.origins
+            .get(&connection)
+            .is_some_and(|origin| origin.deleted),
+        "uncertain declaration commit still requires DEL replay"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_rejected_snapshot_install_retires_the_edge_link() -> TestResult {
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let mut edge = EdgeFederation::new(EdgeConfig {
+        network_id: NETWORK,
+        server_id: EDGE,
+        server_name: EDGE_NAME.to_owned(),
+        incarnation: EDGE_INCARNATION,
+        coordinator: coordinator_identity(),
+    });
+    let (handle, _queue) = link_queue(1 << 20);
+    edge.live = Some(LiveLink {
+        link: LinkId::new(7),
+        handle,
+        coordinator_epoch: COORDINATOR_EPOCH,
+        coordinator_incarnation: ServerIncarnation::from_bytes([92; 16]),
+    });
+    edge.phase = Phase::Snapshot;
+    edge.commit = Some(PendingCommit::SnapshotInstalled);
+    edge.batch_rejected(fixture.context_mut()?);
+    assert_eq!(
+        edge.phase,
+        Phase::Down,
+        "do not wait for remote snapshot expiry"
+    );
+    assert!(edge.commit.is_none());
+    Ok(())
 }
 
 /// The scripted coordinator side of the link.
@@ -381,10 +1213,17 @@ impl Hub {
 
     /// Answers the origin exchange and FRESUME on a fresh link.
     async fn synchronize(&mut self) -> TestResult {
+        self.resume_base().await?;
         self.expect_frame(|frame, _| matches!(frame, FederationFrame::OriginReset { .. }))
             .await?;
-        self.expect_frame(|frame, _| matches!(frame, FederationFrame::OriginReady { .. }))
-            .await?;
+        self.frame(FederationFrame::OriginReady {
+            edge_server_id: EDGE,
+            server_incarnation: EDGE_INCARNATION,
+        })
+        .await
+    }
+
+    async fn resume_base(&mut self) -> TestResult {
         let (frame, _) = self
             .expect_frame(|frame, _| matches!(frame, FederationFrame::Resume { .. }))
             .await?;
@@ -921,8 +1760,9 @@ async fn an_origin_closed_while_the_link_is_down_is_replayed_and_deleted_after_t
         // to the coordinator, so nothing of it is replayed.
         let passerby = Client::open(inbox_for_passerby, 2).await?;
         passerby.close(&closes)?;
-        // The next link replays the closed origin's DEL before READY.
+        // Base synchronization precedes RESET and retained DEL replay.
         hub.establish().await?;
+        hub.resume_base().await?;
         hub.expect_frame(|frame, _| matches!(frame, FederationFrame::OriginReset { .. }))
             .await?;
         let deletion = hub.next_frame().await?;
@@ -933,31 +1773,9 @@ async fn an_origin_closed_while_the_link_is_down_is_replayed_and_deleted_after_t
             ..
         } = deletion
         else {
-            return Err(format!("expected the DEL, got {:?}", deletion.kind()).into());
+            return Err(format!("expected DEL, got {:?}", deletion.kind()).into());
         };
         assert_eq!(deleted_generation, 1);
-        let ready = hub.next_frame().await?;
-        assert!(
-            matches!(ready, FederationFrame::OriginReady { .. }),
-            "{:?}",
-            ready.kind()
-        );
-        let (resume, _) = hub
-            .expect_frame(|frame, _| matches!(frame, FederationFrame::Resume { .. }))
-            .await?;
-        let FederationFrame::Resume {
-            projection_generation,
-            ..
-        } = resume
-        else {
-            return Err("expected FRESUME".into());
-        };
-        hub.frame(FederationFrame::ResumeOk {
-            edge_server_id: EDGE,
-            projection_generation,
-            next_delivery_sequence: hub.next_sequence,
-        })
-        .await?;
         hub.frame(FederationFrame::OriginAck {
             edge_server_id: EDGE,
             server_incarnation,
@@ -966,19 +1784,24 @@ async fn an_origin_closed_while_the_link_is_down_is_replayed_and_deleted_after_t
             object_id: None,
         })
         .await?;
+        hub.frame(FederationFrame::OriginReady {
+            edge_server_id: EDGE,
+            server_incarnation: EDGE_INCARNATION,
+        })
+        .await?;
         // Acknowledged, the origin is gone: a further reset replays nothing.
         hub.send(LinkEvent::Closed(
             crate::federation::LinkCloseReason::PeerClosed,
         ))
         .await?;
         hub.establish().await?;
+        hub.resume_base().await?;
         hub.expect_frame(|frame, _| matches!(frame, FederationFrame::OriginReset { .. }))
             .await?;
-        let next = hub.next_frame().await?;
         assert!(
-            matches!(next, FederationFrame::OriginReady { .. }),
-            "{:?}",
-            next.kind()
+            tokio::time::timeout(std::time::Duration::from_millis(30), hub.queue.recv())
+                .await
+                .is_err()
         );
         Ok(())
     })
@@ -1619,10 +2442,6 @@ mod e2ee {
         /// Synchronizes the base profile the way `Hub::synchronize` does,
         /// through the companion-aware reader.
         async fn synchronize_base(&mut self) -> TestResult {
-            self.expect_base(|frame, _| matches!(frame, FederationFrame::OriginReset { .. }))
-                .await?;
-            self.expect_base(|frame, _| matches!(frame, FederationFrame::OriginReady { .. }))
-                .await?;
             let (frame, _) = self
                 .expect_base(|frame, _| matches!(frame, FederationFrame::Resume { .. }))
                 .await?;
@@ -1638,6 +2457,14 @@ mod e2ee {
                     edge_server_id: EDGE,
                     projection_generation,
                     next_delivery_sequence: self.base.next_sequence,
+                })
+                .await?;
+            self.expect_base(|frame, _| matches!(frame, FederationFrame::OriginReset { .. }))
+                .await?;
+            self.base
+                .frame(FederationFrame::OriginReady {
+                    edge_server_id: EDGE,
+                    server_incarnation: EDGE_INCARNATION,
                 })
                 .await
         }
@@ -1815,6 +2642,7 @@ mod e2ee {
             nickname: &str,
             account: AccountId,
         ) -> TestResult<UserId> {
+            self.ack_base_origin().await?;
             client.line("CAP LS 302").await?;
             client
                 .line(
@@ -2166,4 +2994,211 @@ mod accounts {
         })
         .await
     }
+}
+
+#[tokio::test]
+async fn resync_an_acknowledged_del_does_not_return_after_restart() -> TestResult {
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let mut edge = resync_edge();
+    let connection = ConnectionGeneration::new(1);
+    edge.phase = Phase::Active;
+    edge.connection_opened(fixture.context_mut()?, connection);
+    commit_edge_batches(&mut edge, &mut fixture).await?;
+    let origin_id = edge.origins.get(&connection).ok_or("origin")?.origin_id;
+    edge.connection_closed(fixture.context_mut()?, connection, "");
+    commit_edge_batches(&mut edge, &mut fixture).await?;
+    edge.origin_acked(fixture.context_mut()?, EDGE_INCARNATION, origin_id, 0, None)
+        .map_err(|error| format!("ACK: {error:?}"))?;
+    commit_edge_batches(&mut edge, &mut fixture).await?;
+    let mut restarted = resync_edge();
+    fixture.restore_edge_state(&mut restarted, None)?;
+    assert!(
+        restarted.origins.is_empty(),
+        "acknowledged terminal origins must not accumulate after restart"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_a_completed_request_does_not_return_after_restart() -> TestResult {
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let mut edge = resync_edge();
+    let connection = ConnectionGeneration::new(1);
+    edge.connection_opened(fixture.context_mut()?, connection);
+    request::send_session_close(
+        &mut edge,
+        fixture.context_mut()?,
+        connection,
+        SessionId::from_bytes([78; 16]),
+        "",
+    );
+    commit_edge_batches(&mut edge, &mut fixture).await?;
+    let pending = edge.pending.values().next().ok_or("request")?;
+    let id = pending.header.request_id;
+    let correlation = RequestCorrelation {
+        replay_key: pending.header.replay_key,
+        request_id: id,
+    };
+    let completion = EventId::from_bytes([76; 16]);
+    let result = ResultHeader {
+        network_id: NETWORK,
+        replay_key: correlation.replay_key,
+        request_id: id,
+        request_object_id: federation_object_id(&pending.bytes),
+        completion_event_id: Some(completion),
+        result_kind: agenc_ircd_types::FederationResultKind::Committed,
+    };
+    let bytes = result
+        .build(
+            &ResultArm::Committed {
+                resulting_state_generation: 10,
+            }
+            .to_object()?,
+            Vec::new(),
+        )?
+        .encode_canonical()?
+        .as_slice()
+        .to_vec();
+    let descriptor = OperationDescriptor {
+        addressed_server_id: EDGE,
+        server_incarnation: EDGE_INCARNATION,
+        origin_id: correlation.replay_key.origin_id,
+        origin_generation: 0,
+        operation_sequence: 0,
+        request_id: id,
+        object_id: federation_object_id(&bytes),
+    };
+    let object = resync_assembled(&bytes, |fragment| FederationFrame::Result {
+        descriptor,
+        fragment,
+    })?;
+    request::receive_result(&mut edge, fixture.context_mut()?, descriptor, &object)
+        .map_err(|e| format!("{e:?}"))?;
+    commit_edge_batches(&mut edge, &mut fixture).await?;
+    assert!(
+        request::receive_result(&mut edge, fixture.context_mut()?, descriptor, &object).is_ok(),
+        "an exact retained result replay must be idempotent while its completion is pending"
+    );
+    let projected = ProjectedEvent::RequestCompleted {
+        resulting_state_generation: 10,
+    };
+    let header = EventHeader {
+        network_id: NETWORK,
+        target_server_id: EDGE,
+        projection_generation: 1,
+        coordinator_state_generation: 10,
+        delivery_sequence: 0,
+        event_id: completion,
+        event_kind: projected.kind(),
+        correlation: Some(correlation),
+        cross_profile: None,
+    };
+    let bytes = header
+        .build(&event_arm_object(&projected)?)?
+        .encode_canonical()?
+        .as_slice()
+        .to_vec();
+    let descriptor = agenc_ircd_federation_wire::EventDescriptor {
+        target_server_id: EDGE,
+        delivery_sequence: 0,
+        event_id: completion,
+        object_id: federation_object_id(&bytes),
+    };
+    let object = resync_assembled(&bytes, |fragment| FederationFrame::Event {
+        descriptor,
+        fragment,
+    })?;
+    edge.phase = Phase::Active;
+    events::receive(&mut edge, fixture.context_mut()?, descriptor, &object)
+        .map_err(|e| format!("{e:?}"))?;
+    commit_edge_batches(&mut edge, &mut fixture).await?;
+    assert!(edge.pending.is_empty());
+    let mut restarted = resync_edge();
+    fixture.restore_edge_state(&mut restarted, None)?;
+    assert!(
+        restarted.pending.is_empty(),
+        "terminal covered work cannot be restored as unresolved"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resync_snapshot_cannot_replace_an_incomplete_cross_profile_completion() -> TestResult {
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let mut edge = resync_edge();
+    let connection = ConnectionGeneration::new(1);
+    edge.connection_opened(fixture.context_mut()?, connection);
+    request::send_session_close(
+        &mut edge,
+        fixture.context_mut()?,
+        connection,
+        SessionId::from_bytes([78; 16]),
+        "",
+    );
+    commit_edge_batches(&mut edge, &mut fixture).await?;
+    let pending = edge.pending.values().next().ok_or("request")?;
+    let header = ResultHeader {
+        network_id: NETWORK,
+        replay_key: pending.header.replay_key,
+        request_id: pending.header.request_id,
+        request_object_id: federation_object_id(&pending.bytes),
+        completion_event_id: Some(EventId::from_bytes([76; 16])),
+        result_kind: agenc_ircd_types::FederationResultKind::Committed,
+    };
+    let bytes = header
+        .build(
+            &ResultArm::Committed {
+                resulting_state_generation: 10,
+            }
+            .to_object()?,
+            Vec::new(),
+        )?
+        .encode_canonical()?
+        .as_slice()
+        .to_vec();
+    let descriptor = OperationDescriptor {
+        addressed_server_id: EDGE,
+        server_incarnation: EDGE_INCARNATION,
+        origin_id: header.replay_key.origin_id,
+        origin_generation: 0,
+        operation_sequence: 0,
+        request_id: header.request_id,
+        object_id: federation_object_id(&bytes),
+    };
+    let object = resync_assembled(&bytes, |fragment| FederationFrame::Result {
+        descriptor,
+        fragment,
+    })?;
+    request::receive_result(&mut edge, fixture.context_mut()?, descriptor, &object)
+        .map_err(|e| format!("{e:?}"))?;
+    commit_edge_batches(&mut edge, &mut fixture).await?;
+    let identity = agenc_ircd_storage::e2ee_records::barrier::BarrierIdentity {
+        network_id: *NETWORK.as_bytes(),
+        coordinator_server_id: *COORDINATOR.as_bytes(),
+        coordinator_server_incarnation: *HUB_INCARNATION.as_bytes(),
+        coordinator_recovery_epoch: *COORDINATOR_EPOCH.as_bytes(),
+        target_server_id: *EDGE.as_bytes(),
+        target_server_incarnation: *EDGE_INCARNATION.as_bytes(),
+        mutation_id: [89; 16],
+        coordinator_state_generation: 10,
+        part_count: 2,
+    };
+    edge.barrier.fenced.insert(
+        identity.mutation_id,
+        fence::FencedBarrier {
+            stage: agenc_ircd_storage::e2ee_records::barrier::BarrierStage::empty(identity),
+            parts: Vec::new(),
+        },
+    );
+    let (coverage, writes) = journal::snapshot_writes(
+        &edge,
+        20,
+        fixture.context_mut()?.domain().revision().get() + 1,
+    )
+    .map_err(|e| format!("{e:?}"))?;
+    assert!(
+        coverage.is_empty() && writes.is_empty(),
+        "a snapshot cannot certify an incomplete cross-profile mutation"
+    );
+    Ok(())
 }

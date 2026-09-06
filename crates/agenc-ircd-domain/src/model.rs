@@ -1582,6 +1582,8 @@ impl Sanction {
 /// Complete pure authoritative state for Stage 03.
 pub struct DomainState {
     pub(crate) revision: Revision,
+    pub(crate) fenced_federation_peers: BTreeSet<ServerId>,
+    pub(crate) suspended_federation_peers: BTreeSet<ServerId>,
     pub(crate) accounts: BTreeMap<AccountId, AccountState>,
     pub(crate) sessions: BTreeMap<UserId, SessionState>,
     pub(crate) session_ids: BTreeMap<SessionId, UserId>,
@@ -1605,6 +1607,8 @@ impl DomainState {
     pub fn at_revision(revision: Revision) -> Self {
         Self {
             revision,
+            fenced_federation_peers: BTreeSet::new(),
+            suspended_federation_peers: BTreeSet::new(),
             accounts: BTreeMap::new(),
             sessions: BTreeMap::new(),
             session_ids: BTreeMap::new(),
@@ -1690,7 +1694,59 @@ impl DomainState {
     /// Looks up one live session by its User ID.
     #[must_use]
     pub fn session(&self, user_id: UserId) -> Option<&SessionState> {
+        self.sessions.get(&user_id).filter(|session| {
+            !self
+                .fenced_federation_peers
+                .contains(&session.home_server_id)
+        })
+    }
+
+    /// Retains physical rows for expiry plans after the peer's authority fence.
+    #[must_use]
+    pub fn retained_session(&self, user_id: UserId) -> Option<&SessionState> {
         self.sessions.get(&user_id)
+    }
+
+    /// Iterates retained sessions in the durable cleanup order, including fenced rows.
+    pub fn retained_peer_sessions(
+        &self,
+        peer: ServerId,
+    ) -> impl Iterator<Item = (SessionId, UserId)> + '_ {
+        self.session_ids
+            .iter()
+            .filter_map(move |(session_id, user)| {
+                self.sessions
+                    .get(user)
+                    .filter(|session| session.home_server_id == peer)
+                    .map(|_| (*session_id, *user))
+            })
+    }
+
+    /// Applies a committed federation authority fence without discarding physical rows.
+    pub fn fence_federation_peer(&mut self, peer: ServerId) {
+        self.suspended_federation_peers.insert(peer);
+        self.fenced_federation_peers.insert(peer);
+    }
+
+    /// Allows a new incarnation after all sessions behind its old fence are gone.
+    pub fn resume_federation_peer(&mut self, peer: ServerId) {
+        self.suspended_federation_peers.remove(&peer);
+        self.fenced_federation_peers.remove(&peer);
+    }
+
+    /// Keeps grace visibility while refusing new execution and direct targeting.
+    pub fn suspend_federation_peer(&mut self, peer: ServerId) {
+        self.suspended_federation_peers.insert(peer);
+    }
+
+    /// Whether a session can execute or become a new direct-message target.
+    #[must_use]
+    pub fn session_authority_available(&self, user: UserId) -> bool {
+        self.session(user).is_some_and(|session| {
+            !self
+                .suspended_federation_peers
+                .contains(&session.home_server_id)
+        })
     }
 
     /// Looks up one account by immutable Account ID.
@@ -1818,7 +1874,11 @@ impl DomainState {
         self.sessions
             .iter()
             .filter_map(|(user_id, session)| {
-                (session.account_id() == Some(account_id)).then_some(*user_id)
+                (session.account_id() == Some(account_id)
+                    && !self
+                        .fenced_federation_peers
+                        .contains(&session.home_server_id))
+                .then_some(*user_id)
             })
             .collect()
     }
@@ -1840,7 +1900,7 @@ impl DomainState {
     /// Returns the number of live sessions.
     #[must_use]
     pub fn session_count(&self) -> usize {
-        self.sessions.len()
+        self.session_user_ids().count()
     }
 
     /// Returns the number of live sessions bound to account authority.
@@ -1848,7 +1908,12 @@ impl DomainState {
     pub fn authenticated_session_count(&self) -> usize {
         self.sessions
             .values()
-            .filter(|session| session.account_id().is_some())
+            .filter(|session| {
+                session.account_id().is_some()
+                    && !self
+                        .fenced_federation_peers
+                        .contains(&session.home_server_id)
+            })
             .count()
     }
 
@@ -1886,7 +1951,10 @@ impl DomainState {
     /// Resolves one canonical nickname to the current live user.
     #[must_use]
     pub fn resolve_nickname(&self, nickname: &NicknameValue) -> Option<UserId> {
-        self.nicknames.get(nickname).copied()
+        self.nicknames
+            .get(nickname)
+            .copied()
+            .filter(|user| self.session(*user).is_some())
     }
 
     /// Resolves one canonical channel name to its current channel creation.
@@ -2206,7 +2274,14 @@ impl DomainState {
 
     /// Iterates live user identities in canonical order.
     pub fn session_user_ids(&self) -> impl Iterator<Item = UserId> + '_ {
-        self.sessions.keys().copied()
+        self.sessions
+            .iter()
+            .filter(|(_, session)| {
+                !self
+                    .fenced_federation_peers
+                    .contains(&session.home_server_id)
+            })
+            .map(|(user, _)| *user)
     }
 
     /// Resolves an accepted session identity to its live user.

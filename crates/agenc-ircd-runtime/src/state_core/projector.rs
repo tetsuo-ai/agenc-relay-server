@@ -6,7 +6,7 @@
 //! edge events inside the same storage batch as the mutation. The router
 //! that owns the links takes the encoded events after the commit.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use agenc_ircd_domain::federation::{
     CoordinatorProjection, MutationContext, MutationProjection, ProjectedEvent, ProjectionRecord,
@@ -23,6 +23,9 @@ use agenc_ircd_storage::federation_records::{
 };
 use agenc_ircd_storage::{PersistentRecordValue, StoredKey, TableId};
 use agenc_ircd_types::{EntropySource, EventId, NetworkId, ServerId};
+
+mod outbox;
+pub(crate) use outbox::OutboxBudget;
 
 use crate::RuntimeError;
 use crate::federation::codec::events::event_arm_object;
@@ -72,6 +75,7 @@ struct ProjectedOutput {
     advances: BTreeMap<ServerId, u64>,
     revision: u64,
     state_generation: u64,
+    fences: Vec<ServerId>,
 }
 
 /// The barrier tuple one target's base events carry (spec 20.8): every
@@ -94,6 +98,7 @@ struct EventSlot {
 
 /// What one staged plan projected, held until its batch commits.
 pub struct PendingProjection {
+    fences: Vec<ServerId>,
     events: Vec<OutboundEvent>,
     projection: MutationProjection,
     advances: BTreeMap<ServerId, u64>,
@@ -105,6 +110,9 @@ pub struct FederationProjector {
     server_id: ServerId,
     index: CoordinatorProjection,
     edges: BTreeMap<ServerId, EdgeDelivery>,
+    snapshot_required: BTreeSet<ServerId>,
+    outbox_budgets: BTreeMap<ServerId, OutboxBudget>,
+    committed_fences: BTreeSet<ServerId>,
 }
 
 impl FederationProjector {
@@ -116,12 +124,27 @@ impl FederationProjector {
             server_id,
             index: CoordinatorProjection::new(server_id),
             edges: BTreeMap::new(),
+            snapshot_required: BTreeSet::new(),
+            outbox_budgets: BTreeMap::new(),
+            committed_fences: BTreeSet::new(),
         }
     }
 
     /// Declares or repositions one edge's delivery cursor.
     pub fn set_edge(&mut self, edge: ServerId, delivery: EdgeDelivery) {
+        if self
+            .edges
+            .get(&edge)
+            .is_none_or(|previous| previous.projection_generation != delivery.projection_generation)
+        {
+            self.snapshot_required.remove(&edge);
+        }
         self.edges.insert(edge, delivery);
+    }
+
+    /// Fences ordinary delivery reservations until a successor snapshot opens.
+    pub(crate) fn require_snapshot(&mut self, edge: ServerId) {
+        self.snapshot_required.insert(edge);
     }
 
     /// Returns one edge's delivery position.
@@ -188,6 +211,7 @@ impl FederationProjector {
             advances: BTreeMap::new(),
             revision: row_revision,
             state_generation: plan.resulting_revision().get(),
+            fences: Vec::new(),
         };
         for delta in &projection.edges {
             let Some(delivery) = self.edges.get(&delta.target) else {
@@ -207,6 +231,7 @@ impl FederationProjector {
         Ok(Some((
             output.writes,
             PendingProjection {
+                fences: output.fences,
                 events: output.events,
                 projection,
                 advances: output.advances,
@@ -275,8 +300,13 @@ impl FederationProjector {
         assignment: Option<CrossProfileAssignment>,
         index: &DurableIndex,
     ) -> Result<(), RuntimeError> {
+        let blocked = self.snapshot_required.contains(&delta.target);
+        if blocked && assignment.is_some() {
+            return Err(RuntimeError::LimitExceeded);
+        }
         let mut sequence = delivery.next_delivery_sequence;
-        for (index, event) in delta.events.iter().enumerate() {
+        let mut reserved = Vec::new();
+        for (index, event) in delta.events.iter().enumerate().filter(|_| !blocked) {
             let slot = EventSlot {
                 target: delta.target,
                 projection_generation: delivery.projection_generation,
@@ -295,6 +325,14 @@ impl FederationProjector {
                 })
                 .transpose()?;
             let outbound = self.encode_event(slot, event, binding, entropy, part)?;
+            reserved.push(outbound);
+            sequence = sequence.checked_add(1).ok_or(RuntimeError::Overflow)?;
+        }
+        if !self.fit_outbox(delta.target, delivery, &reserved, assignment, output)? {
+            reserved.clear();
+            sequence = delivery.next_delivery_sequence;
+        }
+        for outbound in reserved {
             output.writes.push(outbox_write(
                 &outbound,
                 output.revision,
@@ -302,7 +340,6 @@ impl FederationProjector {
                 binding,
             )?);
             output.events.push(outbound);
-            sequence = sequence.checked_add(1).ok_or(RuntimeError::Overflow)?;
         }
         output.advances.insert(delta.target, sequence);
         for record in &delta.upserts {
@@ -435,6 +472,10 @@ impl FederationProjector {
     /// Applies one committed projection and returns its events for delivery.
     pub fn committed(&mut self, pending: PendingProjection) -> Vec<OutboundEvent> {
         self.index.apply(&pending.projection);
+        for peer in pending.fences {
+            self.snapshot_required.insert(peer);
+            self.committed_fences.insert(peer);
+        }
         for (edge, next) in pending.advances {
             if let Some(delivery) = self.edges.get_mut(&edge) {
                 delivery.next_delivery_sequence = next;

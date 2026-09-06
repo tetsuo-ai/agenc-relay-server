@@ -4224,6 +4224,13 @@ impl AccountServiceCoordinator {
         {
             return Err(RuntimeError::InvalidValue);
         }
+        context.join_remote_account_response(
+            request.generation,
+            revision,
+            response,
+            None,
+            &mut writes,
+        )?;
         let accepted = context.stage_durable_with_account_service(
             plan,
             fanout,
@@ -4360,6 +4367,18 @@ impl AccountServiceCoordinator {
         {
             return Err(RuntimeError::InvalidValue);
         }
+        context.join_remote_account_response(
+            request.generation,
+            revision,
+            response,
+            sealed.result().ok().map(|intent| {
+                crate::federation::codec::results::ResultArm::AccountCreated {
+                    account_id: intent.account_id(),
+                    account_revision: revision,
+                }
+            }),
+            &mut writes,
+        )?;
         let accepted = context.stage_durable_with_account_service(
             plan,
             fanout,
@@ -4772,12 +4791,20 @@ impl AccountServiceCoordinator {
         {
             return Err(RuntimeError::InvalidValue);
         }
+        let mut writes = vec![transaction_write, result_write];
+        context.join_remote_account_response(
+            request.generation,
+            revision,
+            response,
+            None,
+            &mut writes,
+        )?;
         let accepted = context.stage_durable_with_account_service(
             plan,
             fanout,
             Some(StagedOrigin::silent(request.generation)),
             1,
-            vec![transaction_write, result_write],
+            writes,
         );
         if !matches!(accepted, Ok(StageAccepted::Staged { .. })) {
             return Err(RuntimeError::InvalidValue);
@@ -4954,6 +4981,21 @@ impl AccountServiceCoordinator {
         {
             return Err(RuntimeError::InvalidValue);
         }
+        context.join_remote_account_response(
+            request.generation,
+            revision,
+            response,
+            semantic_grant.map(|grant| {
+                crate::federation::codec::results::ResultArm::Authenticated {
+                    account_id: grant.account_id(),
+                    account_session_generation: grant.account_session_generation().get(),
+                    auth_grant_id: *grant
+                        .grant_id_for_persistence_or_session_open()
+                        .expose_for_session_open(),
+                }
+            }),
+            &mut writes,
+        )?;
         let accepted = context.stage_durable_with_account_service(
             plan,
             fanout,

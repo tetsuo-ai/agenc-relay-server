@@ -310,12 +310,32 @@ impl FederationCoordinator {
     /// Records the request a virtual connection is now answering.
     pub(crate) fn remote_carrier_started(
         &mut self,
+        context: &mut StateCoreContext,
         generation: ConnectionGeneration,
         in_flight: Box<InFlightCarrier>,
-    ) {
+    ) -> Result<(), Violation> {
+        let fresh = &in_flight.fresh;
+        let next = fresh
+            .key
+            .sequence
+            .checked_add(1)
+            .ok_or(Violation::Ceiling)?;
+        let origin = super::origin::origin_row(
+            self,
+            fresh.key.origin,
+            next,
+            context.domain().revision().get(),
+        )?;
+        context.bind_remote_account_result(
+            generation,
+            fresh.header,
+            fresh.request_object_id,
+            origin,
+        );
         if let Some(carrier) = self.remote_accounts.carriers.get_mut(&generation) {
             carrier.in_flight = Some(*in_flight);
         }
+        Ok(())
     }
 
     /// Finishes the request a virtual connection was answering with the
@@ -333,6 +353,16 @@ impl FederationCoordinator {
         let in_flight = carrier.in_flight.take()?;
         let link = in_flight.link;
         let answered = (in_flight.opcode, in_flight.carrier_generation);
+        if let Some(committed) = context.take_remote_account_result(generation) {
+            let bytes = committed.bytes.clone();
+            if self.record_remote_result(committed).is_err() {
+                self.fail_link(context, link, peer, Violation::Origin);
+                return None;
+            }
+            self.send_result(context, link, peer, in_flight.fresh.descriptor, &bytes);
+            return Some(answered);
+        }
+        context.forget_remote_account_result(generation);
         let mut objects = Vec::new();
         for reply in &replies {
             match crate::federation::codec::results::reply_object(reply) {
@@ -494,4 +524,34 @@ impl FederationCoordinator {
 pub(crate) fn challenge_object(bytes: &[u8]) -> Option<SchemaObject> {
     let mut budget = agenc_ircd_federation_wire::DecodeBudget::new(8_192, 64);
     SchemaObject::decode_exact("AccountServiceResponse", bytes, &mut budget).ok()
+}
+
+impl FederationCoordinator {
+    pub(super) fn record_remote_result(
+        &mut self,
+        result: crate::state_core::remote_result::CommittedRemoteResult,
+    ) -> Result<(), Violation> {
+        let replay = result.header.replay_key;
+        let key = agenc_ircd_domain::federation::OperationKey {
+            origin: agenc_ircd_domain::federation::OriginKey {
+                home_server_id: replay.home_server_id,
+                server_incarnation: replay.server_incarnation,
+                origin_id: replay.origin_id,
+            },
+            generation: replay.origin_generation,
+            sequence: replay.operation_sequence,
+        };
+        self.origins
+            .commit_request(key, result.header.request_id)
+            .map_err(|_| Violation::Origin)?;
+        self.retained.insert(
+            key,
+            super::RetainedRequest {
+                request_id: result.header.request_id,
+                request_object_id: *result.request_object_id.as_bytes(),
+            },
+        );
+        self.counters.requests_committed = self.counters.requests_committed.saturating_add(1);
+        Ok(())
+    }
 }

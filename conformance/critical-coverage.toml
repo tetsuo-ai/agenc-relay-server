@@ -3,8 +3,8 @@ minimum_overall_branch_percent = 75.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 446
-reviewed_source_sha256 = "a874a63522d94fc94c7773b6db859906e80c85333faf0bd9eb4d00633fd2b9d1"
+reviewed_source_files = 451
+reviewed_source_sha256 = "122ce35b2a86434a4c30815356a777382939a14a70d628bd4de826e058ec88c7"
 deferred = []
 
 [[region]]
@@ -31,9 +31,9 @@ reason = "Every accepted and rejected syntax path must be exercised at the clien
 id = "domain-command-authorization"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-domain/src/decision.rs"
-source_sha256 = "433ae9b679580c5c369b56d44dbb59101e7f2ebc1383e1aa470d0db6bb684186"
-start_line = 2080
-end_line = 2346
+source_sha256 = "d47ae1b8f49c601855468d76fc3088b7787810e1fc3214f96b37a25bb302c225"
+start_line = 2083
+end_line = 2352
 metric = "branches"
 reason = "Session fences, admission, and command authority are security decisions."
 
@@ -51,9 +51,9 @@ reason = "Every closed FieldKind decode arm must run in the canonical federation
 id = "domain-state-invariant-checks"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-ircd-domain/src/model.rs"
-source_sha256 = "17b848730f9e3ccac7f0d2771db78f233c952745c71ca62db4cc7645eee6aa63"
-start_line = 1898
-end_line = 2083
+source_sha256 = "2647136e4ab4842077e9f7bb7425959cd5a60eb40f0cc1961a186ea7af85789b"
+start_line = 1966
+end_line = 2151
 metric = "branches"
 reason = "Every current domain cross-index and authority-fence check must take both outcomes."
 
@@ -71,9 +71,9 @@ reason = "Every enumerated rollback-guard, reservation, and database recovery st
 id = "history-command-authorization"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-domain/src/decision.rs"
-source_sha256 = "433ae9b679580c5c369b56d44dbb59101e7f2ebc1383e1aa470d0db6bb684186"
-start_line = 2369
-end_line = 2390
+source_sha256 = "d47ae1b8f49c601855468d76fc3088b7787810e1fc3214f96b37a25bb302c225"
+start_line = 2378
+end_line = 2399
 metric = "branches"
 reason = "History requests require current membership, plaintext content, enabled retention, and an eligible channel."
 

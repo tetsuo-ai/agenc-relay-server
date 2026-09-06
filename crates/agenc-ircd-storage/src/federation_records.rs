@@ -35,6 +35,8 @@ pub const PROJECTION_MARKER_KIND: u16 = 2;
 const FEDERATION_BODY_VERSION: u16 = 1;
 /// Peers retain at most this many accepted recovery epochs.
 pub const MAX_ACCEPTED_EPOCHS: usize = 64;
+/// Permanent incarnation fences retained by one peer checkpoint.
+const MAX_FENCED_INCARNATIONS: usize = 1_024;
 /// A canonical `FederationOrigin` is at most this many bytes.
 const MAX_ORIGIN_OBJECT_BYTES: usize = 512;
 /// A canonical request or result object is at most this many bytes.
@@ -107,6 +109,8 @@ pub struct FederationPeerRecord {
     pub recovery_epoch: [u8; ID_BYTES],
     /// Every recovery epoch ever accepted from this peer, oldest first.
     pub accepted_epochs: Vec<[u8; ID_BYTES]>,
+    /// Earlier incarnations that can never regain authority.
+    pub fenced_incarnations: Vec<[u8; ID_BYTES]>,
     /// The link phase.
     pub phase: PeerPhase,
     /// The current projection generation, nonzero once one exists.
@@ -134,11 +138,17 @@ pub struct FederationPeerRecord {
 impl FederationPeerRecord {
     /// Encodes the wrapped body.
     pub fn encode(&self) -> Result<Vec<u8>, StorageError> {
-        if self.accepted_epochs.len() > MAX_ACCEPTED_EPOCHS {
+        if self.accepted_epochs.len() > MAX_ACCEPTED_EPOCHS
+            || self.fenced_incarnations.len() > MAX_FENCED_INCARNATIONS
+        {
             return Err(StorageError::LimitExceeded);
         }
         let mut encoder = Encoder::with_capacity(256, MAX_PROTOCOL_BODY_BYTES)?;
-        encoder.put_u16(FEDERATION_BODY_VERSION)?;
+        encoder.put_u16(if self.fenced_incarnations.is_empty() {
+            FEDERATION_BODY_VERSION
+        } else {
+            2
+        })?;
         encoder.put_fixed(&self.server_incarnation)?;
         encoder.put_fixed(&self.recovery_epoch)?;
         let count =
@@ -158,6 +168,20 @@ impl FederationPeerRecord {
         put_optional_fixed(&mut encoder, self.cleanup_cursor.as_ref().map(|id| &id[..]))?;
         put_bool(&mut encoder, self.quarantined)?;
         encoder.put_u64(self.client_resync_epoch)?;
+        if !self.fenced_incarnations.is_empty() {
+            encoder.put_u16(
+                u16::try_from(self.fenced_incarnations.len())
+                    .map_err(|_| StorageError::Overflow)?,
+            )?;
+            let mut previous = None;
+            for incarnation in &self.fenced_incarnations {
+                if previous.is_some_and(|value| value >= incarnation) {
+                    return Err(StorageError::InvalidEncoding);
+                }
+                encoder.put_fixed(incarnation)?;
+                previous = Some(incarnation);
+            }
+        }
         wrap(TableId::FederationPeer, PEER_RECORD_KIND, encoder.finish())
     }
 
@@ -165,7 +189,10 @@ impl FederationPeerRecord {
     pub fn decode(body: &[u8]) -> Result<Self, StorageError> {
         let inner = unwrap(TableId::FederationPeer, PEER_RECORD_KIND, body)?;
         let mut decoder = Decoder::new(&inner);
-        expect_version(&mut decoder)?;
+        let version = decoder.u16()?;
+        if version != FEDERATION_BODY_VERSION && version != 2 {
+            return Err(StorageError::InvalidEncoding);
+        }
         let server_incarnation = decoder.array::<ID_BYTES>()?;
         let recovery_epoch = decoder.array::<ID_BYTES>()?;
         let count = usize::from(decoder.u16()?);
@@ -176,10 +203,11 @@ impl FederationPeerRecord {
         for _ in 0..count {
             accepted_epochs.push(decoder.array::<ID_BYTES>()?);
         }
-        let record = Self {
+        let mut record = Self {
             server_incarnation,
             recovery_epoch,
             accepted_epochs,
+            fenced_incarnations: Vec::new(),
             phase: PeerPhase::from_wire(decoder.u16()?)?,
             projection_generation: decoder.u64()?,
             next_delivery_sequence: decoder.u64()?,
@@ -192,6 +220,23 @@ impl FederationPeerRecord {
             quarantined: take_bool(&mut decoder)?,
             client_resync_epoch: decoder.u64()?,
         };
+        if version == 2 {
+            let count = usize::from(decoder.u16()?);
+            if count == 0 || count > MAX_FENCED_INCARNATIONS {
+                return Err(StorageError::LimitExceeded);
+            }
+            for _ in 0..count {
+                let incarnation = decoder.array::<ID_BYTES>()?;
+                if record
+                    .fenced_incarnations
+                    .last()
+                    .is_some_and(|previous| previous >= &incarnation)
+                {
+                    return Err(StorageError::InvalidEncoding);
+                }
+                record.fenced_incarnations.push(incarnation);
+            }
+        }
         decoder.finish()?;
         Ok(record)
     }
@@ -433,6 +478,8 @@ pub struct EdgeRequestRecord {
     pub completion_event_id: Option<[u8; ID_BYTES]>,
     /// The resulting global state generation named by the result.
     pub resulting_state_generation: u64,
+    /// Exact completion proof stored atomically with its applied delivery cursor.
+    pub completion_coverage: Option<CompletionCoverageRecord>,
 }
 
 impl EdgeRequestRecord {
@@ -451,7 +498,11 @@ impl EdgeRequestRecord {
             .saturating_add(self.result_object.len())
             .saturating_add(160);
         let mut encoder = Encoder::with_capacity(capacity, MAX_PROTOCOL_BODY_BYTES)?;
-        encoder.put_u16(FEDERATION_BODY_VERSION)?;
+        encoder.put_u16(if self.completion_coverage.is_some() {
+            2
+        } else {
+            FEDERATION_BODY_VERSION
+        })?;
         encoder.put_fixed(&self.request_id)?;
         encoder.put_fixed(&self.request_object_id)?;
         encoder.put_vector_u32(&self.request_object)?;
@@ -467,6 +518,9 @@ impl EdgeRequestRecord {
             self.completion_event_id.as_ref().map(|id| &id[..]),
         )?;
         encoder.put_u64(self.resulting_state_generation)?;
+        if let Some(coverage) = self.completion_coverage {
+            encoder.put_vector_u32(&coverage.encode()?)?;
+        }
         wrap(TableId::RequestResult, EDGE_REQUEST_KIND, encoder.finish())
     }
 
@@ -474,7 +528,10 @@ impl EdgeRequestRecord {
     pub fn decode(body: &[u8]) -> Result<Self, StorageError> {
         let inner = unwrap(TableId::RequestResult, EDGE_REQUEST_KIND, body)?;
         let mut decoder = Decoder::new(&inner);
-        expect_version(&mut decoder)?;
+        let version = decoder.u16()?;
+        if version != FEDERATION_BODY_VERSION && version != 2 {
+            return Err(StorageError::InvalidEncoding);
+        }
         let request_id = decoder.array::<ID_BYTES>()?;
         let request_object_id = decoder.array::<HASH_BYTES>()?;
         let request_object = decoder.vector_u32(MAX_OPERATION_OBJECT_BYTES)?.to_vec();
@@ -484,6 +541,13 @@ impl EdgeRequestRecord {
         let result_object = decoder.vector_u32(MAX_OPERATION_OBJECT_BYTES)?.to_vec();
         let completion_event_id = take_optional_fixed::<ID_BYTES>(&mut decoder)?;
         let resulting_state_generation = decoder.u64()?;
+        let completion_coverage = if version == 2 {
+            Some(CompletionCoverageRecord::decode(
+                decoder.vector_u32(MAX_PROTOCOL_BODY_BYTES)?,
+            )?)
+        } else {
+            None
+        };
         decoder.finish()?;
         if request_object.is_empty() || result_object.is_empty() != result_object_id.is_none() {
             return Err(StorageError::InvalidEncoding);
@@ -498,6 +562,7 @@ impl EdgeRequestRecord {
             result_object,
             completion_event_id,
             resulting_state_generation,
+            completion_coverage,
         })
     }
 }
