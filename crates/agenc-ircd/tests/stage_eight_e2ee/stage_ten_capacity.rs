@@ -2073,6 +2073,13 @@ fn control<'a>(
         }
     }
     *returned = campaign.quiesce()?;
+    // The record must show the whole configured duration: the loop stops
+    // when another cycle would not fit and the final reserve covers the
+    // quiescence check, so the load runs on through whatever remains.
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining > Duration::ZERO {
+        campaign.settle(remaining.as_secs().max(1))?;
+    }
     Ok(campaign)
 }
 
