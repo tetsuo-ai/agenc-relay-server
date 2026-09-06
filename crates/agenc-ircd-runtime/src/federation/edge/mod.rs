@@ -133,6 +133,19 @@ struct ConnectionOrigin {
     del_acked: bool,
 }
 
+impl ConnectionOrigin {
+    /// Whether a deletion acknowledgement names this closed origin: at the
+    /// generation the edge holds, or at the generation of the update still
+    /// in flight, which precedes the DEL on the link.
+    fn deletion_acknowledged_at(&self, generation: u64) -> bool {
+        let declared = self
+            .pending_updates
+            .front()
+            .map_or(self.generation, |update| update.generation);
+        self.deleted && (self.generation == generation || declared == generation)
+    }
+}
+
 /// The durable batch the edge is waiting on.
 enum PendingCommit {
     Journal {
@@ -851,7 +864,7 @@ impl EdgeFederation {
         };
         let origin = self.origins.get_mut(&connection).ok_or(Violation::Phase)?;
         let Some(object_id) = object_id else {
-            if !origin.deleted || origin.generation != generation {
+            if !origin.deletion_acknowledged_at(generation) {
                 return Err(Violation::Consistency);
             }
             origin.del_acked = true;

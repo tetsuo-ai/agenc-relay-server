@@ -294,12 +294,21 @@ fn send_origin_del(
     let Some(origin) = edge.origins.get(&generation) else {
         return;
     };
+    // An update still in flight precedes the DEL on the link, so the
+    // coordinator holds that generation, with no operation under it yet,
+    // by the time the DEL arrives.
+    let (declared_generation, next_operation_sequence) = origin
+        .pending_updates
+        .front()
+        .map_or((origin.generation, origin.sequence), |update| {
+            (update.generation, 0)
+        });
     let frame = agenc_ircd_federation_wire::FederationFrame::OriginDel {
         coordinator_server_id: edge.config.coordinator.server_id(),
         server_incarnation: edge.config.incarnation,
         origin_id: origin.origin_id,
-        generation: origin.generation,
-        next_operation_sequence: origin.sequence,
+        generation: declared_generation,
+        next_operation_sequence,
     };
     edge.send_frame(context, &frame);
 }

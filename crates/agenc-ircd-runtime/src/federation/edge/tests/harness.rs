@@ -1691,6 +1691,113 @@ async fn global_commands_fail_closed_while_the_link_is_down() -> TestResult {
     .await
 }
 
+/// A client that leaves while its registration update is still in flight
+/// closes an origin the coordinator already holds at the updated
+/// generation, because the update precedes the DEL on the link. The DEL
+/// must name that generation, or the coordinator refuses it as a wrong
+/// generation and retires the whole link (finding CAP-42).
+#[tokio::test]
+async fn a_deletion_behind_an_unacknowledged_update_names_the_updated_generation() -> TestResult {
+    run_edge_with_closes(|federation, inbox, closes| async move {
+        let mut hub = Hub::new(federation);
+        hub.establish().await?;
+        hub.synchronize().await?;
+        let mut client = Client::open(inbox.clone(), 1).await?;
+        hub.ack_origin().await?;
+        client.line("NICK rosa").await?;
+        client.line("USER rosa 0 * :Rosa Real").await?;
+        let (header, _, bytes) = hub.next_request().await?;
+        let session_id = SessionId::from_bytes([75; 16]);
+        let user_id = UserId::from_bytes([76; 16]);
+        hub.state_generation += 1;
+        let generation = hub.state_generation;
+        hub.event(
+            &ProjectedEvent::SessionVisible(SessionEventView {
+                source: source(user_id, "rosa", 2)?,
+                home_projection: Some(session_record(session_id, user_id, "rosa", generation, 2)?),
+            }),
+            None,
+        )
+        .await?;
+        let completion = hub
+            .event(
+                &ProjectedEvent::RequestCompleted {
+                    resulting_state_generation: generation,
+                },
+                Some(RequestCorrelation {
+                    replay_key: header.replay_key,
+                    request_id: header.request_id,
+                }),
+            )
+            .await?;
+        hub.result(
+            &header,
+            &bytes,
+            &ResultArm::SessionRegistered(SessionRegistered {
+                session_id,
+                user_id,
+                session_revision: generation,
+                account: None,
+                resulting_state_generation: generation,
+            }),
+            Vec::new(),
+            Some(completion),
+        )
+        .await?;
+        client.wait_for(" 001 rosa ").await?;
+        // The registration update is sent but not yet acknowledged.
+        let (update, object) = hub
+            .expect_frame(|frame, object| {
+                matches!(frame, FederationFrame::OriginUpdate { .. }) && object.is_some()
+            })
+            .await?;
+        let FederationFrame::OriginUpdate { descriptor, .. } = update else {
+            return Err("expected the registration update".into());
+        };
+        let object = object.ok_or("update without object")?;
+        assert_eq!(descriptor.generation, 1);
+        // The client leaves before the acknowledgement arrives.
+        client.close(&closes)?;
+        client.line("PING :gone").await.ok();
+        let (deletion, _) = hub
+            .expect_frame(|frame, _| matches!(frame, FederationFrame::OriginDel { .. }))
+            .await?;
+        let FederationFrame::OriginDel {
+            origin_id,
+            generation: deleted_generation,
+            next_operation_sequence,
+            ..
+        } = deletion
+        else {
+            return Err("expected the DEL".into());
+        };
+        assert_eq!(origin_id, descriptor.origin_id);
+        assert_eq!(deleted_generation, 1, "the DEL names the in-flight update");
+        assert_eq!(next_operation_sequence, 0);
+        // The coordinator acknowledges both in order and the link stays up.
+        hub.frame(FederationFrame::OriginAck {
+            edge_server_id: EDGE,
+            server_incarnation: descriptor.server_incarnation,
+            origin_id,
+            generation: 1,
+            object_id: Some(object.object_id()),
+        })
+        .await?;
+        hub.frame(FederationFrame::OriginAck {
+            edge_server_id: EDGE,
+            server_incarnation: descriptor.server_incarnation,
+            origin_id,
+            generation: 1,
+            object_id: None,
+        })
+        .await?;
+        let _another = Client::open(inbox, 2).await?;
+        hub.ack_origin().await?;
+        Ok(())
+    })
+    .await
+}
+
 /// A registered client that leaves while the coordinator link is down has
 /// no way to tell the coordinator; the edge retains its origin and replays
 /// its DEL after the next FORIGIN RESET, so the coordinator can drop the

@@ -1168,6 +1168,39 @@ row beside a restored peer, requires the reload to complete without
 quarantining the peer, and requires the peer to link again; it fails
 without the change, and the E2EE restart test passes again.
 
+### CAP-42: a deletion behind an unacknowledged update named the old generation
+
+Fixed. The resynchronization change advances an origin's generation only
+when the coordinator acknowledges the update (CAP-35), but the DEL a
+closing connection sends still named the generation the edge held. A
+client that left while its registration update was in flight, which the
+64-client campaign does at every churn and reconnect round, sent a DEL
+for generation 0 behind an update the coordinator had already applied at
+generation 1; the coordinator refused it as a wrong generation and retired
+the whole link, with every client of that edge. The DEL now names the
+in-flight update's generation with no operation under it, and the
+deletion acknowledgement accepts that generation. A unit test registers a
+client, holds the update unacknowledged, closes the client, and requires
+the DEL to name generation 1 and the link to stay up; it fails without
+the change.
+
+### CAP-43: recovery after a link retirement under disk pressure loops on a phase violation
+
+Open. With CAP-42 fixed, the 64-client campaign reaches the disk-pressure
+scenario, the refused marker batch retires edge a's link as CAP-12
+describes, and the edge never recovers: over the next minute it re-links
+44 times, the coordinator answers each resume with a snapshot, and the
+edge fails the link with a phase violation while in the snapshot phase
+while the coordinator fails others with an origin violation, until the
+recovery wait expires with no durable join admitted. The retained
+deleted origins of the closed clients accumulate across the attempts
+(78 at the end), the edge's activation gate stays unsatisfied, and the
+campaign records the scenario as not recovered. The path did recover
+before the resynchronization change, so the fault is in the new ordering
+of resume, snapshot activation, origin reset, and READY under a
+retirement. Evidence: `campaign-diag-10` beside the qualification
+directory (daemon logs and the diagnostic stderr of both nodes).
+
 ## Release claims and limits
 
 The signing command requires an explicit Ed25519 signing key and matching
