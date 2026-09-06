@@ -865,6 +865,7 @@ async fn an_origin_closed_while_the_link_is_down_is_replayed_and_deleted_after_t
         let mut hub = Hub::new(federation);
         hub.establish().await?;
         hub.synchronize().await?;
+        let inbox_for_passerby = inbox.clone();
         let mut client = Client::open(inbox, 1).await?;
         hub.ack_origin().await?;
         client.line("NICK rosa").await?;
@@ -916,6 +917,10 @@ async fn an_origin_closed_while_the_link_is_down_is_replayed_and_deleted_after_t
         .await?;
         client.close(&closes)?;
         client.line("PING :gone").await.ok();
+        // A client that comes and goes during the outage was never declared
+        // to the coordinator, so nothing of it is replayed.
+        let passerby = Client::open(inbox_for_passerby, 2).await?;
+        passerby.close(&closes)?;
         // The next link replays the closed origin's DEL before READY.
         hub.establish().await?;
         hub.expect_frame(|frame, _| matches!(frame, FederationFrame::OriginReset { .. }))

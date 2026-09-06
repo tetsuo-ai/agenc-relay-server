@@ -836,9 +836,10 @@ registered client while the link is down and require the next reset to
 replay the DEL and a later reset to replay nothing, delete an origin
 whose close never arrived and require its session hidden, and replay a
 deletion at a stale generation against the origin table. The campaign's
-quiescence check now also requires the whole population back and records
-population shortfalls, which the driver refuses; a 300-second development
-run with the change holds all 64 clients at both quiescence checks.
+quiescence check now also requires the whole population back, waiting up
+to 90 seconds for its paced return, and records population shortfalls,
+which the driver refuses; a 300-second development run with the change
+holds all 64 clients at both quiescence checks.
 
 ### CAP-19: a process action's confirmation is refused by any commit in between
 

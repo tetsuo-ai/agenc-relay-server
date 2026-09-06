@@ -126,6 +126,9 @@ struct ConnectionOrigin {
     /// The account and its session generation the coordinator registered.
     account: Option<(AccountId, u64)>,
     acked_generation: Option<u64>,
+    /// Whether the coordinator ever acknowledged a declaration of this
+    /// origin; one it never did has nothing to delete there.
+    ever_acked: bool,
     deleted: bool,
 }
 
@@ -806,6 +809,7 @@ impl EdgeFederation {
         for origin in self.origins.values_mut() {
             if origin.origin_id == origin_id && origin.generation == generation {
                 origin.acked_generation = Some(generation);
+                origin.ever_acked = true;
             }
         }
     }
@@ -912,6 +916,7 @@ impl EdgeFederation {
                 session: None,
                 account: None,
                 acked_generation: None,
+                ever_acked: false,
                 deleted: false,
             },
         );

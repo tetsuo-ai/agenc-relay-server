@@ -155,7 +155,9 @@ pub(super) fn declare_origin(
 /// Replays one origin after FORIGIN RESET: the exact current declaration
 /// of an open connection, or the DEL of one that closed while the link was
 /// down, so the coordinator learns of every closure it missed before READY
-/// revives the origins it still holds.
+/// revives the origins it still holds. A closed origin the coordinator
+/// never acknowledged has nothing to delete there and is dropped, so the
+/// connections of an outage do not return as a flood of deletions.
 pub(super) fn replay_origin(
     edge: &mut EdgeFederation,
     context: &mut StateCoreContext,
@@ -165,7 +167,11 @@ pub(super) fn replay_origin(
         return;
     };
     if origin.deleted {
-        send_origin_del(edge, context, generation);
+        if origin.ever_acked {
+            send_origin_del(edge, context, generation);
+        } else {
+            edge.origins.remove(&generation);
+        }
         return;
     }
     let update = origin.generation > 0;

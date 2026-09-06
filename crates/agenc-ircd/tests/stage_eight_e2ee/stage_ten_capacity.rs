@@ -46,6 +46,11 @@ const DEFAULT_CONNECTIONS: usize = 48;
 const MAX_CONNECTIONS: usize = 4_096;
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
 const QUIESCE_WINDOW: Duration = Duration::from_secs(8);
+/// How long a quiescence check waits for the whole population to be back:
+/// the paced return after a maintenance window takes up to 400 ms per
+/// client, and a client the coordinator refuses while it still hides that
+/// client's previous session retries every two seconds.
+const POPULATION_WAIT: Duration = Duration::from_secs(90);
 const SCENARIO_SETTLE: Duration = Duration::from_secs(12);
 const FINAL_RESERVE: Duration = Duration::from_secs(45);
 /// Steady-state rest between two cycles when the budget holds another.
@@ -1698,11 +1703,17 @@ the post-restart grace (CAP-7)"
     fn quiesce(&mut self) -> TestResult<bool> {
         self.shared.pause.store(true, Ordering::Relaxed);
         thread::sleep(QUIESCE_WINDOW);
-        let sample = take_sample(self.shared, &self.nodes, &self.admins)?;
-        let inside = within_envelope(&self.baseline, &sample.resources);
         // The whole population must be back: a client that cannot register
         // again after a scenario is a loss the resource envelope cannot see.
+        // It returns paced, so the check waits a bounded time for it.
         let expected = u64::try_from(self.settings.connections).unwrap_or(u64::MAX);
+        let deadline = Instant::now() + POPULATION_WAIT;
+        let mut sample = take_sample(self.shared, &self.nodes, &self.admins)?;
+        while sample.live_client_connections != expected && Instant::now() < deadline {
+            thread::sleep(Duration::from_secs(2));
+            sample = take_sample(self.shared, &self.nodes, &self.admins)?;
+        }
+        let inside = within_envelope(&self.baseline, &sample.resources);
         let live = sample.live_client_connections;
         let population = live == expected;
         self.note(format!(
