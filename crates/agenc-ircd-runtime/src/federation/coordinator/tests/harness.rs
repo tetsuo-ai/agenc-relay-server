@@ -2040,6 +2040,91 @@ fn resync_outbox_record(peer: ServerId) -> TestResult<InitialStorageRecord> {
     )?)
 }
 
+/// The account service keeps its per-request results in the same table and
+/// under the same record kind as coordinator results, keyed by the client's
+/// 16-byte request id. The reload must leave those rows to their owner
+/// instead of judging them as invalid coordinator results, which quarantined
+/// every peer at any restart after the first account request (CAP-41).
+#[tokio::test]
+async fn resync_reload_leaves_account_service_results_to_their_owner() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let incarnation = ServerIncarnation::from_bytes([51; 16]);
+    let records = vec![
+        restored_peer_record(peer, incarnation, PeerPhase::Ready)?,
+        account_service_result_record()?,
+    ];
+    let mut fixture =
+        StateCoreFixture::with_registration_router_and_records(entropy_script(), records)?;
+    let mut coordinator = standalone_coordinator(peer);
+    coordinator.startup(fixture.context_mut()?);
+    for _ in 0..64 {
+        if coordinator.loaded() {
+            break;
+        }
+        let Ok(Ok(message)) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            fixture.next_storage_read(),
+        )
+        .await
+        else {
+            break;
+        };
+        coordinator.storage_read_completed(fixture.context_mut()?, message);
+    }
+    assert!(
+        coordinator.loaded(),
+        "the reload must complete past a foreign row"
+    );
+    assert!(
+        coordinator
+            .peers
+            .get(&peer)
+            .is_some_and(|state| !state.quarantined),
+        "a foreign row must not quarantine the peers"
+    );
+    let (handle, _queue) = link_queue(1 << 20);
+    coordinator.inbound(
+        fixture.context_mut()?,
+        established(1, peer, incarnation, handle),
+    );
+    assert!(
+        coordinator
+            .peers
+            .get(&peer)
+            .is_some_and(|state| state.live.is_some()),
+        "the restored peer must link again"
+    );
+    Ok(())
+}
+
+/// Bytes shaped like the account service's request result: the coordinator's
+/// record kind over a body that is not a coordinator result, under the
+/// 16-byte client request id.
+fn account_service_result_record() -> TestResult<InitialStorageRecord> {
+    let body = agenc_ircd_storage::ProtocolRecordBody::new(
+        TableId::RequestResult,
+        agenc_ircd_storage::federation_records::COORDINATOR_RESULT_KIND,
+        1,
+        vec![7; 48],
+    )?;
+    let value = PersistentRecordValue::new(
+        TableId::RequestResult,
+        agenc_ircd_storage::federation_records::COORDINATOR_RESULT_KIND,
+        1,
+        0,
+        None,
+        Vec::new(),
+        body.encode()?,
+    )?
+    .encode()?;
+    Ok(InitialStorageRecord::new(
+        TableId::RequestResult,
+        agenc_ircd_storage::StoredKey::new(vec![41; 16])?,
+        1,
+        value,
+    )?)
+}
+
 #[tokio::test]
 async fn resync_restart_recovers_the_delivery_head_from_committed_outbox_rows() -> TestResult {
     let peer = ServerId::from_bytes([50; 16]);

@@ -1146,6 +1146,28 @@ The red and green evidence is recorded in
 [federation-resync-fixes.md](federation-resync-fixes.md). Qualification acceptance
 remains pending; no capacity campaign was run for this change.
 
+### CAP-41: the durable reload treated the account service's result rows as invalid coordinator results
+
+Fixed. Found by the workspace test suite after the resynchronization
+change, which its validation had not run: the real-daemon E2EE test that
+kills and restarts the coordinator never saw either edge become active
+again. The account service keeps its per-request results in the request
+result table under the same record kind as coordinator results, keyed by
+the client's 16-byte request id, while a coordinator result is keyed by
+its 64-byte replay key. The reload used to skip a row whose key it could
+not read as a replay key; the resynchronization change turned every such
+skip into a codec violation, and the first account row failed the reload,
+which quarantines every peer. From then on the restarted coordinator
+accepted each edge's link at the hello and closed it at once, 115 times in
+a minute in that test, and the edge dialled again every second while
+refusing its clients as network-unavailable. Any coordinator restart after
+the first account request disabled federation until an operator
+intervened. The reload now leaves a row whose key is not a replay key to
+its owner and judges only its own rows. A unit test seeds an account-style
+row beside a restored peer, requires the reload to complete without
+quarantining the peer, and requires the peer to link again; it fails
+without the change, and the E2EE restart test passes again.
+
 ## Release claims and limits
 
 The signing command requires an explicit Ed25519 signing key and matching

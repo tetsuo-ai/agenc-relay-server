@@ -28,6 +28,9 @@ use crate::state_core::StateCoreContext;
 use crate::state_core::projector::EdgeDelivery;
 
 const PAGE_ROWS: u16 = 256;
+/// The replay key that names a coordinator result: home server, incarnation,
+/// origin, generation, and sequence.
+const REPLAY_KEY_BYTES: usize = 16 + 16 + 16 + 8 + 8;
 const ENTRY_DECODE_BYTES: usize = 16_384;
 const ENTRY_DECODE_VALUES: usize = 256;
 
@@ -437,13 +440,20 @@ fn admit_result(
     key: &StoredKey,
     value: &PersistentRecordValue,
 ) -> Result<(), Violation> {
+    // The account service shares this table and this record kind for the
+    // results it keeps per client request id, under a 16-byte key; only a
+    // replay key names a coordinator result, so any other key is another
+    // owner's row and not this reload's to judge.
+    let bytes = key.as_bytes();
+    if bytes.len() != REPLAY_KEY_BYTES {
+        return Ok(());
+    }
     let Some((request_id, request_object_id)) = result_identity(key, value) else {
         return Err(Violation::Codec);
     };
     if !retain_history_result(context, value) {
         return Err(Violation::Codec);
     }
-    let bytes = key.as_bytes();
     let (Some(home), Some(incarnation), Some(origin)) = (
         bytes
             .get(..16)
