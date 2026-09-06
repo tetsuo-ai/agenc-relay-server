@@ -151,6 +151,7 @@ fn fixture_with_options(
             session: Some((identity.session_id, identity.user_id)),
             account: None,
             acked_generation: Some(0),
+            ever_acked: true,
             deleted: false,
         },
     );
