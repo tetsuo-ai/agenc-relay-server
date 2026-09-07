@@ -79,14 +79,21 @@ pub(super) fn resume(
         .peers
         .get_mut(&peer)
         .ok_or(Violation::Misaddressed)?;
-    if state.active || state.resend.is_some() {
-        return Err(Violation::Phase);
-    }
-    let retained = generation == state.projection_generation
-        && state.snapshot.is_none()
-        && !state.outbox.snapshot_required
-        && cursor_retained(state, cursor);
+    let same_generation = retained_resume_scope(state, generation)?;
+    let retained = same_generation && cursor_retained(state, cursor);
     if !retained {
+        if same_generation
+            && super::resume_reconciliation::begin(
+                coordinator,
+                context,
+                peer,
+                link,
+                generation,
+                cursor,
+            )?
+        {
+            return Ok(());
+        }
         return begin_snapshot(coordinator, context, link, peer);
     }
     let next = match cursor {
@@ -105,6 +112,15 @@ pub(super) fn resume(
         start_resend(coordinator, context, peer, next);
     }
     Ok(())
+}
+
+fn retained_resume_scope(state: &super::PeerState, generation: u64) -> Result<bool, Violation> {
+    if state.active || state.resend.is_some() || state.reconciliation.is_some() {
+        return Err(Violation::Phase);
+    }
+    Ok(generation == state.projection_generation
+        && state.snapshot.is_none()
+        && !state.outbox.snapshot_required)
 }
 
 /// Whether the edge's cursor is exactly the coordinator's durable cursor.

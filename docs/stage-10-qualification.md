@@ -19,10 +19,13 @@ release candidate.
 | Disk pressure | CAP-44 and CAP-45 fix reset cleanup and durable request reconstruction. CAP-3 still requires proof that the original refused session survives and recovers. |
 | Reconnect and shutdown load | The current CAP-4 release probe survives the unpaced reconnect wave, admits eight fresh clients after recovery, and stops all three daemons cleanly. CAP-14 needs a fresh capacity result after the CAP-51 and CAP-65 shutdown repairs. |
 | Missing implementation | CAP-5 needs stopped login-index rotation commands and their authenticated audit and migration contract. CAP-13 needs bounded ordinary-event batching with complete receipt, rollback, and resource checks. |
+| Companion delivery recovery | CAP-70 records lost retained delivery scope and rows at intact restart. CAP-71 records companion acknowledgements that change memory without owning a durable cursor transition. Production-loader and acknowledgement regressions reproduce both faults; durable repairs remain open. |
+| Declared recovery | CAP-72 records obsolete companion delivery, replay, and barrier rows copied into the new incarnation, plus typed live routes left outside recovery pending. A typed transform regression is being prepared. |
 | Physical storage growth | STO-1 remains open. The measured storage batch exceeds both the qualification ceiling and operational reserve; a smaller page size alone does not establish a universal bound. |
 | Release qualification | The release coverage floor, full fuzz and model runs, both native targets, seven-day soak, external E2EE review, and signed decision remain open. |
 
-The complete repair set passes the required development gates on 2026-09-07:
+The repair set committed as `74b869d` passes the required development gates
+on 2026-09-07:
 `cargo fmt --all --check`, workspace Clippy with all targets and features and
 warnings denied, the locked all-feature workspace test suite, source check
 and self-test, workspace policy check, and the critical coverage self-test.
@@ -32,6 +35,14 @@ files. Both coverage inventories bind the same 472 production source files;
 the release policy names 115 critical regions and retains its 90 percent
 overall and 100 percent critical branch floors. These checks do not replace
 the outstanding coverage measurement or ignored qualification campaigns.
+
+The CAP-3 repair also passes every required development gate. Its workspace
+run reports 2,115 passing tests, no failures, and 21 ignored qualification
+tests across 118 targets. Source policy accepts 600 Rust files. Both reviewed
+inventories bind 476 production source files, and the release policy covers
+127 critical regions with its coverage floors unchanged. The strict release
+campaign passes original-session pressure recovery but fails later restart
+synchronization, so this repair does not close capacity qualification.
 
 ## Current implementation
 
@@ -611,17 +622,21 @@ machine so it produces its ERROR reply. Ordinary router and asynchronous
 registration closes use the bounded writer flush rather than discarding
 queued replies as slow-consumer output. Real writer-queue regressions fail
 with the original close paths in `cap2-red.log` and `cap2-quit-red.log` and
-pass with the correction in `cap2-green.log`. The audit also found numeric
-263 absent from the closed reply registry on the pre-authentication rate
-refusal path; its shape and live refusal checks are still being completed.
+pass with the correction in `cap2-green.log`. Numeric 263 now has its exact
+closed wire shape. Reverting that registry correction drops the pre-authentication
+rate refusal in `cap2-preauth-red.log`; `cap2-preauth-green.log` verifies the
+reply is delivered while the transport remains open.
 
 ### CAP-3: a refused durable mutation under pressure closes the session
 
 A registered session whose JOIN was refused with `FAIL JOIN
 NETWORK_UNAVAILABLE` during disk pressure lost its transport within two
-seconds. Section 28.7 asks for a side-effect-free `SERVER_BUSY`; the edge
-instead reports the coordinator refusal as network loss and drops the client.
-The original campaign re-registers for its recovery check and notes the close.
+seconds. The link is already unavailable when the edge refuses that JOIN.
+Section 28.7 permits a side-effect-free `SERVER_BUSY` or a close required by
+the protocol; Section 20.9 requires a close when a full snapshot replaces a
+global client's projection. The original campaign re-registers for its
+recovery check. The strict campaign instead requires the original transport
+to survive this pressure scenario, exposing unnecessary snapshot recovery.
 
 The strict release run `campaign-strict-cap47-67.log` reproduces the fault
 after the current authentication and shutdown repairs. At 85.2 seconds the
@@ -630,6 +645,68 @@ liveness check fails with BrokenPipe. The run ends after 109.05 seconds and
 does not reach rekey or post-restart authentication. The assertion retains
 the original session and does not retry that transport, so this finding stays
 open. Its daemon logs are preserved in `campaign-strict-cap47-67/logs`.
+
+The diagnostic release run at committed source `74b869d` also fails after
+109.28 seconds in `campaign-cap3-diagnostic-74b869d.log`. Temporary fixed-label
+diagnostics identify the first rejected operation on each affected node:
+the coordinator owns an origin acknowledgement, and edge-a owns an ordinary
+event while active. Both receive `FilesystemRejected` in the same UTC second;
+their separate monotonic clocks do not establish cross-process ordering.
+The edge's journal rejection occurs later, while its link is already down.
+
+On the first reconnect, both reported cursors exactly match retained outbox
+events. Their projection generations match, neither peer requires or owns a
+snapshot, and neither has an open in-memory barrier. The requested sequences
+are 3,573 and 3,467; the last durable acknowledgements are 3,493 and 3,389.
+The coordinator nevertheless selects snapshots because it recognizes only
+equality with the last durable acknowledgement. Refused snapshot writes then
+discard that in-memory retained window. After storage recovers, the diagnostic
+records the actual snapshot client-close path on edge-a before BrokenPipe.
+
+The worktree repair validates the complete ordinary retained prefix through
+sealed reads of at most 64 rows. It checks every key, sequence, immutable event
+identity, and authenticated link scope before deleting any row. Each durable
+checkpoint deletes at most 256 covered rows and updates the peer cursor in the
+same transaction. ResumeOk follows the final matching receipt, then the
+existing resend path replays successors. A prefix containing a cross-profile
+part is refused without deleting it or substituting a snapshot; this ordinary
+path does not repair the separate companion faults below.
+
+Thirteen coordinator regressions pass in
+`cap3-retained-resume-thirteen-green.log`. They include a real restart after the
+first 256-row checkpoint, exact continuation through the remaining rows,
+timer-capacity exhaustion, rejected writes, intermediate identity mismatch,
+duplicate resume, link replacement, quiescence, and cross-profile exclusion.
+`cap3-retained-resume-red.log` records the old branch choosing a new snapshot
+generation after a rejected acknowledgement instead of retaining the cursor.
+
+The edge correction retains exact dirty journal versions after classified
+determinate resource refusal and retries through a matching delayed timer.
+New commands are refused before consuming an origin sequence. The recovery
+latch opens only after every retained change commits. Timer allocation failure
+keeps admission closed; a later authenticated link can arm a new delayed
+attempt, while duplicate or stale establishment cannot replace its owner.
+Nine regressions pass in `cap3-journal-green.log`. The separate reverted
+failures are `cap3-journal-red.log` and `cap3-journal-admission-red.log`.
+Indeterminate receipts retain StateCore's fatal reconciliation handling.
+The inherited closed-origin reset fixture now allocates a fresh checked link
+ID for each authentication, matching the production owner. Reusing ID 7 made
+the new stale-establishment guard correctly ignore its reconnect. That fixture
+fails in `cap3-link-fixture-red.log` and passes in
+`cap3-link-fixture-green.log`; the production guard remains unchanged.
+
+All temporary logging was removed before the fixed release build. Exact source,
+binaries, and hashes are preserved in `cap3-fixed-release-74b869d`. The unchanged
+strict campaign now passes its first pressure scenario: the original session
+survives, the first recovery mutation commits, and fresh registration succeeds.
+The complete run nevertheless fails after 250.30 seconds in
+`campaign-cap3-fixed-74b869d.log`: the edges do not finish synchronization after
+coordinator restart. Preserved logs show edge-b repeatedly reconnecting as soon
+as it returns from the earlier forced kill; edge-a stays linked during that
+interval. After the coordinator restart, edge-b remains the sustained blocker.
+The existing logs lack the rejecting phase and violation, so they do not yet
+identify its cause. Rekey and the strict post-restart authentication check are
+not reached. All required workspace gates pass, and capacity qualification remains open.
 
 ### CAP-4: a coordinator restart under a client reconnection storm fails closed
 
@@ -1999,6 +2076,90 @@ new challenge, the exact committed NOTE and clean EOF, and the late known
 password's typed invalid-login result. `cap69-evidence-green.log` rejects
 refusal text, extra output, transport failures, successful authentication,
 and account-identity mismatch as false evidence.
+
+### CAP-70: intact companion restart drops retained delivery scope and events
+
+Open. The ordinary daemon restart preserves its stored incarnation and
+recovery epoch. Companion startup collects delivery records but restores only
+cursor rows, leaving the retained event queue, barrier, and peer synchronization
+state empty. ERESUME then treats the absent in-memory peer scope as initial
+admission and opens a new ESTATE generation, even if no paired base snapshot
+advanced the durable client resynchronization epoch.
+
+Companion Section 12.5 requires byte-identical replay of unacknowledged rows
+within the same authenticated scope. Its ESTATE rules permit initial admission,
+a new recovery scope, or an explicit paired base snapshot. An intact process
+restart alone satisfies none of those exceptions. Restoring only the cursor
+therefore loses the evidence required to resume the existing delivery stream.
+
+The source audit is `cap3-companion-recovery-audit.md` in the qualification
+scratch directory. The real-storage regression in `cap70-intact-restart-red.log`
+commits ESTATE activation and two production events, discards the owner, and
+reloads authenticated rows into a fresh owner. With unchanged incarnations,
+epochs, and base resynchronization state, ERESUME produces StateBegin and
+StateEnd at generation 1 instead of ResumeOk at generation 0 and the original
+event bytes. The behavioral failure takes 0.07 seconds; an earlier fixture
+revision error is not counted as evidence. Exact regression source and its
+frozen executable are retained in `cap70-71-proof` outside the worktree.
+
+The legacy cursor and snapshot records omit the historical scope needed to
+reconstruct empty streams and exact READY retries. The repair therefore needs
+an explicit successor storage format and migration rules. It cannot infer the
+old companion scope from the current base peer. A legitimate paired reset
+remains a separate positive case. The CAP-3 pressure trace does not establish
+this companion failure, and no repair is claimed yet.
+
+### CAP-71: companion acknowledgement coverage has no durable receipt owner
+
+Open. EACK validates its addressed delivery stream and then changes its
+in-memory acknowledged cursor and replay class. It returns no staged action,
+updates no durable outbox row, and owns no storage receipt. A later event may
+write the cursor incidentally, but an ACK followed by an intact restart can
+recover older coverage. The outer coordinator can also release a combined
+barrier immediately from this in-memory companion cursor when the base half
+is already durable.
+
+The companion stream must retain its last acknowledged cursor and move rows
+to acknowledged replay atomically. Base Section 20.8 requires both barrier
+halves to have durable acknowledgement coverage before release. The current
+companion path cannot establish that condition. Correct restoration under
+CAP-70 must therefore include an explicit acknowledgement transaction and its
+receipt ownership, with complete barrier metadata reconstructed from durable
+evidence.
+
+The independent real-storage regression in `cap71-ack-receipt-red.log`
+reproduces the fault in 0.07 seconds: EACK returns no Stage action for its cursor
+transition. The exact source and frozen executable are retained alongside the
+CAP-70 proof. This failure establishes the missing durable owner; it does not
+claim successful rejection or restart recovery.
+
+The repair also requires rejection before submission, successful commit followed
+by restart without an unrelated event, and the four combinations of durable
+base and companion coverage. It must preserve the existing fatal handling of
+indeterminate storage and prohibit snapshot substitution for an unfinished
+barrier. Those tests and the production correction remain in progress.
+
+### CAP-72: declared recovery preserves obsolete companion state and live routes
+
+Open. The restore selector sends every E2eeState row to RestoreE2eeState.
+That transform updates only the legacy kind-1 recovery gate and copies every
+other kind unchanged. Typed route rows use kind 2, replay rows and origin
+floors use kind 9, delivery cursors and outboxes use kind 10, and combined
+barrier records use kind 12. The route's recovery_gate therefore stays false,
+while obsolete stream and barrier ownership survives into the new incarnation.
+
+Section 23.7 requires every live encrypted route to enter recovery pending
+while preserving its counters and proof head. It also requires discarding old
+base and companion delivery scope, barriers, their parts and receipts, and
+federation request replay roots. The current table-wide selection cannot apply
+those distinct rules. This source finding needs a typed restore regression;
+no executed repair or successful recovery is claimed yet.
+
+The correction must select and validate each closed record kind, preserve
+non-federation proof and mailbox state, and apply the route recovery transition
+without changing counters or inventing evidence. Until that repair passes,
+the existing declared-recovery command is not a valid escape route for the
+ambiguous legacy companion scope identified in CAP-70.
 
 ## Release claims and limits
 

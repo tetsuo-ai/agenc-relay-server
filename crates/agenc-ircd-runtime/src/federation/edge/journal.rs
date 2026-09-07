@@ -15,11 +15,12 @@ use agenc_ircd_storage::{PersistentRecordValue, StoredKey, TableId};
 use agenc_ircd_types::RequestId;
 
 use super::{
-    ConnectionOrigin, EdgeCompletion, EdgeFederation, PendingCommit, Phase, Violation, request,
+    ConnectionOrigin, EdgeCompletion, EdgeFederation, PendingCommit, Phase, Violation,
+    journal_retry, request,
 };
 use crate::RuntimeError;
 use crate::connection::ConnectionGeneration;
-use crate::state_core::StateCoreContext;
+use crate::state_core::{StageRefused, StateCoreContext};
 
 const BATCH_ROWS: usize = 64;
 
@@ -39,6 +40,18 @@ pub(super) struct Version {
 pub(super) struct Journal {
     dirty: BTreeSet<Identity>,
     durable: BTreeMap<Identity, Vec<u8>>,
+    pub(super) retry: journal_retry::Retry,
+}
+
+enum StageFailure {
+    Preparation(Violation),
+    Admission(StageRefused),
+}
+
+impl From<Violation> for StageFailure {
+    fn from(violation: Violation) -> Self {
+        Self::Preparation(violation)
+    }
 }
 
 pub(super) fn origin_record(
@@ -179,23 +192,65 @@ impl EdgeFederation {
 }
 
 pub(super) fn continue_write(edge: &mut EdgeFederation, context: &mut StateCoreContext) {
-    if edge.commit.is_some()
-        || context.in_flight()
-        || context.pending_len() != 0
-        || edge.journal.dirty.is_empty()
-    {
+    continue_write_inner(edge, context, false);
+}
+
+pub(super) fn retry_write(edge: &mut EdgeFederation, context: &mut StateCoreContext) {
+    continue_write_inner(edge, context, true);
+}
+
+fn continue_write_inner(
+    edge: &mut EdgeFederation,
+    context: &mut StateCoreContext,
+    retry_authorized: bool,
+) {
+    if context.is_quiescing() {
+        journal_retry::cancel(edge, context);
         return;
     }
-    if let Err(violation) = stage(edge, context) {
-        edge.fail_link(context, violation);
+    if edge.journal.dirty.is_empty() && edge.commit.is_none() {
+        journal_retry::recovered(edge, context);
+        return;
+    }
+    if edge.journal.retry.waiting.is_some() {
+        return;
+    }
+    if edge.journal.retry.recovering && !retry_authorized {
+        journal_retry::defer(edge, context);
+        return;
+    }
+    if storage_occupied(edge, context) {
+        if edge.journal.retry.recovering {
+            journal_retry::defer(edge, context);
+        }
+        return;
+    }
+    attempt_write(edge, context);
+}
+
+fn storage_occupied(edge: &EdgeFederation, context: &StateCoreContext) -> bool {
+    edge.commit.is_some() || context.in_flight() || context.pending_len() != 0
+}
+
+fn attempt_write(edge: &mut EdgeFederation, context: &mut StateCoreContext) {
+    match stage(edge, context) {
+        Ok(()) => {}
+        Err(StageFailure::Admission(error)) if journal_retry::stage_retryable(&error) => {
+            journal_retry::defer(edge, context);
+        }
+        Err(StageFailure::Admission(StageRefused::Quiescing)) => {
+            journal_retry::cancel(edge, context);
+        }
+        Err(StageFailure::Admission(_)) => edge.fail_link(context, Violation::Ceiling),
+        Err(StageFailure::Preparation(violation)) => edge.fail_link(context, violation),
     }
 }
 
-fn stage(edge: &mut EdgeFederation, context: &mut StateCoreContext) -> Result<(), Violation> {
+fn stage(edge: &mut EdgeFederation, context: &mut StateCoreContext) -> Result<(), StageFailure> {
     let plan = context
         .domain()
         .plan_account_service_checkpoint()
-        .map_err(|_| Violation::Ceiling)?;
+        .map_err(|error| StageFailure::Admission(StageRefused::Domain(error)))?;
     let revision = plan.resulting_revision().get();
     let mut versions = Vec::new();
     let mut writes = Vec::new();
@@ -235,10 +290,12 @@ fn stage(edge: &mut EdgeFederation, context: &mut StateCoreContext) -> Result<()
         );
         versions.push(Version { identity, body });
     }
-    let fanout = super::render::EventFanout::default().finish()?;
+    let fanout = super::render::EventFanout::default()
+        .finish()
+        .map_err(Violation::from)?;
     context
         .stage_durable_with_account_service(plan, fanout, None, 0, writes)
-        .map_err(|_| Violation::Ceiling)?;
+        .map_err(StageFailure::Admission)?;
     edge.commit = Some(PendingCommit::Journal {
         staged_after: context.head().storage_commit_sequence,
         versions,

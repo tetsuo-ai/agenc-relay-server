@@ -14,6 +14,7 @@ mod fence;
 mod history;
 mod join_echo;
 mod journal;
+mod journal_retry;
 pub(crate) use render::prefix as source_prefix;
 mod render;
 mod request;
@@ -389,6 +390,9 @@ impl EdgeFederation {
 
     /// Handles a due timer; returns `false` when it was not the edge's.
     pub fn timer_fired(&mut self, context: &mut StateCoreContext, entry: TimerEntry) -> bool {
+        if journal_retry::timer_fired(self, context, entry) {
+            return true;
+        }
         let (TimerKind::CompanionProfileDeadline, TimedId::Peer(peer)) = (entry.kind, entry.id)
         else {
             return false;
@@ -690,6 +694,9 @@ impl EdgeFederation {
         session: LinkSession,
         handle: LinkHandle,
     ) {
+        if !journal_retry::observe_link(self, session.link) {
+            return;
+        }
         self.live = Some(LiveLink {
             link: session.link,
             handle,
@@ -698,6 +705,9 @@ impl EdgeFederation {
         });
         self.phase = Phase::Origins;
         self.note_phase();
+        if !journal_retry::link_reestablished(self, context) {
+            return;
+        }
         if fence::needed(self) {
             if let Err(violation) = fence::stage(self, context) {
                 self.fail_link(context, violation);
@@ -1357,9 +1367,18 @@ impl EdgeFederation {
 
     /// Drops the work behind a rejected batch; the coordinator re-delivers.
     pub fn batch_rejected(&mut self, context: &mut StateCoreContext) {
+        self.batch_rejected_with_error(context, agenc_ircd_storage::StorageError::Unavailable);
+    }
+
+    /// Retains journal ownership only after a determinate storage refusal.
+    pub fn batch_rejected_with_error(
+        &mut self,
+        context: &mut StateCoreContext,
+        error: agenc_ircd_storage::StorageError,
+    ) {
         if matches!(self.commit, Some(PendingCommit::Journal { .. })) {
             self.commit = None;
-            self.fail_link(context, Violation::Ceiling);
+            journal_retry::rejected(self, context, error);
             return;
         }
         if matches!(
@@ -1392,6 +1411,11 @@ impl EdgeFederation {
             // Resume starts at the previous committed projection and cursor.
             self.fail_link(context, Violation::Ceiling);
         }
+    }
+
+    /// Cancels ordinary retry work when StateCore starts shutdown.
+    pub(crate) fn cancel_journal_retry(&mut self, context: &mut StateCoreContext) {
+        journal_retry::cancel(self, context);
     }
 }
 

@@ -6,6 +6,20 @@ use crate::test_support::TestResult;
 use tokio::sync::mpsc::Receiver;
 
 impl StateCore {
+    /// Rejects a gather batch before it reaches the storage owner.
+    pub(crate) fn reject_fixture_batch_before_submission(
+        &mut self,
+        error: agenc_ircd_storage::StorageError,
+    ) -> TestResult {
+        if self.context.in_flight() {
+            return Err("cannot reject a submitted fixture batch".into());
+        }
+        let batch = self.context.pending.take().ok_or("no fixture batch")?;
+        let rejected = self.context.reject_batch(batch, error);
+        self.report_rejections(rejected);
+        Ok(())
+    }
+
     /// Closes the gather window and settles exactly one staged batch.
     pub(crate) async fn commit_fixture_batch(
         &mut self,

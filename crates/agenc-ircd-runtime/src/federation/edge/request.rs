@@ -500,6 +500,9 @@ pub(super) fn send_session_open(
     capability_hash: [u8; 32],
     auth_grant_id: Option<[u8; 32]>,
 ) -> Result<(), Violation> {
+    if edge.journal.retry.recovering {
+        return Err(Violation::Ceiling);
+    }
     let origin = edge.origins.get(&generation).ok_or(Violation::Phase)?;
     let parsed = agenc_ircd_domain::NicknameValue::parse(nickname).map_err(|_| Violation::Codec)?;
     let operation = FederatedOperation::SessionOpen {
@@ -535,7 +538,7 @@ pub(super) fn send_account_carrier(
     finish: bool,
     carrier_generation: u64,
 ) -> Result<(), Violation> {
-    if edge.phase != Phase::Active {
+    if edge.phase != Phase::Active || edge.journal.retry.recovering {
         return Err(Violation::Phase);
     }
     let mut budget = DecodeBudget::new(8_192, 64);
@@ -593,7 +596,9 @@ pub(super) fn send_command(
     kind: RegisteredCommandKind,
     message: Box<ParsedMessage>,
 ) -> Result<(), (Box<ParsedMessage>, DomainError)> {
-    if edge.phase != Phase::Active && !is_local_user_mode_query(&message) {
+    if (edge.phase != Phase::Active || edge.journal.retry.recovering)
+        && !is_local_user_mode_query(&message)
+    {
         return Err((message, DomainError::ServerBusy));
     }
     let Some((session_id, user_id)) = edge

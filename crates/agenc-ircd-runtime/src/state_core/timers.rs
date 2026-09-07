@@ -67,10 +67,14 @@ pub enum TimerKind {
     CommandDeadline,
     /// The fixed origin grace interval after a federation link is lost.
     FederationGrace,
+    /// One paced retry after definite edge journal admission refusal.
+    FederationJournalRetry,
     /// The pacing step between snapshot entry sends.
     FederationSnapshotSend,
     /// The fixed snapshot token lifetime.
     FederationSnapshotExpiry,
+    /// One paced retained-cursor validation or durable reconciliation step.
+    FederationResumeRetry,
     /// The companion ECAP negotiation deadline of one link.
     CompanionProfileDeadline,
     /// A companion ESTATE snapshot token lifetime.

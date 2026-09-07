@@ -16,6 +16,7 @@ mod history;
 mod origin;
 mod query;
 mod request;
+mod resume_reconciliation;
 mod snapshot;
 mod startup;
 #[cfg(test)]
@@ -124,6 +125,7 @@ struct PeerState {
     active: bool,
     snapshot: Option<snapshot::Snapshot>,
     resend: Option<snapshot::Resend>,
+    reconciliation: Option<resume_reconciliation::Reconciliation>,
     ready_identity: Option<agenc_ircd_federation_wire::SnapshotIdentity>,
 }
 
@@ -219,6 +221,7 @@ enum PendingCommit {
         delivery_sequence: u64,
         event_id: EventId,
     },
+    ResumeAcknowledged(resume_reconciliation::ChunkReceipt),
     OutboxRequired {
         peer: ServerId,
     },
@@ -331,6 +334,7 @@ impl FederationCoordinator {
                         active: false,
                         snapshot: None,
                         resend: None,
+                        reconciliation: None,
                         ready_identity: None,
                     },
                 )
@@ -467,6 +471,10 @@ impl FederationCoordinator {
             && self.crypto.is_none()
             && self.replays.is_empty()
             && !self.history.busy()
+            && self
+                .peers
+                .values()
+                .all(|state| state.reconciliation.is_none())
     }
 
     /// Dispatches one link message at a safe point.
@@ -685,6 +693,11 @@ impl FederationCoordinator {
         if let Some(previous) = state.live.take() {
             self.links.remove(&previous.link);
         }
+        state.reconciliation = None;
+        let _cancelled = context.timers_mut().cancel(
+            TimerKind::FederationResumeRetry,
+            TimedId::Peer(session.peer),
+        );
         state.live = Some(LiveLink {
             link: session.link,
             handle,
@@ -735,6 +748,7 @@ impl FederationCoordinator {
         if !self.link_is_live(link, peer) {
             return;
         }
+        resume_reconciliation::cancel(self, context, peer);
         self.links.remove(&link);
         self.remote_carriers_link_closed(peer);
         self.companion.link_closed(link);
@@ -904,6 +918,9 @@ impl FederationCoordinator {
             .filter(|barrier| !barrier.base_acked)
             .map(|barrier| barrier.base_last);
         let state = self.peers.get(&peer).ok_or(Violation::Misaddressed)?;
+        if state.reconciliation.is_some() {
+            return Err(Violation::Phase);
+        }
         let Some((front, expected, _)) = state.outbox.unacked.front().copied() else {
             return Err(Violation::Acknowledgement);
         };
@@ -1148,6 +1165,7 @@ impl FederationCoordinator {
         self.loader.owns(read_id)
             || self.replays.contains_key(&read_id)
             || snapshot::owns_read(self, read_id)
+            || resume_reconciliation::owns_read(self, read_id)
             || self.history.owns(read_id)
     }
 
@@ -1158,6 +1176,10 @@ impl FederationCoordinator {
         message: crate::bridge::StorageReadCompletionMessage,
     ) {
         if startup::read_completed(self, context, &message) {
+            return;
+        }
+        if resume_reconciliation::owns_read(self, message.read_id) {
+            resume_reconciliation::read_completed(self, context, message);
             return;
         }
         if snapshot::owns_read(self, message.read_id) {
@@ -1189,6 +1211,7 @@ impl FederationCoordinator {
         entry: crate::state_core::timers::TimerEntry,
     ) -> bool {
         grace::timer_fired(self, context, entry)
+            || resume_reconciliation::timer_fired(self, context, entry)
             || snapshot::timer_fired(self, context, entry)
             || self.companion_timer_fired(context, entry)
             || companion::snapshot_timer_fired(self, context, entry)
@@ -1285,6 +1308,8 @@ impl FederationCoordinator {
         // stage a new outer result. That result does not belong to this receipt.
         if matches!(self.pending.as_ref(), Some(PendingCommit::Request { staged_after, .. })
             if context.head().storage_commit_sequence <= *staged_after)
+            || matches!(self.pending.as_ref(), Some(PendingCommit::ResumeAcknowledged(receipt))
+                if context.head().storage_commit_sequence <= receipt.staged_after)
         {
             None
         } else {
@@ -1357,6 +1382,9 @@ impl FederationCoordinator {
                 event_id,
             }) => {
                 self.acknowledgement_committed(context, peer, delivery_sequence, event_id);
+            }
+            Some(PendingCommit::ResumeAcknowledged(receipt)) => {
+                resume_reconciliation::committed(self, context, receipt);
             }
             Some(PendingCommit::OutboxRequired { peer }) => {
                 if let Some(state) = self.peers.get_mut(&peer) {
@@ -1431,9 +1459,21 @@ impl FederationCoordinator {
     /// link, so the edge declares or resumes again from its committed state
     /// instead of waiting for an answer the coordinator will never send.
     pub fn batch_rejected(&mut self, context: &mut StateCoreContext) {
+        self.batch_rejected_with_error(context, agenc_ircd_storage::StorageError::Unavailable);
+    }
+
+    /// Settles the exact storage refusal without advancing durable coverage.
+    pub fn batch_rejected_with_error(
+        &mut self,
+        context: &mut StateCoreContext,
+        error: agenc_ircd_storage::StorageError,
+    ) {
         context.reject_remote_account_results();
         self.remote_grant_rejected();
         match self.pending.take() {
+            Some(PendingCommit::ResumeAcknowledged(receipt)) => {
+                resume_reconciliation::rejected(self, context, receipt, error);
+            }
             Some(PendingCommit::History(prepared)) => history::rejected(self, *prepared),
             Some(PendingCommit::Cleanup { peer }) => grace::continue_cleanup(self, context, peer),
             Some(PendingCommit::Request {

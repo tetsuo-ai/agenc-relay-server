@@ -45,6 +45,7 @@ use crate::test_support::{FrameSink, StateCoreFixture};
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
 mod durability;
+mod journal_retry;
 mod restart;
 
 const NETWORK: NetworkId = NetworkId::from_bytes([31; 32]);
@@ -1132,6 +1133,12 @@ impl Hub {
     }
 
     async fn establish(&mut self) -> TestResult {
+        self.link = LinkId::new(
+            self.link
+                .get()
+                .checked_add(1)
+                .ok_or("link attempt overflow")?,
+        );
         let session = LinkSession {
             link: self.link,
             peer: COORDINATOR,

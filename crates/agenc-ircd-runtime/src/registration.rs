@@ -3034,6 +3034,9 @@ impl CommandRouter for RegistrationRouter {
     }
 
     fn begin_shutdown(&mut self, context: &mut StateCoreContext) -> bool {
+        if let Some(edge) = self.edge.as_mut() {
+            edge.cancel_journal_retry(context);
+        }
         let Some(accounts) = self.accounts.as_mut() else {
             return true;
         };
@@ -3167,11 +3170,11 @@ impl CommandRouter for RegistrationRouter {
         &mut self,
         context: &mut StateCoreContext,
         origin: Option<crate::state_core::StagedOrigin>,
-        _error: agenc_ircd_storage::StorageError,
+        error: agenc_ircd_storage::StorageError,
     ) {
         context.discard_local_join_seeds();
         if let Some(federation) = self.federation.as_mut() {
-            federation.batch_rejected(context);
+            federation.batch_rejected_with_error(context, error);
         }
         if let (Some(accounts), Some(federation)) =
             (self.accounts.as_mut(), self.federation.as_mut())
@@ -3179,7 +3182,7 @@ impl CommandRouter for RegistrationRouter {
             crate::remote_accounts::batch_settled(context, accounts, federation);
         }
         if let Some(edge) = self.edge.as_mut() {
-            edge.batch_rejected(context);
+            edge.batch_rejected_with_error(context, error);
         }
         if let Some(e2ee) = self.e2ee.as_mut() {
             e2ee.batch_rejected();

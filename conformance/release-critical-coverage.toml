@@ -10,8 +10,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 472
-reviewed_source_sha256 = "ef077806c809ab0369bfa0cb4b03704bac64ef239a50ffc71159f86a39da0a17"
+reviewed_source_files = 476
+reviewed_source_sha256 = "0a19f05dcb6abfbecf5d22ced36211847d9ace1e4c9b57630569536643cd1d2b"
 deferred = []
 
 [[region]]
@@ -1047,9 +1047,9 @@ reason = "A committed JOIN snapshot may only be opened for its original bound co
 id = "runtime-edge-user-mode-identity"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/federation/edge/request.rs"
-source_sha256 = "41d5ae1cfca6d15a41b567b776662d2255e3b800ef93ca8cc7878d481b6fae04"
-start_line = 1062
-end_line = 1085
+source_sha256 = "42938c19c3f7e5ab97e1e80a8f719f5253d1c8c1f0c3fb0696ebbd424460c9fe"
+start_line = 1067
+end_line = 1090
 metric = "branches"
 reason = "A user-mode mutation may target only the requesting session nickname."
 
@@ -1057,9 +1057,9 @@ reason = "A user-mode mutation may target only the requesting session nickname."
 id = "runtime-edge-local-user-mode-authority"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/federation/edge/request.rs"
-source_sha256 = "41d5ae1cfca6d15a41b567b776662d2255e3b800ef93ca8cc7878d481b6fae04"
-start_line = 695
-end_line = 745
+source_sha256 = "42938c19c3f7e5ab97e1e80a8f719f5253d1c8c1f0c3fb0696ebbd424460c9fe"
+start_line = 700
+end_line = 750
 metric = "branches"
 reason = "Local user-mode reads retain their own-session authority during federation partitions."
 
@@ -1157,8 +1157,128 @@ reason = "Each held requester echo must correspond to exactly one accepted JOIN 
 id = "runtime-coordinator-result-receipt-ownership"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/mod.rs"
-source_sha256 = "3bee1ab5789ab7040f0e71a2df785bf512ee41447385ef8bc07d810fe602e4ce"
-start_line = 1283
-end_line = 1293
+source_sha256 = "99b0f80f3699ae5ec4720b5dc01da09b7acf4825a24f64761ebc8cfbc61ac8b3"
+start_line = 1306
+end_line = 1318
 metric = "branches"
 reason = "A result staged by an account callback cannot settle under the preceding storage receipt."
+
+[[region]]
+id = "runtime-resume-retained-scope"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/federation/coordinator/snapshot.rs"
+source_sha256 = "0d59dda80eaf771fb27734b7e9a4a24d51a2ebbd7ca95a3d1cf7dd095195fd80"
+start_line = 117
+end_line = 124
+metric = "branches"
+reason = "A resume candidate requires the exact retained projection scope without a pending or required snapshot."
+
+[[region]]
+id = "runtime-resume-candidate"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/federation/coordinator/resume_reconciliation.rs"
+source_sha256 = "d5ced0a9b9b3af18ddc7b31f949618dcaaf2e978a03104c9332ed2f80e04c400"
+start_line = 64
+end_line = 128
+metric = "branches"
+reason = "A newer resume cursor must name an exact retained contiguous prefix owned by the authenticated link."
+
+[[region]]
+id = "runtime-resume-live-owner"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/federation/coordinator/resume_reconciliation.rs"
+source_sha256 = "d5ced0a9b9b3af18ddc7b31f949618dcaaf2e978a03104c9332ed2f80e04c400"
+start_line = 144
+end_line = 155
+metric = "branches"
+reason = "Asynchronous resume work remains bound to its original link, incarnation, generation, and retained scope."
+
+[[region]]
+id = "runtime-resume-prefix-sequence"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/federation/coordinator/resume_reconciliation.rs"
+source_sha256 = "d5ced0a9b9b3af18ddc7b31f949618dcaaf2e978a03104c9332ed2f80e04c400"
+start_line = 392
+end_line = 413
+metric = "branches"
+reason = "Every bounded validation page must continue the exact authenticated retained event sequence."
+
+[[region]]
+id = "runtime-resume-retained-event-identity"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/federation/coordinator/resume_reconciliation.rs"
+source_sha256 = "d5ced0a9b9b3af18ddc7b31f949618dcaaf2e978a03104c9332ed2f80e04c400"
+start_line = 415
+end_line = 424
+metric = "branches"
+reason = "Each decoded event must match its exact in-memory retained sequence and event identity."
+
+[[region]]
+id = "runtime-resume-ordinary-event"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/federation/coordinator/resume_reconciliation.rs"
+source_sha256 = "d5ced0a9b9b3af18ddc7b31f949618dcaaf2e978a03104c9332ed2f80e04c400"
+start_line = 426
+end_line = 462
+metric = "branches"
+reason = "Sealed outbox keys and event metadata must match the resume target and exclude incomplete cross-profile coverage."
+
+[[region]]
+id = "runtime-resume-durable-publication"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/federation/coordinator/resume_reconciliation.rs"
+source_sha256 = "d5ced0a9b9b3af18ddc7b31f949618dcaaf2e978a03104c9332ed2f80e04c400"
+start_line = 553
+end_line = 590
+metric = "branches"
+reason = "Resume success follows committed deletion and cursor coverage and cannot publish on a replacement link."
+
+[[region]]
+id = "runtime-resume-rejection-classification"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/federation/coordinator/resume_reconciliation.rs"
+source_sha256 = "d5ced0a9b9b3af18ddc7b31f949618dcaaf2e978a03104c9332ed2f80e04c400"
+start_line = 605
+end_line = 610
+metric = "branches"
+reason = "Only classified determinate resource refusals may retain a resume retry owner."
+
+[[region]]
+id = "runtime-journal-stage-refusal-classification"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/federation/edge/journal_retry.rs"
+source_sha256 = "0e1bf0f1afe5d12f52c7e3bb5f17994249ae84faf372ced3a3293f38eada764a"
+start_line = 25
+end_line = 35
+metric = "branches"
+reason = "Journal retry admits only classified resource refusals before any plan was staged."
+
+[[region]]
+id = "runtime-journal-storage-refusal-classification"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/federation/edge/journal_retry.rs"
+source_sha256 = "0e1bf0f1afe5d12f52c7e3bb5f17994249ae84faf372ced3a3293f38eada764a"
+start_line = 37
+end_line = 42
+metric = "branches"
+reason = "Journal retry cannot turn an unclassified or fatal storage failure into recoverable progress."
+
+[[region]]
+id = "runtime-journal-retry-timer-owner"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/federation/edge/journal_retry.rs"
+source_sha256 = "0e1bf0f1afe5d12f52c7e3bb5f17994249ae84faf372ced3a3293f38eada764a"
+start_line = 131
+end_line = 147
+metric = "branches"
+reason = "Only the matching peer and current timer generation can authorize a retained journal retry."
+
+[[region]]
+id = "runtime-journal-rearm-link-owner"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/federation/edge/journal_retry.rs"
+source_sha256 = "0e1bf0f1afe5d12f52c7e3bb5f17994249ae84faf372ced3a3293f38eada764a"
+start_line = 76
+end_line = 87
+metric = "branches"
+reason = "Stale or duplicate authenticated link notifications cannot reopen a failed retry schedule."

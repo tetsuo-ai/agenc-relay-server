@@ -51,6 +51,9 @@ mod away_results;
 #[path = "account_shutdown.rs"]
 mod account_shutdown;
 
+#[path = "retained_resume.rs"]
+mod retained_resume;
+
 const NETWORK: NetworkId = NetworkId::from_bytes([31; 32]);
 const COORDINATOR: ServerId = ServerId::from_bytes([32; 16]);
 const COORDINATOR_NAME: &str = "server.example";
