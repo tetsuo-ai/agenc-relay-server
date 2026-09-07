@@ -2078,9 +2078,49 @@ fn control<'a>(
     // quiescence check, so the load runs on through whatever remains.
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining > Duration::ZERO {
-        campaign.settle(remaining.as_secs().max(1))?;
+        campaign.settle(final_wait_seconds(remaining)?)?;
     }
     Ok(campaign)
+}
+
+/// Converts the final remainder into whole seconds without shortening it.
+fn final_wait_seconds(remaining: Duration) -> TestResult<u64> {
+    remaining
+        .as_secs()
+        .checked_add(u64::from(remaining.subsec_nanos() != 0))
+        .ok_or_else(|| failure("campaign wait exceeds the whole-second range"))
+}
+
+#[test]
+fn the_final_wait_covers_the_remainder_with_the_fewest_whole_seconds() -> TestResult {
+    for remaining in [
+        Duration::from_millis(1_500),
+        Duration::from_nanos(1),
+        Duration::from_nanos(999_999_999),
+        Duration::ZERO,
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+        Duration::from_secs(MAX_CAMPAIGN_SECONDS) - Duration::from_millis(500),
+        Duration::from_secs(MAX_CAMPAIGN_SECONDS),
+        Duration::from_secs(u64::MAX),
+    ] {
+        let seconds = final_wait_seconds(remaining)?;
+        assert!(
+            Duration::from_secs(seconds) >= remaining,
+            "a final wait of {seconds}s would end before the remaining {remaining:?}"
+        );
+        if let Some(previous) = seconds.checked_sub(1) {
+            assert!(
+                Duration::from_secs(previous) < remaining,
+                "the final wait includes an unnecessary whole second"
+            );
+        }
+    }
+    assert!(
+        final_wait_seconds(Duration::new(u64::MAX, 1)).is_err(),
+        "an unrepresentable whole-second wait must fail without wrapping"
+    );
+    Ok(())
 }
 
 /// Polls every node's `STATS FEDERATION` until no base outbox object or

@@ -635,8 +635,16 @@ deleted sequence for a restart.
 After a coordinator restart, with both edge links re-established, the first
 authentication of an existing account at an edge was answered with `904 SASL
 authentication failed` in some runs and succeeded in others. The engine
-retries within a thirty-second grace after a restart and notes every such
-retry in the record.
+retries within a thirty-second grace after a restart and reports the retry
+count if a later attempt succeeds.
+
+The first release-profile development run with CAP-44 and CAP-45 fixed,
+`campaign-cap44-45-1`, exhausted that grace and stopped before rekey. During
+the grace interval, edge b established its federation link 28 times and
+closed it 29 times. The logs do not identify the coordinator's rejection
+reason. A second run reached rekey after two SASL failures. CAP-7 remains
+open; a transport establishment alone does not prove federation requests
+are available.
 
 ### CAP-8: a listener ceiling lowered by reload is not enforced
 
@@ -1210,6 +1218,75 @@ in the edge harness, which fails without the retirement change. Evidence:
 the 300-second campaign passes end to end, recording the disk-pressure
 scenario as refused and recovered, then clearing backup, peer loss,
 login-index reconstruction, and rekey.
+
+### CAP-44: snapshot activation discarded completed incarnation cleanup
+
+Fixed. A rekeyed edge repeatedly hit the reset-incarnation fence because
+snapshot activation changed the peer's authority phase from Clean to Ready.
+The first RESET correctly fenced the old incarnation and waited for its
+durable session cleanup. After cleanup committed Clean, the replacement
+reconnected and completed the base snapshot before sending RESET. The
+snapshot callback overwrote Clean, so RESET fenced the same predecessor
+again. The rejected replacement was never recorded.
+
+Snapshot activation now preserves the authority phase. The replacement
+stays blocked through the fence and cleanup, then completes its snapshot
+with Clean intact. RESET can accept the new incarnation, and origin replay
+commits Ready. The old incarnation remains permanently fenced. A returning
+incarnation also remains Suspended through snapshot activation, preserving
+the companion profile's origin-readiness gate. Wire and record formats are
+unchanged.
+
+Two coordinator regressions fail without the change. The replacement test
+commits a hosted session, the authority fence, the cleanup, and the new
+snapshot, then requires the replacement RESET and Ready checkpoint to
+succeed. The second requires a returning incarnation to remain Suspended
+after snapshot activation. Red logs are `cap44-red.log` and
+`cap44-suspended-red.log` under the qualification scratch directory. The
+coordinator test run passes with the change in `cap44-green.log`.
+Qualification acceptance remains pending.
+
+### CAP-45: a client close left its durable request body out of date
+
+Fixed. Release disk-pressure runs sometimes entered a snapshot rejection
+loop. A committed registration result could still be waiting for its
+completion event when the client disconnected. Closing the connection
+changed the pending request's sink flag without marking its journal row
+dirty. The later snapshot compared the changed request with the old durable
+body and rejected ACTIVE with a phase violation. Reconnecting replayed READY
+for the same snapshot and repeated the rejection. Waiting longer could not
+repair the missing write.
+
+Connection close now marks each affected request for a journal write and
+continues the journal. Snapshot activation still requires the exact durable
+request body. The regression retains a registration result without its
+completion event, closes the client, commits the journal, and activates a
+covering snapshot. The request is retired without replying to the closed
+client and stays retired after restart. With the fix absent, the snapshot
+fails with `active after close: Phase`; the log is `cap45-snapshot-red.log`
+under the qualification scratch directory. The final regression passes in
+`cap45-closed-result-green.log`. Wire formats, record formats, and the
+recovery timeout are unchanged. Qualification acceptance remains pending.
+
+### CAP-46: the campaign stopped before its configured deadline
+
+Fixed. The release-profile development campaign `campaign-cap44-45-2`
+completed every scenario, restored all 64 clients, and drained all three
+base outboxes in 5.2 seconds. Its runtime assertions passed, but the
+qualification validator rejected the report's 299,391,685,354 nanoseconds
+against the required 300 seconds. The closing wait converted the remaining
+duration to whole seconds by truncation, dropping the fractional second.
+Daemon shutdown ran later and correctly did not count toward the campaign
+duration.
+
+The final wait now rounds a fractional second upward. The report continues
+to measure actual monotonic elapsed time, and the qualification validator
+still requires the full configured duration. A boundary regression requires
+the wait to cover the remaining duration with less than one second of
+rounding overhead. Its red log is `cap46-final-wait-red.log`, and the
+corrected test passes in `cap46-final-wait-green.log` under the qualification
+scratch directory. The earlier short report is retained as failed duration
+evidence and is not accepted for qualification.
 
 ## Release claims and limits
 

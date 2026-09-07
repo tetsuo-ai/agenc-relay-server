@@ -189,6 +189,112 @@ async fn resync_snapshot_covers_registration_whose_completion_was_lost() -> Test
     Ok(())
 }
 
+/// A durable result can outlive its client while its completion is missing.
+/// Closing that client must persist the changed sink flag before a later
+/// snapshot examines the exact result journal body (finding CAP-45).
+#[tokio::test]
+async fn a_closed_registration_result_remains_durable_and_snapshot_cleanup_completes() -> TestResult
+{
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let mut edge = resync_edge();
+    let connection = ConnectionGeneration::new(1);
+    edge.connection_opened(fixture.context_mut()?, connection);
+    request::send_session_open(
+        &mut edge,
+        fixture.context_mut()?,
+        connection,
+        1,
+        "closed",
+        "Closed",
+        [1; 32],
+        None,
+    )
+    .map_err(|error| format!("request: {error:?}"))?;
+    commit_edge_batches(&mut edge, &mut fixture).await?;
+    let request_id = retain_uncompleted_registration(&mut edge, fixture.context_mut()?)?;
+    commit_edge_batches(&mut edge, &mut fixture).await?;
+    assert!(journal::is_durable(
+        &edge,
+        journal::Identity::Request(request_id)
+    ));
+    edge.connection_closed(
+        fixture.context_mut()?,
+        connection,
+        "closed before completion",
+    );
+    commit_edge_batches(&mut edge, &mut fixture).await?;
+    assert!(
+        journal::is_durable(&edge, journal::Identity::Request(request_id)),
+        "the closed client's changed request body must reach the journal"
+    );
+    let _queue = resync_snapshot_link(&mut edge);
+    let identity = resync_empty_snapshot(&mut edge, &mut fixture)?;
+    commit_edge_batches(&mut edge, &mut fixture).await?;
+    sync::snapshot_active(&mut edge, fixture.context_mut()?, identity)
+        .map_err(|error| format!("active after close: {error:?}"))?;
+    let completions = commit_edge_batches(&mut edge, &mut fixture).await?;
+    assert!(
+        completions.is_empty(),
+        "the closed client must not receive a result"
+    );
+    assert!(!edge.pending.contains_key(&request_id));
+    assert_eq!(
+        edge.replica.projection_generation(),
+        identity.projection_generation
+    );
+    let mut restarted = resync_edge();
+    fixture.restore_edge_state(&mut restarted, None)?;
+    assert!(
+        !restarted.pending.contains_key(&request_id),
+        "snapshot cleanup must survive restart"
+    );
+    Ok(())
+}
+
+fn retain_uncompleted_registration(
+    edge: &mut EdgeFederation,
+    context: &mut crate::state_core::StateCoreContext,
+) -> TestResult<agenc_ircd_types::RequestId> {
+    let pending = edge.pending.values().next().ok_or("request")?;
+    let header = ResultHeader {
+        network_id: NETWORK,
+        replay_key: pending.header.replay_key,
+        request_id: pending.header.request_id,
+        request_object_id: federation_object_id(&pending.bytes),
+        completion_event_id: Some(EventId::from_bytes([76; 16])),
+        result_kind: agenc_ircd_types::FederationResultKind::SessionRegistered,
+    };
+    let bytes = header
+        .build(
+            &ResultArm::SessionRegistered(SessionRegistered {
+                session_id: SessionId::from_bytes([77; 16]),
+                user_id: UserId::from_bytes([78; 16]),
+                session_revision: 9,
+                account: None,
+                resulting_state_generation: 9,
+            })
+            .to_object()?,
+            Vec::new(),
+        )?
+        .encode_canonical()?;
+    let descriptor = OperationDescriptor {
+        addressed_server_id: EDGE,
+        server_incarnation: EDGE_INCARNATION,
+        origin_id: header.replay_key.origin_id,
+        origin_generation: 0,
+        operation_sequence: 0,
+        request_id: header.request_id,
+        object_id: federation_object_id(bytes.as_slice()),
+    };
+    let object = resync_assembled(bytes.as_slice(), |fragment| FederationFrame::Result {
+        descriptor,
+        fragment,
+    })?;
+    request::receive_result(edge, context, descriptor, &object)
+        .map_err(|error| format!("result: {error:?}"))?;
+    Ok(header.request_id)
+}
+
 fn resync_empty_snapshot(
     edge: &mut EdgeFederation,
     fixture: &mut StateCoreFixture,

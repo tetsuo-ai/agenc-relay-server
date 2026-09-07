@@ -981,7 +981,8 @@ pub(super) fn ready_committed(
         .timers_mut()
         .cancel(TimerKind::FederationSnapshotExpiry, TimedId::Peer(peer));
     state.ready_identity = Some(snapshot.identity);
-    state.phase = agenc_ircd_storage::federation_records::PeerPhase::Ready;
+    // Projection activation preserves origin authority. A replacement RESET
+    // still needs the durable Clean phase; origin replay alone advances Ready.
     let frame = FederationFrame::SnapshotActive {
         edge_server_id: peer,
         identity: snapshot.identity,

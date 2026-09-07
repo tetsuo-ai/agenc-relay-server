@@ -4054,6 +4054,166 @@ async fn resync_a_new_incarnation_fences_before_cleaning_the_previous_one() -> T
 }
 
 #[tokio::test]
+async fn a_replacement_incarnation_is_admitted_after_cleanup_and_snapshot() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let first = ServerIncarnation::from_bytes([51; 16]);
+    let second = ServerIncarnation::from_bytes([52; 16]);
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let user = resync_persist_session(&mut fixture, peer, 1, 9, "kate").await?;
+    let mut coordinator = standalone_coordinator(peer);
+    let context = fixture.context_mut()?;
+    let (handle, _queue) = link_queue(1 << 20);
+    coordinator.inbound(context, established(1, peer, first, handle));
+    synchronized_peer_fixture(&mut coordinator, peer, first)?;
+    coordinator.inbound(context, closed(1, peer));
+    let (handle, _queue_again) = link_queue(1 << 20);
+    coordinator.inbound(context, established(2, peer, second, handle));
+    coordinator.inbound(context, reset_frame(2, peer, second));
+    assert!(context.domain().session(user).is_some());
+    assert_eq!(
+        coordinator.peers.get(&peer).ok_or("peer")?.incarnation,
+        Some(first)
+    );
+
+    fixture.commit_staged_batch().await?;
+    coordinator.batch_applied(fixture.context_mut()?);
+    let context = fixture.context_mut()?;
+    assert!(context.domain().session(user).is_none());
+    assert!(context.domain().durable_session(user).is_some());
+    assert_eq!(
+        coordinator.peers.get(&peer).ok_or("peer")?.phase,
+        PeerPhase::Expired
+    );
+    let (handle, _queue_during_cleanup) = link_queue(1 << 20);
+    let LinkEvent::Established { session, handle } = established(3, peer, second, handle).event
+    else {
+        return Err("establishment fixture".into());
+    };
+    coordinator.link_established(context, session, handle);
+    assert!(coordinator.peers.get(&peer).ok_or("peer")?.live.is_none());
+
+    fixture.commit_staged_batch().await?;
+    coordinator.batch_applied(fixture.context_mut()?);
+    assert!(
+        fixture
+            .context_mut()?
+            .domain()
+            .durable_session(user)
+            .is_none()
+    );
+    assert_eq!(
+        resync_read_peer(&mut fixture, peer).await?.phase,
+        PeerPhase::Clean
+    );
+
+    let (handle, _queue_after_cleanup) = link_queue(1 << 20);
+    coordinator.inbound(fixture.context_mut()?, established(4, peer, second, handle));
+    complete_replacement_snapshot(&mut fixture, &mut coordinator, peer).await?;
+    assert_eq!(
+        coordinator.peers.get(&peer).ok_or("peer")?.phase,
+        PeerPhase::Clean,
+        "snapshot activation preserves the completed authority cleanup"
+    );
+    assert_eq!(
+        resync_read_peer(&mut fixture, peer).await?.phase,
+        PeerPhase::Clean
+    );
+    let violations = coordinator.counters().violations;
+    coordinator.inbound(fixture.context_mut()?, reset_frame(4, peer, second));
+    assert_eq!(coordinator.counters().violations, violations);
+    assert_eq!(
+        coordinator.peers.get(&peer).ok_or("peer")?.incarnation,
+        Some(second)
+    );
+    assert!(matches!(
+        coordinator.pending,
+        Some(PendingCommit::OriginReady { .. })
+    ));
+    fixture.commit_staged_batch().await?;
+    coordinator.batch_applied(fixture.context_mut()?);
+    let record = resync_read_peer(&mut fixture, peer).await?;
+    assert_eq!(record.phase, PeerPhase::Ready);
+    assert_eq!(record.server_incarnation, *second.as_bytes());
+    assert!(coordinator.link_is_live(LinkId::new(4), peer));
+    assert_eq!(
+        coordinator
+            .origins
+            .fenced_incarnations_of(peer)
+            .collect::<Vec<_>>(),
+        vec![first]
+    );
+    Ok(())
+}
+
+/// Commits the base snapshot that precedes a replacement's origin reset.
+async fn complete_replacement_snapshot(
+    fixture: &mut StateCoreFixture,
+    coordinator: &mut FederationCoordinator,
+    peer: ServerId,
+) -> TestResult {
+    snapshot::resume(
+        coordinator,
+        fixture.context_mut()?,
+        LinkId::new(4),
+        peer,
+        0,
+        agenc_ircd_federation_wire::DeliveryCursor::Empty,
+    )
+    .map_err(|error| format!("snapshot resume: {error:?}"))?;
+    fixture.commit_staged_batch().await?;
+    coordinator.batch_applied(fixture.context_mut()?);
+    let snapshot = coordinator
+        .peers
+        .get(&peer)
+        .and_then(|state| state.snapshot.as_ref())
+        .ok_or("snapshot")?;
+    assert!(snapshot.end_sent);
+    let identity = snapshot.identity;
+    snapshot::ready(
+        coordinator,
+        fixture.context_mut()?,
+        LinkId::new(4),
+        peer,
+        identity,
+    )
+    .map_err(|error| format!("snapshot ready: {error:?}"))?;
+    fixture.commit_staged_batch().await?;
+    coordinator.batch_applied(fixture.context_mut()?);
+    assert_eq!(
+        coordinator.peers.get(&peer).ok_or("peer")?.ready_identity,
+        Some(identity)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn snapshot_activation_keeps_same_incarnation_origins_suspended() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let incarnation = ServerIncarnation::from_bytes([51; 16]);
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let mut coordinator = standalone_coordinator(peer);
+    let context = fixture.context_mut()?;
+    let (handle, _queue) = link_queue(1 << 20);
+    coordinator.inbound(context, established(1, peer, incarnation, handle));
+    synchronized_peer_fixture(&mut coordinator, peer, incarnation)?;
+    coordinator.inbound(context, closed(1, peer));
+    let (handle, _queue_again) = link_queue(1 << 20);
+    coordinator.inbound(context, established(4, peer, incarnation, handle));
+    complete_replacement_snapshot(&mut fixture, &mut coordinator, peer).await?;
+    assert_eq!(
+        coordinator.peers.get(&peer).ok_or("peer")?.phase,
+        PeerPhase::Suspended,
+        "projection activation cannot complete origin replay"
+    );
+    assert_eq!(
+        resync_read_peer(&mut fixture, peer).await?.phase,
+        PeerPhase::Suspended
+    );
+    assert!(coordinator.link_is_live(LinkId::new(4), peer));
+    Ok(())
+}
+
+#[tokio::test]
 async fn resync_restart_keeps_the_replaced_incarnation_fenced() -> TestResult {
     let peer = ServerId::from_bytes([50; 16]);
     let first = ServerIncarnation::from_bytes([51; 16]);

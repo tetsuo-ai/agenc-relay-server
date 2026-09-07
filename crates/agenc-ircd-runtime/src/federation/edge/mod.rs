@@ -1035,13 +1035,21 @@ impl EdgeFederation {
         }
         request::delete_origin(self, context, generation);
         self.deferred.remove(&generation);
-        for pending in self
+        let changed: Vec<_> = self
             .pending
-            .values_mut()
-            .filter(|pending| pending.generation == generation)
-        {
-            pending.sink_gone = true;
+            .iter_mut()
+            .filter(|(_, pending)| pending.generation == generation)
+            .map(|(id, pending)| {
+                pending.sink_gone = true;
+                *id
+            })
+            .collect();
+        // Snapshot coverage compares the current request with its durable
+        // body, including this sink flag. Persist every changed request.
+        for id in changed {
+            journal::mark_dirty(self, journal::Identity::Request(id));
         }
+        journal::continue_write(self, context);
     }
 
     /// Requests a session for a connection that completed local
