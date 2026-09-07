@@ -691,6 +691,16 @@ impl FederationCoordinator {
         if !state.accepted_epochs.contains(&session.peer_recovery_epoch) {
             state.accepted_epochs.push(session.peer_recovery_epoch);
         }
+        if self
+            .origins
+            .link_reestablished(session.peer, session.peer_incarnation)
+        {
+            // The edge is back before its grace passed, so its disconnect grace
+            // is cancelled: a link that reconnects but resyncs slowly must not
+            // be fenced as if it were gone. A later loss starts a fresh grace.
+            state.grace_deadline = None;
+            grace::cancel_grace(context, session.peer);
+        }
         self.links.insert(session.link, session.peer);
         if context
             .federation()

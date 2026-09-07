@@ -651,6 +651,20 @@ impl OriginTable {
         Ok(grace_deadline)
     }
 
+    /// A lost link came back before its grace interval passed. The incarnation
+    /// is present again, so its disconnect grace is cancelled; the origins stay
+    /// suspended until the resync re-declares them, and a later loss starts a
+    /// fresh interval. Returns whether a pending grace was cleared.
+    pub fn link_reestablished(&mut self, edge: ServerId, incarnation: ServerIncarnation) -> bool {
+        let Some(link) = self.edges.get(&edge) else {
+            return false;
+        };
+        if link.server_incarnation != incarnation || matches!(link.phase, EdgePhase::Expired) {
+            return false;
+        }
+        self.grace_deadlines.remove(&edge).is_some()
+    }
+
     /// Fences an edge incarnation whose grace interval passed, returning the
     /// sessions that cleanup must hide in byte order.
     pub fn expire(&mut self, edge: ServerId, now: MonotonicTick) -> Option<Vec<SessionId>> {

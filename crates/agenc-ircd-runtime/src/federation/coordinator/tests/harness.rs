@@ -2413,6 +2413,41 @@ async fn synchronous_grace_expiry_hides_every_hosted_session() -> TestResult {
 }
 
 #[tokio::test]
+async fn a_link_that_returns_before_its_grace_passes_is_not_fenced() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let context = fixture.context_mut()?;
+    let mut coordinator = standalone_coordinator(peer);
+    let incarnation = ServerIncarnation::from_bytes([51; 16]);
+    let (handle, _queue) = link_queue(1 << 20);
+    coordinator.inbound(context, established(1, peer, incarnation, handle));
+    synchronized_peer_fixture(&mut coordinator, peer, incarnation)?;
+    let user_id = host_session(context, peer, "kate")?;
+    // The link drops: a disconnect grace interval starts.
+    coordinator.inbound(context, closed(1, peer));
+    let deadline = grace_deadline(context)?;
+    let entry = pop_grace_timer(context, peer, deadline)?;
+    // The same incarnation reconnects before the grace passes. A link that is
+    // back but resyncs slowly must not be fenced as if it were gone.
+    let (handle_again, _queue_again) = link_queue(1 << 20);
+    coordinator.inbound(context, established(2, peer, incarnation, handle_again));
+    // The stale grace, fired now, finds no pending interval and fences nothing.
+    let handled = coordinator.timer_fired(context, entry);
+    assert!(handled);
+    assert_eq!(
+        context.pending_len(),
+        0,
+        "a reconnected edge must not stage an authority fence from its previous link's grace"
+    );
+    assert_eq!(coordinator.counters().sessions_expired, 0);
+    assert!(
+        context.domain().session(user_id).is_some(),
+        "the hosted session survives the returned link"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_closed_queue_retires_the_link_without_a_violation() -> TestResult {
     let peer = ServerId::from_bytes([50; 16]);
     let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
