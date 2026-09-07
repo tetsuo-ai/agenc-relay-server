@@ -97,7 +97,7 @@ impl fmt::Display for RenderError {
 
 impl Error for RenderError {}
 
-#[derive(Eq, PartialEq)]
+#[derive(Eq, Hash, PartialEq)]
 struct RenderTag {
     key: String,
     value: Option<String>,
@@ -150,7 +150,7 @@ impl ExactOutput {
 }
 
 /// One validated server-to-client message plan.
-#[derive(Eq, PartialEq)]
+#[derive(Eq, Hash, PartialEq)]
 pub struct WireMessage {
     prefix: String,
     command: String,
@@ -867,7 +867,7 @@ fn stage_two_numeric_shape_is_applicable(
     }
     let trailing_is_applicable = match code {
         221 | 324 | 329 | 333 | 341 | 346 | 348 | 367 => trailing.is_none(),
-        303 | 319 | 322 | 332 | 353 => trailing.is_some(),
+        302 | 303 | 319 | 322 | 332 | 353 => trailing.is_some(),
         _ => trailing.is_some_and(|description| !description.is_empty()),
     };
     trailing_is_applicable && stage_two_numeric_middle_is_applicable(code, middle)
@@ -908,12 +908,12 @@ fn stage_six_numeric_middle_is_applicable(code: u16, middle: &[&str]) -> bool {
 
 fn stage_six_reply_middle_is_applicable(code: u16, middle: &[&str]) -> bool {
     match code {
-        303 | 305 | 306 | 323 | 371 | 374 => middle.is_empty(),
+        302 | 303 | 305 | 306 | 323 | 371 | 374 | 730..=733 => middle.is_empty(),
         221 => matches!(middle, [modes] if modes.starts_with('+')),
         301 | 315 | 318 | 319 | 321 | 331 | 332 | 347 | 349 | 366 | 368 | 369 | 391 => {
             middle.len() == 1
         }
-        311 => middle.len() == 4,
+        311 | 314 => middle.len() == 4,
         312 | 341 | 346 | 348 | 353 => middle.len() == 2,
         322 => matches!(middle, [_, users] if is_ascii_decimal(users)),
         324 => (2..=8).contains(&middle.len()),
@@ -932,6 +932,10 @@ fn stage_six_reply_middle_is_applicable(code: u16, middle: &[&str]) -> bool {
 
 fn stage_six_error_middle_is_applicable(code: u16, middle: &[&str]) -> bool {
     match code {
+        263 => middle.len() == 1,
+        734 => {
+            matches!(middle, [limit, targets] if is_ascii_decimal(limit) && *limit != "0" && !targets.is_empty())
+        }
         409 | 411 | 412 | 481 | 483 | 501 | 502 => middle.is_empty(),
         401..=407 | 442 | 471 | 473..=477 | 482 => middle.len() == 1,
         441 | 443 => middle.len() == 2,

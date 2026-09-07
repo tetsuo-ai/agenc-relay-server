@@ -1144,7 +1144,8 @@ impl ClientSink for FrameSink {
     }
 
     fn queue_snapshot(&self) -> ClientQueueSnapshot {
-        ClientQueueSnapshot::default()
+        // Recorded frames have already drained from this nonblocking test sink.
+        ClientQueueSnapshot::new(0, 1_048_576)
     }
 }
 

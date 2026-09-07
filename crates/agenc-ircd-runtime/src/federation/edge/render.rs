@@ -20,12 +20,16 @@ use crate::state_core::fanout::{
     FanoutFrame, FanoutRequest, FanoutTarget, MAX_FANOUT_FRAMES, MAX_FANOUT_TARGETS,
 };
 
+#[cfg(test)]
+#[path = "tests/fanout.rs"]
+mod tests;
+
 /// One bounded fanout shared by every event in a durable apply.
 #[derive(Default)]
 pub(super) struct EventFanout {
     targets: Vec<FanoutTarget>,
-    frames: Vec<FanoutFrame>,
-    indices: std::collections::BTreeMap<ConnectionGeneration, usize>,
+    frames: std::collections::HashMap<(usize, WireMessage), Vec<usize>>,
+    indices: std::collections::BTreeMap<ConnectionGeneration, (usize, usize)>,
 }
 
 impl EventFanout {
@@ -38,34 +42,85 @@ impl EventFanout {
         if frames.is_empty() {
             return Ok(());
         }
-        if frames.len() > MAX_FANOUT_FRAMES.saturating_sub(self.frames.len()) {
+        let Some((index, mut position)) = self.target_position(context, generation)? else {
+            return Ok(());
+        };
+        for frame in frames {
+            self.append_frame(index, position, frame)?;
+            position = position.checked_add(1).ok_or(RuntimeError::Overflow)?;
+        }
+        self.indices.insert(generation, (index, position));
+        Ok(())
+    }
+
+    fn target_position(
+        &mut self,
+        context: &StateCoreContext,
+        generation: ConnectionGeneration,
+    ) -> Result<Option<(usize, usize)>, RuntimeError> {
+        if let Some(position) = self.indices.get(&generation) {
+            return Ok(Some(*position));
+        }
+        let Some(sink) = context.sessions().sink_for_generation(generation) else {
+            return Ok(None);
+        };
+        if self.targets.len() >= MAX_FANOUT_TARGETS {
             return Err(RuntimeError::LimitExceeded);
         }
-        let index = if let Some(index) = self.indices.get(&generation) {
-            *index
-        } else {
-            let Some(sink) = context.sessions().sink_for_generation(generation) else {
-                return Ok(());
-            };
-            if self.targets.len() >= MAX_FANOUT_TARGETS {
+        self.targets
+            .try_reserve(1)
+            .map_err(|_| RuntimeError::MemoryExhausted)?;
+        let index = self.targets.len();
+        self.targets.push(FanoutTarget { generation, sink });
+        self.indices.insert(generation, (index, 0));
+        Ok(Some((index, 0)))
+    }
+
+    /// Sharing by position preserves repeated equal frames and every sink's
+    /// ordering, even when other sinks have different capability projections.
+    fn append_frame(
+        &mut self,
+        target: usize,
+        position: usize,
+        frame: WireMessage,
+    ) -> Result<(), RuntimeError> {
+        let key = (position, frame);
+        if !self.frames.contains_key(&key) {
+            if self.frames.len() >= MAX_FANOUT_FRAMES {
                 return Err(RuntimeError::LimitExceeded);
             }
-            let index = self.targets.len();
-            self.targets.push(FanoutTarget { generation, sink });
-            self.indices.insert(generation, index);
-            index
-        };
-        self.frames
-            .try_reserve_exact(frames.len())
-            .map_err(|_| RuntimeError::MemoryExhausted)?;
-        for frame in frames {
-            self.frames.push(FanoutFrame::new(frame, vec![index])?);
+            self.frames
+                .try_reserve(1)
+                .map_err(|_| RuntimeError::MemoryExhausted)?;
         }
+        let recipients = self.frames.entry(key).or_default();
+        if recipients.len() >= MAX_FANOUT_TARGETS {
+            return Err(RuntimeError::LimitExceeded);
+        }
+        recipients
+            .try_reserve(1)
+            .map_err(|_| RuntimeError::MemoryExhausted)?;
+        recipients.push(target);
         Ok(())
     }
 
     pub(super) fn finish(self) -> Result<FanoutRequest, RuntimeError> {
-        FanoutRequest::new(self.targets, self.frames)
+        let mut groups = Vec::new();
+        groups
+            .try_reserve_exact(self.frames.len())
+            .map_err(|_| RuntimeError::MemoryExhausted)?;
+        groups.extend(self.frames);
+        groups.sort_unstable_by_key(|((position, _), recipients)| {
+            (*position, recipients.first().copied())
+        });
+        let mut frames = Vec::new();
+        frames
+            .try_reserve_exact(groups.len())
+            .map_err(|_| RuntimeError::MemoryExhausted)?;
+        for ((_, message), recipients) in groups {
+            frames.push(FanoutFrame::new(message, recipients)?);
+        }
+        FanoutRequest::new(self.targets, frames)
     }
 }
 
@@ -152,11 +207,13 @@ pub(super) fn event_channel_label(edge: &EdgeFederation, event: &ProjectedEvent)
 pub(super) fn render_event(
     edge: &mut EdgeFederation,
     context: &mut StateCoreContext,
+    header: &agenc_ircd_federation_wire::EventHeader,
     event: &ProjectedEvent,
     outcome: &ApplyOutcome,
     label: Option<&str>,
     fanout: &mut EventFanout,
-) -> Result<(), RuntimeError> {
+) -> Result<Option<super::join_echo::JoinEcho>, super::Violation> {
+    let mut echo = None;
     for user_id in &outcome.local_recipients {
         let Some(generation) = context.sessions().generation_for_user(*user_id) else {
             continue;
@@ -165,10 +222,18 @@ pub(super) fn render_event(
             .sessions()
             .capabilities_for_user(*user_id)
             .cloned_state();
-        let frames = frames_for(edge, event, *user_id, capabilities.as_ref(), label)?;
+        let mut frames = frames_for(edge, event, *user_id, capabilities.as_ref(), label)?;
+        if let Some(captured) =
+            super::join_echo::capture(edge, context, header, event, *user_id, &mut frames)?
+        {
+            if echo.is_some() {
+                return Err(super::Violation::Consistency);
+            }
+            echo = Some(captured);
+        }
         fanout.append(context, generation, frames)?;
     }
-    Ok(())
+    Ok(echo)
 }
 
 trait ClonedState {
@@ -392,6 +457,19 @@ fn frames_for(
                 .map(|session| session.nickname.presentation().to_owned())
                 .unwrap_or_else(|| "*".to_owned());
             vec![line(server, "NOTICE", &[&nickname], Some(text))?]
+        }
+        ProjectedEvent::UserModesChanged(record) if recipient == record.user_id => {
+            let mode = if record.user_mode_bits & 2 == 0 {
+                "-w"
+            } else {
+                "+w"
+            };
+            vec![line(
+                &prefix(&record.source_view())?,
+                "MODE",
+                &[record.nickname.presentation(), mode],
+                None,
+            )?]
         }
         ProjectedEvent::SessionVisible(_)
         | ProjectedEvent::ChannelVisible(_)

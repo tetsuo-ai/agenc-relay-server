@@ -38,6 +38,7 @@ fn pending_edge() -> TestResult<EdgeFederation> {
             sent: true,
             result: None,
             replies: Vec::new(),
+            join_echoes: Vec::new(),
             completion: None,
             completion_generation: None,
             completion_coverage: None,

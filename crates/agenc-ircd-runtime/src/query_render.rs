@@ -90,13 +90,9 @@ fn render_non_snapshot_query(
             channels,
         ),
         CanonicalCommandView::Information(query) => render_information(context, nickname, query),
-        CanonicalCommandView::UserQuery(query) => render_user_query(
-            context.domain(),
-            context.server_prefix(),
-            nickname,
-            reply.requester,
-            query,
-        ),
+        CanonicalCommandView::UserQuery(query) => {
+            render_state_user_query(context, nickname, reply.requester, query)
+        }
         CanonicalCommandView::Presence(query) => render_presence_query(
             context.domain(),
             context.server_prefix(),
@@ -719,7 +715,7 @@ fn render_topic(
     Ok(frames)
 }
 
-fn render_names(
+pub(crate) fn render_names(
     domain: &DomainState,
     prefix: &str,
     nickname: &str,
@@ -729,6 +725,20 @@ fn render_names(
 ) -> Result<Vec<WireMessage>, RuntimeError> {
     let channel_ids = selected_channel_ids(domain, requester, selected)?;
     let mut frames = Vec::new();
+    let mut endings = Vec::new();
+    endings
+        .try_reserve_exact(channel_ids.len())
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    if channel_ids.is_empty() {
+        push_numeric(
+            &mut frames,
+            prefix,
+            366,
+            nickname,
+            &["*"],
+            "End of NAMES list",
+        )?;
+    }
     for channel_id in channel_ids {
         let projected = visible_projection(
             domain
@@ -743,7 +753,14 @@ fn render_names(
             &projected,
             &mut frames,
         )?;
+        endings.push(frames.pop().ok_or(RuntimeError::InvalidValue)?);
     }
+    // One logical NAMES snapshot ends only after every selected channel's
+    // membership rows, including when that snapshot spans several pages.
+    frames
+        .try_reserve(endings.len())
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    frames.extend(endings);
     Ok(frames)
 }
 
@@ -754,12 +771,6 @@ fn selected_channel_ids(
 ) -> Result<BTreeSet<ChannelInstanceId>, RuntimeError> {
     let mut ids = BTreeSet::new();
     if selected.is_empty() {
-        for channel in domain
-            .project_channel_list()
-            .map_err(|_| RuntimeError::InvalidValue)?
-        {
-            ids.insert(channel.channel_id());
-        }
         let session = domain
             .session(requester)
             .ok_or(RuntimeError::InvalidValue)?;
@@ -789,6 +800,7 @@ fn render_names_channel(
         Visibility::Secret => "@",
     };
     let mut chunk = String::new();
+    let mut chunk_users = 0_usize;
     for member in channel.members() {
         let entry = names_entry(
             domain,
@@ -798,7 +810,8 @@ fn render_names_channel(
             include_userhost,
         )?;
         if !chunk.is_empty()
-            && chunk.len().saturating_add(entry.len()).saturating_add(1) > NAMES_CHUNK_BYTES
+            && (chunk.len().saturating_add(entry.len()).saturating_add(1) > NAMES_CHUNK_BYTES
+                || chunk_users >= crate::query_pages::MAX_NAMES_USERS)
         {
             push_numeric(
                 frames,
@@ -809,11 +822,13 @@ fn render_names_channel(
                 &chunk,
             )?;
             chunk.clear();
+            chunk_users = 0;
         }
         if !chunk.is_empty() {
             chunk.push(' ');
         }
         chunk.push_str(&entry);
+        chunk_users += 1;
     }
     if !chunk.is_empty() {
         push_numeric(
@@ -909,6 +924,83 @@ fn render_list_row(
     )
 }
 
+fn render_state_user_query(
+    context: &StateCoreContext,
+    nickname: &str,
+    requester: UserId,
+    query: &UserQuery,
+) -> Result<Vec<WireMessage>, RuntimeError> {
+    let UserQuery::Whowas(target, count) = query else {
+        return render_user_query(
+            context.domain(),
+            context.server_prefix(),
+            nickname,
+            requester,
+            query,
+        );
+    };
+    let prefix = context.server_prefix();
+    let mut frames = Vec::new();
+    for record in context
+        .whowas()
+        .visible(context.domain(), requester, target, context.now())
+        .take(usize::from(*count))
+    {
+        render_whowas_row(prefix, nickname, record, &mut frames)?;
+    }
+    if frames.is_empty() {
+        push_numeric(
+            &mut frames,
+            prefix,
+            406,
+            nickname,
+            &[target.presentation()],
+            "No WHOWAS history",
+        )?;
+    }
+    push_numeric(
+        &mut frames,
+        prefix,
+        369,
+        nickname,
+        &[target.presentation()],
+        "End of WHOWAS",
+    )?;
+    Ok(frames)
+}
+
+fn render_whowas_row(
+    prefix: &str,
+    nickname: &str,
+    record: &crate::state_core::whowas::WhowasRecord,
+    frames: &mut Vec<WireMessage>,
+) -> Result<(), RuntimeError> {
+    push_numeric(
+        frames,
+        prefix,
+        314,
+        nickname,
+        &[
+            record.nickname.presentation(),
+            ascii(record.cloak.user_component())?,
+            ascii(record.cloak.host_component())?,
+            "*",
+        ],
+        record
+            .label
+            .as_ref()
+            .map_or("*", agenc_ircd_domain::AccountLabelValue::as_str),
+    )?;
+    push_numeric(
+        frames,
+        prefix,
+        312,
+        nickname,
+        &[record.nickname.presentation(), prefix],
+        &record.disconnected_at.get().to_string(),
+    )
+}
+
 fn render_user_query(
     domain: &DomainState,
     prefix: &str,
@@ -919,28 +1011,10 @@ fn render_user_query(
     match query {
         UserQuery::Who(target) => render_who(domain, prefix, nickname, requester, target.as_ref()),
         UserQuery::Whois(target) => render_whois(domain, prefix, nickname, requester, target),
-        UserQuery::Whowas(target, _) => {
-            let mut frames = Vec::new();
-            push_numeric(
-                &mut frames,
-                prefix,
-                406,
-                nickname,
-                &[target.presentation()],
-                "No WHOWAS history",
-            )?;
-            push_numeric(
-                &mut frames,
-                prefix,
-                369,
-                nickname,
-                &[target.presentation()],
-                "End of WHOWAS",
-            )?;
-            Ok(frames)
-        }
-        UserQuery::Ison(targets) | UserQuery::Userhost(targets) => {
-            render_ison(domain, prefix, nickname, requester, targets)
+        UserQuery::Whowas(_, _) => Err(RuntimeError::InvalidValue),
+        UserQuery::Ison(targets) => render_ison(domain, prefix, nickname, requester, targets),
+        UserQuery::Userhost(targets) => {
+            render_userhost(domain, prefix, nickname, requester, targets)
         }
     }
 }
@@ -1242,6 +1316,38 @@ fn render_ison(
     one_numeric(prefix, 303, nickname, &[], &online)
 }
 
+fn render_userhost(
+    domain: &DomainState,
+    prefix: &str,
+    nickname: &str,
+    requester: UserId,
+    targets: &[agenc_ircd_domain::NicknameValue],
+) -> Result<Vec<WireMessage>, RuntimeError> {
+    let mut users = Vec::new();
+    for target in targets {
+        let Some(user_id) = domain.resolve_nickname(target) else {
+            continue;
+        };
+        let ProjectionDecision::Visible(session) = domain.project_session(requester, user_id)
+        else {
+            continue;
+        };
+        let cloak = session.public_cloak();
+        let presence = if session.away_text().is_some() {
+            '-'
+        } else {
+            '+'
+        };
+        users.push(format!(
+            "{}={presence}{}@{}",
+            session.nickname().presentation(),
+            ascii(cloak.user_component())?,
+            ascii(cloak.host_component())?,
+        ));
+    }
+    one_numeric(prefix, 302, nickname, &[], &users.join(" "))
+}
+
 fn render_presence_query(
     domain: &DomainState,
     prefix: &str,
@@ -1254,15 +1360,60 @@ fn render_presence_query(
         .ok_or(RuntimeError::InvalidValue)?;
     match query {
         PresenceCommand::MonitorList => {
-            let monitored: Vec<_> = session.monitored_nicknames().cloned().collect();
-            render_ison(domain, prefix, nickname, requester, &monitored)
+            let mut frames = Vec::new();
+            for target in session.monitored_nicknames() {
+                push_numeric(
+                    &mut frames,
+                    prefix,
+                    732,
+                    nickname,
+                    &[],
+                    target.presentation(),
+                )?;
+            }
+            push_numeric(
+                &mut frames,
+                prefix,
+                733,
+                nickname,
+                &[],
+                "End of MONITOR list",
+            )?;
+            Ok(frames)
         }
         PresenceCommand::MonitorStatus => {
             let monitored: Vec<_> = session.monitored_nicknames().cloned().collect();
-            render_ison(domain, prefix, nickname, requester, &monitored)
+            monitor_status_frames(domain, prefix, nickname, requester, &monitored)
         }
         _ => Err(RuntimeError::InvalidValue),
     }
+}
+
+/// Renders only authorized presence; hidden and missing targets both appear offline.
+pub(crate) fn monitor_status_frames(
+    domain: &DomainState,
+    prefix: &str,
+    nickname: &str,
+    requester: UserId,
+    targets: &[agenc_ircd_domain::NicknameValue],
+) -> Result<Vec<WireMessage>, RuntimeError> {
+    let mut frames = Vec::new();
+    for target in targets {
+        let online = domain.resolve_nickname(target).is_some_and(|user_id| {
+            domain.project_presence(requester, user_id)
+                == agenc_ircd_domain::PresenceProjection::Present
+        });
+        let code = if online { 730 } else { 731 };
+        push_numeric(
+            &mut frames,
+            prefix,
+            code,
+            nickname,
+            &[],
+            target.presentation(),
+        )?;
+    }
+    Ok(frames)
 }
 
 fn visible_channel<'a>(
@@ -1430,13 +1581,9 @@ pub(crate) fn federated_query_frames(
             channels,
         ),
         CanonicalCommandView::Information(query) => render_information(context, &nickname, query),
-        CanonicalCommandView::UserQuery(query) => render_user_query(
-            context.domain(),
-            context.server_prefix(),
-            &nickname,
-            requester,
-            query,
-        ),
+        CanonicalCommandView::UserQuery(query) => {
+            render_state_user_query(context, &nickname, requester, query)
+        }
         CanonicalCommandView::Presence(query) => render_presence_query(
             context.domain(),
             context.server_prefix(),
@@ -2068,6 +2215,276 @@ mod tests {
     }
 
     #[test]
+    fn userhost_uses_public_cloaks_away_flags_and_presence_privacy() -> Result<(), Box<dyn Error>> {
+        let fixture = fixture()?;
+        let targets = [
+            "RenderOwner",
+            "RenderMember",
+            "RenderOutsider",
+            "MissingRenderUser",
+        ]
+        .into_iter()
+        .map(agenc_ircd_domain::NicknameValue::parse)
+        .collect::<Result<Vec<_>, _>>()?;
+        let replies = render_user_query(
+            &fixture.state,
+            "server.test",
+            "owner",
+            fixture.owner.user_id,
+            &UserQuery::Userhost(targets),
+        )?
+        .into_iter()
+        .map(encoded)
+        .collect::<Result<Vec<_>, _>>()?;
+        let owner = fixture
+            .state
+            .session(fixture.owner.user_id)
+            .ok_or("owner")?;
+        let member = fixture
+            .state
+            .session(fixture.member.user_id)
+            .ok_or("member")?;
+        assert_eq!(
+            replies,
+            vec![format!(
+                ":server.test 302 owner :RenderOwner=+{}@{} RenderMember=-{}@{}\r\n",
+                ascii(owner.public_cloak().user_component())?,
+                ascii(owner.public_cloak().host_component())?,
+                ascii(member.public_cloak().user_component())?,
+                ascii(member.public_cloak().host_component())?,
+            )]
+        );
+        let hidden = render_user_query(
+            &fixture.state,
+            "server.test",
+            "outsider",
+            fixture.outsider.user_id,
+            &UserQuery::Userhost(vec![agenc_ircd_domain::NicknameValue::parse(
+                "RenderMember",
+            )?]),
+        )?
+        .into_iter()
+        .map(encoded)
+        .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(hidden, vec![":server.test 302 outsider :\r\n"]);
+        Ok(())
+    }
+
+    fn wide_names_member(
+        state: &mut DomainState,
+        index: u16,
+    ) -> Result<DomainTestIdentity, Box<dyn Error>> {
+        use agenc_ircd_domain::{DisplayNameValue, NicknameValue, SessionSeed};
+        use agenc_ircd_types::{Generation, PublicCloak, ServerId, SessionId};
+        const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+        let mut identity_bytes = [0; 16];
+        identity_bytes[..2].copy_from_slice(&index.to_be_bytes());
+        let identity = DomainTestIdentity {
+            session_id: SessionId::from_bytes(identity_bytes),
+            user_id: UserId::from_bytes(identity_bytes),
+            generation: Generation::new(1)?,
+            account_id: None,
+        };
+        let high = char::from(*ALPHABET.get(usize::from(index / 1_024)).ok_or("high")?);
+        let middle = char::from(*ALPHABET.get(usize::from(index / 32 % 32)).ok_or("middle")?);
+        let low = char::from(*ALPHABET.get(usize::from(index % 32)).ok_or("low")?);
+        let nickname = format!("N{index:04}");
+        let plan = state.plan_session_opened(SessionSeed {
+            session_id: identity.session_id,
+            user_id: identity.user_id,
+            home_server_id: ServerId::from_bytes([240; 16]),
+            account_id: None,
+            account_session_generation: Generation::new(0)?,
+            generation: identity.generation,
+            nickname: NicknameValue::parse(&nickname)?,
+            display_name: DisplayNameValue::prepare(&nickname)?,
+            public_cloak: PublicCloak::parse(
+                &format!("naaaaaa{high}{middle}{low}"),
+                "bbbbbbbbbbbbbbbb",
+            )?,
+            connection_nonce: [1; 32],
+            negotiated_capability_hash: [2; 32],
+            created_at_utc: UtcSecond::from_unix_seconds(1_720_000_000),
+            revision: state.revision(),
+        })?;
+        agenc_ircd_testkit::apply_plan(state, plan)?;
+        Ok(identity)
+    }
+
+    #[test]
+    fn a_names_numeric_never_exceeds_512_members() -> Result<(), Box<dyn Error>> {
+        let mut state = DomainState::new()?;
+        let owner = open_session(&mut state, 0, "NamesOwner", None)?;
+        let channel = ChannelNameValue::parse("#wide-names")?;
+        join_new(&mut state, owner, &channel, 80)?;
+        for index in 1..=512 {
+            let member = wide_names_member(&mut state, index)?;
+            join_existing(&mut state, member, &channel)?;
+        }
+        let frames = render_names(
+            &state,
+            "server.test",
+            "NamesOwner",
+            owner.user_id,
+            false,
+            &[channel],
+        )?;
+        let rows: Vec<_> = frames
+            .iter()
+            .filter(|frame| frame.command() == "353")
+            .map(|frame| {
+                frame
+                    .trailing()
+                    .map_or(0, |text| text.split_ascii_whitespace().count())
+            })
+            .collect();
+        assert_eq!(rows, vec![512, 1]);
+        assert_eq!(frames.last().map(WireMessage::command), Some("366"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_names_snapshot_places_every_channel_ending_after_all_membership_rows()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = fixture()?;
+        let frames = render_names(
+            &fixture.state,
+            "server.test",
+            "owner",
+            fixture.owner.user_id,
+            false,
+            &[],
+        )?;
+        let first_end = frames
+            .iter()
+            .position(|frame| frame.command() == "366")
+            .ok_or("missing ending")?;
+        let membership = frames.get(..first_end).ok_or("missing membership prefix")?;
+        let endings = frames.get(first_end..).ok_or("missing ending suffix")?;
+        assert!(membership.iter().all(|frame| frame.command() == "353"));
+        assert!(endings.iter().all(|frame| frame.command() == "366"));
+        assert_eq!(endings.len(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn an_empty_names_selector_lists_only_joined_channels_and_always_ends()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = fixture()?;
+        let member = render_names(
+            &fixture.state,
+            "server.test",
+            "member",
+            fixture.member.user_id,
+            false,
+            &[],
+        )?
+        .into_iter()
+        .map(encoded)
+        .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(member.len(), 2);
+        assert!(member.iter().all(|line| line.contains("#render-listed")));
+        let outsider = render_names(
+            &fixture.state,
+            "server.test",
+            "outsider",
+            fixture.outsider.user_id,
+            false,
+            &[],
+        )?
+        .into_iter()
+        .map(encoded)
+        .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            outsider,
+            vec![":server.test 366 outsider * :End of NAMES list\r\n"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn private_monitor_changes_preserve_the_projected_session_revision()
+    -> Result<(), Box<dyn Error>> {
+        let mut fixture = fixture()?;
+        let revision = fixture
+            .state
+            .session(fixture.owner.user_id)
+            .ok_or("owner absent")?
+            .revision();
+        apply_command(
+            &mut fixture.state,
+            fixture.owner,
+            CanonicalCommand::presence(PresenceCommand::MonitorClear)?,
+            &registered_admission(fixture.owner.user_id)?,
+            None,
+        )?;
+        assert_eq!(
+            fixture
+                .state
+                .session(fixture.owner.user_id)
+                .ok_or("owner absent")?
+                .revision(),
+            revision
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn monitor_lists_keep_offline_targets_and_status_uses_presence_numerics()
+    -> Result<(), Box<dyn Error>> {
+        let mut fixture = fixture()?;
+        apply_command(
+            &mut fixture.state,
+            fixture.owner,
+            CanonicalCommand::presence(PresenceCommand::MonitorAdd(vec![
+                agenc_ircd_domain::NicknameValue::parse("RenderOutsider")?,
+            ]))?,
+            &registered_admission(fixture.owner.user_id)?,
+            None,
+        )?;
+        let listing = render_presence_query(
+            &fixture.state,
+            "server.test",
+            "owner",
+            fixture.owner.user_id,
+            &PresenceCommand::MonitorList,
+        )?
+        .into_iter()
+        .map(encoded)
+        .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            listing,
+            vec![
+                ":server.test 732 owner :MissingRenderUser\r\n",
+                ":server.test 732 owner :RenderMember\r\n",
+                ":server.test 732 owner :RenderOutsider\r\n",
+                ":server.test 732 owner :RenderOwner\r\n",
+                ":server.test 733 owner :End of MONITOR list\r\n",
+            ]
+        );
+        let status = render_presence_query(
+            &fixture.state,
+            "server.test",
+            "owner",
+            fixture.owner.user_id,
+            &PresenceCommand::MonitorStatus,
+        )?
+        .into_iter()
+        .map(encoded)
+        .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            status,
+            vec![
+                ":server.test 731 owner :MissingRenderUser\r\n",
+                ":server.test 730 owner :RenderMember\r\n",
+                ":server.test 731 owner :RenderOutsider\r\n",
+                ":server.test 730 owner :RenderOwner\r\n",
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn names_lists_who_and_presence_apply_privacy_before_rendering() -> Result<(), Box<dyn Error>> {
         let fixture = fixture()?;
         let all_names = render_names(
@@ -2131,7 +2548,6 @@ mod tests {
             UserQuery::Who(Some(WhoTarget::Channel(fixture.listed.clone()))),
             UserQuery::Whois(member_name.clone()),
             UserQuery::Whois(missing_name.clone()),
-            UserQuery::Whowas(member_name.clone(), 1),
             UserQuery::Ison(vec![
                 agenc_ircd_domain::NicknameValue::parse("RenderOwner")?,
                 member_name.clone(),
@@ -2151,7 +2567,10 @@ mod tests {
                 .is_empty()
             );
         }
-        for query in [PresenceCommand::MonitorList, PresenceCommand::MonitorStatus] {
+        for (query, count) in [
+            (PresenceCommand::MonitorList, 4),
+            (PresenceCommand::MonitorStatus, 3),
+        ] {
             assert_eq!(
                 render_presence_query(
                     &fixture.state,
@@ -2161,7 +2580,7 @@ mod tests {
                     &query,
                 )?
                 .len(),
-                1
+                count
             );
         }
         assert_eq!(

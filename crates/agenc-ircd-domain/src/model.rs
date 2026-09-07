@@ -2290,6 +2290,14 @@ impl DomainState {
         self.session_ids.get(&session_id).copied()
     }
 
+    /// Resolves a public cloak only while its session remains authoritative.
+    /// Callers must still apply requester-specific visibility before disclosure.
+    #[must_use]
+    pub fn user_for_public_cloak(&self, cloak: PublicCloak) -> Option<UserId> {
+        let user = *self.public_cloaks.get(&cloak)?;
+        self.session(user).map(|_| user)
+    }
+
     /// Projects one channel whose authority survives a coordinator restart.
     #[must_use]
     pub fn durable_channel(&self, channel_id: ChannelInstanceId) -> Option<DurableChannel> {

@@ -829,6 +829,7 @@ impl Derivation<'_> {
             }
             DomainEvent::NicknameChanged(user) => self.project_nickname_changed(index, *user),
             DomainEvent::AwayChanged(user) => self.project_away_changed(index, *user),
+            DomainEvent::UserModesChanged(user) => self.project_user_modes_changed(index, *user),
             DomainEvent::DisplayNameChanged(user) => {
                 self.project_display_name_changed(index, *user)
             }
@@ -1216,6 +1217,18 @@ impl Derivation<'_> {
                     },
                 );
             }
+        }
+        Ok(())
+    }
+
+    fn project_user_modes_changed(
+        &mut self,
+        index: u16,
+        user_id: UserId,
+    ) -> Result<(), DomainError> {
+        self.touched_users.insert(user_id);
+        if let (Some(home), Some(record)) = (self.home_of(user_id), self.session_record(user_id)) {
+            self.emit(index, home, ProjectedEvent::UserModesChanged(record));
         }
         Ok(())
     }

@@ -547,6 +547,34 @@ impl TransactionCleanup {
     }
 }
 
+/// Only the account-service owner can construct an owned transaction cleanup.
+/// Its closed write shape can pass the shutdown gate without client authority.
+pub(crate) struct AccountTransactionCleanup {
+    writes: Vec<AccountServiceDurableWrite>,
+}
+
+impl AccountTransactionCleanup {
+    pub(crate) fn into_writes(self) -> Result<Vec<AccountServiceDurableWrite>, RuntimeError> {
+        if self.writes.is_empty()
+            || self.writes.len() > MAX_TRANSACTION_CLEANUPS_PER_BATCH.saturating_mul(3)
+            || !self.writes.iter().all(|write| {
+                matches!(
+                    write,
+                    AccountServiceDurableWrite::Delete {
+                        table: TableId::AuthTransaction
+                            | TableId::LoginIndex
+                            | TableId::RegistrationInvite,
+                        ..
+                    }
+                )
+            })
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
+        Ok(self.writes)
+    }
+}
+
 struct AccountConnection {
     sasl: SaslTransport,
     creation: AccountTransfer,
@@ -1087,6 +1115,20 @@ impl AccountServiceCoordinator {
         let _cleanup = self.try_stage_transaction_cleanup(context);
     }
 
+    /// Cancels incomplete exchanges only after every staged authority settles.
+    pub(crate) fn cancel_for_shutdown(&mut self, context: &mut StateCoreContext) -> bool {
+        if self.pending_authority.is_some()
+            || !self.grant_consumptions.is_empty()
+            || !self.pending_account_deletions.is_empty()
+        {
+            return false;
+        }
+        while let Some(generation) = self.connections.keys().next().copied() {
+            self.connection_closed(context, generation);
+        }
+        true
+    }
+
     fn queue_closed_live_transactions(
         &mut self,
         context: &mut StateCoreContext,
@@ -1435,17 +1477,12 @@ impl AccountServiceCoordinator {
         if self.cleanup_queue.is_empty() {
             return Ok(());
         }
-        let plan = context
-            .domain()
-            .plan_account_service_checkpoint()
-            .map_err(|_| RuntimeError::InvalidValue)?;
         let (cleanup_count, writes) = transaction_cleanup_batch(&self.cleanup_queue)?;
         self.pending_cleanups
             .try_reserve_exact(cleanup_count)
             .map_err(|_| RuntimeError::MemoryExhausted)?;
-        let fanout = FanoutRequest::new(Vec::new(), Vec::new())?;
         if !matches!(
-            context.stage_durable_with_account_service(plan, fanout, None, 0, writes),
+            context.stage_account_transaction_cleanup(AccountTransactionCleanup { writes }),
             Ok(StageAccepted::Staged { .. })
         ) {
             return Ok(());
@@ -1607,6 +1644,29 @@ impl AccountServiceCoordinator {
         }
     }
 
+    /// Returns the trusted authentication instant alongside a live grant's
+    /// current account binding for an atomic remote session insertion.
+    pub(crate) fn authenticated_session_binding(
+        &self,
+        generation: ConnectionGeneration,
+        now: MonotonicTick,
+    ) -> Result<Option<(AccountId, Generation, MonotonicTick)>, RuntimeError> {
+        let Some((account, session_generation)) = self.authenticated_binding(generation, now)?
+        else {
+            return Ok(None);
+        };
+        let binding = self
+            .connections
+            .get(&generation)
+            .and_then(|connection| connection.authenticated.as_ref())
+            .ok_or(RuntimeError::InvalidValue)?;
+        Ok(Some((
+            account,
+            session_generation,
+            binding.authenticated_at,
+        )))
+    }
+
     /// The account, session generation, and grant identifier of a live
     /// pre-registration authentication a remote edge will consume through
     /// `session_open` (spec 22.2).
@@ -1755,11 +1815,9 @@ impl AccountServiceCoordinator {
         {
             return Err(RuntimeError::InvalidValue);
         }
-        // The fresh-authentication window is an ephemeral session attribute
-        // that rewrites the session revision. A session homed on an edge
-        // learns its revision only from durable events, so the window is
-        // recorded for local connections alone; the remote grant keeps its
-        // proof on the virtual connection.
+        // Remote sessions received this process-local deadline in their
+        // insertion plan. Applying another ephemeral plan here would advance
+        // their revision beyond the session-open projection seen by the edge.
         if home == SessionHome::Local {
             let plan = context
                 .domain()
@@ -3689,10 +3747,12 @@ impl AccountServiceCoordinator {
             .domain()
             .account(account_id)
             .ok_or(RuntimeError::InvalidValue)?;
-        if value.record_kind() != LIVE_RECORD_KIND
-            || value.revision() != account.revision().get()
-            || value.generation() != account.session_generation().get()
-        {
+        if !opaque_record_matches_account(
+            value,
+            account_id,
+            account.revision().get(),
+            account.session_generation().get(),
+        ) {
             return Err(RuntimeError::InvalidValue);
         }
         let digest = derive_login_index(
@@ -3744,15 +3804,17 @@ impl AccountServiceCoordinator {
         let expected_key = StoredKey::new(account.account_id().to_text().into_bytes())?;
         let record_matches = record_key == expected_key
             && value.as_ref().is_some_and(|value| {
-                value.record_kind() == LIVE_RECORD_KIND
-                    && value.revision() == account.account_revision().get()
-                    && value.generation() == account.account_session_generation().get()
-                    && value
-                        .body()
-                        .try_into()
-                        .ok()
-                        .and_then(|bytes| OpaqueRegistrationRecord::from_bytes(bytes).ok())
-                        .is_some()
+                opaque_record_matches_account(
+                    value,
+                    account.account_id(),
+                    account.account_revision().get(),
+                    account.account_session_generation().get(),
+                ) && value
+                    .body()
+                    .try_into()
+                    .ok()
+                    .and_then(|bytes| OpaqueRegistrationRecord::from_bytes(bytes).ok())
+                    .is_some()
             });
         if reservation.is_some() && !record_matches {
             self.release_credential_reservation(account.account_id(), request.generation)?;
@@ -6826,8 +6888,39 @@ const fn request_terminal_result(terminal: RequestTerminal) -> ResultClass {
     }
 }
 
+/// Validates an authenticated current credential row against its account.
+/// Its version records the last credential replacement. Account policy can
+/// advance the account revision alone; recovery preserves this exact row
+/// while advancing the account generation and restarting epoch revisions.
+pub(crate) fn opaque_record_matches_account(
+    value: &PersistentRecordValue,
+    account_id: AccountId,
+    revision: u64,
+    generation: u64,
+) -> bool {
+    let [reference] = value.references() else {
+        return false;
+    };
+    value.record_kind() == LIVE_RECORD_KIND
+        && value.expires_at().is_none()
+        && reference.table() == TableId::Account
+        && reference.key().as_bytes() == account_id.to_text().as_bytes()
+        && opaque_version_precedes_account(value, revision, generation)
+}
+
+fn opaque_version_precedes_account(
+    value: &PersistentRecordValue,
+    revision: u64,
+    generation: u64,
+) -> bool {
+    value.generation() != 0
+        && value.generation() <= generation
+        && (value.generation() < generation || value.revision() <= revision)
+}
+
 #[cfg(test)]
 mod tests {
+    mod shutdown;
     use super::{
         AccountCarrierAction, AccountCarrierKind, AccountCarrierPhase, AccountCreationPolicy,
         AccountDeletionBarrier, AccountServiceCoordinator, CarrierCompletion, CarrierRoute,
@@ -6916,6 +7009,119 @@ mod tests {
 
     fn account(byte: u8) -> AccountId {
         AccountId::from_random(AccountRandomId::from_bytes([byte; 16]))
+    }
+
+    fn lookup_test_credential(
+        fixture: &mut CoordinatorFixture,
+        account_id: AccountId,
+        value: &agenc_ircd_storage::PersistentRecordValue,
+    ) -> Result<bool, RuntimeError> {
+        let login = NormalizedLogin::prepare("versioned-account")
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let (coordinator, context) = fixture.parts()?;
+        coordinator
+            .authentication_lookup(
+                context,
+                &login,
+                None,
+                None,
+                Some((account_id, OpaqueCredentialId::from_bytes([17; 32]))),
+                value,
+            )
+            .map(|(lookup, _)| matches!(lookup, agenc_ircd_auth::AuthenticationLookup::Known(_)))
+    }
+
+    fn versioned_test_credential(
+        fixture: &CoordinatorFixture,
+        account_id: AccountId,
+        revision: u64,
+        generation: u64,
+    ) -> Result<agenc_ircd_storage::PersistentRecordValue, RuntimeError> {
+        Ok(agenc_ircd_storage::PersistentRecordValue::new(
+            TableId::OpaqueRecord,
+            agenc_ircd_storage::LIVE_RECORD_KIND,
+            revision,
+            generation,
+            None,
+            vec![agenc_ircd_storage::RecordReference::new(
+                TableId::Account,
+                StoredKey::new(account_id.to_text().into_bytes())?,
+            )?],
+            fixture
+                .core
+                .opaque
+                .expose_fake_record_for_persistence()
+                .to_vec(),
+        )?)
+    }
+
+    #[test]
+    fn account_policy_changes_keep_the_existing_opaque_credential_available()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let mut fixture = CoordinatorFixture::new(Vec::new())?;
+        let (account_id, generation) =
+            crate::test_support::seed_account(fixture.core.context_mut()?, 9, 1)?;
+        let revision = fixture
+            .core
+            .context_mut()?
+            .domain()
+            .account(account_id)
+            .ok_or("account")?
+            .revision()
+            .get();
+        let value = versioned_test_credential(&fixture, account_id, revision, generation.get())?;
+        let encoded = value.encode()?;
+        let context = fixture.core.context_mut()?;
+        let identity = crate::test_support::seed_session(
+            context,
+            10,
+            "policy-owner",
+            Some((account_id, generation)),
+        )?;
+        let decision = crate::test_support::plan_live(context, identity, &|| {
+            Ok(agenc_ircd_domain::CanonicalCommand::account(
+                agenc_ircd_domain::AccountCommand::Presence(PresencePolicy::Public),
+            ))
+        })?;
+        let agenc_ircd_domain::PlanDecision::Mutation(plan) = decision else {
+            return Err("policy did not produce a mutation".into());
+        };
+        crate::test_support::apply_live_plan(context, plan)?;
+        assert!(
+            context
+                .domain()
+                .account(account_id)
+                .ok_or("account")?
+                .revision()
+                .get()
+                > revision
+        );
+        assert!(lookup_test_credential(&mut fixture, account_id, &value)?);
+        assert_eq!(value.encode()?, encoded);
+        Ok(())
+    }
+
+    #[test]
+    fn account_recovery_keeps_the_old_opaque_credential_but_refuses_future_or_wrong_accounts()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let mut fixture = CoordinatorFixture::new(Vec::new())?;
+        let (account_id, _) =
+            crate::test_support::seed_account(fixture.core.context_mut()?, 11, 2)?;
+        let recovered = versioned_test_credential(&fixture, account_id, 37, 1)?;
+        assert!(lookup_test_credential(
+            &mut fixture,
+            account_id,
+            &recovered
+        )?);
+        for value in [
+            versioned_test_credential(&fixture, account_id, 1, 0)?,
+            versioned_test_credential(&fixture, account_id, 1, 3)?,
+            versioned_test_credential(&fixture, account_id, 2, 2)?,
+            versioned_test_credential(&fixture, account(12), 1, 2)?,
+        ] {
+            assert!(lookup_test_credential(&mut fixture, account_id, &value).is_err());
+        }
+        Ok(())
     }
 
     fn parsed(

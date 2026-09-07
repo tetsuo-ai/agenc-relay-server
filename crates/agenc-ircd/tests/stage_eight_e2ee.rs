@@ -4,6 +4,7 @@
 //! fail-closed partition behaviour of an edge.
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write as _};
@@ -11,8 +12,8 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -107,6 +108,10 @@ const REPLY_DEADLINE: Duration = Duration::from_secs(60);
 const NETWORK_ID: NetworkId = NetworkId::from_bytes([1; 32]);
 
 static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+// Claims outlive the probe sockets and every fixture restart. Parallel fixture
+// builders cannot choose an address already assigned elsewhere in this process.
+static LOOPBACK_ADDRESS_CLAIMS: Mutex<BTreeSet<SocketAddr>> = Mutex::new(BTreeSet::new());
+const LOOPBACK_ADDRESS_ATTEMPTS: usize = 128;
 
 fn failure(message: impl Into<String>) -> TestError {
     message.into().into()
@@ -169,10 +174,121 @@ fn write_trust_manifest(
 }
 
 fn reserve_loopback_address() -> TestResult<SocketAddr> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    let address = listener.local_addr()?;
-    drop(listener);
-    Ok(address)
+    let mut claims = LOOPBACK_ADDRESS_CLAIMS
+        .lock()
+        .map_err(|_| failure("loopback address claims are poisoned"))?;
+    reserve_loopback_address_with(&mut claims, || {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        drop(listener);
+        Ok(address)
+    })
+}
+
+fn reserve_loopback_address_with(
+    claims: &mut BTreeSet<SocketAddr>,
+    mut select: impl FnMut() -> TestResult<SocketAddr>,
+) -> TestResult<SocketAddr> {
+    for _ in 0..LOOPBACK_ADDRESS_ATTEMPTS {
+        let address = select()?;
+        if claims.insert(address) {
+            return Ok(address);
+        }
+    }
+    Err(failure(
+        "loopback address selection exhausted its distinct candidates",
+    ))
+}
+
+#[test]
+fn loopback_address_selection_skips_every_prior_fixture_claim() -> TestResult {
+    let first: SocketAddr = "127.0.0.1:32000".parse()?;
+    let second: SocketAddr = "127.0.0.1:32001".parse()?;
+    let mut candidates = [first, first, second].into_iter();
+    let mut select = || {
+        candidates
+            .next()
+            .ok_or_else(|| failure("selector exhausted"))
+    };
+    let mut claims = BTreeSet::new();
+    assert_eq!(
+        reserve_loopback_address_with(&mut claims, &mut select)?,
+        first
+    );
+    assert_eq!(
+        reserve_loopback_address_with(&mut claims, &mut select)?,
+        second
+    );
+    assert_eq!(claims.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn loopback_address_selection_bounds_repeated_candidates() -> TestResult {
+    let address: SocketAddr = "127.0.0.1:32000".parse()?;
+    let mut claims = BTreeSet::from([address]);
+    let mut attempts = 0;
+    let result = reserve_loopback_address_with(&mut claims, || {
+        attempts += 1;
+        Ok(address)
+    });
+    assert!(
+        result.is_err(),
+        "an already claimed endpoint must never be returned"
+    );
+    assert_eq!(attempts, LOOPBACK_ADDRESS_ATTEMPTS);
+    assert_eq!(claims, BTreeSet::from([address]));
+    Ok(())
+}
+
+#[test]
+fn loopback_address_selection_preserves_binding_errors_and_claims() -> TestResult {
+    let address: SocketAddr = "127.0.0.1:32000".parse()?;
+    let mut claims = BTreeSet::from([address]);
+    let mut attempts = 0;
+    let error = reserve_loopback_address_with(&mut claims, || {
+        attempts += 1;
+        Err(io::Error::from(io::ErrorKind::PermissionDenied).into())
+    })
+    .err()
+    .ok_or_else(|| failure("binding error was discarded"))?;
+    assert_eq!(
+        error.downcast_ref::<io::Error>().map(io::Error::kind),
+        Some(io::ErrorKind::PermissionDenied)
+    );
+    assert_eq!(attempts, 1);
+    assert_eq!(claims, BTreeSet::from([address]));
+    Ok(())
+}
+
+#[test]
+fn loopback_address_claims_are_unique_across_parallel_fixtures() -> TestResult {
+    let addresses = thread::scope(|scope| {
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                scope.spawn(|| {
+                    (0..16)
+                        .map(|_| reserve_loopback_address())
+                        .collect::<TestResult<Vec<_>>>()
+                })
+            })
+            .collect();
+        let mut addresses = BTreeSet::new();
+        for worker in workers {
+            for address in worker
+                .join()
+                .map_err(|_| failure("address worker failed"))??
+            {
+                assert!(
+                    addresses.insert(address),
+                    "parallel fixtures reused {address}"
+                );
+            }
+        }
+        Ok::<_, TestError>(addresses)
+    })?;
+    assert_eq!(addresses.len(), 64);
+    Ok(())
 }
 
 fn replace_once(document: &mut String, old: &str, new: &str) -> TestResult {
@@ -1270,6 +1386,7 @@ fn account_requests(request_seed: u8) -> TestResult<[RequestId; 2]> {
 }
 
 fn seal_account_payload(
+    fixture: &NodeFixture,
     network_id: NetworkId,
     request: RequestId,
     payload: AccountRequestPayload,
@@ -1281,7 +1398,7 @@ fn seal_account_payload(
     let public_key = private_key.public_key()?;
     let binding = AccountRequestBinding::new(
         network_id,
-        COORDINATOR_RECOVERY_EPOCH,
+        account_recovery_epoch(fixture, network_id)?,
         public_key.key_id(),
         request,
         payload.message_kind(),
@@ -1290,6 +1407,81 @@ fn seal_account_payload(
     let (sealed, token) = seal_account_request(public_key, binding, plaintext.expose_for_hpke())?;
     let envelope = AccountServiceEnvelope::from_sealed(sealed)?;
     Ok((*envelope.as_bytes(), token))
+}
+
+/// Uses the same validated epoch pin as the edge's coordinator trust record.
+fn account_recovery_epoch(
+    fixture: &NodeFixture,
+    network_id: NetworkId,
+) -> TestResult<RecoveryEpoch> {
+    let config = agenc_ircd_config::load_config(
+        &fixture.config_path,
+        agenc_ircd_config::ValidationDepth::Document,
+    )?;
+    if config.network.network_id != network_id {
+        return Err(failure("account request network differs from the fixture"));
+    }
+    config
+        .federation
+        .peers
+        .iter()
+        .find(|peer| {
+            peer.enabled
+                && peer.role == NodeRole::Coordinator
+                && peer.server_id == config.network.coordinator_server_id
+        })
+        .map(|peer| peer.recovery_epoch)
+        .ok_or_else(|| failure("fixture lacks an enabled coordinator epoch pin"))
+}
+
+#[test]
+fn account_envelopes_follow_the_current_coordinator_epoch_pin() -> TestResult {
+    let network = build_network()?;
+    let old_epoch = COORDINATOR_RECOVERY_EPOCH;
+    let new_epoch = RecoveryEpoch::from_bytes([215; 16]);
+    let private_key = AccountHpkePrivateKey::from_bytes(ACCOUNT_HPKE_PRIVATE)?;
+    let payload = || -> TestResult<AccountRequestPayload> {
+        Ok(AccountRequestPayload::AuthenticationFinish(
+            AuthenticationFinish {
+                network_id: NETWORK_ID,
+                transaction_id: agenc_ircd_types::TransactionId::from_bytes([217; 16]),
+                ke3: OpaqueKe3::from_bytes([0; agenc_ircd_auth::OPAQUE_KE3_BYTES])?,
+            },
+        ))
+    };
+    let (old_bytes, _) = seal_account_payload(
+        &network.edge_a,
+        NETWORK_ID,
+        RequestId::from_bytes([213; 16]),
+        payload()?,
+    )?;
+    stage_ten_capacity::repin_peer_epoch(
+        &network.edge_a,
+        network.coordinator.server_id,
+        &new_epoch.to_base64url(),
+    )?;
+    let (new_bytes, _) = seal_account_payload(
+        &network.edge_a,
+        NETWORK_ID,
+        RequestId::from_bytes([214; 16]),
+        payload()?,
+    )?;
+    let old_envelope = AccountServiceEnvelope::parse(old_bytes)?;
+    let new_envelope = AccountServiceEnvelope::parse(new_bytes)?;
+    let open = |epoch, envelope: &AccountServiceEnvelope| {
+        agenc_ircd_auth::open_and_parse_request(
+            &private_key,
+            epoch,
+            NETWORK_ID,
+            envelope.message_kind(),
+            envelope,
+        )
+    };
+    assert!(open(old_epoch, &old_envelope).is_ok());
+    assert!(open(new_epoch, &old_envelope).is_err());
+    assert!(open(new_epoch, &new_envelope).is_ok());
+    assert!(open(old_epoch, &new_envelope).is_err());
+    Ok(())
 }
 
 fn open_account_payload(
@@ -1584,7 +1776,7 @@ fn create_live_account(
 
 fn create_live_account_with(
     client: &mut IrcClient,
-    _fixture: &NodeFixture,
+    fixture: &NodeFixture,
     login_name: &str,
     requests: [RequestId; 2],
 ) -> TestResult<AccountId> {
@@ -1595,6 +1787,7 @@ fn create_live_account_with(
         registration.message.serialize().as_slice().try_into()?,
     )?;
     let (start_envelope, start_token) = seal_account_payload(
+        fixture,
         NETWORK_ID,
         start_request,
         AccountRequestPayload::CreationStart(CreationStart {
@@ -1639,6 +1832,7 @@ fn create_live_account_with(
     rng.require_success()?;
 
     let (finish_envelope, finish_token) = seal_account_payload(
+        fixture,
         NETWORK_ID,
         finish_request,
         AccountRequestPayload::CreationFinish(CreationFinish {
@@ -1687,7 +1881,7 @@ fn authenticate_live_account(
 
 fn authenticate_live_account_with(
     client: &mut IrcClient,
-    _fixture: &NodeFixture,
+    fixture: &NodeFixture,
     login_name: &str,
     password: &[u8],
     requests: [RequestId; 2],
@@ -1698,6 +1892,7 @@ fn authenticate_live_account_with(
     let login = ClientLogin::<TestOpaqueSuite>::start(&mut rng, password)?;
     let ke1 = OpaqueKe1::from_bytes(login.message.serialize().as_slice().try_into()?)?;
     let (start_envelope, start_token) = seal_account_payload(
+        fixture,
         NETWORK_ID,
         start_request,
         AccountRequestPayload::AuthenticationStart(AuthenticationStart {
@@ -1730,6 +1925,7 @@ fn authenticate_live_account_with(
     let ke3 = OpaqueKe3::from_bytes(login_finish.message.serialize().as_slice().try_into()?)?;
     rng.require_success()?;
     let (finish_envelope, finish_token) = seal_account_payload(
+        fixture,
         NETWORK_ID,
         finish_request,
         AccountRequestPayload::AuthenticationFinish(AuthenticationFinish {

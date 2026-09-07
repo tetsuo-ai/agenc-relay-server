@@ -29,6 +29,7 @@ mod mutation_render;
 pub mod observe;
 pub mod offline;
 pub mod purpose;
+mod query_pages;
 mod query_render;
 pub mod registration;
 pub mod release;

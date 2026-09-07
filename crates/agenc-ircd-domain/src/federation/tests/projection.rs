@@ -234,6 +234,57 @@ fn kinds(events: &[&ProjectedEvent]) -> Vec<agenc_ircd_types::FederationEventKin
 }
 
 #[test]
+fn user_mode_changes_update_only_the_home_edge_and_match_its_snapshot() -> Result<(), DomainError> {
+    use agenc_ircd_types::FederationEventKind;
+
+    let mut harness = Harness::new()?;
+    let alice = harness.open(1, EDGE_A)?;
+    let bob = harness.open(2, EDGE_B)?;
+    let name = ChannelNameValue::parse("#shared-modes")?;
+    let join = || CanonicalCommand::join(vec![ChannelTarget::new(name.clone(), false)]);
+    harness.run(alice, join, &MutationContext::default())?;
+    harness.run(bob, join, &MutationContext::default())?;
+    let nickname = harness
+        .state
+        .session(alice)
+        .ok_or(DomainError::NotFound)?
+        .nickname()
+        .clone();
+    for (enabled, bits) in [(true, 3), (false, 1), (true, 3)] {
+        let projection = harness.run(
+            alice,
+            || {
+                Ok(CanonicalCommand::user_operator_notices(
+                    nickname.clone(),
+                    enabled,
+                ))
+            },
+            &MutationContext::default(),
+        )?;
+        assert_eq!(
+            kinds(&events_for(&projection, EDGE_A)),
+            vec![FederationEventKind::UserModesChanged]
+        );
+        assert!(events_for(&projection, EDGE_B).is_empty());
+        let record = harness
+            .replicas
+            .get(&EDGE_A)
+            .and_then(|replica| replica.session(alice))
+            .ok_or(DomainError::NotFound)?;
+        assert_eq!(record.user_mode_bits, bits);
+        assert_eq!(record.session_revision, harness.state.revision());
+        assert_eq!(
+            harness
+                .state
+                .session(alice)
+                .map(|session| session.operator_notices()),
+            Some(enabled)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn sessions_channels_messages_and_departures_project_least_information() -> Result<(), DomainError>
 {
     use agenc_ircd_types::FederationEventKind as K;

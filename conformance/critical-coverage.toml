@@ -3,8 +3,8 @@ minimum_overall_branch_percent = 75.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 451
-reviewed_source_sha256 = "3f5a426b72812c6939c1d252c8c1f8bd57b511f039a33f1a82718b2c82291e7b"
+reviewed_source_files = 472
+reviewed_source_sha256 = "ef077806c809ab0369bfa0cb4b03704bac64ef239a50ffc71159f86a39da0a17"
 deferred = []
 
 [[region]]
@@ -31,9 +31,9 @@ reason = "Every accepted and rejected syntax path must be exercised at the clien
 id = "domain-command-authorization"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-domain/src/decision.rs"
-source_sha256 = "d47ae1b8f49c601855468d76fc3088b7787810e1fc3214f96b37a25bb302c225"
-start_line = 2083
-end_line = 2352
+source_sha256 = "5e6e9557a880760d38a034a739f6a7dcfefcd67e32c490f2269aeadae539bda8"
+start_line = 2110
+end_line = 2379
 metric = "branches"
 reason = "Session fences, admission, and command authority are security decisions."
 
@@ -51,7 +51,7 @@ reason = "Every closed FieldKind decode arm must run in the canonical federation
 id = "domain-state-invariant-checks"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-ircd-domain/src/model.rs"
-source_sha256 = "2647136e4ab4842077e9f7bb7425959cd5a60eb40f0cc1961a186ea7af85789b"
+source_sha256 = "3a8f6b17d50d93193f1a34e8e161cde53661563462ccb136a88e230582e8ccde"
 start_line = 1966
 end_line = 2151
 metric = "branches"
@@ -71,9 +71,9 @@ reason = "Every enumerated rollback-guard, reservation, and database recovery st
 id = "history-command-authorization"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-domain/src/decision.rs"
-source_sha256 = "d47ae1b8f49c601855468d76fc3088b7787810e1fc3214f96b37a25bb302c225"
-start_line = 2378
-end_line = 2399
+source_sha256 = "5e6e9557a880760d38a034a739f6a7dcfefcd67e32c490f2269aeadae539bda8"
+start_line = 2405
+end_line = 2426
 metric = "branches"
 reason = "History requests require current membership, plaintext content, enabled retention, and an eligible channel."
 

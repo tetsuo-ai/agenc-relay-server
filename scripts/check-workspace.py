@@ -520,6 +520,11 @@ def validate_package_manifest(manifest_path: Path, manifest: dict[str, object]) 
                 # The binary's integration tests build generation-1 fixtures
                 # for the migration drill; the feature never reaches a build.
                 expected_declaration["features"] = ["legacy-fixtures"]
+            if (package_name, table_name, dependency_name) == (
+                "agenc-ircd-runtime", "dev-dependencies", "tokio"
+            ):
+                # Paused clocks make connection deadline tests deterministic.
+                expected_declaration["features"] = ["test-util"]
             if declaration != expected_declaration:
                 raise WorkspaceError(
                     f"{manifest_path} {table_name}.{dependency_name} must inherit the root pin"
@@ -1094,6 +1099,29 @@ def self_test(root: Path) -> int:
         "unreviewed binary external dev dependency",
         lambda: validate_package_manifest(binary_manifest_path, extra_external_dev),
         "external dependency set differs",
+    )
+    cases += 1
+
+    runtime_manifest_path = root / "crates/agenc-ircd-runtime/Cargo.toml"
+    runtime_manifest = load_toml(runtime_manifest_path)
+    production_clock = copy.deepcopy(runtime_manifest)
+    production_clock["dependencies"]["tokio"] = {  # type: ignore[index]
+        "workspace": True, "features": ["test-util"]
+    }
+    expect_rejection(
+        "test clock in production dependency",
+        lambda: validate_package_manifest(runtime_manifest_path, production_clock),
+        "dependencies.tokio must inherit the root pin",
+    )
+    cases += 1
+    extra_clock_feature = copy.deepcopy(runtime_manifest)
+    extra_clock_feature["dev-dependencies"]["tokio"] = {  # type: ignore[index]
+        "workspace": True, "features": ["test-util", "tracing"]
+    }
+    expect_rejection(
+        "unreviewed test clock feature",
+        lambda: validate_package_manifest(runtime_manifest_path, extra_clock_feature),
+        "dev-dependencies.tokio must inherit the root pin",
     )
     cases += 1
 

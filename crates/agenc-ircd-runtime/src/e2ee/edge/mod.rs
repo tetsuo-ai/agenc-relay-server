@@ -109,6 +109,9 @@ pub(crate) struct LocalOrigin {
     pub(crate) sequenced: Option<u64>,
     /// The semantic identifier of the accepted declaration.
     pub(crate) state_id: [u8; 32],
+    /// The last declaration's exact wire bytes, retained across link loss
+    /// even when its acknowledgement has not arrived.
+    pub(crate) declaration: Option<(u64, Vec<u8>)>,
     /// The bound user.
     pub(crate) user_id: Option<UserId>,
     /// The authenticated account.

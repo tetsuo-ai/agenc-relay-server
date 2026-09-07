@@ -42,8 +42,109 @@ const MIGRATION_ATTEMPTS: u32 = 6;
 const DRILL_STOP_BUDGET: Duration = Duration::from_secs(60);
 /// Let the freshly linked network settle before the first operation.
 const STARTUP_SETTLE: Duration = Duration::from_secs(2);
-/// After a restart an explicit SASL failure is retried this long (CAP-7).
-const POST_RESTART_AUTH_GRACE: Duration = Duration::from_secs(30);
+
+fn stop_command(reason: &str) -> TestResult<String> {
+    let command = if reason.contains(' ') || reason.starts_with(':') {
+        format!("DIE :{reason}")
+    } else {
+        format!("DIE {reason}")
+    };
+    let canonical = agenc_ircd_admin::CanonicalCommand::check(command.as_bytes())?;
+    let _validated = agenc_ircd_admin::AdminCommand::parse(canonical)?;
+    Ok(command)
+}
+
+#[test]
+fn stop_reasons_reach_the_signed_admin_confirmation_boundary() -> TestResult {
+    for reason in [
+        "resync",
+        "resync detached",
+        ":resync",
+        " leading",
+        "é",
+        "planned maintenance",
+    ] {
+        let command = stop_command(reason)?;
+        assert_signed_stop_command(&command, reason)?;
+    }
+    for reason in ["", "trailing ", "two  spaces", "bad\rreason", "bad\nreason"] {
+        assert!(stop_command(reason).is_err());
+    }
+    assert!(stop_command(&"x".repeat(513)).is_err());
+    Ok(())
+}
+
+fn assert_signed_stop_command(command: &str, reason: &str) -> TestResult {
+    use agenc_ircd_admin::{
+        AdminChallenge, AdminCommand, AdminCommandTbs, AdminEvent, AdminSessionBinding,
+        AdminSessionId, Challenge, ConfirmationState, OperatorRecord, OperatorRegistry,
+        PeerIdentity, TransportBinding, TransportKind, encode_base64url, render_admin_tag,
+    };
+    use agenc_ircd_types::{AdminPermission, AdminPermissionSet, MonotonicTick, OperatorId};
+
+    let binding = AdminSessionBinding {
+        network_id: NetworkId::from_bytes([1; 32]),
+        server_id: ServerId::from_bytes([2; 16]),
+    };
+    let challenge = AdminChallenge::new(
+        AdminSessionId::from_bytes([3; 16]),
+        Challenge::from_bytes([4; 32]),
+        TransportKind::Local,
+        TransportBinding::from_bytes([5; 32]),
+    );
+    let key = Ed25519SecretKey::from_bytes([6; 32]);
+    let operator = OperatorId::from_bytes([7; 16]);
+    let mut permissions = AdminPermissionSet::EMPTY;
+    permissions.insert(AdminPermission::Process);
+    let registry = OperatorRegistry::from_records(vec![OperatorRecord::new(
+        operator,
+        key.public_key(),
+        None,
+        vec![1000],
+        Vec::new(),
+        permissions,
+        true,
+    )?])?;
+    let signature = challenge.sign_oper(binding.network_id, binding.server_id, &key)?;
+    let oper = format!(
+        "OPER {} {}\r\n",
+        operator.to_base64url(),
+        encode_base64url(signature.as_bytes())
+    );
+    let session_id = challenge.session_id();
+    let mut session = agenc_ircd_admin::AdminSession::new(
+        binding,
+        challenge,
+        PeerIdentity::Local {
+            uid: 1000,
+            gid: 1000,
+        },
+    );
+    assert!(matches!(
+        session.accept_line(oper.as_bytes(), MonotonicTick::from_ticks(0), &registry),
+        Ok(AdminEvent::Authenticated { .. })
+    ));
+    let tbs = AdminCommandTbs::new(
+        binding.network_id,
+        binding.server_id,
+        session_id,
+        0,
+        None,
+        command.as_bytes(),
+    )?;
+    let signed = format!(
+        "{} {command}\r\n",
+        render_admin_tag(0, &tbs.sign(&key)?, None)
+    );
+    let accepted = session.accept_line(signed.as_bytes(), MonotonicTick::from_ticks(1), &registry);
+    let Ok(AdminEvent::Command(event)) = accepted else {
+        return Err(failure("canonical signed stop did not reach confirmation"));
+    };
+    assert_eq!(event.confirmation, ConfirmationState::Required);
+    assert!(matches!(event.command, AdminCommand::Die(value) if value.as_str() == reason));
+    Ok(())
+}
+
 /// Request identifiers handed to account exchanges; every drill process
 /// starts from a distinct base so replayed identifiers never collide.
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(5_000);
@@ -224,25 +325,8 @@ impl DrillNodes {
     /// Stops one node through its admin socket and waits for a clean exit.
     fn stop(&mut self, network: &Network, index: usize, reason: &str) -> TestResult {
         let identity = admin_identity(node(network, index));
-        let deadline = Instant::now() + DRILL_STOP_BUDGET;
-        let mut last = String::new();
-        loop {
-            match AdminSession::connect(&identity)
-                .and_then(|mut admin| admin.confirm_process(&format!("DIE :{reason}")))
-            {
-                Ok(()) => break,
-                Err(error) if Instant::now() < deadline => {
-                    last = error.to_string();
-                    println!("[drill] DIE on node {index} not accepted yet: {last}");
-                    thread::sleep(Duration::from_secs(2));
-                }
-                Err(error) => {
-                    return Err(failure(format!(
-                        "DIE on node {index} refused: {error} (last: {last})"
-                    )));
-                }
-            }
-        }
+        let command = stop_command(reason)?;
+        AdminSession::connect(&identity)?.confirm_process(&command)?;
         let status = self.daemon(index).wait_within(DRILL_STOP_BUDGET)?;
         if !status.success() {
             return Err(failure(format!("node {index} exited with {status}")));
@@ -299,6 +383,8 @@ impl DrillNodes {
     /// Restarts every node after a change that alters the coordinator's
     /// identity or trust facts: the coordinator first, then both edges.
     fn restart_all(&mut self, network: &Network) -> TestResult {
+        let before_a = links_established(&network.edge_a);
+        let before_b = links_established(&network.edge_b);
         for index in [1, 2] {
             if self.daemon(index).child.is_some() {
                 let status = self.daemon(index).stop()?;
@@ -317,10 +403,10 @@ impl DrillNodes {
             DaemonProcess::start_logged(&network.edge_b.config_path, None, Some(&stderr[2]))?;
         self.check_alive(1)?;
         self.check_alive(2)?;
-        let before_a = links_established(&network.edge_a);
-        let before_b = links_established(&network.edge_b);
-        wait_for_link(&network.edge_a, before_a.saturating_sub(1))?;
-        wait_for_link(&network.edge_b, before_b.saturating_sub(1))
+        wait_for_link(&network.edge_a, before_a)?;
+        wait_for_link(&network.edge_b, before_b)?;
+        wait_for_account_authority(&network.edge_a)?;
+        wait_for_account_authority(&network.edge_b)
     }
 
     fn stop_all(&mut self) -> [bool; 3] {
@@ -588,13 +674,15 @@ fn repin_coordinator_epoch(network: &Network, epoch: &str) -> TestResult {
     Ok(())
 }
 
-/// Creates the drill account on edge A and the drill channel with its topic,
-/// then leaves the account session so the state is committed and observable.
+/// Creates the drill account and registers its channel before setting the
+/// topic, so leaving the seed session preserves the state being qualified.
 fn seed_state(network: &Network) -> TestResult<AccountId> {
     let (mut client, account) =
         authenticated_client(&network.edge_a, "drill-seed", DRILL_ACCOUNT_LOGIN, 150)?;
     client.send(&format!("JOIN {DRILL_CHANNEL}"))?;
     client.read_until(|line| line.contains(&format!(" 366 drill-seed {DRILL_CHANNEL} ")))?;
+    client.send(&format!("CHANCTL REGISTER {DRILL_CHANNEL}"))?;
+    client.read_until(|line| line.contains(&format!(" NOTE CHANCTL UPDATED {DRILL_CHANNEL} ")))?;
     client.send(&format!("TOPIC {DRILL_CHANNEL} :{DRILL_TOPIC}"))?;
     client.read_until(|line| line.contains(&format!("TOPIC {DRILL_CHANNEL} :{DRILL_TOPIC}")))?;
     client.send("QUIT :seeded")?;
@@ -607,17 +695,17 @@ fn account_login(fixture: &NodeFixture, account: AccountId, nick: &str) -> TestR
     account_login_counting(fixture, account, nick).map(|(client, _)| client)
 }
 
-/// Authenticates the drill account on an edge and reports how many explicit
-/// SASL failures were retried inside the post-restart grace (finding CAP-7).
+/// Authenticates the drill account and counts only transient transport retries.
+/// An explicit authentication refusal fails the probe on its first attempt.
 fn account_login_counting(
     fixture: &NodeFixture,
     account: AccountId,
     nick: &str,
 ) -> TestResult<(IrcClient, u32)> {
+    wait_for_account_authority(fixture)?;
     let started = Instant::now();
     let deadline = started + NETWORK_WAIT;
-    let grace = started + POST_RESTART_AUTH_GRACE;
-    let mut auth_retries = 0_u32;
+    let mut transport_retries = 0_u32;
     loop {
         let attempt = (|| -> TestResult<IrcClient> {
             let mut client = IrcClient::connect(fixture)?;
@@ -641,13 +729,12 @@ fn account_login_counting(
             Ok(client)
         })();
         match attempt {
-            Ok(client) => return Ok((client, auth_retries)),
-            Err(error) if error.to_string().contains(" 904 ") && Instant::now() < grace => {
-                auth_retries += 1;
-                thread::sleep(Duration::from_secs(1));
-            }
-            Err(error) if Instant::now() < deadline && !error.to_string().contains(" 904 ") => {
-                let _transient = error;
+            Ok(client) => return Ok((client, transport_retries)),
+            Err(error)
+                if Instant::now() < deadline
+                    && super::stage_ten_capacity::transient_transport(&error) =>
+            {
+                transport_retries += 1;
                 thread::sleep(Duration::from_secs(1));
             }
             Err(error) => return Err(error),
@@ -655,10 +742,27 @@ fn account_login_counting(
     }
 }
 
-/// Joins the drill channel and reports whether its topic came back intact.
-/// Joins the drill channel; returns whether the join completed and whether
-/// the topic was shown. Edges do not render the topic on JOIN (CAP-1), so
-/// membership is the gate and the topic an observation.
+fn wait_for_account_authority(fixture: &NodeFixture) -> TestResult {
+    let identity = admin_identity(fixture);
+    let deadline = Instant::now() + NETWORK_WAIT;
+    while Instant::now() < deadline {
+        let active = AdminSession::connect(&identity)?
+            .stats("FEDERATION")?
+            .into_iter()
+            .find(|(name, _)| name == "active_peers")
+            .ok_or_else(|| failure("federation readiness counter missing"))?
+            .1;
+        if active == 1 {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Err(failure(
+        "edge did not finish synchronization before account authentication",
+    ))
+}
+
+/// Joins the drill channel and checks its topic through an explicit query.
 fn join_drill_channel(client: &mut IrcClient, nick: &str) -> TestResult<(bool, bool)> {
     client.send(&format!("JOIN {DRILL_CHANNEL}"))?;
     let lines =
@@ -666,7 +770,15 @@ fn join_drill_channel(client: &mut IrcClient, nick: &str) -> TestResult<(bool, b
     let joined = lines
         .iter()
         .any(|line| line.contains(&format!(" 366 {nick} {DRILL_CHANNEL} ")));
-    let topic = lines.iter().any(|line| line.contains(DRILL_TOPIC));
+    client.send(&format!("TOPIC {DRILL_CHANNEL}"))?;
+    let topic_lines = client.read_until(|line| {
+        line.contains(&format!(" 333 {nick} {DRILL_CHANNEL} "))
+            || line.contains(&format!(" 331 {nick} {DRILL_CHANNEL} "))
+            || line.contains("FAIL TOPIC ")
+    })?;
+    let topic = topic_lines
+        .iter()
+        .any(|line| line.contains(&format!(" 332 {nick} {DRILL_CHANNEL} :{DRILL_TOPIC}")));
     Ok((joined, topic))
 }
 
@@ -752,12 +864,16 @@ fn run_restore(drill: &mut Drill, disaster: bool) -> TestResult<bool> {
             drill.fact("existing_login_error", error.to_string());
             let guest = register_when_available(&network.edge_b, "restore-guest").is_ok();
             drill.fact("guest_registration_after_restore", guest);
-            let fresh = authenticated_client(&network.edge_a, "post-restore", "post-account", 170)
-                .map(|(mut client, _)| client.send("QUIT :probe").is_ok());
-            drill.fact("new_account_after_restore", fresh.is_ok());
             (false, false)
         }
     };
+    let fresh = authenticated_client(&network.edge_a, "post-restore", "post-account", 170)
+        .and_then(|(mut client, _)| client.send("QUIT :probe"));
+    let new_account = fresh.is_ok();
+    if let Err(error) = fresh {
+        drill.fact("new_account_after_restore_error", error.to_string());
+    }
+    drill.fact("new_account_after_restore", new_account);
     drill.fact("existing_login_after_restore", login_ok);
     drill.fact("topic_intact", topic);
     drill.step(
@@ -766,7 +882,12 @@ fn run_restore(drill: &mut Drill, disaster: bool) -> TestResult<bool> {
     );
     let clean = nodes.stop_all();
     drill.fact("daemons_stopped_cleanly", format!("{clean:?}"));
-    Ok(login_ok && witness_ok && outcome.incarnation_changed && clean.iter().all(|c| *c))
+    Ok(login_ok
+        && topic
+        && new_account
+        && witness_ok
+        && outcome.incarnation_changed
+        && clean.iter().all(|c| *c))
 }
 
 #[test]
@@ -967,22 +1088,11 @@ fn delete_account(
         account,
     )?;
     client.complete_registration(nick)?;
-    // Deletion needs a fresh authentication grant on the registered session.
-    client.send("AUTHENTICATE *")?;
-    client.read_until(|line| {
-        [" 901 ", " 903 ", " 904 ", " 906 "]
-            .iter()
-            .any(|n| line.contains(n))
-            || line.contains("FAIL ")
-    })?;
-    authenticate_live_account_with(
-        &mut client,
-        fixture,
-        "delete-account",
-        ACCOUNT_PASSWORD,
-        fresh_requests(),
-        account,
-    )?;
+    // The same connection's initial OPAQUE grant supplies fresh authority.
+    client.send("ACCT LABEL deletion-check")?;
+    client.read_until(|line| line.contains(" NOTE ACCT UPDATED "))?;
+    client.send("ACCT PRESENCE PUBLIC")?;
+    client.read_until(|line| line.contains(" NOTE ACCT UPDATED "))?;
     client.send("ACCT DELETE START")?;
     let challenge = client
         .read_until(|line| line.contains("DELETE_CHALLENGE") || line.contains("FAIL ACCT"))?;
@@ -995,9 +1105,541 @@ fn delete_account(
                 .map(str::to_owned)
         })
         .ok_or_else(|| failure(format!("no deletion challenge: {challenge:?}")))?;
+    // A private challenge cannot stale the edge's published session revision.
+    client.send("AWAY :deletion pending")?;
+    client.read_until(|line| line.contains(" 306 "))?;
     client.send(&format!("ACCT DELETE CONFIRM {token}"))?;
-    let closing = client.read_until(|line| line.contains("ERROR "))?;
-    Ok(closing)
+    read_deleted_connection_closure(&mut client.reader)
+}
+
+fn read_deleted_connection_closure(reader: &mut impl BufRead) -> TestResult<Vec<String>> {
+    let deadline = Instant::now() + REPLY_DEADLINE;
+    let mut lines = Vec::<String>::new();
+    for _ in 0..TRANSCRIPT_LINES {
+        if Instant::now() > deadline {
+            return Err(failure(
+                "deletion connection did not close before its deadline",
+            ));
+        }
+        let mut line = String::new();
+        let read = reader.read_line(&mut line).map_err(|error| {
+            failure(format!(
+                "deletion close read failed ({error}); final note received={}",
+                lines.last().is_some_and(|line| is_deletion_note(line)),
+            ))
+        })?;
+        if read == 0 {
+            if lines.last().is_some_and(|line| is_deletion_note(line)) {
+                return Ok(lines);
+            }
+            return Err(failure(
+                "deletion connection closed before its final response",
+            ));
+        }
+        let line = line.trim_end_matches(['\r', '\n']).to_owned();
+        lines.push(line);
+    }
+    Err(failure("deletion connection exceeded its transcript bound"))
+}
+
+fn is_deletion_note(line: &str) -> bool {
+    line.strip_prefix(':')
+        .and_then(|line| line.split_once(' '))
+        .is_some_and(|(source, reply)| {
+            !source.is_empty() && reply == "NOTE ACCT UPDATED :Account setting updated"
+        })
+}
+
+struct ClosingReadFailure(io::ErrorKind);
+
+impl io::Read for ClosingReadFailure {
+    fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+        Err(io::Error::from(self.0))
+    }
+}
+
+#[test]
+fn deletion_requires_final_note_and_clean_eof() -> TestResult {
+    let note = ":edge.test NOTE ACCT UPDATED :Account setting updated\r\n";
+    let mut clean = io::Cursor::new(note);
+    assert_eq!(
+        read_deleted_connection_closure(&mut clean)?,
+        [note.trim_end()]
+    );
+    for text in [
+        "",
+        ":edge.test ERROR :Closing connection\r\n",
+        ":peer.test NOTICE delete-me : NOTE ACCT UPDATED :Account setting updated\r\n",
+    ] {
+        assert!(read_deleted_connection_closure(&mut io::Cursor::new(text)).is_err());
+    }
+    for kind in [
+        io::ErrorKind::TimedOut,
+        io::ErrorKind::WouldBlock,
+        io::ErrorKind::ConnectionReset,
+        io::ErrorKind::UnexpectedEof,
+    ] {
+        let input = io::Cursor::new(note).chain(ClosingReadFailure(kind));
+        assert!(read_deleted_connection_closure(&mut BufReader::new(input)).is_err());
+    }
+    Ok(())
+}
+
+/// Tests the deleted login itself; unrelated carrier failures cannot pass it.
+fn deleted_account_login_refused(fixture: &NodeFixture, account: AccountId) -> TestResult<bool> {
+    wait_for_account_authority(fixture)?;
+    let mut client = IrcClient::connect(fixture)?;
+    client.negotiate_sasl()?;
+    authentication_was_refused(authenticate_live_account_with(
+        &mut client,
+        fixture,
+        "delete-account",
+        ACCOUNT_PASSWORD,
+        fresh_requests(),
+        account,
+    ))
+}
+
+/// Only a completed OPAQUE exchange may establish the deleted-login refusal.
+fn authentication_was_refused(result: TestResult) -> TestResult<bool> {
+    match result {
+        Ok(()) => Ok(false),
+        Err(error)
+            if matches!(
+                error.downcast_ref::<opaque_ke::errors::ProtocolError>(),
+                Some(opaque_ke::errors::ProtocolError::InvalidLoginError)
+            ) =>
+        {
+            Ok(true)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[test]
+fn deletion_evidence_rejects_wrong_account_and_transport_failures() -> TestResult {
+    let live = AccountId::from_random(agenc_ircd_types::AccountRandomId::from_bytes([231; 16]));
+    let deleted = AccountId::from_random(agenc_ircd_types::AccountRandomId::from_bytes([232; 16]));
+    let completion = Completion::committed(
+        agenc_ircd_types::TransactionId::from_bytes([233; 16]),
+        live,
+        1,
+    );
+    let wrong_account = committed_account(completion, Some(deleted)).map(|_| ());
+    assert!(
+        authentication_was_refused(wrong_account).is_err(),
+        "a healthy account's mismatched identity is not deletion evidence"
+    );
+    assert!(authentication_was_refused(Err(failure("transport closed"))).is_err());
+    assert!(authentication_was_refused(Err(failure(" 904 SASL authentication failed"))).is_err());
+    assert!(!authentication_was_refused(Ok(()))?);
+    let invalid_login =
+        opaque_ke::errors::ProtocolError::<std::convert::Infallible>::InvalidLoginError;
+    assert!(authentication_was_refused(Err(Box::new(invalid_login)))?);
+    Ok(())
+}
+
+struct DeletionAccountRows {
+    account_id: AccountId,
+    account: PersistentRecordValue,
+    credential: Option<PersistentRecordValue>,
+    login: agenc_ircd_storage::LoginIndexValue,
+}
+
+struct DeletionStateEvidence {
+    target: DeletionAccountRows,
+    survivor: DeletionAccountRows,
+}
+
+fn read_deletion_state(
+    fixture: &NodeFixture,
+    target: AccountId,
+    survivor: AccountId,
+) -> TestResult<DeletionStateEvidence> {
+    use agenc_ircd_runtime::state_core::durable::KeyDeriver;
+
+    let config = agenc_ircd_config::load_config(
+        &fixture.config_path,
+        agenc_ircd_config::ValidationDepth::Host,
+    )?;
+    let master = read_key(&config.storage.master_key_file)
+        .ok_or_else(|| failure("deletion evidence master key unavailable"))?;
+    let guard = read_key(&config.storage.rollback_guard_key_file)
+        .ok_or_else(|| failure("deletion evidence guard key unavailable"))?;
+    let login = read_key(&config.storage.login_index_key_file)
+        .ok_or_else(|| failure("deletion evidence login key unavailable"))?;
+    if config.storage.login_index_previous_key_file.is_some() {
+        return Err(failure("deletion drill requires stable login-index state"));
+    }
+    let owner = StorageOwner::start(StorageOpenConfig {
+        expected_network_id: NETWORK_ID,
+        expected_server_id: fixture.server_id,
+        state_directory: StateDirectory::open(
+            &config.storage.state_dir,
+            &embedded_storage_qualifications()?,
+        )?,
+        storage_master_key: StorageMasterKey::from_bytes(master),
+        rollback_guard_root_key: RollbackGuardRootKey::from_bytes(guard),
+        login_index_key: LoginIndexKey::from_bytes(login),
+        previous_login_index_key: None,
+        limits: engine_limits(),
+    })?;
+    let recovered = owner.recovered_state();
+    let keys = KeyDeriver::new(
+        StorageMasterKey::from_bytes(master),
+        recovered.database_binding(),
+        recovered.storage_key_generation(),
+    )?;
+    let result = (|| {
+        let key = StoredKey::new(LOGIN_INDEX_KEY_STATE_KEY.to_vec())?;
+        let state = deletion_evidence_read(&owner, &keys, TableId::LoginIndexKeyState, &key)?
+            .ok_or_else(|| failure("deletion evidence login-key state missing"))?;
+        let state = LoginIndexKeyState::decode(state.expose_for_storage_codec())?;
+        if state.previous().is_some() {
+            return Err(failure("deletion evidence encountered an index transition"));
+        }
+        Ok(DeletionStateEvidence {
+            target: read_deletion_account(
+                &owner,
+                &keys,
+                target,
+                "delete-account",
+                &login,
+                state.current_generation(),
+            )?,
+            survivor: read_deletion_account(
+                &owner,
+                &keys,
+                survivor,
+                DRILL_ACCOUNT_LOGIN,
+                &login,
+                state.current_generation(),
+            )?,
+        })
+    })();
+    owner.shutdown()?;
+    result
+}
+
+fn deletion_evidence_read(
+    owner: &StorageOwner,
+    keys: &agenc_ircd_runtime::state_core::durable::KeyDeriver,
+    table: TableId,
+    key: &StoredKey,
+) -> TestResult<Option<agenc_ircd_crypto::OpenedStoragePlaintext>> {
+    let mut result = owner
+        .port()
+        .try_read(agenc_ircd_storage::ReadPlan::exact(table, key.clone()))?
+        .wait()?;
+    if result.truncated || result.records.len() > 1 {
+        return Err(failure("deletion evidence exact read was incomplete"));
+    }
+    let Some(row) = result.records.pop() else {
+        return Ok(None);
+    };
+    if row.table != table || row.key != *key {
+        return Err(failure("deletion evidence exact row identity changed"));
+    }
+    let sealed = agenc_ircd_storage::SealedRecord::decode(&row.sealed_record)?;
+    Ok(Some(keys.open(table, key, &sealed)?))
+}
+
+fn read_deletion_account(
+    owner: &StorageOwner,
+    keys: &agenc_ircd_runtime::state_core::durable::KeyDeriver,
+    account_id: AccountId,
+    login: &str,
+    login_key: &[u8; 32],
+    login_generation: u32,
+) -> TestResult<DeletionAccountRows> {
+    let account_key = StoredKey::new(account_id.to_text().into_bytes())?;
+    let account = deletion_evidence_read(owner, keys, TableId::Account, &account_key)?
+        .ok_or_else(|| failure("deletion evidence account row missing"))?;
+    let account =
+        PersistentRecordValue::decode(TableId::Account, account.expose_for_storage_codec())?;
+    let credential = deletion_evidence_read(owner, keys, TableId::OpaqueRecord, &account_key)?
+        .map(|value| {
+            PersistentRecordValue::decode(TableId::OpaqueRecord, value.expose_for_storage_codec())
+        })
+        .transpose()?;
+    let digest = agenc_ircd_crypto::derive_login_index(
+        &LoginIndexKey::from_bytes(*login_key),
+        NETWORK_ID,
+        &NormalizedLogin::prepare(login)?,
+    )?;
+    let stored = agenc_ircd_storage::LoginIndexStoredKey::new(login_generation, digest)?;
+    let login = deletion_evidence_read(owner, keys, TableId::LoginIndex, &stored.encode()?)?
+        .ok_or_else(|| failure("deletion evidence login row missing"))?;
+    let login =
+        agenc_ircd_storage::LoginIndexValue::decode(login.expose_for_storage_codec(), &stored)?;
+    Ok(DeletionAccountRows {
+        account_id,
+        account,
+        credential,
+        login,
+    })
+}
+
+fn deletion_state_is_complete(
+    created: &DeletionStateEvidence,
+    deleted: &DeletionStateEvidence,
+    rekeyed: &DeletionStateEvidence,
+    _totals: [(u64, u64); 3],
+) -> TestResult<bool> {
+    let target = created.target.account_id;
+    if target == created.survivor.account_id
+        || deleted.target.account_id != target
+        || rekeyed.target.account_id != target
+        || !live_deletion_account(&created.target)?
+        || !live_deletion_account(&created.survivor)?
+        || !deleted_deletion_account(&deleted.target)
+        || !deleted_deletion_account(&rekeyed.target)
+    {
+        return Ok(false);
+    }
+    Ok(
+        deleted.target.account.revision() > created.target.account.revision()
+            && deleted.target.account.encode()? == rekeyed.target.account.encode()?
+            && deleted.target.login.encode()? == rekeyed.target.login.encode()?
+            && survivor_is_preserved(&created.survivor, &deleted.survivor)?
+            && survivor_is_preserved(&created.survivor, &rekeyed.survivor)?,
+    )
+}
+
+fn live_deletion_account(rows: &DeletionAccountRows) -> TestResult<bool> {
+    use agenc_ircd_storage::{AccountRecordBody, LoginIndexValueKind};
+
+    let Some(credential) = &rows.credential else {
+        return Ok(false);
+    };
+    if rows.account.record_kind() != LIVE_RECORD_KIND {
+        return Ok(false);
+    }
+    let account = AccountRecordBody::decode(rows.account.body())?;
+    let account_key = rows.account_id.to_text();
+    let references = credential.references();
+    let credential_reference = references.len() == 1
+        && references.first().is_some_and(|reference| {
+            reference.table() == TableId::Account
+                && reference.key().as_bytes() == account_key.as_bytes()
+        });
+    let version_precedes = credential.generation() > 0
+        && credential.generation() <= account.session_generation.get()
+        && (credential.generation() < account.session_generation.get()
+            || credential.revision() <= account.revision.get());
+    let credential_bytes = credential
+        .body()
+        .try_into()
+        .map_err(|_| failure("deletion evidence OPAQUE record length was invalid"))?;
+    let _validated = agenc_ircd_auth::OpaqueRegistrationRecord::from_bytes(credential_bytes)?;
+    Ok(account.account_id == rows.account_id
+        && rows.account.generation() == account.session_generation.get()
+        && rows.account.revision() == account.revision.get()
+        && credential.record_kind() == LIVE_RECORD_KIND
+        && credential.expires_at().is_none()
+        && credential_reference
+        && version_precedes
+        && matches!(rows.login.kind(), LoginIndexValueKind::Live { account_id, .. } if *account_id == rows.account_id))
+}
+
+fn deleted_deletion_account(rows: &DeletionAccountRows) -> bool {
+    use agenc_ircd_storage::LoginIndexValueKind;
+
+    rows.account.record_kind() == agenc_ircd_runtime::state_core::durable::TOMBSTONE_RECORD_KIND
+        && rows.account.generation() == 0
+        && rows.account.expires_at().is_none()
+        && rows.account.references().is_empty()
+        && rows.account.body().is_empty()
+        && rows.credential.is_none()
+        && matches!(rows.login.kind(), LoginIndexValueKind::DeletionTombstone { deleted_account_id, expires_at }
+            if *deleted_account_id == rows.account_id && *expires_at != 0)
+}
+
+fn survivor_is_preserved(
+    before: &DeletionAccountRows,
+    after: &DeletionAccountRows,
+) -> TestResult<bool> {
+    if before.account_id != after.account_id || !live_deletion_account(after)? {
+        return Ok(false);
+    }
+    let previous = agenc_ircd_storage::AccountRecordBody::decode(before.account.body())?;
+    let mut resulting = agenc_ircd_storage::AccountRecordBody::decode(after.account.body())?;
+    resulting.session_generation = previous.session_generation;
+    resulting.revision = previous.revision;
+    Ok(agenc_ircd_storage::AccountRecordBody::encode(&previous)?
+        == agenc_ircd_storage::AccountRecordBody::encode(&resulting)?
+        && before
+            .credential
+            .as_ref()
+            .zip(after.credential.as_ref())
+            .is_some_and(|(before, after)| before.body() == after.body())
+        && before.login.encode()? == after.login.encode()?)
+}
+
+fn deletion_evidence_fixture(
+    deleted: bool,
+    generation: u64,
+    opaque: &OpaqueProfile,
+) -> TestResult<DeletionStateEvidence> {
+    Ok(DeletionStateEvidence {
+        target: deletion_evidence_account_fixture(91, deleted, generation, opaque)?,
+        survivor: deletion_evidence_account_fixture(92, false, generation, opaque)?,
+    })
+}
+
+fn deletion_evidence_account_fixture(
+    byte: u8,
+    deleted: bool,
+    generation: u64,
+    opaque: &OpaqueProfile,
+) -> TestResult<DeletionAccountRows> {
+    use agenc_ircd_storage::{
+        LoginIndexStoredKey, LoginIndexValue, LoginIndexValueKind, RecordReference,
+    };
+
+    let account_id = agenc_ircd_testkit::account_id(byte);
+    let revision = if generation == 1 { 3_u64 } else { 1_u64 };
+    // Version-one account body: identity, no label, private presence, permissive
+    // DM policies, empty contacts/nicknames, session generation and revision.
+    let mut body = 1_u16.to_be_bytes().to_vec();
+    body.extend_from_slice(account_id.random().as_bytes());
+    body.extend_from_slice(&[0, 1, 0, 0]);
+    body.extend_from_slice(&[0; 8]);
+    body.extend_from_slice(&generation.to_be_bytes());
+    body.extend_from_slice(&revision.to_be_bytes());
+    let account = if deleted {
+        PersistentRecordValue::new(TableId::Account, 2, 9, 0, None, Vec::new(), Vec::new())?
+    } else {
+        PersistentRecordValue::new(
+            TableId::Account,
+            LIVE_RECORD_KIND,
+            revision,
+            generation,
+            None,
+            Vec::new(),
+            body,
+        )?
+    };
+    let credential = if deleted {
+        None
+    } else {
+        Some(PersistentRecordValue::new(
+            TableId::OpaqueRecord,
+            LIVE_RECORD_KIND,
+            3,
+            1,
+            None,
+            vec![RecordReference::new(
+                TableId::Account,
+                StoredKey::new(account_id.to_text().into_bytes())?,
+            )?],
+            opaque.expose_fake_record_for_persistence().to_vec(),
+        )?)
+    };
+    let stored = LoginIndexStoredKey::new(
+        1,
+        agenc_ircd_crypto::LoginIndexDigest::from_storage_key([byte; 32]),
+    )?;
+    let kind = if deleted {
+        LoginIndexValueKind::DeletionTombstone {
+            deleted_account_id: account_id,
+            expires_at: 3_000_000_000,
+        }
+    } else {
+        LoginIndexValueKind::Live {
+            account_id,
+            opaque_credential_id: OpaqueCredentialId::from_bytes([byte; 32]),
+        }
+    };
+    Ok(DeletionAccountRows {
+        account_id,
+        account,
+        credential,
+        login: LoginIndexValue::new(&stored, kind)?,
+    })
+}
+
+#[test]
+fn deletion_evidence_accepts_exact_removal_when_unrelated_journals_grow() -> TestResult {
+    let opaque = OpaqueProfile::generate(NETWORK_ID)?;
+    let created = deletion_evidence_fixture(false, 1, &opaque)?;
+    let deleted = deletion_evidence_fixture(true, 1, &opaque)?;
+    let rekeyed = deletion_evidence_fixture(true, 2, &opaque)?;
+    assert!(live_deletion_account(&created.target)?);
+    assert!(deleted_deletion_account(&deleted.target));
+    assert!(survivor_is_preserved(&created.survivor, &rekeyed.survivor)?);
+    assert!(
+        deletion_state_is_complete(
+            &created,
+            &deleted,
+            &rekeyed,
+            [(42, 72_491), (61, 136_182), (78, 185_311)]
+        )?,
+        "a retained request journal must not turn exact credential deletion into failure"
+    );
+    Ok(())
+}
+
+#[test]
+fn deletion_evidence_rejects_live_or_reassociated_authority_despite_smaller_totals() -> TestResult {
+    let opaque = OpaqueProfile::generate(NETWORK_ID)?;
+    let created = deletion_evidence_fixture(false, 1, &opaque)?;
+    let deleted = deletion_evidence_fixture(true, 1, &opaque)?;
+    let rekeyed = deletion_evidence_fixture(true, 2, &opaque)?;
+    let totals = [(10, 10_000), (20, 20_000), (15, 15_000)];
+    let live = deletion_evidence_fixture(false, 1, &opaque)?;
+    assert!(
+        !deletion_state_is_complete(&created, &live, &rekeyed, totals)?,
+        "smaller global totals cannot prove that this account was deleted"
+    );
+    let mut retained_credential = deletion_evidence_fixture(true, 1, &opaque)?;
+    retained_credential.target.credential = deletion_evidence_fixture(false, 1, &opaque)?
+        .target
+        .credential;
+    assert!(!deletion_state_is_complete(
+        &created,
+        &retained_credential,
+        &rekeyed,
+        totals
+    )?);
+    let mut wrong_tombstone = deletion_evidence_fixture(true, 1, &opaque)?;
+    wrong_tombstone.target.login = deletion_evidence_account_fixture(93, true, 1, &opaque)?.login;
+    assert!(!deletion_state_is_complete(
+        &created,
+        &wrong_tombstone,
+        &rekeyed,
+        totals
+    )?);
+    let mut different_target = deletion_evidence_fixture(true, 1, &opaque)?;
+    different_target.target = deletion_evidence_account_fixture(93, true, 1, &opaque)?;
+    assert!(deleted_deletion_account(&different_target.target));
+    assert!(
+        !deletion_state_is_complete(&created, &different_target, &rekeyed, totals,)?,
+        "another account's valid tombstone is not this account's deletion evidence"
+    );
+    assert!(
+        !deletion_state_is_complete(&created, &deleted, &live, totals)?,
+        "rekey must not restore deleted account authority"
+    );
+    let mut changed_survivor = deletion_evidence_fixture(true, 2, &opaque)?;
+    let other_profile = OpaqueProfile::generate(NETWORK_ID)?;
+    changed_survivor.survivor.credential =
+        deletion_evidence_account_fixture(92, false, 2, &other_profile)?.credential;
+    assert!(!deletion_state_is_complete(
+        &created,
+        &deleted,
+        &changed_survivor,
+        totals
+    )?);
+    changed_survivor.survivor.credential =
+        deletion_evidence_account_fixture(93, false, 2, &opaque)?.credential;
+    assert!(!deletion_state_is_complete(
+        &created,
+        &deleted,
+        &changed_survivor,
+        totals
+    )?);
+    Ok(())
 }
 
 fn run_deletion(drill: &mut Drill) -> TestResult<bool> {
@@ -1007,7 +1649,7 @@ fn run_deletion(drill: &mut Drill) -> TestResult<bool> {
         directory: drill.stderr_logs.clone(),
     };
     let mut nodes = DrillNodes::start(&network, drill)?;
-    let _seed = seed_state(&network)?;
+    let seed = seed_state(&network)?;
     nodes.stop(&network, 0, "deletion baseline")?;
     let (_, before_records, before_bytes) =
         write_backup(&network.coordinator, "deletion-before.backup", 1)?;
@@ -1016,9 +1658,6 @@ fn run_deletion(drill: &mut Drill) -> TestResult<bool> {
         "baseline",
         format!("{before_records} rows, {before_bytes} bytes"),
     );
-    // Edges forward no account command, so deletion is only reachable on the
-    // node that hosts the account service (finding CAP-11); the account is
-    // created and deleted through the coordinator's own client listener.
     let (mut creator, account) =
         authenticated_client(&network.edge_a, "delete-me", "delete-account", 190)?;
     creator.send("QUIT :created")?;
@@ -1026,40 +1665,39 @@ fn run_deletion(drill: &mut Drill) -> TestResult<bool> {
     nodes.stop(&network, 0, "deletion after create")?;
     let (_, created_records, created_bytes) =
         write_backup(&network.coordinator, "deletion-created.backup", 2)?;
+    let created_state = read_deletion_state(&network.coordinator, account, seed)?;
+    drill.fact(
+        "created_target_has_live_credential",
+        live_deletion_account(&created_state.target)?,
+    );
     nodes.restart(&network, 0)?;
     drill.step(
         "create",
         format!("account created: {created_records} rows, {created_bytes} bytes"),
     );
     thread::sleep(Duration::from_secs(3));
-    // Edges forward no account command and the coordinator's own listener
-    // refuses the account capabilities, so deletion has no reachable path in
-    // the federated profile (finding CAP-11); both refusals are recorded.
     let closing = match delete_account(&network.edge_a, account, "delete-me") {
         Ok(closing) => closing,
         Err(error) => {
             drill.fact("deletion_at_edge", error.to_string());
-            let at_coordinator = delete_account(&network.coordinator, account, "delete-me");
-            drill.fact(
-                "deletion_at_coordinator",
-                match &at_coordinator {
-                    Ok(_) => "accepted".to_owned(),
-                    Err(error) => error.to_string(),
-                },
-            );
-            drill.step("delete", "no reachable deletion path (CAP-11)");
+            drill.step("delete", "edge account deletion failed");
             let clean = nodes.stop_all();
             drill.fact("daemons_stopped_cleanly", format!("{clean:?}"));
             return Ok(false);
         }
     };
     drill.fact("deletion_reply", closing.last().map_or("", String::as_str));
-    let denied = account_login(&network.edge_a, account, "deleted-login").is_err();
+    let denied = deleted_account_login_refused(&network.edge_a, account)?;
     drill.fact("deleted_login_refused", denied);
     drill.step("delete", format!("deleted; later login refused={denied}"));
     nodes.stop(&network, 0, "deletion after delete")?;
     let (backup, deleted_records, deleted_bytes) =
         write_backup(&network.coordinator, "deletion-deleted.backup", 3)?;
+    let deleted_state = read_deletion_state(&network.coordinator, account, seed)?;
+    drill.fact(
+        "deleted_target_has_tombstones_without_credential",
+        deleted_deletion_account(&deleted_state.target),
+    );
     drill.fact("records_before_create", before_records);
     drill.fact("records_after_create", created_records);
     drill.fact("records_after_delete", deleted_records);
@@ -1076,6 +1714,15 @@ fn run_deletion(drill: &mut Drill) -> TestResult<bool> {
         },
     )?;
     let rekeyed_length = database_length(&outcome.output)?;
+    let rekeyed_state = read_deletion_state(&network.coordinator, account, seed)?;
+    drill.fact(
+        "rekeyed_target_has_tombstones_without_credential",
+        deleted_deletion_account(&rekeyed_state.target),
+    );
+    drill.fact(
+        "survivor_credential_and_policy_preserved",
+        survivor_is_preserved(&created_state.survivor, &rekeyed_state.survivor)?,
+    );
     drill.fact("database_length_before_rekey", source_length);
     drill.fact("database_length_after_rekey", rekeyed_length);
     drill.step(
@@ -1087,8 +1734,11 @@ fn run_deletion(drill: &mut Drill) -> TestResult<bool> {
     );
     repin_coordinator_epoch(&network, &outcome.epoch)?;
     nodes.restart_all(&network)?;
-    let still_denied = account_login(&network.edge_b, account, "deleted-login").is_err();
+    let still_denied = deleted_account_login_refused(&network.edge_b, account)?;
     drill.fact("deleted_login_refused_after_rekey", still_denied);
+    let mut survivor = account_login(&network.edge_b, seed, "surviving-account")?;
+    survivor.send("QUIT :survived rekey")?;
+    drill.fact("unrelated_login_after_rekey", true);
     drill.step(
         "verify",
         format!("deleted account still refused={still_denied}"),
@@ -1097,9 +1747,16 @@ fn run_deletion(drill: &mut Drill) -> TestResult<bool> {
     drill.fact("daemons_stopped_cleanly", format!("{clean:?}"));
     Ok(denied
         && still_denied
-        && created_records > before_records
-        && deleted_records < created_records
-        && deleted_bytes < created_bytes
+        && deletion_state_is_complete(
+            &created_state,
+            &deleted_state,
+            &rekeyed_state,
+            [
+                (before_records, before_bytes),
+                (created_records, created_bytes),
+                (deleted_records, deleted_bytes),
+            ],
+        )?
         && clean.iter().all(|c| *c))
 }
 
@@ -1986,17 +2643,10 @@ fn run_resynchronization(drill: &mut Drill) -> TestResult<bool> {
     drill.fact("topic_seen_before", topic_before);
     drill.step(
         "attach",
-        format!("native client on edge b, topic visible={joined_before}"),
+        format!("native client on edge b, joined={joined_before}, topic visible={topic_before}"),
     );
-    let attached_stop = nodes.stop(&network, 2, "resync");
-    if let Err(error) = &attached_stop {
-        drill.fact("die_with_account_session_attached", error.to_string());
-        let _ = native.send("QUIT :detaching for the stop");
-        thread::sleep(Duration::from_secs(1));
-        nodes.stop(&network, 2, "resync detached")?;
-    } else {
-        drill.fact("die_with_account_session_attached", "accepted");
-    }
+    nodes.stop(&network, 2, "resync")?;
+    drill.fact("die_with_account_session_attached", "accepted");
     let (backup, _, _) = write_backup(fixture, "resync.backup", 1)?;
     let outcome = restore_node(
         fixture,
@@ -2028,11 +2678,18 @@ fn run_resynchronization(drill: &mut Drill) -> TestResult<bool> {
     drill.fact("reonboarded", joined_after);
     drill.step(
         "reonboard",
-        format!("disconnected={disconnected}, re-onboarded with topic={joined_after}"),
+        format!(
+            "disconnected={disconnected}, re-onboarded={joined_after}, topic visible={topic_after}"
+        ),
     );
     let clean = nodes.stop_all();
     drill.fact("daemons_stopped_cleanly", format!("{clean:?}"));
-    Ok(joined_before && disconnected && joined_after && clean.iter().all(|c| *c))
+    Ok(joined_before
+        && topic_before
+        && disconnected
+        && joined_after
+        && topic_after
+        && clean.iter().all(|c| *c))
 }
 
 #[test]

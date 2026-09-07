@@ -5,6 +5,34 @@ and its recorded checkpoint. Stage 10 requires evidence from the exact
 release binaries on both native targets. No Stage 10 release decision has
 been signed.
 
+## Current repair status
+
+The findings below distinguish observed faults, tested worktree repairs, and
+remaining implementation work. Development runs do not qualify an immutable
+release candidate.
+
+| Area | Current evidence and remaining work |
+| --- | --- |
+| Restored account authentication | CAP-9 and CAP-54 repairs pass strict restore and disaster-restore drills with existing and new accounts. CAP-7 still needs the strict release capacity run. |
+| Account deletion and rekey | CAP-11, CAP-57, and CAP-62 through CAP-67 pass the complete strict deletion drill, including exact authenticated rows, both deleted-login refusals, the surviving account, and all final stops. |
+| Federation and client replies | CAP-47 through CAP-60 have focused regression evidence, and all required workspace gates pass. A successful new release capacity run remains required. |
+| Disk pressure | CAP-44 and CAP-45 fix reset cleanup and durable request reconstruction. CAP-3 still requires proof that the original refused session survives and recovers. |
+| Reconnect and shutdown load | The current CAP-4 release probe survives the unpaced reconnect wave, admits eight fresh clients after recovery, and stops all three daemons cleanly. CAP-14 needs a fresh capacity result after the CAP-51 and CAP-65 shutdown repairs. |
+| Missing implementation | CAP-5 needs stopped login-index rotation commands and their authenticated audit and migration contract. CAP-13 needs bounded ordinary-event batching with complete receipt, rollback, and resource checks. |
+| Physical storage growth | STO-1 remains open. The measured storage batch exceeds both the qualification ceiling and operational reserve; a smaller page size alone does not establish a universal bound. |
+| Release qualification | The release coverage floor, full fuzz and model runs, both native targets, seven-day soak, external E2EE review, and signed decision remain open. |
+
+The complete repair set passes the required development gates on 2026-09-07:
+`cargo fmt --all --check`, workspace Clippy with all targets and features and
+warnings denied, the locked all-feature workspace test suite, source check
+and self-test, workspace policy check, and the critical coverage self-test.
+The exact test command reports 2,093 passing tests, no failures, and 21 ignored
+qualification tests across 118 targets. The source checker accepts 596 Rust
+files. Both coverage inventories bind the same 472 production source files;
+the release policy names 115 critical regions and retains its 90 percent
+overall and 100 percent critical branch floors. These checks do not replace
+the outstanding coverage measurement or ignored qualification campaigns.
+
 ## Current implementation
 
 The shutdown fix allows unrelated database writes while a signed audit scan
@@ -322,8 +350,10 @@ generation-1 twin of an edge database through the storage crate's
 completes it with `--resume`, and serves the installed directory. Deletion
 creates and deletes an account through the client protocol, takes backups
 before creation, after creation, and after deletion, rekeys the coordinator
-from the last one, and checks the deleted login stays refused and the record
-and byte counts fell. Rekey restores an edge under a new master and guard key
+from the last one, and checks the deleted login stays refused. It verifies
+exact authenticated deletion tombstones, credential absence, and preservation
+of an unrelated account and credential; total counts remain observations.
+Rekey restores an edge under a new master and guard key
 and authenticates an existing login through it. TLS rotation mints a new
 leaf under the same CA, reloads it with `REHASH`, and checks that a new
 connection sees the new leaf while an existing one continues. Federation
@@ -346,22 +376,26 @@ startup. Observability checks that every STATS selector answers with exactly
 its declared field set and that every log line names a registered event
 with a severity and timestamp.
 
-Development runs on this host pass twelve drills: migration (interrupted and
+Earlier development runs on this host passed twelve drills: migration (interrupted and
 resumed), rekey, TLS rotation (same-key renewal by reload, new key by
 restart, which `REHASH` refuses with `RESTART_REQUIRED`), federation
 rotation, sequencer rotation (a generation-1 set chaining from the previous
 credential), backup rotation, audit rotation, compromise (quiesced through
 the restart path, see CAP-8), rollback, resynchronization (see CAP-10), host
-hardening, and observability. Four do not pass and keep the drills job
-failing: restore and disaster restore (CAP-9), login-index transition
-(CAP-5), and deletion (CAP-11).
+hardening, and observability. At that point four failed: restore and disaster
+restore (CAP-9), login-index transition (CAP-5), and deletion (CAP-11). The
+current worktree also passes strict restore, disaster restore, and deletion,
+and repeats strict resynchronization with retained-topic assertions. Their
+records and repaired evidence checks appear under CAP-61 and CAP-65 through
+CAP-67. The missing login-index transition driver remains open. All drills
+still require rerunning against the next immutable candidate.
 
 ## Coverage
 
 `conformance/release-critical-coverage.toml` is the Stage 10 coverage policy.
 It uses the same schema as the interim `critical-coverage.toml`, carries the
 90 percent branch and line floors, and lists the complete critical inventory:
-96 regions across the five categories the architecture names. Each region is
+115 regions across the five categories the architecture names. Each region is
 anchored to a declaration and bound to its file digest and line range: the
 Display match of every parser error enum in the client, federation, E2EE,
 admin, config, and storage crates and the client message parser; every
@@ -381,9 +415,9 @@ policy first and the release policy second, and it also runs the doc tests,
 
 The 2026-09-05 workspace measurement on this branch reports 75.62 percent
 branches (14,310 of 18,924) and 90.66 percent lines, with all nine interim
-regions at 100 percent. Reaching the release floor needs 2,722 more covered
-branch outcomes. The interim policy passes; the release policy fails on the
-floor and on 21 of its 96 regions, which are listed with their counts in the
+regions at 100 percent. That measurement needed 2,722 more covered branch
+outcomes to reach the release floor. The interim policy passed; the release
+policy failed on the floor and on 21 of its then 96 regions, listed in the
 workspace job's coverage log. The largest gaps are the runtime account
 service, state core, registration, daemon, admin, edge history, and E2EE
 coordinator startup modules, and the domain federation projection. This
@@ -520,6 +554,30 @@ report measured a bare redb table with a different row order and does not
 show the behaviour; its embedded tuple remains what startup admits. A fix must
 be followed by a new candidate and a rerun of every storage measurement.
 
+The 2026-09-07 investigation reproduced a stronger counterexample through the
+production storage owner. With database and backup limits both set to 1 GiB,
+65,536 existing 4,096-byte sanction corpus values occupied even keys. A batch
+accepted by the storage layer
+inserted 65,535 small values at the intervening odd keys. Allocated storage
+grew from 551,469,056 to 832,065,536 bytes, a 280,596,480-byte increase that
+exceeds the operational reserve as well as the qualification ceiling. All
+131,071 rows reconstructed through the storage owner after restart. These
+opaque corpus payloads do not satisfy the domain's bare sanction-tombstone
+schema, so this is not a complete DomainState restart or one client command.
+Descending insertion with a held
+redb snapshot still grew by 280,621,056 bytes, so reversing writes does not
+repair the general case. The scratch record `sto1-contract-decision.md`
+contains the exact production probe, contract references, and repair choices.
+Neither growth bound has been raised, and this finding remains open.
+
+The analytical follow-up `sto1-512-page-analysis.md` uses valid live sanction
+body sizes and shows why 512-byte pages alone cannot establish the universal
+128 MiB bound. It is an allocation counterexample design, not a measured
+512-byte-page reserve breach. `sto1-allocation-budget-feasibility.md` maps
+the additional transaction lifecycle, commit-tail, cleanup, and close-path
+changes needed for a typed physical allocation budget. No storage engine or
+dependency patch has been applied yet.
+
 ### CAP-1: edges refuse explicit directory queries
 
 A registered client at an edge that sends `NAMES #load`, `WHO #load`,
@@ -531,6 +589,15 @@ NAMES as supported. The campaign measures the snapshot class on the paged
 NAMES that the JOIN triggers and records the numeric each explicit query
 receives.
 
+The worktree now forwards the closed directory query variants and retains the
+original request across page continuation. A bridge regression exercises
+explicit NAMES, WHO, WHOIS, TOPIC, LIST, MODE, ban-list, ISON, and USERHOST
+queries through the real edge and coordinator harness. The original NAMES
+refusal and missing WHO continuation fail in `cap1-red.log` and
+`cap1-continuation-red.log`; corrected behavior passes in `cap1-green.log`
+and the continuation run. USERHOST exposed the separate CAP-48 renderer
+fault. Full candidate qualification remains pending.
+
 ### CAP-2: registration under disk pressure is not always a bounded refusal
 
 With the coordinator's storage under the reserve, a new registration at an
@@ -538,13 +605,31 @@ edge received `FAIL USER NETWORK_UNAVAILABLE` in some runs, a close before any
 reply in others, and in one run no reply within twenty seconds. The campaign
 records the outcome it observed each cycle.
 
+Two reply-loss paths are corrected in the worktree. A rejected durable
+registration now feeds `RegistrationCommitted(false)` into the registration
+machine so it produces its ERROR reply. Ordinary router and asynchronous
+registration closes use the bounded writer flush rather than discarding
+queued replies as slow-consumer output. Real writer-queue regressions fail
+with the original close paths in `cap2-red.log` and `cap2-quit-red.log` and
+pass with the correction in `cap2-green.log`. The audit also found numeric
+263 absent from the closed reply registry on the pre-authentication rate
+refusal path; its shape and live refusal checks are still being completed.
+
 ### CAP-3: a refused durable mutation under pressure closes the session
 
 A registered session whose JOIN was refused with `FAIL JOIN
 NETWORK_UNAVAILABLE` during disk pressure lost its transport within two
 seconds. Section 28.7 asks for a side-effect-free `SERVER_BUSY`; the edge
 instead reports the coordinator refusal as network loss and drops the client.
-The campaign re-registers for its recovery check and notes the close.
+The original campaign re-registers for its recovery check and notes the close.
+
+The strict release run `campaign-strict-cap47-67.log` reproduces the fault
+after the current authentication and shutdown repairs. At 85.2 seconds the
+original pressure client receives `FAIL JOIN NETWORK_UNAVAILABLE`; the next
+liveness check fails with BrokenPipe. The run ends after 109.05 seconds and
+does not reach rekey or post-restart authentication. The assertion retains
+the original session and does not retry that transport, so this finding stays
+open. Its daemon logs are preserved in `campaign-strict-cap47-67/logs`.
 
 ### CAP-4: a coordinator restart under a client reconnection storm fails closed
 
@@ -559,6 +644,23 @@ fail-closed exit, not the owner; the coordinator log shows a warning-level
 at the listener owner ending after a failed inbound handshake, but that is a
 hypothesis. The daemon's behaviour under an unthrottled reconnection storm
 remains open.
+
+The current eight-client probe in `cap4-unpaced-corrected.log` does not
+reproduce the owner failure. All three daemons survive and stop cleanly.
+The original clients receive the resynchronization close required by the snapshot
+protocol and their immediate, single registration attempts receive explicit
+`NETWORK_UNAVAILABLE` while recovery is unfinished. Those refused attempts
+are not retried. The run establishes daemon survival through that wave;
+a fresh client cohort after both edges become active remains to be checked.
+
+The stricter release probe passes in `cap4-final-release.log` after 30.99
+seconds. Four original clients reconnect successfully on their one attempt;
+four receive the documented early refusal and are not retried. Every worker's
+unexpected-refusal count is zero. After both edges are active, all eight fresh
+clients receive 001, complete JOIN, and receive their committed TOPIC reply.
+All three daemons survive and stop cleanly. This current trigger no longer
+reproduces the historical owner failure; it does not establish which earlier
+repair removed that failure or cover every possible reconnect pattern.
 
 ### CAP-5: the login-index key transition has no stopped-daemon driver
 
@@ -634,9 +736,9 @@ deleted sequence for a restart.
 
 After a coordinator restart, with both edge links re-established, the first
 authentication of an existing account at an edge was answered with `904 SASL
-authentication failed` in some runs and succeeded in others. The engine
-retries within a thirty-second grace after a restart and reports the retry
-count if a later attempt succeeds.
+authentication failed` in some runs and succeeded in others. Earlier engines
+retried within a thirty-second grace after a restart and reported the retry
+count if a later attempt succeeded.
 
 The first release-profile development run with CAP-44 and CAP-45 fixed,
 `campaign-cap44-45-1`, exhausted that grace and stopped before rekey. During
@@ -646,6 +748,12 @@ reason. A second run reached rekey after two SASL failures. CAP-7 remains
 open; a transport establishment alone does not prove federation requests
 are available.
 
+CAP-47 identifies a companion-origin replay defect that can repeatedly reject
+the link. Its regression is fixed in the worktree. The capacity engine
+now waits for both edges to report active federation service and then treats
+an explicit SASL failure as a failed campaign. Only transport interruptions
+are retried. A new campaign must establish whether any CAP-7 symptom remains.
+
 ### CAP-8: a listener ceiling lowered by reload is not enforced
 
 Lowering the client listener's `max_connections` from 32 to 1 and reloading
@@ -654,6 +762,13 @@ while one session was held and no `connection_refused` event was logged. The
 same configuration applied at a restart refuses the second connection.
 Section 22.6 lists a lowered listener ceiling as reloadable. The compromise
 drill records both outcomes and quiesces through the restart path.
+
+The pending accept had checked its ceiling before waiting for the next
+socket. The worktree checks both listener and handshake ceilings again after
+accept and before starting TLS. Tests suspend the accept future, lower each
+ceiling, and verify refusal and permit release when a socket arrives. Their
+original failure is in `cap8-red.log`; `cap8-green.log` and all 15 listener
+accept integration tests pass. The full compromise drill remains to be rerun.
 
 ### CAP-9: the coordinator does not start on a directory restored from its own backup
 
@@ -666,6 +781,44 @@ serves afterwards, and the rekey and resynchronization drills depend on it.
 The restore and disaster restore drills fail on this finding until the
 coordinator restore path preserves a startable state.
 
+The restored Account advances its authority generation while the normative
+RestoreCopy transform preserves its OPAQUE record exactly. Reconstruction
+incorrectly required matching generations, and login also required a matching
+Account revision even after unrelated account-policy changes. Both now share
+an admission predicate that requires the exact account reference, a live
+credential without expiry, and a nonzero credential generation no newer than
+the current Account. In the same generation its revision cannot be newer
+than the Account revision. Authentication still issues current Account facts.
+
+The regression uses the actual RestoreAccount and RestoreCopy transforms on
+sealed source records. It fails with the original predicate in
+`cap9-opaque-recovery-final-red.log` and passes in
+`cap9-opaque-recovery-final-green.log`. All 73 account-service and
+reconstruction tests pass in `cap9-account-reconstruction-tests-final.log`.
+The first new restore and disaster-restore drills exposed CAP-51's virtual
+connection shutdown error. After that correction, restore reached domain
+reconstruction and exposed a second independent defect: a registered channel
+retained memberships, invitations, and pending removals whose sessions the
+restore had correctly omitted. Restore now removes those transient fields,
+preserves durable policy and role grants, and advances the channel revision
+once. Ephemeral channels and their name indexes are omitted together. Stored
+keys must still match the encoded channel identity, including omitted rows.
+
+The actual channel transform and domain reconstruction fail in
+`cap9-channel-restore-red.log` and pass in `cap9-channel-restore-green.log`.
+Ephemeral channel and name omission has separate red and green evidence in
+`cap9-ephemeral-restore-red.log` and `cap9-ephemeral-restore-green.log`.
+All 27 construction runtime tests pass in `cap9-construction-tests.log`.
+The next restore drill successfully starts all restored nodes and registers a
+guest in `drills-cap9-green-2/restore.json`. Its account probes exposed the
+separate CAP-54 client epoch-binding error. After that helper correction,
+`drills-cap9-54-green/restore.json` and
+`drills-cap9-54-green/disaster_restore.json` both pass in about 12 seconds.
+They require existing-account login, new-account creation and login, correct
+guard witness handling, a changed incarnation, and clean stops on all three
+nodes. The seed channel is ephemeral, so its absent topic after restore is
+expected. CAP-9 is fixed in the worktree; immutable candidate reruns remain.
+
 ### CAP-10: the admin DIE is refused while an account session is attached to the edge
 
 With an authenticated account session attached to an edge, every signed
@@ -676,14 +829,38 @@ command from the same operator identity was accepted at once. Guest
 sessions do not trigger it. The resynchronization drill records the refusal
 and stops the node after detaching the client.
 
+Source tracing identifies a confounder in that drill: its first request signs
+`DIE :resync`, which violates the canonical command grammar because the colon
+is unnecessary for a single-word final parameter. The later detached request
+uses `DIE :resync detached`, which is canonical. The observed authentication
+category also misclassifies authenticated failures, recorded as CAP-56.
+The corrected constructor passes six valid reasons through a real signed
+admin confirmation and rejects malformed reasons. Reverting it makes
+`cap10-red.log` fail with `Canonical`; `cap10-green.log` passes. The actual
+debug resynchronization drill in `cap10-resync-green/resynchronization.json`
+accepts the canonical DIE while the account remains attached, restores a new
+edge epoch, disconnects the old session, and re-onboards the account. It stops
+all three nodes cleanly. Its old topic observations are not persistence proof,
+as recorded in CAP-61. CAP-10 is fixed in the worktree. This cause is distinct
+from CAP-19's target revision.
+
 ### CAP-11: account deletion has no reachable path in the federated profile
 
-`ACCT DELETE START` from an authenticated, freshly re-authenticated session
+Fixed in the worktree. `ACCT DELETE START` from an authenticated, freshly re-authenticated session
 at an edge is answered `FAIL ACCT BAD_STATE`: the edge forwards no account
 command to the coordinator. The coordinator's own client listener answers
 `CAP * NAK` for the sasl and account capabilities, so the account service
 cannot be reached there either. The deletion drill records both refusals and
-does not pass; the deletion and rekey evidence it would produce stays open.
+does not pass in the original implementation.
+
+The edge now forwards account mutations with their exact origin and session
+authority. Private challenges preserve the public session revision, and
+completion waits for the covering storage receipt and cross-profile barrier.
+The private-revision regression fails in `cap11-private-revision-red.log`
+and passes in `cap11-private-revision-green.log`; the real storage barrier
+tests pass in `cap11-barrier-final-green.log`. After the separate reply,
+closure, shutdown, readiness, and evidence repairs below, the complete strict
+deletion and rekey drill passes in `cap66-67-strict-deletion/deletion.json`.
 
 ### CAP-12: a snapshot marker refused under disk pressure left the edge waiting on the coordinator
 
@@ -746,6 +923,20 @@ drained, it exits cleanly every time. The campaign now polls every node's
 outbox object remains, which is how an operator stops a coordinator after
 its links go quiet. Bounding the stop phase against an outstanding
 acknowledgement backlog in the daemon itself stays open.
+
+A 2026-09-07 production probe withheld one edge's ACKs with SIGSTOP and sent
+80 real cross-edge channel events. The coordinator retained exactly 80
+outbox objects totaling 19,350 bytes and exited cleanly 25.76 milliseconds
+after SIGTERM. `cap14-backlog-2.log` retains the measurement. Backlog count
+alone therefore does not reproduce the historical failure on the current
+worktree. A stop during the full campaign's recovery state remains required.
+
+The stricter deletion drill now reproduces a shutdown deadline after successful
+deletion, clean client EOF, and refusal of the deleted credentials. The record
+`drill-cap11-64-green/deletion.json` is explicitly failed despite its directory
+name. It stops after 37.05 seconds with coordinator exit status 1 and
+`daemon shutdown exceeded its deadline` on stderr. The later rekey checks do
+not run. This narrows the next shutdown trace to the post-deletion state.
 
 ### CAP-15: a batch gathered during the index read-back stopped the coordinator as corrupt
 
@@ -851,16 +1042,19 @@ holds all 64 clients at both quiescence checks.
 
 ### CAP-19: a process action's confirmation is refused by any commit in between
 
-Open. The confirmation of DIE and the other process actions binds to the
-process target revision, which the state core derives from the state
-generation, so a durable commit landing between the challenge and the
-confirmation refuses the confirmation with INVALID_TARGET. On an edge
-carrying traffic the two-step action succeeds only when the operator
-re-issues it in a quiet moment. The campaign's maintenance stop of edge b
-met the refusal once the coordinator began hiding the sessions of deleted
-origins during the window, and now re-issues the command up to five
-times. A process action should bind to a revision that ordinary traffic
-does not advance.
+Fixed in the worktree. Process-action confirmation used the database state
+generation as the process target revision. Any intervening durable commit
+therefore rejected a valid confirmation with INVALID_TARGET. The target now
+uses the fixed live-process revision. The confirmation remains bound to its
+admin session and operator authority, and quiescence still rejects it.
+Account and channel actions retain their own changing target revisions.
+
+The regression registers a real client and commits a JOIN between process
+revision reads, verifies that storage generation advanced, and requires the
+process revision to remain equal. It then requires quiescence to invalidate
+the target. The original behavior fails in `cap19-red.log`; the fix passes in
+`cap19-green.log`. The campaign now requires its first signed DIE confirmation
+to succeed instead of retrying INVALID_TARGET.
 
 ### CAP-20: restart skipped committed outbox rows and reused delivery sequences
 
@@ -1287,6 +1481,524 @@ rounding overhead. Its red log is `cap46-final-wait-red.log`, and the
 corrected test passes in `cap46-final-wait-green.log` under the qualification
 scratch directory. The earlier short report is retained as failed duration
 evidence and is not accepted for qualification.
+
+### CAP-47: a companion origin replay names itself as its predecessor
+
+Fixed in the worktree. Link loss cleared the edge's declared and acknowledged
+companion-origin generations but retained the last state ID. Rebuilding an
+already declared nonzero generation then used that state ID as its new
+predecessor. The bytes and object ID changed under the same generation, so
+the coordinator correctly rejected the declaration. Retrying rebuilt the
+same invalid successor.
+
+Each local companion origin now retains its last declaration's exact encoded
+bytes and replays them across link loss. A new generation alone constructs a
+new successor. The regression covers repeated reconnects, a lost declaration
+ACK, preserving a same-generation request sequence, and resetting the sequence
+only after a new generation is acknowledged. It fails on changed wire bytes
+in `cap47-red.log`; all 32 companion-edge tests pass in
+`cap47-edge-tests.log`. The strict restart campaign remains pending.
+
+### CAP-48: USERHOST uses the ISON reply renderer
+
+Fixed in the worktree. USERHOST shared ISON's renderer and produced numeric
+303 containing nicknames instead of numeric 302 containing cloak entries.
+The new renderer uses the authorized session projection, preserves the away
+indicator, and exposes only its ephemeral user and host components. An
+invisible target remains indistinguishable from an offline nickname.
+
+Appendix A.2 had also omitted 302, preventing the correct renderer from
+passing the closed numeric validator. The specification registry, generated
+artifacts, source bindings, and exact parameter-shape checks now include it.
+The federation profile hashes and persistent format are unchanged. The bridge
+and cloak/away/privacy regressions fail in `cap48-red.log` and pass in
+`cap48-green.log`.
+
+### CAP-49: MONITOR list, status, and add replies are missing or use ISON
+
+Fixed in the worktree. MONITOR L and S rendered ISON numeric 303, and adding
+subscriptions produced no status reply. The corrected closed registry and
+renderers use 732 followed by 733 for the list, 730 for online status, 731 for
+offline status, and 734 for bounded-list refusal. Lists retain the requester's
+hidden and offline subscription names; status replies apply current presence
+visibility. Empty status produces the permitted NoContent result.
+
+Private subscription changes now preserve the public Session revision and
+commit their exact result without an unsupported completion marker. A later
+nickname change therefore uses the same published revision. The empty status,
+private revision, and full local/federated reply regressions fail on the
+original behavior and pass in `cap1-49-empty-green.log`,
+`cap49-revision-green.log`, and `cap49-bridge-green.log`. The bridge exercises
+add, list, status, clear, empty status/list, and a subsequent nickname change.
+
+### CAP-50: WHOWAS has no bounded retention implementation
+
+Fixed in the worktree under the specified privacy boundary. WHOWAS always
+returned 406 and 369 because no nickname history was retained. StateCore now
+retains only nickname, ephemeral public cloak, public account label, and the
+retention second for 15 minutes, bounded by the configured maximum and the
+10,000-record network ceiling. Edges retain no duplicate history. Memory is
+charged before admission; exhaustion omits a cache entry and cannot fail an
+already committed mutation. History becomes visible only after the mutation
+commits, and an independent expiry wake clears it even during durable reload
+or index refresh.
+
+Disclosure requires a currently visible session with the same public cloak.
+Losing that live authority hides the record. The implementation does not infer
+account identity from a public label or retain an unauthorized historical
+audience. The specification permits no historical Account ID or audience
+fields, so post-disconnect disclosure remains unavailable. Appendix A.2 now
+includes 314 and defines its public cloak and label fields; 312 carries the
+public reply prefix and retained Unix second, never a hidden route identity.
+
+Reinstating the original empty renderer fails in `cap50-red.log`, returning
+406 and 369 where an authorized retained nickname requires 314, 312, and 369.
+All six runtime tests pass in `cap50-final-runtime.log`, covering visibility,
+commit admission, expiry, capacity, public labels, and count bounds. Exact
+314 wire-shape acceptance and rejection pass in `cap50-wire-green.log`.
+
+### CAP-51: final checkpoint starts before physical client cleanup
+
+Fixed in the worktree. A writer could acknowledge Flush before its physical
+close notice reached StateCore. The checkpoint then preceded durable session
+removal, leaving the storage owner's Stop phase to checkpoint again. The
+regression delays the real close notice and requires cleanup before the final
+checkpoint. The original behavior fails in `cap14-close-red.log`.
+
+The restore drills exposed an error in the initial fix: virtual remote
+account carriers enter the same session table but own no socket and cannot
+send a physical close notice. SessionTable now records physical ownership,
+and the final checkpoint waits for physical cleanup plus the existing
+pending-work barrier. A physical connection whose sink is already gone still
+requires its close notice. Virtual carriers retain duplicate and capacity
+checks but cannot block shutdown on a notice they will never send.
+
+The mixed physical and virtual regression fails with the initial gate in
+`cap51-virtual-red.log`; all four checkpoint ordering tests pass in
+`cap51-virtual-green.log`, including a later `NotNeeded` checkpoint. A real
+coordinator with remote authenticated sessions now stops and proceeds to
+backup and restore in `cap51-virtual-green-restore.log`. That run then exposed
+the independent CAP-9 channel reconstruction fault.
+
+### CAP-52: graceful client output has no total drain deadline
+
+Fixed in the worktree. Each queued frame received a fresh 30-second write
+timeout, so a slow reader could keep a closed connection draining for many
+such intervals. The queue now records the first close instant. All subsequent
+writes share its single 30-second drain deadline; repeated close requests do
+not extend it. Before closure, the existing per-write timeout remains.
+
+A deterministic paused-clock regression accepts one frame every 20 seconds.
+The original writer finishes three frames after 60 seconds with ClientQuit
+instead of timing out once at 30 seconds. That failure is recorded in
+`cap52-red.log`; all four final writer tests pass in `cap52-final-green.log`,
+including closure during an already active write. Tokio's
+clock-control feature is enabled only in runtime dev-dependencies. The
+workspace manifest policy permits that exact test feature and rejects it on
+the production dependency or with unapproved extra features.
+
+### CAP-53: shared channel events exhaust the fanout frame ceiling
+
+Fixed in the worktree. The edge allocated a separate frame for each recipient
+of an identical channel event. Its 1,024-frame ceiling therefore rejected
+valid events long before the 65,535-recipient ceiling. EventFanout now groups
+exactly equal wire messages by their position in each recipient's stream.
+Different tags stay separate, and repeated equal messages at different
+positions remain distinct deliveries. Existing frame, recipient, and output
+reservation limits are unchanged.
+
+The full-recipient regression fails with `LimitExceeded` on the original
+collector in `cap53-red.log`. All three regressions pass in `cap53-green.log`:
+65,535 recipients receive the exact line only after reservation commit,
+interleaved recipient streams preserve repeated messages and order, and a
+recipient without the account tag never receives another recipient's tag.
+
+### CAP-54: recovery drills seal account requests under a stale coordinator epoch
+
+Fixed in the worktree. The account integration helper sealed every request
+with the initial constant coordinator recovery epoch. A coordinator restore
+installs a new epoch and the drill updates the peer configuration, but the
+helper ignored that fixture and still sealed login and account-creation
+requests under the old binding. The server correctly refused them.
+
+All four creation and authentication start/finish helpers now use the enabled
+coordinator's current pin from the validated fixture configuration. Missing
+or mismatched pins fail the helper. The boundary regression changes only that
+pin and requires old and new envelopes to decrypt only in their own epochs.
+It fails in `cap54-epoch-red.log` and passes in `cap54-epoch-green.log`.
+Both restore drills pass in `drills-cap9-54-green`, including existing and new
+accounts. No daemon fallback or epoch-rejection rule changed.
+
+### CAP-55: user mode changes use the wrong wire code and never reach the home edge
+
+Fixed in the worktree. The edge and coordinator used mode code 2 for `w`, while the closed
+registry and wire validator require code 18. A valid MODE request therefore
+failed local request encoding before transmission. The edge also discarded
+the requested nickname and could silently apply another-nickname MODE command
+to the requester. The domain's durable operator-notice mutation emitted no semantic event, the coordinator
+emitted no UserModesChanged projection, and the edge discarded that projected
+event when rendering client output.
+
+The domain now emits UserModesChanged and projects the resulting session only
+to its home edge. The regression fails on the missing event in
+`cap55-projection-red.log`; all nine projection tests pass in
+`cap55-projection-green.log`. It drives enable, disable, and enable while
+another edge shares a channel, checks that the other edge receives no private
+mode update, and compares incremental records with the authoritative snapshot.
+The runtime uses code 18, rejects another nickname as the target, and renders
+the committed change to the home client. The full bridge passes enable and
+disable, target rejection, actual flags on both users, and labeled MODE
+queries in `cap59-bridge-green.log`.
+The permanently enabled invisible mode remains immutable.
+
+### CAP-56: authenticated admin failures are logged as authentication failures
+
+Fixed in the worktree. AdminOwner classified rejection after the admin session has already
+entered Closed. Reading the operator from that closed state loses evidence
+that authentication succeeded, so a malformed signed command or confirmation
+failure is mislabeled authentication_failed. This misleading category obscured
+CAP-10's noncanonical command. The worktree correction captures authentication state before accepting the
+line, retaining the existing bounded public log categories. The regression
+fails in `cap56-red.log` because three authenticated rejections are counted
+as zero. It passes in `cap56-green.log` with three authenticated command
+rejections and one actual unauthenticated handshake rejection.
+
+### CAP-57: the deletion drill mistakes a different account ID for login refusal
+
+Fixed in the worktree. The drill deletes `delete-account`, but its original refusal helper always logs
+in as `drill-account`. Passing the deleted account's expected ID makes a
+successful login to that healthy account look like a failed deletion login.
+The assertion can therefore pass without testing the deleted credential.
+
+The correction must authenticate the deleted login explicitly with its known
+password and accept only the expected OPAQUE invalid-login result. Identity
+mismatches, framing errors, timeouts, and lost transports are drill errors.
+The regression uses a healthy account's committed completion to prove that
+a different Account ID cannot satisfy the deletion assertion. It also rejects
+transport loss and SASL 904 as evidence of an invalid password. This test passes
+in `cap67-green.log`. The full strict drill in
+`cap66-67-strict-deletion/deletion.json` refuses the exact deleted login before
+and after rekey and successfully authenticates the separate seed account.
+
+### CAP-58: post-registration CAP changes leave recipient renderers on old settings
+
+Fixed in the worktree. RegistrationState accepted CAP changes and returned ACK
+after registration, but SessionTable retained only the capability snapshot
+captured when the session was first bound. Recipient renderers and the edge's
+own-user mode query read that stale snapshot. Later enabled features were
+omitted and later disabled features could still be rendered.
+
+The registration dispatcher now synchronizes the exact local capability state
+before publishing negotiation replies or follow-up actions. The update checks
+the bound session and reverse user-to-connection identity, allocates only when
+the state changes, and leaves the old state intact if copying fails. It covers
+CAP LS side effects as well as accepted requests. Registered identity fields
+and their existing durable binding are unchanged.
+
+The live two-client regression fails in `cap58-red.log` because an enabled
+server-time tag is absent. All five related tests pass in `cap58-green.log`,
+including actual tagged delivery after enable, untagged delivery after disable,
+and rejection of another session or connection's update. Independent review
+found no additional issue.
+
+### CAP-59: federated query replies lose labels and pagination can release later commands
+
+Fixed in the worktree for explicit directory queries. The edge sent federation reply frames directly without the original
+request's logical response framing. Labeled directory queries therefore
+receive uncorrelated replies. Completing a page can also release deferred
+commands before the next query page is submitted.
+
+The correction retains one bounded logical response batch across all pages,
+validates page order, closes it on the final page or failure, and holds later
+commands until pagination finishes. Replies stream through normal per-page
+reservations. Disconnected sessions discard the response state. Empty labeled
+results produce ACK, and private ACCT replies respect current standard-replies
+negotiation. Six boundary tests pass in `cap59-final-green.log`. The live raw
+delivery revert fails specifically at uncorrelated NAMES 353/366 in
+`cap59-live-red.log`; `cap59-live-green.log` passes the same bridge with the
+correction restored. A further regression removes the unlabelled page hold
+and rejects an out-of-order continuation in `cap59-unlabeled-order-red.log`;
+all seven response-boundary tests pass with the hold restored. Automatic JOIN
+continuation is separately tracked as CAP-60.
+
+### CAP-60: global JOIN omits committed topic replies and a bounded NAMES continuation
+
+Fixed in the worktree. Section 14.2 requires JOIN events, committed topic numerics and target
+failures, then a connection-owned NAMES continuation. The coordinator stages
+an empty reply vector for JOIN, so topics and partial failures disappear.
+The edge starts independent synthetic NAMES requests for every original
+target, including failed targets. It discards the original label, releases
+deferred commands before scheduling those queries, and lacks the specified
+one-slot continuation with output-queue backpressure.
+
+The correction carries bounded topic replies and failures in the membership's
+stored committed result. Only accepted targets proceed to the NAMES snapshot.
+One local continuation retains the original label, channel list, cursor, and
+batch until completion, controls refill by client queue occupancy, and closes
+the client on an interrupted burst. Coordinator, edge, local snapshot, and live bridge regressions cover these
+boundaries. No federation schema change is required.
+
+The coordinator result regression fails on the old empty reply vector in
+`cap60-result-red.log` and passes in `cap60-result-green.log`. It checks exact
+result replay, topics on existing channels, no-topic replies for new channels,
+and a mixed successful/failed target set. A separate actual E2EE binding
+regression fails on 331 in `cap60-placeholder-red.log` and passes with the fixed
+332 placeholder in `cap60-placeholder-green.log`. The continuation, accounting,
+and requester JOIN echo checks are recorded below.
+
+The scripted edge now checks that an acknowledged membership event cannot
+publish the requester's JOIN before its stored result is covered. Bypassing
+capture fails that assertion in `cap60-echo-red.log`. Removing the continuation
+hold sends a later command early in `cap60-hold-red.log`; bypassing interruption
+cleanup leaves the client attached in `cap60-abort-red.log`. The earlier
+`cap60-pending-join-link-red.log` also covers link loss before the first echo.
+The fixed live coordinator-to-edge bridge passes in
+`cap60-live-bridge-green.log`, with one labelled batch containing the exact
+extended JOIN, topic, and complete NAMES response. Local output-queue and
+snapshot accounting review is complete. Local snapshots reserve capacity
+before the JOIN is admitted and open only after their exact revision commits.
+An unrelated later batch cannot hold an already committed seed. Closed or
+rebound generations cannot receive its output, and all retained capacity is
+returned on refusal. Shared pages bound users, reply count, and encoded and
+rendered bytes, and keep every terminal 366 on the final page.
+
+Seven separate implementation reverts reproduce early output at half queue
+capacity, oversized NAMES chunks, early terminal replies, split terminal
+groups, excess users per page, missing active-query accounting, and blocked
+committed seeds. Each corresponding `cap60-*-restored-green.log` passes. The
+additional identity check passes in `cap60-generation-fence-green.log`;
+`cap60-local-snapshot-final-green.log` and `cap60-shared-page-final-green.log`
+cover the complete local snapshot and shared page tests. Both deferred queues now charge parsed commands and retain their backing
+allocation permit through drain and reuse. The old undercharge and early
+release fail in `cap60-edge-memory-red.log`, `cap60-local-memory-red.log`,
+`cap60-join-backing-red.log`, and `cap60-queue-capacity-red.log`. The fixed
+memory, continuation, echo-boundary, and complete live bridge checks pass in
+the corresponding final green logs. Final review finds one additional retained
+allocation: the local pending-seed vector keeps its backing after the last
+snapshot permit disappears. On x86_64 the requested backing can reach 47,104
+bytes, requiring a 49,152-byte rounded charge. The container needs its own
+permit through empty, rejected, closed, and reused states. It now reserves all
+256 slots before allocation and retains that permit until the buffer drops.
+Both new tests fail under the old allocation path in
+`cap60-local-capacity-red.log`; all seven local JOIN tests pass with the fix in
+`cap60-local-capacity-green.log`. The strict capacity campaign still fails at
+the separate disk-pressure session-loss defect in CAP-3. All required
+development gates now pass for this repair set.
+
+### CAP-61: recovery drills can pass without preserving their seeded topic
+
+Fixed in the worktree. The seed client sets a topic on an ephemeral channel and then leaves
+its only membership. The channel is correctly destroyed before the operation
+being qualified. Restore and resynchronization record false topic observations
+but omit them from their pass criteria. Resynchronization also labels its JOIN
+completion boolean as topic visibility in progress text.
+
+The corrected evidence must seed a registered channel, query its exact topic
+explicitly, and require that topic before and after resynchronization and after
+coordinator restore. Membership success alone cannot satisfy these checks.
+Earlier green drill records establish their account, epoch, and shutdown
+assertions only. The replacement fixture registers the channel before setting
+its topic and leaving.
+
+The strict resynchronization regression fails in `cap61-resync-red.log` after
+22.53 seconds. Both exact TOPIC queries show no topic, while membership,
+canonical attached-account shutdown, old-session disconnection, re-onboarding,
+and all three final stops succeed. The corrected strict resynchronization
+passes in `cap61-strict-recovery/resynchronization.json` in 19.61 seconds.
+The same fixture also passes strict restore in 19.81 seconds and disaster
+restore in 20.75 seconds, recorded beside it in `restore.json` and
+`disaster_restore.json`. Both restore records require the exact topic, existing
+and new account authentication, the expected guard witness, a changed
+incarnation, and clean shutdown of all three daemons. These runs also require
+first-attempt signed shutdown confirmation and never retry explicit
+authentication refusals.
+
+### CAP-62: a federated AWAY mutation omits its private acknowledgement
+
+Fixed in the worktree. The edge projects AWAY notifications to recipients, but the coordinator
+stores no private 306 or 305 reply in the committed result. The deletion drill
+reaches ACCT DELETE START, then times out waiting for the AWAY acknowledgement
+before CONFIRM. The phase trace is `drill-cap11-57-trace.log`; all nodes stop
+cleanly.
+
+The correction renders the appropriate numeric into the same durable result
+as the AWAY mutation. The regression requires exact away and return replies,
+and an identical replay that creates no new event. The drill retains its AWAY
+assertion so public session-revision handling remains exercised between START
+and CONFIRM. `cap62-red.log` fails on the old empty reply vector;
+`cap62-green.log` passes exact 306, identical durable replay with no new event,
+and exact 305. The actual deletion drill now passes the AWAY acknowledgement
+and proceeds through deletion confirmation and credential refusal. Its later
+shutdown failure is traced separately under CAP-65.
+
+### CAP-63: the deletion drill requires an ERROR instead of the specified close sequence
+
+Fixed in the worktree. The protocol requires the final committed NOTE followed by connection
+closure. The drill waits specifically for ERROR and can reject a correct
+NOTE followed by clean EOF. Its replacement assertion must require the final
+NOTE and a clean transport end, while rejecting missing replies, ERROR alone,
+timeout, reset, and truncated TLS. The boundary regression fails the valid
+NOTE-to-EOF sequence under the old reader in `cap63-close-red.log` and passes
+in `cap63-close-green.log`. It also rejects a fake NOTICE containing the
+expected words, ERROR alone, timeout, would-block, reset, and TLS truncation.
+This evidence error is separate from the confirmed production closure failure
+in CAP-64.
+
+### CAP-64: a committed federated account deletion leaves its requester connected
+
+Fixed in the worktree. The strict deletion drill reaches CONFIRM and receives the final
+`NOTE ACCT UPDATED`, then times out because the connection remains open.
+`drill-cap11-62-63-trace.log` and its `deletion.json` record the failure after
+47.58 seconds, with all three daemons stopping cleanly. The edge treats the
+committed deletion as ordinary replies and omits the required requester close.
+
+The correction emits a distinct completion only for a committed account-delete
+confirmation with the exact successful NOTE. The router queues that response
+before closing the transport. Ordinary completion and cross-profile barrier
+regressions both fail on the missing close in `cap64-close-red.log`; a refused
+confirmation remains an ordinary reply and keeps its client open. All three
+fixed completion tests pass in `cap64-close-green.log`. The actual deletion
+drill observes the required NOTE and clean TLS EOF, then correctly refuses
+the deleted account's credentials. That run later failed at coordinator
+shutdown, traced separately under CAP-65. With the later shutdown and evidence
+repairs, `cap66-67-strict-deletion/deletion.json` completes the entire deletion
+and rekey drill. Neither a stored result alone
+nor an uncommitted covering event may trigger success or closure.
+
+### CAP-65: abandoned account exchanges can outlive their remote origin and block shutdown
+
+Fixed in the worktree. Source review finds that committing an origin DEL removes its domain
+session but does not close the associated remote account carrier. A client
+that receives an OPAQUE challenge and disconnects before FINISH can leave its
+authentication transaction in the account service. The router's drain check
+waits for account-service readiness, which requires those transactions to be
+absent. The trace in `drill-cap65-diagnostic/deletion-logs/coordinator.stderr`
+confirms one abandoned virtual carrier, zero physical connections, and no
+pending or in-flight storage work. Drain exceeds its four-second deadline; the
+final checkpoint takes 52 milliseconds. The real actor regressions in
+`cap65-lifecycle-red.log` reproduce both a carrier surviving durable origin DEL
+and local and remote unfinished OPAQUE exchanges blocking drain.
+
+The correction must close the exact carrier after durable origin deletion and
+cancel unfinished exchanges during shutdown. Already staged account mutations
+must still settle through their storage receipts. Cancellation also needs a
+narrow shutdown admission path for owned transaction-cleanup records, because
+ordinary staging is correctly refused once quiescing begins. That path must
+not admit arbitrary writes, new account mutations, or client fanout, and must
+retain the normal storage and resource checks.
+
+The implementation now captures the exact virtual connection generation in
+the staged origin acknowledgement and retires it only after that receipt
+commits. Shutdown cancels incomplete exchanges after staged account authority
+settles; a private cleanup type admits only bounded transaction and reservation
+deletes through the existing storage path. New remote authentication is refused
+once quiescing begins. The nine focused tests in `cap65-final-green.log` cover
+these lifecycle paths, stale origin identities, prohibited writes, resource
+bounds, staged authority, and an indeterminate cleanup receipt. Reverting the
+new guards fails in `cap65-readmission-red.log`,
+`cap65-cleanup-authority-red.log`, and
+`cap65-cancellation-authority-red.log`. The actual strict drill now passes
+the formerly blocked coordinator stop and completes rekeying. Its later
+authentication check reveals the separate controller failure in CAP-66. The
+failed record remains `cap65-strict-deletion/deletion.json`; it is not a
+passing complete-drill claim. With CAP-66 and CAP-67 corrected, the full drill
+passes in `cap66-67-strict-deletion/deletion.json` in 39.20 seconds. It requires
+deleted-login refusal before and after rekey, exact authenticated deletion rows,
+a preserved unrelated credential and successful login, and clean shutdown of
+all three daemons.
+
+### CAP-66: a restarted drill network accepts historical link events as readiness
+
+Fixed in the worktree. `DrillNodes::restart_all` reads cumulative link counts after starting
+its nodes and subtracts one before waiting. Old log events therefore satisfy
+the wait even when the new process has established no federation link. The
+deleted-login helper also omits the active-authority wait used by normal
+account-login probes. In `cap65-strict-deletion/deletion.json`, deletion,
+credential refusal, shutdown, and rekey succeed, then the probe receives 904.
+The edge-b log shows its new listener and client connection but no established
+federation link or profile acknowledgement in that process.
+
+The correction captures link counts before restarting, requires new link
+events and active federation on both edges, and checks active authority before
+the deleted-login attempt. An explicit 904 remains a failed probe. No retry of
+authentication refusal is introduced. The full strict drill now passes in
+`cap66-67-strict-deletion/deletion.json` in 39.20 seconds. Reverting only the
+readiness correction fails in `cap66-readiness-red/deletion.json` after
+41.04 seconds, with an explicit edge-b SASL 904 after rekey. The authenticated
+deletion records and surviving credential remain correct in that failing run.
+
+### CAP-67: deletion evidence uses unrelated total backup size as an acceptance gate
+
+Fixed in the worktree. The deletion drill requires total record count and total backup bytes to
+fall after deleting an account. Those totals include independent federation
+journals, audit records, and other retained state. The strict run records
+61 rows and 136,182 bytes after account creation, then 78 rows and 185,311
+bytes after deletion and further protocol work. Those measurements cannot
+establish whether the account's credentials were erased. The later CAP-66
+failure prevents the run from reaching this already-false final predicate.
+
+The replacement evidence must inspect exact authenticated account, OPAQUE,
+and login-index rows before deletion, after deletion, and after rekey. It
+must require the canonical deletion tombstones, the deleted credential's
+absence, and preservation of an unrelated account and credential. Whole-backup
+counts remain observations. The actual deleted login must be refused before
+and after rekey, while the unrelated account must still authenticate. The old
+predicate falsely rejects valid deletion with journal growth in
+`cap67-growth-red.log` and accepts a still-live account when unrelated totals
+shrink in `cap67-falsepositive-red.log`. The corrected three evidence tests
+pass in `cap67-green.log`, including wrong identities, retained credentials,
+post-rekey revival, and changes to the unrelated credential. The full strict
+drill also passes in `cap66-67-strict-deletion/deletion.json`.
+
+### CAP-68: the integration fixture can assign one port to multiple listeners
+
+Fixed in the worktree. The full workspace gate rejects the encrypted network's coordinator
+configuration before startup because two listener endpoints overlap. Both
+edges then exhaust their link wait. The failure is retained in
+`cap68-workspace-red.log`; it is not a runtime federation failure.
+
+The fixture selects a loopback port by binding port zero and immediately
+dropping the socket. Later selections may return that same address before
+any daemon binds it. A process-wide synchronized claim set must prevent reuse
+within a network and across parallel fixture construction, with a bounded
+selection loop. A failed daemon must not be retried to hide the fixture error.
+This addresses duplicate selections in the integration executable. An
+unrelated external process can still race the existing bind-to-spawn gap;
+the tests do not pass inherited listeners to the daemon.
+
+The helper now retains synchronized address claims for the lifetime of the
+test executable and limits selection to 128 attempts. Reverting that loop
+returns the same claimed address and fails both deterministic tests in
+`cap68-red.log`. All four fixed tests pass in `cap68-green.log`, covering
+duplicate selection, exhaustion, preservation of the original bind error,
+and 64 real allocations across four concurrent fixture builders. The exact
+full workspace gate now passes, including the parallel encrypted fixtures.
+
+### CAP-69: the local account test can accept refused deletion as success
+
+Fixed in the worktree. The inherited account test sends a wrong deletion token, then reuses
+the original token even though every confirmation consumes its challenge and
+fresh authentication. Its deletion assertion accepts any collected reply,
+including a refusal. The later login probe sends only START and ignores the
+outcome, so that step cannot establish credential erasure either.
+
+The corrected test must require the wrong-token refusal while preserving the
+connection, complete fresh authentication and obtain a new challenge, and
+then require the exact committed deletion NOTE followed by clean closure.
+A complete login attempt with the deleted account's known password must fail
+with the expected OPAQUE invalid-login result. Unexpected replies, transport
+errors, and account-identity mismatches cannot count as evidence of deletion.
+
+The strict assertion rejects the original stale-token flow in
+`cap69-stale-token-red.log`, where CONFIRM returns BAD_STATE. The corrected
+live flow passes in `cap69-local-deletion-green.log` after 11.84 seconds.
+Logout uses a separate connection so deletion can exercise its fresh
+authentication within the specified two SASL attempts per connection. The
+wrong-token refusal and PING precede the second authentication, a distinct
+new challenge, the exact committed NOTE and clean EOF, and the late known
+password's typed invalid-login result. `cap69-evidence-green.log` rejects
+refusal text, extra output, transport failures, successful authentication,
+and account-identity mismatch as false evidence.
 
 ## Release claims and limits
 

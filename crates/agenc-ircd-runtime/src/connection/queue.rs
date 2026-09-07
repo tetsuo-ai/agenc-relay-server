@@ -189,6 +189,7 @@ struct QueueState {
     query_bytes: u64,
     largest_query_rows: u64,
     closed: Option<CloseReason>,
+    close_started: Option<tokio::time::Instant>,
     warning_armed: bool,
     warning_pending: bool,
     flush_acknowledgement: Option<FlushAcknowledgement>,
@@ -317,6 +318,7 @@ impl WriterQueue {
                     query_bytes: 0,
                     largest_query_rows: 0,
                     closed: None,
+                    close_started: None,
                     warning_armed: true,
                     warning_pending: false,
                     flush_acknowledgement: None,
@@ -350,6 +352,11 @@ impl WriterQueue {
     #[must_use]
     pub fn closed_reason(&self) -> Option<CloseReason> {
         lock(&self.shared.state).closed
+    }
+
+    /// Returns when the first close began, even when later callers close again.
+    pub(super) fn close_started(&self) -> Option<tokio::time::Instant> {
+        lock(&self.shared.state).close_started
     }
 
     /// Takes the one pending slow-consumer warning, if it fired.
@@ -397,6 +404,7 @@ impl WriterQueue {
         let mut state = lock(&self.shared.state);
         if state.closed.is_none() {
             state.closed = Some(reason);
+            state.close_started = Some(tokio::time::Instant::now());
         }
         if policy == ClosePolicy::Immediate {
             state.frames.clear();
@@ -597,6 +605,7 @@ impl ClientSink for WriterQueue {
             .clone();
         if state.closed.is_none() {
             state.closed = Some(reason);
+            state.close_started = Some(tokio::time::Instant::now());
         }
         drop(state);
         self.shared.notify.notify_one();

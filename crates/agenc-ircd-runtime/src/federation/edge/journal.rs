@@ -515,6 +515,7 @@ fn restored_origin(record: OriginRecord, row: &FederationOriginRecord) -> Connec
             .map(|account| (account.account_id, account.account_session_generation)),
         acked_generation: None,
         ever_acked: false,
+        join_names_pending: false,
         del_acked: row.status == OriginRowStatus::Deleted
             && row.flags & ORIGIN_FLAG_PENDING_DEL == 0,
         deleted: true,
@@ -573,6 +574,7 @@ pub(super) fn restore_request(
             result,
             result_bytes: row.result_object,
             replies: Vec::new(),
+            join_echoes: Vec::new(),
             completion: row
                 .completion_event_id
                 .map(agenc_ircd_types::EventId::from_bytes),

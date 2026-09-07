@@ -6,12 +6,14 @@
 
 mod output_budget;
 mod permit;
+mod retained_queue;
 
 use std::error::Error;
 use std::fmt;
 
 pub use output_budget::PermitCursor;
 pub use permit::{MemoryPermit, MemoryPermitBatch};
+pub(crate) use retained_queue::RetainedQueue;
 
 use crate::RuntimeError;
 use crate::purpose::ListenerPurpose;

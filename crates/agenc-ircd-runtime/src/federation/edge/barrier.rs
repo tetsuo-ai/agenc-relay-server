@@ -445,7 +445,9 @@ fn apply_complete(
         .ok_or(Violation::Consistency)?;
     let partition = verified_partition(edge, &open)?;
     let mut fanout = super::render::EventFanout::default();
-    let (upserted, removed) = apply_base_events(edge, context, &open, &mut fanout)?;
+    let mut join_echoes = Vec::new();
+    let (upserted, removed) =
+        apply_base_events(edge, context, &open, &mut fanout, &mut join_echoes)?;
     for output in companion_outputs {
         fanout.append(context, output.generation, output.frames)?;
     }
@@ -477,6 +479,7 @@ fn apply_complete(
         base_last: (base_sequence, EventId::from_bytes(base_event)),
         companion_last: partition.companion_last,
         coverage,
+        join_echoes,
     };
     writes.push(receipt_write);
     for write in companion_writes {
@@ -548,6 +551,7 @@ fn apply_base_events(
     context: &mut StateCoreContext,
     open: &OpenBarrier,
     fanout: &mut super::render::EventFanout,
+    join_echoes: &mut Vec<super::join_echo::JoinEcho>,
 ) -> Result<(Vec<ProjectionKey>, Vec<ProjectionKey>), Violation> {
     let mut upserted = Vec::new();
     let mut removed = Vec::new();
@@ -564,7 +568,21 @@ fn apply_base_events(
             .apply(projected, header.coordinator_state_generation)
             .map_err(|_| Violation::Consistency)?;
         super::render::remember_nicknames(edge, projected);
-        super::render::render_event(edge, context, projected, &outcome, label.as_deref(), fanout)?;
+        if let Some(echo) = super::render::render_event(
+            edge,
+            context,
+            header,
+            projected,
+            &outcome,
+            label.as_deref(),
+            fanout,
+        )? {
+            if join_echoes.len() >= super::join_echo::MAX_JOIN_ECHOES {
+                return Err(Violation::Ceiling);
+            }
+            join_echoes.try_reserve(1).map_err(|_| Violation::Ceiling)?;
+            join_echoes.push(echo);
+        }
         upserted.extend(outcome.upserted);
         removed.extend(outcome.removed);
     }

@@ -13,13 +13,12 @@ use agenc_ircd_federation_wire::{
     decode_result_arm, federation_object_id,
 };
 use agenc_ircd_types::{FederationResultKind, RequestId, SessionId, UserId};
-use std::collections::VecDeque;
 use zeroize::Zeroizing;
 
 use super::{DeferredCommand, EdgeFederation, MAX_DEFERRED_COMMANDS, Phase, Violation};
 use crate::connection::ConnectionGeneration;
 use crate::federation::codec::operations::{
-    FederatedOperation, JoinTarget, MessageTargetArg, ModeChangeArg,
+    FederatedOperation, JoinTarget, MessageTargetArg, ModeChangeArg, USER_MODE_CODE_WALLOPS,
 };
 use crate::federation::codec::results::{ResultArm, failure_error, reply_parts_of};
 use crate::state_core::StateCoreContext;
@@ -62,15 +61,37 @@ pub enum EdgeCompletion {
         /// The client's original line.
         message: Box<ParsedMessage>,
     },
+    /// A covered JOIN result starts its bounded topic and NAMES response.
+    JoinCommitted {
+        /// The client connection.
+        generation: ConnectionGeneration,
+        /// Covered topic numerics and per-target failures.
+        frames: Vec<agenc_ircd_client_wire::WireMessage>,
+        /// Memory backing retained through publication of the committed echoes.
+        echo_permits: Vec<crate::budget::MemoryPermit>,
+        /// The original JOIN and its local response label.
+        message: Box<ParsedMessage>,
+    },
     /// A query page rendered by the coordinator.
     Replies {
         /// The client connection.
         generation: ConnectionGeneration,
         /// The reply lines, prefixed by this edge.
         frames: Vec<agenc_ircd_client_wire::WireMessage>,
+        /// The sequence within this one logical directory response.
+        page_sequence: u32,
         /// The cursor of the next page, if any.
         next_cursor: Option<[u8; 32]>,
         /// The client's original line.
+        message: Box<ParsedMessage>,
+    },
+    /// A covered account deletion queues its final reply and closes the client.
+    AccountDeleted {
+        /// The invalidated client connection.
+        generation: ConnectionGeneration,
+        /// The exact committed final account reply.
+        frames: Vec<agenc_ircd_client_wire::WireMessage>,
+        /// The original deletion confirmation and its response label.
         message: Box<ParsedMessage>,
     },
     /// The link lost synchronization; the registered client must reconnect.
@@ -122,6 +143,7 @@ pub(super) struct PendingRequest {
     pub(super) result: Option<ResultArm>,
     pub(super) result_bytes: Vec<u8>,
     pub(super) replies: Vec<agenc_ircd_client_wire::WireMessage>,
+    pub(super) join_echoes: Vec<super::join_echo::JoinEcho>,
     pub(super) completion: Option<agenc_ircd_types::EventId>,
     /// Generation of the completion event that durably covered this request.
     pub(super) completion_generation: Option<u64>,
@@ -374,6 +396,7 @@ pub(super) fn register_request(
             result: None,
             result_bytes: Vec::new(),
             replies: Vec::new(),
+            join_echoes: Vec::new(),
             completion: None,
             completion_generation: None,
             completion_coverage: None,
@@ -570,7 +593,7 @@ pub(super) fn send_command(
     kind: RegisteredCommandKind,
     message: Box<ParsedMessage>,
 ) -> Result<(), (Box<ParsedMessage>, DomainError)> {
-    if edge.phase != Phase::Active {
+    if edge.phase != Phase::Active && !is_local_user_mode_query(&message) {
         return Err((message, DomainError::ServerBusy));
     }
     let Some((session_id, user_id)) = edge
@@ -580,27 +603,18 @@ pub(super) fn send_command(
     else {
         return Err((message, DomainError::RegistrationRequired));
     };
-    if edge
-        .pending
-        .values()
-        .any(|pending| pending.generation == generation)
-        || edge
-            .origins
-            .get(&generation)
-            .is_some_and(|origin| !origin.pending_updates.is_empty())
-    {
-        let queue = edge.deferred.entry(generation).or_default();
-        if queue.len() >= MAX_DEFERRED_COMMANDS {
-            return Err((message, DomainError::ServerBusy));
-        }
-        queue.push_back(DeferredCommand { kind, message });
-        return Ok(());
+    if must_defer_command(edge, generation) {
+        return defer_command(edge, context, generation, kind, message);
     }
     let Ok(command) =
         crate::command_convert::convert(context.domain(), &edge.replica, kind, &message)
     else {
         return Err((message, DomainError::InvalidArgument));
     };
+    if let CanonicalCommandView::Mode(ModeCommand::UserQuery(target)) = command.view() {
+        return local_user_modes(edge, context, generation, user_id, &message, target)
+            .map_err(|error| (message, error));
+    }
     let operation = match operation_of(edge, session_id, user_id, &message, &command) {
         Ok(operation) => operation,
         Err(error) => return Err((message, error)),
@@ -618,6 +632,115 @@ pub(super) fn send_command(
         prepared,
         PendingKind::Command { message },
     );
+    Ok(())
+}
+
+fn defer_command(
+    edge: &mut EdgeFederation,
+    context: &StateCoreContext,
+    generation: ConnectionGeneration,
+    kind: RegisteredCommandKind,
+    message: Box<ParsedMessage>,
+) -> Result<(), (Box<ParsedMessage>, DomainError)> {
+    let queue = edge.deferred.entry(generation).or_default();
+    if queue.len() >= MAX_DEFERRED_COMMANDS {
+        return Err((message, DomainError::ServerBusy));
+    }
+    let Some(backing) = message
+        .requested_backing_bytes()
+        .checked_add(size_of::<ParsedMessage>())
+    else {
+        return Err((message, DomainError::ServerBusy));
+    };
+    let Ok(permit) = context.reserve_output_backing(backing) else {
+        return Err((message, DomainError::ServerBusy));
+    };
+    if queue
+        .reserve(MAX_DEFERRED_COMMANDS, |bytes| {
+            context.reserve_output_backing(bytes)
+        })
+        .is_err()
+    {
+        return Err((message, DomainError::ServerBusy));
+    }
+    let entry = DeferredCommand {
+        kind,
+        message,
+        _permit: permit,
+    };
+    if let Err(entry) = queue.push_back(entry) {
+        return Err((entry.message, DomainError::ServerBusy));
+    }
+    Ok(())
+}
+
+/// Identifies the own-session read whose authority remains local during a partition.
+pub(crate) fn is_local_user_mode_query(message: &ParsedMessage) -> bool {
+    message.command() == "MODE"
+        && message.trailing().is_none()
+        && matches!(message.middle(), [target] if agenc_ircd_domain::NicknameValue::parse(target).is_ok())
+}
+
+fn must_defer_command(edge: &EdgeFederation, generation: ConnectionGeneration) -> bool {
+    edge.phase == Phase::Active
+        && (edge
+            .pending
+            .values()
+            .any(|pending| pending.generation == generation)
+            || edge.origins.get(&generation).is_some_and(|origin| {
+                origin.join_names_pending || !origin.pending_updates.is_empty()
+            }))
+}
+
+fn local_user_modes(
+    edge: &EdgeFederation,
+    context: &mut StateCoreContext,
+    generation: ConnectionGeneration,
+    user_id: UserId,
+    message: &ParsedMessage,
+    target: &agenc_ircd_domain::NicknameValue,
+) -> Result<(), DomainError> {
+    let command = CanonicalCommand::user_mode_query(target.clone());
+    let charges = context.domain().command_charges(user_id, &command);
+    let now = context.now();
+    context
+        .buckets_mut()
+        .apply_domain_charges(now, &charges)
+        .map_err(|_| DomainError::ServerBusy)?;
+    let session = edge
+        .replica
+        .session(user_id)
+        .ok_or(DomainError::RegistrationRequired)?;
+    if session.nickname != *target {
+        return Err(DomainError::Forbidden);
+    }
+    let modes = if session.user_mode_bits & 2 == 0 {
+        "+i"
+    } else {
+        "+iw"
+    };
+    let frame = agenc_ircd_client_wire::numeric_reply(
+        context.server_prefix(),
+        221,
+        session.nickname.presentation(),
+        &[modes],
+        None,
+    )
+    .map_err(|_| DomainError::InvariantViolation)?;
+    let capabilities = context
+        .sessions()
+        .capabilities_for_user(user_id)
+        .ok_or(DomainError::RegistrationRequired)?;
+    let frames = crate::client_render::logical_frames(
+        context.server_prefix(),
+        capabilities,
+        message,
+        vec![frame],
+    )
+    .map_err(|_| DomainError::InvariantViolation)?;
+    context
+        .send_to(generation, frames)
+        .map_err(|_| DomainError::ServerBusy)?;
     Ok(())
 }
 
@@ -692,6 +815,64 @@ fn channel_of(
         .ok_or(DomainError::NotFound)
 }
 
+fn account_operation(
+    edge: &EdgeFederation,
+    session_id: SessionId,
+    user_id: UserId,
+    command: &agenc_ircd_domain::AccountCommand,
+) -> Result<FederatedOperation, DomainError> {
+    let (account_id, _) = edge
+        .replica
+        .session(user_id)
+        .and_then(|session| session.account)
+        .ok_or(DomainError::RegistrationRequired)?;
+    let expected_account_revision = edge
+        .replica
+        .account(account_id)
+        .map(|account| account.account_revision.get())
+        .ok_or(DomainError::RegistrationRequired)?;
+    let (setting_kind, value) = account_change(command)?;
+    Ok(FederatedOperation::AccountSettings {
+        session_id,
+        expected_account_revision,
+        setting_kind,
+        value,
+    })
+}
+
+fn account_change(
+    command: &agenc_ircd_domain::AccountCommand,
+) -> Result<(u16, Vec<u8>), DomainError> {
+    use agenc_ircd_domain::AccountCommand;
+    Ok(match command {
+        AccountCommand::Label(Some(label)) => (1, label.as_str().as_bytes().to_vec()),
+        AccountCommand::ContactAdd(account) => (7, account.to_text().into_bytes()),
+        AccountCommand::ContactRemove(account) => (8, account.to_text().into_bytes()),
+        AccountCommand::NickReserve(nickname) => (9, nickname.presentation().as_bytes().to_vec()),
+        AccountCommand::NickRelease(nickname) => (10, nickname.presentation().as_bytes().to_vec()),
+        AccountCommand::DeleteConfirm(token) => (12, token.expose_for_deletion().to_vec()),
+        other => (account_flag(other)?, Vec::new()),
+    })
+}
+
+fn account_flag(command: &agenc_ircd_domain::AccountCommand) -> Result<u16, DomainError> {
+    use agenc_ircd_domain::{
+        AccountCommand, DirectMessagePolicy, GuestDirectMessagePolicy, PresencePolicy,
+    };
+    Ok(match command {
+        AccountCommand::Label(None) => 2,
+        AccountCommand::Presence(PresencePolicy::Public) => 3,
+        AccountCommand::Presence(PresencePolicy::Private) => 4,
+        AccountCommand::GuestDirectMessages(GuestDirectMessagePolicy::Allow) => 5,
+        AccountCommand::GuestDirectMessages(GuestDirectMessagePolicy::Deny) => 6,
+        AccountCommand::DeleteStart => 11,
+        AccountCommand::DirectMessages(DirectMessagePolicy::Allow) => 13,
+        AccountCommand::DirectMessages(DirectMessagePolicy::Contacts) => 14,
+        AccountCommand::DirectMessages(DirectMessagePolicy::Deny) => 15,
+        _ => return Err(DomainError::InvalidArgument),
+    })
+}
+
 /// Maps one canonical command onto its operation using the replica for
 /// identities and expected revisions.
 // agenc-review: focus owner=runtime reviewed=2026-09-02 reason=one closed match maps every federated client command onto its operation arm
@@ -732,6 +913,9 @@ fn operation_of(
         CanonicalCommandView::Channel(command) => {
             channel_control_operation(edge, session_id, command)
         }
+        CanonicalCommandView::Account(command) => {
+            account_operation(edge, session_id, user_id, command)
+        }
         CanonicalCommandView::Part(channels, reason) => {
             let mut ids = Vec::new();
             for name in channels {
@@ -757,6 +941,9 @@ fn operation_of(
                 reason: String::new(),
             })
         }
+        CanonicalCommandView::Mode(
+            ModeCommand::ChannelQuery(_) | ModeCommand::ChannelList(_, _),
+        ) => super::directory::operation(session_id, command, None),
         CanonicalCommandView::Mode(mode) => {
             mode_operation(edge, session_id, user_id, message, mode)
         }
@@ -819,7 +1006,7 @@ fn operation_of(
                 cursor: None,
             })
         }
-        _ => Err(DomainError::BadState),
+        _ => super::directory::operation(session_id, command, None),
     }
 }
 
@@ -863,19 +1050,38 @@ fn mode_operation(
                 changes: channel_mode_args(changes, &arguments),
             })
         }
-        ModeCommand::UserOperatorNotices(_, enabled) => Ok(FederatedOperation::UserMode {
-            session_id,
-            expected_session_revision: session_revision(edge, user_id)?,
-            changes: vec![ModeChangeArg {
-                direction: flag(*enabled),
-                mode_code: 2,
-                argument: Zeroizing::new(Vec::new()),
-            }],
-        }),
+        ModeCommand::UserOperatorNotices(target, enabled) => {
+            user_mode_operation(edge, session_id, user_id, target, *enabled)
+        }
         ModeCommand::UserQuery(_)
         | ModeCommand::ChannelQuery(_)
         | ModeCommand::ChannelList(_, _) => Err(DomainError::BadState),
     }
+}
+
+fn user_mode_operation(
+    edge: &EdgeFederation,
+    session_id: SessionId,
+    user_id: UserId,
+    target: &agenc_ircd_domain::NicknameValue,
+    enabled: bool,
+) -> Result<FederatedOperation, DomainError> {
+    let session = edge
+        .replica
+        .session(user_id)
+        .ok_or(DomainError::RegistrationRequired)?;
+    if session.nickname != *target {
+        return Err(DomainError::Forbidden);
+    }
+    Ok(FederatedOperation::UserMode {
+        session_id,
+        expected_session_revision: session.session_revision.get(),
+        changes: vec![ModeChangeArg {
+            direction: flag(enabled),
+            mode_code: USER_MODE_CODE_WALLOPS,
+            argument: Zeroizing::new(Vec::new()),
+        }],
+    })
 }
 
 /// Pairs each change with the client argument it consumes, in order.
@@ -1042,6 +1248,7 @@ pub(super) fn receive_result(
     )
     .map_err(|_| Violation::Codec)?;
     validate_result_generation(edge, header.request_id, &arm)?;
+    super::join_echo::validate_result(edge, header.request_id, &arm)?;
     if pending.header.opcode == agenc_ircd_types::FederationOpcode::HistoryQuery {
         return super::history::receive(edge, context, header, object.object_id(), arm);
     }
@@ -1192,10 +1399,21 @@ pub(super) fn completed(
         .pending
         .get(&request_id)
         .map(|pending| pending.generation);
-    let mut completions = completed_request(edge, request_id);
+    let continues_query = edge.pending.get(&request_id).is_some_and(|pending| {
+        matches!(
+            pending.result,
+            Some(ResultArm::ReplyPage {
+                next_cursor: Some(_),
+                ..
+            })
+        )
+    });
+    let mut completions = completed_request(edge, context, request_id);
     if let Some(generation) = generation {
         super::journal::retire_origin(edge, generation);
-        completions.extend(dispatch_deferred(edge, context, generation));
+        if !continues_query {
+            completions.extend(dispatch_deferred(edge, context, generation));
+        }
     }
     completions
 }
@@ -1213,17 +1431,16 @@ pub(super) fn dispatch_deferred(
             .pending
             .values()
             .any(|pending| pending.generation == generation)
-            || edge
-                .origins
-                .get(&generation)
-                .is_some_and(|origin| !origin.pending_updates.is_empty());
+            || edge.origins.get(&generation).is_some_and(|origin| {
+                origin.join_names_pending || !origin.pending_updates.is_empty()
+            });
         if in_flight {
             break;
         }
         let Some(next) = edge
             .deferred
             .get_mut(&generation)
-            .and_then(VecDeque::pop_front)
+            .and_then(crate::budget::RetainedQueue::pop_front)
         else {
             edge.deferred.remove(&generation);
             break;
@@ -1243,7 +1460,11 @@ pub(super) fn dispatch_deferred(
 
 /// Resolves one finished request into its client-facing completion.
 // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one match pairs every pending request kind with the result kinds the profile permits for it so a forbidden pair is visible in place
-fn completed_request(edge: &mut EdgeFederation, request_id: RequestId) -> Vec<EdgeCompletion> {
+fn completed_request(
+    edge: &mut EdgeFederation,
+    context: &mut StateCoreContext,
+    request_id: RequestId,
+) -> Vec<EdgeCompletion> {
     let Some(pending) = edge.pending.remove(&request_id) else {
         return Vec::new();
     };
@@ -1312,14 +1533,66 @@ fn completed_request(edge: &mut EdgeFederation, request_id: RequestId) -> Vec<Ed
                 error: failure_error(&code).unwrap_or(DomainError::ServerBusy),
             }]
         }
-        (PendingKind::Command { message }, ResultArm::ReplyPage { next_cursor, .. }) => {
+        (
+            PendingKind::Command { message },
+            ResultArm::ReplyPage {
+                page_sequence,
+                next_cursor,
+                ..
+            },
+        ) => {
             vec![EdgeCompletion::Replies {
                 generation,
                 frames: pending.replies,
+                page_sequence,
                 next_cursor,
                 message,
             }]
         }
+        (
+            PendingKind::Command { message },
+            ResultArm::Committed {
+                resulting_state_generation,
+            },
+        ) if message.command() == "JOIN" => {
+            if let Some(origin) = edge.origins.get_mut(&generation) {
+                origin.join_names_pending = true;
+            }
+            super::join_echo::complete(
+                context,
+                generation,
+                message,
+                resulting_state_generation,
+                pending.join_echoes,
+                pending.replies,
+            )
+        }
+        (PendingKind::Command { message }, ResultArm::Committed { .. })
+            if pending.header.opcode == agenc_ircd_types::FederationOpcode::AccountSettings
+                && is_committed_account_deletion(&message, &pending.replies) =>
+        {
+            vec![EdgeCompletion::AccountDeleted {
+                generation,
+                frames: pending.replies,
+                message,
+            }]
+        }
+        (PendingKind::Command { message }, _) if !pending.replies.is_empty() => {
+            vec![EdgeCompletion::Replies {
+                generation,
+                frames: pending.replies,
+                next_cursor: None,
+                page_sequence: 0,
+                message,
+            }]
+        }
+        (PendingKind::Command { message }, ResultArm::NoContent) => vec![EdgeCompletion::Replies {
+            generation,
+            frames: Vec::new(),
+            page_sequence: 0,
+            next_cursor: None,
+            message,
+        }],
         (PendingKind::Command { message }, _) => vec![EdgeCompletion::CommandCompleted {
             generation,
             message,
@@ -1328,54 +1601,25 @@ fn completed_request(edge: &mut EdgeFederation, request_id: RequestId) -> Vec<Ed
     }
 }
 
-/// Builds a `directory.names` query for one channel.
-fn names_query(channel: &str, cursor: Option<[u8; 32]>) -> Result<FederatedOperation, Violation> {
-    let name = SchemaObject::new(
-        "FederationChannelName",
-        vec![
-            agenc_ircd_federation_wire::access::opaque(channel.as_bytes())
-                .map_err(|_| Violation::Codec)?,
-        ],
-    )
-    .map_err(|_| Violation::Codec)?;
-    let arm = SchemaObject::new(
-        "directory.names",
-        vec![agenc_ircd_federation_wire::WireValue::Vector(vec![name])],
-    )
-    .map_err(|_| Violation::Codec)?;
-    directory_query(
-        agenc_ircd_types::FederationDirectoryQueryKind::Names,
-        &arm,
-        cursor,
-    )
-}
-
-/// Wraps one directory arm into the `DirectoryQuery` operation payload.
-fn directory_query(
-    kind: agenc_ircd_types::FederationDirectoryQueryKind,
-    arm: &SchemaObject,
-    cursor: Option<[u8; 32]>,
-) -> Result<FederatedOperation, Violation> {
-    let cursor_bytes: &[u8] = cursor.as_ref().map_or(&[], |cursor| cursor);
-    let query = SchemaObject::new(
-        "DirectoryQuery",
-        vec![
-            agenc_ircd_federation_wire::WireValue::Unsigned(u64::from(kind.wire_value())),
-            agenc_ircd_federation_wire::access::opaque(
-                arm.encode_canonical()
-                    .map_err(|_| Violation::Codec)?
-                    .as_slice(),
-            )
-            .map_err(|_| Violation::Codec)?,
-            agenc_ircd_federation_wire::access::opaque(cursor_bytes)
-                .map_err(|_| Violation::Codec)?,
-        ],
-    )
-    .map_err(|_| Violation::Codec)?;
-    Ok(FederatedOperation::DirectoryQuery {
-        session_id: SessionId::from_bytes([0; 16]),
-        query,
-    })
+fn is_committed_account_deletion(
+    message: &ParsedMessage,
+    replies: &[agenc_ircd_client_wire::WireMessage],
+) -> bool {
+    if message.command() != "ACCT" {
+        return false;
+    }
+    let [operation, confirmation, ..] = message.middle() else {
+        return false;
+    };
+    if !operation.eq_ignore_ascii_case("DELETE") || !confirmation.eq_ignore_ascii_case("CONFIRM") {
+        return false;
+    }
+    let [reply] = replies else {
+        return false;
+    };
+    reply.command() == "NOTE"
+        && reply.middle() == ["ACCT", "UPDATED"]
+        && reply.trailing() == Some("Account setting updated")
 }
 
 /// Sends the NAMES query of one channel for a connection.
@@ -1386,20 +1630,6 @@ pub(super) fn send_names(
     channel: &str,
     cursor: Option<[u8; 32]>,
 ) {
-    let Some((session_id, _)) = edge
-        .origins
-        .get(&generation)
-        .and_then(|origin| origin.session)
-    else {
-        return;
-    };
-    let Ok(FederatedOperation::DirectoryQuery { query, .. }) = names_query(channel, cursor) else {
-        return;
-    };
-    let operation = FederatedOperation::DirectoryQuery { session_id, query };
-    let Ok(prepared) = prepare_request(edge, context, generation, &operation) else {
-        return;
-    };
     let line = format!("NAMES {channel}");
     let Ok(Some(message)) = agenc_ircd_client_wire::FramedLine::new(&line)
         .map_err(|_| ())
@@ -1407,15 +1637,7 @@ pub(super) fn send_names(
     else {
         return;
     };
-    register_request(
-        edge,
-        context,
-        generation,
-        prepared,
-        PendingKind::Command {
-            message: Box::new(message),
-        },
-    );
+    let _started = send_directory_query(edge, context, generation, Box::new(message), cursor);
 }
 
 /// Re-issues the client's query with the continuation cursor.
@@ -1423,17 +1645,89 @@ pub(super) fn continue_query(
     edge: &mut EdgeFederation,
     context: &mut StateCoreContext,
     generation: ConnectionGeneration,
-    message: &ParsedMessage,
+    message: Box<ParsedMessage>,
     cursor: [u8; 32],
-) {
-    if message.command() != "NAMES" {
-        return;
-    }
-    let Some(channel) = message.middle().first() else {
-        return;
+) -> bool {
+    send_directory_query(edge, context, generation, message, Some(cursor))
+}
+
+fn send_directory_query(
+    edge: &mut EdgeFederation,
+    context: &mut StateCoreContext,
+    generation: ConnectionGeneration,
+    message: Box<ParsedMessage>,
+    cursor: Option<[u8; 32]>,
+) -> bool {
+    let Some((session_id, _)) = edge
+        .origins
+        .get(&generation)
+        .and_then(|origin| origin.session)
+    else {
+        return false;
     };
-    let channel = channel.clone();
-    send_names(edge, context, generation, &channel, Some(cursor));
+    let Ok(proof) = agenc_ircd_client_wire::validate_post_registration_command(&message) else {
+        return false;
+    };
+    let kind = RegisteredCommandKind::Public(proof.kind());
+    let Ok(command) =
+        crate::command_convert::convert(context.domain(), &edge.replica, kind, &message)
+    else {
+        return false;
+    };
+    let Ok(operation) = super::directory::operation(session_id, &command, cursor) else {
+        return false;
+    };
+    let Ok(prepared) = prepare_request(edge, context, generation, &operation) else {
+        return false;
+    };
+    register_request(
+        edge,
+        context,
+        generation,
+        prepared,
+        PendingKind::Command { message },
+    );
+    true
+}
+
+pub(super) fn continue_join_names(
+    edge: &mut EdgeFederation,
+    context: &mut StateCoreContext,
+    generation: ConnectionGeneration,
+    channels: &[agenc_ircd_domain::ChannelNameValue],
+    message: Box<ParsedMessage>,
+    cursor: Option<[u8; 32]>,
+) -> bool {
+    if edge.phase != Phase::Active {
+        return false;
+    }
+    let Some(origin) = edge
+        .origins
+        .get(&generation)
+        .filter(|origin| origin.join_names_pending)
+    else {
+        return false;
+    };
+    let Some((session_id, _)) = origin.session else {
+        return false;
+    };
+    let Ok(command) = CanonicalCommand::names(channels.to_vec()) else {
+        return false;
+    };
+    let Ok(operation) = super::directory::operation(session_id, &command, cursor) else {
+        return false;
+    };
+    let Ok(prepared) = prepare_request(edge, context, generation, &operation) else {
+        return false;
+    };
+    register_request(
+        edge,
+        context,
+        generation,
+        prepared,
+        PendingKind::Command { message },
+    );
+    true
 }
 
 /// What the coordinator's account service answered for one forwarded

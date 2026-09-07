@@ -7815,14 +7815,15 @@ narrows them:
 
 ```text
 001 002 003 004 005
-221 251 252 253 254 255 265 266
-301 303 305 306 311 312 315 318 319
+221 251 252 253 254 255 263 265 266
+301 302 303 305 306 311 312 314 315 318 319
 321 322 323 324 329 331 332 333 341
 346 347 348 349 352 353 366 367 368 369
 371 372 374 375 376 391
 401 402 403 404 405 406 407 409 411 412 417
 421 422 431 432 433 441 442 443 451 461 462 464 465
 471 472 473 474 475 476 477 481 482 483 501 502
+730 731 732 733 734
 900 901 902 903 904 905 906 907 908
 ```
 
@@ -7831,6 +7832,14 @@ SASL meanings. Numeric 317 idle time is intentionally absent. Numerics 325,
 338, 378, 379, and any numeric traditionally exposing an address, real host,
 route, or idle timestamp are forbidden. Admin replies use standard replies and
 the same safe subset rather than creating an unrestricted numeric tunnel.
+
+WHOWAS numeric 314 uses the retained nickname, ephemeral public user and host
+components, the fixed `*` marker, and the retained public account label or `*`
+as its trailing field. That field never contains a realname. Its numeric 312
+uses the configured public reply prefix and retained Unix second, without an
+exact server route. Current shared-context authorization still governs each
+record; neither a public label nor a historical nickname establishes account
+identity or permission to disclose a disconnected session.
 
 The closed base standard-reply code registry is:
 

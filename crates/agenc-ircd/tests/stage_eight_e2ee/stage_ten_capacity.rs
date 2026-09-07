@@ -79,8 +79,6 @@ const PHYSICAL_GROWTH_BYTES: u64 = 268_435_456;
 const RESERVE_CLEARANCE_BYTES: u64 = 8 * 1_024 * 1_024 * 1_024;
 const PRESSURE_MARGIN_BYTES: u64 = 64 * 1_024 * 1_024;
 const REGISTRATION_PROBE_WAIT: Duration = Duration::from_secs(10);
-/// Re-issues of a refused DIE confirmation (finding CAP-19).
-const DIE_ATTEMPTS: u32 = 5;
 /// Spacing between two workers connecting or resuming after a maintenance
 /// window. Every campaign client shares one loopback address, and the
 /// per-address pre-authentication bucket admits at most 10 commands per
@@ -92,8 +90,8 @@ const RESUME_SLOT: Duration = Duration::from_millis(400);
 /// The shortest warm-up before the baseline sample.
 const MINIMUM_WARM_UP: Duration = Duration::from_secs(20);
 const PRESSURE_RECOVERY_WAIT: Duration = Duration::from_secs(45);
-/// How long after a coordinator restart an explicit SASL failure is retried.
-const POST_RESTART_AUTH_GRACE: Duration = Duration::from_secs(30);
+/// How long both edges may take to finish synchronization after a restart.
+const POST_RESTART_READY_WAIT: Duration = Duration::from_secs(30);
 const CAMPAIGN_ACCOUNT_LOGIN: &str = "campaign-account";
 
 /// Campaign inputs read from the environment the driver sets.
@@ -417,30 +415,6 @@ impl Session {
     }
 }
 
-/// One registration attempt with a bounded read: an unavailable network or
-/// a closed transport is an error the caller retries on its own schedule.
-fn register_once(fixture: &NodeFixture, nickname: &str) -> TestResult<IrcClient> {
-    let mut client = IrcClient::connect(fixture)?;
-    client
-        .reader
-        .get_ref()
-        .sock
-        .set_read_timeout(Some(REGISTRATION_PROBE_WAIT))?;
-    match client.try_register(nickname)? {
-        Registration::Welcome(lines) => {
-            if lines
-                .iter()
-                .any(|line| line.contains(&format!(" 001 {nickname} ")))
-            {
-                Ok(client)
-            } else {
-                Err(failure(format!("registration lacked 001: {lines:?}")))
-            }
-        }
-        Registration::Unavailable(_) => Err(failure("registration unavailable")),
-    }
-}
-
 /// Registers a load worker with `standard-replies` enabled, so a refused
 /// channel message reaches the worker as `FAIL PRIVMSG` instead of a legacy
 /// numeric it would not recognize, retrying transient failures like
@@ -484,8 +458,11 @@ fn register_worker(fixture: &NodeFixture, nickname: &str) -> TestResult<IrcClien
 /// Whether an error is a transient transport failure a node restart can
 /// cause: a refused connection, a handshake or read cut short, or a broken
 /// pipe. Authentication and protocol failures are not transient.
-fn transient_transport(error: &TestError) -> bool {
+pub(super) fn transient_transport(error: &TestError) -> bool {
     let text = error.to_string();
+    if text.contains(" 904 ") {
+        return false;
+    }
     text.contains("os error 11")
         || [
             "UnexpectedEof",
@@ -502,6 +479,25 @@ fn transient_transport(error: &TestError) -> bool {
         ]
         .iter()
         .any(|needle| text.contains(needle))
+}
+
+#[test]
+fn an_authentication_refusal_is_not_a_transient_transport_failure() {
+    for detail in [
+        "SASL response framing was invalid: :server.test 904 user :Authentication failed",
+        "SASL response framing was invalid: :server.test 904 user :Connection reset",
+        "authentication returned the wrong challenge",
+        "successful authentication omitted numeric 903",
+        "InvalidLogin",
+    ] {
+        assert!(!transient_transport(&failure(detail)), "{detail}");
+    }
+    assert!(transient_transport(&failure(
+        "Connection refused (os error 111)"
+    )));
+    assert!(transient_transport(&failure(
+        "SASL response ended: transport closed"
+    )));
 }
 
 fn own_channel(index: usize) -> String {
@@ -1136,12 +1132,31 @@ impl Campaign<'_> {
         Ok(())
     }
 
-    /// Waits for both edges to log a fresh coordinator link beyond the counts
-    /// captured before a restart, so the coordinator is federated and its
-    /// account service is ready before the scenario probes it.
+    /// Waits for fresh links and complete base synchronization before the
+    /// first account request. Transport establishment alone is insufficient.
     fn wait_relinks(&self, before_a: usize, before_b: usize) -> TestResult {
         wait_for_link(&self.network.edge_a, before_a)?;
-        wait_for_link(&self.network.edge_b, before_b)
+        wait_for_link(&self.network.edge_b, before_b)?;
+        let deadline = Instant::now() + POST_RESTART_READY_WAIT;
+        while Instant::now() < deadline {
+            let mut ready = true;
+            for identity in self.admins.iter().skip(1) {
+                let active = AdminSession::connect(identity)?
+                    .stats("FEDERATION")?
+                    .into_iter()
+                    .find(|(name, _)| name == "active_peers")
+                    .ok_or_else(|| failure("federation readiness counter missing"))?
+                    .1;
+                ready &= active == 1;
+            }
+            if ready {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        Err(failure(
+            "edges did not finish synchronization after coordinator restart",
+        ))
     }
 
     fn settle(&mut self, seconds: u64) -> TestResult {
@@ -1208,6 +1223,16 @@ impl Campaign<'_> {
                 .and_then(|line| line.split_ascii_whitespace().nth(1))
                 .unwrap_or("none")
                 .to_owned();
+            let expected = if query.starts_with("NAMES ") {
+                "366"
+            } else {
+                "315"
+            };
+            if numeric != expected {
+                return Err(failure(format!(
+                    "explicit directory query {query} returned {numeric}: {reply:?}"
+                )));
+            }
             observed.push(format!("{query} -> {numeric}"));
         }
         client.send("QUIT :snapshot complete")?;
@@ -1220,49 +1245,15 @@ impl Campaign<'_> {
         Ok(())
     }
 
-    /// Authenticates the campaign account on a fresh connection (the opaque
-    /// class) and returns the connected client.
-    /// Authenticates the campaign account on a fresh connection (the OPAQUE
-    /// class) and returns the connected client. The whole exchange is retried
-    /// on a transient transport failure: a scenario that restarts the
-    /// coordinator briefly closes clients on the edge whose upstream link is
-    /// re-establishing, and that window is not an authentication fault.
+    /// Authenticates the campaign account on a fresh connection. Transport
+    /// loss may be retried within the network bound; an explicit SASL
+    /// failure is always a failed authentication probe.
     fn opaque_login(&mut self, fixture_index: usize) -> TestResult<IrcClient> {
-        self.opaque_login_with_grace(fixture_index, None)
-    }
-
-    /// Like `opaque_login`, but inside `auth_grace` after a coordinator
-    /// restart an explicit SASL failure is retried as well: the first
-    /// authentication after the restart has been answered with 904 before the
-    /// account service was serving (finding CAP-7). Every such retry is noted.
-    fn opaque_login_with_grace(
-        &mut self,
-        fixture_index: usize,
-        auth_grace: Option<Duration>,
-    ) -> TestResult<IrcClient> {
-        let started = Instant::now();
-        let deadline = started + NETWORK_WAIT;
-        let grace_until = auth_grace.map(|grace| started + grace);
-        let mut auth_retries = 0_u32;
+        let deadline = Instant::now() + NETWORK_WAIT;
         loop {
             match self.opaque_login_once(fixture_index) {
-                Ok(client) => {
-                    if auth_retries > 0 {
-                        self.note(format!(
-                            "OPAQUE login succeeded after {auth_retries} SASL failures within \
-the post-restart grace (CAP-7)"
-                        ));
-                    }
-                    return Ok(client);
-                }
+                Ok(client) => return Ok(client),
                 Err(error) if Instant::now() < deadline && transient_transport(&error) => {
-                    thread::sleep(Duration::from_secs(1));
-                }
-                Err(error)
-                    if grace_until.is_some_and(|until| Instant::now() < until)
-                        && error.to_string().contains(" 904 ") =>
-                {
-                    auth_retries += 1;
                     thread::sleep(Duration::from_secs(1));
                 }
                 Err(error) => return Err(error),
@@ -1307,35 +1298,25 @@ the post-restart grace (CAP-7)"
         Ok(())
     }
 
-    /// A durable write that must be refused under disk pressure and accepted
-    /// once the pressure clears.
-    /// Attempts one durable mutation (a JOIN of a new channel) on an existing
-    /// registered session and classifies the outcome. A refusal is an explicit
-    /// FAIL, and a transport close counts as a refusal too: the edge closes a
-    /// client whose durable request the coordinator rejected under pressure.
+    /// Attempts one durable JOIN on an existing registered session. A refusal
+    /// must be an explicit FAIL; a lost transport fails the campaign.
     fn durable_join(
         client: &mut IrcClient,
         nick: &str,
         channel: &str,
     ) -> TestResult<DurableOutcome> {
-        if client.send(&format!("JOIN {channel}")).is_err() {
-            return Ok(DurableOutcome::Refused("send failed".to_owned()));
-        }
-        match client.read_until_within(BUSY_TRANSCRIPT_LINES, |line| {
+        client.send(&format!("JOIN {channel}"))?;
+        let lines = client.read_until_within(BUSY_TRANSCRIPT_LINES, |line| {
             line.contains(&format!(" 366 {nick} {channel} ")) || line.contains("FAIL JOIN")
-        }) {
-            Ok(lines) => match lines.iter().find(|line| line.contains("FAIL JOIN")) {
-                Some(refusal) => Ok(DurableOutcome::Refused(refusal.clone())),
-                None => Ok(DurableOutcome::Admitted),
-            },
-            Err(error) => Ok(DurableOutcome::Refused(format!(
-                "transport closed: {error}"
-            ))),
+        })?;
+        match lines.iter().find(|line| line.contains("FAIL JOIN")) {
+            Some(refusal) => Ok(DurableOutcome::Refused(refusal.clone())),
+            None => Ok(DurableOutcome::Admitted),
         }
     }
 
-    /// Registers a fresh connection under the current storage conditions with
-    /// a bounded wait and classifies the outcome without failing the campaign.
+    /// Requires registration to produce a welcome or an explicit bounded
+    /// refusal under the current storage conditions.
     fn registration_probe(&mut self, label: &str) -> TestResult {
         let mut client = IrcClient::connect(&self.network.edge_a)?;
         client
@@ -1343,39 +1324,36 @@ the post-restart grace (CAP-7)"
             .get_ref()
             .sock
             .set_read_timeout(Some(REGISTRATION_PROBE_WAIT))?;
-        let outcome = match client.try_register(&format!("register-{label}")) {
-            Ok(Registration::Welcome(_)) => "admitted".to_owned(),
-            Ok(Registration::Unavailable(lines)) => match lines.last() {
-                Some(line) => format!("refused: {line}"),
-                None => "closed before any reply".to_owned(),
-            },
-            Err(error) if error.to_string().contains("os error 11") => {
-                "silent (no reply within the bounded wait)".to_owned()
+        let outcome = match client.try_register(&format!("register-{label}"))? {
+            Registration::Welcome(_) => "admitted".to_owned(),
+            Registration::Unavailable(lines) => {
+                let refusal = lines
+                    .iter()
+                    .find(|line| {
+                        line.contains("FAIL ")
+                            || line.contains("ERROR ")
+                            || line.contains(" 263 ")
+                    })
+                    .ok_or_else(|| {
+                        failure(format!(
+                            "registration probe {label} closed without an explicit refusal: {lines:?}"
+                        ))
+                    })?;
+                format!("refused: {refusal}")
             }
-            Err(error) => format!("error: {error}"),
         };
         let _ = client.send("QUIT :registration probe");
         self.note(format!("registration probe {label}: {outcome}"));
         Ok(())
     }
 
-    /// Polls with fresh sessions until a durable mutation is admitted or the
-    /// recovery deadline passes; the transient window after the ballast drops
-    /// closes early durable requests while the federation origin resettles.
-    fn await_durable_recovery(&mut self) -> TestResult<bool> {
+    /// Requires the original refused session to recover durable service.
+    fn await_durable_recovery(&mut self, client: &mut IrcClient, nick: &str) -> TestResult<bool> {
         let deadline = Instant::now() + PRESSURE_RECOVERY_WAIT;
         let mut attempt = 0_u32;
         while Instant::now() < deadline {
             attempt += 1;
-            let nick = format!("recover{attempt:03}");
-            // One bounded registration attempt per loop turn, so the wait
-            // stays inside the recovery window instead of the network wait.
-            let Ok(mut client) = register_once(&self.network.edge_a, &nick) else {
-                thread::sleep(Duration::from_secs(1));
-                continue;
-            };
-            let outcome = Self::durable_join(&mut client, &nick, &format!("#recover-{attempt}"))?;
-            let _ = client.send("QUIT :recovery probe");
+            let outcome = Self::durable_join(client, nick, &format!("#recover-{attempt}"))?;
             if matches!(outcome, DurableOutcome::Admitted) {
                 self.note(format!("durable recovery admitted on attempt {attempt}"));
                 return Ok(true);
@@ -1416,10 +1394,15 @@ the post-restart grace (CAP-7)"
             refused.as_deref().unwrap_or("admitted (unexpected)")
         ));
         self.registration_probe("on")?;
-        let _ = probe.send("QUIT :pressure probe complete");
+        thread::sleep(Duration::from_secs(3));
+        probe.send("PING :pressure-session-survives")?;
+        probe.read_until_within(BUSY_TRANSCRIPT_LINES, |line| {
+            line.contains(" PONG ") && line.ends_with("pressure-session-survives")
+        })?;
         drop(ballast);
         thread::sleep(Duration::from_secs(2));
-        let recovered = self.await_durable_recovery()?;
+        let recovered = self.await_durable_recovery(&mut probe, "pressure-probe")?;
+        probe.send("QUIT :pressure probe complete")?;
         self.registration_probe("off")?;
         self.shared.maintenance.store(false, Ordering::Relaxed);
         self.note(format!(
@@ -1435,29 +1418,7 @@ the post-restart grace (CAP-7)"
 
     fn stop_edge_b(&mut self) -> TestResult {
         self.shared.maintenance.store(true, Ordering::Relaxed);
-        // The confirmation binds to the state generation (finding CAP-19),
-        // so a commit landing between the challenge and the confirmation
-        // refuses it; an operator re-issues the command, and so does the
-        // campaign, a bounded number of times.
-        let mut attempt = 0_u32;
-        loop {
-            attempt += 1;
-            let outcome = AdminSession::connect(&self.admins[2])?
-                .confirm_process("DIE :campaign maintenance");
-            match outcome {
-                Ok(()) => break,
-                Err(error)
-                    if attempt < DIE_ATTEMPTS
-                        && format!("{error:?}").contains("INVALID_TARGET") =>
-                {
-                    self.note(format!(
-                        "DIE refused at attempt {attempt}: {error} (CAP-19)"
-                    ));
-                    thread::sleep(Duration::from_millis(500));
-                }
-                Err(error) => return Err(error),
-            }
-        }
+        AdminSession::connect(&self.admins[2])?.confirm_process("DIE :campaign maintenance")?;
         let status = self.nodes.edge_b.wait()?;
         if !status.success() {
             return Err(failure(format!("edge b exited with {status}")));
@@ -1663,7 +1624,7 @@ the post-restart grace (CAP-7)"
     /// login-index key transition (Section 23.9 start/finalize) re-encrypts
     /// every login record under a new key through a construction that no
     /// stopped command exposes; that key rotation stays an external drill item
-    /// (finding CAP-4). This scenario proves the login index survives a
+    /// (finding CAP-5). This scenario proves the login index survives a
     /// restart intact, which the transition builds on.
     fn scenario_index_transition(&mut self) -> TestResult {
         self.shared.maintenance.store(true, Ordering::Relaxed);
@@ -1679,7 +1640,7 @@ the post-restart grace (CAP-7)"
         // The reconstructed index must serve a live login before the client
         // population returns, so the login does not queue behind the
         // per-address registration rate of the resume wave.
-        let mut client = self.opaque_login_with_grace(1, Some(POST_RESTART_AUTH_GRACE))?;
+        let mut client = self.opaque_login(1)?;
         client.send("QUIT :login-index reconstruction complete")?;
         self.shared.maintenance.store(false, Ordering::Relaxed);
         self.note("login-index reconstruction across a coordinator restart");

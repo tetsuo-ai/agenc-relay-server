@@ -955,14 +955,12 @@ impl Scan {
             .accounts
             .get(&account_id)
             .ok_or(RuntimeError::Storage(StorageError::StaleState))?;
-        let [reference] = value.references() else {
-            return Err(RuntimeError::Storage(StorageError::StaleState));
-        };
-        if value.generation() != account.session_generation.get()
-            || value.expires_at().is_some()
-            || reference.table() != TableId::Account
-            || reference.key() != key
-            || !self.account_service.opaque_accounts.insert(account_id)
+        if !crate::account_service::opaque_record_matches_account(
+            value,
+            account_id,
+            account.revision.get(),
+            account.session_generation.get(),
+        ) || !self.account_service.opaque_accounts.insert(account_id)
         {
             return Err(RuntimeError::Storage(StorageError::StaleState));
         }
@@ -3638,6 +3636,165 @@ mod tests {
             128,
         )));
         Ok(())
+    }
+
+    #[test]
+    fn recovery_restores_the_unchanged_opaque_row_with_the_advanced_account()
+    -> Result<(), RuntimeError> {
+        let keys = keys()?;
+        let original = account(None)?;
+        let account_key = KeyDeriver::account_key(original.account_id)?;
+        let profile = OpaqueProfile::generate(NetworkId::from_bytes([1; 32]))
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let opaque = PersistentRecordValue::new(
+            TableId::OpaqueRecord,
+            LIVE_RECORD_KIND,
+            original.revision.get(),
+            original.session_generation.get(),
+            None,
+            vec![RecordReference::new(TableId::Account, account_key.clone())?],
+            profile.expose_fake_record_for_persistence().to_vec(),
+        )?;
+        let original_opaque = opaque.encode()?;
+        let recovered = restored_credential_test_record(
+            TableId::Account,
+            &account_key,
+            &account_value(&original)?,
+            agenc_ircd_storage::StorageConstructionAction::RestoreAccount,
+        )?;
+        let opaque = restored_credential_test_record(
+            TableId::OpaqueRecord,
+            &account_key,
+            &opaque,
+            agenc_ircd_storage::StorageConstructionAction::RestoreCopy,
+        )?;
+        assert_eq!(recovered.revision(), original.revision.get() + 1);
+        assert_eq!(
+            recovered.generation(),
+            original.session_generation.get() + 1
+        );
+        let mut scan = Scan::default();
+        admit_sealed(
+            &mut scan,
+            &keys,
+            TableId::Account,
+            &account_key,
+            &recovered,
+            161,
+        )?;
+        admit_sealed(
+            &mut scan,
+            &keys,
+            TableId::OpaqueRecord,
+            &account_key,
+            &opaque,
+            162,
+        )?;
+        assert!(
+            scan.account_service
+                .opaque_accounts
+                .contains(&original.account_id)
+        );
+        assert_eq!(opaque.encode()?, original_opaque);
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_discards_registered_channel_sessions_before_domain_reconstruction()
+    -> Result<(), RuntimeError> {
+        let owner = account_seeded(171)?;
+        let user_id = agenc_ircd_types::UserId::from_bytes([172; 16]);
+        let mut original = channel(171, "#restore-memberships")?;
+        original.content_policy = ContentPolicy::E2eeBound;
+        original
+            .memberships
+            .push(agenc_ircd_domain::DurableMembership {
+                user_id,
+                account_id: Some(owner.account_id),
+                session_role: Role::Member,
+                effective_role: Role::Owner,
+                membership_revision: original.revision,
+                joined_at: original.created_at,
+            });
+        original.invites.push(agenc_ircd_domain::DurableInvite {
+            invite_id: InviteId::from_bytes([173; 16]),
+            target: Principal::Account(owner.account_id),
+            inviter: user_id,
+            creation_revision: original.revision,
+            expires_at_utc: UtcSecond::from_unix_seconds(600),
+        });
+        original.e2ee_removal_pending.push(user_id);
+        let key = KeyDeriver::channel_key(original.channel_id)?;
+        let recovered = restored_credential_test_record(
+            TableId::Channel,
+            &key,
+            &channel_value(&original, original.revision.get())?,
+            agenc_ircd_storage::StorageConstructionAction::RestoreChannel,
+        )?;
+        let channel = ChannelRecordBody::decode(recovered.body())?;
+        assert_eq!(channel.revision.get(), original.revision.get() + 1);
+        assert_eq!(channel.role_grants, original.role_grants);
+        let restored = DomainState::restore_authoritative(
+            Revision::new(0).map_err(|_| RuntimeError::InvalidValue)?,
+            vec![owner],
+            Vec::new(),
+            vec![channel],
+            Vec::new(),
+            MonotonicTick::from_ticks(0),
+            UtcSecond::from_unix_seconds(1),
+        )
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        let channel = restored
+            .durable_channel(original.channel_id)
+            .ok_or(RuntimeError::InvalidValue)?;
+        assert!(channel.memberships.is_empty());
+        assert!(channel.invites.is_empty());
+        assert!(channel.e2ee_removal_pending.is_empty());
+        Ok(())
+    }
+
+    fn restored_credential_test_record(
+        table: TableId,
+        key: &StoredKey,
+        value: &PersistentRecordValue,
+        action: agenc_ircd_storage::StorageConstructionAction,
+    ) -> Result<PersistentRecordValue, RuntimeError> {
+        use agenc_ircd_storage::{
+            ConstructionSourceRecord, ConstructionTransformer, RecoveryTransformV1, SealedRecord,
+            StorageConstructionKind, StorageConstructionPlanEntry, StorageConstructionSource,
+            StorageConstructionSourceKind,
+        };
+        let sealed = seal(table, key, value, 163)?;
+        let source = StorageConstructionSource::new(
+            StorageConstructionSourceKind::BackupRecord,
+            table,
+            key.clone(),
+            1,
+            SealedRecord::decode(&sealed)?.record_id()?,
+            1,
+        )?;
+        let opened = ConstructionSourceRecord::open(
+            &source,
+            &sealed,
+            &StorageMasterKey::from_bytes(MASTER_BYTES),
+            binding(),
+            1,
+        )?;
+        let entry = StorageConstructionPlanEntry::new(
+            StorageConstructionKind::Restore,
+            vec![source],
+            table,
+            key.clone(),
+            1,
+            action,
+            0,
+        )?;
+        let restored = RecoveryTransformV1::new(
+            agenc_ircd_types::RecoveryEpoch::from_bytes([164; 16]),
+            agenc_ircd_crypto::StorageDigest::from_bytes([165; 32]),
+        )
+        .transform(StorageConstructionKind::Restore, &entry, &[opened])?;
+        Ok(PersistentRecordValue::decode(table, &restored)?)
     }
 
     #[test]

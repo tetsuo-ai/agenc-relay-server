@@ -1159,10 +1159,11 @@ impl AdminOwner {
             let Some(owned) = self.sessions.get_mut(&generation) else {
                 return;
             };
+            let was_authenticated = owned.session.operator().is_some();
             (
                 owned.session.accept_line(line, now, &self.registry),
                 owned.purpose,
-                owned.session.operator().is_some(),
+                was_authenticated,
             )
         };
         match outcome {
@@ -2516,7 +2517,7 @@ fn confirmation_target(command: &AdminCommand) -> Option<AdminTarget> {
         AdminCommand::AccountSuspend { account, .. } => Some(AdminTarget::Account(*account)),
         AdminCommand::ChannelHistoryPurge { channel, .. } => Some(AdminTarget::Channel(*channel)),
         // A peer has no domain revision; the durable deny confirms against
-        // the state generation like the process actions do.
+        // the live process target, within the bound admin session authority.
         AdminCommand::Restart(_) | AdminCommand::Die(_) | AdminCommand::PeerQuarantine { .. } => {
             Some(AdminTarget::Process)
         }
@@ -3031,6 +3032,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn command_rejection_keeps_its_authenticated_observation_category()
+    -> Result<(), RuntimeError> {
+        use crate::observe::log::FileLogOwner;
+        use crate::observe::metrics::{LabelSet, MetricKey, MetricLabel, MetricName, MetricsView};
+
+        let directory = BackupTestDirectory::create()?;
+        let correlation = Arc::new(CorrelationSource::new(10));
+        let metrics = Arc::new(MetricsRegistry::new());
+        let (log_owner, log) = FileLogOwner::start(
+            &directory.0,
+            LogRetention::DEFAULT,
+            LogFilter::new(Severity::Debug),
+            binding().server_id,
+            Arc::clone(&correlation),
+        )
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        let observer = Arc::new(RuntimeObserver::new(
+            binding().server_id,
+            SystemMonotonicClock::start(),
+            correlation,
+            log,
+            Arc::clone(&metrics),
+        ));
+        let mut owner = lifecycle_owner()?;
+        owner.registry = all_permissions_registry()?;
+        owner.observer = Some(observer);
+        let root = CancellationToken::root();
+        let token = ConfirmationToken::from_bytes([42; 16]);
+        let cases = [
+            (false, b"OPER invalid proof\r\n".to_vec()),
+            (true, signed_line(0, "DIE :resync")?),
+            (true, signed_line(1, "VERSION")?),
+            (true, confirmed_line(0, "DIE resync", &token)?),
+        ];
+        for (index, (authenticated, line)) in cases.into_iter().enumerate() {
+            let generation = ConnectionGeneration::new(
+                u64::try_from(index).map_err(|_| RuntimeError::InvalidValue)? + 1,
+            );
+            let (sender, mut output) = mpsc::channel(ADMIN_OUTPUT_CAPACITY);
+            owner.open(
+                generation,
+                challenge(),
+                PeerIdentity::Local {
+                    uid: 1000,
+                    gid: 1000,
+                },
+                AdminOutput::new(sender),
+            );
+            let challenge = output.recv().await.ok_or(RuntimeError::InvalidValue)?;
+            assert_eq!(challenge.close, None);
+            if authenticated {
+                owner.line(generation, &oper_line()?, &root).await;
+            }
+            owner.line(generation, &line, &root).await;
+            let rejection = output.recv().await.ok_or(RuntimeError::InvalidValue)?;
+            assert_eq!(rejection.close, Some(CloseReason::ProtocolError));
+        }
+        let key = MetricKey {
+            name: MetricName::CommandsHandled,
+            labels: LabelSet::new(&[
+                MetricLabel::CommandClass(CommandClass::Administration),
+                MetricLabel::ResultClass(ResultClass::Rejected),
+            ])?,
+        };
+        assert_eq!(
+            metrics.snapshot(MetricsView::Operator).counters,
+            vec![(key, 3)]
+        );
+        drop(owner);
+        assert_eq!(log_owner.shutdown().await?, 0);
+        let logs = admin_observation_logs(&directory)?;
+        assert_eq!(logs.matches("admin_rejected").count(), 1);
+        assert_eq!(logs.matches("authentication_failed").count(), 1);
+        assert_eq!(logs.matches("admin_authenticated").count(), 3);
+        assert_eq!(logs.matches("admin_action").count(), 3);
+        Ok(())
+    }
+
+    fn admin_observation_logs(directory: &BackupTestDirectory) -> Result<String, RuntimeError> {
+        let entries =
+            fs::read_dir(directory.0.join("logs")).map_err(|_| RuntimeError::InvalidValue)?;
+        let mut logs = String::new();
+        for entry in entries.take(4) {
+            let path = entry.map_err(|_| RuntimeError::InvalidValue)?.path();
+            if path.extension().is_some_and(|extension| extension == "log") {
+                logs.push_str(&fs::read_to_string(path).map_err(|_| RuntimeError::InvalidValue)?);
+            }
+        }
+        Ok(logs)
+    }
+
+    #[tokio::test]
     async fn owner_answers_only_bounded_pre_auth_liveness() -> Result<(), RuntimeError> {
         let (port, inbox) = admin_transport_channel(binding());
         let (_lifecycle, lifecycle_inbox) = admin_lifecycle_channel();
@@ -3494,7 +3587,7 @@ mod tests {
         );
 
         // PEER QUARANTINE is a confirmed action: the first submission binds a
-        // token to the state generation, the repeat runs it, and the durable
+        // token to the process target, the repeat runs it, and the durable
         // deny goes to the state core between its two records.
         let quarantine = format!("PEER QUARANTINE {PEER} :deny now");
         port.line(generation, signed_line(2, &quarantine)?, &root)

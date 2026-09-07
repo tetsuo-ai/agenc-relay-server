@@ -261,3 +261,22 @@ logical storage effects rather than nonce-dependent ciphertext bytes. Existing
 history databases retain their documented validation and cleanup behavior.
 Historical conformance manifests continue to describe only their recorded
 source commits. Stage 09 completion requires a new exact-source checkpoint.
+
+## 8. Stage 10 client directory reply corrections
+
+Production qualification found that Appendix A.2 omitted numeric 263 for
+temporary command refusal, numeric 302 for the required USERHOST command,
+and numerics 730 through 734 for the required MONITOR command. The registry
+now includes these replies with their pinned
+Modern IRC and IRCv3 meanings. USERHOST exposes only the visible session's
+ephemeral public cloak. MONITOR status applies the same presence visibility
+rules as ISON, while its list contains the requester's own subscriptions.
+This corrects the client reply registry. The federation object schema,
+federation profile hashes, and persistent record format are unchanged.
+
+WHOWAS also lacked numeric 314 and any retention implementation. Its reply
+uses only the fields Section 14.5 permits, with the public account label in
+place of a realname. The retained cloak can authorize a historical nickname
+only while it identifies a currently visible live session. A record whose
+session has disconnected is hidden; the daemon retains no historical audience
+or account identifier and grants no authority based on a public label.

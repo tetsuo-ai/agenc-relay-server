@@ -56,7 +56,9 @@ use crate::state_core::{PeerQuarantineRefusal, StateCoreContext};
 use crate::sync::Arc;
 use agenc_ircd_e2ee::federation::frames::CompanionFrame;
 
-pub(crate) use accounts::{InFlightCarrier, RemoteAccountWork, challenge_object};
+pub(crate) use accounts::{
+    InFlightCarrier, RemoteAccountWork, RemoteSessionGrant, challenge_object,
+};
 pub(crate) use request::{FreshRequest, PendingCrypto};
 
 /// Requests queued behind one link's in-flight crypto continuation; the
@@ -180,6 +182,7 @@ enum PendingCommit {
         peer: ServerId,
         link: LinkId,
         frame: FederationFrame,
+        closed_carrier: Option<crate::connection::ConnectionGeneration>,
         _charge: Option<IngressCharge>,
     },
     OriginExpired {
@@ -1226,6 +1229,21 @@ impl FederationCoordinator {
         true
     }
 
+    fn publish_origin_ack(
+        &mut self,
+        context: &mut StateCoreContext,
+        peer: ServerId,
+        link: LinkId,
+        frame: FederationFrame,
+        closed_carrier: Option<crate::connection::ConnectionGeneration>,
+    ) {
+        if let Some(generation) = closed_carrier {
+            self.retire_remote_carrier(generation);
+        }
+        let _live = self.send_frame(context, link, peer, &frame);
+        origin::continue_ready(self, context, peer);
+    }
+
     fn publish_origin_ready(
         &mut self,
         context: &mut StateCoreContext,
@@ -1262,19 +1280,23 @@ impl FederationCoordinator {
         }
     }
 
-    /// Finishes the batch that just committed and delivers its events.
-    pub fn batch_applied(&mut self, context: &mut StateCoreContext) {
-        let events = context.take_outbound_events();
-        self.settle_remote_results(context);
+    fn take_pending_for_receipt(&mut self, context: &StateCoreContext) -> Option<PendingCommit> {
         // Account completion runs earlier in the router's callback and can
         // stage a new outer result. That result does not belong to this receipt.
-        let pending = if matches!(self.pending.as_ref(), Some(PendingCommit::Request { staged_after, .. })
+        if matches!(self.pending.as_ref(), Some(PendingCommit::Request { staged_after, .. })
             if context.head().storage_commit_sequence <= *staged_after)
         {
             None
         } else {
             self.pending.take()
-        };
+        }
+    }
+
+    /// Finishes the batch that just committed and delivers its events.
+    pub fn batch_applied(&mut self, context: &mut StateCoreContext) {
+        let events = context.take_outbound_events();
+        self.settle_remote_results(context);
+        let pending = self.take_pending_for_receipt(context);
         match pending {
             Some(PendingCommit::History(prepared)) => history::committed(self, context, *prepared),
             Some(PendingCommit::HistoryCleanup(cleanup)) => {
@@ -1286,11 +1308,12 @@ impl FederationCoordinator {
                 }
             }
             Some(PendingCommit::OriginAck {
-                peer, link, frame, ..
-            }) => {
-                let _live = self.send_frame(context, link, peer, &frame);
-                origin::continue_ready(self, context, peer);
-            }
+                peer,
+                link,
+                frame,
+                closed_carrier,
+                ..
+            }) => self.publish_origin_ack(context, peer, link, frame, closed_carrier),
             Some(PendingCommit::OriginReady { peer, link }) => {
                 self.publish_origin_ready(context, peer, link)
             }

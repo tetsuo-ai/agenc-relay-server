@@ -224,9 +224,10 @@ fn apply_projection(
         .map_err(|_| Violation::Consistency)?;
     super::render::remember_nicknames(edge, &projected);
     let mut fanout = super::render::EventFanout::default();
-    super::render::render_event(
+    let join_echo = super::render::render_event(
         edge,
         context,
+        &header,
         &projected,
         &outcome,
         label.as_deref(),
@@ -262,6 +263,7 @@ fn apply_projection(
         header: Box::new(header),
         completion,
         coverage,
+        join_echo: join_echo.map(Box::new),
     };
     stage_rows(
         edge,

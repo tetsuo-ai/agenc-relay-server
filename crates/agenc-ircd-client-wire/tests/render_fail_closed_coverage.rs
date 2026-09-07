@@ -166,6 +166,9 @@ fn stage_two_numerics_reject_noncanonical_middle_and_trailing_shapes() -> Result
 fn stage_six_numerics_accept_only_their_registered_parameter_shapes() {
     for (code, middle, trailing) in [
         (221, vec!["+i"], None),
+        (263, vec!["PING"], Some("Please try again")),
+        (302, vec![], Some("nick=+public@cloak")),
+        (302, vec![], Some("")),
         (303, vec![], Some("")),
         (311, vec!["nick", "user", "host", "*"], Some("Real Name")),
         (321, vec!["Channel"], Some("Users Name")),
@@ -187,6 +190,11 @@ fn stage_six_numerics_accept_only_their_registered_parameter_shapes() {
         ),
         (472, vec!["x"], Some("Unknown mode")),
         (482, vec!["#chat"], Some("Permission denied for channel")),
+        (730, vec![], Some("online")),
+        (731, vec![], Some("offline")),
+        (732, vec![], Some("listed")),
+        (733, vec![], Some("End of MONITOR list")),
+        (734, vec!["100", "alice,bob"], Some("Monitor list is full")),
     ] {
         assert!(
             numeric_reply("server", code, "requester", &middle, trailing).is_ok(),
@@ -196,6 +204,10 @@ fn stage_six_numerics_accept_only_their_registered_parameter_shapes() {
 
     for (code, middle, trailing) in [
         (221, vec!["i"], None),
+        (263, vec![], Some("Please try again")),
+        (263, vec!["PING"], None),
+        (302, vec![], None),
+        (302, vec!["nick"], Some("nick=+public@cloak")),
         (303, vec![], None),
         (311, vec!["nick", "user", "host"], Some("Real Name")),
         (321, vec![], Some("Users Name")),
@@ -213,6 +225,13 @@ fn stage_six_numerics_accept_only_their_registered_parameter_shapes() {
         (441, vec!["nick"], Some("They are not on that channel")),
         (472, vec!["xx"], Some("Unknown mode")),
         (482, vec!["#chat"], None),
+        (730, vec!["online"], Some("online")),
+        (731, vec![], None),
+        (732, vec![], Some("")),
+        (733, vec!["extra"], Some("End of MONITOR list")),
+        (734, vec!["0", "alice"], Some("Monitor list is full")),
+        (734, vec!["many", "alice"], Some("Monitor list is full")),
+        (734, vec!["100"], Some("Monitor list is full")),
     ] {
         assert_eq!(
             numeric_reply("server", code, "requester", &middle, trailing).err(),
@@ -310,6 +329,23 @@ fn labeled_response_validates_correlation_before_rendering_wrappers() -> Result<
             .err(),
             Some(RenderError::InvalidCorrelation)
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn whowas_numeric_requires_four_public_fields_and_a_nonempty_label_placeholder()
+-> Result<(), Box<dyn Error>> {
+    let fields = ["oldnick", "publicuser", "publichost", "*", "extra"];
+    for count in [0, 1, 2, 3, 5] {
+        let fields = fields.get(..count).ok_or("WHOWAS fixture field count")?;
+        assert!(numeric_reply("server.test", 314, "requester", fields, Some("*")).is_err());
+    }
+    for trailing in [None, Some("")] {
+        assert!(numeric_reply("server.test", 314, "requester", &fields[..4], trailing).is_err());
+    }
+    for trailing in [Some("*"), Some("Public Label")] {
+        assert!(numeric_reply("server.test", 314, "requester", &fields[..4], trailing).is_ok());
     }
     Ok(())
 }

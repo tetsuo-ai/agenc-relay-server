@@ -491,6 +491,9 @@ fn run_operation(
             Ok(())
         }
         ConvertedRequest::AccountService { opcode, envelope } => {
+            if context.is_quiescing() {
+                return Err(Violation::Phase);
+            }
             coordinator.queue_remote_carrier(link, peer, fresh, opcode, envelope)
         }
         ConvertedRequest::SessionClose { user_id, kind } => {
@@ -646,19 +649,65 @@ fn finish_query_decision(
                     DomainError::ServerBusy,
                 );
             };
-            stage_with_plan(
+            let result = directory_mutation_result(context, &fresh)?;
+            stage_with_plan_and_writes(
                 coordinator,
                 context,
                 link,
                 peer,
                 fresh,
-                ResultArm::NoContent,
+                result,
                 plan,
                 fanout,
+                Vec::new(),
             )
+            .map(|_| ())
         }
         other => finish_decision(coordinator, context, link, peer, fresh, other),
     }
+}
+
+fn directory_mutation_result(
+    context: &mut StateCoreContext,
+    fresh: &FreshRequest,
+) -> Result<(ResultArm, Vec<agenc_ircd_federation_wire::SchemaObject>), Violation> {
+    let Some(agenc_ircd_domain::CanonicalCommandView::Presence(
+        agenc_ircd_domain::PresenceCommand::MonitorAdd(targets),
+    )) = fresh
+        .command
+        .as_ref()
+        .map(agenc_ircd_domain::CanonicalCommand::view)
+    else {
+        return Ok((ResultArm::NoContent, Vec::new()));
+    };
+    let bound = fresh.bound.ok_or(Violation::Codec)?;
+    let nickname = crate::client_render::requester_nickname(context, bound.user_id);
+    let frames = crate::query_render::monitor_status_frames(
+        context.domain(),
+        context.server_prefix(),
+        &nickname,
+        bound.user_id,
+        targets,
+    )
+    .map_err(|_| Violation::Ceiling)?;
+    let replies = frames
+        .iter()
+        .map(crate::federation::codec::results::reply_object)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| Violation::Codec)?;
+    let mut snapshot_token = [0; 32];
+    context
+        .entropy_mut()
+        .fill_exact(&mut snapshot_token)
+        .map_err(|_| Violation::Ceiling)?;
+    Ok((
+        ResultArm::ReplyPage {
+            snapshot_token,
+            page_sequence: 0,
+            next_cursor: None,
+        },
+        replies,
+    ))
 }
 
 fn open_session(
@@ -669,11 +718,10 @@ fn open_session(
     fresh: FreshRequest,
     seed: SessionSeed,
 ) -> Result<(), Violation> {
-    open_session_with_writes(coordinator, context, link, peer, fresh, seed, Vec::new())
+    open_session_with_writes(coordinator, context, link, peer, fresh, seed, None).map(|_| ())
 }
 
-/// Opens a session; `writes` are the account-service rows that join the
-/// transaction, the consumed pre-registration grant of a remote client.
+/// Opens a session with its consumed grant and original authentication instant.
 pub(super) fn open_session_with_writes(
     coordinator: &mut FederationCoordinator,
     context: &mut StateCoreContext,
@@ -681,8 +729,8 @@ pub(super) fn open_session_with_writes(
     peer: ServerId,
     fresh: FreshRequest,
     seed: SessionSeed,
-    writes: Vec<AccountServiceDurableWrite>,
-) -> Result<(), Violation> {
+    grant: Option<super::accounts::RemoteSessionGrant>,
+) -> Result<bool, Violation> {
     // The result names the account's current revision; the edge's decoder
     // requires it alongside the session generation (result.session_registered).
     let account = seed.account_id.map(|account| {
@@ -699,9 +747,17 @@ pub(super) fn open_session_with_writes(
         account,
         resulting_state_generation: 0,
     };
-    let plan = match context.domain().plan_session_opened(seed) {
+    let planned = match grant.as_ref() {
+        Some(grant) => context
+            .domain()
+            .plan_authenticated_session_opened(seed, grant.authenticated_at),
+        None => context.domain().plan_session_opened(seed),
+    };
+    let plan = match planned {
         Ok(plan) => plan,
-        Err(error) => return finish_failed(coordinator, context, link, peer, fresh, error),
+        Err(error) => {
+            return finish_failed(coordinator, context, link, peer, fresh, error).map(|()| false);
+        }
     };
     let generation = plan.resulting_revision().get();
     let arm = ResultArm::SessionRegistered(SessionRegistered {
@@ -717,10 +773,10 @@ pub(super) fn open_session_with_writes(
         link,
         peer,
         fresh,
-        arm,
+        (arm, Vec::new()),
         plan,
         fanout,
-        writes,
+        grant.map_or_else(Vec::new, |grant| grant.writes),
     )
 }
 
@@ -927,6 +983,13 @@ fn finish_decision(
             let (Some(bound), Some(command)) = (fresh.bound, fresh.command.as_ref()) else {
                 return Err(Violation::Codec);
             };
+            if matches!(
+                command.view(),
+                agenc_ircd_domain::CanonicalCommandView::Account(_)
+            ) {
+                coordinator.queue_remote_account_mutation(link, peer, fresh, plan);
+                return Ok(());
+            }
             let Ok(fanout) =
                 crate::mutation_render::render_mutation(context, bound, None, command, &plan)
             else {
@@ -977,59 +1040,69 @@ fn stage_with_plan(
     plan: agenc_ircd_domain::MutationPlan,
     fanout: crate::state_core::fanout::FanoutRequest,
 ) -> Result<(), Violation> {
+    let replies = match (fresh.bound, fresh.command.as_ref()) {
+        (Some(bound), Some(command)) => {
+            crate::mutation_render::mutation_result_replies(context, bound, command, &plan)
+                .map_err(internal_violation)?
+        }
+        _ => Vec::new(),
+    };
     stage_with_plan_and_writes(
         coordinator,
         context,
         link,
         peer,
         fresh,
-        arm,
+        (arm, replies),
         plan,
         fanout,
         Vec::new(),
     )
+    .map(|_| ())
 }
 
 // agenc-review: allow owner=runtime reviewed=2026-09-03 reason=a staged request carries its link peer request result plan fanout and joined account rows to one durable staging boundary
 #[allow(clippy::too_many_arguments)]
-fn stage_with_plan_and_writes(
+pub(super) fn stage_with_plan_and_writes(
     coordinator: &mut FederationCoordinator,
     context: &mut StateCoreContext,
     link: LinkId,
     peer: ServerId,
     fresh: FreshRequest,
-    arm: ResultArm,
+    result: (ResultArm, Vec<agenc_ircd_federation_wire::SchemaObject>),
     plan: agenc_ircd_domain::MutationPlan,
     fanout: crate::state_core::fanout::FanoutRequest,
     extra_writes: Vec<AccountServiceDurableWrite>,
-) -> Result<(), Violation> {
-    let completion_event_id = fresh_event_id(context)?;
+) -> Result<bool, Violation> {
+    let (arm, replies) = result;
+    let completion_event_id = match &arm {
+        ResultArm::Committed { .. } | ResultArm::SessionRegistered(_) => {
+            Some(fresh_event_id(context)?)
+        }
+        _ => None,
+    };
     let generation = plan.resulting_revision().get();
-    let encoded = encode_result(
-        coordinator,
-        &fresh,
-        &arm,
-        Some(completion_event_id),
-        Vec::new(),
-    )?;
+    let encoded = encode_result(coordinator, &fresh, &arm, completion_event_id, replies)?;
     let mut writes = request_rows(
         coordinator,
         &fresh,
         &encoded,
-        Some(completion_event_id),
+        completion_event_id,
         generation,
         generation,
     )?;
     writes.extend(extra_writes);
     context.set_mutation_context(fresh.mutation.clone());
-    context.set_request_binding(RequestBinding {
-        home: peer,
-        correlation: RequestCorrelation {
-            replay_key: fresh.header.replay_key,
-            request_id: fresh.header.request_id,
-        },
-        completion_event_id,
-    });
+    if let Some(completion_event_id) = completion_event_id {
+        context.set_request_binding(RequestBinding {
+            home: peer,
+            correlation: RequestCorrelation {
+                replay_key: fresh.header.replay_key,
+                request_id: fresh.header.request_id,
+            },
+            completion_event_id,
+        });
+    }
     match context.stage_durable_with_account_service(plan, fanout, None, 0, writes) {
         Ok(crate::state_core::StageAccepted::Staged { .. }) => {
             coordinator.pending = Some(PendingCommit::Request {
@@ -1044,7 +1117,7 @@ fn stage_with_plan_and_writes(
                 header: fresh.header,
                 _charge: fresh.charge,
             });
-            Ok(())
+            Ok(true)
         }
         Ok(crate::state_core::StageAccepted::AppliedInStep(_)) => Err(Violation::Codec),
         Err(_) => {
@@ -1060,6 +1133,7 @@ fn stage_with_plan_and_writes(
                 fresh,
                 DomainError::ServerBusy,
             )
+            .map(|()| false)
         }
     }
 }

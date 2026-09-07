@@ -1887,7 +1887,7 @@ fn exercise_client(fixture: &LiveFixture) -> TestResult<IrcClient> {
         "LiveUser",
     )?;
     assert_contains(
-        &client.send_until("USERHOST LiveUser", " 303 ")?,
+        &client.send_until("USERHOST LiveUser", " 302 ")?,
         "LiveUser",
     )?;
     assert_contains(&client.send_until("MODE LiveUser", " 221 ")?, " 221 ")?;
@@ -2467,8 +2467,8 @@ fn production_daemon_account_edges_cover_replay_mismatch_logout_and_deletion() -
     )?;
     drop(carrier);
 
-    // A complete authentication, registration, logout, re-authentication,
-    // and account deletion with a wrong token first.
+    // Authentication and logout use their own connection so the deletion
+    // exercise has its two permitted same-connection SASL attempts.
     let mut client = IrcClient::connect(&fixture)?;
     client.negotiate_sasl()?;
     // Account control notes are standard replies.
@@ -2477,42 +2477,180 @@ fn production_daemon_account_edges_cover_replay_mismatch_logout_and_deletion() -
     authenticate_live_account(&mut client, &fixture, ACCOUNT_PASSWORD, 80, account_id)?;
     let registered = client.complete_registration("EdgeUser")?;
     assert_contains(&registered, " 001 EdgeUser ")?;
-    let _logout = send_and_sync(&mut client, &["AUTHENTICATE *".to_owned()])?;
+    client.send("AUTHENTICATE *")?;
+    assert_eq!(
+        client.send_until("PING :logout-complete", " PONG ")?,
+        [":node.test PONG :logout-complete"]
+    );
+    client.send("QUIT :logout complete")?;
+    assert_eq!(
+        read_line(&mut client.reader)?,
+        ":node.test ERROR :logout complete"
+    );
+    let mut extra = [0_u8; 1];
+    assert_eq!(
+        client.reader.read(&mut extra)?,
+        0,
+        "logout connection did not end cleanly"
+    );
+    drop(client);
+
+    let mut client = IrcClient::connect(&fixture)?;
+    client.negotiate_sasl()?;
+    let acknowledged = client.send_until("CAP REQ :standard-replies", " CAP * ACK ")?;
+    assert_contains(&acknowledged, "standard-replies")?;
     authenticate_live_account(&mut client, &fixture, ACCOUNT_PASSWORD, 82, account_id)?;
-    client.send("ACCT DELETE START")?;
-    let challenge = read_leniently(&mut client, |line| line.contains("DELETE_CHALLENGE"));
-    let token = challenge
-        .iter()
-        .find_map(|line| {
-            line.split_whitespace()
-                .skip_while(|field| *field != "DELETE_CHALLENGE")
-                .nth(1)
-                .map(str::to_owned)
-        })
-        .ok_or_else(|| failure(format!("no deletion challenge: {challenge:?}")))?;
-    client.send("ACCT DELETE CONFIRM AAAAAAAAAAAAAAAAAAAAAA")?;
-    let wrong = read_leniently(&mut client, |line| {
-        line.contains("FAIL ") || line.contains(" ACCT ")
-    });
-    assert!(!wrong.is_empty(), "wrong deletion token produced no reply");
-    client.send(&format!("ACCT DELETE CONFIRM {token}"))?;
-    let deleted = read_leniently(&mut client, |line| line.contains("ERROR "));
-    assert!(!deleted.is_empty(), "deletion produced no closing lines");
+    assert_contains(
+        &client.complete_registration("DeleteUser")?,
+        " 001 DeleteUser ",
+    )?;
+    let token = account_deletion_challenge(&mut client)?;
+    let mut wrong_token = decode_fixed_base64url::<16>(token.as_bytes())?;
+    let first = wrong_token
+        .first_mut()
+        .ok_or_else(|| failure("empty deletion token"))?;
+    *first ^= 1;
+    client.send(&format!(
+        "ACCT DELETE CONFIRM {}",
+        encode_base64url(&wrong_token)
+    ))?;
+    assert_eq!(
+        read_line_for(&mut client.reader, "wrong deletion token refusal")?,
+        ":node.test FAIL ACCT BAD_STATE :Command is not valid in the current state"
+    );
+    assert_eq!(
+        client.send_until("PING :deletion-refusal-survives", " PONG ")?,
+        [":node.test PONG :deletion-refusal-survives"]
+    );
+    authenticate_live_account(&mut client, &fixture, ACCOUNT_PASSWORD, 84, account_id).map_err(
+        |error| {
+            failure(format!(
+                "fresh authentication after wrong deletion token: {error}"
+            ))
+        },
+    )?;
+    let fresh_token = account_deletion_challenge(&mut client)?;
+    assert_ne!(
+        fresh_token, token,
+        "fresh authentication reused a consumed challenge"
+    );
+    client.send(&format!("ACCT DELETE CONFIRM {fresh_token}"))?;
+    require_committed_account_deletion(&mut client.reader)?;
     drop(client);
 
     // The deleted account can no longer authenticate.
     let mut late = IrcClient::connect(&fixture)?;
     late.negotiate_sasl()?;
-    let (late_start, _token, _state, _rng) =
-        authentication_start_envelope(&fixture, ACCOUNT_PASSWORD, 90)?;
-    late.begin_sasl()?;
-    let _outcome = sasl_exchange_lines(&mut late, &late_start)?;
+    require_deleted_account_login_refusal(authenticate_live_account(
+        &mut late,
+        &fixture,
+        ACCOUNT_PASSWORD,
+        90,
+        account_id,
+    ))?;
     drop(late);
 
     let mut admin = AdminClient::connect(&fixture)?;
     admin.confirm_process("DIE :edge shutdown")?;
     assert!(daemon.wait()?.success());
     Ok(())
+}
+
+fn account_deletion_challenge(client: &mut IrcClient) -> TestResult<String> {
+    client.send("ACCT DELETE START")?;
+    let line = read_line_for(&mut client.reader, "deletion challenge")?;
+    let token = line
+        .strip_prefix(":node.test NOTE ACCT DELETE_CHALLENGE ")
+        .and_then(|line| line.strip_suffix(" :Confirm account deletion"))
+        .ok_or_else(|| failure(format!("unexpected deletion challenge: {line:?}")))?;
+    let _validated = decode_fixed_base64url::<16>(token.as_bytes())?;
+    Ok(token.to_owned())
+}
+
+fn require_committed_account_deletion(reader: &mut impl BufRead) -> TestResult {
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    if line != ":node.test NOTE ACCT UPDATED :Account setting updated\r\n" {
+        return Err(failure(format!(
+            "deletion omitted its committed NOTE: {line:?}"
+        )));
+    }
+    let mut extra = [0_u8; 1];
+    if reader.read(&mut extra)? != 0 {
+        return Err(failure(
+            "account deletion returned output after its final NOTE",
+        ));
+    }
+    Ok(())
+}
+
+fn require_deleted_account_login_refusal(result: TestResult) -> TestResult {
+    match result {
+        Err(error)
+            if matches!(
+                error.downcast_ref::<opaque_ke::errors::ProtocolError>(),
+                Some(opaque_ke::errors::ProtocolError::InvalidLoginError)
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error),
+        Ok(()) => Err(failure("deleted account authenticated successfully")),
+    }
+}
+
+struct DeletionEofFault(io::ErrorKind);
+
+impl io::Read for DeletionEofFault {
+    fn read(&mut self, _bytes: &mut [u8]) -> io::Result<usize> {
+        Err(self.0.into())
+    }
+}
+
+#[test]
+fn local_deletion_evidence_rejects_refusal_replies_and_successful_logins() -> TestResult {
+    let note = ":node.test NOTE ACCT UPDATED :Account setting updated\r\n";
+    for transcript in [
+        ":node.test FAIL ACCT BAD_STATE :Command is not valid in the current state\r\n".to_owned(),
+        ":node.test ERROR :Connection closed\r\n".to_owned(),
+        format!("{note}:node.test ERROR :Connection closed\r\n"),
+        String::new(),
+    ] {
+        assert!(require_committed_account_deletion(&mut io::Cursor::new(transcript)).is_err());
+    }
+    require_committed_account_deletion(&mut io::Cursor::new(note))?;
+    for kind in [
+        io::ErrorKind::ConnectionReset,
+        io::ErrorKind::BrokenPipe,
+        io::ErrorKind::UnexpectedEof,
+        io::ErrorKind::TimedOut,
+    ] {
+        let stream = io::Cursor::new(note).chain(DeletionEofFault(kind));
+        assert!(require_committed_account_deletion(&mut BufReader::new(stream)).is_err());
+    }
+    assert!(require_deleted_account_login_refusal(Ok(())).is_err());
+    assert!(
+        require_deleted_account_login_refusal(Err(failure(" 904 SASL authentication failed")))
+            .is_err()
+    );
+    assert!(
+        require_deleted_account_login_refusal(Err(Box::new(io::Error::from(
+            io::ErrorKind::ConnectionReset
+        ))))
+        .is_err()
+    );
+    let live = AccountId::from_random(AccountRandomId::from_bytes([181; 16]));
+    let other = AccountId::from_random(AccountRandomId::from_bytes([182; 16]));
+    let completion = Completion::committed(
+        agenc_ircd_types::TransactionId::from_bytes([183; 16]),
+        live,
+        1,
+    );
+    let mismatched = committed_account(completion, Some(other)).map(|_| ());
+    assert!(require_deleted_account_login_refusal(mismatched).is_err());
+    require_deleted_account_login_refusal(Err(Box::new(
+        opaque_ke::errors::ProtocolError::<std::convert::Infallible>::InvalidLoginError,
+    )))
 }
 
 #[test]

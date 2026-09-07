@@ -42,6 +42,15 @@ use agenc_ircd_e2ee::federation::frames::CompanionFrame;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
+#[path = "join_results.rs"]
+mod join_results;
+
+#[path = "away_results.rs"]
+mod away_results;
+
+#[path = "account_shutdown.rs"]
+mod account_shutdown;
+
 const NETWORK: NetworkId = NetworkId::from_bytes([31; 32]);
 const COORDINATOR: ServerId = ServerId::from_bytes([32; 16]);
 const COORDINATOR_NAME: &str = "server.example";
@@ -2679,6 +2688,7 @@ async fn an_origin_acknowledgement_whose_batch_storage_refused_retires_the_link(
             generation: 1,
             object_id: None,
         },
+        closed_carrier: None,
         _charge: None,
     });
     coordinator.batch_rejected(context);
@@ -4634,6 +4644,340 @@ async fn resync_account_transaction_contains_its_exact_federation_response() -> 
     assert_eq!(
         record.result_object_id,
         *federation_object_id(&record.result_object).as_bytes()
+    );
+    Ok(())
+}
+
+/// Supplies a live origin to the staging boundary without running a client handshake.
+fn remote_account_staging_request(
+    coordinator: &mut FederationCoordinator,
+    context: &mut crate::state_core::StateCoreContext,
+) -> TestResult<(crate::federation::coordinator::FreshRequest, Edge)> {
+    let (inbox, _receiver) = mpsc::channel(1);
+    let edge = Edge::new(inbox, 50);
+    let origin = Origin::new(72);
+    let peer = edge.server_id;
+    coordinator.inbound(
+        context,
+        established(50, peer, edge.incarnation, edge.handle.clone()),
+    );
+    coordinator.origins.reset(peer, edge.incarnation);
+    let record = origin.record(&edge);
+    let bytes = record.to_object()?.encode_canonical()?.as_slice().to_vec();
+    let key = OriginKey {
+        home_server_id: peer,
+        server_incarnation: edge.incarnation,
+        origin_id: origin.id,
+    };
+    coordinator
+        .origins
+        .add(agenc_ircd_domain::federation::OriginDeclaration {
+            origin: key,
+            generation: 0,
+            previous_object_id: [0; 32],
+            binding: agenc_ircd_domain::federation::OriginBinding {
+                connection_id: record.connection_id,
+                connection_nonce: record.connection_nonce,
+            },
+            principal: agenc_ircd_domain::federation::OriginPrincipal::UNREGISTERED,
+            object_id: *federation_object_id(&bytes).as_bytes(),
+        })?;
+    coordinator.origin_objects.insert(key, bytes);
+    coordinator.origins.ready(peer, edge.incarnation)?;
+    let request_id = RequestId::from_bytes([73; 16]);
+    let request_object_id = FederationHash32::from_bytes([74; 32]);
+    let fresh = crate::federation::coordinator::FreshRequest {
+        key: OperationKey {
+            origin: key,
+            generation: 0,
+            sequence: 0,
+        },
+        header: RequestHeader {
+            network_id: NETWORK,
+            replay_key: origin.replay_key(&edge),
+            request_id,
+            opcode: agenc_ircd_types::FederationOpcode::AccountSettings,
+        },
+        descriptor: OperationDescriptor {
+            addressed_server_id: COORDINATOR,
+            server_incarnation: edge.incarnation,
+            origin_id: origin.id,
+            origin_generation: 0,
+            operation_sequence: 0,
+            request_id,
+            object_id: request_object_id,
+        },
+        request_object_id,
+        bound: None,
+        command: Some(agenc_ircd_domain::CanonicalCommand::account(
+            agenc_ircd_domain::AccountCommand::DeleteConfirm(
+                agenc_ircd_types::AccountDeletionToken::from_bytes([75; 16]),
+            ),
+        )),
+        mutation: agenc_ircd_domain::federation::MutationContext::default(),
+        charge: None,
+    };
+    Ok((fresh, edge))
+}
+
+#[tokio::test]
+async fn a_refused_remote_deletion_cancels_its_account_authority_barrier() -> TestResult {
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let mut config = crate::test_support::account_service_config(
+        &fixture.identity,
+        &fixture.opaque,
+        fixture.key_state,
+    )?;
+    let context = fixture.context_mut()?;
+    let (account, generation) = crate::test_support::seed_account(context, 213, 1)?;
+    let session = crate::test_support::seed_session(
+        context,
+        215,
+        "delete-test",
+        Some((account, generation)),
+    )?;
+    let login_key = agenc_ircd_storage::LoginIndexStoredKey::new(
+        1,
+        agenc_ircd_crypto::LoginIndexDigest::from_storage_key([214; 32]),
+    )?
+    .encode()?;
+    config.live_login_keys.insert(account, login_key);
+    let mut accounts = crate::account_service::AccountServiceCoordinator::new(config)?;
+    let peer = ServerId::from_bytes([50; 16]);
+    let mut coordinator = standalone_coordinator(peer);
+    let (fresh, _edge) = remote_account_staging_request(&mut coordinator, context)?;
+    let deletion = context.domain().plan_account_deleted(account, generation)?;
+    let agenc_ircd_domain::PlanDecision::Mutation(other) =
+        crate::test_support::plan_live(context, session, &|| {
+            Ok(agenc_ircd_domain::CanonicalCommand::account(
+                agenc_ircd_domain::AccountCommand::Presence(
+                    agenc_ircd_domain::PresencePolicy::Public,
+                ),
+            ))
+        })?
+    else {
+        return Err("account update plan missing".into());
+    };
+    // Another admitted write owns the account in this batch. Neither the
+    // deletion nor its failure checkpoint can join that revision chain.
+    context
+        .stage_durable(
+            other,
+            crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())?,
+            None,
+            0,
+        )
+        .map_err(|error| format!("competing account write: {error:?}"))?;
+    let result = coordinator.execute_remote_account(
+        context,
+        &mut accounts,
+        LinkId::new(50),
+        peer,
+        Box::new(fresh),
+        Box::new(deletion),
+    );
+    assert_eq!(result, Err(Violation::Ceiling));
+    let owner = crate::connection::ConnectionGeneration::new(1 << 62);
+    assert!(
+        !accounts.registered_authority_fenced(context, owner),
+        "a refused mutation must not retain its account deletion barrier"
+    );
+    assert!(context.domain().account(account).is_some());
+    assert_eq!(coordinator.take_closed_remote_carriers(), vec![owner]);
+    assert!(coordinator.pending.is_none());
+    assert_eq!(context.pending_len(), 1);
+    let retry = crate::connection::ConnectionGeneration::new((1 << 62) + 1);
+    let _writes = accounts.begin_account_deletion(context, retry, account)?;
+    accounts.cancel_account_deletion(context, retry)?;
+    Ok(())
+}
+
+struct StagedRemoteDeletion {
+    fixture: StateCoreFixture,
+    coordinator: FederationCoordinator,
+    accounts: crate::account_service::AccountServiceCoordinator,
+    edge: Edge,
+    account: agenc_ircd_types::AccountId,
+    key: agenc_ircd_domain::federation::OperationKey,
+}
+
+async fn staged_remote_deletion() -> TestResult<StagedRemoteDeletion> {
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let mut config = crate::test_support::account_service_config(
+        &fixture.identity,
+        &fixture.opaque,
+        fixture.key_state,
+    )?;
+    let (account, generation, login_key) = persist_remote_deletion_account(&mut fixture).await?;
+    let context = fixture.context_mut()?;
+    let _session = crate::test_support::seed_session(
+        context,
+        215,
+        "delete-test",
+        Some((account, generation)),
+    )?;
+    config.live_login_keys.insert(account, login_key);
+    let mut accounts = crate::account_service::AccountServiceCoordinator::new(config)?;
+    let peer = ServerId::from_bytes([50; 16]);
+    let mut coordinator = standalone_coordinator(peer);
+    let (fresh, edge) = remote_account_staging_request(&mut coordinator, context)?;
+    let key = fresh.key;
+    let deletion = context.domain().plan_account_deleted(account, generation)?;
+    coordinator
+        .execute_remote_account(
+            context,
+            &mut accounts,
+            edge.link,
+            peer,
+            Box::new(fresh),
+            Box::new(deletion),
+        )
+        .map_err(|error| format!("stage remote deletion: {error:?}"))?;
+    let owner = crate::connection::ConnectionGeneration::new(1 << 62);
+    assert!(accounts.registered_authority_fenced(context, owner));
+    assert_eq!(context.pending_len(), 1);
+    assert!(context.domain().account(account).is_some());
+    Ok(StagedRemoteDeletion {
+        fixture,
+        coordinator,
+        accounts,
+        edge,
+        account,
+        key,
+    })
+}
+
+async fn persist_remote_deletion_account(
+    fixture: &mut StateCoreFixture,
+) -> TestResult<(
+    agenc_ircd_types::AccountId,
+    agenc_ircd_types::Generation,
+    agenc_ircd_storage::StoredKey,
+)> {
+    use agenc_ircd_storage::{LoginIndexStoredKey, LoginIndexValue, LoginIndexValueKind};
+    let credential = fixture.opaque.expose_fake_record_for_persistence().to_vec();
+    let context = fixture.context_mut()?;
+    let account = agenc_ircd_testkit::account_id(213);
+    let generation = agenc_ircd_testkit::generation(1)?;
+    let plan = context
+        .domain()
+        .plan_account_created(agenc_ircd_domain::AccountState::new(
+            account,
+            generation,
+            context.domain().revision(),
+        ))?;
+    let login_key = LoginIndexStoredKey::new(
+        1,
+        agenc_ircd_crypto::LoginIndexDigest::from_storage_key([214; 32]),
+    )?;
+    let login = LoginIndexValue::new(
+        &login_key,
+        LoginIndexValueKind::Live {
+            account_id: account,
+            opaque_credential_id: agenc_ircd_types::OpaqueCredentialId::from_bytes([216; 32]),
+        },
+    )?;
+    let credential = agenc_ircd_storage::PersistentRecordValue::new(
+        TableId::OpaqueRecord,
+        agenc_ircd_storage::LIVE_RECORD_KIND,
+        plan.resulting_revision().get(),
+        generation.get(),
+        None,
+        vec![agenc_ircd_storage::RecordReference::new(
+            TableId::Account,
+            crate::state_core::durable::KeyDeriver::account_key(account)?,
+        )?],
+        credential,
+    )?;
+    let writes = vec![
+        crate::state_core::durable::AccountServiceDurableWrite::put(
+            TableId::LoginIndex,
+            login_key.encode()?,
+            login.encode()?,
+        )?,
+        crate::state_core::durable::AccountServiceDurableWrite::put(
+            TableId::OpaqueRecord,
+            agenc_ircd_storage::StoredKey::new(account.to_text().into_bytes())?,
+            credential.encode()?,
+        )?,
+    ];
+    context
+        .stage_durable_with_account_service(
+            plan,
+            crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())?,
+            None,
+            0,
+            writes,
+        )
+        .map_err(|error| format!("seed durable account: {error:?}"))?;
+    fixture.commit_staged_batch().await?;
+    Ok((account, generation, login_key.encode()?))
+}
+
+#[tokio::test]
+async fn a_rejected_remote_deletion_releases_its_tombstone_and_carrier() -> TestResult {
+    let StagedRemoteDeletion {
+        mut fixture,
+        mut coordinator,
+        mut accounts,
+        edge: _edge,
+        account,
+        key,
+    } = staged_remote_deletion().await?;
+    let context = fixture.context_mut()?;
+    let owner = crate::connection::ConnectionGeneration::new(1 << 62);
+    let head = context.head();
+    // Deliver the same determinate storage refusal callback that the router
+    // receives. No domain plan or credential deletion has become visible.
+    coordinator.batch_rejected(context);
+    crate::remote_accounts::batch_settled(context, &mut accounts, &mut coordinator);
+    assert_eq!(context.head(), head);
+    assert!(context.domain().account(account).is_some());
+    assert!(!accounts.registered_authority_fenced(context, owner));
+    assert!(coordinator.take_rejected_deletion().is_none());
+    assert!(coordinator.remote_carrier_peer(owner).is_none());
+    assert!(!coordinator.retained.contains_key(&key));
+    // A fresh attempt must be able to reserve the same account and tombstone.
+    let retry = crate::connection::ConnectionGeneration::new((1 << 62) + 1);
+    let _writes = accounts.begin_account_deletion(context, retry, account)?;
+    accounts.cancel_account_deletion(context, retry)?;
+    assert!(!accounts.registered_authority_fenced(context, retry));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_remote_deletion_keeps_its_commit_barrier_after_link_loss() -> TestResult {
+    let StagedRemoteDeletion {
+        mut fixture,
+        mut coordinator,
+        mut accounts,
+        edge,
+        account,
+        key,
+    } = staged_remote_deletion().await?;
+    let owner = crate::connection::ConnectionGeneration::new(1 << 62);
+    {
+        let context = fixture.context_mut()?;
+        coordinator.inbound(context, closed(edge.link.get(), edge.server_id));
+        crate::remote_accounts::drive(context, &mut accounts, &mut coordinator);
+        assert!(coordinator.remote_carrier_peer(owner).is_none());
+        assert!(accounts.registered_authority_fenced(context, owner));
+        assert!(context.domain().account(account).is_some());
+    }
+    fixture.commit_staged_batch().await?;
+    let context = fixture.context_mut()?;
+    let _completions = accounts.batch_applied(context);
+    coordinator.batch_applied(context);
+    crate::remote_accounts::batch_settled(context, &mut accounts, &mut coordinator);
+    assert!(context.domain().account(account).is_none());
+    assert!(!accounts.registered_authority_fenced(context, owner));
+    assert!(coordinator.pending.is_none());
+    assert!(coordinator.retained.contains_key(&key));
+    assert!(coordinator.remote_carrier_peer(owner).is_none());
+    assert!(
+        accounts
+            .begin_account_deletion(context, owner, account)
+            .is_err()
     );
     Ok(())
 }

@@ -8,9 +8,11 @@
 //! open and close, registered commands, and connection origins.
 
 mod barrier;
+mod directory;
 mod events;
 mod fence;
 mod history;
+mod join_echo;
 mod journal;
 pub(crate) use render::prefix as source_prefix;
 mod render;
@@ -52,6 +54,7 @@ use crate::observe::health::{ReadinessGate, ReadinessStage};
 use crate::state_core::StateCoreContext;
 use crate::sync::Arc;
 
+pub(crate) use request::is_local_user_mode_query;
 pub use request::{EdgeCompletion, RemoteCarrierOutcome};
 
 /// Events held while one durable batch is in flight.
@@ -129,6 +132,8 @@ struct ConnectionOrigin {
     acked_generation: Option<u64>,
     /// Whether an exact declaration acknowledgement has been received.
     ever_acked: bool,
+    /// A committed JOIN still owns its topic and NAMES response.
+    join_names_pending: bool,
     deleted: bool,
     del_acked: bool,
 }
@@ -169,12 +174,14 @@ enum PendingCommit {
         base_last: (u64, EventId),
         companion_last: (u64, u64, [u8; 16]),
         coverage: Vec<journal::Version>,
+        join_echoes: Vec<join_echo::JoinEcho>,
     },
     /// An event was applied; ACK follows the commit.
     Event {
         header: Box<EventHeader>,
         completion: Option<RequestId>,
         coverage: Option<journal::Version>,
+        join_echo: Option<Box<join_echo::JoinEcho>>,
     },
     /// The pending snapshot generation is durable; READY follows.
     SnapshotInstalled,
@@ -231,7 +238,7 @@ pub struct EdgeFederation {
     /// Commands waiting for the connection's earlier request to complete,
     /// so the revisions they carry are read from a replica that already
     /// reflects that request (spec 20.5 ordering per origin).
-    deferred: BTreeMap<ConnectionGeneration, VecDeque<DeferredCommand>>,
+    deferred: BTreeMap<ConnectionGeneration, crate::budget::RetainedQueue<DeferredCommand>>,
     companion: CompanionLinks,
     barrier: barrier::BarrierState,
 }
@@ -240,6 +247,8 @@ pub struct EdgeFederation {
 pub(super) struct DeferredCommand {
     pub(super) kind: RegisteredCommandKind,
     pub(super) message: Box<agenc_ircd_client_wire::ParsedMessage>,
+    /// Returned only after the retained parsed command has been dropped.
+    pub(super) _permit: crate::budget::MemoryPermit,
 }
 
 /// The most commands one connection may queue behind its in-flight
@@ -716,8 +725,33 @@ impl EdgeFederation {
             self.snapshot = None;
         }
         self.queued_events.clear();
+        self.abort_interrupted_joins(context);
         for pending in self.pending.values_mut() {
             pending.sent = false;
+        }
+    }
+
+    fn abort_interrupted_joins(&self, context: &mut StateCoreContext) {
+        let active = self
+            .origins
+            .iter()
+            .filter(|(_, origin)| origin.join_names_pending)
+            .map(|(generation, _)| *generation);
+        let waiting = self
+            .pending
+            .values()
+            .filter(|pending| !pending.sink_gone)
+            .filter(|pending| {
+                matches!(&pending.kind, request::PendingKind::Command { message }
+                    if message.command() == "JOIN")
+            })
+            .map(|pending| pending.generation);
+        for generation in active.chain(waiting) {
+            if let Some(sink) = context.sessions().sink_for_generation(generation) {
+                let _closed =
+                    sink.close_after_flush(crate::state_core::inbox::CloseReason::ProtocolError);
+            }
+            context.sessions_mut().mark_sink_gone(generation);
         }
     }
 
@@ -1004,6 +1038,7 @@ impl EdgeFederation {
                 account: None,
                 acked_generation: None,
                 ever_acked: false,
+                join_names_pending: false,
                 del_acked: false,
                 deleted: false,
             },
@@ -1152,10 +1187,34 @@ impl EdgeFederation {
         &mut self,
         context: &mut StateCoreContext,
         generation: ConnectionGeneration,
-        message: &agenc_ircd_client_wire::ParsedMessage,
+        message: Box<agenc_ircd_client_wire::ParsedMessage>,
         cursor: [u8; 32],
-    ) {
-        request::continue_query(self, context, generation, message, cursor);
+    ) -> bool {
+        request::continue_query(self, context, generation, message, cursor)
+    }
+
+    /// Requests the next NAMES page while its JOIN holds origin admission.
+    pub(crate) fn continue_join_names(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+        channels: &[agenc_ircd_domain::ChannelNameValue],
+        message: Box<agenc_ircd_client_wire::ParsedMessage>,
+        cursor: Option<[u8; 32]>,
+    ) -> bool {
+        request::continue_join_names(self, context, generation, channels, message, cursor)
+    }
+
+    /// Releases the completed JOIN burst and admits deferred commands in order.
+    pub(crate) fn finish_join_names(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+    ) -> Vec<EdgeCompletion> {
+        if let Some(origin) = self.origins.get_mut(&generation) {
+            origin.join_names_pending = false;
+        }
+        request::dispatch_deferred(self, context, generation)
     }
 
     /// Finishes the batch that just committed.
@@ -1180,7 +1239,14 @@ impl EdgeFederation {
                 header,
                 completion,
                 coverage,
+                join_echo,
             }) => {
+                if let Some(echo) = join_echo
+                    && let Err(violation) = join_echo::committed(self, *echo)
+                {
+                    self.fail_link(context, violation);
+                    return Vec::new();
+                }
                 completions.extend(self.settle_event(context, *header, completion, coverage));
             }
             Some(PendingCommit::SnapshotInstalled) => {
@@ -1202,8 +1268,12 @@ impl EdgeFederation {
                 base_last,
                 companion_last,
                 coverage,
+                join_echoes,
             }) => {
                 if !self.commit_coverage(context, coverage) {
+                    return Vec::new();
+                }
+                if !self.commit_join_echoes(context, join_echoes) {
                     return Vec::new();
                 }
                 completions.extend(barrier::applied(
@@ -1219,6 +1289,20 @@ impl EdgeFederation {
         completions.extend(events::drain_queued(self, context));
         journal::continue_write(self, context);
         completions
+    }
+
+    fn commit_join_echoes(
+        &mut self,
+        context: &mut StateCoreContext,
+        echoes: Vec<join_echo::JoinEcho>,
+    ) -> bool {
+        for echo in echoes {
+            if let Err(violation) = join_echo::committed(self, echo) {
+                self.fail_link(context, violation);
+                return false;
+            }
+        }
+        true
     }
 
     fn commit_coverage(

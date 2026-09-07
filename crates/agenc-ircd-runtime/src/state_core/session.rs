@@ -65,12 +65,14 @@ pub struct BoundSession {
 /// Edge-local facts about one admitted connection.
 pub struct ConnectionEntry {
     sink: Arc<dyn ClientSink>,
+    physical: bool,
     purpose: ListenerPurpose,
     source: SourceAddressKey,
     admission: AdmissionClass,
     opened_at: MonotonicTick,
     session: Option<BoundSession>,
     capabilities: Option<CapabilityState>,
+    active_query: Option<(u64, u64)>,
     sink_gone: bool,
     last_line_sequence: u64,
     pending_physical_close: Option<PendingPhysicalClose>,
@@ -171,6 +173,35 @@ impl SessionTable {
         sink: Arc<dyn ClientSink>,
         now: MonotonicTick,
     ) -> Result<(), RuntimeError> {
+        self.open_connection(generation, purpose, source, sink, now, true)
+    }
+
+    /// Records an internal account carrier that has no transport close lane.
+    pub(crate) fn open_virtual(
+        &mut self,
+        generation: ConnectionGeneration,
+        sink: Arc<dyn ClientSink>,
+        now: MonotonicTick,
+    ) -> Result<(), RuntimeError> {
+        self.open_connection(
+            generation,
+            ListenerPurpose::ClientTls,
+            SourceAddressKey::onion_listener(),
+            sink,
+            now,
+            false,
+        )
+    }
+
+    fn open_connection(
+        &mut self,
+        generation: ConnectionGeneration,
+        purpose: ListenerPurpose,
+        source: SourceAddressKey,
+        sink: Arc<dyn ClientSink>,
+        now: MonotonicTick,
+        physical: bool,
+    ) -> Result<(), RuntimeError> {
         if generation != sink.generation()
             || source != source.prefix_key()
             || self.connections.contains_key(&generation)
@@ -184,12 +215,14 @@ impl SessionTable {
             generation,
             ConnectionEntry {
                 sink,
+                physical,
                 purpose,
                 source,
                 admission: AdmissionClass::for_purpose(purpose),
                 opened_at: now,
                 session: None,
                 capabilities: None,
+                active_query: None,
                 sink_gone: false,
                 last_line_sequence: 0,
                 pending_physical_close: None,
@@ -285,6 +318,31 @@ impl SessionTable {
         entry.session = Some(session);
         entry.capabilities = Some(capabilities);
         self.users.insert(session.user_id, generation);
+        Ok(())
+    }
+
+    /// Refreshes local rendering state without changing the registered identity.
+    /// An unchanged state requires no allocation; a failed copy leaves it intact.
+    pub(crate) fn refresh_capabilities(
+        &mut self,
+        generation: ConnectionGeneration,
+        session: BoundSession,
+        capabilities: &CapabilityState,
+    ) -> Result<(), RuntimeError> {
+        let entry = self
+            .connections
+            .get_mut(&generation)
+            .ok_or(RuntimeError::InvalidValue)?;
+        if entry.session != Some(session) || self.users.get(&session.user_id) != Some(&generation) {
+            return Err(RuntimeError::InvalidValue);
+        }
+        if entry.capabilities.as_ref() != Some(capabilities) {
+            entry.capabilities = Some(
+                capabilities
+                    .try_clone()
+                    .map_err(|_| RuntimeError::MemoryExhausted)?,
+            );
+        }
         Ok(())
     }
 
@@ -389,6 +447,12 @@ impl SessionTable {
         self.connections.is_empty()
     }
 
+    /// Whether any transport still owes its final physical-close notice.
+    /// A writer acknowledgement or sink failure does not discharge that notice.
+    pub(crate) fn has_physical_connections(&self) -> bool {
+        self.connections.values().any(|entry| entry.physical)
+    }
+
     /// Returns the number of registered sessions.
     #[must_use]
     pub fn registered_len(&self) -> usize {
@@ -425,7 +489,7 @@ impl SessionTable {
             .connections
             .values()
             .filter(|entry| !entry.sink_gone)
-            .map(|entry| entry.sink.queue_snapshot())
+            .map(ConnectionEntry::queue_snapshot)
         {
             queued_bytes = queued_bytes.saturating_add(snapshot.queued_bytes());
             capacity_bytes = capacity_bytes.saturating_add(snapshot.capacity_bytes());
@@ -446,6 +510,61 @@ impl SessionTable {
             max_query_snapshots_per_session,
         )
     }
+
+    /// Counts a connection-owned snapshot before its final frame is queued.
+    pub(crate) fn begin_active_query(
+        &mut self,
+        generation: ConnectionGeneration,
+        rows: u64,
+        bytes: u64,
+    ) -> Result<(), RuntimeError> {
+        let entry = self
+            .connections
+            .get_mut(&generation)
+            .filter(|entry| !entry.sink_gone)
+            .ok_or(RuntimeError::InvalidValue)?;
+        if entry.active_query.is_some() || bytes == 0 {
+            return Err(RuntimeError::InvalidValue);
+        }
+        entry.active_query = Some((rows, bytes));
+        Ok(())
+    }
+
+    /// Releases metadata as the permit moves to the queue, or is abandoned.
+    pub(crate) fn end_active_query(&mut self, generation: ConnectionGeneration) {
+        if let Some(entry) = self.connections.get_mut(&generation) {
+            entry.active_query = None;
+        }
+    }
+
+    pub(crate) fn query_snapshot_for(
+        &self,
+        generation: ConnectionGeneration,
+    ) -> Option<ClientQueueSnapshot> {
+        self.connections
+            .get(&generation)
+            .filter(|entry| !entry.sink_gone)
+            .map(ConnectionEntry::queue_snapshot)
+    }
+}
+
+impl ConnectionEntry {
+    fn queue_snapshot(&self) -> ClientQueueSnapshot {
+        let queued = self.sink.queue_snapshot();
+        let Some((rows, bytes)) = self.active_query else {
+            return queued;
+        };
+        let count = queued.query_snapshots().saturating_add(1);
+        ClientQueueSnapshot::with_query_usage(
+            queued.queued_bytes(),
+            queued.capacity_bytes(),
+            count,
+            queued.query_rows().saturating_add(rows),
+            queued.query_bytes().saturating_add(bytes),
+            queued.largest_query_rows().max(rows),
+            count,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -460,6 +579,57 @@ mod tests {
     use agenc_ircd_types::SessionId;
 
     struct ClosedSink(ConnectionGeneration);
+
+    #[test]
+    fn active_query_usage_is_counted_until_transfer_or_connection_close() -> Result<(), RuntimeError>
+    {
+        let mut table = SessionTable::new();
+        for value in [1, 2] {
+            table.open(
+                ConnectionGeneration::new(value),
+                ListenerPurpose::ClientTls,
+                SourceAddressKey::onion_listener(),
+                sink(value),
+                MonotonicTick::from_ticks(0),
+            )?;
+        }
+        let first = ConnectionGeneration::new(1);
+        let second = ConnectionGeneration::new(2);
+        table.begin_active_query(first, 10, 1_024)?;
+        table.begin_active_query(second, 20, 2_048)?;
+        let usage = table.queue_snapshot();
+        assert_eq!(
+            (
+                usage.query_snapshots(),
+                usage.query_rows(),
+                usage.query_bytes()
+            ),
+            (2, 30, 3_072)
+        );
+        assert_eq!(usage.largest_query_rows(), 20);
+        assert_eq!(usage.max_query_snapshots_per_session(), 1);
+        let individual = table
+            .query_snapshot_for(first)
+            .ok_or(RuntimeError::InvalidValue)?;
+        assert_eq!(
+            (individual.query_snapshots(), individual.query_rows()),
+            (1, 10)
+        );
+        assert_eq!(
+            table.begin_active_query(first, 99, 99),
+            Err(RuntimeError::InvalidValue)
+        );
+        table.end_active_query(first);
+        table.end_active_query(first);
+        assert_eq!(table.queue_snapshot().query_rows(), 20);
+        let _closed = table.close(second).ok_or(RuntimeError::InvalidValue)?;
+        assert_eq!(table.queue_snapshot().query_snapshots(), 0);
+        assert_eq!(
+            table.begin_active_query(second, 1, 1),
+            Err(RuntimeError::InvalidValue)
+        );
+        Ok(())
+    }
 
     impl ClientSink for ClosedSink {
         fn generation(&self) -> ConnectionGeneration {
@@ -525,6 +695,86 @@ mod tests {
             return Err(RuntimeError::InvalidValue);
         }
         Ok(state)
+    }
+
+    #[test]
+    fn virtual_carriers_do_not_discharge_a_physical_close() -> Result<(), RuntimeError> {
+        let mut table = SessionTable::with_ceiling(2);
+        let now = MonotonicTick::from_ticks(1);
+        let physical = ConnectionGeneration::new(1);
+        let virtual_carrier = ConnectionGeneration::new(2);
+        table.open(
+            physical,
+            ListenerPurpose::ClientOnion,
+            SourceAddressKey::onion_listener(),
+            sink(1),
+            now,
+        )?;
+        table.open_virtual(virtual_carrier, sink(2), now)?;
+        assert!(table.has_physical_connections());
+        assert!(table.mark_sink_gone(physical));
+        assert!(table.has_physical_connections());
+        assert!(table.open_virtual(virtual_carrier, sink(2), now).is_err());
+        assert!(
+            table
+                .open_virtual(ConnectionGeneration::new(3), sink(3), now)
+                .is_err()
+        );
+        assert!(table.close(physical).is_some());
+        assert!(!table.has_physical_connections());
+        assert_eq!(table.len(), 1);
+        assert!(table.connection(virtual_carrier).is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn capability_refresh_requires_the_exact_bound_connection_and_session()
+    -> Result<(), RuntimeError> {
+        let mut table = SessionTable::new();
+        let generation = ConnectionGeneration::new(1);
+        table.open(
+            generation,
+            ListenerPurpose::ClientOnion,
+            SourceAddressKey::onion_listener(),
+            sink(1),
+            MonotonicTick::from_ticks(1),
+        )?;
+        table.bind_session(generation, bound(1), CapabilityState::default())?;
+        let enabled = enabled_capability("multi-prefix")?;
+        assert!(
+            table
+                .refresh_capabilities(generation, bound(2), &enabled)
+                .is_err()
+        );
+        assert!(
+            table
+                .refresh_capabilities(ConnectionGeneration::new(2), bound(1), &enabled)
+                .is_err()
+        );
+        assert!(
+            table
+                .capabilities_for_user(bound(1).user_id)
+                .is_some_and(|state| !state.enabled("multi-prefix"))
+        );
+        table.refresh_capabilities(generation, bound(1), &enabled)?;
+        assert!(
+            table
+                .capabilities_for_user(bound(1).user_id)
+                .is_some_and(|state| state.enabled("multi-prefix"))
+        );
+        assert_eq!(
+            table
+                .connection(generation)
+                .and_then(ConnectionEntry::session),
+            Some(bound(1))
+        );
+        table.refresh_capabilities(generation, bound(1), &CapabilityState::default())?;
+        assert!(
+            table
+                .capabilities_for_user(bound(1).user_id)
+                .is_some_and(|state| !state.enabled("multi-prefix"))
+        );
+        Ok(())
     }
 
     #[tokio::test]

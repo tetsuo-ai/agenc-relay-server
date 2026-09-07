@@ -912,7 +912,7 @@ e2ee_text = validate_markdown(
     e2ee, "companion E2EE spec", list(range(1, 25)), list("AB")
 )
 sources_text = validate_markdown(
-    sources, "protocol source ledger", list(range(1, 8)), []
+    sources, "protocol source ledger", list(range(1, 9)), []
 )
 for match in re.finditer(r"\bSection (\d+)(?:\.\d+)*", e2ee_text):
     number = int(match.group(1))

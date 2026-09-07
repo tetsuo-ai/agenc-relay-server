@@ -64,6 +64,8 @@ const CONSTRUCTION_PLAN_UNSORTED_TABLE: TableDefinition<'static, &'static [u8], 
     TableDefinition::new("construction_plan_unsorted");
 const RESTORE_CHANNEL_SOURCE_TABLE: TableDefinition<'static, &'static [u8], &'static [u8]> =
     TableDefinition::new("restore_channel_sources");
+const RESTORE_DISCARDED_CHANNEL_TABLE: TableDefinition<'static, &'static [u8], &'static [u8]> =
+    TableDefinition::new("restore_discarded_channels");
 const RESTORE_CURRENT_RECORD_TABLE: TableDefinition<'static, &'static [u8], &'static [u8]> =
     TableDefinition::new("restore_current_records");
 const RESTORE_REFERENCE_TABLE: TableDefinition<'static, &'static [u8], &'static [u8]> =
@@ -315,6 +317,47 @@ impl ConstructionPlanBuilder {
             return Err(StorageError::StaleState);
         }
         Ok(())
+    }
+
+    fn discard_restore_channel(
+        &mut self,
+        key: &StoredKey,
+        name: &agenc_ircd_domain::ChannelNameValue,
+    ) -> Result<(), StorageError> {
+        let mut table = self
+            .transaction
+            .open_table(RESTORE_DISCARDED_CHANNEL_TABLE)
+            .map_err(|_| StorageError::DatabaseRejected)?;
+        if table
+            .insert(key.as_bytes(), name.canonical().as_bytes())
+            .map_err(|_| StorageError::DatabaseRejected)?
+            .is_some()
+        {
+            return Err(StorageError::StaleState);
+        }
+        Ok(())
+    }
+
+    fn discarded_restore_channel_name(
+        &self,
+        key: &StoredKey,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        let table = self
+            .transaction
+            .open_table(RESTORE_DISCARDED_CHANNEL_TABLE)
+            .map_err(|_| StorageError::DatabaseRejected)?;
+        let Some(name) = table
+            .get(key.as_bytes())
+            .map_err(|_| StorageError::DatabaseRejected)?
+        else {
+            return Ok(None);
+        };
+        let mut encoded = Vec::new();
+        encoded
+            .try_reserve_exact(name.value().len())
+            .map_err(|_| StorageError::AllocationFailed)?;
+        encoded.extend_from_slice(name.value());
+        Ok(Some(encoded))
     }
 
     fn restore_channel_source(
@@ -2335,16 +2378,7 @@ fn select_restore_record(
         }
         TableId::Channel => {
             let value = PersistentRecordValue::decode(table, record.plaintext())?;
-            if value.record_kind() == 1 {
-                // Backup streams are written in strictly increasing (table, key) order by
-                // `BackupStreamWriter::write_record`, and Channel (8) precedes ChannelName
-                // (9), so every channel is indexed here before `push_restore_channel_name`
-                // looks it up.
-                builder.index_restore_channel_source(source)?;
-                Some(StorageConstructionAction::RestoreChannel)
-            } else {
-                None
-            }
+            select_restore_channel(builder, source, &value)?
         }
         TableId::ChannelName => {
             let value = PersistentRecordValue::decode(table, record.plaintext())?;
@@ -2373,6 +2407,30 @@ fn select_restore_record(
     Ok(action.map_or(RestoreSelection::Omit, RestoreSelection::Direct))
 }
 
+fn select_restore_channel(
+    builder: &mut ConstructionPlanBuilder,
+    source: &StorageConstructionSource,
+    value: &PersistentRecordValue,
+) -> Result<Option<StorageConstructionAction>, StorageError> {
+    if value.record_kind() != 1 {
+        return Ok(None);
+    }
+    let channel = ChannelRecordBody::decode(value.body())?;
+    if channel.channel_id.as_bytes() != source.key().as_bytes()
+        || channel.revision.get() != value.revision()
+    {
+        return Err(StorageError::StaleState);
+    }
+    // Channel (8) precedes ChannelName (9) in the authenticated backup stream.
+    // Index even omitted channels so their name rows remain fully checked.
+    builder.index_restore_channel_source(source)?;
+    if channel.persistence == agenc_ircd_domain::PersistencePolicy::Ephemeral {
+        builder.discard_restore_channel(source.key(), &channel.name)?;
+        return Ok(None);
+    }
+    Ok(Some(StorageConstructionAction::RestoreChannel))
+}
+
 fn push_restore_channel_name(
     builder: &mut ConstructionPlanBuilder,
     source: StorageConstructionSource,
@@ -2399,6 +2457,17 @@ fn push_restore_channel_name(
         context.target_binding,
         context.target_generation,
     )?;
+    if let Some(name) = builder.discarded_restore_channel_name(channel.key())? {
+        let binding = ChannelNameRecordBody::decode(value.body())?;
+        if binding.name.canonical().as_bytes() != name
+            || binding
+                .channel_id
+                .is_some_and(|id| id.as_bytes() != channel.key().as_bytes())
+        {
+            return Err(StorageError::StaleState);
+        }
+        return Ok(());
+    }
     builder.push(StorageConstructionPlanEntry::new(
         StorageConstructionKind::Restore,
         vec![source, channel_source],
@@ -3330,6 +3399,9 @@ fn recovery_domain_body(
         (TableId::Channel, 1) => {
             let mut channel = ChannelRecordBody::decode(value.body())?;
             channel.revision = Revision::new(revision).map_err(|_| StorageError::Overflow)?;
+            channel.memberships.clear();
+            channel.invites.clear();
+            channel.e2ee_removal_pending.clear();
             ChannelRecordBody::encode(&channel)
         }
         (TableId::Account, 2) => Ok(value.body().to_vec()),
@@ -4499,13 +4571,16 @@ mod tests {
         }
 
         for (kind, expected_direct) in [(1_u16, true), (2, false)] {
-            let key = StoredKey::new(vec![150 + kind as u8; 16])?;
+            let plaintext = domain_plaintext(TableId::Channel, kind)?;
+            let key = if kind == 1 {
+                let value = PersistentRecordValue::decode(TableId::Channel, &plaintext)?;
+                let channel = ChannelRecordBody::decode(value.body())?;
+                StoredKey::new(channel.channel_id.as_bytes().to_vec())?
+            } else {
+                StoredKey::new(vec![150 + kind as u8; 16])?
+            };
             let source = backup_source(TableId::Channel, &key, 80 + u64::from(kind))?;
-            let record = record(
-                TableId::Channel,
-                key,
-                domain_plaintext(TableId::Channel, kind)?,
-            );
+            let record = record(TableId::Channel, key, plaintext);
             assert_eq!(
                 matches!(
                     select_restore_record(&mut builder, &source, &record)?,
@@ -4610,6 +4685,118 @@ mod tests {
             );
         }
 
+        drop(builder);
+        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+        Ok(())
+    }
+
+    #[test]
+    fn restore_omits_ephemeral_channels_and_their_validated_name_rows() -> Result<(), StorageError>
+    {
+        let (file, path) = scratch_file("omit-ephemeral-channel")?;
+        let mut builder = ConstructionPlanBuilder::start_streaming(
+            StorageConstructionKind::Restore,
+            file,
+            maximum_limits(),
+        )?;
+        let mut channel = ChannelRecordBody::decode(&crate::domain_records::fixtures::live_body(
+            TableId::Channel,
+            1,
+        )?)?;
+        let agenc_ircd_domain::Principal::Account(owner) = channel.creator else {
+            return Err(StorageError::InvalidEncoding);
+        };
+        channel.persistence = agenc_ircd_domain::PersistencePolicy::Ephemeral;
+        channel.role_grants.clear();
+        channel
+            .memberships
+            .push(agenc_ircd_domain::DurableMembership {
+                user_id: agenc_ircd_types::UserId::from_bytes([180; 16]),
+                account_id: Some(owner),
+                session_role: agenc_ircd_domain::Role::Owner,
+                effective_role: agenc_ircd_domain::Role::Owner,
+                membership_revision: channel.revision,
+                joined_at: channel.created_at,
+            });
+        let channel_key = StoredKey::new(channel.channel_id.as_bytes().to_vec())?;
+        let source = backup_source(TableId::Channel, &channel_key, 1)?;
+        let value = PersistentRecordValue::new(
+            TableId::Channel,
+            1,
+            channel.revision.get(),
+            0,
+            None,
+            Vec::new(),
+            ChannelRecordBody::encode(&channel)?,
+        )?;
+        let original = record(TableId::Channel, channel_key.clone(), value.encode()?);
+        assert!(matches!(
+            select_restore_record(&mut builder, &source, &original)?,
+            RestoreSelection::Omit
+        ));
+        let mismatched_key = StoredKey::new(vec![179; 16])?;
+        assert_eq!(
+            select_restore_record(
+                &mut builder,
+                &backup_source(TableId::Channel, &mismatched_key, 3)?,
+                &record(TableId::Channel, mismatched_key.clone(), value.encode()?),
+            )
+            .err(),
+            Some(StorageError::StaleState)
+        );
+        let master = StorageMasterKey::from_bytes([181; 32]);
+        let binding = DatabaseBinding::new(
+            NetworkId::from_bytes([182; 32]),
+            ServerId::from_bytes([183; 16]),
+            ServerIncarnation::from_bytes([184; 16]),
+            DatabaseId::from_bytes([185; 16]),
+        );
+        let context = RekeyContext {
+            source_master_key: &master,
+            source_binding: binding,
+            source_generation: 1,
+            target_master_key: &master,
+            target_binding: binding,
+            target_generation: 1,
+        };
+        let name_key = StoredKey::new(
+            derive_storage_index(
+                &master,
+                binding,
+                StorageTable::new(TableId::ChannelName.as_u16())?,
+                1,
+                channel.name.canonical().as_bytes(),
+            )?
+            .expose_for_storage_key()
+            .to_vec(),
+        )?;
+        for (id, expected) in [
+            (channel.channel_id, Ok(())),
+            (
+                agenc_ircd_types::ChannelInstanceId::from_bytes([186; 16]),
+                Err(StorageError::StaleState),
+            ),
+        ] {
+            let name = PersistentRecordValue::new(
+                TableId::ChannelName,
+                1,
+                channel.revision.get(),
+                0,
+                None,
+                vec![RecordReference::new(TableId::Channel, channel_key.clone())?],
+                ChannelNameRecordBody::encode(id, &channel.name)?,
+            )?;
+            assert_eq!(
+                push_restore_channel_name(
+                    &mut builder,
+                    backup_source(TableId::ChannelName, &name_key, 2)?,
+                    &record(TableId::ChannelName, name_key.clone(), name.encode()?),
+                    &context,
+                ),
+                expected
+            );
+        }
+        assert_eq!(builder.entry_count, 0);
         drop(builder);
         std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
         Ok(())

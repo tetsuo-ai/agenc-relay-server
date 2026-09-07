@@ -269,6 +269,9 @@ fn stage_origin(
         .map_err(|_| Violation::Ceiling)?;
     let revision = plan.resulting_revision().get();
     let entry = coordinator.origins.origin(&key).ok_or(Violation::Origin)?;
+    let closed_carrier = (entry.status == OriginStatus::Deleted)
+        .then(|| coordinator.remote_carrier_for_origin(peer, *key.origin_id.as_bytes()))
+        .flatten();
     let writes = vec![
         origin_row(coordinator, key, entry.next_sequence, revision)?,
         coordinator
@@ -284,6 +287,7 @@ fn stage_origin(
         peer,
         link,
         frame,
+        closed_carrier,
         _charge: charge,
     });
     Ok(())

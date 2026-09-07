@@ -13,11 +13,9 @@ use crate::account_service::{AccountServiceCoordinator, CarrierCompletion, Carri
 use crate::connection::ConnectionGeneration;
 use crate::federation::codec::results::ResultArm;
 use crate::federation::coordinator::{
-    FederationCoordinator, InFlightCarrier, RemoteAccountWork, challenge_object,
+    FederationCoordinator, InFlightCarrier, RemoteAccountWork, RemoteSessionGrant, challenge_object,
 };
-use crate::purpose::ListenerPurpose;
 use crate::state_core::StateCoreContext;
-use crate::state_core::inbox::SourceAddressKey;
 
 /// The characters of one carrier line's payload (spec 11.4).
 const CHUNK_CHARACTERS: usize = 400;
@@ -36,6 +34,12 @@ pub(crate) fn drive(
     }
     for work in federation.take_remote_account_work() {
         match work {
+            RemoteAccountWork::AccountMutation {
+                peer,
+                link,
+                fresh,
+                plan,
+            } => account_mutation(context, accounts, federation, (peer, link), fresh, plan),
             RemoteAccountWork::Carrier {
                 generation,
                 opcode,
@@ -63,6 +67,23 @@ pub(crate) fn drive(
     }
 }
 
+fn account_mutation(
+    context: &mut StateCoreContext,
+    accounts: &mut AccountServiceCoordinator,
+    federation: &mut FederationCoordinator,
+    origin: (agenc_ircd_types::ServerId, crate::federation::LinkId),
+    fresh: Box<crate::federation::coordinator::FreshRequest>,
+    plan: Box<agenc_ircd_domain::MutationPlan>,
+) {
+    let (peer, link) = origin;
+    if federation
+        .execute_remote_account(context, accounts, link, peer, fresh, plan)
+        .is_err()
+    {
+        federation.remote_carrier_violation(context, link, peer);
+    }
+}
+
 /// Stages a session open whose account a remote grant proves: the grant
 /// must belong to a virtual connection of the same edge and still be live.
 fn session_open(
@@ -80,12 +101,12 @@ fn session_open(
         .filter(|owner| federation.remote_carrier_peer(*owner) == Some(peer));
     let binding = owner.and_then(|owner| {
         accounts
-            .authenticated_binding(owner, context.now())
+            .authenticated_session_binding(owner, context.now())
             .ok()
             .flatten()
             .map(|binding| (owner, binding))
     });
-    let Some((owner, (account_id, session_generation))) = binding else {
+    let Some((owner, (account_id, session_generation, authenticated_at))) = binding else {
         federation.refuse_remote_session(context, link, peer, fresh);
         return;
     };
@@ -103,11 +124,22 @@ fn session_open(
         federation.refuse_remote_session(context, link, peer, fresh);
         return;
     };
-    if federation
-        .open_remote_session(context, link, peer, fresh, seed, writes, owner)
-        .is_err()
-    {
+    let staged = federation.open_remote_session(
+        context,
+        link,
+        peer,
+        fresh,
+        seed,
+        RemoteSessionGrant {
+            writes,
+            authenticated_at,
+            owner,
+        },
+    );
+    if !matches!(staged, Ok(true)) {
         let _cancelled = accounts.cancel_registration_grant_consumption(context, owner);
+    }
+    if staged.is_err() {
         federation.remote_carrier_violation(context, link, peer);
     }
 }
@@ -118,6 +150,9 @@ pub(crate) fn batch_settled(
     accounts: &mut AccountServiceCoordinator,
     federation: &mut FederationCoordinator,
 ) {
+    if let Some(generation) = federation.take_rejected_deletion() {
+        let _rejected = accounts.account_deletion_rejected(context, generation);
+    }
     if let Some((generation, user_id)) = federation.take_committed_grant() {
         let _committed = accounts.registration_committed(
             context,
@@ -129,6 +164,18 @@ pub(crate) fn batch_settled(
     if let Some(generation) = federation.take_rejected_grant() {
         let _rejected = accounts.registration_rejected(context, generation);
     }
+    for generation in federation.take_closed_remote_carriers() {
+        close_virtual(context, accounts, federation, generation);
+    }
+}
+
+/// Removes virtual carriers after the account owner canceled unfinished work.
+pub(crate) fn shutdown(
+    context: &mut StateCoreContext,
+    accounts: &mut AccountServiceCoordinator,
+    federation: &mut FederationCoordinator,
+) {
+    federation.shutdown_remote_carriers();
     for generation in federation.take_closed_remote_carriers() {
         close_virtual(context, accounts, federation, generation);
     }
@@ -200,13 +247,7 @@ fn carrier(
                 let now = context.now();
                 context
                     .sessions_mut()
-                    .open(
-                        generation,
-                        ListenerPurpose::ClientTls,
-                        SourceAddressKey::onion_listener(),
-                        sink,
-                        now,
-                    )
+                    .open_virtual(generation, sink, now)
                     .map_err(|_| ())
             })
             .and_then(|()| {

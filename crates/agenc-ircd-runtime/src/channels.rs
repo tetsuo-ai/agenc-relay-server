@@ -522,6 +522,7 @@ impl RegisteredCommandExecutor {
                 {
                     *current_nickname = Some(nickname);
                 }
+                context.attach_local_join_request(generation, message);
             }
             Ok(CommandExecution::Crypto(plan)) => {
                 let Some(observation) = observation.take() else {
@@ -813,6 +814,7 @@ fn finish_pending(
     ) {
         Ok(result) => {
             complete_observation(context, &mut observation, result);
+            context.attach_local_join_request(generation, message);
             Ok(())
         }
         Err(error) => {
@@ -995,22 +997,44 @@ fn execute_planned_command(
             ..agenc_ircd_domain::federation::MutationContext::default()
         });
     }
-    let fanout = crate::mutation_render::render_mutation(
-        context,
+    let mut local_join = context.prepare_local_join(
         bound,
         reply.map(|reply| reply.render_input(bound.user_id)),
         render_command,
         &plan,
     )?;
-    match plan.storage_class() {
-        StorageClass::Ephemeral => match context.apply_ephemeral(plan, fanout) {
-            Ok(_) => Ok(ResultClass::Ok),
-            Err(error) => render_ephemeral_refusal(context, bound, reply, error),
-        },
-        StorageClass::Durable => {
-            stage_durable_command(context, accounts, bound, plan, fanout, reply, observation)
+    let result = (|| {
+        let fanout = if let (Some(prepared), Some(reply)) = (local_join.as_mut(), reply) {
+            let (fanout, frames) = crate::mutation_render::render_local_join_start(
+                context,
+                bound,
+                reply.render_input(bound.user_id),
+                render_command,
+                &plan,
+            )?;
+            prepared.frames = frames;
+            fanout
+        } else {
+            crate::mutation_render::render_mutation(
+                context,
+                bound,
+                reply.map(|reply| reply.render_input(bound.user_id)),
+                render_command,
+                &plan,
+            )?
+        };
+        match plan.storage_class() {
+            StorageClass::Ephemeral => match context.apply_ephemeral(plan, fanout) {
+                Ok(_) => Ok(ResultClass::Ok),
+                Err(error) => render_ephemeral_refusal(context, bound, reply, error),
+            },
+            StorageClass::Durable => {
+                stage_durable_command(context, accounts, bound, plan, fanout, reply, observation)
+            }
         }
-    }
+    })();
+    context.settle_local_join(local_join, result == Ok(ResultClass::Ok));
+    result
 }
 
 fn render_ephemeral_refusal(

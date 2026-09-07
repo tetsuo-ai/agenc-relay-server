@@ -36,6 +36,16 @@ const VIRTUAL_BASE: u64 = 1 << 62;
 /// Remote carriers a coordinator serves at once.
 const MAX_REMOTE_CARRIERS: usize = 4_096;
 
+/// A live grant consumed atomically with its remote session insertion.
+pub(crate) struct RemoteSessionGrant {
+    /// The exact durable grant-row deletion.
+    pub writes: Vec<AccountServiceDurableWrite>,
+    /// The same connection's original OPAQUE authentication instant.
+    pub authenticated_at: agenc_ircd_types::MonotonicTick,
+    /// The virtual connection whose grant barrier settles with the batch.
+    pub owner: ConnectionGeneration,
+}
+
 struct NoopLedger;
 
 impl QueueReservationLedger for NoopLedger {
@@ -148,6 +158,13 @@ pub(crate) enum RemoteAccountWork {
         /// The federated request; handed back when the carrier finishes.
         in_flight: Box<InFlightCarrier>,
     },
+    /// Apply account settings with any account-service deletion barrier.
+    AccountMutation {
+        peer: ServerId,
+        link: LinkId,
+        fresh: Box<FreshRequest>,
+        plan: Box<agenc_ircd_domain::MutationPlan>,
+    },
     /// Open a session whose account a pre-registration grant proves.
     SessionOpen {
         /// The edge that opens the session.
@@ -173,6 +190,8 @@ pub(crate) struct RemoteAccounts {
     pending_grant: Option<(ConnectionGeneration, UserId)>,
     committed_grant: Option<(ConnectionGeneration, UserId)>,
     rejected_grant: Option<ConnectionGeneration>,
+    pending_deletion: Option<ConnectionGeneration>,
+    rejected_deletion: Option<ConnectionGeneration>,
     closed: Vec<ConnectionGeneration>,
 }
 
@@ -270,6 +289,104 @@ impl FederationCoordinator {
                 seed: Box::new(seed),
                 grant_id,
             });
+    }
+
+    /// Queues account mutations for the router that owns account authority.
+    pub(super) fn queue_remote_account_mutation(
+        &mut self,
+        link: LinkId,
+        peer: ServerId,
+        fresh: FreshRequest,
+        plan: agenc_ircd_domain::MutationPlan,
+    ) {
+        self.remote_accounts
+            .queued
+            .push_back(RemoteAccountWork::AccountMutation {
+                peer,
+                link,
+                fresh: Box::new(fresh),
+                plan: Box::new(plan),
+            });
+    }
+
+    /// Joins credential removal and authority invalidation to account deletion.
+    // agenc-review: allow owner=runtime reviewed=2026-09-07 reason=one remote account operation retains its link peer request domain plan and account-service owner through the atomic staging boundary
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn execute_remote_account(
+        &mut self,
+        context: &mut StateCoreContext,
+        accounts: &mut crate::account_service::AccountServiceCoordinator,
+        link: LinkId,
+        peer: ServerId,
+        fresh: Box<FreshRequest>,
+        plan: Box<agenc_ircd_domain::MutationPlan>,
+    ) -> Result<(), Violation> {
+        if !self.link_is_live(link, peer) {
+            return Err(Violation::Phase);
+        }
+        let result = account_result(context, &fresh, &plan)?;
+        let fanout = crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())
+            .map_err(|_| Violation::Ceiling)?;
+        let Ok(deletion) = self.begin_remote_deletion(context, accounts, peer, &fresh, &plan)
+        else {
+            return super::request::finish_failed(
+                self,
+                context,
+                link,
+                peer,
+                *fresh,
+                agenc_ircd_domain::DomainError::ServerBusy,
+            );
+        };
+        let (owner, writes) = deletion.map_or_else(
+            || (None, Vec::new()),
+            |(owner, writes)| (Some(owner), writes),
+        );
+        let staged = super::request::stage_with_plan_and_writes(
+            self, context, link, peer, *fresh, result, *plan, fanout, writes,
+        );
+        if let Some(owner) = owner {
+            if matches!(staged, Ok(true)) {
+                self.remote_accounts.pending_deletion = Some(owner);
+            } else {
+                let cancelled = accounts.cancel_account_deletion(context, owner);
+                self.remote_accounts.closed.push(owner);
+                cancelled.map_err(|_| Violation::Ceiling)?;
+            }
+        }
+        staged.map(|_| ())
+    }
+
+    fn begin_remote_deletion(
+        &mut self,
+        context: &mut StateCoreContext,
+        accounts: &mut crate::account_service::AccountServiceCoordinator,
+        peer: ServerId,
+        fresh: &FreshRequest,
+        plan: &agenc_ircd_domain::MutationPlan,
+    ) -> Result<Option<(ConnectionGeneration, Vec<AccountServiceDurableWrite>)>, Violation> {
+        let account = plan.events().iter().find_map(|event| match event {
+            agenc_ircd_domain::DomainEvent::AccountDeleted(account) => Some(*account),
+            _ => None,
+        });
+        let Some(account) = account else {
+            return Ok(None);
+        };
+        let (owner, _) = self
+            .remote_accounts
+            .carrier_for(peer, *fresh.header.replay_key.origin_id.as_bytes())?;
+        match accounts.begin_account_deletion(context, owner, account) {
+            Ok(writes) => Ok(Some((owner, writes))),
+            Err(_) => {
+                self.remote_accounts.closed.push(owner);
+                Err(Violation::Ceiling)
+            }
+        }
+    }
+
+    /// The account deletion whose durable batch was rejected.
+    pub(crate) fn take_rejected_deletion(&mut self) -> Option<ConnectionGeneration> {
+        self.remote_accounts.rejected_deletion.take()
     }
 
     /// Takes the queued remote account work.
@@ -428,24 +545,26 @@ impl FederationCoordinator {
         peer: ServerId,
         fresh: Box<FreshRequest>,
         seed: SessionSeed,
-        grant_writes: Vec<AccountServiceDurableWrite>,
-        virtual_connection: ConnectionGeneration,
-    ) -> Result<(), Violation> {
+        grant: RemoteSessionGrant,
+    ) -> Result<bool, Violation> {
         if !self.link_is_live(link, peer) {
             return Err(Violation::Phase);
         }
         let user_id = seed.user_id;
-        super::request::open_session_with_writes(
+        let virtual_connection = grant.owner;
+        let staged = super::request::open_session_with_writes(
             self,
             context,
             link,
             peer,
             *fresh,
             seed,
-            grant_writes,
+            Some(grant),
         )?;
-        self.remote_accounts.pending_grant = Some((virtual_connection, user_id));
-        Ok(())
+        if staged {
+            self.remote_accounts.pending_grant = Some((virtual_connection, user_id));
+        }
+        Ok(staged)
     }
 
     /// Fails a queued session open without staging anything.
@@ -486,12 +605,41 @@ impl FederationCoordinator {
         std::mem::take(&mut self.remote_accounts.closed)
     }
 
+    /// The existing virtual carrier behind a validated origin declaration.
+    pub(super) fn remote_carrier_for_origin(
+        &self,
+        peer: ServerId,
+        origin_id: [u8; 16],
+    ) -> Option<ConnectionGeneration> {
+        self.remote_accounts
+            .by_origin
+            .get(&(peer, origin_id))
+            .copied()
+    }
+
+    /// Closes the exact carrier captured by a committed origin deletion.
+    pub(super) fn retire_remote_carrier(&mut self, generation: ConnectionGeneration) {
+        if self.remote_accounts.carriers.contains_key(&generation) {
+            self.remote_accounts.closed.push(generation);
+        }
+    }
+
+    /// Cancels internal carriers after the last admitted batch settles.
+    pub(crate) fn shutdown_remote_carriers(&mut self) {
+        self.remote_accounts
+            .closed
+            .extend(self.remote_accounts.carriers.keys().copied());
+    }
+
     /// Forgets one virtual connection after the router closed it.
     pub(crate) fn remote_carrier_closed(&mut self, generation: ConnectionGeneration) {
         let _removed = self.remote_accounts.remove(generation);
     }
 
     pub(super) fn remote_grant_committed(&mut self) {
+        if let Some(generation) = self.remote_accounts.pending_deletion.take() {
+            self.remote_accounts.closed.push(generation);
+        }
         if let Some((generation, user_id)) = self.remote_accounts.pending_grant.take() {
             self.remote_accounts.committed_grant = Some((generation, user_id));
             self.remote_accounts.closed.push(generation);
@@ -499,6 +647,10 @@ impl FederationCoordinator {
     }
 
     pub(super) fn remote_grant_rejected(&mut self) {
+        if let Some(generation) = self.remote_accounts.pending_deletion.take() {
+            self.remote_accounts.rejected_deletion = Some(generation);
+            self.remote_accounts.closed.push(generation);
+        }
         if let Some((generation, _)) = self.remote_accounts.pending_grant.take() {
             self.remote_accounts.rejected_grant = Some(generation);
         }
@@ -517,6 +669,71 @@ impl FederationCoordinator {
             self.remote_accounts.closed.push(generation);
         }
     }
+}
+
+/// Builds private account replies; the edge applies the client's capabilities.
+fn account_result(
+    context: &StateCoreContext,
+    fresh: &FreshRequest,
+    plan: &agenc_ircd_domain::MutationPlan,
+) -> Result<(ResultArm, Vec<SchemaObject>), Violation> {
+    let Some(agenc_ircd_domain::CanonicalCommandView::Account(command)) = fresh
+        .command
+        .as_ref()
+        .map(agenc_ircd_domain::CanonicalCommand::view)
+    else {
+        return Err(Violation::Codec);
+    };
+    let frame = account_reply(context.server_prefix(), command, plan)?;
+    let arm = if matches!(command, agenc_ircd_domain::AccountCommand::DeleteStart) {
+        ResultArm::NoContent
+    } else {
+        ResultArm::Committed {
+            resulting_state_generation: plan.resulting_revision().get(),
+        }
+    };
+    let reply =
+        crate::federation::codec::results::reply_object(&frame).map_err(|_| Violation::Codec)?;
+    Ok((arm, vec![reply]))
+}
+
+fn account_reply(
+    prefix: &str,
+    command: &agenc_ircd_domain::AccountCommand,
+    plan: &agenc_ircd_domain::MutationPlan,
+) -> Result<WireMessage, Violation> {
+    if plan.events().iter().any(|event| {
+        matches!(
+            event,
+            agenc_ircd_domain::DomainEvent::AccountDeletionConfirmationRejected(_)
+        )
+    }) {
+        return WireMessage::new(
+            prefix,
+            "FAIL",
+            &["ACCT", "BAD_STATE"],
+            Some("Command is not valid in this state"),
+        )
+        .map_err(|_| Violation::Codec);
+    }
+    if matches!(command, agenc_ircd_domain::AccountCommand::DeleteStart) {
+        let token = plan.account_deletion_token().ok_or(Violation::Codec)?;
+        let token = agenc_ircd_admin::encode_base64url(token);
+        return WireMessage::new(
+            prefix,
+            "NOTE",
+            &["ACCT", "DELETE_CHALLENGE", &token],
+            Some("Confirm account deletion"),
+        )
+        .map_err(|_| Violation::Codec);
+    }
+    WireMessage::new(
+        prefix,
+        "NOTE",
+        &["ACCT", "UPDATED"],
+        Some("Account setting updated"),
+    )
+    .map_err(|_| Violation::Codec)
 }
 
 /// Encodes a captured `AccountServiceResponse` for the `auth_challenge`

@@ -1682,8 +1682,8 @@ async fn edge_registers_joins_and_relays_names_through_the_coordinator() -> Test
         client.wait_for(" 001 quinn ").await?;
         // The origin now carries the session.
         hub.ack_origin().await?;
-        // JOIN goes to the coordinator; the events render the JOIN echo and
-        // the NAMES page follows from a directory query.
+        // The requester's event waits for the committed result; its NAMES
+        // continuation follows the echoed JOIN and topic reply.
         client.line("JOIN #edge").await?;
         let (join_header, join_operation, join_bytes) = hub.next_request().await?;
         let FederatedOperation::Join { targets, .. } = &join_operation else {
@@ -1726,6 +1726,14 @@ async fn edge_registers_joins_and_relays_names_through_the_coordinator() -> Test
             None,
         )
         .await?;
+        assert!(
+            client
+                .sink
+                .lines()
+                .iter()
+                .all(|line| !line.contains(" JOIN #edge")),
+            "requester JOIN escaped before its committed result"
+        );
         let completion = hub
             .event(
                 &ProjectedEvent::RequestCompleted {
@@ -1743,7 +1751,13 @@ async fn edge_registers_joins_and_relays_names_through_the_coordinator() -> Test
             &ResultArm::Committed {
                 resulting_state_generation: generation,
             },
-            Vec::new(),
+            vec![agenc_ircd_client_wire::numeric_reply(
+                COORDINATOR_NAME,
+                331,
+                "quinn",
+                &["#edge"],
+                Some("No topic is set"),
+            )?],
             Some(completion),
         )
         .await?;
@@ -1782,6 +1796,15 @@ async fn edge_registers_joins_and_relays_names_through_the_coordinator() -> Test
         )
         .await?;
         let lines = client.wait_for(" 366 quinn #edge ").await?;
+        let response: Vec<_> = lines
+            .iter()
+            .filter(|line| line.contains("#edge"))
+            .map(|line| line.split_ascii_whitespace().nth(1))
+            .collect();
+        assert_eq!(
+            response,
+            [Some("JOIN"), Some("331"), Some("353"), Some("366")]
+        );
         assert!(
             lines
                 .iter()
@@ -1862,6 +1885,14 @@ async fn global_commands_fail_closed_while_the_link_is_down() -> TestResult {
         );
         client.line("PING :still-here").await?;
         client.wait_for("PONG").await?;
+        client.line("MODE rosa").await?;
+        let lines = client
+            .wait_for_any(&[" 221 rosa +i", "FAIL MODE NETWORK_UNAVAILABLE"])
+            .await?;
+        assert!(
+            lines.iter().any(|line| line.contains(" 221 rosa +i")),
+            "{lines:?}"
+        );
         Ok(())
     })
     .await
@@ -2345,9 +2376,14 @@ async fn exchange_over_bridge(inbox: mpsc::Sender<StateCoreMessage>) -> TestResu
     .await?;
     let mut tess = Client::open(inbox, 2).await?;
     register(&mut tess, "tess").await?;
-    sam.line("JOIN #bridge").await?;
+    sam.line("CAP REQ :message-tags batch labeled-response")
+        .await?;
+    sam.line("@label=joined JOIN #bridge").await?;
     sam.wait_for(" JOIN #bridge").await?;
-    sam.wait_for(" 366 sam #bridge ").await?;
+    let lines = sam.wait_for(" 366 sam #bridge ").await?;
+    assert_labeled_join_burst(&lines)?;
+    sam.line("CAP REQ :-labeled-response -batch -message-tags")
+        .await?;
     tess.line("JOIN #bridge").await?;
     let lines = sam.wait_for(":tess!").await?;
     assert!(
@@ -2370,6 +2406,35 @@ async fn exchange_over_bridge(inbox: mpsc::Sender<StateCoreMessage>) -> TestResu
     tess.line("PART #bridge :done").await?;
     sam.wait_for(" PART #bridge :done").await?;
     exchange_more_over_bridge(&mut sam, &mut tess).await
+}
+
+fn assert_labeled_join_burst(lines: &[String]) -> TestResult {
+    let needles = [
+        "@label=joined :edge.example BATCH +fq1 labeled-response",
+        " JOIN #bridge",
+        " 331 sam #bridge ",
+        " 353 sam = #bridge ",
+        " 366 sam #bridge ",
+        ":edge.example BATCH -fq1",
+    ];
+    let mut positions = Vec::new();
+    for (index, needle) in needles.iter().enumerate() {
+        let position = lines
+            .iter()
+            .position(|line| {
+                line.contains(needle)
+                    && (index == 0 || index == 5 || line.starts_with("@batch=fq1 "))
+            })
+            .ok_or_else(|| format!("missing JOIN response element {needle}: {lines:?}"))?;
+        positions.push(position);
+    }
+    assert!(
+        positions
+            .windows(2)
+            .all(|pair| matches!(pair, [first, second] if first < second)),
+        "{lines:?}"
+    );
+    Ok(())
 }
 
 /// Topic, mode, invite, away, setname, nick, and quit traffic between the
@@ -2413,9 +2478,240 @@ async fn exchange_more_over_bridge(sam: &mut Client, tess: &mut Client) -> TestR
     tess.line("PRIVMSG sam :direct hello").await?;
     let lines = sam.wait_for("PRIVMSG sam :direct hello").await?;
     assert!(lines.iter().any(|line| line.starts_with(":tessa!")));
+    explicit_queries_over_bridge(sam).await?;
+    tess.line("MODE tessa").await?;
+    tess.wait_for(" 221 tessa +i").await?;
     // The in-process harness has no connection task, so a client QUIT
     // never reaches the router as a closed connection; the three-process
     // daemon test covers the QUIT relay.
+    Ok(())
+}
+
+async fn explicit_queries_over_bridge(client: &mut Client) -> TestResult {
+    for (command, ending) in [
+        ("NAMES #bridge", " 366 sam #bridge "),
+        ("WHO #bridge", " 315 sam #bridge "),
+        ("WHOIS tessa", " 318 sam tessa "),
+        ("TOPIC #bridge", " 332 sam #bridge :bridged topic"),
+        ("LIST #bridge", " 323 sam "),
+        ("MODE #bridge", " 324 sam #bridge "),
+        ("MODE sam", " 221 sam +i"),
+        ("MODE #bridge +b", " 368 sam #bridge "),
+        ("ISON sam tessa", " 303 sam "),
+        ("USERHOST sam tessa", " 302 sam "),
+        ("WHOWAS tess 1", " 369 sam tess "),
+        ("MONITOR + tessa,bridge-offline", " 731 sam :bridge-offline"),
+        ("MONITOR L", " 733 sam "),
+        ("MONITOR S", " 731 sam :bridge-offline"),
+    ] {
+        let before = client.sink.lines().len();
+        client.line(command).await?;
+        let replies = new_query_reply(client, before, ending).await?;
+        assert!(
+            replies.iter().any(|line| line.contains(ending)),
+            "explicit query {command} failed: {replies:?}"
+        );
+    }
+    let before = client.sink.lines().len();
+    client.line("MONITOR C").await?;
+    client.line("MONITOR S").await?;
+    client.line("MONITOR L").await?;
+    let replies = new_query_reply(client, before, " 733 sam ").await?;
+    assert_eq!(
+        replies.len(),
+        1,
+        "empty MONITOR status emitted a reply: {replies:?}"
+    );
+    assert!(
+        replies
+            .first()
+            .is_some_and(|line| line.contains(" 733 sam "))
+    );
+    let before = client.sink.lines().len();
+    client.line("MODE sam +w").await?;
+    client.line("MODE sam").await?;
+    let replies = new_query_reply(client, before, " 221 sam +iw").await?;
+    assert!(
+        replies.iter().any(|line| line.contains(" 221 sam +iw")),
+        "{replies:?}"
+    );
+    assert!(
+        replies.iter().any(|line| line.contains(" MODE sam +w")),
+        "{replies:?}"
+    );
+    let before = client.sink.lines().len();
+    client.line("MODE sam -w").await?;
+    client.line("MODE sam").await?;
+    let replies = new_query_reply(client, before, " 221 sam +i").await?;
+    assert!(
+        replies.iter().any(|line| line.contains(" MODE sam -w")),
+        "{replies:?}"
+    );
+    assert!(
+        replies.iter().any(|line| line.ends_with(" 221 sam +i")),
+        "{replies:?}"
+    );
+    let before = client.sink.lines().len();
+    client.line("MODE tessa +w").await?;
+    let replies = new_query_reply(client, before, " 481 sam ").await?;
+    assert!(
+        replies.iter().any(|line| line.contains(" 481 sam ")),
+        "{replies:?}"
+    );
+    client
+        .line("CAP REQ :message-tags labeled-response batch")
+        .await?;
+    let before = client.sink.lines().len();
+    client.line("@label=own-mode MODE sam").await?;
+    let replies = new_query_reply(client, before, " 221 sam +i").await?;
+    assert!(
+        replies
+            .iter()
+            .any(|line| line.starts_with("@label=own-mode ") && line.ends_with(" 221 sam +i")),
+        "{replies:?}"
+    );
+    let before = client.sink.lines().len();
+    client.line("@label=names-check NAMES #bridge").await?;
+    let replies = new_query_reply(client, before, "BATCH -names-check").await?;
+    assert!(
+        replies
+            .iter()
+            .any(|line| line.starts_with("@label=names-check ")
+                && line.ends_with("BATCH +names-check labeled-response")),
+        "{replies:?}"
+    );
+    assert!(
+        replies
+            .iter()
+            .any(|line| line.starts_with("@batch=names-check ")
+                && line.contains(" 366 sam #bridge ")),
+        "{replies:?}"
+    );
+    let before = client.sink.lines().len();
+    client.line("@label=monitor-empty MONITOR S").await?;
+    let replies = new_query_reply(client, before, " ACK").await?;
+    assert!(
+        replies
+            .iter()
+            .any(|line| line.starts_with("@label=monitor-empty ") && line.ends_with(" ACK")),
+        "{replies:?}"
+    );
+    client.line("NICK sammy").await?;
+    client.wait_for("NICK :sammy").await?;
+    Ok(())
+}
+
+async fn new_query_reply(client: &Client, before: usize, ending: &str) -> TestResult<Vec<String>> {
+    for _ in 0..5_000 {
+        let lines: Vec<_> = client.sink.lines().into_iter().skip(before).collect();
+        if lines.iter().any(|line| {
+            [ending, " FAIL ", " 481 ", " 482 ", " 400 ", " 451 "]
+                .iter()
+                .any(|needle| line.contains(needle))
+        }) {
+            return Ok(lines);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+    Err(format!("query never received {ending}: {:?}", client.sink.lines()).into())
+}
+
+#[test]
+fn live_user_mode_changes_use_the_pinned_wire_code_in_both_directions() -> TestResult {
+    use agenc_ircd_client_wire::{PostRegistrationCommandKind, RegisteredCommandKind};
+    use agenc_ircd_domain::federation::ModeDirection;
+    for (mode, direction) in [("+w", ModeDirection::Add), ("-w", ModeDirection::Remove)] {
+        let mut fixture = StateCoreFixture::new(entropy_script())?;
+        let mut edge = resync_edge();
+        let connection = ConnectionGeneration::new(1);
+        edge.connection_opened(fixture.context_mut()?, connection);
+        let session_id = SessionId::from_bytes([45; 16]);
+        let user_id = UserId::from_bytes([46; 16]);
+        edge.origins
+            .get_mut(&connection)
+            .ok_or("origin absent")?
+            .session = Some((session_id, user_id));
+        let record = session_record(session_id, user_id, "ModeOwner", 3, 2)?;
+        edge.replica.apply(
+            &ProjectedEvent::SessionVisible(SessionEventView {
+                source: record.source_view(),
+                home_projection: Some(record),
+            }),
+            3,
+        )?;
+        edge.phase = Phase::Active;
+        let line = format!("MODE ModeOwner {mode}");
+        let message = parse_message(FramedLine::new(&line)?)?.ok_or("empty mode")?;
+        request::send_command(
+            &mut edge,
+            fixture.context_mut()?,
+            connection,
+            RegisteredCommandKind::Public(PostRegistrationCommandKind::ModeChange),
+            Box::new(message),
+        )
+        .map_err(|(_, error)| format!("mode encoding failed: {error:?}"))?;
+        let pending = edge.pending.values().next().ok_or("mode not pending")?;
+        let mut budget = DecodeBudget::new(1 << 20, 4096);
+        let object = SchemaObject::decode_exact("FederationRequest", &pending.bytes, &mut budget)?;
+        let arm = decode_request_operation(&object, &mut budget)?;
+        let FederatedOperation::UserMode { changes, .. } =
+            FederatedOperation::from_object(pending.header.opcode, &arm)?
+        else {
+            return Err("wrong mode operation".into());
+        };
+        assert_eq!(changes.len(), 1);
+        assert_eq!(
+            changes
+                .first()
+                .map(|change| (change.mode_code, change.direction)),
+            Some((18, direction))
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_who_continuation_retains_the_exact_command_and_cursor() -> TestResult {
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let mut edge = resync_edge();
+    let connection = ConnectionGeneration::new(1);
+    edge.connection_opened(fixture.context_mut()?, connection);
+    let session_id = SessionId::from_bytes([45; 16]);
+    edge.origins
+        .get_mut(&connection)
+        .ok_or("origin absent")?
+        .session = Some((session_id, UserId::from_bytes([46; 16])));
+    let message = parse_message(FramedLine::new("WHO #bridge")?)?.ok_or("empty query")?;
+    let cursor = [47; 32];
+    request::continue_query(
+        &mut edge,
+        fixture.context_mut()?,
+        connection,
+        Box::new(message),
+        cursor,
+    );
+    assert_eq!(edge.pending.len(), 1, "WHO continuation was discarded");
+    let pending = edge.pending.values().next().ok_or("no continuation")?;
+    let mut budget = DecodeBudget::new(1 << 20, 4096);
+    let object = SchemaObject::decode_exact("FederationRequest", &pending.bytes, &mut budget)?;
+    let arm = decode_request_operation(&object, &mut budget)?;
+    let FederatedOperation::DirectoryQuery {
+        session_id: bound,
+        query,
+    } = FederatedOperation::from_object(pending.header.opcode, &arm)?
+    else {
+        return Err("continuation changed operation".into());
+    };
+    assert_eq!(bound, session_id);
+    assert_eq!(
+        agenc_ircd_federation_wire::access::opaque_field(&query, "cursor")?,
+        cursor
+    );
+    let request::PendingKind::Command { message: saved } = &pending.kind else {
+        return Err("continuation lost its client command".into());
+    };
+    assert_eq!(saved.command(), "WHO");
+    assert_eq!(saved.middle(), &["#bridge"]);
     Ok(())
 }
 
@@ -2454,6 +2750,302 @@ async fn a_closed_queue_retires_the_link_without_a_violation() -> TestResult {
     assert!(edge.live.is_none(), "the dead link is retired at once");
     assert_eq!(edge.phase, Phase::Down);
     Ok(())
+}
+
+#[test]
+fn an_unfinished_join_blocks_later_requests_between_pages() -> TestResult {
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let mut edge = resync_edge();
+    let generation = ConnectionGeneration::new(1);
+    edge.connection_opened(fixture.context_mut()?, generation);
+    edge.phase = Phase::Active;
+    let origin = edge.origins.get_mut(&generation).ok_or("missing origin")?;
+    origin.session = Some((
+        SessionId::from_bytes([45; 16]),
+        UserId::from_bytes([46; 16]),
+    ));
+    origin.pending_updates.clear();
+    origin.join_names_pending = true;
+    let message = parse_message(FramedLine::new("WHO #bridge")?)?.ok_or("empty query")?;
+    let proof = agenc_ircd_client_wire::validate_post_registration_command(&message)?;
+    request::send_command(
+        &mut edge,
+        fixture.context_mut()?,
+        generation,
+        agenc_ircd_client_wire::RegisteredCommandKind::Public(proof.kind()),
+        Box::new(message),
+    )
+    .map_err(|_| "later request was refused instead of deferred")?;
+    assert!(edge.pending.is_empty());
+    assert_eq!(
+        edge.deferred
+            .get(&generation)
+            .map(crate::budget::RetainedQueue::len),
+        Some(1)
+    );
+    assert!(
+        edge.finish_join_names(fixture.context_mut()?, generation)
+            .is_empty()
+    );
+    assert_eq!(edge.pending.len(), 1);
+    assert!(
+        edge.deferred
+            .get(&generation)
+            .is_none_or(crate::budget::RetainedQueue::is_empty)
+    );
+    Ok(())
+}
+
+#[test]
+fn losing_the_link_closes_only_clients_with_unfinished_join_bursts() -> TestResult {
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let mut edge = resync_edge();
+    for number in [1, 2] {
+        let generation = ConnectionGeneration::new(number);
+        let context = fixture.context_mut()?;
+        let now = context.now();
+        context.sessions_mut().open(
+            generation,
+            ListenerPurpose::ClientOnion,
+            SourceAddressKey::onion_listener(),
+            FrameSink::new(generation, true),
+            now,
+        )?;
+        edge.connection_opened(context, generation);
+    }
+    edge.origins
+        .get_mut(&ConnectionGeneration::new(1))
+        .ok_or("missing origin")?
+        .join_names_pending = true;
+    let (handle, _queue) = link_queue(1 << 20);
+    let link = LinkId::new(1);
+    edge.live = Some(LiveLink {
+        link,
+        handle,
+        coordinator_epoch: COORDINATOR_EPOCH,
+        coordinator_incarnation: HUB_INCARNATION,
+    });
+    edge.phase = Phase::Active;
+    edge.link_closed(fixture.context_mut()?, link);
+    assert!(
+        fixture
+            .context_mut()?
+            .sessions()
+            .sink_for_generation(ConnectionGeneration::new(1))
+            .is_none()
+    );
+    assert!(
+        fixture
+            .context_mut()?
+            .sessions()
+            .sink_for_generation(ConnectionGeneration::new(2))
+            .is_some()
+    );
+    Ok(())
+}
+
+#[test]
+fn losing_the_link_before_a_join_echo_closes_that_requester_but_keeps_other_queries() -> TestResult
+{
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let mut edge = resync_edge();
+    for (number, line) in [(1, "JOIN #waiting"), (2, "WHO #waiting")] {
+        let generation = ConnectionGeneration::new(number);
+        let context = fixture.context_mut()?;
+        let now = context.now();
+        context.sessions_mut().open(
+            generation,
+            ListenerPurpose::ClientOnion,
+            SourceAddressKey::onion_listener(),
+            FrameSink::new(generation, true),
+            now,
+        )?;
+        edge.connection_opened(context, generation);
+        let session = SessionId::from_bytes([u8::try_from(number)?; 16]);
+        let user = UserId::from_bytes([u8::try_from(number + 10)?; 16]);
+        let origin = edge.origins.get_mut(&generation).ok_or("missing origin")?;
+        origin.session = Some((session, user));
+        origin.pending_updates.clear();
+        let record = session_record(session, user, &format!("user{number}"), 3, 2)?;
+        edge.replica.apply(
+            &ProjectedEvent::SessionVisible(SessionEventView {
+                source: record.source_view(),
+                home_projection: Some(record),
+            }),
+            3,
+        )?;
+        edge.phase = Phase::Active;
+        let message = parse_message(FramedLine::new(line)?)?.ok_or("empty command")?;
+        let proof = agenc_ircd_client_wire::validate_post_registration_command(&message)?;
+        request::send_command(
+            &mut edge,
+            context,
+            generation,
+            agenc_ircd_client_wire::RegisteredCommandKind::Public(proof.kind()),
+            Box::new(message),
+        )
+        .map_err(|_| "request admission failed")?;
+    }
+    assert_eq!(edge.pending.len(), 2);
+    assert!(
+        edge.pending
+            .values()
+            .all(|pending| pending.join_echoes.is_empty())
+    );
+    assert!(
+        edge.origins
+            .values()
+            .all(|origin| !origin.join_names_pending)
+    );
+    let (handle, _queue) = link_queue(1 << 20);
+    let link = LinkId::new(1);
+    edge.live = Some(LiveLink {
+        link,
+        handle,
+        coordinator_epoch: COORDINATOR_EPOCH,
+        coordinator_incarnation: HUB_INCARNATION,
+    });
+    edge.link_closed(fixture.context_mut()?, link);
+    let sessions = fixture.context_mut()?.sessions();
+    assert!(
+        sessions
+            .sink_for_generation(ConnectionGeneration::new(1))
+            .is_none()
+    );
+    assert!(
+        sessions
+            .sink_for_generation(ConnectionGeneration::new(2))
+            .is_some()
+    );
+    Ok(())
+}
+
+#[test]
+fn deferred_edge_commands_refuse_exhausted_backing_and_release_it_when_dropped() -> TestResult {
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let mut edge = resync_edge();
+    let generation = ConnectionGeneration::new(1);
+    edge.connection_opened(fixture.context_mut()?, generation);
+    edge.phase = Phase::Active;
+    let origin = edge.origins.get_mut(&generation).ok_or("missing origin")?;
+    origin.session = Some((
+        SessionId::from_bytes([45; 16]),
+        UserId::from_bytes([46; 16]),
+    ));
+    origin.pending_updates.clear();
+    origin.join_names_pending = true;
+    let held = exhaust_fixture_backing(fixture.context_mut()?);
+    assert!(matches!(
+        queue_deferred_query(&mut edge, fixture.context_mut()?, generation)?,
+        Err(agenc_ircd_domain::DomainError::ServerBusy)
+    ));
+    assert!(
+        edge.deferred
+            .get(&generation)
+            .is_none_or(crate::budget::RetainedQueue::is_empty)
+    );
+    drop(held);
+    queue_deferred_query(&mut edge, fixture.context_mut()?, generation)?
+        .map_err(|_| "released backing did not admit the deferred command")?;
+    assert_eq!(
+        edge.deferred
+            .get(&generation)
+            .map(crate::budget::RetainedQueue::len),
+        Some(1)
+    );
+    let held = exhaust_fixture_backing(fixture.context_mut()?);
+    assert!(fixture.context_mut()?.reserve_output_backing(1).is_err());
+    edge.deferred.remove(&generation);
+    assert!(fixture.context_mut()?.reserve_output_backing(1).is_ok());
+    drop(held);
+    Ok(())
+}
+
+fn queue_deferred_query(
+    edge: &mut EdgeFederation,
+    context: &mut StateCoreContext,
+    generation: ConnectionGeneration,
+) -> TestResult<Result<(), agenc_ircd_domain::DomainError>> {
+    let message = parse_message(FramedLine::new("WHO #waiting")?)?.ok_or("empty query")?;
+    let proof = agenc_ircd_client_wire::validate_post_registration_command(&message)?;
+    Ok(request::send_command(
+        edge,
+        context,
+        generation,
+        agenc_ircd_client_wire::RegisteredCommandKind::Public(proof.kind()),
+        Box::new(message),
+    )
+    .map_err(|(_, error)| error))
+}
+
+fn exhaust_fixture_backing(context: &StateCoreContext) -> Vec<crate::budget::MemoryPermit> {
+    let mut held = Vec::new();
+    for power in (12..=29).rev() {
+        let capacity = (1_usize << power) - 256;
+        if let Ok(permit) = context.reserve_output_backing(capacity) {
+            held.push(permit);
+        }
+    }
+    assert!(context.reserve_output_backing(1).is_err());
+    held
+}
+
+#[test]
+fn a_drained_deferred_queue_keeps_its_capacity_charged_until_the_owner_drops() -> TestResult {
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let mut edge = resync_edge();
+    let generation = ConnectionGeneration::new(1);
+    edge.connection_opened(fixture.context_mut()?, generation);
+    edge.phase = Phase::Active;
+    let origin = edge.origins.get_mut(&generation).ok_or("missing origin")?;
+    origin.session = Some((
+        SessionId::from_bytes([45; 16]),
+        UserId::from_bytes([46; 16]),
+    ));
+    origin.pending_updates.clear();
+    origin.join_names_pending = true;
+    let baseline = fixture_backing_available(fixture.context_mut()?);
+    fill_deferred_query_queue(&mut edge, fixture.context_mut()?, generation)?;
+    let queue = edge.deferred.get_mut(&generation).ok_or("missing queue")?;
+    while queue.pop_front().is_some() {}
+    let empty_backing = fixture_backing_available(fixture.context_mut()?);
+    assert!(
+        empty_backing < baseline,
+        "the empty deque still owns allocated slots"
+    );
+    fill_deferred_query_queue(&mut edge, fixture.context_mut()?, generation)?;
+    let queue = edge.deferred.get_mut(&generation).ok_or("missing queue")?;
+    while queue.pop_front().is_some() {}
+    assert_eq!(
+        fixture_backing_available(fixture.context_mut()?),
+        empty_backing
+    );
+    edge.deferred.remove(&generation);
+    assert_eq!(fixture_backing_available(fixture.context_mut()?), baseline);
+    Ok(())
+}
+
+fn fill_deferred_query_queue(
+    edge: &mut EdgeFederation,
+    context: &mut StateCoreContext,
+    generation: ConnectionGeneration,
+) -> TestResult {
+    for _ in 0..MAX_DEFERRED_COMMANDS {
+        queue_deferred_query(edge, context, generation)?
+            .map_err(|_| "backing refused before the bounded queue filled")?;
+    }
+    assert_eq!(
+        edge.deferred
+            .get(&generation)
+            .map(crate::budget::RetainedQueue::len),
+        Some(MAX_DEFERRED_COMMANDS)
+    );
+    Ok(())
+}
+
+fn fixture_backing_available(context: &StateCoreContext) -> u64 {
+    let permits = exhaust_fixture_backing(context);
+    permits.iter().map(crate::budget::MemoryPermit::bytes).sum()
 }
 
 #[tokio::test]
