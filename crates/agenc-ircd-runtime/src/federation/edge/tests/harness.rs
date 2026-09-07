@@ -2081,8 +2081,8 @@ async fn an_origin_closed_while_the_link_is_down_is_replayed_and_deleted_after_t
         .await?;
         client.close(&closes)?;
         client.line("PING :gone").await.ok();
-        // A client that comes and goes during the outage was never declared
-        // to the coordinator, so nothing of it is replayed.
+        // A client that comes and goes during the outage still settles its
+        // durable tombstone through DEL even though no ADD was transmitted.
         let passerby = Client::open(inbox_for_passerby, 2).await?;
         passerby.close(&closes)?;
         // Base synchronization precedes RESET and retained DEL replay.
@@ -2106,6 +2106,29 @@ async fn an_origin_closed_while_the_link_is_down_is_replayed_and_deleted_after_t
             server_incarnation,
             origin_id,
             generation: 1,
+            object_id: None,
+        })
+        .await?;
+        let passerby_deletion = hub.next_frame().await?;
+        let FederationFrame::OriginDel {
+            server_incarnation: passerby_incarnation,
+            origin_id: passerby_origin,
+            generation: 0,
+            next_operation_sequence: 0,
+            ..
+        } = passerby_deletion
+        else {
+            return Err(
+                format!("expected passerby DEL, got {:?}", passerby_deletion.kind()).into(),
+            );
+        };
+        assert_eq!(passerby_incarnation, EDGE_INCARNATION);
+        assert_ne!(passerby_origin, origin_id);
+        hub.frame(FederationFrame::OriginAck {
+            edge_server_id: EDGE,
+            server_incarnation: passerby_incarnation,
+            origin_id: passerby_origin,
+            generation: 0,
             object_id: None,
         })
         .await?;

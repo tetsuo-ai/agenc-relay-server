@@ -200,17 +200,9 @@ pub(super) fn replay_origin(
         return;
     }
     if origin.deleted {
-        // An all-zero object identity means no declaration was even encoded.
-        // Such a connection has no remote work unless it owns a pending request.
-        if origin.object_id == [0; 32]
-            && !edge
-                .pending
-                .values()
-                .any(|pending| pending.generation == generation)
-        {
-            edge.origins.remove(&generation);
-            return;
-        }
+        // Even an origin never transmitted can own a staged or refused
+        // journal write. Retain it through the durable DEL acknowledgement;
+        // the coordinator also acknowledges DEL for an unknown origin.
         send_origin_del(edge, context, generation);
         return;
     }

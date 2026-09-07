@@ -16,7 +16,7 @@ release candidate.
 | Restored account authentication | CAP-9 and CAP-54 repairs pass strict restore and disaster-restore drills with existing and new accounts. CAP-7 passes post-restart authentication in the diagnostic release campaign; an uninstrumented repeat remains required. |
 | Account deletion and rekey | CAP-11, CAP-57, and CAP-62 through CAP-67 pass the complete strict deletion drill, including exact authenticated rows, both deleted-login refusals, the surviving account, and all final stops. |
 | Federation and client replies | CAP-47 through CAP-60 have focused regression evidence, and all required workspace gates pass. A successful new release capacity run remains required. |
-| Disk pressure | CAP-44 and CAP-45 fix reset cleanup and durable request reconstruction. CAP-3 now preserves the original refused session through pressure recovery. The uninstrumented campaign later hit an intermittent restart loop; the diagnostic campaign completed. |
+| Disk pressure | CAP-44 and CAP-45 fix reset cleanup and durable request reconstruction. CAP-3 preserves the original refused session through pressure recovery. CAP-87 removes premature origin retirement after a pending or refused journal write; both regressions and all 100 edge tests pass. A new uninstrumented capacity run remains required. |
 | Reconnect and shutdown load | The current CAP-4 release probe survives the unpaced reconnect wave, admits eight fresh clients after recovery, and stops all three daemons cleanly. CAP-14 needs a fresh capacity result after the CAP-51 and CAP-65 shutdown repairs. |
 | Implementation under qualification | CAP-5 stopped rotation commands, live two-account migration, and stale START cleanup pass. Maintenance-aware export and actual rotation in the capacity scenario remain open. CAP-13 batching has focused receipt, rollback, and resource proofs and needs a new capacity run. |
 | Companion delivery recovery | CAP-70 and CAP-71 now restore scoped delivery rows and commit companion acknowledgement transitions before changing replay coverage. Retained acknowledged cross-profile rows also restart with exact bytes. Complete recovery of unfinished combined barriers remains open. CAP-79 still requires the published replay retention bounds. |
@@ -2836,6 +2836,43 @@ submitter continues into the new group, or that a ReInit ACK matches that
 leaf's signer. Those operation-matrix obligations remain open and require a
 validated device-to-leaf admission contract; account membership alone does
 not prove them.
+
+### CAP-87: reconnect drops a closed origin while its journal write is unsettled
+
+The diagnostic campaign on checkpoint `52808b9` fails pressure recovery before
+reaching the coordinator restart. Its edge repeatedly closes the link from
+`journal::attempt_write` with `Violation::Phase` during origin synchronization.
+The preserved trace and unchanged binary hashes are in
+`resumed-restart-diagnostic/campaign-result.json` and its campaign logs.
+This identifies a separate recovery failure; it does not establish the cause
+of the earlier post-restart failure.
+
+`replay_origin` removed a deleted origin whose declaration had never been
+transmitted and which owned no request. Its pending or refused journal write
+still referred to that origin. Subsequent staging could not encode the missing
+owner, so reconnecting repeated the same failure.
+
+Two real-storage regressions fail against the checkpoint with the first write
+pending and refused, respectively. The fix retains every deleted origin until
+its deletion acknowledgement commits. The coordinator already acknowledges
+deletion of an unknown origin. The tests verify no deletion is transmitted
+before its tombstone commits, no retirement occurs before the acknowledgement
+commits, unacknowledged deletion survives storage reconstruction, acknowledged
+deletion retires on reconstruction, and a fresh origin still commits afterward.
+All 100 edge tests pass. An existing outage test now acknowledges both the
+registered origin and the never-transmitted origin before checking that another
+reset has nothing to replay. The failure and passing logs are `cap87-red.log`
+and `cap87-edge-green.log`; temporary diagnostic changes have been removed.
+
+All required repository gates pass for this fix: 2,402 workspace tests pass,
+zero fail, and 21 qualification tests remain ignored. Both reviewed inventories
+bind 618 source files; the release policy retains 656 critical regions and its
+existing floors. Exact commands and results are in `cap87-final-gates.json`.
+The uninstrumented 64-client release repeat passes pressure recovery on the
+first retry but still fails coordinator-restart synchronization, ending after
+237.93 seconds. `cap87-capacity-64-result.json` binds the unchanged daemon and
+test executable. This closes the reproduced premature-retirement defect only;
+the separate restart loop and capacity qualification remain open.
 
 ## Release claims and limits
 

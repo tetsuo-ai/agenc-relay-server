@@ -10,8 +10,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 617
-reviewed_source_sha256 = "b88e25599bfd4e6b6a68aec6f45d3fb86fe4f5f05188711219323abde97b122f"
+reviewed_source_files = 618
+reviewed_source_sha256 = "e46e7b824f0ce81601f838ba5a64c7029270c51485d08ab66ec474463707611e"
 deferred = []
 
 [[region]]
@@ -1047,9 +1047,9 @@ reason = "A committed JOIN snapshot may only be opened for its original bound co
 id = "runtime-edge-user-mode-identity"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/federation/edge/request.rs"
-source_sha256 = "42938c19c3f7e5ab97e1e80a8f719f5253d1c8c1f0c3fb0696ebbd424460c9fe"
-start_line = 1067
-end_line = 1090
+source_sha256 = "1943b75cc8c7a28b3d784ec7d5653a1e128b627f9d2fe810a70c739042501e72"
+start_line = 1059
+end_line = 1082
 metric = "branches"
 reason = "A user-mode mutation may target only the requesting session nickname."
 
@@ -1057,9 +1057,9 @@ reason = "A user-mode mutation may target only the requesting session nickname."
 id = "runtime-edge-local-user-mode-authority"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/federation/edge/request.rs"
-source_sha256 = "42938c19c3f7e5ab97e1e80a8f719f5253d1c8c1f0c3fb0696ebbd424460c9fe"
-start_line = 700
-end_line = 750
+source_sha256 = "1943b75cc8c7a28b3d784ec7d5653a1e128b627f9d2fe810a70c739042501e72"
+start_line = 692
+end_line = 742
 metric = "branches"
 reason = "Local user-mode reads retain their own-session authority during federation partitions."
 
